@@ -74,6 +74,8 @@ pub struct ProxyConfig {
     pub drain_grace: Duration,
     /// The external face `/readyz` requires usable; `None` checks none.
     pub external_face_check: Option<FaceCheck>,
+    /// How often the external face is read (`PROXY_EXT_FACE_CHECK_MS`).
+    pub external_face_period: Duration,
 }
 
 /// The largest millisecond value a duration variable takes (about 24 days).
@@ -124,6 +126,8 @@ impl ProxyConfig {
         let prewarm = prewarm(&mut env);
         let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 15_000, 1, MAX_MS));
         let external_face_check = external_face_check(&mut env);
+        let external_face_period =
+            Duration::from_millis(env.int("PROXY_EXT_FACE_CHECK_MS", 500, 10, 60_000));
         // Read by the trace registry; refused here unless on or off.
         env.flag(observe::TRACE_HEADER_ENV, false);
 
@@ -188,6 +192,7 @@ impl ProxyConfig {
             prewarm,
             drain_grace,
             external_face_check,
+            external_face_period,
         })
     }
 }

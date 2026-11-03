@@ -182,3 +182,33 @@ suffix, the forms the runners and Kubernetes share. Takes (list <name>
 {{- end }}
 {{- mul (int64 $digits) (get $scale $unit) }}
 {{- end }}
+
+{{/*
+The worker's affinity: its own `affinity` and, with the proxy enabled, a
+required node affinity off every node proxy.nodeSelector names, so a worker
+never lands on a node that runs or ran a proxy, whose VIPs stay on its lo
+(ADR-0056 §7). A node is off when it carries every label of the selector:
+one term per label (terms are ORed), each ANDed into every term the worker's
+own required node affinity states. Takes the root.
+*/}}
+{{- define "siprust.workerAffinity" -}}
+{{- $aff := deepCopy (.Values.worker.affinity | default dict) }}
+{{- if .Values.proxy.enabled }}
+{{- $na := get $aff "nodeAffinity" | default dict }}
+{{- $req := get $na "requiredDuringSchedulingIgnoredDuringExecution" | default dict }}
+{{- $own := get $req "nodeSelectorTerms" | default (list dict) }}
+{{- $terms := list }}
+{{- range $term := $own }}
+{{- range $k, $v := $.Values.proxy.nodeSelector }}
+{{- $t := deepCopy $term }}
+{{- $exprs := get $t "matchExpressions" | default list }}
+{{- $_ := set $t "matchExpressions" (append $exprs (dict "key" $k "operator" "NotIn" "values" (list (toString $v)))) }}
+{{- $terms = append $terms $t }}
+{{- end }}
+{{- end }}
+{{- $_ := set $req "nodeSelectorTerms" $terms }}
+{{- $_ := set $na "requiredDuringSchedulingIgnoredDuringExecution" $req }}
+{{- $_ := set $aff "nodeAffinity" $na }}
+{{- end }}
+{{- toYaml $aff }}
+{{- end }}

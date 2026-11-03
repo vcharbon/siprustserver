@@ -47,7 +47,7 @@ tor_up() {
 tor_down() { docker rm -f "$TOR_NAME" >/dev/null 2>&1 || true; }
 
 # The next hops of `vip` in the host's table, one address per line, sorted;
-# nothing when it has no route of its own (ip route show prints no /32).
+# nothing when no node announces it (its blackhole route has no gateway).
 tor_next_hops() { # vip
   ip -j route show "$1/32" 2>/dev/null \
     | jq -r '.[] | (.gateway // empty), (.nexthops[]?.gateway // empty)' | sort

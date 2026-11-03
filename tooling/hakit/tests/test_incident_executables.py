@@ -244,10 +244,10 @@ def test_cut_external_plane_fails_while_the_internal_vip_stays_announced(tmp_pat
 def test_cut_heal_reconnects_at_the_kept_address_only_when_disconnected(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "cut_external_plane")
     sb.state("cut", "e2 192.168.60.12\n")
-    sb.rules(Rule(r"docker inspect", "\n", once=True), Rule(r"docker network connect --ip 192.168.60.12 sipext e2$"),
+    sb.rules(Rule(r"docker inspect", "\n", once=True), Rule(r"docker network connect --ip 192.168.60.12 --driver-opt com\.docker\.network\.endpoint\.ifname=eth1 sipext e2$"),
              Rule(r"docker inspect", "192.168.60.12\n"))
     facts(sb.run("heal"))
-    assert sb.index("docker network connect --ip 192.168.60.12 sipext e2") >= 0
+    assert sb.index("docker network connect --ip 192.168.60.12 --driver-opt com.docker.network.endpoint.ifname=eth1 sipext e2") >= 0
     assert len(sb.lines("docker inspect")) == 3  # before, after, and a second later
     sb.rules(Rule(r"docker inspect", "192.168.60.12\n"))
     facts(sb.run("heal"))
@@ -256,10 +256,24 @@ def test_cut_heal_reconnects_at_the_kept_address_only_when_disconnected(tmp_path
 
 def test_cut_probe_waits_for_the_reconnected_node_in_the_routes(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "cut_external_plane")
-    sb.rules(PROXIES, *PLANES, route_rule(IVIP, "172.20.0.3"), route_rule(EVIP, "192.168.60.11", "192.168.60.12"))
+    sb.state("cut", "e2 192.168.60.12\n")
+    link = Rule(r"^docker exec e2 ip link show eth1$")
+    sb.rules(link, PROXIES, *PLANES, route_rule(IVIP, "172.20.0.3"), route_rule(EVIP, "192.168.60.11", "192.168.60.12"))
     assert sb.run("probe").returncode == 75
-    sb.rules(PROXIES, *PLANES, *BOTH)
+    sb.rules(Rule(r"^docker exec e2 ip link show eth1$", rc=1), PROXIES, *PLANES, *BOTH)
+    assert sb.run("probe").returncode == 75, "the interface is not back under its name"
+    sb.rules(link, PROXIES, *PLANES, *BOTH)
     assert as_obj(facts(sb.run("probe"))["next_hops"])[IVIP] == ["172.20.0.3", "172.20.0.4"]
+
+
+def successor(node: str, name: str) -> Rule:
+    """The pods of the proxy selector on `node`: the old one gone, its Ready successor."""
+    pods = {"items": [{"metadata": {"name": name}, "status": {"conditions": [
+        {"type": "Ready", "status": "True", "lastTransitionTime": "2026-11-03T10:00:20Z"}]}}]}
+    return Rule(rf"get pods -l app=sip-front-proxy --field-selector spec.nodeName={node} -o json$", json.dumps(pods))
+
+
+SUCCESSORS = [successor("e1", "p-2"), successor("e2", "p-3")]
 
 
 def rollout_routes(vip: str, a: str, b: str) -> list[Rule]:
@@ -277,6 +291,7 @@ def test_proxy_rollout_times_each_pods_drain_withdrawal_and_return(tmp_path: Pat
              Rule(r"rollout status deployment/sip-front-proxy --timeout=1s$"),
              Rule(r"get pod p-[01] --ignore-not-found -o jsonpath=\{\.metadata\.deletionTimestamp\}$", "2026-11-03T10:00:15Z"),
              Rule(r"logs p-[01] -c sip-front-proxy --timestamps$", f"{drain} INFO draining signal=SIGTERM\n"),
+             *SUCCESSORS,
              *rollout_routes(IVIP, "172.20.0.3", "172.20.0.4"),
              *rollout_routes(EVIP, "192.168.60.11", "192.168.60.12"))
     f = facts(sb.run("inject"))
@@ -285,8 +300,22 @@ def test_proxy_rollout_times_each_pods_drain_withdrawal_and_return(tmp_path: Pat
     assert set(rows) == {(p, v) for p in ("p-0", "p-1") for v in (IVIP, EVIP)}
     for r in rows.values():
         assert r["drain_at_ms"] == 1793700000500
+        assert r["ready_at_ms"] == 1793700020000
         assert number(r, "announced_at_ms") >= number(r, "withdrawn_at_ms")
+        assert number(r, "ready_to_announced_ms") == number(r, "announced_at_ms") - 1793700020000
     assert f["max_drain_to_withdrawn_ms"] == max(number(r, "drain_to_withdrawn_ms") for r in rows.values())
+    assert f["max_ready_to_announced_ms"] == max(number(r, "ready_to_announced_ms") for r in rows.values())
+
+
+def test_proxy_rollout_fails_when_a_drain_line_is_never_read(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "proxy_rollout")
+    sb.rules(PROXIES, *PLANES,
+             Rule(r"rollout restart deployment/sip-front-proxy$"),
+             Rule(r"rollout status deployment/sip-front-proxy --timeout=1s$"),
+             Rule(r"get pod p-[01] --ignore-not-found -o jsonpath=\{\.metadata\.deletionTimestamp\}$", ""),
+             *rollout_routes(IVIP, "172.20.0.3", "172.20.0.4"),
+             *rollout_routes(EVIP, "192.168.60.11", "192.168.60.12"))
+    failed(sb.run("inject"), "p-0 was replaced and its drain line 'draining' was never read")
 
 
 def test_proxy_rollout_probe_waits_for_the_rollout_and_the_routes(tmp_path: Path) -> None:

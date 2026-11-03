@@ -55,12 +55,31 @@ ufw_rules() {
 
 ufw_active() { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; }
 
-# Whether the settings are in place: the file as written, the global keys live.
+# ufw's saved rules, readable without root.
+UFW_RULES="${UFW_RULES:-/etc/ufw/user.rules}"
+
+# Whether ufw holds the rules ufw_rules adds, read from its saved tuples.
+ufw_check() {
+  local br saved
+  saved="$(cat "$UFW_RULES")" || { echo "lab-host-setup: $UFW_RULES unreadable" >&2; return 1; }
+  for br in "$SIP_BRIDGE" "$SIPEXT_BRIDGE"; do
+    grep -q "^### tuple ### allow tcp 179 .* in_$br\b" <<<"$saved" || return 1
+    grep -q "^### tuple ### allow udp 3784:3785 .* in_$br\b" <<<"$saved" || return 1
+    grep -q "^### tuple ### route:allow any any .* in_$br!out_$br\b" <<<"$saved" || return 1
+  done
+}
+
+# Whether the settings are in place: the file as written, the global keys
+# live, and with ufw active its rules.
 check() {
   [ -f "$SYSCTL_FILE" ] && [ "$(cat "$SYSCTL_FILE")" = "$(sysctl_text)" ] || return 1
   [ "$(sysctl -n net.ipv4.fib_multipath_hash_policy)" = 1 ] || return 1
   [ "$(sysctl -n net.ipv4.conf.all.send_redirects)" = 0 ] || return 1
+  ! ufw_active_unprivileged || ufw_check
 }
+
+# Whether ufw is active, asked of systemd (`ufw status` needs root).
+ufw_active_unprivileged() { systemctl is-active --quiet ufw 2>/dev/null; }
 
 apply() {
   [ "$(id -u)" -eq 0 ] || { echo "lab-host-setup: run it with sudo" >&2; exit 1; }

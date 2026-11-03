@@ -35,6 +35,7 @@ PRODUCT_VALUES: dict[str, Any] = {
             "selfGate": {"cpsRate": 1000, "cpsSize": 500},
             "resources": {"requests": {"cpu": "2", "memory": "64Mi"}},
             "hmac": {"existingSecret": "product-cookie"},
+            "nodeSelector": {"tier": "edge"},
             "extraContainers": [{
                 "name": "media-relay",
                 "image": "media-relay:0.1",

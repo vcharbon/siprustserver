@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Recovered when both VIPs are routed over every live proxy's node, the
-# reconnected one among them. Exit 75 while not yet, or while a read fails.
+# Recovered when the cut node has its interface back under its name and both
+# VIPs are routed over every live proxy's node, the reconnected one among them. Exit 75 while not yet, or while a read fails.
 # Facts: the next hops and the instant.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=route.sh
 source "$HAKIT_LIB/route.sh"
+cut="$(hk_state cut)"
+if [ -n "$cut" ]; then
+  read -r node _ <<<"$cut"
+  docker exec "$node" ip link show "$HAKIT_PARAM_INTERFACE" >/dev/null 2>&1 || exit "$HK_NOT_YET"
+fi
 routes="$(hk_probe_routed_over_live)"
 jq -cn --argjson r "$routes" --argjson at "$(hk_now_ms)" '{next_hops: $r, announced_at_ms: $at}'

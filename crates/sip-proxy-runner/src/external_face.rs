@@ -1,16 +1,19 @@
 //! Whether the external face can carry traffic, read from local kernel state
 //! only: the external interface is present and up, and at least one of its
-//! configured next hops is not `FAILED` in the neighbour table. Nothing is
-//! probed on the wire. `/readyz` requires it, so a node whose caller-facing
-//! uplink is gone stops announcing both faces' addresses together
-//! (ADR-0056).
+//! configured next hops resolved in the neighbour table. Nothing is probed on
+//! the wire: the next hops are the external plane's BGP peers, whose BFD and
+//! keepalive traffic keeps their entries resolved. `/readyz` requires the face
+//! usable, so a node whose caller-facing uplink is gone stops announcing both
+//! faces' addresses together (ADR-0056).
 
+mod monitor;
 mod neighbours;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
-pub use neighbours::{dump_ipv4, Neighbour, NUD_FAILED};
+pub use monitor::FaceMonitor;
+pub use neighbours::{dump_ipv4, Neighbour, NUD_FAILED, NUD_INCOMPLETE, NUD_RESOLVED};
 
 /// The external interface and the next hops the face is reached through
 /// (`PROXY_EXT_INTERFACE`, `PROXY_EXT_NEXT_HOPS`).
@@ -28,9 +31,10 @@ pub enum FaceState {
     Missing,
     /// The interface exists and is not up.
     Down(String),
-    /// Every configured next hop is `FAILED`.
-    NextHopsFailed,
-    /// The neighbour table cannot be read.
+    /// No next hop resolved, and one read `FAILED` or `INCOMPLETE` since the
+    /// last that did.
+    NextHopsUnresolved,
+    /// The neighbour table cannot be read, or no reading has completed yet.
     Unreadable(String),
 }
 
@@ -40,24 +44,46 @@ impl FaceState {
     }
 }
 
+/// What the readings before this one saw of the next hops: set by a reading
+/// that finds no next hop resolved and one `FAILED` or `INCOMPLETE`, cleared
+/// only by a reading that finds one resolved. While set, a reading that finds
+/// every next hop absent from the table stays unusable, so an entry that
+/// flaps between `INCOMPLETE` and gone never reads usable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FaceLatch {
+    unresolved: bool,
+}
+
+/// One next hop in the neighbour table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hop {
+    /// `REACHABLE`, `STALE`, `DELAY`, `PROBE` or `PERMANENT`.
+    Resolved,
+    /// `FAILED` or `INCOMPLETE`.
+    Unresolved,
+    /// No entry, or one in no state above.
+    Absent,
+}
+
 /// Where the kernel publishes its network interfaces.
 pub const SYS_CLASS_NET: &str = "/sys/class/net";
 
 impl FaceCheck {
-    /// The face as the running kernel reports it.
-    pub fn read(&self) -> FaceState {
-        self.read_at(Path::new(SYS_CLASS_NET), dump_ipv4)
+    /// The face as the running kernel reports it, `latch` carried from the
+    /// previous reading.
+    pub fn read(&self, latch: &mut FaceLatch) -> FaceState {
+        self.read_at(Path::new(SYS_CLASS_NET), dump_ipv4, latch)
     }
 
     /// The face read from the interface directory under `class_net` and the
     /// IPv4 neighbour table `neighbours` returns. Operstate `up` is up; an
     /// interface that reports `unknown` (one that tracks no carrier state) is
-    /// up while its carrier reads 1. A next hop absent from the table is not
-    /// `FAILED`.
+    /// up while its carrier reads 1.
     pub fn read_at(
         &self,
         class_net: &Path,
         neighbours: impl FnOnce() -> std::io::Result<Vec<Neighbour>>,
+        latch: &mut FaceLatch,
     ) -> FaceState {
         let dir: PathBuf = class_net.join(&self.interface);
         let Some(operstate) = read_trimmed(&dir.join("operstate")) else {
@@ -82,16 +108,31 @@ impl FaceCheck {
             Ok(table) => table,
             Err(e) => return FaceState::Unreadable(e.to_string()),
         };
-        let failed = |hop: &Ipv4Addr| {
-            table
-                .iter()
-                .any(|n| n.ifindex == ifindex && n.addr == *hop && n.state & NUD_FAILED != 0)
-        };
-        if self.next_hops.iter().all(failed) {
-            FaceState::NextHopsFailed
+        let hops: Vec<Hop> = self.next_hops.iter().map(|h| hop(&table, ifindex, *h)).collect();
+        if hops.contains(&Hop::Resolved) {
+            latch.unresolved = false;
+        } else if hops.contains(&Hop::Unresolved) {
+            latch.unresolved = true;
+        }
+        if latch.unresolved {
+            FaceState::NextHopsUnresolved
         } else {
             FaceState::Usable
         }
+    }
+}
+
+/// The state of `addr` on `ifindex` in `table`.
+fn hop(table: &[Neighbour], ifindex: i32, addr: Ipv4Addr) -> Hop {
+    let Some(n) = table.iter().find(|n| n.ifindex == ifindex && n.addr == addr) else {
+        return Hop::Absent;
+    };
+    if n.state & NUD_RESOLVED != 0 {
+        Hop::Resolved
+    } else if n.state & (NUD_FAILED | NUD_INCOMPLETE) != 0 {
+        Hop::Unresolved
+    } else {
+        Hop::Absent
     }
 }
 

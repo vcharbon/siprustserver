@@ -29,6 +29,15 @@ fn check(next_hops: &[Ipv4Addr]) -> FaceCheck {
     FaceCheck { interface: "eth1".into(), next_hops: next_hops.to_vec() }
 }
 
+/// One reading with a fresh latch.
+fn read(
+    check: &FaceCheck,
+    root: &std::path::Path,
+    table: impl FnOnce() -> std::io::Result<Vec<Neighbour>>,
+) -> FaceState {
+    check.read_at(root, table, &mut FaceLatch::default())
+}
+
 fn entry(addr: Ipv4Addr, state: u16) -> Neighbour {
     Neighbour { ifindex: IFINDEX, addr, state }
 }
@@ -38,7 +47,7 @@ const REACHABLE: u16 = 0x02;
 #[test]
 fn an_up_interface_with_a_live_next_hop_is_usable() {
     let root = class_net("live", "up", None);
-    let state = check(&[TOR]).read_at(&root, || Ok(vec![entry(TOR, REACHABLE)]));
+    let state = read(&check(&[TOR]), &root, || Ok(vec![entry(TOR, REACHABLE)]));
     assert_eq!(state, FaceState::Usable);
 }
 
@@ -46,14 +55,14 @@ fn an_up_interface_with_a_live_next_hop_is_usable() {
 fn a_missing_interface_is_not_usable() {
     let root = class_net("missing", "up", None);
     let state =
-        FaceCheck { interface: "eth9".into(), next_hops: vec![] }.read_at(&root, || Ok(vec![]));
+        read(&FaceCheck { interface: "eth9".into(), next_hops: vec![] }, &root, || Ok(vec![]));
     assert_eq!(state, FaceState::Missing);
 }
 
 #[test]
 fn a_down_interface_is_not_usable() {
     let root = class_net("down", "down", None);
-    let state = check(&[TOR]).read_at(&root, || Ok(vec![entry(TOR, REACHABLE)]));
+    let state = read(&check(&[TOR]), &root, || Ok(vec![entry(TOR, REACHABLE)]));
     assert_eq!(state, FaceState::Down("down".into()));
 }
 
@@ -61,16 +70,81 @@ fn a_down_interface_is_not_usable() {
 #[test]
 fn an_unknown_operstate_follows_the_carrier() {
     let root = class_net("unknown-1", "unknown", Some("1"));
-    assert!(check(&[]).read_at(&root, || Ok(vec![])).is_usable());
+    assert!(read(&check(&[]), &root, || Ok(vec![])).is_usable());
     let root = class_net("unknown-0", "unknown", Some("0"));
-    assert_eq!(check(&[]).read_at(&root, || Ok(vec![])), FaceState::Down("unknown".into()));
+    assert_eq!(read(&check(&[]), &root, || Ok(vec![])), FaceState::Down("unknown".into()));
 }
 
 #[test]
-fn a_failed_next_hop_makes_the_face_unusable() {
+fn a_failed_or_incomplete_next_hop_makes_the_face_unusable() {
     let root = class_net("failed", "up", None);
-    let state = check(&[TOR]).read_at(&root, || Ok(vec![entry(TOR, NUD_FAILED)]));
-    assert_eq!(state, FaceState::NextHopsFailed);
+    for state in [NUD_FAILED, NUD_INCOMPLETE] {
+        let face = read(&check(&[TOR]), &root, || Ok(vec![entry(TOR, state)]));
+        assert_eq!(face, FaceState::NextHopsUnresolved, "state {state:#x}");
+    }
+}
+
+/// An entry flapping between INCOMPLETE and gone, as the kernel shows a next
+/// hop that stopped answering, never reads usable: the latch holds until a
+/// reading finds the next hop resolved (STALE here).
+#[test]
+fn an_incomplete_flap_stays_unusable_until_the_next_hop_resolves() {
+    let root = class_net("flap", "up", None);
+    let face = check(&[TOR]);
+    let mut latch = FaceLatch::default();
+    let mut step = |table: Vec<Neighbour>| face.read_at(&root, || Ok(table), &mut latch);
+    assert_eq!(step(vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+    assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), FaceState::NextHopsUnresolved);
+    assert_eq!(step(vec![]), FaceState::NextHopsUnresolved, "gone after INCOMPLETE");
+    assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), FaceState::NextHopsUnresolved);
+    assert_eq!(step(vec![]), FaceState::NextHopsUnresolved);
+    assert_eq!(step(vec![entry(TOR, 0x04)]), FaceState::Usable, "STALE clears the latch");
+    assert_eq!(step(vec![]), FaceState::Usable, "gone with no latch is not unresolved");
+}
+
+/// Every resolved state clears the latch; NOARP and no state do not.
+#[test]
+fn only_a_resolved_state_clears_the_latch() {
+    let root = class_net("clears", "up", None);
+    let face = check(&[TOR]);
+    for resolved in [0x02, 0x04, 0x08, 0x10, 0x80] {
+        let mut latch = FaceLatch::default();
+        face.read_at(&root, || Ok(vec![entry(TOR, NUD_FAILED)]), &mut latch);
+        let state = face.read_at(&root, || Ok(vec![entry(TOR, resolved)]), &mut latch);
+        assert_eq!(state, FaceState::Usable, "state {resolved:#x}");
+    }
+    for other in [0x00, 0x40] {
+        let mut latch = FaceLatch::default();
+        face.read_at(&root, || Ok(vec![entry(TOR, NUD_FAILED)]), &mut latch);
+        let state = face.read_at(&root, || Ok(vec![entry(TOR, other)]), &mut latch);
+        assert_eq!(state, FaceState::NextHopsUnresolved, "state {other:#x}");
+    }
+}
+
+/// The monitor publishes each reading, taken off the async runtime, and
+/// reads unusable before its first one.
+#[tokio::test(start_paused = true)]
+async fn the_monitor_publishes_each_reading() {
+    let monitor = FaceMonitor::new(check(&[TOR]));
+    assert!(!monitor.usable(), "no reading yet");
+    let usable = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let reads = usable.clone();
+    let task = monitor.spawn_reading(
+        std::time::Duration::from_millis(500),
+        std::sync::Arc::new(move |_latch: &mut FaceLatch| {
+            if reads.load(std::sync::atomic::Ordering::SeqCst) {
+                FaceState::Usable
+            } else {
+                FaceState::Missing
+            }
+        }),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(monitor.usable());
+    usable.store(false, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    assert_eq!(monitor.state(), FaceState::Missing);
+    task.abort();
 }
 
 /// One live next hop of two carries the face.
@@ -78,23 +152,23 @@ fn a_failed_next_hop_makes_the_face_unusable() {
 fn one_live_next_hop_of_two_keeps_the_face_usable() {
     let root = class_net("one-of-two", "up", None);
     let table = vec![entry(TOR, NUD_FAILED), entry(TOR_B, REACHABLE)];
-    assert!(check(&[TOR, TOR_B]).read_at(&root, || Ok(table)).is_usable());
+    assert!(read(&check(&[TOR, TOR_B]), &root, || Ok(table)).is_usable());
 }
 
 /// A next hop the table does not hold, or holds as FAILED on another
 /// interface, is not FAILED here: nothing is probed.
 #[test]
-fn an_absent_next_hop_or_one_failed_elsewhere_is_not_failed() {
+fn an_absent_next_hop_or_one_failed_elsewhere_is_not_unresolved() {
     let root = class_net("absent", "up", None);
-    assert!(check(&[TOR]).read_at(&root, || Ok(vec![])).is_usable());
+    assert!(read(&check(&[TOR]), &root, || Ok(vec![])).is_usable());
     let elsewhere = Neighbour { ifindex: IFINDEX + 1, addr: TOR, state: NUD_FAILED };
-    assert!(check(&[TOR]).read_at(&root, || Ok(vec![elsewhere])).is_usable());
+    assert!(read(&check(&[TOR]), &root, || Ok(vec![elsewhere])).is_usable());
 }
 
 #[test]
 fn an_unreadable_neighbour_table_is_not_usable() {
     let root = class_net("unreadable", "up", None);
-    let state = check(&[TOR]).read_at(&root, || Err(std::io::Error::other("denied")));
+    let state = read(&check(&[TOR]), &root, || Err(std::io::Error::other("denied")));
     assert!(matches!(state, FaceState::Unreadable(_)), "{state:?}");
 }
 

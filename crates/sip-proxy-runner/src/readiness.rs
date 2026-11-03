@@ -14,7 +14,7 @@ use sip_proxy::health::FirstView;
 use sip_proxy::liveness::ShardPulse;
 use sip_proxy::registry::WorkerRegistry;
 
-use crate::external_face::FaceCheck;
+use crate::external_face::FaceMonitor;
 
 /// Draining once SIGTERM latched; else NotReady while a recv shard is
 /// stalled, before the first worker view, with the external face unusable,
@@ -44,11 +44,10 @@ pub struct ProxyProbes {
 }
 
 /// The probes, read from `pulse` on `clock`, from `first_view` and from
-/// `external_face` (none: no face check): a shard holding one packet longer
-/// than `stall_ms` fails both, so the node withdraws the addresses and the
-/// livenessProbe restarts the process. A shard waiting on an empty socket is
-/// never stalled. The external face is read from the kernel on each
-/// `/readyz`.
+/// `external_face`'s latest reading (none: no face check): a shard holding
+/// one packet longer than `stall_ms` fails both, so the node withdraws the
+/// addresses and the livenessProbe restarts the process. A shard waiting on
+/// an empty socket is never stalled.
 pub fn probes(
     draining: Arc<AtomicBool>,
     pulse: Arc<ShardPulse>,
@@ -56,7 +55,7 @@ pub fn probes(
     stall_ms: u64,
     registry: Arc<dyn WorkerRegistry>,
     first_view: Arc<FirstView>,
-    external_face: Option<FaceCheck>,
+    external_face: Option<Arc<FaceMonitor>>,
 ) -> ProxyProbes {
     let stalled = {
         let pulse = pulse.clone();
@@ -70,7 +69,7 @@ pub fn probes(
             draining.load(Ordering::Relaxed),
             ready_stalled(),
             ready_view.is_in(),
-            external_face.as_ref().is_none_or(|face| face.read().is_usable()),
+            external_face.as_ref().is_none_or(|face| face.usable()),
             registry.as_ref(),
         )
     });

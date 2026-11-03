@@ -137,13 +137,21 @@ provides:
   preferably resilient hashing (adding a node then moves few flows).
 - **The internal VIP never routable from the external plane**: separate routers or a
   VRF per plane; the external VIP likewise kept off the internal plane.
-- **No worker pod on a proxy node** (the chart's proxy anti-affinity; the VIPs stay on a
-  proxy node's `lo`).
+- **No worker pod on a node that runs or ran a proxy**: `proxy.nodeSelector` names the proxy
+  nodes (required) and the workers' node affinity keeps them off those; the VIPs stay on a proxy
+  node's `lo`.
+- **A proxy node's own listeners answer on the VIPs.** The VIPs are local addresses of a proxy
+  node, so every service bound to all of its addresses answers on them, from the callers' plane
+  on the external VIP: the kubelet (10250) and kube-proxy's `healthCheckNodePort` of the
+  announce-only Services among them. The operator firewalls them on the external plane (or binds
+  them to the node's internal address).
 - **The internal plane's isolation** of ADR-0048: nothing on the external plane reaches
   a worker or the proxies' internal face.
-- Each proxy node's external interface (`network.externalInterface`) and its routers'
-  addresses on it (`network.externalNextHops`): the proxy's readiness requires the
-  interface up and one of those next hops not `FAILED`.
+- Each proxy node's external interface (`network.externalInterface`) and its external BGP
+  peers' addresses on it (`network.externalNextHops`): the proxy's readiness requires the
+  interface up and one of those next hops resolved; their BFD and keepalive traffic keeps them
+  resolved. A lab router also holds a blackhole route per VIP below BGP, so a VIP nobody
+  announces is unreachable instead of following a default route.
 - The drain grace, `minReadySeconds` and the readiness probe set from the measured
   withdrawal and announcement latency (`proxy.announce.propagationMs`,
   `docs/TUNING.md`).

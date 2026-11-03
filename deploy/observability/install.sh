@@ -71,6 +71,7 @@ ensure_sipext_net() {
     docker network create --driver bridge \
       --subnet "$SIPEXT_SUBNET" --gateway "$SIPEXT_GATEWAY" \
       -o com.docker.network.bridge.enable_ip_masquerade=false \
+      -o "com.docker.network.bridge.name=${SIPEXT_BRIDGE:-br-sipext}" \
       "$SIPEXT_NET" >/dev/null
   fi
 }

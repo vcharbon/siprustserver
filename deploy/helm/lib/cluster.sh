@@ -165,7 +165,8 @@ sipext_up() {
       *) die "sipext: more than 2 tier=edge nodes" ;;
     esac
     if ! docker network inspect "$SIPEXT_NET" --format '{{range .Containers}}{{.Name}} {{end}}' | grep -qw "$node"; then
-      docker network connect --ip "$ip" "$SIPEXT_NET" "$node"
+      docker network connect --ip "$ip" --driver-opt "com.docker.network.endpoint.ifname=$SIPEXT_IF" \
+        "$SIPEXT_NET" "$node"
       log "sipext: connected edge node $node as $ip"
     fi
     n=$((n + 1))

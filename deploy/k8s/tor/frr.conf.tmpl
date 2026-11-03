@@ -6,11 +6,16 @@
 ! VIP is ever routed onto the other plane. Multipath over every node that
 ! announces a VIP; zebra installs the /32s into the host's table. BFD drops a
 ! node's routes within detect-multiplier x receive-interval of its death. The
-! router advertises nothing.
+! router advertises nothing. Each VIP also has a blackhole route at distance
+! 250, below any BGP route: a VIP no node announces is unreachable, never
+! sent out the host's own uplink.
 frr defaults datacenter
 hostname @TOR_NAME@
 log stdout informational
 service integrated-vtysh-config
+!
+ip route @PROXY_VIP@/32 blackhole 250
+ip route @SIPEXT_VIP@/32 blackhole 250
 !
 ip prefix-list INTERNAL-VIP seq 5 permit @PROXY_VIP@/32
 ip prefix-list EXTERNAL-VIP seq 5 permit @SIPEXT_VIP@/32

@@ -51,6 +51,13 @@ class MetallbObjects(unittest.TestCase):
         err = render_error(SIPRUST, *KIND, "--set", "proxy.announce.metallb.peers.external=null")
         self.assertIn("proxy.announce.metallb.peers.external is empty", err)
 
+    def test_the_external_next_hops_are_the_external_peers(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set", "network.externalNextHops={192.168.60.9}")
+        self.assertIn("network.externalNextHops=[192.168.60.9] must be the external BGP peers", err)
+        self.assertIn("[192.168.60.1]", err)
+        render(SIPRUST, *KIND, "--set", "proxy.announce.metallb.enabled=false",
+               "--set", "network.externalNextHops={192.168.60.9}")
+
     def test_a_load_balancer_class_is_passed_on(self) -> None:
         docs = render(SIPRUST, *KIND, "--set", "proxy.announce.loadBalancerClass=metallb")
         self.assertEqual(find(docs, "Service", "sip-front-proxy-internal")["spec"]

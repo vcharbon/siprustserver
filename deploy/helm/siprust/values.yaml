@@ -44,9 +44,11 @@ network:
   # plane, which the proxy's readiness requires up (PROXY_EXT_INTERFACE).
   externalVip: ""
   externalInterface: ""
-  # The external interface's next hops (IPv4, the routers of the external
-  # plane): readiness requires one of them not FAILED in the node's neighbour
-  # table (PROXY_EXT_NEXT_HOPS). Empty checks the interface only.
+  # The external interface's next hops (IPv4): the external plane's BGP peers,
+  # whose BFD and keepalive traffic keeps them resolved. Readiness requires one
+  # of them resolved in the node's neighbour table (PROXY_EXT_NEXT_HOPS); equal
+  # to proxy.announce.metallb.peers.external when the chart renders MetalLB's
+  # objects (refused at render otherwise). Empty checks the interface only.
   externalNextHops: []
   # The external plane's subnet (masq-exempt only).
   externalSubnet: ""
@@ -256,6 +258,9 @@ proxy:
   resources:
     requests: { cpu: "500m", memory: "64Mi" }
     limits: { memory: "512Mi" }
+  # The nodes the proxies run on, required: the workers are kept off every
+  # node these labels name (ADR-0056), so a node that runs or ran a proxy,
+  # whose VIPs stay on its lo, never takes a worker.
   nodeSelector: {}
   tolerations: []
 

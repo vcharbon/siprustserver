@@ -73,7 +73,9 @@ spec:
     spec:
       serviceAccountName: b2bua-worker
       {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
-      {{- with include "siprust.scheduling" $w | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- $ws := deepCopy $w }}
+      {{- $_ := set $ws "affinity" (include "siprust.workerAffinity" $ | fromYaml) }}
+      {{- with include "siprust.scheduling" $ws | trim }}{{ . | nindent 6 }}{{- end }}
       {{- with include "siprust.podSecurity" $w | trim }}{{ . | nindent 6 }}{{- end }}
       terminationGracePeriodSeconds: {{ int $w.terminationGracePeriodSeconds }}
       {{- with $w.extraInitContainers }}

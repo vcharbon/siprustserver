@@ -16,8 +16,12 @@ pub struct Neighbour {
     pub state: u16,
 }
 
-/// `NUD_FAILED` (`linux/neighbour.h`): resolution gave up.
+/// `NUD_INCOMPLETE` (`linux/neighbour.h`): resolution in progress.
+pub const NUD_INCOMPLETE: u16 = 0x01;
+/// `NUD_FAILED`: resolution gave up.
 pub const NUD_FAILED: u16 = 0x20;
+/// The resolved states: `REACHABLE`, `STALE`, `DELAY`, `PROBE`, `PERMANENT`.
+pub const NUD_RESOLVED: u16 = 0x02 | 0x04 | 0x08 | 0x10 | 0x80;
 
 const NLMSG_HDRLEN: usize = 16;
 const NDMSG_LEN: usize = 12;

@@ -41,9 +41,14 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    Services' `healthCheckNodePort` on every node.
 3. **`/readyz` is the one signal.** Ready means: no drain latched, no recv shard stalled, the
    first worker view in, at least one worker `Alive`, and the external face usable: the external
-   interface present and up and at least one of its configured next hops not `FAILED` in the
-   kernel's neighbour table (`PROXY_EXT_INTERFACE`, `PROXY_EXT_NEXT_HOPS`). That is a read of local
-   kernel state, nothing is probed on the wire. It ties the two faces together: a node whose
+   interface present and up and at least one of its configured next hops resolved (`REACHABLE`,
+   `STALE`, `DELAY`, `PROBE`, `PERMANENT`) in the kernel's neighbour table (`PROXY_EXT_INTERFACE`,
+   `PROXY_EXT_NEXT_HOPS`). A next hop read `FAILED` or `INCOMPLETE` latches the face unusable until
+   one reads resolved again, so an entry flapping between `INCOMPLETE` and gone never reads usable.
+   The next hops are the external plane's BGP peers (checked at render when the chart renders
+   MetalLB's objects), whose BFD and keepalive traffic keeps them resolved. That is a read of local
+   kernel state, every `PROXY_EXT_FACE_CHECK_MS` off the async runtime; nothing is probed on the
+   wire. It ties the two faces together: a node whose
    caller-facing uplink is gone stops announcing the internal VIP as well. No component detects
    the reachability of a peer beyond the first router: a fault in the routed network hits both
    proxies alike and is the network's to converge. Consequences:
@@ -75,10 +80,11 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    node's death is withdrawn within about a second. Graceful restart would keep a dead node's
    routes after its BFD session went down; it stays off. A restart of the speaker or of frr-k8s
    on a node ends its sessions, withdraws the node and rehashes its flows.
-7. **No worker runs on a proxy node.** The VIPs stay on a proxy node's `lo` whatever the routers
-   say, so a worker there would reach its local proxy even while that node is withdrawn. The
-   proxy pods carry a required anti-affinity to the worker pods; required anti-affinity holds
-   both ways, so a worker is never scheduled onto a proxy's node either.
+7. **No worker runs on a node that runs or ran a proxy.** The VIPs stay on a proxy node's `lo`
+   whatever the routers say, after its proxy is gone too, so a worker there would reach that node
+   instead of the announcing ones. The chart requires `proxy.nodeSelector` and gives the workers
+   a required node affinity off every node it names (one `NotIn` term per label, ANDed into the
+   workers' own terms); the proxy pods also carry a required anti-affinity to the worker pods.
 8. **What ECMP does to flows.** One peer address and port is one flow, so one proxy carries all
    of a single-flow peer's traffic and each proxy is sized for all of it (`PROXY_*` budgets stay
    per proxy, ADR-0046, ADR-0009). Removing a next hop moves only its flows; adding one moves

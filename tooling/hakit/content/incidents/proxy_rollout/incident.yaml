@@ -7,8 +7,9 @@ description: >-
   (Draining, still forwarding) while its node withdraws both VIPs. Inject
   watches the rollout to its end and measures, per replaced pod, from the
   drain its proxy logged, when its node left and rejoined each VIP's next
-  hops in the host's table: the drain-to-withdrawal latency is what the
-  drain grace must exceed. The probe wants the rollout complete and both
+  hops in the host's table, and from its successor's Ready when the node was
+  announced again: the drain-to-withdrawal latency is what the drain grace
+  must exceed, the Ready-to-announced latency what minReadySeconds must. The probe wants the rollout complete and both
   VIPs routed over every live proxy's node.
 kind: fault
 target:

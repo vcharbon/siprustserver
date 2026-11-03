@@ -14,7 +14,7 @@ use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use topology::K8sMembership;
 
-use crate::external_face::{FaceCheck, FaceState};
+use crate::external_face::{FaceMonitor, FaceState};
 
 /// What the sampler reads and where it publishes.
 pub struct HealthSampler {
@@ -26,7 +26,7 @@ pub struct HealthSampler {
     pub clock: Clock,
     pub stall_ms: u64,
     /// The external face `/readyz` requires, `None` for none.
-    pub external_face: Option<FaceCheck>,
+    pub external_face: Option<Arc<FaceMonitor>>,
 }
 
 /// How often the sampler publishes.
@@ -90,16 +90,17 @@ impl HealthSampler {
         stalled
     }
 
-    /// The external face's state published, a change from `before` logged;
-    /// the current state returned.
+    /// The external face's latest reading published, a change from `before`
+    /// logged; the current state returned.
     fn sample_face(&self, before: FaceState) -> FaceState {
-        let Some(check) = &self.external_face else {
+        let Some(monitor) = &self.external_face else {
             self.metrics.set_external_face_usable(true);
             return FaceState::Usable;
         };
-        let now = check.read();
+        let now = monitor.state();
         self.metrics.set_external_face_usable(now.is_usable());
         if now != before {
+            let check = &monitor.check;
             if now.is_usable() {
                 tracing::info!(interface = %check.interface, "external face usable again");
             } else {

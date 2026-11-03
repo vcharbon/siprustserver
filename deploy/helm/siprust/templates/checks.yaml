@@ -13,6 +13,8 @@ each runner's startup check.
 | proxy PROXY_DRAIN_GRACE_MS > `readinessProbe.periodSeconds` × `failureThreshold` + `announce.propagationMs` | a draining proxy keeps forwarding until its node's route is out of the routers' tables (ADR-0056) |
 | proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.propagationMs` | a rollout stops the next proxy only once the replaced one is back in the routers' tables |
 | proxy `announce.port` ≠ the metrics port 9090 and ≠ `network.sipPort` | the announce-only Services expose nothing kube-proxy would forward to a listener |
+| `proxy.nodeSelector` set | the workers' node affinity keeps them off every node it names: a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056 §7) |
+| `network.externalNextHops` = the addresses of `proxy.announce.metallb.peers.external` (MetalLB objects rendered) | the face check reads next hops whose BFD and keepalive traffic keeps them resolved |
 | `worker.replication.enabled` ⇒ `worker.replicas` ≥ 2 | a backup lives on another worker |
 | `worker.replication.enabled` ⇒ worker B2BUA_REPL_MAX_CONNECTIONS ≥ 4 × (`worker.replicas` − 1) | ADR-0045 item 5 |
 | worker B2BUA_CDR_RABBITMQ_MAX_LEN = consumer CDR_QUEUE_MAX_LEN | both declare the one queue; a different argument fails the second declare |
@@ -86,6 +88,18 @@ operator's to keep consistent.
 {{- end }}
 {{- if le (mul (int64 $p.minReadySeconds) 1000) (add (mul $period 1000) $propagation) }}
 {{- fail (printf "proxy.minReadySeconds=%d s must exceed proxy.readinessProbe.periodSeconds=%d s + proxy.announce.propagationMs=%d: a rollout would stop the next proxy before the replaced one is announced" (int64 $p.minReadySeconds) $period $propagation) }}
+{{- end }}
+{{- if not $p.nodeSelector }}
+{{- fail "proxy.nodeSelector is required: the workers' node affinity keeps them off every node it names, since a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056)" }}
+{{- end }}
+{{- if $p.announce.metallb.enabled }}
+{{- $peers := list }}
+{{- range $p.announce.metallb.peers.external | default list }}{{- $peers = append $peers (toString .address) }}{{- end }}
+{{- $hops := list }}
+{{- range .Values.network.externalNextHops | default list }}{{- $hops = append $hops (toString .) }}{{- end }}
+{{- if ne (sortAlpha $peers | join ",") (sortAlpha $hops | join ",") }}
+{{- fail (printf "network.externalNextHops=[%s] must be the external BGP peers proxy.announce.metallb.peers.external=[%s]: the face check reads next hops whose BFD and keepalive traffic keeps them resolved" (join "," $hops) (join "," $peers)) }}
+{{- end }}
 {{- end }}
 {{- if has (int $p.announce.port) (list 9090 (int .Values.network.sipPort)) }}
 {{- fail (printf "proxy.announce.port=%d must differ from the metrics port 9090 and network.sipPort=%d: kube-proxy would forward the announce-only Service to a listener" (int $p.announce.port) (int .Values.network.sipPort)) }}

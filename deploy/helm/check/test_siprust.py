@@ -324,7 +324,8 @@ class GenericDefaults(unittest.TestCase):
                "--set", "network.externalVip=203.0.113.250", "--set", "network.externalInterface=ens4",
                "--set", "network.internalCidrs=10.0.0.0/16",
                "--set", "worker.networkPolicy.proxyNodeCidrs={10.0.0.0/24}",
-               "--set", "proxy.hmac.existingSecret=edge-cookie"]
+               "--set", "proxy.hmac.existingSecret=edge-cookie",
+               "--set", "proxy.nodeSelector.sip-role=edge"]
     DERIVED = {
         "b2bua-worker": {"B2BUA_LISTEN", "B2BUA_ADVERTISE", "B2BUA_ORDINAL", "B2BUA_METRICS",
                          "B2BUA_ADMIN",
@@ -344,12 +345,15 @@ class GenericDefaults(unittest.TestCase):
                          "CDR_PAYLOAD"},
     }
 
-    def test_only_derived_env_and_no_node_placement(self) -> None:
+    def test_only_derived_env_and_no_node_placement_but_the_proxy_tier(self) -> None:
         docs = render(SIPRUST, *self.NETWORK)
         for w in workloads(docs):
             spec = pod_spec(w)
             name = w["metadata"]["name"]
-            self.assertNotIn("nodeSelector", spec, name)
+            if name == "sip-front-proxy":
+                self.assertEqual(spec["nodeSelector"], {"sip-role": "edge"})
+            else:
+                self.assertNotIn("nodeSelector", spec, name)
             self.assertNotIn("tolerations", spec, name)
             if name in self.DERIVED:
                 self.assertEqual(set(env(container(w, name))), self.DERIVED[name], name)
@@ -401,6 +405,43 @@ class Workloads(unittest.TestCase):
                       render_error(SIPRUST, *KIND, "--set", "worker.replica=3"))
         self.assertIn("worker/env/B2BUA_KEEPALIVE_SEC",
                       render_error(SIPRUST, *KIND, "--set", "worker.env.B2BUA_KEEPALIVE_SEC=60"))
+
+
+
+class FormerProxyNodes(unittest.TestCase):
+    """A node that runs or ran a proxy keeps the VIPs on lo: no worker lands
+    there (ADR-0056 §7), and the proxy's nodes are always named."""
+
+    @staticmethod
+    def terms(*args: str) -> list[Doc]:
+        w = find(render(SIPRUST, *KIND, *args), "StatefulSet", "b2bua-worker")
+        aff = pod_spec(w)["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+        return list(aff["nodeSelectorTerms"])
+
+    def test_workers_keep_off_every_node_the_proxy_selector_names(self) -> None:
+        self.assertEqual(self.terms(), [{"matchExpressions": [
+            {"key": "tier", "operator": "NotIn", "values": ["edge"]}]}])
+
+    def test_each_proxy_label_is_its_own_term_anded_into_the_workers_own(self) -> None:
+        own = ["--set", "worker.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution"
+               ".nodeSelectorTerms[0].matchExpressions[0].key=disk",
+               "--set", "worker.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution"
+               ".nodeSelectorTerms[0].matchExpressions[0].operator=In",
+               "--set", "worker.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution"
+               ".nodeSelectorTerms[0].matchExpressions[0].values[0]=ssd",
+               "--set", "proxy.nodeSelector.rack=r1"]
+        disk = {"key": "disk", "operator": "In", "values": ["ssd"]}
+        self.assertEqual(self.terms(*own), [
+            {"matchExpressions": [disk, {"key": "rack", "operator": "NotIn", "values": ["r1"]}]},
+            {"matchExpressions": [disk, {"key": "tier", "operator": "NotIn", "values": ["edge"]}]}])
+
+    def test_the_proxy_nodes_must_be_named(self) -> None:
+        self.assertIn("proxy.nodeSelector is required",
+                      render_error(SIPRUST, *KIND, "--set", "proxy.nodeSelector=null"))
+
+    def test_no_proxy_leaves_the_workers_own_affinity(self) -> None:
+        w = find(render(SIPRUST, *KIND, "--set", "proxy.enabled=false"), "StatefulSet", "b2bua-worker")
+        self.assertNotIn("affinity", pod_spec(w))
 
 
 if __name__ == "__main__":

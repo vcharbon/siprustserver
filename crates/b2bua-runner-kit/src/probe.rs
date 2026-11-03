@@ -192,11 +192,8 @@ mod tests {
         let reads = state.clone();
         let ready = ready_fn(move || *reads.lock().unwrap(), loops.clone(), STALL);
         let live = live_fn(loops, STALL);
-        let routes = ProbeRoutes {
-            metrics: Arc::new(String::new),
-            ready: ready.clone(),
-            heap: None,
-        };
+        let routes =
+            ProbeRoutes { metrics: Arc::new(String::new), ready: ready.clone(), heap: None };
         let server =
             ProbeServer::start_live("127.0.0.1:0".parse().unwrap(), routes, live).await.unwrap();
         assert!(get(server.addr(), "/ready").await.contains("200 OK"));

@@ -10,6 +10,7 @@ use sip_proxy::ProxyAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
+use crate::external_face::FaceCheck;
 
 const STALL_MS: u64 = 2_000;
 
@@ -43,7 +44,7 @@ async fn server_with_face(
     pool: Arc<dyn WorkerRegistry>,
     pulse: Arc<ShardPulse>,
     view: Arc<FirstView>,
-    face: Option<FaceCheck>,
+    face: Option<Arc<FaceMonitor>>,
 ) -> ProbeServer {
     let draining = Arc::new(AtomicBool::new(false));
     let p = probes(draining, pulse, Clock::test_at(10_000), STALL_MS, pool, view, face);
@@ -117,17 +118,14 @@ async fn with_the_view_in_and_no_worker_alive_readyz_fails() {
     assert!(get(s.addr(), "/readyz").await.starts_with("HTTP/1.1 503"));
 }
 
-/// Every other condition met, an external interface that is gone fails
+/// Every other condition met, an external face read unusable fails
 /// `/readyz` and leaves `/healthz` passing: the node withdraws both faces'
-/// addresses and the process is not restarted. The interface returning makes
-/// the proxy ready again.
+/// addresses and the process is not restarted. `/readyz` reads the monitor's
+/// latest reading, which is unusable before the first one completes.
 #[tokio::test]
 async fn an_unusable_external_face_fails_readyz_only() {
-    let root = std::env::temp_dir().join(format!("readyz-face-{}", std::process::id()));
-    let face = FaceCheck { interface: "readyz-test-ext0".into(), next_hops: vec![] };
-    let check = face.clone();
-    let reads = move || check.read_at(&root, || Ok(vec![]));
-    assert!(!reads().is_usable(), "no such interface");
+    let face =
+        FaceMonitor::new(FaceCheck { interface: "readyz-test-ext0".into(), next_hops: vec![] });
     let s = server_with_face(
         pool(WorkerHealth::Alive),
         Arc::new(ShardPulse::new(1)),

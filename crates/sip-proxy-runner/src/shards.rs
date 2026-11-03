@@ -21,7 +21,7 @@ use sip_proxy::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::{ProxyAddr, ProxyCoreBuilder, ProxyMetrics, ProxyTraces, RoutingStrategy};
 use sip_txn::IdGen;
 
-use crate::external_face::FaceCheck;
+use crate::external_face::FaceMonitor;
 use crate::readiness::{probes, ProxyProbes};
 
 /// What every recv shard shares. Kernel flow hashing keeps one source on one
@@ -127,7 +127,7 @@ impl SharedRouting {
         &self,
         draining: Arc<AtomicBool>,
         stall_ms: u64,
-        external_face: Option<FaceCheck>,
+        external_face: Option<Arc<FaceMonitor>>,
     ) -> ProxyProbes {
         probes(
             draining,

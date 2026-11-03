@@ -1008,6 +1008,15 @@ spec:
       labels:
         app: b2bua-worker
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: tier
+                operator: NotIn
+                values:
+                - edge
       containers:
       - command:
         - /usr/local/bin/b2bua-runner

@@ -75,9 +75,9 @@
 //!                    crash-looping (default 20000)
 //!   PROXY_DRAIN_GRACE_MS  SIGTERM (/readyz Draining) to exit, ms ≥ 1 (15000),
 //!                    past the withdrawal of the node's routes (ADR-0056)
-//!   PROXY_EXT_INTERFACE / PROXY_EXT_NEXT_HOPS  the external interface and its
-//!                    IPv4 next hops: /readyz wants it up and one hop not
-//!                    FAILED (default none: no check)
+//!   PROXY_EXT_INTERFACE / PROXY_EXT_NEXT_HOPS / PROXY_EXT_FACE_CHECK_MS  the
+//!                    external interface, its IPv4 next hops, read every 500 ms:
+//!                    /readyz wants it up, one hop resolved (default: no check)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 16 bytes  (REQUIRED, no
 //!                    default; every proxy of a cluster shares it); a key
@@ -167,6 +167,7 @@ use sip_proxy::{ExternalFaceParts, RoutingStrategy};
 use sip_proxy_runner::binds::{bind_sockets, ShardSockets, Sockets};
 use sip_proxy_runner::config::{refusal, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
+use sip_proxy_runner::external_face::FaceMonitor;
 use sip_proxy_runner::health_sampler::HealthSampler;
 use sip_proxy_runner::shards::SharedRouting;
 use sip_proxy_runner::signal::sigterm;
@@ -250,7 +251,7 @@ async fn run() -> Result<i32, String> {
     let shard_stall_ms = cfg.shard_stall_ms;
     let recv_shards = cfg.recv_shards;
     let ext_face = cfg.external.clone();
-    let face_check = cfg.external_face_check.clone();
+    let face = FaceMonitor::start(cfg.external_face_check.clone(), cfg.external_face_period);
     tracing::info!(observer = ?cfg.observer, "load-observer bands and AIMD ladder");
 
     // ONE process clock, built before the first bind: every signaling endpoint
@@ -401,7 +402,7 @@ async fn run() -> Result<i32, String> {
     // see `sip_proxy::liveness`) is a proxy that black-holes a share of its
     // flows while every activity meter reads idle: it fails `/readyz` and
     // `/healthz` (ADR-0046 D4), and raises the gauge.
-    let proxy_probes = shared.probes(draining.clone(), shard_stall_ms, face_check.clone());
+    let proxy_probes = shared.probes(draining.clone(), shard_stall_ms, face.clone());
 
     // Health sampler: the worker-health, acceptance, shard-stall and
     // discovery gauges every 2 s.
@@ -412,7 +413,7 @@ async fn run() -> Result<i32, String> {
         pulse: pulse.clone(),
         clock: clock.clone(),
         stall_ms: shard_stall_ms,
-        external_face: face_check,
+        external_face: face,
     }
     .spawn();
 

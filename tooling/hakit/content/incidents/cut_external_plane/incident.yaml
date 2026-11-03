@@ -2,12 +2,13 @@ schema: incident.v1
 name: cut_external_plane
 description: >-
   Disconnect the node of one front proxy from the callers' docker network for
-  duration_s, then reconnect it at its own address: the node loses its
+  duration_s, then reconnect it at its own address and interface name: the
+  node loses its
   caller-facing interface. Its proxy turns not ready (the external face is
   unusable), so the node withdraws both VIPs, the internal one too, and the
   peer carries every flow. Inject measures, from the cut, when the node left
-  each VIP's next hops in the host's table. The probe wants both VIPs routed
-  over every live proxy's node again.
+  each VIP's next hops in the host's table. The probe wants the interface back
+  and both VIPs routed over every live proxy's node again.
 kind: fault
 target:
   selector: app=sip-front-proxy
@@ -25,6 +26,10 @@ params:
     type: string
     default: sipext
     description: The docker network of the callers' plane.
+  interface:
+    type: string
+    default: eth1
+    description: The interface name the node's endpoint on that network takes again at heal.
   withdraw_timeout_s:
     type: integer
     default: 30
