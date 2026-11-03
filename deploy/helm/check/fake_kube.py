@@ -1,7 +1,7 @@
 """A Kubernetes API server answering what `helm template --dry-run=server`
 asks of a chart's render and what the lab's kubectl reads: the version, the
-discovery of every kind the charts render (core, apps, networking, policy, rbac) and of the pods
-and ReplicaSets under them, and GETs of the objects it holds (what `lookup`
+discovery of every kind the charts render (core, apps, networking, policy,
+rbac) and of the pods and ReplicaSets under them, and GETs of the objects it holds (what `lookup`
 reads, a list at its collection path). Every other path is a 404 Status.
 Plain HTTP on 127.0.0.1, one test."""
 import json
