@@ -210,6 +210,12 @@ pub const REPL_FORWARD_FLUSH_REFUSED: Family = Family::counter(
     "forward flushes (primary→backup) a backup refused (ADR-0031 D3): op=put, a body behind the Element on a lifecycle axis or behind its b; op=delete, a teardown of an answered Active Element by an authority that never published the answer. A rising count means a primary is flushing a branch of a call one of its backups took over — expected across a partition heal or a drain, sustained means the two views never converge",
 );
 
+pub const REPL_INBOUND_DROPPED: Family = Family::counter(
+    "b2bua_repl_inbound_dropped_total",
+    Labels::Product(&[Dim::new("reason", &["cap", "open_timeout"])]),
+    "inbound replication connections the serve loop closed before they opened a flow (ADR-0045): reason=cap, accepted while B2BUA_REPL_MAX_CONNECTIONS were served; reason=open_timeout, no opening PullRequest within B2BUA_REPL_OPEN_TIMEOUT_MS. A healthy cluster reads 0 for both; a rising count names a client that is not a peer worker, or a cap below the flows the peers open",
+);
+
 pub const DRAIN_EXITS: Family = Family::counter(
     "b2bua_drain_exits_total",
     Labels::Product(&[DRAIN_REASON]),

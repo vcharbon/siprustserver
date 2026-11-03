@@ -40,6 +40,7 @@ class NetEnvAgreement(unittest.TestCase):
             (net["PROXY_VIP"], net["SIPEXT_VIP"], net["SIP_IF"], net["SIPEXT_IF"],
              net["SIPEXT_SUBNET"], net["SIP_PORT"], net["PROXY_FACE_INT_CIDRS"]))
         self.assertEqual(values["worker"]["dest"], f"{net['SIPEXT_UAS_IP']}:5060")
+        self.assertEqual(values["worker"]["networkPolicy"]["proxyNodeCidrs"], [net["SIP_SUBNET"]])
         self.assertEqual(values["tracing"]["otlpEndpoint"],
                          f"http://{net['SIP_GATEWAY']}:10428/insert/opentelemetry")
 

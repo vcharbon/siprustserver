@@ -29,6 +29,10 @@ worker:
   # The lab is the HA lab: worker kills fail over to the survivor.
   replication:
     enabled: true
+  # The kind bridge (SIP_SUBNET) holds every node: the edge nodes' probes and
+  # notices come from it. kindnet enforces the policy.
+  networkPolicy:
+    proxyNodeCidrs: [172.20.0.0/16]
   # Created by kind-lab.sh deploy before the release (lib/sut.sh).
   clusterKey:
     existingSecret: b2bua-worker-cluster-key

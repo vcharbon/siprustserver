@@ -6,7 +6,8 @@ so callRef ownership, the proxy's cookie and replication membership agree by
 construction. Readiness is /ready: 503 while re-hydrating or draining, so a
 NotReady worker leaves the EndpointSlice the proxy and its peers watch.
 Liveness is /healthz: 503 while a loop has been on one piece of work past
-B2BUA_LOOP_STALL_MS.
+B2BUA_LOOP_STALL_MS. The operator routes listen on loopback (B2BUA_ADMIN),
+reached through kubectl exec or port-forward, never through a Service.
 */ -}}
 {{- if .Values.worker.enabled }}
 {{- $w := .Values.worker }}
@@ -15,6 +16,7 @@ B2BUA_LOOP_STALL_MS.
   "B2BUA_ADVERTISE" "$(POD_IP):5060"
   "B2BUA_ORDINAL" "$(POD_NAME)"
   "B2BUA_METRICS" "0.0.0.0:9091"
+  "B2BUA_ADMIN" "127.0.0.1:9093"
   "B2BUA_REPL" (ternary "1" "0" $w.replication.enabled)
   "B2BUA_REPL_LISTEN" (printf "0.0.0.0:%d" (int $w.replication.port))
   "B2BUA_REPL_PORT" (toString (int $w.replication.port))

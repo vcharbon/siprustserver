@@ -1,8 +1,9 @@
-//! The accept loop of a [`ProbeServer`](crate::ProbeServer): it takes each
-//! connection under the [`MAX_CONNECTIONS`] backstop and serves it on a task
-//! of its own. A failed accept never ends it: the probes it answers are what
-//! keep the process alive, so a listener lost to one `EMFILE` would get a
-//! healthy process restarted.
+//! The accept loop of a [`ProbeServer`](crate::ProbeServer) and an
+//! [`AdminServer`](crate::AdminServer): it takes each connection under the
+//! [`MAX_CONNECTIONS`] backstop and serves it on a task of its own. A failed
+//! accept never ends it: the probes it answers are what keep the process
+//! alive, so a listener lost to one `EMFILE` would get a healthy process
+//! restarted.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -10,8 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
-
-use crate::{handle_conn, Served};
 
 /// Light backstop on concurrent connections. The cluster is internal, so this
 /// is not a throttle — just a ceiling so a runaway client can't spawn unbounded
@@ -38,10 +37,14 @@ impl Incoming for TcpListener {
     }
 }
 
-/// Accept on `listener` and serve each connection with `served`, until the
+/// Accept on `listener` and serve each connection with `handle`, until the
 /// task is aborted. A failed accept logs a warning once per run of failures
 /// and is retried after [`ACCEPT_PAUSE`].
-pub(crate) async fn run(listener: impl Incoming, served: Served, idle_timeout: Duration) {
+pub(crate) async fn run<H, F>(listener: impl Incoming, handle: H)
+where
+    H: Fn(TcpStream) -> F + Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
+{
     #[expect(clippy::disallowed_methods, reason = "MAX_CONNECTIONS is below the permit ceiling")]
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     let local = listener.local_addr().ok();
@@ -67,10 +70,10 @@ pub(crate) async fn run(listener: impl Incoming, served: Served, idle_timeout: D
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             continue; // at the backstop cap — drop the connection
         };
-        let served = served.clone();
+        let served = handle(stream);
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = handle_conn(stream, served, idle_timeout).await;
+            served.await;
         });
     }
 }

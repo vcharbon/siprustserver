@@ -170,6 +170,57 @@ class RenderRelations(unittest.TestCase):
         render(SIPRUST, *KIND, *args, "--set", "worker.terminationGracePeriodSeconds=32")
 
 
+    def test_a_replication_cap_below_the_peers_flows_fails_the_render(self) -> None:
+        # 20 workers: 19 peers x 2 flows x a reconnect each = 76 above the default 64.
+        err = render_error(SIPRUST, *KIND, "--set", "worker.replicas=20")
+        for named in ("B2BUA_REPL_MAX_CONNECTIONS=64", "worker.replicas=20", "= 76"):
+            self.assertIn(named, err)
+        render(SIPRUST, *KIND, "--set", "worker.replicas=20",
+               "--set-string", "worker.env.B2BUA_REPL_MAX_CONNECTIONS=76")
+
+
+class WorkerNetworkPolicy(unittest.TestCase):
+    """templates/worker-network-policy.yaml: SIP from the proxies, replication
+    from the workers, the probe port from the monitoring namespace."""
+
+    @staticmethod
+    def rules(*args: str) -> dict[str, Doc]:
+        policy = find(render(SIPRUST, *args), "NetworkPolicy", "b2bua-worker")
+        assert policy["spec"]["podSelector"] == {"matchLabels": {"app": "b2bua-worker"}}
+        assert policy["spec"]["policyTypes"] == ["Ingress"]
+        return {f"{r['ports'][0]['protocol']}/{r['ports'][0]['port']}": r
+                for r in policy["spec"]["ingress"]}
+
+    def test_the_lab_admits_the_proxy_vip_and_nodes_the_workers_and_the_scraper(self) -> None:
+        rules = self.rules(*KIND)
+        self.assertEqual(set(rules), {"UDP/5060", "TCP/9092", "TCP/9091"})
+        self.assertEqual(rules["UDP/5060"]["from"], [{"ipBlock": {"cidr": "172.20.255.250/32"}},
+                                                     {"ipBlock": {"cidr": "172.20.0.0/16"}}])
+        self.assertEqual(rules["TCP/9092"]["from"],
+                         [{"podSelector": {"matchLabels": {"app": "b2bua-worker"}}}])
+        self.assertEqual(rules["TCP/9091"]["from"], [{"namespaceSelector": {"matchLabels": {
+            "kubernetes.io/metadata.name": "observability"}}}])
+
+    def test_a_standalone_worker_takes_sip_from_anywhere_and_opens_no_replication(self) -> None:
+        rules = self.rules("--set", "proxy.enabled=false")
+        self.assertEqual(set(rules), {"UDP/5060", "TCP/9091"})
+        self.assertNotIn("from", rules["UDP/5060"])
+
+    def test_the_proxy_nodes_are_required_with_the_proxy(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set", "worker.networkPolicy.proxyNodeCidrs=null")
+        self.assertIn("worker.networkPolicy.proxyNodeCidrs is required", err)
+
+    def test_off_renders_no_policy(self) -> None:
+        docs = render(SIPRUST, *KIND, "--set", "worker.networkPolicy.enabled=false")
+        self.assertNotIn(("NetworkPolicy", "b2bua-worker"), names(docs))
+
+    def test_the_operator_listener_binds_loopback_and_is_no_port(self) -> None:
+        w = find(render(SIPRUST, *KIND), "StatefulSet", "b2bua-worker")
+        c = container(w, "b2bua-worker")
+        self.assertEqual(env(c)["B2BUA_ADMIN"], "127.0.0.1:9093")
+        self.assertNotIn(9093, [p["containerPort"] for p in c["ports"]])
+
+
 class Backends(unittest.TestCase):
     def test_producer_and_consumer_declare_the_same_queue(self) -> None:
         docs = render(SIPRUST, *KIND, "--set", "cdr.maxLength=5000", "--set", "cdr.queue=records")
@@ -201,7 +252,8 @@ class Backends(unittest.TestCase):
         every = names(render(SIPRUST, *KIND))
         for key, gone in (
                 ("worker.enabled", {("StatefulSet", "b2bua-worker"), ("Service", "b2bua-worker"),
-                                    ("PodDisruptionBudget", "b2bua-worker")}),
+                                    ("PodDisruptionBudget", "b2bua-worker"),
+                                    ("NetworkPolicy", "b2bua-worker")}),
                 ("proxy.enabled", {("Deployment", "sip-front-proxy"), ("Service", "sip-front-proxy"),
                                    ("ConfigMap", "sip-front-proxy-keepalived"),
                                    ("Secret", "sip-front-proxy-hmac"),
@@ -227,9 +279,11 @@ class GenericDefaults(unittest.TestCase):
     NETWORK = ["--set", "network.proxyVip=10.0.255.250", "--set", "network.internalInterface=ens3",
                "--set", "network.externalVip=203.0.113.250", "--set", "network.externalInterface=ens4",
                "--set", "network.internalCidrs=10.0.0.0/16",
+               "--set", "worker.networkPolicy.proxyNodeCidrs={10.0.0.0/24}",
                "--set", "proxy.hmac.existingSecret=edge-cookie"]
     DERIVED = {
         "b2bua-worker": {"B2BUA_LISTEN", "B2BUA_ADVERTISE", "B2BUA_ORDINAL", "B2BUA_METRICS",
+                         "B2BUA_ADMIN",
                          "B2BUA_REPL", "B2BUA_REPL_LISTEN", "B2BUA_REPL_PORT", "B2BUA_REPL_SERVICE",
                          "B2BUA_MODE", "B2BUA_OUTBOUND_PROXY", "B2BUA_CONTACT_ADDRESS",
                          "LIMITER_URL",

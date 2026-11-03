@@ -32,7 +32,7 @@ crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 517
 crates/b2bua/src/limiter/release_queue.rs 513
 crates/b2bua/src/metrics/limiter.rs 504
-crates/b2bua/src/metrics.rs 771
+crates/b2bua/src/metrics.rs 716
 crates/b2bua/src/node.rs 546
 crates/b2bua/src/repl/puller.rs 620
 crates/b2bua/src/repl/real_transport_tests.rs 1185

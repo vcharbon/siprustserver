@@ -107,3 +107,17 @@ fn split_host_port_defaults_and_parses() {
     assert_eq!(split_host_port("bob"), ("bob".to_string(), 5060));
     assert_eq!(split_host_port("bob:nope"), ("bob".to_string(), 5060));
 }
+
+#[test]
+fn the_admin_address_defaults_to_loopback_and_refuses_any_other() {
+    assert_eq!(
+        crate::runner_env::admin_addr(lookup(&[])).unwrap(),
+        "127.0.0.1:9093".parse().unwrap()
+    );
+    let stated = lookup(&[("B2BUA_ADMIN", "[::1]:19093")]);
+    assert_eq!(crate::runner_env::admin_addr(stated).unwrap(), "[::1]:19093".parse().unwrap());
+    for refused in ["0.0.0.0:9093", "10.0.0.5:9093", "localhost:9093"] {
+        let e = crate::runner_env::admin_addr(lookup(&[("B2BUA_ADMIN", refused)])).unwrap_err();
+        assert!(e.contains("B2BUA_ADMIN"), "{refused}: {e}");
+    }
+}

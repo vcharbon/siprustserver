@@ -114,7 +114,7 @@ mod limiter_env;
 mod liveness_env;
 mod null_cdr;
 pub mod poison;
-mod probe;
+pub mod probe;
 mod replication;
 mod runner_env;
 pub mod runtime;

@@ -1,4 +1,5 @@
-//! The worker's operator routes on its probe server (ADR-0050 §10):
+//! The worker's operator routes on its loopback operator server
+//! (`B2BUA_ADMIN`, ADR-0050 §10):
 //!
 //! - `POST /admin/cordon` cordons the worker, `DELETE /admin/cordon` lifts the
 //!   cordon: `204`, idempotent; `409` with the state the worker is in when no

@@ -28,6 +28,7 @@ PRODUCT_VALUES: dict[str, Any] = {
             "extraEnv": [{"name": "NODE_NAME",
                           "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}],
             "resources": {"requests": {"cpu": "1"}, "limits": {"memory": "3Gi"}},
+            "networkPolicy": {"proxyNodeCidrs": ["172.20.0.0/16"]},
         },
         "proxy": {
             "recvShards": 4,

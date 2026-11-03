@@ -4,6 +4,7 @@
 
 use std::env;
 use std::fmt::Display;
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -29,6 +30,9 @@ pub struct RunnerEnv {
     pub addresses: WorkerAddresses,
     /// `B2BUA_METRICS` — Prometheus HTTP listen addr (default `0.0.0.0:9091`).
     pub metrics_addr: String,
+    /// `B2BUA_ADMIN` — the operator routes' listen addr, a loopback
+    /// `ip:port` only (default `127.0.0.1:9093`).
+    pub admin_addr: SocketAddr,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
     /// `B2BUA_UDP_SNDBUF` — `SO_SNDBUF` requested on the signalling socket,
@@ -245,6 +249,20 @@ fn cluster_key(value: Option<String>) -> Result<Option<sip_ids::SigningKey>, Str
     })
 }
 
+/// `B2BUA_ADMIN`: a loopback `ip:port`, `127.0.0.1:9093` when unset. `Err`
+/// names the variable for a value that is no address or not a loopback one.
+pub(crate) fn admin_addr(lookup: impl Fn(&str) -> Option<String>) -> Result<SocketAddr, String> {
+    let raw = stated(lookup("B2BUA_ADMIN")).unwrap_or_else(|| "127.0.0.1:9093".into());
+    match raw.trim().parse::<SocketAddr>() {
+        Ok(addr) if addr.ip().is_loopback() => Ok(addr),
+        Ok(addr) => Err(format!(
+            "B2BUA_ADMIN={addr} is not a loopback address: the operator routes are reached \
+             from inside the worker's network namespace only"
+        )),
+        Err(e) => Err(format!("B2BUA_ADMIN={raw:?} is not an ip:port: {e}")),
+    }
+}
+
 impl RunnerEnv {
     /// Parse the full generic env grammar. `Err` is the boot refusal of the
     /// first value the worker cannot honour, naming its variable.
@@ -261,6 +279,7 @@ impl RunnerEnv {
             listen: env_or("B2BUA_LISTEN", "0.0.0.0:5060"),
             addresses,
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
+            admin_addr: admin_addr(lookup)?,
             queue_max: knob("B2BUA_QUEUE", "8192")?,
             udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF")?,
             udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF")?,

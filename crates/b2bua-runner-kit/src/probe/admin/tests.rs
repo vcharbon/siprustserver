@@ -1,4 +1,4 @@
-//! The operator routes over a real probe server: the cordon's status codes,
+//! The operator routes over a real operator server: the cordon's status codes,
 //! its idempotence, the state report and the states no cordon applies to;
 //! the release-all's counts.
 
@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use b2bua::release_all::ReleasedAll;
 use b2bua::repl::ReadinessSource;
-use probe_http::{ProbeRoutes, ProbeServer, ProbeState};
+use probe_http::AdminServer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -26,7 +26,7 @@ fn body(resp: &str) -> &str {
     resp.split_once("\r\n\r\n").map(|(_, body)| body).unwrap_or("")
 }
 
-async fn server(readiness: &Readiness, calls: usize) -> ProbeServer {
+async fn server(readiness: &Readiness, calls: usize) -> AdminServer {
     let release_all: ReleaseAllFn = Arc::new(ReleasedAll::default);
     server_releasing(readiness, calls, release_all).await
 }
@@ -35,20 +35,14 @@ async fn server_releasing(
     readiness: &Readiness,
     calls: usize,
     release_all: ReleaseAllFn,
-) -> ProbeServer {
-    let routes = ProbeRoutes {
-        metrics: Arc::new(String::new),
-        ready: Arc::new(|| ProbeState::Ready),
-        heap: None,
-        vrrp: None,
-        admin: Some(admin_routes(
-            readiness.clone(),
-            Arc::new(move || calls),
-            Arc::new(|| Some(Vec::new())),
-            release_all,
-        )),
-    };
-    ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap()
+) -> AdminServer {
+    let routes = admin_routes(
+        readiness.clone(),
+        Arc::new(move || calls),
+        Arc::new(|| Some(Vec::new())),
+        release_all,
+    );
+    AdminServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap()
 }
 
 /// A node whose gates never open.
@@ -165,19 +159,13 @@ async fn the_live_calls_are_listed_with_their_legs_call_ids() {
     let live: LiveCallsFn = Arc::new(|| {
         Some(vec![LiveCall { call_ref: "c1".into(), call_ids: vec!["a@x".into(), "b@y".into()] }])
     });
-    let routes = ProbeRoutes {
-        metrics: Arc::new(String::new),
-        ready: Arc::new(|| ProbeState::Ready),
-        heap: None,
-        vrrp: None,
-        admin: Some(admin_routes(
-            Readiness::always_ready(),
-            Arc::new(|| 1),
-            live,
-            Arc::new(ReleasedAll::default),
-        )),
-    };
-    let s = ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
+    let routes = admin_routes(
+        Readiness::always_ready(),
+        Arc::new(|| 1),
+        live,
+        Arc::new(ReleasedAll::default),
+    );
+    let s = AdminServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
     let get = request(s.addr(), "GET", "/admin/calls").await;
     assert!(get.starts_with("HTTP/1.1 200 OK"), "{get}");
     let listed: serde_json::Value = serde_json::from_str(body(&get)).unwrap();
@@ -193,19 +181,13 @@ async fn the_live_calls_are_listed_with_their_legs_call_ids() {
 /// observer would take for "no call left".
 #[tokio::test]
 async fn unreadable_calls_answer_503() {
-    let routes = ProbeRoutes {
-        metrics: Arc::new(String::new),
-        ready: Arc::new(|| ProbeState::Ready),
-        heap: None,
-        vrrp: None,
-        admin: Some(admin_routes(
-            Readiness::always_ready(),
-            Arc::new(|| 0),
-            Arc::new(|| None),
-            Arc::new(ReleasedAll::default),
-        )),
-    };
-    let s = ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
+    let routes = admin_routes(
+        Readiness::always_ready(),
+        Arc::new(|| 0),
+        Arc::new(|| None),
+        Arc::new(ReleasedAll::default),
+    );
+    let s = AdminServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
     let get = request(s.addr(), "GET", "/admin/calls").await;
     assert!(get.starts_with("HTTP/1.1 503"), "{get}");
 }

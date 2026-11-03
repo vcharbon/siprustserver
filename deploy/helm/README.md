@@ -4,7 +4,7 @@ Two charts deploy a cluster:
 
 | Chart | Deploys | Namespace |
 |---|---|---|
-| `siprust/` | the front proxy pair (keepalived VRRP, dual-faced), the B2BUA worker pool, the call limiter, the CDR broker and consumer, and on kind the `masq-exempt` DaemonSet | `sip-test` on the lab |
+| `siprust/` | the front proxy pair (keepalived VRRP, dual-faced), the B2BUA worker pool and its ingress NetworkPolicy, the call limiter, the CDR broker and consumer, and on kind the `masq-exempt` DaemonSet | `sip-test` on the lab |
 | `siprust-observability/` | the in-cluster collectors: vmagent, kube-state-metrics, node-exporter, fluent-bit, writing to a VictoriaMetrics / VictoriaLogs pair outside the cluster | `observability` |
 
 The stores and Grafana stay outside the cluster (`deploy/observability/stack`,
@@ -24,8 +24,9 @@ heap profiling, the loadgen relay header, the stress limiter), replication on,
 traces exported with the trace header trusted, and `masq-exempt`.
 
 The SUT chart requires its network (`network.proxyVip`, `externalVip`, both
-interfaces, `internalCidrs`, and `externalSubnet` for `masq-exempt`) while the
-proxy is enabled; the collectors chart requires `hostStack.address` and
+interfaces, `internalCidrs`, and `externalSubnet` for `masq-exempt`) and,
+with the workers' NetworkPolicy on, `worker.networkPolicy.proxyNodeCidrs`
+while the proxy is enabled; the collectors chart requires `hostStack.address` and
 `clusterName`. A top-level `enabled` in each chart serves a parent's
 `condition:`.
 
@@ -80,13 +81,35 @@ a release installed against its cluster may set `proxy.hmac.drawInCluster`
 its key drawn on the first install and read back by every upgrade through
 `lookup`, `proxy.hmac.kid` applying to that first draw only.
 
+## Deployment requirements
+
+- **The internal SIP plane is isolated** (ADR-0048). The proxy trusts what
+  reaches its internal socket, so only the workers and the proxies reach the
+  internal VIP. The proxies are hostNetwork: no NetworkPolicy selects them, so
+  a host firewall on the proxy nodes or a CNI host policy enforces it (the
+  kind lab: `masq-exempt`'s drop rule and the docker bridges' isolation).
+- **The workers' ingress** is the chart's NetworkPolicy
+  (`templates/worker-network-policy.yaml`, `worker.networkPolicy`, on by
+  default): SIP from the internal VIP and `proxyNodeCidrs` (the proxies'
+  OPTIONS probes and dead notices leave from their node's own address),
+  replication from the worker pods, the probe port from
+  `monitoringNamespace`; the kubelet's probes come from the pod's own node,
+  which no NetworkPolicy blocks. It holds only where the CNI implements
+  NetworkPolicy (kindnet does); a CNI that does not ignores it. A CNI that
+  gives node addresses an identity of their own must let CIDR rules match them
+  (Cilium: `policy-cidr-match-mode: nodes`). The replication port has no peer
+  authentication: this policy is what confines it to the workers.
+- **The operator routes** (cordon, release-all, the live calls; ADR-0050 §10)
+  listen on the worker's loopback (`B2BUA_ADMIN`, 127.0.0.1:9093), never on a
+  Service: `kubectl port-forward pod/<worker> 19093:9093`, or `kubectl exec`.
+
 ## Render-time relations
 
 `siprust/templates/checks.yaml` holds the relations that span a pod spec and a
 runner's env, or two components, and fails the render naming every value
 involved: the worker's and the proxy's `terminationGracePeriodSeconds` against
-their drain bounds, replication against the worker count, the CDR queue's
-`x-max-length` on both sides, the worker's RSS ceilings and the proxy's
+their drain bounds, replication and its connection cap against the worker
+count, the CDR queue's `x-max-length` on both sides, the worker's RSS ceilings and the proxy's
 branch memo against their memory limits, the workers' consult deadline against
 the proxy's dead verdict, the limiter lease against the workers' refresh, the
 one INVITE bound of workers and proxies, and the cookie key above. Each runner

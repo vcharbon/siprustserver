@@ -441,7 +441,6 @@ async fn run() -> Result<i32, String> {
         // No heap profiling on the proxy (not the leak target): /debug/heap → 503.
         heap: None,
         vrrp: Some(proxy_probes.vrrp),
-        admin: None,
     };
     // The listener was bound FIRST (metrics-first bind order above); this only
     // starts the accept loop. A failure here is fatal — a proxy without its

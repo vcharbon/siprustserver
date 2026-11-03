@@ -36,6 +36,7 @@
 //!                   (the full consistency table: `b2bua_runner_kit::addresses_from_lookup`)
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
 //!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
+//!   B2BUA_ADMIN     operator routes' listen addr, loopback only (default 127.0.0.1:9093)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
 //!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default 4 MiB;
 //!                   empty = kernel wmem_default; clamped at wmem_max) — ADR-0033
@@ -96,6 +97,11 @@
 //!                                on a silent peer is confirmed this long
 //!                                after its last frame; >= 2 x the Noop
 //!                                interval                             (2000)
+//!   B2BUA_REPL_OPEN_TIMEOUT_MS   an accepted connection with no opening
+//!                                request is closed; >= the idle
+//!                                timeout                              (4000)
+//!   B2BUA_REPL_MAX_CONNECTIONS   inbound connections served at once;
+//!                                one above is closed; >= 4            (64)
 //!   B2BUA_REPL_ACK_BOUND_MS      the longest the ACK of a callee's non-2xx
 //!                                waits for its turn; above the sync cap,
 //!                                below T1                             (200)

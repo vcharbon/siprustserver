@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use metric_catalogue::HistogramValue;
-use metric_values::{FixedCounts, OpenRows};
 
 use crate::dispatch::{Discard, PastBound};
 use crate::drain::DrainExit;
@@ -20,6 +19,7 @@ mod removal_class;
 mod repl_gauges;
 mod repl_hold;
 mod retransmit_row;
+mod rows;
 pub mod shell;
 mod turn_counts;
 mod udp_transport;
@@ -32,6 +32,7 @@ pub use limiter::{
 pub use operator::OPERATOR_RELEASE_KINDS;
 pub use removal_class::RemovalClass;
 use retransmit_row::retransmit_row;
+use rows::Rows;
 pub use udp_transport::{LiveCounters, LiveGauge, UdpTransportMetrics};
 
 #[derive(Debug, Default)]
@@ -164,76 +165,6 @@ struct Inner {
     census_timers: AtomicU64,
     census_tag_map: AtomicU64,
     census_b_legs: AtomicU64,
-}
-
-/// The label-keyed families of the counter set: a semi-open one's rows (one
-/// per observed label set) or a fixed one's counts, every declared label set
-/// at 0 from the start.
-#[derive(Debug)]
-struct Rows {
-    // Inbound requests by method, outbound requests this worker originated
-    // or relayed by method, inbound responses by CSeq method and status.
-    requests: OpenRows,
-    requests_out: OpenRows,
-    responses: OpenRows,
-    // Every repeat of a retained emission that left this worker — a rung of
-    // a dialog-level ladder or a triggered re-send — by ladder, method and,
-    // for a response, code. An original send is not a repeat.
-    retransmits: OpenRows,
-    // Dialog-level ladders that ran to their give-up, by the kind of
-    // obligation left undischarged: the peer went deaf.
-    repeat_give_ups: FixedCounts,
-    // Model invariants broken and defects met, by name (ADR-0052 §8).
-    model_defects: FixedCounts,
-    // Outbound messages left unsent: their next hop is not an IP literal
-    // (`router::unaddressable`), by kind.
-    outbound_unaddressable: FixedCounts,
-    // Messages and events that resolved to no call (`router::unroutable`),
-    // in three classes that never overlap: wire messages that drew no
-    // answer (by kind), wire requests answered on no call's behalf (by
-    // method and code), this node's own events naming no call (by event and
-    // method).
-    unroutable_dropped: FixedCounts,
-    unroutable_refused: OpenRows,
-    unroutable_internal: OpenRows,
-    // Quiet turns persisted without a bump or a flush, by kind.
-    repl_quiet_turns: FixedCounts,
-    // Inbound replication ops applied, by flow, peer and op: a reboot's bulk
-    // reclaim is a sharp `recovery`/`create` step for that peer.
-    repl_applied: OpenRows,
-    // Catch-up/idle `Noop`s this node sent as a server, by flow and pulling
-    // peer (ADR-0014): climbs on every healthy stream; a flat one names a
-    // stuck serve loop.
-    repl_noops_sent: OpenRows,
-    // Forward flushes a backup refused as a regression of its own progress
-    // (ADR-0031 D3), by the operation refused.
-    repl_forward_flush_refused: FixedCounts,
-    // Live calls resting at each state-machine cursor (ADR-0016),
-    // a census replaced whole on the gauge cadence.
-    sm_cursors: OpenRows,
-}
-
-impl Default for Rows {
-    fn default() -> Self {
-        use catalogue::worker as w;
-        Self {
-            requests: OpenRows::new(&w::REQUESTS),
-            requests_out: OpenRows::new(&w::REQUESTS_OUT),
-            responses: OpenRows::new(&w::RESPONSES),
-            retransmits: OpenRows::new(&w::RETRANSMITS),
-            repeat_give_ups: FixedCounts::new(&w::REPEAT_GIVE_UPS),
-            model_defects: FixedCounts::new(&w::MODEL_DEFECTS),
-            outbound_unaddressable: FixedCounts::new(&w::OUTBOUND_UNADDRESSABLE),
-            unroutable_dropped: FixedCounts::new(&w::UNROUTABLE_DROPPED),
-            unroutable_refused: OpenRows::new(&w::UNROUTABLE_REFUSED),
-            unroutable_internal: OpenRows::new(&w::UNROUTABLE_INTERNAL),
-            repl_quiet_turns: FixedCounts::new(&w::REPL_QUIET_TURNS),
-            repl_applied: OpenRows::new(&w::REPL_APPLIED),
-            repl_noops_sent: OpenRows::new(&w::REPL_NOOPS_SENT),
-            repl_forward_flush_refused: FixedCounts::new(&w::REPL_FORWARD_FLUSH_REFUSED),
-            sm_cursors: OpenRows::new(&w::SM_CURSORS),
-        }
-    }
 }
 
 /// Clone-cheap handle to the B2BUA counter set.
@@ -450,6 +381,19 @@ impl B2buaMetrics {
         self.inner.rows.repl_forward_flush_refused.get(&[op])
     }
 
+    /// `b2bua_repl_inbound_dropped_total{reason}`: one inbound replication
+    /// connection closed before it opened a flow (ADR-0045). `reason` is `cap`
+    /// (accepted at the cap on concurrent connections) or `open_timeout` (no
+    /// opening request within the open timeout).
+    pub fn record_repl_inbound_dropped(&self, reason: &str) {
+        self.inner.rows.repl_inbound_dropped.add(&[reason], 1);
+    }
+
+    /// Inbound replication connections dropped for `reason` (test/observability).
+    pub fn repl_inbound_dropped(&self, reason: &str) -> u64 {
+        self.inner.rows.repl_inbound_dropped.get(&[reason])
+    }
+
     /// Count one inbound request by SIP method, as written (a method is
     /// case-sensitive, RFC 3261 §7.1), for `b2bua_requests_total{method}`.
     pub fn record_request(&self, method: &str) {
@@ -660,6 +604,7 @@ impl B2buaMetrics {
         rows.repl_applied.render(&mut s);
         rows.repl_noops_sent.render(&mut s);
         rows.repl_forward_flush_refused.render(&mut s);
+        rows.repl_inbound_dropped.render(&mut s);
         catalogue::worker::DRAIN_EXITS.render(&mut s, |series| {
             cells::get_at(&i.drain_exits, series.index(&catalogue::worker::DRAIN_REASON))
         });

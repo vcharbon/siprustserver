@@ -16,6 +16,8 @@ fn unset_variables_take_the_stated_defaults() {
     assert_eq!(s.idle_timeout, Duration::from_secs(2));
     assert_eq!(s.noop_interval, Duration::from_millis(500));
     assert_eq!(s.send_stall, Duration::from_secs(15));
+    assert_eq!(s.open_timeout, Duration::from_secs(4));
+    assert_eq!(s.max_connections, 64);
     assert_eq!(s.socket.keepalive_idle, Duration::from_secs(5));
     assert_eq!(s.socket.keepalive_interval, Duration::from_secs(2));
     assert_eq!(s.socket.keepalive_retries, 3);
@@ -33,6 +35,8 @@ fn every_bound_is_read_from_its_variable() {
         ("B2BUA_REPL_IDLE_TIMEOUT_MS", "9000"),
         ("B2BUA_REPL_NOOP_INTERVAL_MS", "3000"),
         ("B2BUA_REPL_SEND_STALL_MS", "8000"),
+        ("B2BUA_REPL_OPEN_TIMEOUT_MS", "9500"),
+        ("B2BUA_REPL_MAX_CONNECTIONS", "12"),
         ("B2BUA_REPL_KEEPALIVE_IDLE_MS", "4000"),
         ("B2BUA_REPL_KEEPALIVE_INTERVAL_MS", "1000"),
         ("B2BUA_REPL_KEEPALIVE_RETRIES", "5"),
@@ -48,7 +52,12 @@ fn every_bound_is_read_from_its_variable() {
     assert_eq!((puller.backoff_init_ms, puller.backoff_max_ms), (100, 4000));
     assert_eq!(
         s.serve(),
-        ServeConfig { noop_interval: Duration::from_secs(3), send_stall: Duration::from_secs(8) }
+        ServeConfig {
+            noop_interval: Duration::from_secs(3),
+            send_stall: Duration::from_secs(8),
+            open_timeout: Duration::from_millis(9500),
+            max_connections: 12,
+        }
     );
     assert_eq!(
         s.socket,
@@ -71,6 +80,8 @@ fn a_bound_that_is_not_a_positive_integer_refuses_boot_naming_its_variable() {
         "B2BUA_REPL_IDLE_TIMEOUT_MS",
         "B2BUA_REPL_NOOP_INTERVAL_MS",
         "B2BUA_REPL_SEND_STALL_MS",
+        "B2BUA_REPL_OPEN_TIMEOUT_MS",
+        "B2BUA_REPL_MAX_CONNECTIONS",
         "B2BUA_REPL_KEEPALIVE_IDLE_MS",
         "B2BUA_REPL_KEEPALIVE_INTERVAL_MS",
         "B2BUA_REPL_KEEPALIVE_RETRIES",

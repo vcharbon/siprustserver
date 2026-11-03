@@ -560,6 +560,48 @@ spec:
           name: sip-front-proxy-keepalived
         name: keepalived-conf
 ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app: b2bua-worker
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: b2bua-worker
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: b2bua-worker
+  namespace: sip-test
+spec:
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 172.20.255.250/32
+    - ipBlock:
+        cidr: 172.20.0.0/16
+    ports:
+    - port: 5060
+      protocol: UDP
+  - from:
+    - podSelector:
+        matchLabels:
+          app: b2bua-worker
+    ports:
+    - port: 9092
+      protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability
+    ports:
+    - port: 9091
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: b2bua-worker
+  policyTypes:
+  - Ingress
+---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -878,6 +920,8 @@ spec:
             secretKeyRef:
               key: key
               name: b2bua-worker-cluster-key
+        - name: B2BUA_ADMIN
+          value: 127.0.0.1:9093
         - name: B2BUA_ADVERTISE
           value: $(POD_IP):5060
         - name: B2BUA_CDR_RABBITMQ_MAX_LEN

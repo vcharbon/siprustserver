@@ -42,7 +42,6 @@ fn probe_routes(
         ready: Arc::new(|| ProbeState::Ready),
         heap: None,
         vrrp: None,
-        admin: None,
     }
 }
 

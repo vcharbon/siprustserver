@@ -3,16 +3,12 @@
 use super::*;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use tokio::io::AsyncReadExt;
+
 use crate::accept::Incoming;
 
 fn routes(body: &'static str, ready: ReadyFn) -> ProbeRoutes {
-    ProbeRoutes {
-        metrics: Arc::new(move || body.to_string()),
-        ready,
-        heap: None,
-        vrrp: None,
-        admin: None,
-    }
+    ProbeRoutes { metrics: Arc::new(move || body.to_string()), ready, heap: None, vrrp: None }
 }
 fn always(state: ProbeState) -> ReadyFn {
     Arc::new(move || state)
@@ -129,7 +125,6 @@ async fn vrrp_is_liveness_and_its_own_condition() {
     let (live_reads, holds_reads) = (live.clone(), holds.clone());
     let routes = ProbeRoutes {
         vrrp: Some(Arc::new(move || holds_reads.load(Ordering::SeqCst) == 1)),
-        admin: None,
         ..routes("", always(ProbeState::NotReady))
     };
     let server = ProbeServer::start_live(
@@ -167,15 +162,15 @@ async fn request(addr: std::net::SocketAddr, method: &str, path: &str) -> String
 
 /// The operator routes receive the method and the path, its query stripped,
 /// and their replies are framed: a body with its length, a `204` with neither.
+/// Any other path is `404`.
 #[tokio::test]
 async fn admin_routes_receive_the_method_and_path_and_their_replies_are_framed() {
-    let mut r = routes("", always(ProbeState::Ready));
-    r.admin = Some(Arc::new(|method: &str, path: &str| match (method, path) {
+    let admin: AdminFn = Arc::new(|method: &str, path: &str| match (method, path) {
         ("POST", "/admin/x") => Some(AdminReply::no_content()),
         ("GET", "/admin/x") => Some(AdminReply::json(200, r#"{"y":1}"#.into())),
         _ => None,
-    }));
-    let server = ProbeServer::start("127.0.0.1:0".parse().unwrap(), r).await.unwrap();
+    });
+    let server = AdminServer::start("127.0.0.1:0".parse().unwrap(), admin).await.unwrap();
     let post = request(server.addr(), "POST", "/admin/x").await;
     assert_eq!(post, "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
     let get = request(server.addr(), "GET", "/admin/x?y=1").await;
@@ -185,10 +180,26 @@ async fn admin_routes_receive_the_method_and_path_and_their_replies_are_framed()
          Connection: close\r\n\r\n{\"y\":1}"
     );
     assert!(request(server.addr(), "DELETE", "/admin/x").await.contains("404 Not Found"));
+    assert!(request(server.addr(), "GET", "/metrics").await.contains("404 Not Found"));
 }
 
+/// The operator server binds a loopback address only.
 #[tokio::test]
-async fn admin_paths_are_404_on_a_server_given_none() {
+async fn the_admin_server_refuses_an_address_that_is_not_loopback() {
+    let admin: AdminFn = Arc::new(|_: &str, _: &str| Some(AdminReply::no_content()));
+    for addr in ["0.0.0.0:0", "[::]:0", "192.0.2.1:0"] {
+        let refused = AdminServer::start(addr.parse().unwrap(), admin.clone()).await;
+        assert!(
+            matches!(&refused, Err(e) if e.kind() == std::io::ErrorKind::InvalidInput),
+            "{addr}: {:?}",
+            refused.map(|s| s.addr())
+        );
+    }
+}
+
+/// The probe server answers no operator route.
+#[tokio::test]
+async fn admin_paths_are_404_on_the_probe_server() {
     let server =
         ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes("", always(ProbeState::Ready)))
             .await

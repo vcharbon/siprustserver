@@ -43,6 +43,15 @@
 //! then (the peer's window full, nothing read) drops the stream, which ends the
 //! serve task and releases the changelog its guard pinned.
 //!
+//! ## The accept side's bounds (ADR-0045)
+//! A connection that has not sent its opening `PullRequest` within
+//! [`ServeConfig::open_timeout`] is closed, and one accepted while
+//! [`ServeConfig::max_connections`] are served is closed at once; each is
+//! counted on `b2bua_repl_inbound_dropped_total{reason}`. To a peer confirming
+//! a dead verdict (ADR-0047 D1) either reads as a stream ending unheard, so
+//! the open timeout is at least the pullers' idle bound and the cap well
+//! above the flows the peers open (two per peer).
+//!
 //! ## Flow → keyspace
 //! `partition` fixes the body keyspace (no per-callRef `partition_of`):
 //! - **Reclaim** (`Pri`): caller reclaims its own calls we hold → `bak:{caller}`.
@@ -57,7 +66,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repl_net::frame::{Frame, Op, Partition, Watermark, PROTO_VER};
-use repl_net::transport::{AcceptError, ReplicationConnection, ReplicationListener, SendError};
+use repl_net::transport::{ReplicationConnection, SendError};
 
 use super::changelog::{BodySource, Changelog};
 use crate::abort_on_drop::AbortOnDrop;
@@ -68,9 +77,6 @@ use crate::store::PartitionRole;
 /// batch means caught-up → emit the catch-up Noop and wait for a write.
 const BATCH: usize = 500;
 
-/// The pause after a failed accept before the next one.
-const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
-
 /// The link bounds of the serve loop (ADR-0045).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServeConfig {
@@ -78,11 +84,21 @@ pub struct ServeConfig {
     pub noop_interval: Duration,
     /// A send blocked this long drops the stream.
     pub send_stall: Duration,
+    /// A connection that has not sent its opening `PullRequest` this long
+    /// after its accept is closed.
+    pub open_timeout: Duration,
+    /// The most connections served at once; one accepted above it is closed.
+    pub max_connections: usize,
 }
 
 impl Default for ServeConfig {
     fn default() -> Self {
-        Self { noop_interval: Duration::from_millis(500), send_stall: Duration::from_secs(15) }
+        Self {
+            noop_interval: Duration::from_millis(500),
+            send_stall: Duration::from_secs(15),
+            open_timeout: Duration::from_millis(4000),
+            max_connections: 64,
+        }
     }
 }
 
@@ -106,7 +122,8 @@ pub(super) enum Unsent {
     Refused(String),
 }
 
-/// Serves a node's changelog to pulling peers over a [`ReplicationListener`].
+/// Serves a node's changelog to pulling peers over a
+/// [`ReplicationListener`](repl_net::transport::ReplicationListener).
 ///
 /// Cheap to clone (Arcs); `run` accepts forever and spawns a per-connection
 /// task. Each task drives one caller's single-flow stream and ends cleanly when
@@ -159,59 +176,21 @@ impl ReplServer {
         self
     }
 
-    /// Accept connections forever, serving each on a per-connection task. Returns
-    /// only when the listener is closed ([`AcceptError::Closed`]). A failed
-    /// accept (descriptors exhausted, a handshake aborted) never stops it: a
-    /// warning once per run of failures, a pause of 100 ms, and
-    /// accepting goes on. Spawn this on a task.
-    ///
-    /// The serve tasks are owned by a [`JoinSet`](tokio::task::JoinSet), NOT
-    /// detached. This is load-bearing for crash semantics: when the worker is
-    /// aborted, this `run` future is dropped, dropping the `JoinSet` and aborting
-    /// every live serve task, cutting their connections so each peer reconnects
-    /// to the rebooted node.
-    pub async fn run(self, listener: Box<dyn ReplicationListener>) {
-        let mut serves = tokio::task::JoinSet::new();
-        let mut failing = false;
-        loop {
-            tokio::select! {
-                accepted = listener.accept() => match accepted {
-                    Ok(conn) => {
-                        if std::mem::take(&mut failing) {
-                            tracing::info!(
-                                node = observe::node(),
-                                local = %listener.local_addr(),
-                                "replication listener accepting again"
-                            );
-                        }
-                        let server = self.clone();
-                        serves.spawn(observe::keep_node(async move {
-                            server.serve_connection(conn).await;
-                        }));
-                    }
-                    Err(AcceptError::Closed) => break,
-                    Err(AcceptError::Io(error)) => {
-                        if !std::mem::replace(&mut failing, true) {
-                            tracing::warn!(
-                                node = observe::node(),
-                                local = %listener.local_addr(),
-                                %error,
-                                "replication accept failed; accepting again after a pause"
-                            );
-                        }
-                        tokio::time::sleep(ACCEPT_PAUSE).await;
-                    }
-                },
-                Some(_) = serves.join_next() => {}
-            }
-        }
-    }
-
     /// Serve one accepted connection: recv the opening `PullRequest`, then drive
     /// its single flow to completion (until the socket closes).
     async fn serve_connection(self, conn: Box<dyn ReplicationConnection>) {
         let conn: Arc<dyn ReplicationConnection> = Arc::from(conn);
-        let (caller, identity, partition, since) = match conn.recv().await {
+        let Ok(opening) = tokio::time::timeout(self.config.open_timeout, conn.recv()).await else {
+            self.count_dropped("open_timeout");
+            tracing::info!(
+                node = observe::node(),
+                peer = %conn.peer_addr(),
+                open_timeout_ms = sip_clock::wall::millis_u64(self.config.open_timeout),
+                "replication connection closed: no opening request within the open timeout"
+            );
+            return;
+        };
+        let (caller, identity, partition, since) = match opening {
             Some(Frame::PullRequest { proto_ver, caller, identity, partition, since })
                 if proto_ver == PROTO_VER =>
             {
@@ -463,4 +442,5 @@ impl ReplServer {
     }
 }
 
+mod accept;
 mod bootstrap;

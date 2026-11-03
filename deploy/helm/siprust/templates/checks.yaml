@@ -11,6 +11,7 @@ each runner's startup check.
 | worker `terminationGracePeriodSeconds` > B2BUA_DRAIN_GRACE_MS + 2 × B2BUA_DRAIN_RELEASE_FLUSH_MS + B2BUA_DRAIN_CDR_FLUSH_MS + 2 s | a drain whose grace ended calls returns by grace + 2 flushes, then the CDR sink closes (ADR-0031); the kubelet's SIGKILL must not cut it |
 | proxy `terminationGracePeriodSeconds` > PROXY_DRAIN_GRACE_MS + 2 s | the proxy's drain ends before the SIGKILL |
 | `worker.replication.enabled` ⇒ `worker.replicas` ≥ 2 | a backup lives on another worker |
+| `worker.replication.enabled` ⇒ worker B2BUA_REPL_MAX_CONNECTIONS ≥ 4 × (`worker.replicas` − 1) | every peer's two flows, each with the connection it replaces not yet read down, fit under the cap: a connection refused at the cap reads as a dead node to a peer confirming a verdict |
 | worker B2BUA_CDR_RABBITMQ_MAX_LEN = consumer CDR_QUEUE_MAX_LEN | both declare the one queue; a different argument fails the second declare |
 | every RSS ceiling (B2BUA_MAX_RSS, _EMERGENCY, B2BUA_REPL_BACKUP_MAX_RSS) < worker `resources.limits.memory` | a ceiling at the limit is never reached before the OOM kill |
 | worker B2BUA_INVITE_TXN_TIMEOUT_SEC = proxy PROXY_INVITE_TXN_TIMEOUT_SEC (`inviteTxnTimeoutSec`) | the proxy keeps an INVITE's memo entry for the bound the workers ring under |
@@ -38,6 +39,13 @@ operator's to keep consistent.
 {{- end }}
 {{- if and $w.replication.enabled (lt (int $w.replicas) 2) }}
 {{- fail (printf "worker.replication.enabled needs worker.replicas >= 2, got %d: a backup lives on another worker" (int $w.replicas)) }}
+{{- end }}
+{{- if $w.replication.enabled }}
+{{- $cap := include "siprust.envInt" (list $wenv "B2BUA_REPL_MAX_CONNECTIONS" 64) | int64 }}
+{{- $flows := mul 4 (sub (int64 $w.replicas) 1) }}
+{{- if lt $cap $flows }}
+{{- fail (printf "worker B2BUA_REPL_MAX_CONNECTIONS=%d must be at least 4 × (worker.replicas=%d − 1) = %d: every peer's two flows and a reconnect of each must fit under the cap, or a live worker reads dead to a peer confirming a verdict" $cap (int64 $w.replicas) $flows) }}
+{{- end }}
 {{- end }}
 {{- $limit := dig "limits" "memory" "" ($w.resources | default dict) }}
 {{- if $limit }}

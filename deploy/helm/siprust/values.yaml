@@ -90,6 +90,23 @@ worker:
   replication:
     enabled: false
     port: 9092
+  # The workers' ingress NetworkPolicy (templates/worker-network-policy.yaml):
+  # SIP from the proxies, replication from the other workers, the probe port
+  # from `monitoringNamespace` (the kubelet's probes come from the pod's own
+  # node, which no NetworkPolicy blocks). Every other ingress is refused.
+  # Enforced only by a CNI that implements NetworkPolicy.
+  networkPolicy:
+    enabled: true
+    # The proxies are hostNetwork: their SIP reaches the workers from the
+    # internal VIP (network.proxyVip, allowed by the chart) and their OPTIONS
+    # probes and dead notices from the proxy nodes' own internal-plane
+    # addresses, which no pod selector names. These CIDRs hold those
+    # addresses: the internal plane's node subnet, so a replaced edge node
+    # stays covered. Required while the proxy is enabled; ignored without it
+    # (a standalone worker takes SIP from anywhere).
+    proxyNodeCidrs: []
+    # The namespace of the metrics scraper (siprust-observability's vmagent).
+    monitoringNamespace: observability
   # Env by name over the env the chart derives (pod identity, listen and
   # advertise, metrics, outbound proxy, replication, limiter URL, CDR sink,
   # tracing): a name here overrides a derived one. The failover timings

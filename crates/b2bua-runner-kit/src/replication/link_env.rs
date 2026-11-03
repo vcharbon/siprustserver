@@ -9,6 +9,9 @@
 //!                                     without a Noop, the heartbeat       (500)
 //!   B2BUA_REPL_SEND_STALL_MS          a send blocked this long leaves the
 //!                                     stream, either end                 (15000)
+//!   B2BUA_REPL_OPEN_TIMEOUT_MS        an accepted connection with no
+//!                                     opening request is closed          (4000)
+//!   B2BUA_REPL_MAX_CONNECTIONS        inbound connections served at once (64)
 //!   B2BUA_REPL_KEEPALIVE_IDLE_MS      TCP keepalive: idle before probing (5000)
 //!   B2BUA_REPL_KEEPALIVE_INTERVAL_MS  TCP keepalive: between probes      (2000)
 //!   B2BUA_REPL_KEEPALIVE_RETRIES      TCP keepalive: unanswered probes   (3)
@@ -45,6 +48,15 @@
 //! per peer, whatever notices arrive meanwhile, and a notice is checked fresh
 //! when it arrives.
 //!
+//! The open timeout and the connection cap bound what a client that is not a
+//! peer can hold on the serving side. A peer sends its opening request as soon
+//! as its connect completes, so neither touches a healthy stream; to a peer
+//! confirming a dead verdict either reads as a stream ending unheard, so the
+//! open timeout is at least the idle timeout (the confirming peer's own bound
+//! on that wait) and the cap sits well above the two flows each peer opens
+//! ([`ConfigCheck`](crate::ConfigCheck); the chart holds the cap against the
+//! worker count).
+//!
 //! The dead-peer TTL is an HA timer of the serving side: a peer log no flow
 //! has served for that long is dropped, writes or not, so the log toward an
 //! away backup holds the writes of one TTL at most (ADR-0055 §3). It decides
@@ -74,6 +86,8 @@ pub(crate) struct LinkSettings {
     pub(crate) idle_timeout: Duration,
     pub(crate) noop_interval: Duration,
     pub(crate) send_stall: Duration,
+    pub(crate) open_timeout: Duration,
+    pub(crate) max_connections: usize,
     pub(crate) socket: SocketSettings,
     pub(crate) lookup_timeout: Duration,
     pub(crate) dead_peer_ttl: Duration,
@@ -90,6 +104,8 @@ impl Default for LinkSettings {
             idle_timeout: Duration::from_millis(puller.idle_timeout_ms),
             noop_interval: serve.noop_interval,
             send_stall: serve.send_stall,
+            open_timeout: serve.open_timeout,
+            max_connections: serve.max_connections,
             socket: SocketSettings::default(),
             lookup_timeout: http_net::LOOKUP_BOUND,
             dead_peer_ttl: Duration::from_millis(
@@ -121,6 +137,17 @@ impl LinkSettings {
             idle_timeout: ms("B2BUA_REPL_IDLE_TIMEOUT_MS", d.idle_timeout)?,
             noop_interval: ms("B2BUA_REPL_NOOP_INTERVAL_MS", d.noop_interval)?,
             send_stall: ms("B2BUA_REPL_SEND_STALL_MS", d.send_stall)?,
+            open_timeout: ms("B2BUA_REPL_OPEN_TIMEOUT_MS", d.open_timeout)?,
+            max_connections: match positive(
+                &get,
+                "B2BUA_REPL_MAX_CONNECTIONS",
+                u64::try_from(d.max_connections).unwrap_or(u64::MAX),
+            )?
+            .try_into()
+            {
+                Ok(n) => n,
+                Err(_) => return Err("B2BUA_REPL_MAX_CONNECTIONS is too large".into()),
+            },
             socket: SocketSettings {
                 keepalive_idle: keepalive_s(
                     "B2BUA_REPL_KEEPALIVE_IDLE_MS",
@@ -199,7 +226,12 @@ impl LinkSettings {
 
     /// The serve loop's configuration.
     pub(crate) fn serve(&self) -> ServeConfig {
-        ServeConfig { noop_interval: self.noop_interval, send_stall: self.send_stall }
+        ServeConfig {
+            noop_interval: self.noop_interval,
+            send_stall: self.send_stall,
+            open_timeout: self.open_timeout,
+            max_connections: self.max_connections,
+        }
     }
 }
 

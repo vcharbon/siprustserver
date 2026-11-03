@@ -500,7 +500,7 @@ async fn a_served_stream_carries_a_noop_at_least_every_noop_interval_during_and_
     // A configured interval other than the default: the server keeps the one
     // it is given.
     let interval = Duration::from_secs(3);
-    let config = ServeConfig { noop_interval: interval, send_stall: Duration::from_secs(15) };
+    let config = ServeConfig { noop_interval: interval, ..ServeConfig::default() };
     let server = ReplServer::new("B", changelog, Arc::new(store.clone())).with_config(config);
     tokio::spawn(server.run(net.listen(b).await.unwrap()));
 

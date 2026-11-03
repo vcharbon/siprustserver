@@ -1,7 +1,9 @@
-//! The worker's probe server, and what it answers from: `/ready` from its
-//! readiness and its loops, `/healthz` from its loops alone, `/metrics` from
-//! every metric source of the worker, the operator routes ([`admin`]) from its
-//! readiness and its live calls, which it can release.
+//! The worker's two HTTP listeners, and what they answer from. The probe
+//! server (`B2BUA_METRICS`): `/ready` from its readiness and its loops,
+//! `/healthz` from its loops alone, `/metrics` from every metric source of the
+//! worker. The operator server (`B2BUA_ADMIN`, loopback only): the operator
+//! routes (`probe::admin`) from its readiness and its live calls, which it can
+//! release.
 
 mod admin;
 
@@ -11,7 +13,7 @@ use std::time::Duration;
 use b2bua::loops::WorkerLoops;
 use b2bua::repl::ReadinessState;
 use b2bua::B2buaCore;
-use probe_http::{LiveFn, ProbeState, ReadyFn};
+use probe_http::{AdminFn, AdminServer, LiveFn, ProbeRoutes, ProbeServer, ProbeState, ReadyFn};
 
 use crate::{RunnerBase, WorkerMetrics};
 
@@ -25,15 +27,17 @@ impl RunnerBase {
     /// composed, the loops' stall gauge, the cordon gauge), then
     /// `extra_metrics` (e.g. allocator stats). `/ready` reads NotReady and
     /// `/healthz` 503 while a worker loop is stalled past `loop_stall`.
-    /// `/admin/cordon` is the operator's cordon, `/admin/release-all` its
-    /// release of every call, `/admin/calls` the list of the live ones. Hold the returned server for
-    /// the process lifetime — its accept loop aborts on drop.
+    /// The operator server on `B2BUA_ADMIN` serves `/admin/cordon`, the
+    /// operator's cordon, `/admin/release-all`, its release of every call, and
+    /// `/admin/calls`, the list of the live ones; the probe server answers
+    /// none of them. Hold the returned servers for the process lifetime: each
+    /// accept loop aborts on drop.
     pub async fn spawn_probe_server(
         &self,
         core: &Arc<B2buaCore>,
         extra_metrics: Option<probe_http::MetricsFn>,
         heap: Option<probe_http::HeapDumpFn>,
-    ) -> Option<probe_http::ProbeServer> {
+    ) -> ProbeServers {
         let core_ready = core.clone();
         let stall = self.env.loop_stall;
         let worker = WorkerMetrics {
@@ -46,38 +50,75 @@ impl RunnerBase {
             loop_stall: stall,
             readiness: core.readiness(),
         };
-        let routes = probe_http::ProbeRoutes {
+        let routes = ProbeRoutes {
             metrics: Arc::new(move || worker.body(extra_metrics.as_ref())),
             ready: ready_fn(move || core_ready.readiness_state(), core.loops().clone(), stall),
             heap,
             vrrp: None,
-            admin: Some(admin::admin_routes(
-                core.readiness(),
-                core.active_calls_probe(),
-                live_calls(core),
-                core.release_all_handle(),
-            )),
         };
         let live = live_fn(core.loops().clone(), stall);
-        match probe_http::ProbeServer::start_live(self.metrics_sa, routes, live).await {
+        let admin = admin::admin_routes(
+            core.readiness(),
+            core.active_calls_probe(),
+            live_calls(core),
+            core.release_all_handle(),
+        );
+        ProbeServers::start(
+            &self.name,
+            (self.metrics_sa, routes, live),
+            (self.env.admin_addr, admin),
+        )
+        .await
+    }
+}
+
+/// The worker's probe server and its operator server, each `None` when it
+/// failed to bind: the worker serves calls without them.
+pub struct ProbeServers {
+    pub probe: Option<ProbeServer>,
+    pub admin: Option<AdminServer>,
+}
+
+impl ProbeServers {
+    /// Start the probe server on `probe`'s address with its routes and
+    /// liveness, and the operator server on `admin`'s loopback address. A
+    /// bind failure is logged and leaves that server out.
+    pub(crate) async fn start(
+        service: &str,
+        probe: (std::net::SocketAddr, ProbeRoutes, LiveFn),
+        admin: (std::net::SocketAddr, AdminFn),
+    ) -> Self {
+        let (probe_at, routes, live) = probe;
+        let probe = match ProbeServer::start_live(probe_at, routes, live).await {
             Ok(server) => {
                 tracing::info!(
-                    service = %self.name,
+                    service,
                     addr = %server.addr(),
-                    "metrics server listening (/metrics, readiness /ready, liveness /healthz, operator /admin/cordon /admin/release-all /admin/calls)"
+                    "metrics server listening (/metrics, readiness /ready, liveness /healthz)"
                 );
                 Some(server)
             }
             Err(e) => {
-                tracing::warn!(
-                    service = %self.name,
-                    addr = %self.metrics_sa,
-                    error = %e,
-                    "metrics server failed to bind"
-                );
+                tracing::warn!(service, addr = %probe_at, error = %e, "metrics server failed to bind");
                 None
             }
-        }
+        };
+        let (admin_at, routes) = admin;
+        let admin = match AdminServer::start(admin_at, routes).await {
+            Ok(server) => {
+                tracing::info!(
+                    service,
+                    addr = %server.addr(),
+                    "operator server listening (/admin/cordon /admin/release-all /admin/calls)"
+                );
+                Some(server)
+            }
+            Err(e) => {
+                tracing::warn!(service, addr = %admin_at, error = %e, "operator server failed to bind");
+                None
+            }
+        };
+        Self { probe, admin }
     }
 }
 
@@ -124,7 +165,6 @@ pub(crate) fn live_fn(loops: WorkerLoops, stall: Duration) -> LiveFn {
 mod tests {
     use std::sync::Mutex;
 
-    use probe_http::{ProbeRoutes, ProbeServer};
     use sip_txn::LoopPulse;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -158,7 +198,6 @@ mod tests {
             ready: ready.clone(),
             heap: None,
             vrrp: None,
-            admin: None,
         };
         let server =
             ProbeServer::start_live("127.0.0.1:0".parse().unwrap(), routes, live).await.unwrap();
@@ -180,6 +219,55 @@ mod tests {
         *state.lock().unwrap() = ReadinessState::Ready;
         assert!(get(server.addr(), "/ready").await.contains("200 OK"));
         assert!(get(server.addr(), "/healthz").await.contains("200 OK"));
+    }
+
+    async fn request(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("{method} {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        s.read_to_end(&mut resp).await.unwrap();
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    /// The operator routes answer on the loopback operator server and on no
+    /// path of the probe server.
+    #[tokio::test]
+    async fn the_operator_routes_answer_on_their_own_listener_only() {
+        let parked = || tokio::spawn(std::future::pending::<()>()).abort_handle();
+        let loops = WorkerLoops::new(
+            (Arc::new(LoopPulse::new()), parked()),
+            (Arc::new(LoopPulse::new()), parked()),
+        );
+        let readiness = b2bua::repl::Readiness::always_ready();
+        let routes = ProbeRoutes {
+            metrics: Arc::new(String::new),
+            ready: ready_fn(|| ReadinessState::Ready, loops.clone(), STALL),
+            heap: None,
+            vrrp: None,
+        };
+        let admin = admin::admin_routes(
+            readiness.clone(),
+            Arc::new(|| 0),
+            Arc::new(|| Some(Vec::new())),
+            Arc::new(b2bua::release_all::ReleasedAll::default),
+        );
+        let any = "127.0.0.1:0".parse().unwrap();
+        let servers =
+            ProbeServers::start("w", (any, routes, live_fn(loops, STALL)), (any, admin)).await;
+        let probe = servers.probe.as_ref().unwrap().addr();
+        let operator = servers.admin.as_ref().unwrap().addr();
+
+        for (method, path) in [("POST", "/admin/cordon"), ("POST", "/admin/release-all")] {
+            let r = request(probe, method, path).await;
+            assert!(r.starts_with("HTTP/1.1 404"), "the probe server answered {path}: {r}");
+        }
+        assert!(!readiness.is_cordoned());
+        let r = request(operator, "POST", "/admin/cordon").await;
+        assert!(r.starts_with("HTTP/1.1 204"), "{r}");
+        assert!(readiness.is_cordoned());
+        assert!(request(operator, "GET", "/ready").await.starts_with("HTTP/1.1 404"));
     }
 
     /// A cordoned worker reads Ready: it serves its dialogs and stays

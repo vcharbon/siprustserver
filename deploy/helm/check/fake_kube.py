@@ -1,6 +1,6 @@
 """A Kubernetes API server answering what `helm template --dry-run=server`
 asks of a chart's render and what the lab's kubectl reads: the version, the
-discovery of every kind the charts render (core, apps, rbac) and of the pods
+discovery of every kind the charts render (core, apps, networking, policy, rbac) and of the pods
 and ReplicaSets under them, and GETs of the objects it holds (what `lookup`
 reads, a list at its collection path). Every other path is a 404 Status.
 Plain HTTP on 127.0.0.1, one test."""
@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 def resource(kind: str, namespaced: bool = True) -> dict[str, Any]:
-    plural = kind.lower() + ("es" if kind.endswith("s") else "s")
+    low = kind.lower()
+    plural = low[:-1] + "ies" if low.endswith("y") else low + ("es" if low.endswith("s") else "s")
     return {"name": plural, "singularName": kind.lower(), "namespaced": namespaced, "kind": kind,
             "verbs": ["get", "list", "create", "update", "patch", "delete"]}
 
@@ -19,6 +20,7 @@ GROUPS: dict[str, list[dict[str, Any]]] = {
     "/api/v1": [resource(k) for k in ("Secret", "ConfigMap", "Service", "ServiceAccount", "Pod")]
     + [resource("Namespace", namespaced=False)],
     "/apis/apps/v1": [resource(k) for k in ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet")],
+    "/apis/networking.k8s.io/v1": [resource("NetworkPolicy")],
     "/apis/policy/v1": [resource("PodDisruptionBudget")],
     "/apis/rbac.authorization.k8s.io/v1": [resource("Role"), resource("RoleBinding"),
                                            resource("ClusterRole", namespaced=False),
