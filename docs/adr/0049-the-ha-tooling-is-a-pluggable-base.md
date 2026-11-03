@@ -783,7 +783,10 @@ made. A run profile joins the two.
    by default), whose newest sample must be recent. One that stops updating
    for three scrape intervals (for records, at least five calls of the
    stream's rate) is a `series_stale` integrity finding with the instant it
-   was last fresh. A generator that exits
+   was last fresh. An open incident window holds that count and a silence
+   that outlasts it counts from its close: a fault may silence every target
+   of a series (a total freeze), and the delay never loses a finding.
+   A generator that exits
    before its stream is due to stop is `stream_died`, and a `detected` event.
    A `run` stream's rate `steps` are applied at their instants (SIPp's remote
    control `cset rate`, loadgen's `POST /rate`) and logged in `steps.jsonl`;
