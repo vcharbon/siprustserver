@@ -45,8 +45,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         let ladder = self.instance.recording().legs().remove(&step.leg).unwrap_or_default();
         let steps = self.instance.plan().steps();
         let Some(at) = steps.iter().position(|s| s.id == step.id) else { return false };
+        let fork_tag = self.fork_tag_of(step);
         scripted_final::answered_invite(&steps, at, &ladder)
-            .is_some_and(|cseq| scripted_final::invite_answered(&ladder, cseq))
+            .is_some_and(|cseq| scripted_final::invite_answered(&ladder, cseq, fork_tag))
     }
 
     /// Emit one send step.
