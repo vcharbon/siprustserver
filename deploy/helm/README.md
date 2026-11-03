@@ -86,9 +86,14 @@ its key drawn on the first install and read back by every upgrade through
 runner's env, or two components, and fails the render naming every value
 involved: the worker's and the proxy's `terminationGracePeriodSeconds` against
 their drain bounds, replication against the worker count, the CDR queue's
-`x-max-length` on both sides, the worker's RSS ceilings against its memory
-limit, and the cookie key above. Each runner checks its own relations at
-startup on its final configuration.
+`x-max-length` on both sides, the worker's RSS ceilings and the proxy's
+branch memo against their memory limits, the workers' consult deadline against
+the proxy's dead verdict, the limiter lease against the workers' refresh, the
+one INVITE bound of workers and proxies, and the cookie key above. Each runner
+checks its own relations at startup on its final configuration. A value set
+through `extraEnv` is outside the render relations: keeping it consistent is
+the operator's responsibility. [docs/TUNING.md](../../docs/TUNING.md) says how
+to change each variable safely.
 
 ## The kind lab
 

@@ -1,0 +1,99 @@
+# Tuning the deployment
+
+How to change a deployment variable safely: its role, its default and unit,
+the relations it keeps with other variables and the check that enforces them,
+what to watch, and the trade-off either way. Where a value comes from for a
+given deployment is that deployment's own sizing page; this page does not
+repeat it. A product built on this stack adds its own rows in its own guide.
+
+Every relation below is checked, never only documented: a worker or proxy
+refuses to start on its final configuration and names every variable involved
+(`b2bua_runner_kit::ConfigCheck`, the proxy's `ProxyConfig`), and the `siprust`
+chart refuses to render (`deploy/helm/siprust/templates/checks.yaml`). A value
+set through a component's `extraEnv` escapes the render checks.
+
+## Worked example: the emergency call ceiling
+
+`B2BUA_MAX_CALLS_EMERGENCY` is the live-call count past which every new call,
+emergency included, is refused; `B2BUA_MAX_CALLS`, below it, refuses only
+normal calls (ADR-0037 item 2). The pair is a protection: by default the
+emergency ceiling sits a small margin above the normal one, enough for the
+emergency share of the load while normal calls are refused.
+
+- **Relations.** Emergency strictly above normal (worker start). Every peer's
+  `B2BUA_REPL_BACKUP_MAX_CALLS` at least this ceiling, so every call a worker
+  admits can be backed (worker start, ADR-0037 item 4). The worker's memory
+  limit holds a takeover: its own calls up to this ceiling and every backup
+  turned live, `limit · (1 − s) ≥ base + (C + B) · call + (N + reserve) · txn`
+  (ADR-0037 item 7; checked at render by a product chart that states its
+  measured costs).
+- **After a worker dies.** Copies turned live are never refused; only new
+  calls are. A survivor holding more live calls than its ceilings refuses new
+  calls until its count falls under them. With mean holding time `T` and `L`
+  calls live after the takeover, normal calls are refused for `T · ln(L / C_n)`
+  and every call for `T · ln(L / C_e)`; the survivor then admits `C_n / T`
+  normal calls a second.
+- **Raising it** gives emergency calls priority through a takeover: set it at
+  the count a survivor holds at peak, plus margin. Raise the peers' backup
+  ceilings to it, the emergency RSS ceiling to what it implies, and the memory
+  limit to the item 7 line with the raised `C`: a takeover can then hold
+  `C + B` live calls.
+- **Lowering it** toward the normal ceiling narrows the emergency band; it can
+  never meet it.
+- **Watch** `b2bua_new_calls_total{outcome="rejected"}` by `reason`,
+  `b2bua_capacity_level`, `b2bua_active_calls`, and after a takeover
+  `b2bua_repl_takeover_hydrated_total`.
+
+## Worker (`b2bua-runner-kit`)
+
+| variable | default | role | relations (check) | watch | raise / lower |
+|---|---|---|---|---|---|
+| `B2BUA_MAX_CALLS` | off | live calls past which new normal calls are refused (ADR-0037) | < `_EMERGENCY` (start) | `b2bua_new_calls_total{reason}`, `b2bua_active_calls` | raise: more admitted per worker, more memory per item 7; lower: refusals earlier |
+| `B2BUA_MAX_CALLS_EMERGENCY` | off | the worked example above | > normal; ≤ every peer's backup ceiling (start) | as above | as above |
+| `B2BUA_MAX_TXNS`, `_EMERGENCY` | off | live transactions past which new calls are refused | emergency > normal (start) | `b2bua_capacity_level` | raise with the call ceilings: a lone worker holds about the transactions of the whole rate |
+| `B2BUA_MAX_RSS`, `_EMERGENCY` | off | process RSS past which new calls are refused | emergency > normal (start); < `resources.limits.memory` (render); item 7's RSS line | `b2bua_capacity_rss_bytes`, `b2bua_capacity_level` | set at the RSS the count ceilings imply, so counts bind first; raising above item 7's line risks an OOM kill on a takeover |
+| `B2BUA_REPL_BACKUP_MAX_CALLS` | off | backups held for peers | ≥ the emergency call ceiling (start) | `b2bua_repl_backup_shed_total`, `b2bua_repl_calls_unbacked` | lower and calls go unbacked (admitted, lost with their worker); raise and item 7 needs more memory |
+| `B2BUA_REPL_BACKUP_MAX_RSS` | off | RSS past which a new backup is not stored | ≥ the emergency RSS ceiling (start); < the memory limit (render) | `b2bua_repl_backup_shed_total` | as above |
+| `B2BUA_INVITE_TXN_TIMEOUT_SEC` | 158 | the INVITE transaction bound, both call halves | 33..=600; > setup deadline; < `B2BUA_REBOOT_BUDGET_SEC` (start); = the proxy's `PROXY_INVITE_TXN_TIMEOUT_SEC` (render, `inviteTxnTimeoutSec`) | `b2bua_new_calls_total`, CDR causes | raise for long rings, with the proxy's memo cap; lower cuts rings |
+| `B2BUA_SETUP_TIMEOUT_MS` | 150000 | the caller's total setup deadline | < the INVITE bound (start) | setup-timeout CDR causes | raise for long rings, under the bound |
+| `B2BUA_CALL_CONTROL_TIMEOUT_MS` | 5000 | one decision round trip's deadline (ADR-0022) | < `B2BUA_LOOP_STALL_MS` − 2 s (start); > the proxy's dead verdict `HEALTH_THRESHOLD` × `HEALTH_INTERVAL_MS` + `HEALTH_TIMEOUT_MS` (render) | decision failures on `b2bua_new_calls_total` | lower refuses calls on a slow backend sooner and can undercut a takeover; raise holds callers longer |
+| `B2BUA_KEEPALIVE_SEC` | 300 | in-dialog OPTIONS cadence | ≥ 120 (above the probe's Timer F); ≤ `B2BUA_REBOOT_BUDGET_SEC` − Timer F − 10 s (start) | keepalive failures in CDRs | lower detects a dead peer sooner, more traffic and memo entries; raise needs a longer replica TTL |
+| `B2BUA_REBOOT_BUDGET_SEC` | 600 | the replica TTL (not a reboot budget, see HA_GUARANTEES.md) | ≥ 60; ≥ keepalive + Timer F + 10 s; > the INVITE bound (start) | `b2bua_store_bodies` | raise keeps quiet calls' replicas longer, more memory after a long outage |
+| `B2BUA_CPS_BUCKET_RATE`, `_SIZE` | 500, 1000 | the per-worker new-call rate rung | rate > 0 when size > 0 (start) | `b2bua_new_calls_total{reason="bucket"}` | set to what a lone worker carries |
+| `B2BUA_QUEUE` | 8192 | inbound UDP queue, packets | ≥ 256 (start) | `b2bua_udp_queue_depth`, `b2bua_udp_tail_dropped_total` | raise absorbs bursts, longer queueing delay |
+| `B2BUA_UDP_INGRESS_BRAKE_PCT` | 70 | queue depth share at which new INVITEs are shed statelessly | 1..=100 (start) | `b2bua_udp_*` brake counters | lower sheds earlier |
+| `B2BUA_EVENT_QUEUE_*` | 512 / 64 / 300 / 150 / 50 / 3000 | the event-queue gate (ADR-0050 §9) | accept bounds under refusal bounds, refusal depth ≤ the queue, interval < hold (start) | `b2bua_event_queue_refusing`, `_refusals_total` | see `runner_env::event_queue_env` |
+| `B2BUA_LOOP_STALL_MS` | max(10000, decision + 5000) | a loop turn longer than this reads stalled | > `B2BUA_CALL_CONTROL_TIMEOUT_MS` + 2 s (start) | `b2bua_loop_stalled` | lower restarts a slow worker sooner, false stalls on a starved node |
+| `B2BUA_DRAIN_GRACE_MS`, `_MIN_MS`, `_RELEASE_FLUSH_MS`, `_CDR_FLUSH_MS` | 5000, 1000, 3000, 3000 | the planned exit (ADR-0031) | floor ≤ grace (start); pod grace > grace + 2 × flush + CDR flush + 2 s (render) | `b2bua_drain_exits_total`, `b2bua_drain_seconds` | raise with `terminationGracePeriodSeconds` |
+| `B2BUA_REPL_*_MS` (link) | see `replication/link_env.rs` | replication link liveness (ADR-0045) | idle ≥ 2 × Noop; dead-peer TTL > idle + backoff + connect (start) | `b2bua_repl_serving_flows` | lower idle detects a dead peer sooner, false downs on a loaded link |
+| `B2BUA_REPL_SYNC`, `_SYNC_CAP_MS`, `_ACK_BOUND_MS`, `_CANCEL_BOUND_MS` | applied, 100, 200, 200 | the write path (ADR-0055 §3) | 0 < cap < T1 and the §17.2.1 bound; cap < ACK, CANCEL bounds < T1 (start) | `b2bua_repl_outbox_released_total{reason}` | a longer cap holds more effects for the backup, slower answers |
+| `B2BUA_DEAD_NOTICE_FRESH_MS`, `B2BUA_DEAD_VERDICT_HOLD_MS` | 10000, 42000 | dead-verdict freshness and hold (ADR-0050 §3) | hold ≥ fresh + Timer F; hold > 2 × idle + lookup + connect of the link (start) | `b2bua_dead_verdicts_taken_total`, `_unconfirmed_total`, `b2bua_dead_notices_refused_total` | a shorter window refuses replays sooner, needs synchronised clocks |
+| `LIMITER_REFRESH_SECONDS`, `LIMITER_REFRESH_BATCH_MS` | 40, 1000 | lease refresh cadence and tick | tick < period (start); 2 × period + tick < the limiter lease (render) | `b2bua_limiter_refresh_*`, `limiter_lease_expired_calls_total` | lower: more refresh traffic; raise: needs a longer lease |
+| `LIMITER_TIMEOUT_MS`, `_REFRESH_TIMEOUT_MS`, `_RELEASE_TIMEOUT_MS` | 150, 2000, 2000 | request budgets | > 0 (start) | `b2bua_limiter_breaker_open` | a longer admit budget delays setup on a slow limiter, which fails open |
+| `SIP_TRACE_HEADER` | off | honour `X-Trace-Sample` | on/off only (start) | — | a lab setting: the header is untrusted at a serving edge |
+
+## Front proxy (`sip-proxy-runner`)
+
+| variable | default | role | relations (check) | watch | raise / lower |
+|---|---|---|---|---|---|
+| `HEALTH_INTERVAL_MS`, `HEALTH_TIMEOUT_MS`, `HEALTH_THRESHOLD` | 1000, 1600, 2 | the worker probe; the dead verdict falls one cycle to `THRESHOLD × INTERVAL + TIMEOUT` (3.6 s) after a death | payload staleness ≥ 2 probe cycles; AIMD cooldown ≥ one cycle (start); the workers' decision deadline > the verdict bound (render) | `sip_proxy_worker_pool_empty`, worker health gauges | shorter: faster takeover, more false verdicts under load |
+| `PROXY_RECV_SHARDS` | 1 | serial recv loops | 1..1024 (start) | `sip_proxy_recv_shards_stalled`, `sip_proxy_udp_queue_depth` | one per ~150 calls/s of a heavy call mix, one core each |
+| `PROXY_SELF_GATE_CPS_RATE`, `_SIZE` | 100, 50 | the proxy's own intake rate | the branch memo holds the rate's working set (start) | `sip_proxy_self_external_invites_rejected_total`, `sip_proxy_self_cps_bucket_level` | raise with the memo; lower sheds at the proxy |
+| `PROXY_BRANCH_MEMO_MAX_BYTES`, `_MAX_ENTRIES`, `_MEAN_RING_MS` | 192 MiB, 78 643, 30000 | the full CANCEL/ACK/retransmission memo (ADR-0009 X7) | holds `SELF_GATE_CPS_RATE` (start); bytes < the pod's memory limit (render) | `sip_proxy_branch_memo_bytes`, `sip_proxy_branch_memo_evictions_total` | an eviction at nominal load is undersizing; raise with the memory limit |
+| `PROXY_INVITE_TXN_TIMEOUT_SEC` | 158 | the workers' INVITE bound; an INVITE entry lives it + Timer H at most | 33..=600 (start); = the workers' bound (render) | — | set by `inviteTxnTimeoutSec`, never alone |
+| `LB_CAP_INITIAL_CPS`, `_CEILING_CPS`, `_FLOOR_CPS`, `LB_AIMD_INCREASE_STEP_CPS`, `LB_AIMD_COOLDOWN_TICKS` | 30, 200, 1, 2, 5 | the per-worker AIMD (ADR-0046) | floor ≤ initial ≤ ceiling; cooldown × 1 s ≥ one probe cycle (start) | `sip_proxy_lb_rate_cap_spilled_total`, `sip_proxy_worker_stale_decrease_total` | the ceiling must let a lone worker take the whole rate, or calls spill at nominal load |
+| `PROXY_DRAIN_GRACE_MS`, `PROXY_BIND_RETRY_DEADLINE_MS` | 5000, 10000 | drain on SIGTERM; a recreated pod's wait for its predecessor's ports | deadline > grace (start); pod grace > drain grace + 2 s (render) | — | raise both together |
+| `PROXY_QUEUE`, `PROXY_INTAKE_SHED_PCT` | 8192, 50 | inbound queue and its shed watermark | ≥ 1; 0..100 (start) | `sip_proxy_intake_shed_total`, `sip_proxy_udp_tail_dropped_total` | lower sheds earlier |
+
+## Call limiter, CDR chain, chart
+
+| variable | default | role | relations (check) | watch | raise / lower |
+|---|---|---|---|---|---|
+| `callLimiter.leaseSeconds` (`LIMITER_LEASE_SECONDS`) | 120 | the lease every answer states (ADR-0040) | > 2 × the workers' refresh + tick (render) | `limiter_lease_expired_holds_total` | longer: a dead worker's holds linger; shorter: more refresh traffic |
+| `cdr.maxLength` | 100000 | the CDR queue's `x-max-length`, drop-head | producer and consumer declare it equal (render) | the queue depth, `cdr_consumed_total` | the CDRs a consumer outage may hold |
+| `B2BUA_CDR_RABBITMQ_URL`, `CDR_AMQP_URL` | — | the broker | `heartbeat=0` refused (start); none proposes 30 s | `cdr_amqp_consuming`, `b2bua_cdr_dropped_total` | keep a heartbeat: a silent broker is detected only by it |
+| `B2BUA_CDR_RABBITMQ_*_TIMEOUT_MS`, `_WINDOW` | 3000 / 1000 / 5000, 256 | delivery bounds | each in its range; backoff max ≥ backoff (start) | `b2bua_cdr_dropped_total` | longer waits hold more CDRs in memory |
+| `inviteTxnTimeoutSec` | null | the one INVITE bound of workers and proxies | 33..=600 (schema) | — | see the worker's bound |
+| `worker.terminationGracePeriodSeconds`, `proxy.terminationGracePeriodSeconds` | 30, 30 | the kubelet's SIGKILL | above the drains (render) | killed drains in pod events | raise with the drain bounds |
+| `worker.replicas`, `worker.replication.enabled` | 2, off | the pool and HA | replication ⇒ ≥ 2 workers and a cluster key (render) | — | — |
+| `proxy.hmac.existingSecret`, `drawInCluster` | "", false | the cookie key's Secret | one of them (render) | `sip_proxy_hmac_failures_total` | a changed key 403s calls in progress |

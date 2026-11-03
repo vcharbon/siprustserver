@@ -14,9 +14,14 @@ each runner's startup check.
 | worker B2BUA_CDR_RABBITMQ_MAX_LEN = consumer CDR_QUEUE_MAX_LEN | both declare the one queue; a different argument fails the second declare |
 | every RSS ceiling (B2BUA_MAX_RSS, _EMERGENCY, B2BUA_REPL_BACKUP_MAX_RSS) < worker `resources.limits.memory` | a ceiling at the limit is never reached before the OOM kill |
 | worker B2BUA_INVITE_TXN_TIMEOUT_SEC = proxy PROXY_INVITE_TXN_TIMEOUT_SEC (`inviteTxnTimeoutSec`) | the proxy keeps an INVITE's memo entry for the bound the workers ring under |
+| worker B2BUA_CALL_CONTROL_TIMEOUT_MS > proxy HEALTH_THRESHOLD × HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS | a consult in flight outlasts the proxy's dead verdict on its worker, so a call whose worker dies unannounced is taken over before its consult gives up |
+| proxy PROXY_BRANCH_MEMO_MAX_BYTES < proxy `resources.limits.memory` | the memo's accounted bytes fit the process |
+| `callLimiter.leaseSeconds` > 2 × worker LIMITER_REFRESH_SECONDS + LIMITER_REFRESH_BATCH_MS | a counted call's lease survives one missed refresh |
 | `proxy.hmac.existingSecret` set, or `proxy.hmac.drawInCluster` | a render without a cluster (helm template, GitOps) draws a new cookie key each time |
 
-The proxy's BGP withdrawal bounds join the proxy row when they exist.
+The proxy's BGP withdrawal bounds join the proxy rows when they exist. An
+`extraEnv` entry is outside these relations: a value set there is the
+operator's to keep consistent.
 */ -}}
 {{- $margin := 2000 }}
 {{- if .Values.worker.enabled }}
@@ -73,5 +78,37 @@ The proxy's BGP withdrawal bounds join the proxy row when they exist.
 {{- end }}
 {{- if not (or $p.hmac.existingSecret $p.hmac.drawInCluster) }}
 {{- fail "proxy.hmac.existingSecret is required: name the Secret (keys kid, key) both proxies read. Only a release installed against its cluster (the kind lab) may set proxy.hmac.drawInCluster, where the key is drawn once and read back by lookup" }}
+{{- end }}
+{{- end }}
+{{- /* The runner defaults a relation reads when the env states nothing:
+sip-proxy HealthProbeConfig, b2bua-runner-kit runner_env and limiter_env,
+call-limiter-runner env. */ -}}
+{{- $wenv := .Values.worker.env | default dict }}
+{{- $penv := .Values.proxy.env | default dict }}
+{{- if and .Values.worker.enabled .Values.proxy.enabled }}
+{{- $consult := include "siprust.envInt" (list $wenv "B2BUA_CALL_CONTROL_TIMEOUT_MS" 5000) | int64 }}
+{{- $threshold := include "siprust.envInt" (list $penv "HEALTH_THRESHOLD" 2) | int64 }}
+{{- $interval := include "siprust.envInt" (list $penv "HEALTH_INTERVAL_MS" 1000) | int64 }}
+{{- $window := include "siprust.envInt" (list $penv "HEALTH_TIMEOUT_MS" 1600) | int64 }}
+{{- $verdict := add (mul $threshold $interval) $window }}
+{{- if and (gt $consult 0) (le $consult $verdict) }}
+{{- fail (printf "worker B2BUA_CALL_CONTROL_TIMEOUT_MS=%d must exceed proxy HEALTH_THRESHOLD=%d × HEALTH_INTERVAL_MS=%d + HEALTH_TIMEOUT_MS=%d: a consult would give up before the proxy's dead verdict on its worker" $consult $threshold $interval $window) }}
+{{- end }}
+{{- end }}
+{{- if .Values.proxy.enabled }}
+{{- $memo := get $penv "PROXY_BRANCH_MEMO_MAX_BYTES" }}
+{{- $plimit := dig "limits" "memory" "" (.Values.proxy.resources | default dict) }}
+{{- if and $memo $plimit }}
+{{- if ge (int64 (toString $memo)) (include "siprust.bytes" (list "proxy.resources.limits.memory" $plimit) | int64) }}
+{{- fail (printf "proxy PROXY_BRANCH_MEMO_MAX_BYTES=%s must be below proxy.resources.limits.memory=%s: the memo would not fit the process" (toString $memo) (toString $plimit)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.worker.enabled .Values.callLimiter.enabled }}
+{{- $lease := ternary 120 (int64 .Values.callLimiter.leaseSeconds) (kindIs "invalid" .Values.callLimiter.leaseSeconds) }}
+{{- $refresh := include "siprust.envInt" (list $wenv "LIMITER_REFRESH_SECONDS" 40) | int64 }}
+{{- $tick := include "siprust.envInt" (list $wenv "LIMITER_REFRESH_BATCH_MS" 1000) | int64 }}
+{{- if le (mul $lease 1000) (add (mul $refresh 2000) $tick) }}
+{{- fail (printf "callLimiter.leaseSeconds=%d must exceed 2 × worker LIMITER_REFRESH_SECONDS=%d + LIMITER_REFRESH_BATCH_MS=%d ms: one missed refresh would let a live call's lease lapse" $lease $refresh $tick) }}
 {{- end }}
 {{- end }}
