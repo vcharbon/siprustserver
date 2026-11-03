@@ -81,7 +81,7 @@
 //!                    derived from it keys the To-tags of the proxy's own finals
 //!   PROXY_CLUSTER_KEY  the workers' shared key, signing dead notices (none)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS  OPTIONS probe tick and reply
-//!                    window, ms ≥ 1                  (default 1000 / 1500)
+//!                    window, ms ≥ 1                  (default 1000 / 1600)
 //!   HEALTH_THRESHOLD  consecutive misses that mark a worker Dead, ≥ 1
 //!                    (default 2)
 //!   LB_ELU_SOFT / LB_ELU_HARD / LB_ELU_CRITICAL  worker ELU bands, each in

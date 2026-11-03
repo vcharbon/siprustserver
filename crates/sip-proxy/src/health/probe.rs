@@ -93,7 +93,7 @@ struct PendingProbe {
     /// The address this probe was sent to — replies/misses count only while
     /// the worker is still registered AT this address.
     addr: ProxyAddr,
-    /// The end of its reply window: unanswered by then, it is one miss.
+    /// The last instant of its reply window: unanswered by then, one miss.
     window_ends: Instant,
 }
 
@@ -250,22 +250,10 @@ impl HealthProbe {
                 self.first_view.latch();
                 first_round = None;
             }
-            let window_ends = state.pending.values().map(|p| p.window_ends).min();
+            let reap_at = state.pending.values().map(|p| p.window_ends).min();
+            // Events first: an answer queued at its window's end is no miss.
             tokio::select! {
-                _ = tick.tick() => {
-                    if self.tick(&mut state).await.is_err() {
-                        return;
-                    }
-                }
-                () = sleep_until_or_never(window_ends) => {
-                    if self.reap(&mut state).await.is_err() {
-                        return;
-                    }
-                }
-                _ = &mut round_window, if first_round.is_some() => {
-                    self.first_view.latch();
-                    first_round = None;
-                }
+                biased;
                 ev = self.events.recv() => match ev {
                     None => return, // transaction layer gone (endpoint closed)
                     Some(TransactionEvent::Message { message, .. }) => {
@@ -282,6 +270,20 @@ impl HealthProbe {
                     }
                     Some(_) => {}
                 },
+                () = sleep_until_or_never(reap_at.map(config::past_the_window)) => {
+                    if self.reap(&mut state).await.is_err() {
+                        return;
+                    }
+                }
+                _ = tick.tick() => {
+                    if self.tick(&mut state).await.is_err() {
+                        return;
+                    }
+                }
+                _ = &mut round_window, if first_round.is_some() => {
+                    self.first_view.latch();
+                    first_round = None;
+                }
             }
         }
     }
@@ -291,15 +293,13 @@ impl HealthProbe {
     /// void for the remainder of Timer F.
     async fn reap(&self, state: &mut ProbeState) -> Result<(), TransactionLayerClosed> {
         let now = Instant::now();
-        let mut expired: Vec<(String, Instant)> = state
+        let expired: Vec<String> = state
             .pending
             .iter()
-            .filter(|(_, p)| p.window_ends <= now)
-            .map(|(b, p)| (b.clone(), p.window_ends))
+            .filter(|(_, p)| p.window_ends < now)
+            .map(|(b, _)| b.clone())
             .collect();
-        // Misses count in the order the windows ended.
-        expired.sort_by_key(|(_, ends)| *ends);
-        for (branch, _) in expired {
+        for branch in expired {
             let Some(p) = state.pending.remove(branch.as_str()) else { continue };
             self.txn.cancel_txns_for_call(&probe_call_ref(&branch)).await?;
             self.count_miss(p, &mut state.misses);

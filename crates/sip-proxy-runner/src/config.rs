@@ -105,10 +105,11 @@ impl ProxyConfig {
         let hmac_kid = env.text("PROXY_HMAC_KID", "k0");
         let hmac_key = hmac_key(&mut env);
         let cluster_key = cluster_key(&mut env);
+        let probe_default = HealthProbeConfig::default();
         let probe = HealthProbeConfig {
-            interval_ms: env.int("HEALTH_INTERVAL_MS", 1000, 1, MAX_MS),
-            timeout_ms: env.int("HEALTH_TIMEOUT_MS", 1500, 1, MAX_MS),
-            threshold: env.int_u32("HEALTH_THRESHOLD", 2, 1, u32::MAX),
+            interval_ms: env.int("HEALTH_INTERVAL_MS", probe_default.interval_ms, 1, MAX_MS),
+            timeout_ms: env.int("HEALTH_TIMEOUT_MS", probe_default.timeout_ms, 1, MAX_MS),
+            threshold: env.int_u32("HEALTH_THRESHOLD", probe_default.threshold, 1, u32::MAX),
         };
         let observer = observer_overrides(&mut env, LoadObserverConfig::default());
         let intake_shed_pct = env.int("PROXY_INTAKE_SHED_PCT", 50, 0, 100);

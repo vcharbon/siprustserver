@@ -205,7 +205,8 @@ proxy reading a live primary dead, where the backup's copy relays and stands dow
 primary's write (ADR-0047 D7) and a dead notice from either instance is advisory, the
 backup confirming by itself (ADR-0047 D1). The window lasts until both instances read
 the worker alike: one probe verdict (`HEALTH_THRESHOLD` × `HEALTH_INTERVAL_MS` +
-`HEALTH_TIMEOUT_MS`) when one instance lags the other, the partition's length when only
+`HEALTH_TIMEOUT_MS`, 3.6 s by default, the 1.6 s window holding the three Timer E copies
+of a probe; ADR-0047 D1) when one instance lags the other, the partition's length when only
 one instance has lost its path to the worker. Cell: `active_active::health_views`.
 
 **Trace spans are per instance.** A span armed to close on the ACK of a rejecting final

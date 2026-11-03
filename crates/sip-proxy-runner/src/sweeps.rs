@@ -23,7 +23,7 @@ const STALE_SWEEP_PERIOD: Duration = Duration::from_secs(1);
 /// (or whose probe stalls), instead of keeping its last AIMD cap while the
 /// balancer admits at full rate into a worker it has lost telemetry on.
 /// Every 200 carries a payload, a refusing worker's included, and the probe
-/// cycle (interval 1000 + timeout 1500) is well inside the stale window, so a
+/// cycle (interval 1000 + timeout 1600) is well inside the stale window, so a
 /// worker that answers is never floored (ADR-0050 §6). Each sweep's floored
 /// count feeds the `stale_decrease` counter, so a silently floored cap is
 /// diagnosable in Prometheus.
