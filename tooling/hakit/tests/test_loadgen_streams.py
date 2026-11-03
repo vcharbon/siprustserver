@@ -206,28 +206,48 @@ def test_an_unreadable_counter_is_a_record_gap(tmp_path: Path) -> None:
     assert kinds == ["record_gap"]
 
 
-def test_an_abandoned_loadgen_firing_is_held_counted_killed_and_not_reconciled(tmp_path: Path) -> None:
+def test_an_abandoned_loadgen_firing_is_counted_once_two_reads_agree_then_killed(tmp_path: Path) -> None:
     # A killed loadgen leaves no `metrics.prom`: its count is the live
-    # endpoint's once `POST /rate?cps=0` parked the rate.
+    # endpoint's once `POST /rate?cps=0` parked the rate. The first read after
+    # the hold has not yet counted the 2 calls shed at admission; the next two agree.
     orphan: Json = {"at_s": 30, "incident": "orphan", "stream": "burst", "budget": "any"}
-    seen = {"held": False}
+    seen = {"held": False, "reads": 0}
 
     def live(c: Call) -> HttpResult | None:
         if c.kind == "http" and c.method == "POST" and c.url.endswith("/rate?cps=0"):
             seen["held"] = True
             return HttpResult(200, "")
         if c.kind == "http" and c.method == "GET" and c.url.endswith(":9300/metrics"):
-            return HttpResult(200, metrics(9 if seen["held"] else 7))
+            if not seen["held"]:
+                return HttpResult(200, metrics(7))
+            seen["reads"] += 1
+            return HttpResult(200, metrics(9, not_placed=0 if seen["reads"] == 1 else 2, failed=1))
         return None
 
     run_dir, calls = run(tmp_path, [live], events=[orphan])
     heal = as_obj(next(e for e in read_jsonl(run_dir / "events.jsonl") if e.get("executable") == "heal")["facts"])
-    assert heal["calls"] == 9 and heal["held"] is True
+    assert (heal["calls"], heal["not_placed"], heal["generator_failures"], heal["held"]) == (9, 2, 1, True)
+    assert seen["reads"] == 3
     argvs = [c.argv for c in calls if c.kind == "run"]
     assert HARD in argvs and SOFT not in argvs
     docs = {str(d["stream"]): d for d in json.loads((run_dir / "streams.json").read_text())}
     assert docs["burst"]["reconciled"] is False and docs["burst"]["calls"] == 9
-    assert verdict(run_dir)["status"] == "pass"
+
+
+def test_a_refused_hold_leaves_the_firing_uncounted_and_keeps_its_failures(tmp_path: Path) -> None:
+    orphan: Json = {"at_s": 30, "incident": "orphan", "stream": "burst", "budget": "any"}
+
+    def refused(c: Call) -> HttpResult | None:
+        if c.kind == "http" and c.method == "POST" and c.url.endswith("/rate?cps=0"):
+            return HttpResult(500, "")
+        if c.kind == "http" and c.method == "GET" and c.url.endswith(":9300/metrics"):
+            return HttpResult(200, metrics(9, not_placed=2, failed=1))
+        return None
+
+    run_dir, calls = run(tmp_path, [refused], events=[orphan])
+    heal = as_obj(next(e for e in read_jsonl(run_dir / "events.jsonl") if e.get("executable") == "heal")["facts"])
+    assert (heal["calls"], heal["not_placed"], heal["generator_failures"], heal["held"]) == (None, 2, 1, False)
+    assert HARD in [c.argv for c in calls if c.kind == "run"]
 
 
 def test_two_firings_carry_their_own_call_id_tags(tmp_path: Path) -> None:

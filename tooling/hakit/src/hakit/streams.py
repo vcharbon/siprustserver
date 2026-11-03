@@ -6,8 +6,9 @@ its own generator, started at inject in its own directory under the stream's,
 its Call-IDs tagged with the event so two firings never share one. At heal,
 `drain` tells the UAC to place no new call and waits for its calls to end;
 `abandon` holds it at rate 0, reads its count once its counters show the hold
-(the calls it placed up to its stop, none after), then kills it with its calls
-in flight. Either way the records it wrote are shipped and its counter read
+and read the same twice in a row (the calls it offered up to its stop, none
+after, with those it did not place or failed itself), then kills it with its
+calls in flight. Either way the records it wrote are shipped and its counter read
 before the generator is removed, so the next firing starts clean. A docker
 generator works in its working directory (workdir.py), collected into its
 stream directory once it is removed. A stream's `streams.json` entry sums its
@@ -40,7 +41,8 @@ from .workdir import WorkDir, work_dir
 SHIP_WAIT_S = 60
 POLL_MS = 2000
 # An abandoned generator's counters show its hold within a statistics period
-# (SIPp writes a row a second); they are read this often, this long at most.
+# (SIPp writes a row a second) and are taken once two consecutive reads agree;
+# they are read this often, this long at most.
 HOLD_POLL_MS = 250
 HOLD_WAIT_S = 5
 # VictoriaLogs is queried around the run's own span with this margin.
@@ -67,6 +69,10 @@ class Firing:
     records_complete: bool = True
     exit_code: int | None = None
     collected: bool = False
+
+
+def _uncounted(t: Tally) -> Tally:
+    return Tally(None, t.not_placed, t.generator_failures)
 
 
 class StreamSet:
@@ -199,6 +205,8 @@ class StreamSet:
             "exited_at_ms": exited_at,
             "teardown_ms": exited_at - stopped_at,
             "calls": f.calls,
+            "not_placed": f.not_placed,
+            "generator_failures": f.generator_failures,
             "records": f.local,
             "shipped_records": shipped,
             "exit_code": f.exit_code,
@@ -209,15 +217,22 @@ class StreamSet:
 
     def _hold(self, f: Firing, wait: Waiter) -> Tally:
         """Hold the firing's generator at rate 0 (no new call, its calls go on)
-        and read its count once its counters show the hold, within
-        `HOLD_WAIT_S`; an unknown count when it refused the hold or its
-        counters never showed it."""
+        and take its count once two consecutive reads of its counters show the
+        hold and agree, within `HOLD_WAIT_S`. When it refused the hold or its
+        counters never settled the count of calls is unknown, and the calls it
+        did not place or failed itself are kept from its last read."""
         if not f.gen.set_rate(0):
-            return Tally(None)
+            return _uncounted(f.gen.held_tally() or f.gen.tally())
         deadline = self.clock.now_ms() + HOLD_WAIT_S * 1000
-        while (t := f.gen.held_tally()) is None and self.clock.now_ms() < deadline:
+        prev: Tally | None = None
+        while True:
+            t = f.gen.held_tally()
+            if t is not None and t == prev:
+                return t
+            if self.clock.now_ms() >= deadline:
+                return _uncounted(t or prev or f.gen.tally())
+            prev = t
             wait(min(deadline, self.clock.now_ms() + HOLD_POLL_MS))
-        return t or Tally(None)
 
     def _settle(self, f: Firing, wait: Waiter, held: Tally | None = None) -> int | None:
         """Read the firing's counter (`held`, read before an abandoned

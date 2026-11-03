@@ -167,12 +167,14 @@ tolerated (§3).
    removed (`SIGUSR1` for both drivers; loadgen also takes `POST /drain`,
    and a drained loadgen must exit 0, any other exit fails the step). With
    `stop: abandon` the generator is held at rate 0 (SIPp's `cset rate 0`,
-   loadgen's `POST /rate?cps=0`), its count read once its counters show the
-   hold (SIPp's next statistics row, loadgen's live `/metrics`, within 5 s),
-   then it is killed with its calls in flight, which leaves those calls to the
+   loadgen's `POST /rate?cps=0`), its count taken once two consecutive reads
+   of its counters show the hold and agree (SIPp's statistics row with its
+   target rate 0, loadgen's live `/metrics`, within 5 s), then it is killed
+   with its calls in flight, which leaves those calls to the
    system under test to reap; the stream writes no record for them and is left
-   out of the reconciliation. The heal facts state that count and whether the
-   counters showed the hold (`held`). A stream that
+   out of the reconciliation. The heal facts state that count, the calls not
+   placed and failed by the generator, and whether the counters showed the
+   hold (`held`). A stream that
    starts with an incident has no pre-inject baseline and so no `recovery`.
    Each firing is its own generator, its Call-IDs tagged with the event; at
    heal its records are shipped and its counter read before it is removed,
@@ -406,9 +408,10 @@ made. A run profile joins the two.
    CDRs of a firing stopped with `abandon` (their Call-IDs carry its event)
    join the firing instead of records: each call it placed owes one CDR, and
    a second one of a Call-ID, fewer or more Call-IDs than calls placed are
-   charged at the instant its generator exited. Only a count taken at the
-   hold bounds the Call-IDs; a firing whose counters never showed the hold is
-   a `class_failed` finding and only its duplicates are charged. A missing CDR whose call
+   charged at the instant its generator exited: a call not placed owes none,
+   a call the generator failed may owe one. Only a count taken at the hold
+   bounds the Call-IDs; a firing whose facts hold none is a `class_failed`
+   finding and only its duplicates are charged. A missing CDR whose call
    ended outside every window but within the profile's `cdr_in_flight_s`
    before a window opened belongs to that window: its CDR was still in the
    sink when the fault hit; the value is stated from the system under test's
@@ -486,9 +489,12 @@ made. A run profile joins the two.
     stream's `setup_deadline_s`) that falls inside one, measure the generator:
     they leave the impacts and the recovery samples, and are
     listed, with their Call-IDs, in one `generator_stall` integrity finding
-    per stall, which names the signal that saw it and its source by the
-    host's samples over it: the host under stress (§6.6), the generator's own
-    when they cover it calm, or unobserved. A stall that spoiled no measurement is listed in the stream's
+    per stall, which names the signal that saw it (a watchdog stall by the two
+    statistics rows it lies between) and its source by the host's samples
+    over it, with their worst figures: the host under stress (§6.6) or its CPU
+    contended (a task waiting for a CPU a tenth of the time), the generator's
+    side (the generator itself or a slow reader of its record output) when
+    samples at most 2 s apart cover it calm, or the host unobserved. A stall that spoiled no measurement is listed in the stream's
     `stalls` and leaves the status alone. A generator's own count of calls it
     failed without a record (loadgen's `loadgen_generator_failures_total`) is
     a `generator_failure` integrity finding when above 0. A stall, a spoiled

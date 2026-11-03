@@ -189,7 +189,7 @@ def test_a_stall_inside_host_stress_is_host_under_stress_first_with_its_numbers(
     v = verdict(tmp_path, host_lines(T0 + 58_000, T0 + 63_000))
     kinds = [i["kind"] for i in jv.objs(v, "integrity")]
     assert kinds == ["host_under_stress", "generator_stall"] and v["status"] == "invalid"
-    assert str(jv.objs(v, "integrity")[1]["detail"]).endswith("; the host under stress over it")
+    assert "; the host under stress over it (cpu some 0.0 %, io full 20.0 %" in str(jv.objs(v, "integrity")[1]["detail"])
     h = jv.objs(v, "integrity")[0]
     assert (h["at_ms"], h["until_ms"]) == (T0 + 58_000, T0 + 63_000)
     assert h["host"] == {"io_full_pct": 20.0, "memory_full_pct": 0.0, "swapin_pages_s": 400.0}
@@ -201,7 +201,31 @@ def test_a_stall_inside_host_stress_is_host_under_stress_first_with_its_numbers(
 def test_a_stall_on_a_calm_host_is_a_plain_generator_stall_named_the_generator_s_own(tmp_path: Path) -> None:
     v = verdict(tmp_path, host_lines(T0 + 90_000, T0 + 95_000))
     assert [i["kind"] for i in jv.objs(v, "integrity")] == ["generator_stall"]
-    assert str(jv.objs(v, "integrity")[0]["detail"]).endswith("; the host under no stress over it: the generator's own")
+    assert str(jv.objs(v, "integrity")[0]["detail"]).endswith(
+        "; the host calm over it (cpu some 0.0 %, io full 0.0 %, memory full 0.0 %, swap-in 0 pages/s): "
+        "the generator's side, the generator itself or a slow reader of its record output"
+    )
+
+
+def test_a_stall_on_a_cpu_contended_host_is_never_the_generator_s_side(tmp_path: Path) -> None:
+    # No io, memory or swap-in stress, but a task waited for a CPU 30 % of
+    # each second from +58 s to +63 s.
+    lines = host_lines(T0 + 90_000, T0 + 95_000, io_full_us=0, swapin=0)
+    waited = 0
+    for line in lines:
+        if T0 + 58_000 < float(str(line["at_ms"])) <= T0 + 63_000:
+            waited += 300_000
+        line["cpu"] = {"some": {"avg10": 0.0, "total": waited}, "full": {"avg10": 0.0, "total": 0}}
+    v = verdict(tmp_path, lines)
+    (i,) = jv.objs(v, "integrity")
+    assert "; the host's CPU contended over it (cpu some 30.0 %" in str(i["detail"])
+
+
+def test_a_stall_inside_a_gap_in_the_host_samples_is_unobserved(tmp_path: Path) -> None:
+    lines = [ln for ln in host_lines(T0 + 90_000, T0 + 95_000) if not T0 + 57_000 < float(str(ln["at_ms"])) < T0 + 64_000]
+    v = verdict(tmp_path, lines)
+    (i,) = jv.objs(v, "integrity")
+    assert str(i["detail"]).endswith("; the host unobserved over it (its samples more than 2 s apart)")
     # Stress the profile states a higher bound for is no stress.
     v = verdict(tmp_path / "b", host_lines(T0 + 58_000, T0 + 63_000, io_full_us=30_000, swapin=10),
                 profile={"preflight": {"max_io_full_pct": 5, "max_swapin_pages_s": 50}})

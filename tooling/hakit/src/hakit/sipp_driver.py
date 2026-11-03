@@ -94,9 +94,12 @@ class Counters:
 
 
 def parse_stat_csv(text: str | None) -> Counters:
+    """The counters of the last complete row: a last line without its newline
+    is a row SIPp is still writing, and is left out."""
     if not text:
         return Counters(None, None)
-    lines = [ln for ln in text.splitlines() if ln.strip()]
+    complete = text if text.endswith("\n") else text[: text.rfind("\n") + 1]
+    lines = [ln for ln in complete.splitlines() if ln.strip()]
     if len(lines) < 2:
         return Counters(None, None)
     header = lines[0].split(";")

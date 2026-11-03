@@ -170,6 +170,22 @@ def test_an_abandoned_stream_whose_counters_never_show_the_hold_has_no_count(tmp
     assert (as_obj(heal["facts"])["calls"], as_obj(heal["facts"])["held"]) == (None, False)
 
 
+def test_a_refused_hold_leaves_the_firing_uncounted_and_still_kills_it(tmp_path: Path) -> None:
+    orphan: Json = {"at_s": 30, "incident": "orphan", "stream": "burst", "budget": "any"}
+
+    def refused(c: Call) -> ProcResult | str | None:
+        if is_hold(c):
+            return ProcResult(1, "", "Error response from daemon: container is not running")
+        if c.kind == "read" and c.path is not None and c.path.name == "stat.csv" and "burst" in str(c.path):
+            return HELD_HEADER + "0;0;0;50;5;95\n"
+        return None
+
+    run_dir, fake = run(tmp_path, [refused], [orphan])
+    heal = as_obj(next(e for e in read_jsonl(run_dir / "events.jsonl") if e.get("executable") == "heal")["facts"])
+    assert (heal["calls"], heal["held"]) == (None, False)
+    assert HARD in [c.argv for c in fake.calls if c.kind == "run"]
+
+
 def test_each_firing_is_its_own_generator_and_the_stream_sums_them(tmp_path: Path) -> None:
     second: Json = {**SPIKE, "at_s": 300}
 

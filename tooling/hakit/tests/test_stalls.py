@@ -4,6 +4,7 @@ measured is an integrity finding, never an impact of the system under test."""
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kit import T0, paced, record, timed_out
@@ -13,6 +14,10 @@ from hakit import jsonval as jv
 from hakit.jsonval import Json
 from hakit.stalls import Stall, detect
 from hakit.verdict import compute
+
+
+def clock(ms: float) -> str:
+    return datetime.fromtimestamp(ms / 1000, UTC).strftime("%H:%M:%S.%f")[:-3]
 
 
 def rate(cps: float) -> Callable[[float, float], float]:
@@ -72,7 +77,10 @@ def test_a_slow_setup_measured_across_a_stall_is_a_generator_stall_finding(tmp_p
     assert v["unattributed"] == []
     (i,) = jv.objs(v, "integrity")
     assert (i["kind"], i["stream"], i["at_ms"], i["call_ids"]) == ("generator_stall", "basic", at + 50, ["late"])
-    assert i["detail"] == "1 measurements taken across a 950 ms generator stall (a gap in its call starts); no host sample over it"
+    assert i["detail"] == (
+        "1 measurements taken across a 950 ms generator stall (a gap in its call starts); "
+        "the host unobserved over it (no host sample)"
+    )
     (s,) = jv.objs(v, "streams")
     assert s["stalls"] == [{"at_ms": at + 50, "ms": 950.0, "spoiled": 1, "source": "starts"}]
     assert v["status"] == "invalid"
@@ -192,7 +200,8 @@ def test_the_generator_s_watchdog_is_a_second_source_of_stalls(tmp_path: Path) -
     stat_csv(d, [(at - 1000, 10, 3), (at + 400, 10, 3), (at + 1400, 10, 4)])
     v = compute(d, SCHEMAS)
     assert [(i["kind"], i["call_ids"]) for i in jv.objs(v, "integrity")] == [("generator_stall", ["late"])]
-    assert "(its watchdog tripped between two statistics rows)" in str(jv.objs(v, "integrity")[0]["detail"])
+    rows = f"between the statistics rows at {clock(at + 400)} and {clock(at + 1400)} UTC;"
+    assert f"across a generator stall its watchdog saw {rows}" in str(jv.objs(v, "integrity")[0]["detail"])
 
 
 def test_a_timeout_spoiled_by_a_stall_is_left_out_of_the_recovery_samples(tmp_path: Path) -> None:

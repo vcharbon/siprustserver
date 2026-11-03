@@ -3,13 +3,15 @@
 Its generator was killed with its calls in flight and wrote no record for
 them, so their CDRs join no record. They are joined against the firing
 instead: its Call-IDs carry `<run>-<event>`, and its heal facts state the
-calls it placed, counted once its counters showed the hold before the kill
-(`held`). Each call owes exactly one CDR: a second distinct one of a Call-ID
-is `duplicate`, fewer Call-IDs than calls placed are as many `missing`, more
-are as many `extra`, each charged at the instant the generator exited, inside
-the firing's window. A count not taken at the hold bounds nothing: only
-duplicates are charged, and facts that say the hold failed are a
-`class_failed` finding.
+calls it offered, those it did not place and those it failed itself, counted
+at the hold before the kill (`held`). Each placed call owes exactly one CDR,
+and a call the generator failed may or may not have reached the system under
+test: a second distinct CDR of a Call-ID is `duplicate`, fewer Call-IDs than
+the calls placed and not failed are as many `missing`, more than the calls
+placed are as many `extra`, each charged at the instant the generator exited,
+inside the firing's window. A firing whose facts hold no count taken at the
+hold has only its duplicates charged, beside a `class_failed` finding
+(cdr_check.py).
 """
 
 from __future__ import annotations
@@ -31,7 +33,8 @@ class Firing:
     stream: str
     calls: int | None
     exited_at_ms: float
-    held: bool | None = None
+    not_placed: int = 0
+    generator_failures: int = 0
 
 
 def abandoned_firings(run_dir: Path, run: str) -> list[Firing]:
@@ -40,14 +43,14 @@ def abandoned_firings(run_dir: Path, run: str) -> list[Firing]:
         facts = jv.obj(line, "facts")
         if line.get("kind") != "facts" or line.get("executable") != "heal" or facts.get("stop") != "abandon":
             continue
-        held = facts.get("held")
         out.append(
             Firing(
                 mark=f"{run}-{jv.string(line, 'event')}",
                 stream=jv.string(facts, "stream", ""),
-                calls=jv.opt_int(facts, "calls") if held is True else None,
+                calls=jv.opt_int(facts, "calls") if facts.get("held") is True else None,
                 exited_at_ms=jv.number(facts, "exited_at_ms", 0),
-                held=held if isinstance(held, bool) else None,
+                not_placed=jv.opt_int(facts, "not_placed") or 0,
+                generator_failures=jv.opt_int(facts, "generator_failures") or 0,
             )
         )
     return out
@@ -77,8 +80,9 @@ def firing_impacts(firing: Firing, cdrs: list[Json], charge_missing: bool) -> li
         out += [impact(s, call_id, at, DUPLICATE, f"CDR {i + 2} of an abandoned call") for i in range(len(mine) - 1)]
     if firing.calls is None:
         return out
-    gap = firing.calls - len(by_call)
-    if gap > 0 and charge_missing:
-        out += [impact(s, "", at, MISSING, "an abandoned call without a CDR") for _ in range(gap)]
-    out += [impact(s, "", at, EXTRA, "a CDR beyond the calls the firing placed") for _ in range(-gap)]
+    placed = firing.calls - firing.not_placed
+    missing = placed - firing.generator_failures - len(by_call)
+    if missing > 0 and charge_missing:
+        out += [impact(s, "", at, MISSING, "an abandoned call without a CDR") for _ in range(missing)]
+    out += [impact(s, "", at, EXTRA, "a CDR beyond the calls the firing placed") for _ in range(len(by_call) - placed)]
     return out
