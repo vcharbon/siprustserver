@@ -48,6 +48,11 @@ product built on this stack states its own additions beside it.
 - **The call limiter fails open.** An admit with no usable answer within its
   budget admits the call (ADR-0040, ADR-0043): a limiter outage over-admits,
   it never refuses calls.
+- **New calls are refused while a survivor is above its ceilings.** The
+  copies a takeover turns live are never refused, but they count: until the
+  survivor's live calls fall under its admission ceilings, new calls are
+  refused, emergency calls included under the default emergency margin
+  (TUNING.md, the worked example).
 - **An unbacked call stays admissible.** Past a backup ceiling, or with no
   live backup, a new call is admitted without a backup and is lost with its
   worker; the shortfall is counted, never refused (ADR-0037 item 4).
