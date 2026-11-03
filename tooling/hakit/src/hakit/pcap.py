@@ -108,7 +108,7 @@ def extract(run_dir: Path, call_id: str, out_dir: Path) -> list[Path]:
     """Write the call's packets under `out_dir`; the files written."""
     header = call_id_header(call_id)
     by_link: dict[int, dict[tuple[int, bytes], Packet]] = {}
-    for f in sorted((run_dir / "pcap").rglob("sip.pcap*")):
+    for f in sorted((run_dir / "pcap").rglob("sip*.pcap*")):
         try:
             pf = read(f)
         except PcapError:

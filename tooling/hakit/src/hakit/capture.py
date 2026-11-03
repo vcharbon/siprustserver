@@ -4,11 +4,14 @@ kept per window.
 One ring on the callers' docker bridge, and one inside each kind node the
 profile's `nodes` selector names (every interface of the node's netns). Each
 ring is a container of the capture image (`tooling/hakit/capture/`, built on
-first use) writing `pcap/ring/<source>/sip.pcapN` in the run directory. When a
-window closes, the ring files written since it opened (by mtime, with a margin)
-are copied to `pcap/windows/<event>/<source>/`, so what an incident caused
-outlives the ring's rotation. At the end of the run the rings are stopped,
-their files handed to the runner's user, and the last ring kept as it stands.
+first use) writing `pcap/ring/<source>/sip.pcapN` in the run directory. A ring
+whose container stopped (a node ring dies with its node) is started again at
+each window's close and before the run's end, each new incarnation n writing
+`sip-<n>.pcapN` beside the earlier files. When a window closes, the ring files
+written since it opened (by mtime, with a margin) are copied to
+`pcap/windows/<event>/<source>/`, so what an incident caused outlives the
+ring's rotation. At the end of the run the rings are stopped, their files
+handed to the runner's user, and the last ring kept as it stands.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .executor import Executor
+from .executor import Executor, ProcResult
 from .lab import Lab
 from .paths import HAKIT_ROOT
 from .profile import Capture
@@ -27,13 +30,23 @@ IMAGE = "hakit-capture:1"
 IMAGE_DIR = HAKIT_ROOT / "capture"
 # Ring files written this long before a window opened are kept with it.
 KEEP_MARGIN_MS = 5_000
+# Every incarnation's ring files: `sip.pcapN`, then `sip-<n>.pcapN`.
+RING_GLOB = "sip*.pcap*"
 
 
-@dataclass(frozen=True)
+@dataclass
 class Ring:
     source: str
     container: str
     directory: Path
+    net: list[str]
+    iface: str
+    bpf: str
+    # 0 for the ring the run started; each revival adds one.
+    incarnation: int = 0
+
+    def file(self) -> str:
+        return "/cap/sip.pcap" if self.incarnation == 0 else f"/cap/sip-{self.incarnation}.pcap"
 
 
 class CaptureFailed(Exception):
@@ -96,23 +109,45 @@ class Captures:
         for source, net, iface, bpf in targets:
             d = self.run_dir / "pcap" / "ring" / source
             d.mkdir(parents=True)
-            name = f"hakit-capture-{self.run}-{source}"[:128]
-            self._run(
-                ["docker", "run", "-d", "--name", name, "--label", f"hakit-run={self.run}", *net]
-                + ["--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "-v", f"{d}:/cap", IMAGE]
-                + ["tcpdump", "-i", iface, "-s", "0", "-Z", "root", "-C", str(self.spec.file_mb), "-W", str(self.spec.files)]
-                + ["-w", "/cap/sip.pcap", bpf],
-                f"capture {source}",
-            )
-            self.rings.append(Ring(source, name, d))
+            ring = Ring(source, f"hakit-capture-{self.run}-{source}"[:128], d, net, iface, bpf)
+            res = self._launch(ring)
+            if res.rc != 0:
+                raise CaptureFailed(f"capture {source}: {res.stderr.strip()[:300]}")
+            self.rings.append(ring)
+
+    def _launch(self, ring: Ring) -> ProcResult:
+        return self.executor.run(
+            ["docker", "run", "-d", "--name", ring.container, "--label", f"hakit-run={self.run}", *ring.net]
+            + ["--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "-v", f"{ring.directory}:/cap", IMAGE]
+            + ["tcpdump", "-i", ring.iface, "-s", "0", "-Z", "root", "-C", str(self.spec.file_mb), "-W", str(self.spec.files)]
+            + ["-w", ring.file(), ring.bpf],
+            timeout_s=60,
+        )
+
+    def revive(self) -> int:
+        """Start again every ring whose container is not running, as its next
+        incarnation; the count started. A ring that does not start (its node
+        still down) is tried again at the next call."""
+        n = 0
+        for ring in self.rings:
+            state = self.executor.run(["docker", "inspect", "-f", "{{.State.Running}}", ring.container], timeout_s=30)
+            if state.rc == 0 and state.stdout.strip() == "true":
+                continue
+            self.executor.run(["docker", "rm", "-f", ring.container], timeout_s=60)
+            ring.incarnation += 1
+            if self._launch(ring).rc == 0:
+                n += 1
+        return n
 
     def keep(self, event: str, opened_ms: int) -> int:
-        """Copy every ring file written since the window opened; the count."""
+        """Start again any ring found stopped, then copy every ring file written
+        since the window opened; the count copied."""
+        self.revive()
         n = 0
         since = (opened_ms - KEEP_MARGIN_MS) / 1000
         for ring in self.rings:
             dest = self.run_dir / "pcap" / "windows" / event / ring.source
-            for f in sorted(ring.directory.glob("sip.pcap*")):
+            for f in sorted(ring.directory.glob(RING_GLOB)):
                 if f.stat().st_mtime >= since:
                     dest.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(f, dest / f.name)
@@ -120,7 +155,9 @@ class Captures:
         return n
 
     def stop(self) -> None:
-        """Stop every ring (tcpdump flushes) and hand its files to the runner's user."""
+        """Start again any ring found stopped, then stop every ring (tcpdump
+        flushes) and hand its files to the runner's user."""
+        self.revive()
         for ring in self.rings:
             self.executor.run(["docker", "stop", "-t", "5", ring.container], timeout_s=60)
             self.executor.run(

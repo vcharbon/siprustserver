@@ -106,9 +106,57 @@ def test_a_window_keeps_only_the_ring_files_written_since_it_opened(tmp_path: Pa
         os.utime(ring / name, (mtime, mtime))
     from hakit.capture import Ring
 
-    caps.rings.append(Ring("bridge", "c", ring))
+    caps.rings.append(Ring("bridge", "c", ring, ["--net", "host"], "any", "udp"))
     assert caps.keep("007-x", 2_000_000) == 2  # opened at 2000 s: 1996 is inside the 5 s margin
     assert sorted(p.name for p in (tmp_path / "pcap" / "windows" / "007-x" / "bridge").iterdir()) == ["sip.pcap1", "sip.pcap2"]
+
+
+def test_a_ring_whose_container_stopped_is_started_again_under_a_new_prefix(tmp_path: Path) -> None:
+    """A node ring dies with its node: at each window's close a ring not
+    running is removed and started again, its next incarnation writing
+    `sip-<n>.pcap`, so it never overwrites the files of the one before; a
+    start that fails is tried again at the next close."""
+    from hakit.capture import Ring
+
+    running = {"hakit-capture-r-bridge": True, "hakit-capture-r-node-e1": False}
+    node_up = [False]
+
+    def rules(c: Call) -> ProcResult | None:
+        a = c.argv
+        if c.kind != "run":
+            return None
+        if a[:2] == ["docker", "inspect"]:
+            return ProcResult(0, "true\n" if running[a[-1]] else "false\n", "")
+        if a[:2] == ["docker", "run"] and "tcpdump" in a:
+            if not node_up[0]:
+                return ProcResult(125, "", "container e1 is not running")
+            running[a[a.index("--name") + 1]] = True
+            ring = Path(a[a.index("-v") + 1].split(":")[0])
+            f = ring / (a[a.index("-w") + 1].removeprefix("/cap/") + "0")
+            f.write_bytes(b"revived")
+            os.utime(f, (FUTURE_S, FUTURE_S))
+        return None
+
+    fake = FakeExecutor([rules])
+    caps = Captures("r", tmp_path, Capture(10, 4, "udp", "tier=edge"), lab_from_env({}), fake)
+    for source, net in (("bridge", ["--net", "host"]), ("node-e1", ["--net", "container:e1"])):
+        d = tmp_path / "pcap" / "ring" / source
+        d.mkdir(parents=True)
+        (d / "sip.pcap0").write_bytes(b"first")
+        os.utime(d / "sip.pcap0", (FUTURE_S, FUTURE_S))
+        caps.rings.append(Ring(source, f"hakit-capture-r-{source}", d, net, "any", "udp"))
+    assert caps.revive() == 0  # the node is still down
+    node_up[0] = True
+    assert caps.keep("002-x", 1_000_000) == 3
+    runs = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:2] == ["docker", "run"]]
+    assert [a[a.index("-w") + 1] for a in runs] == ["/cap/sip-1.pcap", "/cap/sip-2.pcap"]
+    assert all("container:e1" in a for a in runs)
+    removed = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:3] == ["docker", "rm", "-f"]]
+    assert removed == [["docker", "rm", "-f", "hakit-capture-r-node-e1"]] * 2
+    kept = tmp_path / "pcap" / "windows" / "002-x"
+    assert sorted(p.name for p in (kept / "node-e1").iterdir()) == ["sip-2.pcap0", "sip.pcap0"]
+    assert (kept / "node-e1" / "sip.pcap0").read_bytes() == b"first"
+    assert caps.revive() == 0  # both running now
 
 
 def udp(call_id: str, n: int) -> bytes:
