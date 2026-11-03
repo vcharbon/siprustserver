@@ -269,9 +269,12 @@ made. A run profile joins the two.
    code is exactly what a run exists to show. The in-dialog classes
    (`dialog_request_failed`, `call_cut`, `call_stranded`,
    `protocol_anomaly`) and an `unexpected_ending` after answer take no budget
-   at all, and the budget schema has no place for them: an established call
-   is what HA protects, and a call answered where the treatment should have
-   refused it is a treatment that stopped working. One exception: a catalog
+   by default: an established call is what HA protects, and a call answered
+   where the treatment should have refused it is a treatment that stopped
+   working. A budget may allow in-dialog impacts by class and detail
+   (`in_dialog`) only for a fault whose stated mechanism outlasts an
+   in-dialog transaction's timeout (a total outage), each impact charged to
+   the window holding its instant. One exception for the unexpected ending: a catalog
    leg declared `after_consult` opens only after an in-dialog consult of a
    decision service that another leg (`by`) asks for, and the catalog states
    the answers the consult's contract gives `by` when that service fails
@@ -317,7 +320,8 @@ made. A run profile joins the two.
    (`setup_failed`, or an `unexpected_ending` before answer: timed out, or a
    final that came late) belongs to the first window open while it was
    pending (an INVITE sent into the fault, ended after the window closed);
-   one outside every window is `unattributed`. An in-dialog impact takes no budget, so its attribution is
+   one outside every window is `unattributed`. An in-dialog impact its holding window's
+   `in_dialog` allowance does not name takes no budget, so its attribution is
    for analysis: its `candidate_windows` are every window whose `inject` fell
    inside the call's lifetime before the failure, or that holds the failure's
    instant, and with none it is `unattributed`. A call stranded before a window opens and whose setup

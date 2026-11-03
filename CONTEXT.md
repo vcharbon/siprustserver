@@ -1447,8 +1447,9 @@ generator saw, not what the system under test did.
 **Impact budget**:
 What impact one window allows, per class, `setup_failed` and a pre-answer
 `unexpected_ending` keyed by stream × final code × reason. A class or key the
-budget does not name allows 0; the in-dialog classes and an unexpected ending
-after answer take no budget at all; impact outside every window is
+budget does not name allows 0; the in-dialog classes take a budget only
+through `in_dialog`, for a fault that outlasts their transactions' timeout,
+and an unexpected ending after answer takes none; impact outside every window is
 `unattributed` and always a finding.
 _Avoid_: "tolerance" for something an incident or a scenario carries.
 

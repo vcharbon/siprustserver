@@ -7,7 +7,7 @@ from kit import T0, record, rejected, timed_out
 from hakit.classify import Impact, SetupLatency, classify
 from hakit.judge import judge
 from hakit.jsonval import Json
-from hakit.model import Allowance, Budget, ExpectedEnding, SetupSlowAllowance, Shape
+from hakit.model import Allowance, Budget, ExpectedEnding, InDialogAllowance, SetupSlowAllowance, Shape
 from hakit.windows import Phase, Window
 
 ANSWER = Shape("basic", "c", None, [], [], [ExpectedEnding("answered", None, None)], True)
@@ -19,6 +19,17 @@ KILL = Budget(
     raw={},
 )
 STRICT = Budget("strict", [], [], SetupSlowAllowance(None, None, None), raw={})
+OUTAGE = Budget(
+    "outage",
+    [],
+    [],
+    SetupSlowAllowance(None, None, None),
+    raw={},
+    in_dialog=[
+        InDialogAllowance("*", "dialog_request_failed", "BYE no final", None, 0.2),
+        InDialogAllowance("*", "call_stranded", "*", 2, None),
+    ],
+)
 
 
 def window(event: str, opened: int, closed: int, budget: str = "kill") -> Window:
@@ -33,7 +44,7 @@ def run(records: list[Json], windows: list[Window], cps: float = 10) -> tuple[di
         impacts += c.impacts
         if c.latency is not None:
             latencies.append(c.latency)
-    j = judge(windows, impacts, latencies, {"kill": KILL, "strict": STRICT}, 1000, {"basic": cps, "other": cps})
+    j = judge(windows, impacts, latencies, {"kill": KILL, "strict": STRICT, "outage": OUTAGE}, 1000, {"basic": cps, "other": cps})
     # The full Call-ID list rides apart from the verdict's rows (test_attribution).
     for row in [r for rows in j.per_window.values() for r in rows] + j.unattributed:
         row.pop("all_call_ids")
@@ -188,7 +199,7 @@ def test_a_reject_shaped_treatment_timing_out_after_the_window_is_charged_to_it(
     reject = Shape("final", "c", None, [], [], [ExpectedEnding("rejected", 603, None)], True)
     w = window("001-kill_worker", T0 + 60_000, T0 + 85_000)
     impacts = classify({**timed_out("a", T0 + 60_200), "shape": "final"}, reject).impacts
-    j = judge([w], impacts, [], {"kill": KILL, "strict": STRICT}, 1000, {"basic": 10.0})
+    j = judge([w], impacts, [], {"kill": KILL, "strict": STRICT, "outage": OUTAGE}, 1000, {"basic": 10.0})
     assert [(r["class"], r["reason"]) for r in j.per_window["001-kill_worker"]] == [("unexpected_ending", "timeout")]
     assert j.unattributed == []
 
@@ -212,3 +223,47 @@ def test_a_setup_no_hop_answered_takes_no_setup_latency() -> None:
     late = {**timed_out("b", T0), "first_provisional_at_ms": T0 + 1500}
     lat = classify(late, ANSWER).latency
     assert lat is not None and lat.ms == 1500
+
+
+def stranded(call_id: str, started: float, bye_at: float) -> Json:
+    """Answered, then its BYE drew no final within the transaction's 32 s."""
+    fail = {"at_ms": bye_at, "kind": "dialog_request", "method": "BYE", "detail": "no final"}
+    return record(call_id, started, "stranded", ended=bye_at - started, failures=[fail])
+
+
+def test_an_in_dialog_impact_the_window_holds_is_charged_to_its_in_dialog_allowance() -> None:
+    w = window("001-outage", T0 + 10_000, T0 + 60_000, budget="outage")
+    per, in_dialog, unatt = run([stranded(f"s{i}", T0, T0 + 45_000) for i in range(2)], [w])
+    rows = [(r["class"], r["reason"], r["count"], r["allowed"], r["finding"]) for r in per["001-outage"]]
+    assert rows == [
+        ("call_stranded", "*", 2, 2.0, False),
+        ("dialog_request_failed", "BYE no final", 2, 2.0, False),
+    ]
+    assert in_dialog == [] and unatt == []
+
+
+def test_in_dialog_impacts_past_their_allowance_are_a_finding_of_the_window() -> None:
+    w = window("001-outage", T0 + 10_000, T0 + 60_000, budget="outage")
+    per, in_dialog, _ = run([stranded(f"s{i}", T0, T0 + 45_000) for i in range(3)], [w])
+    assert [(r["class"], r["count"], r["finding"]) for r in per["001-outage"]] == [
+        ("call_stranded", 3, True),
+        ("dialog_request_failed", 3, True),
+    ]
+    assert in_dialog == []
+
+
+def test_an_in_dialog_impact_no_entry_names_stays_an_in_dialog_finding() -> None:
+    w = window("001-outage", T0 + 10_000, T0 + 60_000, budget="outage")
+    cut = record("c", T0, "cut", failures=[{"at_ms": T0 + 45_000, "kind": "dialog_request", "method": "BYE", "code": 481}])
+    per, in_dialog, _ = run([cut], [w])
+    assert per["001-outage"] == []
+    assert [(i["class"], i["candidate_windows"]) for i in in_dialog] == [
+        ("call_cut", ["001-outage"]),
+        ("dialog_request_failed", ["001-outage"]),
+    ]
+
+
+def test_an_in_dialog_impact_after_the_window_takes_no_allowance() -> None:
+    w = window("001-outage", T0 + 10_000, T0 + 40_000, budget="outage")
+    _, in_dialog, _ = run([stranded("s", T0, T0 + 45_000)], [w])
+    assert [i["class"] for i in in_dialog] == ["call_stranded", "dialog_request_failed"]
