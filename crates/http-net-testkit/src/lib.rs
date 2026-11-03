@@ -4,7 +4,9 @@
 //! - [`SimulatedHttpNetwork`] — an in-memory routing table keyed by
 //!   `SocketAddr`. A `request` looks up the bound service, applies the per-`dst`
 //!   [`Fault`] (pause / cutoff / error), waits the transit delay, and invokes
-//!   the **real** handler in-process. Mandatory for the paused-clock tests:
+//!   the **real** handler in-process; a backend client pools its connections,
+//!   and a balanced address spreads new connections over its backends
+//!   ([`Pick`]). Mandatory for the paused-clock tests:
 //!   real sockets do not obey `tokio::time::pause`, so deterministic scenarios
 //!   cannot use real HTTP. This is the workhorse.
 //! - [`RecordingHttpNetwork`] — a decorator that records both sides of every
@@ -40,4 +42,4 @@ use http_net::{
 pub use entries::{to_http_entries, CapturedExchange, ExchangeOutcome, RecordedHttpEntry};
 pub use external::ExternalHttp;
 pub use recording::{HttpNetworkEvent, HttpOutcome, RecordingHttpNetwork, HTTP_TAG};
-pub use simulated::{Behaviour, Fault, SimulatedHttpNetwork};
+pub use simulated::{Behaviour, Fault, Pick, SimulatedHttpNetwork};
