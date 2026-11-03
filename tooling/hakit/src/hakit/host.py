@@ -31,14 +31,18 @@ KINDS = ("some", "full")
 SAMPLE_MS = 1000
 HOST_FILE = "host.jsonl"
 
-# Stated, not fitted. Swap-in is the trigger: a generator's own pages may be on
-# disk, and its one thread waits on each fault. Memory full pressure is reclaim
-# run by every allocating task, the generator's included. A tmpfs-backed
-# generator does not wait on the host's disk, so io full pressure counts only
-# as a sustained stall risk, a fifth of the time with every task stalled.
+# Stated, not fitted. Swap-in is the trigger: a generator's own pages may be
+# swapped out, and its one thread waits on each fault; on zram or NVMe a fault
+# costs tens of microseconds, so 1000 pages/s stalls a thread a few percent at
+# most. Memory full pressure is reclaim run by every allocating task, the
+# generator's included. A tmpfs-backed generator does not wait on the host's
+# disk, so io full pressure counts only as a sustained stall risk, a fifth of
+# the time with every task stalled.
 DEFAULT_IO_FULL_PCT = 20.0
-DEFAULT_MEMORY_FULL_PCT = 5.0
-DEFAULT_SWAPIN_PAGES_S = 50.0
+DEFAULT_MEMORY_FULL_PCT = 10.0
+DEFAULT_SWAPIN_PAGES_S = 1000.0
+# How long the launch waits for a calm host before it refuses.
+PREFLIGHT_WAIT_S = 120
 
 
 @dataclass(frozen=True)
@@ -141,24 +145,30 @@ def series(run: str, iv: Interval) -> list[str]:
 
 
 def preflight_errors(executor: Executor, clock: Clock, t: Thresholds) -> list[str]:
-    """Refusals while the host is under stress now: the avg10 of io and memory
-    full, and the swap-in rate over one sample interval. None on a host
-    without PSI."""
-    first = read_sample(executor, clock.now_ms())
-    if first is None:
-        return []
-    clock.sleep(SAMPLE_MS / 1000)
-    second = read_sample(executor, clock.now_ms())
+    """Refusals while the host stays under stress: the avg10 of io and memory
+    full, and the swap-in rate over one sample interval, checked every second
+    for up to `PREFLIGHT_WAIT_S`. The first calm check passes, so the burst of
+    starting the run's own containers is waited out, not refused; the last
+    check's findings are the refusal. None on a host without PSI."""
     errs: list[str] = []
-    for resource, limit in (("io", t.io_full_pct), ("memory", t.memory_full_pct)):
-        avg = _psi_field(first, resource, "full", "avg10")
-        if avg is not None and avg >= limit:
-            errs.append(f"{resource} full pressure avg10 {avg:g} % is at or above {limit:g} %")
-    if second is not None:
-        (iv,) = intervals([first, second]) or (None,)
-        if iv is not None and iv.swapin_pages_s >= t.swapin_pages_s:
-            errs.append(f"swap-in {iv.swapin_pages_s:.0f} pages/s is at or above {t.swapin_pages_s:g}")
-    return errs
+    deadline = clock.now_ms() + PREFLIGHT_WAIT_S * 1000
+    while True:
+        first = read_sample(executor, clock.now_ms())
+        if first is None:
+            return []
+        clock.sleep(SAMPLE_MS / 1000)
+        second = read_sample(executor, clock.now_ms())
+        errs = []
+        for resource, limit in (("io", t.io_full_pct), ("memory", t.memory_full_pct)):
+            avg = _psi_field(first, resource, "full", "avg10")
+            if avg is not None and avg >= limit:
+                errs.append(f"{resource} full pressure avg10 {avg:g} % is at or above {limit:g} %")
+        if second is not None:
+            (iv,) = intervals([first, second]) or (None,)
+            if iv is not None and iv.swapin_pages_s >= t.swapin_pages_s:
+                errs.append(f"swap-in {iv.swapin_pages_s:.0f} pages/s is at or above {t.swapin_pages_s:g}")
+        if not errs or clock.now_ms() >= deadline:
+            return errs
 
 
 class HostSampler:

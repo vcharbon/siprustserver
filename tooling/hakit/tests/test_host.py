@@ -16,7 +16,7 @@ from rundir import SCHEMAS, run_dir
 from hakit import jsonval as jv
 from hakit.clock import FakeClock
 from hakit.executor import Call, FakeExecutor
-from hakit.host import HOST_FILE, HostSampler, Thresholds, intervals, preflight_errors, read_sample
+from hakit.host import HOST_FILE, PREFLIGHT_WAIT_S, HostSampler, Thresholds, intervals, preflight_errors, read_sample
 from hakit.jsonl import read_jsonl, write_jsonl
 from hakit.jsonval import Json
 from hakit.summary import render
@@ -52,12 +52,12 @@ def test_an_interval_s_share_stalled_comes_from_the_totals() -> None:
     fake = FakeExecutor([proc.rule])
     a = read_sample(fake, T0)
     proc.total[("io", "full")] += 120_000  # 120 ms stalled over 2 s: 6 %
-    proc.pswpin += 300
+    proc.pswpin += 3000
     b = read_sample(fake, T0 + 2000)
     assert a is not None and b is not None
     (iv,) = intervals([a, b])
-    assert round(iv.pct[("io", "full")], 3) == 6.0 and iv.swapin_pages_s == 150
-    assert iv.stressed(Thresholds()) and not iv.stressed(Thresholds(io_full_pct=7, swapin_pages_s=151))
+    assert round(iv.pct[("io", "full")], 3) == 6.0 and iv.swapin_pages_s == 1500
+    assert iv.stressed(Thresholds()) and not iv.stressed(Thresholds(io_full_pct=7, swapin_pages_s=1501))
 
 
 def test_a_host_without_pressure_files_is_never_sampled_again() -> None:
@@ -99,7 +99,7 @@ def test_by_default_swap_in_is_stress_and_a_passing_io_stall_is_not() -> None:
     b = read_sample(fake, T0 + 1000)
     proc.total[("io", "full")] += 200_000  # 20 %
     c = read_sample(fake, T0 + 2000)
-    proc.pswpin += 50
+    proc.pswpin += 1000
     d = read_sample(fake, T0 + 3000)
     assert a is not None and b is not None and c is not None and d is not None
     calm, io_stall, swapping = intervals([a, b, c, d])
@@ -119,6 +119,31 @@ def test_preflight_refuses_a_host_under_stress_and_names_what() -> None:
     assert preflight_errors(fake, FakeClock(), Thresholds()) == []
     # No PSI: nothing to refuse.
     assert preflight_errors(FakeExecutor([]), FakeClock(), Thresholds()) == []
+
+
+def test_preflight_waits_out_a_launch_burst_and_refuses_only_lasting_stress() -> None:
+    """Starting the run's own containers stalls io for a few seconds: the gate
+    checks again each second and passes once the host is calm."""
+    proc = FakeProc()
+    proc.avg10[("io", "full")] = 40.0
+    reads = 0
+
+    def calming(c: Call) -> str | None:
+        nonlocal reads
+        if c.kind == "read" and c.path == Path("/proc/pressure/io"):
+            reads += 1
+            if reads > 5:
+                proc.avg10[("io", "full")] = 3.0
+        return proc.rule(c)
+
+    clock = FakeClock()
+    assert preflight_errors(FakeExecutor([calming]), clock, Thresholds()) == []
+    proc.avg10[("io", "full")] = 40.0
+    clock = FakeClock()
+    start = clock.now_ms()
+    errs = preflight_errors(FakeExecutor([proc.rule]), clock, Thresholds())
+    assert errs == ["io full pressure avg10 40 % is at or above 20 %"]
+    assert clock.now_ms() - start >= PREFLIGHT_WAIT_S * 1000
 
 
 def host_lines(stressed_from: float, stressed_until: float, io_full_us: int = 200_000, swapin: int = 400) -> list[Json]:
@@ -198,10 +223,10 @@ def test_a_run_is_refused_while_the_host_is_under_stress_and_samples_while_it_ru
 
     content = discover([BASE_CONTENT], SCHEMAS)
     proc = FakeProc()
-    proc.avg10[("memory", "full")] = 9.0
+    proc.avg10[("memory", "full")] = 12.0
     clock, fake = simulated([proc.rule])
     r = Runner(content, SCHEMAS, lab_from_env({}), fake, clock, tmp_path / "results", say=lambda _m: None)
-    with pytest.raises(RunRefused, match="host under stress: memory full pressure avg10 9 % is at or above 5 %"):
+    with pytest.raises(RunRefused, match="host under stress: memory full pressure avg10 12 % is at or above 10 %"):
         r.run("kill-worker-smoke")
     proc.avg10[("memory", "full")] = 0.0
     run_dir = r.run("kill-worker-smoke")

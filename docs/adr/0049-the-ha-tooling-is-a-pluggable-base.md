@@ -760,9 +760,10 @@ made. A run profile joins the two.
    `leftover_calls` finding), while an event of an earlier run is open, or
    while the host is under stress: io or memory full pressure (avg10) or the
    swap-in rate at or above the profile's `preflight` thresholds
-   (`max_swapin_pages_s` 50, `max_memory_full_pct` 5, `max_io_full_pct` 20
+   (`max_swapin_pages_s` 1000, `max_memory_full_pct` 10, `max_io_full_pct` 20
    by default; stated, not fitted). Swap-in is the trigger: a generator
-   waits on each fault of its own pages, and memory full pressure is reclaim
+   waits on each fault of its own pages (tens of microseconds on zram or
+   NVMe, so 1000 pages/s costs a thread a few percent), and memory full pressure is reclaim
    every allocating task runs. A tmpfs-backed generator does not wait on the
    host's disk, so io full pressure counts only as a sustained stall risk.
 6. **During the load.** The runner samples the host every second while it
