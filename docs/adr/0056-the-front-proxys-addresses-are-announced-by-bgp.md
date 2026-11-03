@@ -52,11 +52,13 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    caller-facing uplink is gone stops announcing the internal VIP as well. No component detects
    the reachability of a peer beyond the first router: a fault in the routed network hits both
    proxies alike and is the network's to converge. Consequences:
+   - a proxy with no live worker answers a new call `503` with a `Retry-After` until its route is
+     withdrawn, so the caller may retry elsewhere at once; a short loss is answered rather than
+     left to time out;
    - a proxy that loses every worker, or its external uplink, while its peer does not, withdraws
      both VIPs and the peer carries all traffic;
-   - **a total backend outage withdraws both routes**: the callers see an unreachable address,
-     not a refusal. This amends ADR-0046's fail-loud rule for that one case; the proxies answer
-     `503` only until their nodes are withdrawn;
+   - **a total backend outage withdraws both routes**: once both are withdrawn the callers see
+     an unreachable address. This amends ADR-0046's fail-loud rule for that one case;
    - **with the API server down** EndpointSlices cannot change: a crashed proxy is not withdrawn,
      a proxy restarted then gets no first worker view yet its node stays announced for the whole
      outage, and a speaker restarted then withdraws every route it announced. BFD still covers a
@@ -68,9 +70,11 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    `proxy.announce.propagationMs`). The Deployment's `minReadySeconds` covers the announcement of
    a replaced pod, so a rollout stops the next proxy only once the previous one is back in the
    routers' tables. `templates/checks.yaml` refuses a drain grace at or below detection plus
-   propagation, and a `minReadySeconds` at or below one probe period plus propagation. The
-   propagation is measured on the lab (the `proxy_rollout` incident); the shipped values are
-   provisional until then (`docs/TUNING.md`).
+   propagation, and a `minReadySeconds` at or below one probe period plus propagation. The lab
+   measures them with the `proxy_rollout` incident: with kube-proxy in iptables mode the
+   drain-to-withdrawal reached 7.29 s and the Ready-to-announced 6.7 s, so the propagation is
+   7 s, the drain grace 13 s and `minReadySeconds` 12 s, pending the nftables run
+   (`docs/TUNING.md`).
 5. **No ICMP port unreachable from a VIP.** Until its route is withdrawn a node still receives a
    VIP's traffic while no proxy socket is bound (a crash, the end of a drain); its kernel would
    answer port unreachable, which a SIP client takes as a transport error (RFC 3261 §18.4)
@@ -119,6 +123,17 @@ win. Docker's isolation between the bridges keeps each VIP off the other plane. 
 setup (`deploy/k8s/lab-host-setup.sh`, with sudo) sets layer-4 multipath hashing, no ICMP
 redirects and loose reverse-path filtering on the bridges, and the firewall rules BGP, BFD and
 same-bridge forwarding need. `deploy/README.md` lists the production requirements.
+
+## A rejoining proxy forgets its blind verdicts
+
+A proxy cut off every worker reads them all `Dead`, verdicts about its own reach. When a
+write reads one worker `Alive` again while no worker reads alive, every other worker read
+`Dead` returns to `Unknown` and its probe judges it afresh
+(`crates/sip-proxy/src/registry/projection.rs`). Otherwise the rehashed flows bring
+responses for a live primary to a proxy that sends them to the call's backup, which takes the
+call over beside its primary (failover harness `rejoining_proxy_stale_verdicts`). A worker
+really dead reads `Dead` again at its next probe miss; until then a response for it follows its
+Via.
 
 ## Residuals
 

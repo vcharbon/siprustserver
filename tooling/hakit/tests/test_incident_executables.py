@@ -203,8 +203,21 @@ def test_kill_proxy_refuses_a_node_that_announces_nothing_before_the_kill(tmp_pa
 
 def test_kill_proxy_fails_while_the_node_stays_announced(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "kill_proxy", withdraw_timeout_s="1")
-    sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]))
-    failed(sb.run("inject"), "still announces a VIP 1s after the kill")
+    sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]),
+             Rule(r"get pod p-1 -o jsonpath=\{\.status\.conditions\[\?\(@\.type==\"Ready\"\)\]\.lastTransitionTime\}$", ""),
+             Rule(r"get pod p-1 -o jsonpath=\{\.status\.conditions\[\?\(@\.type==\"Ready\"\)\]\.status\}$", "False"))
+    failed(sb.run("inject"), "still announces a VIP 1s after the kill and p-1 is not Ready again")
+
+
+def test_a_kill_whose_successor_is_ready_before_the_withdrawal_is_recorded_not_failed(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "kill_proxy", withdraw_timeout_s="1")
+    sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]),
+             Rule(r"get pod p-1 -o jsonpath=\{\.status\.conditions\[\?\(@\.type==\"Ready\"\)\]\.lastTransitionTime\}$",
+                  "2099-01-01T00:00:00Z"),
+             Rule(r"get pod p-1 -o jsonpath=\{\.status\.conditions\[\?\(@\.type==\"Ready\"\)\]\.status\}$", "True"))
+    f = facts(sb.run("inject"))
+    assert f["withdrawn_ms"] is None
+    assert f["ready_again_at_ms"] == 4070908800000
 
 
 def test_kill_proxy_probe_waits_for_both_nodes_in_the_routes(tmp_path: Path) -> None:

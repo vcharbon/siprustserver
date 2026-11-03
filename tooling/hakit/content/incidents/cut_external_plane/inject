@@ -17,4 +17,4 @@ docker network disconnect "$HAKIT_PARAM_NETWORK" "$node" >&2
 withdrawn="$(hk_route_wait absent "$at" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs")" \
   || hk_die "$node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the cut"
 jq -cn --arg pod "$pod" --arg node "$node" --arg ip "$ip" --argjson at "$at" --argjson w "$withdrawn" \
-  '{pod: $pod, node: $node, address: $ip, cut_at_ms: $at, withdrawn_ms: $w}'
+  '{pod: $pod, node: $node, address: $ip, cut_at_ms: $at, applied_at_ms: $at, withdrawn_ms: $w}'

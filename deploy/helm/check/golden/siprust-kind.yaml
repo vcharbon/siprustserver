@@ -420,7 +420,7 @@ metadata:
   name: sip-front-proxy
   namespace: sip-test
 spec:
-  minReadySeconds: 15
+  minReadySeconds: 12
   replicas: 2
   selector:
     matchLabels:

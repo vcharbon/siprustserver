@@ -123,7 +123,7 @@ class Network(unittest.TestCase):
         self.assertEqual((ready["httpGet"]["path"], ready["periodSeconds"],
                           ready["failureThreshold"], ready["successThreshold"]),
                          ("/readyz", 1, 2, 1))
-        self.assertEqual(proxy["spec"]["minReadySeconds"], 15)
+        self.assertEqual(proxy["spec"]["minReadySeconds"], 12)
         self.assertEqual([c["name"] for c in pod_spec(proxy)["containers"]], ["sip-front-proxy"])
 
     def test_no_worker_shares_a_proxy_node(self) -> None:

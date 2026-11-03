@@ -1,0 +1,37 @@
+schema: budget.v1
+name: proxy-cut
+description: >-
+  One front proxy cut off a plane while its process runs (its node off the
+  callers' network, or cut off every worker): it turns not ready and its node
+  withdraws both VIPs (ADR-0056 §3), within W = 11 s of the cut, measured on
+  the lab (the worker cut's dead verdict 3.6 s + readiness 2 s + propagation
+  7 s; the external cut's face check 0.5 s + 2 s + 7 s), iptables mode,
+  pending the nftables run. Each allowance is a mechanism of that window, in
+  seconds of offered rate:
+  - setup timeout, 5 s: a call whose INVITE the cut node swallows is repaired
+    by the first retransmission after the withdrawal; one offered in the
+    window's first W − 7.5 s = 3.5 s has its last retransmission before its
+    10 s setup deadline (at 7.5 s, RFC 3261 §17.1.1.2 with T1 500 ms) still
+    inside it, plus 1.5 s for setups already in flight at the cut;
+  - 480 with Reason q.850;cause=18, 5 s: a worker's b-leg INVITE whose flow
+    hashes into the cut node is lost the same way, and the worker gives up
+    on it with no answer by the same arithmetic;
+  - 503 with Retry-After, 11 s: the cut-off proxy reads every worker dead and
+    answers a new call 503 with a Retry-After until its node's routes are
+    withdrawn (ADR-0056 §3), so the caller may retry elsewhere; never past
+    the window;
+  - setups slow for the window, 11 s;
+  - a CDR duration off by up to the first retransmission of a 2xx or BYE
+    past the window, 11.5 s (T1, 2·T1, 4·T1, then every T2 4 s), the
+    split-view mismatch two proxies with different health views produce
+    while the cut node's view is stale (ADR-0009 X7).
+setup_failed:
+  - { stream: "*", code: 0, reason: timeout, max_seconds: 5 }
+  - { stream: "*", code: 480, reason: "q.850;cause=18", max_seconds: 5 }
+  - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 11 }
+setup_slow:
+  max_seconds: 11
+cdr_mismatch:
+  differs:
+    max_calls: 0
+    excess_ms: 11500

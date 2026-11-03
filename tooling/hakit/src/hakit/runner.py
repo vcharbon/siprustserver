@@ -18,7 +18,7 @@ from pathlib import Path
 from .capture import CaptureFailed, Captures
 from .check import profile_errors
 from .classes import run_counts
-from .clock import Clock
+from .clock import Clock, RealClock
 from .collect import collect_cdrs
 from .content import Content
 from .events import KEEPALIVE_MS, EventJournal
@@ -206,6 +206,8 @@ class Runner:
         streams = StreamSet(run, run_dir, profile, self.content, self.lab, self.executor, self.clock, self.vlogs, started)
         live = _Live(streams)
         live.host = HostSampler(run, run_dir, self.executor, self.clock, self.vm)
+        if isinstance(self.clock, RealClock):
+            live.host.start_thread()
         # Appended as found, so `hakit probe` reads them while the run runs.
         integrity = JsonlLog(run_dir / "integrity.jsonl")
         steps_log = JsonlLog(run_dir / "steps.jsonl")
@@ -276,6 +278,7 @@ class Runner:
         finally:
             restore()
             clear_active(run_dir)
+            live.host.stop()
         integrity.add(streams.remove_all())
         if live.capture is not None:
             live.capture.stop()

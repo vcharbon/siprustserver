@@ -124,7 +124,7 @@ impl ProxyConfig {
         let branch_memo = branch_memo(&mut env);
         let resolver = resolver(&mut env);
         let prewarm = prewarm(&mut env);
-        let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 15_000, 1, MAX_MS));
+        let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 13_000, 1, MAX_MS));
         let external_face_check = external_face_check(&mut env);
         let external_face_period =
             Duration::from_millis(env.int("PROXY_EXT_FACE_CHECK_MS", 500, 10, 60_000));

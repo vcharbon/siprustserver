@@ -2,16 +2,16 @@ schema: budget.v1
 name: backend-outage
 description: >-
   Every worker gone at once (a total backend outage): every front proxy reads
-  them dead (the dead verdict, 2.6-3.6 s), refuses new calls 503 with a
-  Retry-After until its node's routes are withdrawn, then the VIPs are unreachable and new setups
-  end without a final (ADR-0056 amends the fail-loud rule for this case).
-  Every setup of the outage may fail, plus 10 s of offered rate past it: the
-  first probe round that reads a worker alive (1 s), one readiness period
-  (1 s) and the propagation of the announcement to the routers' tables (8 s,
-  provisional until measured on the lab).
+  them dead (the dead verdict, 2.6-3.6 s) and answers new calls 503 with a
+  Retry-After until its node's routes are withdrawn (ADR-0056 §3); once both
+  are withdrawn the VIPs are unreachable and new setups end without a final. Every setup of the outage
+  may fail, plus 9 s of offered rate past it: the first probe round that
+  reads a worker alive (1 s), one readiness period (1 s) and the propagation
+  of the announcement to the routers' tables (7 s measured on the lab with
+  kube-proxy in iptables mode, pending the nftables run).
 setup_failed:
-  - { stream: "*", code: 0, reason: timeout, max_seconds: 10, over_outage: true }
-  - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 10, over_outage: true }
+  - { stream: "*", code: 0, reason: timeout, max_seconds: 9, over_outage: true }
+  - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 9, over_outage: true }
 setup_slow:
-  max_seconds: 10
+  max_seconds: 9
   over_outage: true

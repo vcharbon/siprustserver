@@ -198,8 +198,9 @@ proxy:
   # A replaced pod counts as available this long after Ready: above one probe
   # period + announce.propagationMs, so a rollout stops the next proxy only
   # once the replaced one is back in the routers' tables (refused at render
-  # otherwise). Provisional until the lab measures the propagation.
-  minReadySeconds: 15
+  # otherwise). Set from the lab's measured Ready-to-announced latency (6.7 s,
+  # kube-proxy iptables mode) plus margin, pending the nftables run.
+  minReadySeconds: 12
   # The BGP announcement of the VIPs (ADR-0056): one announce-only
   # LoadBalancer Service per VIP (templates/proxy-announce.yaml).
   announce:
@@ -211,9 +212,9 @@ proxy:
     loadBalancerClass: null
     # The latency from a readiness change to the routers' tables (EndpointSlice,
     # speaker, BGP UPDATE, router FIB), ms. The render requires the drain grace
-    # and minReadySeconds above it plus the probe's detection. Provisional
-    # until measured on the lab (docs/SIZING.md).
-    propagationMs: 8000
+    # and minReadySeconds above it plus the probe's detection. Measured on the
+    # lab, 6.8 s with kube-proxy in iptables mode, pending the nftables run.
+    propagationMs: 7000
     # The MetalLB objects of the announcement, rendered into MetalLB's
     # namespace: an IPAddressPool per VIP (autoAssign off), a BGPAdvertisement
     # per pool to that face's peers only, a BGPPeer per router from the proxy

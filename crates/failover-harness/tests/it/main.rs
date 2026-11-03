@@ -91,6 +91,7 @@ mod reinvite_round_not_yet_replicated;
 mod reinvite_server_side_at_the_takeover;
 mod reject_final_loss_via_lb;
 mod rejection_owed_after_the_ended_write;
+mod rejoining_proxy_stale_verdicts;
 mod relay_answer_failover;
 mod relay_resumed_at_the_takeover;
 mod relay_the_primary_never_read;

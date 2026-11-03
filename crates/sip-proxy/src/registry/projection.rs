@@ -168,18 +168,43 @@ impl WorkerAnnotations {
     /// Annotate health and acceptance of new calls in one write, `None`
     /// leaving that one as it is. No-op if the worker is unknown or unchanged.
     /// Returns whether the write turned the worker's health `Dead`.
+    ///
+    /// A write reading a worker `Alive` while the view reads no worker alive
+    /// returns every other worker read `Dead` to `Unknown`: verdicts taken
+    /// while the proxy reached no worker speak of its own reach, not of the
+    /// workers, so a rejoining proxy routes no response or request away from
+    /// a worker on them. Its probe judges each afresh.
     fn set_view(
         &self,
         id: &str,
         health: Option<WorkerHealth>,
         acceptance: Option<Acceptance>,
     ) -> bool {
-        let Some(previous) = self.snapshot().get(id).map(|r| (r.health, r.acceptance)) else {
+        let snapshot = self.snapshot();
+        let Some(previous) = snapshot.get(id).map(|r| (r.health, r.acceptance)) else {
             return false;
         };
         let next = (health.unwrap_or(previous.0), acceptance.unwrap_or(previous.1));
         if next == previous {
             return false;
+        }
+        let blind = !snapshot.values().any(|r| r.health == WorkerHealth::Alive);
+        let forgotten: Vec<WorkerId> = if blind && next.0 == WorkerHealth::Alive {
+            snapshot
+                .iter()
+                .filter(|(other, r)| other.as_str() != id && r.health == WorkerHealth::Dead)
+                .map(|(other, _)| other.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for other in &forgotten {
+            tracing::info!(
+                node = observe::node(),
+                worker = %other,
+                read_alive = id,
+                "dead verdict taken while no worker read alive forgotten"
+            );
         }
         if next.0 != previous.0 {
             let (from, to) = (previous.0, next.0);
@@ -198,6 +223,11 @@ impl WorkerAnnotations {
         self.update(|recs| {
             if let Some(rec) = recs.get_mut(id) {
                 (rec.health, rec.acceptance) = next;
+            }
+            for other in &forgotten {
+                if let Some(rec) = recs.get_mut(other).filter(|r| r.health == WorkerHealth::Dead) {
+                    rec.health = WorkerHealth::Unknown;
+                }
             }
         });
         next.0 == WorkerHealth::Dead && previous.0 != WorkerHealth::Dead

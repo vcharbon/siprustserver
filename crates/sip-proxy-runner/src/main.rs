@@ -73,7 +73,7 @@
 //!                    exceed PROXY_DRAIN_GRACE_MS (refused at boot) so a
 //!                    recreated pod waits out its predecessor instead of
 //!                    crash-looping (default 20000)
-//!   PROXY_DRAIN_GRACE_MS  SIGTERM (/readyz Draining) to exit, ms ≥ 1 (15000),
+//!   PROXY_DRAIN_GRACE_MS  SIGTERM (/readyz Draining) to exit, ms ≥ 1 (13000),
 //!                    past the withdrawal of the node's routes (ADR-0056)
 //!   PROXY_EXT_INTERFACE / PROXY_EXT_NEXT_HOPS / PROXY_EXT_FACE_CHECK_MS  the
 //!                    external interface, its IPv4 next hops, read every 500 ms:

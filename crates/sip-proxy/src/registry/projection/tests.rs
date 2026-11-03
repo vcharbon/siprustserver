@@ -33,6 +33,29 @@ fn health_write_composes_and_survives_membership_recompose() {
 }
 
 #[test]
+fn a_worker_read_alive_out_of_a_view_reading_none_alive_forgets_the_others_dead_verdicts() {
+    let (set, _sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2"), ("w2", "10.0.0.3")], 5060);
+    set.set_health("w0", WorkerHealth::Dead);
+    set.set_health("w1", WorkerHealth::Dead);
+    set.set_health("w2", WorkerHealth::Dead);
+    set.set_health("w1", WorkerHealth::Alive);
+    assert_eq!(set.resolve("w0").unwrap().health, WorkerHealth::Unknown);
+    assert_eq!(set.resolve("w1").unwrap().health, WorkerHealth::Alive);
+    assert_eq!(set.resolve("w2").unwrap().health, WorkerHealth::Unknown);
+    set.set_health("w0", WorkerHealth::Dead);
+    assert_eq!(set.resolve("w0").unwrap().health, WorkerHealth::Dead, "the probe judges afresh");
+}
+
+#[test]
+fn a_dead_verdict_taken_while_a_worker_read_alive_stands() {
+    let (set, _sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2"), ("w2", "10.0.0.3")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    set.set_health("w1", WorkerHealth::Dead);
+    set.set_health("w2", WorkerHealth::Alive);
+    assert_eq!(set.resolve("w1").unwrap().health, WorkerHealth::Dead);
+}
+
+#[test]
 fn address_move_resets_health() {
     let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
     set.set_health("w0", WorkerHealth::Dead);

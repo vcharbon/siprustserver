@@ -1,7 +1,11 @@
 """One event through the incident contract (ADR-0049 §2.2 to §2.6, §2.8).
 
 Phases in order: `inject`, `injected`, then after the hold `heal`, `healed`,
-then `recovered` once `probe` exits 0 (at once without a probe). A step that
+then `recovered` once `probe` exits 0 (at once without a probe). The hold
+(`duration_s`) counts from the earliest `applied_at_ms` an inject's facts
+state, the instant its fault took hold, else from `injected`: an inject that
+also waits for an effect of its fault (a route withdrawn) does not lengthen
+the fault. A step that
 fails or overruns its timeout records `failed`. Incidents inject in the listed
 order and heal in reverse; heal runs for every incident whose inject was
 attempted, whatever happened after it. A fault's inject and heal are its
@@ -98,6 +102,8 @@ class EventRunner:
         self.journal = journal
         self.wait_until = wait_until
         self.load = load
+        # The earliest applied_at_ms of each event's injects.
+        self.applied: dict[str, int] = {}
 
     def env(self, inc: Incident, ev: PlannedEvent, event_dir: Path) -> dict[str, str]:
         selector, namespace, pick = _target(inc, ev, self.lab)
@@ -166,6 +172,9 @@ class EventRunner:
         rc, facts = self.step(inc, ev, step, timeout_s)
         if facts is not None:
             self.journal.facts(ev.event_id, inc.name, step, facts)
+            applied = facts.get("applied_at_ms") if step == "inject" else None
+            if isinstance(applied, (int, float)) and not isinstance(applied, bool):
+                self.applied[ev.event_id] = min(int(applied), self.applied.get(ev.event_id, int(applied)))
         if rc == 0 or not quiet:
             self.journal.phase(ev.event_id, inc.name, done if rc == 0 else "failed")
         return rc == 0
@@ -213,7 +222,8 @@ class EventRunner:
                 failed = True
                 break
         if not failed:
-            self.wait_until(self.clock.now_ms() + int(ev.duration_s * 1000))
+            hold_from = min(self.applied.get(ev.event_id, self.clock.now_ms()), self.clock.now_ms())
+            self.wait_until(hold_from + int(ev.duration_s * 1000))
         heal_failed = False
         for inc in reversed(attempted):
             self.journal.phase(ev.event_id, inc.name, "heal")

@@ -2,7 +2,8 @@
 # Crash one front proxy: SIGKILL every container of the pod from its node and
 # prove them dead, then wait until its node left both VIPs' next hops. Facts:
 # the crash's, plus the node and the withdrawal of each VIP in ms after the
-# kill.
+# kill, or null with the instant the restarted proxy turned Ready again when
+# that came first.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=route.sh
@@ -17,7 +18,21 @@ while read -r vip addr; do
 done <<<"$pairs"
 hk_crash_prepare
 crashed="$(hk_crash_kill)"
-withdrawn="$(hk_route_wait absent "$(cat "$HAKIT_EVENT_DIR/killed_at_ms")" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs")" \
-  || hk_die "$node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the kill"
-jq -cn --argjson d "$crashed" --arg node "$node" --argjson w "$withdrawn" \
-  '$d + {node: $node, withdrawn_ms: $w}'
+# The restarted proxy may be Ready again before the withdrawal reaches the
+# routers: the node then never leaves the next hops, a valid outcome (the
+# flows' move to the peer is node_stop's and the cut incidents' to prove).
+killed="$(cat "$HAKIT_EVENT_DIR/killed_at_ms")"
+ready_at=null
+if ! withdrawn="$(hk_route_wait absent "$killed" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs")"; then
+  read -r pod _ _ <<<"$(hk_targets)"
+  at="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].lastTransitionTime}')" \
+    || hk_die "$pod cannot be read"
+  ready="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" \
+    || hk_die "$pod cannot be read"
+  [ "$ready" = True ] && [ -n "$at" ] && [ "$(hk_ms "$at")" -ge $(( killed - 1000 )) ] \
+    || hk_die "$node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the kill and $pod is not Ready again"
+  withdrawn=null
+  ready_at="$(hk_ms "$at")"
+fi
+jq -cn --argjson d "$crashed" --arg node "$node" --argjson w "$withdrawn" --argjson r "$ready_at" \
+  '$d + {node: $node, withdrawn_ms: $w, ready_again_at_ms: $r}'

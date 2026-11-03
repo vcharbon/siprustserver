@@ -40,4 +40,4 @@ if [ -n "$pairs" ]; then
     || hk_die "a stopped node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the stop"
 fi
 jq -cn --argjson n "$(printf '%s\n' "${nodes[@]}" | jq -Rnc '[inputs]')" --argjson p "$held" --argjson at "$at" \
-  --argjson w "$withdrawn" '{nodes: $n, pods: $p, stopped_at_ms: $at, withdrawn_ms: $w}'
+  --argjson w "$withdrawn" '{nodes: $n, pods: $p, stopped_at_ms: $at, applied_at_ms: $at, withdrawn_ms: $w}'

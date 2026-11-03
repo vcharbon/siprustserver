@@ -15,6 +15,7 @@ profile's `preflight` (stated defaults below). The samples are kept in
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -161,9 +162,11 @@ def preflight_errors(executor: Executor, clock: Clock, t: Thresholds) -> list[st
 
 
 class HostSampler:
-    """Samples the host every `SAMPLE_MS` while the runner waits; appends each
-    sample to `host.jsonl` and pushes the interval it closes. A host without
-    PSI is sampled once and then left alone."""
+    """Samples the host every `SAMPLE_MS`; appends each sample to `host.jsonl`
+    and pushes the interval it closes. A host without PSI is sampled once and
+    then left alone. The runner ticks it while it waits; on a real clock
+    `start_thread` also ticks it on a thread of its own, so a long blocking
+    step (an incident's inject) leaves no gap in the samples."""
 
     def __init__(self, run: str, run_dir: Path, executor: Executor, clock: Clock, vm: VictoriaMetrics) -> None:
         self.run = run
@@ -174,8 +177,30 @@ class HostSampler:
         self.last: Json | None = None
         self.available = True
         self.due_ms = clock.now_ms()
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def start_thread(self) -> None:
+        """Tick every `SAMPLE_MS` on a daemon thread until `stop`."""
+
+        def run() -> None:
+            while not self.stopped.wait(SAMPLE_MS / 1000):
+                self.tick()
+
+        self.thread = threading.Thread(target=run, name="host-sampler", daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join(timeout=5)
 
     def tick(self) -> None:
+        with self.lock:
+            self._tick()
+
+    def _tick(self) -> None:
         now = self.clock.now_ms()
         if not self.available or now < self.due_ms:
             return
