@@ -6,11 +6,12 @@ what to watch, and the trade-off either way. Where a value comes from for a
 given deployment is that deployment's own sizing page; this page does not
 repeat it. A product built on this stack adds its own rows in its own guide.
 
-Every relation below is checked, never only documented: a worker or proxy
-refuses to start on its final configuration and names every variable involved
-(`b2bua_runner_kit::ConfigCheck`, the proxy's `ProxyConfig`), and the `siprust`
-chart refuses to render (`deploy/helm/siprust/templates/checks.yaml`). A value
-set through a component's `extraEnv` escapes the render checks.
+Every relation below is checked, but those a row marks "a derivation, not
+checked": a worker or proxy refuses to start on its final configuration and
+names every variable involved (`b2bua_runner_kit::ConfigCheck`, the proxy's
+`ProxyConfig`), and the `siprust` chart refuses to render
+(`deploy/helm/siprust/templates/checks.yaml`). A value set through a
+component's `extraEnv` escapes the render checks.
 
 ## Worked example: the emergency call ceiling
 
