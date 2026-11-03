@@ -1,7 +1,7 @@
 //! What a failed call owes the SUT before its endpoints drop: its teardown
 //! transactions run to their end, and its callee legs answer what the SUT
 //! still sends them; then what the call leaves once its traffic is over. A
-//! call whose in-dialog request awaits its final at its end is held the same
+//! call with a client transaction still open at its end is held the same
 //! way, with no quiesce.
 
 use std::sync::Arc;
@@ -40,19 +40,19 @@ impl Tail {
     }
 }
 
-/// Hold the call when it `failed` or `awaits` the final of an in-dialog
-/// request, releasing it in the background ([`release`]); a call neither
-/// failed nor awaiting a final ends at once.
+/// Hold the call when it `failed` or a client transaction of it is still
+/// `open` (RFC 3261 §17.1.2), releasing it in the background ([`release`]);
+/// any other call ends at once.
 pub(crate) async fn hold(
     failed: bool,
-    awaits: bool,
+    open: bool,
     tails: Arc<RwLock<()>>,
     net: Arc<MuxNetwork>,
     caller: &Agent,
     callees: &[(&str, Agent)],
     quiesce: Duration,
 ) -> Tail {
-    match (failed, awaits) {
+    match (failed, open) {
         (false, false) => Tail(None),
         (true, _) => release(tails, net, caller, callees, quiesce).await,
         (false, true) => release(tails, net, caller, callees, Duration::ZERO).await,

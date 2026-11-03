@@ -354,6 +354,12 @@ impl CallTxns {
         true
     }
 
+    /// Whether a client transaction is still open: its final not arrived and
+    /// Timer B/F not expired.
+    pub(super) fn client_open(&self) -> bool {
+        self.inner.lock().unwrap().client.values().any(|ctl| ctl.open())
+    }
+
     /// Park until every client transaction open now has ended: its final
     /// arrived, or Timer B/F expired. Retransmission runs meanwhile, so a
     /// teardown CANCEL or BYE lost on the wire still reaches its peer.

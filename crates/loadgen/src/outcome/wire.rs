@@ -29,7 +29,8 @@ pub struct WireFailure {
     pub code: Option<u16>,
 }
 
-/// One in-dialog request a callee leg received (ACK and CANCEL aside): what
+/// One in-dialog request the caller or a callee leg received (ACK and CANCEL
+/// aside): what
 /// it said, for a reader that tells one outcome of an in-dialog exchange from
 /// another (a NOTIFY's subscription state and sipfrag, an INFO's payload).
 #[derive(Debug, Clone, PartialEq)]
@@ -43,7 +44,8 @@ pub struct LegRequest {
     pub body: Vec<u8>,
 }
 
-/// The bound on the requests a leg's facts keep, and on each one's body.
+/// The bound on the requests the caller's or a leg's facts keep, and on each
+/// one's body.
 pub const LEG_REQUESTS_MAX: usize = 8;
 pub const LEG_REQUEST_BODY_MAX: usize = 64;
 
@@ -100,6 +102,9 @@ pub struct WireFacts {
     pub bye_received: Option<Option<u16>>,
     /// An in-dialog request or the BYE drew a 481: the dialog was gone.
     pub saw_481: bool,
+    /// The in-dialog requests the caller received, a retransmission once, the
+    /// first [`LEG_REQUESTS_MAX`].
+    pub received: Vec<LegRequest>,
     /// In-dialog requests answered with a non-2xx final.
     pub failures: Vec<WireFailure>,
     pub legs: Vec<LegFacts>,
@@ -131,7 +136,8 @@ impl WireFacts {
 
 /// After the seal, the final `code` to the request `method` `cseq`: a
 /// request other than a BYE that `pending` still holds is settled, a non-2xx
-/// one a failure.
+/// one a failure. A late 481 is that request's failure only: the call's
+/// ending stays as the seal left it, never `cut`.
 fn settle_pending(
     pending: &mut HashMap<u32, (String, i64)>,
     failures: &mut Vec<WireFailure>,
@@ -194,6 +200,12 @@ impl CallWire {
         self.facts.lock().unwrap().sealed = true;
     }
 
+    /// Whether an in-dialog request other than a BYE still awaits its final
+    /// ([`WireFacts::awaits_finals`]).
+    pub fn awaits(&self) -> bool {
+        self.facts.lock().unwrap().awaits_finals()
+    }
+
     /// The facts seen so far.
     pub fn facts(&self) -> WireFacts {
         self.facts.lock().unwrap().clone()
@@ -238,8 +250,11 @@ impl WireFacts {
                     self.in_dialog_final(cseq, code, now);
                 }
             }
-            (Dir::In, None) if id.method == Some("BYE") => {
-                self.bye_received.get_or_insert(None);
+            (Dir::In, None) => {
+                if id.method == Some("BYE") {
+                    self.bye_received.get_or_insert(None);
+                }
+                note_request(&mut self.received, d, now);
             }
             (Dir::Out, Some(code)) if method == "BYE" && code >= 200 => {
                 self.bye_received = Some(Some(code));
@@ -344,7 +359,7 @@ impl WireFacts {
             (Dir::In, None, Some(i)) if id.method == Some("CANCEL") => {
                 self.legs[i].cancelled = true;
             }
-            (Dir::In, None, Some(i)) => self.legs[i].received_request(d, now),
+            (Dir::In, None, Some(i)) => note_request(&mut self.legs[i].received, d, now),
             (Dir::Out, None, Some(i)) => self.legs[i].sent_request(id, now),
             (Dir::In, Some(code), Some(i)) => self.legs[i].own_final(id, code, now),
             (Dir::Out, Some(code), Some(i)) if id.cseq_method == Some("INVITE") => {
@@ -383,27 +398,30 @@ impl LegFacts {
             self.failures.push(WireFailure { at_ms: now, method, code: Some(code) });
         }
     }
+}
 
-    fn received_request(&mut self, d: &Datagram<'_>, now: i64) {
-        let id = d.id();
-        let (Some(method), Some(cseq)) = (id.method, id.cseq) else { return };
-        let seen = self.received.iter().any(|r| r.cseq == cseq && r.method == method);
-        if method == "ACK" || untagged(id) || seen || self.received.len() >= LEG_REQUESTS_MAX {
-            return;
-        }
-        let raw = d.raw();
-        let subscription_state = header_value(raw, "Subscription-State")
-            .and_then(|v| SubscriptionState::parse(&SipStr::owned(&v)).ok())
-            .map(|s| s.token().to_ascii_lowercase());
-        let body = body(raw).unwrap_or_default();
-        self.received.push(LegRequest {
-            at_ms: now,
-            method: method.to_string(),
-            cseq,
-            subscription_state,
-            body: body[..body.len().min(LEG_REQUEST_BODY_MAX)].to_vec(),
-        });
+/// Note the in-dialog request `d` received at `now` in `received` (ACK and
+/// out-of-dialog requests aside, a retransmission once, the first
+/// [`LEG_REQUESTS_MAX`]).
+fn note_request(received: &mut Vec<LegRequest>, d: &Datagram<'_>, now: i64) {
+    let id = d.id();
+    let (Some(method), Some(cseq)) = (id.method, id.cseq) else { return };
+    let seen = received.iter().any(|r| r.cseq == cseq && r.method == method);
+    if method == "ACK" || untagged(id) || seen || received.len() >= LEG_REQUESTS_MAX {
+        return;
     }
+    let raw = d.raw();
+    let subscription_state = header_value(raw, "Subscription-State")
+        .and_then(|v| SubscriptionState::parse(&SipStr::owned(&v)).ok())
+        .map(|s| s.token().to_ascii_lowercase());
+    let body = body(raw).unwrap_or_default();
+    received.push(LegRequest {
+        at_ms: now,
+        method: method.to_string(),
+        cseq,
+        subscription_state,
+        body: body[..body.len().min(LEG_REQUEST_BODY_MAX)].to_vec(),
+    });
 }
 
 #[cfg(test)]

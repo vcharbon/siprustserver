@@ -139,7 +139,7 @@ pub fn build(
         CallOutcome::Ok { branch } => format!("ok:{branch}"),
         other => ResultClass::from(other).label(),
     };
-    Some(json!({
+    let mut record = json!({
         "schema": SCHEMA,
         "run": meta.run,
         "source": meta.source,
@@ -160,7 +160,11 @@ pub fn build(
         "failures": failures,
         "legs": legs(wire),
         "producer_verdict": verdict,
-    }))
+    });
+    if !wire.received.is_empty() {
+        record["received"] = wire.received.iter().map(received).collect();
+    }
+    Some(record)
 }
 
 /// The caller's failed in-dialog requests, then each callee leg's own (naming

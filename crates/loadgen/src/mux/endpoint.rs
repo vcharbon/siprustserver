@@ -88,6 +88,12 @@ impl MuxNetwork {
         self
     }
 
+    /// Whether a client transaction is still open on this call's endpoints
+    /// (final not arrived, Timer B/F not expired). Never without the engine.
+    pub fn client_txn_open(&self) -> bool {
+        self.engines.lock().unwrap().iter().any(|txns| txns.client_open())
+    }
+
     /// Park until every client transaction this call's endpoints have open
     /// has ended (final received, or Timer B/F), retransmitting meanwhile:
     /// what a failed call waits for before its endpoints drop, so its

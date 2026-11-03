@@ -567,11 +567,15 @@ attributes it to the incident window it fell in, against that window's budget
 (ADR-0049 §3.5).
 
 An in-dialog request other than a BYE still awaiting its final when its call
-ends is judged by its client transaction (RFC 3261 §17.1.2): with
-`--auto-retransmit`, the call's endpoints stay and retransmit it until its
-final or Timer F (64·T1, 32 s), and the call's record is written then; without
-it, the request fails at the call's end. A BYE that ends the dialog never fails
-it.
+ends is judged by its client transaction (RFC 3261 §17.1.2). With
+`--auto-retransmit`, a call with a client transaction still open is held: its
+endpoints stay and retransmit until the final or Timer F (64·T1, 32 s), and
+the call's record is written then. A request still without a final is a
+failure stamped at the call's end (`ended_at_ms`). Without the engine nothing
+is held and such a request fails at the call's end. A BYE that ends the dialog
+never fails it. A held call no longer counts against `--max-in-flight`, keeps
+its endpoints and their demux entries for up to 32 s, and delays the drain by
+as much; outside a loss window no call is held.
 
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`
 per bucket); the rest are counted only. A non-sampled failure still gets a stub
@@ -589,7 +593,8 @@ Every call placed writes one `call-outcome.v1` record
 (`tooling/hakit/schemas/call-outcome.v1.schema.json`, ADR-0049 §4) when the
 driver is done with it: what the caller saw on the wire (its first INVITE,
 first provisional, final and its Reason cause key, answer, teardown, failed
-in-dialog requests) and how each callee leg loadgen played ended. The result
+in-dialog requests, the in-dialog requests it received) and how each callee
+leg loadgen played ended. The result
 class rides in `producer_verdict` only. Records are appended to
 `--records-file` (default `<out-dir>/call-outcomes.jsonl`) and, with
 `--records-url http://host:port`, pushed to VictoriaLogs' `/insert/jsonline`

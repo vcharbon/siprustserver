@@ -432,9 +432,9 @@ pub(crate) async fn run_one(
     let ended_at_ms = transport.clock.now_ms();
     let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
     // A request awaiting its final is judged by its transaction (RFC 3261 §17.1.2).
-    let awaits = wire.as_ref().is_some_and(|w| w.facts().awaits_finals());
+    let (open, awaits) = (net.client_txn_open(), wire.as_ref().is_some_and(CallWire::awaits));
     let (agents, quiesce) = (&callee_agents, call.teardown_quiesce);
-    let tail = failed_call::hold(failed, awaits, tails, net, &alice, agents, quiesce).await;
+    let tail = failed_call::hold(failed, open, tails, net, &alice, agents, quiesce).await;
 
     // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
     // the attached case's lowered `allowViolations` PLUS the plan's declared

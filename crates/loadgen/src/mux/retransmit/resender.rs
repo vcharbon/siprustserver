@@ -48,6 +48,11 @@ impl ResendCtl {
     pub(super) fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }
+    /// Whether the transaction is still open: neither acknowledged nor past
+    /// its timeout.
+    pub(super) fn open(&self) -> bool {
+        !self.stopped() && tokio::time::Instant::now() < self.deadline
+    }
     /// Park until the transaction ends: acknowledged, or timed out.
     pub(super) async fn ended(&self) {
         loop {
