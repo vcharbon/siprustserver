@@ -214,7 +214,7 @@ def test_kill_proxy_fails_while_the_node_stays_announced(tmp_path: Path) -> None
     sb = Sandbox(tmp_path, "kill_proxy", guard_window_s="1", withdraw_timeout_s="2")
     sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]),
              guard_started("2020-01-01T00:00:00.000000Z", "false"))
-    failed(sb.run("inject"), "its route guard did not restart onto a fit proxy within 1000 ms")
+    failed(sb.run("inject"), "its route guard did not restart onto a fit proxy within 1900 ms")
 
 
 def test_a_guard_restarted_onto_a_fit_proxy_within_its_dead_bound_is_recorded_apart(tmp_path: Path) -> None:
@@ -224,6 +224,15 @@ def test_a_guard_restarted_onto_a_fit_proxy_within_its_dead_bound_is_recorded_ap
     f = facts(sb.run("inject"))
     assert (f["withdrawn_ms"], f["readiness_withdrawn_ms"]) == (None, None)
     assert f["guard_restarted_at_ms"] == 4070908800250
+
+
+def test_a_guard_restarted_past_its_dead_bound_but_inside_bfd_detection_is_recorded_apart(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "kill_proxy", guard_window_s="1", withdraw_timeout_s="2", dead_ms="0",
+                 bfd_detect_ms="3000000000000")
+    sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]),
+             guard_started("2099-01-01T00:00:00.250000Z", "false"))
+    f = facts(sb.run("inject"))
+    assert (f["withdrawn_ms"], f["guard_restarted_at_ms"]) == (None, 4070908800250)
 
 
 def test_a_guard_restarted_onto_an_unfit_proxy_is_no_fit_restart(tmp_path: Path) -> None:

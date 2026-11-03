@@ -2,11 +2,11 @@
 # Crash one front proxy: SIGKILL every container of the pod from its node and
 # prove them dead, then time its node's withdrawal from both VIPs' next hops.
 # The route guard withdraws it within guard_window_s, unless the restarted
-# guard found the restarted proxy fit within its dead-man bound (dead_ms after
-# the kill, read from its "route guard started" log line): it then lets the
-# node out at once, a valid outcome recorded as guard_restarted_at_ms with no
-# withdrawn_ms, and a later withdrawal through readiness, if any, as
-# readiness_withdrawn_ms. Otherwise the withdrawal is awaited for
+# guard found the restarted proxy fit before the routers could withdraw the
+# node (dead_ms plus bfd_detect_ms after the kill, read from its "route guard
+# started" log line): it then keeps the node in, a valid outcome recorded as
+# guard_restarted_at_ms with no withdrawn_ms, and a later withdrawal through
+# readiness, if any, as readiness_withdrawn_ms. Otherwise the withdrawal is awaited for
 # withdraw_timeout_s. Facts: the crash's, the node and those three.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
@@ -33,14 +33,15 @@ if ! withdrawn="$(hk_route_wait absent "$killed" "$window" "$pairs")"; then
   started="$(grep -m1 'route guard started' <<<"$logs" | sed 's/\x1b\[[0-9;]*m//g' || true)"
   at=""
   if [ -n "$started" ]; then at="$(hk_ms "${started%% *}")"; fi
-  if [ -n "$at" ] && [ "$at" -ge "$killed" ] && [ "$at" -le $(( killed + HAKIT_PARAM_DEAD_MS )) ] \
+  bound=$(( HAKIT_PARAM_DEAD_MS + HAKIT_PARAM_BFD_DETECT_MS ))
+  if [ -n "$at" ] && [ "$at" -ge "$killed" ] && [ "$at" -le $(( killed + bound )) ] \
     && grep -q 'withdrawn=false' <<<"$started"; then
     guard_at="$at"
     withdrawn=null
     readiness="$(hk_route_wait absent "$killed" "$rest" "$pairs")" || readiness=null
   else
     withdrawn="$(hk_route_wait absent "$killed" "$rest" "$pairs")" \
-      || hk_die "$node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the kill and its route guard did not restart onto a fit proxy within ${HAKIT_PARAM_DEAD_MS} ms"
+      || hk_die "$node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the kill and its route guard did not restart onto a fit proxy within ${bound} ms"
   fi
 fi
 jq -cn --argjson d "$crashed" --arg node "$node" --argjson w "$withdrawn" --argjson g "$guard_at" \

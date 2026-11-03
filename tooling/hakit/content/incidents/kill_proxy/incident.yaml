@@ -6,11 +6,11 @@ description: >-
   The node's route guard withdraws both VIPs (its last refresh runs out) and
   the routers move the node's flows to the peer. Inject measures, from the
   kill, when the node left each VIP's next hops in the host's table; when the
-  restarted guard found the restarted proxy fit within its dead-man bound, it
-  lets the node out at once and inject records that instead, with any later
-  withdrawal through readiness apart. The probe waits for the restart, proves
-  no incarnation overlap, and wants both VIPs routed over every live proxy's
-  node again.
+  restarted guard found the restarted proxy fit before the routers' BFD could
+  declare the node down, it keeps the node in and inject records that instead,
+  with any later withdrawal through readiness apart. The probe waits for the
+  restart, proves no incarnation overlap, and wants both VIPs routed over
+  every live proxy's node again.
 kind: fault
 target:
   selector: app=sip-front-proxy
@@ -43,15 +43,23 @@ params:
     type: integer
     default: 1000
     description: >-
-      The route guard's dead-man bound (ROUTE_GUARD_DEAD_MS): a guard that
-      started later than this after the kill did not find the proxy fit
-      before the last refresh ran out.
+      The route guard's dead-man bound (ROUTE_GUARD_DEAD_MS): the last
+      refresh of a dead guard runs out at most this long after the kill.
+  bfd_detect_ms:
+    type: integer
+    default: 900
+    description: >-
+      The routers' BFD detection time (interval times multiplier), counted
+      from the refresh running out. A guard restarted onto a fit proxy
+      within dead_ms plus this after the kill refreshes the node before BFD
+      declares it down, so the node is never withdrawn; a later start is a
+      failed dead-man.
   guard_container:
     type: string
     default: route-guard
     description: >-
       The node's route guard container: restarted onto a proxy already fit
-      again, it lets the node out before the last refresh ran out.
+      again, it keeps the node in before the routers withdraw it.
 duration_s: 0
 expected_s: 60
 timeouts:
