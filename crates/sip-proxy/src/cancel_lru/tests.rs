@@ -286,14 +286,16 @@ async fn a_flood_of_invite_entries_keeps_a_short_memo() {
     assert_eq!(lru.lookup(&key("rtx")).map(|e| e.branch), Some("short".to_string()));
 }
 
-/// The working set one instance of an active pair holds at its worst: each
-/// call's INVITE entry whose final crosses the other instance, kept to its
-/// cap; the call's other leg's INVITE entry, shortened at its final after the
-/// mean ring; and the call's retransmission memos. The smallest memo the
-/// start check accepts for a rate holds that working set at the rate without
-/// forgetting an entry.
-#[tokio::test(start_paused = true)]
-async fn a_memo_holding_a_rate_keeps_every_crossed_invite_entry_to_its_cap() {
+/// The working set one instance of an active pair holds at its worst, for
+/// calls of `invites` INVITEs each: the INVITE entry of one of the call's two
+/// basic legs whose final crosses the other instance, kept to its cap; the
+/// other basic leg's entry, shortened at its final after the mean ring; every
+/// further INVITE (a re-INVITE, a rerouted or transferred leg) crossing to its
+/// cap; and the call's retransmission memos, three for each further INVITE
+/// (its INVITE, its ACK, its ACK hop or Timer H entry). The smallest memo the
+/// start check accepts for a rate holds that working set without forgetting
+/// an entry.
+async fn holds_the_worst_working_set(invites: u64) {
     const RATE: usize = 10;
     let mut bounds = MemoBounds {
         max_entries: 1,
@@ -301,6 +303,7 @@ async fn a_memo_holding_a_rate_keeps_every_crossed_invite_entry_to_its_cap() {
         stripes: 1,
         invite_ttl_ms: invite_entry_ttl_ms(60),
         mean_ring_ms: DEFAULT_MEAN_RING_MS,
+        invites_per_call_milli: invites * 1_000,
     };
     while calls_per_second(&bounds) < RATE {
         bounds.max_entries += 1;
@@ -308,6 +311,7 @@ async fn a_memo_holding_a_rate_keeps_every_crossed_invite_entry_to_its_cap() {
     let lru = CancelBranchLru::with_bounds(Clock::test_at(0), bounds);
     let ring_s = bounds.mean_ring_ms / 1_000;
     let seconds = (bounds.invite_ttl_ms / 1_000 + ring_s + 10) as usize;
+    let extra = invites.saturating_sub(2) as usize;
     let mut ringing = std::collections::VecDeque::new();
     for second in 0..seconds {
         for call in 0..RATE {
@@ -315,7 +319,11 @@ async fn a_memo_holding_a_rate_keeps_every_crossed_invite_entry_to_its_cap() {
             lru.remember(&key(&format!("crossed-{id}")), entry("a"), Lifetime::InviteTransaction);
             lru.remember(&key(&format!("seen-{id}")), entry("b"), Lifetime::InviteTransaction);
             ringing.push_back((second + ring_s as usize, key(&format!("seen-{id}"))));
-            for memo in 0..9 {
+            for more in 0..extra {
+                let k = key(&format!("more{more}-{id}"));
+                lru.remember(&k, entry("c"), Lifetime::InviteTransaction);
+            }
+            for memo in 0..9 + 3 * extra {
                 lru.remember(
                     &key(&format!("rtx{memo}-{id}")),
                     entry("r"),
@@ -333,7 +341,17 @@ async fn a_memo_holding_a_rate_keeps_every_crossed_invite_entry_to_its_cap() {
     assert_eq!(
         lru.evicted(),
         0,
-        "a memo of {} entries forgot entries at {RATE} calls/s",
+        "a memo of {} entries forgot entries at {RATE} calls/s of {invites} INVITEs",
         bounds.max_entries
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_memo_holding_a_rate_keeps_every_crossed_invite_entry_to_its_cap() {
+    holds_the_worst_working_set(2).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_memo_holding_a_rate_keeps_the_entries_of_calls_with_more_invites() {
+    holds_the_worst_working_set(3).await;
 }

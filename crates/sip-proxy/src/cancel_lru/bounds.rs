@@ -22,25 +22,24 @@ pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
 /// entry waits for its final, on average.
 pub const DEFAULT_MEAN_RING_MS: u64 = 30_000;
 
-/// The entry-milliseconds one call holds at one instance, at most, for a mean
-/// ring of `mean_ring_ms` and an INVITE entry cap of `invite_ttl_ms`: the
-/// INVITE-transaction pool's part (one leg's entry to its cap, the other's
-/// for the ring), Timer H in the
-/// retransmission pool for each leg's INVITE entry its final shortened
-/// (ADR-0009 X7), a retransmission memo for each leg's INVITE, ACK and BYE
-/// and for one keepalive OPTIONS per leg, and one ACK hop for a relayed
-/// non-2xx final.
-pub const fn entry_ms_per_call(mean_ring_ms: u64, invite_ttl_ms: u64) -> u64 {
-    invite_ms_per_call(mean_ring_ms, invite_ttl_ms) + 2 * TIMER_H + 9 * RTX_ENTRY_TTL_MS
-}
+/// The default INVITEs per call, thousandths: a basic call's two, one per
+/// leg.
+pub const DEFAULT_INVITES_PER_CALL_MILLI: u64 = 2_000;
 
-/// The INVITE-transaction pool's part of [`entry_ms_per_call`]. An entry
-/// whose final crosses the other instance of an active pair lives to its
-/// cap. A call has one leg whose final can cross at this instance: its other
-/// leg's INVITE passes here only when its final does, and that entry is
-/// shortened after the ring.
-const fn invite_ms_per_call(mean_ring_ms: u64, invite_ttl_ms: u64) -> u64 {
-    invite_ttl_ms.saturating_add(mean_ring_ms)
+/// The entry-milliseconds one call holds at one instance, at most, under
+/// `bounds`: the INVITE-transaction pool's part ([`MemoBounds::invite_ms_per_call`])
+/// and the retransmission pool's. A basic call leaves there Timer H for each
+/// leg's INVITE entry its final shortened (ADR-0009 X7), a retransmission
+/// memo for each leg's INVITE, ACK and BYE and for one keepalive OPTIONS per
+/// leg, and one ACK hop for a relayed non-2xx final; each further INVITE
+/// leaves three more: its INVITE's and its ACK's retransmission memos, and its
+/// ACK hop or its shortened entry.
+pub const fn entry_ms_per_call(bounds: &MemoBounds) -> u64 {
+    let further = bounds.further_invites_milli();
+    bounds.invite_ms_per_call()
+        + 2 * TIMER_H
+        + 9 * RTX_ENTRY_TTL_MS
+        + further.saturating_mul(TIMER_H + 2 * RTX_ENTRY_TTL_MS) / 1_000
 }
 
 /// The default byte budget: 3/8 of the front proxy's 512 MiB memory limit.
@@ -77,6 +76,10 @@ pub struct MemoBounds {
     pub invite_ttl_ms: u64,
     /// The mean ring the pools are split on, ms.
     pub mean_ring_ms: u64,
+    /// The INVITEs that cross the pair per call on average, thousandths, at
+    /// least a basic call's two: re-INVITEs and the further legs of a
+    /// rerouted or transferred call each write an entry.
+    pub invites_per_call_milli: u64,
 }
 
 impl Default for MemoBounds {
@@ -87,11 +90,32 @@ impl Default for MemoBounds {
             stripes: DEFAULT_STRIPES,
             invite_ttl_ms: INVITE_ENTRY_TTL_MS,
             mean_ring_ms: DEFAULT_MEAN_RING_MS,
+            invites_per_call_milli: DEFAULT_INVITES_PER_CALL_MILLI,
         }
     }
 }
 
 impl MemoBounds {
+    /// The INVITEs per call beyond a basic call's two, thousandths.
+    const fn further_invites_milli(&self) -> u64 {
+        self.invites_per_call_milli.saturating_sub(DEFAULT_INVITES_PER_CALL_MILLI)
+    }
+
+    /// The INVITE-transaction pool's part of [`entry_ms_per_call`]. An entry
+    /// whose final crosses the other instance of an active pair lives to its
+    /// cap. Of a call's two basic legs, at most one crosses at this instance:
+    /// the B2BUA sends the caller leg's final and the callee leg's INVITE on
+    /// one flow, so when that flow lands elsewhere the caller leg's entry
+    /// crosses here and the callee leg's INVITE never passes here, and when
+    /// it lands here the caller leg's entry is shortened after the ring. Each
+    /// further INVITE may cross to its cap.
+    pub const fn invite_ms_per_call(&self) -> u64 {
+        let further = self.further_invites_milli();
+        self.invite_ttl_ms
+            .saturating_add(self.mean_ring_ms)
+            .saturating_add(further.saturating_mul(self.invite_ttl_ms) / 1_000)
+    }
+
     /// The stripe count, at least one.
     pub(super) fn stripe_count(&self) -> usize {
         self.stripes.max(1)
@@ -122,10 +146,8 @@ impl MemoBounds {
 
     /// The INVITE-transaction pool's part of `n`.
     fn invite_share(&self, n: usize) -> usize {
-        let whole = usize::try_from(entry_ms_per_call(self.mean_ring_ms, self.invite_ttl_ms))
-            .unwrap_or(usize::MAX);
-        let part =
-            usize::try_from(invite_ms_per_call(self.mean_ring_ms, self.invite_ttl_ms)).unwrap_or(0);
+        let whole = usize::try_from(entry_ms_per_call(self)).unwrap_or(usize::MAX);
+        let part = usize::try_from(self.invite_ms_per_call()).unwrap_or(0);
         (n / whole).saturating_mul(part).saturating_add((n % whole).saturating_mul(part) / whole)
     }
 }
@@ -136,8 +158,6 @@ impl MemoBounds {
 pub fn calls_per_second(bounds: &MemoBounds) -> usize {
     let entries = bounds.max_entries.min(bounds.max_bytes / TYPICAL_ENTRY_BYTES);
     let call_seconds =
-        usize::try_from(entry_ms_per_call(bounds.mean_ring_ms, bounds.invite_ttl_ms) / 1_000)
-            .unwrap_or(usize::MAX)
-            .max(1);
+        usize::try_from(entry_ms_per_call(bounds) / 1_000).unwrap_or(usize::MAX).max(1);
     entries.saturating_mul(4) / call_seconds.saturating_mul(5)
 }

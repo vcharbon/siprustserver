@@ -149,9 +149,10 @@ workers' `B2BUA_INVITE_TXN_TIMEOUT_SEC`) stays the cap of an entry whose final c
 the other one. The worker's flow and the caller's hash on their own, so in steady state
 a call's legs often cross: at one instance a call holds, at most, one leg's INVITE entry
 to its cap (the leg whose final crosses the other instance) and its other leg's entry for
-the ring, then Timer H. The memo is sized on that working set at the deployment's call
-rate, mean ring and cap (`cancel_lru::entry_ms_per_call`), so its eviction happens only
-under abnormal load. The instance that placed a call knows where it went, a placement
+the ring, then Timer H; every further INVITE (a re-INVITE, a rerouted or transferred leg)
+may cross to its cap too. The memo is sized on that working set at the deployment's call
+rate, mean ring, INVITEs per call and cap (`cancel_lru::entry_ms_per_call`), so its
+eviction happens only under abnormal load. The instance that placed a call knows where it went, a placement
 away from the call's rendezvous winner included (a spill past an empty bucket, a
 band-filtered winner, a winner refusing new calls, a winner away or not yet back when
 the call came).

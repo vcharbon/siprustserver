@@ -117,8 +117,9 @@
 //!   PROXY_BRANCH_MEMO_MAX_BYTES / _MAX_ENTRIES  accounted bytes and entries of
 //!                    the CANCEL/ACK/retransmission memo, ≥ 1 (default 192 MiB
 //!                    and the 78 643 heaviest entries it holds); at
-//!                    PROXY_BRANCH_MEMO_MEAN_RING_MS (default 30000) and the
-//!                    INVITE entry cap they hold PROXY_SELF_GATE_CPS_RATE's
+//!                    PROXY_BRANCH_MEMO_MEAN_RING_MS (default 30000), the
+//!                    INVITE entry cap and PROXY_BRANCH_MEMO_INVITES_PER_CALL
+//!                    (2 to 100, default 2) they hold PROXY_SELF_GATE_CPS_RATE's
 //!                    calls (refused at boot)
 //!   PROXY_INVITE_TXN_TIMEOUT_SEC  the workers' INVITE bound, 33..=600 (default
 //!                    158): an INVITE memo entry lives it + Timer H at most

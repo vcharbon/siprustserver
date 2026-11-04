@@ -52,13 +52,17 @@ fn the_branch_memo_bounds_are_read() {
         ("PROXY_BRANCH_MEMO_MAX_BYTES", "8589934592"),
         ("PROXY_BRANCH_MEMO_MEAN_RING_MS", "20000"),
         ("PROXY_INVITE_TXN_TIMEOUT_SEC", "210"),
+        ("PROXY_BRANCH_MEMO_INVITES_PER_CALL", "2.5"),
     ])
     .expect("valid");
     let memo = cfg.branch_memo;
     assert_eq!((memo.max_entries, memo.max_bytes), (100_000, 8 << 30));
     assert_eq!((memo.mean_ring_ms, memo.invite_ttl_ms), (20_000, 242_000));
+    assert_eq!(memo.invites_per_call_milli, 2_500);
     let errors = boot(&[("PROXY_BRANCH_MEMO_MAX_BYTES", "0")]).expect_err("zero bytes");
     assert!(errors.iter().any(|e| e.contains("PROXY_BRANCH_MEMO_MAX_BYTES")), "{errors:?}");
+    let errors = boot(&[("PROXY_BRANCH_MEMO_INVITES_PER_CALL", "1.5")]).expect_err("one leg");
+    assert!(errors.iter().any(|e| e.contains("PROXY_BRANCH_MEMO_INVITES_PER_CALL")), "{errors:?}");
 }
 
 // ── parse_ext_face_cidrs — dual-face boot rule ───────────────────────────

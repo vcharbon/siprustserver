@@ -151,19 +151,24 @@ impl ProxyConfig {
         if let Err(violations) = validate_config(timings, &observer) {
             errors.extend(violations);
         }
-        // The memo holds the entries of every call the self-gate admits.
+        // The memo holds the entries of every call the self-gate admits. The
+        // gate counts the external INVITEs; the B-legs the workers send
+        // bypass it, so the check holds while the system's whole rate stays
+        // within one proxy's gate, each B-leg pairing an admitted call.
         if let Some(gate) = &self_gate {
             let held = calls_per_second(&branch_memo);
             if held < usize::try_from(gate.cps_bucket_rate).unwrap_or(usize::MAX) {
                 errors.push(format!(
                     "PROXY_BRANCH_MEMO_MAX_ENTRIES={} / PROXY_BRANCH_MEMO_MAX_BYTES={} hold the \
-                     memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={} and an INVITE \
-                     entry cap of {} ms (PROXY_INVITE_TXN_TIMEOUT_SEC + Timer H), below \
+                     memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={}, \
+                     PROXY_BRANCH_MEMO_INVITES_PER_CALL={} and an INVITE entry cap of {} ms \
+                     (PROXY_INVITE_TXN_TIMEOUT_SEC + Timer H), below \
                      PROXY_SELF_GATE_CPS_RATE={}: admitted calls would push out the entries \
                      their CANCEL and ACK are routed by",
                     branch_memo.max_entries,
                     branch_memo.max_bytes,
                     branch_memo.mean_ring_ms,
+                    branch_memo.invites_per_call_milli as f64 / 1_000.0,
                     branch_memo.invite_ttl_ms,
                     gate.cps_bucket_rate
                 ));
@@ -419,6 +424,19 @@ fn self_gate(env: &mut EnvReader) -> Option<ProxySelfGateConfig> {
     on.then_some(cfg)
 }
 
+/// `PROXY_BRANCH_MEMO_INVITES_PER_CALL`, thousandths: the INVITEs a call
+/// sends across the pair on average, from 2 (a basic call's) to 100.
+fn invites_per_call_milli(env: &mut EnvReader) -> u64 {
+    let key = "PROXY_BRANCH_MEMO_INVITES_PER_CALL";
+    let invites = env.real(key, 2.0, Span::Positive);
+    if !(2.0..=100.0).contains(&invites) {
+        env.refuse(format!("{key} must be from 2 to 100, got {invites}"));
+        return 2_000;
+    }
+    // In 2..=100, so the thousandths fit a u64.
+    (invites * 1_000.0).round() as u64
+}
+
 /// The branch memo's entry cap and byte budget, the mean ring they are
 /// split on, and the INVITE entry's cap, derived from the downstream INVITE
 /// transaction bound `PROXY_INVITE_TXN_TIMEOUT_SEC` (the workers' bound).
@@ -439,6 +457,7 @@ fn branch_memo(env: &mut EnvReader) -> MemoBounds {
         max_bytes: size(env, "PROXY_BRANCH_MEMO_MAX_BYTES", d.max_bytes),
         mean_ring_ms: env.int("PROXY_BRANCH_MEMO_MEAN_RING_MS", d.mean_ring_ms, 1, MAX_MS),
         invite_ttl_ms: invite_entry_ttl_ms(bound_sec),
+        invites_per_call_milli: invites_per_call_milli(env),
         ..d
     }
 }
