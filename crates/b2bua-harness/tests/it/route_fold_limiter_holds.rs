@@ -407,8 +407,11 @@ async fn failover_route_refused_on_its_second_limiter_counts_nothing() {
     bob.receive("INVITE").await.respond(486, "Busy Here").await;
     bob.receive("ACK").await;
 
-    // ── the refused failover ends the call in the stack's 486 ──────────────
-    call.expect(486).await;
+    // ── the refused failover ends the call in the stack's bare 503 ─────────
+    let refused = call.expect(503).await;
+    assert_eq!(refused.reason(), "Service Unavailable");
+    assert!(!refused.has(&sip_message::header::HeaderName::Reason), "no Reason");
+    assert!(!refused.has(&sip_message::header::HeaderName::RetryAfter), "no Retry-After");
     assert!(
         carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
         "the refused route dials nothing",
@@ -424,8 +427,8 @@ async fn failover_route_refused_on_its_second_limiter_counts_nothing() {
     let report = h.finish().await;
     assert_eq!(
         invite_final_statuses(&report, alice.addr()),
-        vec![486],
-        "the a-leg INVITE transaction carries exactly one final: the 486",
+        vec![503],
+        "the a-leg INVITE transaction carries exactly one final: the 503",
     );
 }
 

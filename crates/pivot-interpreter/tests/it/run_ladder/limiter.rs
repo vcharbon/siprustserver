@@ -1,5 +1,12 @@
 //! Admission control: a limited second call refused before any b-leg.
 
+use async_trait::async_trait;
+use b2bua::decision::{
+    CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
+    CallReferRequest, CallReferResponse, CallTreatment, NewCallRequest, NewCallResponse,
+    RejectDecision, ScriptedDecisionEngine,
+};
+
 use super::*;
 
 /// The address the lane's limiter server answers at, on its own simulated HTTP
@@ -21,10 +28,44 @@ async fn serve_limiter(
     (store, handle)
 }
 
-/// The scene a LIMITED document replays against: the deployed-engine decision —
-/// which honours the lane's `X-Api-Call` egress directive, its admission entry
-/// included — over the system's own `HttpCallLimiter` pointed at `net`, whose
-/// `store` the reaped check reads.
+/// The deployed-engine decision, which honours the lane's `X-Api-Call` egress
+/// directive, its admission entry included, and answers a limiter's refusal as
+/// the document states a backend does: every route carries a failover context,
+/// and the failure consult rejects the call 486.
+struct RefusingBackend(ScriptedDecisionEngine);
+
+#[async_trait]
+impl CallDecisionEngine for RefusingBackend {
+    async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
+        let mut response = self.0.new_call(req).await;
+        if let Ok(NewCallResponse::Route(route)) = &mut response {
+            route.callback_context = Some("the-backend-token".into());
+        }
+        response
+    }
+    async fn call_failure(
+        &self,
+        _req: CallFailureRequest,
+    ) -> Result<CallFailureResponse, CallDecisionError> {
+        Ok(CallTreatment::Reject(RejectDecision {
+            reject_code: 486,
+            reject_reason: Some("Busy Here".into()),
+            update_headers: None,
+            service_ext: Default::default(),
+            label: None,
+        }))
+    }
+    async fn call_refer(
+        &self,
+        req: CallReferRequest,
+    ) -> Result<CallReferResponse, CallDecisionError> {
+        self.0.call_refer(req).await
+    }
+}
+
+/// The scene a LIMITED document replays against: [`RefusingBackend`] over the
+/// system's own `HttpCallLimiter` pointed at `net`, whose `store` the reaped
+/// check reads.
 async fn limited_scene(
     name: &str,
     net: &SimulatedHttpNetwork,
@@ -36,13 +77,15 @@ async fn limited_scene(
         std::time::Duration::from_millis(150),
     ));
     B2buaScene::with_b2bua(name, move |bob_port| {
-        B2buaSut::route_api_call("127.0.0.1", bob_port).limiter(client).limiter_store(store)
+        let inner = ScriptedDecisionEngine::route_by_api_call("127.0.0.1", bob_port);
+        B2buaSut::builder(Arc::new(RefusingBackend(inner))).limiter(client).limiter_store(store)
     })
     .await
 }
 
 /// The LIMITER rung: a second call arrives while the first holds the only
-/// admission slot, and the platform's own admission control refuses it.
+/// admission slot: the platform's own admission control refuses its route, and
+/// the backend it consults on that refusal rejects the call.
 ///
 /// The shape the draft exists for is a refusal that never becomes a call: the
 /// caller of the second call gets its final (ADR-0022 — once 100 Trying is out,

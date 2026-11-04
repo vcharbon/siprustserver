@@ -419,6 +419,38 @@ async fn a_healthy_chain_inside_the_budget_reaches_its_route() {
     let _ = s.finish().await;
 }
 
+/// A plan that keeps returning limited routes ends at the chain's depth with the
+/// bare 503 of an unavailable decision, inside the budget: nothing is dialled,
+/// the key the admits were sent under is released, and the call writes its CDR
+/// with no decision on it.
+#[tokio::test(start_paused = true)]
+async fn a_chain_past_its_depth_answers_the_bare_503() {
+    let limiter = spy(refuse_on("cap", fail_open()));
+    let spied = limiter.clone();
+    let mut engine = None;
+    let s = B2buaScene::with_b2bua("setup-budget-chain-depth", |bob_port| {
+        let inner = capped_chain(bob_port, "cap", "cap");
+        let e = Slow::new(inner, Duration::ZERO, Duration::ZERO);
+        engine = Some(e.clone());
+        B2buaSut::builder(e).limiter(spied)
+    })
+    .await;
+    let engine = engine.expect("the engine was built");
+
+    let mut call = invite(&s, &s.alice).await;
+    assert_bare_503(&call.expect(503).await);
+
+    assert_eq!(engine.failures.load(Ordering::SeqCst), 5, "the chain ran to its depth");
+    assert!(s.bob.take_queued().await.is_none(), "no call dialled");
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    assert_refused_cdr(&s, &call);
+    let admitted = limiter.admitted_keys();
+    assert_eq!(admitted.len(), 6, "the route's admit and five failovers': {admitted:?}");
+    settle_until(|| !limiter.released_keys().is_empty()).await;
+    assert_eq!(limiter.released_keys(), vec![admitted[0].clone()], "the key released once");
+    let _ = s.finish().await;
+}
+
 /// An emergency INVITE draws the shared pool alone and holds no privilege over
 /// the budget: a caller left waiting serves nobody.
 #[tokio::test(start_paused = true)]

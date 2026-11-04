@@ -86,7 +86,7 @@ async fn refresh_keeps_a_long_call_counted_across_its_lease() {
     // The call is still counted → a second call is refused. (Without the
     // refresh the set would have lapsed at 2 s and this would admit.)
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    assert_eq!(call2.expect(486).await.status(), 486, "the refresh kept the call counted");
+    assert_eq!(call2.expect(503).await.status(), 503, "the refresh kept the call counted");
 
     let mut bye = dialog1.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
@@ -140,7 +140,7 @@ async fn a_one_second_lease_keeps_a_long_call_counted_under_the_default_pace() {
     assert_eq!(store.stats().reregistered_calls, 0, "no refresh found the set lapsed");
 
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    assert_eq!(call2.expect(486).await.status(), 486, "the refresh kept the call counted");
+    assert_eq!(call2.expect(503).await.status(), 503, "the refresh kept the call counted");
 
     let mut bye = dialog1.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;

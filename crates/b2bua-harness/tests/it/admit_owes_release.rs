@@ -276,7 +276,7 @@ async fn an_initial_admit_landing_after_the_release_is_refused_by_the_fence() {
 }
 
 /// An initial admit refused at a cap sent a request: the call it ends in
-/// (the stack's 486) releases its key once, which frees nothing and holds
+/// (the stack's 503) releases its key once, which frees nothing and holds
 /// nothing. `y` at cap 1 is refused (its witness fills it) on the list's
 /// second entry.
 #[tokio::test(start_paused = true)]
@@ -288,7 +288,7 @@ async fn an_initial_admit_refused_at_its_cap_owes_one_release() {
     let b2bua = sut(&h, routes_holding(&[("x", 10), ("y", 1)]), rig.client.clone(), &rig).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    call.expect(486).await;
+    call.expect(503).await;
     settle_until(|| b2bua.is_reaped()).await;
     settle_until(|| rig.store.stats().releases_total == 1).await;
 
@@ -299,7 +299,7 @@ async fn an_initial_admit_refused_at_its_cap_owes_one_release() {
     rig.expect_drained("the refusal counted nothing").await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
-    assert_eq!(invite_final_statuses(&report, alice.addr()), vec![486]);
+    assert_eq!(invite_final_statuses(&report, alice.addr()), vec![503]);
 }
 
 /// An admit that sent no request (no limiter is configured) owes nothing:

@@ -77,8 +77,8 @@ async fn assert_drained(sut: &B2buaSut, store: &CallStore) {
 }
 
 #[tokio::test]
-async fn rejected_call_gets_486_and_no_second_increment() {
-    let h = Harness::with_transit_delay("limiter-486", 0);
+async fn rejected_call_gets_503_and_no_second_increment() {
+    let h = Harness::with_transit_delay("limiter-refused-503", 0);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let carol = h.agent("carol", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -95,10 +95,12 @@ async fn rejected_call_gets_486_and_no_second_increment() {
     let mut dialog1 = establish(&alice, &bob, b2bua.addr).await;
     assert_eq!((store.held("trunk-A"), store.held("site-B")), (1, 1), "first call counted");
 
-    // Second concurrent call: trunk-A at cap 1 → 486 Busy Here.
+    // Second concurrent call: trunk-A at cap 1, no callback context to fail
+    // over with → the bare 503 of an unavailable decision.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    let resp = call2.expect(486).await;
-    assert_eq!(resp.status(), 486);
+    let resp = call2.expect(503).await;
+    assert!(!resp.has(&sip_message::header::HeaderName::Reason), "no Reason");
+    assert!(!resp.has(&sip_message::header::HeaderName::RetryAfter), "no Retry-After");
 
     // No second increment happened on either id (all or none).
     assert_eq!((store.held("trunk-A"), store.held("site-B")), (1, 1), "reject took nothing");
@@ -210,9 +212,9 @@ async fn shared_counting_across_two_workers() {
     // Call through w0 fills the shared cap of 1.
     let mut dialog = establish(&alice, &bob, w0.addr).await;
 
-    // Call through w1 sees the SAME counter → rejected 486.
+    // Call through w1 sees the SAME counter → refused.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(w1.addr).send().await;
-    assert_eq!(call2.expect(486).await.status(), 486);
+    call2.expect(503).await;
 
     hangup(&mut dialog, &bob).await;
     assert_drained(&w0, &store).await;

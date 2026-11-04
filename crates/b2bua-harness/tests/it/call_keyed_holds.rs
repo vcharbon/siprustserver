@@ -70,7 +70,7 @@ fn limited_route(host: &str, port: u16, entries: &[(&str, i64)]) -> b2bua::decis
 /// The initial route toward bob (5070) holding `initial`, whose failure
 /// fails over to carol (5071) holding `failover`, whatever the failure's
 /// origin: a limiter refusal of the failover route re-consults and is
-/// refused again, which ends the chain in the stack's 486.
+/// refused again, which ends the chain in the stack's 503.
 fn one_failover(
     initial: &'static [(&'static str, i64)],
     failover: &'static [(&'static str, i64)],
@@ -555,7 +555,7 @@ async fn a_retried_invite_reusing_the_call_identity_is_counted() {
 
     // ── x is at its cap: a third call is refused ───────────────────────────
     let mut third = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    third.expect(486).await;
+    third.expect(503).await;
     rig.expect_holds([1, 0, 0], "the refused call counted nothing").await;
 
     let mut bye = dialog.bye().await;
@@ -960,14 +960,14 @@ async fn a_refused_release_reroute_leaves_the_call_uncounted() {
     let _ = h.finish().await;
 }
 
-/// The failure chain's terminal 486 leaves the call uncounted: the refused
+/// The failure chain's terminal 503 leaves the call uncounted: the refused
 /// failover route dropped the call's `x`, and the re-consult is refused again,
 /// so the call ends with one terminal release, which frees nothing. Bob
 /// busies out; the failover route `[y, z]` is refused on `z` (at its cap) at
 /// every depth.
 #[tokio::test(start_paused = true)]
-async fn the_failure_chain_s_terminal_486_leaves_the_call_uncounted() {
-    let h = Harness::new("keyed-holds-terminal-486-uncounted");
+async fn the_failure_chain_s_terminal_503_leaves_the_call_uncounted() {
+    let h = Harness::new("keyed-holds-terminal-503-uncounted");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let (rig, paths) = logged_rig().await;
@@ -982,7 +982,7 @@ async fn the_failure_chain_s_terminal_486_leaves_the_call_uncounted() {
     rig.expect_holds([1, 0, 0], "the initial route holds x").await;
     bob_uas.respond(486, "Busy Here").await;
     bob.receive("ACK").await;
-    call.expect(486).await;
+    call.expect(503).await;
     settle_until(|| b2bua.is_reaped()).await;
 
     assert_eq!(
@@ -999,7 +999,7 @@ async fn the_failure_chain_s_terminal_486_leaves_the_call_uncounted() {
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
     let report = h.finish().await;
-    assert_eq!(invite_final_statuses(&report, alice.addr()), vec![486]);
+    assert_eq!(invite_final_statuses(&report, alice.addr()), vec![503]);
 }
 
 /// An initial admit refused by a release fence runs the call uncounted, counts
