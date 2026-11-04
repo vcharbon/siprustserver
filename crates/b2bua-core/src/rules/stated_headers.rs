@@ -10,6 +10,11 @@
 //! `200`, the `487` answering the cancelled INVITE, the release-time answer to
 //! a pending INVITE, the ACK of a non-2xx final) take none.
 //!
+//! A `Reason` states the cause of a rejection someone decided (RFC 3326), so on
+//! a final this stack authors for the initial INVITE a stated one never replaces
+//! the `Reason` the final carries, and never adds one to a 5xx: that is an
+//! internal error, whichever path minted it (ADR-0022 X3).
+//!
 //! The stamp runs once, at the end of the turn, and a retained emission is the
 //! message as it left: the stamp rebinds a retained copy of a message it changes.
 //!
@@ -26,7 +31,9 @@ use sip_message::header::{HeaderName, Restatement};
 use sip_message::write_check::{self, WriteRefusal};
 use sip_message::{Method, SipRequest, SipResponse};
 
-use crate::effects::{BufferedObservabilityEffect, HandlerResult, OutboundBody, OutboundSipEffect};
+use crate::effects::{
+    BufferedObservabilityEffect, HandlerResult, OutboundBody, OutboundSipEffect, Provenance,
+};
 
 /// Stamp every outbound message of `result` with its call's stated headers,
 /// rebinding any retained copy of a message the stamp changes. Each statement
@@ -87,18 +94,23 @@ pub fn stamp(call: &Call, effect: &mut OutboundSipEffect) -> Vec<WriteRefusal> {
                 *req = stamped;
             }
         }
-        OutboundBody::Response(resp) => skipped = stamp_response(call, leg_id, resp),
+        OutboundBody::Response(resp) => {
+            let authored = effect.provenance == Provenance::Authored;
+            if let Some(stamped) = stamped_response(call, leg_id, resp, authored, &mut skipped) {
+                *resp = stamped;
+            }
+        }
         OutboundBody::Datagram(_) => {}
     }
     skipped
 }
 
-/// Stamp `resp`, sent on `leg_id`, with what `call`'s stated headers state
-/// for it, handing back the statements skipped.
+/// Stamp `resp`, the stack's own answer sent on `leg_id`, with what `call`'s
+/// stated headers state for it, handing back the statements skipped.
 #[must_use]
 pub fn stamp_response(call: &Call, leg_id: &str, resp: &mut SipResponse) -> Vec<WriteRefusal> {
     let mut skipped = Vec::new();
-    if let Some(stamped) = stamped_response(call, leg_id, resp, &mut skipped) {
+    if let Some(stamped) = stamped_response(call, leg_id, resp, true, &mut skipped) {
         *resp = stamped;
     }
     skipped
@@ -146,13 +158,15 @@ fn stamped_request(
     if launched {
         sets.push(&stated.launched_invite);
     }
-    restated(&sets, |name| carried(req.raw(name)), || req.thaw(), skipped)?.freeze().ok()
+    restated(&sets, |_| false, |name| carried(req.raw(name)), || req.thaw(), skipped)?.freeze().ok()
 }
 
+/// `authored`: the stack's own response, not a peer's relayed.
 fn stamped_response(
     call: &Call,
     leg_id: &str,
     resp: &SipResponse,
+    authored: bool,
     skipped: &mut Vec<WriteRefusal>,
 ) -> Option<SipResponse> {
     if resp.status() == 100 {
@@ -167,7 +181,13 @@ fn stamped_response(
     if final_to_initial {
         sets.push(&stated.originator_finals);
     }
-    restated(&sets, |name| carried(resp.raw(name)), || resp.thaw(), skipped)?.freeze().ok()
+    let own_reason = authored
+        && final_to_initial
+        && ((500..600).contains(&resp.status()) || resp.has(&HeaderName::Reason));
+    let withheld = |name: &str| own_reason && HeaderName::Reason.matches(name);
+    restated(&sets, withheld, |name| carried(resp.raw(name)), || resp.thaw(), skipped)?
+        .freeze()
+        .ok()
 }
 
 /// `lines` once `update` is applied: a set's lines, none for a removal, an
@@ -183,11 +203,13 @@ fn applied(update: &HeaderUpdate, lines: Vec<String>) -> Vec<String> {
 /// The message's draft with `sets` applied in order — each set's statement of
 /// a name resolved against what the sets before it left — or `None` where the
 /// message already carries the result. Names compare case-insensitively;
+/// `withheld` names what the message keeps as it is whatever is stated,
 /// `carried` reads the message's lines of a name, `thaw` opens its draft. A
 /// name whose resolved lines the wire cannot carry whole keeps its carried
 /// lines, its refusal pushed onto `skipped`.
 fn restated<D: Draft>(
     sets: &[&SipHeaderUpdates],
+    withheld: impl Fn(&str) -> bool,
     carried: impl Fn(HeaderName) -> Vec<String>,
     thaw: impl FnOnce() -> D,
     skipped: &mut Vec<WriteRefusal>,
@@ -200,7 +222,7 @@ fn restated<D: Draft>(
     }
     let mut edits: Vec<(HeaderName, Vec<String>)> = Vec::new();
     for name in names {
-        if HeaderName::restatement_of(name) != Restatement::Free {
+        if HeaderName::restatement_of(name) != Restatement::Free || withheld(name) {
             continue;
         }
         let header = HeaderName::from(name);
@@ -276,7 +298,7 @@ pub fn with_adds(
     skipped: &mut Vec<WriteRefusal>,
 ) -> SipRequest {
     let set = as_adds(adds);
-    restated(&[&set], |name| carried(req.raw(name)), || req.thaw(), skipped)
+    restated(&[&set], |_| false, |name| carried(req.raw(name)), || req.thaw(), skipped)
         .and_then(|d| d.freeze().ok())
         .unwrap_or(req)
 }
@@ -289,7 +311,7 @@ pub fn response_with_adds(
     skipped: &mut Vec<WriteRefusal>,
 ) -> SipResponse {
     let set = as_adds(adds);
-    restated(&[&set], |name| carried(resp.raw(name)), || resp.thaw(), skipped)
+    restated(&[&set], |_| false, |name| carried(resp.raw(name)), || resp.thaw(), skipped)
         .and_then(|d| d.freeze().ok())
         .unwrap_or(resp)
 }

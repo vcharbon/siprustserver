@@ -47,7 +47,8 @@ pub(super) enum Turn {
 /// the budget's 503, or the accept counts the INVITE's outcome once
 /// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
 /// `admitted` is the hold and the setup budget of a new call, `None` for a
-/// copy. Every identifier the turn mints is drawn from `turn`; `datagram` is
+/// copy, whose budget only ends its wait for its permits: it asks nothing and
+/// answers at once. Every identifier the turn mints is drawn from `turn`; `datagram` is
 /// the INVITE as it arrived, what a trace activation backfills its `sip.in`
 /// from.
 #[allow(clippy::too_many_arguments)]

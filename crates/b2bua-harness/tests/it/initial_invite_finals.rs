@@ -10,7 +10,8 @@
 //! - **RFC 3261's own**: 400 (§8.1.1.3), 482 (§8.2.2.2), 483 (§16.3), 487 (§9.2).
 //! - **no callee answered**: the generic defaults of a callee's silence, 480 or 408.
 //!
-//! The scan reads the four places a final is built: [`SITES`]. A new one fails
+//! The scan reads the places a final is built: [`SITES`], [`RESPOND`] and the
+//! [`FOLD_CODE`] of a fold's payload. A new one fails
 //! [`every_final_the_stack_mints_for_an_initial_invite_has_its_class`] until a row
 //! states its class, and a class holds only its own statuses.
 
@@ -93,6 +94,11 @@ const FINALS: &[Row] = &[
     ("b2bua/src/router/responses.rs", "500", OtherRequest),
     ("b2bua/src/router/responses.rs", "status", OtherRequest),
     ("b2bua/src/router/store_fault_gate.rs", "500", OtherRequest),
+    // A fold's stated code: the bare 503 of an unanswered consult and of a chain
+    // with no way to fail over, named once; a trace's reading of a refusal.
+    ("b2bua-core/src/failure_unavailable.rs", "STATUS", Builder),
+    ("b2bua/src/router/callouts.rs", "failure_unavailable::STATUS", Builder),
+    ("b2bua/src/trace/intake.rs", "code", OtherRequest),
     ("sip-txn/src/layer/server_cancel.rs", "487", Rfc3261),
     ("sip-txn/src/layer/unanswered.rs", "status", OtherRequest),
 ];
@@ -103,6 +109,9 @@ const SITES: [(&str, usize); 3] =
 
 /// The struct a rule states a final with, by its `status` field.
 const RESPOND: &str = "RespondToALeg {";
+
+/// The field a fold's JSON payload states a final's status in.
+const FOLD_CODE: &str = "\"code\":";
 
 /// The sources a final is minted in, under `crates/`.
 const ROOTS: [&str; 3] = ["b2bua-core/src", "b2bua/src", "sip-txn/src"];
@@ -198,6 +207,10 @@ fn finals_in(file: &str, code: &str, found: &mut Vec<Found>) {
         let bare = fields.iter().any(|f| f == "header_updates: vec![]");
         push(status, bare);
     }
+    for (start, _) in code.match_indices(FOLD_CODE) {
+        let value = code[start + FOLD_CODE.len()..].split([',', '\n', '}']).next();
+        push(value.unwrap_or_default().trim().to_string(), true);
+    }
 }
 
 fn found_in_sources() -> Vec<Found> {
@@ -278,12 +291,13 @@ fn the_scan_finds_a_final_at_each_place_one_is_built() {
                 generate_response(req, 415, \"Unsupported\", &opts);\n\
                 RuleAction::RespondToALeg { status: 420, reason: r, header_updates: vec![] };\n\
                 RuleAction::RespondToALeg { .. } => {}\n\
-                generate_response(req, 200, \"OK\", &opts);\n";
+                generate_response(req, 200, \"OK\", &opts);\n\
+                json!({ \"code\": 430, \"origin\": \"x\" });\n";
     let mut found = Vec::new();
     finals_in("new.rs", code, &mut found);
     let mut statuses: Vec<_> = found.iter().map(|f| f.status.as_str()).collect();
     statuses.sort_unstable();
-    assert_eq!(statuses, ["404", "410", "415", "420"]);
+    assert_eq!(statuses, ["404", "410", "415", "420", "430"]);
 }
 
 /// A 4xx the class table does not name has no row to hide in.

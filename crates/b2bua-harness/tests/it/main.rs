@@ -82,6 +82,7 @@ mod in_dialog_request_uri_not_ours;
 mod info_body_relay;
 mod initial_admit_bound;
 mod initial_invite_finals;
+mod internal_error_no_reason;
 mod invite_sent;
 mod keepalive;
 mod keepalive_481;

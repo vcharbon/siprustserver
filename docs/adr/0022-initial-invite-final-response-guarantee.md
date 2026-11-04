@@ -86,8 +86,9 @@ On an initial INVITE's turn `call_control_timeout_ms` bounds the whole setup, no
 round trip: a caller behind the 100 waits for all of it together. The budget runs from
 the instant the transaction layer opened the INVITE's server transaction
 (`TransactionEvent::Message::opened_at`), through the event queue and the router, and a
-retransmission moves nothing: the transaction absorbs it (RFC 3261 §17.2.3), and a copy
-on a new branch is no new call and carries no budget. It covers the wait for the turn's
+retransmission moves nothing: the transaction absorbs it (RFC 3261 §17.2.3). A copy on a
+new branch (§8.2.2.2) opened a transaction of its own and heard its own 100: it is no new
+call, but its turn stops waiting at its own budget and answers its 482. It covers the wait for the turn's
 handler permits, the decision round trips with their retries, the limiter's admits and
 the failover chain they start. It has one check and one deadline:
 
@@ -163,6 +164,15 @@ ingress brake, the deferred backlog — gets the 503 with a jittered
 no way to fail over, past `MAX_LIMITER_FAILOVER` or with no callback context, on the
 initial INVITE's turn or off it (ADR-0039), is no capacity statement to its caller: it
 gets the same bare 503, and its record still owes the release of the admits that left.
+
+A route's stated `Reason` never rides this 503. A `Reason` states the cause of a
+rejection someone decided (RFC 3326), and a caller rerouting on a 5xx reads it as one. So
+the end-of-turn stamp (`rules::stated_headers`) leaves `Reason` as it finds it on any 5xx
+this stack authors for the initial INVITE: whichever path minted it (a spent budget, an
+unanswered consult, a refused route, the chain's depth, the X2 synthesis, a service's
+teardown), a stated `Reason` adds none. A final that states its own, as a decision's
+reject does, keeps it over the route's. The route's other stated headers ride as ever,
+and a callee's relayed final takes them all.
 
 This rule is the initial INVITE's alone: a re-INVITE or another request in a dialog is
 answered by its own rules. Every final the stack mints for an initial INVITE is one of:

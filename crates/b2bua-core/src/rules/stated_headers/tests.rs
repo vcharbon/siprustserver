@@ -24,7 +24,7 @@ fn edits(
             .flat_map(|(_, l)| lines(l))
             .collect()
     };
-    restated(&sets, carried_of, Vec::new, &mut Vec::new())
+    restated(&sets, |_| false, carried_of, Vec::new, &mut Vec::new())
 }
 
 /// A statement the wire cannot carry whole is skipped and handed back; the
@@ -47,7 +47,7 @@ fn a_statement_with_a_line_break_or_a_non_token_name_is_skipped() {
             Vec::new()
         }
     };
-    let edited = restated(&sets, carried_of, Vec::new, &mut skipped);
+    let edited = restated(&sets, |_| false, carried_of, Vec::new, &mut skipped);
     assert_eq!(edited, Some(vec![("X-C".to_string(), lines(&["kept"]))]));
     assert_eq!(skipped.len(), 3, "{skipped:?}");
 }
@@ -311,4 +311,60 @@ fn the_charging_arm_reads_the_legs_own_set() {
     assert!(crate::rules::charging::minting_arm(&call, "b-1", None).is_some());
     assert!(crate::rules::charging::minting_arm(&call, "b-2", None).is_none());
     assert!(crate::rules::charging::minting_arm(&call, "b-3", None).is_none(), "the call's");
+}
+
+/// A stated `Reason` on a final to the caller's initial INVITE: a 5xx the stack
+/// authors carries none it does not state itself, whichever path minted it; a
+/// final stating its own keeps it; a 4xx of the stack's and a peer's relayed
+/// final take the statement. The route's other statements ride them all.
+#[test]
+fn a_stated_reason_never_rides_a_5xx_the_stack_authors() {
+    use sip_message::generators::{generate_response, GenerateResponseOpts};
+    use sip_message::SipHeader;
+
+    let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+    let mut ids = sip_ids::TurnIds::fixed(1);
+    let mut call =
+        crate::initial_invite::build_initial_call(&invite("reason"), src(), &config, &mut ids, 0);
+    let a_invite = caller_of(&call);
+    let mut stated = StatedHeaders::default();
+    stated.originator_finals.insert("Reason".into(), HeaderUpdate::line("stated"));
+    stated.originator_finals.insert("X-Final".into(), HeaderUpdate::line("stated"));
+    let mut features = crate::decision::default_platform_features();
+    features.stated_headers = Some(stated);
+    call.features = Some(features);
+
+    let cases: [(u16, Provenance, Option<&str>, &[&str]); 6] = [
+        (503, Provenance::Authored, None, &[]),
+        (503, Provenance::Authored, Some("own"), &["own"]),
+        (503, Provenance::Relayed, None, &["stated"]),
+        (486, Provenance::Authored, None, &["stated"]),
+        (486, Provenance::Authored, Some("own"), &["own"]),
+        (486, Provenance::Relayed, Some("peer"), &["stated"]),
+    ];
+    for (status, provenance, own, expected) in cases {
+        let opts = GenerateResponseOpts {
+            to_tag: Some("a-tag".into()),
+            extra_headers: own
+                .map(|line| SipHeader { name: "Reason".to_string().into(), value: line.into() })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let resp = generate_response(&a_invite, status, "Final", &opts).unwrap();
+        let mut fx = HandlerEffects::new();
+        fx.outbound.push(OutboundSipEffect {
+            body: OutboundBody::Response(resp),
+            mode: OutboundTxnMode::ServerResponse,
+            destination: ("192.0.2.1".into(), 5060),
+            label: "final".into(),
+            leg_id: Some("a".into()),
+            provenance,
+        });
+        let result = stamp_outbound(HandlerResult { call: call.clone(), effects: fx });
+        let OutboundBody::Response(sent) = &result.effects.outbound[0].body else { unreachable!() };
+        let case = format!("{status} {provenance:?} own {own:?}");
+        assert_eq!(sent.raw(HeaderName::Reason).collect::<Vec<_>>(), expected, "{case}");
+        assert_eq!(sent.raw(HeaderName::from("X-Final")).collect::<Vec<_>>(), ["stated"], "{case}");
+    }
 }

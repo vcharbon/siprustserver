@@ -288,6 +288,126 @@ async fn a_turn_past_its_budget_behind_a_wedged_router_is_refused_unasked() {
     let _ = s.finish().await;
 }
 
+/// A copy of an INVITE waiting for its permit, on a new branch (RFC 3261
+/// §8.2.2.2): its caller heard a 100 too, so its turn is due at its own budget and
+/// answers its 482 then, whatever still holds the permits. It is no new call.
+#[tokio::test(start_paused = true)]
+async fn a_copy_waiting_for_a_permit_is_answered_at_its_own_budget() {
+    let (open, gate) = watch::channel(false);
+    let s = B2buaScene::with_b2bua("setup-budget-copy", |bob_port| {
+        let inner = ScriptedDecisionEngine::route_all_to("127.0.0.1", bob_port);
+        permits_held(gate, Slow::new(inner, Duration::ZERO, Duration::ZERO), 2, BUDGET_MS)
+    })
+    .await;
+    s.h.waive(
+        scenario_harness::WaiverScope::rule("cseq-in-dialog-order", "the copy under test")
+            .on_party("alice"),
+    );
+    let carol = s.h.agent("carol", "127.0.0.1:5062").await;
+    let mut holder = invite(&s, &carol).await;
+    s.h.advance(TRANSIT * 2).await;
+
+    let mut first = s
+        .alice
+        .invite(&s.bob)
+        .identity("copy@127.0.0.1", "copy-tag")
+        .cseq(1)
+        .with_sdp(OFFER_SDP)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    first.expect(100).await;
+    let sent = tokio::time::Instant::now();
+    let mut copy = s
+        .alice
+        .invite(&s.bob)
+        .identity("copy@127.0.0.1", "copy-tag")
+        .cseq(1)
+        .with_sdp(OFFER_SDP)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    copy.expect(100).await;
+    assert_bare_503(&first.expect(503).await);
+
+    tokio::time::sleep_until(sent + FINAL_AT - MARGIN).await;
+    assert!(s.alice.take_queued().await.is_none(), "no final before its own budget");
+    s.h.advance(MARGIN * 2).await;
+    copy.expect(482).await;
+
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    assert_refused_cdr(&s, &first);
+    let counts = s.b2bua.new_calls();
+    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Normal), 1, "the first alone");
+    assert_eq!(counts.refused_copies(), 1, "a copy is no new call");
+
+    open.send_replace(true);
+    answer_and_hang_up(&mut holder, &s.bob).await;
+    settle_until(|| s.b2bua.cdr_records().len() == 2).await;
+    let _ = s.finish().await;
+}
+
+/// A CANCEL that crosses the 503 of a spent turn: it reaches the node just after
+/// the final left, and the caller's INVITE keeps that one final (RFC 3261 §9.2).
+#[tokio::test(start_paused = true)]
+async fn a_cancel_crossing_the_budgets_503_draws_no_second_final() {
+    let (open, gate) = watch::channel(false);
+    let s = B2buaScene::with_b2bua("setup-budget-cancel-crossing", |bob_port| {
+        let inner = ScriptedDecisionEngine::route_all_to("127.0.0.1", bob_port);
+        permits_held(gate, Slow::new(inner, Duration::ZERO, Duration::ZERO), 2, BUDGET_MS)
+    })
+    .await;
+    let carol = s.h.agent("carol", "127.0.0.1:5062").await;
+    let mut holder = invite(&s, &carol).await;
+    s.h.advance(TRANSIT * 2).await;
+
+    let sent = tokio::time::Instant::now();
+    let mut waiting = invite(&s, &s.alice).await;
+    waiting.expect(100).await;
+    // Sent while the 503 is on its way: each reaches the far end after the other left.
+    tokio::time::sleep_until(sent + FINAL_AT - MARGIN).await;
+    let mut cancel = waiting.cancel().await;
+    assert_bare_503(&waiting.expect(503).await);
+    cancel.expect(200).await;
+
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    assert_refused_cdr(&s, &waiting);
+    let counts = s.b2bua.new_calls();
+    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Normal), 1, "refused, not cancelled");
+    assert_eq!(counts.cancelled(Class::Normal), 0);
+    assert!(s.alice.take_queued().await.is_none(), "the 503 was its one final");
+
+    open.send_replace(true);
+    answer_and_hang_up(&mut holder, &s.bob).await;
+    settle_until(|| s.b2bua.cdr_records().len() == 2).await;
+    let _ = s.finish().await;
+}
+
+/// A route answered at the very instant the budget runs out is applied with none
+/// left: no admit leaves for it, so nothing can have been counted.
+#[tokio::test(start_paused = true)]
+async fn a_route_answered_at_the_budget_sends_no_admit() {
+    let limiter = spy(admit_all());
+    let spied = limiter.clone();
+    let s = B2buaScene::with_b2bua("setup-budget-no-admit", |bob_port| {
+        let inner = capped_chain(bob_port, "trunk", "trunk");
+        B2buaSut::builder(Slow::new(inner, BUDGET, Duration::ZERO)).limiter(spied)
+    })
+    .await;
+
+    let mut call = invite(&s, &s.alice).await;
+    call.expect(100).await;
+    s.h.advance(BUDGET).await;
+    assert_bare_503(&call.expect(503).await);
+
+    assert!(limiter.admitted_keys().is_empty(), "no admit sent: {:?}", limiter.admitted_keys());
+    assert!(s.bob.take_queued().await.is_none(), "no call dialled");
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    assert_refused_cdr(&s, &call);
+    assert!(limiter.released_keys().is_empty(), "nothing to release");
+    let _ = s.finish().await;
+}
+
 /// Slow answers and limiter refusals: the chain is cut where the budget runs
 /// out, in the third failure consult, well before its depth limit would have
 /// ended it. The caller gets the 503 at the budget, nothing is dialled, and

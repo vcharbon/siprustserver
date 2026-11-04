@@ -63,7 +63,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Rejections per second — by gate",
-      "description": "Stacked rate of new-INVITE rejections, broken out by the migrated gate that dropped them. proxy_overload_intake_age/cps are the proxy-self EluCpsGate; all_workers_overloaded is the LB above_critical critical-filter emptying the candidate set; rate_cap_exhausted is the per-worker AIMD bucket; worker_panic_elu / worker_cps_hard_cap are the b2bua panic-ELU and CPS bucket rungs; udp_ingress_brake is the b2bua UDP ingress brake (each read from b2bua_new_calls_total by reason).",
+      "description": "Stacked rate of new-INVITE rejections, broken out by the migrated gate that dropped them. proxy_overload_intake_age/cps are the proxy-self EluCpsGate; all_workers_overloaded is the LB above_critical critical-filter emptying the candidate set; rate_cap_exhausted is the per-worker AIMD bucket; worker_panic_elu / worker_cps_hard_cap are the b2bua panic-ELU and CPS bucket rungs; udp_ingress_brake is the b2bua UDP ingress brake; worker_setup_budget is no rung but a turn that waited past the setup budget (ADR-0022 X1) (each read from b2bua_new_calls_total by reason).",
       "gridPos": { "h": 9, "w": 18, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
@@ -74,7 +74,8 @@
         { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"panic_elu\"}[1m]))", "refId": "E", "legendFormat": "worker_panic_elu" },
         { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"bucket_empty\"}[1m]))", "refId": "F", "legendFormat": "worker_cps_hard_cap" },
         { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"ingress_brake\"}[1m]))", "refId": "G", "legendFormat": "udp_ingress_brake" },
-        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"event_queue\"}[1m]))", "refId": "H", "legendFormat": "worker_event_queue" }
+        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"event_queue\"}[1m]))", "refId": "H", "legendFormat": "worker_event_queue" },
+        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"setup_budget\"}[1m]))", "refId": "I", "legendFormat": "worker_setup_budget" }
       ],
       "fieldConfig": {
         "defaults": {
@@ -100,11 +101,11 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "Worker panic-ELU + CPS bucket + event-queue refusals (rate)",
+      "title": "Worker panic-ELU + CPS bucket + event-queue + setup-budget refusals (rate)",
       "gridPos": { "h": 5, "w": 6, "x": 18, "y": 5 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=~\"panic_elu|bucket_empty|event_queue\"}[5m]))", "refId": "A" }
+        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=~\"panic_elu|bucket_empty|event_queue|setup_budget\"}[5m]))", "refId": "A" }
       ],
       "fieldConfig": {
         "defaults": {
@@ -301,6 +302,39 @@
         { "expr": "rate(b2bua_udp_ingress_brake_emergency_bypassed_total[1m])", "refId": "C", "legendFormat": "emergency bypass" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "New-call setup times (ADR-0022 X1)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 },
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "New INVITE receipt to turn start (seconds)",
+      "description": "b2bua_new_call_turn_wait_seconds: the wait for a handler permit and the queues before it. A turn at the setup budget is refused unasked.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 57 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by (le) (rate(b2bua_new_call_turn_wait_seconds_bucket[1m])))", "refId": "A", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(b2bua_new_call_turn_wait_seconds_bucket[1m])))", "refId": "B", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 } }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "New-call permit hold (seconds)",
+      "description": "b2bua_new_call_permit_hold_seconds: new calls queue for a permit once rate times this hold passes the new-call share.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 57 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by (le) (rate(b2bua_new_call_permit_hold_seconds_bucket[1m])))", "refId": "A", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(b2bua_new_call_permit_hold_seconds_bucket[1m])))", "refId": "B", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 } }
     }
   ]
 }

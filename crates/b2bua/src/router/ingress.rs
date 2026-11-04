@@ -6,9 +6,9 @@
 //! class ([`crate::dispatch::class`]). The router acts on the offer: an
 //! admitted new INVITE spends its CPS token once its turn is queued, the reaper
 //! hears a call past its lifetime cap or at its overflow ceiling, and a
-//! discarded request is paid what it is owed ([`super::owed`]). An admitted new
-//! INVITE's turn carries the setup budget from the INVITE's receipt, a re-ask's
-//! a fresh one ([`SetupBudget`]).
+//! discarded request is paid what it is owed ([`super::owed`]). A new INVITE's
+//! turn, a copy's included, carries the setup budget from its own receipt, a
+//! re-ask's a fresh one ([`SetupBudget`]).
 
 use std::sync::Arc;
 
@@ -192,7 +192,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, arrival: Ar
     }
     let admitted = unborn.is_some();
     let budget_ms = ctx.config.call_control_timeout_ms;
-    let budget = if admitted {
+    let budget = if class.is_new_call() {
         SetupBudget::from_receipt(opened_at.unwrap_or_else(Instant::now), budget_ms)
     } else if super::undecided::notice_of(&event).is_some() {
         SetupBudget::from_receipt(Instant::now(), budget_ms)
