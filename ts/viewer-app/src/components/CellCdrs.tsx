@@ -1,9 +1,8 @@
 /**
  * A campaign cell's CDRs in its call details: the counts its verdict states,
- * each call's declared raw CDR lines beside the lines seen, the files that
- * read as one table open under them, then each other CDR file folded, one
- * block per CDR (its fields, its tables, the whole as JSON where it is one).
- * Every file is downloadable as it is.
+ * each call's declared raw CDR lines beside the lines seen, then each CDR file
+ * folded: its one table, or one block per CDR (its fields, its tables, the
+ * whole as JSON where it is one). Every file is downloadable as it is.
  */
 import type { JSX } from "react"
 import {
@@ -127,27 +126,18 @@ export const CellCdrs = ({ capture, session, cell, declared }: {
         </table>
       )}
       {cdr.files.length === 0 && <p className="muted">none</p>}
-      {cdr.files.flatMap((file) =>
-        file.table === null ? [] : [
-          <div key={file.name} className="cp-cdr-file">
-            <b>{file.label}</b> <span className="muted">{file.table.columns.length - 1}</span>{" "}
+      {cdr.files.map((file) => (
+        <details key={file.name} className="cp-cdr-file">
+          <summary>
+            <b>{file.label}</b>{" "}
+            <span className="muted">{file.table === null ? file.blocks.length : file.table.columns.length - 1}</span>{" "}
             <Download path={path} file={file} />
-            {file.note !== null && <p className="cp-nok">{file.note}</p>}
-            {file.table.rows.length > 0 && <SideTable table={file.table} />}
-          </div>
-        ]
-      )}
-      {cdr.files.flatMap((file) =>
-        file.table !== null ? [] : [
-          <details key={file.name} className="cp-cdr-file">
-            <summary>
-              <b>{file.label}</b> <span className="muted">{file.blocks.length}</span> <Download path={path} file={file} />
-            </summary>
-            {file.note !== null && <p className="cp-nok">{file.note}</p>}
-            {file.blocks.map((block, at) => <Block key={at} block={block} />)}
-          </details>
-        ]
-      )}
+          </summary>
+          {file.note !== null && <p className="cp-nok">{file.note}</p>}
+          {file.table !== null && file.table.rows.length > 0 && <SideTable table={file.table} />}
+          {file.blocks.map((block, at) => <Block key={at} block={block} />)}
+        </details>
+      ))}
     </section>
   )
 }

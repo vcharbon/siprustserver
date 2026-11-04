@@ -3,14 +3,15 @@
  * with its decision line and the cell's decision-service log beside it, the
  * cell's CDRs and their delta against the case's other sub-cases or lanes,
  * then the ladder of what the run produced and the HTTP exchanges, the
- * selected message above the ladder. A check's anchor and an exchange's
- * preceding message select a ladder message; the header copies the modal's
- * own link.
+ * selected message above the ladder. A check's anchor (the datagram it names
+ * where one arrived, else its step's message) and an exchange's preceding
+ * message select a ladder message; the header copies the modal's own link.
  */
 import { buildRecordingLayout, type LadderEvent, NO_HTTP_EXCHANGES, parseRecording } from "@sip/viewer-core"
 import type { JSX } from "react"
 import { useMemo, useRef, useState } from "react"
 import { api, type Campaign, type CampaignLane, type CampaignResult, useAsync } from "../api.ts"
+import { arrivedMessages } from "../campaign-arrived-message.ts"
 import { caseLink } from "../campaign-case-link.ts"
 import { declaredOf } from "../campaign-cdr.ts"
 import { checkMessages } from "../campaign-check-message.ts"
@@ -62,18 +63,22 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
   const [selected, setSelected] = useState<string | undefined>(undefined)
   const ladderRef = useRef<HTMLDivElement | null>(null)
   const value = detail.state === "ok" ? detail.value : undefined
+  const recording = useMemo(() => (value === undefined ? undefined : parseRecording(value.recording ?? {})), [value])
   const layout = useMemo(() => {
-    if (value === undefined) return undefined
-    const recording = parseRecording(value.recording ?? {})
+    if (value === undefined || recording === undefined) return undefined
     const document = cellDocument(value.pivot, undefined)
     return buildRecordingLayout(recording, {
       document: document.ok ? document.document : undefined,
       title: cell ?? "",
       subtitle: `${recording.legs.length} legs · ${recording.messages.length} messages`
     })
-  }, [value, cell])
+  }, [value, recording, cell])
   const http = value?.http ?? NO_HTTP_EXCHANGES
-  const targets = useMemo(() => checkMessages(result.checks, layout?.events ?? []), [result.checks, layout])
+  const targets = useMemo(() => {
+    const arrived = arrivedMessages(result.checks, value?.verdict, recording?.messages ?? [])
+    const stepped = checkMessages(result.checks, layout?.events ?? [])
+    return result.checks.map((_, at) => arrived[at] ?? stepped[at])
+  }, [result.checks, value, recording, layout])
   const after = useMemo(() => exchangesAfter(http.exchanges, layout?.events ?? []), [http, layout])
   const show = (id: string): void => {
     setSelected(id)
