@@ -14,7 +14,8 @@
 //! a call materialised before its routing decision, `quiesced` the
 //! self-release turn of a takeover copy, `stand_down` the turn that releases a
 //! takeover copy on its primary's write, `dropped_on_delete` the turn that
-//! drops a live copy of a call its backup discharged, `reclaim`
+//! drops a live copy of a call its backup discharged, `flush_turn` the turn a
+//! replicated flush takes on its call, `reclaim`
 //! the replication reclaim/discharge funnels, `readmission` the hold of those
 //! reclaims while the node's own endpoint does not read ready,
 //! `restore_hygiene` the replicated-timer restore seam, `release` the one
@@ -38,6 +39,7 @@ mod dialog_gate;
 mod dropped_on_delete;
 #[cfg(test)]
 mod evidence_gate_tests;
+mod flush_turn;
 mod fold_payload;
 mod inbox;
 mod incarnation_gate;
@@ -279,9 +281,9 @@ pub enum ReplCommand {
     /// A backup's reverse flush the store did not take — the stored copy
     /// contains it or the two diverged — or one the store already read: the
     /// body is handed up to meet the live copy (`reclaim::meet_refused_flush`,
-    /// ADR-0055 §7). `origin_now_ms` is the flushing node's wall clock, for
-    /// timer re-anchoring. Held with the reclaim, so it meets the copy the
-    /// reclaim makes live.
+    /// ADR-0055 §7), on a turn of the call. `origin_now_ms` is the flushing
+    /// node's wall clock, for timer re-anchoring. Held with the reclaim, so it
+    /// meets the copy the reclaim makes live.
     ReverseFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
     /// A primary's forward flush this backup did not take: the body is handed
     /// up on the same terms as the reverse case, and meets only a live
@@ -387,16 +389,14 @@ async fn on_repl_command(
                 reclaim::arm_parked(ctx).await;
             }
         }
-        ReplCommand::ReclaimCall(call_ref) => {
-            reclaim::reconcile_reverse_flush(ctx, &call_ref).await
-        }
+        ReplCommand::ReclaimCall(call_ref) => flush_turn::offer_reconcile(ctx, call_ref).await,
         ReplCommand::ReverseFlushRefused { call_ref, body, origin_now_ms } => {
             let dir = reclaim::FlushDirection::Reverse;
-            reclaim::meet_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
+            flush_turn::offer_refused(ctx, dir, call_ref, &body, origin_now_ms).await
         }
         ReplCommand::ForwardFlushRefused { call_ref, body, origin_now_ms } => {
             let dir = reclaim::FlushDirection::Forward;
-            reclaim::meet_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
+            flush_turn::offer_refused(ctx, dir, call_ref, &body, origin_now_ms).await
         }
         ReplCommand::ForwardFlushApplied { call_ref, write } => {
             stand_down::offer(ctx, call_ref, write).await

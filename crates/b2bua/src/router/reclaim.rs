@@ -26,10 +26,10 @@ pub(crate) use reap::reap_expired_replicas;
 
 /// Apply a backup's reverse-flushed copy that the puller just landed in our
 /// `pri:{self}` partition (ADR-0014 Reclaim-tail reconcile, extended to the
-/// live copy). The acting backup served the call while we still own it live:
-/// its copy meets our live copy ([`meet_live`], ADR-0055 §7). A copy whose
-/// primary is a member defers the CDR to it (ADR-0055 §5): the live primary
-/// discharges the call.
+/// live copy), on a turn of the call (`flush_turn`). The acting backup served
+/// the call while we still own it live: its copy meets our live copy
+/// ([`meet_live`], ADR-0055 §7). A copy whose primary is a member defers the
+/// CDR to it (ADR-0055 §5): the live primary discharges the call.
 ///
 /// Not live: a **Terminated** body is a reboot-reclaimed deferral — materialise +
 /// discharge (no keepalive arming); anything else is the existing reactive
@@ -177,12 +177,24 @@ impl FlushDirection {
     }
 }
 
+/// Whether a refused flush of `direction` may meet a copy of `call_ref` here: a
+/// flush of the role this node plays for the ref, on a call live here or with a
+/// queue, whose earlier turn may make it live. An Element alone opens no queue.
+pub(super) fn refused_flush_may_meet(
+    ctx: &RouterCtx,
+    direction: FlushDirection,
+    call_ref: &str,
+) -> bool {
+    role_of(&ctx.config.self_ordinal, call_ref) == direction.expected_role()
+        && (ctx.state.contains(call_ref) || ctx.dispatcher.has_queue(call_ref))
+}
+
 /// Meet a copy the store did not take with the live copy (the body rides the
-/// command, the store kept its own): the store's copy contains it, or the two
-/// diverged, and the live copy may hold more than the store's
-/// ([`meet_live`], ADR-0055 §7). **A live copy is required**: an Element
-/// alone is kept as it is, and a call we do not serve live is never
-/// resurrected here.
+/// command, the store kept its own), on a turn of the call (`flush_turn`): the
+/// store's copy contains it, or the two diverged, and the live copy may hold
+/// more than the store's ([`meet_live`], ADR-0055 §7). **A live copy is
+/// required**: an Element alone is kept as it is, and a call we do not serve
+/// live is never resurrected here.
 pub(super) async fn meet_refused_flush(
     ctx: &Arc<RouterCtx>,
     direction: FlushDirection,

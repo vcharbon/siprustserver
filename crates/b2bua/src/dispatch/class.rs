@@ -78,9 +78,10 @@ pub enum DispatchClass {
     /// A timer the call armed, fired once.
     Timer,
     /// An event the node raised itself: a reaper verdict, the answer to a
-    /// request the call sent off its turn, or a takeover copy's stand-down or
-    /// self-release notice, the latter queued behind the turns of the
-    /// messages that cleared its transactions (ADR-0014).
+    /// request the call sent off its turn, a replicated flush's notice, or a
+    /// takeover copy's stand-down or self-release notice, the latter queued
+    /// behind the turns of the messages that cleared its transactions
+    /// (ADR-0014).
     Internal,
 }
 

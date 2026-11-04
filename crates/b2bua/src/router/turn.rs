@@ -55,6 +55,10 @@ impl Runnable for Turn {
                 super::undecided::reask_turn(&self.ctx, call_ref, self.budget).await;
                 return;
             }
+            if super::flush_turn::is_notice(&self.event) {
+                super::flush_turn::flush_turn(&self.ctx, &self.event).await;
+                return;
+            }
             match (&self.event, self.res.call_ref.as_deref()) {
                 (CallEvent::InternalEvent { call_ref, topic, outcome, payload, body, .. }, _)
                     if topic == super::stand_down::TOPIC =>
