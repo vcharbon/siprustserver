@@ -210,6 +210,7 @@ async fn a_ring_from_a_late_18x_is_held_inside_the_invite_bound() {
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     let invited = tokio::time::Instant::now();
+    uas.respond(100, "Trying").await;
     s.h.advance(Duration::from_secs(10)).await;
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
@@ -263,6 +264,7 @@ async fn a_held_ring_runs_from_the_invite_as_it_left_after_a_slow_admission() {
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     let invited = tokio::time::Instant::now();
+    uas.respond(100, "Trying").await;
     s.h.advance(Duration::from_secs(10)).await;
     uas.respond(180, "Ringing").await;
     call.expect(180).await;

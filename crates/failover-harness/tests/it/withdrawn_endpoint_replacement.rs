@@ -23,6 +23,8 @@
 //! the disagreement at its heart — the proxy calls `b1` absent while `b1#g1`'s
 //! process is up and serving. The call is still driven to a proper, fully
 //! released end with exactly one CDR.
+//!
+//! Beyond the failover sweep: the harness's report of an endpoint replaced while its process runs.
 
 use std::time::Duration;
 

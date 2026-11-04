@@ -195,3 +195,41 @@ async fn multi_callee_group_demuxes_via_proxy() {
     // alice + proxy + one shared callee lane.
     assert_eq!(report.scenario().lanes.len(), 3, "alice + proxy + shared callee lane");
 }
+
+/// Two siblings parked on the shared socket at once: whichever pulls the
+/// other's BYE stashes it and wakes it, so each takes its own BYE as it
+/// lands, never at its next receive bound.
+#[tokio::test(start_paused = true)]
+async fn a_parked_sibling_takes_a_stashed_packet_at_once() {
+    let h = Harness::new("callee-group-wake").describe(
+        "bob and charlie both wait on the one socket; alice BYEs each in turn: \
+         each BYE reaches its own callee at once, whichever sibling pulled it",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let callees = h
+        .callee_group(SHARED_ADDR)
+        .callee("bob", BOB_DIGITS)
+        .callee("charlie", CHARLIE_DIGITS)
+        .build()
+        .await;
+    let (bob, charlie) = (callees.agent("bob"), callees.agent("charlie"));
+    let (mut alice_bob, _) = establish(&alice, &bob, BOB_DIGITS).await;
+    let (mut alice_charlie, _) = establish(&alice, &charlie, CHARLIE_DIGITS).await;
+
+    // Past the fabric's 100 ms transit, far short of the 5 s receive bound.
+    let bound = std::time::Duration::from_millis(300);
+    for (target, dialog) in [(&bob, &mut alice_bob), (&charlie, &mut alice_charlie)] {
+        let sibling = if target.name() == "bob" { charlie.clone() } else { bob.clone() };
+        // The sibling parks first, so it is the one the arrival wakes.
+        let parked =
+            tokio::spawn(async move { tokio::time::timeout(bound, sibling.recv_any()).await });
+        tokio::task::yield_now().await;
+        let mut bye = dialog.bye().await;
+        let got = tokio::time::timeout(bound, target.receive("BYE")).await;
+        let mut got = got.unwrap_or_else(|_| panic!("{} took its BYE late", target.name()));
+        got.respond(200, "OK").await;
+        bye.expect(200).await;
+        assert!(parked.await.expect("the sibling's wait").is_err(), "nothing for the sibling");
+    }
+    h.finish().await;
+}

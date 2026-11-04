@@ -41,6 +41,12 @@ pub struct CallCtx {
     /// Run once when the call's verdict resolves, before its teardown
     /// ([`on_resolved`](Self::on_resolved)).
     on_resolved: Mutex<Option<ResolveHook>>,
+    /// Whether a party the system under test ends cleanly ends the call
+    /// cleanly ([`accept_clean_ends`](Self::accept_clean_ends)).
+    clean_ends: AtomicBool,
+    /// Whether a provisional lost to a crash is accepted
+    /// ([`accept_lost_provisionals`](Self::accept_lost_provisionals)).
+    lost_provisionals: AtomicBool,
 }
 
 /// What a call runs at the instant its verdict resolves.
@@ -57,7 +63,39 @@ impl CallCtx {
             anchors: Mutex::new(Vec::new()),
             notes: Mutex::new(Vec::new()),
             on_resolved: Mutex::new(None),
+            clean_ends: AtomicBool::new(false),
+            lost_provisionals: AtomicBool::new(false),
         }
+    }
+
+    /// From now on, a party the system under test ends cleanly — a non-2xx
+    /// final to her establishing INVITE, a BYE she answers 200 — drops her
+    /// remaining goals, and a caller ended cleanly ends the call cleanly: a
+    /// fault injection that may make the system under test end a call arms
+    /// it when the fault strikes. A request left without its final or a
+    /// dialog left open still fails the call.
+    pub fn accept_clean_ends(&self) {
+        self.clean_ends.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`accept_clean_ends`](Self::accept_clean_ends) was armed.
+    pub fn clean_ends_accepted(&self) -> bool {
+        self.clean_ends.load(Ordering::Relaxed)
+    }
+
+    /// From now on, a party whose establishing INVITE reaches its final with
+    /// no provisional before it reads as having rung: an unreliable
+    /// provisional is not guaranteed across a crash. A fault injection that
+    /// crashes a node arms it when the fault strikes; every other check
+    /// stands.
+    pub fn accept_lost_provisionals(&self) {
+        self.lost_provisionals.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`accept_lost_provisionals`](Self::accept_lost_provisionals)
+    /// was armed.
+    pub fn lost_provisionals_accepted(&self) -> bool {
+        self.lost_provisionals.load(Ordering::Relaxed)
     }
 
     /// Run `hook` at the instant the call's verdict resolves: after its last

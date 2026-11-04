@@ -7,6 +7,7 @@
 use crate::common;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use call::helpers::{answered_2xx, sent_exchange, sent_exchange_mut};
 use call::{
     CallBodyCodec, CallDecodeError, DialogState, LegKind, MachineId, MsgpackCodec,
     PolicyUpdateBody, StateLabel,
@@ -28,7 +29,7 @@ fn representative_round_trips() {
 /// A service-owned timer (`TimerType::Service`, the ADR-0016 watchdog seam)
 /// rides the replicated `call.timers` ledger like any core timer: the borrowed
 /// `Cow<'static, str>` declaration form encodes and decodes back as an owned,
-/// **equal** key (the HA takeover-restore path), keeping its scope and
+/// **equal** key (the record-restore path), keeping its scope and
 /// generation; distinct service keys are distinct timer keys.
 #[test]
 fn service_timer_entry_round_trips_with_its_key_and_generation() {
@@ -61,7 +62,7 @@ fn service_timer_entry_round_trips_with_its_key_and_generation() {
 
 /// Replication sanity: the release-event `subscriptions` and
 /// the in-flight `reroute` slice are ordinary replicated `Call` fields — a
-/// takeover node must keep honoring the subscription and be able to resume /
+/// restored record must keep honoring the subscription and be able to resume /
 /// tear down a mid-reroute call. Round-trips through the production msgpack
 /// codec across all three shapes (none / subscribed-idle / mid-reroute).
 #[test]
@@ -93,7 +94,7 @@ fn release_subscriptions_and_reroute_round_trip() {
 }
 
 /// The decision log and the ordinal stamped on events and ring entries are
-/// replicated state — a takeover node's record names the decision every
+/// replicated state — a restored record names the decision every
 /// message was handled under — so they survive the codec in every shape: no
 /// decision yet, one labelled mark, a second mark without a label.
 #[test]
@@ -109,11 +110,10 @@ fn the_decision_log_round_trips() {
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "no decision yet");
 
-    let call =
-        mark_decision(call, 1_000, DecisionKind::Route, Some("a".into()), Some("first".into()));
-    let call = mark_decision(call, 2_000, DecisionKind::FailoverRoute, Some("b-1".into()), None);
-    let call = add_cdr_event(
-        call,
+    mark_decision(&mut call, 1_000, DecisionKind::Route, Some("a".into()), Some("first".into()));
+    mark_decision(&mut call, 2_000, DecisionKind::FailoverRoute, Some("b-1".into()), None);
+    add_cdr_event(
+        &mut call,
         CdrEvent {
             event_type: CdrEventType::InviteSent,
             timestamp: 2_000,
@@ -145,10 +145,9 @@ fn an_in_dialog_info_decision_round_trips_under_its_own_kind() {
     assert_eq!(serde_json::to_value(DecisionKind::InfoAcknowledge).unwrap(), "info_acknowledge");
 
     let codec = MsgpackCodec::new();
-    let call = representative_call();
-    let call =
-        mark_decision(call, 1_000, DecisionKind::InfoRelay, Some("b-1".into()), Some("k1".into()));
-    let call = mark_decision(call, 2_000, DecisionKind::InfoAcknowledge, Some("b-1".into()), None);
+    let mut call = representative_call();
+    mark_decision(&mut call, 1_000, DecisionKind::InfoRelay, Some("b-1".into()), Some("k1".into()));
+    mark_decision(&mut call, 2_000, DecisionKind::InfoAcknowledge, Some("b-1".into()), None);
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call);
     let kinds: Vec<DecisionKind> =
@@ -172,7 +171,7 @@ fn the_termination_record_round_trips() {
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "a live call");
 
-    let call = record_termination(call, 3_000, TerminationCause::RemoteBye, Some("b-1".into()));
+    record_termination(&mut call, 3_000, TerminationCause::RemoteBye, Some("b-1".into()));
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the callee's BYE, not yet cut");
     let t = decoded.termination.as_ref().unwrap();
@@ -181,16 +180,15 @@ fn the_termination_record_round_trips() {
         (3_000, TerminationCause::RemoteBye, Some("b-1"), 0)
     );
 
-    let mut call = call;
     call.termination = None;
     call.message_seq = 9;
-    let call = record_termination(
-        call,
+    record_termination(
+        &mut call,
         4_000,
         TerminationCause::Timeout(TimeoutKind::Keepalive),
         Some("a".into()),
     );
-    let call = seal_termination_seq(call);
+    seal_termination_seq(&mut call);
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "a deadline, cut");
     let t = decoded.termination.as_ref().unwrap();
@@ -198,8 +196,8 @@ fn the_termination_record_round_trips() {
     assert_eq!(t.last_seq, 9);
 }
 
-/// The final a leg's initial INVITE carries is replicated state — a takeover
-/// node must refuse a second final on that transaction exactly as the node
+/// The final a leg's initial INVITE carries is replicated state — a node
+/// restoring the record must refuse a second final on that transaction exactly as the node
 /// that sent the first would — so it survives the replication codec in both
 /// shapes (unanswered / answered).
 #[test]
@@ -207,29 +205,29 @@ fn the_invite_final_sent_fact_round_trips() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
 
-    call.a_leg.invite_final_sent = None;
+    *call.a_leg.invite_final_sent_mut() = None;
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "unanswered a-leg");
-    assert_eq!(decoded.a_leg.invite_final_sent, None);
+    assert_eq!(decoded.a_leg.invite_final_sent(), None);
 
-    call.a_leg.invite_final_sent = Some(487);
+    *call.a_leg.invite_final_sent_mut() = Some(487);
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "a-leg carrying its final");
-    assert_eq!(decoded.a_leg.invite_final_sent, Some(487));
+    assert_eq!(decoded.a_leg.invite_final_sent(), Some(487));
 
     // The helper records the first final only.
-    let call = call::helpers::record_invite_final(call, "a", 480);
-    assert_eq!(call.a_leg.invite_final_sent, Some(487), "the first final stands");
-    let call = call::helpers::record_invite_final(call, "b-1", 200);
-    assert_eq!(call.b_legs[0].invite_final_sent, Some(200));
+    call::helpers::record_invite_final(&mut call, "a", 480);
+    assert_eq!(call.a_leg.invite_final_sent(), Some(487), "the first final stands");
+    call::helpers::record_invite_final(&mut call, "b-1", 200);
+    assert_eq!(call.b_legs[0].invite_final_sent(), Some(200));
 }
 
 /// Each caller-facing early dialog is a record of its own on the a-leg, with
-/// its own tag and sequences (RFC 3261 §12.1.2): a takeover copy holds every
+/// its own tag and sequences (RFC 3261 §12.1.2): a restored record holds every
 /// one of them, in order, so a request in any of them is numbered and
 /// measured as before the copy.
 #[test]
-fn every_caller_facing_early_dialog_survives_a_takeover_copy() {
+fn every_caller_facing_early_dialog_survives_the_codec() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
     let mut second = call.a_leg.dialogs.confirmed().expect("the answered dialog").clone();
@@ -251,18 +249,18 @@ fn every_caller_facing_early_dialog_survives_a_takeover_copy() {
 }
 
 /// RFC 3261 §8.2.6.1: a relayed request's `Timestamp` is what the response
-/// relayed back to its originator echoes, so a takeover node relaying that
+/// relayed back to its originator echoes, so a node restoring the record and relaying that
 /// response must still know it: the pending snapshot keeps it through the
 /// replication codec.
 #[test]
-fn a_pending_requests_timestamp_survives_a_takeover_copy() {
+fn a_pending_requests_timestamp_survives_the_codec() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
     let pending = call
         .b_legs
         .iter_mut()
         .flat_map(|leg| leg.dialogs.iter_mut())
-        .flat_map(|d| d.inbound_pending_requests.iter_mut())
+        .flat_map(|d| d.requests.iter_mut())
         .next()
         .expect("the representative call holds a pending request");
     pending.source_timestamp = Some("54.2".into());
@@ -272,13 +270,13 @@ fn a_pending_requests_timestamp_survives_a_takeover_copy() {
         .b_legs
         .iter()
         .flat_map(|leg| leg.dialogs.iter())
-        .flat_map(|d| d.inbound_pending_requests.iter())
+        .flat_map(|d| d.requests.iter())
         .find_map(|p| p.source_timestamp.clone());
     assert_eq!(echoed.as_deref(), Some("54.2"));
 }
 
 /// RFC 3262: the record of the reliable provisionals is replicated state — a
-/// PRACK arriving after a takeover must still translate onto the responder's
+/// PRACK arriving after a restore must still translate onto the responder's
 /// number it acknowledges, and a responder's repeat must still be discarded —
 /// so the record has to survive the replication codec.
 #[test]
@@ -321,7 +319,7 @@ fn the_reliable_provisional_record_round_trips() {
         Provisional {
             id: id("b-2", "bf3", 1),
             responder_sdp: false,
-            responder: ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() },
+            responder: ResponderAck::OwnPrack,
             shown: None,
         },
     ];
@@ -329,7 +327,7 @@ fn the_reliable_provisional_record_round_trips() {
     assert_eq!(decoded, call, "every provisional survives, shown or not");
 
     // A live §3 ladder emission is replicated state too: the exact datagram a
-    // takeover node re-sends, its destination, and the rung the ladder stands on.
+    // node restoring the record re-sends, its destination, and the rung the ladder stands on.
     let datagram = b"SIP/2.0 183 Session Progress\r\nRSeq: 40\r\n\r\n";
     let emission = paced_emission(datagram, ("10.0.0.7", 5060), Class::ReliableProvisional, 3);
     call.provisionals[1].shown = Some(shown("a2", 40, Ladder::Repeating(emission)));
@@ -349,7 +347,7 @@ fn the_reliable_provisional_record_round_trips() {
 }
 
 /// RFC 3261 §13.2.2.4: the retained ACK-for-2xx datagram (`emitted_ack`) is
-/// replicated dialog state — a takeover node re-ACKs a retransmitted 2xx with
+/// replicated dialog state — a node restoring the record re-ACKs a retransmitted 2xx with
 /// the SAME bytes the failed node sent, at the same destination (on a delayed
 /// offer they carry the answer) — so it must survive the replication codec
 /// byte-exact, in both the retained and the not-yet-retained shape.
@@ -360,15 +358,15 @@ fn the_retained_emitted_ack_round_trips() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
 
-    if let Some(d) = call.b_legs[0].dialogs.confirmed_mut() {
-        d.emitted_ack = None;
+    if let Some(x) = call.b_legs[0].dialogs.confirmed_mut().and_then(sent_exchange_mut) {
+        x.emitted_ack = None;
     }
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "no ACK emitted yet on the b-leg dialog");
 
     let datagram = b"ACK sip:bob@10.0.0.7 SIP/2.0\r\nCSeq: 8005 ACK\r\n\r\nanswer";
-    if let Some(d) = call.b_legs[0].dialogs.confirmed_mut() {
-        d.emitted_ack = Some(RetainedEmission::on_trigger(
+    if let Some(x) = call.b_legs[0].dialogs.confirmed_mut().and_then(sent_exchange_mut) {
+        x.emitted_ack = Some(RetainedEmission::on_trigger(
             datagram.to_vec(),
             ("10.0.0.7".into(), 5060),
             call::Repeated::request("ACK"),
@@ -376,11 +374,13 @@ fn the_retained_emitted_ack_round_trips() {
     }
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the retained ACK survives byte-exact");
-    let ack = decoded.b_legs[0].dialogs.confirmed().unwrap().emitted_ack.as_ref().unwrap();
+    let ack = sent_exchange(decoded.b_legs[0].dialogs.confirmed().unwrap())
+        .and_then(|x| x.emitted_ack.as_ref())
+        .unwrap();
     assert_eq!(
         ack.wire(),
         (&datagram[..], ("10.0.0.7", 5060)),
-        "the takeover node re-sends the same bytes at the destination the ACK first took",
+        "the restoring node re-sends the same bytes at the destination the ACK first took",
     );
     assert_eq!(
         ack.repeat(),
@@ -390,12 +390,12 @@ fn the_retained_emitted_ack_round_trips() {
     assert_eq!(
         ack.repeated(),
         &call::Repeated::request("ACK"),
-        "the label captured at retention rides with the datagram: a takeover node counts its re-ACK as one",
+        "the label captured at retention rides with the datagram: a restoring node counts its re-ACK as one",
     );
 }
 
 /// RFC 3261 §13.3.1.4: the a-leg 2xx the representative call is still owed an
-/// ACK for rides the body with its ladder position, so a takeover node repeats
+/// ACK for rides the body with its ladder position, so a restoring node repeats
 /// the SAME bytes on the rung the failed node stood on — never from rung one.
 #[test]
 fn the_retained_answered_2xx_round_trips_with_its_rung() {
@@ -403,19 +403,13 @@ fn the_retained_answered_2xx_round_trips_with_its_rung() {
 
     let codec = MsgpackCodec::new();
     let call = representative_call();
-    let answered = call
-        .a_leg
-        .dialogs
-        .confirmed()
-        .unwrap()
-        .answered_2xx
-        .as_ref()
-        .expect("the fixture answered");
+    let answered =
+        answered_2xx(call.a_leg.dialogs.confirmed().unwrap()).expect("the fixture answered");
     assert_eq!(answered.emission.repeat(), Repeat::Paced { class: Class::Final2xx, rung: 3 });
 
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the retained 2xx survives byte-exact");
-    let restored = decoded.a_leg.dialogs.confirmed().unwrap().answered_2xx.as_ref().unwrap();
+    let restored = answered_2xx(decoded.a_leg.dialogs.confirmed().unwrap()).unwrap();
     assert_eq!(
         (restored.dialog_tag.as_str(), restored.cseq),
         ("b2bua-to-tag-aleg-9876", 1),
@@ -430,7 +424,7 @@ fn the_retained_answered_2xx_round_trips_with_its_rung() {
     assert_eq!(
         restored.emission.repeated(),
         &call::Repeated::response("INVITE", 200),
-        "the label captured at retention survives: a takeover node's rungs count as INVITE/200",
+        "the label captured at retention survives: a restoring node's rungs count as INVITE/200",
     );
 }
 
@@ -474,7 +468,7 @@ fn policy_body_three_states_round_trip() {
 /// intact.
 ///
 /// Wire position. The TS positional msgpack codec carries it at `FIELD_ORDER`
-/// **index 20** (`msgpack.ts` L37: `callRef`=0 … `_topology`=19, `emergency`=20);
+/// **index 20** (`msgpack.ts` L37: `callRef`=0 … `emergency`=20);
 /// the protobuf codec encodes it whenever `!== undefined` (`protobuf.ts` L143),
 /// under id `optional bool emergency = 24` (`call.proto`). (The older bench
 /// definition in `tests/bench/call-codec/codec.ts` uses `id: 21`; the bench and
@@ -563,7 +557,7 @@ fn reroute_plan_in_callback_context_survives_replication() {
 // Port of `tests/codec/leg-kind-round-trip.test.ts`. `Leg.kind` and
 // `Leg.adopted` ride in the replicated call body and must survive
 // encode → decode: a media leg's `kind=Media` / `adopted=false` is what the
-// unadopted-leg takeover gate keys on after a worker failover, so losing it
+// unadopted-leg gate keys on when another node restores the call, so losing it
 // across replication would mis-route the parked MRF leg on the backup.
 //
 // CODEC ARMS. The `call` crate has exactly **one** `CallBodyCodec` impl:

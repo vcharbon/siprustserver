@@ -36,9 +36,9 @@ pub(crate) struct NodeWiring {
     pub peers: Vec<Peer>,
     /// Puller backoff / bootstrap-timeout config (tests inject short values).
     pub config: PullerConfig,
-    /// Changelog TTLs `(tombstone, dead_peer)` so dead-peer auto-clean is
-    /// reachable within a test budget.
-    pub ttls: (i64, i64),
+    /// Changelog dead-peer TTL so dead-peer auto-clean is reachable within a
+    /// test budget.
+    pub dead_peer_ttl_ms: i64,
     /// Backstop body-TTL for a replica stored with `ttl_ms <= 0` (the missed-
     /// delete self-eviction bound). Long by default; split-brain tests inject a
     /// short value so the ghost evicts within the test budget.
@@ -97,7 +97,8 @@ impl HaNode {
         Arc<SimulatedMembership>,
         tokio::task::JoinHandle<()>,
     ) {
-        let changelog = Changelog::new(gen, clock.clone()).with_ttls(wiring.ttls.0, wiring.ttls.1);
+        let changelog =
+            Changelog::new(gen, clock.clone()).with_dead_peer_ttl(wiring.dead_peer_ttl_ms);
         let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone())
             .with_default_ttl_ms(wiring.replica_backstop_ms);
 

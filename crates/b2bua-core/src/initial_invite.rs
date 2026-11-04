@@ -18,6 +18,7 @@ use sip_message::header::{HeaderClass, HeaderName};
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 
 use crate::config::B2buaConfig;
+use b2bua_sdk::consult_headers::consult_headers;
 use b2bua_sdk::reason_phrase::default_reason;
 
 use crate::decision::apply_reject::{apply_redirect, apply_reject};
@@ -29,27 +30,8 @@ use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult}
 use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
 
-/// Headers sent as top-level decision-request fields (excluded from
-/// `sip_headers`). Shared with the failure path: `route-failure` applies the
-/// same exclusion to the failed final response's headers, so "the
-/// non-structural remainder" means one thing across the decision seam.
-///
-/// `Max-Forwards` is deliberately NOT here: a decision that cannot see the hop
-/// count cannot answer a spent one. It rides `sip_headers` read-only — the stack
-/// owns what a leg it originates states ([`crate::rules::relay::build_b_leg`]).
-pub const STANDARD_HEADERS: &[HeaderName] = &[
-    HeaderName::From,
-    HeaderName::To,
-    HeaderName::Via,
-    HeaderName::Contact,
-    HeaderName::ContentType,
-    HeaderName::CallId,
-    HeaderName::CSeq,
-    HeaderName::ContentLength,
-];
-
 /// Build the initial [`Call`] (a-leg only) from an inbound INVITE, its
-/// incarnation mark drawn from `ids`. Pure.
+/// incarnation mark and its caller-facing tag seed drawn from `ids`. Pure.
 pub fn build_initial_call(
     invite: &SipRequest,
     src: SocketAddr,
@@ -66,7 +48,18 @@ pub fn build_initial_call(
     // unique over time where the call_ref is not (a retried INVITE reuses its
     // Call-ID and From tag).
     let limiter = CallLimiterState::uncounted(call::derive_incarnation(&call_ref, &ids.new_tag()));
+    let tag_seed = ids.draw();
     let (local_addr, remote_addr) = relay::uas_addresses(invite);
+    let emergency = is_emergency_request(invite).then_some(true);
+    let contact = relay::allocate_leg_contact(
+        config,
+        relay::ContactMarks {
+            call_ref: &call_ref,
+            incarnation_mark: call::incarnation_mark(limiter.key()),
+            is_emergency: emergency == Some(true),
+        },
+        "a",
+    );
     let a_leg = Leg {
         leg_id: "a".to_string(),
         call_id: invite.call_id().to_string(),
@@ -74,22 +67,20 @@ pub fn build_initial_call(
         dialogs: Default::default(),
         local_uri: Some(local_addr),
         remote_uri: Some(remote_addr),
+        contact,
         invite_request_uri: Some(invite.request_uri().to_string()),
-        outbound_invite: None,
+        invite: Some(call::RequestRecord::received_invite(i64::from(invite.cseq().seq()))),
         own_tag: None,
         ext: None,
         kind: Some(LegKind::A),
         // Derived from kind (the a-leg is always adopted); see `is_adopted`.
         adopted: None,
-        invite_final_sent: None,
-        answer_preempted: None,
         attempt: None,
         ring: call::Ring::Silent,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: Default::default(),
     };
-    let topology = topology_from_cookie(invite, &config.self_ordinal, &call_ref);
     let a_leg_invite = ALegInviteSnapshot {
         uri: invite.request_uri().to_string(),
         headers: invite
@@ -127,7 +118,6 @@ pub fn build_initial_call(
         root_span_id: None,
         sampled: None,
         worker_index: None,
-        topology,
         // A non-emergency INVITE writes *absence* (`None`), never `Some(false)`
         // — production only ever stamps `Some(true)` or leaves the field unset
         // (see `call` codec_roundtrip emergency contract). The field carries the
@@ -135,7 +125,7 @@ pub fn build_initial_call(
         // `stack_identity`, so it is derived from the INVITE here, not
         // hard-coded. The admission ladder classifies the wire request directly and
         // never read this field.
-        emergency: is_emergency_request(invite).then_some(true),
+        emergency,
         features: None,
         policy_update_headers: None,
         policy_update_body: None,
@@ -152,9 +142,14 @@ pub fn build_initial_call(
         message_seq: 0,
         decision_log: Vec::new(),
         decision_ordinal: 0,
+        setup_cancelled: false,
         termination: None,
         message_turn: 1,
         sm_cursors: std::collections::BTreeMap::new(),
+        tag_seed,
+        leg_space: call::LegSpace::Creator,
+        answered: Vec::new(),
+        awaited: Vec::new(),
     }
 }
 
@@ -169,7 +164,7 @@ pub enum Initial {
 /// The treatment the initial consult's `response` states for `call`, whose
 /// caller's INVITE is `a_invite`: a route to apply, or the call's final.
 pub fn treatment(
-    call: Call,
+    mut call: Call,
     response: Result<NewCallResponse, CallDecisionError>,
     a_invite: &SipRequest,
     config: &B2buaConfig,
@@ -204,7 +199,7 @@ pub fn treatment(
         // `Relay` is a failover-only treatment; with no captured downstream
         // failure at new-call time it falls back to 480 (ADR-0017 X5).
         Ok(NewCallResponse::Relay { label }) => {
-            let call = mark_decision(call, now_ms, DecisionKind::Relay, Some("a".into()), label);
+            mark_decision(&mut call, now_ms, DecisionKind::Relay, Some("a".into()), label);
             reject_call(
                 call,
                 a_invite,
@@ -256,11 +251,7 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
     let src =
         sip_message::ip_literal::ip_socket_addr(&call.a_leg.source.address, call.a_leg.source.port)
             .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Request(a_invite.clone())),
-        src,
-        matched_client_txn: false,
-    }
+    CallEvent::sip(SipMessage::Request(a_invite.clone()), src)
 }
 
 /// Answer the a-leg with a final failure / redirect the decision layer authors,
@@ -327,17 +318,23 @@ pub fn reject_call(
         );
     }
     let mut effects = HandlerEffects::new();
-    // A non-100 final response needs a To-tag (the B2BUA's a-facing tag).
+    // A non-100 final response needs a To-tag: the a-leg's own, as derived for
+    // the call, so a provisional an earlier owner showed carried the same one.
+    let to_tag = call
+        .a_leg
+        .own_tag
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| crate::caller_tags::own(&call));
     if let Some(effect) = relay::response_to_a_leg(
         &mut call,
         &mut effects,
         a_invite,
         status,
         &reason,
-        Some(ids.new_tag()),
+        Some(to_tag),
         None,
         vec![],
-        None,
         None,
         extra_headers,
         crate::effects::Provenance::Authored,
@@ -350,8 +347,8 @@ pub fn reject_call(
                 crate::rules::stated_headers::response_with_adds(resp.clone(), &adds, &mut skipped);
         }
         effects.outbound.push(effect);
-        call = add_cdr_event(
-            call,
+        add_cdr_event(
+            &mut call,
             CdrEvent {
                 event_type: CdrEventType::Reject,
                 timestamp: now_ms,
@@ -363,22 +360,14 @@ pub fn reject_call(
         );
     }
     effects.buffered.extend(BufferedObservabilityEffect::skipped("rejecting final", skipped));
-    call = record_termination(call, now_ms, cause, None);
+    record_termination(&mut call, now_ms, cause, None);
     call.state = CallModelState::Terminated;
     HandlerResult { call, effects }
 }
 
 /// The decision request the initial consult sends for `invite`.
 pub fn build_request(invite: &SipRequest) -> NewCallRequest {
-    // One `(name, value)` per wire line, in wire order: the order of a multi-line
-    // header is part of its meaning (RFC 7044 `History-Info` index chains), whatever
-    // spelling each line wears.
-    let sip_headers: Vec<(String, String)> = invite
-        .headers()
-        .iter()
-        .filter(|h| !STANDARD_HEADERS.iter().any(|n| n.matches(&h.name)))
-        .map(|h| (h.name.to_string(), h.value.to_string()))
-        .collect();
+    let sip_headers = consult_headers(invite.headers());
     NewCallRequest {
         call_id: invite.call_id().as_str().to_string(),
         ruri: invite.request_uri().to_string(),
@@ -426,15 +415,8 @@ fn build_reject_headers(
     Ok(out)
 }
 
-mod topology_cookie;
-pub use topology_cookie::foreign_primary;
-use topology_cookie::topology_from_cookie;
-
 #[cfg(test)]
 mod emergency_on_invite_tests;
-
-#[cfg(test)]
-mod stickiness_cookie_tests;
 
 #[cfg(test)]
 mod multi_instance_header_tests;

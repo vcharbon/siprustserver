@@ -149,10 +149,20 @@ impl ActionExecutor<'_> {
         let outbound_cseq = dialog.our_cseq + 1;
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let branch = self.turn.ids.new_branch();
-        let marks = relay::CallMarks::of(call);
+        let marks = self.marks(call);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, marks, &id.leg, branch.clone())),
-            contact: Some(relay::leg_contact(self.config, marks, &id.leg)),
+            via: Some(relay::leg_via(
+                self.config,
+                marks,
+                &id.leg,
+                Some(relay::RequestFacts {
+                    method: "PRACK",
+                    uri: &gen_dialog.remote_target,
+                    offer: false,
+                }),
+                branch.clone(),
+            )),
+            contact: relay::leg_contact(call, &id.leg),
             rack: Some(RAck::new(id.rseq.0, id.invite_cseq.0, Method::Invite)),
             cseq: Some(relay::wire_cseq(outbound_cseq)),
             content_type: answer.is_some().then(relay::sdp),
@@ -170,8 +180,8 @@ impl ActionExecutor<'_> {
                     return;
                 }
             };
-        *call = bump_our_cseq(call.clone(), &id.leg, &t_id, 1);
-        call::helpers::note_responder_ack(call, id, ResponderAck::OwnPrack { branch });
+        bump_our_cseq(call, &id.leg, &t_id, 1);
+        call::helpers::note_responder_ack(call, id, ResponderAck::OwnPrack);
         clear_owed_offer(call, id);
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
@@ -181,14 +191,16 @@ impl ActionExecutor<'_> {
             res.request,
             dest,
         );
-        fx.outbound.push(OutboundSipEffect {
+        let prack = OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
             destination: dest,
             label: format!("PRACK → {}", id.leg),
             leg_id: Some(id.leg.clone()),
             provenance: Provenance::Authored,
-        });
+        };
+        self.record_own_effect(call, &id.leg, &t_id, &prack);
+        fx.outbound.push(prack);
     }
 }
 
@@ -240,7 +252,7 @@ fn defer_to_ack(call: &mut Call, id: &ProvisionalId, confirmed: &str) -> bool {
         return false;
     }
     let mut deferred = false;
-    *call = call::helpers::update_leg(call.clone(), &id.leg, |leg| {
+    call::helpers::update_leg(call, &id.leg, |leg| {
         let Some(d) = call::helpers::dialog_with_peer_mut(leg, &id.responder_tag) else {
             return;
         };
@@ -282,7 +294,7 @@ fn deferred_offer(call: &Call, leg_id: &str) -> Option<(String, call::RSeq, Vec<
 /// The offer the provisional `id` carried is no longer owed by its dialog: a
 /// PRACK naming it has left, or its dialog is gone.
 pub(super) fn clear_owed_offer(call: &mut Call, id: &ProvisionalId) {
-    *call = call::helpers::update_leg(call.clone(), &id.leg, |leg| {
+    call::helpers::update_leg(call, &id.leg, |leg| {
         if let Some(d) = call::helpers::dialog_with_peer_mut(leg, &id.responder_tag) {
             if d.owed_answer.as_ref().is_some_and(|o| o.prack_offer(id.rseq).is_some()) {
                 d.owed_answer = None;

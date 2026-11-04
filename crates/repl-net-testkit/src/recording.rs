@@ -242,6 +242,7 @@ mod tests {
         let req = Frame::PullRequest {
             proto_ver: 1,
             caller: "node-A".into(),
+            identity: None,
             partition: crate::Partition::Bak,
             since: crate::Watermark::new(1, 0),
         };

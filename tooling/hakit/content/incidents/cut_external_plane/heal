@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Reconnect the cut node to the callers' network at its own address, and
-# prove it connected there, again a second later. Idempotent: a node already
-# connected is left alone. With equal VRRP priorities the addresses stay with
-# the peer.
+# Reconnect the cut node to the callers' network at its own address and
+# interface name (the proxy's face check reads that name), and prove it
+# connected there, again a second later. Idempotent: a node already
+# connected is left alone.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 cut="$(hk_state cut)"
@@ -11,7 +11,8 @@ read -r node ip <<<"$cut"
 address() { docker inspect -f "{{with index .NetworkSettings.Networks \"$HAKIT_PARAM_NETWORK\"}}{{.IPAddress}}{{end}}" "$node"; }
 now="$(address)"
 if [ -z "$now" ]; then
-  docker network connect --ip "$ip" "$HAKIT_PARAM_NETWORK" "$node" >&2
+  docker network connect --ip "$ip" --driver-opt "com.docker.network.endpoint.ifname=$HAKIT_PARAM_INTERFACE" \
+    "$HAKIT_PARAM_NETWORK" "$node" >&2
   now="$(address)"
 fi
 [ "$now" = "$ip" ] || hk_die "$node is on $HAKIT_PARAM_NETWORK as '${now}', not $ip"

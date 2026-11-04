@@ -181,7 +181,7 @@ Content-Length: 0\r\n\r\n"
 }
 
 // RFC 3261 §17.1.1.3/§17.2.1: an ACK is never answered. With no worker to
-// select it is dropped and counted, never 503'd.
+// take it, it is dropped and counted as a request no worker takes, never 503'd.
 #[tokio::test]
 async fn an_ack_with_no_target_is_dropped_not_answered() {
     let (core, metrics) =
@@ -189,7 +189,7 @@ async fn an_ack_with_no_target_is_dropped_not_answered() {
     let outcome = core.route_request_from(&ack(None), format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.messages_total(), 0, "no response to an ACK");
-    assert_eq!(metrics.reject_count("ack_not_answered"), 1);
+    assert_eq!(metrics.reject_count("no_target_dropped"), 1);
 }
 
 // An ACK whose stickiness cookie is refused is dropped and counted, never 403'd.

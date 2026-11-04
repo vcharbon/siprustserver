@@ -9,6 +9,9 @@ description = "Load-shedding primitives shared by every process that refuses wor
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

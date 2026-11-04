@@ -128,10 +128,10 @@ const RedTable = ({ slice }: { readonly slice: Extract<JobCells, { outcome: "red
 const Hooks = ({ hooks }: { readonly hooks: readonly JobHook[] }): JSX.Element | null =>
   hooks.length === 0 ? null : (
     <section>
-      <h2>hooks <span className="muted">({hooks.length})</span></h2>
+      <h2>hooks <span className="count">{hooks.length}</span></h2>
       {hooks.map((hook) => (
         <details key={hook.name} className="job-hook">
-          <summary className="mono">{hook.name}.log <span className="muted">({hook.text.length} chars)</span></summary>
+          <summary className="mono">{hook.name}.log <span className="count muted">{hook.text.length} chars</span></summary>
           <pre className="log-tail-text">{hook.text === "" ? <span className="muted">(empty)</span> : hook.text}</pre>
         </details>
       ))}
@@ -149,7 +149,7 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
   useEffect(() => {
     setEvery(ENDED.has(status) ? null : POLL_MS)
   }, [status])
-  // The cells and the hooks follow the landing count while the job runs; once it has ended, one read each.
+  // Cells and hooks refetch when the landed count moves while the job runs, and once after it ends.
   const cellsKey = `${id}#${refresh}#${running ? job?.progress.landed ?? 0 : "ended"}`
   const gone = useHeld(() => api.jobCells(id, "gone", CELLS_SHOWN), `gone#${cellsKey}`)
   const red = useHeld(() => api.jobCells(id, "red", CELLS_SHOWN), `red#${cellsKey}`)
@@ -158,7 +158,7 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
 
   if (job === undefined) {
     if (held.error !== undefined) return <p className="page error">{held.error}</p>
-    return <p className="page muted">loading job {id}…</p>
+    return <p className="page muted">loading…</p>
   }
   const unit = unitOf(job.kind)
 
@@ -167,8 +167,8 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
       <header className="page-head">
         <div>
           <h1>
-            job {job.id} <span className="muted">— {job.label}</span>{" "}
-            <Link to={href.jobs()} className="muted">(all jobs)</Link>
+            Job {job.id} <span className="muted">· {job.label}</span>{" "}
+            <Link to={href.jobs()} className="muted">← jobs</Link>
           </h1>
           <p className="job-facts">
             <span className={`tag ${job.status === "done" ? "status-passing" : ENDED.has(job.status) ? "error" : "state-stale"}`}>
@@ -191,7 +191,7 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
           {job.request !== null && (
             <p className="mono">
               request {job.request.id} on <Link to={href.triage({ lane: job.request.lane })}>{job.request.lane}</Link>:{" "}
-              {job.request.cells} cell(s) over {job.request.captures} capture(s) — <code>{job.request.selection}</code>
+              {job.request.cells} cells · {job.request.captures} captures · <code>{job.request.selection}</code>
             </p>
           )}
           {held.error !== undefined && <p className="error">{held.error}</p>}
@@ -211,14 +211,14 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
       <section className="job-progress">
         <ProgressBar progress={job.progress} unit={unit} startedAt={job.startedAt} finishedAt={job.finishedAt} />
         <p className="muted">
-          {job.progress.total} planned, {job.progress.landed} landed, {job.progress.pending} pending,{" "}
+          {job.progress.total} planned · {job.progress.landed} landed · {job.progress.pending} pending ·{" "}
           {job.progress.goneRefused + job.progress.goneMissing} gone ({job.progress.goneRefused} refused,{" "}
-          {job.progress.goneMissing} not in this cut)
+          {job.progress.goneMissing} not in cut)
           {job.kind === "replay" && (
             <>
               {" · "}
-              {job.progress.passed} passed, {job.progress.failed} failed, {job.progress.skipped} skipped over{" "}
-              {job.progress.runs} run(s), {job.progress.openRuns} open
+              ✓ {job.progress.passed} · ✗ {job.progress.failed} · — {job.progress.skipped} · {job.progress.runs} runs,{" "}
+              {job.progress.openRuns} open
             </>
           )}
           {job.batchAt !== null && job.batches !== null && <> · batch {job.batchAt}/{job.batches}</>}
@@ -235,7 +235,8 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
       {gone.current !== undefined && gone.current.outcome === "gone" && gone.current.total > 0 && (
         <section>
           <h2>
-            gone cells <span className="muted">({gone.current.total}{gone.current.total > gone.current.cells.length && `, first ${gone.current.cells.length}`})</span>
+            gone cells <span className="count">{gone.current.total}</span>
+            {gone.current.total > gone.current.cells.length && <span className="muted"> · first {gone.current.cells.length}</span>}
           </h2>
           <GoneTable slice={gone.current} />
         </section>
@@ -244,11 +245,12 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
       {red.current !== undefined && red.current.outcome === "red" && (
         <section>
           <h2>
-            red cells so far{" "}
-            <span className="muted">({red.current.total}{red.current.total > red.current.cells.length && `, first ${red.current.cells.length}`})</span>
+            red cells{" "}
+            <span className="count">{red.current.total}</span>
+            {red.current.total > red.current.cells.length && <span className="muted"> · first {red.current.cells.length}</span>}
           </h2>
           {red.current.total === 0
-            ? <p className="muted">none landed red{running ? " yet — results are written as each capture's row closes" : ""}</p>
+            ? <p className="muted" title={running ? "written as each capture's row closes" : undefined}>none{running ? " yet" : ""}</p>
             : <RedTable slice={red.current} />}
         </section>
       )}

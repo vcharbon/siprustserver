@@ -85,6 +85,35 @@ fn a_late_cancel_the_peer_sent_is_not_charged_to_this_bind() {
     assert_eq!(out[0].3, Some(ALICE.to_string()), "charged to the UAC that sent it");
 }
 
+/// RFC 3261 §9.2 is judged where the UAS took the CANCEL. The caller's lane
+/// times its CANCEL at sending and the UAS's 200 at arrival, so a 200 sent
+/// before the CANCEL reached the UAS reads there as one sent after it: a
+/// callee that is no recorded bind is not judged at the caller's lane. Its
+/// own lane still is.
+#[test]
+fn a_200_crossing_the_cancel_is_judged_only_at_the_uas_lane() {
+    let at_caller = vec![
+        sent(ALICE, req("INVITE", "z9hG4bK-x", 1, None), BOB, 0),
+        recv(ALICE, resp(180, 1, "INVITE", "bt", "z9hG4bK-x"), BOB, 1),
+        sent(ALICE, req("CANCEL", "z9hG4bK-x", 1, None), BOB, 2),
+        recv(ALICE, resp(200, 1, "INVITE", "bt", "z9hG4bK-x"), BOB, 2),
+        sent(ALICE, req("ACK", "z9hG4bK-xa", 1, Some("bt")), BOB, 3),
+        recv(ALICE, resp(200, 1, "CANCEL", "bt", "z9hG4bK-x"), BOB, 4),
+    ];
+    let out = live(RuleId::No200AfterCancel).check_positioned(&at_caller);
+    assert!(out.is_empty(), "the caller's lane cannot order the crossing: {out:?}");
+
+    let at_callee = vec![
+        recv(BOB, req("INVITE", "z9hG4bK-x", 1, None), ALICE, 0),
+        sent(BOB, resp(180, 1, "INVITE", "bt", "z9hG4bK-x"), ALICE, 1),
+        recv(BOB, req("CANCEL", "z9hG4bK-x", 1, None), ALICE, 2),
+        sent(BOB, resp(200, 1, "INVITE", "bt", "z9hG4bK-x"), ALICE, 3),
+    ];
+    let out = live(RuleId::No200AfterCancel).check_positioned(&at_callee);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!((out[0].0.as_str(), out[0].3.as_deref()), (BOB, Some(BOB)));
+}
+
 #[test]
 fn divergent_cancel_route_is_flagged_at_its_wire_position() {
     let evs = vec![

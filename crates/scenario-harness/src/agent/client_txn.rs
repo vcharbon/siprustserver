@@ -146,9 +146,10 @@ pub(super) async fn try_expect_response(
 /// [`ClientReinvite`](super::ClientReinvite) / [`InDialogTxn`](super::InDialogTxn):
 /// wait for the response with status `status`, absorbing an unsolicited `100
 /// Trying` (RFC 3261 §8.1.3.2 — a stateful upstream emits it before the first
-/// real provisional) and 200-OKing any inbound request whose method is in
-/// `tolerate` (e.g. a keepalive OPTIONS racing the awaited response on the
-/// same socket). Any non-2xx final belonging to `ack`'s INVITE transaction is
+/// real provisional) and a provisional of another status byte-identical to one
+/// that arrived before it (§13.2.2.1), and 200-OKing any inbound request whose
+/// method is in `tolerate` (e.g. a keepalive OPTIONS racing the awaited
+/// response on the same socket). Any non-2xx final belonging to `ack`'s INVITE transaction is
 /// auto-ACKed on arrival (§17.1.1.3), matching or not. A wrong status /
 /// genuinely unexpected request / timeout is a [`StepError`]; the panicking
 /// veneers unwrap it.
@@ -163,6 +164,9 @@ pub(super) async fn try_expect_response_tolerating(
             agent.try_recv().await.map_err(|e| e.awaiting(|| format!("a {status} response")));
         match next? {
             SipMessage::Response(r) if r.status() == 100 && status != 100 => continue,
+            SipMessage::Response(r) if r.status() != status && agent.repeated_provisional(&r) => {
+                continue
+            }
             SipMessage::Response(r) => {
                 if let Some(ctx) = ack {
                     ctx.ack_non_2xx(&r).await?;

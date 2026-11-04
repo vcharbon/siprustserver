@@ -11,7 +11,7 @@
 //! ## What this crate is NOT (deferred — see ADR-0008)
 //!
 //! - **`CallState`** — the stateful, per-call-serialized owner of the in-memory
-//!   call map + persistence + orphan sweep + HA topology; it lives with the
+//!   call map + persistence + orphan sweep; it lives with the
 //!   b2bua runtime, not in this leaf.
 //! - **`TimerService`** — live timer scheduling. The data model carries only
 //!   *serializable* [`model::TimerEntry`] intents; firing rides `sip-txn`'s
@@ -64,8 +64,8 @@ pub use txn::{TxnKind, TxnTimeoutKind};
 pub use codec::{CallBodyCodec, CallDecodeError, CallEncodeError, MsgpackCodec};
 // The Call→Leg→Dialog tree + call-level satellites.
 pub use model::{
-    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology, Leg,
-    PolicyUpdateBody, SipHeader,
+    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, Leg, PolicyUpdateBody,
+    SipHeader,
 };
 // The reliable provisionals a call received (RFC 3262) and the answers its
 // dialogs owe (RFC 3264).
@@ -80,14 +80,17 @@ pub use model::{
 // Leg + dialog state.
 pub use model::{
     ByeDisposition, Dialog, DialogEnd, DialogId, DialogState, Dialogs, Direction, EndingBy,
-    HostPort, InviteTxnHandle, LegDisposition, LegKind, LegSdpSession, LegState, OutboundInvite,
-    PeerDialog, PendingRequest, RemoteInfo, RetiredDialog, Ring, StragglerRelease, Unacked2xx,
+    HostPort, InviteExchange, LegDisposition, LegKind, LegSdpSession, LegSpace, LegState,
+    OutboundInvite, PeerDialog, RelayOwner, RemoteInfo, Ring, Unacked2xx,
 };
+// The request records a call's dialogs hold (ADR-0055 §2).
+pub use model::{DialogUsage, RequestOrigin, RequestRecord, SentRequest, KEEPALIVE_AUTHOR};
 // The retained emission every dialog-level retransmission repeats (ADR-0032 X3)
 // and the obligation that discharges its ladder (X4).
-pub use model::{Obligation, Repeat, Repeated, RetainedEmission};
-// This stack's unanswered NOTIFY on a dialog and the requests held behind it.
-pub use model::{HeldRequest, OwnNotify};
+pub use model::{AnsweredRequest, Obligation, OffTurnRequest, Repeat, Repeated, RetainedEmission};
+// The subscriptions this stack notifies on a dialog (RFC 6665) and its
+// requests waiting there.
+pub use model::{Behind, NotifyInFlight, Queued, QueuedRequest, Subscription, SubscriptionState};
 // Timers, CDR events, the message ring, the decision log and the termination
 // record on the replicated body.
 pub use model::{millis_i64, millis_u64, Deadline};

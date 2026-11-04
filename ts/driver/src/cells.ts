@@ -75,6 +75,11 @@ export interface TestInvocation {
    * index and the result record can never disagree on it.
    */
   readonly cellInfraEnv?: string
+  /**
+   * Why this host runs no crate test, in the words a reader is shown; set,
+   * every crate-test cell is an error carrying it and nothing is spawned.
+   */
+  readonly unavailable?: string
 }
 
 /** `cargo test -p <crate> -- --exact <name> --nocapture`, the standard form. */
@@ -325,12 +330,13 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
 })
 
 /**
- * The verdict that blocks a lane, or `undefined` where the lane may run. A lane
- * the document does not mention is NOT blocked: absence means "none" (§2.2), and
- * the driver skips only what the document positively refuses.
+ * The verdict that blocks a lane, or `undefined` where the lane may run: the
+ * lane's own verdict, else the one stated for every lane (`ANY_LANE`). A lane
+ * the document mentions neither way is NOT blocked: absence means "none"
+ * (§2.2), and the driver skips only what the document positively refuses.
  */
-const laneBlock = (pivot: Pivot.PivotV3, lane: string): Tokens.LaneVerdict | undefined => {
-  const verdict = pivot.case.lanes[lane]
+export const laneBlock = (pivot: Pivot.PivotV3, lane: string): Tokens.LaneVerdict | undefined => {
+  const verdict = pivot.case.lanes[lane] ?? pivot.case.lanes[LanePresets.ANY_LANE]
   if (verdict === undefined) return undefined
   return Tokens.parseLaneVerdict(verdict)._tag === "blocked" ? verdict : undefined
 }
@@ -477,6 +483,9 @@ const runRustTest = Effect.fn("Driver.runRustTest")(function* (
   // a stale result.json from an earlier run must never read as this run's.
   yield* fs.remove(absolute, { recursive: true, force: true })
   yield* fs.makeDirectory(absolute, { recursive: true })
+  if (tests.unavailable !== undefined) {
+    return { passed: false, detail: tests.unavailable, crashed: true } satisfies CellOutcome
+  }
   const env = {
     ...(tests.cellDirEnv === undefined ? {} : { [tests.cellDirEnv]: absolute }),
     ...(tests.cellInfraEnv === undefined ? {} : { [tests.cellInfraEnv]: cellIdOf(cell).infra })

@@ -8,6 +8,8 @@
 // Shared fixtures, reached from a test module as `crate::common::…`.
 mod common;
 
+mod active_active;
+mod backup_named_while_away;
 mod first_view;
 mod health_probe_late_reply;
 mod ingress_trust;
@@ -15,9 +17,13 @@ mod load_balancer;
 mod load_balancer_routing;
 mod no_panic_lane;
 mod options_e2e;
+mod own_final_source_stamp;
 mod parse_refusal;
 mod per_call_trace;
+mod probe_dead_verdict;
+mod probe_isolation;
 mod probe_period;
+mod rate_cap_spill;
 mod receive_path_parse;
 mod refused_invite_copies;
 mod rfc_proxy_compliance;

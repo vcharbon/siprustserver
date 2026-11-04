@@ -59,6 +59,14 @@ def test_an_expected_reject_is_a_success_and_another_code_an_unexpected_ending()
     assert (imp.cls, imp.code, imp.budgetable) == ("unexpected_ending", 480, True)
 
 
+def test_a_setup_without_a_final_is_setup_failed_whatever_the_expected_ending() -> None:
+    (imp,) = classify(timed_out("a", T0), REJECT_486).impacts
+    assert (imp.cls, imp.code, imp.reason, imp.budgetable) == ("setup_failed", 0, "timeout", True)
+    failed = record("b", T0, "failed", answered=None, code=None, reason="transport", ended=300)
+    (imp,) = classify(failed, REJECT_486).impacts
+    assert (imp.cls, imp.code, imp.reason) == ("setup_failed", 0, "transport")
+
+
 def test_an_answer_where_only_a_reject_is_expected_takes_no_budget() -> None:
     (imp,) = classify(record("a", T0), REJECT_486).impacts
     assert (imp.cls, imp.answered, imp.budgetable) == ("unexpected_ending", True, False)

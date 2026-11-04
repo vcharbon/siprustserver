@@ -4,15 +4,18 @@
 
 use std::env;
 use std::fmt::Display;
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-use b2bua::config::CapacityConfig;
+use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
 
 use crate::{
-    capacity_env, drain_env, env_or, limiter_env, liveness_env, parse_outbound_proxy, split_csv,
-    stated, stated_list,
+    addresses_from_lookup, capacity_env, drain_env, env_or, limiter_env, liveness_env, split_csv,
+    stated, stated_list, ReplicationSettings, WorkerAddresses,
 };
+
+mod event_queue_env;
 
 /// Every generic runner knob, parsed once from env by [`RunnerEnv::from_env`].
 /// All fields are pub: tweak any of them between `from_env()` and
@@ -21,28 +24,15 @@ use crate::{
 pub struct RunnerEnv {
     /// `B2BUA_LISTEN` — SIP/signaling listen addr (default `0.0.0.0:5060`).
     pub listen: String,
-    /// `B2BUA_ADVERTISE` — SIP `host[:port]` stamped on Via/Contact/b-leg
-    /// Call-ID. `None` → the bound IP, with an unspecified `0.0.0.0` coerced to
-    /// loopback so the literal is at least routable. In k8s inject the pod IP
-    /// via the downward API `status.podIP`, else peers route responses to
-    /// `0.0.0.0` (a storm).
-    pub advertise: Option<String>,
-    /// `B2BUA_OUTBOUND_PROXY` — front-proxy IP-literal `ip:port` every b-leg
-    /// (worker→callee) request is forced through (a preloaded plain `;lr` Route).
-    /// REQUIRED in the k8s cluster (pod IPs are not peer-routable); unset →
-    /// b-leg goes straight to the callee (local/dev only). A malformed value is
-    /// fatal at parse — a silent fallback to pod-direct would send b-leg traffic
-    /// to unroutable pod IPs.
-    pub outbound_proxy: Option<(String, u16)>,
-    /// `B2BUA_REQUIRE_OUTBOUND_PROXY` — set (to ANY non-empty value) to refuse
-    /// boot when `B2BUA_OUTBOUND_PROXY` is unset. In the cluster profile a
-    /// worker silently dialing R-URIs pod-direct violates the "only the proxy
-    /// sees the external world" invariant (the dual-face network split);
-    /// refusing the boot turns that misconfiguration into a loud
-    /// CrashLoopBackOff instead of a live plane leak.
-    pub require_outbound_proxy: bool,
+    /// `B2BUA_ADVERTISE` and `B2BUA_MODE` with the proxy's addresses: the
+    /// worker's own `ip:port` and its deployment mode, read by
+    /// [`addresses_from_lookup`], which refuses an inconsistent pair.
+    pub addresses: WorkerAddresses,
     /// `B2BUA_METRICS` — Prometheus HTTP listen addr (default `0.0.0.0:9091`).
     pub metrics_addr: String,
+    /// `B2BUA_ADMIN` — the operator routes' listen addr, a loopback
+    /// `ip:port` only (default `127.0.0.1:9094`).
+    pub admin_addr: SocketAddr,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
     /// `B2BUA_UDP_SNDBUF` — `SO_SNDBUF` requested on the signalling socket,
@@ -58,6 +48,14 @@ pub struct RunnerEnv {
     pub cdr_queue: usize,
     /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
     pub ordinal: String,
+    /// `POD_UID` — the worker identity, the orchestrator's pod UID from the
+    /// downward API (ADR-0055 §6), required when replication discovers its
+    /// peers. Unset in a static pool: a per-boot token drawn from the OS RNG.
+    pub identity: Option<String>,
+    /// `B2BUA_CLUSTER_KEY` — the secret every worker of the cluster shares to
+    /// sign the via-extension on its own requests (ADR-0055 §12), 16 to 64
+    /// bytes. Unset: the worker states none and trusts none.
+    pub cluster_key: Option<sip_ids::SigningKey>,
     /// `B2BUA_CONCURRENCY` — handler concurrency ceiling (default 8192; a
     /// back-pressure SAFETY limit, not a rate governor).
     pub concurrency: usize,
@@ -78,27 +76,27 @@ pub struct RunnerEnv {
     /// `B2BUA_KEEPALIVE_SEC` — in-dialog OPTIONS keepalive interval (default
     /// 300 s; a shorter poke breaks long-hold endurance traffic).
     pub keepalive_sec: i64,
-    /// `B2BUA_KEEPALIVE_TIMEOUT_SEC` — grace waiting for the OPTIONS 200 before
-    /// declaring the leg dead and BYE-ing (default 32 s so a reclaimed dialog's
-    /// keepalive can round-trip across the post-reboot recovery window).
-    pub keepalive_timeout_sec: i64,
-    /// `B2BUA_REBOOT_BUDGET_SEC` — replicated-backup TTL / reboot budget
-    /// (default 600; `config.validate()` forces it to outlast the keepalive).
-    pub reboot_budget_sec: i64,
+    /// The replication tunables: `B2BUA_REBOOT_BUDGET_SEC`, the replica TTL /
+    /// reboot budget (default 600; with replication on, at least one
+    /// keepalive round and above the INVITE bound, `ReplicaConfig::validate`), and the
+    /// backup ceilings `B2BUA_REPL_BACKUP_MAX_*` (grammar in `capacity_env`).
+    pub replica: b2bua::ReplicaConfig,
     /// `B2BUA_SETUP_TIMEOUT_MS` — a-leg total setup deadline, reroutes
     /// included, in ms (default 150000; must stay strictly below
-    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`, enforced at boot; <= 0 disables).
+    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC` in the final composed configuration,
+    /// checked at spawn; <= 0 disables).
     pub setup_timeout_ms: i64,
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC` — the sip-txn out-of-dialog INVITE bound
     /// for BOTH call halves (b-leg client give-up + a-leg pre-final backstop).
-    /// Default 158; supported range 33..=600 (telephony deployments raise it —
-    /// Timer C > 3 min, 180 s PSTN supervision). `validate()` refuses boot when
+    /// Default `B2buaConfig::DEFAULT_INVITE_TXN_TIMEOUT_SEC` (158); supported
+    /// range 33..=600 (telephony deployments raise it — Timer C > 3 min, 180 s
+    /// PSTN supervision). The spawn check refuses boot when the final
     /// `B2BUA_SETUP_TIMEOUT_MS` does not sit strictly below it.
     pub invite_txn_timeout_sec: i64,
     /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC` — how long the worker waits
     /// for a response of ANY kind to a b-leg initial INVITE before it gives up
     /// on the hop and the `call_failure` consult carries `timeout_kind:
-    /// "response"` (ADR-0044). Default 32 (RFC 3261 Timer B); supported range
+    /// "response"` (ADR-0044). Default 5; supported range
     /// 2..=32. In-dialog INVITE and non-INVITE never read it.
     pub invite_first_response_timeout_sec: i64,
     /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — decision-backend deadline per
@@ -136,12 +134,16 @@ pub struct RunnerEnv {
     /// `B2BUA_PRIVACY_SERVICE` — `on` (the default): this worker is the RFC
     /// 3323 privacy service at the trust boundary; `off`: the next hop is.
     pub privacy_service: bool,
-    /// `B2BUA_CDR_MESSAGE_RING` — the per-leg message-ring cap on the call
-    /// record (default 0 = off; blank = unset).
-    pub cdr_message_ring: usize,
-    /// `B2BUA_CDR_CAPTURED_HEADERS` — the header names every ring entry
-    /// captures the values of, comma-separated (default empty).
-    pub cdr_captured_headers: Vec<String>,
+    /// `SIP_TRACE_HEADER` — on: an `X-Trace-Sample` header may sample a call
+    /// (default off, a lab setting); any other value than on/off refuses the
+    /// boot.
+    pub trace_header: bool,
+    /// The call record's message ring: `B2BUA_CDR_MESSAGE_RING` (the
+    /// per-leg cap, default 0 = off), `B2BUA_CDR_CAPTURED_HEADERS` (the
+    /// names every entry captures, default none) and
+    /// `B2BUA_CDR_FINAL_RESPONSE_HEADERS` (the names an INVITE final's
+    /// entry captures instead, default the captured ones); blank = unset.
+    pub cdr: CdrConfig,
     /// `LIMITER_URL` as the limiter's `host:port` (boot refuses a malformed
     /// value); empty when unset → `NoopLimiter` (fail-open).
     pub limiter_url: String,
@@ -181,6 +183,12 @@ pub struct RunnerEnv {
     /// the loop reads stalled; the grammar, its default and the boot check
     /// against the call-control timeout in `liveness_env`.
     pub loop_stall: Duration,
+    /// The event-queue gate's bounds (ADR-0050 §9), the grammar, defaults
+    /// and boot checks in `runner_env::event_queue_env`.
+    pub event_queue_gate: b2bua::config::EventQueueGateConfig,
+    /// `B2BUA_REPL` and the replication grammar ([`ReplicationSettings`]);
+    /// `None` when replication is off.
+    pub replication: Option<ReplicationSettings>,
 }
 
 /// `key` parsed as `T`, `default` when unset; `Err` names the variable and
@@ -202,28 +210,61 @@ fn socket_buffer_knob(key: &str) -> Result<Option<usize>, String> {
         .transpose()
 }
 
-/// `B2BUA_CDR_MESSAGE_RING` (default `0`, off) and `B2BUA_CDR_CAPTURED_HEADERS`
-/// (comma-separated, default none) as `lookup` states them; a blank value is
-/// unset. An unparsable cap is the error.
+/// `B2BUA_CDR_MESSAGE_RING` (default `0`, off), `B2BUA_CDR_CAPTURED_HEADERS`
+/// (comma-separated, default none) and `B2BUA_CDR_FINAL_RESPONSE_HEADERS`
+/// (comma-separated, default the captured ones) as `lookup` states them; a
+/// blank value, or a list naming no header, is unset. An unparsable cap is
+/// the error.
 pub(crate) fn cdr_ring_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
-) -> Result<(usize, Vec<String>), String> {
-    let ring = stated(lookup("B2BUA_CDR_MESSAGE_RING"))
+) -> Result<CdrConfig, String> {
+    let message_ring = stated(lookup("B2BUA_CDR_MESSAGE_RING"))
         .map(|v| v.parse().map_err(|e| format!("B2BUA_CDR_MESSAGE_RING={v:?}: {e}")))
         .transpose()?
         .unwrap_or(0);
-    let headers = stated_list(lookup("B2BUA_CDR_CAPTURED_HEADERS")).unwrap_or_default();
-    Ok((ring, headers))
+    Ok(CdrConfig {
+        message_ring,
+        captured_headers: stated_list(lookup("B2BUA_CDR_CAPTURED_HEADERS")).unwrap_or_default(),
+        final_response_headers: stated_list(lookup("B2BUA_CDR_FINAL_RESPONSE_HEADERS")),
+    })
 }
 
 /// An on/off knob as `value` states it: truthy or falsy (`0`/`false`/`no`/
 /// `off`), `default` when absent or blank. Any other value is the error.
-pub(crate) fn switch(key: &str, value: Option<String>, default: bool) -> Result<bool, String> {
+pub fn switch(key: &str, value: Option<String>, default: bool) -> Result<bool, String> {
     let Some(value) = stated(value) else { return Ok(default) };
     match value.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" => Ok(false),
         _ => Err(format!("{key} must be on or off, got {value:?}")),
+    }
+}
+
+/// `B2BUA_CLUSTER_KEY` as the key it holds: unset is none, a value out of
+/// the key's bounds refuses the boot.
+fn cluster_key(value: Option<String>) -> Result<Option<sip_ids::SigningKey>, String> {
+    let Some(value) = value else { return Ok(None) };
+    sip_ids::SigningKey::new(value.as_bytes()).map(Some).ok_or_else(|| {
+        format!(
+            "B2BUA_CLUSTER_KEY must hold {} to {} bytes, got {}",
+            sip_ids::MIN_KEY_BYTES,
+            sip_ids::MAX_KEY_BYTES,
+            value.len()
+        )
+    })
+}
+
+/// `B2BUA_ADMIN`: a loopback `ip:port`, `127.0.0.1:9094` when unset. `Err`
+/// names the variable for a value that is no address or not a loopback one.
+pub(crate) fn admin_addr(lookup: impl Fn(&str) -> Option<String>) -> Result<SocketAddr, String> {
+    let raw = stated(lookup("B2BUA_ADMIN")).unwrap_or_else(|| "127.0.0.1:9094".into());
+    match raw.trim().parse::<SocketAddr>() {
+        Ok(addr) if addr.ip().is_loopback() => Ok(addr),
+        Ok(addr) => Err(format!(
+            "B2BUA_ADMIN={addr} is not a loopback address: the operator routes are reached \
+             from inside the worker's network namespace only"
+        )),
+        Err(e) => Err(format!("B2BUA_ADMIN={raw:?} is not an ip:port: {e}")),
     }
 }
 
@@ -233,26 +274,24 @@ impl RunnerEnv {
     pub fn from_env() -> Result<Self, String> {
         let lookup = |k: &str| env::var(k).ok();
         let invalid = |e: String| format!("invalid B2BUA config: {e}");
-        let (cdr_message_ring, cdr_captured_headers) = cdr_ring_from_lookup(lookup)?;
+        let cdr = cdr_ring_from_lookup(lookup)?;
         let limiter = limiter_env::limiter_from_lookup(lookup).map_err(invalid)?;
         let call_control_timeout_ms: i64 = knob("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")?;
         let call_control =
             Duration::from_millis(u64::try_from(call_control_timeout_ms).unwrap_or(0));
-        let outbound_proxy = match stated(env::var("B2BUA_OUTBOUND_PROXY").ok()) {
-            Some(s) => Some(parse_outbound_proxy(&s)?),
-            None => None,
-        };
+        let addresses = addresses_from_lookup(lookup)?;
         Ok(Self {
             listen: env_or("B2BUA_LISTEN", "0.0.0.0:5060"),
-            advertise: env::var("B2BUA_ADVERTISE").ok(),
-            outbound_proxy,
-            require_outbound_proxy: stated(env::var("B2BUA_REQUIRE_OUTBOUND_PROXY").ok()).is_some(),
+            addresses,
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
+            admin_addr: admin_addr(lookup)?,
             queue_max: knob("B2BUA_QUEUE", "8192")?,
             udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF")?,
             udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF")?,
             cdr_queue: knob("B2BUA_CDR_QUEUE", "1024")?,
             ordinal: env_or("B2BUA_ORDINAL", "w0"),
+            identity: stated(env::var("POD_UID").ok()),
+            cluster_key: cluster_key(stated(env::var("B2BUA_CLUSTER_KEY").ok()))?,
             // Dispatch throttle ceilings — deliberately high so they never cap
             // throughput below the offered rate; `cap_drops`/`saturation`
             // metrics flag if either is actually hit.
@@ -263,13 +302,19 @@ impl RunnerEnv {
             max_messages_per_call: knob("B2BUA_MAX_MESSAGES_PER_CALL", "200")?,
             max_messages_per_call_lifetime: knob("B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME", "100000")?,
             keepalive_sec: knob("B2BUA_KEEPALIVE_SEC", "300")?,
-            keepalive_timeout_sec: knob("B2BUA_KEEPALIVE_TIMEOUT_SEC", "32")?,
-            reboot_budget_sec: knob("B2BUA_REBOOT_BUDGET_SEC", "600")?,
+            replica: b2bua::ReplicaConfig {
+                reboot_budget_sec: knob("B2BUA_REBOOT_BUDGET_SEC", "600")?,
+                backup: capacity_env::backup_from_lookup(lookup).map_err(invalid)?,
+                ..Default::default()
+            },
             setup_timeout_ms: knob("B2BUA_SETUP_TIMEOUT_MS", "150000")?,
-            invite_txn_timeout_sec: knob("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")?,
+            invite_txn_timeout_sec: knob(
+                "B2BUA_INVITE_TXN_TIMEOUT_SEC",
+                &B2buaConfig::DEFAULT_INVITE_TXN_TIMEOUT_SEC.to_string(),
+            )?,
             invite_first_response_timeout_sec: knob(
                 "B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC",
-                "32",
+                "5",
             )?,
             call_control_timeout_ms,
             ack_timeout_sec: knob("B2BUA_ACK_TIMEOUT_SEC", "32")?,
@@ -289,8 +334,12 @@ impl RunnerEnv {
                 env::var("B2BUA_PRIVACY_SERVICE").ok(),
                 true,
             )?,
-            cdr_message_ring,
-            cdr_captured_headers,
+            trace_header: switch(
+                observe::TRACE_HEADER_ENV,
+                env::var(observe::TRACE_HEADER_ENV).ok(),
+                false,
+            )?,
+            cdr,
             limiter_url: limiter_env::limiter_url_from_lookup(lookup)
                 .map_err(invalid)?
                 .unwrap_or_default(),
@@ -306,6 +355,9 @@ impl RunnerEnv {
             capacity: capacity_env::capacity_from_lookup(lookup).map_err(invalid)?,
             loop_stall: liveness_env::loop_stall_from_lookup(lookup, call_control)
                 .map_err(invalid)?,
+            event_queue_gate: event_queue_env::event_queue_gate_from_lookup(lookup)
+                .map_err(invalid)?,
+            replication: ReplicationSettings::from_lookup(lookup).map_err(invalid)?,
         })
     }
 }

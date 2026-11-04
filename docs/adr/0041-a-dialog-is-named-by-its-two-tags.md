@@ -2,7 +2,7 @@
 
 **Status:** accepted (2026-10-10)
 
-**Owner:** `crates/call/src/model/dialog.rs` and `dialogs.rs`; the engine side is the dialog gate, `crates/b2bua/src/router/dialog_gate.rs`.
+**Owner:** `crates/call/src/model/dialog.rs` and `dialogs.rs`; the engine side is the dialog gate: its verdict `crates/b2bua-core/src/dialog_gate.rs`, the shell's answers `crates/b2bua/src/router/dialog_gate.rs`.
 
 ## Context
 

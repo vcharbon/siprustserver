@@ -29,4 +29,4 @@ mod uri;
 
 pub use handover::open_over;
 pub use stream::{connect_stream, BrokerStream, Connected};
-pub use uri::connect_uri;
+pub use uri::{checked_uri, connect_uri, DEFAULT_HEARTBEAT_SEC};

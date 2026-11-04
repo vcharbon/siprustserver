@@ -3,9 +3,10 @@
 `loadgen` drives **managed-rate SIP load** through a SUT (our front-proxy +
 B2BUA, or any SIP element) by **reusing the functional `scenario-harness`
 choreography** as load scenarios. One process, thousands of concurrent calls,
-bounded memory, a live Prometheus `/metrics` endpoint, and an on-disk callflow
-report that keeps the first-N samples per `(scenario × result-class)` — including
-the OK flows and, for failures, *why* they failed.
+bounded memory, a live Prometheus `/metrics` endpoint, a live report page on
+the same socket, and an on-disk callflow report that keeps the first-N samples
+per `(scenario × result-class)` — including the OK flows and, for failures,
+*why* they failed.
 
 It multiplexes every dialog over a **few static UDP sockets** (one per defined
 endpoint address: `uac`, `uas`, `refer`, or one shared socket with
@@ -84,10 +85,11 @@ data fed into the refer scenarios), `--scenario name=weight` (repeatable; omit
 for the default mix), `--out-dir`, `--metrics-addr` (default `0.0.0.0:9300`),
 `--sample-cap`, `--drop-rate` / `--drop` / `--auto-retransmit` (see *Packet loss
 + auto-retransmit* below), `--load-profile` (see *The run-spec axis* below),
-`--overload-reject <code>` (see *Accepted endings*). Run `--help` for the full
-list. Each mux socket requests 2 MiB receive and send buffers: one socket
-carries every concurrent call, so an overflowing buffer would drop datagrams
-before the loadgen sees them and fail their calls on a timeout. The loadgen
+`--overload-reject <code>` (see *Accepted endings*), `--worker-threads`
+(the runtime's workers, default 4). Run `--help` for the full list. Each mux
+socket requests 2 MiB receive and send buffers: one socket carries every
+concurrent call, so an overflowing buffer would drop datagrams before the
+loadgen sees them and fail their calls on a timeout. The loadgen
 warns at bind when `net.core.rmem_max` / `wmem_max` clamped the request.
 
 ### The run-spec axis: `--load-profile`
@@ -149,6 +151,9 @@ HTTP socket as `/metrics`:
   untouched); a later `POST /rate?cps=N` **resumes** cleanly.
 - The current target is exported as the **`loadgen_target_cps`** gauge (`0` while
   paused).
+- Every rate change and the drain is logged (the first 256, then counted), marked
+  on the report's time series and listed on the report. The live report page
+  carries a form for each.
 
 ```bash
 curl -X POST 'http://<metrics-addr>/rate?cps=40'   # ramp up to 40 cps
@@ -257,6 +262,15 @@ INVITE on a Call-ID a finished call released within 64·T1 is a
 `reason="released"` orphan, and a leg arriving before its call's caller sent
 its INVITE is a `reason="early"` orphan. A new INVITE reusing a caller's own
 Call-ID (RFC 3261 §8.1.1.4) is a `reason="call_id_reuse"` orphan.
+
+A server transaction outlives its call (RFC 3261 §17.2.2, Timer J): for the
+same 64·T1 a released Call-ID keeps the finals its agents sent to the requests
+of the dialog (every non-INVITE final, an INVITE's non-2xx final), at most the
+last 8 per dialog. A retransmission of an answered request arriving after the
+call ended (the final was lost, or the SUT re-sent before it got it) is answered
+again with the same final, counted `loadgen_mux_late_retransmission_answered_total`
+and never an orphan; the ACK of a held INVITE non-2xx final is absorbed. A
+request with no held answer stays a `reason="stray"` orphan.
 
 Correlation failures are observable either way: an arriving initial INVITE with
 no extractable token counts `loadgen_mux_orphan_total{reason="no_header"}`; an
@@ -497,8 +511,17 @@ quantiles, RSS + leak canaries), with the incident windows annotated.
 
 The report is written to `--out-dir`, bucketed per `(scenario × result-class × case)`:
 
-- **`index.html`** — counts table (`scenario | class | case | count | sample-links`),
-  OK rows green, failing rows red; plus latency percentiles and checkpoints.
+- **`index.html`** — in order: the command line, the headline figures (elapsed,
+  target vs achieved cps, in flight, placed / ok / failed, every rejection
+  source, injected drops, mux orphans, late retransmissions answered and inbox
+  drops, 18x delivery), the time
+  series (a window every 5 s, adjacent windows merging past 720 so the whole run
+  stays covered: placed, ok, failed, rejected, error %, p50 / p99 end-to-end
+  latency, as sparklines and the last 20 windows), the last 20 failures, the
+  counts table (`scenario | class | case | count | judged share | error |
+  sample-links`, the error being the first stored sample's detail), the latency,
+  checkpoint, SIP round-trip and check tables, the rate changes and the run's
+  settings.
 - **`callflows/<scenario>/<class>[/<case>]/<i>.html`** — the per-call **SIP sequence
   diagram** for sampled calls. For a failing call the page shows `FAIL` **and the
   reason** (the `StepError` / outcome) as the header banner and a `call-result`
@@ -511,8 +534,17 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   A failed call's sample bucket (its *case*) is the step it failed at,
   `<who>[:<goal kind>#<goal index>]@<barrier>` (e.g. `alice:bye#1@established`,
   or `settle` for an unmet settle barrier), in a filesystem-safe spelling.
-- **`summary.md`** — the same counts in markdown.
-- **Live:** `curl <metrics-addr>/metrics` during a run (every series names its
+- **`load-result.json`** — the run's index, everything `index.html` shows
+  (`index.html` is rendered from it alone, by the `loadrun-render` crate the
+  e2e website's `/load/<run>` page uses too).
+- **Live report:** `http://<metrics-addr>/` (printed at startup as
+  `live report: …`) is the same page rendered on demand from the running
+  reporter, with the rate and drain controls, reloading every 60 s
+  (`?refresh=N`, `?refresh=0` freezes it); `/load-result.json` is the live
+  index and `/callflows/…` the stored samples, served from memory.
+- **stderr:** every 5 s a status line: elapsed, achieved cps, in flight,
+  ok / fail / rej, and the error % of the window just closed.
+- **Live metrics:** `curl <metrics-addr>/metrics` during a run (every series names its
   `--stream` first) for the per-`(stream, shape,
   class)` counters, `loadgen_branch_total{stream,shape,branch}` (ok calls by
   the accepted ending they took) and `loadgen_failed_step_total{stream,shape,step}`
@@ -534,13 +566,25 @@ call's record carries its own instants, and the HA tooling's verdict
 attributes it to the incident window it fell in, against that window's budget
 (ADR-0049 §3.5).
 
+An in-dialog request other than a BYE still awaiting its final when its call
+ends is judged by its client transaction (RFC 3261 §17.1.2). With
+`--auto-retransmit`, a call with a client transaction still open is held: its
+endpoints stay and retransmit until the final or Timer F (64·T1, 32 s), and
+the call's record is written then. A request still without a final is a
+failure stamped at the call's end (`ended_at_ms`). Without the engine nothing
+is held and such a request fails at the call's end. A BYE that ends the dialog
+never fails it. A held call no longer counts against `--max-in-flight`, keeps
+its endpoints and their demux entries for up to 32 s, and delays the drain by
+as much; outside a loss window no call is held.
+
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`
 per bucket); the rest are counted only. A non-sampled failure still gets a stub
-page with its one-line reason. A bucket still under its cap keeps its scenario
-recording for 64 calls after its last sample, then leaves it to
-`--background-record-every`. So after warm-up the RFC audit and the case
-checks, which run on recorded calls only, cover fewer calls: a rare outcome
-may go without its second sample. Lower `--background-record-every`
+page with its one-line reason. A call records when it falls in its scenario's
+fixed share of 1 in `--background-record-every` (from the first call on), when it
+or is one of the first `--sample-cap` calls of its scenario. The recorded calls
+are thus a steady share whatever the call hold time and the outcomes: an error
+burst never raises the loadgen's recording cost. The RFC audit and the case checks run on recorded calls
+only: a rare outcome may go without its second sample. Lower `--background-record-every`
 (`1` records every call) when the audit's reach matters more than CPU.
 
 ### Call-outcome records
@@ -549,7 +593,8 @@ Every call placed writes one `call-outcome.v1` record
 (`tooling/hakit/schemas/call-outcome.v1.schema.json`, ADR-0049 §4) when the
 driver is done with it: what the caller saw on the wire (its first INVITE,
 first provisional, final and its Reason cause key, answer, teardown, failed
-in-dialog requests) and how each callee leg loadgen played ended. The result
+in-dialog requests, the in-dialog requests it received) and how each callee
+leg loadgen played ended. The result
 class rides in `producer_verdict` only. Records are appended to
 `--records-file` (default `<out-dir>/call-outcomes.jsonl`) and, with
 `--records-url http://host:port`, pushed to VictoriaLogs' `/insert/jsonline`

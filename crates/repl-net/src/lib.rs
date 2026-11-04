@@ -9,10 +9,11 @@
 //! reliable, ordered, message-granular framed stream (Decision X2).
 //!
 //! ## What is here
-//! - [`Frame`] — the five positional-msgpack replication messages
+//! - [`Frame`] — the seven positional-msgpack replication messages
 //!   ([`Frame::PullRequest`], [`Frame::Data`], [`Frame::Noop`],
-//!   [`Frame::ResetToBootstrap`], [`Frame::Position`]) plus the [`Op`] /
-//!   [`Partition`] value enums and
+//!   [`Frame::ResetToBootstrap`], [`Frame::Position`],
+//!   [`Frame::ReplicaRefused`], [`Frame::StreamRefused`]) under
+//!   [`PROTO_VER`], plus the [`Op`] / [`Partition`] value enums and
 //!   the [`Watermark`] ordering. The two flows (**Reclaim** = `partition=Pri`,
 //!   **Backup** = `partition=Bak`) run on two single-flow sockets and share this
 //!   one frame set (ADR-0014 §Stream topology).
@@ -59,7 +60,7 @@ pub mod framing;
 pub mod transport;
 
 pub use codec::{decode_frame, encode_frame, ReplCodecError};
-pub use frame::{Frame, Op, Partition, UnknownDiscriminant, Watermark};
+pub use frame::{Frame, Op, Partition, UnknownDiscriminant, Watermark, PROTO_VER};
 pub use framing::{frame_with_len_prefix, try_read_framed, ReplFramingError, MAX_FRAME_LEN};
 pub use transport::{
     AcceptError, ConnectError, ListenError, RealReplicationNetwork, ReplicationConnection,

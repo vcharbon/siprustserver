@@ -31,7 +31,7 @@ export const RunPage = ({ id }: { id: string }): JSX.Element => {
     <div className="page run-page">
       <header className="page-head">
         <div>
-          <h1>run {run?.runId}</h1>
+          <h1>Run {run?.runId}</h1>
           <p className="muted">{id} · legs {run?.legs.join(", ")}</p>
           <p className="muted path">{run?.path}</p>
           <CaseOfRun
@@ -97,11 +97,11 @@ export const RunPage = ({ id }: { id: string }): JSX.Element => {
                 <VerdictPane verdict={run?.verdict} />
                 <JsonView value={run?.verdict} label="verdict.json" />
                 <JsonView value={run?.timing} label="timing.json" />
-                <p className="muted">click a message in the ladder to inspect the recorded line.</p>
+                <p className="muted">—</p>
               </>
             )}
           <p className="muted">
-            <Link to={href.index()}>back to the index</Link>
+            <Link to={href.index()}>← index</Link>
           </p>
         </aside>
       </div>

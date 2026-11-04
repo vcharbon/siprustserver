@@ -59,6 +59,7 @@ pub mod observability;
 pub mod parse_refusals;
 mod poison;
 pub mod refusals;
+pub mod refused_sample;
 pub mod registry;
 pub mod resolver;
 pub mod security;
@@ -73,5 +74,7 @@ pub use core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};
 pub use face::{FaceCidrs, Ipv4Cidr};
 pub use observability::ProxyMetrics;
 pub use strategies::{ForwardAllStrategy, LoadBalancerStrategy};
-pub use strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
+pub use strategy::{
+    DecodeResult, RankPlacement, RouteParams, RoutingStrategy, SelectError, SelectOpts,
+};
 pub use trace::ProxyTraces;

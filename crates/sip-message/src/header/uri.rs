@@ -13,6 +13,7 @@ use crate::sip_str::SipStr;
 use super::params::{ParamValue, Params};
 use super::wire::Wire;
 
+mod equivalent;
 mod read;
 pub(crate) use read::{host_refusal, read_sent_by};
 
@@ -97,8 +98,9 @@ impl HostPort {
 /// A URI read off the wire renders the bytes it was read from until an update
 /// touches it: RFC 3261 §16.6 forbids a proxy rewriting a Request-URI it is not
 /// retargeting, and §9.1 / §17.1.1.3 require the CANCEL and the non-2xx ACK to
-/// carry the INVITE's Request-URI unchanged. Identity is the parsed parts, so
-/// two URIs spelled differently but meaning the same thing compare equal.
+/// carry the INVITE's Request-URI unchanged. `==` compares the parts as read,
+/// byte for byte and parameters in order; the text read from plays no part.
+/// Whether two URIs name one resource is [`equivalent`](Self::equivalent).
 ///
 /// A URI of a scheme other than sip, sips or tel is opaque: it keeps its
 /// scheme-specific part whole and names no user, host, port, parameter or
@@ -210,6 +212,11 @@ impl Uri {
 
     pub fn is_secure(&self) -> bool {
         self.scheme.eq_ignore_ascii_case("sips")
+    }
+
+    /// Whether the scheme is sip or sips, in any case (RFC 3986 §3.1).
+    pub fn is_sip_or_sips(&self) -> bool {
+        self.scheme.eq_ignore_ascii_case("sip") || self.is_secure()
     }
 
     /// The scheme-specific part of a URI whose scheme is neither sip, sips nor

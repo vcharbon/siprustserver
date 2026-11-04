@@ -1,0 +1,40 @@
+{{- if .Values.proxy.enabled }}
+{{- /*
+The announce-only Services of the proxy's VIPs (ADR-0056): one LoadBalancer
+Service per VIP, the VIP pinned, the proxy pods as endpoints and
+externalTrafficPolicy Local, so a BGP load-balancer announces the VIP from
+exactly the nodes whose proxy pod is Ready (or Serving while it terminates)
+and withdraws it from the others. SIP never crosses these Services: the
+proxy binds the VIPs on its node's lo, and the one port each Service carries
+is a TCP port with no listener on a proxy node, never the metrics port.
+kube-proxy (iptables or nftables mode) matches a LoadBalancer address per
+protocol and port only, so it leaves VIP:SIP untouched; IPVS mode binds the
+address to every node and refuses unlisted ports, and is unsupported. For
+externalTrafficPolicy Local kube-proxy also serves the Service's
+healthCheckNodePort on every node.
+*/}}
+{{- $a := .Values.proxy.announce }}
+{{- range $face := list "internal" "external" }}
+{{- $key := ternary "proxyVip" "externalVip" (eq $face "internal") }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sip-front-proxy-{{ $face }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
+  annotations:
+    metallb.io/loadBalancerIPs: {{ include "siprust.net" (dict "root" $ "key" $key) | quote }}
+spec:
+  type: LoadBalancer
+  {{- with $a.loadBalancerClass }}
+  loadBalancerClass: {{ . }}
+  {{- end }}
+  externalTrafficPolicy: Local
+  allocateLoadBalancerNodePorts: false
+  selector: { app: sip-front-proxy }
+  ports:
+    - { name: announce, port: {{ int $a.port }}, targetPort: {{ int $a.port }}, protocol: TCP }
+{{- end }}
+{{- end }}

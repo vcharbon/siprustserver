@@ -123,6 +123,9 @@ fn authored_constructs(index: &Index<'_>, report: &mut Report) {
         if !step.checks.is_empty() {
             refuse(report, "subset/checks", path.clone(), "inline field checks");
         }
+        if step.awaits.is_some() {
+            refuse(report, "subset/awaits", path.clone(), "a lane event a send awaits");
+        }
         // Every string a step carries, from the one inventory the accessor
         // validator reads: a run-time accessor hidden in a frozen tier-2 ref is
         // exactly as unjustifiable as one in a header value. A `num:`

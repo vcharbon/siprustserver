@@ -10,8 +10,10 @@ record's `ended_at_ms`; `differs`, a disposition other than the caller saw,
 and for a planned teardown (`ending: answered`) a duration that differs from
 the caller's by more than 1 s plus the CDR's unit, at the record's
 `ended_at_ms` (for a `cut` or `stranded` call, a CDR ending later than the
-caller's end plus that tolerance). A `differs` impact carries its excess past
-the tolerance (`excess_ms`); a disposition that differs carries none.
+caller's end plus that tolerance), or at its `answered_at_ms` when the two
+ends agree within that tolerance: the durations then part at the answer. A
+`differs` impact carries its excess past the tolerance (`excess_ms`); a
+disposition that differs carries none.
 """
 
 from __future__ import annotations
@@ -68,6 +70,17 @@ def _compare(r: Json, cdr: Json) -> tuple[str, float] | None:
     return None
 
 
+def _parted_at(r: Json, cdr: Json) -> float:
+    """Where a duration mismatch of `r` arose: at its answer when its end and
+    the CDR's agree within the join's tolerance, else at its end."""
+    answered_at = jv.opt_number(r, "answered_at_ms")
+    ended = jv.number(r, "ended_at_ms")
+    allowed = DURATION_TOLERANCE_MS + jv.number(cdr, "duration_unit_ms")
+    if answered_at is not None and abs(jv.number(cdr, "end_ms") - ended) <= allowed:
+        return answered_at
+    return ended
+
+
 def distinct(cdrs: list[Json]) -> list[Json]:
     """The observations, each byte-identical copy dropped, in order."""
     seen: set[str] = set()
@@ -111,7 +124,8 @@ def join(
             continue
         why = _compare(r, mine[0])
         if why is not None:
-            out.append(impact(stream, call_id, ended, DIFFERS, why[0], why[1], started_ms=started))
+            at = _parted_at(r, mine[0]) if math.isfinite(why[1]) and jv.string(r, "ending") == "answered" else ended
+            out.append(impact(stream, call_id, at, DIFFERS, why[0], why[1], started_ms=started))
         out += [
             impact(stream, call_id, ended, DUPLICATE, f"CDR {i + 2} of the call", started_ms=started)
             for i in range(len(mine) - 1)

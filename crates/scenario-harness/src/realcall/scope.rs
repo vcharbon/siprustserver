@@ -17,10 +17,11 @@
 //! its own BYE. After the scenario resolves (Ok / Err / panic) the runner calls
 //! [`teardown`](CallScope::teardown), which acts on whatever was last registered.
 //!
-//! Teardown targets the **a-leg** (toward the cluster/SUT): that BYE/CANCEL is
-//! what releases the SUT's call state and limiter token. The in-process
-//! bob/charlie legs are simply dropped — once the a-leg is torn down the B2BUA
-//! terminates the call and cleans up its b-leg on its own.
+//! Each party's scope tears down the leg it holds: the caller's INVITE or
+//! dialog, and an answering party's confirmed dialog, which a SUT that lost the
+//! call would otherwise leave open (a 2xx never ACKed ends in a BYE,
+//! §13.3.1.4). A canceled INVITE is given up: the party's transaction layer
+//! still ACKs its non-2xx final (§17.1.1.3).
 
 use std::sync::Mutex;
 

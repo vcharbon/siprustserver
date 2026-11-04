@@ -11,17 +11,22 @@
 //! entry via a probe service on a live call), this test drives the REAL
 //! hydration path: the stale entry is implanted into the surviving backup's
 //! replica body, the primary reboots empty, bootstrap re-hydrates `pri:{self}`
-//! from the peer and the bulk `router::reclaim_all` materialises the call +
-//! re-arms its timers (`sanitize_restored_timers` + `TimerService::restore`).
+//! from the peer and the bulk reclaim (`router::reclaim::park_all`, then
+//! `arm_parked`) materialises the call + re-arms its timers
+//! (`sanitize_restored_timers` + `TimerService::restore`).
 //! The fire then reaches the `no-answer` rule exactly as it did on the cluster.
+//!
+//! Beyond the failover sweep: a stale ring deadline implanted in the replica, absorbed and
+//! scrubbed.
 
+use b2bua::store::envelope;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
-use call::{parse_call_ref, CallBodyCodec, CdrEventType, MsgpackCodec, TimerType};
+use call::{parse_call_ref, CdrEventType, MsgpackCodec, TimerType};
 use failover_harness::{
     worker_ordinals, FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth,
 };
@@ -84,7 +89,7 @@ async fn replica_carries_no_answer(
     let Some(body) = backup.get(BAK, primary, call_ref).await else {
         return false;
     };
-    let call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
+    let call = envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call;
     call.timers.iter().any(|t| *t.timer_type() == TimerType::NoAnswer)
 }
 
@@ -225,7 +230,13 @@ async fn stale_no_answer_restored_by_reclaim_is_absorbed_and_scrubbed() {
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect_tolerating(200, &["OPTIONS"]).await;
     fh.advance(Duration::from_secs(1)).await;
-    failover_harness::assert_call_fully_released(&[&*b1, &*b2], &call_ref).await;
+    failover_harness::assert_call_ended(
+        &[&*b1, &*b2],
+        &call_ref,
+        1,
+        "the reclaimed primary ends the call",
+    )
+    .await;
 
     // No trace of the absorbed fire in the CDR stream: no timeout event, no
     // no-answer reason, on any incarnation of either node.

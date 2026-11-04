@@ -2,11 +2,11 @@
 //! verdict a `dialog-…` waiver on its UA does not opt out fails the run, and a
 //! waiver that covers one is used.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use super::waiver::WaiverState;
-use crate::dialogs::{covers, DialogJudge, DialogVerdict};
+use crate::dialogs::{covers_at, DialogJudge, DialogVerdict};
 
 /// One verdict that survived the waivers, with the UA that recorded it.
 pub(crate) struct GatedVerdict {
@@ -16,30 +16,58 @@ pub(crate) struct GatedVerdict {
 
 /// The verdicts of `judges` no waiver covers, marking each covering waiver
 /// used, and per rule the count of verdicts a waiver covered: every dialog
-/// verdict is a finding against the SUT that sent the message.
+/// verdict is a finding against the SUT that sent the message. A waiver that
+/// covers one verdict per dialog covers the first of each, in the order the
+/// UA recorded them.
 pub(crate) fn surviving_verdicts(
     judges: &[Arc<DialogJudge>],
     waivers: &[WaiverState],
 ) -> (Vec<GatedVerdict>, BTreeMap<String, usize>) {
     let mut out = Vec::new();
     let mut waived_by_rule = BTreeMap::new();
-    for judge in judges {
-        for verdict in judge.gated() {
-            let mut waived = false;
-            for w in waivers {
-                if covers(&w.scope, judge.party(), &verdict) {
-                    w.used.set(true);
-                    waived = true;
-                }
-            }
-            if waived {
-                *waived_by_rule.entry(verdict.rule().to_string()).or_insert(0) += 1;
-            } else {
-                out.push(GatedVerdict { party: judge.party().to_string(), verdict });
-            }
+    for (gated, waiver) in classify(judges, waivers) {
+        match waiver {
+            Some(_) => *waived_by_rule.entry(gated.verdict.rule().to_string()).or_insert(0) += 1,
+            None => out.push(gated),
         }
     }
     (out, waived_by_rule)
+}
+
+/// Every verdict of `judges` with the index into `waivers` of the first
+/// waiver that covers it, if any, marking each covering waiver used.
+pub(crate) fn classify(
+    judges: &[Arc<DialogJudge>],
+    waivers: &[WaiverState],
+) -> Vec<(GatedVerdict, Option<usize>)> {
+    let mut out = Vec::new();
+    let mut covered_dialogs: HashSet<(usize, String, String, String, String)> = HashSet::new();
+    for judge in judges {
+        for (verdict, at) in judge.gated() {
+            let mut first = None;
+            for (i, w) in waivers.iter().enumerate() {
+                if !covers_at(&w.scope, judge.party(), &verdict, at) {
+                    continue;
+                }
+                if w.scope.once_per_dialog {
+                    let dialog = (
+                        i,
+                        judge.party().to_string(),
+                        verdict.call_id.clone(),
+                        verdict.from_tag.clone(),
+                        verdict.to_tag.clone(),
+                    );
+                    if !covered_dialogs.insert(dialog) {
+                        continue;
+                    }
+                }
+                w.used.set(true);
+                first.get_or_insert(i);
+            }
+            out.push((GatedVerdict { party: judge.party().to_string(), verdict }, first));
+        }
+    }
+    out
 }
 
 /// The panic text of a run whose UAs recorded dialog verdicts: a first line
@@ -80,3 +108,6 @@ pub(crate) fn as_findings(verdicts: Vec<GatedVerdict>) -> Vec<sip_net_testkit::R
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;

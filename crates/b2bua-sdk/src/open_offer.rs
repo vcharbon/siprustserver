@@ -4,7 +4,7 @@
 //! on a dialog. Only a reliable provisional carrying a description answers an
 //! INVITE offer before the final (§5.1); an unreliable one answers nothing.
 
-use call::{Call, Dialog, DialogId, Ladder, Leg, LegState, PendingRequest, Shown};
+use call::{Call, Dialog, DialogId, Ladder, Leg, LegState, RequestRecord, Shown};
 use sip_message::header::{HeaderValue, MediaType};
 use sip_message::sip_str::SipStr;
 use sip_message::{HeaderName, SipMessage, SipParser};
@@ -42,13 +42,13 @@ pub fn open_offer(
 }
 
 /// The re-INVITE relayed onto `dialog` still awaiting its final.
-fn pending_invite(dialog: &Dialog) -> Option<&PendingRequest> {
-    dialog.inbound_pending_requests.iter().find(|p| p.method.eq_ignore_ascii_case("INVITE"))
+fn pending_invite(dialog: &Dialog) -> Option<&RequestRecord> {
+    call::helpers::invite_relay(dialog)
 }
 
 /// A relayed re-INVITE: its offer is the sender's until answered, this stack's
 /// once the sender CANCELled it; an offerless one opens this stack's offer.
-fn relayed(call: &Call, shown: &str, p: &PendingRequest) -> Option<OpenOffer> {
+fn relayed(call: &Call, shown: &str, p: &RequestRecord) -> Option<OpenOffer> {
     let cseq = p.inbound_cseq;
     match (p.offered, p.cancelled) {
         (true, _) if shown_answer(call, shown, cseq) => None,
@@ -85,7 +85,7 @@ fn dialled(call: &Call, leg: &Leg, callee_tag: &str) -> Option<OpenOffer> {
     if !matches!(leg.state(), LegState::Trying | LegState::Early) {
         return None;
     }
-    let bytes = &leg.outbound_invite.as_ref()?.txn.as_ref()?.original_invite;
+    let bytes = &leg.dialled_sent()?.image;
     let SipMessage::Request(invite) =
         sip_message::CustomParser::new().parse(bytes.as_slice()).ok()?
     else {

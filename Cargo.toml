@@ -8,6 +8,7 @@ members = [
     "crates/observe",
     "crates/observe-testkit",
     "crates/alloc-counter",
+    "crates/insn-counter",
     "crates/sip-clock",
     "crates/lock-poison",
     "crates/task-restart",
@@ -28,6 +29,7 @@ members = [
     "crates/repl-net-testkit",
     "crates/http-net",
     "crates/http-net-testkit",
+    "crates/clock-bridge",
     "crates/call-limiter",
     "crates/call-limiter-wire",
     "crates/seq-report",
@@ -37,6 +39,7 @@ members = [
     "crates/b2bua-sdk",
     "crates/announcement",
     "crates/b2bua-core",
+    "crates/b2bua-decision",
     "crates/b2bua",
     "crates/b2bua-harness",
     "crates/ha-harness",
@@ -48,6 +51,7 @@ members = [
     "crates/b2bua-runner-kit",
     "crates/b2bua-runner",
     "crates/sip-proxy-runner",
+    "crates/route-guard",
     "crates/call-limiter-runner",
     "crates/cdr-consumer-runner",
     "crates/callshapes",
@@ -56,10 +60,12 @@ members = [
     "crates/e2e-cli",
     "crates/e2e-web",
     "crates/loadgen",
+    "crates/loadrun-render",
     "crates/rfc-rules",
     "crates/sip-pcap",
     "crates/pivot-schema",
     "crates/pivot-interpreter",
+    "crates/workspace-hack",
     "xtask",
 ]
 
@@ -233,17 +239,20 @@ debug = "line-tables-only"
 # Dependencies carry NO debuginfo. A triage backtrace is read for its
 # first-party frames; a dependency's file:line is never the thing acted on, and
 # dependency rlibs are the bulk of the bytes each of the ~190 test binaries
-# links. This glob covers dependencies only — workspace crates keep the line
-# tables set above.
+# links. They build at `opt-level = 1`: smaller test binaries, a cheaper
+# relink, faster tests, for a one-time rebuild when the lockfile moves. This
+# glob covers dependencies only — workspace crates keep the line tables set
+# above and `opt-level = 0`, so an edit rebuilds them fast.
 [profile.dev.package."*"]
 debug = false
+opt-level = 1
 
 # First-party code is unsafe-free by policy. Every member crate opts in with
 # `[lints] workspace = true`, turning a stray `unsafe` block into a hard compile
 # error rather than a silent perf shortcut nobody reviewed. `forbid` (stronger
 # than `deny`) cannot be locally re-enabled with `#[allow(unsafe_code)]`. The
 # exceptions are the crates whose FFI or socket-option calls are irreducibly
-# unsafe (`jemalloc-stats`, `sip-net`, `alloc-counter`): they do NOT opt into
+# unsafe (`jemalloc-stats`, `sip-net`, `alloc-counter`, `insn-counter`): they do NOT opt into
 # this table, pin their own `deny` + a narrow `#[allow(unsafe_code)]` on each
 # documented call site, and otherwise restate the workspace lint tables exactly
 # (scripts/purity.py checks it). This governs OUR source only; dependencies

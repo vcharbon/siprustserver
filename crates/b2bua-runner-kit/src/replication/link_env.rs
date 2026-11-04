@@ -4,16 +4,23 @@
 //! ```text
 //!   B2BUA_REPL_CONNECT_TIMEOUT_MS     one connect to a peer              (2000)
 //!   B2BUA_REPL_BACKOFF_MAX_MS         the reconnect backoff's ceiling    (2000)
-//!   B2BUA_REPL_IDLE_TIMEOUT_MS        a stream delivering nothing is left (15000)
+//!   B2BUA_REPL_IDLE_TIMEOUT_MS        a stream delivering nothing is left (2000)
 //!   B2BUA_REPL_NOOP_INTERVAL_MS       the longest a served stream goes
-//!                                     without a Noop                     (5000)
+//!                                     without a Noop, the heartbeat       (500)
 //!   B2BUA_REPL_SEND_STALL_MS          a send blocked this long leaves the
 //!                                     stream, either end                 (15000)
+//!   B2BUA_REPL_OPEN_TIMEOUT_MS        an accepted connection with no
+//!                                     opening request is closed          (4000)
+//!   B2BUA_REPL_MAX_CONNECTIONS        inbound connections served at once (64)
 //!   B2BUA_REPL_KEEPALIVE_IDLE_MS      TCP keepalive: idle before probing (5000)
 //!   B2BUA_REPL_KEEPALIVE_INTERVAL_MS  TCP keepalive: between probes      (2000)
 //!   B2BUA_REPL_KEEPALIVE_RETRIES      TCP keepalive: unanswered probes   (3)
 //!   B2BUA_REPL_USER_TIMEOUT_MS        TCP_USER_TIMEOUT                   (15000)
 //!   B2BUA_REPL_LOOKUP_TIMEOUT_MS      one peer name lookup               (2000)
+//!   B2BUA_REPL_DEAD_PEER_TTL_MS       how long a peer's change log is kept
+//!                                     after a flow last served it        (60000)
+//!   B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS  a cold flow's bound on reaching
+//!                                     its peer and catching up           (10000)
 //! ```
 //!
 //! Unset takes the default. A value that is not a positive integer refuses the
@@ -23,6 +30,41 @@
 //! timeout under twice the `Noop` interval: a healthy quiet stream could be
 //! left between two `Noop`s. The two span nodes (one node's pullers, its
 //! peers' servers): raise the idle timeout first, the interval after.
+//!
+//! The `Noop` interval is one setting of the serve loop, applied to every
+//! stream it serves, each flow's alike; it is the heartbeat a quiet stream
+//! carries, and a position claim vouches for twice it. The idle timeout is
+//! how long after a peer's last frame its stream reads down, and a stall of a
+//! live peer longer than it makes the puller pull again from its watermark.
+//! A proxy's dead verdict is confirmed once the Backup flow's stream is down,
+//! at the verdict or that long after the peer's last frame, by one connect
+//! made at once that is refused or runs out the connect timeout, after the
+//! peer's address lookup (ADR-0047 D1): a node lost whole is taken over at
+//! most idle + lookup + connect timeouts after the verdict, plus the idle
+//! timeout again for a frozen process whose kernel takes the connect (6 to
+//! 8 s by default), so all stay far below the orchestrator's force-delete of
+//! an unreachable node's pod (minutes).
+//! Neither is tied to the verdict's freshness window or hold: one wait runs
+//! per peer, whatever notices arrive meanwhile, and a notice is checked fresh
+//! when it arrives.
+//!
+//! The open timeout and the connection cap bound what a client that is not a
+//! peer holds on the serving side; their relations are ADR-0045 item 5.
+//!
+//! The dead-peer TTL is an HA timer of the serving side: a peer log no flow
+//! has served for that long is dropped, writes or not, so the log toward an
+//! away backup holds the writes of one TTL at most (ADR-0055 §3). It decides
+//! only whether a peer coming back with the same identity resumes warm from
+//! its watermark or re-bootstraps cold. It must exceed the idle timeout plus
+//! the backoff ceiling plus one connect: the longest a flow that blipped
+//! takes to be read down and pull again, so a short blip resumes warm.
+//!
+//! The bootstrap hard timer bounds how long a cold flow waits to reach its
+//! peer before it stops holding readiness (ADR-0011 X5, ADR-0014 §11), and how
+//! long a serving node reads a peer's bootstrap in flight as no slow consumer
+//! (ADR-0055 §3); every worker of a cluster runs the same value. Its relation
+//! to the connect bounds is checked with the configuration
+//! (`ConfigCheck`).
 
 use std::time::Duration;
 
@@ -38,8 +80,12 @@ pub(crate) struct LinkSettings {
     pub(crate) idle_timeout: Duration,
     pub(crate) noop_interval: Duration,
     pub(crate) send_stall: Duration,
+    pub(crate) open_timeout: Duration,
+    pub(crate) max_connections: usize,
     pub(crate) socket: SocketSettings,
     pub(crate) lookup_timeout: Duration,
+    pub(crate) dead_peer_ttl: Duration,
+    pub(crate) bootstrap_hard_timeout: Duration,
 }
 
 impl Default for LinkSettings {
@@ -52,8 +98,14 @@ impl Default for LinkSettings {
             idle_timeout: Duration::from_millis(puller.idle_timeout_ms),
             noop_interval: serve.noop_interval,
             send_stall: serve.send_stall,
+            open_timeout: serve.open_timeout,
+            max_connections: serve.max_connections,
             socket: SocketSettings::default(),
             lookup_timeout: http_net::LOOKUP_BOUND,
+            dead_peer_ttl: Duration::from_millis(
+                u64::try_from(b2bua::repl::DEFAULT_DEAD_PEER_TTL_MS).unwrap_or(u64::MAX),
+            ),
+            bootstrap_hard_timeout: Duration::from_millis(puller.bootstrap_hard_timeout_ms),
         }
     }
 }
@@ -79,6 +131,17 @@ impl LinkSettings {
             idle_timeout: ms("B2BUA_REPL_IDLE_TIMEOUT_MS", d.idle_timeout)?,
             noop_interval: ms("B2BUA_REPL_NOOP_INTERVAL_MS", d.noop_interval)?,
             send_stall: ms("B2BUA_REPL_SEND_STALL_MS", d.send_stall)?,
+            open_timeout: ms("B2BUA_REPL_OPEN_TIMEOUT_MS", d.open_timeout)?,
+            max_connections: match positive(
+                &get,
+                "B2BUA_REPL_MAX_CONNECTIONS",
+                u64::try_from(d.max_connections).unwrap_or(u64::MAX),
+            )?
+            .try_into()
+            {
+                Ok(n) => n,
+                Err(_) => return Err("B2BUA_REPL_MAX_CONNECTIONS is too large".into()),
+            },
             socket: SocketSettings {
                 keepalive_idle: keepalive_s(
                     "B2BUA_REPL_KEEPALIVE_IDLE_MS",
@@ -104,6 +167,11 @@ impl LinkSettings {
                 },
             },
             lookup_timeout: ms("B2BUA_REPL_LOOKUP_TIMEOUT_MS", d.lookup_timeout)?,
+            dead_peer_ttl: ms("B2BUA_REPL_DEAD_PEER_TTL_MS", d.dead_peer_ttl)?,
+            bootstrap_hard_timeout: ms(
+                "B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS",
+                d.bootstrap_hard_timeout,
+            )?,
         };
         let floor = Duration::from_millis(PullerConfig::default().backoff_init_ms);
         if settings.backoff_max < floor {
@@ -120,13 +188,28 @@ impl LinkSettings {
                 settings.noop_interval.as_millis()
             ));
         }
+        let blip = settings.idle_timeout + settings.backoff_max + settings.connect_timeout;
+        if settings.dead_peer_ttl <= blip {
+            return Err(format!(
+                "B2BUA_REPL_DEAD_PEER_TTL_MS ({} ms) must exceed B2BUA_REPL_IDLE_TIMEOUT_MS + \
+                 B2BUA_REPL_BACKOFF_MAX_MS + B2BUA_REPL_CONNECT_TIMEOUT_MS ({} ms)",
+                settings.dead_peer_ttl.as_millis(),
+                blip.as_millis()
+            ));
+        }
         Ok(settings)
     }
 
-    /// The pullers' configuration: the default backoff floor and bootstrap
-    /// timer, these link bounds and backoff ceiling.
+    /// The dead-peer TTL in the change log's unit.
+    pub(crate) fn dead_peer_ttl_ms(&self) -> i64 {
+        i64::try_from(self.dead_peer_ttl.as_millis()).unwrap_or(i64::MAX)
+    }
+
+    /// The pullers' configuration: the default backoff floor, these link
+    /// bounds, backoff ceiling and bootstrap hard timer.
     pub(crate) fn puller(&self) -> PullerConfig {
         PullerConfig {
+            bootstrap_hard_timeout_ms: millis_u64(self.bootstrap_hard_timeout),
             connect_timeout_ms: millis_u64(self.connect_timeout),
             backoff_max_ms: millis_u64(self.backoff_max),
             idle_timeout_ms: millis_u64(self.idle_timeout),
@@ -137,12 +220,21 @@ impl LinkSettings {
 
     /// The serve loop's configuration.
     pub(crate) fn serve(&self) -> ServeConfig {
-        ServeConfig { noop_interval: self.noop_interval, send_stall: self.send_stall }
+        ServeConfig {
+            noop_interval: self.noop_interval,
+            send_stall: self.send_stall,
+            open_timeout: self.open_timeout,
+            max_connections: self.max_connections,
+        }
     }
 }
 
 /// `key` as a positive integer, `default` when unset.
-fn positive(get: &impl Fn(&str) -> Option<String>, key: &str, default: u64) -> Result<u64, String> {
+pub(super) fn positive(
+    get: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: u64,
+) -> Result<u64, String> {
     match get(key) {
         None => Ok(default),
         Some(raw) => match raw.trim().parse::<u64>() {

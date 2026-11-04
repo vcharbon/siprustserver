@@ -13,7 +13,7 @@ from kit import budget, write_yaml
 
 from hakit.content import Content, discover
 from hakit.dryrun import simulated
-from hakit.executor import Call, FakeExecutor
+from hakit.executor import Call, FakeExecutor, ProcResult
 from hakit.incident_exec import fmt_param
 from hakit.jsonval import Json, as_obj
 from hakit.lab import lab_from_env
@@ -124,3 +124,26 @@ def test_a_load_incident_starts_its_stream_at_inject_and_stops_it_at_heal(name: 
     assert docs["extra"]["reconciled"] is (inc.stop == "drain") and docs["extra"]["firings"] == 1
     facts = [e for e in read_jsonl(run_dir / "events.jsonl") if e.get("kind") == "facts" and e.get("executable") == "heal"]
     assert as_obj(facts[0]["facts"])["stop"] == inc.stop
+
+
+def test_the_hold_counts_from_the_instant_the_fault_was_applied(tmp_path: Path) -> None:
+    """An inject that waits for an effect of its fault (a route withdrawn)
+    states `applied_at_ms`: the hold runs from it, not from `injected`, so
+    the fault lasts `duration_s` whatever the wait."""
+    name = "backend_outage"
+    inc = BASE.incidents[name]
+    clock, fake = simulated()
+    applied: list[int] = []
+
+    def inject(call: Call) -> ProcResult | None:
+        if call.kind != "run" or call.argv[0] != str(inc.directory / "inject"):
+            return None
+        applied.append(clock.now_ms())
+        clock.sleep(10)
+        return ProcResult(rc=0, stdout=json.dumps({"applied_at_ms": applied[0]}), stderr="")
+
+    fake.rules.insert(0, inject)
+    r = Runner(one_event(tmp_path, name), SCHEMAS, lab_from_env({}), fake, clock, tmp_path / "results", say=lambda _m: None)
+    at = dict(phases(r.run("one")))
+    assert at["injected"] - applied[0] >= 10_000
+    assert at["heal"] - applied[0] == int(inc.duration_s * 1000)

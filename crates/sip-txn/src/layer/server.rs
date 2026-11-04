@@ -13,6 +13,7 @@ use bytes::Bytes;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::header::ParamValue;
 use sip_message::param_codec::decode_param;
+use sip_message::received::{stamp_received, stamped_destination, Received, Stamp};
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
@@ -71,7 +72,9 @@ impl Owner {
     /// datagram that left: the response's own image (ADR-0025, ADR-0032 X3),
     /// re-rendered only where `bind_to_tag` held it to the bound To-tag. The
     /// transaction is the one its request matched (§17.2.3): the response
-    /// echoes that request's top Via and CSeq method.
+    /// echoes that request's top Via and CSeq method, and leaves to the
+    /// destination the transaction holds (§18.2.2), whatever `dest` names.
+    /// `dest` addresses only a response no transaction here holds.
     pub(super) async fn do_send_response(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -114,8 +117,10 @@ impl Owner {
             return buf;
         }
 
+        let mut dest = dest;
         if let Some(id) = ServerTxnId::of_response(&msg) {
-            if self.server(id).is_some() {
+            if let Some(held) = self.server(id).map(|t| t.destination) {
+                dest = held.unwrap_or(dest);
                 self.record_uas_tag(id, &msg);
                 if let Some(txn) = self.server_mut(id) {
                     let is_final = status >= 200;
@@ -131,7 +136,7 @@ impl Owner {
                     if is_final {
                         txn.original_request = None;
                         let kind = txn.kind;
-                        self.arm_final_hold(id, kind, status, dest);
+                        self.arm_final_hold(id, kind, status);
                     }
                 }
             } else if status >= 300 && cseq_method == Method::Invite {
@@ -172,19 +177,14 @@ impl Owner {
     /// Arm a server txn's post-final timers (RFC 3261 §17.2): the Timer H/J
     /// hold, or Timer L for an INVITE Accepted on a 2xx (RFC 6026 §7.1), and
     /// for an INVITE answered non-2xx the Timer G ladder that re-sends the
-    /// final to `dest` (T1, then ×2 capped at T2) until the ACK or Timer H.
+    /// final to the transaction's destination (T1, then ×2 capped at T2)
+    /// until the ACK or Timer H.
     /// The auto-100 already silenced the UAC's INVITE retransmit, so the
     /// passive replay-on-request-retransmit path never fires and a single
     /// dropped reject would otherwise wedge the caller for the full 32 s. 2xx
     /// is exempt (the TU owns §13.3.1.4 2xx retransmission); non-INVITE
     /// (Timer J) only absorbs, never retransmits.
-    pub(super) fn arm_final_hold(
-        &mut self,
-        id: ServerTxnId<'_>,
-        kind: TxnKind,
-        status: u16,
-        dest: SocketAddr,
-    ) {
+    pub(super) fn arm_final_hold(&mut self, id: ServerTxnId<'_>, kind: TxnKind, status: u16) {
         self.hold(
             TxnRef::Server(id),
             match (kind, status) {
@@ -202,24 +202,27 @@ impl Owner {
             if let Some(txn) = self.server_mut(id) {
                 txn.retransmit_key = Some(g_key);
                 txn.ladder = Some(ladder);
-                txn.destination = Some(dest);
             }
         }
     }
 
+    /// Admit a request received from `src`. A copy a transaction absorbs is
+    /// matched as it arrived (§17.2.3 reads no `received`/`rport`); a request
+    /// that goes on — handed to the TU, opening a transaction, a CANCEL, a
+    /// refused INVITE — is first stamped with what the transport observed
+    /// (RFC 3261 §18.2.1, RFC 3581 §4), once, so the TU, the transaction and
+    /// every response composed from it read the stamped hop. The event still
+    /// carries the datagram as it arrived.
     pub(super) async fn handle_inbound_request(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         req: SipRequest,
         src: SocketAddr,
     ) {
+        let datagram = req.image().clone();
         let Some(id) = ServerTxnId::of_request(&req) else {
             // No branch — pass through (pre-RFC 3261 UA).
-            self.emit(TransactionEvent::Message {
-                message: Box::new(SipMessage::Request(req)),
-                src,
-                matched_client_txn: false,
-            });
+            self.hand_up(req, src, datagram);
             return;
         };
 
@@ -239,11 +242,7 @@ impl Owner {
                         // copy; the transaction stays Accepted for Timer L.
                         (TxnState::Accepted, _) => {
                             self.detach_from_call(TxnRef::Server(id));
-                            self.emit(TransactionEvent::Message {
-                                message: Box::new(SipMessage::Request(req)),
-                                src,
-                                matched_client_txn: false,
-                            });
+                            self.hand_up(req, src, datagram);
                             return;
                         }
                         _ => {}
@@ -260,17 +259,14 @@ impl Owner {
             {
                 return;
             }
-            self.emit(TransactionEvent::Message {
-                message: Box::new(SipMessage::Request(req)),
-                src,
-                matched_client_txn: false,
-            });
+            self.hand_up(req, src, datagram);
             return;
         }
 
         // ── CANCEL ─────────────────────────────────────────────────────────────
         if req.method() == Method::Cancel {
-            self.handle_cancel(endpoint, req, src, false).await;
+            let cancel = self.stamp(req, src).request;
+            self.handle_cancel(endpoint, cancel, src, Some(datagram)).await;
             return;
         }
 
@@ -280,13 +276,11 @@ impl Owner {
         }
 
         // ── Out-of-dialog OPTIONS, stateless (RFC 3261 §8.2.7) ─────────────────
-        // No transaction: every copy reaches the TU, whose answer leaves raw.
+        // No transaction: every copy reaches the TU, on the keepalive lane when
+        // the layer runs one, and its answer leaves raw.
         if self.stateless_options && req.method() == Method::Options && req.to().tag().is_none() {
-            self.emit(TransactionEvent::Message {
-                message: Box::new(SipMessage::Request(req)),
-                src,
-                matched_client_txn: false,
-            });
+            let event = self.upward(req, src, datagram);
+            self.emit_keepalive(event);
             return;
         }
 
@@ -298,8 +292,12 @@ impl Owner {
         let kind =
             if req.method() == Method::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         let is_invite = matches!(kind, TxnKind::Invite);
+        // Every response of the transaction leaves to one address: its
+        // request's stamped response target (§18.2.2), fixed now.
+        let Received { request: req, destination, .. } = self.stamp(req, src);
+        let Some(id) = ServerTxnId::of_request(&req) else { return };
         let held = if is_invite {
-            match self.judge_new_invite(endpoint, &req, src).await {
+            match self.judge_new_invite(endpoint, &req, destination).await {
                 NewInvite::Refused => return,
                 NewInvite::Admitted { held } => held,
             }
@@ -332,37 +330,20 @@ impl Owner {
             leg_id: None,
             incarnation_mark: None,
             state: TxnState::Trying,
-            // An INVITE's source, where a final the layer itself owes it is
-            // sent (`answer_unanswered_invites_of_call`); the TU's final
-            // re-points it.
-            destination: is_invite.then_some(src),
+            destination: Some(destination),
         };
         self.open_txn_with(head, |txn| txn.held = held);
 
-        // For INVITE, immediately send 100 Trying and move to proceeding.
+        // An INVITE's first provisional is its consumer's to release, or this
+        // layer's at the §17.2.1 bound (`layer::trying`).
         if is_invite {
-            // The recipe froze the 100 into its own image, which IS its wire
-            // form — send and cache that instead of rendering it twice. An
-            // INVITE whose lines no response can echo draws no 100.
-            let trying = generate_response(&req, 100, "Trying", &GenerateResponseOpts::default())
-                .map(|trying| trying.image().clone());
-            if let Ok(trying_buf) = &trying {
-                self.send_buffer(endpoint, trying_buf, src).await;
-            }
-            if let Some(txn) = self.server_mut(id) {
-                txn.state = TxnState::Proceeding;
-                // Cache the 100 as the latest provisional so a retransmitted INVITE
-                // replays it (RFC 3261 §17.2.1) instead of being absorbed silently —
-                // the auto-100 already silenced the UAC's own retransmission timer.
-                if let Ok(trying_buf) = trying {
-                    txn.last_response = Some(trying_buf);
-                    txn.last_response_status = Some(100);
-                }
+            if let Some(opened) = self.server(id).map(|t| t.created_at) {
+                self.arm_trying_bound(id.to_key(), opened);
             }
         }
 
-        // Critical for INVITE: the 100 we just sent stops the UAC retransmitting,
-        // so this Message is the app's ONLY notice of the call. A non-INVITE the
+        // Critical for INVITE: the 100 the bound sends stops the UAC
+        // retransmitting, so this Message is the app's ONLY notice of the call. A non-INVITE the
         // full queue drops is not admitted: its transaction is forgotten, so the
         // UAC's Timer E copy (§17.1.2.2; UDP-only, ADR-0027) is admitted afresh
         // rather than absorbed unanswered by a Trying transaction.
@@ -371,6 +352,7 @@ impl Owner {
             message: Box::new(SipMessage::Request(req)),
             src,
             matched_client_txn: false,
+            datagram,
         };
         if is_invite {
             self.emit_critical(event);
@@ -378,6 +360,36 @@ impl Owner {
             if let Some(key) = forgettable {
                 self.delete_txn(key.as_ref());
             }
+        }
+    }
+
+    /// `req`, received from `src`, stamped on receipt ([`stamp_received`]);
+    /// a stamp the render cannot write is counted.
+    fn stamp(&self, req: SipRequest, src: SocketAddr) -> Received {
+        let received = stamp_received(req, src);
+        if received.stamp == Stamp::Unwritten {
+            self.metrics.via_stamps_unwritten.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        received
+    }
+
+    /// Hand `req`, received from `src` as `datagram`, to the TU with no
+    /// transaction, stamped on receipt. `false` when the event queue dropped
+    /// it.
+    fn hand_up(&mut self, req: SipRequest, src: SocketAddr, datagram: Bytes) -> bool {
+        let event = self.upward(req, src, datagram);
+        self.emit(event)
+    }
+
+    /// The event passing `req`, received from `src` as `datagram`, up to the
+    /// consumer, its top Via stamped (RFC 3261 §18.2.1).
+    fn upward(&self, req: SipRequest, src: SocketAddr, datagram: Bytes) -> TransactionEvent {
+        let req = self.stamp(req, src).request;
+        TransactionEvent::Message {
+            message: Box::new(SipMessage::Request(req)),
+            src,
+            matched_client_txn: false,
+            datagram,
         }
     }
 
@@ -392,8 +404,10 @@ impl Owner {
     /// first response sends nothing: its request is the consumer's to answer.
     /// A copy the event queue drops, or the consumer discards before handling
     /// it ([`TransactionLayer::forget_unanswered`](crate::TransactionLayer::forget_unanswered)),
-    /// leaves no transaction behind. `true` when a transaction absorbed the
-    /// request, `false` when none matches it or the branch is empty.
+    /// leaves no transaction behind. What it sends goes to the destination
+    /// the transaction holds, else to the copy's response target (§18.2.2).
+    /// `true` when a transaction absorbed the request, `false` when none
+    /// matches it or the branch is empty.
     pub(super) async fn replay_cached(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -401,6 +415,11 @@ impl Owner {
         src: SocketAddr,
     ) -> bool {
         let Some(id) = ServerTxnId::of_request(req) else { return false };
+        // A copy of an INVITE whose CANCEL's answers are still held: they
+        // answer it.
+        if self.holds_cancel(id) {
+            return true;
+        }
         let Some(existing) = self.server(id) else { return false };
         let replay = existing
             .last_response
@@ -409,19 +428,22 @@ impl Owner {
             .map(|(cached, status)| (cached, status, existing.method.clone()));
         let owes_trying =
             existing.kind == TxnKind::Invite && existing.state == TxnState::Proceeding;
+        let dest = existing.destination.unwrap_or_else(|| stamped_destination(req.top_via(), src));
         match replay {
             Some((cached, status, method)) => {
-                self.send_buffer(endpoint, &cached, src).await;
+                self.send_buffer(endpoint, &cached, dest).await;
                 self.metrics.retransmits.record_trigger(&method, status);
             }
             None if owes_trying => {
-                let Ok(trying) =
-                    generate_response(req, 100, "Trying", &GenerateResponseOpts::default())
-                else {
+                // The 100 answers the copy (its Timestamp, §8.2.6.1), stamped
+                // on receipt.
+                let request = self.stamp(req.clone(), src).request;
+                let opts = GenerateResponseOpts::default();
+                let Ok(trying) = generate_response(&request, 100, "Trying", &opts) else {
                     return true;
                 };
                 let trying_buf = trying.image().clone();
-                self.send_buffer(endpoint, &trying_buf, src).await;
+                self.send_buffer(endpoint, &trying_buf, dest).await;
                 if let Some(txn) = self.server_mut(id) {
                     txn.last_response = Some(trying_buf);
                     txn.last_response_status = Some(100);

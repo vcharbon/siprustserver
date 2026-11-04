@@ -6,15 +6,23 @@
 //! [`MsgpackCodec`] only for flush/replication. Routing uses the in-memory
 //! `sip_index`; the store's `get_index` is the fallback.
 
-mod adoption;
+mod backup;
 mod call_store;
+pub mod containment;
+pub mod envelope;
 mod faults;
 mod flush_body;
+mod index;
+mod local_release;
+mod materialise;
 mod memory;
+mod parked;
 mod poison;
+mod reap;
 mod reconcile;
 mod replica_index;
 mod resident;
+mod resident_envelope;
 mod scan;
 mod setup_cancel;
 #[cfg(test)]
@@ -22,28 +30,26 @@ mod setup_cancel_tests;
 #[cfg(test)]
 mod spiral_index_tests;
 mod takeover;
-mod terminate_writer;
+pub use reap::ReapedBodies;
 #[cfg(test)]
 mod unwired_tests;
 
+pub use backup::HoldTarget;
 pub use call_store::{
     partition_of, role_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
 };
+pub use envelope::{CallTopology, Enveloped};
 pub use faults::{FaultInjectingCallStore, StoreFaultPoint, StoreFaults};
 pub use memory::InMemoryCallStore;
 pub(crate) use poison::*;
 pub use poison::{LOCKS, LOCK_RECOVERIES};
 pub use reconcile::Reconciled;
 pub use takeover::TakeoverProbe;
-pub use terminate_writer::BufferedTerminateWriter;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use call::{
-    call_index_keys, Call, CallBodyCodec, CallModelState, IndexHit, IndexLookup, MsgpackCodec,
-    Probe,
-};
+use call::{call_index_keys, Call, CallModelState, MsgpackCodec};
 
 use crate::metrics::B2buaMetrics;
 use crate::repl::{ReplicatingCallStore, ReplicationPlan};
@@ -81,7 +87,11 @@ struct Inner {
     /// Boxed so a bucket is a pointer, not the whole record: the table's
     /// doubling step and its footprint after a drain stay small, and a call's
     /// own memory goes back to the allocator when it is removed.
-    calls: HashMap<String, Box<Call>>,
+    calls: HashMap<String, Arc<Call>>,
+    /// The store envelope of each resident call placed under a worker pair
+    /// (ADR-0055 §7): written at every entry and every write of its call,
+    /// removed with it.
+    topologies: HashMap<String, CallTopology>,
     /// SIP routing index: a [`call::index_key`] key → callRef.
     sip_index: HashMap<String, String>,
     /// The index keys each call currently owns (for clean re-index on update).
@@ -98,6 +108,9 @@ struct Inner {
     /// handshake. Local-only; never serialized/replicated. Cleared on
     /// drop_local/remove.
     takeover: takeover::TakeoverMarks,
+    /// Reclaimed calls resident here and not yet armed (`parked`): cleared on
+    /// arming and on drop_local.
+    parked: std::collections::HashSet<String>,
     /// **Last-touched stamps** (ADR-0020 X4) — the call reaper's only liveness
     /// input: epoch-ms of the last dispatched event that reached the handler
     /// (`router::process` touches), stamped at every entry
@@ -121,6 +134,10 @@ struct Inner {
     /// waiting INVITE holds ([`retain_setup_cancelled`](Self::retain_setup_cancelled)).
     /// The marked CSeqs of each `callRef`; no entry is empty.
     setup_cancelled: HashMap<String, Vec<u32>>,
+    /// The initial INVITEs whose turn awaits their setup-CANCEL mark while
+    /// their decision runs, by `(callRef, INVITE CSeq)`: the mark wakes it.
+    /// Removed when its `SetupCancelWatch` drops, unless a later watch replaced it.
+    setup_cancel_watches: HashMap<(String, u32), Arc<tokio::sync::Notify>>,
     /// Resident calls that run uncounted (`CallLimiterState::runs_uncounted`):
     /// moved by every insertion, replacement and removal of `calls`, so it is
     /// exact at every write, and published as `b2bua_limiter_uncounted_calls`.
@@ -153,19 +170,11 @@ impl Inner {
         }
     }
 
-    /// Drop `call_ref`'s index `keys`, leaving any key another call now holds.
-    fn unindex(&mut self, call_ref: &str, keys: &[String]) {
-        for k in keys {
-            if self.sip_index.get(k).is_some_and(|owner| owner == call_ref) {
-                self.sip_index.remove(k);
-            }
-        }
-    }
-
     /// Shrink the per-call maps after a removal (see [`shrink_idle`]); the
     /// membership sets hold pointer-sized buckets and are left as they are.
     fn shrink_idle(&mut self) {
         shrink_idle(&mut self.calls);
+        shrink_idle(&mut self.topologies);
         shrink_idle(&mut self.sip_index);
         shrink_idle(&mut self.indexed);
         shrink_idle(&mut self.locks);
@@ -173,30 +182,22 @@ impl Inner {
     }
 }
 
-/// The store write path of a wired node: the replicating store the write-side policy
-/// targets and the buffered writer that drains to it. The two exist together
-/// or not at all.
-#[derive(Clone)]
-struct Replication {
-    store: Arc<ReplicatingCallStore>,
-    writer: BufferedTerminateWriter,
-}
-
 /// The call store. Clone-cheap (one `Arc`); share across the stack.
 #[derive(Clone)]
 pub struct CallState {
     inner: Arc<Mutex<Inner>>,
     store: Arc<dyn CallStore>,
-    /// The replication wiring, present only on a wired node. It is the one switch
+    /// The replicating store, present only on a wired node. It is the one switch
     /// on the store write path: `None` and
     /// [`flush`](CallState::flush)/[`remove`](CallState::remove) touch the store
     /// not at all, whatever topology a call carries (the front proxy stamps a
     /// backup peer on every call whenever two workers are alive, and nothing
-    /// reads what an unwired node would write); there is then no writer either.
-    /// `Some` and a call with a non-empty `topology.bak` rides the write-side
-    /// policy ([`ReplicationPlan`]); a call with no backup takes
-    /// `PutOpts::default()`.
-    repl: Option<Replication>,
+    /// reads what an unwired node would write). `Some` and a call with a backup
+    /// ([`backup_of`](CallState::backup_of)) rides the write-side policy
+    /// ([`ReplicationPlan`]); a call with none takes `PutOpts::default()`. Every
+    /// write lands in the store and its change log within the call that makes
+    /// it: none is queued, none dropped (ADR-0055 §3).
+    repl: Option<Arc<ReplicatingCallStore>>,
     codec: MsgpackCodec,
     self_ordinal: String,
     metrics: B2buaMetrics,
@@ -224,9 +225,9 @@ impl CallState {
     /// Decode every call this worker owns as primary from the store (crash
     /// recovery read-path), bounded by what the store holds for the primary
     /// partition.
-    pub async fn load_owned(&self) -> Result<Vec<Call>, StoreError> {
+    pub async fn load_owned(&self) -> Result<Vec<Enveloped>, StoreError> {
         let bodies = self.store.scan_calls(PartitionRole::Primary, &self.self_ordinal).await?;
-        Ok(bodies.iter().filter_map(|b| self.codec.decode(b).ok()).collect())
+        Ok(bodies.iter().filter_map(|b| envelope::decode(&self.codec, b).ok()).collect())
     }
 
     /// An unwired call state over `store`: the store is read (`load_owned`)
@@ -268,31 +269,17 @@ impl CallState {
         self
     }
 
-    /// Opt into replication: open the store write path through `writer`, and
-    /// route the flush/remove of any call that carries a non-empty
-    /// `topology.bak` through the write-side policy. Without this call the
-    /// store is never written and no writer exists. `repl` MUST be the store
-    /// `writer` drains to, so the changelog bump (keyed off the `PutOpts.peer`
-    /// this path sets) fires.
-    pub fn with_replication(
-        mut self,
-        repl: Arc<ReplicatingCallStore>,
-        writer: BufferedTerminateWriter,
-    ) -> Self {
-        self.repl = Some(Replication { store: repl, writer });
+    /// Opt into replication: open the store write path into `repl`, and route
+    /// the flush/remove of any call with a backup through the write-side
+    /// policy. Without this call the store is never written.
+    pub fn with_replication(mut self, repl: Arc<ReplicatingCallStore>) -> Self {
+        self.repl = Some(repl);
         self
     }
 
     /// The replicating store, when replication is wired.
-    fn repl_store(&self) -> Option<&Arc<ReplicatingCallStore>> {
-        self.repl.as_ref().map(|r| &r.store)
-    }
-
-    /// The buffered writer the store write path submits to, when replication
-    /// is wired, for the tests that assert what an unwired node constructs.
-    #[cfg(test)]
-    pub(crate) fn terminate_writer(&self) -> Option<&BufferedTerminateWriter> {
-        self.repl.as_ref().map(|r| &r.writer)
+    pub(crate) fn repl_store(&self) -> Option<&Arc<ReplicatingCallStore>> {
+        self.repl.as_ref()
     }
 
     /// The call map's lock ([`poison::CALL_STORE`]).
@@ -300,20 +287,25 @@ impl CallState {
         poison::locked(&self.inner, poison::CALL_STORE)
     }
 
-    /// Insert a freshly-created call + index it. Returns its `callRef`. The
-    /// index, the stamp and the uncounted tally are written before the call
-    /// itself, so a panic between them leaves only entries the sweep drops.
-    pub fn create(&self, call: Call) -> String {
+    /// Insert a freshly-created call, placed under `topology`, + index it.
+    /// Returns its `callRef`. The index, the stamp, the envelope and the
+    /// uncounted tally are written before the call itself, so a panic between
+    /// them leaves only entries the sweep drops.
+    pub fn create(&self, call: Call, topology: Option<CallTopology>) -> String {
         let call_ref = call.call_ref.clone();
         let now_ms = self.clock.now_ms();
         let is = call.limiter.runs_uncounted();
+        let keys = call_index_keys(&call);
         let mut inner = self.locked();
         let was = inner.calls.get(&call_ref).is_some_and(|c| c.limiter.runs_uncounted());
-        Self::reindex(&mut inner, &call);
+        Self::reindex(&mut inner, &call_ref, keys);
         inner.touched.insert(call_ref.clone(), now_ms);
+        Self::place(&mut inner, &call_ref, topology);
         inner.restate_uncounted(was, is);
         self.publish_uncounted(&inner);
-        inner.calls.insert(call_ref.clone(), Box::new(call));
+        let replaced = inner.calls.insert(call_ref.clone(), Arc::new(call));
+        drop(inner);
+        drop(replaced);
         call_ref
     }
 
@@ -338,7 +330,7 @@ impl CallState {
         self.locked().touched.get(call_ref).copied()
     }
 
-    /// Cheap residency check (no `Call` clone) — sweep-side strike pruning.
+    /// Whether `call_ref` is resident, read without cloning it.
     pub fn contains(&self, call_ref: &str) -> bool {
         self.locked().calls.contains_key(call_ref)
     }
@@ -362,9 +354,15 @@ impl CallState {
             .collect()
     }
 
-    /// Snapshot a call (clone) from memory, if present.
+    /// Snapshot a call (clone) from memory, if present. The copy is made
+    /// after the map lock is released.
     pub fn peek(&self, call_ref: &str) -> Option<Call> {
-        self.locked().calls.get(call_ref).map(|c| (**c).clone())
+        self.resident(call_ref).map(Arc::unwrap_or_clone)
+    }
+
+    /// The resident call `call_ref`, shared with the map: no copy.
+    pub fn resident(&self, call_ref: &str) -> Option<Arc<Call>> {
+        self.locked().calls.get(call_ref).cloned()
     }
 
     /// Whether the resident call `call_ref` is the incarnation `incarnation`
@@ -389,7 +387,7 @@ impl CallState {
     /// source). Returns the decoded call with its persisted receive-time
     /// clock-skew offset (`0` when none). No state check: a `Terminated` body
     /// is returned as-is for the caller to refuse.
-    pub async fn peek_replica(&self, call_ref: &str) -> Result<(Call, i64), ReplicaMiss> {
+    pub async fn peek_replica(&self, call_ref: &str) -> Result<(Enveloped, i64), ReplicaMiss> {
         self.read_partition(PartitionRole::Backup, call_ref).await
     }
 
@@ -397,20 +395,15 @@ impl CallState {
     ///
     /// **Version-vector bump rule (ADR-0014):** each authoritative mutation of a
     /// call increments **the local node's own** counter of that call's `(p,b)`
-    /// version vector (`CallTopology.{gen, bak_gen}`) — the central, single
-    /// bump-point. Which counter depends on the role this node plays for the
-    /// call (resolved by [`partition_of`]):
-    /// - **Primary** (the ref's encoded ordinal is ours) → bump `gen` (`p`).
-    /// - **Acting-backup** (the ref names a crashed peer we took over) → bump
-    ///   `bak_gen` (`b`).
-    ///
-    /// Because each node bumps only its own counter, the *other* counter carried
-    /// on a propagated update is, by construction, the branch point — which is
-    /// what lets the asymmetric apply rule (see [`Puller`](crate::repl::Puller)) resolve
-    /// concurrent primary+backup mutations, where a single shared counter would
-    /// tie at equal generations and diverge. A brand-new call enters at
-    /// `(1,0)` (stamped at INVITE time in [`crate::initial_invite`]). The bump is
-    /// a no-op for non-proxied calls that carry no `topology`.
+    /// version vector (the envelope's `CallTopology.{gen, bak_gen}`) — the
+    /// central, single bump-point. Which counter depends on the role this node plays for the
+    /// call (resolved by [`partition_of`]): **Primary** (the ref's encoded
+    /// ordinal is ours) bumps `gen` (`p`), **acting-backup** (the ref names a
+    /// crashed peer we took over) bumps `bak_gen` (`b`). Each node bumps only
+    /// its own counter, so the *other* counter carried on a propagated update
+    /// is, by construction, the branch point. A brand-new call enters at
+    /// `(1,0)` (placed at INVITE time from the proxy's cookie). The bump is a
+    /// no-op for a non-proxied call, placed under no worker pair.
     ///
     /// **Replace-only.** `update` never *inserts*: every live call enters the map
     /// through [`create`](Self::create) / [`materialize_if_absent`](Self::materialize_if_absent),
@@ -421,48 +414,69 @@ impl CallState {
     /// this node by an authoritative teardown, and any later event re-enters via
     /// a fresh hydrate.
     ///
-    /// A bump counts a write this node made that changes the call; a quiet turn
-    /// ([`crate::effects::QuietTurn`]) and a fold of the other owner's body go
-    /// through [`update_quiet`](Self::update_quiet) and move no axis.
+    /// A bump counts a write this node made; a quiet turn
+    /// ([`crate::effects::QuietTurn`]) and a meeting with the other owner's
+    /// copy go through [`update_quiet`](Self::update_quiet) and move no axis.
     ///
-    /// The primary's write is its own body at its own `gen`, which therefore
-    /// no longer names a version adopted without its body
-    /// ([`CallTopology::gen_adopted`](call::CallTopology::gen_adopted)).
-    pub fn update(&self, mut call: Call) {
-        if let Some(t) = call.topology.as_mut() {
+    /// **The state stamp (ADR-0055 §7)** is set here and nowhere else: a write
+    /// that changes a compared field of the resident copy
+    /// ([`call::helpers::same_state`]) stamps the vector it bumps; a write that
+    /// changes only exempt fields leaves the stamp ([`containment`]). It runs
+    /// outside the map lock: the caller holds the call's own.
+    pub fn update(&self, call: impl Into<Arc<Call>>) {
+        let call = call.into();
+        let Some(resident) = self.resident(&call.call_ref) else {
+            return;
+        };
+        let changed = !call::helpers::same_state(&resident, &call);
+        let keys = call_index_keys(&call);
+        let mut inner = self.locked();
+        if let Some(t) = inner.topologies.get_mut(&call.call_ref) {
             match role_of(&self.self_ordinal, &call.call_ref) {
-                PartitionRole::Primary => {
-                    t.gen += 1;
-                    t.gen_adopted = false;
-                }
+                PartitionRole::Primary => t.gen += 1,
                 PartitionRole::Backup => t.bak_gen += 1,
             }
+            if changed {
+                t.stamp_vector();
+            }
         }
-        self.replace(call);
+        let released = self.replace_locked(&mut inner, call, keys);
+        drop(inner);
+        drop(released);
     }
 
-    /// Replace the in-memory call for a quiet turn or a fold: the same
+    /// Replace the in-memory call for a quiet turn or a meeting: the same
     /// replace-only rule as [`update`](Self::update) with no counter moved —
     /// the `(p,b)` the resident copy carries is the last write's, either
     /// owner's, and so is what the next flush publishes.
-    pub fn update_quiet(&self, call: Call) {
-        self.replace(call);
+    pub fn update_quiet(&self, call: impl Into<Arc<Call>>) {
+        let call = call.into();
+        let keys = call_index_keys(&call);
+        let mut inner = self.locked();
+        let released = self.replace_locked(&mut inner, call, keys);
+        drop(inner);
+        drop(released);
     }
 
-    fn replace(&self, call: Call) {
-        let mut inner = self.locked();
-        if !inner.calls.contains_key(&call.call_ref) {
-            return;
-        }
-        Self::reindex(&mut inner, &call);
-        let was = inner.calls.get(&call.call_ref).is_some_and(|c| c.limiter.runs_uncounted());
+    /// Put `call`, indexed under `keys`, in place of its resident copy.
+    /// Returns what leaves the map, the replaced copy or `call` itself when
+    /// none is resident, for the caller to drop once the lock is released.
+    fn replace_locked(
+        &self,
+        inner: &mut Inner,
+        call: Arc<Call>,
+        keys: Vec<String>,
+    ) -> Option<Arc<Call>> {
+        let Some(was) = inner.calls.get(&call.call_ref).map(|c| c.limiter.runs_uncounted()) else {
+            return Some(call);
+        };
+        Self::reindex(inner, &call.call_ref, keys);
         if was != call.limiter.runs_uncounted() {
             inner.restate_uncounted(was, call.limiter.runs_uncounted());
-            self.publish_uncounted(&inner);
+            self.publish_uncounted(inner);
         }
-        if let Some(slot) = inner.calls.get_mut(&call.call_ref) {
-            **slot = call;
-        }
+        let slot = inner.calls.get_mut(&call.call_ref)?;
+        Some(std::mem::replace(slot, call))
     }
 
     /// Publish the resident calls that run uncounted.
@@ -470,21 +484,21 @@ impl CallState {
         self.metrics.limiter().set_uncounted_calls(inner.uncounted);
     }
 
-    /// The backup peer for a call from its `CallTopology.bak`, or `None` when no
-    /// replicating store is wired / the call has no topology / `bak` is empty.
-    /// This is the resolver the write-side policy ([`ReplicationPlan`]) needs:
-    /// the proxy already signed the backup into the `w_bak` cookie and the b2bua
-    /// stamped it onto `topology.bak` at INVITE time (see [`crate::initial_invite`]),
-    /// so the b2bua never recomputes HRW — it just echoes `w_bak`.
-    fn backup_of(&self, call_ref: &str) -> Option<String> {
-        self.repl_store()?;
-        let inner = self.locked();
-        inner
-            .calls
-            .get(call_ref)
-            .and_then(|c| c.topology.as_ref())
-            .map(|t| t.bak.clone())
-            .filter(|bak| !bak.is_empty())
+    /// The backup peer for a call from its envelope's `bak`, or `None` when no
+    /// replicating store is wired / the call has no topology / `bak` is empty /
+    /// the call has no backup for life (ADR-0055 §3). This is the resolver the
+    /// write-side policy ([`ReplicationPlan`]) needs: the proxy already signed
+    /// the backup into the `w_bak` cookie and the b2bua stamped it onto
+    /// `topology.bak` at INVITE time, so the b2bua never recomputes HRW — it
+    /// just echoes `w_bak`.
+    pub(crate) fn backup_of(&self, call_ref: &str) -> Option<String> {
+        let repl = self.repl_store()?;
+        let bak = {
+            let inner = self.locked();
+            let topology = inner.topologies.get(call_ref);
+            topology.map(|t| t.bak.clone()).filter(|bak| !bak.is_empty())
+        }?;
+        (!repl.unbacked(call_ref)).then_some(bak)
     }
 
     /// Resolve the store target + propagate opts for `call_ref`, on a wired
@@ -516,90 +530,31 @@ impl CallState {
     /// resident copy the store is left alone: the delete would name no call, and
     /// what the store holds for the ref may be another one.
     pub fn remove(&self, call_ref: &str) {
-        // Resolve the replication target BEFORE evicting the in-memory call (the
-        // topology lookup `backup_of` needs the call still present).
-        let target = self.repl.as_ref().map(|r| (self.store_target(call_ref), &r.writer));
-
-        // The call map first, the stamp last: a panic between them leaves only
-        // derived entries the sweep reconciles.
-        let mut inner = self.locked();
-        let removed = inner.calls.remove(call_ref);
-        inner.takeover.remove(call_ref);
-        let keys = inner.indexed.remove(call_ref).unwrap_or_default();
-        inner.unindex(call_ref, &keys);
-        let mut answered = false;
-        let mut incarnation = None;
-        if let Some(was) = removed {
-            inner.restate_uncounted(was.limiter.runs_uncounted(), false);
-            self.publish_uncounted(&inner);
-            answered = call::helpers::caller_answered(&was);
-            incarnation = Some(was.incarnation().to_string());
-        }
-        inner.locks.remove(call_ref);
-        inner.touched.remove(call_ref);
-        inner.shrink_idle();
-        drop(inner);
-
-        if let (Some(((role, primary, mut opts), writer)), Some(incarnation)) =
-            (target, incarnation)
-        {
-            // The delete names the call it removes: its tombstone buries that
-            // call, not a later one born on the same ref.
-            opts.incarnation = Some(incarnation);
-            writer.submit_delete(role, primary, call_ref.to_string(), keys, answered, opts);
-        }
+        self.log_delete(call_ref);
+        self.drop_local(call_ref);
     }
 
-    /// **Local-only self-release teardown** (ADR-0014): drop a live acting-backup
-    /// **takeover copy** from the in-memory map + routing index + takeover set,
-    /// with **no** store mutation and **no** replication propagation — unlike
-    /// [`remove`](Self::remove), which propagates a delete. The call lives on at
-    /// its reclaiming primary (which is the node now forward-refreshing this
-    /// node's backup `Element`); this node merely sheds the active role once the
-    /// transaction(s) it served reached a terminal state. The router pairs this
-    /// with timer / txn / dispatch teardown (it owns those). Returns `true` if a
-    /// live copy was actually dropped (so the caller meters the self-release once).
-    pub fn drop_local(&self, call_ref: &str) -> bool {
-        let mut inner = self.locked();
-        let was = inner.calls.remove(call_ref);
-        let present = was.is_some();
-        if let Some(was) = was {
-            inner.restate_uncounted(was.limiter.runs_uncounted(), false);
-            self.publish_uncounted(&inner);
-        }
-        if let Some(keys) = inner.indexed.remove(call_ref) {
-            inner.unindex(call_ref, &keys);
-        }
-        inner.locks.remove(call_ref);
-        inner.takeover.remove(call_ref);
-        inner.touched.remove(call_ref);
-        inner.shrink_idle();
-        present
-    }
-
-    /// Release the ephemeral per-call state an **orphan-reject** created — the
-    /// 481 path for an in-dialog request that resolved to `call_ref` but hydrated
-    /// **no** live call (a failed-over BYE for a dialog that was never reclaimed,
-    /// or a late in-dialog request after teardown). [`process`] acquired the
-    /// per-call [`lock`](Self::lock) — and the router spun up a per-call dispatch
-    /// queue (one `bump_creation`) — yet there is nothing to [`remove`](Self::remove):
-    /// the call was never in the map. Drop the artifact this leaves behind —
-    /// the `locks`-map entry — with **no** store
-    /// mutation (unlike `remove`, which would reverse-propagate a *spurious
-    /// delete* for a call we never held).
-    ///
-    /// Paired with the router poisoning the dispatch queue (so the worker exits and
-    /// `removals` balances `creations`), this is what stops an **orphan storm** —
-    /// the thousands of failed-over BYEs that hit a rebooted worker — from leaking
-    /// the `locks` map and the `active_calls` (creations−removals) count. Without
-    /// it each orphan stranded one lock entry + one idle worker task + one unmatched
-    /// creation permanently (the ~3150-per-worker ratchet the leak-detector caught).
-    ///
-    /// [`process`]: crate::router
-    pub fn discard_orphan(&self, call_ref: &str) {
-        let mut inner = self.locked();
-        inner.locks.remove(call_ref);
-        inner.shrink_idle();
+    /// Write the delete of the resident call `call_ref` to the store, when a
+    /// replication store is wired, leaving the call resident: a terminal turn
+    /// logs its delete before its effects leave (ADR-0055 §3) and evicts the
+    /// call after them. The delete states whether the copy had answered the
+    /// caller (ADR-0031 D3) and names the call it removes, so its tombstone
+    /// buries that call, not a later one born on the same ref.
+    pub fn log_delete(&self, call_ref: &str) {
+        let Some(repl) = self.repl.as_ref() else {
+            return;
+        };
+        let (role, primary, mut opts) = self.store_target(call_ref);
+        let (keys, answered, incarnation) = {
+            let inner = self.locked();
+            let Some(call) = inner.calls.get(call_ref) else {
+                return;
+            };
+            let keys = inner.indexed.get(call_ref).cloned().unwrap_or_default();
+            (keys, call::helpers::caller_answered(call), call.incarnation().to_string())
+        };
+        opts.incarnation = Some(incarnation);
+        let _ = repl.write_delete(role, &primary, call_ref, &keys, answered, &opts);
     }
 
     /// **Active-reclaim reactive read-path** (ADR-0011 X11): decode a single
@@ -612,37 +567,42 @@ impl CallState {
     /// active-replica TTL = `reboot_budget` elapsed without a refresh), so it is
     /// NOT re-served; the periodic reap evicts it. The reverse-flush reconcile
     /// path wants the opposite (see [`peek_reclaimable_raw`]).
-    /// Returns the decoded call plus its persisted receive-time clock-skew offset
-    /// (`0` when none) so the reclaim re-anchors its timers before re-arming them
-    /// (clock-skew hardening).
+    /// Returns the decoded call plus its persisted clock-skew offset (`0` when
+    /// none) so the reclaim re-anchors its instants before re-arming its timers
+    /// (ADR-0055 §9).
     ///
     /// [`peek_reclaimable_raw`]: Self::peek_reclaimable_raw
-    pub async fn peek_reclaimable(&self, call_ref: &str) -> Result<(Call, i64), ReplicaMiss> {
+    pub async fn peek_reclaimable(&self, call_ref: &str) -> Result<(Enveloped, i64), ReplicaMiss> {
         self.read_partition(PartitionRole::Primary, call_ref).await
+    }
+
+    /// The skew offset held beside `call_ref`'s body (ADR-0055 §9), else `0`.
+    pub fn held_skew_offset_ms(&self, call_ref: &str) -> i64 {
+        self.repl_store().and_then(|r| r.skew_offset_ms(call_ref)).unwrap_or(0)
     }
 
     /// Decode a replica body this node did not store (a reverse flush the
     /// `(p,b)` gate refused), so the router can read the call it carries.
-    pub fn decode_body(&self, body: &[u8]) -> Option<Call> {
+    pub fn decode_body(&self, body: &[u8]) -> Option<Enveloped> {
         crate::repl::decode_peer_body(&self.codec, &self.metrics, body)
     }
 
     /// Like [`peek_reclaimable`](Self::peek_reclaimable) but it reads an expired
     /// body too (`peek_body_raw`): a reverse-flushed *terminal* the live primary is
-    /// about to fold is folded whatever its TTL, so the reconcile writes its CDR.
+    /// about to meet is met whatever its TTL, so the reconcile writes its CDR.
     /// Used by the reverse-flush reconcile to classify the body; a non-terminal one
     /// is then materialised through the TTL-gated read. Returns the decoded call
     /// plus its persisted receive-time clock-skew offset (`0` when none).
-    pub async fn peek_reclaimable_raw(&self, call_ref: &str) -> Option<(Call, i64)> {
+    pub async fn peek_reclaimable_raw(&self, call_ref: &str) -> Option<(Enveloped, i64)> {
         let repl = self.repl_store()?;
         let (role, primary) = partition_of(&self.self_ordinal, call_ref);
         if role != PartitionRole::Primary {
             return None;
         }
         let body = repl.peek_body_raw(role, &primary, call_ref).await?;
-        let call = self.codec.decode(&body).ok()?;
+        let copy = envelope::decode(&self.codec, &body).ok()?;
         let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
-        Some((call, skew))
+        Some((copy, skew))
     }
 
     /// The one narrow partition read behind [`peek_replica`](Self::peek_replica)
@@ -654,7 +614,7 @@ impl CallState {
         &self,
         required: PartitionRole,
         call_ref: &str,
-    ) -> Result<(Call, i64), ReplicaMiss> {
+    ) -> Result<(Enveloped, i64), ReplicaMiss> {
         let repl = self.repl_store().ok_or(ReplicaMiss::Absent)?;
         let (role, primary) = partition_of(&self.self_ordinal, call_ref);
         if role != required {
@@ -666,136 +626,44 @@ impl CallState {
             .ok()
             .flatten()
             .ok_or(ReplicaMiss::Absent)?;
-        let call = self.codec.decode(&body).map_err(|_| ReplicaMiss::Undecodable)?;
+        let copy = envelope::decode(&self.codec, &body).map_err(|_| ReplicaMiss::Undecodable)?;
         let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
-        Ok((call, skew))
+        Ok((copy, skew))
     }
 
-    /// Physically evict every expired replica body, changelog tombstone and
-    /// stale resurrection tombstone (the missed-delete ghost backstop,
-    /// ADR-0014), and return the evicted bodies that are **deferred terminals**
-    /// (`Terminating`/`Terminated`): a node served the call's end and deferred
-    /// its discharge to a primary that never reconciled it inside the TTL. The
-    /// router releases each one's limiter key and counts its CDR lost (the
-    /// accepted double-failure); an expired non-terminal ghost is evicted
-    /// silently. A read never evicts, so each expired body is returned by
-    /// exactly one pass. A deferred terminal another call on its ref replaced
-    /// on this backup is returned the same way
-    /// ([`take_displaced`](crate::repl::ReplicatingCallStore::take_displaced)).
-    /// Empty without a replicating store.
-    pub async fn reap_replica(&self, now_ms: i64) -> Vec<Call> {
-        let Some(repl) = self.repl_store() else {
-            return Vec::new();
-        };
-        let mut owed = repl.reap(now_ms).await;
-        owed.extend(repl.take_displaced());
-        owed.iter()
-            .filter_map(|body| self.codec.decode(body).ok())
-            .filter(|call| {
-                matches!(call.state, CallModelState::Terminating | CallModelState::Terminated)
-            })
-            .collect()
-    }
-
-    /// The one residency insert: put a materialised call into the live map +
-    /// routing index iff it is not already resident. Returns `true` when just
-    /// inserted — the router then re-arms its timers exactly once. Idempotent: a
-    /// call already live (re-served, or never lost) is left untouched.
-    ///
-    /// Every caller holds the call's per-call lock ([`lock`](Self::lock)), so no
-    /// other insert of it runs between the residency check and the insert. A
-    /// traced call opens this node's own root span here, after the residency
-    /// check, so a span is opened only for a call this node goes on to serve
-    /// (ADR-0026 §5). The idle clock starts at the insert, never at `created_at`
-    /// (ADR-0020 X4): a hours-old failed-over or reclaimed long-hold call is
-    /// fresh here, not reap-stale.
-    ///
-    /// The inserted call's limiter change counter moves to its next epoch
-    /// (`CallLimiterState::enter_epoch`, ADR-0040 decision 8): the previous
-    /// holder may have sent admits under numbers its last replicated write
-    /// does not show.
-    ///
-    /// On a [`MaterialiseOrigin::Reclaim`] insert it also re-establishes the
-    /// replica's denormalised backup from the call's authoritative
-    /// `topology.bak` (ADR-0014 #4): the reboot-reclaim hydration imports the
-    /// body peerless, leaving `CallMeta.backup == None` and the call invisible to
-    /// its backup's bootstrap scan until the next keepalive re-flush. A takeover
-    /// copy holds the `bak:` element itself and re-establishes nothing.
-    pub fn materialize_if_absent(&self, mut call: Call, origin: MaterialiseOrigin) -> bool {
-        let backup = call.topology.as_ref().map(|t| t.bak.clone()).filter(|b| !b.is_empty());
-        let call_ref = call.call_ref.clone();
-        let now_ms = self.clock.now_ms();
-        if self.contains(&call_ref) {
-            return false;
-        }
-        // Outside the store lock: the trace registry takes its own.
-        crate::trace::adopt_replicated(&mut call, now_ms);
-        call.limiter.enter_epoch();
-        {
-            let mut inner = self.locked();
-            if inner.calls.contains_key(&call_ref) {
-                return false;
-            }
-            Self::reindex(&mut inner, &call);
-            inner.touched.insert(call_ref.clone(), now_ms);
-            inner.restate_uncounted(false, call.limiter.runs_uncounted());
-            self.publish_uncounted(&inner);
-            inner.calls.insert(call_ref.clone(), Box::new(call));
-        }
-        if origin == MaterialiseOrigin::Reclaim {
-            if let (Some(repl), Some(backup)) = (self.repl_store(), backup) {
-                repl.reestablish_backup(&call_ref, &backup);
-            }
-        }
-        true
-    }
-
-    /// Encode + submit the call to the store (replication path; non-blocking).
+    /// Encode + write the call to the store (replication path), its change-log
+    /// entry moved before this returns.
     ///
     /// A no-op, allocation-free, when no replicating store is wired. Otherwise,
-    /// when the call carries a non-empty `topology.bak`, the put rides the
-    /// write-side policy (`call_gen = topology.gen`, peer = the backup, direction
-    /// Forward/Reverse) and the `ReplicatingCallStore` the
-    /// [`BufferedTerminateWriter`] drains to bumps its changelog for that peer;
-    /// with no topology / no backup it is the `PutOpts::default()` (no
+    /// when the call has a backup, the put rides the write-side policy
+    /// (`call_gen` = the envelope's `gen`, peer = the backup, direction
+    /// Forward/Reverse) and the replicating store moves its changelog entry for
+    /// that peer; with no backup it is the `PutOpts::default()` (no
     /// propagation) path.
     pub fn flush(&self, call: &Call) {
         self.flush_with_ttl(call, self.replicated_ttl_ms);
     }
 
-    /// Like [`flush`](Self::flush) but stamps an explicit body TTL. The Model-Y
-    /// **deferred-terminal** flush uses a SHORT grace here (not the 1 h active
+    /// Like [`flush`](Self::flush) but stamps an explicit body TTL. The
+    /// **deferred-terminal** flush (ADR-0055 §5) uses a SHORT grace here (not the 1 h active
     /// backstop): a `Terminating`/`Terminated` `bak:` Element a backup deferred is
     /// the backup-durable-fallback's alive-timer — if the primary never reconciles
     /// it (and forward-deletes it) within the grace, the reap discharges it. Active
     /// replicas keep the long backstop (refreshed every keepalive), so a held call's
     /// replica never expires mid-call.
     pub fn flush_with_ttl(&self, call: &Call, ttl_ms: i64) {
-        self.submit_flush(call, ttl_ms, false);
-    }
-
-    /// The write behind [`flush`](Self::flush): `adopted` marks a version this
-    /// node adopted without its body ([`PutOpts::adopted`]).
-    fn submit_flush(&self, call: &Call, ttl_ms: i64, adopted: bool) {
-        let Some(writer) = self.repl.as_ref().map(|r| &r.writer) else {
+        let Some(repl) = self.repl.as_ref() else {
             return;
         };
         let indexes = call_index_keys(call);
-        // The authoritative topology lives on the in-memory call (bumped by
-        // `update`); the passed `call` may be a pre-bump clone, so prefer the
-        // stored topology.
-        let stored = {
-            let inner = self.locked();
-            inner.calls.get(&call.call_ref).and_then(|c| c.topology.clone())
-        }
-        .or_else(|| call.topology.clone());
+        // The authoritative envelope is the store's (bumped by `update`).
+        let stored = self.topology(&call.call_ref);
         let (call_gen, call_bgen) = stored.as_ref().map(|t| (t.gen, t.bak_gen)).unwrap_or((0, 0));
-        let Some(body) = flush_body::encode(&self.codec, &self.metrics, call, &stored) else {
-            return;
-        };
         let (role, primary, mut opts) = self.store_target(&call.call_ref);
+        let Some(body) = flush_body::encode(&self.codec, &self.metrics, call, &stored) else {
+            return self.abandon_backup(&opts, &call.call_ref);
+        };
         opts.incarnation = Some(call.incarnation().to_string());
-        opts.adopted = adopted;
         // Observability: a propagating flush is one whose call carries a backup
         // peer (topology.bak from the proxy cookie). Rising on the PRIMARY proves
         // the b2bua is attempting replication — distinguishing a cookie/topology
@@ -803,43 +671,17 @@ impl CallState {
         if self.backup_of(&call.call_ref).is_some() {
             self.metrics.bump_repl_flush_propagated();
         }
-        writer.submit_put(
+        let _ = repl.write_put(
             role,
-            primary,
-            call.call_ref.clone(),
+            &primary,
+            &call.call_ref,
             body,
-            indexes,
+            &indexes,
             ttl_ms,
             call_gen,
             call_bgen,
-            opts,
+            &opts,
         );
-    }
-
-    /// Resolve a message that carries no `callRef` of ours to a call from
-    /// the in-memory index only (the sync path the dispatcher's route key
-    /// needs), probing in [`IndexLookup::probes`] order. The hit names the
-    /// namespace that matched.
-    pub fn resolve_from_sip_key_sync(&self, lookup: IndexLookup<'_>) -> Option<IndexHit> {
-        let mut key = lookup.key_buffer();
-        let inner = self.locked();
-        for probe in lookup.probes() {
-            match *probe {
-                Probe::Resolve(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    if let Some(r) = inner.sip_index.get(key.as_str()) {
-                        return Some(IndexHit { call_ref: r.clone(), kind });
-                    }
-                }
-                Probe::Refuse(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    if inner.sip_index.contains_key(key.as_str()) {
-                        return None;
-                    }
-                }
-            }
-        }
-        None
     }
 
     /// Acquire the per-callRef serialization lock (held across a handler run).
@@ -872,13 +714,6 @@ impl CallState {
     /// `assert_fully_reaped` 4th invariant — ADR-0020).
     pub fn touched_count(&self) -> usize {
         self.locked().touched.len()
-    }
-
-    /// The number of live setup-CANCEL marks. Cleared by every release of the
-    /// call that no waiting INVITE outlives; a residue after teardown is a
-    /// mark leak (the harness `assert_fully_reaped` 5th invariant).
-    pub fn setup_cancelled_count(&self) -> usize {
-        self.locked().setup_cancelled.values().map(Vec::len).sum()
     }
 
     /// Push the store's map lengths into the memory-attribution gauges (one
@@ -932,10 +767,9 @@ impl CallState {
             let mut call_pend = 0u64;
             for leg in std::iter::once(&call.a_leg).chain(call.b_legs.iter()) {
                 dialogs += leg.dialogs.len() as u64;
-                call_pend += call::helpers::retired_relay_count(leg) as u64;
                 for d in &leg.dialogs {
                     rset += d.route_set.len() as u64;
-                    call_pend += d.inbound_pending_requests.len() as u64;
+                    call_pend += d.requests.len() as u64;
                 }
             }
             pend += call_pend;
@@ -943,18 +777,5 @@ impl CallState {
         }
         self.metrics.set_sm_cursor_census(census);
         self.metrics.set_call_census(cdr, pend, pend_max, dialogs, rset, timers, tagmap, blegs);
-    }
-
-    /// Recompute and apply a call's routing index, dropping any stale keys.
-    fn reindex(inner: &mut Inner, call: &Call) {
-        let call_ref = &call.call_ref;
-        if let Some(old) = inner.indexed.remove(call_ref) {
-            inner.unindex(call_ref, &old);
-        }
-        let keys = call_index_keys(call);
-        for k in &keys {
-            inner.sip_index.insert(k.clone(), call_ref.clone());
-        }
-        inner.indexed.insert(call_ref.clone(), keys);
     }
 }

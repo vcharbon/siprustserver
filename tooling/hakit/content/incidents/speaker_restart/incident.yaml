@@ -1,0 +1,48 @@
+schema: incident.v1
+name: speaker_restart
+description: >-
+  Restart the BGP speakers of one front proxy's node: every pod of
+  pod_selector in pod_namespace on that node (by default MetalLB's speaker
+  and its frr-k8s router) deleted with its grace period. With no graceful
+  restart the node's sessions end, the routers withdraw its routes and the
+  peer carries its flows until the replacements announce again. Inject
+  records, from the delete, when the node left each VIP's next hops (null
+  when it never did within withdraw_timeout_s). The probe wants the
+  replacements Ready and both VIPs routed over every live proxy's node.
+kind: fault
+target:
+  selector: app=sip-front-proxy
+  pick: one
+params:
+  pod_namespace:
+    type: string
+    default: metallb-system
+    description: The namespace of the speakers.
+  pod_selector:
+    type: string
+    default: app.kubernetes.io/component in (speaker,frr-k8s)
+    description: The label selector of the speaker pods.
+  internal_vip:
+    type: string
+    default: 172.20.255.250
+    description: The VIP the workers reach the proxies at.
+  external_vip:
+    type: string
+    default: 192.168.60.250
+    description: The VIP the callers dial.
+  network:
+    type: string
+    default: sipext
+    description: The docker network of the callers' plane.
+  withdraw_timeout_s:
+    type: integer
+    default: 15
+    description: How long inject watches for the node's withdrawal.
+duration_s: 0
+expected_s: 90
+timeouts:
+  inject_s: 60
+  heal_s: 10
+  probe_s: 240
+  probe_interval_s: 2
+requires: [kind]

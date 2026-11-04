@@ -65,7 +65,7 @@ Content-Length: 0\r\n\r\n"
 }
 
 fn proxied_config() -> B2buaConfig {
-    B2buaConfig { b2b_outbound_proxy: Some(("10.0.0.9".to_string(), 5060)), ..Default::default() }
+    B2buaConfig { front: crate::config::Front::single_face("10.0.0.9", 5060), ..Default::default() }
 }
 
 // A recorded route no reader accepts must never leave the dialog with an
@@ -77,7 +77,12 @@ fn proxied_config() -> B2buaConfig {
 fn an_unreadable_record_route_never_yields_an_empty_route_set() {
     let config = proxied_config();
     let mut scope = TurnScope::of(TurnIds::fixed(0xD1));
-    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: crate::owners::Owners::none(),
+        config: &config,
+        turn: &mut scope,
+        now_ms: 0,
+    };
 
     let resp = ok_200(UNREADABLE_RR);
     assert!(uac_route_set(&resp).is_err(), "the fixture's recorded route must not read");
@@ -103,7 +108,12 @@ fn an_unreadable_record_route_never_yields_an_empty_route_set() {
 fn without_a_front_proxy_the_fallback_is_empty_but_the_read_still_fails() {
     let config = B2buaConfig::default();
     let mut scope = TurnScope::of(TurnIds::fixed(0xD2));
-    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: crate::owners::Owners::none(),
+        config: &config,
+        turn: &mut scope,
+        now_ms: 0,
+    };
     let resp = ok_200(UNREADABLE_RR);
     assert!(uac_route_set(&resp).is_err());
     assert!(exec.dialog_route_set(uac_route_set(&resp), "call-1", "b-1").is_empty());
@@ -116,7 +126,12 @@ fn without_a_front_proxy_the_fallback_is_empty_but_the_read_still_fails() {
 fn readable_recorded_routes_keep_their_dialog_order() {
     let config = proxied_config();
     let mut scope = TurnScope::of(TurnIds::fixed(0xD3));
-    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: crate::owners::Owners::none(),
+        config: &config,
+        turn: &mut scope,
+        now_ms: 0,
+    };
     let combined = "<sip:10.0.0.9:5060;outbound;lr>,<sip:10.0.0.9:5060;target=1;lr>";
 
     let resp = ok_200(combined);
@@ -146,16 +161,21 @@ fn a_caller_rejected_with_a_non_2xx_final_gains_no_dialog() {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut scope = TurnScope::of(TurnIds::fixed(0xD4));
     let open = crate::initial_invite::build_initial_call(
-        &crate::test_call::invite("w0", "w1", "rejected-caller"),
+        &crate::test_call::invite("rejected-caller"),
         crate::test_call::src(),
         &config,
         &mut scope.ids,
         0,
     );
-    let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: crate::owners::Owners::none(),
+        config: &config,
+        turn: &mut scope,
+        now_ms: 0,
+    };
 
     let mut rejected = open.clone();
-    rejected.a_leg.invite_final_sent = Some(487);
+    *rejected.a_leg.invite_final_sent_mut() = Some(487);
     exec.ensure_a_dialog_with(&mut rejected, None);
     exec.ensure_a_dialog_with(&mut rejected, Some("shown".into()));
     assert!(rejected.a_leg.dialogs.is_empty(), "a rejected caller gains no dialog");

@@ -25,7 +25,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         // consume a second claim on its way to being absorbed. The datagram is
         // still recorded — that is why the rule runs here and not below the
         // agent's own API.
-        let sighting = self.absorption.sight(&bytes, &message);
+        let sighting = self.absorption.sight(&bytes, &message, tokio::time::Instant::now());
         let repeat = sighting.repeat;
         if sighting.owner == Owner::TxnDuplicate {
             let leg =

@@ -1,44 +1,10 @@
 """The SUT chart's extension points a product on the external plane uses:
-floating addresses and health checks of its own, pod settings, ports,
-annotations and labels, env naming the release."""
+pod settings, ports, annotations and labels, env naming the release."""
 import unittest
 
 from charts import SIPRUST, container, env, find, kind_values, pod_spec, render, render_error
 
 KIND = kind_values(SIPRUST)
-RELAY = ["--set", "proxy.keepalived.extraVirtualIps[0].address=192.168.60.240",
-         "--set", "proxy.keepalived.extraVirtualIps[0].interface=eth1",
-         "--set", "proxy.keepalived.extraTrackScripts[0].name=chk_relay",
-         "--set", "proxy.keepalived.extraTrackScripts[0].script=/usr/bin/relay-ok",
-         "--set", "proxy.keepalived.extraTrackScripts[0].weight=0"]
-
-
-class FloatingAddresses(unittest.TestCase):
-    def test_an_extra_address_floats_with_the_vips_and_rides_lo(self) -> None:
-        docs = render(SIPRUST, *KIND, *RELAY)
-        conf = find(docs, "ConfigMap", "sip-front-proxy-keepalived")["data"]["keepalived.conf"]
-        self.assertIn("192.168.60.240 dev eth1\n", conf)
-        for notify in ("notify_master", "notify_backup", "notify_fault"):
-            line = next(ln for ln in conf.splitlines() if ln.strip().startswith(notify))
-            self.assertIn("ip addr add 192.168.60.240/32 dev lo", line)
-        proxy = find(docs, "Deployment", "sip-front-proxy")
-        self.assertEqual(env(container(proxy, "vip-loopback"))["EXTRA_VIPS"], "192.168.60.240")
-        masq = find(docs, "DaemonSet", "masq-exempt")
-        self.assertEqual(env(container(masq, "masq-exempt"))["EXTRA_VIPS"], "192.168.60.240")
-
-    def test_an_extra_check_weighs_on_the_same_priority(self) -> None:
-        conf = find(render(SIPRUST, *KIND, *RELAY), "ConfigMap",
-                    "sip-front-proxy-keepalived")["data"]["keepalived.conf"]
-        block = conf[conf.index("vrrp_script chk_relay {"):]
-        block = block[:block.index("}")]
-        self.assertIn('script "/usr/bin/relay-ok"', block)
-        self.assertIn("weight 0", block)
-        track = conf[conf.index("track_script {"):]
-        self.assertEqual(track[:track.index("}")].split()[2:], ["chk_proxy_health", "chk_relay"])
-
-    def test_no_extra_address_leaves_the_scripts_their_two_vips(self) -> None:
-        proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
-        self.assertEqual(env(container(proxy, "vip-loopback"))["EXTRA_VIPS"], "")
 
 
 class PodSettings(unittest.TestCase):
@@ -89,7 +55,7 @@ class EnvTemplating(unittest.TestCase):
 
     def test_a_kubelet_reference_passes_through(self) -> None:
         w = find(render(SIPRUST, *KIND), "StatefulSet", "b2bua-worker")
-        self.assertEqual(env(container(w, "b2bua-worker"))["B2BUA_ADVERTISE"], "$(POD_IP)")
+        self.assertEqual(env(container(w, "b2bua-worker"))["B2BUA_ADVERTISE"], "$(POD_IP):5060")
 
 
 if __name__ == "__main__":

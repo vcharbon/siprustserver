@@ -23,7 +23,7 @@ v:  SIP  / 2.0  / TCP     spindle.example.com   ;
   branch  =   z9hG4bK9ikj8  ,
  SIP  /    2.0   / UDP  192.168.255.111   ; branch=
  z9hG4bK30239
-m:"Quoted string \\"\\""  <sip:jdrosen@example.com> ; newparam =
+m:"Quoted string \"\"" <sip:jdrosen@example.com> ; newparam =
       newvalue ;
   secondparam ; q = 0.33
 

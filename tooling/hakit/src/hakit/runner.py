@@ -17,8 +17,9 @@ from pathlib import Path
 
 from .capture import CaptureFailed, Captures
 from .check import profile_errors
+from .one_at_a_time import ready_errors
 from .classes import run_counts
-from .clock import Clock
+from .clock import Clock, RealClock
 from .collect import collect_cdrs
 from .content import Content
 from .events import KEEPALIVE_MS, EventJournal
@@ -117,6 +118,8 @@ class _Live:
     load_start_ms: int = 0
     off: OffSchedule | None = None
     fresh: Freshness | None = None
+    # The close of the latest incident window, which holds the freshness count.
+    last_close_ms: int | None = None
     capture: Captures | None = None
     steps: RateSteps | None = None
     host: HostSampler | None = None
@@ -179,6 +182,9 @@ class Runner:
         errs = self.refusals(profile, lab_capabilities(self.lab, self.executor))
         if errs:
             raise RunRefused("\n".join(errs))
+        errs = ready_errors(profile, self.lab, self.executor)
+        if errs:
+            raise RunRefused("\n".join(errs))
         stale = earlier_open_events(self.results)
         if stale:
             raise RunRefused(f"events of an earlier run are still open ({', '.join(stale)}); run `hakit cleanup`")
@@ -206,6 +212,8 @@ class Runner:
         streams = StreamSet(run, run_dir, profile, self.content, self.lab, self.executor, self.clock, self.vlogs, started)
         live = _Live(streams)
         live.host = HostSampler(run, run_dir, self.executor, self.clock, self.vm)
+        if isinstance(self.clock, RealClock):
+            live.host.start_thread()
         # Appended as found, so `hakit probe` reads them while the run runs.
         integrity = JsonlLog(run_dir / "integrity.jsonl")
         steps_log = JsonlLog(run_dir / "steps.jsonl")
@@ -276,6 +284,7 @@ class Runner:
         finally:
             restore()
             clear_active(run_dir)
+            live.host.stop()
         integrity.add(streams.remove_all())
         if live.capture is not None:
             live.capture.stop()
@@ -356,7 +365,8 @@ class Runner:
             if live.host is not None:
                 live.host.tick()
             journal.tick()
-            for event, opened, _closed in journal.take_closed():
+            for event, opened, closed in journal.take_closed():
+                live.last_close_ms = max(closed, live.last_close_ms or closed)
                 if live.capture is not None:
                     live.capture.keep(event, opened)
             if live.loading:
@@ -375,7 +385,8 @@ class Runner:
                         if live.off is not None:
                             live.off.detected("stream_died")
                 if live.fresh is not None:
-                    integrity.add(live.fresh.tick())
+                    held = self.clock.now_ms() if journal.open else live.last_close_ms
+                    integrity.add(live.fresh.tick(held))
                 if live.off is not None:
                     live.off.poll()
             now = self.clock.now_ms()

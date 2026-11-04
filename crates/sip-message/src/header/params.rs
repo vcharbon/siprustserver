@@ -311,27 +311,6 @@ fn token_end(s: &[u8], mut i: usize) -> usize {
     i
 }
 
-/// Read comma-separated `name=value` parameters covering all of `base` from
-/// byte `i` — the credentials layout, where `,` separates and `;` is data.
-pub(crate) fn parse_comma_params(base: &SipStr, mut i: usize) -> Params {
-    const STYLE: ParamStyle = ParamStyle { name_delims: b"=, \t", value_delims: b"," };
-    let bytes = base.as_bytes();
-    let mut params = Params::new();
-    loop {
-        i = skip_ws(bytes, i);
-        if i >= bytes.len() {
-            return params;
-        }
-        i = read_one(base, i, &STYLE, &mut params);
-        i = skip_ws(bytes, i);
-        if byte_at(bytes, i) == Some(b',') {
-            i += 1;
-        } else {
-            return params;
-        }
-    }
-}
-
 /// Read one `name[=value]` at byte `i`; yields the position after it.
 fn read_one(base: &SipStr, mut i: usize, style: &ParamStyle, params: &mut Params) -> usize {
     let bytes = base.as_bytes();
@@ -421,13 +400,5 @@ mod tests {
         assert_eq!(p.get("Q.850"), Some(&ParamValue::Flag));
         assert_eq!(p.value("cause"), Some("16"));
         assert_eq!(p.value("text"), Some("normal"));
-    }
-
-    #[test]
-    fn credentials_parameters_split_on_commas_not_semicolons() {
-        let p = parse_comma_params(&SipStr::owned(r#"realm="a;b", nonce=xyz, stale=FALSE"#), 0);
-        assert_eq!(p.len(), 3);
-        assert_eq!(p.value("realm"), Some("a;b"));
-        assert_eq!(p.value("nonce"), Some("xyz"));
     }
 }

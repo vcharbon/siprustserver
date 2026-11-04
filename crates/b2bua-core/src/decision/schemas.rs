@@ -149,8 +149,8 @@ pub struct RouteDecision {
     /// Internal release events the backend wants consulted on (`call_release`)
     /// instead of handled locally — the route's subscription list. Recorded
     /// on the call at route-apply time (initial route: `apply_route`; async
-    /// failover/reroute route: the `SetSubscriptions` fold), so it survives
-    /// replication/takeover like `features`. Empty = no subscriptions = local
+    /// failover/reroute route: the `SetSubscriptions` fold), so it rides the
+    /// call record like `features`. Empty = no subscriptions = local
     /// handling.
     pub subscriptions: Vec<call::ReleaseEventKind>,
     /// **Engine force-enable** for per-call tracing (ADR-0026): `true` asks

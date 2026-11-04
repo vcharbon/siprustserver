@@ -1,7 +1,9 @@
 # The CANCEL waits for a provisional, without bound
 
 **Status:** accepted (2026-10-11). Supersedes ADR-0028. Amended (2026-10-12):
-the front proxy relays the callee's 100 (Context, X1, Consequences).
+the front proxy relays the callee's 100 (Context, X1, Consequences). Amended
+(2026-10-23): a `Trying` seed re-sends its INVITE at the seed, not when a
+CANCEL is held on it.
 
 **Owner:** `crates/sip-txn/src/layer/client.rs` (the CANCEL gate, the
 provisional flush, the Timer-E ladder), `crates/sip-txn/src/layer/seed.rs`
@@ -54,11 +56,13 @@ wait. A CANCEL the record says was sent with no provisional on record is still
 held when the node that sent it dies: the record keeps the headers it stated
 (`OutboundInvite::cancel_headers`), and the seed carries it rebuilt, held on
 the `Trying` transaction until the callee's first provisional reaches the
-survivor. A `Trying` seed runs no Timer A, so a CANCEL held on it (carried by
-the seed or sent later by the survivor) has its INVITE re-sent once: the
-callee's server transaction answers a retransmission with its latest
-provisional (§17.2.1), which releases the CANCEL. One resend only; the INVITE
-bound still ends a callee that answers nothing.
+survivor. A `Trying` seed runs no Timer A ladder but re-sends its INVITE once,
+at the seed, as a client in `Trying` retransmits (§17.1.1.2): the callee's
+server transaction answers that retransmission with its latest provisional
+(§17.2.1), which the survivor takes — a reliable one PRACKed — and which
+releases a CANCEL held on it (carried by the seed or sent later by the
+survivor). One resend only; the INVITE bound still ends a callee that answers
+nothing.
 
 ### X2 — The caller is answered at once
 

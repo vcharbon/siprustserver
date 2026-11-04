@@ -6,7 +6,7 @@
 use std::fmt;
 
 use super::ending::Expect;
-use super::state::ObservedState;
+use super::state::{ObservedState, StateInner};
 use super::CallVerdict;
 use crate::StepError;
 
@@ -33,6 +33,8 @@ pub struct FailedAt {
 impl FailedAt {
     /// The pseudo-barrier of the verdict read after teardown and settle.
     pub const ENDING: &'static str = "ending";
+    /// The barrier every leg terminated holds at.
+    pub const TORN_DOWN: &'static str = "torn_down";
     /// The scenario's build refused the call before any datagram.
     pub const BUILD: FailedAt = FailedAt::at_barrier("build");
 
@@ -65,6 +67,10 @@ pub enum ScenarioVerdict {
 }
 
 impl ScenarioVerdict {
+    /// The branch of a call whose caller the system under test ended cleanly
+    /// while it accepted clean ends ([`CallCtx::accept_clean_ends`](crate::realcall::CallCtx::accept_clean_ends)).
+    pub const ENDED_CLEANLY: &'static str = "ended_cleanly";
+
     /// The accepted branch, `None` for a failure.
     pub fn branch(&self) -> Option<&'static str> {
         match self {
@@ -85,8 +91,11 @@ impl ScenarioVerdict {
 }
 
 /// The verdict of a finished call: a runner failure as is; a settle breach at
-/// the `settle` barrier; a clean call under the first branch of `expect` its
-/// final state shows, or a failure at the caller's [`FailedAt::ENDING`].
+/// the `settle` barrier; a clean call whose caller the system under test
+/// ended cleanly while the call accepted it under
+/// [`ScenarioVerdict::ENDED_CLEANLY`]; any
+/// other clean call under the first branch of `expect` its final state shows,
+/// or a failure at the caller's [`FailedAt::ENDING`].
 pub fn verdict(
     expect: Expect,
     run: CallVerdict,
@@ -99,6 +108,9 @@ pub fn verdict(
             at: FailedAt::at_barrier("settle"),
             cause: StepError::timeout("settle", None, "every call to settle"),
         },
+        CallVerdict::Ok if obs.with_snapshot(StateInner::caller_ended_cleanly) => {
+            ScenarioVerdict::Success { branch: ScenarioVerdict::ENDED_CLEANLY }
+        }
         CallVerdict::Ok => obs.with_snapshot(|s| match expect.branch_of(s, caller) {
             Some(branch) => ScenarioVerdict::Success { branch },
             None => {

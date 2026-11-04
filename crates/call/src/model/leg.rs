@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::dialogs::Dialogs;
 use super::message_ring::MessageRing;
-use super::outbound_invite::OutboundInvite;
+use super::request_record::RequestRecord;
 use super::sdp_session::LegSdpSession;
 use super::services::ExtMap;
 
@@ -29,7 +29,7 @@ pub enum LegKind {
     TransferTarget,
 }
 
-/// Whether a dialled leg's callee rang.
+/// Whether a dialled leg's callee rang, as the call record states it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Ring {
@@ -38,10 +38,6 @@ pub enum Ring {
     Silent,
     /// The leg's INVITE received a 180–189 provisional.
     Rang,
-    /// A restore found none on record for the leg's unanswered INVITE, though
-    /// the turn that took one may not have replicated: its ring deadline runs
-    /// from the INVITE until an 18x arrives.
-    Presumed,
 }
 
 impl Ring {
@@ -67,11 +63,16 @@ pub struct Leg {
     /// Remote party's address on this leg, in the same form: the To of every
     /// such request.
     pub remote_uri: Option<String>,
+    /// The URI of this stack's Contact on the leg, allocated once when the
+    /// leg is created: every message of the leg that states a Contact states
+    /// this one, whichever copy of the call sends it (ADR-0055 §14).
+    pub contact: String,
     /// Request-URI of the outbound INVITE — needed for CANCEL (§9.1).
     pub invite_request_uri: Option<String>,
-    /// The dialog-creating INVITE this stack sent on the leg; `None` on a leg
-    /// whose INVITE it received.
-    pub outbound_invite: Option<OutboundInvite>,
+    /// The request record of the leg's dialog-creating INVITE (ADR-0055 §2):
+    /// the one this stack dialled, or on the originator's leg the one it
+    /// received ([`crate::model::leg_invite`] reads it).
+    pub invite: Option<RequestRecord>,
     /// On a leg whose INVITE this stack received: the tag of the dialog this
     /// stack answers that INVITE under where no callee dialog names one —
     /// set with the leg's first dialog, moved to the dialog a 2xx confirms
@@ -96,18 +97,6 @@ pub struct Leg {
     /// Whether generic relay/keepalive rules own this leg; read via
     /// [`crate::helpers::is_adopted`].
     pub adopted: Option<bool>,
-    /// Status of the final this stack has sent on the leg's initial inbound
-    /// INVITE; `None` while that transaction is unanswered. Every TU final
-    /// records itself here and so does the autonomous 487 the transaction
-    /// layer sends on a CANCEL; a leg carrying one is never sent a second
-    /// final (RFC 3261 §17.2.1).
-    pub invite_final_sent: Option<u16>,
-    /// The 2xx this stack recorded on the leg's initial inbound INVITE that the
-    /// transaction layer's autonomous `487` (its answer to the caller's CANCEL)
-    /// pre-empted before it reached the wire (RFC 3261 §9.2). `None` unless
-    /// that race happened; the leg then states the 487 as its final and holds
-    /// no confirmed dialog.
-    pub answer_preempted: Option<u16>,
     /// The leg's distinct SIP messages, received and sent, under the
     /// configured cap; empty while the ring is off. Written only by
     /// [`crate::helpers::record_message`].

@@ -2,21 +2,25 @@
 //! dead primary is released as the backup's own calls are (ADR-0050 §10):
 //! nothing is sent to either party. The copy defers the call's end to its
 //! primary, still a member of the set (ADR-0020 X3), so the backup writes no
-//! record yet; when the primary departs, the departure sweep discharges the
-//! ended call (ADR-0047 D8): one CDR, closed under `operator_release`, and the
-//! call's limiter holds released once.
+//! record yet; the proxy's verdict on the primary confirmed, the end releases
+//! the call's limiter holds at once. When the primary departs, the departure
+//! sweep discharges the ended call (ADR-0047 D8): one CDR, closed under
+//! `operator_release`, and a release that frees nothing more.
 //!
 //! ```text
 //!   established · P serves · B synchronized
-//!   P crashes in place (its endpoint stays in the set)
+//!   P crashes in place (its endpoint stays in the set); the proxy reads it dead
 //!   alice ──INFO──▶ proxy ──▶ B   (takeover copy, its transaction still open)
-//!   operator ──release-all──▶ B   (copy ended, deferred to P)
-//!   P's endpoint leaves the set   (B's sweep: CDR, release, delete)
+//!   operator ──release-all──▶ B   (copy ended, its holds released, CDR deferred to P)
+//!   P's endpoint leaves the set   (B's sweep: CDR, delete)
 //! ```
 //!
 //! The parties are left holding a dialog the SUT dropped: that is what the
 //! test asserts. Each ends its side with a BYE, and the `481` terminates it
 //! (RFC 3261 §12.2.1.2).
+//!
+//! Beyond the failover sweep: the operator's release of a takeover copy, settled once by the
+//! departure.
 
 use std::time::Duration;
 
@@ -25,9 +29,7 @@ use call::TerminationCause;
 use failover_harness::{assert_call_fully_over, cookie_field, FailoverHarness, WorkerHealth};
 use sip_message::generators::InDialogMethod;
 
-use crate::limiter_release_by_call::{
-    accept_takeover_cseq_overlap, limited_decision, spawn_workers, LimiterRig,
-};
+use crate::limiter_release_by_call::{limited_decision, spawn_workers, LimiterRig};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -58,7 +60,6 @@ async fn a_released_takeover_copy_is_settled_once_by_the_departure_sweep() {
     let call_ref = backup.scan_one_backed_up(&pri).await.expect("the call replicated");
 
     // ── the primary crashes in place; an INFO makes the backup serve the call
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&pri, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;
@@ -76,12 +77,12 @@ async fn a_released_takeover_copy_is_settled_once_by_the_departure_sweep() {
     assert_eq!(sent, 0, "nothing is sent to either party");
     assert!(!backup.serves(&call_ref), "the copy is released");
     assert!(backup.cdr_records().is_empty(), "the copy defers the call's end to its primary");
-    assert_eq!(rig.holds(), [1, 0, 0], "and its release");
+    assert_eq!(rig.holds(), [0, 0, 0], "and releases its holds: the primary is read dead");
 
     // ── the primary departs: the sweep settles the call ─────────────────────
     backup.simulate_peer_removed(&pri);
     fh.advance(Duration::from_secs(1)).await;
-    assert_eq!(rig.holds(), [0, 0, 0], "the sweep released the call's holds");
+    assert_eq!(rig.holds(), [0, 0, 0], "the sweep's release frees nothing more");
     let records = backup.cdr_records();
     let [record] = records.as_slice() else { panic!("one record: {records:#?}") };
     let cause = record.termination.as_ref().map(|t| t.cause);

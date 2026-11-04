@@ -18,7 +18,11 @@ async fn the_cap_keeps_the_opening_and_the_last_entries_after_it() {
     let h = Harness::new("message-ring-cap");
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
-    let sut = Sut::spawn(&h, CdrConfig { message_ring: 4, captured_headers: Vec::new() }).await;
+    let sut = Sut::spawn(
+        &h,
+        CdrConfig { message_ring: 4, captured_headers: Vec::new(), ..Default::default() },
+    )
+    .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -108,7 +112,11 @@ async fn keepalive_rounds_add_nothing_and_evict_nothing() {
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
     // Three rounds would add twelve rows across the legs — over this cap.
-    let sut = Sut::spawn(&h, CdrConfig { message_ring: 8, captured_headers: Vec::new() }).await;
+    let sut = Sut::spawn(
+        &h,
+        CdrConfig { message_ring: 8, captured_headers: Vec::new(), ..Default::default() },
+    )
+    .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;

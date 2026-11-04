@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!-- Rings past the caller's setup deadline, answers its CANCEL 200, then sends a BYE and, 200 ms later, a 200 to the INVITE (a callee that answered and hung up at once, its 200 lost on the way and retransmitted after the BYE): expects the BYE answered 200, no second CANCEL, the late 200 ACKed and the caller's own BYE, which it answers 481. -->
+<scenario name="peer-bye-then-late-answer">
+  <recv request="INVITE" crlf="true" rrs="true">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" assign_to="from_hdr"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" assign_to="to_raw"/>
+      <ereg regexp=".*" search_in="hdr" header="Via:" start_line="true" assign_to="inv_via"/>
+      <ereg regexp="&lt;([^&gt;]+)&gt;" search_in="hdr" header="Contact:" assign_to="ct_all,caller_contact"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]P[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv request="CANCEL" crlf="true" timeout="10000"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]P[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <send retrans="500">
+    <![CDATA[
+      BYE [$caller_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-pbye-[call_number]
+      From: [$to_raw];tag=[pid]P[call_number]
+      To: [$from_hdr]
+      Call-ID: [call_id]
+      CSeq: 10 BYE
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv response="200" timeout="5000"/>
+  <pause milliseconds="200"/>
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 200 OK
+      Via:[$inv_via]
+      From:[$from_hdr]
+      To:[$to_raw];tag=[pid]P[call_number]
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=callee 1 1 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" timeout="5000"/>
+  <recv request="BYE" crlf="true" timeout="5000"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 481 Call/Transaction Does Not Exist
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <Reference variables="ct_all"/>
+</scenario>

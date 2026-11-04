@@ -50,8 +50,8 @@ production cadence. Two things make it representative *and* fix the cadence:
    reap). Teeth verified: deliberately dropping the reclaim keepalive re-arm fails
    the cell.
 
-The happy-path foundation is `failover.rs::successful_long_call_with_as_generated_options`
-(no fault: a long call kept alive across two AS-generated OPTIONS cycles at 300 s,
+The happy-path foundation is `failover.rs::successful_long_call_with_b2bua_generated_options`
+(no fault: a long call kept alive across two B2BUA-generated OPTIONS cycles at 300 s,
 then a clean BYE). Core rearm-on-takeover stays covered by
 `failover.rs::hydrated_takeover_copy_self_releases_without_leaking`.
 
@@ -216,7 +216,7 @@ transparency oracle.
   - *Generic in-dialog* — re-INVITE / UPDATE / INFO / in-dialog OPTIONS ping;
     behaviorally interchangeable, so the driver picks `{method × direction}` by
     **seeded random** rather than permuting (keeps the matrix from exploding).
-  - *AS-generated keepalive OPTIONS* — its own category: refreshes both dead-peer
+  - *B2BUA-generated keepalive OPTIONS* — its own category: refreshes both dead-peer
     detection **and** the call-limiter keepalive hold on the owner.
   - *Nothing* — no event routed to the backup; pure re-hydration on reboot.
 - **D. Recovery permutation:** kill-and-stay-dead (rest of call served on backup) ·

@@ -132,6 +132,30 @@ class Allowance:
 
 
 @dataclass(frozen=True)
+class InDialogAllowance:
+    """One `in_dialog` entry: an in-dialog impact class, its detail (`*` any)
+    and its allowance, per stream."""
+
+    stream: str
+    cls: str
+    detail: str
+    max_calls: int | None
+    max_seconds: float | None
+
+    def matches(self, stream: str, cls: str, detail: str) -> bool:
+        return (
+            (self.stream == "*" or self.stream == stream)
+            and self.cls == cls
+            and (self.detail == "*" or self.detail == detail)
+        )
+
+    def allowed(self, cps: float, outage_s: float = 0.0) -> float:
+        if self.max_calls is not None:
+            return float(self.max_calls)
+        return (self.max_seconds or 0.0) * cps
+
+
+@dataclass(frozen=True)
 class SetupSlowAllowance:
     threshold_ms: float | None
     max_calls: int | None
@@ -187,6 +211,10 @@ class Budget:
     cdr_mismatch: dict[str, CountAllowance] = field(default_factory=lambda: {})
     recovery: RecoveryRule = RecoveryRule()
     classes: dict[str, float] = field(default_factory=lambda: {})
+    # The calls up at the window's first inject that must end whole, at
+    # least this many of them (established.py); None: not judged.
+    established_min: int | None = None
+    in_dialog: list[InDialogAllowance] = field(default_factory=lambda: [])
 
 
 NO_BUDGET = Budget("", [], [], SetupSlowAllowance(None, None, None), raw={})
@@ -244,6 +272,17 @@ def parse_budget(d: Json) -> Budget:
             latency_slack_ms=jv.number(rec, "latency_slack_ms", 50),
         ),
         classes={k: jv.number(jv.as_obj(v, k), "max") for k, v in jv.obj(d, "classes").items()},
+        established_min=jv.opt_int(jv.obj(d, "established"), "min_calls"),
+        in_dialog=[
+            InDialogAllowance(
+                stream=jv.string(e, "stream"),
+                cls=jv.string(e, "class"),
+                detail=jv.string(e, "detail"),
+                max_calls=jv.opt_int(e, "max_calls"),
+                max_seconds=jv.opt_number(e, "max_seconds"),
+            )
+            for e in jv.objs(d, "in_dialog")
+        ],
     )
 
 

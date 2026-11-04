@@ -16,6 +16,7 @@ mod cseq;
 mod dialog;
 mod final_response;
 mod offer_answer;
+mod pass;
 mod prack;
 mod proxy;
 mod register;
@@ -410,10 +411,8 @@ fn a_retransmission_of_a_lost_arrival_is_the_first_copy_the_view_holds() {
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_ANSWER)), ALICE, 3),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 4),
     ];
-    let visible: Vec<_> =
-        evs.iter().filter(|s| crate::contracts::audit_visible_event(&s.event)).cloned().collect();
-    let views = bind_views(&visible);
-    let repeats: Vec<bool> = views[0].msgs.iter().map(|m| m.repeat).collect();
+    let pass = AuditPass::new(&evs);
+    let repeats: Vec<bool> = pass.views()[0].0.msgs.iter().map(|m| m.repeat).collect();
     assert_eq!(repeats, vec![false, true, false, false], "only the second copy repeats");
     let findings = evaluate_rfc_findings(&evs);
     assert!(

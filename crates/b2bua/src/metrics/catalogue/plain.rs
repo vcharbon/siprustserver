@@ -103,14 +103,14 @@ plain_counters! {
         "b2bua_cdr_dropped_total",
         "CDRs dropped (submit-queue overflow, or a record the sink did not deliver)",
     ) => cdr_dropped, bump_cdr_dropped, cdr_dropped_total;
-    // Decision-application drop guard: a `/call/new` decision result (route
-    // or reject) that landed on a call whose initial INVITE the caller already
-    // CANCELed — dropped whole: no b-leg launch, no second final on the a-leg's
-    // completed transaction. A non-zero rate measures the caller-gives-up-
+    // A `/call/new` decision result (route or reject) that landed on a call
+    // whose initial INVITE the caller already CANCELed — recorded on the call,
+    // never applied: no b-leg launch, no second final on the a-leg's completed
+    // transaction. A non-zero rate measures the caller-gives-up-
     // during-routing race, not a fault.
     DECISION_DROPPED_CANCELLED = (
         "b2bua_decision_dropped_cancelled_total",
-        "decision results (route/reject) dropped whole because the caller CANCELed the initial INVITE while the decision was in flight (the 487 is the transaction's one final; no b-leg is launched)",
+        "decision results (route/reject) recorded and not applied because the caller CANCELed the initial INVITE while the decision was in flight (the 487 is the transaction's one final; no b-leg is launched)",
     ) => decision_dropped_cancelled, bump_decision_dropped_cancelled, decision_dropped_cancelled_total;
     TERMINATION_UNRECORDED = (
         "b2bua_termination_unrecorded_total",
@@ -198,10 +198,30 @@ plain_counters! {
         "b2bua_repl_frames_refused_total",
         "replication frames the transport refused unsent (past the frame cap); each is skipped and the stream goes on — expected 0",
     ) => repl_frames_refused, bump_repl_frame_refused, repl_frames_refused_total;
+    REPL_STREAMS_REFUSED = (
+        "b2bua_repl_streams_refused_total",
+        "replication streams a peer refused at connect for another protocol version; the puller pulls again after its backoff — expected 0",
+    ) => repl_streams_refused, bump_repl_stream_refused, repl_streams_refused_total;
+    REPL_NEW_CALLS_UNBACKED = (
+        "b2bua_repl_new_calls_unbacked_total",
+        "new calls admitted with no backup, for life, while the backlog toward their backup was over its high-water mark (ADR-0055 §3)",
+    ) => repl_new_calls_unbacked, bump_repl_new_call_unbacked, repl_new_calls_unbacked_total;
     DEPARTURE_TAKEOVER_PANICS = (
         "b2bua_departure_takeover_panics_total",
         "departed-peer calls whose takeover panicked; the sweep goes on with the next call — expected 0",
     ) => departure_takeover_panics, bump_departure_takeover_panic, departure_takeover_panics_total;
+    DEAD_NOTICES_REFUSED = (
+        "b2bua_dead_notices_refused_total",
+        "a front proxy's dead notices (X-Worker-Dead) refused unsigned, badly signed, stale, or with no cluster key to check them (ADR-0050 §3) — expected 0",
+    ) => dead_notices_refused, bump_dead_notice_refused, dead_notices_refused_total;
+    DEAD_VERDICTS_TAKEN = (
+        "b2bua_dead_verdicts_taken_total",
+        "a front proxy's dead verdicts on another worker taken: each runs the takeover of the calls this node backs for it with work in flight once this node's Backup flow from that worker confirms it, an open stream ending with no frame or, with the stream down, one connect made at once refused or run out (ADR-0047 D1)",
+    ) => dead_verdicts_taken, bump_dead_verdict_taken, dead_verdicts_taken_total;
+    DEAD_VERDICTS_UNCONFIRMED = (
+        "b2bua_dead_verdicts_unconfirmed_total",
+        "taken dead verdicts this node's Backup flow from that worker spoke against, a frame of the incarnation it streamed at the verdict arriving after it, on the open stream or on the one connect a down stream makes at once, or the stream open past its silence bound: the proxy misread a live worker, and nothing was taken over; one per pending wait (ADR-0047 D1)",
+    ) => dead_verdicts_unconfirmed, bump_dead_verdict_unconfirmed, dead_verdicts_unconfirmed_total;
     STORE_RECONCILED_ORPHAN_STAMPS = (
         "b2bua_store_reconciled_orphan_stamps_total",
         "last-touched stamps of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",
@@ -222,6 +242,10 @@ plain_counters! {
         "b2bua_store_reconciled_orphan_takeover_total",
         "takeover marks of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",
     ) => store_reconciled_orphan_takeover, bump_store_reconciled_orphan_takeover, store_reconciled_orphan_takeover_total;
+    STORE_RECONCILED_ORPHAN_ENVELOPE = (
+        "b2bua_store_reconciled_orphan_envelope_total",
+        "store envelopes of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",
+    ) => store_reconciled_orphan_envelope, bump_store_reconciled_orphan_envelope, store_reconciled_orphan_envelope_total;
     REPLICA_REAP_PANICS = (
         "b2bua_replica_reap_panics_total",
         "replica reap steps that panicked; the next pass runs one interval later — expected 0",
@@ -238,10 +262,10 @@ plain_counters! {
         "b2bua_unrecoverable_calls_total",
         "calls whose record does not rebuild their caller's INVITE, discharged with nothing on the wire (ADR-0052 §11; ALARM: expected 0)",
     ) => unrecoverable_calls, bump_unrecoverable_call, unrecoverable_calls_total;
-    UNRECOVERABLE_FOLDS = (
-        "b2bua_unrecoverable_folds_total",
-        "folds refused because the other owner's body does not rebuild the caller's INVITE; the live copy keeps serving (ADR-0052 §11; ALARM: expected 0)",
-    ) => unrecoverable_folds, bump_unrecoverable_fold, unrecoverable_folds_total;
+    UNRECOVERABLE_MEETINGS = (
+        "b2bua_unrecoverable_meetings_total",
+        "copies of the other owner not taken at a meeting because they do not rebuild the caller's INVITE; the live copy keeps serving (ADR-0052 §11; ALARM: expected 0)",
+    ) => unrecoverable_meetings, bump_unrecoverable_meeting, unrecoverable_meetings_total;
     // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
     // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
     // proves it is attempting to replicate (the proxy cookie stamped
@@ -272,11 +296,16 @@ plain_counters! {
         "b2bua_repl_takeover_hydrated_total",
         "calls hydrated from a backup replica to serve a failed-over request",
     ) => repl_takeover_hydrated, bump_repl_takeover_hydrated, repl_takeover_hydrated_total;
-    // Reverse flushes a live primary refused to fold; the gate is `router::reclaim`.
+    // Reverse copies a live primary's copy contains; the meeting is `router::reclaim`.
     REPL_REVERSE_FLUSH_REFUSED = (
         "b2bua_repl_reverse_flush_refused_total",
-        "a backup's reverse flush for a call this primary serves live that neither the (p,b) vector nor lifecycle progress let it fold (ADR-0014): the primary kept its own copy",
+        "a backup's reverse flush for a call this primary serves live that the live copy contains (ADR-0055 §7): the primary kept its own copy",
     ) => repl_reverse_flush_refused, bump_repl_reverse_flush_refused, repl_reverse_flush_refused_total;
+    // Copies of one call that met diverged; the meeting is `router::reclaim`.
+    REPL_COPIES_DIVERGED = (
+        "b2bua_repl_copies_diverged_total",
+        "a copy of a call this node serves live met the other owner's copy and neither contained the other (ADR-0055 §7): the call was ended cleanly",
+    ) => repl_copies_diverged, bump_repl_copies_diverged, repl_copies_diverged_total;
     // Refusals of a `Terminated` replica; the rule is `router::materialise`.
     REPL_TAKEOVER_REFUSED_TERMINATED = (
         "b2bua_repl_takeover_refused_terminated_total",
@@ -299,10 +328,11 @@ plain_counters! {
         "b2bua_repl_stand_down_total",
         "acting-backup takeover copies stood down on a write of their primary that covers every write the copy made, or on its delete (ADR-0047 D7)",
     ) => repl_stand_down, bump_repl_stand_down, repl_stand_down_total;
-    // Model Y (ADR-0020 X3): a backup-held deferred terminal whose primary never
-    // came back to reclaim it (crashed for good, past the replica TTL). The backup
-    // is NOT a discharge authority, so its periodic reap releases the call's limiter
-    // hold(s) + frees the replica memory but writes **no CDR**.
+    // A backup-held deferred terminal whose primary, still a member, never came
+    // back to reclaim it (past the replica TTL). A copy whose primary is a member
+    // defers the CDR to it (ADR-0055 §5, ADR-0020 X3), so its periodic reap
+    // releases the call's limiter hold(s) + frees the replica memory but writes
+    // **no CDR**.
     // This counter is that lost-CDR count: it should stay ~0 in a healthy cluster
     // and only climbs when a primary is permanently lost mid-call.
     REPL_TERMINAL_LOST = (

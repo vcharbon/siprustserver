@@ -50,7 +50,7 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
     let proxy = common::spawn_lb_proxy(&h, PROXY, "b2bua", B2BUA.parse().unwrap()).await;
     // The worker routes every call to bob, but sends its b-leg through the proxy.
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070)
-        .outbound_proxy("127.0.0.1", 5080)
+        .behind_proxy("127.0.0.1", 5080)
         .start(&h, "b2bua", B2BUA)
         .await;
 

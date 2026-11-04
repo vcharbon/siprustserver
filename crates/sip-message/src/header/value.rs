@@ -53,19 +53,41 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
 
     /// Every value carried on one header line.
     fn parse_line(raw: &SipStr) -> Result<Vec<Self>, SipParseError> {
+        // Sized for the one-value line the wire almost always carries: a value
+        // type is a wide struct, so a growth step costs real bytes on the
+        // relay path.
+        let mut values = Vec::with_capacity(1);
+        Self::parse_line_into(raw, &mut values)?;
+        Ok(values)
+    }
+
+    /// [`parse_line`](Self::parse_line) appending to `out`, so a reader that
+    /// folds every line of a header into one list allocates it once.
+    fn parse_line_into(raw: &SipStr, out: &mut Vec<Self>) -> Result<(), SipParseError> {
         match Self::folding() {
             Folding::Comma => {
-                // Sized for the one-value line the wire almost always carries:
-                // a value type is a wide struct, so a growth step costs real
-                // bytes on the relay path.
-                let mut values = Vec::with_capacity(1);
                 for entry in top_level_comma_entries(raw.as_str()) {
-                    values.push(Self::parse(&raw.reslice(entry))?);
+                    out.push(Self::parse(&raw.reslice(entry))?);
                 }
-                Ok(values)
             }
-            Folding::Single | Folding::Opaque | Folding::SetPerLine => Ok(vec![Self::parse(raw)?]),
+            Folding::Single | Folding::Opaque | Folding::SetPerLine => out.push(Self::parse(raw)?),
         }
+        Ok(())
+    }
+
+    /// Whether [`combine`](Self::combine) reads every value: `true` for a type
+    /// that overrides it, which must say so here. A type that keeps the first
+    /// value and carries one value per line is read from its first line only.
+    const COMBINES: bool = false;
+
+    /// Whether a reader of the single logical value reads the first line that
+    /// carries this header and no other: the type keeps the first value
+    /// ([`COMBINES`](Self::COMBINES) is `false`) and a line carries one value
+    /// ([`Folding::Single`] or [`Folding::Opaque`]). A later line, malformed
+    /// or not, then takes no part in that value (RFC 3261 §7.3.1: such a
+    /// header appears once).
+    fn first_line_only() -> bool {
+        !Self::COMBINES && matches!(Self::folding(), Folding::Single | Folding::Opaque)
     }
 
     /// The single logical value a reader sees when the message carries several

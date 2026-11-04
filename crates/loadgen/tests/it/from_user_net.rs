@@ -207,6 +207,37 @@ async fn from_user_calls_on_one_shared_socket_each_reach_their_own_call() {
     settle(&rig, &reporter).await;
 }
 
+/// Calling numbers that carry an `;ext=` user parameter, keyed through an
+/// extraction regex that keeps the number: the key is the number alone on the
+/// caller and on every leg the SUT originates, and every call is OK with no
+/// orphan and no caller-key mismatch.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn from_user_extract_keys_each_call_on_the_number_without_its_extension() {
+    let correlation = Correlation::from_user_extract(r"^(\+[0-9]+)").unwrap();
+    let rig = rig(7540, Layout::Shared, correlation, B2buaSut::route_all_with_refer, None).await;
+    let reporter = reporter();
+    let pool = case(
+        r#""bindings": { "mode": "seq", "entries": [
+             { "core": { "from": "<sip:+1555${seq:6};ext=7@pool.example>" } } ] }"#,
+    );
+    let driver = Driver::new(
+        cfg(rig.b2bua.addr, 10.0, 2, 300, 0xE7E7),
+        vec![mix("basic_call").with_case(Some(pool))],
+        reporter.clone(),
+        rig.transport.clone(),
+    );
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let ok = reporter.count("basic_call", &ResultClass::Ok);
+    assert!(total >= 10, "governor under-delivered: {total}\n{}", reporter.render_prometheus());
+    assert_eq!(ok, total, "NOK calls:\n{}", reporter.render_prometheus());
+    assert_eq!(orphans(&rig.core), 0, "orphans: {:?}", rig.core.stats().samples());
+    assert_eq!(rig.core.stats().caller_key_mismatch.load(Relaxed), 0);
+    settle(&rig, &reporter).await;
+}
+
 /// A calling number already held by an in-flight call is refused: the later
 /// call is counted `rejected` (never a panic, never a datagram), the call
 /// holding the number completes, and once it ends the number is free again.

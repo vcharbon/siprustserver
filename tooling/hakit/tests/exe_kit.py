@@ -1,4 +1,4 @@
-"""Runs a base incident's executable against fake `kubectl` and `docker`.
+"""Runs a base incident's executable against fake `kubectl`, `docker` and `ip`.
 
 The fakes (`fakebin/fake_tool.py`) log every call and answer from scripted
 rules; a call no rule scripts exits 97. So a test states every answer the lab
@@ -50,7 +50,7 @@ class Sandbox:
         self.inc = BASE.incidents[incident]
         self.bin = tmp / "bin"
         self.bin.mkdir(parents=True, exist_ok=True)
-        for tool in ("kubectl", "docker"):
+        for tool in ("kubectl", "docker", "ip"):
             link = self.bin / tool
             if not link.exists():
                 link.symlink_to(FAKE_TOOL)
@@ -132,10 +132,12 @@ def live(selector: str, rows: str) -> Rule:
     return Rule(rf"get pods -l {re.escape(selector)} -o jsonpath=\{{range .items\[\*\]\}}\{{\.metadata\.name\}}", rows)
 
 
-def pod_rules(pod: str, node: str, uid: str, *, frozen: str | list[str] = "0", qdisc: str | list[str] = "qdisc noqueue 0: root",
+def pod_rules(pod: str, node: str, uid: str, *, frozen: str | list[str] = "0",
+              containers_frozen: str | list[str] = "0\n0\n", qdisc: str | list[str] = "qdisc noqueue 0: root",
               iptables: str | list[str] = "-P INPUT ACCEPT\n", restarts: str = "0\n", host_network: str = "") -> list[Rule]:
     """The reads pod-faults.sh makes for one pod on its node: its node, uid,
-    sandbox netns and pod-level cgroup, then the residue reads; a list of
+    sandbox netns and pod-level cgroup, then the residue reads (the pod's
+    cgroup.freeze, then its containers' one per line); a list of
     answers is given once each in order, the last one for good."""
 
     def seq(match: str, answers: str | list[str]) -> list[Rule]:
@@ -154,8 +156,28 @@ def pod_rules(pod: str, node: str, uid: str, *, frozen: str | list[str] = "0", q
         Rule(rf"docker exec {node} cat /proc/111/cgroup$", "0::/kubepods/pod1/sb1\n"),
         *seq(rf"docker exec {node} cat /sys/fs/cgroup/kubepods/pod1/cgroup\.freeze$", frozen),
         Rule(rf"docker exec {node} sh -c echo [01] > '/sys/fs/cgroup/kubepods/pod1/cgroup\.freeze'$"),
+        *seq(rf"docker exec {node} sh -c cat '/sys/fs/cgroup/kubepods/pod1'/\*/cgroup\.freeze$", containers_frozen),
         *seq(rf"docker exec {node} nsenter -t 111 -n -- tc qdisc show dev eth0$", qdisc),
         *seq(rf"docker exec {node} nsenter -t 111 -n -- iptables -S INPUT$", iptables),
+    ]
+
+
+def route_rule(vip: str, *hops: str, once: bool = False) -> Rule:
+    """`ip -j route show <vip>/32` answering the next hops `hops`."""
+    if not hops:
+        body = "[]"
+    elif len(hops) == 1:
+        body = json.dumps([{"dst": vip, "gateway": hops[0]}])
+    else:
+        body = json.dumps([{"dst": vip, "nexthops": [{"gateway": h} for h in hops]}])
+    return Rule(rf"^ip -j route show {re.escape(vip)}/32$", body, once=once)
+
+
+def plane_rules(node: str, internal: str, external: str, network: str = "sipext") -> list[Rule]:
+    """A node's address on each plane: its InternalIP, its address on `network`."""
+    return [
+        Rule(rf"get node {re.escape(node)} -o jsonpath=\{{\.status\.addresses", internal),
+        Rule(rf"docker inspect -f .*{re.escape(network)}.*IPAddress.* {re.escape(node)}$", external),
     ]
 
 

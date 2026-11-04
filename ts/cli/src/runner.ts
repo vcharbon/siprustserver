@@ -8,6 +8,7 @@
  * error rides 2 and `--help` rides 0.
  */
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
+import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
@@ -33,8 +34,9 @@ export const operatorCwd = (env: NodeJS.ProcessEnv = process.env): string => env
 export const stdinText = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString("/dev/stdin"))
 
 /**
- * One command, run: the host's env files applied (defaults, never overrides),
- * its flags parsed off `process.argv`, its services provided from `layers` and
+ * One command, run: the host's env files applied (defaults, never overrides;
+ * a refusal of the deployment's own defaults is printed and exits 2 before
+ * the line is parsed), its flags parsed off `process.argv`, its services provided from `layers` and
  * the platform, its exit code set. The layers are built for the handler alone,
  * from the parsed line, so `--help` and a usage error need nothing the layers
  * reach for — the store included — and a root stated on the line is the one
@@ -52,7 +54,11 @@ export const runMain = <Name extends string, Input, E, LA, LE>(
     | ((input: Input) => Layer.Layer<LA, LE, NodeServices.NodeServices>)
 ): void => {
   Effect.gen(function*() {
-    const applied = yield* HostEnv.apply(facts.hostEnv)
+    const applied = yield* HostEnv.apply(facts.hostEnv).pipe(
+      Effect.catchTag("HostEnv.Refused", (refused) =>
+        Effect.andThen(Console.error(refused.reason), Effect.as(exit(2), undefined)))
+    )
+    if (applied === undefined) return
     yield* Command.run(
       Command.provide(
         command,

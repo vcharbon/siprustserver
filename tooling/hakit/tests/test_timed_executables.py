@@ -4,7 +4,10 @@ replaced pod left alone, and a read that fails never taken for "gone"."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+from hakit.jsonval import as_obj
 
 from exe_kit import Rule, Sandbox, facts, failed, live, pod_rules
 
@@ -38,7 +41,7 @@ def test_freeze_heal_thaws_the_same_pod_twice_and_proves_it_thawed(tmp_path: Pat
     sb = freeze_heal(tmp_path)
     f = facts(sb.run("heal"))
     assert len(sb.lines(FREEZE_WRITE.format(0))) == 2  # the heal and its re-check a second later
-    assert f["pods"] == {"l-0": {"state": "healed", "restarts": 0}}
+    assert f["pods"] == {"l-0": {"state": "healed", "restarts": 0, "terminated_since_applied": None}}
 
 
 def test_freeze_heal_fails_when_the_pod_stays_frozen(tmp_path: Path) -> None:
@@ -49,7 +52,7 @@ def test_freeze_heal_leaves_a_replaced_pod_alone(tmp_path: Path) -> None:
     sb = freeze_heal(tmp_path, uid="u7")
     f = facts(sb.run("heal"))
     assert sb.index("cgroup.freeze") == -1
-    assert f["pods"] == {"l-0": {"state": "replaced", "restarts": None}}
+    assert f["pods"] == {"l-0": {"state": "replaced", "restarts": None, "terminated_since_applied": None}}
 
 
 def test_freeze_heal_fails_when_the_pod_cannot_be_read(tmp_path: Path) -> None:
@@ -70,7 +73,7 @@ def test_tcp_reset_heal_deletes_every_reset_rule_and_proves_none_left(tmp_path: 
     )
     f = facts(sb.run("heal"))
     assert len(sb.lines("iptables -D INPUT")) == 1
-    assert f["pods"] == {"l-0": {"state": "healed", "restarts": None}}
+    assert f["pods"] == {"l-0": {"state": "healed", "restarts": None, "terminated_since_applied": None}}
 
 
 def test_a_netns_fault_refuses_a_host_network_pod_unless_allowed(tmp_path: Path) -> None:
@@ -198,3 +201,16 @@ def test_node_stop_heal_starts_every_node_before_waiting_on_any(tmp_path: Path) 
 
 def test_node_stop_heal_fails_when_a_node_is_not_running_a_second_later(tmp_path: Path) -> None:
     failed(node_heal(tmp_path, running="false").run("heal"), "a1 is not running a second after its start")
+
+
+def test_freeze_heal_counts_a_container_terminated_since_the_freeze(tmp_path: Path) -> None:
+    """A liveness restart the count does not show yet: the container's last
+    termination after the freeze is counted."""
+    sb = freeze_heal(tmp_path)
+    sb.state("applied_at_ms", "1793682891925\n")
+    rules = json.loads(sb.rules_file.read_text())
+    rules.insert(0, {"match": r"get pod l-0 --ignore-not-found -o jsonpath=\{range \.status\.containerStatuses\[\*\]\}\{\.lastState",
+                     "stdout": "2026-11-03T05:15:10Z\n", "rc": 0, "once": False})
+    sb.rules_file.write_text(json.dumps(rules))
+    f = facts(sb.run("heal"))
+    assert as_obj(f["pods"])["l-0"] == {"state": "healed", "restarts": 0, "terminated_since_applied": 1}

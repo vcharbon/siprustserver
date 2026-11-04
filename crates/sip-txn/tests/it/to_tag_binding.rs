@@ -232,6 +232,7 @@ async fn a_seeded_transaction_pins_the_seeds_tag_for_the_cancel_answer() {
     let seed = TxnSeed::ServerInvite {
         request: invite,
         to_tag: Some("t1".to_string()),
+        provisional: None,
         leg_id: Some("a".to_string()),
     };
     assert_eq!(stack.txn.seed("w0|bind-g|atag", vec![seed]).await.unwrap(), 1);

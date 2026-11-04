@@ -35,7 +35,8 @@
 //! [`BackendClient`] (ADR-0043): one per backend, its name looked up through a
 //! [`ResolvedTarget`] (bounded, single-flight), its connections held as
 //! [`ClientSettings`] state, a cap on requests in flight, a client rotated on a
-//! fixed period, a circuit breaker, and the generic retry rule. The transport
+//! fixed period, a circuit breaker, the generic retry rule, and a connection
+//! closed after a 5xx answer ([`ErrorCloses`]). The transport
 //! reports the honest outcome (`Ok(response)` or a classified [`HttpError`]);
 //! the budgets and what a failure means for the caller (fail the call, let
 //! it through) are the caller's policy.
@@ -59,6 +60,7 @@
 )]
 
 pub mod backend;
+pub mod error_close;
 pub mod failures;
 pub mod poison;
 mod resolved_target;
@@ -67,6 +69,7 @@ pub mod settings;
 mod transport;
 
 pub use backend::{AttemptError, BackendClient, BackendConfig, BreakerConfig, Budgets};
+pub use error_close::ErrorCloses;
 pub use resolved_target::{Addresses, LookupSettings, ResolvedTarget, LOOKUP_BOUND, MAX_STUCK};
 pub use resolver::{MemoryResolver, NameResolver, SystemResolver};
 pub use settings::ClientSettings;

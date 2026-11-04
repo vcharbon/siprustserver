@@ -3,7 +3,7 @@
 use regex::Regex;
 use scenario_harness::legpick::LegInfo;
 use scenario_harness::realcall::CorrelationStamp;
-use sip_message::sniff::{from_user, header_value};
+use sip_message::sniff::{address_user, call_id, from_user, header_value};
 
 /// How the per-call correlation token is carried through the SUT, with two
 /// halves:
@@ -27,7 +27,13 @@ use sip_message::sniff::{from_user, header_value};
 /// - [`Correlation::from_user`] — the token IS the calling party's From URI
 ///   user, taken from the call's resolved identity (nothing is stamped). Fits a
 ///   SUT that keeps the From URI user on every originated leg while it may
-///   rewrite the host, display name and tag.
+///   rewrite the host, display name and tag. [`Correlation::from_user_extract`]
+///   keys on a regex's first capture group of that user instead, on the
+///   caller's From and every received leg alike (a SUT that adds or drops a
+///   suffix such as `;ext=` or `;verstat=`).
+/// - [`Correlation::call_id`] — the token IS the caller's Call-ID; a received
+///   leg's Call-ID yields it through a regex's first capture group (a SUT that
+///   derives each originated leg's Call-ID from the incoming one).
 #[derive(Debug, Clone)]
 pub struct Correlation {
     strategy: Strategy,
@@ -45,7 +51,15 @@ enum Strategy {
         extract: Option<Regex>,
     },
     ToUser,
-    FromUser,
+    /// `extract`: first capture group of the From URI user = the token;
+    /// `None` → the whole user.
+    FromUser {
+        extract: Option<Regex>,
+    },
+    /// `extract`: first capture group of a received leg's Call-ID = the token.
+    CallId {
+        extract: Regex,
+    },
 }
 
 /// What a token looks like inside a structured header value when deriving the
@@ -84,17 +98,7 @@ impl Correlation {
             return Err(format!("correlation template {template:?} has no ${{token}} placeholder"));
         };
         let extract = match extract {
-            Some(re) => {
-                let re =
-                    Regex::new(re).map_err(|e| format!("bad correlation extract regex: {e}"))?;
-                if re.captures_len() < 2 {
-                    return Err(format!(
-                        "correlation extract regex {:?} needs a capture group (group 1 = the token)",
-                        re.as_str()
-                    ));
-                }
-                Some(re)
-            }
+            Some(re) => Some(extract_regex(re)?),
             // Plain "${token}" → whole-value extraction (no charset assumption
             // on the token).
             None if prefix.is_empty() && suffix.is_empty() => None,
@@ -118,13 +122,44 @@ impl Correlation {
     /// Token = the From URI user of the call's own INVITE — zero SUT
     /// cooperation beyond keeping the calling party's number.
     pub fn from_user() -> Self {
-        Self { strategy: Strategy::FromUser }
+        Self { strategy: Strategy::FromUser { extract: None } }
+    }
+
+    /// Token = the first capture group of `extract` over the From URI user,
+    /// applied to the caller's resolved From and to every received leg. Errors
+    /// on an invalid regex or one with no capture group.
+    pub fn from_user_extract(extract: &str) -> Result<Self, String> {
+        Ok(Self { strategy: Strategy::FromUser { extract: Some(extract_regex(extract)?) } })
+    }
+
+    /// Token = the caller's Call-ID (stamped as the minted token); a received
+    /// leg yields it as the first capture group of `extract` over its Call-ID.
+    /// The regex states the SUT's rewrite (e.g. `^leg[0-9]+-(.+)$`). Errors on
+    /// an invalid regex or one with no capture group.
+    pub fn call_id(extract: &str) -> Result<Self, String> {
+        Ok(Self { strategy: Strategy::CallId { extract: extract_regex(extract)? } })
     }
 
     /// Whether the call's key is its caller's From URI user (the driver takes
     /// the key from the resolved identity instead of minting one).
     pub fn is_from_user(&self) -> bool {
-        matches!(self.strategy, Strategy::FromUser)
+        matches!(self.strategy, Strategy::FromUser { .. })
+    }
+
+    /// Whether the call's key is its caller's Call-ID.
+    pub fn is_call_id(&self) -> bool {
+        matches!(self.strategy, Strategy::CallId { .. })
+    }
+
+    /// The from-user key of a call whose caller identity is `from`, or the
+    /// bounded rejection reason: `no_from`, `userless_from`, or
+    /// `unmatched_from` when the extraction regex does not match the user.
+    pub(crate) fn caller_key(&self, from: Option<&str>) -> Result<String, &'static str> {
+        let user = address_user(from.ok_or("no_from")?).ok_or("userless_from")?;
+        match &self.strategy {
+            Strategy::FromUser { extract: Some(re) } => capture(re, &user).ok_or("unmatched_from"),
+            _ => Ok(user),
+        }
     }
 
     /// The STAMP half: how a scenario writes `token` into the outgoing INVITE.
@@ -135,7 +170,8 @@ impl Correlation {
                 value: template.replace("${token}", token),
             },
             Strategy::ToUser => CorrelationStamp::ToUser,
-            Strategy::FromUser => CorrelationStamp::FromUser,
+            Strategy::FromUser { .. } => CorrelationStamp::FromUser,
+            Strategy::CallId { .. } => CorrelationStamp::CallId,
         }
     }
 
@@ -146,13 +182,32 @@ impl Correlation {
                 let value = header_value(raw, name)?;
                 match extract {
                     None => Some(value),
-                    Some(re) => re.captures(&value)?.get(1).map(|m| m.as_str().to_string()),
+                    Some(re) => capture(re, &value),
                 }
             }
             Strategy::ToUser => LegInfo::new(raw).to_user(),
-            Strategy::FromUser => from_user(raw),
+            Strategy::FromUser { extract: None } => from_user(raw),
+            Strategy::FromUser { extract: Some(re) } => capture(re, &from_user(raw)?),
+            Strategy::CallId { extract } => capture(extract, &call_id(raw)?),
         }
     }
+}
+
+/// A token-extraction regex: valid, with a first capture group (the token).
+fn extract_regex(re: &str) -> Result<Regex, String> {
+    let re = Regex::new(re).map_err(|e| format!("bad correlation extract regex: {e}"))?;
+    if re.captures_len() < 2 {
+        return Err(format!(
+            "correlation extract regex {:?} needs a capture group (group 1 = the token)",
+            re.as_str()
+        ));
+    }
+    Ok(re)
+}
+
+/// The first capture group of `re` over `value`, when it matches.
+fn capture(re: &Regex, value: &str) -> Option<String> {
+    re.captures(value)?.get(1).map(|m| m.as_str().to_string())
 }
 
 #[cfg(test)]
@@ -303,5 +358,72 @@ mod tests {
         assert_eq!(c.token(&compact).as_deref(), Some("+1555010"), "compact f: form");
 
         assert_eq!(c.token(&leg("<sip:sut.example>;tag=s1")), None, "userless From");
+    }
+
+    /// From-user strategy with an extractor: the regex's group 1 over the From
+    /// user is the key, on the caller's resolved From and on a received leg
+    /// whose user gained a suffix; a user the regex misses is `unmatched_from`.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn from_user_extract_keys_both_sides_on_the_capture_group() {
+        let c = Correlation::from_user_extract(r"^(\+?[0-9]+)").unwrap();
+        assert!(c.is_from_user());
+        assert!(matches!(c.stamp("+1555010"), CorrelationStamp::FromUser));
+
+        assert_eq!(
+            c.caller_key(Some("<sip:+1555010;ext=12@pool.example>")).as_deref(),
+            Ok("+1555010")
+        );
+        assert_eq!(c.caller_key(Some("<tel:+1555010;ext=12>")).as_deref(), Ok("+1555010"));
+        assert_eq!(c.caller_key(Some("sip:alice@pool.example")), Err("unmatched_from"));
+        assert_eq!(c.caller_key(Some("sip:pool.example")), Err("userless_from"));
+        assert_eq!(c.caller_key(None), Err("no_from"));
+
+        let leg = |from: &str| {
+            format!(
+                "INVITE sip:+15550900@10.0.0.9 SIP/2.0\r\nCall-ID: c3@h\r\n\
+                 To: <sip:+15550900@10.0.0.9>\r\nFrom: {from}\r\nCSeq: 1 INVITE\r\n\r\n"
+            )
+            .into_bytes()
+        };
+        let attested =
+            leg("<sip:+1555010;verstat=TN-Validation-Passed@sut.example;user=phone>;tag=s");
+        assert_eq!(c.token(&attested).as_deref(), Some("+1555010"));
+        let suffixed = leg("<sip:+1555010A@sut.example>;tag=s");
+        assert_eq!(c.token(&suffixed).as_deref(), Some("+1555010"));
+        assert_eq!(c.token(&leg("<sip:anonymous@sut.example>;tag=s")), None);
+
+        // Without an extractor the key is the whole user, params included.
+        let whole = Correlation::from_user();
+        assert_eq!(
+            whole.caller_key(Some("<sip:+1555010;ext=12@pool.example>")).as_deref(),
+            Ok("+1555010;ext=12")
+        );
+    }
+
+    /// Call-ID strategy: the stamp is [`CorrelationStamp::CallId`]; a received
+    /// leg's Call-ID (full or compact `i:`) yields the caller's Call-ID as the
+    /// regex's group 1, a leg the regex misses yields none, and a regex
+    /// without a capture group is refused.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn call_id_strategy_extracts_the_callers_call_id() {
+        let c = Correlation::call_id(r"^leg[0-9]+-(.+)$").unwrap();
+        assert!(c.is_call_id() && !c.is_from_user());
+        assert!(matches!(c.stamp("lg0a1b.run"), CorrelationStamp::CallId));
+
+        let leg = |call_id: &str| {
+            format!(
+                "INVITE sip:bob@10.0.0.9 SIP/2.0\r\n{call_id}\r\nTo: <sip:bob@10.0.0.9>\r\n\
+                 From: <sip:alice@sut.example>;tag=s\r\nCSeq: 1 INVITE\r\n\r\n"
+            )
+            .into_bytes()
+        };
+        assert_eq!(c.token(&leg("Call-ID: leg1-lg0a1b.run")).as_deref(), Some("lg0a1b.run"));
+        assert_eq!(c.token(&leg("i: leg27-lg0a1b.run")).as_deref(), Some("lg0a1b.run"));
+        assert_eq!(c.token(&leg("Call-ID: lg0a1b.run")), None, "an unrewritten Call-ID");
+
+        assert!(Correlation::call_id("leg-.+").is_err(), "no capture group");
+        assert!(Correlation::call_id("(").is_err(), "invalid regex");
     }
 }

@@ -15,13 +15,14 @@ use sip_message::{Method, SipMessage};
 
 use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
-use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry};
+use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry, Lifetime};
 use crate::headers::via_with_cookie;
 use crate::observability::metrics::{
     Direction, Face, MessageResult, NoTargetDrop, RoutingDecisionKind,
 };
 use crate::self_gate::BypassKind;
 use crate::strategy::SelectOpts;
+use sip_message::received::observed_source;
 
 use super::super::ProxyCore;
 use super::reply::extra_header;
@@ -107,31 +108,41 @@ impl ProxyCore {
         // An ACK for a NON-2xx INVITE final belongs to the INVITE transaction
         // itself — it reuses the INVITE's top-Via branch — while an ACK for a
         // 2xx is a NEW transaction (fresh branch) that takes the normal
-        // routing ladder. The `ackhop|` memo + branch match is the
-        // discriminator, NOT the presence of a Route header: a worker's b-leg
-        // INVITE carries a preloaded outbound-proxy Route, and §17.1.1.3 makes
-        // its non-2xx ACK copy that Route verbatim, so a route-presence
-        // heuristic misroutes exactly that ACK.
-        // Gating on the memo (rather than merely branch-matching the
-        // remembered INVITE) also keeps a takeover UA's 2xx ACK safe: a
-        // restarted `IdGen` can make its fresh ACK branch ALIAS the dead
-        // incarnation's INVITE branch — but no non-2xx final was ever relayed
-        // for a confirmed call, so no memo exists and the ACK flows.
+        // routing ladder. The `ackhop|` memo, written for every relayed
+        // non-2xx INVITE final, + branch match is the discriminator, NOT the
+        // presence of a Route header: a worker's b-leg INVITE carries a
+        // preloaded outbound-proxy Route, and §17.1.1.3 makes its non-2xx ACK
+        // copy that Route verbatim, so a route-presence heuristic misroutes
+        // exactly that ACK. With no ACK hop (the final crossed another
+        // instance), the ACK goes where its INVITE went: a caller's where the
+        // INVITE's entry names, else by the call's rank; a worker's by its
+        // Route and Request-URI (ADR-0009 X7). A takeover UA's 2xx ACK whose
+        // restarted `IdGen` aliases the dead incarnation's INVITE branch stays
+        // safe: no non-2xx final was relayed for a confirmed call, so no ACK
+        // hop exists, and as a worker's request it is routed by its Route and
+        // Request-URI, never by the INVITE's entry.
         //
-        // What a match means depends on who generated the final:
-        //  • relayed final (memo names the node the final arrived from) —
-        //    RELAY the ACK there, where §16.11 puts it on the INVITE's outbound
-        //    branch so the downstream server transaction (§17.2.3) matches it
-        //    and stops retransmitting the final (Timer G). This transaction-less
-        //    proxy never synthesizes the hop ACK itself (ADR-0022 X4; see
-        //    `core/response.rs`) — the upstream's ACK is the only quench,
-        //    end-to-end, which is what keeps a lossy caller hop recoverable.
-        //  • the proxy's OWN final (memo written by `reply()`, empty `branch`:
-        //    no downstream exists) — the ACK terminates HERE: absorb it, never
-        //    run the strategy over it and hand a worker a stray ACK matching
-        //    no transaction it ever created.
+        // A match is a relayed final (the memo names the node the final
+        // arrived from): RELAY the ACK there, where §16.11 puts it on the
+        // INVITE's outbound branch so the downstream server transaction
+        // (§17.2.3) matches it and stops retransmitting the final (Timer G).
+        // This transaction-less proxy never synthesizes the hop ACK itself
+        // (ADR-0022 X4; see `core/response`) — the upstream's ACK is the
+        // only quench, end-to-end, which is what keeps a lossy caller hop
+        // recoverable.
+        //
+        // The ACK to a final the proxy generated ITSELF carries the To-tag the
+        // proxy derived for that INVITE under the deployment's shared key
+        // (`crate::security::own_final_tag`): the ACK terminates HERE, at any
+        // proxy holding the key, and is never run through the strategy to hand
+        // a worker a stray ACK matching no transaction it ever created.
         let mut ack_hop: Option<CancelEntry> = None;
         if method == Method::Ack {
+            if self.refusals.acknowledges_own_final(req)
+                || self.parse_refusals.acknowledges_own_final(req)
+            {
+                return RouteOutcome { decision: select, target: None };
+            }
             let key = crate::cancel_lru::ack_hop_key(
                 req.top_via(),
                 call_id.as_str(),
@@ -147,9 +158,6 @@ impl ProxyCore {
                 let same_txn = top_via_branch(req).is_some();
                 let legacy_routeless = !same_txn && !req.has(&sip_message::HeaderName::Route);
                 if same_txn || legacy_routeless {
-                    if found.branch.is_empty() {
-                        return RouteOutcome { decision: select, target: None };
-                    }
                     ack_hop = Some(found);
                 }
             }
@@ -186,7 +194,7 @@ impl ProxyCore {
         };
 
         // ── A copy of a refused request (§8.2.7) ────────────────────────────
-        // It draws the refusal's bytes and is neither counted as a new call
+        // It draws the refusal's 503 and is neither counted as a new call
         // nor judged again: a gate or a cap that cleared since must not admit
         // a transaction this hop already refused. A worker's request is never
         // refused (it bypasses the gate and goes to its Request-URI), so it
@@ -226,8 +234,21 @@ impl ProxyCore {
         }
 
         // ── Pick the downstream target (`target`) ───────────────────────────
+        // A caller's §17.1.1.3 ACK with no ACK hop (its final crossed another
+        // instance): the INVITE's entry, which the ACK's branch keys, names
+        // where the INVITE went, whatever Route or cookie the ACK copied from
+        // it. A worker's ACK repeats its INVITE's Route and Request-URI.
+        let placed_ack = if method == Method::Ack
+            && ack_hop.is_none()
+            && !c.worker_outbound
+            && c.loose_route_next_hop.is_none()
+        {
+            self.invite_hop(msg, req).await
+        } else {
+            None
+        };
         let chosen: Result<Chosen, RouteOutcome> = if method == Method::Cancel {
-            let target = self.cancel_target(msg, req, src, c.worker_outbound).await;
+            let target = self.cancel_target(msg, req, src, &c).await;
             target.map(|t| (t, RoutingDecisionKind::Cancel, None))
         } else if let Some(found) = ack_hop {
             // The §17.1.1.3 ACK for a relayed non-2xx final: to the node the
@@ -235,6 +256,8 @@ impl ProxyCore {
             // the INVITE's Call-ID, From tag, CSeq number and received branch,
             // so §16.11 already puts it on the INVITE's outbound branch.
             Ok((found.target, RoutingDecisionKind::AckHop, None))
+        } else if let Some(found) = placed_ack {
+            found.map(|t| (t, RoutingDecisionKind::AckHop, None))
         } else if let Some(next) = c.loose_route_next_hop.clone() {
             Ok((next, RoutingDecisionKind::LooseRoute, None))
         } else if c.worker_outbound {
@@ -256,6 +279,14 @@ impl ProxyCore {
                 Some(target) => Ok((target, RoutingDecisionKind::SelectNew, None)),
                 None => Err(self.drop_without_target(NoTargetDrop::Initial)),
             }
+        } else if method == Method::Ack {
+            // A §17.1.1.3 ACK no memo, Route or cookie places (a flow moved
+            // after the INVITE crossed the other instance): where an unspilled
+            // placement put the call (ADR-0009 X7). A 2xx ACK opens its own
+            // transaction on a fresh branch and rides the dialog's cookie,
+            // which routed it above.
+            let target = self.admitted_target(msg, None, NoTargetDrop::Initial).await;
+            target.map(|t| (t, RoutingDecisionKind::AckHop, None))
         } else {
             let admit_as_new = self.admits_as_new(msg, face, None);
             let opts = SelectOpts { admit_as_new, ..SelectOpts::default() };
@@ -268,8 +299,8 @@ impl ProxyCore {
         };
 
         // ── §16.6 received/rport, Max-Forwards, Record-Route, Via ───────────
-        let src_ip = src.ip().to_string();
-        draft = match draft.update_top::<Via>(|via| via.stamped_from(&src_ip, src.port())) {
+        let (src_host, src_port) = observed_source(src);
+        draft = match draft.update_top::<Via>(|via| via.stamped_from(&src_host, src_port)) {
             Ok(d) => d,
             Err(_) => return self.drop_unforwardable(),
         };
@@ -332,7 +363,7 @@ impl ProxyCore {
                         minted: minted_cookie.clone(),
                         via_cookie: via_cookie.clone(),
                     },
-                    crate::cancel_lru::RTX_ENTRY_TTL_MS,
+                    Lifetime::Retransmission,
                 );
             }
         }
@@ -358,8 +389,8 @@ impl ProxyCore {
                 minted: None,
                 via_cookie: via_cookie.clone(),
             };
-            self.cancel_lru.remember(&key, entry, crate::cancel_lru::INVITE_ENTRY_TTL_MS);
-            self.metrics.set_pending_invite_lru_size(self.cancel_lru.size() as u64);
+            self.cancel_lru.remember(&key, entry, Lifetime::InviteTransaction);
+            self.cancel_lru.publish(&self.metrics);
         }
 
         // ── Freeze + forward ────────────────────────────────────────────────

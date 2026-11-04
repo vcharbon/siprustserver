@@ -18,24 +18,24 @@ export const SutRecords = ({ join, windows, held }: {
 }): JSX.Element => (
   <details className="study-record cell-sut" open>
     <summary>
-      the SUT's records of this cell — {join.from} → {join.to}
+      SUT records <span className="count">{join.from} → {join.to}</span>
     </summary>
     <p className="muted">
-      Call-ID(s) minted:{" "}
+      Call-IDs{" "}
       {join.callIds.map((callId) => <code key={callId} className="call-id">{callId}</code>)}
     </p>
     {held.length > 0 && (
       <div className="error">
-        <p>the SUT still held call state of this cell after its batch:</p>
+        <p>call state held after the batch</p>
         <JsonView value={held} label="held" />
       </div>
     )}
     {windows.length === 0
-      ? <p className="muted">no hook log is kept with this run</p>
+      ? <p className="muted">no hook log</p>
       : windows.map((window) => (
         <details key={window.name} className="rerun-log study-hook" open>
-          <summary className="muted">hook: {window.name}, this cell's window</summary>
-          <pre className="raw">{window.text === "" ? "(no line of the log falls inside this window)" : window.text}</pre>
+          <summary className="muted">hook {window.name} · this cell</summary>
+          <pre className="raw">{window.text === "" ? "no line in this window" : window.text}</pre>
         </details>
       ))}
   </details>

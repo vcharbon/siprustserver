@@ -43,7 +43,9 @@
 
 pub mod body;
 pub mod caller_invite;
+pub mod caller_tags;
 pub mod config;
+pub mod consult_headers;
 pub mod effect;
 pub mod event;
 pub mod failure_image;
@@ -59,7 +61,9 @@ pub mod provisional;
 pub mod reason_phrase;
 pub mod relayed_final;
 pub mod release_reason;
+mod request_record;
 pub mod rule_call;
+mod rule_diagnostic;
 pub mod sdp_form;
 pub mod service;
 pub mod service_params;

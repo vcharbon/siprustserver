@@ -23,6 +23,9 @@
 //!   (`call::helpers::leg_is_resolved`) — so a `200` the callee sends later,
 //!   promptly or seconds after, is reaped by `cancel-200-crossing` (ACK + BYE
 //!   to the late callee) and the caller still gets its final.
+//!
+//! Beyond the failover sweep: a lone worker's own deadlines abandoning a callee through the proxy,
+//! with no node fault.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,7 +40,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
-const CHARLIE: &str = "127.0.0.1:5071"; // reroute target (failover variant)
+const CHARLIE: &str = "127.0.0.1:5071"; // the second target, after a failure
 const PROXY: &str = "127.0.0.1:5080";
 const B1: &str = "127.0.0.1:5091";
 
@@ -46,10 +49,12 @@ const B1: &str = "127.0.0.1:5091";
 /// far below the configured initial-INVITE bound (default 158 s).
 const ABANDON_SEC: u64 = 5;
 
-/// The worker's setup deadline at [`ABANDON_SEC`]: what abandons a callee
-/// that never rings, the caller answered 408.
+/// The worker's setup deadline at [`ABANDON_SEC`], its first-response
+/// deadline at Timer B past it: what abandons a callee that never rings, the
+/// caller answered 408.
 fn setup_deadline(c: &mut b2bua::B2buaConfig) {
     c.setup_timeout_ms = ABANDON_SEC as i64 * 1000;
+    c.invite_first_response_timeout_sec = b2bua::B2buaConfig::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC;
 }
 
 /// The worker's first-response deadline at [`ABANDON_SEC`] (ADR-0044): what
@@ -70,20 +75,20 @@ fn reject_decision(dest_port: u16) -> Arc<dyn CallDecisionEngine> {
 
 /// Failover-capable decision: a ring deadline of [`ABANDON_SEC`] plus a
 /// `callback_context` (the call stays Active for the `/call/failure`
-/// consult), rerouting on failure to charlie (5071).
-fn reroute_decision() -> Arc<dyn CallDecisionEngine> {
+/// consult), sending the call to charlie (5071) on failure.
+fn retarget_decision() -> Arc<dyn CallDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.no_answer_ms = Some(ABANDON_SEC as i64 * 1000);
-                r.callback_context = Some("abandon-reroute-ctx".into());
+                r.callback_context = Some("abandon-retarget-ctx".into());
                 NewCallResponse::Route(r)
             })
             .on_failure(|_| {
                 // Behind the LB the b-leg is forwarded to its Request-URI, and a
-                // reroute leg's R-URI defaults to the a-leg's (bob). Name the real
-                // reroute target explicitly so the proxy forwards to charlie, not
+                // second-target leg's R-URI defaults to the a-leg's (bob). Name the second
+                // target explicitly so the proxy forwards to charlie, not
                 // back to bob (the `test_adapter` anti-loop invariant).
                 let mut r = route_to("127.0.0.1", 5071);
                 r.new_ruri = Some("sip:127.0.0.1:5071".into());
@@ -112,7 +117,8 @@ async fn spawn_b1(
 }
 
 /// Wait for the single worker to fully reap the call: `creations == removals`
-/// (call removed) and per-call memory clean (no live call, no lingering lock).
+/// (call removed) and per-call memory clean (no live call, no lingering lock),
+/// with the call's one CDR written and no trace of it left.
 async fn assert_reaped(fh: &FailoverHarness, b1: &failover_harness::ReplicatedB2buaSut) {
     let reaped = fh
         .settle_terminal(|| async {
@@ -128,6 +134,9 @@ async fn assert_reaped(fh: &FailoverHarness, b1: &failover_harness::ReplicatedB2
         b1.active_calls(),
         b1.lock_count(),
     );
+    let cdrs = b1.cdr_records();
+    assert_eq!(cdrs.len(), 1, "the lone worker writes the call's one CDR");
+    failover_harness::assert_call_ended(&[b1], &cdrs[0].call_ref, 1, "one call, one worker").await;
 }
 
 /// **Reject path, a callee that answered with a 100 alone.** The caller hears
@@ -165,18 +174,18 @@ async fn trying_only_callee_abandoned_via_lb__reject__is_cancelled() {
     drop(proxy);
 }
 
-/// **Reroute path, a callee that rang.** Its ring deadline CANCELs the callee
-/// on the wire, the callee's 487 resolves the abandoned leg, and the reroute
+/// **Second-target path, a callee that rang.** Its ring deadline CANCELs the callee
+/// on the wire, the callee's 487 resolves the abandoned leg, and the leg
 /// to the second target bridges the caller.
 #[tokio::test(start_paused = true)]
 #[allow(non_snake_case)]
-async fn ringing_callee_no_answer_via_lb__reroute__is_cancelled_and_reroutes() {
-    let mut fh = FailoverHarness::new("s10b-ringing-callee-noanswer-reroute", &["b1"]);
+async fn ringing_callee_no_answer_via_lb__retarget__is_cancelled_and_retargeted() {
+    let mut fh = FailoverHarness::new("s10b-ringing-callee-noanswer-retarget", &["b1"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let charlie = fh.agent("charlie", CHARLIE).await;
     let proxy = fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap())]).await;
-    let b1 = spawn_b1(&mut fh, reroute_decision()).await;
+    let b1 = spawn_b1(&mut fh, retarget_decision()).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(b1.is_ready());
 
@@ -311,26 +320,26 @@ async fn silent_callee_abandoned_via_lb__reject__delayed_crossing_200_still_reap
     drop(proxy);
 }
 
-/// **Failover / reroute path, crossing.** The via-LB sibling of
+/// **Second-target path, crossing.** The via-LB sibling of
 /// `no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover_proceeds`
 /// (which is direct-topology). A `callback_context` keeps the call Active while
 /// `/call/failure` is consulted at the first-response deadline; the crossing
 /// `200` on the abandoned callee is reaped (ACK + BYE via the proxy) AND the
-/// reroute to the second target proceeds — the caller is bridged. The callee
+/// leg to the second target proceeds — the caller is bridged. The callee
 /// sent nothing, so the CANCEL is held until its `200`.
 #[tokio::test(start_paused = true)]
 #[allow(non_snake_case)]
-async fn silent_callee_abandoned_via_lb__reroute__reaps_crossing_200_and_reroutes() {
-    let mut fh = FailoverHarness::new("s10b-silent-callee-abandoned-reroute", &["b1"])
+async fn silent_callee_abandoned_via_lb__retarget__reaps_crossing_200_and_retargets() {
+    let mut fh = FailoverHarness::new("s10b-silent-callee-abandoned-retarget", &["b1"])
         .with_worker_tune(first_response_deadline);
 
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await; // silent, abandoned, answers late
-    let charlie = fh.agent("charlie", CHARLIE).await; // reroute target
+    let charlie = fh.agent("charlie", CHARLIE).await; // the second target
 
     let proxy = fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap())]).await;
 
-    let b1 = spawn_b1(&mut fh, reroute_decision()).await;
+    let b1 = spawn_b1(&mut fh, retarget_decision()).await;
 
     fh.advance(Duration::from_millis(500)).await;
     assert!(b1.is_ready());
@@ -348,11 +357,11 @@ async fn silent_callee_abandoned_via_lb__reroute__reaps_crossing_200_and_reroute
     let mut bye = bob.receive_absorbing("BYE", &["INVITE"]).await;
     bye.respond(200, "OK").await;
 
-    // ── The reroute reaches charlie via the proxy; the caller is bridged ─────
+    // ── The second-target INVITE reaches charlie via the proxy; the caller is bridged ─────
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let confirmed = call.expect(200).await;
-    assert_eq!(confirmed.status(), 200, "caller bridged to the reroute target");
+    assert_eq!(confirmed.status(), 200, "caller bridged to the second target");
     let mut dialog = call.ack().await;
     charlie.receive("ACK").await;
 

@@ -1,4 +1,4 @@
-//! The replication frame model — five positional-msgpack messages plus the
+//! The replication frame model — seven positional-msgpack messages plus the
 //! small value enums and the [`Watermark`] ordering they ride on.
 //!
 //! Field ORDER on the wire is the contract (ADR-0008 positional-msgpack ethos):
@@ -10,6 +10,15 @@
 //! share this one frame set (ADR-0014 §Stream topology).
 
 use std::sync::Arc;
+
+/// The protocol version a [`Frame::PullRequest`] announces: **v7**, the seven
+/// frames `{PullRequest, Data, Noop, ResetToBootstrap, Position,
+/// ReplicaRefused, StreamRefused}`, one socket = one flow, scan-then-tail,
+/// `Op` = `{Put, Delete}`. Bumped on every change to a frame's shape, to the
+/// frame set or to the shape of the call record the frames carry; a server
+/// refuses a stream announcing another version ([`Frame::StreamRefused`]), and
+/// no upgrade compatibility is kept.
+pub const PROTO_VER: u16 = 7;
 
 /// Discriminant outside the accepted range for an enum-coded byte field.
 ///
@@ -134,7 +143,7 @@ impl Ord for Watermark {
 /// whose element 0 is the integer tag in the doc-comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
-    /// `[0, proto_ver, caller, partition, since_gen, since_counter]`
+    /// `[0, proto_ver, caller, identity, partition, since_gen, since_counter]`
     ///
     /// Client → server: opens **one flow's** stream (`partition` selects Reclaim
     /// vs Backup). The server does a store-scan **bootstrap then tail** when
@@ -144,6 +153,10 @@ pub enum Frame {
         proto_ver: u16,
         /// The pulling node's identifier.
         caller: String,
+        /// The pulling worker's identity (ADR-0055 §6): the server's flow
+        /// state toward `caller` follows the latest identity that opened a
+        /// flow. `None` when the worker states none.
+        identity: Option<String>,
         /// Which flow: `Pri` = Reclaim, `Bak` = Backup.
         partition: Partition,
         /// Watermark to resume from; `(0,0)` ⇒ bootstrap-then-tail.
@@ -173,16 +186,15 @@ pub enum Frame {
         call_bgen: i64,
         /// Body TTL in ms; `i64`, may be negative on the wire.
         body_ttl_ms: i64,
-        /// **Origin wall clock** at flush-send time — the SENDER's shared
-        /// `Clock::now_ms()` when this frame was built (clock-skew hardening).
-        /// The receiver re-anchors it as `skew_offset_ms = receiver_now_ms −
-        /// origin_now_ms` and persists that offset so a failover/reclaim can
-        /// correct the ABSOLUTE `TimerEntry.fire_at` deadlines (which were minted
-        /// on the origin node's clock) against the two nodes' wall-clock skew.
+        /// **Origin wall clock** at send time: the sender's `Clock::now_ms()`
+        /// when this frame was built, read on the clock the body's absolute
+        /// instants were written on (the sender's own clock less the offset it
+        /// holds for a body it received). The receiver keeps `skew_offset_ms =
+        /// receiver_now_ms − origin_now_ms`, which composes every hop the body
+        /// made, so a failover/reclaim moves those instants into its own frame.
         /// This mirrors the receiver-side `body_ttl_ms → expiry_for` re-anchor
-        /// idiom — timers were the one deadline class left absolute. `i64`, may be
-        /// negative on the wire; `0` on a delete/bootstrap frame that carries no
-        /// re-anchorable timers.
+        /// idiom. `i64`, may be negative on the wire; `0` on a delete frame,
+        /// which carries no body.
         origin_now_ms: i64,
         /// Index keys for this call.
         indexes: Vec<String>,
@@ -229,6 +241,33 @@ pub enum Frame {
         /// The highest position this client has applied on this flow.
         at: Watermark,
     },
+    /// `[5, gen, counter, call_ref, incarnation]`
+    ///
+    /// Client → server: the client refuses to hold the replica of `call_ref`
+    /// the `Data` at `at` carried (a backup at its memory ceiling, ADR-0037
+    /// item 4). The call has no backup on this flow for its whole life; the
+    /// client's position moves past the refused write (ADR-0055 §3).
+    ReplicaRefused {
+        /// The position of the refused `Data`.
+        at: Watermark,
+        /// The call whose replica is refused.
+        call_ref: String,
+        /// The incarnation the refused `Data` carried: the refusal unbacks
+        /// that call, never a later one born on `call_ref`.
+        incarnation: Option<String>,
+    },
+    /// `[6, proto_ver, reason]`
+    ///
+    /// Server → client: the server refuses the stream the opening
+    /// `PullRequest` asked for, stating the protocol version it speaks; it
+    /// sends nothing else and closes. The client does not pull again from this
+    /// peer before its backoff.
+    StreamRefused {
+        /// The protocol version the server speaks.
+        proto_ver: u16,
+        /// Human-readable cause (for logs).
+        reason: String,
+    },
 }
 
 /// Integer tags, element 0 of each frame array. Kept in one place so the
@@ -242,4 +281,6 @@ pub(crate) mod tag {
     pub const NOOP: u64 = 2;
     pub const RESET_TO_BOOTSTRAP: u64 = 3;
     pub const POSITION: u64 = 4;
+    pub const REPLICA_REFUSED: u64 = 5;
+    pub const STREAM_REFUSED: u64 = 6;
 }

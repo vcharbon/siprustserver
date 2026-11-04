@@ -1,6 +1,6 @@
 //! Backend client counters, by backend (`peer`, the target as configured):
-//! the in-flight cap's saturation and wait, retries, and breaker
-//! transitions. Counters only, never a per-request log line (ADR-0026). A
+//! the in-flight cap's saturation and wait, retries, breaker transitions,
+//! and the 5xx answers by what became of their connection. Counters only, never a per-request log line (ADR-0026). A
 //! runner appends [`prometheus_text`] to its `/metrics` body. Capped like
 //! [`crate::failures`]: each family has its overflow counter.
 
@@ -12,7 +12,7 @@ use metric_values::OpenRows;
 
 /// Requests that found every in-flight slot taken and waited for one.
 pub const SLOT_WAITS: Family = Family::counter(
-    "http_client_slot_waits_total",
+    "http_request_slot_waits_total",
     Labels::Product(&[Dim::new("peer", &[])]),
     "Backend requests that found every in-flight slot taken and waited for one.",
 )
@@ -20,14 +20,14 @@ pub const SLOT_WAITS: Family = Family::counter(
 
 /// Observations of [`SLOT_WAITS`] past its cap.
 pub const SLOT_WAITS_OVERFLOW: Family = Family::counter(
-    "http_client_slot_waits_overflow_total",
+    "http_request_slot_waits_overflow_total",
     Labels::None,
-    "observations of http_client_slot_waits_total past its cap, each counted on its series whose peer reads _overflow",
+    "observations of http_request_slot_waits_total past its cap, each counted on its series whose peer reads _overflow",
 );
 
 /// Time spent waiting for an in-flight slot.
 pub const SLOT_WAIT_MS: Family = Family::counter(
-    "http_client_slot_wait_ms_total",
+    "http_request_slot_wait_ms_total",
     Labels::Product(&[Dim::new("peer", &[])]),
     "Milliseconds backend requests spent waiting for an in-flight slot.",
 )
@@ -35,14 +35,14 @@ pub const SLOT_WAIT_MS: Family = Family::counter(
 
 /// Observations of [`SLOT_WAIT_MS`] past its cap.
 pub const SLOT_WAIT_MS_OVERFLOW: Family = Family::counter(
-    "http_client_slot_wait_ms_overflow_total",
+    "http_request_slot_wait_ms_overflow_total",
     Labels::None,
-    "observations of http_client_slot_wait_ms_total past its cap, each counted on its series whose peer reads _overflow",
+    "observations of http_request_slot_wait_ms_total past its cap, each counted on its series whose peer reads _overflow",
 );
 
 /// Requests whose budget ran out waiting for a slot: never sent.
 pub const SLOT_EXPIRED: Family = Family::counter(
-    "http_client_slot_expired_total",
+    "http_request_slot_expired_total",
     Labels::Product(&[Dim::new("peer", &[])]),
     "Backend requests whose budget ran out waiting for an in-flight slot, never sent.",
 )
@@ -50,14 +50,14 @@ pub const SLOT_EXPIRED: Family = Family::counter(
 
 /// Observations of [`SLOT_EXPIRED`] past its cap.
 pub const SLOT_EXPIRED_OVERFLOW: Family = Family::counter(
-    "http_client_slot_expired_overflow_total",
+    "http_request_slot_expired_overflow_total",
     Labels::None,
-    "observations of http_client_slot_expired_total past its cap, each counted on its series whose peer reads _overflow",
+    "observations of http_request_slot_expired_total past its cap, each counted on its series whose peer reads _overflow",
 );
 
 /// Second attempts sent after a connection-level failure or a timeout.
 pub const RETRIES: Family = Family::counter(
-    "http_client_retries_total",
+    "http_request_retries_total",
     Labels::Product(&[Dim::new("peer", &[])]),
     "Backend requests sent a second time after a connection-level failure or a timeout.",
 )
@@ -65,9 +65,27 @@ pub const RETRIES: Family = Family::counter(
 
 /// Observations of [`RETRIES`] past its cap.
 pub const RETRIES_OVERFLOW: Family = Family::counter(
-    "http_client_retries_overflow_total",
+    "http_request_retries_overflow_total",
     Labels::None,
-    "observations of http_client_retries_total past its cap, each counted on its series whose peer reads _overflow",
+    "observations of http_request_retries_total past its cap, each counted on its series whose peer reads _overflow",
+);
+
+/// The `connection` label values of [`ERROR_ANSWERS`].
+const CONNECTION: &[&str] = &["closed", "pooled"];
+
+/// 5xx answers, by what became of the connection they came on.
+pub const ERROR_ANSWERS: Family = Family::counter(
+    "http_request_error_answers_total",
+    Labels::Product(&[Dim::new("peer", &[]), Dim::new("connection", CONNECTION)]),
+    "Backend 5xx answers, by what became of their connection: closed, or pooled past the client's close budget.",
+)
+.capped(&ERROR_ANSWERS_OVERFLOW, &["peer"]);
+
+/// Observations of [`ERROR_ANSWERS`] past its cap.
+pub const ERROR_ANSWERS_OVERFLOW: Family = Family::counter(
+    "http_request_error_answers_overflow_total",
+    Labels::None,
+    "observations of http_request_error_answers_total past its cap, each counted on its series whose peer reads _overflow",
 );
 
 /// The `to` label values of [`BREAKER_TRANSITIONS`].
@@ -75,7 +93,7 @@ const TO: &[&str] = &["open", "closed"];
 
 /// Breaker transitions, by the state entered.
 pub const BREAKER_TRANSITIONS: Family = Family::counter(
-    "http_client_breaker_transitions_total",
+    "http_request_breaker_transitions_total",
     Labels::Product(&[Dim::new("peer", &[]), Dim::new("to", TO)]),
     "Backend circuit breaker transitions, by the state entered.",
 )
@@ -83,9 +101,9 @@ pub const BREAKER_TRANSITIONS: Family = Family::counter(
 
 /// Observations of [`BREAKER_TRANSITIONS`] past its cap.
 pub const BREAKER_TRANSITIONS_OVERFLOW: Family = Family::counter(
-    "http_client_breaker_transitions_overflow_total",
+    "http_request_breaker_transitions_overflow_total",
     Labels::None,
-    "observations of http_client_breaker_transitions_total past its cap, each counted on its series whose peer reads _overflow",
+    "observations of http_request_breaker_transitions_total past its cap, each counted on its series whose peer reads _overflow",
 );
 
 /// The families this module renders, in exposition order.
@@ -100,6 +118,8 @@ pub const FAMILIES: &[Family] = &[
     RETRIES_OVERFLOW,
     BREAKER_TRANSITIONS,
     BREAKER_TRANSITIONS_OVERFLOW,
+    ERROR_ANSWERS,
+    ERROR_ANSWERS_OVERFLOW,
 ];
 
 struct Rows {
@@ -108,6 +128,7 @@ struct Rows {
     slot_expired: OpenRows,
     retries: OpenRows,
     transitions: OpenRows,
+    error_answers: OpenRows,
 }
 
 static ROWS: OnceLock<Rows> = OnceLock::new();
@@ -119,6 +140,7 @@ fn rows() -> &'static Rows {
         slot_expired: OpenRows::new(&SLOT_EXPIRED),
         retries: OpenRows::new(&RETRIES),
         transitions: OpenRows::new(&BREAKER_TRANSITIONS),
+        error_answers: OpenRows::new(&ERROR_ANSWERS),
     })
 }
 
@@ -143,6 +165,16 @@ pub(crate) fn retried(peer: &str) {
 /// `peer`'s breaker opened (`true`) or closed.
 pub(crate) fn breaker_moved(peer: &str, open: bool) {
     rows().transitions.add(&[peer, if open { "open" } else { "closed" }], 1);
+}
+
+/// A 5xx answer of `peer` came; its connection `closed` or was pooled.
+pub(crate) fn error_answered(peer: &str, closed: bool) {
+    rows().error_answers.add(&[peer, if closed { "closed" } else { "pooled" }], 1);
+}
+
+/// 5xx answers of `peer` whose connection was closed (`true`) or pooled.
+pub fn error_answers(peer: &str, closed: bool) -> u64 {
+    rows().error_answers.get(&[peer, if closed { "closed" } else { "pooled" }])
 }
 
 /// Requests to `peer` that waited for a slot.
@@ -181,6 +213,7 @@ pub fn prometheus_text() -> String {
     rows.slot_expired.render(&mut s);
     rows.retries.render(&mut s);
     rows.transitions.render(&mut s);
+    rows.error_answers.render(&mut s);
     s
 }
 
@@ -194,6 +227,7 @@ mod tests {
         slot_wait_ended("10.9.0.1:80", Duration::from_millis(40), false);
         retried("10.9.0.1:80");
         breaker_moved("10.9.0.1:80", true);
+        error_answered("10.9.0.1:80", true);
         let text = prometheus_text();
         for family in FAMILIES {
             assert_eq!(family.check(&text), Ok(()), "{}", family.name);
@@ -204,7 +238,7 @@ mod tests {
         );
         assert!(
             text.contains(
-                "http_client_breaker_transitions_total{peer=\"10.9.0.1:80\",to=\"open\"} 1"
+                "http_request_breaker_transitions_total{peer=\"10.9.0.1:80\",to=\"open\"} 1"
             ),
             "{text}"
         );

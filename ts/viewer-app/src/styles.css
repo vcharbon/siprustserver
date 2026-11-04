@@ -1,15 +1,106 @@
+/* The site's one token set (UI-STYLE.md): light here, dark below, nothing
+   outside these blocks names a colour. */
 :root {
-  --bg: #ffffff;
-  --fg: #16181d;
-  --muted: #6b7280;
-  --rule: #e2e5ea;
-  --accent: #7a5af8;
-  --matched: #059669;
-  --missing: #dc2626;
-  --extra: #d97706;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #1d2330;
+  --mute: #6b7385;
+  --line: #e2e5eb;
+  --line-strong: #c8ccd4;
+  --ok: #2e9e5b;
+  --ok-bg: #e3f4ea;
+  --nok: #d23c3c;
+  --nok-bg: #fbe6e6;
+  --warn: #b9770e;
+  --warn-bg: #fbf0dc;
+  --none: #c9ced8;
+  --none-bg: #f0f2f5;
+  --acc: #3b5bdb;
+  --acc-bg: #e8edff;
+  --sut: #7a5af8;
+  --sut-bg: #efeaff;
+  --info: #7c3aed;
+  --sel: #e11d48;
+  --cat-0: #2563eb;
+  --cat-1: #c2410c;
+  --cat-2: #047857;
+  --cat-3: #a21caf;
+  --cat-4: #0e7490;
+  --cat-5: #7c3aed;
+  --shadow: rgba(0, 0, 0, 0.2);
+  --scrim: rgba(0, 0, 0, 0.45);
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --topbar-h: 41px;
   font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
   color-scheme: light;
 }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171d;
+    --panel: #1c2028;
+    --ink: #e3e7ef;
+    --mute: #8d95a6;
+    --line: #2c323d;
+    --line-strong: #414957;
+    --ok: #4cc27f;
+    --ok-bg: #17321f;
+    --nok: #ff6b6b;
+    --nok-bg: #3a1d1d;
+    --warn: #e3a53a;
+    --warn-bg: #3a2d12;
+    --none: #4a5160;
+    --none-bg: #232831;
+    --acc: #8ea2ff;
+    --acc-bg: #232c4a;
+    --sut: #a48bff;
+    --sut-bg: #2a2346;
+    --info: #b794f6;
+    --sel: #ff5c7c;
+    --cat-0: #6b9bff;
+    --cat-1: #ff9a5c;
+    --cat-2: #4cc27f;
+    --cat-3: #e07be8;
+    --cat-4: #4fc3d9;
+    --cat-5: #a98bff;
+    --shadow: rgba(0, 0, 0, 0.5);
+    --scrim: rgba(0, 0, 0, 0.6);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #14171d;
+  --panel: #1c2028;
+  --ink: #e3e7ef;
+  --mute: #8d95a6;
+  --line: #2c323d;
+  --line-strong: #414957;
+  --ok: #4cc27f;
+  --ok-bg: #17321f;
+  --nok: #ff6b6b;
+  --nok-bg: #3a1d1d;
+  --warn: #e3a53a;
+  --warn-bg: #3a2d12;
+  --none: #4a5160;
+  --none-bg: #232831;
+  --acc: #8ea2ff;
+  --acc-bg: #232c4a;
+  --sut: #a48bff;
+  --sut-bg: #2a2346;
+  --info: #b794f6;
+  --sel: #ff5c7c;
+  --cat-0: #6b9bff;
+  --cat-1: #ff9a5c;
+  --cat-2: #4cc27f;
+  --cat-3: #e07be8;
+  --cat-4: #4fc3d9;
+  --cat-5: #a98bff;
+  --shadow: rgba(0, 0, 0, 0.5);
+  --scrim: rgba(0, 0, 0, 0.6);
+  color-scheme: dark;
+}
+
 
 * {
   box-sizing: border-box;
@@ -18,12 +109,12 @@
 body {
   margin: 0;
   background: var(--bg);
-  color: var(--fg);
+  color: var(--ink);
   font-size: 14px;
 }
 
 a {
-  color: var(--accent);
+  color: var(--acc);
   text-decoration: none;
 }
 
@@ -33,14 +124,27 @@ a:hover {
 
 .app-nav {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 16px;
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--rule);
+  height: var(--topbar-h);
+  padding: 0 20px;
+  border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
-  background: var(--bg);
-  z-index: 2;
+  background: var(--panel);
+  z-index: 5;
+}
+
+.nav-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-switch {
+  margin-left: auto;
 }
 
 .brand {
@@ -72,7 +176,7 @@ a:hover {
 }
 
 .muted {
-  color: var(--muted);
+  color: var(--mute);
   font-size: 12px;
   margin: 2px 0;
 }
@@ -83,25 +187,72 @@ a:hover {
 }
 
 .error {
-  color: var(--missing);
+  color: var(--nok);
   font-size: 13px;
 }
 
 button,
-select {
+select,
+input,
+textarea {
   font: inherit;
   font-size: 12px;
+  color: inherit;
   padding: 4px 10px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 6px;
-  background: #fff;
+  background: var(--panel);
+}
+
+button,
+select {
   cursor: pointer;
 }
 
+input[type="checkbox"],
+input[type="radio"] {
+  padding: 0;
+  accent-color: var(--acc);
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--acc);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 button.on {
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--acc-bg);
+  border-color: var(--acc);
+  color: var(--acc);
   font-weight: 600;
+}
+
+/* A panel: the grouping every page's sections share. */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.panel > h2:first-child,
+.panel > h3:first-child {
+  margin-top: 0;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--mono);
+}
+
+details > summary {
+  cursor: pointer;
 }
 
 h2 {
@@ -124,26 +275,26 @@ h3 {
 .listing td {
   text-align: left;
   padding: 5px 10px 5px 0;
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid var(--line);
   vertical-align: top;
 }
 
 .listing th {
-  color: var(--muted);
+  color: var(--mute);
   font-weight: 600;
 }
 
 .row-matched td:nth-child(2) {
-  color: var(--matched);
+  color: var(--ok);
 }
 
 .row-missing td:nth-child(2) {
-  color: var(--missing);
+  color: var(--nok);
   font-weight: 600;
 }
 
 .row-extra td:nth-child(2) {
-  color: var(--extra);
+  color: var(--warn);
   font-weight: 600;
 }
 
@@ -155,7 +306,7 @@ h3 {
 }
 
 .split-side {
-  border-left: 1px solid var(--rule);
+  border-left: 1px solid var(--line);
   padding-left: 16px;
   max-height: calc(100vh - 160px);
   overflow: auto;
@@ -175,7 +326,7 @@ h3 {
 
 .ladder-scroll {
   overflow: auto;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 8px;
   max-height: calc(100vh - 210px);
 }
@@ -183,12 +334,12 @@ h3 {
 .warnings {
   margin: 6px 0;
   padding-left: 18px;
-  color: var(--extra);
+  color: var(--warn);
   font-size: 12px;
 }
 
 .json-view {
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 8px;
   margin-bottom: 12px;
   overflow: hidden;
@@ -199,16 +350,18 @@ h3 {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+  min-height: 30px;
+  padding: 2px 8px;
+  background: var(--none-bg);
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--mute);
 }
 
-.json-view-actions {
+.json-view-actions,
+.sip-view-actions {
   display: flex;
   gap: 6px;
-  padding: 4px 8px;
-  background: #f6f7f9;
-  border-bottom: 1px solid var(--rule);
-  font-size: 11px;
-  color: var(--muted);
 }
 
 .json-view pre {
@@ -234,7 +387,7 @@ h3 {
 }
 
 .related-label {
-  color: var(--muted);
+  color: var(--mute);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-size: 11px;
@@ -243,13 +396,13 @@ h3 {
 .related-link {
   font-family: ui-monospace, monospace;
   font-size: 11.5px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 999px;
   padding: 2px 10px;
 }
 
 .related-link:hover {
-  border-color: var(--accent);
+  border-color: var(--acc);
 }
 
 /* A recorded datagram: the SIP message reads as SIP, its record reads beside it. */
@@ -257,23 +410,36 @@ h3 {
   margin-bottom: 12px;
 }
 
+/* One line of chips, each cut to fit; the full value is the chip's tooltip. */
 .sip-meta {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px 6px;
+  flex-wrap: nowrap;
+  gap: 4px;
+  height: 22px;
   margin-bottom: 6px;
+  overflow: hidden;
 }
 
 .sip-meta-item {
-  border: 1px solid var(--rule);
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 1px 7px;
   font-size: 11px;
-  font-family: ui-monospace, monospace;
+  line-height: 18px;
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sip-meta-item.long {
+  flex: 0 1 auto;
+  min-width: 6em;
 }
 
 .sip-meta-key {
-  color: var(--muted);
+  color: var(--mute);
   margin-right: 5px;
 }
 
@@ -281,18 +447,20 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 4px 8px;
-  background: #f6f7f9;
-  border: 1px solid var(--rule);
+  gap: 8px;
+  min-height: 30px;
+  padding: 2px 8px;
+  background: var(--none-bg);
+  border: 1px solid var(--line);
   border-radius: 8px 8px 0 0;
   font-size: 11px;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .sip-message {
   margin: 0;
   padding: 10px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-top: none;
   border-radius: 0 0 8px 8px;
   font-family: ui-monospace, monospace;
@@ -309,27 +477,27 @@ h3 {
 }
 
 .sip-header-name {
-  color: var(--accent);
+  color: var(--acc);
 }
 
 .sip-header-sep {
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .sip-body {
-  color: var(--matched);
+  color: var(--ok);
 }
 
 /* A hex dump's columns only line up unwrapped. */
 .sip-hex {
   white-space: pre;
-  color: var(--matched);
+  color: var(--ok);
 }
 
 .sip-record {
   margin-top: 6px;
   font-size: 11px;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .sip-record summary {
@@ -339,7 +507,7 @@ h3 {
 .sip-record pre {
   margin: 6px 0 0;
   padding: 8px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 8px;
   font-family: ui-monospace, monospace;
   font-size: 11px;
@@ -348,7 +516,7 @@ h3 {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--fg);
+  color: var(--ink);
 }
 
 .compare-grid {
@@ -376,34 +544,34 @@ h3 {
   font-size: 12px;
   padding: 3px 8px;
   border-radius: 999px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
 }
 
 .tag.matched {
-  color: var(--matched);
+  color: var(--ok);
 }
 
 .tag.missing {
-  color: var(--missing);
+  color: var(--nok);
 }
 
 .tag.extra {
-  color: var(--extra);
+  color: var(--warn);
 }
 
 /* Origin split: authored cases and captured ones are two populations. */
 .origin-section {
-  border-left: 3px solid var(--rule);
+  border-left: 3px solid var(--line);
   padding-left: 12px;
   margin-top: 22px;
 }
 
 .origin-section.origin-authored {
-  border-left-color: #7a5af8;
+  border-left-color: var(--sut);
 }
 
 .origin-section.origin-capture {
-  border-left-color: #0e7490;
+  border-left-color: var(--cat-4);
 }
 
 .origin-badge {
@@ -415,17 +583,17 @@ h3 {
 }
 
 .origin-badge.origin-authored {
-  color: #7a5af8;
-  background: #f2eefe;
+  color: var(--sut);
+  background: var(--sut-bg);
 }
 
 .origin-badge.origin-capture {
-  color: #0e7490;
-  background: #e2f2f6;
+  color: var(--cat-4);
+  background: color-mix(in srgb, var(--cat-4) 12%, var(--panel));
 }
 
 .origin-badge.origin-unknown {
-  color: var(--muted);
+  color: var(--mute);
 }
 
 /* Source side by side: the pivot's reading next to the capture's bytes. */
@@ -451,7 +619,7 @@ h3 {
   gap: 6px;
   margin: 6px 0 10px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 /* A narrowing in force, and the one click that lifts it. */
@@ -462,13 +630,13 @@ h3 {
   flex-wrap: wrap;
   margin: 0 0 8px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .source-pane .fv-capture-legend {
   margin-bottom: 10px;
   padding: 8px 10px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 8px;
   max-height: 320px;
   overflow: auto;
@@ -477,7 +645,7 @@ h3 {
 .source-pane .raw {
   margin: 0;
   padding: 10px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 8px;
   font-family: ui-monospace, monospace;
   font-size: 11px;
@@ -489,7 +657,7 @@ h3 {
 }
 
 .config-note {
-  border-top: 1px solid var(--rule);
+  border-top: 1px solid var(--line);
   margin-top: 30px;
 }
 
@@ -504,23 +672,46 @@ h3 {
 }
 
 .verdict-status.verdict-ok {
-  color: var(--matched);
+  color: var(--ok);
 }
 
 .verdict-status.verdict-failed {
-  color: var(--missing);
+  color: var(--nok);
 }
 
 /* Green-as-negative: a run that PASSED BY FAILING exactly as its document
    declared. Amber, so it reads as neither of the other two. */
 .verdict-status.verdict-ok-negative {
-  color: var(--extra);
+  color: var(--warn);
 }
 
 .verdict-section {
-  border-left: 3px solid var(--rule);
-  padding: 2px 0 2px 10px;
-  margin-bottom: 12px;
+  border-left: 3px solid var(--line);
+  border-radius: 0 6px 6px 0;
+  padding: 6px 8px 6px 10px;
+  margin-bottom: 8px;
+  background: var(--panel);
+}
+
+.verdict-section > summary {
+  list-style: none;
+}
+
+.verdict-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.verdict-section > summary h4::before {
+  content: "▸ ";
+  color: var(--mute);
+}
+
+.verdict-section[open] > summary h4::before {
+  content: "▾ ";
+}
+
+.verdict-section > summary h4 {
+  display: inline-block;
 }
 
 .verdict-section h4 {
@@ -531,32 +722,30 @@ h3 {
 }
 
 .verdict-violations {
-  border-left-color: var(--extra);
-  background: #fdf6ec;
+  border-left-color: var(--warn);
 }
 
 .verdict-violations h4 {
-  color: var(--extra);
+  color: var(--warn);
 }
 
 .verdict-failures {
-  border-left-color: var(--missing);
+  border-left-color: var(--nok);
 }
 
 .verdict-failures h4 {
-  color: var(--missing);
+  color: var(--nok);
 }
 
 /* A declared failure: the case's own subject matter, like a declared RFC
    violation, so it sits in the same amber and never in the failure red. */
 .verdict-declared {
-  border-left-color: var(--extra);
+  border-left-color: var(--warn);
   border-left-style: double;
-  background: #fdf6ec;
 }
 
 .verdict-declared h4 {
-  color: var(--extra);
+  color: var(--warn);
 }
 
 .verdict-declared-outcome {
@@ -566,7 +755,7 @@ h3 {
 /* Except when the run did not produce it: reality stopped failing, and that is
    this case failing. */
 .verdict-declared-absent {
-  color: var(--missing);
+  color: var(--nok);
 }
 
 /* A carried divergence is a real wire difference the negative case did not turn
@@ -574,11 +763,11 @@ h3 {
    with, and never the failure red. */
 .verdict-tolerated {
   border-left-style: dashed;
-  border-left-color: var(--extra);
+  border-left-color: var(--warn);
 }
 
 .verdict-tolerated h4 {
-  color: var(--extra);
+  color: var(--warn);
 }
 
 /* A script the first delta ended, and the close that ended its call instead:
@@ -586,42 +775,42 @@ h3 {
    than red. */
 .verdict-abandoned {
   border-left-style: dashed;
-  border-left-color: var(--muted);
+  border-left-color: var(--mute);
 }
 
 .verdict-abandoned h4 {
-  color: var(--muted);
+  color: var(--mute);
 }
 
 /* The post-run RFC audit. A gating finding is the cell's cause of death, so it
    takes the failure red; the rest are recorded and failed on by nobody, so they
    are dashed and muted and can never be mistaken for it. */
 .rfc-audit-gating {
-  border-left-color: var(--missing);
+  border-left-color: var(--nok);
 }
 
 .rfc-audit-gating h4 {
-  color: var(--missing);
+  color: var(--nok);
 }
 
 /* A source fault is information: never the SUT's red. */
 .rfc-audit-source {
-  border-left-color: var(--extra);
+  border-left-color: var(--warn);
 }
 
 .rfc-audit-source h4 {
-  color: var(--extra);
+  color: var(--warn);
 }
 
 .rfc-audit-advisory,
 .rfc-audit-clean {
   border-left-style: dashed;
-  border-left-color: var(--muted);
+  border-left-color: var(--mute);
 }
 
 .rfc-audit-advisory h4,
 .rfc-audit-clean h4 {
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .rfc-badge {
@@ -634,29 +823,29 @@ h3 {
 }
 
 .rfc-badge-gating {
-  color: var(--missing);
-  background: #fdecec;
+  color: var(--nok);
+  background: var(--nok-bg);
   font-weight: 600;
 }
 
 .rfc-badge-bound {
-  color: var(--extra);
-  background: #fdf6ec;
+  color: var(--warn);
+  background: var(--warn-bg);
 }
 
 .rfc-badge-advisory {
-  color: var(--muted);
+  color: var(--mute);
   border-style: dashed;
 }
 
 .rfc-badge-relayed,
 .rfc-badge-party {
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .rfc-badge-source {
-  color: var(--extra);
-  background: #fdf6ec;
+  color: var(--warn);
+  background: var(--warn-bg);
   font-weight: 600;
 }
 
@@ -664,11 +853,11 @@ h3 {
    turn on. */
 .verdict-informative {
   border-left-style: dashed;
-  border-left-color: var(--muted);
+  border-left-color: var(--mute);
 }
 
 .verdict-informative h4 {
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .verdict-row {
@@ -688,24 +877,105 @@ h3 {
 }
 
 .verdict-tag {
-  background: #f0f1f4;
-  color: var(--fg);
+  background: var(--none-bg);
+  color: var(--ink);
 }
 
 .verdict-class {
-  border: 1px dashed var(--muted);
-  color: var(--muted);
+  border: 1px dashed var(--mute);
+  color: var(--mute);
 }
 
 .verdict-detail {
-  color: var(--muted);
+  color: var(--mute);
   word-break: break-word;
+}
+
+/* Findings: one line each, columns shared by the list (rule · chip · party ·
+   step · difference); the full text opens under its row. */
+.finding-list {
+  display: grid;
+  grid-template-columns: 1.2em max-content max-content max-content max-content minmax(0, 1fr);
+  column-gap: 8px;
+  font-size: 12px;
+}
+
+.finding {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+  padding: 2px 4px;
+  border-radius: 4px;
+  min-height: 22px;
+}
+
+.finding:hover {
+  background: var(--none-bg);
+}
+
+.finding > span,
+.finding > code {
+  min-width: 0;
+  justify-self: start;
+}
+
+.finding > .finding-text {
+  justify-self: stretch;
+}
+
+.finding .verdict-tag {
+  margin-right: 0;
+}
+
+.finding-party {
+  color: var(--mute);
+}
+
+.finding-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.finding-expand {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--mute);
+  font-size: 11px;
+}
+
+.finding-full {
+  grid-column: 2 / -1;
+  margin: 2px 0 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--none-bg);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* A count beside its noun: spaced from it wherever it stands. */
+.count {
+  margin-left: 4px;
+}
+
+h4 .count,
+h3 .count,
+h2 .count,
+summary .count {
+  font-weight: 600;
+  color: var(--mute);
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 /* An excluded entry — the pipeline refused to cut a case here. Amber, never
    red: a refusal is a decision the pipeline made on purpose, not a failure. */
 .origin-section.origin-excluded {
-  border-left-color: var(--extra);
+  border-left-color: var(--warn);
 }
 
 .origin-badge.origin-excluded,
@@ -715,8 +985,8 @@ h3 {
   padding: 1px 10px;
   font-size: 12px;
   border: 1px solid currentColor;
-  color: var(--extra);
-  background: #fdf6ec;
+  color: var(--warn);
+  background: var(--warn-bg);
 }
 
 .exclusion-badge {
@@ -727,13 +997,13 @@ h3 {
 }
 
 .excluded-listing tr.origin-excluded td {
-  background: #fffbf4;
+  background: color-mix(in srgb, var(--warn-bg) 50%, transparent);
 }
 
 .exclusion-reason {
   display: inline-block;
   margin-right: 6px;
-  color: var(--extra);
+  color: var(--warn);
 }
 
 .exclusion-pane {
@@ -741,12 +1011,12 @@ h3 {
 }
 
 .exclusion-record {
-  border: 1px solid var(--rule);
-  border-left: 3px solid var(--extra);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
   border-radius: 6px;
   padding: 10px 14px;
   margin: 14px 0;
-  background: #fffdfa;
+  background: var(--panel);
 }
 
 .exclusion-record h3 {
@@ -762,7 +1032,7 @@ h3 {
 
 .exclusion-record code {
   font-size: 11.5px;
-  background: #f0f1f4;
+  background: var(--none-bg);
   border-radius: 4px;
   padding: 1px 5px;
   margin-right: 6px;
@@ -799,7 +1069,7 @@ h3 {
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 999px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   white-space: nowrap;
 }
 
@@ -809,21 +1079,21 @@ h3 {
 }
 
 .tag.disposition-untriaged {
-  color: var(--missing);
-  border-color: var(--missing);
+  color: var(--nok);
+  border-color: var(--nok);
 }
 
 .tag.disposition-requeue {
-  color: var(--extra);
-  border-color: var(--extra);
+  color: var(--warn);
+  border-color: var(--warn);
 }
 
 .tag.disposition-suppressed {
-  color: var(--accent);
+  color: var(--acc);
 }
 
 .tag.disposition-excluded {
-  color: var(--muted);
+  color: var(--mute);
 }
 
 tr.disposition-excluded td,
@@ -835,8 +1105,8 @@ tr.status-passing td {
 /* Green rows: shown when the reader asks for the lane whole, never coloured as
    work that is waiting for somebody. */
 .tag.status-passing {
-  color: var(--matched);
-  border-color: var(--matched);
+  color: var(--ok);
+  border-color: var(--ok);
 }
 
 /* The queue's question, as controls: lane, how much of it, which captures. */
@@ -845,7 +1115,7 @@ tr.status-passing td {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .queue-filters .row-cap {
@@ -855,46 +1125,46 @@ tr.status-passing td {
 .tag.verdict-cut,
 .tag.verdict-replay,
 .tag.verdict-bug {
-  color: var(--extra);
+  color: var(--warn);
 }
 
 .tag.verdict-expected,
 .tag.verdict-never-fix {
-  color: var(--matched);
+  color: var(--ok);
 }
 
 .tag.ticket-open {
-  color: var(--accent);
+  color: var(--acc);
 }
 
 .tag.ticket-closed {
-  color: var(--matched);
+  color: var(--ok);
 }
 
 .tag.ticket-wontfix,
 .tag.ticket-missing {
-  color: var(--missing);
+  color: var(--nok);
 }
 
 .tag.class-accepted {
-  color: var(--matched);
+  color: var(--ok);
 }
 
 .tag.class-known-bug {
-  color: var(--accent);
+  color: var(--acc);
 }
 
 .tag.class-unlisted {
-  color: var(--extra);
+  color: var(--warn);
 }
 
 .tag.class-unknown {
-  color: var(--missing);
+  color: var(--nok);
 }
 
 tr.class-unlisted td,
 tr.class-unknown td {
-  background: color-mix(in srgb, var(--missing) 6%, transparent);
+  background: color-mix(in srgb, var(--nok) 6%, transparent);
 }
 
 .copy-ref {
@@ -912,7 +1182,7 @@ tr.class-unknown td {
 
 .study-record summary {
   cursor: pointer;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 /* The never-fix shortcut: a reason picked, the record previewed, one copy. */
@@ -922,7 +1192,7 @@ tr.class-unknown td {
 
 .study-ignore summary {
   cursor: pointer;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .ignore-controls {
@@ -971,7 +1241,7 @@ tr.class-unknown td {
   flex-wrap: wrap;
   margin: 10px 0 6px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .pane-toolbar label {
@@ -981,44 +1251,6 @@ tr.class-unknown td {
   cursor: pointer;
 }
 
-.study-panes {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
-}
-
-.study-panes[data-open="2"] {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-}
-
-.study-panes[data-open="3"] {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.7fr);
-}
-
-.study-pane {
-  min-width: 0;
-}
-
-/* A pane that reads as prose rather than as a ladder spans the whole row. */
-.study-pane.wide {
-  grid-column: 1 / -1;
-}
-
-.study-pane-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.study-pane-head h3 {
-  margin: 0 0 4px;
-}
-
-.study-pane .ladder-scroll {
-  max-height: calc(100vh - 320px);
-}
 
 /* The outcome line: the verdict first, then what the deltas cost. */
 .outcome {
@@ -1037,9 +1269,9 @@ tr.class-unknown td {
 }
 
 .tag.failed-step {
-  color: var(--missing);
-  border-color: var(--missing);
-  background: color-mix(in srgb, var(--missing) 10%, transparent);
+  color: var(--nok);
+  border-color: var(--nok);
+  background: color-mix(in srgb, var(--nok) 10%, transparent);
   font-weight: 600;
 }
 
@@ -1080,27 +1312,27 @@ button.tag.main-error {
 }
 
 .tag.error-rfc {
-  color: var(--missing);
-  border-color: var(--missing);
-  background: color-mix(in srgb, var(--missing) 10%, transparent);
+  color: var(--nok);
+  border-color: var(--nok);
+  background: color-mix(in srgb, var(--nok) 10%, transparent);
 }
 
 .tag.error-died,
 .tag.error-source-fault {
-  color: var(--extra);
-  border-color: var(--extra);
-  background: color-mix(in srgb, var(--extra) 10%, transparent);
+  color: var(--warn);
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
 }
 
 .tag.error-failure,
 .tag.error-bad-body {
-  color: var(--missing);
-  border-color: var(--missing);
+  color: var(--nok);
+  border-color: var(--nok);
 }
 
 .tag.error-refused {
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--acc);
+  border-color: var(--acc);
 }
 
 /* The other reasons a refused call was refused under, after its first; a bad
@@ -1117,16 +1349,16 @@ button.tag.main-error {
 button.tag.error-rfc:hover,
 button.tag.error-failure:hover,
 button.tag.error-bad-body:hover {
-  background: color-mix(in srgb, var(--missing) 20%, transparent);
+  background: color-mix(in srgb, var(--nok) 20%, transparent);
 }
 
 button.tag.error-died:hover,
 button.tag.error-source-fault:hover {
-  background: color-mix(in srgb, var(--extra) 20%, transparent);
+  background: color-mix(in srgb, var(--warn) 20%, transparent);
 }
 
 button.tag.error-refused:hover {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: color-mix(in srgb, var(--acc) 12%, transparent);
 }
 
 /* The chip row: per rule, per expected message, per refusal, each with its
@@ -1147,7 +1379,7 @@ button.tag.error-refused:hover {
 
 .facet-label {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--mute);
   min-width: 60px;
 }
 
@@ -1156,26 +1388,26 @@ button.tag.error-refused:hover {
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 999px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   background: transparent;
   cursor: pointer;
   white-space: nowrap;
 }
 
 .facet:hover {
-  border-color: var(--accent);
+  border-color: var(--acc);
 }
 
 .facet .count {
   margin-left: 6px;
-  color: var(--muted);
+  color: var(--mute);
   font-variant-numeric: tabular-nums;
 }
 
 .facet.active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--acc);
+  border-color: var(--acc);
+  background: color-mix(in srgb, var(--acc) 12%, transparent);
   font-weight: 600;
 }
 
@@ -1184,7 +1416,7 @@ button.tag.error-refused:hover {
 }
 
 .facet.excluded {
-  color: var(--muted);
+  color: var(--mute);
   border-style: dashed;
   text-decoration: line-through;
 }
@@ -1205,51 +1437,21 @@ button.tag.error-refused:hover {
 .case-flags h3 { margin: 0.75rem 0 0.25rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.7; }
 .flag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
 .flag { display: flex; gap: 0.5rem; align-items: baseline; font-size: 0.85rem; }
-.flag code { flex: 0 0 auto; padding: 0 0.3rem; border-radius: 3px; background: var(--chip-bg, #2a2a2a); }
-.flag.detected code { background: #2f5d3a; }
-.flag.detected-none code { background: #3a3a3a; }
-.flag.detection-unavailable code { background: #5d4a2f; }
+.flag code { flex: 0 0 auto; padding: 0 0.3rem; border-radius: 3px; background: var(--none-bg); }
+.flag.detected code { background: var(--ok-bg); color: var(--ok); }
+.flag.detected-none code { background: var(--none-bg); }
+.flag.detection-unavailable code { background: var(--warn-bg); color: var(--warn); }
 .flag-detail { opacity: 0.8; }
 
 /* A cell the driver declined to run: the lane the document declares blocked. */
-.skipped-note { margin: 0.5rem 0; padding: 0.6rem 0.8rem; border-left: 3px solid #5d4a2f; background: rgba(93, 74, 47, 0.15); font-size: 0.9rem; }
-.skipped-note code { padding: 0 0.3rem; border-radius: 3px; background: var(--chip-bg, #2a2a2a); }
+.skipped-note { margin: 0.5rem 0; padding: 0.6rem 0.8rem; border-left: 3px solid var(--warn); background: var(--warn-bg); font-size: 0.9rem; }
+.skipped-note code { padding: 0 0.3rem; border-radius: 3px; background: var(--none-bg); }
 
-/* Three ladders, equal width: the study is a confrontation of all three, and a
-   narrowed third column is the one nobody reads. */
-.study-panes[data-open="3"] {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-/* The selected message, kept above its OWN ladder: reading a delta means
-   holding the capture's bytes and the replay's side by side, which one shared
-   panel at the foot of the page cannot do. */
-.pane-detail {
-  position: sticky;
-  top: 44px;
-  z-index: 1;
-  margin: 6px 0;
-  padding: 6px;
-  border: 1px solid var(--rule);
-  border-radius: 8px;
-  background: var(--bg);
-  max-height: 42vh;
-  overflow: auto;
-}
-
-.pane-detail .sip-message,
-.pane-detail pre {
-  max-height: 30vh;
-}
-
-.study-pane .ladder-scroll {
-  max-height: calc(100vh - 260px);
-}
 
 /* The step name is the cross-reference: it takes the ladders to the message. */
 .step-link {
   font: inherit;
-  color: var(--accent);
+  color: var(--acc);
   background: none;
   border: none;
   padding: 0;
@@ -1268,8 +1470,8 @@ button.tag.error-refused:hover {
 }
 
 .confrontation-listing tr.row-focused > td {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  box-shadow: inset 3px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--acc) 12%, transparent);
+  box-shadow: inset 3px 0 0 var(--acc);
 }
 
 .focus-note {
@@ -1296,13 +1498,13 @@ button.tag.error-refused:hover {
   align-items: center;
   gap: 6px;
   padding: 3px 10px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 999px;
 }
 
 .call-chip.on {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: var(--acc);
+  background: color-mix(in srgb, var(--acc) 10%, transparent);
 }
 
 /* The delta sheet scrolls in its own box: a focused row must never take the
@@ -1311,7 +1513,7 @@ button.tag.error-refused:hover {
   position: relative;
   max-height: 60vh;
   overflow: auto;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 8px;
 }
 
@@ -1325,12 +1527,12 @@ a.tag.failed-step,
 button.tag.failed-step {
   cursor: pointer;
   font-family: inherit;
-  color: var(--missing);
+  color: var(--nok);
 }
 
 a.tag.failed-step:hover,
 button.tag.failed-step:hover {
-  background: color-mix(in srgb, var(--missing) 20%, transparent);
+  background: color-mix(in srgb, var(--nok) 20%, transparent);
   text-decoration: none;
 }
 
@@ -1338,8 +1540,8 @@ button.tag.failed-step:hover {
 .refused-note {
   margin: 10px 0;
   padding: 8px 12px;
-  border-left: 3px solid var(--extra);
-  background: color-mix(in srgb, var(--extra) 8%, transparent);
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
 }
 
 .refused-note h3 {
@@ -1348,7 +1550,7 @@ button.tag.failed-step:hover {
 
 /* When something happened, beside what happened. */
 .age {
-  color: var(--muted);
+  color: var(--mute);
   white-space: nowrap;
 }
 
@@ -1358,7 +1560,7 @@ button.tag.failed-step:hover {
 }
 
 .tag.muted {
-  color: var(--muted);
+  color: var(--mute);
 }
 
 /* A finding's step, in the verdict pane: an address, not prose. */
@@ -1384,6 +1586,7 @@ button.verdict-step {
 
 .rule-family {
   margin: 24px 0;
+  overflow-x: auto;
 }
 
 .rule-family h2 {
@@ -1399,7 +1602,8 @@ button.verdict-step {
 
 .rule-listing .rule-id {
   font-family: ui-monospace, SFMono-Regular, monospace;
-  white-space: nowrap;
+  max-width: 36ch;
+  overflow-wrap: anywhere;
 }
 
 .rule-listing .rule-count {
@@ -1425,7 +1629,7 @@ button.verdict-step {
 
 /* A rule nothing exercised is the reading this page exists for: never dimmed. */
 tr.rule-unexercised td {
-  background: color-mix(in srgb, var(--extra) 8%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
 }
 
 tr.rule-declared-zero td {
@@ -1433,16 +1637,16 @@ tr.rule-declared-zero td {
 }
 
 tr.rule-unrostered td {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--acc) 8%, transparent);
 }
 
 .rule-fired {
-  color: var(--missing);
+  color: var(--nok);
   font-weight: 600;
 }
 
 .tag.rule-unfalsifiable {
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .rule-population {
@@ -1452,7 +1656,7 @@ tr.rule-unrostered td {
 /* A subset chip, never a class of its own: it overlaps the counts beside it. */
 .tag.class-shape,
 .tag.class-blessed {
-  color: var(--muted);
+  color: var(--mute);
   border-style: dashed;
 }
 
@@ -1464,15 +1668,17 @@ tr.rule-unrostered td {
    muted, a detected one stands out: the difference is the whole read. */
 .case-profile { margin: 0.75rem 0; }
 .case-profile h3 { margin: 0 0 0.35rem; font-size: 0.85rem; text-transform: lowercase; }
-.profile-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }
+.profile-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.35rem; min-width: 0; }
+.profile-list > * { min-width: 0; }
+.profile-list pre { max-width: 100%; overflow: auto; }
 .profile-list .profile {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem;
-  padding: 0.35rem 0.5rem; border: 1px solid var(--line, #d7d7d7); border-radius: 4px;
+  padding: 0.35rem 0.5rem; border: 1px solid var(--line); border-radius: 4px;
 }
 .profile-list .profile.defaulted { opacity: 0.75; }
 .profile-call { font-weight: 600; }
-.profile-list code { background: var(--chip, #eee); border-radius: 3px; padding: 0.05rem 0.3rem; }
-.profile-list code.on { background: #ffe6a8; font-weight: 600; }
+.profile-list code { background: var(--none-bg); border-radius: 3px; padding: 0.05rem 0.3rem; }
+.profile-list code.on { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
 .profile-list code.unstated { opacity: 0.6; font-style: italic; }
 .profile-source { font-size: 0.8rem; opacity: 0.7; }
 .profile-evidence { flex-basis: 100%; margin: 0.2rem 0 0 0.5rem; padding-left: 1rem; font-size: 0.8rem; opacity: 0.85; }
@@ -1495,18 +1701,18 @@ tr.rule-unrostered td {
   gap: 14px;
   flex-wrap: wrap;
   padding: 10px 14px;
-  border: 1px dashed var(--rule);
+  border: 1px dashed var(--line);
   border-radius: 6px;
 }
 
 .drop-zone.over {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: var(--acc);
+  background: color-mix(in srgb, var(--acc) 8%, transparent);
 }
 
 .drop-zone label.copy-ref {
   cursor: pointer;
-  color: var(--accent);
+  color: var(--acc);
 }
 
 .drop-list {
@@ -1517,7 +1723,7 @@ tr.rule-unrostered td {
 
 .drop-item {
   padding: 3px 0;
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid var(--line);
 }
 
 /* The HTTP exchange as one run replayed it: a head line per request, its
@@ -1531,7 +1737,7 @@ tr.rule-unrostered td {
 .request-builder {
   margin: 12px 0;
   padding: 10px 14px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 6px;
 }
 
@@ -1542,7 +1748,7 @@ tr.rule-unrostered td {
 
 .request-builder .count {
   margin-left: 4px;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .request-head {
@@ -1565,7 +1771,7 @@ tr.rule-unrostered td {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .request-row .row-cap {
@@ -1587,7 +1793,7 @@ tr.rule-unrostered td {
 .request-created {
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid var(--rule);
+  border-top: 1px solid var(--line);
   font-size: 12px;
 }
 
@@ -1629,8 +1835,8 @@ tr.rule-unrostered td {
 
 /* A state that asks for work is amber, as a stale cut is. */
 .tag.state-stale {
-  color: var(--extra);
-  border-color: var(--extra);
+  color: var(--warn);
+  border-color: var(--warn);
 }
 
 /* The source list's add-by-path form and the retire confirmation. */
@@ -1660,8 +1866,8 @@ tr.rule-unrostered td {
 }
 
 .copy-ref.danger {
-  color: var(--missing);
-  border-color: var(--missing);
+  color: var(--nok);
+  border-color: var(--nok);
 }
 
 .sources-listing td {
@@ -1703,10 +1909,10 @@ tr.rule-unrostered td {
   height: 10px;
   width: 260px;
   max-width: 100%;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 5px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--rule) 40%, transparent);
+  background: color-mix(in srgb, var(--line) 40%, transparent);
 }
 
 .progress.compact .progress-bar {
@@ -1725,23 +1931,23 @@ tr.rule-unrostered td {
 }
 
 .progress-passed {
-  background: var(--matched);
+  background: var(--ok);
 }
 
 .progress-failed {
-  background: var(--missing);
+  background: var(--nok);
 }
 
 .progress-skipped {
-  background: var(--extra);
+  background: var(--warn);
 }
 
 .progress-landed {
-  background: var(--accent);
+  background: var(--acc);
 }
 
 .progress-gone {
-  background: var(--muted);
+  background: var(--mute);
   opacity: 0.5;
 }
 
@@ -1751,7 +1957,7 @@ tr.rule-unrostered td {
 }
 
 .waiting {
-  color: var(--extra);
+  color: var(--warn);
 }
 
 .job-actions {
@@ -1787,9 +1993,9 @@ tr.rule-unrostered td {
   overflow: auto;
   margin: 0;
   padding: 8px 10px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: color-mix(in srgb, var(--rule) 25%, transparent);
+  background: color-mix(in srgb, var(--line) 25%, transparent);
   font-size: 12px;
   line-height: 1.4;
   white-space: pre-wrap;
@@ -1833,7 +2039,7 @@ tr.rule-unrostered td {
 }
 
 .call-lanes-table tr.current-lane {
-  background: var(--rule);
+  background: var(--line);
 }
 
 /* The delta sheet: each line's samples sit in a nested table, step · captured · replayed. */
@@ -1854,7 +2060,7 @@ tr.rule-unrostered td {
 }
 
 .delta-samples tr + tr td {
-  border-top: 1px dotted var(--rule);
+  border-top: 1px dotted var(--line);
 }
 
 .deltas-listing > tbody > tr > td:nth-child(2) {
@@ -1894,7 +2100,7 @@ tr.rule-unrostered td {
 }
 
 .compare-call {
-  border-top: 1px solid var(--rule);
+  border-top: 1px solid var(--line);
   padding: 6px 0;
 }
 
@@ -1920,13 +2126,13 @@ tr.rule-unrostered td {
 .compare-ladder h4 {
   margin: 4px 0;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--mute);
 }
 
 .ladder-text {
   margin: 0;
   padding: 6px;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--line);
   border-radius: 4px;
   overflow: auto;
   max-height: 32rem;
@@ -1938,18 +2144,559 @@ tr.rule-unrostered td {
   display: inline-block;
   min-width: 100%;
   color: inherit;
-  background: color-mix(in srgb, var(--extra) 22%, transparent);
+  background: color-mix(in srgb, var(--warn) 22%, transparent);
 }
 
 .report-summary-note {
   padding: 8px 12px;
-  border: 1px solid var(--extra);
+  border: 1px solid var(--warn);
   border-radius: 4px;
-  background: color-mix(in srgb, var(--extra) 8%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
 }
 
 @media (max-width: 900px) {
   .compare-ladders {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ---- campaign summary ---- */
+
+.campaign {
+  min-height: calc(100vh - var(--topbar-h));
+}
+
+.campaign .muted { color: var(--mute); }
+.campaign .mono { font-family: var(--mono); font-size: 12.5px; }
+.campaign h1 { font-size: 19px; margin: 0 0 2px; }
+.campaign h2 { font-size: 14px; margin: 0 0 8px; }
+.campaign h3 { font-size: 13px; margin: 0 0 6px; }
+.campaign a { color: var(--acc); }
+.campaign select,
+.campaign input,
+.campaign button {
+  font: inherit;
+  color: inherit;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 7px;
+}
+.campaign button { cursor: pointer; }
+.campaign button.on { background: var(--acc-bg); border-color: var(--acc); color: var(--acc); }
+.campaign button:disabled { cursor: default; opacity: 0.5; }
+.cp-ok { color: var(--ok); }
+.cp-nok { color: var(--nok); }
+.cp-err { color: var(--warn); }
+
+.cp-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px 20px; align-items: flex-start; margin-bottom: 12px; }
+.cp-controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.cp-lanebuttons { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.cp-check { display: inline-flex; gap: 4px; align-items: center; color: var(--mute); font-size: 13px; }
+.cp-filter { width: 12em; }
+.cp-legend { margin: 4px 0 10px; }
+
+.cp-facets > * { min-width: 0; }
+.cp-facets > .cp-panel { overflow-x: auto; }
+.cp-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+.cp-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+.cp-tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+.cp-big { font-size: 22px; font-weight: 650; }
+.cp-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--none-bg); margin: 6px 0; }
+.cp-bar i { display: block; }
+.cp-bar i.pass { background: var(--ok); }
+.cp-bar i.failure { background: var(--nok); }
+.cp-bar i.error { background: var(--warn); }
+
+.cp-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.cp-facets { display: grid; grid-template-columns: minmax(280px, 420px) 1fr; gap: 12px; align-items: start; }
+@media (max-width: 900px) { .cp-facets { grid-template-columns: 1fr; } }
+.cp-facet {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  width: 100%;
+  text-align: left;
+  margin-bottom: 6px;
+  padding: 8px 10px !important;
+  border-radius: 8px !important;
+}
+.cp-facet .cp-count { grid-row: span 3; font-size: 20px; font-weight: 650; color: var(--nok); min-width: 2ch; }
+.cp-facet.gone { opacity: 0.55; border: 1px solid var(--line); }
+.cp-facet.gone .cp-count { color: var(--ok); }
+.cp-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.cp-lanes { color: var(--mute); font-size: 11px; }
+.cp-tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 9px; border: 1px solid var(--line); white-space: nowrap; }
+.cp-tag.side0 { background: var(--acc-bg); color: var(--acc); border-color: transparent; }
+.cp-tag.side1 { background: var(--nok-bg); color: var(--nok); border-color: transparent; }
+.cp-tag.side2 { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.cp-tag.error { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.cp-tag.untyped { color: var(--mute); }
+.cp-tag.new { background: var(--nok-bg); color: var(--nok); border-color: transparent; font-weight: 600; }
+.cp-tag.fixed { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
+.cp-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.cp-chip { font-size: 12px !important; }
+.cp-matched { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+
+.campaign table { border-collapse: collapse; }
+.cp-table { width: 100%; }
+.cp-table th, .cp-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.cp-table th { font-size: 12px; color: var(--mute); font-weight: 600; }
+.cp-row { cursor: pointer; }
+.cp-row:hover { background: var(--none-bg); }
+.cp-dot { display: inline-block; min-width: 1.6em; text-align: center; border-radius: 4px; padding: 0 3px !important; border: none !important; font-weight: 700; }
+.cp-dot.pass { color: var(--ok); background: var(--ok-bg) !important; }
+.cp-dot.failure { color: var(--nok); background: var(--nok-bg) !important; }
+.cp-dot.error { color: var(--warn); background: var(--warn-bg) !important; }
+.cp-dot.none { color: var(--mute); background: var(--none-bg) !important; }
+.cp-small { font-size: 11px !important; }
+
+.cp-card { border: 2px solid var(--nok); border-radius: 10px; padding: 10px 12px; margin: 8px 0; background: var(--panel); }
+.cp-card-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+.cp-kv { display: grid; grid-template-columns: 7.5em 1fr; gap: 3px 10px; margin: 6px 0 0; }
+.cp-kv dt { font-size: 12px; color: var(--mute); font-weight: 600; }
+.cp-kv dd { margin: 0; }
+.cp-diff { font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-all; }
+.cp-diff del { background: var(--nok-bg); color: var(--nok); text-decoration: none; border-radius: 2px; }
+.cp-diff ins { background: var(--ok-bg); color: var(--ok); text-decoration: none; border-radius: 2px; }
+.cp-log { font-size: 12px; }
+
+.cp-grid { overflow: auto; max-height: calc(100vh - 260px); }
+.cp-grid td, .cp-grid th { padding: 1px; }
+.cp-grid th { font-size: 11px; color: var(--mute); position: sticky; top: 0; background: var(--panel); }
+.cp-grid .cp-run { font-size: 9px; top: 18px; }
+.cp-grid .cp-gap { width: 10px; }
+.cp-name { white-space: nowrap; max-width: 420px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; padding: 1px 10px 1px 4px !important; position: sticky; left: 0; background: var(--panel); }
+.cp-family { cursor: pointer; }
+.cp-family .cp-name { font-weight: 650; }
+.cp-case { padding-left: 20px !important; }
+.cp-cell { display: block; width: 12px; height: 12px; border-radius: 2px; cursor: pointer; }
+.cp-cell.pass { background: var(--ok); }
+.cp-cell.failure { background: var(--nok); }
+.cp-cell.error { background: var(--warn); }
+.cp-cell.none { background: var(--none); }
+.cp-cell.cur { outline: 2px solid var(--acc); outline-offset: -1px; }
+.cp-cell.cp-key { display: inline-block; vertical-align: middle; cursor: default; }
+
+.cp-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(1280px, 100vw);
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 24px var(--shadow);
+  z-index: 20;
+  overflow: auto;
+  padding: 14px 18px 60px;
+}
+.cp-close { float: right; }
+.cp-launch { display: inline-block; }
+.cp-launch > summary { cursor: pointer; }
+.cp-launch-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.cp-refused { margin: 4px 0 0; padding-left: 16px; font-size: 12px; }
+.cp-replay { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+.cp-checks td { text-align: left; vertical-align: top; font-size: 12px; }
+.cp-expected { word-break: break-all; }
+.cp-source {
+  margin: 8px 0 0;
+  max-height: 520px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.45;
+  counter-reset: cp-line;
+}
+.cp-line::before {
+  counter-increment: cp-line;
+  content: counter(cp-line);
+  display: inline-block;
+  width: 3ch;
+  margin-right: 1.5ch;
+  text-align: right;
+  color: var(--mute);
+}
+.cp-drawer > .cp-panel { overflow-x: auto; }
+.cp-hist td, .cp-hist th { padding: 3px 5px; text-align: center; font-size: 12px; }
+.cp-hist td:first-child { text-align: left; white-space: nowrap; }
+.cp-hist td.x { background: var(--nok-bg); color: var(--nok); font-weight: 600; }
+.cp-hist td.v { color: var(--ok); }
+.cp-hist td.chg { border-left: 2px solid var(--acc); }
+
+.cp-modal { position: fixed; inset: 0; background: var(--scrim); z-index: 30; display: flex; justify-content: center; align-items: flex-start; padding: 40px 16px; overflow: auto; }
+.cp-modal-body { background: var(--bg); color: var(--ink); border-radius: 12px; padding: 14px 18px; width: 100%; max-width: 1100px; }
+.cp-modal-body .ladder-pane { background: var(--panel); color: var(--ink); border-radius: 8px; padding: 6px; }
+.cp-pre { font-family: var(--mono); font-size: 12px; background: var(--none-bg); padding: 10px; border-radius: 8px; white-space: pre-wrap; }
+.cp-cdr-file { margin: 6px 0; }
+.cp-cdr-file > summary { cursor: pointer; }
+.cp-cdr { margin: 4px 0 4px 14px; }
+.cp-cdr > summary { cursor: pointer; font-size: 12px; }
+.cp-cdr h4 { font-size: 12px; margin: 8px 0 2px; }
+.cp-cdr-fields td, .cp-cdr-fields th, .cp-cdr-calls td { font-size: 12px; padding: 2px 8px; }
+.cp-cdr-delta { overflow-x: auto; }
+.cp-cdr-delta td { font-size: 12px; padding: 2px 8px; }
+.cp-nowrap { white-space: nowrap; }
+.cp-delta-content td { background: var(--nok-bg); }
+.cp-delta-content td:first-child { color: var(--nok); font-weight: 700; }
+.cp-delta-expected td { background: var(--warn-bg); }
+.cp-delta-expected td:first-child { color: var(--warn); font-weight: 700; }
+.cp-delta-timing td, .cp-delta-identity td { color: var(--mute); }
+.cp-own { border-left: 2px solid var(--acc); border-right: 2px solid var(--acc); }
+
+/* ---- study workbench: the three ladder panes ----
+   One grid, its rows shared by every pane through subgrid: head, controls,
+   the selected message, the ladder. The detail boxes and the ladders start on
+   one line whatever each pane's controls hold, and the block fits the viewport
+   under the top bar so every ladder's scrollbars are on screen. */
+
+.study-verdict {
+  margin: 10px 0;
+}
+
+.study-paths {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.copy-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: var(--mute);
+}
+
+.study-workbench {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--topbar-h));
+  margin: 12px 0;
+  scroll-margin-top: var(--topbar-h);
+}
+
+.study-workbench[data-open="0"] {
+  height: auto;
+}
+
+/* Until the workbench is docked its boxes do not scroll: a wheel over it
+   scrolls the page and stops where it docks (components/dock.ts). */
+.study-workbench:not([data-docked="true"]) .ladder-scroll,
+.study-workbench:not([data-docked="true"]) .pane-detail pre,
+.study-workbench:not([data-docked="true"]) .pane-controls {
+  overflow: hidden;
+}
+
+.study-workbench > .pane-toolbar {
+  flex: none;
+  height: 30px;
+  flex-wrap: nowrap;
+  margin: 0 0 6px;
+}
+
+.study-http {
+  min-width: 0;
+}
+
+.study-http .json-view pre {
+  overflow-wrap: anywhere;
+}
+
+.study-panes {
+  --detail-row: 0px;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--open, 3), minmax(0, 1fr));
+  /* The controls row has a fixed height: a fold opened in one pane floats
+     over its pane and never resizes the rows the other panes share. */
+  --controls-row: 52px;
+  grid-template-rows: auto var(--controls-row) var(--detail-row) minmax(0, 1fr);
+  gap: 6px 10px;
+}
+
+@media (max-width: 1300px) {
+  .study-panes {
+    --controls-row: 72px;
+  }
+}
+
+.study-workbench[data-open="1"] .study-panes { --open: 1; }
+.study-workbench[data-open="2"] .study-panes { --open: 2; }
+
+.study-workbench[data-detail="true"] .study-panes {
+  --detail-row: minmax(0, 0.75fr);
+}
+
+.study-pane {
+  position: relative;
+  grid-row: 1 / span 4;
+  display: grid;
+  grid-template-rows: subgrid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.study-pane > .ladder-pane {
+  display: contents;
+}
+
+.study-pane-head {
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.study-pane-head h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.study-pane-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.study-pane .pane-controls {
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  align-items: center;
+  gap: 2px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.study-pane .pane-controls > *,
+.study-pane .pane-controls .source-filter {
+  margin: 0;
+}
+
+.study-pane .source-filters {
+  display: contents;
+}
+
+.study-pane .pane-controls > .fv-call-legend {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.pane-fold > summary {
+  color: var(--mute);
+  white-space: nowrap;
+}
+
+.pane-fold[open] > summary {
+  color: var(--acc);
+}
+
+/* An open fold floats over its own pane, anchored under its control. */
+.study-pane .pane-fold[open] > :not(summary) {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  z-index: 4;
+  max-height: 60%;
+  overflow: auto;
+  margin-top: 4px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+
+.study-pane .pane-detail {
+  grid-row: 3;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.study-pane .ladder-scroll {
+  grid-row: 4;
+  min-height: 0;
+  max-height: none;
+}
+
+/* Inside a pane, a long call strip is one line; its chip's tooltip holds the rest. */
+.study-pane .fv-call-legend {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  margin: 0 0 4px;
+}
+
+.study-pane .fv-call-chip {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+
+.source-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--mute);
+  margin-bottom: 4px;
+}
+
+.source-filters .source-toggle,
+.source-filters .source-filter {
+  margin: 0;
+}
+
+/* The selected message: its chips, its bar, its body taking what is left. */
+.pane-detail > .sip-view,
+.pane-detail > .json-detail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.pane-detail .sip-message {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+.pane-detail .json-detail > .json-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.pane-detail .json-view pre {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+.detail-empty {
+  margin: auto;
+}
+
+.study-http,
+.confrontation-section {
+  margin-top: 12px;
+}
+
+/* ---- triage queue ---- */
+
+.triage-page .page-head h1 .tag {
+  font-size: 11px;
+  font-weight: 400;
+  vertical-align: middle;
+}
+
+.queue-facets .facets {
+  margin: 0;
+}
+
+.queue-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.queue-counts code {
+  font-size: 12px;
+}
+
+.queue-tools {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.queue-tools .request-builder {
+  margin: 0;
+}
+
+.queue-tools .request-builder:not(.collapsed) {
+  flex: 1 1 100%;
+  background: var(--panel);
+}
+
+.queue-tools .drop-captures {
+  flex: 1;
+  margin: 0;
+}
+
+.queue-tools .drop-zone {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.queue-table {
+  padding: 4px 14px;
+  overflow-x: auto;
+}
+
+.queue-table .capture-cell a,
+.queue-table .row-features .facet {
+  display: inline-block;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.queue-table .listing td {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.call-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin: 0;
+}
+
+.triage-listing tbody tr:hover td {
+  background: var(--none-bg);
+}
+
+.queue-table .queue-why .tag {
+  white-space: normal;
+}
+
+.queue-table .age {
+  white-space: normal;
+}
+
+.queue-table .row-actions > *,
+.queue-table .row-actions > .rerun > button {
+  display: block;
+  margin: 0 0 4px;
+  width: 100%;
 }

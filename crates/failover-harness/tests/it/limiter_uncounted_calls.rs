@@ -5,6 +5,8 @@
 //! backup that takes the call over and the rebooted primary that reclaims it
 //! each count it while it is resident on them, and each stops counting it
 //! when it leaves them (the takeover copy's self-release, the call's end).
+//!
+//! Beyond the failover sweep: the fail-open gauge follows the node a call resides on.
 
 use call::LimiterEntry;
 use std::net::SocketAddr;
@@ -18,7 +20,6 @@ use b2bua::limiter::CallLimiter;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
-    RULE_CSEQ_IN_DIALOG_ORDER,
 };
 use http_net::HttpTransport;
 use http_net_testkit::{Fault, SimulatedHttpNetwork};
@@ -128,11 +129,6 @@ async fn a_call_failing_open_counts_on_the_node_it_is_resident_on() {
     let call_ref = call_ref.expect("the backup holds the replicated call");
 
     // ── the primary crashes; the re-INVITE fails over to the backup ──────
-    fh.accept_rfc_deviations_from_now(
-        RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
-         takeover window — one call drops cleanly",
-    );
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_secs(5)).await;

@@ -16,7 +16,7 @@ use crate::obligations::{Obligation, ObligationKind};
 /// refresh `period` of the learnt lease. A missing entry (the turn's own
 /// admit, the refresh turn whose entry fired) and one due later than
 /// `now_ms + period` (armed under a longer period) are re-armed at
-/// `now_ms + period`; a past-due one (a copy materialised with a stale
+/// `now_ms + period`; a past-due one (a record restored with a stale
 /// ledger, a fire the per-call queue dropped) is re-armed due now, so the
 /// refresh it owes runs at once. Each on the record and as a `ScheduleTimer`.
 pub fn arm_refresh(

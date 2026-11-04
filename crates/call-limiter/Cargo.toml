@@ -9,6 +9,9 @@ description = "Call limiter keyed by the call: the keyed store (per-call multise
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

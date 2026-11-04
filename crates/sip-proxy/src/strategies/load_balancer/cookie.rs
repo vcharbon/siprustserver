@@ -15,6 +15,9 @@ use super::{build_stickiness_input, call_id_of, LoadBalancerStrategy, COOKIE_VER
 /// Every field of the cookie, as `encode_stickiness` writes them.
 pub(super) const FIELDS: [&str; 6] = ["w_pri", "w_bak", "e", "v", "kid", "sig"];
 
+/// The field of a Via cookie's dialling mark.
+const DIALLING: &str = "dl";
+
 /// A cookie whose signature verified.
 pub(super) struct Checked<'p> {
     pub(super) w_pri: &'p str,
@@ -97,6 +100,31 @@ impl LoadBalancerStrategy {
         Ok(Checked { w_pri, w_bak, is_emergency: e == "1" })
     }
 
+    /// The dialling mark of `cookie`, signed under its key over its
+    /// signature; `None` when it carries none or another key signs now.
+    pub(super) fn mark_dialling(&self, cookie: &RouteParams) -> Option<(String, String)> {
+        let (kid, sig) = (cookie.get("kid")?, cookie.get("sig")?);
+        let signed = self.hmac.sign(&dialling_input(sig));
+        if signed.kid != *kid {
+            return None;
+        }
+        let mark = URL_SAFE_NO_PAD.encode(&signed.mac[..TRUNCATED_MAC_BYTES]);
+        Some((DIALLING.to_string(), mark))
+    }
+
+    /// Whether `params` carry a dialling mark that verifies for the cookie's
+    /// signature under its key.
+    pub(super) fn dialling_marked(&self, params: &RouteParams) -> bool {
+        let (Some(kid), Some(sig), Some(mark)) =
+            (params.get("kid"), params.get("sig"), params.get(DIALLING))
+        else {
+            return false;
+        };
+        let Ok(decoded) = URL_SAFE_NO_PAD.decode(mark) else { return false };
+        decoded.len() == TRUNCATED_MAC_BYTES
+            && self.hmac.verify_truncated(&dialling_input(sig), kid, &decoded)
+    }
+
     /// The cookie in `params` restricted to [`FIELDS`], when it verifies.
     pub(super) fn own_fields(&self, params: &RouteParams, msg: &SipMessage) -> Option<RouteParams> {
         self.check(params, msg).ok()?;
@@ -107,4 +135,9 @@ impl LoadBalancerStrategy {
                 .collect(),
         )
     }
+}
+
+/// What a dialling mark signs: the cookie's signature, labelled.
+fn dialling_input(sig: &str) -> Vec<u8> {
+    format!("dialling|sig={sig}").into_bytes()
 }

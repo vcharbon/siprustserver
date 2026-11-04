@@ -7,11 +7,10 @@
 //! bytes survive `MsgpackCodec`. Neither proves a survivor node answering a
 //! real PRACK on the wire, which is what these cells do.
 //!
-//! The shape is the **delayed offer** (RFC 3264 §4): alice's INVITE carries no
-//! body, bob's reliable 183 carries the OFFER, and alice's PRACK carries the
-//! ANSWER. So the cell proves both halves at once — the survivor translates
-//! `(a_tag, a_rseq) → (b_leg, b_rseq)` from hydrated books, AND relays the
-//! answer body onward to the callee.
+//! The shape is the **delayed offer** (RFC 3264 §4): alice's INVITE carries no body, bob's reliable
+//! 183 carries the OFFER, and alice's PRACK carries the ANSWER. So the cell proves both halves at
+//! once — the survivor translates `(a_tag, a_rseq) → (b_leg, b_rseq)` from hydrated books, AND
+//! relays the answer body onward to the callee.
 //!
 //! ```text
 //!   INVITE(no SDP) → 183(Require:100rel, RSeq, offer) → ✗ primary killed ✗
@@ -19,19 +18,22 @@
 //!                  → 200(PRACK) → 200(INVITE) → ACK → BYE → 200(BYE)
 //! ```
 //!
-//! The negative half is its sibling: a post-takeover PRACK naming a number this
-//! stack never showed must still draw 481 — hydrated books refuse as well as
-//! they admit.
+//! The negative half is its sibling: a post-takeover PRACK naming a number this stack never showed
+//! must still draw 481 — hydrated books refuse as well as they admit.
 //!
 //! Every kill here is unannounced to the peers (ADR-0031 cases 3a and 4): no
 //! departure sweep runs, so the message each cell is about takes the call over.
+//!
+//! Beyond the failover sweep: PRACK and RAck across a takeover, lost messages, an unseen RSeq.
 
+use b2bua::store::envelope;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering, Ordering::SeqCst};
 use std::sync::Arc;
 use std::time::Duration;
 
-use call::{CallBodyCodec, Ladder, MsgpackCodec, Provisional, Repeat};
+use crate::departure_support::spawn_reactive_proxy;
+use call::{Ladder, MsgpackCodec, Provisional, Repeat};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -67,11 +69,8 @@ async fn replicated_provisionals(
     primary: &str,
     call_ref: &str,
 ) -> Vec<Provisional> {
-    let body = backup
-        .get(PartitionRole::Backup, primary, call_ref)
-        .await
-        .expect("the backup holds a replica body for the early call");
-    MsgpackCodec::new().decode(&body).expect("replica body decodes").provisionals
+    let body = backup.get(PartitionRole::Backup, primary, call_ref).await.expect("a held copy");
+    envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call.provisionals
 }
 
 /// Reboot the crashed primary EMPTY at a higher gen + new pod IP, re-learn its
@@ -110,8 +109,7 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =
@@ -280,8 +278,7 @@ async fn prack_naming_an_unshown_rseq_after_takeover_draws_481() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =
@@ -420,8 +417,7 @@ async fn non_2xx_b_leg_final_after_a_takeover_reaches_the_caller_and_acks_the_ca
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =
@@ -564,8 +560,7 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
         .await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =
@@ -670,7 +665,7 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
     let a_leg_acks: Vec<_> = fh
         .sip_entries()
         .into_iter()
-        .filter(|e| e.from == proxy_addr && e.to != bob_addr && e.raw.starts_with(b"ACK "))
+        .filter(|e| e.from == proxy_addr && e.to != bob_addr && e.opens_with("ACK "))
         .collect();
     assert_eq!(
         a_leg_acks.len(),
@@ -754,8 +749,7 @@ async fn a_lost_takeover_ack_is_resent_when_the_callee_retransmits_its_final() {
         )
         .await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =

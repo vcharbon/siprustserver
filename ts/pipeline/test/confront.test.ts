@@ -459,6 +459,26 @@ describe("shapeProbes", () => {
     expect(signature(probes[0]!.probe)).toBe("shape:missing-message:response-486")
   })
 
+  it("an omitted 100 is one shape record at its own step, scoped on the 100 to INVITE", () => {
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "trying-omitted",
+          step: "s13",
+          leg: "B",
+          arrived: { kind: "response", status: 487, reason: "Request Terminated", cseq_method: "INVITE", cseq: 2 },
+          after_ms: 2
+        }
+      ]),
+      new Map([["s13", step("s13", { in_dialog: true, msg: { "cseq-method": "INVITE", status: 100, headers: [], "headers-present": [] } })]]),
+      new Map()
+    )
+    expect(probes).toHaveLength(1)
+    expect(probes[0]?.step).toBe("s13")
+    expect(signature(probes[0]!.probe)).toBe("shape:trying-omitted:response:100:INVITE")
+    expect(probes[0]?.probe).toMatchObject({ shapeKind: { shape: "trying-omitted", final: 487, afterMs: 2 } })
+  })
+
   it("a passing verdict produces nothing", () => {
     expect(shapeProbes({ case: "c", lane: "fake", status: "ok" }, new Map(), new Map())).toEqual([])
   })
@@ -621,8 +641,7 @@ describe("an expected body held against the one received", () => {
     expect(signature(probes[0]!.probe)).toBe("body:application/example+xml:request:INFO:in-dialog")
   })
 
-  it("a shape or a send is not read here", () => {
-    expect(run({ mode: "absent" }, XML)).toEqual([])
+  it("a send is not read here", () => {
     const sent = confront({
       pivot: expecting(resource(), "send"),
       verdict: verdictWith([]),
@@ -758,6 +777,91 @@ describe("an expected body held against the one received", () => {
 
   it("a resource the driver did not supply is the driver's error, named by ref", () => {
     expect(() => run(resource(), XML, new Map())).toThrow(REF)
+  })
+})
+
+describe("a shape-only expectation held against the reception's type", () => {
+  const info = (contentType: string | undefined, body: string | undefined): string =>
+    crlf([
+      "INFO sip:callee@127.0.0.1 SIP/2.0",
+      "To: <sip:+15551@h.example>;tag=b",
+      "CSeq: 2 INFO",
+      ...(contentType === undefined ? [] : [`Content-Type: ${contentType}`]),
+      `Content-Length: ${body?.length ?? 0}`
+    ]) + (body ?? "")
+
+  const MULTIPART = "--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\r\n--b--\r\n"
+
+  const run = (
+    mode: Body.BodyShape,
+    check: Flow.Step["check"],
+    contentType: string | undefined,
+    body: string | undefined
+  ) =>
+    confront({
+      pivot: {
+        pivot_version: 3,
+        case: { id: "c", title: "t", family: "f", variant: "repro", origin: "capture", lanes: {} },
+        identities: [],
+        calls: [],
+        endpoints: [],
+        actors: [],
+        legs: [],
+        flow: [step("s9", { leg: "B", in_dialog: true, check, msg: { method: "INFO", body: { mode } } })],
+        timing: { expect_budget_ms: 1000, settle_budget_ms: 1000 }
+      },
+      verdict: verdictWith([]),
+      recordings: new Map([
+        [
+          "B",
+          [{
+            seq: 1,
+            dir: "in",
+            at_us: 1200,
+            step: "s9",
+            raw: info(contentType, body),
+            ...laidOut((contentType ?? "").split(";")[0]!, body)
+          }] as Array<Bundle.RecordedMessage>
+        ]
+      ]),
+      resources: new Map()
+    }).probes.filter((p) => p.probe.kind === "body")
+
+  it("a reception breaking the shape is one `body` probe naming the shape and the received type, under either check", () => {
+    for (const check of ["record", "assert"] as const) {
+      const probes = run("multipart-present", check, "application/sdp", "v=0\r\n")
+      expect(probes).toHaveLength(1)
+      const probe = probes[0]!.probe
+      expect(probe.kind === "body" && probe).toMatchObject({
+        step: "s9",
+        mediaType: "multipart-present",
+        compare: "exact",
+        captured: ["multipart-present"],
+        replayed: ["application/sdp"]
+      })
+      expect(signature(probe)).toBe("body:multipart-present:request:INFO:in-dialog")
+    }
+  })
+
+  it("a bodiless reception is `absent`, and a body where none is expected names its type", () => {
+    const missing = run("sdp-present", "record", undefined, undefined)
+    expect(missing.map((p) => p.probe.kind === "body" && [p.probe.captured, p.probe.replayed])).toEqual([
+      [["sdp-present"], ["absent"]]
+    ])
+    const unexpected = run("absent", "record", "application/example+xml;charset=utf-8", "<x/>")
+    expect(unexpected.map((p) => p.probe.kind === "body" && [p.probe.captured, p.probe.replayed])).toEqual([
+      [["absent"], ["application/example+xml"]]
+    ])
+    const multipart = run("sdp-present", "record", "multipart/mixed;boundary=b", MULTIPART)
+    expect(multipart.map((p) => p.probe.kind === "body" && [p.probe.captured, p.probe.replayed])).toEqual([
+      [["sdp-present"], ["multipart/mixed"]]
+    ])
+  })
+
+  it("a reception holding the shape produces nothing", () => {
+    expect(run("multipart-present", "record", "multipart/related;boundary=b", MULTIPART)).toEqual([])
+    expect(run("sdp-present", "record", "Application/SDP", "v=0\r\n")).toEqual([])
+    expect(run("absent", "record", undefined, undefined)).toEqual([])
   })
 })
 

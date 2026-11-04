@@ -4,9 +4,9 @@ use crate::ingress_brake::IngressBrakeCounters;
 #[test]
 fn per_method_request_response_render() {
     let m = B2buaMetrics::new();
-    m.record_request("invite");
+    m.record_request("INVITE");
     m.record_request("BYE");
-    m.record_response("invite", 200);
+    m.record_response("INVITE", 200);
     m.record_response("BYE", 200);
     let txt = m.prometheus_text();
     assert!(txt.contains("b2bua_requests_total{method=\"INVITE\"} 1"));
@@ -86,8 +86,9 @@ fn drain_exits_and_duration_render() {
 #[test]
 fn retransmit_and_give_up_families_render() {
     let m = B2buaMetrics::new();
-    m.record_retransmit("final-2xx", "invite", Some(200));
     m.record_retransmit("final-2xx", "INVITE", Some(200));
+    m.record_retransmit("final-2xx", "INVITE", Some(200));
+    m.record_retransmit("final-2xx", "invite", Some(200));
     m.record_retransmit("reliable-provisional", "INVITE", Some(183));
     m.record_retransmit("trigger", "ACK", None);
     m.record_repeat_give_up("ack-of-2xx");
@@ -96,6 +97,11 @@ fn retransmit_and_give_up_families_render() {
     assert_eq!(m.repl_quiet_turns_total("own-rung"), 2);
     assert_eq!(m.repl_quiet_turns_total("re-ack"), 0);
     assert_eq!(m.retransmits_total("final-2xx", "INVITE", Some(200)), 2);
+    assert_eq!(
+        m.retransmits_total("final-2xx", "invite", Some(200)),
+        1,
+        "an extension method keeps its own row"
+    );
     assert_eq!(m.retransmits_total("trigger", "ACK", None), 1);
     assert_eq!(
         m.retransmits_total("trigger", "ACK", Some(200)),
@@ -147,7 +153,7 @@ fn memory_attribution_gauges_render() {
     assert!(zero.contains("b2bua_repl_meta_backup 0"));
 
     m.set_store_gauges(7, 11, 7, 9, 3, 7);
-    m.set_repl_store_gauges(40, 22, 64, 4);
+    m.set_repl_store_gauges(40, 22, 5, 64, 4);
     let txt = m.prometheus_text();
     // A store_locks (9) > store_calls (7) gap is exactly the lock-leak signal.
     assert!(txt.contains("b2bua_store_calls 7"));
@@ -158,6 +164,7 @@ fn memory_attribution_gauges_render() {
     assert!(txt.contains("b2bua_store_touched 7"));
     assert!(txt.contains("b2bua_repl_meta_total 40"));
     assert!(txt.contains("b2bua_repl_meta_backup 22"));
+    assert!(txt.contains("b2bua_repl_calls_unbacked 5"));
     assert!(txt.contains("b2bua_repl_changelog_entries 64"));
     assert!(txt.contains("b2bua_repl_changelog_peers 4"));
     assert!(txt.contains("b2bua_withdrawn_running 0"));

@@ -295,6 +295,19 @@ data:
     \        target_label: namespace\n      - source_labels: [__meta_kubernetes_pod_name]\n\
     \        target_label: pod\n      - source_labels: [__meta_kubernetes_pod_node_name]\n\
     \        target_label: node\n      - source_labels: [__meta_kubernetes_pod_container_name]\n\
+    \        target_label: container\n\n  # The same pods' sidecar, on the port prometheus.io/sidecar-port\
+    \ names.\n  - job_name: 'kubernetes-pod-sidecars'\n    kubernetes_sd_configs:\n\
+    \      - role: pod\n    relabel_configs:\n      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]\n\
+    \        action: keep\n        regex: true\n      - source_labels: [__meta_kubernetes_pod_container_port_number]\n\
+    \        target_label: __tmp_pod_port\n      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_sidecar_port]\n\
+    \        action: keepequal\n        target_label: __tmp_pod_port\n      - source_labels:\
+    \ [__address__, __meta_kubernetes_pod_annotation_prometheus_io_sidecar_port]\n\
+    \        action: replace\n        regex: ([^:]+)(?::\\d+)?;(\\d+)\n        replacement:\
+    \ $1:$2\n        target_label: __address__\n      - action: labelmap\n       \
+    \ regex: __meta_kubernetes_pod_label_(.+)\n      - source_labels: [__meta_kubernetes_namespace]\n\
+    \        target_label: namespace\n      - source_labels: [__meta_kubernetes_pod_name]\n\
+    \        target_label: pod\n      - source_labels: [__meta_kubernetes_pod_node_name]\n\
+    \        target_label: node\n      - source_labels: [__meta_kubernetes_pod_container_name]\n\
     \        target_label: container\n\n  # The kubelet of every node, through the\
     \ API server proxy.\n  - job_name: 'kubernetes-kubelet'\n    scheme: https\n \
     \   tls_config: { insecure_skip_verify: true }\n    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token\n\

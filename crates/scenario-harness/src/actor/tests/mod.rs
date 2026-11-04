@@ -6,17 +6,26 @@
 //! expectation, the parked-request pick, and message templates.
 //! Shared plan/template builders live in [`testkit`].
 
+mod abandoned_reinvite;
 mod auth;
 mod body_expect;
+mod bye_refused;
 mod cancel_race;
+mod clean_end;
+mod client_retransmit;
 mod delta_request;
 mod delta_response;
 mod dialog_refusal;
 mod endings;
 mod forking;
+mod future_size;
 mod held;
+mod long_call_ping;
+mod long_dwell;
+mod prack_refused;
 mod rang;
 mod reception_observer;
+mod refused_requests;
 mod reinvite_ack_body;
 mod reliable_give_up;
 mod reneg;
@@ -28,3 +37,4 @@ mod substrate;
 mod template_request;
 mod template_respond;
 mod testkit;
+mod won_invite;

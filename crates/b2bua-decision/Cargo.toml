@@ -1,0 +1,23 @@
+[package]
+name = "b2bua-decision"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The call-decision seam a decision backend implements: the CallDecisionEngine port, the decision DTOs of the core, and the adaptation HTTP port a service's async callbacks ride. A consumer's decision crate depends on this, never on the b2bua shell."
+
+[package.metadata.purity]
+tier = "shell"
+
+[package.metadata.ha]
+side = "blind"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+# The decision DTOs and folds (ADR-0052).
+b2bua-core = { path = "../b2bua-core" }
+# The backend client the adaptation port rides (ADR-0043).
+http-net = { path = "../http-net" }

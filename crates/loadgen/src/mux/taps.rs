@@ -1,13 +1,18 @@
 //! What a call watches on each of its mux endpoints, at the two points every
 //! datagram of an endpoint crosses (its send, before simulated loss, and its
-//! inbound delivery, after it): SIP round-trip timing, and the call's wire
-//! tap, which sees each datagram with the side of the call it crossed.
+//! inbound delivery, after it), and at its retransmit engine's re-sends: SIP
+//! round-trip timing, the call's message tally, and the call's wire tap,
+//! which sees each datagram with the side of the call it crossed. Each of
+//! them reads the datagram's one sniff ([`Datagram`]).
 
 use std::sync::Arc;
 
 use tokio::time::Instant;
 
+use super::datagram::Datagram;
 use super::rtt::{RttSink, RttTracker};
+use super::tally::{CallTally, LateRepair};
+use sip_message::sniff::Identity;
 
 /// The endpoint of a call a datagram crossed: its caller, or the callee leg
 /// bound under this role.
@@ -18,7 +23,7 @@ pub enum Side<'a> {
 }
 
 /// Whether the endpoint sent the datagram or had it delivered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Dir {
     Out,
     In,
@@ -27,11 +32,12 @@ pub enum Dir {
 /// A call's wire tap: every datagram its endpoints send (first transmissions
 /// by the call, not the engine's retransmissions) and every datagram delivered
 /// to them, duplicates included.
-pub type WireTap = Arc<dyn Fn(Side<'_>, Dir, &[u8]) + Send + Sync>;
+pub type WireTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>) + Send + Sync>;
 
 /// One endpoint's taps.
 pub(in crate::mux) struct Taps {
     rtt: Option<RttTracker>,
+    tally: Option<Arc<CallTally>>,
     wire: Option<WireTap>,
     /// The callee leg's role; `None` on the caller.
     leg: Option<String>,
@@ -42,35 +48,71 @@ impl Taps {
     /// `None` when the call watches nothing.
     pub(in crate::mux) fn new(
         rtt: Option<RttSink>,
+        tally: Option<Arc<CallTally>>,
         wire: Option<WireTap>,
         leg: Option<&str>,
     ) -> Option<Arc<Self>> {
-        if rtt.is_none() && wire.is_none() {
+        if rtt.is_none() && tally.is_none() && wire.is_none() {
             return None;
         }
         let rtt = rtt.map(RttTracker::new);
-        Some(Arc::new(Self { rtt, wire, leg: leg.map(str::to_string) }))
+        Some(Arc::new(Self { rtt, tally, wire, leg: leg.map(str::to_string) }))
     }
 
     fn side(&self) -> Side<'_> {
         self.leg.as_deref().map_or(Side::Caller, Side::Leg)
     }
 
-    pub(in crate::mux) fn on_outbound(&self, raw: &[u8], now: Instant) {
+    pub(in crate::mux) fn on_outbound(&self, d: &Datagram<'_>, now: Instant) {
         if let Some(rtt) = &self.rtt {
-            rtt.on_outbound(raw, now);
+            rtt.on_outbound(d.id(), now);
+        }
+        if let Some(tally) = &self.tally {
+            tally.on_datagram(self.leg.as_deref(), Dir::Out, d.id(), now);
         }
         if let Some(wire) = &self.wire {
-            wire(self.side(), Dir::Out, raw);
+            wire(self.side(), Dir::Out, d);
         }
     }
 
-    pub(in crate::mux) fn on_inbound(&self, raw: &[u8], now: Instant) {
+    pub(in crate::mux) fn on_inbound(&self, d: &Datagram<'_>, now: Instant) {
         if let Some(rtt) = &self.rtt {
-            rtt.on_inbound(raw, now);
+            rtt.on_inbound(d.id(), now);
+        }
+        if let Some(tally) = &self.tally {
+            tally.on_datagram(self.leg.as_deref(), Dir::In, d.id(), now);
         }
         if let Some(wire) = &self.wire {
-            wire(self.side(), Dir::In, raw);
+            wire(self.side(), Dir::In, d);
         }
+    }
+
+    /// The report of a late re-send of `answer`, a final this endpoint sent
+    /// (see [`CallTally::late_repair`]).
+    pub(in crate::mux) fn late_repair(&self, answer: &Identity<'_>) -> Option<LateRepair> {
+        self.tally.as_ref()?.late_repair(self.leg.as_deref(), answer)
+    }
+
+    /// Where the re-sends of the datagram `id` this endpoint sends are
+    /// counted; `None` when the call tallies nothing.
+    pub(in crate::mux) fn resend_count(&self, id: &Identity<'_>) -> Option<ResendCount> {
+        let tally = self.tally.clone()?;
+        Some(ResendCount { key: CallTally::resend_key(self.leg.as_deref(), id), tally })
+    }
+}
+
+/// Where the re-sends of one datagram an endpoint sent are counted: the
+/// tally key resolved from the datagram's sniff when it was first sent, so a
+/// re-send is not sniffed again.
+#[derive(Clone)]
+pub(in crate::mux) struct ResendCount {
+    tally: Arc<CallTally>,
+    key: u64,
+}
+
+impl ResendCount {
+    /// One re-send of the datagram.
+    pub(in crate::mux) fn record(&self) {
+        self.tally.on_resend(self.key);
     }
 }

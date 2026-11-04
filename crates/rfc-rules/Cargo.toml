@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "The one home for RFC-violation knowledge: obligation rules decided off an observed SIP wire, shared verbatim by the capture-side census (sip-pcap) and the live recorded-trace audit (sip-net) through thin adapters. Depends on sip-message only."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

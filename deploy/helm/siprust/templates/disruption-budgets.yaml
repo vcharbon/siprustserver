@@ -1,0 +1,35 @@
+{{- /*
+PodDisruptionBudgets: a voluntary disruption (a node drain, an eviction)
+takes one worker and one proxy at a time, and waits for the one it took to
+read ready again. A worker reads ready once it holds its own calls and the
+calls it backs up, so the next eviction waits for the copies it can get.
+*/ -}}
+{{- $w := .Values.worker }}
+{{- if and $w.enabled $w.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: b2bua-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "b2bua-worker") | nindent 4 }}
+spec:
+  maxUnavailable: {{ int $w.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels: { app: b2bua-worker }
+{{- end }}
+{{- $p := .Values.proxy }}
+{{- if and $p.enabled $p.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sip-front-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
+spec:
+  maxUnavailable: {{ int $p.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels: { app: sip-front-proxy }
+{{- end }}

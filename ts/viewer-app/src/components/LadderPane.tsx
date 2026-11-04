@@ -1,4 +1,10 @@
-/** A ladder with its legend, its warnings and its selection, in a scroll box. */
+/**
+ * A ladder with its legend, its warnings and its selection, in a scroll box.
+ *
+ * Three slots, in order, each its own element so a host can line them up
+ * across panes: `.pane-controls` (copy, legends, warnings, the caller's own
+ * controls), `.pane-detail` (the selected message) and `.ladder-scroll`.
+ */
 import {
   CallLegend,
   Ladder,
@@ -22,22 +28,28 @@ export interface LadderPaneProps {
   readonly marksById?: Readonly<Record<string, LadderMark>> | undefined
   /** The notation panel; on by default, off where two panes would repeat it. */
   readonly legend?: boolean | undefined
+  /** The copy-as-text button; on by default, off where the host puts its own. */
+  readonly copy?: boolean | undefined
+  /** The warnings folded behind a summary; open by default. */
+  readonly compact?: boolean | undefined
+  /** The host's own controls, after the legends. */
+  readonly controls?: ReactNode | undefined
   /**
-   * The selected message, rendered ABOVE the ladder and sticky. Each ladder
-   * shows its own: reading a delta means holding two messages side by side, and
-   * one shared panel at the foot of the page can only ever hold one of them.
-   *
-   * Absent where nothing is selected — an empty panel would hold a third of the
-   * viewport open for a placeholder, on every pane at once.
+   * The selected message, rendered ABOVE the ladder. Each ladder shows its
+   * own: reading a delta means holding two messages side by side. Absent
+   * where nothing is selected and the host asks for no placeholder.
    */
   readonly detail?: ReactNode | undefined
 }
 
 export const LadderPane = (
-  { layout, heading, selectedId, onSelect, statusById, marksById, legend, detail }: LadderPaneProps
+  { layout, heading, selectedId, onSelect, statusById, marksById, legend, copy, compact, controls, detail }: LadderPaneProps
 ): JSX.Element => {
   const selected = layout.events.find((event) => event.id === selectedId)
-  const scroll = useScrollToRow(selected?.y)
+  const scroll = useScrollToRow(
+    selected?.y,
+    selected !== undefined && selected.kind === "message" ? [selected.x1, selected.x2] : undefined
+  )
   return (
     <section className="ladder-pane">
       {heading !== undefined && (
@@ -46,22 +58,39 @@ export const LadderPane = (
           {layout.subtitle && <p className="muted">{layout.subtitle}</p>}
         </header>
       )}
-      <div className="ladder-actions">
-        <CopyText text={() => ladderToText(layout)} />
+      <div className="pane-controls">
+        {(copy ?? true) && (
+          <div className="ladder-actions">
+            <CopyText text={() => ladderToText(layout)} />
+          </div>
+        )}
+        <CallLegend layout={layout} />
+        {(legend ?? true) && <LadderLegend layout={layout} />}
+        {layout.warnings.length > 0 && (compact === true
+          ? (
+            <details className="pane-fold">
+              <summary>warnings <span className="count">{layout.warnings.length}</span></summary>
+              <ul className="warnings">
+                {layout.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+              </ul>
+            </details>
+          )
+          : (
+            <ul className="warnings">
+              {layout.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+            </ul>
+          ))}
+        {controls}
       </div>
-      <CallLegend layout={layout} />
-      {(legend ?? true) && <LadderLegend layout={layout} />}
-      {layout.warnings.length > 0 && (
-        <ul className="warnings">
-          {layout.warnings.map((warning) => <li key={warning}>{warning}</li>)}
-        </ul>
-      )}
       {detail !== undefined && <div className="pane-detail">{detail}</div>}
-      <div className="ladder-scroll" ref={scroll}>
+      <div className="ladder-scroll" ref={scroll.ref}>
         <Ladder
           layout={layout}
           selectedId={selectedId}
-          onSelect={onSelect}
+          onSelect={(event) => {
+            scroll.anchorAt(event.y)
+            onSelect(event)
+          }}
           statusById={statusById}
           marksById={marksById}
         />

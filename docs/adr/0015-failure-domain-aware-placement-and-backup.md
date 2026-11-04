@@ -1,15 +1,22 @@
 # 0015 — Failure-domain-aware placement & backup selection: zone-pinned workers, single-picker distinct-zone backup, unified exclusion key
 
+> **D5 is superseded by ADR-0056** (the front proxy's VIPs are announced by BGP).
+>
 > **⚠️ NOT YET IMPLEMENTED — TODO / target design (as of 2026-06-13).**
 > This ADR is the intended cross-rack / multi-zone evolution. The SUT chart
-> (`deploy/helm/siprust`) does **not** implement any of it: it still runs the
+> (`deploy/helm/siprust`) implements only D4's budget (one worker and one proxy
+> PodDisruptionBudget, `maxUnavailable: 1`); for the rest it runs the
 > ADR-0012 D7 design (multicast VRRP, `tier=edge` proxy nodes,
 > `kubernetes.io/hostname` anti-affinity, a single worker StatefulSet — no zone
 > labels, no `unicast_peer`, no failure-domain key). **Until the chart is
 > migrated, ADR-0012 D7 is the source of truth for what actually runs.** Treat
-> every decision below as planned, not live.
+> every decision below but D4 as planned, not live.
 
-**Status:** accepted as design (2026-06-05); **not yet deployed**
+**Status:** accepted as design (2026-06-05); **deferred** until more than two workers
+spread over zones. With two workers a call's two copies sit on the two workers, and
+a hard node anti-affinity of the workers (a deployment value) is the failure-domain
+separation. The worker and proxy PodDisruptionBudgets (`maxUnavailable: 1`) are
+deployed (`templates/disruption-budgets.yaml`).
 
 **Source:** this codebase (no sipjsserver counterpart — the source's 2-worker
 deployment never scaled past a pair, so "primary and backup on distinct nodes"
@@ -121,6 +128,8 @@ backup in z2 can be co-evicted ⇒ reintroduces the acute loss. The intuition
 inverts under per-zone StatefulSets: the safe PDB is **global**, not per-zone.
 
 ## Decision D5 — the front proxy is unified on the SAME failure-domain key; cross-rack VIP needs unicast VRRP
+
+> **Superseded by ADR-0056:** each proxy's node announces the VIPs over BGP, so the proxies need no shared layer 2.
 
 The "generic exclusion scheme" is one key reused everywhere:
 

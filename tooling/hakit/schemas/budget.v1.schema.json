@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "budget.v1.schema.json",
-  "$comment": "minor 6",
+  "$comment": "minor 8",
   "title": "budget.v1",
-  "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer (but a consult's contract refusal, below) and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
+  "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded` and `protocol_anomaly` take a budget only through `in_dialog`; an `unexpected_ending` after answer (but a consult's contract refusal, below) and `unattributed` take none, so this schema has no place for them. ADR-0049.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "name", "description"],
@@ -86,6 +86,15 @@
         }
       }
     },
+    "established": {
+      "description": "The calls answered before the window's first `inject` and still up at it, the calls a fault of a call-setup dependency must leave whole: each of them ends with no impact the budget does not allow (no in-dialog request failed, no cut, its CDR joined), and the window holds at least `min_calls` of them once the run answered any call before it, so the check is never vacuous. Absent: not judged.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_calls"],
+      "properties": {
+        "min_calls": { "type": "integer", "minimum": 1 }
+      }
+    },
     "limiter": {
       "description": "What the window allows the profile's limiters (ADR-0049 §3.13), from its opening to its close plus the limiter's `repair_s`, each direction on its own: the median of admitted calls may reach every call the limiter's streams offer, cps × (ring + hold), with `overshoot: offered` (callers failing open admit them all; absent, the cap), and may fall under the steady band when `undershoot` is true (absent, never).",
       "type": "object",
@@ -93,6 +102,35 @@
       "properties": {
         "overshoot": { "const": "offered" },
         "undershoot": { "type": "boolean" }
+      }
+    },
+    "in_dialog": {
+      "description": "Allowances for in-dialog impacts whose instant the window holds, for a fault whose mechanism ends in-dialog transactions (a total outage outlasting their timeout) or reorders a dialog's requests (RFC 3261 §12.2.2). An impact matching an entry is charged to the window like a failed setup; one matching none is an in-dialog finding, with its candidate windows.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stream", "class", "detail"],
+        "properties": {
+          "stream": {
+            "description": "A stream name, or `*` for each stream separately.",
+            "type": "string",
+            "pattern": "^([a-z][a-z0-9_]*|\\*)$"
+          },
+          "class": { "enum": ["dialog_request_failed", "call_cut", "call_stranded", "protocol_anomaly"] },
+          "detail": {
+            "description": "The impact's detail as the classifier writes it (`BYE no final`, `teardown never completed`), or `*` for any.",
+            "type": "string",
+            "minLength": 1
+          },
+          "max_calls": { "type": "integer", "minimum": 0 },
+          "max_seconds": {
+            "description": "The allowance in seconds of the stream's offered rate.",
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "oneOf": [{ "required": ["max_calls"] }, { "required": ["max_seconds"] }]
       }
     },
     "classes": {

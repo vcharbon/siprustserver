@@ -96,23 +96,24 @@ fn v3_1_1_10_varied_transports_parses_its_lower_hops_whatever_the_transport() {
 #[test]
 fn invalid_messages_rejected_by_eager_parse() {
     let rejected = [
-        "extraneousSeparators",     // 3.1.2.1
-        "contentLengthTooLarge",    // 3.1.2.2
-        "negativeContentLength",    // 3.1.2.3
-        "overlargRequestScalars",   // 3.1.2.4
-        "overlargResponseScalars",  // 3.1.2.5
-        "unterminatedQuotedString", // 3.1.2.6
-        "angleBracketRequestUri",   // 3.1.2.7
-        "embeddedLwsInUri",         // 3.1.2.8
-        "multipleSPInRequestLine",  // 3.1.2.9
-        "escapedHeadersInUri",      // 3.1.2.11
-        "unencloseNameAddr",        // 3.1.2.13
-        "spacesInAddrSpec",         // 3.1.2.14
-        "nonTokenDisplayName",      // 3.1.2.15
-        "unknownProtocolVersion",   // 3.1.2.16
-        "methodMismatch",           // 3.1.2.17
-        "unknownMethodMismatch",    // 3.1.2.18
-        "overlargeResponseCode",    // 3.1.2.19
+        "extraneousSeparators",        // 3.1.2.1
+        "contentLengthTooLarge",       // 3.1.2.2
+        "negativeContentLength",       // 3.1.2.3
+        "overlargRequestScalars",      // 3.1.2.4
+        "overlargResponseScalars",     // 3.1.2.5
+        "unterminatedQuotedString",    // 3.1.2.6
+        "angleBracketRequestUri",      // 3.1.2.7
+        "embeddedLwsInUri",            // 3.1.2.8
+        "multipleSPInRequestLine",     // 3.1.2.9
+        "trailingSpacesInRequestLine", // 3.1.2.10
+        "escapedHeadersInUri",         // 3.1.2.11
+        "unencloseNameAddr",           // 3.1.2.13
+        "spacesInAddrSpec",            // 3.1.2.14
+        "nonTokenDisplayName",         // 3.1.2.15
+        "unknownProtocolVersion",      // 3.1.2.16
+        "methodMismatch",              // 3.1.2.17
+        "unknownMethodMismatch",       // 3.1.2.18
+        "overlargeResponseCode",       // 3.1.2.19
     ];
     for name in rejected {
         assert!(parse("rfc4475-invalid", name).is_err(), "{name} should be rejected");
@@ -122,11 +123,9 @@ fn invalid_messages_rejected_by_eager_parse() {
 // --- §3.1.2 the parser still reads ---
 
 #[test]
-fn trailing_spaces_and_a_malformed_date_still_read_as_a_request() {
-    // 3.1.2.10, and 3.1.2.12: a malformed Date never refuses a message.
-    for name in ["trailingSpacesInRequestLine", "invalidTimezone"] {
-        let msg = parse("rfc4475-invalid", name)
-            .unwrap_or_else(|e| panic!("{name} should parse: {}", e.reason));
-        assert!(matches!(msg, SipMessage::Request(_)), "{name}: expected request");
-    }
+fn a_malformed_date_still_reads_as_a_request() {
+    // 3.1.2.12: a malformed Date never refuses a message.
+    let msg = parse("rfc4475-invalid", "invalidTimezone")
+        .unwrap_or_else(|e| panic!("invalidTimezone should parse: {}", e.reason));
+    assert!(matches!(msg, SipMessage::Request(_)), "expected request");
 }

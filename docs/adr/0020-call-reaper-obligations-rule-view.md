@@ -1,6 +1,10 @@
 # 0020 — Call reaper, obligation vocabulary, and the narrowed rule-facing call view
 
 **Status:** accepted (2026-06-11)
+Amended (2026-10-23): X3, the CDR is written at least once with a key and a discharged
+marker (ADR-0055 §5).
+Amended (2026-10-31): X3, a copy whose primary reads dead at a verdict releases the
+limiter key and still defers the CDR (ADR-0047 D8).
 
 ## Context
 
@@ -100,7 +104,8 @@ termination propagates its delete through the existing terminate-writer, so
 the HA protocol is untouched.
 
 The **acting-backup terminal contract** (amended by ADR-0047 D8: a copy whose primary
-has departed discharges the call): a backup **never discharges** a call —
+has departed discharges the call, and one whose primary reads dead at a dead verdict
+releases the limiter key at its end, the CDR still deferred): a backup **never discharges** a call —
 no CDR, no limiter release, no propagated delete — *not even* on an explicit
 BYE/CANCEL. It answers the wire (SIP continuity), records the terminal into the
 `(p,b)` Element, reverse-flushes it with a **short grace TTL as its alive-timer**,
@@ -140,7 +145,7 @@ forget) and at every materialisation site (`create`,
 `hydrate_from_replica`, `materialize_if_absent`) — so a freshly reclaimed
 long-hold call starts its idle clock at reclaim. **Never `created_at`, never
 timer deadlines** (keepalive catch-up smoothing makes a reclaimed call look
-overdue — the stale-`KeepaliveTimeout` bug class).
+overdue).
 
 Stamp membership mirrors live-map membership: cleared in `remove` and
 `drop_local`; an orphan never enters either. The idle threshold defaults to

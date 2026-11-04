@@ -5,7 +5,7 @@
 //! [`super::relay_response`] / [`super::relay_request`].
 
 use call::helpers::{callee_dialog, caller_dialog, caller_dialog_mut, fronting_dialog};
-use call::{Call, Dialog, DialogState, EndingBy, LegState, PeerDialog, RetiredDialog};
+use call::{Call, Dialog, DialogState, EndingBy, LegState, PeerDialog};
 use sip_message::draft::HeaderList;
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 use sip_message::SipParseError;
@@ -55,7 +55,9 @@ impl ActionExecutor<'_> {
         to_tag: &str,
     ) {
         let Some(leg) = call.b_legs.iter().find(|l| l.leg_id == source_leg_id) else { return };
-        let Some(invite) = leg.outbound_invite.clone() else { return };
+        let Some(invite) = leg.outbound_invite().cloned() else { return };
+        let cseq = leg.dialled_cseq().unwrap_or_default();
+        let sent_invite = leg.dialled_on_dialog();
         if callee_dialog(leg, to_tag).is_some() {
             return;
         }
@@ -76,9 +78,9 @@ impl ActionExecutor<'_> {
         } else {
             DialogState::Early
         };
-        *call = call::helpers::update_leg(call.clone(), source_leg_id, |leg| {
-            let mut d = Dialog::new(invite.our_tag, to_tag, state, invite.cseq);
-            d.pending_invite_txn = invite.txn;
+        call::helpers::update_leg(call, source_leg_id, |leg| {
+            let mut d = Dialog::new(invite.our_tag, to_tag, state, cseq);
+            d.sent_invite = sent_invite;
             d.remote_target = contact;
             d.route_set = route_set;
             leg.dialogs.insert(d);
@@ -95,7 +97,7 @@ impl ActionExecutor<'_> {
         if b_tag.is_empty() || fronting_dialog(call, b_leg_id, b_tag).is_some() {
             return;
         }
-        let a_tag = self.turn.ids.new_tag();
+        let a_tag = crate::caller_tags::fronting(call, b_leg_id, b_tag);
         self.map_a_face(call, &a_tag, b_leg_id, b_tag);
     }
 
@@ -120,28 +122,39 @@ impl ActionExecutor<'_> {
         let mirrors_callee_dialogs = call::helpers::relay_first_18x_strategy(call).is_none();
         let in_setup = !answering && call.a_leg.state() != LegState::Confirmed;
         let already_published = {
-            let mut fronts = call
-                .a_leg
-                .dialogs
-                .iter()
-                .filter(|d| d.retired().is_none())
-                .flat_map(|d| d.fronts.iter());
+            let mut fronts =
+                call.a_leg.dialogs.iter().filter(|d| !d.is_retired()).flat_map(|d| d.fronts.iter());
             if mirrors_callee_dialogs && in_setup {
                 fronts.next().is_some()
             } else {
                 fronts.any(|f| f.leg_id == b_leg_id)
             }
         };
-        // A media leg's early media holds the primary as its own dialog: the
-        // callee's dialog is another session, under another tag (RFC 3264 §8).
-        let primary_shows_media =
-            caller_dialog(call, &primary).is_some_and(|d| d.shows_media.is_some());
-        let a_face = if already_published || primary_shows_media {
-            self.turn.ids.new_tag()
+        let a_face = if already_published || primary_shows_media(call, &primary) {
+            crate::caller_tags::fronting(call, b_leg_id, b_tag)
         } else {
             primary
         };
         self.map_a_face(call, &a_face, b_leg_id, b_tag);
+        a_face
+    }
+
+    /// The tag a 2xx of `b_leg_id`, a leg the record lacks, was relayed to the
+    /// caller under, as [`Self::a_face_tag`] chose it for an answer from a
+    /// leg nothing fronts yet: the fronting tag beside a media leg's early
+    /// media, else the primary. Its early dialog is opened under it.
+    pub(super) fn unknown_leg_face_tag(
+        &mut self,
+        call: &mut Call,
+        b_leg_id: &str,
+        b_tag: &str,
+    ) -> String {
+        let primary = self.ensure_a_dialog(call);
+        if !primary_shows_media(call, &primary) {
+            return primary;
+        }
+        let a_face = crate::caller_tags::fronting(call, b_leg_id, b_tag);
+        open_early_a_dialog(call, &a_face);
         a_face
     }
 
@@ -207,7 +220,7 @@ impl ActionExecutor<'_> {
         let primary = self.ensure_a_dialog(call);
         let free = caller_dialog(call, &primary)
             .is_some_and(|d| !d.shown && d.fronts.is_empty() && d.shows_media.is_none());
-        let tag = if free { primary } else { self.turn.ids.new_tag() };
+        let tag = if free { primary } else { crate::caller_tags::of_leg(call, media_leg) };
         open_early_a_dialog(call, &tag);
         show_media(call, &tag, media_leg);
         tag
@@ -235,10 +248,10 @@ impl ActionExecutor<'_> {
                 return own;
             }
         }
-        if call.a_leg.invite_final_sent.is_some_and(|status| !(200..300).contains(&status)) {
+        if call.a_leg.invite_final_sent().is_some_and(|status| !(200..300).contains(&status)) {
             return call.a_leg.own_tag.clone().or(preferred).unwrap_or_default();
         }
-        let tag = preferred.unwrap_or_else(|| self.turn.ids.new_tag());
+        let tag = preferred.unwrap_or_else(|| crate::caller_tags::own(call));
         let Some(a_invite) = self.caller_invite(call) else { return tag };
         let from = a_invite.from();
         let a_leg_id = call.a_leg.leg_id.clone();
@@ -266,7 +279,7 @@ impl ActionExecutor<'_> {
     /// none. Nothing is shown once the caller's INVITE has its final, nor for
     /// a callee dialog already fronted.
     pub(super) fn map_a_face(&mut self, call: &mut Call, a_tag: &str, b_leg_id: &str, b_tag: &str) {
-        if call.a_leg.invite_final_sent.is_some()
+        if call.a_leg.invite_final_sent().is_some()
             || a_tag.is_empty()
             || fronting_dialog(call, b_leg_id, b_tag).is_some()
         {
@@ -313,6 +326,12 @@ impl ActionExecutor<'_> {
             }
         }
     }
+}
+
+/// Whether the caller's dialog `primary` carries a media leg's early media:
+/// a callee's dialog is then another session, under another tag (RFC 3264 §8).
+fn primary_shows_media(call: &Call, primary: &str) -> bool {
+    caller_dialog(call, primary).is_some_and(|d| d.shows_media.is_some())
 }
 
 /// Record that the caller-facing dialog `tag` shows the early media of the
@@ -387,8 +406,7 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
         if d.our_tag == tag {
             d.state = DialogState::Confirmed;
         } else if matches!(d.state, DialogState::Early | DialogState::Confirmed) {
-            let open_relays = std::mem::take(&mut d.inbound_pending_requests);
-            d.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
+            d.state = DialogState::Retired;
         }
     }
     call.a_leg.own_tag = Some(tag.to_string());

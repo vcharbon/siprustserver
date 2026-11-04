@@ -147,6 +147,46 @@ async fn a_callee_side_fork_rings_twice_under_two_minted_tags() {
     scene.finish().await;
 }
 
+/// The FORKED-ANSWER rung: leg B's two forks `f1`/`f2` both answer the one
+/// INVITE 2xx, each under its own To-tag. Each fork is its own UAS, so the
+/// second 2xx is sent, not ruled a moot second final; the system keeps the
+/// first dialog and ACKs and BYEs the second (RFC 3261 §13.2.2.4).
+///
+/// The proof is on the b-leg wire: two 2xx under the two forks' tags, and the
+/// ACK and the BYE the second drew riding its tag.
+#[tokio::test(start_paused = true)]
+async fn a_second_fork_s_2xx_is_sent_and_the_system_acks_and_byes_it() {
+    let scene = api_scene("pivot-forked-answer-twice").await;
+    let (outcome, dir) = replay(&scene, "forked-answer-twice.v3.json").await;
+    assert_bundle_is_complete(&outcome, &dir);
+    assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
+
+    let to_tag = |m: &str| -> Option<String> {
+        let to = m.lines().find(|line| line.starts_with("To:"))?;
+        let tag = to.split("tag=").nth(1)?;
+        Some(tag.split(';').next().unwrap_or(tag).trim().to_string())
+    };
+    let b_leg: Vec<String> = outcome.recording.legs()["B"].iter().map(text).collect();
+    let answers: Vec<String> = b_leg
+        .iter()
+        .filter(|m| m.starts_with("SIP/2.0 200") && m.contains(" INVITE\r\n"))
+        .filter_map(|m| to_tag(m))
+        .collect();
+    assert_eq!(answers.len(), 2, "both forks answered: {answers:?}");
+    assert!(answers[0].ends_with("-early-f1") && answers[1].ends_with("-early-f2"), "{answers:?}");
+    let on_second = |method: &str| {
+        b_leg
+            .iter()
+            .any(|m| m.starts_with(method) && to_tag(m).as_deref() == Some(answers[1].as_str()))
+    };
+    assert!(on_second("ACK "), "the second fork's 2xx is ACKed under its tag");
+    assert!(on_second("BYE "), "the second fork's dialog is BYEd under its tag");
+
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
 /// The INTERLEAVED-FORK rung: both forks ring reliably BEFORE either is
 /// PRACKed, so each PRACK must ride its own early dialog — the fork's To-tag
 /// and the fork's RAck on ONE message, and a CSeq numbered in that fork's own

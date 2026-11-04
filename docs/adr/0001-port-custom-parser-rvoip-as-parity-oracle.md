@@ -19,9 +19,10 @@ through one reader (ADR-0053). These refuse what the grammar or the RFC's
 compatibility rules admit, on purpose:
 
 - **The magic cookie.** The topmost Via's branch starts with `z9hG4bK`
-  (§8.1.1.7). A scope choice: RFC 2543 elements are not served, departing from
-  the backward-compatible matching of §17.2.3, so RFC 4475 §3.1.1.1 and
-  §3.1.1.7 are refused.
+  (§8.1.1.7) and carries an identifier after it. A scope choice: RFC 2543
+  elements are not served, departing from the backward-compatible matching of
+  §17.2.3, so RFC 4475 §3.1.1.1, §3.1.1.7 and §3.4.1 are refused, and so is
+  §3.2.1's bare cookie.
 - **The transport allowlist.** The topmost Via, the hop this element answers,
   names a transport of `SipParserLimits::allowed_transports`. A lower Via may
   name any transport §25.1 admits.
@@ -35,7 +36,8 @@ compatibility rules admit, on purpose:
 - **Readable credentials.** An Authorization or Proxy-Authorization whose
   Digest credentials do not read is refused with its message (§22.4).
 - **Numeric headers.** A header of the numeric registry carries a decimal value
-  within its range, digits only.
+  within its range, digits only, followed by nothing but the tail its grammar
+  has: CSeq's method, a session timer's parameters.
 
 A gate refuses like any other rule: a refused request whose echoed fields read
 is answered 400 (ADR-0054).

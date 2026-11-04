@@ -1,9 +1,9 @@
 # Panic-sites budget (scripts/panic-sites.py, `just panic-sites`, ADR-0051):
 # the panic-class sites per file of the tiered crates, counted by one clippy
-# pass with the panic set as `-W` flags over `--lib --bins`. Each entry is a
-# file that had sites when it was listed, with their count: it goes down, and
-# up only by sites moved into its file or revealed by a rule the base did not
-# count. An unlisted file has none. `just panic-sites-update` lowers an entry,
+# pass with the panic set as `-W` flags over the workspace's lib and bin
+# targets. Each entry is a file that had sites when it was listed, with their
+# count: it goes down, and up only by sites moved into its file or revealed by
+# a rule the base did not count. An unlisted file has none. `just panic-sites-update` lowers an entry,
 # removes it at zero, and raises or adds one by those moved and revealed sites.
 # A crate with no entry carries the zero attribute at its roots
 # (`just panic-sites` names it).

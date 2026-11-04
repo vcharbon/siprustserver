@@ -35,6 +35,8 @@
 //!   virtual-time advance, `finish()` + the RFC hard gate.
 //! - `dialog_gate` — `finish()`'s gate on the UAs' dialog verdicts
 //!   ([`crate::dialogs`]) and the `dialog-…` waivers that opt one out.
+//! - `dialog_views` — the dialog verdicts a waiver covered, for a wrapping
+//!   harness.
 //! - `run_guards` — the RFC audit hard gate: its findings, its panic text,
 //!   the forgot-to-`finish` backstop.
 //! - `failure_dump` — the panic-time dump of a failing run: the digest line,
@@ -55,6 +57,8 @@
 //!   method-filtered receive policies. The §17.2 receive view itself is NOT
 //!   here: it lives once for the whole tree in [`crate::absorption`], which
 //!   every agent mode reads.
+//! - `weak_agent` — [`Agent`] without a hold on its socket, what the harness
+//!   keeps to sight what a UA left unread.
 //! - `invite` / `client_invite` / `out_of_dialog` / `dialog` —
 //!   client-side builders and transactions (initial INVITE, any out-of-dialog
 //!   method, in-dialog).
@@ -78,8 +82,10 @@ mod client_txn;
 mod cseq_applier;
 mod dialog;
 pub(crate) mod dialog_gate;
+mod dialog_views;
 mod failure_dump;
 mod harness;
+mod identity;
 mod ids;
 mod invite;
 mod ladder;
@@ -93,11 +99,14 @@ mod rule_coverage;
 mod run_guards;
 mod server_txn;
 mod step;
+mod stepped_over;
 #[cfg(test)]
 mod tests;
 mod tolerant_recv;
 mod ua;
 pub(crate) mod waiver;
+mod weak_agent;
+mod wire_out;
 
 pub use client_invite::{CancelHandle, ClientInvite};
 pub(crate) use cseq_applier::shared_cseq_applier;
@@ -120,6 +129,6 @@ pub use waiver::WaiverScope;
 // socket callee group construct `Agent`s directly; the reactive actor
 // dispatches on the INVITE fate and the top-Via branch.
 pub(crate) use addressing::top_via_branch;
-pub(crate) use client_invite::InviteResponseFate;
+pub(crate) use client_invite::{InviteResponseFate, WonInvite};
 pub(crate) use ids::Ids;
 pub(crate) use rr_fold::decide_rr_fold;

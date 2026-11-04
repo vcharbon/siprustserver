@@ -7,6 +7,8 @@
 # Produces ONE image carrying all runner binaries; the chart (deploy/helm/siprust)
 # picks which one to run via the container `command`:
 #   - sip-proxy-runner     (front proxy + load balancer)
+#   - route-guard          (the proxy node's fast withdrawal: nftables over
+#                           the node's BFD and BGP, beside the proxy)
 #   - b2bua-runner         (B2BUA worker)
 #   - call-limiter-runner  (shared call limiter, keyed by the call)
 #   - cdr-consumer-runner  (drains the RabbitMQ CDR queue -> Prometheus metrics)
@@ -58,24 +60,31 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
     cargo build --release -p sip-proxy-runner \
+ && cargo build --release -p route-guard \
  && cargo build --release -p call-limiter-runner \
  && cargo build --release -p b2bua-runner -p cdr-consumer-runner -p loadgen \
  && mkdir -p /out \
  && cp target/release/sip-proxy-runner \
+       target/release/route-guard \
        target/release/b2bua-runner \
        target/release/call-limiter-runner \
        target/release/cdr-consumer-runner \
        target/release/loadgen /out/
 
-FROM debian:bookworm-slim AS runtime
-# ca-certificates for TLS. Network faults are injected from the node into the
-# pod's namespace, so the image carries no `tc`.
+# Trixie, not the builder's bookworm: its nft (1.1) writes on a node whose
+# ruleset holds kube-proxy's nftables tables, where bookworm's 1.0.6
+# segfaults. The binaries built on bookworm's glibc run on trixie's.
+FROM debian:trixie-slim AS runtime
+# ca-certificates for TLS; nftables for the route guard, the one container of
+# the proxy pod with NET_ADMIN. Network faults are injected from the node into
+# the pod's namespace, so the image carries no `tc`.
 RUN rm -f /etc/apt/apt.conf.d/docker-clean
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates
+    && apt-get install -y --no-install-recommends ca-certificates nftables
 COPY --from=builder /out/sip-proxy-runner    /usr/local/bin/sip-proxy-runner
+COPY --from=builder /out/route-guard         /usr/local/bin/route-guard
 COPY --from=builder /out/b2bua-runner        /usr/local/bin/b2bua-runner
 COPY --from=builder /out/call-limiter-runner /usr/local/bin/call-limiter-runner
 COPY --from=builder /out/cdr-consumer-runner  /usr/local/bin/cdr-consumer-runner

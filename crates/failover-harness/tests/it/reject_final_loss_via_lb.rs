@@ -4,7 +4,7 @@
 //! relayed a non-2xx INVITE final upstream would quench the worker's §17.2.1
 //! Timer G — the ONLY retransmitter of the final in the whole system (the
 //! worker's auto-100 already silences the caller's INVITE Timer A) — while the
-//! relay itself stays exactly-once (the proxy is transaction-less, ADR-0022
+//! relay itself sends each copy once (the proxy is transaction-less, ADR-0022
 //! X4). Lose that single relayed copy and the caller never sees the reject at
 //! all: nothing retransmits, the caller wedges to Timer B / the 32 s safety
 //! ceiling, the call lands `torn_down`.
@@ -23,6 +23,8 @@
 //! proves the full recovery loop: Timer G re-sends at ~500 ms → the proxy
 //! relays the retransmit → alice receives + ACKs → the ACK crosses the proxy
 //! back to the worker → Timer G is quenched (no third copy) → the call reaps.
+//!
+//! Beyond the failover sweep: a lone worker's Timer G recovery of a lost final, with no node fault.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

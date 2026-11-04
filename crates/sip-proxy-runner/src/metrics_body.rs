@@ -1,9 +1,10 @@
 //! The proxy's `/metrics` body and its catalogue: the data path, the
-//! proxy-self gate, the process-wide observability counters, then the
-//! allocator's exposition.
+//! proxy-self gate, the branch memo, the process-wide observability
+//! counters, then the allocator's exposition.
 
 use metric_catalogue::Catalogue;
-use sip_proxy::observability::catalogue::{PROXY, SELF_GATE};
+use sip_proxy::cancel_lru::CancelBranchLru;
+use sip_proxy::observability::catalogue::{BRANCH_MEMO, PROXY, SELF_GATE};
 use sip_proxy::observability::metrics::self_gate_text;
 use sip_proxy::self_gate::ProxySelfGateMetrics;
 use sip_proxy::ProxyMetrics;
@@ -14,6 +15,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
     sections: &[
         PROXY,
         SELF_GATE,
+        BRANCH_MEMO,
         sip_proxy::supervise::FAMILIES,
         metric_values::poison::FAMILIES,
         observe::counters::FAMILIES,
@@ -22,16 +24,19 @@ pub const CATALOGUE: Catalogue = Catalogue {
 };
 
 /// The `/metrics` body: the data path, the self gate (`None` for the
-/// always-admit gate), the restarted tasks, the metric rows' lock
+/// always-admit gate), the branch memo `memo` read at this scrape, the
+/// restarted tasks, the metric rows' lock
 /// recoveries, the dropped log lines and
 /// trace-admission denials (ADR-0026), then `allocator`.
 pub fn body(
     metrics: &ProxyMetrics,
     gate: Option<&ProxySelfGateMetrics>,
+    memo: &CancelBranchLru,
     allocator: &dyn Fn() -> String,
 ) -> String {
     let mut t = metrics.prometheus_text();
     t.push_str(&self_gate_text(gate));
+    t.push_str(&memo.prometheus_text());
     t.push_str(&sip_proxy::supervise::prometheus_text());
     t.push_str(&metric_values::poison::prometheus_text());
     t.push_str(&observe::counters::prometheus_text());
@@ -63,7 +68,8 @@ mod tests {
             emergency_bypassed_total: 5,
         };
         for gate in [Some(&gate), None] {
-            let text = body(&metrics, gate, &jemalloc_stats::prometheus_text);
+            let memo = CancelBranchLru::new();
+            let text = body(&metrics, gate, &memo, &jemalloc_stats::prometheus_text);
             if let Err(mismatches) = CATALOGUE.check(&text) {
                 panic!("{mismatches:#?}\n{text}");
             }

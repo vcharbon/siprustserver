@@ -25,7 +25,7 @@ const Result = ({ entry }: { entry: TriageCallHistoryEntry }): JSX.Element => {
     <>
       <span className={`tag ${state.tone}`} title={entry.skipped ?? undefined}>{state.label}</span>
       {entry.errorRule !== null && <span className="mono"> {entry.errorRule}</span>}
-      {entry.errorExpected !== null && <span className="muted"> — waited for {entry.errorExpected}</span>}
+      {entry.errorExpected !== null && <span className="muted"> · expected {entry.errorExpected}</span>}
     </>
   )
 }
@@ -50,18 +50,18 @@ export const CallLanes = (
     () => Promise.all([api.triageCallHistory(capture, caseId), api.lanes()]),
     `${capture}#${caseId}`
   )
-  if (history.state === "loading") return <p className="muted">loading this call's history…</p>
+  if (history.state === "loading") return <p className="muted">loading…</p>
   if (history.state === "error") return <p className="error">history: {history.message}</p>
   const [{ latest: runs, recent }, known] = history.value
   const latest = new Map(runs.map((entry) => [entry.lane, entry]))
   const shown = known.lanes.map((one) => one.lane)
   const features = recent[0]?.features ?? []
   return (
-    <section className="call-lanes">
+    <section className="panel call-lanes">
       <p className="counts">
         <span className="muted">features:</span>
         {features.length === 0
-          ? <span className="muted">none recorded</span>
+          ? <span className="muted">none</span>
           : features.map((feature) => (
             <Link key={feature} to={href.triage({ lane, scope: "all", feature })} className="tag">{feature}</Link>
           ))}
@@ -97,7 +97,7 @@ export const CallLanes = (
       </table>
       {recent.length > 0 && (
         <details>
-          <summary className="muted">recent runs, every lane ({recent.length})</summary>
+          <summary className="muted">recent runs <span className="count">{recent.length}</span></summary>
           <table className="listing call-lanes-table">
             <tbody>
               {recent.map((entry) => (

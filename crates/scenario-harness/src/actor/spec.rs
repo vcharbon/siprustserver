@@ -35,10 +35,11 @@ pub struct ActorCall {
     pub automatics: Automatics,
     /// The controller's per-barrier / goal-guard wait ceiling for this call.
     /// `None` uses [`STEP_TIMEOUT`] (`64·T1 = 32 s`, the protocol re-emission
-    /// bound). A plan whose honoured inter-message dwells span longer than that
-    /// (a capture-replay honouring the wire timing) sets a larger ceiling so a
-    /// long-but-healthy call does not trip `torn_down`; free under a paused clock,
-    /// the honest wall duration on a real one.
+    /// bound). Each wait is counted past the end of the last dwell a party
+    /// still owes ([`super::Pacing`]: a ring, a goal's delay, a keepalive
+    /// cadence, a held ACK, a retry back-off), so a dwell of any length needs no
+    /// larger ceiling; a plan sets one only where it waits longer than that on
+    /// a message no dwell of its own paces.
     pub ceiling: Option<std::time::Duration>,
     /// The plan's accepted-delta policy (ADR-0024 §6), riding the plan like
     /// `waivers`. `None` (the default) = hook absent, behavior unchanged.
@@ -150,9 +151,19 @@ pub async fn run_actor_scenario(
     env: &CallEnv<'_>,
     ctx: &CallCtx,
 ) -> ScenarioVerdict {
+    run_actor_scenario_observed(scenario, env, ctx).await.0
+}
+
+/// [`run_actor_scenario`], with the call's observed state for a reader that
+/// judges a failed verdict against what each leg was left with.
+pub async fn run_actor_scenario_observed(
+    scenario: &dyn ActorScenario,
+    env: &CallEnv<'_>,
+    ctx: &CallCtx,
+) -> (ScenarioVerdict, ObservedState) {
     match scenario.build(env) {
-        Ok(call) => run_built_actor_call(call, env, ctx).await,
-        Err(cause) => ScenarioVerdict::build_failure(cause),
+        Ok(call) => run_built_actor_call_observed(call, env, ctx).await,
+        Err(cause) => (ScenarioVerdict::build_failure(cause), ObservedState::new()),
     }
 }
 
@@ -165,6 +176,14 @@ pub async fn run_built_actor_call(
     env: &CallEnv<'_>,
     ctx: &CallCtx,
 ) -> ScenarioVerdict {
+    run_built_actor_call_observed(call, env, ctx).await.0
+}
+
+async fn run_built_actor_call_observed(
+    call: ActorCall,
+    env: &CallEnv<'_>,
+    ctx: &CallCtx,
+) -> (ScenarioVerdict, ObservedState) {
     let ActorCall {
         actors,
         plan,
@@ -181,8 +200,7 @@ pub async fn run_built_actor_call(
     let caller = originating_role(&actors);
     let expect = expect.in_context(env);
     let obs = ObservedState::new();
-    // A plan whose honoured dwells span longer than the standard re-emission
-    // bound raises the controller ceiling; the default is `STEP_TIMEOUT`.
+    // An explicit ceiling replaces the standard re-emission bound.
     let step_timeout = ceiling.unwrap_or(STEP_TIMEOUT);
     // The deferred-auth adapter (RFC 3261 §22.2) reaches the caller's
     // establishing INVITE from the call env — `None` on every current surface
@@ -213,7 +231,7 @@ pub async fn run_built_actor_call(
             ));
         }
     }
-    verdict(expect, run, &obs, caller)
+    (verdict(expect, run, &obs, caller), obs)
 }
 
 /// The per-barrier / per-goal-guard wait bound: `64·T1 = 32 s` — the protocol's

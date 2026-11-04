@@ -37,6 +37,13 @@ pub struct RfcFinding {
     /// rule pinpoints one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offending: Option<usize>,
+    /// The offending message as the run's recording holds it: its leg and that
+    /// leg's `seq`. `offending` numbers the audit's own wire order, which the
+    /// recording's arrival order need not match (two legs' datagrams may share
+    /// an instant); this names the one message unambiguously. Absent where the
+    /// rule pinpoints none, or no leg recorded the datagram.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offending_message: Option<MessageRef>,
     /// The bind the rule holds RESPONSIBLE (`ip:port`, or `ip:port#label` for
     /// a labelled sub-lane): the one that emitted the offending message, or
     /// owed the one never emitted. `lane` is where the
@@ -75,6 +82,15 @@ pub struct RfcFinding {
     /// never read its captured trace's violations. Information only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unjudged: Option<String>,
+}
+
+/// One recorded message of a run: the leg whose `recording/<leg>.jsonl` holds
+/// it, and its `seq` there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MessageRef {
+    pub leg: String,
+    pub seq: u64,
 }
 
 /// What the post-run audit came to.
@@ -129,6 +145,7 @@ mod tests {
             advisory: !gating,
             gating,
             offending: Some(7),
+            offending_message: Some(MessageRef { leg: "A".into(), seq: 3 }),
             charged: Some("127.0.0.1:5080".into()),
             actor: None,
             cancelled_by: None,

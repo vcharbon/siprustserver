@@ -5,12 +5,15 @@
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use sip_retransmit::Class;
 use tokio::sync::mpsc;
 
-use crate::event::{EventQueueClass, TransactionEvent};
+use crate::event::EventQueueClass;
+use crate::event::TransactionEvent;
 use crate::invite_class::InviteClass;
+use crate::layer::EventAges;
 
 mod by_class;
 mod retransmits;
@@ -40,6 +43,8 @@ pub(crate) struct MetricsInner {
     /// Critical events waiting on the retry deque right now (gauge), sampled
     /// at the end of every owner turn.
     pub event_queue_deferred: AtomicUsize,
+    /// Out-of-dialog OPTIONS the full keepalive lane dropped (counter).
+    pub keepalive_lane_drops: AtomicU64,
     /// Deferred requests removed because the server transaction that
     /// admitted them left the map unanswered — at its backstop, or reaped by
     /// the sweep (counter).
@@ -51,6 +56,9 @@ pub(crate) struct MetricsInner {
     /// INVITEs refused at a deferred-backlog ceiling, indexed by
     /// [`InviteClass::index`] (counter).
     pub deferred_refused: ByClass<{ InviteClass::ALL.len() }>,
+    /// INVITEs refused at receipt while the consumer's new-call gate was set,
+    /// indexed by [`InviteClass::index`] (counter).
+    pub new_call_gate_refused: ByClass<{ InviteClass::ALL.len() }>,
     /// Copies of a refused INVITE answered that refusal again before any
     /// transaction held them (counter).
     pub refused_copies: AtomicU64,
@@ -94,6 +102,11 @@ pub(crate) struct MetricsInner {
     /// run its Timer G ladder). A materialisation that answered an INVITE it
     /// never seeded shows here; a healthy node holds it at zero.
     pub server_final_unseen_branch: AtomicU64,
+    /// Requests whose top-Via stamp (RFC 3261 §18.2.1, RFC 3581 §4) the
+    /// render could not write: handed on as received, their responses still
+    /// sent to the stamp's response target. A healthy peer set holds it at
+    /// zero.
+    pub via_stamps_unwritten: AtomicU64,
     /// Responses the TU handed over under a To-tag other than the one this
     /// layer had bound to the transaction or dialog, re-rendered under the
     /// bound tag before they left (RFC 3261 §9.2, §12.1.1). A climb is a TU
@@ -143,9 +156,11 @@ impl MetricsInner {
             event_queue_drops: ByClass::new(),
             event_queue_deferrals: ByClass::new(),
             event_queue_deferred: AtomicUsize::new(0),
+            keepalive_lane_drops: AtomicU64::new(0),
             deferred_swept: AtomicU64::new(0),
             sweep_reaped: AtomicU64::new(0),
             deferred_refused: ByClass::new(),
+            new_call_gate_refused: ByClass::new(),
             refused_copies: AtomicU64::new(0),
             txn_orphaned_on_call_evict: AtomicU64::new(0),
             orphaned_transactions: AtomicUsize::new(0),
@@ -157,6 +172,7 @@ impl MetricsInner {
             txn_seeded: AtomicU64::new(0),
             txn_seed_skipped: AtomicU64::new(0),
             server_final_unseen_branch: AtomicU64::new(0),
+            via_stamps_unwritten: AtomicU64::new(0),
             to_tag_coerced: AtomicU64::new(0),
             to_tag_filled: AtomicU64::new(0),
             fallback_to_tag_used: AtomicU64::new(0),
@@ -187,11 +203,17 @@ pub struct TransactionMetrics {
     /// A clone of the output `events` sender — its capacity is how we read the
     /// bounded queue's depth/capacity without owning the receiver.
     events_tx: mpsc::Sender<TransactionEvent>,
+    /// The entry stamps of the events in that queue.
+    ages: Arc<EventAges>,
 }
 
 impl TransactionMetrics {
-    pub(crate) fn new(inner: Arc<MetricsInner>, events_tx: mpsc::Sender<TransactionEvent>) -> Self {
-        Self { inner, events_tx }
+    pub(crate) fn new(
+        inner: Arc<MetricsInner>,
+        events_tx: mpsc::Sender<TransactionEvent>,
+        ages: Arc<EventAges>,
+    ) -> Self {
+        Self { inner, events_tx, ages }
     }
 
     /// Current number of active transactions (gauge).
@@ -217,6 +239,18 @@ impl TransactionMetrics {
     /// Current depth of the bounded event queue (gauge).
     pub fn event_queue_depth(&self) -> usize {
         self.events_tx.max_capacity() - self.events_tx.capacity()
+    }
+
+    /// How long the oldest event in the queue has waited, read now; zero
+    /// while the queue is empty (gauge). A consumer that takes nothing still
+    /// reads it grow.
+    pub fn event_queue_delay(&self) -> Duration {
+        self.ages.oldest()
+    }
+
+    /// Out-of-dialog OPTIONS the full keepalive lane dropped (counter).
+    pub fn keepalive_lane_drops(&self) -> u64 {
+        self.inner.keepalive_lane_drops.load(Ordering::Relaxed)
     }
 
     /// Ordinary events the full output queue dropped, by class. Counted per
@@ -260,6 +294,13 @@ impl TransactionMetrics {
     /// (counter).
     pub fn deferred_refused(&self, class: InviteClass) -> u64 {
         self.inner.deferred_refused.get(class.index())
+    }
+
+    /// INVITEs refused at receipt while the consumer's new-call gate was set
+    /// ([`NewCallGate`](crate::NewCallGate)), by class; a later copy drew the
+    /// same refusal and is not counted again (counter).
+    pub fn new_call_gate_refused(&self, class: InviteClass) -> u64 {
+        self.inner.new_call_gate_refused.get(class.index())
     }
 
     /// Copies of a refused INVITE — at this layer or a stage ahead of it —
@@ -351,6 +392,12 @@ impl TransactionMetrics {
     /// Non-2xx INVITE finals dropped on an unseen branch (counter, expected 0).
     pub fn server_final_unseen_branch(&self) -> u64 {
         self.inner.server_final_unseen_branch.load(Ordering::Relaxed)
+    }
+
+    /// Requests handed on with a top-Via stamp the render could not write
+    /// (counter, expected 0).
+    pub fn via_stamps_unwritten(&self) -> u64 {
+        self.inner.via_stamps_unwritten.load(Ordering::Relaxed)
     }
 
     /// Counts one non-2xx INVITE final dropped on an unseen branch, as the

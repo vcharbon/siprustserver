@@ -1,14 +1,16 @@
-//! The orchestrator's hand on membership: withdrawing, flapping, departing
-//! and re-admitting a worker in the proxy's registry and every live peer's
-//! membership, each recorded on the views ledger.
+//! The orchestrator's hand on membership: withdrawing, flapping, departing,
+//! re-admitting and force-deleting a worker in the proxy's registry and every
+//! live peer's membership, each recorded on the views ledger. A member is
+//! bound to the worker identity of its newest incarnation (ADR-0055 §6).
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use sip_proxy::registry::WorkerHealth;
 use sip_proxy::ProxyAddr;
 use topology::Peer;
 
-use super::FailoverHarness;
+use super::{incarnation_key, FailoverHarness, ReplicatedB2buaSut};
 use crate::views::Belief;
 
 impl FailoverHarness {
@@ -130,16 +132,73 @@ impl FailoverHarness {
     /// **Re-admit `ordinal` at `addr`** — the counterpart of
     /// [`withdraw`](Self::withdraw): the proxy publishes the endpoint again at
     /// `addr` with health `Unknown` (nothing has probed it yet) and every other
-    /// live worker's membership re-adds the peer.
+    /// live worker's membership re-adds the peer, bound to its newest
+    /// incarnation.
     pub fn readmit(&mut self, ordinal: &str, addr: SocketAddr) {
         self.mark(ordinal, None, "readmit", &format!("endpoint published at {addr}"));
-        self.publish(ordinal, addr);
+        self.publish(ordinal, addr, "readmit");
+    }
+
+    /// **Publish `node` once it is ready** — its readiness probe passing puts
+    /// it in the slice: pumps until `node` reports ready, then
+    /// [`readmit`](Self::readmit)s its ordinal at its address. `false`, with
+    /// nothing published, when it is not ready within 30 s.
+    pub async fn readmit_once_ready(&mut self, node: &ReplicatedB2buaSut) -> bool {
+        let ready = self
+            .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
+                node.is_ready()
+            })
+            .await;
+        if ready {
+            self.readmit(node.ordinal(), node.sip_addr());
+        }
+        ready
+    }
+
+    /// **Publish `ordinal` to its own informer only** — the slice lists its
+    /// newest incarnation and the worker has seen it before the proxy and every
+    /// peer: it reads its own endpoint ready while nothing routes to it
+    /// and no peer pulls it as rejoined. [`readmit`](Self::readmit) publishes it
+    /// to the rest.
+    pub fn publish_to_itself(&mut self, ordinal: &str) {
+        self.mark(ordinal, None, "publish_to_itself", "its own informer lists the endpoint");
+        let member = self.bound_member(ordinal);
+        for (_, membership) in self.views.live_incarnations_of(ordinal) {
+            membership.add(member.clone());
+        }
+    }
+
+    /// **Force-delete `ordinal`** — the orchestrator removes the pod without
+    /// waiting for its process, and recreates the ordinal at once: a
+    /// replacement incarnation comes up beside the still-running elder
+    /// ([`spawn_replacement`](Self::spawn_replacement)) and the endpoint is
+    /// re-bound to it in one step, the proxy's registry and every live
+    /// membership included — the elder's own, which shows it its ordinal
+    /// bound to another worker identity. Returns the replacement.
+    pub async fn force_delete(&mut self, ordinal: &str) -> ReplicatedB2buaSut {
+        let replacement = self.spawn_replacement(ordinal).await;
+        let addr = replacement.sip_addr();
+        self.mark(
+            ordinal,
+            None,
+            "force_delete",
+            &format!("endpoint re-bound to {} at {addr}", replacement.incarnation_key()),
+        );
+        self.publish(ordinal, addr, "force_delete");
+        replacement
+    }
+
+    /// `ordinal` as the informer lists it: bound to the worker identity of its
+    /// newest incarnation.
+    pub(super) fn bound_member(&self, ordinal: &str) -> Peer {
+        let gen = self.views.max_gen(ordinal).max(1);
+        Peer::new(ordinal, ordinal).with_identity(incarnation_key(ordinal, gen))
     }
 
     /// Publish `ordinal` at `addr` in the proxy's registry (`Unknown`) and in
-    /// every live peer's membership.
-    fn publish(&mut self, ordinal: &str, addr: SocketAddr) {
-        self.views.record("orchestrator", ordinal, Belief::Admitted, "readmit");
+    /// every live peer's membership, bound to its newest incarnation.
+    fn publish(&mut self, ordinal: &str, addr: SocketAddr, signal: &str) {
+        self.views.record("orchestrator", ordinal, Belief::Admitted, signal);
         if let Some(registry) = self.views.proxy_registry() {
             registry.add(sip_proxy::registry::WorkerEntry {
                 health: WorkerHealth::Unknown,
@@ -148,19 +207,15 @@ impl FailoverHarness {
                     ProxyAddr::new(addr.ip().to_string(), addr.port()),
                 )
             });
-            self.views.record(
-                "proxy",
-                ordinal,
-                Belief::Registered(WorkerHealth::Unknown),
-                "readmit",
-            );
+            self.views.record("proxy", ordinal, Belief::Registered(WorkerHealth::Unknown), signal);
         }
+        let member = self.bound_member(ordinal);
         for (observer, membership) in self.views.live_peers_of(ordinal) {
-            membership.add(Peer::new(ordinal, ordinal));
-            self.views.record(&observer, ordinal, Belief::PeerActive, "readmit");
+            membership.add(member.clone());
+            self.views.record(&observer, ordinal, Belief::PeerActive, signal);
         }
         for (_, membership) in self.views.live_incarnations_of(ordinal) {
-            membership.add(Peer::new(ordinal, ordinal));
+            membership.add(member.clone());
         }
     }
 }

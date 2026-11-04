@@ -47,13 +47,17 @@ pub fn answered_invite(
         })
 }
 
-/// Whether `ladder`'s leg already sent a final to its INVITE CSeq `cseq`.
-pub fn invite_answered(ladder: &[RecordedMessage], cseq: u32) -> bool {
+/// Whether `ladder`'s leg already sent a final to its INVITE CSeq `cseq`; under
+/// the fork whose To-tag is `fork_tag`, a final that fork sent. Each fork of a
+/// forked INVITE is its own UAS, so a later fork's own 2xx is a final of its
+/// own (RFC 3261 §13.2.2.4), never a second final of the first fork's.
+pub fn invite_answered(ladder: &[RecordedMessage], cseq: u32, fork_tag: Option<&str>) -> bool {
     ladder.iter().filter(|m| m.dir == Dir::Out).any(|m| {
         matches!(parse(m.wire()), Some(SipMessage::Response(r))
             if r.status() >= 200
                 && r.cseq().seq() == cseq
-                && *r.cseq().method() == Method::Invite)
+                && *r.cseq().method() == Method::Invite
+                && fork_tag.is_none_or(|tag| r.to().tag() == Some(tag)))
     })
 }
 
@@ -256,10 +260,23 @@ mod tests {
             (Dir::Out, final_to(200, 1), Some("r1")),
         ]);
         assert_eq!(answered_invite(&steps, 3, &rec), None, "t2's INVITE is still to come");
-        let moot = answered_invite(&steps, 3, &rec).is_some_and(|c| invite_answered(&rec, c));
+        let moot = answered_invite(&steps, 3, &rec).is_some_and(|c| invite_answered(&rec, c, None));
         assert!(!moot, "r2 answers nothing yet: it stays to be composed, loudly");
-        assert!(invite_answered(&rec, 1));
-        assert!(!invite_answered(&rec, 2));
+        assert!(invite_answered(&rec, 1, None));
+        assert!(!invite_answered(&rec, 2, None));
+    }
+
+    /// A fork's own final is told by its To-tag: the 2xx one fork sent leaves
+    /// the INVITE unanswered under another fork's tag (RFC 3261 §13.2.2.4).
+    #[test]
+    fn a_fork_s_final_answers_only_under_its_own_tag() {
+        let rec = ladder(&[
+            (Dir::In, invite(1, None), Some("t1")),
+            (Dir::Out, final_to(200, 1), Some("r1")),
+        ]);
+        assert!(invite_answered(&rec, 1, Some("b1")), "the fork tagged b1 answered");
+        assert!(!invite_answered(&rec, 1, Some("b2")), "the fork tagged b2 has not");
+        assert!(invite_answered(&rec, 1, None), "the leg as a whole has");
     }
 
     fn ack_expect(id: &str) -> String {

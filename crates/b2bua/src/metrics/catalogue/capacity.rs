@@ -1,9 +1,13 @@
 //! The capacity gate's families: its level, its last RSS sample, its
-//! ceilings, and the backup replicas it kept out.
+//! ceilings, the backup replicas it kept out, and the live calls left with no
+//! backup; the replication hold's: its outbox depth, its releases by reason,
+//! and the flows this node serves by state.
 
 use metric_catalogue::{assert_exposition_order, label_values, Dim, Family, Labels};
 
 use crate::capacity::BackupBound;
+use crate::repl::FlowLiveness;
+use crate::turn_probe::Released;
 
 /// A live-call ceiling's bound.
 pub const CEILING_BOUND: Dim = Dim::new("bound", &["calls", "transactions", "rss"]);
@@ -16,6 +20,18 @@ const BACKUP_BOUND_VALUES: [&str; 2] = label_values!(BackupBound::ALL, BackupBou
 pub const BACKUP_BOUND: Dim = Dim::new("bound", &BACKUP_BOUND_VALUES);
 
 assert_exposition_order!(BackupBound: Calls, Rss);
+
+const RELEASE_REASON_VALUES: [&str; 5] = label_values!(Released::ALL, Released::label);
+/// Why an outbox entry left, indexed like [`Released::ALL`].
+pub const RELEASE_REASON: Dim = Dim::new("reason", &RELEASE_REASON_VALUES);
+
+assert_exposition_order!(Released: AtOnce, Applied, Capped, BackupLost, CallReleased);
+
+const FLOW_STATE_VALUES: [&str; 3] = label_values!(FlowLiveness::ALL, FlowLiveness::label);
+/// A served flow's state, indexed like [`FlowLiveness::ALL`].
+pub const FLOW_STATE: Dim = Dim::new("state", &FLOW_STATE_VALUES);
+
+assert_exposition_order!(FlowLiveness: Live, Stale, Down);
 
 pub const CAPACITY_LEVEL: Family = Family::gauge(
     "b2bua_capacity_level",
@@ -42,4 +58,28 @@ pub const REPL_BACKUP_SHED: Family = Family::counter(
     "b2bua_repl_backup_shed_total",
     Labels::Product(&[BACKUP_BOUND]),
     "Backup replicas not stored because a backup ceiling was reached.",
+);
+
+pub const REPL_CALLS_UNBACKED: Family = Family::gauge(
+    "b2bua_repl_calls_unbacked",
+    Labels::None,
+    "live calls of this node with no backup for life: admitted over a backlog high-water mark, or refused by their backup at its ceiling (ADR-0055 §3)",
+);
+
+pub const REPL_OUTBOX_DEPTH: Family = Family::gauge(
+    "b2bua_repl_outbox_depth",
+    Labels::None,
+    "outbox entries queued across every call, waiting for their backup to apply the write that records them (ADR-0055 §3)",
+);
+
+pub const REPL_OUTBOX_RELEASED: Family = Family::counter(
+    "b2bua_repl_outbox_released_total",
+    Labels::Product(&[RELEASE_REASON]),
+    "outbox entries released under the applied sync level, by why they left (ADR-0055 §3): no_live_backup, the call had no live, bootstrapped backup to wait for (none, a call unbacked by design included, or its flow stale or down: a backup with no position report for the claim TTL; alert on b2bua_repl_serving_flows{state=\"stale\"} instead); applied, the backup applied the write that records them; capped, the sync cap expired first; backup_lost, the flow to the backup went down first; call_released, the call was released here and its copy's write records them. Anything but applied left unprotected by the hold",
+);
+
+pub const REPL_SERVING_FLOWS: Family = Family::gauge(
+    "b2bua_repl_serving_flows",
+    Labels::Product(&[FLOW_STATE]),
+    "the replication flows this node serves, two per peer log (one per partition), by state (ADR-0031 D2, ADR-0055 §3): live, connected with a position claim inside the claim TTL, what the hold waits on; stale, connected with no fresh claim, a bootstrap in flight or a peer that stopped answering; down, no flow connected. Sampled on the gauge cadence",
 );

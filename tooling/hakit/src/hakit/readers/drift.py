@@ -253,8 +253,9 @@ class Drift:
         self.check("gauges back to their baseline", verdict, "; ".join(rows))
 
     def quiet_zero(self) -> None:
-        """Each `quiet_zero_increase` counter grows by nothing between the
-        padded windows, from the load's start to the drained read."""
+        """Each `quiet_zero_increase` counter, a name or a selector with its
+        labels, grows by nothing between the padded windows, from the load's
+        start to the drained read."""
         sp = self.spec
         spans: list[tuple[float, float]] = []
         t = self.view.load_start_s + sp.quiet_pad_s
@@ -269,7 +270,7 @@ class Drift:
             grew: list[str] = []
             unread = 0
             for a, b in spans:
-                r = self.vm.at(f"sum(increase({m}{{{self.ns}}}[{int(b - a)}s]))", b)
+                r = self.vm.at(f"sum(increase({with_labels(m, self.ns)}[{int(b - a)}s]))", b)
                 if not r:
                     unread += 1
                 elif round(r[0][1]) > 0:

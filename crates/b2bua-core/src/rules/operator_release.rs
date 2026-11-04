@@ -1,11 +1,13 @@
 //! `operator-release` (ADR-0050 §10): the turn of one call an operator's
-//! release-all reached, sent as a [`TOPIC`] event. A call already ending is
-//! left to its teardown: the rule does not run while terminating.
+//! release-all reached, sent as a [`TOPIC`] event; a drain's grace sends the
+//! same event, with the [`AT_DRAIN_GRACE`] outcome, to each call no peer holds
+//! (ADR-0055 §3). A call already ending is left to its teardown: the rule does
+//! not run while terminating.
 //!
 //! - An answered call ends with no BYE: a 2xx whose ACK this stack can compose
 //!   is ACKed (RFC 3261 §13.2.2.4), a leg still ringing is CANCELled
 //!   (§9.1), every other leg is let go as it stands. The ordinary release then
-//!   closes the record, frees the holds and deletes the replica.
+//!   closes the record, frees the holds and deletes every stored copy.
 //! - A call in setup is aborted: `503` to the caller, then the ordinary
 //!   teardown CANCELs a ringing callee.
 
@@ -16,6 +18,8 @@ use b2bua_sdk::model::{
     LegEnd, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, CORE_LAYER,
 };
 
+use b2bua_sdk::event::CallEvent;
+
 use crate::rules::defaults::still_owed_bare_ack;
 
 /// The topic of the internal event that releases one call.
@@ -23,6 +27,13 @@ pub const TOPIC: &str = "operator-release";
 
 /// The reason the closing CDR event of a released call carries.
 pub const REASON: &str = "operator_release";
+
+/// The outcome of the release a drain's grace sends.
+pub const AT_DRAIN_GRACE: &str = "drain-grace";
+
+/// The reason the closing CDR event of a call released at a drain's grace
+/// carries.
+pub const DRAIN_GRACE_REASON: &str = "drain_grace";
 
 /// The operator-release rule family: CORE, its match unique to its topic.
 pub fn operator_release_rules() -> Vec<RuleDefinition> {
@@ -37,11 +48,15 @@ pub fn operator_release_rules() -> Vec<RuleDefinition> {
 
 fn operator_release(ctx: &RuleContext) -> Option<RuleHandleResult> {
     let call = &ctx.call;
+    let reason = match ctx.event {
+        CallEvent::InternalEvent { outcome, .. } if outcome == AT_DRAIN_GRACE => DRAIN_GRACE_REASON,
+        _ => REASON,
+    };
     let record = RuleAction::AddCdrEvent {
         event_type: CdrEventType::Bye,
         leg_id: call.a_leg().leg_id.clone(),
         status_code: None,
-        reason: Some(REASON.into()),
+        reason: Some(reason.into()),
     };
     let mut actions = Vec::new();
     if call.caller_answered() {
@@ -67,7 +82,7 @@ fn operator_release(ctx: &RuleContext) -> Option<RuleHandleResult> {
         });
     }
     actions.push(RuleAction::BeginTermination {
-        reason: Some(REASON.into()),
+        reason: Some(reason.into()),
         cause: TerminationCause::OperatorRelease,
         by_leg: None,
     });

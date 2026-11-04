@@ -26,7 +26,7 @@ pub(super) fn seed_service_ext(
         if crate::rules::relay::is_core_reserved_ext(&service_id) {
             continue;
         }
-        call = set_call_ext(call, &service_id, Some(value));
+        set_call_ext(&mut call, &service_id, Some(value));
     }
     call
 }
@@ -38,7 +38,7 @@ pub(super) fn seed_service_ext(
 /// no non-2xx final is refused ([`is_reject_code`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_reject(
-    call: Call,
+    mut call: Call,
     reject: RejectDecision,
     kind: DecisionKind,
     leg_id: Option<String>,
@@ -47,7 +47,7 @@ pub(crate) fn apply_reject(
     ids: &mut TurnIds,
     now_ms: i64,
 ) -> HandlerResult {
-    let call = mark_decision(call, now_ms, kind, leg_id, reject.label);
+    mark_decision(&mut call, now_ms, kind, leg_id, reject.label);
     let call = seed_service_ext(call, reject.service_ext);
     if !is_reject_code(reject.reject_code) {
         tracing::warn!(call_ref = %call.call_ref, code = reject.reject_code, "reject refused: not a non-2xx final");
@@ -100,7 +100,7 @@ pub(crate) const REFUSED_DECISION_REASON: &str = "Server Internal Error";
 /// Contact list. A non-3xx code is refused ([`is_redirect_code`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_redirect(
-    call: Call,
+    mut call: Call,
     redirect: RedirectDecision,
     kind: DecisionKind,
     leg_id: Option<String>,
@@ -109,7 +109,7 @@ pub(crate) fn apply_redirect(
     ids: &mut TurnIds,
     now_ms: i64,
 ) -> HandlerResult {
-    let call = mark_decision(call, now_ms, kind, leg_id, redirect.label);
+    mark_decision(&mut call, now_ms, kind, leg_id, redirect.label);
     let call = seed_service_ext(call, redirect.service_ext);
     if !is_redirect_code(redirect.code) {
         tracing::warn!(call_ref = %call.call_ref, code = redirect.code, "redirect refused: not a 3xx");

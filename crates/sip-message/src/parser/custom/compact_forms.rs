@@ -1,5 +1,5 @@
-//! RFC 3261 §7.3.3 — compact header form expansion. Port of
-//! `src/sip/parsers/custom/compact-forms.ts`.
+//! Compact header form expansion: the forms of RFC 3261 §7.3.3, and
+//! Session-Expires's `x` (RFC 4028 §4).
 
 use super::scanner::Span;
 use crate::sip_str::{SharedText, SipStr};
@@ -51,6 +51,7 @@ fn canonical_of(name: &str) -> Option<&'static str> {
         'k' => Some("Supported"),
         't' => Some("To"),
         'v' => Some("Via"),
+        'x' => Some("Session-Expires"),
         _ => None,
     }
 }

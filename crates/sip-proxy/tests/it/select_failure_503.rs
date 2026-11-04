@@ -5,8 +5,7 @@
 use crate::common;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use common::spawn_proxy;
+use common::{spawn_proxy, FailingSelect};
 use scenario_harness::Harness;
 use sip_message::header::RetryAfter;
 use sip_message::parser::custom::CustomParser;
@@ -14,38 +13,11 @@ use sip_message::HeaderName;
 use sip_message::{SipMessage, SipParser};
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::WorkerRegistry;
-use sip_proxy::strategy::{DecodeResult, RouteParams, SelectError, SelectOpts};
-use sip_proxy::{ProxyAddr, RoutingStrategy};
+use sip_proxy::strategy::SelectError;
+use sip_proxy::RoutingStrategy;
 
 const PROXY: &str = "127.0.0.1:5060";
 const ALICE: &str = "127.0.0.1:5061";
-
-/// Strategy double whose new-dialog selection always fails with the error it
-/// was built with.
-struct FailingSelect(fn() -> SelectError);
-
-#[async_trait]
-impl RoutingStrategy for FailingSelect {
-    fn name(&self) -> &str {
-        "FailingSelect"
-    }
-    async fn select_for_new_dialog(
-        &self,
-        _msg: &SipMessage,
-        _opts: SelectOpts,
-    ) -> Result<ProxyAddr, SelectError> {
-        Err((self.0)())
-    }
-    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
-        DecodeResult::Unknown { is_emergency: false }
-    }
-    fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
-        None
-    }
-    fn stickiness_primary<'p>(&self, _params: &'p RouteParams) -> Option<&'p str> {
-        None
-    }
-}
 
 const BRANCH: &str = "z9hG4bK-capped";
 

@@ -11,12 +11,14 @@ use super::answer::{
     answer_initial_invite, apply_disposition, arm_reject_final, discharge_on_teardown,
     respond_200_sdp,
 };
+use super::clean_end::Ending;
 use super::endpoint::{Disposition, SUBFLOW_REALIGN};
 use super::facts::record_request;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::response::react_response;
 use super::runner::{ActorState, ParkedRequest};
 use super::script::{scripted_wants_cancel, scripted_wants_in_dialog};
+use super::shared_endpoint::Inbox;
 use super::state::{LegPhase, Observation, SubflowState};
 use crate::{Inbound, ServerTxn, StepError};
 
@@ -41,9 +43,9 @@ pub(super) async fn cancel_pending_initial(
         .pending_answer
         .take()
         .map(|ta| ta.uas)
-        .or_else(|| st.pending_prack_answer.take())
-        .or_else(|| st.held_silent.take())
-        .or_else(|| st.held.take())
+        .or_else(|| st.pending_prack_answer.take().map(|t| *t))
+        .or_else(|| st.held_silent.take().map(|t| *t))
+        .or_else(|| st.held.take().map(|t| *t))
         // A script-BOUND initial INVITE (claimed by `ExpectRequest{Initial}`,
         // provisionals already sent on the bound txn) with no scripted CANCEL
         // claim: the automatic mirrors the parked path so the peer never
@@ -57,7 +59,7 @@ pub(super) async fn cancel_pending_initial(
                 return None;
             }
             consumed = Some("200 + 487 on the bound INVITE");
-            st.bound.take()
+            st.bound.take().map(|t| *t)
         })
         .or_else(|| {
             let i = st.parked.iter().position(|p| p.initial)?;
@@ -97,8 +99,8 @@ pub(super) async fn cancel_pending_initial(
 /// bodyless 200 to an offer (RFC 3264 §5).
 pub(super) async fn default_react(st: &mut ActorState<'_>, msg: Inbound) -> Result<(), StepError> {
     match msg {
-        Inbound::Request(txn) => react_request(st, txn).await,
-        Inbound::Response(resp) => react_response(st, resp).await,
+        Inbound::Request(txn) => react_request(st, *txn).await,
+        Inbound::Response(resp) => react_response(st, *resp).await,
     }
 }
 
@@ -106,6 +108,9 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
     let method = uas.request().method().as_str().to_string();
     let is_initial_invite = method == "INVITE" && uas.request().to().tag().is_none();
 
+    if method == "INVITE" && !take_invite(st, &uas) {
+        return Ok(());
+    }
     if is_initial_invite {
         return apply_disposition(st, uas).await;
     }
@@ -202,6 +207,22 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
         return react_in_dialog_request(st, uas).await;
     }
     react_in_dialog_request(st, uas).await
+}
+
+/// Whether `uas` is an INVITE this actor has not taken yet, noting it taken.
+/// A copy of one it took — the same server transaction by its top Via (RFC
+/// 3261 §17.2.3) and the same request by its Call-ID, From-tag and CSeq,
+/// whatever a proxy stamped below the top Via — is a retransmission its
+/// transaction absorbs (§17.2.1; RFC 6026 §7.1 once answered 2xx), never a
+/// second call or a second offer to answer.
+fn take_invite(st: &mut ActorState<'_>, uas: &ServerTxn) -> bool {
+    let req = uas.request();
+    let via = req.top_via();
+    let (host, port) = via.sent_by().pair();
+    let (branch, from_tag) =
+        (via.branch().unwrap_or_default(), req.from().tag().unwrap_or_default());
+    let key = format!("{branch} {host}:{port} {} {from_tag} {}", req.call_id(), req.cseq().seq());
+    branch.is_empty() || st.taken_invites.insert(key)
 }
 
 /// The reactive in-dialog answer table — shared by the live dispatch and the
@@ -304,6 +325,7 @@ pub(super) async fn react_in_dialog_request(
             discharge_on_teardown(st, now);
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
+            super::clean_end::end_cleanly(st, Ending::Bye, now);
         }
         // A CANCEL (RFC 3261 §9.2): always 200 the CANCEL. If the INVITE is
         // still PENDING (a ring not yet answered, or a reliable 183 held for its
@@ -319,6 +341,7 @@ pub(super) async fn react_in_dialog_request(
         }
         // In-dialog non-offer requests: 200 and fold the CSeq into the dialog's
         // gap detector (all methods share the dialog CSeq space, §12.2.1.1).
+        // A NOTIFY ending her own subscription is a clean end too.
         "NOTIFY" | "OPTIONS" | "INFO" | "MESSAGE" => {
             uas.respond(200, "OK").try_send().await?;
             st.obs.record(
@@ -330,6 +353,9 @@ pub(super) async fn react_in_dialog_request(
                 },
                 now,
             );
+            if method == "NOTIFY" && super::clean_end::ends_own_subscription(st, uas.request()) {
+                super::clean_end::end_cleanly(st, Ending::Notify, now);
+            }
         }
         // An in-dialog (re-)INVITE — an offer realign. Answer 200 WITH SDP; a
         // delayed-offer bodyless re-INVITE still gets 200 + our SDP (no
@@ -427,56 +453,8 @@ pub(super) async fn react_in_dialog_request(
                 maybe_answer_held_invite(st).await?;
             }
         }
-        // A PRACK (RFC 3262) for our reliable 183: 200 it, then — MUST-014 — this
-        // is the trigger to answer 200 to the HELD INVITE txn (the reliable
-        // provisional's whole point: no 200-to-INVITE before the PRACK). A
-        // FORKING callee (C1/E3) answers only on the WINNER fork's PRACK — a
-        // losing fork's PRACK (identified by its To-tag) is 200'd and absorbed.
-        "PRACK" => {
-            // After this leg's own final (or its BYE) the early dialog the
-            // PRACK names is gone: 481 (RFC 3261 §12.2.2, RFC 3262 §3).
-            if st.obs.with_snapshot(|s| s.leg(st.role).phase() == LegPhase::Terminated) {
-                uas.respond(481, "Call/Transaction Does Not Exist").try_send().await?;
-                return Ok(());
-            }
-            st.ctx.anchor(&st.agent, "prack", uas.request());
-            let prack_tag = uas.request().to().tag().map(str::to_owned);
-            uas.respond(200, "OK").try_send().await?;
-            if let Some(tag) = &prack_tag {
-                st.unpracked.remove(tag);
-            }
-            st.obs.record(
-                Observation::InDialogRequest {
-                    leg: st.role,
-                    call_id: call_id.to_string(),
-                    cseq,
-                    method: method.clone(),
-                },
-                now,
-            );
-            // C5: this callee holds the INVITE for an early UPDATE — mark the
-            // 183 PRACKed and release the held 200 only once the UPDATE is also
-            // done (MUST-014 + RFC 3311 §5.1, in either arrival order).
-            if st.hold_for_early_update {
-                st.early_pracked = true;
-                maybe_answer_held_invite(st).await?;
-                return Ok(());
-            }
-            let releases_answer = match (&mut st.fork_answer, prack_tag.as_deref()) {
-                // Forking: the winner fork's PRACK (or, for an unrung winner,
-                // the last fork's PRACK) releases the 200.
-                (Some(f), Some(tag)) => f.releases_on_prack(tag),
-                (Some(_), None) => false,
-                // Non-forking reliable answer: any PRACK releases (as before).
-                (None, _) => true,
-            };
-            if releases_answer {
-                if let Some(inv_txn) = st.pending_prack_answer.take() {
-                    let fork = st.fork_answer.take();
-                    answer_initial_invite(st, inv_txn, fork).await?;
-                }
-            }
-        }
+        // Boxed: its state stays off the reactor future's own.
+        "PRACK" => Box::pin(super::prack_rx::react_prack(st, uas)).await?,
         // Any other in-dialog method: a plain 200 (dialog-neutral).
         _ => {
             uas.respond(200, "OK").try_send().await?;
@@ -489,11 +467,25 @@ pub(super) async fn react_in_dialog_request(
 /// INVITE 200, but only once BOTH the reliable 183 is PRACKed (RFC 3262
 /// MUST-014) AND the early UPDATE is 200'd (RFC 3311 §5.1) — regardless of the
 /// order those two arrive in. A no-op otherwise.
-async fn maybe_answer_held_invite(st: &mut ActorState<'_>) -> Result<(), StepError> {
+pub(super) async fn maybe_answer_held_invite(st: &mut ActorState<'_>) -> Result<(), StepError> {
     if st.hold_for_early_update && st.early_pracked && st.early_updated {
         if let Some(inv_txn) = st.pending_prack_answer.take() {
-            answer_initial_invite(st, inv_txn, None).await?;
+            answer_initial_invite(st, *inv_txn, None).await?;
         }
+    }
+    Ok(())
+}
+
+/// React to the inbound already queued while `pending` holds, so what landed
+/// before a step (a final, a CANCEL) is handled before it.
+pub(super) async fn react_queued(
+    st: &mut ActorState<'_>,
+    inbox: &mut Inbox,
+    pending: fn(&ActorState<'_>) -> bool,
+) -> Result<(), StepError> {
+    while pending(st) {
+        let Some(m) = inbox.try_take().await else { break };
+        default_react(st, m).await?;
     }
     Ok(())
 }

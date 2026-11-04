@@ -2,16 +2,17 @@
 //! events, whichever rule claimed the turn, within what a lifecycle handler
 //! may do; and a guard timer is declared by its type and its scope's kind.
 
+use super::fixtures::*;
 use super::*;
+use b2bua_core::rule_fixture::executor;
 use b2bua_core::rules::lifecycle_delivery::{close_turn, TurnStart};
 use b2bua_sdk::model::LifecycleEvent;
 
 fn bye_event() -> CallEvent {
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Request(in_dialog_request(sip_message::Method::Bye))),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    }
+    CallEvent::sip(
+        SipMessage::Request(in_dialog_request(sip_message::Method::Bye)),
+        "127.0.0.1:5060".parse().unwrap(),
+    )
 }
 
 fn ext_write(key: &str, value: serde_json::Value) -> RuleAction {
@@ -113,7 +114,7 @@ fn run_bye_noting(rules: &[RuleDefinition], call: &call::Call) -> (HandlerResult
     let event = bye_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = executor(&config, &mut id_gen);
     let ctx = ctx_for(call, &event, &config);
     let claimed = execute_rules(rules, call, &ctx, &mut exec, &ObligationSet::core());
     let result = close_turn(rules, &TurnStart::of(call), claimed, &mut exec);
@@ -328,7 +329,7 @@ fn run_watching_noting(
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = executor(&config, &mut id_gen);
     let rules = vec![RuleDefinition { effects: &WATCH_EFFECTS, ..sm_rule(handle) }];
     let ctx = ctx_for(&call, &event, &config);
     let result = execute_rules(&rules, &call, &ctx, &mut exec, &ObligationSet::core());

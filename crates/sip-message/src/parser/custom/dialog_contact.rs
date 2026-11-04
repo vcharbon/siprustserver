@@ -10,14 +10,14 @@ use crate::types::ContactSet;
 /// The methods whose request can establish a dialog: INVITE (RFC 3261),
 /// SUBSCRIBE and NOTIFY (RFC 6665 §4.4.1), REFER (RFC 3515 §2.4.4).
 pub(super) fn can_establish_dialog(method: &str) -> bool {
-    ["INVITE", "SUBSCRIBE", "NOTIFY", "REFER"].iter().any(|m| m.eq_ignore_ascii_case(method))
+    matches!(method, "INVITE" | "SUBSCRIBE" | "NOTIFY" | "REFER")
 }
 
 /// Why the Contact set of a dialog-establishing message, `what` naming it in
 /// the reason, names no dialog target, if one of its URIs is not SIP or SIPS.
 pub(super) fn dialog_contact_refusal(contacts: &ContactSet, what: &str) -> Option<SipParseError> {
     let ContactSet::Contacts(contacts) = contacts else { return None };
-    let other = contacts.iter().map(|c| c.uri()).find(|u| !matches!(u.scheme(), "sip" | "sips"))?;
+    let other = contacts.iter().map(|c| c.uri()).find(|u| !u.is_sip_or_sips())?;
     Some(SipParseError::new(format!(
         "{what} carries a Contact of scheme \"{}\": a dialog's remote target is a SIP or SIPS \
          URI (RFC 3261 §8.1.1.8, §12.1.1): \"{other}\"",

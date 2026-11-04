@@ -25,12 +25,16 @@
 //! `client_give_up` (a client transaction's deadlines and the Timeout it reports) ·
 //! `accepted` (RFC 6026 §7.2: a client INVITE after its 2xx, and who ACKs it) ·
 //! `orphan` (a released call's client transactions, ADR-0034) ·
-//! `server` (§17.2 UAS FSM) · `server_cancel` (§9.2: a CANCEL of a server
+//! `commands` (the command funnel's dispatch) · `server` (§17.2 UAS FSM) ·
+//! `trying` (§17.2.1: an INVITE's first provisional) · `server_cancel` (§9.2: a CANCEL of a server
 //! INVITE) · `shrink` (a drained table's memory returned) · `lifetime` (when a transaction leaves the map:
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
 //! outbound response is held to) · `seed` (ADR-0014 seeding + re-offer) ·
 //! `relinquish` (a call's transactions deleted for another node to serve) ·
-//! `events` (output-queue discipline) · `backlog` (new-call admission against
+//! `new_call_gate` (a consumer's switch on new calls, read at receipt) ·
+//! `events` (output-queue discipline) · `event_receiver` (the consumer's end
+//! of the event queue and the keepalive lane) · `event_age` (the age of the
+//! oldest event waiting in the queue) · `backlog` (new-call admission against
 //! the deferred backlog) · `refusals` (the node's shared refusals of new
 //! INVITEs) · `txn` (per-transaction state) · `unanswered` (server
 //! transactions the consumer will not answer) · `key` (a server transaction's
@@ -39,15 +43,22 @@
 mod accepted;
 mod backlog;
 mod bind;
+mod bound_report;
 mod call_txns;
 mod client;
 mod client_give_up;
+mod commands;
 mod config;
+mod event_age;
+mod event_receiver;
 mod events;
 mod handle;
+mod held_ack;
+mod held_cancel;
 mod ingress;
 mod key;
 mod lifetime;
+mod new_call_gate;
 mod orphan;
 mod owner;
 mod parse_refusal;
@@ -58,11 +69,16 @@ mod seed;
 mod server;
 mod server_cancel;
 mod shrink;
+mod trying;
 mod txn;
 mod unanswered;
 mod via_marks;
 
 pub use backlog::DeferredBound;
-pub use handle::{TransactionConfig, TransactionLayer, TransactionLayerClosed};
+pub use bound_report::BoundPassed;
+pub use config::OnBound;
+pub(crate) use event_age::EventAges;
+pub use handle::{TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed};
 pub use key::ServerTxnKey;
+pub use new_call_gate::NewCallGate;
 pub use refusals::{InviteRefusals, NewCallRefusal, Verdict, REFUSED_MEMO_MAX};

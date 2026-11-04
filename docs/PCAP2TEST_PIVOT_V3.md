@@ -70,6 +70,20 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-10-23 — the body TYPE is held on every expect, and a shape-only
+expect is confronted.** A body of another type than the one a `check: record`
+expect states — present where none is stated, a bare session description where
+a multipart one is, a missing or reordered part — reached no verdict: the
+interpreter read bodies under `assert` alone, and the confrontation read no
+declared shape. No document field changes; the verdict and the confrontation
+gain findings.
+
+| change | where |
+|---|---|
+| every expect holds the body TYPE it states — presence, the bare media type, and for a decomposed multipart the part count and each part's bare type by position — under `assert` and `record` alike; a miss fails the run as `check-failed` (`field: body`, `op: type`, the stated and received types) and the step keeps its datagram. Framing and part entity headers are not part of the type, content stays the confrontation's under `record` | §6.4, §8.3, `pivot-interpreter` |
+| the unstripped-provisional waiver applies to the type finding under either check, recorded in `waived` | §8.3, `pivot-interpreter` |
+| a shape-only expect whose reception breaks the shape is one `body` record, `body:<shape>:<scope>`, the shape and the received bare type (`absent` where nothing arrived) one a side | §8.3, the pipeline's `confront` |
+
 **2026-10-16 — the settle waits on the scripted legs' own INVITE client
 transactions, and a leg ACKs every non-2xx final it takes.** An INVITE a
 scripted leg sent holds a client transaction until its final (RFC 3261
@@ -1043,6 +1057,7 @@ FIRST message, and a nested block has no first message to commit on.
 | `checks` | no | field assertions over the matched message — AUTHORED ONLY (§9) |
 | `early` | no | id of the early dialog this message answers under, or rides |
 | `overlap` | no | a declared race with the named step |
+| `awaits` | `send` only | a lane event that must have occurred before the message goes out — AUTHORED ONLY (§6.7g) |
 | `msg` | yes | message spec (§8) |
 | `delay` | yes | dwell and its anchor (§6.8) |
 | `within_ms` | no | per-step override of `timing.expect_budget_ms` |
@@ -1307,11 +1322,13 @@ meaningless.
 | value | contract |
 |---|---|
 | `assert` | the stored content of `msg` is MATCHED against the inbound message |
-| `record` | the stored content is RECORDED for post-run confrontation and matched against nothing |
+| `record` | the stored content is RECORDED for post-run confrontation and matched against nothing; only its body TYPE is held (§8.3) |
 
 Under both values the step still gates on `op`, leg alignment, and the
 discriminator (`method`, or `status` + `cseq-method`), and still times out at
-`within_ms`.
+`within_ms`. Under both, the body TYPE the step states is held against the
+datagram it took, and a type that does not hold fails the run without
+refusing the datagram (§8.3).
 
 **A lane never reinterprets a stored field.** The rule the generator applies: a
 message some captured peer emitted and the SUT relayed is asserted; a message the
@@ -1362,6 +1379,12 @@ weakens no assertion. A step that MATCHED is not released; it completed.
 A `send` never releases an `optional` expect it overtakes. §6.5 releases on a
 MATCH, and a send is emitted, not matched — releasing on one would discard a
 message still in flight, which then arrives as an unmatched datagram.
+
+A response `send` anchored on a released `optional` REQUEST expect of its own
+leg is moot: the request it answers never arrived, so nothing goes on the wire
+and the step completes. That is how a document answers a request that may or
+may not come (a relay a race decides): the request tolerated, its answer
+anchored on it.
 
 **`unordered`** — all of these must arrive, order free.
 
@@ -1629,6 +1652,40 @@ holds, and a real UA answers it 481 (§12.2.2). So does the interpreter:
   any other, except a BYE (§15) or an INVITE (§14.1), which the answering side
   never sends on an early dialog;
 - an ACK and a CANCEL are never refused here (§17.1.1.3, §9.1).
+
+### 6.7g awaits — a lane event a send waits on — AUTHORED ONLY
+
+```json
+{ "id": "s3", "leg": "A", "op": "send", "awaits": "decision-request-in-flight",
+  "msg": { "method": "CANCEL" },
+  "delay": { "ms": 0, "from": "step:s2", "compressible": true, "timer_linked": false } }
+```
+
+Some orderings a test needs are against something the SIP wire does not show:
+a CANCEL that must cross the system's own routing exchange is sent while the
+system has a request to its decision backend outstanding, and no datagram marks
+that moment. `awaits` names such an event, and the send goes out only once its
+dwell has elapsed AND an occurrence the lane reported is not yet consumed; the
+send consumes it. One occurrence releases one send, whenever it was reported.
+
+The token is the LANE's, from its event registry, like an `inject` action
+(§6.6). The one this document names:
+
+| token | the lane reports it when |
+|---|---|
+| `decision-request-in-flight` | the system under test sent a request to its decision backend and holds no response to it yet |
+
+What produces the event, and what keeps the request in flight long enough for
+the send to cross it, is the lane's (a relay holding the decision backend's
+response, the delivery instant of a virtual clock). The interpreter only waits.
+
+- a run whose lane does not report an awaited event refuses before it dials
+  (`lane-event-unsupported`): the send could only ever time out;
+- a send whose event does not come inside its budget (`within_ms`, else
+  `timing.expect_budget_ms`, counted from its dwell) fails
+  (`lane-event-missing`) and ends the script, as a required expect does;
+- `awaits` sits on a `send` only (`awaits/on-expect`): an arrival is ordered by
+  what arrives.
 
 ### 6.8 delay and dwell
 
@@ -2038,7 +2095,13 @@ call longer than that would trip.
 The tier model is UNCHANGED:
 
 - **Tier 1, stack-owned**, never stored: Via and branch, Call-ID, From/To tags,
-  CSeq numbering, Max-Forwards, Content-Length, Contact host:port, Route sets.
+  CSeq numbering, Max-Forwards (but where stated, below), Content-Length,
+  Contact host:port, Route sets.
+  A request whose `headers` state a `Max-Forwards` — dialog-opening,
+  in-dialog, an ACK or a CANCEL — sends that hop count in place of the
+  RFC 3261 §8.1.1.6 default, once; a stated value that is no 0–255 count
+  (§20.22), or a second one, refuses the send. The omission list (§8.2) names
+  it `regenerated-unless-stated`.
 - **Tier 2, role-mapped**, stored symbolically: numbers and domains, as
   positional refs (`{ "pos": "called[0][1]", "form": "trunk-composed" }`, §4.5)
   or, where the plan does not recognize the value, `{ "frozen": "…" }`. A frozen
@@ -2047,7 +2110,10 @@ The tier model is UNCHANGED:
   declared once, in the identity registry (§8.5). A From or To ref of either
   shape may add `addr`, the captured name-addr (tag dropped) with its role
   numbers composed as `${num:…}`; it is then the field's whole value. A
-  positional ref states it only where its number composed.
+  positional ref states it only where its number composed. Either shape may
+  add `params`, the uri-parameters the URI the lane composes carries after its
+  host (RFC 3261 §19.1.1, the leading `;` left out): a dialled Request-URI's
+  `user=phone` rides there.
 - **Tier 3, frozen**, stored verbatim: everything else, in wire order.
 
 **The dialog a scripted request rides is tier-1 state.** A leg's dialog opens
@@ -2092,11 +2158,12 @@ there.
 | `status`, `reason`, `cseq-method` | responses | discriminator |
 | `cseq` | auto steps only | the CSeq number (§6.3) |
 | `ruri`, `from`, `to` | dialog-opening INVITE sends | tier-2 refs |
-| `from`, `to` | the dialog-opening INVITE a UAS expects | tier-2 refs, recorded: the identity the system launched |
+| `from`, `to` | the dialog-opening INVITE a UAS expects | tier-2 refs, recorded: the identity the system launched. An authored expectation of it is a check on `ruri.uri`, `from.uri`, `to.uri` (§9) |
 | `headers` | any | tier-3 frozen list, wire order |
 | `headers-present` | expects | existence checks |
 | `body` | any | §8.3 |
 | `target-refresh` | sends | the `n`-th time the leg's party refreshes its remote target (RFC 3261 §12.1.2, §12.2.1.2): the stack writes a Contact user part of its own per refresh, kept on every later message of the leg; host and port stay tier 1 |
+| `contact` | sends | `{ display, user }`, each optional: the Contact display name (unescaped; the stack quotes it) and user part the leg's party writes from this message on (RFC 3261 §8.1.1.8, §20.10), accessors resolved; a later target refresh numbers the stated user part; host and port stay tier 1 |
 
 `headers` and `headers-present` are stated on an `expect` regardless of `check`.
 Under `assert` they are matched; under `record` they are the recorded value.
@@ -2116,12 +2183,16 @@ held. Four namespaces, and the order between them matters.
 ${leg:<leg-id>.call-id}        ${leg:<leg-id>.cseq.local}
 ${leg:<leg-id>.local-tag}      ${leg:<leg-id>.cseq.remote}
 ${leg:<leg-id>.remote-tag}     ${leg:<leg-id>.rseq}
-${leg:<leg-id>.remote-target}
+${leg:<leg-id>.remote-target}  ${leg:<leg-id>.local-hostport}
 ${leg:<leg-id>.route-set}
 ```
 
 They exist because asserting a dialog's own tags, composing a header out of
 them, or routing through a proxy needs exactly this dialog state.
+`local-hostport` is the `host:port` the leg's endpoint is bound at on THIS run:
+a lane may bind an endpoint elsewhere than its stated `observed` address (a
+port the OS picks, so cells run side by side), and a check on the Request-URI
+the system addressed the leg with reads the bound one.
 
 **Early-dialog accessors** read ONE fork of a forking leg:
 
@@ -2275,14 +2346,30 @@ lint refuses it (`body/compare-on-send`); `sdp` on a body whose stated content
 type is not `application/sdp` names a fold that cannot read the file
 (`body/compare-sdp-type`).
 
-The two halves of the assertion run at two times, and only one of them
-depends on `check`. The interpreter gates on PRESENCE alone, and only under
-`check: assert` — a body must have arrived, whatever it holds — so a differing
-body never abandons the call: the message is answered, the dialog walks to its
-captured teardown, and the post-run confrontation states the difference as a
-`body` record (`body:<type/subtype>:<scope>`, the expected text and the
-received text side by side, both verbatim), which a lane's rule lists then
-classify. Under `sdp` there is one record per differing line key,
+The two halves of the assertion run at two times. The interpreter holds the
+body's TYPE on every expect, under `check: assert` and `check: record` alike:
+the body is present or absent as stated, its bare media type (`type/subtype`,
+lowercased, parameters such as `boundary` ignored) is the one stated — a
+resource's `content-type`, bare `application/sdp` where it states none, the
+`sdp-present` shape's `application/sdp`, any `multipart/…` for the
+`multipart-present` shape — and a decomposed multipart arrives with as many
+parts as stated, each of the stated bare type by position. The multipart
+framing (boundary, delimiters, preamble) and a part's entity headers other
+than `Content-Type` are not part of the type. Under `assert` presence and the
+container type (an `sdp-present` shape or a `compare: sdp` resource arriving as
+SDP, a multipart arriving as `multipart/…`) gate the MATCH; every other type
+miss, and every one under `record`, is a finding on the datagram the step
+took: `check-failed` with `field: body`, `op: type`, the stated and received
+types (`multipart/mixed (application/sdp, …)` for a multipart, `absent` where
+nothing arrived). It fails the run; the step keeps its datagram, so the call
+walks to its teardown. A body on a provisional the expect states `absent` is
+the miss the `provisional-rewrite-not-applied` known bug names, waived under
+either check on a lane whose run configuration declares it (`known_bugs`).
+The CONTENT is never the interpreter's, so a differing body never abandons the
+call: the message is answered, the dialog walks to its captured teardown, and
+the post-run confrontation states the difference as a `body` record
+(`body:<type/subtype>:<scope>`, the expected text and the received text side
+by side, both verbatim), which a lane's rule lists then classify. Under `sdp` there is one record per differing line key,
 `body:sdp:<section>:<line>:<scope>` — `<section>` is `session` or `m<i>`
 (0-based, wire order), `<line>` is `<type>=` for a session line or `a=<name>`
 for an attribute, the four direction attributes under one key `a=direction` —
@@ -2292,10 +2379,14 @@ that is empty or no session description is one `document:sdp` record with
 both texts whole; a media section on one side only is one `m<i>:section`
 record with that side's lines; two descriptions a verbatim run carried as
 different bytes with the structure equal are one `document:bytes` record
-with both texts whole. A reception carrying NO body where content is asserted is confronted
+with both texts whole, read as order-only where the two differ in the order of
+attribute lines alone and the received one is the expected one in the
+attribute order a stack writes (`sdpform`, the twin of `sip_message::canonical_form`). A reception carrying NO body where content is asserted is confronted
 as the empty text; under `check: assert` the interpreter also refuses it, and
-under `check: record` — every generated expect — the confrontation's record is
-the only statement of it.
+under `check: record` it fails the run as a body-type finding. A shape-only
+expect is confronted by type: a reception that breaks the shape is one
+`body:<shape>:<scope>` record (`absent`, `sdp-present`, `multipart-present`),
+the shape against the received bare type, `absent` where nothing arrived.
 
 **A frozen body compares byte for byte.** The confrontation holds the received
 bytes — the recording keeps them as they crossed the socket (§14 item 12),
@@ -2316,8 +2407,8 @@ differs, one per differing part under that part's `compare`; a line that
 recorded no layout, or a layout its bytes cannot honour, is one record saying
 so. A part's entity headers are not compared. Where
 extraction handed no parts over, the expect falls back to the shape
-`{ "mode": "multipart-present" }`, and the interpreter gates the reception's
-container type either way.
+`{ "mode": "multipart-present" }`. The interpreter holds the container type
+either way, and the part count and part types where the parts are stated.
 
 Multipart bodies reference DECOMPOSED parts:
 
@@ -2499,7 +2590,7 @@ One check vocabulary everywhere, borrowed from the upstream `e2e-model`:
 
 | field | required | meaning |
 |---|---|---|
-| `field` | yes | field selector. Open token: `from.userInfo`, `header(P-Asserted-Identity)`, `body`, `body.b64`, or a deployment observable's name in a postcondition |
+| `field` | yes | field selector. Open token: `status`, `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)` (its first occurrence), `header(Diversion)[1]` (the `n`-th item, 0-based, of that header's rows folded into one list, RFC 3261 §7.3.1; a header §7.3.1 exempts from folding, or one whose grammar is a single value such as Date, counted by row), `tags(Supported,Require)` (the option tags every row of the named headers lists, one set joined by `,`), `body`, `body.b64`, `part(application/sdp)` (the first entity part of that media type, read as `body` reads a body), or a deployment observable's name in a postcondition |
 | `op` | yes | `eq`, `regex`, `exists`, `absent` |
 | `value` | with `eq` / `regex` | a literal, a regex, or a string carrying `${…}` accessors |
 
@@ -2510,8 +2601,16 @@ also treats a control byte as non-text; `body.b64` observes it as base64
 always — the byte-exact assertion an author writes for a body that is not
 text.
 
+`part(<type>)` observes the payload of the first entity part whose bare media
+type is `<type>`, case-insensitively (RFC 2045 §5.1): a `multipart/*` body's
+parts (RFC 2046 §5.1), or a single-part body as its one part. A body holding no
+such part observes none, so `exists` asserts the part is there.
+
 `exists` and `absent` take no value, and `eq` / `regex` require one; lint refuses
 either mismatch.
+
+A `${…}` inside a `regex` value is substituted as a LITERAL: a bound
+`+15550100` matches a plus sign, never a repetition.
 
 Checks appear inline on an `expect` (asserting over the matched message) and in
 `postconditions` (asserting over what the run left behind). Both are
@@ -2915,7 +3014,7 @@ and a member arrives with the derivation that decides it.
 
 | failure | what the run must produce |
 |---|---|
-| `unexpected-ack` | an ACK this platform sends to the dialog-creating 2xx the anchor step EMITS, which no step states because the source never carried one. The ACK to a 2xx is the acknowledging peer's own, relayed (RFC 3261 §13.2.2.4), so where the caller never ACKs the platform's own §13.3.1.4 give-up composes one before its teardown BYE — on an offer-carrying INVITE, whose ACK owes no answer body; a delayed-offer dialog gets the BYE alone and draws no such datagram. The derivation today still narrows this by the source's relay-paired second view (a caller that withheld its ACK too charges the same withholding at two vantages) |
+| `unexpected-ack` | an ACK this platform sends to the dialog-creating 2xx the anchor step EMITS, which no step states because the source never carried one. The ACK to a 2xx is the acknowledging peer's own, relayed (RFC 3261 §13.2.2.4), so where the caller never ACKs the platform's own §13.3.1.4 give-up composes one before its teardown BYE — bare on an offer-carrying INVITE, whose ACK owes no answer body; on a delayed-offer dialog answering every stream rejected (RFC 3264 §6), which the derivation does not declare yet. The derivation today still narrows this by the source's relay-paired second view (a caller that withheld its ACK too charges the same withholding at two vantages) |
 | `unexpected-prack` | a PRACK this platform sends to the reliable provisional the anchor step EMITS (RFC 3262 §4). The source never PRACKed it, so no step states one, and this platform's own answer arrives where nothing expects it |
 | `unexpected-cancel` | a CANCEL this platform sends while the INVITE transaction is still in flight (RFC 3261 §9.1), where the source sent its CANCEL only after that transaction had taken — and ACKed — the final the anchor step EMITS. The capture places its CANCEL BEHIND that final, so the document's CANCEL step sits behind it too and this platform's arrives ahead of it, on a leg where nothing yet expects one. The anchor is the final rather than the CANCEL because a declaration's anchor must be a `send`: the transaction end is what the divergence turns on, and the emission is what supplies the dialog |
 
@@ -3224,7 +3323,12 @@ Its whole job:
    charged ends the transaction and RETIRES the expect (a required one; an
    `optional` is released, and so is every tolerated absence armed on that
    transaction), the verdict listing it under `retired`; a block member is
-   charged but never retired. The one status an expect takes besides its own:
+   charged but never retired. A final that is the first response on the leg's
+   own INVITE transaction and meets a required `100` stands in for it (RFC 3261
+   §17.2.1: the server transaction sends 100 only when its TU does not answer
+   within 200 ms) where retiring the 100 arms an expect of that transaction: the
+   step is retired as omitted, the verdict names it `trying-omitted`, and the
+   final is offered to that expect. The one status an expect takes besides its own:
    200 for 481 or 481 for 200 on a CANCEL the leg sent after its INVITE's
    non-2xx final reached it (§6.7d), a match and no failure.
 5. **Lane scoping** (§9.1): evaluate every check, and record a CLASSIFIED one as
@@ -3290,7 +3394,8 @@ that leaves the run nothing to compose, and there are two:
   RFC 3261 §17.1 ends a client transaction at its final, so no response of
   another status rides it again and the expect is retired (item 4). Whether the
   run goes on is then a DIALOG fact: it ends where the retired step named a
-  PROVISIONAL (the tail was scripted for a transaction still open), or where an
+  PROVISIONAL (the tail was scripted for a transaction still open; a `100` an
+  INVITE final stood in for goes on, item 4), or where an
   INVITE final is of the other class than the one named (2xx against non-2xx)
   on a leg whose dialog no INVITE 2xx has yet confirmed — the initial INVITE's
   final decides whether the dialog the tail was scripted for exists (§12.1,

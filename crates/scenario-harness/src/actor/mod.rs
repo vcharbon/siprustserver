@@ -44,7 +44,10 @@
 mod accept_delta;
 mod answer;
 mod barrier;
+mod clean_end;
+mod client_retransmit;
 mod delta;
+mod dialog_table;
 mod drive;
 mod ending;
 mod endpoint;
@@ -54,9 +57,14 @@ mod goals;
 mod held;
 mod held_acks;
 mod ledger;
+mod lost_provisional;
 mod observe;
 mod originate;
+mod pacing;
+mod prack_rx;
 mod react;
+mod refused_dialog;
+mod replay_record;
 mod response;
 mod runner;
 pub mod scenarios;
@@ -85,6 +93,7 @@ pub use endpoint::{
 pub use runner::{run_actor, ActorFailure, ActorState};
 pub use shared_endpoint::{EndpointHandle, EndpointPump, Inbox};
 
+pub use barrier::await_pred;
 pub use delta::{
     AcceptedDelta, AcceptedDeltaPolicy, DeltaContext, DeltaDecision, DeltaReaction, DialogSnapshot,
     ExpectedStimulus, ObservedStimulus,
@@ -94,17 +103,21 @@ pub use goals::{
     Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind,
 };
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
+pub use lost_provisional::provisional_lost;
 pub use observe::{ReceivedMessage, ReceptionContext, ReceptionObserver};
+pub use pacing::{Dwell, Pacing};
 pub use settle::{SettleBarrier, SettleVerdict, T1};
 pub use spec::{
-    originating_role, run_actor_scenario, run_built_actor_call, ActorCall, ActorScenario,
-    STEP_TIMEOUT,
+    originating_role, run_actor_scenario, run_actor_scenario_observed, run_built_actor_call,
+    ActorCall, ActorScenario, STEP_TIMEOUT,
 };
 pub use state::{
-    await_pred, LegObservation, LegPhase, Observation, ObservedState, RecordedFinal, ReplayEntry,
-    RequestFact, ResponseFact, StateInner, SubflowState,
+    LegObservation, LegPhase, Observation, ObservedState, RecordedFinal, ReplayEntry, RequestFact,
+    ResponseFact, StateInner, SubflowState,
 };
 pub use verdict::{verdict, FailedAt, ScenarioVerdict};
+
+use barrier::await_paced;
 
 /// One phase barrier in the controller's plan — a named predicate over the
 /// observed state that must hold (bounded by the controller's `step_timeout`)
@@ -174,8 +187,9 @@ struct CallController {
     plan: Vec<BarrierPhase>,
     settle: SettleBarrier,
     /// The per-barrier wait bound (the same 32 s ceiling the actors' goal
-    /// guards use — [`spec::STEP_TIMEOUT`]); a barrier that never holds fails
-    /// the call rather than hanging.
+    /// guards use — [`spec::STEP_TIMEOUT`]), counted past the call's scheduled
+    /// dwells ([`Pacing`]); a barrier that never holds fails the call rather
+    /// than hanging.
     step_timeout: Duration,
     /// The barrier being waited on, as an index: a plan phase, then
     /// [`TORN_DOWN`], then [`SETTLE`] ([`Self::barrier_name`]). Written by the
@@ -185,9 +199,11 @@ struct CallController {
 }
 
 /// The teardown barrier: every leg terminated.
-const TORN_DOWN: &str = "torn_down";
+const TORN_DOWN: &str = FailedAt::TORN_DOWN;
 /// The acknowledgement-gated settle barrier.
 const SETTLE: &str = "settle";
+/// How far past the ceiling the teardown barrier waits: two T1.
+const TORN_DOWN_MARGIN: Duration = Duration::from_secs(1);
 
 impl CallController {
     /// The name of the barrier at `index` (see [`Self::pending`]).
@@ -212,17 +228,23 @@ impl CallController {
     async fn drive_to_verdict(&self) -> CallVerdict {
         for (i, phase) in self.plan.iter().enumerate() {
             self.pending.store(i, Ordering::Relaxed);
-            let deadline = tokio::time::Instant::now() + self.step_timeout;
-            let held = |s: &StateInner| (phase.pred)(s) || s.accepted_ending();
-            if let Err(e) = await_pred(&self.obs, phase.name, held, deadline).await {
+            let since = tokio::time::Instant::now();
+            let held =
+                |s: &StateInner| (phase.pred)(s) || s.accepted_ending() || s.caller_ended_cleanly();
+            if let Err(e) = await_paced(&self.obs, phase.name, held, since, self.step_timeout).await
+            {
                 return CallVerdict::Failed(FailedAt::at_barrier(phase.name), e);
             }
         }
         // Teardown: every leg terminated. Bounded separately (teardown can take
-        // the whole flow after the last phase barrier).
+        // the whole flow after the last phase barrier), a margin past the
+        // ceiling: a party's own 64·T1 give-up armed as the barrier starts (a
+        // reliable provisional no PRACK answers, RFC 3262 §3) lands inside it.
         self.pending.store(self.plan.len(), Ordering::Relaxed);
-        let deadline = tokio::time::Instant::now() + self.step_timeout;
-        if let Err(e) = await_pred(&self.obs, TORN_DOWN, |s| s.all_terminated(), deadline).await {
+        let since = tokio::time::Instant::now();
+        let bound = self.step_timeout + TORN_DOWN_MARGIN;
+        let torn_down = |s: &StateInner| s.all_terminated();
+        if let Err(e) = await_paced(&self.obs, TORN_DOWN, torn_down, since, bound).await {
             return CallVerdict::Failed(FailedAt::at_barrier(TORN_DOWN), e);
         }
         self.pending.store(self.plan.len() + 1, Ordering::Relaxed);
@@ -322,7 +344,7 @@ pub(crate) async fn run_call_accepting(
         if let Some((inbox, handle)) = seat {
             state = state.on_shared_endpoint(inbox, handle);
         }
-        states.push(state);
+        states.push(Box::new(state));
         scopes.push(scope);
     }
 
@@ -361,9 +383,10 @@ pub(crate) async fn run_call_accepting(
 
     // The loser future is dropped; teardown acts on whatever each scope last
     // registered (Terminated → no-op on the happy path) — including after a
-    // caught panic, so a panicking actor never leaks SUT state.
+    // caught panic, so a panicking actor never leaks SUT state. Each teardown
+    // runs boxed, so this call-long future never holds its state inline.
     for scope in &scopes {
-        scope.teardown().await;
+        Box::pin(scope.teardown()).await;
     }
     match result {
         Ok(verdict) => verdict,

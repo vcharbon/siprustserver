@@ -238,7 +238,7 @@
     },
     {
       "id": 35, "type": "timeseries", "title": "Keepalive OPTIONS round-trip (sent vs answered) + timeout BYEs",
-      "description": "The reclaimed-dialog teardown localizer. `OPTIONS sent` = `b2bua_requests_out_total{method=OPTIONS}` (the in-dialog keepalive the worker originates); `OPTIONS 200 recv` = `b2bua_responses_total{method=OPTIONS,code=200}` (the answer coming back). In steady state the two track 1:1. A reboot that opens a SENT≫ANSWERED gap means the reclaimed keepalive round-trip is failing — the worker then BYEs those dialogs when the `keepalive_timeout_sec` grace expires (watch the long-call `unexpected_msg` rise on the endurance dashboard). Pair with the proxy's worker_outbound OPTIONS to split forward (proxy→UAC) vs return (UAC→worker) leg.",
+      "description": "The reclaimed-dialog teardown localizer. `OPTIONS sent` = `b2bua_requests_out_total{method=OPTIONS}` (the in-dialog keepalive the worker originates); `OPTIONS 200 recv` = `b2bua_responses_total{method=OPTIONS,code=200}` (the answer coming back). In steady state the two track 1:1. A reboot that opens a SENT≫ANSWERED gap means the reclaimed keepalive round-trip is failing — the worker then BYEs those dialogs when each probe's Timer F (32 s) expires (watch the long-call `unexpected_msg` rise on the endurance dashboard). Pair with the proxy's worker_outbound OPTIONS to split forward (proxy→UAC) vs return (UAC→worker) leg.",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 54 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [

@@ -3,11 +3,12 @@ import type { JSX, ReactNode } from "react"
 import { navigate } from "../router.ts"
 
 export const Link = (
-  { to, className, children }: { to: string; className?: string; children: ReactNode }
+  { to, className, title, children }: { to: string; className?: string; title?: string; children: ReactNode }
 ): JSX.Element => (
   <a
     href={to}
     className={className}
+    title={title}
     onClick={(event) => {
       if (event.metaKey || event.ctrlKey || event.shiftKey) return
       event.preventDefault()

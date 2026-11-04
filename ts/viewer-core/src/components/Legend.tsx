@@ -16,43 +16,41 @@ interface Notation {
 
 /** One line per mark a ladder can draw. */
 export const notations: readonly Notation[] = [
-  { key: "solid arrow", what: "scripted: the document composes and owns this message" },
-  { key: "dashed arrow", what: "auto: the interpreter's own SIP stack owns it — scripted by nobody, recorded against the step" },
-  { key: "dotted arrow", what: "optional: absence is tolerated, a later step on the leg releases it" },
-  { key: "record", what: "the stored content is recorded for post-run confrontation and matched against nothing" },
-  { key: "no record", what: "assert: the stored content is matched against the inbound message" },
-  { key: "+Nms", what: "dwell from its anchor; amber means timer-linked, which is never compressible" },
-  { key: "xN", what: "retransmissions of this message, collapsed onto the step it repeats" },
-  { key: "after a, b", what: "cross-leg ordering: the step waits until those nodes completed" },
-  { key: "<=Nms", what: "per-step expect budget, overriding the document's default" },
-  { key: "races s7", what: "a declared overlap with that step" },
-  { key: "N checks", what: "inline field assertions over the matched message" },
-  { key: "deviation", what: "peer non-compliance the replay reproduces on purpose" },
-  { key: "defect", what: "the step whose outcome IS the defect the case captures" },
-  { key: "Nms", what: "capture or run offset from the first message" },
-  {
-    key: "alt sections",
-    what:
-      "declared alternatives, one stacked section each, separated by OR; the stack is a reading order, not a sequence — exactly one branch runs and they all rejoin below"
-  },
-  { key: "unordered", what: "bracketed steps all arrive, in any order" },
-  { key: "inject bar", what: "an external event handed to the lane's injector; the interpreter never runs it" },
-  {
-    key: "fromA1 + toA1",
-    what:
-      "the dialog's simplified tag PAIR, never the real tags: both beads on one arrow, each at the end of the party holding that tag. Requests and responses of one dialog carry the same pair"
-  },
-  {
-    key: "same from, different to",
-    what:
-      "a FORK: one leg answered under several early dialogs — toB1 and toB2 under one fromB1, one colour each. The numbering runs past the fork: the ACK, the re-INVITE and the BYE restate the tag of the early dialog that answered, so they keep its token and its colour"
-  },
-  {
-    key: "dashed to— bead",
-    what: "no To-tag yet, so no dialog is established: the initial request and its 100 Trying"
-  },
-  { key: "arrow colour", what: "which call the message belongs to, where a document holds several" }
+  { key: "solid arrow", what: "scripted: the document owns the message" },
+  { key: "dashed arrow", what: "auto: the interpreter's SIP stack sends it" },
+  { key: "dotted arrow", what: "optional: absence tolerated" },
+  { key: "record", what: "content recorded for confrontation, not matched" },
+  { key: "no record", what: "assert: content matched against the inbound message" },
+  { key: "+Nms", what: "dwell from its anchor; amber = timer-linked, never compressed" },
+  { key: "xN", what: "retransmissions, collapsed onto the step" },
+  { key: "after a, b", what: "waits until those nodes complete" },
+  { key: "<=Nms", what: "per-step expect budget" },
+  { key: "races s7", what: "declared overlap with that step" },
+  { key: "N checks", what: "inline field assertions" },
+  { key: "deviation", what: "peer non-compliance reproduced on purpose" },
+  { key: "defect", what: "the step whose outcome is the defect" },
+  { key: "Nms", what: "offset from the first message" },
+  { key: "alt sections", what: "declared alternatives separated by OR; one runs, all rejoin" },
+  { key: "unordered", what: "bracketed steps arrive in any order" },
+  { key: "inject bar", what: "external event for the lane's injector" },
+  { key: "fromA1 + toA1", what: "the dialog's simplified tag pair, never the real tags" },
+  { key: "same from, different to", what: "a fork: one leg, several early dialogs, one colour each" },
+  { key: "dashed to— bead", what: "no To-tag yet: no dialog established" },
+  { key: "arrow colour", what: "the call the message belongs to" }
 ]
+
+/** One call in a line: its caller, its legs, each attempt and how it ended. */
+const callLine = (call: LadderLayout["calls"][number]): string =>
+  `caller ${call.callerLeg} · legs ${call.legs.join(", ")}` +
+  call.attempts.map((attempt) =>
+    ` · ${attempt.branch}.${attempt.position} ${attempt.leg} -> ${attempt.callee}${
+      attempt.finalStatus === undefined ? "" : ` (${attempt.finalStatus})`
+    }${attempt.cause === undefined ? "" : ` ${attempt.cause}`}${
+      attempt.joinedBy === undefined
+        ? ""
+        : ` ⤷ ${attempt.joinedBy.kind}@${attempt.joinedBy.step}`
+    }`
+  ).join("")
 
 /** The call colour strip: which colour is which `calls[]` entry. */
 export const CallLegend = ({ layout }: { layout: LadderLayout }): JSX.Element | null => {
@@ -63,20 +61,9 @@ export const CallLegend = ({ layout }: { layout: LadderLayout }): JSX.Element | 
   return (
     <div className="fv-call-legend">
       {layout.calls.map((call) => (
-        <span key={call.id} className={`fv-call-chip ${callSlotClass(call.slot)}`}>
+        <span key={call.id} className={`fv-call-chip ${callSlotClass(call.slot)}`} title={callLine(call)}>
           <b>{call.id}</b>
-          <span>
-            {`caller ${call.callerLeg} · legs ${call.legs.join(", ")}`}
-            {call.attempts.map((attempt) =>
-              ` · ${attempt.branch}.${attempt.position} ${attempt.leg} -> ${attempt.callee}${
-                attempt.finalStatus === undefined ? "" : ` (${attempt.finalStatus})`
-              }${attempt.cause === undefined ? "" : ` ${attempt.cause}`}${
-                attempt.joinedBy === undefined
-                  ? ""
-                  : ` ⤷ ${attempt.joinedBy.kind}@${attempt.joinedBy.step}`
-              }`
-            ).join("")}
-          </span>
+          <span>{callLine(call)}</span>
         </span>
       ))}
     </div>
@@ -132,7 +119,7 @@ export const LadderLegend = ({ layout, open }: LadderLegendProps): JSX.Element =
     </ul>
     {layout.calls.length > 1 && (
       <>
-        <h4>calls in this document</h4>
+        <h4>calls</h4>
         <CallLegend layout={layout} />
       </>
     )}

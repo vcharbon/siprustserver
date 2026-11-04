@@ -24,7 +24,21 @@ pub(super) struct ReplWiring {
     pub(super) peers: Vec<Peer>,
     /// This node's repl listen address (stable across reboots).
     pub(super) listen_addr: SocketAddr,
-    pub(super) ttls: (i64, i64),
+    pub(super) dead_peer_ttl_ms: i64,
+    /// The node's replication tunables, the same on every incarnation.
+    pub(super) replica: b2bua::ReplicaConfig,
+    /// The sync level the node's write path runs at.
+    pub(super) sync: b2bua::repl::SyncLevel,
+}
+
+impl super::FailoverHarness {
+    /// Set the replication tunables of every worker spawned from now on, on
+    /// each of its incarnations (a backup ceiling, the reboot budget); the
+    /// defaults until then. Returns `self` for chaining.
+    pub fn with_worker_replica(mut self, replica: b2bua::ReplicaConfig) -> Self {
+        self.worker_replica = replica;
+        self
+    }
 }
 
 impl ReplWiring {
@@ -38,7 +52,8 @@ impl ReplWiring {
         gen: u64,
         clock: &Clock,
     ) -> (ReplicationSetup, Arc<ReplicatingCallStore>, Arc<SimulatedMembership>) {
-        let changelog = Changelog::new(gen, clock.clone()).with_ttls(self.ttls.0, self.ttls.1);
+        let changelog =
+            Changelog::new(gen, clock.clone()).with_dead_peer_ttl(self.dead_peer_ttl_ms);
         let store = Arc::new(ReplicatingCallStore::with_changelog(changelog, clock.clone()));
         let sim_membership =
             Arc::new(SimulatedMembership::with_clock(self.peers.clone(), clock.clone()));
@@ -65,6 +80,9 @@ impl ReplWiring {
             incarnation_gen: gen,
             puller: PullerConfig::default(),
             serve: ServeConfig::default(),
+            replica: self.replica,
+            write_path: b2bua::repl::WritePath { sync: self.sync, ..Default::default() },
+            verdict: Default::default(),
         };
         (setup, store, sim_membership)
     }
@@ -82,4 +100,13 @@ impl ReplWiring {
         }
         panic!("the repl listen address {} stays bound by a live incarnation", self.listen_addr)
     }
+}
+
+/// The sync level `B2BUA_REPL_SYNC` names (`off` | `applied`), else the write
+/// path's default.
+pub(crate) fn sync_level_from_env() -> b2bua::repl::SyncLevel {
+    std::env::var("B2BUA_REPL_SYNC")
+        .ok()
+        .map(|level| level.parse().unwrap_or_else(|why| panic!("B2BUA_REPL_SYNC: {why}")))
+        .unwrap_or_default()
 }

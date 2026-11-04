@@ -15,47 +15,72 @@
 //! to a different worker.
 //!
 //! The same cache also drives the non-2xx ACK hop decision (`ackhop|` keys —
-//! relay the upstream's §17.1.1.3 ACK to the node the final arrived from, or
-//! absorb it when the proxy itself generated the final; see `core/request`
-//! and `core/response.rs`) and the retransmission target memo (`rtx|`-prefixed
-//! keys, see `core/request`).
+//! relay the upstream's §17.1.1.3 ACK for a relayed final to the node the
+//! final arrived from; see `core/request` and `core/response.rs`) and the
+//! retransmission target memo (`rtx|`-prefixed keys, see `core/request`).
+//! The ACK to a final the proxy generated itself is recognised by its To-tag
+//! and writes nothing here (`crate::refusals`).
 //!
-//! Reads are O(1) and lock-only (never block on I/O). Eviction is lazy on
-//! lookup plus an optional periodic [`sweep_expired`](CancelBranchLru::sweep_expired)
-//! the owner task can drive.
+//! Each instance of an active pair holds only what crossed it, so every
+//! request these entries route also routes without them (ADR-0009 X7): an
+//! entry is a placement only this instance knows (a spill), a target the
+//! cookie would re-derive, or a hop the Request-URI names.
+//!
+//! Keys are written by whoever sends the proxy a request, so the memo is
+//! bounded in entries and accounted bytes ([`MemoBounds`]). Each [`Lifetime`]
+//! has its own pool and share of the bounds; past a bound a pool forgets its
+//! oldest writes and counts them. Expiry and eviction walk a pool's write
+//! order from its front, so their work is what they remove, never the table.
+//! Reads and writes take one stripe's lock and never block on I/O.
 
-use std::collections::HashMap;
+mod bounds;
+mod footprint;
+mod pool;
+mod stripe;
+
+use std::collections::hash_map::RandomState;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use sip_clock::Clock;
 use sip_message::header::Via;
-use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
+use sip_txn::timers::{TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
-use crate::observability::ProxyMetrics;
+use crate::observability::{catalogue, ProxyMetrics};
 use crate::poison::{locked, INVITE_BRANCH_LRU};
 use crate::strategy::RouteParams;
-
-/// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
-/// Must cover the downstream UA's **whole INVITE transaction window**: the
-/// B2BUA answers or gives up within `sip-txn`'s `INVITE_INITIAL_TIMEOUT`
-/// (158 s, which wraps its 150 s `SetupTimeout` ledger), plus the
-/// final-response retransmit tail (Timer H). Imported from `sip-txn` so the
-/// proxy's memory and the B2BUA's transaction timers cannot drift apart: a TTL
-/// under the ringing window loses the CANCEL's target and the non-2xx ACK's
-/// hop while the callee is still legally ringing.
-/// Covers the DEFAULT b2bua bound; a deployment raising
-/// `B2BUA_INVITE_TXN_TIMEOUT_SEC` beyond this TTL degrades late-CANCEL /
-/// non-2xx-ACK hop memory.
-pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
+pub use bounds::{
+    calls_per_second, entry_ms_per_call, invite_entry_ttl_ms, MemoBounds, DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_ENTRIES, DEFAULT_MEAN_RING_MS, DEFAULT_STRIPES, INVITE_ENTRY_TTL_MS,
+    TYPICAL_ENTRY_BYTES,
+};
+use pool::Change;
+use stripe::Stripe;
 
 /// TTL for retransmission target memos (`rtx|` keys): upstream retransmits
 /// stop at Timer B/F (64×T1 = 32 s), so these need live no longer. They are
 /// written for EVERY forwarded request — including each keepalive OPTIONS — so
 /// keeping them short keeps the map at ≈ one transaction window of traffic.
+/// It is also Timer H, the life of an ACK hop and of an INVITE entry whose
+/// final passed.
 pub const RTX_ENTRY_TTL_MS: u64 = TIMER_F;
+
+/// How long a memo entry lives, and the pool of each stripe it is held in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifetime {
+    /// [`MemoBounds::invite_ttl_ms`], the cap derived from the downstream
+    /// INVITE transaction bound ([`invite_entry_ttl_ms`]), shortened to Timer H
+    /// when the final passes ([`CancelBranchLru::shorten`]): an INVITE
+    /// transaction's CANCEL target.
+    InviteTransaction,
+    /// [`RTX_ENTRY_TTL_MS`]: a retransmission target, a relayed non-2xx
+    /// final's ACK hop, or an INVITE transaction's entry once its final
+    /// passed.
+    Retransmission,
+}
 
 /// Default sweep cadence — half the SHORT (rtx) TTL, so the dominant entry
 /// class is physically reclaimed near its expiry and the map stays at ~1×
@@ -66,6 +91,8 @@ pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 16_000;
 const _: () = assert!(DEFAULT_SWEEP_INTERVAL_MS <= RTX_ENTRY_TTL_MS);
 #[expect(clippy::disallowed_macros, reason = "checked at compile time")]
 const _: () = assert!(RTX_ENTRY_TTL_MS <= INVITE_ENTRY_TTL_MS);
+#[expect(clippy::disallowed_macros, reason = "checked at compile time")]
+const _: () = assert!(RTX_ENTRY_TTL_MS == TIMER_H);
 
 /// The key of the INVITE transaction `via` opened upstream (§17.2.3): its
 /// branch and sent-by (in `SentByRef::write_canonical`'s form), with the
@@ -119,15 +146,12 @@ fn txn_key(
 
 /// Namespaced key for the non-2xx ACK hop memo of the INVITE transaction
 /// `via` opened upstream, consulted on the request path when the upstream's
-/// §17.1.1.3 ACK (the INVITE's own top Via) arrives. Written in two flavours:
-///  • RESPONSE path, on relaying a non-2xx INVITE final upstream — carries
-///    the node the final came from, so the ACK is RELAYED to the transaction
-///    that sent the final (it matches the ACK and stops retransmitting);
-///  • request path `reply()`, on a final the proxy generated ITSELF — empty
-///    `branch`, so the ACK is ABSORBED here (the proxy is the UAS; no
-///    downstream exists).
-/// `ackhop|` keeps it disjoint from the `inv|` INVITE keys and the `rtx|`
-/// memos sharing this store.
+/// §17.1.1.3 ACK (the INVITE's own top Via) arrives. Written on the response
+/// path for every non-2xx INVITE final this proxy relays, whether or not the
+/// INVITE crossed it: it carries the node the final came from, so the ACK is
+/// RELAYED to the transaction that sent the final (it matches the ACK and
+/// stops retransmitting). `ackhop|` keeps it disjoint from the `inv|` INVITE
+/// keys and the `rtx|` memos sharing this store.
 pub fn ack_hop_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
     txn_key(&["ackhop"], via, call_id, from_tag, cseq_num)
 }
@@ -158,43 +182,69 @@ pub struct CancelEntry {
     pub via_cookie: Option<RouteParams>,
 }
 
-struct StoredEntry {
-    entry: CancelEntry,
-    expires_at_ms: u64,
-}
-
-/// The TTL cache. Cheap to share behind an `Arc`.
+/// The CANCEL / ACK / retransmission memo: [`DEFAULT_STRIPES`] independently
+/// locked stripes, each bounded by its share of [`MemoBounds`]. Cheap to
+/// share behind an `Arc`.
+///
+/// Concurrency: a key hashes to one stripe and every operation on it takes
+/// that stripe's lock alone, for work proportional to what it removes; the
+/// totals are lock-free counters.
 pub struct CancelBranchLru {
-    table: Mutex<HashMap<String, StoredEntry>>,
+    stripes: Box<[Mutex<Stripe>]>,
+    hasher: RandomState,
     clock: Clock,
+    len: AtomicUsize,
+    bytes: AtomicUsize,
+    evicted: AtomicU64,
     /// Latched by the first [`ensure_sweeper`](Self::ensure_sweeper) caller so
     /// N recv-shard cores sharing one LRU spawn exactly one sweeper.
     sweeper_claimed: AtomicBool,
 }
 
+/// What one expiry pass did: the entries it removed and the expiry-index
+/// entries it looked at (each removed one, plus the live one that ends the
+/// pass in each non-empty stripe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Swept {
+    pub removed: usize,
+    pub inspected: usize,
+}
+
 impl CancelBranchLru {
-    /// System clock.
+    /// System clock, default bounds.
     pub fn new() -> Self {
         Self::with_clock(Clock::system())
     }
 
     /// Explicit clock (tests use `Clock::test_at(..)` for deterministic
-    /// eviction under `tokio::time`).
+    /// eviction under `tokio::time`), default bounds.
     pub fn with_clock(clock: Clock) -> Self {
-        Self { table: Mutex::new(HashMap::new()), clock, sweeper_claimed: AtomicBool::new(false) }
+        Self::with_bounds(clock, MemoBounds::default())
+    }
+
+    /// Explicit clock and bounds.
+    pub fn with_bounds(clock: Clock, bounds: MemoBounds) -> Self {
+        let stripes = (0..bounds.stripe_count()).map(|_| Mutex::new(Stripe::new(&bounds)));
+        Self {
+            stripes: stripes.collect(),
+            hasher: RandomState::new(),
+            clock,
+            len: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
+            evicted: AtomicU64::new(0),
+            sweeper_claimed: AtomicBool::new(false),
+        }
     }
 
     /// Spawn the background sweeper for this LRU — once. Every `ProxyCore::run`
     /// calls this; the first caller claims it and N recv-shard cores sharing one
-    /// LRU don't end up with N sweepers. `lookup` only evicts an entry looked up
-    /// *after* expiry — which an answered (2xx) call never is (no CANCEL, no
-    /// proxy-absorbed ACK) — so without the sweep the map (and
-    /// `sip_proxy_pending_invite_lru_size`) grows ≈ the cumulative-INVITE count
-    /// for the life of the process. Sweeping every half-TTL physically reclaims
-    /// expired slots and re-publishes the gauge, pinning the map at ~1× working
-    /// set. The task is detached (process-lifetime, like the LRU itself) and
-    /// restarted when a sweep panics; supervision exits the process if a core
-    /// dies, so an orphaned sweeper cannot outlive the data path in production.
+    /// LRU don't end up with N sweepers. A write expires its own stripe and a
+    /// lookup an expired entry it meets, so a stripe nobody writes to keeps its
+    /// expired entries until this sweep reclaims them; each sweep also
+    /// re-publishes the memo's series ([`publish`](Self::publish)). The task is
+    /// detached (process-lifetime, like the LRU itself) and restarted when a
+    /// sweep panics; supervision exits the process if a core dies, so an
+    /// orphaned sweeper cannot outlive the data path in production.
     pub fn ensure_sweeper(self: &Arc<Self>, metrics: Arc<ProxyMetrics>) {
         if self.sweeper_claimed.swap(true, Ordering::SeqCst) {
             return;
@@ -214,7 +264,7 @@ impl CancelBranchLru {
                 loop {
                     tick.tick().await;
                     lru.sweep_expired();
-                    metrics.set_pending_invite_lru_size(lru.size() as u64);
+                    lru.publish(&metrics);
                 }
             }
         });
@@ -224,43 +274,109 @@ impl CancelBranchLru {
         u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
-    /// Remember the downstream target + outbound branch used on a forward.
-    /// TTL is per entry: [`INVITE_ENTRY_TTL_MS`] for CANCEL/ACK correlation,
-    /// [`RTX_ENTRY_TTL_MS`] for retransmission target memos.
-    pub fn remember(&self, key: &str, entry: CancelEntry, ttl_ms: u64) {
-        let expires_at_ms = self.now_ms() + ttl_ms;
-        locked(&self.table, INVITE_BRANCH_LRU)
-            .insert(key.to_string(), StoredEntry { entry, expires_at_ms });
+    fn stripe(&self, key: &str) -> MutexGuard<'_, Stripe> {
+        let count = u64::try_from(self.stripes.len()).unwrap_or(1).max(1);
+        let slot = usize::try_from(self.hasher.hash_one(key) % count).unwrap_or(0);
+        #[expect(clippy::indexing_slicing, reason = "a remainder of the stripe count")]
+        let stripe = &self.stripes[slot];
+        locked(stripe, INVITE_BRANCH_LRU)
+    }
+
+    /// Fold one stripe operation's [`Change`] into the totals, under that
+    /// stripe's lock: an entry's removal is then counted after its addition,
+    /// and no total reads below what the stripes hold.
+    fn account(&self, change: &Change) {
+        self.len.fetch_add(change.added, Ordering::Relaxed);
+        self.len.fetch_sub(change.removed, Ordering::Relaxed);
+        self.bytes.fetch_add(change.bytes_added, Ordering::Relaxed);
+        self.bytes.fetch_sub(change.bytes_removed, Ordering::Relaxed);
+        let evicted = u64::try_from(change.evicted).unwrap_or(u64::MAX);
+        self.evicted.fetch_add(evicted, Ordering::Relaxed);
+    }
+
+    /// Remember the downstream target + outbound branch used on a forward,
+    /// for `lifetime`. A rewrite of a held key replaces its entry and its
+    /// expiry. The write first forgets the expired entries of its pool, then,
+    /// past a bound, that pool's oldest writes (counted in
+    /// [`evicted`](Self::evicted)). Nothing is refused for want of room: a
+    /// request whose memo was forgotten is routed as one this hop never saw.
+    pub fn remember(&self, key: &str, entry: CancelEntry, lifetime: Lifetime) {
+        let now = self.now_ms();
+        let mut change = Change::default();
+        let mut stripe = self.stripe(key);
+        stripe.insert(key, entry, lifetime, now, &mut change);
+        self.account(&change);
     }
 
     /// Look up a remembered entry (for a CANCEL / ACK). Lazily evicts an expired
     /// entry and returns `None` for it.
     pub fn lookup(&self, key: &str) -> Option<CancelEntry> {
         let now = self.now_ms();
-        let mut table = locked(&self.table, INVITE_BRANCH_LRU);
-        match table.get(key) {
-            Some(e) if e.expires_at_ms <= now => {
-                table.remove(key);
-                None
-            }
-            Some(e) => Some(e.entry.clone()),
-            None => None,
-        }
+        let mut change = Change::default();
+        let mut stripe = self.stripe(key);
+        let found = stripe.get(key, now, &mut change);
+        self.account(&change);
+        found
     }
 
-    /// Current map size — tests/metrics.
-    pub fn size(&self) -> usize {
-        locked(&self.table, INVITE_BRANCH_LRU).len()
-    }
-
-    /// Drop all expired entries; returns the count swept. The owner task calls
-    /// this periodically.
-    pub fn sweep_expired(&self) -> usize {
+    /// The live entry under `key`, an INVITE transaction's whose final has
+    /// passed: from now on it lives [`Lifetime::Retransmission`] (Timer H, the
+    /// window of the ACK to a non-2xx final, RFC 3261 §17.2.1) instead of
+    /// its INVITE cap. An entry already shortened keeps its expiry.
+    pub fn shorten(&self, key: &str) -> Option<CancelEntry> {
         let now = self.now_ms();
-        let mut table = locked(&self.table, INVITE_BRANCH_LRU);
-        let before = table.len();
-        table.retain(|_, e| e.expires_at_ms > now);
-        before - table.len()
+        let mut change = Change::default();
+        let mut stripe = self.stripe(key);
+        let found = stripe.shorten(key, now, &mut change);
+        self.account(&change);
+        found
+    }
+
+    /// The entries held.
+    pub fn size(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
+    }
+
+    /// The bytes the held entries account for.
+    pub fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
+    /// The entries forgotten before their expiry, the memo being at a bound.
+    pub fn evicted(&self) -> u64 {
+        self.evicted.load(Ordering::Relaxed)
+    }
+
+    /// Drop every expired entry, stripe by stripe. The owner task calls this
+    /// periodically.
+    pub fn sweep_expired(&self) -> Swept {
+        let now = self.now_ms();
+        let mut swept = Swept { removed: 0, inspected: 0 };
+        for stripe in &self.stripes {
+            let mut change = Change::default();
+            let mut stripe = locked(stripe, INVITE_BRANCH_LRU);
+            stripe.expire(now, &mut change);
+            self.account(&change);
+            drop(stripe);
+            swept.removed = swept.removed.saturating_add(change.removed);
+            swept.inspected = swept.inspected.saturating_add(change.inspected);
+        }
+        swept
+    }
+
+    /// Publish the memo's size to `metrics`.
+    pub fn publish(&self, metrics: &ProxyMetrics) {
+        metrics.set_pending_invite_lru_size(u64::try_from(self.size()).unwrap_or(u64::MAX));
+    }
+
+    /// The memo's families ([`catalogue::BRANCH_MEMO`]) as Prometheus text,
+    /// read at the scrape from the memo's own counters.
+    pub fn prometheus_text(&self) -> String {
+        let mut text = String::new();
+        let bytes = u64::try_from(self.bytes()).unwrap_or(u64::MAX);
+        catalogue::BRANCH_MEMO_BYTES.render_value(&mut text, bytes);
+        catalogue::BRANCH_MEMO_EVICTIONS.render_value(&mut text, self.evicted());
+        text
     }
 }
 
@@ -271,126 +387,4 @@ impl Default for CancelBranchLru {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sip_message::header::HeaderValue;
-    use sip_message::sip_str::SipStr;
-
-    fn entry(branch: &str) -> CancelEntry {
-        CancelEntry {
-            target: ProxyAddr::new("10.0.0.2", 5070),
-            branch: branch.to_string(),
-            stickiness: None,
-            minted: None,
-            via_cookie: None,
-        }
-    }
-
-    fn via(line: &str) -> Via {
-        Via::parse(&SipStr::owned(line)).expect("a Via value")
-    }
-
-    fn key(call_id: &str) -> String {
-        invite_txn_key(&via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1"), call_id, Some("t"), 1)
-    }
-
-    /// A panic under the table's lock leaves the table serving: the next
-    /// caller takes it as it stands, and the recovery is counted.
-    #[test]
-    fn a_panic_under_the_table_lock_leaves_it_serving() {
-        let lru = Arc::new(CancelBranchLru::with_clock(Clock::test_at(0)));
-        lru.remember(&key("before"), entry("z9hG4bK-before"), 60_000);
-        let poisoner = lru.clone();
-        let _ = std::thread::spawn(move || {
-            let _held = poisoner.table.lock();
-            panic!("a panic under the table lock");
-        })
-        .join();
-        let counted = || crate::poison::RECOVERIES.count(INVITE_BRANCH_LRU);
-        let recovered = counted();
-        assert_eq!(lru.size(), 1, "the table as it stood");
-        lru.remember(&key("after"), entry("z9hG4bK-after"), 60_000);
-        assert!(lru.lookup(&key("after")).is_some());
-        assert_eq!(counted() - recovered, 1, "the recovery is counted once, under its lock");
-    }
-
-    #[test]
-    fn key_format_is_branch_sent_by_then_dialog_fields() {
-        let v = via("SIP/2.0/UDP Host.Example:5060;branch=z9hG4bK1;received=10.0.0.9;rport=4");
-        assert_eq!(
-            invite_txn_key(&v, "abc@h", Some("t1"), 7),
-            "inv|z9hG4bK1|host.example:5060|abc@h|t1|7"
-        );
-        assert_eq!(
-            invite_txn_key(&via("SIP/2.0/UDP h;branch=z9hG4bK1"), "abc@h", None, 7),
-            "inv|z9hG4bK1|h|abc@h||7"
-        );
-        assert_eq!(
-            ack_hop_key(&v, "abc@h", Some("t1"), 7),
-            "ackhop|z9hG4bK1|host.example:5060|abc@h|t1|7"
-        );
-    }
-
-    #[test]
-    fn the_received_transaction_disambiguates_one_dialog_identity() {
-        // A spiral crosses the proxy twice under one Call-ID, From tag and
-        // CSeq: the branch and the sent-by keep the two passes apart.
-        let first = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKa");
-        for other in [
-            "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKb",
-            "SIP/2.0/UDP 10.0.0.2:5060;branch=z9hG4bKa",
-            "SIP/2.0/UDP 10.0.0.1:5061;branch=z9hG4bKa",
-            "SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKa",
-        ] {
-            assert_ne!(
-                invite_txn_key(&first, "c1", Some("t"), 5),
-                invite_txn_key(&via(other), "c1", Some("t"), 5),
-                "{other}"
-            );
-        }
-    }
-
-    #[test]
-    fn from_tag_disambiguates_the_two_dialog_directions() {
-        // Both directions share the Call-ID; CSeq spaces are independent and
-        // can collide on the same number — the From-tag keeps them apart.
-        let v = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKa");
-        assert_ne!(
-            invite_txn_key(&v, "c1", Some("uac"), 5),
-            invite_txn_key(&v, "c1", Some("b2bua"), 5)
-        );
-    }
-
-    #[test]
-    fn remember_then_lookup_returns_entry() {
-        let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-        let k = key("call-1");
-        lru.remember(&k, entry("z9hG4bK-1"), 1000);
-        assert_eq!(lru.lookup(&k).unwrap().branch, "z9hG4bK-1");
-        assert_eq!(lru.size(), 1);
-        assert!(lru.lookup("absent").is_none());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn entries_expire_after_their_own_ttl() {
-        let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-        let short = key("call-1");
-        let long = key("call-2");
-        lru.remember(&short, entry("a"), 1000);
-        lru.remember(&long, entry("b"), 5000);
-        tokio::time::advance(std::time::Duration::from_millis(1001)).await;
-        assert!(lru.lookup(&short).is_none(), "short-TTL entry should have expired");
-        assert!(lru.lookup(&long).is_some(), "long-TTL entry must outlive the short one");
-        assert_eq!(lru.sweep_expired(), 0, "lazy lookup already evicted the expired one");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn sweep_drops_expired() {
-        let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-        lru.remember(&key("c1"), entry("a"), 1000);
-        lru.remember(&key("c2"), entry("b"), 1000);
-        tokio::time::advance(std::time::Duration::from_millis(1001)).await;
-        assert_eq!(lru.sweep_expired(), 2);
-        assert_eq!(lru.size(), 0);
-    }
-}
+mod tests;

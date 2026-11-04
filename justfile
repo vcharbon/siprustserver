@@ -53,8 +53,41 @@ test-slow *filter:
     cargo nextest run --workspace --release -P slow --run-ignored only --no-tests=warn -E {{ quote("(not " + property_lane + ")" + if filter == "" { "" } else { " & (" + filter + ")" }) }}
     cargo nextest run --workspace -P slow --run-ignored only --no-tests=warn -E {{ quote(property_lane + if filter == "" { "" } else { " & (" + filter + ")" }) }}
 
+# The failover sweep (ADR-0055 §11): every shape of the catalogue cut at every
+# turn point by every incident at both sync levels, one test per shape,
+# incident and level, held to each crate's `failover-sweep.ratchet`. Its own
+# lane, out of `test`: about an hour of CPU. Optional filter: `just sweep
+# reinvite`.
+sweep filter='':
+    cargo nextest run --workspace -P sweep --no-tests=fail {{ filter }}
+
+# The last sweep's cells added together per window-table row and per tier,
+# and its failing Guaranteed cells. Gates nothing.
+sweep-report:
+    scripts/sweep-report.py target/sweep-report
+
 # Both lanes.
 test-all: test test-slow
+
+# Coverage-guided fuzzing (ADR-0051 §8): discovery only, never a gate; its own
+# workspace on a pinned nightly (fuzz/), cargo-fuzz installed
+# (`cargo install cargo-fuzz`). When to run it: docs/testing/fuzzing.md.
+#
+# Fuzz one target: `just fuzz b2bua_turn --minutes 60 --jobs 8`.
+fuzz target *args:
+    scripts/fuzz.sh run {{ target }} {{ args }}
+
+# The fuzz targets, in blast-radius order.
+fuzz-list:
+    @scripts/fuzz.sh list
+
+# Minimise one target's corpus to the inputs that keep its coverage.
+fuzz-min target:
+    scripts/fuzz.sh min {{ target }}
+
+# Line coverage one target's corpus reaches, per file.
+fuzz-cov target:
+    scripts/fuzz.sh cov {{ target }}
 
 # The parity oracle (ADR-0001): sip-message's test targets built under its
 # `rvoip-oracle` feature, which no workspace build turns on, and its
@@ -63,11 +96,13 @@ parity-oracle:
     cargo nextest run -p sip-message --features rvoip-oracle --no-tests=fail -E 'test(/^rvoip_parity::/)'
 
 # The live ELU under a real one-core cgroup CPU quota (a transient systemd
-# user scope): the one `overload::quota_tests` case no other lane can run.
+# user scope): the one `overload::quota_tests` case no other lane can run,
+# from the workspace's test build.
 test-cpu-quota:
-    cargo test -p b2bua --lib --no-run
+    cargo nextest run --workspace --no-run
     systemd-run --user --wait --pipe --quiet --same-dir -p CPUQuota=100% -E PATH -E HOME \
-        cargo test -p b2bua --lib -- --ignored --exact overload::quota_tests::live_signal_sheds_under_a_real_one_core_quota
+        cargo nextest run --workspace --run-ignored only --no-tests=fail \
+        -E 'package(=b2bua) & test(=overload::quota_tests::live_signal_sheds_under_a_real_one_core_quota)'
 
 # ── review gates ───────────────────────────────────────────────────────
 
@@ -115,7 +150,9 @@ file-size-check:
 # `testkit`/`test-util` feature and no first-party crate without a tier, and
 # the listed Dockerfiles build it by a cargo command of its own; a pure crate
 # depends on pure crates and `pure-deps` only; every member's lint table is the
-# workspace's. The pre-commit hook checks the staged known entries.
+# workspace's; every member states its HA side, and a blind one depends on
+# blind crates only and passes the word net (scripts/ha_side.py, ADR-0055 §11).
+# The pre-commit hook checks the staged known entries.
 purity:
     scripts/purity.py
 
@@ -155,22 +192,11 @@ fmt-check:
     cargo fmt --all --check
 
 # Rustdoc of every workspace crate, warnings denied: a broken or private
-# intra-doc link, or unclosed HTML in prose, fails. A bin named like its
-# package's lib is skipped by `cargo doc`, so each one gets its own
-# `cargo rustdoc`; its page overwrites the lib's index.html under target/doc.
+# intra-doc link, or unclosed HTML in prose, fails. Every lib and bin is
+# documented under the test build's features, a bin named like its package's
+# lib in a run of its own (scripts/doc-all.sh).
 doc-check:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    export RUSTDOCFLAGS="-D warnings"
-    rc=0
-    cargo doc --no-deps --workspace --keep-going || rc=1
-    while read -r pkg bin; do
-        cargo rustdoc -p "$pkg" --bin "$bin" || rc=1
-    done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[]
-        | ([.targets[] | select(.kind | index("lib")) | .name]) as $libs
-        | .name as $pkg | .targets[] | select(.kind | index("bin"))
-        | select((.name | gsub("-"; "_")) as $n | $libs | index($n)) | "\($pkg) \(.name)"')
-    exit "$rc"
+    RUSTDOCFLAGS="-D warnings" scripts/doc-all.sh --keep-going
 
 # Point git at the versioned hooks (pre-commit: staged Rust must be fmt-clean;
 # prepare-commit-msg: no amend on develop). A hooks path already set is left
@@ -236,7 +262,7 @@ doctor:
 
 # What the build tree currently costs.
 disk:
-    @du -sh target/* 2>/dev/null | sort -rh
+    @du -sh target/* fuzz/target 2>/dev/null | sort -rh
 
 # Drop incremental state, keep compiled artifacts — cheapest GB back mid-session.
 clean-incremental:

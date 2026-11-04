@@ -1,0 +1,73 @@
+schema: budget.v1
+name: backend-outage
+description: >-
+  Every worker gone at once (a total backend outage): every front proxy reads
+  them dead (the dead verdict V, 2.6-3.6 s) and answers new calls 503 with a
+  Retry-After until its node's routes are withdrawn (ADR-0056 §3); once both
+  are withdrawn the VIPs are unreachable and new setups end without a final.
+  The outage A = D + R runs from the inject to both VIPs routed again: D the
+  fault (a freeze: its hold plus the inject's own time, 22 s here), R from
+  the workers' return to the re-announcement, R = h + 1 s probe round + the
+  route guard's 3 s hold (its node withdrawn, the guard and so the pod read
+  not ready until the proxy read fit that long) + 2 s readiness (1 s × 2) +
+  P, with P the announcement's propagation (proxy.announce.propagationMs,
+  5 s with frr-k8s reloading 500 ms after a change) and h the heal and the
+  thawed workers' backlog (2.5 s measured), so R = 13.5 s and A = 35.5 s
+  (measured 31.4 s with the guard). Allowances, in seconds of offered rate:
+  - every setup of the outage may fail, plus 9 s past it: the first probe
+    round that reads a worker alive (1 s), one readiness period (1 s) and P;
+  - 480 with Reason q.850;cause=18, 5.4 s: a setup that reached a worker
+    after it froze and before the proxies read it dead waits in its queue;
+    at the return the worker sends its b-leg INVITE into the withdrawn route
+    and gives up on it with no answer. The span runs from the first worker
+    frozen to the last read dead: the freeze's spread over the workers (the
+    inject's own time, 1.8 s measured) + V (3.6 s); measured 4.0 s;
+  - in-dialog transactions first sent in the outage's first A − L get no
+    final, L the caller's last retransmission (RFC 3261 §17.1.2.2, T1
+    500 ms, T2 4 s: 27.5 s for a non-INVITE; 15.5 s for a re-INVITE from a
+    caller that stops at its fifth retransmission, as SIPp does, an RFC
+    3261 caller's sixth at 31.5 s arriving with 0.5 s left): a BYE strands
+    its call, A − 27.5 = 8 s; a re-INVITE cuts it, A − 15.5 = 20 s per
+    re-INVITE, 40 s for a stream of two per call (ADR-0056 §3; measured
+    with frr-k8s's 3 s default and no guard, A = 34.4 s: 4.4 s of BYEs,
+    10 s of re-INVITEs);
+  - a CDR that says answered for a call whose caller timed out, and a CDR
+    of a stranded call ending after its caller's end, 18 s of the summed
+    offered rate (10 s + 8 s): a setup pending at the freeze (offered in the 10 s setup
+    deadline before it) whose callee's 2xx the worker relays at its return,
+    after the caller's deadline; and a call whose BYE never reached a
+    worker (the 8 s of stranding BYEs), which the worker ends later on its
+    own;
+  - a CDR duration off by up to R + T2 = 17.5 s: the worker ends a call at
+    its return on the caller's queued BYE, whose 200 reaches the caller with
+    its first retransmission after the re-announcement;
+  - a dialog request overtaken by the next, 32 s per kind: the worker sends
+    a dialog's requests without waiting for the previous one's final (a
+    transfer's NOTIFY with the referred call's 100, then its 200: RFC 6665
+    §4.2.2 sends each state change at once). The first, sent into the
+    outage, is delivered only by a retransmission after the
+    re-announcement; the next, sent meanwhile, can arrive first
+    (`dialog-cseq-skip`), and the first then arrives under a lower CSeq
+    (`dialog-cseq-backwards`), which the receiver answers 500 (RFC 3261
+    §12.2.2); the transfer completes. At most the dialogs whose first
+    request was sent in the outage and still lives at the re-announcement:
+    min(A = 35.5 s, the transaction's 32 s life) = 32 s (measured 1 s of the
+    transfer stream's rate).
+setup_failed:
+  - { stream: "*", code: 0, reason: timeout, max_seconds: 9, over_outage: true }
+  - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 9, over_outage: true }
+  - { stream: "*", code: 480, reason: "q.850;cause=18", max_seconds: 5.4 }
+setup_slow:
+  max_seconds: 9
+  over_outage: true
+in_dialog:
+  - { stream: "*", class: dialog_request_failed, detail: BYE no final, max_seconds: 8 }
+  - { stream: "*", class: call_stranded, detail: teardown never completed, max_seconds: 8 }
+  - { stream: "*", class: dialog_request_failed, detail: INVITE no final, max_seconds: 40 }
+  - { stream: "*", class: call_cut, detail: cut, max_seconds: 40 }
+  - { stream: "*", class: protocol_anomaly, detail: dialog-cseq-skip, max_seconds: 32 }
+  - { stream: "*", class: protocol_anomaly, detail: dialog-cseq-backwards, max_seconds: 32 }
+cdr_mismatch:
+  differs:
+    max_seconds: 18
+    excess_ms: 17500

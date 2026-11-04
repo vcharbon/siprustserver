@@ -3,9 +3,9 @@
 //! where a second final, or a provisional after the final, on that
 //! transaction is refused.
 
-use call::Call;
+use call::{Call, Repeated, RetainedEmission};
 use sip_message::generators::{self, response_states_own_contact, GenerateResponseOpts};
-use sip_message::header::{self, MediaType};
+use sip_message::header::{self, HeaderName, MediaType};
 use sip_message::{Method, SipHeader as MsgHeader, SipRequest};
 
 use crate::effects::{
@@ -38,7 +38,6 @@ pub fn response_to_a_leg(
     contact: Option<header::Contact>,
     body: Vec<u8>,
     content_type: Option<MediaType>,
-    incoming_source: Option<(String, u16)>,
     extra_headers: Vec<MsgHeader>,
     provenance: Provenance,
     author: super::sdp_session::Author<'_>,
@@ -47,7 +46,7 @@ pub fn response_to_a_leg(
     // is not built leaves it so.
     let unsent = call.clone();
     if status >= 200 {
-        if let Some(carried) = call.a_leg.invite_final_sent {
+        if let Some(carried) = call.a_leg.invite_final_sent() {
             tracing::warn!(
                 call_ref = %call.call_ref,
                 status,
@@ -57,7 +56,7 @@ pub fn response_to_a_leg(
             fx.buffered.push(BufferedObservabilityEffect::SecondFinalRefused { status, carried });
             return None;
         }
-        call.a_leg.invite_final_sent = Some(status);
+        *call.a_leg.invite_final_sent_mut() = Some(status);
         // A non-2xx final ends every early dialog the INVITE opened (RFC
         // 3261 §12.1).
         if status >= 300 {
@@ -103,7 +102,7 @@ pub fn response_to_a_leg(
         body,
         content_type,
         extra_headers,
-        incoming_source,
+        ..Default::default()
     };
     let resp = match generators::generate_response(a_leg_invite, status, &reason, &opts) {
         Ok(resp) => resp,
@@ -113,11 +112,30 @@ pub fn response_to_a_leg(
             return None;
         }
     };
-    // Routed by the txn layer to the a-leg server transaction; dest is alice
-    // (top Via sent-by of her INVITE, RFC 3261 §18.2.2).
-    let hop = a_leg_invite.top_via();
-    let (host, port) = hop.sent_by().pair();
+    // Routed by the txn layer to the a-leg server transaction; dest is the
+    // response target of her INVITE's stamped top Via (RFC 3261 §18.2.2).
+    let (host, port) = a_leg_invite.top_via().response_target();
     let dest = (host.to_string(), port);
+    // A node serving the call from the record re-sends the non-2xx final
+    // (§17.2.1), and once the latest provisional unless reliable, which its
+    // own ladder repeats (RFC 3262 §3); the end-of-turn stamp rebinds either
+    // to the bytes that leave.
+    let retained = || {
+        RetainedEmission::on_trigger(
+            resp.image().to_vec(),
+            dest.clone(),
+            Repeated::response("INVITE", status),
+        )
+    };
+    if status >= 300 {
+        *call.a_leg.invite_rejection_mut() = Some(retained());
+    }
+    if status >= 200 {
+        *call.a_leg.invite_provisional_mut() = None;
+    } else if status > 100 {
+        let reliable = resp.has(&HeaderName::RSeq);
+        *call.a_leg.invite_provisional_mut() = (!reliable).then(retained);
+    }
     Some(OutboundSipEffect {
         body: OutboundBody::Response(resp),
         mode: OutboundTxnMode::ServerResponse,
@@ -136,7 +154,7 @@ pub fn response_to_a_leg(
 /// executors that would mint one ask here first, so a refused provisional
 /// touches no dialog tag and no reliable-provisional ladder on the way.
 pub fn provisional_after_final(call: &Call, fx: &mut HandlerEffects, status: u16) -> bool {
-    let Some(carried) = call.a_leg.invite_final_sent else { return false };
+    let Some(carried) = call.a_leg.invite_final_sent() else { return false };
     tracing::warn!(
         call_ref = %call.call_ref,
         status,

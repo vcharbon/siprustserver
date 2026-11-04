@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use scenario_harness::claim::ClaimRule;
 use scenario_harness::legpick::LegPicker;
 use sip_message::preparse::is_invite_request_buffer;
-use sip_message::sniff::{call_id, from_user};
 use sip_net::queue::PacketQueue;
 use sip_net::{
     BindError, BindErrorReason, BindUdpOpts, SendError, SendTap, SignalingNetwork, UdpEndpoint,
@@ -21,11 +20,14 @@ use sip_net::{
 };
 use tokio::time::Instant;
 
+use super::datagram::Datagram;
+use super::late_answer::SentAnswers;
 use super::late_final::SentInvites;
 use super::loss::{DropDir, DropModel, TargetedDrop};
 use super::retransmit::CallTxns;
 use super::routing::BindDecl;
 use super::rtt::RttSink;
+use super::tally::CallTally;
 use super::taps::{Taps, WireTap};
 use super::{
     CallGate, CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role, RELEASE_HOLD,
@@ -57,6 +59,8 @@ pub struct MuxNetwork {
     /// Where each bound endpoint's measured SIP round trips go; `None` = not
     /// measured.
     pub(super) rtt_sink: Option<RttSink>,
+    /// The call's message tally; `None` = not tallied.
+    pub(super) tally: Option<Arc<CallTally>>,
     /// The call's wire tap; `None` = not watched.
     pub(super) wire_tap: Option<WireTap>,
     /// The retransmit engine of every endpoint bound on this network.
@@ -71,16 +75,30 @@ impl MuxNetwork {
         self
     }
 
+    /// Tally every datagram this network's endpoints send, re-send or have
+    /// delivered into `tally`.
+    pub fn with_tally(mut self, tally: Arc<CallTally>) -> Self {
+        self.tally = Some(tally);
+        self
+    }
+
     /// Hand every datagram this network's endpoints send or receive to `tap`.
     pub fn with_wire_tap(mut self, tap: WireTap) -> Self {
         self.wire_tap = Some(tap);
         self
     }
 
+    /// Whether a client transaction is still open on this call's endpoints
+    /// (final not arrived, Timer B/F not expired). Never without the engine.
+    pub fn client_txn_open(&self) -> bool {
+        self.engines.lock().unwrap().iter().any(|txns| txns.client_open())
+    }
+
     /// Park until every client transaction this call's endpoints have open
     /// has ended (final received, or Timer B/F), retransmitting meanwhile:
     /// what a failed call waits for before its endpoints drop, so its
-    /// teardown CANCEL or BYE survives a loss. Immediate without the engine.
+    /// teardown CANCEL or BYE survives a loss, and what a call whose in-dialog
+    /// request awaits its final waits for. Immediate without the engine.
     pub async fn client_txns_ended(&self) {
         let engines: Vec<Arc<CallTxns>> = self.engines.lock().unwrap().clone();
         for txns in engines {
@@ -156,14 +174,20 @@ impl SignalingNetwork for MuxNetwork {
             Some(leg) => uas.as_ref().map(|(l, _)| l.as_str()) == Some(leg),
         });
         let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), drop_nth));
+        let leg = uas.as_ref().map(|(label, _)| label.as_str());
+        let taps = Taps::new(self.rtt_sink.clone(), self.tally.clone(), self.wire_tap.clone(), leg);
         let txns = self.retransmit.then(|| {
-            Arc::new(CallTxns::new(mux.endpoint.clone(), drop.clone(), mux.stats.clone()))
+            Arc::new(CallTxns::new(
+                mux.endpoint.clone(),
+                drop.clone(),
+                mux.stats.clone(),
+                taps.clone(),
+            ))
         });
         if let Some(txns) = &txns {
             self.engines.lock().unwrap().push(txns.clone());
         }
-        let leg = uas.as_ref().map(|(label, _)| label.as_str());
-        let taps = Taps::new(self.rtt_sink.clone(), self.wire_tap.clone(), leg);
+        let answers = Arc::new(SentAnswers::default());
 
         if let Some((label, claim)) = uas {
             let claim_mode = claim.is_some();
@@ -247,6 +271,7 @@ impl SignalingNetwork for MuxNetwork {
                 drop: drop.clone(),
                 txns: txns.clone(),
                 taps: taps.clone(),
+                answers: answers.clone(),
                 claim,
                 claimed: false,
             });
@@ -270,6 +295,7 @@ impl SignalingNetwork for MuxNetwork {
             txns,
             taps,
             invites: (role == Role::Caller).then(Default::default),
+            answers,
         }))
     }
 
@@ -294,7 +320,7 @@ impl SignalingNetwork for MuxNetwork {
 struct MuxEndpoint {
     local: SocketAddr,
     role: Role,
-    /// The From user a caller's initial INVITE must carry (from-user
+    /// The From key a caller's initial INVITE must yield (from-user
     /// correlation only): the call's key, registered by its callee legs.
     caller_key: Option<String>,
     mux: Arc<MuxSocket>,
@@ -320,80 +346,100 @@ struct MuxEndpoint {
     /// A caller's INVITEs still open to a non-2xx final; handed to the
     /// registry on `Drop` so a late final is still ACKed.
     invites: Option<Arc<SentInvites>>,
+    /// The finals this endpoint's agent sent; handed to the registry on
+    /// `Drop` so a retransmitted request still draws its answer.
+    answers: Arc<SentAnswers>,
+}
+
+impl MuxEndpoint {
+    /// A caller registers the Call-ID of each dialog it opens, up to and
+    /// including its first INVITE, so responses and in-dialog requests demux
+    /// back to it. Under from-user correlation that first INVITE must carry
+    /// the call's key as its From user: a mismatch would return legs to
+    /// another call (or none), so it is refused and counted, never sent.
+    /// This is local bookkeeping, done even when the datagram is then
+    /// dropped on the wire (a UAC that loses its INVITE still owns the
+    /// dialog).
+    fn register_dialog(&self, d: &Datagram<'_>) -> Result<(), SendError> {
+        if self.role != Role::Caller || self.invite_sent.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let invite = is_invite_request_buffer(d.raw());
+        if invite {
+            if let Some(key) = &self.caller_key {
+                let from = self.mux.correlation.token(d.raw());
+                if from.as_deref() != Some(key.as_str()) {
+                    self.mux.stats.caller_key_mismatch.fetch_add(1, Ordering::Relaxed);
+                    return Err(SendError::stated(format!(
+                        "caller INVITE From key {from:?} is not the call key {key:?}"
+                    )));
+                }
+            }
+        }
+        if let Some(cid) = d.id().call_id {
+            // Lock order: registry, then keyset (as the demux and `Drop`).
+            let mut g = self.mux.reg.lock().unwrap();
+            let mut keys = self.keyset.lock().unwrap();
+            if !keys.iter().any(|k| matches!(k, Key::CallId(c) if **c == *cid)) {
+                let cid: Arc<str> = cid.into();
+                g.by_call_id.insert(
+                    cid.clone(),
+                    Delivery {
+                        caller: true,
+                        queue: self.queue.clone(),
+                        drop: self.drop.clone(),
+                        txns: self.txns.clone(),
+                        taps: self.taps.clone(),
+                        invites: self.invites.clone(),
+                        answers: self.answers.clone(),
+                    },
+                );
+                keys.push(Key::CallId(cid));
+            }
+        }
+        if invite {
+            self.invite_sent.store(true, Ordering::Relaxed);
+            // Release: the Call-ID registered above is visible to the
+            // dispatcher that Acquire-loads the gate open.
+            self.gate.invite_sent.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl UdpEndpoint for MuxEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
-        // A caller registers the Call-ID of each dialog it opens, up to and
-        // including its first INVITE, so responses and in-dialog requests demux
-        // back to it. Under from-user correlation that first INVITE must carry
-        // the call's key as its From user: a mismatch would return legs to
-        // another call (or none), so it is refused and counted, never sent.
-        // This is local bookkeeping, done even when the datagram is then
-        // dropped on the wire below (a UAC that loses its INVITE still owns
-        // the dialog).
-        if self.role == Role::Caller && !self.invite_sent.load(Ordering::Relaxed) {
-            let invite = is_invite_request_buffer(buf);
-            if invite {
-                if let Some(key) = &self.caller_key {
-                    let from = from_user(buf);
-                    if from.as_deref() != Some(key.as_str()) {
-                        self.mux.stats.caller_key_mismatch.fetch_add(1, Ordering::Relaxed);
-                        return Err(SendError::stated(format!(
-                            "caller INVITE From user {from:?} is not the call key {key:?}"
-                        )));
-                    }
-                }
+        let dropped = {
+            let d = Datagram::sniff(buf);
+            self.register_dialog(&d)?;
+            // Record the outbound message in the retransmit engine BEFORE the
+            // loss check: a dropped request is exactly what the resender must
+            // recover, and the resender re-applies the same loss model on every
+            // retry.
+            if let Some(txns) = &self.txns {
+                txns.on_outbound(&d, dst);
             }
-            if let Some(cid) = call_id(buf) {
-                // Lock order: registry, then keyset (as the demux and `Drop`).
-                let mut g = self.mux.reg.lock().unwrap();
-                let mut keys = self.keyset.lock().unwrap();
-                if !keys.iter().any(|k| matches!(k, Key::CallId(c) if *c == cid)) {
-                    g.by_call_id.insert(
-                        cid.clone(),
-                        Delivery {
-                            caller: true,
-                            queue: self.queue.clone(),
-                            drop: self.drop.clone(),
-                            txns: self.txns.clone(),
-                            taps: self.taps.clone(),
-                            invites: self.invites.clone(),
-                        },
-                    );
-                    keys.push(Key::CallId(cid));
-                }
+            if let Some(invites) = &self.invites {
+                invites.on_outbound(&d, dst);
             }
-            if invite {
-                self.invite_sent.store(true, Ordering::Relaxed);
-                // Release: the Call-ID registered above is visible to the
-                // dispatcher that Acquire-loads the gate open.
-                self.gate.invite_sent.store(true, Ordering::Release);
+            self.answers.on_outbound(&d, self.taps.as_deref());
+            // A round trip runs from the first transmission attempt, lost or not.
+            if let Some(taps) = &self.taps {
+                taps.on_outbound(&d, Instant::now());
             }
-        }
-        // Record the outbound message in the retransmit engine BEFORE the loss
-        // check: a dropped request is exactly what the resender must recover, and
-        // the resender re-applies the same loss model on every retry.
-        if let Some(txns) = &self.txns {
-            txns.on_outbound(buf, dst);
-        }
-        if let Some(invites) = &self.invites {
-            invites.on_outbound(buf, dst);
-        }
-        // A round trip runs from the first transmission attempt, lost or not.
-        if let Some(taps) = &self.taps {
-            taps.on_outbound(buf, Instant::now());
-        }
-        // Simulated loss: report success (the txn believes it sent) but never put
-        // the datagram on the wire — the SUT never sees it, so only auto-retransmit
-        // recovers the call. The targeted OUTBOUND drop fires here too (a
-        // deterministic single-shot the engine's Timer-E resend then heals).
-        if self.drop.drops() || self.drop.targeted_hit(buf, DropDir::Outbound) {
+            // Simulated loss: report success (the txn believes it sent) but never
+            // put the datagram on the wire — the SUT never sees it, so only
+            // auto-retransmit recovers the call. The targeted OUTBOUND drop fires
+            // here too (a deterministic single-shot the engine's Timer-E resend
+            // then heals).
+            self.drop.drops() || self.drop.targeted_hit(d.id(), DropDir::Outbound)
+        };
+        if dropped {
             self.mux.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
-        self.mux.endpoint.send_to(buf, dst).await
+        self.mux.endpoint.as_ref().send_to(buf, dst).await
     }
 
     async fn recv(&self) -> Option<UdpPacket> {
@@ -441,8 +487,8 @@ impl Drop for MuxEndpoint {
         // leg's Call-ID into its keyset under the registry lock).
         let mut g = self.mux.reg.lock().unwrap();
         let keys: Vec<Key> = self.keyset.lock().unwrap().drain(..).collect();
-        let invites = |c: &str| self.invites.as_ref().and_then(|i| i.take(c));
-        g.release_keys(keys, invites, Instant::now() + RELEASE_HOLD, &self.mux.stats);
+        let held = |c: &str| (self.invites.as_ref().and_then(|i| i.take(c)), self.answers.take(c));
+        g.release_keys(keys, held, Instant::now() + RELEASE_HOLD, &self.mux.stats);
         drop(g);
         self.queue.close();
         // Stop this call's resender tasks now (call ended) rather than letting them

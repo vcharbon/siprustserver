@@ -1,8 +1,7 @@
 //! The bulk reads of one partition of the replicating store: its call bodies
 //! decoded, or its `callRef`s alone.
 
-use call::{Call, CallBodyCodec};
-
+use super::envelope::{self, Enveloped};
 use super::{CallState, CallStore, PartitionRole};
 
 impl CallState {
@@ -10,9 +9,9 @@ impl CallState {
     /// — this node's own `pri:{self}` for the bulk reclaim (ADR-0011 X11).
     /// The router materialises what it serves through the per-call read. Empty
     /// when no replicating store is wired. Each entry pairs the decoded call with
-    /// its persisted receive-time clock-skew offset (`0` when the record carries
-    /// none) — the router re-anchors the call's absolute timer deadlines by this
-    /// offset before re-arming them (clock-skew hardening). `beat` runs once
+    /// its persisted clock-skew offset (`0` when the record carries none) — the
+    /// router moves the call's instants into this node's frame by it before
+    /// reading them (ADR-0055 §9). `beat` runs once
     /// per body read, so a caller's loop pulse shows a long scan making
     /// progress.
     pub async fn scan_partition(
@@ -20,7 +19,7 @@ impl CallState {
         role: PartitionRole,
         primary: &str,
         beat: &(dyn Fn() + Sync),
-    ) -> Vec<(Call, i64)> {
+    ) -> Vec<(Enveloped, i64)> {
         let Some(repl) = self.repl_store() else {
             return Vec::new();
         };
@@ -29,10 +28,10 @@ impl CallState {
             .iter()
             .filter_map(|b| {
                 beat();
-                self.codec.decode(b).ok()
+                envelope::decode(&self.codec, b).ok()
             })
             .map(|c| {
-                let skew = repl.skew_offset_ms(&c.call_ref).unwrap_or(0);
+                let skew = repl.skew_offset_ms(&c.call.call_ref).unwrap_or(0);
                 (c, skew)
             })
             .collect()

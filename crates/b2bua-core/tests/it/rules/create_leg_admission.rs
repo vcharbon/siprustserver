@@ -15,7 +15,9 @@
 //! has no span channel). IP literals and the `["*"]` wildcard admit regardless
 //! of the suffix list.
 
+use super::fixtures::*;
 use super::*;
+use b2bua_core::rule_fixture::{context, executor, Varied};
 use call::{CallModelState, CdrEventType};
 
 /// One `create-leg` action toward `host:port`, all overrides at their
@@ -41,25 +43,12 @@ fn create_leg(host: &str, port: u16) -> RuleAction {
 fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult {
     let call = test_call();
     let reinvite = invite();
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(reinvite)),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(SipMessage::Request(reinvite), "127.0.0.1:5060".parse().unwrap());
     let mut id_gen = scope(1);
     let now_ms = 1_700_000_000_000;
-    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms };
-    let ctx = RuleContext {
-        call: RuleCall::new(&call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms: 1_700_000_000_000,
-        config,
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
+    let mut exec = executor(config, &mut id_gen);
+    exec.now_ms = now_ms;
+    let ctx = context(&call, &event, "a", config).at(1_700_000_000_000);
     exec.execute(&[create_leg(host, port)], &call, &ctx)
 }
 
@@ -122,14 +111,18 @@ fn create_leg_refused_mid_call_ends_every_leg_on_the_wire() {
         let mut b = b_leg_pending();
         call::testkit::stage_leg(&mut b, LegState::Confirmed);
         with_dialog(&mut b, "btag");
-        call = call::helpers::add_b_leg(call, b);
+        call::helpers::add_b_leg(&mut call, b);
         let mut ringing =
             Leg { leg_id: "b-2".into(), call_id: "b2cid@x".into(), ..b_leg_pending() };
         // The INVITE `b-2` rings on, which its CANCEL names (RFC 3261 §9.1).
         let dest = call::HostPort { host: "10.0.0.2".into(), port: 5070 };
-        let handle = call::InviteTxnHandle::new("z9hG4bK-b2", 1, invite().image().to_vec(), dest);
-        ringing.outbound_invite.as_mut().expect("a dialled leg").txn = Some(handle);
-        call = call::helpers::add_b_leg(call, ringing);
+        let handle = call::SentRequest {
+            branch: "z9hG4bK-b2".to_string(),
+            image: invite().image().to_vec(),
+            destination: dest,
+        };
+        call::testkit::dial_with(&mut ringing, handle);
+        call::helpers::add_b_leg(&mut call, ringing);
         let guard = TimerKey::call(TimerType::ReferOverallSafety);
         let result =
             execute_on(&call, &[action, RuleAction::arm(guard.clone(), TimerDelay::millis(5_000))]);

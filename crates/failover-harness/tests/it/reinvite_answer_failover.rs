@@ -14,13 +14,16 @@
 //! what takes the call over; announced, the departure sweep takes over the call
 //! whose round is in flight at once (ADR-0047), and the 200 then reaches the
 //! copy already live, whose seeded transaction takes it.
+//!
+//! Beyond the failover sweep: a re-INVITE answered after the kill, its re-send branch and the
+//! takeover count.
 
 use std::time::Duration;
 
 use failover_harness::FailoverHarness;
 use sip_message::generators::InDialogMethod;
 
-use crate::departure_support::kill_announced;
+use crate::departure_support::{bring_up_reactive, kill_announced};
 use crate::inflight_resend::{
     bring_up, establish, kill_serving_node, reboot_and_reclaim, settle_to_one_cdr, split_mut,
     survivor_of, synchronized_call_ref, REANSWER, REOFFER, REPLICATE,
@@ -34,7 +37,7 @@ async fn a_reinvite_answered_after_the_kill_completes_on_the_survivor() {
     let mut fh = FailoverHarness::new("reinvite-answer-failover", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
 
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
@@ -58,7 +61,7 @@ async fn a_reinvite_answered_after_the_kill_completes_on_the_survivor() {
         "the failed-over 200 took the call over on the survivor",
     );
     dialog.ack(None).await;
-    bob.receive("ACK").await;
+    bob.receive_ack_of(at_bob.request().cseq().seq()).await;
 
     // ── The session lives on, then ends cleanly ─────────────────────────────
     let mut info = dialog.send_request(InDialogMethod::Info).send().await;
@@ -98,6 +101,10 @@ async fn a_reinvite_answered_after_its_nodes_departure_completes_on_the_live_cop
         hydrated_before + 1,
         "the departure took the call over, its round in flight",
     );
+    // The copy re-sends the re-INVITE it holds no provisional for, once, as a
+    // client in Trying retransmits (RFC 3261 §17.1.1.2).
+    let resent = bob.receive("INVITE").await;
+    assert_eq!(resent.request().top_via().branch(), at_bob.request().top_via().branch());
 
     // ── The callee answers the live copy ─────────────────────────────────────
     at_bob.respond(200, "OK").with_sdp(REANSWER).await;

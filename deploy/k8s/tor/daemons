@@ -1,0 +1,24 @@
+# The FRR daemons of the lab router (deploy/k8s/tor/frr.conf.tmpl): zebra
+# installs the routes, bgpd talks to the edge nodes, bfdd detects their death,
+# staticd holds the VIPs' blackhole fallbacks.
+bgpd=yes
+staticd=yes
+bfdd=yes
+ospfd=no
+ospf6d=no
+ripd=no
+ripngd=no
+isisd=no
+pimd=no
+ldpd=no
+nhrpd=no
+eigrpd=no
+babeld=no
+sharpd=no
+pbrd=no
+fabricd=no
+pathd=no
+vtysh_enable=yes
+zebra_options="  -A 127.0.0.1 -s 90000000"
+bgpd_options="   -A 127.0.0.1"
+bfdd_options="   -A 127.0.0.1"

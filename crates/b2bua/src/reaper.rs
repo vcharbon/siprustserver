@@ -172,7 +172,7 @@ impl Reaper {
 
     /// One paced sweep pass, gated on `enabled` (a no-op for a disabled reaper).
     /// Driven per tick by the single sweep task `b2bua_core` spawns — which also
-    /// drives the Model-Y backup-durable reap, so the two periodic concerns share
+    /// drives the replica-store reap, so the two periodic concerns share
     /// one `tokio::time::interval` (deterministic under `start_paused` +
     /// `Harness::advance`) with an explicit ordering instead of two racing timers.
     ///
@@ -204,6 +204,7 @@ impl Reaper {
             (fixed.orphan_index, B2buaMetrics::bump_store_reconciled_orphan_index),
             (fixed.missing_index, B2buaMetrics::bump_store_reconciled_missing_index),
             (fixed.orphan_takeover, B2buaMetrics::bump_store_reconciled_orphan_takeover),
+            (fixed.orphan_envelopes, B2buaMetrics::bump_store_reconciled_orphan_envelope),
         ] {
             for _ in 0..n {
                 bump(m);
@@ -349,8 +350,8 @@ pub fn discharge_result(mut call: Call, now_ms: i64) -> HandlerResult {
             call::helpers::abandon_leg(leg);
         }
     }
-    let call = call::helpers::add_cdr_event(
-        call,
+    call::helpers::add_cdr_event(
+        &mut call,
         CdrEvent {
             event_type: CdrEventType::Bye,
             timestamp: now_ms,
@@ -360,7 +361,7 @@ pub fn discharge_result(mut call: Call, now_ms: i64) -> HandlerResult {
             decision_ordinal: 0,
         },
     );
-    let mut call = record_termination(call, now_ms, TerminationCause::Supervisor, None);
+    record_termination(&mut call, now_ms, TerminationCause::Supervisor, None);
     call.state = CallModelState::Terminated;
     HandlerResult::new(call)
 }

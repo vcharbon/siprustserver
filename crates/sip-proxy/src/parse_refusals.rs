@@ -24,12 +24,22 @@ pub struct ParseRefusals {
 }
 
 impl ParseRefusals {
-    /// A full cap; the To-tag secret is drawn from `id_gen` once, here.
+    /// A full cap; the To-tag secret is drawn from `id_gen` once, here: this
+    /// instance's own, for a proxy with no shared key (tests, development).
     pub fn new(id_gen: &IdGen) -> Self {
-        Self {
-            cap: Mutex::new(ParseRefusalCap::new(Duration::ZERO)),
-            tagger: StatelessTagger::from_id_gen(id_gen),
-        }
+        Self::keyed(StatelessTagger::from_id_gen(id_gen))
+    }
+
+    /// A full cap; `tagger` derives the To-tags (a deployment's shared key,
+    /// `crate::security::own_final_tag`).
+    pub fn keyed(tagger: StatelessTagger) -> Self {
+        Self { cap: Mutex::new(ParseRefusalCap::new(Duration::ZERO)), tagger }
+    }
+
+    /// Whether `ack` acknowledges a 400 this proxy answered an INVITE with
+    /// (RFC 3261 §17.1.1.3).
+    pub fn acknowledges_own_final(&self, ack: &sip_message::SipRequest) -> bool {
+        self.tagger.acknowledges_own_final(ack)
     }
 
     /// The fate at `now_ms` of the datagram from `src` the parser refused

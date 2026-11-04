@@ -2,17 +2,19 @@ use super::*;
 use crate::plan::StepKind;
 use crate::program::StepLoc;
 use crate::state::RunState;
+use pivot_schema::body::{Body, BodyCompare, BodyShape};
 use pivot_schema::bundle::{ClockMode, IdentityBindings, RunConfig};
 use pivot_schema::flow::{Anchor, CheckMode, Delay};
 use pivot_schema::known_bug::KnownBug;
 use pivot_schema::msg::Header;
 use pivot_schema::scoping::CheckClass;
+use sip_message::HeaderProjection;
 use std::sync::OnceLock;
 
 /// A resolver over an empty binding set. These tests freeze literal values,
 /// so every `${…}`-free header resolves to itself; the ones that DO state an
 /// accessor build their own bindings.
-fn plain() -> Resolver<'static> {
+pub(super) fn plain() -> Resolver<'static> {
     static STATE: OnceLock<RunState> = OnceLock::new();
     static BINDINGS: OnceLock<IdentityBindings> = OnceLock::new();
     Resolver::new(STATE.get_or_init(RunState::new), BINDINGS.get_or_init(IdentityBindings::new))
@@ -20,11 +22,11 @@ fn plain() -> Resolver<'static> {
 
 /// A lane's configuration; `Scope::new(&config, origin)` binds it to the
 /// document a test is replaying.
-fn lane() -> RunConfig {
+pub(super) fn lane() -> RunConfig {
     RunConfig::new("upstream-demo", ClockMode::Virtual, "127.0.0.1:5080")
 }
 
-fn step(msg: MsgSpec, check: CheckMode) -> CompiledStep {
+pub(super) fn step(msg: MsgSpec, check: CheckMode) -> CompiledStep {
     let discriminator = match (&msg.method, msg.status) {
         (Some(m), _) => Discriminator::Request { method: m.clone() },
         (None, Some(s)) => {
@@ -41,6 +43,7 @@ fn step(msg: MsgSpec, check: CheckMode) -> CompiledStep {
         checks: vec![],
         early: None,
         overlap: None,
+        awaits: None,
         msg,
         delay: Delay { ms: 0, from: Anchor::Trigger, compressible: true, timer_linked: false },
         within_ms: 32000,
@@ -53,7 +56,7 @@ fn step(msg: MsgSpec, check: CheckMode) -> CompiledStep {
     }
 }
 
-fn inbound_response(status: u16, cseq_method: &str) -> Inbound {
+pub(super) fn inbound_response(status: u16, cseq_method: &str) -> Inbound {
     Inbound {
         method: None,
         status: Some(status),
@@ -70,10 +73,13 @@ fn inbound_response(status: u16, cseq_method: &str) -> Inbound {
         to_tag: Some("b1".into()),
         from_user: Some("alice".into()),
         to_user: Some("bob".into()),
+        ruri: None,
+        from_uri: None,
+        to_uri: None,
     }
 }
 
-fn inbound_request(method: &str) -> Inbound {
+pub(super) fn inbound_request(method: &str) -> Inbound {
     Inbound {
         method: Some(method.into()),
         status: None,
@@ -90,6 +96,9 @@ fn inbound_request(method: &str) -> Inbound {
         to_tag: None,
         from_user: Some("alice".into()),
         to_user: Some("bob".into()),
+        ruri: None,
+        from_uri: None,
+        to_uri: None,
     }
 }
 
@@ -243,11 +252,15 @@ fn a_binding_on_another_leg_is_another_dialog() {
 }
 
 #[test]
-fn a_request_gate_reads_method_identity_not_spelling() {
-    let step =
+fn a_request_gate_reads_the_method_as_spelled() {
+    let invite =
+        step(MsgSpec { method: Some("INVITE".into()), ..MsgSpec::default() }, CheckMode::Record);
+    assert!(discriminates(&invite, &inbound_request("INVITE")).matches());
+    assert!(!discriminates(&invite, &inbound_request("ACK")).matches());
+    // A method is case-sensitive (RFC 3261 §7.1): `Invite` is no INVITE.
+    let extension =
         step(MsgSpec { method: Some("Invite".into()), ..MsgSpec::default() }, CheckMode::Record);
-    assert!(discriminates(&step, &inbound_request("INVITE")).matches());
-    assert!(!discriminates(&step, &inbound_request("ACK")).matches());
+    assert!(!discriminates(&extension, &inbound_request("INVITE")).matches());
 }
 
 #[test]
@@ -396,46 +409,6 @@ fn a_multipart_body_on_an_expect_gates_the_container_type() {
         content_holds(&described, &invite, &scope, &plain()).matches(),
         "the parts are the confrontation's, never the gate's"
     );
-}
-
-/// A lane that declares the known bug keeps taking the datagram, so the run
-/// reaches the steps behind the symptom; a lane that declares nothing still
-/// refuses it. What the waived assertion found is recorded either way.
-#[test]
-fn a_lane_declared_known_bug_takes_the_body_out_of_the_match_and_records_what_it_found() {
-    let provisional = step(
-        MsgSpec {
-            status: Some(180),
-            cseq_method: Some("INVITE".into()),
-            body: Some(Body::Shape(pivot_schema::body::ShapeBody { mode: BodyShape::Absent })),
-            ..MsgSpec::default()
-        },
-        CheckMode::Assert,
-    );
-    let mut arrived = inbound_response(180, "INVITE");
-    arrived.body = b"v=0\r\n".to_vec();
-
-    let strict = lane();
-    let strict = Scope::new(&strict, None);
-    assert_eq!(
-        content_holds(&provisional, &arrived, &strict, &plain()),
-        GateVerdict::Rejects("body must be absent; 5 bytes arrived".into()),
-        "a lane declaring nothing refuses the datagram"
-    );
-    assert!(waived_body_findings(&provisional, &arrived, &strict).is_empty());
-
-    let waiving = lane().with_known_bug(KnownBug::ProvisionalRewriteNotApplied);
-    let waiving = Scope::new(&waiving, None);
-    assert!(content_holds(&provisional, &arrived, &waiving, &plain()).matches());
-    let found = waived_body_findings(&provisional, &arrived, &waiving);
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].0, KnownBug::ProvisionalRewriteNotApplied);
-    assert!(matches!(
-        &found[0].1,
-        Failure::CheckFailed { field, expected, observed, .. }
-            if field == "body" && expected == "absent"
-                && observed == "body must be absent; 5 bytes arrived"
-    ));
 }
 
 /// The waiver is the ONE miss it names, on the ONE message class it names.

@@ -1,14 +1,15 @@
 {{- if .Values.proxy.enabled }}
 {{- /*
-SIP front proxy and load balancer, an active/passive pair (ADR-0012 D7) on the
-tier=edge nodes, the only nodes on both SIP planes. One keepalived VRRP
-instance floats the internal VIP (worker-facing) and the external VIP
-(caller-facing) together; the master serves all traffic, the backup keeps a
-live worker view through its own OPTIONS probes and stays Ready. The proxy
-advertises the VIPs in Via and Record-Route, stable across failover and pod
-restart; the HMAC stickiness cookie and worker replication keep in-dialog
-routing correct from either pod. Workers are discovered from the EndpointSlices
-of the headless b2bua-worker Service (ADR-0012 D4).
+SIP front proxy and load balancer, an active-active pair on the nodes of
+both SIP planes (ADR-0056). Each pod binds the internal VIP (worker-facing)
+and the external VIP (caller-facing) on its node's lo; the node announces
+both to the routers through the announce-only Services (proxy-announce.yaml)
+exactly while the pod is Ready, and the routers spread flows over the
+announcing nodes. The proxy advertises the VIPs in Via and Record-Route,
+the same from either pod; the HMAC stickiness cookie and worker replication
+keep in-dialog routing correct from either pod (ADR-0009 X7). Workers are
+discovered from the EndpointSlices of the headless b2bua-worker Service
+(ADR-0012 D4).
 */}}
 {{- $p := .Values.proxy }}
 {{- $vip := include "siprust.net" (dict "root" $ "key" "proxyVip") }}
@@ -20,12 +21,19 @@ of the headless b2bua-worker Service (ADR-0012 D4).
   "PROXY_LISTEN_EXT" (printf "%s:%d" $extVip $port)
   "PROXY_ADVERTISE_EXT" (printf "%s:%d" $extVip $port)
   "PROXY_FACE_INT_CIDRS" (include "siprust.net" (dict "root" $ "key" "internalCidrs"))
+  "PROXY_EXT_INTERFACE" (include "siprust.net" (dict "root" $ "key" "externalInterface"))
   "PROXY_METRICS" "0.0.0.0:9090"
   "PROXY_WORKER_SERVICE" "b2bua-worker"
   "PROXY_WORKER_PORT" "5060"
   "OTEL_EXPORTER_OTLP_ENDPOINT" .Values.tracing.otlpEndpoint
   "SIP_TRACE_HEADER" (include "siprust.traceHeader" .)
 }}
+{{- with .Values.network.externalNextHops }}
+{{- $_ := set $env "PROXY_EXT_NEXT_HOPS" (join "," .) }}
+{{- end }}
+{{- if not (kindIs "invalid" .Values.inviteTxnTimeoutSec) }}
+{{- $_ := set $env "PROXY_INVITE_TXN_TIMEOUT_SEC" (toString (int .Values.inviteTxnTimeoutSec)) }}
+{{- end }}
 {{- if not (kindIs "invalid" $p.recvShards) }}
 {{- $_ := set $env "PROXY_RECV_SHARDS" (toString (int $p.recvShards)) }}
 {{- end }}
@@ -36,7 +44,21 @@ of the headless b2bua-worker Service (ADR-0012 D4).
 {{- $_ := set $env "PROXY_SELF_GATE_CPS_SIZE" (toString (int $p.selfGate.cpsSize)) }}
 {{- end }}
 {{- include "siprust.overlayEnv" (dict "into" $env "from" $p.env) }}
+{{- /* Sizing's computed values (templates/_sizing.tpl): checks.yaml refuses
+an env or a self-gate stating one of them; the computed memory replaces the
+resources'. */ -}}
+{{- $sizing := include "siprust.sizing" .Values | fromJson }}
+{{- $resources := deepCopy ($p.resources | default dict) }}
+{{- with $sizing.proxyEnv }}
+{{- include "siprust.overlayEnv" (dict "into" $env "from" .) }}
+{{- $_ := set $resources "requests" (merge (dict "memory" $sizing.proxyMemory) (get $resources "requests" | default dict)) }}
+{{- $_ := set $resources "limits" (merge (dict "memory" $sizing.proxyMemory) (get $resources "limits" | default dict)) }}
+{{- end }}
 {{- $hmacSecret := $p.hmac.existingSecret | default "sip-front-proxy-hmac" }}
+{{- $clusterKeySecret := "" }}
+{{- if .Values.worker.replication.enabled }}
+{{- $clusterKeySecret = required "worker.clusterKey.existingSecret: replication needs the Secret of the workers' shared key (ADR-0055 §12)" .Values.worker.clusterKey.existingSecret }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -48,8 +70,11 @@ spec:
   replicas: {{ int $p.replicas }}
   selector:
     matchLabels: { app: sip-front-proxy }
-  # The pods are hard anti-affine, one per edge node: a rollout replaces one
-  # pod at a time, the VIP gap covered by re-election and SIP retransmission.
+  # The pods are hard anti-affine, one per node: a rollout replaces one pod at
+  # a time, and a replaced pod counts as available only minReadySeconds after
+  # Ready, once its node is back in the routers' tables, so the next pod is
+  # stopped only then (templates/checks.yaml).
+  minReadySeconds: {{ int $p.minReadySeconds }}
   strategy:
     type: RollingUpdate
     rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }
@@ -58,7 +83,10 @@ spec:
       labels:
         {{- include "siprust.podLabels" (dict "app" "sip-front-proxy" "extra" $p.podLabels) | nindent 8 }}
       annotations:
-        {{- $base := dict "prometheus.io/scrape" "true" "prometheus.io/port" "9090" "checksum/keepalived" (tpl (.Files.Get "files/keepalived.conf") . | sha256sum) }}
+        {{- $base := dict "prometheus.io/scrape" "true" "prometheus.io/port" "9090" }}
+        {{- if $p.routeGuard.enabled }}
+        {{- $_ := set $base "prometheus.io/sidecar-port" (toString (int $p.routeGuard.metricsPort)) }}
+        {{- end }}
         {{- include "siprust.podAnnotations" (dict "base" $base "extra" $p.podAnnotations) | nindent 8 }}
     spec:
       serviceAccountName: sip-front-proxy
@@ -66,8 +94,8 @@ spec:
       {{- with include "siprust.scheduling" $p | trim }}{{ . | nindent 6 }}{{- end }}
       {{- with include "siprust.podSecurity" $p | trim }}{{ . | nindent 6 }}{{- end }}
       terminationGracePeriodSeconds: {{ int $p.terminationGracePeriodSeconds }}
-      # keepalived answers ARP for the VIPs on the node's interfaces, and reads
-      # the proxy's /vrrp over the shared host network.
+      # The VIPs are the node's own addresses on lo: every face binds and
+      # sources its egress from them.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       affinity:
@@ -75,9 +103,30 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector: { matchLabels: { app: sip-front-proxy } }
               topologyKey: kubernetes.io/hostname
+            # No worker on a proxy node: the VIPs sit on its lo for good, so a
+            # worker there would reach its local proxy whatever the routers
+            # announce (ADR-0056). Required anti-affinity holds both ways: a
+            # worker is not scheduled onto a proxy's node either.
+            - labelSelector: { matchLabels: { app: b2bua-worker } }
+              topologyKey: kubernetes.io/hostname
       initContainers:
+        {{- if $p.routeGuard.enabled }}
+        # The node starts withdrawn: its BFD and BGP to the routers stay
+        # dropped until the route guard reads the proxy fit for the hold, so
+        # an EndpointSlice still naming the pod Ready from before a node
+        # restart announces nothing.
+        - name: route-guard-hold
+          {{- include "siprust.image" (dict "root" $ "image" $p.image) | nindent 10 }}
+          command: ["/usr/local/bin/route-guard", "--withdraw"]
+          env:
+            {{- include "siprust.routeGuardEnv" . | nindent 12 }}
+          securityContext:
+            {{- include "siprust.routeGuardSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $p.routeGuard.resources | nindent 12 }}
+        {{- end }}
         - name: vip-loopback
-          {{- include "siprust.keepalivedImage" . | nindent 10 }}
+          {{- include "siprust.netToolsImage" . | nindent 10 }}
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -85,8 +134,8 @@ spec:
           env:
             - { name: PROXY_VIP, value: {{ $vip | quote }} }
             - { name: EXTERNAL_VIP, value: {{ $extVip | quote }} }
-            - { name: EXTRA_VIPS, value: {{ include "siprust.extraVips" . | quote }} }
             - { name: UNRES_QLEN_BYTES, value: {{ int $p.unresQlenBytes | toString | quote }} }
+            - { name: ROUTE_GUARD, value: {{ ternary "on" "off" $p.routeGuard.enabled | quote }} }
           securityContext:
             privileged: true
             capabilities: { add: ["NET_ADMIN"] }
@@ -107,6 +156,11 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $hmacSecret }}, key: kid } }
             - name: PROXY_HMAC_KEY
               valueFrom: { secretKeyRef: { name: {{ $hmacSecret }}, key: key } }
+            {{- with $clusterKeySecret }}
+            # The workers' shared key the dead notice is signed with (ADR-0050 §3).
+            - name: PROXY_CLUSTER_KEY
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: key } }
+            {{- end }}
             {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
             {{- with $p.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -118,55 +172,70 @@ spec:
             {{- with $p.extraPorts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          # Ready from the first worker view on with >=1 routable worker
-          # (ADR-0012 D4, ADR-0050 §11), never on VRRP mastership, so the warm
-          # backup stays Ready. Liveness: process up and every recv shard
-          # turning (ADR-0046 D4), never the worker view, so a proxy that boots
-          # with no reachable worker is not restarted; an idle shard is never
-          # stalled.
+          # Ready from the first worker view on with >=1 routable worker and the
+          # external face usable (ADR-0012 D4, ADR-0050 §11, ADR-0056); the
+          # node announces the VIPs exactly while it is Ready, so the period
+          # and threshold bound the withdrawal (templates/checks.yaml).
+          # Liveness: process up and every recv shard turning (ADR-0046 D4),
+          # never the worker view, so a proxy that boots with no reachable
+          # worker is not restarted; an idle shard is never stalled.
           readinessProbe:
             httpGet: { path: /readyz, port: 9090 }
             initialDelaySeconds: 1
-            periodSeconds: 2
-            failureThreshold: 3
+            periodSeconds: {{ int $p.readinessProbe.periodSeconds }}
+            failureThreshold: {{ int $p.readinessProbe.failureThreshold }}
+            successThreshold: 1
+            timeoutSeconds: 1
           livenessProbe:
             httpGet: { path: /healthz, port: 9090 }
             initialDelaySeconds: 3
             periodSeconds: 10
           resources:
-            {{- toYaml $p.resources | nindent 12 }}
+            {{- toYaml $resources | nindent 12 }}
           {{- with $p.extraVolumeMounts }}
           volumeMounts:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        # The VRRP sidecar; preStop drops the VIPs at once so the peer promotes
-        # before SIGTERM reaches the proxy.
-        - name: keepalived
-          {{- include "siprust.keepalivedImage" . | nindent 10 }}
-          command: ["/usr/sbin/keepalived"]
-          args: ["--dont-fork", "--log-console", "--log-detail", "--use-file=/etc/keepalived/keepalived.conf"]
+        {{- if $p.routeGuard.enabled }}
+        {{- $g := $p.routeGuard }}
+        # The route guard (ADR-0056 §10): reads /fitz over loopback and drops
+        # the node's BFD and BGP to the routers while the proxy is unfit, hung
+        # or gone, so they withdraw the node within their BFD detection time.
+        # The pod's only NET_ADMIN after its init container.
+        - name: route-guard
+          {{- include "siprust.image" (dict "root" $ "image" $p.image) | nindent 10 }}
+          command: ["/usr/local/bin/route-guard"]
+          env:
+            {{- include "siprust.routeGuardEnv" . | nindent 12 }}
+          ports:
+            - { name: guard-metrics, containerPort: {{ int $g.metricsPort }}, protocol: TCP }
+          # Ready exactly while the guard lets the node out, so the pod is
+          # Ready, and minReadySeconds counts, only from a node that carries
+          # traffic.
+          readinessProbe:
+            httpGet: { path: /readyz, port: {{ int $g.metricsPort }} }
+            periodSeconds: {{ int $p.readinessProbe.periodSeconds }}
+            failureThreshold: {{ int $p.readinessProbe.failureThreshold }}
+            successThreshold: 1
+            timeoutSeconds: 1
+          livenessProbe:
+            httpGet: { path: /healthz, port: {{ int $g.metricsPort }} }
+            initialDelaySeconds: 3
+            periodSeconds: 10
           securityContext:
-            capabilities: { add: ["NET_ADMIN", "NET_BROADCAST", "NET_RAW"] }
-          lifecycle:
-            preStop:
-              exec: { command: ["/bin/sh", "-c", "pkill keepalived; sleep 1"] }
-          {{- with $p.keepalived.resources }}
+            {{- include "siprust.routeGuardSecurity" . | nindent 12 }}
           resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          volumeMounts:
-            - { name: keepalived-conf, mountPath: /etc/keepalived, readOnly: true }
+            {{- toYaml $g.resources | nindent 12 }}
+        {{- end }}
         {{- with $p.extraContainers }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- with $p.extraVolumes }}
       volumes:
-        - name: keepalived-conf
-          configMap: { name: sip-front-proxy-keepalived }
-        {{- with $p.extraVolumes }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
+      {{- end }}
 ---
-# Metrics-only Service: SIP flows through the VIPs.
+# Metrics-only Service: SIP flows through the VIPs the nodes announce.
 apiVersion: v1
 kind: Service
 metadata:

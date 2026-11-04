@@ -339,6 +339,70 @@ async fn actor_caller_acks_and_byes_losing_fork_late_200() {
     h.finish().await;
 }
 
+/// The BYEs `agent` received under the To-tag `tag`, each by its CSeq number.
+fn byes_received_under(agent: &crate::Agent, tag: &str) -> Vec<u32> {
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    agent
+        .wire_view()
+        .iter()
+        .filter_map(|e| match CustomParser::new().parse(&e.raw).ok()? {
+            SipMessage::Request(r) if r.method() == "BYE" && r.to().tag() == Some(tag) => {
+                Some(r.cseq().seq())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// C1(b) loser-late-200 on reliable forks: both forks' reliable 183s are
+/// PRACKed on their own early dialogs (each PRACK `C + 1` in its fork's CSeq
+/// space), the winner (f2) is ACKed, then the loser's (f1) late 200 arrives.
+/// The fork's BYE continues f1's own sequence past its PRACK, `C + 2`
+/// (RFC 3261 §12.2.1.1), never reusing the PRACK's number.
+#[tokio::test(start_paused = true)]
+async fn actor_caller_byes_reliable_losing_fork_past_its_prack() {
+    let h = Harness::new("actor-caller-reliable-loser-late-200").describe(
+        "C1(b): reliable 183(f1)+183(f2), each PRACKed on its own early dialog; \
+         f2 wins and is ACKed; f1's late 200 is ACKed and BYE'd with the CSeq \
+         after f1's PRACK",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    // The caller advertises 100rel, so the UAS's reliable 183s are legal (RFC 3262 §3).
+    let plan = crate::realcall::InvitePlan {
+        via: bob.addr(),
+        from: None,
+        to: None,
+        ruri: None,
+        call_id: None,
+        headers: vec![("Supported".to_string(), "100rel".to_string())],
+        rewrite: Default::default(),
+    };
+
+    let call = forked_pair_plan(
+        &alice,
+        &bob,
+        Disposition::ForkingRing {
+            tags: &["f1", "f2"],
+            winner: ForkWinner::Tag("f2"),
+            ring: Duration::ZERO,
+            reliable: true,
+            loser_late_200: Some("f1"),
+        },
+        Some(plan),
+    );
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the reliable loser-late-200 call must settle OK, got {verdict:?}");
+    assert_eq!(
+        byes_received_under(&bob, "f1"),
+        vec![C + 2],
+        "the losing fork's BYE follows its PRACK (C + 1) in f1's own CSeq space",
+    );
+    h.finish().await;
+}
+
 /// C1(b) reliable forks: each fork's reliable 183 (distinct tag, RSeq:1) is
 /// PRACKed on its OWN early dialog — the `(to_tag, rseq)` dedup re-key: an
 /// RSeq-only dedup would swallow the second fork's PRACK (both forks start
@@ -362,6 +426,7 @@ async fn actor_caller_pracks_each_reliable_fork() {
         from: None,
         to: None,
         ruri: None,
+        call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
     };
@@ -427,6 +492,7 @@ async fn actor_caller_confirms_reliable_unrung_winner() {
         from: None,
         to: None,
         ruri: None,
+        call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
     };

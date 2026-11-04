@@ -72,6 +72,17 @@ export const UnmatchedDatagram = failure("unmatched-datagram", {
   reason: Schema.String,
   arrived: Arrived
 })
+/**
+ * The `100` to an INVITE the leg sent met by that transaction's final first
+ * (RFC 3261 §17.2.1): the step is retired as omitted and the final goes on to
+ * the step behind it. `after_ms` is the final's arrival from the INVITE's emission.
+ */
+export const TryingOmitted = failure("trying-omitted", {
+  step: Schema.String,
+  leg: Schema.String,
+  arrived: Arrived,
+  after_ms: Schema.Int
+})
 /** A datagram arrived on a leg with no armed expect at all. */
 export const UnexpectedDatagram = failure("unexpected-datagram", {
   leg: Schema.String,
@@ -146,6 +157,18 @@ export const DeviationUnimplemented = failure("deviation-unimplemented", {
 export const InjectorMissing = failure("injector-missing", {
   node: Schema.String,
   action: Schema.String
+})
+/** A send awaits a lane event the lane does not report (§6.7g): refused before the dial. */
+export const LaneEventUnsupported = failure("lane-event-unsupported", {
+  step: Schema.String,
+  event: Schema.String
+})
+/** A send's awaited lane event did not occur inside the step's budget. */
+export const LaneEventMissing = failure("lane-event-missing", {
+  step: Schema.String,
+  leg: Schema.String,
+  event: Schema.String,
+  within_ms: Schema.Int
 })
 /** The lane bound no number for an identity the run needs. */
 export const IdentityUnbound = failure("identity-unbound", {
@@ -231,6 +254,7 @@ export const Failure = Schema.Union([
   PlanRefused,
   ExpectTimedOut,
   UnmatchedDatagram,
+  TryingOmitted,
   UnexpectedDatagram,
   DatagramAfterFlow,
   FinalUnacknowledged,
@@ -244,6 +268,8 @@ export const Failure = Schema.Union([
   FlowIncomplete,
   DeviationUnimplemented,
   InjectorMissing,
+  LaneEventUnsupported,
+  LaneEventMissing,
   IdentityUnbound,
   TransportClosed,
   RecordingFailed,
@@ -265,11 +291,14 @@ export const failureStep = (value: Failure): string | undefined => {
   switch (value.failure) {
     case "expect-timed-out":
     case "unmatched-datagram":
+    case "trying-omitted":
     case "send-failed":
     case "retransmit-count-mismatch":
     case "timing-out-of-tolerance":
     case "retransmit-ladder-refused":
     case "declared-failure-not-produced":
+    case "lane-event-unsupported":
+    case "lane-event-missing":
       return value.step
     case "deviation-unimplemented":
       return value.step ?? undefined

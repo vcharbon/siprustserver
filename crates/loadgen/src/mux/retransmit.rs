@@ -5,18 +5,19 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use sip_message::sniff::{
-    call_id, cseq_method_label, cseq_number, is_response, rack_rseq, req_method,
-    require_has_100rel, resp_status, rseq_of, to_tag, via_branch,
-};
 use sip_net::{ReEmitKind, SendTap, UdpEndpoint};
 
+use super::datagram::{key_of, Datagram};
 use super::loss::DropModel;
 use super::stats::MuxStats;
+use super::taps::Taps;
+use resender::{spawn_resender, ResendCtl, Sent};
+
+mod resender;
 
 /// RFC 3261 default transaction timers driving the engine.
 const T1: Duration = Duration::from_millis(500); // first retransmit interval
@@ -25,95 +26,6 @@ const TXN_TIMEOUT: Duration = Duration::from_secs(32); // Timer B/F/H = 64·T1
 /// How long a released Call-ID, or a key whose call ended not ok, is held
 /// back: 64·T1, the longest a peer keeps retransmitting an INVITE (Timer B).
 pub const RELEASE_HOLD: Duration = TXN_TIMEOUT;
-
-/// Stop-control shared between a spawned resender task and the [`CallTxns`] engine
-/// that owns it. The engine flips `stop` (and wakes the task) when the transaction
-/// is acknowledged or the call ends; the flag is authoritative (the wake is only a
-/// latency optimisation — a lost `Notify` wake is caught by the post-sleep check).
-/// The transaction times out at `deadline` (Timer B/F/H).
-struct ResendCtl {
-    stop: AtomicBool,
-    notify: tokio::sync::Notify,
-    deadline: tokio::time::Instant,
-}
-
-impl ResendCtl {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            stop: AtomicBool::new(false),
-            notify: tokio::sync::Notify::new(),
-            deadline: tokio::time::Instant::now() + TXN_TIMEOUT,
-        })
-    }
-    fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-        self.notify.notify_waiters();
-    }
-    fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
-    }
-    /// Park until the transaction ends: acknowledged, or timed out.
-    async fn ended(&self) {
-        loop {
-            let woken = self.notify.notified();
-            tokio::pin!(woken);
-            woken.as_mut().enable();
-            if self.stopped() {
-                return;
-            }
-            tokio::select! {
-                _ = woken => {}
-                _ = tokio::time::sleep_until(self.deadline) => return,
-            }
-        }
-    }
-}
-
-/// Spawn a resender: retransmit `bytes` to `dst` on the SIP timer schedule until
-/// `ctl` is stopped or the transaction times out. `invite` selects the backoff —
-/// INVITE Timer A doubles unbounded (until Timer B); non-INVITE Timer E / 2xx
-/// Timer G doubles but caps at T2. Each retransmit re-applies the loss model, so a
-/// retransmit can itself be dropped (the point of the robustness test).
-#[allow(clippy::too_many_arguments)]
-fn spawn_resender(
-    ctl: Arc<ResendCtl>,
-    endpoint: Arc<dyn UdpEndpoint>,
-    drop: Arc<DropModel>,
-    stats: Arc<MuxStats>,
-    bytes: Vec<u8>,
-    dst: SocketAddr,
-    invite: bool,
-    sendtap: Arc<OnceLock<SendTap>>,
-) {
-    tokio::spawn(async move {
-        let mut interval = T1;
-        let deadline = ctl.deadline;
-        loop {
-            tokio::select! {
-                _ = ctl.notify.notified() => return,
-                _ = tokio::time::sleep(interval) => {}
-            }
-            if ctl.stopped() || tokio::time::Instant::now() >= deadline {
-                return;
-            }
-            if drop.drops() {
-                stats.dropped_out.fetch_add(1, Ordering::Relaxed);
-            } else {
-                let _ = endpoint.send_to(&bytes, dst).await;
-                // Record the re-emission (a frame that reached the wire) on the
-                // ladder — a proactive Timer A/E/G retransmit of our own frame.
-                if let Some(tap) = sendtap.get() {
-                    tap(&bytes, dst, ReEmitKind::Retransmit);
-                }
-            }
-            interval = if invite {
-                interval.saturating_mul(2)
-            } else {
-                interval.saturating_mul(2).min(T2)
-            };
-        }
-    });
-}
 
 /// Per-call SIP transaction engine.
 ///
@@ -147,34 +59,55 @@ pub(super) struct CallTxns {
     /// time — recovery frames go on the wire below the recording layer, so this
     /// is the only way they reach the ladder.
     sendtap: Arc<OnceLock<SendTap>>,
+    /// The endpoint's taps, told of every re-send.
+    taps: Option<Arc<Taps>>,
 }
+
+/// A transaction's key: its top-Via branch and its (CSeq) method, hashed. A
+/// CANCEL shares its INVITE's branch (RFC 3261 §9.1) and is its own
+/// transaction.
+fn txn_key(branch: &str, method: &str) -> u64 {
+    key_of((branch, method))
+}
+
+/// A dialog-scoped key: the Call-ID, hashed, and a sequence number.
+fn cid_key<N>(call_id: &str, n: N) -> (u64, N) {
+    (key_of(call_id), n)
+}
+
+/// A proactive INVITE-final resender, and the key of the final it resends in
+/// [`TxnInner::server`].
+type FinalResend = (Arc<ResendCtl>, u64);
 
 #[derive(Default)]
 struct TxnInner {
-    /// Our in-flight client transactions, keyed by the request's top-Via branch
-    /// and method (a CANCEL shares its INVITE's branch, RFC 3261 §9.1) → its
-    /// resender (stopped when the response arrives).
-    client: HashMap<(String, String), Arc<ResendCtl>>,
+    /// Our in-flight client transactions, by [`txn_key`] → its resender
+    /// (stopped when the response arrives).
+    client: HashMap<u64, Arc<ResendCtl>>,
     /// Our proactive 2xx (INVITE server txn) resenders, keyed by (Call-ID, CSeq
     /// number) so the inbound ACK — which carries a *different* branch — can stop them.
-    invite_2xx: HashMap<(String, u32), Arc<ResendCtl>>,
+    invite_2xx: HashMap<(u64, u32), FinalResend>,
     /// Our proactive NON-2xx INVITE-final resenders (RFC 3261 §17.2.1: a real UAS
     /// retransmits its non-2xx final via Timer G until the ACK arrives, giving up
-    /// at Timer H = 64·T1), keyed by (Call-ID, CSeq number) so the inbound hop-ACK
-    /// — which reuses the INVITE CSeq (§17.1.1.3) — can stop them. Symmetric to
-    /// `invite_2xx` except NOT drained at `shutdown` — see the note there.
-    invite_non2xx: HashMap<(String, u32), Arc<ResendCtl>>,
+    /// at Timer H = 64·T1), keyed by the INVITE's [`txn_key`]: the hop-ACK is on
+    /// the INVITE's own branch (§17.1.1.3), so a merged request's other
+    /// transactions (§8.2.2.2) are left alone. Symmetric to `invite_2xx` except
+    /// NOT drained at `shutdown` — see the note there.
+    invite_non2xx: HashMap<u64, Arc<ResendCtl>>,
     /// Our proactive RELIABLE-1xx resenders (RFC 3262 §3: retransmit until
     /// PRACKed), keyed by (Call-ID, RSeq) so the inbound PRACK — whose RAck
     /// response-num carries that RSeq but whose branch is its own — can stop them.
-    reliable_1xx: HashMap<(String, u64), Arc<ResendCtl>>,
-    /// The last response we sent per server txn (request branch → bytes+dst), for a
-    /// reactive re-answer when the peer retransmits the request.
-    server: HashMap<String, (Vec<u8>, SocketAddr)>,
+    reliable_1xx: HashMap<(u64, u64), Arc<ResendCtl>>,
+    /// The last response we sent per server txn ([`txn_key`]), for a reactive
+    /// re-answer when the peer retransmits the request. An INVITE's final goes
+    /// with its ACK: a retransmitted INVITE is then absorbed (RFC 3261
+    /// §17.2.1 Confirmed, RFC 6026 Accepted).
+    server: HashMap<u64, Sent>,
     /// ACKs we sent, keyed by (Call-ID, CSeq number), for re-ACK on a duplicate 2xx.
-    acks: HashMap<(String, u32), (Vec<u8>, SocketAddr)>,
-    /// Inbound `(branch, discriminator)` already delivered — duplicate detection.
-    seen_in: HashSet<(String, String)>,
+    acks: HashMap<(u64, u32), Sent>,
+    /// Inbound datagrams already delivered, by branch and discriminator,
+    /// hashed — duplicate detection.
+    seen_in: HashSet<u64>,
     /// Call ended: stop tracking and reject new resenders.
     closed: bool,
 }
@@ -184,6 +117,7 @@ impl CallTxns {
         endpoint: Arc<dyn UdpEndpoint>,
         drop: Arc<DropModel>,
         stats: Arc<MuxStats>,
+        taps: Option<Arc<Taps>>,
     ) -> Self {
         Self {
             endpoint,
@@ -191,6 +125,7 @@ impl CallTxns {
             stats,
             inner: Mutex::new(TxnInner::default()),
             sendtap: Arc::new(OnceLock::new()),
+            taps,
         }
     }
 
@@ -206,38 +141,43 @@ impl CallTxns {
     /// `send_to` is async). `kind` classifies the re-emission for the ladder; a
     /// frame that passed the loss model is reported to the send tap (a dropped
     /// one is invisible, like a dropped first transmission).
-    fn send(&self, bytes: &[u8], dst: SocketAddr, kind: ReEmitKind) {
+    fn send(&self, sent: Sent, kind: ReEmitKind) {
+        let Sent { bytes, dst, count } = sent;
+        if let Some(count) = &count {
+            count.record();
+        }
         if self.drop.drops() {
             self.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let endpoint = self.endpoint.clone();
-        let owned = bytes.to_vec();
-        tokio::spawn(async move {
-            let _ = endpoint.send_to(&owned, dst).await;
-        });
         if let Some(tap) = self.sendtap.get() {
-            tap(bytes, dst, kind);
+            tap(&bytes, dst, kind);
         }
+        let endpoint = self.endpoint.clone();
+        tokio::spawn(async move {
+            let _ = endpoint.as_ref().send_to(&bytes, dst).await;
+        });
     }
 
     /// Record an outbound datagram and arm any retransmission it needs.
-    pub(super) fn on_outbound(&self, raw: &[u8], dst: SocketAddr) {
+    pub(super) fn on_outbound(&self, d: &Datagram<'_>, dst: SocketAddr) {
         let mut g = self.inner.lock().unwrap();
         if g.closed {
             return;
         }
-        if is_response(raw) {
-            let Some(branch) = via_branch(raw) else { return };
-            g.server.insert(branch, (raw.to_vec(), dst));
-            let status = resp_status(raw).unwrap_or(0);
-            if cseq_method_label(raw) != "INVITE" {
+        let id = d.id();
+        if let Some(status) = id.status {
+            let Some(branch) = id.branch else { return };
+            let method = id.cseq_method.unwrap_or_default();
+            let server = txn_key(branch, method);
+            g.server.insert(server, self.sent(d, dst));
+            if method != "INVITE" {
                 return;
             }
             // A final ends the INVITE's provisionals: none is retransmitted
             // after it (RFC 3262 §3, the give-up's 5xx included).
             if status >= 200 {
-                if let Some(cid) = call_id(raw) {
+                if let Some(cid) = id.call_id.map(key_of) {
                     g.reliable_1xx.retain(|(c, _), ctl| {
                         let stays = *c != cid;
                         if !stays {
@@ -247,13 +187,12 @@ impl CallTxns {
                     });
                 }
             }
+            let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) else { return };
             // Proactive 2xx-until-ACK for an INVITE answer (Timer G).
             if (200..300).contains(&status) {
-                if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_number(raw)) {
-                    g.invite_2xx
-                        .entry((cid, cseq))
-                        .or_insert_with(|| self.spawn_response_resender(raw, dst));
-                }
+                g.invite_2xx
+                    .entry(cid_key(cid, cseq))
+                    .or_insert_with(|| (self.spawn_response_resender(d, dst), server));
             }
             // Proactive non-2xx-until-ACK for an INVITE reject (Timer G, §17.2.1):
             // a real UAS retransmits its final until the hop-ACK arrives, so a lost
@@ -261,39 +200,37 @@ impl CallTxns {
             // §17.1.1.2) instead of stranding the reject as an unACKed final. In
             // no-loss runs the ACK arrives first and this never fires.
             if (300..700).contains(&status) {
-                if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_number(raw)) {
-                    g.invite_non2xx
-                        .entry((cid, cseq))
-                        .or_insert_with(|| self.spawn_response_resender(raw, dst));
-                }
+                g.invite_non2xx
+                    .entry(server)
+                    .or_insert_with(|| self.spawn_response_resender(d, dst));
             }
             // Proactive reliable-1xx-until-PRACK (RFC 3262 §3): a provisional we
             // send with `Require: 100rel` + `RSeq` is guaranteed-delivery. Without
             // this, a dropped reliable 183 is unrecoverable: the peer's INVITE
             // resender already stopped on the 100 Trying, so nobody would resend
             // anything. (A plain 18x stays best-effort by design.)
-            if (101..200).contains(&status) && require_has_100rel(raw) {
-                if let (Some(cid), Some(rseq)) = (call_id(raw), rseq_of(raw)) {
+            if (101..200).contains(&status) && id.reliable {
+                if let Some(rseq) = id.rseq {
                     g.reliable_1xx
-                        .entry((cid, rseq))
-                        .or_insert_with(|| self.spawn_response_resender(raw, dst));
+                        .entry(cid_key(cid, rseq))
+                        .or_insert_with(|| self.spawn_response_resender(d, dst));
                 }
             }
             return;
         }
         // Request.
-        let method = req_method(raw).unwrap_or_default();
+        let method = id.method.unwrap_or_default();
         if method == "ACK" {
             // ACK is not a retransmitting transaction; remember it for re-ACK.
-            if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_number(raw)) {
-                g.acks.insert((cid, cseq), (raw.to_vec(), dst));
+            if let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) {
+                g.acks.insert(cid_key(cid, cseq), self.sent(d, dst));
             }
             return;
         }
-        let Some(branch) = via_branch(raw) else { return };
+        let Some(branch) = id.branch else { return };
         let invite = method == "INVITE";
         let ctl = ResendCtl::new();
-        if let Some(old) = g.client.insert((branch, method), ctl.clone()) {
+        if let Some(old) = g.client.insert(txn_key(branch, method), ctl.clone()) {
             old.stop();
         }
         spawn_resender(
@@ -301,8 +238,7 @@ impl CallTxns {
             self.endpoint.clone(),
             self.drop.clone(),
             self.stats.clone(),
-            raw.to_vec(),
-            dst,
+            self.sent(d, dst),
             invite,
             self.sendtap.clone(),
         );
@@ -310,33 +246,38 @@ impl CallTxns {
 
     /// Spawn a proactive resender (non-INVITE backoff: Timer G/E shape) for one
     /// of our responses and return its stop-control for the caller's table.
-    fn spawn_response_resender(&self, raw: &[u8], dst: SocketAddr) -> Arc<ResendCtl> {
+    fn spawn_response_resender(&self, d: &Datagram<'_>, dst: SocketAddr) -> Arc<ResendCtl> {
         let ctl = ResendCtl::new();
         spawn_resender(
             ctl.clone(),
             self.endpoint.clone(),
             self.drop.clone(),
             self.stats.clone(),
-            raw.to_vec(),
-            dst,
+            self.sent(d, dst),
             false,
             self.sendtap.clone(),
         );
         ctl
     }
 
+    /// `d`, sent to `dst`, as a store keeps it for a re-send.
+    fn sent(&self, d: &Datagram<'_>, dst: SocketAddr) -> Sent {
+        let count = self.taps.as_ref().and_then(|t| t.resend_count(d.id()));
+        Sent { bytes: d.shared(), dst, count }
+    }
+
     /// Process an inbound datagram. Returns `true` to deliver it to the app,
     /// `false` to ABSORB it (a duplicate the strict agent must not see — any
     /// re-ACK / re-answer has already been sent here).
-    pub(super) fn on_inbound(&self, raw: &[u8], _src: SocketAddr) -> bool {
+    pub(super) fn on_inbound(&self, d: &Datagram<'_>, _src: SocketAddr) -> bool {
         let mut g = self.inner.lock().unwrap();
         if g.closed {
             return true;
         }
-        let branch = via_branch(raw).unwrap_or_default();
-        if is_response(raw) {
-            let status = resp_status(raw).unwrap_or(0);
-            let method = cseq_method_label(raw).to_string();
+        let id = d.id();
+        let branch = id.branch.unwrap_or_default();
+        if let Some(status) = id.status {
+            let method = id.cseq_method.unwrap_or_default();
             let is_invite = method == "INVITE";
             // Stop our client resender: INVITE Timer A stops on the FIRST provisional
             // (incl. `100 Trying`, RFC 3261 §17.1.1.2); non-INVITE only on a final.
@@ -346,7 +287,7 @@ impl CallTxns {
             // the cross-call 18x delivery rate instead).
             let stop = if is_invite { status >= 100 } else { status >= 200 };
             if stop {
-                if let Some(ctl) = g.client.remove(&(branch.clone(), method)) {
+                if let Some(ctl) = g.client.remove(&txn_key(branch, method)) {
                     ctl.stop();
                 }
             }
@@ -357,64 +298,66 @@ impl CallTxns {
             // tag — on the wire it IS one, which makes byte-identical "ring again"
             // unobservable from a load body; see the shape-authoring caveat in
             // `crate::scenarios`).
-            let key = (branch, format!("r{status}:{}", to_tag(raw)));
-            if g.seen_in.contains(&key) {
+            let key = key_of((branch, "r", status, id.to_tag.unwrap_or_default()));
+            if !g.seen_in.insert(key) {
                 // Duplicate response. A retransmitted INVITE 2xx means our ACK was
                 // lost → re-ACK it.
                 if (200..300).contains(&status) && is_invite {
-                    if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_number(raw)) {
-                        if let Some((ack, dst)) = g.acks.get(&(cid, cseq)).cloned() {
-                            self.send(&ack, dst, ReEmitKind::ReAck);
+                    if let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) {
+                        if let Some(ack) = g.acks.get(&cid_key(cid, cseq)).cloned() {
+                            self.send(ack, ReEmitKind::ReAck);
                         }
                     }
                 }
                 return false;
             }
-            g.seen_in.insert(key);
             return true;
         }
         // Inbound request.
-        let method = req_method(raw).unwrap_or_default();
+        let method = id.method.unwrap_or_default();
         if method == "ACK" {
             // The ACK confirms our INVITE final → stop its proactive resender
-            // (2xx §13.3.1 or non-2xx §17.2.1; both keyed by the INVITE CSeq, which
-            // the hop-ACK reuses per §17.1.1.3).
-            if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_number(raw)) {
-                let key = (cid, cseq);
-                if let Some(ctl) = g.invite_2xx.remove(&key) {
-                    ctl.stop();
-                }
-                if let Some(ctl) = g.invite_non2xx.remove(&key) {
-                    ctl.stop();
-                }
+            // (2xx §13.3.1 or non-2xx §17.2.1); the final is no longer owed to a
+            // retransmitted INVITE. A non-2xx's ACK is hop-by-hop, on the branch
+            // of an INVITE we received (§17.1.1.3); a 2xx's ACK is a transaction
+            // of its own, on a new branch, matched by Call-ID and CSeq.
+            let acked = if g.seen_in.contains(&key_of((branch, "q", "INVITE"))) {
+                let server = txn_key(branch, "INVITE");
+                g.invite_non2xx.remove(&server).map(|ctl| (ctl, server))
+            } else {
+                let key = id.call_id.zip(id.cseq).map(|(cid, cseq)| cid_key(cid, cseq));
+                key.and_then(|key| g.invite_2xx.remove(&key))
+            };
+            if let Some((ctl, server)) = acked {
+                ctl.stop();
+                g.server.remove(&server);
             }
-            let key = (branch, "qACK".to_string());
-            if g.seen_in.contains(&key) {
-                return false; // duplicate ACK
-            }
-            g.seen_in.insert(key);
-            return true;
+            return g.seen_in.insert(key_of((branch, "q", method))); // false: duplicate ACK
         }
         if method == "PRACK" {
             // The PRACK acknowledges our reliable 1xx (RAck response-num = its
             // RSeq, RFC 3262 §7.2) → stop that proactive resender. Idempotent, so
             // it runs before the duplicate check below.
-            if let (Some(cid), Some(rseq)) = (call_id(raw), rack_rseq(raw)) {
-                if let Some(ctl) = g.reliable_1xx.remove(&(cid, rseq)) {
+            if let (Some(cid), Some(rseq)) = (id.call_id, id.rack_rseq) {
+                if let Some(ctl) = g.reliable_1xx.remove(&cid_key(cid, rseq)) {
                     ctl.stop();
                 }
             }
         }
-        let key = (branch.clone(), format!("q{method}"));
-        if g.seen_in.contains(&key) {
+        if !g.seen_in.insert(key_of((branch, "q", method))) {
             // The peer retransmitted this request → our response was lost; re-send it.
-            if let Some((resp, dst)) = g.server.get(&branch).cloned() {
-                self.send(&resp, dst, ReEmitKind::ReAnswer);
+            if let Some(resp) = g.server.get(&txn_key(branch, method)).cloned() {
+                self.send(resp, ReEmitKind::ReAnswer);
             }
             return false;
         }
-        g.seen_in.insert(key);
         true
+    }
+
+    /// Whether a client transaction is still open: its final not arrived and
+    /// Timer B/F not expired.
+    pub(super) fn client_open(&self) -> bool {
+        self.inner.lock().unwrap().client.values().any(|ctl| ctl.open())
     }
 
     /// Park until every client transaction open now has ended: its final
@@ -435,7 +378,7 @@ impl CallTxns {
         for (_, ctl) in g.client.drain() {
             ctl.stop();
         }
-        for (_, ctl) in g.invite_2xx.drain() {
+        for (_, (ctl, _)) in g.invite_2xx.drain() {
             ctl.stop();
         }
         // NOT `invite_non2xx`: a rejected leg's server txn is independent of the

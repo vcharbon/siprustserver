@@ -59,6 +59,12 @@ pub const SERVER_FINAL_UNSEEN_BRANCH: Family = Family::counter(
     "Non-2xx INVITE finals dropped because no server transaction held their branch (RFC 3261 section 17.2.1, one final per transaction); expected 0.",
 );
 
+pub const VIA_STAMPS_UNWRITTEN: Family = Family::counter(
+    "b2bua_txn_via_stamps_unwritten_total",
+    Labels::None,
+    "Inbound requests whose top-Via received/rport stamp (RFC 3261 section 18.2.1, RFC 3581 section 4) could not be rendered: handed on as received, their responses still sent to the stamped target; expected 0.",
+);
+
 pub const PARSE_ERRORS: Family = Family::counter(
     "b2bua_txn_parse_errors_total",
     Labels::None,
@@ -105,6 +111,18 @@ pub const EVENT_QUEUE_CAPACITY: Family = Family::gauge(
     "b2bua_txn_event_queue_capacity",
     Labels::None,
     "Inbound->app events channel capacity.",
+);
+
+pub const EVENT_QUEUE_DELAY: Family = Family::gauge(
+    "b2bua_txn_event_queue_delay_ms",
+    Labels::None,
+    "How long the oldest event waiting in the inbound->app events channel has waited, ms, read at scrape; 0 while the channel is empty.",
+);
+
+pub const KEEPALIVE_LANE_DROPS: Family = Family::counter(
+    "b2bua_txn_keepalive_lane_drops_total",
+    Labels::None,
+    "Out-of-dialog OPTIONS the full keepalive lane dropped; the prober repeats.",
 );
 
 pub const EVENT_QUEUE_DROPS: Family = Family::counter(

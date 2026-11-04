@@ -11,6 +11,10 @@ use super::records::{
     Answer, Invite, ObligationKey, Prack, Rack, Reliable, Served, Trying, TxnKey,
 };
 
+/// (endpoint, call, early dialog, INVITE CSeq number, `RSeq`): one PRACK
+/// ledger's key.
+type PrackKey<'a> = (&'a str, &'a str, &'a str, u32, u64);
+
 /// What one view's messages say about the 100rel obligations on it.
 #[derive(Debug, Default)]
 pub(super) struct Reading<'a> {
@@ -70,11 +74,14 @@ pub(super) struct Reading<'a> {
     /// (endpoint, call) → the `100 Trying`s that endpoint took carrying BOTH
     /// `Require: 100rel` and an `RSeq` — the 100rel §4 has a UAC ignore.
     pub(super) trying_100rel: BTreeMap<(&'a str, &'a str), Vec<Trying<'a>>>,
-    /// (taker, call, early dialog, `RSeq`) → when that endpoint FIRST took a
-    /// PRACK naming it. The To tag is in the key for the same reason the
-    /// obligation half keys on it: two forks answering one INVITE number their
-    /// `RSeq`s independently, so one fork's PRACK settles nothing for the other.
-    pracked_at: BTreeMap<(&'a str, &'a str, &'a str, u64), u64>,
+    /// (taker, call, early dialog, INVITE CSeq number, `RSeq`) → when that
+    /// endpoint FIRST took a PRACK naming it. The To tag keeps forks apart:
+    /// each numbers its own `RSeq`s.
+    pracked_to: BTreeMap<PrackKey<'a>, u64>,
+    /// The same, keyed by the PRACK's sender: the PRACK goes to the early
+    /// dialog's remote target, the UAS's Contact, which need not be the
+    /// address the provisional came from (RFC 3262 §4).
+    pracked_by: BTreeMap<PrackKey<'a>, u64>,
 }
 
 impl<'a> Reading<'a> {
@@ -111,6 +118,7 @@ impl<'a> Reading<'a> {
                     msg: mi,
                     ts_us: msg.at_us,
                     method: method.as_str(),
+                    client: msg.src.as_str(),
                     requires_100rel: head.is_some_and(sniff::require_has_100rel),
                     offers_100rel: head.is_some_and(offers_100rel),
                     dialog: msg.to_tag.as_deref().unwrap_or_default(),
@@ -123,13 +131,16 @@ impl<'a> Reading<'a> {
             );
         }
         if method.eq_ignore_ascii_case("PRACK") {
-            if let Some(rseq) = head.and_then(sniff::rack_rseq) {
+            if let Some((rseq, cseq)) = head.and_then(rack_of) {
                 let dialog = msg.to_tag.as_deref().unwrap_or_default();
-                let at = self
-                    .pracked_at
-                    .entry((msg.dst.as_str(), call, dialog, rseq))
-                    .or_insert(msg.at_us);
-                *at = (*at).min(msg.at_us);
+                for (ledger, endpoint) in
+                    [(&mut self.pracked_to, &msg.dst), (&mut self.pracked_by, &msg.src)]
+                {
+                    let at = ledger
+                        .entry((endpoint.as_str(), call, dialog, cseq, rseq))
+                        .or_insert(msg.at_us);
+                    *at = (*at).min(msg.at_us);
+                }
             }
         }
     }
@@ -286,37 +297,47 @@ impl<'a> Reading<'a> {
         self.answers.get(key).map_or(&[][..], Vec::as_slice)
     }
 
-    /// The `(RSeq, INVITE CSeq-num)` pairs `uas` had already sent reliably on
-    /// the `dialog` early dialog of `call` before `ts_us` — what a PRACK
-    /// arriving then in that dialog could legitimately name (§3, §7.2). The To
-    /// tag is in the key for the same reason [`Self::pracked_at`]'s is: two
-    /// forks answering one INVITE number their `RSeq`s independently, so one
-    /// fork's number names nothing in the other's dialog.
+    /// The `(RSeq, INVITE CSeq-num)` pairs sent reliably on the `dialog` early
+    /// dialog of `call` before `ts_us`, by `uas` or to `uac` — what a PRACK
+    /// from `uac` arriving at `uas` then could legitimately name (§3, §7.2).
+    /// By `uas`: the PRACK may come straight from a UAC whose provisionals
+    /// came through a proxy. To `uac`: the PRACK reaches the UAS at its
+    /// Contact, which need not be the address its provisionals came from (§4).
+    /// The To tag keeps forks apart: each numbers its own `RSeq`s.
     pub(super) fn reliably_sent_before(
         &self,
         uas: &str,
+        uac: &str,
         call: &str,
         dialog: &str,
         ts_us: u64,
     ) -> BTreeSet<(u64, u32)> {
         self.answers
             .iter()
-            .filter(|(k, _)| k.uas == uas && k.call_id == call)
-            .flat_map(|(_, list)| list.iter())
+            .filter(|(k, _)| k.call_id == call)
+            .flat_map(|(k, list)| list.iter().map(move |a| (k, a)))
+            .filter(|(k, a)| k.uas == uas || a.taker == uac)
+            .map(|(_, a)| a)
             .filter(|a| a.ts_us < ts_us && a.reliable_1xx() && a.to_tag == dialog)
             .filter_map(|a| a.rseq.map(|rseq| (rseq, a.cseq)))
             .collect()
     }
 
-    /// Whether `uas` took a PRACK naming `rseq` on that early dialog of `call`
-    /// between the provisional that owed it and a later emission of its own.
+    /// Whether a PRACK naming `(INVITE CSeq, RSeq)` on that early dialog of
+    /// `call` was taken by `uas`, or sent by `uac`, the endpoint the
+    /// provisional went to, between the provisional and a later emission of
+    /// `uas`: the PRACK may come straight from a UAC behind a proxy, or reach
+    /// the UAS at a Contact that is not the address it answers from (§4).
     pub(super) fn pracked_between(
         &self,
-        key: (&str, &str, &str, u64),
+        (uas, uac): (&str, &str),
+        (call, dialog, cseq, rseq): (&str, &str, u32, u64),
         after: u64,
         before: u64,
     ) -> bool {
-        self.pracked_at.get(&key).is_some_and(|at| *at > after && *at < before)
+        let to = self.pracked_to.get(&(uas, call, dialog, cseq, rseq));
+        let by = self.pracked_by.get(&(uac, call, dialog, cseq, rseq));
+        [to, by].into_iter().flatten().any(|at| *at > after && *at < before)
     }
 
     fn answered_finally(&mut self, uac: &'a str, call: &'a str, cseq: u32, ts_us: u64) {

@@ -1,5 +1,5 @@
 //! The router's rungs of the admission ladder (ADR-0037): a new INVITE is
-//! judged at ingress — capacity, shed, panic-ELU, bucket, in
+//! judged at ingress — capacity, shed, panic-ELU, bucket, event queue, in
 //! [`LADDER`](crate::admission::LADDER) order — before the dispatch offer, so
 //! a refusal opens no per-call queue and waits for no handler permit. A
 //! refused INVITE is answered through its server transaction, which absorbs
@@ -129,7 +129,7 @@ pub(super) fn invite_here(ctx: &RouterCtx, call_ref: &str, cseq: u32) -> bool {
     // The hold is read first: a turn creates its call before dropping its
     // hold, so a birth between the two reads is still seen.
     ctx.unborn.holds(call_ref, cseq)
-        || ctx.state.peek(call_ref).is_some_and(|call| copies(&call, cseq))
+        || ctx.state.resident(call_ref).is_some_and(|call| copies(&call, cseq))
 }
 
 /// Whether an INVITE carrying CSeq `cseq` on `call`'s identity is a copy of
@@ -192,6 +192,9 @@ impl RouterReadings for Readings<'_> {
     fn token_wait_sec(&self) -> u32 {
         self.ctx.overload.token_wait_sec()
     }
+    fn event_queue_refusing(&self) -> bool {
+        self.ctx.readiness.queue_gate().is_some_and(|gate| gate.read())
+    }
 }
 
 /// The live calls and transactions a new call is judged against: the calls
@@ -212,7 +215,8 @@ pub(super) fn queued(ctx: &RouterCtx) {
 }
 
 /// Answer the new INVITE `req` from `src`, refused for `refused`, through its
-/// server transaction. The caller counts it. A request whose lines no
+/// server transaction ([`reply_to`](super::reply_to::reply_to)). The caller
+/// counts it. A request whose lines no
 /// response can echo is left to its transaction's lifetime.
 pub(super) async fn answer(
     txn: &TransactionLayer,
@@ -222,7 +226,7 @@ pub(super) async fn answer(
     refused: Refused,
 ) {
     if let Ok(resp) = refusals.answer(req, refused) {
-        let _ = txn.send_response(resp, src).await;
+        let _ = txn.send_response(resp, super::reply_to::reply_to(req, src)).await;
     }
 }
 

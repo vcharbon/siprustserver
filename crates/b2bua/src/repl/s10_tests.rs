@@ -9,7 +9,7 @@
 //!    S8 write-side policy so the body lands on the peer's `ReplicatingCallStore`
 //!    (proving the b2bua flush → changelog → ReplServer → puller path end-to-end);
 //! 2. the proxy's `w_pri`/`w_bak` stickiness cookie (URI params on the topmost
-//!    Record-Route) reaches `topology.pri`/`topology.bak` via `build_initial_call`;
+//!    Record-Route) reaches `topology.pri`/`topology.bak` of the call's placement;
 //! 3. each authoritative `CallState::update` increments `topology.gen` (the LWW
 //!    content version) from the gen=1 baseline stamped at INVITE time.
 //!
@@ -19,7 +19,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, CallBodyCodec, MsgpackCodec};
+use crate::store::envelope;
+use call::{Call, MsgpackCodec};
 use repl_net::transport::ReplicationNetwork;
 use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
@@ -31,9 +32,7 @@ use super::{Changelog, Puller, ReplicatingCallStore};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
-use crate::store::{
-    BufferedTerminateWriter, CallState, CallStore, PartitionRole, PropagateDirection, PutOpts,
-};
+use crate::store::{CallState, CallStore, PartitionRole, PropagateDirection, PutOpts};
 
 const BAK: PartitionRole = PartitionRole::Backup;
 
@@ -71,8 +70,8 @@ fn src() -> SocketAddr {
 // (1) A replicating b2bua's CallState flush lands the call body on the peer.
 //
 // Two replicating nodes w0/w1 over a shared sim repl network. w1 pulls w0 (so it
-// backs w0 up). A CallState wired to w0's store + a terminate-writer draining to
-// that same store flushes a call whose topology = {pri:w0, bak:w1, gen:1}. The
+// backs w0 up). A CallState wired to w0's store flushes a call whose
+// topology = {pri:w0, bak:w1, gen:1}. The
 // flush rides the S8 write-side policy → changelog-for-w1 (partition=Bak) →
 // ReplServer streams it → w1's puller imports it as bak:w0. We assert w1 holds
 // the body, and that it decodes back to the same call.
@@ -91,14 +90,13 @@ async fn replicating_callstate_flush_lands_on_peer() {
     w1_sup.start(one_peer("w0", &clock));
     tick(50).await;
 
-    // The b2bua call path: a CallState over w0's store, draining to that store so
-    // the changelog bumps on the flush (exactly how B2buaCore wires it). `w0.store`
-    // is bare and clone-cheap (shares inner state); wrap once so the writer, the
-    // CallState, and the replication handle share one Arc over that same state.
+    // The b2bua call path: a CallState writing w0's store, so the changelog
+    // bumps on the flush (exactly how B2buaCore wires it). `w0.store` is bare and
+    // clone-cheap (shares inner state); wrap once so the CallState and the
+    // replication handle share one Arc over that same state.
     let store: Arc<ReplicatingCallStore> = Arc::new(w0.store.clone());
-    let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, 1024);
     let state = CallState::new(store.clone() as Arc<dyn CallStore>, "w0", B2buaMetrics::new())
-        .with_replication(store.clone(), writer);
+        .with_replication(store.clone());
 
     // Build a call from an INVITE carrying the w_pri=w0;w_bak=w1 cookie. The
     // callRef encodes primary w0, so the write-side policy routes it Forward → w1.
@@ -106,22 +104,22 @@ async fn replicating_callstate_flush_lands_on_peer() {
     let call =
         build_initial_call(&invite, src(), &config_for("w0"), &mut sip_ids::TurnIds::fixed(1), 0);
     assert_eq!(
-        call.topology.as_ref().map(|t| (t.pri.as_str(), t.bak.as_str(), t.gen)),
-        Some(("w0", "w1", 1)),
-        "cookie → topology stamped on the call"
+        placed(&invite).map(|t| (t.pri, t.bak, t.gen)),
+        Some(("w0".to_string(), "w1".to_string(), 1)),
+        "cookie → topology the call is placed under"
     );
     let call_ref = call.call_ref.clone();
     assert!(call_ref.starts_with("w0|"), "callRef encodes primary w0");
 
-    state.create(call.clone());
+    state.create_placed(call.clone());
     state.flush(&call);
-    // Let the writer drain → changelog bump → ReplServer push → w1 import.
+    // Changelog bump → ReplServer push → w1 import.
     tick(150).await;
 
     let got = w1.store.get_call(BAK, "w0", &call_ref).await.unwrap();
     assert!(got.is_some(), "w1 holds w0's call in bak:w0");
-    let decoded = MsgpackCodec::new().decode(got.as_deref().unwrap()).unwrap();
-    assert_eq!(decoded.call_ref, call_ref, "replicated body round-trips to the same call");
+    let decoded = envelope::decode(&MsgpackCodec::new(), got.as_deref().unwrap()).unwrap();
+    assert_eq!(decoded.call.call_ref, call_ref, "replicated body round-trips to the same call");
     assert_eq!(
         w1.store.current_cv(BAK, "w0", &call_ref),
         Some((1, 0)),
@@ -135,9 +133,7 @@ async fn replicating_callstate_flush_lands_on_peer() {
 #[tokio::test(start_paused = true)]
 async fn cookie_parse_sets_topology_pri_bak() {
     let invite = invite_with_cookie("w0", "w1");
-    let call =
-        build_initial_call(&invite, src(), &config_for("w0"), &mut sip_ids::TurnIds::fixed(1), 0);
-    let topo = call.topology.expect("cookie present → topology set");
+    let topo = placed(&invite).expect("cookie present → topology set");
     assert_eq!(topo.pri, "w0");
     assert_eq!(topo.bak, "w1", "w_bak reaches topology.bak");
     assert_eq!(topo.gen, 1, "brand-new call starts at gen=1");
@@ -155,9 +151,12 @@ async fn cookie_parse_sets_topology_pri_bak() {
         SipMessage::Request(r) => r,
         _ => panic!(),
     };
-    let call =
-        build_initial_call(&req, src(), &config_for("w0"), &mut sip_ids::TurnIds::fixed(1), 0);
-    assert!(call.topology.is_none(), "no cookie → no topology (non-replicating)");
+    assert!(placed(&req).is_none(), "no cookie → no topology (non-replicating)");
+}
+
+/// The topology `w0` places the call `invite` opens under.
+fn placed(invite: &sip_message::SipRequest) -> Option<crate::store::CallTopology> {
+    crate::router::topology_cookie::topology_from_cookie(invite, "w0", "w0|cookie|t")
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +174,7 @@ async fn update_bumps_call_gen() {
     let call: Call =
         build_initial_call(&invite, src(), &config_for("w0"), &mut sip_ids::TurnIds::fixed(1), 0);
     let call_ref = call.call_ref.clone();
-    state.create(call.clone());
+    state.create_placed(call.clone());
     assert_eq!(gen(&state, &call_ref), 1, "create keeps the gen=1 baseline");
 
     state.update(state.peek(&call_ref).unwrap());
@@ -186,7 +185,7 @@ async fn update_bumps_call_gen() {
 }
 
 fn gen(state: &CallState, call_ref: &str) -> i64 {
-    state.peek(call_ref).unwrap().topology.unwrap().gen
+    state.topology(call_ref).unwrap().gen
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +207,7 @@ async fn backup_held_counts_update_first_replica() {
 
     // w1's backup store + a puller pulling w0 — built directly so we hold the
     // metrics handle the supervisor would otherwise own privately.
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let metrics = B2buaMetrics::new();
     let (puller, _status) = Puller::new_at(
         "w0",

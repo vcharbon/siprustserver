@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use metric_catalogue::HistogramValue;
-use metric_values::{FixedCounts, OpenRows};
 
 use crate::dispatch::{Discard, PastBound};
 use crate::drain::DrainExit;
@@ -17,7 +16,10 @@ mod cells;
 mod limiter;
 mod operator;
 mod removal_class;
+mod repl_gauges;
+mod repl_hold;
 mod retransmit_row;
+mod rows;
 pub mod shell;
 mod turn_counts;
 mod udp_transport;
@@ -30,6 +32,7 @@ pub use limiter::{
 pub use operator::OPERATOR_RELEASE_KINDS;
 pub use removal_class::RemovalClass;
 use retransmit_row::retransmit_row;
+use rows::Rows;
 pub use udp_transport::{LiveCounters, LiveGauge, UdpTransportMetrics};
 
 #[derive(Debug, Default)]
@@ -99,10 +102,10 @@ struct Inner {
     // held count, re-hydration is whole.
     repl_bootstrap_last_applied: AtomicU64,
     // Reboot-reclaim completeness. Per the MOST RECENT bulk reclaim pass
-    // (`router::reclaim_all`): `scanned` = bodies found in `pri:{self}` (the
+    // (`router::reclaim::park_all`): `scanned` = bodies found in `pri:{self}` (the
     // denominator — everything the bootstrap import made reclaimable on this
     // node) and `materialized` = how many of those this pass freshly inserted
-    // into the live serving map + re-armed timers. The per-reboot chain localises
+    // into the live serving map, parked until armed. The per-reboot chain localises
     // exactly where a rebooted primary's quiescent dialogs are lost: `(peer)
     // repl_meta_backup` → `repl_bootstrap_last_applied` → `repl_reclaim_scanned`
     // → `repl_reclaim_materialized`. `scanned ≪ peer meta_backup` ⇒ a
@@ -110,28 +113,25 @@ struct Inner {
     // (cumulatively, via `repl_reclaimed_total`) ⇒ a materialise gap.
     repl_reclaim_scanned: AtomicU64,
     repl_reclaim_materialized: AtomicU64,
-    // Memory-attribution gauges (sampled, not counter-derived). `store_calls` is
-    // the TRUE live call-map length — compare to `active_calls`
-    // (creations-removals); a divergence localises a store-side leak the counter
-    // pair can't see. The sibling maps should track `store_calls`; one that grows
-    // while it stays flat names the leaking map (`locks` + `takeover_at` are the
-    // X11 fail-back suspects: a per-call lock or takeover-instant never released).
+    // Memory-attribution gauges (sampled). `store_calls` is the TRUE live
+    // call-map length; a divergence from `active_calls` (creations-removals)
+    // localises a store-side leak. A sibling map growing while it stays flat
+    // names the leaking map (`locks`, `takeover_at`: the X11 fail-back suspects).
     store_calls: AtomicU64,
     store_sip_index: AtomicU64,
     store_indexed: AtomicU64,
     store_locks: AtomicU64,
     store_takeover_at: AtomicU64,
     store_touched: AtomicU64,
-    // Replicating-store sizes: `repl_meta_total` = all replica metadata entries
-    // this node holds; `repl_meta_backup` = the BACKUP-partition subset (the
-    // replicas this node holds for its peers; a backup self-releases its *live*
-    // takeover copy on transaction completion but KEEPS the replica until its
-    // primary deletes it, so this tracks resident backup bodies, ADR-0014). The
-    // changelog gauges are the outbound replication buffer depth (entries across
-    // peers + live peer count); a peer whose entries grow without draining
-    // (slow/dead subscriber) is an outbound-side leak distinct from the call map.
+    // Replicating-store sizes: all replica metadata entries, the BACKUP-partition
+    // subset (resident backup bodies, kept past a takeover copy's self-release
+    // until the primary deletes them, ADR-0014), and the live calls with no
+    // backup (ADR-0055 §3). The changelog gauges are the outbound buffer depth
+    // (entries, peers); entries that grow without draining are an outbound leak.
     repl_meta_total: AtomicU64,
     repl_meta_backup: AtomicU64,
+    repl_calls_unbacked: AtomicU64,
+    repl_hold: repl_hold::ReplHold,
     // Inner CallStore map sizes (bodies/idx) — the idx map is insert-only on
     // put_call, so a call whose index keys change across re-flushes (or whose
     // delete passes the wrong keys) strands `idx:*` entries. store_idx_entries
@@ -165,76 +165,6 @@ struct Inner {
     census_timers: AtomicU64,
     census_tag_map: AtomicU64,
     census_b_legs: AtomicU64,
-}
-
-/// The label-keyed families of the counter set: a semi-open one's rows (one
-/// per observed label set) or a fixed one's counts, every declared label set
-/// at 0 from the start.
-#[derive(Debug)]
-struct Rows {
-    // Inbound requests by method, outbound requests this worker originated
-    // or relayed by method, inbound responses by CSeq method and status.
-    requests: OpenRows,
-    requests_out: OpenRows,
-    responses: OpenRows,
-    // Every repeat of a retained emission that left this worker — a rung of
-    // a dialog-level ladder or a triggered re-send — by ladder, method and,
-    // for a response, code. An original send is not a repeat.
-    retransmits: OpenRows,
-    // Dialog-level ladders that ran to their give-up, by the kind of
-    // obligation left undischarged: the peer went deaf.
-    repeat_give_ups: FixedCounts,
-    // Model invariants broken and defects met, by name (ADR-0052 §8).
-    model_defects: FixedCounts,
-    // Outbound messages left unsent: their next hop is not an IP literal
-    // (`router::unaddressable`), by kind.
-    outbound_unaddressable: FixedCounts,
-    // Messages and events that resolved to no call (`router::unroutable`),
-    // in three classes that never overlap: wire messages that drew no
-    // answer (by kind), wire requests answered on no call's behalf (by
-    // method and code), this node's own events naming no call (by event and
-    // method).
-    unroutable_dropped: FixedCounts,
-    unroutable_refused: OpenRows,
-    unroutable_internal: OpenRows,
-    // Quiet turns persisted without a bump or a flush, by kind.
-    repl_quiet_turns: FixedCounts,
-    // Inbound replication ops applied, by flow, peer and op: a reboot's bulk
-    // reclaim is a sharp `recovery`/`create` step for that peer.
-    repl_applied: OpenRows,
-    // Catch-up/idle `Noop`s this node sent as a server, by flow and pulling
-    // peer (ADR-0014): climbs on every healthy stream; a flat one names a
-    // stuck serve loop.
-    repl_noops_sent: OpenRows,
-    // Forward flushes a backup refused as a regression of its own progress
-    // (ADR-0031 D3), by the operation refused.
-    repl_forward_flush_refused: FixedCounts,
-    // Live calls resting at each state-machine cursor (ADR-0016),
-    // a census replaced whole on the gauge cadence.
-    sm_cursors: OpenRows,
-}
-
-impl Default for Rows {
-    fn default() -> Self {
-        use catalogue::worker as w;
-        Self {
-            requests: OpenRows::new(&w::REQUESTS),
-            requests_out: OpenRows::new(&w::REQUESTS_OUT),
-            responses: OpenRows::new(&w::RESPONSES),
-            retransmits: OpenRows::new(&w::RETRANSMITS),
-            repeat_give_ups: FixedCounts::new(&w::REPEAT_GIVE_UPS),
-            model_defects: FixedCounts::new(&w::MODEL_DEFECTS),
-            outbound_unaddressable: FixedCounts::new(&w::OUTBOUND_UNADDRESSABLE),
-            unroutable_dropped: FixedCounts::new(&w::UNROUTABLE_DROPPED),
-            unroutable_refused: OpenRows::new(&w::UNROUTABLE_REFUSED),
-            unroutable_internal: OpenRows::new(&w::UNROUTABLE_INTERNAL),
-            repl_quiet_turns: FixedCounts::new(&w::REPL_QUIET_TURNS),
-            repl_applied: OpenRows::new(&w::REPL_APPLIED),
-            repl_noops_sent: OpenRows::new(&w::REPL_NOOPS_SENT),
-            repl_forward_flush_refused: FixedCounts::new(&w::REPL_FORWARD_FLUSH_REFUSED),
-            sm_cursors: OpenRows::new(&w::SM_CURSORS),
-        }
-    }
 }
 
 /// Clone-cheap handle to the B2BUA counter set.
@@ -451,9 +381,23 @@ impl B2buaMetrics {
         self.inner.rows.repl_forward_flush_refused.get(&[op])
     }
 
-    /// Count one inbound request by SIP method, for `b2bua_requests_total{method}`.
+    /// `b2bua_repl_inbound_dropped_total{reason}`: one inbound replication
+    /// connection closed before it opened a flow (ADR-0045). `reason` is `cap`
+    /// (accepted at the cap on concurrent connections) or `open_timeout` (no
+    /// opening request within the open timeout).
+    pub fn record_repl_inbound_dropped(&self, reason: &str) {
+        self.inner.rows.repl_inbound_dropped.add(&[reason], 1);
+    }
+
+    /// Inbound replication connections dropped for `reason` (test/observability).
+    pub fn repl_inbound_dropped(&self, reason: &str) -> u64 {
+        self.inner.rows.repl_inbound_dropped.get(&[reason])
+    }
+
+    /// Count one inbound request by SIP method, as written (a method is
+    /// case-sensitive, RFC 3261 §7.1), for `b2bua_requests_total{method}`.
     pub fn record_request(&self, method: &str) {
-        self.inner.rows.requests.add(&[&method.to_ascii_uppercase()], 1);
+        self.inner.rows.requests.add(&[method], 1);
     }
 
     /// Count one OUTBOUND request this worker originated/relayed, for
@@ -461,14 +405,13 @@ impl B2buaMetrics {
     /// here; pairing OPTIONS-out with the inbound `responses_total{OPTIONS,200}`
     /// isolates the keepalive round-trip (sent vs answered) on the b2bua itself.
     pub fn record_request_out(&self, method: &str) {
-        self.inner.rows.requests_out.add(&[&method.to_ascii_uppercase()], 1);
+        self.inner.rows.requests_out.add(&[method], 1);
     }
 
     /// Count one inbound response by its CSeq method + status code, for
     /// `b2bua_responses_total{method,code}`.
     pub fn record_response(&self, method: &str, code: u16) {
-        let (method, code) = (method.to_ascii_uppercase(), code.to_string());
-        self.inner.rows.responses.add(&[&method, &code], 1);
+        self.inner.rows.responses.add(&[method, &code.to_string()], 1);
     }
 
     /// Count one repeat that left this worker, for
@@ -506,30 +449,6 @@ impl B2buaMetrics {
     /// The quiet turns of one kind.
     pub fn repl_quiet_turns_total(&self, kind: &str) -> u64 {
         self.inner.rows.repl_quiet_turns.get(&[kind])
-    }
-
-    /// Record how many bodies the most recent bootstrap pass imported (gauge).
-    pub fn set_repl_bootstrap_last_applied(&self, n: u64) {
-        self.inner.repl_bootstrap_last_applied.store(n, Ordering::Relaxed);
-    }
-    pub fn repl_bootstrap_last_applied(&self) -> u64 {
-        self.inner.repl_bootstrap_last_applied.load(Ordering::Relaxed)
-    }
-
-    /// Record the most recent bulk-reclaim pass's `(scanned, materialized)` — the
-    /// reboot-reclaim completeness denominator/numerator (gauges). `scanned` is the
-    /// `pri:{self}` partition size the pass swept; `materialized` is how many it
-    /// freshly re-served. Overwritten each pass; the cumulative materialised total
-    /// is `repl_reclaimed_total`.
-    pub fn set_repl_reclaim_pass(&self, scanned: u64, materialized: u64) {
-        self.inner.repl_reclaim_scanned.store(scanned, Ordering::Relaxed);
-        self.inner.repl_reclaim_materialized.store(materialized, Ordering::Relaxed);
-    }
-    pub fn repl_reclaim_scanned(&self) -> u64 {
-        self.inner.repl_reclaim_scanned.load(Ordering::Relaxed)
-    }
-    pub fn repl_reclaim_materialized(&self) -> u64 {
-        self.inner.repl_reclaim_materialized.load(Ordering::Relaxed)
     }
 
     /// Record one inbound replication op applied, for
@@ -642,41 +561,6 @@ impl B2buaMetrics {
         self.inner.census_b_legs.store(b_legs, Ordering::Relaxed);
     }
 
-    /// Push the replicating-store sizes (memory-attribution gauges): total +
-    /// backup-partition replica metadata entries, and the outbound changelog
-    /// depth (entries across peers + peer count). See the field docs.
-    pub fn set_repl_store_gauges(
-        &self,
-        meta_total: u64,
-        meta_backup: u64,
-        changelog_entries: u64,
-        changelog_peers: u64,
-    ) {
-        self.inner.repl_meta_total.store(meta_total, Ordering::Relaxed);
-        self.inner.repl_meta_backup.store(meta_backup, Ordering::Relaxed);
-        self.inner.repl_changelog_entries.store(changelog_entries, Ordering::Relaxed);
-        self.inner.repl_changelog_peers.store(changelog_peers, Ordering::Relaxed);
-    }
-
-    /// Set whether this worker is withdrawn from routing while still running
-    /// (ADR-0031 D6). Written by the replication supervisor on the observation.
-    pub fn set_withdrawn_running(&self, withdrawn: bool) {
-        self.inner.withdrawn_running.store(u64::from(withdrawn), Ordering::Relaxed);
-    }
-    pub fn withdrawn_running(&self) -> bool {
-        self.inner.withdrawn_running.load(Ordering::Relaxed) == 1
-    }
-
-    /// Set the number of replication peers currently pulled while not `ready`
-    /// (present in membership only, ADR-0031 D1). Written by the supervisor at
-    /// every reconcile.
-    pub fn set_repl_peers_pulled_not_ready(&self, n: u64) {
-        self.inner.repl_peers_pulled_not_ready.store(n, Ordering::Relaxed);
-    }
-    pub fn repl_peers_pulled_not_ready(&self) -> u64 {
-        self.inner.repl_peers_pulled_not_ready.load(Ordering::Relaxed)
-    }
-
     /// Replace the state-machine cursor census (ADR-0016) wholesale —
     /// `census` maps `(machine, state)` to the count of live calls resting there,
     /// sampled from the call map under the store lock on the slow gauge cadence.
@@ -720,6 +604,7 @@ impl B2buaMetrics {
         rows.repl_applied.render(&mut s);
         rows.repl_noops_sent.render(&mut s);
         rows.repl_forward_flush_refused.render(&mut s);
+        rows.repl_inbound_dropped.render(&mut s);
         catalogue::worker::DRAIN_EXITS.render(&mut s, |series| {
             cells::get_at(&i.drain_exits, series.index(&catalogue::worker::DRAIN_REASON))
         });
@@ -783,6 +668,9 @@ impl B2buaMetrics {
             .render_value(&mut s, self.inner.repl_meta_total.load(Ordering::Relaxed));
         catalogue::worker::REPL_META_BACKUP
             .render_value(&mut s, self.inner.repl_meta_backup.load(Ordering::Relaxed));
+        catalogue::capacity::REPL_CALLS_UNBACKED
+            .render_value(&mut s, self.inner.repl_calls_unbacked.load(Ordering::Relaxed));
+        self.inner.repl_hold.render(&mut s);
         catalogue::worker::REPL_CHANGELOG_ENTRIES
             .render_value(&mut s, self.inner.repl_changelog_entries.load(Ordering::Relaxed));
         catalogue::worker::REPL_CHANGELOG_PEERS

@@ -193,7 +193,7 @@
     },
     {
       "id": 31, "type": "timeseries", "title": "CANCEL lookups, no-target drops / sec",
-      "description": "`sip_proxy_cancel_lookups_total{outcome}`: a CANCEL that found its INVITE's hop (hit) or was routed on its own (miss). `sip_proxy_no_target_dropped_total{kind}`: requests dropped unanswered because neither the primary nor the backup of the cookie placing them is alive (in_dialog, cancel, initial).",
+      "description": "`sip_proxy_cancel_lookups_total{outcome}`: a CANCEL that found its INVITE's entry (hit), or one routed without it (miss: its INVITE crossed the other proxy or the entry was evicted; its loose Route, Request-URI, cookie or the call's rendezvous winner; junk CANCELs count here too). `sip_proxy_no_target_dropped_total{kind}`: requests dropped unanswered because no alive worker takes them (in_dialog: a cookie-routed request; cancel; initial: an out-of-dialog request, or the ACK of an initial INVITE's non-2xx final).",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [

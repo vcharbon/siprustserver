@@ -6,17 +6,60 @@
 //! than [`claim_ttl`](Changelog::set_claim_ttl) belongs to a peer that stopped
 //! answering, one that died without a FIN included, whose serve task (and
 //! claim) outlives it until the link bounds end it: it reads as unknown.
+//!
+//! The highest position a flow ever reported under this node's incarnation is
+//! kept apart from the claim, past a disconnect: it is what the peer holds for
+//! sure. It releases the messages a turn holds for the peer (ADR-0055 §3) and
+//! reaps the deletes it covers.
 
 use std::time::Duration;
 
-use repl_net::frame::{Partition, Watermark};
+use repl_net::frame::{Op, Partition, Watermark};
 use tokio::time::Instant;
 
-use super::Changelog;
+use super::{Changelog, SubLog};
 
 /// How long a claim vouches for its flow unless the server says otherwise:
 /// twice the server's default idle `Noop` interval.
-pub const DEFAULT_CLAIM_TTL: Duration = Duration::from_secs(10);
+pub const DEFAULT_CLAIM_TTL: Duration = Duration::from_secs(1);
+
+/// How a wait for a peer's applied position ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// The peer reported applying the position.
+    Applied,
+    /// The peer's flow went down, or its log is gone, first.
+    Lost,
+}
+
+/// How a serving-side flow stands, one per `(peer, partition)` log this node
+/// keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlowLiveness {
+    /// Connected, with a claim inside the claim TTL: what the replication
+    /// hold waits on.
+    Live,
+    /// Connected, with no claim inside the claim TTL: a bootstrap in flight,
+    /// or a peer that stopped answering. The hold waits on nothing here.
+    Stale,
+    /// No flow connected.
+    Down,
+}
+
+impl FlowLiveness {
+    /// Every state, in the exposition order of `b2bua_repl_serving_flows`.
+    pub const ALL: [FlowLiveness; 3] =
+        [FlowLiveness::Live, FlowLiveness::Stale, FlowLiveness::Down];
+
+    /// The `state` label of `b2bua_repl_serving_flows`.
+    pub const fn label(self) -> &'static str {
+        match self {
+            FlowLiveness::Live => "live",
+            FlowLiveness::Stale => "stale",
+            FlowLiveness::Down => "down",
+        }
+    }
+}
 
 /// A puller's report: the position it applied, and when it said so.
 #[derive(Clone, Copy, Debug)]
@@ -36,12 +79,139 @@ impl Changelog {
     /// ([`repl_net::frame::Frame::Position`]), stamped now. The latest report
     /// stands, lower or not: a peer that shed what it held claims less, and
     /// its earlier claim no longer vouches for it. Ignored for a peer with no
-    /// log.
-    pub fn note_applied(&self, peer: &str, partition: Partition, at: Watermark) {
+    /// log, and from a worker `identity` other than the one membership binds to
+    /// the ordinal ([`bind_identity`](Self::bind_identity)): a superseded
+    /// worker on the ordinal vouches for nothing its successor holds (ADR-0055
+    /// §6). The highest such report under this incarnation is kept aside: it
+    /// counts once membership binds that identity.
+    pub fn note_applied(
+        &self,
+        peer: &str,
+        identity: Option<&str>,
+        partition: Partition,
+        at: Watermark,
+    ) {
+        let gen = self.gen;
         let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
-        if let Some(log) = inner.peers.get_mut(peer) {
-            log.sub_mut(partition).applied = Some(Claim { at, made: Instant::now() });
+        if inner.bound.get(peer).is_some_and(|bound| Some(bound.as_str()) != identity) {
+            if let (Some(log), Some(identity)) = (inner.peers.get_mut(peer), identity) {
+                let sub = log.sub_mut(partition);
+                let higher = sub.unbound.as_ref().is_none_or(|(id, w)| id != identity || at > *w);
+                if at.gen == gen && higher {
+                    sub.unbound = Some((identity.to_string(), at));
+                }
+            }
+            return;
         }
+        let now_ms = self.clock.now_ms();
+        if let Some(log) = inner.peers.get_mut(peer) {
+            log.last_active_ms = now_ms;
+            let sub = log.sub_mut(partition);
+            sub.applied = Some(Claim { at, made: Instant::now() });
+            sub.flow_started = None;
+            if at.gen == gen {
+                sub.acked.send_if_modified(|acked| {
+                    let raised = at > *acked;
+                    if raised {
+                        *acked = at;
+                    }
+                    raised
+                });
+            }
+        }
+    }
+
+    /// Bind `peer`'s ordinal to the worker `identity` membership names for it
+    /// (ADR-0055 §6): only that identity's reports count from now on. `None`:
+    /// membership names no identity, and every report counts. A new identity
+    /// holds nothing an earlier one applied: the highest position applied
+    /// falls back to what that identity reported before it was bound, or none,
+    /// on both sub-logs.
+    pub fn bind_identity(&self, peer: &str, identity: Option<&str>) {
+        let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        let Some(identity) = identity else {
+            inner.bound.remove(peer);
+            return;
+        };
+        if inner.bound.get(peer).is_some_and(|bound| bound == identity) {
+            return;
+        }
+        inner.bound.insert(peer.to_string(), identity.to_string());
+        if let Some(log) = inner.peers.get_mut(peer) {
+            for partition in [Partition::Pri, Partition::Bak] {
+                let sub = log.sub_mut(partition);
+                let reported = sub.unbound.take().filter(|(id, _)| id == identity);
+                sub.acked.send_replace(reported.map_or(Watermark::new(0, 0), |(_, at)| at));
+            }
+        }
+    }
+
+    /// Whether `peer` is a live, bootstrapped holder of `partition`: its flow is
+    /// connected and has claimed a position within the claim TTL, which it does
+    /// only once its bootstrap is applied.
+    pub fn flow_live(&self, peer: &str, partition: Partition) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        inner.peers.get(peer).map(|log| log.sub(partition)).is_some_and(|sub| {
+            sub.streams > 0 && sub.applied.is_some_and(|c| c.made.elapsed() <= inner.claim_ttl)
+        })
+    }
+
+    /// How many of the flows this node serves stand in each state, indexed
+    /// like [`FlowLiveness::ALL`]: two per peer log, one per partition.
+    pub fn flow_liveness(&self) -> [u64; FlowLiveness::ALL.len()] {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        let mut counts = [0u64; FlowLiveness::ALL.len()];
+        let subs = inner.peers.values().flat_map(|log| [&log.pri, &log.bak]);
+        for sub in subs {
+            let state = match sub.applied {
+                _ if sub.streams == 0 => FlowLiveness::Down,
+                Some(claim) if claim.made.elapsed() <= inner.claim_ttl => FlowLiveness::Live,
+                _ => FlowLiveness::Stale,
+            };
+            if let Some(n) =
+                FlowLiveness::ALL.iter().position(|s| *s == state).and_then(|at| counts.get_mut(at))
+            {
+                *n += 1;
+            }
+        }
+        counts
+    }
+
+    /// Whether a flow of `peer` is open on `partition`, bootstrapped or not.
+    pub fn flow_open(&self, peer: &str, partition: Partition) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        inner.peers.get(peer).is_some_and(|log| log.sub(partition).streams > 0)
+    }
+
+    /// Whether `peer` reported applying `at` or past it on `partition`.
+    pub fn has_applied(&self, peer: &str, partition: Partition, at: Watermark) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        inner.peers.get(peer).is_some_and(|log| *log.sub(partition).acked.borrow() >= at)
+    }
+
+    /// Resolves once `peer` reported applying `at` or past it on `partition`
+    /// ([`Reach::Applied`]), or once its flow is disconnected or its log is
+    /// gone, when nothing will report it ([`Reach::Lost`]).
+    pub async fn applied_reaches(&self, peer: &str, partition: Partition, at: Watermark) -> Reach {
+        let acked = {
+            let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+            inner.peers.get(peer).map(|log| log.sub(partition).acked.subscribe())
+        };
+        let Some(mut acked) = acked else { return Reach::Lost };
+        loop {
+            if *acked.borrow_and_update() >= at {
+                return Reach::Applied;
+            }
+            if !self.flow_connected(peer, partition) || acked.changed().await.is_err() {
+                return Reach::Lost;
+            }
+        }
+    }
+
+    /// Whether a serve task streams `peer`'s flow on `partition`.
+    fn flow_connected(&self, peer: &str, partition: Partition) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        inner.peers.get(peer).is_some_and(|log| log.sub(partition).streams > 0)
     }
 
     /// Whether `peer`'s flow on `partition` is connected AND has reported,
@@ -60,5 +230,26 @@ impl Changelog {
         }
         let head = Watermark::new(self.gen, sub.head);
         sub.applied.is_some_and(|c| c.at >= head && c.made.elapsed() <= inner.claim_ttl)
+    }
+}
+
+/// Remove from `sub` the tombstones its peer reported applying under
+/// incarnation `gen`, raising its `retained_floor`.
+pub(super) fn reap_sublog(sub: &mut SubLog, gen: u64) {
+    let acked = *sub.acked.borrow();
+    if acked.gen != gen {
+        return;
+    }
+    let applied: Vec<String> = sub
+        .entries
+        .range(..=acked.counter)
+        .filter(|(_, call_ref)| sub.by_ref.get(*call_ref).is_some_and(|st| st.op == Op::Delete))
+        .map(|(_, call_ref)| call_ref.clone())
+        .collect();
+    for call_ref in applied {
+        if let Some(st) = sub.by_ref.remove(&call_ref) {
+            sub.entries.remove(&st.counter);
+            sub.retained_floor = sub.retained_floor.max(st.counter);
+        }
     }
 }

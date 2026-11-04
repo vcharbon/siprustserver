@@ -21,6 +21,7 @@ pub use crate::leg_end::LegEnd;
 pub use crate::lifecycle::{AttemptOpening, LifecycleEvent, RouteAnswer};
 use crate::relayed_final::RelayedFinal;
 pub use crate::rule_call::RuleCall;
+pub use crate::rule_diagnostic::RuleDiagnostic;
 pub use crate::timer_delay::TimerDelay;
 
 pub const CORE_LAYER: u8 = 0;
@@ -66,7 +67,7 @@ pub enum MatchKind {
 #[derive(Clone)]
 pub struct Match {
     pub kind: MatchKind,
-    /// Request method / response cseq-method / timeout method (case-insensitive).
+    /// Request method / response cseq-method / timeout method, as spelled (RFC 3261 §7.1).
     pub methods: Option<Vec<&'static str>>,
     pub status: StatusMatch,
     /// Exact timer-type matching — for a [`TimerType::Service`] entry this is
@@ -235,7 +236,7 @@ impl Match {
                 _ => None,
             };
             match m {
-                Some(m) if methods.iter().any(|x| x.eq_ignore_ascii_case(&m)) => {}
+                Some(m) if methods.iter().any(|x| *x == m) => {}
                 _ => return false,
             }
         }
@@ -372,32 +373,6 @@ impl RuleDefinition {
     }
 }
 
-/// An input a rule could not read, stated as a fact instead of absorbed into a
-/// fabricated value. A rule that hits one names the field and why, emits
-/// whatever refusal it owns (a reject response, a terminated subscription), and
-/// lets the engine log and count the diagnostic — the alternative a rule surface
-/// without this seam is forced into is choosing between silence and acting as if
-/// the input were fine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuleDiagnostic {
-    /// The input that did not read (`refer_to`, `destination.port`, …).
-    pub field: String,
-    /// Why it did not read.
-    pub reason: String,
-}
-
-impl RuleDiagnostic {
-    pub fn unreadable(field: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self { field: field.into(), reason: reason.into() }
-    }
-}
-
-impl std::fmt::Display for RuleDiagnostic {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unreadable {}: {}", self.field, self.reason)
-    }
-}
-
 /// What a rule emits when it handles an event.
 #[derive(Debug, Clone, Default)]
 pub struct RuleHandleResult {
@@ -459,6 +434,23 @@ pub enum RuleAction {
         body: Vec<u8>,
         content_type: Option<String>,
     },
+    /// Hold the current received non-INVITE request for a final a service
+    /// gives on a later turn ([`RuleAction::AnswerHeld`]); nothing answers it
+    /// now. A held request the service has not answered by its deadline, the
+    /// originator's Timer F less T2, is answered `500` by the platform
+    /// (RFC 4320 §4.2, ADR-0055 §2).
+    HoldRequest,
+    /// Answer the request held on `leg_id` whose sender numbered it `cseq`
+    /// ([`RuleAction::HoldRequest`]) with `status`, carrying `body`. A request
+    /// no longer held (answered, or its deadline passed) draws nothing.
+    AnswerHeld {
+        leg_id: String,
+        cseq: i64,
+        status: u16,
+        reason: String,
+        body: Vec<u8>,
+        content_type: Option<String>,
+    },
     /// Refuse the current INVITE that meets glare, or UPDATE over an open
     /// offer, in place (RFC 3261 §14.2, RFC 3311 §5.2), by [`GlareRefusal`].
     RefuseGlare {
@@ -471,12 +463,11 @@ pub enum RuleAction {
         leg_id: String,
         body: Option<Body>,
     },
-    /// ACK the INVITE final the current response carries on `leg_id`'s
-    /// confirmed dialog for a round the record does not hold (ADR-0047): the
-    /// dialog's sequence is raised to the response's first (RFC 3261
-    /// §12.2.1.1); a 2xx is ACKed end to end and its ACK retained for a repeat
-    /// (§13.2.2.4), a non-2xx hop by hop on the response's own branch (§17.1.1.3).
-    AckLostRound {
+    /// Owe the current message on `leg_id`, evidence the record cannot
+    /// explain (ADR-0055 §4), what RFC 3261 requires of it, and take into the
+    /// record the dialog state it proves, so the teardown that follows ends
+    /// every dialog the record or the evidence names.
+    EndOnEvidence {
         leg_id: String,
     },
     /// Release the fork straggler whose 2xx the current event carries on a
@@ -548,7 +539,7 @@ pub enum RuleAction {
     /// CANCEL a relayed, still-unanswered **re-INVITE** client transaction on
     /// `leg_id`'s dialog (RFC 3261 §9.1) — transaction-scoped: no leg state or
     /// disposition change, the established dialog and the call stay up. Builds
-    /// the CANCEL from the dialog's cached `pending_invite_txn` handle (same
+    /// the CANCEL from the INVITE the dialog's record holds (same
     /// branch / Route set / wire destination as the re-INVITE) and marks the
     /// matching pending-relay snapshot (`outbound_cseq`) cancelled so the
     /// peer's eventual final is resolved locally instead of relayed: the
@@ -1140,24 +1131,6 @@ impl<'a> RuleContext<'a> {
         } else {
             GlareRefusal::Crossing
         }
-    }
-
-    /// The pending-relay snapshot the current response answers, as the
-    /// engine's dialog gate resolved it ([`Self::resolved`]): kept on the
-    /// dialog the response's tags name, or among the relays of a dialog the
-    /// answer retired — never another dialog's. `None` for any non-response
-    /// event.
-    pub fn relayed_pending(&self) -> Option<call::PendingRequest> {
-        self.response()?;
-        self.resolved.relay.as_deref().map(|(_, p)| p.clone())
-    }
-
-    /// Does the current response answer a request THIS STACK RELAYED
-    /// ([`Self::relayed_pending`])? `false` for a request the B2BUA originated
-    /// itself (keepalive OPTIONS, its own PRACK, a REFER-progress NOTIFY),
-    /// which leaves no snapshot, and for any non-response event.
-    pub fn answers_relayed_request(&self) -> bool {
-        self.relayed_pending().is_some()
     }
 
     /// The leg the event arrived on.

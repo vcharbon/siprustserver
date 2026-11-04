@@ -17,6 +17,16 @@
 //! [`Product`](loadgen::app::Product) seam: this bin is the shipped product,
 //! and another product's load bin is the same one line over its own product.
 
+/// jemalloc, not the system allocator: the per-call churn of a load run spends
+/// a large share of its CPU in the allocator, and jemalloc's thread caches cut it.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() -> std::io::Result<()> {
+    // The resolved allocator configuration, with the defaults jemalloc-stats
+    // sets (ADR-0038).
+    #[cfg(not(target_env = "msvc"))]
+    jemalloc_stats::log_config();
     loadgen::app::main(loadgen::app::Shipped)
 }

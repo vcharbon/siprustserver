@@ -32,10 +32,10 @@ image: {{ printf "%s:%s" $img.repository (toString $img.tag) | quote }}
 imagePullPolicy: {{ $img.pullPolicy }}
 {{- end }}
 
-{{/* The keepalived image of the VRRP sidecar, vip-loopback and masq-exempt. */}}
-{{- define "siprust.keepalivedImage" -}}
-image: {{ printf "%s:%s" .Values.keepalivedImage.repository (toString .Values.keepalivedImage.tag) | quote }}
-imagePullPolicy: {{ .Values.keepalivedImage.pullPolicy }}
+{{/* The network tools image of vip-loopback and masq-exempt. */}}
+{{- define "siprust.netToolsImage" -}}
+image: {{ printf "%s:%s" .Values.netToolsImage.repository (toString .Values.netToolsImage.tag) | quote }}
+imagePullPolicy: {{ .Values.netToolsImage.pullPolicy }}
 {{- end }}
 
 {{/*
@@ -150,11 +150,112 @@ A network value the proxy and masq-exempt require, named in the error. Takes
 {{- required (printf "network.%s is required by the proxy and masq-exempt" .key) $v }}
 {{- end }}
 
-{{/* The addresses of proxy.keepalived.extraVirtualIps, space-separated. */}}
-{{- define "siprust.extraVips" -}}
-{{- $out := list }}
-{{- range .Values.proxy.keepalived.extraVirtualIps }}
-{{- $out = append $out .address }}
+{{/*
+An integer env value of a component's final env, or the runner default when
+the env does not state it (unset or null). Takes (list <env map> <name>
+<default>); a value that is not an integer fails the render naming it.
+*/}}
+{{- define "siprust.envInt" -}}
+{{- $v := get (index . 0) (index . 1) }}
+{{- if or (kindIs "invalid" $v) (eq (toString $v) "") }}
+{{- index . 2 }}
+{{- else if regexMatch "^[0-9]+$" (toString $v) }}
+{{- toString $v }}
+{{- else }}
+{{- fail (printf "%s=%q is not an integer" (index . 1) (toString $v)) }}
 {{- end }}
-{{- join " " $out }}
+{{- end }}
+
+{{/*
+A byte quantity in bytes: an integer with an optional Ki/Mi/Gi/Ti or k/M/G/T
+suffix, the forms the runners and Kubernetes share. Takes (list <name>
+<value>); any other form fails the render naming it.
+*/}}
+{{- define "siprust.bytes" -}}
+{{- $name := index . 0 }}
+{{- $v := toString (index . 1) | trim }}
+{{- $digits := regexFind "^[0-9]+" $v }}
+{{- $unit := trimPrefix $digits $v }}
+{{- $scale := dict "" 1 "Ki" 1024 "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 "k" 1000 "M" 1000000 "G" 1000000000 "T" 1000000000000 }}
+{{- if or (not $digits) (not (hasKey $scale $unit)) }}
+{{- fail (printf "%s=%q is not a byte quantity (an integer with an optional Ki, Mi, Gi, Ti, k, M, G or T suffix)" $name $v) }}
+{{- end }}
+{{- mul (int64 $digits) (get $scale $unit) }}
+{{- end }}
+
+{{/*
+The worker's affinity: its own `affinity` and, with the proxy enabled, a
+required node affinity off every node proxy.nodeSelector names, so a worker
+never lands on a node that runs or ran a proxy, whose VIPs stay on its lo
+(ADR-0056 §7). A node is off when it carries every label of the selector:
+one term per label (terms are ORed), each ANDed into every term the worker's
+own required node affinity states. Takes the root.
+*/}}
+{{- define "siprust.workerAffinity" -}}
+{{- $aff := deepCopy (.Values.worker.affinity | default dict) }}
+{{- if .Values.proxy.enabled }}
+{{- $na := get $aff "nodeAffinity" | default dict }}
+{{- $req := get $na "requiredDuringSchedulingIgnoredDuringExecution" | default dict }}
+{{- $own := get $req "nodeSelectorTerms" | default (list dict) }}
+{{- $terms := list }}
+{{- range $term := $own }}
+{{- range $k, $v := $.Values.proxy.nodeSelector }}
+{{- $t := deepCopy $term }}
+{{- $exprs := get $t "matchExpressions" | default list }}
+{{- $_ := set $t "matchExpressions" (append $exprs (dict "key" $k "operator" "NotIn" "values" (list (toString $v)))) }}
+{{- $terms = append $terms $t }}
+{{- end }}
+{{- end }}
+{{- $_ := set $req "nodeSelectorTerms" $terms }}
+{{- $_ := set $na "requiredDuringSchedulingIgnoredDuringExecution" $req }}
+{{- $_ := set $aff "nodeAffinity" $na }}
+{{- end }}
+{{- toYaml $aff }}
+{{- end }}
+
+{{/*
+The routers the proxy's route guard drops BFD and BGP to, comma-separated:
+proxy.routeGuard.peers, else every address of proxy.announce.metallb.peers
+when the chart renders MetalLB's objects; a guard with neither fails the
+render.
+*/}}
+{{- define "siprust.routeGuardPeers" -}}
+{{- $g := .Values.proxy.routeGuard }}
+{{- $m := .Values.proxy.announce.metallb }}
+{{- $peers := list }}
+{{- range $g.peers | default list }}{{- $peers = append $peers (toString .) }}{{- end }}
+{{- if and (not $peers) $m.enabled }}
+{{- range $face := list "internal" "external" }}
+{{- range (index $m.peers $face | default list) }}{{- $peers = append $peers (toString .address) }}{{- end }}
+{{- end }}
+{{- end }}
+{{- if not $peers }}
+{{- fail "proxy.routeGuard.peers is required when the chart does not render MetalLB's peers (proxy.announce.metallb.enabled): the routers whose BFD and BGP the guard drops; or set proxy.routeGuard.enabled=false" }}
+{{- end }}
+{{- range $peers }}
+{{- if not (regexMatch "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$" .) }}
+{{- fail (printf "proxy.routeGuard: router %s is not an IPv4 address: the route guard drops BFD and BGP to IPv4 routers only" .) }}
+{{- end }}
+{{- end }}
+{{- $peers | uniq | join "," }}
+{{- end }}
+
+{{/* The route guard's env, for its container and its init step. */}}
+{{- define "siprust.routeGuardEnv" -}}
+{{- $g := .Values.proxy.routeGuard -}}
+- { name: ROUTE_GUARD_FITNESS, value: "127.0.0.1:9090" }
+- { name: ROUTE_GUARD_PEERS, value: {{ include "siprust.routeGuardPeers" . | quote }} }
+- { name: ROUTE_GUARD_POLL_MS, value: {{ int $g.pollMs | toString | quote }} }
+- { name: ROUTE_GUARD_DEAD_MS, value: {{ int $g.deadMs | toString | quote }} }
+- { name: ROUTE_GUARD_HOLD_MS, value: {{ int $g.holdMs | toString | quote }} }
+- { name: ROUTE_GUARD_METRICS, value: {{ printf "0.0.0.0:%d" (int $g.metricsPort) | quote }} }
+{{- end }}
+
+{{/* The route guard's privileges: NET_ADMIN on the node's network, nothing else. */}}
+{{- define "siprust.routeGuardSecurity" -}}
+runAsUser: 0
+runAsNonRoot: false
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+capabilities: { drop: ["ALL"], add: ["NET_ADMIN"] }
 {{- end }}

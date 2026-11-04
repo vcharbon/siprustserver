@@ -129,6 +129,14 @@ fn msg_strings(msg: &MsgSpec) -> Vec<Text<'_>> {
         if let Some(addr) = reference.addr() {
             out.push(one(format!("{field}.addr"), addr));
         }
+        if let Some(params) = reference.params() {
+            out.push(one(format!("{field}.params"), params));
+        }
+    }
+    if let Some(contact) = &msg.contact {
+        for text in contact.display.iter().chain(&contact.user) {
+            out.push(one("msg.contact", text.as_str()));
+        }
     }
     for header in &msg.headers {
         out.push(one("msg.headers[].name", header.name.as_str()));

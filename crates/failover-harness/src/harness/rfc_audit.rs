@@ -1,15 +1,15 @@
 //! The RFC audit gates of a [`FailoverHarness`] run: the endpoint-scoped
-//! cross-message audit every cell runs, the full per-bind suite a via-LB test
-//! opts into, and the acceptance windows that keep a declared deviation from
-//! gating.
+//! cross-message audit every cell runs, and the full per-bind suite a via-LB
+//! test opts into. A deviation an incident causes is accepted only by the
+//! window a strike opened ([`FailoverHarness::strike`]).
 
 use std::collections::HashSet;
 
 use layer_harness::Stamped;
-use sip_net_testkit::{audit_visible_event, SignalingNetworkEvent};
+use sip_net_testkit::{cross_audit_event, CaptureIndex, SignalingNetworkEvent};
 
 use super::FailoverHarness;
-use crate::rfc_acceptance::{lane_details, Finding};
+use crate::rfc_acceptance::{lane_details, Accepted, Finding};
 
 impl FailoverHarness {
     /// Run the FULL RFC audit suite — the per-bind **peer** rules (Via echo /
@@ -32,11 +32,11 @@ impl FailoverHarness {
         // same view `evaluate_rfc_findings` hands the rules — so a window must be
         // resolved against `audit_wire_entries`, never the raw snapshot (whose
         // extra ReEmit / invisible-disposition rows shift every later index).
-        let entries = sip_net_testkit::audit_wire_entries(&events);
+        let capture = CaptureIndex::new(sip_net_testkit::audit_wire_entries(&events));
         let findings: Vec<_> = sip_net_testkit::evaluate_rfc_findings(&events)
             .into_iter()
             .filter(|f| !f.advisory && !self.rfc_acceptance.waived(&f.rule))
-            .filter(|f| !self.rfc_acceptance.accepts(&f.rule, f.offending, &entries))
+            .filter(|f| self.rfc_acceptance.accepts(&f.rule, f.offending, &capture).is_none())
             .collect();
         assert!(
             findings.is_empty(),
@@ -84,20 +84,18 @@ impl FailoverHarness {
 
     /// Split the endpoint-scoped cross-message audit into `(gating, accepted)` —
     /// see [`RfcAcceptance::partition`](crate::rfc_acceptance::RfcAcceptance::partition).
-    #[allow(clippy::type_complexity)]
-    pub(super) fn partition_rfc_findings(&self) -> (Vec<Finding>, Vec<Finding>) {
+    pub(super) fn partition_rfc_findings(&self) -> (Vec<Finding>, Vec<Accepted>) {
         let (events, scoped_out) = self.audited_events();
         self.rfc_acceptance.partition(&events, &scoped_out)
     }
 
-    /// The findings an acceptance window covered this run — the deviations the
-    /// scenario declared accepted via
-    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now).
-    /// They do not gate, but they are recorded (advisory anomalies in the unified
-    /// report) so an accepted trade-off stays visible, and a test can assert on
-    /// them to prove its window matched something.
-    pub fn accepted_rfc_deviations(&self) -> Vec<(String, String)> {
-        lane_details(self.partition_rfc_findings().1)
+    /// The findings a window of a struck row covered this run, each with the
+    /// row that took it. They do not gate, but they are recorded (advisory
+    /// anomalies in the unified report) so an accepted deviation stays
+    /// visible, and a test can assert on them to prove its window matched
+    /// something.
+    pub fn accepted_rfc_deviations(&self) -> Vec<Accepted> {
+        self.partition_rfc_findings().1
     }
 
     /// The recorded SIP events the audit judges — the endpoint-scoped view —
@@ -123,14 +121,14 @@ impl FailoverHarness {
         let worker_binds: HashSet<String> = self
             .all_worker_sip_addrs
             .iter()
-            .chain(self.relay_sip_addrs.iter())
             .chain(incarnation_binds.iter())
             .map(|a| a.to_string())
+            .chain(self.relay_lanes.iter().cloned())
             .collect();
         let snapshot = self.harness.recording().channel().snapshot();
         let events = snapshot
             .into_iter()
-            .filter(|s| !worker_binds.contains(s.event.bind_key()) && audit_visible_event(&s.event))
+            .filter(|s| !worker_binds.contains(s.event.bind_key()) && cross_audit_event(&s.event))
             .collect();
         (events, worker_binds)
     }

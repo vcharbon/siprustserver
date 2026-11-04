@@ -75,7 +75,7 @@ fn crossed(report: &scenario_harness::RunReport, from: u16, to: u16, method: &st
 #[tokio::test(start_paused = true)]
 async fn a_spiral_through_the_front_proxy_cancelled_by_the_caller_while_ringing() {
     let s = B2buaScene::with_b2bua("spiral-front-proxy-cancelled", |bob_port| {
-        B2buaSut::builder(spiral_decision(bob_port)).outbound_proxy("127.0.0.1", LB_PORT)
+        B2buaSut::builder(spiral_decision(bob_port)).behind_proxy("127.0.0.1", LB_PORT)
     })
     .await;
     let lb =

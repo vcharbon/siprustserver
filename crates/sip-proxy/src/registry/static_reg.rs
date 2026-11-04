@@ -157,11 +157,17 @@ impl WorkerRegistry for StaticWorkerRegistry {
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry> {
         self.set.lookup_by_address(addr)
     }
+    fn away_ordinals(&self) -> Vec<super::WorkerId> {
+        self.set.away_ordinals()
+    }
     fn rearm_departed(&self, addr: &ProxyAddr) {
         self.set.rearm_departed(addr)
     }
     fn synced(&self) -> bool {
         self.set.synced()
+    }
+    fn read_dead(&self) -> tokio::sync::broadcast::Receiver<super::WorkerId> {
+        self.set.read_dead()
     }
 }
 

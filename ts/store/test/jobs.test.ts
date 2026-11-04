@@ -441,6 +441,23 @@ describe.skipIf(!served)("Jobs", () => {
       expect((yield* jobs.red(first, 0)).cells).toEqual([])
     })))
 
+  it("pages one kind of job alone, counted, an inbox take landing its capture once it is done", () =>
+    withStore(Effect.gen(function*() {
+      const jobs = yield* Jobs.Service
+      const taking = yield* jobs.create({ kind: "inbox", args: { files: [] }, createdBy: "test", planned: 1 })
+      yield* jobs.started(taking, { pid: 3 })
+      const taken = yield* jobs.create({ kind: "inbox", args: { files: [] }, createdBy: "test", planned: 1 })
+      yield* jobs.close(taken, { status: "done", exit: 0 })
+      yield* jobs.create({ kind: "cut", args: {}, createdBy: "test" })
+      const inbox = yield* jobs.page({ kind: "inbox", limit: 10, offset: 0 })
+      expect(inbox.rows.map((row) => [row.id, row.kind, row.landed, row.total])).toEqual([[taking, "inbox", 0, 1], [taken, "inbox", 1, 1]])
+      expect(inbox.total).toBe(2)
+      const active = yield* jobs.page({ kind: "inbox", status: "active", limit: 10, offset: 0 })
+      expect(active.rows.map((row) => row.id)).toEqual([taking])
+      const past = yield* jobs.page({ kind: "inbox", limit: 10, offset: 50 })
+      expect(past).toEqual({ rows: [], total: 2 })
+    })))
+
   it("refuses a job cell with no job behind it", () =>
     withStore(Effect.gen(function*() {
       const sql = yield* SqlClient

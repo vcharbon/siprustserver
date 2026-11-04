@@ -27,12 +27,12 @@ export const ReportPage = ({ run: inPath }: { run?: string }): JSX.Element => {
     <div className="page report-page">
       <header className="page-head">
         <div>
-          <h1>report</h1>
-          <p className="muted">{run === "" ? "one run set: how its calls ended" : run}</p>
+          <h1>Report</h1>
+          <p className="muted">{run === "" ? "one run set" : run}</p>
         </div>
         {run !== "" && (
           <div className="page-actions">
-            <a href={`/api/report${window.location.search}`}>the JSON</a>
+            <a href={`/api/report${window.location.search}`}>JSON</a>
           </div>
         )}
       </header>
@@ -49,7 +49,7 @@ export const ReportPage = ({ run: inPath }: { run?: string }): JSX.Element => {
         <button type="submit">report</button>
       </form>
       {run === ""
-        ? <p className="muted">name a run set: <code>@run:N</code>, <code>@sweep:N</code>, <code>@env:X</code> …</p>
+        ? <p className="muted"><code>@run:N</code> · <code>@sweep:N</code> · <code>@env:X</code> …</p>
         : doc.state === "loading"
         ? <p className="muted">reading…</p>
         : doc.state === "error"

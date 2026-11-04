@@ -9,6 +9,9 @@ description = "HA replication wire layer: the five positional-msgpack replicatio
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

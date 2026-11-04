@@ -1,10 +1,11 @@
-//! Seeding (ADR-0014 materialisation): rebuilding INVITE transactions this
-//! layer never saw the first copy of, and re-offering the datagram that
+//! Seeding (ADR-0014 materialisation, ADR-0055 §2): rebuilding transactions
+//! this layer never saw the first copy of, and re-offering the datagram that
 //! arrived before they existed. The FSMs the seeds then run are `layer::client`
 //! and `layer::server`; nothing protocol-shaped lives here.
 
 use std::net::SocketAddr;
 
+use sip_message::received::response_destination;
 use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
@@ -18,9 +19,11 @@ use super::owner::Owner;
 use super::txn::{CancelWire, HeldCancel, NewTransaction, Timer, TxnId, TxnRef, TxnState};
 use super::via_marks::{extract_via_custom_params, ViaMarks};
 
+mod non_invite;
+
 impl Owner {
-    /// Put every seed in the map of its role as an INVITE transaction, with the
-    /// CANCEL a client seed carries, and return how many went in. A seed whose
+    /// Put every seed in the map of its role, with the CANCEL a client INVITE
+    /// seed carries, and return how many went in. A seed whose
     /// identity already holds a transaction of its role is skipped and counted,
     /// never displaced: the occupant is either the datagram that triggered the
     /// materialisation or a transaction this node built itself, and both
@@ -43,14 +46,44 @@ impl Owner {
         let mut seeded = 0usize;
         for seed in seeds {
             let went_in = match seed {
-                TxnSeed::ClientInvite { invite, dest, provisional, cancel } => {
-                    self.seed_client_invite(call_ref, invite, dest, provisional, cancel)
+                TxnSeed::ClientInvite { invite, dest, provisional, cancel, ack_ahead } => {
+                    let went_in =
+                        self.seed_client_invite(call_ref, invite, dest, provisional, cancel);
+                    if let Some((ack, to)) = ack_ahead.filter(|_| went_in && !provisional) {
+                        self.send_buffer(endpoint, &ack, to).await;
+                    }
+                    went_in
                 }
-                TxnSeed::ServerInvite { request, to_tag, leg_id } => {
-                    self.seed_server_invite(call_ref, request, to_tag, leg_id)
+                TxnSeed::ClientRejected { invite, dest, bound_ms } => {
+                    self.seed_client_rejected(call_ref, invite, dest, bound_ms)
+                }
+                TxnSeed::ServerInvite { request, to_tag, provisional, leg_id } => {
+                    self.seed_server_invite(
+                        endpoint,
+                        call_ref,
+                        request,
+                        to_tag,
+                        provisional,
+                        leg_id,
+                    )
+                    .await
                 }
                 TxnSeed::ServerAccepted { response, leg_id } => {
                     self.seed_accepted(endpoint, call_ref, response, leg_id).await
+                }
+                TxnSeed::ServerRejected { response, dest, leg_id, bound_ms } => {
+                    let seed = (response, dest, leg_id, bound_ms);
+                    self.seed_rejected(endpoint, call_ref, seed).await
+                }
+                TxnSeed::ClientNonInvite { request, dest, bound_ms } => {
+                    self.seed_client_non_invite(endpoint, call_ref, request, dest, bound_ms).await
+                }
+                TxnSeed::ServerNonInvite { request, leg_id } => {
+                    self.seed_server_non_invite(call_ref, request, leg_id)
+                }
+                TxnSeed::ServerNonInviteAnswered { response, dest, bound_ms, leg_id } => {
+                    let seed = (response, dest, bound_ms, leg_id);
+                    self.seed_answered_non_invite(endpoint, call_ref, seed).await
                 }
             };
             if went_in {
@@ -63,21 +96,26 @@ impl Owner {
         seeded
     }
 
-    /// A server INVITE holding `request`, keyed by its top Via, `Proceeding`
-    /// with no response cached: a retransmission draws a 100 Trying
-    /// (`replay_cached`). `false` when the request names no branch or its
-    /// identity is occupied.
-    fn seed_server_invite(
+    /// A server INVITE holding `request`, keyed by its top Via, `Proceeding`.
+    /// Its responses go to the top Via's response target (RFC 3261 §18.2.2).
+    /// `provisional` is cached and sent there once now, so a retransmission
+    /// draws it again (§17.2.1); with none cached a retransmission draws a 100
+    /// Trying (`replay_cached`). `false` when the request names no branch or
+    /// its identity is occupied.
+    async fn seed_server_invite(
         &mut self,
+        endpoint: &dyn UdpEndpoint,
         call_ref: &str,
         request: SipRequest,
         to_tag: Option<String>,
+        provisional: Option<Box<SipResponse>>,
         leg_id: Option<String>,
     ) -> bool {
         let Some(key) = ServerTxnKey::of(&request) else { return false };
         if self.server(key.id()).is_some() {
             return false;
         }
+        let destination = response_destination(request.top_via());
         let head = NewTransaction {
             id: TxnId::Server(key.clone()),
             kind: TxnKind::Invite,
@@ -90,18 +128,31 @@ impl Owner {
             leg_id,
             incarnation_mark: None,
             state: TxnState::Proceeding,
-            destination: None,
+            destination,
         };
-        self.open_txn_with(head, |txn| txn.uas_to_tag = to_tag.filter(|t| !t.is_empty()));
+        self.open_txn_with(head, |txn| {
+            txn.uas_to_tag = to_tag.filter(|t| !t.is_empty());
+            txn.seeded = true;
+        });
         self.hold_seeded_identity(TxnRef::Server(key.id()));
+        let Some(provisional) = provisional else { return true };
+        if let Some(txn) = self.server_mut(key.id()) {
+            txn.last_response = Some(provisional.image().clone());
+            txn.last_response_status = Some(provisional.status());
+        }
+        if let Some(dest) = destination {
+            self.send_buffer(endpoint, provisional.image(), dest).await;
+        }
         true
     }
 
     /// A server INVITE Accepted on `response` (RFC 6026 §7.1), keyed by its top
-    /// Via. An occupant that has sent no final takes `response` and sends it to
-    /// the address its INVITE came from: it answered that copy with a
-    /// provisional only. `false` when the response names no branch or its
-    /// identity holds a transaction that has sent its final.
+    /// Via. An occupant that has sent no final takes `response`; one a received
+    /// copy of the INVITE opened sends it to the address that copy came from,
+    /// having answered it with a provisional only, and a seeded one sends
+    /// nothing: the 2xx's own retransmission ladder repeats it (RFC 3261
+    /// §13.3.1.4). `false` when the response names no branch or its identity
+    /// holds a transaction that has sent its final.
     async fn seed_accepted(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -116,7 +167,7 @@ impl Owner {
             if !occupant.state.is_active() {
                 return false;
             }
-            let dest = occupant.destination;
+            let dest = occupant.destination.filter(|_| !occupant.seeded);
             self.accept(key.id(), &response);
             if let Some(dest) = dest {
                 self.send_buffer(endpoint, response.image(), dest).await;
@@ -135,10 +186,70 @@ impl Owner {
             leg_id,
             incarnation_mark: None,
             state: TxnState::Accepted,
-            destination: None,
+            destination: response_destination(response.top_via()),
         });
         self.hold_seeded_identity(TxnRef::Server(key.id()));
         self.accept(key.id(), &response);
+        true
+    }
+
+    /// A server INVITE Completed on the non-2xx `response` (RFC 3261 §17.2.1),
+    /// keyed by its top Via, the final sent toward that Via's response target
+    /// (RFC 3261 §18.2.2; `dest` where it names none) on Timer G from now
+    /// until the ACK or Timer H. An occupant that has sent no final takes
+    /// `response` as its final and sends it to its own destination, now and
+    /// on Timer G.
+    /// `false` when the response names no branch or its identity holds a
+    /// transaction that has sent its final.
+    async fn seed_rejected(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        call_ref: &str,
+        (response, dest, leg_id, bound_ms): (SipResponse, SocketAddr, Option<String>, Option<u64>),
+    ) -> bool {
+        let Some(key) = ServerTxnId::of_response(&response).map(ServerTxnId::to_key) else {
+            return false;
+        };
+        let occupant = match self.server(key.id()) {
+            Some(occupant) if !occupant.state.is_active() => return false,
+            Some(occupant) => Some(occupant.destination.unwrap_or(dest)),
+            None => {
+                let dest = response_destination(response.top_via()).unwrap_or(dest);
+                self.open_txn(NewTransaction {
+                    id: TxnId::Server(key.clone()),
+                    kind: TxnKind::Invite,
+                    method: Method::Invite,
+                    cseq: response.cseq().seq(),
+                    call_id: response.call_id().as_str().to_string(),
+                    from_tag: response.from().tag().unwrap_or_default().to_string(),
+                    original_request: None,
+                    call_ref: Some(call_ref.to_string()),
+                    leg_id,
+                    incarnation_mark: None,
+                    state: TxnState::Completed,
+                    destination: Some(dest),
+                });
+                self.hold_seeded_identity(TxnRef::Server(key.id()));
+                None
+            }
+        };
+        self.record_uas_tag(key.id(), &response);
+        if let Some(txn) = self.server_mut(key.id()) {
+            txn.state = TxnState::Completed;
+            txn.last_response = Some(response.image().clone());
+            txn.last_response_status = Some(response.status());
+            txn.original_request = None;
+        }
+        if let (Some(source), Some(txn)) = (occupant, self.server_mut(key.id())) {
+            txn.destination = Some(source);
+        }
+        self.arm_final_hold(key.id(), TxnKind::Invite, response.status());
+        if let Some(left) = bound_ms {
+            self.hold_for(TxnRef::Server(key.id()), Hold::TimerH, ms(left));
+        }
+        if let Some(source) = occupant {
+            self.send_buffer(endpoint, response.image(), source).await;
+        }
         true
     }
 
@@ -171,12 +282,15 @@ impl Owner {
     /// `call_ref` when the Via names no `cr`), with the INVITE bound armed and
     /// no retransmit ladder: the node that sent it ran Timer A. It opens
     /// `Proceeding` when the record holds a provisional for it, else `Trying`,
-    /// so a CANCEL on it waits for one (RFC 3261 §9.1); a `Trying` seed keeps
-    /// its INVITE to re-send once when a CANCEL is held on it. The bound runs
-    /// from the seed: the first copy's send instant is not in the record.
-    /// `cancel` is held on it ([`seed_held_cancel`](Self::seed_held_cancel)).
-    /// `false` when the INVITE names no branch or a client transaction holds
-    /// it.
+    /// so a CANCEL on it waits for one (RFC 3261 §9.1). A `Trying` seed
+    /// re-sends its INVITE once, at the seed, as a client in `Trying`
+    /// retransmits (§17.1.1.2): the callee's server transaction answers that
+    /// copy with its latest provisional (§17.2.1), so the copy learns a
+    /// provisional the record lost, PRACKs a reliable one, and releases a
+    /// CANCEL held on it. The bound runs from the seed: the first copy's send
+    /// instant is not in the record. `cancel` is held on it
+    /// ([`seed_held_cancel`](Self::seed_held_cancel)). `false` when the INVITE
+    /// names no branch or a client transaction holds it.
     fn seed_client_invite(
         &mut self,
         call_ref: &str,
@@ -220,14 +334,54 @@ impl Owner {
         if let Some(cancel) = cancel {
             self.seed_held_cancel(&branch, *cancel, dest);
         }
+        self.release_seed_resend(&branch);
+        true
+    }
+
+    /// A client INVITE keyed by `invite`'s branch, attributed from its Via as
+    /// [`seed_client_invite`](Self::seed_client_invite) attributes it,
+    /// Completed on a non-2xx final and held for `bound_ms` from now, so each
+    /// copy of the final is ACKed and absorbed (RFC 3261 §17.1.1.2). `false`
+    /// when the INVITE names no branch or a client transaction holds it.
+    fn seed_client_rejected(
+        &mut self,
+        call_ref: &str,
+        invite: SipRequest,
+        dest: SocketAddr,
+        bound_ms: u64,
+    ) -> bool {
+        let Some(branch) = invite.top_via().branch().filter(|b| !b.is_empty()).map(str::to_string)
+        else {
+            return false;
+        };
+        if self.clients.contains_key(&branch) {
+            return false;
+        }
+        let ViaMarks { call_ref: via_call_ref, leg_id, incarnation_mark } =
+            extract_via_custom_params(&invite);
+        self.open_txn(NewTransaction {
+            id: TxnId::Client(branch.clone()),
+            kind: TxnKind::Invite,
+            method: Method::Invite,
+            cseq: invite.cseq().seq(),
+            call_id: invite.call_id().as_str().to_string(),
+            from_tag: invite.from().tag().unwrap_or_default().to_string(),
+            original_request: Some(invite),
+            call_ref: via_call_ref.or_else(|| Some(call_ref.to_string())),
+            leg_id,
+            incarnation_mark,
+            state: TxnState::Completed,
+            destination: Some(dest),
+        });
+        self.hold_for(TxnRef::Client(&branch), Hold::TimerD, ms(bound_ms));
         true
     }
 
     /// Re-send, once, the INVITE of the seeded `Trying` transaction at
-    /// `branch` that a CANCEL is now held on: the callee's server transaction
-    /// answers it with its latest provisional (RFC 3261 §17.2.1), which
-    /// releases the CANCEL. No ladder: the one fire re-arms nothing. A
-    /// transaction past its bound re-sends nothing.
+    /// `branch`: the callee's server transaction answers it with its latest
+    /// provisional (RFC 3261 §17.2.1). No ladder: the one fire re-arms
+    /// nothing. A transaction past its bound, or whose INVITE was already
+    /// re-sent, re-sends nothing.
     pub(super) fn release_seed_resend(&mut self, branch: &str) {
         let Some(buf) = self
             .clients
@@ -272,7 +426,7 @@ impl Owner {
         let matched = match message {
             SipMessage::Response(resp) => self.inbound_response(endpoint, resp, src, true).await,
             SipMessage::Request(req) if req.method() == Method::Cancel => {
-                self.handle_cancel(endpoint, req, src, true).await
+                self.handle_cancel(endpoint, req, src, None).await
             }
             SipMessage::Request(req) => {
                 ServerTxnId::of_request(&req).is_some_and(|id| self.server(id).is_some())

@@ -1,3 +1,8 @@
+use std::path::Path;
+use std::sync::Arc;
+
+use e2e_model::{Canaries, JudgedBasis, JudgedShare, LoadRunIndex, LoadRunMeta, Sampling};
+
 use super::*;
 
 fn rfc_fail(rule: &str, detail: &str) -> CallOutcome {
@@ -25,7 +30,7 @@ fn latency_histograms_are_exported_as_prometheus_histograms() {
             "",
             Duration::from_millis(e2e),
             &[("time_to_200", Duration::from_millis(setup))],
-            None,
+            CallEvidence::default(),
         );
     }
     let prom = r.render_prometheus();
@@ -73,13 +78,20 @@ fn a_scrape_holds_no_quantile_gauge_and_counts_branches_and_steps() {
         "",
         Duration::from_millis(9_000),
         &[("time_to_200", Duration::from_millis(5))],
-        None,
+        CallEvidence::default(),
     );
     let failed = CallOutcome::Step {
         at: FailedAt { who: "alice", goal: Some(("bye", 1)), barrier: "established" },
         cause: scenario_harness::StepError::timeout("alice", None, "a datagram"),
     };
-    r.record("basic_call", &failed, &failed.case(None), Duration::from_millis(9_000), &[], None);
+    r.record(
+        "basic_call",
+        &failed,
+        &failed.case(None),
+        Duration::from_millis(9_000),
+        &[],
+        CallEvidence::default(),
+    );
     let prom = r.render_prometheus();
     assert!(!prom.contains("loadgen_e2e_seconds"), "{prom}");
     assert!(!prom.contains("loadgen_checkpoint_seconds"), "{prom}");
@@ -145,32 +157,56 @@ fn round_trips_render_as_a_fine_histogram_per_exchange() {
     assert!(!prom.contains("exchange=\"invite_100\""), "an unobserved exchange is not written");
 }
 
-/// A bucket under cap keeps its scenario recording for [`CHASE_CALLS`]
-/// calls after its last sample, then only the background fraction does;
-/// its next sample re-arms the chase.
+/// The gate records the same calls whatever the outcomes: new failure modes,
+/// recorded or not, stored as samples or not, never raise the recorded share.
 #[test]
 #[ignore = "slow lane: loadgen"]
-fn a_bucket_under_cap_chases_its_next_sample_for_a_bounded_run() {
-    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 0 });
-    assert!(r.should_record("s"), "nothing recorded yet");
-    let failed = || CallOutcome::Step {
-        at: FailedAt::at_barrier("established"),
-        cause: scenario_harness::StepError::timeout("established", None, "a datagram"),
-    };
-    let record = |o: &CallOutcome| {
-        let sample = RenderedSample { html: None, detail: o.detail(), e2e_ms: 1.0 };
-        r.record("s", o, &o.case(None), Duration::ZERO, &[], Some(sample));
-    };
-    record(&failed());
-    let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
-    assert_eq!(chased, CHASE_CALLS as usize, "the chase is bounded");
-    record(&failed());
-    assert!(!r.should_record("s"), "a full bucket is not chased");
-    record(&CallOutcome::Step {
-        at: FailedAt::at_barrier("torn_down"),
-        cause: scenario_harness::StepError::timeout("torn_down", None, "a datagram"),
-    });
-    assert!(r.should_record("s"), "a new bucket re-arms the chase");
+fn the_recorded_share_does_not_depend_on_the_outcomes() {
+    let cfg = || ReporterCfg { sample_cap: 3, background_record_every: 16 };
+    let (quiet, failing) = (Reporter::new(cfg()), Reporter::new(cfg()));
+    let flow = || RenderedSample { html: Some(Arc::from("<html/>")), detail: None, e2e_ms: 1.0 };
+    let mut recorded = (Vec::new(), Vec::new());
+    for i in 0..1_000 {
+        let failed = rfc_fail(&format!("rule-{}", i % 40), "detail");
+        let sample = (i % 2 == 0).then(flow);
+        failing.record(
+            "s",
+            &failed,
+            &failed.case(None),
+            Duration::ZERO,
+            &[],
+            CallEvidence { sample, ..CallEvidence::default() },
+        );
+        if quiet.should_record("s") {
+            recorded.0.push(i);
+        }
+        if failing.should_record("s") {
+            recorded.1.push(i);
+        }
+    }
+    assert_eq!(recorded.0.len(), 65, "calls 0, 1, 2 and every 16th (63 from call 0 on)");
+    assert_eq!(recorded.0, recorded.1, "failure modes changed which calls record");
+}
+
+/// Before any call of a scenario has ended, the gate records the first
+/// `sample_cap` calls of the scenario and the background share, whatever the
+/// number of calls placed: long holds never record a whole hold time of calls.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn before_any_outcome_the_gate_records_the_first_samples_and_the_share() {
+    let (sample_cap, every, placed) = (3u32, 16u64, 1_000u64);
+    let r = Reporter::new(ReporterCfg { sample_cap, background_record_every: every });
+    let recorded = (0..placed).filter(|_| r.should_record("s")).count() as u64;
+    let bound = u64::from(sample_cap) + placed.div_ceil(every);
+    assert!(recorded <= bound, "{recorded} of {placed} calls recorded, bound {bound}");
+    assert!(recorded >= placed.div_ceil(every), "the background share records");
+
+    let first = Reporter::new(ReporterCfg { sample_cap, background_record_every: 0 });
+    let firsts: Vec<bool> = (0..6).map(|_| first.should_record("s")).collect();
+    assert_eq!(firsts, [true, true, true, false, false, false], "the first sample_cap calls");
+
+    let never = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+    assert!((0..100).all(|_| !never.should_record("s")), "no cap and no share records nothing");
 }
 
 /// The index counts an accepted reject as ok: it is no failed call.
@@ -179,21 +215,16 @@ fn a_bucket_under_cap_chases_its_next_sample_for_a_bounded_run() {
 fn the_index_counts_an_accepted_reject_as_ok() {
     let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
     let reject = CallOutcome::Ok { branch: "rejected" };
-    r.record("limited", &reject, &reject.case(None), Duration::from_millis(3), &[], None);
-    let idx = r.build_index(
-        LoadRunMeta {
-            started_ms: 0,
-            finished_ms: 0,
-            finished: true,
-            target: "t".into(),
-            cps: 1.0,
-            duration_secs: 1,
-            max_in_flight: 1,
-            egress: None,
-            profile: None,
-        },
-        Canaries::default(),
+    r.record(
+        "limited",
+        &reject,
+        &reject.case(None),
+        Duration::from_millis(3),
+        &[],
+        CallEvidence::default(),
     );
+    let idx = r
+        .build_index(LoadRunMeta { finished: true, ..LoadRunMeta::default() }, Canaries::default());
     let row = idx.counts.iter().find(|c| c.class == "ok").expect("a row");
     assert!(row.ok, "{row:?}");
     assert_eq!((idx.total_calls(), idx.failed_calls()), (1, 0));
@@ -215,7 +246,14 @@ fn case_splits_sample_buckets_within_a_class() {
     assert_ne!(case_a, case_b, "different rules → different cases");
 
     // Fill rule A's bucket (cap 1), then rule B must STILL want a sample.
-    r.record("reinvite", &unacked, &case_a, Duration::from_millis(1), &[], mk("a"));
+    r.record(
+        "reinvite",
+        &unacked,
+        &case_a,
+        Duration::from_millis(1),
+        &[],
+        CallEvidence { sample: mk("a"), ..CallEvidence::default() },
+    );
     assert!(
         !r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_a),
         "rule A bucket full at cap"
@@ -224,7 +262,14 @@ fn case_splits_sample_buckets_within_a_class() {
         r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_b),
         "rule B keeps its own bucket"
     );
-    r.record("reinvite", &cseq, &case_b, Duration::from_millis(1), &[], mk("b"));
+    r.record(
+        "reinvite",
+        &cseq,
+        &case_b,
+        Duration::from_millis(1),
+        &[],
+        CallEvidence { sample: mk("b"), ..CallEvidence::default() },
+    );
     assert_eq!(r.sample_count("reinvite", &ResultClass::RfcAuditFail), 2);
 
     // The machine-readable index carries the case on counts AND samples,
@@ -232,20 +277,8 @@ fn case_splits_sample_buckets_within_a_class() {
     let out = std::env::temp_dir().join(format!("loadgen-case-split-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     r.finalize(&out).unwrap();
-    let idx = r.build_index(
-        LoadRunMeta {
-            started_ms: 0,
-            finished_ms: 0,
-            finished: true,
-            target: "t".into(),
-            cps: 1.0,
-            duration_secs: 1,
-            max_in_flight: 1,
-            egress: None,
-            profile: None,
-        },
-        Canaries::default(),
-    );
+    let idx = r
+        .build_index(LoadRunMeta { finished: true, ..LoadRunMeta::default() }, Canaries::default());
     assert!(idx.counts.iter().any(|c| c.case == case_a && c.count == 1));
     assert!(idx.counts.iter().any(|c| c.case == case_b && c.count == 1));
     for group in &idx.samples {
@@ -276,7 +309,7 @@ fn writes_and_parses_the_machine_readable_index() {
         "",
         Duration::from_millis(3),
         &[("ringing", Duration::from_millis(1))],
-        mk("ok"),
+        CallEvidence { sample: mk("ok"), ..CallEvidence::default() },
     );
     let check_fail = CallOutcome::CheckFail(vec![e2e_model::CheckVerdict {
         on: "alice.invite".to_string(),
@@ -288,7 +321,14 @@ fn writes_and_parses_the_machine_readable_index() {
         detail: "from.userInfo mismatch".to_string(),
     }]);
     let check_case = check_fail.case(None);
-    r.record("reinvite", &check_fail, &check_case, Duration::from_millis(5), &[], mk("check fail"));
+    r.record(
+        "reinvite",
+        &check_fail,
+        &check_case,
+        Duration::from_millis(5),
+        &[],
+        CallEvidence { sample: mk("check fail"), ..CallEvidence::default() },
+    );
     r.record_ringing(Some(true));
     r.record_ringing(Some(false));
     r.record_checks("reinvite", true);
@@ -307,16 +347,19 @@ fn writes_and_parses_the_machine_readable_index() {
         max_in_flight: 100,
         egress: Some("transparent".to_string()),
         profile: Some("smoke".to_string()),
+        command_line: vec!["loadgen".to_string(), "--cps".to_string(), "20".to_string()],
+        sampling: None,
     };
-    let canaries = Canaries { orphans: 0, drops: 7, ..Canaries::default() };
-    r.finalize_run(&out, meta.clone(), canaries).unwrap();
+    let canaries = Canaries { orphans: 0, drops_in: 7, ..Canaries::default() };
+    r.write_report(&out, &r.build_index(meta.clone(), canaries)).unwrap();
 
     let path = out.join("load-result.json");
     assert!(path.exists(), "load-result.json missing next to index.html");
     assert!(out.join("index.html").exists(), "index.html still written");
     let idx: LoadRunIndex = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
-    assert_eq!(idx.meta, meta, "run metadata echoed verbatim");
+    let sampling = Sampling { sample_cap: 5, record_every: 0 };
+    assert_eq!(idx.meta, LoadRunMeta { sampling: Some(sampling), ..meta }, "run metadata echoed");
     assert_eq!(idx.total_calls(), 2);
     assert_eq!(idx.failed_calls(), 1, "the check_fail reinvite");
     assert!(idx.counts.iter().any(|c| c.scenario == "basic_call" && c.class == "ok" && c.ok));
@@ -327,7 +370,7 @@ fn writes_and_parses_the_machine_readable_index() {
 
     // Canaries: reporter-owned shed/ringing filled in; caller-owned drops kept.
     assert_eq!(idx.canaries.shed, 1);
-    assert_eq!(idx.canaries.drops, 7);
+    assert_eq!(idx.canaries.drops_in, 7);
     assert_eq!((idx.canaries.ringing_received, idx.canaries.ringing_expected), (1, 2));
 
     // Per-scenario check-verdict tally.
@@ -359,7 +402,7 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
         "",
         Duration::from_millis(3),
         &[],
-        None,
+        CallEvidence::default(),
     );
 
     let out = std::env::temp_dir().join(format!("loadgen-snapshot-race-{}", std::process::id()));
@@ -372,8 +415,7 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
         cps: 1.0,
         duration_secs: 60,
         max_in_flight: 1,
-        egress: None,
-        profile: None,
+        ..LoadRunMeta::default()
     };
     let read_finished = |out: &Path| -> bool {
         let idx: LoadRunIndex =
@@ -382,13 +424,10 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
         idx.meta.finished
     };
 
-    let snap_meta = base.clone();
-    let snap = r.spawn_snapshots(
-        out.clone(),
-        Duration::from_secs(1),
-        move || snap_meta.clone(),
-        Canaries::default,
-    );
+    let (snap_meta, snap_reporter) = (base.clone(), r.clone());
+    let snap = r.spawn_snapshots(out.clone(), Duration::from_secs(1), move || {
+        snap_reporter.build_index(snap_meta.clone(), Canaries::default())
+    });
 
     // Let a few ticks land: mid-run snapshots say finished:false.
     for _ in 0..3 {
@@ -400,7 +439,8 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
     // The shutdown sequence under test: stop the task, THEN write the final.
     snap.abort();
     let _ = snap.await;
-    r.finalize_run(&out, LoadRunMeta { finished: true, ..base }, Canaries::default()).unwrap();
+    let index = r.build_index(LoadRunMeta { finished: true, ..base }, Canaries::default());
+    r.write_report(&out, &index).unwrap();
     assert!(read_finished(&out), "final write says finished:true");
 
     // Advance past several more would-be ticks — a leaked
@@ -411,4 +451,162 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
     }
     assert!(read_finished(&out), "no snapshot tick may land after shutdown");
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A bucket counted with no stored sample lists none, and the index states
+/// the sampling bounds the page names it by.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_index_names_a_bucket_with_no_recorded_call() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 64 });
+    let failed = rfc_fail("rule", "detail");
+    r.record("s", &failed, &failed.case(None), Duration::ZERO, &[], CallEvidence::default());
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    assert!(idx.samples.is_empty(), "{:?}", idx.samples);
+    let sampling = Sampling { sample_cap: 2, record_every: 64 };
+    assert_eq!(idx.meta.sampling, Some(sampling));
+    let row = &idx.counts[0];
+    assert_eq!(row.error, None, "no stored sample, no detail: {row:?}");
+}
+
+/// An `rfc_audit_fail` row shows the share of its audited recorded calls
+/// among the audited ones and the estimate over the calls that ended on an
+/// accepted branch; a dialog verdict on an unrecorded call and a call that
+/// never reached the audit add to the count, never to the share.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_index_shows_the_audited_share_of_an_audit_failure() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+    assert_eq!((0..100).filter(|_| r.should_record("s")).count(), 0);
+    let ok = CallOutcome::Ok { branch: "answered" };
+    let failed = rfc_fail("rule", "detail");
+    let case = failed.case(None);
+    let audited = || CallEvidence { recorded: true, accepted: true, sample: None };
+    let unrecorded = || CallEvidence { recorded: false, accepted: true, sample: None };
+    let unjudged = CallEvidence { recorded: true, accepted: false, sample: None };
+    for _ in 0..2 {
+        r.record("s", &ok, "", Duration::ZERO, &[], audited());
+    }
+    r.record("s", &failed, &case, Duration::ZERO, &[], audited());
+    for _ in 0..95 {
+        r.record("s", &ok, "", Duration::ZERO, &[], unrecorded());
+    }
+    r.record("s", &failed, &case, Duration::ZERO, &[], unrecorded());
+    let refused = rfc_fail("refused", "detail");
+    r.record("s", &refused, &refused.case(None), Duration::ZERO, &[], unjudged);
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    let row = |rule: &str| {
+        idx.counts.iter().find(|c| c.case.contains(rule)).unwrap_or_else(|| panic!("{rule}"))
+    };
+    let share = JudgedShare { failed: 1, judged: 3, base: 99, basis: JudgedBasis::Audited };
+    assert_eq!((row("rule").count, row("rule").judged.as_ref()), (2, Some(&share)));
+    assert_eq!(share.estimate(), 33);
+    assert_eq!(row("refused").judged, None, "the refused row has no share");
+    let rec = &idx.recording[0];
+    assert_eq!((rec.placed, rec.recorded, rec.accepted, rec.audited), (100, 4, 99, 3));
+}
+
+/// The index keeps the last failed calls, bounded, each with its stored
+/// sample page, and each failure bucket's error is its first stored detail.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_index_keeps_the_last_failures_and_each_bucket_error() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 1, background_record_every: 0 });
+    let flow = |d: &str| RenderedSample {
+        html: Some(Arc::from("<html/>")),
+        detail: Some(d.into()),
+        e2e_ms: 1.0,
+    };
+    let failed = rfc_fail("rule", "detail");
+    let case = failed.case(None);
+    for i in 0..live::RECENT_FAILURES + 5 {
+        let evidence =
+            CallEvidence { sample: Some(flow(&format!("d{i}"))), ..CallEvidence::default() };
+        r.record("s", &failed, &case, Duration::ZERO, &[], evidence);
+    }
+    r.record(
+        "s",
+        &CallOutcome::Ok { branch: "answered" },
+        "",
+        Duration::ZERO,
+        &[],
+        CallEvidence::default(),
+    );
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    assert_eq!(idx.recent_failures.len(), live::RECENT_FAILURES, "bounded, ok calls left out");
+    assert!(idx.recent_failures.iter().all(|f| f.class == "rfc_audit_fail" && f.case == case));
+    assert_eq!(
+        idx.recent_failures.iter().filter(|f| f.page.is_some()).count(),
+        0,
+        "cap 1: the first only"
+    );
+    assert_eq!(idx.counts.iter().find(|c| !c.ok).and_then(|c| c.error.as_deref()), Some("d0"));
+    let page = sample_rel("s", "rfc_audit_fail", &case, 0);
+    assert_eq!(r.sample_page(&page).as_deref(), Some("<html/>"), "served from memory");
+    assert_eq!(r.sample_page("callflows/s/none/0.html"), None);
+}
+
+/// A failure whose sample is stored names its page.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_failure_with_a_stored_sample_names_its_page() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 0 });
+    let failed = rfc_fail("rule", "detail");
+    let case = failed.case(None);
+    let sample = RenderedSample { html: Some(Arc::from("<html/>")), detail: None, e2e_ms: 1.0 };
+    r.record(
+        "s",
+        &failed,
+        &case,
+        Duration::ZERO,
+        &[],
+        CallEvidence { sample: Some(sample), ..CallEvidence::default() },
+    );
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    assert_eq!(idx.recent_failures[0].page, Some(sample_rel("s", "rfc_audit_fail", &case, 0)));
+}
+
+/// A tick closes a window of what changed since the last one: calls placed,
+/// ended ok, failed, and rejected or shed.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_tick_closes_a_window_of_deltas() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+    let ok = CallOutcome::Ok { branch: "answered" };
+    let failed = rfc_fail("rule", "detail");
+    let rejected = CallOutcome::Rejected("key_in_flight");
+    for _ in 0..3 {
+        r.inc_inflight();
+        r.record("s", &ok, "", Duration::from_millis(10), &[], CallEvidence::default());
+        r.dec_inflight();
+    }
+    tokio::time::advance(SERIES_TICK).await;
+    let first = r.tick(0);
+    assert_eq!((first.start_ms, first.span_ms, first.placed, first.ok), (0, 5_000, 3, 3));
+    r.inc_inflight();
+    r.record(
+        "s",
+        &failed,
+        &failed.case(None),
+        Duration::from_millis(10),
+        &[],
+        CallEvidence::default(),
+    );
+    r.record("s", &rejected, &rejected.case(None), Duration::ZERO, &[], CallEvidence::default());
+    r.inc_shed("s");
+    tokio::time::advance(SERIES_TICK).await;
+    let second = r.tick(2);
+    assert_eq!(
+        (second.start_ms, second.placed, second.ok, second.failed, second.rejected),
+        (5_000, 1, 0, 1, 2)
+    );
+    assert_eq!((first.late_answered, second.late_answered), (0, 2), "the mux count's delta");
+    assert_eq!(second.error_pct(), Some(100.0));
+    let p = r.progress();
+    assert_eq!(
+        (p.elapsed_ms, p.placed, p.in_flight, p.ok, p.failed, p.rejected),
+        (10_000, 4, 1, 3, 1, 1)
+    );
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    assert_eq!(idx.series, vec![first, second]);
 }

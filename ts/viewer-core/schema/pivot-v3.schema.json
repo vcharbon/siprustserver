@@ -786,6 +786,27 @@
       ],
       "type": "object"
     },
+    "ContactSpec": {
+      "additionalProperties": false,
+      "description": "The parts of a Contact its party chooses: what the URI's host and port do\nnot route.",
+      "properties": {
+        "display": {
+          "description": "The display name, unescaped; the stack quotes it on the wire.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "The URI's user part, or `${…}` accessors composing it; empty, the URI\nstates no userinfo (RFC 3261 §25.1).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "CountBound": {
       "additionalProperties": false,
       "description": "A settle-time count assertion. Every bound stated is checked; stating none\nmeans the traffic is answered and not asserted about.",
@@ -1137,6 +1158,13 @@
             "string",
             "null"
           ]
+        },
+        "params": {
+          "description": "The uri-parameters the URI the lane composes carries after its host\n(RFC 3261 §19.1.1), `;`-separated, the leading `;` left out.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1381,6 +1409,17 @@
             }
           ],
           "description": "The body, by resource reference, multipart structure or asserted shape."
+        },
+        "contact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContactSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "On a send: the display name and user part the leg's party writes in its\nContact from this message on (RFC 3261 §8.1.1.8, §20.10). Host and port\nstay tier 1."
         },
         "cseq": {
           "description": "The captured CSeq NUMBER, on `auto` steps only: the LABEL of the\ntransaction that obliged the message. An identity token for pairing,\nlint and confrontation, and the marker that scopes an auto ACK's DRAWN\n`retransmits` to one transaction — NEVER replayed and never resolved\nagainst: the interpreter's own stack numbers its CSeqs, and an auto ACK\nfinds the final it acknowledges in leg state.",
@@ -1688,6 +1727,13 @@
             "null"
           ]
         },
+        "params": {
+          "description": "The uri-parameters the URI the lane composes carries after its host\n(RFC 3261 §19.1.1), `;`-separated, the leading `;` left out.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "pos": {
           "description": "Position token in the tier-2 reference namespace, resolved against the\ncall chains: `caller` or `called[<branch>][<position>]`, call-qualified\n(`c2.called[0][1]`) once the document declares more than one call.",
           "type": "string"
@@ -1926,6 +1972,7 @@
         "strict-route-rewrite-handled",
         "strict-route-shuffle-on-send",
         "tag-consistency",
+        "taken-final-ends-invite-txn",
         "to-tag-presence",
         "unacked-2xx-not-cleared",
         "unacked-invite-non-2xx-final",
@@ -2043,6 +2090,13 @@
         "auto": {
           "description": "`true` when the interpreter's own stack COMPOSES this message (100\nTrying, ACK-to-final, PRACK and its 2xx), deriving its R-URI, Route, Via\nand CSeq from the transaction that obliged it rather than from dialog\nstate (§6.3). It is not a storage policy: the step stores what any step\nstores, and only a body the stack could not place is withheld.",
           "type": "boolean"
+        },
+        "awaits": {
+          "description": "`send` only: a lane event that must have occurred before the message\ngoes out (§6.7g), an open token from the lane's event registry\n(`decision-request-in-flight`). Each occurrence releases one send.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "check": {
           "anyOf": [

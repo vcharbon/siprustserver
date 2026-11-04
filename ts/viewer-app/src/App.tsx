@@ -1,6 +1,7 @@
 /** The shell: route in, page out. */
 import type { JSX } from "react"
 import { Link } from "./components/Link.tsx"
+import { CampaignPage } from "./pages/CampaignPage.tsx"
 import { CasePage } from "./pages/CasePage.tsx"
 import { ComparePage } from "./pages/ComparePage.tsx"
 import { DeltasPage } from "./pages/DeltasPage.tsx"
@@ -10,10 +11,12 @@ import { JobsPage } from "./pages/JobsPage.tsx"
 import { ReportPage } from "./pages/ReportPage.tsx"
 import { RulesPage } from "./pages/RulesPage.tsx"
 import { RunComparePage } from "./pages/RunComparePage.tsx"
+import { PcapsPage } from "./pages/PcapsPage.tsx"
 import { RunPage } from "./pages/RunPage.tsx"
 import { SourcesPage } from "./pages/SourcesPage.tsx"
 import { StudyPage } from "./pages/StudyPage.tsx"
 import { TriagePage } from "./pages/TriagePage.tsx"
+import { ThemeSwitch } from "./components/ThemeSwitch.tsx"
 import { href, useRoute } from "./router.ts"
 
 export const App = (): JSX.Element => {
@@ -28,10 +31,13 @@ export const App = (): JSX.Element => {
         <Link to={href.triage()}>triage</Link>
         <Link to={href.rules()}>rules</Link>
         <Link to={href.sources()}>sources</Link>
+        <Link to={href.pcaps()}>pcaps</Link>
         <Link to={href.jobs()}>jobs</Link>
         <Link to={href.compareRuns({})}>compare</Link>
         <Link to={href.report({})}>report</Link>
-        <span className="muted">{window.location.pathname}</span>
+        <Link to={href.campaigns()}>campaign</Link>
+        <span className="muted nav-path">{window.location.pathname}</span>
+        <ThemeSwitch />
       </nav>
       {route.kind === "index" && <IndexPage />}
       {route.kind === "case" && <CasePage id={route.id} />}
@@ -42,13 +48,15 @@ export const App = (): JSX.Element => {
       {route.kind === "triage" && <TriagePage />}
       {route.kind === "rules" && <RulesPage />}
       {route.kind === "sources" && <SourcesPage />}
+      {route.kind === "pcaps" && <PcapsPage />}
       {route.kind === "jobs" && <JobsPage />}
       {route.kind === "job" && <JobPage id={route.id} />}
       {route.kind === "triage-study" && <StudyPage capture={route.capture} />}
       {route.kind === "deltas" && <DeltasPage />}
+      {route.kind === "campaign" && <CampaignPage capture={route.capture} />}
       {route.kind === "unknown" && (
         <p className="page error">
-          no route for {route.path}. Try <Link to={href.index()}>the index</Link>.
+          no route: {route.path} · <Link to={href.index()}>index</Link>
         </p>
       )}
     </div>

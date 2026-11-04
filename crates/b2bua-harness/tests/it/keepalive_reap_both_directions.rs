@@ -4,18 +4,20 @@
 //! Guards the "no-BYE orphan" leak: an ESTABLISHED dialog whose peer vanished
 //! with no BYE must still be reaped, or `b2bua_active_calls` grows without
 //! bound. The cleanup is the in-dialog OPTIONS keepalive
-//! (`keepalive` rule) → unanswered OPTIONS → `KeepaliveTimeout` →
-//! `keepalive-timeout` rule → `BeginTermination` → reap.
+//! (`keepalive` rule) → unanswered OPTIONS → its Timer F → `handle-timeout`
+//! → `BeginTermination` → reap.
 //!
 //! The single shared `TimerService` keys its live-epoch map by
-//! `(call_ref, id)`: the bare timer **id** (`"Keepalive"`, `"KeepaliveTimeout:a"`,
+//! `(call_ref, id)`: the bare timer **id** (`"Keepalive"`, `"NoAnswer:b-1"`,
 //! …) is identical across calls, so keyed by id alone a later call's keepalive
 //! would overwrite an earlier call's epoch and tombstone it — at scale,
 //! keepalives would stop and dead peers go unprobed. `colliding_timer_ids_across_calls_both_fire`
 //! covers the driver; these tests cover the end-to-end reap + CDR.
 //!
-//! Mirrors `keepalive_timeout.rs`: a 30 s keepalive interval + a hard 5 s
-//! per-leg keepalive timeout. We assert teardown via `b2bua.cdr_records()`
+//! Mirrors `keepalive_timeout.rs`: a 30 s keepalive interval, the probe ended
+//! by its own Timer F (32 s). The healthy party answers the next interval's
+//! probe, sent before that Timer F; the silent one answers nothing. We assert
+//! teardown via `b2bua.cdr_records()`
 //! (a CDR is written and contains a `Bye`/teardown event) and via paired
 //! creations/removals metrics.
 
@@ -29,7 +31,8 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
-const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timer F of the unanswered probe's client transaction (RFC 3261 §17.1.2.2), plus one.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(33);
 /// Timer F of the unanswered BYE's client transaction (RFC 3261 §17.1.2.2), plus one.
 const BYE_TIMEOUT: Duration = Duration::from_secs(33);
 
@@ -57,12 +60,12 @@ async fn caller_silent_keepalive_reaps_with_cdr() {
     let _silent = alice.receive("OPTIONS").await; // received, never answered
     bob.receive("OPTIONS").await.respond(200, "OK").await;
 
-    // A-leg keepalive times out → BYE both peers: bob answers, alice (silent
-    // on the OPTIONS) receives hers behind the probe's retransmits and stays
-    // silent; the BYE's own timeout resolves her leg.
-    h.advance(KEEPALIVE_TIMEOUT).await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    let _silent_bye = alice.receive_tolerating("BYE", &["OPTIONS"]).await;
+    // A-leg probe times out → BYE both peers: bob answers, alice (silent on
+    // every OPTIONS) receives hers behind the probes and stays silent; the
+    // BYE's own timeout resolves her leg.
+    h.advance(PROBE_TIMEOUT).await;
+    bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    let _silent_bye = alice.receive_absorbing("BYE", &["OPTIONS"]).await;
 
     // The unanswered BYE times out (Timer F) and the call is fully reaped.
     h.advance(BYE_TIMEOUT).await;
@@ -74,7 +77,7 @@ async fn caller_silent_keepalive_reaps_with_cdr() {
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
     assert!(
         kinds.contains(&CdrEventType::Bye),
-        "CDR records the keepalive-timeout teardown (Bye): {kinds:?}",
+        "CDR records the keepalive-failure teardown (Bye): {kinds:?}",
     );
 
     let _report = h.finish().await;
@@ -105,12 +108,12 @@ async fn callee_silent_keepalive_reaps_with_cdr() {
     alice.receive("OPTIONS").await.respond(200, "OK").await;
     let _silent = bob.receive("OPTIONS").await; // received, never answered
 
-    // B-leg keepalive times out → BYE both peers: alice answers, bob (silent
-    // on the OPTIONS) receives his behind the probe's retransmits and stays
-    // silent; the BYE's own timeout resolves his leg.
-    h.advance(KEEPALIVE_TIMEOUT).await;
-    alice.receive("BYE").await.respond(200, "OK").await;
-    let _silent_bye = bob.receive_tolerating("BYE", &["OPTIONS"]).await;
+    // B-leg probe times out → BYE both peers: alice answers, bob (silent on
+    // every OPTIONS) receives his behind the probes and stays silent; the
+    // BYE's own timeout resolves his leg.
+    h.advance(PROBE_TIMEOUT).await;
+    alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    let _silent_bye = bob.receive_absorbing("BYE", &["OPTIONS"]).await;
 
     // The unanswered BYE times out (Timer F) and the call is fully reaped.
     h.advance(BYE_TIMEOUT).await;
@@ -122,7 +125,7 @@ async fn callee_silent_keepalive_reaps_with_cdr() {
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
     assert!(
         kinds.contains(&CdrEventType::Bye),
-        "CDR records the keepalive-timeout teardown (Bye): {kinds:?}",
+        "CDR records the keepalive-failure teardown (Bye): {kinds:?}",
     );
 
     let _report = h.finish().await;
@@ -176,15 +179,15 @@ async fn two_calls_both_reap_despite_shared_timer_ids() {
     bob.receive_tolerating("OPTIONS", &["OPTIONS"]).await.respond(200, "OK").await;
     bob.receive_tolerating("OPTIONS", &["OPTIONS"]).await.respond(200, "OK").await;
 
-    // ── Both A-leg keepalives time out → both calls BYE both peers ───────────
-    // Drain bob's inbound until both BYEs are answered, 200-ing any retransmit.
-    // Each silent caller receives her BYE behind the probe's retransmits and
+    // ── Both A-leg probes time out → both calls BYE both peers ───────────────
+    // Drain bob's inbound until both BYEs are answered, 200-ing any probe or
+    // retransmit. Each silent caller receives her BYE behind the probes and
     // stays silent; the BYE timeouts resolve those legs.
-    h.advance(KEEPALIVE_TIMEOUT).await;
+    h.advance(PROBE_TIMEOUT).await;
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bob.receive_tolerating("BYE", &["OPTIONS", "BYE"]).await.respond(200, "OK").await;
-    let _b1 = alice1.receive_tolerating("BYE", &["OPTIONS"]).await;
-    let _b2 = alice2.receive_tolerating("BYE", &["OPTIONS"]).await;
+    let _b1 = alice1.receive_absorbing("BYE", &["OPTIONS"]).await;
+    let _b2 = alice2.receive_absorbing("BYE", &["OPTIONS"]).await;
 
     // No orphaned established call leaked once the unanswered BYEs time out.
     h.advance(BYE_TIMEOUT).await;

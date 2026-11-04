@@ -28,6 +28,7 @@ impl FailoverHarness {
     /// direction buffers in order and flushes on [`heal`](Self::heal). Names
     /// each ordinal's current incarnation. Marker.
     pub fn partition(&mut self, a: &str, b: &str) {
+        self.tamper();
         let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
         self.repl_sim.apply_fault(Fault::Partition { a: aa, b: ba });
         self.mark(a, Some(b), "partition", "");
@@ -41,6 +42,7 @@ impl FailoverHarness {
     /// Names each ordinal's current incarnation; lifted by
     /// [`heal`](Self::heal). Marker.
     pub fn delay(&mut self, from: &str, to: &str, ms: u64) {
+        self.tamper();
         let (src, dst) = (self.repl_listen(from), self.repl_listen(to));
         self.repl_sim.apply_fault(Fault::Delay { src, dst, ms });
         self.mark(from, Some(to), "delay", &format!("{ms}ms on {src} → {dst}"));
@@ -52,9 +54,33 @@ impl FailoverHarness {
     /// [`resume`](Self::resume) or [`heal`](Self::heal). Names each ordinal's
     /// current incarnation. Marker.
     pub fn stall(&mut self, from: &str, to: &str) {
+        self.tamper();
         let (src, dst) = (self.repl_listen(from), self.repl_listen(to));
         self.repl_sim.apply_fault(Fault::Stall { src, dst });
         self.mark(from, Some(to), "stall", &format!("{src} → {dst} held"));
+    }
+
+    /// Close every replication stream between two workers, both directions,
+    /// as a reset does: each end reads its stream ended. A stream either
+    /// opens while the cut lasts dies as soon as it is attributed, until
+    /// [`heal`](Self::heal). Names each ordinal's current incarnation. Marker.
+    pub fn cut_streams(&mut self, a: &str, b: &str) {
+        self.tamper();
+        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
+        self.repl_sim.apply_fault(Fault::Cut { src: aa, dst: ba });
+        self.repl_sim.apply_fault(Fault::Cut { src: ba, dst: aa });
+        self.mark(a, Some(b), "cut", "every stream closed");
+    }
+
+    /// Answer no connect to `ordinal`'s replication listen address, as a host
+    /// that answers nothing does: a connect to it neither succeeds nor fails
+    /// until a [`heal`](Self::heal) naming the ordinal. Streams already open
+    /// are untouched. Names its current incarnation. Marker.
+    pub fn black_hole(&mut self, ordinal: &str) {
+        self.tamper();
+        let dst = self.repl_listen(ordinal);
+        self.repl_sim.apply_fault(Fault::BlackHole { dst });
+        self.mark(ordinal, None, "black-hole", &format!("{dst} answers no connect"));
     }
 
     /// Lift a [`stall`](Self::stall) from `from` to `to`: every held stream
@@ -68,10 +94,23 @@ impl FailoverHarness {
     /// Heal the repl fabric between two workers: unblock `connect`, lift every
     /// directed fault between them ([`delay`](Self::delay) included) and
     /// release every held stream, which flushes what buffered while the cut
-    /// lasted, in order. Names each ordinal's current incarnation. Marker.
+    /// lasted, in order. Reaches every incarnation of each ordinal, so a fault
+    /// named before a replacement came up is lifted with the others. Marker.
     pub fn heal(&mut self, a: &str, b: &str) {
-        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
-        self.repl_sim.apply_fault(Fault::Heal { a: aa, b: ba });
+        for aa in self.repl_listens(a) {
+            for ba in self.repl_listens(b) {
+                self.repl_sim.apply_fault(Fault::Heal { a: aa, b: ba });
+            }
+        }
         self.mark(a, Some(b), "heal", "");
+    }
+
+    /// The replication listen address of every incarnation `ordinal` has had.
+    fn repl_listens(&self, ordinal: &str) -> Vec<SocketAddr> {
+        let mut listens = self.views.repl_addrs_of(ordinal);
+        listens.push(self.repl_listen(ordinal));
+        listens.sort();
+        listens.dedup();
+        listens
     }
 }

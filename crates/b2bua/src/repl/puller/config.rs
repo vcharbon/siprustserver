@@ -9,12 +9,14 @@ const DEFAULT_BACKOFF_MAX_MS: u64 = 2_000;
 /// waits — for a reachable connection AND for the first catch-up `Noop` — before
 /// declaring bootstrap-complete best-effort (ADR-0011 X5 — liveness over
 /// completeness). The connection is NOT dropped on expiry; it keeps streaming.
-const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
+/// The serving side reads the same bound for a peer's bootstrap in flight.
+pub const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
 /// Default bound on one connect (ms).
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 2_000;
-/// Default bound on a stream delivering nothing (ms), above the server's
-/// `Noop` interval.
-const DEFAULT_IDLE_TIMEOUT_MS: u64 = 15_000;
+/// Default bound on a stream delivering nothing (ms): four of the server's
+/// default `Noop` intervals (500 ms), so a peer that went silent is read down
+/// about 2 s after its last frame.
+const DEFAULT_IDLE_TIMEOUT_MS: u64 = 2_000;
 /// Default bound on one blocked send (ms).
 const DEFAULT_SEND_STALL_MS: u64 = 15_000;
 
@@ -32,7 +34,9 @@ pub struct PullerConfig {
     /// which keeps streaming until the real `Noop` arrives. Kept short — it gates
     /// readiness, never correctness (the `(p,b)` merge admits late frames).
     pub bootstrap_hard_timeout_ms: u64,
-    /// The longest one connect is waited for, in every phase.
+    /// The longest one connect is waited for, in every phase; it also bounds
+    /// the one connect a dead verdict asks for when the stream is down
+    /// (ADR-0047 D1).
     pub connect_timeout_ms: u64,
     /// A stream that delivers nothing for this long is left and pulled again
     /// from the retained watermark, in every phase.
@@ -55,6 +59,13 @@ impl Default for PullerConfig {
 }
 
 impl PullerConfig {
+    /// `min(init · 2^(attempt-1), max)` — attempt 1 = init, growing per failure.
+    pub(super) fn backoff_ms(&self, attempt: u32) -> u64 {
+        let shift = attempt.saturating_sub(1).min(31);
+        let scaled = self.backoff_init_ms.saturating_mul(1u64 << shift);
+        scaled.min(self.backoff_max_ms)
+    }
+
     /// Test-tier config: short backoff + a 2 s bootstrap hard timeout, so a few
     /// paused-clock advances trip the relevant deadline deterministically, and
     /// the default link bounds. ONE definition — these values are

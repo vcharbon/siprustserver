@@ -1,5 +1,4 @@
-//! Structured SIP header extraction — quote-aware, zero-regex. Port of
-//! `src/sip/parsers/custom/structured-headers.ts`.
+//! Structured SIP header extraction — quote-aware, zero-regex.
 //!
 //! Scans From/To, Via, Contact and CSeq values into their parts, leniently:
 //! the reading of a message held to no wire grammar, and the Via and CSeq
@@ -288,8 +287,8 @@ pub fn parse_cseq(value: &SipStr) -> ParsedCSeq {
 // byte can never equal one, so byte-wise scanning visits exactly the same
 // structural positions a `&[char]` walk would, and every index handed to
 // a `&str` slice below lands on a char boundary. Indices may run past the end
-// (the callers propagate `end + 1` positions on missing delimiters, as the TS
-// did) — hence the clamping in `subslice`.
+// (the callers propagate `end + 1` positions on missing delimiters) — hence
+// the clamping in `subslice`.
 
 /// Borrowed `s[a..b]` with both byte indices clamped to `s.len()`; empty when
 /// the clamped range is not one of `s` (`a` past `b`, or inside a character),
@@ -312,7 +311,7 @@ fn skip_digits(s: &[u8], mut i: usize) -> usize {
 }
 
 /// `base[a..b]` as a span of `base`, clamped like [`subslice`] — the single
-/// materialization point for every structured field, and the reason a parsed
+/// point every structured field is read out at, and the reason a parsed
 /// From/Via/Contact copies no bytes.
 fn slice(base: &SipStr, a: usize, b: usize) -> SipStr {
     span_of(base, subslice(base.as_str(), a, b))
@@ -480,8 +479,8 @@ fn read_one_param(base: &SipStr, mut i: usize, params: &mut Params) -> usize {
     i
 }
 
-/// Mimic JS `decodeURIComponent`: decode `%XX` as UTF-8 bytes; `Err` on a
-/// malformed escape or invalid UTF-8 (the caller falls back to the raw form).
+/// Percent-decode `s` (each `%XX` one byte) as UTF-8; `Err` on a malformed
+/// escape or bytes that are not UTF-8 (the caller falls back to the raw form).
 pub(crate) fn decode_uri_component(s: &str) -> Result<String, ()> {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());

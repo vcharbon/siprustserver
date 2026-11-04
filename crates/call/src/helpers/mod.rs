@@ -1,23 +1,28 @@
 //! Pure lens / accessor / timer helpers over the [`Call`](crate::model::Call)
-//! tree. Helpers take
-//! the `Call`/`Leg` by value, mutate in place, and return it — value semantics
-//! from the caller's view, without deep clones. The data types themselves live
-//! in [`crate::model`].
+//! tree. A helper that changes one call takes it as `&mut Call`; the helpers
+//! that fold two copies of a call into one (`merge_exempt`, `with_own_running`,
+//! `raise_sequences`, `keep_dialogs`) take the copy they keep by value. The
+//! data types themselves live in [`crate::model`].
 //!
 //! Concern map:
 //!   - [`lens`] — the base `update_leg` / `update_dialog` lenses
 //!   - [`leg`] — role, lookup, resolution, the next leg id
 //!   - [`attempt`] — open, join, end and settle the call's attempts
 //!   - [`leg_end`] — the INVITE outcome and dialog ends a leg's end records
-//!   - [`resolved`] — what a received message names: its dialog, the relay a
-//!     response answers
+//!   - [`resolved`] — what a received message names: its dialog, the request
+//!     record a response answers
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
-//!     of one call compare on them (replication reconciliation)
-//!   - [`round`] — the re-INVITE rounds two copies share, and how one copy's
-//!     view of a round's end or opening lands in the other
+//!     of one call rank on them
+//!   - [`compared`] — the compared fields of a call record and the closed
+//!     exempt list (ADR-0055 §7)
 //!   - [`sequence`] — the in-dialog requests two copies of one call carry:
 //!     the sequences they reached, the relays they hold
-//!   - [`dialog`] — CSeq, ACK branch, pending and retired relays, SDP cache
+//!   - [`dialog`] — CSeq, INVITE glare, SDP cache
+//!   - [`request_records`] — the request records a call's dialogs hold: add,
+//!     find by final or branch, close (ADR-0055 §2)
+//!   - [`invite_records`] — the INVITE records: the one a dialog last sent
+//!     and the ACK its 2xx owes, the one it answered 2xx, a dialling
+//!     INVITE's image
 //!   - [`peering`] — caller-facing fronts, active peer pair, relay-peer
 //!     resolution
 //!   - [`reliable`] — the reliable provisionals the call received and where
@@ -29,14 +34,20 @@
 //!   - [`record`] — CDR append (and the originated leg's attach-and-record), rule
 //!     deactivation, SM-cursor rendering
 //!   - [`decision_log`] — the decision-log append and its ordinal
+//!   - [`instants`] — every absolute instant the record holds, moved together
+//!     into another clock frame
 //!   - [`message_ring`] — the message-ring append and its call-wide sequence
 //!   - [`termination`] — the termination record and its message-ring cut
 //!   - [`timer`] — the timer ledger (`arm_timer`, `disarm_timer`, terminating cap,
 //!     the keepalive one-interval ceiling)
+//!   - [`timer_scope`] — whether the scope a timer guards has ended
 
 pub mod attempt;
+pub mod compared;
 pub mod decision_log;
 pub mod dialog;
+pub mod instants;
+pub mod invite_records;
 pub mod leg;
 pub mod leg_end;
 pub mod lens;
@@ -47,25 +58,31 @@ pub mod peering;
 pub mod prack_disposition;
 pub mod record;
 pub mod reliable;
+pub mod request_records;
 pub mod resolved;
-pub mod round;
 pub mod sequence;
 pub mod services;
 pub mod termination;
 pub mod timer;
+pub mod timer_scope;
 
 pub use attempt::{
     dialled_leg_ended, end_attempt, find_attempt, join_attempt, next_attempt_id, open_attempt,
     settle_attempts,
 };
+pub use compared::{merge_exempt, same_state, with_own_running};
 pub use decision_log::mark_decision;
 pub use dialog::{
-    add_pending_request, advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog,
-    cached_sdp_for_leg_dialog, cancel_pending_request, close_rejected_invite_round, close_relay,
-    find_pending_request, invite_glare, invite_transaction_open, leg_relays, peer_update_pending,
-    relayed_pending, remove_pending_request, retain_ack_branch, retain_emitted_ack,
-    retired_relay_count, sender_invite_unacknowledged, sender_invite_unanswered,
-    set_awaited_ack_cseq, settle_straggler_release, take_retired_relays, PendingHolder,
+    advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
+    invite_glare, invite_transaction_open, peer_update_pending, sender_invite_unacknowledged,
+    sender_invite_unanswered,
+};
+pub use instants::shift_instants;
+pub use invite_records::{
+    answered_2xx, answered_2xx_mut, close_rejected_invite_round, hold_answered_2xx, invite_image,
+    invite_relay, invite_taken, invite_untaken, open_sent_invite, relayed_invite_pending,
+    retain_ack_branch, retain_emitted_ack, sent_exchange, sent_exchange_mut, sent_invite_image,
+    set_awaited_ack_cseq,
 };
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
@@ -79,9 +96,7 @@ pub use leg_end::{
     reject_early_dialogs, retire_early_dialogs,
 };
 pub use lens::{update_dialog, update_leg};
-pub use lifecycle::{
-    lifecycle_advances, lifecycle_behind, lifecycle_position, lifecycle_progress, Progress,
-};
+pub use lifecycle::{lifecycle_behind, lifecycle_position};
 pub use message_ring::{record_message, seal_turn};
 pub use obligation::{
     acked_2xx, advance_ladder, answers_initial_invite, clear_retained, obligations_in,
@@ -98,13 +113,17 @@ pub use prack_disposition::{
 pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_cursors};
 pub use reliable::{
     acknowledge_shown, admits_reliable_provisional, advance_shown_ladder, arrival,
-    cease_shown_ladder, described_before, leg_shown, note_responder_ack, own_prack_branch,
-    provisional, record_provisional, responder_of, show_provisional, shown_as, shown_emission,
+    cease_shown_ladder, described_before, leg_shown, note_responder_ack, provisional,
+    record_provisional, responder_of, show_provisional, shown_as, shown_emission,
     start_shown_ladder, starts_shown_sequence, Arrival,
 };
+pub use request_records::{
+    add_record, answered_record, cancel_relay, close_held, close_record, drop_keepalive_records,
+    every_record, find_relay, held_record, next_held_deadline, record_with_branch, remove_relay,
+    take_overdue_held, Answers, RecordHolder,
+};
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
-pub use round::{holds_rounds_of, merge_rounds, round_ahead, round_further, round_opened};
-pub use sequence::{holds_relays_of, raise_sequences};
+pub use sequence::{holds_records_of, keep_dialogs, raise_sequences};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,
     refer_processed_locally, relay_first_18x_first_relayed, relay_first_18x_messages,
@@ -117,3 +136,4 @@ pub use timer::{
     arm_timer, cap_keepalive_fire_at, disarm_timer, holds_timer, retire_timers,
     TERMINATING_TIMEOUT_MS,
 };
+pub use timer_scope::{scope_ended, setup_over};

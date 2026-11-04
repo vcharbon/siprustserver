@@ -5,6 +5,10 @@ use tokio::net::UdpSocket as TokioUdp;
 use tokio::time::{timeout, Duration as TokioDuration};
 
 async fn txn_rig() -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
+    txn_rig_with(None).await
+}
+
+async fn txn_rig_with(taps: Option<Arc<Taps>>) -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
     // The engine sends through the same fabric seam the mux binds on.
     let endpoint: Arc<dyn UdpEndpoint> = Arc::from(
         RealSignalingNetwork::new()
@@ -18,6 +22,7 @@ async fn txn_rig() -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
         endpoint,
         Arc::new(DropModel::new(0.0, 1, None)),
         Arc::new(MuxStats::new(4)),
+        taps,
     ));
     (txns, peer, peer_addr)
 }
@@ -63,15 +68,15 @@ fn prack_req(branch: &str, rack: &str) -> Vec<u8> {
 async fn calltxns_timer_e_is_method_generic_for_update() {
     let (txns, peer, peer_addr) = txn_rig().await;
 
-    txns.on_outbound(&update_req("z9hG4bK-u1"), peer_addr);
+    txns.on_outbound(&Datagram::sniff(&update_req("z9hG4bK-u1")), peer_addr);
     let got = recv_one(&peer, 2_000).await.expect("Timer E retransmit of the UPDATE");
     assert!(got.starts_with("UPDATE "), "retransmit is the UPDATE: {got}");
 
     // The 200 (UPDATE) stops the resender…
     let ok = resp(200, "z9hG4bK-u1", "2 UPDATE", "");
-    assert!(txns.on_inbound(&ok, peer_addr), "first 200 (UPDATE) is delivered");
+    assert!(txns.on_inbound(&Datagram::sniff(&ok), peer_addr), "first 200 (UPDATE) is delivered");
     // …and its duplicate is absorbed (method-generic dedup).
-    assert!(!txns.on_inbound(&ok, peer_addr), "duplicate 200 (UPDATE) absorbed");
+    assert!(!txns.on_inbound(&Datagram::sniff(&ok), peer_addr), "duplicate 200 (UPDATE) absorbed");
     assert!(
         recv_one(&peer, 1_500).await.is_none(),
         "UPDATE resender must stop on the final response"
@@ -88,10 +93,10 @@ async fn calltxns_absorbs_duplicate_prack_and_reanswers() {
     let (txns, peer, peer_addr) = txn_rig().await;
 
     let prack = prack_req("z9hG4bK-p1", "1 1 INVITE");
-    assert!(txns.on_inbound(&prack, peer_addr), "first PRACK is delivered");
-    txns.on_outbound(&resp(200, "z9hG4bK-p1", "2 PRACK", ""), peer_addr);
+    assert!(txns.on_inbound(&Datagram::sniff(&prack), peer_addr), "first PRACK is delivered");
+    txns.on_outbound(&Datagram::sniff(&resp(200, "z9hG4bK-p1", "2 PRACK", "")), peer_addr);
 
-    assert!(!txns.on_inbound(&prack, peer_addr), "duplicate PRACK absorbed");
+    assert!(!txns.on_inbound(&Datagram::sniff(&prack), peer_addr), "duplicate PRACK absorbed");
     let got = recv_one(&peer, 1_000).await.expect("reactive re-answer to the dup PRACK");
     assert!(got.starts_with("SIP/2.0 200"), "re-answer is our 200 (PRACK): {got}");
     txns.shutdown();
@@ -108,7 +113,7 @@ async fn calltxns_retransmits_reliable_1xx_until_prack() {
     let (txns, peer, peer_addr) = txn_rig().await;
 
     // A plain 180 arms NO resender (best-effort by design).
-    txns.on_outbound(&resp(180, "z9hG4bK-i1", "1 INVITE", ""), peer_addr);
+    txns.on_outbound(&Datagram::sniff(&resp(180, "z9hG4bK-i1", "1 INVITE", "")), peer_addr);
     assert!(
         recv_one(&peer, 1_200).await.is_none(),
         "a non-reliable 18x must not be proactively retransmitted"
@@ -116,12 +121,12 @@ async fn calltxns_retransmits_reliable_1xx_until_prack() {
 
     // A reliable 183 IS retransmitted until its PRACK.
     let r183 = resp(183, "z9hG4bK-i1", "1 INVITE", "Require: 100rel\r\nRSeq: 1\r\n");
-    txns.on_outbound(&r183, peer_addr);
+    txns.on_outbound(&Datagram::sniff(&r183), peer_addr);
     let got = recv_one(&peer, 2_000).await.expect("reliable 183 retransmit");
     assert!(got.starts_with("SIP/2.0 183"), "retransmit is the reliable 183: {got}");
 
     // The matching PRACK stops it (and is delivered to the app).
-    assert!(txns.on_inbound(&prack_req("z9hG4bK-p2", "1 1 INVITE"), peer_addr));
+    assert!(txns.on_inbound(&Datagram::sniff(&prack_req("z9hG4bK-p2", "1 1 INVITE")), peer_addr));
     assert!(
         recv_one(&peer, 1_500).await.is_none(),
         "reliable-183 resender must stop on the matching PRACK"
@@ -150,24 +155,36 @@ async fn calltxns_distinct_fork_tags_are_not_deduped() {
 
     // Fork 1's 180 (tag=f1) — delivered.
     assert!(
-        txns.on_inbound(&resp_tag(180, "z9hG4bK-i1", "1 INVITE", "f1"), peer_addr),
+        txns.on_inbound(
+            &Datagram::sniff(&resp_tag(180, "z9hG4bK-i1", "1 INVITE", "f1")),
+            peer_addr
+        ),
         "the first fork's 180 is delivered"
     );
     // Fork 2's 180 (tag=f2) on the SAME branch — a DISTINCT early dialog, so
     // it must be delivered too (not absorbed as a retransmit).
     assert!(
-        txns.on_inbound(&resp_tag(180, "z9hG4bK-i1", "1 INVITE", "f2"), peer_addr),
+        txns.on_inbound(
+            &Datagram::sniff(&resp_tag(180, "z9hG4bK-i1", "1 INVITE", "f2")),
+            peer_addr
+        ),
         "a distinct-tag fork's 180 must NOT be deduped as a retransmit"
     );
     // Fork 1's 180 again (tag=f1) — a genuine retransmit, absorbed.
     assert!(
-        !txns.on_inbound(&resp_tag(180, "z9hG4bK-i1", "1 INVITE", "f1"), peer_addr),
+        !txns.on_inbound(
+            &Datagram::sniff(&resp_tag(180, "z9hG4bK-i1", "1 INVITE", "f1")),
+            peer_addr
+        ),
         "a same-tag repeat is a true retransmit and IS deduped"
     );
     // A losing fork's LATE 200 (tag=f2) is also delivered (the winner is f1,
     // but the body must see f2's 200 to ACK+BYE it, §13.2.2.4).
     assert!(
-        txns.on_inbound(&resp_tag(200, "z9hG4bK-i1", "1 INVITE", "f2"), peer_addr),
+        txns.on_inbound(
+            &Datagram::sniff(&resp_tag(200, "z9hG4bK-i1", "1 INVITE", "f2")),
+            peer_addr
+        ),
         "a losing fork's late 200 (distinct tag) reaches the body for ACK+BYE"
     );
     txns.shutdown();
@@ -197,21 +214,27 @@ async fn calltxns_sendtap_records_every_reemission() {
     }));
 
     // (1) Proactive Timer-E retransmit of an outbound UPDATE, then stop it.
-    txns.on_outbound(&update_req("z9hG4bK-u1"), peer_addr);
+    txns.on_outbound(&Datagram::sniff(&update_req("z9hG4bK-u1")), peer_addr);
     recv_one(&peer, 2_000).await.expect("Timer E retransmit of the UPDATE");
-    assert!(txns.on_inbound(&resp(200, "z9hG4bK-u1", "2 UPDATE", ""), peer_addr));
+    assert!(txns.on_inbound(&Datagram::sniff(&resp(200, "z9hG4bK-u1", "2 UPDATE", "")), peer_addr));
 
     // (2) Reactive re-answer to a duplicate request (our 200 was lost).
     let prack = prack_req("z9hG4bK-p1", "1 1 INVITE");
-    assert!(txns.on_inbound(&prack, peer_addr));
-    txns.on_outbound(&resp(200, "z9hG4bK-p1", "2 PRACK", ""), peer_addr);
-    assert!(!txns.on_inbound(&prack, peer_addr), "dup PRACK absorbed → re-answer");
+    assert!(txns.on_inbound(&Datagram::sniff(&prack), peer_addr));
+    txns.on_outbound(&Datagram::sniff(&resp(200, "z9hG4bK-p1", "2 PRACK", "")), peer_addr);
+    assert!(
+        !txns.on_inbound(&Datagram::sniff(&prack), peer_addr),
+        "dup PRACK absorbed → re-answer"
+    );
 
     // (3) Reactive re-ACK on a duplicate INVITE 2xx (our ACK was lost).
     let ok_inv = resp(200, "z9hG4bK-i9", "1 INVITE", "");
-    assert!(txns.on_inbound(&ok_inv, peer_addr), "first 200 (INVITE) delivered");
-    txns.on_outbound(&ack_req("z9hG4bK-a9", 1), peer_addr);
-    assert!(!txns.on_inbound(&ok_inv, peer_addr), "dup 200 (INVITE) absorbed → re-ACK");
+    assert!(txns.on_inbound(&Datagram::sniff(&ok_inv), peer_addr), "first 200 (INVITE) delivered");
+    txns.on_outbound(&Datagram::sniff(&ack_req("z9hG4bK-a9", 1)), peer_addr);
+    assert!(
+        !txns.on_inbound(&Datagram::sniff(&ok_inv), peer_addr),
+        "dup 200 (INVITE) absorbed → re-ACK"
+    );
 
     let _ = recv_one(&peer, 200).await; // drain stragglers
     let kinds = seen.lock().unwrap().clone();
@@ -219,4 +242,38 @@ async fn calltxns_sendtap_records_every_reemission() {
     assert!(kinds.contains(&ReEmitKind::ReAnswer), "reactive re-answer tapped: {kinds:?}");
     assert!(kinds.contains(&ReEmitKind::ReAck), "reactive re-ACK tapped: {kinds:?}");
     txns.shutdown();
+}
+
+/// Every re-send the engine makes reaches the call's tally through its
+/// endpoint's taps: the proactive Timer E retransmit and the reactive re-ACK.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: loadgen"]
+async fn calltxns_counts_every_resend_on_the_tally() {
+    use crate::mux::tally::CallTally;
+    use sip_message::sniff::identity;
+
+    let tally = Arc::new(CallTally::new("alice"));
+    let taps = Taps::new(None, Some(tally.clone()), None, None);
+    let (txns, peer, peer_addr) = txn_rig_with(taps).await;
+    let (update, ack) = (update_req("z9hG4bK-u1"), ack_req("z9hG4bK-a9", 1));
+    let now = tokio::time::Instant::now();
+    tally.on_datagram(None, super::super::taps::Dir::Out, &identity(&update), now);
+    tally.on_datagram(None, super::super::taps::Dir::Out, &identity(&ack), now);
+
+    txns.on_outbound(&Datagram::sniff(&update), peer_addr);
+    recv_one(&peer, 2_000).await.expect("Timer E retransmit of the UPDATE");
+    assert!(txns.on_inbound(&Datagram::sniff(&resp(200, "z9hG4bK-u1", "2 UPDATE", "")), peer_addr));
+    let ok_inv = resp(200, "z9hG4bK-i9", "1 INVITE", "");
+    assert!(txns.on_inbound(&Datagram::sniff(&ok_inv), peer_addr));
+    txns.on_outbound(&Datagram::sniff(&ack), peer_addr);
+    assert!(
+        !txns.on_inbound(&Datagram::sniff(&ok_inv), peer_addr),
+        "dup 200 (INVITE) absorbed → re-ACK"
+    );
+    txns.shutdown();
+
+    let m = tally.finish();
+    let resent = |label: &str| m.arrows.iter().find(|(k, _)| *k.label == *label).unwrap().1.resent;
+    assert!(resent("UPDATE") >= 1, "the proactive retransmit: {m:?}");
+    assert_eq!(resent("ACK"), 1, "the reactive re-ACK: {m:?}");
 }

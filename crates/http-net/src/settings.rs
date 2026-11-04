@@ -12,9 +12,11 @@
 //! | `<P>_CEILING_MS` | the bound on any one request, whatever its caller's budget | 5000 |
 //! | `<P>_MAX_IN_FLIGHT` | requests in flight at once, and idle connections kept | per backend |
 //! | `<P>_ROTATION_MS` | a new client takes new requests this often | 60000 |
+//! | `<P>_ERROR_CLOSES_PER_S` | connections a client closes after a 5xx answer, at most, per second ([`crate::ErrorCloses`]); 0 never. The simulated fabric's pooled client closes them; the `reqwest` client cannot close one pooled connection and pools them | 20 |
 //!
 //! Unset or blank takes the default; a value that is not a positive integer
-//! is an error naming it.
+//! (or, for `<P>_ERROR_CLOSES_PER_S`, not a non-negative one) is an error
+//! naming it.
 
 use std::time::Duration;
 
@@ -46,6 +48,9 @@ pub struct ClientSettings {
     /// A new client takes new requests this often; the old one finishes the
     /// requests it carries and closes its connections.
     pub rotation: Duration,
+    /// Connections closed after a 5xx answer, at most, per second and
+    /// client; past it they are pooled. `0` never closes one.
+    pub error_closes_per_s: u32,
 }
 
 /// The cap on requests in flight a backend client runs with unless told
@@ -73,6 +78,7 @@ impl ClientSettings {
             max_in_flight,
             max_idle_per_host: max_in_flight,
             rotation: Duration::from_millis(60_000),
+            error_closes_per_s: crate::error_close::DEFAULT_ERROR_CLOSES_PER_S,
         }
     }
 
@@ -109,6 +115,13 @@ impl ClientSettings {
         let max_in_flight = usize::try_from(max_in_flight)
             .map_err(|_| format!("{prefix}_MAX_IN_FLIGHT={max_in_flight}: past this platform"))?;
         let retries = positive("KEEPALIVE_RETRIES", u64::from(defaults.keepalive_retries))?;
+        let closes = {
+            let key = format!("{prefix}_ERROR_CLOSES_PER_S");
+            match lookup(&key).filter(|v| !v.trim().is_empty()) {
+                None => defaults.error_closes_per_s,
+                Some(v) => v.trim().parse::<u32>().map_err(|e| format!("{key}={v:?}: {e}"))?,
+            }
+        };
         Ok(Self {
             connect_timeout: ms("CONNECT_TIMEOUT_MS", defaults.connect_timeout)?,
             pool_idle_timeout: ms("POOL_IDLE_MS", defaults.pool_idle_timeout)?,
@@ -121,6 +134,7 @@ impl ClientSettings {
             max_in_flight,
             max_idle_per_host: max_in_flight,
             rotation: ms("ROTATION_MS", defaults.rotation)?,
+            error_closes_per_s: closes,
         })
     }
 }
@@ -153,6 +167,7 @@ mod tests {
         assert_eq!(settings.ceiling, Duration::from_secs(5));
         assert_eq!(settings.rotation, Duration::from_secs(60));
         assert_eq!((settings.max_in_flight, settings.max_idle_per_host), (64, 64));
+        assert_eq!(settings.error_closes_per_s, 20);
     }
 
     #[test]
@@ -167,6 +182,7 @@ mod tests {
             ("B_CEILING_MS", "4000"),
             ("B_MAX_IN_FLIGHT", "16"),
             ("B_ROTATION_MS", "30000"),
+            ("B_ERROR_CLOSES_PER_S", "0"),
         ])
         .unwrap();
         assert_eq!(
@@ -182,6 +198,7 @@ mod tests {
                 max_in_flight: 16,
                 max_idle_per_host: 16,
                 rotation: Duration::from_millis(30_000),
+                error_closes_per_s: 0,
             }
         );
     }
@@ -192,6 +209,8 @@ mod tests {
         assert!(e.contains("B_MAX_IN_FLIGHT=0"), "{e}");
         let e = from(&[("B_ROTATION_MS", "soon")]).expect_err("not a number");
         assert!(e.contains("B_ROTATION_MS"), "{e}");
+        let e = from(&[("B_ERROR_CLOSES_PER_S", "-1")]).expect_err("negative");
+        assert!(e.contains("B_ERROR_CLOSES_PER_S"), "{e}");
         assert_eq!(from(&[("B_CEILING_MS", " ")]).unwrap().ceiling, Duration::from_secs(5));
     }
 

@@ -86,10 +86,10 @@ fn rewritten_element(elem: &str, host: &str, port: u16) -> Option<String> {
     let value = SipStr::owned(elem);
     let (addr, span) =
         NameAddr::parse_spanned(&value, AddrForm::NameAddrOrSpec, UriRole::Target).ok()?;
-    let scheme = addr.uri().scheme();
-    if !matches!(scheme, "sip" | "sips") {
+    if !addr.uri().is_sip_or_sips() {
         return None;
     }
+    let scheme = addr.uri().scheme();
     let uri = addr.uri().clone().with_authority(HostPort::new(host, Some(port))).to_string();
     Some(format!(
         "{}{}{}{}",

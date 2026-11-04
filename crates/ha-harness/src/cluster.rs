@@ -26,11 +26,6 @@ use topology::Peer;
 use crate::node::{HaNode, NodeWiring};
 use crate::report::{Marker, ReplReport};
 
-/// Default changelog TTLs for harness nodes: short enough that dead-peer
-/// auto-clean is reachable in a test budget, long enough that steady-state
-/// tombstones survive a few advances. `(tombstone_ms, dead_peer_ms)`.
-const DEFAULT_TTLS: (i64, i64) = (30_000, 300_000);
-
 /// Short backoff + bootstrap hard timeout so a couple of advances trip the
 /// relevant deadline deterministically — the canonical values live on
 /// [`PullerConfig::fast_test`], shared with the b2bua repl tests so the
@@ -58,7 +53,7 @@ pub struct HaCluster {
     /// Injected timeline markers for the report (crash/reboot/partition/…).
     markers: Vec<Marker>,
     config: PullerConfig,
-    ttls: (i64, i64),
+    dead_peer_ttl_ms: i64,
     /// Backstop body-TTL for replicas stored with `ttl_ms <= 0` (long by default;
     /// split-brain tests inject a short value via [`with_replica_backstop_ms`]).
     ///
@@ -120,7 +115,7 @@ impl HaCluster {
             addrs,
             markers: Vec::new(),
             config: fast_config(),
-            ttls: DEFAULT_TTLS,
+            dead_peer_ttl_ms: b2bua::repl::DEFAULT_DEAD_PEER_TTL_MS,
             replica_backstop_ms,
         };
 
@@ -151,13 +146,13 @@ impl HaCluster {
     /// (re)build its server+supervisor. The node's handle attributes every
     /// stream it opens at `connect`, so a partition refuses its connects.
     fn wiring_for(&self, ordinal: &str, peers: Vec<Peer>) -> NodeWiring {
-        let network = self.recording.over(Arc::new(self.sim.as_node(ordinal)));
+        let network = self.recording.over(Arc::new(self.sim.as_node(self.addrs[ordinal])));
         NodeWiring {
             network: Arc::new(network) as Arc<dyn ReplicationNetwork>,
             addr_map: self.addrs.clone(),
             peers,
             config: self.config,
-            ttls: self.ttls,
+            dead_peer_ttl_ms: self.dead_peer_ttl_ms,
             replica_backstop_ms: self.replica_backstop_ms,
         }
     }

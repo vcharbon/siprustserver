@@ -45,8 +45,27 @@ impl<'a, 'p> Runner<'a, 'p> {
         let ladder = self.instance.recording().legs().remove(&step.leg).unwrap_or_default();
         let steps = self.instance.plan().steps();
         let Some(at) = steps.iter().position(|s| s.id == step.id) else { return false };
+        let fork_tag = self.fork_tag_of(step);
         scripted_final::answered_invite(&steps, at, &ladder)
-            .is_some_and(|cseq| scripted_final::invite_answered(&ladder, cseq))
+            .is_some_and(|cseq| scripted_final::invite_answered(&ladder, cseq, fork_tag))
+    }
+
+    /// Whether `step` answers a tolerated absence that never came: a response
+    /// its leg sends, anchored on an `optional` request expect of that leg the
+    /// run released (§6.5). The request it would answer was never received, so
+    /// the answer is moot.
+    pub(super) fn answer_moot(&self, step: &CompiledStep) -> bool {
+        if !step.is_send() || !matches!(step.discriminator, Discriminator::Response { .. }) {
+            return false;
+        }
+        let Some(anchor) = step.delay.from.step() else { return false };
+        self.instance.cursor().released().iter().any(|id| id == anchor)
+            && self.instance.plan().steps().iter().any(|s| {
+                s.id == anchor
+                    && s.leg == step.leg
+                    && s.optional_expect()
+                    && matches!(s.discriminator, Discriminator::Request { .. })
+            })
     }
 
     /// Emit one send step.
@@ -105,6 +124,19 @@ impl<'a, 'p> Runner<'a, 'p> {
                 Vec::new(),
                 Some(&step.id),
                 Some("moot: the INVITE this final answers already has its final"),
+            );
+            self.complete(step);
+            return true;
+        }
+        // §6.5: an answer to a request that never came is never put on the wire.
+        if self.answer_moot(step) {
+            self.instance.recording().push(
+                &step.leg,
+                Dir::Out,
+                self.now_us(),
+                Vec::new(),
+                Some(&step.id),
+                Some("moot: the request it answers was a tolerated absence that never came"),
             );
             self.complete(step);
             return true;

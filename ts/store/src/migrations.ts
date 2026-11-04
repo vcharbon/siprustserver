@@ -736,6 +736,44 @@ const cutCaseHashes = Effect.gen(function*() {
 /** The key of the migration that indexes the cut cases by case hash. */
 export const CUT_CASE_HASHES = "9_cut_case_hashes"
 
+/** A campaign run is a job kind of its own: lanes and cases of a campaign, run end to end. */
+const campaignJobs = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check`
+  yield* sql`
+    ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check
+    CHECK (kind IN ('replay', 'cut', 'ingest', 'retire', 'delete', 'campaign'))
+  `
+})
+
+/** The key of the migration that admits campaign jobs. */
+export const CAMPAIGN_JOBS = "10_campaign_jobs"
+
+/**
+ * `runs.forced`: the capabilities a run's lane lacked of what the run needs,
+ * where it was driven anyway; null on a run that was not forced.
+ */
+const forcedRuns = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE runs ADD COLUMN forced text[]`
+})
+
+/** The key of the migration that records a forced run. */
+export const FORCED_RUNS = "11_forced_runs"
+
+/** An inbox job is a job kind of its own: one capture taken from the deployment's inbox into its pcap root. */
+const inboxJobs = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check`
+  yield* sql`
+    ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check
+    CHECK (kind IN ('replay', 'cut', 'ingest', 'retire', 'delete', 'campaign', 'inbox'))
+  `
+})
+
+/** The key of the migration that admits inbox jobs. */
+export const INBOX_JOBS = "12_inbox_jobs"
+
 /**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
@@ -749,7 +787,10 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [ID_GAPS]: idGaps,
   [FROZEN_CUT_GUARD]: frozenCutGuard,
   [SOURCE_FAULT]: sourceFault,
-  [CUT_CASE_HASHES]: cutCaseHashes
+  [CUT_CASE_HASHES]: cutCaseHashes,
+  [CAMPAIGN_JOBS]: campaignJobs,
+  [FORCED_RUNS]: forcedRuns,
+  [INBOX_JOBS]: inboxJobs
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

@@ -65,4 +65,6 @@ def cdr_impacts_of(run_dir: Path, profile: Profile, records: list[Json], schemas
     out = join(records, good, charge_missing=complete, required=lambda r: any(m.matches(r) for m in required))
     for f in firings:
         out += firing_impacts(f, of_firings.get(f.mark, []), complete)
+        if f.calls is None:
+            found.append(_failed(f"the abandoned firing {f.mark} holds no count taken at its hold: its calls are uncounted"))
     return out, found

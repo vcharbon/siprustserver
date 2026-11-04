@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "profile.v1.schema.json",
-  "$comment": "minor 7",
+  "$comment": "minor 8",
   "title": "profile.v1",
   "description": "A file `profiles/<name>.yaml`: one run. The load streams, the schedule of incident events, the budget of each event's window, and the defaults of an event the schedule did not fire. Impact outside every window is `unattributed`. ADR-0049.",
   "type": "object",
@@ -50,7 +50,7 @@
       "properties": {
         "file_mb": { "description": "The size of one ring file, in MB (tcpdump -C).", "type": "integer", "minimum": 1, "default": 100 },
         "files": { "description": "The ring's file count (tcpdump -W).", "type": "integer", "minimum": 2, "default": 20 },
-        "filter": { "description": "The capture filter.", "type": "string", "default": "udp and portrange 5060-5100" },
+        "filter": { "description": "The capture filter.", "type": "string", "default": "(udp and portrange 5060-5100) or (ip[9] = 17 and ip[6:2] & 0x1fff != 0)" },
         "nodes": { "description": "A node label selector: these kind nodes are captured too, on every interface of their netns.", "type": "string" }
       }
     },
@@ -91,6 +91,20 @@
           "cap": { "type": "integer", "minimum": 1 },
           "streams": { "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true },
           "repair_s": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "one_at_a_time": {
+      "description": "Redundant pods the run faults one at a time: every scheduled event aimed at `selector` (its incident's target, or the event's own) picks one pod, and the next one fires at least `gap_s` after the previous one's `at_s + expected_s`, the time the clients take to spread their connections again; before the load at least `min_ready` pods of the selector are ready, so another one serves at every instant.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["selector", "gap_s"],
+        "properties": {
+          "selector": { "type": "string", "minLength": 1 },
+          "min_ready": { "type": "integer", "minimum": 1, "default": 2 },
+          "gap_s": { "type": "number", "minimum": 0 }
         }
       }
     },

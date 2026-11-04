@@ -9,6 +9,9 @@ description = "The values a process holds for its declared metric families, shar
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

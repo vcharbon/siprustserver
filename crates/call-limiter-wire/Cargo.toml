@@ -9,6 +9,9 @@ description = "The wire DTOs of the call-keyed limiter HTTP API and the server's
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

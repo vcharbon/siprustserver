@@ -2,7 +2,9 @@
 
 **Status:** accepted (2026-06-05). Amended (2026-10-12): D1, a departed peer's calls with an
 INVITE in flight are taken over at its departure (ADR-0047). Amended (2026-10-16): §5, affinity
-is the ACK/CANCEL exemption and liveness routing, no fresh-pod guard (ADR-0050).
+is the ACK/CANCEL exemption and liveness routing, no fresh-pod guard (ADR-0050). Amended
+(2026-10-31): §2, a backup whose primary reads dead at a verdict releases the limiter key
+(ADR-0047 D8). Amended (2026-11-03): §11, readiness waits for the Backup streams too.
 **Amends:** ADR-0011 Decision X11 — removes the *eager* (membership-driven) takeover
 and the *`Deactivate` watermark handshake*; **keeps** reactive takeover; **replaces**
 LWW-by-`gen` reconciliation with a per-context `(primary, backup)` version vector.
@@ -11,6 +13,9 @@ LWW-by-`gen` reconciliation with a per-context `(primary, backup)` version vecto
 single-flow sockets (§Stream topology below) with a trimmed wire message set.
 **Plan of record:** [docs/plan/passive-backup-reclaim-strategy.md](../plan/passive-backup-reclaim-strategy.md).
 **Implementation task list:** [docs/plan/0014-rehydration-simplification-tasks.md](../plan/0014-rehydration-simplification-tasks.md).
+Amended (2026-10-23): the replication write path, the confirm-race trade-off and the
+INVITE-only seeds (ADR-0055 §2–§4); the apply rules and the fold read containment
+(ADR-0055 §7).
 
 ---
 
@@ -40,7 +45,8 @@ primary+backup mutations (a latent equal-`gen` divergence).
    in-flight transaction** for a taken-over call reaches a terminal state, it
    `drop_local`s its live copy (the `bak:` replica + the reverse-flushed deltas
    remain). On a **terminal** (BYE/CANCEL) the backup **does not discharge** — no
-   CDR, no limiter release, no propagated delete: it records the terminal into the
+   CDR, no limiter release (unless its primary reads dead at a verdict, ADR-0047
+   D8), no propagated delete: it records the terminal into the
    `(p,b)` Element and reverse-flushes it with a short grace TTL (its alive-timer)
    before dropping the live copy; the **primary is the sole discharge authority**
    (§Terminal reconcile). Durability of the reverse-flush replaces the handshake.
@@ -145,12 +151,19 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     old counter, insert at the max) that bounds the log to the live set; apply is
     idempotent under the `(p,b)` gate. `needs_reset` is per-`(peer,partition)`.
 
-11. **Readiness = Reclaim-first-Noop only.** `Ready` ⇔ every **Reclaim** stream to a
-    *reachable* peer hit its first Noop (hard-timer bounded — a dead peer cannot hang
-    readiness). **Backup** streams are opened only *after* `Ready`, are
-    fire-and-forget, and **never gate** readiness (observable via the store + a
-    received-non-Noop-frame counter, not a readiness sub-state). A cold node with no
-    calls reaches `Ready` at once (empty scan → immediate terminal Noop). The
+11. **Readiness = both flows' first Noop, Reclaim first.** `Ready` ⇔ every stream
+    to a *reachable* ready peer hit its first Noop, the **Reclaim** stream and then
+    the **Backup** stream, which opens once every Reclaim stream has: a node reads
+    ready only once it holds the calls its peers named it backup of, so an
+    orchestrator that waits for ready before its next disruption waits for the
+    copies the returned node can get. Hard-timer bounded
+    (`B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS`, ADR-0011 X5) for a peer never reached:
+    a Backup stream never reached is released by its own hard timer, or by one
+    failed connect of its own once the peer's Reclaim stream was never reached by
+    its hard timer; a dead peer cannot hang readiness. A stream that reached its
+    peer and then stalled holds readiness while the peer stays listed ready, the
+    strict X6 gate. A cold node with no calls reaches `Ready` at once (empty scan
+    → immediate terminal Noop). The
     **server** side is independent of local readiness: a NotReady node still answers
     peers' pulls — it simply has nothing to hand over until it processes calls.
 
@@ -233,8 +246,8 @@ Timer L from the seed. A non-INVITE clears at Timer J; a failed leg at Timer B/F
   rejected out of order (§12.2.2 — 500 when the number is strictly lower, an
   implementation-defined reject when both owners mint the same value). The
   failover suites encode this as a
-  deviation window scoped to the takeover
-  (`FailoverHarness::accept_rfc_deviations_from_now`) and still assert the accepted
+  deviation window scoped to the takeover (a row of ADR-0055 §11's window
+  table, opened by `FailoverHarness::strike`) and still assert the accepted
   outcome — call fully over, one CDR, limiter released; the same rule gates in full
   on establishment and on every no-fault cell.
 - **Forked-b-leg confirm lost on the kill instant** (the "confirm-race"). When a
@@ -341,10 +354,15 @@ one deadline class left absolute). One router seam,
 `sanitize_restored_timers`, runs EVERY hydration path (bulk reclaim, reactive
 takeover, on-demand reclaim, reverse-flush straggler): re-anchor every restored
 `fire_at` by `skew_offset_ms` (a sub-second deadband ignores pure replication
-latency), drop the stale `KeepaliveTimeout`, apply a defensive floor for any path
+latency), apply a defensive floor for any path
 that lacked an offset, then cohort-smooth. The offset includes one transit
 latency — acceptable at in-cluster ms scale. This bounds restore skew to
 ~replication latency instead of the raw inter-node clock disagreement.
+
+Amended by ADR-0055 §9: the stamp is read in the frame of the body's instants,
+so the offset composes across hops; a write of a node's own body clears it; the
+re-anchor moves every instant of the copy, not only its timers, so no path
+restores with an unknown offset and the defensive floor is gone.
 
 This introduces **no** wall-clock-dependent correctness rule, settle window, or
 handback: `(p,b)` reconciliation remains the sole correctness mechanism, and the
@@ -372,7 +390,8 @@ INVITE transactions the replicated record names**, in one router module
 
 - a `Proceeding` client INVITE for each INVITE handle still open (the record
   says which; a handle kept for a taken 2xx's re-ACK is not in flight), with
-  the INVITE bound armed and no re-send;
+  the INVITE bound armed and no Timer A ladder; one the record holds no
+  provisional for opens `Trying` and re-sends its INVITE once (ADR-0043);
 - a `Proceeding` server INVITE for the a-leg's initial INVITE while the a-leg
   is unanswered (request rebuilt from the replicated snapshot, To-tag pinned),
   and for each pending relayed INVITE, holding the originator's request rebuilt
@@ -423,25 +442,20 @@ there: its target's responses follow the Via of the node that relayed it, so onl
 that node can CANCEL it or take its final, and a client seed elsewhere would run
 out its bound on a round another node finishes.
 
-**A non-INVITE relay this node cannot finish is superseded.** A non-INVITE request
-that reaches the rules found no server transaction on this node, so the relay the
-record holds for it, if any, was made by another node, or this one's former
-incarnation: the relay's final follows its Via there and a non-INVITE response is
-never failed over (`sip-proxy/src/core/response.rs`), and the target does not repeat
-it (RFC 3261 §17.2.2). This node cannot tell whether the relaying node lives. The
-record drops that relay — same method, originator CSeq, Call-ID, top-Via branch and
-sent-by — before the rules read the call, and the request is relayed afresh, under
-this node's `relayed_by`. Absorbing the retransmission instead would leave its
-originator to run out Timer F when the relaying node is dead. Residuals: the target
-sees the request twice (`superseded_relay.rs`); and when the relaying node lives —
-the proxy read it dead for a moment and routed a Timer E rung here — both relays are
-answered, the originator absorbs the second final as a retransmission, and two
-UPDATE answers that differ can leave the parties' descriptions apart (RFC 3311).
+**A non-INVITE relay is resumed from its record (ADR-0055 §2).** The record
+holds both halves of a non-INVITE relay: a takeover seeds the server transaction
+of the originator's request, which absorbs its retransmission, and the relay's
+client transaction, which retransmits the relayed request under its branch; the
+target repeats its final for it (RFC 3261 §17.2.2), and the proxy hands that
+final to the call's owner alive (ADR-0055 §8). Residual: when the relaying node
+lives — the proxy read it dead for a moment and routed a Timer E rung here — both
+nodes hold the relay, and the originator absorbs a second final as a
+retransmission.
 
 Pinned by `failover-harness/tests/it/{prack_takeover,inflight_resend,released_copy,
-reinvite_server_side_at_the_takeover,retained_2xx_folded_into_the_record,superseded_relay}.rs`,
-`sip-txn/tests/it/{seed,accepted}.rs`, `b2bua/src/router/materialise/tests.rs` and
-`b2bua/src/router/superseded_relay/tests.rs`.
+reinvite_server_side_at_the_takeover,retained_2xx_folded_into_the_record,
+relay_resumed_at_the_takeover}.rs`, `sip-txn/tests/it/{seed,accepted}.rs` and
+`b2bua/src/router/materialise/tests.rs`.
 
 ## Amendment — lifecycle progress folds over a refused reverse flush
 

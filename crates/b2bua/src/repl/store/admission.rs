@@ -1,6 +1,5 @@
 //! Which write a [`ReplicatingCallStore`] takes, under its metadata lock: the
-//! resurrection tombstones, the call incarnation a `(p,b)` version orders, and
-//! an adopted version against the one held.
+//! resurrection tombstones and the call incarnation a `(p,b)` version orders.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,20 +17,13 @@ pub(super) struct Write {
     pub(super) role: PartitionRole,
     pub(super) direction: Option<PropagateDirection>,
     pub(super) now: i64,
-    /// The `(p,b)` the write carries.
-    pub(super) version: (i64, i64),
-    /// The version is one this node adopted ([`PutOpts::adopted`]).
-    pub(super) adopted: bool,
 }
 
 impl ReplicatingCallStore {
     /// The incarnation rule of a write of `incarnation` of `call_ref`, under
-    /// the metadata lock (ADR-0014, "`(p,b)` orders one call incarnation"), and
-    /// the version rule of an adopted write. `false` leaves the store as it is:
+    /// the metadata lock (ADR-0014, "`(p,b)` orders one call incarnation").
+    /// `false` leaves the store as it is:
     ///
-    /// - an adopted version of the call the store holds at that version or past
-    ///   it is the other owner's to keep: its body at that version is the one
-    ///   held (ADR-0031 D3);
     /// - a buried call stays buried (the resurrection guard); a write of a call
     ///   another one replaced re-stamps its burial, and a backup keeps it for
     ///   the replica reap;
@@ -74,9 +66,7 @@ impl ReplicatingCallStore {
         }
         let held = meta.get(call_ref).and_then(|m| m.meta.incarnation.clone());
         if !is_another_call(held.as_deref(), incarnation) {
-            let (p, b) = write.version;
-            let holds = |m: &CallMeta| m.meta.call_gen >= p && m.meta.call_bgen >= b;
-            return !(write.adopted && meta.get(call_ref).is_some_and(holds));
+            return true;
         }
         if write.direction == Some(PropagateDirection::Reverse) {
             let owned = incarnation.map(str::to_string);

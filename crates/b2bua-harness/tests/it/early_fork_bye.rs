@@ -88,3 +88,52 @@ async fn a_silent_callee_does_not_hold_the_record_past_the_terminating_timeout()
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
+
+/// The callee's UPDATE on its other fork is relayed to the caller, who has
+/// not answered it when the early BYE ends the call. Her INVITE takes its
+/// final at once, which ends her leg: the callee's UPDATE draws its 481 then
+/// (RFC 3261 §8.2.6, ADR-0055 §2), not its own Timer F.
+#[tokio::test(start_paused = true)]
+async fn a_request_relayed_to_the_unanswered_caller_is_answered_with_her_final() {
+    let h = Harness::with_transit_delay("early-fork-bye-relayed-update", 1);
+    let alice = h.agent_auto("alice").await;
+    let bob = h.agent_auto("bob").await;
+    let b2bua = B2buaSut::route_all_to(&bob.addr().ip().to_string(), bob.addr().port())
+        .start(&h, "b2bua", &h.next_addr().to_string())
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").with_to_tag("fork1").await;
+    call.expect(180).await;
+    uas.respond(180, "Ringing").with_to_tag("fork2").await;
+    call.expect(180).await;
+
+    uas.adopt_to_tag("fork2");
+    let mut fork2 = uas.dialog();
+    let mut update = fork2.request(InDialogMethod::Update, None).await;
+    let mut at_alice = alice.receive("UPDATE").await;
+
+    h.allow_violation(
+        "no-bye-outside-or-early-dialog",
+        "the callee's BYE on its early dialog is the deviation under test (RFC 3261 §15)",
+    );
+    uas.adopt_to_tag("fork1");
+    let mut fork1 = uas.dialog();
+    fork1.send_request(InDialogMethod::Bye).send().await.expect(200).await;
+    call.expect(503).await;
+    let mut cancel = bob.receive("CANCEL").await;
+    update.expect(481).await;
+    // Her early dialog ended with her INVITE's 503.
+    at_alice.respond(481, "Call/Transaction Does Not Exist").await;
+
+    cancel.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}

@@ -26,16 +26,21 @@
 //!
 //! The sibling cell for a shown provisional — a PRACK the SURVIVOR must
 //! translate — is `prack_takeover.rs`.
+//!
+//! Beyond the failover sweep: a reliable provisional repeated after a takeover draws no second
+//! PRACK.
 
+use b2bua::store::envelope;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::departure_support::spawn_reactive_proxy;
 use b2bua::decision::test_adapter::route_to_with_18x;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
 use call::features::RelayFirst18xStrategy;
-use call::{CallBodyCodec, MsgpackCodec, Provisional, ResponderAck};
+use call::{MsgpackCodec, Provisional, ResponderAck};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -48,7 +53,6 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
-const PROXY: &str = "127.0.0.1:5080";
 const B1: &str = "127.0.0.1:5091";
 const B2: &str = "127.0.0.1:5092";
 
@@ -86,7 +90,7 @@ async fn replicated_pracked(
         .get(PartitionRole::Backup, primary, call_ref)
         .await
         .expect("the backup holds a replica body for the call");
-    MsgpackCodec::new().decode(&body).expect("replica body decodes").provisionals
+    envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call.provisionals
 }
 
 /// Reboot the crashed primary EMPTY at a higher gen + new pod IP and let the
@@ -118,6 +122,7 @@ async fn reboot_and_reclaim(
 #[tokio::test(start_paused = true)]
 async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     let mut fh = FailoverHarness::new("prack-repeat-takeover", &["b1", "b2"]);
+    // bob breaks RFC 3262 §3: a reliable provisional to an INVITE that offered no 100rel.
     fh.allow_rfc_violation(
         "reliable-needs-client-opt-in",
         "bob answers reliably although the mask withheld 100rel from his INVITE — the PRACK \
@@ -126,8 +131,7 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let decision = decision_masking_the_first_18x();
     let mut w_b1 = fh
         .spawn_worker_limited(
@@ -224,7 +228,7 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     let at_survivor = fh
         .sip_entries()
         .iter()
-        .filter(|e| e.to == survivor_addr && e.raw.starts_with(b"SIP/2.0 183 "))
+        .filter(|e| e.to == survivor_addr && e.opens_with("SIP/2.0 183 "))
         .count();
     assert_eq!(at_survivor, 1, "bob's repeat reached the survivor's bind");
     assert!(

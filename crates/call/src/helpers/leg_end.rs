@@ -2,9 +2,7 @@
 //! INVITE took, this stack's CANCEL of it, and the early dialogs those end or
 //! retire. The leg's state reads off them ([`crate::model::Leg::state`]).
 
-use crate::model::{
-    Call, DialogEnd, DialogState, EndingBy, Leg, MessageDirection, MessageEntry, RetiredDialog,
-};
+use crate::model::{Call, DialogEnd, DialogState, EndingBy, Leg, MessageDirection, MessageEntry};
 
 use super::lens::update_leg;
 
@@ -12,14 +10,13 @@ use super::lens::update_leg;
 /// (RFC 3261 §8.1.3.3).
 pub fn retire_early_dialogs(leg: &mut Leg) {
     for d in leg.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
-        let open_relays = std::mem::take(&mut d.inbound_pending_requests);
-        d.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
+        d.state = DialogState::Retired;
     }
 }
 
 /// Note the CANCEL of `leg_id`'s INVITE leaving (RFC 3261 §9.1): each early
 /// dialog that INVITE opened is ending, and ends on the INVITE's final.
-pub fn cancel_early_dialogs(call: Call, leg_id: &str) -> Call {
+pub fn cancel_early_dialogs(call: &mut Call, leg_id: &str) {
     update_leg(call, leg_id, |l| {
         for d in l.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
             d.state = DialogState::Ending(EndingBy::Cancel);
@@ -31,12 +28,12 @@ pub fn cancel_early_dialogs(call: Call, leg_id: &str) -> Call {
 /// ([`Leg::invite_final_sent`]). The first final stands: a leg that already
 /// carries one is left as is — the transaction took exactly that one final.
 /// A non-2xx final ends every early dialog of the leg (RFC 3261 §12.1).
-pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
+pub fn record_invite_final(call: &mut Call, leg_id: &str, status: u16) {
     update_leg(call, leg_id, |l| {
-        if l.invite_final_sent.is_none() && status >= 300 {
+        if l.invite_final_sent().is_none() && status >= 300 {
             reject_early_dialogs(l, status);
         }
-        l.invite_final_sent.get_or_insert(status);
+        l.invite_final_sent_mut().get_or_insert(status);
     })
 }
 
@@ -44,23 +41,32 @@ pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
 /// of CSeq `cseq` this stack sent: when it is the INVITE that dialled the leg
 /// ([`Leg::outbound_invite`]), every early dialog it created ends (RFC 3261
 /// §12.1). A final to a re-INVITE changes no dialog's state (§14.1).
-pub fn record_dialling_invite_rejected(call: Call, leg_id: &str, cseq: i64, status: u16) -> Call {
+pub fn record_dialling_invite_rejected(call: &mut Call, leg_id: &str, cseq: i64, status: u16) {
     update_leg(call, leg_id, |l| {
-        if l.outbound_invite.as_ref().is_some_and(|i| i.cseq == cseq) {
+        if l.dialled_cseq() == Some(cseq) {
             reject_early_dialogs(l, status);
         }
     })
 }
 
-/// Record the final `status` that answered, on `leg_id`, the INVITE of CSeq
-/// `cseq` this stack sent, when it is the INVITE that dialled the leg
-/// ([`Leg::outbound_invite`]): the leg's INVITE outcome, the first final
-/// standing (RFC 3261 §17.1.1.2); a non-2xx final ends every early dialog it
-/// created (§12.1).
-pub fn record_dialled_invite_final(call: Call, leg_id: &str, cseq: i64, status: u16) -> Call {
+/// Record the final `status` that answered at `at_ms`, on `leg_id`, the
+/// INVITE of CSeq `cseq` this stack sent, when it is the INVITE that dialled
+/// the leg ([`Leg::outbound_invite`]): the leg's INVITE outcome, the first
+/// final standing (RFC 3261 §17.1.1.2); a non-2xx final ends every early
+/// dialog it created (§12.1).
+pub fn record_dialled_invite_final(
+    call: &mut Call,
+    leg_id: &str,
+    cseq: i64,
+    status: u16,
+    at_ms: i64,
+) {
     update_leg(call, leg_id, |l| {
-        let Some(invite) = l.outbound_invite.as_mut().filter(|i| i.cseq == cseq) else { return };
-        invite.record_final(status);
+        if l.dialled_cseq() != Some(cseq) {
+            return;
+        }
+        let Some(invite) = l.outbound_invite_mut() else { return };
+        invite.record_final_at(status, at_ms);
         if status >= 300 {
             reject_early_dialogs(l, status);
         }
@@ -73,11 +79,10 @@ pub fn record_dialled_invite_final(call: Call, leg_id: &str, cseq: i64, status: 
 /// a 2xx confirmed, its BYE in flight or not, ends without a final
 /// (§15.1.1).
 pub fn abandon_leg(leg: &mut Leg) {
-    if let Some(invite) = leg.outbound_invite.as_mut().filter(|i| i.final_received.is_none()) {
+    if let Some(invite) = leg.outbound_invite_mut().filter(|i| i.final_received.is_none()) {
         invite.record_final(408);
         for d in leg.dialogs.iter_mut().filter(|d| d.awaits_invite_final()) {
-            let open_relays = std::mem::take(&mut d.inbound_pending_requests);
-            d.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
+            d.state = DialogState::Retired;
         }
     }
     for d in leg.dialogs.iter_mut().filter(|d| d.is_confirmed()) {
@@ -88,9 +93,9 @@ pub fn abandon_leg(leg: &mut Leg) {
 /// Note this stack's CANCEL of `leg_id`'s INVITE, stating `stated`, leaving
 /// (RFC 3261 §9.1): the leg's INVITE is cancelled, and each early dialog it
 /// opened is ending, to end on the INVITE's final.
-pub fn record_cancel_sent(call: Call, leg_id: &str, stated: Vec<(String, String)>) -> Call {
-    let call = update_leg(call, leg_id, |l| {
-        if let Some(invite) = l.outbound_invite.as_mut() {
+pub fn record_cancel_sent(call: &mut Call, leg_id: &str, stated: Vec<(String, String)>) {
+    update_leg(call, leg_id, |l| {
+        if let Some(invite) = l.outbound_invite_mut() {
             invite.cancel_sent = true;
             invite.cancel_headers = stated;
         }
@@ -109,22 +114,33 @@ pub fn reject_early_dialogs(leg: &mut Leg, status: u16) {
 /// Record the `487` the transaction layer answered a CANCEL of `leg_id`'s
 /// initial INVITE with (RFC 3261 §9.2): the wire's final, over a 2xx built
 /// too late ([`Leg::answer_preempted`]), whose ring entry and ACK obligation
-/// go; every dialog the INVITE opened ends under the 487 (§12.1).
-pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
+/// go, or over a non-2xx the layer dropped, which is no longer kept, nor is
+/// its latest provisional; every dialog the INVITE opened ends under the 487
+/// (§12.1). `terminated` is that 487 as it leaves, retained as the INVITE's
+/// rejection when it could be built.
+pub fn record_cancelled_invite(
+    call: &mut Call,
+    leg_id: &str,
+    terminated: Option<crate::model::RetainedEmission>,
+) {
     update_leg(call, leg_id, |l| {
-        if let Some(answer) = l.invite_final_sent.filter(|s| (200..300).contains(s)) {
-            l.answer_preempted = Some(answer);
+        if let Some(answer) = l.invite_final_sent().filter(|s| (200..300).contains(s)) {
+            *l.answer_preempted_mut() = Some(answer);
             l.messages.entries.retain(|e| !is_sent_invite_2xx(e));
             for d in l.dialogs.iter_mut() {
-                d.answered_2xx = None;
-                d.awaited_ack_cseq = None;
+                d.drop_answered_invite();
+                if let Some(x) = d.sent_invite.as_mut().and_then(|r| r.invite.as_mut()) {
+                    x.awaited_ack_cseq = None;
+                }
                 if d.state == DialogState::Confirmed {
                     d.state = DialogState::Early;
                 }
             }
         }
         reject_early_dialogs(l, 487);
-        l.invite_final_sent = Some(487);
+        *l.invite_final_sent_mut() = Some(487);
+        *l.invite_rejection_mut() = terminated;
+        *l.invite_provisional_mut() = None;
     })
 }
 

@@ -6,15 +6,17 @@ so callRef ownership, the proxy's cookie and replication membership agree by
 construction. Readiness is /ready: 503 while re-hydrating or draining, so a
 NotReady worker leaves the EndpointSlice the proxy and its peers watch.
 Liveness is /healthz: 503 while a loop has been on one piece of work past
-B2BUA_LOOP_STALL_MS.
+B2BUA_LOOP_STALL_MS. The operator routes listen on loopback (B2BUA_ADMIN),
+reached through kubectl port-forward, never through a Service.
 */ -}}
 {{- if .Values.worker.enabled }}
 {{- $w := .Values.worker }}
 {{- $env := dict
   "B2BUA_LISTEN" "0.0.0.0:5060"
-  "B2BUA_ADVERTISE" "$(POD_IP)"
+  "B2BUA_ADVERTISE" "$(POD_IP):5060"
   "B2BUA_ORDINAL" "$(POD_NAME)"
   "B2BUA_METRICS" "0.0.0.0:9091"
+  "B2BUA_ADMIN" "127.0.0.1:9094"
   "B2BUA_REPL" (ternary "1" "0" $w.replication.enabled)
   "B2BUA_REPL_LISTEN" (printf "0.0.0.0:%d" (int $w.replication.port))
   "B2BUA_REPL_PORT" (toString (int $w.replication.port))
@@ -25,9 +27,17 @@ B2BUA_LOOP_STALL_MS.
 {{- with $w.dest }}
 {{- $_ := set $env "B2BUA_DEST" . }}
 {{- end }}
-{{- if and .Values.proxy.enabled $w.outboundProxy }}
+{{- if not (kindIs "invalid" .Values.inviteTxnTimeoutSec) }}
+{{- $_ := set $env "B2BUA_INVITE_TXN_TIMEOUT_SEC" (toString (int .Values.inviteTxnTimeoutSec)) }}
+{{- end }}
+{{- /* Behind the proxy, b-leg requests go through its internal VIP and every
+Contact names its external VIP; without it the worker is standalone. */ -}}
+{{- if .Values.proxy.enabled }}
+{{- $_ := set $env "B2BUA_MODE" "proxied" }}
 {{- $_ := set $env "B2BUA_OUTBOUND_PROXY" (printf "%s:%d" (include "siprust.net" (dict "root" $ "key" "proxyVip")) (int .Values.network.sipPort)) }}
-{{- $_ := set $env "B2BUA_REQUIRE_OUTBOUND_PROXY" "1" }}
+{{- $_ := set $env "B2BUA_CONTACT_ADDRESS" (printf "%s:%d" (include "siprust.net" (dict "root" $ "key" "externalVip")) (int .Values.network.sipPort)) }}
+{{- else }}
+{{- $_ := set $env "B2BUA_MODE" "standalone" }}
 {{- end }}
 {{- if .Values.callLimiter.enabled }}
 {{- $_ := set $env "LIMITER_URL" (printf "%s:8080" (include "siprust.svcHost" (list $ "call-limiter"))) }}
@@ -38,6 +48,19 @@ B2BUA_LOOP_STALL_MS.
 {{- $_ := set $env "B2BUA_CDR_RABBITMQ_MAX_LEN" (toString (int .Values.cdr.maxLength)) }}
 {{- end }}
 {{- include "siprust.overlayEnv" (dict "into" $env "from" $w.env) }}
+{{- /* Sizing's computed values (templates/_sizing.tpl): checks.yaml refuses
+an env stating one of them; the computed memory replaces the resources'. */ -}}
+{{- $sizing := include "siprust.sizing" .Values | fromJson }}
+{{- $resources := deepCopy ($w.resources | default dict) }}
+{{- with $sizing.workerEnv }}
+{{- include "siprust.overlayEnv" (dict "into" $env "from" .) }}
+{{- $_ := set $resources "requests" (merge (dict "memory" $sizing.workerMemory) (get $resources "requests" | default dict)) }}
+{{- $_ := set $resources "limits" (merge (dict "memory" $sizing.workerMemory) (get $resources "limits" | default dict)) }}
+{{- end }}
+{{- $clusterKeySecret := "" }}
+{{- if $w.replication.enabled }}
+{{- $clusterKeySecret = required "worker.clusterKey.existingSecret: replication needs the Secret of the workers' shared key (ADR-0055 §12)" $w.clusterKey.existingSecret }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -59,7 +82,9 @@ spec:
     spec:
       serviceAccountName: b2bua-worker
       {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
-      {{- with include "siprust.scheduling" $w | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- $ws := deepCopy $w }}
+      {{- $_ := set $ws "affinity" (include "siprust.workerAffinity" $ | fromYaml) }}
+      {{- with include "siprust.scheduling" $ws | trim }}{{ . | nindent 6 }}{{- end }}
       {{- with include "siprust.podSecurity" $w | trim }}{{ . | nindent 6 }}{{- end }}
       terminationGracePeriodSeconds: {{ int $w.terminationGracePeriodSeconds }}
       {{- with $w.extraInitContainers }}
@@ -78,10 +103,19 @@ spec:
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            # The worker identity: a pod recreated under the same name is
+            # another one (ADR-0055 §6).
+            - name: POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
             # The routable address peers reach the worker on; the bind address
             # 0.0.0.0 is not routable.
             - name: POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            {{- with $clusterKeySecret }}
+            # The key the workers share to sign the via-extension (ADR-0055 §12).
+            - name: B2BUA_CLUSTER_KEY
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: key } }
+            {{- end }}
             {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
             {{- with $w.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -107,7 +141,7 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
           resources:
-            {{- toYaml $w.resources | nindent 12 }}
+            {{- toYaml $resources | nindent 12 }}
           {{- with $w.extraVolumeMounts }}
           volumeMounts:
             {{- toYaml . | nindent 12 }}

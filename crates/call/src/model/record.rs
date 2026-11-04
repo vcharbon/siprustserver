@@ -1,5 +1,5 @@
 //! The master [`Call`] record and its call-level satellites: lifecycle state,
-//! HA topology hint, active peering, the a-leg INVITE
+//! active peering, the a-leg INVITE
 //! snapshot, policy overrides, active rules.
 
 use std::collections::BTreeMap;
@@ -28,7 +28,7 @@ pub struct SipHeader {
 
 /// Snapshot of the original a-leg INVITE — source of truth for failover b-leg
 /// reconstruction and INVITE-response relay (§8.2.6.2). Written when the call
-/// is built; only a whole fold of another owner's body replaces it.
+/// is built; only another owner's body, taken whole, replaces it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ALegInviteSnapshot {
     pub uri: String,
@@ -62,41 +62,6 @@ pub enum CallModelState {
     Terminated,
 }
 
-/// Persisted topology hint: the worker pair stamped at INVITE time plus a
-/// per-context **version vector** `(gen, bak_gen)` = `(p, b)` (ADR-0014).
-///
-/// `gen` (`p`) is the **primary** counter — bumped only by the call's primary on
-/// a local mutation. `bak_gen` (`b`) is the **backup** counter — bumped only by
-/// an acting-backup on a takeover mutation. Each node bumps only its own role's
-/// counter, so the *other* node's counter in an incoming update is, by
-/// construction, the branch point. A single-counter "highest gen wins" LWW
-/// cannot disambiguate concurrent primary+backup mutations. See the apply
-/// rule in `b2bua::repl::puller`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CallTopology {
-    pub pri: String,
-    pub bak: String,
-    /// Primary counter `p` of the `(p,b)` version vector.
-    pub gen: i64,
-    /// Backup counter `b` of the `(p,b)` version vector.
-    pub bak_gen: i64,
-    /// `gen` names a primary version whose body this body does not hold: a
-    /// backup took it from the primary's write it refused, or from a fold of
-    /// only the primary's re-INVITE rounds. Such a body is never a newer
-    /// version of the primary's at that `gen`. False on every primary's body:
-    /// the primary's own write and every fold at the primary clear it.
-    #[serde(default)]
-    pub gen_adopted: bool,
-}
-
-impl CallTopology {
-    /// The topology of a call `pri` serves and `bak` backs up, at `(gen,
-    /// bak_gen)`, its `gen` the primary's own.
-    pub fn new(pri: impl Into<String>, bak: impl Into<String>, gen: i64, bak_gen: i64) -> Self {
-        CallTopology { pri: pri.into(), bak: bak.into(), gen, bak_gen, gen_adopted: false }
-    }
-}
-
 /// The single active leg pair (1↔1). `None` on the [`Call`] means 1↔0.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivePeer {
@@ -120,8 +85,9 @@ pub struct Call {
     /// Deterministic: derived from a-leg call-id + from-tag (+ primary ordinal).
     pub call_ref: String,
     pub a_leg: Leg,
-    /// The legs this stack dialled, in creation order ("b-1", "b-2", …):
-    /// destination, transfer-target and media legs alike.
+    /// The legs this stack dialled, in creation order ("b-1", "b-2", …, in
+    /// the [`leg_space`](Self::leg_space) that minted each): destination,
+    /// transfer-target and media legs alike.
     pub b_legs: Vec<Leg>,
     /// The routing answers the call dialled, in opening order
     /// ([`crate::helpers::attempt`] is the writer).
@@ -149,9 +115,6 @@ pub struct Call {
     pub root_span_id: Option<String>,
     pub sampled: Option<bool>,
     pub worker_index: Option<i64>,
-    /// HA topology hint.
-    #[serde(rename = "_topology")]
-    pub topology: Option<CallTopology>,
     /// True if this call carries an emergency Resource-Priority.
     pub emergency: Option<bool>,
     /// Feature activations decoded from the decision-engine response.
@@ -189,7 +152,7 @@ pub struct Call {
     /// (`GlobalDuration`) is call-scoped, so a per-leg registry would be
     /// speculative — revisit when a genuinely per-leg event (BYE/INFO
     /// reporting) lands. Replicated like `features` (an ordinary `Call` field
-    /// on the msgpack body), so a takeover node keeps honoring the
+    /// on the msgpack body), so a restored record keeps honoring the
     /// subscription.
     pub subscriptions: Vec<ReleaseEventKind>,
     /// Per-call runtime state for an in-flight **established-call reroute**
@@ -201,7 +164,7 @@ pub struct Call {
     /// Every reliable provisional the call received (RFC 3262), in arrival
     /// order, for the life of the call: the engine records each one before
     /// any rule reads it ([`crate::helpers::reliable`] is the one writer).
-    /// Replicated with the call, so a takeover node discards a responder's
+    /// Replicated with the call, so a restored record discards a responder's
     /// retransmission, translates a PRACK's `RAck` and answers a late PRACK
     /// as the primary would.
     pub provisionals: Vec<Provisional>,
@@ -211,11 +174,19 @@ pub struct Call {
     pub message_seq: u32,
     /// The decisions applied to the call, in order
     /// ([`crate::helpers::mark_decision`] is the one writer); empty until the
-    /// first decision.
+    /// first decision. On a [`setup_cancelled`](Self::setup_cancelled) call,
+    /// the decisions that answered, none of them applied.
     pub decision_log: Vec<DecisionMark>,
     /// The count of applied decisions — `decision_log.len()`, kept as a field
     /// so a stamp reads it without a length; `0` before the first decision.
     pub decision_ordinal: u32,
+    /// The caller CANCELed the setup while its initial decision was in
+    /// flight: nothing the decision stated was applied, and the record may
+    /// hold no decision at all. The caller's 487 is the transaction layer's,
+    /// sent already or, from another node serving the call, on the INVITE
+    /// transaction it seeds when she repeats her CANCEL.
+    #[serde(default)]
+    pub setup_cancelled: bool,
     /// Who ended the call and why ([`crate::helpers::record_termination`] is
     /// the one writer, the first termination's record stands); `None` while
     /// the call is live.
@@ -223,14 +194,34 @@ pub struct Call {
     /// The turn being handled (one event under the call's lock), whose number
     /// every ring entry it appends carries; `1` for the initial INVITE's turn,
     /// advanced by one as each turn lands ([`crate::helpers::seal_turn`]).
-    /// A takeover resumes from the last flushed body: later turns died with
-    /// their entries on the primary, so no surviving entry shares a number.
+    /// A restored record resumes from the last flushed body: later turns were
+    /// never written, so no surviving entry shares a number.
     pub message_turn: u32,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate
     /// machine-bound rules.
     pub sm_cursors: BTreeMap<MachineId, StateLabel>,
+    /// The seed every tag this stack mints toward the caller is derived from,
+    /// drawn once at the call's birth from the keyed identifier stream and
+    /// replicated with the body: any owner of the call derives the tags its
+    /// first owner showed the caller (RFC 3261 §19.3, ADR-0055 §4).
+    #[serde(default)]
+    pub tag_seed: u64,
+    /// The leg-id space the node acting on the call mints from: the creating
+    /// node's from the call's birth, set by whichever node acts on it.
+    #[serde(default)]
+    pub leg_space: super::leg_space::LegSpace,
+    /// The received non-INVITE requests answered with a final whose server
+    /// transaction is still Completed, oldest first: what a copy of one draws
+    /// again (RFC 3261 §17.2.2), bounded by the messages the call may take over
+    /// Timer J (`max_messages_per_call`).
+    #[serde(default)]
+    pub answered: Vec<super::answered_request::AnsweredRequest>,
+    /// The requests sent off the call's turn whose answers it awaits, in
+    /// sending order: what a node serving the call sends again.
+    #[serde(default)]
+    pub awaited: Vec<super::off_turn::OffTurnRequest>,
 }
 
 impl Call {

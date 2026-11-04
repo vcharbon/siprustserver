@@ -5,7 +5,17 @@
 use crate::sdp_form::{AsWritten, SdpFormPolicy};
 use crate::service_params::ServiceParams;
 
+mod bounds;
+mod capacity;
+mod cdr;
+mod event_queue_gate;
+mod front;
 mod retry_after;
+mod validate;
+pub use capacity::{CapacityConfig, Ceilings};
+pub use cdr::CdrConfig;
+pub use event_queue_gate::{EventQueueGateConfig, GateBound, GateViolation, EVENT_QUEUE_CAPACITY};
+pub use front::Front;
 pub use retry_after::RetryAfterRange;
 
 /// Tunables for a B2BUA worker. Cheap to clone (a handful of scalars + two
@@ -14,17 +24,17 @@ pub use retry_after::RetryAfterRange;
 pub struct B2buaConfig {
     /// This worker's ordinal, encoded into `callRef` for partition routing.
     pub self_ordinal: String,
-    /// Local signaling IP stamped into Via / Contact.
+    /// The key every worker of the cluster shares to sign what it states
+    /// about its own requests (the via-extension, ADR-0055 §12): a peer
+    /// verifies the statement on a response its request drew. `None`: the
+    /// worker states nothing and trusts no statement.
+    pub cluster_key: Option<sip_ids::SigningKey>,
+    /// Local signaling IP stamped into Via, and into Contact standalone.
     pub sip_local_ip: String,
-    /// Local signaling port stamped into Via / Contact.
+    /// Local signaling port stamped into Via, and into Contact standalone.
     pub sip_local_port: u16,
-    /// When the worker is deployed behind the SIP front proxy, every b-leg
-    /// (worker→callee) outbound request is sent to this `(host, port)` with a
-    /// preloaded plain `Route: <sip:host:port;lr>`; the proxy's internal face
-    /// classifies it worker-outbound (skip LB, forward to the R-URI; ADR-0048).
-    /// The R-URI / remote target stays the callee (RFC 3261 §16.12). `None` =
-    /// send b-leg traffic straight to the callee.
-    pub b2b_outbound_proxy: Option<(String, u16)>,
+    /// The deployment mode: standalone, or behind the SIP front proxy.
+    pub front: Front,
     /// Global cap on concurrently-running handlers across all calls.
     pub event_dispatch_concurrency: usize,
     /// Per-call queue depth (events buffered behind a busy handler).
@@ -88,38 +98,9 @@ pub struct B2buaConfig {
     /// 30 s) breaks long-hold endurance traffic by poking mid-dialog calls whose
     /// UAC is not expecting it. Overridable per worker via `B2BUA_KEEPALIVE_SEC`.
     /// The test harness lowers this to 30 s so paused-clock tests stay fast.
+    /// A probe's only deadline is its own transaction's Timer F (32 s, RFC 3261
+    /// §17.1.2.2): unanswered by then, it ends the call.
     pub keepalive_interval_sec: i64,
-    /// **Keepalive-timeout grace**, seconds — how long the B2BUA waits for the
-    /// in-dialog OPTIONS `200` before declaring the leg dead and tearing the call
-    /// down (`keepalive-timeout` rule → BYE). Production default **32 s**. A 5 s
-    /// grace is unsound across a worker reboot: a
-    /// reclaimed dialog re-arms its keepalive and fires OPTIONS into a path still
-    /// settling (smoothed reclaim burst draining over `L_max/speedup`, the proxy
-    /// EndpointSlice re-discovering the rebooted worker's new pod IP), so the
-    /// round-trip can momentarily exceed 5 s and the worker BYEs thousands of
-    /// healthy reclaimed long-hold calls. A generous grace rides that recovery
-    /// window out; it must stay well under `keepalive_interval_sec` so two
-    /// keepalives never overlap. Overridable via `B2BUA_KEEPALIVE_TIMEOUT_SEC`.
-    pub keepalive_timeout_sec: i64,
-    /// **Reboot budget**, seconds — the TTL stamped on every *replicated* backup
-    /// `Element` (ADR-0011 X11). It is how long a backup copy survives without a
-    /// refresh from its primary, i.e. how long a primary may be down/rebooting
-    /// before its backups give up and self-evict. Decoupled from the OPTIONS
-    /// keepalive (which is leg-liveness, a different concern); default **600 s**.
-    ///
-    /// Under reactive-only takeover (ADR-0014) reclaim is the sole
-    /// quiescent-recovery path, so this TTL must comfortably outlast the
-    /// keepalive interval plus the 120 s reboot+rehydrate+smoothed-drain slack
-    /// (§3 of the reactive-takeover plan): `600 ≥ 300 + 120` with margin.
-    ///
-    /// Correctness coupling — the backup's TTL is *refreshed* only when the
-    /// primary flushes the call, and a quiescent established call is flushed only
-    /// by its keepalive OPTIONS. So this budget MUST outlast one keepalive gap
-    /// (`reboot_budget_sec >= keepalive_interval_sec`) or a healthy-but-idle
-    /// call's backup expires between pokes, silently dropping its failover
-    /// coverage. [`validate`](Self::validate) enforces both this and the absolute
-    /// floors. The non-replicating path ignores this (TTL stays `CALL_TTL_MS`).
-    pub reboot_budget_sec: i64,
     /// Limiter-refresh cadence, seconds — how often a counted call extends its
     /// lease on the limiter. The lease is the limiter's own, stated in its
     /// answers; this period plus one refresh tick must stay below it by a
@@ -138,21 +119,6 @@ pub struct B2buaConfig {
     pub limiter_refresh_batch_ms: u64,
     /// Most keys one limiter refresh request carries. Default 1000.
     pub limiter_refresh_batch_max: usize,
-    /// **Keepalive catch-up speed-up** (ADR-0014, performance-only). On reboot a
-    /// primary's `ReclaimAll` re-materialises its whole `pri:{self}` partition;
-    /// many keepalive timers are past-due. Firing them all at once floods a
-    /// freshly-rehydrated node, so the reclaim handler *smooths* the backlog: the
-    /// oldest-overdue keepalive fires first and the rest are staggered to drain
-    /// over `L_max / speedup` (bounded to `speedup`× the normal cadence), where
-    /// `L_max` is the largest overdue gap. This is pure load management with **no**
-    /// correctness role (`(p,b)` reconciliation makes any incidental keepalive
-    /// overlap non-corrupting), so it carries no timing assumption. Default **10**.
-    /// `<= 1` disables smoothing (every past-due keepalive fires immediately).
-    pub keepalive_catchup_speedup: i64,
-    /// Optional cap (seconds) on the keepalive catch-up drain window for a
-    /// pathological `L_max` (a very long reboot). `None` = no cap (drain over the
-    /// full `L_max / speedup`). See [`keepalive_catchup_speedup`](Self::keepalive_catchup_speedup).
-    pub max_catchup_window_sec: Option<i64>,
     /// **Call reaper** master switch (ADR-0020 X1). ON by default; `false` is a
     /// debugging escape hatch only — the in-process "released exactly once, one
     /// CDR" promise does not hold without it.
@@ -180,15 +146,14 @@ pub struct B2buaConfig {
     /// [`validate`](Self::validate)). Liveness derives ONLY from the stamp —
     /// never `created_at`, never timer deadlines.
     pub reaper_idle_max_sec: i64,
-    /// **Setup timeout**, milliseconds — the call-level a-leg initial-INVITE deadline:
-    /// armed at route time, cancelled at answer, deliberately NOT reset by
-    /// reroute/failover (each new b-leg that rings gets its own `NoAnswer`; this caps the
-    /// caller's *total* wait for a final response). It rides the replicated
-    /// `call.timers` ledger, so it survives a crash → reclaim — the sip-txn
-    /// transaction bound
-    /// ([`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)) cannot (the
-    /// transactions die with the node), so without it a worker kill strands
-    /// mid-setup calls holding limiter slots for the full 1 h GlobalDuration.
+    /// **Setup timeout**, milliseconds — the caller's initial-INVITE deadline:
+    /// armed at route time, cancelled at answer, deliberately NOT reset
+    /// by reroute/failover (each new b-leg that rings gets its own `NoAnswer`;
+    /// this caps the caller's *total* wait for a final response). It rides the
+    /// call record's timer ledger, which outlives the transactions that bound
+    /// ([`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)) lives in, so
+    /// a call whose transactions are gone is still ended at the deadline rather
+    /// than holding its limiter slots for the full 1 h GlobalDuration.
     /// Default **150 000 ms**: strictly below the configured transaction bound
     /// (enforced by [`validate`](Self::validate)) so the rules path owns the
     /// teardown (408 to the caller, CANCEL to pending b-legs, obligations
@@ -208,7 +173,8 @@ pub struct B2buaConfig {
     /// a route-supplied `NoAnswer` falling later than
     /// `bound − `[`NO_ANSWER_CANCEL_MARGIN_SEC`](Self::NO_ANSWER_CANCEL_MARGIN_SEC)
     /// after the leg's INVITE is held to that instant.
-    /// Default **158 s**; telephony deployments (Timer C > 3 min, 180 s PSTN
+    /// Default [`DEFAULT_INVITE_TXN_TIMEOUT_SEC`](Self::DEFAULT_INVITE_TXN_TIMEOUT_SEC)
+    /// (158 s); telephony deployments (Timer C > 3 min, 180 s PSTN
     /// supervision, hunting chains) raise it. Overridable via
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`.
     pub invite_txn_timeout_sec: i64,
@@ -224,8 +190,7 @@ pub struct B2buaConfig {
     /// [`validate`](Self::validate) range-checks
     /// [`MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`](Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC)
     /// `..=` [`MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`](Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC).
-    /// Default **32 s** (Timer B: no deviation until a deployment asks).
-    /// Overridable via
+    /// Default **5 s**: a silent next hop is given up fast. Overridable via
     /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`.
     pub invite_first_response_timeout_sec: i64,
     /// **Un-ACKed 2xx give-up deadline**, seconds (RFC 3261 §13.3.1.4; the
@@ -372,106 +337,28 @@ pub struct B2buaConfig {
     /// headers it captures. Off by default: the runner turns it on.
     pub cdr: CdrConfig,
     /// **Capacity admission** (ADR-0037): the live-call, transaction and RSS
-    /// ceilings above which a new call is refused, and the backup-copy
-    /// ceilings. Every bound is off by default.
+    /// ceilings above which a new call is refused. Every bound is off by
+    /// default.
     pub capacity: CapacityConfig,
+    /// **Event-queue gate** (ADR-0050 §9): the depth and wait of the
+    /// transaction event queue at which a `Ready` worker refuses new calls on
+    /// its OPTIONS answer, and the bounds and hold under which it accepts
+    /// them again.
+    pub event_queue_gate: EventQueueGateConfig,
     /// **Service parameters.** Product services carry their own parameters
     /// here, one value per type; their rules read them through `ctx.config`.
     /// Empty by default.
     pub service_params: ServiceParams,
 }
 
-/// A pair of admission ceilings on one measured quantity. At or above
-/// `normal` a new non-emergency call is refused; at or above `emergency`
-/// every new call is refused. `None` leaves that class unbounded.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Ceilings {
-    pub normal: Option<u64>,
-    pub emergency: Option<u64>,
-}
-
-impl Ceilings {
-    /// The ceiling a call of this class is refused at: a non-emergency call
-    /// meets the lower of the two, an emergency call only `emergency`.
-    pub fn for_class(&self, is_emergency: bool) -> Option<u64> {
-        if is_emergency {
-            self.emergency
-        } else {
-            match (self.normal, self.emergency) {
-                (Some(n), Some(e)) => Some(n.min(e)),
-                (n, e) => n.or(e),
-            }
-        }
-    }
-
-    fn validate(&self, name: &str) -> Result<(), String> {
-        if self.normal == Some(0) || self.emergency == Some(0) {
-            return Err(format!("capacity.{name}: a ceiling of 0 refuses every call; unset it"));
-        }
-        if let (Some(n), Some(e)) = (self.normal, self.emergency) {
-            if e < n {
-                return Err(format!(
-                    "capacity.{name}: emergency ceiling {e} is below the normal ceiling {n}; \
-                     emergency calls keep priority, so their ceiling must be the higher one"
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-/// The worker's memory bounds (ADR-0037). Live calls and transactions are
-/// counted exactly; RSS is the process resident set, sampled. The backup
-/// ceilings bound the replica bodies this node holds for its peers: at either
-/// one a replica of a call not yet held is not stored.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CapacityConfig {
-    /// Live calls this worker serves, takeover copies included.
-    pub calls: Ceilings,
-    /// Live SIP transactions, every role and state.
-    pub transactions: Ceilings,
-    /// Process resident set size, in bytes.
-    pub rss_bytes: Ceilings,
-    /// Backup replica bodies held for peers.
-    pub backup_calls: Option<u64>,
-    /// Process RSS above which a new backup replica is not stored.
-    pub backup_rss_bytes: Option<u64>,
-}
-
-impl CapacityConfig {
-    /// Refuses a zero ceiling and an emergency ceiling below its normal one.
-    pub fn validate(&self) -> Result<(), String> {
-        self.calls.validate("calls")?;
-        self.transactions.validate("transactions")?;
-        self.rss_bytes.validate("rss_bytes")?;
-        if self.backup_calls == Some(0) || self.backup_rss_bytes == Some(0) {
-            return Err("capacity: a backup ceiling of 0 stores no backup; unset it".to_string());
-        }
-        Ok(())
-    }
-}
-
-/// What the call keeps of its own SIP traffic for the record it writes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CdrConfig {
-    /// The per-leg message-ring cap: the last N messages after the leg's
-    /// opening (`call::MessageRing::push`), the rest counted as dropped. `0`
-    /// (the default) records nothing. Overridable via `B2BUA_CDR_MESSAGE_RING`.
-    pub message_ring: usize,
-    /// The header names whose every value each ring entry captures, in this
-    /// order; matched casing- and compact-form-insensitively. Empty = the
-    /// entries carry no header values. Overridable via
-    /// `B2BUA_CDR_CAPTURED_HEADERS` (comma-separated).
-    pub captured_headers: Vec<String>,
-}
-
 impl Default for B2buaConfig {
     fn default() -> Self {
         Self {
             self_ordinal: "w0".to_string(),
+            cluster_key: None,
             sip_local_ip: "127.0.0.1".to_string(),
             sip_local_port: 5060,
-            b2b_outbound_proxy: None,
+            front: Front::Standalone,
             event_dispatch_concurrency: 1024,
             per_call_queue_depth: 64,
             per_call_queue_cap: 200_000,
@@ -489,20 +376,16 @@ impl Default for B2buaConfig {
             refer_overall_safety_sec: 120,
             release_reroute_guard_sec: 120,
             keepalive_interval_sec: 300,
-            keepalive_timeout_sec: 32,
-            reboot_budget_sec: 600,
             limiter_refresh_sec: 40,
             limiter_release_queue_cap: 100_000,
             limiter_refresh_batch_ms: 1_000,
             limiter_refresh_batch_max: 1_000,
-            keepalive_catchup_speedup: 10,
-            max_catchup_window_sec: None,
             reaper_enabled: true,
             model_invariants: cfg!(debug_assertions),
             reaper_sweep_interval_sec: 30,
             reaper_idle_max_sec: 0,
             setup_timeout_ms: 150_000,
-            invite_txn_timeout_sec: 158,
+            invite_txn_timeout_sec: Self::DEFAULT_INVITE_TXN_TIMEOUT_SEC,
             invite_first_response_timeout_sec: Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC,
             ack_timeout_sec: Self::DEFAULT_ACK_TIMEOUT_SEC,
             // CPS bucket and panic-ELU rungs. Defaults match the env knobs
@@ -534,263 +417,32 @@ impl Default for B2buaConfig {
             minted_final_advertisement: sip_message::generators::CapabilitySet::silent(),
             cdr: CdrConfig::default(),
             capacity: CapacityConfig::default(),
+            event_queue_gate: EventQueueGateConfig::default(),
             service_params: ServiceParams::default(),
         }
     }
 }
 
 impl B2buaConfig {
-    /// Absolute minimum OPTIONS keepalive (s). Below 2 min a mid-dialog OPTIONS
-    /// poke breaks long-hold traffic (see
-    /// [`keepalive_interval_sec`](Self::keepalive_interval_sec) doc). A
-    /// **production** floor only — the paused-clock test harness builds configs
-    /// directly and skips [`validate`](Self::validate) to use a faster cadence.
-    pub const MIN_KEEPALIVE_SEC: i64 = 120;
-    /// Absolute minimum reboot budget (s): a backup must survive a primary's
-    /// reboot. The effective floor is usually higher — see [`validate`](Self::validate).
-    pub const MIN_REBOOT_BUDGET_SEC: i64 = 60;
-    /// Floor for [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) (s):
-    /// the out-of-dialog bound must stay above the 32 s in-dialog Timer B.
-    pub const MIN_INVITE_TXN_TIMEOUT_SEC: i64 = 33;
-    /// Ceiling for [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) (s):
-    /// the top of the supported telephony setup range (~10 min hunting chains).
-    pub const MAX_INVITE_TXN_TIMEOUT_SEC: i64 = 600;
-    /// Floor for
-    /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
-    /// (s): two Timer A re-sends (rungs at 0.5 s and 1.5 s) precede the
-    /// deadline, so a lossy path still gets more than one chance.
-    pub const MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 2;
-    /// Ceiling for
-    /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
-    /// (s): Timer B itself (RFC 3261 §17.1.1.2, 64·T1), past which the
-    /// transaction reports the hop dead on its own.
-    pub const MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 32;
-    /// Default
-    /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
-    /// (s): Timer B, the RFC value.
-    pub const DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 32;
-    /// Margin (s) a route-supplied `NoAnswer` deadline must keep under
-    /// [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec): the room the
-    /// CANCEL→487 exchange needs to complete inside the still-live b-leg client
-    /// transaction (mirrors the default 150/158 gap).
-    pub const NO_ANSWER_CANCEL_MARGIN_SEC: i64 = 8;
-    /// Default [`ack_timeout_sec`](Self::ack_timeout_sec) (s): RFC 3261
-    /// §13.3.1.4's `64·T1`, Timer L.
-    pub const DEFAULT_ACK_TIMEOUT_SEC: i64 = 32;
-
-    /// Validate operator-supplied tunables at **boot** (the runner calls this and
-    /// refuses to start on `Err`; unit/sim harnesses construct configs directly
-    /// and skip it). Returns the first violation as a human-readable message.
-    pub fn validate(&self) -> Result<(), String> {
-        if let Some(r) = self.glare_retry_after {
-            if r.min_sec > r.max_sec {
-                return Err(format!(
-                    "glare_retry_after={}..={}: an empty range picks no Retry-After",
-                    r.min_sec, r.max_sec
-                ));
-            }
-        }
-        if !(1..=100).contains(&self.new_call_permit_share_percent) {
-            return Err(format!(
-                "new_call_permit_share_percent={} outside 1..=100: new calls need at least \
-                 one handler permit and can hold no more than the whole pool",
-                self.new_call_permit_share_percent
-            ));
-        }
-        if self.new_call_queue_headroom_percent > 99 {
-            return Err(format!(
-                "new_call_queue_headroom_percent={} above 99: a headroom of the whole cap \
-                 refuses every normal new call",
-                self.new_call_queue_headroom_percent
-            ));
-        }
-        if self.limiter_refresh_sec <= 0 {
-            return Err(format!(
-                "limiter_refresh_sec={}: a counted call refreshes at a positive period",
-                self.limiter_refresh_sec
-            ));
-        }
-        let refresh_ms = self.limiter_refresh_sec.saturating_mul(1000);
-        let batch = i64::try_from(self.limiter_refresh_batch_ms);
-        if !batch.is_ok_and(|batch| (1..refresh_ms).contains(&batch)) {
-            return Err(format!(
-                "limiter_refresh_batch_ms={} not in 1..{refresh_ms} (limiter_refresh_sec): a \
-                 refresh falling due must leave within one refresh period",
-                self.limiter_refresh_batch_ms
-            ));
-        }
-        if self.limiter_refresh_batch_max == 0 {
-            return Err("limiter_refresh_batch_max=0: a refresh request carries at least one \
-                        key"
-            .to_string());
-        }
-        if self.limiter_release_queue_cap == 0 {
-            return Err("limiter_release_queue_cap=0: the release queue needs room for \
-                        one release"
-                .to_string());
-        }
-        if self.reaper_enabled && self.max_messages_per_call_lifetime == 0 {
-            return Err("max_messages_per_call_lifetime=0: the per-call work bound has no \
-                        off; set it far above any healthy call"
-                .to_string());
-        }
-        if self.keepalive_interval_sec < Self::MIN_KEEPALIVE_SEC {
-            return Err(format!(
-                "keepalive_interval_sec={} < min {} s (2 min): a shorter in-dialog \
-                 OPTIONS cadence breaks long-hold traffic",
-                self.keepalive_interval_sec,
-                Self::MIN_KEEPALIVE_SEC
-            ));
-        }
-        if self.reboot_budget_sec < Self::MIN_REBOOT_BUDGET_SEC {
-            return Err(format!(
-                "reboot_budget_sec={} < min {} s (1 min): a replicated backup must \
-                 survive a primary reboot",
-                self.reboot_budget_sec,
-                Self::MIN_REBOOT_BUDGET_SEC
-            ));
-        }
-        // The backup `Element` TTL is refreshed only on a primary flush, and a
-        // quiescent established call is flushed only by its keepalive OPTIONS. So
-        // the budget must outlast one keepalive gap or an idle call's backup
-        // self-evicts before its next refresh, silently losing failover coverage.
-        if self.reboot_budget_sec < self.keepalive_interval_sec {
-            return Err(format!(
-                "reboot_budget_sec={} < keepalive_interval_sec={}: the backup TTL is \
-                 refreshed each keepalive flush, so the budget must outlast one \
-                 keepalive gap (an idle call is flushed only by its keepalive)",
-                self.reboot_budget_sec, self.keepalive_interval_sec
-            ));
-        }
-        // The reaper's staleness verdict is only provable when a healthy call is
-        // guaranteed at least one liveness-bearing event (its keepalive OPTIONS
-        // `200` — only real SIP traffic stamps the ledger) inside the idle
-        // window — below 2 keepalive intervals a merely-quiet call could be
-        // reaped (ADR-0020 X4).
-        if self.reaper_idle_max_sec != 0
-            && self.reaper_idle_max_sec < 2 * self.keepalive_interval_sec
-        {
-            return Err(format!(
-                "reaper_idle_max_sec={} < 2 × keepalive_interval_sec={}: a healthy \
-                 call is only provably dead after missing at least two keepalive \
-                 cycles (0 derives 3× automatically)",
-                self.reaper_idle_max_sec, self.keepalive_interval_sec
-            ));
-        }
-        // ── Worker overload protection (CPS bucket + panic-ELU rungs) ──
-        // The panic-ELU backstop 503s a new INVITE when the worker's own
-        // EWMA-smoothed Event-Loop Utilization exceeds this fraction. ELU is
-        // clamped to [0, 1], so a threshold <= 0 (or NaN) would trip for *every*
-        // call the instant load is non-zero — the worker could never admit an
-        // INVITE. (>= 1.0 is the documented "disable" and is allowed: the clamped
-        // ELU never exceeds 1.)
-        if !(self.overload_panic_elu_threshold.is_finite()
-            && self.overload_panic_elu_threshold > 0.0)
-        {
-            return Err(format!(
-                "overload_panic_elu_threshold={} is not a positive fraction: ELU is \
-                 clamped to [0,1], so a value <= 0 (or NaN) would 503 every new \
-                 INVITE the instant load rises. Use a value in (0, 1] (>= 1.0 \
-                 disables the backstop)",
-                self.overload_panic_elu_threshold
-            ));
-        }
-        // The transaction bound must sit in the supported range: above the 32 s
-        // in-dialog Timer B (the floor keeps the out-of-dialog window the LONG
-        // one), at most the telephony ceiling.
-        if !(Self::MIN_INVITE_TXN_TIMEOUT_SEC..=Self::MAX_INVITE_TXN_TIMEOUT_SEC)
-            .contains(&self.invite_txn_timeout_sec)
-        {
-            return Err(format!(
-                "invite_txn_timeout_sec={} outside the supported {}..={} s range",
-                self.invite_txn_timeout_sec,
-                Self::MIN_INVITE_TXN_TIMEOUT_SEC,
-                Self::MAX_INVITE_TXN_TIMEOUT_SEC
-            ));
-        }
-        // The first-response deadline sits between the two-rung floor and
-        // Timer B: below the floor the hop has heard the INVITE once, above
-        // Timer B the transaction reports the hop dead on its own.
-        if !(Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC
-            ..=Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC)
-            .contains(&self.invite_first_response_timeout_sec)
-        {
-            return Err(format!(
-                "invite_first_response_timeout_sec={} outside the supported {}..={} s range",
-                self.invite_first_response_timeout_sec,
-                Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC,
-                Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC
-            ));
-        }
-        // Above the transaction bound the ordering inverts: the txn layer CANCELs the b-leg on
-        // its own, the app give-up authors a SECOND final, and the callee's 487 lands on a dead
-        // client txn (never ACKed). The app setup deadline must therefore fire strictly first.
-        if self.setup_timeout_ms > 0 && self.setup_timeout_ms >= self.invite_txn_timeout_sec * 1000
-        {
-            return Err(format!(
-                "setup_timeout_ms={} >= invite_txn_timeout_sec={} s: the app setup \
-                 deadline must fire strictly before the transaction bound, or the \
-                 txn layer tears the b-leg down first and the caller takes two \
-                 finals on one INVITE",
-                self.setup_timeout_ms, self.invite_txn_timeout_sec
-            ));
-        }
-        // A ringing call stamps no ledger liveness until its setup resolves, so
-        // an explicit reaper idle window at or under the transaction bound would
-        // reap a call that is legitimately still ringing (the derived window is
-        // floored above the bound automatically — see `reaper_idle_max_ms`).
-        if self.reaper_idle_max_sec != 0 && self.reaper_idle_max_sec <= self.invite_txn_timeout_sec
-        {
-            return Err(format!(
-                "reaper_idle_max_sec={} <= invite_txn_timeout_sec={}: the reaper idle \
-                 window must outlast the longest configured ring, or a legitimately \
-                 still-ringing call is reaped before its own setup deadline",
-                self.reaper_idle_max_sec, self.invite_txn_timeout_sec
-            ));
-        }
-        // The un-ACKed 2xx give-up is a deadline, never a switch (RFC 3261
-        // §13.3.1.4): a non-positive value would configure a leaking session.
-        if self.ack_timeout_sec <= 0 {
-            return Err(format!(
-                "ack_timeout_sec={} is not a positive deadline: an un-ACKed 2xx \
-                 always ends the session (RFC 3261 §13.3.1.4), the knob only says \
-                 how many seconds to wait first (default {})",
-                self.ack_timeout_sec,
-                Self::DEFAULT_ACK_TIMEOUT_SEC
-            ));
-        }
-        // The CPS bucket refills at `cps_bucket_rate` tokens/s up to
-        // `cps_bucket_size`. If the gate is enabled (size > 0) but the rate is 0,
-        // the bucket drains once and never refills — after the first burst EVERY
-        // new INVITE is 503'd forever. (size == 0 disables the hard CPS gate, so
-        // the rate is moot.)
-        if self.cps_bucket_size > 0 && self.cps_bucket_rate == 0 {
-            return Err(format!(
-                "cps_bucket_rate=0 with cps_bucket_size={} (CPS gate enabled): the \
-                 token bucket would drain once and never refill, 503-ing every new \
-                 INVITE after the first burst. Set a positive refill rate, or set \
-                 cps_bucket_size=0 to disable the hard CPS gate",
-                self.cps_bucket_size
-            ));
-        }
-        self.capacity.validate()?;
-        Ok(())
-    }
-
     /// The configured initial-INVITE transaction bound in ms — the value wired
     /// into `TransactionConfig::invite_initial_timeout_ms`. `<= 0` is NOT
     /// "disabled" (unlike [`setup_timeout_ms`](Self::setup_timeout_ms)):
-    /// a non-positive value falls back to the 158 s default rather than arming
-    /// a degenerate bound.
+    /// a non-positive value falls back to
+    /// [`DEFAULT_INVITE_TXN_TIMEOUT_SEC`](Self::DEFAULT_INVITE_TXN_TIMEOUT_SEC)
+    /// rather than arming a degenerate bound.
     pub fn invite_txn_timeout_ms(&self) -> u64 {
-        let sec = if self.invite_txn_timeout_sec > 0 { self.invite_txn_timeout_sec } else { 158 };
-        u64::try_from(sec).unwrap_or(158).saturating_mul(1000)
+        let sec = if self.invite_txn_timeout_sec > 0 {
+            self.invite_txn_timeout_sec
+        } else {
+            Self::DEFAULT_INVITE_TXN_TIMEOUT_SEC
+        };
+        sec.unsigned_abs().saturating_mul(1000)
     }
 
     /// The configured initial-INVITE first-response deadline in ms — the value
     /// wired into `TransactionConfig::invite_first_response_timeout_ms`. `<= 0`
-    /// is NOT "disabled": a non-positive value falls back to the 32 s Timer B
-    /// default rather than arming a degenerate deadline.
+    /// is NOT "disabled": a non-positive value falls back to the 5 s default
+    /// rather than arming a degenerate deadline.
     pub fn invite_first_response_timeout_ms(&self) -> u64 {
         let sec = if self.invite_first_response_timeout_sec > 0 {
             self.invite_first_response_timeout_sec

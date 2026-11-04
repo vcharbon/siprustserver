@@ -7,8 +7,8 @@
 pub mod message_cap;
 pub mod quiet_turn;
 pub mod response_facts;
-pub mod superseded_relay;
 pub mod timer_screen;
+mod unheld_final;
 
 use call::helpers::{Arrival, Resolved};
 use call::{Call, CallModelState, Direction, Obligation, TimerType};
@@ -18,9 +18,10 @@ use crate::answer_deadline::Screened;
 use crate::config::B2buaConfig;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
 use crate::obligations::ObligationSet;
-use crate::rules::actions::{Owed, Settle};
+use crate::owners::Owners;
+use crate::rules::actions::{possibly_confirmed, Owed, Settle};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
-use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
+use crate::rules::{execute_turn, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
 use crate::turn_notes::TurnNotes;
 use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
@@ -44,22 +45,13 @@ pub struct TurnInput<'a> {
     pub direction: Direction,
     /// What the dialog gate resolved the event's message to.
     pub resolved: Resolved,
+    /// A response: whether it answered a client transaction the transaction
+    /// layer holds, which ACKs a non-2xx INVITE final hop-by-hop itself (RFC
+    /// 3261 §17.1.1.3). `false` for a request.
+    pub matched_client_txn: bool,
     pub now_ms: i64,
-}
-
-/// The branch of a BYE client transaction `event` ends: a final to it, or a
-/// transaction timeout (whose branch names it alone).
-fn bye_transaction_end(event: &CallEvent) -> Option<&str> {
-    match event {
-        CallEvent::Sip { message, .. } => match message.as_ref() {
-            SipMessage::Response(r) if r.status() >= 200 && r.cseq().method() == Method::Bye => {
-                r.top_via().branch()
-            }
-            _ => None,
-        },
-        CallEvent::Timeout { branch, .. } => Some(branch.as_str()),
-        _ => None,
-    }
+    /// The call's owners, as the shell read them at the turn's start.
+    pub owners: Owners,
 }
 
 /// Run the synchronous rule chain for one in-dialog event, with the
@@ -86,7 +78,16 @@ pub fn rule_chain_turn(
     input: TurnInput<'_>,
     turn: &mut TurnScope,
 ) -> HandlerResult {
-    let TurnInput { event, call_ref, source_leg_id, direction, resolved, now_ms } = input;
+    let TurnInput {
+        event,
+        call_ref,
+        source_leg_id,
+        direction,
+        mut resolved,
+        matched_client_txn,
+        now_ms,
+        owners,
+    } = input;
     // The cap budget is a PER-LIVENESS-INTERVAL rate, not a lifetime total: the
     // keepalive tick RESETS the counter, opening a fresh window. A runaway
     // dialog still lands >cap events inside one window and is torn down; a
@@ -96,7 +97,10 @@ pub fn rule_chain_turn(
     // call around message 200, BYEing a healthy dialog mid-call.
     let bumped = if fired(event, &TimerType::Keepalive) {
         0
-    } else if fired(event, &TimerType::Rung) || fired(event, &TimerType::NotifyAnswerCap) {
+    } else if fired(event, &TimerType::Rung)
+        || fired(event, &TimerType::NotifyAnswerCap)
+        || fired(event, &TimerType::HeldAnswer)
+    {
         call.message_count.unwrap_or(0)
     } else {
         call.message_count.unwrap_or(0) + 1
@@ -104,7 +108,7 @@ pub fn rule_chain_turn(
     call.message_count = Some(bumped);
     let cap_exceeded = i64::try_from(fw.config.max_messages_per_call).is_ok_and(|cap| bumped > cap)
         && !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
-    let mut exec = ActionExecutor { config: fw.config, turn, now_ms };
+    let mut exec = ActionExecutor { config: fw.config, owners: &owners, turn, now_ms };
     // The dialog-level ladders are the framework's (ADR-0032 X4): a rung is
     // repeated here and never reaches a rule; the discharging ACK or PRACK
     // retires its ladder before the rules run and they read the fact; a
@@ -121,10 +125,15 @@ pub fn rule_chain_turn(
     {
         Screened::Expired(lost) => {
             lost_answer = lost;
+            ladder_fx.took_answer = true;
             (&lost_answer, true)
         }
         Screened::Unawaited => (event, false),
-        Screened::Awaited | Screened::Other => (event, true),
+        Screened::Awaited | Screened::Other => {
+            // A REFER's authorization answers with no deadline of its own.
+            ladder_fx.took_answer = crate::off_turn::is_answer(event);
+            (event, true)
+        }
     };
     if let Some(obligation) = fired_obligation(event, &TimerType::Rung) {
         let before = call.clone();
@@ -141,33 +150,69 @@ pub fn rule_chain_turn(
         let released = HandlerResult { call, effects: ladder_fx };
         return enforced(fw, &before, released, now_ms, &mut exec.turn.notes);
     }
+    // A caller dialog held possibly confirmed is the framework's: its hold
+    // ends with her ACK naming it or at its deadline, its BYE leaves, and no
+    // rule sees either (ADR-0055 §4).
+    if let Some(tag) = possibly_confirmed::released_by(&call, event, source_leg_id) {
+        let before = call.clone();
+        exec.release_possibly_confirmed(&mut call, &mut ladder_fx, &tag);
+        let released = HandlerResult { call, effects: ladder_fx };
+        return enforced(fw, &before, released, now_ms, &mut exec.turn.notes);
+    }
+    // The deadline of a request held for a service's final is the
+    // framework's: the platform answers it, and no rule sees the fire.
+    if fired(event, &TimerType::HeldAnswer) {
+        let before = call.clone();
+        exec.answer_overdue_held(&mut call, &mut ladder_fx);
+        let answered = HandlerResult { call, effects: ladder_fx };
+        return enforced(fw, &before, answered, now_ms, &mut exec.turn.notes);
+    }
     let start = TurnStart::of(&call);
     // A reliable provisional is the engine's before it is any rule's (RFC
     // 3262): recorded with its early dialog and offer, or — a repeat, or out
     // of `RSeq` order — dropped unread, its turn a write of nothing else.
     let arrival = exec.take_reliable_provisional(&mut call, event, source_leg_id);
     let screened = matches!(arrival, Some(Arrival::Repeat | Arrival::OutOfOrder));
-    let rules_read = rules_read && !screened;
+    // A fire of the setup's deadline once the setup is over reaches no rule:
+    // its scope is read as the call stands at the fire.
+    let rules_read = rules_read && !screened && !setup_spent(event, &call);
     let discharged = exec.discharge(&mut call, &mut ladder_fx, event, source_leg_id);
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
             let leg = source_leg_id;
             let fx = &mut ladder_fx;
             response_facts::record(&mut exec, &mut call, fx, leg, resp, screened);
-            exec.release_answered_notify(&mut call, &mut ladder_fx, leg, resp);
+            // Only the final on this stack's NOTIFY's own transaction ends
+            // the wait behind it and speaks for its subscription: a final to
+            // another request at its number, one the record never sent,
+            // answers nothing here.
+            if let Some((holder, record)) = resolved.record.as_deref() {
+                if resp.status() >= 200 {
+                    let status = Some(resp.status());
+                    exec.notify_settled(&mut call, fx, leg, holder, record, status);
+                }
+            }
         }
     }
-    // The end of a BYE that released a retired dialog, its final or its
-    // timeout, settles that release (§15.1.1) before the rules read it.
-    if let Some(branch) = bye_transaction_end(event) {
-        call = call::helpers::settle_straggler_release(call, branch);
+    // The request record a final or a timeout settles is settled before the
+    // rules read the event, which they read on `resolved` (ADR-0055 §2).
+    exec.settle_before_rules(&mut call, event, source_leg_id, &mut resolved);
+    // This stack's NOTIFY that timed out ends its subscription (RFC 6665
+    // §4.2.2) and no longer holds the requests behind it.
+    if let (CallEvent::Timeout { .. }, Some((holder, record))) = (event, resolved.record.as_deref())
+    {
+        exec.notify_settled(&mut call, &mut ladder_fx, source_leg_id, holder, record, None);
     }
     // The transaction layer answered an out-of-dialog CANCEL itself — 200 to
     // the CANCEL, 487 to the initial INVITE (RFC 3261 §9.2): the record
     // carries that transaction's one final before the rules read it, over a
     // 2xx this stack built too late for the completed transaction to send.
-    if let CallEvent::Cancelled { in_dialog: false, .. } = event {
-        call = call::helpers::record_cancelled_invite(call, source_leg_id);
+    if let CallEvent::Cancelled { in_dialog: false, to_tag, .. } = event {
+        let caller = call.a_leg.leg_id == source_leg_id;
+        let notes = &mut exec.turn.notes;
+        let sent =
+            caller.then(|| crate::rules::relay::cancelled_final(&call, to_tag.clone(), notes));
+        call::helpers::record_cancelled_invite(&mut call, source_leg_id, sent.flatten());
     }
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         exec.turn.notes.repeat_give_up(obligation.kind());
@@ -178,8 +223,14 @@ pub fn rule_chain_turn(
     if let Some(ring) = crate::message_ring::Ring::of(fw.config) {
         let dialog = resolved.dialog.as_ref();
         let repeat = arrival == Some(Arrival::Repeat);
-        call =
-            ring.received(call, source_leg_id, event, repeat, discharged.as_ref(), dialog, now_ms);
+        let received = crate::message_ring::Received {
+            event,
+            matched_client_txn,
+            repeat,
+            discharged: discharged.as_ref(),
+            dialog,
+        };
+        call = ring.received(call, source_leg_id, received, now_ms);
     }
     // An INVITE (offerless included) or an UPDATE offer the leg's peer sends
     // opens an exchange on that leg, counted once as it is received, before
@@ -216,7 +267,7 @@ pub fn rule_chain_turn(
         resolved: &resolved,
     };
     let mut result = if rules_read {
-        execute_rules(fw.rules, &call, &rule_ctx, &mut exec, fw.obligations)
+        execute_turn(fw.rules, &call, &rule_ctx, owners.copy_served, &mut exec, fw.obligations)
     } else {
         HandlerResult { call: call.clone(), effects: HandlerEffects::new() }
     };
@@ -226,15 +277,24 @@ pub fn rule_chain_turn(
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
             if resp.status() >= 200 && resp.cseq().method() == Method::Invite {
-                result.call = call::helpers::record_dialled_invite_final(
-                    result.call,
+                call::helpers::record_dialled_invite_final(
+                    &mut result.call,
                     source_leg_id,
                     i64::from(resp.cseq().seq()),
                     resp.status(),
+                    now_ms,
                 );
             }
         }
     }
+    unheld_final::ack_unheld_final(
+        fw.config,
+        event,
+        matched_client_txn,
+        &mut result.effects,
+        &mut exec.turn.ids,
+        now_ms,
+    );
     quiet_turn::name_candidate(&mut result, &call, event, discharged.as_ref());
     // The ladder's own effects (its cancels) precede the rule's.
     ladder_fx.extend(std::mem::take(&mut result.effects));
@@ -274,6 +334,13 @@ pub fn enforced(
         crate::rules::invariants::UnansweredCaller::Answer(&fw.config.minted_final_advertisement),
         notes,
     )
+}
+
+/// Whether `event` fires a timer guarding the call's setup on a call whose
+/// setup is over ([`call::helpers::setup_over`]).
+fn setup_spent(event: &CallEvent, call: &Call) -> bool {
+    matches!(event, CallEvent::Timer { key, .. } if key.scope == call::TimerScope::Setup)
+        && call::helpers::setup_over(call)
 }
 
 /// Whether `event` is a fire of a timer of type `timer_type`.

@@ -40,7 +40,7 @@ use topology::{Peer, SimulatedMembership};
 // landed in the store"; this reaches "call live + routable + keepalive re-armed".
 use std::collections::HashMap;
 
-use call::{CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
+use call::{TimerKey, TimerType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 use sip_net::{BindUdpOpts, RealSignalingNetwork, SignalingNetwork};
@@ -117,16 +117,16 @@ fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (Strin
     // +5 min: restored into the DelayQueue but never fires during the test.
     let fire_at = clock.now_ms() + 300_000;
     call::helpers::arm_timer(&mut call, TimerKey::call(TimerType::Keepalive), fire_at);
-    let body = MsgpackCodec::new().encode(&call).unwrap();
+    let body = crate::store::envelope::placed_body(&call).unwrap();
     (call.call_ref.clone(), body)
 }
 
 /// Spawn a FULL rebooting `B2buaCore` reclaimer (`self_ordinal`, incarnation 2)
 /// on a real SIP UDP endpoint, replicating over `repl_net`, pulling its single
 /// peer (`peer_ordinal` @ `peer_addr`). Returns the core + its repl store handle.
-/// Its supervisor bootstraps the peer and signals the REAL `router::reclaim_all`
-/// — so a `serves()` true means the call went all the way through materialise +
-/// timer re-arm, not just store-landing.
+/// Its supervisor bootstraps the peer and signals the REAL bulk reclaim
+/// — so a `serves()` true means the call went all the way through materialise,
+/// not just store-landing.
 async fn spawn_reclaimer_core(
     self_ordinal: &str,
     peer_ordinal: &str,
@@ -139,10 +139,8 @@ async fn spawn_reclaimer_core(
     let sip_port = endpoint.local_addr().port();
 
     // Fresh empty store at a higher incarnation gen (the rebooted node).
-    let store = Arc::new(ReplicatingCallStore::with_changelog(
-        Changelog::new(2, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    ));
+    let changelog = Changelog::new(2, clock.clone());
+    let store = Arc::new(ReplicatingCallStore::with_changelog(changelog, clock.clone()));
     let addr_map: HashMap<String, SocketAddr> =
         [(peer_ordinal.to_string(), peer_addr)].into_iter().collect();
     let addr_resolver: crate::repl::AddrResolver =
@@ -160,23 +158,26 @@ async fn spawn_reclaimer_core(
         incarnation_gen: 2,
         puller: PullerConfig::default(),
         serve: ServeConfig::default(),
-    };
-    let config = B2buaConfig {
-        self_ordinal: self_ordinal.into(),
-        sip_local_ip: "127.0.0.1".into(),
-        sip_local_port: sip_port,
-        keepalive_interval_sec: 300,
-        reboot_budget_sec: 600,
-        ..Default::default()
+        replica: crate::node::replica::ReplicaConfig::default(),
+        write_path: Default::default(),
+        verdict: Default::default(),
     };
     let deps = B2buaDeps {
-        config,
+        config: B2buaConfig {
+            self_ordinal: self_ordinal.into(),
+            sip_local_ip: "127.0.0.1".into(),
+            sip_local_port: sip_port,
+            keepalive_interval_sec: 300,
+            ..Default::default()
+        },
+        identity: String::new(),
         decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 9)),
         limiter: Arc::new(NoopLimiter),
         cdr: Arc::new(InMemoryCdrWriter::new()),
         store: Arc::new(InMemoryCallStore::new()), // throwaway legacy slot
         store_faults: Default::default(),          // no injected faults
         wire_faults: Default::default(),
+        turn_probe: Default::default(),
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
         refusals: None,
@@ -216,7 +217,7 @@ async fn spawn_primary(
     net: &RealReplicationNetwork,
     clock: &Clock,
 ) -> (ReplicatingCallStore, SocketAddr) {
-    let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let changelog = Changelog::new(1, clock.clone());
     let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     let listener = net.listen(loopback()).await.unwrap();
     let addr = listener.local_addr();
@@ -253,10 +254,9 @@ fn spawn_puller(
 }
 
 // ---------------------------------------------------------------------------
-// An in-dialog mutation made on the primary AFTER the puller has connected +
-// bootstrapped (cold, empty store) must stream over real TCP and land on the
-// backup (a broken tail shows as `repl_pull_applied = 0`); the sim suite cannot
-// reach it (no real socket).
+// An in-dialog mutation made on the primary AFTER the puller has connected + bootstrapped
+// (cold, empty store) must stream over real TCP and land on the backup (a broken tail
+// shows as `repl_pull_applied = 0`); the sim suite cannot reach it (no real socket).
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn tail_delivers_post_connect_mutation_over_real_tcp() {
@@ -265,10 +265,7 @@ async fn tail_delivers_post_connect_mutation_over_real_tcp() {
 
     // Primary w0 serves; backup w1 pulls w0 into its store.
     let (w0, w0_addr) = spawn_primary("w0", &net, &clock).await;
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (_cancel, metrics) =
         spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Bak);
 
@@ -320,10 +317,7 @@ async fn tail_streams_successive_updates_over_real_tcp() {
     let net = RealReplicationNetwork::new();
 
     let (w0, w0_addr) = spawn_primary("w0", &net, &clock).await;
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (_cancel, metrics) =
         spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Bak);
 
@@ -379,10 +373,7 @@ async fn bootstrap_preseed_delivers_over_real_tcp() {
     .await
     .unwrap();
 
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (_cancel, metrics) =
         spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Pri);
 
@@ -563,10 +554,7 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
     }
 
     // Cold w1 bootstraps the full set; time from connect to last context landed.
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let started = tokio::time::Instant::now();
     let (_cancel, metrics) =
         spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Pri);
@@ -610,12 +598,12 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
 }
 
 // ---------------------------------------------------------------------------
-// MATERIALISATION gate (real `reclaim_all`, end-to-end, under serving load).
+// MATERIALISATION gate (real bulk reclaim, end-to-end, under serving load).
 //
 // The stream gates above stop one stage too early: they assert the body LANDED
 // in the store (`scan_call_refs` / `repl_pull_applied`). A call only becomes
 // LIVE + routable + keepalive-armed after the SECOND stage —
-// `ReclaimAll → reclaim_into_live → materialize_if_absent + timers.restore`
+// `ReclaimAll → park_all → materialize_if_absent`, then `arm_parked → timers.restore`
 // (`router.rs`), which a bare `ReplicatingCallStore` can't reach. That second
 // stage is exactly what was slow on the live cluster (`repl_reclaimed_total`
 // trickled 203→433 over 15 min at ~30% CPU — wait-bound, not compute-bound), so
@@ -662,7 +650,7 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
 
     // w1: a FULL rebooting B2buaCore reclaimer pointed at w0. Start the clock the
     // instant it comes up — the measured interval is connect → bootstrap → the
-    // real reclaim_all materialising every call.
+    // real bulk reclaim materialising every call.
     let started = tokio::time::Instant::now();
     let (w1, w1_store) = spawn_reclaimer_core("w1", "w0", w0_addr, &net, &clock).await;
 
@@ -723,7 +711,7 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
     assert_eq!(
         w1.metrics().repl_reclaimed_total(),
         N as u64,
-        "the bulk reclaim_all materialised all {N} (no reactive trickle, no truncation)",
+        "the bulk reclaim materialised all {N} (no reactive trickle, no truncation)",
     );
 
     // (b) Materialisation throughput floor under serving load — comfortably met
@@ -761,10 +749,8 @@ async fn mismatched_ordinal_silently_delivers_nothing() {
 
     // The puller connects as "b2bua-worker-1" — but the primary will bump its
     // changelog for peer "w1" (the proxy's mismatched cookie id).
-    let backup = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let backup =
+        ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (_cancel, metrics) = spawn_puller(
         "b2bua-worker-1",
         "w0",
@@ -824,10 +810,7 @@ async fn measure_bootstrap(
             .await
             .unwrap();
     }
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
 
     // Concurrent live-write storm on w0 (forwarded to a dummy peer so it never
     // reaches w1) — pure contention on w0's meta/inner locks during the scan.
@@ -1004,7 +987,7 @@ async fn measure_bootstrap_latent(
     send_cost: Duration,
 ) -> Duration {
     let net = LatentNet { inner: Arc::new(base.clone()), send_cost };
-    let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let changelog = Changelog::new(1, clock.clone());
     let w0 = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     let listener = net.listen(loopback()).await.unwrap();
     let w0_addr = listener.local_addr();
@@ -1016,10 +999,7 @@ async fn measure_bootstrap_latent(
             .await
             .unwrap();
     }
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let metrics = B2buaMetrics::new();
     let (puller, _status) = Puller::new_at(
         "w0",
@@ -1153,7 +1133,7 @@ async fn bootstrap_coalesces_into_few_network_rounds() {
         CountingNet { inner: Arc::new(RealReplicationNetwork::new()), rounds: rounds.clone() };
 
     // Primary w0 holds N static bak:w1 bodies; serve over the counting net.
-    let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let changelog = Changelog::new(1, clock.clone());
     let w0 = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     let listener = net.listen(loopback()).await.unwrap();
     let w0_addr = listener.local_addr();
@@ -1167,10 +1147,7 @@ async fn bootstrap_coalesces_into_few_network_rounds() {
     }
 
     // Cold w1 bootstraps over the counting net.
-    let w1 = ReplicatingCallStore::with_changelog(
-        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
-        clock.clone(),
-    );
+    let w1 = ReplicatingCallStore::with_changelog(Changelog::new(1, clock.clone()), clock.clone());
     let (puller, _status) = Puller::new_at(
         "w0",
         "w1",

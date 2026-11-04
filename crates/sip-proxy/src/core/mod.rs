@@ -21,6 +21,8 @@ mod face_pick;
 mod first_view_tests;
 #[cfg(test)]
 mod liveness_routing_tests;
+#[cfg(test)]
+mod owner_rule_tests;
 mod request;
 mod response;
 
@@ -440,11 +442,12 @@ impl ProxyCore {
             // message's `raw`/`body` share the receive buffer.
             let parsed = match parsed {
                 Some(parsed) => *parsed,
-                None => parse_datagram(raw, |b| self.parser.parse_shared(b)),
+                None => parse_datagram(raw.clone(), |b| self.parser.parse_shared(b)),
             };
             let msg = match parsed {
                 Ok(Ok(msg)) => msg,
                 Ok(Err(error)) => {
+                    crate::refused_sample::sample(src, &error, &raw, now_ms);
                     self.refuse_unparsed(&error, src).await;
                     self.pulse.waiting(self.shard);
                     continue;

@@ -3,6 +3,7 @@
 //! the inverse of seeding (`seed`). A message for one of them reaching this
 //! layer afterwards is a new arrival, handed to the consumer to route afresh.
 
+use sip_net::UdpEndpoint;
 use tokio::sync::oneshot;
 
 use super::key::ServerTxnKey;
@@ -11,17 +12,32 @@ use super::txn::TxnRef;
 
 impl Owner {
     /// Delete every client and server transaction attributed to `call_ref`,
-    /// Accepted client ones included, their timers with them, sending nothing
-    /// and owing nothing: no ACK, no CANCEL, no final, no retransmission. The
+    /// Accepted client ones included, their timers with them, owing nothing:
+    /// no CANCEL, no final, no retransmission. The things sent are those held
+    /// for a message already taken: the ACK a client INVITE holds for its
+    /// non-2xx (`layer::held_ack`), and the 200 a server INVITE holds for the
+    /// CANCEL that cancelled it (`layer::held_cancel`); its 487 is the node
+    /// serving the call's to send. The
     /// call's self-release watch goes too, so no `CallQuiesced` follows.
     /// Replies with how many went.
-    pub(super) fn relinquish_call(&mut self, call_ref: &str, reply: oneshot::Sender<usize>) {
+    pub(super) async fn relinquish_call(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        call_ref: &str,
+        reply: oneshot::Sender<usize>,
+    ) {
         self.self_release_watch.remove(call_ref);
         let txns = self.txn_index.get(call_ref);
         let clients: Vec<String> =
             txns.into_iter().flat_map(|t| t.every_client().cloned()).collect();
         let servers: Vec<ServerTxnKey> =
             txns.into_iter().flat_map(|t| t.server.iter().cloned()).collect();
+        for branch in &clients {
+            self.send_held_ack(endpoint, branch).await;
+        }
+        for key in &servers {
+            self.waive_held_final(key);
+        }
         let clients = clients.iter().filter(|b| self.delete_txn(TxnRef::Client(b))).count();
         let servers = servers.iter().filter(|k| self.delete_txn(TxnRef::Server(k.id()))).count();
         let _ = reply.send(clients + servers);
@@ -43,9 +59,25 @@ impl Owner {
 }
 
 impl Owner {
-    /// Delete the one server transaction `key`, its timers with it, sending
-    /// nothing and owing nothing. Replies whether it was there.
+    /// Delete the one server transaction `key`, its timers with it, owing
+    /// nothing but the 200 to a CANCEL it holds. Replies whether it was there.
     pub(super) fn relinquish_server(&mut self, key: &ServerTxnKey, reply: oneshot::Sender<bool>) {
+        self.waive_held_final(key);
         let _ = reply.send(self.delete_txn(TxnRef::Server(key.id())));
+    }
+}
+
+impl Owner {
+    /// Delete the one client transaction on `branch`, its timers with it,
+    /// owing nothing but the ACK it holds for a non-2xx final it took.
+    /// Replies whether it was there.
+    pub(super) async fn relinquish_client(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        branch: &str,
+        reply: oneshot::Sender<bool>,
+    ) {
+        self.send_held_ack(endpoint, branch).await;
+        let _ = reply.send(self.delete_txn(TxnRef::Client(branch)));
     }
 }

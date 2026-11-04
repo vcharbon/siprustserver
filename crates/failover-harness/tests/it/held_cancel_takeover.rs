@@ -9,6 +9,9 @@
 //! on the INVITE carries the cookie naming the dead node and its backup, so
 //! the front proxy fails the 100 over to the survivor, whose transaction takes
 //! it as the provisional §9.1 waits for and releases the CANCEL (ADR-0043 X1).
+//!
+//! Beyond the failover sweep: a CANCEL held for a silent callee, sent by the survivor on the
+//! callee's 100.
 
 use std::time::Duration;
 

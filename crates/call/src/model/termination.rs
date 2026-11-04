@@ -17,7 +17,8 @@ pub enum TimeoutKind {
     NoAnswer,
     /// A 2xx was never ACKed (RFC 3261 §13.3.1.4).
     Ack,
-    /// A leg answered no liveness probe (RFC 3261 §11).
+    /// A leg's liveness probe went unanswered by its Timer F, or drew an
+    /// answer that ends the dialog (RFC 3261 §11, §12.2.1.2; RFC 5057 §5.1).
     Keepalive,
     /// A transaction this stack originated drew no final (Timer B / F).
     Transaction,
@@ -55,7 +56,8 @@ pub enum TerminationCause {
     MessageCap,
     /// The supervisor ended it: a reaper strike, a forced terminal.
     Supervisor,
-    /// An operator released every call of the worker (ADR-0050 §10): an
+    /// The worker released the call: an operator's release-all (ADR-0050
+    /// §10), or a drain's grace for a call no peer holds (ADR-0055 §3). An
     /// answered call ended with nothing sent, a call in setup aborted.
     OperatorRelease,
 }

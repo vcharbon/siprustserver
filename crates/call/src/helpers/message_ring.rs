@@ -14,9 +14,9 @@ use super::lens::update_leg;
 /// so the two rings of a call interleave by it.
 /// A cap of `0` records nothing and moves nothing; an unknown leg is left
 /// alone.
-pub fn record_message(mut call: Call, leg_id: &str, cap: usize, mut entry: MessageEntry) -> Call {
-    if cap == 0 || super::find_leg(&call, leg_id).is_none() {
-        return call;
+pub fn record_message(call: &mut Call, leg_id: &str, cap: usize, mut entry: MessageEntry) {
+    if cap == 0 || super::find_leg(call, leg_id).is_none() {
+        return;
     }
     call.message_seq += 1;
     entry.seq = call.message_seq;
@@ -28,7 +28,6 @@ pub fn record_message(mut call: Call, leg_id: &str, cap: usize, mut entry: Messa
 /// Close the turn being handled once all its entries are on the ring: the
 /// counter moves to the next turn's number, whether this turn appended an
 /// entry or not — one turn, one number.
-pub fn seal_turn(mut call: Call) -> Call {
+pub fn seal_turn(call: &mut Call) {
     call.message_turn += 1;
-    call
 }

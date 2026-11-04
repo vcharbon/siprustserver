@@ -45,7 +45,7 @@ pub(super) fn record(
         Settle::AtFinal { confirmed: None },
     );
     if let Some(branch) = resp.top_via().branch() {
-        *call = call::helpers::close_rejected_invite_round(call.clone(), leg, branch);
+        call::helpers::close_rejected_invite_round(call, leg, branch);
     }
-    *call = call::helpers::record_dialling_invite_rejected(call.clone(), leg, cseq, resp.status());
+    call::helpers::record_dialling_invite_rejected(call, leg, cseq, resp.status());
 }

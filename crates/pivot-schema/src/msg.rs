@@ -67,6 +67,25 @@ pub struct MsgSpec {
     /// by their Contact alone stay two messages on the wire.
     #[serde(rename = "target-refresh", default, skip_serializing_if = "Option::is_none")]
     pub target_refresh: Option<u32>,
+    /// On a send: the display name and user part the leg's party writes in its
+    /// Contact from this message on (RFC 3261 §8.1.1.8, §20.10). Host and port
+    /// stay tier 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactSpec>,
+}
+
+/// The parts of a Contact its party chooses: what the URI's host and port do
+/// not route.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContactSpec {
+    /// The display name, unescaped; the stack quotes it on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    /// The URI's user part, or `${…}` accessors composing it; empty, the URI
+    /// states no userinfo (RFC 3261 §25.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 /// One frozen header, exactly as the capture carried it.
@@ -106,6 +125,14 @@ impl Ref {
             Ref::Frozen(f) => f.addr.as_deref(),
         }
     }
+
+    /// The uri-parameters the ref adds to the URI the lane composes.
+    pub fn params(&self) -> Option<&str> {
+        match self {
+            Ref::Positional(p) => p.params.as_deref(),
+            Ref::Frozen(f) => f.params.as_deref(),
+        }
+    }
 }
 
 /// A tier-2 reference the numbering plan resolved.
@@ -124,6 +151,10 @@ pub struct PositionalRef {
     /// lane composes no URI around it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addr: Option<String>,
+    /// The uri-parameters the URI the lane composes carries after its host
+    /// (RFC 3261 §19.1.1), `;`-separated, the leading `;` left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<String>,
 }
 
 /// A tier-2 reference the numbering plan did not resolve.
@@ -142,6 +173,10 @@ pub struct FrozenRef {
     /// lane composes no URI around it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addr: Option<String>,
+    /// The uri-parameters the URI the lane composes carries after its host
+    /// (RFC 3261 §19.1.1), `;`-separated, the leading `;` left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<String>,
 }
 
 #[cfg(test)]

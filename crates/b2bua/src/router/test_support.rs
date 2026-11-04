@@ -99,7 +99,9 @@ pub async fn node_on(
         .await
         .expect("bind the simulated SIP endpoint");
     let store = Arc::new(ReplicatingCallStore::new(1, clock.clone()));
-    let view = Arc::new(SimulatedMembership::with_clock(Vec::new(), clock.clone()));
+    // The node's own endpoint is published, so it reads itself routable.
+    let own = Peer::new(ordinal, ordinal);
+    let view = Arc::new(SimulatedMembership::with_clock(vec![own], clock.clone()));
     let membership: Arc<dyn Membership> = view.clone();
     let addr_resolver: AddrResolver =
         Arc::new(FnPeerResolver(|_: &Peer| SocketAddr::from(([127, 0, 0, 2], 1))));
@@ -114,13 +116,15 @@ pub async fn node_on(
         incarnation_gen: 1,
         puller: PullerConfig::default(),
         serve: ServeConfig::default(),
+        replica: crate::node::replica::ReplicaConfig::default(),
+        write_path: Default::default(),
+        verdict: Default::default(),
     };
     let config = B2buaConfig {
         self_ordinal: ordinal.into(),
         sip_local_ip: sip_addr.ip().to_string(),
         sip_local_port: sip_addr.port(),
         keepalive_interval_sec: 300,
-        reboot_budget_sec: 600,
         ..Default::default()
     };
     let mut config = config;
@@ -129,12 +133,14 @@ pub async fn node_on(
     let metrics = B2buaMetrics::new();
     let deps = B2buaDeps {
         config,
+        identity: String::new(),
         decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.2", 9)),
         limiter: Arc::new(NoopLimiter),
         cdr: Arc::new(cdr.clone()),
         store: Arc::new(InMemoryCallStore::new()),
         store_faults: Default::default(),
         wire_faults: Default::default(),
+        turn_probe: Default::default(),
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
         refusals: None,

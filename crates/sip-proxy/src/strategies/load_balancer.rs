@@ -5,24 +5,40 @@
 //! - `select_for_new_dialog`: Call-ID → snapshot the registry → the `Alive`
 //!   workers that accept new calls, or every `Alive` one when none accepts (a
 //!   refusing worker answers the call itself and writes its record, §6) → for
-//!   non-emergency new dialogs, drop `above_critical`-band workers →
-//!   `rendezvous_select` → spend one token from the winner's per-worker AIMD
-//!   bucket → address. `NoTarget` when the candidate set is empty;
-//!   `RateCapExhausted` when the winner's bucket is empty (→ 503 + Retry-After).
-//!   Emergency / in-dialog requests bypass the bucket (they still record the
-//!   admit for the `share` signal); an unobserved worker is admitted
-//!   (bootstrap-friendly). Port of TS LoadBalancer.ts:335-348.
-//! - `encode_stickiness`: recover the target's `WorkerId` (= `w_pri`) by
-//!   address, a departed-address tombstone included, pick the HRW winner among
-//!   the other `Alive` workers that accept new calls, else among the other
-//!   `Alive` ones (= `w_bak`, §7), and sign
-//!   `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>` (HMAC-SHA256 truncated to 128
-//!   bits, base64url) into `{w_pri,w_bak,e,v,kid,sig}`. A dialog a departed
-//!   worker originates is thus pinned to its ordinal, and its INVITE responses
-//!   and in-dialog requests take `w_bak` until the ordinal rejoins, for the
-//!   dialog's life: the core carries the cookie on its own Via too, so it
-//!   outlives the tombstone (ADR-0031 D4). An address neither live nor
-//!   tombstoned gets no cookie.
+//!   non-emergency new dialogs, drop `above_critical`-band workers → rank them
+//!   by rendezvous → spend one token from the per-worker AIMD bucket of the
+//!   first in rank that has one (ADR-0009 X6) → address. `NoTarget` when the
+//!   candidate set is empty; `RateCapExhausted` when no candidate's bucket has
+//!   a token (→ 503 + Retry-After). Emergency / in-dialog requests take the
+//!   rendezvous winner and bypass the bucket (they still record the admit for
+//!   the `share` signal); an unobserved worker is admitted (bootstrap-friendly).
+//! - `placement_by_rank`: the rendezvous winner among the `Alive` workers,
+//!   unfiltered and spending no token, where a request of an admitted call no
+//!   memo places goes (ADR-0009 X7).
+//! - `encode_stickiness`: a call the proxy places. Recover the target's
+//!   `WorkerId` (= `w_pri`) by address, pick the HRW winner among the other
+//!   `Alive` workers that accept new calls, else among the other `Alive` ones,
+//!   else among the other ordinals it knows and does not read alive — a
+//!   member not read alive, a member whose endpoint is not ready, a departed
+//!   address still tombstoned — (= `w_bak`, ADR-0050 §7, ADR-0055 §8; empty
+//!   only when it knows no other ordinal), and sign
+//!   `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>`
+//!   (HMAC-SHA256 truncated to 128 bits, base64url) into
+//!   `{w_pri,w_bak,e,v,kid,sig}`.
+//! - `encode_originated`: a request a worker originates, from an address
+//!   live or tombstoned (an address neither gets no cookie). `w_pri` is the
+//!   call's primary the worker states, else the originating worker,
+//!   recovered by address, a departed-address tombstone included; `w_bak` is
+//!   the backup the worker states, so every leg of a call names the call's
+//!   primary and the backup holding its replica, whichever of the two dialled
+//!   it (ADR-0055 §8). A dialog a departed worker originates is thus pinned
+//!   to the ordinals it names for the dialog's life: the core carries the
+//!   cookie on its own Via too, so it outlives the tombstone.
+//! - `dialling_mark`: the Via cookie of a leg's dialling INVITE whose worker
+//!   states the call's primary carries `dl`, a MAC over the cookie's own
+//!   signature under its key, which the response path reads as that INVITE's
+//!   (ADR-0055 §8): the far end echoes the worker's Via, so its unsigned `pri`
+//!   decides nothing there.
 //! - `decode_stickiness`: verify the MAC, then `w_pri` while it is `Alive`,
 //!   else `w_bak` while it is `Alive`, else `Unroutable` (§4, §5); acceptance
 //!   is never read. It resolves the primary by ORDINAL, so a departed-address
@@ -43,9 +59,12 @@ use crate::load_observer::{EluBand, WorkerLoadObserver};
 use crate::observability::metrics::ProxyMetrics;
 use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
-use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
+use crate::strategy::{
+    DecodeResult, RankPlacement, RouteParams, RoutingStrategy, SelectError, SelectOpts,
+    StatedOwners,
+};
 
-use super::rendezvous::{rendezvous_select, RendezvousCandidate};
+use super::rendezvous::{rendezvous_rank, rendezvous_select, RendezvousCandidate};
 
 mod cookie;
 
@@ -126,6 +145,68 @@ impl LoadBalancerStrategy {
         Self { registry, hmac, observer, metrics, clock }
     }
 
+    /// The cookie naming `primary` and `backup` for `msg`'s call (`call_id`).
+    fn sign(&self, primary: &str, backup: &str, msg: &SipMessage, call_id: &str) -> RouteParams {
+        let emergency_flag = if is_emergency_invite(msg) { "1" } else { "0" };
+        let input = build_stickiness_input(primary, backup, emergency_flag, call_id);
+        let signed = self.hmac.sign(&input);
+        let sig = URL_SAFE_NO_PAD.encode(&signed.mac[..TRUNCATED_MAC_BYTES]);
+        let mut params = RouteParams::new();
+        params.insert("w_pri".into(), primary.to_string());
+        params.insert("w_bak".into(), backup.to_string());
+        params.insert("e".into(), emergency_flag.to_string());
+        params.insert("v".into(), COOKIE_VERSION.to_string());
+        params.insert("kid".into(), signed.kid);
+        params.insert("sig".into(), sig);
+        params
+    }
+
+    /// The first of `ranked` whose bucket yields a token, the token spent and
+    /// the admit recorded; one past the rendezvous winner counts a spill. With
+    /// no token anywhere, `RateCapExhausted` names the winner and the earliest
+    /// refill among them.
+    fn take_token<'w>(&self, ranked: &[&'w WorkerEntry]) -> Result<&'w WorkerEntry, SelectError> {
+        let now_ms = self.clock.now_ms();
+        let mut retry_after_sec = u32::MAX;
+        for (rank, worker) in ranked.iter().enumerate() {
+            match self.observer.try_consume_for(&worker.id, now_ms) {
+                Ok(()) => {
+                    if rank > 0 {
+                        self.metrics.record_lb_rate_cap_spill();
+                    }
+                    self.observer.record_own_admitted(&worker.id);
+                    return Ok(worker);
+                }
+                Err(sec) => retry_after_sec = retry_after_sec.min(sec),
+            }
+        }
+        self.metrics.record_overload_rejection("bucket_empty");
+        let worker_id = ranked.first().map(|w| w.id.clone()).unwrap_or_default();
+        Err(SelectError::RateCapExhausted { worker_id, retry_after_sec })
+    }
+
+    /// The backup a call `call_id` placed on `primary` names: the rendezvous
+    /// winner among the other placeable workers, else among the other
+    /// ordinals the pool knows and does not read alive, so a call admitted
+    /// while its backup restarts names it and the backup's return carries it
+    /// (ADR-0055 §8). Empty only when the pool knows no other ordinal.
+    fn backup_for(&self, call_id: &str, primary: &str) -> String {
+        let snapshot = self.registry.snapshot();
+        let others = snapshot.iter().filter(|w| w.id != primary);
+        let alive: Vec<WorkerKey> =
+            placeable(others.clone()).into_iter().map(|w| WorkerKey(w.id.clone())).collect();
+        if let Some(winner) = rendezvous_select(call_id, &alive) {
+            return winner.0.clone();
+        }
+        let away: Vec<WorkerKey> = others
+            .map(|w| w.id.clone())
+            .chain(self.registry.away_ordinals())
+            .filter(|id| id != primary)
+            .map(WorkerKey)
+            .collect();
+        rendezvous_select(call_id, &away).map(|k| k.0.clone()).unwrap_or_default()
+    }
+
     /// The address of worker `id` while it is `Alive`.
     fn alive_address(&self, id: &str) -> Option<ProxyAddr> {
         if id.is_empty() {
@@ -165,9 +246,11 @@ impl RoutingStrategy for LoadBalancerStrategy {
         };
 
         let keys: Vec<WorkerKey> = candidates.iter().map(|w| WorkerKey(w.id.clone())).collect();
-        let chosen = rendezvous_select(call_id, &keys)
-            .and_then(|key| candidates.iter().copied().find(|w| w.id == key.0));
-        let Some(winner) = chosen else {
+        let ranked: Vec<&WorkerEntry> = rendezvous_rank(call_id, &keys)
+            .into_iter()
+            .filter_map(|key| candidates.iter().copied().find(|w| w.id == key.0))
+            .collect();
+        let Some(&winner) = ranked.first() else {
             if !is_emergency && !alive.is_empty() {
                 self.metrics.record_overload_rejection("no_target_critical_filtered");
             }
@@ -185,15 +268,11 @@ impl RoutingStrategy for LoadBalancerStrategy {
             return Err(SelectError::NoTarget { reason });
         };
 
-        // Per-worker AIMD token bucket (port of TS LoadBalancer.ts:335-348).
-        // Emergency and in-dialog requests bypass the bucket entirely —
-        // in-dialog: the call is already admitted, AIMD is a new-call knob; the
-        // bypass still records the admit so `own_admitted_rate`/`share` stays
-        // truthful. Otherwise spend a token: an empty bucket is the LB rate-capping
-        // this (alive, non-critical) worker so it can shed in-flight load → 503 +
-        // Retry-After. An unobserved worker has no bucket and is admitted
-        // (`try_consume_for` is bootstrap-friendly).
-        let now_ms = self.clock.now_ms();
+        // Emergency and in-dialog requests bypass the per-worker AIMD bucket
+        // and stay on the rendezvous winner — in-dialog: the call is already
+        // admitted, AIMD is a new-call knob; the bypass still records the admit
+        // so `own_admitted_rate`/`share` stays truthful. A new call takes the
+        // first candidate in rank whose bucket has a token (ADR-0009 X6).
         if is_emergency || in_dialog {
             // Emergency bypasses BOTH the above_critical critical-filter (above)
             // and this AIMD bucket — count emergency new-dialog bypasses so the
@@ -202,18 +281,22 @@ impl RoutingStrategy for LoadBalancerStrategy {
                 self.metrics.record_lb_emergency_bypass();
             }
             self.observer.record_own_admitted(&winner.id);
-        } else if let Err(retry_after_sec) = self.observer.try_consume_for(&winner.id, now_ms) {
-            // The Retry-After is the bucket's own time to a token, read from
-            // the failed take.
-            self.metrics.record_overload_rejection("bucket_empty");
-            return Err(SelectError::RateCapExhausted {
-                worker_id: winner.id.clone(),
-                retry_after_sec,
-            });
-        } else {
-            self.observer.record_own_admitted(&winner.id);
+            return Ok(winner.address.clone());
         }
-        Ok(winner.address.clone())
+        self.take_token(&ranked).map(|placed| placed.address.clone())
+    }
+
+    /// The rendezvous winner for the call among the `Alive` workers: where a
+    /// call placed with neither filter nor spill lives, and, its primary gone,
+    /// the next in rank.
+    fn placement_by_rank(&self, msg: &SipMessage) -> RankPlacement {
+        let call_id = call_id_of(msg).unwrap_or("");
+        let snapshot = self.registry.snapshot();
+        let alive: Vec<WorkerKey> =
+            snapshot.iter().filter(|w| w.is_alive()).map(|w| WorkerKey(w.id.clone())).collect();
+        rendezvous_select(call_id, &alive)
+            .and_then(|key| snapshot.iter().find(|w| w.id == key.0))
+            .map_or(RankPlacement::NoNode, |w| RankPlacement::Node(w.address.clone()))
     }
 
     async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult {
@@ -237,28 +320,23 @@ impl RoutingStrategy for LoadBalancerStrategy {
 
     fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams> {
         let call_id = call_id_of(msg)?;
-        // A departed-address tombstone answers as the ordinal last bound there.
         let primary = self.registry.lookup_by_address(target)?;
-        let snapshot = self.registry.snapshot();
-        let backup_keys: Vec<WorkerKey> = placeable(snapshot.iter().filter(|w| w.id != primary.id))
-            .into_iter()
-            .map(|w| WorkerKey(w.id.clone()))
-            .collect();
-        let backup_id =
-            rendezvous_select(call_id, &backup_keys).map(|k| k.0.clone()).unwrap_or_default();
-        let emergency_flag = if is_emergency_invite(msg) { "1" } else { "0" };
-        let input = build_stickiness_input(&primary.id, &backup_id, emergency_flag, call_id);
-        let signed = self.hmac.sign(&input);
-        let sig = URL_SAFE_NO_PAD.encode(&signed.mac[..TRUNCATED_MAC_BYTES]);
+        let backup_id = self.backup_for(call_id, &primary.id);
+        Some(self.sign(&primary.id, &backup_id, msg, call_id))
+    }
 
-        let mut params = RouteParams::new();
-        params.insert("w_pri".into(), primary.id.clone());
-        params.insert("w_bak".into(), backup_id);
-        params.insert("e".into(), emergency_flag.to_string());
-        params.insert("v".into(), COOKIE_VERSION.to_string());
-        params.insert("kid".into(), signed.kid);
-        params.insert("sig".into(), sig);
-        Some(params)
+    fn encode_originated(
+        &self,
+        origin: &ProxyAddr,
+        msg: &SipMessage,
+        stated: &StatedOwners,
+    ) -> Option<RouteParams> {
+        let call_id = call_id_of(msg)?;
+        // A departed-address tombstone answers as the ordinal last bound there.
+        let sender = self.registry.lookup_by_address(origin)?;
+        let primary = if stated.primary.is_empty() { &sender.id } else { &stated.primary };
+        let backup = if stated.backup == *primary { "" } else { stated.backup.as_str() };
+        Some(self.sign(primary, backup, msg, call_id))
     }
 
     fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {
@@ -271,5 +349,13 @@ impl RoutingStrategy for LoadBalancerStrategy {
 
     fn verified_cookie(&self, params: &RouteParams, msg: &SipMessage) -> Option<RouteParams> {
         self.own_fields(params, msg)
+    }
+
+    fn dialling_mark(&self, cookie: &RouteParams) -> Option<(String, String)> {
+        self.mark_dialling(cookie)
+    }
+
+    fn marks_dialling(&self, params: &RouteParams) -> bool {
+        self.dialling_marked(params)
     }
 }

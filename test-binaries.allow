@@ -16,4 +16,5 @@ crates/media/tests/rtp_media_live.rs real UDP paced by the wall clock, frame cou
 crates/observe/tests/panic_hook.rs installs the process panic hook
 crates/scenario-harness/tests/artifact_on_drop.rs sets and removes a process environment variable
 crates/sip-message/tests/alloc_budget.rs installs the global allocation counter
+crates/sip-message/tests/scaling/main.rs installs the global allocation counter
 crates/sip-proxy/tests/trace_alloc_budget.rs installs the global allocation counter

@@ -16,9 +16,8 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use call::{TxnKind, TxnTimeoutKind};
 use sip_clock::delay_queue;
-use sip_message::generators::generate_ack_for_non_2xx;
 use sip_message::serializer::{render, write_request_line};
-use sip_message::{Method, SipMessage, SipRequest, SipResponse};
+use sip_message::{Method, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
 use crate::event::{ClientTransactionHandle, TransactionEvent};
@@ -187,7 +186,7 @@ impl Owner {
         self.start_client_retransmit(&branch, buf, dest, max_ms, timeout_kind);
         if txn_type == TxnKind::Invite
             && msg.to().tag().is_none()
-            && self.invite_first_response_timeout_ms < max_ms
+            && self.invite_first_response_timeout_ms <= max_ms
         {
             self.arm(
                 Timer::FirstResponse(branch.clone()),
@@ -291,7 +290,7 @@ impl Owner {
         }
     }
 
-    fn start_client_retransmit(
+    pub(super) fn start_client_retransmit(
         &mut self,
         branch: &str,
         buf: Bytes,
@@ -373,7 +372,7 @@ impl Owner {
     /// on it is moot (the UAS answered — §9.2; counted dropped only if it
     /// never reached the wire), and Timer D holds it to re-ACK repeats (RFC
     /// 3261 §17.1.1.2), from this final.
-    fn complete_non_2xx(&mut self, branch: &str) {
+    pub(super) fn complete_non_2xx(&mut self, branch: &str) {
         let (r, t, cr) = match self.clients.get_mut(branch) {
             Some(txn) => {
                 txn.state = TxnState::Completed;
@@ -475,11 +474,7 @@ impl Owner {
                 };
                 self.cancel_timer(key);
                 if !reoffer {
-                    self.emit(TransactionEvent::Message {
-                        message: Box::new(SipMessage::Response(resp)),
-                        src,
-                        matched_client_txn: false,
-                    });
+                    self.emit(TransactionEvent::response(resp, src, false));
                 }
                 return false;
             }
@@ -510,13 +505,13 @@ impl Owner {
                 if resp.status() < 200 {
                     // Provisional 1xx>100 — Proceeding. Ignore once Completed or
                     // Accepted (a late provisional must not downgrade a txn that
-                    // already took its final). INVITE stops retransmitting
-                    // (§17.1.1.2); non-INVITE continues at T2 (§17.1.2.2), so only
-                    // cancel retransmit for INVITE.
+                    // took its final). INVITE stops retransmitting (§17.1.1.2);
+                    // non-INVITE continues at T2 (§17.1.2.2).
                     if state.is_active() {
                         let key = match self.clients.get_mut(branch) {
                             Some(txn) => {
                                 txn.state = TxnState::Proceeding;
+                                txn.past_trying = true;
                                 (kind == TxnKind::Invite)
                                     .then(|| txn.retransmit_key.take())
                                     .flatten()
@@ -531,39 +526,9 @@ impl Owner {
                         self.flush_cancel_on_provisional(endpoint, branch).await;
                     }
                 } else if kind == TxnKind::Invite && resp.status() >= 300 {
-                    // Non-2xx INVITE final: (re-)ACK hop-by-hop (RFC 3261 §17.1.1.2).
-                    if let (Some(orig), Some(dest)) = (original_request, destination) {
-                        match generate_ack_for_non_2xx(&orig, &resp, &[]) {
-                            Ok(ack) => self.send_buffer(endpoint, ack.image(), dest).await,
-                            Err(e) => tracing::warn!(%branch, %e, "ACK not sent: no ACK echoes it"),
-                        }
-                    }
-                    if state == TxnState::Completed {
-                        // A RETRANSMITTED non-2xx final (our first ACK was lost): we
-                        // just re-ACKed it above; absorb without re-notifying.
-                        return true;
-                    }
-                    if orphaned {
-                        // No consumer holds this transaction's call: the hop
-                        // ACK above and the Timer D hold below are the whole
-                        // of what the final draws.
-                        self.complete_non_2xx(branch);
-                        return true;
-                    }
-                    // FIRST non-2xx final: hold the txn in Completed for Timer D so
-                    // retransmitted finals are re-ACKed + absorbed, not re-surfaced.
-                    // The auto-ACK silenced the UAS's retransmission *trigger*, so
-                    // without Timer D a lost ACK would have the UAS resend the final
-                    // unanswered until its own Timer H, each resend re-emitting
-                    // upstream as a duplicate.
-                    self.complete_non_2xx(branch);
-                    // Critical: we auto-ACKed (silenced the UAS's resend), so this is
-                    // the app's only delivery of the final.
-                    self.emit_critical(TransactionEvent::Message {
-                        message: Box::new(SipMessage::Response(resp)),
-                        src,
-                        matched_client_txn: true,
-                    });
+                    let txn = (state, orphaned, original_request, destination);
+                    let branch = branch.to_string();
+                    self.take_non_2xx_final(endpoint, &branch, resp, src, txn).await;
                     return true;
                 } else if kind == TxnKind::Invite {
                     // A 2xx INVITE final: Accepted until Timer M (RFC 6026
@@ -575,11 +540,7 @@ impl Owner {
                     }
                     self.accept_2xx(branch, &resp);
                     // Critical: the transaction's only delivery of its final.
-                    self.emit_critical(TransactionEvent::Message {
-                        message: Box::new(SipMessage::Response(resp)),
-                        src,
-                        matched_client_txn: true,
-                    });
+                    self.emit_critical(TransactionEvent::response(resp, src, true));
                     return true;
                 } else {
                     // Any non-INVITE final: terminate the client txn; an
@@ -588,11 +549,7 @@ impl Owner {
                     if orphaned {
                         return true;
                     }
-                    self.emit_critical(TransactionEvent::Message {
-                        message: Box::new(SipMessage::Response(resp)),
-                        src,
-                        matched_client_txn: true,
-                    });
+                    self.emit_critical(TransactionEvent::response(resp, src, true));
                     return true;
                 }
             }
@@ -604,11 +561,7 @@ impl Owner {
         // transaction's provisional has no consumer at all.
         let orphaned = self.clients.get(branch).is_some_and(|t| t.orphaned);
         if (matched_client_txn && !orphaned) || !reoffer {
-            self.emit(TransactionEvent::Message {
-                message: Box::new(SipMessage::Response(resp)),
-                src,
-                matched_client_txn,
-            });
+            self.emit(TransactionEvent::response(resp, src, matched_client_txn));
         }
         matched_client_txn
     }

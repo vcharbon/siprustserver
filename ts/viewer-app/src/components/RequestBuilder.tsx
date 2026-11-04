@@ -12,6 +12,7 @@
  * Nothing is written until Create: a preview is the server reading the
  * selection the way the resolution would.
  */
+import { plural } from "../plural.ts"
 import type { JSX } from "react"
 import { useState } from "react"
 import { api, type JobStarted, type LanesView, type RequestPreview, type TriageCallRow, useAsync } from "../api.ts"
@@ -78,7 +79,7 @@ export const RequestBuilder = (
   const laneNames = lanesView === undefined ? known : lanesView.lanes.map((one) => one.lane)
   const selection = selectionOf(mode, { lane, scope, q, filter }, ticked, shown, predicates)
   const defaults = lanesView?.knobs ?? { concurrency: 8, batchSize: 1000, memoryMax: "4G", startsPerSecond: 0, cleanup: true }
-  // One lane picked: its own defaults stand in the empty fields; several: the generic ones, each lane's noted below.
+  // Empty fields show the picked lane's defaults; with several lanes, the generic defaults (each lane's own are in the notes).
   const only = picked.length === 1 ? lanesView?.lanes.find((one) => one.lane === picked[0]) : undefined
   const placeholders = only === undefined ? defaults : laneKnobs(NO_KNOBS, only, defaults)
   const previewed = outcome.kind === "previewed" ? outcome.preview : undefined
@@ -115,7 +116,7 @@ export const RequestBuilder = (
       setOutcome({
         kind: "created",
         jobs,
-        requests: created.map((one) => `request ${one.requestId} on ${one.lane}: ${one.cells} cell(s)`)
+        requests: created.map((one) => `request ${one.requestId} on ${one.lane}: ${plural(one.cells, "cell")}`)
       })
     } catch (error) {
       setOutcome({ kind: "refused", detail: said(error) })
@@ -175,8 +176,8 @@ export const RequestBuilder = (
               value={predicates.universe}
               onChange={(event) => setPredicates({ ...predicates, universe: event.target.value === "all" ? "all" : "standing" })}
             >
-              <option value="standing">standing (the population)</option>
-              <option value="all">all (the universe)</option>
+              <option value="standing">standing</option>
+              <option value="all">all</option>
             </select>
           </label>
           <label>
@@ -213,7 +214,7 @@ export const RequestBuilder = (
             <input type="checkbox" checked={picked.includes(name)} onChange={() => toggleLane(name)} /> {name}
           </label>
         ))}
-        <span className="muted">one request per lane</span>
+        <span className="muted" title="one request per lane">· 1 request each</span>
       </div>
 
       <div className="request-row">

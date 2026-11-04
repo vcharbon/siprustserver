@@ -10,8 +10,8 @@ use sip_retransmit::Class;
 
 const A_TAG: &str = "b2bua-to-tag-aleg-9876"; // the a-leg dialog's own tag
 const ALICE_TAG: &str = "alice-from-tag-001"; // the a-leg dialog's peer tag
-const B_LOCAL_TAG: &str = "b2bua-from-tag-bleg-5544"; // the b-1 dialog's own tag
-const B_TAG: &str = "bob-to-tag-007"; // the b-1 dialog's peer tag
+pub(crate) const B_LOCAL_TAG: &str = "b2bua-from-tag-bleg-5544"; // the b-1 dialog's own tag
+pub(crate) const B_TAG: &str = "bob-to-tag-007"; // the b-1 dialog's peer tag
 
 fn a_id() -> DialogId {
     DialogId { our_tag: A_TAG.into(), peer_tag: ALICE_TAG.into() }
@@ -55,12 +55,12 @@ fn leg_kind_and_adoption_defaults() {
 
 #[test]
 fn cseq_lens_helpers() {
-    let call = representative_call();
+    let mut call = representative_call();
     let before = a_dialog(&call).our_cseq;
-    let call = bump_our_cseq(call, "a", &a_id(), 5);
+    bump_our_cseq(&mut call, "a", &a_id(), 5);
     assert_eq!(a_dialog(&call).our_cseq, before + 5);
 
-    let call = advance_peer_cseq(call, "b-1", &b_id(), 9999);
+    advance_peer_cseq(&mut call, "b-1", &b_id(), 9999);
     assert_eq!(b_dialog(&call).peer_cseq, Some(9999));
 }
 
@@ -68,30 +68,30 @@ fn cseq_lens_helpers() {
 /// never decreases.
 #[test]
 fn the_peer_sequence_never_decreases() {
-    let mut unseen = representative_call();
-    unseen.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).unwrap().peer_cseq = None;
-    let call = advance_peer_cseq(unseen, "b-1", &b_id(), 7);
+    let mut call = representative_call();
+    call.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).unwrap().peer_cseq = None;
+    advance_peer_cseq(&mut call, "b-1", &b_id(), 7);
     assert_eq!(b_dialog(&call).peer_cseq, Some(7), "the first request sets it");
-    let call = advance_peer_cseq(call, "b-1", &b_id(), 12);
+    advance_peer_cseq(&mut call, "b-1", &b_id(), 12);
     assert_eq!(b_dialog(&call).peer_cseq, Some(12), "a gap is in order");
-    let call = advance_peer_cseq(call, "b-1", &b_id(), 9);
+    advance_peer_cseq(&mut call, "b-1", &b_id(), 9);
     assert_eq!(b_dialog(&call).peer_cseq, Some(12), "a lower number leaves it");
 }
 
 #[test]
 fn pending_request_lifecycle() {
-    let call = representative_call();
-    let entry = PendingRequest {
+    let mut call = representative_call();
+    let entry = RequestRecord {
         source_call_id: "cid".into(),
         source_from: "f".into(),
         source_to: "t".into(),
-        ..PendingRequest::new("OPTIONS", 42, 42, Direction::FromB)
+        ..RequestRecord::relayed("OPTIONS", 42, 42)
     };
-    let call = add_pending_request(call, "b-1", &b_id(), entry);
-    assert!(find_pending_request(b_dialog(&call), 42).is_some());
+    add_record(&mut call, "b-1", &b_id(), entry);
+    assert!(find_relay(b_dialog(&call), 42).is_some());
 
-    let call = remove_pending_request(call, "b-1", &b_id(), 42);
-    assert!(find_pending_request(b_dialog(&call), 42).is_none());
+    remove_relay(&mut call, "b-1", &b_id(), 42);
+    assert!(find_relay(b_dialog(&call), 42).is_none());
 }
 
 #[test]
@@ -117,25 +117,22 @@ fn tag_accessors_and_fronts() {
 
 #[test]
 fn peering_split_merge() {
-    let call = representative_call();
+    let mut call = representative_call();
     assert_eq!(get_peer(&call, "a"), Some("b-1"));
     assert_eq!(get_peer(&call, "b-1"), Some("a"));
     assert_eq!(all_peered_legs(&call).len(), 2);
 
-    let call = split_leg(call, "a");
+    split_leg(&mut call, "a");
     assert_eq!(get_peer(&call, "a"), None);
     assert!(all_peered_legs(&call).is_empty());
 
-    let call = merge_leg(call, "a", "b-1");
+    merge_leg(&mut call, "a", "b-1");
     assert_eq!(get_peer(&call, "b-1"), Some("a"));
 }
 
-fn end_dialog(call: Call, leg_id: &str, state: DialogState) -> Call {
-    update_leg(call, leg_id, |l| {
-        for d in l.dialogs.iter_mut() {
-            d.state = state.clone();
-        }
-    })
+fn end_dialog(mut call: Call, leg_id: &str, state: DialogState) -> Call {
+    update_leg(&mut call, leg_id, |l| l.dialogs.iter_mut().for_each(|d| d.state = state.clone()));
+    call
 }
 
 #[test]
@@ -158,7 +155,7 @@ fn termination_resolution() {
 fn a_legs_state_reads_off_its_invite_and_its_dialogs() {
     let mut leg = representative_call().b_legs[0].clone();
     leg.dialogs.retain(|_| false);
-    let invite = leg.outbound_invite.clone().expect("a dialled leg");
+    let invite = leg.outbound_invite().cloned().expect("a dialled leg");
     let read = |l: &Leg| (l.state(), l.end(), l.disposition(), l.is_resolved());
     assert_eq!(read(&leg), (LegState::Trying, None, LegDisposition::Pending, true));
 
@@ -166,7 +163,7 @@ fn a_legs_state_reads_off_its_invite_and_its_dialogs() {
     assert_eq!(read(&leg), (LegState::Early, None, LegDisposition::Pending, false));
 
     let mut cancelling = leg.clone();
-    cancelling.outbound_invite.as_mut().unwrap().cancel_sent = true;
+    cancelling.outbound_invite_mut().unwrap().cancel_sent = true;
     for d in cancelling.dialogs.iter_mut() {
         d.state = DialogState::Ending(EndingBy::Cancel);
     }
@@ -175,18 +172,18 @@ fn a_legs_state_reads_off_its_invite_and_its_dialogs() {
         read(&cancelling),
         (LegState::Terminated, cancelled, LegDisposition::Cancelling, false)
     );
-    cancelling.outbound_invite.as_mut().unwrap().record_final(487);
+    cancelling.outbound_invite_mut().unwrap().record_final(487);
     assert_eq!(
         read(&cancelling),
         (LegState::Terminated, cancelled, LegDisposition::Rejected, true)
     );
 
     let mut rejected = leg.clone();
-    rejected.outbound_invite.as_mut().unwrap().record_final(486);
+    rejected.outbound_invite_mut().unwrap().record_final(486);
     let end = Some(ByeDisposition::Rejected);
     assert_eq!(read(&rejected), (LegState::Terminated, end, LegDisposition::Rejected, true));
 
-    leg.outbound_invite.as_mut().unwrap().record_final(200);
+    leg.outbound_invite_mut().unwrap().record_final(200);
     leg.dialogs.iter_mut().for_each(|d| d.state = DialogState::Confirmed);
     assert_eq!(read(&leg), (LegState::Confirmed, None, LegDisposition::Bridged, false));
     leg.dialogs.iter_mut().for_each(|d| d.state = DialogState::Ending(EndingBy::Bye));
@@ -205,34 +202,34 @@ fn a_legs_state_reads_off_its_invite_and_its_dialogs() {
 fn the_callers_leg_reads_the_final_it_was_sent() {
     let mut leg = representative_call().a_leg;
     let read = |l: &Leg| (l.state(), l.end(), l.disposition(), l.is_resolved());
-    leg.invite_final_sent = None;
+    *leg.invite_final_sent_mut() = None;
     leg.dialogs.iter_mut().for_each(|d| d.state = DialogState::Early);
     assert_eq!(read(&leg), (LegState::Early, None, LegDisposition::Pending, true));
     let mut rejected = leg.clone();
-    rejected.invite_final_sent = Some(480);
+    *rejected.invite_final_sent_mut() = Some(480);
     rejected
         .dialogs
         .iter_mut()
         .for_each(|d| d.state = DialogState::Ended(DialogEnd::Rejected(480)));
     let end = Some(ByeDisposition::Rejected);
     assert_eq!(read(&rejected), (LegState::Terminated, end, LegDisposition::Rejected, true));
-    leg.invite_final_sent = Some(200);
+    *leg.invite_final_sent_mut() = Some(200);
     leg.dialogs.iter_mut().for_each(|d| d.state = DialogState::Confirmed);
     assert_eq!(read(&leg), (LegState::Confirmed, None, LegDisposition::Bridged, false));
 }
 
 #[test]
 fn ext_and_rule_helpers() {
-    let call = representative_call();
-    let call = set_call_ext(call, "transfer", Some(serde_json::json!({ "phase": "ringing" })));
+    let mut call = representative_call();
+    set_call_ext(&mut call, "transfer", Some(serde_json::json!({ "phase": "ringing" })));
     assert!(call.ext.as_ref().unwrap().contains_key("transfer"));
-    let call = set_call_ext(call, "transfer", None);
+    set_call_ext(&mut call, "transfer", None);
     assert!(!call.ext.as_ref().unwrap().contains_key("transfer"));
 
-    let call = set_leg_ext(call, "b-1", "media", serde_json::json!({ "role": "mrf" }));
+    set_leg_ext(&mut call, "b-1", "media", serde_json::json!({ "role": "mrf" }));
     assert!(call.b_legs[0].ext.as_ref().unwrap().contains_key("media"));
 
-    let call = deactivate_rule(call, "limit-by-subscriber");
+    deactivate_rule(&mut call, "limit-by-subscriber");
     let r =
         call.active_rules.as_ref().unwrap().iter().find(|r| r.id == "limit-by-subscriber").unwrap();
     assert!(!r.active);
@@ -247,7 +244,7 @@ fn dialog_constructor() {
     assert_eq!(empty.peer_cseq, None);
     assert!(empty.route_set.is_empty());
     assert!(empty.fronts.is_empty());
-    assert!(empty.inbound_pending_requests.is_empty());
+    assert!(empty.requests.is_empty());
     assert!(empty.is_live() && !empty.is_confirmed());
 }
 
@@ -352,11 +349,11 @@ fn an_arrival_reads_as_a_repeat_in_order_or_out_of_order() {
 /// `representative_call` deliberately seeds pending INVITE snapshots for
 /// round-trip coverage; these start from a call with no in-dialog INVITE in
 /// flight.
-fn settled_call() -> Call {
+pub(crate) fn settled_call() -> Call {
     let mut call = representative_call();
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         for d in leg.dialogs.iter_mut() {
-            d.inbound_pending_requests.clear();
+            d.requests.clear();
         }
     }
     call
@@ -424,10 +421,8 @@ fn a_prack_is_relayed_answered_or_refused_by_what_it_names() {
 
     let other = pid("b-1", B_TAG, 1, 4712);
     let (mut call, s2) = shown(call, &other, "a1", 1, 9_000);
-    note_responder_ack(&mut call, &other, ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() });
+    note_responder_ack(&mut call, &other, ResponderAck::OwnPrack);
     assert_eq!(prack_disposition(&call, "a1", rack(s2, 1), None), PrackDisposition::Answer200);
-    assert!(own_prack_branch(&call, "z9hG4bK-own"));
-    assert!(!own_prack_branch(&call, "z9hG4bK-relayed"));
 }
 
 /// A responder dialog that no longer carries a request — gone, or its INVITE
@@ -446,9 +441,9 @@ fn a_responder_dialog_that_carries_nothing_answers_200_here() {
 /// recorded admits nothing.
 #[test]
 fn a_relayed_provisional_is_reliable_only_to_an_invite_whose_originator_offered_100rel() {
-    let pending = |method: &str, offered_100rel: bool| PendingRequest {
+    let pending = |method: &str, offered_100rel: bool| RequestRecord {
         offered_100rel,
-        ..PendingRequest::new(method, 2, 2, Direction::FromA)
+        ..RequestRecord::relayed(method, 2, 2)
     };
     assert!(admits_reliable_provisional(&pending("INVITE", true)));
     assert!(
@@ -564,17 +559,11 @@ fn a_2xx_ladder_never_runs_past_timer_l() {
 #[test]
 fn the_provisionals_scope_leaves_every_unacked_2xx_alone() {
     let mut call = representative_call();
-    call.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).unwrap().pending_reinvite_2xx =
-        Some(Unacked2xx {
-            dialog_tag: B_TAG.into(),
-            cseq: 4002,
-            emission: common::paced_emission(
-                common::ANSWERED_2XX,
-                ("203.0.113.42", 5060),
-                Class::Final2xx,
-                1,
-            ),
-        });
+    let emission =
+        common::paced_emission(common::ANSWERED_2XX, ("203.0.113.42", 5060), Class::Final2xx, 1);
+    let answer = Unacked2xx { dialog_tag: B_TAG.into(), cseq: 4002, emission };
+    let d = call.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).unwrap();
+    hold_answered_2xx(d, 4002, answer);
     let (call, s) = shown(call, &pid("b-1", B_TAG, 1, 7), A_TAG, 1, 1);
 
     let provisionals = obligations_in(&call, &Scope::Provisionals);
@@ -619,14 +608,14 @@ fn marks_number_the_decisions_and_stamp_what_follows() {
         decision_ordinal: 99,
     };
 
-    let call = record_message(call, "b-1", 8, entry());
-    let call = add_cdr_event(call, cdr());
-    let call = mark_decision(call, 10, DecisionKind::Route, Some("a".into()), Some("first".into()));
-    let call = record_message(call, "b-1", 8, entry());
-    let call = add_cdr_event(call, cdr());
-    let call = mark_decision(call, 20, DecisionKind::FailoverRoute, Some("b-1".into()), None);
-    let call = record_message(call, "b-1", 8, entry());
-    let call = add_cdr_event(call, cdr());
+    record_message(&mut call, "b-1", 8, entry());
+    add_cdr_event(&mut call, cdr());
+    mark_decision(&mut call, 10, DecisionKind::Route, Some("a".into()), Some("first".into()));
+    record_message(&mut call, "b-1", 8, entry());
+    add_cdr_event(&mut call, cdr());
+    mark_decision(&mut call, 20, DecisionKind::FailoverRoute, Some("b-1".into()), None);
+    record_message(&mut call, "b-1", 8, entry());
+    add_cdr_event(&mut call, cdr());
 
     assert_eq!(call.decision_ordinal, 2);
     assert_eq!(
@@ -679,14 +668,14 @@ fn a_turn_numbers_its_entries_and_the_seal_moves_past_it() {
         turn: 99,
     };
 
-    let call = record_message(call, "a", 8, entry());
-    let call = record_message(call, "b-1", 8, entry());
-    let call = seal_turn(call);
+    record_message(&mut call, "a", 8, entry());
+    record_message(&mut call, "b-1", 8, entry());
+    seal_turn(&mut call);
     assert_eq!(call.message_turn, 2, "past the turn that recorded two entries");
-    let call = seal_turn(call);
+    seal_turn(&mut call);
     assert_eq!(call.message_turn, 3, "a turn that recorded nothing takes a number too");
-    let call = record_message(call, "a", 8, entry());
-    let call = seal_turn(call);
+    record_message(&mut call, "a", 8, entry());
+    seal_turn(&mut call);
     assert_eq!(call.message_turn, 4);
 
     let turns = |leg: &Leg| leg.messages.entries.iter().map(|e| e.turn).collect::<Vec<u32>>();
@@ -702,10 +691,11 @@ fn the_first_termination_is_recorded_once_and_cut_once() {
     let mut call = representative_call();
     call.termination = None;
     call.message_seq = 4;
-    assert_eq!(seal_termination_seq(call.clone()).termination, None, "nothing to cut");
+    seal_termination_seq(&mut call);
+    assert_eq!(call.termination, None, "nothing to cut");
 
-    let call = record_termination(call, 10, TerminationCause::RemoteCancel, Some("a".into()));
-    let call = record_termination(call, 20, TerminationCause::Supervisor, None);
+    record_termination(&mut call, 10, TerminationCause::RemoteCancel, Some("a".into()));
+    record_termination(&mut call, 20, TerminationCause::Supervisor, None);
     assert_eq!(
         call.termination,
         Some(Termination {
@@ -715,10 +705,10 @@ fn the_first_termination_is_recorded_once_and_cut_once() {
             last_seq: 0,
         })
     );
-    let mut call = seal_termination_seq(call);
+    seal_termination_seq(&mut call);
     assert_eq!(call.termination.as_ref().unwrap().last_seq, 4, "cut at the seal");
     call.message_seq = 7;
-    let call = seal_termination_seq(call);
+    seal_termination_seq(&mut call);
     assert_eq!(call.termination.as_ref().unwrap().last_seq, 4, "a later seal moves nothing");
 }
 
@@ -731,10 +721,9 @@ fn the_first_termination_is_recorded_once_and_cut_once() {
 fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
     let pristine = |call: &Call| {
         let mut d = b_dialog(call).clone();
-        d.inbound_pending_requests.clear();
-        d.pending_reinvite_2xx = None;
-        d.answered_2xx = None;
-        d.awaited_ack_cseq = None;
+        d.requests.clear();
+        d.sent_invite = None;
+        d.answered_invite = None;
         d
     };
     let call = representative_call();
@@ -743,11 +732,8 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
 
     // Rule 1: a relayed INVITE still awaiting its final response.
     let mut relayed = base.clone();
-    relayed.inbound_pending_requests = b_dialog(&call).inbound_pending_requests.clone();
-    assert!(
-        !relayed.inbound_pending_requests.is_empty(),
-        "the fixture dialog carries a pending relayed INVITE"
-    );
+    relayed.sent_invite = Some(RequestRecord::relayed("INVITE", 4012, 4012));
+    assert!(invite_relay(&relayed).is_some(), "a relayed INVITE awaits its final");
     assert!(invite_transaction_open(&relayed));
 
     let unacked = || Unacked2xx {
@@ -763,16 +749,16 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
 
     // Rule 2, a 2xx this side sent: a relayed re-INVITE's, and the call's answer.
     let mut reinvite = base.clone();
-    reinvite.pending_reinvite_2xx = Some(unacked());
+    hold_answered_2xx(&mut reinvite, 4002, unacked());
     assert!(invite_transaction_open(&reinvite));
 
     let mut answered = base.clone();
-    answered.answered_2xx = Some(unacked());
+    hold_answered_2xx(&mut answered, 1, unacked());
     assert!(invite_transaction_open(&answered));
 
     // Rule 2, a 2xx taken here: its ACK is the peer's, not relayed yet.
     let mut owes_ack = base.clone();
-    owes_ack.awaited_ack_cseq = Some(4002);
+    owes_ack.sent_invite = Some(common::invite_awaiting_ack(4002));
     assert!(invite_transaction_open(&owes_ack));
 }
 
@@ -822,7 +808,8 @@ fn only_the_first_description_of_a_dialog_is_its_offer() {
 #[test]
 fn a_cancelled_invite_takes_back_the_2xx_that_never_left() {
     let mut call = representative_call();
-    call.a_leg.dialogs.by_tags_mut(A_TAG, ALICE_TAG).unwrap().awaited_ack_cseq = Some(1);
+    call.a_leg.dialogs.by_tags_mut(A_TAG, ALICE_TAG).unwrap().sent_invite =
+        Some(common::invite_awaiting_ack(1));
     let entry = |seq, direction, code: Option<u16>| MessageEntry {
         seq,
         at_ms: 0,
@@ -841,15 +828,15 @@ fn a_cancelled_invite_takes_back_the_2xx_that_never_left() {
         entry(3, MessageDirection::Relayed, Some(200)),
     ];
 
-    let call = record_cancelled_invite(call, "a");
+    record_cancelled_invite(&mut call, "a", None);
 
     let a = &call.a_leg;
-    assert_eq!(a.invite_final_sent, Some(487));
-    assert_eq!(a.answer_preempted, Some(200));
+    assert_eq!(a.invite_final_sent(), Some(487));
+    assert_eq!(a.answer_preempted(), Some(200));
     assert_eq!(a.state(), LegState::Terminated, "her INVITE's final is the 487");
     assert!(a.dialogs.confirmed().is_none(), "no dialog stands confirmed");
-    assert!(a.dialogs.iter().all(|d| d.answered_2xx.is_none()), "no ACK ladder stands");
-    assert!(a.dialogs.iter().all(|d| d.awaited_ack_cseq.is_none()), "no ACK is awaited");
+    assert!(a.dialogs.iter().all(|d| answered_2xx(d).is_none()), "no ACK ladder stands");
+    assert!(a.dialogs.iter().filter_map(sent_exchange).all(|x| x.awaited_ack_cseq.is_none()));
     let ring: Vec<_> = a.messages.entries.iter().map(|e| e.seq).collect();
     assert_eq!(ring, [1, 2], "the ring holds what reached the wire");
 }
@@ -881,7 +868,7 @@ fn the_carrying_dialog_is_the_confirmed_or_the_only_live_one() {
     let two: Dialogs = vec![early("f1"), early("f2")].into();
     assert!(two.carrying().is_none(), "two early forks name no carrying dialog");
     let answered: Dialogs = vec![
-        Dialog { state: DialogState::Retired(RetiredDialog::default()), ..early("f1") },
+        Dialog { state: DialogState::Retired, ..early("f1") },
         Dialog { state: DialogState::Confirmed, ..early("f2") },
     ]
     .into();
@@ -891,45 +878,14 @@ fn the_carrying_dialog_is_the_confirmed_or_the_only_live_one() {
     assert!(ended.carrying().is_none());
 }
 
-/// A relay open in an early dialog the answer retired is found through that
-/// dialog's tags, and closing it leaves the retired record in place (RFC 3261
-/// §8.1.3.3).
-#[test]
-fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
-    let mut call = settled_call();
-    let open = PendingRequest {
-        source_call_id: "cid".into(),
-        source_from: "f".into(),
-        source_to: "t".into(),
-        offered: true,
-        ..PendingRequest::new("UPDATE", 3, 3, Direction::FromA)
-    };
-    let lost = Dialog {
-        state: DialogState::Retired(RetiredDialog { open_relays: vec![open], release: None }),
-        ..Dialog::new(B_LOCAL_TAG, "lost-fork", DialogState::Early, 3)
-    };
-    call.b_legs[0].dialogs.insert(lost);
-    let (holder, pending) =
-        relayed_pending(&call, "b-1", Some("lost-fork"), Some(B_LOCAL_TAG), 3).expect("found");
-    let id = DialogId { our_tag: B_LOCAL_TAG.into(), peer_tag: "lost-fork".into() };
-    assert_eq!(holder, PendingHolder::Retired(id.clone()));
-    assert_eq!(pending.method, "UPDATE");
-    assert!(relayed_pending(&call, "b-1", Some(B_TAG), Some(B_LOCAL_TAG), 3).is_none());
-
-    let call = close_relay(call, "b-1", &holder, 3);
-    let kept = call.b_legs[0].dialogs.by_tags(&id.our_tag, &id.peer_tag).expect("kept");
-    assert!(kept.retired().is_some_and(|r| r.open_relays.is_empty()));
-}
-
 /// A dialog the peer's BYE ended while early was never established: only
 /// the dialog a 2xx confirmed is (RFC 3261 §12.1, §13.2.2.4).
 #[test]
 fn an_early_dialog_the_peers_bye_ended_was_never_established() {
     let mut leg = representative_call().b_legs[0].clone();
-    let ours = leg.outbound_invite.clone().expect("a dialled leg").our_tag;
+    let ours = leg.outbound_invite().cloned().expect("a dialled leg").our_tag;
     leg.dialogs.retain(|_| false);
-    let mut early = Dialog::new(&ours, "fork1", DialogState::Ended(DialogEnd::EarlyPeerBye), 1);
-    early.ack_branch = None;
+    let early = Dialog::new(&ours, "fork1", DialogState::Ended(DialogEnd::EarlyPeerBye), 1);
     leg.dialogs.insert(early);
     leg.dialogs.insert(Dialog::new(&ours, "fork2", DialogState::Confirmed, 1));
     assert_eq!(leg.dialogs.established().map(|d| d.peer_tag.as_str()), Some("fork2"));

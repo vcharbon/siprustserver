@@ -16,12 +16,16 @@ use call::model::*;
 use proptest::prelude::*;
 use sip_retransmit::Class;
 
+mod dialog;
 mod emission;
+mod leg;
 mod provisional;
+mod request_record;
 mod sdp_session;
-use emission::{arb_own_notify, arb_retained_emission, arb_unacked_2xx};
-use provisional::{arb_owed_answer, arb_provisional};
-use sdp_session::arb_sdp_session;
+mod subscription;
+use emission::arb_retained_emission;
+use leg::arb_leg;
+use provisional::arb_provisional;
 
 // ── Representative fixture (port of fixture.ts) ─────────────────────────────
 
@@ -34,7 +38,8 @@ fn header(name: &str, value: &str) -> SipHeader {
 }
 
 /// A confirmed dialog of a fixture leg: its tags, remote target, own CSeq
-/// (the peer's one above), the cached answer and `pending` relayed INVITEs.
+/// (the peer's one above), the cached answer, `pending` relayed INFOs and,
+/// with any, a relayed re-INVITE awaiting its final.
 fn dialog(
     local_tag: &str,
     remote_tag: &str,
@@ -48,27 +53,27 @@ fn dialog(
     d.peer_cseq = Some(cseq + 1);
     d.remote_target = remote_target.to_string();
     d.route_set = vec!["<sip:fproxy.example.com;lr>".into(), "<sip:edge1.example.com;lr>".into()];
-    d.inbound_pending_requests = (0..pending)
-        .map(|i| PendingRequest {
+    d.requests = (0..pending)
+        .map(|i| RequestRecord {
             source_vias: vec!["SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-x".into()],
             source_call_id: source_call_id.to_string(),
             source_from: "<sip:alice@example.com>;tag=alice-001".into(),
             source_to: "<sip:bob@example.com>;tag=b2bua-aleg".into(),
-            ..PendingRequest::new(
-                "INVITE",
-                cseq + 10 + i as i64,
-                cseq + 10 + i as i64,
-                Direction::FromA,
-            )
+            ..RequestRecord::relayed("INFO", cseq + 10 + i as i64, cseq + 10 + i as i64)
         })
         .collect();
-    d.ack_branch = Some(format!("z9hG4bK-ack-{cseq:x}"));
+    d.sent_invite = (pending > 0).then(|| RequestRecord {
+        source_vias: vec!["SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-y".into()],
+        source_call_id: source_call_id.to_string(),
+        source_from: "<sip:alice@example.com>;tag=alice-001".into(),
+        source_to: "<sip:bob@example.com>;tag=b2bua-aleg".into(),
+        ..RequestRecord::relayed("INVITE", cseq + 9, cseq + 9)
+    });
     d.cached_sdp = cached_sdp.then(|| SDP_BODY.to_vec());
     d
 }
 
-/// What a fixture emission on the ladder `class` paces is a copy of: an
-/// INVITE's 200 on the §13.3.1.4 ladder, a 183 to an INVITE on RFC 3262 §3's.
+/// What a fixture emission on the ladder `class` paces is a copy of.
 pub fn repeated_on(class: Class) -> Repeated {
     match class {
         Class::ReliableProvisional => Repeated::response("INVITE", 183),
@@ -76,9 +81,18 @@ pub fn repeated_on(class: Class) -> Repeated {
     }
 }
 
+/// A relayed INVITE numbered `cseq` whose 2xx this side took, its ACK awaited
+/// from the acknowledging peer under that number (RFC 3261 §13.2.2.4).
+pub fn invite_awaiting_ack(cseq: i64) -> RequestRecord {
+    let mut taken = RequestRecord::relayed("INVITE", cseq, cseq);
+    if let Some(x) = taken.invite.as_mut() {
+        x.awaited_ack_cseq = Some(cseq);
+    }
+    taken
+}
+
 /// A retained emission standing on `rung` of the ladder `class` paces: the
-/// first rung armed by `paced`, then advanced rung by rung — the way the
-/// stack itself reaches one.
+/// first rung armed by `paced`, then advanced rung by rung, as the stack does.
 pub fn paced_emission(
     datagram: &[u8],
     dest: (&str, u16),
@@ -98,8 +112,7 @@ pub fn paced_emission(
 }
 
 /// The initial-INVITE 2xx the representative call answered the caller with,
-/// three rungs into its §13.3.1.4 ladder (RFC 3261) — the caller's ACK is
-/// still outstanding.
+/// three rungs into its §13.3.1.4 ladder (RFC 3261), her ACK outstanding.
 pub const ANSWERED_2XX: &[u8] = b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-123;rport=5060\r\n\
 From: <sip:alice@example.com>;tag=alice-from-tag-001\r\nTo: <sip:bob@example.com>;tag=b2bua-to-tag-aleg-9876\r\n\
 Call-ID: call-id-deadbeef@example.com\r\nCSeq: 1 INVITE\r\nP-Charging-Vector: icid-value=icid-9f2c\r\n\
@@ -128,14 +141,13 @@ pub fn representative_call() -> Call {
         .into(),
         local_uri: Some("sip:bob@example.com".into()),
         remote_uri: Some("sip:alice@example.com".into()),
+        contact: "sip:b2bua@127.0.0.1:5060".into(),
         invite_request_uri: None,
-        outbound_invite: None,
+        invite: None,
         own_tag: Some("b2bua-to-tag-aleg-9876".into()),
         ext: None,
         kind: None,
         adopted: None,
-        invite_final_sent: Some(200),
-        answer_preempted: None,
         attempt: None,
         ring: Ring::Silent,
         in_session_timer: None,
@@ -157,11 +169,16 @@ pub fn representative_call() -> Call {
     };
     a_leg.dialogs.confirmed_mut().expect("the answered dialog").fronts =
         vec![PeerDialog { leg_id: "b-1".into(), peer_tag: "bob-to-tag-007".into() }];
-    a_leg.dialogs.confirmed_mut().expect("the answered dialog").answered_2xx = Some(Unacked2xx {
-        dialog_tag: "b2bua-to-tag-aleg-9876".into(),
-        cseq: 1,
-        emission: paced_emission(ANSWERED_2XX, ("192.0.2.10", 5060), Class::Final2xx, 3),
-    });
+    *a_leg.invite_final_sent_mut() = Some(200);
+    call::helpers::hold_answered_2xx(
+        a_leg.dialogs.confirmed_mut().expect("the answered dialog"),
+        1,
+        Unacked2xx {
+            dialog_tag: "b2bua-to-tag-aleg-9876".into(),
+            cseq: 1,
+            emission: paced_emission(ANSWERED_2XX, ("192.0.2.10", 5060), Class::Final2xx, 3),
+        },
+    );
     let mut b_leg = Leg {
         leg_id: "b-1".into(),
         call_id: "b-leg-call-id-fedcba@b2bua".into(),
@@ -178,26 +195,35 @@ pub fn representative_call() -> Call {
         .into(),
         local_uri: Some("sip:alice@example.com".into()),
         remote_uri: Some("sip:bob@example.com".into()),
+        contact: "sip:b2bua@127.0.0.1:5060".into(),
         invite_request_uri: Some("sip:bob@example.com".into()),
-        outbound_invite: Some(OutboundInvite::new("b2bua-from-tag-bleg-5544", 1, 0, None)),
+        invite: Some(RequestRecord::dialled(
+            1,
+            None,
+            OutboundInvite::new("b2bua-from-tag-bleg-5544", 0),
+        )),
         own_tag: None,
         ext: None,
         kind: None,
         adopted: None,
-        invite_final_sent: None,
-        answer_preempted: None,
         attempt: None,
         ring: Ring::Silent,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: LegSdpSession::default(),
     };
-    b_leg.dialogs.confirmed_mut().expect("the confirmed dialog").emitted_ack =
-        Some(RetainedEmission::on_trigger(
+    let b_dialog = b_leg.dialogs.confirmed_mut().expect("the confirmed dialog");
+    let mut b_invite =
+        b_dialog.sent_invite.take().unwrap_or_else(|| RequestRecord::relayed("INVITE", 8005, 0));
+    if let Some(x) = b_invite.invite.as_mut() {
+        x.ack_branch = Some("z9hG4bK-ack-1f45".into());
+        x.emitted_ack = Some(RetainedEmission::on_trigger(
             EMITTED_ACK.to_vec(),
             ("192.0.2.20".into(), 5060),
             Repeated::request("ACK"),
         ));
+    }
+    b_dialog.sent_invite = Some(b_invite);
 
     let mut ext: ExtMap = BTreeMap::new();
     ext.insert(
@@ -269,7 +295,6 @@ pub fn representative_call() -> Call {
         root_span_id: Some("fedcba9876543210".into()),
         sampled: Some(true),
         worker_index: Some(0),
-        topology: Some(CallTopology::new("worker-0", "worker-1", 3, 0)),
         emergency: Some(true),
         features: Some(FeatureActivations {
             platform: PlatformActivations {
@@ -313,9 +338,14 @@ pub fn representative_call() -> Call {
         message_seq: 0,
         decision_log: vec![representative_mark()],
         decision_ordinal: 1,
+        setup_cancelled: false,
         termination: None,
         message_turn: 1,
         sm_cursors: BTreeMap::new(),
+        tag_seed: 0,
+        leg_space: call::LegSpace::Creator,
+        answered: Vec::new(),
+        awaited: Vec::new(),
     }
 }
 
@@ -333,9 +363,7 @@ fn representative_mark() -> DecisionMark {
 // ── proptest strategies ─────────────────────────────────────────────────────
 
 mod records;
-use records::{
-    arb_attempt, arb_cdr, arb_decision_log, arb_message_ring, arb_ring, arb_termination, arb_timer,
-};
+use records::{arb_attempt, arb_cdr, arb_decision_log, arb_termination, arb_timer};
 
 fn arb_tag() -> impl Strategy<Value = String> {
     "[a-z0-9-]{1,16}"
@@ -359,8 +387,7 @@ fn arb_ext() -> impl Strategy<Value = Option<ExtMap>> {
     proptest::option::of(proptest::collection::btree_map("[a-z]{1,8}", arb_json(), 0..3))
 }
 
-/// Varied `sm_cursors` maps (ADR-0016): empty through a few
-/// `MachineId → StateLabel` entries, exercising the round-trip.
+/// Varied `sm_cursors` maps (ADR-0016), empty through a few entries.
 fn arb_sm_cursors() -> impl Strategy<Value = BTreeMap<MachineId, StateLabel>> {
     proptest::collection::btree_map(
         "[a-z-]{1,12}".prop_map(|s| MachineId(s.into())),
@@ -369,30 +396,8 @@ fn arb_sm_cursors() -> impl Strategy<Value = BTreeMap<MachineId, StateLabel>> {
     )
 }
 
-fn arb_remote_info() -> impl Strategy<Value = RemoteInfo> {
-    ("[a-z0-9.]{1,15}", any::<u16>()).prop_map(|(address, port)| RemoteInfo { address, port })
-}
 fn arb_host_port() -> impl Strategy<Value = HostPort> {
     ("[a-z0-9.]{1,15}", any::<u16>()).prop_map(|(host, port)| HostPort { host, port })
-}
-fn arb_invite_handle() -> impl Strategy<Value = InviteTxnHandle> {
-    (arb_tag(), arb_bytes(48), arb_host_port()).prop_map(
-        |(branch, original_invite, destination)| InviteTxnHandle {
-            branch,
-            cseq: 1,
-            original_invite,
-            destination,
-        },
-    )
-}
-
-fn arb_leg_kind() -> impl Strategy<Value = LegKind> {
-    prop_oneof![
-        Just(LegKind::A),
-        Just(LegKind::Destination),
-        Just(LegKind::Media),
-        Just(LegKind::TransferTarget),
-    ]
 }
 fn arb_timer_type() -> impl Strategy<Value = TimerType> {
     prop_oneof![
@@ -400,14 +405,14 @@ fn arb_timer_type() -> impl Strategy<Value = TimerType> {
         Just(TimerType::GlobalDuration),
         Just(TimerType::LimiterRefresh),
         Just(TimerType::Keepalive),
-        Just(TimerType::KeepaliveTimeout),
         Just(TimerType::TerminatingTimeout),
         Just(TimerType::ReferSubscriptionExpiry),
         Just(TimerType::ReferReinviteAnswer),
         Just(TimerType::ReferOverallSafety),
         Just(TimerType::NotifyAnswerCap),
+        Just(TimerType::HeldAnswer),
         // Service-owned timer: arbitrary (service_id, key) — both deserialise
-        // into owned strings on the replica side (Cow::Owned), so the codec
+        // into owned strings on the decoding side (Cow::Owned), so the codec
         // P1 round-trip property covers the HA replication path for it.
         ("[a-z][a-z0-9-]{0,8}", "[a-zA-Z0-9_-]{1,12}").prop_map(|(sid, key)| {
             TimerType::Service { service_id: MachineId(sid.into()), key: key.into() }
@@ -428,236 +433,6 @@ fn arb_cdr_type() -> impl Strategy<Value = CdrEventType> {
 }
 fn arb_direction() -> impl Strategy<Value = Direction> {
     prop_oneof![Just(Direction::FromA), Just(Direction::FromB)]
-}
-
-fn arb_pending_request() -> impl Strategy<Value = PendingRequest> {
-    (
-        "[A-Z]{3,8}",
-        any::<i64>(),
-        any::<i64>(),
-        proptest::collection::vec("[a-z0-9 /.:;=-]{1,40}", 0..3),
-        arb_tag(),
-        arb_uri(),
-        arb_uri(),
-        arb_direction(),
-        proptest::option::of("[0-9]{1,10}(\\.[0-9]{1,3})?"),
-    )
-        .prop_map(
-            |(
-                method,
-                outbound_cseq,
-                inbound_cseq,
-                source_vias,
-                source_call_id,
-                source_from,
-                source_to,
-                direction,
-                source_timestamp,
-            )| {
-                PendingRequest {
-                    method,
-                    outbound_cseq,
-                    inbound_cseq,
-                    source_vias,
-                    source_call_id,
-                    source_from,
-                    source_to,
-                    direction,
-                    cancelled: false,
-                    offered_100rel: false,
-                    offered: false,
-                    source_timestamp,
-                    relayed_by: String::new(),
-                }
-            },
-        )
-}
-
-/// Boxed, as [`arb_leg`] is: a debug build otherwise holds the whole value tree
-/// of a call on the test thread's stack.
-fn arb_dialog() -> BoxedStrategy<Dialog> {
-    let sip = (
-        arb_tag(),
-        arb_tag(),
-        arb_dialog_state(),
-        arb_uri(),
-        any::<i64>(),
-        proptest::collection::vec("[a-z0-9 /.:;=<>-]{1,40}", 0..3),
-        proptest::collection::vec(
-            ("(a|b-[0-9]{1,2})", arb_tag())
-                .prop_map(|(leg_id, peer_tag)| PeerDialog { leg_id, peer_tag }),
-            0..2,
-        ),
-    );
-    let ext = (
-        proptest::option::of(any::<i64>()),
-        proptest::collection::vec(arb_pending_request(), 0..3),
-        proptest::option::of(arb_tag()),
-        proptest::option::of(arb_invite_handle()),
-        proptest::option::of(arb_bytes(80)),
-        proptest::option::of(arb_unacked_2xx()),
-        proptest::option::of(arb_unacked_2xx()),
-        proptest::option::of(arb_retained_emission()),
-        proptest::option::of(any::<i64>()),
-        (
-            proptest::option::of(arb_sdp_session()),
-            proptest::option::of(arb_owed_answer()),
-            proptest::option::of(arb_own_notify()),
-        ),
-        (any::<bool>(), proptest::option::of(arb_tag())),
-    );
-    (sip, ext)
-        .prop_map(
-            |(
-                (our_tag, peer_tag, state, remote_target, our_cseq, route_set, fronts),
-                (
-                    peer_cseq,
-                    inbound_pending_requests,
-                    ack_branch,
-                    pending_invite_txn,
-                    cached_sdp,
-                    pending_reinvite_2xx,
-                    answered_2xx,
-                    emitted_ack,
-                    awaited_ack_cseq,
-                    (sdp_session, owed_answer, own_notify),
-                    (shown, shows_media),
-                ),
-            )| Dialog {
-                our_tag,
-                peer_tag,
-                state,
-                our_cseq,
-                peer_cseq,
-                remote_target,
-                route_set,
-                fronts,
-                shown,
-                shows_media,
-                inbound_pending_requests,
-                ack_branch,
-                pending_invite_txn,
-                cached_sdp,
-                pending_reinvite_2xx,
-                awaited_ack_cseq,
-                answered_2xx,
-                emitted_ack,
-                sdp_session,
-                owed_answer,
-                own_notify,
-            },
-        )
-        .boxed()
-}
-
-/// Any dialog state, a retired one with open relays and a release.
-fn arb_dialog_state() -> impl Strategy<Value = DialogState> {
-    let end = prop_oneof![
-        any::<u16>().prop_map(DialogEnd::Rejected),
-        Just(DialogEnd::PeerBye),
-        Just(DialogEnd::EarlyPeerBye),
-        proptest::option::of(any::<u16>())
-            .prop_map(|final_status| DialogEnd::OurBye { final_status }),
-    ];
-    let retired = (
-        proptest::collection::vec(arb_pending_request(), 0..2),
-        proptest::option::of((arb_tag(), arb_tag(), any::<bool>()).prop_map(
-            |(ack_branch, bye_branch, settled)| StragglerRelease {
-                ack_branch,
-                bye_branch,
-                settled,
-            },
-        )),
-    )
-        .prop_map(|(open_relays, release)| RetiredDialog { open_relays, release });
-    prop_oneof![
-        Just(DialogState::Early),
-        Just(DialogState::Confirmed),
-        Just(DialogState::Ending(EndingBy::Bye)),
-        Just(DialogState::Ending(EndingBy::Cancel)),
-        end.prop_map(DialogState::Ended),
-        retired.prop_map(DialogState::Retired),
-    ]
-}
-
-/// Boxed: a value tree this size, held by value in every enclosing tuple, is
-/// past the 2 MiB test-thread stack of a debug build.
-fn arb_leg() -> BoxedStrategy<Leg> {
-    (
-        "(a|b-[0-9]{1,2})",
-        arb_tag(),
-        (
-            proptest::option::of(
-                (
-                    arb_tag(),
-                    (any::<i64>(), any::<i64>()),
-                    proptest::option::of(arb_invite_handle()),
-                    proptest::option::of(100u16..700),
-                    any::<bool>(),
-                )
-                    .prop_map(
-                        |(tag, (cseq, sent), txn, final_received, cancel_sent)| OutboundInvite {
-                            final_received,
-                            cancel_sent,
-                            ..OutboundInvite::new(tag, cseq, sent, txn)
-                        },
-                    ),
-            ),
-            proptest::option::of(arb_tag()),
-        ),
-        arb_remote_info(),
-        proptest::collection::vec(arb_dialog(), 0..3),
-        (
-            proptest::option::of(arb_uri()),
-            proptest::option::of(arb_uri()),
-            proptest::option::of(arb_uri()),
-        ),
-        (
-            arb_ext(),
-            proptest::option::of(arb_leg_kind()),
-            proptest::option::of(any::<bool>()),
-            proptest::option::of(200u16..700),
-            proptest::option::of(any::<bool>()),
-        ),
-        (arb_message_ring(), proptest::option::of(200u16..300)),
-        arb_sdp_session(),
-        (proptest::option::of((0usize..4).prop_map(AttemptId)), arb_ring()),
-    )
-        .prop_map(
-            |(
-                leg_id,
-                call_id,
-                (outbound_invite, own_tag),
-                source,
-                dialogs,
-                (local_uri, remote_uri, invite_request_uri),
-                (ext, kind, adopted, invite_final_sent, in_session_timer),
-                (messages, answer_preempted),
-                sdp_session,
-                (attempt, ring),
-            )| Leg {
-                leg_id,
-                call_id,
-                source,
-                dialogs: dialogs.into(),
-                local_uri,
-                remote_uri,
-                invite_request_uri,
-                outbound_invite,
-                own_tag,
-                ext,
-                kind,
-                adopted,
-                in_session_timer,
-                invite_final_sent,
-                answer_preempted,
-                attempt,
-                ring,
-                messages,
-                sdp_session,
-            },
-        )
-        .boxed()
 }
 
 fn arb_limiter() -> impl Strategy<Value = CallLimiterState> {
@@ -856,10 +631,6 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         proptest::option::of("[0-9a-f]{16}"),
         proptest::option::of(any::<bool>()),
         proptest::option::of(any::<i64>()),
-        proptest::option::of(
-            (arb_tag(), arb_tag(), any::<i64>(), any::<i64>())
-                .prop_map(|(pri, bak, gen, bak_gen)| CallTopology::new(pri, bak, gen, bak_gen)),
-        ),
     );
     let tail = (
         proptest::option::of(any::<bool>()),
@@ -902,7 +673,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             (call_ref, a_leg, b_legs, active_peer, callback_context, billing_context, a_leg_invite),
             (limiter, timers, cdr_events, attempts),
             (state, created_at),
-            (trace_id, root_span_id, sampled, worker_index, topology),
+            (trace_id, root_span_id, sampled, worker_index),
             (
                 emergency,
                 features,
@@ -935,7 +706,6 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             root_span_id,
             sampled,
             worker_index,
-            topology,
             emergency,
             features,
             policy_update_headers,
@@ -952,10 +722,15 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             provisionals,
             message_seq,
             decision_ordinal: decision_log.len() as u32,
+            setup_cancelled: false,
             decision_log,
             termination,
             message_turn,
             sm_cursors,
+            tag_seed: 7,
+            leg_space: call::LegSpace::Creator,
+            answered: Vec::new(),
+            awaited: Vec::new(),
         },
     )
 }

@@ -1,6 +1,7 @@
 //! The simulated-failover acceptance gate (ADR-0011 X10). The canonical 5-step
-//! failover scenario plus a fault matrix plus the combined SIP+replication
-//! recording report, all under ONE fake clock (`#[tokio::test(start_paused = true)]`).
+//! failover scenario plus the combined SIP+replication recording report, all
+//! under ONE fake clock (`#[tokio::test(start_paused = true)]`); its fault
+//! matrix is `failover_matrix.rs`.
 //!
 //! Topology:
 //!
@@ -11,13 +12,17 @@
 //! Fake-clock discipline (CLAUDE.md): drive the protocol BETWEEN advances; both
 //! fabrics use transit `>= 1 ms`; `FailoverHarness::advance` runs settled
 //! 100 ms chunks across BOTH planes.
+//!
+//! Beyond the failover sweep: keepalives across a reclaim, CSeq order, self-release, clock skew
+//! and the on-demand reclaim.
 
 use std::time::Duration;
 
 use call::parse_call_ref;
 use call::CdrEventType;
 use failover_harness::{
-    worker_ordinals, FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth,
+    assert_call_ended, worker_ordinals, FailoverHarness, PartitionRole, ProxySut,
+    ReplicatedB2buaSut, WorkerHealth,
 };
 use scenario_harness::Agent;
 use sip_message::generators::InDialogMethod;
@@ -123,14 +128,13 @@ async fn canonical_failover() {
         b2.metrics().creations_total() > b2_creations_before,
         "GATE 3: b2 processed the failed-over in-dialog request (created the call locally)",
     );
-    // Model Y (amends ADR-0020 X3): the acting-backup DEFERS — it answers the wire
-    // but does NOT discharge a CDR itself (the rebooting primary discharges the
-    // deferred terminal on reclaim, or the backup's alive-timer fallback does if it
-    // never returns). Exactly-once CDR accounting is covered by the matrix +
-    // `acting_backup_terminate`; here we assert the defer.
+    // The deferral (ADR-0055 §5, ADR-0020 X3): a copy whose primary is a member
+    // answers the wire but does NOT discharge a CDR itself (the rebooting primary
+    // discharges the deferred terminal on reclaim). The CDR count is covered by the
+    // matrix + `acting_backup_terminate`; here we assert the defer.
     assert!(
         b2.cdr_records().is_empty(),
-        "GATE 3 (Model Y): the acting-backup must DEFER (write no CDR itself); got {} CDR(s)",
+        "GATE 3 (deferral): the acting-backup must DEFER (write no CDR itself); got {} CDR(s)",
         b2.cdr_records().len(),
     );
 
@@ -184,6 +188,19 @@ async fn canonical_failover() {
     // HRW picked — with both alive the cookie names a definite primary).
     scenario_harness::callflow::hangup(&mut dlg2, &bob).await;
     fh.advance(Duration::from_millis(300)).await;
+
+    // Both calls ended with one CDR each and nothing left: the first discharged
+    // by the reclaiming primary, the second by its own primary.
+    assert_call_ended(&[&*b1, &*b2], &call_ref, 1, "the reclaim discharges the deferred end").await;
+    let second: Vec<String> = b1
+        .cdr_records()
+        .into_iter()
+        .chain(b2.cdr_records())
+        .map(|c| c.call_ref)
+        .filter(|r| *r != call_ref)
+        .collect();
+    assert_eq!(second.len(), 1, "one CDR for the second call: {second:?}");
+    assert_call_ended(&[&*b1, &*b2], &second[0], 1, "a call no fault touched").await;
 
     // ── combined report (recording-first; SIP + replication together) ────────
     // Emitted by `FailoverHarness`'s write-on-Drop fallback into
@@ -311,28 +328,37 @@ async fn hydrated_takeover_copy_self_releases_without_leaking() {
         "the self-release kept the replica — the call is not lost",
     );
 
+    // The caller hangs up: the backup takes the call over again, relays the BYE
+    // and defers the end to its member primary, whose reclaim discharges it.
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    fh.advance(Duration::from_millis(500)).await;
+    reboot_and_reclaim(&mut fh, &proxy, b1).await;
+    assert_call_ended(&[&*b1, &*b2], &call_ref, 1, "the reclaim discharges the deferred end").await;
+
     drop((w_b1, w_b2, proxy));
     let _ = fh.repl_report();
 }
 
 // ===========================================================================
-// SUCCESSFUL LONG CALL — the AS generates its own in-dialog OPTIONS keepalive.
+// SUCCESSFUL LONG CALL — the B2BUA generates its own in-dialog OPTIONS keepalive.
 //
 // The happy-path FOUNDATION for the keepalive failover matrix (ADR-0013): NO
 // fault at all. A quiescent established call is parked on its primary; at the
-// PRODUCTION 300 s interval the AS pokes BOTH peered legs with an in-dialog
+// PRODUCTION 300 s interval the B2BUA pokes BOTH peered legs with an in-dialog
 // OPTIONS; both answer 200, which (1) cancels each leg's 5 s dead-peer reap and
 // (2) flushes the call (refreshing the backup `Element` TTL). The keepalive
 // re-arms, so a SECOND interval probes again — proving the call survives an
-// arbitrarily long hold driven by the AS's own timers, not by UAC traffic.
+// arbitrarily long hold driven by the B2BUA's own timers, not by UAC traffic.
 // Then a normal caller BYE tears it down cleanly (CDR written, no residue).
 //
-// This is the cell the keepalive matrix builds on: get the AS-generated OPTIONS
+// This is the cell the keepalive matrix builds on: get the B2BUA-generated OPTIONS
 // loop right at production cadence with zero failover BEFORE injecting one.
 // ===========================================================================
 #[tokio::test(start_paused = true)]
-async fn successful_long_call_with_as_generated_options() {
-    let mut fh = FailoverHarness::new("s10b-long-call-as-keepalive", &["b1", "b2"]);
+async fn successful_long_call_with_b2bua_generated_options() {
+    let mut fh = FailoverHarness::new("s10b-long-call-b2bua-keepalive", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let b1_lane = fh.agent("b1-lane", B1).await;
@@ -353,7 +379,7 @@ async fn successful_long_call_with_as_generated_options() {
     let mut uas = bob.receive("INVITE").await;
     let b_leg_call_id = uas.request().call_id().as_str().to_string();
     let (pri_ord, _bak) = worker_ordinals(uas.request());
-    let (b1, _b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
     uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -362,8 +388,9 @@ async fn successful_long_call_with_as_generated_options() {
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await; // confirm + replicate
     assert_eq!(b1.active_calls(), 1, "primary serves the established call");
+    let call_ref = find_backed_up_ref(b2, b1.ordinal()).await;
 
-    // ── TWO keepalive cycles at the PRODUCTION interval — the AS pokes both legs;
+    // ── TWO keepalive cycles at the PRODUCTION interval — the B2BUA pokes both legs;
     //    both answer within the 5 s reap, so the quiescent call stays up. ─────────
     let tol = ["INVITE", "ACK"];
     for cycle in 1..=2 {
@@ -384,13 +411,13 @@ async fn successful_long_call_with_as_generated_options() {
                 a_txn.is_some() && b_txn.is_some()
             })
             .await;
-        assert!(serviced, "cycle {cycle}: the AS keepalive OPTIONS reached both legs");
+        assert!(serviced, "cycle {cycle}: the B2BUA keepalive OPTIONS reached both legs");
 
         let mut bob_opts = b_txn.take().unwrap();
         assert_eq!(
             bob_opts.request().call_id().as_str(),
             b_leg_call_id.as_str(),
-            "cycle {cycle}: the AS keepalive probes the SAME b-leg dialog it owns",
+            "cycle {cycle}: the B2BUA keepalive probes the SAME b-leg dialog it owns",
         );
         a_txn.take().unwrap().respond(200, "OK").await;
         bob_opts.respond(200, "OK").await;
@@ -427,6 +454,7 @@ async fn successful_long_call_with_as_generated_options() {
         b1.cdr_records().iter().any(|c| c.events.iter().any(|e| e.event_type == CdrEventType::Bye)),
         "a CDR with the terminating Bye was written for the long call",
     );
+    assert_call_ended(&[&*b1, &*b2], &call_ref, 1, "a call no fault touched").await;
 
     drop((w_b1, w_b2, proxy));
     let _ = fh.repl_report();
@@ -469,7 +497,7 @@ async fn keepalive_as_options_increments_dialog_cseq() {
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak) = worker_ordinals(uas.request());
-    let (b1, _b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
     uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -478,8 +506,9 @@ async fn keepalive_as_options_increments_dialog_cseq() {
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await; // confirm + replicate
     assert_eq!(b1.active_calls(), 1, "primary serves the established call");
+    let call_ref = find_backed_up_ref(b2, b1.ordinal()).await;
 
-    // ── ONE AS keepalive OPTIONS cycle at the PRODUCTION interval — the AS pokes
+    // ── ONE B2BUA keepalive OPTIONS cycle at the PRODUCTION interval — the B2BUA pokes
     //    both legs; both answer within the 5 s reap, so the call stays up. The
     //    OPTIONS advances the per-leg dialog CSeq past the INVITE's. ──────────────
     let tol = ["INVITE", "ACK"];
@@ -496,7 +525,7 @@ async fn keepalive_as_options_increments_dialog_cseq() {
             a_txn.is_some() && b_txn.is_some()
         })
         .await;
-    assert!(serviced, "the AS keepalive OPTIONS reached both legs");
+    assert!(serviced, "the B2BUA keepalive OPTIONS reached both legs");
     a_txn.take().unwrap().respond(200, "OK").await;
     b_txn.take().unwrap().respond(200, "OK").await;
     fh.advance(Duration::from_millis(300)).await;
@@ -513,6 +542,7 @@ async fn keepalive_as_options_increments_dialog_cseq() {
     // INVITE CSeq 1 → OPTIONS CSeq 2 → BYE CSeq 3 (strictly increasing); the RFC
     // audit finds no in-dialog CSeq reuse a real UAS would reject.
     fh.assert_sip_rfc_clean("keepalive_as_options_increments_dialog_cseq");
+    assert_call_ended(&[&*b1, &*b2], &call_ref, 1, "a call no fault touched").await;
 
     drop((w_b1, w_b2, proxy));
     let _ = fh.repl_report();
@@ -618,6 +648,13 @@ async fn reboot_reclaim_exactly_one_owner_after_self_release() {
     assert!(b1.serves(&call_ref), "the rebooted primary reclaimed + serves it");
     assert!(b2.memory_clean(), "the backup holds no live copy");
 
+    // The caller hangs up on the reclaimed call; its owner ends it.
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    fh.advance(Duration::from_secs(1)).await;
+    assert_call_ended(&[&*b1, &*b2], &call_ref, 1, "the reclaimed primary ends the call").await;
+
     drop((w_b1, w_b2, proxy));
 }
 
@@ -707,7 +744,7 @@ async fn quiescent_long_call_survives_kill_reboot_reclaim() {
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect_tolerating(200, &["OPTIONS"]).await;
     fh.advance(Duration::from_secs(1)).await;
-    failover_harness::assert_call_fully_released(&[&*b1, &*b2], &call_ref).await;
+    assert_call_ended(&[&*b1, &*b2], &call_ref, 1, "the reclaimed primary ends the call").await;
 
     drop((w_b1, w_b2, proxy));
 }
@@ -809,6 +846,7 @@ async fn cseq_stays_in_order_across_failover_and_reclaim() {
     bob.receive_tolerating("BYE", &["OPTIONS", "INFO"]).await.respond(200, "OK").await;
     bye.expect_tolerating(200, &["OPTIONS", "INFO"]).await;
     fh.advance(Duration::from_secs(1)).await;
+    assert_call_ended(&[&*b1, &*b2], &call_ref, 1, "the reclaimed primary ends the call").await;
 
     // NOTE: no inline `assert_sip_rfc_clean` here — this test's focus is CSeq
     // survival across the complete failover. The RFC in-dialog-CSeq audit still
@@ -819,7 +857,7 @@ async fn cseq_stays_in_order_across_failover_and_reclaim() {
     drop((w_b1, w_b2, proxy));
 }
 
-/// Pump to the next keepalive deadline and answer the AS-generated OPTIONS on both
+/// Pump to the next keepalive deadline and answer the B2BUA-generated OPTIONS on both
 /// legs inside their 5 s dead-peer window (the proven sub-reap pump cadence).
 async fn service_keepalive_both_legs(
     fh: &mut FailoverHarness,
@@ -840,7 +878,7 @@ async fn service_keepalive_both_legs(
             a_txn.is_some() && b_txn.is_some()
         })
         .await;
-    assert!(got, "the AS keepalive OPTIONS reached both legs within an interval");
+    assert!(got, "the B2BUA keepalive OPTIONS reached both legs within an interval");
     a_txn.take().unwrap().respond(200, "OK").await;
     b_txn.take().unwrap().respond(200, "OK").await;
     fh.advance(Duration::from_millis(300)).await;
@@ -907,19 +945,16 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
     bye.expect(200).await; // ← external: the failed-over BYE completes
     fh.advance(Duration::from_millis(500)).await;
 
-    // ── INVARIANT 1 (Model Y — amends ADR-0020 X3): the acting-backup DEFERS its
+    // ── INVARIANT 1 (ADR-0055 §5, ADR-0020 X3): the acting-backup DEFERS its
     //    terminal. It answers the wire (alice/bob's BYE completed above), records the
     //    terminal + reverse-flushes it as a short-TTL deferred `bak:` context, and
     //    self-releases its LIVE copy — but it does NOT discharge: no CDR, no limiter
-    //    release, no delete. The live/rebooting primary is the sole discharge
-    //    authority (it reclaims + discharges EXACTLY ONCE; or the backup's own
-    //    alive-timer fallback fires only if the primary never returns). So b2 has
-    //    written NO CDR here. (This INVERTS the pre-Model-Y contract this test's name
-    //    was written for: the backup now deliberately DOES leave a transient
-    //    deferred context for reclaim — cleaned by INVARIANT 2 below.) ─────────────
+    //    release, no delete. Its primary is a member, so the rebooting primary
+    //    reclaims and discharges the call. So b2 has written NO CDR here, and the
+    //    deferred context it leaves is cleaned by INVARIANT 2 below. ─────────────
     assert!(
         b2.cdr_records().is_empty(),
-        "Model Y: the acting-backup must DEFER (write no CDR itself); the primary \
+        "deferral: the acting-backup must DEFER (write no CDR itself); the primary \
          discharges on reclaim. b2 wrote {} CDR(s)",
         b2.cdr_records().len(),
     );
@@ -943,345 +978,17 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
     fh.advance(Duration::from_secs(10)).await; // ReclaimAll (smoothed) + straggler sweep
 
     // ── INVARIANT 2: the rebooted primary reclaimed the deferred terminal and
-    //    discharged it EXACTLY ONCE — the call is fully released cluster-wide (no
-    //    owner, no replica anywhere; no resurrection) AND there is exactly one CDR
-    //    across the cluster (the reclaiming primary's, the backup having deferred). ─
+    //    discharged it — the call is fully released cluster-wide (no owner, no
+    //    replica anywhere; no resurrection) AND there is one CDR across the cluster
+    //    (the reclaiming primary's, the backup having deferred). ─
     failover_harness::assert_call_fully_released(&[&*b1, &*b2], &call_ref).await;
     assert_eq!(
         failover_harness::total_cdrs_for(&[&*b1, &*b2], &call_ref),
         1,
-        "Model Y: exactly one CDR cluster-wide for the reclaimed-and-discharged deferred terminal",
+        "one CDR cluster-wide for the reclaimed-and-discharged deferred terminal",
     );
 
     drop((w_b1, w_b2, proxy));
-}
-
-// ===========================================================================
-// MATRIX — fault cases (best-effort; deferrals documented in the report-back)
-// ===========================================================================
-
-/// Matrix: crash mid-INVITE — crash the primary BEFORE the call is established /
-/// replicated. The proxy fails the early dialog to the backup or the call is
-/// lost gracefully — assert no panic + a sane outcome (the harness/cores stay
-/// live and a subsequent fresh call still establishes).
-#[tokio::test(start_paused = true)]
-async fn matrix_crash_mid_invite() {
-    let mut fh = FailoverHarness::new("s10b-crash-mid-invite", &["b1", "b2"]);
-    let alice = fh.agent("alice", ALICE).await;
-    let bob = fh.agent("bob", BOB).await;
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
-    let mut w_b1 =
-        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    let mut w_b2 =
-        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    fh.advance(Duration::from_millis(500)).await;
-
-    // alice INVITEs; bob gets the b-leg. Determine the primary from the cookie.
-    let call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    let uas = bob.receive("INVITE").await;
-    let (pri_ord, _bak) = worker_ordinals(uas.request());
-
-    // Crash the primary BEFORE answering (no 200 → no establish → no replicate).
-    fh.mark(&pri_ord, None, "crash", "mid-INVITE (before answer)");
-    if pri_ord == "b1" {
-        w_b1.crash();
-    } else {
-        w_b2.crash();
-    }
-    proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    // Drop bob's pending UAS (the early dialog is abandoned).
-    drop(uas);
-    drop(call); // alice abandons the early dialog.
-    fh.advance(Duration::from_millis(500)).await;
-
-    // SANE OUTCOME: no panic; the surviving worker + proxy still serve a fresh
-    // call end-to-end (the cluster degraded to 1 node but stays live).
-    let mut call2 = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    let mut uas2 = bob.receive("INVITE").await;
-    uas2.respond(200, "OK").with_sdp(ANSWER).await;
-    call2.expect(200).await;
-    let mut dlg2 = call2.ack().await;
-    bob.receive("ACK").await;
-    scenario_harness::callflow::hangup(&mut dlg2, &bob).await;
-    fh.advance(Duration::from_millis(300)).await;
-    // Reaching here without a panic IS the assertion (liveness preserved).
-    drop((w_b1, w_b2, proxy));
-    let _ = fh.repl_report();
-}
-
-/// Matrix: the backup crashes between two Timer-A copies of one INVITE. The
-/// callee is silent and the worker's 100 is lost on its way to the caller, so
-/// both INVITE client transactions keep their Timer A: the caller's rung and
-/// the primary's b-leg rung reach the proxy after the backup was killed. The
-/// proxy repeats each forward — same target, same branch, and the cookie its
-/// first copy carried (the §16.6 / §17.2.3 memo), the dead backup still named:
-/// the taker keeps the first copy's route set (§12.1.1), so the dialog keeps
-/// one cookie. The primary's server transaction absorbs the a-leg copy, the
-/// callee the b-leg copy, the call completes on the survivor, and the trace is
-/// clean under `rung-byte-identical`.
-#[tokio::test(start_paused = true)]
-async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
-    let mut fh = FailoverHarness::new("s10b-backup-crash-between-timer-a-copies", &["b1", "b2"]);
-    let alice = fh.agent("alice", ALICE).await;
-    let bob = fh.agent("bob", BOB).await;
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
-    let mut w_b1 =
-        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    let mut w_b2 =
-        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    fh.advance(Duration::from_millis(500)).await;
-
-    // alice INVITEs, cut off while the worker's 100 crosses; bob gets the b-leg.
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    fh.cut_signalling("alice", alice.addr());
-    let mut uas = bob.receive("INVITE").await;
-    fh.restore_signalling("alice", alice.addr());
-    let (pri_ord, bak_ord) = worker_ordinals(uas.request());
-    assert!(!bak_ord.is_empty(), "two live workers: the cookie names a backup");
-    let primary: std::net::SocketAddr = if pri_ord == "b1" { B1 } else { B2 }.parse().unwrap();
-
-    // The backup dies before either Timer A fires.
-    fh.mark(&bak_ord, None, "crash", "between two Timer-A copies of the INVITE");
-    if bak_ord == "b1" {
-        w_b1.crash();
-    } else {
-        w_b2.crash();
-    }
-    proxy.set_health(&bak_ord, WorkerHealth::Dead);
-    fh.advance(Duration::from_millis(500)).await; // Timer A (T1): the primary's b-leg rung
-
-    // Timer A: the caller re-sends THE INVITE — the bytes that left, again.
-    let invite = fh
-        .sip_entries()
-        .into_iter()
-        .find(|e| e.from == alice.addr() && e.to == proxy.addr() && e.raw.starts_with(b"INVITE "))
-        .map(|e| e.raw)
-        .expect("the caller's INVITE is on the wire");
-    alice.try_send_datagram(&invite, proxy.addr()).await.unwrap();
-    fh.advance(Duration::from_millis(100)).await;
-
-    // The proxy repeated its forward to the SAME primary under the SAME branch
-    // and the SAME cookie: the dead backup is still named.
-    let forwarded: Vec<Vec<u8>> = fh
-        .sip_entries()
-        .into_iter()
-        .filter(|e| e.from == proxy.addr() && e.to == primary && e.raw.starts_with(b"INVITE "))
-        .map(|e| e.raw)
-        .collect();
-    assert_eq!(forwarded.len(), 2, "two copies of the one INVITE forwarded to {pri_ord}");
-    assert_eq!(
-        sip_message::sniff::via_branch(&forwarded[0]),
-        sip_message::sniff::via_branch(&forwarded[1]),
-        "§16.11: the retransmission rides the branch the first copy got"
-    );
-    let cookie = |raw: &[u8]| {
-        sip_message::sniff::header_values(raw, "Record-Route")
-            .into_iter()
-            .find(|row| row.contains("w_pri="))
-            .expect("the proxy's cookie Record-Route")
-    };
-    assert!(
-        cookie(&forwarded[0]).contains(&format!("w_bak={bak_ord}")),
-        "{}",
-        cookie(&forwarded[0])
-    );
-    assert_eq!(cookie(&forwarded[1]), cookie(&forwarded[0]), "the cookie repeats");
-    // The b-leg rung went to bob too.
-    let to_bob = fh
-        .sip_entries()
-        .into_iter()
-        .filter(|e| e.from == proxy.addr() && e.to == bob.addr() && e.raw.starts_with(b"INVITE "))
-        .count();
-    assert_eq!(to_bob, 2, "the primary's Timer A re-sent its b-leg INVITE through the proxy");
-
-    // The primary absorbed the a-leg copy; bob absorbs the b-leg copy and answers.
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut dlg = call.ack().await;
-    bob.receive_absorbing("ACK", &["INVITE"]).await;
-    scenario_harness::callflow::hangup(&mut dlg, &bob).await;
-    fh.advance(Duration::from_millis(300)).await;
-    // Released on the survivor: the primary left no per-call state behind.
-    let survivor = if pri_ord == "b1" { &w_b1 } else { &w_b2 };
-    assert!(
-        survivor.memory_clean(),
-        "{pri_ord} released the call ({} live, {} locks)",
-        survivor.active_calls(),
-        survivor.lock_count()
-    );
-    drop((w_b1, w_b2, proxy));
-    let _ = fh.repl_report();
-}
-
-/// Matrix: crash during re-hydration — crash B1 AGAIN while it is bootstrapping
-/// from B2 (before it reaches ready), then reboot it once more. It must retry /
-/// re-bootstrap with no corruption and eventually reach ready.
-#[tokio::test(start_paused = true)]
-async fn matrix_crash_during_rehydration() {
-    let mut fh = FailoverHarness::new("s10b-crash-during-rehydration", &["b1", "b2"]);
-    let _alice = fh.agent("alice", ALICE).await;
-    let _bob = fh.agent("bob", BOB).await;
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
-    let mut w_b1 =
-        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    let w_b2 =
-        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    fh.advance(Duration::from_millis(500)).await;
-    assert!(w_b1.is_ready() && w_b2.is_ready());
-
-    // Crash b1, reboot it (begins re-hydration), then crash it AGAIN immediately
-    // (mid-bootstrap) before it reaches ready.
-    fh.mark("b1", None, "crash", "first");
-    w_b1.crash();
-    proxy.set_health("b1", WorkerHealth::Dead);
-    fh.advance(Duration::from_millis(200)).await;
-
-    w_b1.reboot().await;
-    fh.mark("b1", None, "reboot", &format!("gen={}", w_b1.gen()));
-    // Only a tiny advance — likely still bootstrapping — then crash again.
-    fh.advance(Duration::from_millis(100)).await;
-    fh.mark("b1", None, "crash", "during re-hydration");
-    w_b1.crash();
-    fh.advance(Duration::from_millis(200)).await;
-
-    // Reboot once more and let it fully re-hydrate. No corruption: it reaches
-    // ready again at an even higher gen.
-    w_b1.reboot().await;
-    fh.mark("b1", None, "reboot", &format!("gen={}", w_b1.gen()));
-    for _ in 0..40 {
-        fh.advance(Duration::from_millis(500)).await;
-        if w_b1.is_ready() {
-            break;
-        }
-    }
-    assert!(w_b1.is_ready(), "b1 re-bootstrapped to ready after a crash mid-re-hydration");
-    assert!(w_b1.gen() >= 3, "two reboots bumped the gen at least to 3, got {}", w_b1.gen());
-    drop((w_b1, w_b2, proxy));
-    let _ = fh.repl_report();
-}
-
-/// Matrix: partition during failover — cut the repl link between B1 and B2 at the
-/// failover moment, then heal. The acting-backup b2 still serves the in-dialog
-/// request (its reverse-propagation to the down/cut primary is best-effort), and
-/// after heal + B1 reboot the cluster re-converges (B1 reaches ready). The
-/// partition holds every stream between the pair — the ones already open, which
-/// the fabric attributes to their owning node, and any opened while the cut
-/// lasts; B1 is crashed to make the failover happen, and the cut then keeps its
-/// reconnect-on-reboot from landing until heal.
-#[tokio::test(start_paused = true)]
-async fn matrix_partition_during_failover() {
-    let mut fh = FailoverHarness::new("s10b-partition-during-failover", &["b1", "b2"]);
-    let alice = fh.agent("alice", ALICE).await;
-    let bob = fh.agent("bob", BOB).await;
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
-    let mut w_b1 =
-        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    let mut w_b2 =
-        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    fh.advance(Duration::from_millis(500)).await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    let (pri_ord, _bak) = worker_ordinals(uas.request());
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
-    fh.advance(Duration::from_millis(500)).await;
-
-    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
-        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
-    let primary_ord = b1.ordinal().to_string();
-    let bak_ord = b2.ordinal().to_string();
-
-    // Failover moment: partition the pair (blocks reconnect) AND crash the
-    // primary (closes its established streams). Mark it dead.
-    fh.partition(&primary_ord, &bak_ord);
-    fh.mark(&primary_ord, None, "crash", "at failover");
-    b1.crash();
-    proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    fh.advance(Duration::from_millis(300)).await;
-
-    // The acting-backup b2 still handles the in-dialog BYE (reverse-propagation
-    // to the partitioned/crashed primary is best-effort; the call is served).
-    let b2_before = b2.metrics().creations_total();
-    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
-    fh.advance(Duration::from_millis(500)).await;
-    assert!(
-        b2.metrics().creations_total() > b2_before,
-        "acting-backup served the in-dialog request despite the partition",
-    );
-
-    // Heal + reboot the primary → it reconnects and re-converges to ready.
-    fh.heal(&primary_ord, &bak_ord);
-    b1.reboot().await;
-    fh.mark(&primary_ord, None, "reboot", &format!("gen={}", b1.gen()));
-    for _ in 0..40 {
-        fh.advance(Duration::from_millis(500)).await;
-        if b1.is_ready() {
-            break;
-        }
-    }
-    assert!(b1.is_ready(), "primary re-converged to ready after heal + reboot");
-    drop((w_b1, w_b2, proxy));
-    let _ = fh.repl_report();
-}
-
-/// Matrix: double-fault — crash B1, then before recovery the BYE arrives on B2
-/// AND B2 takes a transient fault (we cut B2→B1 reverse-propagation so its
-/// best-effort reclaim push fails). Liveness must be preserved: B2 still serves
-/// the in-dialog request and the harness stays live.
-#[tokio::test(start_paused = true)]
-async fn matrix_double_fault() {
-    let mut fh = FailoverHarness::new("s10b-double-fault", &["b1", "b2"]);
-    let alice = fh.agent("alice", ALICE).await;
-    let bob = fh.agent("bob", BOB).await;
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
-    let mut w_b1 =
-        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    let mut w_b2 =
-        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    fh.advance(Duration::from_millis(500)).await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    let (pri_ord, _bak) = worker_ordinals(uas.request());
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
-    fh.advance(Duration::from_millis(500)).await;
-
-    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
-        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
-    let primary_ord = b1.ordinal().to_string();
-    let bak_ord = b2.ordinal().to_string();
-
-    // Fault 1: crash the primary. Fault 2: partition the pair so b2's reverse
-    // reclaim push to the (down) primary also cannot land — a transient repl
-    // fault on the acting-backup's propagation path.
-    fh.mark(&primary_ord, None, "crash", "fault 1");
-    b1.crash();
-    proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    fh.partition(&primary_ord, &bak_ord);
-    fh.mark(&bak_ord, Some(&primary_ord), "partition", "fault 2 (reverse-prop cut)");
-    fh.advance(Duration::from_millis(300)).await;
-
-    // Liveness: the BYE still completes on b2 despite the double fault.
-    let b2_before = b2.metrics().creations_total();
-    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
-    fh.advance(Duration::from_millis(500)).await;
-    assert!(
-        b2.metrics().creations_total() > b2_before,
-        "double-fault: acting-backup still served the in-dialog request (liveness)",
-    );
-    drop((w_b1, w_b2, proxy));
-    let _ = fh.repl_report();
 }
 
 // ===========================================================================
@@ -1461,19 +1168,33 @@ async fn skew_ahead_backup_no_immediate_options_at_takeover() {
     //    so pump toward it and confirm it eventually probes both legs (the call is
     //    kept alive, not silently un-probed). ─────────────────────────────────────
     let mut saw_options = false;
+    let mut caller_probed = false;
     let fired = fh
         .pump_until(Duration::from_secs(2), Duration::from_secs(340), async || {
             if let Some(mut txn) = bob.try_receive_tolerating("OPTIONS", &tol).await {
                 txn.respond(200, "OK").await;
                 saw_options = true;
             }
-            saw_options
+            if let Some(mut txn) = alice.try_receive_tolerating("OPTIONS", &tol).await {
+                txn.respond(200, "OK").await;
+                caller_probed = true;
+            }
+            saw_options && caller_probed
         })
         .await;
     assert!(
         fired && saw_options,
         "the re-armed keepalive DOES eventually probe bob (call kept alive)"
     );
+
+    // The caller hangs up on the backup, which defers the end to its member
+    // primary; the primary's reclaim discharges it.
+    let mut bye = dialog.bye().await;
+    bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
+    fh.advance(Duration::from_millis(500)).await;
+    reboot_and_reclaim(&mut fh, &proxy, b1).await;
+    assert_call_ended(&[&*b1, &*b2], &call_ref, 1, "the reclaim discharges the deferred end").await;
 
     drop((w_b1, w_b2, proxy));
 }
@@ -1484,7 +1205,7 @@ async fn skew_ahead_backup_no_immediate_options_at_takeover() {
 
 /// The callRef the acting-backup `b2` holds for `primary` in its `bak:{primary}`
 /// partition (the replicated call). Scans the engine's live backup keyset.
-async fn find_backed_up_ref(b2: &ReplicatedB2buaSut, primary: &str) -> String {
+pub(crate) async fn find_backed_up_ref(b2: &ReplicatedB2buaSut, primary: &str) -> String {
     for _ in 0..50 {
         if let Some(rf) = b2.scan_one_backed_up(primary).await {
             // Sanity: the replicated ref encodes the original primary.
@@ -1496,6 +1217,28 @@ async fn find_backed_up_ref(b2: &ReplicatedB2buaSut, primary: &str) -> String {
         tokio::task::yield_now().await;
     }
     panic!("no backed-up call ref found in bak:{primary} on the backup");
+}
+
+/// Reboot the crashed `primary` at a new address, publish it to the proxy as
+/// alive, and wait out its re-hydration and bulk reclaim.
+pub(crate) async fn reboot_and_reclaim(
+    fh: &mut FailoverHarness,
+    proxy: &ProxySut,
+    primary: &mut ReplicatedB2buaSut,
+) {
+    let ordinal = primary.ordinal().to_string();
+    let addr = primary.reboot().await;
+    proxy.set_address(&ordinal, addr);
+    fh.note_worker_rebound(&ordinal, addr);
+    proxy.set_health(&ordinal, WorkerHealth::Alive);
+    for _ in 0..40 {
+        fh.advance(Duration::from_millis(500)).await;
+        if primary.is_ready() {
+            break;
+        }
+    }
+    assert!(primary.is_ready(), "rebooted {ordinal} ready after re-hydration");
+    fh.advance(Duration::from_secs(10)).await;
 }
 
 // ===========================================================================
@@ -1567,4 +1310,6 @@ async fn in_dialog_bye_races_bulk_reclaim_served_on_demand() {
         !b2.is_synchronized_backup(&call_ref).await,
         "the terminate's delete propagated to the backup replica"
     );
+    assert_call_ended(&[&*b1, &*b2], &call_ref, 1, "the primary ends the call it materialised")
+        .await;
 }

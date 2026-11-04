@@ -166,9 +166,15 @@ tolerated (§3).
    `setup_deadline_s` or `ring_s` + `hold_s`, and only then is the generator
    removed (`SIGUSR1` for both drivers; loadgen also takes `POST /drain`,
    and a drained loadgen must exit 0, any other exit fails the step). With
-   `stop: abandon` the generator is killed with its calls in flight, which
-   leaves those calls to the system under test to reap; the stream writes no
-   record for them and is left out of the reconciliation. A stream that
+   `stop: abandon` the generator is held at rate 0 (SIPp's `cset rate 0`,
+   loadgen's `POST /rate?cps=0`), its count taken once two consecutive reads
+   of its counters show the hold and agree (SIPp's statistics row with its
+   target rate 0, loadgen's live `/metrics`, within 5 s), then it is killed
+   with its calls in flight, which leaves those calls to the
+   system under test to reap; the stream writes no record for them and is left
+   out of the reconciliation. The heal facts state that count, the calls not
+   placed and failed by the generator, and whether the counters showed the
+   hold (`held`). A stream that
    starts with an incident has no pre-inject baseline and so no `recovery`.
    Each firing is its own generator, its Call-IDs tagged with the event; at
    heal its records are shipped and its counter read before it is removed,
@@ -197,7 +203,12 @@ tolerated (§3).
     | `kill_worker` | fault | crash one worker: SIGKILL its processes from the node, proven dead; the kubelet restarts it | `kill_worker` |
     | `kill_worker_graceful` | fault | delete one worker pod with its grace period | `kill_worker` with `KILL_GRACE` |
     | `kill_worker_held` | fault | crash one worker and keep it absent for `duration_s` (the nodes it may run on tainted NoSchedule), then let it start once | (new) |
-    | `kill_proxy` | fault | crash the front proxy that holds the virtual address | `kill_proxy` |
+    | `kill_proxy` | fault | crash one front proxy; time its node's withdrawal from the VIPs' routes | `kill_proxy` |
+    | `proxy_rollout` | fault | a rollout restart of the proxies, each drained past its node's withdrawal; time the drain-to-withdrawal | (new) |
+    | `speaker_restart` | fault | restart the BGP speakers of one proxy's node | (new) |
+    | `cut_proxy_workers` | fault | cut one proxy off every worker for `duration_s`; time its node's withdrawal | (new) |
+    | `freeze_proxy` | fault | freeze one proxy's container for `duration_s` (a hung process, the pod's other containers running); time its node's withdrawal | (new) |
+    | `backend_outage` | fault | freeze every worker for `duration_s`; time every proxy node's withdrawal | (new) |
     | `pod_kill` | fault | crash one pod of any selector | `limiter_kill` |
     | `force_delete` | fault | force-delete one pod through the API, its processes left running: two incarnations at once | `kill_worker`'s former mechanism |
     | `pod_restart` | fault | delete one pod of any selector with its grace period | `limiter_restart` |
@@ -206,12 +217,12 @@ tolerated (§3).
     | `net_loss` | fault | netem loss on one pod for `duration_s` | `limiter_netcut` |
     | `tcp_reset` | fault | reset new TCP connections to one pod's port for `duration_s` | `limiter_reject` |
     | `cpu_starve` | fault | cap the CPU of one pod (pick `one`) or all (pick `all`) for `duration_s` | `cpu_starve`, `cpu_starve_all` |
-    | `node_stop` | fault | stop the nodes `node_selector` names, or the node that hosts a pod of the selector; start them at heal | `infra_node_kill` |
+    | `node_stop` | fault | stop the nodes `node_selector` names, or the node that hosts a pod of the selector; start them at heal; with `internal_vip`, time the withdrawal of the VIPs' routes | `infra_node_kill` |
     | `partition` | fault | cut the network between the targets and their peers for `duration_s` (Chaos Mesh); by default one worker from the others, the replication link | (new) |
     | `sip_loss` | fault | netem loss, duplication and delay on one pod's SIP datagrams only, for `duration_s` | (new) |
     | `io_stall` | fault | delay the file operations of one pod's volume for `duration_s` (Chaos Mesh) | (new) |
     | `clock_skew` | fault | shift one pod's wall clock for `duration_s` (Chaos Mesh) | (new) |
-    | `cut_external_plane` | fault | take the external interface of the virtual-address holder down | `cut_external_plane` |
+    | `cut_external_plane` | fault | disconnect one proxy's node from the callers' network; time its withdrawal from both VIPs' routes | `cut_external_plane` |
     | `spike` | load | a burst stream, drained at heal | `peak` |
     | `abuse` | load | a stream of an abuse scenario, drained at heal | `abuse_up`, `abuse_down` |
     | `orphan` | load | a stream abandoned mid-call at heal (`stop: abandon`) | `orphan_kill` |
@@ -242,8 +253,8 @@ made. A run profile joins the two.
 
    | class | from the record | instant | budget |
    |---|---|---|---|
-   | `setup_failed` | the shape expects `answered` and the call ended before answer some other way: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0). Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms`; one outside every window belongs to the first window open while it was pending (§3.5) | per key |
-   | `unexpected_ending` | any other caller ending not in `expected` (`rejected` with another code, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms`; a leg of an answered call at `ended_at_ms`, when it is known missing; a consult's contract refusal (§3.2) at the refusal | per key before answer; 0 after answer but a consult's contract refusal |
+   | `setup_failed` | the call ended before answer some other way than its shape expects: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0), where the shape expects `answered` or the setup drew no final at all. Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms`; one outside every window belongs to the first window open while it was pending (§3.5) | per key |
+   | `unexpected_ending` | any other caller ending not in `expected` (a final with another code where only a reject is expected, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms`; a leg of an answered call at `ended_at_ms`, when it is known missing; a consult's contract refusal (§3.2) at the refusal | per key before answer; 0 after answer but a consult's contract refusal |
    | `setup_slow` | from `started_at_ms` to `first_provisional_at_ms` (to `setup_ended_at_ms` when no provisional came) above the threshold; ring time never counts; a setup that drew no response at all takes none (it is a `setup_failed`) | that instant | count |
    | `dialog_request_failed` | each `failures` entry of kind `dialog_request` | its `at_ms` | 0 |
    | `call_cut` | `ending: cut` | the failure that cut it, else `ended_at_ms` | 0 |
@@ -265,9 +276,13 @@ made. A run profile joins the two.
    code is exactly what a run exists to show. The in-dialog classes
    (`dialog_request_failed`, `call_cut`, `call_stranded`,
    `protocol_anomaly`) and an `unexpected_ending` after answer take no budget
-   at all, and the budget schema has no place for them: an established call
-   is what HA protects, and a call answered where the treatment should have
-   refused it is a treatment that stopped working. One exception: a catalog
+   by default: an established call is what HA protects, and a call answered
+   where the treatment should have refused it is a treatment that stopped
+   working. A budget may allow in-dialog impacts by class and detail
+   (`in_dialog`) only for a fault whose stated mechanism outlasts an
+   in-dialog transaction's timeout (a total outage) or reorders a dialog's
+   requests, which an RFC-compliant receiver refuses (RFC 3261 §12.2.2),
+   each impact charged to the window holding its instant. One exception for the unexpected ending: a catalog
    leg declared `after_consult` opens only after an in-dialog consult of a
    decision service that another leg (`by`) asks for, and the catalog states
    the answers the consult's contract gives `by` when that service fails
@@ -313,7 +328,8 @@ made. A run profile joins the two.
    (`setup_failed`, or an `unexpected_ending` before answer: timed out, or a
    final that came late) belongs to the first window open while it was
    pending (an INVITE sent into the fault, ended after the window closed);
-   one outside every window is `unattributed`. An in-dialog impact takes no budget, so its attribution is
+   one outside every window is `unattributed`. An in-dialog impact its holding window's
+   `in_dialog` allowance does not name takes no budget, so its attribution is
    for analysis: its `candidate_windows` are every window whose `inject` fell
    inside the call's lifetime before the failure, or that holds the failure's
    instant, and with none it is `unattributed`. A call stranded before a window opens and whose setup
@@ -382,7 +398,9 @@ made. A run profile joins the two.
      1 s plus the CDR's unit; for a `cut` or `stranded` call, an impact
      already, a CDR ending more than 1 s plus its unit after the record's
      `ended_at_ms` (the call billed past the caller's end); each at the
-     record's `ended_at_ms`, with its excess past that tolerance.
+     record's `ended_at_ms`, with its excess past that tolerance, but a
+     duration whose ends agree within that tolerance at the record's
+     `answered_at_ms`: the two part at the answer.
 
    An unanswered call without a CDR is no mismatch, unless the profile's
    `cdr_required` names its ending (and optionally its final's code and
@@ -390,7 +408,10 @@ made. A run profile joins the two.
    CDRs of a firing stopped with `abandon` (their Call-IDs carry its event)
    join the firing instead of records: each call it placed owes one CDR, and
    a second one of a Call-ID, fewer or more Call-IDs than calls placed are
-   charged at the instant its generator exited. A missing CDR whose call
+   charged at the instant its generator exited: a call not placed owes none,
+   a call the generator failed may owe one. Only a count taken at the hold
+   bounds the Call-IDs; a firing whose facts hold none is a `class_failed`
+   finding and only its duplicates are charged. A missing CDR whose call
    ended outside every window but within the profile's `cdr_in_flight_s`
    before a window opened belongs to that window: its CDR was still in the
    sink when the fault hit; the value is stated from the system under test's
@@ -440,10 +461,16 @@ made. A run profile joins the two.
     allowance and whether it is a finding; the in-dialog impacts with their
     candidate windows; the unattributed impact; the integrity findings.
     `status` is `invalid` when an integrity finding exists, else `fail` when
-    any impact is a finding, else `pass`. A human `summary.md` is rendered
-    from it: the status and why, then per window and per stream each class
-    against its allowance, and each window's in-dialog impacts it is a
-    candidate of.
+    any impact is a finding, else `pass`. Beside the judgement, `unanswered`
+    reads every call that did not end answered by cause (expected ending,
+    503 with Retry-After, 503 without it whose setup overlaps a window
+    whose budget allows one, setup timeout, cut, other) and by window
+    incident kind, per stream and for priority calls (`Resource-Priority`,
+    RFC 4412) against the other `run` streams; it judges nothing and
+    changes no status. A human
+    `summary.md` is rendered from it: the status and why, the unanswered
+    calls, then per window and per stream each class against its
+    allowance, and each window's in-dialog impacts it is a candidate of.
 12. **Generator health.** A generator stall is a time the generator did not
     run: it placed no call and read no message. It has two signals. In the
     records: two consecutive calls of one firing of a stream started more than
@@ -462,7 +489,12 @@ made. A run profile joins the two.
     stream's `setup_deadline_s`) that falls inside one, measure the generator:
     they leave the impacts and the recovery samples, and are
     listed, with their Call-IDs, in one `generator_stall` integrity finding
-    per stall. A stall that spoiled no measurement is listed in the stream's
+    per stall, which names the signal that saw it (a watchdog stall by the two
+    statistics rows it lies between) and its source by the host's samples
+    over it, with their worst figures: the host under stress (§6.6) or its CPU
+    contended (a task waiting for a CPU a tenth of the time), the generator's
+    side (the generator itself or a slow reader of its record output) when
+    samples at most 2 s apart cover it calm, or the host unobserved. A stall that spoiled no measurement is listed in the stream's
     `stalls` and leaves the status alone. A generator's own count of calls it
     failed without a record (loadgen's `loadgen_generator_failures_total`) is
     a `generator_failure` integrity finding when above 0. A stall, a spoiled
@@ -494,6 +526,20 @@ made. A run profile joins the two.
     (more calls than the cap, minor). Consecutive minutes out of bound make
     one entry of the verdict's `limiters`, naming the limiter, its streams,
     the span, the minute maxima and medians, the bound and the window.
+14. **Calls established at a fault.** A fault of a call-setup dependency
+    must leave the calls already up whole. A budget's `established`
+    (`min_calls`) adds one row to its window: the calls answered before the
+    window's first `inject` and not ended at it, those an impact no
+    allowance takes hurt (an in-dialog request failed, a cut, a CDR
+    mismatch), allowed none, and a finding too when fewer than `min_calls`
+    such calls existed while the run had answered calls before it, so a
+    window no call spanned never passes it.
+15. **Redundant pods faulted one at a time.** A profile's `one_at_a_time`
+    names a label selector whose pods back one service: every event aimed at
+    it picks one pod, the next fires at least `gap_s` after the previous
+    one's `at_s + expected_s` (the clients' time to spread their connections
+    again), refused at load otherwise; and the run is refused before the
+    load while fewer than `min_ready` (2) pods of the selector are ready.
 
 ### 4. The call-outcome record
 
@@ -513,11 +559,15 @@ made. A run profile joins the two.
    the stream's stats directory. The exporter twin follows the file, ships
    each line and counts the records by `stream`, `shape`, `ending`. A SIPp UAS
    writes no record; it exposes counters only. SIPp ends a call without
-   running any step of the scenario in three cases: the global
-   `-recv_timeout` deletes the call, an exhausted retransmission of a `<send>`
-   without `ontimeout` aborts it, and an unexpected message received while
-   the call is already in its unexpected-message handler aborts it. So every
-   UAC scenario follows these rules:
+   running any step of the scenario in two cases: the global
+   `-recv_timeout` deletes the call, and an exhausted retransmission of a
+   `<send>` without `ontimeout` aborts it. A third, an unexpected message
+   received while the call is already in its unexpected-message handler, is
+   turned off: the UAC runs with `-default_behaviors all,-abortunexp`, so SIPp
+   discards that message (logging `Continuing call on unexpected message`,
+   counted in no stat) and the call acts on the peer's retransmission; a
+   discarded provisional, never retransmitted, is lost. So every UAC
+   scenario follows these rules:
    - every wait (a group of `<recv>`s) is entered on a recv with its own
      `timeout` and `ontimeout`: a pending send never bounds it (below);
    - every `<send>` SIPp retransmits has `ontimeout`;
@@ -552,10 +602,13 @@ made. A run profile joins the two.
      follows the requests it waits for and `_unexp.main` follows every send;
      the SIPp image reads that method from the CSeq header line
      (`deploy/k8s/sipp/cseq-method.patch`), not from any `CSeq` text;
-   - a message landing while the call runs its handler aborts the call, so a
-     handler path answers and resumes in one step (the resume is an action of
-     its send); an `ontimeout` naming the end of the scenario counts the call
-     failed; SIPp 3.7 loads no scenario file over 64 KiB.
+   - SIPp runs one step of a call per scheduler cycle and reads one datagram
+     per cycle, so a handler path of several steps leaves a window in which a
+     second message lands inside the handler; over UDP the peer retransmits
+     the discarded message, so a handler path answers and resumes in as few
+     steps as it can (the resume is an action of its send); an `ontimeout`
+     naming the end of the scenario counts the call failed; SIPp 3.7 loads no
+     scenario file over 64 KiB.
 
    A static lint checks these rules on every scenario of the search path (the
    wait timers, the method lists, the handler's coverage, the resume guards,
@@ -729,9 +782,10 @@ made. A run profile joins the two.
    `leftover_calls` finding), while an event of an earlier run is open, or
    while the host is under stress: io or memory full pressure (avg10) or the
    swap-in rate at or above the profile's `preflight` thresholds
-   (`max_swapin_pages_s` 50, `max_memory_full_pct` 5, `max_io_full_pct` 20
+   (`max_swapin_pages_s` 1000, `max_memory_full_pct` 10, `max_io_full_pct` 20
    by default; stated, not fitted). Swap-in is the trigger: a generator
-   waits on each fault of its own pages, and memory full pressure is reclaim
+   waits on each fault of its own pages (tens of microseconds on zram or
+   NVMe, so 1000 pages/s costs a thread a few percent), and memory full pressure is reclaim
    every allocating task runs. A tmpfs-backed generator does not wait on the
    host's disk, so io full pressure counts only as a sustained stall risk.
 6. **During the load.** The runner samples the host every second while it
@@ -751,7 +805,10 @@ made. A run profile joins the two.
    by default), whose newest sample must be recent. One that stops updating
    for three scrape intervals (for records, at least five calls of the
    stream's rate) is a `series_stale` integrity finding with the instant it
-   was last fresh. A generator that exits
+   was last fresh. An open incident window holds that count and a silence
+   that outlasts it counts from its close: a fault may silence every target
+   of a series (a total freeze), and the delay never loses a finding.
+   A generator that exits
    before its stream is due to stop is `stream_died`, and a `detected` event.
    A `run` stream's rate `steps` are applied at their instants (SIPp's remote
    control `cset rate`, loadgen's `POST /rate`) and logged in `steps.jsonl`;

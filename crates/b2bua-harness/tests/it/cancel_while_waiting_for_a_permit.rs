@@ -1,5 +1,6 @@
 //! An initial INVITE whose turn waits for a new-call permit, CANCELed by its
-//! caller meanwhile (RFC 3261 §9.1): the transaction layer answers 200 to the
+//! caller meanwhile, once the transaction layer's 100 reached it (RFC 3261
+//! §9.1, §17.2.1): the transaction layer answers 200 to the
 //! CANCEL and 487 to the INVITE at once, and the call's turn, once it gets its
 //! permit, ends the setup as cancelled. It asks the decision backend nothing,
 //! admits no limiter hold, and is counted as cancelled, not accepted nor on
@@ -99,10 +100,12 @@ async fn an_invite_canceled_while_waiting_for_a_permit_skips_the_decision_and_th
     s.h.advance(Duration::from_millis(300)).await;
     assert_eq!(engine.count.load(Ordering::SeqCst), HOLDERS, "the share is held");
 
-    // A third INVITE's turn waits for a new-call permit.
+    // A third INVITE's turn waits for a new-call permit; no turn releases its
+    // 100, the transaction layer sends it at the RFC 3261 §17.2.1 bound, and
+    // its caller may CANCEL from then on (§9.1).
     let erin = s.h.agent("erin", "127.0.0.1:5069").await;
     let mut waiting = erin.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
-    s.h.advance(Duration::from_millis(300)).await;
+    waiting.expect(100).await;
     assert_eq!(
         s.b2bua.metrics().new_call_share_waits_total(),
         1,

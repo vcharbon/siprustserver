@@ -7,13 +7,8 @@ use super::*;
 /// `x` and `y`, and legs `b-1`, `b-2`, `b-3` of its own.
 fn early_caller() -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let mut call = build_initial_call(
-        &invite("w0", "w1", "sdp"),
-        src(),
-        &config,
-        &mut sip_ids::TurnIds::fixed(1),
-        0,
-    );
+    let mut call =
+        build_initial_call(&invite("sdp"), src(), &config, &mut sip_ids::TurnIds::fixed(1), 0);
     for id in ["b-1", "b-2", "b-3"] {
         let mut leg = call.a_leg.clone();
         leg.leg_id = id.into();

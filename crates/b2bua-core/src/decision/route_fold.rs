@@ -93,7 +93,7 @@ pub fn up_to_admit(
     call.features = Some(features);
     call.callback_context = route.callback_context.clone();
     // Release-event subscription registry: recorded like
-    // `features`, so it replicates and survives takeover. The latest applied
+    // `features`, so it rides the call record. The latest applied
     // route owns the set (a limiter-reject failover recursion re-enters here
     // and overwrites with ITS route's subscriptions — decision-response
     // parity, same as `features`).
@@ -173,11 +173,13 @@ pub fn refused(route: AdmittingRoute) -> (Call, HandlerEffects) {
 /// leaving at `sent_ms` (`OutboundInvite::sent_at_ms`), after the admission
 /// the turn waited on; a route whose dial a service defers opens none here.
 /// `now_ms` is the turn's timestamp: every CDR entry and timer deadline below
-/// reads it.
+/// reads it; `owners` are the call's, as the shell states them.
+#[allow(clippy::too_many_arguments)]
 pub fn admitted(
     route: AdmittingRoute,
     a_invite: &SipRequest,
     config: &B2buaConfig,
+    owners: &crate::owners::Owners,
     ids: &mut TurnIds,
     now_ms: i64,
     sent_ms: i64,
@@ -190,7 +192,7 @@ pub fn admitted(
     // route answers no failed leg.
     let kind = if depth == 0 { DecisionKind::Route } else { DecisionKind::FailoverRoute };
     let leg_id = (depth == 0).then(|| "a".to_string());
-    call = mark_decision(call, now_ms, kind, leg_id, route.label.clone());
+    mark_decision(&mut call, now_ms, kind, leg_id, route.label.clone());
 
     // Announcement / deferred-routing services (ADR-0016): when the decision
     // attaches a `service_ext` slice that defers routing (it set
@@ -213,7 +215,7 @@ pub fn admitted(
 
     // NOTE: a DNS-name b-leg callee (e.g. a headless-StatefulSet `sipp-uas` pod
     // FQDN the UAC injects via `X-Api-Call.destination`) is NOT resolved here. The
-    // B2BUA only routes the b-leg to the LB (via the `b2b_outbound_proxy` Route);
+    // B2BUA only routes the b-leg to the LB (via the outbound-proxy Route);
     // the LB resolves the Request-URI name to the pod IP and forwards it (kept off
     // the B2BUA so resolution/next-hop selection lives in one place — the proxy).
     // A per-pod name is single-A, so it resolves consistently across retransmits
@@ -251,7 +253,7 @@ pub fn admitted(
     // wire cannot carry whole is left off the INVITE and reported.
     let mut skipped = Vec::new();
     let (mut leg, mut effect) = match relay::build_b_leg(
-        relay::CallMarks::of(&call),
+        relay::CallMarks::of(&call, owners),
         leg_id,
         a_invite,
         dest,
@@ -267,7 +269,7 @@ pub fn admitted(
         &capabilities::withheld_option_tags(&call, None, offers_sdp),
         &capabilities::offered_option_tags(&call, None),
         None,
-        call.a_leg.invite_final_sent.is_none(),
+        call.a_leg.invite_final_sent().is_none(),
         now_ms,
         &mut skipped,
     ) {
@@ -324,10 +326,10 @@ pub fn admitted(
         if let Ok(edited) = draft.freeze() {
             *req = edited;
         }
-        // The client-transaction handle holds the INVITE as it leaves; the
+        // The dialling INVITE's record holds the INVITE as it leaves; the
         // leg holds no dialog before a response to it.
-        if let Some(handle) = leg.outbound_invite.as_mut().and_then(|i| i.txn.as_mut()) {
-            handle.original_invite = req.image().to_vec();
+        if let Some(sent) = leg.invite.as_mut().and_then(|r| r.sent.as_mut()) {
+            sent.image = req.image().to_vec();
         }
     }
 
@@ -338,10 +340,10 @@ pub fn admitted(
             BodyUpdate::Drop | BodyUpdate::Replace(_) => relay::Author::Stack,
         },
     );
-    if let Some(invite) = leg.outbound_invite.as_mut() {
+    if let Some(invite) = leg.outbound_invite_mut() {
         invite.sent_at_ms = sent_ms;
     }
-    call = add_originated_b_leg(call, leg, now_ms);
+    add_originated_b_leg(&mut call, leg, now_ms);
     fx.outbound.push(effect);
     // The leg rings for the attempt's deadline from its first 18x
     // (`ring_deadline`).
@@ -393,19 +395,17 @@ fn arm_global_duration(
     arm(call, fx, TimerKey::call(TimerType::GlobalDuration), fire_at);
 }
 
-/// Arm the call-level a-leg setup deadline (`SetupTimeout`), once: the
-/// initial route's turn is the one turn that runs this, whichever route of
-/// its limiter-failover chain lands, so no later attempt extends the caller's
-/// total wait. Cancelled at answer (`confirm-dialog` and the promote/18x
-/// confirm paths); fired by the CORE `setup-timeout` rule (408 to A, CANCEL
-/// pending b-legs). Lives in `call.timers`, so a reclaimed mid-setup call
-/// still carries its deadline — the configured sip-txn initial-INVITE bound
-/// dies with a crashed node and would leave such calls holding their limiter
-/// slots for the full GlobalDuration. A non-positive `setup_timeout_ms` is
-/// off.
+/// Arm the call's setup deadline (`SetupTimeout`), once, under the setup's
+/// scope: the initial route's turn is the one turn that runs this, whichever
+/// route of its limiter-failover chain lands, so no later attempt extends the
+/// caller's total wait. Cancelled at answer (`confirm-dialog` and the
+/// promote/18x confirm paths); fired by the CORE `setup-timeout` rule (408 to
+/// A, CANCEL pending b-legs). It lives in
+/// the call record's ledger, where the transaction layer's initial-INVITE
+/// bound does not. A non-positive `setup_timeout_ms` is off.
 fn arm_setup_timeout(call: &mut Call, fx: &mut HandlerEffects, setup_timeout_ms: i64, now_ms: i64) {
     if let Some(ms) = Deadline::of_millis(Some(setup_timeout_ms)).millis() {
-        arm(call, fx, TimerKey::call(TimerType::SetupTimeout), now_ms + ms);
+        arm(call, fx, TimerKey::setup(TimerType::SetupTimeout), now_ms + ms);
     }
 }
 

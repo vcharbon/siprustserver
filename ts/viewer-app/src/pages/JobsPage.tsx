@@ -86,7 +86,7 @@ const Group = (
   }
 ): JSX.Element => (
   <section className="jobs-group">
-    <h2>{title} <span className="muted">({jobs.length})</span></h2>
+    <h2>{title} <span className="count">{jobs.length}</span></h2>
     {jobs.length === 0 ? <p className="muted">{empty}</p> : (
       <table className="listing jobs-listing">
         <thead>
@@ -133,7 +133,7 @@ export const JobsPage = (): JSX.Element => {
   if (active.current === undefined || ended.current === undefined) {
     const error = active.error ?? ended.error
     if (error !== undefined) return <p className="page error">{error}</p>
-    return <p className="page muted">loading the jobs…</p>
+    return <p className="page muted">loading…</p>
   }
   const running = active.current.rows.filter((job) => job.status === "running")
   const queued = active.current.rows.filter((job) => job.status === "queued")
@@ -144,24 +144,24 @@ export const JobsPage = (): JSX.Element => {
     <div className="page jobs-page">
       <header className="page-head">
         <div>
-          <h1>jobs</h1>
+          <h1>Jobs</h1>
           <p className="muted">
-            {anythingActive ? "re-read every two seconds while anything runs" : "nothing runs"}
-            {commands.job !== undefined && <>{" · "}<code>{commands.job} list</code> is the same queue</>}
+            {anythingActive ? <span title="re-read every 2 s">live</span> : "idle"}
+            {commands.job !== undefined && <>{" · "}<code title="the same queue">{commands.job} list</code></>}
           </p>
           {(active.error ?? ended.error) !== undefined && <p className="error">{active.error ?? ended.error}</p>}
         </div>
       </header>
 
-      <Group title="running" jobs={running} onChanged={onChanged} empty="no job runs" />
-      <Group title="queued" jobs={queued} onChanged={onChanged} empty="no job waits for its process" />
+      <Group title="running" jobs={running} onChanged={onChanged} empty="none" />
+      <Group title="queued" jobs={queued} onChanged={onChanged} empty="none" />
 
       <section className="jobs-group">
         <h2>
-          finished <span className="muted">({page.total})</span>
+          finished <span className="count">{page.total}</span>
         </h2>
         <p className="muted">
-          showing <b>{page.rows.length === 0 ? 0 : page.offset + 1}–{last}</b> of <b>{page.total}</b>
+          <b>{page.rows.length === 0 ? 0 : page.offset + 1}–{last}</b> / <b>{page.total}</b>
           {" · "}
           <button
             type="button"
@@ -173,7 +173,7 @@ export const JobsPage = (): JSX.Element => {
               url({ offset: next })
             }}
           >
-            previous
+            ‹ previous
           </button>{" "}
           <button
             type="button"
@@ -185,7 +185,7 @@ export const JobsPage = (): JSX.Element => {
               url({ offset: next })
             }}
           >
-            next
+            next ›
           </button>
           {" · "}
           <label>
@@ -203,7 +203,7 @@ export const JobsPage = (): JSX.Element => {
             />
           </label>
         </p>
-        {page.rows.length === 0 ? <p className="muted">no job has ended</p> : (
+        {page.rows.length === 0 ? <p className="muted">none</p> : (
           <table className="listing jobs-listing">
             <thead>
               <tr>

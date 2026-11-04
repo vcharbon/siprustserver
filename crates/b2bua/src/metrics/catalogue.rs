@@ -9,6 +9,7 @@
 pub mod capacity;
 pub mod limiter;
 pub mod plain;
+pub mod readiness;
 pub mod shell;
 pub mod udp;
 pub mod worker;
@@ -58,6 +59,7 @@ assert_exposition_order!(
     IdentityInUse,
     Cordoned,
     Unrecoverable,
+    EventQueue,
 );
 assert_exposition_order!(Class: Normal, Emergency, InDialog);
 
@@ -157,6 +159,7 @@ const WORKER_REST: &[Family] = &[
     worker::REPL_APPLIED,
     worker::REPL_NOOPS_SENT,
     worker::REPL_FORWARD_FLUSH_REFUSED,
+    worker::REPL_INBOUND_DROPPED,
     worker::DRAIN_EXITS,
     worker::DRAIN_SECONDS,
     worker::OPERATOR_RELEASED,
@@ -203,6 +206,10 @@ const WORKER_REST: &[Family] = &[
     worker::STORE_TOMBSTONES,
     worker::REPL_META,
     worker::REPL_META_BACKUP,
+    capacity::REPL_CALLS_UNBACKED,
+    capacity::REPL_OUTBOX_DEPTH,
+    capacity::REPL_OUTBOX_RELEASED,
+    capacity::REPL_SERVING_FLOWS,
     worker::REPL_CHANGELOG_ENTRIES,
     worker::REPL_CHANGELOG_PEERS,
     worker::WITHDRAWN_RUNNING,
@@ -248,6 +255,7 @@ pub const TXN: &[Family] = &[
     txn::TIMER_QUEUE_LEN,
     txn::RETRANSMIT_BUF_BYTES,
     txn::SERVER_FINAL_UNSEEN_BRANCH,
+    txn::VIA_STAMPS_UNWRITTEN,
     txn::PARSE_ERRORS,
     txn::PARSE_REFUSALS_ANSWERED,
     txn::PARSE_REFUSALS_CAPPED,
@@ -256,6 +264,8 @@ pub const TXN: &[Family] = &[
     txn::SEND_ERRORS,
     txn::EVENT_QUEUE_DEPTH,
     txn::EVENT_QUEUE_CAPACITY,
+    txn::EVENT_QUEUE_DELAY,
+    txn::KEEPALIVE_LANE_DROPS,
     txn::EVENT_QUEUE_DROPS,
     txn::EVENT_QUEUE_DEFERRALS,
     txn::EVENT_QUEUE_DEFERRED,
@@ -299,8 +309,10 @@ pub const CAPACITY: &[Family] = &[
 /// Whether the worker's loops turn.
 pub const LOOPS: &[Family] = &[worker::LOOP_STALLED];
 
-/// Whether an operator cordoned the worker.
-pub const READINESS: &[Family] = &[worker::CORDONED];
+/// Whether an operator cordoned the worker, and whether its backed-up
+/// event queue refuses new calls.
+pub const READINESS: &[Family] =
+    &[readiness::CORDONED, readiness::EVENT_QUEUE_REFUSING, readiness::EVENT_QUEUE_REFUSALS];
 
 /// Every new call's admission outcome.
 pub const NEW_CALL_OUTCOMES: &[Family] = &[NEW_CALLS, NEW_CALL_REFUSED_COPIES];

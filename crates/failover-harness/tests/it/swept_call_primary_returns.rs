@@ -8,6 +8,9 @@
 //! routable, or the backup's copy wrote before the node came back, and
 //! whether the backup learns of the node's return from its reclaim write or
 //! from its delete of the call.
+//!
+//! Beyond the failover sweep: a swept call whose node returns: the copy stands down and the call
+//! ends once.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -24,12 +27,12 @@ use crate::ringing_call_taken_over_on_departure::{
     depart, final_at, place, place_ringing_for, ring_until, Callee, Placed, ANSWER, OFFER,
 };
 
-/// A ring deadline that outlives a changelog tombstone and the sweep that reaps
-/// it, inside the call's setup timeout.
+/// A ring deadline that outlives a peer log's dead-peer TTL and the sweep that
+/// reaps it, inside the call's setup timeout.
 const LONG_RING: Duration = Duration::from_secs(140);
-/// How long the replication fabric stays cut: past a tombstone's life (60 s in
-/// the harness) and the next sweep that reaps it (every 30 s).
-const PAST_TOMBSTONE: Duration = Duration::from_secs(100);
+/// How long the replication fabric stays cut: past a peer log's dead-peer TTL
+/// (60 s in the harness) and the next sweep that reaps it (every 30 s).
+const PAST_DEAD_PEER: Duration = Duration::from_secs(100);
 
 /// The SIP port of a worker, every incarnation alike.
 pub(crate) fn port(worker: &str) -> u16 {
@@ -42,7 +45,7 @@ pub(crate) fn sent(p: &Placed, to: SocketAddr, prefix: &[u8]) -> Vec<u16> {
     let proxy = p.proxy.addr();
     p.fh.sip_entries()
         .iter()
-        .filter(|e| e.to == proxy && e.from != to && e.raw.starts_with(prefix))
+        .filter(|e| e.to == proxy && e.from != to && e.start_line().as_bytes().starts_with(prefix))
         .map(|e| e.from.port())
         .collect()
 }
@@ -173,7 +176,9 @@ async fn a_ringing_call_whose_node_returns_and_is_then_answered_gets_no_final_bu
 
 /// The callee answers while the departed node is down: its 200 fails over to
 /// the backup, whose takeover copy relays it and the caller's ACK. The node then
-/// returns and reclaims the answered call: the caller gets the 200 alone.
+/// returns and reclaims the answered call with a write, as the copy wrote it,
+/// and the copy stands down on that write: the caller gets the 200 alone, and
+/// one node runs the call's timers.
 #[tokio::test(start_paused = true)]
 async fn a_swept_call_answered_while_its_node_is_down_gets_no_final_but_its_200() {
     let mut p = place("swept-call-answered-node-down", Callee::Ringing).await;
@@ -182,6 +187,10 @@ async fn a_swept_call_answered_while_its_node_is_down_gets_no_final_but_its_200(
     let answered = answer(&mut p).await;
     assert_eq!(sent(&p, p.bob.addr(), b"ACK").last(), Some(&port(B2)), "the backup relays the ACK");
     return_before_deadline(&mut p).await;
+    assert!(
+        !p.w_b2.serves(&p.ringing_ref),
+        "the copy stands down on the reclaim of a call it wrote"
+    );
 
     answered_alone_past(&p, deadline).await;
     hang_up_and_settle(p, answered, &[]).await;
@@ -192,7 +201,7 @@ async fn a_swept_call_answered_while_its_node_is_down_gets_no_final_but_its_200(
 /// fails over to the backup's takeover copy, which relays it and the ACK. The
 /// node then becomes ready: the caller gets the 200 alone. On the paused
 /// runtime the node reclaims the ringing call before the backup's answer
-/// reaches it, and folds that answer as the backup's reverse flush; the answer
+/// reaches it, and meets that answer in the backup's reverse flush; the answer
 /// landing first is the node-down cell above.
 #[tokio::test(start_paused = true)]
 async fn a_swept_call_answered_before_its_returning_node_is_routable_gets_no_final_but_its_200() {
@@ -330,8 +339,9 @@ async fn a_swept_call_whose_copy_wrote_and_whose_callee_refuses_at_its_returned_
 
 /// The backup's stream from b1 falls off b1's compacted changelog: the
 /// replication fabric is cut while a short call is placed and hung up on b1,
-/// and stays cut past the life of that call's delete tombstone, so the healed
-/// stream's resumed pull is answered with a reset to bootstrap. Returns the
+/// and stays cut past b1's dead-peer TTL, which drops its log toward the
+/// backup with the call's unapplied delete, so the healed stream's resumed
+/// pull is answered with a reset to bootstrap. Returns the
 /// short call's `call_ref` once the backup's stream from b1 holds a cold
 /// watermark; the backup still holds its replica of the ringing call.
 async fn fall_off_compacted_tail(p: &mut Placed) -> String {
@@ -354,7 +364,7 @@ async fn fall_off_compacted_tail(p: &mut Placed) -> String {
     let mut bye = short.bye().await;
     p.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    p.fh.advance(PAST_TOMBSTONE).await;
+    p.fh.advance(PAST_DEAD_PEER).await;
 
     p.fh.heal("b1", "b2");
     let cold = Watermark::new(0, 0);

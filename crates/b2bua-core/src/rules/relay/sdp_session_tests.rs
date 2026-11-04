@@ -38,13 +38,8 @@ fn policy(form: SdpForm) -> &'static dyn SdpFormPolicy {
 /// A confirmed caller leg `a` and confirmed legs `b-1`, `b-2`, `b-3`.
 fn call() -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let mut call = build_initial_call(
-        &invite("w0", "w1", "sdp"),
-        src(),
-        &config,
-        &mut sip_ids::TurnIds::fixed(1),
-        0,
-    );
+    let mut call =
+        build_initial_call(&invite("sdp"), src(), &config, &mut sip_ids::TurnIds::fixed(1), 0);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     for id in ["b-1", "b-2", "b-3"] {
         let mut leg = call.a_leg.clone();
@@ -311,23 +306,26 @@ fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
     else {
         panic!("a relay target");
     };
-    let pending = call::PendingRequest {
+    let pending = call::RequestRecord {
         source_vias: vec![format!("SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-{method}")],
         source_call_id: "c".into(),
         source_from: "<sip:a@192.0.2.1>;tag=a".into(),
         source_to: "<sip:b@192.0.2.100>;tag=b".into(),
         offered_100rel: true,
         offered: with_sdp,
-        ..call::PendingRequest::new(method, 7, 7, call::Direction::FromA)
+        ..call::RequestRecord::relayed(method, 7, 7)
     };
-    let target = std::iter::once(&mut call.a_leg)
-        .chain(call.b_legs.iter_mut())
-        .find(|l| l.leg_id == target)
-        .unwrap();
-    if target.dialogs.confirmed().is_none() {
-        target.dialogs.insert(call::Dialog::new("as", "bob", call::DialogState::Confirmed, 1));
-    }
-    target.dialogs.confirmed_mut().unwrap().inbound_pending_requests.push(pending);
+    call::helpers::update_leg(call, &target, |target| {
+        if target.dialogs.confirmed().is_none() {
+            target.dialogs.insert(call::Dialog::new("as", "bob", call::DialogState::Confirmed, 1));
+        }
+        let d = target.dialogs.confirmed_mut().unwrap();
+        if pending.is_invite() {
+            d.sent_invite = Some(pending);
+        } else {
+            d.requests.push(pending);
+        }
+    });
 }
 
 /// The peer of `leg` opens an offer/answer exchange with a request carrying a
@@ -573,18 +571,13 @@ fn forked() -> Call {
     let mut c = call();
     let leg = &mut c.b_legs[0];
     call::testkit::stage_leg(leg, LegState::Early);
-    leg.outbound_invite = Some(call::OutboundInvite::new("as", 1, 0, None));
+    leg.invite = Some(call::RequestRecord::dialled(1, None, call::OutboundInvite::new("as", 0)));
     leg.dialogs = ["f1", "f2"]
         .into_iter()
         .map(|tag| call::Dialog::new("as", tag, call::DialogState::Early, 1))
         .collect();
-    send(
-        &mut c,
-        "b-1",
-        Author::Leg("a"),
-        Carried::Opening,
-        &sdp("alice 1 1 IN IP4 192.0.2.1", 10000),
-    );
+    let opening = sdp("alice 1 1 IN IP4 192.0.2.1", 10000);
+    send(&mut c, "b-1", Author::Leg("a"), Carried::Opening, &opening);
     c
 }
 
@@ -815,7 +808,7 @@ fn a_stack_description_at_the_next_version_is_no_restatement() {
 }
 
 /// The restatement is the call's: a leg that restated nothing itself, whose
-/// state travels with a replicated or reclaimed call, still sees it.
+/// state travels with the call record, still sees it.
 #[test]
 fn the_calls_restatement_is_recorded_on_the_leg_it_crossed() {
     let (c, _) = restated_once(SdpForm::AsWritten);
@@ -836,7 +829,7 @@ fn a_restatement_in_a_losing_fork_stays_the_calls() {
         d.state = if d.peer_tag == "f2" {
             call::DialogState::Confirmed
         } else {
-            call::DialogState::Retired(Default::default())
+            call::DialogState::Retired
         };
     }
     call::testkit::stage_leg(&mut c.b_legs[0], LegState::Confirmed);

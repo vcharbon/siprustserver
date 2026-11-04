@@ -26,7 +26,7 @@ pub(super) async fn hold_initial(
     st.obs.record(Observation::LegEarly { leg: st.role }, Instant::now());
     st.unpracked.clear();
     st.early_dialogs.clear();
-    st.held = Some(uas);
+    st.held = Some(Box::new(uas));
     Ok(())
 }
 
@@ -100,7 +100,7 @@ pub(super) async fn answer_held(
     st: &mut ActorState<'_>,
     winner: Option<ForkWinner>,
 ) -> Result<(), StepError> {
-    let Some(txn) = st.held.take() else {
+    let Some(txn) = st.held.take().map(|t| *t) else {
         return Err(no_held_invite(st.role, "Answer"));
     };
     let fork = winner.map(|winner| ForkAnswer {
@@ -126,7 +126,7 @@ pub(super) async fn reject_held(st: &mut ActorState<'_>, status: u16) -> Result<
             detail: format!("Reject goal with the non-final-error status {status}"),
         });
     }
-    let Some(txn) = st.held.take() else {
+    let Some(txn) = st.held.take().map(|t| *t) else {
         return Err(no_held_invite(st.role, "Reject"));
     };
     reject_initial(st, txn, status).await

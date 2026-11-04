@@ -4,7 +4,7 @@
 //! stood.
 //!
 //! ```text
-//!   puller   silence ≥ 15 s after the last frame   → reconnect, since = W
+//!   puller   silence ≥ 2 s after the last frame    → reconnect, since = W
 //!   puller   connect with no answer                → given up at 2 s, backoff
 //!   puller   one send blocked 15 s                 → stream left, backoff
 //!   puller   a stream that lasted the idle bound   → backoff from its floor
@@ -12,6 +12,7 @@
 //!                                                     peer's log reapable
 //!   server   a Noop at least every noop interval   → a quiet stream is kept
 //!   server   accepts that fail                     → accepting goes on
+//!   puller   streaming while a stream is open      → cleared when it is left
 //! ```
 
 use std::net::SocketAddr;
@@ -204,7 +205,7 @@ async fn tick_until(at: Instant) {
     }
 }
 
-const IDLE: Duration = Duration::from_secs(15);
+const IDLE: Duration = Duration::from_secs(2);
 /// The default bound on one blocked send.
 const SEND_STALL: Duration = Duration::from_secs(15);
 const CONNECT_BOUND: Duration = Duration::from_secs(2);
@@ -212,7 +213,7 @@ const CONNECT_BOUND: Duration = Duration::from_secs(2);
 const BACKOFF_FLOOR: Duration = Duration::from_millis(100);
 
 #[tokio::test(start_paused = true)]
-async fn a_peer_silent_after_bootstrap_is_left_after_15_s_and_pulled_again_from_its_watermark() {
+async fn a_peer_silent_after_bootstrap_is_left_after_2_s_and_pulled_again_from_its_watermark() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let b = addr(1);
     let peer = ScriptedPeer::listen(&net, b).await;
@@ -225,14 +226,14 @@ async fn a_peer_silent_after_bootstrap_is_left_after_15_s_and_pulled_again_from_
     let last_frame = peer.noop_sent();
 
     tick_until(last_frame + IDLE - Duration::from_millis(100)).await;
-    assert_eq!(peer.pulls().len(), 1, "a stream quiet for less than 15 s is kept");
+    assert_eq!(peer.pulls().len(), 1, "a stream quiet for less than 2 s is kept");
 
     tick_until(last_frame + IDLE + BACKOFF_FLOOR + Duration::from_millis(100)).await;
     let pulls = peer.pulls();
     assert_eq!(
         pulls.len(),
         2,
-        "the puller leaves a stream silent for 15 s and opens another after one backoff step"
+        "the puller leaves a stream silent for 2 s and opens another after one backoff step"
     );
     let gap = pulls[1].at - last_frame;
     assert!(
@@ -240,6 +241,27 @@ async fn a_peer_silent_after_bootstrap_is_left_after_15_s_and_pulled_again_from_
         "re-pulled {gap:?} after the last frame"
     );
     assert_eq!(pulls[1].since, W, "the new stream resumes from the watermark the Noop announced");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_puller_reads_streaming_while_its_stream_is_open_and_not_once_it_ends() {
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b = addr(9);
+    let peer = ScriptedPeer::listen(&net, b).await;
+    let (_run, status) = pull_from(net, b);
+    assert!(!status.borrow().streaming, "no stream before the first connect");
+
+    tick(100).await;
+    assert!(status.borrow().streaming, "the stream is open");
+    let last_frame = peer.noop_sent();
+    let heard = status.borrow().last_frame_at.expect("the catch-up Noop was read");
+    assert!(heard >= last_frame, "the last frame's arrival is published");
+    tick_until(last_frame + IDLE - Duration::from_millis(100)).await;
+    assert!(status.borrow().streaming, "a stream quiet for less than the idle bound is open");
+    tick_until(last_frame + IDLE + Duration::from_millis(20)).await;
+    assert!(!status.borrow().streaming, "a stream silent for the idle bound is left");
+    tick(BACKOFF_FLOOR.as_millis() as u64 + 20).await;
+    assert!(status.borrow().streaming, "the next stream is open");
 }
 
 #[tokio::test(start_paused = true)]
@@ -382,8 +404,9 @@ async fn a_peer_that_stops_reading_is_dropped_after_15_s_and_its_log_becomes_rea
     let client = net.connect_from(a_local, b).await.unwrap();
     client
         .send(Frame::PullRequest {
-            proto_ver: 3,
+            proto_ver: repl_net::PROTO_VER,
             caller: "A".into(),
+            identity: None,
             partition: Partition::Pri,
             since: Watermark::new(0, 0),
         })
@@ -455,7 +478,7 @@ async fn a_served_stream_carries_a_noop_at_least_every_noop_interval_during_and_
     let clock = Clock::test_at(0);
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let b = addr(8);
-    let changelog = Changelog::new(3, clock.clone()).with_ttls(30_000, 300_000);
+    let changelog = Changelog::new(3, clock.clone());
     let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     for i in 0..300 {
         let call_ref = cref("A", &i.to_string());
@@ -477,15 +500,16 @@ async fn a_served_stream_carries_a_noop_at_least_every_noop_interval_during_and_
     // A configured interval other than the default: the server keeps the one
     // it is given.
     let interval = Duration::from_secs(3);
-    let config = ServeConfig { noop_interval: interval, send_stall: Duration::from_secs(15) };
+    let config = ServeConfig { noop_interval: interval, ..ServeConfig::default() };
     let server = ReplServer::new("B", changelog, Arc::new(store.clone())).with_config(config);
     tokio::spawn(server.run(net.listen(b).await.unwrap()));
 
     let client = net.connect_from(addr(41), b).await.unwrap();
     client
         .send(Frame::PullRequest {
-            proto_ver: 3,
+            proto_ver: repl_net::PROTO_VER,
             caller: "A".into(),
+            identity: None,
             partition: Partition::Pri,
             since: Watermark::new(0, 0),
         })

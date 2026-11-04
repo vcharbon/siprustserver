@@ -10,10 +10,6 @@
 //!   in either order, yields the same state (phase folds by `max`; the ledger
 //!   is grow-only). So a double-observation is harmless and the fold-order
 //!   determinism gate holds by construction.
-//!
-//! The single wait primitive is [`await_pred`]: register on the tick BEFORE
-//! reading the predicate (the lost-wake hazard), so a fact recorded in the
-//! check→await gap is never lost.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -22,77 +18,9 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use super::ledger::{ObligationKey, ObligationLedger};
-use crate::StepError;
 
 pub use super::facts::{RequestFact, ResponseFact};
-
-/// One `ObserveFinal`/`ExpectFinal` outcome: the capture-declared expectation
-/// beside what actually arrived. Divergence is data, never a verdict.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordedFinal {
-    pub key: u32,
-    pub expected: Option<u16>,
-    pub observed: u16,
-}
-
-/// One entry of the replay record — an observed final beside its expectation,
-/// a request the reactor (not the script) serviced on a `Scripted` actor, or a
-/// policy-blessed substitution (ADR-0024 §6).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplayEntry {
-    Final(RecordedFinal),
-    ServicedStray {
-        leg: &'static str,
-        method: String,
-        action: &'static str,
-    },
-    /// An accepted-delta policy blessed a non-matching inbound as satisfying
-    /// the due scripted expectation: `step` is the goal-cursor index of that
-    /// expectation on `leg`; `expected`/`observed` are the confrontation's
-    /// bounded labels (method or status); `rule` the policy's rule name. An
-    /// acceptance is never silent — the report side classifies on this entry.
-    AcceptedDelta {
-        leg: &'static str,
-        step: usize,
-        expected: String,
-        observed: String,
-        rule: &'static str,
-    },
-    /// An inbound a SHARED endpoint's demux could hand to no actor — an initial
-    /// INVITE no pending claim owns, a response no member's dialog owns, or a
-    /// message for an actor that has already finished. `endpoint` names the UA
-    /// it arrived on, `detail` the message. Counted and recorded, never
-    /// silently dropped.
-    UnclaimedInbound {
-        endpoint: String,
-        detail: String,
-    },
-    /// A final RETRANSMITTED on `leg` while this endpoint holds its ACK (a
-    /// declared delayed automatic): the peer's own RFC 3261 §13.3.1.4
-    /// re-passing, absorbed by the scheduled ACK. ONE entry per retransmission,
-    /// so a run states how many the hold provoked instead of hiding them.
-    HeldFinalRetransmitted {
-        leg: &'static str,
-        status: u16,
-        cseq_method: String,
-        cseq: u32,
-    },
-    /// A reception goal's [`super::goals::BodyExpect`] was not met by the
-    /// message that otherwise satisfied the goal: divergence DATA, never a step
-    /// failure — the run continues and the report side classifies the record.
-    /// `status` is `Some` for a response (with `method` its CSeq method), `None`
-    /// for a request (`method` the request's own, `initial` its dialog axis).
-    BodyExpectMiss {
-        leg: &'static str,
-        step: usize,
-        expected: &'static str,
-        body_len: usize,
-        body_is_sdp: bool,
-        status: Option<u16>,
-        method: String,
-        initial: bool,
-    },
-}
+pub use super::replay_record::{RecordedFinal, ReplayEntry};
 
 /// One endpoint leg's observed dialog lifecycle. Ordered so `max` gives the
 /// monotone fold: a fact can advance the phase but never retreat.
@@ -256,6 +184,10 @@ pub struct StateInner {
     /// The caller's establishing INVITE ended on a final the call accepts
     /// ([`Observation::AcceptedEnding`]): the remaining phase barriers are moot.
     accepted_ending: bool,
+    /// The system under test ended the caller cleanly ([`Observation::EndedCleanly`]).
+    caller_ended_cleanly: bool,
+    /// A party the system under test ended cleanly dropped a goal.
+    goal_dropped: bool,
     /// The replay record: observed-vs-expected finals + reactor-serviced strays
     /// (append-only, diagnostic — never gates the verdict).
     replay: Vec<ReplayEntry>,
@@ -267,6 +199,8 @@ impl StateInner {
             legs: HashMap::new(),
             ledger: ObligationLedger::default(),
             accepted_ending: false,
+            caller_ended_cleanly: false,
+            goal_dropped: false,
             replay: Vec::new(),
         }
     }
@@ -292,6 +226,30 @@ impl StateInner {
     /// accepts — every remaining phase barrier is then moot.
     pub fn accepted_ending(&self) -> bool {
         self.accepted_ending
+    }
+
+    /// Whether the system under test ended the caller cleanly while the call
+    /// accepts clean ends: every remaining phase barrier is then moot.
+    pub fn caller_ended_cleanly(&self) -> bool {
+        self.caller_ended_cleanly
+    }
+
+    /// Whether a party the system under test ended cleanly, the caller or
+    /// another, dropped a goal the ending did not itself meet
+    /// ([`Observation::GoalDropped`]).
+    pub fn goal_dropped(&self) -> bool {
+        self.goal_dropped
+    }
+
+    /// Whether `role` holds no live dialog: none ever (no early or confirmed
+    /// dialog observed) or every one ended.
+    pub fn leg_idle_or_ended(&self, role: &str) -> bool {
+        matches!(self.leg(role).phase(), LegPhase::Absent | LegPhase::Terminated)
+    }
+
+    /// Every leg observed, by role, with its phase.
+    pub fn leg_phases(&self) -> impl Iterator<Item = (&'static str, LegPhase)> + '_ {
+        self.legs.iter().map(|(role, l)| (*role, l.phase()))
     }
 
     /// Whether a leg has reached (at least) a given phase.
@@ -405,6 +363,13 @@ pub enum Observation {
     /// The caller's establishing INVITE drew a final its call accepts: the call
     /// ended before its remaining phase barriers could hold.
     AcceptedEnding,
+    /// The system under test ended a party cleanly while the call accepts
+    /// clean ends ([`CallCtx::accept_clean_ends`](crate::realcall::CallCtx::accept_clean_ends));
+    /// `caller` when that party originates the call.
+    EndedCleanly { caller: bool },
+    /// A party the system under test ended cleanly dropped a goal the ending
+    /// did not itself meet.
+    GoalDropped,
     /// `leg` sent a CANCEL for its establishing INVITE.
     CancelSent { leg: &'static str },
     /// A named sub-flow advanced (re-INVITE realign / refer / early-PRACK tracking).
@@ -486,6 +451,8 @@ impl StateInner {
                 self.leg_mut(leg).finals.insert((status, reason));
             }
             Observation::AcceptedEnding => self.accepted_ending = true,
+            Observation::EndedCleanly { caller } => self.caller_ended_cleanly |= caller,
+            Observation::GoalDropped => self.goal_dropped = true,
             Observation::CancelSent { leg } => self.leg_mut(leg).cancel_sent = true,
             Observation::Subflow { leg, name, to } => self.leg_mut(leg).advance_subflow(name, to),
             Observation::RenegCompleted { leg, dialog, cseq } => {
@@ -554,17 +521,23 @@ impl StateInner {
 #[derive(Clone)]
 pub struct ObservedState {
     inner: Arc<Mutex<StateInner>>,
-    tick: Arc<Notify>,
+    /// Fired on every mutation: what [`await_pred`](super::barrier::await_pred)
+    /// parks on.
+    pub(super) tick: Arc<Notify>,
+    /// The call's scheduled dwells, which every wait on it is bounded past.
+    pub(super) pacing: super::pacing::Pacing,
 }
 
 impl ObservedState {
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(StateInner::new())), tick: Arc::new(Notify::new()) }
+        let pacing = super::pacing::Pacing::default();
+        Self { inner: Arc::new(Mutex::new(StateInner::new())), tick: pacing.tick(), pacing }
     }
 
     /// Fold one reactor observation into the state and wake every barrier
     /// waiter. `now` is a `tokio::time::Instant` (rides the paused clock).
     pub fn record(&self, o: Observation, now: Instant) {
+        self.pacing.observe(&o);
         self.inner.lock().unwrap().apply(o, now);
         self.tick.notify_waiters();
     }
@@ -627,41 +600,5 @@ impl ObservedState {
 impl Default for ObservedState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Await a predicate over the observed state, re-checked on every `tick`,
-/// bounded by `deadline`. `who` names the barrier for the timeout `StepError`
-/// (a bounded label the case-keyer accepts — never free-form gap text).
-///
-/// **Lost-wake hazard**: `Notify::notified()` only registers the waiter when it
-/// is first polled, not at creation, so a naive `if !pred { notified().await }`
-/// loses a `notify_waiters` fired in the check→await gap. We pin the future and
-/// `enable()` it — registering NOW — *before* reading the predicate, so no tick
-/// between the read and the park is missed. (Under tokio auto-advance a missed
-/// tick would silently leap the clock to `deadline` → a spurious timeout.)
-pub async fn await_pred<F>(
-    obs: &ObservedState,
-    who: &'static str,
-    pred: F,
-    deadline: Instant,
-) -> Result<(), StepError>
-where
-    F: Fn(&StateInner) -> bool,
-{
-    loop {
-        let notified = obs.tick.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable(); // register BEFORE the predicate read
-        if obs.with_snapshot(&pred) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(StepError::timeout(who, None, format!("the call state to reach {who}")));
-        }
-        tokio::select! {
-            _ = &mut notified => {}
-            _ = tokio::time::sleep_until(deadline) => {}
-        }
     }
 }

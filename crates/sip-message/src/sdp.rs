@@ -13,15 +13,14 @@ const CRLF: &str = "\r\n";
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Split into non-empty lines, tolerating CRLF or LF endings — mirrors the TS
-/// `split(/\r\n|\n/).filter(l => l.length > 0)`.
+/// Split into non-empty lines, tolerating CRLF or LF endings.
 pub(crate) fn split_lines(text: &str) -> Vec<&str> {
     text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).filter(|l| !l.is_empty()).collect()
 }
 
-/// JS `Number.parseInt(s, 10)` semantics: optional sign, leading digits, stop
-/// at the first non-digit; `None` when no digits are present (the NaN case).
-fn parse_int_js(s: &str) -> Option<i64> {
+/// A leading integer: optional sign, leading digits, stop at the first
+/// non-digit; `None` when no digits are present.
+fn leading_integer(s: &str) -> Option<i64> {
     let s = s.trim_start();
     let (neg, unsigned) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -41,8 +40,7 @@ fn line_with<'a>(lines: &[&'a str], prefix: &str) -> Option<(&'a str, &'a str)> 
     lines.iter().find_map(|l| l.strip_prefix(prefix).map(|value| (*l, value)))
 }
 
-/// Split a value on runs of ASCII whitespace, dropping empties — the port of
-/// `trim().split(/\s+/).filter(t => t.length > 0)`.
+/// Split a value on runs of whitespace, dropping empties.
 fn ws_tokens(s: &str) -> Vec<&str> {
     s.split_whitespace().collect()
 }
@@ -303,7 +301,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
         if *kind != "audio" || formats.is_empty() {
             continue;
         }
-        let pts: Vec<i64> = formats.iter().filter_map(|f| parse_int_js(f)).collect();
+        let pts: Vec<i64> = formats.iter().filter_map(|f| leading_integer(f)).collect();
         if pts.is_empty() {
             continue;
         }
@@ -330,7 +328,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
         }
         if let Some(rest) = line.strip_prefix("a=rtpmap:") {
             if let Some((pt, _)) = rest.trim().split_once(' ') {
-                if let Some(pt) = parse_int_js(pt) {
+                if let Some(pt) = leading_integer(pt) {
                     if allowed.contains(&pt) {
                         rtpmaps.push((*line).to_string());
                     }
@@ -338,7 +336,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
             }
         } else if let Some(rest) = line.strip_prefix("a=fmtp:") {
             if let Some((pt, _)) = rest.trim().split_once(' ') {
-                if let Some(pt) = parse_int_js(pt) {
+                if let Some(pt) = leading_integer(pt) {
                     if allowed.contains(&pt) {
                         fmtp.push((*line).to_string());
                     }

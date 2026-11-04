@@ -121,9 +121,10 @@ impl RuleAction {
             | RuleAction::RespondToALeg { .. }
             | RuleAction::AnswerALegNewDialog { .. }
             | RuleAction::Respond { .. }
+            | RuleAction::AnswerHeld { .. }
             | RuleAction::RefuseGlare { .. }
             | RuleAction::AckLeg { .. }
-            | RuleAction::AckLostRound { .. }
+            | RuleAction::EndOnEvidence { .. }
             | RuleAction::ReleaseStraggler2xx { .. }
             | RuleAction::CreateLeg { .. }
             | RuleAction::DestroyLeg { .. }
@@ -149,6 +150,7 @@ impl RuleAction {
             // Bookkeeping — local data writes / async kicks / reports, no wire
             // output.
             RuleAction::ConfirmDialog { .. }
+            | RuleAction::HoldRequest
             | RuleAction::MapUnshownDialog { .. }
             | RuleAction::AddCdrEvent { .. }
             | RuleAction::ReportStatedTextSkipped { .. }

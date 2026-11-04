@@ -12,6 +12,7 @@ use tokio::time::Instant;
 
 use super::endpoint::{Disposition, ForkWinner};
 use super::ledger::{ObligationKey, ObligationKind};
+use super::pacing::Dwell;
 use super::runner::{ActorState, ParkedRequest, PendingRejectAck, TimedAnswer};
 use super::script::scripted_wants_initial;
 use super::state::Observation;
@@ -87,6 +88,9 @@ pub(super) async fn reject_initial(
 /// `answered_reinvites` set is drained in lockstep for hygiene.
 pub(super) fn discharge_on_teardown(st: &mut ActorState<'_>, now: Instant) {
     st.answered_reinvites.clear();
+    // A re-INVITE still pending outlives this actor: its endpoint ACKs a
+    // non-2xx final crossing the BYE (RFC 3261 §17.1.1.3).
+    st.sent_reinvite_txns.values().for_each(crate::InDialogTxn::abandon);
     st.obs.record(Observation::DialogTornDown { leg: st.role }, now);
 }
 
@@ -152,6 +156,9 @@ pub(super) fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
     }
     // Dialog-formation point: attach this leg's shared CSeq counter (ADR-0024 §6).
     dialog.set_shared_cseq_dev(st.cseq_dev.clone());
+    // A call that fails from here leaves the leg confirmed: teardown BYEs it,
+    // as a UAS whose 2xx is never ACKed must (§13.3.1.4).
+    st.scope.set_confirmed(dialog.clone());
     st.dialogs.confirmed = Some(dialog);
     st.obs
         .record(Observation::SeedDialog { leg: st.role, call_id: call_id.to_string(), cseq }, now);
@@ -201,7 +208,8 @@ pub(super) async fn apply_disposition(
             uas.respond(180, "Ringing").try_send().await?;
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            st.pending_answer = Some(TimedAnswer { at: Instant::now() + ring, uas, fork: None });
+            st.pending_answer =
+                Some(Box::new(TimedAnswer { at: st.dwell(Dwell::Ring, ring), uas, fork: None }));
         }
         // Ring then SILENCE: the 180 goes out, the INVITE server txn is
         // held with NO answer ever scheduled — the SUT's own no-answer timer
@@ -212,7 +220,7 @@ pub(super) async fn apply_disposition(
             uas.respond(180, "Ringing").try_send().await?;
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            st.held_silent = Some(uas);
+            st.held_silent = Some(Box::new(uas));
         }
         // C1/E3 forking UAS: one 18x per DISTINCT explicit To-tag on the ONE
         // retained INVITE server txn (as if a downstream proxy forked), then the
@@ -262,10 +270,10 @@ pub(super) async fn apply_disposition(
             if reliable {
                 // The 200 waits for the WINNER fork's PRACK (see the PRACK arm).
                 st.fork_answer = Some(fork);
-                st.pending_prack_answer = Some(uas);
+                st.pending_prack_answer = Some(Box::new(uas));
             } else {
-                st.pending_answer =
-                    Some(TimedAnswer { at: Instant::now() + ring, uas, fork: Some(fork) });
+                let at = st.dwell(Dwell::Ring, ring);
+                st.pending_answer = Some(Box::new(TimedAnswer { at, uas, fork: Some(fork) }));
             }
         }
         Disposition::Reject(code) => reject_initial(st, uas, code).await?,
@@ -282,7 +290,7 @@ pub(super) async fn apply_disposition(
             st.unpracked.insert(uas.dialog().local_tag().to_string(), now);
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            st.pending_prack_answer = Some(uas);
+            st.pending_prack_answer = Some(Box::new(uas));
         }
         // The goals ring and answer the held INVITE (`super::held`).
         Disposition::Held => super::held::hold_initial(st, uas).await?,

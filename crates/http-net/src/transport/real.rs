@@ -144,6 +144,7 @@ impl HttpTransport for RealHttpNetwork {
 /// answering [`HttpAnswer::Abort`] fails the exchange, and hyper closes the
 /// connection without writing a response (RFC 9112 §9.6).
 async fn serve_connection(stream: TcpStream, peer: SocketAddr, service: Arc<dyn HttpService>) {
+    let _open = Opened::announce(service.clone());
     let io = TokioIo::new(stream);
     let handler = service_fn(move |req: Request<Incoming>| {
         // hyper calls this once the head is read: the receipt precedes the body.
@@ -193,6 +194,23 @@ async fn serve_connection(stream: TcpStream, peer: SocketAddr, service: Arc<dyn 
         }
     });
     let _ = hyper::server::conn::http1::Builder::new().serve_connection(io, handler).await;
+}
+
+/// One accepted connection as its service hears of it: opened when made,
+/// closed when dropped, the connection task aborted with its server included.
+struct Opened(Arc<dyn HttpService>);
+
+impl Opened {
+    fn announce(service: Arc<dyn HttpService>) -> Self {
+        service.connection_opened();
+        Self(service)
+    }
+}
+
+impl Drop for Opened {
+    fn drop(&mut self) {
+        self.0.connection_closed();
+    }
 }
 
 /// `413 Content Too Large` (RFC 9110 §15.5.14) closing the connection: the

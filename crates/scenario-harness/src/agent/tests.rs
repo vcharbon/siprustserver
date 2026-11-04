@@ -520,6 +520,75 @@ mod two_view_ladders {
         let _ = h.finish().await;
     }
 
+    /// A repeat of a 2xx the core ACKed more than 64·T1 ago owes no ACK: it is
+    /// discarded, neither re-ACKed nor handed to the body.
+    #[tokio::test(start_paused = true)]
+    async fn a_2xx_repeat_past_64_t1_after_its_ack_is_discarded() {
+        let h = Harness::new("late-2xx-repeat");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        let mut call = alice.invite(&server).with_sdp(OFFER).send().await;
+        let mut uas = server.receive("INVITE").await;
+        uas.respond(200, "OK").with_sdp(OFFER).send().await;
+        call.expect(200).await;
+        let mut dialog = call.ack().await;
+        server.receive("ACK").await;
+
+        h.advance(64 * T1).await;
+        uas.respond(200, "OK").with_sdp(OFFER).send().await;
+        h.advance(T1).await;
+        assert!(alice.take_held_or_queued().await.is_none(), "the late repeat is not surfaced");
+        assert_eq!(count(&alice.wire_view(), "SIP/2.0 200"), 2, "the repeat arrived");
+
+        let mut bye = dialog.bye().await;
+        server.receive("BYE").await.respond(200, "OK").send().await;
+        bye.expect(200).await;
+        server.sight_queued().await;
+        assert_eq!(count(&server.wire_view(), "ACK"), 1, "the late repeat is not re-ACKed");
+        let _ = h.finish().await;
+    }
+
+    /// A copy of a request whose server transaction completed is judged at
+    /// its arrival: one that arrived inside Timer J draws the final again,
+    /// however late the endpoint reads it and though the dialog it ended is
+    /// gone (RFC 3261 §17.2.2).
+    #[tokio::test(start_paused = true)]
+    async fn a_copy_arrived_inside_timer_j_draws_the_final_however_late_it_is_read() {
+        let h = Harness::new("late-read-copy-inside-timer-j");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        let mut call = alice.invite(&server).with_sdp(OFFER).send().await;
+        let mut uas = server.receive("INVITE").await;
+        uas.respond(200, "OK").with_sdp(OFFER).send().await;
+        call.expect(200).await;
+        let mut dialog = call.ack().await;
+        server.receive("ACK").await;
+        let mut bye = dialog.bye().await;
+        server.receive("BYE").await.respond(200, "OK").send().await;
+        bye.expect(200).await;
+        let sent_bye = server.wire_view().into_iter().find(|e| e.start_line().starts_with("BYE"));
+        let sent_bye = sent_bye.expect("the BYE arrived").raw;
+
+        h.advance(64 * T1 - T1).await;
+        alice.try_send_datagram(&sent_bye, server.addr()).await.expect("the copy leaves");
+        h.advance(2 * T1).await;
+        server.sight_queued().await;
+        h.advance(T1).await;
+        alice.sight_queued().await;
+
+        assert_eq!(count(&server.wire_view(), "BYE"), 2, "the copy arrived");
+        assert_eq!(count(&server.tu_view(), "BYE"), 1, "the copy is the transaction layer's");
+        assert_eq!(
+            count(&alice.wire_view(), "SIP/2.0 200"),
+            3,
+            "the INVITE's 200, the BYE's, and the BYE's again: {:#?}",
+            alice.wire_view(),
+        );
+        let _ = h.finish().await;
+    }
+
     /// Row 4 on its own, the normal path: one 2xx, one ACK, and both views
     /// agree on the whole exchange because nothing was absorbed.
     #[tokio::test(start_paused = true)]

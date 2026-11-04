@@ -2,7 +2,7 @@
 //! new run cannot rebuild, so a run that panics is counted under its name
 //! (`b2bua_task_restarts_total{task}`) and made again. A task whose state a
 //! new run cannot rebuild (the transaction owner, the router, the timer
-//! driver, the CDR and terminate writers, the replication server) joins the
+//! driver, the CDR writer, the replication server) joins the
 //! worker's loops instead, whose end exits the process ([`crate::loops`]).
 
 use std::future::Future;

@@ -4,10 +4,12 @@
 //!
 //! The first tick fires as soon as the registry holds its first listing, and
 //! its round latches the proxy's [`FirstView`] (ADR-0050 §11). Per tick (every
-//! `interval_ms`): reap probes past their `timeout_ms` reply
-//! window (each reap = one miss; `threshold` consecutive misses → `Dead`),
-//! prune per-worker state for departed/recreated workers, then fan one OPTIONS
-//! client transaction out to every registered worker. Replies arrive as
+//! `interval_ms`): prune per-worker state for departed/recreated workers, then
+//! fan one OPTIONS client transaction out to every registered worker. Each
+//! probe is reaped at the end of its own `timeout_ms` reply window (each reap =
+//! one miss; `threshold` consecutive misses → `Dead`), so the verdict lands
+//! [`HealthProbeConfig::verdict_after_first_miss`] after the first unanswered
+//! probe left. Replies arrive as
 //! transaction events and correlate by Via branch, and are read on the two
 //! axes of ADR-0050 §3 ([`read_answer`]): a `200` makes the worker `Alive`
 //! and sets its acceptance from `X-Readiness` (absent reads `accept`); a
@@ -17,7 +19,8 @@
 //! address: the worker is reset to `Unknown` and its miss count and overload
 //! band cleared before the answer applies. Each reply's `X-Overload` payload
 //! feeds the [`WorkerLoadObserver`]. Health and acceptance are written through
-//! the [`WorkerRegistryControl`] seam.
+//! the [`WorkerRegistryControl`] seam. Every correlated final also stamps the
+//! proxy's [`WorkerReach`], whatever worker sent it.
 //!
 //! Why the transaction layer: a fan-out of ONE datagram per worker per tick
 //! turns a single lost packet into a full miss, and two losses in ~2.5 s
@@ -27,24 +30,16 @@
 //! minted-Call-ID parse. The probe keeps its own reply window — Timer F is a
 //! fixed 32 s, far too slow for health detection — and **cancels** the
 //! transaction when the window expires, so per-probe state (here and in the
-//! transaction map) does not outlive `timeout_ms` by more than a turn.
+//! transaction map) does not outlive `timeout_ms`.
 //!
-//! Late-reply recovery: a valid-but-late 200 OK must still count, or a worker
-//! that once crossed `threshold` stays `Dead` for the rest of the run. A probe
-//! stays in `pending` keyed by its durable transaction Via branch, and a reply
-//! correlates by that branch in `handle_reply` for as long as the probe is
-//! still pending — which is governed
-//! by the **tick-gated reap**, not the timeout/interval ratio. The reap runs
-//! once per `interval_ms` tick and evicts only probes whose `deadline_ms <= now`
-//! at that tick, so a probe lingers in `pending` until the FIRST tick at-or-after
-//! its deadline (this is why a config with `timeout_ms < interval_ms` — e.g. the
-//! failover harness's 10 s/1.5 s — still correlates late replies rather than
-//! racing them). A reply arriving any number of ticks late therefore still
-//! correlates by branch and resets the miss counter — and a reply proving
-//! liveness also retires every other in-flight probe to the same worker so their
-//! later reap cannot count a spurious miss. A reply that lands after its branch
-//! has already been reaped, or that correlates to no `pending` probe at all (a
-//! forged/replayed branch), is dropped: it can never revive a worker. Locked by
+//! Late replies: a probe stays in `pending`, keyed by its durable transaction
+//! Via branch, for its whole reply window, however many ticks the window
+//! spans, so a reply that lands ticks after the tick that sent it still
+//! correlates and resets the miss counter. A reply proving liveness also
+//! retires every other in-flight probe to the same worker so their reap cannot
+//! count a spurious miss. A reply that lands after its window ended, or that
+//! correlates to no `pending` probe at all (a forged/replayed branch), is
+//! dropped: it can never revive a worker. Locked by
 //! `tests/it/health_probe_late_reply.rs`.
 //!
 //! Identity hygiene (the dead-pod resurrection race): every pending probe
@@ -71,39 +66,30 @@ use sip_message::generators::{
 use sip_message::header::{self, ParamValue, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipResponse;
-use sip_message::worker_report::{self, NewCalls, Readiness};
+use sip_message::worker_report;
 use sip_message::{SipMessage, SipRequest, SipStr};
 use sip_net::UdpEndpoint;
 use sip_txn::{
     IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed,
 };
-use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use super::first_view::{FirstRound, FirstView};
+use super::reach::WorkerReach;
 use crate::addr::ProxyAddr;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
-use crate::registry::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
+use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+
+mod answer;
+mod config;
+
+pub use answer::{read_answer, AnswerReading};
+pub use config::HealthProbeConfig;
 
 /// How often a probe waiting for the registry's first listing looks again.
 const LISTING_POLL: Duration = Duration::from_millis(20);
-
-/// Probe cadence (source defaults: 1 s interval, 1.5 s reply window, 2 misses
-/// → dead). `interval_ms` is the tick period; `timeout_ms` is each probe's own
-/// reply window (windows may overlap ticks — probes are branch-correlated).
-#[derive(Debug, Clone, Copy)]
-pub struct HealthProbeConfig {
-    pub interval_ms: u64,
-    pub timeout_ms: u64,
-    pub threshold: u32,
-}
-
-impl Default for HealthProbeConfig {
-    fn default() -> Self {
-        Self { interval_ms: 1_000, timeout_ms: 1_500, threshold: 2 }
-    }
-}
 
 /// One in-flight probe transaction, keyed by its Via branch.
 struct PendingProbe {
@@ -111,7 +97,8 @@ struct PendingProbe {
     /// The address this probe was sent to — replies/misses count only while
     /// the worker is still registered AT this address.
     addr: ProxyAddr,
-    deadline_ms: u64,
+    /// The last instant of its reply window: unanswered by then, one miss.
+    window_ends: Instant,
 }
 
 /// The probe's mutable per-run state (one owner: the `run` loop).
@@ -129,29 +116,6 @@ struct ProbeState {
     incarnation: HashMap<String, u64>,
 }
 
-/// What one OPTIONS answer says about a worker (ADR-0050 §3): the health it
-/// sets, `None` to leave it, and the acceptance it sets, `None` to keep it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AnswerReading {
-    pub health: Option<WorkerHealth>,
-    pub acceptance: Option<Acceptance>,
-}
-
-/// Read one OPTIONS answer: its status and its `X-Readiness`, if any.
-pub fn read_answer(status: u16, readiness: Option<&Readiness>) -> AnswerReading {
-    match status {
-        200 => AnswerReading {
-            health: Some(WorkerHealth::Alive),
-            acceptance: Some(match readiness.map(|r| r.new) {
-                Some(NewCalls::Refuse) => Acceptance::Refuse,
-                Some(NewCalls::Accept) | None => Acceptance::Accept,
-            }),
-        },
-        503 => AnswerReading { health: None, acceptance: Some(Acceptance::Refuse) },
-        _ => AnswerReading { health: Some(WorkerHealth::Alive), acceptance: None },
-    }
-}
-
 /// The per-probe `call_ref` stamped as the Via `cr=` custom param — the
 /// transaction-layer attribution key `cancel_txns_for_call` cancels by.
 fn probe_call_ref(branch: &str) -> String {
@@ -162,7 +126,7 @@ fn probe_call_ref(branch: &str) -> String {
 /// through a dedicated [`TransactionLayer`].
 pub struct HealthProbe {
     txn: TransactionLayer,
-    events: mpsc::Receiver<TransactionEvent>,
+    events: sip_txn::TransactionEvents,
     probe_host: String,
     probe_port: u16,
     registry: Arc<dyn WorkerRegistry>,
@@ -180,6 +144,8 @@ pub struct HealthProbe {
     metrics: Option<Arc<ProxyMetrics>>,
     /// Latched once the first round over the first listing has completed.
     first_view: Arc<FirstView>,
+    /// Stamped by every answer a probe correlates.
+    reach: Arc<WorkerReach>,
 }
 
 impl HealthProbe {
@@ -214,6 +180,7 @@ impl HealthProbe {
             config,
             metrics: None,
             first_view: FirstView::pending(),
+            reach: WorkerReach::unheard(),
         }
     }
 
@@ -222,6 +189,14 @@ impl HealthProbe {
     /// latches a view of its own nobody reads.
     pub fn with_first_view(mut self, view: Arc<FirstView>) -> Self {
         self.first_view = view;
+        self
+    }
+
+    /// The proxy's reach, which every answer this probe correlates stamps;
+    /// the runner's fitness reads the same one. Without it the probe stamps a
+    /// reach of its own nobody reads.
+    pub fn with_reach(mut self, reach: Arc<WorkerReach>) -> Self {
+        self.reach = reach;
         self
     }
 
@@ -257,7 +232,7 @@ impl HealthProbe {
         let round_window = tokio::time::sleep(Duration::from_millis(self.config.timeout_ms));
         tokio::pin!(round_window);
         // A round at most every millisecond: a zero interval rounds that often.
-        let period = Duration::from_millis(self.config.interval_ms.max(1));
+        let period = self.config.period();
         #[expect(clippy::disallowed_methods, reason = "the period is at least 1 ms")]
         let mut tick = tokio::time::interval_at(sip_clock::deadline::from_now(period), period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -267,16 +242,10 @@ impl HealthProbe {
                 self.first_view.latch();
                 first_round = None;
             }
+            let reap_at = state.pending.values().map(|p| p.window_ends).min();
+            // Events first: an answer queued at its window's end is no miss.
             tokio::select! {
-                _ = tick.tick() => {
-                    if self.tick(&mut state).await.is_err() {
-                        return;
-                    }
-                }
-                _ = &mut round_window, if first_round.is_some() => {
-                    self.first_view.latch();
-                    first_round = None;
-                }
+                biased;
                 ev = self.events.recv() => match ev {
                     None => return, // transaction layer gone (endpoint closed)
                     Some(TransactionEvent::Message { message, .. }) => {
@@ -293,20 +262,33 @@ impl HealthProbe {
                     }
                     Some(_) => {}
                 },
+                () = sleep_until_or_never(reap_at.map(config::past_the_window)) => {
+                    if self.reap(&mut state).await.is_err() {
+                        return;
+                    }
+                }
+                _ = tick.tick() => {
+                    if self.tick(&mut state).await.is_err() {
+                        return;
+                    }
+                }
+                _ = &mut round_window, if first_round.is_some() => {
+                    self.first_view.latch();
+                    first_round = None;
+                }
             }
         }
     }
 
-    async fn tick(&self, state: &mut ProbeState) -> Result<(), TransactionLayerClosed> {
-        let now = self.now_ms();
-
-        // ── Reap probes past their reply window ──────────────────────────
-        // Each reap = one miss; the transaction is cancelled so Timer E stops
-        // retransmitting into the void for the remainder of Timer F.
+    /// Reap every probe whose reply window has ended: each is one miss, and
+    /// its transaction is cancelled so Timer E stops retransmitting into the
+    /// void for the remainder of Timer F.
+    async fn reap(&self, state: &mut ProbeState) -> Result<(), TransactionLayerClosed> {
+        let now = Instant::now();
         let expired: Vec<String> = state
             .pending
             .iter()
-            .filter(|(_, p)| p.deadline_ms <= now)
+            .filter(|(_, p)| p.window_ends < now)
             .map(|(b, _)| b.clone())
             .collect();
         for branch in expired {
@@ -314,6 +296,12 @@ impl HealthProbe {
             self.txn.cancel_txns_for_call(&probe_call_ref(&branch)).await?;
             self.count_miss(p, &mut state.misses);
         }
+        Ok(())
+    }
+
+    async fn tick(&self, state: &mut ProbeState) -> Result<(), TransactionLayerClosed> {
+        let now = self.now_ms();
+        let window = Duration::from_millis(self.config.timeout_ms);
 
         // ── Keep per-worker state in lockstep with membership ────────────
         // Departed ordinals are dropped (bounded maps under worker churn); a
@@ -345,7 +333,7 @@ impl HealthProbe {
                 PendingProbe {
                     worker_id: w.id.clone(),
                     addr: w.address.clone(),
-                    deadline_ms: now + self.config.timeout_ms,
+                    window_ends: sip_clock::deadline::from_now(window),
                 },
             );
         }
@@ -358,6 +346,8 @@ impl HealthProbe {
         }
         let Some(branch) = resp.via().first().branch().map(str::to_owned) else { return };
         let Some(p) = state.pending.remove(branch.as_str()) else { return };
+        // A correlated final crossed the proxy-to-worker path both ways.
+        self.reach.answered();
 
         // A reply proves liveness — retire any other in-flight probes to the
         // same worker so their later reap can't count a spurious miss against
@@ -489,6 +479,14 @@ impl HealthProbe {
             tracing::warn!(worker = %w.id, error = %e, "health probe not sent: its address makes no OPTIONS");
         })
         .ok()
+    }
+}
+
+/// Sleep until `at`, or forever when there is nothing to wait for.
+async fn sleep_until_or_never(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 

@@ -36,6 +36,39 @@ impl HeaderProjection {
         let want = HeaderName::from(name);
         self.0.iter().filter(|(n, _)| want.matches(n)).map(|(_, v)| v.as_str()).collect()
     }
+
+    /// The `n`-th item (0-based) of `name` over every row in wire order: the
+    /// rows fold into one list (RFC 3261 §7.3.1), split on the header's own
+    /// separator outside quoted-strings and `<…>`, each item trimmed. A header
+    /// whose row is one item ([`HeaderName::one_item_per_row`]: the
+    /// folding-exempt credentials family, a single-valued grammar such as
+    /// Date) is counted by row, never split.
+    pub fn item(&self, name: &str, n: usize) -> Option<&str> {
+        let rows = self.all(name).into_iter();
+        if HeaderName::one_item_per_row_of(name) {
+            return rows.map(str::trim).nth(n);
+        }
+        let sep = HeaderName::item_separator_of(name);
+        rows.flat_map(|row| sep.split(row)).nth(n)
+    }
+
+    /// The option tags every row of the set-like header `name` lists
+    /// (`Supported`, `Require`, …), in wire order, read as
+    /// [`crate::sniff::option_tags`] reads them: one case-insensitive set, a
+    /// value that is no `token` dropped.
+    pub fn option_tags(&self, name: &str) -> Vec<String> {
+        let sep = HeaderName::item_separator_of(name);
+        let mut out: Vec<String> = Vec::new();
+        for row in self.all(name) {
+            for tag in sep.split(row) {
+                let ok = !tag.is_empty() && tag.bytes().all(crate::char_class::is_token_char);
+                if ok && !out.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                    out.push(tag.to_string());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Pairs a test states directly stand in for a projected message.
@@ -90,5 +123,37 @@ l: 3\r\n\r\nv=0",
         assert_eq!(headers.first("X-Api-Call"), Some("call-9"));
         assert_eq!(headers.all("x-API-call"), ["call-9", "call-10"]);
         assert!(headers.all("Reason").is_empty());
+    }
+
+    /// An item is counted over every row, a comma-folded row and separate
+    /// rows alike; a comma inside a quoted display name or `<…>` is data.
+    #[test]
+    fn an_item_counts_over_every_row_of_the_list() {
+        let rows: HeaderProjection = vec![
+            ("Diversion".to_string(), "\"a, b\" <sip:1@h>;counter=1, <sip:2@h>".to_string()),
+            ("diversion".to_string(), "<sip:3@h;x=1,2>;reason=unknown".to_string()),
+        ]
+        .into();
+        assert_eq!(rows.item("Diversion", 0), Some("\"a, b\" <sip:1@h>;counter=1"));
+        assert_eq!(rows.item("Diversion", 1), Some("<sip:2@h>"));
+        assert_eq!(rows.item("Diversion", 2), Some("<sip:3@h;x=1,2>;reason=unknown"));
+        assert_eq!(rows.item("Diversion", 3), None);
+        assert_eq!(rows.item("Reason", 0), None);
+    }
+
+    /// A row of a folding-exempt or single-valued header is one item: its
+    /// commas are data (RFC 3261 §7.3.1, §20.17, §20.44).
+    #[test]
+    fn a_folding_exempt_or_single_valued_header_is_counted_by_row() {
+        let rows: HeaderProjection = vec![
+            ("WWW-Authenticate".to_string(), "Digest realm=\"a\", nonce=\"n1\"".to_string()),
+            ("www-authenticate".to_string(), "Digest realm=\"b\", nonce=\"n2\"".to_string()),
+            ("Date".to_string(), "Sat, 13 Nov 2010 23:29:00 GMT".to_string()),
+        ]
+        .into();
+        assert_eq!(rows.item("WWW-Authenticate", 1), Some("Digest realm=\"b\", nonce=\"n2\""));
+        assert_eq!(rows.item("WWW-Authenticate", 2), None);
+        assert_eq!(rows.item("Date", 0), Some("Sat, 13 Nov 2010 23:29:00 GMT"));
+        assert_eq!(rows.item("Date", 1), None);
     }
 }

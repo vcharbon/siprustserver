@@ -71,21 +71,21 @@ impl Leg {
     /// a leg this stack dialled, the one sent on a leg whose INVITE it
     /// received.
     pub fn invite_final(&self) -> Option<u16> {
-        match &self.outbound_invite {
+        match self.outbound_invite() {
             Some(invite) => invite.final_received,
-            None => self.invite_final_sent,
+            None => self.invite_final_sent(),
         }
     }
 
     /// Whether this stack CANCELled the leg's INVITE.
     pub fn cancel_sent(&self) -> bool {
-        self.outbound_invite.as_ref().is_some_and(|i| i.cancel_sent)
+        self.outbound_invite().is_some_and(|i| i.cancel_sent)
     }
 
     /// Whether the INVITE this stack dialled the leg with still rings: no
     /// final and no CANCEL of it yet (RFC 3261 §9.1), whatever its dialogs.
     pub fn invite_ringing(&self) -> bool {
-        self.outbound_invite.as_ref().is_some_and(|i| i.final_received.is_none() && !i.cancel_sent)
+        self.outbound_invite().is_some_and(|i| i.final_received.is_none() && !i.cancel_sent)
     }
 
     /// The leg's state: `Confirmed` while one of its dialogs is; else
@@ -157,7 +157,7 @@ impl Leg {
     pub fn is_resolved(&self) -> bool {
         match self.state() {
             LegState::Confirmed => false,
-            LegState::Early => self.outbound_invite.is_none(),
+            LegState::Early => self.outbound_invite().is_none(),
             LegState::Trying => true,
             LegState::Terminated => {
                 self.end() != Some(ByeDisposition::ByeSent)

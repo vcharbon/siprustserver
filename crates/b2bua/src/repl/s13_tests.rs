@@ -8,16 +8,14 @@
 //! Timing is the axis of every scenario: when the late write of the earlier
 //! call lands — in the Reclaim flow's bootstrap or in its tail, before or after
 //! the new call's `Put` reached the backup. A primary that deletes a call and
-//! writes the retry inside one poll drains one changelog entry, the retry's
-//! `Put`, so the backup never sees that delete. All run under
+//! writes the retry before its serve task drains the delete holds one
+//! changelog entry, the retry's `Put`, so the backup never sees that delete. All run under
 //! `#[tokio::test(start_paused = true)]`, the protocol driven between `tick`s.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{
-    Call, CallBodyCodec, CallLimiterState, CallModelState, LegState, LimiterEntry, MsgpackCodec,
-};
+use call::{Call, CallLimiterState, CallModelState, LegState, LimiterEntry, MsgpackCodec};
 use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
@@ -69,7 +67,7 @@ fn nth(cid: &str, n: u32, state: CallModelState) -> Call {
     call.state = state;
     if state != CallModelState::Active {
         call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
-        call.a_leg.invite_final_sent = Some(401);
+        *call.a_leg.invite_final_sent_mut() = Some(401);
     }
     call
 }
@@ -85,7 +83,7 @@ fn named(call: &Call, opts: PutOpts) -> PutOpts {
 
 /// The primary's own write of `call` at `(p, 0)`, flushed toward B.
 async fn primary_put(a: &ReplicatingCallStore, call: &Call, p: i64) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     a.put_call(PRI, "A", &call.call_ref, body, &[], 600_000, p, 0, &named(call, fwd("B")))
         .await
         .unwrap();
@@ -99,7 +97,7 @@ async fn primary_delete(a: &ReplicatingCallStore, call: &Call) {
 /// B's own write of `call` at `(p, b)`: what its takeover copy flushes back
 /// toward the primary (`b > 0`).
 async fn takeover_write(b: &ReplicatingCallStore, call: &Call, p: i64, bgen: i64) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     b.put_call(BAK, "A", &call.call_ref, body, &[], 30_000, p, bgen, &named(call, rev("A")))
         .await
         .unwrap();
@@ -107,7 +105,7 @@ async fn takeover_write(b: &ReplicatingCallStore, call: &Call, p: i64, bgen: i64
 
 /// B's copy of a call A replicated: what B's Backup flow applies.
 async fn replicated(b: &ReplicatingCallStore, call: &Call, p: i64) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     let opts = named(call, PutOpts { origin_now_ms: Some(0), ..PutOpts::default() });
     b.put_call(BAK, "A", &call.call_ref, body, &[], 600_000, p, 0, &opts).await.unwrap();
 }
@@ -115,7 +113,8 @@ async fn replicated(b: &ReplicatingCallStore, call: &Call, p: i64) {
 /// The incarnation of the body `store` holds for `call_ref` in `role`, decoded.
 async fn held(store: &ReplicatingCallStore, role: PartitionRole, call_ref: &str) -> Option<String> {
     let raw = store.get_call(role, "A", call_ref).await.unwrap()?;
-    let call: Call = MsgpackCodec::new().decode(&raw).expect("the body decodes");
+    let call =
+        crate::store::envelope::decode(&MsgpackCodec::new(), &raw).expect("the body decodes").call;
     Some(call.incarnation().to_string())
 }
 
@@ -216,9 +215,10 @@ async fn primary_and_backup(
 
 /// **A takeover copy of a replaced call never overwrites the retry.** B holds
 /// the first call and serves a takeover copy of it; A releases the first call
-/// and answers the retry inside one poll, so B gets the retry's `Put` and never
-/// the first call's delete. Whenever the takeover copy writes, B ends holding
-/// the retry: a takeover of the retry after A crashes must read the retry.
+/// and answers the retry before its serve task runs, so B gets the retry's
+/// `Put` and never the first call's delete. Whenever the takeover copy writes,
+/// B ends holding the retry: a takeover of the retry after A crashes must read
+/// the retry.
 async fn a_takeover_write_of_a_replaced_call(at: TakeoverWrite, base: u16) {
     let clock = Clock::test_at(0);
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
@@ -233,7 +233,8 @@ async fn a_takeover_write_of_a_replaced_call(at: TakeoverWrite, base: u16) {
     if let TakeoverWrite::BeforeTheRetryLands = at {
         takeover_write(&b.store, &first, 3, 1).await;
     }
-    // Inside one poll: the delete and the retry's first write share an entry.
+    // Before the serve task runs: the delete and the retry's first write share
+    // an entry.
     primary_delete(&a.store, &first).await;
     let retry = nth("s13-takeover", 2, CallModelState::Active);
     primary_put(&a.store, &retry, 1).await;
@@ -290,7 +291,11 @@ async fn a_deferred_terminal_the_retry_replaces(at: TakeoverWrite, base: u16) {
         .store
         .take_displaced()
         .iter()
-        .map(|raw| MsgpackCodec::new().decode(raw).expect("the body decodes"))
+        .map(|raw| {
+            crate::store::envelope::decode(&MsgpackCodec::new(), raw)
+                .expect("the body decodes")
+                .call
+        })
         .filter(|c: &Call| c.state == CallModelState::Terminated)
         .map(|c| c.incarnation().to_string())
         .collect();
@@ -386,12 +391,11 @@ async fn a_replaced_terminal_the_authority_flushed_is_not_counted_lost() {
 #[tokio::test(start_paused = true)]
 async fn a_release_with_no_resident_copy_leaves_the_retry_in_the_store() {
     use crate::metrics::B2buaMetrics;
-    use crate::store::{BufferedTerminateWriter, CallState};
+    use crate::store::CallState;
 
     let store = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
-    let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, 16);
     let state = CallState::new(store.clone() as Arc<dyn CallStore>, "A", B2buaMetrics::new())
-        .with_replication(store.clone(), writer);
+        .with_replication(store.clone());
     let retry = nth("s13-release", 2, CallModelState::Active);
     let call_ref = retry.call_ref.clone();
     primary_put(&store, &retry, 1).await;

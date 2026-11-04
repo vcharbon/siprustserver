@@ -10,7 +10,7 @@ use sip_message::draft::RequestDraft;
 use sip_message::{SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
-use crate::headers::{record_route, record_route_flagged};
+use crate::headers::{record_route, record_route_flagged, stated_owners};
 use crate::strategy::RouteParams;
 
 use super::super::{is_dialog_creating, ProxyCore};
@@ -58,7 +58,7 @@ impl ProxyCore {
         // proxy's own headers there), so push the lower half first.
         // For a worker-originated request the cookie identifies the
         // ORIGINATING worker, taken from the SNAT-immune Via identity —
-        // NOT the UDP source: behind the keepalived VIP the source is the
+        // NOT the UDP source: behind a masquerading node the source is the
         // node IP + an ephemeral port, which matches no registry entry, so
         // encoding for the source silently produces a param-less cookie RR and
         // the callee's later in-dialog requests decode Unknown and are
@@ -69,8 +69,16 @@ impl ProxyCore {
         } else {
             target.clone()
         };
-        let stickiness =
-            repeated.cloned().or_else(|| self.strategy.encode_stickiness(&cookie_addr, msg));
+        // A worker's dialog names the owners the worker states for its call
+        // (ADR-0055 §8); a dialog the proxy places names the backup it picks.
+        let stickiness = repeated.cloned().or_else(|| {
+            if is_worker_outbound {
+                let stated = stated_owners(req.top_via());
+                self.strategy.encode_originated(&cookie_addr, msg, &stated)
+            } else {
+                self.strategy.encode_stickiness(&cookie_addr, msg)
+            }
+        });
         // Dual-face (§16.6/§16.7 multi-homed): stamp each half of the
         // double-RR with the advertise of the face facing the party that
         // will USE it —

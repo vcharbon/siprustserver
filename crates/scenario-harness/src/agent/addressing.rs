@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 
 use sip_message::generators::StackDialog;
-use sip_message::header::{HostPort, NameAddr, Via};
+use sip_message::header::{HostPort, NameAddr, Uri, Via};
 use sip_message::sip_str::SipStr;
 use sip_message::SipRequest;
 
@@ -22,16 +22,21 @@ fn authority_to_addr(authority: &HostPort) -> Option<SocketAddr> {
     hostport_to_addr(&format!("{}:{}", authority.host(), authority.port_or_default()))
 }
 
-/// Resolve a SIP URI to a socket address. Handles `sip:user@host:port`, the
-/// userless `<sip:host:port;lr>` name-addr form of a Route / Record-Route
-/// entry, and a bare `host:port`.
+/// Resolve a SIP URI to a socket address. Handles a bare `sip:user@host:port`
+/// URI read whole (a `;` in its user part stays there, RFC 3261 §25.1), the
+/// `<sip:host:port;lr>` name-addr form of a Route / Record-Route entry, and a
+/// bare `host:port`.
 pub(super) fn uri_to_addr(uri: &str) -> Option<SocketAddr> {
     let t = uri.trim();
-    // A bare `host[:port]` is not a URI — it resolves directly.
-    if t.starts_with("sip:") || t.starts_with("sips:") || t.starts_with('<') {
+    if t.starts_with("sip:") || t.starts_with("sips:") {
+        let uri = Uri::parse(&SipStr::owned(t)).ok()?;
+        return authority_to_addr(uri.authority());
+    }
+    if t.starts_with('<') {
         let addr = NameAddr::parse(&SipStr::owned(t)).ok()?;
         return authority_to_addr(addr.uri().authority());
     }
+    // A bare `host[:port]` is not a URI — it resolves directly.
     hostport_to_addr(t)
 }
 
@@ -66,4 +71,24 @@ pub(super) fn via_addr(via: &Via) -> Option<SocketAddr> {
 /// `generate_response`, so the sent-by host:port is authoritative here.)
 pub(super) fn top_via_addr(req: &SipRequest) -> Option<SocketAddr> {
     via_addr(req.top_via())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uri_to_addr;
+
+    /// A dialog's remote target is a URI read whole: a `;` in its user part
+    /// (RFC 3261 §25.1 `user-unreserved`) stays in the user part, and the
+    /// address is the host and port after the `@`.
+    #[test]
+    fn a_remote_target_whose_user_part_holds_a_parameter_names_its_socket() {
+        for target in [
+            "sip:+33612345678;foo=bar@192.0.2.10:5070",
+            "sip:alice%3Bx=y;isub=12@192.0.2.10:5070;transport=udp",
+            "<sip:+33612345678;foo=bar@192.0.2.10:5070;lr>",
+            "192.0.2.10:5070",
+        ] {
+            assert_eq!(uri_to_addr(target), Some("192.0.2.10:5070".parse().unwrap()), "{target}");
+        }
+    }
 }

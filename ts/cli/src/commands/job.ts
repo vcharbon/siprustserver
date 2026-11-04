@@ -136,7 +136,8 @@ const knobsOf = (input: StartInput): JobStart.ReplayKnobs => ({
   cleanup: input.cleanup,
   wait: Option.getOrNull(input.wait),
   unran: false,
-  after: null
+  after: null,
+  force: false
 })
 
 /** A replay launched, said: the job, its log, the commands that follow it. */
@@ -328,6 +329,14 @@ const startCommand = (facts: CliFacts, root: Root) =>
         if (kind === "cut") return yield* startCut(facts, input, yield* pathsFrom(root))
         if (kind === "retire") return yield* startRetire(facts, input, yield* pathsFrom(root))
         if (kind === "delete") return yield* startDelete(facts, input, yield* pathsFrom(root))
+        if (kind === "campaign") {
+          yield* Console.error("[job] refused: a campaign job is started from the campaign page, or run in the foreground by the deployment's campaign command")
+          return yield* exit(2)
+        }
+        if (kind === "inbox") {
+          yield* Console.error("[job] refused: an inbox job is started by the deployment's inbox, for a capture it found there")
+          return yield* exit(2)
+        }
         if (Option.isNone(input.request)) {
           yield* Console.error("[job] refused: a replay job names its request (--request <id>)")
           return yield* exit(2)

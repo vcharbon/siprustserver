@@ -107,6 +107,23 @@ pub struct RecordedSipEntry {
     pub seq: u64,
 }
 
+impl RecordedSipEntry {
+    /// The message's start line, trimmed ([`sip_message::sniff::first_line`]).
+    pub fn start_line(&self) -> String {
+        sip_message::sniff::first_line(&self.raw)
+    }
+
+    /// Whether its start line begins with `prefix`.
+    pub fn opens_with(&self, prefix: &str) -> bool {
+        self.start_line().starts_with(prefix)
+    }
+
+    /// The method its CSeq names ([`sip_message::sniff::cseq_method_token`]).
+    pub fn cseq_method(&self) -> Option<String> {
+        sip_message::sniff::cseq_method_token(&self.raw)
+    }
+}
+
 struct RecvHalf<'a> {
     seq: u64,
     receiver: SocketAddr,

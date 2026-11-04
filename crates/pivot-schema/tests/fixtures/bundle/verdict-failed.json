@@ -67,6 +67,19 @@
       "step": "s7"
     },
     {
+      "after_ms": 2,
+      "arrived": {
+        "cseq": 2,
+        "cseq_method": "INVITE",
+        "kind": "response",
+        "reason": "Request Terminated",
+        "status": 487
+      },
+      "failure": "trying-omitted",
+      "leg": "B",
+      "step": "s13"
+    },
+    {
       "arrived": {
         "cseq": 9,
         "kind": "request",
@@ -153,6 +166,18 @@
       "action": "kill-b2bua",
       "failure": "injector-missing",
       "node": "i1"
+    },
+    {
+      "event": "decision-request-in-flight",
+      "failure": "lane-event-unsupported",
+      "step": "s3"
+    },
+    {
+      "event": "decision-request-in-flight",
+      "failure": "lane-event-missing",
+      "leg": "A",
+      "step": "s3",
+      "within_ms": 2000
     },
     {
       "detail": "the lane bound caller and called-0-0",

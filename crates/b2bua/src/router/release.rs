@@ -12,8 +12,10 @@ use crate::metrics::RemovalClass;
 /// call end" invariant (CLAUDE.md). The kinds differ ONLY in which side
 /// effects they must NOT perform (encoded here, not in comments):
 pub(super) enum ReleaseKind {
-    /// Terminated call: evict from map/index/store and **propagate the delete**
-    /// to the replica peer (the `RemoveCall` critical effect).
+    /// Terminated call: evict from map/index (the `RemoveCall` critical
+    /// effect). Its turn logged the delete toward the replica peer before its
+    /// effects left, and released the call once its outbox drained (ADR-0055
+    /// §3).
     Terminated,
     /// **Acting-backup self-release** (ADR-0014): shed a reactive takeover copy
     /// once the transaction(s) the backup served for it have all reached a
@@ -47,7 +49,7 @@ pub(super) enum ReleaseKind {
 }
 
 /// The single per-call teardown executor (see [`ReleaseKind`]). Owns the full
-/// release checklist — map/index entry, store propagation, per-call lock,
+/// release checklist — map/index entry, per-call lock,
 /// takeover mark, timers (physical `try_remove`, CLAUDE.md), transactions, and
 /// the dispatch queue — so the released-at-call-end invariant lives in ONE
 /// place instead of per-path hand-maintained copies.
@@ -56,9 +58,13 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
     // through — so the active-trace slot returns exactly when the call's runtime
     // state does (ADR-0026). Idempotent, and a no-op for an unsampled call.
     crate::trace::traces().close(call_ref);
+    // What the call's outbox still holds leaves before the call's teardown:
+    // a terminal turn drained it, and on every other release the copy's write
+    // records it (ADR-0055 §3).
+    ctx.outboxes.release(call_ref).await;
     match kind {
         ReleaseKind::Terminated => {
-            ctx.state.remove(call_ref);
+            ctx.state.drop_local(call_ref);
             // Idempotent with an explicit `CancelAllTimers` effect, but not
             // dependent on every rule remembering to emit one: a terminated call
             // frees EVERY timer slot it owns now, not at its deadline.

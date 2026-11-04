@@ -9,6 +9,9 @@ description = "The deployed call-limiter process: serves the limiter HTTP API + 
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

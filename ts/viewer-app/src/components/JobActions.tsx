@@ -4,6 +4,7 @@
  * plan's counts. Each is a job command the server runs for the page; a
  * job it starts is linked. A verb the CLI refuses shows its sentence in place.
  */
+import { plural } from "../plural.ts"
 import type { JSX } from "react"
 import { useState } from "react"
 import { api, type JobDeletePlan, type JobStarted, type JobStatus } from "../api.ts"
@@ -66,16 +67,16 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
     return (
       <span className="retire-confirm">
         <span className="mono">
-          {shown.runs} run(s): rows runs {shown.rows.runs}, case results {shown.rows.caseResults}, rule hits{" "}
-          {shown.rows.runRuleHits}; {shown.bundles} bundle(s) on disk
+          {plural(shown.runs, "run")}: rows runs {shown.rows.runs}, case results {shown.rows.caseResults}, rule hits{" "}
+          {shown.rows.runRuleHits}; {plural(shown.bundles, "bundle")} on disk
         </span>
         {shown.held.length > 0
           ? <span className="error"> held: {shown.held.map((one) => `run${one.id} (${one.why})`).join("; ")}</span>
           : shown.runs === 0
-          ? <span className="muted"> nothing to delete</span>
+          ? <span className="muted"> nothing</span>
           : (
             <button type="button" className="copy-ref danger" onClick={() => void del()}>
-              delete the {shown.runs} run(s) of job {id}
+              delete {plural(shown.runs, "run")}
             </button>
           )}
         <button type="button" className="copy-ref" onClick={() => setPhase({ kind: "idle" })}>keep</button>
@@ -91,7 +92,7 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
           type="button"
           className="copy-ref danger"
           disabled={busy || stopRequestedAt !== null}
-          title="stop: no new cell, a grace for the cells in flight, rows closed interrupted"
+          title="no new cell; cells in flight get a grace, then close interrupted"
           onClick={() => void stop()}
         >
           {stopRequestedAt !== null ? "stopping" : "stop"}
@@ -103,7 +104,7 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
             type="button"
             className="copy-ref"
             disabled={busy}
-            title="restart, resume: the request's cells no job of it ran, as cases sets"
+            title="restart over the request's cells no job ran"
             onClick={() => void restart("resume")}
           >
             resume
@@ -112,7 +113,7 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
             type="button"
             className="copy-ref"
             disabled={busy}
-            title="restart, again: every cell of the request, kinds as it resolves"
+            title="restart over every cell of the request"
             onClick={() => void restart("again")}
           >
             again
@@ -124,7 +125,7 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
           type="button"
           className="copy-ref"
           disabled={busy}
-          title="delete the runs this job opened — rows and bundles — after one confirmation on the counts"
+          title="delete this job's runs, rows and bundles; asks once"
           onClick={() => void plan()}
         >
           delete results…

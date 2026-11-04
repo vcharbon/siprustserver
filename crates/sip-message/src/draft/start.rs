@@ -9,6 +9,7 @@ use bytes::Bytes;
 
 use crate::error::SipParseError;
 use crate::header::{HeaderName, Uri, Wire};
+use crate::header_table::HeaderTable;
 use crate::method::Method;
 use crate::parser::custom::extract_fields::{
     extract_request_fields, extract_response_fields, ExtractMode,
@@ -17,7 +18,7 @@ use crate::parser::custom::header_index::HeaderIndex;
 use crate::parser::custom::optional_headers::extract_optional_indexed;
 use crate::parser::SipParserLimits;
 use crate::sip_str::{SharedText, SipStr};
-use crate::types::{MessageCore, SipHeader, SipRequest, SipResponse};
+use crate::types::{MessageCore, SipRequest, SipResponse};
 
 /// A byte range of the rendered datagram.
 pub type Span = (usize, usize);
@@ -46,7 +47,7 @@ pub trait StartKind: 'static {
         line: Self::Line,
         image: &SharedText,
         spans: StartSpans,
-        headers: Vec<SipHeader>,
+        headers: HeaderTable,
         body: Bytes,
         raw: Bytes,
     ) -> Result<Self::Message, SipParseError>;
@@ -110,17 +111,16 @@ impl StartKind for kind::Request {
         line: Self::Line,
         image: &SharedText,
         spans: StartSpans,
-        headers: Vec<SipHeader>,
+        headers: HeaderTable,
         body: Bytes,
         raw: Bytes,
     ) -> Result<Self::Message, SipParseError> {
-        let limits = SipParserLimits::default();
         let uri = image.span(spans.subject.0, spans.subject.1);
         let idx = HeaderIndex::build(&headers);
         let eager = extract_request_fields(
             &idx,
             &uri,
-            &limits,
+            &SipParserLimits::DEFAULT,
             Some(line.method.as_str()),
             ExtractMode::Hydrate,
         )?;
@@ -159,13 +159,17 @@ impl StartKind for kind::Response {
         line: Self::Line,
         image: &SharedText,
         spans: StartSpans,
-        headers: Vec<SipHeader>,
+        headers: HeaderTable,
         body: Bytes,
         raw: Bytes,
     ) -> Result<Self::Message, SipParseError> {
-        let limits = SipParserLimits::default();
         let idx = HeaderIndex::build(&headers);
-        let core = extract_response_fields(&idx, line.status, &limits, ExtractMode::Hydrate)?;
+        let core = extract_response_fields(
+            &idx,
+            line.status,
+            &SipParserLimits::DEFAULT,
+            ExtractMode::Hydrate,
+        )?;
         let optional = extract_optional_indexed(&idx);
         Ok(SipResponse::new(
             StatusLine {

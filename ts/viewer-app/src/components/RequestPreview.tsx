@@ -2,6 +2,7 @@
  * A preview as the page shows it (§5 R1): per lane the count and the
  * captures, each `full` or `cases`, folded behind the count past a handful.
  */
+import { plural } from "../plural.ts"
 import type { JSX } from "react"
 import type { RequestLanePreview, RequestPreview as Preview } from "../api.ts"
 import { FOLD_CAPTURES, listedCaptures, previewLine } from "../request-builder.ts"
@@ -12,7 +13,7 @@ const CaptureList = ({ one }: { readonly one: RequestLanePreview }): JSX.Element
     <ul className="request-captures mono">
       {listed.map((capture) => (
         <li key={capture.capture}>
-          {capture.capture} <span className="tag">{capture.kind}</span> {capture.cells} cell(s)
+          {capture.capture} <span className="tag">{capture.kind}</span> {plural(capture.cells, "cell")}
         </li>
       ))}
     </ul>

@@ -7,6 +7,7 @@
 import { Boxing, Census, LaneHosting } from "@sip/corpus"
 import type { Paths } from "@sip/corpus/paths"
 import type { Selection } from "@sip/corpus/universe"
+import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import type { CliFacts } from "./facts.js"
@@ -20,12 +21,31 @@ export const census = (facts: CliFacts, paths: Paths) =>
 
 /**
  * Why `lane` cannot be driven, or `null`: a lane the deployment does not
- * state. Asked before any row, build or lock is taken for it.
+ * state, or one lacking a capability a capture replay needs
+ * (`LaneHosting.replayNeeds`). `force` drives the second anyway, saying so on
+ * the command's output. Asked before any row, build or lock is taken for it.
  */
-export const lane = (name: string) =>
-  Effect.flatMap(LaneHosting.Service, (hosting) => hosting.lane(name)).pipe(
-    Effect.as(null as string | null),
-    Effect.catchTag("Corpus.LaneUnstated", (unstated) => Effect.succeed(unstated.message))
+export const lane = (name: string, force = false) => Effect.map(laneFit(name, force), (fit) => fit.refused)
+
+/** {@link lane}'s answer, with what a forced replay's lane lacks: what its run rows record as forced. */
+export const laneFit = (name: string, force = false) =>
+  Effect.gen(function*() {
+    const hosting = yield* LaneHosting.Service
+    const stated = yield* hosting.lane(name)
+    const lacks = LaneHosting.replayLacks(hosting, stated)
+    if (lacks.length === 0) return { refused: null, forced: [] }
+    if (!force) {
+      return {
+        refused: `a capture replay is not runnable on this lane: ${name} lacks ${lacks.join(", ")} ` +
+          "(--force runs it anyway, marked forced)",
+        forced: []
+      }
+    }
+    yield* Console.log(`[replay] forced: ${name} lacks ${lacks.join(", ")}; its runs are recorded forced`)
+    return { refused: null, forced: lacks }
+  }).pipe(
+    Effect.catchTag("Corpus.LaneUnstated", (unstated) => Effect.succeed({ refused: unstated.message, forced: [] })),
+    Effect.map((fit): { readonly refused: string | null; readonly forced: ReadonlyArray<string> } => fit)
   )
 
 /**

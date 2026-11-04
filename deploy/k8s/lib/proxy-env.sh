@@ -44,7 +44,7 @@ K8S_POD_CIDR="${K8S_POD_CIDR:-10.244.0.0/16}"
 # install.sh reuse path) without net-env.sh having run first. The .svc* suffixes
 # cover cluster-DNS names.
 _proxy_local_list="127.0.0.1,localhost,::1,\
-${SIP_SUBNET:-172.20.0.0/16},${SIP_GATEWAY:-172.20.0.1},${PROXY_VIP:-172.20.255.250},\
+${SIP_SUBNET:-172.20.0.0/17},${SIP_GATEWAY:-172.20.0.1},${PROXY_VIP:-172.20.255.250},\
 ${K8S_SERVICE_CIDR},${K8S_POD_CIDR},\
 .svc,.svc.cluster.local,.cluster.local"
 

@@ -42,8 +42,14 @@ def render_error(chart: Path, *args: str) -> str:
     return out.stderr
 
 
+# The APIs the kind lab's MetalLB serves, which the SUT's kind render needs.
+METALLB_APIS = ["--api-versions", "metallb.io/v1beta1", "--api-versions", "metallb.io/v1beta2"]
+
+
 def kind_values(chart: Path) -> list[str]:
-    return ["-f", str(chart / "values-kind.yaml")]
+    """The kind values of `chart`, with the APIs the lab cluster serves."""
+    apis = METALLB_APIS if chart == SIPRUST else []
+    return ["-f", str(chart / "values-kind.yaml"), *apis]
 
 
 def find(docs: list[Doc], kind: str, name: str) -> Doc:
@@ -87,8 +93,9 @@ def secret_key_bytes(secret: Doc) -> bytes:
 def canonical(docs: list[Doc]) -> str:
     """A render as sorted, key-sorted YAML, the random cookie key masked."""
     out: list[Doc] = []
+    drawn = ("sip-front-proxy-hmac",)
     for d in sorted(docs, key=lambda d: (d["kind"], d["metadata"]["name"])):
-        if d["kind"] == "Secret" and d["metadata"]["name"] == "sip-front-proxy-hmac":
+        if d["kind"] == "Secret" and d["metadata"]["name"] in drawn:
             d = dict(d, data=dict(d["data"], key="<random>"))
         out.append(d)
     return yaml.safe_dump_all(out, sort_keys=True)
@@ -96,8 +103,9 @@ def canonical(docs: list[Doc]) -> str:
 
 def net_env_defaults() -> dict[str, str]:
     """net-env.sh's values in a clean environment (no caller override)."""
-    names = ["SIP_GATEWAY", "PROXY_VIP", "SIP_PORT", "SIPEXT_VIP", "SIPEXT_SUBNET", "SIP_IF",
-             "SIPEXT_IF", "PROXY_FACE_INT_CIDRS", "SIPEXT_UAS_IP"]
+    names = ["SIP_SUBNET", "SIP_GATEWAY", "PROXY_VIP", "SIP_PORT", "SIPEXT_VIP", "SIPEXT_SUBNET",
+             "SIPEXT_GATEWAY", "SIPEXT_IF", "PROXY_FACE_INT_CIDRS", "SIPEXT_UAS_IP", "TOR_ASN",
+             "PROXY_NODE_ASN", "BFD_INTERVAL_MS", "BFD_DETECT_MULTIPLIER"]
     script = f'. "{NET_ENV}"; ' + "; ".join(f'echo "{n}=${n}"' for n in names)
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True,
                          env={"PATH": os.environ["PATH"]})

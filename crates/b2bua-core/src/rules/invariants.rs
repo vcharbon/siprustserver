@@ -40,6 +40,7 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     if result.call.state == CallModelState::Terminating
         && is_fully_resolved(&result.call)
         && !super::actions::holds_requests(&result.call)
+        && !super::actions::possibly_confirmed::holds_any(&result.call)
     {
         result.call.state = CallModelState::Terminated;
     }
@@ -61,8 +62,8 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
 pub enum UnansweredCaller<'a> {
     /// Answer her 503 under the deployment's advertisement for a minted final.
     Answer(&'a CapabilitySet),
-    /// Leave the wire alone: an already-terminal reclaimed or folded body, or
-    /// an unrecoverable call (ADR-0052 §11).
+    /// Leave the wire alone: a body already terminal when it reached this
+    /// node, or an unrecoverable call (ADR-0052 §11).
     Leave,
 }
 
@@ -74,12 +75,11 @@ pub enum UnansweredCaller<'a> {
 ///
 /// `unanswered` is `Answer` on every LIVE-serving funnel (rules,
 /// initial-INVITE, limiter-refresh, reaper discharge) and `Leave` ONLY on the
-/// two HA discharge helpers for already-terminal reclaimed/folded bodies
-/// (`discharge_materialized_terminal` / `discharge_folded_terminal`): those
-/// bodies were answered by whichever node served them to terminal — or their
-/// caller's transaction died with that node ≥ `reboot_budget` ago — and the HA
-/// contract keeps reclaim-discharge OFF the SIP wire. An unrecoverable call
-/// (ADR-0052 §11) takes `Leave` too: it has no INVITE to answer. What the
+/// shell's discharge of a body already terminal when it reached this node:
+/// the node that served it to terminal answered its caller, or her
+/// transaction ended long before, so its discharge stays OFF the SIP wire. An
+/// unrecoverable call (ADR-0052 §11) takes `Leave` too: it has no INVITE to
+/// answer. What the
 /// funnel meets that it cannot carry is noted on `notes`.
 pub fn enforce(
     obligations: &ObligationSet,
@@ -136,7 +136,7 @@ pub fn enforce(
 ///    unanswered (an answered a-leg reads `Confirmed` or `Terminated`).
 ///  - a non-empty `a_leg_invite` snapshot (nothing to answer otherwise —
 ///    degenerate synthetic fixtures).
-///  - `a_leg.invite_final_sent` is `None` — the transaction carries no final
+///  - `a_leg.invite_final_sent()` is `None` — the transaction carries no final
 ///    yet: neither a reject / relay / setup-timeout final of this turn nor the
 ///    487 the txn layer sent autonomously on a CANCEL.
 ///
@@ -155,29 +155,34 @@ fn answer_a_leg_if_unanswered(
 ) {
     if matches!(before.a_leg.state(), LegState::Trying | LegState::Early) {
         let (call, effects) = (&mut result.call, &mut result.effects);
-        answer_unanswered_caller(call, effects, now_ms, advertisement, notes);
+        answer_unanswered_caller(call, effects, now_ms, advertisement, notes, None);
     }
 }
 
 /// Answer the caller's INVITE `503` when it carries no final yet and a
 /// snapshot to answer exists, recording it on the CDR: the funnel above, and
 /// a teardown whose release waits on a callee's CANCEL (the caller is owed
-/// nothing from it).
+/// nothing from it). Once her final left, every request relayed toward her
+/// or held on her leg is answered (ADR-0055 §2).
 pub(crate) fn answer_unanswered_caller(
     call: &mut Call,
     effects: &mut HandlerEffects,
     now_ms: i64,
     advertisement: &CapabilitySet,
     notes: &mut TurnNotes,
+    under: Option<String>,
 ) {
-    if call.a_leg_invite.headers.is_empty() || call.a_leg.invite_final_sent.is_some() {
+    if call.a_leg_invite.headers.is_empty() || call.a_leg.invite_final_sent().is_some() {
         return;
     }
     let Some(a_invite) = super::relay::caller_invite(call, notes) else { return };
     let a_leg_id = call.a_leg.leg_id.clone();
-    // Reuse the a-leg's own tag when an 18x already pinned one (Early);
-    // otherwise `generate_response`'s deterministic fallback tag applies.
-    let to_tag = call.a_leg.own_tag.clone().filter(|t| !t.is_empty());
+    // The a-leg's own tag when an 18x already pinned one (Early), else the
+    // one the call derives for it: the tag a provisional its earlier owner
+    // showed carried (ADR-0055 §4).
+    let to_tag = under
+        .or_else(|| call.a_leg.own_tag.clone().filter(|t| !t.is_empty()))
+        .or_else(|| Some(crate::caller_tags::own(call)));
     let mut own = Vec::new();
     super::capabilities::stamp_own_advertisement(advertisement, |_| false, &mut own);
     let Some(mut effect) = super::relay::response_to_a_leg(
@@ -190,7 +195,6 @@ pub(crate) fn answer_unanswered_caller(
         None,
         vec![],
         None,
-        None,
         own,
         crate::effects::Provenance::Authored,
         super::relay::Author::Stack,
@@ -199,6 +203,8 @@ pub(crate) fn answer_unanswered_caller(
     };
     effect.label = "503 (terminated unanswered) → a-leg".to_string();
     effects.outbound.push(effect);
+    let caller = super::actions::Legs::One(&a_leg_id);
+    super::actions::settle(call, effects, caller, super::actions::Cause::LegEnd, now_ms);
     // Before `obligations.settle` reads the snapshot, so the CDR carries it.
     call.cdr_events.push(CdrEvent {
         event_type: CdrEventType::Reject,

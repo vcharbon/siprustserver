@@ -149,6 +149,7 @@ const store = (shape: StoreShape): Store => {
             }),
           unfinishedOf: () => refuse,
           dirty: () => refuse,
+          forced: () => refuse,
           openOfSweep: () => refuse,
           forget: () => refuse
         })

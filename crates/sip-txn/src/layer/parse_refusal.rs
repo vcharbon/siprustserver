@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering::Relaxed;
 
+use sip_message::received::response_destination;
 use sip_message::{SipParseError, SipRequest};
 use sip_net::UdpEndpoint;
 use tokio::time::Instant;
@@ -57,7 +58,9 @@ impl Owner {
         let cap = &mut refusals.cap;
         match refuse(error, src, &refusals.tagger, agent, || cap.try_take(now)) {
             ParseRefusal::Answer(response) => {
-                self.send_buffer(endpoint, response.image(), src).await;
+                // §18.2.2: the stamped top Via's response target.
+                let dest = response_destination(response.top_via()).unwrap_or(src);
+                self.send_buffer(endpoint, response.image(), dest).await;
                 self.metrics.parse_refusals_answered.fetch_add(1, Relaxed);
             }
             ParseRefusal::Capped => {

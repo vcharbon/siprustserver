@@ -21,7 +21,7 @@
 //! Each plane keeps its own [`seq_report::RowKind`] so the renderer styles them
 //! distinctly (SIP solid, replication dashed, lifecycle as a band).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 
 use ha_harness::{frame_summary, ReplReport};
@@ -121,6 +121,16 @@ pub fn combine_doc(
     let sip_col = |addr: SocketAddr| -> String {
         sip_addr_col.get(&addr).cloned().unwrap_or_else(|| addr.to_string())
     };
+    // A labelled lane (`ip:port#label`, one of several endpoints serving one
+    // address) is a column of its own: a row on it lands there.
+    let labelled: BTreeSet<&str> =
+        scenario.lanes.iter().map(|l| l.key.as_str()).filter(|k| k.contains('#')).collect();
+    let row_col = |lane: Option<&String>, addr: SocketAddr| -> String {
+        match lane {
+            Some(key) if labelled.contains(key.as_str()) => key.clone(),
+            _ => sip_col(addr),
+        }
+    };
 
     // --- 2. the rows, one plane at a time, on ONE shared global seq ----------
     // Every source — SIP messages, repl frames, lifecycle markers — was stamped
@@ -148,11 +158,11 @@ pub fn combine_doc(
         rows.push(SeqRow {
             at_ms: e.sent_ms as i64,
             seq: e.seq,
-            from: sip_col(e.from),
-            to: Some(sip_col(e.to)),
+            from: row_col(e.from_lane.as_ref(), e.from),
+            to: Some(row_col(e.to_lane.as_ref(), e.to)),
             label: facets(&e.raw).label,
             detail: Some(detail),
-            conn: None,
+            conn: sip_message::sniff::call_id(&e.raw),
             kind: RowKind::Sip { delivered: e.delivered },
         });
     }
@@ -324,8 +334,10 @@ fn build_lanes(
     };
 
     // Partition the non-worker SIP lanes into UAs and the proxy/core SUT.
-    let mut uas: Vec<(SocketAddr, String)> = Vec::new();
-    let mut suts: Vec<(SocketAddr, String)> = Vec::new();
+    // Each keyed by its lane key: the address, or `ip:port#label` for one of
+    // several endpoints serving one address.
+    let mut uas: Vec<(SocketAddr, String, String)> = Vec::new();
+    let mut suts: Vec<(SocketAddr, String, String)> = Vec::new();
     for l in &scenario.lanes {
         if sip_addr_col.contains_key(&l.addr) {
             continue; // a worker — placed separately, collapsed onto its column
@@ -333,14 +345,14 @@ fn build_lanes(
         let name = l.names.first().cloned().unwrap_or_default();
         let is_proxy = matches!(l.network, NetworkTag::Core) || name == "proxy";
         if is_proxy {
-            suts.push((l.addr, name));
+            suts.push((l.addr, l.key.clone(), name));
         } else {
-            uas.push((l.addr, name));
+            uas.push((l.addr, l.key.clone(), name));
         }
     }
     // Stable deterministic order within each group.
-    uas.sort_by_key(|a| a.0);
-    suts.sort_by_key(|a| a.0);
+    uas.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    suts.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
 
     let label = |name: &str, id: &str| -> String {
         if name.is_empty() {
@@ -357,12 +369,12 @@ fn build_lanes(
         lanes.push(Lane::new(ORCHESTRATOR, ORCHESTRATOR, LaneKind::Sut));
     }
     // Caller-side UA first (alice).
-    for (addr, name) in uas.iter().take(uas.len().saturating_sub(1)) {
-        lanes.push(Lane::new(addr.to_string(), label(name, &addr.to_string()), LaneKind::Ua));
+    for (addr, key, name) in uas.iter().take(uas.len().saturating_sub(1)) {
+        lanes.push(Lane::new(key.clone(), label(name, &addr.to_string()), LaneKind::Ua));
     }
     // The proxy SUT.
-    for (addr, name) in &suts {
-        lanes.push(Lane::new(addr.to_string(), label(name, &addr.to_string()), LaneKind::Sut));
+    for (addr, key, name) in &suts {
+        lanes.push(Lane::new(key.clone(), label(name, &addr.to_string()), LaneKind::Sut));
     }
     // The worker nodes (b1, b2) in declaration order, keyed by ordinal so SIP +
     // repl + lifecycle all collapse here. The column caption pairs the ordinal
@@ -375,8 +387,8 @@ fn build_lanes(
         });
     }
     // Callee-side UA last (bob).
-    if let Some((addr, name)) = uas.last() {
-        lanes.push(Lane::new(addr.to_string(), label(name, &addr.to_string()), LaneKind::Ua));
+    if let Some((addr, key, name)) = uas.last() {
+        lanes.push(Lane::new(key.clone(), label(name, &addr.to_string()), LaneKind::Ua));
     }
 
     let _ = name_of;

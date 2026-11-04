@@ -7,7 +7,7 @@ description: >-
   callee's re-INVITEs (the lab's base UAS sends them 60 s and 120 s in and
   hangs up at 180 s), the ghost and the two floods. The ghost is released by
   the system under test's keepalive, so its 600 s bound sits above the lab's
-  keepalive interval plus its answer grace (300 s + 120 s).
+  keepalive interval plus the probe's Timer F (300 s + 32 s).
 duration_s: 900
 drain_s: 700
 settle_s: 40

@@ -5,6 +5,9 @@
 #
 #   pf_freeze / pf_thaw          cgroup v2 freeze of the whole pod (its pod-level
 #                                cgroup: every container stops, sockets stay open)
+#   pf_freeze_container / pf_thaw_containers  cgroup v2 freeze of one container
+#                                of the pod, the others running on; the thaw
+#                                undoes it on every container
 #   pf_reject_tcp / pf_unreject  TCP RST to new connections on a port, in the
 #                                pod's netns; the kubelet's probes still pass
 #   pf_delay / pf_loss / pf_undelay  netem on the pod's eth0 (egress)
@@ -76,6 +79,32 @@ pf_set_freeze() { # pod 0|1
 pf_freeze() { pf_set_freeze "$1" 1; }
 pf_thaw() { pf_set_freeze "$1" 0; }
 
+# Freeze the cgroup of the pod's container named `container` and prove it.
+pf_freeze_container() { # pod container
+  local node uid id pid rel dir now
+  node="$(pf_pod_node "$1")" || return 1
+  uid="$(kubectl -n "$NS" get pod "$1" -o jsonpath='{.metadata.uid}')" || return 1
+  id="$(docker exec "$node" crictl ps --label "io.kubernetes.pod.uid=$uid" --name "^$2\$" --state running -q)" || return 1
+  id="${id%%$'\n'*}"
+  [ -n "$id" ] || { pf_err "no running container $2 in $1"; return 1; }
+  pid="$(docker exec "$node" crictl inspect --output go-template --template '{{.info.pid}}' "$id")" || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { pf_err "no pid for $2 of $1: '$pid'"; return 1; }
+  rel="$(docker exec "$node" cat "/proc/$pid/cgroup")" || return 1
+  rel="$(awk -F: '$1 == "0" { print $3; exit }' <<<"$rel")"
+  [ -n "$rel" ] || { pf_err "no cgroup v2 path for $2 of $1"; return 1; }
+  dir="/sys/fs/cgroup$rel"
+  docker exec "$node" sh -c "echo 1 > '$dir/cgroup.freeze'" || return 1
+  now="$(docker exec "$node" cat "$dir/cgroup.freeze")" || return 1
+  [ "$now" = 1 ] || { pf_err "cgroup.freeze of $2 in $1 reads '$now' after writing 1"; return 1; }
+}
+
+# Thaw every container cgroup of the pod that reads frozen.
+pf_thaw_containers() { # pod
+  local cg
+  cg="$(pf_pod_cgroup "$1")" || return 1
+  docker exec "${cg% *}" sh -c "for f in '${cg#* }'/*/cgroup.freeze; do [ \"\$(cat \"\$f\")\" = 0 ] || echo 0 > \"\$f\"; done"
+}
+
 # The kubelet probes a pod from its node through the pod's default gateway, so
 # the node's own addresses stay accepted and the pod stays Ready.
 pf_reject_tcp() { # pod port
@@ -102,6 +131,16 @@ pf_unreject() { # pod
   done
 }
 
+# Drop every packet from `ips` arriving in the pod's netns: a set of peers
+# gone silent for this pod alone. pf_unreject deletes the rules.
+pf_drop_from() { # pod ip…
+  local pod="$1" ip
+  shift
+  for ip in "$@"; do
+    pf_netns "$pod" iptables -I INPUT -s "$ip/32" -m comment --comment "$PF_REJECT_TAG" -j DROP || return 1
+  done
+}
+
 pf_delay() { pf_netns "$1" tc qdisc replace dev eth0 root netem delay "${2}ms"; } # pod ms
 pf_loss() { pf_netns "$1" tc qdisc replace dev eth0 root netem loss "${2}%"; }    # pod pct
 # Remove the root qdisc when it carries a netem anywhere (a netem root or a
@@ -117,16 +156,18 @@ pf_undelay() { # pod
 }
 
 # Every pod fault still applied to the pod, one word each (netem, reject,
-# frozen); fails when any of its state cannot be read.
+# frozen: the pod's cgroup or one of its containers'); fails when any of its
+# state cannot be read.
 pf_pod_residue() { # pod
-  local q r cg f
+  local q r cg f c
   q="$(pf_netns "$1" tc qdisc show dev eth0)" || return 1
   r="$(pf_netns "$1" iptables -S INPUT)" || return 1
   cg="$(pf_pod_cgroup "$1")" || return 1
   f="$(docker exec "${cg% *}" cat "${cg#* }/cgroup.freeze")" || return 1
+  c="$(docker exec "${cg% *}" sh -c "cat '${cg#* }'/*/cgroup.freeze")" || return 1
   if grep -q netem <<<"$q"; then echo netem; fi
   if grep -q -- "$PF_REJECT_TAG" <<<"$r"; then echo reject; fi
-  if [ "$f" != 0 ]; then echo frozen; fi
+  if [ "$f" != 0 ] || grep -qv '^0$' <<<"$c"; then echo frozen; fi
 }
 
 pf_node_stop() { docker stop -t 0 "$1" >/dev/null; } # node

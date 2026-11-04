@@ -67,11 +67,14 @@ pub enum Refusal {
     /// The call's record of the INVITE does not rebuild it (ADR-0052 §11):
     /// answered 500 from the INVITE itself, and no call is born.
     Unrecoverable,
+    /// The event-queue gate refused: the worker's transaction event queue is
+    /// backed up (ADR-0050 §9).
+    EventQueue,
 }
 
 impl Refusal {
     /// Every reason, in exposition order.
-    pub const ALL: [Refusal; 13] = [
+    pub const ALL: [Refusal; 14] = [
         Refusal::BucketEmpty,
         Refusal::PanicElu,
         Refusal::CapacityCalls,
@@ -85,6 +88,7 @@ impl Refusal {
         Refusal::IdentityInUse,
         Refusal::Cordoned,
         Refusal::Unrecoverable,
+        Refusal::EventQueue,
     ];
 
     /// Stable `reason` label.
@@ -103,6 +107,7 @@ impl Refusal {
             Refusal::IdentityInUse => "identity_in_use",
             Refusal::Cordoned => "cordoned",
             Refusal::Unrecoverable => "unrecoverable",
+            Refusal::EventQueue => "event_queue",
         }
     }
 
@@ -153,6 +158,12 @@ impl NewCallTally {
     pub fn refuse_copy(&self) {
         self.rows.refused_copies.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// New calls of `class` the router refused for `reason` so far.
+    pub fn rejected(&self, reason: Refusal, class: Class) -> u64 {
+        let row = self.rows.rejected.get(reason.index());
+        row.and_then(|row| row.get(class.index())).map_or(0, |n| n.load(Ordering::Relaxed))
+    }
 }
 
 /// Count one into `cell`, a tally row's slot.
@@ -182,8 +193,8 @@ pub struct NewCallCounts {
 }
 
 impl NewCallCounts {
-    /// The router's tally, the transaction layer's backlog and, when the
-    /// ingress brake is installed, the brake's.
+    /// The router's tally, the transaction layer's backlog and new-call gate
+    /// and, when the ingress brake is installed, the brake's.
     pub fn read(
         tally: &NewCallTally,
         txn: &TransactionMetrics,
@@ -193,7 +204,12 @@ impl NewCallCounts {
             refused: Class::ALL.map(|class| txn.deferred_refused(class)),
             copies: txn.refused_copies(),
         };
-        Self::compose(tally, backlog, brake.map(IngressBrakeCounters::counts).unwrap_or_default())
+        let brake = brake.map(IngressBrakeCounters::counts).unwrap_or_default();
+        let mut counts = Self::compose(tally, backlog, brake);
+        // The transaction layer's refusals on arrival while the event-queue
+        // gate refuses; their copies are counted with the backlog's.
+        counts.add(Refusal::EventQueue, Class::ALL.map(|class| txn.new_call_gate_refused(class)));
+        counts
     }
 
     /// The router's tally plus the backlog's and the brake's counts.
@@ -205,14 +221,17 @@ impl NewCallCounts {
             rejected: tally.rows.rejected.each_ref().map(|row| row.each_ref().map(load)),
             refused_copies: load(&tally.rows.refused_copies) + backlog.copies + brake.copies,
         };
-        for (reason, stage) in [(Refusal::DeferredBacklog, backlog), (Refusal::IngressBrake, brake)]
-        {
-            let row = counts.rejected.get_mut(reason.index()).into_iter().flatten();
-            for (slot, n) in row.zip(stage.refused) {
-                *slot += n;
-            }
-        }
+        counts.add(Refusal::DeferredBacklog, backlog.refused);
+        counts.add(Refusal::IngressBrake, brake.refused);
         counts
+    }
+
+    /// Add `refused`, by class, to the row of `reason`.
+    fn add(&mut self, reason: Refusal, refused: [u64; CLASSES]) {
+        let row = self.rejected.get_mut(reason.index()).into_iter().flatten();
+        for (slot, n) in row.zip(refused) {
+            *slot += n;
+        }
     }
 
     /// New calls of this class admitted.

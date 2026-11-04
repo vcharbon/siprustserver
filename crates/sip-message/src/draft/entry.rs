@@ -9,7 +9,7 @@
 use std::any::Any;
 
 use crate::error::SipParseError;
-use crate::header::{HeaderName, HeaderValue, Wire};
+use crate::header::{HeaderId, HeaderKey, HeaderName, HeaderValue, Wire};
 use crate::sip_str::SipStr;
 use crate::write_check::{self, WriteRefusal};
 
@@ -46,14 +46,28 @@ enum Value {
 /// One header line: a name and what it carries.
 #[derive(Debug)]
 pub struct Entry {
+    /// The name as the line writes it: a known name, or a caller's own
+    /// spelling as [`Other`](HeaderName::Other).
     name: HeaderName,
+    /// The known header the line carries, classified once; `None` for an
+    /// extension header.
+    id: Option<HeaderId>,
     value: Value,
 }
 
 impl Entry {
-    /// An entry holding wire bytes. The value is NOT parsed or validated.
+    /// An entry holding wire bytes. The value is NOT parsed or validated. A
+    /// name given as [`Other`](HeaderName::Other) that spells a known header
+    /// carries that header, written with the spelling given.
     pub fn raw(name: HeaderName, value: impl Into<SipStr>) -> Self {
-        Self { name, value: Value::Raw(value.into()) }
+        let id = name.key().id();
+        Self { name, id, value: Value::Raw(value.into()) }
+    }
+
+    /// A raw entry for a line some message already classified as `id`.
+    pub(crate) fn classified_raw(id: Option<HeaderId>, wire: &SipStr, value: SipStr) -> Self {
+        let name = id.map_or_else(|| HeaderName::Other(wire.clone()), HeaderId::name);
+        Self { name, id, value: Value::Raw(value) }
     }
 
     /// A raw entry for a line stated from outside the stack, refused unless
@@ -66,17 +80,30 @@ impl Entry {
 
     /// An entry holding a typed value, named by that value's header.
     pub fn typed<H: HeaderValue>(value: H) -> Self {
-        Self { name: H::header_name(), value: Value::Typed(Box::new(value)) }
+        let name = H::header_name();
+        let id = name.id();
+        Self { name, id, value: Value::Typed(Box::new(value)) }
     }
 
+    /// The name as this line writes it.
     pub fn name(&self) -> &HeaderName {
         &self.name
+    }
+
+    /// The known header this line carries; `None` for an extension header.
+    pub fn id(&self) -> Option<HeaderId> {
+        self.id
     }
 
     /// Whether this line carries `name`. An entry that kept a caller's own
     /// spelling still answers to the header it names.
     pub fn is(&self, name: &HeaderName) -> bool {
-        self.name.same_header(name)
+        self.is_key(&name.key())
+    }
+
+    /// Whether this line carries the header `key` names.
+    pub(crate) fn is_key(&self, key: &HeaderKey<'_>) -> bool {
+        key.is(self.id, self.name.as_wire_str())
     }
 
     /// Whether this entry still holds untouched wire bytes.
@@ -122,7 +149,7 @@ impl Clone for Entry {
             Value::Raw(text) => Value::Raw(text.clone()),
             Value::Typed(value) => Value::Typed(value.clone_entry()),
         };
-        Self { name: self.name.clone(), value }
+        Self { name: self.name.clone(), id: self.id, value }
     }
 }
 

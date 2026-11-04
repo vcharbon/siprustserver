@@ -23,7 +23,7 @@ hk_refuse_host_network() { # allow (true|false)
 # Apply `fn pod args…` to each target and check `word` in its residue. Facts:
 # the pods, the applied instant, each pod's restart count before.
 hk_timed_inject() { # word fn [args…]
-  local word="$1" fn="$2" pod restarts="{}" n residue targets
+  local word="$1" fn="$2" pod restarts="{}" n residue targets applied
   shift 2
   targets="$(hk_targets)"
   while read -r pod _ _; do
@@ -35,7 +35,9 @@ hk_timed_inject() { # word fn [args…]
     grep -qx "$word" <<<"$residue" || hk_die "$word is not in place on $pod after $fn"
   done <<<"$targets"
   echo "$restarts" > "$HAKIT_EVENT_DIR/restarts_before"
-  jq -cn --argjson pods "$(hk_target_pods_json)" --argjson at "$(hk_now_ms)" --argjson r "$restarts" \
+  applied="$(hk_now_ms)"
+  echo "$applied" > "$HAKIT_EVENT_DIR/applied_at_ms"
+  jq -cn --argjson pods "$(hk_target_pods_json)" --argjson at "$applied" --argjson r "$restarts" \
     '{pods: $pods, applied_at_ms: $at, restarts_before: $r}'
 }
 
@@ -60,23 +62,62 @@ hk_timed_undo() { # word fn
   done <<<"$targets"
 }
 
+# The containers of `pod` that terminated at or after `since_ms` (their
+# lastState.terminated.finishedAt): a restart the kubelet made, seen even
+# while its restart count still lags.
+hk_terminated_since() { # pod since_ms
+  local rows n=0 at
+  rows="$(kubectl -n "$NS" get pod "$1" --ignore-not-found -o jsonpath='{range .status.containerStatuses[*]}{.lastState.terminated.finishedAt}{"\n"}{end}')" || return 1
+  while read -r at; do
+    [ -n "$at" ] || continue
+    [ "$(hk_ms "$at")" -lt $(( $2 - 1000 )) ] || n=$((n + 1))
+  done <<<"$rows"
+  echo "$n"
+}
+
+# Per target, its restarts since the inject (restart count against
+# restarts_before), read now: a probe running after the heal re-reads what a
+# heal read too early. JSON {pod: n|null}.
+hk_restarts_since_inject() {
+  local rb pod before after out="{}" targets
+  rb="$(hk_state restarts_before)"
+  [ -n "$rb" ] || rb='{}'
+  targets="$(hk_targets)"
+  while read -r pod _ _; do
+    [ -n "$pod" ] || continue
+    before="$(jq -r --arg p "$pod" '.[$p] // "null"' <<<"$rb")"
+    after="$(hk_restarts "$pod")" || return 1
+    out="$(jq -c --arg p "$pod" --argjson b "$before" --argjson a "${after:-null}" \
+      '. + {($p): (if $a == null or $b == null then null else $a - $b end)}' <<<"$out")"
+  done <<<"$targets"
+  echo "$out"
+}
+
 # Undo with `fn pod` on each target and prove it gone; idempotent. Facts: per
-# pod `healed`, `replaced` or `gone`, and its restarts during the fault (a
-# liveness restart the fault caused).
+# pod `healed`, `replaced` or `gone`, its restarts during the fault (a liveness
+# restart the fault caused) by restart count, and the containers that
+# terminated since the fault was applied, which a lagging count misses.
 hk_timed_heal() { # word fn
-  local states pod state before after rb facts="{}"
+  local states pod state before after rb term applied facts="{}"
   states="$(hk_timed_undo "$1" "$2")"
   sleep "${HK_RECHECK_S:-1}"
   hk_timed_undo "$1" "$2" >/dev/null
   rb="$(hk_state restarts_before)"
   [ -n "$rb" ] || rb='{}'
+  applied="$(hk_state applied_at_ms)"
   while read -r pod state; do
     [ -n "$pod" ] || continue
     before="$(jq -r --arg p "$pod" '.[$p] // "null"' <<<"$rb")"
     after="$(hk_restarts "$pod")" || hk_die "$pod cannot be read"
     [ "$state" = healed ] || after=""
+    term=null
+    if [ "$state" = healed ] && [ -n "$applied" ]; then
+      term="$(hk_terminated_since "$pod" "$applied")" || hk_die "$pod cannot be read"
+    fi
     facts="$(jq -c --arg p "$pod" --arg s "$state" --argjson b "$before" --argjson a "${after:-null}" \
-      '. + {($p): {state: $s, restarts: (if $a == null or $b == null then null else $a - $b end)}}' <<<"$facts")"
+      --argjson t "$term" \
+      '. + {($p): {state: $s, restarts: (if $a == null or $b == null then null else $a - $b end),
+                   terminated_since_applied: $t}}' <<<"$facts")"
   done <<<"$states"
   jq -cn --argjson f "$facts" --argjson at "$(hk_now_ms)" '{pods: $f, healed_at_ms: $at}'
 }

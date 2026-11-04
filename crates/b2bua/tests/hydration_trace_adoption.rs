@@ -15,7 +15,7 @@ use std::sync::Arc;
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
-use b2bua::store::{CallState, InMemoryCallStore, MaterialiseOrigin};
+use b2bua::store::{CallState, Enveloped, InMemoryCallStore, MaterialiseOrigin};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use observe::{activation_bucket, RateDraw, SampleAdmission};
 use sip_clock::Clock;
@@ -94,7 +94,7 @@ async fn materialising_adopts_the_call_it_serves_and_only_that_call() {
     let served = replicated("served@x", Some(true));
     let served_ref = served.call_ref.clone();
     assert!(
-        s.materialize_if_absent(served, MaterialiseOrigin::Reclaim),
+        s.materialize_if_absent(Enveloped::new(served, None), MaterialiseOrigin::Reclaim),
         "a call absent here is materialised"
     );
 
@@ -116,14 +116,14 @@ async fn materialising_adopts_the_call_it_serves_and_only_that_call() {
     let resident = replicated("resident@x", None);
     let resident_ref = resident.call_ref.clone();
     assert!(
-        s.materialize_if_absent(resident, MaterialiseOrigin::Reclaim),
+        s.materialize_if_absent(Enveloped::new(resident, None), MaterialiseOrigin::Reclaim),
         "first materialise inserts"
     );
     assert_eq!(traces().active(), 1, "an unsampled call opens no span");
 
     let again = replicated("resident@x", Some(true));
     assert!(
-        !s.materialize_if_absent(again, MaterialiseOrigin::Reclaim),
+        !s.materialize_if_absent(Enveloped::new(again, None), MaterialiseOrigin::Reclaim),
         "a resident call is left untouched"
     );
     assert_eq!(

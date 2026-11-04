@@ -29,6 +29,7 @@ pub fn catalogues() -> Vec<Catalogue> {
         call_limiter::CATALOGUE,
         loadgen::CATALOGUE,
         cdr_consumer_runner::CATALOGUE,
+        route_guard::metrics::CATALOGUE,
     ]
 }
 

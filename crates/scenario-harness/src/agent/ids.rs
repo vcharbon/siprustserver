@@ -35,9 +35,47 @@ impl Ids {
     /// A fresh Call-ID for agent `name` at `ip`: `<name>-<n>[.<nonce>]@<ip>`.
     pub(crate) fn call_id(&self, name: &str, ip: IpAddr) -> String {
         let n = self.next();
+        self.call_id_at(name, ip, n)
+    }
+
+    /// The Call-ID agent `name` at `ip` mints when the counter stands at `n`.
+    pub(crate) fn call_id_at(&self, name: &str, ip: IpAddr, n: u64) -> String {
         match self.nonce.lock().unwrap().as_deref() {
             Some(nonce) => format!("{name}-{n}.{nonce}@{ip}"),
             None => format!("{name}-{n}@{ip}"),
         }
+    }
+
+    /// Seed the counter at the first value, from the next one on, whose
+    /// Call-ID for agent `name` at `ip` `accept` takes, and return that
+    /// Call-ID. `None` when no value of the next `bound` does.
+    pub(crate) fn seed_call_id_where(
+        &self,
+        name: &str,
+        ip: IpAddr,
+        bound: u64,
+        accept: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        let first = self.next();
+        (first..first.saturating_add(bound)).find_map(|n| {
+            let id = self.call_id_at(name, ip, n);
+            accept(&id).then(|| {
+                self.seed(n);
+                id
+            })
+        })
+    }
+}
+
+impl super::Agent {
+    /// Seed the id counter every agent of the harness shares so that the next
+    /// Call-ID this agent mints is the first one, from the counter on, that
+    /// `accept` takes, and return it. The call this agent originates next
+    /// carries it when no identifier is drawn in between. Panics when none of
+    /// the next 100 000 values is accepted.
+    pub fn seed_next_call_id(&self, accept: impl Fn(&str) -> bool) -> String {
+        self.ids
+            .seed_call_id_where(&self.name, self.addr.ip(), 100_000, accept)
+            .unwrap_or_else(|| panic!("{}: no Call-ID of the next 100 000 is accepted", self.name))
     }
 }

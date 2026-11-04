@@ -137,6 +137,50 @@ _Avoid_: "relayed provisional" for the record (one shown to no one has a
 record too); "owed PRACK" for a PRACK owed TO this stack (that is
 `AwaitPrack`).
 
+**Request record** (ADR-0055 §2, `call::RequestRecord`):
+One request a dialog of the call holds open, by origin: **relayed** from the
+peer leg (its received half is the originator's request, its sent half the
+relay), this stack's **own**, **held** — received and owed a final a service
+gives on a later turn, which the platform gives (500) at a deadline under the
+sender's Timer F — or **received**, an INVITE this stack answers itself. It
+carries its method, CSeq, branch, the request as sent and its destination, its
+deadline, the dialog usage it belongs to and, for an own request, the rule
+that sent it; a final settles it by its branch, outlives its dialog's
+retirement, and settles by its final, its timeout, its leg's end, the call's
+release or its deadline; a takeover seeds a transaction from each half. A
+leg's dialog-creating INVITE has its record on the leg; a dialog holds the
+INVITE it last sent and the one it answered 2xx awaiting its ACK.
+_Avoid_: "pending relay" or "snapshot" for a record that is not a relay.
+
+**INVITE exchange** (`call::InviteExchange`):
+What an INVITE's request record carries past its final: the ACK its 2xx drew
+(branch and datagram, RFC 3261 §13.2.2.4) or the ACK it awaits from the
+acknowledging peer, the 2xx it answered awaiting its ACK (§13.3.1.4) and the
+BYE queued behind that ACK (§15), the dialling facts of a leg's dialling
+INVITE, and the final sent on a received one.
+
+**Subscription record** (ADR-0055 §2, `call::Subscription`):
+A subscription this stack is the notifier of on a dialog, a usage of its own
+(RFC 5057 §3): its event package and `id` (RFC 6665 §4.5), the state its
+NOTIFYs reported, and its NOTIFY awaiting a final. It opens with its first
+NOTIFY and is **terminated** for good once a NOTIFY stating `terminated` is
+asked for, or once a final that removes it or its NOTIFY's timeout ends it
+(RFC 6665 §4.2.2): no NOTIFY leaves on it after, whoever asks. This stack's
+NOTIFYs and BYE asked for while one of its NOTIFYs on the dialog awaits its
+final are **queued** on the dialog, in order, and leave on that final or 8·T1
+after the NOTIFY left.
+_Avoid_: "own NOTIFY" for the record; "held" for a queued request (held is a
+received request owed a final).
+
+**Method table** (`b2bua_core::rules::method_table`):
+What differs by method for a request record: what a dialog this side is
+ending makes of it, the final a relay toward an ended leg owes, and whether
+it waits behind this stack's own NOTIFY in flight or behind the ACK of this
+stack's 2xx on the dialog (RFC 3261 §15). Knows no HA. What
+the timeout of this stack's own request ends is policy: the default rule's,
+which a service rule outranks for a request its rule sent (the record names
+that rule).
+
 **PRACK disposition**:
 What a PRACK this stack receives draws on the face it showed the
 provisional: relayed, answered 200 here, or refused 481. One reading serves
@@ -200,7 +244,8 @@ release**: a release result, a route it answered that could not complete, a
 media program run to its end); the duration cap (**max duration**); a
 deadline by kind (**timeout**: a call-level completion deadline — the setup
 deadline or a transfer's overall guard —, no answer, PRACK, ACK, keepalive —
-the probe unanswered or denied with a 481 —, transaction); the stack's own
+the probe unanswered by its own Timer F, or answered with a dialog-terminating
+final —, transaction); the stack's own
 refusal (**admission**: a limiter, the destination
 allow-list, a spent hop budget, a malformed INVITE, an unreadable or unanswered
 decision); the per-call message cap; the **supervisor** (a reaper strike, a
@@ -248,8 +293,8 @@ refused at it) and an **emergency ceiling** (every new call is refused at it).
 A refused call draws a 503 with a jittered `Retry-After` and no `Reason`, and
 no call state is born. The **backup ceilings** (a count and an RSS value) keep a
 replica of a call not yet held out of the store; a replica left out this way
-is **shed**, and the call's next write that finds room stores it; until then
-the backup's flow reports no position past the shed write.
+is **shed**: the backup refuses it in a frame to the primary, its position
+moves past it, and the call is **unbacked** for life (ADR-0055 §3).
 _Avoid_: "overload" for these rejects (overload is the rate and loop shedding
 of the CPS bucket, the panic-ELU backstop and the queue brake); "limit" for a
 ceiling (the call limiter owns that word).
@@ -292,8 +337,8 @@ holds its first listing and one OPTIONS round over it has completed, each
 listed worker having answered or run out its reply window (ADR-0050 §11).
 The round leaves as soon as the listing is in. Before the view, a request
 with no target is dropped and counted, never refused: its retransmission meets
-the view. `/readyz` waits for the view; `/vrrp`, which the VRRP check reads, is
-`/healthz` and the view; `/healthz` never waits for it.
+the view. `/readyz` waits for the view, and the proxy's node announces its
+addresses only while `/readyz` passes (ADR-0056); `/healthz` never waits for it.
 _Avoid_: "warm-up" (there is no fixed delay: the view is in when the first
 round has answered or run out its reply window).
 
@@ -353,6 +398,33 @@ One replicated call replica — a `(partition, callRef)` entry in a backup's
 store. "Which elements do I back up" is not a separate retrieval: it *is* the
 contents of each peer's per-peer changelog (HRW 2nd-best backup, full mesh).
 _Avoid_: "shard", "partition key" (the partition is just pri/bak).
+
+**Unbacked call**:
+A call that has no backup for its whole life: admitted while the backlog
+toward its backup was over the high-water mark, or refused by its backup at
+its memory ceiling. It runs as on a non-HA B2BUA and is lost with its primary;
+`b2bua_repl_calls_unbacked` counts the live ones (ADR-0055 §3).
+_Avoid_: "degraded call" (degraded fallback is a same-zone backup).
+
+**Backlog** (toward a backup):
+The entries of the change log toward one backup above the position it
+reported applying, and the age of the oldest. Over a high-water mark new calls
+are admitted unbacked; under the low-water marks they get a backup again. No
+call is refused for it (ADR-0055 §3).
+
+**Replication sync level** (`off` | `applied`, `B2BUA_REPL_SYNC`):
+When a turn's effects leave the node, relative to the write that records them.
+Every effect a call's turns send off the node (SIP, requests to outside
+services, limiter releases) leaves through the call's one ordered **outbox**, a
+later entry never overtaking an earlier one; the level decides only when an
+entry is released. Under `off` at once, the write logged first; under
+`applied` (the default) once the backup applied the write that records it, or
+at the **sync cap** counted from the entry's own enqueue, whichever comes
+first. A call with no live, bootstrapped backup waits for nothing; the turn
+that ends a call waits for its delete, the call resident until then (ADR-0055
+§3).
+_Avoid_: "sync replication" (no entry waits past the cap), "hold" (every
+effect goes through the outbox).
 
 **Silent stream**:
 A replication stream that has delivered nothing for the idle bound (15 s; a
@@ -436,9 +508,11 @@ pre-seeding its **own** calls (`pri:{self}`) from the peers that backed them up,
 then re-serving them (smoothed). Gates **readiness** (first Noop).
 
 **Backup re-subscription**:
-The **Backup** stream (bootstrap + tail) a node opens against each peer *after*
-`Ready` to keep the calls it backs up current. Distinct socket, distinct
-watermark from Reclaim; never gates readiness (metrics-only).
+The **Backup** stream (bootstrap + tail) a node opens against each peer once
+its **Reclaim** streams are ready, to hold and keep current the calls it backs
+up. Distinct socket, distinct watermark from Reclaim. Gates **readiness** too
+(first Noop, ADR-0014 §11): a node reads ready once it holds the calls its
+peers named it backup of.
 
 **Takeover copy** (acting-backup live copy) (ADR-0014, ADR-0047):
 The live, in-memory call a backup materialises into its own call map **when the
@@ -452,21 +526,41 @@ The copy serves the dialog and owns the runtime timers; the Element is just byte
 _Avoid_: using "Element"/"replica" for the live copy, or "takeover copy" for the
 stored body; "eager takeover" (removed: it took over every call, quiet ones too).
 
-**Departure sweep** (ADR-0047, `router::departure`): what a backup does when a
-peer leaves the membership set while its flows run — it takes over every call of
-the peer's backup partition that names an INVITE transaction in flight, and
-discharges every ended one (ADR-0047 D8); every other call is left. _Avoid_:
-"eager takeover" for it.
+**Departure sweep** (ADR-0047, ADR-0055 §5, `router::departure`): what a backup
+does when a peer leaves the membership set while its flows run — it takes over
+every call of the peer's backup partition that names an INVITE transaction in
+flight, and every `Terminating` one with any request record open; it discharges
+every ended one (ADR-0047 D8) and every `Terminating` one with nothing left to
+serve; every other call is left to the reactive path by user ruling, a silent
+one ending at the endpoints' timers or the replica's TTL. _Avoid_: "eager
+takeover" for it.
 
 **Undecided call** (ADR-0047, `router::undecided`): a live call still waiting on
 its first routing decision — caller unanswered, no decision applied, nothing
 dialled. Materialised with no message (the departure sweep, a reclaim), it is
 refused 503 without Retry-After, the decision never asked again.
 
-**Lost round** (ADR-0047, `rules::lost_round`): an INVITE transaction a node sent
-on a confirmed dialog that no record holds — the node died before the round
-replicated. Its final is told by a CSeq above the dialog's recorded sequence with
-no relay pending; it is ACKed and the call ended.
+**Evidence** (ADR-0055 §4, `rules::evidence`): a message proving the call took a
+step its record never saw — a final above its dialog's sequence or at a number
+this side re-used, an ACK of an INVITE the record holds unanswered, a callee's
+BYE on an early dialog, a 2xx naming a leg the record lacks. It is owed what RFC
+3261 requires and the call is ended over every dialog the record or the evidence
+names. _Avoid_: "lost round" (its INVITE-only predecessor).
+
+**Possibly confirmed** (ADR-0055 §4, `rules::actions::possibly_confirmed`): a
+caller dialog held after evidence proves a callee answered while the record
+holds the caller unanswered: she is sent her non-2xx under the tag a relayed
+2xx carried, and the dialog is BYEd on her ACK naming it or at 64·T1.
+
+**Via-extension** (ADR-0055 §12, `stack_identity`): the `vx` parameter on the
+worker's own Via — the leg, the Request-URI and the offer flag of the request,
+signed with the cluster key over them and the Via's own call, leg, incarnation,
+branch and method — read back off a response by a node that holds no record of
+the request.
+
+**Unheld response** (ADR-0055 §4, `unheld_response`): a response to a request of
+ours for a call this node holds neither live nor as a replica it may serve:
+answered as an unknown dialog would be.
 
 **Reclaim** (active) — the sole quiescent-recovery path (ADR-0014):
 A returning primary *re-serving* its calls — materialising each back into the live
@@ -482,15 +576,18 @@ for a takeover the self-release watch. The same step on takeover and on
 reclaim; only the origin differs. _Avoid_: "hydration" for it (that is the
 storage-only step).
 
-**Seed**: a transaction the materialisation rebuilds from the record: a
-Proceeding client INVITE from an INVITE handle, a Proceeding server INVITE
-holding the request rebuilt from the a-leg snapshot or a pending relayed
-re-INVITE's snapshot, an Accepted server INVITE (RFC 6026) holding a 2xx a
-dialog retains awaiting its ACK. A fold into the call's record seeds the last
-kind. The 2xx's repeats, a PRACK or a re-ACK are never a transaction's: those
+**Seed**: a transaction the materialisation rebuilds from a **request
+record**, one path for every method: a client INVITE from the sent image of an
+INVITE awaiting its final, re-sent once at the seed when the record holds no
+provisional for it (RFC 3261 §17.1.1.2), a Proceeding server INVITE holding the request
+rebuilt from the a-leg snapshot or a pending relayed re-INVITE's record, an
+Accepted server INVITE (RFC 6026) holding a 2xx a dialog retains awaiting its
+ACK, and for a non-INVITE a client transaction retransmitting its sent request
+under its branch and a server transaction holding its received request. A copy the call's
+record takes whole at a meeting seeds the Accepted kind. The 2xx's repeats, a PRACK or a re-ACK are never a transaction's: those
 are ADR-0032 obligations replicated with the call.
 
-**Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):
+**Self-release** (acting-backup takeover-copy lifecycle, ADR-0014):
 A backup holds a **takeover copy** only *while actively serving* the rerouted
 request(s). When the **last transaction** for that call reaches a terminal state
 (2xx INVITE → its ACK on the branch, else Timer L; non-INVITE → Timer J; failed leg → Timer B/F)
@@ -498,7 +595,7 @@ the txn layer emits `CallQuiesced` and the backup **self-releases**: it
 `drop_local`s the live copy and stops its timers, reverting to a pure **Element**.
 **Local-only** — no delete propagates; the `bak:` replica + reverse-flushed deltas
 survive, so the call lives on at its reclaiming primary. There is **no** watermark
-handshake and **no** time-based settle; correctness rests on `(p,b)` causality.
+handshake and **no** time-based settle; two copies meet by containment (ADR-0055 §7).
 A copy that ends a call whose primary has **departed** does not defer: it
 discharges the call itself — CDR, limiter release, delete; the departure sweep
 discharges an ended call deferred to a peer that then departs; and a node of the
@@ -508,47 +605,49 @@ _Avoid_: "Deactivate"/"handback" (the removed watermark handshake); "ghost backu
 
 **Stand-down** (ADR-0047 D7, `router::stand_down`): a takeover copy released on a
 write of its primary the backup applied — a returning node's reclaim write, an answer,
-an ending — when the primary's `b` is at or past the copy's (the primary's record
-covers every write the copy made), or on the primary's delete of the call. Local-only
-like a self-release, and its transactions are **relinquished** (deleted with nothing
-sent), never orphaned. _Avoid_: "self-release" for it (that waits for the copy's
-transactions to clear).
+an ending — when the primary's copy **contains** the copy and holds every request
+record it keeps open, or on the primary's delete of the call when it holds none.
+Local-only like a self-release, and its transactions are **relinquished** (deleted
+with nothing sent), never orphaned. _Avoid_: "self-release" for it (that waits for the
+copy's transactions to clear).
 
-**Version vector `(p, b)`** (per-context reconciliation) — replaces LWW-by-`gen` (ADR-0014):
-Each call carries `(p, b)` = `(primary_counter, backup_counter)` =
+**Version vector `(p, b)`** (per-context reconciliation, ADR-0014):
+Each call's **store envelope** carries `(p, b)` = `(primary_counter, backup_counter)` =
 `CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter, once per
-write it makes that changes the call, so the *other* counter on a propagated update
-is the **branch point**; a quiet turn and a fold are not writes.
-Merge is direction-aware: **Bootstrap** (a node recovering its own partition)
-applies unless the stored vector dominates; **Forward** (primary→backup) applies
-on that same rule *and* never behind the Element's own `b` (ADR-0031 D3 — an
-Element an acting backup authored holds a version the authority never saw),
-except that at the Element's own `(p,b)` an authored Element whose body is behind
-the frame's takes it: the authority adopted that version and republished its own
-call there (ADR-0047 D7);
-**Reverse** (backup→primary) applies iff `p_in == p_cur && b_in > b_cur`
-(untouched-by-primary since the backup branched, genuinely newer backup
-mutation). A Forward `Put` whose BODY stands behind the Element on the call's
-lifecycle — read answer first: an unanswered teardown never ends an answered call
-(ADR-0047 D7) — is a **branch** of the call and is refused; **deletes** apply
-unconditionally except Forward, which yields for the **answer** alone — an
-`Active` Element whose caller was answered and to which no forward flush, taken
-or refused, has ever carried the authority's own answer. A refused flush is folded into a live copy
-when it carries lifecycle progress the vector cannot see: an answer or an ending,
-folded whole, or the end of a re-INVITE round the live copy holds unfinished or
-the opening of one it never reached, dialog by dialog, whose facts alone are
-merged in. The Reverse rule never folds whole a body whose `p` the backup
-adopted without the primary's body (`CallTopology::gen_adopted`) — nor stores it — and the
-authority's call at an Element's own `(p,b)` replaces such a body there; every
-fold and refusal takes the higher dialog sequences. A **fold** adopts `max` of both counters and
-moves neither, so the split heals and the other owner's next write orders
-against what it published; a
-**refusal** adopts only the axis the other owner bumps — `b` at a primary, `p`
-at a backup — and without that bump, because recording a version somebody else
-published is a read, not a mutation. Closes the latent equal-`gen` divergence
-the single counter suffered.
-_Avoid_: "call_gen LWW"/"highest gen wins" (both propagating directions guard:
-reverse on the branch point, forward on the backup's own progress).
+write it makes, so the *other* counter on a propagated update is the **branch
+point**; a quiet turn and a meeting are not writes. **Bootstrap** (a node recovering
+its own partition) applies unless the stored vector dominates; the **Forward** and
+**Reverse** flows apply a write at or past the stored vector on both counters and
+meet two concurrent copies by **containment**; **deletes** apply unconditionally
+except Forward, which yields for the **answer** alone — an `Active` Element whose
+caller was answered and to which no forward flush, taken or refused, has ever
+carried the authority's own answer (ADR-0031).
+_Avoid_: "call_gen LWW"/"highest gen wins".
+
+**State stamp** (ADR-0055 §7, `CallTopology.{stamp_gen, stamp_bak_gen}`): the vector
+of a copy's last write that changed a **compared field**, set only where the vector is
+bumped (`CallState::update`). Every field of the call record is compared except the
+closed **exempt list** (`call::helpers::compared`): the vector, each dialog's
+sequences, the message and turn counters, the timer generation, the limiter's change
+counter (maximum of two copies); the CDR events and the message rings (union); the
+keepalive records, the keepalive and limiter-refresh ledger entries, the ladder
+rungs, the trace fields (the container's).
+
+**Containment** (ADR-0055 §7, `store::containment`): of two copies of one call
+incarnation, R **contains** L when L's state stamp is at or below R's vector on both
+counters — R read every compared write L made (replication is pull-only and no vector
+is ever taken without its body). At a **meeting** the copy that contains the other is
+taken whole with the other's exempt fields merged in; when each contains the other the
+primary's stands; when neither does, the copies **diverged** and the meeting node ends
+the call cleanly from the copy ranked higher on the lifecycle, over the union of both
+copies' dialogs (`router::reclaim::diverged`). _Avoid_: "fold", "adopted counter",
+"rounds fold" (the per-axis reconciliation containment replaced).
+
+**Leg-id space** (ADR-0055 §7, `call::LegSpace`): one of a call's two sets of leg
+ids. The node the call was created on mints `b-{n}`, any other node acting on the
+call `c-{n}`, so two copies acting at once never mint one id for two legs and a
+leg id names one leg in any union of their records. Which space a node mints from
+is an exempt field: the container's value stands.
 
 **Call incarnation** (`call::Call::incarnation`):
 Which of the successive calls on one `call_ref` a record is — a retried INVITE
@@ -594,6 +693,9 @@ restarts, so `(new_gen, 0) > (old_gen, *)`). *callGen* (`CallTopology.gen`) = th
 **primary counter `p`** of a call's `(p,b)` **version vector** (ADR-0014; `b` =
 `CallTopology.bak_gen`), the per-context reconciliation key. Never conflate the
 incarnation-gen (per node, in the watermark) with the call's `(p,b)` (per call).
+The incarnation-gen resets a puller's changelog position; it never decides which
+of two live processes of one ordinal authors — the **worker identity** does, by
+equality.
 
 **Watermark** `(gen, counter)`:
 A puller's cursor, **one per `(peer, flow)`** — the **Reclaim** and **Backup**
@@ -618,8 +720,9 @@ waits for it.
 Set the instant the **first `Noop`** arrives on a stream — the server emits it on
 the **catch-up edge** (backlog drained below one batch / to head), so it means "I
 have drained this flow's backlog." **Sticky** across reconnects; a transient TCP
-blip does not revert a node to NotReady. Tracked **per flow**: the **Reclaim**
-stream's current flag gates readiness; the **Backup** stream's is **metrics-only**.
+blip does not revert a node to NotReady. Tracked **per flow**: both the
+**Reclaim** and the **Backup** stream's current flags gate readiness (ADR-0014
+§11).
 
 **Readiness states** (`NotReady → Ready ⇄ Cordoned → Draining`):
 Two axes, read apart by the proxy (ADR-0050): **serving dialogs** (OPTIONS `200`,
@@ -869,6 +972,23 @@ drains and exits as on SIGTERM (D5). A static membership
 never shows a worker itself. Four ways out — graceful, abrupt, vanished, restarted in
 place — in ADR-0031.
 
+**Worker identity**:
+One boot of one worker ordinal: the orchestrator's pod UID (the informer's
+`targetRef.uid`, its own from the downward API as `POD_UID`), or a per-boot
+token in a static pool. Membership binds it to the ordinal (`topology::Peer`);
+a changed identity is a changed binding, handled as a changed address. Compared
+for equality only, never ordered (ADR-0055 §6). A request record names the
+worker that relayed it by ordinal and identity (`call::RelayOwner`). Not the
+**incarnation-gen**, and not the **call incarnation**.
+
+**Superseded**:
+A worker that saw its ordinal bound to its own worker identity and then sees it
+bound to another: the orchestrator recreated the ordinal while this process
+still runs (a forced delete). Sticky and terminal: the worker stops authoring at
+once — no SIP, no write a peer can pull, no CDR — and exits without a drain
+(ADR-0055 §6; `is_superseded` on the core). Another identity seen before its
+own is a predecessor still listed, not a supersession.
+
 **Terminating member**:
 A worker the orchestrator has begun to remove and that still runs. Still a
 **replication peer** (pulled until it is gone from membership), no longer a
@@ -941,19 +1061,24 @@ How long a dialled leg may ring unanswered: its attempt's statement, run
 from the first 180–189 the leg's INVITE draws, to the millisecond, and held
 inside that INVITE's transaction bound. A leg answered or failed before any
 18x never arms it; a later 18x, on any of its early dialogs, does not move it.
-A copy materialised from a replica that shows no 18x on an unanswered leg
-**presumes** it ringing since its INVITE (`Ring::Presumed`): the turn that
-took its first 18x may not have replicated. An 18x it then takes re-arms the
-deadline from that 18x.
+A call restored on another node that shows no 18x on an unanswered leg runs
+the deadline from its INVITE inside the core, the leg's ring state staying
+`Ring::Silent`: the turn that took its first 18x may not have reached that
+node, and a service reads the leg as not having rung. An 18x it then takes
+re-arms the deadline from that 18x.
 _Avoid_: "no-answer timeout" for the time since the INVITE (that is the
 **setup** deadline's, or a service's own watchdog).
 
 **Timer scope** (ADR-0042, `TimerScope`):
-What a timer guards — the call, an attempt, a leg, or a retransmission
-obligation — and so when it dies: leaving the scope retires every timer of
-it, with no rule cancelling one. A timer is named by its type and its scope
-(`TimerKey`) and armed under the call's next **generation**; a fire the
-ledger no longer holds under that generation is stale and reaches no rule.
+What a timer guards — the call, an attempt, a leg, a retransmission
+obligation, or the call's setup (`Setup`, the **setup** deadline's: over
+while any leg holds a confirmed dialog, a media server's included, and once
+the call is terminating) — and so when it dies: leaving
+the scope retires every timer of it, with no rule cancelling one. A timer is
+named by its type and its scope (`TimerKey`) and armed under the call's next
+**generation**; a fire the ledger no longer holds under that generation, or
+whose scope ended whatever the ledger holds, is stale and reaches no rule, so
+no rule re-checks for a stale ledger (ADR-0055 §10).
 _Avoid_: "timer id" (there is no string name); "cancel" for what a scope's
 end does (it **retires** the scope).
 
@@ -1322,8 +1447,9 @@ generator saw, not what the system under test did.
 **Impact budget**:
 What impact one window allows, per class, `setup_failed` and a pre-answer
 `unexpected_ending` keyed by stream × final code × reason. A class or key the
-budget does not name allows 0; the in-dialog classes and an unexpected ending
-after answer take no budget at all; impact outside every window is
+budget does not name allows 0; the in-dialog classes take a budget only
+through `in_dialog`, for a fault that outlasts their transactions' timeout
+or reorders a dialog's requests, and an unexpected ending after answer takes none; impact outside every window is
 `unattributed` and always a finding.
 _Avoid_: "tolerance" for something an incident or a scenario carries.
 
@@ -1356,3 +1482,107 @@ _Avoid_: an accepted ending stated anywhere but the catalog.
 unattributed impact and the integrity findings; `pass`, `fail`, or `invalid`
 when the measurement itself is in doubt (a record gap, a failed incident, a
 stale series).
+
+## The HA-blind boundary
+
+[ADR-0055](./docs/adr/0055-services-are-ha-blind.md) §1, §11.
+
+**Blind crate**:
+A crate that holds single-node logic only: no HA type, term or branch. Its
+manifest states `[package.metadata.ha] side = "blind"`; its normal dependencies
+are blind crates and its files pass the **word net** (`scripts/ha_side.py`, run by
+`scripts/purity.py`). The call record, the decision core, the SDK, the decision
+seam (`b2bua-decision`) and the services are blind.
+_Avoid_: "HA-free" for a crate whose side no manifest states.
+
+**Aware crate**:
+A crate that may know HA (`side = "aware"`): the shell (`b2bua`), replication,
+the proxy, the runners, the harnesses and every test crate.
+
+**Word net**:
+The words a blind crate never holds, in any spelling: `takeover`, `reclaim`,
+`tombstone`, `materialise`/`materialize`, `stand-down`, and `replica` as a word of
+its own. No allowlist: a hit moves to an aware crate or states the single-node
+fact it makes.
+
+**Store envelope**:
+What the store keeps and replicates beside a call record (`b2bua::store::envelope`):
+the worker pair the call was placed on, the version vector and the state stamp.
+A replicated body is the envelope, then the call body. The core reads none of it;
+the shell hands each turn the call's **owners** as a plain input
+(`b2bua_core::owners::Owners`).
+
+## Failover sweep vocabulary
+
+The in-process proof of HA-blind services
+([ADR-0055](./docs/adr/0055-services-are-ha-blind.md) §11, §13), in
+`crates/failover-harness`.
+
+**Turn point**:
+One sub-point of one turn a call takes at its primary, the turns numbered from
+1: the turn's write handed to replication (`logged`), its write applied at the
+backup (`applied`, only for a turn that wrote), its last outbox entry left
+(`left`), in that order under the `applied` sync level with no cap hit, and
+`logged`, `left`, `applied` under `off` or past the cap. Where a sweep incident
+arms; the harness holds the turn there until the incident struck.
+_Avoid_: "safe-point" (the transparent matrix's quiescent states, ADR-0013).
+
+**Failover sweep**:
+Every shape of a catalogue cut at every turn point by each sweep incident
+(primary killed, primary killed unannounced, primary killed then rebooted,
+backup killed, split, split then healed, stalled then killed, unbacked then
+killed), at each replication sync level, one test per shape,
+incident and level. Each cell must end with nothing left on any node and an
+RFC-clean, fully terminated call the parties accept, with one CDR or, when the
+primary dies, two; what an incident may cause beyond that is the **window
+table**'s, opened by the cell's **tier**. A consumer adds shapes with
+`failover_sweep!` and a ratchet of its own; a shape may name callee roles that
+share the callee's address, told apart by the Request-URI user part, and may
+stay out of the split that never heals. Its lane is `just sweep`;
+`just sweep-report` counts its rows and tiers.
+_Avoid_: "matrix" (the hand-listed transparent matrix of ADR-0013).
+
+**Sweep ratchet**:
+`failover-sweep.ratchet`: the cells that fail today, each with the ADR section
+that owns its correction and its cause, and each test's count of Guaranteed
+cells. A failing cell it does not list fails the test, and so does a listed
+cell that passes, or a Guaranteed count other than the listed one; it only
+shrinks.
+_Avoid_: "allow-list" or "waiver" (a listed cell still fails; the ratchet
+only records that it is known).
+
+**Clean end**:
+The system under test ending a call the way RFC 3261 allows after an incident:
+a non-2xx final to an INVITE it holds unanswered, a BYE of every dialog the
+record or the evidence names, a NOTIFY ending a subscription (ADR-0055 §1, §4).
+A party it ends cleanly drops her remaining goals; once the caller is ended so,
+the call is (`CallCtx::accept_clean_ends`, armed when the incident strikes). A
+request left without its final or a dialog left open is never a clean end.
+_Avoid_: "dropped call" for it (a clean end is a pass of the cell).
+
+**Window table**:
+Every deviation from a perfect call an incident may cause, one named row each
+(`W-…`, the id of its ADR-0055 §11 bullet): an RFC-rule window, a
+dialog-verdict waiver, a party outcome, a clean-end goal drop or a CDR count.
+A row names the strongest **tier** it opens in, its incidents, its scope and
+its predicate, and an upstream witness cell that must fire it. A test strikes
+an incident (`FailoverHarness::strike`) and is given its rows; every accepted
+finding names its row, the first in table order. A hand-written test's fault
+no incident names keeps its windows under a transitional row (`T-…`).
+_Avoid_: "waiver" (a waiver is not tied to an incident or to §11), "accepted
+trade-off", "declared window" for a window a test opens itself (none does).
+
+**Tier** (Guaranteed / Degraded / Off):
+How much a cell may deviate, measured from its run (ADR-0055 §11).
+**Guaranteed**: level `applied`, a kill of a cluster whose every call was
+backed and bootstrapped at every turn up to the strike, no outbox entry hitting
+the cap, no replication stream or replica tampered with: no row opens, the
+evidence rule ends no call. **Degraded**: level `applied`, any other case,
+every row but the off-only ones. **Off**: level `off`, every row.
+_Avoid_: "transparent" for Guaranteed (the transparent matrix is ADR-0013's).
+
+**Declared window**:
+An RFC-rule window or dialog-verdict waiver of the **window table**, open from
+the strike of its incident, scoped to its rule and its message.
+_Avoid_: "waiver" (a waiver is not tied to an incident or to §11), "accepted
+trade-off".

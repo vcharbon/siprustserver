@@ -137,13 +137,8 @@ fn the_wider_set_applies_first_and_the_narrower_against_its_result() {
 fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut ids = sip_ids::TurnIds::fixed(1);
-    let mut call = crate::initial_invite::build_initial_call(
-        &invite("w0", "w1", "stamp"),
-        src(),
-        &config,
-        &mut ids,
-        0,
-    );
+    let mut call =
+        crate::initial_invite::build_initial_call(&invite("stamp"), src(), &config, &mut ids, 0);
     let a_invite = caller_of(&call);
     let ack = a_invite.clone();
     let (emission, _) = call::RetainedEmission::paced(
@@ -188,23 +183,18 @@ fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
 }
 
 /// The launched INVITE the end-of-turn stamp changes is the one the leg's
-/// client-transaction handle holds: a takeover seeds the client INVITE
+/// client-transaction handle holds: a restored record seeds the client INVITE
 /// from that handle, and a retransmission of a request is the request it
 /// repeats (RFC 3261 §17.1.1.2).
 #[test]
 fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut ids = sip_ids::TurnIds::fixed(1);
-    let mut call = crate::initial_invite::build_initial_call(
-        &invite("w0", "w1", "handle"),
-        src(),
-        &config,
-        &mut ids,
-        0,
-    );
+    let mut call =
+        crate::initial_invite::build_initial_call(&invite("handle"), src(), &config, &mut ids, 0);
     let a_invite = caller_of(&call);
     let (leg, effect) = crate::rules::relay::build_b_leg(
-        crate::rules::relay::CallMarks::of(&call),
+        crate::rules::relay::CallMarks::of(&call, crate::owners::Owners::none()),
         "b-1",
         &a_invite,
         ("192.0.2.9".into(), 5060),
@@ -237,12 +227,11 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
     let OutboundBody::Request(sent) = &result.effects.outbound[0].body else { unreachable!() };
     assert_eq!(sent.raw(HeaderName::from("X-Stamp")).collect::<Vec<_>>(), ["s"]);
     let leg = &result.call.b_legs[0];
-    let held =
-        leg.outbound_invite.as_ref().and_then(|i| i.txn.as_ref()).expect("the INVITE handle");
-    assert_eq!(held.original_invite, sent.image().to_vec(), "the handle holds what left");
+    let held = leg.dialled_sent().expect("the INVITE's record");
+    assert_eq!(held.image, sent.image().to_vec(), "the record holds what left");
     for d in &leg.dialogs {
-        if let Some(h) = &d.pending_invite_txn {
-            assert_eq!(h.original_invite, sent.image().to_vec());
+        if let Some(h) = d.sent_invite.as_ref().and_then(|r| r.sent.as_ref()) {
+            assert_eq!(h.image, sent.image().to_vec());
         }
     }
 }
@@ -253,16 +242,11 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
 fn an_ended_legs_own_set_stays_with_the_call() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut ids = sip_ids::TurnIds::fixed(1);
-    let mut call = crate::initial_invite::build_initial_call(
-        &invite("w0", "w1", "prune"),
-        src(),
-        &config,
-        &mut ids,
-        0,
-    );
+    let mut call =
+        crate::initial_invite::build_initial_call(&invite("prune"), src(), &config, &mut ids, 0);
     let a_invite = caller_of(&call);
     let (mut leg, effect) = crate::rules::relay::build_b_leg(
-        crate::rules::relay::CallMarks::of(&call),
+        crate::rules::relay::CallMarks::of(&call, crate::owners::Owners::none()),
         "b-1",
         &a_invite,
         ("192.0.2.9".into(), 5060),
@@ -310,13 +294,8 @@ fn an_ended_legs_own_set_stays_with_the_call() {
 fn the_charging_arm_reads_the_legs_own_set() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut ids = sip_ids::TurnIds::fixed(1);
-    let mut call = crate::initial_invite::build_initial_call(
-        &invite("w0", "w1", "arm"),
-        src(),
-        &config,
-        &mut ids,
-        0,
-    );
+    let mut call =
+        crate::initial_invite::build_initial_call(&invite("arm"), src(), &config, &mut ids, 0);
     let mut stated = StatedHeaders::default();
     stated.every_message.insert("P-Charging-Vector".into(), HeaderUpdate::line("call"));
     let mut silent = StatedHeaders::default();

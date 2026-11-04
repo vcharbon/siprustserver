@@ -53,6 +53,17 @@ pub struct WaiverScope {
     /// When `true`, a waiver that filters nothing is NOT an error at `finish()`
     /// (a legitimately conditional shape). Default `false` (unused ⇒ loud).
     pub conditional: bool,
+    /// A dialog-verdict waiver's method: only verdicts on requests of it are
+    /// covered. `None` = any method.
+    pub method: Option<String>,
+    /// A dialog-verdict waiver's start: only verdicts recorded from this
+    /// instant on are covered. Set by a live run, never by a scenario file.
+    pub since: Option<tokio::time::Instant>,
+    /// A dialog-verdict waiver that covers at most one verdict per dialog.
+    pub once_per_dialog: bool,
+    /// A dialog-verdict waiver that covers only a request ending its
+    /// subscription (a NOTIFY stating `terminated`).
+    pub terminating: bool,
     /// Human-readable reason (surfaced on registration / in the report).
     pub justification: String,
 }
@@ -66,8 +77,39 @@ impl WaiverScope {
             party: None,
             position: None,
             conditional: false,
+            method: None,
+            since: None,
+            once_per_dialog: false,
+            terminating: false,
             justification: justification.into(),
         }
+    }
+
+    /// Narrow a dialog-verdict waiver to the verdicts on `method` requests.
+    pub fn on_method(mut self, method: impl Into<String>) -> Self {
+        self.method = Some(method.into());
+        self
+    }
+
+    /// Narrow a dialog-verdict waiver to the requests ending their
+    /// subscription.
+    pub fn terminating(mut self) -> Self {
+        self.terminating = true;
+        self
+    }
+
+    /// Narrow a dialog-verdict waiver to the verdicts recorded from now on.
+    pub fn from_now(mut self) -> Self {
+        self.since = Some(tokio::time::Instant::now());
+        self
+    }
+
+    /// Narrow a dialog-verdict waiver to the verdicts recorded from now on,
+    /// at most one per dialog.
+    pub fn from_now_once_per_dialog(mut self) -> Self {
+        self.since = Some(tokio::time::Instant::now());
+        self.once_per_dialog = true;
+        self
     }
 
     /// Narrow to the emitting party (a bind/lane name).
@@ -125,6 +167,14 @@ impl Attribution<'_> {
             (None, _) => false,
             (Some(p), Attribution::AddrNames { sut, .. }) => !sut.contains(p),
             (Some(_), Attribution::SubLane) => true,
+        }
+    }
+
+    /// Whether `party` is a lane the harness bound as SUT.
+    fn is_sut(&self, party: Option<&str>) -> bool {
+        match (party, self) {
+            (Some(p), Attribution::AddrNames { sut, .. }) => sut.contains(p),
+            _ => false,
         }
     }
 }
@@ -201,7 +251,10 @@ fn covers(w: &WaiverScope, finding: &RfcFinding, party: Option<&str>, attr: &Att
 
 /// The findings a waiver set lets through, and the SUT findings it covered.
 pub(crate) struct Waived<T> {
-    /// The non-advisory findings no waiver covers.
+    /// The gating findings no waiver covers: the non-advisory ones, and the
+    /// advisory ones of a rule that gates the SUT
+    /// ([`rfc_rule_gates_sut`](sip_net_testkit::rfc_rule_gates_sut)) charged
+    /// to it.
     pub gating: Vec<T>,
     /// Per rule, how many findings charged to the SUT a waiver covered.
     pub sut: BTreeMap<String, usize>,
@@ -210,7 +263,7 @@ pub(crate) struct Waived<T> {
     pub simulated: BTreeMap<String, usize>,
 }
 
-/// The non-advisory findings that SURVIVE the waivers (marking each covering
+/// The gating findings ([`Waived::gating`]) that SURVIVE the waivers (marking each covering
 /// waiver used) — the shared core of both apply variants. Attribution
 /// references each finding's `offending` wire-entry index directly. Takes the
 /// PRE-EVALUATED suite output so a caller that already ran
@@ -232,8 +285,13 @@ fn waive(
     attr: &Attribution,
 ) -> Waived<(RfcFinding, Option<String>)> {
     let mut out = Waived { gating: Vec::new(), sut: BTreeMap::new(), simulated: BTreeMap::new() };
-    for f in findings.iter().filter(|f| !f.advisory) {
+    for f in findings {
         let party = finding_party(f, entries, attr);
+        let gates = !f.advisory
+            || (sip_net_testkit::rfc_rule_gates_sut(&f.rule) && attr.is_sut(party.as_deref()));
+        if !gates {
+            continue;
+        }
         let mut waived = false;
         for w in waivers {
             if covers(&w.scope, f, party.as_deref(), attr) {
@@ -253,7 +311,7 @@ fn waive(
 }
 
 /// Apply the waivers to the PRE-EVALUATED audit findings: drop every
-/// non-advisory finding a waiver covers (marking that waiver used), returning
+/// gating finding a waiver covers (marking that waiver used), returning
 /// each remaining gating finding with the party it charges, and the waived SUT
 /// findings per rule — the functional-lane (addr→name) attribution.
 pub(super) fn apply_waivers(

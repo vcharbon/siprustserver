@@ -12,7 +12,8 @@
 //! - `Added` → spawn/Connecting (or un-Park: reconnect from the retained W).
 //! - `Removed` → `Parked`: interrupt both flows, **retain W forever** keyed by
 //!   `(ordinal, flow)`, and tell the router the peer departed (ADR-0047).
-//! - `AddressChanged` → reconnect both flows to the new addr from the retained W.
+//! - `AddressChanged` → reconnect both flows to the new binding (host or worker
+//!   identity, ADR-0055 §6) from the retained W.
 //! - `ConditionsChanged` → nothing moves: a member is **pulled while it is in the
 //!   snapshot at all**, ready or not, terminating or not (ADR-0031 D1). Only
 //!   leaving the snapshot parks it. A peer pulled while not ready is logged once
@@ -20,18 +21,20 @@
 //!
 //! Every snapshot is also read for this node's **own** endpoint before self is
 //! filtered out of the desired set: once seen routable, its disappearance is the
-//! node's withdrawal from routing (ADR-0031 D6, [`SelfEndpoint`]), exposed as
+//! node's withdrawal from routing (ADR-0031 D6), and its ordinal bound to
+//! another worker identity is its supersession (ADR-0055 §6) — the
+//! [`SelfEndpoint`](super::SelfEndpoint) state, exposed as
 //! [`is_withdrawn`](ReplicationSupervisor::is_withdrawn) and on a watch the core
-//! turns into the `Draining` latch. Only a source that shows a member itself
-//! ([`Membership::observes_self`]) is read this way.
+//! turns into the `Draining` latch and its fence. Only a source that shows a
+//! member itself ([`Membership::observes_self`]) is read this way.
 //!
-//! ## Boot order: Reclaim first, Backup deferred
-//! A rebooting node prioritises reclaiming **its own** partition over taking on
-//! backup duty for others. Reclaim streams open immediately; the Backup streams
-//! open only after the Reclaim flows are all current-or-unreachable (the
-//! readiness gate). Backup never feeds readiness — its `current` flag is
-//! metrics-only — so deferring it is purely a bandwidth-prioritisation choice
-//! and has no correctness role (`(p,b)` makes any incidental overlap safe).
+//! ## Boot order: Reclaim first, Backup deferred, readiness waits for both
+//! A rebooting node reclaims **its own** partition before it takes on backup
+//! duty for others: Reclaim streams open immediately, the Backup streams once
+//! the Reclaim flows are all current-or-unreachable. Readiness waits for the
+//! Backup flows too (ADR-0014 §11), so a node reads ready only once it holds
+//! the calls its peers named it backup of. A peer unreached by the Reclaim
+//! hard timer releases the Backup flow at its first failed connect (X5).
 //!
 //! ## Watermark retention per `(ordinal, flow)`
 //! The authoritative watermark + current flag live in the supervisor, keyed by
@@ -39,13 +42,14 @@
 //! publishes its progress on a `watch` channel the supervisor mirrors; a
 //! re-spawned puller is seeded from the retained W so it resumes.
 //!
-//! ## Introspection (for tests / readiness) — Reclaim-scoped
+//! ## Introspection (for tests / readiness)
 //! [`is_current`](ReplicationSupervisor::is_current) /
-//! [`all_current`](ReplicationSupervisor::all_current) /
+//! [`all_bootstrapped`](ReplicationSupervisor::all_bootstrapped) /
 //! [`bootstrap_complete`](ReplicationSupervisor::bootstrap_complete) /
-//! [`watermark`](ReplicationSupervisor::watermark) all read the **Reclaim** flow
-//! — readiness depends on reclaiming our own partition, never on backing up
-//! others. The readiness state machine consumes `all_current`/`all_bootstrapped`.
+//! [`watermark`](ReplicationSupervisor::watermark) read the **Reclaim** flow;
+//! [`all_current`](ReplicationSupervisor::all_current) reads both flows of
+//! each peer. The readiness state machine consumes `all_current` and
+//! `all_bootstrapped`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,12 +63,21 @@ use topology::{Membership, Peer};
 
 use super::peer_resolver::AddrResolver;
 use super::puller::{Puller, PullerConfig, PullerStatus};
-use super::self_endpoint::{SelfEndpoint, SelfObserver};
+use super::self_endpoint::SelfObserver;
 use super::ReplicatingCallStore;
 use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
 
 mod backup_deferral;
+mod bindings;
 mod follow;
+mod peer_entry;
+mod peer_link;
+mod shutdown;
+mod streams;
+mod wiring;
+
+use peer_entry::{FlowState, PeerEntry};
+pub use peer_link::PeerLink;
 
 /// One of the supervisor's wiring slots ([`SUPERVISOR_WIRING`]).
 fn wiring<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -82,151 +95,13 @@ const DEFAULT_RECONCILE_PERIOD: Duration = Duration::from_secs(5);
 /// starts backing up its peers promptly after re-hydrating its own partition.
 const BACKUP_GATE_POLL: Duration = Duration::from_millis(100);
 
-/// Per-`(ordinal, flow)` retained replication state — survives Park/disconnect/
-/// re-add. One of these per flow lives inside a [`PeerEntry`].
-struct FlowState {
-    /// The running puller's status receiver (current flag + live watermark), or
-    /// `None` while Parked.
-    status_rx: Option<watch::Receiver<PullerStatus>>,
-    /// Cancel handle to interrupt the running puller (Park / re-spawn).
-    cancel_tx: Option<watch::Sender<bool>>,
-    /// The retained watermark — authoritative, survives the puller task. Seeded
-    /// into the next puller on re-spawn.
-    watermark: Watermark,
-    /// Sticky current flag — retained across Park (never cleared, ADR-0011 X6).
-    current: bool,
-    /// Sticky bootstrap-complete flag (X5) — retained across Park. Set when the
-    /// puller hit the first catch-up `Noop`, the hard timer fired, or it resumed
-    /// warm.
-    bootstrap_complete: bool,
-    /// Highest reset generation absorbed from any puller for this flow. A puller
-    /// bumps its `reset_gen` when the server pushes `ResetToBootstrap` (watermark
-    /// forced back to `(0,0)`); a higher value here means we must pull the
-    /// retained watermark DOWN so a respawn re-bootstraps instead of resuming the
-    /// now-invalid high W.
-    reset_gen: u64,
-    /// Sticky: this flow was reached by a successful `connect` at least once. An
-    /// unreachable peer (never connected) that goes bootstrap-complete only by the
-    /// hard timer must NOT pin readiness NotReady (ADR-0011 X5 — liveness).
-    ever_connected: bool,
-}
-
 /// Why a reconcile (re)starts a flow's puller.
 fn flow_reason(drift: bool, ended: bool) -> &'static str {
     match (drift, ended) {
-        (true, _) => "host moved",
+        (true, _) => "binding moved",
         (false, true) => "puller ended",
         (false, false) => "new peer",
     }
-}
-
-impl FlowState {
-    /// Whether the flow's puller has ended while it was neither parked nor
-    /// replaced: a puller runs until it is cancelled, so only a panic ends
-    /// one the supervisor still holds the status of.
-    fn puller_ended(&self) -> bool {
-        self.status_rx.as_ref().is_some_and(|rx| rx.has_changed().is_err())
-    }
-
-    fn cold() -> Self {
-        Self {
-            status_rx: None,
-            cancel_tx: None,
-            watermark: Watermark::new(0, 0),
-            current: false,
-            bootstrap_complete: false,
-            reset_gen: 0,
-            ever_connected: false,
-        }
-    }
-
-    /// Fold the puller's latest published status into the retained copy. The
-    /// current and ever-connected flags are sticky (OR). A `reset_gen` advance means the server
-    /// forced a re-bootstrap: pull the watermark DOWN to `(0,0)` and clear
-    /// bootstrap-complete so a respawn re-bootstraps. Otherwise bootstrap-complete
-    /// is sticky and the watermark only advances.
-    fn absorb(&mut self) {
-        if let Some(rx) = &self.status_rx {
-            let s = *rx.borrow();
-            self.current |= s.current;
-            self.ever_connected |= s.ever_connected;
-            if s.reset_gen > self.reset_gen {
-                self.reset_gen = s.reset_gen;
-                self.watermark = s.watermark; // (0,0)
-                self.bootstrap_complete = s.bootstrap_complete; // false
-            } else {
-                self.bootstrap_complete |= s.bootstrap_complete;
-                if s.watermark > self.watermark {
-                    self.watermark = s.watermark;
-                }
-            }
-        }
-    }
-
-    /// True iff this flow is current OR was never reachable and best-effort
-    /// completed (the readiness predicate, ADR-0011 X5). A reachable-then-blipped
-    /// flow keeps the strict gate (sticky `current`).
-    fn ready(&self) -> bool {
-        self.current || (self.bootstrap_complete && !self.ever_connected)
-    }
-}
-
-/// Per-ordinal retained state: one [`FlowState`] per flow + the last host.
-struct PeerEntry {
-    /// Reclaim flow (`partition = Pri`) — drives readiness + reclaim.
-    reclaim: FlowState,
-    /// Backup flow (`partition = Bak`) — metrics-only, deferred until ready.
-    backup: FlowState,
-    /// The membership `host` the running pullers were last spawned for. The drift
-    /// signal for the periodic snapshot reconcile (ADR-0012 D2): a desired peer
-    /// whose host moved (or whose flows are not running) is (re)spawned. `None`
-    /// until a puller has been spawned for this ordinal.
-    host: Option<String>,
-    /// The peer's `ready` condition as last reconciled. Not a drift signal — a
-    /// condition flip never respawns a flow — only what [`PeerLink::Kept`], the
-    /// transition log and the pulled-not-ready gauge read.
-    ready: bool,
-}
-
-impl PeerEntry {
-    fn cold() -> Self {
-        Self { reclaim: FlowState::cold(), backup: FlowState::cold(), host: None, ready: true }
-    }
-
-    fn flow(&self, partition: Partition) -> &FlowState {
-        match partition {
-            Partition::Pri => &self.reclaim,
-            Partition::Bak => &self.backup,
-        }
-    }
-
-    /// Park BOTH flows: fold progress, interrupt, drop the status receivers. The
-    /// retained watermarks/current flags survive.
-    fn park(&mut self) {
-        for flow in [&mut self.reclaim, &mut self.backup] {
-            flow.absorb();
-            if let Some(tx) = flow.cancel_tx.take() {
-                let _ = tx.send(true);
-            }
-            flow.status_rx = None;
-        }
-    }
-}
-
-/// This node's link state toward one peer, as the supervisor holds it —
-/// read-only introspection ([`peer_link`](ReplicationSupervisor::peer_link)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PeerLink {
-    /// The ordinal was never in this node's membership view.
-    Absent,
-    /// The peer left the membership set: both flows are interrupted, the
-    /// retained watermarks survive for a warm resume.
-    Parked,
-    /// The Reclaim flow's puller is running toward a ready peer.
-    Active,
-    /// The Reclaim flow's puller is running toward a member that is present in
-    /// the snapshot but not `ready` — pulled on presence alone (ADR-0031 D1).
-    Kept,
 }
 
 /// Ties pullers to topology; owns the per-`(ordinal, flow)` retained watermarks.
@@ -255,6 +130,8 @@ struct SupervisorInner {
     /// The memory admission gate handed to every spawned puller (ADR-0037).
     /// `None` until [`set_capacity`](ReplicationSupervisor::set_capacity).
     capacity: Mutex<Option<crate::capacity::CapacityGate>>,
+    /// The turn-point seam handed to every spawned puller (ADR-0055 §13).
+    turn_probe: Mutex<crate::turn_probe::TurnProbes>,
     /// Set once the Reclaim flows are all ready and the Backup streams may open
     /// (ADR-0014 boot order). Latched true; subsequent reconciles spawn Backup
     /// pullers for any newly-added peer.
@@ -264,6 +141,10 @@ struct SupervisorInner {
     membership: Mutex<Option<Arc<dyn Membership>>>,
     /// `ordinal → PeerEntry`.
     peers: Mutex<HashMap<String, PeerEntry>>,
+    /// Set by [`shutdown`](ReplicationSupervisor::shutdown) before it parks the
+    /// pullers: a reconcile already running when the loop is aborted reads it
+    /// under the `peers` lock and spawns nothing.
+    stopped: AtomicBool,
     /// The topology-reconcile loop's handle, retained so [`shutdown`] can abort
     /// it. Without this the loop outlives `crash()`/`shutdown()` (it holds an
     /// `Arc<SupervisorInner>`) and keeps spawning pullers against a dead node on
@@ -289,17 +170,20 @@ impl SupervisorInner {
 }
 
 impl ReplicationSupervisor {
-    /// Build a supervisor for `self_ordinal`. Call [`start`](Self::start) to
-    /// spawn the initial pullers + the topology-reconcile loop.
+    /// Build a supervisor for the worker `self_ordinal` whose identity is
+    /// `self_identity` (`None`: it states none, and is never superseded). Call
+    /// [`start`](Self::start) to spawn the initial pullers + the
+    /// topology-reconcile loop.
     pub fn new(
         self_ordinal: impl Into<String>,
+        self_identity: Option<String>,
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
         resolve: AddrResolver,
         config: PullerConfig,
         metrics: crate::metrics::B2buaMetrics,
     ) -> Self {
-        Self::build(self_ordinal, network, store, resolve, config, metrics)
+        Self::build(self_ordinal, self_identity, network, store, resolve, config, metrics)
     }
 
     /// Build with explicit puller backoff config (tests inject short backoff).
@@ -314,6 +198,7 @@ impl ReplicationSupervisor {
     ) -> Self {
         Self::build(
             self_ordinal,
+            None,
             network,
             store,
             resolve,
@@ -325,6 +210,7 @@ impl ReplicationSupervisor {
     #[allow(clippy::too_many_arguments)]
     fn build(
         self_ordinal: impl Into<String>,
+        self_identity: Option<String>,
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
         resolve: AddrResolver,
@@ -334,7 +220,7 @@ impl ReplicationSupervisor {
         let self_ordinal = self_ordinal.into();
         Self {
             inner: Arc::new(SupervisorInner {
-                self_endpoint: SelfObserver::new(self_ordinal.clone()),
+                self_endpoint: SelfObserver::new(self_ordinal.clone(), self_identity),
                 self_ordinal: self_ordinal.into(),
                 network,
                 store,
@@ -344,27 +230,16 @@ impl ReplicationSupervisor {
                 reconcile_period: DEFAULT_RECONCILE_PERIOD,
                 repl_tx: Mutex::new(None),
                 capacity: Mutex::new(None),
+                turn_probe: Mutex::new(Default::default()),
                 backup_enabled: AtomicBool::new(false),
                 membership: Mutex::new(None),
                 peers: Mutex::new(HashMap::new()),
+                stopped: AtomicBool::new(false),
                 reconcile: Mutex::new(None),
                 gate: Mutex::new(None),
                 started_at: Mutex::new(None),
             }),
         }
-    }
-
-    /// Wire the router command sink every puller forwards X11 fail-back commands
-    /// to (reactive reclaim / bulk reclaim). Call **before** [`start`](Self::start)
-    /// so the initial pullers pick it up; a re-spawned puller reads it too.
-    pub fn set_repl_sink(&self, sink: impl Into<super::RouterSink>) {
-        *wiring(&self.inner.repl_tx) = Some(sink.into());
-    }
-
-    /// Wire the memory admission gate whose backup ceilings every puller
-    /// applies (ADR-0037). Call **before** [`start`](Self::start).
-    pub fn set_capacity(&self, gate: crate::capacity::CapacityGate) {
-        *wiring(&self.inner.capacity) = Some(gate);
     }
 
     /// Spawn the Reclaim pullers per current peer (excluding self), keep them in
@@ -412,17 +287,21 @@ impl ReplicationSupervisor {
     /// loop vs. the backup gate) cannot interleave check-then-spawn and
     /// double-spawn a flow.
     fn reconcile_from_snapshot(&self, snapshot: Vec<Peer>) {
-        self.observe_self(&snapshot);
+        self.observe_bindings(&snapshot);
         let desired: Vec<Peer> =
             snapshot.into_iter().filter(|p| p.ordinal != self.inner.self_ordinal).collect();
         let backup_enabled = self.inner.backup_enabled.load(Ordering::SeqCst);
 
         let mut peers = self.inner.peers();
+        if self.inner.stopped.load(Ordering::SeqCst) {
+            return;
+        }
 
         for peer in &desired {
             let entry = peers.entry(peer.ordinal.clone()).or_insert_with(PeerEntry::cold);
-            let drift = entry.host.as_deref() != Some(peer.host.as_str());
-            entry.host = Some(peer.host.clone());
+            let binding = (peer.host.clone(), peer.identity.clone());
+            let drift = entry.binding.as_ref() != Some(&binding);
+            entry.binding = Some(binding);
             if entry.ready != peer.ready {
                 entry.ready = peer.ready;
                 if peer.ready {
@@ -504,29 +383,6 @@ impl ReplicationSupervisor {
         self.inner.metrics.set_repl_peers_pulled_not_ready(pulled_not_ready);
     }
 
-    /// Read this node's own endpoint out of `snapshot` (ADR-0031 D6). A
-    /// withdrawal raises the `b2bua_withdrawn_running` gauge; the readiness
-    /// latch follows through [`self_endpoint`](Self::self_endpoint).
-    fn observe_self(&self, snapshot: &[Peer]) {
-        let synced = self.membership_synced();
-        if let Some(SelfEndpoint::Withdrawn(_)) = self.inner.self_endpoint.observe(snapshot, synced)
-        {
-            self.inner.metrics.set_withdrawn_running(true);
-        }
-    }
-
-    /// Whether this node has observed its own endpoint withdrawn from routing
-    /// (ADR-0031 D6): nothing new is routed here. Sticky. Always `false` on a
-    /// membership that does not show the node itself (static list).
-    pub fn is_withdrawn(&self) -> bool {
-        self.inner.self_endpoint.is_withdrawn()
-    }
-
-    /// The node's own endpoint state, as a watch that wakes on each transition.
-    pub fn self_endpoint(&self) -> watch::Receiver<SelfEndpoint> {
-        self.inner.self_endpoint.subscribe()
-    }
-
     /// (Re)spawn one flow's puller into `flow`, seeded from its retained W. Cancels
     /// any running puller first (its W is absorbed). Called only with the `peers`
     /// lock held — `Puller::new` + `tokio::spawn` have no await points.
@@ -552,42 +408,15 @@ impl ReplicationSupervisor {
             start_w,
             self.inner.metrics.clone(),
         );
-        // Forward X11 fail-back commands to the router when a live core wired a sink.
-        let puller = match wiring(&self.inner.repl_tx).clone() {
-            Some(sink) => puller.with_repl_sink(sink),
-            None => puller,
-        };
-        let puller = match wiring(&self.inner.capacity).clone() {
-            Some(gate) => puller.with_capacity(gate),
-            None => puller,
-        };
+        let mut puller = self.wire(puller);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         flow.status_rx = Some(status_rx);
         flow.cancel_tx = Some(cancel_tx);
+        flow.connect_now = Some(puller.connect_now());
 
         observe::spawn_keeping_node(async move {
             puller.run(cancel_rx).await;
         });
-    }
-
-    /// Shut every running puller down (Park them all) + abort the reconcile loop
-    /// and the backup gate. The retained watermarks/current flags survive. Used by
-    /// [`B2buaCore::abort`](crate::B2buaCore::abort) to stop a crashed worker's
-    /// pullers without changing replication behaviour.
-    pub fn shutdown(&self) {
-        // Stop reacting to membership deltas + the backup gate FIRST so neither can
-        // spawn a new puller against this (about-to-be-dead) node after we park the
-        // existing ones. Aborting also frees each task's `Arc<SupervisorInner>`.
-        if let Some(h) = wiring(&self.inner.reconcile).take() {
-            h.abort();
-        }
-        if let Some(h) = wiring(&self.inner.gate).take() {
-            h.abort();
-        }
-        let mut peers = self.inner.peers();
-        for entry in peers.values_mut() {
-            entry.park();
-        }
     }
 
     /// Fold every running puller's published status into the retained map. Tests
@@ -633,15 +462,15 @@ impl ReplicationSupervisor {
         })
     }
 
-    /// Are ALL **desired** peers' **Reclaim** flows current — or unreachable? (The
-    /// readiness gate.) Empty set → `true`. Peers that have left membership or
-    /// are present but not ready are excluded
-    /// (`desired_ordinals`) so neither a parked entry
-    /// nor a pulled-not-ready one can pin readiness. A peer that is bootstrap-
-    /// complete only via the hard timer and was **never reached** does NOT block
-    /// readiness (per ADR-0011 X5 a node must boot and serve even when peers are
-    /// unreachable). A reachable-then-blipped peer **still desired** keeps the
-    /// strict gate (sticky `current`).
+    /// Are ALL **desired** peers' **Reclaim and Backup** flows current — or
+    /// unreachable? (The readiness gate, `PeerEntry::ready`.) Empty set →
+    /// `true`. Peers that have left membership or are present but not ready
+    /// are excluded (`desired_ordinals`) so neither a parked entry nor a
+    /// pulled-not-ready one can pin readiness. A flow that is bootstrap-
+    /// complete only via a hard timer and was **never reached** does NOT block
+    /// readiness (per ADR-0011 X5 a node must boot and serve even when peers
+    /// are unreachable). A reachable-then-blipped peer **still desired** keeps
+    /// the strict gate (sticky `current`).
     pub fn all_current(&self) -> bool {
         self.sync();
         let desired = self.desired_ordinals();
@@ -649,7 +478,7 @@ impl ReplicationSupervisor {
             .peers()
             .iter()
             .filter(|(ord, _)| desired.as_ref().is_none_or(|d| d.contains(ord.as_str())))
-            .all(|(_, e)| e.reclaim.ready())
+            .all(|(_, e)| e.ready())
     }
 
     /// Has `peer`'s **Reclaim** bootstrap completed (first `Noop`, hard timer, or
@@ -702,7 +531,7 @@ impl ReplicationSupervisor {
     }
 
     /// The retained watermark for a specific `(peer, flow)` (test introspection
-    /// into the Backup flow, which the readiness accessors do not expose).
+    /// into the Backup flow).
     pub fn flow_watermark(&self, peer: &str, partition: Partition) -> Watermark {
         self.sync();
         self.inner
@@ -712,29 +541,9 @@ impl ReplicationSupervisor {
             .unwrap_or_else(|| Watermark::new(0, 0))
     }
 
-    /// This node's link state toward `peer` ([`PeerLink`]): `Active` while its
-    /// Reclaim puller runs toward a ready member, `Kept` while it runs toward a
-    /// member that is present but not ready, `Parked` once it left the
-    /// membership set (the entry and its watermarks are retained), `Absent` when
-    /// the ordinal was never seen. Pure read — it folds no puller status and
-    /// spawns nothing.
-    pub fn peer_link(&self, peer: &str) -> PeerLink {
-        match self.inner.peers().get(peer) {
-            None => PeerLink::Absent,
-            Some(e) if e.reclaim.status_rx.is_some() && e.ready => PeerLink::Active,
-            Some(e) if e.reclaim.status_rx.is_some() => PeerLink::Kept,
-            Some(_) => PeerLink::Parked,
-        }
-    }
-
     /// The metrics handle this supervisor and its pullers write.
     pub fn metrics(&self) -> &crate::metrics::B2buaMetrics {
         &self.inner.metrics
-    }
-
-    /// Whether the **Reclaim** puller is currently running (not Parked) for `peer`.
-    pub fn is_running(&self, peer: &str) -> bool {
-        self.inner.peers().get(peer).map(|e| e.reclaim.status_rx.is_some()).unwrap_or(false)
     }
 
     /// Await `peer`'s **Reclaim** flow becoming current (sticky), folding live

@@ -1,5 +1,5 @@
 //! Mandatory-header extraction + the strict wire-grammar gates (`Wire` vs
-//! `Hydrate` mode; those beyond the RFC grammar are listed in ADR-0001). Port of `src/sip/parsers/extract-fields.ts`.
+//! `Hydrate` mode; those beyond the RFC grammar are listed in ADR-0001).
 //!
 //! Produces the typed [`CoreHeaders`] from the
 //! [`HeaderIndex`] of one dispatch pass — this module locates nothing itself,
@@ -15,7 +15,7 @@ use super::dialog_contact::{can_establish_dialog, dialog_contact_refusal};
 use super::dialog_ids::{count_tag_params, is_call_id, read_address, tag_refusal};
 use super::header_index::HeaderIndex;
 use super::request_uri::read_request_uri;
-use super::routes::route_refusal;
+use super::routes::read_routes;
 use super::structured_headers::{parse_cseq, parse_via, top_level_comma_entries};
 use super::top_via;
 use crate::char_class::is_token_char;
@@ -24,7 +24,9 @@ use crate::header::{self, HeaderValue, HostPort, Uri};
 use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::sip_str::SipStr;
-use crate::types::{ContactSet, CoreHeaders, NonEmpty};
+use smallvec::SmallVec;
+
+use crate::types::{ContactSet, CoreHeaders, NonEmpty, ReadRoutes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractMode {
@@ -117,11 +119,13 @@ pub fn extract_common_fields(
     let identity = extract_identity(idx, limits, mode)?;
     let wire = mode == ExtractMode::Wire;
     let contacts = read_contacts(idx, wire, contact_reading)?;
-    if wire && contact_reading == ContactReading::Strict {
-        route_refusal(idx)?;
-    }
+    let routes = if wire && contact_reading == ContactReading::Strict {
+        read_routes(idx)?
+    } else {
+        ReadRoutes::default()
+    };
     let Identity { from, to, call_id, cseq, via } = identity;
-    Ok(CoreHeaders::new(from, to, call_id, cseq, via, contacts))
+    Ok(CoreHeaders::new(from, to, call_id, cseq, via, contacts, routes))
 }
 
 /// The fields every response to a message echoes (RFC 3261 §8.2.6.2), typed.
@@ -217,20 +221,25 @@ pub(super) fn extract_identity(
     if idx.via.is_empty() {
         return Err(SipParseError::new("Missing mandatory Via header"));
     }
-    let via_segments = || idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()));
+    // Each line is split into its entries once, for the grammar check and
+    // the read alike.
+    let mut segments: SmallVec<[(&SipStr, &str); 4]> = SmallVec::with_capacity(idx.via.len());
+    segments.extend(
+        idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s))),
+    );
     if wire {
-        for segment in via_segments() {
+        for (_, segment) in &segments {
             if let Some(reason) = check_sent_protocol(segment) {
                 return Err(SipParseError::new(format!("{reason}: \"{segment}\"")));
             }
         }
     }
-    let mut vias: Vec<header::Via> = Vec::with_capacity(idx.via.len());
-    for (value, raw) in
-        idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s)))
-    {
+    // The top hop and the lower ones, each list at its exact size.
+    let mut head: Option<header::Via> = None;
+    let mut hops: Vec<header::Via> = Vec::with_capacity(segments.len().saturating_sub(1));
+    for &(value, raw) in &segments {
         let v = parse_via(&value.reslice(raw));
-        let top = vias.is_empty();
+        let top = head.is_none();
         // A lenient reading holds a sent-by the reader refuses whole, as it
         // holds a URI it refuses opaque.
         let (host, port) = match &v.sent_by {
@@ -268,18 +277,21 @@ pub(super) fn extract_identity(
             Some(host) => HostPort::new(host, port),
             None => HostPort::whole(v.sent_by_text),
         };
-        vias.push(header::Via::from_parts(v.protocol, v.version, v.transport, sent_by, v.params));
+        let via = header::Via::from_parts(v.protocol, v.version, v.transport, sent_by, v.params);
+        match head {
+            None => head = Some(via),
+            Some(_) => hops.push(via),
+        }
     }
 
-    let mut hops = vias.into_iter();
-    let top = hops.next().ok_or_else(|| SipParseError::new("Missing mandatory Via header"))?;
+    let top = head.ok_or_else(|| SipParseError::new("Missing mandatory Via header"))?;
 
     Ok(Identity {
         from: header::From::new(from),
         to: header::To::new(to),
         call_id: header::CallId::new(call_id),
         cseq,
-        via: NonEmpty::from_parts(top, hops.collect()),
+        via: NonEmpty::from_parts(top, hops),
     })
 }
 
@@ -292,28 +304,35 @@ fn read_contacts(
     wire: bool,
     contact_reading: ContactReading,
 ) -> Result<ContactSet, SipParseError> {
-    let spans = || idx.contact.iter().flat_map(|v| contact_entry_spans(v));
+    // Each line is split into its entries once, for the wildcard rule and the
+    // read alike.
+    let spans: SmallVec<[SipStr; 2]> =
+        idx.contact.iter().flat_map(|v| contact_entry_spans(v)).collect();
     let strict = contact_reading == ContactReading::Strict;
-    let contact_wildcard = spans().any(|e| e.as_str() == "*");
-    if strict && contact_wildcard && spans().any(|e| e.as_str() != "*") {
+    let contact_wildcard = spans.iter().any(|e| e.as_str() == "*");
+    if strict && contact_wildcard && spans.iter().any(|e| e.as_str() != "*") {
         return Err(SipParseError::new(
             "Contact: * wildcard must be the only value (RFC 3261 §10.2.2)",
         ));
     }
-    let mut contact_list: Vec<header::Contact> = Vec::new();
-    for span in spans() {
-        match read_contact_entry(&span) {
+    let mut contact_list: Vec<header::Contact> = Vec::with_capacity(spans.len());
+    for span in &spans {
+        match read_contact_entry(span) {
             ContactEntry::Wildcard => {}
             ContactEntry::Readable(contact) => contact_list.push(*contact),
             // The grammar holds on wire bytes only.
             ContactEntry::Unreadable { .. } if !wire => {
-                contact_list.push(read_contact_entry_lenient(&span));
+                contact_list.push(read_contact_entry_lenient(span));
             }
             ContactEntry::Unreadable { .. } if !strict => {}
             ContactEntry::Unreadable { reason } => {
                 return Err(SipParseError::new(format!("Strict Contact: {reason} (\"{span}\")")));
             }
         }
+    }
+    // The list lives as long as the message: no room for a dropped entry.
+    if contact_list.len() < contact_list.capacity() {
+        contact_list.shrink_to_fit();
     }
     // A lenient read keeps the readable entries beside a misplaced wildcard.
     Ok(if contact_wildcard && contact_list.is_empty() {
@@ -345,21 +364,16 @@ pub fn extract_request_fields(
             }
         }
         if let Some(method) = method {
-            let dialog_creating = method.eq_ignore_ascii_case("INVITE")
-                || method.eq_ignore_ascii_case("SUBSCRIBE")
-                || method.eq_ignore_ascii_case("REFER");
-            if dialog_creating {
+            if matches!(method, "INVITE" | "SUBSCRIBE" | "REFER") {
                 match common.contacts() {
                     ContactSet::Wildcard => {
                         return Err(SipParseError::new(format!(
-                            "Contact: * wildcard is not valid in {} (RFC 3261 §10.2.2)",
-                            method.to_ascii_uppercase()
+                            "Contact: * wildcard is not valid in {method} (RFC 3261 §10.2.2)"
                         )));
                     }
                     ContactSet::Contacts(cs) if cs.len() > 1 => {
                         return Err(SipParseError::new(format!(
-                            "{} must not contain multiple Contact headers (RFC 3261 §8.1.1.8 — found {})",
-                            method.to_ascii_uppercase(),
+                            "{method} must not contain multiple Contact headers (RFC 3261 §8.1.1.8 — found {})",
                             cs.len()
                         )));
                     }
@@ -369,8 +383,8 @@ pub fn extract_request_fields(
         }
     }
 
-    // CSeq method must match the request method: a known method in any case,
-    // an extension method in its own (RFC 3261 §7.1).
+    // CSeq method must match the request method, spelling for spelling
+    // (RFC 3261 §7.1, §8.1.1.5).
     if let Some(method) = method {
         if let Some(cseq_val) = idx.cseq.first {
             let trimmed = cseq_val.trim();
@@ -442,3 +456,7 @@ pub fn extract_response_fields(
     }
     Ok(common)
 }
+
+#[cfg(test)]
+#[path = "extract_fields_tests.rs"]
+mod tests;

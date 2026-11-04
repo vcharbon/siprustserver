@@ -13,6 +13,7 @@ use crate::decision::failover_fold::{self, Consult, Failover};
 use crate::decision::{CallDecisionEngine, CallTreatment};
 use crate::effects::HandlerResult;
 use crate::limiter::LimiterWorker;
+use crate::owners::Owners;
 
 /// The limiter refused this route: consult `/call/failure` for a failover
 /// treatment and apply it, or answer the call's final
@@ -26,6 +27,7 @@ pub(super) async fn limiter_reject_failover(
     decision: &dyn CallDecisionEngine,
     limiter: &LimiterWorker,
     config: &B2buaConfig,
+    owners: &Owners,
     ids: &mut TurnIds,
     clock: &Clock,
     now_ms: i64,
@@ -67,6 +69,7 @@ pub(super) async fn limiter_reject_failover(
                 decision,
                 limiter,
                 config,
+                owners,
                 ids,
                 clock,
                 now_ms,

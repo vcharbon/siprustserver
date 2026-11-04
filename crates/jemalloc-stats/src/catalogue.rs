@@ -148,7 +148,7 @@ gauge!(
 gauge!(
     MUZZY,
     "jemalloc_muzzy_bytes",
-    "Bytes madvise(FREE)'d, reclaimable by the OS under pressure (awaiting muzzy decay)."
+    "Bytes madvise(FREE)'d, returnable to the OS under pressure (awaiting muzzy decay)."
 );
 counter!(
     DIRTY_NMADVISE,

@@ -13,31 +13,39 @@
 //!
 //! The caller holds the per-call lock. In order:
 //! 1. residency — a call already live is handed back untouched
-//!    ([`Materialised::Resident`]); its timers are live and never re-armed;
+//!    ([`Materialised::Resident`]); its timers are live and never re-armed. A
+//!    parked one is armed first ([`arm`]) and handed back as served, except
+//!    to a parking reclaim, which leaves it parked;
 //! 2. the store read the origin names — `bak:{primary}` for a takeover,
 //!    `pri:{self}` for a reclaim — each miss a typed [`Reason`] the caller's
 //!    orphan path answers (481 for a request, drop for a response);
 //! 3. the state check — a takeover refuses a `Terminated` replica (the image of
-//!    a call that already ended, kept for its primary to fold or reclaim;
+//!    a call that already ended, kept for its primary to meet or reclaim;
 //!    serving it would re-arm timers and run rules on a released copy) and
 //!    serves a `Terminating` one, which still owes the teardown's end; a
 //!    reclaim discharges a terminal body through the reclaim funnel instead of
 //!    re-serving a dead dialog, `Terminating` forced terminal (ADR-0020 X3);
-//! 4. `sanitize_restored_timers` — re-anchor by the persisted skew offset, drop
-//!    the stale `KeepaliveTimeout`, cohort-smooth on the bulk sweep only; then
-//!    `ring_deadline::presume_after_restore` re-anchors each dialled INVITE's
-//!    send instant and arms the ring deadline of an unanswered leg with no ring
-//!    on record from its INVITE;
-//! 5. the residency insert through the store, then `timers.restore`;
-//! 6. **seed** — the in-flight INVITE transactions the record names, and the
-//!    answered ones whose 2xx it retains ([`seeds::seeds_for`]), are rebuilt
-//!    in the transaction layer, on every origin, so the layer owns their ACKs,
-//!    their Timer D / G / L and the copies of their requests;
-//! 7. takeover only: `mark_takeover` + `watch_self_release`, so the copy is
+//! 4. `reanchor` — every instant of the copy moved into this node's clock
+//!    frame by the persisted skew offset (ADR-0055 §9), right after the read;
+//!    then `forget_keepalive_probes` (again at a parked call's arming) and
+//!    `sanitize_restored_timers` bound the keepalive, and
+//!    `ring_deadline::arm_unrung_after_restore` arms the ring deadline of an
+//!    unanswered leg with no ring on record from its INVITE;
+//! 5. the residency insert through the store; a parking reclaim stops here,
+//!    the call parked unarmed until [`arm`] runs the rest;
+//! 6. `timers.restore`;
+//! 7. **seed** — the in-flight transactions the record names, the answered
+//!    INVITEs whose 2xx it retains, every non-INVITE request record's client
+//!    and server halves ([`seeds::seeds_for`]) and every answered non-INVITE
+//!    request still Completed ([`seeds::answered_seeds`]), are rebuilt in the
+//!    transaction layer, on every origin, so the layer owns their ACKs, their
+//!    Timer D / E / G / L and the copies of their requests; the requests the
+//!    call awaits answers to are queued to be sent again ([`super::resend`]);
+//! 8. takeover only: `mark_takeover` + `watch_self_release`, so the copy is
 //!    shed once the transactions it serves — the seeds among them — clear
 //!    (ADR-0014); the watch is armed after the seeds so it cannot fire on a
 //!    copy that is about to hold one;
-//! 8. metrics and the takeover episode line.
+//! 9. metrics and the takeover episode line.
 //!
 //! The caller that holds a datagram then re-offers it ([`reoffer_trigger`]): a
 //! response no client transaction matched, a CANCEL, or an INVITE the record
@@ -51,9 +59,14 @@
 //! mark and no watch. A call never imported into `pri:{self}` (its only copy is
 //! the peer's `bak:{self}`) is a genuine miss here.
 
-mod relayed_invite;
+mod received_request;
+mod rejected_dialled;
 mod seeds;
-pub(in crate::router) use seeds::{names_server_branch, relayed_server_key};
+pub(in crate::router) use rejected_dialled::rejected_dialled_seeds;
+pub(in crate::router) use seeds::{
+    names_request_in_flight, names_server_branch, names_unanswered_caller_invite, rejected_seed,
+    relayed_server_key,
+};
 #[cfg(test)]
 mod tests;
 
@@ -64,9 +77,11 @@ use sip_message::{Method, SipMessage};
 use sip_txn::Reoffer;
 
 use super::reclaim::{discharge_materialized_terminal, format_pb};
-use super::restore_hygiene::{applied_offset, sanitize_restored_timers, Smoothing};
+use super::restore_hygiene::{
+    forget_keepalive_probes, reanchor, sanitize_restored_timers, Smoothing,
+};
 use super::RouterCtx;
-use crate::store::{MaterialiseOrigin, ReplicaMiss};
+use crate::store::{Enveloped, MaterialiseOrigin, ReplicaMiss};
 use b2bua_sdk::event::CallEvent;
 
 /// Which entry path is materialising: the whole axis of behaviour (spec D5).
@@ -75,17 +90,20 @@ pub(super) enum Origin {
     /// An acting-backup takeover of a crashed peer's call, read from
     /// `bak:{primary}`: the copy is marked and watched for self-release.
     Takeover,
-    /// This node re-serving its own call from `pri:{self}`: the bulk sweep
-    /// passes its cohort smoothing, a single straggler / on-demand reclaim
-    /// passes `None`.
-    Reclaim(Option<Smoothing>),
+    /// This node re-serving its own call from `pri:{self}`, armed at once: a
+    /// straggler or an on-demand reclaim.
+    Reclaim,
+    /// The bulk reboot reclaim's first pass over `pri:{self}`: the call is
+    /// made resident and parked, nothing armed, so nothing of it leaves the
+    /// node until [`arm`] runs (ADR-0055 §8).
+    Park,
 }
 
 impl From<Origin> for MaterialiseOrigin {
     fn from(origin: Origin) -> Self {
         match origin {
             Origin::Takeover => MaterialiseOrigin::Takeover,
-            Origin::Reclaim(_) => MaterialiseOrigin::Reclaim,
+            Origin::Reclaim | Origin::Park => MaterialiseOrigin::Reclaim,
         }
     }
 }
@@ -119,6 +137,8 @@ pub(super) enum Materialised {
     Served { call: Call, seeded: Option<usize> },
     /// Already live on this node; nothing was re-armed.
     Resident(Call),
+    /// Freshly made resident by a parking reclaim, nothing armed.
+    Parked(Call),
     /// Not served; the caller's orphan path answers.
     Refused(Reason),
 }
@@ -130,17 +150,37 @@ pub(super) async fn materialise(
     call_ref: &str,
     origin: Origin,
 ) -> Materialised {
+    materialise_after(ctx, call_ref, origin, false).await
+}
+
+/// [`materialise`], for a trigger that shows the caller took a final when
+/// `answered`: a request only a confirmed dialog carries. A takeover's seeds
+/// then re-send no provisional, which would follow that final (RFC 3261
+/// §13.3.1.1).
+pub(super) async fn materialise_after(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    origin: Origin,
+    answered: bool,
+) -> Materialised {
     if let Some(live) = ctx.state.peek(call_ref) {
-        return Materialised::Resident(live);
+        if let Origin::Park = origin {
+            return Materialised::Resident(live);
+        }
+        return match arm(ctx, call_ref, None).await {
+            Some((call, seeded)) => Materialised::Served { call, seeded },
+            None => Materialised::Resident(live),
+        };
     }
     let read = match origin {
         Origin::Takeover => ctx.state.peek_replica(call_ref).await,
-        Origin::Reclaim(_) => ctx.state.peek_reclaimable(call_ref).await,
+        Origin::Reclaim | Origin::Park => ctx.state.peek_reclaimable(call_ref).await,
     };
-    let (mut call, skew_offset_ms) = match read {
+    let (Enveloped { mut call, topology }, skew_offset_ms) = match read {
         Ok(hit) => hit,
         Err(miss) => return Materialised::Refused(refusal(origin, miss)),
     };
+    reanchor(&mut call, skew_offset_ms);
     let now_ms = ctx.clock.now_ms();
     match origin {
         Origin::Takeover if call.state == CallModelState::Terminated => {
@@ -148,41 +188,49 @@ pub(super) async fn materialise(
             ctx.state.note_takeover(call_ref, "refused_terminated");
             return Materialised::Refused(Reason::Terminated);
         }
-        Origin::Reclaim(_)
+        Origin::Reclaim | Origin::Park
             if matches!(call.state, CallModelState::Terminated | CallModelState::Terminating) =>
         {
             let force_terminal = call.state == CallModelState::Terminating;
-            discharge_materialized_terminal(ctx, call_ref, call, now_ms, force_terminal).await;
+            super::owed_final::deliver(ctx, call_ref, &call).await;
+            let terminal = Enveloped::new(call, topology);
+            discharge_materialized_terminal(ctx, call_ref, terminal, now_ms, force_terminal).await;
             return Materialised::Refused(Reason::Terminated);
         }
         _ => {}
     }
-    if !super::unrecoverable::copy_recoverable(ctx, call_ref, &call, origin.into(), now_ms).await {
+    let copy = Enveloped::new(call, topology);
+    if !super::unrecoverable::copy_recoverable(ctx, call_ref, &copy, origin.into(), now_ms).await {
         return Materialised::Refused(Reason::Unrecoverable);
     }
-    let smoothing = match origin {
-        Origin::Takeover => None,
-        Origin::Reclaim(smoothing) => smoothing,
-    };
+    let Enveloped { mut call, topology } = copy;
+    // A takeover's other owner is the dead primary; a reclaim's, the live backup.
+    let other_alive = !matches!(origin, Origin::Takeover);
+    let _ = forget_keepalive_probes(&mut call, now_ms, &ctx.relay_owner.ordinal, other_alive);
     sanitize_restored_timers(
         &mut call.timers,
         call_ref,
         now_ms,
-        Some(skew_offset_ms),
         ctx.config.keepalive_interval_sec * 1000,
-        smoothing,
+        None,
     );
-    crate::ring_deadline::presume_after_restore(
-        &ctx.config,
-        &mut call,
-        applied_offset(skew_offset_ms),
-    );
-    let timers = call.timers.clone();
-    if !ctx.state.materialize_if_absent(call.clone(), origin.into()) {
+    crate::ring_deadline::arm_unrung_after_restore(&ctx.config, &mut call);
+    // A copy acting on a call another node created mints its legs from a
+    // space of its own; the creating node, reclaiming it, from the call's.
+    call.leg_space = match origin {
+        Origin::Takeover => call::LegSpace::Other,
+        Origin::Reclaim | Origin::Park => call::LegSpace::Creator,
+    };
+    let pb = format_pb(topology.as_ref());
+    if !ctx.state.materialize_if_absent(Enveloped::new(call.clone(), topology), origin.into()) {
         return Materialised::Resident(ctx.state.peek(call_ref).unwrap_or(call));
     }
-    ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
-    let seeded = ctx.txn.seed(call_ref, seeds::seeds_for(&call)).await.ok();
+    if let Origin::Park = origin {
+        ctx.state.park(call_ref);
+        ctx.metrics.bump_repl_reclaimed();
+        return Materialised::Parked(call);
+    }
+    let seeded = serve(ctx, call_ref, &call, now_ms, origin, answered).await;
     match origin {
         Origin::Takeover => {
             ctx.state.mark_takeover(call_ref);
@@ -191,89 +239,261 @@ pub(super) async fn materialise(
             ctx.state.note_takeover(call_ref, "hydrated");
             ctx.state.note_takeover_count(call_ref, "seeded", seeded.unwrap_or(0) as u64);
         }
-        Origin::Reclaim(smoothing) => {
+        Origin::Reclaim => {
             ctx.metrics.bump_repl_reclaimed();
-            // The bulk sweep folds into `reclaim_all`'s single summary; a lone
-            // reclaim is rare by construction and gets its own line (ADR-0026).
-            if smoothing.is_none() {
-                tracing::info!(
-                    node = observe::node(),
-                    call_ref,
-                    call_id = %call.a_leg.call_id,
-                    pb = %format_pb(&call),
-                    timers = call.timers.len(),
-                    "straggler reclaim"
-                );
-            }
+            // A lone reclaim is rare by construction and gets its own line
+            // (ADR-0026); the bulk sweep folds into its single summary.
+            tracing::info!(
+                node = observe::node(),
+                call_ref,
+                call_id = %call.a_leg.call_id,
+                pb = %pb,
+                timers = call.timers.len(),
+                "straggler reclaim"
+            );
         }
+        Origin::Park => {}
     }
     // The resident copy is the authoritative one: it carries this node's own
     // root span ids when the call is traced (ADR-0026 §5).
     Materialised::Served { call: ctx.state.peek(call_ref).unwrap_or(call), seeded }
 }
 
+/// Arm the resident `call` this node now serves: its ledger re-armed in the
+/// timer service, its transactions seeded, a sent request past its deadline
+/// settled as the timeout it drew, the requests it awaits answers to sent
+/// again on a turn of its own ([`super::resend`]). A reclaim's seeds, and a
+/// takeover's whose trigger shows the caller `answered`, re-send no
+/// provisional ([`seeds::without_provisional`]). What the layer seeded, `None`
+/// when it could not be asked.
+async fn serve(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    call: &Call,
+    now_ms: i64,
+    origin: Origin,
+    answered: bool,
+) -> Option<usize> {
+    // The answer deadlines of the requests sent again are the re-send's to
+    // arm: one already past would read the answer as lost first.
+    let resend = !call.awaited.is_empty() && call.state == call::CallModelState::Active;
+    let timers = call
+        .timers
+        .iter()
+        .filter(|t| !(resend && super::resend::awaited_deadline(call, t.timer_type())))
+        .cloned()
+        .collect();
+    ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
+    let mut seeds = seeds::seeds_for(call, now_ms);
+    seeds.extend(seeds::answered_seeds(call, now_ms));
+    seeds.extend(rejected_dialled::rejected_dialled_seeds(call, now_ms));
+    if answered || !matches!(origin, Origin::Takeover) {
+        seeds = seeds::without_provisional(seeds);
+    }
+    let seeded = ctx.txn.seed(call_ref, seeds).await.ok();
+    for timeout in seeds::overdue_sent(call, now_ms) {
+        let _ = ctx.reentry_tx.send(timeout);
+    }
+    if resend {
+        let _ = ctx.reentry_tx.send(super::resend::notice(call));
+    }
+    seeded
+}
+
+/// Arm the parked call `call_ref` (ADR-0055 §8): the keepalive probes it
+/// cannot carry on forgotten (a meeting may have brought the live backup's),
+/// its keepalives smoothed over the bulk cohort when `smoothing` names one,
+/// then served as a fresh reclaim is ([`serve`]). The caller holds the per-call lock. `None` when the call is
+/// not parked: it is armed already, or gone.
+pub(super) async fn arm(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    smoothing: Option<Smoothing>,
+) -> Option<(Call, Option<usize>)> {
+    if !ctx.state.unpark(call_ref) {
+        return None;
+    }
+    let mut call = ctx.state.peek(call_ref)?;
+    let now_ms = ctx.clock.now_ms();
+    if forget_keepalive_probes(&mut call, now_ms, &ctx.relay_owner.ordinal, true) {
+        ctx.state.update_quiet(call.clone());
+    }
+    if smoothing.is_some() {
+        sanitize_restored_timers(
+            &mut call.timers,
+            call_ref,
+            now_ms,
+            ctx.config.keepalive_interval_sec * 1000,
+            smoothing,
+        );
+        ctx.state.update_quiet(call.clone());
+    }
+    let seeded = serve(ctx, call_ref, &call, now_ms, Origin::Reclaim, false).await;
+    Some((call, seeded))
+}
+
 /// Re-offer `event` — a datagram the layer emitted with no transaction to
 /// match it — against the transactions `call`'s materialisation seeded. A
 /// response no client transaction matched and a CANCEL are always re-offered:
 /// a seeded client INVITE ACKs the final it was waiting for, a seeded server
-/// INVITE answers the CANCEL 200 + 487. An in-dialog INVITE is re-offered only
-/// when the record names its branch as a relayed INVITE a peer already admitted
-/// or an INVITE whose 2xx it retains ([`seeds::names_server_branch`]: a
-/// retransmission the layer's own transaction absorbs, so the rules never mint
-/// a second relay for the round nor refuse its copy as glare);
-/// any other request, a response a transaction here already took, and any
-/// non-SIP event are the turn's to process. `Matched`: the layer re-emitted
+/// INVITE answers the CANCEL 200 + 487. An INVITE is re-offered only when the
+/// record names its branch as the caller's unanswered initial INVITE, a relayed
+/// INVITE a peer already admitted or an INVITE whose 2xx it retains
+/// ([`seeds::names_server_branch`]: a copy the seeded transaction absorbs, so
+/// the rules never take it for a new request, never mint a second relay for
+/// the round nor refuse its copy as glare); a non-INVITE
+/// request only when the record names its branch as a request it relayed or
+/// holds ([`seeds::names_received_branch`]: a copy of it is absorbed, never
+/// relayed a second time) or answered while its server transaction is
+/// Completed ([`seeds::names_answered_branch`]: a copy draws the final the
+/// record holds) — a relay whose client transaction this node does
+/// not hold is superseded instead: dropped from the record, and the copy
+/// relayed afresh; any other request, a response a transaction here already
+/// took, and any non-SIP event are the turn's to process. `Matched`: the layer re-emitted
 /// whatever it owes, so this turn ends without running the rules; `Unmatched`
 /// (a layer that cannot be asked included): the turn continues.
 pub(super) async fn reoffer_trigger(
     ctx: &Arc<RouterCtx>,
-    call: &Call,
+    call: Call,
     event: &CallEvent,
-) -> Reoffer {
-    let CallEvent::Sip { message, src, matched_client_txn } = event else {
-        return Reoffer::Unmatched;
+    matched_client_txn: bool,
+) -> Offered {
+    let CallEvent::Sip { message, src, .. } = event else {
+        return Offered::Turn(Box::new(call));
     };
     let offer = match message.as_ref() {
         SipMessage::Response(_) => !matched_client_txn,
         SipMessage::Request(req) if req.method() == Method::Cancel => true,
         SipMessage::Request(req) if req.method() == Method::Invite => {
-            seeds::names_server_branch(call, req.top_via().branch().unwrap_or_default())
+            seeds::names_server_branch(&call, req.top_via().branch().unwrap_or_default())
         }
-        SipMessage::Request(_) => false,
+        SipMessage::Request(req) if req.method() == Method::Ack => false,
+        SipMessage::Request(req) => {
+            let branch = req.top_via().branch().unwrap_or_default();
+            match seeds::received_record(&call, branch) {
+                None => {
+                    let now_ms = ctx.clock.now_ms();
+                    seeds::names_answered_branch(&call, branch, req.method().as_str(), now_ms)
+                }
+                Some(record) => match record.branch() {
+                    // A relay whose client transaction is another node's:
+                    // its final follows that relay's Via there, so its
+                    // originator's copy supersedes it and is relayed afresh.
+                    Some(sent) if !ctx.txn.holds_client(sent).await.unwrap_or(false) => {
+                        let call = seeds::drop_superseded(call, branch);
+                        return Offered::Turn(Box::new(call));
+                    }
+                    _ => true,
+                },
+            }
+        }
     };
     if !offer {
-        return Reoffer::Unmatched;
+        return Offered::Turn(Box::new(call));
     }
-    ctx.txn.reoffer((**message).clone(), *src).await.unwrap_or(Reoffer::Unmatched)
+    match ctx.txn.reoffer((**message).clone(), *src).await.unwrap_or(Reoffer::Unmatched) {
+        Reoffer::Matched => Offered::Matched,
+        Reoffer::Unmatched => Offered::Turn(Box::new(call)),
+    }
 }
 
-/// The seeds a fold into the call's record hands the layer: the INVITE server
-/// transactions answered 2xx whose ACK the folded record still awaits, in RFC
+/// What [`reoffer_trigger`] made of a turn's datagram.
+pub(super) enum Offered {
+    /// A transaction here took it: the turn ends.
+    Matched,
+    /// The turn runs on the call, a relay the datagram supersedes dropped.
+    Turn(Box<Call>),
+}
+
+/// The seeds a meeting with the other copy hands the layer: the INVITE server
+/// transactions answered 2xx whose ACK the met record still awaits, in RFC
 /// 6026 Accepted with the 2xx it retains. They are the only transactions of
 /// another node's rounds this node can serve while that node lives: a copy of
 /// the INVITE reaches whichever node the proxy reads alive, and the 2xx that
 /// answers it is in the record; the rest of a round runs where its Via sends
 /// the target's responses, the node that relayed it.
 pub(in crate::router) fn answered_invite_seeds(call: &Call) -> Vec<sip_txn::TxnSeed> {
-    seeds::seeds_for(call)
+    // No instant moves an INVITE seed: the latest one is read.
+    seeds::seeds_for(call, i64::MAX)
         .into_iter()
         .filter(|s| matches!(s, sip_txn::TxnSeed::ServerAccepted { .. }))
         .collect()
 }
 
+/// The seeds the call's primary hands the layer when it takes its backup's
+/// copy at a meeting, for the legs that copy dialled and `live`, the
+/// primary's own copy until the meeting, does not: each leg's dialling INVITE
+/// another node sent that has no final, as a client INVITE. A leg's cookie
+/// names the call's primary, so the INVITE's responses reach it (ADR-0055
+/// §8), and it takes the INVITE's client transaction over from the record
+/// (ADR-0047 D7).
+pub(in crate::router) fn dialled_invite_seeds(
+    call: &Call,
+    live: &Call,
+    this: &call::RelayOwner,
+) -> Vec<sip_txn::TxnSeed> {
+    let branches: Vec<&str> = call
+        .b_legs
+        .iter()
+        .filter(|leg| leg.invite.as_ref().is_some_and(|r| r.relayed_by != *this))
+        .filter(|leg| leg.outbound_invite().is_some_and(|i| i.final_received.is_none()))
+        .filter_map(|leg| leg.dialled_sent())
+        .map(|sent| sent.branch.as_str())
+        .filter(|branch| !dials_on(live, branch))
+        .collect();
+    // No instant moves an INVITE seed: the latest one is read.
+    seeds::seeds_for(call, i64::MAX)
+        .into_iter()
+        .filter(|s| match s {
+            sip_txn::TxnSeed::ClientInvite { invite, .. } => {
+                invite.top_via().branch().is_some_and(|b| branches.contains(&b))
+            }
+            _ => false,
+        })
+        .collect()
+}
+
+/// Whether `call` holds a leg whose dialling INVITE left on `branch`.
+fn dials_on(call: &Call, branch: &str) -> bool {
+    call.b_legs.iter().filter_map(|leg| leg.dialled_sent()).any(|sent| sent.branch == branch)
+}
+
 /// Whether `call` names an INVITE transaction a live copy must serve — one a
 /// materialisation would seed ([`seeds::seeds_for`]): an INVITE awaiting its
-/// final, whose bound and finals the copy owns, or a 2xx awaiting its ACK,
-/// whose retransmission ladder the copy resumes (RFC 3261 §13.3.1.4).
+/// final, whose bound and finals the copy owns, a 2xx awaiting its ACK, whose
+/// retransmission ladder the copy resumes (RFC 3261 §13.3.1.4), or the
+/// caller's non-2xx, repeated until her ACK (§17.2.1).
 pub(super) fn has_invite_to_serve(call: &Call) -> bool {
-    !seeds::seeds_for(call).is_empty()
+    // No instant moves an INVITE seed: the latest one is read.
+    seeds::seeds_for(call, i64::MAX).iter().any(|s| {
+        matches!(
+            s,
+            sip_txn::TxnSeed::ClientInvite { .. }
+                | sip_txn::TxnSeed::ServerInvite { .. }
+                | sip_txn::TxnSeed::ServerAccepted { .. }
+                | sip_txn::TxnSeed::ServerRejected { .. }
+        )
+    })
+}
+
+/// Whether `call` names a transaction a live copy must serve — one a
+/// materialisation would seed ([`seeds::seeds_for`]): an INVITE awaiting its
+/// final, whose bound and finals the copy owns, a 2xx awaiting its ACK, whose
+/// retransmission ladder the copy resumes (RFC 3261 §13.3.1.4), or a
+/// non-INVITE request record open on either side — a request sent awaiting
+/// its final, whatever its deadline, one received awaiting its answer. A
+/// sent request past its deadline is still work: the copy settles it as its
+/// timeout ([`seeds::overdue_sent`]).
+pub(super) fn has_work_to_serve(call: &Call) -> bool {
+    // No deadline has passed at the earliest instant.
+    !seeds::seeds_for(call, i64::MIN).is_empty()
 }
 
 /// The typed miss of the store read, named from the origin's side.
 fn refusal(origin: Origin, miss: ReplicaMiss) -> Reason {
     match (origin, miss) {
         (Origin::Takeover, ReplicaMiss::WrongRole) => Reason::NotBackupRole,
-        (Origin::Reclaim(_), ReplicaMiss::WrongRole) => Reason::NotPrimaryRole,
+        (Origin::Reclaim | Origin::Park, ReplicaMiss::WrongRole) => Reason::NotPrimaryRole,
         (_, ReplicaMiss::Absent) => Reason::NoReplica,
         (_, ReplicaMiss::Undecodable) => Reason::Decode,
     }

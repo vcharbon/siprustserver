@@ -85,6 +85,22 @@ describe("Source.refusal", () => {
     )
     expect(roots).toEqual([path.join(paths.corpus, Source.UPLOADS), "/srv/pcaps", "/srv/more"])
   })
+
+  it("leaves the store's uploads out where the deployment takes captures through its own roots alone", async () => {
+    const own = Roots.layerWith({
+      paths: () => Effect.succeed(paths),
+      pcapRoots: Effect.succeed(["/srv/pcaps"]),
+      uploadsRoot: Effect.succeed(false),
+      locks: Effect.die("unused"),
+      bench: Effect.die("unused")
+    })
+    expect(await Effect.runPromise(Source.roots(paths).pipe(Effect.provide(own)))).toEqual(["/srv/pcaps"])
+    const upload = path.join(paths.corpus, Source.UPLOADS, "a.pcap")
+    const refused = await Effect.runPromise(
+      Source.refusal([upload], scratch, paths).pipe(Effect.provide(Layer.merge(own, NodeServices.layer)))
+    )
+    expect(refused).toContain("outside the roots a source is read from (/srv/pcaps)")
+  })
 })
 
 const EXTRACTOR = "extractor-now"

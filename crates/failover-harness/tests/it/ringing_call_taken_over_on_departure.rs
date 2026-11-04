@@ -10,13 +10,16 @@
 //! INVITE re-sent once so the callee resends its latest one, §17.2.1). An
 //! established call of the same node, with nothing in flight, is not taken
 //! over: it stays reactive (ADR-0014 §1).
+//!
+//! Beyond the failover sweep: ringing calls ended at their replicated deadline after a departure.
 
+use b2bua::store::envelope;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
-use call::{CallBodyCodec, MsgpackCodec, TimerType};
+use call::{MsgpackCodec, TimerType};
 use failover_harness::{FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut};
 use scenario_harness::agent::{Agent, ClientInvite, ServerTxn};
 
@@ -84,6 +87,23 @@ pub(crate) async fn place(name: &str, callee: Callee) -> Placed {
 
 /// [`place`] with the route's ring deadline at `no_answer`.
 pub(crate) async fn place_ringing_for(name: &str, callee: Callee, no_answer: Duration) -> Placed {
+    place_offering(name, callee, no_answer, Some(OFFER)).await
+}
+
+/// [`place`] with the ringing call's INVITE carrying no offer: the callee's
+/// 2xx makes it, the caller's ACK answers it (RFC 3264 §4).
+pub(crate) async fn place_offerless(name: &str, callee: Callee) -> Placed {
+    place_offering(name, callee, NO_ANSWER, None).await
+}
+
+/// [`place`] with the route's ring deadline at `no_answer` and the ringing
+/// call's INVITE carrying `offer`.
+async fn place_offering(
+    name: &str,
+    callee: Callee,
+    no_answer: Duration,
+    offer: Option<&str>,
+) -> Placed {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -103,13 +123,13 @@ pub(crate) async fn place_ringing_for(name: &str, callee: Callee, no_answer: Dur
     bob.receive("ACK").await;
 
     let ringing_cid = call_id_placed_on("b1", "ringing");
-    let mut ringing = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .identity(ringing_cid, "ringing-tag")
-        .through(proxy.addr())
-        .send()
-        .await;
+    let invite = alice.invite(&bob).identity(ringing_cid, "ringing-tag").through(proxy.addr());
+    let mut ringing = match offer {
+        Some(offer) => invite.with_sdp(offer),
+        None => invite,
+    }
+    .send()
+    .await;
     ringing.expect(100).await;
     let mut at_bob = bob.receive("INVITE").await;
     match callee {
@@ -146,9 +166,9 @@ pub(crate) async fn place_ringing_for(name: &str, callee: Callee, no_answer: Dur
 /// its callee not having rung, the one a takeover presumes from its INVITE.
 async fn replicated_deadline(p: &Placed) -> i64 {
     let body = p.w_b2.get(PartitionRole::Backup, "b1", &p.ringing_ref).await.expect("the replica");
-    let call = MsgpackCodec::new().decode(&body).expect("the replica decodes");
+    let call = envelope::decode(&MsgpackCodec::new(), &body).expect("the replica decodes").call;
     let presumed = || {
-        let invite = call.b_legs[0].outbound_invite.as_ref().expect("the callee was dialled");
+        let invite = call.b_legs[0].outbound_invite().expect("the callee was dialled");
         invite.sent_at_ms + p.no_answer.as_millis() as i64
     };
     call.timers
@@ -228,9 +248,9 @@ async fn a_call_ringing_at_its_nodes_departure_ends_at_its_replicated_deadline()
 
 /// A 100 is hop-by-hop and leaves no dialog in the record (§16.7), so the
 /// backup holds the callee's INVITE as one that drew no provisional: the
-/// CANCEL waits for the callee's next provisional (§9.1). The callee's 100 to
-/// the backup's resend fails over to the backup on the cookie of the proxy's
-/// Via, and the CANCEL goes out on it.
+/// CANCEL waits for the callee's next provisional (§9.1). The 100 the callee's
+/// transaction repeats to the backup's resend (§17.2.1) fails over to the
+/// backup on the cookie of the proxy's Via, and the CANCEL goes out on it.
 #[tokio::test(start_paused = true)]
 async fn a_call_whose_callee_sent_a_100_alone_ends_at_its_replicated_deadline() {
     let mut p = place("trying-callee-departure", Callee::TryingOnly).await;
@@ -238,9 +258,13 @@ async fn a_call_whose_callee_sent_a_100_alone_ends_at_its_replicated_deadline() 
     ring_until(&p, deadline).await;
     p.fh.advance(Duration::from_millis(600)).await;
     final_at(&mut p, deadline).await;
-    resent_invite(&p).await;
-    p.at_bob.respond(100, "Trying").await;
-    p.bob.receive("CANCEL").await.respond(200, "OK").await;
+    // bob's transaction repeats its 100 to the re-sent INVITE (§17.2.1).
+    p.bob.receive_absorbing("CANCEL", &["INVITE"]).await.respond(200, "OK").await;
+    let invites: Vec<_> =
+        p.bob.wire_view().into_iter().filter(|e| e.start_line().starts_with("INVITE ")).collect();
+    let resent = invites.last().expect("the re-sent INVITE reached bob");
+    assert!(invites.len() >= 2, "the INVITE and its re-send");
+    assert_eq!(resent.seen_by(), scenario_harness::absorption::SeenBy::WireOnly);
     p.at_bob.respond(487, "Request Terminated").await;
     p.bob.receive("ACK").await;
     finish(p).await;

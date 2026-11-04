@@ -7,7 +7,7 @@
 //! the server pushes, reconnecting with exponential backoff across cuts. The
 //! supervisor runs **two** pullers per peer — a **Reclaim** flow (`partition =
 //! Pri`, arms timers / reclaims) and a **Backup** flow (`partition = Bak`, no
-//! timers, metrics-only). The watermark `W` each resumes from is **owned by the
+//! timers). The watermark `W` each resumes from is **owned by the
 //! supervisor** (retained per `(ordinal, flow)` across Park/disconnect/re-add)
 //! and passed in at construction.
 //!
@@ -48,10 +48,10 @@
 //! ```
 //! - connect ok → send one `PullRequest{ partition, since = retained W }`.
 //! - `Data{at}` → apply under `(p,b)`; if `bootstrapped`, `W = at` (+ Reclaim
-//!   straggler [`ReclaimCall`](ReplCommand::ReclaimCall)).
+//!   straggler [`ReclaimCall`](crate::router::ReplCommand::ReclaimCall)).
 //! - `Noop{at}` → `current = true` (sticky); first one marks bootstrap-complete,
 //!   flips `bootstrapped`, and (Reclaim flow) fires the bulk
-//!   [`ReclaimAll`](ReplCommand::ReclaimAll); advance `W` if greater.
+//!   [`ReclaimAll`](crate::router::ReplCommand::ReclaimAll); advance `W` if greater.
 //! - `ResetToBootstrap` → discard `W`, clear bootstrap-complete, bump
 //!   `reset_gen`, disconnect (reconnect re-bootstraps from `(0,0)`).
 //! - after a post-bootstrap `Data` and on every `Noop` → `Position{at}` back to
@@ -64,6 +64,9 @@
 //!   `sleep`+`select`, **not** a `DelayQueue` — CLAUDE.md aliasing hazard). A
 //!   stream that stayed connected for `idle_timeout_ms` resets `attempt`: the
 //!   next wait is the floor.
+//! - a connect asked for at once ([`ConnectNow`]) ends the backoff and starts a
+//!   connect in flight afresh; that connect's outcome answers it, and its
+//!   failure does not advance `attempt` (ADR-0047 D1).
 //!
 //! ## Link liveness (ADR-0045)
 //! The server sends a `Noop` at least every few seconds, so a stream that
@@ -80,57 +83,31 @@
 //! socket and the real first `Noop` (when it arrives) completes the bootstrap for
 //! real.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use call::MsgpackCodec;
-use repl_net::frame::{Frame, Partition, Watermark};
+use repl_net::frame::{Frame, Partition, Watermark, PROTO_VER};
 use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
 use tokio::sync::watch;
 use topology::Peer;
 
 use super::{AddrResolver, ReplicatingCallStore, RouterSink};
-use crate::router::ReplCommand;
 
 mod apply;
+mod bootstrap_complete;
+mod build;
 mod config;
+mod connect_now;
+mod connecting;
+mod held_meetings;
+mod status;
+mod wiring;
 use apply::{ApplyMode, ApplyOutcome};
-pub use config::PullerConfig;
-
-/// Protocol version stamped on the `PullRequest`. **v3** (ADR-0014 stream split):
-/// the four-frame `{PullRequest, Data, Noop, ResetToBootstrap}` form (one
-/// socket = one flow, scan-then-tail), `Op` = `{Put, Delete}`. A v3 node cannot
-/// interpret a v2 peer's frames.
-const PROTO_VER: u16 = 3;
-
-/// Shared, observable per-`(peer, flow)` puller status. The supervisor reads
-/// `current` for readiness (scoped to the **Reclaim** flow) and the retained
-/// `watermark`.
-#[derive(Clone, Copy, Debug)]
-pub struct PullerStatus {
-    /// Sticky current flag — set on the first `Noop`, never cleared.
-    pub current: bool,
-    /// The retained watermark (advances on Noop / post-bootstrap tail). The
-    /// supervisor owns the authoritative copy keyed by `(ordinal, flow)`; the
-    /// puller publishes its progress here so a Park/re-add resumes from it.
-    pub watermark: Watermark,
-    /// Sticky **bootstrap-complete** flag (ADR-0011 X5). Set when the first
-    /// catch-up `Noop` arrives OR the bootstrap hard timer fires (best-effort) OR
-    /// the puller resumes warm (`W > (0,0)` — no bootstrap needed). Cleared only
-    /// by a `ResetToBootstrap`. Readiness consumes this.
-    pub bootstrap_complete: bool,
-    /// Monotonic reset generation: bumped each time the server pushes
-    /// `ResetToBootstrap` (watermark forced back to `(0,0)`). Lets the supervisor
-    /// distinguish "never advanced past `(0,0)`" from "was just reset" and pull
-    /// the retained watermark down accordingly (survives the `watch` channel's
-    /// last-value-wins coalescing of a reset-then-advance).
-    pub reset_gen: u64,
-    /// Set the first time `connect` succeeds for this peer. Readiness uses it so
-    /// an unreachable peer (hard-timer bootstrap-complete, never connected) does
-    /// not pin the node NotReady.
-    pub ever_connected: bool,
-}
+pub use config::{PullerConfig, DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS};
+use connect_now::Asks;
+pub use connect_now::{Attempt, ConnectNow};
+pub use status::PullerStatus;
 
 /// What ended a single `run_once` connection attempt — drives the supervisor's
 /// retention + the puller's own reconnect.
@@ -180,12 +157,14 @@ pub struct Puller {
     peer: Peer,
     /// This node's ordinal (apply-target keyspace resolution).
     self_ordinal: String,
+    /// This worker's identity, stated on every flow it opens (ADR-0055 §6).
+    identity: Option<String>,
     /// The **flow** this puller serves: `Pri` = Reclaim (arm timers / reclaim),
-    /// `Bak` = Backup (no timers, metrics-only).
+    /// `Bak` = Backup (no timers).
     partition: Partition,
-    /// Resolves `peer` to a [`SocketAddr`] **fresh on every connect attempt**
-    /// (ADR-0012 D3) — so a restarted peer's new IP is picked up on reconnect
-    /// without waiting on a membership delta.
+    /// Resolves `peer` to a [`SocketAddr`](std::net::SocketAddr) **fresh on
+    /// every connect attempt** (ADR-0012 D3) — so a restarted peer's new IP is
+    /// picked up on reconnect without waiting on a membership delta.
     resolve: AddrResolver,
     network: Arc<dyn ReplicationNetwork>,
     /// Apply target — the local store.
@@ -204,6 +183,8 @@ pub struct Puller {
     /// The memory admission gate whose backup ceilings bound the replicas this
     /// node stores for its peers (ADR-0037). `None` stores every replica.
     capacity: Option<crate::capacity::CapacityGate>,
+    /// Where an applied write of a primary is reported (ADR-0055 §13).
+    turn_probe: crate::turn_probe::TurnProbes,
     /// Decoder for a stored Element's body. The Forward `Delete` guard reads the
     /// Element's lifecycle state, and the store persists the same encoding.
     codec: MsgpackCodec,
@@ -212,116 +193,15 @@ pub struct Puller {
     /// bootstrap to time). Written from the single task that runs the FSM; the
     /// mutex is what keeps `&Puller` `Sync` across its awaits.
     bootstrap_started_at: std::sync::Mutex<Option<tokio::time::Instant>>,
+    /// The copies a batch refused, until it is read whole (ADR-0055 §7).
+    held_meetings: held_meetings::HeldMeetings,
+    /// Where requests for a connect at once arrive
+    /// ([`connect_now`](Self::connect_now)); `None` when no handle was made.
+    /// Taken by [`run`](Self::run).
+    asks: Option<connect_now::AskRx>,
 }
 
 impl Puller {
-    /// Build a puller for `peer` on `partition` (the flow), resolving its address
-    /// per-connect via `resolve` (ADR-0012 D3), seeded from `start_w` (the
-    /// supervisor's retained watermark — `(0,0)` for a cold/never-seen peer).
-    /// Returns the puller plus a [`watch::Receiver`] the supervisor reads.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        peer: Peer,
-        self_ordinal: impl Into<String>,
-        partition: Partition,
-        resolve: AddrResolver,
-        network: Arc<dyn ReplicationNetwork>,
-        store: ReplicatingCallStore,
-        config: PullerConfig,
-        start_w: Watermark,
-        metrics: crate::metrics::B2buaMetrics,
-    ) -> (Self, watch::Receiver<PullerStatus>) {
-        // A warm resume (W > (0,0)) needs no bootstrap — mark it complete up
-        // front so readiness doesn't wait on a bootstrap that won't happen.
-        let warm = start_w != Watermark::new(0, 0);
-        let (status_tx, status_rx) = watch::channel(PullerStatus {
-            current: false,
-            watermark: start_w,
-            bootstrap_complete: warm,
-            reset_gen: 0,
-            ever_connected: false,
-        });
-        (
-            Self {
-                peer,
-                self_ordinal: self_ordinal.into(),
-                partition,
-                resolve,
-                network,
-                store,
-                config,
-                status_tx,
-                metrics,
-                repl_tx: None,
-                capacity: None,
-                codec: MsgpackCodec::new(),
-                bootstrap_started_at: std::sync::Mutex::new(
-                    (!warm).then(tokio::time::Instant::now),
-                ),
-            },
-            status_rx,
-        )
-    }
-
-    /// Attach the router command sink (ADR-0011 X11 fail-back). A puller built
-    /// without it (sim + unit tests, which assert on the store directly) sends no
-    /// router commands.
-    pub fn with_repl_sink(mut self, sink: impl Into<RouterSink>) -> Self {
-        self.repl_tx = Some(sink.into());
-        self
-    }
-
-    /// The position this flow may report having applied, given it received
-    /// up to `at`: a Backup flow never claims past a replica it left unstored
-    /// (ADR-0037), so a draining primary does not read a shed call as held
-    /// (ADR-0031 D2). A Reclaim flow sheds nothing.
-    fn claimable(&self, at: Watermark) -> Watermark {
-        if self.is_reclaim() {
-            return at;
-        }
-        match self.store.shed_floor(self.peer_ordinal(), at.gen) {
-            Some(floor) if floor < at => floor,
-            _ => at,
-        }
-    }
-
-    /// Attach the memory admission gate whose backup ceilings this puller
-    /// applies (ADR-0037).
-    pub fn with_capacity(mut self, gate: crate::capacity::CapacityGate) -> Self {
-        self.capacity = Some(gate);
-        self
-    }
-
-    /// Convenience constructor for a puller that always connects to a **fixed**
-    /// `peer_addr` (a resolver-less caller / tests with a concrete bound socket).
-    /// Wraps `peer_addr` in a constant [`FnPeerResolver`](super::FnPeerResolver).
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_at(
-        peer_ordinal: impl Into<String>,
-        self_ordinal: impl Into<String>,
-        partition: Partition,
-        peer_addr: SocketAddr,
-        network: Arc<dyn ReplicationNetwork>,
-        store: ReplicatingCallStore,
-        config: PullerConfig,
-        start_w: Watermark,
-        metrics: crate::metrics::B2buaMetrics,
-    ) -> (Self, watch::Receiver<PullerStatus>) {
-        let ordinal = peer_ordinal.into();
-        let resolve: AddrResolver = Arc::new(super::FnPeerResolver(move |_: &Peer| peer_addr));
-        Self::new(
-            Peer::new(ordinal, peer_addr.to_string()),
-            self_ordinal,
-            partition,
-            resolve,
-            network,
-            store,
-            config,
-            start_w,
-            metrics,
-        )
-    }
-
     /// The peer ordinal this puller serves.
     pub fn peer_ordinal(&self) -> &str {
         &self.peer.ordinal
@@ -357,26 +237,11 @@ impl Puller {
         );
     }
 
-    /// Resolve the peer's address (fresh) and open a connection within
-    /// `connect_timeout_ms`. `None` if the address is unresolvable right now or
-    /// the connect fails or runs out of time — the caller treats each as a
-    /// failed connect (→ Backoff, then retry/re-resolve).
-    async fn try_connect(&self) -> Option<Box<dyn ReplicationConnection>> {
-        let addr = self.resolve.resolve(&self.peer).await?;
-        let bound = Duration::from_millis(self.config.connect_timeout_ms);
-        match tokio::time::timeout(bound, self.network.connect(addr)).await {
-            Ok(conn) => conn.ok(),
-            Err(_) => {
-                tracing::debug!(peer = %self.peer.ordinal, %addr, "repl connect timed out");
-                None
-            }
-        }
-    }
-
     /// Run the FSM until `cancel` flips to `true` (Park / shutdown) or its sender
     /// is dropped. `cancel` is a `watch` so the supervisor can interrupt a
     /// parked-out puller atomically.
-    pub async fn run(self, mut cancel: watch::Receiver<bool>) {
+    pub async fn run(mut self, mut cancel: watch::Receiver<bool>) {
+        let mut asks = Asks::new(self.asks.take());
         let mut attempt: u32 = 0;
         // Arm the bootstrap hard deadline iff we start cold. A warm resume is
         // already `bootstrap_complete` (set in `new`), so no deadline is needed.
@@ -395,23 +260,36 @@ impl Puller {
             if *cancel.borrow() {
                 return;
             }
-            match self.run_once(&mut cancel, &mut deadline).await {
+            let outcome = self.run_once(&mut cancel, &mut deadline, &mut asks).await;
+            self.status_tx.send_if_modified(|s| std::mem::replace(&mut s.streaming, false));
+            match outcome {
                 RunOutcome::Cancelled => return,
                 outcome @ (RunOutcome::ConnectFailed | RunOutcome::Disconnected { .. }) => {
                     // ---- Backoff{attempt} ---- retain W (status already holds it).
                     if outcome == (RunOutcome::Disconnected { lasted: true }) {
                         attempt = 0;
                     }
-                    attempt = attempt.saturating_add(1);
-                    let ms = self.backoff_ms(attempt);
+                    // A connect made for a request leaves the backoff where it
+                    // stood; a request pending skips the backoff.
+                    if !asks.take_failed() {
+                        attempt = attempt.saturating_add(1);
+                    }
+                    if asks.pending() {
+                        self.note_state("backoff", "a connect is asked for at once");
+                        continue;
+                    }
+                    let ms = self.config.backoff_ms(attempt);
                     self.note_state("backoff", &format!("attempt {attempt}, retry in {ms}ms"));
                     // The hard timer must keep ticking through backoff so an
-                    // unreachable peer still becomes bootstrap-complete on time.
-                    let fire_hard = self.select_with_deadline(
-                        tokio::time::sleep(Duration::from_millis(ms)),
-                        &mut cancel,
-                        deadline,
-                    );
+                    // unreachable peer still becomes bootstrap-complete on time;
+                    // a connect asked for at once ends it.
+                    let backoff = async {
+                        tokio::select! {
+                            () = tokio::time::sleep(Duration::from_millis(ms)) => {}
+                            () = asks.next() => {}
+                        }
+                    };
+                    let fire_hard = self.select_with_deadline(backoff, &mut cancel, deadline);
                     match fire_hard.await {
                         SelectOutcome::Cancelled => return,
                         SelectOutcome::Deadline => {
@@ -428,40 +306,6 @@ impl Puller {
             if self.status_tx.borrow().bootstrap_complete {
                 deadline = None;
             }
-        }
-    }
-
-    /// Mark this puller **bootstrap-complete** (sticky). Called on the first
-    /// catch-up `Noop` and on the hard-timer firing (best-effort). Lines the
-    /// per-peer completion once — `applied` bodies imported, `reason` telling a
-    /// real catch-up from a best-effort timer expiry.
-    fn mark_bootstrap_complete(&self, applied: u64, reason: &'static str) {
-        if !self.status_tx.borrow().bootstrap_complete {
-            let started =
-                crate::poison::locked(&self.bootstrap_started_at, crate::poison::PULLER_BOOTSTRAP)
-                    .take();
-            let duration_ms = started.map_or(0, |at| sip_clock::wall::millis_u64(at.elapsed()));
-            tracing::info!(
-                node = observe::node(),
-                peer = %self.peer.ordinal,
-                flow = self.flow_label(),
-                applied,
-                duration_ms,
-                reason,
-                "peer bootstrap complete"
-            );
-        }
-        self.status_tx.send_modify(|s| s.bootstrap_complete = true);
-    }
-
-    /// Signal the router to **bulk-reclaim** every `pri:{self}` body — materialise
-    /// each into the live serving map + re-arm its timers, with the keepalive
-    /// backlog smoothed (ADR-0014 §4). Fired by the **Reclaim** flow on bootstrap
-    /// completion (first `Noop` or best-effort hard-timer). Idempotent
-    /// (`materialize_if_absent`), so a partial pass plus a later one self-heal.
-    fn signal_reclaim_all(&self) {
-        if let Some(sink) = &self.repl_tx {
-            sink.send(ReplCommand::ReclaimAll);
         }
     }
 
@@ -496,8 +340,10 @@ impl Puller {
         self.ended(connected_at)
     }
 
-    /// A stream connected at `connected_at` ended.
+    /// A stream connected at `connected_at` ended: the copies its last batch
+    /// refused meet the live copy now.
     fn ended(&self, connected_at: tokio::time::Instant) -> RunOutcome {
+        self.release_meetings();
         let idle = Duration::from_millis(self.config.idle_timeout_ms);
         RunOutcome::Disconnected { lasted: connected_at.elapsed() >= idle }
     }
@@ -515,13 +361,6 @@ impl Puller {
         }
     }
 
-    /// `min(init · 2^(attempt-1), max)` — attempt 1 = init, growing per failure.
-    fn backoff_ms(&self, attempt: u32) -> u64 {
-        let shift = attempt.saturating_sub(1).min(31);
-        let scaled = self.config.backoff_init_ms.saturating_mul(1u64 << shift);
-        scaled.min(self.config.backoff_max_ms)
-    }
-
     /// One connect-and-stream cycle: connect (racing the hard deadline), send the
     /// single `PullRequest{ partition, since = retained W }`, then apply the
     /// scan-then-tail stream until the socket cuts. `deadline` is the bootstrap
@@ -532,35 +371,13 @@ impl Puller {
         &self,
         cancel: &mut watch::Receiver<bool>,
         deadline: &mut Option<tokio::time::Instant>,
+        asks: &mut Asks,
     ) -> RunOutcome {
-        // ---- Connecting ---- resolve fresh (D3) + connect, racing the hard
-        // deadline so a hung connect to an unreachable/stalled peer still lets the
-        // node go bootstrap-complete.
-        let conn = match *deadline {
-            Some(at) => tokio::select! {
-                c = self.try_connect() => c,
-                _ = tokio::time::sleep_until(at) => {
-                    // Hard timer tripped mid-connect: best-effort complete for
-                    // readiness, then back off + retry (now warm → no hard timer).
-                    self.mark_bootstrap_complete(0, "hard timeout while connecting");
-                    *deadline = None;
-                    return RunOutcome::ConnectFailed;
-                }
-                () = cancelled(cancel) => return RunOutcome::Cancelled,
-            },
-            None => tokio::select! {
-                c = self.try_connect() => c,
-                () = cancelled(cancel) => return RunOutcome::Cancelled,
-            },
+        // ---- Connecting ---- resolve fresh (D3) + connect.
+        let conn = match self.connect(cancel, deadline, asks).await {
+            Ok(conn) => conn,
+            Err(outcome) => return outcome,
         };
-        let conn = match conn {
-            Some(c) => c,
-            None => return RunOutcome::ConnectFailed,
-        };
-        // Mark the peer reached so readiness no longer treats it as unreachable.
-        if !self.status_tx.borrow().ever_connected {
-            self.status_tx.send_modify(|s| s.ever_connected = true);
-        }
         self.note_state("streaming", "connected");
         let connected_at = tokio::time::Instant::now();
 
@@ -572,6 +389,7 @@ impl Puller {
         let req = Frame::PullRequest {
             proto_ver: PROTO_VER,
             caller: self.self_ordinal.clone(),
+            identity: self.identity.clone(),
             partition: self.partition,
             since,
         };
@@ -583,12 +401,11 @@ impl Puller {
         // advance W and apply the Reverse rule from the first frame. A cold pull
         // starts pre-bootstrap: apply ungated, hold W until the first Noop.
         let mut bootstrapped = since != Watermark::new(0, 0);
-        // A Backup scan re-sends every live body of the primary, so the shed
-        // marks of an earlier stream (an old incarnation, a ref deleted while
-        // disconnected) say nothing about it: they go, and a body still left
-        // out marks itself again (ADR-0037).
+        // A Backup scan re-sends every live body the primary still offers
+        // this node, so the refusals of an earlier stream say nothing about
+        // it: they go (ADR-0037 item 4).
         if !bootstrapped && !self.is_reclaim() {
-            self.store.clear_shed_of(self.peer_ordinal());
+            self.store.clear_refusals_of(self.peer_ordinal());
         }
         // Bodies imported during the pre-`Noop` bootstrap phase — the
         // re-hydration diagnostic (Reclaim flow only): a pass that re-stalls at
@@ -605,11 +422,16 @@ impl Puller {
             // hard deadline; once complete (or warm), race cancel only. Both
             // race the idle bound.
             let arm = if bootstrapped { None } else { *deadline };
+            let held = !self.held_meetings.is_empty();
             let frame = match arm {
                 Some(at) => tokio::select! {
                     f = conn.recv() => f,
                     _ = tokio::time::sleep_until(quiet_until) => {
                         return self.left_idle(connected_at);
+                    }
+                    () = tokio::time::sleep(held_meetings::BATCH_QUIET), if held => {
+                        self.release_meetings();
+                        continue;
                     }
                     _ = tokio::time::sleep_until(at) => {
                         // First Noop is taking too long. Mark complete best-effort
@@ -636,11 +458,16 @@ impl Puller {
                     _ = tokio::time::sleep_until(quiet_until) => {
                         return self.left_idle(connected_at);
                     }
+                    () = tokio::time::sleep(held_meetings::BATCH_QUIET), if held => {
+                        self.release_meetings();
+                        continue;
+                    }
                     () = cancelled(cancel) => return RunOutcome::Cancelled,
                 },
             };
-            if frame.is_some() {
+            if let Some(frame) = &frame {
                 quiet_until = sip_clock::deadline::from_now(idle);
+                self.status_tx.send_modify(|s| s.heard(frame));
             }
             match frame {
                 Some(Frame::Data {
@@ -665,6 +492,7 @@ impl Puller {
                         (false, _) => ApplyMode::Forward,
                     };
                     let write = apply::written(op, &body, &incarnation);
+                    let refused = incarnation.clone();
                     let outcome = self
                         .apply_to_store(
                             op,
@@ -681,19 +509,17 @@ impl Puller {
                             mode,
                         )
                         .await;
-                    if outcome == ApplyOutcome::Shed {
-                        let floor = self.status_tx.borrow().watermark;
-                        self.store.note_shed(
-                            &call_ref,
-                            self.peer_ordinal(),
-                            at.gen,
-                            floor,
-                            body_ttl_ms,
-                        );
+                    // A replica refused at this backup's ceiling: the primary is
+                    // told, and the call has no backup for life (ADR-0055 §3).
+                    if outcome == ApplyOutcome::Shed
+                        && !self.refuse(conn.as_ref(), at, &call_ref, refused.as_deref()).await
+                    {
+                        return self.ended(connected_at);
                     }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
                     }
+                    self.report_applied(mode, outcome, op, &call_ref, (call_gen, call_bgen)).await;
                     self.signal(mode, outcome, bootstrapped, &call_ref, write, origin_now_ms);
                     // Pre-bootstrap frames share `at = W`; only the post-bootstrap
                     // tail advances W.
@@ -704,10 +530,7 @@ impl Puller {
                         // frames all share `at = W`: claiming W before the whole
                         // scan is applied would be false, so the bootstrap claim
                         // is made once, on the first catch-up `Noop`.
-                        if !self
-                            .send(conn.as_ref(), Frame::Position { at: self.claimable(at) })
-                            .await
-                        {
+                        if !self.send(conn.as_ref(), Frame::Position { at }).await {
                             return self.ended(connected_at);
                         }
                     }
@@ -734,11 +557,12 @@ impl Puller {
                             self.signal_reclaim_all();
                         }
                     }
+                    self.release_meetings();
                     // Every `Noop` is answered with the position it announced:
                     // the first one is the bootstrap's own claim (every scan body
                     // is applied by now), the idle ones keep the claim fresh
                     // (ADR-0031 D2).
-                    if !self.send(conn.as_ref(), Frame::Position { at: self.claimable(at) }).await {
+                    if !self.send(conn.as_ref(), Frame::Position { at }).await {
                         return self.ended(connected_at);
                     }
                 }
@@ -768,7 +592,23 @@ impl Puller {
                     self.note_state("reset_to_bootstrap", "server dropped our watermark");
                     return self.ended(connected_at);
                 }
-                // PullRequest is client→server; never expected here. Ignore.
+                // The peer speaks another protocol: nothing it would send can be
+                // read, so the stream is left and pulled again after the
+                // backoff (ADR-0045).
+                Some(Frame::StreamRefused { proto_ver, reason }) => {
+                    self.metrics.bump_repl_stream_refused();
+                    tracing::error!(
+                        node = observe::node(),
+                        peer = %self.peer.ordinal,
+                        flow = self.flow_label(),
+                        ours = PROTO_VER,
+                        theirs = proto_ver,
+                        reason,
+                        "replication stream refused: the peer speaks another protocol"
+                    );
+                    return self.ended(connected_at);
+                }
+                // Client→server frames; never expected here. Ignore.
                 Some(_) => {}
                 None => return self.ended(connected_at),
             }

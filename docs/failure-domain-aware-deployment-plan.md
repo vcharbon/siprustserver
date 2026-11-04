@@ -5,8 +5,10 @@
 > exists in the tree yet.** Every file path is a *target*; every struct field,
 > env var, and manifest is what will be *added*, not what is. Do not cite this as
 > current behaviour. The current behaviour is: zone-blind `w_bak` selection, a
-> single un-anti-affined worker StatefulSet on 2 `tier=app` nodes, multicast
-> VRRP, no PodDisruptionBudget.
+> single un-anti-affined worker StatefulSet on 2 `tier=app` nodes, one worker
+> and one proxy PodDisruptionBudget (`maxUnavailable: 1`). The front proxy part
+> (ADR-0015 D5) is superseded by ADR-0056: each proxy node announces the VIPs
+> over BGP, so the proxies need no shared layer 2.
 
 **Design source:** [`docs/adr/0015-failure-domain-aware-placement-and-backup.md`](adr/0015-failure-domain-aware-placement-and-backup.md)
 **Glossary:** `CONTEXT.md` → **Failure domain**, **Distinct-zone backup**.
@@ -36,9 +38,8 @@ before coding.
    membership `Peer.ordinal` = callRef primary. Per-zone StatefulSets change pod
    names to `b2bua-worker-z1-0` etc.; this invariant must continue to hold across
    all of them (it does — they still get their pod name as ordinal).
-5. **Racks are L3-separated.** The whole reason for unicast VRRP (D5). If the two
-   proxy racks happen to share an L2 broadcast domain, multicast would still work
-   — but we standardise on unicast so the design is correct regardless.
+5. **Racks are L3-separated.** The proxies' VIPs are routed by BGP (ADR-0056),
+   which holds whether or not two racks share a broadcast domain.
 6. **≥3 zones with N+1 headroom (D6).** Selection is zone-count-agnostic, but the
    degraded-fallback rarity and the 1.5×-survivor capacity math assume 3 zones at
    ≤66% steady-state.
@@ -52,11 +53,11 @@ before coding.
 | `topology` crate | New `Peer.failure_domain` field; `peers_from_slices` reads `zone`/`node_name`. Consumed by both proxy and b2bua. | **Low** — additive field; existing tests pass an explicit domain or `None`. |
 | `sip-proxy` | `WorkerEntry.failure_domain`; `encode_stickiness` gains a foreign-domain filter + degraded fallback + metric. **Changes which worker becomes `w_bak`** for new dialogs. | **Medium** — alters backup placement; cookie *format* unchanged (still `w_pri`/`w_bak` ids), so in-flight dialogs are unaffected. |
 | `b2bua` | Periodic self-scan emitting the degraded metric. No selection change. | **Low** — read-only observability. |
-| Chart | the worker StatefulSet split into 3 zoned StatefulSets; new PDB; proxy anti-affinity key + unicast keepalived + nodeSelector; `cluster.yaml` 6 zoned nodes. | **High (operational)** — deployment topology change; needs a fresh `deploy/helm/kind-lab.sh up`. No data migration (early project). |
+| Chart | the worker StatefulSet split into 3 zoned StatefulSets; new PDB; proxy anti-affinity key + nodeSelector; `cluster.yaml` 6 zoned nodes. | **High (operational)** — deployment topology change; needs a fresh `deploy/helm/kind-lab.sh up`. No data migration (early project). |
 | Wire / storage | **None.** Cookie fields, callRef, replication frames, `topology.bak` semantics all unchanged. | — |
 
 **Rollback:** revert the chart split (back to one StatefulSet, hostname proxy
-anti-affinity, multicast) and the `encode_stickiness` filter; the `Peer`/
+anti-affinity) and the `encode_stickiness` filter; the `Peer`/
 `WorkerEntry` field is harmless if left (defaults to `None` → filter is a no-op,
 i.e. the single-zone behaviour). No persisted state to undo.
 
@@ -131,12 +132,10 @@ readiness-gated) by design.
 - New `deploy/helm/siprust/templates/worker-pdb.yaml`:
   `PodDisruptionBudget{ selector app=b2bua-worker, maxUnavailable: 1 }`.
   **Single, global — not per-zone** (per-zone reintroduces acute pair loss, D4).
-- `deploy/helm/siprust/templates/proxy.yaml` and `files/keepalived.conf`:
-  - `podAntiAffinity.topologyKey` → `topology.kubernetes.io/zone`.
-  - `nodeSelector` → land on 2 worker-zone nodes (drop dedicated `tier=edge`).
-  - keepalived ConfigMap → **unicast**: `unicast_src_ip` = own node IP,
-    `unicast_peer` = the other proxy's node IP (inject via env/downward API, or a
-    small init that resolves the peer from the proxy EndpointSlice).
+- `deploy/helm/siprust/templates/proxy.yaml`:
+  - `podAntiAffinity.topologyKey` → `topology.kubernetes.io/zone` (the proxies
+    stay off every worker's node, ADR-0056).
+  - `nodeSelector` → land on 2 zone nodes of their own.
 - **Impact:** operational — requires `deploy/helm/kind-lab.sh up` on the new `cluster.yaml`.
 - `FAILURE_DOMAIN_KEY` env wired into both proxy and worker runners (default
   `topology.kubernetes.io/zone`).
@@ -190,9 +189,8 @@ stays a config knob for degenerate clusters.
    reclaim, handback; degraded counter stays 0.
 4. **Serial upgrade (D4):** trigger a rolling restart; assert the PDB serialises it
    (one worker NotReady at a time) and no call is lost.
-5. **Cross-zone VIP (D5):** kill the VIP-master proxy; assert the standby (in the
-   other zone) claims the VIP via **unicast** adverts within <2s and the
-   `kill_proxy` window stays within its budget.
+5. **Cross-zone proxies (ADR-0056):** kill one proxy; assert its node's routes
+   are withdrawn and the `kill_proxy` window stays within its budget.
 
 ---
 

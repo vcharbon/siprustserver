@@ -6,8 +6,10 @@
 //! self-gate, any request a failed worker selection leaves without a target)
 //! draws a 503 with a jittered, floored `Retry-After` and no `Reason`, and is
 //! remembered for 64·T1 (Timer B, the longest a UAC retransmits a request):
-//! every copy of it within that window is answered with the same bytes and
+//! every copy of it within that window is answered with the same 503 and
 //! never judged again, so one transaction is never both refused and admitted.
+//! Every answer records the source of the request it answers on its topmost
+//! Via (RFC 3261 §18.2.1, RFC 3581 §4).
 //! A copy arriving after the window, or after the memo forgot it past its
 //! capacity, is judged afresh. A CANCEL is never remembered: the CANCEL of a
 //! remembered INVITE refusal is answered 200 here, the proxy being the UAS of
@@ -16,6 +18,7 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, VecDeque};
 use std::hash::BuildHasher;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -28,6 +31,7 @@ use sip_txn::timers::TIMER_B;
 use sip_txn::{IdGen, StatelessTagger};
 
 use crate::cancel_lru::retransmit_key;
+use sip_message::received::observed_source;
 
 /// The most refused requests a memo holds by default; past it the oldest is
 /// forgotten first. At 64·T1 it covers refusals up to 2 048 a second.
@@ -90,7 +94,8 @@ impl Memo {
 impl Refusals {
     /// Refusals whose `Retry-After` is spread over `jitter_sec` past its base,
     /// remembering at most [`REFUSED_MEMO_MAX`] refused requests. The To-tag
-    /// secret is drawn from `id_gen` once, here.
+    /// secret is drawn from `id_gen` once, here: this instance's own, for a
+    /// proxy with no shared key (tests, development).
     pub fn new(id_gen: &IdGen, jitter_sec: u32) -> Self {
         Self::with_capacity(id_gen, jitter_sec, REFUSED_MEMO_MAX)
     }
@@ -98,9 +103,16 @@ impl Refusals {
     /// [`new`](Self::new), remembering at most about `max` refused requests:
     /// each stripe holds `max / STRIPES`, rounded up.
     pub fn with_capacity(id_gen: &IdGen, jitter_sec: u32, max: usize) -> Self {
+        Self::keyed(StatelessTagger::from_id_gen(id_gen), jitter_sec, max)
+    }
+
+    /// Refusals whose To-tags `tagger` derives (a deployment's shared key,
+    /// `crate::security::own_final_tag`), remembering at most about `max`
+    /// refused requests.
+    pub fn keyed(tagger: StatelessTagger, jitter_sec: u32, max: usize) -> Self {
         let per_stripe = max.div_ceil(STRIPES).max(1);
         Self {
-            tagger: StatelessTagger::from_id_gen(id_gen),
+            tagger,
             jitter_sec,
             hasher: RandomState::new(),
             stripes: std::array::from_fn(|_| {
@@ -119,12 +131,21 @@ impl Refusals {
         self.tagger.for_request(req).0
     }
 
-    /// Refuse `req` at `now_ms`, `retry_after_sec` being the refusing stage's
-    /// hint: its 503, remembered so every copy within 64·T1 draws the same one.
-    /// A CANCEL is answered but not remembered.
+    /// Whether `ack` acknowledges a non-2xx final the proxy answered an
+    /// INVITE with itself: its To-tag is the one this tagger derives for that
+    /// INVITE (RFC 3261 §17.1.1.3).
+    pub fn acknowledges_own_final(&self, ack: &SipRequest) -> bool {
+        self.tagger.acknowledges_own_final(ack)
+    }
+
+    /// Refuse `req`, received from `src`, at `now_ms`, `retry_after_sec`
+    /// being the refusing stage's hint: its 503, remembered so every copy
+    /// within 64·T1 draws the same one. A CANCEL is answered but not
+    /// remembered.
     pub fn refuse(
         &self,
         req: &SipRequest,
+        src: SocketAddr,
         retry_after_sec: u32,
         now_ms: u64,
     ) -> Result<SipResponse, GenerateError> {
@@ -140,22 +161,23 @@ impl Refusals {
             let forgotten = memo.expire(now_ms);
             self.count(added, forgotten);
         }
-        answer(req, 503, "Service Unavailable", to_tag, Some(retry_after_sec))
+        answer(req, src, 503, "Service Unavailable", to_tag, Some(retry_after_sec))
     }
 
-    /// The 503 an earlier copy of `req` drew, when `req` is a copy of a
-    /// request refused within 64·T1 of `now_ms` whose lines a response can echo.
-    pub fn repeat(&self, req: &SipRequest, now_ms: u64) -> Option<SipResponse> {
+    /// The 503 an earlier copy of `req` drew, answering `req` received from
+    /// `src`, when `req` is a copy of a request refused within 64·T1 of
+    /// `now_ms` whose lines a response can echo.
+    pub fn repeat(&self, req: &SipRequest, src: SocketAddr, now_ms: u64) -> Option<SipResponse> {
         let refused = self.remembered(req, req.method().as_str(), now_ms)?;
-        answer(req, 503, "Service Unavailable", refused.0, Some(refused.1)).ok()
+        answer(req, src, 503, "Service Unavailable", refused.0, Some(refused.1)).ok()
     }
 
-    /// The 200 answering `cancel` when it cancels an INVITE refused within
-    /// 64·T1 of `now_ms` (§9.2): the INVITE already has its final, and the
-    /// 200 carries that final's To-tag.
-    pub fn cancel(&self, cancel: &SipRequest, now_ms: u64) -> Option<SipResponse> {
+    /// The 200 answering `cancel`, received from `src`, when it cancels an
+    /// INVITE refused within 64·T1 of `now_ms` (§9.2): the INVITE already has
+    /// its final, and the 200 carries that final's To-tag.
+    pub fn cancel(&self, cancel: &SipRequest, src: SocketAddr, now_ms: u64) -> Option<SipResponse> {
         let (to_tag, _) = self.remembered(cancel, Method::Invite.as_str(), now_ms)?;
-        answer(cancel, 200, "OK", to_tag, None).ok()
+        answer(cancel, src, 200, "OK", to_tag, None).ok()
     }
 
     /// The To-tag and `Retry-After` of the remembered `method` refusal of
@@ -205,10 +227,11 @@ impl Refusals {
     }
 }
 
-/// The proxy's own `status` final to `req`, with `to_tag` and, for a refusal,
-/// its `Retry-After`.
+/// The proxy's own `status` final to `req`, received from `src`, with
+/// `to_tag` and, for a refusal, its `Retry-After`.
 fn answer(
     req: &SipRequest,
+    src: SocketAddr,
     status: u16,
     reason: &str,
     to_tag: String,
@@ -224,7 +247,12 @@ fn answer(
         })
         .into_iter()
         .collect();
-    let opts = GenerateResponseOpts { to_tag: Some(to_tag), extra_headers, ..Default::default() };
+    let opts = GenerateResponseOpts {
+        to_tag: Some(to_tag),
+        extra_headers,
+        incoming_source: Some(observed_source(src)),
+        ..Default::default()
+    };
     generate_response(req, status, reason, &opts)
 }
 

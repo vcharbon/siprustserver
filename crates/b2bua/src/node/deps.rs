@@ -17,6 +17,7 @@ use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::repl::ReplicatingCallStore;
 use crate::store::{CallStore, StoreFaults};
+use crate::turn_probe::TurnProbes;
 use crate::wire_faults::WireFaults;
 
 /// Optional replication wiring for [`B2buaDeps`]. Supplying `Some(..)` turns a
@@ -52,11 +53,45 @@ pub struct ReplicationSetup {
     pub puller: crate::repl::PullerConfig,
     /// The serve loop's link bounds (ADR-0045).
     pub serve: crate::repl::ServeConfig,
+    /// The replicas' TTL, the backup ceilings and the keepalive catch-up.
+    pub replica: super::replica::ReplicaConfig,
+    /// The sync level, its cap and the backlog marks (ADR-0055 §3).
+    pub write_path: crate::repl::WritePath,
+    /// How a proxy's dead verdicts are read (ADR-0050 §3).
+    pub verdict: crate::repl::VerdictBounds,
+}
+
+impl ReplicationSetup {
+    /// The dead verdict's bounds and the write path a node runs with,
+    /// `setup` checked ([`Self::check_bounds`]): with no replication, the
+    /// defaults and [`WritePath::unwired`](crate::repl::WritePath::unwired).
+    pub fn bounds_of(setup: Option<&Self>) -> (crate::repl::VerdictBounds, crate::repl::WritePath) {
+        let Some(setup) = setup else {
+            return (Default::default(), crate::repl::WritePath::unwired());
+        };
+        setup.check_bounds();
+        (setup.verdict, setup.write_path)
+    }
+
+    /// Check the write path's and the dead verdict's bounds as the runner's
+    /// boot does: one out of range is logged as an error, and a debug build
+    /// stops on it.
+    pub fn check_bounds(&self) {
+        let checked = self.write_path.validate().and_then(|()| self.verdict.validate());
+        if let Err(why) = &checked {
+            tracing::error!(node = observe::node(), "replication bounds out of range: {why}");
+        }
+        debug_assert!(checked.is_ok(), "replication bounds out of range: {checked:?}");
+    }
 }
 
 /// Wiring inputs for [`B2buaCore::spawn`](super::B2buaCore::spawn).
 pub struct B2buaDeps {
     pub config: B2buaConfig,
+    /// This worker's identity: one boot of one worker, compared for equality
+    /// only (ADR-0055 §6). A request this worker relays names it beside the
+    /// ordinal. Empty: the worker states none.
+    pub identity: String,
     pub decision: Arc<dyn CallDecisionEngine>,
     pub limiter: Arc<dyn CallLimiter>,
     pub cdr: Arc<dyn CdrWriter>,
@@ -66,12 +101,15 @@ pub struct B2buaDeps {
     /// in-dialog request fetch, keepalive/audit read) consult it before their
     /// sync map reads, and read the map unchanged while it is disarmed. A test
     /// retains a clone of the handle and flips per-path switches mid-call.
-    /// Sits ONLY on the live-serving sites — the HA reclaim/reconcile/
-    /// terminate-writer paths are deliberately un-probed.
+    /// Sits ONLY on the live-serving sites — the HA reclaim/reconcile paths
+    /// and the store write path are deliberately un-probed.
     pub store_faults: StoreFaults,
     /// Wire-fault seam: one named RFC deviation the core emits on purpose so
     /// the post-run audit gate can be proven live. Default = never armed.
     pub wire_faults: WireFaults,
+    /// Turn-point seam (ADR-0055 §13): a test observes and may hold each turn
+    /// of a call at its sub-points. Default = no probe.
+    pub turn_probe: TurnProbes,
     pub clock: Clock,
     pub id_gen: Arc<IdGen>,
     /// The worker's refusals of new INVITEs ([`crate::admission::Refusals`]),

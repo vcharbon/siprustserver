@@ -124,6 +124,12 @@ describe("the failure vocabulary", () => {
     expect(verdictPassed(failed)).toBe(false)
   })
 
+  it("names the step of an omitted 100", () => {
+    const omitted = (failed.failures ?? []).find((f) => f.failure === "trying-omitted")
+    expect(omitted).toBeDefined()
+    expect(failureStep(omitted!)).toBe("s13")
+  })
+
   it("carries a deviation-unimplemented step as a stated value, not an absent key", () => {
     const deviation = (failed.failures ?? []).find((f) => f.failure === "deviation-unimplemented")
     expect(deviation).toBeDefined()

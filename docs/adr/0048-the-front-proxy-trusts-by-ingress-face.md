@@ -35,11 +35,13 @@ but used it only for a metric.
      datagrams to other local addresses (an edge node's external-interface
      address among them) to that socket. Test:
      `config::tests::a_dual_face_wildcard_bind_refuses_the_boot`;
-   - on an edge node both addresses live on one host, so a caller-plane host
-     that routes the internal address through the node would reach the
-     internal socket. The deployment drops every packet to `PROXY_VIP` that
-     arrives on the external interface (`deploy/helm/siprust/files/masq-exempt.sh`,
-     re-asserted with its other rules).
+   - a proxy node holds both addresses on `lo` (ADR-0056), so a caller-plane
+     host that routes the internal address through the node would reach the
+     internal socket. The routers never carry the internal VIP onto the
+     external plane (a requirement, `deploy/README.md`); on the kind lab the
+     node also drops every packet to `PROXY_VIP` that arrives on the external
+     interface (`deploy/helm/siprust/files/masq-exempt.sh`, re-asserted with
+     its other rules).
 2. **On the internal face a request is worker-outbound** when its direction
    entry carries `;outbound`, when its source is a registry worker, or when its
    top Via sent-by is one. The marker is what recognises a worker rebooted onto

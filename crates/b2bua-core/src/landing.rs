@@ -1,7 +1,8 @@
 //! The landing pass a turn's result takes before the shell persists it
 //! (ADR-0052 §6): the answer deadlines of the requests the turn sent off its
-//! turn, the refresh arming, the stated headers on every outbound message, the
-//! message ring's record of what the turn sends and the turn's seal.
+//! turn and the requests themselves, the refresh arming, the stated headers on every outbound message, the
+//! non-INVITE finals it sends, the message ring's record of what the turn
+//! sends and the turn's seal.
 
 use std::time::Duration;
 
@@ -26,6 +27,9 @@ pub fn land(result: HandlerResult, landing: &Landing<'_>, now_ms: i64) -> Handle
     // Every request sent off the call's turn has its answer's deadline on
     // the record the turn lands (ADR-0039).
     let result = crate::answer_deadline::arm(result, &landing.budgets, now_ms);
+    // ... and is itself on that record, which a node serving the call sends
+    // again from.
+    let result = crate::off_turn::record(result, now_ms);
     // A counted live call always has its refresh armed within one refresh
     // period of the learnt lease, before the record lands: the one arming of
     // the refresh, for the admitting turn, the refresh turn and every other.
@@ -33,6 +37,9 @@ pub fn land(result: HandlerResult, landing: &Landing<'_>, now_ms: i64) -> Handle
     // Every message the turn sends takes the call's stated headers before the
     // ring records it or the wire sees it.
     let result = crate::rules::stated_headers::stamp_outbound(result);
+    // Every non-INVITE final the turn sends is on the record as it leaves, so
+    // a copy of its request draws it again wherever the call is served.
+    let result = crate::answered_finals::retain(result, now_ms);
     // What the turn sends is on the record before the record lands, and a
     // termination this turn began is cut after it: every ring entry with
     // `seq <= termination.last_seq` was received or sent as part of
@@ -42,11 +49,12 @@ pub fn land(result: HandlerResult, landing: &Landing<'_>, now_ms: i64) -> Handle
     // cut stays `0`.
     match crate::message_ring::Ring::of(landing.config) {
         Some(ring) => HandlerResult {
-            call: seal_turn(seal_termination_seq(ring.sent(
-                result.call,
-                &result.effects.outbound,
-                now_ms,
-            ))),
+            call: {
+                let mut call = ring.sent(result.call, &result.effects.outbound, now_ms);
+                seal_termination_seq(&mut call);
+                seal_turn(&mut call);
+                call
+            },
             effects: result.effects,
         },
         None => result,

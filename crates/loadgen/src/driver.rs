@@ -16,26 +16,31 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use e2e_model::LegSpec;
 use futures::FutureExt;
-use scenario_harness::{Agent, AgentBinder, EgressPolicy, WaiverScope};
+use scenario_harness::{AgentBinder, EgressPolicy, WaiverScope};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
 use crate::mix_entry::{LoadBody, MixEntry};
-use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting, Correlation, MuxCore};
+use crate::mux::{CallTally, Correlation, MuxCore};
 use crate::outcome::{CallWire, OutcomeSink};
 use crate::rate::{Governor, RateHandle};
-use crate::report::{RenderedSample, Reporter};
-use crate::scenarios::ScenarioId;
-use crate::{call_rtt::CallRtts, failed_call};
+use crate::report::{CallEvidence, RenderedSample, Reporter};
+use crate::{call_rtt::CallRtts, call_task::call_task, failed_call};
 use scenario_harness::actor::ScenarioVerdict;
+
+mod binding;
+mod record;
+mod seeds;
+pub(crate) use binding::CALLER;
+use binding::{bind_agents, bind_refusal, call_key, call_routing, KEY_DRAWS};
+use record::{phase_annotated_detail, record_unrun};
+use seeds::{next_seed, panic_msg, xorshift};
 
 /// The mux transport the driver binds calls on.
 pub struct MuxTransport {
@@ -145,38 +150,6 @@ pub struct Driver {
     tails: Arc<RwLock<()>>,
 }
 
-/// Process-wide per-call id-seed source: a unique 100k-wide window per call so a
-/// fresh binder (whose `Ids` restart at 1) never mints Call-IDs colliding with
-/// another in-flight or prior call against the same stateful SUT.
-fn next_seed(base: u64) -> u64 {
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
-    base.wrapping_add(SERIAL.fetch_add(1, Ordering::Relaxed).wrapping_mul(100_000)).max(1)
-}
-
-/// A random per-call correlation token, formatted as a valid SIP user-part.
-fn mint_token() -> String {
-    format!("lg{}", uuid::Uuid::new_v4().simple())
-}
-
-fn xorshift(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
-
-fn panic_msg(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "non-string panic payload".to_string()
-    }
-}
-
 impl Driver {
     pub fn new<M: Into<MixEntry>>(
         cfg: DriverCfg,
@@ -187,6 +160,10 @@ impl Driver {
         let scenarios: Vec<MixEntry> = scenarios.into_iter().map(Into::into).collect();
         assert!(!scenarios.is_empty(), "loadgen needs at least one scenario");
         let total_weight = scenarios.iter().map(|e| e.weight).sum();
+        for e in &scenarios {
+            let tuned = cfg.tuning.get(e.id).unwrap_or(&cfg.default_tuning);
+            reporter.declare_retransmit(e.id, tuned.retransmit);
+        }
         Self {
             rate: RateHandle::new(cfg.cps),
             duration: cfg.duration,
@@ -284,18 +261,7 @@ impl Driver {
                 permit,
                 self.tails.clone(),
             );
-            // A panic outside the scenario's own boundary (checks, sample
-            // rendering, the bookkeeping) still closes the call's in-flight
-            // count and is counted as a generator failure: the call wrote no
-            // record.
-            tokio::spawn(async move {
-                if AssertUnwindSafe(call).catch_unwind().await.is_err() {
-                    reporter.dec_inflight();
-                    if let Some(sink) = outcomes {
-                        sink.generator_failure(id, "panic");
-                    }
-                }
-            });
+            tokio::spawn(call_task(call, id, reporter, outcomes));
         }
 
         // Drain: every permit (in-flight calls), then the lock (release tails).
@@ -307,7 +273,7 @@ impl Driver {
 /// One call, start to finish. `Send + 'static`, so it runs on the shared
 /// multi-threaded runtime.
 #[allow(clippy::too_many_arguments)] // per-call context threaded explicitly (no shared struct)
-async fn run_one(
+pub(crate) async fn run_one(
     entry: MixEntry,
     reporter: Arc<Reporter>,
     transport: Arc<MuxTransport>,
@@ -331,6 +297,7 @@ async fn run_one(
     let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
     let mut draw = 0;
     let rtts = CallRtts::new(reporter.clone(), id);
+    let tally = Arc::new(CallTally::new(CALLER).with_late_sink(reporter.late_sink(id)));
     let (core, dwells, banner, resolved_input, token, net, binder, alice, callee_agents) = loop {
         draw += 1;
         // Resolve THIS call's binding from the attached Test case (pool walk +
@@ -342,19 +309,13 @@ async fn run_one(
             Some(r) => (r.core, r.dwells, Some(r.banner), Some(r.input)),
             None => (Default::default(), Default::default(), None, None),
         };
-        // The call's key: minted, or under from-user correlation the resolved
-        // caller's From user (the SUT keeps it on every leg it originates); a
-        // call without one is refused here, before any bind or datagram.
-        let token = if from_user {
-            match from_user_key(core.from.as_deref()) {
-                Ok(key) => key,
-                Err(reason) => {
-                    let outcome = CallOutcome::Rejected(reason);
-                    return record_unrun(&reporter, &outcomes, id, outcome);
-                }
+        // A call without a usable key is refused here, before any bind or datagram.
+        let nonce = outcomes.as_ref().map(|sink| sink.call_id_nonce.as_str());
+        let token = match call_key(&transport.correlation, core.from.as_deref(), nonce) {
+            Ok(key) => key,
+            Err(reason) => {
+                return record_unrun(&reporter, &outcomes, id, CallOutcome::Rejected(reason))
             }
-        } else {
-            mint_token()
         };
         // Simulated packet loss + auto-retransmit both ride the mux transport
         // (the mux dispatcher is the background pump that reacts to inbound
@@ -370,7 +331,8 @@ async fn run_one(
                 next_seed(seed_base),
                 tuning.drop_nth,
             )
-            .with_rtt_sink(rtts.sink());
+            .with_rtt_sink(rtts.sink())
+            .with_tally(tally.clone());
         let net = Arc::new(match &wire {
             Some(w) => mux_net.with_wire_tap(w.tap()),
             None => mux_net,
@@ -406,10 +368,13 @@ async fn run_one(
     if record {
         ctx.enable_anchor_collection();
     }
-    if let Some(wire) = &wire {
-        let wire = wire.clone();
-        ctx.on_resolved(move || wire.seal());
-    }
+    // At the verdict, before the runner's own teardown: seal the wire facts
+    // and charge a failure to each lane's last message in.
+    let (seal, mark) = (wire.clone(), tally.clone());
+    ctx.on_resolved(move || {
+        seal.iter().for_each(CallWire::seal);
+        mark.mark_outcome();
+    });
 
     let env = CallEnv {
         alice: &alice,
@@ -440,15 +405,11 @@ async fn run_one(
         long_hold: dwells.long_hold.unwrap_or(call.long_hold),
     };
     // The single body-invocation site: an actor scenario rides the per-endpoint
-    // reactor runner (each runner owns its per-actor teardown scopes, so no
-    // outer `CallScope` is needed), yielding the `ScenarioVerdict` everything
-    // downstream — classification, sampling, phases, the ringing gate —
-    // buckets on, inside a `catch_unwind` boundary (a panic is a counted
-    // failure, never a worker abort). The body is built ONCE here so its
-    // declared waivers (ADR-0024 §6) can be read for the audit, then the BUILT
-    // call is run — never built twice. A build guard error is the call's
-    // `build` failure; a build panic is caught at the same boundary as a run
-    // panic.
+    // reactor runner (it owns the per-actor teardown scopes), yielding the
+    // verdict everything downstream buckets on, inside a `catch_unwind`
+    // boundary (a panic is a counted failure). The body is built ONCE so its
+    // declared waivers (ADR-0024 §6) reach the audit; a build guard error is
+    // the call's `build` failure, a build panic caught like a run panic.
     let mut plan_waivers: Vec<WaiverScope> = Vec::new();
     let result = match &body {
         LoadBody::Actor(scenario) => {
@@ -467,10 +428,13 @@ async fn run_one(
         }
     };
 
+    tally.mark_outcome(); // a call whose runner never resolved (its build failed)
+    let ended_at_ms = transport.clock.now_ms();
     let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
-    if failed {
-        failed_call::release(tails, net, &alice, &callee_agents, call.teardown_quiesce).await;
-    }
+    // A request awaiting its final is judged by its transaction (RFC 3261 §17.1.2).
+    let (open, awaits) = (net.client_txn_open(), wire.as_ref().is_some_and(CallWire::awaits));
+    let (agents, quiesce) = (&callee_agents, call.teardown_quiesce);
+    let tail = failed_call::hold(failed, open, tails, net, &alice, agents, quiesce).await;
 
     // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
     // the attached case's lowered `allowViolations` PLUS the plan's declared
@@ -485,6 +449,7 @@ async fn run_one(
         Ok(verdict) => CallOutcome::from(verdict),
         Err(payload) => CallOutcome::Panic(panic_msg(payload)),
     };
+    let accepted = outcome.is_checkable();
     let outcome = outcome.audited(|| {
         let wo = binder.rfc_findings(&merged_waivers);
         // Fold this sampled call's per-waiver use into the CAMPAIGN tally
@@ -543,179 +508,30 @@ async fn run_one(
     // split.
     let case = outcome.case(ctx.phases().last().map(|(name, _)| *name));
 
-    let sample = if reporter.wants_sample(id, &class, &case) {
+    // Only a recorded call is a sample: an unrecorded one never takes a slot
+    // a later recorded call of its bucket would fill with a full callflow.
+    let sample = if binder.is_recording() && reporter.wants_sample(id, &class, &case) {
         let detail = phase_annotated_detail(outcome.detail(), &ctx);
-        // Thread the failure reason into the rendered callflow so a sampled NOK
-        // page explains WHY (header banner + an explicit anomaly), not just "FAIL".
-        let html = if binder.is_recording() {
-            // The banner (the resolved binding — the actual From/To used) shows
-            // in the page header on PASS and FAIL alike; the failure detail
-            // stays FAIL-only; the case's check verdicts render pass AND fail.
-            // Metrics labels stay scenario-keyed.
-            binder.render_html(
-                id,
-                class.is_ok(),
-                banner.as_deref(),
-                detail.as_deref(),
-                &check_notes,
-            )
-        } else {
-            None
-        };
-        if html.is_some() || !class.is_ok() {
-            Some(RenderedSample {
-                html: html.map(Arc::from),
+        // A sampled NOK page states WHY (banner + anomaly); the banner (the
+        // resolved binding) shows on PASS and FAIL alike, the failure detail on
+        // FAIL only, the case's check verdicts pass AND fail.
+        binder
+            .render_html(id, class.is_ok(), banner.as_deref(), detail.as_deref(), &check_notes)
+            .map(|html| RenderedSample {
+                html: Some(Arc::from(html)),
                 detail,
                 e2e_ms: e2e.as_secs_f64() * 1000.0,
             })
-        } else {
-            None
-        }
     } else {
         None
     };
 
-    reporter.record(id, &outcome, &case, e2e, &checkpoints, sample);
+    let evidence = CallEvidence { recorded: binder.is_recording(), accepted, sample };
+    reporter.record(id, &outcome, &case, e2e, &checkpoints, evidence);
+    // The ladder takes the call's messages once its traffic is over.
+    let fold = record::ladder_fold(&reporter, id, &tally, &outcome);
+    let write = record::outcome_write(outcomes, wire, id, outcome, ended_at_ms);
+    tail.finish(fold, Box::new(write), awaits);
     rtts.finish();
-    if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
-        crate::outcome::write_call(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
-    }
     reporter.dec_inflight();
-}
-
-/// The caller agent's name: the agent that originates every call.
-const CALLER: &str = "alice";
-
-/// How many numbers a from-user call draws from its case's pool before it is
-/// rejected for contention (every draw held or cooling).
-const KEY_DRAWS: usize = 8;
-
-/// The per-call routing the driver declares: one correlation token per call,
-/// the callee legs on the callee address, and the R-URI picker when there are
-/// several.
-///
-/// Two-tier callee demux. The token is the FIRST tier — it selects the call
-/// INSTANCE (mux `by_token`); the SUT carries it onto every downstream leg, so
-/// every callee leg shares it. Every callee-side leg (the shape's named
-/// `LegSpec`s — by default bob, the rerouting `bob2`, the transfer
-/// `charlie`) shares ONE socket (`transport.uas_addr`); the SECOND tier —
-/// WHICH leg of this instance — is the R-URI-prefix leg picker, fed each leg's
-/// declared `ruri_prefixes` labelled with its role. The in-house shapes' legs
-/// arrive under their role (`sip:bob2@…`, `sip:charlie@…`: the reroute plan's
-/// `new_ruri`, the transfer's Refer-To user); an open-registry shape's legs
-/// arrive under number-plan digits (`+1555…`, `9007…`) that its specs map back
-/// to the role. Either way no leg needs a per-leg socket.
-fn call_routing(transport: &MuxTransport, legs: &[LegSpec], token: &str) -> CallRouting {
-    let mut routing = CallRouting::new(token);
-    // Shared-socket layout: the caller binds the callee legs' address, so
-    // every bind there is declared, the caller first (the bind order below).
-    if transport.uac_addr == transport.uas_addr {
-        routing = routing.caller(transport.uac_addr);
-    }
-    for leg in legs {
-        routing = routing.leg(transport.uas_addr, leg.role);
-    }
-    if legs.len() > 1 {
-        // The SUT originates its PRIMARY callee leg from its own route config, so
-        // that INVITE's R-URI is the bare route target (`sip:host:port`, userless)
-        // — unlike a transfer (Refer-To → `sip:charlie@…`) or reroute
-        // (`new_ruri` → `sip:bob2@…`) leg, which carries a distinguishing
-        // user-part. Route such a userless leg to the primary (first-declared)
-        // role instead of orphaning it; otherwise every multi-leg shape (refer,
-        // reroute) drops its very first bob leg as `no endpoint to route to`.
-        routing = routing.picker(
-            transport.uas_addr,
-            labelled_prefix_leg_picker_defaulting(
-                legs.iter().flat_map(|leg| leg.ruri_prefixes.iter().map(|p| (*p, leg.role))),
-                Some(legs[0].role),
-            ),
-        );
-    }
-    routing
-}
-
-/// Bind the call's agents: alice, then the callee legs in `legs` order (the
-/// order the routing declares them — load-bearing on a shared socket). A
-/// refusal is returned as is (see [`bind_refusal`]); the agents bound so far
-/// deregister as they drop.
-async fn bind_agents(
-    binder: &AgentBinder,
-    transport: &MuxTransport,
-    legs: &[LegSpec],
-) -> Result<(Agent, Vec<(&'static str, Agent)>), sip_net::BindError> {
-    let alice = binder.try_agent(CALLER, transport.uac_addr).await?;
-    let mut callees = Vec::with_capacity(legs.len());
-    for leg in legs {
-        callees.push((leg.role, binder.try_agent(leg.role, transport.uas_addr).await?));
-    }
-    Ok((alice, callees))
-}
-
-/// The from-user correlation key of a call: the URI user of its resolved
-/// caller identity, or the bounded rejection reason when there is none.
-fn from_user_key(from: Option<&str>) -> Result<String, &'static str> {
-    let from = from.ok_or("no_from")?;
-    sip_message::sniff::address_user(from).ok_or("userless_from")
-}
-
-/// The outcome of a refused agent bind: a key a concurrent call holds is a
-/// `key_in_flight` rejection, a key cooling after a failed call a
-/// `key_cooling` one; any other refusal (no mux endpoint at the address, more
-/// binds than declared) is a layout defect, a counted panic.
-fn bind_refusal(e: &sip_net::BindError) -> CallOutcome {
-    match e.reason {
-        sip_net::BindErrorReason::AlreadyBound => CallOutcome::Rejected("key_in_flight"),
-        sip_net::BindErrorReason::HeldBack => CallOutcome::Rejected("key_cooling"),
-        _ => CallOutcome::Panic(format!("agent bind refused: {e}")),
-    }
-}
-
-/// Record a call that never ran (refused before any datagram) and close its
-/// in-flight count.
-fn record_unrun(
-    reporter: &Reporter,
-    outcomes: &Option<Arc<OutcomeSink>>,
-    id: ScenarioId,
-    outcome: CallOutcome,
-) {
-    if let Some(sink) = outcomes {
-        match &outcome {
-            CallOutcome::Rejected(reason) => sink.not_placed(id, reason),
-            _ => sink.generator_failure(id, "bind_refused"),
-        }
-    }
-    let class = ResultClass::from(&outcome);
-    let case = outcome.case(None);
-    let sample = reporter.wants_sample(id, &class, &case).then(|| RenderedSample {
-        html: None,
-        detail: outcome.detail(),
-        e2e_ms: 0.0,
-    });
-    reporter.record(id, &outcome, &case, Duration::ZERO, &[], sample);
-    reporter.dec_inflight();
-}
-
-/// Append the call's lifecycle phase trail (`connected@1234ms`, `reinvited@…`) to
-/// a NOK sample's one-line detail, so a sampled failing flow says WHICH phase it
-/// reached before it failed.
-/// `None`/empty detail (an OK call) is left untouched.
-fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<String> {
-    let mut detail = detail?;
-    // Scenario-attached diagnostic notes (e.g. the actor settle barrier's
-    // still-open obligations) — detail-channel only, never a report key.
-    let notes = ctx.notes();
-    if !notes.is_empty() {
-        detail = format!("{detail} [{}]", notes.join("; "));
-    }
-    let phases = ctx.phases();
-    if phases.is_empty() {
-        return Some(detail);
-    }
-    let start = ctx.start_instant();
-    let trail = phases
-        .iter()
-        .map(|(name, at)| format!("{name}@{}ms", at.saturating_duration_since(start).as_millis()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!("{detail} [phases: {trail}]"))
 }

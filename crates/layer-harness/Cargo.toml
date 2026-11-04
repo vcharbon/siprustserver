@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Test-only contract + recording machinery shared by every layer. Port of sipjsserver src/test-harness/framework (Recorder, RunContext, EventSequencer, three-tier severity, recording helpers, anomaly ledger). See the effect-layer-test SKILL."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

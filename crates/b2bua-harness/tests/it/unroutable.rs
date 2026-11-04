@@ -359,23 +359,24 @@ async fn a_released_transactions_timeout_is_not_a_wire_drop() {
     let bob = h.agent("bob", "127.0.0.1:5077").await;
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
-    let _dialog = establish(&alice, &bob, b2bua.addr).await;
+    let mut dialog = establish(&alice, &bob, b2bua.addr).await;
 
-    // t = 30 s: the probe. Alice stays silent on it; bob answers.
+    // t = 30 s: the probe. Bob stays silent on it; alice answers.
     h.advance(Duration::from_secs(30)).await;
-    let _silent = alice.receive("OPTIONS").await;
-    bob.receive("OPTIONS").await.respond(200, "OK").await;
+    alice.receive("OPTIONS").await.respond(200, "OK").await;
+    let _silent = bob.receive("OPTIONS").await;
 
-    // t = 35 s: the keepalive cutoff BYEs both legs; both answer, so the call
-    // ends with alice's probe still inside its Timer F (t = 62 s).
+    // t = 35 s: alice hangs up and bob answers the BYE, so the call ends with
+    // bob's probe still inside its Timer F (t = 62 s).
     h.advance(Duration::from_secs(5)).await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive_absorbing("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
 
     // Past the probe's Timer F.
     h.advance(Duration::from_secs(30)).await;
-    alice.drain().await;
+    bob.drain().await;
     settle_until(|| false).await;
     assert_eq!(
         b2bua.metrics().unroutable_dropped_total(),

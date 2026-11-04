@@ -5,24 +5,18 @@ use std::net::SocketAddr;
 
 use call::TimerKey;
 use call::TxnTimeoutKind;
-use sip_message::{SipHeader, SipMessage};
+use sip_message::{Bytes, SipHeader, SipMessage};
 
 /// One thing that happens to a call: an inbound SIP message, a fired timer, a
 /// CANCEL the txn layer already answered, a client-transaction timeout, or a
 /// re-entrant internal event (e.g. an async decision result).
 #[derive(Debug, Clone)]
 pub enum CallEvent {
-    /// A SIP request/response that survived the transaction layer.
-    Sip {
-        message: Box<SipMessage>,
-        src: SocketAddr,
-        /// A response: whether it answered a client transaction this node's
-        /// txn layer holds — so a non-2xx INVITE final it carries is already
-        /// ACKed hop-by-hop (RFC 3261 §17.1.1.3). `false` for a response to a
-        /// request another node sent (a call taken over from it), and always
-        /// for a request.
-        matched_client_txn: bool,
-    },
+    /// A SIP request/response that survived the transaction layer. A
+    /// request's `message` carries the top Via the server transport stamped
+    /// on receipt (RFC 3261 §18.2.1); `datagram` is the message as it arrived,
+    /// byte for byte, what a trace records (ADR-0026).
+    Sip { message: Box<SipMessage>, src: SocketAddr, datagram: Bytes },
     /// A B2BUA timer fired (keepalive, no-answer, max-duration, …): its key
     /// and the generation it was armed under. The router delivers it only
     /// while the call's ledger holds that key under that generation.
@@ -48,6 +42,11 @@ pub enum CallEvent {
         headers: Vec<SipHeader>,
         /// The To-tag the layer's 200 and 487 carried.
         to_tag: Option<String>,
+        /// The instant the CANCEL reached the call's worker, its 200 and 487
+        /// sent or held for the turn that takes this event: what the call
+        /// records them at, however long the event waits behind the call's
+        /// running turn.
+        at_ms: i64,
     },
     /// A client transaction (b-leg INVITE, BYE, …) timed out with no final.
     Timeout {
@@ -92,16 +91,24 @@ pub enum CallEvent {
         /// answers ([`Self::incarnation`]).
         incarnation: Option<String>,
     },
-    /// The transaction layer reports the last transaction for a *watched* call has
-    /// cleared (ADR-0014). The router uses it to self-release an acting-backup
-    /// takeover copy whose served transaction(s) are done.
-    CallQuiesced { call_ref: String },
     /// A lifecycle event of the call the turn caused, as the engine delivers
     /// it to the active services after the turn's claim. Never dispatched.
     Lifecycle(crate::lifecycle::LifecycleEvent),
 }
 
+/// The [`CallEvent::InternalEvent`] topic of the transaction layer's notice
+/// that an initial INVITE's first-response deadline passed with a `100 Trying`
+/// as its only response (ADR-0044): the next hop is alive, nothing past it has
+/// answered. Its payload names the leg (`leg_id`) and the branch (`branch`).
+pub const HOP_ALIVE_TOPIC: &str = "hop-alive";
+
 impl CallEvent {
+    /// `message`, received from `src` as the datagram it is.
+    pub fn sip(message: SipMessage, src: SocketAddr) -> Self {
+        let datagram = message.image().clone();
+        CallEvent::Sip { message: Box::new(message), src, datagram }
+    }
+
     /// The incarnation of the call this event belongs to
     /// (`call::Call::incarnation`): a timer fire, a transaction timeout and an
     /// internal event carry the one of the call they were armed, sent or
@@ -113,10 +120,7 @@ impl CallEvent {
             CallEvent::Timer { incarnation, .. }
             | CallEvent::Timeout { incarnation, .. }
             | CallEvent::InternalEvent { incarnation, .. } => incarnation.as_deref(),
-            CallEvent::Sip { .. }
-            | CallEvent::Cancelled { .. }
-            | CallEvent::CallQuiesced { .. }
-            | CallEvent::Lifecycle(_) => None,
+            CallEvent::Sip { .. } | CallEvent::Cancelled { .. } | CallEvent::Lifecycle(_) => None,
         }
     }
 
@@ -152,7 +156,6 @@ impl CallEvent {
             CallEvent::Cancelled { .. } => "cancelled",
             CallEvent::Timeout { .. } => "timeout",
             CallEvent::InternalEvent { .. } => "internal-event",
-            CallEvent::CallQuiesced { .. } => "call-quiesced",
             CallEvent::Lifecycle(_) => "lifecycle",
         }
     }

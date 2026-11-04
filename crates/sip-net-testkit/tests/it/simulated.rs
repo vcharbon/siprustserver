@@ -95,9 +95,9 @@ async fn pre_ingress_drop_and_reply() {
     // b drops anything that starts with 'D', replies "PONG" to anything that
     // starts with 'P', accepts the rest.
     let hook: PreIngressHook =
-        Arc::new(|arrival: &mut Arrival, _src, _depth| match arrival.raw().first() {
+        Arc::new(|arrival: &mut Arrival, src, _depth| match arrival.raw().first() {
             Some(b'D') => PreIngressAction::Drop,
-            Some(b'P') => PreIngressAction::Reply(b"PONG".to_vec()),
+            Some(b'P') => PreIngressAction::Reply { datagram: b"PONG".to_vec(), to: src },
             _ => PreIngressAction::Accept,
         });
     let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();

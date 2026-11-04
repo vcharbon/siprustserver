@@ -1,6 +1,7 @@
 //! The end of a turn's lifecycle (ADR-0042): the open attempts are settled
-//! against the legs and the call, every attempt that ended has its timers
-//! retired, and the turn's lifecycle events — each attempt opened or ended,
+//! against the legs and the call, every timer whose scope ended — an ended
+//! attempt's, the caller's wait once its INVITE is answered — is retired, and
+//! the turn's lifecycle events — each attempt opened or ended,
 //! each leg that ended — reach every active service, whichever rule claimed
 //! the turn. A service handles one with a machine-bound rule matching
 //! [`MatchKind::Lifecycle`]; its handler may arm or cancel its own service
@@ -14,10 +15,11 @@ use std::collections::BTreeMap;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::lifecycle::{LifecycleEvent, RouteAnswer};
 use call::{
-    AttemptId, Call, CallModelState, Direction, LegState, MachineId, StateLabel, TimerType,
+    AttemptId, Call, CallModelState, Direction, LegState, MachineId, StateLabel, TimerKey,
+    TimerType,
 };
 
-use crate::effects::HandlerResult;
+use crate::effects::{CriticalStateEffect, HandlerResult};
 use crate::turn_notes::TurnNotes;
 
 use super::actions::ActionExecutor;
@@ -57,8 +59,9 @@ impl TurnStart {
 }
 
 /// Close the turn that started at `start` and left `result`: settle the open
-/// attempts, retire the timers of each attempt that ended, and deliver the
-/// turn's lifecycle events to the active services of `rules`.
+/// attempts, retire the timers of each attempt that ended, deliver the turn's
+/// lifecycle events to the active services of `rules`, then retire every timer
+/// whose scope ended.
 pub fn close_turn(
     rules: &[RuleDefinition],
     start: &TurnStart,
@@ -72,18 +75,17 @@ pub fn close_turn(
     for event in events(start, &result.call, opened) {
         deliver(rules, start, event, &mut result, exec);
     }
-    // A handler arms nothing under an attempt that has ended.
-    let ended =
-        |id: AttemptId| call::helpers::find_attempt(&result.call, id).is_none_or(|a| !a.is_open());
-    let stray: Vec<AttemptId> = result
-        .call
+    // Leaving a scope retires it, a timer a handler armed under an ended
+    // attempt included.
+    let call = &result.call;
+    let ended: Vec<TimerKey> = call
         .timers
         .iter()
-        .filter_map(|t| t.key.attempt_id())
-        .filter(|id| ended(*id))
+        .filter(|t| call::helpers::scope_ended(call, &t.key))
+        .map(|t| t.key.clone())
         .collect();
-    for id in stray {
-        crate::attempts::retire(&mut result.call, &mut result.effects, id);
+    for t in call::helpers::retire_timers(&mut result.call, |t| ended.contains(&t.key)) {
+        result.effects.critical.push(CriticalStateEffect::CancelTimer { key: t.key });
     }
     result
 }

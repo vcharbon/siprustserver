@@ -14,6 +14,9 @@
 //! the peers (ADR-0031 cases 3a and 4), or — the caller having heard the 100,
 //! so sending nothing more — the departure announced, on which the survivor
 //! takes over the call whose round is in flight (ADR-0047).
+//!
+//! Beyond the failover sweep: a re-INVITE the callee never answers, given up at its bound after a
+//! takeover.
 
 use std::time::Duration;
 
@@ -22,7 +25,7 @@ use scenario_harness::agent::Inbound;
 use sip_message::generators::InDialogMethod;
 use sip_message::{Method, SipMessage};
 
-use crate::departure_support::kill_announced;
+use crate::departure_support::{bring_up_reactive, kill_announced};
 use crate::inflight_resend::{
     assert_not_taken_over, assert_taken_over_once, bring_up, establish, kill_serving_node,
     last_request_sent, reboot_and_reclaim, round_invites_sent_to, settle_to_one_cdr, split_mut,
@@ -43,7 +46,7 @@ async fn a_taken_over_reinvite_round_the_callee_never_answers_gives_up_at_its_bo
     let mut fh = FailoverHarness::new("reinvite-round-gives-up", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
 
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;

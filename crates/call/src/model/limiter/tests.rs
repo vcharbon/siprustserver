@@ -315,3 +315,49 @@ fn a_lost_admit_reports_the_target_it_asked_for_while_no_later_change_replaced_i
     sent(state.replace_set(vec![e("z")], false));
     assert_eq!(state.lost_admit(n), AdmitReport::lost("c#k".into(), n, vec![]));
 }
+
+/// A call whose consults never sent an admit — each route stated no limiter
+/// and nothing could have landed for the key — sends none on any number of
+/// later empty routes, consult after consult.
+#[test]
+fn consults_that_sent_nothing_leave_nothing_the_limiter_may_hold() {
+    let mut state = CallLimiterState::uncounted("c#k".into());
+    for _ in 0..3 {
+        let consult = state.owe_consult(1);
+        assert!(!consult.may_hold, "nothing can have landed for the key");
+        state.apply_fold(&report(consult.first_change, vec![], AdmitOutcome::NotSent), true);
+    }
+    assert!(!state.may_hold());
+    assert_eq!(state.owed_release(), Some("c#k"), "the end-of-call release stays owed");
+}
+
+/// A fold that arrives once no consult awaits it still closes its consult: a
+/// later empty route sends no replacement.
+#[test]
+fn an_unawaited_fold_closes_its_consult() {
+    let mut state = CallLimiterState::uncounted("c#k".into());
+    let consult = state.owe_consult(1);
+    state.apply_unawaited_fold(&report(consult.first_change, vec![], AdmitOutcome::NotSent));
+    assert!(!state.may_hold());
+    assert!(!state.owe_consult(1).may_hold, "nothing can have landed for the key");
+}
+
+/// A consult whose fold the record never applied — lost with the node that
+/// dispatched it — may have sent its admit: the limiter may hold a set.
+#[test]
+fn a_consult_whose_fold_is_missing_may_hold_a_set() {
+    let mut state = CallLimiterState::uncounted("c#k".into());
+    state.owe_consult(1);
+    assert!(state.may_hold());
+    assert!(state.owe_consult(1).may_hold, "a second consult sends its empty replacement");
+}
+
+/// A consult that sent an admit leaves the key one the limiter may hold, its
+/// answer lost or not.
+#[test]
+fn a_consult_that_sent_an_admit_leaves_a_set_the_limiter_may_hold() {
+    let mut state = CallLimiterState::uncounted("c#k".into());
+    let consult = state.owe_consult(1);
+    state.apply_fold(&report(consult.first_change, vec![e("x")], AdmitOutcome::Unavailable), true);
+    assert!(state.may_hold());
+}

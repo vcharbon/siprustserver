@@ -12,24 +12,17 @@
 //! A byte value is an integer with an optional `Ki`/`Mi`/`Gi` suffix. Unset or
 //! blank leaves that ceiling off.
 
+use b2bua::capacity::BackupCeilings;
 use b2bua::config::{CapacityConfig, Ceilings};
 
 use crate::stated;
 
-/// The ceilings `lookup` states. An unparsable value is an `Err` naming it.
+/// The new-call ceilings `lookup` states. An unparsable value is an `Err`
+/// naming it.
 pub(crate) fn capacity_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<CapacityConfig, String> {
-    let count = |key: &str| -> Result<Option<u64>, String> {
-        stated(lookup(key))
-            .map(|v| v.parse::<u64>().map_err(|e| format!("{key}={v:?}: {e}")))
-            .transpose()
-    };
-    let bytes = |key: &str| -> Result<Option<u64>, String> {
-        stated(lookup(key))
-            .map(|v| parse_bytes(&v).map_err(|e| format!("{key}={v:?}: {e}")))
-            .transpose()
-    };
+    let (count, bytes) = (count(&lookup), bytes(&lookup));
     Ok(CapacityConfig {
         calls: Ceilings {
             normal: count("B2BUA_MAX_CALLS")?,
@@ -43,9 +36,41 @@ pub(crate) fn capacity_from_lookup(
             normal: bytes("B2BUA_MAX_RSS")?,
             emergency: bytes("B2BUA_MAX_RSS_EMERGENCY")?,
         },
-        backup_calls: count("B2BUA_REPL_BACKUP_MAX_CALLS")?,
-        backup_rss_bytes: bytes("B2BUA_REPL_BACKUP_MAX_RSS")?,
     })
+}
+
+/// The backup ceilings `lookup` states. An unparsable value is an `Err`
+/// naming it.
+pub(crate) fn backup_from_lookup(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<BackupCeilings, String> {
+    let (count, bytes) = (count(&lookup), bytes(&lookup));
+    Ok(BackupCeilings {
+        calls: count("B2BUA_REPL_BACKUP_MAX_CALLS")?,
+        rss_bytes: bytes("B2BUA_REPL_BACKUP_MAX_RSS")?,
+    })
+}
+
+/// A count `lookup` states under a key: unset or blank is `None`.
+fn count(
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> impl Fn(&str) -> Result<Option<u64>, String> + '_ {
+    move |key| {
+        stated(lookup(key))
+            .map(|v| v.parse::<u64>().map_err(|e| format!("{key}={v:?}: {e}")))
+            .transpose()
+    }
+}
+
+/// A byte value `lookup` states under a key: unset or blank is `None`.
+fn bytes(
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> impl Fn(&str) -> Result<Option<u64>, String> + '_ {
+    move |key| {
+        stated(lookup(key))
+            .map(|v| parse_bytes(&v).map_err(|e| format!("{key}={v:?}: {e}")))
+            .transpose()
+    }
 }
 
 /// `1536Mi` → 1536·2²⁰. Plain integers are bytes.
@@ -75,7 +100,7 @@ mod capacity_env_tests {
 
     #[test]
     fn every_ceiling_is_read() {
-        let cfg = capacity_from_lookup(lookup(&[
+        let pairs = lookup(&[
             ("B2BUA_MAX_CALLS", "8000"),
             ("B2BUA_MAX_CALLS_EMERGENCY", "9000"),
             ("B2BUA_MAX_TXNS", "40000"),
@@ -84,13 +109,13 @@ mod capacity_env_tests {
             ("B2BUA_MAX_RSS_EMERGENCY", "2Gi"),
             ("B2BUA_REPL_BACKUP_MAX_CALLS", "8000"),
             ("B2BUA_REPL_BACKUP_MAX_RSS", "1048576"),
-        ]))
-        .expect("parses");
+        ]);
+        let cfg = capacity_from_lookup(&pairs).expect("parses");
+        let backup = backup_from_lookup(&pairs).expect("parses");
         assert_eq!(cfg.calls, Ceilings { normal: Some(8000), emergency: Some(9000) });
         assert_eq!(cfg.transactions, Ceilings { normal: Some(40000), emergency: Some(45000) });
         assert_eq!(cfg.rss_bytes, Ceilings { normal: Some(1536 << 20), emergency: Some(2 << 30) });
-        assert_eq!(cfg.backup_calls, Some(8000));
-        assert_eq!(cfg.backup_rss_bytes, Some(1 << 20));
+        assert_eq!(backup, BackupCeilings { calls: Some(8000), rss_bytes: Some(1 << 20) });
     }
 
     #[test]

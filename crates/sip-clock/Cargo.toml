@@ -9,6 +9,9 @@ description = "Monotonic-anchored clock — Rust re-expression of the source's E
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

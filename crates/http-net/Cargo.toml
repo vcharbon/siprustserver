@@ -9,6 +9,9 @@ description = "Reusable unary HTTP transport seam (request/response, no streamin
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

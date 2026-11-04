@@ -64,6 +64,7 @@ async fn a_seeded_server_invite_leaves_at_its_backstop_measured_from_the_seed() 
             None,
         )),
         to_tag: None,
+        provisional: None,
         leg_id: None,
     };
     assert_eq!(stack.txn.seed("w0|seeded-unanswered|atag", vec![seed]).await.unwrap(), 1);

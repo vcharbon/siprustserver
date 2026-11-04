@@ -8,38 +8,49 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use b2bua::cdr::{CdrRecord, CdrWriter};
-use b2bua::config::B2buaConfig;
-use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
+use b2bua::config::{B2buaConfig, Front};
+use b2bua::decision::CallDecisionEngine;
 use b2bua::limiter::CallLimiter;
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::{CallStore, FaultInjectingCallStore, InMemoryCallStore, StoreFaults};
 use b2bua::wire_faults::WireFaults;
-use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
-use scenario_harness::{Harness, RunReport};
+use b2bua::{B2buaCore, B2buaDeps};
+use scenario_harness::Harness;
 
 // The canonical INVITE/180/200/ACK choreography lives in
-// `scenario_harness::callflow`, one implementation shared by the single-SUT
-// b2bua tests and the HA failover tests; the names the b2bua tests use are
-// re-exported here.
+// `scenario_harness::callflow`, shared by the single-SUT b2bua tests and the
+// HA failover tests; the names the b2bua tests use are re-exported here.
 pub use scenario_harness::callflow::{self, establish, hangup, ANSWER_SDP, OFFER_SDP};
 use sip_clock::Clock;
 use sip_net::UdpEndpoint;
 use sip_txn::IdGen;
 
+pub mod backlog;
 pub mod failure_view;
 pub mod limiter;
+mod live;
 pub mod model_gate;
 mod operator;
 mod proxy_core;
 mod reaped;
+pub mod router_pace;
+mod routes;
 mod scene;
+mod settle;
+mod spawn_params;
 pub mod terminated;
+mod wire_reads;
 pub mod witness;
 
+pub use backlog::{drop_backlog_answers, send_backlog, BACKLOG_METHOD};
 pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
 pub use proxy_core::{spawn_proxy_core, spawn_proxy_core_with, ExternalProxyFace, ProxyCoreParts};
+pub use router_pace::{Pace, RouterPace};
 pub use scene::{B2buaScene, ALICE_PORT, B2BUA_PORT, BOB_PORT};
+pub use settle::settle_until;
+pub use spawn_params::{cluster_key, B2buaSpawnParams};
 use terminated::{TerminatedCalls, TerminatedCallsWriter};
+pub use wire_reads::{invite_final_statuses, stated, stated_by_response};
 pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 
 // ===========================================================================
@@ -56,68 +67,7 @@ pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 // "spawn the core", captured by [`B2buaSpawnParams`] + [`spawn_b2bua_core`].
 // `failover-harness` reuses these (it depends on this crate).
 
-/// Everything that varies between a single-SUT and a replicated b2bua spawn.
-/// The caller binds its own endpoint and passes it (plus these params) to
-/// [`spawn_b2bua_core`].
-pub struct B2buaSpawnParams {
-    /// `self_ordinal` (e.g. "w0" single-SUT, the worker ordinal in a cluster).
-    pub ordinal: String,
-    /// This worker's SIP wire address (drives `sip_local_ip`/`sip_local_port`).
-    pub sip_addr: SocketAddr,
-    pub decision: Arc<dyn CallDecisionEngine>,
-    pub limiter: Arc<dyn CallLimiter>,
-    /// Callflow services to register (ADR-0016). Empty for the plain path.
-    pub services: Vec<b2bua::rules::ServiceDef>,
-    pub outbound_proxy: Option<(String, u16)>,
-    /// Already-built replication setup (`None` → non-replicating). The caller
-    /// constructs this — keeping repl-net/topology deps out of this crate.
-    pub replication: Option<ReplicationSetup>,
-    pub clock: Clock,
-    pub id_gen: Arc<IdGen>,
-    /// CDR writer handed to the deps (the caller keeps its own handle to
-    /// snapshot what it wrote).
-    pub cdr: Arc<dyn CdrWriter>,
-    /// Worker-side overload signal to inject. `None` → the core mints a fresh
-    /// [`OverloadSignal::live`](b2bua::overload::OverloadSignal::live). A
-    /// `start_paused` test passes one built over the `simulated()`
-    /// sampler (retaining its control) so it can drive a known ELU THROUGH the
-    /// running 100 ms sampler task into the published `X-Overload` header.
-    pub overload: Option<b2bua::overload::OverloadSignal>,
-    /// Host-injected generic async-HTTP capability for a service's
-    /// `RuleAction::ServiceHttpRequest` (ADR-0016 seam). `None` → a service
-    /// firing the effect gets an `outcome:"error"` re-entry. A test builds one
-    /// over `SimulatedHttpNetwork` (mirroring the limiter injection) to
-    /// round-trip a binary adaptation body.
-    pub adaptation_http: Option<b2bua::AdaptationHttpPort>,
-    /// Compose-time built-in-machine selection (ADR-0016 opt-out seam).
-    /// `Default` = every built-in included. A downstream that
-    /// owns REFER via its own transfer machine passes
-    /// `ComposeOptions::default().without_core_refer_transfer()`.
-    pub compose: b2bua::rules::ComposeOptions,
-    /// [`CallStore`] override (ADR-0023). `None` → a fresh
-    /// [`InMemoryCallStore`]. On the replicating path the replication store is
-    /// the drain target and this slot is unused.
-    pub store: Option<Arc<dyn CallStore>>,
-    /// Store fault-injection handle (ADR-0023). `None` → no faults. `Some` does
-    /// two things with the SAME handle: wraps the (default or overridden)
-    /// store in a [`FaultInjectingCallStore`] and threads the handle as the
-    /// router's live-path probe, so one control drives both halves of the seam.
-    pub store_faults: Option<StoreFaults>,
-    /// Wire-fault handle (`b2bua::wire_faults`). `None` → compliant emission.
-    pub wire_faults: Option<WireFaults>,
-    /// Memory admission gate (ADR-0037). `None` → the core builds one over the
-    /// real process. A test passes one over a simulated
-    /// [`SystemProbe`](b2bua::capacity::SystemProbe) to drive the RSS bounds.
-    pub capacity: Option<b2bua::capacity::CapacityGate>,
-    /// The deferred backlog's ceilings ([`B2buaDeps::deferred_ceilings`]).
-    /// `None` → the worker's own.
-    pub deferred_ceilings: Option<sip_txn::DeferredBound>,
-    /// The node the worker serves ([`observe::NodeScope`]): what its log lines
-    /// and per-call trace facts name in a failure dump. `None` → `ordinal`.
-    pub node: Option<String>,
-}
-
-/// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
+/// Builds the base [`B2buaConfig`] (ip/port/ordinal/front wired),
 /// applies `tune`, assembles [`B2buaDeps`], and spawns the core on the
 /// already-bound `endpoint`. The single home for the spawn wiring that
 /// `B2buaSut` and `failover-harness`'s `ReplicatedB2buaSut` share.
@@ -133,11 +83,12 @@ pub fn spawn_b2bua_core(
 ) -> B2buaCore {
     let B2buaSpawnParams {
         ordinal,
+        identity,
         sip_addr,
         decision,
         limiter,
         services,
-        outbound_proxy,
+        front,
         replication,
         clock,
         id_gen,
@@ -148,6 +99,7 @@ pub fn spawn_b2bua_core(
         store,
         store_faults,
         wire_faults,
+        turn_probe,
         capacity,
         deferred_ceilings,
         node,
@@ -157,10 +109,11 @@ pub fn spawn_b2bua_core(
         self_ordinal: ordinal,
         sip_local_ip: sip_addr.ip().to_string(),
         sip_local_port: sip_addr.port(),
-        b2b_outbound_proxy: outbound_proxy,
-        // Every harness B2BUA checks the model invariants after each turn,
-        // release builds included.
+        front,
+        // Every harness B2BUA checks the model invariants after each turn, and
+        // shares one cluster key with every other (ADR-0055 §12).
         model_invariants: true,
+        cluster_key: Some(cluster_key()),
         ..Default::default()
     };
     tune(&mut config);
@@ -186,12 +139,14 @@ pub fn spawn_b2bua_core(
     );
     let deps = B2buaDeps {
         config,
+        identity,
         decision,
         limiter,
         cdr,
         store,
         store_faults,
         wire_faults: wire_faults.unwrap_or_default(),
+        turn_probe: turn_probe.unwrap_or_default(),
         clock,
         id_gen,
         refusals: Some(refusals),
@@ -209,64 +164,6 @@ pub fn spawn_b2bua_core(
 // The multi-node HA failover harness (FailoverHarness / ReplicatedB2buaSut /
 // ProxySut) lives in the `failover-harness` crate (ADR-0013 §0). This crate is
 // the single-SUT b2bua harness.
-
-/// Poll `cond` until it holds, yielding so spawned teardown / CDR-writer tasks
-/// drain. The single home for the "wait for the async teardown to land" loop.
-///
-/// Works under both wall-clock (`#[tokio::test]`) and `start_paused` tests:
-/// under a paused runtime the `sleep` auto-advances virtual time, so the
-/// awaited spawned tasks still get to run. Bounded (200 × 5 ms) so a real
-/// regression — `cond` never holds — falls through to the test's assertions
-/// instead of hanging.
-///
-/// For tests that must *advance the clock to trip a timer* (not merely drain
-/// already-due tasks), advance with `Harness::advance` first, then settle here.
-pub async fn settle_until(cond: impl Fn() -> bool) {
-    for _ in 0..200 {
-        if cond() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-}
-
-/// The first value `req` states under header `name`, as written on the wire.
-pub fn stated(req: &sip_message::SipRequest, name: &str) -> Option<String> {
-    req.raw_text(sip_message::header::HeaderName::from(name)).next().map(|v| v.as_str().to_string())
-}
-
-/// The first value `resp` states under header `name`, as written on the wire.
-pub fn stated_by_response(resp: &sip_message::SipResponse, name: &str) -> Option<String> {
-    resp.raw_text(sip_message::header::HeaderName::from(name))
-        .next()
-        .map(|v| v.as_str().to_string())
-}
-
-/// The distinct final statuses delivered to `to` for its initial-INVITE
-/// transaction (CSeq method INVITE) — the RFC 3261 §17.2.1
-/// one-final-per-transaction oracle shared by the cancelled-call scenarios.
-/// Retransmits of the SAME final dedup to one status; a
-/// regression's second, different final shows up as a second element.
-pub fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
-    use sip_message::parser::custom::CustomParser;
-    use sip_message::{Method, SipMessage, SipParser};
-    let mut statuses: Vec<u16> = report
-        .entries()
-        .iter()
-        .filter(|e| e.to == to)
-        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Response(r))
-                if r.status() >= 200 && *r.cseq().method() == Method::Invite =>
-            {
-                Some(r.status())
-            }
-            _ => None,
-        })
-        .collect();
-    statuses.sort_unstable();
-    statuses.dedup();
-    statuses
-}
 
 /// [`B2buaSut::force_brake_depth`]'s "no depth forced": the brake reads the live one.
 const NO_FORCED_DEPTH: usize = usize::MAX;
@@ -297,11 +194,11 @@ pub struct B2buaSut {
 /// binds and spawns the core (binds `{Uac, Uas}` roles; keepalive defaults 30/5
 /// applied FIRST then the caller `tune` LAST so a test overriding keepalive
 /// still wins; the default limiter (see [`limiter`](Self::limiter)), empty
-/// services, no replication, `Clock::test_at(0)`, id-gen seed `0xB2B0`, ordinal
+/// services, no replication, `Clock::test_at(0)` (see [`clock`](Self::clock)), id-gen seed `0xB2B0`, ordinal
 /// `"w0"` defaults).
 pub struct B2buaSutBuilder {
     decision: Arc<dyn CallDecisionEngine>,
-    outbound_proxy: Option<(String, u16)>,
+    front: Front,
     limiter: Option<Arc<dyn CallLimiter>>,
     limiter_store: Option<Arc<call_limiter::CallStore>>,
     services: Vec<b2bua::rules::ServiceDef>,
@@ -317,10 +214,19 @@ pub struct B2buaSutBuilder {
     deferred_ceilings: Option<sip_txn::DeferredBound>,
     keep_terminated_calls: bool,
     cdr_tap: Option<Arc<dyn CdrWriter>>,
+    turn_probe: Option<b2bua::TurnProbes>,
     untraced: bool,
+    clock: Option<Clock>,
 }
 
 impl B2buaSutBuilder {
+    /// Stamp the core's records on `clock` in place of `Clock::test_at(0)`: the
+    /// wall anchor of a run whose records leave the process.
+    pub fn clock(mut self, clock: Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     /// Trace no call: the process keeps the production trace gate, so a run
     /// measuring the per-call cost pays exactly what production pays. By
     /// default [`start`](Self::start) traces every call
@@ -345,11 +251,17 @@ impl B2buaSutBuilder {
         self
     }
 
-    /// Route the b-leg through the front proxy at `(host, port)` (the
-    /// `alice → proxy → b2bua → proxy → bob` topology; see
-    /// [`B2buaConfig::b2b_outbound_proxy`]).
-    pub fn outbound_proxy(mut self, host: &str, port: u16) -> Self {
-        self.outbound_proxy = Some((host.to_string(), port));
+    /// Report every turn to `probe`, which may hold it at a sub-point (ADR-0055 §13).
+    pub fn turn_probe(mut self, probe: b2bua::TurnProbes) -> Self {
+        self.turn_probe = Some(probe);
+        self
+    }
+
+    /// Run behind the single-face front proxy at `(host, port)` (the
+    /// `alice → proxy → b2bua → proxy → bob` topology): the b-leg goes through
+    /// it and every Contact names it ([`Front::single_face`]).
+    pub fn behind_proxy(mut self, host: &str, port: u16) -> Self {
+        self.front = Front::single_face(host, port);
         self
     }
 
@@ -482,7 +394,7 @@ impl B2buaSutBuilder {
         let since = model_gate::Since::now();
         let B2buaSutBuilder {
             decision,
-            outbound_proxy,
+            front,
             limiter,
             limiter_store,
             services,
@@ -498,7 +410,9 @@ impl B2buaSutBuilder {
             deferred_ceilings,
             keep_terminated_calls,
             cdr_tap,
+            turn_probe,
             untraced,
+            clock,
         } = self;
         if !untraced {
             failure_view::trace_every_call();
@@ -551,14 +465,15 @@ impl B2buaSutBuilder {
             Some(tap) => cdr.with_tap(tap),
             None => cdr,
         };
-        let clock = Clock::test_at(0);
+        let clock = clock.unwrap_or_else(|| Clock::test_at(0));
         let params = B2buaSpawnParams {
             ordinal: "w0".into(),
+            identity: String::new(),
             sip_addr: sa,
             decision,
             limiter,
             services,
-            outbound_proxy,
+            front,
             replication: None,
             clock: clock.clone(),
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
@@ -569,6 +484,7 @@ impl B2buaSutBuilder {
             store,
             store_faults,
             wire_faults,
+            turn_probe,
             capacity,
             deferred_ceilings,
             node: None,
@@ -578,10 +494,6 @@ impl B2buaSutBuilder {
             // tests advance in 30 s steps, so the harness baseline stays at 30 s.
             // A scenario can still override via `tune`.
             config.keepalive_interval_sec = 30;
-            // Production default is 32 s; the paused-clock keepalive-timeout
-            // tests advance a fixed 5 s after the probe, so the harness pins a
-            // 5 s grace to keep those steps valid (a scenario can `tune` it).
-            config.keepalive_timeout_sec = 5;
             // Panic-ELU rung: off in the harness baseline. The live
             // sampler reads a paused-clock `Harness::advance` as a saturated loop
             // (ELU ≈ 1.0) and would panic-503 the next new INVITE; the backstop is
@@ -633,11 +545,11 @@ impl Drop for B2buaSut {
 
 impl B2buaSut {
     /// Base builder: a B2BUA driven by `decision`, every other axis at its
-    /// default (no outbound proxy, the default limiter, no services, no-op tune).
+    /// default (standalone, the default limiter, no services, no-op tune).
     pub fn builder(decision: Arc<dyn CallDecisionEngine>) -> B2buaSutBuilder {
         B2buaSutBuilder {
             decision,
-            outbound_proxy: None,
+            front: Front::Standalone,
             limiter: None,
             limiter_store: None,
             services: Vec::new(),
@@ -653,110 +565,10 @@ impl B2buaSut {
             deferred_ceilings: None,
             keep_terminated_calls: false,
             cdr_tap: None,
+            turn_probe: None,
             untraced: false,
+            clock: None,
         }
-    }
-
-    /// Builder for a B2BUA that routes every call to `dest` (the common case).
-    pub fn route_all_to(dest_host: &str, dest_port: u16) -> B2buaSutBuilder {
-        Self::builder(Arc::new(ScriptedDecisionEngine::route_all_to(dest_host, dest_port)))
-    }
-
-    /// Builder for a B2BUA that routes every call to `dest` and authorizes REFER
-    /// transfers via the default `X-Api-Call`-keyed `/call/refer` behavior (the
-    /// REFER-scenario constructor).
-    pub fn route_all_with_refer(dest_host: &str, dest_port: u16) -> B2buaSutBuilder {
-        Self::builder(Arc::new(ScriptedDecisionEngine::route_all_with_refer(dest_host, dest_port)))
-    }
-
-    /// Builder for a B2BUA whose engine honors the full inbound `X-Api-Call`
-    /// control surface — a single `destination` pin, an ADR-0017 `routes`
-    /// failover plan walked on b-leg rejection (`/call/failure` pops the next
-    /// route), per-call `call_limiter` admission and the `features.refer` arm;
-    /// plan-less traffic falls back to routing to `dest`. Every activation is
-    /// the CALLER's to state — nothing is implied — which is what a replayed
-    /// document needs. This is the SUT the loadgen rerouting scenarios exercise
-    /// under the `api-call-pin` egress policy.
-    pub fn route_api_call(dest_host: &str, dest_port: u16) -> B2buaSutBuilder {
-        Self::builder(Arc::new(ScriptedDecisionEngine::route_by_api_call(dest_host, dest_port)))
-    }
-
-    /// Builder for a B2BUA that routes every call to `dest` with the
-    /// `relayFirst18xTo180` feature active under `strategy` (suppress / fake-prack).
-    pub fn route_all_to_with_18x(
-        dest_host: &str,
-        dest_port: u16,
-        strategy: call::features::RelayFirst18xStrategy,
-    ) -> B2buaSutBuilder {
-        let dest = (dest_host.to_string(), dest_port);
-        Self::builder(Arc::new(
-            b2bua::decision::ScriptedDecisionEngine::builder()
-                .fallback(move |_req| {
-                    b2bua::decision::NewCallResponse::Route(
-                        b2bua::decision::test_adapter::route_to_with_18x(&dest.0, dest.1, strategy),
-                    )
-                })
-                .build(),
-        ))
-    }
-
-    /// Builder for a B2BUA that routes every call to `dest` with the
-    /// `relayFirst18xTo180` feature active under `strategy` and an explicit
-    /// [`call::features::Relay18xMessages`] policy.
-    pub fn route_all_to_with_18x_messages(
-        dest_host: &str,
-        dest_port: u16,
-        strategy: call::features::RelayFirst18xStrategy,
-        messages: call::features::Relay18xMessages,
-    ) -> B2buaSutBuilder {
-        let dest = (dest_host.to_string(), dest_port);
-        Self::builder(Arc::new(
-            b2bua::decision::ScriptedDecisionEngine::builder()
-                .fallback(move |_req| {
-                    b2bua::decision::NewCallResponse::Route(
-                        b2bua::decision::test_adapter::route_to_with_18x_messages(
-                            &dest.0, dest.1, strategy, messages,
-                        ),
-                    )
-                })
-                .build(),
-        ))
-    }
-
-    /// Builder for a B2BUA that routes the call to `dest_port` (bob1) with the
-    /// `relayFirst18xTo180` feature active under `strategy` and a `callback_context`
-    /// set (the failover-capable marker), and fails over via `/call/failure` to
-    /// `failover_port` (bob2) with `failover_ruri` as the new Request-URI. Mirrors
-    /// the TS `on_failure: { action: "failover", destination, new_ruri }` instruction.
-    pub fn route_all_to_with_18x_failover(
-        dest_host: &str,
-        dest_port: u16,
-        failover_port: u16,
-        failover_ruri: &str,
-        strategy: call::features::RelayFirst18xStrategy,
-    ) -> B2buaSutBuilder {
-        use b2bua::decision::test_adapter::route_to_with_18x;
-        use b2bua::decision::{CallFailureResponse, NewCallResponse};
-        let primary = (dest_host.to_string(), dest_port);
-        let failover = (dest_host.to_string(), failover_port);
-        let failover_ruri = failover_ruri.to_string();
-        Self::builder(Arc::new(
-            ScriptedDecisionEngine::builder()
-                .fallback(move |_req| {
-                    let mut r = route_to_with_18x(&primary.0, primary.1, strategy);
-                    r.callback_context = Some("failover-test".into());
-                    // The TS relies on the 30 s platform no-answer default the Rust
-                    // default route omits — set it so the no-answer failover fires.
-                    r.no_answer_ms = Some(30_000);
-                    NewCallResponse::Route(r)
-                })
-                .on_failure(move |_req| {
-                    let mut r = route_to_with_18x(&failover.0, failover.1, strategy);
-                    r.new_ruri = Some(failover_ruri.clone());
-                    CallFailureResponse::Route(r)
-                })
-                .build(),
-        ))
     }
 
     pub fn cdr_records(&self) -> Vec<CdrRecord> {
@@ -899,12 +711,6 @@ impl B2buaSut {
     /// posts one: a stand-in for an event already in flight when it is posted.
     pub fn post_event(&self, event: b2bua::CallEvent) {
         self._core.post_event(event);
-    }
-
-    /// The live copy of `call_ref` this worker serves, if any (introspection:
-    /// what its rules read at the next event).
-    pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
-        self._core.live_call(call_ref)
     }
 
     /// Live per-call serialization-lock count. Should return to 0 once traffic

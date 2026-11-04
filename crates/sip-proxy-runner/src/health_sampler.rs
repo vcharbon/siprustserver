@@ -1,8 +1,8 @@
 //! The health sampler: every 2 s it publishes the recv shards' stall gauge,
-//! the worker-health and acceptance gauges and the discovery's own health, so
-//! an empty or unprobed pool and the reason for it are observable in
-//! Prometheus, not only through readiness. A shard's stall and its recovery
-//! are each logged once.
+//! the external face gauge, the worker-health and acceptance gauges and the
+//! discovery's own health, so an empty or unprobed pool, an unusable external
+//! face and the reason for each are observable in Prometheus, not only
+//! through readiness. A shard's stall and its recovery are logged once.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +13,8 @@ use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use topology::K8sMembership;
 
+use crate::external_face::FaceMonitor;
+
 /// What the sampler reads and where it publishes.
 pub struct HealthSampler {
     pub registry: Arc<dyn WorkerRegistry>,
@@ -22,6 +24,8 @@ pub struct HealthSampler {
     pub pulse: Arc<ShardPulse>,
     pub clock: Clock,
     pub stall_ms: u64,
+    /// The external face `/readyz` requires, `None` for none.
+    pub external_face: Option<Arc<FaceMonitor>>,
 }
 
 /// How often the sampler publishes.
@@ -41,6 +45,7 @@ impl HealthSampler {
                 loop {
                     ticker.tick().await;
                     stalled_before = sampler.sample(stalled_before);
+                    sampler.sample_face();
                 }
             }
         })
@@ -60,7 +65,7 @@ impl HealthSampler {
                 tracing::error!(
                     shards = ?stalled,
                     threshold_ms = self.stall_ms,
-                    "recv shard(s) stalled on one packet — /healthz, /readyz and /vrrp fail"
+                    "recv shard(s) stalled on one packet — /healthz and /readyz fail"
                 );
             }
         }
@@ -81,5 +86,12 @@ impl HealthSampler {
             None => m.set_discovery(false, None),
         }
         stalled
+    }
+
+    /// Whether the external face is usable, published (the monitor logs
+    /// each change).
+    fn sample_face(&self) {
+        let usable = self.external_face.as_ref().is_none_or(|monitor| monitor.usable());
+        self.metrics.set_external_face_usable(usable);
     }
 }

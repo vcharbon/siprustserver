@@ -72,7 +72,7 @@ pub struct Defect {
 }
 
 /// What a turn has reported and the shell has not drained yet.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TurnNotes {
     trace: Vec<TraceFact>,
     repeat_give_ups: Vec<&'static str>,

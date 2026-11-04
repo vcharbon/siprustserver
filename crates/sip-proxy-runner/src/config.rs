@@ -2,6 +2,8 @@
 //! through a lookup ([`ProxyConfig::from_lookup`]). The keys, their defaults
 //! and their ranges are listed in the `sip-proxy-runner` binary's module doc.
 
+mod branch_memo;
+mod external_face;
 mod preflight;
 mod process_env;
 mod reader;
@@ -9,6 +11,7 @@ mod reader;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use sip_proxy::cancel_lru::{calls_per_second, MemoBounds};
 use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
 use sip_proxy::resolver::ResolverConfig;
@@ -17,6 +20,10 @@ use sip_proxy::{FaceCidrs, ProxyAddr};
 
 pub use preflight::{refusal, validate_config, ProbeTimingConfig};
 use reader::{EnvReader, Span};
+
+use crate::external_face::FaceCheck;
+use branch_memo::branch_memo;
+use external_face::external_face_check;
 
 /// Where the worker pool comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +60,13 @@ pub struct ProxyConfig {
     pub bind_retry_deadline: Duration,
     pub hmac_kid: String,
     pub hmac_key: String,
+    /// The workers' shared key the dead notice is signed with (ADR-0050 §3);
+    /// `None` sends no notice.
+    pub cluster_key: Option<sip_ids::SigningKey>,
     pub probe: HealthProbeConfig,
+    /// No worker answer for this long reads the proxy isolated
+    /// (`HEALTH_ISOLATION_MS`): unfit on `/fitz`.
+    pub isolation_window: Duration,
     pub observer: LoadObserverConfig,
     /// The intake-shed watermark, percent of `queue_max`.
     pub intake_shed_pct: u64,
@@ -61,13 +74,26 @@ pub struct ProxyConfig {
     pub self_gate: Option<ProxySelfGateConfig>,
     /// The spread, seconds, added to a refusal's `Retry-After` base.
     pub retry_after_jitter_sec: u32,
+    /// The entry cap and byte budget of the CANCEL/ACK branch memo.
+    pub branch_memo: MemoBounds,
     pub resolver: ResolverConfig,
     pub prewarm: Vec<ProxyAddr>,
     pub drain_grace: Duration,
+    /// The external face `/readyz` requires usable; `None` checks none.
+    pub external_face_check: Option<FaceCheck>,
+    /// How often the external face is read (`PROXY_EXT_FACE_CHECK_MS`).
+    pub external_face_period: Duration,
 }
 
 /// The largest millisecond value a duration variable takes (about 24 days).
 const MAX_MS: u64 = u32::MAX as u64;
+
+/// `HEALTH_ISOLATION_MS`'s default: one probe interval, the first Timer E
+/// retransmission and 500 ms for the answer's way back.
+const DEFAULT_ISOLATION_MS: u64 = 2_000;
+
+/// RFC 3261 T1: the first retransmission of an unanswered probe.
+const T1_MS: u64 = 500;
 
 impl ProxyConfig {
     /// Reads every boot variable through `get` (`None` = unset).
@@ -95,27 +121,81 @@ impl ProxyConfig {
         let bind_retry_interval =
             Duration::from_millis(env.int("PROXY_BIND_RETRY_INTERVAL_MS", 200, 1, MAX_MS));
         let bind_retry_deadline =
-            Duration::from_millis(env.int("PROXY_BIND_RETRY_DEADLINE_MS", 10_000, 1, MAX_MS));
+            Duration::from_millis(env.int("PROXY_BIND_RETRY_DEADLINE_MS", 20_000, 1, MAX_MS));
         let hmac_kid = env.text("PROXY_HMAC_KID", "k0");
         let hmac_key = hmac_key(&mut env);
+        let cluster_key = cluster_key(&mut env);
+        let probe_default = HealthProbeConfig::default();
         let probe = HealthProbeConfig {
-            interval_ms: env.int("HEALTH_INTERVAL_MS", 1000, 1, MAX_MS),
-            timeout_ms: env.int("HEALTH_TIMEOUT_MS", 1500, 1, MAX_MS),
-            threshold: env.int_u32("HEALTH_THRESHOLD", 2, 1, u32::MAX),
+            interval_ms: env.int("HEALTH_INTERVAL_MS", probe_default.interval_ms, 1, MAX_MS),
+            timeout_ms: env.int("HEALTH_TIMEOUT_MS", probe_default.timeout_ms, 1, MAX_MS),
+            threshold: env.int_u32("HEALTH_THRESHOLD", probe_default.threshold, 1, u32::MAX),
         };
+        let isolation_ms = env.int("HEALTH_ISOLATION_MS", DEFAULT_ISOLATION_MS, 1, MAX_MS);
+        let isolation_window = Duration::from_millis(isolation_ms);
         let observer = observer_overrides(&mut env, LoadObserverConfig::default());
         let intake_shed_pct = env.int("PROXY_INTAKE_SHED_PCT", 50, 0, 100);
         let self_gate = self_gate(&mut env);
         let retry_after_jitter_sec = env.int_u32("PROXY_RETRY_AFTER_JITTER_SEC", 5, 0, 3600);
+        let branch_memo = branch_memo(&mut env);
         let resolver = resolver(&mut env);
         let prewarm = prewarm(&mut env);
-        let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 5000, 1, MAX_MS));
+        let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 8_800, 1, MAX_MS));
+        let external_face_check = external_face_check(&mut env);
+        let external_face_period =
+            Duration::from_millis(env.int("PROXY_EXT_FACE_CHECK_MS", 500, 10, 60_000));
+        // Read by the trace registry; refused here unless on or off.
+        env.flag(observe::TRACE_HEADER_ENV, false);
 
         let mut errors = env.into_errors();
         let timings =
             ProbeTimingConfig { interval_ms: probe.interval_ms, timeout_ms: probe.timeout_ms };
         if let Err(violations) = validate_config(timings, &observer) {
             errors.extend(violations);
+        }
+        // The memo holds the entries of every call the self-gate admits. The
+        // gate counts the external INVITEs; the B-legs the workers send
+        // bypass it, so the check holds while the system's whole rate stays
+        // within one proxy's gate, each B-leg pairing an admitted call.
+        if let Some(gate) = &self_gate {
+            let held = calls_per_second(&branch_memo);
+            if held < usize::try_from(gate.cps_bucket_rate).unwrap_or(usize::MAX) {
+                errors.push(format!(
+                    "PROXY_BRANCH_MEMO_MAX_ENTRIES={} / PROXY_BRANCH_MEMO_MAX_BYTES={} hold the \
+                     memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={}, \
+                     PROXY_BRANCH_MEMO_INVITES_PER_CALL={} and an INVITE entry cap of {} ms \
+                     (PROXY_INVITE_TXN_TIMEOUT_SEC + Timer H), below \
+                     PROXY_SELF_GATE_CPS_RATE={}: admitted calls would push out the entries \
+                     their CANCEL and ACK are routed by",
+                    branch_memo.max_entries,
+                    branch_memo.max_bytes,
+                    branch_memo.mean_ring_ms,
+                    branch_memo.invites_per_call_milli as f64 / 1_000.0,
+                    branch_memo.invite_ttl_ms,
+                    gate.cps_bucket_rate
+                ));
+            }
+        }
+        // A healthy proxy whose probes to every worker lose their first copy
+        // still hears the answer to a Timer E copy inside the window.
+        let isolation_floor = probe.interval_ms.saturating_add(T1_MS);
+        if isolation_ms < isolation_floor {
+            errors.push(format!(
+                "HEALTH_ISOLATION_MS={isolation_ms} must be at least HEALTH_INTERVAL_MS={} + T1 \
+                 {T1_MS} ms: a proxy whose probes lose their first copy would read itself \
+                 isolated",
+                probe.interval_ms
+            ));
+        }
+        // A recreated pod on the same host binds the faces its predecessor
+        // holds until that one's drain ends.
+        if bind_retry_deadline <= drain_grace {
+            errors.push(format!(
+                "PROXY_BIND_RETRY_DEADLINE_MS={} must exceed PROXY_DRAIN_GRACE_MS={}: a \
+                 recreated pod would give up binding before its predecessor's drain ends",
+                bind_retry_deadline.as_millis(),
+                drain_grace.as_millis()
+            ));
         }
         if !errors.is_empty() {
             return Err(errors);
@@ -135,14 +215,19 @@ impl ProxyConfig {
             bind_retry_deadline,
             hmac_kid,
             hmac_key,
+            cluster_key,
             probe,
+            isolation_window,
             observer,
             intake_shed_pct,
             self_gate,
             retry_after_jitter_sec,
+            branch_memo,
             resolver,
             prewarm,
             drain_grace,
+            external_face_check,
+            external_face_period,
         })
     }
 }
@@ -287,6 +372,22 @@ fn hmac_key(env: &mut EnvReader) -> String {
     }
 }
 
+/// `PROXY_CLUSTER_KEY`, the workers' shared key: unset is none, a value out
+/// of the key's bounds refuses the boot.
+fn cluster_key(env: &mut EnvReader) -> Option<sip_ids::SigningKey> {
+    let value = env.present("PROXY_CLUSTER_KEY")?;
+    let key = sip_ids::SigningKey::new(value.as_bytes());
+    if key.is_none() {
+        env.refuse(format!(
+            "PROXY_CLUSTER_KEY must hold {} to {} bytes, got {}",
+            sip_ids::MIN_KEY_BYTES,
+            sip_ids::MAX_KEY_BYTES,
+            value.len()
+        ));
+    }
+    key
+}
+
 /// A `PROXY_UDP_*BUF` request in bytes: 4 MiB when unset, the kernel default
 /// (`None`) when set empty.
 fn socket_buffer(env: &mut EnvReader, key: &str) -> Option<usize> {
@@ -305,6 +406,8 @@ fn observer_overrides(env: &mut EnvReader, mut cfg: LoadObserverConfig) -> LoadO
     set("LB_BAND_HYSTERESIS", &mut cfg.band_hysteresis, Span::FromZero);
     set("LB_AIMD_DECREASE_FACTOR", &mut cfg.aimd_decrease_factor, Span::OpenUnit);
     set("LB_AIMD_INCREASE_STEP_CPS", &mut cfg.aimd_increase_step_cps, Span::Positive);
+    set("LB_AIMD_COOLDOWN_TICKS", &mut cfg.aimd_cooldown_ticks, Span::Positive);
+    set("LB_CAP_INITIAL_CPS", &mut cfg.cap_initial_cps, Span::Positive);
     set("LB_CAP_CEILING_CPS", &mut cfg.cap_ceiling_cps, Span::Positive);
     set("LB_CAP_FLOOR_CPS", &mut cfg.cap_floor_cps, Span::Positive);
     cfg

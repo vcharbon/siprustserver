@@ -10,12 +10,15 @@
 //! - [`rules`] — the rule engine and every rule family, the action executor
 //!   and vocabulary, the invariants, relay construction;
 //! - [`rule_chain`] — the per-turn framework around the rules;
+//! - [`dialog_gate`] — what the dialog gate makes of a message before any
+//!   rule reads it;
 //! - [`landing`] — the pass a turn's result takes before the shell persists it;
 //! - [`initial_invite`], [`decision`] — the initial INVITE's folds and the
 //!   decision DTOs;
 //! - [`effects`] — the effect vocabulary a turn returns;
-//! - [`turn_scope`], [`turn_notes`], [`wire_fault_set`] — a turn's inputs and
-//!   what it reports.
+//! - [`unheld_response`] — the answer to a response for a call no node holds;
+//! - [`turn_scope`], [`turn_notes`], [`wire_fault_set`], [`owners`] — a turn's
+//!   inputs and what it reports.
 #![cfg_attr(
     not(test),
     deny(
@@ -35,11 +38,14 @@
 )]
 
 pub mod answer_deadline;
+pub mod answered_finals;
 pub mod attempts;
+pub use b2bua_sdk::caller_tags;
 pub mod config;
 pub mod decision;
 pub mod decision_log;
 pub mod destination_allowlist;
+pub mod dialog_gate;
 pub mod effects;
 pub mod failure_terminate;
 pub mod failure_unavailable;
@@ -48,14 +54,21 @@ pub mod landing;
 pub mod limiter;
 pub mod message_ring;
 pub mod obligations;
+pub mod off_turn;
+pub mod owners;
 pub mod reaper_verdict;
 pub mod ring_deadline;
 pub mod rule_chain;
+#[cfg(any(test, feature = "testkit"))]
+pub mod rule_fixture;
 pub mod rules;
 pub mod stack_identity;
 #[cfg(any(test, feature = "testkit"))]
 pub mod test_call;
 pub mod timer_arm;
+#[cfg(any(test, feature = "testkit"))]
+pub mod turn_driver;
 pub mod turn_notes;
 pub mod turn_scope;
+pub mod unheld_response;
 pub mod wire_fault_set;

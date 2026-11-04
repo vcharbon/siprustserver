@@ -1,0 +1,54 @@
+{{- /*
+The workers' ingress: SIP from the proxies, replication from the other
+workers, the probe port from the monitoring namespace. Everything else is
+refused, the operator listener included (it binds loopback). The kubelet's
+probes come from the pod's own node, which a NetworkPolicy never blocks.
+
+The proxies are hostNetwork, so no pod selector names them: their calls reach
+a worker from the internal VIP and their OPTIONS probes and dead notices from
+the source address their node uses toward pod IPs (`proxyNodeCidrs`, see
+values.yaml), both allowed as ipBlocks. Without the proxy a worker is standalone and
+takes SIP from anywhere. Policies add up: a port a product adds through
+`worker.extraPorts` is opened by a NetworkPolicy of its own.
+*/ -}}
+{{- if and .Values.worker.enabled .Values.worker.networkPolicy.enabled }}
+{{- $w := .Values.worker }}
+{{- $np := $w.networkPolicy }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: b2bua-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "b2bua-worker") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app: b2bua-worker }
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { port: 5060, protocol: UDP }
+      {{- if .Values.proxy.enabled }}
+      {{- if not $np.proxyNodeCidrs }}
+      {{- fail "worker.networkPolicy.proxyNodeCidrs is required while the proxy is enabled: the CIDRs of the proxy nodes' internal-plane addresses, the source of their OPTIONS probes and dead notices (or worker.networkPolicy.enabled=false)" }}
+      {{- end }}
+      from:
+        {{- $vip := include "siprust.net" (dict "root" $ "key" "proxyVip") }}
+        - ipBlock: { cidr: {{ printf "%s/%s" $vip (ternary "128" "32" (contains ":" $vip)) }} }
+        {{- range $np.proxyNodeCidrs }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+      {{- end }}
+    {{- if $w.replication.enabled }}
+    - ports:
+        - { port: {{ int $w.replication.port }}, protocol: TCP }
+      from:
+        - podSelector:
+            matchLabels: { app: b2bua-worker }
+    {{- end }}
+    - ports:
+        - { port: 9091, protocol: TCP }
+      from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.monitoringNamespace }} }
+{{- end }}

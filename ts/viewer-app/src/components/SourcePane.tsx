@@ -70,7 +70,7 @@ export const SourceLadder = ({ source, pivot, flows }: SourceLadderProps): JSX.E
               onChange={(event) => setGroupsOnly(event.target.checked)}
               disabled={source.callGroups.length === 0}
             />
-            case groups only (off: the whole capture, which is what triage reads)
+            <span title="off: the whole capture">case groups only</span>
           </label>
           <WindowLine window={{ ...flows.window, beyond: flows.beyond, total: source.legs, onWindow: flows.onWindow }} />
           {flows.error !== undefined && <p className="error">{flows.error}</p>}
@@ -105,14 +105,14 @@ export const SourceLadder = ({ source, pivot, flows }: SourceLadderProps): JSX.E
         {selected
           ? `raw · leg ${selected.legIndex} msg ${selected.message.msgIndex}${
             selected.stepId === undefined
-              ? selected.selected ? "" : " · leg discarded by this case"
+              ? selected.selected ? "" : " · not this case's"
               : ` · step ${selected.stepId}`
           }`
           : "raw"}
       </h3>
       <pre className="raw">
         {selected?.message.raw === undefined || selected.message.raw === ""
-          ? "click a message in the source ladder to read its bytes"
+          ? "—"
           : selected.message.raw}
       </pre>
     </section>
@@ -136,7 +136,7 @@ export const SourcePane = (
   { id, variant, pivot }: { id: string; variant: string; pivot: PivotV3 | undefined }
 ): JSX.Element => {
   const source = useAsync(() => api.caseSource(id, variant), `${id}#${variant}#source`)
-  if (source.state === "loading") return <p className="muted">loading the capture source…</p>
+  if (source.state === "loading") return <p className="muted">loading…</p>
   if (source.state === "error") return <p className="error">{source.message}</p>
   if (!source.value.available) {
     return (

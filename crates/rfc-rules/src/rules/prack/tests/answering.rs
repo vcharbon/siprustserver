@@ -86,6 +86,47 @@ fn a_prack_draws_2xx_on_a_match_and_481_without_one() {
     assert!(matches!(decide(&Prack2xxOr481, &rejected)[0].decision, Decision::Compliant));
 }
 
+/// `prack-2xx-or-481`: a UAS taking the PRACK at its Contact, not at the
+/// address it sent the provisional from, holds the same `RSeq` state there:
+/// the PRACK matches and owes the 2xx.
+#[test]
+fn a_prack_taken_at_the_uas_contact_matches_the_provisional_it_sent() {
+    let flow = |status: u16| {
+        vec![
+            inv_resp(1_100_000, 180, &reliable_rows(1), false),
+            via_contact(prack_on(1_200_000, "1 1 INVITE", false)),
+            via_contact(prack_answer(1_250_000, status)),
+        ]
+    };
+    let f = decide(&Prack2xxOr481, &flow(200));
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+    assert_eq!(f[0].emitter, UAS_CONTACT);
+    let f = decide(&Prack2xxOr481, &flow(481));
+    let Decision::Violated(Evidence::PrackAnsweredWrongly { rack_matched, .. }) = &f[0].decision
+    else {
+        panic!("prack-answer evidence: {:?}", f[0].decision)
+    };
+    assert!(*rack_matched, "the RAck names the provisional the UAS sent");
+}
+
+/// `prack-2xx-or-481`: a PRACK sent straight to the UAS past a proxy that
+/// did not record-route matches the provisional the UAS sent through it.
+#[test]
+fn a_prack_sent_past_a_proxy_matches_the_provisional_the_uas_sent() {
+    let [ringing, ringing_relayed] =
+        through_proxy(inv_resp(1_100_000, 180, &reliable_rows(1), false));
+    let flow = vec![
+        ringing,
+        ringing_relayed,
+        prack_on(1_200_000, "1 1 INVITE", false),
+        prack_answer(1_250_000, 200),
+    ];
+    let f = decide(&Prack2xxOr481, &flow);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+}
+
 /// `prack-2xx-or-481`: a provisional an earlier PRACK of another transaction
 /// drew a 2xx for is acknowledged, so a new PRACK naming it matches nothing
 /// unacknowledged and owes the 481 (RFC 3262 §3).

@@ -9,6 +9,9 @@ description = "SIP transaction layer (RFC 3261 §17 client/server FSMs + retrans
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

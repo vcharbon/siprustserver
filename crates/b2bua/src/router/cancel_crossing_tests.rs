@@ -36,14 +36,18 @@ fn relayed_answer_call() -> Call {
     let mut a1 = Dialog::new("a1", call.a_leg_invite.from_tag.clone(), DialogState::Confirmed, 1);
     a1.remote_target = "sip:alice@10.0.0.9:5060".into();
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
-    call.a_leg.invite_final_sent = Some(200);
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     let (emission, _) = RetainedEmission::paced(
         b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
         ("10.0.0.9".into(), 5060),
         Class::Final2xx,
         Repeated::response("INVITE", 200),
     );
-    a1.answered_2xx = Some(Unacked2xx { dialog_tag: "a1".into(), cseq: 1, emission });
+    call::helpers::hold_answered_2xx(
+        &mut a1,
+        1,
+        Unacked2xx { dialog_tag: "a1".into(), cseq: 1, emission },
+    );
     call.a_leg.dialogs = vec![a1].into();
     call.a_leg.own_tag = Some("a1".into());
     let obligation = Obligation::AckOf2xx { leg: "a".into(), dialog_tag: "a1".into(), cseq: 1 };
@@ -54,13 +58,14 @@ fn relayed_answer_call() -> Call {
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = "b-cid@10.0.0.2".into();
-    b.outbound_invite = Some(OutboundInvite::new("b2bua-b-tag", 1, 0, None));
+    b.invite = Some(call::RequestRecord::dialled(1, None, OutboundInvite::new("b2bua-b-tag", 0)));
     b.own_tag = None;
-    b.invite_final_sent = None;
+    *b.invite_final_sent_mut() = None;
     let mut bob = Dialog::new("b2bua-b-tag", "bob-tag", DialogState::Confirmed, 1);
     bob.remote_target = "sip:bob@10.0.0.2:5060".into();
     b.dialogs = vec![bob].into();
-    call::helpers::add_b_leg(call, b)
+    call::helpers::add_b_leg(&mut call, b);
+    call
 }
 
 #[tokio::test(start_paused = true)]
@@ -74,6 +79,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         in_dialog: false,
         headers: vec![],
         to_tag: Some("a1".into()),
+        at_ms: 0,
     };
     let (call_ref, source_leg_id) = (call.call_ref.clone(), call.a_leg.leg_id.clone());
     let input = TurnInput {
@@ -82,7 +88,9 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         source_leg_id: &source_leg_id,
         direction: Direction::FromA,
         resolved: Default::default(),
+        matched_client_txn: false,
         now_ms: 1_000,
+        owners: Default::default(),
     };
     let fw = node.core.router_ctx().framework();
     let result = rule_chain_turn(&fw, call, input, &mut super::test_support::turn(1));
@@ -101,11 +109,11 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
     };
     assert_eq!(requests_to("a"), Vec::<String>::new(), "nothing goes to the caller");
     assert!(requests_to("b-1").iter().any(|m| m == "BYE"), "bob gets his BYE");
-    assert_eq!(result.call.a_leg.invite_final_sent, Some(487), "the final the wire carries");
+    assert_eq!(result.call.a_leg.invite_final_sent(), Some(487), "the final the wire carries");
     assert_eq!(result.call.a_leg.state(), LegState::Terminated, "the caller holds no dialog");
     assert!(!call::helpers::caller_answered(&result.call), "the caller was never answered");
     assert!(
-        result.call.a_leg.dialogs.iter().all(|d| d.answered_2xx.is_none()),
+        result.call.a_leg.dialogs.iter().all(|d| d.answered_invite.is_none()),
         "no 2xx awaits the caller's ACK"
     );
     let ladders: Vec<_> = result

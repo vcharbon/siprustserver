@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Recovered when both VIPs are routed over every live proxy's node again.
+# Exit 75 while not yet, or while a read fails. Facts: the next hops and each
+# worker's restarts since the freeze, re-read here, after the heal (a liveness
+# restart of a frozen container lands once it is thawed).
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+routes="$(hk_probe_routed_over_live "$HAKIT_PARAM_PROXY_SELECTOR")"
+restarts="$(hk_restarts_since_inject)" || exit "$HK_NOT_YET"
+jq -cn --argjson r "$routes" --argjson n "$restarts" --argjson at "$(hk_now_ms)" \
+  '{next_hops: $r, worker_restarts: $n, announced_at_ms: $at}'

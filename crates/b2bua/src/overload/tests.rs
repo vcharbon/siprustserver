@@ -125,6 +125,9 @@ pub(super) fn admit(sig: &OverloadSignal, emergency: bool) -> Result<(), Refused
         fn token_wait_sec(&self) -> u32 {
             self.0.token_wait_sec()
         }
+        fn event_queue_refusing(&self) -> bool {
+            false
+        }
     }
     let class = if emergency { Class::Emergency } else { Class::Normal };
     let refused = first_refusal(class, &Signal(sig));

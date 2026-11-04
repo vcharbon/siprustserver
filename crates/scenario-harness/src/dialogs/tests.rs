@@ -357,3 +357,42 @@ fn a_refer_sub_false_refer_opens_no_subscription() {
         Some(VerdictKind::Ended { by: None })
     );
 }
+
+/// A message with the header line `extra` added after its Call-ID.
+fn with_line(text: String, extra: &str) -> SipMessage {
+    parse(text.replacen("Call-ID:", &format!("{extra}\r\nCall-ID:"), 1))
+}
+
+/// RFC 3262 §3: a PRACK whose `RAck` names a reliable provisional the UA sent
+/// on its dialog is owed a 2xx; one naming another RSeq, or riding another
+/// dialog, names nothing.
+#[test]
+fn a_prack_names_the_reliable_provisional_the_ua_sent() {
+    let mut t = super::reliable::ReliableSent::default();
+    let text = format!(
+        "SIP/2.0 183 Session Progress\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1INVITE\r\n\
+         From: {}\r\nTo: {}\r\nCall-ID: {CALL}\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n",
+        tagged("a", Some("A1")),
+        tagged("b", Some("B1")),
+    );
+    let SipMessage::Response(reliable) = with_line(text, "Require: 100rel\r\nRSeq: 7") else {
+        unreachable!()
+    };
+    t.note(&reliable);
+    let prack = |rack: &str, to: &str| {
+        let text = format!(
+            "PRACK sip:x@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2PRACK\r\n\
+             From: {}\r\nTo: {}\r\nCall-ID: {CALL}\r\nCSeq: 2 PRACK\r\n\
+             Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+            tagged("a", Some("A1")),
+            tagged("b", Some(to)),
+        );
+        let SipMessage::Request(r) = with_line(text, &format!("RAck: {rack}")) else {
+            unreachable!()
+        };
+        r
+    };
+    assert!(t.names(&prack("7 1 INVITE", "B1")));
+    assert!(!t.names(&prack("8 1 INVITE", "B1")));
+    assert!(!t.names(&prack("7 1 INVITE", "B9")));
+}

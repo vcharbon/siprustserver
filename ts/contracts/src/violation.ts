@@ -104,6 +104,7 @@ export const RFC_RULES = [
   "strict-route-rewrite-handled",
   "strict-route-shuffle-on-send",
   "tag-consistency",
+  "taken-final-ends-invite-txn",
   "to-tag-presence",
   "unacked-2xx-not-cleared",
   "unacked-invite-non-2xx-final",

@@ -63,7 +63,7 @@ ensure_sipext_net() {
     source "$HERE/../k8s/lib/net-env.sh"
   fi
   SIPEXT_NET="${SIPEXT_NET:-sipext}"
-  SIPEXT_SUBNET="${SIPEXT_SUBNET:-192.168.60.0/24}"
+  SIPEXT_SUBNET="${SIPEXT_SUBNET:-192.168.60.0/25}"
   SIPEXT_GATEWAY="${SIPEXT_GATEWAY:-192.168.60.1}"
   export SIPEXT_NET   # compose interpolates ${SIPEXT_NET:-sipext}
   if ! docker network inspect "$SIPEXT_NET" >/dev/null 2>&1; then
@@ -71,6 +71,7 @@ ensure_sipext_net() {
     docker network create --driver bridge \
       --subnet "$SIPEXT_SUBNET" --gateway "$SIPEXT_GATEWAY" \
       -o com.docker.network.bridge.enable_ip_masquerade=false \
+      -o "com.docker.network.bridge.name=${SIPEXT_BRIDGE:-br-sipext}" \
       "$SIPEXT_NET" >/dev/null
   fi
 }

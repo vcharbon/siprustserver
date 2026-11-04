@@ -117,6 +117,7 @@ async fn run(
         media: Booking::new("127.0.0.1", 40000),
         base_dir,
         composer: &Composer,
+        events: None,
     };
     let dir = std::env::temp_dir().join("pivot-runs").join(case);
     pivot_interpreter::replay(document, config, lane, system, &dir)

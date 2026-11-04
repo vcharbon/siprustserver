@@ -227,3 +227,21 @@ fn parse_peer_list_accepts_host_with_no_port() {
     assert_eq!(peers[0].host, "10.0.0.1");
     assert_eq!(peers[1].host, "b2b.svc.cluster.local");
 }
+
+#[tokio::test]
+async fn a_new_worker_identity_at_the_same_host_is_a_changed_binding() {
+    let elder = Peer::new("w0", "h0").with_identity("uid-a");
+    let state = MembershipState::new(vec![elder.clone()]);
+    let mut rx = state.changes();
+    let successor = Peer::new("w0", "h0").with_identity("uid-b");
+
+    reconcile_to_desired(&state, vec![elder]);
+    assert!(rx.try_recv().is_err(), "an unchanged binding emits nothing");
+    reconcile_to_desired(&state, vec![successor.clone()]);
+    assert_eq!(rx.try_recv().unwrap(), MemberDelta::AddressChanged(successor.clone()));
+    assert_eq!(state.resolve("w0"), Some(successor.clone()));
+
+    // A condition flip keeps the binding it applies to.
+    reconcile_to_desired(&state, vec![successor.clone().not_ready()]);
+    assert_eq!(rx.try_recv().unwrap(), MemberDelta::ConditionsChanged(successor.not_ready()));
+}

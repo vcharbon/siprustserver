@@ -25,10 +25,10 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-/// Named counters one episode can accumulate. Four covers every current call
-/// site (`hydrated`/`resolved`/`self_released`/`refused_terminated` is the
-/// widest).
-pub const MAX_COUNTERS: usize = 4;
+/// Named counters one episode can accumulate. Five covers every current call
+/// site (the takeover episode's `hydrated`/`resolved`/`self_released`/
+/// `stood_down`/`refused_terminated` is the widest).
+pub const MAX_COUNTERS: usize = 5;
 
 /// Cadence of the periodic summary while an episode is open.
 pub const DEFAULT_SUMMARY_EVERY: Duration = Duration::from_secs(5);

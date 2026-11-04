@@ -7,11 +7,11 @@
 use b2bua_core::config::B2buaConfig;
 use b2bua_core::effects::{HandlerResult, OutboundBody};
 use b2bua_core::initial_invite::build_initial_call;
-use b2bua_core::rules::{ActionExecutor, RuleAction, RuleCall, RuleContext};
-use b2bua_core::turn_scope::TurnScope;
+use b2bua_core::rule_fixture::{context, execute};
+use b2bua_core::rules::RuleAction;
 use b2bua_sdk::event::CallEvent;
 use call::features::{RelayFirst18xStrategy, RelayFirst18xTo180Feature};
-use call::{Direction, LegKind};
+use call::LegKind;
 use sip_ids::TurnIds;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -64,24 +64,8 @@ fn originate(
         features.relay_first_18x_to_180 =
             Some(RelayFirst18xTo180Feature { strategy, messages: Default::default() });
     }
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(invite())),
-        src,
-        matched_client_txn: false,
-    };
-    let mut id_gen = TurnScope::of(TurnIds::fixed(2));
-    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms: 0 };
-    let ctx = RuleContext {
-        call: RuleCall::new(&call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms: 0,
-        config,
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
+    let event = CallEvent::sip(SipMessage::Request(invite()), src);
+    let ctx = context(&call, &event, "a", config);
     let leg = RuleAction::CreateLeg {
         destination: ("127.0.0.1".into(), 5090),
         new_ruri: None,
@@ -94,7 +78,7 @@ fn originate(
         kind,
         attempt: None,
     };
-    exec.execute(&[leg], &call, &ctx)
+    execute(&ctx, &call, 2, &[leg])
 }
 
 /// The originated INVITE's lines of `name`.

@@ -2,8 +2,8 @@
 //! rebuilt from the snapshot taken as the request was relayed, so it echoes
 //! the originator's Via/From/To/CSeq.
 
-use call::helpers::{PendingHolder, Scope};
-use call::{Call, PendingRequest, RSeq};
+use call::helpers::{RecordHolder, Scope};
+use call::{Call, RSeq, RequestRecord};
 use sip_message::generators::{self, RelayScope, RelaySituation};
 use sip_message::header::{From, HeaderValue};
 use sip_message::{Method, SipStr};
@@ -16,7 +16,7 @@ use crate::rules::relay;
 
 use super::relay_response::Relaying;
 use super::show_provisional::shown_tag_of;
-use super::snapshot_answer::{snapshot_response_opts, via_sent_by};
+use super::snapshot_answer::{snapshot_response_opts, via_response_target};
 use super::{ActionExecutor, Owed, Settle};
 
 impl ActionExecutor<'_> {
@@ -28,19 +28,20 @@ impl ActionExecutor<'_> {
         call: &mut Call,
         fx: &mut HandlerEffects,
         r: &Relaying<'_>,
-        holder: PendingHolder,
-        pending: PendingRequest,
+        holder: RecordHolder,
+        pending: RequestRecord,
     ) {
         let (status, target_leg, source_leg_id) =
             (r.status, r.target_leg, r.source_leg_id.as_str());
         // §18.2.2: a relayed response goes to the originator's top Via
-        // sent-by, and the snapshot holds that Via verbatim. A Via no
+        // response target, and the snapshot holds that Via as stamped on
+        // receipt (§18.2.1, RFC 3581 §4). A Via no
         // reader accepts names no address — drop the relay and say so
         // (the originator retransmits, then times out its own request).
         // Answering it toward a fabricated destination would post the
         // caller's response to whatever that address happens to be; a
         // loopback fallback would swallow it silently.
-        let Some(dest) = pending.source_vias.first().and_then(|v| via_sent_by(v)) else {
+        let Some(dest) = pending.source_vias.first().and_then(|v| via_response_target(v)) else {
             tracing::warn!(
                 call_ref = %call.call_ref,
                 leg_id = %source_leg_id,
@@ -54,9 +55,9 @@ impl ActionExecutor<'_> {
         // or answers a target refresh (`response_states_own_contact`) —
         // a relayed 200 to PRACK/OPTIONS/INFO/MESSAGE states none, and a
         // relayed 3xx / 485 carries the peer's targets in passthrough.
-        let contact =
+        let contact = relay::leg_contact(call, target_leg).filter(|_| {
             generators::response_states_own_contact(&Method::from_wire(&r.cseq_method), status)
-                .then(|| relay::leg_contact(self.config, relay::CallMarks::of(call), target_leg));
+        });
         let mut transparent_headers = r.passthrough(relay::relay_response_passthrough_headers(
             r.resp,
             self.config
@@ -130,8 +131,8 @@ impl ActionExecutor<'_> {
                 peer_tag,
             });
         let relay_body = match &holder {
-            PendingHolder::Retired(_) => r.body.clone(),
-            PendingHolder::Dialog(_) => relay::continue_on_leg(
+            RecordHolder::Retired(_) => r.body.clone(),
+            RecordHolder::Dialog(_) => relay::continue_on_leg(
                 call,
                 target_leg,
                 dialog.as_ref(),
@@ -175,7 +176,7 @@ impl ActionExecutor<'_> {
         // carries no relay snapshot (it takes the per-fork branch
         // below), and a B2BUA-originated re-INVITE (realign / reroute /
         // promote, whose 2xx is ACKed by the B2BUA itself) leaves no
-        // snapshot either — so a reclaim/realign leg never arms this.
+        // snapshot either — so a restored or realign leg never arms this.
         if r.cseq_method == "INVITE" && (200..300).contains(&status) {
             // RFC 3261 §13.2.2.4 on the ANSWERING leg — `confirm_dialog`'s
             // in-dialog twin: the ACK this 2xx owes is the originator's
@@ -186,11 +187,8 @@ impl ActionExecutor<'_> {
             // 2xx is re-ACKed on. The ladder below is discharged by
             // RECEIVING that ACK (the engine matches it on the
             // originator's dialog), never by relaying it.
-            *call = call::helpers::set_awaited_ack_cseq(
-                call.clone(),
-                source_leg_id,
-                Some(pending.inbound_cseq),
-            );
+            call::helpers::set_awaited_ack_cseq(call, source_leg_id, Some(pending.inbound_cseq));
+            relay::owe_answer_in_ack(call, source_leg_id, r.resp, pending.inbound_cseq);
             self.retain_reinvite_2xx(call, fx, &mut relayed, dest.clone(), target_leg);
         }
         let mut effect = OutboundSipEffect {
@@ -219,7 +217,7 @@ impl ActionExecutor<'_> {
         call: &mut Call,
         fx: &mut HandlerEffects,
         r: &Relaying<'_>,
-        holder: &PendingHolder,
+        holder: &RecordHolder,
     ) {
         let source_leg_id = r.source_leg_id.as_str();
         // The final ends this transaction: the PRACKs its responder
@@ -238,6 +236,6 @@ impl ActionExecutor<'_> {
             );
             self.retire(call, fx, Scope::Transaction { leg_id: source_leg_id, cseq: r.cseq_num });
         }
-        *call = call::helpers::close_relay(call.clone(), source_leg_id, holder, r.cseq_num);
+        call::helpers::close_record(call, source_leg_id, holder, r.cseq_num);
     }
 }

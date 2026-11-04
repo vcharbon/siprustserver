@@ -1,114 +1,61 @@
 use super::*;
-use crate::timers::TimerService;
-use b2bua_sdk::event::CallEvent;
+use crate::config::B2buaConfig;
+use crate::initial_invite::build_initial_call;
+use crate::router::test_support::{invite, src};
 use call::TimerKey;
-use sip_clock::Clock;
 use std::time::Duration;
 
 fn keepalive(fire_at: i64) -> TimerEntry {
     TimerEntry { key: TimerKey::call(TimerType::Keepalive), generation: 1, fire_at }
 }
-fn keepalive_timeout(leg: &str, fire_at: i64) -> TimerEntry {
-    TimerEntry { key: TimerKey::leg(TimerType::KeepaliveTimeout, leg), generation: 2, fire_at }
+fn no_answer(leg: &str, fire_at: i64) -> TimerEntry {
+    TimerEntry { key: TimerKey::leg(TimerType::NoAnswer, leg), generation: 2, fire_at }
 }
 
-// The reclaim/takeover hygiene: a snapshot caught mid-keepalive-round-trip
-// carries an armed `KeepaliveTimeout`; restoring it verbatim onto the
-// reclaiming/taking-over node fires it (its guarded OPTIONS died with the
-// crashed node) and BYEs a healthy long hold. The hygiene strips it; the next
-// `Keepalive` re-probes fresh. Asserts both the stripping AND that the
-// remaining `Keepalive` survives.
-#[test]
-fn drop_stale_keepalive_timeout_strips_only_the_timeout() {
-    let mut timers = vec![
-        keepalive(300_000),
-        keepalive_timeout("a", 35_000),
-        keepalive_timeout("b-1", 35_000),
-        TimerEntry {
-            key: TimerKey::call(TimerType::GlobalDuration),
-            generation: 1,
-            fire_at: 3_600_000,
-        },
-    ];
-    drop_stale_keepalive_timeout(&mut timers);
-    assert!(
-        timers.iter().all(|t| !matches!(t.timer_type(), TimerType::KeepaliveTimeout)),
-        "every KeepaliveTimeout is stripped from the reclaimed snapshot",
+/// A call whose ledger holds `timers`, as a copy read from the store holds it.
+fn call_holding(timers: Vec<TimerEntry>) -> Call {
+    let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+    let mut call = build_initial_call(
+        &invite("w0", "w1", "hygiene"),
+        src(),
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
     );
-    assert!(
-        timers.iter().any(|t| matches!(t.timer_type(), TimerType::Keepalive)),
-        "the Keepalive (re-probe) timer is kept — the call re-probes on its own schedule",
-    );
-    assert!(
-        timers.iter().any(|t| matches!(t.timer_type(), TimerType::GlobalDuration)),
-        "unrelated timers (GlobalDuration) are kept",
-    );
+    call.timers = timers;
+    call
 }
 
-/// A service-owned timer (`TimerType::Service`) rides the restore-hygiene
-/// seam GENERICALLY: it is kept (never stripped like `KeepaliveTimeout`),
-/// re-anchored by the persisted skew offset like every timer, and left out
-/// of the keepalive-only floor/smoothing — so a takeover node restores a
-/// downstream service's watchdog (e.g. the 18x deadline) with the same
-/// clock-skew bounds as core timers.
+/// `timers` re-anchored by `skew` as a materialisation re-anchors its copy.
+fn reanchored(timers: Vec<TimerEntry>, skew: i64) -> Vec<TimerEntry> {
+    let mut call = call_holding(timers);
+    reanchor(&mut call, skew);
+    call.timers
+}
+
+/// A service-owned timer (`TimerType::Service`) rides the restore path
+/// GENERICALLY: it is kept, re-anchored by the persisted skew offset like
+/// every timer, and left out of the keepalive-only smoothing — so a takeover
+/// node restores a downstream service's watchdog (e.g. the 18x deadline) with
+/// the same clock-skew bounds as core timers.
 #[test]
 fn service_timer_survives_restore_hygiene_and_is_reanchored() {
     let svc = TimerType::service(call::MachineId::new("routing"), "deadline18x");
     let now = 1_000_000;
     let skew = 45_000; // receiver_now − origin_now (clears the deadband)
     let raw_fire_at = now - skew + 5_000; // origin-frame deadline
-    let mut timers = vec![
-        TimerEntry { key: TimerKey::call(svc.clone()), generation: 1, fire_at: raw_fire_at },
-        keepalive_timeout("b-1", now - skew + 1_000),
-    ];
+    let mut timers = reanchored(
+        vec![TimerEntry { key: TimerKey::call(svc.clone()), generation: 1, fire_at: raw_fire_at }],
+        skew,
+    );
     let smoothing = Some(Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None });
-    sanitize_restored_timers(&mut timers, "w1|svc|svc", now, Some(skew), 300_000, smoothing);
-    assert_eq!(timers.len(), 1, "service timer kept; stale KeepaliveTimeout stripped");
+    sanitize_restored_timers(&mut timers, "w1|svc|svc", now, 300_000, smoothing);
+    assert_eq!(timers.len(), 1, "service timer kept");
     assert_eq!(*timers[0].timer_type(), svc);
     assert_eq!(
         timers[0].fire_at,
         now + 5_000,
         "re-anchored into this node's clock frame exactly like a core timer",
-    );
-}
-
-// At the timer layer: a *past-due* `KeepaliveTimeout` restored from a
-// pre-crash snapshot fires IMMEDIATELY (`restore` clamps `fire_at <= now` to
-// a next-tick fire) — this is the event that drives `keepalive-timeout` → BYE
-// on a healthy reclaimed call. The stripped set restores NOTHING that fires
-// at now=reclaim.
-#[tokio::test(start_paused = true)]
-async fn past_due_keepalive_timeout_fires_on_restore_without_the_fix() {
-    let clock = Clock::test_at(0);
-    // now is well past the snapshot's KeepaliveTimeout deadline (the dead
-    // node armed it +120 s before its clock, which is in our past).
-    tokio::time::advance(Duration::from_millis(200_000)).await;
-
-    // Unstripped: the verbatim snapshot includes the past-due timeout.
-    let (timers, mut fire_rx) = TimerService::spawn(clock.clone());
-    let snapshot = vec![keepalive(500_000), keepalive_timeout("b-1", 120_000)];
-    timers.restore(snapshot.clone(), "w0|cid|tag".into(), "w0|cid|tag#k").await;
-    tokio::time::advance(Duration::from_millis(1)).await;
-    let fired = fire_rx.recv().await.unwrap();
-    match fired {
-        CallEvent::Timer { key, .. } => assert_eq!(
-            key.timer_type,
-            TimerType::KeepaliveTimeout,
-            "BUG: the stale past-due KeepaliveTimeout fires on reclaim → spurious BYE",
-        ),
-        _ => panic!("expected a timer event"),
-    }
-
-    // Stripped: the same snapshot fires NOTHING at reclaim time (the future
-    // Keepalive is the only survivor and is far off).
-    let (timers2, mut fire_rx2) = TimerService::spawn(clock);
-    let mut fixed = snapshot;
-    drop_stale_keepalive_timeout(&mut fixed);
-    timers2.restore(fixed, "w0|cid|tag2".into(), "w0|cid|tag2#k").await;
-    tokio::time::advance(Duration::from_millis(1)).await;
-    assert!(
-        fire_rx2.try_recv().is_err(),
-        "FIX: no spurious keepalive-timeout fires on reclaim; the call survives",
     );
 }
 
@@ -118,7 +65,7 @@ async fn past_due_keepalive_timeout_fires_on_restore_without_the_fix() {
 /// then spreads the cohort across `[now, fire_at]`, and every call landing past
 /// `now + interval` goes a full extra cadence unprobed — the UAC's keepalive
 /// tolerance expires and it BYEs a healthy hold. The ceiling bounds the future
-/// side; the defensive floor covers the past-due side.
+/// side.
 #[test]
 fn restored_keepalive_is_capped_at_one_interval() {
     let now = 1_000_000;
@@ -128,13 +75,13 @@ fn restored_keepalive_is_capped_at_one_interval() {
     let deadline = now + interval + interval / 2;
     let smoothing = Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None };
 
-    // Bulk reboot sweep (`reclaim_all`): offset already applied + smoothing.
+    // Bulk reboot sweep (`arm_parked`): offset already applied + smoothing.
     let mut late = 0;
     let mut fire_ats = std::collections::HashSet::new();
     for i in 0..1000 {
         let call_ref = format!("w1|call-{i}|tag-{i}");
         let mut timers = vec![keepalive(deadline)];
-        sanitize_restored_timers(&mut timers, &call_ref, now, Some(0), interval, Some(smoothing));
+        sanitize_restored_timers(&mut timers, &call_ref, now, interval, Some(smoothing));
         if timers[0].fire_at > ceiling {
             late += 1;
         }
@@ -156,14 +103,14 @@ fn restored_keepalive_is_capped_at_one_interval() {
     // Reactive takeover / on-demand straggler: no cohort, so no smoothing —
     // the ceiling still applies, exactly.
     let mut t = vec![keepalive(deadline)];
-    sanitize_restored_timers(&mut t, "w1|solo|solo", now, Some(0), interval, None);
+    sanitize_restored_timers(&mut t, "w1|solo|solo", now, interval, None);
     assert_eq!(t[0].fire_at, ceiling, "un-smoothed restore is clamped to the ceiling");
 
     // A deadline already within one interval is trusted token-for-token (the
-    // single-clock transparency property, future-side counterpart of the floor).
+    // single-clock transparency property).
     let inside = now + interval / 3;
     let mut t = vec![keepalive(inside)];
-    sanitize_restored_timers(&mut t, "w1|inside|inside", now, Some(0), interval, None);
+    sanitize_restored_timers(&mut t, "w1|inside|inside", now, interval, None);
     assert_eq!(t[0].fire_at, inside, "a within-interval deadline is left untouched");
 
     // Keepalive-only: a policy deadline legitimately outlives one keepalive
@@ -177,7 +124,7 @@ fn restored_keepalive_is_capped_at_one_interval() {
             fire_at: duration_at,
         },
     ];
-    sanitize_restored_timers(&mut t, "w1|mixed|mixed", now, Some(0), interval, None);
+    sanitize_restored_timers(&mut t, "w1|mixed|mixed", now, interval, None);
     assert_eq!(t[0].fire_at, ceiling, "the keepalive is clamped");
     assert_eq!(t[1].fire_at, duration_at, "GlobalDuration keeps its absolute deadline");
 }
@@ -195,7 +142,7 @@ fn catchup_drain_stays_within_one_interval() {
     // is overdue by 1 s, so it lands at the far end of the catch-up band.
     let smoothing = Smoothing { now_ms: now, l_max: 40 * interval, speedup: 10, cap_ms: None };
     let mut timers = vec![keepalive(now - 1_000)];
-    sanitize_restored_timers(&mut timers, "w1|od|od", now, Some(0), interval, Some(smoothing));
+    sanitize_restored_timers(&mut timers, "w1|od|od", now, interval, Some(smoothing));
     assert!(
         timers[0].fire_at <= now + interval,
         "catch-up offset bounded by the ceiling: {} > {}",
@@ -287,11 +234,11 @@ fn seam_reanchor_keeps_future_cohort_out_of_the_catchup_band() {
                                             // future; a LARGER skew would flip it past-due. Use a skew big enough to
                                             // flip it: origin minted it only 30 s out.
     let raw_fire_at_flip = now - skew + 30_000; // = now - 15_000 → PAST-DUE raw!
-    let mut timers = vec![keepalive(raw_fire_at_flip)];
-    // l_max computed over the CORRECTED deadline (as reclaim_all does):
+    let mut timers = reanchored(vec![keepalive(raw_fire_at_flip)], skew);
+    // l_max computed over the CORRECTED deadline (as arm_parked does):
     // corrected = raw + skew = now + 30_000 (future) → not past-due → l_max 0.
     let smoothing = Some(Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None });
-    sanitize_restored_timers(&mut timers, "w1|c|c", now, Some(skew), 300_000, smoothing);
+    sanitize_restored_timers(&mut timers, "w1|c|c", now, 300_000, smoothing);
     let fa = timers[0].fire_at;
     assert!(
         fa >= now,
@@ -301,8 +248,7 @@ fn seam_reanchor_keeps_future_cohort_out_of_the_catchup_band() {
         fa <= now + 30_000,
         "de-correlated within [now, corrected deadline], not the raw past-due frame: {fa}",
     );
-    // Control: the SAME raw timers WITHOUT re-anchoring (offset None) would be
-    // seen past-due and smoothed toward the catch-up band at `now`.
+    // Control: the SAME raw timers WITHOUT re-anchoring would be seen past-due and smoothed toward the catch-up band at `now`.
     let mut raw_timers = vec![keepalive(raw_fire_at_flip)];
     smooth_keepalives(&mut raw_timers, "w1|c|c", now, 15_000, 10, None);
     assert!(
@@ -312,54 +258,11 @@ fn seam_reanchor_keeps_future_cohort_out_of_the_catchup_band() {
     let _ = raw_fire_at;
 }
 
-/// The defensive floor. When the offset is UNKNOWN (`None`, a path that
-/// could not re-anchor), a keepalive past-due by ≥ 1× interval is re-based
-/// to within one interval of `now` (not fired immediately, which would race a
-/// failed-over transaction). Deterministic per (call_ref, timer key).
-#[test]
-fn defensive_floor_rebases_deep_past_due_keepalive_within_one_interval() {
-    let now = 1_000_000;
-    let interval = 300_000;
-    // Past-due by 2× interval — deep skew/backlog pathology.
-    let make = || vec![keepalive(now - 2 * interval)];
-
-    let mut t = make();
-    // Unknown offset (None) → floor engages; no smoothing.
-    sanitize_restored_timers(&mut t, "w1|d|d", now, None, interval, None);
-    let fa = t[0].fire_at;
-    assert!(
-        (now..now + interval).contains(&fa),
-        "deep-past-due keepalive re-based into [now, now+interval): {fa}",
-    );
-    assert!(fa > now, "not fired immediately at now (which would race the failed-over txn)");
-
-    // Determinism: same (call_ref, id) → same slot (idempotent reboot re-pass).
-    let mut t2 = make();
-    sanitize_restored_timers(&mut t2, "w1|d|d", now, None, interval, None);
-    assert_eq!(t2[0].fire_at, fa, "floor is deterministic per call_ref/id");
-    // Distinct call_ref → (very likely) a different slot.
-    let mut t3 = make();
-    sanitize_restored_timers(&mut t3, "w1|different|x", now, None, interval, None);
-    // (Not asserting inequality hard — hash collisions are possible — but the
-    // slot must still be within the interval.)
-    assert!((now..now + interval).contains(&t3[0].fire_at));
-
-    // KNOWN offset (Some, even 0) → floor SKIPPED: a well-anchored past-due
-    // keepalive fires promptly (single-clock transparency).
-    let mut t4 = make();
-    sanitize_restored_timers(&mut t4, "w1|d|d", now, Some(0), interval, None);
-    assert_eq!(
-        t4[0].fire_at,
-        now - 2 * interval,
-        "known offset trusts the deadline — past-due fires promptly, floor does NOT engage",
-    );
-}
-
 /// SetupTimeout (a non-keepalive policy deadline) under skew. A ringing call
 /// partway through its setup window fails over; the restored SetupTimeout
 /// must land at its TRUE remaining time in the takeover node's clock frame,
 /// NOT reaped early (skew-ahead) nor extended by the skew (skew-behind). The
-/// seam re-anchors ALL timer classes, so this holds for the SetupTimeout
+/// re-anchor moves ALL timer classes, so this holds for the SetupTimeout
 /// ledger timer exactly as for the keepalive.
 #[test]
 fn setup_timeout_is_reanchored_not_reaped_early_or_extended() {
@@ -368,7 +271,7 @@ fn setup_timeout_is_reanchored_not_reaped_early_or_extended() {
     // Model the restored entry as it arrives on the takeover node, whose `now`
     // is 100 s past the (origin-frame) ring start.
     let setup = |fire_at: i64| TimerEntry {
-        key: TimerKey::call(TimerType::SetupTimeout),
+        key: TimerKey::setup(TimerType::SetupTimeout),
         generation: 1,
         fire_at,
     };
@@ -380,8 +283,8 @@ fn setup_timeout_is_reanchored_not_reaped_early_or_extended() {
     let now = 1_000_000;
     let skew_ahead = 40_000;
     let raw_fire_at = now - skew_ahead + 50_000; // origin-frame deadline
-    let mut t = vec![setup(raw_fire_at)];
-    sanitize_restored_timers(&mut t, "w1|s|s", now, Some(skew_ahead), 300_000, None);
+    let mut t = reanchored(vec![setup(raw_fire_at)], skew_ahead);
+    sanitize_restored_timers(&mut t, "w1|s|s", now, 300_000, None);
     assert_eq!(
         t[0].fire_at,
         now + 50_000,
@@ -394,8 +297,8 @@ fn setup_timeout_is_reanchored_not_reaped_early_or_extended() {
     //    −40 s re-anchor it lands at the true 50 s. ─────────────────────────────
     let skew_behind = -40_000;
     let raw_fire_at_b = now - skew_behind + 50_000; // = now + 90_000 (origin frame)
-    let mut tb = vec![setup(raw_fire_at_b)];
-    sanitize_restored_timers(&mut tb, "w1|s|s", now, Some(skew_behind), 300_000, None);
+    let mut tb = reanchored(vec![setup(raw_fire_at_b)], skew_behind);
+    sanitize_restored_timers(&mut tb, "w1|s|s", now, 300_000, None);
     assert_eq!(
         tb[0].fire_at,
         now + 50_000,
@@ -403,17 +306,121 @@ fn setup_timeout_is_reanchored_not_reaped_early_or_extended() {
     );
 }
 
-/// The re-anchor itself: a known offset shifts every timer's absolute deadline
-/// into the local clock frame; a sub-deadband offset is a no-op (latency, not
-/// skew — keeps the single-clock harness transparent).
+/// The re-anchor itself: a known offset shifts every instant of the copy into
+/// the local clock frame; a sub-deadband offset is a no-op (latency, not skew —
+/// keeps the single-clock harness transparent).
 #[test]
 fn reanchor_applies_above_deadband_and_ignores_below() {
-    let mut t = vec![keepalive(1_000_000), keepalive_timeout("a", 900_000)];
-    reanchor_timers(&mut t, 30_000); // +30 s real skew
-    assert_eq!(t[0].fire_at, 1_030_000);
-    assert_eq!(t[1].fire_at, 930_000, "ALL timer classes re-anchored, not just keepalive");
+    let mut call = call_holding(vec![keepalive(1_000_000), no_answer("a", 900_000)]);
+    let created = call.created_at;
+    reanchor(&mut call, 30_000); // +30 s real skew
+    assert_eq!(call.timers[0].fire_at, 1_030_000);
+    assert_eq!(call.timers[1].fire_at, 930_000, "ALL timer classes re-anchored");
+    assert_eq!(call.created_at, created + 30_000, "and every other instant of the copy");
 
-    let mut small = vec![keepalive(1_000_000)];
-    reanchor_timers(&mut small, 200); // 200 ms — below the 1 s deadband
+    let small = reanchored(vec![keepalive(1_000_000)], 200); // below the 1 s deadband
     assert_eq!(small[0].fire_at, 1_000_000, "sub-deadband latency offset is a no-op");
+}
+
+/// A call whose caller's 2xx, sent at 0 ms, awaits its ACK on its §13.3.1.4
+/// ladder, the first rung due at 500 ms.
+fn answered_on_its_ladder() -> (Call, Obligation) {
+    use call::{Dialog, DialogState, Repeated, RetainedEmission, Unacked2xx};
+    use sip_retransmit::Class;
+    let mut call = call_holding(Vec::new());
+    let mut a1 = Dialog::new("a1", call.a_leg_invite.from_tag.clone(), DialogState::Confirmed, 1);
+    let (emission, first) = RetainedEmission::paced(
+        b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
+        ("192.0.2.9".into(), 5060),
+        Class::Final2xx,
+        Repeated::response("INVITE", 200),
+    );
+    call::helpers::hold_answered_2xx(
+        &mut a1,
+        1,
+        Unacked2xx { dialog_tag: "a1".into(), cseq: 1, emission },
+    );
+    call.a_leg.dialogs = vec![a1].into();
+    let obligation = Obligation::AckOf2xx { leg: "a".into(), dialog_tag: "a1".into(), cseq: 1 };
+    let key = TimerKey::obligation(TimerType::Rung, obligation.clone());
+    call::helpers::arm_timer(&mut call, key, call::millis_i64(first));
+    (call, obligation)
+}
+
+/// A rung a meeting takes past due goes on along its ladder: the rung due at
+/// 500 ms, met at 1 100 ms, is the one due at 1 500 ms, its rung index
+/// stepped with it, so the next one is 2 s later (RFC 3261 §13.3.1.4).
+#[test]
+fn a_met_rung_past_due_goes_on_along_its_ladder() {
+    let (mut call, obligation) = answered_on_its_ladder();
+    let mut fresh = std::mem::take(&mut call.timers);
+    resume_met_ladders(&mut call, &mut fresh, 1_100, &B2buaConfig::default());
+    assert_eq!(fresh.iter().map(|t| t.fire_at).collect::<Vec<_>>(), vec![1_500]);
+    let bound = ladder_bound(&B2buaConfig::default(), &obligation);
+    let next = advance_ladder(&mut call, &obligation, bound).expect("a rung left");
+    assert_eq!(next, Duration::from_secs(2), "the rung after the one at 1 500 ms");
+}
+
+/// A rung not yet due is left as it stands.
+#[test]
+fn a_met_rung_not_yet_due_is_left_as_it_stands() {
+    let (mut call, _) = answered_on_its_ladder();
+    let mut fresh = std::mem::take(&mut call.timers);
+    resume_met_ladders(&mut call, &mut fresh, 400, &B2buaConfig::default());
+    assert_eq!(fresh.iter().map(|t| t.fire_at).collect::<Vec<_>>(), vec![500]);
+}
+
+/// A ladder with no rung left inside its bound leaves the met timers.
+#[test]
+fn a_met_ladder_past_its_bound_leaves_the_timers() {
+    let (mut call, _) = answered_on_its_ladder();
+    let mut fresh = std::mem::take(&mut call.timers);
+    resume_met_ladders(&mut call, &mut fresh, 60_000, &B2buaConfig::default());
+    assert!(fresh.is_empty(), "{fresh:?}");
+}
+
+/// A call whose caller's dialog holds one keepalive probe per `(sender,
+/// deadline_ms)`, at consecutive CSeqs.
+fn with_probes(probes: &[(&str, i64)]) -> Call {
+    use call::{DialogState, DialogUsage, HostPort, RequestRecord, SentRequest};
+    let mut call = call_holding(Vec::new());
+    let mut d =
+        call::Dialog::new("atag", call.a_leg_invite.from_tag.clone(), DialogState::Confirmed, 1);
+    for (cseq, (sender, deadline_ms)) in (2..).zip(probes) {
+        let sent = SentRequest {
+            branch: format!("z9hG4bK-probe-{cseq}"),
+            image: Vec::new(),
+            destination: HostPort { host: "192.0.2.10".into(), port: 5060 },
+        };
+        d.requests.push(RequestRecord {
+            author: Some(call::KEEPALIVE_AUTHOR.into()),
+            relayed_by: call::RelayOwner::new(*sender, *sender),
+            ..RequestRecord::own("OPTIONS", cseq, sent, *deadline_ms, DialogUsage::Session)
+        });
+    }
+    call.a_leg.dialogs.insert(d);
+    call
+}
+
+fn senders(call: &Call) -> Vec<String> {
+    call::helpers::every_record(call).map(|(_, _, r)| r.relayed_by.ordinal.clone()).collect()
+}
+
+/// A takeover keeps every probe inside its Timer F, the dead primary's
+/// included, to send it again; one past its Timer F is forgotten.
+#[test]
+fn a_takeover_keeps_the_probes_inside_their_timer_f() {
+    let mut call = with_probes(&[("w0", 50_000), ("w1", 50_000), ("w0", 30_000)]);
+    assert!(forget_keepalive_probes(&mut call, 40_000, "w1", false));
+    assert_eq!(senders(&call), ["w0", "w1"]);
+}
+
+/// A reclaim or a parked call's arming keeps only its own probes inside their
+/// Timer F: the live backup's answer reaches the backup.
+#[test]
+fn a_reclaim_forgets_the_live_backups_probe() {
+    let mut call = with_probes(&[("w0", 50_000), ("w1", 50_000)]);
+    assert!(forget_keepalive_probes(&mut call, 40_000, "w0", true));
+    assert_eq!(senders(&call), ["w0"]);
+    assert!(!forget_keepalive_probes(&mut call, 40_000, "w0", true), "nothing more to forget");
 }

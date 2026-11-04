@@ -3,9 +3,9 @@
 //! snapshot. ACK origination toward a leg is [`super::ack_leg`]'s; response
 //! relay is [`super::relay_response`]'s.
 
-use call::helpers::{add_pending_request, bump_our_cseq, find_b_leg, leg_kind};
+use call::helpers::{add_record, bump_our_cseq, find_b_leg, leg_kind};
 use call::TxnKind;
-use call::{ByeDisposition, Call, DialogId, PendingRequest};
+use call::{ByeDisposition, Call, DialogId, RequestRecord};
 use sip_message::generators::{
     self, CapabilitySet, GenerateInDialogRequestOpts, InDialogMethod, RelayScope, RelaySituation,
 };
@@ -59,7 +59,10 @@ impl ActionExecutor<'_> {
         if req.method() == Method::Ack {
             let owed = leg_at(call, target_leg)
                 .and_then(|leg| leg.dialogs.established())
-                .is_some_and(|d| d.awaited_ack_cseq == Some(req.cseq().seq() as i64));
+                .is_some_and(|d| {
+                    call::helpers::sent_exchange(d).and_then(|x| x.awaited_ack_cseq)
+                        == Some(req.cseq().seq() as i64)
+                });
             if !owed {
                 return;
             }
@@ -137,14 +140,15 @@ impl ActionExecutor<'_> {
 
         // The target dialog's next number (§12.2.1.1).
         let inbound_cseq = req.cseq().seq() as i64;
-        let target_invite_cseq =
-            invite_cseq_from_handle(&target_dialog).unwrap_or(target_dialog.our_cseq);
+        let target_invite_cseq = leg_at(call, target_leg)
+            .and_then(|leg| invite_cseq_from_handle(leg, &target_dialog))
+            .unwrap_or(target_dialog.our_cseq);
         let outbound_cseq = target_dialog.our_cseq + 1;
         let t_id = target_dialog.id();
         // The call as it stands before the relay records anything: a request
         // that is not built leaves it so.
         let unrelayed = call.clone();
-        *call = bump_our_cseq(call.clone(), target_leg, &t_id, 1);
+        bump_our_cseq(call, target_leg, &t_id, 1);
 
         // RFC 3262 §7.2: RAck names the reliable 1xx and the INVITE that drew it
         // *on the target leg* — the CSeq token becomes the target's INVITE CSeq
@@ -202,11 +206,16 @@ impl ActionExecutor<'_> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
-                relay::CallMarks::of(call),
+                self.marks(call),
                 target_leg,
+                Some(relay::RequestFacts {
+                    method: req.method().as_str(),
+                    uri: &gen_dialog.remote_target,
+                    offer: *req.method() == Method::Invite && relay::carries_sdp(req),
+                }),
                 branch.clone(),
             )),
-            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), target_leg)),
+            contact: relay::leg_contact(call, target_leg),
             body,
             content_type,
             cseq: Some(relay::wire_cseq(outbound_cseq)),
@@ -244,52 +253,40 @@ impl ActionExecutor<'_> {
         let kind =
             if method == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
 
-        // For a re-INVITE, cache its client-transaction handle on the *target*
-        // dialog so the eventual ACK-for-2xx echoes the re-INVITE CSeq
-        // (RFC 3261 §13.2.2.4) and CANCEL can reuse the branch (§9.1). (The
-        // initial INVITE never reaches this path — it is built by
-        // `CreateLeg`/`build_b_leg`.)
-        if method == InDialogMethod::Invite {
-            *call = call::helpers::update_dialog(call.clone(), target_leg, &t_id, |d| {
-                d.pending_invite_txn = Some(call::InviteTxnHandle {
-                    branch: branch.clone(),
-                    cseq: i64::from(out_req.cseq().seq()),
-                    original_invite: out_req.image().to_vec(),
-                    destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
-                });
-                // New INVITE transaction → drop the prior ACK branch and its
-                // retained datagram (§13.2.2.4); this re-INVITE's 2xx ACK mints
-                // its own, retained on first ACK — a copy of that 2xx must
-                // never be re-ACKed with the PREVIOUS transaction's answer.
-                // Any stale relay-ACK obligation dies with it — this 2xx arms
-                // its own (`relay_response`).
-                d.ack_branch = None;
-                d.emitted_ack = None;
-                d.awaited_ack_cseq = None;
-            });
-        }
-
-        // Snapshot the inbound request so the response can echo its Via/From/To/
-        // Call-ID/CSeq (§8.1.3.3) and so glare detection on the target dialog
-        // sees the in-flight re-INVITE (`reinvite-glare`). The B2BUA answers BYE
-        // locally and ACK has no response, so neither needs correlation.
+        // The relay's record: the inbound request's lines, so the response
+        // echoes its Via/From/To/Call-ID/CSeq (§8.1.3.3), and its sent half,
+        // which a restored record rebuilds (ADR-0055 §2). A re-INVITE's is the target
+        // dialog's INVITE record: glare detection there sees it in flight
+        // (`reinvite-glare`), its ACK-for-2xx echoes its CSeq (RFC 3261
+        // §13.2.2.4) and a CANCEL reuses its branch (§9.1); it replaces the
+        // dialog's previous INVITE, whose ACK belongs to that transaction
+        // alone. The B2BUA answers BYE locally and ACK has no response, so
+        // neither is recorded.
         if !matches!(method, InDialogMethod::Bye) {
-            let pending = PendingRequest {
-                method: req.method().to_string(),
-                outbound_cseq,
-                inbound_cseq,
+            let received = RequestRecord {
                 source_vias: req.raw(HeaderName::Via).map(str::to_string).collect(),
                 source_call_id: req.call_id().as_str().to_string(),
                 source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
                 source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
-                direction: ctx.direction,
-                cancelled: false,
                 offered_100rel: req.offers_100rel(),
                 offered: relay::carries_sdp(req),
                 source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
-                relayed_by: self.config.self_ordinal.clone(),
+                relayed_by: self.owners.this.clone(),
+                ..RequestRecord::relayed(req.method().as_str(), outbound_cseq, inbound_cseq)
             };
-            *call = add_pending_request(call.clone(), target_leg, &t_id, pending);
+            match method {
+                InDialogMethod::Invite => {
+                    let record = RequestRecord {
+                        sent: Some(super::request_record::sent_request(&out_req, &dest)),
+                        ..received
+                    };
+                    call::helpers::open_sent_invite(call, target_leg, &t_id, record)
+                }
+                _ => {
+                    let record = self.relayed_sent_half(received, &out_req, &dest);
+                    add_record(call, target_leg, &t_id, record)
+                }
+            }
         }
 
         fx.outbound.push(OutboundSipEffect {

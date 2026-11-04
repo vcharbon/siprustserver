@@ -82,6 +82,61 @@ fn a_target_refresh_changes_the_contact_the_leg_states() {
     assert_eq!(ring(&mut uas), second, "the refresh holds for later messages");
 }
 
+/// RFC 3261 §8.1.1.8, §20.10: the Contact's display name and user part are
+/// the party's choice. A stated Contact rides the INVITE that states it and
+/// every later message of the leg, its host and port the bound socket's; a
+/// target refresh numbers the stated user part.
+#[test]
+fn a_stated_contact_names_its_display_and_user_on_every_later_message() {
+    let mut uac = stack("A", "r1a2b3");
+    uac.state_contact(Some("Front Desk"), Some("+15556000777"));
+    let addresses = Addresses {
+        ruri: "sip:callee@pivot.invalid",
+        from: "<sip:caller@pivot.invalid>",
+        to: "<sip:callee@pivot.invalid>",
+    };
+    let invite = uac
+        .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+        .expect("the caller composes its INVITE");
+    assert_eq!(
+        header(&invite, sip_message::HeaderName::Contact),
+        "\"Front Desk\" <sip:+15556000777@127.0.0.1:5060>"
+    );
+    uac.state_contact(None, Some("+15556000778"));
+    uac.refresh_target(1);
+    let again = uac
+        .out_of_dialog(Method::Options, &addresses, &[], Vec::new(), None, None)
+        .expect("an OPTIONS");
+    assert_eq!(
+        header(&again, sip_message::HeaderName::Contact),
+        "\"Front Desk\" <sip:+15556000778-1@127.0.0.1:5060>"
+    );
+}
+
+/// RFC 3261 §25.1: a SIP URI's userinfo is optional. A stated empty user
+/// part states a Contact with none, `<sip:host:port>`; a later target refresh
+/// still names a URI of its own, the leg id numbered.
+#[test]
+fn a_stated_empty_contact_user_states_no_userinfo() {
+    let addr: SocketAddr = "127.0.0.1:5070".parse().unwrap();
+    let mut uac = LegStack::new("A", addr, addr, "r1a2b3", "", "");
+    uac.state_contact(None, Some(""));
+    let addresses = Addresses {
+        ruri: "sip:callee@pivot.invalid",
+        from: "<sip:caller@pivot.invalid>",
+        to: "<sip:callee@pivot.invalid>",
+    };
+    let invite = uac
+        .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+        .expect("the caller composes its INVITE");
+    assert_eq!(header(&invite, sip_message::HeaderName::Contact), "<sip:127.0.0.1:5070>");
+    uac.refresh_target(2);
+    let again = uac
+        .out_of_dialog(Method::Options, &addresses, &[], Vec::new(), None, None)
+        .expect("an OPTIONS");
+    assert_eq!(header(&again, sip_message::HeaderName::Contact), "<sip:A-2@127.0.0.1:5070>");
+}
+
 // ── UPDATE on an early dialog (RFC 3311 §5.1) ───────────────────────────
 
 /// Compile once, run MANY: two instances of one plan must not share a
@@ -126,4 +181,39 @@ fn two_runs_mint_disjoint_via_branches() {
     sorted.sort();
     sorted.dedup();
     assert_eq!(sorted.len(), one.len(), "{one:?}");
+}
+
+/// RFC 3261 §8.1.1.6, §20.22: a dialog-opening request states its own hop
+/// count where the document states one; the line rides once, and a stated
+/// value that is no 0–255 count refuses the request.
+#[test]
+fn a_stated_max_forwards_replaces_the_default_hop_count() {
+    let addresses = Addresses {
+        ruri: "sip:callee@pivot.invalid",
+        from: "<sip:caller@pivot.invalid>",
+        to: "<sip:callee@pivot.invalid>",
+    };
+    let mut uac = stack("A", "r1a2b3");
+    let stated = [TemplateHeader::frozen("Max-Forwards", "0")];
+    let invite = uac
+        .out_of_dialog(Method::Invite, &addresses, &stated, Vec::new(), None, None)
+        .expect("the caller composes its INVITE");
+    let hops: Vec<String> =
+        invite.raw_text(sip_message::HeaderName::MaxForwards).map(|s| s.to_string()).collect();
+    assert_eq!(hops, ["0"], "one Max-Forwards, the stated count");
+    let plain = stack("A", "r1a2b4")
+        .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+        .expect("the caller composes its INVITE");
+    assert_eq!(header(&plain, sip_message::HeaderName::MaxForwards), "70");
+    for bad in ["256", "-1", "seventy"] {
+        let refused = stack("A", "r1a2b5").out_of_dialog(
+            Method::Invite,
+            &addresses,
+            &[TemplateHeader::frozen("Max-Forwards", bad)],
+            Vec::new(),
+            None,
+            None,
+        );
+        assert!(matches!(refused, Err(StackError::Unbuilt { .. })), "{bad}: {refused:?}");
+    }
 }

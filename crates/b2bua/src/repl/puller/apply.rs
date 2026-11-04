@@ -3,14 +3,17 @@
 
 use std::sync::Arc;
 
-use call::helpers::lifecycle_behind;
 use call::CallModelState;
 use repl_net::frame::{Op, Partition};
 
 use super::super::incarnation::is_another_call;
 use super::Puller;
 use crate::router::{PrimaryWrite, ReplCommand};
+use crate::store::envelope::Enveloped;
 use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
+use store_meeting::KeptCopy;
+
+mod store_meeting;
 
 /// How an inbound `Data` frame is reconciled into the local store
 /// ([`Puller::apply_to_store`]). Selected per frame from `(flow, bootstrapped)`
@@ -22,50 +25,62 @@ pub(super) enum ApplyMode {
     /// own partition takes the replica's `(p,b)` as-is (recovery, not a merge),
     /// skipping only a strictly dominated copy (ADR-0014 §3).
     Bootstrap,
-    /// Backup flow — a primary→backup update. The follower defers to the
-    /// authority, but never regresses progress an acting backup authored on the
-    /// Element itself (ADR-0031 D3).
+    /// Backup flow — a primary→backup update, taken when it contains the
+    /// Element (ADR-0055 §7).
     Forward,
-    /// Reclaim-flow steady tail — apply the ADR-0014 Reverse `(p,b)` rule.
+    /// Reclaim-flow steady tail — an acting backup's update, taken when it
+    /// contains the stored copy (ADR-0055 §7).
     Reverse,
 }
 
 /// What [`Puller::apply_to_store`] did with a `Data` frame. `Dominated` and
-/// `Refused` both leave the store untouched but mean opposite things: a
-/// dominated frame is a re-delivery of a version already held, a refused one is
-/// a version the local copy will not take — the two views have split, and only
-/// that case is counted and handed to the fold (ADR-0031 D3).
+/// `Refused` both leave the stored body in place but mean opposite things: a
+/// dominated frame is a version the stored copy already read, a refused one is
+/// a copy the stored one is not contained in — the stored copy contains it, or
+/// the two diverged — and only that case is counted and handed to the meeting
+/// at the live copy (ADR-0055 §7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum ApplyOutcome {
     Applied,
     Dominated,
     Refused,
-    /// A backup replica of a call not held yet, left unstored at a backup
-    /// ceiling (ADR-0037). Says nothing about the call; the next `Put` that
-    /// finds room stores it.
+    /// A backup replica of a call not held yet, refused at a backup ceiling,
+    /// or of a call whose replica this backup refused before (ADR-0037 item 4):
+    /// the call has no backup here for life.
     Shed,
     /// A reverse flush of a call incarnation other than the Element's: a
     /// takeover copy's view of a call the authority has since replaced on the
-    /// ref. The Element keeps its call and nothing is handed to the fold.
+    /// ref. The Element keeps its call and nothing is handed to the meeting.
     Superseded,
 }
 
 impl Puller {
-    /// Apply a `Data` frame's mutation to the local store under the **ADR-0014
-    /// `(p,b)` version-vector rule**, **without** touching the watermark.
+    /// Apply a `Data` frame's mutation to the local store, **without**
+    /// touching the watermark.
     ///
     /// `partition = Bak` → store as `bak:{primary}` (a **Forward** primary→backup
     /// update); `partition = Pri` → store as `pri:{primary}` (a **Reverse**
-    /// backup→primary reverse-flush, or a bootstrap import).
+    /// backup→primary update, or a bootstrap import).
     ///
-    /// Apply decision (`(call_gen, call_bgen)` = incoming `(p,b)`; `(sp, sb)` =
-    /// stored):
+    /// A `Put` (`(call_gen, call_bgen)` = incoming `(p,b)`; `(sp, sb)` = stored):
     ///
-    /// | mode | `Put` | `Delete` |
-    /// |---|---|---|
-    /// | [`Bootstrap`](ApplyMode::Bootstrap) | apply unless `(sp, sb)` dominates | apply |
-    /// | [`Forward`](ApplyMode::Forward) | apply unless `(sp, sb)` dominates, refuse when the body branches off the Element or `sb > b_in` | apply unless the Element is a live call the authority never answered (by a flush or by this `Delete`) |
-    /// | [`Reverse`](ApplyMode::Reverse) | apply iff `p_in == sp && b_in > sb` and the body's `p` is not adopted | apply |
+    /// - [`Bootstrap`](ApplyMode::Bootstrap): applied unless `(sp, sb)`
+    ///   dominates — recovery, not a meeting (ADR-0014 §3);
+    /// - [`Forward`](ApplyMode::Forward) and [`Reverse`](ApplyMode::Reverse):
+    ///   dominated by `(sp, sb)` ⇒ a version the stored copy read; at or past
+    ///   `(sp, sb)` on both components ⇒ a copy that read every write the
+    ///   stored one holds, applied; otherwise the two copies meet (ADR-0055 §7,
+    ///   [`Puller::meet_stored`]) in one clock frame (§9): the incoming copy
+    ///   contains the stored one ⇒ applied, the
+    ///   stored copy's exempt fields merged in; the stored copy contains it ⇒
+    ///   refused, the incoming copy's exempt fields merged into the stored one;
+    ///   neither ⇒ refused, the store untouched. When each contains the other
+    ///   the primary's stands: the incoming copy on the Forward flow, the stored
+    ///   one on the Reverse flow.
+    ///
+    /// A `Delete` applies, except on the Forward flow over an Element the
+    /// authority never saw answered (ADR-0031, "the `Delete` guard keys on the
+    /// answer").
     ///
     /// With no local copy every mode applies; the store's own resurrection
     /// tombstone, not this gate, is what stops a re-create of a just-deleted call.
@@ -78,20 +93,9 @@ impl Puller {
     /// so the Element's call is over there), and Reverse returns
     /// [`Superseded`](ApplyOutcome::Superseded).
     ///
-    /// Bootstrap recovery and the Reverse tail keep delete-wins outright. Forward
-    /// is the one direction that yields (ADR-0031 D3): a `Put` whose body stands
-    /// behind the Element on the call's lifecycle, or whose `b_in` is behind the
-    /// Element's own `b`, is a branch of the call the Element records and is
-    /// refused; a `Delete` is refused only for the one fact the guard protects —
-    /// an ACTIVE, answered Element the authority has never published an answer
-    /// for, by a flush or by the `Delete` itself. Both Forward refusals count into
-    /// `b2bua_repl_forward_flush_refused_total{op}`.
-    ///
-    /// Returns the [`ApplyOutcome`]: a dominated re-delivery and a refusal both
-    /// leave the store untouched, and only the refusal is a split of the two
-    /// views. The reclaim tail reclaims on an applied reverse flush and hands a
-    /// refused flush up with its body, so the call model can fold lifecycle
-    /// progress the vector cannot see.
+    /// Returns the [`ApplyOutcome`]: a dominated frame and a refusal both leave
+    /// the stored body in place, and only the refusal hands the frame's body up
+    /// to the meeting at the live copy.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn apply_to_store(
         &self,
@@ -122,10 +126,9 @@ impl Puller {
                         self.store.incarnation(call_ref).as_deref(),
                         incarnation.as_deref(),
                     );
-                // The Forward direction reads the frame's body twice — for the
-                // branch compare and for the authority's view of the answer —
-                // and the Reverse direction once, for an adopted `p`; it is
-                // decoded once, here.
+                // The Forward direction reads the frame's body for the
+                // authority's view of the answer, and both directions for a
+                // meeting; it is decoded once, here.
                 let incoming = matches!(mode, ApplyMode::Forward | ApplyMode::Reverse)
                     .then(|| body.as_deref().and_then(|b| self.decode_counted(b)))
                     .flatten();
@@ -134,6 +137,9 @@ impl Puller {
                 // idempotency (no watermark apply-gate): it is what makes every
                 // bootstrap frame — all sharing `at = W` — safe to apply.
                 let dominated = |sp: i64, sb: i64| sp >= call_gen && sb >= call_bgen;
+                let descends = |sp: i64, sb: i64| sp <= call_gen && sb <= call_bgen;
+                let mut body = body;
+                let mut version = (call_gen, call_bgen);
                 let outcome = match mode {
                     // Bootstrap recovery: the authority's body, monotone by `(p,b)`.
                     ApplyMode::Bootstrap => match stored {
@@ -142,50 +148,48 @@ impl Puller {
                         }
                         _ => ApplyOutcome::Applied,
                     },
-                    // Forward (primary → backup): the D3 guard, counters first and
-                    // then the bodies.
                     ApplyMode::Forward if another_call => ApplyOutcome::Applied,
-                    ApplyMode::Forward => {
-                        self.forward_put_outcome(
-                            role,
-                            &primary,
-                            call_ref,
-                            stored,
-                            (call_gen, call_bgen),
-                            incoming.as_ref(),
-                        )
-                        .await
-                    }
-                    // Reverse (backup → primary): accept iff untouched-by-us since
-                    // the backup branched (`p_in == sp`) AND a genuinely newer
-                    // backup mutation (`b_in > sb`); no local copy → accept (the
-                    // reactive reclaim materialises it). Else keep our own — and
-                    // hand it up, re-delivery included: the fold reads the body for
-                    // progress the vector cannot carry (ADR-0014 amendment). A
-                    // `p` the backup adopted without our body is no untouched
-                    // branch point: our store keeps our own call (ADR-0031, "an
-                    // adopted counter is not the body it counts").
                     ApplyMode::Reverse if another_call => ApplyOutcome::Superseded,
-                    ApplyMode::Reverse => match stored {
-                        Some((sp, sb))
-                            if call_gen != sp
-                                || call_bgen <= sb
-                                || incoming.as_ref().is_some_and(adopted_p) =>
-                        {
-                            ApplyOutcome::Refused
+                    ApplyMode::Forward | ApplyMode::Reverse => match stored {
+                        None => ApplyOutcome::Applied,
+                        Some((sp, sb)) if dominated(sp, sb) => ApplyOutcome::Dominated,
+                        Some((sp, sb)) if descends(sp, sb) => ApplyOutcome::Applied,
+                        Some(_) => {
+                            let kept = KeptCopy { body_ttl_ms, incarnation: incarnation.clone() };
+                            let primary_incoming = mode == ApplyMode::Forward;
+                            let (met, origin) = (incoming.as_ref(), origin_now_ms);
+                            match self
+                                .meet_stored(
+                                    role,
+                                    &primary,
+                                    call_ref,
+                                    met,
+                                    primary_incoming,
+                                    origin,
+                                    kept,
+                                )
+                                .await
+                            {
+                                Some(taken) => {
+                                    version = taken.version.unwrap_or(version);
+                                    body = taken.body.or(body);
+                                    ApplyOutcome::Applied
+                                }
+                                None => ApplyOutcome::Refused,
+                            }
                         }
-                        _ => ApplyOutcome::Applied,
                     },
                 };
                 let outcome = if outcome == ApplyOutcome::Applied
                     && stored.is_none()
                     && role == PartitionRole::Backup
                     && !self.store.buries(call_ref, incarnation.as_deref())
-                    && self
-                        .capacity
-                        .as_ref()
-                        .and_then(|g| g.refuses_backup(self.store.backup_held()))
-                        .is_some()
+                    && (self.store.refused_replica(call_ref, incarnation.as_deref())
+                        || self
+                            .capacity
+                            .as_ref()
+                            .and_then(|g| g.refuses_backup(self.store.backup_held()))
+                            .is_some())
                 {
                     ApplyOutcome::Shed
                 } else {
@@ -195,7 +199,7 @@ impl Puller {
                     self.metrics.record_repl_forward_flush_refused("put");
                 }
                 if outcome == ApplyOutcome::Applied {
-                    let body = body.map(|b| b.to_vec()).unwrap_or_default();
+                    let body = body.as_deref().map(<[u8]>::to_vec).unwrap_or_default();
                     let _ = self
                         .store
                         .put_call(
@@ -205,12 +209,12 @@ impl Puller {
                             body,
                             indexes,
                             body_ttl_ms,
-                            call_gen,
-                            call_bgen,
+                            version.0,
+                            version.1,
                             // Apply locally only — do NOT re-propagate (peer:None).
-                            // Carry the origin wall clock so the store can persist
-                            // the receive-time skew offset for later timer
-                            // re-anchoring on failover/reclaim (clock-skew hardening).
+                            // Carry the origin wall clock so the store keeps the
+                            // body's skew offset, which re-anchors its instants on
+                            // failover/reclaim (ADR-0055 §9).
                             &PutOpts {
                                 origin_now_ms: Some(origin_now_ms),
                                 incarnation,
@@ -230,7 +234,8 @@ impl Puller {
                 // whether or not the Element takes its body: latch the answer for
                 // the `Delete` guard. Refusing a body is a decision about which
                 // version the Element keeps, never about what its sender saw.
-                if incoming.as_ref().is_some_and(call::helpers::caller_answered) {
+                if incoming.as_ref().is_some_and(|copy| call::helpers::caller_answered(&copy.call))
+                {
                     self.store.note_authority_answer(call_ref);
                 }
                 outcome
@@ -259,86 +264,8 @@ impl Puller {
         }
     }
 
-    /// The Forward `Put` decision (ADR-0031 D3), in three checks. Where the
-    /// bodies speak, they are ordered by `call::helpers::lifecycle_behind`: the
-    /// answer ranks first, so an unanswered teardown never ends an answered
-    /// call.
-    ///
-    /// 1. `(sp, sb)` dominates the frame ⇒ a re-delivery of a version already
-    ///    held. Not a split; nothing to report. One exception: at the Element's
-    ///    own `(p,b)`, over an Element an acting backup authored (`sb > 0`) whose
-    ///    body stands behind the frame's, the authority adopted the backup's
-    ///    counter without its body (refusing it as behind its own) and published
-    ///    its own call at that version. The frame applies, so the Element heals.
-    ///    So does a frame not behind an Element whose `p` the acting backup
-    ///    adopted without the authority's body (`CallTopology::gen_adopted`):
-    ///    the authority's call at that version is its body, the Element's only
-    ///    names it.
-    /// 2. `sb > 0` and the frame's body stands behind the Element's ⇒ the
-    ///    authority is serving a BRANCH of this call. Refused.
-    /// 3. `sb > b_in` ⇒ the frame names a version behind the one the Element
-    ///    carries. Refused: whatever its body says, its sender has not seen what
-    ///    an acting backup wrote here.
-    ///
-    /// The Element is read only when `sb > 0`, and only for checks 1 and 2.
-    async fn forward_put_outcome(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-        stored: Option<(i64, i64)>,
-        version: (i64, i64),
-        incoming: Option<&call::Call>,
-    ) -> ApplyOutcome {
-        let (call_gen, call_bgen) = version;
-        let Some((sp, sb)) = stored else {
-            return ApplyOutcome::Applied;
-        };
-        let held = || self.authored_element(role, primary, call_ref, sb);
-        if sp >= call_gen && sb >= call_bgen {
-            let adopted = (sp, sb) == version;
-            return match (adopted, incoming) {
-                (true, Some(incoming))
-                    if held().await.is_some_and(|h| holds_the_version(&h, incoming)) =>
-                {
-                    ApplyOutcome::Applied
-                }
-                _ => ApplyOutcome::Dominated,
-            };
-        }
-        if let (Some(incoming), Some(held)) = (incoming, held().await) {
-            if lifecycle_behind(incoming, &held) {
-                return ApplyOutcome::Refused;
-            }
-        }
-        if sb > call_bgen {
-            return ApplyOutcome::Refused;
-        }
-        ApplyOutcome::Applied
-    }
-
-    /// The stored Element's body when an acting backup authored it (`sb > 0`),
-    /// decoded; `None` for an Element only its authority wrote, an absent one,
-    /// or one the model cannot read — the counters stay the only gate there.
-    /// Read with the **non-evicting**
-    /// [`peek_body_raw`](ReplicatingCallStore::peek_body_raw), so the compare
-    /// never destroys it.
-    async fn authored_element(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-        sb: i64,
-    ) -> Option<call::Call> {
-        if sb == 0 {
-            return None;
-        }
-        let raw = self.store.peek_body_raw(role, primary, call_ref).await?;
-        self.decode_counted(&raw)
-    }
-
     /// A stored or incoming body decoded, its refusal counted and logged.
-    fn decode_counted(&self, body: &[u8]) -> Option<call::Call> {
+    pub(super) fn decode_counted(&self, body: &[u8]) -> Option<Enveloped> {
         crate::repl::decode_peer_body(&self.codec, &self.metrics, body)
     }
 
@@ -384,21 +311,24 @@ impl Puller {
         let Some(raw) = self.store.peek_body_raw(role, primary, call_ref).await else {
             return false;
         };
-        self.decode_counted(&raw).is_some_and(|call| {
-            call.state == CallModelState::Active && call::helpers::caller_answered(&call)
+        self.decode_counted(&raw).is_some_and(|copy| {
+            copy.call.state == CallModelState::Active && call::helpers::caller_answered(&copy.call)
         })
     }
 
     /// Hand a frame's outcome up to the router (ADR-0011 X11 / ADR-0014 /
-    /// ADR-0031 D3). An applied reverse flush is reclaimed; a refused one, in
-    /// either direction, rides up **with its body**, because the call model can
-    /// read lifecycle progress in it that the counters cannot carry. A bootstrap
-    /// import signals nothing — the bulk reclaim covers the whole partition once.
+    /// ADR-0055 §7). An applied reverse flush is reclaimed; a refused one, in
+    /// either direction, rides up **with its body** to meet the live copy, the
+    /// latest of its call in the batch, once the batch is read whole
+    /// ([`held_meetings`](super::held_meetings)); any other frame of the call
+    /// rides up after it. A bootstrap import signals nothing — the bulk reclaim
+    /// covers the whole partition once.
     ///
     /// A pre-bootstrap Backup-flow refusal signals nothing either: the bulk
     /// re-seed replays the whole `bak:{peer}` keyspace, so its refusals are the
-    /// state of the two views and not an event, and folding each one would drive
-    /// one fold per resident call. They are counted; only the tail is handed up.
+    /// state of the two views and not an event, and meeting each one would drive
+    /// one meeting per resident call. They are counted; only the tail is handed
+    /// up.
     ///
     /// An applied forward write — a `Put` with its body, a `Delete` with the
     /// incarnation it names — rides up only for a call this node serves as a
@@ -417,63 +347,82 @@ impl Puller {
         write: PrimaryWrite,
         origin_now_ms: i64,
     ) {
-        use ApplyOutcome::{Applied, Dominated, Refused, Shed, Superseded};
         let Some(sink) = &self.repl_tx else { return };
-        if (mode, outcome) == (ApplyMode::Forward, Applied) {
-            if sink.serves_takeover(call_ref) {
-                let call_ref = call_ref.to_string();
-                sink.send(ReplCommand::ForwardFlushApplied { call_ref, write });
-            }
-            return;
-        }
-        let body = match write {
-            PrimaryWrite::Put(body) => body,
-            PrimaryWrite::Delete(incarnation) => {
-                if mode != ApplyMode::Forward && outcome == Applied {
-                    let call_ref = call_ref.to_string();
-                    sink.send(ReplCommand::ReverseDeleteApplied { call_ref, incarnation });
+        let cmd = command(mode, outcome, bootstrapped, call_ref, write, origin_now_ms, sink);
+        match cmd {
+            Some(
+                cmd @ (ReplCommand::ReverseFlushRefused { .. }
+                | ReplCommand::ForwardFlushRefused { .. }),
+            ) => self.held_meetings.hold(call_ref, cmd),
+            other => {
+                if let Some(held) = self.held_meetings.take(call_ref) {
+                    sink.send(held);
                 }
-                return;
+                if let Some(cmd) = other {
+                    sink.send(cmd);
+                }
             }
-        };
-        if mode == ApplyMode::Forward && !bootstrapped {
-            return;
         }
-        let cmd = match (mode, outcome) {
-            // Reclaim straggler: a backup reverse-flushed one of OUR calls after
-            // the bulk sweep — re-materialise + re-serve it.
-            (ApplyMode::Reverse, Applied) => ReplCommand::ReclaimCall(call_ref.to_string()),
-            (ApplyMode::Reverse, Dominated | Refused) => ReplCommand::ReverseFlushRefused {
-                call_ref: call_ref.to_string(),
-                body,
-                origin_now_ms,
-            },
-            // Forward: only a SPLIT rides up. A dominated re-delivery says nothing
-            // the live copy does not already hold.
-            (ApplyMode::Forward, Refused) => ReplCommand::ForwardFlushRefused {
-                call_ref: call_ref.to_string(),
-                body,
-                origin_now_ms,
-            },
-            (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => return,
-            (_, Shed | Superseded) => return,
-        };
-        sink.send(cmd);
+    }
+
+    /// Hand the router every refused copy the batch held, the batch read
+    /// whole ([`held_meetings`](super::held_meetings)).
+    pub(super) fn release_meetings(&self) {
+        let held = self.held_meetings.take_all();
+        if let Some(sink) = &self.repl_tx {
+            for cmd in held {
+                sink.send(cmd);
+            }
+        }
     }
 }
 
-/// Whether the authority's `incoming` body, at the Element's own `(p,b)`,
-/// is that version's body over the acting backup's `held`: `held` stands
-/// behind it, or `held`'s `p` was adopted without the authority's body and
-/// `incoming` is not behind it.
-fn holds_the_version(held: &call::Call, incoming: &call::Call) -> bool {
-    lifecycle_behind(held, incoming) || (adopted_p(held) && !lifecycle_behind(incoming, held))
-}
-
-/// Whether `body`'s `p` names a primary version whose body it does not hold
-/// (`CallTopology::gen_adopted`).
-fn adopted_p(body: &call::Call) -> bool {
-    body.topology.as_ref().is_some_and(|t| t.gen_adopted)
+/// The command a frame's outcome hands the router ([`Puller::signal`]), or
+/// none.
+fn command(
+    mode: ApplyMode,
+    outcome: ApplyOutcome,
+    bootstrapped: bool,
+    call_ref: &str,
+    write: PrimaryWrite,
+    origin_now_ms: i64,
+    sink: &crate::repl::RouterSink,
+) -> Option<ReplCommand> {
+    use ApplyOutcome::{Applied, Dominated, Refused, Shed, Superseded};
+    if (mode, outcome) == (ApplyMode::Forward, Applied) {
+        let call_ref = call_ref.to_string();
+        return sink
+            .serves_takeover(&call_ref)
+            .then_some(ReplCommand::ForwardFlushApplied { call_ref, write });
+    }
+    let body = match write {
+        PrimaryWrite::Put(body) => body,
+        PrimaryWrite::Delete(incarnation) => {
+            let applied_reverse = mode != ApplyMode::Forward && outcome == Applied;
+            let call_ref = call_ref.to_string();
+            return applied_reverse
+                .then_some(ReplCommand::ReverseDeleteApplied { call_ref, incarnation });
+        }
+    };
+    if mode == ApplyMode::Forward && !bootstrapped {
+        return None;
+    }
+    let call_ref = call_ref.to_string();
+    match (mode, outcome) {
+        // Reclaim straggler: a backup reverse-flushed one of OUR calls after
+        // the bulk sweep — re-materialise + re-serve it.
+        (ApplyMode::Reverse, Applied) => Some(ReplCommand::ReclaimCall(call_ref)),
+        (ApplyMode::Reverse, Dominated | Refused) => {
+            Some(ReplCommand::ReverseFlushRefused { call_ref, body, origin_now_ms })
+        }
+        // Forward: only a SPLIT rides up. A dominated re-delivery says nothing
+        // the live copy does not already hold.
+        (ApplyMode::Forward, Refused) => {
+            Some(ReplCommand::ForwardFlushRefused { call_ref, body, origin_now_ms })
+        }
+        (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => None,
+        (_, Shed | Superseded) => None,
+    }
 }
 
 /// What a `Data` frame wrote, as [`Puller::signal`] hands it up: a `Put`'s

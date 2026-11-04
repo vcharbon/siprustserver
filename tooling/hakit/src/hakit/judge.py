@@ -9,9 +9,10 @@ just before a window opened, within the sink's in-flight span, belongs to that
 window. A counted impact outside every window of a call whose lifetime
 overlapped windows takes no budget: it carries those windows, like an
 in-dialog impact. One outside every window is `unattributed`.
-An in-dialog impact takes no budget: it carries every window whose inject fell
-inside the call's lifetime before the impact or that holds the impact's
-instant, and with none it is `unattributed`. A slow setup measured across a generator stall is no impact:
+An in-dialog impact the window holding its instant allows (`in_dialog`) is
+charged there like a failed setup; any other carries every window whose
+inject fell inside the call's lifetime before the impact or that holds the
+impact's instant, and with none it is `unattributed`. A slow setup measured across a generator stall is no impact:
 it is returned apart, with its stall.
 """
 
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from .cdrjoin import CDR_MISMATCH, MISSING
 from .classify import SETUP_FAILED, SETUP_SLOW, UNEXPECTED_ENDING, Impact, SetupLatency
 from .jsonval import Json
-from .model import NO_BUDGET, Allowance, Budget
+from .model import NO_BUDGET, Allowance, Budget, InDialogAllowance
 from .stalls import Stall
 from .windows import Window
 
@@ -86,6 +87,26 @@ def _keyed(
         if retry_after:
             row["retry_after"] = True
         rows.append(row)
+    return rows
+
+
+def _charged_in_dialog(w: Window | None, imp: Impact, budgets: dict[str, Budget]) -> bool:
+    """Whether the window holding an in-dialog impact names it in its `in_dialog` allowances."""
+    if w is None:
+        return False
+    return any(e.matches(imp.stream, imp.cls, imp.detail or "") for e in budget_of(w, budgets).in_dialog)
+
+
+def _in_dialog_rows(impacts: list[Impact], entries: list[InDialogAllowance], cps: dict[str, float]) -> list[Json]:
+    charged: dict[tuple[int, str], list[Impact]] = defaultdict(list)
+    for imp in impacts:
+        idx = next(i for i, e in enumerate(entries) if e.matches(imp.stream, imp.cls, imp.detail or ""))
+        charged[(idx, imp.stream)].append(imp)
+    rows: list[Json] = []
+    for (idx, stream), items in sorted(charged.items(), key=lambda kv: (entries[kv[0][0]].cls, kv[0][0], kv[0][1])):
+        e = entries[idx]
+        rate = cps.get(stream, 0.0)
+        rows.append({**_row(e.cls, stream, items, e.allowed(rate), rate), "reason": e.detail})
     return rows
 
 
@@ -163,6 +184,7 @@ def judge(
     `cdr_in_flight_ms` how long a CDR stays in the system under test's sink
     after its call ends (the profile's `cdr_in_flight_s`)."""
     in_window: dict[str, list[Impact]] = defaultdict(list)
+    dialog_in_window: dict[str, list[Impact]] = defaultdict(list)
     counted_in_window: dict[str, list[Impact]] = defaultdict(list)
     slow_in_window: dict[str, list[SetupLatency]] = defaultdict(list)
     outside: dict[tuple[str, str, int, str, bool], list[Impact | SetupLatency]] = defaultdict(list)
@@ -176,6 +198,10 @@ def judge(
                 outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "", imp.retry_after)].append(imp)
             else:
                 in_window[w.event].append(imp)
+            continue
+        holder = _holding(windows, imp.at_ms)
+        if holder is not None and _charged_in_dialog(holder, imp, budgets):
+            dialog_in_window[holder.event].append(imp)
             continue
         candidates = [
             w.event
@@ -234,6 +260,7 @@ def judge(
         rows += _keyed(
             UNEXPECTED_ENDING, [i for i in mine if i.cls != SETUP_FAILED], budget.unexpected_ending, cps, out_s
         )
+        rows += _in_dialog_rows(dialog_in_window.get(w.event, []), budget.in_dialog, cps)
         by_stream: dict[str, list[SetupLatency]] = defaultdict(list)
         for lat in slow_in_window.get(w.event, []):
             by_stream[lat.stream].append(lat)

@@ -26,6 +26,7 @@
 //! verdict's ([`crate::must_fail`]), decided once the run is over.
 
 mod arbitration;
+mod awaits;
 mod completion;
 mod compose;
 mod deliver;
@@ -34,6 +35,7 @@ mod emit;
 mod flow;
 mod ladders;
 mod legs;
+mod omission;
 mod policy;
 mod script_end;
 mod settling;
@@ -76,6 +78,9 @@ pub struct Lane<'a> {
     pub base_dir: PathBuf,
     /// How a tier-2 position becomes a URI on this lane.
     pub composer: &'a dyn UriComposer,
+    /// The events the lane observes off the wire, for a send that awaits one
+    /// (§6.7g); `None` on a lane that reports none.
+    pub events: Option<crate::events::LaneEvents>,
 }
 
 /// One finished run.

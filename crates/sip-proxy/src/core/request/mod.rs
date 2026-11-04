@@ -30,6 +30,10 @@ mod cancel_route_tests;
 #[cfg(test)]
 mod cookie_identity_tests;
 #[cfg(test)]
+mod memo_bound_tests;
+#[cfg(test)]
+mod own_final_ack_tests;
+#[cfg(test)]
 mod reject_metric_tests;
 #[cfg(test)]
 mod retransmission_tests;
@@ -55,9 +59,7 @@ use super::ProxyCore;
 /// Outcome of routing a request — what to meter after the work is done.
 pub(super) struct RouteOutcome {
     pub(super) decision: RoutingDecisionKind,
-    /// The forwarded-to target. The lib meters only the decision; the routing
-    /// regression tests assert on this field.
-    #[allow(dead_code)]
+    /// The forwarded-to target; `None` for a request not forwarded.
     pub(super) target: Option<ProxyAddr>,
 }
 
@@ -78,9 +80,9 @@ impl ProxyCore {
         let start_ms = self.now_ms();
         let SipMessage::Request(req) = &msg else { return };
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
-        // Method::as_str() is already canonical-uppercase for known methods
-        // (Method::from_wire normalized at parse time); an extension method
-        // keeps its own row under the family's cap, `_overflow` past it.
+        // A known method is its upper-case spelling (RFC 3261 §7.1); any
+        // other token is an extension method on its own row under the
+        // family's cap, `_overflow` past it.
         self.metrics.record_request(req.method().as_str());
         // (`sip_proxy_calls_total` is counted inside `route_request`, where the
         // retransmission memo can exclude re-sent copies of the same INVITE.)
@@ -109,12 +111,11 @@ impl ProxyCore {
         //  • the ACK of a setup this hop saw rejected for good (486, 603, and
         //    the CANCEL flow's 487) — that call is over once its ACK is on the
         //    wire. Which ACK that is was decided on the response path, where
-        //    the final's status is known: an `AckHop` is written for EVERY
-        //    relayed non-2xx INVITE final, including a mid-dialog re-INVITE's
-        //    488 and an auth challenge, neither of which ends the call.
+        //    the final's status is known, by arming the span: any other ACK
+        //    (a re-INVITE's 488, an auth challenge's, a 2xx's) leaves it open.
         if initial_invite && outcome.decision == RoutingDecisionKind::Reject {
             self.traces.close(call_id);
-        } else if outcome.decision == RoutingDecisionKind::AckHop {
+        } else if req.method() == Method::Ack && outcome.target.is_some() {
             self.traces.close_on_ack(call_id);
         }
 

@@ -26,6 +26,7 @@ use scenario_harness::{Agent, Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
 mod cap;
+mod final_response;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -101,10 +102,8 @@ impl Sut {
 }
 
 fn ring_on() -> CdrConfig {
-    CdrConfig {
-        message_ring: 32,
-        captured_headers: vec!["Allow".into(), "Accept".into(), "Privacy".into()],
-    }
+    let captured_headers = vec!["Allow".into(), "Accept".into(), "Privacy".into()];
+    CdrConfig { message_ring: 32, captured_headers, final_response_headers: None }
 }
 
 /// `(direction, method, cseq, code)` of every entry, the shape the

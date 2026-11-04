@@ -16,7 +16,6 @@ use sip_txn::{
     DeferredBound, IdGen, InviteClass, InviteRefusals, TransactionConfig, TransactionEvent,
     TransactionLayer,
 };
-use tokio::sync::mpsc;
 
 use super::seeds::{self, Seed, LAYER, PEER};
 
@@ -175,12 +174,12 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// 200. What it is handed is counted in `seen`.
 async fn answer_requests(
     layer: TransactionLayer,
-    mut events: mpsc::Receiver<TransactionEvent>,
+    mut events: sip_txn::TransactionEvents,
     seen: Arc<Seen>,
 ) {
     while let Some(event) = events.recv().await {
         let (message, src, matched) = match event {
-            TransactionEvent::Message { message, src, matched_client_txn } => {
+            TransactionEvent::Message { message, src, matched_client_txn, .. } => {
                 (message, src, matched_client_txn)
             }
             TransactionEvent::Cancelled { .. } => {

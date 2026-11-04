@@ -1,17 +1,38 @@
 # A departed peer's in-flight INVITE calls are taken over
 
 **Status:** accepted (2026-10-12)
+Amended (2026-10-23): D5 and its residuals, the lost round becomes the evidence rule of
+any method (ADR-0055 §3, §4); a removed process superseded by its replacement authors
+nothing (ADR-0055 §6); D2's sweep also serves a departed primary's `Terminating` calls
+and discharges those with nothing left to serve (ADR-0055 §5); D7's stand-down reads
+containment, and the lifecycle order its gates read only ranks the base of a diverged
+call's end (ADR-0055 §7).
+Amended (2026-10-28): D1, a proxy's dead verdict is a second trigger; D2, the sweep's
+takeover half runs on either trigger, and its discharge half and the refusal of an
+undecided call on a departure only; the residual of a death the peers are not told of
+(ADR-0050 §3).
+Amended (2026-10-29): D2, the sweep also takes over a call with an in-dialog request in
+flight, and one that awaits the answer to a request sent off its turn, which the copy
+sends again (ADR-0039 decision 5).
+Amended (2026-10-29): D1, a dead verdict acts once this node's replication stream from
+the peer is down; D2, the takeover half then takes every such call over at once; D4, an
+undecided call's decision is asked again, on a verdict too, and a copy written over by
+its returning primary applies no answer (D7).
+Amended (2026-10-31): D2 and D8, a dead verdict that acted releases the limiter key of
+every ended call of the peer here, and a copy that ends a call while its primary reads
+dead releases the key at its end; the CDR still waits for the departure or the reconcile.
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
 ADR-0020 X3 (a copy whose primary departed discharges the call, D8).
 
 **Owner:** `crates/b2bua/src/repl/supervisor.rs` (the departure signal),
+`router/dead_verdict.rs` (a proxy's dead verdict),
 `repl/self_endpoint.rs` (leaving the slice), `router/departure.rs` (the sweep),
 `router/quiesced.rs` (the self-release turn), `router/undecided.rs` (the undecided
 call), `router/initial_turn.rs` (the creation write, the decision a node that left
-the slice does not apply), `rules/lost_round.rs` and
-`rules/actions/lost_round.rs` (the lost round), `sip-message`'s
+the slice does not apply), `rules/evidence.rs` and
+`rules/actions/evidence.rs` (the lost round, now ADR-0055 §4's evidence rule), `sip-message`'s
 `generate_ack_for_non_2xx_in_dialog`, `router/reclaim/bulk.rs` (the reclaim write),
 `repl/puller/apply.rs` and `repl/router_sink.rs` (an applied primary write handed up),
 `router/stand_down.rs` (the stand-down), `store/takeover.rs` (the takeover marks),
@@ -51,13 +72,53 @@ never on a periodic reconcile of a peer already parked, never for a condition fl
 a peer still in the set, never on this node's own shutdown
 (`repl/departure_signal_tests.rs`).
 
+A front proxy's **dead verdict** on a peer is the second trigger (ADR-0050 §3): the
+signed `X-Worker-Dead` notice an out-of-dialog OPTIONS carries, taken once per verdict.
+The proxy reads a death the membership does not show (ADR-0031 case 3a) when the reply
+window of the `HEALTH_THRESHOLD`-th probe the peer leaves unanswered ends:
+`(HEALTH_THRESHOLD − 1) × HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS` after the first one was
+sent, which leaves within one interval of the death, so 2.6 to 3.6 s after it by default
+(`probe_dead_verdict.rs`). The default window, 1.6 s, holds the three copies Timer E
+sends of a probe (at 0, 0.5 and 1.5 s) and the answer to the last one. From then on it routes the peer's traffic to its backups, so
+the backups act on that verdict rather than wait for the endpoint to leave the slice. A
+notice naming this node is ignored (`router/dead_verdict/tests.rs`;
+`read_dead_primary_taken_over.rs`).
+
+The backup confirms the verdict by itself, on its own Backup flow from that peer (user
+ruling). With the stream open, it waits for the stream's end, which the pullers' idle
+bound (ADR-0045) brings at most that long after the peer's last frame. With the stream
+down or reconnecting at the verdict, or ended since with no frame from the peer, its
+puller makes one connect at once, skipping the backoff and starting afresh a connect in
+flight, bounded by the connect bound (`B2BUA_REPL_CONNECT_TIMEOUT_MS`): a connect
+refused, as when the peer's process died, or run out, as when its host answers nothing,
+confirms the verdict; a connect the peer takes opens a stream whose end with no frame
+confirms it. A frame from the peer after the verdict, on a stream that lives or on the
+one that reconnects, or a stream open past the idle bound, speaks for a live peer the
+proxy misread, and the verdict takes nothing over. That frame must carry the incarnation
+generation the flow last heard before the verdict: a frame of another generation comes
+from a process that restarted in place, the incarnation the verdict named is gone, and
+the verdict is confirmed (`repl/verdict_confirmation_tests.rs`). A restarted process
+the flow already streams from at the verdict is that generation, and its own reclaim
+takes its calls back
+(`b2bua_dead_verdicts_unconfirmed_total`, one wait per peer however many verdicts;
+`verdict_meets_a_down_stream.rs`, the backoff, connect and cut cells). Two independent
+signals must agree, so a flap, a partition between the proxy and a live peer, or a
+second proxy that alone lost the peer never moves its calls: a notice from any proxy
+holding the cluster key is advisory (`verdict_meets_a_down_stream.rs`, the standby
+cell). A crashed process on a live node refuses the connect at once
+(`read_dead_primary_taken_over.rs`); a node lost whole is confirmed by the connect's
+bound (the unanswering-host cell there).
+
 **D2 — The departure sweep takes over the calls with an INVITE in flight.** The
 router starts a task of its own over the departed peer's backup partition — never the
 router loop's, which serves its own calls meanwhile — tracked by the dispatcher, so a
 crash of the node stops it (`router/departure/tests.rs`). It
 reads the bodies one at a time, yielding as it goes, and for every call that names an
-INVITE transaction in flight — exactly the calls a materialisation would seed — takes
-the call lock and materialises the call as a takeover: its timers re-arm at their
+INVITE transaction in flight — exactly the calls a materialisation would seed — or an
+in-dialog request in flight but the keepalive (a relay, a request of its own or one it
+holds), or holds the answer to a request it sent off its turn, whose task died with the
+peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover
+at once: its timers re-arm at their
 replicated deadlines, its INVITE transactions are rebuilt, the self-release watch is
 armed. A call already live here is left as it is. A call with nothing in flight is
 not touched: it stays reactive, for the reason ADR-0014 D1 removed the eager takeover
@@ -79,6 +140,17 @@ keeps — the give-up of a 2xx ladder the primary's copy discharged — is not k
 (`answer_lost_with_primary_no_answer.rs`, the cell where the ACK reaches the reclaimed
 copy first).
 
+The sweep has two halves. The **takeover half** (the calls above, an undecided one
+included, D4) runs on either trigger. The **discharge half** (D8's discharge of an
+ended Element and of a `Terminating` call with nothing left to serve, ADR-0055 §5) runs
+on a departure only: a peer read dead may live behind a partition and discharge those
+calls itself (user ruling). A copy taken over on a verdict that ends while its peer is still a member
+defers its CDR (ADR-0020 X3), and the departure's sweep discharges it. The limiter half
+of the discharge runs on the verdict too (D8). A call already
+live here when the departure's sweep runs is left as it is. A primary that comes back
+from the partition meets the copies through D3's forward guard, D7's stand-down and
+ADR-0055 §7's containment, as it meets a reactive takeover.
+
 **D3 — A new call is written to its backup at its birth.** The INVITE's turn flushes
 the call it creates, when the call has a backup, before the decision is asked for;
 the decision turn's write supersedes it — `(1,0)` then `(2,0)`, a forward
@@ -87,35 +159,41 @@ entry, as every write of one call does (`repl/tests.rs`,
 `update_compacts_and_moves_counter_forward`). The replica lands one stream hop after
 the caller's 100, before the decision answers (`new_call_replication_window.rs`).
 
-**D4 — An undecided call materialised with no message is refused 503.** A call the
-departure sweep takes over, or that its own node reclaims after a restart (the bulk
-reclaim and the straggler reclaim), carries no message to serve. One still waiting on
-its first routing decision — live, the caller unanswered, no decision applied, no
-attempt, no leg dialled — is refused as a decision the backend could not give
-(503 Service Unavailable, ADR-0022 X3) through the INVITE server transaction the
-materialisation rebuilt, with **no Retry-After**: the caller takes it as a 500
-(§21.5.4), and whether to retry is its own or its upstream's call — nothing behind the
-stateless front proxy holds state that a delay would wait out. The decision is never
-asked again, so nothing it causes happens twice. The copy's primary has departed, so
-the copy writes the CDR (D8). When the caller's INVITE branch is
+**D4 — An undecided call materialised with no message has its decision asked again.**
+A call the departure sweep or a confirmed dead verdict takes over, or that its own node
+reclaims after a restart (the bulk reclaim and the straggler reclaim), carries no
+message to serve. One still waiting on its first routing decision — live, the caller
+unanswered, no decision applied, no attempt, no leg dialled — has that decision asked
+again on a turn of the call's own (user ruling): the initial consult runs on the
+materialised call, its caller's INVITE rebuilt from the record, and the caller is
+answered through the INVITE server transaction the materialisation seeded. The
+backend may be asked twice and the callee dialled twice; the backend is stateless
+(ADR-0055 §1). One owner acts on the answer (D7): a takeover copy whose primary wrote
+the call since the copy was made — a returning primary's reclaim, which asks the
+decision itself — asks nothing, and applies no answer that returns after that write.
+A call whose caller CANCELed the setup during its consult (`Call::setup_cancelled`,
+written by the consulting turn before her CANCEL's answers leave, ADR-0055 §3) ends
+under her cancel with nothing on the wire (`setup_cancelled_during_its_decision.rs`,
+a kill at each sub-point after the CANCEL). When the caller's INVITE branch is
 already another call's transaction on this node — its retransmission placed here as a
-call of its own — the undecided call ends with nothing on the wire, as the 503 would
-answer that other call; when the transaction layer cannot be asked, nothing is settled
+call of its own — the undecided call ends with nothing on the wire; when the
+transaction layer cannot be asked, nothing is settled. A node whose endpoint left the
+slice asks nothing and refuses the caller 503, with no Retry-After (D6)
 (`undecided_call_settled_on_departure.rs`, `router/departure/tests.rs`).
 
 **D5 — A final for a round the record lost is acknowledged and ends the call.** An
 INVITE final on a confirmed dialog whose CSeq is above the last the record sent on that
 dialog, with no relay pending for it, answers a round the record lost
-(`ack-lost-round`). The dialog's sequence is raised to the round's first, so no later
+(`evidence-final`, ADR-0055 §4). The dialog's sequence is raised to the round's first, so no later
 request reuses a number the peer saw (§12.2.1.1), and the round becomes the dialog's
 INVITE transaction. A 2xx is ACKed end to end, an offer it makes answered with every
 stream rejected (RFC 3264 §6), the ACK retained so a repeat is re-ACKed (§13.2.2.4); a
 non-2xx is ACKed hop by hop on the response's own branch, built from the dialog's
 remote target and route set where the INVITE went (§17.1.1.3), the ACK retained too so
-a repeat is re-ACKed (`re-ack-lost-round`, §17.1.1.2). Then the call ends with a BYE on
+a repeat is re-ACKed (`re-ack-evidence`, §17.1.1.2). Then the call ends with a BYE on
 every leg. Once the call is ended, a later copy of the final finds a terminal record
 and takes nothing over: one takeover per lost round
-(`reinvite_round_not_yet_replicated.rs`, `b2bua/tests/it/lost_round_rules.rs`). The
+(`reinvite_round_not_yet_replicated.rs`, `b2bua-core/tests/it/evidence_rules.rs`). The
 failure rule for a dialled leg matches only a leg still dialling: a non-2xx on a
 confirmed leg is never read as the leg failing.
 
@@ -129,10 +207,14 @@ replacement-decision cell). A node still in the slice — draining in ADR-0031 c
 applies its decisions.
 
 **D7 — A returning primary takes its swept calls back.** A node that reclaims one of
-its own calls with an INVITE in flight, in the bulk reclaim or a straggler reclaim,
-writes it once: one `p` increment, recording that the node serves the call again. A
-quiet call is not written, so the reclaim of a large partition stays write-free for
-it. On the backup that write is a forward flush. Applied to the Element of a call the
+its own calls with an INVITE in flight, or one its backup wrote as the call's acting
+owner (its `b` past zero), in the bulk reclaim or a straggler reclaim, writes it once:
+one `p` increment, recording that the node serves the call again. A copy taken over on
+a verdict or by a message stays resident while its transactions last, timers armed,
+after the call went quiet, so the write reaches it too
+(`swept_call_primary_returns.rs`, the node-down cell). A quiet call the backup never
+wrote has no copy and is not written, so the reclaim of a large partition stays
+write-free for it. On the backup that write is a forward flush. Applied to the Element of a call the
 backup serves as a takeover copy, on the stream's tail or inside a bootstrap scan of
 the returned node, it is handed to the router with its body; so is an applied forward
 delete of the call, with the incarnation it names. The puller reads the router's live
@@ -150,7 +232,20 @@ stands down when:
   the transactions, never from a sequence a refusal raised), and each other request the
   copy relayed itself, as the same relay (`call::helpers::holds_relays_of`;
   `PendingRequest::relayed_by` names the relaying node). A relay the copy holds as the
-  primary's own returns its final to the primary and pins nothing. One increment
+  primary's own returns its final to the primary and pins nothing. Nor does a leg's
+  dialling INVITE the copy sent, awaiting its final or not: its cookie names the
+  call's primary (ADR-0055 §8), so once the proxy reads the primary alive the
+  INVITE's responses reach the primary, which takes the INVITE's client transaction
+  over from its record — seeded as every materialisation seeds a dialled INVITE
+  with no final, or at the meeting that takes the copy's write carrying the dial,
+  which the primary then writes once so the copy stands down — and takes its
+  provisionals and final, ACKs a non-2xx, ACKs or
+  BYEs a 2xx and CANCELs it as the call decides
+  (`reclaim_takes_the_copys_dialled_invite.rs`). A final that reaches the copy
+  while the primary is not routable is the copy's: the primary that takes the
+  copy's write carrying it writes the call once, the copy stands down on that
+  write, and a 2xx taken that way goes on along the copy's §13.3.1.4 ladder,
+  never sent again at once. One increment
   of a copy's `b` is one write this node made as the call's acting backup; a quiet
   turn, a fold or an adopted version moves nothing. A primary reaches a `b` only by
   reading the copy's write that carries it — applied or folded into its record, or
@@ -161,7 +256,8 @@ stands down when:
   `relay_the_primary_never_read.rs`, `ending_crossing_a_round.rs`;
   `router/stand_down/tests.rs`). A copy that wrote
   nothing is covered by any write of its primary. The returning node's recovery pulls
-  the copy's writes before it reclaims, so its reclaim write covers them; or
+  the copy's writes before it reclaims, so its reclaim write covers them; it makes that
+  write before it is routable, its calls parked until then (ADR-0055 §8); or
 - the primary deleted the call (the same incarnation, or one the delete does not name),
   and the copy holds no request whose final only it sees.
 
@@ -170,12 +266,28 @@ between. Standing down releases the copy local-only: its timers are cancelled, n
 is written, no CDR (ADR-0020 X3). Its transactions are **relinquished**, deleted with
 nothing sent, rather than orphaned (ADR-0034). They are images of the primary's own,
 so an orphan's ACK and BYE would end the dialog the primary holds, and every request
-the copy sent carries the route cookie naming the primary, so a response reaches the
-primary once the proxy reads it alive; one that still reaches the backup takes the
-call over afresh (`stood_down_round.rs`: a copy stood down in the middle of a re-INVITE
-round it relayed; the callee's 200 takes the call over afresh and the round completes).
-Any other copy plays on and self-releases at quiescence, and a refused flush folds as
-before (ADR-0031 D3).
+the copy sent carries the route cookie naming the primary: the responses to a leg's
+dialling INVITE reach the primary once the proxy reads it alive, and any other
+response follows its Via to the backup, where it takes the call over afresh
+(`stood_down_round.rs`: a copy stood down in the middle of a re-INVITE round it
+relayed; the callee's 200 takes the call over afresh and the round completes). Any
+other copy plays on and self-releases at quiescence, and a refused flush folds as
+before (ADR-0031 D3). A CANCEL the primary's copy records on a leg's dialling INVITE
+the copy sent leaves the primary, which holds that INVITE's client transaction
+(RFC 3261 §9.1); a copy that plays on sends none
+(`reclaim_takes_the_copys_dialled_invite.rs`, the transfer-target cells). A
+non-2xx final to a leg's dialling INVITE that reaches the primary while it
+holds no client transaction of it — the copies of a split each dialled and
+ended their own — is ACKed there from its via-extension (ADR-0055 §12;
+`router/unheld_final_tests.rs`).
+
+One owner acts on an outside service's answer. A copy awaiting the answer to a request
+the primary's reclaim write awaits too is covered by that write on that request: it stands down, an answer reaching
+it afterwards takes nothing over (ADR-0039 decision 5), and the primary alone acts on
+the answer, the backend possibly asked twice. A primary that takes the copy's write
+carrying a dialled INVITE's final the copy took sends again each request that write
+awaits and its own record did not: the copy stands down on the primary's write, and
+the primary is the one owner of those answers (`reclaim_takes_the_copys_consult.rs`).
 
 **An unanswered teardown never ends an answered call.** Both replication gates order
 two bodies of one call the same way (`call::helpers::lifecycle_behind`): the answer
@@ -235,8 +347,23 @@ cells measure the discharge).
 The departure sweep (D2) discharges, the same way and once, every ended Element of
 the departed peer: a copy here ended the call and deferred it while the peer was a
 member, and the peer left without reconciling it
-(`deferred_end_of_a_departed_primary.rs`; `limiter_release_by_call.rs`, the departing
-primary cell, counts one release).
+(`deferred_end_of_a_departed_primary.rs`, its limiter cell counting the release).
+
+**The limiter key of a deferred end leaves at the verdict, its CDR at the departure.**
+A peer reads dead here from a dead verdict that acted (D1) until a frame from it
+arrives. The verdict's sweep releases the limiter key every ended call of the peer owes
+(an ended Element, a `Terminating` call with nothing left to serve), and a copy that
+ends a call while its primary reads dead releases the key at its end, with the wire.
+Neither writes the CDR: on a misread that would be a second record (user ruling). The
+release is keyed by the call (ADR-0040 decisions 1 and 3): the key is minted once per
+call, a release drops that key's set only and fences it for one lease, so the
+departure's, the reclaim's or the reap's release of the same call frees nothing more.
+A live primary behind a partition that confirms the misread still holds its copy of the
+ended call: its refreshes meet the fence for one lease, then re-register the set until
+its reconcile of the copy's end writes the one CDR and releases the key. No other
+call's hold is taken; the ended call counts again at most from the fence's lapse to
+that reconcile, as it counted throughout before the verdict released it
+(`limiter_release_at_the_verdict.rs`; its unconfirmed cell releases nothing).
 
 A node of the departed ordinal that applies the backup's delete on its reclaim stream
 while it holds the call live — the departed process itself, still running (ADR-0031
@@ -253,33 +380,70 @@ the call has one CDR.
 
 ## Residuals
 
-- **A death the peers are not told of stays reactive.** A partition or a crash
-  before the orchestrator acts (ADR-0031 case 3a) and a restart in place (case 4)
-  never leave the membership set, so no sweep runs: a message takes the call over
-  (`inflight_resend.rs`, `prack_takeover.rs`, and the CANCEL cell of
-  `undecided_call_settled_on_departure.rs`), and a restarted node answers its own
-  undecided calls on its reclaim (the restart cell there).
+- **A death no proxy reads dead stays reactive.** A restart in place (ADR-0031 case
+  4) never leaves the membership set and is read by the tombstone, not the probe, and
+  a proxy with no cluster key tells no verdict: a message takes the call over
+  (`inflight_resend.rs`, `prack_takeover.rs`, each on a proxy that tells no verdict).
+  An undecided call there is taken over by a message (the CANCEL cell of
+  `undecided_call_settled_on_departure.rs`), and a restarted node asks its own
+  undecided calls' decisions again on its reclaim (the restart cell there).
+- **A primary read dead while it lives.** A flap or a partition between the proxy and
+  the primary alone takes nothing over, the stream open or reconnecting: nothing is
+  dialled, asked or relayed twice (`cancel_and_retransmission_follow_a_live_hop.rs`, the
+  cells that tell the verdict; `live_primary_read_dead.rs`, a flap;
+  `verdict_meets_a_down_stream.rs`). A verdict that meets a partition between the two
+  workers too, the backup's connect refused or unanswered, takes over the calls with
+  work in flight while the primary may still serve them, so the callee may get the
+  dialled INVITE twice and an outside service the request twice
+  (`read_dead_primary_taken_over.rs`, the silent-host cell, confirmed by its partition).
+- **A peer that goes silent** is confirmed once its stream is left at the pullers'
+  idle bound (2 s after its last frame, `B2BUA_REPL_IDLE_TIMEOUT_MS`; ADR-0045) and the
+  one connect fails: at once when the path to it refuses connects
+  (`read_dead_primary_taken_over.rs`, the silent-host cell), one connect bound later
+  when its host answers nothing (`B2BUA_REPL_CONNECT_TIMEOUT_MS`, 2 s;
+  `verdict_meets_a_down_stream.rs`, the unanswering-host cell). The connect resolves the
+  peer's address first, within the lookup bound (`B2BUA_REPL_LOOKUP_TIMEOUT_MS`, 2 s),
+  and a process frozen behind a kernel that still takes the connect sends no frame, its
+  stream left at the idle bound again (`repl/verdict_confirmation_tests.rs`). So a node
+  lost whole is taken over at most idle + lookup + connect after the verdict, plus idle
+  once more for a frozen process: 6 to 8 s by default. A live peer whose stream stalls
+  longer than the idle bound is pulled again from its watermark.
+- **A refuted verdict is spent.** The proxy tells one notice per health change; a
+  primary that sends one frame on the backup's reconnect and then dies is not taken
+  over proactively: its calls are taken over by a message (the reactive path), at a
+  later verdict on another health change (`live_primary_read_dead.rs`, the second
+  verdict), or at its departure.
+- **A split healing on both planes at once.** The partitioned primary's ladders (its
+  480's Timer G repeats, its CANCEL) reach the parties until its own pull reconnects
+  and it learns the takeover; the parties draw 481s and hop-ACKs. Judged as a split:
+  leaks, cleanup and the CDR count (`forward_flush_never_regresses_backup_progress.rs`,
+  the cells healing after the copy shed; its live Put cell heals the SIP plane once both
+  workers pulled each other again).
 - **The creation write lands one stream hop after the 100.** A death inside that
   hop leaves no replica (`new_call_replication_window.rs` measures it).
 - **A route applied before its write replicated.** A node that dies after dialling
   the callee and before the routed call reached its backup leaves the backup an
-  undecided call: the caller is refused 503 and the callee rings on, CANCELled by no
-  one (`undecided_call_settled_on_departure.rs`, the route-not-replicated cell).
+  undecided call: the backup asks the decision again and dials the callee a second
+  time, while the INVITE the dead node sent rings on, CANCELled by no one
+  (`undecided_call_settled_on_departure.rs`, the route-not-replicated cell).
 - **The caller's re-INVITE of a lost round gets no final.** Its transaction existed
   only on the dead node (§17.1.3); the BYE ends its dialog instead
   (`reinvite_round_not_yet_replicated.rs`). Answering it would need the 100 held on
   a synchronous replication, which ADR-0014 rejects.
-- **A caller answered twice.** When a removed node refuses a call its backup's sweep
-  answered too, the caller hears a second 503 on the branch its transaction completed
-  on, and does not ACK it (`undecided_call_settled_on_departure.rs`, the
-  replacement-decision cell). A CANCEL during the decision round trip draws the same:
-  the backup holds the call as born and refuses it 503 after the caller's 487 (the
-  CANCEL-during-decision cell).
-- **An abrupt removal writes two CDRs.** In ADR-0031 case 2 the removed process and
-  the backup that ended the call of its departed primary each discharge it — the dual-owner
-  window of ADR-0031 D3 (`undecided_call_settled_on_departure.rs`, the
-  replacement-decision cell). A decision slower than the process's grace leaves one
-  final, one CDR, one consult (the replacement cell).
+- **A removed node superseded by its replacement.** A removed node whose ordinal is
+  bound to its replacement answers nothing, nor writes a CDR (ADR-0055 §6,
+  `undecided_call_settled_on_departure.rs`, the replacement-decision cell).
+- **A returning primary's reclaim inside the copy's decision.** At `applied`, the
+  copy's re-asked answer can apply in the one replication hop between the returning
+  primary's reclaim write and its arrival at the copy; both nodes then dial the
+  callee, and the responses to the copy's INVITE reach the primary (D7, ADR-0055
+  §8), which holds no transaction of it. A non-2xx is ACKed there from its
+  via-extension (ADR-0055 §12). A 2xx on a leg the primary's record lacks is
+  evidence (ADR-0055 §4): it is ACKed and BYEd from its via-extension and the
+  call ends (`router/evidence_gate_tests.rs`). A 2xx on a leg id the
+  primary's own dial holds, under tags that name no dialog of it, is ACKed
+  and its dialog BYEd from its via-extension, and the call goes on
+  (`router/unheld_final_tests.rs`).
 - **A returning node's answer inside the replication lag of the deadline.** The
   copy's ring deadline fires before the returned node's reclaim and answer reach the
   backup: the copy CANCELs the callee after its answer and refuses the caller 480

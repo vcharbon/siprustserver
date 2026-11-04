@@ -21,7 +21,7 @@ spec:
         - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
       containers:
         - name: masq-exempt
-          {{- include "siprust.keepalivedImage" . | nindent 10 }}
+          {{- include "siprust.netToolsImage" . | nindent 10 }}
           securityContext:
             capabilities: { add: ["NET_ADMIN", "NET_RAW"] }
           command: ["/bin/sh", "-c"]
@@ -31,7 +31,6 @@ spec:
           env:
             - { name: PROXY_VIP, value: {{ include "siprust.net" (dict "root" $ "key" "proxyVip") | quote }} }
             - { name: EXTERNAL_VIP, value: {{ include "siprust.net" (dict "root" $ "key" "externalVip") | quote }} }
-            - { name: EXTRA_VIPS, value: {{ include "siprust.extraVips" . | quote }} }
             - { name: EXTERNAL_SUBNET, value: {{ include "siprust.net" (dict "root" $ "key" "externalSubnet") | quote }} }
             - { name: EXTERNAL_INTERFACE, value: {{ include "siprust.net" (dict "root" $ "key" "externalInterface") | quote }} }
             - { name: PERIOD, value: {{ int .Values.masqExempt.periodSeconds | toString | quote }} }

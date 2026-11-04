@@ -15,16 +15,17 @@ use call::{
 use sip_message::header::RAck;
 use sip_message::{Method, SipRequest};
 
-use b2bua_sdk::provisional::{
-    absorbed_provisional_actions, originator_final_sent, shown_to_no_one,
-};
-
 use b2bua_sdk::model::{
     LegEnd, Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition,
     RuleHandleResult, TimerDelay, CORE_LAYER,
 };
+use b2bua_sdk::provisional::{
+    absorbed_provisional_actions, originator_final_sent, shown_to_no_one,
+};
 
 use super::reaper_verdicts::{reap_handler_panic, reap_message_cap, reap_overflow, reap_stale};
+use super::request_timeouts::{going_away_timeout, record_timeout_actions};
+use super::straggler::{fork_straggler, straggler_release, straggler_release_timeout};
 
 /// A CORE_LAYER rule.
 pub(super) fn rule(
@@ -89,9 +90,9 @@ pub(crate) fn unacked_2xx_give_up_actions(
 /// Every leg still holding a 2xx whose ACK this stack can compose alone
 /// ([`crate::rules::relay::bare_ack_owed`]). Either face qualifies — a b-leg
 /// answering the call, or the caller's face answering a relayed callee
-/// re-INVITE. Absent: a delayed-offer 2xx (only the silent peer's own ACK
-/// supplies its answer) and the a-leg's initial round, where this stack sent
-/// no INVITE and owes no ACK.
+/// re-INVITE. Absent: a delayed-offer 2xx, whose ACK the teardown composes
+/// rejecting every stream (RFC 3264 §6), and the a-leg's initial round, where
+/// this stack sent no INVITE and owes no ACK.
 pub(crate) fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
     std::iter::once(call.a_leg())
         .chain(call.b_legs().iter())
@@ -110,13 +111,8 @@ pub(crate) fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item 
 fn find_pending_relayed_invite(ctx: &RuleContext, inbound_cseq: i64) -> Option<(String, i64)> {
     std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()).find_map(|leg| {
         leg.dialogs.iter().find_map(|d| {
-            d.inbound_pending_requests
-                .iter()
-                .find(|p| {
-                    p.method.eq_ignore_ascii_case("INVITE")
-                        && p.inbound_cseq == inbound_cseq
-                        && !p.cancelled
-                })
+            call::helpers::invite_relay(d)
+                .filter(|p| p.inbound_cseq == inbound_cseq && !p.cancelled)
                 .map(|p| (leg.leg_id.clone(), p.outbound_cseq))
         })
     })
@@ -129,13 +125,6 @@ fn keepalive_interval(ctx: &RuleContext) -> i64 {
     // long-hold endurance traffic. The per-call `features` keepalive value is
     // accepted but does not drive the runtime timer.
     ctx.config.keepalive_interval_sec
-}
-fn keepalive_timeout(ctx: &RuleContext) -> i64 {
-    // Grace for the in-dialog OPTIONS 200 before the leg is declared dead and the
-    // call is torn down. Operator knob (`B2BUA_KEEPALIVE_TIMEOUT_SEC`, default
-    // 32 s) — wide enough that a healthy reclaimed dialog whose keepalive
-    // round-trip is still settling across a reboot is not BYE'd as dead.
-    ctx.config.keepalive_timeout_sec
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call.features().map(|f| f.platform.max_duration_ms).unwrap_or(3_600_000)
@@ -394,8 +383,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .leg_states(&[LegState::Confirmed, LegState::Terminated])
                 .filter(|ctx| {
                     let Some(d) = ctx.dialog() else { return false };
+                    let Some(leg) = ctx.source_leg() else { return false };
                     let Some(resp) = ctx.response() else { return false };
-                    d.ack_branch.is_some() && crate::rules::relay::retransmitted_2xx(d, resp)
+                    call::helpers::sent_exchange(d).is_some_and(|x| x.ack_branch.is_some())
+                        && crate::rules::relay::retransmitted_2xx(leg, d, resp)
                 }),
             |ctx| {
                 ok(vec![RuleAction::AckLeg { leg_id: ctx.source_leg_id.to_string(), body: None }])
@@ -475,7 +466,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 // Nothing is composed here.
                 actions.extend(vec![
                     RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
-                    RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)),
+                    RuleAction::cancel(TimerKey::setup(TimerType::SetupTimeout)),
                     RuleAction::arm(
                         TimerKey::call(TimerType::GlobalDuration),
                         TimerDelay::millis(max_duration(ctx)),
@@ -530,17 +521,18 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // The non-INVITE sibling of `relay-reinvite-response`
         // (INVITE) alongside `relay-non-invite-200` (the 2xx half): without it
         // the far end's 481/488/491… to a relayed UPDATE/INFO was silently
-        // dropped and the requester timed out. Matches ONLY when the source
-        // dialog holds a pending-relay snapshot for the response CSeq — i.e. a
-        // transaction WE relayed. A B2BUA-originated request (keepalive
-        // OPTIONS, relayFirst18x PRACK, REFER-progress NOTIFY) leaves no
-        // snapshot, so its failures keep their own rules — in particular a
+        // dropped and the requester timed out. Matches ONLY when the response
+        // answers a relay record on the source dialog — i.e. a transaction WE
+        // relayed. A B2BUA-originated request (keepalive OPTIONS,
+        // relayFirst18x PRACK, REFER-progress NOTIFY) records as this stack's
+        // own, so its failures keep their own rules — in particular a
         // keepalive-OPTIONS 481 still reaches `handle-481`'s teardown, which
         // this rule outranks only for relayed transactions. Like a failed
         // re-INVITE (§14.1), a failed relayed non-INVITE leaves the dialog and
         // the call as they were: report the failure to the requester, nothing
-        // more. (BYE never takes this path — it is answered locally and leaves
-        // no snapshot; the relay executor removes the snapshot on this final.)
+        // more. (BYE never takes this path — it is answered locally and
+        // relayed by no record; the relay executor settles the record on this
+        // final.)
         rule(
             "relay-non-invite-failure",
             &["handle-481"],
@@ -600,14 +592,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         let sip_headers: Vec<serde_json::Value> = ctx
                             .response()
                             .map(|r| {
-                                r.headers()
-                                    .iter()
-                                    .filter(|h| {
-                                        !crate::initial_invite::STANDARD_HEADERS
-                                            .iter()
-                                            .any(|n| n.matches(&h.name))
-                                    })
-                                    .map(|h| serde_json::json!([h.name, h.value]))
+                                b2bua_sdk::consult_headers::consult_headers(r.headers())
+                                    .into_iter()
+                                    .map(|(name, value)| serde_json::json!([name, value]))
                                     .collect()
                             })
                             .unwrap_or_default();
@@ -709,16 +696,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
+        super::keepalive_failure::keepalive_dialog_terminated_rule(),
         // A non-2xx final to a request THIS STACK originated — its own PRACK
         // toward a responder whose provisional the originator was never shown
-        // reliably, or a REFER-progress NOTIFY — leaves no pending-relay
-        // snapshot, and denies one transaction or one subscription, never the
+        // reliably, or a REFER-progress NOTIFY — records as this stack's own,
+        // and denies one transaction or one subscription, never the
         // dialog: a PRACK's 481 is RFC 3262 §3's ordinary answer once the
-        // responder no longer holds that provisional unacknowledged. A refer
-        // NOTIFY's 481 is the transfer machine's (`transfer-notify-481` ends
-        // the subscription, RFC 6665 §4.4.1); this rule keeps the remainder,
-        // where nothing is owed and nothing moves. A RELAYED request's failure
-        // has its snapshot and is `relay-non-invite-failure`'s to relay.
+        // responder no longer holds that provisional unacknowledged; a
+        // NOTIFY's that removes its subscription ended it before the rules
+        // (RFC 6665 §4.2.2). Nothing is owed and nothing moves. A RELAYED
+        // request's failure is `relay-non-invite-failure`'s to relay.
         rule(
             "absorb-own-request-failure",
             &[],
@@ -737,39 +724,30 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "absorb-options-200",
             &["relay-non-invite-200"],
-            // Only a B2BUA-originated keepalive OPTIONS is absorbed: it leaves no
-            // pending-relay snapshot on the source dialog. A relayed end-to-end
-            // OPTIONS does leave one (matching the response CSeq) → this declines
-            // and `relay-non-invite-200` forwards the 200 to the peer.
-            Match::response().method("OPTIONS").status_class(2).filter(|ctx| {
-                let cseq = ctx.response().map(|r| r.cseq().seq() as i64);
-                match (ctx.dialog(), cseq) {
-                    (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
-                    _ => true,
-                }
-            }),
-            |ctx| {
-                let leg = ctx.source_leg_id.to_string();
-                ok(vec![RuleAction::cancel(TimerKey::leg(TimerType::KeepaliveTimeout, leg))])
-            },
+            // Only a B2BUA-originated keepalive OPTIONS is absorbed: its record
+            // is this stack's own. A relayed end-to-end OPTIONS's record is a
+            // relay → this declines and `relay-non-invite-200` forwards the 200
+            // to the peer.
+            Match::response()
+                .method("OPTIONS")
+                .status_class(2)
+                .filter(|ctx| !ctx.answers_relayed_request()),
+            |_ctx| ok(vec![]),
         ),
         rule(
             "absorb-notify-200",
             &["relay-non-invite-200"],
             // Only a B2BUA-originated NOTIFY is absorbed: the `referTransfer`
             // machine's `SendNotify` (refer-progress sipfrag toward the referrer)
-            // leaves no pending-relay snapshot on the source dialog. A **relayed**
-            // NOTIFY — the transparent-REFER path forwards the transferee's
-            // implicit-subscription NOTIFYs (RFC 3515) end-to-end — DOES leave one
-            // (matching the response CSeq) → this declines and `relay-non-invite-200`
-            // forwards the 200 back to the requester. Mirrors `absorb-options-200`.
-            Match::response().method("NOTIFY").status_class(2).filter(|ctx| {
-                let cseq = ctx.response().map(|r| r.cseq().seq() as i64);
-                match (ctx.dialog(), cseq) {
-                    (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
-                    _ => true,
-                }
-            }),
+            // is this stack's own. A **relayed** NOTIFY — the transparent-REFER
+            // path forwards the transferee's implicit-subscription NOTIFYs (RFC
+            // 3515) end-to-end — is a relay → this declines and
+            // `relay-non-invite-200` forwards the 200 back to the requester.
+            // Mirrors `absorb-options-200`.
+            Match::response()
+                .method("NOTIFY")
+                .status_class(2)
+                .filter(|ctx| !ctx.answers_relayed_request()),
             |_ctx| ok(vec![]),
         ),
         // ── fork-straggler release ──────────────────────────────────────────
@@ -780,9 +758,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "absorb-straggler-release-final",
             &[],
-            Match::response().method("BYE").filter(|ctx| {
-                ctx.dialog().and_then(|d| d.retired()).is_some_and(|r| r.release.is_some())
-            }),
+            Match::response().method("BYE").filter(|ctx| straggler_release(ctx.resolved)),
             |_ctx| ok(vec![]),
         )
         .runs_while_terminating(),
@@ -794,7 +770,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             &["relay-bye", "resolve-cross-bye", "resolve-ended-leg-bye"],
             Match::request()
                 .method("BYE")
-                .filter(|ctx| ctx.dialog().is_some_and(|d| d.retired().is_some())),
+                .filter(|ctx| ctx.dialog().is_some_and(|d| d.is_retired())),
             |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 200,
@@ -805,23 +781,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             },
         )
         .runs_while_terminating(),
-        rule(
-            "absorb-straggler-release-timeout",
-            &[],
-            Match::timeout().filter(|ctx| {
-                let branch = ctx.timeout_branch().unwrap_or_default();
-                ctx.source_leg().is_some_and(|l| {
-                    l.dialogs
-                        .iter()
-                        .filter_map(|d| d.retired())
-                        .any(|r| r.release.as_ref().is_some_and(|rel| rel.bye_branch == branch))
-                })
-            }),
-            |_ctx| ok(vec![]),
-        )
-        .runs_while_terminating(),
     ]);
-    rules.extend(super::own_request_timeouts::own_request_timeouts());
     rules.extend([
         // ── terminating ─────────────────────────────────────────────────────
         rule(
@@ -914,7 +874,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .method("BYE")
                 .direction(Direction::FromA)
                 .leg_states(&[LegState::Trying, LegState::Early])
-                .filter(|ctx| ctx.call.a_leg().invite_final_sent.is_none()),
+                .filter(|ctx| ctx.call.a_leg().invite_final_sent().is_none()),
             |ctx| {
                 let a = ctx.source_leg_id.to_string();
                 let mut actions = vec![
@@ -1040,7 +1000,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // to the peer leg (the implicit REFER subscription's progress reports ride
         // the dialog end-to-end on the transparent-transfer path). Its 200/failure
         // finals relay back via `relay-non-invite-200`/`-failure` (NOTIFY is in both
-        // sets); `absorb-notify-200`'s snapshot filter keeps a B2BUA-*originated*
+        // sets); `absorb-notify-200`'s record filter keeps a B2BUA-*originated*
         // NOTIFY's 200 absorbed. A SERVICE_LAYER rule (e.g. a subscribed transfer
         // machine that owns NOTIFY) out-ranks this CORE default when active.
         rule("relay-notify", &[], Match::request().method("NOTIFY"), |_| {
@@ -1120,6 +1080,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ok(actions)
         }),
         rule("handle-timeout", &[], Match::timeout(), |ctx| {
+            // The BYE that released a fork straggler times out the release's
+            // alone (§15.1.1): the winning dialog on the leg never reads it.
+            if straggler_release_timeout(ctx) {
+                return ok(vec![]);
+            }
+            // A request record's timeout reads by the record's origin and the
+            // method table (ADR-0055 §2).
+            if let Some(record) = ctx.timed_out_record() {
+                return ok(record_timeout_actions(ctx, record));
+            }
             // A **pending b-leg INVITE** transaction timeout (Timer B / the long
             // INVITE backstop) on a failover-capable call is a failure the
             // decision backend must get a shot at — the dead-gateway reroute is
@@ -1131,8 +1101,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // Everything else (a-leg, confirmed-leg re-INVITE, BYE/OPTIONS
             // timeouts, no callback context) keeps the unconditional
             // termination below.
-            let timed_out_invite =
-                ctx.timeout_method().map(|m| m.eq_ignore_ascii_case("INVITE")).unwrap_or(false);
+            let timed_out_invite = ctx.timeout_method().map(|m| m == "INVITE").unwrap_or(false);
             let pending_b_leg = ctx.source_leg().is_some_and(|l| {
                 l.leg_id != ctx.call.a_leg().leg_id
                     && matches!(l.state(), LegState::Trying | LegState::Early)
@@ -1148,37 +1117,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // termination finalize on the deadline it already has.
             if let Some(leg) = ctx.source_leg() {
                 if call::helpers::leg_is_going_away(ctx.call.state(), leg) {
-                    // What the leg was awaiting names its end: an unanswered
-                    // BYE times out, anything else is abandoned.
-                    // A leg awaiting its BYE's answer is resolved by that
-                    // BYE's own timeout only: an earlier request's dead
-                    // transaction (the liveness OPTIONS that opened the
-                    // teardown, Timer F still running) says nothing about
-                    // the BYE, which may yet be answered. A leg already ended
-                    // (terminal disposition, no CANCEL in flight) keeps its
-                    // disposition when a request sent after its dialog ended
-                    // times out (a NOTIFY on a surviving subscription usage,
-                    // RFC 5057 §5.2); requests still pending toward it are
-                    // answered by the leg's re-termination.
-                    if leg.disposition() != LegDisposition::Cancelling
-                        && matches!(leg.end(), Some(b) if b.is_terminal())
-                    {
-                        return ok(vec![RuleAction::TerminateLeg {
-                            leg_id: ctx.source_leg_id.to_string(),
-                            end: LegEnd::Settle,
-                        }]);
-                    }
-                    let timed_out_bye =
-                        ctx.timeout_method().is_some_and(|m| m.eq_ignore_ascii_case("BYE"));
-                    let end = match leg.end() {
-                        Some(ByeDisposition::ByeSent) if timed_out_bye => LegEnd::OurByeTimedOut,
-                        Some(ByeDisposition::ByeSent) => return ok(vec![]),
-                        _ => LegEnd::Abandon,
-                    };
-                    return ok(vec![RuleAction::TerminateLeg {
-                        leg_id: ctx.source_leg_id.to_string(),
-                        end,
-                    }]);
+                    return ok(going_away_timeout(ctx, leg));
                 }
             }
             if timed_out_invite && pending_b_leg {
@@ -1221,17 +1160,14 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     ]);
                 }
             }
-            // A caller whose callee's INVITE gave up is answered 408 in this
+            // A caller whose callee's INVITE gave up is answered in this
             // turn, before the CANCELed leg resolves (RFC 3261 §9.1 lets that
             // wait 64·T1), as the failure consult's let-stand path answers it.
             let mut actions = Vec::new();
             if timed_out_invite && pending_b_leg && !originator_final_sent(&ctx.call) {
-                actions.push(RuleAction::RespondToALeg {
-                    status: 408,
-                    reason: "Request Timeout".into(),
-                    header_updates: vec![],
-                    contacts: vec![],
-                });
+                actions.push(super::failover_rules::timeout_final(
+                    ctx.timeout_kind() == Some(TxnTimeoutKind::Response),
+                ));
             }
             actions.push(RuleAction::BeginTermination {
                 reason: Some("timeout".into()),
@@ -1308,30 +1244,13 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ok(actions)
         })
         .runs_while_terminating(),
-        // Call-level a-leg setup deadline (armed at route time, cancelled at
-        // answer). Deliberately NOT per-b-leg: reroute/failover creates fresh
-        // b-legs (each with its own optional NoAnswer), while this caps the
-        // caller's TOTAL wait for a final response. It rides the replicated
-        // `call.timers` ledger, so a crash → reclaim restores it and a
-        // stuck-in-setup call is torn down at the deadline instead of holding
-        // its limiter slots until GlobalDuration — the sip-txn setup timeout
-        // is process-local and dies with a crashed node; this one survives.
+        // The call's setup deadline (setup scope: a fire once a leg holds a
+        // confirmed dialog or the call is terminating reaches no rule). Deliberately NOT per-b-leg:
+        // reroute/failover creates fresh b-legs (each with its own optional
+        // NoAnswer), while this caps the caller's TOTAL wait for a final
+        // response, so a stuck-in-setup call is torn down at the deadline
+        // instead of holding its limiter slots until GlobalDuration.
         rule("setup-timeout", &[], Match::timer().timer_type(TimerType::SetupTimeout), |ctx| {
-            // Answer raced the fire (e.g. a reclaim restored a stale ledger
-            // entry whose cancel was lost with the crashed node), or the call
-            // is already going away (a terminating call authors no new final
-            // on the a-leg's completed transaction): absorb, and scrub the
-            // spent entry so a later reclaim cannot re-fire it.
-            let answered = ctx.call.a_leg().state() == LegState::Confirmed
-                || ctx.call.b_legs().iter().any(|b| b.state() == LegState::Confirmed);
-            let spent = answered
-                || matches!(
-                    ctx.call.state(),
-                    CallModelState::Terminating | CallModelState::Terminated
-                );
-            if spent {
-                return ok(vec![]);
-            }
             ok(vec![
                 RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Timeout,
@@ -1354,8 +1273,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     by_leg: None,
                 },
             ])
-        })
-        .runs_while_terminating(),
+        }),
         rule("max-duration", &[], Match::timer().filter(release_event_due), |ctx| {
             // A **subscribed** max-call-duration on an ANSWERED
             // call with a callback_context consults the engine (`call_release`
@@ -1375,12 +1293,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // → the `release-result-release` rule performs exactly this local
             // teardown, so the fail-safe is this same path.
             //
-            // A cap crossing the terminating window (the caller BYE'd just
-            // before it, or a reclaim restored a stale entry) is SPENT: the
-            // call is already going away, so no `call_release` consult (a
-            // `reroute` outcome would dial a fresh b-leg on a terminating
-            // call) and no BeginTermination re-arm of the safety timer —
-            // absorb, and scrub the entry so a later reclaim cannot re-fire it.
+            // A release consult's deadline outlives the start of the
+            // termination (its answer still settles what the consult holds),
+            // so its expiry can reach a call already going away: the release
+            // event is spent there — no `call_release` consult (a `reroute`
+            // outcome would dial a fresh b-leg on a terminating call) and no
+            // BeginTermination re-arm of the safety timer.
             if matches!(ctx.call.state(), CallModelState::Terminating | CallModelState::Terminated)
             {
                 return ok(vec![]);
@@ -1418,8 +1336,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ])
         })
         .runs_while_terminating(),
+        // Every interval, each peered leg is probed with an in-dialog OPTIONS
+        // (RFC 3261 §11). The probe has one deadline, its own transaction's
+        // Timer F; what ends the call on it is `super::keepalive_failure`'s.
         rule(
-            "keepalive",
+            call::KEEPALIVE_AUTHOR,
             &[],
             Match::timer().timer_type(TimerType::Keepalive).call_state(CallModelState::Active),
             |ctx| {
@@ -1431,43 +1352,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         body: None,
                         headers: vec![],
                     });
-                    actions.push(RuleAction::arm(
-                        TimerKey::leg(TimerType::KeepaliveTimeout, leg_id),
-                        TimerDelay::secs(keepalive_timeout(ctx)),
-                    ));
                 }
                 actions.push(RuleAction::arm(
                     TimerKey::call(TimerType::Keepalive),
                     TimerDelay::secs(keepalive_interval(ctx)),
                 ));
                 ok(actions)
-            },
-        ),
-        // The liveness probe drew no answer within its deadline: the call ends,
-        // and the silent leg is BYEd like its peer (RFC 3261 §12.2.1.2: no
-        // response to an in-dialog request ends an INVITE dialog by a BYE —
-        // the probe may be what was lost, not the peer). A leg silent on its
-        // BYE too resolves by that BYE's transaction timeout (`handle-timeout`).
-        rule(
-            "keepalive-timeout",
-            &[],
-            Match::timer()
-                .timer_type(TimerType::KeepaliveTimeout)
-                .call_state(CallModelState::Active),
-            |ctx| {
-                ok(vec![
-                    RuleAction::AddCdrEvent {
-                        event_type: CdrEventType::Bye,
-                        leg_id: ctx.source_leg_id.to_string(),
-                        status_code: None,
-                        reason: Some("keepalive timeout".into()),
-                    },
-                    RuleAction::BeginTermination {
-                        reason: Some("keepalive-timeout".into()),
-                        cause: TerminationCause::Timeout(TimeoutKind::Keepalive),
-                        by_leg: Some(ctx.source_leg_id.to_string()),
-                    },
-                ])
             },
         ),
         // ── ladder give-ups (ADR-0032 X4/X5) ─────────────────────────────────
@@ -1621,23 +1511,4 @@ fn rack_tokens(req: &SipRequest) -> Option<RAckTokens> {
         cseq: CSeq(rack.seq()),
         names_invite: *rack.method() == Method::Invite,
     })
-}
-
-/// Whether the current response is a fork straggler's 2xx on its b-leg: a
-/// To-tag naming no dialog of the leg, or a retired one, on a leg a 2xx
-/// established, answering an INVITE no later than the one the established
-/// dialog's ACK acknowledges (every fork of one INVITE answers on its CSeq,
-/// RFC 3261 §12.1.2).
-fn fork_straggler(ctx: &RuleContext) -> bool {
-    let Some(resp) = ctx.response() else { return false };
-    if resp.to().tag().is_none_or(str::is_empty) {
-        return false;
-    }
-    let Some(leg) = ctx.call.b_legs().iter().find(|l| l.leg_id == ctx.source_leg_id) else {
-        return false;
-    };
-    let Some(established) = leg.dialogs.established() else { return false };
-    ctx.dialog().is_none_or(|d| d.retired().is_some())
-        && crate::rules::relay::acked_invite_cseq(established)
-            .is_some_and(|acked| resp.cseq().seq() <= acked)
 }

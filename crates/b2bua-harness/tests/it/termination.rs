@@ -76,7 +76,11 @@ impl Sut {
             .keep_terminated_calls()
             .tune(move |config| {
                 config.worker_allowed_target_suffixes = vec!["*".into()];
-                config.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() };
+                config.cdr = CdrConfig {
+                    message_ring: 32,
+                    captured_headers: Vec::new(),
+                    ..Default::default()
+                };
                 tune(config);
             })
             .start(h, "b2bua", B2BUA)
@@ -440,10 +444,12 @@ async fn a_callee_final_with_no_reroute_is_recorded_by_the_callee() {
     let _report = h.finish().await;
 }
 
-/// A leg that answers no liveness probe ends the call under a keepalive
-/// deadline, by that leg; the BYEs to both peers are under the cut.
+/// A leg that answers no liveness probe ends the call when the probe's own
+/// transaction times out (Timer F, RFC 3261 §17.1.2.2; §12.2.1.2), not
+/// before: under a keepalive deadline, by that leg. The BYEs to both peers
+/// are under the cut.
 #[tokio::test(start_paused = true)]
-async fn a_keepalive_timeout_is_recorded_by_the_silent_leg() {
+async fn an_unanswered_probe_ends_the_call_at_its_timer_f_by_the_silent_leg() {
     let h = Harness::new("termination-keepalive");
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
@@ -458,12 +464,20 @@ async fn a_keepalive_timeout_is_recorded_by_the_silent_leg() {
     let _dialog = call.ack().await;
     bob.receive("ACK").await;
 
+    // The probe leaves at the interval (30 s); its Timer F ends 32 s later.
     h.advance(Duration::from_secs(30)).await;
     alice.receive("OPTIONS").await.respond(200, "OK").await;
     let _silent = bob.receive("OPTIONS").await;
-    h.advance(Duration::from_secs(5)).await;
-    let mut alice_bye = alice.receive("BYE").await;
-    let mut bob_bye = bob.receive_tolerating("BYE", &["OPTIONS"]).await;
+    // The next interval's probe leaves before that Timer F; alice answers it.
+    h.advance(Duration::from_secs(31)).await;
+    assert!(
+        alice.try_receive_tolerating("BYE", &["OPTIONS"]).await.is_none(),
+        "the call stands until the probe's Timer F"
+    );
+
+    h.advance(Duration::from_secs(2)).await;
+    let mut alice_bye = alice.receive_tolerating("BYE", &["OPTIONS"]).await;
+    let mut bob_bye = bob.receive_absorbing("BYE", &["OPTIONS"]).await;
     h.advance(Duration::from_secs(1)).await;
     alice_bye.respond(200, "OK").await;
     bob_bye.respond(200, "OK").await;

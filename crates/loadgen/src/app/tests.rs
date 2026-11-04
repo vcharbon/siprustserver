@@ -43,6 +43,39 @@ fn correlate_from_user_selects_the_from_user_strategy() {
     );
 }
 
+/// `--correlate from-user --correlation-extract` keys on the regex's group 1;
+/// a regex without a capture group is refused at startup.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn correlate_from_user_takes_the_extract_regex() {
+    let args = |re: &str| {
+        Args::parse_from(["loadgen", "--correlate", "from-user", "--correlation-extract", re])
+    };
+    let c = correlation(&args(r"^(\+?[0-9]+)")).unwrap();
+    assert_eq!(c.caller_key(Some("<sip:+1555010;ext=4@pool.example>")).as_deref(), Ok("+1555010"));
+    assert!(correlation(&args("[0-9]+")).is_err(), "no capture group");
+}
+
+/// `--correlate call-id` selects the Call-ID stamp and needs an explicit
+/// `--correlation-extract`: without one the run is refused at startup.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn correlate_call_id_needs_an_extract_regex() {
+    let bare = Args::parse_from(["loadgen", "--correlate", "call-id"]);
+    assert!(correlation(&bare).is_err(), "call-id without --correlation-extract");
+
+    let args = Args::parse_from([
+        "loadgen",
+        "--correlate",
+        "call-id",
+        "--correlation-extract",
+        "^leg[0-9]+-(.+)$",
+    ]);
+    let c = correlation(&args).unwrap();
+    assert!(c.is_call_id());
+    assert!(matches!(c.stamp("lg1"), crate::CorrelationStamp::CallId));
+}
+
 /// From-user correlation refuses a mix with a case-less entry at startup;
 /// other strategies accept it.
 #[test]

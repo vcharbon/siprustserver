@@ -128,7 +128,7 @@ def lab_from_env(env: Mapping[str, str]) -> Lab:
         sipp_image=g("HAKIT_SIPP_IMAGE", "sipp:dev"),
         sipp_network=g("HAKIT_SIPP_NETWORK", "sipext"),
         sip_target=g("HAKIT_SIP_TARGET", "192.168.60.250:5060"),
-        sipp_ip_base=g("HAKIT_SIPP_IP_BASE", "192.168.60.100"),
+        sipp_ip_base=g("HAKIT_SIPP_IP_BASE", "192.168.60.64"),
         sipp_ip_slots=int(g("HAKIT_SIPP_IP_SLOTS", "36")),
         callees=parse_callees(g("HAKIT_CALLEES", "192.168.60.21:5060,192.168.60.22:5060")),
         leftover_calls_query=g("HAKIT_LEFTOVER_CALLS_QUERY", "sum(last_over_time(b2bua_active_calls[30s]))"),

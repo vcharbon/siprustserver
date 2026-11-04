@@ -14,6 +14,7 @@ use super::originate::{
     originate_early, originate_in_dialog, originate_initial_invite, originate_reinvite,
     originate_update, ping_options_once, send_request_template,
 };
+use super::pacing::Dwell;
 use super::runner::ActorState;
 use super::script::{consume_final_fact, drive_respond, expect_request, expect_response};
 use super::state::Observation;
@@ -143,17 +144,17 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         GoalStep::Ring { forks, reliable } => ring(st, forks, reliable).await?,
         GoalStep::Answer { winner } => answer_held(st, winner).await?,
         GoalStep::Reject { status } => reject_held(st, status).await?,
-        // One in-dialog OPTIONS keepalive ping, its 200 read inline (the reactor
-        // has nothing else to do for this leg during the ping).
+        // One in-dialog OPTIONS keepalive ping; its 200 arrives through the
+        // reactor, which stays free to answer whatever crosses it.
         GoalStep::Options => {
-            ping_options_once(st).await?;
+            originate_in_dialog(st, InDialogMethod::Options, None, None, Vec::new()).await?;
         }
         // The OPTIONS-keepalive hold loop: ping every `cadence` until `hold`
         // elapses. Each 200 is read inline; the first stamps `keepalive_ack`.
         GoalStep::EveryOptions { cadence, hold } => {
             let start = Instant::now();
             while start.elapsed() < hold {
-                tokio::time::sleep(cadence).await;
+                tokio::time::sleep_until(st.dwell(Dwell::Keepalive, cadence)).await;
                 ping_options_once(st).await?;
             }
         }

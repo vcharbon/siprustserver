@@ -70,17 +70,20 @@ pub mod supervise;
 pub(crate) mod sweep;
 pub mod timers;
 pub mod trace;
+pub mod turn_probe;
 pub mod wire_faults;
 
 #[cfg(test)]
-pub(crate) use ::b2bua_core::test_call;
+pub(crate) mod test_call;
 pub use ::b2bua_core::{
     answer_deadline, attempts, config, decision_log, destination_allowlist, effects,
     failure_terminate, failure_unavailable, initial_invite, landing, message_ring, obligations,
-    reaper_verdict, ring_deadline, rule_chain, rules, stack_identity, timer_arm, turn_notes,
-    turn_scope, wire_fault_set,
+    off_turn, owners, reaper_verdict, ring_deadline, rule_chain, rules, stack_identity, timer_arm,
+    turn_notes, turn_scope, wire_fault_set,
 };
 
+pub use node::replica::ReplicaConfig;
+pub use node::txn_config::EVENT_QUEUE_CAPACITY;
 pub use node::{B2buaCore, B2buaDeps, ReplicationSetup};
 pub use router::AdaptationHttpPort;
 
@@ -91,6 +94,7 @@ pub use metrics::{B2buaMetrics, LiveGauge, RemovalClass, UdpTransportMetrics};
 /// The process's identifier generator: the counter stream outside any call's
 /// turn, and the key every turn draws its own identifiers under.
 pub use sip_txn::IdGen;
+pub use turn_probe::{Released, TurnMark, TurnPoint, TurnProbe, TurnProbes};
 pub use wire_faults::{WireFaultPoint, WireFaults};
 // The callflow-service authoring macros live in the public Rule SDK (ADR-0016);
 // re-export them so in-tree services keep using `b2bua::define_service!` /

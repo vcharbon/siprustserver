@@ -202,7 +202,7 @@ pub(super) async fn drive_respond(
     if status < 200 {
         // Provisional: respond in place, binding NOT consumed
         // (provisional-then-final on ONE server transaction, §17.2.1).
-        let txn = match st.bound.as_mut() {
+        let txn = match st.bound.as_deref_mut() {
             Some(t) => t,
             None => &mut st.parked[parked_initial.expect("checked above")].txn,
         };
@@ -229,7 +229,7 @@ pub(super) async fn drive_respond(
     }
 
     // Final: consume the binding.
-    let mut txn = match st.bound.take() {
+    let mut txn = match st.bound.take().map(|t| *t) {
         Some(t) => t,
         None => st.parked.remove(parked_initial.expect("checked above")).txn,
     };
@@ -495,7 +495,7 @@ pub(super) fn expect_request(
         // so the following scripted 487 rides the BOUND INVITE transaction.
         return Ok(());
     }
-    st.bound = Some(entry.txn);
+    st.bound = Some(Box::new(entry.txn));
     Ok(())
 }
 

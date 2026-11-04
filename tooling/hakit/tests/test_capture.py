@@ -5,7 +5,9 @@ the end; `hakit pcap` extracts one call's packets by Call-ID."""
 from __future__ import annotations
 
 import os
+import shutil
 import struct
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,7 @@ from hakit.jsonval import Json
 from hakit.lab import lab_from_env
 from hakit.paths import BASE_CONTENT
 from hakit.pcap import Packet, extract, read, write
-from hakit.profile import Capture
+from hakit.profile import CAPTURE_FILTER, Capture
 from hakit.runner import Runner, RunRefused
 from hakit.schemas import SchemaSet
 
@@ -42,7 +44,9 @@ def with_capture(tmp_path: Path) -> Content:
     return discover([BASE_CONTENT, root], SCHEMAS)
 
 
-def lab_rules(c: Call) -> ProcResult | None:
+def lab_rules(c: Call) -> ProcResult | str | None:
+    if c.kind == "read" and c.path == Path("/sys/class/net/br-0123456789ab/address"):
+        return "02:42:ac:14:00:01\n"
     a = c.argv
     if c.kind != "run":
         return None
@@ -66,10 +70,12 @@ def test_a_run_captures_the_bridge_and_the_named_nodes_and_keeps_each_window(tmp
     assert len(runs) == 3
     bridge = runs[0]
     assert bridge[bridge.index("tcpdump"):] == ["tcpdump", "-i", "br-0123456789ab", "-s", "0", "-Z", "root", "-C", "10", "-W", "4",
-                                               "-w", "/cap/sip.pcap", "udp and portrange 5060-5100"]
+                                               "-w", "/cap/sip.pcap", f"({CAPTURE_FILTER}) and not ether src 02:42:ac:14:00:01"]
     assert "--net" in bridge and bridge[bridge.index("--net") + 1] == "host" and IMAGE in bridge
     nodes = [a[a.index("--net") + 1] for a in runs[1:]]
     assert nodes == ["container:e1", "container:e2"] and all(a[a.index("-i") + 1] == "any" for a in runs[1:])
+    # A node ring keeps every packet: the host's routed copies are only on the bridge.
+    assert all(a[-1] == CAPTURE_FILTER for a in runs[1:])
     for source in ("bridge", "node-e1", "node-e2"):
         assert (run_dir / "pcap" / "windows" / "001-blip" / source / "sip.pcap0").read_bytes() == b"ring"
     argvs = [c.argv for c in fake.calls if c.kind == "run"]
@@ -100,9 +106,74 @@ def test_a_window_keeps_only_the_ring_files_written_since_it_opened(tmp_path: Pa
         os.utime(ring / name, (mtime, mtime))
     from hakit.capture import Ring
 
-    caps.rings.append(Ring("bridge", "c", ring))
+    caps.rings.append(Ring("bridge", "c", ring, ["--net", "host"], "any", "udp"))
     assert caps.keep("007-x", 2_000_000) == 2  # opened at 2000 s: 1996 is inside the 5 s margin
     assert sorted(p.name for p in (tmp_path / "pcap" / "windows" / "007-x" / "bridge").iterdir()) == ["sip.pcap1", "sip.pcap2"]
+
+
+def test_a_stale_ring_is_started_again_under_a_new_prefix(tmp_path: Path) -> None:
+    """A node ring that joined its node's network namespace keeps running in
+    the orphaned namespace when the node stops: once the node started after
+    the ring, the ring is stale. At each window's close a stale ring, or one
+    not running, is removed and started again, its next incarnation writing
+    `sip-<n>.pcap`, so it never overwrites the files of the one before."""
+    from hakit.capture import Ring
+
+    # name -> (running, StartedAt); the node e1 is a container too.
+    state = {
+        "hakit-capture-r-bridge": ("true", "2026-11-03T13:00:00.5Z"),
+        "hakit-capture-r-node-e1": ("true", "2026-11-03T13:00:01.25Z"),
+        "e1": ("true", "2026-11-03T13:00:00.123456789Z"),
+    }
+    launched = ["2026-11-03T13:31:00Z"]
+
+    def rules(c: Call) -> ProcResult | None:
+        a = c.argv
+        if c.kind != "run":
+            return None
+        if a[:2] == ["docker", "inspect"]:
+            running, started = state[a[-1]]
+            return ProcResult(0, (f"{running} {started}" if "Running" in a[3] else started) + "\n", "")
+        if a[:2] == ["docker", "run"] and "tcpdump" in a:
+            state[a[a.index("--name") + 1]] = ("true", launched[0])
+            ring = Path(a[a.index("-v") + 1].split(":")[0])
+            f = ring / (a[a.index("-w") + 1].removeprefix("/cap/") + "0")
+            f.write_bytes(b"revived")
+            os.utime(f, (FUTURE_S, FUTURE_S))
+        return None
+
+    fake = FakeExecutor([rules])
+    caps = Captures("r", tmp_path, Capture(10, 4, "udp", "tier=edge"), lab_from_env({}), fake)
+    for source, net in (("bridge", ["--net", "host"]), ("node-e1", ["--net", "container:e1"])):
+        d = tmp_path / "pcap" / "ring" / source
+        d.mkdir(parents=True)
+        (d / "sip.pcap0").write_bytes(b"first")
+        os.utime(d / "sip.pcap0", (FUTURE_S, FUTURE_S))
+        caps.rings.append(Ring(source, f"hakit-capture-r-{source}", d, net, "any", "udp"))
+    assert caps.revive() == 0  # the node started before its ring
+    state["e1"] = ("true", "2026-11-03T13:30:07.9Z")  # the node stopped and started again
+    assert caps.keep("002-x", 1_000_000) == 3
+    runs = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:2] == ["docker", "run"]]
+    assert [(a[a.index("--net") + 1], a[a.index("-w") + 1]) for a in runs] == [("container:e1", "/cap/sip-1.pcap")]
+    removed = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:3] == ["docker", "rm", "-f"]]
+    assert removed == [["docker", "rm", "-f", "hakit-capture-r-node-e1"]]
+    kept = tmp_path / "pcap" / "windows" / "002-x"
+    assert sorted(p.name for p in (kept / "node-e1").iterdir()) == ["sip-1.pcap0", "sip.pcap0"]
+    assert (kept / "node-e1" / "sip.pcap0").read_bytes() == b"first"
+    assert caps.revive() == 0  # the new incarnation started after the node
+    state["hakit-capture-r-bridge"] = ("false", "2026-11-03T13:00:00.5Z")
+    assert caps.revive() == 1  # a ring not running, the bridge's included
+    last = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:2] == ["docker", "run"]][-1]
+    assert (last[last.index("--net") + 1], last[last.index("-w") + 1]) == ("host", "/cap/sip-1.pcap")
+
+
+def test_a_started_at_reads_to_the_nanosecond_whatever_its_fraction() -> None:
+    from hakit.capture import started_ns
+
+    assert started_ns("2026-11-03T13:30:07.9Z") == started_ns("2026-11-03T13:30:07.900000000Z")
+    assert started_ns("2026-11-03T13:30:07Z") is not None
+    assert started_ns("2026-11-03T13:30:07.12Z") < started_ns("2026-11-03T13:30:07.123Z")  # type: ignore[operator]
+    assert started_ns("0") is None
 
 
 def udp(call_id: str, n: int) -> bytes:
@@ -160,3 +231,33 @@ def test_pcap_reads_a_microsecond_tcpdump_file_and_stops_at_a_torn_record(tmp_pa
     (tmp_path / "f.pcap").write_bytes(head + rec + struct.pack("<IIII", 6, 0, 99, 99) + b"ab")
     pf = read(tmp_path / "f.pcap")
     assert [(p.ts_ns, p.data) for p in pf.packets] == [(5_000_007_000, b"abcd")]
+
+
+def _ipv4_udp_fragments(payload: bytes, mtu: int) -> list[bytes]:
+    """Ethernet frames of one UDP datagram 192.0.2.1:5060 -> 192.0.2.2:5060,
+    fragmented at `mtu` (RFC 791)."""
+    datagram = struct.pack(">HHHH", 5060, 5060, 8 + len(payload), 0) + payload
+    step = (mtu - 20) // 8 * 8
+    frames: list[bytes] = []
+    for off in range(0, len(datagram), step):
+        chunk = datagram[off : off + step]
+        more = off + step < len(datagram)
+        flags = (0x2000 if more else 0) | (off // 8)
+        ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(chunk), 0x1234, flags, 64, 17, 0, bytes([192, 0, 2, 1]), bytes([192, 0, 2, 2]))
+        frames.append(b"\x02" * 6 + b"\x04" * 6 + b"\x08\x00" + ip + chunk)
+    return frames
+
+
+def test_the_default_filter_keeps_every_fragment_of_a_sip_datagram(tmp_path: Path) -> None:
+    """A SIP request over UDP larger than the MTU travels as IP fragments, and
+    only the first carries the UDP ports: the capture keeps the later ones
+    too, so the request can be reassembled."""
+    tcpdump = shutil.which("tcpdump")
+    assert tcpdump is not None, "tcpdump is not on PATH"
+    frames = _ipv4_udp_fragments(b"INVITE sip:callee@192.0.2.2 SIP/2.0\r\n" + b"X-Pad: " + b"a" * 3000 + b"\r\n\r\n", 1500)
+    assert len(frames) == 3
+    src, out = tmp_path / "in.pcap", tmp_path / "out.pcap"
+    write(src, 1, [Packet(1_000_000_000 + i, f) for i, f in enumerate(frames)])
+    run = subprocess.run([tcpdump, "-r", str(src), "-w", str(out), CAPTURE_FILTER], capture_output=True, check=False)
+    assert run.returncode == 0, run.stderr.decode()
+    assert [p.data for p in read(out).packets] == frames

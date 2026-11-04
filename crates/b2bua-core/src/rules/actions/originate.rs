@@ -5,7 +5,7 @@
 
 use call::helpers::bump_our_cseq;
 use call::TxnKind;
-use call::{Call, DialogId, HeldRequest};
+use call::{Call, DialogId};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{Event, HeaderValue, SubscriptionState};
 use sip_message::{Method, SipStr};
@@ -17,45 +17,14 @@ use crate::rules::capabilities;
 use crate::rules::relay;
 
 use super::select::{in_dialog_method, leg_at};
+use super::teardown::Relayed;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
-    /// Originate a NOTIFY on `leg_id`'s confirmed dialog (toward the referrer)
-    /// carrying the REFER implicit-subscription state (RFC 3515 §2.4.4): `Event:
-    /// refer`, `Subscription-State`, and a `message/sipfrag` body. The B2BUA is
-    /// the UAS of the referrer leg, so the NOTIFY rides that dialog's local
-    /// sequence.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn send_notify(
-        &mut self,
-        call: &mut Call,
-        fx: &mut HandlerEffects,
-        leg_id: &str,
-        event: &str,
-        subscription_state: &str,
-        content_type: Option<&str>,
-        body: &[u8],
-    ) {
-        let Some(id) =
-            leg_at(call, leg_id).and_then(call::helpers::carrying_dialog).map(|d| d.id())
-        else {
-            return;
-        };
-        if self.held_behind_notify(call, leg_id, &id) {
-            let notify = HeldRequest::Notify {
-                event: event.to_string(),
-                subscription_state: subscription_state.to_string(),
-                content_type: content_type.map(str::to_string),
-                body: body.to_vec(),
-            };
-            self.hold(call, fx, leg_id, &id, notify);
-            return;
-        }
-        self.notify_now(call, fx, leg_id, &id, event, subscription_state, content_type, body);
-    }
-
     /// Compose and send the NOTIFY on `leg_id`'s dialog `id`, the dialog's next
-    /// CSeq: what this stack asks for there next waits for its final.
+    /// CSeq, carrying `event`'s subscription state (RFC 6665 §8.1.2) and
+    /// `body`: what this stack asks for there next waits for its final. The
+    /// subscription's gate and order are [`super::subscription`]'s.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn notify_now(
         &mut self,
@@ -76,8 +45,18 @@ impl ActionExecutor<'_> {
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let branch = self.turn.ids.new_branch();
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
-            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
+            via: Some(relay::leg_via(
+                self.config,
+                self.marks(call),
+                leg_id,
+                Some(relay::RequestFacts {
+                    method: "NOTIFY",
+                    uri: &gen_dialog.remote_target,
+                    offer: false,
+                }),
+                branch,
+            )),
+            contact: relay::leg_contact(call, leg_id),
             body: body.to_vec(),
             content_type: content_type.and_then(relay::media_type),
             cseq: Some(relay::wire_cseq(outbound_cseq)),
@@ -102,7 +81,7 @@ impl ActionExecutor<'_> {
             Ok(res) => res,
             Err(e) => return relay::unbuilt(&call.call_ref, leg_id, "NOTIFY", &e),
         };
-        *call = bump_our_cseq(call.clone(), leg_id, id, 1);
+        bump_our_cseq(call, leg_id, id, 1);
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
             self.config,
@@ -111,15 +90,17 @@ impl ActionExecutor<'_> {
             res.request,
             dest,
         );
-        fx.outbound.push(OutboundSipEffect {
+        let notify = OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
             destination: dest,
             label: format!("NOTIFY → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
             provenance: Provenance::Authored,
-        });
-        self.notify_left(call, leg_id, id, outbound_cseq);
+        };
+        self.record_own_effect(call, leg_id, id, &notify);
+        fx.outbound.push(notify);
+        self.notify_left(call, leg_id, id, event, outbound_cseq);
     }
 
     /// Originate a re-INVITE on `leg_id` carrying `body` as the new offer, typed
@@ -157,7 +138,7 @@ impl ActionExecutor<'_> {
         // The call as it stands before the re-INVITE records anything: one
         // that is not built leaves it so.
         let unsent = call.clone();
-        *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
+        bump_our_cseq(call, leg_id, &t_id, 1);
 
         let branch = self.turn.ids.new_branch();
         let Some(leg) = leg_at(call, leg_id) else {
@@ -189,11 +170,16 @@ impl ActionExecutor<'_> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
-                relay::CallMarks::of(call),
+                self.marks(call),
                 leg_id,
+                Some(relay::RequestFacts {
+                    method: "INVITE",
+                    uri: &gen_dialog.remote_target,
+                    offer: !body.is_empty(),
+                }),
                 branch.clone(),
             )),
-            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
+            contact: relay::leg_contact(call, leg_id),
             body: relay::continue_on_leg(
                 call,
                 leg_id,
@@ -230,21 +216,18 @@ impl ActionExecutor<'_> {
             dest,
         );
 
-        // Cache the re-INVITE's client-transaction handle so the ACK-for-2xx
-        // echoes its CSeq (§13.2.2.4). Reset the retained ACK branch, its
-        // retained datagram, and any armed ACK obligation: all belonged to the
-        // prior CSeq — this new INVITE transaction's 2xx mints/arms its own.
-        *call = call::helpers::update_dialog(call.clone(), leg_id, &t_id, |d| {
-            d.pending_invite_txn = Some(call::InviteTxnHandle {
-                branch: branch.clone(),
-                cseq: i64::from(out_req.cseq().seq()),
-                original_invite: out_req.image().to_vec(),
-                destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
-            });
-            d.ack_branch = None;
-            d.emitted_ack = None;
-            d.awaited_ack_cseq = None;
-        });
+        // The re-INVITE becomes the dialog's INVITE record, so the ACK-for-2xx
+        // echoes its CSeq (§13.2.2.4). The ACK branch, its retained datagram
+        // and any armed ACK obligation belonged to the prior INVITE — this new
+        // transaction's 2xx mints/arms its own.
+        let record = call::RequestRecord {
+            origin: call::RequestOrigin::Own,
+            sent: Some(super::request_record::sent_request(&out_req, &dest)),
+            relayed_by: self.owners.this.clone(),
+            author: self.turn.rule.map(str::to_string),
+            ..call::RequestRecord::relayed("INVITE", i64::from(out_req.cseq().seq()), 0)
+        };
+        call::helpers::open_sent_invite(call, leg_id, &t_id, record);
 
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),
@@ -258,7 +241,8 @@ impl ActionExecutor<'_> {
 
     /// Originate an in-dialog request on `leg_id`'s confirmed dialog
     /// ([`b2bua_sdk::model::RuleAction::SendRequestToLeg`]): keepalive
-    /// OPTIONS, opaque-body INFO (MSCML), deferred-relay re-emission.
+    /// OPTIONS, opaque-body INFO (MSCML), deferred-relay re-emission. A BYE
+    /// takes the method table's BYE row ([`Self::send_bye`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_request_to_leg(
         &mut self,
@@ -276,6 +260,14 @@ impl ActionExecutor<'_> {
             Some(m) => m,
             None => return,
         };
+        if m == InDialogMethod::Bye {
+            let content_type = content_type
+                .and_then(relay::media_type)
+                .or_else(|| (!body.is_empty()).then(relay::sdp));
+            let lines = stated_lines(method, headers, body, descriptors, fx);
+            let relayed = Relayed { headers: lines, body: body.to_vec(), content_type };
+            return self.send_bye(call, fx, leg_id, None, relayed, None, false);
+        }
         let Some(leg) = leg_at(call, leg_id) else { return };
         // Probe the dialog the leg's requests ride ([`call::helpers::carrying_dialog`]).
         // Skip when the leg holds none (nothing to probe).
@@ -315,7 +307,7 @@ impl ActionExecutor<'_> {
         // is not built leaves it so.
         let unsent = call.clone();
         if !reuse {
-            *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
+            bump_our_cseq(call, leg_id, &t_id, 1);
         }
 
         // Opaque body carrier (MSCML INFO rides here): default the content type
@@ -323,27 +315,7 @@ impl ActionExecutor<'_> {
         let content_type = content_type
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
-        // Forward the service-nominated application headers verbatim (e.g. a held
-        // `User-To-User` re-emitted toward the peer on a deferred User-to-User relay).
-        // Body-owned headers are dropped: `body`/`content_type` own
-        // Content-Type/Content-Length via `append_body_headers`, so listing them
-        // here would duplicate them.
-        let mut extra_headers: Vec<sip_message::SipHeader> = headers
-            .iter()
-            .filter(|(n, _)| {
-                let named = sip_message::HeaderName::from(n.as_str());
-                named != sip_message::HeaderName::ContentType
-                    && named != sip_message::HeaderName::ContentLength
-            })
-            .map(|(name, value)| sip_message::SipHeader {
-                name: name.clone().into(),
-                value: value.clone().into(),
-            })
-            .collect();
-        relay::describe_body(&mut extra_headers, body, descriptors);
-        // A stated line the wire cannot carry whole is left out: the request
-        // still leaves (a BYE above all, its leg already recorded as ending).
-        let extra_headers = relay::writable_lines(&format!("{method} to a leg"), extra_headers, fx);
+        let extra_headers = stated_lines(method, headers, body, descriptors, fx);
         let branch = self.turn.ids.new_branch();
         let Some(leg) = leg_at(call, leg_id) else {
             *call = unsent;
@@ -352,8 +324,18 @@ impl ActionExecutor<'_> {
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
-            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
+            via: Some(relay::leg_via(
+                self.config,
+                self.marks(call),
+                leg_id,
+                Some(relay::RequestFacts {
+                    method,
+                    uri: &gen_dialog.remote_target,
+                    offer: m == InDialogMethod::Invite && !body.is_empty(),
+                }),
+                branch,
+            )),
+            contact: relay::leg_contact(call, leg_id),
             cseq: Some(relay::wire_cseq(outbound_cseq)),
             body: relay::continue_on_leg(
                 call,
@@ -388,14 +370,18 @@ impl ActionExecutor<'_> {
         // The one in-dialog OPTIONS this stack originates is the keepalive.
         let provenance =
             if m == InDialogMethod::Options { Provenance::Probe } else { Provenance::Authored };
-        fx.outbound.push(OutboundSipEffect {
+        let request = OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(kind),
             destination: dest,
             label: format!("{method} → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
             provenance,
-        });
+        };
+        if kind == TxnKind::NonInvite {
+            self.record_own_effect(call, leg_id, &t_id, &request);
+        }
+        fx.outbound.push(request);
     }
 
     /// The answer to `offer` rejecting every stream (RFC 3264 §6, port 0) —
@@ -410,4 +396,32 @@ impl ActionExecutor<'_> {
             },
         )
     }
+}
+
+/// The lines a service states on its `method` request carrying `body`: its
+/// application headers verbatim (a held `User-To-User` re-emitted toward the
+/// peer on a deferred relay) and the descriptors of the body. Body-owned
+/// headers are left to `body` and its content type. A line the wire cannot
+/// carry whole is left out: the request still leaves.
+fn stated_lines(
+    method: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    descriptors: &[sip_message::SipHeader],
+    fx: &mut HandlerEffects,
+) -> Vec<sip_message::SipHeader> {
+    let mut lines: Vec<sip_message::SipHeader> = headers
+        .iter()
+        .filter(|(n, _)| {
+            let named = sip_message::HeaderName::from(n.as_str());
+            named != sip_message::HeaderName::ContentType
+                && named != sip_message::HeaderName::ContentLength
+        })
+        .map(|(name, value)| sip_message::SipHeader {
+            name: name.clone().into(),
+            value: value.clone().into(),
+        })
+        .collect();
+    relay::describe_body(&mut lines, body, descriptors);
+    relay::writable_lines(&format!("{method} to a leg"), lines, fx)
 }

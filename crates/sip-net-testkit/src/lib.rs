@@ -16,6 +16,8 @@
 //! The crate declares no purity tier (ADR-0051 §1): a production binary that
 //! links it fails the closure check.
 
+mod audit_rules;
+mod audit_view;
 pub mod contracts;
 pub mod loss;
 pub mod repeat;
@@ -27,14 +29,18 @@ pub mod simulated;
 use sip_net::{net, pre_ingress, queue, types};
 
 pub use contracts::{
-    audit_visible_event, with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork,
-    PeerAuditRule, RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome,
-    SignalingAuditViolation, SignalingNetworkEvent, WireStamp, WrappedNetwork, SIGNALING_TAG,
+    audit_visible_event, cross_audit_event, with_all_contracts, CrossMessageAuditRule,
+    ParanoidSignalingNetwork, PeerAuditRule, RecordingSignalingNetwork, ScopedAuditOptions,
+    SendOutcome, SignalingAuditViolation, SignalingNetworkEvent, WireStamp, WrappedNetwork,
+    SIGNALING_TAG,
 };
 pub use loss::RandomLoss;
 pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};
+pub use rfc_audit::capture_index::{CaptureIndex, Captured, DialogKey, Kind, Transaction, TxnKey};
+pub use rfc_audit::wire_adapter::rfc_rule_gates_sut;
 pub use rfc_audit::{
     audit_wire_entries, bind_roles_of, evaluate_rfc_audit, evaluate_rfc_findings,
-    rfc_cross_message_rules, rfc_cross_message_rules_scoped, RfcAudit, RfcFinding,
+    rfc_cross_message_rules, rfc_cross_message_rules_scoped, AuditPass, CrossMessageRules,
+    RfcAudit, RfcFinding,
 };
-pub use simulated::{SendFault, SimulatedSignalingNetwork};
+pub use simulated::{FlowPick, SendFault, SimulatedSignalingNetwork};

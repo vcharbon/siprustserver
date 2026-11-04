@@ -1,13 +1,15 @@
 # shellcheck shell=bash
 # The SUT release of the kind lab (kind-lab.sh): the siprust chart, or a
 # product chart that depends on it. Sourced after lib/cluster.sh and
-# lib/smokes.sh (log, die, kubectl on the lab's context, vip_smoke,
-# isolation_smoke); reads HELM_DIR, CLUSTER, NS, ROLLOUT_TIMEOUT.
+# lib/smokes.sh (log, die, kubectl on the lab's context, route_smoke,
+# vip_smoke, isolation_smoke, policy_smoke); reads HELM_DIR, CLUSTER, NS,
+# OBS_NS (the collectors' namespace, default observability), ROLLOUT_TIMEOUT.
 #
 # SUT_CHART (default the siprust chart), SUT_RELEASE (default siprust) and
 # SUT_SUBCHART (the name a product chart gives its siprust dependency): a
 # product chart gets the siprust kind values nested under that name, then its
-# own values-kind.yaml when it has one, then the helm args.
+# own values-kind.yaml when it has one, then the helm args. A render with no
+# cluster (sut_template) states the APIs the lab's MetalLB serves.
 
 SUT_CHART="${SUT_CHART:-$HELM_DIR/siprust}"
 SUT_RELEASE="${SUT_RELEASE:-siprust}"
@@ -31,7 +33,7 @@ sut_dependencies() {
 
 # `helm <verb> <release> <chart>` of the SUT with its whole value set: the
 # nested siprust kind values, the chart's values-kind.yaml when it has one,
-# then the args.
+# the workers' scraper namespace (OBS_NS), then the args.
 sut_helm() { # <verb...> -- [helm args]
   local verb=() nested own=() rc=0
   while [ "$1" != -- ]; do verb+=("$1"); shift; done
@@ -40,18 +42,33 @@ sut_helm() { # <verb...> -- [helm args]
   nested="$(sut_kind_values)"
   [ ! -f "$SUT_CHART/values-kind.yaml" ] || own=(-f "$SUT_CHART/values-kind.yaml")
   helm "${verb[@]}" "$SUT_RELEASE" "$SUT_CHART" --kube-context "kind-$CLUSTER" -n "$NS" \
-    ${nested:+-f "$nested"} "${own[@]}" "$@" || rc=$?
+    ${nested:+-f "$nested"} "${own[@]}" \
+    --set "${SUT_SUBCHART:+$SUT_SUBCHART.}worker.networkPolicy.monitoringNamespace=${OBS_NS:-observability}" \
+    "$@" || rc=$?
   [ -z "$nested" ] || rm -f "$nested"
   return "$rc"
 }
 
+# The Secret of the workers' shared key (values-kind.yaml names it), drawn
+# once: an existing one is kept, so a redeploy keeps the running pods' key.
+sut_cluster_key() {
+  kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS" >/dev/null \
+    || die "cannot create namespace $NS"
+  kubectl -n "$NS" get secret b2bua-worker-cluster-key >/dev/null 2>&1 && return 0
+  log "drawing the workers' cluster key (secret b2bua-worker-cluster-key)"
+  kubectl -n "$NS" create secret generic b2bua-worker-cluster-key \
+    --from-literal=key="$(head -c 24 /dev/urandom | base64 | tr -d '\n')" >/dev/null \
+    || die "cannot create secret b2bua-worker-cluster-key in $NS"
+}
+
 sut_release() { # [helm args]
+  sut_cluster_key
   log "helm upgrade --install $SUT_RELEASE ($NS, $SUT_CHART)"
   sut_helm upgrade --install -- --create-namespace "$@" --wait --timeout "$ROLLOUT_TIMEOUT"
 }
 
 sut_template() { # [helm args]
-  sut_helm template -- "$@"
+  sut_helm template -- --api-versions metallb.io/v1beta1 --api-versions metallb.io/v1beta2 "$@"
 }
 
 # Objects of the same names helm does not own, or another release owns, are
@@ -74,12 +91,14 @@ sut_has_proxy() { kubectl -n "$NS" get deploy sip-front-proxy >/dev/null 2>&1; }
 # The `hakit obs-check` scope of the release: `proxy` when it runs the front proxy.
 sut_obs_scope() { if sut_has_proxy; then echo proxy; else echo sut; fi; }
 
-# The VIP and isolation smokes, when the release deploys the front proxy.
+# The route, VIP, isolation and policy smokes, when the release deploys the front proxy.
 sut_smokes() {
   if sut_has_proxy; then
-    vip_smoke || die "vip-smoke: the external VIP ${SIPEXT_VIP}:${SIP_PORT} answers nothing; kubectl -n $NS logs deploy/sip-front-proxy -c keepalived"
+    route_smoke
+    vip_smoke || die "vip-smoke: the external VIP ${SIPEXT_VIP}:${SIP_PORT} answers nothing; kubectl -n $NS logs deploy/sip-front-proxy"
     isolation_smoke
+    policy_smoke
   else
-    log "no front proxy in $NS: the VIP and isolation smokes do not apply"
+    log "no front proxy in $NS: the route, VIP, isolation and policy smokes do not apply"
   fi
 }

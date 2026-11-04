@@ -34,8 +34,8 @@ describe("the preview pane", () => {
   it("reads one line per lane and lists its captures by name, each with its kind", () => {
     const html = render(preview)
     expect(html).toContain("against prep 2")
-    expect(html).toContain("<b>fake</b>: 44 cell(s) over 3 capture(s) — 1 full, 2 as cases")
-    expect(html).toContain(`<li>${B} <span class="tag">full</span> 1 cell(s)</li>`)
+    expect(html).toContain("<b>fake</b>: 44 cells over 3 captures — 1 full, 2 as cases")
+    expect(html).toContain(`<li>${B} <span class="tag">full</span> 1 cell</li>`)
     expect(html.indexOf(`${C} <span`)).toBeLessThan(html.indexOf(`${A} <span`))
     expect(html).not.toContain("<details")
   })

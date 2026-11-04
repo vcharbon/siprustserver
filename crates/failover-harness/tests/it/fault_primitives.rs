@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use call::{CallBodyCodec, LegState, MsgpackCodec};
+use call::{LegState, MsgpackCodec};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -55,8 +55,8 @@ const BAK: PartitionRole = PartitionRole::Backup;
 const PRI: PartitionRole = PartitionRole::Primary;
 
 /// The delay every delay cell applies, in ms — well above the 100 ms pump
-/// chunk, so "landed early" and "landed on time" are chunks apart.
-const DELAY_MS: u64 = 3_000;
+/// chunk, and under the pullers' 2 s idle bound, which keeps the stream.
+const DELAY_MS: u64 = 1_500;
 
 struct Cluster {
     fh: FailoverHarness,
@@ -125,7 +125,7 @@ async fn find_backed_up_ref(backup: &ReplicatedB2buaSut, primary: &str) -> Strin
 /// The replica body the backup holds for `call_ref`, decoded.
 async fn replica(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> call::Call {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
-    MsgpackCodec::new().decode(&body).expect("replica body decodes")
+    b2bua::store::envelope::decode(&MsgpackCodec::new(), &body).expect("a copy decodes").call
 }
 
 /// The recording-order seq of the last marker the harness appended — the
@@ -345,7 +345,7 @@ async fn partition_delivers_nothing_across_the_cut() {
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    fh.advance(Duration::from_secs(2)).await;
+    fh.advance(Duration::from_millis(1_000)).await; // under the 2 s idle bound
     let live = primary.live_call(&call_ref).expect("the primary serves the call");
     assert_eq!(live.a_leg.state(), LegState::Confirmed, "the primary answered the caller");
 
@@ -646,7 +646,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
         crossed.len(),
         crossed[0].from,
         crossed[0].to,
-        String::from_utf8_lossy(&crossed[0].raw).lines().next().unwrap_or(""),
+        crossed[0].start_line(),
     );
     assert!(alice.take_queued().await.is_none(), "nothing reached the caller through the cut");
     assert!(primary.is_ready(), "the cut worker's process is still running");
@@ -675,7 +675,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
         inside.len(),
         inside[0].from,
         inside[0].to,
-        String::from_utf8_lossy(&inside[0].raw).lines().next().unwrap_or(""),
+        inside[0].start_line(),
     );
 
     // ── the callee answers the one INVITE it holds; the call completes ───────
@@ -753,7 +753,7 @@ async fn crash_stops_every_frame_and_datagram_from_the_node() {
         sip_from_dead.is_empty(),
         "the crashed {pri_ord} sent {} datagram(s) after the crash; the first: {}",
         sip_from_dead.len(),
-        String::from_utf8_lossy(&sip_from_dead[0].raw).lines().next().unwrap_or(""),
+        sip_from_dead[0].start_line(),
     );
     assert!(!primary.serves(&call_ref), "a crashed node serves nothing");
     assert!(!primary.is_ready(), "a crashed node is not ready");

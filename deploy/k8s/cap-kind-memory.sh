@@ -6,10 +6,10 @@
 # has no native per-node memory limit, so we `docker update` the node containers
 # after the cluster exists.
 #
-# Caps are TIER-AWARE, not flat: the control-plane (etcd+apiserver) and the edge
-# nodes (front proxy — a 512 Mi pod) are cheap, so they get small caps; the app
-# nodes (b2bua pool) and the infra node (broker, limiter, CDR consumer) need
-# real headroom. Tier is read from the kube node label `tier` (set in
+# Caps are TIER-AWARE, not flat: the edge nodes (front proxy — a 512 Mi pod)
+# are cheap, so they get small caps; the control plane holds etcd's data in
+# memory, and the app nodes (b2bua pool) and the infra node (broker, limiter,
+# CDR consumer) need real headroom. Tier is read from the kube node label `tier` (set in
 # cluster.yaml); if kubectl/labels aren't available yet we fall back to the
 # conservative uniform WORKER_CAP_MB.
 #
@@ -29,10 +29,12 @@
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-sip-e2e}"
-TOTAL_CAP_MB="${TOTAL_CAP_MB:-9728}"   # 9.5 GiB whole-cluster hard ceiling. On a ~16 GiB host,
+TOTAL_CAP_MB="${TOTAL_CAP_MB:-11264}"  # 11 GiB whole-cluster hard ceiling. On a ~16 GiB host,
                                        # leave room for rust-analyzer (~2.5 GiB), the
                                        # observability stack (~1.9 GiB) and the page cache.
-CP_CAP_MB="${CP_CAP_MB:-1536}"         # control-plane reservation (etcd+apiserver ~1 GiB)
+CP_CAP_MB="${CP_CAP_MB:-3072}"         # control plane: etcd, the apiserver, and etcd's data on the
+                                       # node's tmpfs (cluster.yaml); a tighter cap thrashes the
+                                       # node's page cache and stalls the API
 EDGE_CAP_MB="${EDGE_CAP_MB:-768}"      # edge node: front proxy pod is 512 Mi + kubelet
 APP_POD_LIMIT_MB="${APP_POD_LIMIT_MB:-2048}"  # the worker pod's memory limit (the chart's 2Gi)
 APP_COTENANT_MB="${APP_COTENANT_MB:-0}"       # summed limits of the other pods on one app node

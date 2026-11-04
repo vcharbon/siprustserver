@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Workspace automation tasks (e.g. ABNF corpus regeneration)."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

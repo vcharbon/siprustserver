@@ -1,0 +1,198 @@
+{{- /*
+The render-time relations of the release: what no runner can see because it
+spans a pod spec and a runner's env, or two components. Each reads the final
+env a component gets (its derived env with `env` laid over it), the runner's
+default where the env states nothing. They render nothing; an invalid set
+fails the render naming every value involved. The runner-side relations are
+each runner's startup check.
+
+| relation | why |
+|---|---|
+| worker `terminationGracePeriodSeconds` > B2BUA_DRAIN_GRACE_MS + 2 × B2BUA_DRAIN_RELEASE_FLUSH_MS + B2BUA_DRAIN_CDR_FLUSH_MS + 2 s | a drain whose grace ended calls returns by grace + 2 flushes, then the CDR sink closes (ADR-0031); the kubelet's SIGKILL must not cut it |
+| proxy `terminationGracePeriodSeconds` > PROXY_DRAIN_GRACE_MS + 2 s | the proxy's drain ends before the SIGKILL |
+| proxy PROXY_DRAIN_GRACE_MS > `readinessProbe.periodSeconds` × `failureThreshold` + `announce.propagationMs` | a draining proxy keeps forwarding until its node's route is out of the routers' tables (ADR-0056) |
+| proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.propagationMs` | a rollout stops the next proxy only once the replaced one is back in the routers' tables |
+| proxy HEALTH_ISOLATION_MS + 2 × `routeGuard.pollMs` + `bfd.detectMultiplier` × max(`bfd.receiveIntervalMs`, `bfd.transmitIntervalMs`) ≤ `routeGuard.withdrawWithinMs` (route guard on) | a proxy cut off every worker leaves the routers' ECMP within the bound (ADR-0056 §10) |
+| proxy PROXY_EXT_FACE_CHECK_MS + 2 × `routeGuard.pollMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a proxy whose external interface or link is lost leaves it within the bound; a next hop dying with its carrier up reads unresolved only after the neighbour table's STALE/DELAY/PROBE cycle, tens of seconds, outside the bound |
+| `routeGuard.deadMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a hung or dead proxy, whose guard stops refreshing, leaves it within the bound |
+| proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.metallb.connectTimeSeconds` + 2 s (route guard on) | the pod is Ready once its guard let the node out; its BGP sessions are back before the rollout stops the next proxy |
+| proxy PROXY_METRICS keeps port 9090 | the readiness and liveness probes and the route guard read the proxy there |
+| proxy `announce.port` ≠ the metrics port 9090 and ≠ `network.sipPort` | the announce-only Services expose nothing kube-proxy would forward to a listener |
+| `proxy.nodeSelector` set | the workers' node affinity keeps them off every node it names: a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056 §7) |
+| `network.externalNextHops` = the addresses of `proxy.announce.metallb.peers.external` (MetalLB objects rendered) | the face check reads next hops whose BFD and keepalive traffic keeps them resolved |
+| `worker.replication.enabled` ⇒ `worker.replicas` ≥ 2 | a backup lives on another worker |
+| `worker.replication.enabled` ⇒ worker B2BUA_REPL_MAX_CONNECTIONS ≥ 4 × (`worker.replicas` − 1) | ADR-0045 item 5 |
+| worker B2BUA_CDR_RABBITMQ_MAX_LEN = consumer CDR_QUEUE_MAX_LEN | both declare the one queue; a different argument fails the second declare |
+| every RSS ceiling (B2BUA_MAX_RSS, _EMERGENCY, B2BUA_REPL_BACKUP_MAX_RSS) < worker `resources.limits.memory` | a ceiling at the limit is never reached before the OOM kill |
+| worker B2BUA_INVITE_TXN_TIMEOUT_SEC = proxy PROXY_INVITE_TXN_TIMEOUT_SEC (`inviteTxnTimeoutSec`) | the proxy keeps an INVITE's memo entry for the bound the workers ring under |
+| worker B2BUA_CALL_CONTROL_TIMEOUT_MS > proxy HEALTH_THRESHOLD × HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS | a consult in flight outlasts the proxy's dead verdict on its worker, so a call whose worker dies unannounced is taken over before its consult gives up |
+| proxy PROXY_BRANCH_MEMO_MAX_BYTES < proxy `resources.limits.memory` | the memo's accounted bytes fit the process |
+| `callLimiter.leaseSeconds` > 2 × worker LIMITER_REFRESH_SECONDS + LIMITER_REFRESH_BATCH_MS | a counted call's lease survives one missed refresh |
+| `proxy.hmac.existingSecret` set, or `proxy.hmac.drawInCluster` | a render without a cluster (helm template, GitOps) draws a new cookie key each time |
+| `sizing.enabled` ⇒ no component env or `proxy.selfGate` states a value sizing computes | one source for each capacity value: the computed ones keep the relations above by construction (templates/_sizing.tpl); the computed memory replaces the components' memory requests and limits |
+
+An `extraEnv` entry is outside these relations: a value set there is the
+operator's to keep consistent.
+*/ -}}
+{{- $margin := 2000 }}
+{{- $sizing := include "siprust.sizing" .Values | fromJson }}
+{{- if $sizing.workerEnv }}
+{{- range $component := list "worker" "proxy" }}
+{{- $c := index $.Values $component }}
+{{- range $name, $_ := index $sizing (printf "%sEnv" $component) }}
+{{- if hasKey ($c.env | default dict) $name }}
+{{- fail (printf "%s.env.%s is computed by sizing (sizing.enabled): state the sizing inputs instead" $component $name) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if or (not (kindIs "invalid" .Values.proxy.selfGate.cpsRate)) (not (kindIs "invalid" .Values.proxy.selfGate.cpsSize)) }}
+{{- fail "proxy.selfGate is computed by sizing (sizing.enabled): state sizing.profile.cps and sizing.gateMarginPct instead" }}
+{{- end }}
+{{- end }}
+{{- if .Values.worker.enabled }}
+{{- $w := .Values.worker }}
+{{- $wenv := $w.env | default dict }}
+{{- /* The drain bounds' runner defaults (b2bua-runner-kit drain_env). */ -}}
+{{- $grace := include "siprust.envInt" (list $wenv "B2BUA_DRAIN_GRACE_MS" 5000) | int64 }}
+{{- $flush := include "siprust.envInt" (list $wenv "B2BUA_DRAIN_RELEASE_FLUSH_MS" 3000) | int64 }}
+{{- $cdrFlush := include "siprust.envInt" (list $wenv "B2BUA_DRAIN_CDR_FLUSH_MS" 3000) | int64 }}
+{{- $drain := add $grace (mul 2 $flush) $cdrFlush $margin }}
+{{- $term := mul (int64 $w.terminationGracePeriodSeconds) 1000 }}
+{{- if le $term $drain }}
+{{- fail (printf "worker.terminationGracePeriodSeconds=%d s must exceed B2BUA_DRAIN_GRACE_MS=%d + 2 × B2BUA_DRAIN_RELEASE_FLUSH_MS=%d + B2BUA_DRAIN_CDR_FLUSH_MS=%d + %d ms: the kubelet would kill a drain still running" (int64 $w.terminationGracePeriodSeconds) $grace $flush $cdrFlush $margin) }}
+{{- end }}
+{{- if and $w.replication.enabled (lt (int $w.replicas) 2) }}
+{{- fail (printf "worker.replication.enabled needs worker.replicas >= 2, got %d: a backup lives on another worker" (int $w.replicas)) }}
+{{- end }}
+{{- if $w.replication.enabled }}
+{{- $cap := include "siprust.envInt" (list $wenv "B2BUA_REPL_MAX_CONNECTIONS" 64) | int64 }}
+{{- $flows := mul 4 (sub (int64 $w.replicas) 1) }}
+{{- if lt $cap $flows }}
+{{- fail (printf "worker B2BUA_REPL_MAX_CONNECTIONS=%d must be at least 4 × (worker.replicas=%d − 1) = %d (ADR-0045 item 5)" $cap (int64 $w.replicas) $flows) }}
+{{- end }}
+{{- end }}
+{{- $limit := dig "limits" "memory" "" ($w.resources | default dict) }}
+{{- if $limit }}
+{{- $limitBytes := include "siprust.bytes" (list "worker.resources.limits.memory" $limit) | int64 }}
+{{- range $name := list "B2BUA_MAX_RSS" "B2BUA_MAX_RSS_EMERGENCY" "B2BUA_REPL_BACKUP_MAX_RSS" }}
+{{- $v := get $wenv $name }}
+{{- if and $v (not (kindIs "invalid" $v)) }}
+{{- if ge (include "siprust.bytes" (list $name $v) | int64) $limitBytes }}
+{{- fail (printf "%s=%s must be below worker.resources.limits.memory=%s: the ceiling would never be reached before the OOM kill" $name (toString $v) (toString $limit)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.cdr.enabled .Values.cdr.consumer.enabled }}
+{{- $default := toString (int .Values.cdr.maxLength) }}
+{{- $produced := get $wenv "B2BUA_CDR_RABBITMQ_MAX_LEN" | default $default | toString }}
+{{- $consumed := get (.Values.cdr.consumer.env | default dict) "CDR_QUEUE_MAX_LEN" | default $default | toString }}
+{{- if ne $produced $consumed }}
+{{- fail (printf "worker B2BUA_CDR_RABBITMQ_MAX_LEN=%s differs from cdr-consumer CDR_QUEUE_MAX_LEN=%s: both declare one queue (cdr.maxLength)" $produced $consumed) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.proxy.enabled }}
+{{- $p := .Values.proxy }}
+{{- $penv := $p.env | default dict }}
+{{- $pgrace := include "siprust.envInt" (list $penv "PROXY_DRAIN_GRACE_MS" 8800) | int64 }}
+{{- $pterm := mul (int64 $p.terminationGracePeriodSeconds) 1000 }}
+{{- if le $pterm (add $pgrace $margin) }}
+{{- fail (printf "proxy.terminationGracePeriodSeconds=%d s must exceed PROXY_DRAIN_GRACE_MS=%d + %d ms: the kubelet would kill the proxy's drain" (int64 $p.terminationGracePeriodSeconds) $pgrace $margin) }}
+{{- end }}
+{{- $period := int64 $p.readinessProbe.periodSeconds }}
+{{- $failures := int64 $p.readinessProbe.failureThreshold }}
+{{- $propagation := int64 $p.announce.propagationMs }}
+{{- if le $pgrace (add (mul $period $failures 1000) $propagation) }}
+{{- fail (printf "PROXY_DRAIN_GRACE_MS=%d must exceed proxy.readinessProbe.periodSeconds=%d × failureThreshold=%d s + proxy.announce.propagationMs=%d: a draining proxy would exit while its node is still announced" $pgrace $period $failures $propagation) }}
+{{- end }}
+{{- if le (mul (int64 $p.minReadySeconds) 1000) (add (mul $period 1000) $propagation) }}
+{{- fail (printf "proxy.minReadySeconds=%d s must exceed proxy.readinessProbe.periodSeconds=%d s + proxy.announce.propagationMs=%d: a rollout would stop the next proxy before the replaced one is announced" (int64 $p.minReadySeconds) $period $propagation) }}
+{{- end }}
+{{- if $p.routeGuard.enabled }}
+{{- $g := $p.routeGuard }}
+{{- $bfd := $p.announce.metallb.bfd }}
+{{- $mult := int64 $bfd.detectMultiplier }}
+{{- $interval := max (int64 $bfd.receiveIntervalMs) (int64 $bfd.transmitIntervalMs) }}
+{{- $within := int64 $g.withdrawWithinMs }}
+{{- $poll := int64 $g.pollMs }}
+{{- /* The guard withdraws on its second unfit reading (route-guard UNFIT_READINGS). */ -}}
+{{- $paths := list
+  (list (printf "proxy HEALTH_ISOLATION_MS=%d" (include "siprust.envInt" (list $penv "HEALTH_ISOLATION_MS" 2000) | int64)) (include "siprust.envInt" (list $penv "HEALTH_ISOLATION_MS" 2000) | int64) 2 "a proxy cut off every worker")
+  (list (printf "proxy PROXY_EXT_FACE_CHECK_MS=%d" (include "siprust.envInt" (list $penv "PROXY_EXT_FACE_CHECK_MS" 500) | int64)) (include "siprust.envInt" (list $penv "PROXY_EXT_FACE_CHECK_MS" 500) | int64) 2 "a proxy whose external interface or link is lost")
+  (list (printf "proxy.routeGuard.deadMs=%d" (int64 $g.deadMs)) (int64 $g.deadMs) 0 "a hung or dead proxy") }}
+{{- range $paths }}
+{{- $name := index . 0 }}{{- $detect := index . 1 }}{{- $readings := index . 2 }}{{- $what := index . 3 }}
+{{- if gt (add $detect (mul $readings $poll) (mul $mult $interval)) $within }}
+{{- fail (printf "%s + %d unfit readings × proxy.routeGuard.pollMs=%d + proxy.announce.metallb.bfd.detectMultiplier=%d × max(receiveIntervalMs, transmitIntervalMs)=%d ms must not exceed proxy.routeGuard.withdrawWithinMs=%d: %s would stay in the routers' ECMP longer" $name (int64 $readings) $poll $mult $interval $within $what) }}
+{{- end }}
+{{- end }}
+{{- $connect := mul (int64 $p.announce.metallb.connectTimeSeconds) 1000 }}
+{{- if le (mul (int64 $p.minReadySeconds) 1000) (add (mul $period 1000) $connect $margin) }}
+{{- fail (printf "proxy.minReadySeconds=%d s must exceed proxy.readinessProbe.periodSeconds=%d s + proxy.announce.metallb.connectTimeSeconds=%d s + %d ms: the pod is Ready once its route guard let the node out, and a rollout would stop the next proxy before the node's BGP sessions came back" (int64 $p.minReadySeconds) $period (int64 $p.announce.metallb.connectTimeSeconds) $margin) }}
+{{- end }}
+{{- end }}
+{{- with get $penv "PROXY_METRICS" }}
+{{- if not (hasSuffix ":9090" (toString .)) }}
+{{- fail (printf "proxy PROXY_METRICS=%s must keep port 9090: the probes and the route guard read /readyz, /healthz and /fitz there" (toString .)) }}
+{{- end }}
+{{- end }}
+{{- if not $p.nodeSelector }}
+{{- fail "proxy.nodeSelector is required: the workers' node affinity keeps them off every node it names, since a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056)" }}
+{{- end }}
+{{- if $p.announce.metallb.enabled }}
+{{- $peers := list }}
+{{- range $p.announce.metallb.peers.external | default list }}{{- $peers = append $peers (toString .address) }}{{- end }}
+{{- $hops := list }}
+{{- range .Values.network.externalNextHops | default list }}{{- $hops = append $hops (toString .) }}{{- end }}
+{{- if ne (sortAlpha $peers | join ",") (sortAlpha $hops | join ",") }}
+{{- fail (printf "network.externalNextHops=[%s] must be the external BGP peers proxy.announce.metallb.peers.external=[%s]: the face check reads next hops whose BFD and keepalive traffic keeps them resolved" (join "," $hops) (join "," $peers)) }}
+{{- end }}
+{{- end }}
+{{- if has (int $p.announce.port) (list 9090 (int .Values.network.sipPort)) }}
+{{- fail (printf "proxy.announce.port=%d must differ from the metrics port 9090 and network.sipPort=%d: kube-proxy would forward the announce-only Service to a listener" (int $p.announce.port) (int .Values.network.sipPort)) }}
+{{- end }}
+{{- if .Values.worker.enabled }}
+{{- $default := ternary "" (toString (int .Values.inviteTxnTimeoutSec)) (kindIs "invalid" .Values.inviteTxnTimeoutSec) }}
+{{- $wb := get (.Values.worker.env | default dict) "B2BUA_INVITE_TXN_TIMEOUT_SEC" | default $default | toString }}
+{{- $pb := get $penv "PROXY_INVITE_TXN_TIMEOUT_SEC" | default $default | toString }}
+{{- if ne $wb $pb }}
+{{- fail (printf "worker B2BUA_INVITE_TXN_TIMEOUT_SEC=%q differs from proxy PROXY_INVITE_TXN_TIMEOUT_SEC=%q: the proxy keeps an INVITE's memo entry for the bound the workers ring under; set inviteTxnTimeoutSec" $wb $pb) }}
+{{- end }}
+{{- end }}
+{{- if not (or $p.hmac.existingSecret $p.hmac.drawInCluster) }}
+{{- fail "proxy.hmac.existingSecret is required: name the Secret (keys kid, key) both proxies read. Only a release installed against its cluster (the kind lab) may set proxy.hmac.drawInCluster, where the key is drawn once and read back by lookup" }}
+{{- end }}
+{{- end }}
+{{- /* The runner defaults a relation reads when the env states nothing:
+the proxy's probe configuration, the worker's and its limiter client's env
+grammar, the call limiter's lease. */ -}}
+{{- $wenv := .Values.worker.env | default dict }}
+{{- $penv := .Values.proxy.env | default dict }}
+{{- if and .Values.worker.enabled .Values.proxy.enabled }}
+{{- $consult := include "siprust.envInt" (list $wenv "B2BUA_CALL_CONTROL_TIMEOUT_MS" 5000) | int64 }}
+{{- $threshold := include "siprust.envInt" (list $penv "HEALTH_THRESHOLD" 2) | int64 }}
+{{- $interval := include "siprust.envInt" (list $penv "HEALTH_INTERVAL_MS" 1000) | int64 }}
+{{- $window := include "siprust.envInt" (list $penv "HEALTH_TIMEOUT_MS" 1600) | int64 }}
+{{- $verdict := add (mul $threshold $interval) $window }}
+{{- if and (gt $consult 0) (le $consult $verdict) }}
+{{- fail (printf "worker B2BUA_CALL_CONTROL_TIMEOUT_MS=%d must exceed proxy HEALTH_THRESHOLD=%d × HEALTH_INTERVAL_MS=%d + HEALTH_TIMEOUT_MS=%d: a consult would give up before the proxy's dead verdict on its worker" $consult $threshold $interval $window) }}
+{{- end }}
+{{- end }}
+{{- if .Values.proxy.enabled }}
+{{- $memo := get $penv "PROXY_BRANCH_MEMO_MAX_BYTES" }}
+{{- $plimit := dig "limits" "memory" "" (.Values.proxy.resources | default dict) }}
+{{- if and $memo $plimit }}
+{{- if ge (int64 (toString $memo)) (include "siprust.bytes" (list "proxy.resources.limits.memory" $plimit) | int64) }}
+{{- fail (printf "proxy PROXY_BRANCH_MEMO_MAX_BYTES=%s must be below proxy.resources.limits.memory=%s: the memo would not fit the process" (toString $memo) (toString $plimit)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.worker.enabled .Values.callLimiter.enabled }}
+{{- $lease := ternary 120 (int64 .Values.callLimiter.leaseSeconds) (kindIs "invalid" .Values.callLimiter.leaseSeconds) }}
+{{- $refresh := include "siprust.envInt" (list $wenv "LIMITER_REFRESH_SECONDS" 40) | int64 }}
+{{- $tick := include "siprust.envInt" (list $wenv "LIMITER_REFRESH_BATCH_MS" 1000) | int64 }}
+{{- if le (mul $lease 1000) (add (mul $refresh 2000) $tick) }}
+{{- fail (printf "callLimiter.leaseSeconds=%d must exceed 2 × worker LIMITER_REFRESH_SECONDS=%d + LIMITER_REFRESH_BATCH_MS=%d ms: one missed refresh would let a live call's lease lapse" $lease $refresh $tick) }}
+{{- end }}
+{{- end }}

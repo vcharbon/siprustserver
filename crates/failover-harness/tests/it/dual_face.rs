@@ -18,6 +18,8 @@
 //! full callflow through a real worker; every call terminates and the worker
 //! is asserted fully reaped. Per-message contracts (exact Via/RR bytes,
 //! single-face byte-compat) live in `sip-proxy/src/core/dual_face_tests.rs`.
+//!
+//! Beyond the failover sweep: the two-faced proxy topology and the face each message crosses.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,7 +38,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 // External (caller) plane.
 const ALICE: &str = "192.168.60.10:5060";
 const BOB: &str = "192.168.60.20:5060";
-const CHARLIE: &str = "192.168.60.21:5060"; // reroute target
+const CHARLIE: &str = "192.168.60.21:5060"; // the second target, after a failure
 const PROXY_EXT: &str = "192.168.60.250:5060"; // external VIP
                                                // Internal (worker) plane.
 const PROXY_INT: &str = "10.244.255.250:5080"; // internal VIP
@@ -73,7 +75,7 @@ fn assert_plane_discipline(fh: &FailoverHarness) {
             "datagram crossed the planes on the wire: {} -> {} ({})",
             e.from,
             e.to,
-            String::from_utf8_lossy(&e.raw).lines().next().unwrap_or(""),
+            e.start_line(),
         );
     }
     // And the caller-plane half really is the proxy's EXTERNAL bind (not some
@@ -366,19 +368,19 @@ async fn dual_face_cancel_correlates_across_faces() {
     drop(proxy);
 }
 
-/// **(d) non-2xx ACK correlation across faces (486-then-reroute).** Bob 486s
+/// **(d) non-2xx ACK correlation across faces (486-then-retarget).** Bob 486s
 /// the b-leg: the proxy synthesizes the hop ACK toward bob on the EXT face
 /// (same branch as the INVITE it relayed), absorbs the worker's own ACK
-/// arriving on the INT face, and the worker's reroute INVITE reaches charlie
-/// — alice is bridged. The via-LB reroute twin, split across two planes.
+/// arriving on the INT face, and the worker's second-target INVITE reaches charlie
+/// — alice is bridged. The via-LB second-target twin, split across two planes.
 #[tokio::test(start_paused = true)]
-async fn dual_face_486_reroute_ack_correlation() {
-    let mut fh = FailoverHarness::new("dual-face-486-reroute", &["b1"]);
+async fn dual_face_486_retarget_ack_correlation() {
+    let mut fh = FailoverHarness::new("dual-face-486-retarget", &["b1"]);
     let decision: Arc<dyn CallDecisionEngine> = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("192.168.60.20", 5060);
-                r.callback_context = Some("dual-face-486-reroute-ctx".into());
+                r.callback_context = Some("dual-face-486-retarget-ctx".into());
                 NewCallResponse::Route(r)
             })
             .on_failure(|_| {
@@ -406,11 +408,11 @@ async fn dual_face_486_reroute_ack_correlation() {
         "the non-2xx hop ACK must reuse the INVITE's branch across the face split",
     );
 
-    // ── the reroute reaches charlie (EXT face); alice is bridged ─────────────
+    // ── the second-target INVITE reaches charlie (EXT face); alice is bridged ─────────────
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let confirmed = call.expect(200).await;
-    assert_eq!(confirmed.status(), 200, "caller bridged to the reroute target");
+    assert_eq!(confirmed.status(), 200, "caller bridged to the second target");
     let mut dialog = call.ack().await;
     charlie.receive("ACK").await;
 
@@ -420,12 +422,13 @@ async fn dual_face_486_reroute_ack_correlation() {
 
     assert_reaped(&fh, &b1).await;
     assert_plane_discipline(&fh);
-    fh.assert_full_rfc_clean("dual-face-486-reroute");
+    fh.assert_full_rfc_clean("dual-face-486-retarget");
     drop(proxy);
 }
 
 /// **(f) dual-VIP takeover.** Both faces' identities (the two VIPs) move to a
-/// peer proxy TOGETHER — the VRRP failover model. An established call
+/// peer proxy TOGETHER: a node withdraws both addresses at once (ADR-0056),
+/// so the peer carries both faces' flows. An established call
 /// survives: the takeover proxy (same HMAC key, fresh branch space) decodes
 /// the caller's cookie on the EXT face and bridges the in-dialog teardown
 /// across both planes. The proxy is stateless by design, so the only state
@@ -446,7 +449,7 @@ async fn dual_face_takeover_moves_both_faces_together() {
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(100)).await;
 
-    // ── proxy A dies; BOTH VIPs move to the peer proxy ───────────────────────
+    // ── proxy A dies; BOTH VIPs' flows move to the peer proxy ───────────────
     fh.mark("proxy", None, "crash", "dual-face proxy killed; VIPs move to peer");
     drop(proxy_a);
     // Let the aborted recv task actually drop (releasing both face binds)

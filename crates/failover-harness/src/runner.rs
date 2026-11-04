@@ -379,17 +379,6 @@ async fn inject_failover(
     if !inject {
         return;
     }
-    // From the fault instant on, the dialog has two potential owners of one leg, so
-    // ADR-0014's accepted keepalive-vs-backup-transaction overlap can reuse an
-    // in-dialog CSeq (the loser's mutation reaches the wire before `(p,b)` rejects
-    // it; that one call drops cleanly). Accepted from HERE, never before: the clean
-    // baseline (`inject == false`) and this cell's own establishment keep
-    // `cseq-in-dialog-order` fully gating, so a new CSeq regression still fails.
-    fh.accept_rfc_deviations_from_now(
-        crate::RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
-         takeover window — one call drops cleanly",
-    );
     match fault {
         Fault::Kill => {
             // "stop b2b" — the abrupt crash the user wants visible in the diagram.

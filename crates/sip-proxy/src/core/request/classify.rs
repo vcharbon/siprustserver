@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 
 use sip_message::draft::RequestDraft;
 use sip_message::header::{RouteEntry, Uri};
-use sip_message::{HeaderName, Method, SipRequest};
+use sip_message::{HeaderName, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::headers::{cookie_params, route_target};
@@ -145,7 +145,7 @@ impl ProxyCore {
         }
         let loose_route_next_hop = routes
             .get(self_routes)
-            .filter(|next| req.method() != Method::Cancel && next.uri().is_loose_route())
+            .filter(|next| next.uri().is_loose_route())
             .map(|next| route_target(next.uri()));
         routes.truncate(self_routes);
         let classified = Classified {

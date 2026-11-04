@@ -1,10 +1,11 @@
 //! The release of a fork straggler's 2xx (RFC 3261 §13.2.2.4): a 2xx under a
 //! To-tag no live dialog of an already confirmed b-leg carries is ACKed and
 //! its dialog BYEd, once per straggler; a repeat is re-ACKed with the same ACK.
-//! The straggler is a retired dialog of the leg ([`call::RetiredDialog`]),
-//! whose BYE continues its own sequence.
+//! The straggler is a retired dialog of the leg ([`call::DialogState::Retired`]): its
+//! INVITE record keeps the ACK's branch and bytes, and the BYE, continuing its own
+//! sequence, is a request record of its own until it settles (ADR-0055 §2).
 
-use call::{Call, Dialog, DialogState, RetiredDialog, StragglerRelease};
+use call::{Call, Dialog, DialogState, RetainedEmission};
 use sip_message::generators::{self, GenerateAckFor2xxOpts};
 use sip_message::header;
 
@@ -39,9 +40,10 @@ impl ActionExecutor<'_> {
         let Some(tag) = resp.to().tag().filter(|t| !t.is_empty()).map(str::to_string) else {
             return;
         };
-        let marks = relay::CallMarks::of(call);
+        let marks = self.marks(call);
         let Some(leg) = call.b_legs.iter().find(|l| l.leg_id == leg_id) else { return };
-        let Some(invite) = leg.outbound_invite.clone() else { return };
+        let Some(invite) = leg.outbound_invite().cloned() else { return };
+        let dialled = leg.dialled_on_dialog();
         let invite_cseq = resp.cseq().seq();
         // The losing fork's own record keeps the sequence it spent; a tag that
         // never rang starts from the INVITE (RFC 3261 §12.2.1.1).
@@ -51,10 +53,10 @@ impl ActionExecutor<'_> {
                 let mut d = Dialog::new(
                     invite.our_tag,
                     tag.clone(),
-                    DialogState::Retired(RetiredDialog::default()),
+                    DialogState::Retired,
                     i64::from(invite_cseq),
                 );
-                d.pending_invite_txn = leg.outbound_invite.as_ref().and_then(|i| i.txn.clone());
+                d.sent_invite = dialled;
                 d
             }
         };
@@ -64,9 +66,17 @@ impl ActionExecutor<'_> {
             straggler.remote_target = target;
         }
         straggler.route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
-        let released = straggler.retired().and_then(|r| r.release.clone());
+        // Released already: its ACK left, re-passed as it left (§13.2.2.4).
+        if let Some(first) =
+            call::helpers::sent_exchange(&straggler).and_then(|x| x.emitted_ack.as_ref())
+        {
+            let label = format!("ACK (fork straggler {tag}, 2xx retransmit) → {leg_id}");
+            fx.outbound.push(super::ladder::repeat_of(first, label, leg_id));
+            return;
+        }
+        let released = call::helpers::sent_exchange(&straggler).and_then(|x| x.ack_branch.clone());
         let offered_reliably = relay::offered_reliably(call, leg_id, &tag, i64::from(invite_cseq));
-        let answer = (!relay::acked_invite_carries_offer(&straggler) && !offered_reliably)
+        let answer = (!relay::acked_invite_carries_offer(leg, &straggler) && !offered_reliably)
             .then(|| resp.sdp())
             .flatten()
             .and_then(|offer| {
@@ -81,13 +91,10 @@ impl ActionExecutor<'_> {
                 )
                 .and_then(|bytes| relay::in_dialog_session(bytes, origin.as_deref()))
             });
-        let ack_branch = released
-            .as_ref()
-            .map(|r| r.ack_branch.clone())
-            .unwrap_or_else(|| self.turn.ids.new_branch());
+        let ack_branch = released.clone().unwrap_or_else(|| self.turn.ids.new_branch());
         let dialog = relay::to_gen_dialog(leg, &straggler);
         let opts = GenerateAckFor2xxOpts {
-            via: Some(relay::leg_via(self.config, marks, leg_id, ack_branch.clone())),
+            via: Some(relay::leg_via(self.config, marks, leg_id, None, ack_branch.clone())),
             cseq: Some(invite_cseq),
             content_type: answer.is_some().then(relay::sdp),
             body: answer.unwrap_or_default(),
@@ -100,6 +107,11 @@ impl ActionExecutor<'_> {
         let dest = relay::target_dest(&dialog.remote_target);
         let (ack, dest) =
             relay::apply_b_leg_egress(self.config, leg_id, &dialog.route_set, ack, dest);
+        let retained = RetainedEmission::on_trigger(
+            ack.image().to_vec(),
+            dest.clone(),
+            call::Repeated::request("ACK"),
+        );
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(ack),
             mode: OutboundTxnMode::Raw,
@@ -115,22 +127,21 @@ impl ActionExecutor<'_> {
         else {
             return;
         };
-        let bye_branch = match &bye.body {
-            OutboundBody::Request(r) => r.top_via().branch().unwrap_or_default().to_string(),
-            _ => String::new(),
-        };
-        fx.outbound.push(bye);
         straggler.our_cseq += 1;
-        let release = StragglerRelease { ack_branch, bye_branch, settled: false };
-        match &mut straggler.state {
-            DialogState::Retired(r) => r.release = Some(release),
-            state => {
-                *state = DialogState::Retired(RetiredDialog {
-                    release: Some(release),
-                    ..Default::default()
-                })
-            }
-        }
-        *call = call::helpers::update_leg(call.clone(), leg_id, |l| l.dialogs.insert(straggler));
+        let ack_cseq = i64::from(invite_cseq);
+        let exchange = straggler
+            .sent_invite
+            .get_or_insert_with(|| call::RequestRecord::dialled_on_dialog(ack_cseq))
+            .invite
+            .get_or_insert_with(Default::default);
+        exchange.ack_branch = Some(ack_branch);
+        exchange.emitted_ack = Some(retained);
+        // Retired with the requests still open in it, whose finals still reach
+        // their originators (§8.1.3.3).
+        straggler.state = DialogState::Retired;
+        let id = straggler.id();
+        call::helpers::update_leg(call, leg_id, |l| l.dialogs.insert(straggler));
+        self.record_own_effect(call, leg_id, &id, &bye);
+        fx.outbound.push(bye);
     }
 }

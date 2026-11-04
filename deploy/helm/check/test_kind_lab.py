@@ -17,9 +17,12 @@ from charts import (GOLDEN, OBSERVABILITY, SIPRUST, canonical, container, env, f
 
 class Lint(unittest.TestCase):
     def test_both_charts_lint_clean_with_the_kind_values(self) -> None:
+        # helm lint takes no API list: the MetalLB objects are left to the
+        # golden render, which states the lab's APIs.
         for chart in (SIPRUST, OBSERVABILITY):
-            out = helm("lint", "--strict", str(chart), *kind_values(chart),
-                       "--set", "clusterName=kind-sip-e2e" if chart == OBSERVABILITY else "enabled=true")
+            args = (["--set", "clusterName=kind-sip-e2e"] if chart == OBSERVABILITY
+                    else ["--set", "proxy.announce.metallb.enabled=false"])
+            out = helm("lint", "--strict", str(chart), "-f", str(chart / "values-kind.yaml"), *args)
             self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_the_sut_chart_lints_without_a_proxy(self) -> None:
@@ -35,11 +38,24 @@ class NetEnvAgreement(unittest.TestCase):
         values = yaml.safe_load((SIPRUST / "values-kind.yaml").read_text())
         n = values["network"]
         self.assertEqual(
-            (n["proxyVip"], n["externalVip"], n["internalInterface"], n["externalInterface"],
+            (n["proxyVip"], n["externalVip"], n["externalInterface"], n["externalNextHops"],
              n["externalSubnet"], str(n["sipPort"]), n["internalCidrs"]),
-            (net["PROXY_VIP"], net["SIPEXT_VIP"], net["SIP_IF"], net["SIPEXT_IF"],
+            (net["PROXY_VIP"], net["SIPEXT_VIP"], net["SIPEXT_IF"], [net["SIPEXT_GATEWAY"]],
              net["SIPEXT_SUBNET"], net["SIP_PORT"], net["PROXY_FACE_INT_CIDRS"]))
+        m = values["proxy"]["announce"]["metallb"]
+        self.assertEqual(str(m["myASN"]), net["PROXY_NODE_ASN"])
+        self.assertEqual(
+            [(p["address"], str(p["asn"])) for face in ("internal", "external")
+             for p in m["peers"][face]],
+            [(net["SIP_GATEWAY"], net["TOR_ASN"]), (net["SIPEXT_GATEWAY"], net["TOR_ASN"])])
+        bfd = m.get("bfd") or yaml.safe_load((SIPRUST / "values.yaml").read_text())[
+            "proxy"]["announce"]["metallb"]["bfd"]
+        self.assertEqual((str(bfd["receiveIntervalMs"]), str(bfd["transmitIntervalMs"]),
+                          str(bfd["detectMultiplier"])),
+                         (net["BFD_INTERVAL_MS"], net["BFD_INTERVAL_MS"],
+                          net["BFD_DETECT_MULTIPLIER"]))
         self.assertEqual(values["worker"]["dest"], f"{net['SIPEXT_UAS_IP']}:5060")
+        self.assertEqual(values["worker"]["networkPolicy"]["proxyNodeCidrs"], [net["SIP_SUBNET"]])
         self.assertEqual(values["tracing"]["otlpEndpoint"],
                          f"http://{net['SIP_GATEWAY']}:10428/insert/opentelemetry")
 

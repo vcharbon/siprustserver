@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .jsonval import as_obj
 from .model import Incident
 from .profile import EventSpec, Profile
 
@@ -27,6 +28,19 @@ class PlannedEvent:
     def window_end_s(self) -> float:
         """The planned close used by the dry-run overlap check (ADR-0049 §3.7)."""
         return self.at_s + self.expected_s + self.settle_s
+
+
+def target_of(inc: Incident, spec: EventSpec) -> tuple[str, str | None, str]:
+    """The selector, namespace (`None`: the lab's) and pick `inc` fires on in
+    an event of `spec`: the event's `target` over the incident's, keyed by
+    incident name when the event fires several."""
+    raw = spec.target.get(inc.name, {}) if len(spec.incidents) > 1 else spec.target
+    over = as_obj(raw)
+    base = inc.target
+    selector = str(over.get("selector", base.selector if base else ""))
+    namespace = over.get("namespace", base.namespace if base else None)
+    pick = str(over.get("pick", base.pick if base else "one"))
+    return selector, None if namespace is None else str(namespace), pick
 
 
 def plan_event(

@@ -2,8 +2,9 @@
 //! Record-Route URI the grammar refuses (a port with trailing garbage, no
 //! host, a control byte). The parser refuses the 2xx (RFC 3261 §20.30, §25.1),
 //! so it matches no client transaction (§17.1.3): the INVITE retransmits under
-//! Timer A and Timer B ends the call as a timeout (§17.1.1.2), its CDR written
-//! and its state reaped. No such route ever becomes a dialog's route set.
+//! Timer A and the first-response deadline (ADR-0044) gives the hop up, its
+//! CDR written and its state reaped. No such route ever becomes a dialog's
+//! route set.
 
 use std::time::Duration;
 
@@ -14,29 +15,40 @@ use sip_message::header::HeaderName;
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
+/// What the audit, which reads without the wire grammar, makes of the 2xx.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Audit {
+    /// The URI grammar alone refuses the route: the audit reads the 2xx and
+    /// sees a dialog the B2BUA's parser refused.
+    ReadsTheDialog,
+    /// A control byte outside a quoted-pair refuses the 2xx in every reading.
+    ReadsNothing,
+}
+
 /// Alice calls bob, bob's 200 records `route`: the B2BUA drops it and fails
-/// the call at Timer B.
-async fn call_recording(name: &str, route: &str) {
+/// the call at the first-response deadline.
+async fn call_recording(name: &str, route: &str, audit: Audit) {
     let s = B2buaScene::new(name).await;
-    // The audit reads the 2xx without the wire grammar, so it sees a dialog
-    // the B2BUA's parser refused: the 2xx (wire entry 4) is the input under
-    // test, and its ACK and BYE are owed by nobody.
-    s.h.waive(
-        WaiverScope::rule(
-            "no-ack-to-dialog-creating-2xx",
-            "the 2xx records a route the grammar refuses; the B2BUA's parser discards it (RFC 3261 §25.1)",
-        )
-        .on_party("b2bua")
-        .at_position(4),
-    );
-    s.h.waive(
-        WaiverScope::rule(
-            "unacked-2xx-not-cleared",
-            "bob deliberately sends one malformed 2xx and nothing after it — the input under test",
-        )
-        .on_party("bob")
-        .at_position(4),
-    );
+    // A 2xx the audit reads is the input under test (wire entry 4): its ACK
+    // and BYE are owed by nobody.
+    if audit == Audit::ReadsTheDialog {
+        s.h.waive(
+            WaiverScope::rule(
+                "no-ack-to-dialog-creating-2xx",
+                "the 2xx records a route the grammar refuses; the B2BUA's parser discards it (RFC 3261 §25.1)",
+            )
+            .on_party("b2bua")
+            .at_position(4),
+        );
+        s.h.waive(
+            WaiverScope::rule(
+                "unacked-2xx-not-cleared",
+                "bob deliberately sends one malformed 2xx and nothing after it — the input under test",
+            )
+            .on_party("bob")
+            .at_position(4),
+        );
+    }
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let uas = s.bob.receive("INVITE").await;
     let req = uas.request();
@@ -60,12 +72,13 @@ async fn call_recording(name: &str, route: &str) {
     );
     s.bob.try_send_datagram(wire.as_bytes(), s.b2bua.addr).await.expect("the 200 leaves");
 
-    // Timer B is 64·T1 = 32 s; past it the client transaction has timed out.
-    s.h.advance(Duration::from_secs(33)).await;
-    call.expect(408).await;
+    // Past the 5 s first-response deadline the hop that answered nothing
+    // usable is given up.
+    s.h.advance(Duration::from_secs(6)).await;
+    call.expect(480).await;
 
     // The Trying b-leg is CANCELed and stays unresolved, so the terminating
-    // call waits on its safety timeout and is reaped at about 64 s.
+    // call waits on its safety timeout and is reaped at about 37 s.
     s.h.advance(Duration::from_secs(35)).await;
     s.bob.drain().await;
     settle_until(|| s.b2bua.is_reaped()).await;
@@ -76,15 +89,15 @@ async fn call_recording(name: &str, route: &str) {
 
 #[tokio::test(start_paused = true)]
 async fn a_recorded_port_with_trailing_garbage_refuses_the_2xx() {
-    call_recording("b2bua-rr-port-garbage", "<sip:10.0.0.9:5060x>").await;
+    call_recording("b2bua-rr-port-garbage", "<sip:10.0.0.9:5060x>", Audit::ReadsTheDialog).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_recorded_route_with_no_host_refuses_the_2xx() {
-    call_recording("b2bua-rr-no-host", "<sip:@>").await;
+    call_recording("b2bua-rr-no-host", "<sip:@>", Audit::ReadsTheDialog).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_recorded_route_with_a_control_byte_refuses_the_2xx() {
-    call_recording("b2bua-rr-control-byte", "<sip:10.0.0.\u{7f}9>").await;
+    call_recording("b2bua-rr-control-byte", "<sip:10.0.0.\u{7f}9>", Audit::ReadsNothing).await;
 }

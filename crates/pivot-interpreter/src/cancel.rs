@@ -147,6 +147,7 @@ mod tests {
             after: Vec::new(),
             early: None,
             overlap: None,
+            awaits: None,
             discriminator: Discriminator::Response {
                 status,
                 cseq_method: cseq_method.map(str::to_string),

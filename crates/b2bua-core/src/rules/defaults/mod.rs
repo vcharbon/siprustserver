@@ -8,10 +8,11 @@
 //!   registration list.
 //! - `failover_rules` — the CORE_LAYER failover resolution the list
 //!   registers in its place: one rule per `/call/failure` outcome.
-//! - `own_request_timeouts` — the timeouts of requests this stack originated
-//!   itself that end what the request was for, not the call.
 //! - `reaper_verdicts` — the bodies of the rules that handle the call
 //!   reaper's verdicts (ADR-0020).
+//! - `request_timeouts` — what a transaction timeout means before its INVITE
+//!   readings: a request record's by origin and method table, a leg going
+//!   away, a straggler's release (ADR-0055 §2).
 //! - `route_fold` — the shared route-shaped-payload parser + parity actions
 //!   both async route folds (`call-failure-result`, `call-release-result`)
 //!   apply identically.
@@ -22,9 +23,11 @@
 mod compose;
 mod core_rules;
 mod failover_rules;
-mod own_request_timeouts;
+mod keepalive_failure;
 mod reaper_verdicts;
+mod request_timeouts;
 mod route_fold;
+mod straggler;
 
 pub use compose::{default_rules, default_rules_with, ComposeOptions};
 pub(crate) use core_rules::{still_owed_bare_ack, unacked_2xx_give_up_actions};

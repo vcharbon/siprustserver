@@ -3,7 +3,7 @@
 //! ([`actions`]), framework invariants, and the rule families: the CORE
 //! lifecycle set ([`defaults`]), the 18x-policy services ([`relay_first_18x`],
 //! [`promote_pem`]), REFER transfer ([`refer_transfer`]), release/reroute
-//! ([`release_reroute`]), the round a record lost ([`lost_round`]), a 2xx
+//! ([`release_reroute`]), evidence the record cannot explain ([`evidence`]), a 2xx
 //! after the dialog's BYE ([`ended_dialog_2xx`]), and an operator's release
 //! ([`operator_release`]).
 
@@ -13,10 +13,11 @@ pub mod charging;
 pub mod defaults;
 pub mod docgen;
 pub mod ended_dialog_2xx;
+pub mod evidence;
 pub mod executor;
 pub mod invariants;
 pub mod lifecycle_delivery;
-pub mod lost_round;
+pub mod method_table;
 pub mod operator_release;
 mod pending_refusal;
 pub mod promote_pem;
@@ -36,7 +37,7 @@ pub use b2bua_sdk::model::{
 pub use b2bua_sdk::relayed_final::RelayedFinal;
 pub use defaults::{default_rules, default_rules_with, ComposeOptions};
 pub use docgen::{check_registry, render_registry, render_registry_html, MachineGraph};
-pub use executor::{execute_rules, pick_ranked};
+pub use executor::{execute_rules, execute_turn, pick_ranked};
 pub use promote_pem::promote_pem_rules;
 pub use refer_transfer::{transfer_rules, transfer_seed_rules, transfer_service_def};
 pub use relay_first_18x::{relay_first_18x_rules, relay_first_18x_service_def};

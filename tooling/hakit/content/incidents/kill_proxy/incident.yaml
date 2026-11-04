@@ -1,29 +1,69 @@
 schema: incident.v1
 name: kill_proxy
 description: >-
-  Crash the front proxy holding the virtual address (the VRRP master, found as
-  the pod carrying the address on an interface other than lo): every container
-  process of the pod is killed with SIGKILL and proven dead. Its peer takes the
-  address over and the kubelet restarts the crashed pod as a backup. The probe
-  waits for the restart, proves no incarnation overlap, and wants exactly one
-  holder.
+  Crash one front proxy of the active-active pair: every container process of
+  the pod is killed with SIGKILL and proven dead; the kubelet restarts them.
+  The node's route guard withdraws both VIPs (its last refresh runs out) and
+  the routers move the node's flows to the peer. Inject measures, from the
+  kill, when the node left each VIP's next hops in the host's table; when the
+  restarted guard found the restarted proxy fit before the routers' BFD could
+  declare the node down, it keeps the node in and inject records that instead,
+  with any later withdrawal through readiness apart. The probe waits for the
+  restart, proves no incarnation overlap, and wants both VIPs routed over
+  every live proxy's node again.
 kind: fault
 target:
   selector: app=sip-front-proxy
   pick: one
 params:
-  address:
+  internal_vip:
+    type: string
+    default: 172.20.255.250
+    description: The VIP the workers reach the proxies at.
+  external_vip:
     type: string
     default: 192.168.60.250
-    description: The virtual address the callers dial.
-  container:
+    description: The VIP the callers dial.
+  network:
     type: string
-    default: keepalived
-    description: The container of the proxy pod through which its addresses are read (it needs `ip`).
+    default: sipext
+    description: The docker network of the callers' plane.
+  withdraw_timeout_s:
+    type: integer
+    default: 30
+    description: How long inject waits for the node to leave both VIPs' next hops.
+  guard_window_s:
+    type: integer
+    default: 4
+    description: >-
+      How long inject waits for the route guard's withdrawal (its bound,
+      proxy.routeGuard.withdrawWithinMs, rounded up) before it reads whether
+      the guard restarted onto a fit proxy.
+  dead_ms:
+    type: integer
+    default: 1000
+    description: >-
+      The route guard's dead-man bound (ROUTE_GUARD_DEAD_MS): the last
+      refresh of a dead guard runs out at most this long after the kill.
+  bfd_detect_ms:
+    type: integer
+    default: 900
+    description: >-
+      The routers' BFD detection time (interval times multiplier), counted
+      from the refresh running out. A guard restarted onto a fit proxy
+      within dead_ms plus this after the kill refreshes the node before BFD
+      declares it down, so the node is never withdrawn; a later start is a
+      failed dead-man.
+  guard_container:
+    type: string
+    default: route-guard
+    description: >-
+      The node's route guard container: restarted onto a proxy already fit
+      again, it keeps the node in before the routers withdraw it.
 duration_s: 0
 expected_s: 60
 timeouts:
-  inject_s: 30
+  inject_s: 60
   heal_s: 10
   probe_s: 180
   probe_interval_s: 2

@@ -153,6 +153,16 @@ fn overload_shed_counters_render() {
 }
 
 #[test]
+fn rate_cap_spill_counter_renders() {
+    let m = ProxyMetrics::new();
+    m.record_lb_rate_cap_spill();
+    assert_eq!(m.lb_rate_cap_spilled_total(), 1);
+    let txt = m.prometheus_text();
+    assert!(txt.contains("sip_proxy_lb_rate_cap_spilled_total 1"));
+    assert!(txt.contains("# TYPE sip_proxy_lb_rate_cap_spilled_total counter"));
+}
+
+#[test]
 fn reject_reason_counter_renders() {
     // Every reason must surface as its own labelled series — the aggregate
     // kind="reject" bucket alone leaves a locally generated 503

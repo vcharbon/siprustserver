@@ -8,12 +8,21 @@ import type { Jobs } from "@sip/store"
 const seconds = (from: string, to: string | null): number =>
   Math.max(0, (new Date(to ?? Date.now()).getTime() - new Date(from).getTime()) / 1000)
 
-/** The unit a job counts: cells for a replay, runs for a delete, captures otherwise. */
-const unit = (kind: Jobs.Kind): string => (kind === "replay" ? "cell" : kind === "delete" ? "run" : "capture")
+/** The unit a job counts: cells for a replay or a campaign, runs for a delete, captures otherwise. */
+const unit = (kind: Jobs.Kind): string =>
+  kind === "replay" || kind === "campaign" ? "cell" : kind === "delete" ? "run" : "capture"
 
-/** What a job's landed units did: replayed, removed, or cut. */
+/** What a job's landed units did: replayed, judged, removed, taken in, or cut. */
 const verb = (kind: Jobs.Kind): string =>
-  kind === "replay" ? "landed" : kind === "retire" || kind === "delete" ? "removed" : "cut"
+  kind === "replay"
+    ? "landed"
+    : kind === "campaign"
+    ? "judged"
+    : kind === "retire" || kind === "delete"
+    ? "removed"
+    : kind === "inbox"
+    ? "taken"
+    : "cut"
 
 /** What a job is, in a few words: a replay names its request and lane; the others what they planned. */
 export const what = (job: Jobs.Row): string =>

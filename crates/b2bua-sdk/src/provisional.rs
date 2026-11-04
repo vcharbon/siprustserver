@@ -13,7 +13,7 @@ use crate::model::{RuleAction, RuleCall, RuleContext};
 /// mid-call, or one still ringing after her CANCEL — rings inside a dialog
 /// she holds and is shown to her as nothing.
 pub fn originator_final_sent(call: &RuleCall) -> bool {
-    call.a_leg().invite_final_sent.is_some()
+    call.a_leg().invite_final_sent().is_some()
 }
 
 /// The `RSeq` a reliable provisional states (RFC 3262: `Require: 100rel` plus

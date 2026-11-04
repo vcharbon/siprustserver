@@ -259,6 +259,25 @@ describe("a lane the document declares blocked", () => {
     expect(cell.passed).toBe(true)
   })
 
+  it("is skipped on the verdict stated for every lane where the document does not name it", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([
+      replayCell({ case: caseWithLanes(cases, "blocked.v3.json", { "other-lane": "ok", "*": "blocked:claim-ambiguous" }) })
+    ])
+    expect(run.index.cells[0]!.skipped).toBe("blocked:claim-ambiguous")
+  })
+
+  it("runs the cell on its own ok verdict, whatever the document states for every lane", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([
+      replayCell({ case: caseWithLanes(cases, "ok.v3.json", { "stub-lane": "ok", "*": "blocked:whatever" }) })
+    ])
+    expect(run.index.cells[0]!.skipped).toBeUndefined()
+    expect(run.index.cells[0]!.passed).toBe(true)
+  })
+
   it("runs the cell where the document does not mention the lane at all", async () => {
     // Absence means "none" — a lane nobody ruled on is not a blocked lane.
     const run = await campaign([replayCell()])
@@ -300,6 +319,24 @@ describe("a cell that never produced a result", () => {
     expect(run.index.cells[0]!.error).toBeDefined()
     expect(run.index.cells[1]!.passed).toBe(true)
     expect(fs.existsSync(run.indexPath)).toBe(true)
+  })
+
+  it("carries the host's own words where it runs no crate test, and spawns nothing", async () => {
+    const run = await campaign([rustCell(), replayCell()], {
+      tests: {
+        command: "/nonexistent/runner",
+        args: () => [],
+        cellDirEnv: "CELL_DIR",
+        unavailable: "crate-test cells: not available on this host"
+      }
+    })
+    const cell = run.index.cells[0]!
+    expect(cell.passed).toBe(false)
+    expect(cell.error).toBe("crate-test cells: not available on this host")
+    expect(fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")).toBe(
+      "crate-test cells: not available on this host\n"
+    )
+    expect(run.index.cells[1]!.passed).toBe(true)
   })
 
   it("is what an unknown lane produces, because a lane is never guessed", async () => {

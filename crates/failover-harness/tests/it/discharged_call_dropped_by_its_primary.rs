@@ -15,6 +15,8 @@
 //!   alice ──BYE──▶ proxy ──▶ B   (takeover copy: ends the call, discharges it)
 //!   B's delete ──▶ P / P'        (the live copy there is dropped)
 //! ```
+//!
+//! Beyond the failover sweep: a withdrawn or replaced primary drops the call its backup discharged.
 
 use std::time::Duration;
 
@@ -69,10 +71,6 @@ pub(crate) async fn establish(name: &str) -> Established {
     let backup = if pri_ord == "b1" { &w_b2 } else { &w_b1 };
     let call_ref =
         backup.scan_one_backed_up(&pri_ord).await.expect("the call replicated to the backup");
-    fh.accept_rfc_deviations_from_now(
-        failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the takeover window",
-    );
     Established { fh, alice, bob, proxy, w_b1, w_b2, pri_ord, call_ref, dialog }
 }
 
@@ -121,8 +119,9 @@ async fn a_running_primary_drops_the_call_its_backup_discharged() {
     drop(proxy);
 }
 
-/// The primary is killed and departs; a replacement of its ordinal reclaims
-/// the call from the backup before the backup is told the ordinal rejoined.
+/// The primary is killed and departs; a replacement of its ordinal, whose own
+/// informer lists its endpoint first, reclaims the call from the backup before
+/// the backup is told the ordinal rejoined.
 /// The backup ends and discharges the call; the replacement drops the copy it
 /// reclaimed on the backup's delete.
 #[tokio::test(start_paused = true)]
@@ -146,6 +145,7 @@ async fn a_replacement_drops_the_call_its_backup_discharged_before_seeing_it_rej
     fh.depart(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
     let replacement = fh.spawn_replacement(&pri_ord).await;
+    fh.publish_to_itself(&pri_ord);
     let reclaimed = fh
         .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
             replacement.is_ready() && replacement.serves(&call_ref)

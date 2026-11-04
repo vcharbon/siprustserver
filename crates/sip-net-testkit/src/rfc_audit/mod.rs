@@ -22,13 +22,16 @@
 //!
 //! [`msg_reads`] holds the per-message accessors the adapter builds a
 //! `rfc_rules::Msg` from; [`relay_lanes`] classifies which lanes forward rather
-//! than author, the one policy input the adapter needs beyond the rule bodies.
+//! than author, the one policy input the adapter needs beyond the rule bodies;
+//! [`capture_index`] parses a capture once for the predicates that read what
+//! surrounds an offending message; [`AuditPass`] builds the projections every
+//! rule of one pass reads once for the whole rule list.
 //!
 //! SDP grammar is NOT here: a description is read as a document by
 //! [`sip_message::sdp_doc`], the one home for it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use layer_harness::Stamped;
 use sip_message::parser::custom::CustomParser;
@@ -50,6 +53,7 @@ pub(crate) fn lenient_parser() -> CustomParser {
 }
 
 // Shared helpers.
+pub mod capture_index;
 pub mod msg_reads;
 pub mod relay_lanes;
 
@@ -63,12 +67,29 @@ mod occasions;
 // The parties the recording holds a lane for.
 mod recorded;
 
+// The datagrams the loss model dropped before their taker.
+mod dropped;
+
+// The projection builds a pass made, for the tests that bound them.
+#[cfg(test)]
+mod builds;
+
+/// A list of cross-message rules, shared: the rules are stateless, so one list
+/// serves every recorded network that audits with it.
+pub type CrossMessageRules = Arc<[Arc<dyn CrossMessageAuditRule>]>;
+
+pub use wire_adapter::AuditPass;
+
+/// The default cross-message rule list, built once per process.
+static CROSS_MESSAGE_RULES: LazyLock<CrossMessageRules> =
+    LazyLock::new(|| wire_adapter::cross_rules().into());
+
 /// The full default set of **cross-message** RFC rules every test harness
-/// installs by default. One pass over the whole recorded channel at layer
-/// close; each finding carries its originating bind so subject dispatch and the
-/// hard gate can filter it.
-pub fn rfc_cross_message_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
-    wire_adapter::cross_rules()
+/// installs by default, one list shared by every caller. One pass over the
+/// whole recorded channel at layer close; each finding carries its originating
+/// bind so subject dispatch and the hard gate can filter it.
+pub fn rfc_cross_message_rules() -> CrossMessageRules {
+    CROSS_MESSAGE_RULES.clone()
 }
 
 /// [`rfc_cross_message_rules`] over a view a consumer took the binds of
@@ -169,15 +190,12 @@ pub struct RfcAudit {
 
 /// [`evaluate_rfc_findings`] with the rule population of the same pass.
 pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit {
-    // Audit view: consumption markers and modeled-loss /
-    // infra-absorbed arrivals are projection-only — filtered here so EVERY
-    // caller (harness hard gate, e2e collector, report projection) hands the
-    // rules the same view of the wire.
-    let events: Vec<Stamped<SignalingNetworkEvent>> = events
-        .iter()
-        .filter(|s| crate::contracts::audit_visible_event(&s.event))
-        .cloned()
-        .collect();
+    // Audit view: consumption markers and infra-absorbed arrivals are
+    // projection-only, filtered here so EVERY caller (harness hard gate, e2e
+    // collector, report projection) hands the rules the same view of the wire;
+    // modeled-loss arrivals stay as evidence the rules never judge.
+    let events: Vec<Stamped<SignalingNetworkEvent>> =
+        events.iter().filter(|s| crate::contracts::cross_audit_event(&s.event)).cloned().collect();
     let events = events.as_slice();
     let roles = bind_roles_of(events);
     let roles_of = |party: &str| -> HashSet<UaRole> {
@@ -204,10 +222,11 @@ pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit
     let mut findings = Vec::new();
     let mut population: BTreeMap<&'static str, rfc_rules::Population> = BTreeMap::new();
 
-    // Cross-message rules — one pass over the whole channel each.
-    for rule in rfc_cross_message_rules() {
+    // Cross-message rules — every one over the one pass.
+    let pass = AuditPass::new(events);
+    for rule in rfc_cross_message_rules().iter() {
         let subject = rule.subject();
-        let (positioned, tally) = occasions::tallied(|| rule.check_positioned(events));
+        let (positioned, tally) = occasions::tallied(|| rule.check_pass(&pass));
         for ((token, bind), noted) in tally {
             if subject_hits(&subject, &bind) {
                 population.entry(token).or_default().add(noted);

@@ -1,0 +1,81 @@
+# The failover sweep's ratchet (ADR-0055 §11): every cell of the base
+# catalogue that fails today, at either sync level, with the decision section
+# that owns its correction and its cause, and each test's count of cells in
+# the Guaranteed tier. A change that makes a cell pass removes its line; a new
+# failure is never added without its owner. The list only shrinks, and a
+# Guaranteed count never falls (a rise is recorded here).
+#
+# The owner is read from the finding: a request or final a copy sends without
+# the record of what the dead owner sent, a request into a dialog the other
+# copy ended, and the non-2xx a copy owes a caller the dead primary answered
+# §4; a deviation no row of the window table covers, or a Guaranteed cell
+# that fires a row, §11; a PRACK, an owed ACK or an in-dialog request left
+# unanswered §2; a 2xx repeat routed through the other owner §8; and any
+# other finding of a split cell §7.
+
+# The Guaranteed cells of each test.
+guaranteed basic/applied/backup-killed 18
+guaranteed basic/applied/primary-killed 18
+guaranteed basic/applied/primary-killed-unannounced 18
+guaranteed basic/applied/primary-rebooted 18
+guaranteed cancel/applied/backup-killed 15
+guaranteed cancel/applied/primary-killed 15
+guaranteed cancel/applied/primary-killed-unannounced 15
+guaranteed cancel/applied/primary-rebooted 15
+guaranteed forked/applied/backup-killed 24
+guaranteed forked/applied/primary-killed 24
+guaranteed forked/applied/primary-killed-unannounced 24
+guaranteed forked/applied/primary-rebooted 24
+guaranteed info-x-bye/applied/backup-killed 18
+guaranteed info-x-bye/applied/primary-killed 18
+guaranteed info-x-bye/applied/primary-killed-unannounced 18
+guaranteed info-x-bye/applied/primary-rebooted 18
+guaranteed info/applied/backup-killed 24
+guaranteed info/applied/primary-killed 24
+guaranteed info/applied/primary-killed-unannounced 24
+guaranteed info/applied/primary-rebooted 24
+guaranteed keepalive/applied/backup-killed 57
+guaranteed keepalive/applied/primary-killed 57
+guaranteed keepalive/applied/primary-killed-unannounced 57
+guaranteed keepalive/applied/primary-rebooted 57
+guaranteed media-leg/applied/backup-killed 27
+guaranteed media-leg/applied/primary-killed 27
+guaranteed media-leg/applied/primary-killed-unannounced 27
+guaranteed media-leg/applied/primary-rebooted 27
+guaranteed prack/applied/backup-killed 24
+guaranteed prack/applied/primary-killed 24
+guaranteed prack/applied/primary-killed-unannounced 24
+guaranteed prack/applied/primary-rebooted 24
+guaranteed refer-x-bye/applied/backup-killed 27
+guaranteed refer-x-bye/applied/primary-killed 27
+guaranteed refer-x-bye/applied/primary-killed-unannounced 27
+guaranteed refer-x-bye/applied/primary-rebooted 27
+guaranteed refer/applied/backup-killed 45
+guaranteed refer/applied/primary-killed 45
+guaranteed refer/applied/primary-killed-unannounced 45
+guaranteed refer/applied/primary-rebooted 45
+guaranteed reinvite-x-bye/applied/backup-killed 18
+guaranteed reinvite-x-bye/applied/primary-killed 18
+guaranteed reinvite-x-bye/applied/primary-killed-unannounced 18
+guaranteed reinvite-x-bye/applied/primary-rebooted 18
+guaranteed reinvite/applied/backup-killed 27
+guaranteed reinvite/applied/primary-killed 27
+guaranteed reinvite/applied/primary-killed-unannounced 27
+guaranteed reinvite/applied/primary-rebooted 27
+guaranteed reject/applied/backup-killed 6
+guaranteed reject/applied/primary-killed 6
+guaranteed reject/applied/primary-killed-unannounced 6
+guaranteed reject/applied/primary-rebooted 6
+guaranteed update-x-bye/applied/backup-killed 18
+guaranteed update-x-bye/applied/primary-killed 18
+guaranteed update-x-bye/applied/primary-killed-unannounced 18
+guaranteed update-x-bye/applied/primary-rebooted 18
+guaranteed update/applied/backup-killed 24
+guaranteed update/applied/primary-killed 24
+guaranteed update/applied/primary-killed-unannounced 24
+guaranteed update/applied/primary-rebooted 24
+
+# applied: the Guaranteed cells that fire a row.
+
+# The cells that fail outright, at either level, with no row to take the
+# finding.

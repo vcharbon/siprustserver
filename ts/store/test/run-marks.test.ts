@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import * as Client from "../src/client.js"
+import * as RunIdentity from "../src/run-identity.js"
 import * as Runs from "../src/runs.js"
 import * as Sessions from "../src/sessions.js"
 import { CURRENT } from "./identity.js"
@@ -90,5 +91,31 @@ describe.skipIf(!served)("run marks", () => {
     await withStore(Effect.flatMap(Runs.Service, (runs) => runs.finish({ id: first!.id, status: "done", cases: [] })))
     const left = await withStore(Effect.flatMap(Runs.Service, (runs) => runs.openOfSweep(dead)))
     expect(left).toEqual([{ id: second!.id, bundlePath: second!.bundlePath }])
+  })
+
+  it("records what a forced run's lane lacked, and nothing on a run that was not forced", async () => {
+    const [plain, forced] = await withStore(Effect.flatMap(Runs.Service, (runs) =>
+      runs.openMany([
+        { capture: "marks.pcap", lane: "real", mode: "record", sessionDir: "/w/marks", identity: CURRENT },
+        {
+          capture: "marks.pcap",
+          lane: "real",
+          mode: "record",
+          sessionDir: "/w/marks",
+          identity: { ...CURRENT, forced: ["scripted"] }
+        }
+      ])))
+    const read = await withStore(Effect.flatMap(Runs.Service, (runs) => runs.forced([plain!.id, forced!.id])))
+    expect([...read]).toEqual([[forced!.id, ["scripted"]]])
+  })
+})
+
+describe("the lane hash", () => {
+  it("of an unforced run is the knobs' alone, and a forced run never shares it", () => {
+    const knobs = { startsPerSecond: 10, batchSize: 4000, memoryMax: "1G" }
+    const plain = RunIdentity.laneHash("real", knobs)
+    expect(RunIdentity.laneHash("real", knobs, [])).toBe(plain)
+    expect(RunIdentity.laneHash("real", knobs, ["scripted"])).not.toBe(plain)
+    expect(RunIdentity.laneHash("real", knobs, ["b", "a"])).toBe(RunIdentity.laneHash("real", knobs, ["a", "b"]))
   })
 })

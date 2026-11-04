@@ -73,7 +73,7 @@ pub fn refuse(
         return ParseRefusal::Capped;
     }
     let to_tag = tagger.for_partial(partial).0;
-    let source = (source.ip().to_string(), source.port());
+    let source = sip_message::received::observed_source(source);
     match generate_invalid_request(partial, &error.reason, &agent(), &to_tag, &source) {
         Ok(response) => ParseRefusal::Answer(Box::new(response)),
         Err(_) => ParseRefusal::Dropped,

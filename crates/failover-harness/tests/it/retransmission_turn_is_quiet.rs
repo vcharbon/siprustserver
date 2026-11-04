@@ -33,6 +33,9 @@
 //!
 //! The single-node twin (`b2bua-harness/tests/it/retransmission_turn_and_message_cap.rs`)
 //! pins the runaway-message cap's side of the same rule.
+//!
+//! Beyond the failover sweep: the 2xx ladder's rungs and re-ACKs as quiet turns, and the message
+//! cap.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -45,7 +48,9 @@ use failover_harness::{
 use repl_net::frame::{Frame, Op};
 use repl_net_testkit::Direction;
 use scenario_harness::Agent;
-use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::generators::{
+    generate_response, GenerateResponseOpts, B2BUA_ACCEPT, B2BUA_ALLOW, B2BUA_SUPPORTED,
+};
 use sip_message::types::SipResponse;
 use sip_message::{serialize, CustomParser, Method, SipMessage, SipParser};
 
@@ -74,6 +79,11 @@ const RESTART_GAPS_MS: [u64; 2] = [1_000, 2_000];
 
 /// Scheduling slack on a measured gap: the paused clock's advance chunk.
 const SLACK_MS: u64 = 200;
+
+/// How much earlier than its rung a gap may close: a copy that follows a write
+/// leaves once the backup applied it (ADR-0055 §3), and the next rung's timer
+/// counts from the turn.
+const APPLY_MS: u64 = 10;
 
 /// One paused-clock step: the transit hop, so nothing lands between steps.
 const STEP: Duration = Duration::from_millis(100);
@@ -180,8 +190,19 @@ async fn service_peers(alice: &Agent, bob: &Agent, hop: SocketAddr) {
         match msg {
             SipMessage::Response(r) if r.status() == 200 => {}
             SipMessage::Request(req) if req.method() == Method::Options => {
-                let ok = generate_response(&req, 200, "OK", &GenerateResponseOpts::default())
-                    .expect("a 200");
+                // A 2xx to OPTIONS states the UA's capabilities (RFC 3261 §11.2).
+                let header = |name: &str, value: &str| sip_message::SipHeader {
+                    name: name.into(),
+                    value: value.into(),
+                };
+                let extra_headers = vec![
+                    header("Allow", B2BUA_ALLOW),
+                    header("Supported", B2BUA_SUPPORTED),
+                    header("Accept", B2BUA_ACCEPT),
+                ];
+                let opts =
+                    GenerateResponseOpts { extra_headers, ..GenerateResponseOpts::default() };
+                let ok = generate_response(&req, 200, "OK", &opts).expect("a 200");
                 alice.try_send_datagram(&serialize(&SipMessage::Response(ok)), hop).await.unwrap();
             }
             SipMessage::Response(r) => panic!("alice read an unexpected {} response", r.status()),
@@ -224,9 +245,7 @@ async fn reboot_and_reclaim(
 /// One run of the scenario: the kill lands after rung `k`.
 async fn own_2xx_ladder_across_a_kill(name: &str, k: usize) {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = spawn_cluster(name).await;
-    // The one knowingly-unmet obligation is alice's, and it is the subject: her
-    // missing ACK is what keeps the ladder walking across the kill. The callee's
-    // 2xx is acknowledged by the give-up before its BYE (§13.2.2.4).
+    // alice breaks RFC 3261 §13.2.2.4: she never ACKs the 2xx, whose ladder is the target.
     fh.allow_rfc_violation(
         "no-ack-to-dialog-creating-2xx",
         "alice deliberately never ACKs — the ladder across a kill is under test",
@@ -318,7 +337,7 @@ async fn own_2xx_ladder_across_a_kill(name: &str, k: usize) {
     let measured = gaps(&copies[..3]);
     for (i, (got, want)) in measured.iter().zip(RESTART_GAPS_MS).enumerate() {
         assert!(
-            (want..=want + SLACK_MS).contains(got),
+            (want - APPLY_MS..=want + SLACK_MS).contains(got),
             "a restored ladder restarts from the last replicated write, the answer's own: copy {} \
              lands {got} ms after the one before it, not the {want} ms RFC 3261 §13.3.1.4 owes \
              from the first rung (T1, doubling); gaps {measured:?}",

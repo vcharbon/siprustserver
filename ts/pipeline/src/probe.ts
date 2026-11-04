@@ -43,6 +43,11 @@ export type ShapeKind =
   | { readonly shape: "method-substitution"; readonly expected: string; readonly observed: string }
   | { readonly shape: "serviced-stray"; readonly method: string; readonly action: string }
   | { readonly shape: "alignment-lost"; readonly method: string }
+  /**
+   * The `100` to an INVITE the leg sent, met by that transaction's `final`
+   * first (RFC 3261 §17.2.1); `afterMs` is the final's arrival from the INVITE.
+   */
+  | { readonly shape: "trying-omitted"; readonly final: number; readonly afterMs: number }
   | {
       readonly shape: "retransmission"
       readonly cseqMethod: string
@@ -64,6 +69,8 @@ const shapeText = (kind: ShapeKind): string => {
       return `serviced-stray:${kind.method}:${kind.action}`
     case "alignment-lost":
       return `alignment-lost:${kind.method}`
+    case "trying-omitted":
+      return "trying-omitted"
     case "retransmission":
       return `retransmission:${kind.cseqMethod}:2xx`
   }
@@ -76,6 +83,8 @@ export const shapeSides = (
   switch (kind.shape) {
     case "retransmission":
       return [[String(kind.captured)], [String(kind.replayed)]]
+    case "trying-omitted":
+      return [["100"], [`${kind.final} after ${kind.afterMs} ms`]]
     default:
       return [[shapeText(kind)], []]
   }
@@ -159,7 +168,7 @@ export interface ShapeProbe extends ProbeSite {
  */
 export interface BodyProbe extends ProbeSite {
   readonly kind: "body"
-  /** The expectation's bare `type/subtype`, lowercased, parameters stripped. */
+  /** The expectation's bare `type/subtype`, lowercased, parameters stripped; the declared shape on a shape-only one. */
   readonly mediaType: string
   readonly scope: MsgScope
   readonly compare: Body.BodyCompare
@@ -172,14 +181,20 @@ export interface BodyProbe extends ProbeSite {
    * only. `mintedOrigin` marks a `session:o=` row of a verbatim run whose two
    * origins read as one the replayed endpoint mints and its counterpart, and
    * `originNotContinued` one where the replay breaks RFC 3264 §8 against its
-   * previous description on the leg while the capture keeps its session
-   * (`./sdporigin.ts`); the signature carries neither.
+   * previous description on the leg while the capture keeps its session, and
+   * `versionStepOne` one whose sess-version the capture skips where the
+   * replay steps by one (`./sdporigin.ts`); `orderOnly` marks a
+   * `document:bytes` row whose texts differ in attribute order alone
+   * (`./sdpfold.ts`), and carries `versionStepOne` beside it where its origin
+   * row does. The signature carries none of them.
    */
   readonly sdp?: {
     readonly section: string
     readonly line: string
     readonly mintedOrigin?: true
     readonly originNotContinued?: true
+    readonly orderOnly?: true
+    readonly versionStepOne?: true
   }
 }
 

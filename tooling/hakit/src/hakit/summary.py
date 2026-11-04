@@ -1,7 +1,8 @@
 """`summary.md`: the human rendering of a `verdict.json` (ADR-0049 §3.11).
 
 The status and why first (each integrity finding, each impact found), then the
-streams with their generator health, then per window its phases, facts,
+streams with their generator health, the unanswered calls by cause per stream
+and for priority calls against the others, then per window its phases, facts,
 recovery per stream and every class against its allowance, then the in-dialog
 and unattributed impacts.
 """
@@ -81,6 +82,102 @@ def _streams(v: Json) -> list[str]:
     return out
 
 
+CAUSE_COLUMNS = (
+    ("expected", "expected ending"),
+    ("dependency_fault", "dependency fault (503)"),
+    ("overload", "overload (503 + Retry-After)"),
+    ("setup_timeout", "setup timeout"),
+    ("cut", "cut / not released"),
+    ("other", "other"),
+)
+CAUSE_NAMES = dict(CAUSE_COLUMNS)
+
+
+def _cause_count(t: Json, cause: str) -> int:
+    return sum(int(jv.number(c, "count")) for c in jv.objs(t, "causes") if c["cause"] == cause)
+
+
+def _share(t: Json) -> str:
+    share = t.get("answered_share")
+    return "-" if not isinstance(share, (int, float)) else f"{share * 100:.4f}%"
+
+
+def _tally_table(head: str, rows: list[tuple[str, Json]]) -> list[str]:
+    cols = " | ".join(name for _, name in CAUSE_COLUMNS)
+    out = [
+        f"| {head} | calls | answered | {cols} | answered, dependency faults left out |",
+        "|---" * (4 + len(CAUSE_COLUMNS)) + "|",
+    ]
+    for name, t in rows:
+        counts = " | ".join(str(_cause_count(t, c)) for c, _ in CAUSE_COLUMNS)
+        out.append(f"| {name} | {t['calls']} | {t['answered']} | {counts} | {_share(t)} |")
+    return out
+
+
+def _places(c: Json) -> str:
+    """A cause row's count by where, the largest first."""
+    where = sorted(jv.as_obj(c["where"]).items(), key=lambda kv: (-int(str(kv[1])), kv[0]))
+    return ", ".join(f"{k} {n}" for k, n in where)
+
+
+def _where(name: str, t: Json) -> list[str]:
+    """One line per name: each cause and detail with its count by where."""
+    parts: list[str] = []
+    for c in jv.objs(t, "causes"):
+        detail = "" if c["cause"] == "setup_timeout" else f" {c['detail']}"
+        parts.append(f"{CAUSE_NAMES[str(c['cause'])]}{detail}: {c['count']} ({_places(c)})")
+    return [f"- {name}: {'; '.join(parts)}"] if parts else []
+
+
+def _unanswered(v: Json) -> list[str]:
+    streams = jv.objs(jv.obj(v, "unanswered"), "streams")
+    out = [
+        "Every call that did not end answered, in exactly one cause. A dependency fault is a 503 without "
+        "Retry-After whose setup overlaps a window whose budget allows one; where is the incident kind of that "
+        "window, or `outside`.",
+        "",
+        *_tally_table("stream", [(str(s["stream"]), s) for s in streams]),
+        "",
+    ]
+    lines = [ln for s in streams for ln in _where(str(s["stream"]), s)]
+    return out + (lines or ["- every call answered"])
+
+
+def priority_verdict(group: Json | None) -> str:
+    if group is None or not jv.strings(group, "streams"):
+        return "No `run` stream places priority calls."
+    said = {"overload": "refused for overload", "setup_timeout": "timed out", "cut": "cut or never released"}
+    other = [c for c in jv.objs(group, "causes") if c["cause"] == "other"]
+    n_other = sum(int(jv.number(c, "count")) for c in other)
+    if not any(_cause_count(group, c) for c in said) and not n_other:
+        return "No priority call was refused for overload, timed out, cut or ended otherwise."
+    parts: list[str] = []
+    for cause, what in said.items():
+        rows = [c for c in jv.objs(group, "causes") if c["cause"] == cause]
+        n = sum(int(jv.number(c, "count")) for c in rows)
+        parts.append(f"{n} {what} ({'; '.join(_places(c) for c in rows)})" if n else f"none {what}")
+    if n_other:
+        details = "; ".join(f"{c['detail']}: {_places(c)}" for c in other)
+        parts[-1] += f", and {n_other} ended otherwise ({details})"
+    return f"Priority calls: {', '.join(parts)}."
+
+
+def _priority(v: Json) -> list[str]:
+    groups = {str(g["group"]): g for g in jv.objs(jv.obj(v, "unanswered"), "groups")}
+    prio, others = groups.get("priority"), groups.get("others")
+    named = [(n, g) for n, g in (("priority", prio), ("others", others)) if g is not None]
+    members = {n: ", ".join(jv.strings(g, "streams")) or "none" for n, g in named}
+    out = [
+        f"Priority streams (`Resource-Priority`, RFC 4412): {members.get('priority', 'none')}. "
+        f"Others: {members.get('others', 'none')}. Streams an incident starts are in neither.",
+        "",
+        *_tally_table("group", named),
+        "",
+    ]
+    out += [ln for n, g in named for ln in _where(n, g)]
+    return out + ["", priority_verdict(prio)]
+
+
 def _window(w: Json, dialog: dict[str, int]) -> list[str]:
     candidates = f", candidate of {sum(dialog.values())} in-dialog impacts" if dialog else ""
     out = [
@@ -116,6 +213,14 @@ def render(v: Json) -> str:
         "## Streams",
         "",
         *_streams(v),
+        "",
+        "## Unanswered calls",
+        "",
+        *_unanswered(v),
+        "",
+        "## Priority calls",
+        "",
+        *_priority(v),
         "",
         "## Windows",
         "",

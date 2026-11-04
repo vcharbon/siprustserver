@@ -5,12 +5,14 @@ runs once per firing of the load incident whose event names it: each firing is
 its own generator, started at inject in its own directory under the stream's,
 its Call-IDs tagged with the event so two firings never share one. At heal,
 `drain` tells the UAC to place no new call and waits for its calls to end;
-`abandon` kills it with its calls in flight. Either way the records it wrote
-are shipped and its counter read before the generator is removed, so the next
-firing starts clean. A docker generator works in its working directory
-(workdir.py), collected into its stream directory once it is removed. A
-stream's `streams.json` entry sums its firings; an abandoned stream is left
-out of the reconciliation.
+`abandon` holds it at rate 0, reads its count once its counters show the hold
+and read the same twice in a row (the calls it offered up to its stop, none
+after, with those it did not place or failed itself), then kills it with its
+calls in flight. Either way the records it wrote are shipped and its counter read
+before the generator is removed, so the next firing starts clean. A docker
+generator works in its working directory (workdir.py), collected into its
+stream directory once it is removed. A stream's `streams.json` entry sums its
+firings; an abandoned stream is left out of the reconciliation.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from pathlib import Path
 from .clock import Clock
 from .content import Content
 from .executor import Executor
-from .generator import Generator
+from .generator import Generator, Tally
 from .injection import render
 from .jsonval import Json
 from .lab import Lab
@@ -38,6 +40,11 @@ from .workdir import WorkDir, work_dir
 
 SHIP_WAIT_S = 60
 POLL_MS = 2000
+# An abandoned generator's counters show its hold within a statistics period
+# (SIPp writes a row a second) and are taken once two consecutive reads agree;
+# they are read this often, this long at most.
+HOLD_POLL_MS = 250
+HOLD_WAIT_S = 5
 # VictoriaLogs is queried around the run's own span with this margin.
 QUERY_MARGIN_MS = 3_600_000
 
@@ -62,6 +69,10 @@ class Firing:
     records_complete: bool = True
     exit_code: int | None = None
     collected: bool = False
+
+
+def _uncounted(t: Tally) -> Tally:
+    return Tally(None, t.not_placed, t.generator_failures)
 
 
 class StreamSet:
@@ -173,6 +184,7 @@ class StreamSet:
             return True, {"stream": name, "stop": mode}
         stopped_at = self.clock.now_ms()
         f.stop = mode
+        held = self._hold(f, wait) if mode == "abandon" else None
         signalled = f.gen.kill() if mode == "abandon" else f.gen.drain()
         while signalled and f.gen.running() and self.clock.now_ms() < deadline_ms:
             wait(min(deadline_ms, self.clock.now_ms() + POLL_MS))
@@ -181,7 +193,7 @@ class StreamSet:
         ok = f.drained or (signalled and mode == "abandon")
         if not ok:
             f.gen.kill()
-        shipped = self._settle(f, wait)
+        shipped = self._settle(f, wait, held)
         if f.drained and not f.gen.clean_exit(f.exit_code):
             f.drained = ok = False
         self._remove(f)
@@ -193,17 +205,41 @@ class StreamSet:
             "exited_at_ms": exited_at,
             "teardown_ms": exited_at - stopped_at,
             "calls": f.calls,
+            "not_placed": f.not_placed,
+            "generator_failures": f.generator_failures,
             "records": f.local,
             "shipped_records": shipped,
             "exit_code": f.exit_code,
         }
+        if held is not None:
+            facts["held"] = held.calls is not None
         return ok, facts
 
-    def _settle(self, f: Firing, wait: Waiter) -> int | None:
-        """Read the firing's counter, wait (bounded) until its records are all
+    def _hold(self, f: Firing, wait: Waiter) -> Tally:
+        """Hold the firing's generator at rate 0 (no new call, its calls go on)
+        and take its count once two consecutive reads of its counters show the
+        hold and agree, within `HOLD_WAIT_S`. When it refused the hold or its
+        counters never settled the count of calls is unknown, and the calls it
+        did not place or failed itself are kept from its last read."""
+        if not f.gen.set_rate(0):
+            return _uncounted(f.gen.held_tally() or f.gen.tally())
+        deadline = self.clock.now_ms() + HOLD_WAIT_S * 1000
+        prev: Tally | None = None
+        while True:
+            t = f.gen.held_tally()
+            if t is not None and t == prev:
+                return t
+            if self.clock.now_ms() >= deadline:
+                return _uncounted(t or prev or f.gen.tally())
+            prev = t
+            wait(min(deadline, self.clock.now_ms() + HOLD_POLL_MS))
+
+    def _settle(self, f: Firing, wait: Waiter, held: Tally | None = None) -> int | None:
+        """Read the firing's counter (`held`, read before an abandoned
+        generator's kill, when given), wait (bounded) until its records are all
         on disk, read them, and wait (bounded) until VictoriaLogs holds every
         record the stream wrote so far."""
-        tally = f.gen.tally()
+        tally = held if held is not None else f.gen.tally()
         f.calls, f.not_placed, f.generator_failures = tally.calls, tally.not_placed, tally.generator_failures
         f.exit_code = f.gen.exit_code()
         deadline = self.clock.now_ms() + SHIP_WAIT_S * 1000

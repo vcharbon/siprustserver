@@ -148,7 +148,8 @@ impl ActionExecutor<'_> {
         // may carry the same CSeq, and a final delivered to a transaction it
         // does not answer — or regenerated below as an INVITE response —
         // would turn a `200 (PRACK)` into a spurious `200 (INVITE)`.
-        if let Some((holder, pending)) = ctx.resolved.relay.as_deref().cloned() {
+        let relayed = ctx.resolved.record.as_deref().filter(|(_, r)| r.is_relay()).cloned();
+        if let Some((holder, pending)) = relayed {
             self.relay_pending_response(call, fx, &r, holder, pending);
             return;
         }
@@ -191,8 +192,7 @@ impl ActionExecutor<'_> {
             let a_face = self.a_face_tag(call, source_leg_id, to_tag, answering);
             call::helpers::note_shown(call, source_leg_id, to_tag);
             let Some(a_invite) = self.caller_invite(call) else { return };
-            let contact =
-                relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
+            let contact = relay::leg_contact(call, &call.a_leg.leg_id);
             let mut passthrough = r.passthrough(relay::relay_response_passthrough_headers(
                 resp,
                 self.config
@@ -233,10 +233,9 @@ impl ActionExecutor<'_> {
                 status,
                 &r.reason,
                 Some(a_face.clone()),
-                Some(contact),
+                contact,
                 r.body,
                 r.content_type,
-                None,
                 passthrough,
                 Provenance::Relayed,
                 relay::Author::Leg(source_leg_id),
@@ -274,8 +273,7 @@ impl ActionExecutor<'_> {
         // owned bare 180's under `relayFirst18xTo180`.
         let a_tag = self.ensure_a_dialog(call);
         let Some(a_invite) = self.caller_invite(call) else { return };
-        let contact =
-            relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
+        let contact = relay::leg_contact(call, &call.a_leg.leg_id);
         // Reliable-provisional negotiation (Require/Supported) passes through
         // transparently so end-to-end PRACK keeps working (RFC 3262); the RSeq
         // it rides on is this transaction's own (`own_relayed_rseq`).
@@ -319,10 +317,9 @@ impl ActionExecutor<'_> {
             status,
             &r.reason,
             Some(a_tag.clone()),
-            Some(contact),
+            contact,
             r.body,
             r.content_type,
-            None,
             passthrough,
             Provenance::Relayed,
             relay::Author::Leg(source_leg_id),
@@ -379,9 +376,9 @@ impl ActionExecutor<'_> {
         let stored = call::helpers::relay_first_18x_stored_a_tag(call).map(str::to_string);
         let a_facing_tag = self.ensure_a_dialog_with(call, stored);
         self.map_a_face(call, &a_facing_tag, leg_id, b_tag);
-        *call = call::helpers::set_relay_first_18x_relayed(call.clone(), &a_facing_tag);
+        call::helpers::set_relay_first_18x_relayed(call, &a_facing_tag);
         if let Some(resp) = ctx.response() {
-            *call = call::helpers::record_relay_first_18x_value(call.clone(), resp.status());
+            call::helpers::record_relay_first_18x_value(call, resp.status());
         }
         // A bare 180 states ringing and nothing else: the reliable-provisional
         // negotiation goes with the reliability the downgrade removes (RFC

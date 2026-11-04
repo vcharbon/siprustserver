@@ -6,7 +6,8 @@
 //! Layers:
 //! - `harness` — the [`FailoverHarness`] engine + [`ReplicatedB2buaSut`] +
 //!   [`ProxySut`] (moved here from `b2bua-harness`; the canonical 5-step failover
-//!   scenario and the fault matrix live in `tests/it/failover.rs`).
+//!   scenario lives in `tests/it/failover.rs`, the fault matrix in
+//!   `tests/it/failover_matrix.rs`).
 //! - [`scenario`] — the `CallScenario` step-list + `SafePoint` DSL: a callflow
 //!   declares its steps and the quiescent points where an injected crash/recovery
 //!   is expected to be *transparent*.
@@ -14,33 +15,57 @@
 //!   failover-injected) + strict From/To/CSeq invariants.
 //! - [`cookie`] — the proxy stickiness cookie read back off a forwarded
 //!   request, which names the primary and backup worker of a call.
-//! - [`rfc_acceptance`] — RFC-audit acceptance scoping: which recorded deviations
-//!   gate the run and which a scenario declared accepted for a bounded window.
+//! - [`incident`] — what befalls a call's two owners, struck by a test.
+//! - [`windows`] — the window table: every deviation an incident may cause,
+//!   one named row each, and the tier a run's measured facts place it in
+//!   (ADR-0055 §11).
+//! - [`rfc_acceptance`] — RFC-audit acceptance scoping: which recorded
+//!   deviations gate the run and which a struck row's window accepts.
 //! - [`views`] — the views ledger: what the orchestrator, the proxy and each
 //!   worker incarnation believed about every worker, and where they disagreed.
+//! - [`turn_points`] — every turn of a call at its primary and its three
+//!   sub-points, where a test arms an incident (ADR-0055 §13).
+//! - [`cluster`] + [`roles`] — a two-worker cluster built from a recipe, and
+//!   the verbs that place a call, steer its traffic to a role and name its
+//!   nodes by role (ADR-0055 §13).
+//! - [`sweep`] — the failover sweep, its catalogue and its ratchet
+//!   (ADR-0055 §11).
 //! - the [`transparent_matrix!`] matrix macro — expands a table of
 //!   `(state, event, fault, recovery, seed)` rows into one named
 //!   `#[tokio::test]` per legal cell (`tests/it/transparent_v1.rs`).
 
+pub mod callouts;
+pub mod cluster;
 pub mod combine;
 pub mod cookie;
 mod harness;
+pub mod incident;
 pub mod oracle;
 pub mod rfc_acceptance;
+pub mod roles;
 pub mod runner;
 pub mod scenario;
+pub mod sweep;
+pub mod turn_points;
 pub mod views;
+pub mod windows;
 
 pub use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
+pub use cluster::{Cluster, ClusterRecipe};
 pub use combine::{combine_doc, WorkerAxis};
 pub use cookie::{cookie_field, worker_ordinals};
+pub use harness::proxy_pair::{Instance, ProxyPair};
 pub use harness::{
-    FailoverHarness, PendingDrain, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER,
+    FailoverHarness, Fired, PendingDrain, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER,
     RULE_NO_CANCEL_AFTER_FINAL,
 };
+pub use incident::Incident;
+pub use roles::{Cause, Placement, Role};
 pub use runner::run_cell;
 pub use scenario::{Cell, DialogState, Event, Fault, Party, Recovery};
+pub use turn_points::{HeldTurn, Released, Turn, TurnAt, TurnPoint, TurnPoints};
 pub use views::{Belief, View, ViewLedger};
+pub use windows::{Strike, Tier, Transitional};
 
 /// Run one matrix cell as a differential transparency check: drive it clean
 /// (baseline) and with the failover injected (variant), assert the two external
@@ -70,11 +95,10 @@ pub fn assert_single_owner(nodes: &[&ReplicatedB2buaSut], call_ref: &str) {
     );
 }
 
-/// Count the CDRs whose `call_ref` matches across **every** node's CDR sink — the
-/// cross-cluster "exactly one CDR" tally (`§2` invariant #1). Today only per-node
-/// `cdr_records()` exists, so this folds them: `0` = the call's end-event was lost
-/// (the backup self-released without a CDR), `2` = double-billed (both nodes
-/// discharged). A correct teardown leaves exactly `1` *anywhere* in the cluster.
+/// Count the CDRs whose `call_ref` matches across **every** node's CDR sink. A
+/// teardown no incident touched inside the call's replication window leaves `1`
+/// *anywhere* in the cluster; a kill of the primary or a split may leave a second
+/// (ADR-0055 §5), and `0` is a lost CDR.
 pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
     nodes
         .iter()
@@ -91,13 +115,12 @@ pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
 pub const LEASE_OUTLIVING_THE_REPLICA_TTL: call_limiter::LimiterConfig =
     call_limiter::LimiterConfig { lease_sec: 3600 };
 
-/// **The universal "call terminated on the backup" post-condition** (TODO
-/// `FixCallTerminateOnBackup` §2). After the call ends and the cluster settles,
-/// *every* cell must hold all four invariants, regardless of which node served the
-/// terminal request and whatever the primary's fate:
+/// **The "call terminated on the backup" post-condition.** After the call ends and
+/// the cluster settles, a cell that kills no primary inside the call's replication
+/// window holds these invariants, whichever node served the terminal request:
 ///
-/// 1. **Exactly ONE CDR** for `call_ref` across all nodes (not zero = lost, not
-///    two = double-billed) — [`total_cdrs_for`].
+/// 1. **One CDR** for `call_ref` across all nodes (zero = lost; the second CDR
+///    ADR-0055 §5 accepts needs a kill inside the window) — [`total_cdrs_for`].
 /// 2. **The call is OVER** — no node serves it and no node holds a replica body,
 ///    so no later reboot can resurrect it, and both nodes' per-call memory is
 ///    clean ([`assert_call_fully_released`], which also asserts 0 serving owners).
@@ -115,27 +138,28 @@ pub async fn assert_call_fully_over(
 ) {
     // #2 — over everywhere (0 owners, no replica trace, memory clean).
     assert_call_fully_released(nodes, call_ref).await;
-    // #1 — exactly one CDR across the whole cluster.
+    // #1 — one CDR across the whole cluster.
     let cdrs = total_cdrs_for(nodes, call_ref);
     assert_eq!(
         cdrs, 1,
-        "expected EXACTLY ONE CDR for {call_ref} across the cluster (0 = lost / \
-         backup self-released without a CDR, 2 = double-billed); got {cdrs}",
+        "expected one CDR for {call_ref} across the cluster (0 = lost / backup \
+         self-released without a CDR, 2 = both nodes discharged); got {cdrs}",
     );
     // #3 — limiter released (drained to zero).
     let total = limiter.stats().current_total;
     assert_eq!(total, 0, "limiter set of {call_ref} not released: current_total = {total}");
 }
 
-/// **The StayDead post-condition** (ADR-0020 X3, Model Y): a call whose terminal was
-/// served on the backup while the primary CRASHED with its endpoint still in the
-/// backup's membership, and NEVER returned (past the replica TTL). The primary is
-/// the CDR authority of a call it has not departed from, so when it never reclaims
-/// the deferral the CDR is **lost** — the accepted double-failure (primary down AND
-/// never returns). But the periodic backup reap must still:
+/// **The StayDead post-condition** (ADR-0055 §5, ADR-0020 X3): a call whose terminal
+/// was served on the backup while the primary CRASHED with its endpoint still in the
+/// backup's membership, and NEVER returned (past the replica TTL). A copy whose
+/// primary is a member defers the CDR to it, so when the primary never reclaims the
+/// deferral the CDR is **lost** — the accepted double-failure (primary down AND
+/// never returns, with its endpoint never removed). The periodic backup reap must
+/// still:
 ///
 /// 1. **Write NO CDR** — exactly zero across the cluster ([`total_cdrs_for`] == 0).
-///    A `1` would mean the backup illegally discharged (the removed fallback).
+///    A `1` would mean the backup discharged a call its member primary owns.
 /// 2. **Release the limiter anyway** — the shared `CallStore`'s
 ///    `current_total == 0` (not leaked at ≥1 by skipping the release). This is
 ///    the auto-cleanup the contract requires.
@@ -163,6 +187,21 @@ pub async fn assert_call_lost_no_cdr(
         "limiter set of {call_ref} not released by the backup auto-cleanup: \
          current_total = {total}"
     );
+}
+
+/// A terminated call left exactly `cdrs` CDRs across `nodes` and nothing else:
+/// no node serves it or holds a replica of it, and every node's per-call memory
+/// is clean ([`assert_call_fully_released`]). `why` names the scenario's reason
+/// for that count. For a cluster without a limiter, or before its limiter check.
+pub async fn assert_call_ended(
+    nodes: &[&ReplicatedB2buaSut],
+    call_ref: &str,
+    cdrs: usize,
+    why: &str,
+) {
+    assert_call_fully_released(nodes, call_ref).await;
+    let got = total_cdrs_for(nodes, call_ref);
+    assert_eq!(got, cdrs, "{call_ref}: expected {cdrs} CDR(s) ({why}); got {got}");
 }
 
 /// **High-level cluster invariant**: a terminated call left **no trace anywhere** —

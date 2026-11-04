@@ -1,0 +1,11 @@
+schema: budget.v1
+name: proxy-reroute
+description: >-
+  A planned withdrawal of one front proxy's node: a rollout of the proxies
+  (each one drains, still forwarding, past its node's withdrawal) or a
+  restart of the node's BGP speakers (the proxy keeps running). No datagram
+  is lost, so no setup may fail; when the node announces again the routers
+  move a share of the flows back to it, and setups crossing that move may be
+  slower for about 2 s of offered rate (ADR-0056).
+setup_slow:
+  max_seconds: 2

@@ -71,7 +71,7 @@ impl Repeated {
 /// IS the message the RFC names rather than a re-composition of one. Opaque:
 /// the one outward operation yields the bytes and their destination, so no
 /// caller can parse, edit and re-emit them as a "repeat". Replicated with the
-/// call, so a takeover node keeps the obligation byte for byte.
+/// call, so a restored record keeps the obligation byte for byte.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetainedEmission {
     #[serde(with = "serde_bytes")]
@@ -129,6 +129,23 @@ impl RetainedEmission {
         }
         self.datagram = now.to_vec();
         true
+    }
+
+    /// Whether `other` is this emission at any rung of its ladder: what it
+    /// holds that a quiet turn's rung does not move.
+    pub fn same_at_rest(&self, other: &Self) -> bool {
+        let RetainedEmission { datagram, dest_host, dest_port, repeat, repeated } = self;
+        let same_repeat = match (repeat, &other.repeat) {
+            (Repeat::Paced { class, .. }, Repeat::Paced { class: other_class, .. }) => {
+                class == other_class
+            }
+            (r, o) => r == o,
+        };
+        *datagram == other.datagram
+            && *dest_host == other.dest_host
+            && *dest_port == other.dest_port
+            && *repeated == other.repeated
+            && same_repeat
     }
 
     /// How this emission is repeated.

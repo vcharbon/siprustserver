@@ -106,19 +106,59 @@ pub fn execute_rules(
     obligations: &ObligationSet,
 ) -> HandlerResult {
     let selection = select(rules, call, ctx);
-    for rule in selection.ranked {
+    if let Some(handled) = first_handling(&selection, call, ctx, exec, obligations) {
+        return handled;
+    }
+    let mut result = HandlerResult::new(call.clone());
+    note_absorbed(&mut result.effects, call, ctx, &selection.absorbed);
+    result
+}
+
+/// Run the evidence stage, then the rule chain: a message only a lost write
+/// explains is the evidence rules' alone (ADR-0055 §4), read before any rule
+/// of `rules` can see it. `copy_served` — another owner served the call — is
+/// the stage's own input; no rule of the chain reads it.
+pub fn execute_turn(
+    rules: &[RuleDefinition],
+    call: &Call,
+    ctx: &RuleContext,
+    copy_served: bool,
+    exec: &mut ActionExecutor,
+    obligations: &ObligationSet,
+) -> HandlerResult {
+    let evidence = crate::rules::evidence::evidence_rules(copy_served);
+    let selection = select(&evidence, call, ctx);
+    if let Some(handled) = first_handling(&selection, call, ctx, exec, obligations) {
+        return handled;
+    }
+    execute_rules(rules, call, ctx, exec, obligations)
+}
+
+/// The turn of the first ranked rule of `selection` that handles the event,
+/// or `None` when none does.
+fn first_handling(
+    selection: &Selection,
+    call: &Call,
+    ctx: &RuleContext,
+    exec: &mut ActionExecutor,
+    obligations: &ObligationSet,
+) -> Option<HandlerResult> {
+    for &rule in &selection.ranked {
         let Some(outcome) = (rule.handle)(ctx) else {
             continue;
         };
+        exec.turn.handled_by = Some(rule.id);
         if outcome.unrecoverable {
             let why = format!("read by rule {}", rule.id);
             crate::rules::relay::note_unrebuilt(call, &mut exec.turn.notes, &why);
-            return HandlerResult::new(call.clone());
+            return Some(HandlerResult::new(call.clone()));
         }
-        let before = call.clone();
+        let before = call;
         report_diagnostics(rule, call, &outcome);
         check_declared_effects(rule, &outcome.actions, call, &mut exec.turn.notes);
+        exec.turn.rule = Some(rule.id);
         let result = exec.execute(&outcome.actions, call, ctx);
+        exec.turn.rule = None;
         // The rule's OWN cursor move is checked against what the rule
         // produced — the projections, the terminal fold below and the
         // machine deactivation termination performs belong to the engine,
@@ -129,11 +169,11 @@ pub fn execute_rules(
                 CallModelState::Terminating | CallModelState::Terminated
             );
         let after = &result.call.sm_cursors;
-        check_declared_transition(rule, &before, after, torn_down, &mut exec.turn.notes);
+        check_declared_transition(rule, before, after, torn_down, &mut exec.turn.notes);
         let result = invariants::finalize(result);
         let mut enforced = invariants::enforce(
             obligations,
-            &before,
+            before,
             result,
             exec.now_ms,
             invariants::UnansweredCaller::Answer(&exec.config.minted_final_advertisement),
@@ -143,13 +183,11 @@ pub fn execute_rules(
         // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503
         // otherwise shows on a traced call as a `sip.out` with no matching
         // `call.transition`.
-        record_transitions(rule, &before, &enforced.call, exec.now_ms, &mut exec.turn.notes);
+        record_transitions(rule, before, &enforced.call, exec.now_ms, &mut exec.turn.notes);
         note_absorbed(&mut enforced.effects, call, ctx, &selection.absorbed);
-        return enforced;
+        return Some(enforced);
     }
-    let mut result = HandlerResult::new(call.clone());
-    note_absorbed(&mut result.effects, call, ctx, &selection.absorbed);
-    result
+    None
 }
 
 /// Count a fire the going-away gate absorbed: one effect per turn, naming

@@ -1,14 +1,16 @@
 //! The recv shards' shared routing state, and what is built over it: each
-//! shard's core, the health probe and the probe routes, all on ONE first
-//! worker view (ADR-0050 §11).
+//! shard's core, the health probe with the dead notifier, and the probe
+//! routes, all on ONE first worker view (ADR-0050 §3, §11).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sip_clock::Clock;
+use sip_ids::SigningKey;
 use sip_net::UdpEndpoint;
 use sip_proxy::cancel_lru::CancelBranchLru;
-use sip_proxy::health::{FirstView, HealthProbe, HealthProbeConfig};
+use sip_proxy::health::{DeadNotifier, FirstView, HealthProbe, HealthProbeConfig, WorkerReach};
 use sip_proxy::liveness::ShardPulse;
 use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::parse_refusals::ParseRefusals;
@@ -20,7 +22,8 @@ use sip_proxy::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::{ProxyAddr, ProxyCoreBuilder, ProxyMetrics, ProxyTraces, RoutingStrategy};
 use sip_txn::IdGen;
 
-use crate::readiness::{probes, ProxyProbes};
+use crate::external_face::FaceMonitor;
+use crate::readiness::{probes, ProbeSources, ProxyProbes};
 
 /// What every recv shard shares. Kernel flow hashing keeps one source on one
 /// shard, but a response, a CANCEL or a copy can reach another socket than
@@ -42,6 +45,8 @@ pub struct SharedRouting {
     pub pulse: Arc<ShardPulse>,
     /// The proxy's first worker view, which its health probe latches.
     pub first_view: Arc<FirstView>,
+    /// The last worker answer its health probe heard.
+    pub reach: Arc<WorkerReach>,
 }
 
 impl SharedRouting {
@@ -69,7 +74,8 @@ impl SharedRouting {
 
     /// The OPTIONS health probe over the worker pool on `endpoint`, writing
     /// health through `control` and load payloads into `observer`; it latches
-    /// the first view the shards and the probe routes read. Its misses are
+    /// the first view the shards and the probe routes read and stamps the
+    /// reach the fitness reads. Its misses are
     /// counted per peer (`sip_proxy_peer_failures_total`).
     pub fn health_probe(
         &self,
@@ -89,19 +95,59 @@ impl SharedRouting {
         )
         .with_metrics(self.metrics.clone())
         .with_first_view(self.first_view.clone())
+        .with_reach(self.reach.clone())
     }
 
-    /// The probe routes, read from the shards' pulse and the first view; a
-    /// shard stalled past `stall_ms` fails them all, `draining` fails `/readyz`.
-    pub fn probes(&self, draining: Arc<AtomicBool>, stall_ms: u64) -> ProxyProbes {
-        probes(
+    /// `probe` and the dead notifier on `notice` (ADR-0050 §3), signing with
+    /// `key`, run until either ends. With no key no dead verdict is told, and
+    /// the backups take a dead worker's calls over on the next message that
+    /// reaches them.
+    pub fn health(
+        &self,
+        probe: HealthProbe,
+        notice: Box<dyn UdpEndpoint>,
+        key: Option<SigningKey>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let (registry, clock, id_gen) =
+            (self.registry.clone(), self.clock.clone(), self.id_gen.clone());
+        let notifier = key.map(|key| DeadNotifier::new(notice, registry, key, clock, id_gen));
+        if notifier.is_none() {
+            tracing::warn!("PROXY_CLUSTER_KEY unset: no dead verdict is told to the workers");
+        }
+        async move {
+            match notifier {
+                Some(notifier) => tokio::select! {
+                    () = probe.run() => {}
+                    () = notifier.run() => {}
+                },
+                None => probe.run().await,
+            }
+        }
+    }
+
+    /// The probe routes, read from the shards' pulse, the first view, the
+    /// reach and `external_face`; a shard stalled past `stall_ms` fails them
+    /// all, `draining` fails `/readyz`, an unusable external face fails
+    /// `/readyz` and `/fitz`, and no worker answer within `isolation_window`
+    /// fails `/fitz`.
+    pub fn probes(
+        &self,
+        draining: Arc<AtomicBool>,
+        stall_ms: u64,
+        external_face: Option<Arc<FaceMonitor>>,
+        isolation_window: Duration,
+    ) -> ProxyProbes {
+        probes(ProbeSources {
             draining,
-            self.pulse.clone(),
-            self.clock.clone(),
+            pulse: self.pulse.clone(),
+            clock: self.clock.clone(),
             stall_ms,
-            self.registry.clone(),
-            self.first_view.clone(),
-        )
+            registry: self.registry.clone(),
+            first_view: self.first_view.clone(),
+            external_face,
+            reach: self.reach.clone(),
+            isolation_window,
+        })
     }
 }
 

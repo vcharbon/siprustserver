@@ -231,8 +231,20 @@ Proxy-Require: bogus-extension-xyz\r\n\
 Content-Length: 0\r\n\r\n"
     ));
     core.route_request_from(&inv, src()).await; // → self-generated 420
+    let SipMessage::Request(req) = &inv else { unreachable!() };
+    let to_tag = core.refusals.to_tag(req);
+    let ack = parse_req(&format!(
+        "ACK sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKinv;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>;tag={to_tag}\r\n\
+Call-ID: absorb-1@test\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\r\n"
+    ));
 
-    let outcome = core.route_request_from(&ack("z9hG4bKinv", ""), src()).await;
+    let outcome = core.route_request_from(&ack, src()).await;
     assert_eq!(
         outcome.target, None,
         "the ACK to a self-generated non-2xx final must be absorbed at this hop"

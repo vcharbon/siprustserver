@@ -21,7 +21,7 @@ impl ActionExecutor<'_> {
     /// `leg_id`'s dialog (RFC 3261 §9.1). Unlike [`Self::cancel_to_leg`] /
     /// `CancelLeg` this touches NO leg state or disposition — the established
     /// dialog and the call stay up; only the renegotiation ends. The CANCEL is
-    /// built from the dialog's cached `pending_invite_txn` handle, so it reuses
+    /// built from the INVITE the dialog's record holds, so it reuses
     /// the re-INVITE's branch, echoes its Route set (`generate_cancel`), and
     /// goes to the re-INVITE's cached wire destination — the same next-hop
     /// consistency as the initial-INVITE `cancel_to_leg` path. The matching
@@ -60,12 +60,7 @@ impl ActionExecutor<'_> {
             Settle::Ending,
         );
         fx.outbound.push(cancel.effect);
-        *call = call::helpers::cancel_pending_request(
-            call.clone(),
-            leg_id,
-            &cancel.t_id,
-            outbound_cseq,
-        );
+        call::helpers::cancel_relay(call, leg_id, &cancel.t_id, outbound_cseq);
         self.retire(call, fx, Scope::Transaction { leg_id, cseq: outbound_cseq });
     }
 
@@ -94,11 +89,10 @@ impl ActionExecutor<'_> {
         let Some((_, dialog)) = find_pending_dialog(call, leg_id, outbound_cseq) else {
             return;
         };
-        let Some(pending) = call::helpers::find_pending_request(&dialog, outbound_cseq).cloned()
-        else {
+        let Some(pending) = call::helpers::find_relay(&dialog, outbound_cseq).cloned() else {
             return;
         };
-        if pending.cancelled || !pending.method.eq_ignore_ascii_case("INVITE") {
+        if pending.cancelled || pending.method != "INVITE" {
             return;
         }
         let refused = |what: &str| {
@@ -109,10 +103,13 @@ impl ActionExecutor<'_> {
                 "re-INVITE reject dropped — {what}"
             );
         };
-        // §18.2.2: the final goes to the originator's top Via sent-by; one no
-        // reader accepts names no destination (see `relay_response`).
-        let Some(dest) =
-            pending.source_vias.first().and_then(|v| super::snapshot_answer::via_sent_by(v))
+        // §18.2.2: the final goes to the originator's top Via response
+        // target; one no reader accepts names no destination (see
+        // `relay_response`).
+        let Some(dest) = pending
+            .source_vias
+            .first()
+            .and_then(|v| super::snapshot_answer::via_response_target(v))
         else {
             refused("the originator's top Via does not read, so it names no destination");
             return;
@@ -126,8 +123,7 @@ impl ActionExecutor<'_> {
             refused("the originator's request lines make no response");
             return;
         };
-        let originator =
-            call::helpers::get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
+        let originator = super::settle::relay_originator(call, leg_id, &dialog.id());
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Response(reject),
             mode: OutboundTxnMode::ServerResponse,
@@ -148,20 +144,21 @@ struct PendingReinviteCancel {
 }
 
 /// Build the transaction-scoped CANCEL of the relayed re-INVITE pending on
-/// `leg_id`'s dialog under `outbound_cseq` (RFC 3261 §9.1), from the dialog's
-/// cached `pending_invite_txn` handle: the re-INVITE's own branch, Route set
-/// and wire destination. `None` where no such transaction can be CANCELled —
-/// no pending dialog, no cached handle, an unreadable one, or a handle naming
-/// another CSeq than the snapshot (the glare guard forbids a second in-flight
-/// INVITE on one dialog, and a mismatched transaction is never CANCELled).
+/// `leg_id`'s dialog under `outbound_cseq` (RFC 3261 §9.1), from the INVITE
+/// the dialog's record holds: the re-INVITE's own branch, Route set and wire
+/// destination. `None` where no such transaction can be CANCELled — no
+/// pending dialog, no image, an unreadable one, or one naming another CSeq
+/// than the relay (the glare guard forbids a second in-flight INVITE on one
+/// dialog, and a mismatched transaction is never CANCELled).
 fn pending_reinvite_cancel(
     call: &Call,
     leg_id: &str,
     outbound_cseq: i64,
 ) -> Option<PendingReinviteCancel> {
     let (t_id, dialog) = find_pending_dialog(call, leg_id, outbound_cseq)?;
-    let handle = dialog.pending_invite_txn.as_ref()?;
-    let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.original_invite) else {
+    let leg = call::helpers::find_leg(call, leg_id)?;
+    let handle = call::helpers::sent_invite_image(leg, &dialog)?;
+    let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.image) else {
         return None;
     };
     if req.cseq().seq() as i64 != outbound_cseq {

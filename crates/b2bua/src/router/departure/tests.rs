@@ -1,20 +1,21 @@
 //! The departure sweep over a wired core: of a departed peer's backup
 //! partition it takes over exactly the calls with an INVITE transaction to
-//! serve and discharges the ended ones, and an
-//! undecided one among them is answered 503 through the caller's INVITE
-//! transaction, or settled with nothing on the wire when that transaction's
-//! branch is already another call's here.
+//! serve, and the ending ones with any transaction to serve, and discharges
+//! the ended ones and the ending ones with nothing left to serve; an
+//! undecided one among them has its decision asked again, or is settled with
+//! nothing on the wire when its caller CANCELed the setup or its INVITE
+//! transaction's branch is already another call's here.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use call::{Call, CallBodyCodec, CallModelState, LegState, MsgpackCodec};
+use call::{Call, CallModelState, LegState, MsgpackCodec};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 
 use b2bua_sdk::event::CallEvent;
 
-use super::{sweep, take_over_departed, take_over_one, Swept};
+use super::{sweep, take_over_departed, take_over_one, take_over_read_dead, Cause, Swept};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::repl::ReplicatingCallStore;
@@ -32,7 +33,7 @@ fn born(cid: &str) -> Call {
 /// A call whose caller was answered and that has nothing in flight.
 fn quiet(cid: &str) -> Call {
     let mut call = born(cid);
-    call.a_leg.invite_final_sent = Some(200);
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     call
 }
@@ -40,14 +41,15 @@ fn quiet(cid: &str) -> Call {
 /// A call that already ended.
 fn ended(cid: &str) -> Call {
     let mut call = born(cid);
-    call.a_leg.invite_final_sent = Some(486);
+    *call.a_leg.invite_final_sent_mut() = Some(486);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
     call.state = CallModelState::Terminated;
-    call::helpers::record_termination(call, 0, call::TerminationCause::RemoteFinal, None)
+    call::helpers::record_termination(&mut call, 0, call::TerminationCause::RemoteFinal, None);
+    call
 }
 
 async fn put(store: &ReplicatingCallStore, call: &Call) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     store
         .put_call(BAK, "w0", &call.call_ref, body, &[], 60_000, 1, 0, &PutOpts::default())
         .await
@@ -57,7 +59,7 @@ async fn put(store: &ReplicatingCallStore, call: &Call) {
 /// The `w0` backup body of `call_ref` this node holds, decoded.
 async fn element(store: &ReplicatingCallStore, call_ref: &str) -> Call {
     let body = store.get_call(BAK, "w0", call_ref).await.unwrap().expect("the element");
-    MsgpackCodec::new().decode(&body).unwrap()
+    crate::store::envelope::decode(&MsgpackCodec::new(), &body).unwrap().call
 }
 
 /// The status lines `caller` receives within `within`.
@@ -85,36 +87,119 @@ async fn a_departed_peers_in_flight_calls_are_taken_over_and_its_ended_calls_dis
     take_over_departed(ctx, "w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
-    assert_eq!(lines, ["SIP/2.0 503 Service Unavailable"], "the undecided caller's final");
+    assert!(lines.is_empty(), "the undecided caller is refused nothing: {lines:?}");
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "one call taken over");
     assert_eq!(n.metrics.repl_takeover_refused_terminated_total(), 0, "an ended call unread");
     assert!(ctx.state.peek(&quiet.call_ref).is_none(), "the quiet call stays reactive");
-    assert!(ctx.state.peek(&undecided.call_ref).is_none(), "the settled copy released itself");
-    assert_eq!(
-        element(&n.store, &undecided.call_ref).await.state,
-        CallModelState::Terminated,
-        "the settled call's end is kept for its primary",
-    );
+    let copy = ctx.state.peek(&undecided.call_ref).expect("the undecided call's copy serves it");
+    assert!(!copy.b_legs.is_empty(), "its decision was asked again and the callee dialled");
     let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|r| r.call_ref).collect();
-    assert_eq!(
-        cdrs,
-        [ended.call_ref.clone()],
-        "the ended call is discharged; the settled copy defers"
-    );
+    assert_eq!(cdrs, [ended.call_ref.clone()], "the ended call is discharged");
     let held = n.store.get_call(BAK, "w0", &ended.call_ref).await.unwrap();
     assert!(held.is_none(), "the discharged call is deleted");
+}
+
+/// On a proxy's dead verdict an undecided call is taken over and its decision
+/// asked again, while an ended call is left to the peer, which may live
+/// behind a partition; nothing is refused.
+#[tokio::test(start_paused = true)]
+async fn a_dead_verdict_asks_an_undecided_calls_decision_again_and_leaves_an_ended_one() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let (undecided, ended) = (born("undecided"), ended("ended"));
+    for call in [&undecided, &ended] {
+        put(&n.store, call).await;
+    }
+
+    assert!(take_over_read_dead(ctx, "w0"), "this node backs calls of w0");
+
+    let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
+    assert!(lines.is_empty(), "nothing reaches the caller: {lines:?}");
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "the undecided call taken over");
+    let copy = ctx.state.peek(&undecided.call_ref).expect("the undecided call's copy serves it");
+    assert!(!copy.b_legs.is_empty(), "its decision was asked again and the callee dialled");
+    assert!(n.cdr.snapshot().is_empty(), "nothing discharged");
+    assert_eq!(element(&n.store, &ended.call_ref).await.state, CallModelState::Terminated);
+    assert!(!take_over_read_dead(ctx, "w9"), "no call of w9 is backed here");
+}
+
+/// A call whose ending the departed peer finished with its last write lost:
+/// `Terminating`, nothing left to serve. No node is left to end it: the sweep
+/// discharges it — one CDR, the call deleted — with nothing on the wire.
+#[tokio::test(start_paused = true)]
+async fn an_ending_call_with_nothing_left_to_serve_is_discharged() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let mut ending = quiet("ending");
+    ending.a_leg.own_tag = Some("staged".into());
+    ending.state = CallModelState::Terminating;
+    put(&n.store, &ending).await;
+
+    take_over_departed(ctx, "w0");
+
+    let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
+    assert!(lines.is_empty(), "nothing on the wire: {lines:?}");
+    let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|r| r.call_ref).collect();
+    assert_eq!(cdrs, [ending.call_ref.clone()], "the ending call's one CDR");
+    let held = n.store.get_call(BAK, "w0", &ending.call_ref).await.unwrap();
+    assert!(held.is_none(), "the discharged call is deleted");
+    assert!(ctx.state.peek(&ending.call_ref).is_none(), "no live copy is left");
     assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
+}
+
+/// A call whose ending the departed peer had begun, its own BYE to the caller
+/// sent and not yet answered: the BYE is a transaction to serve, whatever its
+/// deadline. The sweep takes the call over and the BYE goes again under its
+/// branch; nothing is discharged while it is in flight (ADR-0055 §5).
+#[tokio::test(start_paused = true)]
+async fn an_ending_call_whose_bye_is_in_flight_is_taken_over_not_discharged() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let mut ending = quiet("bye-in-flight");
+    ending.a_leg.own_tag = Some("staged".into());
+    ending.state = CallModelState::Terminating;
+    let at = src();
+    let bye = format!(
+        "BYE sip:alice@{at} SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.2:5080;branch=z9hG4bK-own-bye\r\n\
+         Max-Forwards: 70\r\nFrom: <sip:bob@127.0.0.2>;tag=staged\r\n\
+         To: <sip:alice@{at}>;tag=alicetag\r\nCall-ID: bye-in-flight@x\r\nCSeq: 2 BYE\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    let sent = call::SentRequest {
+        branch: "z9hG4bK-own-bye".into(),
+        image: bye.into_bytes(),
+        destination: call::HostPort { host: at.ip().to_string(), port: at.port() },
+    };
+    let deadline = ctx.clock.now_ms() + 30_000;
+    let dialog = ending.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    dialog.requests.push(call::RequestRecord::own("BYE", 2, sent, deadline, Default::default()));
+    put(&n.store, &ending).await;
+
+    take_over_departed(ctx, "w0");
+
+    let lines = heard(caller.as_ref(), Duration::from_millis(700)).await;
+    assert!(lines.iter().any(|l| l.starts_with("BYE ")), "the BYE in flight goes again: {lines:?}");
+    assert!(n.cdr.snapshot().is_empty(), "no CDR while the BYE is in flight");
 }
 
 /// A call its copy ends while its primary is out of the membership set has no
 /// primary to discharge it: the copy writes the one CDR and deletes the call.
+/// The copy ends an undecided call whose caller CANCELed the setup, with
+/// nothing on the wire.
 #[tokio::test(start_paused = true)]
 async fn a_call_ended_while_its_primary_is_departed_is_discharged_by_its_copy() {
     let net = SimulatedSignalingNetwork::new(1);
     let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
     let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
     let ctx = n.core.router_ctx();
-    let undecided = born("departed-primary");
+    let mut undecided = born("departed-primary");
+    undecided.setup_cancelled = true;
     put(&n.store, &undecided).await;
     n.membership.add(topology::Peer::new("w0", "w0"));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -122,7 +207,7 @@ async fn a_call_ended_while_its_primary_is_departed_is_discharged_by_its_copy() 
     n.membership.remove("w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(500)).await;
-    assert_eq!(lines, ["SIP/2.0 503 Service Unavailable"], "the undecided caller's final");
+    assert!(lines.is_empty(), "the cancelled setup ends with nothing sent: {lines:?}");
     let cdrs = n.cdr.snapshot();
     assert_eq!(cdrs.len(), 1, "the copy writes the call's CDR");
     assert_eq!(cdrs[0].call_ref, undecided.call_ref);
@@ -186,11 +271,7 @@ async fn the_router_serves_its_own_calls_while_a_departed_partition_is_swept() {
     let own = invite("w1", "w0", "own");
     let own_ref =
         build_initial_call(&own, src(), &config, &mut sip_ids::TurnIds::fixed(1), 0).call_ref;
-    let event = CallEvent::Sip {
-        message: Box::new(sip_message::SipMessage::Request(own)),
-        src: src(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(sip_message::SipMessage::Request(own), src());
     ctx.reentry_tx.send(event).unwrap();
     let mut rounds = 0;
     while ctx.state.peek(&own_ref).is_none() {
@@ -270,11 +351,11 @@ async fn a_takeover_that_panics_costs_its_call_only_and_is_counted() {
     let task = tokio::spawn({
         let ctx = ctx.clone();
         async move {
-            sweep(&ctx, "w0", refs, move |ctx, call_ref| {
+            sweep(&ctx, "w0", Cause::Departed, refs, move |ctx, call_ref| {
                 let bad = call_ref == bad_ref;
                 async move {
                     assert!(!bad, "the takeover of this call panics");
-                    take_over_one(&ctx, &call_ref).await
+                    take_over_one(&ctx, &call_ref, Cause::Departed).await
                 }
             })
             .await;
@@ -282,8 +363,7 @@ async fn a_takeover_that_panics_costs_its_call_only_and_is_counted() {
     });
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
-    let answered = ["SIP/2.0 503 Service Unavailable", "SIP/2.0 503 Service Unavailable"];
-    assert_eq!(lines, answered, "both other undecided callers are answered");
+    assert!(lines.is_empty(), "no undecided caller is refused: {lines:?}");
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 2, "the other two calls taken over");
     assert_eq!(n.metrics.departure_takeover_panics_total(), 1, "the panic is counted");
     assert!(task.await.is_ok(), "the sweep itself ran to its end");

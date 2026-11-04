@@ -28,15 +28,15 @@ PRODUCT_VALUES: dict[str, Any] = {
             "extraEnv": [{"name": "NODE_NAME",
                           "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}],
             "resources": {"requests": {"cpu": "1"}, "limits": {"memory": "3Gi"}},
+            "networkPolicy": {"proxyNodeCidrs": ["172.20.0.0/17"]},
         },
         "proxy": {
             "recvShards": 4,
             "selfGate": {"cpsRate": 1000, "cpsSize": 500},
             "resources": {"requests": {"cpu": "2", "memory": "64Mi"}},
-            "keepalived": {
-                "extraVirtualIps": [{"address": "192.168.60.240", "interface": "eth1"}],
-                "extraTrackScripts": [{"name": "chk_relay", "script": "/usr/bin/relay-ok"}],
-            },
+            "hmac": {"existingSecret": "product-cookie"},
+            "nodeSelector": {"tier": "edge"},
+            "routeGuard": {"peers": ["172.20.0.1", "192.168.60.1"]},
             "extraContainers": [{
                 "name": "media-relay",
                 "image": "media-relay:0.1",
@@ -105,17 +105,12 @@ class DownstreamChart(unittest.TestCase):
         self.assertNotIn("B2BUA_KEEPALIVE_SEC", e)
         self.assertEqual(c["env"][-1]["name"], "NODE_NAME")
 
-    def test_a_media_relay_rides_the_proxy_pod_on_its_own_floating_address(self) -> None:
+    def test_a_media_relay_rides_the_proxy_pod_on_the_external_plane(self) -> None:
         spec = pod_spec(self.proxy())
         self.assertEqual([c["name"] for c in spec["containers"]],
-                         ["sip-front-proxy", "keepalived", "media-relay"])
-        self.assertIn({"name": "relay-state", "emptyDir": {}}, spec["volumes"])
+                         ["sip-front-proxy", "route-guard", "media-relay"])
+        self.assertEqual(spec["volumes"], [{"name": "relay-state", "emptyDir": {}}])
         self.assertTrue(spec["hostNetwork"])
-        self.assertEqual(env(container(self.proxy(), "vip-loopback"))["EXTRA_VIPS"],
-                         "192.168.60.240")
-        conf = find(self.docs, "ConfigMap", "sip-front-proxy-keepalived")["data"]["keepalived.conf"]
-        self.assertIn("192.168.60.240 dev eth1", conf)
-        self.assertIn("vrrp_script chk_relay {", conf)
 
     def test_the_proxy_is_sized_for_the_product(self) -> None:
         c = container(self.proxy(), "sip-front-proxy")

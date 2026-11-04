@@ -13,19 +13,19 @@ fn the_limiter_refresh_and_release_queue_bounds_are_checked() {
         c.validate()
     };
     let e = with(|c| c.limiter_refresh_sec = 0).expect_err("zero refresh period");
-    assert!(e.contains("limiter_refresh_sec=0"), "{e}");
+    assert!(e.contains("LIMITER_REFRESH_SECONDS=0"), "{e}");
     let e = with(|c| c.limiter_refresh_batch_ms = 0).expect_err("zero tick");
-    assert!(e.contains("limiter_refresh_batch_ms=0"), "{e}");
+    assert!(e.contains("LIMITER_REFRESH_BATCH_MS=0"), "{e}");
     let e = with(|c| c.limiter_refresh_batch_ms = 40_000).expect_err("tick at the period");
-    assert!(e.contains("limiter_refresh_batch_ms=40000"), "{e}");
+    assert!(e.contains("LIMITER_REFRESH_BATCH_MS=40000"), "{e}");
     assert!(
         with(|c| c.limiter_refresh_sec = 600).is_ok(),
         "the lease is the limiter's: boot does not know it"
     );
     let e = with(|c| c.limiter_refresh_batch_max = 0).expect_err("zero batch");
-    assert!(e.contains("limiter_refresh_batch_max=0"), "{e}");
+    assert!(e.contains("LIMITER_REFRESH_BATCH_MAX=0"), "{e}");
     let e = with(|c| c.limiter_release_queue_cap = 0).expect_err("zero cap");
-    assert!(e.contains("limiter_release_queue_cap=0"), "{e}");
+    assert!(e.contains("LIMITER_RELEASE_QUEUE_CAP=0"), "{e}");
 }
 
 /// A refresh tick past `i64::MAX` ms is past every refresh period, not a
@@ -34,7 +34,7 @@ fn the_limiter_refresh_and_release_queue_bounds_are_checked() {
 fn a_refresh_tick_beyond_i64_is_refused() {
     let c = B2buaConfig { limiter_refresh_batch_ms: u64::MAX, ..B2buaConfig::default() };
     let e = c.validate().expect_err("a tick past i64::MAX ms");
-    assert!(e.contains(&format!("limiter_refresh_batch_ms={}", u64::MAX)), "{e}");
+    assert!(e.contains(&format!("LIMITER_REFRESH_BATCH_MS={}", u64::MAX)), "{e}");
 }
 
 /// New calls hold half the handler permits and stop 5 % below the queue
@@ -59,7 +59,7 @@ fn the_new_call_thresholds_are_shares_of_their_pools() {
     }
     let c = B2buaConfig { new_call_queue_headroom_percent: 100, ..Default::default() };
     let e = c.validate().expect_err("a headroom of the whole cap");
-    assert!(e.contains("new_call_queue_headroom_percent=100"), "{e}");
+    assert!(e.contains("B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT=100"), "{e}");
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn rejects_nonpositive_or_nan_panic_elu() {
     for bad in [0.0, -0.5, f64::NAN, f64::INFINITY] {
         let c = B2buaConfig { overload_panic_elu_threshold: bad, ..Default::default() };
         let e = c.validate().expect_err("non-positive/NaN panic-ELU must be rejected");
-        assert!(e.contains("overload_panic_elu_threshold"), "msg was: {e}");
+        assert!(e.contains("B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD"), "msg was: {e}");
     }
 }
 
@@ -85,7 +85,7 @@ fn allows_panic_elu_at_or_above_one_as_disable() {
 fn rejects_zero_cps_rate_when_gate_enabled() {
     let c = B2buaConfig { cps_bucket_size: 1000, cps_bucket_rate: 0, ..Default::default() };
     let e = c.validate().expect_err("zero refill with gate on must be rejected");
-    assert!(e.contains("cps_bucket_rate"), "msg was: {e}");
+    assert!(e.contains("B2BUA_CPS_BUCKET_RATE"), "msg was: {e}");
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn rejects_setup_deadline_at_or_above_the_txn_bound() {
         ..Default::default()
     };
     let e = c.validate().expect_err("setup >= txn bound must be rejected");
-    assert!(e.contains("setup_timeout_ms"), "msg was: {e}");
+    assert!(e.contains("B2BUA_SETUP_TIMEOUT_MS"), "msg was: {e}");
 }
 
 #[test]
@@ -114,16 +114,15 @@ fn rejects_txn_bound_outside_the_supported_range() {
         let c =
             B2buaConfig { invite_txn_timeout_sec: bad, setup_timeout_ms: 0, ..Default::default() };
         let e = c.validate().expect_err("out-of-range invite_txn_timeout_sec must be rejected");
-        assert!(e.contains("invite_txn_timeout_sec"), "msg was: {e}");
+        assert!(e.contains("B2BUA_INVITE_TXN_TIMEOUT_SEC"), "msg was: {e}");
     }
 }
 
 #[test]
 fn first_response_bound_is_a_deadline_between_two_rungs_and_timer_b() {
-    // Default is Timer B itself: no deviation until a deployment asks for
-    // one.
-    assert_eq!(B2buaConfig::default().invite_first_response_timeout_sec, 32);
-    assert_eq!(B2buaConfig::default().invite_first_response_timeout_ms(), 32_000);
+    // Default: three re-sends, then the hop is given up.
+    assert_eq!(B2buaConfig::default().invite_first_response_timeout_sec, 5);
+    assert_eq!(B2buaConfig::default().invite_first_response_timeout_ms(), 5_000);
     // 1 s would send the INVITE effectively once; 33 s is above the RFC
     // value the class already gives up at.
     for bad in [1, 33, 0, -5] {
@@ -131,7 +130,7 @@ fn first_response_bound_is_a_deadline_between_two_rungs_and_timer_b() {
         let e = c
             .validate()
             .expect_err("out-of-range invite_first_response_timeout_sec must be rejected");
-        assert!(e.contains("invite_first_response_timeout_sec"), "msg was: {e}");
+        assert!(e.contains("B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC"), "msg was: {e}");
     }
     // The floor (two re-sends) and the ceiling (Timer B) are both allowed.
     for ok in [2, 5, 32] {
@@ -140,9 +139,9 @@ fn first_response_bound_is_a_deadline_between_two_rungs_and_timer_b() {
         assert_eq!(c.invite_first_response_timeout_ms(), ok as u64 * 1000);
     }
     // A harness config that writes a non-positive value anyway arms the
-    // Timer B default, never a degenerate bound.
+    // default, never a degenerate bound.
     let c = B2buaConfig { invite_first_response_timeout_sec: 0, ..Default::default() };
-    assert_eq!(c.invite_first_response_timeout_ms(), 32_000);
+    assert_eq!(c.invite_first_response_timeout_ms(), 5_000);
 }
 
 #[test]
@@ -205,7 +204,7 @@ fn rejects_explicit_reaper_idle_window_at_or_under_the_txn_bound() {
         ..Default::default()
     };
     let e = c.validate().expect_err("an idle window a ringing call can outlive must be rejected");
-    assert!(e.contains("invite_txn_timeout_sec"), "msg was: {e}");
+    assert!(e.contains("B2BUA_INVITE_TXN_TIMEOUT_SEC"), "msg was: {e}");
     let ok = B2buaConfig { reaper_idle_max_sec: 401, ..c };
     assert!(ok.validate().is_ok());
 }
@@ -217,7 +216,7 @@ fn rejects_a_nonpositive_ack_deadline() {
     for bad in [0, -5] {
         let c = B2buaConfig { ack_timeout_sec: bad, ..Default::default() };
         let e = c.validate().expect_err("a non-positive ACK deadline must be rejected");
-        assert!(e.contains("ack_timeout_sec"), "msg was: {e}");
+        assert!(e.contains("B2BUA_ACK_TIMEOUT_SEC"), "msg was: {e}");
     }
     assert!(B2buaConfig { ack_timeout_sec: 1, ..Default::default() }.validate().is_ok());
 }
@@ -253,8 +252,6 @@ fn capacity_ceilings_are_off_by_default_and_validate() {
         calls: Ceilings { normal: Some(10), emergency: Some(12) },
         transactions: Ceilings { normal: Some(100), emergency: None },
         rss_bytes: Ceilings { normal: None, emergency: Some(1 << 30) },
-        backup_calls: Some(10),
-        backup_rss_bytes: Some(1 << 29),
     };
     assert_eq!(with_capacity(ok).validate(), Ok(()));
 }
@@ -266,7 +263,7 @@ fn an_emergency_ceiling_below_the_normal_one_is_refused() {
         ..Default::default()
     });
     let err = c.validate().unwrap_err();
-    assert!(err.contains("capacity.calls"), "{err}");
+    assert!(err.contains("B2BUA_MAX_CALLS_EMERGENCY"), "{err}");
 }
 
 #[test]
@@ -283,20 +280,16 @@ fn with_the_reaper_off_the_lifetime_message_cap_is_not_checked() {
 fn a_lifetime_message_cap_of_zero_is_refused() {
     let c = B2buaConfig { max_messages_per_call_lifetime: 0, ..Default::default() };
     let err = c.validate().unwrap_err();
-    assert!(err.contains("max_messages_per_call_lifetime"), "{err}");
+    assert!(err.contains("B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME"), "{err}");
 }
 
 #[test]
 fn a_zero_ceiling_is_refused() {
-    for capacity in [
-        CapacityConfig {
-            rss_bytes: Ceilings { normal: Some(0), emergency: None },
-            ..Default::default()
-        },
-        CapacityConfig { backup_calls: Some(0), ..Default::default() },
-    ] {
-        assert!(with_capacity(capacity).validate().is_err(), "{capacity:?}");
-    }
+    let capacity = CapacityConfig {
+        rss_bytes: Ceilings { normal: Some(0), emergency: None },
+        ..Default::default()
+    };
+    assert!(with_capacity(capacity).validate().is_err(), "{capacity:?}");
 }
 
 #[test]
@@ -337,4 +330,36 @@ fn an_empty_glare_retry_after_range_is_refused() {
         ..B2buaConfig::default()
     };
     assert!(c.validate().is_ok(), "{:?}", c.validate());
+}
+
+/// A config built in code meets the event-queue gate's relations at boot:
+/// every bound positive, each accept bound below its refusal bound, the
+/// refusal depth within the queue, the interval below the hold.
+#[test]
+fn the_event_queue_gate_relations_are_checked() {
+    let with =
+        |gate: EventQueueGateConfig| B2buaConfig { event_queue_gate: gate, ..Default::default() };
+    let d = EventQueueGateConfig::default();
+    assert_eq!(d.validate(), Ok(()));
+    let refused = [
+        EventQueueGateConfig { refuse_interval_ms: 0, ..d },
+        EventQueueGateConfig { accept_depth: d.refuse_depth, ..d },
+        EventQueueGateConfig { accept_delay_ms: d.refuse_delay_ms, ..d },
+        EventQueueGateConfig { refuse_interval_ms: d.accept_hold_ms, ..d },
+        EventQueueGateConfig { refuse_depth: EVENT_QUEUE_CAPACITY + 1, ..d },
+    ];
+    for gate in refused {
+        let err = with(gate).validate().unwrap_err();
+        assert!(err.starts_with("B2BUA_EVENT_QUEUE_"), "{gate:?}: {err}");
+    }
+    assert_eq!(
+        EventQueueGateConfig { refuse_interval_ms: d.accept_hold_ms, ..d }.validate(),
+        Err(GateViolation::NotBelow {
+            low: GateBound::RefuseInterval,
+            high: GateBound::AcceptHold,
+            why: "a refusal would end before a delay that persists could trip it again",
+        })
+    );
+    let at_the_bound = EventQueueGateConfig { refuse_depth: EVENT_QUEUE_CAPACITY, ..d };
+    assert_eq!(with(at_the_bound).validate(), Ok(()), "the queue's bound is reachable");
 }

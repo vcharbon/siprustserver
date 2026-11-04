@@ -85,6 +85,18 @@ impl NameAddr {
         Self::parse_as(raw, AddrForm::NameAddrOrSpec, UriRole::Target)
     }
 
+    /// Read a target stated outside a header line, bare or as a name-addr:
+    /// text that reads whole as a URI is that URI, so a `;` in its user part
+    /// stays there (RFC 3261 §25.1); any other text is read by
+    /// [`parse`](Self::parse) (angle brackets, a display name, header
+    /// parameters).
+    pub fn parse_uri_or_name_addr(raw: &SipStr) -> Result<Self, SipParseError> {
+        match Uri::parse(raw) {
+            Ok(uri) => Ok(Self::new(uri)),
+            Err(_) => Self::parse(raw),
+        }
+    }
+
     /// Read one address value whole by the RFC 3261 §25.1 grammar:
     /// `name-addr = [ display-name ] LAQUOT addr-spec RAQUOT`, a display name
     /// being a quoted-string or tokens separated by LWS, the addr-spec read by
@@ -373,5 +385,33 @@ mod tests {
     #[test]
     fn an_unclosed_angle_bracket_is_an_error() {
         assert!(NameAddr::parse(&SipStr::owned("<sip:a@h")).is_err());
+    }
+
+    // RFC 3261 §20: a URI holding a `;` is bracketed in a header; inside the
+    // brackets it reads whole, and a bare addr-spec ends at its first `;`.
+    #[test]
+    fn a_bracketed_address_keeps_a_semicolon_user_part_a_bare_one_does_not() {
+        let target = "sip:+33612345678;foo=bar@192.0.2.10:5070";
+        let bracketed = parse(&format!("<{target}>;expires=60"));
+        assert_eq!(bracketed.uri().to_string(), target);
+        assert_eq!(bracketed.uri().host_port(), ("192.0.2.10", 5070));
+        let bare = NameAddr::parse(&SipStr::owned(target));
+        assert!(bare.map_or(true, |addr| addr.uri().to_string() != target));
+    }
+
+    /// A target stated outside a header line reads whole when it is a URI and
+    /// as a name-addr otherwise.
+    #[test]
+    fn a_stated_target_reads_bare_or_bracketed() {
+        let target = "sip:+33612345678;foo=bar@192.0.2.10:5070;user=phone";
+        let read = |s: &str| NameAddr::parse_uri_or_name_addr(&SipStr::owned(s)).unwrap();
+        let bare = read(target);
+        assert_eq!(bare.uri().to_string(), target);
+        assert!(bare.params().is_empty());
+        let bracketed = read(&format!("\"Bob\" <{target}>;q=0.5"));
+        assert_eq!(bracketed.uri().to_string(), target);
+        assert_eq!(bracketed.display(), Some("Bob"));
+        assert_eq!(bracketed.params().value("q"), Some("0.5"));
+        assert!(NameAddr::parse_uri_or_name_addr(&SipStr::owned("<sip:a@h")).is_err());
     }
 }

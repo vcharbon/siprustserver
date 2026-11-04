@@ -143,8 +143,9 @@ impl Via {
 
     /// The address a response to this hop is actually sent to: `received` (and
     /// an observed `rport`) override the sent-by (RFC 3261 §18.2.2, RFC 3581).
+    /// A `received` that is no IP address (§25.1) is no target.
     pub fn response_target(&self) -> (&str, u16) {
-        let host = self.received().unwrap_or_else(|| self.host());
+        let host = self.received().filter(|r| ip_host(r).is_some()).unwrap_or_else(|| self.host());
         let port = match self.rport() {
             Some(Rport::Observed(p)) => p,
             _ => self.sent_by.port_or_default(),
@@ -181,13 +182,13 @@ impl Via {
 
     /// Stamp what the receiving side observed (RFC 3261 §18.2.1, RFC 3581 §4):
     /// `received` is the source address whenever it differs from the sent-by
-    /// host, the sender asked for `rport` (even when they are equal), or the
-    /// hop already carries a `received`, which is the sender's own writing and
-    /// is never kept; `rport` is the source port when the sender asked for it.
+    /// host, the hop carries `rport` (even when they are equal), or the hop
+    /// already carries a `received`; `rport` is the source port whenever the
+    /// hop carries one. A value the sender wrote in either is never kept.
     /// Two IP literals differ as addresses, an IPv4-mapped IPv6 address being
     /// its IPv4 address; anything else as text.
     pub fn stamped_from(mut self, source_host: &str, source_port: u16) -> Self {
-        let rport_asked = matches!(self.rport(), Some(Rport::Requested));
+        let rport_asked = self.params.get(RPORT.as_str()).is_some();
         let same_host = match (ip_host(self.host()), ip_host(source_host)) {
             (Some(sent_by), Some(source)) => sent_by.to_canonical() == source.to_canonical(),
             _ => self.host() == source_host,
@@ -299,6 +300,16 @@ mod tests {
         assert_eq!(via("SIP/2.0/TCP host.example").response_target(), ("host.example", 5060));
     }
 
+    /// `received` is an address (RFC 3261 §25.1): a name there is no target
+    /// to resolve, and the sent-by stands.
+    #[test]
+    fn a_received_that_is_no_address_leaves_the_sent_by() {
+        let v = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1;received=host.invalid");
+        assert_eq!(v.response_target(), ("10.0.0.1", 5060));
+        let v6 = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1;received=2001:db8::7");
+        assert_eq!(v6.response_target(), ("2001:db8::7", 5060));
+    }
+
     #[test]
     fn stamping_adds_received_when_the_source_differs_or_rport_asks() {
         let asked = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;rport");
@@ -315,6 +326,20 @@ mod tests {
             unasked.stamped_from("10.0.0.1", 33000).to_wire(),
             "SIP/2.0/UDP 10.0.0.1:5060;branch=z1"
         );
+    }
+
+    /// RFC 3581 §4: the `rport` a response carries is the port the request
+    /// came from, whatever value the sender wrote there.
+    #[test]
+    fn stamping_replaces_an_rport_the_sender_wrote() {
+        let stamped = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;rport=1234")
+            .stamped_from("198.51.100.4", 33000);
+        assert_eq!(stamped.rport(), Some(Rport::Observed(33000)));
+        assert_eq!(stamped.received(), Some("198.51.100.4"));
+        let unreadable =
+            via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;rport=x").stamped_from("10.0.0.1", 33000);
+        assert_eq!(unreadable.rport(), Some(Rport::Observed(33000)));
+        assert_eq!(unreadable.response_target(), ("10.0.0.1", 33000));
     }
 
     #[test]

@@ -114,10 +114,24 @@ pub(super) enum Timer {
     /// transaction runs on to Timer B. Its key is never stored — the fire
     /// reads the transaction's state and is a no-op on anything else.
     FirstResponse(String),
+    /// The §17.2.1 bound of the server INVITE transaction opened at the
+    /// instant it carries: its 100 leaves then if nothing has (`layer::trying`).
+    /// Its key is never stored; the fire reads the transaction's state.
+    Trying(ServerTxnKey, tokio::time::Instant),
     /// The transaction's end of life, due at its [`Lifetime`] deadline — the
     /// backstop of an active one, the end of a hold otherwise. Every resident
     /// transaction has exactly one; firing removes the transaction.
     Cleanup(TxnId),
+    /// The bound of the client INVITE transaction opened at the instant it
+    /// carries on the ACK of its non-2xx final (`layer::held_ack`): the ACK
+    /// leaves then if its consumer released none. Its key is never stored;
+    /// the fire reads the transaction.
+    AckBound(String, tokio::time::Instant),
+    /// The bound of the server INVITE transaction opened at the instant it
+    /// carries on the answers to a CANCEL of it (`layer::held_cancel`): the
+    /// 200 and the 487 leave then if its consumer released none. Its key is
+    /// never stored; the fire reads the transaction.
+    CancelBound(ServerTxnKey, tokio::time::Instant),
     /// Timer E for the on-wire CANCEL (RFC 3261 §17.1.2.2 — a CANCEL is a
     /// non-INVITE request, but it reuses its INVITE's branch and builds no txn
     /// of its own, so its retransmit ladder rides the INVITE client txn as the
@@ -140,6 +154,15 @@ pub(super) enum CancelWire {
     Held,
     /// On the wire; only the [`Timer::CancelRetransmit`] ladder re-sends it.
     Sent,
+}
+
+/// The answers to a CANCEL an INVITE server transaction holds: the CANCEL's
+/// 200 and the INVITE's 487, each as it leaves and where.
+pub(super) struct UnsentCancel {
+    pub(super) cancel_ok: Option<(Bytes, SocketAddr)>,
+    pub(super) terminated: Option<(Bytes, SocketAddr)>,
+    /// The key the transaction is held under in `Owner::held_cancels`.
+    pub(super) held_as: (String, String, u32),
 }
 
 /// A CANCEL datagram parked on its INVITE client txn (see
@@ -229,14 +252,18 @@ impl Transaction {
             cancel_retransmit_key: None,
             retransmit_buf: None,
             seed_resend: None,
+            unsent_ack: None,
+            unsent_cancel: None,
             ladder: None,
             timeout_kind: TxnTimeoutKind::Response,
             dead_hop_reported: false,
+            past_trying: false,
             dialogs: Vec::new(),
             reliable_offers: Vec::new(),
             lifetime,
             orphaned: false,
             held: false,
+            seeded: false,
         }
     }
 
@@ -314,6 +341,9 @@ pub(super) struct Transaction {
     /// read off its Via beside `cr` / `lg`; `None` for a server transaction.
     pub(super) incarnation_mark: Option<String>,
     pub(super) state: TxnState,
+    /// Where it sends: a client transaction's request; every response of a
+    /// server transaction, its request's response target (RFC 3261 §18.2.2)
+    /// fixed when it opened.
     pub(super) destination: Option<SocketAddr>,
     /// The instant this transaction entered the map — its first send, its
     /// admission or its seed: the origin the client INVITE bound is measured
@@ -351,6 +381,14 @@ pub(super) struct Transaction {
     /// On a client INVITE seeded `Trying` (ADR-0014): its INVITE, re-sent once
     /// when a CANCEL is first held on it (ADR-0043), taken at that send.
     pub(super) seed_resend: Option<Bytes>,
+    /// On a client INVITE that took a non-2xx final: its ACK and where it
+    /// goes, held until the consumer releases it or its bound passes
+    /// (`layer::held_ack`), taken at that send.
+    pub(super) unsent_ack: Option<(Bytes, SocketAddr)>,
+    /// On a server INVITE a CANCEL cancelled: the CANCEL's 200 and the
+    /// INVITE's 487, each with where it goes, held until the consumer
+    /// releases them or their bound passes (`layer::held_cancel`).
+    pub(super) unsent_cancel: Option<Box<UnsentCancel>>,
     /// The Timer A/E ladder for [`retransmit_buf`](Self::retransmit_buf).
     /// `None` until this txn starts retransmitting, and on a server txn until
     /// its non-2xx final arms Timer G.
@@ -365,6 +403,9 @@ pub(super) struct Transaction {
     /// INVITE's hop is dead (ADR-0044): no later timeout of the transaction is
     /// reported again.
     pub(super) dead_hop_reported: bool,
+    /// On an INVITE client txn: a provisional above 100 answered it, so the
+    /// TU holds a response and is never told the hop is alive.
+    pub(super) past_trying: bool,
     /// On an INVITE client txn: the dialogs it opened that a request this
     /// layer sent (a PRACK, an UPDATE, a BYE) or a 2xx named, at most
     /// [`MAX_DIALOGS`]; a 2xx under another To-tag is a forked dialog of its
@@ -392,4 +433,7 @@ pub(super) struct Transaction {
     /// stage ahead of this layer refuses a copy of it; leaving the map
     /// releases the hold.
     pub(super) held: bool,
+    /// A server INVITE transaction a seed rebuilt from a record, not one a
+    /// request this layer received opened: it answers no copy of its own.
+    pub(super) seeded: bool,
 }

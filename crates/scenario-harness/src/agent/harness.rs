@@ -30,12 +30,13 @@ use super::run_guards::{
     render_rfc_panic, rfc_hard_gate_findings, waived_sut_line, CseqGate, HardGate,
 };
 use super::step::StepCounter;
-use super::ua::WeakAgent;
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
+use super::weak_agent::WeakAgent;
 use super::{Agent, Proxy};
 use crate::absorption::Absorption;
 use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
 use crate::run::RunReport;
+mod shared_lanes;
 
 /// Fake-fabric per-`recv` silent-wait bound (virtual time — a paused clock
 /// auto-advances to it, so it costs no wall time). Sits above the longest
@@ -79,7 +80,7 @@ pub struct Harness {
     /// fixture where a simulated peer intentionally emits non-conforming SIP).
     /// The hard gate drops each finding a waiver covers. Shared (`Rc`) with
     /// [`CseqGate`] so waivers registered before `finish`/Drop are honoured by both.
-    waivers: Rc<RefCell<Vec<WaiverState>>>,
+    pub(super) waivers: Rc<RefCell<Vec<WaiverState>>>,
     /// Per-`recv` wait bound handed to every [`Agent`] this harness binds. Small
     /// under a paused (simulated) clock — a parked `recv` auto-advances virtual
     /// time, so the bound only catches a genuinely stuck flow. A *real*-clock
@@ -95,7 +96,7 @@ pub struct Harness {
     finish_settles: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
     /// The dialog judge of every UA this harness bound; [`finish`](Self::finish)
     /// gates their verdicts and the failure dump shows their tables.
-    judges: Judges,
+    pub(super) judges: Judges,
     /// Every UA this harness bound, its socket not held: `finish` sights what
     /// each still has queued, so an unread request meets its dialog table.
     bound: RefCell<Vec<WeakAgent>>,
@@ -145,8 +146,7 @@ impl Harness {
             Some(fault) => net.with_send_fault(fault),
             None => net,
         };
-        let sim: Arc<dyn SignalingNetwork> = Arc::new(net);
-        Self::build(scenario_name.into(), sim, Clock::test_at(0), TransportKind::Fake, RECV_TIMEOUT)
+        Self::with_simulated_network(scenario_name, net)
     }
 
     /// Start a session over a **caller-supplied** network + clock — the seam an
@@ -411,12 +411,8 @@ impl Harness {
     /// 100-within-200ms, strict-route rewrite, PRACK forwarding) do not judge
     /// its lane. Use [`agent_with_roles`](Self::agent_with_roles) to override.
     pub async fn agent(&self, name: impl Into<String>, addr: &str) -> Agent {
-        self.agent_with_roles(
-            name,
-            addr,
-            HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
-        )
-        .await
+        let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
+        self.agent_with_roles(name, addr, roles).await
     }
 
     /// [`agent`](Self::agent) with explicit bind roles for RFC-rule subject
@@ -466,10 +462,9 @@ impl Harness {
         // A proxy relays requests it is not a party to: it holds no dialogs.
         let holds_dialogs =
             roles.contains(&sip_net::UaRole::Uac) || roles.contains(&sip_net::UaRole::Uas);
-        let mut opts = BindUdpOpts::new(addr, 64).with_roles(roles);
-        if let Some(hook) = pre_ingress {
-            opts = opts.with_pre_ingress(hook);
-        }
+        let arrivals = sip_clock::Clock::system();
+        let opts = BindUdpOpts::new(addr, 64).with_roles(roles).with_clock(arrivals.clone());
+        let opts = BindUdpOpts { pre_ingress, ..opts };
         let ep =
             self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         let rr_fold = decide_rr_fold(&name);
@@ -495,6 +490,8 @@ impl Harness {
             dialogs,
             steps: self.steps.clone(),
             answers_as: Party::Callee,
+            advertised: None,
+            arrivals: Some(arrivals),
         };
         self.keep_bound(&agent);
         agent

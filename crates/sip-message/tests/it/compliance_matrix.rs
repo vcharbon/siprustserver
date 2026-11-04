@@ -1,18 +1,21 @@
 //! RFC 4475 torture + CVE-regression + RFC 3261 param-gap + RFC 5118 IPv6
-//! compliance matrix for the ported custom parser. Port of
-//! `tests/sip/parser-compliance.test.ts` (the `custom` column).
+//! compliance matrix of the parser.
 //!
-//! Fixtures are the byte-exact files under `tests/fixtures/<category>/`,
-//! dumped verbatim from the TS source (the `sipMsg` template results) so the
-//! wire bytes match 1:1.
+//! The RFC 4475 fixtures under `tests/fixtures/rfc4475-*/` are the messages of
+//! the RFC's Appendix A bit-exact archive, byte for byte:
+//! [`rfc4475_fixtures_are_the_rfc_archive`] decodes the archive from
+//! `docs/rfc/rfc4475.txt` and compares every fixture with its message. Each
+//! expectation below restates what the RFC says of its message.
 //!
 //! Every category is read by the one default parse: the grammar of RFC 3261
 //! §25.1 and the gates of ADR-0001 are all held at parse time.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 
+use base64::Engine;
 use sip_message::{CustomParser, SipParser};
 
 fn fixture(category: &str, name: &str) -> Vec<u8> {
@@ -59,23 +62,26 @@ fn set(items: &[&'static str]) -> HashSet<&'static str> {
 // RFC 4475 §3.1.1 — valid messages (must parse, except the gates of ADR-0001)
 // ---------------------------------------------------------------------------
 
+/// `(fixture, archive message)` of RFC 4475 §3.1.1, in section order.
+const RFC4475_VALID: [(&str, &str); 13] = [
+    ("shortTorturousInvite", "wsinv"),      // 3.1.1.1
+    ("wideRangeValidChars", "intmeth"),     // 3.1.1.2
+    ("validPercentEscaping", "esc01"),      // 3.1.1.3
+    ("escapedNulls", "escnull"),            // 3.1.1.4
+    ("percentNotEscape", "esc02"),          // 3.1.1.5
+    ("noLwsBeforeAngleBracket", "lwsdisp"), // 3.1.1.6
+    ("longValues", "longreq"),              // 3.1.1.7
+    ("extraTrailingOctets", "dblreq"),      // 3.1.1.8
+    ("semicolonInUserPart", "semiuri"),     // 3.1.1.9
+    ("variedTransports", "transports"),     // 3.1.1.10
+    ("multipartMime", "mpart01"),           // 3.1.1.11
+    ("unusualReasonPhrase", "unreason"),    // 3.1.1.12
+    ("emptyReasonPhrase", "noreason"),      // 3.1.1.13
+];
+
 #[test]
 fn rfc4475_valid() {
-    let names = [
-        "shortTorturousInvite",    // 3.1.1.1
-        "wideRangeValidChars",     // 3.1.1.2
-        "validPercentEscaping",    // 3.1.1.3
-        "escapedNulls",            // 3.1.1.4
-        "percentNotEscape",        // 3.1.1.5
-        "noLwsBeforeAngleBracket", // 3.1.1.6
-        "longValues",              // 3.1.1.7
-        "extraTrailingOctets",     // 3.1.1.8
-        "semicolonInUserPart",     // 3.1.1.9
-        "variedTransports",        // 3.1.1.10
-        "multipartMime",           // 3.1.1.11
-        "unusualReasonPhrase",     // 3.1.1.12
-        "emptyReasonPhrase",       // 3.1.1.13
-    ];
+    let names: Vec<&str> = RFC4475_VALID.iter().map(|(name, _)| *name).collect();
     // 3.1.1.1 and 3.1.1.7 carry a top Via without the magic cookie: RFC 2543
     // requests, refused by scope choice (ADR-0001 gates, departing from RFC
     // 3261 §17.2.3).
@@ -84,39 +90,155 @@ fn rfc4475_valid() {
 }
 
 // ---------------------------------------------------------------------------
-// RFC 4475 §3.1.2 — invalid messages (should reject)
+// RFC 4475 §3.1.2 — invalid messages
 // ---------------------------------------------------------------------------
+
+/// `(fixture, archive message)` of RFC 4475 §3.1.2, in section order.
+const RFC4475_INVALID: [(&str, &str); 19] = [
+    ("extraneousSeparators", "badinv01"),    // 3.1.2.1
+    ("contentLengthTooLarge", "clerr"),      // 3.1.2.2
+    ("negativeContentLength", "ncl"),        // 3.1.2.3
+    ("overlargRequestScalars", "scalar02"),  // 3.1.2.4
+    ("overlargResponseScalars", "scalarlg"), // 3.1.2.5
+    ("unterminatedQuotedString", "quotbal"), // 3.1.2.6
+    ("angleBracketRequestUri", "ltgtruri"),  // 3.1.2.7
+    ("embeddedLwsInUri", "lwsruri"),         // 3.1.2.8
+    ("multipleSPInRequestLine", "lwsstart"), // 3.1.2.9
+    ("trailingSpacesInRequestLine", "trws"), // 3.1.2.10
+    ("escapedHeadersInUri", "escruri"),      // 3.1.2.11
+    ("invalidTimezone", "baddate"),          // 3.1.2.12
+    ("unencloseNameAddr", "regbadct"),       // 3.1.2.13
+    ("spacesInAddrSpec", "badaspec"),        // 3.1.2.14
+    ("nonTokenDisplayName", "baddn"),        // 3.1.2.15
+    ("unknownProtocolVersion", "badvers"),   // 3.1.2.16
+    ("methodMismatch", "mismatch01"),        // 3.1.2.17
+    ("unknownMethodMismatch", "mismatch02"), // 3.1.2.18
+    ("overlargeResponseCode", "bigcode"),    // 3.1.2.19
+];
 
 #[test]
 fn rfc4475_invalid() {
-    let names = [
-        "extraneousSeparators",        // 3.1.2.1
-        "contentLengthTooLarge",       // 3.1.2.2
-        "negativeContentLength",       // 3.1.2.3
-        "overlargRequestScalars",      // 3.1.2.4
-        "overlargResponseScalars",     // 3.1.2.5
-        "unterminatedQuotedString",    // 3.1.2.6
-        "angleBracketRequestUri",      // 3.1.2.7
-        "embeddedLwsInUri",            // 3.1.2.8
-        "multipleSPInRequestLine",     // 3.1.2.9
-        "trailingSpacesInRequestLine", // 3.1.2.10
-        "escapedHeadersInUri",         // 3.1.2.11
-        "invalidTimezone",             // 3.1.2.12
-        "unencloseNameAddr",           // 3.1.2.13
-        "spacesInAddrSpec",            // 3.1.2.14
-        "nonTokenDisplayName",         // 3.1.2.15
-        "unknownProtocolVersion",      // 3.1.2.16
-        "methodMismatch",              // 3.1.2.17
-        "unknownMethodMismatch",       // 3.1.2.18
-        "overlargeResponseCode",       // 3.1.2.19
-    ];
-    // Reject every invalid fixture except trailingSpacesInRequestLine
-    // (3.1.2.10), whose trailing SP the start-line reader leaves to the
-    // Request-URI split, and invalidTimezone (3.1.2.12): a malformed Date
-    // never refuses a message (ADR-0053; RFC 4475 lets an element ignore it).
-    let lenient = set(&["trailingSpacesInRequestLine", "invalidTimezone"]);
+    let names: Vec<&str> = RFC4475_INVALID.iter().map(|(name, _)| *name).collect();
+    // Every invalid message is refused but invalidTimezone (3.1.2.12), whose
+    // Date the RFC lets an element ignore when it does not use it: a
+    // malformed Date never refuses a message (ADR-0053). The trailing SP of
+    // 3.1.2.10 is one the RFC lets an element refuse, and it is refused.
+    let lenient = set(&["invalidTimezone"]);
     let reject: HashSet<&str> = names.iter().copied().filter(|n| !lenient.contains(n)).collect();
     run_category("rfc4475-invalid", &names, &reject);
+}
+
+// ---------------------------------------------------------------------------
+// RFC 4475 §3.2 – §3.4 — transaction, application and RFC 2543 messages
+// ---------------------------------------------------------------------------
+
+/// `(fixture, archive message)` of RFC 4475 §3.2 to §3.4, in section order.
+const RFC4475_SEMANTICS: [(&str, &str); 17] = [
+    ("missingTransactionId", "badbranch"),      // 3.2.1
+    ("missingRequiredHeaders", "insuf"),        // 3.3.1
+    ("unknownSchemeRequestUri", "unkscm"),      // 3.3.2
+    ("atypicalSchemeRequestUri", "novelsc"),    // 3.3.3
+    ("unknownSchemesInHeaders", "unksm2"),      // 3.3.4
+    ("proxyRequireAndRequire", "bext01"),       // 3.3.5
+    ("unknownContentType", "invut"),            // 3.3.6
+    ("unknownAuthorizationScheme", "regaut01"), // 3.3.7
+    ("multipleSingleValueFields", "multi01"),   // 3.3.8
+    ("multipleContentLength", "mcl01"),         // 3.3.9
+    ("broadcastVia", "bcast"),                  // 3.3.10
+    ("maxForwardsZero", "zeromf"),              // 3.3.11
+    ("contactHeaderParam", "cparam01"),         // 3.3.12
+    ("contactUrlParam", "cparam02"),            // 3.3.13
+    ("escapedHeaderInContact", "regescrt"),     // 3.3.14
+    ("unacceptableAccept", "sdp01"),            // 3.3.15
+    ("rfc2543Syntax", "inv2543"),               // 3.4.1
+];
+
+#[test]
+fn rfc4475_semantics() {
+    let names: Vec<&str> = RFC4475_SEMANTICS.iter().map(|(name, _)| *name).collect();
+    // The messages the RFC has an element answer 400 or an error are refused
+    // at parse: no Call-ID, From or To (3.3.1), single-value fields repeated
+    // (3.3.8), two Content-Length values (3.3.9). 3.2.1's empty transaction
+    // identifier is one the RFC lets an element answer 400; the branch reads
+    // as the bare magic cookie and is refused. 3.4.1 carries no magic
+    // cookie: an RFC 2543 request, refused by scope choice (ADR-0001). Every
+    // other message is well formed and parses; what the RFC asks of it
+    // (416, 420, 415, 483, …) is the element's answer, not the parser's.
+    let reject = set(&[
+        "missingTransactionId",
+        "missingRequiredHeaders",
+        "multipleSingleValueFields",
+        "multipleContentLength",
+        "rfc2543Syntax",
+    ]);
+    run_category("rfc4475-semantics", &names, &reject);
+}
+
+// ---------------------------------------------------------------------------
+// The RFC 4475 fixtures are the RFC's own bytes
+// ---------------------------------------------------------------------------
+
+/// The messages of RFC 4475 Appendix A, by archive name: the base64 block
+/// between its markers, gunzipped, read as a ustar archive.
+fn rfc4475_archive() -> HashMap<String, Vec<u8>> {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("../../docs/rfc/rfc4475.txt");
+    let text = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {p:?}: {e}"));
+    // The block runs between the marker lines (the decoding script above them
+    // names the markers too, inside a longer line). Appendix A keeps every
+    // line of it that is one run of non-space characters: the page footers
+    // and headers between the base64 lines hold spaces.
+    let base64: String = text
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| *line != "-- BEGIN MESSAGE ARCHIVE --")
+        .skip(1)
+        .take_while(|line| *line != "-- END MESSAGE ARCHIVE --")
+        .filter(|line| !line.is_empty() && !line.contains(char::is_whitespace))
+        .collect();
+    let gz = base64::engine::general_purpose::STANDARD.decode(base64).expect("base64");
+    let mut tar = Vec::new();
+    flate2::read::GzDecoder::new(gz.as_slice()).read_to_end(&mut tar).expect("gunzip");
+
+    let mut files = HashMap::new();
+    let mut at = 0;
+    while let Some(header) = tar.get(at..at + 512) {
+        if header.iter().all(|&b| b == 0) {
+            break;
+        }
+        let field = |range: std::ops::Range<usize>| {
+            let raw = &header[range];
+            let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+            String::from_utf8_lossy(&raw[..end]).trim().to_string()
+        };
+        let name = field(0..100);
+        let size = usize::from_str_radix(&field(124..136), 8).expect("octal size");
+        let data = tar[at + 512..at + 512 + size].to_vec();
+        let name = name.trim_end_matches(".dat").to_string();
+        files.insert(name, data);
+        at += 512 + size.div_ceil(512) * 512;
+    }
+    files
+}
+
+#[test]
+fn rfc4475_fixtures_are_the_rfc_archive() {
+    let archive = rfc4475_archive();
+    let categories: [(&str, &[(&str, &str)]); 3] = [
+        ("rfc4475-valid", &RFC4475_VALID),
+        ("rfc4475-invalid", &RFC4475_INVALID),
+        ("rfc4475-semantics", &RFC4475_SEMANTICS),
+    ];
+    let mut differ = Vec::new();
+    for (category, fixtures) in categories {
+        for (name, message) in fixtures {
+            let rfc = archive.get(*message).unwrap_or_else(|| panic!("{message} in the archive"));
+            if fixture(category, name) != *rfc {
+                differ.push(format!("{category}/{name} ({message})"));
+            }
+        }
+    }
+    assert!(differ.is_empty(), "fixtures differing from RFC 4475 Appendix A: {differ:?}");
 }
 
 // ---------------------------------------------------------------------------

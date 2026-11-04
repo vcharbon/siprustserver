@@ -23,7 +23,9 @@ use super::RouterCtx;
 use crate::dispatch::{Discarded, DispatchClass, Outcome};
 use b2bua_sdk::event::CallEvent;
 
-pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
+/// Take `event` in; `matched_client_txn`: a response it carries answered a
+/// client transaction the transaction layer holds.
+pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_client_txn: bool) {
     // Per-method / per-(method,code) data-path counters. Every inbound SIP
     // message lands here once, so this is the single chokepoint to meter them.
     if let CallEvent::Sip { message, .. } = &event {
@@ -60,14 +62,15 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     // A self-release notice for a call this node holds no takeover copy of
     // has nothing to shed.
-    if let CallEvent::CallQuiesced { call_ref } = &event {
+    if let Some(call_ref) = super::quiesced::notice_of(&event) {
         if !ctx.state.is_takeover(call_ref) {
             return;
         }
     }
 
     // Out-of-dialog OPTIONS keepalive: self-report readiness (ADR-0011 X6) on
-    // its two axes (ADR-0050 §2), read by the front proxy's health probe.
+    // its two axes (ADR-0050 §2), read by the front proxy's health probe, and
+    // take the proxy's dead verdicts it carries (ADR-0050 §3).
     if let CallEvent::Sip { message, src, .. } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() == "OPTIONS" && req.to().tag().is_none() {
@@ -79,8 +82,9 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                     &ctx.config.node_capabilities,
                 );
                 if let Ok(resp) = resp {
-                    let _ = ctx.txn.send_response(resp, *src).await;
+                    let _ = ctx.txn.send_response(resp, super::reply_to::reply_to(req, *src)).await;
                 }
+                super::dead_verdict::on_options(ctx, req);
                 return;
             }
         }
@@ -88,23 +92,24 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     let mut res = resolve(ctx, &event);
     let mut lookup = Lookup::Answered;
-    // An initial INVITE copying a call this node holds the answered record of
-    // is that call's, answered from the record; one placed here as another
-    // primary's backup and copying none belongs to that primary and gets no
-    // final (its 100 Trying went out on receipt), its transaction
-    // relinquished — never a second call.
+    // An initial INVITE copying a transaction of a decided call this node
+    // holds the record of is that call's: the call is taken over and the copy
+    // absorbed by the transaction the record rebuilds, which for the caller's
+    // unanswered INVITE replaces the one the layer opened for the copy. One
+    // placed here as another primary's backup and copying none belongs to
+    // that primary and gets no final (its 100 Trying went out on receipt),
+    // its transaction relinquished — never a second call.
     match initial_invite_copy(ctx, &event, &res).await {
         InitialInvite::Own => {}
-        InitialInvite::CopyOf(hit) => res.copy_of(hit, &event),
+        InitialInvite::CopyOf { hit, unanswered } => {
+            if unanswered {
+                relinquish_arrival(ctx, &event).await;
+            }
+            res.copy_of(hit, &event);
+        }
         InitialInvite::Foreign => {
             ctx.metrics.bump_foreign_invite_copy_dropped();
-            if let CallEvent::Sip { message, .. } = &event {
-                if let SipMessage::Request(req) = message.as_ref() {
-                    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
-                        let _ = ctx.txn.relinquish_server(key).await;
-                    }
-                }
-            }
+            relinquish_arrival(ctx, &event).await;
             return;
         }
     }
@@ -135,12 +140,14 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     // ── Setup-CANCEL mark ──────────────────────────────────────────────
     // An out-of-dialog CANCEL means the txn layer just finalized the initial
-    // INVITE (200 + 487 already on the wire). The `Cancelled` event queues on
-    // the per-call FIFO BEHIND the initial-INVITE turn (waiting for a permit,
-    // or parked on its decision round trip), so the call model cannot learn
+    // INVITE (200 + 487 sent, or held for the turn that writes the CANCEL).
+    // The `Cancelled` event queues on the per-call FIFO BEHIND the
+    // initial-INVITE turn (waiting for a permit, or parked on its decision
+    // round trip), so the call model cannot learn
     // the caller is gone until that turn ends — mark it here (the run loop) so
     // the turn (`process::initial_invite_turn`) skips the decision of a setup
-    // not yet ruled, and drops a route/reject landing on the cancelled call.
+    // not yet ruled, writes the CANCEL of one whose decision runs, and drops a
+    // route/reject landing on the cancelled call.
     // The mark names the cancelled INVITE's CSeq: only that INVITE's turn
     // reads it. An in-dialog CANCEL targets one re-INVITE transaction, never
     // the call setup, and is not marked. Gated on that INVITE being here —
@@ -154,7 +161,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         }
     }
 
-    let Some(class) = DispatchClass::of(&event) else { return };
+    let Some(class) = DispatchClass::of(&event, matched_client_txn) else { return };
     // A copy of a replicated call's INVITE opens no call: it queues as a
     // request of that call.
     let class = if class.is_new_call() && !res.initial_invite {
@@ -179,7 +186,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         }
     }
     let admitted = unborn.is_some();
-    let turn = Turn { ctx: ctx.clone(), event, res, class, unborn };
+    let turn = Turn { ctx: ctx.clone(), event, matched_client_txn, res, class, unborn };
     let offer = ctx.dispatcher.offer(&call_ref, turn, class);
     if admitted && matches!(offer.outcome, Outcome::Queued) {
         admit::queued(ctx);
@@ -194,5 +201,15 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         let Discarded { item, why, owed } = discarded;
         let admitted = item.unborn.is_some();
         OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
+    }
+}
+
+/// Relinquish the server transaction the layer opened for the initial INVITE
+/// `event` carries, sending nothing: another transaction answers it.
+async fn relinquish_arrival(ctx: &RouterCtx, event: &CallEvent) {
+    let CallEvent::Sip { message, .. } = event else { return };
+    let SipMessage::Request(req) = message.as_ref() else { return };
+    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
+        let _ = ctx.txn.relinquish_server(key).await;
     }
 }

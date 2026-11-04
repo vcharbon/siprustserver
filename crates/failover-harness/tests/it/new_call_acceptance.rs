@@ -15,6 +15,8 @@
 //!
 //! The probe reads a breaker flip within one probe round ([`PROBE_ROUND`]).
 //! Every call ends with one CDR, the refused one included.
+//!
+//! Beyond the failover sweep: new-call placement under a backend outage or a refusing worker.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -191,6 +193,18 @@ pub(crate) async fn callee_hangs_up(bob_dialog: &mut Dialog, alice: &Agent) {
 pub(crate) async fn drain(fh: &FailoverHarness, c: &Cluster) {
     let drained = fh.settle_terminal(async || c.b1.memory_clean() && c.b2.memory_clean()).await;
     assert!(drained, "the cluster drains every call");
+}
+
+/// [`drain`], and no node holds a trace of `call_ref`: its replica's delete
+/// may still be on its way to the backup when the last response arrives.
+pub(crate) async fn drain_call(fh: &FailoverHarness, c: &Cluster, call_ref: &str) {
+    let drained = fh
+        .settle_terminal(async || {
+            let clean = c.b1.memory_clean() && c.b2.memory_clean();
+            clean && !c.b1.holds_any_trace(call_ref).await && !c.b2.holds_any_trace(call_ref).await
+        })
+        .await;
+    assert!(drained, "the cluster drains the call, its replicas included");
 }
 
 /// The backend is down for the whole cluster with one call answered and one

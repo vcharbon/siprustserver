@@ -25,6 +25,8 @@
 //! (the 2xx, RFC 3261 §13.2.2.4), no ring deadline authors a second final on
 //! her ACKed INVITE server transaction (§17.2.1, §13.3.1.4), the callee is
 //! ACKed and takes no CANCEL, and the call settles to one CDR.
+//!
+//! Beyond the failover sweep: a b-leg INVITE relayed after its worker's graceful departure.
 
 use std::net::SocketAddr;
 use std::time::Duration;

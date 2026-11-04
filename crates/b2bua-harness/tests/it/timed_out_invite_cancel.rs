@@ -5,8 +5,11 @@
 //! turn the transaction gives up, before its own server transaction can age
 //! out.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use b2bua::decision::test_adapter::route_to;
+use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{invite_final_statuses, settle_until, B2buaScene, B2buaSut};
 use scenario_harness::callflow::OFFER_SDP;
 
@@ -87,16 +90,13 @@ async fn a_timeout_run_late_still_answers_the_caller_and_acks_the_487() {
 }
 
 /// bob answers nothing at all, not even a 100. The hop is dead at the
-/// first-response deadline: alice is answered 408 there, and no CANCEL goes to
+/// first-response deadline (5 s by default): alice is answered 480 there, and no CANCEL goes to
 /// bob, who answered nothing (§9.1). The leg his silence leaves unresolved
 /// rides the terminating backstop out.
 #[tokio::test(start_paused = true)]
 async fn a_callee_that_answers_nothing_is_not_cancelled() {
     let s = B2buaScene::with_b2bua("timed-out-invite-dead-hop", |bob_port| {
-        B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
-            c.invite_first_response_timeout_sec = 5;
-            c.keepalive_interval_sec = 300;
-        })
+        B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| c.keepalive_interval_sec = 300)
     })
     .await;
 
@@ -104,7 +104,7 @@ async fn a_callee_that_answers_nothing_is_not_cancelled() {
     let _dead = s.bob.receive("INVITE").await;
 
     s.h.advance(Duration::from_secs(5) + Duration::from_millis(300)).await;
-    call.try_expect(408).await.expect("the caller is answered at the first-response deadline");
+    call.try_expect(480).await.expect("the caller is answered at the first-response deadline");
 
     s.h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
     settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
@@ -116,4 +116,39 @@ async fn a_callee_that_answers_nothing_is_not_cancelled() {
         !report.entries().iter().any(|e| e.to == bob_addr && e.raw.starts_with(b"CANCEL ")),
         "no CANCEL to a callee that answered nothing (RFC 3261 §9.1)"
     );
+}
+
+/// A backend that lets a failure stand (`Relay`) on the routing consult a
+/// silent hop raised: bob answers nothing, the consult says `response`, and
+/// alice is answered 480 at the default 5 s deadline. A hop that rang and then
+/// went silent past the INVITE bound keeps 408 (above).
+#[tokio::test(start_paused = true)]
+async fn a_silent_hop_let_stand_answers_the_caller_480() {
+    let s = B2buaScene::with_b2bua("timed-out-invite-let-stand", |bob_port| {
+        let decision = ScriptedDecisionEngine::builder()
+            .fallback(move |_| {
+                let mut r = route_to("127.0.0.1", bob_port);
+                r.callback_context = Some("ctx-let-stand".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|req| {
+                assert_eq!(req.failure.timeout_kind.as_deref(), Some("response"));
+                CallTreatment::Relay { label: None }
+            })
+            .build();
+        B2buaSut::builder(Arc::new(decision)).tune(|c| c.keepalive_interval_sec = 300)
+    })
+    .await;
+
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let _dead = s.bob.receive("INVITE").await;
+
+    s.h.advance(Duration::from_secs(5) + Duration::from_millis(300)).await;
+    call.try_expect(480).await.expect("a silent hop let stand is a 480");
+
+    s.h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
+    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
+        .await;
+    s.b2bua.assert_fully_reaped();
+    let _ = s.finish().await;
 }

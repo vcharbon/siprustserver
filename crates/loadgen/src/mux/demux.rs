@@ -11,11 +11,12 @@ use std::time::Duration;
 use scenario_harness::claim::{resolve_claim, ClaimRule};
 use scenario_harness::legpick::LegInfo;
 use sip_message::preparse::is_invite_request_buffer;
-use sip_message::sniff::call_id;
 use sip_net::queue::PacketQueue;
 use sip_net::{UdpEndpoint, UdpPacket};
 use tokio::time::Instant;
 
+use super::datagram::Datagram;
+use super::late_answer::LateReply;
 use super::late_final::Reply;
 use super::stats::{MuxStats, OrphanReason};
 use super::{CallSlot, Delivery, Key, MuxSocket};
@@ -24,32 +25,37 @@ use super::{CallSlot, Delivery, Key, MuxSocket};
 /// Exits when the endpoint's inbox closes (fabric endpoint dropped) or the
 /// owning [`MuxSocket`] is gone.
 pub(super) async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, endpoint: Arc<dyn UdpEndpoint>) {
-    while let Some(pkt) = endpoint.recv().await {
+    while let Some(pkt) = endpoint.as_ref().recv().await {
         let Some(mux) = mux.upgrade() else { return };
-        for (datagram, dst) in route(&mux, &pkt.raw, pkt.src) {
+        for (datagram, dst) in route(&mux, &pkt) {
             // Best effort, as any UDP send: a lost ACK draws the final again.
-            let _ = mux.endpoint.send_to(&datagram, dst).await;
+            let _ = mux.endpoint.as_ref().send_to(&datagram, dst).await;
         }
     }
 }
 
 /// Demux precedence: (1) known Call-ID — covers EVERY in-dialog datagram with
 /// no token or R-URI cooperation, except a new INVITE on a caller's own
-/// Call-ID (`call_id_reuse` orphan); (2) correlation token — an initial INVITE
-/// spawning a new leg of a known call, unless its Call-ID was released by a
-/// finished call (`released`) or the call's caller has not sent its INVITE yet
-/// (`early`); (3) a final to the INVITE a released caller dialog last sent,
-/// answered with the datagrams this returns (its ACK, and for a 2xx the BYE
-/// ending the dialog); (4) orphan.
-fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAddr)> {
-    let cid = call_id(raw);
+/// Call-ID (`call_id_reuse` orphan); (2) a retransmitted request a released
+/// dialog's agent answered, answered again with the held final (its ACK
+/// absorbed for an INVITE's non-2xx); (3) correlation token — an initial
+/// INVITE spawning a new leg of a known call, unless its Call-ID was released
+/// by a finished call (`released`) or the call's caller has not sent its
+/// INVITE yet (`early`); (4) a final to the INVITE a released caller dialog
+/// last sent, answered with the datagrams this returns (its ACK, and for a 2xx
+/// the BYE ending the dialog); (5) orphan. The datagram is sniffed once,
+/// here, for every step and every watcher.
+fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
+    let (raw, src) = (&pkt.raw[..], pkt.src);
+    let dg = Datagram::sniff(raw);
+    let cid = dg.id().call_id;
     let mut g = mux.reg.lock().unwrap();
 
     // 1. Known dialog (Call-ID we minted or already promoted). Clone the
     //    `Delivery` out and RELEASE the registry lock before running the loss
     //    check + retransmit engine (which may send on the socket) — never hold
     //    `reg` across a send.
-    if let Some(cid) = &cid {
+    if let Some(cid) = cid {
         if let Some(d) = g.by_call_id.get(cid) {
             if d.caller && is_invite_request_buffer(raw) && LegInfo::new(raw).is_initial_invite() {
                 mux.stats.orphan(OrphanReason::CallIdReuse, raw);
@@ -57,18 +63,37 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
             }
             let d = d.clone();
             drop(g);
-            handle_inbound(mux, &d, raw, src);
+            handle_inbound(mux, &d, &dg, pkt);
             return Vec::new();
         }
     }
-    // 2. A new leg of a known call: an INITIAL INVITE whose Call-ID we have not
+    // 2. A retransmission of a request a released dialog's agent answered,
+    //    re-answered to its source: the address the SUT sent from, as a UAS
+    //    answers to the request's received/rport (RFC 3261 §18.2.2). The call's
+    //    loss model went with its endpoints: neither the request nor the
+    //    re-answer is dropped.
+    if let Some(cid) = cid.filter(|_| !dg.is_response()) {
+        match g.released_answer(cid, dg.id(), Instant::now()) {
+            LateReply::Reanswer(answer, repair) => {
+                drop(g);
+                mux.stats.late_answered.fetch_add(1, Ordering::Relaxed);
+                if let Some(repair) = repair {
+                    repair.record();
+                }
+                return vec![(answer, src)];
+            }
+            LateReply::Absorbed => return Vec::new(),
+            LateReply::NotHeld => {}
+        }
+    }
+    // 3. A new leg of a known call: an INITIAL INVITE whose Call-ID we have not
     //    seen, carrying our per-call token. Only an initial INVITE may spawn a
     //    leg (an in-dialog request with an unknown Call-ID is a stray, never a
     //    new dialog). The token entry is NON-consuming: it persists for the
     //    call's lifetime so re-routes / multi-REFER / re-REFER (further legs of
     //    the same call on this socket) each promote their own dialog.
     if is_invite_request_buffer(raw) {
-        if cid.as_ref().is_some_and(|c| g.is_released(c, Instant::now())) {
+        if cid.is_some_and(|c| g.is_released(c, Instant::now())) {
             mux.stats.orphan(OrphanReason::Released, raw);
             return Vec::new();
         }
@@ -104,7 +129,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
                 }
                 None => {
                     mux.stats.unclaimed(raw);
-                    tap_unrouted(mux, slot, raw, src);
+                    tap_unrouted(mux, slot, pkt);
                     return Vec::new();
                 }
             }
@@ -133,7 +158,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
                             Some(i) => i,
                             None => {
                                 mux.stats.orphan(OrphanReason::NoRoute, raw);
-                                tap_unrouted(mux, slot, raw, src);
+                                tap_unrouted(mux, slot, pkt);
                                 return Vec::new();
                             }
                         }
@@ -142,7 +167,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
                         // Several receivers but no picker to disambiguate — a
                         // scenario bug, not a silent first-wins.
                         mux.stats.orphan(OrphanReason::NoRoute, raw);
-                        tap_unrouted(mux, slot, raw, src);
+                        tap_unrouted(mux, slot, pkt);
                         return Vec::new();
                     }
                 },
@@ -160,19 +185,21 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
                 txns: recv.txns.clone(),
                 taps: recv.taps.clone(),
                 invites: None,
+                answers: recv.answers.clone(),
             }
         };
-        if let Some(cid) = &cid {
+        if let Some(cid) = cid {
+            let cid: Arc<str> = cid.into();
             slot.receivers[idx].keyset.lock().unwrap().push(Key::CallId(cid.clone()));
-            g.by_call_id.insert(cid.clone(), delivery.clone());
+            g.by_call_id.insert(cid, delivery.clone());
         }
         drop(g);
-        handle_inbound(mux, &delivery, raw, src);
+        handle_inbound(mux, &delivery, &dg, pkt);
         return Vec::new();
     }
-    // 3. A late final of a released caller's INVITE transaction.
-    let late = cid.as_deref().and_then(|c| g.released_invite(c, Instant::now()));
-    match late.map_or(Reply::NotHeld, |held| held.on_final(raw)) {
+    // 4. A late final of a released caller's INVITE transaction.
+    let late = cid.and_then(|c| g.released_invite(c, Instant::now()));
+    match late.map_or(Reply::NotHeld, |held| held.on_final(&dg)) {
         Reply::Absorbed => return Vec::new(),
         Reply::AckNon2xx(ack, dst) => {
             mux.stats.late_final_acked.fetch_add(1, Ordering::Relaxed);
@@ -184,7 +211,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
         }
         Reply::NotHeld => {}
     }
-    // 4. Not a known dialog and not an initial INVITE → a late straggler.
+    // 5. Not a known dialog and not an initial INVITE → a late straggler.
     mux.stats.orphan(OrphanReason::Stray, raw);
     Vec::new()
 }
@@ -193,44 +220,42 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
 /// (above the retransmit engine, so a lost datagram is truly gone and the peer's
 /// retransmit re-delivers it fresh), time it against the call's open exchanges,
 /// then let the retransmit engine dedup / stop-resenders / re-answer; a datagram
-/// the engine ABSORBS (a duplicate the app must not see) is not enqueued.
-fn handle_inbound(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr) {
-    if d.drop.drops_inbound(raw) {
+/// the engine ABSORBS (a duplicate the app must not see) is not enqueued. The
+/// app is handed the received bytes themselves, not a copy.
+fn handle_inbound(mux: &MuxSocket, d: &Delivery, dg: &Datagram<'_>, pkt: &UdpPacket) {
+    if d.drop.drops_inbound(dg.id()) {
         mux.stats.dropped_in.fetch_add(1, Ordering::Relaxed);
         // A recorded (sampled) call still shows the arrival on its ladder,
         // tagged as modeled loss — the RFC audit filters it out.
-        tap_discard(mux, d, raw, src, sip_net::RecvDisposition::LossModel);
+        tap_discard(mux, d, pkt, sip_net::RecvDisposition::LossModel);
         return;
     }
     if let Some(taps) = &d.taps {
-        taps.on_inbound(raw, Instant::now());
+        taps.on_inbound(dg, Instant::now());
+    }
+    if dg.id().method == Some("ACK") {
+        d.answers.on_ack(dg.id());
     }
     if let Some(invites) = &d.invites {
-        invites.on_inbound(raw);
+        invites.on_inbound(dg);
     }
     if let Some(txns) = &d.txns {
-        if !txns.on_inbound(raw, src) {
+        if !txns.on_inbound(dg, pkt.src) {
             // duplicate absorbed (engine did any re-ACK / re-answer)
-            tap_discard(mux, d, raw, src, sip_net::RecvDisposition::AbsorbedRetransmit);
+            tap_discard(mux, d, pkt, sip_net::RecvDisposition::AbsorbedRetransmit);
             return;
         }
     }
     let arrival_ms = mux.clock.now_ms().max(0) as u64;
-    deliver(&mux.stats, &d.queue, UdpPacket::unparsed(raw.to_vec(), src, arrival_ms));
+    deliver(&mux.stats, &d.queue, UdpPacket::unparsed(pkt.raw.clone(), pkt.src, arrival_ms));
 }
 
 /// Report a demuxed-but-discarded datagram to a recorded inbox's delivery tap
 /// (no-op — not even an allocation — on the unsampled path).
-fn tap_discard(
-    mux: &MuxSocket,
-    d: &Delivery,
-    raw: &[u8],
-    src: SocketAddr,
-    disp: sip_net::RecvDisposition,
-) {
+fn tap_discard(mux: &MuxSocket, d: &Delivery, pkt: &UdpPacket, disp: sip_net::RecvDisposition) {
     if let Some(tap) = d.queue.recv_tap() {
         let arrival_ms = mux.clock.now_ms().max(0) as u64;
-        tap(&UdpPacket::unparsed(raw.to_vec(), src, arrival_ms), disp);
+        tap(&UdpPacket::unparsed(pkt.raw.clone(), pkt.src, arrival_ms), disp);
     }
 }
 
@@ -240,12 +265,12 @@ fn tap_discard(
 /// `Unrouted`, rendered on the `ip:port#noendpoint` sub-lane. Uncorrelated
 /// datagrams never reach here and stay counter-only, so cross-call noise
 /// cannot contaminate a sampled trace.
-fn tap_unrouted(mux: &MuxSocket, slot: &CallSlot, raw: &[u8], src: SocketAddr) {
+fn tap_unrouted(mux: &MuxSocket, slot: &CallSlot, pkt: &UdpPacket) {
     let Some(tap) = slot.receivers.first().and_then(|r| r.queue.recv_tap()) else {
         return;
     };
     let arrival_ms = mux.clock.now_ms().max(0) as u64;
-    let packet = UdpPacket::unparsed(raw.to_vec(), src, arrival_ms);
+    let packet = UdpPacket::unparsed(pkt.raw.clone(), pkt.src, arrival_ms);
     tap(&packet, sip_net::RecvDisposition::Unrouted);
 }
 

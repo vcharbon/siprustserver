@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::received::response_destination;
 use sip_message::SipRequest;
 use sip_net::UdpEndpoint;
 
@@ -59,9 +60,8 @@ impl Owner {
 
     /// Answer every in-dialog INVITE server transaction of `call_ref` that has
     /// sent no final with `status` `reason`, through the transaction: under
-    /// the To-tag it names, to the address the request came from (or, for a
-    /// re-INVITE seeded at a takeover, which recorded none, the top Via's
-    /// response target). Counted; returns how many.
+    /// the To-tag it names, to the destination it holds, else the top Via's
+    /// response target (RFC 3261 §18.2.2). Counted; returns how many.
     pub(super) async fn answer_unanswered_invites_of_call(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -86,7 +86,9 @@ impl Owner {
             .collect();
         let mut answered = 0;
         for (key, req, source) in unanswered {
-            let Some(dest) = source.or_else(|| via_response_target(&req)) else { continue };
+            let Some(dest) = source.or_else(|| response_destination(req.top_via())) else {
+                continue;
+            };
             let to_tag = self.uas_to_tag_of(key.id());
             let opts = GenerateResponseOpts { to_tag, ..Default::default() };
             let Ok(resp) = generate_response(&req, status, reason, &opts) else { continue };
@@ -98,13 +100,4 @@ impl Owner {
             .fetch_add(answered as u64, std::sync::atomic::Ordering::Relaxed);
         answered
     }
-}
-
-/// Where a response to `req` goes when its source is unknown (a re-INVITE
-/// seeded at a takeover): the top Via's response target (RFC 3261 §18.2.2),
-/// when it names an IP address.
-fn via_response_target(req: &SipRequest) -> Option<SocketAddr> {
-    let (host, port) = req.top_via().response_target();
-    let ip: std::net::IpAddr = host.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
-    Some(SocketAddr::new(ip, port))
 }

@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "SIP load generator that reuses the functional scenario-harness choreography (basic call, re-INVITE, REFER, OPTIONS keepalive) as a partial SIPp substitute: managed CPS, bounded memory, live Prometheus /metrics + on-disk callflow report with bounded per-result samples. Drives the real cluster from the host; not production code."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 
@@ -19,6 +22,9 @@ scenario-harness = { path = "../scenario-harness" }
 # `EndpointConfig` (`--endpoint-config`), whose optional `egress` field carries
 # the run's egress policy (the environment axis).
 e2e-model = { path = "../e2e-model" }
+# The one report page of a load run, rendered from its index: served live and
+# written as the final `index.html`.
+loadrun-render = { path = "../loadrun-render" }
 sip-message = { path = "../sip-message", features = ["sniff"] }
 tokio = { workspace = true }
 # catch_unwind over a scenario future → a panic becomes a counted failure, never
@@ -47,6 +53,15 @@ flamegraph-util = { path = "../flamegraph-util" }
 # call recording and packet arrival — so loadgen never reads raw
 # SystemTime on its own timeline (the marker and frame axes stay in lockstep).
 sip-clock = { path = "../sip-clock" }
+
+# The global allocator of the `loadgen` binary only (src/bin/loadgen.rs); the lib
+# installs none, so a test binary may install its own. unix-only (jemalloc has no
+# MSVC target). "profiling" lets `_RJEM_MALLOC_CONF=prof:true` dump the heap.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.7", features = ["profiling"] }
+# The binary's jemalloc defaults (its `malloc_conf`, ADR-0038) and the resolved
+# configuration line it logs at startup.
+jemalloc-stats = { path = "../jemalloc-stats" }
 
 [dev-dependencies]
 # The counting global allocator of the allocations-per-call bench

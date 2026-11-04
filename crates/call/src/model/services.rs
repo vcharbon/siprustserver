@@ -46,6 +46,10 @@ pub struct TransferState {
     pub c_leg_id: Option<String>,
     /// CSeq of the REFER request on the referrer's dialog (NOTIFY correlation).
     pub refer_cseq: Option<u32>,
+    /// The `Event` of the REFER's NOTIFYs: `refer`, or `refer;id=<CSeq>` when
+    /// the referrer's dialog already carries a refer subscription (RFC 3515
+    /// §2.4.6).
+    pub notify_event: String,
     /// Wall-clock ms when the REFER was received.
     pub started_at_ms: i64,
     /// Last 1xx status C sent: a repeat of it is accounted no second time.
@@ -54,10 +58,6 @@ pub struct TransferState {
     /// a-realign re-INVITE can offer it back to A.
     #[serde(with = "serde_bytes")]
     pub c_initial_sdp: Option<Vec<u8>>,
-    /// The referrer answered a refer NOTIFY 481: the implicit subscription is
-    /// over (RFC 6665 §4.4.1) and no further NOTIFY leaves on it; the transfer
-    /// itself runs on to its own outcome.
-    pub subscription_terminated: bool,
 }
 
 /// An internal release event the decision backend can subscribe to on a

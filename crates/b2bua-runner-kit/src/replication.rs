@@ -5,7 +5,8 @@
 //! replication on never runs without it.
 //!
 //! ## Env grammar
-//!   B2BUA_REPL          truthy (`1`/`true`/`yes`/`on`) enables replication (default off)
+//!   B2BUA_REPL          on/off (`1`/`true`/`yes`/`on`, `0`/`false`/`no`/`off`; any
+//!                       other value refuses the boot) enables replication (default off)
 //!   B2BUA_REPL_LISTEN   replication TCP listen addr        (default 0.0.0.0:9092)
 //!   B2BUA_REPL_PORT     port every peer is reached on      (default = the REPL_LISTEN port)
 //!   B2BUA_PEERS         static membership `ord@host,..`; set, it takes precedence
@@ -13,7 +14,9 @@
 //!   B2BUA_REPL_SERVICE  headless Service whose EndpointSlices name the peers
 //!                       (default b2bua-worker)
 //!   B2BUA_NAMESPACE     namespace of that Service          (default $POD_NAMESPACE, then sip-test)
-//!   B2BUA_REPL_*_MS …   the link bounds ([`link_env`], ADR-0045)
+//!   B2BUA_REPL_*_MS …   the link bounds ([`link_env`], ADR-0045) and the write
+//!                       path's ([`write_path_env`], ADR-0055 §3)
+//!   B2BUA_DEAD_*_MS …   the dead-verdict bounds ([`verdict_env`], ADR-0050 §3)
 //!
 //! A malformed `B2BUA_REPL_LISTEN`, `B2BUA_REPL_PORT`, `B2BUA_PEERS` or link
 //! bound, or a listen address that cannot be bound, refuses the boot. A kube
@@ -39,17 +42,19 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use b2bua::repl::ReplicatingCallStore;
+use b2bua::repl::{Changelog, ReplicatingCallStore};
 use b2bua::ReplicationSetup;
 use http_net::SystemResolver;
 use repl_net::{RealReplicationNetwork, ReplicationNetwork};
 use sip_clock::Clock;
 use topology::{parse_peer_list, Membership, Peer, StaticMembership};
 
-use crate::is_truthy;
+use crate::runner_env::switch;
 
 mod link_env;
 mod repl_resolver;
+mod verdict_env;
+mod write_path_env;
 use link_env::LinkSettings;
 use repl_resolver::ReplResolver;
 
@@ -84,14 +89,27 @@ pub struct ReplicationSettings {
     pub(crate) membership: MembershipSource,
     /// The link bounds, `B2BUA_REPL_*_MS` ([`link_env`]).
     pub(crate) link: LinkSettings,
+    /// The sync level, its cap and the backlog marks ([`write_path_env`]).
+    pub(crate) write_path: b2bua::repl::WritePath,
+    /// The dead-verdict bounds ([`verdict_env`]).
+    pub(crate) verdict: b2bua::repl::VerdictBounds,
 }
 
 impl ReplicationSettings {
     /// Reads the grammar through `get`. `Ok(None)` when replication is off;
-    /// `Err` naming the variable when one is malformed.
+    /// `Err` naming the variable when one is malformed, when replication is
+    /// on with no `B2BUA_CLUSTER_KEY` — the owners of a call trust what each
+    /// states on its requests only under that key (ADR-0055 §12) — or when
+    /// it discovers its peers with no `POD_UID`, the identity its own
+    /// endpoint is bound to (§6).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
-        if !get("B2BUA_REPL").is_some_and(|v| is_truthy(&v)) {
+        if !switch("B2BUA_REPL", get("B2BUA_REPL"), false)? {
             return Ok(None);
+        }
+        if get("B2BUA_CLUSTER_KEY").is_none_or(|k| k.trim().is_empty()) {
+            return Err("B2BUA_REPL is on but B2BUA_CLUSTER_KEY is unset: the owners of a call \
+                 sign and verify the via-extension with it (ADR-0055 §12)"
+                .to_string());
         }
         let raw_listen = get("B2BUA_REPL_LISTEN").unwrap_or_else(|| "0.0.0.0:9092".to_string());
         let listen =
@@ -106,6 +124,12 @@ impl ReplicationSettings {
         };
         let peers = get("B2BUA_PEERS").unwrap_or_default();
         let membership = if peers.trim().is_empty() {
+            if get("POD_UID").is_none_or(|uid| uid.trim().is_empty()) {
+                return Err("B2BUA_REPL discovers its peers from the EndpointSlices but POD_UID \
+                     is unset: the worker tells its own endpoint from another worker's on its \
+                     ordinal by its pod UID (ADR-0055 §6)"
+                    .to_string());
+            }
             MembershipSource::EndpointSlices {
                 service: get("B2BUA_REPL_SERVICE").unwrap_or_else(|| "b2bua-worker".to_string()),
                 namespace: get("B2BUA_NAMESPACE")
@@ -118,7 +142,9 @@ impl ReplicationSettings {
             MembershipSource::Static(list)
         };
         let link = LinkSettings::from_lookup(&get)?;
-        Ok(Some(Self { listen, peer_port, membership, link }))
+        let write_path = write_path_env::write_path(&get)?;
+        let verdict = verdict_env::verdict_bounds(&get)?;
+        Ok(Some(Self { listen, peer_port, membership, link, write_path, verdict }))
     }
 
     /// How the membership these settings select is addressed.
@@ -157,7 +183,12 @@ impl ReplicationSettings {
         Ok(ReplicationSetup {
             network: Arc::new(network),
             membership,
-            store: Arc::new(ReplicatingCallStore::new(incarnation_gen, clock)),
+            store: Arc::new(ReplicatingCallStore::with_changelog(
+                Changelog::new(incarnation_gen, clock.clone())
+                    .with_dead_peer_ttl(self.link.dead_peer_ttl_ms())
+                    .with_bootstrap_hard_timeout(self.link.bootstrap_hard_timeout),
+                clock,
+            )),
             listener,
             addr_resolver: Arc::new(ReplResolver::new(
                 self.peer_port,
@@ -168,6 +199,9 @@ impl ReplicationSettings {
             incarnation_gen,
             puller: self.link.puller(),
             serve: self.link.serve(),
+            replica: b2bua::ReplicaConfig::default(),
+            write_path: self.write_path,
+            verdict: self.verdict,
         })
     }
 }
@@ -237,7 +271,7 @@ pub async fn replication_setup_from_lookup(
 
 /// Boot wall clock in milliseconds, so a sub-second restart still takes a
 /// higher gen; 0 only for a clock before the epoch.
-fn boot_incarnation() -> u64 {
+pub(crate) fn boot_incarnation() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(sip_clock::wall::millis_u64).unwrap_or(0)
 }
 

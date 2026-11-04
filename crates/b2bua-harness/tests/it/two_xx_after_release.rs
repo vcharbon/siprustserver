@@ -67,9 +67,10 @@ async fn a_2xx_repeated_after_release_draws_the_calls_own_ack_and_no_bye() {
 
 /// A delayed offer: bob's 200 carries the offer, so its ACK owes the answer
 /// alice's ACK would carry. alice hangs up on the 200 before she ACKs it (her
-/// declared fault), so the BYE reaches bob with no ACK of his 2xx; he answers
-/// it and the call is reaped. His next repeat of the 2xx (RFC 3261 §13.3.1.4)
-/// draws one ACK and no second BYE: the call already ended that dialog.
+/// declared fault): the BYE relayed to bob leaves behind his ACK, answering
+/// his offer with every stream rejected (RFC 3264 §6); he answers the BYE and
+/// the call is reaped. His next repeat of the 2xx (RFC 3261 §13.3.1.4) draws
+/// one ACK and no second BYE: the call already ended that dialog.
 #[tokio::test(start_paused = true)]
 async fn a_2xx_repeated_after_a_bye_that_beat_its_ack_draws_an_ack_and_no_bye() {
     let h = Harness::new("b2bua-2xx-after-release-byed-unacked");
@@ -87,6 +88,10 @@ async fn a_2xx_repeated_after_a_bye_that_beat_its_ack_draws_an_ack_and_no_bye() 
     uas.respond(200, "OK").with_sdp(OFFER).await;
     call.expect(200).await;
     let mut bye = call.send_request(InDialogMethod::Bye).send().await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq());
+    let answer = String::from_utf8_lossy(ack.request().body()).to_string();
+    assert!(answer.contains("m=audio 0 "), "the ACK rejects every stream of the offer: {answer}");
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;

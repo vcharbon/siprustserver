@@ -13,9 +13,17 @@ use crate::rules::refer_transfer::notify::{
 use crate::rules::refer_transfer::ok;
 use crate::rules::Terminal;
 use b2bua_sdk::model::{
-    Body, Effect, Match, RuleAction, RuleDefinition, RuleHandleResult, TimerDelay,
+    Body, Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay,
 };
 use call::TimerKey;
+
+/// Whether the event is C's response to the INVITE that dialled it: one at
+/// another number answers a later request of C's dialog, not that INVITE.
+fn from_c_to_its_invite(ctx: &RuleContext) -> bool {
+    let from_c = state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id);
+    let cseq = ctx.response().map(|r| i64::from(r.cseq().seq()));
+    from_c && cseq.is_some() && cseq == ctx.source_leg().and_then(|l| l.dialled_cseq())
+}
 
 /// transfer-c-1xx-absorb — C 1xx. The referrer's peer is answered, so C's
 /// provisional is shown to no one: C keeps what it is owed (`Early`, a PRACK
@@ -33,9 +41,7 @@ pub(super) fn c_1xx_absorb() -> RuleDefinition {
             .method("INVITE")
             .status_class(1)
             .direction(Direction::FromB)
-            .filter(|ctx| {
-                state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
-            }),
+            .filter(from_c_to_its_invite),
         handle: |ctx| {
             let st = state(ctx)?;
             let resp = ctx.response()?;
@@ -72,9 +78,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             .status_class(2)
             .direction(Direction::FromB)
             .leg_states(&[LegState::Trying, LegState::Early])
-            .filter(|ctx| {
-                state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
-            }),
+            .filter(from_c_to_its_invite),
         handle: |ctx| {
             let st = state(ctx)?.clone();
             let resp = ctx.response()?;
@@ -103,7 +107,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                 RuleAction::ConfirmDialog { leg_id: c_leg_id.clone() },
                 RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: None },
             ];
-            actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"));
+            actions.push(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"));
             actions.extend([
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
                 RuleAction::cancel(TimerKey::leg(call::TimerType::NoAnswer, &c_leg_id)),
@@ -148,14 +152,13 @@ pub(super) fn c_fail_initial() -> RuleDefinition {
             .leg_states(&[LegState::Trying, LegState::Early])
             .filter(|ctx| {
                 let is_fail = ctx.response().map(|r| r.status() >= 300).unwrap_or(false);
-                is_fail
-                    && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+                is_fail && from_c_to_its_invite(ctx)
             }),
         handle: |ctx| {
             let st = state(ctx)?.clone();
             let resp = ctx.response()?;
             let mut actions = Vec::new();
-            actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, resp.status(), resp.reason()));
+            actions.push(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, resp.status(), resp.reason()));
             actions.extend([
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
                 RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
@@ -202,7 +205,7 @@ pub(super) fn c_no_answer() -> RuleDefinition {
             let st = state(ctx)?.clone();
             let c_leg_id = st.c_leg_id.clone()?;
             let mut actions = Vec::new();
-            actions.extend(notify(&st, SUB_STATE_TERMINATED_TIMEOUT, 408, "Request Timeout"));
+            actions.push(notify(&st, SUB_STATE_TERMINATED_TIMEOUT, 408, "Request Timeout"));
             actions.extend([
                 RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Timeout,

@@ -29,17 +29,18 @@ mod resurrection;
 mod router_sink;
 mod self_endpoint;
 mod server;
-mod shed_marks;
 mod store;
 mod supervisor;
+mod verdict_bounds;
+mod write_path;
 
 pub use changelog::{
-    BodySource, Changelog, RefMeta, DEFAULT_DEAD_PEER_TTL_MS, DEFAULT_TOMBSTONE_TTL_MS,
+    BacklogMarks, BodySource, Changelog, FlowLiveness, Reach, RefMeta, DEFAULT_DEAD_PEER_TTL_MS,
 };
 pub use departed::{departed_probe, DepartedProbe};
 pub(crate) use peer_body::decode_peer_body;
 pub use peer_resolver::{AddrResolver, FnPeerResolver, PeerResolver};
-pub use puller::{Puller, PullerConfig, PullerStatus};
+pub use puller::{Attempt, ConnectNow, Puller, PullerConfig, PullerStatus};
 pub use readiness::{
     CordonRefused, OptionsReport, Readiness, ReadinessSource, ReadinessState, Refusal,
 };
@@ -49,9 +50,20 @@ pub use self_endpoint::{SelfEndpoint, WithdrawalCondition};
 pub use server::{ReplServer, ServeConfig};
 pub use store::ReplicatingCallStore;
 pub use supervisor::{PeerLink, ReplicationSupervisor};
+pub use verdict_bounds::{
+    VerdictBounds, DEFAULT_FRESH_MS as DEFAULT_VERDICT_FRESH_MS,
+    DEFAULT_HOLD_MS as DEFAULT_VERDICT_HOLD_MS,
+};
+pub use write_path::{SyncLevel, WritePath};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod anchor_tests;
+
+#[cfg(test)]
+mod backup_readiness_tests;
 
 #[cfg(test)]
 mod test_support;
@@ -108,4 +120,16 @@ mod puller_restart_tests;
 mod reconcile_restart_tests;
 
 #[cfg(test)]
+mod verdict_confirmation_tests;
+
+#[cfg(test)]
 mod real_transport_tests;
+
+#[cfg(test)]
+mod proto_ver_tests;
+
+#[cfg(test)]
+mod accept_bounds_tests;
+
+#[cfg(test)]
+mod write_path_tests;

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# A deleted pod is re-created by its workload: nothing to undo.
+exit 0

@@ -23,17 +23,19 @@ const branchOf = (checkout: string) =>
       : Effect.tap(Git.branchOf(checkout), (branch) => Effect.sync(() => void branches.set(checkout, branch)))
   )
 
-/** The run identity of a replay on `lane` under `load`. */
+/** The run identity of a replay on `lane` under `load`, forced onto a lane lacking `forced` where any. */
 export const current = (
   lane: string,
-  load: RunIdentity.Load
+  load: RunIdentity.Load,
+  forced: ReadonlyArray<string> = []
 ): Effect.Effect<RunIdentity.RunIdentity, never, Identity.Service | ChildProcessSpawner.ChildProcessSpawner> =>
   Effect.gen(function*() {
     const identity = yield* Identity.Service
     return {
       env: identity.environment,
       branch: yield* branchOf(identity.checkout),
-      laneHash: RunIdentity.laneHash(lane, load),
-      load
+      laneHash: RunIdentity.laneHash(lane, load, forced),
+      load,
+      ...(forced.length === 0 ? {} : { forced })
     }
   })

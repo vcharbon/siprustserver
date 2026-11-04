@@ -30,8 +30,8 @@ const GLARE_500_RETRY_AFTER: RetryAfterRange = RetryAfterRange { min_sec: 0, max
 
 impl ActionExecutor<'_> {
     /// Answer the current request event in place with `status` (no relay) —
-    /// the response goes back to the request's top-Via sent-by on the source
-    /// leg's server transaction, under the source face's Contact where
+    /// the response goes to the request's top-Via response target on the
+    /// source leg's server transaction, under the source face's Contact where
     /// [`generators::response_states_own_contact`] states one (the 2xx to
     /// UPDATE, the 202 to REFER). `extra_headers` ride the response as given; on a failure final to the
     /// initial INVITE the deployment's minted-final advertisement fills a half
@@ -91,10 +91,8 @@ impl ActionExecutor<'_> {
             // (`leg_own_tag`; none on the a-leg before its dialog exists). No
             // rule answers locally with a 1xx, so the policy's tagged-1xx
             // clause needs no check here.
-            let contact =
-                generators::response_states_own_contact(req.method(), status).then(|| {
-                    relay::leg_contact(self.config, relay::CallMarks::of(call), ctx.source_leg_id)
-                });
+            let contact = relay::leg_contact(call, ctx.source_leg_id)
+                .filter(|_| generators::response_states_own_contact(req.method(), status));
             let opts = GenerateResponseOpts {
                 to_tag,
                 contact,
@@ -107,8 +105,8 @@ impl ActionExecutor<'_> {
                 Ok(resp) => resp,
                 Err(e) => return relay::unbuilt(&call.call_ref, ctx.source_leg_id, "response", &e),
             };
-            // RFC 3261 §18.2.2: a response goes back to the request's top-Via sent-by.
-            let (host, port) = req.top_via().sent_by().pair();
+            // RFC 3261 §18.2.2: to the request's top-Via response target.
+            let (host, port) = req.top_via().response_target();
             fx.outbound.push(OutboundSipEffect {
                 body: OutboundBody::Response(resp),
                 mode: OutboundTxnMode::ServerResponse,
@@ -171,8 +169,7 @@ impl ActionExecutor<'_> {
         self.retire(call, fx, Scope::Provisionals);
         let a_tag = self.ensure_a_dialog(call);
         let Some(a_invite) = self.caller_invite(call) else { return };
-        let contact =
-            relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
+        let contact = relay::leg_contact(call, &call.a_leg.leg_id);
         // Guard: the status relayed here is the failing peer's own, so the
         // image already holds retry targets only on a 3xx / 485. Any other
         // status keeps no Contact line, whatever the image holds.
@@ -194,9 +191,8 @@ impl ActionExecutor<'_> {
             status,
             reason,
             Some(a_tag),
-            Some(contact),
+            contact,
             vec![],
-            None,
             None,
             extra,
             Provenance::Relayed,
@@ -288,7 +284,6 @@ impl ActionExecutor<'_> {
             None,
             vec![],
             None,
-            None,
             extra,
             Provenance::Authored,
             relay::Author::Stack,
@@ -368,8 +363,7 @@ impl ActionExecutor<'_> {
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
         let Some(a_invite) = self.caller_invite(call) else { return };
-        let contact =
-            relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
+        let contact = relay::leg_contact(call, &call.a_leg.leg_id);
         let mut extra_headers = Vec::new();
         if let Some(pem) = p_early_media {
             extra_headers.push(SipHeader {
@@ -385,10 +379,9 @@ impl ActionExecutor<'_> {
             status,
             reason,
             Some(to_tag),
-            Some(contact),
+            contact,
             body.to_vec(),
             content_type,
-            None,
             extra_headers,
             Provenance::Authored,
             author,
@@ -446,17 +439,16 @@ impl ActionExecutor<'_> {
         if !(200..300).contains(&status) {
             return;
         }
-        // A2: the caller-supplied tag verbatim, else a freshly minted one.
-        // Minting via the IdGen guarantees A2 ≠ A1 (distinct from the pinned
-        // early-media tag), the RFC 3264 §5.1 requirement.
-        let a2 = to_tag.map(str::to_string).unwrap_or_else(|| self.turn.ids.new_tag());
+        // A2: the caller-supplied tag verbatim, else the one the call derives
+        // for the answering dialog, distinct from every early-media tag (RFC
+        // 3264 §5.1).
+        let a2 = to_tag.map(str::to_string).unwrap_or_else(|| crate::caller_tags::answering(call));
         // SDP answer defaults to application/sdp (mirrors the provisional path).
         let content_type = content_type
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
         let Some(a_invite) = self.caller_invite(call) else { return };
-        let contact =
-            relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
+        let contact = relay::leg_contact(call, &call.a_leg.leg_id);
         // §16.6: the delivered final's lines ride as received, except the names
         // the service's `header_updates` state — those are the service's, set
         // or removed, and a relayed line of the same name never competes.
@@ -503,10 +495,9 @@ impl ActionExecutor<'_> {
             status,
             reason,
             Some(a2.clone()),
-            Some(contact),
+            contact,
             body.to_vec(),
             content_type,
-            None,
             extra_headers,
             Provenance::Authored,
             author,

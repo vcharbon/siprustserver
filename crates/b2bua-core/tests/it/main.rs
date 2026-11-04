@@ -4,13 +4,22 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=b2bua-core) & binary(it)' <module>::`.
 
+mod caller_tags;
+mod calls;
 mod ended_dialog_2xx_rules;
+mod evidence_rules;
+mod evidence_triggers;
+mod fork_straggler_rules;
 mod lifecycle_transition_trace;
-mod lost_round_rules;
 mod media_leg_advertisement;
 mod rules;
 mod service_macro;
+mod services;
+mod settle_triggers;
+mod timer_scope_rules;
 mod turn_lane;
+mod unheld_lane;
+mod unheld_response;
 
 /// The caller's INVITE `call`'s record rebuilds.
 fn caller_of(call: &call::Call) -> sip_message::SipRequest {

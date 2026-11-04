@@ -20,6 +20,10 @@ impl<'a, 'p> Runner<'a, 'p> {
         // or advances the clock; if neither happens for a long stretch the loop
         // cannot make progress, and saying so beats spinning forever.
         let mut stall = Stall::new(self.wall_ceiling());
+        self.state_bound_addresses();
+        if !self.refuse_unsupported_events() {
+            return false;
+        }
         loop {
             if let Some(failure) = stall.check("the flow", || self.instance.cursor().frontier()) {
                 self.instance.fail(failure);
@@ -63,8 +67,13 @@ impl<'a, 'p> Runner<'a, 'p> {
                     {
                         return false;
                     }
-                    if !self.expire_expects() {
+                    if !self.expire_expects() || !self.expire_awaits() {
                         return false;
+                    }
+                }
+                Wake::Event(event) => {
+                    if let Some(events) = self.lane.events.as_mut() {
+                        events.record(event);
                     }
                 }
                 Wake::Message { actor, message } => {
@@ -109,6 +118,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     pub(super) async fn emit_ready(&mut self) -> bool {
         loop {
             let Some(step) = self.next_send() else { return true };
+            self.consume_event(&step);
             if !self.emit(&step, None).await {
                 // A send the run cannot compose, pace or put on the wire is a
                 // script it cannot keep following (§11.2): the close ends what
@@ -127,7 +137,11 @@ impl<'a, 'p> Runner<'a, 'p> {
             .frontier()
             .iter()
             .filter_map(|id| self.instance.plan().step(id))
-            .find(|step| step.is_send() && self.dwell_deadline(step).is_some_and(|at| at <= now))
+            .find(|step| {
+                step.is_send()
+                    && self.dwell_deadline(step).is_some_and(|at| at <= now)
+                    && self.event_released(step)
+            })
             .cloned()
     }
 
@@ -196,7 +210,14 @@ impl<'a, 'p> Runner<'a, 'p> {
         for id in self.instance.cursor().frontier() {
             let Some(step) = self.instance.plan().step(&id) else { continue };
             let at = if step.is_send() {
-                match self.dwell_deadline(step) {
+                // A send held on its lane event wakes the run at its budget;
+                // the event's own report wakes it earlier.
+                let deadline = if self.event_released(step) {
+                    self.dwell_deadline(step)
+                } else {
+                    self.event_deadline(step)
+                };
+                match deadline {
                     Some(at) => at,
                     None => continue,
                 }
@@ -238,6 +259,13 @@ impl<'a, 'p> Runner<'a, 'p> {
                 (actor, inbound)
             });
         }
+        let events = self.lane.events.as_mut();
+        let event = async move {
+            match events {
+                Some(events) => events.next().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             biased;
             Some((actor, inbound)) = pumps.next() => match inbound {
@@ -247,13 +275,14 @@ impl<'a, 'p> Runner<'a, 'p> {
                 },
                 Ok(HarnessInbound::Response(response)) => Wake::Message {
                     actor,
-                    message: Box::new(SipMessage::Response(response)),
+                    message: Box::new(SipMessage::Response(*response)),
                 },
                 // A per-recv timeout is "nothing arrived yet", not an error: the
                 // loop's own deadlines decide when waiting has gone on too long.
                 Err(scenario_harness::StepError::Timeout { .. }) => Wake::Timer,
                 Err(e) => Wake::Closed { actor, detail: e.to_string() },
             },
+            event = event => Wake::Event(event),
             () = tokio::time::sleep_until(wake) => Wake::Timer,
         }
     }
@@ -310,4 +339,6 @@ pub(super) enum Wake {
     Message { actor: String, message: Box<SipMessage> },
     /// A socket closed or errored under the run, in the transport's own words.
     Closed { actor: String, detail: String },
+    /// The lane reported one occurrence of an event (§6.7g).
+    Event(String),
 }

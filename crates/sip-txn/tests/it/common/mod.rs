@@ -31,7 +31,6 @@ use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::{IdGen, ServerTxnKey, TransactionConfig, TransactionEvent, TransactionLayer};
-use tokio::sync::mpsc;
 
 pub const B2BUA: &str = "127.0.0.1:5070";
 pub const PEER: &str = "10.0.0.1:5555";
@@ -40,16 +39,21 @@ pub fn addr(s: &str) -> SocketAddr {
     s.parse().unwrap()
 }
 
-/// The layer's defaults, identifiers drawn deterministically.
+/// The layer's defaults, identifiers drawn deterministically, under a TU that
+/// releases no 100: an INVITE's 100 leaves on the layer's next turn, as at a
+/// bound of zero. The bound itself is `first_provisional`'s.
 pub fn config() -> TransactionConfig {
-    TransactionConfig::new(Arc::new(IdGen::seeded(0xC0FFEE)))
+    TransactionConfig {
+        trying_bound_ms: 0,
+        ..TransactionConfig::new(Arc::new(IdGen::seeded(0xC0FFEE)))
+    }
 }
 
 /// A bound transaction layer over the simulated fabric, plus a peer endpoint
 /// for injecting wire bytes at it.
 pub struct Stack {
     pub txn: TransactionLayer,
-    pub events: mpsc::Receiver<TransactionEvent>,
+    pub events: sip_txn::TransactionEvents,
     pub peer: Box<dyn UdpEndpoint>,
     pub net: SimulatedSignalingNetwork,
 }
@@ -270,4 +274,19 @@ pub fn response_bytes(
          Content-Length: 0\r\n\r\n"
     )
     .into_bytes()
+}
+
+/// What an `on_bound` report named, each time: the transaction's call, Call-ID
+/// and From-tag.
+pub type Told =
+    std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>, Option<String>)>>>;
+
+/// An `on_bound` report that keeps what it is told in `told`.
+pub fn telling(told: &Told) -> sip_txn::OnBound {
+    let told = told.clone();
+    std::sync::Arc::new(move |held: sip_txn::BoundPassed<'_>| {
+        let owned = |v: Option<&str>| v.map(str::to_string);
+        let named = (owned(held.call_ref), owned(held.call_id), owned(held.from_tag));
+        told.lock().unwrap().push(named);
+    })
 }

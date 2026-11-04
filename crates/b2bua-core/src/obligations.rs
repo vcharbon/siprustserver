@@ -10,7 +10,7 @@
 //! - **pure over the snapshot** — `settle`/`owed` read only `&Call` (including
 //!   its `ext` slices). Closures and runtime registries are unrepresentable
 //!   here by design: the same derivation must produce the same obligations
-//!   from a snapshot rehydrated on another node after reclaim.
+//!   from the same snapshot, wherever it is restored.
 //! - **total over the call's life** — tolerate a snapshot taken before the
 //!   kind's state was ever written (`None` / empty fields).
 //! - **skip-aware** — entries carrying no real allocation are skipped at

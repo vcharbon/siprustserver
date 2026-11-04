@@ -4,7 +4,7 @@
 //! (`sip_net::RealSignalingNetwork` — no `Recorder` decorator, no simulated
 //! fabric) and a **system wall clock** (`Clock::system`, so transaction/dialog
 //! timers fire). The generic runner plumbing — env grammar, bind + ingress
-//! brake, advertise coercion, deps defaults, probe server, gauge sampler,
+//! brake, the worker's addresses and mode, deps defaults, probe server, gauge sampler,
 //! SIGTERM/drain — lives in `b2bua-runner-kit` (shared with downstream runner
 //! binaries per ADR-0016); this binary keeps only its OWN composition choices:
 //!   - route: `ScriptedDecisionEngine::route_all_to_with_limiter(DEST, stress)`
@@ -21,27 +21,33 @@
 //!   - alloc: jemalloc (+ heap-profiling `/debug/heap` route, jemalloc stats
 //!            appended to `/metrics`).
 //!
-//! Config via env (all optional; the generic `B2BUA_*`/`LIMITER_*`/`WORKER_*`
+//! Config via env (optional unless marked; the generic `B2BUA_*`/`LIMITER_*`/`WORKER_*`
 //! knobs are parsed by `b2bua_runner_kit::RunnerEnv` — see its field docs):
 //!   B2BUA_LISTEN    SIP/signaling listen addr        (default 0.0.0.0:5060)
-//!   B2BUA_ADVERTISE SIP host\[:port\] stamped on Via/Contact/b-leg Call-ID
-//!                   (default: bound IP, or loopback if bind is 0.0.0.0).
-//!                   In k8s inject the pod IP via downward API `status.podIP`,
-//!                   else peers route responses to 0.0.0.0 (a storm).
+//!   B2BUA_ADVERTISE REQUIRED: the worker's IP-literal ip:port on every Via and
+//!                   b-leg Call-ID, and standalone on every Contact. In k8s
+//!                   inject the pod IP via downward API `status.podIP`.
+//!   B2BUA_MODE      REQUIRED: `proxied` (behind the front proxy) or `standalone`
+//!   B2BUA_OUTBOUND_PROXY  proxied only, REQUIRED there: the proxy's worker-facing
+//!                   IP-literal ip:port every b-leg (worker→callee) request is
+//!                   forced through (a preloaded plain `;lr` Route).
+//!   B2BUA_CONTACT_ADDRESS proxied only, REQUIRED there: the proxy's peer-facing
+//!                   IP-literal ip:port every Contact names.
+//!                   (the full consistency table: `b2bua_runner_kit::addresses_from_lookup`)
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
-//!   B2BUA_OUTBOUND_PROXY  front-proxy IP-literal ip:port every b-leg (worker→callee)
-//!                   request is forced through (a preloaded plain `;lr` Route).
-//!                   REQUIRED in the k8s cluster: a peer's internal pod IP is not
-//!                   routable peer-to-peer in a real deployment, so ALL outbound
-//!                   SIP must traverse the LB proxy — never go pod-direct. Unset →
-//!                   b-leg goes straight to the callee (local/dev only). (unset)
 //!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
+//!   B2BUA_ADMIN     operator routes' listen addr, loopback only (default 127.0.0.1:9094)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
 //!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default 4 MiB;
 //!                   empty = kernel wmem_default; clamped at wmem_max) — ADR-0033
 //!   B2BUA_UDP_RCVBUF SO_RCVBUF on the signalling socket, bytes (default 4 MiB;
 //!                   empty = kernel rmem_default; clamped at rmem_max)
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
+//!   POD_UID         worker identity, the pod UID (downward API); required with
+//!                   discovered peers; unset in a static pool: a per-boot token
+//!   B2BUA_CLUSTER_KEY the key the cluster's workers share to sign the via-extension
+//!                   (16..64 bytes; required with B2BUA_REPL on; unset: none
+//!                   stated, none trusted) — ADR-0055 §12
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024; 0 = unbuffered, refused beside a RabbitMQ URL)
 //!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _DECLARE / _MAX_LEN / _WINDOW / _*_TIMEOUT_MS / _BACKOFF*_MS
 //!                   the RabbitMQ CDR sink (see `b2bua_runner_kit::RabbitMqCdrSettings`)
@@ -50,16 +56,28 @@
 //!   B2BUA_NEW_CALL_PERMIT_SHARE_PCT share of B2BUA_CONCURRENCY normal initial-INVITE turns may hold (default 50; 1..=100; emergency INVITEs draw the whole pool)
 //!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
-//!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
+//!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60, >= keepalive + Timer F + 10 s, > B2BUA_INVITE_TXN_TIMEOUT_SEC)
 //!   B2BUA_SETUP_TIMEOUT_MS a-leg total setup deadline in ms, reroutes included (default 150000, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
 //!   B2BUA_INVITE_TXN_TIMEOUT_SEC out-of-dialog INVITE txn bound, both call halves (default 158; range 33..=600)
-//!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC the worker gives up on a b-leg hop when NOTHING answers its initial INVITE, not even a 100 (default 32 = RFC 3261 Timer B; range 2..=32; ADR-0044: the transaction keeps Timer A/B; in-dialog INVITE and non-INVITE never read it)
+//!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC the worker gives up on a b-leg hop when NOTHING answers its initial INVITE, not even a 100 (default 5; range 2..=32; ADR-0044: the transaction keeps Timer A/B; in-dialog INVITE and non-INVITE never read it)
 //!   B2BUA_CALL_CONTROL_TIMEOUT_MS decision-backend deadline per round-trip (default 5000; <= 0 disables — ADR-0022)
 //!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg destination allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
 //!   B2BUA_PRIVACY_SERVICE on (default) = this worker is the RFC 3323 privacy service and withholds the asserted identity a concealing Privacy names; off = the next hop is the trust boundary and the identity rides
 //!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)
 //!   B2BUA_CDR_MESSAGE_RING per-leg message-ring cap on the call record: a leg keeps its opening (the initial INVITE up to its first final, the 2xx ACK) and the last N distinct SIP messages after it (default 0 = off)
 //!   B2BUA_CDR_CAPTURED_HEADERS header names whose values every ring entry captures, comma-separated (default empty)
+//!   B2BUA_CDR_FINAL_RESPONSE_HEADERS header names an INVITE final response's entry captures instead, comma-separated (default the captured ones)
+//!   B2BUA_EVENT_QUEUE_REFUSE_DEPTH / _ACCEPT_DEPTH / _REFUSE_DELAY_MS / _REFUSE_INTERVAL_MS /
+//!   _ACCEPT_DELAY_MS / _ACCEPT_HOLD_MS
+//!                   a backed-up transaction event queue (by depth, or by its oldest event's
+//!                   age held past the refusal delay for the interval) refuses new calls on the
+//!                   OPTIONS answer (cause=overload) and at the admission ladder, and accepts
+//!                   again after the hold (default 512 / 64 / 300 / 150 / 50 / 3000; roles,
+//!                   relations, boot checks: `runner_env::event_queue_env`, ADR-0050 §9)
+//!
+//! Every relation between these is checked once, on the final configuration,
+//! before anything is served (`b2bua_runner_kit::ConfigCheck`): an invalid set
+//! refuses the start with one message naming every variable involved.
 //!
 //! ## Call limiter
 //!   LIMITER_URL             the shared limiter, [http://]host:port; unset → NoopLimiter (fail-open)
@@ -70,8 +88,32 @@
 //!
 //! ## HA replication — opt-in via `B2BUA_REPL=1` (default off: unwired node)
 //!   B2BUA_REPL / _REPL_LISTEN / _REPL_PORT / B2BUA_PEERS / B2BUA_REPL_SERVICE /
-//!   B2BUA_NAMESPACE / B2BUA_REPL_*_MS  the replication grammar and its link
-//!   bounds (see `b2bua_runner_kit::ReplicationSettings`, ADR-0045)
+//!   B2BUA_NAMESPACE / B2BUA_REPL_*_MS / B2BUA_DEAD_*_MS  the replication
+//!   grammar, its link and write-path bounds, the held ACK's bound and the
+//!   dead-verdict bounds (see `b2bua_runner_kit::ReplicationSettings`,
+//!   ADR-0045, ADR-0055 §3, ADR-0050 §3). The failover timings, each refused
+//!   at boot off its range, the message naming both variables:
+//!   B2BUA_REPL_NOOP_INTERVAL_MS  heartbeat of every served stream    (500)
+//!   B2BUA_REPL_IDLE_TIMEOUT_MS   a silent stream reads down; a dead verdict
+//!                                on a silent peer is confirmed this long
+//!                                after its last frame; >= 2 x the Noop
+//!                                interval                             (2000)
+//!   B2BUA_REPL_OPEN_TIMEOUT_MS   an accepted connection with no opening
+//!                                request is closed; >= the idle
+//!                                timeout                              (4000)
+//!   B2BUA_REPL_MAX_CONNECTIONS   inbound connections served at once;
+//!                                one above is closed; >= 4            (64)
+//!   B2BUA_REPL_ACK_BOUND_MS      the longest the ACK of a callee's non-2xx
+//!                                waits for its turn; above the sync cap,
+//!                                below T1                             (200)
+//!   B2BUA_REPL_CANCEL_BOUND_MS   the longest a CANCEL's 200 and its
+//!                                INVITE's 487 wait for their turn; above
+//!                                the sync cap, below T1               (200)
+//!   B2BUA_DEAD_NOTICE_FRESH_MS   how fresh a proxy's dead notice must be to
+//!                                act on; above zero                   (10000)
+//!   B2BUA_DEAD_VERDICT_HOLD_MS   the longest a verdict waits for the
+//!                                replication link to confirm it; >= the
+//!                                freshness window + Timer F           (42000)
 //!
 //! SIGTERM, or the worker's own endpoint withdrawn with no SIGTERM, latches
 //! the worker into `Draining` (OPTIONS 503 + readiness probe fails) so k8s
@@ -97,7 +139,7 @@ use std::env;
 use std::sync::Arc;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use b2bua_runner_kit::{env_or, split_host_port, validate_default_dest, RunnerEnv};
+use b2bua_runner_kit::{env_or, split_host_port, validate_default_dest, ConfigCheck, RunnerEnv};
 use call::LimiterEntry;
 
 /// Always-on "stress" limiter entry attached to every routed call so the full
@@ -149,20 +191,14 @@ async fn run() -> Result<std::process::ExitCode, String> {
 
     // The b-leg callee (`B2BUA_DEST`) is passed to the decision engine as an
     // unresolved host:port: the core never resolves a destination name for
-    // sending. Behind the `B2BUA_OUTBOUND_PROXY` the proxy resolves the
+    // sending. Behind the proxy (`B2BUA_MODE=proxied`) it resolves the
     // Request-URI name; without it the b-leg INVITE to a name fails at send.
     let dest = env_or("B2BUA_DEST", "127.0.0.1:5070");
     let (dest_host, dest_port) = split_host_port(&dest);
 
     // Generic runner plumbing (b2bua-runner-kit): env grammar → bind (ingress
-    // brake installed) → advertise coercion → validated config + metrics/clock.
+    // brake installed) → the worker's addresses → validated config + metrics/clock.
     let base = RunnerEnv::from_env()?.bind("b2bua-runner").await?;
-
-    // Runner-only coherence (not visible to `B2buaConfig::validate`): the default
-    // callee must be admissible under the worker's own allow-list — refuse to
-    // boot with a clear message rather than silently 503 every call.
-    validate_default_dest(&dest_host, &base.config.worker_allowed_target_suffixes)
-        .map_err(|e| format!("invalid B2BUA config: {e}"))?;
 
     // CDR sink: RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
     // discarding default, either way behind the kit's bounded buffer.
@@ -185,7 +221,12 @@ async fn run() -> Result<std::process::ExitCode, String> {
     // No extra ServiceDefs: the in-tree services (transfer, relay-first-18x)
     // ride `default_rules()` at runtime; `compose_services()` (lib.rs) is the
     // doc-generation registry.
-    let core = base.spawn(deps, Vec::new());
+    // This runner's own relation, checked with the generic ones on the final
+    // configuration: the default callee is admissible under the worker's own
+    // allow-list, or every call would be 503'd.
+    let mut check = ConfigCheck::new();
+    check.take(validate_default_dest(&dest_host, &deps.config.worker_allowed_target_suffixes));
+    let core = base.spawn(deps, Vec::new(), check)?;
 
     tracing::info!(
         pid = std::process::id(),

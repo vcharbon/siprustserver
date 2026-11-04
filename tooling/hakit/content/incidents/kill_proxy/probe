@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # Recovered when the crashed proxy's containers restarted with no overlap, it
-# is Ready again, and exactly one proxy holds the virtual address. Exit 75
-# while not yet, or while the addresses cannot be read. Facts: the crash's
-# restart timings, the holder.
+# is Ready again, and both VIPs are routed over every live proxy's node. Exit
+# 75 while not yet, or while a read fails. Facts: the crash's restart
+# timings, the next hops.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
-# shellcheck source=vip.sh
-source "$HAKIT_LIB/vip.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
 # shellcheck source=crash.sh
 source "$HAKIT_LIB/crash.sh"
 crashed="$(hk_probe_crashed)"
-holders="$(hk_vip_holders "$HAKIT_PARAM_ADDRESS" "$HAKIT_PARAM_CONTAINER")" || exit "$HK_NOT_YET"
-[ "$(hk_count <<<"$holders")" -eq 1 ] || exit "$HK_NOT_YET"
-read -r pod node _ <<<"$holders"
-jq -cn --argjson c "$crashed" --arg pod "$pod" --arg node "$node" '$c + {holder: $pod, holder_node: $node}'
+routes="$(hk_probe_routed_over_live)"
+jq -cn --argjson c "$crashed" --argjson r "$routes" --argjson at "$(hk_now_ms)" \
+  '$c + {next_hops: $r, announced_at_ms: $at}'

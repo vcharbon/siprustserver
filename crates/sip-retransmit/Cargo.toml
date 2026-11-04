@@ -9,6 +9,9 @@ description = "The one home for SIP retransmission pacing (ADR-0032): the RFC 32
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

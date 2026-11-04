@@ -8,6 +8,7 @@
 mod bundle;
 mod conformance;
 mod lint;
+mod lint_events;
 mod part_compare;
 mod recording_arms;
 mod recording_fixture;

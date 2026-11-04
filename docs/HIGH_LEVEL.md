@@ -176,6 +176,14 @@ Legend per row — **Port:** direct (D) / re-express (R); **Dep:** extra depende
 
 ## 5. Call-context storage layer (the HA seam) — design in detail
 
+> The replication design in force is ADR-0011 and ADR-0014 as amended by
+> [ADR-0055](./adr/0055-services-are-ha-blind.md): one never-dropped change-log
+> entry per call written before any effect of the turn leaves (§3), the
+> `(p,b)` vector and the state stamp in the store envelope, and containment
+> between two copies (§7). This section is the source model the storage seam
+> was cut from; where it differs (the `callGen` gate, the buffered writer, the
+> single-owner claim), the ADRs hold.
+
 **This is the load-bearing section.** The user's constraint: even though the
 replication transport (the HTTP stream) is **not wired now**, the storage layer
 must be shaped so it drops in later without touching `call` or `rules`. The
@@ -200,7 +208,8 @@ call-cache-backup}.md` + `src/cache`, `src/storage`, `src/replication`:
   **only ever by P**. If the proxy fails over to backup `B` while `P` is down, `B`
   serves the request, advances state, bumps `gen`, and writes to **`bak:{P}:call:
   {ref}` on B's own backend** — `B` never becomes primary; the cookie's `w_pri`
-  stays `P`. No moment of dual ownership.
+  stays `P`. A split can still leave two acting copies of one call; ADR-0055 §7
+  meets them by containment.
 - **Storage layout (key-value, role-partitioned).** Each worker's backend holds:
   `pri:{owner}:call:{ref}` (calls it owns), `bak:{owner}:call:{ref}` (warm backups
   of others' calls), `idx:{key}` (flat index → callRef; **derived from the body**,
@@ -335,9 +344,9 @@ flush(call_ref):
 Because `channel_write_update` appends to the per-peer channel on every flush,
 **turning on HA later is: add a process that reads that channel
 (`channel_pull_batch`) and serves it to peers, plus a puller that applies it
-(`apply_replica_update`).** No call-site changes in `call` or `rules`. Eviction
-and terminate flushes route through a buffered async writer
-(`BufferedTerminateWriter`) so the hot path never blocks on persistence.
+(`apply_replica_update`).** No call-site changes in `call` or `rules`. A turn
+writes the call into the change log itself, before any of its effects leaves,
+and no write is dropped (ADR-0055 §3).
 
 ### 5.4 What we wire NOW vs DEFER
 

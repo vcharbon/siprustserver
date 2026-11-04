@@ -85,6 +85,29 @@ impl Hist {
         HistogramValue { buckets, sum: (self.sum * 1e6).round() / 1e9, count: self.total }
     }
 
+    /// What was recorded since `earlier`, a past copy of this histogram: the
+    /// bucket counts, total and sum apart; the max stays this one's.
+    pub(crate) fn since(&self, earlier: &Hist) -> Hist {
+        let counts = self.counts.iter().zip(&earlier.counts).map(|(n, e)| n - e).collect();
+        Hist {
+            bounds: self.bounds.clone(),
+            counts,
+            total: self.total - earlier.total,
+            sum: self.sum - earlier.sum,
+            max: self.max,
+        }
+    }
+
+    /// Fold `other`, a histogram of the same bounds, into this one.
+    pub(crate) fn merge(&mut self, other: &Hist) {
+        for (n, o) in self.counts.iter_mut().zip(&other.counts) {
+            *n += o;
+        }
+        self.total += other.total;
+        self.sum += other.sum;
+        self.max = self.max.max(other.max);
+    }
+
     pub(crate) fn mean_ms(&self) -> f64 {
         if self.total == 0 {
             0.0

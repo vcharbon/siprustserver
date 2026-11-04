@@ -13,9 +13,7 @@ use failover_harness::{assert_call_fully_over, WorkerHealth};
 use scenario_harness::expect_failure;
 use sip_message::generators::InDialogMethod;
 
-use crate::call_terminate_on_backup::{
-    accept_takeover_cseq_overlap, establish, Established, ANSWER, OFFER,
-};
+use crate::call_terminate_on_backup::{establish, Established, ANSWER, OFFER};
 
 /// The dump section under the header `── {title} ──`, up to the next one.
 fn section<'d>(dump: &'d str, title: &str) -> &'d str {
@@ -38,7 +36,7 @@ fn fact_node(line: &str) -> Option<&str> {
 async fn a_two_node_dump_names_the_node_of_every_trace_fact_and_log_line() {
     let failed = expect_failure(async {
         let Established {
-            mut fh,
+            fh,
             alice,
             bob,
             proxy,
@@ -51,7 +49,6 @@ async fn a_two_node_dump_names_the_node_of_every_trace_fact_and_log_line() {
             mut dialog,
             ..
         } = establish("dump-names-the-node").await;
-        accept_takeover_cseq_overlap(&mut fh);
 
         // The backup's copy serves a re-INVITE round while the primary lives.
         proxy.set_health(&primary_ord, WorkerHealth::Dead);

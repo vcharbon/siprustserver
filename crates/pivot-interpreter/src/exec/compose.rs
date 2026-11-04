@@ -156,6 +156,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         if let Some(n) = step.msg.target_refresh {
             stack.refresh_target(n);
         }
+        stack.state_contact(rendered.contact_display.as_deref(), rendered.contact_user.as_deref());
 
         // Where the CSeq is NOT the stack's to choose, an override cannot be
         // honoured, and a message that quietly kept the compliant number would

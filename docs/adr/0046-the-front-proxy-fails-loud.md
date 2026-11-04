@@ -2,6 +2,7 @@
 
 **Status:** accepted (2026-10-12). Amended (2026-10-16): §2, readiness waits for the first
 worker view and ignores acceptance; D4, the VRRP check also reads the first-view latch (ADR-0050).
+D4 superseded (2026-11-03) by ADR-0056; a total backend outage withdraws the routes (ADR-0056 §3).
 
 **Owner:** `crates/sip-proxy-runner/src/config.rs` and `config/reader.rs` (the
 env grammar and its ranges), `discovery.rs` (the worker pool),
@@ -51,7 +52,8 @@ its family.
    watcher's 30 s backoff ceiling plus the 30 s connect timeout, with margin).
    Each failure is an episode: one warning naming the cause when it starts,
    one line when it ends.
-4. **The virtual address follows proxy health.** The VRRP instance tracks a
+4. **The virtual address follows proxy health.** *Superseded by ADR-0056: a node announces the
+   VIPs exactly while its proxy's `/readyz` passes.* The VRRP instance tracks a
    script that reads the proxy's `/vrrp` (its `/healthz` and its first worker
    view, ADR-0050 §11), wrapped in `/bin/sh -c` with its
    exit code clamped to 0/1: 1 s timeout, `interval 1`, `fall 3`, `rise 2`,
@@ -108,7 +110,9 @@ its family.
    random bytes, base64 text, kid `k1`); both proxies read it through
    `secretKeyRef` and every redeploy reuses it. Rotation through env is not
    supported: changing the key fails the cookie check (403) for the in-dialog
-   requests of every call in progress.
+   requests of every call in progress. The To-tags of the finals a proxy
+   answers itself are keyed by a key derived from it, so either proxy, and a
+   restarted one, absorbs the ACK to a final the other sent.
 8. **Named-target lookups are bounded.** Each lookup is bounded at
    `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` (2 s). A packet whose name is being
    looked up waits on that lookup (at most 32 per name) and leaves after the
@@ -142,18 +146,22 @@ its family.
 | `PROXY_RECV_SHARDS` | 1..1024 | 1 |
 | `PROXY_INTAKE_SHED_PCT` | 0..100 | 50 |
 | `PROXY_SHARD_STALL_MS`, `PROXY_BIND_RETRY_INTERVAL_MS`, `PROXY_BIND_RETRY_DEADLINE_MS`, `PROXY_DRAIN_GRACE_MS` | ≥ 1 ms | 2000, 200, 10000, 5000 |
-| `HEALTH_INTERVAL_MS`, `HEALTH_TIMEOUT_MS` | ≥ 1 ms | 1000, 1500 |
+| `HEALTH_INTERVAL_MS`, `HEALTH_TIMEOUT_MS` | ≥ 1 ms | 1000, 1600 |
 | `HEALTH_THRESHOLD` | ≥ 1 | 2 |
 | `PROXY_HMAC_KID` | non-empty | `k0` |
 | `PROXY_HMAC_KEY` | ≥ 16 bytes | required |
 | `LB_ELU_SOFT`, `LB_ELU_HARD`, `LB_ELU_CRITICAL` | (0, 1], soft < hard < critical | 0.4, 0.5, 0.65 |
 | `LB_BAND_HYSTERESIS` | [0, 1), below the narrower band gap | 0.05 |
 | `LB_AIMD_DECREASE_FACTOR` | (0, 1) | 0.5 |
-| `LB_AIMD_INCREASE_STEP_CPS`, `LB_CAP_CEILING_CPS`, `LB_CAP_FLOOR_CPS` | > 0, floor ≤ initial cap ≤ ceiling | 2, 200, 1 |
+| `LB_AIMD_INCREASE_STEP_CPS`, `LB_CAP_INITIAL_CPS`, `LB_CAP_CEILING_CPS`, `LB_CAP_FLOOR_CPS` | > 0, floor ≤ initial ≤ ceiling | 2, 30, 200, 1 |
+| `LB_AIMD_COOLDOWN_TICKS` | > 0, × the 1000 ms tick ≥ one probe cycle (`HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS`) | 5 |
 | `PROXY_SELF_GATE` | one of `1`, `true`, `yes`, `on`, `0`, `false`, `no`, `off` | on |
 | `PROXY_SELF_GATE_ELU_CRITICAL` | (0, 1] | 0.8 |
 | `PROXY_SELF_GATE_CPS_SIZE`, `PROXY_SELF_GATE_CPS_RATE` | ≥ 1 | 50, 100 |
 | `PROXY_RETRY_AFTER_JITTER_SEC` | 0..3600 s | 5 |
+| `PROXY_BRANCH_MEMO_MAX_ENTRIES`, `PROXY_BRANCH_MEMO_MAX_BYTES` | ≥ 1; with the mean ring, they hold the working set of `PROXY_SELF_GATE_CPS_RATE` calls/s with a quarter of headroom (refused at boot otherwise) | 78 643, 192 MiB accounted (3/8 of the 512 MiB pod limit; that many entries of the heaviest shape, 109 calls/s at a 30 s mean ring and the 158 s INVITE bound) |
+| `PROXY_BRANCH_MEMO_MEAN_RING_MS` | ≥ 1 ms | 30000: the mean ring the memo's two pools are split on |
+| `PROXY_INVITE_TXN_TIMEOUT_SEC` | 33..=600 s, the workers' INVITE transaction bound | 158: an INVITE entry lives the bound plus Timer H at most |
 | `PROXY_RESOLVER_POSITIVE_TTL_MS`, `PROXY_RESOLVER_NEGATIVE_TTL_MS`, `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` | ≥ 1 ms | 60000, 5000, 2000 |
 | `PROXY_RESOLVER_PREWARM` | `host:port` list | none |
 

@@ -37,9 +37,9 @@ crate::registry::rules! {
 /// The occasion is ONE response the endpoint took on a branch it had opened
 /// with a bare `;rport`. Charges the endpoint that sent the response.
 ///
-/// **Advisory by consumer policy**: on a loopback fabric the source-port lookup
-/// never triggers — there is no NAT on 127.0.0.1 — so a fake stack that omits
-/// the echo is not defective. The finding is surfaced and never gates.
+/// **Gating by consumer policy for the stack under test only**: a fake stack
+/// that omits the echo is surfaced as advisory, a stack under test that omits
+/// it fails the run.
 pub struct RportEcho;
 
 impl Obligation for RportEcho {

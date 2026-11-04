@@ -9,13 +9,10 @@
 //! counting:
 //!
 //!   1. **Branch correlation, not an ephemeral Call-ID map.** A probe stays in
-//!      `pending` keyed by its transaction Via branch until the tick-gated reap
-//!      evicts it — the reap fires once per `interval_ms` and drops only probes
-//!      whose deadline has already passed *at that tick*, so a probe survives in
-//!      `pending` until the first tick at-or-after its deadline (this, not any
-//!      `timeout_ms > interval_ms` sizing, is what gives the late reply a window
-//!      to correlate). A reply that lands several ticks after the tick that sent
-//!      it still correlates by branch and resets the miss counter
+//!      `pending` keyed by its transaction Via branch until its own reply window
+//!      (`timeout_ms`) ends, however many ticks the window spans. A reply that
+//!      lands several ticks after the tick that sent it, inside its window,
+//!      still correlates by branch and resets the miss counter
 //!      (`handle_reply`). A reply proving liveness also retires every other
 //!      in-flight probe to the same worker, so their later reaps cannot count a
 //!      spurious miss against a worker that just answered. There is no per-cycle

@@ -121,7 +121,8 @@ impl Sut {
         let capped = engine.capped;
         let mut builder = B2buaSut::builder(Arc::new(engine)).keep_terminated_calls().tune(|c| {
             c.worker_allowed_target_suffixes = vec!["*".into()];
-            c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() };
+            c.cdr =
+                CdrConfig { message_ring: 32, captured_headers: Vec::new(), ..Default::default() };
         });
         if capped {
             builder = builder.limiter(refuse_on("cap", fail_open()));

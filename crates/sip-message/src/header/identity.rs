@@ -248,11 +248,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_cseq_folds_its_method_to_the_canonical_spelling() {
+    fn a_cseq_keeps_its_method_as_written() {
         let c = CSeq::parse(&SipStr::owned("314159 iNvItE")).unwrap();
         assert_eq!(c.seq(), 314159);
+        assert_eq!(c.method(), &Method::Other("iNvItE".to_string()));
+        assert_eq!(c.to_wire(), "314159 iNvItE");
+        let c = CSeq::parse(&SipStr::owned("314159 INVITE")).unwrap();
         assert_eq!(c.method(), &Method::Invite);
-        assert_eq!(c.to_wire(), "314159 INVITE");
     }
 
     #[test]

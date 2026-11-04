@@ -24,7 +24,7 @@ const NOW_MS: i64 = 1_000;
 /// under [`RING_MS`].
 fn ringing_call() -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let call = build_initial_call(
+    let mut call = build_initial_call(
         &invite("w0", "w1", "response-facts"),
         src(),
         &config,
@@ -33,7 +33,7 @@ fn ringing_call() -> Call {
     );
     let mut b = call::testkit::dialled_leg("b-1", "svc");
     b.call_id = "bcid@x".into();
-    let mut call = call::helpers::add_b_leg(call, b);
+    call::helpers::add_b_leg(&mut call, b);
     let ring = Deadline::After(Duration::from_millis(RING_MS as u64));
     let (attempt, _) = call::helpers::open_attempt(&mut call, AttemptCause::Route, ring);
     call::helpers::join_attempt(&mut call, attempt, "b-1");
@@ -55,11 +55,7 @@ Content-Length: 0\r\n\r\n"
     let Ok(SipMessage::Response(resp)) = CustomParser::new().parse(raw.as_bytes()) else {
         panic!("a response")
     };
-    CallEvent::Sip {
-        message: Box::new(SipMessage::Response(resp)),
-        src: "10.0.0.2:5070".parse().unwrap(),
-        matched_client_txn: true,
-    }
+    CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap())
 }
 
 /// One real turn of `event` from `b-1` over `call`, at [`NOW_MS`].
@@ -72,7 +68,9 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         source_leg_id: "b-1",
         direction: Direction::FromB,
         resolved: Default::default(),
+        matched_client_txn: true,
         now_ms: NOW_MS,
+        owners: Default::default(),
     };
     let fw = node.core.router_ctx().framework();
     rule_chain_turn(&fw, call, input, &mut super::test_support::turn(1))

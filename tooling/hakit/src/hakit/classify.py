@@ -2,7 +2,10 @@
 
 A pure function (ADR-0049 §4.6, the class table of §3.1). A record is a
 success when its ending is in the shape's `expected` and every catalog leg the
-generator saw ended as its leg expects. `producer_verdict` is never read.
+generator saw ended as its leg expects. A setup that ends unanswered and
+unexpected is `setup_failed` where the shape expects an answer, or where it
+drew no final at all whatever the shape expects; a final the shape does not
+expect is otherwise an `unexpected_ending`. `producer_verdict` is never read.
 """
 
 from __future__ import annotations
@@ -82,6 +85,11 @@ def _expected(options: list[ExpectedEnding], ending: str, code: int | None, earl
     return any(_matches(e, ending, code, early_media) for e in options)
 
 
+def caller_expected(r: Json, shape: Shape) -> bool:
+    """The caller's ending is one its shape expects."""
+    return _expected(shape.expected, jv.string(r, "ending"), jv.opt_int(r, "final_code"), jv.boolean(r, "early_media"))
+
+
 def _leg_impacts(r: Json, shape: Shape, base: Impact) -> list[Impact]:
     """A leg judged under the caller's ending. On an answered call a leg is
     known missing or wrong only once the call is over: its impact is at the
@@ -150,7 +158,6 @@ def classify(r: Json, shape: Shape) -> Classified:
     ending = jv.string(r, "ending")
     code = jv.opt_int(r, "final_code")
     reason = jv.opt_string(r, "reason")
-    early_media = jv.boolean(r, "early_media")
     failures = jv.objs(r, "failures")
 
     out = Classified(success=False)
@@ -167,10 +174,10 @@ def classify(r: Json, shape: Shape) -> Classified:
     base = Impact(UNEXPECTED_ENDING, stream, call_id, setup_instant, started, answered=answered,
                   retry_after=retry_after)
 
-    caller_ok = _expected(shape.expected, ending, code, early_media)
+    caller_ok = caller_expected(r, shape)
     if not caller_ok:
         if ending in PRE_ANSWER_ENDINGS and not answered:
-            cls = SETUP_FAILED if shape.expects_answer else UNEXPECTED_ENDING
+            cls = SETUP_FAILED if shape.expects_answer or code is None else UNEXPECTED_ENDING
             out.impacts.append(replace(base, cls=cls, code=code or 0, reason=reason or ending))
         elif ending == "cut":
             cut_at = max((jv.number(f, "at_ms") for f in failures), default=ended)

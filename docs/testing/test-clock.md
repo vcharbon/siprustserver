@@ -42,7 +42,7 @@ For *which harness* to use, see [harness-layers.md](harness-layers.md).
 2. **Advance *between* protocol steps, exactly to the deadline you want to
    trip.** Advance to the deadline; let the response / cancel land; then
    advance again. Advancing past two deadlines in one step fires both before
-   you can react — e.g. advancing past a keepalive *and* its timeout
+   you can react — e.g. advancing past a keepalive *and* its probe's Timer F
    terminates the call you meant to keep up.
 
 3. **Never feed a paused test a real wall-clock signal.** Canonical flake:

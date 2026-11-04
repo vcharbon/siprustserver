@@ -139,9 +139,9 @@ async fn compaction_under_churn_keeps_live_set_size() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn delete_emits_tombstone_then_reaped() {
+async fn delete_emits_a_tombstone_drained_as_a_bodiless_delete() {
     let clock = Clock::test_at(0);
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(60_000);
     let store = ReplicatingCallStore::with_changelog(cl, clock.clone());
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await;
     store.delete_call(PRI, SELF, "c1", &[], false, &fwd("A")).await.unwrap();
@@ -159,11 +159,6 @@ async fn delete_emits_tombstone_then_reaped() {
         }
         f => panic!("not Data: {f:?}"),
     }
-
-    // Advance past tombstone TTL + reap → gone.
-    tokio::time::advance(Duration::from_millis(1_001)).await;
-    store.changelog().reap(clock.now_ms());
-    assert_eq!(store.changelog().peer_len("A", BAK_P), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -274,7 +269,7 @@ async fn dead_peer_auto_clean_via_idle_reap() {
     // drop — a disconnected puller's pending log is kept until the TTL so a
     // quick reconnect resumes warm).
     let clock = Clock::test_at(0);
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 2_000);
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(2_000);
     let store = ReplicatingCallStore::with_changelog(cl, clock.clone());
 
     // Idle-reap: advance past dead-peer TTL with no activity → peer dropped.
@@ -363,13 +358,14 @@ async fn no_peer_stores_body_without_bump() {
 
 const BAK: PartitionRole = PartitionRole::Backup;
 
-/// A reaped delete-tombstone raises the per-(peer,partition) retention floor, so a
-/// warm puller whose `since` is below it is told to re-bootstrap (`needs_reset`),
-/// while one at/above the floor — or on a cold (lower-gen) pull — is not.
+/// A reaped delete-tombstone (one its peer reported applying) raises the
+/// per-(peer,partition) retention floor, so a warm puller whose `since` is
+/// below it is told to re-bootstrap (`needs_reset`), while one at/above the
+/// floor — or on a cold (lower-gen) pull — is not.
 #[tokio::test(start_paused = true)]
 async fn needs_reset_after_tombstone_reap_raises_floor() {
     let clock = Clock::test_at(0);
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(60_000);
     let store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
 
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await; // counter 1 (Bak)
@@ -379,9 +375,9 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
     // (the tombstone at counter 2 is still live and would be re-delivered).
     assert!(!cl.needs_reset("A", BAK_P, Watermark::new(1, 1)), "tombstone still live → no reset");
 
-    // Advance past the tombstone TTL and reap: the delete at counter 2 is gone,
-    // the floor rises to 2.
-    tokio::time::advance(Duration::from_millis(1_001)).await;
+    // The peer reports applying the delete; the reap drops it and the floor
+    // rises to 2.
+    cl.note_applied("A", None, BAK_P, Watermark::new(1, 2));
     cl.reap(clock.now_ms());
 
     assert!(cl.needs_reset("A", BAK_P, Watermark::new(1, 1)), "since below reaped tail → reset");
@@ -404,7 +400,7 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
 async fn gen_collision_or_backward_clock_forces_reset() {
     let clock = Clock::test_at(0);
     // "Restarted" changelog: same gen 1 as the previous life, counter back at 0.
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(60_000);
     let store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await; // head = (1, 1)
 
@@ -428,11 +424,11 @@ async fn gen_collision_or_backward_clock_forces_reset() {
 /// it is draining out from under itself); once the guard drops, the next reap
 /// evicts the now-unserved log.
 ///
-/// [`ServeGuard`]: super::changelog::ServeGuard
+/// [`ServeGuard`]: super::changelog::serving::ServeGuard
 #[tokio::test(start_paused = true)]
 async fn served_peer_log_survives_reap_until_guard_dropped() {
     let clock = Clock::test_at(0);
-    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 2_000); // dead-peer TTL 2s
+    let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(2_000); // dead-peer TTL 2s
     let _store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
 
     let guard = cl.serving("A", Partition::Bak);
@@ -443,7 +439,7 @@ async fn served_peer_log_survives_reap_until_guard_dropped() {
     cl.reap(clock.now_ms());
     assert!(cl.has_peer("A"), "a served peer log must survive an idle reap");
 
-    // A bump refreshes the last-active stamp; drop the guard, idle past the TTL
+    // Dropping the guard stamps the log; idle past the TTL
     // again, and reap → the now-unserved log is evicted.
     cl.bump_put("A", "c1", Partition::Bak);
     drop(guard);
@@ -509,10 +505,10 @@ async fn reap_frees_expired_replica_index_entries() {
 // ---------------------------------------------------------------------------
 // Per-ref metadata across writers: the record is keyed by callRef alone and
 // every local writer rewrites it. A write carries over each field it does not
-// itself carry (`backup`, `skew_offset_ms`, `authority_answered`) and replaces
-// the ones it does (`(p,b)`, expiry, role/primary, the index set — every writer
-// computes the full index set from the body, so `indexes` is carried by the
-// write, not lost). Nothing here is scheduled: the store is synchronous under
+// itself carry (`backup`, `authority_answered`) and replaces the ones it does
+// (`(p,b)`, expiry, role/primary, the index set — every writer computes the
+// full index set from the body, so `indexes` is carried by the write, not
+// lost — and the skew offset, which names the body's clock frame). Nothing here is scheduled: the store is synchronous under
 // one mutex, so the order of the writes IS the order of the calls.
 // ---------------------------------------------------------------------------
 
@@ -582,11 +578,13 @@ async fn backup_ordinal_survives_every_write_that_does_not_carry_one() {
     assert_eq!(store.scan_refs_backed_by(SELF, "w2"), vec!["c1".to_string()]);
 }
 
-/// The skew offset is carried only by an origin-stamped write (the puller's
-/// apply): every local flush keeps it, and a later apply replaces it.
+/// The skew offset names the clock frame of the body it is stored with: an
+/// origin-stamped write (the puller's apply) sets it, every write of this
+/// node's own body clears it — that body's instants are in this node's frame
+/// (ADR-0055 §9) — and a later apply replaces it.
 #[tokio::test(start_paused = true)]
-async fn skew_offset_survives_every_write_that_does_not_carry_one() {
-    let lost = writers_losing(
+async fn skew_offset_names_the_frame_of_the_body_it_is_stored_with() {
+    let kept = writers_losing(
         "skew offset",
         every_writer_but("apply"),
         &applied(70_000),
@@ -594,7 +592,7 @@ async fn skew_offset_survives_every_write_that_does_not_carry_one() {
         |store| store.skew_offset_ms("c1") == Some(30_000),
     )
     .await;
-    assert!(lost.is_empty(), "skew offset lost by {lost:?}");
+    assert_eq!(kept, ["peerless", "reverse", "forward"], "every local write clears it");
 
     let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
     put(&store, "c1", b"v1", 0, 1, &applied(70_000)).await;
@@ -744,7 +742,7 @@ async fn a_delete_naming_its_call_buries_it_with_no_body_held() {
 
 /// A write of another call on the ref starts a fresh record: the facts the
 /// record kept about the call it replaces (the authority's answer, the backup
-/// ordinal, the skew offset) are not the new call's. An unnamed write is one
+/// ordinal) are not the new call's. An unnamed write is one
 /// of the held call and keeps its name.
 #[tokio::test(start_paused = true)]
 async fn a_write_of_another_call_on_the_ref_starts_a_fresh_record() {
@@ -755,14 +753,12 @@ async fn a_write_of_another_call_on_the_ref_starts_a_fresh_record() {
     put(&store, "c1", b"first", 0, 4, &PutOpts::default()).await;
     assert_eq!(store.incarnation("c1").as_deref(), Some("c1#1"), "an unnamed write keeps it");
     assert!(store.authority_answered("c1"));
-    assert_eq!(store.skew_offset_ms("c1"), Some(40_000));
     assert_eq!(store.scan_refs_backed_by(SELF, "w1"), vec!["c1".to_string()]);
 
     put(&store, "c1", b"retry", 0, 1, &named(PutOpts::default(), "c1#2")).await;
     assert_eq!(store.incarnation("c1").as_deref(), Some("c1#2"));
     assert_eq!(store.current_cv(PRI, SELF, "c1"), Some((1, 0)));
     assert!(!store.authority_answered("c1"), "the new call starts unanswered");
-    assert_eq!(store.skew_offset_ms("c1"), None, "and with no skew offset");
     assert!(store.scan_refs_backed_by(SELF, "w1").is_empty(), "and with no backup ordinal");
 }
 

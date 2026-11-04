@@ -1,4 +1,4 @@
-//! The re-anchor pass of a bulk reclaim: the largest past-due keepalive gap,
+//! The arming pass of a bulk reclaim: the largest past-due keepalive gap,
 //! read call by call, each call one beat of the router's pulse.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,13 +29,13 @@ fn call_with_keepalive_at(cid: &str, fire_at: i64) -> call::Call {
 
 #[test]
 fn the_pass_beats_once_per_call_and_reads_the_largest_gap() {
-    let mut calls = vec![
-        (call_with_keepalive_at("a", 9_000), 0),
-        (call_with_keepalive_at("b", 4_000), 0),
-        (call_with_keepalive_at("c", 12_000), 0),
+    let calls = [
+        call_with_keepalive_at("a", 9_000),
+        call_with_keepalive_at("b", 4_000),
+        call_with_keepalive_at("c", 12_000),
     ];
     let beats = AtomicUsize::new(0);
-    let gap = largest_keepalive_gap(&mut calls, 10_000, &|| {
+    let gap = largest_keepalive_gap(&calls, 10_000, &|| {
         beats.fetch_add(1, Ordering::SeqCst);
     });
     assert_eq!(gap, 6_000, "the most overdue keepalive, 6 s past due");

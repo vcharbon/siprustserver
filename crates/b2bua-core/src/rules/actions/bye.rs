@@ -1,10 +1,13 @@
 //! The BYE this stack sends on a confirmed dialog (RFC 3261 §15): what the
 //! leg is owed before it, its composition with the `Reason` and the lines of
-//! the peer's it restates, and its order behind this stack's own NOTIFY there
-//! ([`super::own_notify`]).
+//! the peer's it restates, and its order behind the ACK of the dialog's own
+//! 2xx and behind this stack's own NOTIFY there ([`super::subscription`]).
 
+use call::helpers::TERMINATING_TIMEOUT_MS;
 use call::TxnKind;
-use call::{Call, Dialog, DialogId, HeldRequest, Leg};
+use call::{
+    Behind, Call, Dialog, DialogId, Leg, Obligation, Queued, QueuedRequest, TimerKey, TimerType,
+};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::HeaderName;
 use sip_message::SipHeader;
@@ -21,8 +24,14 @@ impl ActionExecutor<'_> {
     /// BYE `leg_id`'s confirmed dialog carrying `reason` and `relayed`
     /// (RFC 3261 §15): the PRACKs the leg's responders are owed leave first,
     /// an offer left to the ACK answered rejecting (RFC 3262 §4, §5), then a
-    /// 2xx still unACKed is ACKed bare (§13.2.2.4), then the BYE — held while
-    /// this stack's NOTIFY on the dialog awaits its final.
+    /// 2xx still unACKed is ACKed (§13.2.2.4) — bare where the ACK owes no
+    /// answer; answering every stream rejected (RFC 3264 §6) where it owes an
+    /// answer no ACK will bring: `answer_lost` (the teardown answers a peer's
+    /// BYE or gives up a 2xx's ACK), or no leg awaits the ACK that would carry
+    /// it — then the BYE. The BYE waits for the ACK of the leg's own
+    /// 2xx to its dialog-creating INVITE (§15), and behind this stack's NOTIFY
+    /// on the dialog awaiting its final.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn send_bye(
         &mut self,
         call: &mut Call,
@@ -31,11 +40,14 @@ impl ActionExecutor<'_> {
         reason: Option<&str>,
         relayed: Relayed,
         hops: Option<u32>,
+        answer_lost: bool,
     ) {
         let ack_owed = relay::owes_bare_ack(call, leg_id);
         self.settle_owed_pracks(call, fx, Owed::Leg(leg_id), Settle::Ending);
         if ack_owed {
             self.ack_own_bare(call, fx, leg_id);
+        } else if answer_lost || relay::answer_never_comes(call, leg_id) {
+            self.ack_rejecting(call, fx, leg_id);
         }
         let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
         let (reason, relayed) = if is_media(leg) {
@@ -44,24 +56,29 @@ impl ActionExecutor<'_> {
             (reason, relayed)
         };
         let Some(id) = leg.dialogs.confirmed().map(|d| d.id()) else { return };
-        if self.held_behind_notify(call, leg_id, &id) {
-            self.hold(call, fx, leg_id, &id, relayed.held_bye(reason, hops));
+        if answer_unacked(call, leg_id) {
+            hold_behind_ack(call, leg_id, &id, relayed.queued_bye(reason, hops));
+            return;
+        }
+        if self.waits_behind_notify(call, leg_id, &id) {
+            self.queue(call, fx, leg_id, &id, relayed.queued_bye(reason, hops));
             return;
         }
         self.bye_now(call, fx, leg_id, &id, reason, relayed, hops);
     }
 
-    /// Send `bye`, a BYE held behind this stack's NOTIFY on `leg_id`'s dialog
-    /// `id`, composed now.
-    pub(super) fn send_held_bye(
+    /// Send `bye`, a BYE queued on `leg_id`'s dialog `id` behind an ACK or this
+    /// stack's NOTIFY, composed now. A terminating call's backstop runs again
+    /// from this BYE, so its transaction has its whole bound.
+    pub(super) fn send_queued_bye(
         &mut self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
         id: &DialogId,
-        bye: HeldRequest,
+        bye: QueuedRequest,
     ) {
-        let HeldRequest::Bye { reason, headers, body, content_type, max_forwards } = bye else {
+        let QueuedRequest::Bye { reason, headers, body, content_type, max_forwards } = bye else {
             return;
         };
         let headers = headers
@@ -71,10 +88,14 @@ impl ActionExecutor<'_> {
         let content_type = content_type.as_deref().and_then(relay::media_type);
         let relayed = Relayed { headers, body, content_type };
         self.bye_now(call, fx, leg_id, id, reason.as_deref(), relayed, max_forwards);
+        if call.state == call::CallModelState::Terminating {
+            let backstop = TimerKey::call(TimerType::TerminatingTimeout);
+            self.schedule(call, fx, backstop, TERMINATING_TIMEOUT_MS);
+        }
     }
 
     /// Compose and send the BYE on `leg_id`'s dialog `id`: it takes the
-    /// dialog's next CSeq (§12.2.1.1).
+    /// dialog's next CSeq (§12.2.1.1) and is recorded until it settles.
     #[allow(clippy::too_many_arguments)]
     fn bye_now(
         &mut self,
@@ -88,9 +109,10 @@ impl ActionExecutor<'_> {
     ) {
         let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
         let Some(d) = leg.dialogs.by_tags(&id.our_tag, &id.peer_tag) else { return };
-        let marks = relay::CallMarks::of(call);
+        let marks = self.marks(call);
         let Some(bye) = self.bye_on_dialog(marks, leg, d, reason, relayed, hops) else { return };
-        *call = call::helpers::bump_our_cseq(call.clone(), leg_id, id, 1);
+        call::helpers::bump_our_cseq(call, leg_id, id, 1);
+        self.record_own_effect(call, leg_id, id, &bye);
         fx.outbound.push(bye);
     }
 
@@ -128,7 +150,17 @@ impl ActionExecutor<'_> {
         // this dialog's `our_cseq + 1`, the next sequence number within THIS
         // dialog (a forked sibling's CSeq is irrelevant — distinct dialog).
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, marks, leg_id, branch)),
+            via: Some(relay::leg_via(
+                self.config,
+                marks,
+                leg_id,
+                Some(relay::RequestFacts {
+                    method: "BYE",
+                    uri: &dialog.remote_target,
+                    offer: false,
+                }),
+                branch,
+            )),
             extra_headers,
             body: relayed.body,
             content_type: relayed.content_type,
@@ -150,4 +182,31 @@ impl ActionExecutor<'_> {
             provenance: Provenance::Authored,
         })
     }
+}
+
+/// Whether `leg_id`'s confirmed dialog holds this stack's 2xx to the leg's
+/// dialog-creating INVITE still awaiting its ACK: the call's answer to the
+/// caller (RFC 3261 §13.3.1.4).
+fn answer_unacked(call: &Call, leg_id: &str) -> bool {
+    let Some(d) = call::helpers::find_leg(call, leg_id).and_then(|l| l.dialogs.confirmed()) else {
+        return false;
+    };
+    call::helpers::answered_2xx(d).is_some_and(|u| {
+        let key = Obligation::AckOf2xx {
+            leg: leg_id.to_string(),
+            dialog_tag: u.dialog_tag.clone(),
+            cseq: u.cseq,
+        };
+        call::helpers::answers_initial_invite(call, &key)
+    })
+}
+
+/// Hold `bye` behind the ACK of the 2xx `leg_id`'s dialog `id` answered
+/// the leg's dialog-creating INVITE with (RFC 3261 §15): the dialog holds
+/// one such BYE, the latest asked for.
+fn hold_behind_ack(call: &mut Call, leg_id: &str, id: &DialogId, bye: QueuedRequest) {
+    call::helpers::update_dialog(call, leg_id, id, |d| {
+        d.queued.retain(|q| q.behind != Behind::AnswerAck);
+        d.queued.push(Queued { behind: Behind::AnswerAck, request: bye });
+    });
 }

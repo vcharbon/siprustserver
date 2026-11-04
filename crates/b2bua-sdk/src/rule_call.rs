@@ -18,7 +18,7 @@ use call::{
 /// returning [`RuleAction`](crate::model::RuleAction)s through the executor.
 ///
 /// Hidden by design (the framework-internal fields — do not add accessors for
-/// these): `topology` (the HA `(p,b)` version vector), `worker_index`,
+/// these): `worker_index`,
 /// `sampled`/`trace_id`/`root_span_id` (observability), `message_count`,
 /// `terminating_refresh_legs`, `a_leg_pending_vias`/`a_leg_pending_cseq`
 /// (relay frame state), `limiter` (but its held and target sets), `timers`, `active_rules`,
@@ -54,11 +54,6 @@ impl<'a> RuleCall<'a> {
     ) -> PrackDisposition {
         call::helpers::prack_disposition(self.0, tag, rack, discharged)
     }
-    /// Whether `branch` is a PRACK client transaction this stack originated
-    /// itself, never one it relayed.
-    pub fn own_prack_branch(&self, branch: &str) -> bool {
-        call::helpers::own_prack_branch(self.0, branch)
-    }
     /// Whether `obligation` is the caller's ACK of the a-leg's INITIAL answer
     /// rather than of a re-INVITE's 2xx — what tells the `RepeatGiveUp` of the
     /// call's own setup from an in-dialog one (RFC 3261 §13.3.1.4). A rule
@@ -79,6 +74,16 @@ impl<'a> RuleCall<'a> {
     }
 
     // ── legs ─────────────────────────────────────────────────────────────
+    /// The To-tag the caller knows the call's own dialog by: the a-leg's own
+    /// tag once one was minted, else the one any holder of the record derives
+    /// for it ([`crate::caller_tags::own`]). A service stating a caller-facing
+    /// tag of its own states this one, so every owner of the call names the
+    /// dialog alike (ADR-0055 §4).
+    pub fn caller_tag(&self) -> String {
+        let own = self.0.a_leg.own_tag.clone().filter(|t| !t.is_empty());
+        own.unwrap_or_else(|| crate::caller_tags::own(self.0))
+    }
+
     pub fn a_leg(&self) -> &'a Leg {
         &self.0.a_leg
     }

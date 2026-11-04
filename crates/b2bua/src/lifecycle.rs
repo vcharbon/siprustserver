@@ -17,9 +17,10 @@ use observe::{WaveReport, WaveSet};
 /// Acting-backup takeover, keyed by the dead peer whose partition we are
 /// serving: `hydrated` (calls loaded off the replica), `resolved` (in-dialog
 /// requests re-keyed through the replica index), `self_released` (takeover
-/// copies shed once their transactions cleared) and `refused_terminated` (a
-/// released copy's `Terminated` replica refused, the datagram falling to the
-/// orphan path) fold into ONE episode per peer.
+/// copies shed once their transactions cleared), `stood_down` (copies a
+/// returning primary stood down) and `refused_terminated` (a released
+/// copy's `Terminated` replica refused, the datagram falling to the orphan
+/// path) fold into ONE episode per peer.
 pub fn takeover_waves() -> Arc<WaveSet> {
     WaveSet::new(|peer: &str, r: &WaveReport| {
         tracing::info!(
@@ -33,8 +34,8 @@ pub fn takeover_waves() -> Arc<WaveSet> {
     })
 }
 
-/// Keepalive timeouts, keyed by the failed leg's egress hop. A wave here is a
-/// peer or a network path going away, not one call dying.
+/// Keepalive probes timed out, keyed by the failed leg's egress hop. A wave
+/// here is a peer or a network path going away, not one call dying.
 pub fn keepalive_timeout_waves() -> Arc<WaveSet> {
     WaveSet::new(|hop: &str, r: &WaveReport| {
         tracing::info!(
@@ -44,6 +45,23 @@ pub fn keepalive_timeout_waves() -> Arc<WaveSet> {
             elapsed_ms = r.elapsed_ms,
             totals = %r.tally,
             "keepalive-timeout wave"
+        );
+    })
+}
+
+/// Copies of one call meeting (ADR-0055 §7), keyed by the call's other
+/// owner: a node coming back or a heal meets every call it shares in one
+/// burst. Counted by outcome — `held` (this copy stands), `incoming` (the
+/// other copy is taken), `diverged` (the call ends cleanly).
+pub fn meeting_waves() -> Arc<WaveSet> {
+    WaveSet::new(|peer: &str, r: &WaveReport| {
+        tracing::info!(
+            node = observe::node(),
+            peer,
+            edge = %r.edge,
+            elapsed_ms = r.elapsed_ms,
+            totals = %r.tally,
+            "copies met"
         );
     })
 }
@@ -63,6 +81,49 @@ pub fn backend_waves(backend: &'static str) -> Arc<WaveSet> {
             totals = %r.tally,
             "backend degraded"
         );
+    })
+}
+
+/// The latest outbound message an unsent episode holds: its call, its label
+/// and, for a request, its Request-URI.
+#[derive(Debug, Clone)]
+pub struct Unsent {
+    pub call_ref: String,
+    pub label: String,
+    pub request_uri: Option<String>,
+}
+
+/// Outbound messages left unsent for a next hop that is not an IP literal
+/// (`router::unaddressable`), keyed by that hop and counted by kind
+/// (`request`, `response`, `datagram`), at warn: a flood toward one target
+/// prints its rising edge, a summary every few seconds and its total.
+pub fn unsent_waves() -> Arc<WaveSet<Unsent>> {
+    WaveSet::with_payload(|hop: &str, r: &WaveReport, u: &Unsent| {
+        const UNSENT: &str = "outbound message not sent: its next hop is not an IP literal";
+        let (call_ref, label) = (&u.call_ref, &u.label);
+        match &u.request_uri {
+            Some(request_uri) => tracing::warn!(
+                node = observe::node(),
+                hop,
+                %call_ref,
+                %label,
+                %request_uri,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "{UNSENT}"
+            ),
+            None => tracing::warn!(
+                node = observe::node(),
+                hop,
+                %call_ref,
+                %label,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "{UNSENT}"
+            ),
+        }
     })
 }
 
@@ -153,6 +214,44 @@ mod tests {
         assert!(last.contains("sample=call_id=c4999"), "{}", last.line());
     }
 
+    /// A flood of unsent requests toward one hop prints a handful of warn
+    /// lines naming the target; an unsent response's line names none.
+    #[tokio::test(start_paused = true)]
+    async fn an_unsent_flood_prints_a_handful_of_warn_lines() {
+        let (_guard, log) = observe_testkit::test_buffer();
+        let waves = unsent_waves();
+        let unsent = |request_uri: Option<&str>| Unsent {
+            call_ref: "c".into(),
+            label: "BYE → a".into(),
+            request_uri: request_uri.map(str::to_string),
+        };
+        for _ in 0..2_000 {
+            waves.record_with(
+                "peer.invalid:5060",
+                "request",
+                1,
+                unsent(Some("sip:a@peer.invalid")),
+            );
+        }
+        waves.record_with("other.invalid:5060", "response", 1, unsent(None));
+        tokio::task::yield_now().await;
+        tokio::time::advance(observe::DEFAULT_IDLE_CLOSE_AFTER).await;
+        tokio::task::yield_now().await;
+
+        let lines = log.matching("not sent");
+        let toward = |hop: &str| -> Vec<_> {
+            lines.iter().filter(|l| l.contains(&format!("hop={hop}"))).collect()
+        };
+        let flood = toward("peer.invalid:5060");
+        assert!(flood.len() <= 4, "2000 messages must not print 2000 lines: {}", flood.len());
+        assert!(flood
+            .iter()
+            .all(|l| l.level == "WARN" && l.contains("request_uri=sip:a@peer.invalid")));
+        assert!(flood.last().is_some_and(|l| l.contains("request=2000")), "the total is counted");
+        let response = toward("other.invalid:5060");
+        assert!(!response.is_empty() && response.iter().all(|l| !l.contains("request_uri")));
+    }
+
     /// Two successive episodes of one class: each episode's lines name its
     /// own reason and sample.
     #[tokio::test(start_paused = true)]
@@ -209,6 +308,8 @@ mod tests {
         for _ in 0..5_000 {
             waves.record("w-3", "self_released", 1);
         }
+        waves.record("w-3", "stood_down", 1);
+        waves.record("w-3", "refused_terminated", 1);
         // Let the episode's driver task arm its timer before moving the clock,
         // then advance exactly to the idle window that closes the episode.
         tokio::task::yield_now().await;
@@ -216,12 +317,15 @@ mod tests {
         tokio::task::yield_now().await;
 
         let lines = log.matching("acting-backup takeover");
-        assert!(lines.len() <= 4, "15000 events must not print 15000 lines: {lines:?}");
+        assert!(lines.len() <= 4, "15002 events must not print 15002 lines: {lines:?}");
         assert!(lines[0].contains("edge=rising"), "{:?}", lines[0].line());
         let last = lines.last().expect("the episode closes");
         assert!(last.contains("edge=falling"), "{}", last.line());
         assert!(
-            last.contains("totals=hydrated=5000 resolved=5000 self_released=5000"),
+            last.contains(
+                "totals=hydrated=5000 resolved=5000 self_released=5000 stood_down=1 \
+                 refused_terminated=1"
+            ),
             "the falling edge carries the episode totals: {}",
             last.line(),
         );

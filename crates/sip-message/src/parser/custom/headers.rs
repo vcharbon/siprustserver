@@ -1,18 +1,21 @@
-//! SIP header-block parser. Port of `src/sip/parsers/custom/headers.ts`.
-//! No regex. Handles folding, compact-form expansion, Content-Length
-//! extraction, case-preserving names, and the registry-driven strict numeric
-//! gate + CVE-regression quoted-string / Digest checks (the gates beyond the
-//! grammar are listed in ADR-0001).
+//! SIP header-block parser. No regex. Handles folding, compact-form
+//! expansion, Content-Length extraction and case-preserving names. Each value
+//! meets the grammar's control-byte rule (one only as a quoted-pair's escaped
+//! byte) and its singleton rule for the headers the split reads (one
+//! Content-Length, one Max-Forwards), then the gates beyond the grammar
+//! (ADR-0001): the registry-driven strict numeric values and the
+//! CVE-regression quoted-string / Digest checks.
 
 use super::compact_forms::expand_compact_form;
 use super::scanner::{
-    decode, is_wsp, strict_non_negative_decimal, trim_span, HeaderValue, Scanner, Span, COLON, CR,
-    HTAB, LF,
+    is_wsp, strict_non_negative_decimal, trim_span, HeaderValue, Scanner, Span, COLON, CR, HTAB, LF,
 };
 use super::structured_headers::split_top_level_commas;
 use crate::char_class::is_token_char;
+use crate::control_bytes::{bare_control_byte, has_comments};
 use crate::error::SipParseError;
-use crate::header::HeaderName;
+use crate::header::{HeaderId, HeaderName};
+use crate::header_table::{HeaderTable, Ids};
 use crate::parser::SipParserLimits;
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::SipHeader;
@@ -22,41 +25,60 @@ const INT_32_MAX: u64 = (1u64 << 31) - 1;
 
 struct NumericHeaderRule {
     max: u64,
-    /// True if the value may carry a `;param=...` tail (RFC 4028 session timers).
-    allow_param_tail: bool,
+    tail: NumericTail,
 }
 
-/// Numeric-header registry — every header whose value must be a non-negative
+/// What a numeric header's grammar has after its digits.
+enum NumericTail {
+    /// Nothing: the value is `1*DIGIT`.
+    None,
+    /// `*( SEMI param )` (RFC 4028 session timers).
+    Params,
+    /// `LWS Method` (CSeq), read by the CSeq reader.
+    Method,
+}
+
+/// Numeric-header registry — every header whose value is a non-negative
 /// decimal integer within a defined range (ADR-0001, numeric headers). `None`
 /// if not numeric.
 fn numeric_header_rule(name: &HeaderName) -> Option<NumericHeaderRule> {
-    let r = |max, allow_param_tail| Some(NumericHeaderRule { max, allow_param_tail });
+    let r = |max, tail| Some(NumericHeaderRule { max, tail });
     match name {
-        HeaderName::ContentLength | HeaderName::CSeq => r(INT_32_MAX, false),
-        HeaderName::MaxForwards => r(255, false),
-        HeaderName::Expires | HeaderName::MinExpires => r(UINT_32_MAX, false),
-        HeaderName::SessionExpires | HeaderName::MinSe => r(UINT_32_MAX, true),
+        HeaderName::ContentLength => r(INT_32_MAX, NumericTail::None),
+        HeaderName::CSeq => r(INT_32_MAX, NumericTail::Method),
+        HeaderName::MaxForwards => r(255, NumericTail::None),
+        HeaderName::Expires | HeaderName::MinExpires => r(UINT_32_MAX, NumericTail::None),
+        HeaderName::SessionExpires | HeaderName::MinSe => r(UINT_32_MAX, NumericTail::Params),
         _ => None,
     }
 }
 
-/// Strict numeric extraction with optional param tail. The digit prefix is
-/// terminated at the first WSP (CSeq is `1*DIGIT LWS Method`).
-fn extract_strict_numeric_prefix(value: &str, rule: &NumericHeaderRule) -> Option<u64> {
-    let scoped = match value.split_once(';') {
-        Some((head, _)) if rule.allow_param_tail => head,
-        _ => value,
+/// The number a trimmed numeric value states, `None` unless its digits are
+/// followed by nothing but the tail its grammar has.
+fn strict_numeric_value(value: &str, rule: &NumericHeaderRule) -> Option<u64> {
+    let digits = match rule.tail {
+        NumericTail::None => value,
+        // `SEMI = SWS ";" SWS`: whitespace may stand before the `;`.
+        NumericTail::Params => value.split_once(';').map_or(value, |(head, _)| head.trim_end()),
+        NumericTail::Method => value.split_once([' ', '\t']).map_or(value, |(head, _)| head),
     };
-    let digits = match scoped.find([' ', '\t']) {
-        Some(wsp) => scoped.get(..wsp)?,
-        None => scoped,
-    };
-    strict_non_negative_decimal(digits.trim(), rule.max)
+    strict_non_negative_decimal(digits, rule.max)
+}
+
+/// The headers whose repeat the split refuses: Content-Length and
+/// Max-Forwards (RFC 3261 §7.3.1: a header whose grammar is no comma list
+/// appears once). A repeated From, To, Call-ID or CSeq is refused at
+/// extraction (`extract_fields`); the split checks no other repeat.
+#[derive(Default)]
+struct Singletons {
+    content_length: Option<u64>,
+    max_forwards: bool,
 }
 
 pub struct ParsedHeaders {
-    /// The lines that passed, in wire order.
-    pub headers: Vec<SipHeader>,
+    /// The lines that passed, in wire order, each with the header it was
+    /// classified as.
+    pub headers: HeaderTable,
     /// The declared `Content-Length`; `None` when the block states none, which
     /// the transport framing then resolves (RFC 3261 §18.3).
     pub content_length: Option<u64>,
@@ -90,16 +112,20 @@ enum Line {
 /// [`parse_headers`]'s line loop but reads names only (no value validation), so
 /// name-scanning stays a single source of truth. Returns the names in wire
 /// order aligned 1:1 with [`parse_headers`]'s `headers`; an empty Vec when the
-/// start line or any header line is malformed (the caller falls back to
-/// canonical names). Used to recover the captured name-form for near-verbatim
-/// replay after the parser has already canonicalized `SipHeader.name`.
+/// head is not UTF-8 or its start line or any header line is malformed (the
+/// caller falls back to canonical names). Used to recover the captured
+/// name-form for near-verbatim replay after the parser has already
+/// canonicalized `SipHeader.name`.
 pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<String> {
-    if super::scanner::header_block(raw).bare_break.is_some() {
+    let block = super::scanner::header_block(raw);
+    if block.bare_break.is_some() {
         return Vec::new();
     }
-    let image = decode(raw);
+    let Some(image) = raw.get(..block.end).and_then(|head| std::str::from_utf8(head).ok()) else {
+        return Vec::new();
+    };
     let mut s = Scanner::new(image.as_bytes());
-    if super::start_line::parse_start_line(&mut s, &image, limits).is_err() {
+    if super::start_line::parse_start_line(&mut s, image, limits).is_err() {
         return Vec::new();
     }
     let mut names: Vec<String> = Vec::new();
@@ -140,14 +166,12 @@ pub fn parse_headers(
     lines: usize,
     limits: &SipParserLimits,
 ) -> Result<ParsedHeaders, SipParseError> {
-    let mut parsed = ParsedHeaders {
-        // Size the list up front from the block's line count — growing it from
-        // empty cost one reallocation per doubling, several per message.
-        headers: Vec::with_capacity(lines),
-        content_length: None,
-        refusal: None,
-        echoed_line_refused: false,
-    };
+    // Size the list up front from the block's line count — growing it from
+    // empty cost one reallocation per doubling, several per message.
+    let mut kept = Kept { lines: Vec::with_capacity(lines), ids: Ids::with_capacity(lines) };
+    let mut refusal: Option<SipParseError> = None;
+    let mut echoed_line_refused = false;
+    let mut singletons = Singletons::default();
 
     loop {
         if s.at_end_of_headers() {
@@ -157,17 +181,28 @@ pub fn parse_headers(
         if s.at_end() {
             break;
         }
-        match parse_line(s, text, limits, &mut parsed) {
+        match parse_line(s, text, limits, &mut kept, &mut singletons) {
             Ok(Line::Kept) => {}
             Ok(Line::Refused { error, echoed }) => {
-                parsed.echoed_line_refused |= echoed;
-                parsed.refusal.get_or_insert(error);
+                echoed_line_refused |= echoed;
+                refusal.get_or_insert(error);
             }
-            Err(limit) => return Err(parsed.refusal.unwrap_or(limit)),
+            Err(limit) => return Err(refusal.unwrap_or(limit)),
         }
     }
 
-    Ok(parsed)
+    Ok(ParsedHeaders {
+        headers: HeaderTable::classified(kept.lines, kept.ids),
+        content_length: singletons.content_length,
+        refusal,
+        echoed_line_refused,
+    })
+}
+
+/// The lines kept so far and the header each was classified as.
+struct Kept {
+    lines: Vec<SipHeader>,
+    ids: Ids,
 }
 
 /// The rest of a refused line consumed, folds included, so the split resumes
@@ -183,7 +218,8 @@ fn parse_line(
     s: &mut Scanner,
     text: &SharedText,
     limits: &SipParserLimits,
-    parsed: &mut ParsedHeaders,
+    kept: &mut Kept,
+    singletons: &mut Singletons,
 ) -> Result<Line, SipParseError> {
     let image = text.as_str();
     // A name that does not read may have been any header, the five a response
@@ -209,7 +245,8 @@ fn parse_line(
     // Header identity is resolved once, here, from bytes the scanner has just
     // walked; every gate below dispatches on it instead of re-probing the name
     // against a candidate list.
-    let known = HeaderName::known(&name);
+    let id = HeaderId::of(&name);
+    let known = id.map(HeaderId::name);
     if let Err(error) = s.expect(COLON) {
         return refused(s, error, known.as_ref().is_some_and(is_echoed));
     }
@@ -235,39 +272,58 @@ fn parse_line(
         )));
     }
 
+    let echoed = known.as_ref().is_some_and(is_echoed);
+    let comments = known.as_ref().is_some_and(has_comments);
+    if let Some(at) = bare_control_byte(trimmed_value.as_bytes(), comments) {
+        let byte = trimmed_value.as_bytes().get(at).copied().unwrap_or_default();
+        let error = SipParseError::new(format!(
+            "Header \"{name}\" holds control byte 0x{byte:02x} outside a quoted-pair \
+             (RFC 3261 §25.1)"
+        ));
+        return Ok(Line::Refused { error, echoed });
+    }
     if let Some(known) = known {
-        if let Some(error) = gate_refusal(&known, &name, &trimmed_value, &mut parsed.content_length)
-        {
-            return Ok(Line::Refused { error, echoed: is_echoed(&known) });
+        if let Some(error) = gate_refusal(&known, &name, &trimmed_value, singletons) {
+            return Ok(Line::Refused { error, echoed });
         }
     }
 
-    parsed.headers.push(SipHeader { name, value: trimmed_value });
+    kept.lines.push(SipHeader { name, value: trimmed_value });
+    kept.ids.push(id);
     Ok(Line::Kept)
 }
 
-/// The gate beyond the grammar (ADR-0001) the value of the known header
-/// `known` breaks, if any. A numeric value that passes and names the
-/// Content-Length is stored in `content_length`.
+/// The refusal the value of the known header `known` draws, if any: a
+/// repeated singleton, or a gate beyond the grammar (ADR-0001). A
+/// Content-Length or Max-Forwards that passes is recorded in `singletons`,
+/// which refuses a second one.
 fn gate_refusal(
     known: &HeaderName,
     name: &SipStr,
     value: &SipStr,
-    content_length: &mut Option<u64>,
+    singletons: &mut Singletons,
 ) -> Option<SipParseError> {
+    let repeated = match known {
+        HeaderName::ContentLength => singletons.content_length.is_some(),
+        HeaderName::MaxForwards => singletons.max_forwards,
+        _ => false,
+    };
+    if repeated {
+        return Some(SipParseError::new(format!(
+            "Multiple {} headers (RFC 3261 §7.3.1 — one value)",
+            known.as_wire_str()
+        )));
+    }
+
     // Registry-driven paranoid digit-only pass.
     if let Some(rule) = numeric_header_rule(known) {
-        match extract_strict_numeric_prefix(value, &rule) {
-            Some(parsed) => {
-                if *known == HeaderName::ContentLength {
-                    *content_length = Some(parsed);
-                }
-            }
-            None => {
-                return Some(SipParseError::new(format!(
-                    "Invalid {name} numeric value: \"{value}\""
-                )));
-            }
+        let Some(parsed) = strict_numeric_value(value, &rule) else {
+            return Some(SipParseError::new(format!("Invalid {name} numeric value: \"{value}\"")));
+        };
+        match known {
+            HeaderName::ContentLength => singletons.content_length = Some(parsed),
+            HeaderName::MaxForwards => singletons.max_forwards = true,
+            _ => {}
         }
     }
 

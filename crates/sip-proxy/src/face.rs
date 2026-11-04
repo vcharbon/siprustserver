@@ -1,9 +1,10 @@
 //! Dual-face (multi-homed edge proxy) plane classification — RFC 3261 §16.
 //!
-//! The kind deployment splits into two network planes: an **internal** plane
-//! (proxy ↔ b2bua workers; pod/node CIDRs; the existing VRRP VIP) and an
-//! **external** plane (a dedicated no-NAT bridge where every caller lives,
-//! with its own VRRP VIP). The proxy is the ONLY component bridging the two —
+//! The deployment splits into two network planes: an **internal** plane
+//! (proxy ↔ b2bua workers; pod/node CIDRs; the internal VIP) and an
+//! **external** plane (where every caller lives, with the external VIP).
+//! Both VIPs are announced by the proxy's node (ADR-0056). The proxy is the
+//! ONLY component bridging the two —
 //! it binds one UDP socket per face and picks the egress socket (and the
 //! advertise stamped on Via / Record-Route) **by destination IP**: an address
 //! inside any configured internal CIDR egresses on the internal face,

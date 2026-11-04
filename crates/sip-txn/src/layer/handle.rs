@@ -18,9 +18,13 @@ use crate::seed::{Reoffer, TxnSeed};
 use call::TxnKind;
 
 pub use super::config::TransactionConfig;
-use super::key::ServerTxnKey;
+use super::event_age::EventAges;
+pub use super::event_receiver::TransactionEvents;
+use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
 use super::run::run;
+
+mod relinquish;
 
 /// The command funnel's bound.
 const COMMAND_CAPACITY: usize = 1024;
@@ -94,6 +98,17 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<usize>,
     },
+    /// Delete the client transaction on `branch` with nothing sent; replies
+    /// whether it was there.
+    RelinquishClient {
+        branch: String,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Whether a client transaction on `branch` is resident.
+    HoldsClient {
+        branch: String,
+        reply: oneshot::Sender<bool>,
+    },
     /// Forget every non-INVITE server transaction of `call_ref` that has sent
     /// no final; replies with how many.
     ForgetUnansweredOfCall {
@@ -107,6 +122,26 @@ pub(super) enum Command {
         status: u16,
         reason: String,
         reply: oneshot::Sender<usize>,
+    },
+    /// Send the held answers to a CANCEL of the INVITE named by its Call-ID,
+    /// From-tag and CSeq number; replies whether they left.
+    ReleaseCancel {
+        call_id: String,
+        from_tag: String,
+        cseq: u32,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Send the held ACK of the client INVITE transaction at `branch`;
+    /// replies whether it left.
+    ReleaseAck {
+        branch: String,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Send the 100 Trying of the server INVITE transaction `key` names if it
+    /// has sent nothing yet; replies whether the 100 left.
+    ReleaseTrying {
+        key: ServerTxnKey,
+        reply: oneshot::Sender<bool>,
     },
     /// Register `call_ref` for a one-shot [`TransactionEvent::CallQuiesced`] when
     /// its last transaction clears (ADR-0014 self-release). If it already has no
@@ -146,31 +181,39 @@ pub struct TransactionLayer {
 
 impl TransactionLayer {
     /// Spawn the owner task over an already-bound endpoint. Returns the handle
-    /// and the receiver end of the bounded `events` queue (the consumer — the
-    /// proxy/B2BUA router — drains it). The task lives until both the returned
-    /// handle (all clones) and the events receiver are dropped, or the endpoint
-    /// closes.
+    /// and the consumer's end of the bounded `events` queue and of the
+    /// keepalive lane, when configured (the consumer — the proxy/B2BUA router —
+    /// drains them). The task lives until both the returned handle (all
+    /// clones) and the events receiver are dropped, or the endpoint closes.
     pub fn spawn(
         endpoint: Box<dyn UdpEndpoint>,
         parser: Arc<dyn SipParser + Send + Sync>,
         config: TransactionConfig,
-    ) -> (Self, mpsc::Receiver<TransactionEvent>) {
+    ) -> (Self, TransactionEvents) {
         #[expect(clippy::disallowed_methods, reason = "event_capacity is within EVENT_CAPACITY")]
         let (events_tx, events_rx) = mpsc::channel::<TransactionEvent>(config.event_capacity());
+        let ages = Arc::new(EventAges::new(config.event_capacity()));
+        #[expect(clippy::disallowed_methods, reason = "the lane's bound is at least 1")]
+        let (keepalive_tx, keepalive_rx) = config
+            .keepalive_lane
+            .map(|bound| mpsc::channel::<TransactionEvent>(bound.max(1)))
+            .unzip();
         #[expect(clippy::disallowed_methods, reason = "COMMAND_CAPACITY is not zero")]
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CAPACITY);
         let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
 
         let metrics_inner = Arc::new(MetricsInner::new());
-        let metrics = TransactionMetrics::new(metrics_inner.clone(), events_tx.clone());
+        let metrics =
+            TransactionMetrics::new(metrics_inner.clone(), events_tx.clone(), ages.clone());
+        let events = TransactionEvents::new(events_rx, keepalive_rx, ages.clone());
 
-        let owner = Owner::new(parser, events_tx, metrics_inner, config);
+        let owner = Owner::new(parser, (events_tx, ages), keepalive_tx, metrics_inner, config);
         let owner_pulse = Arc::new(LoopPulse::new());
         let owner_abort =
             tokio::spawn(run(owner, endpoint, cmd_rx, forget_rx, owner_pulse.clone()))
                 .abort_handle();
 
-        (Self { cmd_tx, forget_tx, metrics, owner_abort, owner_pulse }, events_rx)
+        (Self { cmd_tx, forget_tx, metrics, owner_abort, owner_pulse }, events)
     }
 
     pub fn metrics(&self) -> &TransactionMetrics {
@@ -230,7 +273,9 @@ impl TransactionLayer {
     /// return the datagram that left. The bytes are `msg.image()` verbatim
     /// unless the To-tag had to be bound to the transaction's (`bind_to_tag`),
     /// so a TU that retains an image for a repeat retains what is returned
-    /// here (ADR-0032 X3).
+    /// here (ADR-0032 X3). A response a server transaction here holds leaves
+    /// to that transaction's destination, its request's response target
+    /// (RFC 3261 §18.2.2); `dest` addresses any other.
     pub async fn send_response(
         &self,
         msg: SipResponse,
@@ -287,43 +332,6 @@ impl TransactionLayer {
             .await
     }
 
-    /// Relinquish every transaction of `call_ref`, client and server, to the
-    /// node that serves the call now: each is deleted with its timers, nothing
-    /// sent and nothing owed, and no `CallQuiesced` follows. A message for one
-    /// of them arriving afterwards matches nothing here and is handed up as a
-    /// new arrival. Returns how many went. Idempotent.
-    pub async fn relinquish_call(&self, call_ref: &str) -> Result<usize, TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::RelinquishCall { call_ref: call_ref.to_string(), reply })
-            .await
-    }
-
-    /// Delete the Accepted INVITE client transactions of `call_ref` with
-    /// nothing sent, ahead of a release that does not end the call: no later
-    /// 2xx draws this layer's ACK or BYE on a dialog the call keeps, and a
-    /// repeat is a new arrival. Returns how many went. Idempotent.
-    pub async fn relinquish_accepted_of_call(
-        &self,
-        call_ref: &str,
-    ) -> Result<usize, TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::RelinquishAccepted {
-            call_ref: call_ref.to_string(),
-            reply,
-        })
-        .await
-    }
-
-    /// Relinquish the one server transaction `key` to the node that answered
-    /// its request: it is deleted with its timers, nothing sent and nothing
-    /// owed. A retransmission of its request arriving afterwards matches
-    /// nothing here and is handed up as a new arrival. Returns whether it was
-    /// there. Idempotent.
-    pub async fn relinquish_server(
-        &self,
-        key: ServerTxnKey,
-    ) -> Result<bool, TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::RelinquishServer { key, reply }).await
-    }
-
     /// How many transactions for `call_ref` are still resident in the map (any
     /// role/state). The acting-backup self-release (ADR-0014) reads it as a
     /// defensive re-check — see `Command::ActiveTxnCount`.
@@ -333,6 +341,12 @@ impl TransactionLayer {
     ) -> Result<usize, TransactionLayerClosed> {
         self.roundtrip(|reply| Command::ActiveTxnCount { call_ref: call_ref.to_string(), reply })
             .await
+    }
+
+    /// Whether this layer holds a client transaction on `branch`: the final to
+    /// the request sent on it arrives here (RFC 3261 §17.1.3).
+    pub async fn holds_client(&self, branch: &str) -> Result<bool, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::HoldsClient { branch: branch.to_string(), reply }).await
     }
 
     /// The consumer discarded the non-INVITE request whose server transaction
@@ -394,6 +408,45 @@ impl TransactionLayer {
             reply,
         })
         .await
+    }
+
+    /// Release the 100 Trying of the server INVITE transaction `invite`
+    /// opened (RFC 3261 §17.2.1): it leaves now if the transaction is still
+    /// `Trying` with nothing sent, and never after another response. `true`
+    /// when the 100 left; `false` too when no transaction holds `invite`.
+    pub async fn release_trying(
+        &self,
+        invite: &SipRequest,
+    ) -> Result<bool, TransactionLayerClosed> {
+        let Some(key) = ServerTxnId::of_request(invite).map(ServerTxnId::to_key) else {
+            return Ok(false);
+        };
+        self.roundtrip(|reply| Command::ReleaseTrying { key, reply }).await
+    }
+
+    /// Release the ACK of the non-2xx final the client INVITE transaction at
+    /// `branch` took ([`TransactionConfig::ack_bound_ms`](crate::TransactionConfig)):
+    /// it leaves now if it is still held. `true` when it left; `false` when
+    /// none is held there.
+    pub async fn release_ack(&self, branch: &str) -> Result<bool, TransactionLayerClosed> {
+        let branch = branch.to_string();
+        self.roundtrip(|reply| Command::ReleaseAck { branch, reply }).await
+    }
+
+    /// Release the 200 to a CANCEL and the 487 to the INVITE it cancelled, the
+    /// INVITE named by its Call-ID, From-tag and CSeq number as the
+    /// `Cancelled` event states them
+    /// ([`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig)):
+    /// they leave now if still held. `true` when they left; `false` when none
+    /// are held for that INVITE.
+    pub async fn release_cancel(
+        &self,
+        call_id: &str,
+        from_tag: &str,
+        cseq: u32,
+    ) -> Result<bool, TransactionLayerClosed> {
+        let (call_id, from_tag) = (call_id.to_string(), from_tag.to_string());
+        self.roundtrip(|reply| Command::ReleaseCancel { call_id, from_tag, cseq, reply }).await
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last

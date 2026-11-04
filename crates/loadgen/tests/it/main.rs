@@ -3,7 +3,8 @@
 //! the dependency graph. Only an ADR-0030 X2 exception stays there.
 //!
 //! Every `loadgen` test, here and in the lib, is `#[ignore = "slow lane: loadgen"]`
-//! (CLAUDE.md test-runtime policy).
+//! (CLAUDE.md test-runtime policy), `pending_request` aside: one paused-clock
+//! call in the default lane.
 //!
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=loadgen) & binary(it)' --run-ignored only <module>::`.
@@ -13,9 +14,14 @@ mod fake_net;
 mod fake_rig;
 mod from_user_net;
 mod governor;
+mod ladder_net;
+mod late_answer_net;
 mod late_final;
+mod live_report;
 mod mux_claims;
 mod mux_from_user;
 mod outcome_records;
+mod pending_request;
+mod samples;
 mod smoke;
 mod waiver_lane;

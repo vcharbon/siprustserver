@@ -20,7 +20,11 @@
 //! What the flap must not do is park the peer: a parked peer sees nothing the
 //! worker authors while it is unroutable, and the ring deadline it fires would
 //! exist on one node only. The caller takes exactly one final.
+//!
+//! Beyond the failover sweep: a member flapping not ready is departed by the proxy and still pulled
+//! by its peer.
 
+use b2bua::store::envelope;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,7 +35,7 @@ use b2bua::decision::{
     CallDecisionEngine, CallTreatment, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
 };
 use b2bua::limiter::NoopLimiter;
-use call::{CallBodyCodec, LegState, MsgpackCodec, TimerType};
+use call::{LegState, MsgpackCodec, TimerType};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, Belief, FailoverHarness,
     PartitionRole, PeerLink, ReplicatedB2buaSut, WorkerHealth,
@@ -92,7 +96,7 @@ async fn find_backed_up_ref(backup: &ReplicatedB2buaSut, primary: &str) -> Strin
 /// The survivor's replica, decoded (`None` once the replica is gone).
 async fn replica(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> Option<call::Call> {
     let body = backup.get(BAK, primary, call_ref).await?;
-    Some(MsgpackCodec::new().decode(&body).expect("replica body decodes"))
+    Some(envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call)
 }
 
 /// The absolute deadline of the survivor's replica per-b-leg `NoAnswer` entry.
@@ -223,9 +227,8 @@ async fn a_member_flapping_not_ready_is_departed_by_the_proxy_and_still_pulled()
     // The elder authors the 480 to the caller and the CANCEL to the callee; the
     // callee answers the CANCEL and terminates its INVITE (RFC 3261 §9.2). The
     // callee's responses travel the proxy's response path, where the elder's
-    // address reads `Dead`: the 487 is an INVITE response and reverse-fails to
-    // the survivor, while the 200 to the CANCEL answers a client transaction
-    // only the elder holds (§17.1.2) and returns to the elder.
+    // address reads `Dead`: the 487 and the 200 to the CANCEL alike go to the
+    // call's other owner, the survivor (ADR-0055 §8).
     assert!(fh.now_ms() < fire_at, "the flap precedes the ring deadline");
     let mut finals_to_alice: Vec<u16> = Vec::new();
     // The callee answers the CANCEL and terminates its INVITE the instant the
@@ -269,33 +272,26 @@ async fn a_member_flapping_not_ready_is_departed_by_the_proxy_and_still_pulled()
     assert_eq!(finals_to_alice, vec![480], "the caller takes exactly one final, the elder's 480");
     assert_eq!(cancels_to_bob, 1, "the callee's TU takes exactly one CANCEL");
 
-    // The callee's transaction layer answers a byte-identical CANCEL repeat
+    // The CANCEL's 200 goes to the survivor, never along the Via to the
+    // departed elder, whose client transaction repeats the CANCEL on its Timer
+    // E ladder (§17.1.2.2); the callee's transaction layer answers each repeat
     // from its Completed server transaction (§17.2.2), below the TU the count
-    // above sees. Only the recording says the 200 reached its sender and
-    // stopped the elder's Timer E ladder.
+    // above sees.
     let parser = CustomParser::new();
     let entries = fh.sip_entries();
-    let bob_addr: SocketAddr = BOB.parse().unwrap();
-    let cancels_on_wire = entries
-        .iter()
-        .filter(|e| {
-            e.from == proxy.addr()
-                && e.to == bob_addr
-                && matches!(parser.parse(&e.raw), Ok(SipMessage::Request(r)) if r.method() == &Method::Cancel)
-        })
-        .count();
-    assert_eq!(cancels_on_wire, 1, "exactly one CANCEL datagram reaches the callee");
-    let cancel_200_to_elder = entries
-        .iter()
-        .filter(|e| {
-            e.from == proxy.addr()
-                && e.to == elder_addr
-                && e.delivered
-                && matches!(parser.parse(&e.raw), Ok(SipMessage::Response(r))
-                    if r.status() == 200 && r.cseq().method() == &Method::Cancel)
-        })
-        .count();
-    assert_eq!(cancel_200_to_elder, 1, "the CANCEL's 200 follows the Via to the departed elder");
+    let cancel_200s_to = |to: SocketAddr| {
+        entries
+            .iter()
+            .filter(|e| {
+                e.from == proxy.addr()
+                    && e.to == to
+                    && matches!(parser.parse(&e.raw), Ok(SipMessage::Response(r))
+                        if r.status() == 200 && *r.cseq().method() == Method::Cancel)
+            })
+            .count()
+    };
+    assert_eq!(cancel_200s_to(elder_addr), 0, "no CANCEL 200 returns to the departed elder");
+    assert!(cancel_200s_to(survivor.sip_addr()) >= 1, "the CANCEL's 200 reaches the survivor");
 
     // The terminal state the elder authored while unroutable reached the
     // survivor: the replica is terminated or already deleted.
@@ -346,6 +342,13 @@ async fn a_member_flapping_not_ready_is_departed_by_the_proxy_and_still_pulled()
     assert_eq!(total_cdrs_for(&nodes[..], &call_ref), 1, "exactly one CDR for the rejected call");
     let cdrs: usize = nodes.iter().map(|n| n.cdr_records().len()).sum();
     assert_eq!(cdrs, 2, "one CDR per call across the cluster, the second call included");
+    let second = nodes
+        .iter()
+        .flat_map(|n| n.cdr_records())
+        .map(|c| c.call_ref)
+        .find(|r| *r != call_ref)
+        .expect("the second call's CDR");
+    assert_call_fully_released(&nodes[..], &second).await;
 
     // ── what the ledger recorded ─────────────────────────────────────────────
     // Nothing — primitive or sampler — ever parked the peer; the live link reads

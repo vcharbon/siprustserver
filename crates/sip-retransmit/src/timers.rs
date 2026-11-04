@@ -22,6 +22,11 @@ pub const T4: u64 = 5000;
 /// fast failure detection for a hop that answers nothing.
 pub const TIMER_B: u64 = 64 * T1;
 
+/// The bound on an INVITE server transaction's first provisional (RFC 3261
+/// §17.2.1, ms): the transaction MUST send a 100 Trying unless its TU answers
+/// within 200 ms.
+pub const TRYING_BOUND: u64 = 200;
+
 /// Non-INVITE client transaction timeout (Timer F = 64·T1 = 32 s).
 pub const TIMER_F: u64 = 64 * T1;
 

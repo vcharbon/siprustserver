@@ -6,6 +6,7 @@ use super::emit;
 use super::error::GenerateError;
 use crate::draft::ResponseDraft;
 use crate::header::{self, HeaderName, HeaderValue, MediaType, To, Via};
+use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
 
@@ -55,8 +56,9 @@ pub struct GenerateResponseOpts {
 }
 
 /// Echo one Via line. The topmost records what the receiving side observed
-/// (RFC 3261 §18.2.1, RFC 3581 §4); a line needing no stamp — or folding
-/// several hops onto one line — is echoed byte for byte.
+/// (RFC 3261 §18.2.1, RFC 3581 §4) on its first hop; a hop needing no stamp,
+/// and every hop after the first of a line folding several, is echoed byte
+/// for byte.
 pub(super) fn echo_via(
     draft: ResponseDraft,
     line: SipStr,
@@ -65,17 +67,24 @@ pub(super) fn echo_via(
     let Some((host, port)) = source else {
         return draft.push_raw(HeaderName::Via, line);
     };
-    let single = Via::parse_line(&line).ok().filter(|hops| hops.len() == 1);
-    match single.and_then(|hops| hops.into_iter().next()) {
-        Some(hop) => {
-            let stamped = hop.clone().stamped_from(host, *port);
-            if stamped == hop {
-                draft.push_raw(HeaderName::Via, line)
-            } else {
-                draft.push(stamped)
-            }
-        }
-        None => draft.push_raw(HeaderName::Via, line),
+    let text = line.as_str();
+    let mut entries = top_level_comma_entries(text);
+    let Some(first) = entries.next() else {
+        return draft.push_raw(HeaderName::Via, line);
+    };
+    let Ok(hop) = Via::parse(&line.reslice(first)) else {
+        return draft.push_raw(HeaderName::Via, line);
+    };
+    let rest = entries.next().and_then(|second| {
+        let start = (second.as_ptr() as usize).checked_sub(text.as_ptr() as usize)?;
+        text.get(start..)
+    });
+    let stamped = hop.clone().stamped_from(host, *port);
+    match rest {
+        None if stamped == hop => draft.push_raw(HeaderName::Via, line),
+        None => draft.push(stamped),
+        Some(_) if stamped == hop => draft.push_raw(HeaderName::Via, line),
+        Some(rest) => draft.push(stamped).push_raw(HeaderName::Via, line.reslice(rest)),
     }
 }
 
@@ -103,6 +112,22 @@ pub(super) fn echo_to(
         Err(_) => draft
             .push_raw(HeaderName::To, SipStr::owned(&format!("{};tag={}", line.as_str(), tag()))),
     }
+}
+
+/// The `Timestamp` of a 100 Trying sent `delay` after `request` arrived
+/// (RFC 3261 §8.2.6.1): the request's timestamp with the delay value, in
+/// seconds, the UAS spent before answering. `None` when the request carries no
+/// `Timestamp`. Handed to [`generate_response`] in `extra_headers`, it
+/// replaces the undelayed echo.
+pub fn delayed_trying_timestamp(
+    request: &SipRequest,
+    delay: std::time::Duration,
+) -> Option<SipHeader> {
+    let stated = request.raw_text(HeaderName::Timestamp).next()?;
+    let value = stated.as_str().split_whitespace().next()?;
+    let ms = delay.as_millis();
+    let delayed = format!("{value} {}.{:03}", ms / 1000, ms % 1000);
+    Some(SipHeader::new(HeaderName::Timestamp.as_wire_str().to_string(), delayed))
 }
 
 /// Build a UAS response to `incoming_request`, echoing Via / From / To /
@@ -215,5 +240,58 @@ Content-Length: 0\r\n\r\n";
     fn a_200_gains_no_allow_here() {
         let resp = generate_response(&notify(), 200, "OK", &Default::default()).unwrap();
         assert_eq!(resp.raw_text(HeaderName::Allow).count(), 0);
+    }
+
+    /// RFC 3261 §8.2.6.1 — a 100 sent late states the delay it was sent
+    /// after, in seconds, beside the request's timestamp; one Timestamp line.
+    #[test]
+    fn a_late_100_states_its_delay_in_the_timestamp() {
+        let raw = String::from_utf8(notify().image().to_vec())
+            .unwrap()
+            .replace("Content-Length: 0", "Timestamp: 54.25\r\nContent-Length: 0");
+        let request = match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            crate::SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        };
+        let delayed =
+            delayed_trying_timestamp(&request, std::time::Duration::from_millis(1_234)).unwrap();
+        let opts = GenerateResponseOpts { extra_headers: vec![delayed], ..Default::default() };
+        let resp = generate_response(&request, 100, "Trying", &opts).unwrap();
+        let stamps: Vec<_> = resp.raw_text(HeaderName::Timestamp).collect();
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].as_str(), "54.25 1.234");
+        assert!(delayed_trying_timestamp(&notify(), std::time::Duration::ZERO).is_none());
+    }
+
+    /// RFC 3261 §18.2.1 / RFC 3581 §4 — a topmost Via line folding several
+    /// hops has its first hop stamped; the hops after it are echoed as sent.
+    #[test]
+    fn the_first_hop_of_a_folded_top_via_line_is_stamped() {
+        let raw = "OPTIONS sip:as@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.44:5999;branch=z9hG4bK-a;rport , SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-b\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@127.0.0.1:5070>;tag=a1\r\n\
+To: <sip:as@127.0.0.1:5060>\r\n\
+Call-ID: folded-via\r\n\
+CSeq: 2 OPTIONS\r\n\
+Content-Length: 0\r\n\r\n";
+        let request = match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            crate::SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        };
+        let opts = GenerateResponseOpts {
+            incoming_source: Some(("198.51.100.4".to_string(), 33000)),
+            ..Default::default()
+        };
+        let resp = generate_response(&request, 200, "OK", &opts).unwrap();
+        let lines: Vec<_> =
+            resp.raw_text(HeaderName::Via).map(|l| l.as_str().to_string()).collect();
+        assert_eq!(
+            lines,
+            [
+                "SIP/2.0/UDP 192.0.2.44:5999;branch=z9hG4bK-a;rport=33000;received=198.51.100.4",
+                "SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-b",
+            ]
+        );
     }
 }

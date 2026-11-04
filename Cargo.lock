@@ -37,6 +37,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.3.4",
  "once_cell",
+ "serde",
  "version_check",
  "zerocopy",
 ]
@@ -493,6 +494,7 @@ dependencies = [
  "alloc-counter",
  "async-trait",
  "b2bua-core",
+ "b2bua-decision",
  "b2bua-sdk",
  "call",
  "call-limiter",
@@ -508,7 +510,9 @@ dependencies = [
  "proptest",
  "repl-net",
  "repl-net-testkit",
+ "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sip-clock",
  "sip-ids",
@@ -529,6 +533,7 @@ dependencies = [
 name = "b2bua-core"
 version = "0.1.0"
 dependencies = [
+ "b2bua-core",
  "b2bua-sdk",
  "call",
  "lookup-map",
@@ -541,6 +546,15 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "wire-mutations",
+]
+
+[[package]]
+name = "b2bua-decision"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "b2bua-core",
+ "http-net",
 ]
 
 [[package]]
@@ -568,6 +582,7 @@ dependencies = [
  "scenario-harness",
  "serde_json",
  "sip-clock",
+ "sip-ids",
  "sip-message",
  "sip-net",
  "sip-net-testkit",
@@ -638,7 +653,9 @@ dependencies = [
  "call",
  "serde",
  "serde_json",
+ "sip-ids",
  "sip-message",
+ "sip-retransmit",
 ]
 
 [[package]]
@@ -1017,6 +1034,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
+name = "clock-bridge"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1238,9 +1262,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -1461,6 +1485,7 @@ dependencies = [
  "axum",
  "e2e-core",
  "http-body-util",
+ "loadrun-render",
  "maud",
  "seq-report",
  "serde",
@@ -1591,12 +1616,14 @@ dependencies = [
 name = "failover-harness"
 version = "0.1.0"
 dependencies = [
+ "announcement",
  "async-trait",
  "b2bua",
  "b2bua-harness",
  "b2bua-sdk",
  "call",
  "call-limiter",
+ "callshapes",
  "ha-harness",
  "http-net",
  "http-net-testkit",
@@ -2100,6 +2127,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "clock-bridge",
  "http-net",
  "layer-harness",
  "serde",
@@ -2372,6 +2400,13 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "block-padding",
  "generic-array",
+]
+
+[[package]]
+name = "insn-counter"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -2730,7 +2765,9 @@ dependencies = [
  "e2e-model",
  "flamegraph-util",
  "futures",
+ "jemalloc-stats",
  "layer-harness",
+ "loadrun-render",
  "metric-catalogue",
  "metric-values",
  "regex",
@@ -2740,8 +2777,17 @@ dependencies = [
  "sip-message",
  "sip-net",
  "sip-net-testkit",
+ "tikv-jemallocator",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "loadrun-render"
+version = "0.1.0"
+dependencies = [
+ "e2e-model",
+ "seq-report",
 ]
 
 [[package]]
@@ -2875,6 +2921,7 @@ dependencies = [
  "cdr-consumer-runner",
  "loadgen",
  "metric-catalogue",
+ "route-guard",
  "serde_json",
  "sip-proxy-runner",
 ]
@@ -3942,6 +3989,9 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -4007,6 +4057,17 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "route-guard"
+version = "0.1.0"
+dependencies = [
+ "metric-catalogue",
+ "observe",
+ "probe-http",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4592,6 +4653,8 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "criterion",
+ "flate2",
+ "insn-counter",
  "lookup-map",
  "memchr",
  "proptest",
@@ -4669,6 +4732,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.1",
  "sip-clock",
+ "sip-ids",
  "sip-message",
  "sip-net",
  "sip-net-testkit",
@@ -4694,6 +4758,7 @@ dependencies = [
  "http-body-util",
  "jemalloc-stats",
  "kube",
+ "libc",
  "metric-catalogue",
  "metric-values",
  "observe",
@@ -4701,10 +4766,12 @@ dependencies = [
  "rustls",
  "serde_json",
  "sip-clock",
+ "sip-ids",
  "sip-net",
  "sip-net-testkit",
  "sip-proxy",
  "sip-txn",
+ "socket2",
  "task-restart",
  "tikv-jemallocator",
  "tokio",
@@ -5841,6 +5908,20 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "workspace-hack"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "aho-corasick",
+ "clap",
+ "linux-raw-sys",
+ "regex-automata",
+ "reqwest",
+ "rustix",
+ "serde_json",
+]
 
 [[package]]
 name = "writeable"

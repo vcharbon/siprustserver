@@ -13,7 +13,7 @@
 //! The header values an entry keeps are read off the parsed message by
 //! `sip-message` here, once; nothing downstream re-reads a datagram.
 
-use call::helpers::{find_leg, find_pending_request, record_message};
+use call::helpers::{find_leg, find_relay, record_message};
 use call::{Call, Dialog, DialogId, MessageDirection, MessageEntry, Obligation};
 use sip_message::{HeaderName, Method, SipMessage, SipRequest, SipResponse};
 
@@ -21,12 +21,29 @@ use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, Provenance};
 use b2bua_sdk::event::CallEvent;
 
+/// What the layer handed the call, as the turn read it.
+pub struct Received<'a> {
+    pub event: &'a CallEvent,
+    /// A response answered a client transaction the layer holds.
+    pub matched_client_txn: bool,
+    /// The engine's verdict that the message is a reliable provisional it
+    /// already recorded (RFC 3262 §3).
+    pub repeat: bool,
+    /// The obligation the received request retired: the executor's own
+    /// verdict on whether an ACK is the first of its 2xx.
+    pub discharged: Option<&'a Obligation>,
+    /// The dialog the dialog gate resolved the message to.
+    pub dialog: Option<&'a DialogId>,
+}
+
 /// The ring's configuration for one turn: the cap and the header names
 /// resolved once. `None` while the ring is off, so an unconfigured stack pays
 /// for nothing.
 pub struct Ring {
     cap: usize,
     names: Vec<HeaderName>,
+    /// The names an INVITE final response's entry captures.
+    final_names: Vec<HeaderName>,
 }
 
 impl Ring {
@@ -34,14 +51,16 @@ impl Ring {
         if config.cdr.message_ring == 0 {
             return None;
         }
+        let resolve = |names: &[String]| -> Vec<HeaderName> {
+            names.iter().map(|n| HeaderName::from(n.as_str())).collect()
+        };
+        let cdr = &config.cdr;
         Some(Self {
-            cap: config.cdr.message_ring,
-            names: config
-                .cdr
-                .captured_headers
-                .iter()
-                .map(|n| HeaderName::from(n.as_str()))
-                .collect(),
+            cap: cdr.message_ring,
+            names: resolve(&cdr.captured_headers),
+            final_names: resolve(
+                cdr.final_response_headers.as_deref().unwrap_or(&cdr.captured_headers),
+            ),
         })
     }
 
@@ -49,25 +68,12 @@ impl Ring {
     /// message, or a CANCEL it answered itself — with the messages it sent
     /// autonomously for it: the 100 Trying every INVITE server transaction
     /// answers with, the hop-by-hop ACK of a non-2xx INVITE final on a client
-    /// transaction this node holds, the 200 and 487 a matched CANCEL draws.
-    /// `repeat` is the engine's verdict that the message is a reliable
-    /// provisional it already recorded (RFC 3262 §3); `discharged` is the
-    /// obligation the received request retired, the executor's own verdict on
-    /// whether an ACK is the first of its 2xx; `dialog` is the dialog the
-    /// dialog gate resolved the message to.
-    #[allow(clippy::too_many_arguments)]
-    pub fn received(
-        &self,
-        call: Call,
-        leg_id: &str,
-        event: &CallEvent,
-        repeat: bool,
-        discharged: Option<&Obligation>,
-        dialog: Option<&DialogId>,
-        now_ms: i64,
-    ) -> Call {
+    /// transaction it holds, the 200 and 487 a matched CANCEL draws (all three
+    /// at the instant the event states, [`CallEvent::Cancelled::at_ms`]).
+    pub fn received(&self, call: Call, leg_id: &str, received: Received<'_>, now_ms: i64) -> Call {
+        let Received { event, matched_client_txn, repeat, discharged, dialog } = received;
         match event {
-            CallEvent::Sip { message, matched_client_txn, .. } => {
+            CallEvent::Sip { message, .. } => {
                 let named = dialog.and_then(|id| {
                     find_leg(&call, leg_id)?.dialogs.by_tags(&id.our_tag, &id.peer_tag)
                 });
@@ -85,7 +91,7 @@ impl Ring {
                         self.record(call, leg_id, self.request_entry(req, now_ms))
                     }
                     SipMessage::Response(resp)
-                        if *matched_client_txn
+                        if matched_client_txn
                             && resp.status() >= 300
                             && resp.cseq().method() == Method::Invite =>
                     {
@@ -104,7 +110,7 @@ impl Ring {
                     }
                 }
             }
-            CallEvent::Cancelled { invite_cseq, in_dialog, headers, to_tag, .. } => {
+            CallEvent::Cancelled { invite_cseq, in_dialog, headers, to_tag, at_ms, .. } => {
                 let cseq = invite_cseq.unwrap_or(0);
                 // The CANCEL names the INVITE's dialog: the tag the INVITE
                 // carried when it was in one, none when it was not; both
@@ -112,7 +118,7 @@ impl Ring {
                 let cancel_tag = if *in_dialog { to_tag.clone() } else { None };
                 let cancel = MessageEntry {
                     seq: 0,
-                    at_ms: now_ms,
+                    at_ms: *at_ms,
                     direction: MessageDirection::Received,
                     method: Method::Cancel.to_string(),
                     cseq,
@@ -208,8 +214,9 @@ impl Ring {
         })
     }
 
-    fn record(&self, call: Call, leg_id: &str, entry: MessageEntry) -> Call {
-        record_message(call, leg_id, self.cap, entry)
+    fn record(&self, mut call: Call, leg_id: &str, entry: MessageEntry) -> Call {
+        record_message(&mut call, leg_id, self.cap, entry);
+        call
     }
 
     /// A received request's entry; `seq` is assigned at the append.
@@ -228,8 +235,15 @@ impl Ring {
         }
     }
 
-    /// A received response's entry; `seq` is assigned at the append.
+    /// A received response's entry; `seq` is assigned at the append. An
+    /// INVITE final captures the final-response names, any other response
+    /// the common ones.
     fn response_entry(&self, resp: &SipResponse, now_ms: i64) -> MessageEntry {
+        let names = if resp.status() >= 200 && resp.cseq().method() == Method::Invite {
+            &self.final_names
+        } else {
+            &self.names
+        };
         MessageEntry {
             seq: 0,
             at_ms: now_ms,
@@ -239,7 +253,7 @@ impl Ring {
             code: Some(resp.status()),
             to_tag: resp.to().tag().map(str::to_string),
             decision_ordinal: 0,
-            headers: resp.captured_headers(&self.names),
+            headers: resp.captured_headers(names),
             turn: 0,
         }
     }
@@ -270,7 +284,7 @@ fn repeated(
                 })
         }
         SipMessage::Response(resp) => {
-            named.is_some_and(|d| crate::rules::relay::retransmitted_2xx(d, resp))
+            named.is_some_and(|d| crate::rules::relay::retransmitted_2xx(leg, d, resp))
         }
     }
 }
@@ -285,5 +299,5 @@ fn probe_answer(message: &SipMessage, named: Option<&Dialog>) -> bool {
         return false;
     }
     let cseq = i64::from(resp.cseq().seq());
-    named.is_none_or(|d| find_pending_request(d, cseq).is_none())
+    named.is_none_or(|d| find_relay(d, cseq).is_none())
 }

@@ -1,25 +1,32 @@
 //! Whether caller text fits the RFC 3261 §25.1 class of the place a writer
-//! puts it. A header line ends with CRLF and nowhere else (ADR-0053): text
-//! that would put a CR or LF inside one is refused, never written. A caller
-//! holding text from outside the stack checks it here and skips what is
-//! refused; a draft refuses to freeze with a line break inside a line
-//! whichever writer carried it ([`crate::draft::IncompleteDraft::Unwritable`]).
+//! puts it. A header line ends with CRLF and nowhere else (ADR-0053), and a
+//! control byte other than HTAB stands in a value only as a quoted-pair's
+//! escaped byte: text breaking either is refused, never written. Caller text
+//! carries no NUL at all, so no peer reading a value up to its first NUL
+//! reads another value than the one written. A caller holding text from
+//! outside the stack checks it here and skips what is refused; a draft
+//! refuses to freeze with a line it could not write whole, whichever writer
+//! carried it ([`crate::draft::IncompleteDraft::Unwritable`]).
 
 use std::fmt;
 
 use crate::char_class::is_token_char;
+use crate::control_bytes::{bare_control_byte, has_comments, is_control};
+use crate::header::HeaderName;
 
 /// Where a writer was asked to put text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {
     /// A header field name: a `token`.
     HeaderName,
-    /// A header field value: no CR, LF or NUL.
+    /// A header field value: no NUL, and no other control byte but HTAB
+    /// outside a quoted-pair.
     HeaderValue,
-    /// A status line's reason phrase: no CR, LF or NUL.
+    /// A status line's reason phrase: no control byte but HTAB.
     ReasonPhrase,
     /// Text a writer carries as a `quoted-string` (a display name, a
-    /// parameter value that is no token): no CR, LF or NUL.
+    /// parameter value that is no token): no CR, LF or NUL; the writer
+    /// escapes every other control byte as a quoted-pair.
     QuotedText,
     /// A request or status line as rendered.
     StartLine,
@@ -65,40 +72,63 @@ pub fn header_name(name: &str) -> Result<(), WriteRefusal> {
     }
 }
 
-/// A header value: any text but CR, LF and NUL.
+/// A header value: no NUL, and no other control byte but HTAB outside a
+/// quoted-pair of a quoted-string.
 pub fn header_value(value: &str) -> Result<(), WriteRefusal> {
-    unbreakable(Position::HeaderValue, value)
+    value_refusal(value, false).map_or(Ok(()), |reason| Err(refusal(Position::HeaderValue, reason)))
 }
 
-/// One header line: [`header_name`] and [`header_value`].
+/// One header line: [`header_name`] and [`header_value`], a comment of a
+/// header whose grammar has one carrying quoted-pairs too.
 pub fn header_line(name: &str, value: &str) -> Result<(), WriteRefusal> {
     header_name(name)?;
-    header_value(value).map_err(|e| WriteRefusal { reason: format!("{name}: {}", e.reason), ..e })
+    let comments = HeaderName::known(name).is_some_and(|known| has_comments(&known));
+    match value_refusal(value, comments) {
+        Some(reason) => Err(refusal(Position::HeaderValue, format!("{name}: {reason}"))),
+        None => Ok(()),
+    }
 }
 
-/// A reason phrase: any text but CR, LF and NUL.
+/// A reason phrase: any text but a control byte other than HTAB.
 pub fn reason_phrase(text: &str) -> Result<(), WriteRefusal> {
-    unbreakable(Position::ReasonPhrase, text)
+    match text.bytes().position(is_control) {
+        Some(at) => Err(refusal(Position::ReasonPhrase, byte_reason(text, at))),
+        None => Ok(()),
+    }
 }
 
 /// Text a writer quotes where it is no token (a display name, a `gen-value`):
 /// any text but CR, LF and NUL, the rest escaped as the grammar asks.
 pub fn quoted_text(text: &str) -> Result<(), WriteRefusal> {
-    unbreakable(Position::QuotedText, text)
+    match text.bytes().position(|b| matches!(b, b'\r' | b'\n' | 0)) {
+        Some(at) => Err(refusal(Position::QuotedText, byte_reason(text, at))),
+        None => Ok(()),
+    }
 }
 
-/// The first CR or LF of `text` as a reason; `None` when it holds neither.
-/// The one check a freeze runs on every line it renders.
-pub(crate) fn line_break(text: &[u8]) -> Option<String> {
-    let at = text.iter().position(|&b| b == b'\r' || b == b'\n')?;
+/// Why caller text cannot be a header value: a NUL, or a control byte outside
+/// a quoted-pair.
+fn value_refusal(value: &str, comments: bool) -> Option<String> {
+    let at = value
+        .bytes()
+        .position(|b| b == 0)
+        .or_else(|| bare_control_byte(value.as_bytes(), comments))?;
+    Some(byte_reason(value, at))
+}
+
+/// Why a rendered header value cannot be written: a control byte outside a
+/// quoted-pair, CR and LF included. The check a freeze runs on every header
+/// line it renders, relayed ones too: a quoted-pair a peer sent passes.
+pub(crate) fn rendered_value(text: &[u8], comments: bool) -> Option<String> {
+    let at = bare_control_byte(text, comments)?;
     Some(byte_reason(&String::from_utf8_lossy(text), at))
 }
 
-fn unbreakable(position: Position, text: &str) -> Result<(), WriteRefusal> {
-    match text.bytes().position(|b| matches!(b, b'\r' | b'\n' | 0)) {
-        Some(at) => Err(refusal(position, byte_reason(text, at))),
-        None => Ok(()),
-    }
+/// Why a rendered start line cannot be written: a control byte other than
+/// HTAB, CR and LF included, anywhere in it.
+pub(crate) fn rendered_start_line(text: &[u8]) -> Option<String> {
+    let at = text.iter().position(|&b| is_control(b))?;
+    Some(byte_reason(&String::from_utf8_lossy(text), at))
 }
 
 fn refusal(position: Position, reason: String) -> WriteRefusal {
@@ -125,11 +155,17 @@ mod tests {
     #[test]
     fn a_value_holds_no_cr_lf_or_nul() {
         assert!(header_value("any text, \"quoted\", ü\t").is_ok());
-        for bad in ["a\rb", "a\nb", "a\r\nVia: x", "a\0b"] {
+        for bad in ["a\rb", "a\nb", "a\r\nVia: x", "a\0b", "\"a\\\r\""] {
             assert!(header_value(bad).is_err(), "{bad:?}");
             assert!(reason_phrase(bad).is_err(), "{bad:?}");
             assert!(quoted_text(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_comment_carries_a_quoted_pair_where_the_header_has_comments() {
+        assert!(header_line("Server", "stack/1 (a \\\x07 b)").is_ok());
+        assert!(header_line("X-Note", "stack/1 (a \\\x07 b)").is_err());
     }
 
     #[test]
@@ -140,9 +176,12 @@ mod tests {
     }
 
     #[test]
-    fn a_freeze_finds_cr_and_lf_but_lets_nul_through() {
-        assert!(line_break(b"a\0b").is_none());
-        assert!(line_break(b"a\rb").is_some());
-        assert!(line_break(b"a\nb").is_some());
+    fn a_freeze_finds_every_bare_control_byte() {
+        for bad in [&b"a\0b"[..], b"a\rb", b"a\nb", b"a\x07b", b"\"a\\\r\""] {
+            assert!(rendered_value(bad, false).is_some(), "{bad:?}");
+            assert!(rendered_start_line(bad).is_some(), "{bad:?}");
+        }
+        assert!(rendered_value(b"\"a\\\0b\"", false).is_none(), "a quoted-pair a peer sent");
+        assert!(rendered_start_line(b"SIP/2.0 200 O\tK").is_none());
     }
 }

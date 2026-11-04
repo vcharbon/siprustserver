@@ -1,33 +1,25 @@
 //! Self-generated UAS finals: the synthesized response to the packet source,
-//! the `ackhop|` absorb memo the proxy writes when it becomes the UAS of a
-//! non-2xx INVITE transaction, the refusal of a new request (one 503 for every
-//! copy, [`crate::refusals`]), the select-failure → 503 mapping, and the rule
-//! that an ACK is never answered (RFC 3261 §17): a reject of an ACK drops it.
+//! the refusal of a new request (one 503 for every copy, [`crate::refusals`]),
+//! the select-failure → 503 mapping, and the rule that an ACK is never
+//! answered (RFC 3261 §17): a reject of an ACK drops it. The ACK to a non-2xx
+//! final sent here is recognised by its To-tag (`route`), so sending one
+//! writes no memo.
 //! Relayed responses do NOT live here — see `core/response`.
 
 use std::net::SocketAddr;
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::header::{HeaderValue, Via};
+use sip_message::header::HeaderValue;
 use sip_message::types::SipHeader;
 use sip_message::{Method, SipRequest, SipResponse};
 
 use crate::observability::metrics::{Direction, MessageResult, NoTargetDrop, RoutingDecisionKind};
 use crate::strategy::SelectError;
 use crate::trace::emit;
+use sip_message::received::observed_source;
 
 use super::super::ProxyCore;
 use super::RouteOutcome;
-
-/// The fields of a request the proxy answers itself that its own final's
-/// bookkeeping reads: a parsed request's, or a refused one's partial's.
-pub(super) struct Answered<'a> {
-    pub method: &'a Method,
-    pub top_via: &'a Via,
-    pub call_id: &'a str,
-    pub from_tag: Option<&'a str>,
-    pub cseq: u32,
-}
 
 /// A typed value on the response generator's extra-header seam, which still
 /// takes wire lines.
@@ -39,7 +31,8 @@ pub(super) fn extra_header(value: impl HeaderValue) -> SipHeader {
 impl ProxyCore {
     /// Reject `req` locally: answer it with `status`, counted under `metric`.
     /// An ACK is never answered — nothing awaits a response to it — so a
-    /// rejected ACK is dropped, counted `ack_not_answered`.
+    /// rejected ACK is dropped, counted `ack_not_answered`; an ACK no worker
+    /// takes is a request dropped for want of a target (`no_target_dropped`).
     pub(super) async fn reply_reject(
         &self,
         req: &SipRequest,
@@ -80,7 +73,7 @@ impl ProxyCore {
 
     /// Refuse the new request `req` with a 503, `retry_after_sec` being the
     /// refusing stage's hint, counted once under `metric`: every later copy
-    /// draws the same bytes from [`repeat_refusal`](Self::repeat_refusal).
+    /// draws the same 503 from [`repeat_refusal`](Self::repeat_refusal).
     pub(super) async fn refuse_new(
         &self,
         req: &SipRequest,
@@ -89,7 +82,7 @@ impl ProxyCore {
         metric: &str,
     ) -> RouteOutcome {
         // A request whose lines no response can echo is refused unanswered.
-        if let Ok(resp) = self.refusals.refuse(req, retry_after_sec, self.now_ms()) {
+        if let Ok(resp) = self.refusals.refuse(req, src, retry_after_sec, self.now_ms()) {
             self.send_own_final(req, src, &resp).await;
         }
         self.metrics.record_reject(metric);
@@ -103,7 +96,7 @@ impl ProxyCore {
         req: &SipRequest,
         src: SocketAddr,
     ) -> Option<RouteOutcome> {
-        let resp = self.refusals.repeat(req, self.now_ms())?;
+        let resp = self.refusals.repeat(req, src, self.now_ms())?;
         self.send_own_final(req, src, &resp).await;
         Some(RouteOutcome { decision: RoutingDecisionKind::Reject, target: None })
     }
@@ -117,12 +110,13 @@ impl ProxyCore {
         req: &SipRequest,
         src: SocketAddr,
     ) -> Option<RouteOutcome> {
-        let resp = self.refusals.cancel(req, self.now_ms())?;
+        let resp = self.refusals.cancel(req, src, self.now_ms())?;
         self.send_own_final(req, src, &resp).await;
         Some(RouteOutcome { decision: RoutingDecisionKind::Cancel, target: None })
     }
 
-    /// Synthesize a UAS response to the source.
+    /// Synthesize a UAS response to the source, recorded on its topmost Via
+    /// (RFC 3261 §18.2.1, RFC 3581 §4).
     async fn reply(
         &self,
         req: &SipRequest,
@@ -134,6 +128,7 @@ impl ProxyCore {
         let opts = GenerateResponseOpts {
             to_tag: Some(self.refusals.to_tag(req)),
             extra_headers: extra.to_vec(),
+            incoming_source: Some(observed_source(src)),
             ..Default::default()
         };
         if let Ok(resp) = generate_response(req, status, reason, &opts) {
@@ -143,21 +138,14 @@ impl ProxyCore {
 
     /// Send `resp`, the proxy's own final to `req`, to the source.
     async fn send_own_final(&self, req: &SipRequest, src: SocketAddr, resp: &SipResponse) {
-        let answered = Answered {
-            method: req.method(),
-            top_via: req.top_via(),
-            call_id: req.call_id().as_str(),
-            from_tag: req.from().tag(),
-            cseq: req.cseq().seq(),
-        };
-        self.send_own_final_to(answered, src, resp).await;
+        self.send_own_final_to(req.call_id().as_str(), src, resp).await;
     }
 
-    /// Send `resp`, the proxy's own final to the request `answered` names,
-    /// to the source.
+    /// Send `resp`, the proxy's own final to a request of call `call_id`, to
+    /// the source.
     pub(super) async fn send_own_final_to(
         &self,
-        answered: Answered<'_>,
+        call_id: &str,
         src: SocketAddr,
         resp: &SipResponse,
     ) {
@@ -168,37 +156,7 @@ impl ProxyCore {
         // place a traced call's own 503 / 483 / 420 / 400 becomes a `sip.out`.
         // A shed call never reaches a downstream hop, so without this its span
         // would show the INVITE arriving and nothing leaving.
-        emit::responded(&self.traces, answered.call_id, self.trace_ms(), src, resp.image());
-
-        // ── §16.7 / §17.1.1.3: absorb the ACK to our OWN non-2xx INVITE final ─
-        // Generating a final response makes this proxy the UAS of that INVITE
-        // transaction, and its non-2xx ACK is hop-by-hop — the upstream's ACK
-        // terminates HERE. Write the `ackhop|` memo (see `cancel_lru.rs`) with
-        // an EMPTY `branch`, which is what tells the request path to absorb
-        // the matching ACK rather than relay it (no downstream exists for a
-        // self-generated reject; relaying would run the strategy and hand a
-        // worker a stray ACK matching no transaction it ever created).
-        if (300..700).contains(&resp.status())
-            && answered.method == Method::Invite
-            && answered.top_via.branch().is_some_and(|b| !b.is_empty())
-        {
-            self.cancel_lru.remember(
-                &crate::cancel_lru::ack_hop_key(
-                    answered.top_via,
-                    answered.call_id,
-                    answered.from_tag,
-                    answered.cseq,
-                ),
-                crate::cancel_lru::CancelEntry {
-                    target: self.advertised.clone(),
-                    branch: String::new(),
-                    stickiness: None,
-                    minted: None,
-                    via_cookie: None,
-                },
-                crate::cancel_lru::RTX_ENTRY_TTL_MS,
-            );
-        }
+        emit::responded(&self.traces, call_id, self.trace_ms(), src, resp.image());
     }
 
     /// Refuse the request a `select_for_new_dialog` failure leaves without a
@@ -219,8 +177,7 @@ impl ProxyCore {
             }
         };
         if req.method() == Method::Ack {
-            self.metrics.record_reject("ack_not_answered");
-            return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+            return self.drop_without_target(NoTargetDrop::of(req));
         }
         if matches!(err, SelectError::NoTarget { .. }) && !self.first_view.is_in() {
             return self.drop_without_target(NoTargetDrop::of(req));

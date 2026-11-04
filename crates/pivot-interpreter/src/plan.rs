@@ -16,17 +16,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use pivot_schema::accessor::{Accessor, StepField};
-use pivot_schema::body::Body;
 use pivot_schema::check::{Check, CheckOp};
 use pivot_schema::deviation::{CseqValue, Deviation};
 use pivot_schema::document::PivotV3;
-use pivot_schema::flow::{Anchor, CheckMode, Delay, FlowNode, Op, Step};
-use pivot_schema::msg::{MsgSpec, Ref};
+use pivot_schema::flow::{Anchor, CheckMode, FlowNode, Op, Step};
+use pivot_schema::msg::MsgSpec;
 use pivot_schema::placement::{Actor, Endpoint, Leg};
 use pivot_schema::postcondition::CdrExpectation;
 use pivot_schema::violation::{RfcRule, RfcViolation};
 
 use crate::program::{Branch, Item, ItemKind, Program, StepLoc};
+
+mod msg_strings;
+mod step;
+
+use msg_strings::msg_strings;
+pub use step::{CompiledStep, StepKind};
 
 /// Why a document cannot be compiled to a plan. Every variant names the site it
 /// refuses and what is wrong with it: a compilation refusal is reported to the
@@ -330,77 +335,6 @@ impl From<&Discriminator> for pivot_schema::bundle::GatedOn {
                 }
             }
         }
-    }
-}
-
-/// What a compiled step does on the wire, carrying each side's own fields —
-/// so an expect's check mode is mandatory here, where the document's `Option`
-/// has already been refused if absent, and `optional` cannot exist on a send.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepKind {
-    /// The actor emits the message.
-    Send,
-    /// The actor waits for the message, within its budget.
-    Expect {
-        /// Whether the stored content is matched or merely recorded.
-        check: CheckMode,
-        /// Tolerated absence (§6.5).
-        optional: bool,
-    },
-}
-
-/// One flow step, compiled: every field the run needs, resolved once.
-#[derive(Debug, Clone)]
-pub struct CompiledStep {
-    pub id: String,
-    pub leg: String,
-    pub kind: StepKind,
-    pub auto: bool,
-    pub after: Vec<String>,
-    pub checks: Vec<Check>,
-    pub early: Option<String>,
-    pub overlap: Option<String>,
-    pub msg: MsgSpec,
-    pub delay: Delay,
-    /// The step's own budget: its `within_ms` where it states one, else
-    /// `timing.expect_budget_ms`.
-    pub within_ms: u64,
-    pub retransmits: Option<u32>,
-    /// The document's own pacing for those repeats, one entry per rung. Empty
-    /// where the document states none and the RFC's ladder paces instead.
-    pub retransmit_intervals_ms: Vec<u64>,
-    pub(crate) loc: StepLoc,
-    /// Document order, over every step the flow holds.
-    pub order: usize,
-    /// Indices into `document.deviations` of the entries that apply to this step.
-    pub deviations: Vec<usize>,
-    pub discriminator: Discriminator,
-}
-
-impl CompiledStep {
-    /// Whether the run may compress this step's dwell on a virtual clock. Read
-    /// from the document and never re-derived.
-    pub fn compressible(&self) -> bool {
-        self.delay.compressible
-    }
-
-    pub fn is_send(&self) -> bool {
-        matches!(self.kind, StepKind::Send)
-    }
-
-    pub fn is_expect(&self) -> bool {
-        matches!(self.kind, StepKind::Expect { .. })
-    }
-
-    /// A tolerated absence: an `optional` expect (§6.5).
-    pub fn optional_expect(&self) -> bool {
-        matches!(self.kind, StepKind::Expect { optional: true, .. })
-    }
-
-    /// Whether the stored content is MATCHED against the inbound message
-    /// (`check: assert`) rather than merely recorded.
-    pub fn asserts_content(&self) -> bool {
-        matches!(self.kind, StepKind::Expect { check: CheckMode::Assert, .. })
     }
 }
 
@@ -881,6 +815,7 @@ impl Compiler {
                     checks: step.checks.clone(),
                     early: step.early.clone(),
                     overlap: step.overlap.clone(),
+                    awaits: step.awaits.clone(),
                     msg: step.msg.clone(),
                     delay: step.delay.clone(),
                     within_ms: step.within_ms.unwrap_or(budget),
@@ -1393,38 +1328,8 @@ impl Compiler {
         for step in self.document.steps() {
             let owner = Some(step.id.clone());
             let site = |what: &str| format!("step {:?} {what}", step.id);
-            let msg: &MsgSpec = &step.msg;
-            for h in &msg.headers {
-                out.push((site("header name"), owner.clone(), h.name.clone()));
-                out.push((site(&format!("header {:?}", h.name)), owner.clone(), h.value.clone()));
-            }
-            for h in &msg.headers_present {
-                out.push((site("headers-present"), owner.clone(), h.clone()));
-            }
-            for (what, r) in [("ruri", &msg.ruri), ("from", &msg.from), ("to", &msg.to)] {
-                let Some(r) = r else { continue };
-                match r {
-                    Ref::Positional(p) => {
-                        out.push((site(what), owner.clone(), p.pos.clone()));
-                        if let Some(form) = &p.form {
-                            out.push((site(what), owner.clone(), form.clone()));
-                        }
-                    }
-                    Ref::Frozen(f) => {
-                        out.push((site(what), owner.clone(), f.frozen.clone()));
-                        if let Some(kind) = &f.kind {
-                            out.push((site(what), owner.clone(), kind.clone()));
-                        }
-                    }
-                }
-                if let Some(addr) = r.addr() {
-                    out.push((site(what), owner.clone(), addr.to_string()));
-                }
-            }
-            if let Some(body) = &msg.body {
-                for text in body_strings(body) {
-                    out.push((site("body"), owner.clone(), text));
-                }
+            for (what, text) in msg_strings(&step.msg) {
+                out.push((site(&what), owner.clone(), text));
             }
             for c in &step.checks {
                 out.push((site("check field"), owner.clone(), c.field.clone()));
@@ -1564,34 +1469,6 @@ fn requires_100rel(msg: &MsgSpec) -> bool {
             sip_message::header::Require::parse(&sip_message::SipStr::owned(&h.value)).ok()
         })
         .any(|tokens| tokens.contains("100rel"))
-}
-
-/// Every string a body spec carries — refs, modes, content types.
-fn body_strings(body: &Body) -> Vec<String> {
-    match body {
-        Body::Resource(r) => {
-            let mut out = vec![r.reference.clone()];
-            out.extend(r.rewrite.iter().cloned());
-            out.extend(r.content_type.iter().cloned());
-            out
-        }
-        Body::Shape(_) => Vec::new(),
-        Body::Multipart(m) => {
-            let mut out = vec![m.multipart.content_type.clone()];
-            for p in &m.multipart.parts {
-                out.push(p.content_type.clone());
-                out.push(p.reference.clone());
-                out.extend(p.rewrite.iter().cloned());
-                out.extend(p.content_id.iter().cloned());
-                for header in &p.headers {
-                    out.push(header.name.clone());
-                    out.push(header.value.clone());
-                }
-                out.extend(p.cid_linked.iter().cloned());
-            }
-            out
-        }
-    }
 }
 
 /// A check's `op`/`value` agreement and, for `regex`, that the pattern compiles

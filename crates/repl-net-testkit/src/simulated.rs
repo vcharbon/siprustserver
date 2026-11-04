@@ -71,12 +71,14 @@
 //!
 //! A node connects through its own handle ([`NodeReplicationNetwork`], from
 //! [`SimulatedReplicationNetwork::as_node`]) whenever the harness can hand it
-//! one: the stream is then attributed at `connect`, so a partition refuses
-//! the connect outright — the puller never reads a peer it cannot reach as
-//! reached. The `PullRequest` attribution covers a stream opened through the
-//! bare fabric.
+//! one: the stream is then attributed at `connect` to the listen address the
+//! handle was made for, so a partition refuses the connect outright — the
+//! puller never reads a peer it cannot reach as reached — and two live
+//! incarnations of one ordinal, each on its own listen address, keep their
+//! streams apart. The `PullRequest` attribution covers a stream opened through
+//! the bare fabric.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -95,8 +97,10 @@ use super::{
 
 mod fault;
 mod listener;
+mod node_handle;
 pub use fault::Fault;
 use listener::SimListener;
+pub use node_handle::NodeReplicationNetwork;
 
 /// Directed pair key for the fault tables.
 type Pair = (SocketAddr, SocketAddr);
@@ -172,40 +176,42 @@ struct ListenerHandle {
 }
 
 struct SimShared {
-    routing: Mutex<HashMap<SocketAddr, ListenerHandle>>,
+    routing: Mutex<BTreeMap<SocketAddr, ListenerHandle>>,
     /// Default per-hop transit delay (ms, `>= 1`) for new directions.
     default_delay_ms: u64,
     /// Default inbound-buffer capacity.
     buffer_cap: usize,
     /// Per-direction live state, created lazily per `connect`-direction and
     /// kept so later `delay/stall/cut` faults reach the live actors.
-    dir_state: Mutex<HashMap<Pair, Arc<DirState>>>,
+    dir_state: Mutex<BTreeMap<Pair, Arc<DirState>>>,
     /// Endpoints to drop-on-overflow by default for a fresh direction.
-    drop_on_overflow_pairs: Mutex<HashSet<Pair>>,
+    drop_on_overflow_pairs: Mutex<BTreeSet<Pair>>,
     /// Partitions blocking new `connect`s (unordered pair, stored both ways).
     /// Enforced on the OWNER of each end, so a stream a puller opens from an
     /// ephemeral local is cut with its node, new streams included.
-    partitions: Mutex<HashSet<Pair>>,
+    partitions: Mutex<BTreeSet<Pair>>,
     /// Node ordinal → its listen address, declared by the harness. The bridge
     /// from a `PullRequest`'s `caller` name to an address the fault tables key on.
-    endpoints: Mutex<HashMap<String, SocketAddr>>,
+    endpoints: Mutex<BTreeMap<String, SocketAddr>>,
     /// Client-side ephemeral address → the listen address of the node whose
     /// puller opened the stream, learned from the `caller` on its first
     /// `PullRequest`.
-    stream_owner: Mutex<HashMap<SocketAddr, SocketAddr>>,
+    stream_owner: Mutex<BTreeMap<SocketAddr, SocketAddr>>,
     /// Directed faults between two declared endpoints, keyed by the owner pair;
     /// read by every wire through its [`WireView`], so they reach streams that
     /// run between an ephemeral local and a listener.
-    node_faults: Mutex<HashMap<Pair, NodeFault>>,
+    node_faults: Mutex<BTreeMap<Pair, NodeFault>>,
     /// Live in-flight frame count (across all delivery actors) — harness
     /// introspection, mirrors sip-net's `in_flight`.
     in_flight: AtomicI64,
     /// Addresses that answer no connect ([`Fault::BlackHole`]).
-    black_holes: Mutex<HashSet<SocketAddr>>,
+    black_holes: Mutex<BTreeSet<SocketAddr>>,
     /// Woken when a black-hole is lifted, so a waiting `connect` re-checks.
     black_hole_lifted: Notify,
     /// Listen address → accepts still to fail ([`Fault::AcceptErrors`]).
-    accept_errors: Mutex<HashMap<SocketAddr, usize>>,
+    accept_errors: Mutex<BTreeMap<SocketAddr, usize>>,
+    /// The fabric's own counter [`synth_local`] draws ephemeral ports from.
+    next_local: std::sync::atomic::AtomicU32,
 }
 
 impl SimShared {
@@ -292,7 +298,8 @@ impl SimShared {
         }
     }
 
-    /// Wake every live direction, so a partition change is re-read at once.
+    /// Wake every live direction in the pairs' order, so a partition change is
+    /// re-read at once and every run delivers frames due at one instant alike.
     fn wake_all(&self) {
         for d in self.dir_state.lock().unwrap().values() {
             d.wake.notify_waiters();
@@ -316,19 +323,20 @@ impl SimulatedReplicationNetwork {
     pub fn new(transit_delay_ms: u64, buffer_cap: usize) -> Self {
         Self {
             shared: Arc::new(SimShared {
-                routing: Mutex::new(HashMap::new()),
+                routing: Mutex::new(BTreeMap::new()),
                 default_delay_ms: transit_delay_ms.max(1),
                 buffer_cap: buffer_cap.max(1),
-                dir_state: Mutex::new(HashMap::new()),
-                drop_on_overflow_pairs: Mutex::new(HashSet::new()),
-                partitions: Mutex::new(HashSet::new()),
-                endpoints: Mutex::new(HashMap::new()),
-                stream_owner: Mutex::new(HashMap::new()),
-                node_faults: Mutex::new(HashMap::new()),
+                dir_state: Mutex::new(BTreeMap::new()),
+                drop_on_overflow_pairs: Mutex::new(BTreeSet::new()),
+                partitions: Mutex::new(BTreeSet::new()),
+                endpoints: Mutex::new(BTreeMap::new()),
+                stream_owner: Mutex::new(BTreeMap::new()),
+                node_faults: Mutex::new(BTreeMap::new()),
                 in_flight: AtomicI64::new(0),
-                black_holes: Mutex::new(HashSet::new()),
+                black_holes: Mutex::new(BTreeSet::new()),
                 black_hole_lifted: Notify::new(),
-                accept_errors: Mutex::new(HashMap::new()),
+                accept_errors: Mutex::new(BTreeMap::new()),
+                next_local: std::sync::atomic::AtomicU32::new(1),
             }),
         }
     }
@@ -459,10 +467,11 @@ impl SimulatedReplicationNetwork {
         self
     }
 
-    /// `ordinal`'s own handle on this fabric: every stream it opens is
-    /// attributed to it at `connect` (see [`NodeReplicationNetwork`]).
-    pub fn as_node(&self, ordinal: &str) -> NodeReplicationNetwork {
-        NodeReplicationNetwork { shared: self.shared.clone(), ordinal: ordinal.to_string() }
+    /// The handle of the node listening at `listen`: every stream it opens is
+    /// attributed to `listen` at `connect` (see [`NodeReplicationNetwork`]),
+    /// whatever address its ordinal is declared at later.
+    pub fn as_node(&self, listen: SocketAddr) -> NodeReplicationNetwork {
+        NodeReplicationNetwork::new(self.shared.clone(), listen)
     }
 
     /// Declare `ordinal`'s replication listen address, so a stream its puller
@@ -471,8 +480,9 @@ impl SimulatedReplicationNetwork {
     /// two declared addresses is a node fault (see [`Fault`]). Without a
     /// declaration a stream stands for its own address and a fault between two
     /// listen addresses reaches only the wires that literally run on the pair.
-    /// Declaring an ordinal again re-points it: later attributions and faults
-    /// read the new address.
+    /// Declaring an ordinal again re-points it: later `PullRequest`
+    /// attributions read the new address; a node's own handle keeps the
+    /// address it was made for.
     pub fn declare_endpoint(&self, ordinal: &str, listen: SocketAddr) {
         self.shared.endpoints.lock().unwrap().insert(ordinal.to_string(), listen);
     }
@@ -490,12 +500,9 @@ impl ReplicationNetwork for SimulatedReplicationNetwork {
         &self,
         dst: SocketAddr,
     ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
-        // A `connect` needs a fresh, ephemeral *local* address for the client
-        // end so the directed-pair fault keys are well-defined. We synthesise
-        // one from a counter on 127.0.0.x:port-ish space — but the harness
-        // never inspects client ports, only the directed pair, so a unique
-        // synthetic addr suffices. Reuse `dst`'s ip family.
-        let local = synth_local(dst);
+        // A fresh, unique local address for the client end keys the directed
+        // pair; the harness reads the pair, never the client port.
+        let local = synth_local(&self.shared, dst);
         self.connect_from(local, dst).await
     }
 
@@ -589,50 +596,11 @@ impl SimulatedReplicationNetwork {
     }
 }
 
-/// One node's handle on a [`SimulatedReplicationNetwork`]: `connect` draws the
-/// ephemeral local and attributes it to the node's declared listen address
-/// before the fabric decides, so a [`Fault::Partition`] on the node refuses the
-/// connect with [`ConnectError::Blocked`] — a peer behind a partition is never
-/// reached — and a node [`Fault::Cut`] closes the stream at once. An ordinal
-/// with no declaration connects as the bare fabric does. `listen` is the
-/// fabric's own.
-#[derive(Clone)]
-pub struct NodeReplicationNetwork {
-    shared: Arc<SimShared>,
-    ordinal: String,
-}
-
-#[async_trait]
-impl ReplicationNetwork for NodeReplicationNetwork {
-    async fn connect(
-        &self,
-        dst: SocketAddr,
-    ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
-        let local = synth_local(dst);
-        let owner = self.shared.endpoints.lock().unwrap().get(&self.ordinal).copied();
-        if let Some(owner) = owner {
-            self.shared.stream_owner.lock().unwrap().insert(local, owner);
-        }
-        let fabric = SimulatedReplicationNetwork { shared: self.shared.clone() };
-        let conn = fabric.connect_from(local, dst).await;
-        if conn.is_err() {
-            self.shared.forget_stream(local);
-        }
-        conn
-    }
-
-    async fn listen(&self, local: SocketAddr) -> Result<Box<dyn ReplicationListener>, ListenError> {
-        SimulatedReplicationNetwork { shared: self.shared.clone() }.listen(local).await
-    }
-}
-
 /// Synthesise a unique client-side local address in the same ip family as
-/// `dst`. The port carries a process-global counter so distinct `connect`s get
+/// `dst`. The port carries the fabric's counter so distinct `connect`s get
 /// distinct pair keys.
-fn synth_local(dst: SocketAddr) -> SocketAddr {
-    use std::sync::atomic::AtomicU32;
-    static NEXT: AtomicU32 = AtomicU32::new(1);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+fn synth_local(shared: &SimShared, dst: SocketAddr) -> SocketAddr {
+    let n = shared.next_local.fetch_add(1, Ordering::Relaxed);
     let port = 40000u16.wrapping_add((n % 20000) as u16).max(1025);
     match dst {
         SocketAddr::V4(_) => SocketAddr::from(([127, 0, 0, 1], port)),

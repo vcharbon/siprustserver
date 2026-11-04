@@ -124,21 +124,66 @@ def test_a_spike_that_does_not_drain_within_heal_s_is_killed_and_invalidates_the
     assert [i["kind"] for i in v["integrity"]] == ["incident_failed"]  # type: ignore[index]
 
 
-def test_an_abandoned_stream_is_killed_and_left_out_of_the_reconciliation(tmp_path: Path) -> None:
+HELD_HEADER = "StartTime;LastResetTime;CurrentTime;TargetRate;CurrentCall;TotalCallCreated\n"
+
+
+def is_hold(c: Call) -> bool:
+    return c.kind == "run" and c.argv[:3] == ["docker", "exec", "hakit-burst-exporter"] and "cset rate 0" in c.argv
+
+
+def test_an_abandoned_stream_is_held_counted_killed_and_left_out_of_the_reconciliation(tmp_path: Path) -> None:
+    # SIPp writes a row a second: its last row before the stop counts 95 calls,
+    # and it places 5 more before the stop. The row it writes once held counts them.
     orphan: Json = {"at_s": 30, "incident": "orphan", "stream": "burst", "budget": "any"}
+    seen = {"held": False}
 
     def counted(c: Call) -> str | None:
+        if is_hold(c):
+            seen["held"] = True
         if c.kind == "read" and c.path is not None and c.path.name == "stat.csv" and "burst" in str(c.path):
-            return STAT_HEADER + "0;0;0;5;9\n"
+            return HELD_HEADER + "0;0;0;50;5;95\n" + ("0;0;0;0;5;100\n" if seen["held"] else "")
         return None
 
     run_dir, fake = run(tmp_path, [counted], [orphan])
+    heal = as_obj(next(e for e in read_jsonl(run_dir / "events.jsonl") if e.get("executable") == "heal")["facts"])
+    assert heal["calls"] == 100 and heal["held"] is True
     argvs = [c.argv for c in fake.calls if c.kind == "run"]
     assert HARD in argvs and SOFT not in argvs
+    order = [c.argv == HARD for c in fake.calls if is_hold(c) or (c.kind == "run" and c.argv == HARD)]
+    assert order == [False, True]  # held, then killed
     docs = {str(d["stream"]): d for d in json.loads((run_dir / "streams.json").read_text())}
-    assert docs["burst"]["reconciled"] is False and docs["burst"]["calls"] == 9
+    assert docs["burst"]["reconciled"] is False and docs["burst"]["calls"] == 100
     v = as_obj(json.loads((run_dir / "verdict.json").read_text()))
-    assert v["status"] == "pass"  # 9 calls and no record: not a record gap for an abandoned stream
+    assert v["status"] == "pass"  # 100 calls and no record: not a record gap for an abandoned stream
+
+
+def test_an_abandoned_stream_whose_counters_never_show_the_hold_has_no_count(tmp_path: Path) -> None:
+    orphan: Json = {"at_s": 30, "incident": "orphan", "stream": "burst", "budget": "any"}
+
+    def unheld(c: Call) -> str | None:
+        if c.kind == "read" and c.path is not None and c.path.name == "stat.csv" and "burst" in str(c.path):
+            return HELD_HEADER + "0;0;0;50;5;95\n"
+        return None
+
+    run_dir, _ = run(tmp_path, [unheld], [orphan])
+    heal = next(e for e in read_jsonl(run_dir / "events.jsonl") if e.get("executable") == "heal")
+    assert (as_obj(heal["facts"])["calls"], as_obj(heal["facts"])["held"]) == (None, False)
+
+
+def test_a_refused_hold_leaves_the_firing_uncounted_and_still_kills_it(tmp_path: Path) -> None:
+    orphan: Json = {"at_s": 30, "incident": "orphan", "stream": "burst", "budget": "any"}
+
+    def refused(c: Call) -> ProcResult | str | None:
+        if is_hold(c):
+            return ProcResult(1, "", "Error response from daemon: container is not running")
+        if c.kind == "read" and c.path is not None and c.path.name == "stat.csv" and "burst" in str(c.path):
+            return HELD_HEADER + "0;0;0;50;5;95\n"
+        return None
+
+    run_dir, fake = run(tmp_path, [refused], [orphan])
+    heal = as_obj(next(e for e in read_jsonl(run_dir / "events.jsonl") if e.get("executable") == "heal")["facts"])
+    assert (heal["calls"], heal["held"]) == (None, False)
+    assert HARD in [c.argv for c in fake.calls if c.kind == "run"]
 
 
 def test_each_firing_is_its_own_generator_and_the_stream_sums_them(tmp_path: Path) -> None:

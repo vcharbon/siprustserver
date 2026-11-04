@@ -37,7 +37,8 @@ pub trait Product {
 
     /// Loadgen flag defaults this product runs with, as `(clap id, value)`.
     /// A default changes the starting value only: a `--load-profile` field
-    /// still overrides it, and an explicit flag still overrides both.
+    /// overrides it where the profile carries that setting, and an explicit
+    /// flag overrides both.
     fn flag_defaults(&self) -> &'static [(&'static str, &'static str)] {
         &[]
     }
@@ -116,10 +117,12 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
     let mut cmd = command(product);
-    let matches = cmd.try_get_matches_from_mut(itr)?;
+    let matches = cmd.try_get_matches_from_mut(argv.clone())?;
     let flags = P::Flags::from_arg_matches(&matches)?;
     let mut args = Args::from_matches(&matches)?;
+    args.command_line = super::args::command_line(&argv);
     product
         .configure(&flags, &mut args)
         .map_err(|e| cmd.error(clap::error::ErrorKind::ValueValidation, e))?;
@@ -128,13 +131,19 @@ where
 
 /// The whole load binary for `product`: parse the process command line
 /// (exiting with clap's usage error on a bad one), then run on a
-/// multi-threaded runtime.
+/// multi-threaded runtime of `--worker-threads` workers.
 pub fn main<P: Product>(product: P) -> std::io::Result<()> {
     let (flags, args) = parse_from(&product, std::env::args_os()).unwrap_or_else(|e| e.exit());
+    runtime(&args)?.block_on(run(&product, &flags, args))
+}
+
+/// The multi-threaded runtime a load run drives on, with `--worker-threads`
+/// workers.
+fn runtime(args: &Args) -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(args.worker_threads.get())
         .enable_all()
-        .build()?
-        .block_on(run(&product, &flags, args))
+        .build()
 }
 
 #[cfg(test)]

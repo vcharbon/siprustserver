@@ -1,33 +1,36 @@
 //! What a received message names on the leg it arrived on ([`Resolved`]), as
 //! the engine resolves it before any rule reads the message (RFC 3261 §12.2):
 //! the dialog its tags name, read by its direction, and for a response the
-//! relay it answers (§8.1.3.3). A response that names nothing this stack sent
-//! is told apart ([`ResponseOrigin`]) so it reaches no rule.
+//! request record it answers (§8.1.3.3). A response that names nothing this
+//! stack sent is told apart ([`ResponseOrigin`]) so it reaches no rule.
 
-use crate::model::{Call, Dialog, DialogId, Leg, PendingRequest};
+use crate::model::{Call, Dialog, DialogId, Leg, RequestRecord};
 
-use super::dialog::{relayed_pending, PendingHolder};
 use super::leg::{find_leg, leg_own_tag};
+use super::request_records::{answered_record, Answers, RecordHolder};
 
-/// The dialog the turn's message names, and the relay a response answers.
-/// Empty for any other event, and for a message naming no dialog (a request
-/// without a To-tag, a CANCEL, a response creating a dialog).
+/// The dialog the turn's message names, and the request record a response or
+/// a transaction timeout settles. Empty for any other event, and for a message
+/// naming no dialog (a request without a To-tag, a CANCEL, a response
+/// creating a dialog).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Resolved {
     /// The dialog of the source leg the message names.
     pub dialog: Option<DialogId>,
-    /// The relayed request a response answers and where it is kept.
-    pub relay: Option<Box<(PendingHolder, PendingRequest)>>,
+    /// The sent request a response answers or a timeout ends, and where it is
+    /// kept, as it stood when the event arrived.
+    pub record: Option<Box<(RecordHolder, RequestRecord)>>,
 }
 
 /// The resolution of an event that names no dialog.
-pub static UNRESOLVED: Resolved = Resolved { dialog: None, relay: None };
+pub static UNRESOLVED: Resolved = Resolved { dialog: None, record: None };
 
 /// What a received response answers.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ResponseOrigin {
     /// A response in the dialog its tags name (a tagless one: the leg's
-    /// confirmed dialog), with the relay it answers when it answers one.
+    /// confirmed dialog), with the request record it answers when it
+    /// answers one.
     Dialog(Resolved),
     /// A 1xx or 2xx to the INVITE that dialled the leg, under a To-tag no
     /// dialog of the leg has yet: it creates one (RFC 3261 §12.1.2).
@@ -50,6 +53,8 @@ pub struct ResponseFacts<'a> {
     /// The CSeq method: the method of the request it answers.
     pub method: &'a str,
     pub status: u16,
+    /// The top-Via branch: the client transaction it answers.
+    pub branch: Option<&'a str>,
 }
 
 /// What the response `facts` describes answers on `leg_id`.
@@ -60,17 +65,16 @@ pub fn response_origin(call: &Call, leg_id: &str, facts: ResponseFacts<'_>) -> R
         None => leg.dialogs.confirmed().filter(|d| Some(d.our_tag.as_str()) == facts.from),
     };
     if let Some(d) = named {
-        let relay = relayed_pending(call, leg_id, facts.to, facts.from, facts.cseq)
-            .filter(|(_, p)| p.method.eq_ignore_ascii_case(facts.method))
-            .map(Box::new);
-        return ResponseOrigin::Dialog(Resolved { dialog: Some(d.id()), relay });
+        let answers = Answers { method: facts.method, cseq: facts.cseq, branch: facts.branch };
+        let record = answered_record(call, leg_id, facts.to, facts.from, answers).map(Box::new);
+        return ResponseOrigin::Dialog(Resolved { dialog: Some(d.id()), record });
     }
     let Some(from) = facts.from.filter(|f| holds_our_tag(leg, f)) else {
         return ResponseOrigin::Stray;
     };
-    let dialling =
-        leg.outbound_invite.as_ref().is_some_and(|i| i.our_tag == from && i.cseq == facts.cseq);
-    let invite = facts.method.eq_ignore_ascii_case("INVITE");
+    let dialling = leg.outbound_invite().is_some_and(|i| i.our_tag == from)
+        && leg.dialled_cseq() == Some(facts.cseq);
+    let invite = facts.method == "INVITE";
     if dialling && invite && facts.to.is_some() && (101..300).contains(&facts.status) {
         return ResponseOrigin::Creates;
     }

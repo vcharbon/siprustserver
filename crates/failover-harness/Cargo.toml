@@ -6,10 +6,15 @@ license.workspace = true
 publish.workspace = true
 description = "Test-only harness for multi-node HA failover: composes the proxy SUT (real LoadBalancer), two replicating b2bua workers over the simulated repl fabric, alice/bob UAs, and a shared fake clock. Hosts the FailoverHarness engine, the CallScenario/safe-point DSL, and the transparent-failover test matrix (ADR-0013). Carries no production code."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 
 [dependencies]
+# The decision callouts wrap the engine (the `CallDecisionEngine` trait is async-trait).
+async-trait = { workspace = true }
 b2bua = { path = "../b2bua", features = ["testkit"] }
 # The simulated load sampler each worker's overload signal reads.
 load-shed = { path = "../load-shed" }
@@ -38,7 +43,12 @@ seq-report = { path = "../seq-report" }
 call-limiter = { path = "../call-limiter" }
 http-net = { path = "../http-net" }
 http-net-testkit = { path = "../http-net-testkit" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+# The parties of the failover sweep play composed call shapes (ADR-0055 §11).
+callshapes = { path = "../callshapes" }
+# The sweep's media-server leg is the announcement service's.
+announcement = { path = "../announcement" }
+serde_json = { workspace = true }
 # The node each SUT serves (`NodeScope`); the trace-plane tests also install
 # their own sampling gate and read the captured subscriber buffer (ADR-0026).
 observe = { path = "../observe" }
@@ -48,6 +58,3 @@ tokio = { workspace = true, features = ["test-util"] }
 observe-testkit = { path = "../observe-testkit" }
 # A test service states the body of a request it originates.
 b2bua-sdk = { path = "../b2bua-sdk" }
-# A test wraps the limiter client (the `CallLimiter` trait is async-trait).
-async-trait = { workspace = true }
-serde_json = { workspace = true }

@@ -9,6 +9,9 @@ description = "On-demand pprof-rs CPU flamegraph capture for the runner binaries
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

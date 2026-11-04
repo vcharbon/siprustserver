@@ -1,5 +1,9 @@
 //! How one OPTIONS answer is read, and the probe's per-branch call ref.
 
+use sip_message::worker_report::Readiness;
+
+use crate::registry::Acceptance;
+
 use super::*;
 
 /// ADR-0050 §3: the status sets health, `X-Readiness` acceptance.

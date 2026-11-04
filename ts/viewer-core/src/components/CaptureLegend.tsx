@@ -46,11 +46,11 @@ const SocketStrip = (
   }
 ): JSX.Element => (
   <div className="fv-capture-sockets">
-    <span className="fv-capture-rule">
-      {sutSockets.length === 0
-        ? "SUT unknown: this case cites no capture coordinate, so nothing here names the system under test"
-        : `SUT at ${sutSockets.join(", ")} — where the case's steps send to and expect from`}
-      {onToggle !== undefined && " · click a socket to draw only what it exchanged"}
+    <span
+      className="fv-capture-rule"
+      title={onToggle === undefined ? undefined : "click a socket: draw only what it exchanged"}
+    >
+      {sutSockets.length === 0 ? "SUT unknown: no capture coordinate" : `SUT ${sutSockets.join(", ")}`}
     </span>
     <div className="fv-socket-chips">
       {sockets.map((socket) => (
@@ -156,7 +156,7 @@ const LegLine = (
         type="button"
         className={`fv-leg-button${picked ? " fv-leg-button-on" : ""}`}
         disabled={onToggleLeg === undefined}
-        title={picked ? "drawing this leg alone — click to draw every leg again" : "draw only this leg"}
+        title={picked ? "this leg alone · click: every leg" : "this leg alone"}
         onClick={onToggleLeg === undefined ? undefined : () => onToggleLeg(leg.legIndex)}
       >
         leg {leg.legIndex}
@@ -195,18 +195,14 @@ export const CaptureLegend = (
         onToggle={onToggleSocket}
       />
       <p className="fv-capture-rule">
-        hue = Call-ID family, shade = leg within it (a derived Call-ID keeps its base's hue)
-        {layout.hasSelection
-          ? " · full colour = selected by this case, pale = seen and discarded"
-          : " · this document cites no capture coordinate, so every leg is drawn selected"}
-        {" · a leg's chips are its REAL tags, shortened: one "}
-        <code>from</code>
-        {" against one "}
-        <code>to</code>
-        {" per dialog, so several to-chips under one from-chip is a fork"}
-        {onSelectTag !== undefined && " · click a tag to light only the messages that state it"}
-        {onToggleLeg !== undefined && " · click a leg to draw that leg alone"}
-        {layout.hiddenMessages > 0 && ` · ${layout.hiddenMessages} messages are filtered out of this drawing`}
+        hue = Call-ID family · shade = leg
+        {layout.hasSelection && " · pale = not this case's"}
+        {" · "}
+        <span title="several to-chips under one from-chip: a fork">
+          <code>from</code>/<code>to</code> = real tags, shortened
+        </span>
+        {onSelectTag !== undefined && <span title="click a tag: light the messages that state it"> · tags light</span>}
+        {layout.hiddenMessages > 0 && ` · ${layout.hiddenMessages} filtered`}
       </p>
       {layout.families.families.map((family) => {
         const legs = family.legs.map((leg) => drawn.get(leg)).filter((leg): leg is FlowsLegHeader => leg !== undefined)

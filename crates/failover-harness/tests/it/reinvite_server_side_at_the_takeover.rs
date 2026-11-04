@@ -24,6 +24,8 @@
 //!
 //! The kill is never told to the peers (ADR-0031 cases 3a and 4). Every cell
 //! ends with a BYE, one CDR and clean memory on both nodes.
+//!
+//! Beyond the failover sweep: re-INVITE retransmissions and CANCELs absorbed at the takeover.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -34,7 +36,7 @@ use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
-use crate::departure_support::kill_announced;
+use crate::departure_support::{bring_up_reactive, kill_announced};
 use crate::inflight_resend::{
     assert_not_taken_over, assert_taken_over_once, bring_up, establish, kill_serving_node,
     last_request_sent, reboot_and_reclaim, round_invites_sent_to, settle_to_one_cdr, split_mut,
@@ -81,7 +83,7 @@ async fn a_reinvite_retransmitted_after_its_2xx_replicated_draws_that_2xx_at_the
     let mut fh = FailoverHarness::new("reinvite-2xx-retransmitted-takeover", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
 
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
@@ -90,6 +92,7 @@ async fn a_reinvite_retransmitted_after_its_2xx_replicated_draws_that_2xx_at_the
     let reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
     fh.cut_signalling("alice", alice.addr());
     let mut at_bob = bob.receive("INVITE").await;
+    let round_cseq = at_bob.request().cseq().seq();
     let cseq = reinvite.sent_invite().expect("the re-INVITE").cseq().seq();
     at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     fh.advance(REPLICATE).await;
@@ -120,7 +123,7 @@ async fn a_reinvite_retransmitted_after_its_2xx_replicated_draws_that_2xx_at_the
 
     // ── The caller ACKs; the callee draws one ACK ───────────────────────────
     dialog.ack_for(cseq, None).await;
-    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob).await;
+    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob, round_cseq).await;
     assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
     drop(reinvite);
 
@@ -141,7 +144,7 @@ async fn a_reinvite_retransmitted_after_another_takeover_draws_its_replicated_2x
     let mut fh = FailoverHarness::new("reinvite-2xx-retransmitted-after-takeover", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
 
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
@@ -149,6 +152,7 @@ async fn a_reinvite_retransmitted_after_another_takeover_draws_its_replicated_2x
     let reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
     fh.cut_signalling("alice", alice.addr());
     let mut at_bob = bob.receive("INVITE").await;
+    let round_cseq = at_bob.request().cseq().seq();
     let cseq = reinvite.sent_invite().expect("the re-INVITE").cseq().seq();
     at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     fh.advance(REPLICATE).await;
@@ -179,7 +183,7 @@ async fn a_reinvite_retransmitted_after_another_takeover_draws_its_replicated_2x
     drop((info, reinvite));
 
     dialog.ack_for(cseq, None).await;
-    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob).await;
+    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob, round_cseq).await;
     assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -209,6 +213,7 @@ async fn a_retained_2xx_is_retransmitted_by_the_survivor_after_its_nodes_departu
     let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
     reinvite.expect(100).await;
     let mut at_bob = bob.receive("INVITE").await;
+    let round_cseq = at_bob.request().cseq().seq();
     fh.cut_signalling("alice", alice.addr());
     at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     fh.advance(REPLICATE).await;
@@ -221,7 +226,7 @@ async fn a_retained_2xx_is_retransmitted_by_the_survivor_after_its_nodes_departu
     reinvite.expect(200).await;
     assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
     dialog.ack(None).await;
-    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob).await;
+    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob, round_cseq).await;
     assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -252,6 +257,19 @@ fn responses_from_toward(
         .count()
 }
 
+/// The INVITE the survivor re-sends once its held CANCEL waits on it (§9.1):
+/// the callee's transaction took it as a retransmission, below its TU.
+fn assert_resent_once_and_absorbed(bob: &Agent) {
+    let invites: Vec<_> = bob
+        .wire_view()
+        .into_iter()
+        .filter(|e| e.start_line().starts_with("INVITE "))
+        .skip(1)
+        .collect();
+    assert_eq!(invites.len(), 2, "the re-INVITE and its one re-send");
+    assert_eq!(invites[1].seen_by(), scenario_harness::absorption::SeenBy::WireOnly);
+}
+
 /// Which request reaches the survivor first after the kill.
 #[derive(Clone, Copy)]
 enum FirstAtTheSurvivor {
@@ -270,7 +288,7 @@ async fn reinvite_cancelled_at_the_takeover(name: &str, first: FirstAtTheSurvivo
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
 
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
@@ -301,11 +319,10 @@ async fn reinvite_cancelled_at_the_takeover(name: &str, first: FirstAtTheSurvivo
     fh.advance(Duration::from_millis(200)).await;
     assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
 
-    // ── The callee's side: the INVITE re-sent once, its 100, the CANCEL ─────
-    let resent = bob.receive("INVITE").await;
-    assert_eq!(resent.request().top_via().branch(), at_bob.request().top_via().branch());
-    at_bob.respond(100, "Trying").await;
+    // ── The callee's side: the INVITE re-sent once, its transaction repeating
+    //    its 100 (§17.2.1), the CANCEL ────────────────────────────────────────
     bob.receive_absorbing("CANCEL", &["INVITE"]).await.respond(200, "OK").await;
+    assert_resent_once_and_absorbed(&bob);
     at_bob.respond(487, "Request Terminated").await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;
     assert_eq!(round_invites_sent_to(&fh, bob.addr(), REOFFER), 1, "one b-leg INVITE");

@@ -8,16 +8,25 @@
 //! - `record_write` — the actions that write the record or hand a request to a
 //!   service or the limiter, with no SIP leaving
 //! - `ack_leg` — the ACK of a 2xx toward a leg, relayed or this stack's own
-//! - `lost_round` — the ACK of an INVITE final for a round the record lost
+//! - `evidence` — what evidence the record cannot explain is owed, and the
+//!   dialog state it proves (ADR-0055 §4)
+//! - `possibly_confirmed` — the caller dialog held while it may carry a 2xx
+//!   another owner sent (ADR-0055 §4)
 //! - `relay_request` / `relay_response` — relaying the current event to a peer
 //! - `relay_pending_response` — a response to a request this stack relayed
+//! - `request_record` — the non-INVITE request records: written as a request
+//!   leaves or is held, settled by its final, timeout, deadline or a
+//!   service's answer (ADR-0055 §2)
+//! - `settle` — the one settle entry: what a leg's end, the call's release
+//!   or its termination answers, at its listed triggers (ADR-0055 §2)
 //! - `dialog_track` — early-dialog tracking, 2xx confirmation, the a-dialog
 //! - `dialog_end` — a leg's dialogs moving to the state its teardown records
 //! - `create_leg` — the new leg's INVITE, opening the attempt it dials
 //! - `originate` — requests the B2BUA sends itself (re-INVITE,
 //!   NOTIFY, in-dialog probes)
-//! - `own_notify` — this stack's requests held behind its own unanswered
-//!   NOTIFY on a dialog
+//! - `subscription` — this stack as the notifier of a dialog's subscriptions:
+//!   a NOTIFY refused once its subscription is terminated, and this stack's
+//!   requests queued behind its own unanswered NOTIFY
 //! - `prack` — the PRACKs this stack owes responders, settled in one step
 //! - `provisional_arrival` — the engine's record of a reliable provisional
 //!   as it arrives, before the rules
@@ -40,10 +49,11 @@ mod create_leg;
 mod dialog_end;
 mod dialog_track;
 mod dispatch;
+mod evidence;
 mod ladder;
-mod lost_round;
 mod originate;
-mod own_notify;
+mod peer_bye;
+pub mod possibly_confirmed;
 mod prack;
 mod provisional_arrival;
 mod record_write;
@@ -52,12 +62,15 @@ mod relay_pending_response;
 mod relay_request;
 mod relay_response;
 mod relayed_teardown;
+mod request_record;
 mod respond;
 mod retire;
 mod select;
+mod settle;
 mod show_provisional;
 mod snapshot_answer;
 mod straggler;
+mod subscription;
 mod teardown;
 mod unrelayed;
 
@@ -70,25 +83,42 @@ use crate::turn_scope::TurnScope;
 
 use b2bua_sdk::model::{RuleAction, RuleContext};
 
-pub(crate) use own_notify::holds_requests;
+pub use ladder::ladder_bound;
 pub use prack::{Owed, Settle};
 pub use provisional_arrival::invite_open;
+pub(crate) use settle::{settle, Cause, Legs};
+pub(crate) use subscription::holds_requests;
 
 /// Executes rule actions against a working copy of the call, drawing every
 /// identifier it mints from its turn and noting there what it reports.
 pub struct ActionExecutor<'a> {
     pub config: &'a B2buaConfig,
+    /// The call's owners, as the shell states them for the turn.
+    pub owners: &'a crate::owners::Owners,
     /// The turn the actions run in: its identifier source, its notes and the
     /// wire faults its guarded emissions read.
     pub turn: &'a mut TurnScope,
     pub now_ms: i64,
 }
 
+impl<'a> ActionExecutor<'a> {
+    /// The marks this stack stamps on what it emits for `call`, under the
+    /// turn's owners.
+    fn marks<'c>(&self, call: &'c Call) -> crate::rules::relay::CallMarks<'c>
+    where
+        'a: 'c,
+    {
+        crate::rules::relay::CallMarks::of(call, self.owners)
+    }
+}
+
 impl ActionExecutor<'_> {
     /// Apply `actions` to a working copy of the authoritative `call`. The
     /// `ctx` view carries the event; the full struct comes in explicitly —
     /// rules never hold it (ADR-0020 X8). An action that breaks ends the list:
-    /// the actions after it are not applied.
+    /// the actions after it are not applied. A peer's BYE the actions answer
+    /// by ending its leg first draws the ACK its 2xx is owed (RFC 3261
+    /// §13.2.2.4).
     pub fn execute(
         &mut self,
         actions: &[RuleAction],
@@ -97,6 +127,7 @@ impl ActionExecutor<'_> {
     ) -> HandlerResult {
         let mut call = call.clone();
         let mut fx = HandlerEffects::new();
+        self.ack_before_peer_bye_answer(&mut call, &mut fx, ctx, actions);
         for action in actions {
             if self.step(action, ctx, &mut call, &mut fx).is_break() {
                 break;

@@ -35,19 +35,17 @@ pub fn get_peer<'a>(call: &'a Call, leg_id: &str) -> Option<&'a str> {
 }
 
 /// Connect two legs (INAP MergeCallSegments) — replaces any existing pairing.
-pub fn merge_leg(mut call: Call, leg_a: impl Into<String>, leg_b: impl Into<String>) -> Call {
+pub fn merge_leg(call: &mut Call, leg_a: impl Into<String>, leg_b: impl Into<String>) {
     call.active_peer = Some(ActivePeer { leg_a: leg_a.into(), leg_b: leg_b.into() });
-    call
 }
 
 /// Disconnect a leg from its peer (INAP SplitLeg) if it is in the current pair.
-pub fn split_leg(mut call: Call, leg_id: &str) -> Call {
+pub fn split_leg(call: &mut Call, leg_id: &str) {
     if let Some(p) = &call.active_peer {
         if p.leg_a == leg_id || p.leg_b == leg_id {
             call.active_peer = None;
         }
     }
-    call
 }
 
 /// All leg IDs that currently have a peer.

@@ -9,10 +9,15 @@ description = "Reusable B2BUA runner composition: the env -> config -> bind -> d
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 
 [dependencies]
+# The cluster key a worker signs its via-extension with (`B2BUA_CLUSTER_KEY`).
+sip-ids = { path = "../sip-ids" }
 lock-poison = { path = "../lock-poison" }
 metric-catalogue = { path = "../metric-catalogue" }
 metric-values = { path = "../metric-values" }
@@ -53,6 +58,8 @@ b2bua = { path = "../b2bua", features = ["testkit"] }
 # The fixed-key turn a test call is built under.
 sip-ids = { path = "../sip-ids", features = ["testkit"] }
 sip-message = { path = "../sip-message" }
+# `dialled_leg`: the b-leg a live-call listing test adds to its call.
+call = { path = "../call", features = ["testkit"] }
 sip-net-testkit = { path = "../sip-net-testkit" }
 http-net-testkit = { path = "../http-net-testkit" }
 repl-net-testkit = { path = "../repl-net-testkit" }

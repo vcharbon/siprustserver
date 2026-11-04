@@ -11,8 +11,7 @@ use sip_net::{
     BindUdpOpts, SendError, SignalingNetwork, UdpEndpoint, UdpEndpointCounters, UdpPacket,
 };
 use sip_net_testkit::SimulatedSignalingNetwork;
-use sip_txn::{TransactionEvent, TransactionLayer};
-use tokio::sync::mpsc;
+use sip_txn::TransactionLayer;
 
 use crate::common::{addr, config, B2BUA, PEER};
 
@@ -48,7 +47,7 @@ impl UdpEndpoint for ParkingSends {
 
 /// The layer over an endpoint, `parking` its sends or not, and the consumer
 /// half of its event queue, held open for the layer's life.
-async fn layer(parking: bool) -> (TransactionLayer, mpsc::Receiver<TransactionEvent>) {
+async fn layer(parking: bool) -> (TransactionLayer, sip_txn::TransactionEvents) {
     let net = SimulatedSignalingNetwork::new(1);
     let bound = net.bind_udp(BindUdpOpts::new(addr(B2BUA), 64)).await.expect("bind");
     let endpoint: Box<dyn UdpEndpoint> =

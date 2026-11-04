@@ -6,7 +6,9 @@
 //! what the generator's own teardown of a failed call draws afterwards (a
 //! CANCEL and its 487, a late final, a cleanup BYE) is not the call's
 //! outcome. Of the teardown, the facts keep only whether a BYE released the
-//! dialog.
+//! dialog. An in-dialog request other than a BYE still awaiting its final at
+//! the seal is judged by its client transaction (RFC 3261 §17.1.2): a final
+//! that arrives after the seal still settles it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,12 +16,9 @@ use std::sync::{Arc, Mutex};
 use sip_clock::Clock;
 use sip_message::header::{cause_key, retry_after_seconds, HeaderValue, SubscriptionState};
 use sip_message::sip_str::SipStr;
-use sip_message::sniff::{
-    body, call_id, content_type_is, cseq_method_token, cseq_number, has_body, header_value,
-    header_values, is_response, req_method, resp_status, to_tag,
-};
+use sip_message::sniff::{body, content_type_is, has_body, header_value, header_values, Identity};
 
-use crate::mux::{Dir, Side, WireTap};
+use crate::mux::{Datagram, Dir, Side, WireTap};
 
 /// One failed in-dialog request the caller sent: its non-2xx final, or no
 /// final at all (`code: None`).
@@ -30,7 +29,8 @@ pub struct WireFailure {
     pub code: Option<u16>,
 }
 
-/// One in-dialog request a callee leg received (ACK and CANCEL aside): what
+/// One in-dialog request the caller or a callee leg received (ACK and CANCEL
+/// aside): what
 /// it said, for a reader that tells one outcome of an in-dialog exchange from
 /// another (a NOTIFY's subscription state and sipfrag, an INFO's payload).
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +44,8 @@ pub struct LegRequest {
     pub body: Vec<u8>,
 }
 
-/// The bound on the requests a leg's facts keep, and on each one's body.
+/// The bound on the requests the caller's or a leg's facts keep, and on each
+/// one's body.
 pub const LEG_REQUESTS_MAX: usize = 8;
 pub const LEG_REQUEST_BODY_MAX: usize = 64;
 
@@ -101,6 +102,9 @@ pub struct WireFacts {
     pub bye_received: Option<Option<u16>>,
     /// An in-dialog request or the BYE drew a 481: the dialog was gone.
     pub saw_481: bool,
+    /// The in-dialog requests the caller received, a retransmission once, the
+    /// first [`LEG_REQUESTS_MAX`].
+    pub received: Vec<LegRequest>,
     /// In-dialog requests answered with a non-2xx final.
     pub failures: Vec<WireFailure>,
     pub legs: Vec<LegFacts>,
@@ -118,6 +122,37 @@ impl WireFacts {
     /// final, as failures without a code, in the order they were sent.
     pub fn unanswered(&self) -> Vec<WireFailure> {
         unanswered(&self.pending)
+    }
+
+    /// Whether an in-dialog request other than a BYE, the caller's or a
+    /// callee leg's, still awaits its final.
+    pub fn awaits_finals(&self) -> bool {
+        let awaits = |pending: &HashMap<u32, (String, i64)>| {
+            pending.values().any(|(method, _)| method != "BYE")
+        };
+        awaits(&self.pending) || self.legs.iter().any(|l| awaits(&l.pending))
+    }
+}
+
+/// After the seal, the final `code` to the request `method` `cseq`: a
+/// request other than a BYE that `pending` still holds is settled, a non-2xx
+/// one a failure. A late 481 is that request's failure only: the call's
+/// ending stays as the seal left it, never `cut`.
+fn settle_pending(
+    pending: &mut HashMap<u32, (String, i64)>,
+    failures: &mut Vec<WireFailure>,
+    method: &str,
+    cseq: u32,
+    code: u16,
+    now: i64,
+) {
+    let held = pending.get(&cseq).is_some_and(|(m, _)| m == method && m != "BYE");
+    if code < 200 || !held {
+        return;
+    }
+    pending.remove(&cseq);
+    if code >= 300 {
+        failures.push(WireFailure { at_ms: now, method: method.to_string(), code: Some(code) });
     }
 }
 
@@ -150,12 +185,12 @@ impl CallWire {
     /// The tap the call's mux network feeds.
     pub fn tap(&self) -> WireTap {
         let (clock, facts) = (self.clock.clone(), self.facts.clone());
-        Arc::new(move |side, dir, raw| {
+        Arc::new(move |side, dir, d| {
             let now = clock.now_ms();
             let mut f = facts.lock().unwrap();
             match side {
-                Side::Caller => f.on_caller(dir, raw, now),
-                Side::Leg(role) => f.on_leg(role, dir, raw, now),
+                Side::Caller => f.on_caller(dir, d, now),
+                Side::Leg(role) => f.on_leg(role, dir, d, now),
             }
         })
     }
@@ -163,6 +198,12 @@ impl CallWire {
     /// The call's verdict resolved: freeze the setup facts.
     pub fn seal(&self) {
         self.facts.lock().unwrap().sealed = true;
+    }
+
+    /// Whether an in-dialog request other than a BYE still awaits its final
+    /// ([`WireFacts::awaits_finals`]).
+    pub fn awaits(&self) -> bool {
+        self.facts.lock().unwrap().awaits_finals()
     }
 
     /// The facts seen so far.
@@ -176,56 +217,66 @@ fn has_sdp(raw: &[u8]) -> bool {
     has_body(raw) && content_type_is(raw, "application/sdp")
 }
 
+/// Whether the request `id` is out of any dialog: its To has no tag.
+fn untagged(id: &Identity<'_>) -> bool {
+    id.to_tag.is_none_or(str::is_empty)
+}
+
 impl WireFacts {
-    fn on_caller(&mut self, dir: Dir, raw: &[u8], now: i64) {
-        let (Some(method), Some(cseq)) = (cseq_method_token(raw), cseq_number(raw)) else {
+    fn on_caller(&mut self, dir: Dir, d: &Datagram<'_>, now: i64) {
+        let id = d.id();
+        let (Some(method), Some(cseq)) = (id.cseq_method, id.cseq) else {
             return;
         };
         if self.sealed {
-            // Only whether the teardown released the dialog.
-            let bye_ok =
-                method == "BYE" && resp_status(raw).is_some_and(|c| (200..300).contains(&c));
+            // Whether the teardown released the dialog, and the finals of the
+            // requests the seal left pending.
+            let bye_ok = method == "BYE" && id.status.is_some_and(|c| (200..300).contains(&c));
             self.teardown_released |= bye_ok;
+            if let (Dir::In, Some(code)) = (dir, id.status) {
+                settle_pending(&mut self.pending, &mut self.failures, method, cseq, code, now);
+            }
             return;
         }
-        match (dir, is_response(raw)) {
-            (Dir::Out, false) => self.caller_sent(&method, cseq, raw, now),
-            (Dir::In, true) => {
-                let Some(code) = resp_status(raw) else { return };
+        match (dir, id.status) {
+            (Dir::Out, None) => self.caller_sent(method, cseq, id, now),
+            (Dir::In, Some(code)) => {
                 let setup = method == "INVITE"
                     && self.invite_cseq == Some(cseq)
-                    && call_id(raw) == self.call_id;
+                    && id.call_id == self.call_id.as_deref();
                 if setup {
-                    self.setup_response(code, raw, now);
+                    self.setup_response(code, d.raw(), now);
                 } else if code >= 200 {
                     self.in_dialog_final(cseq, code, now);
                 }
             }
-            (Dir::In, false) if req_method(raw).as_deref() == Some("BYE") => {
-                self.bye_received.get_or_insert(None);
-            }
-            (Dir::Out, true) if method == "BYE" => {
-                let code = resp_status(raw);
-                if code.is_some_and(|c| c >= 200) {
-                    self.bye_received = Some(code);
+            (Dir::In, None) => {
+                if id.method == Some("BYE") {
+                    self.bye_received.get_or_insert(None);
                 }
+                note_request(&mut self.received, d, now);
+            }
+            (Dir::Out, Some(code)) if method == "BYE" && code >= 200 => {
+                self.bye_received = Some(Some(code));
             }
             _ => {}
         }
     }
 
-    fn caller_sent(&mut self, method: &str, cseq: u32, raw: &[u8], now: i64) {
-        let initial = method == "INVITE" && to_tag(raw).is_empty();
+    fn caller_sent(&mut self, method: &str, cseq: u32, id: &Identity<'_>, now: i64) {
+        let initial = method == "INVITE" && untagged(id);
         match method {
             "INVITE" if self.started_at_ms.is_none() => {
-                self.call_id = call_id(raw);
+                self.call_id = id.call_id.map(str::to_string);
                 self.started_at_ms = Some(now);
                 self.invite_cseq = Some(cseq);
             }
             "INVITE" if self.invite_cseq == Some(cseq) => {}
             // A new initial INVITE on the call's Call-ID (a 401/407/422 retry)
             // is the setup again.
-            "INVITE" if initial && call_id(raw) == self.call_id => self.restart_setup(cseq),
+            "INVITE" if initial && id.call_id == self.call_id.as_deref() => {
+                self.restart_setup(cseq)
+            }
             "ACK" => {}
             "CANCEL" => self.cancelled = true,
             _ => {
@@ -286,35 +337,40 @@ impl WireFacts {
         }
     }
 
-    fn on_leg(&mut self, role: &str, dir: Dir, raw: &[u8], now: i64) {
+    fn on_leg(&mut self, role: &str, dir: Dir, d: &Datagram<'_>, now: i64) {
+        let id = d.id();
+        let opened = self.legs.iter().position(|l| l.role == role);
         if self.sealed {
+            // Only the finals of the leg's requests the seal left pending.
+            if let (Dir::In, Some(code), Some(i), Some(method), Some(cseq)) =
+                (dir, id.status, opened, id.cseq_method, id.cseq)
+            {
+                let leg = &mut self.legs[i];
+                settle_pending(&mut leg.pending, &mut leg.failures, method, cseq, code, now);
+            }
             return;
         }
-        let opened = self.legs.iter().position(|l| l.role == role);
-        match (dir, is_response(raw), opened) {
-            (Dir::In, false, None) => {
-                let initial =
-                    req_method(raw).as_deref() == Some("INVITE") && to_tag(raw).is_empty();
-                if initial {
+        match (dir, id.status, opened) {
+            (Dir::In, None, None) => {
+                if id.method == Some("INVITE") && untagged(id) {
                     self.legs.push(LegFacts { role: role.to_string(), ..LegFacts::default() });
                 }
             }
-            (Dir::In, false, Some(i)) if req_method(raw).as_deref() == Some("CANCEL") => {
+            (Dir::In, None, Some(i)) if id.method == Some("CANCEL") => {
                 self.legs[i].cancelled = true;
             }
-            (Dir::In, false, Some(i)) => self.legs[i].received_request(raw, now),
-            (Dir::Out, false, Some(i)) => self.legs[i].sent_request(raw, now),
-            (Dir::In, true, Some(i)) => self.legs[i].own_final(raw, now),
-            (Dir::Out, true, Some(i)) if cseq_method_token(raw).as_deref() == Some("INVITE") => {
+            (Dir::In, None, Some(i)) => note_request(&mut self.legs[i].received, d, now),
+            (Dir::Out, None, Some(i)) => self.legs[i].sent_request(id, now),
+            (Dir::In, Some(code), Some(i)) => self.legs[i].own_final(id, code, now),
+            (Dir::Out, Some(code), Some(i)) if id.cseq_method == Some("INVITE") => {
                 let leg = &mut self.legs[i];
-                let Some(code) = resp_status(raw) else { return };
                 if leg.final_code.is_some() {
                     return;
                 }
                 if code >= 200 {
                     leg.final_code = Some(code);
                 } else {
-                    leg.early_media |= code > 100 && has_sdp(raw);
+                    leg.early_media |= code > 100 && has_sdp(d.raw());
                 }
             }
             _ => {}
@@ -324,16 +380,16 @@ impl WireFacts {
 
 impl LegFacts {
     /// An in-dialog request the leg sent (ACK and CANCEL aside), first sending.
-    fn sent_request(&mut self, raw: &[u8], now: i64) {
-        let (Some(method), Some(cseq)) = (req_method(raw), cseq_number(raw)) else { return };
-        if method != "ACK" && method != "CANCEL" && !to_tag(raw).is_empty() {
-            self.pending.entry(cseq).or_insert((method, now));
+    fn sent_request(&mut self, id: &Identity<'_>, now: i64) {
+        let (Some(method), Some(cseq)) = (id.method, id.cseq) else { return };
+        if method != "ACK" && method != "CANCEL" && !untagged(id) {
+            self.pending.entry(cseq).or_insert_with(|| (method.to_string(), now));
         }
     }
 
     /// A final to one of the leg's own in-dialog requests.
-    fn own_final(&mut self, raw: &[u8], now: i64) {
-        let (Some(code), Some(cseq)) = (resp_status(raw), cseq_number(raw)) else { return };
+    fn own_final(&mut self, id: &Identity<'_>, code: u16, now: i64) {
+        let Some(cseq) = id.cseq else { return };
         if code < 200 {
             return;
         }
@@ -342,26 +398,30 @@ impl LegFacts {
             self.failures.push(WireFailure { at_ms: now, method, code: Some(code) });
         }
     }
+}
 
-    fn received_request(&mut self, raw: &[u8], now: i64) {
-        let (Some(method), Some(cseq)) = (req_method(raw), cseq_number(raw)) else { return };
-        let in_dialog = !to_tag(raw).is_empty();
-        let seen = self.received.iter().any(|r| r.cseq == cseq && r.method == method);
-        if method == "ACK" || !in_dialog || seen || self.received.len() >= LEG_REQUESTS_MAX {
-            return;
-        }
-        let subscription_state = header_value(raw, "Subscription-State")
-            .and_then(|v| SubscriptionState::parse(&SipStr::owned(&v)).ok())
-            .map(|s| s.token().to_ascii_lowercase());
-        let body = body(raw).unwrap_or_default();
-        self.received.push(LegRequest {
-            at_ms: now,
-            method,
-            cseq,
-            subscription_state,
-            body: body[..body.len().min(LEG_REQUEST_BODY_MAX)].to_vec(),
-        });
+/// Note the in-dialog request `d` received at `now` in `received` (ACK and
+/// out-of-dialog requests aside, a retransmission once, the first
+/// [`LEG_REQUESTS_MAX`]).
+fn note_request(received: &mut Vec<LegRequest>, d: &Datagram<'_>, now: i64) {
+    let id = d.id();
+    let (Some(method), Some(cseq)) = (id.method, id.cseq) else { return };
+    let seen = received.iter().any(|r| r.cseq == cseq && r.method == method);
+    if method == "ACK" || untagged(id) || seen || received.len() >= LEG_REQUESTS_MAX {
+        return;
     }
+    let raw = d.raw();
+    let subscription_state = header_value(raw, "Subscription-State")
+        .and_then(|v| SubscriptionState::parse(&SipStr::owned(&v)).ok())
+        .map(|s| s.token().to_ascii_lowercase());
+    let body = body(raw).unwrap_or_default();
+    received.push(LegRequest {
+        at_ms: now,
+        method: method.to_string(),
+        cseq,
+        subscription_state,
+        body: body[..body.len().min(LEG_REQUEST_BODY_MAX)].to_vec(),
+    });
 }
 
 #[cfg(test)]

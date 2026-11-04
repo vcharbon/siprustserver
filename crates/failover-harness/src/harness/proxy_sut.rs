@@ -7,6 +7,7 @@ use std::sync::Arc;
 use observe::NodeScope;
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{Acceptance, WorkerHealth, WorkerRegistry};
+use sip_proxy::strategies::rendezvous::{rendezvous_select, RendezvousCandidate};
 use sip_proxy::{ProxyAddr, ProxyMetrics};
 use tokio::task::JoinHandle;
 
@@ -29,6 +30,10 @@ pub struct ProxySut {
     ///
     /// [`FailoverHarness::spawn_proxy_with_health_probe`]: super::FailoverHarness::spawn_proxy_with_health_probe
     pub(super) probe_task: Option<JoinHandle<()>>,
+    /// The dead notifier (ADR-0050 §3): each dead verdict a health write
+    /// makes is told to the other alive workers; `None` for a proxy that tells
+    /// none. Aborted on drop.
+    pub(super) notices: Option<JoinHandle<()>>,
     /// The node the proxy serves: its tasks run under it, and every registry
     /// change the scenario drives is lined as it.
     pub(super) node: NodeScope,
@@ -51,6 +56,15 @@ impl ProxySut {
     /// The proxy's metrics.
     pub fn metrics(&self) -> &Arc<ProxyMetrics> {
         &self.metrics
+    }
+
+    /// From now on tell no dead verdict, as a proxy with no cluster key: a
+    /// dead worker's calls are taken over only by a message that reaches
+    /// their backup (the reactive path, ADR-0047 D1).
+    pub fn tell_no_dead_verdict(&mut self) {
+        if let Some(n) = self.notices.take() {
+            n.abort();
+        }
     }
 
     /// Mark a worker's health (e.g. `Dead` on crash, `Alive` on recovery).
@@ -117,11 +131,51 @@ impl ProxySut {
     pub fn health(&self, ordinal: &str) -> Option<WorkerHealth> {
         self.registry.resolve(ordinal).map(|w| w.health)
     }
+
+    /// The `(primary, backup)` the proxy places a new call with `call_id` on
+    /// under its current view: rendezvous hashing over the workers that take
+    /// new calls, then for the backup over the other alive ones, else over
+    /// the other ordinals the proxy knows and does not read alive (ADR-0055
+    /// §8). `None` when no worker takes it.
+    pub fn placement_of(&self, call_id: &str) -> Option<(String, String)> {
+        let snapshot = self.registry.snapshot();
+        let accepting: Vec<Key> =
+            snapshot.iter().filter(|w| w.accepts_new_calls()).map(|w| Key(w.id.clone())).collect();
+        let primary = rendezvous_select(call_id, &accepting)?.0.clone();
+        let others = snapshot.iter().filter(|w| w.id != primary);
+        let alive: Vec<Key> =
+            others.clone().filter(|w| w.is_alive()).map(|w| Key(w.id.clone())).collect();
+        let backup = match rendezvous_select(call_id, &alive) {
+            Some(k) => k.0.clone(),
+            None => {
+                let away: Vec<Key> = others
+                    .map(|w| w.id.clone())
+                    .chain(self.registry.away_ordinals())
+                    .filter(|id| *id != primary)
+                    .map(Key)
+                    .collect();
+                rendezvous_select(call_id, &away).map(|k| k.0.clone()).unwrap_or_default()
+            }
+        };
+        Some((primary, backup))
+    }
+}
+
+/// A worker ordinal as a rendezvous candidate.
+struct Key(String);
+
+impl RendezvousCandidate for Key {
+    fn id(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Drop for ProxySut {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(n) = self.notices.take() {
+            n.abort();
+        }
         if let Some(p) = self.probe_task.take() {
             p.abort();
         }

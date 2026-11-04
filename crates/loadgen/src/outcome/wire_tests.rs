@@ -26,7 +26,7 @@ pub(super) fn early_media(cid: &str) -> Vec<u8> {
 fn feed(wire: &CallWire, events: &[(Side<'_>, Dir, Vec<u8>)]) -> WireFacts {
     let tap = wire.tap();
     for (side, dir, raw) in events {
-        tap(*side, *dir, raw);
+        tap(*side, *dir, &Datagram::sniff(raw));
     }
     wire.facts()
 }
@@ -42,12 +42,24 @@ async fn the_setup_facts_are_read_from_the_caller_side() {
     let clock = Clock::test_at(1_000);
     let wire = CallWire::new(clock.clone());
     let tap = wire.tap();
-    tap(Side::Caller, Dir::Out, &msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", ""));
+    tap(
+        Side::Caller,
+        Dir::Out,
+        &Datagram::sniff(&msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", "")),
+    );
     tokio::time::advance(std::time::Duration::from_millis(10)).await;
-    tap(Side::Caller, Dir::Out, &msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", ""));
-    tap(Side::Caller, Dir::In, &msg("SIP/2.0 100 Trying", "c1", "1 INVITE", "", ""));
+    tap(
+        Side::Caller,
+        Dir::Out,
+        &Datagram::sniff(&msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", "")),
+    );
+    tap(
+        Side::Caller,
+        Dir::In,
+        &Datagram::sniff(&msg("SIP/2.0 100 Trying", "c1", "1 INVITE", "", "")),
+    );
     tokio::time::advance(std::time::Duration::from_millis(10)).await;
-    tap(Side::Caller, Dir::In, &early_media("c1"));
+    tap(Side::Caller, Dir::In, &Datagram::sniff(&early_media("c1")));
     tokio::time::advance(std::time::Duration::from_millis(10)).await;
     let busy = msg(
         "SIP/2.0 486 Busy Here",
@@ -56,9 +68,9 @@ async fn the_setup_facts_are_read_from_the_caller_side() {
         "t1",
         "Reason: Q.850;cause=017;text=\"busy\"\r\n",
     );
-    tap(Side::Caller, Dir::In, &busy);
+    tap(Side::Caller, Dir::In, &Datagram::sniff(&busy));
     tokio::time::advance(std::time::Duration::from_millis(10)).await;
-    tap(Side::Caller, Dir::In, &busy);
+    tap(Side::Caller, Dir::In, &Datagram::sniff(&busy));
     let f = wire.facts();
     assert_eq!(f.call_id.as_deref(), Some("c1"));
     assert_eq!(f.started_at_ms, Some(1_000));
@@ -162,13 +174,37 @@ async fn each_leg_keeps_its_first_final() {
 async fn sealed_setup_facts_ignore_the_teardown() {
     let wire = CallWire::new(Clock::test_at(0));
     let tap = wire.tap();
-    tap(Side::Caller, Dir::Out, &msg("INVITE sip:b@h SIP/2.0", "c3", "1 INVITE", "", ""));
-    tap(Side::Caller, Dir::In, &msg("SIP/2.0 100 Trying", "c3", "1 INVITE", "", ""));
-    tap(Side::Leg("callee"), Dir::In, &msg("INVITE sip:q@h SIP/2.0", "b3", "1 INVITE", "", ""));
+    tap(
+        Side::Caller,
+        Dir::Out,
+        &Datagram::sniff(&msg("INVITE sip:b@h SIP/2.0", "c3", "1 INVITE", "", "")),
+    );
+    tap(
+        Side::Caller,
+        Dir::In,
+        &Datagram::sniff(&msg("SIP/2.0 100 Trying", "c3", "1 INVITE", "", "")),
+    );
+    tap(
+        Side::Leg("callee"),
+        Dir::In,
+        &Datagram::sniff(&msg("INVITE sip:q@h SIP/2.0", "b3", "1 INVITE", "", "")),
+    );
     wire.seal();
-    tap(Side::Caller, Dir::Out, &msg("CANCEL sip:b@h SIP/2.0", "c3", "1 CANCEL", "", ""));
-    tap(Side::Caller, Dir::In, &msg("SIP/2.0 487 Terminated", "c3", "1 INVITE", "t1", ""));
-    tap(Side::Leg("callee"), Dir::Out, &msg("SIP/2.0 487 Terminated", "b3", "1 INVITE", "q1", ""));
+    tap(
+        Side::Caller,
+        Dir::Out,
+        &Datagram::sniff(&msg("CANCEL sip:b@h SIP/2.0", "c3", "1 CANCEL", "", "")),
+    );
+    tap(
+        Side::Caller,
+        Dir::In,
+        &Datagram::sniff(&msg("SIP/2.0 487 Terminated", "c3", "1 INVITE", "t1", "")),
+    );
+    tap(
+        Side::Leg("callee"),
+        Dir::Out,
+        &Datagram::sniff(&msg("SIP/2.0 487 Terminated", "b3", "1 INVITE", "q1", "")),
+    );
     let f = wire.facts();
     assert!(!f.cancelled, "the teardown's CANCEL is not the caller's");
     assert_eq!((f.final_code, f.setup_ended_at_ms), (None, None));
@@ -284,4 +320,51 @@ async fn a_leg_s_own_failed_in_dialog_request_is_a_failure_of_the_leg() {
         leg.unanswered(),
         vec![WireFailure { at_ms: 9_000, method: "INFO".into(), code: None }]
     );
+}
+
+/// An in-dialog request other than a BYE still awaiting its final at the seal
+/// is judged by its client transaction (RFC 3261 §17.1.2): a final after the
+/// seal settles it, a non-2xx one as a failure; a request first sent after the
+/// seal, and the BYE, are not followed.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_request_pending_at_the_seal_is_settled_by_its_later_final() {
+    let wire = CallWire::new(Clock::test_at(7_000));
+    let leg = Side::Leg("callee");
+    feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c4", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c4", "1 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("INFO sip:b@h SIP/2.0", "c4", "2 INFO", "t1", "")),
+            (Side::Caller, Dir::Out, msg("UPDATE sip:b@h SIP/2.0", "c4", "3 UPDATE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("BYE sip:b@h SIP/2.0", "c4", "4 BYE", "t1", "")),
+            (leg, Dir::In, msg("INVITE sip:q@h SIP/2.0", "b4", "1 INVITE", "", "")),
+            (leg, Dir::Out, msg("SIP/2.0 200 OK", "b4", "1 INVITE", "q1", "")),
+            (leg, Dir::Out, msg("INFO sip:a@h SIP/2.0", "b4", "2001 INFO", "f1", "")),
+        ],
+    );
+    assert!(wire.facts().awaits_finals());
+    wire.seal();
+    tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    let f = feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c4", "2 INFO", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 491 Pending", "c4", "3 UPDATE", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c4", "4 BYE", "t1", "")),
+            (leg, Dir::In, msg("SIP/2.0 200 OK", "b4", "2001 INFO", "f1", "")),
+            (leg, Dir::Out, msg("INFO sip:a@h SIP/2.0", "b4", "2002 INFO", "f1", "")),
+        ],
+    );
+    assert!(!f.awaits_finals(), "every request the seal left pending settled");
+    assert_eq!(f.unanswered(), vec![]);
+    assert_eq!(
+        f.failures,
+        vec![WireFailure { at_ms: 7_500, method: "UPDATE".into(), code: Some(491) }]
+    );
+    assert_eq!(f.bye, Some(None), "the BYE stays as the seal left it");
+    assert!(f.teardown_released);
+    assert_eq!(f.legs[0].unanswered(), vec![]);
+    assert_eq!(f.legs[0].failures, vec![]);
 }

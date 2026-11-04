@@ -4,9 +4,9 @@
 //! and the core's `/call/failure` and release-event consults
 //! (`RuleAction::FailureAsyncHttp`, `RuleAction::ReleaseAsyncHttp`).
 //! The task awaiting the answer lives on the node that sent the request and
-//! dies with it; the deadline lives in the call's replicated timer ledger and
-//! is re-armed wherever the call is materialised, so a call taken over or
-//! reclaimed elsewhere reads the lost answer at the deadline (ADR-0039).
+//! dies with it; the deadline lives in the call's timer ledger and is re-armed
+//! wherever the record is restored, so a call restored from its record reads
+//! the lost answer at the deadline (ADR-0039).
 //!
 //! - [`arm`]: the turn that sends a request arms its deadline at the request's
 //!   budget plus [`MARGIN`]; the router answers every request by its budget,
@@ -251,8 +251,12 @@ pub enum Screened {
 /// Screen `event` against the call's pending deadlines: a delivered deadline
 /// fire (the timer screen already took it off the ledger) is read as its lost
 /// answer; an answer takes the deadline it closes off `call`'s ledger and
-/// cancels it on `fx`.
+/// cancels it on `fx`. Either takes the request it answers off the record of
+/// awaited requests ([`crate::off_turn::settle`]).
 pub fn screen(call: &mut Call, fx: &mut HandlerEffects, event: &CallEvent) -> Screened {
+    if !of_another_call(call, event) {
+        crate::off_turn::settle(call, event);
+    }
     if let CallEvent::Timer { key, .. } = event {
         return match &key.timer_type {
             TimerType::ServiceHttpAnswer { correlation_id } => {

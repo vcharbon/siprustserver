@@ -17,6 +17,9 @@ import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 import type { LaneBlock } from "./run-spec.js"
 
+/** The `case.lanes` key whose verdict holds for every lane the document does not name. */
+export const ANY_LANE = "*"
+
 /** The lane the campaign named is not one this composition can run; the message is the reason. */
 export class LaneUnknown extends Schema.TaggedError<LaneUnknown>()("Driver.LaneUnknown", {
   lane: Schema.String,

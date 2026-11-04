@@ -522,7 +522,7 @@ const openRows = Effect.fn("Replay.openRows")(function*(
     startsPerSecond: limits.starts,
     maxSpanSeconds: options.selection.maxSpanSeconds ?? null,
     memoryMax: options.memoryMax
-  })
+  }, options.forced ?? [])
   const opening = plans.map((plan) => ({
     capture: plan.capture,
     lane: options.lane,

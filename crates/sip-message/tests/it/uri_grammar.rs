@@ -214,15 +214,15 @@ fn an_extension_method_keeps_its_case() {
     assert_eq!(r.cseq().method().as_str(), "Foo-Bar");
 }
 
-/// The CSeq names the request's own method (§8.1.1.5): an extension method
-/// matches only in its own case; a known one as it always did.
+/// The CSeq names the request's own method (§8.1.1.5) in its own case
+/// (§7.1): `invite` is an extension method, no INVITE.
 #[test]
-fn an_extension_method_matches_its_cseq_in_case() {
+fn a_method_matches_its_cseq_in_case() {
     let raw = invite("INVITE", "Foo-Bar sip:bob@example.com SIP/2.0", "")
         .replace("CSeq: 1 INVITE", "CSeq: 1 FOO-BAR");
     refused("CSeq method case", &raw);
     let raw = invite("INVITE", "invite sip:bob@example.com SIP/2.0", "");
-    assert_eq!(request(&raw).method().as_str(), "INVITE");
+    refused("CSeq INVITE for the extension method invite", &raw);
 }
 
 /// The request-line method is a token of its own (§25.1 `Method`), whatever

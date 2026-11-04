@@ -14,15 +14,17 @@ pub(crate) const BACKEND_REPORT: &str = "backend_report";
 pub(crate) const BACKEND_ROTATION: &str = "backend_rotation";
 pub(crate) const RESOLVED_NAME: &str = "resolved_name";
 pub(crate) const MEMORY_RESOLVER: &str = "memory_resolver";
+pub(crate) const ERROR_CLOSES: &str = "error_closes";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 6] = [
+pub const LOCKS: [&str; 7] = [
     BACKEND_BREAKER,
     BACKEND_PROBE,
     BACKEND_REPORT,
     BACKEND_ROTATION,
     RESOLVED_NAME,
     MEMORY_RESOLVER,
+    ERROR_CLOSES,
 ];
 
 /// The recoveries of the crate's locks in this process.

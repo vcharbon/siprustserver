@@ -5,7 +5,9 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=pivot-interpreter) & binary(it)' <module>::`.
 
+mod bound_address;
 mod foreign_dialog;
+mod lane_events;
 mod mscml_echo;
 mod plan_compilation;
 mod recording_bytes;

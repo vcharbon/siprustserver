@@ -6,7 +6,7 @@
 
 use call::{Dialog, Leg};
 use sip_message::generators;
-use sip_message::header::{HeaderValue, HostPort, NameAddr};
+use sip_message::header::{HeaderValue, HostPort, Uri};
 use sip_message::{SipRequest, SipStr};
 
 /// The generators' `StackDialog` input for dialog `d` of `leg`: the Call-ID
@@ -47,22 +47,23 @@ pub fn uas_addresses(invite: &SipRequest) -> (String, String) {
     (invite.to().clone().without_tag().to_wire(), invite.from().clone().without_tag().to_wire())
 }
 
-/// The transport destination the address `target` names. The `call` crate keeps
-/// dialog targets and route sets as text (it has no sip-message dependency by
-/// design, ADR-0008), so reading one back is a parse; an address no reader
-/// accepts, or whose scheme names no host, falls back to its own text on the
-/// default port, and says so — the fallback resolves a host nothing routes
-/// to, so it must not pass unnamed.
+/// The transport destination the URI `target` names: a dialog's remote target
+/// or a Request-URI, read whole as a URI (RFC 3261 §12.1), so a `;` in its user
+/// part stays in the user part. The `call` crate keeps dialog targets and route
+/// sets as text (it has no sip-message dependency by design, ADR-0008), so
+/// reading one back is a parse; a URI no reader accepts, or whose scheme names
+/// no host, falls back to its own text on the default port, and says so — the
+/// fallback resolves a host nothing routes to, so it must not pass unnamed.
 pub fn target_dest(target: &str) -> (String, u16) {
-    let read = NameAddr::parse(&SipStr::owned(target)).map_err(|e| e.reason).and_then(|addr| {
-        match addr.uri().opaque_part() {
-            None => Ok(addr),
-            Some(_) => Err(format!("a {} URI names no host", addr.uri().scheme())),
+    let read = Uri::parse(&SipStr::owned(target)).map_err(|e| e.reason).and_then(|uri| {
+        match uri.opaque_part() {
+            None => Ok(uri),
+            Some(_) => Err(format!("a {} URI names no host", uri.scheme())),
         }
     });
     match read {
-        Ok(addr) => {
-            let (host, port) = addr.uri().host_port();
+        Ok(uri) => {
+            let (host, port) = uri.host_port();
             (host.to_string(), port)
         }
         Err(err) => {
@@ -80,13 +81,28 @@ mod tests {
 
     #[test]
     fn a_target_names_its_host_and_port() {
-        assert_eq!(target_dest("<sip:bob@192.0.2.4:5070>"), ("192.0.2.4".to_string(), 5070));
+        assert_eq!(target_dest("sip:bob@192.0.2.4:5070"), ("192.0.2.4".to_string(), 5070));
+    }
+
+    /// A user part may carry `;`, `=` and escapes (RFC 3261 §25.1
+    /// `user-unreserved`): the host and port are the ones after the `@`, and
+    /// a URI parameter or header after the host changes neither.
+    #[test]
+    fn a_target_whose_user_part_holds_a_parameter_names_its_host_and_port() {
+        for target in [
+            "sip:+33612345678;foo=bar@192.0.2.10:5070",
+            "sip:+33612345678;foo=bar@192.0.2.10:5070;transport=udp",
+            "sip:alice%3Bx=y;isub=12@192.0.2.10:5070",
+            "sip:bob@192.0.2.10:5070;transport=udp?Subject=hi",
+        ] {
+            assert_eq!(target_dest(target), ("192.0.2.10".to_string(), 5070), "{target}");
+        }
     }
 
     /// A target whose scheme names no host resolves to no part of its text.
     #[test]
     fn a_target_of_an_opaque_scheme_names_no_host() {
-        for target in ["<urn:service:sos>", "<http://example.com/a:b>"] {
+        for target in ["urn:service:sos", "http://example.com/a:b"] {
             assert_eq!(target_dest(target), (target.to_string(), 5060));
         }
     }

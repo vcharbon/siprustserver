@@ -7,9 +7,10 @@
 //! `Call.transfer.phase` via `SetTransfer`, which the projection mirrors.
 //!
 //! The rules live phase-per-file — [`authorizing`], [`c_ringing`],
-//! [`realign`] — with the cross-phase guards (requests, the referrer's NOTIFY
-//! 481) and watchdog in [`guards`]; the `define_service!` list below is the
-//! registration index.
+//! [`realign`] — with the cross-phase guards (requests) and watchdog in
+//! [`guards`]; the `define_service!` list below is the registration index. A
+//! final or timeout of a refer NOTIFY that ends the subscription is the core's
+//! (`actions::subscription`): no NOTIFY leaves on it after.
 
 use b2bua_sdk::define_service;
 use call::{Call, StateLabel, TransferPhase, TransferState};
@@ -35,8 +36,6 @@ define_service! {
     init: |_call| None,
     rules: [
         guards::reject_second_refer(),
-        guards::referrer_notify_481(),
-        guards::referrer_notify_timeout(),
         authorizing::http_reject(),
         authorizing::http_allow(),
         authorizing::http_timeout(),

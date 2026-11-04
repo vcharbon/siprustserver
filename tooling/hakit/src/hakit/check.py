@@ -2,7 +2,8 @@
 
 References resolve (incidents, budgets, catalogs, shapes, scenarios), event
 parameters are set and of their declared type, the timing bounds of ADR-0049
-§3.7 hold, and the planned windows do not overlap.
+§3.7 hold, the planned windows do not overlap, and the pods faulted one at
+a time are never faulted together.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from .jsonval import as_obj
 from . import loadgen
 from .limiters import limiter_errors
 from .model import Incident
+from .one_at_a_time import one_at_a_time_errors
 from .recovery import MIN_SAMPLES
 from .profile import EventSpec, Profile, Stream
 from .schedule import overlaps, plan
@@ -181,7 +183,9 @@ def profile_errors(profile: Profile, content: Content) -> list[str]:
             errs.append(f"{where}: defaults.{name}: budget {b!r} is not on the search path")
     errs.extend(limiter_errors(where, profile))
     if not errs:
-        errs.extend(f"{where}: {e}" for e in overlaps(plan(profile, content.incidents)))
+        planned = plan(profile, content.incidents)
+        errs.extend(f"{where}: {e}" for e in overlaps(planned))
+        errs.extend(one_at_a_time_errors(where, profile, planned, content.incidents))
     return errs
 
 

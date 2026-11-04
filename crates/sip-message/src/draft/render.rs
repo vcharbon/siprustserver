@@ -4,9 +4,11 @@
 //! Raw entries are memcpy'd from whatever image they point into; typed entries
 //! render straight into the same buffer. Nothing is re-parsed and no value gets
 //! its own `String`. Each line is checked as it is written: a header name off
-//! `token`, or a CR or LF inside the start line or a header value, is the
-//! render's refusal (ADR-0053).
+//! `token`, a control byte inside the start line, or one outside a
+//! quoted-pair inside a header value (CR and LF always), is the render's
+//! refusal (ADR-0053).
 
+use crate::control_bytes::has_comments;
 use crate::header::{HeaderName, Wire};
 use crate::write_check::{self, Position, WriteRefusal};
 
@@ -54,7 +56,7 @@ fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: b
     let mut out = Wire::with_capacity(capacity);
 
     let start = S::render_start(line, &mut out);
-    let mut refusal = write_check::line_break(out.as_bytes())
+    let mut refusal = write_check::rendered_start_line(out.as_bytes())
         .map(|reason| WriteRefusal { position: Position::StartLine, reason });
     out.str("\r\n");
 
@@ -70,8 +72,7 @@ fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: b
             headers.push((name, (value_at, out.len() - value_at)));
         }
         if refusal.is_none() {
-            refusal =
-                line_refusal(entry.name(), out.as_bytes().get(value_at..).unwrap_or_default());
+            refusal = line_refusal(entry, out.as_bytes().get(value_at..).unwrap_or_default());
         }
         out.str("\r\n");
     }
@@ -84,15 +85,17 @@ fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: b
     Rendered { bytes, start, headers, body_at, refusal }
 }
 
-/// Why the line `name: value` cannot be written whole: an extension name off
-/// `token`, or a CR or LF in the value. A known name is a constant `token`.
-fn line_refusal(name: &HeaderName, value: &[u8]) -> Option<WriteRefusal> {
+/// Why the line `name: value` cannot be written whole: a name spelled by the
+/// caller off `token`, or a control byte outside a quoted-pair in the value. A
+/// canonical known name is a constant `token`.
+fn line_refusal(entry: &Entry, value: &[u8]) -> Option<WriteRefusal> {
+    let name = entry.name();
     if let HeaderName::Other(text) = name {
         if let Err(refusal) = write_check::header_name(text.as_str()) {
             return Some(refusal);
         }
     }
-    write_check::line_break(value).map(|reason| WriteRefusal {
+    write_check::rendered_value(value, has_comments(name)).map(|reason| WriteRefusal {
         position: Position::HeaderValue,
         reason: format!("{}: {reason}", name.as_wire_str()),
     })

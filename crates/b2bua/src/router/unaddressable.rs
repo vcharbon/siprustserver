@@ -4,19 +4,23 @@
 //! draws no response, so the call gets at once the response `Timeout` that
 //! transaction reports for a dead hop, instead of waiting on a B2BUA timer.
 //! Every other emission (a response, an ACK, a CANCEL, a retained datagram)
-//! has no transaction to fail and is counted.
+//! has no transaction to fail and is counted. Each one is recorded into the
+//! unsent wave of its next hop ([`crate::lifecycle::unsent_waves`]), which
+//! logs an episode at warn with its latest message's Request-URI.
 
 use b2bua_sdk::event::CallEvent;
 use call::TxnTimeoutKind;
 
 use super::RouterCtx;
-use crate::effects::{HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::lifecycle::Unsent;
 
-/// Account for `eff`, which names no IP-literal next hop.
+/// Account for `eff` of call `incarnation`, which names no IP-literal next
+/// hop.
 pub(super) fn fail_unaddressable(
     ctx: &RouterCtx,
     call_ref: &str,
-    result: &HandlerResult,
+    incarnation: &str,
     eff: &OutboundSipEffect,
 ) {
     let kind = match &eff.body {
@@ -25,13 +29,13 @@ pub(super) fn fail_unaddressable(
         OutboundBody::Datagram(_) => "datagram",
     };
     ctx.metrics.record_outbound_unaddressable(kind);
-    tracing::debug!(
-        %call_ref,
-        label = %eff.label,
-        host = %eff.destination.0,
-        port = eff.destination.1,
-        "outbound message not sent: its next hop is not an IP literal"
-    );
+    let request_uri = match &eff.body {
+        OutboundBody::Request(req) => Some(req.request_uri().to_string()),
+        OutboundBody::Response(_) | OutboundBody::Datagram(_) => None,
+    };
+    let hop = format!("{}:{}", eff.destination.0, eff.destination.1);
+    let unsent = Unsent { call_ref: call_ref.to_string(), label: eff.label.clone(), request_uri };
+    ctx.unsent_waves.record_with(&hop, kind, 1, unsent);
     let (OutboundBody::Request(req), OutboundTxnMode::NewClient(_)) = (&eff.body, &eff.mode) else {
         return;
     };
@@ -48,5 +52,5 @@ pub(super) fn fail_unaddressable(
         timeout_kind: TxnTimeoutKind::Response,
         incarnation: None,
     };
-    let _ = ctx.reentry_tx.send(failed.stamped(result.call.incarnation()));
+    let _ = ctx.reentry_tx.send(failed.stamped(incarnation));
 }

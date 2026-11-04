@@ -83,6 +83,22 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
     // rendered doc keys on (the doc's rows are a superset view over the same
     // recording, so seq equality is the join).
     let wire = sip_net_testkit::audit_wire_entries(report.events());
+    // A rule that gates the stack under test reads as gating on a finding
+    // charged to a lane bound as SUT, as the hard gate judges it.
+    let sut: Vec<std::net::SocketAddr> = report
+        .scenario()
+        .lanes
+        .iter()
+        .filter(|l| l.network == layer_harness::NetworkTag::Core)
+        .map(|l| l.addr)
+        .collect();
+    let gates = |f: &sip_net_testkit::RfcFinding| {
+        sip_net_testkit::rfc_rule_gates_sut(&f.rule)
+            && f.charged
+                .as_deref()
+                .and_then(sip_net_testkit::report::lane_addr)
+                .is_some_and(|at| sut.contains(&at))
+    };
     report
         .rfc_findings()
         .iter()
@@ -91,7 +107,7 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
             detail: f.detail.clone(),
             lane: Some(f.lane.clone()),
             endpoint: None, // resolved against the recorder lanes by `sip_doc`
-            advisory: Some(f.advisory),
+            advisory: Some(f.advisory && !gates(f)),
             row_seqs: f
                 .offending
                 .and_then(|i| wire.get(i - 1))

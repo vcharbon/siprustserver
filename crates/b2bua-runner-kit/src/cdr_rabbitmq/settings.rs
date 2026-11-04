@@ -146,13 +146,15 @@ impl RabbitMqCdrSettings {
     /// buffer between the call path and the broker), when `QUEUE` is blank or
     /// padded, when `MAX_LEN`
     /// is not a non-negative integer, when `DECLARE` is neither `own` nor
-    /// `existing` (blank = `own`), when `MAX_LEN` is set beside
+    /// `existing` (blank = `own`), when the URL does not parse or states
+    /// `heartbeat=0` ([`amqp_connect::checked_uri`]), when `MAX_LEN` is set beside
     /// `DECLARE=existing` (the broker owns the bound), or when a bound of
     /// [`CdrDeliveryBounds`] is not a positive integer.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         let Some(url) = get("B2BUA_CDR_RABBITMQ_URL").filter(|u| !u.trim().is_empty()) else {
             return Ok(None);
         };
+        amqp_connect::checked_uri("B2BUA_CDR_RABBITMQ_URL", &url)?;
         let queue = get("B2BUA_CDR_RABBITMQ_QUEUE").unwrap_or_else(|| "cdr".to_string());
         if queue.trim().is_empty() || queue.trim() != queue {
             return Err(format!(

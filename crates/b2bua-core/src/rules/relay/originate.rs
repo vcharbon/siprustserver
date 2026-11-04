@@ -4,7 +4,7 @@
 //! (Call-ID, tags, CSeq space, Contact) is minted fresh — nothing
 //! dialog-identifying is copied from the a-leg.
 
-use call::{InviteTxnHandle, Leg, RemoteInfo, TxnKind};
+use call::{Leg, RemoteInfo, TxnKind};
 use sip_ids::TurnIds;
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
@@ -19,7 +19,7 @@ use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenanc
 use super::address::{address, identity, UnreadableAddress};
 use super::body::{media_type, sdp, source_content_type};
 use super::egress::apply_b_leg_egress;
-use super::identity::{leg_contact, leg_via, CallMarks};
+use super::identity::{allocate_leg_contact, dialling_via, stated_contact, CallMarks};
 use super::option_tags::{apply_offered_option_tags, apply_withheld_option_tags};
 use super::stated_text::writable;
 use b2bua_sdk::model::Body;
@@ -158,10 +158,10 @@ fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> 
 }
 
 /// The INVITE that dialled `leg`, as it left the stack (after every edit a
-/// route applied), re-parsed from the leg's initial client-transaction handle.
-/// `None` on the originator's leg, which the stack did not dial.
+/// route applied), re-parsed from the leg's dialling INVITE record. `None` on
+/// the originator's leg, which the stack did not dial.
 pub(crate) fn dialling_invite(leg: &Leg) -> Option<SipRequest> {
-    super::ack::parse_request(&leg.outbound_invite.as_ref()?.txn.as_ref()?.original_invite)
+    super::ack::parse_request(&leg.dialled_sent()?.image)
 }
 
 /// Build a fresh b-leg + its outbound INVITE effect (initial route + failover).
@@ -239,6 +239,7 @@ pub fn build_b_leg(
     let branch = ids.new_branch();
     let from_tag = ids.new_tag();
     let b_call_id = format!("{}-{}@{}", leg_id, ids.new_tag(), config.sip_local_ip);
+    let contact = allocate_leg_contact(config, marks.into(), leg_id);
     // Each rewrite is read here or the leg is not built. `None` keeps the
     // relayed a-leg value, which the parser already accepted.
     let request_uri = match new_ruri {
@@ -378,8 +379,18 @@ pub fn build_b_leg(
         from: Some(header::From::new(from_addr.clone()).with_tag(SipStr::owned(&from_tag))),
         to: Some(header::To::new(to_addr.clone())),
         cseq: 1,
-        via: Some(leg_via(config, marks, leg_id, branch.clone())),
-        contact: Some(leg_contact(config, marks, leg_id)),
+        via: Some(dialling_via(
+            config,
+            marks,
+            leg_id,
+            super::RequestFacts {
+                method: "INVITE",
+                uri: &request_uri.text(),
+                offer: !body.is_empty(),
+            },
+            branch.clone(),
+        )),
+        contact: stated_contact(&contact),
         // §16.6 step 3: the originated leg continues the budget of the INVITE
         // that caused it rather than refilling — a B2BUA that restated 70 would
         // let a routing loop through it run forever. A REFER transfer leg reads
@@ -406,12 +417,18 @@ pub fn build_b_leg(
     let remote_addr = header::To::new(to_addr).to_wire();
     let request_uri = request_uri.text().into_owned();
 
-    let leg_invite_handle = Some(InviteTxnHandle {
-        branch: branch.clone(),
-        cseq: i64::from(invite.cseq().seq()),
-        original_invite: invite.image().to_vec(),
-        destination: call::HostPort { host: wire_dest.0.clone(), port: wire_dest.1 },
-    });
+    let dialled = call::RequestRecord {
+        relayed_by: marks.owners.this.clone(),
+        ..call::RequestRecord::dialled(
+            i64::from(invite.cseq().seq()),
+            Some(call::SentRequest {
+                branch: branch.clone(),
+                image: invite.image().to_vec(),
+                destination: call::HostPort { host: wire_dest.0.clone(), port: wire_dest.1 },
+            }),
+            call::OutboundInvite::new(from_tag, now_ms),
+        )
+    };
     let leg = Leg {
         leg_id: leg_id.to_string(),
         call_id: b_call_id,
@@ -419,10 +436,11 @@ pub fn build_b_leg(
         dialogs: Default::default(),
         local_uri: Some(local_addr),
         remote_uri: Some(remote_addr),
+        contact,
         invite_request_uri: Some(request_uri),
-        // Each dialog a response to this INVITE creates inherits its handle,
-        // for its ACK-for-2xx / RAck CSeq (RFC 3261 §13.2.2.4 / RFC 3262 §7.2).
-        outbound_invite: Some(call::OutboundInvite::new(from_tag, 1, now_ms, leg_invite_handle)),
+        // Each dialog a response to this INVITE creates reads its image, for
+        // its ACK-for-2xx / RAck CSeq (RFC 3261 §13.2.2.4 / RFC 3262 §7.2).
+        invite: Some(dialled),
         own_tag: None,
         ext: None,
         kind: Some(kind.unwrap_or(call::LegKind::Destination)),
@@ -430,8 +448,6 @@ pub fn build_b_leg(
         // Media ⇒ unadopted. See `call::helpers::is_adopted`.
         adopted: None,
         in_session_timer: Some(takes_part),
-        invite_final_sent: None,
-        answer_preempted: None,
         attempt: None,
         ring: call::Ring::Silent,
         messages: Default::default(),

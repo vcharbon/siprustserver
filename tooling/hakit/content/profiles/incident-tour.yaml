@@ -77,7 +77,7 @@ schedule:
     - { at_s: 1675, incident: sip_loss, duration_s: 30, budget: lossy-plane }
     - { at_s: 1785, incident: io_stall, duration_s: 30, budget: dependency-fault }
     - { at_s: 1895, incident: clock_skew, duration_s: 30, budget: dependency-fault }
-    - { at_s: 2005, incident: cut_external_plane, duration_s: 30, budget: proxy-failover }
+    - { at_s: 2005, incident: cut_external_plane, duration_s: 30, budget: proxy-cut }
     - { at_s: 2115, incident: spike, stream: burst, budget: spike }
     - { at_s: 2315, incidents: [cpu_starve, spike], stream: burst, duration_s: 30, expected_s: 180, budget: cpu-overload }
     - { at_s: 2515, incident: force_delete, budget: worker-kill }

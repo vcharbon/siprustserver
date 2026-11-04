@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "call-outcome.v1.schema.json",
-  "$comment": "minor 4",
+  "$comment": "minor 5",
   "title": "call-outcome.v1",
   "description": "One record per call a caller-side generator placed, written once when the generator is done with the call, whatever path it took. It states what the caller observed; it never judges it. The classifier compares it with the treatment catalog. Times are Unix epoch milliseconds. ADR-0049.",
   "type": "object",
@@ -106,6 +106,12 @@
       "items": { "$ref": "#/$defs/failure" },
       "default": []
     },
+    "received": {
+      "description": "The in-dialog requests the caller received (ACK aside), a retransmission once, the first 8: what each said, for a treatment that relays an in-dialog request to the caller. Absent when none.",
+      "type": "array",
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/received_request" }
+    },
     "legs": {
       "description": "The callee-side legs a generator playing both sides saw, by the role the treatment catalog names. Absent when the generator plays the caller only. A catalog leg that never opened is absent from the list.",
       "type": "array",
@@ -195,7 +201,7 @@
           "type": "number"
         },
         "kind": {
-          "description": "`dialog_request`: an in-dialog request (re-INVITE, UPDATE, INFO, OPTIONS, REFER, NOTIFY, PRACK, BYE) got a non-2xx final or none. `protocol`: an unexpected or malformed message, or an RFC check finding. `transport`: a send or receive error at the socket. `generator`: the generator itself failed (a panic); not a system-under-test impact.",
+          "description": "`dialog_request`: an in-dialog request (re-INVITE, UPDATE, INFO, OPTIONS, REFER, NOTIFY, PRACK, BYE) got a non-2xx final, or none by the end of its client transaction (its final or Timer F with loadgen's retransmission on, the call's end without it). `protocol`: an unexpected or malformed message, or an RFC check finding. `transport`: a send or receive error at the socket. `generator`: the generator itself failed (a panic); not a system-under-test impact.",
           "enum": ["dialog_request", "protocol", "transport", "generator"]
         },
         "method": {
@@ -243,24 +249,26 @@
           "description": "The in-dialog requests the leg received (ACK and CANCEL aside), a retransmission once, the first 8: what each said, for a treatment whose leg opens only after an in-dialog consult (treatment-catalog.v1 `after_consult`).",
           "type": "array",
           "maxItems": 8,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["at_ms", "method"],
-            "properties": {
-              "at_ms": { "type": "number" },
-              "method": { "type": "string" },
-              "subscription_state": {
-                "description": "The `Subscription-State` value's state token (RFC 6665 §8.2.3), lower case.",
-                "type": "string"
-              },
-              "body_hex": {
-                "description": "The body's first 64 bytes, in lower-case hex.",
-                "type": "string",
-                "pattern": "^([0-9a-f]{2}){1,64}$"
-              }
-            }
-          }
+          "items": { "$ref": "#/$defs/received_request" }
+        }
+      }
+    },
+    "received_request": {
+      "description": "One in-dialog request received.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at_ms", "method"],
+      "properties": {
+        "at_ms": { "type": "number" },
+        "method": { "type": "string" },
+        "subscription_state": {
+          "description": "The `Subscription-State` value's state token (RFC 6665 §8.2.3), lower case.",
+          "type": "string"
+        },
+        "body_hex": {
+          "description": "The body's first 64 bytes, in lower-case hex.",
+          "type": "string",
+          "pattern": "^([0-9a-f]{2}){1,64}$"
         }
       }
     }

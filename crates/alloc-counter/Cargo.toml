@@ -13,6 +13,10 @@ description = "Counting #[global_allocator] wrapper for allocation-budget tests:
 # impl block carries a narrow `#[allow(unsafe_code)]` with a SAFETY comment.
 # The clippy table restates the workspace's exactly (scripts/purity.py checks
 # it).
+
+[package.metadata.ha]
+side = "aware"
+
 [lints.rust]
 unsafe_code = "deny"
 

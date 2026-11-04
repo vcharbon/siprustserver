@@ -47,11 +47,14 @@ class Workspace:
         with open(os.path.join(self.root, rel)) as f:
             return f.read()
 
-    def crate(self, name, tier=None, deps=(), features=None, lib="", bin=None, lints=True):
-        """A member `crates/<name>`; `deps` names members, a `name/feature`
-        entry enabling that feature."""
+    def crate(self, name, tier=None, deps=(), features=None, lib="", bin=None, lints=True,
+              side="aware"):
+        """A member `crates/<name>` on HA side `side` (`None`: it declares
+        none); `deps` names members, a `name/feature` entry enabling that
+        feature."""
         self.crates[name] = True
         meta = f'\n[package.metadata.purity]\ntier = "{tier}"\n' if tier else ""
+        meta += f'\n[package.metadata.ha]\nside = "{side}"\n' if side else ""
         lint = "\n[lints]\nworkspace = true\n" if lints else ""
         feats = "" if features is None else "\n[features]\n" + "".join(
             f"{k} = {json.dumps(v)}\n" for k, v in features.items())

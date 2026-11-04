@@ -77,7 +77,9 @@ impl Obligation for UnmatchedPrackProxied {
 /// transaction — a retransmission repeats that answer rather than giving a
 /// second. `matched` is the whole §7.2 `RAck` within the early dialog the
 /// PRACK names (§5): the method `INVITE`, and the `(RSeq, CSeq-num)` pair of a
-/// provisional the UAS had sent reliably in THAT dialog as of the PRACK's
+/// provisional the UAS had sent reliably in THAT dialog — from the address
+/// that took the PRACK, or to the PRACK's sender from its other address (the
+/// PRACK reaches it at its Contact, §4) — as of the PRACK's
 /// ARRIVAL and still held unacknowledged — an `RSeq` it sends afterwards was
 /// not yet its to acknowledge, one an earlier-arriving PRACK of another
 /// transaction drew a 2xx for left the unacknowledged list as that PRACK
@@ -114,7 +116,13 @@ impl Obligation for Prack2xxOr481 {
             };
             let matched = rack.on_invite
                 && seen
-                    .reliably_sent_before(key.uas, key.call_id, prack.dialog, prack.ts_us)
+                    .reliably_sent_before(
+                        key.uas,
+                        prack.client,
+                        key.call_id,
+                        prack.dialog,
+                        prack.ts_us,
+                    )
                     .contains(&(rack.rseq, rack.cseq))
                 && !acknowledged_before(&seen, key, prack);
             let honoured = if matched { (200..300).contains(&a.status) } else { a.status == 481 };

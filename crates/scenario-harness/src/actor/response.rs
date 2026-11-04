@@ -15,10 +15,10 @@ use sip_message::header::MediaType;
 use sip_message::SipResponse;
 
 use super::endpoint::{SUBFLOW_EARLY, SUBFLOW_REFER, SUBFLOW_RENEG};
-use super::goals::GoalStep;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::runner::{ActorState, HeldAck};
-use super::state::{Observation, ResponseFact, SubflowState};
+use super::state::{Observation, SubflowState};
+use super::{Dwell, GoalStep};
 use crate::agent::InviteResponseFate;
 use crate::{ClientInvite, StepError};
 
@@ -77,15 +77,13 @@ async fn absorb_establishing_provisional(
     Ok(())
 }
 
-/// A non-2xx final on the caller's establishing INVITE. Returns `true` when a
-/// §22.2 authenticated resend consumed the challenge (caller re-parks the
-/// INVITE); otherwise records the terminal. A final the call accepts
-/// ([`ActorState::accepts`](super::runner::ActorState)) ends the call: it is
-/// recorded as the accepted ending and — unless the next pending goal is a
-/// RECEPTION goal, which then owns the final — the remaining goals are
-/// dropped. Any other final, with a non-reception goal pending, surfaces as
-/// the incidental establishment failure `WrongStatus{expected: <180|183>}`,
-/// never a 32 s barrier timeout.
+/// A non-2xx final on the caller's establishing INVITE. Returns `true` when a §22.2 authenticated
+/// resend consumed the challenge (caller re-parks the INVITE); otherwise records the terminal. A
+/// final the call accepts ([`ActorState::accepts`](super::runner::ActorState)) ends the call: it is
+/// recorded as the accepted ending and — unless the next pending goal is a RECEPTION goal, which
+/// then owns the final — the remaining goals are dropped. Any other final, with a non-reception
+/// goal pending, surfaces as the incidental establishment failure `WrongStatus{expected:
+/// <180|183>}`, never a 32 s barrier timeout.
 async fn absorb_establishing_failure(
     st: &mut ActorState<'_>,
     inv: &mut ClientInvite,
@@ -116,6 +114,9 @@ async fn absorb_establishing_failure(
     );
     st.obs.record(Observation::LegTerminated { leg: st.role }, now);
     st.scope.mark_terminated();
+    if super::clean_end::end_cleanly(st, super::clean_end::Ending::InviteFinal(status), now) {
+        return Ok(false);
+    }
     let reception_pending = st.goals.next_step().is_some_and(GoalStep::is_reception);
     if st.accepts.accepts_final(status) {
         st.obs.record(Observation::AcceptedEnding, now);
@@ -134,36 +135,6 @@ async fn absorb_establishing_failure(
         });
     }
     Ok(false)
-}
-
-/// Fold one inbound response into this leg's ordered response-fact log. The
-/// typed message is retained while a matcher-carrying reception goal is still
-/// pending on this actor (the content matcher compares it later), and — with a
-/// reception observer installed — for every response, so a reception goal that
-/// carries no matcher still hands the hook a fully populated message. With
-/// neither, nothing is retained.
-pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, now: Instant) {
-    let retain = st.reception_observer.is_some()
-        || st
-            .goals
-            .remaining_steps()
-            .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
-    let body_is_sdp = carries_sdp(resp.body(), resp.header::<MediaType>());
-    st.obs.record(
-        Observation::LegResponse {
-            leg: st.role,
-            fact: ResponseFact {
-                status: resp.status(),
-                reason: resp.reason().to_string(),
-                cseq_method: resp.cseq().method().as_str().to_string(),
-                body_len: resp.body().len(),
-                body_is_sdp,
-                early_tag: resp.to().tag().map(str::to_string),
-                typed: retain.then(|| Box::new(resp.clone())),
-            },
-        },
-        now,
-    );
 }
 
 pub(super) async fn react_response(
@@ -191,7 +162,7 @@ pub(super) async fn react_response(
         );
         return Ok(());
     }
-    record_response_fact(st, &resp, now);
+    super::facts::record_response_fact(st, &resp, now);
     // A response to our still-pending caller INVITE drives the establish flow —
     // but ONLY a response whose CSeq method is INVITE. A PRACK's 200 (or any
     // other in-dialog final) sharing the early dialog must NOT be fed to the
@@ -205,6 +176,7 @@ pub(super) async fn react_response(
                     st.dialogs.pending_invite = Some(inv);
                 }
                 InviteResponseFate::Answered => {
+                    super::lost_provisional::note_final(st, now);
                     st.ctx.anchor(&st.agent, "answer", &resp);
                     if st.feed.ringing_gate && !st.saw_provisional {
                         // Answered without ever ringing: a lost non-PRACK 18x is
@@ -213,9 +185,8 @@ pub(super) async fn react_response(
                         st.ctx.mark_ringing(false);
                     }
                     st.feed.on_answer_rx.stamp(st.ctx);
-                    // ACK the 2xx then register the confirmed dialog with NO await in
-                    // between, so a mid-window cancellation can never leave a
-                    // confirmed-but-unregistered dialog (the drop-safety rule).
+                    // ACK the 2xx and register the confirmed dialog with NO await
+                    // between (the drop-safety rule).
                     let (mut dialog, ack_sent) = inv.ack_reporting(None, &[]).await;
                     // Dialog-formation point: attach this leg's shared CSeq counter
                     // BEFORE the scope-refresh clone, so both share ONE step counter
@@ -224,12 +195,12 @@ pub(super) async fn react_response(
                     st.dialogs.confirmed = Some(dialog.clone());
                     st.scope.set_confirmed(dialog);
                     st.obs.record(Observation::LegConfirmed { leg: st.role }, now);
-                    // RETAIN the establishing INVITE (C1/E3): a LOSING fork's late
-                    // 2xx (§13.2.2.4) is ACK+BYE'd on a fork dialog derived from it.
-                    st.dialogs.won_invite = Some(inv);
+                    // Keep the fork seed: a losing fork's late 2xx is ACK+BYE'd (§13.2.2.4).
+                    st.dialogs.won_invite = Some(Box::new(inv.into_won()));
                     ack_sent?;
                 }
                 InviteResponseFate::Failed { status } => {
+                    super::lost_provisional::note_final(st, now);
                     if absorb_establishing_failure(st, &mut inv, &resp, status, now).await? {
                         // §22.2 authenticated resend — the retried INVITE is a
                         // fresh pending transaction, parked back.
@@ -261,20 +232,8 @@ pub(super) async fn react_response(
                 },
                 now,
             );
-            if resp.status() == 491 && !st.automatics.suppress_491_retry {
-                // §14.1: the owner of the Call-ID (the dialog's original UAC —
-                // the ORIGINATING actor, keyed on its first goal) waits a random
-                // T in [2.1, 4] s; a non-owner in [0, 2] s. Fixed in-range
-                // values keep the paused-clock test deterministic while
-                // preserving the owner>non-owner ordering that breaks the glare.
-                // A replay plan suppresses the retry: the script carries the
-                // captured one (see [`Automatics::suppress_491_retry`]).
-                let dwell = if st.originates {
-                    Duration::from_millis(2500)
-                } else {
-                    Duration::from_millis(1000)
-                };
-                st.reinvite_retry = Some(Instant::now() + dwell);
+            if !super::refused_dialog::end_refused_dialog(st, &resp, now) {
+                super::originate::schedule_reinvite_retry(st, &resp);
             }
             return Ok(());
         }
@@ -300,7 +259,7 @@ pub(super) async fn react_response(
                     .is_some_and(|(d, t)| d.remote_tag() != *t);
             if is_losing_fork {
                 if let Some(inv) = st.dialogs.won_invite.as_ref() {
-                    let mut fork = inv.fork_dialog(&resp);
+                    let mut fork = inv.fork_dialog(&st.agent, &resp);
                     // Our INVITE carried the offer, so the fork's 200 carried
                     // its answer — the ACK is bodyless (§13.2.2.4).
                     fork.try_ack_for(resp.cseq().seq(), None).await?;
@@ -342,7 +301,7 @@ pub(super) async fn react_response(
                 if let Some(delay) =
                     st.reinvite_ordinals.get(&cseq).copied().and_then(|o| st.ack_hold_for(o))
                 {
-                    st.held_acks.push(HeldAck { at: Instant::now() + delay, cseq, sdp });
+                    st.held_acks.push(HeldAck { at: st.dwell(Dwell::HeldAck, delay), cseq, sdp });
                     return Ok(());
                 }
             }
@@ -374,7 +333,7 @@ pub(super) async fn react_response(
             } else {
                 Duration::from_millis(1000)
             };
-            st.update_retry = Some(Instant::now() + dwell);
+            st.update_retry = Some(st.dwell(Dwell::Retry, dwell));
         }
         return Ok(());
     }
@@ -398,6 +357,9 @@ pub(super) async fn react_response(
         let kind = if fork_teardown { ObligationKind::ForkBye } else { kind };
         let key = ObligationKey::new(st.role, kind, resp.cseq().seq());
         st.obs.record(Observation::ResponseObserved { key }, now);
+        if kind != ObligationKind::ForkBye {
+            super::refused_dialog::end_refused_dialog(st, &resp, now);
+        }
         if (200..300).contains(&resp.status()) {
             match kind {
                 ObligationKind::Bye => {
@@ -449,6 +411,14 @@ pub(super) async fn react_response(
                     );
                     st.feed.on_update_ok.stamp(st.ctx);
                 }
+                // The 200 to our OPTIONS keepalive ping: the first stamps the
+                // `keepalive_ack` feed, once.
+                ObligationKind::InDialog
+                    if resp.cseq().method().as_str() == "OPTIONS" && !st.saw_options_200 =>
+                {
+                    st.saw_options_200 = true;
+                    st.feed.on_options_ok.stamp(st.ctx);
+                }
                 _ => {}
             }
         }
@@ -483,7 +453,10 @@ pub(super) fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, n
 
 /// Whether a message carries a session description: a non-empty body typed
 /// `application/sdp`. `content_type` is the message's own [`MediaType`] read.
-fn carries_sdp(body: &[u8], content_type: Option<Result<MediaType, SipParseError>>) -> bool {
+pub(super) fn carries_sdp(
+    body: &[u8],
+    content_type: Option<Result<MediaType, SipParseError>>,
+) -> bool {
     !body.is_empty()
         && content_type
             .and_then(Result::ok)

@@ -7,7 +7,7 @@ use sip_message::generators::{
     GenerateOutOfDialogRequestOpts, InDialogMethod, InviteClientTransactionHandle,
     OutOfDialogMethod, StackDialog,
 };
-use sip_message::header::{self, NameAddr, Uri};
+use sip_message::header::{self, HeaderValue, NameAddr, Uri};
 use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr};
 use sip_template::TemplateHeader;
 
@@ -41,6 +41,7 @@ impl LegStack {
         self.dialog.local_uri = from.to_string();
         self.dialog.remote_uri = to.to_string();
         self.dialog.local_cseq = cseq.unwrap_or(self.dialog.local_cseq + 1);
+        let (max_forwards, headers) = stated_hops(&self.leg, headers)?;
         let via = self.via();
         let opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(ruri)),
@@ -52,10 +53,10 @@ impl LegStack {
             cseq: self.dialog.local_cseq,
             via: Some(via),
             contact: Some(self.contact()),
-            max_forwards: None,
+            max_forwards,
             body,
             content_type: content_type.as_deref().map(media_type),
-            extra_headers: frozen(headers),
+            extra_headers: frozen(&headers),
         };
         let request = generate_out_of_dialog_request(verb, &opts)
             .map_err(|e| StackError::unbuilt(&self.leg, e))?;
@@ -111,14 +112,16 @@ impl LegStack {
             })?,
         };
         self.addressable(&dialog, &method)?;
+        let (max_forwards, headers) = stated_hops(&self.leg, headers)?;
         let via = self.via();
         let opts = GenerateInDialogRequestOpts {
             via: Some(via),
             contact: Some(self.contact()),
             body,
             content_type: content_type.as_deref().map(media_type),
-            extra_headers: frozen(headers),
+            extra_headers: frozen(&headers),
             cseq,
+            max_forwards,
             ..Default::default()
         };
         let result = generate_in_dialog_request(verb, &dialog, &opts)
@@ -191,7 +194,8 @@ impl LegStack {
             }
             None => (!self.unacknowledged.is_empty()).then_some(0),
         };
-        let mut extra = frozen(headers);
+        let (max_forwards, headers) = stated_hops(&self.leg, headers)?;
+        let mut extra = frozen(&headers);
         if !extra.iter().any(|h| sip_message::HeaderName::RAck.matches(&h.name)) {
             let provisional = chosen
                 .map(|at| &self.unacknowledged[at])
@@ -222,6 +226,7 @@ impl LegStack {
             content_type: content_type.as_deref().map(media_type),
             extra_headers: extra,
             cseq,
+            max_forwards,
             ..Default::default()
         };
         let result = generate_in_dialog_request(InDialogMethod::Prack, &dialog, &opts)
@@ -279,7 +284,9 @@ impl LegStack {
             .or_else(|| self.sent_invites.last())
             .cloned()
             .ok_or_else(|| StackError::NoInvite { leg: self.leg.clone(), method: "ACK".into() })?;
-        if response.status() < 300 {
+        let (hops, headers) = stated_hops(&self.leg, headers)?;
+        let headers = headers.as_slice();
+        let ack = if response.status() < 300 {
             // The ACK rides the dialog the 2xx created, under ITS To-tag (RFC
             // 3261 §13.2.2.4) — not whatever tag the leg learned since.
             let dialog = match response.to().tag() {
@@ -299,16 +306,16 @@ impl LegStack {
                 ..Default::default()
             };
             generate_ack_for_2xx(Some(&txn), &dialog, &opts)
-                .map_err(|e| StackError::unbuilt(&self.leg, e))
+                .map_err(|e| StackError::unbuilt(&self.leg, e))?
         } else {
             self.acked_invites.insert(invite.cseq().seq());
             if cseq.is_some() {
-                Err(StackError::CseqOverrideOnAbsorbedAck { leg: self.leg.clone() })
-            } else {
-                generate_ack_for_non_2xx(&invite, response, &frozen(headers))
-                    .map_err(|e| StackError::unbuilt(&self.leg, e))
+                return Err(StackError::CseqOverrideOnAbsorbedAck { leg: self.leg.clone() });
             }
-        }
+            generate_ack_for_non_2xx(&invite, response, &frozen(headers))
+                .map_err(|e| StackError::unbuilt(&self.leg, e))?
+        };
+        with_hops(&self.leg, ack, hops)
     }
 
     /// Refuse a request on a dialog with no remote target: no response that
@@ -331,7 +338,10 @@ impl LegStack {
             method: "CANCEL".into(),
         })?;
         let txn = InviteClientTransactionHandle { original_invite: invite };
-        generate_cancel(&txn, &frozen(headers)).map_err(|e| StackError::unbuilt(&self.leg, e))
+        let (hops, headers) = stated_hops(&self.leg, headers)?;
+        let cancel = generate_cancel(&txn, &frozen(&headers))
+            .map_err(|e| StackError::unbuilt(&self.leg, e))?;
+        with_hops(&self.leg, cancel, hops)
     }
 }
 
@@ -373,3 +383,47 @@ fn in_dialog_method(method: &Method) -> Option<InDialogMethod> {
 
 #[cfg(test)]
 mod tests;
+
+/// The hop count a request's stated headers carry, beside the other stated
+/// headers: on every request this stack composes, a stated `Max-Forwards`
+/// replaces the RFC 3261 §8.1.1.6 default the recipe writes, so the line rides
+/// once. A stated value that is no 0–255 hop count (§20.22), or a second one,
+/// refuses the request.
+fn stated_hops(
+    leg: &str,
+    headers: &[TemplateHeader],
+) -> Result<(Option<u32>, Vec<TemplateHeader>), StackError> {
+    let mut hops = None;
+    let mut rest = Vec::with_capacity(headers.len());
+    for h in headers {
+        if !header::HeaderName::MaxForwards.matches(&h.name) {
+            rest.push(h.clone());
+            continue;
+        }
+        if hops.is_some() {
+            return Err(StackError::Unbuilt {
+                leg: leg.to_string(),
+                reason: "the request states Max-Forwards twice".into(),
+            });
+        }
+        let parsed = header::MaxForwards::parse(&SipStr::owned(h.value.trim())).map_err(|e| {
+            StackError::Unbuilt {
+                leg: leg.to_string(),
+                reason: format!("stated Max-Forwards {:?} is no hop count: {e}", h.value),
+            }
+        })?;
+        hops = Some(parsed.value());
+    }
+    Ok((hops, rest))
+}
+
+/// `request` carrying the stated hop count `hops` in place of the one its
+/// recipe wrote (the recipes of an ACK and a CANCEL take no count), as it is
+/// where none was stated.
+fn with_hops(leg: &str, request: SipRequest, hops: Option<u32>) -> Result<SipRequest, StackError> {
+    let Some(hops) = hops else { return Ok(request) };
+    request.thaw().set(header::MaxForwards::new(hops)).freeze().map_err(|e| StackError::Unbuilt {
+        leg: leg.to_string(),
+        reason: format!("the stated Max-Forwards does not freeze: {e}"),
+    })
+}

@@ -32,15 +32,18 @@ mod access;
 pub mod capture;
 pub mod char_class;
 mod checked;
+mod control_bytes;
 pub mod draft;
 pub mod error;
 pub mod header;
+pub mod header_table;
 pub mod method;
 pub mod parser;
 pub mod sip_str;
 pub mod status;
 pub mod types;
 
+pub mod dead_notice;
 pub mod deviation;
 pub mod emergency;
 pub mod generators;
@@ -54,6 +57,7 @@ pub mod payload;
 #[cfg(feature = "sniff")]
 pub mod preparse;
 pub mod projection;
+pub mod received;
 pub mod remote_target;
 pub mod sdp;
 pub mod sdp_answer;
@@ -68,6 +72,7 @@ pub mod site;
 #[cfg(feature = "sniff")]
 pub mod sniff;
 pub mod trace_sample;
+pub mod via_extension;
 pub mod worker_report;
 pub mod write_check;
 

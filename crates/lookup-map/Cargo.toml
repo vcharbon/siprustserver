@@ -9,6 +9,9 @@ description = "Hash maps and sets for lookups only: the std collections under th
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

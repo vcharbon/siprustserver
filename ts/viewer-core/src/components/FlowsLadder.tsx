@@ -47,7 +47,7 @@ const SocketHead = (
     <rect x={lifeline.x - 96} y={boxY} width={192} height={26} rx={6} className="fv-lifeline-box" />
     <text x={lifeline.x} y={boxY + 17} className="fv-lifeline-label">
       {lifeline.sut ? `SUT ${lifeline.id}` : lifeline.id}
-      {lifeline.sut && <title>the system under test: the case's own steps send to and expect from this socket</title>}
+      {lifeline.sut && <title>SUT: the case's steps send to and expect from this socket</title>}
     </text>
   </g>
 )

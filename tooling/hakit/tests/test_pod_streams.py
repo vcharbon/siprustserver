@@ -143,7 +143,7 @@ def test_rate_steps_are_applied_to_the_running_generators_and_logged(tmp_path: P
     assert "/api/v1/namespaces/sip-test/pods/hakit-cell-a:9300/proxy/rate?cps=8" in raws
     assert "/api/v1/namespaces/sip-test/pods/hakit-cell-a:9300/proxy/rate?cps=12" in raws
     posts = [c.url for c in calls if c.kind == "http" and c.method == "POST" and "/rate" in c.url]
-    assert posts == ["http://192.168.60.101:9300/rate?cps=6"]
+    assert posts == ["http://192.168.60.65:9300/rate?cps=6"]
     steps = read_jsonl(run_dir / "steps.jsonl")
     assert [(s["stream"], s["at_s"], s["cps"]) for s in steps] == [("cell_a", 60, 8), ("lg_docker", 90, 6), ("cell_a", 120, 12)]
     assert all(s["applied_ms"] == s["due_ms"] for s in steps)

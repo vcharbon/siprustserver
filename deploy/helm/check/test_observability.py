@@ -72,7 +72,8 @@ class Collectors(unittest.TestCase):
         conf = yaml.safe_load(find(docs, "ConfigMap", "vmagent-config")["data"]["vmagent.yaml"])
         self.assertEqual(conf["global"]["external_labels"], {"cluster": "kind-sip-e2e"})
         jobs = [j["job_name"] for j in conf["scrape_configs"]]
-        self.assertEqual(jobs, ["kubernetes-pods", "kubernetes-kubelet", "kubernetes-cadvisor",
+        self.assertEqual(jobs, ["kubernetes-pods", "kubernetes-pod-sidecars", "kubernetes-kubelet",
+                                "kubernetes-cadvisor",
                                 "vmagent", "gen"])
 
     def test_a_log_config_change_rolls_the_shippers(self) -> None:

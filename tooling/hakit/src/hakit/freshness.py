@@ -5,7 +5,9 @@ VictoriaLogs must grow once its first calls could have ended, and the newest
 sample of each `live_series` selector in VictoriaMetrics must be recent. A
 series that stops for three scrape intervals (for records, at least five calls
 of the stream's rate) is one `series_stale` finding, with the instant it was
-last fresh.
+last fresh. An incident window holds that count: a fault may silence every
+target of a series (a freeze, a kill, a cut), so silence inside an open window
+is no finding, and one that outlasts the window counts from its close.
 """
 
 from __future__ import annotations
@@ -57,15 +59,18 @@ class Freshness:
         ]
         self.series = [_Watched(sel, stale, now) for sel in selectors]
 
-    def _stale(self, w: _Watched, now: int, kind: str) -> Json | None:
-        if w.reported or now - w.fresh_at_ms <= w.stale_after_ms:
+    def _stale(self, w: _Watched, now: int, kind: str, held_ms: int | None) -> Json | None:
+        since = w.fresh_at_ms if held_ms is None else max(w.fresh_at_ms, held_ms)
+        if w.reported or now - since <= w.stale_after_ms:
             return None
         w.reported = True
         detail = f"{kind} {w.name} stopped updating"
         return {"kind": "series_stale", "at_ms": w.fresh_at_ms, "detail": detail}
 
-    def tick(self) -> list[Json]:
-        """Check every series once a scrape interval; the new findings."""
+    def tick(self, held_ms: int | None = None) -> list[Json]:
+        """Check every series once a scrape interval; the new findings. `held_ms`
+        is now while an incident window is open, else the close of the latest
+        one: silence before it counts from it."""
         now = self.clock.now_ms()
         if now < self.next_ms:
             return []
@@ -77,7 +82,7 @@ class Freshness:
                 if w.last_count >= 0:
                     w.fresh_at_ms = max(w.fresh_at_ms, now)
                 w.last_count = n
-            stale = self._stale(w, now, "the records of stream")
+            stale = self._stale(w, now, "the records of stream", held_ms)
             if stale is not None:
                 found.append({**stale, "stream": w.name})
         for w in self.series:
@@ -86,7 +91,7 @@ class Freshness:
                 w.fresh_at_ms = max(w.fresh_at_ms, int(newest_s * 1000))
             except QueryFailed:
                 pass
-            stale = self._stale(w, now, "the series")
+            stale = self._stale(w, now, "the series", held_ms)
             if stale is not None:
                 found.append(stale)
         return found

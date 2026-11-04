@@ -53,7 +53,7 @@ describe("the study head", () => {
     expect(markup).toContain("3 calls")
     expect(markup).toContain("1 refused")
     expect(markup).toContain("1 red")
-    expect(markup).not.toContain("one call of")
+    expect(markup).not.toContain("call of")
   })
 
   it("names the one call and links up to the capture study for a one-call study", () => {
@@ -62,7 +62,7 @@ describe("the study head", () => {
     )
     // The title is the call; the capture is one line under it, as a link.
     expect(markup).toMatch(new RegExp(`<h1>.*${CASE}.*</h1>`))
-    expect(markup).toContain("one call of")
+    expect(markup).toContain("call of")
     expect(markup).toContain(
       `href="/triage/${encodeURIComponent(CAPTURE)}?lane=fake&amp;cell=run1%2F${CASE}__pivot-replay__fake"`
     )

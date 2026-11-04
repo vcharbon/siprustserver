@@ -23,7 +23,8 @@
  *   replayed endpoint mints marked on its `o=` row (`./sdporigin.ts`).
  * - **shape** — the verdict's structural failures, restated in the delta-record
  *   vocabulary (a final answered with another status, a datagram nothing
- *   expected — serviced by the leg or not — an expectation nothing satisfied).
+ *   expected — serviced by the leg or not — an expectation nothing satisfied,
+ *   a 100 an INVITE's final stood in for).
  * - **retransmission** — a declared ACK-hold's evidenced re-pass count against
  *   the re-passed un-ACKed 2xx finals the recording actually shows.
  *
@@ -359,7 +360,8 @@ const headerProbes = (
 /**
  * One probe per recorded reception whose `expect` asserts a body the reception
  * does not carry: a resource body under the expectation's `compare` mode, a
- * multipart body part by part. A frozen body compares byte for byte, whatever
+ * multipart body part by part, a declared shape (`absent`, `sdp-present`,
+ * `multipart-present`) by the reception's presence and bare type. A frozen body compares byte for byte, whatever
  * its bytes hold; `sdp` and `xml` fold both sides after a strict UTF-8 decode,
  * and a side that is not UTF-8 under a text compare is a probe. Under `sdp`
  * there is one probe per differing line key, each side one element per line
@@ -454,7 +456,30 @@ const messageBodyProbes = (
     return multipartProbes(step.id, body.multipart, scope, input.resources, message, media, origins)
       .map((probe) => ({ step: step.id, probe }))
   }
-  return []
+  return shapeBodyProbes(step.id, body.mode, scope, message).map((probe) => ({ step: step.id, probe }))
+}
+
+/**
+ * A shape-only expectation held against the reception's type: one probe where
+ * the reception breaks the shape — a body where `absent` is stated, none or one
+ * of another type where `sdp-present` or `multipart-present` is — keyed by the
+ * shape, its sides the shape and the received bare type (`absent` where the
+ * reception carried no body). Read under either check.
+ */
+const shapeBodyProbes = (
+  step: string,
+  shape: Body.BodyShape,
+  scope: MsgScope,
+  message: Bundle.RecordedMessage
+): ReadonlyArray<BodyProbe> => {
+  const received = recordedBodiless(message) ? "absent" : mediaTypeOf(undefined, message)
+  const holds = shape === "absent"
+    ? received === "absent"
+    : shape === "sdp-present"
+    ? received === "application/sdp"
+    : received.startsWith("multipart/")
+  if (holds) return []
+  return [{ kind: "body", step, mediaType: shape, scope, compare: "exact", captured: [shape], replayed: [received] }]
 }
 
 /**
@@ -593,7 +618,9 @@ const bodyProbe = (
         section: d.section,
         line: d.line,
         ...(d.mintedOrigin === true ? { mintedOrigin: true as const } : {}),
-        ...(d.originNotContinued === true ? { originNotContinued: true as const } : {})
+        ...(d.originNotContinued === true ? { originNotContinued: true as const } : {}),
+        ...(d.orderOnly === true ? { orderOnly: true as const } : {}),
+        ...(d.versionStepOne === true ? { versionStepOne: true as const } : {})
       }
     }))
   }
@@ -909,6 +936,19 @@ export const shapeProbes = (
           break
         }
         out.push(strayProbe(failure.step, failure.leg, failure.arrived, answered))
+        break
+      }
+      case "trying-omitted": {
+        if (failure.arrived.kind !== "response") break
+        out.push({
+          step: failure.step,
+          probe: {
+            kind: "shape",
+            step: failure.step,
+            shapeKind: { shape: "trying-omitted", final: failure.arrived.status, afterMs: failure.after_ms },
+            scope: { kind: "response", status: 100, cseqMethod: failure.arrived.cseq_method }
+          }
+        })
         break
       }
       case "unexpected-datagram":

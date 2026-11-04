@@ -40,6 +40,7 @@ fn shared() -> SharedRouting {
         traces: Arc::new(ProxyTraces::from_env(0)),
         pulse: Arc::new(ShardPulse::new(2)),
         first_view: FirstView::given(),
+        reach: WorkerReach::unheard(),
         clock,
     }
 }
@@ -109,8 +110,8 @@ async fn unanswered(caller: &dyn UdpEndpoint) -> bool {
 
 /// The shards, the health probe and the probe routes read ONE first view:
 /// before the probe's first round a new call with no worker is dropped on
-/// every shard and `/vrrp` and `/readyz` fail; once the round over the empty
-/// pool is done, every shard refuses it and `/vrrp` passes.
+/// every shard and `/readyz` fails; once the round over the empty pool is
+/// done, every shard refuses it and `/readyz` still fails, no worker alive.
 #[tokio::test(start_paused = true)]
 async fn the_shards_the_probe_and_the_probe_routes_read_one_first_view() {
     use probe_http::ProbeState;
@@ -142,7 +143,8 @@ async fn the_shards_the_probe_and_the_probe_routes_read_one_first_view() {
     let shard0 = shared.shard(0).build(bind(&net, "127.0.0.1:5080").await);
     let shard1 = shared.shard(1).build(bind(&net, "127.0.0.1:5081").await);
     let tasks = [tokio::spawn(shard0.run()), tokio::spawn(shard1.run())];
-    let routes = shared.probes(Arc::new(AtomicBool::new(false)), 2_000);
+    let routes =
+        shared.probes(Arc::new(AtomicBool::new(false)), 2_000, None, Duration::from_secs(2));
     let caller = bind(&net, CALLER).await;
     let shards: [SocketAddr; 2] =
         ["127.0.0.1:5080".parse().unwrap(), "127.0.0.1:5081".parse().unwrap()];
@@ -151,7 +153,7 @@ async fn the_shards_the_probe_and_the_probe_routes_read_one_first_view() {
         caller.send_to(&invite_on(&format!("before-{n}")), *shard).await.unwrap();
         assert!(unanswered(&*caller).await, "shard {n} answered before the first view");
     }
-    assert!(!(routes.vrrp)());
+    assert!(!shared.first_view.is_in());
     assert_eq!((routes.ready)(), ProbeState::NotReady);
 
     let probe = shared.health_probe(
@@ -162,7 +164,8 @@ async fn the_shards_the_probe_and_the_probe_routes_read_one_first_view() {
     );
     let probe = tokio::spawn(probe.run());
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!((routes.vrrp)(), "the probe latched the view the routes read");
+    assert!(shared.first_view.is_in(), "the probe latched the view the routes read");
+    assert_eq!((routes.ready)(), ProbeState::NotReady, "no worker is alive");
     for (n, shard) in shards.iter().enumerate() {
         caller.send_to(&invite_on(&format!("after-{n}")), *shard).await.unwrap();
         let answer = reply(&*caller).await;

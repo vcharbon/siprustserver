@@ -2,7 +2,7 @@
 //! an in-dialog request to the cookie's primary while the primary is alive,
 //! however recently it joined (ADR-0050 §8): its Ready gate already waited
 //! for its partition to be bootstrapped and current, and the calls it held
-//! before it left are folded back by on-demand reclaim.
+//! before it left are taken back by on-demand reclaim.
 //!
 //! ```text
 //!   returned   established on P · P crashes, comes back at a new address,
@@ -14,6 +14,9 @@
 //! ```
 //!
 //! Every cell ends with the caller's BYE, one CDR and clean memory.
+//!
+//! Beyond the failover sweep: the routing of dialogs and new calls to a worker just after it
+//! returns.
 
 use std::time::Duration;
 

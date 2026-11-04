@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+
 use sip_message::SipParser;
 use sip_net::UdpEndpoint;
 use tokio::sync::mpsc;
@@ -20,8 +22,10 @@ use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
 use super::call_txns::CallTxns;
-use super::handle::{Command, TransactionConfig};
+use super::event_age::EventAges;
+use super::handle::TransactionConfig;
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
+use super::new_call_gate::NewCallGate;
 use super::parse_refusal::ParseRefusals;
 use super::refusals::InviteRefusals;
 use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
@@ -45,6 +49,11 @@ pub(super) struct Owner {
     pub(super) timers: DelayQueue<Timer>,
     pub(super) parser: Arc<dyn SipParser + Send + Sync>,
     pub(super) events_tx: mpsc::Sender<TransactionEvent>,
+    /// The entry stamps of the events in `events_tx`'s queue.
+    pub(super) event_ages: Arc<EventAges>,
+    /// The keepalive lane ([`TransactionConfig::keepalive_lane`](crate::TransactionConfig)),
+    /// when the layer runs one.
+    pub(super) keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
     pub(super) metrics: Arc<MetricsInner>,
     pub(super) id_gen: Arc<IdGen>,
     /// call_refs the consumer asked to be told about when their **last**
@@ -75,6 +84,8 @@ pub(super) struct Owner {
     pub(super) deferred_bound: Option<DeferredBound>,
     /// [`TransactionConfig::invite_refusals`](crate::TransactionConfig).
     pub(super) refusals: Option<InviteRefusals>,
+    /// [`TransactionConfig::new_call_gate`](crate::TransactionConfig).
+    pub(super) new_call_gate: Option<NewCallGate>,
     /// Whether a [`Timer::EventRetry`] is already in the wheel (at most one).
     pub(super) event_retry_armed: bool,
     /// call_refs whose last txn cleared THIS turn but whose `CallQuiesced` must be
@@ -91,6 +102,20 @@ pub(super) struct Owner {
     /// The TU's first-response deadline on an initial INVITE
     /// ([`TransactionConfig::invite_first_response_timeout_ms`](crate::TransactionConfig)).
     pub(super) invite_first_response_timeout_ms: u64,
+    /// [`TransactionConfig::trying_bound_ms`](crate::TransactionConfig).
+    pub(super) trying_bound_ms: u64,
+    /// [`TransactionConfig::ack_bound_ms`](crate::TransactionConfig).
+    pub(super) ack_bound_ms: u64,
+    /// [`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig).
+    pub(super) cancel_bound_ms: u64,
+    /// [`TransactionConfig::on_bound`](crate::TransactionConfig).
+    pub(super) on_bound: Option<super::config::OnBound>,
+    /// The INVITE server transactions holding the answers to a CANCEL, by the
+    /// INVITE's Call-ID, From-tag and CSeq number (`layer::held_cancel`).
+    pub(super) held_cancels: HashMap<(String, String, u32), ServerTxnKey>,
+    /// Held answers to a CANCEL whose transaction left the map this turn,
+    /// sent at its end (`layer::held_cancel`).
+    pub(super) owed_sends: Vec<(Bytes, SocketAddr)>,
     /// The To-tag this node bound to a dialog it answered as UAS, by
     /// (Call-ID, From-tag), kept for Timer L past the transaction so a
     /// CANCEL or a stray answered after the transaction is gone still carries
@@ -106,18 +131,23 @@ pub(super) struct Owner {
 }
 
 impl Owner {
-    /// The owner over `events_tx`, holding the tunables of `config` (its
-    /// `udp_queue_max` already sized `events_tx`).
+    /// The owner over the event queue `events_tx` with its entry stamps and
+    /// the keepalive lane `keepalive_tx`, holding the tunables of `config`
+    /// (which already sized both).
     pub(super) fn new(
         parser: Arc<dyn SipParser + Send + Sync>,
-        events_tx: mpsc::Sender<TransactionEvent>,
+        (events_tx, event_ages): (mpsc::Sender<TransactionEvent>, Arc<EventAges>),
+        keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
         metrics: Arc<MetricsInner>,
         config: TransactionConfig,
     ) -> Self {
-        let unanswerable = config.deferred_bound.is_some() && config.invite_refusals.is_none();
-        debug_assert!(!unanswerable, "a deferred bound refuses through invite_refusals");
+        let judges = config.deferred_bound.is_some() || config.new_call_gate.is_some();
+        let unanswerable = judges && config.invite_refusals.is_none();
+        debug_assert!(!unanswerable, "a deferred bound or gate refuses through invite_refusals");
         if unanswerable {
-            tracing::warn!("a deferred bound without invite_refusals refuses nothing");
+            tracing::warn!(
+                "a deferred bound or new-call gate without invite_refusals refuses nothing"
+            );
         }
         Self {
             clients: HashMap::new(),
@@ -125,6 +155,8 @@ impl Owner {
             timers: DelayQueue::new(),
             parser,
             events_tx,
+            event_ages,
+            keepalive_tx,
             metrics,
             parse_refusals: ParseRefusals::new(&config.id_gen, config.advertised),
             id_gen: config.id_gen,
@@ -133,10 +165,17 @@ impl Owner {
             deferred_events: VecDeque::new(),
             deferred_bound: config.deferred_bound,
             refusals: config.invite_refusals,
+            new_call_gate: config.new_call_gate,
             event_retry_armed: false,
             pending_quiesce: Vec::new(),
             invite_initial_timeout_ms: config.invite_initial_timeout_ms,
             invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
+            trying_bound_ms: config.trying_bound_ms,
+            ack_bound_ms: config.ack_bound_ms,
+            cancel_bound_ms: config.cancel_bound_ms,
+            on_bound: config.on_bound.clone(),
+            held_cancels: HashMap::new(),
+            owed_sends: Vec::new(),
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
             stateless_options: config.stateless_options,
@@ -278,11 +317,14 @@ impl Owner {
             TxnRef::Server(id) => self.servers.remove(&id as &dyn ServerTxnIdentity),
         };
         match removed {
-            Some(t) => {
+            Some(mut t) => {
                 if t.role() == TxnRole::Server {
                     if let Some(tag) = t.bound_to_tag() {
                         self.remember_uas_tag(&t.call_id, &t.from_tag, tag);
                     }
+                }
+                if let Some(held) = t.unsent_cancel.take() {
+                    self.owe_held_cancel(*held);
                 }
                 self.cancel_timer(t.retransmit_key);
                 self.cancel_timer(t.timeout_key);
@@ -390,6 +432,9 @@ impl Owner {
                 self.fire_timeout(&branch)
             }
             Timer::FirstResponse(branch) => self.fire_first_response(&branch),
+            Timer::Trying(key, opened) => self.fire_trying(endpoint, &key, opened).await,
+            Timer::AckBound(branch, opened) => self.fire_ack_bound(endpoint, &branch, opened).await,
+            Timer::CancelBound(key, opened) => self.fire_cancel_bound(endpoint, &key, opened).await,
             Timer::Cleanup(id) => {
                 if let Some(t) = self.txn_mut(id.as_ref()) {
                     t.cleanup_key = None;
@@ -436,65 +481,5 @@ impl Owner {
             })
             .sum();
         self.metrics.retransmit_buf_bytes.store(buf_bytes, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    // ── send API command handling ─────────────────────────────────────────────
-
-    pub(super) async fn handle_command(&mut self, endpoint: &dyn UdpEndpoint, cmd: Command) {
-        match cmd {
-            Command::SendRequest { msg, dest, txn_type, reply } => {
-                let handle = self.do_send_request(endpoint, *msg, dest, txn_type).await;
-                let _ = reply.send(handle);
-            }
-            Command::SendResponse { msg, dest, reply } => {
-                let sent = self.do_send_response(endpoint, *msg, dest).await;
-                let _ = reply.send(sent);
-            }
-            Command::SendRaw { buf, dest, reply } => {
-                // Bypasses transaction management; still counts a send failure.
-                self.metrics.count_send(endpoint.send_to(&buf, dest).await);
-                let _ = reply.send(());
-            }
-            Command::Seed { call_ref, seeds, reply } => {
-                let _ = reply.send(self.do_seed(endpoint, &call_ref, seeds).await);
-            }
-            Command::Reoffer { message, src, reply } => {
-                let disposition = self.do_reoffer(endpoint, *message, src).await;
-                let _ = reply.send(disposition);
-            }
-            Command::CancelTxnsForCall { call_ref, reply } => {
-                self.do_cancel_txns_for_call(&call_ref);
-                let _ = reply.send(());
-            }
-            Command::RelinquishCall { call_ref, reply } => self.relinquish_call(&call_ref, reply),
-            Command::RelinquishServer { key, reply } => self.relinquish_server(&key, reply),
-            Command::RelinquishAccepted { call_ref, reply } => {
-                let _ = reply.send(self.relinquish_accepted_of_call(&call_ref));
-            }
-            Command::ForgetUnansweredOfCall { call_ref, reply } => {
-                let _ = reply.send(self.forget_unanswered_of_call(&call_ref));
-            }
-            Command::AnswerUnansweredInvitesOfCall { call_ref, status, reason, reply } => {
-                let answered = self
-                    .answer_unanswered_invites_of_call(endpoint, &call_ref, status, &reason)
-                    .await;
-                let _ = reply.send(answered);
-            }
-            Command::ActiveTxnCount { call_ref, reply } => {
-                let on_books = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::on_books);
-                let _ = reply.send(on_books);
-            }
-            Command::WatchSelfRelease { call_ref, reply } => {
-                if self.has_txns_for(&call_ref) {
-                    // Live txns — arm the watch; the last `delete_txn` fires the
-                    // (lossless) CallQuiesced at end-of-turn.
-                    self.self_release_watch.insert(call_ref);
-                } else {
-                    // Already quiesced — capture CallQuiesced now (lossless path).
-                    self.notify_quiesced(call_ref);
-                }
-                let _ = reply.send(());
-            }
-        }
     }
 }

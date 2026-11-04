@@ -62,12 +62,12 @@ fn broken(edit: impl FnOnce(&mut Value)) -> pivot_schema::Report {
     lint_str(&document.to_string())
 }
 
-fn assert_fires(rule: &str, edit: impl FnOnce(&mut Value)) {
+pub(crate) fn assert_fires(rule: &str, edit: impl FnOnce(&mut Value)) {
     let report = broken(edit);
     assert!(report.rules().contains(rule), "expected {rule}, got:\n{}", report.render());
 }
 
-fn assert_clean(rule: &str, edit: impl FnOnce(&mut Value)) {
+pub(crate) fn assert_clean(rule: &str, edit: impl FnOnce(&mut Value)) {
     let report = broken(edit);
     assert!(!report.rules().contains(rule), "unexpected {rule}:\n{}", report.render());
 }

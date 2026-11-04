@@ -2,9 +2,6 @@
 //! Record-Route rows as separate lines or comma-combined into one (RFC 3261
 //! §7.3.1 permits both wire forms).
 
-use std::collections::hash_map::RandomState;
-use std::sync::OnceLock;
-
 use sip_message::header::HeaderName;
 use sip_message::SipHeader;
 
@@ -31,26 +28,19 @@ pub enum RecordRouteFold {
     Combined,
 }
 
-/// Process-wide random seed for the per-UA fold coin flip, drawn ONCE per launch
-/// (so the two halves vary run-to-run) but shared by every UA (so a given name's
-/// choice is stable within the run and reproducible from the logged line).
-fn rr_fold_seed() -> &'static RandomState {
-    static SEED: OnceLock<RandomState> = OnceLock::new();
-    SEED.get_or_init(RandomState::new)
-}
-
 /// Decide a UA's Record-Route fold mode. `HARNESS_RR_FOLD=separate|combined`
-/// pins it (for deterministic / repro runs); otherwise it is a per-UA coin flip
-/// keyed on the UA name and the per-launch [`rr_fold_seed`].
+/// pins it; otherwise it is a coin flip keyed on the UA name alone (FNV-1a), so
+/// every run, every process and every replay of a cell folds alike, and a run
+/// still exercises both wire forms across its UAs.
 pub(crate) fn decide_rr_fold(name: &str) -> RecordRouteFold {
     match std::env::var("HARNESS_RR_FOLD").ok().as_deref() {
         Some("separate") => RecordRouteFold::Separate,
         Some("combined") => RecordRouteFold::Combined,
         _ => {
-            use std::hash::{BuildHasher, Hasher};
-            let mut h = rr_fold_seed().build_hasher();
-            h.write(name.as_bytes());
-            if h.finish() & 1 == 0 {
+            let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            });
+            if hash & 1 == 0 {
                 RecordRouteFold::Separate
             } else {
                 RecordRouteFold::Combined

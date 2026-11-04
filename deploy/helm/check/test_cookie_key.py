@@ -37,7 +37,10 @@ class CookieKey(unittest.TestCase):
         directory = Path(tempfile.mkdtemp(prefix="helm-lookup-"))
         self.addCleanup(shutil.rmtree, directory)
         with FakeKube({SECRET_PATH: secret}) as kube:
-            docs = render(SIPRUST, *KIND, "--set", "proxy.hmac.kid=k2", "--dry-run=server",
+            # The stand-in API server serves no MetalLB API.
+            docs = render(SIPRUST, *KIND, "--set", "proxy.hmac.kid=k2",
+                          "--set", "proxy.announce.metallb.enabled=false",
+                          "--set", "proxy.routeGuard.enabled=false", "--dry-run=server",
                           "--disable-openapi-validation", "--kubeconfig",
                           str(kube.kubeconfig(directory)))
         self.assertIn(SECRET_PATH, kube.requests)
@@ -50,7 +53,18 @@ class CookieKey(unittest.TestCase):
         c = container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy")
         refs = {e["name"]: e["valueFrom"]["secretKeyRef"]["name"]
                 for e in c["env"] if "valueFrom" in e and "secretKeyRef" in e["valueFrom"]}
+        refs.pop("PROXY_CLUSTER_KEY", None)
         self.assertEqual(refs, {"PROXY_HMAC_KID": "edge-cookie", "PROXY_HMAC_KEY": "edge-cookie"})
+
+    def test_the_proxy_reads_the_workers_cluster_key(self) -> None:
+        docs = render(SIPRUST, *KIND)
+        c = container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy")
+        w = find(docs, "StatefulSet", "b2bua-worker")
+        worker = container(w, w["spec"]["template"]["spec"]["containers"][0]["name"])
+        key = {e["name"]: e["valueFrom"]["secretKeyRef"]
+               for e in c["env"] + worker["env"]
+               if "valueFrom" in e and "secretKeyRef" in e["valueFrom"]}
+        self.assertEqual(key["PROXY_CLUSTER_KEY"], key["B2BUA_CLUSTER_KEY"])
 
 
 if __name__ == "__main__":

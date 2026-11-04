@@ -13,18 +13,17 @@ fn an_unbuildable_relay_answers_its_sender_and_records_nothing() {
     for d in b.dialogs.iter_mut() {
         d.remote_target = "sip:bob@10.0.0.2:5070x".into();
     }
-    call = call::helpers::add_b_leg(call, b);
-    call = call::helpers::merge_leg(call, "a", "b-1");
+    call::helpers::add_b_leg(&mut call, b);
+    call::helpers::merge_leg(&mut call, "a", "b-1");
     let peer = |c: &call::Call| {
         let dialogs = c.b_legs[0].dialogs.iter();
-        dialogs.map(|d| (d.our_cseq, d.inbound_pending_requests.len())).collect::<Vec<_>>()
+        dialogs.map(|d| (d.our_cseq, d.requests.len())).collect::<Vec<_>>()
     };
     let before = peer(&call);
-    let event = CallEvent::Sip {
-        message: Box::new(SipMessage::Request(super::super::in_dialog_request(Method::Info))),
-        src: "127.0.0.1:5060".parse().unwrap(),
-        matched_client_txn: false,
-    };
+    let event = CallEvent::sip(
+        SipMessage::Request(super::super::fixtures::in_dialog_request(Method::Info)),
+        "127.0.0.1:5060".parse().unwrap(),
+    );
     let (config, mut id_gen) = (B2buaConfig::default(), scope(1));
     let relay = [RuleAction::RelayToPeer { transform: MessageTransform::default() }];
     let result = exec_on(&call, &event, "a", &config, &mut id_gen, &relay);

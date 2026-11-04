@@ -3,7 +3,7 @@
 //! another call on the ref leaves it, and a takeover copy is never dropped on
 //! the notice.
 
-use call::{Call, CallBodyCodec, MsgpackCodec};
+use call::Call;
 
 use super::offer;
 use crate::config::B2buaConfig;
@@ -27,7 +27,7 @@ fn ringing(primary: &str, backup: &str, cid: &str) -> Call {
 /// `call`, stored in `role` of `primary`'s partition and materialised from
 /// `origin`: the live copy, its lock released.
 async fn live(n: &Node, call: &Call, role: PartitionRole, primary: &str, origin: Origin) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     let r = &call.call_ref;
     n.store.put_call(role, primary, r, body, &[], 60_000, 1, 0, &PutOpts::default()).await.unwrap();
     let ctx = n.core.router_ctx();
@@ -49,7 +49,7 @@ async fn a_live_own_call_is_dropped_on_its_backups_delete_of_it_alone() {
     let ctx = n.core.router_ctx();
     let call = ringing("w0", "w1", "own");
     let r = call.call_ref.clone();
-    live(&n, &call, PartitionRole::Primary, "w0", Origin::Reclaim(None)).await;
+    live(&n, &call, PartitionRole::Primary, "w0", Origin::Reclaim).await;
 
     let mut other = ringing("w0", "w1", "reborn");
     other.call_ref = r.clone();

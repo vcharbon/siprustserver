@@ -33,6 +33,13 @@
 //! where the retired step named a PROVISIONAL, the tail having been scripted
 //! for a transaction still open. Every other retirement goes on.
 //!
+//! **A final may stand in for the 100 of its own INVITE transaction.** An
+//! INVITE server transaction sends 100 only when its TU does not answer within
+//! 200 ms (RFC 3261 §17.2.1), so a required `100` expect retired by the FIRST
+//! response on the leg's own INVITE transaction, a final, may be OMITTED. The
+//! end is stated as for any provisional so retired; the runner goes on instead
+//! only where a step of that transaction can take the final (`exec::omission`).
+//!
 //! **Where nothing is retired, all the alternatives or none.** `alt` branches
 //! and `unordered` members arm several expects on one leg at once, and the run
 //! can still go on while any one of them can still be satisfied — so such a
@@ -71,7 +78,11 @@ pub struct Unmatched<'a> {
     pub retired: Vec<String>,
     /// The tolerated absences released on the ended transaction.
     pub released: Vec<String>,
-    /// Whether the script ends here (§11.2).
+    /// Whether the retired expect is a `100` the INVITE's final may stand in
+    /// for (RFC 3261 §17.2.1): the final is the first response on the
+    /// transaction, so a step behind the 100 may still take it.
+    pub omitted: bool,
+    /// Whether the script ends here (§11.2), where no omission is taken.
     pub ends: bool,
 }
 
@@ -118,6 +129,7 @@ pub fn unmatched<'a>(
             own_transaction: false,
             retired: Vec::new(),
             released: Vec::new(),
+            omitted: false,
             ends: contradicts_every_required(inbound, &steps, leg),
         });
     };
@@ -126,6 +138,7 @@ pub fn unmatched<'a>(
         own_transaction: true,
         retired: Vec::new(),
         released: Vec::new(),
+        omitted: false,
         ends: false,
     };
     let (Some(status), Some(named)) = (inbound.status, names(charged.step)) else {
@@ -149,6 +162,9 @@ pub fn unmatched<'a>(
         return Some(out);
     }
     out.retired.push(charged.step.id.clone());
+    out.omitted = named == 100
+        && method == Method::Invite
+        && !provisional_received(leg, &method, inbound.cseq);
     let class_changed = method == Method::Invite && (named >= 300) != (status >= 300);
     out.ends = named < 200 || (class_changed && !confirmed);
     Some(out)
@@ -176,6 +192,41 @@ fn awaited(armed: &Armed<'_>, leg: &[RecordedMessage]) -> Option<(Method, u32)> 
         None => last_sent(leg, &method),
     }?;
     Some((method, cseq))
+}
+
+/// How long after this leg FIRST sent the request of the transaction
+/// `inbound` answers — its CSeq method and number — the response arrived at
+/// `arrived_us`, in whole milliseconds. `None` where the leg's recording holds
+/// no such request.
+pub fn answered_after_ms(
+    leg: &[RecordedMessage],
+    inbound: &Inbound,
+    arrived_us: u64,
+) -> Option<u64> {
+    let method = Method::from_wire(&inbound.cseq_method);
+    let sent_us = leg.iter().filter(|recorded| recorded.dir == Dir::Out).find_map(|recorded| {
+        match CustomParser::new().parse(recorded.wire()).ok()? {
+            SipMessage::Request(request)
+                if *request.method() == method && request.cseq().seq() == inbound.cseq =>
+            {
+                Some(recorded.at_us)
+            }
+            _ => None,
+        }
+    })?;
+    Some(arrived_us.saturating_sub(sent_us) / 1000)
+}
+
+/// Whether a provisional on the leg's `method` transaction numbered `cseq` has
+/// arrived: a server transaction that sent one did not answer at once.
+fn provisional_received(leg: &[RecordedMessage], method: &Method, cseq: u32) -> bool {
+    leg.iter().filter(|recorded| recorded.dir == Dir::In).any(|recorded| {
+        matches!(CustomParser::new().parse(recorded.wire()).ok(),
+            Some(SipMessage::Response(response))
+                if response.status() < 200
+                    && response.cseq().method() == method
+                    && response.cseq().seq() == cseq)
+    })
 }
 
 /// The CSeq of the request this leg sent under `step`, where it is recorded.

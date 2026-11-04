@@ -26,17 +26,15 @@ use super::sm::MachineId;
 #[serde(rename_all = "snake_case")]
 pub enum TimerType {
     NoAnswer,
-    /// Call-level a-leg setup deadline: armed at route time, cancelled at
-    /// answer, untouched by reroutes (each reroute gets its own per-leg
-    /// `NoAnswer`; this caps the *whole* setup). Rides the replicated
-    /// `call.timers` ledger, so unlike the configured sip-txn initial-INVITE
-    /// bound (which dies with a crashed node's transactions) it survives
-    /// crash → reclaim and still reaps a stuck-in-setup call.
+    /// The call's setup deadline: armed at route time under
+    /// [`TimerScope::Setup`], untouched by reroutes (each reroute gets its own
+    /// per-leg `NoAnswer`; this caps the *whole* setup). It rides the call
+    /// record's ledger, so a call whose transactions are gone is still ended
+    /// at the deadline.
     SetupTimeout,
     GlobalDuration,
     LimiterRefresh,
     Keepalive,
-    KeepaliveTimeout,
     /// The next rung of the ladder repeating the retained emission its
     /// obligation scope is owed for (ADR-0032 X4): the un-ACKed 2xx (RFC 3261
     /// §13.3.1.4) or the un-PRACKed reliable provisional (RFC 3262 §3). The
@@ -63,15 +61,28 @@ pub enum TimerType {
     ReferReinviteAnswer,
     /// Overall REFER safety timer covering the full transfer state machine.
     ReferOverallSafety,
-    /// The earliest end of a wait of this stack's requests held behind its own
-    /// NOTIFY on a dialog ([`crate::OwnNotify::ANSWER_CAP_MS`] after that
-    /// NOTIFY left): they leave though it is unanswered. Call-scoped, armed
-    /// exactly while a request is held; it outlives the start of the
-    /// termination, whose BYE may be the request held.
+    /// The earliest end of a wait of this stack's requests queued behind its
+    /// own NOTIFY on a dialog ([`crate::NotifyInFlight::ANSWER_CAP_MS`] after
+    /// that NOTIFY left): they leave though it is unanswered. Call-scoped,
+    /// armed exactly while a request is queued; it outlives the start of the
+    /// termination, whose BYE may be the request queued.
     NotifyAnswerCap,
+    /// The earliest deadline of a received request held for a final a service
+    /// gives later ([`crate::RequestRecord::HELD_ANSWER_MS`] after it
+    /// arrived): the platform answers it then. Call-scoped, armed exactly
+    /// while a request is held.
+    HeldAnswer,
     /// The bound on an established call's reroute: the replacement leg's dial,
     /// the realign and the old leg's release.
     RerouteGuard,
+    /// The end of the hold of the caller dialog `tag` names, which may be
+    /// confirmed by a 2xx another owner sent (ADR-0055 §4): 64·T1 after this
+    /// stack sent the caller's INVITE its non-2xx, the dialog is BYEd unless
+    /// her ACK named it first. Call-scoped; it outlives the start of the
+    /// termination, which waits for it.
+    PossiblyConfirmed {
+        tag: String,
+    },
     /// The deadline of the answer to the adaptation HTTP request a service
     /// sent off the call's turn, named by its `correlation_id`: the request's
     /// budget plus a margin. In the ledger while the answer is awaited; its
@@ -145,7 +156,6 @@ impl PartialEq for TimerType {
             GlobalDuration => matches!(other, GlobalDuration),
             LimiterRefresh => matches!(other, LimiterRefresh),
             Keepalive => matches!(other, Keepalive),
-            KeepaliveTimeout => matches!(other, KeepaliveTimeout),
             Rung => matches!(other, Rung),
             RepeatGiveUp => matches!(other, RepeatGiveUp),
             TerminatingTimeout => matches!(other, TerminatingTimeout),
@@ -153,7 +163,9 @@ impl PartialEq for TimerType {
             ReferReinviteAnswer => matches!(other, ReferReinviteAnswer),
             ReferOverallSafety => matches!(other, ReferOverallSafety),
             NotifyAnswerCap => matches!(other, NotifyAnswerCap),
+            HeldAnswer => matches!(other, HeldAnswer),
             RerouteGuard => matches!(other, RerouteGuard),
+            PossiblyConfirmed { tag: a } => matches!(other, PossiblyConfirmed { tag: b } if a == b),
             ServiceHttpAnswer { correlation_id: a } => {
                 matches!(other, ServiceHttpAnswer { correlation_id: b } if a == b)
             }
@@ -178,6 +190,7 @@ impl Hash for TimerType {
         std::mem::discriminant(self).hash(state);
         match self {
             TimerType::ServiceHttpAnswer { correlation_id } => correlation_id.hash(state),
+            TimerType::PossiblyConfirmed { tag } => tag.hash(state),
             TimerType::ServiceAdmitAnswer { correlation_id, change } => {
                 correlation_id.hash(state);
                 change.hash(state);
@@ -202,7 +215,6 @@ impl std::fmt::Debug for TimerType {
             TimerType::GlobalDuration => f.write_str("GlobalDuration"),
             TimerType::LimiterRefresh => f.write_str("LimiterRefresh"),
             TimerType::Keepalive => f.write_str("Keepalive"),
-            TimerType::KeepaliveTimeout => f.write_str("KeepaliveTimeout"),
             TimerType::Rung => f.write_str("Rung"),
             TimerType::RepeatGiveUp => f.write_str("RepeatGiveUp"),
             TimerType::TerminatingTimeout => f.write_str("TerminatingTimeout"),
@@ -210,7 +222,9 @@ impl std::fmt::Debug for TimerType {
             TimerType::ReferReinviteAnswer => f.write_str("ReferReinviteAnswer"),
             TimerType::ReferOverallSafety => f.write_str("ReferOverallSafety"),
             TimerType::NotifyAnswerCap => f.write_str("NotifyAnswerCap"),
+            TimerType::HeldAnswer => f.write_str("HeldAnswer"),
             TimerType::RerouteGuard => f.write_str("RerouteGuard"),
+            TimerType::PossiblyConfirmed { tag } => write!(f, "PossiblyConfirmed:{tag}"),
             TimerType::ServiceHttpAnswer { correlation_id } => {
                 write!(f, "ServiceHttpAnswer:{correlation_id}")
             }
@@ -240,12 +254,19 @@ pub enum TimerScope {
     Leg(String),
     /// One retransmission obligation (ADR-0032 X4): retired with its ladder.
     Obligation(Obligation),
+    /// The call's setup: over while any leg holds a confirmed dialog (a
+    /// media-server leg's included) and once the call's termination began. A
+    /// fire is read against it as it stands at the fire, so a timer of this
+    /// scope is retired by the rule that answers or by the termination, never
+    /// because a leg's dialog was confirmed for a while.
+    Setup,
 }
 
 impl std::fmt::Debug for TimerScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TimerScope::Call => f.write_str("call"),
+            TimerScope::Setup => f.write_str("setup"),
             TimerScope::Attempt(id) => write!(f, "{id:?}"),
             TimerScope::Leg(leg) => write!(f, "leg {leg}"),
             TimerScope::Obligation(o) => write!(f, "{o:?}"),
@@ -261,6 +282,7 @@ pub enum TimerScopeKind {
     Attempt,
     Leg,
     Obligation,
+    Setup,
 }
 
 impl TimerScope {
@@ -271,6 +293,7 @@ impl TimerScope {
             TimerScope::Attempt(_) => TimerScopeKind::Attempt,
             TimerScope::Leg(_) => TimerScopeKind::Leg,
             TimerScope::Obligation(_) => TimerScopeKind::Obligation,
+            TimerScope::Setup => TimerScopeKind::Setup,
         }
     }
 }
@@ -288,6 +311,11 @@ impl TimerKey {
     /// `timer_type` guarding the call.
     pub const fn call(timer_type: TimerType) -> Self {
         TimerKey { timer_type, scope: TimerScope::Call }
+    }
+
+    /// `timer_type` guarding the call's setup.
+    pub const fn setup(timer_type: TimerType) -> Self {
+        TimerKey { timer_type, scope: TimerScope::Setup }
     }
 
     /// `timer_type` guarding attempt `id`.

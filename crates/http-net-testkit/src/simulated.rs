@@ -35,6 +35,22 @@
 //! faulted request is one no service saw, [`Behaviour::StallBody`] aside. A
 //! service answering [`HttpAnswer::Abort`] closes the connection without a
 //! response, reported as `Eof` after the return transit.
+//!
+//! ## Connections and balanced addresses
+//! A request rides a connection. [`request`](crate::HttpTransport::request)
+//! opens one per request; a backend client
+//! ([`client`](crate::HttpTransport::client)) keeps them in a pool, reused
+//! most recently returned first, as `reqwest` does (`pool` module). An
+//! address set with [`SimulatedHttpNetwork::balance`] stands in front of
+//! several backends: each new connection to it goes to one of them, chosen by
+//! its [`Pick`], and keeps that backend for its life. A backend closes every
+//! connection open to it when its server is dropped, on [`Fault::Close`],
+//! and on a standing behaviour that ends connections ([`Fault::Cut`],
+//! [`Fault::ErrorAfter`], [`Behaviour::Refuse`], [`Behaviour::Reset`],
+//! [`Behaviour::Eof`]): an idle one is never handed out again, and a request
+//! in flight on one fails `Eof`. Faults, scripts and the counters are keyed
+//! by the backend a request reached. A connection the service answered on is
+//! announced to it ([`HttpService::connection_opened`]) and its end too.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -42,6 +58,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use http_net::{HttpClient, ResolvedTarget};
 use tokio::sync::Notify;
 
 use super::{
@@ -50,77 +67,12 @@ use super::{
 };
 use crate::settings::ClientSettings;
 
-/// What a destination does with one request (see the module doc).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Behaviour {
-    /// The service answers.
-    Answer,
-    /// The connection is refused at once.
-    Refuse,
-    /// The connect never completes; the connect timeout ends it.
-    Blackhole,
-    /// Sent and never answered until a [`Fault::Resume`].
-    Silent,
-    /// The service answers; the body never completes.
-    StallBody,
-    /// The connection is reset after `after_ms`.
-    Reset {
-        /// Delay before the reset, in milliseconds.
-        after_ms: u64,
-    },
-    /// The connection is closed after the request with no byte back.
-    Eof,
-}
+mod fault;
+mod front;
+mod pool;
 
-/// A dst-keyed fault. Apply with [`SimulatedHttpNetwork::apply_fault`].
-#[derive(Clone, Debug)]
-pub enum Fault {
-    /// Raise the per-hop transit delay (ms, coerced to `>= 1`) for `dst`.
-    Delay {
-        /// The destination whose delivery slows.
-        dst: SocketAddr,
-        /// New transit delay in milliseconds.
-        ms: u64,
-    },
-    /// Hang requests to `dst` ([`Behaviour::Silent`]): they never complete
-    /// until a [`Fault::Resume`] (or the caller times out).
-    Stall {
-        /// The destination to stall.
-        dst: SocketAddr,
-    },
-    /// Clear any fault and script on `dst` and wake stalled requests.
-    Resume {
-        /// The destination to resume.
-        dst: SocketAddr,
-    },
-    /// Refuse requests to `dst` ([`Behaviour::Refuse`]).
-    Cut {
-        /// The destination to cut.
-        dst: SocketAddr,
-    },
-    /// Reset requests to `dst` after `ms` ([`Behaviour::Reset`]).
-    ErrorAfter {
-        /// The destination that resets.
-        dst: SocketAddr,
-        /// Delay before the error fires, in milliseconds.
-        ms: u64,
-    },
-    /// Give every request to `dst` this standing behaviour.
-    Behave {
-        /// The destination.
-        dst: SocketAddr,
-        /// What it does with each request.
-        behaviour: Behaviour,
-    },
-    /// Give the next requests to `dst` these behaviours, one each, before
-    /// the standing one.
-    Script {
-        /// The destination.
-        dst: SocketAddr,
-        /// One behaviour per request, in order.
-        steps: Vec<Behaviour>,
-    },
-}
+pub use fault::{Behaviour, Fault};
+pub use front::Pick;
 
 struct Shared {
     /// Bound services, keyed by local address.
@@ -140,6 +92,69 @@ struct Shared {
     resume: Notify,
     /// Requests started and not yet finished or dropped, keyed by destination.
     in_flight: Mutex<HashMap<SocketAddr, usize>>,
+    /// Requests ever started, keyed by destination.
+    started: Mutex<HashMap<SocketAddr, usize>>,
+    /// Balanced addresses, keyed by the address clients dial.
+    fronts: Mutex<HashMap<SocketAddr, front::Front>>,
+    /// Per backend, how many times it closed its connections: a connection
+    /// opened under an older count is closed.
+    epochs: Mutex<HashMap<SocketAddr, u64>>,
+    /// Connections a service answered on, ever and now, keyed by backend.
+    opened: Mutex<HashMap<SocketAddr, usize>>,
+    open: Mutex<HashMap<SocketAddr, usize>>,
+}
+
+impl Shared {
+    fn epoch(&self, backend: SocketAddr) -> u64 {
+        self.epochs.lock().unwrap().get(&backend).copied().unwrap_or(0)
+    }
+
+    /// `backend` closes every connection open to it.
+    fn close_connections(&self, backend: SocketAddr) {
+        *self.epochs.lock().unwrap().entry(backend).or_default() += 1;
+    }
+}
+
+/// One connection: the address dialled, the backend it reached (none when a
+/// balanced address had no member), the backend's closings when it opened,
+/// and the service once it answered on it.
+pub(super) struct Connection {
+    shared: Arc<Shared>,
+    front: SocketAddr,
+    backend: Option<SocketAddr>,
+    epoch: u64,
+    service: Option<Arc<dyn HttpService>>,
+}
+
+impl Connection {
+    /// The address dialled.
+    pub(super) fn front(&self) -> SocketAddr {
+        self.front
+    }
+
+    /// First answer on it: announce it to `service`.
+    fn establish(&mut self, backend: SocketAddr, service: &Arc<dyn HttpService>) {
+        if self.service.is_some() {
+            return;
+        }
+        *self.shared.opened.lock().unwrap().entry(backend).or_default() += 1;
+        *self.shared.open.lock().unwrap().entry(backend).or_default() += 1;
+        service.connection_opened();
+        self.service = Some(service.clone());
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let Some(service) = self.service.take() else { return };
+        if let Some(backend) = self.backend {
+            let mut open = self.shared.open.lock().unwrap();
+            if let Some(n) = open.get_mut(&backend) {
+                *n = n.saturating_sub(1);
+            }
+        }
+        service.connection_closed();
+    }
 }
 
 /// Counts one request to `dst` as in flight until it finishes or its future
@@ -152,6 +167,7 @@ struct InFlight<'a> {
 impl<'a> InFlight<'a> {
     fn start(shared: &'a Shared, dst: SocketAddr) -> Self {
         *shared.in_flight.lock().unwrap().entry(dst).or_default() += 1;
+        *shared.started.lock().unwrap().entry(dst).or_default() += 1;
         Self { shared, dst }
     }
 }
@@ -199,6 +215,11 @@ impl SimulatedHttpNetwork {
                 connect_timeout: ClientSettings::default().connect_timeout,
                 resume: Notify::new(),
                 in_flight: Mutex::new(HashMap::new()),
+                started: Mutex::new(HashMap::new()),
+                fronts: Mutex::new(HashMap::new()),
+                epochs: Mutex::new(HashMap::new()),
+                opened: Mutex::new(HashMap::new()),
+                open: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -216,7 +237,10 @@ impl SimulatedHttpNetwork {
     /// Inject (or clear) a fault. Live: it affects future requests, and a
     /// [`Fault::Resume`] wakes the stalled ones.
     pub fn apply_fault(&self, fault: Fault) {
-        let standing = |dst, behaviour| {
+        let standing = |dst, behaviour: Behaviour| {
+            if behaviour.ends_connections() {
+                self.shared.close_connections(dst);
+            }
             self.shared.faults.lock().unwrap().insert(dst, behaviour);
         };
         match fault {
@@ -230,6 +254,7 @@ impl SimulatedHttpNetwork {
             Fault::Script { dst, steps } => {
                 self.shared.scripts.lock().unwrap().entry(dst).or_default().extend(steps);
             }
+            Fault::Close { dst } => self.shared.close_connections(dst),
             Fault::Resume { dst } => {
                 self.shared.faults.lock().unwrap().remove(&dst);
                 self.shared.scripts.lock().unwrap().remove(&dst);
@@ -244,6 +269,64 @@ impl SimulatedHttpNetwork {
     /// detached request still owes.
     pub fn in_flight(&self, dst: SocketAddr) -> usize {
         self.shared.in_flight.lock().unwrap().get(&dst).copied().unwrap_or(0)
+    }
+
+    /// Requests to `dst` started this run, answered or not: each attempt of
+    /// a client's retry counts.
+    pub fn started(&self, dst: SocketAddr) -> usize {
+        self.shared.started.lock().unwrap().get(&dst).copied().unwrap_or(0)
+    }
+
+    /// `front` stands in front of `members`: each new connection to it goes
+    /// to one of them, chosen by `pick`. Replaces any balancing of `front`.
+    pub fn balance(&self, front: SocketAddr, members: &[SocketAddr], pick: Pick) {
+        self.shared.fronts.lock().unwrap().insert(front, front::Front::new(members.to_vec(), pick));
+    }
+
+    /// The members of the balanced address `front` from now on, as a load
+    /// balancer adds or removes a backend: open connections keep theirs, the
+    /// choice's sequence goes on. Without a [`balance`](Self::balance) of
+    /// `front`, it balances round robin.
+    pub fn set_members(&self, front: SocketAddr, members: &[SocketAddr]) {
+        let mut fronts = self.shared.fronts.lock().unwrap();
+        match fronts.get_mut(&front) {
+            Some(f) => f.set_members(members.to_vec()),
+            None => {
+                fronts.insert(front, front::Front::new(members.to_vec(), Pick::RoundRobin));
+            }
+        }
+    }
+
+    /// Connections a service at `backend` answered on, this run.
+    pub fn connections_opened(&self, backend: SocketAddr) -> usize {
+        self.shared.opened.lock().unwrap().get(&backend).copied().unwrap_or(0)
+    }
+
+    /// Connections to `backend` a service answered on and still open: in a
+    /// pool, or carrying a request.
+    pub fn connections_open(&self, backend: SocketAddr) -> usize {
+        self.shared.open.lock().unwrap().get(&backend).copied().unwrap_or(0)
+    }
+
+    /// A new connection to `addr`: to the backend its balancing chooses, or
+    /// to `addr` itself when it is not balanced.
+    pub(super) fn connect(&self, addr: SocketAddr) -> Connection {
+        let backend = match self.shared.fronts.lock().unwrap().get_mut(&addr) {
+            Some(front) => front.next(),
+            None => Some(addr),
+        };
+        Connection {
+            shared: self.shared.clone(),
+            front: addr,
+            backend,
+            epoch: backend.map_or(0, |b| self.shared.epoch(b)),
+            service: None,
+        }
+    }
+
+    /// Whether `conn` is still open: its backend has not closed it.
+    pub(super) fn is_open(&self, conn: &Connection) -> bool {
+        conn.backend.is_some_and(|b| self.shared.epoch(b) == conn.epoch)
     }
 
     /// What `dst` does with the next request: the script's next step, else
@@ -285,6 +368,7 @@ impl HttpServerHandle for SimServerHandle {
 impl Drop for SimServerHandle {
     fn drop(&mut self) {
         self.shared.routing.lock().unwrap().remove(&self.addr);
+        self.shared.close_connections(self.addr);
     }
 }
 
@@ -306,6 +390,31 @@ impl HttpTransport for SimulatedHttpNetwork {
     }
 
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let mut conn = self.connect(dst);
+        self.exchange(&mut conn, req).await
+    }
+
+    /// A client of `target` keeping its connections in a pool as `settings`
+    /// states (the `pool` module).
+    fn client(
+        self: Arc<Self>,
+        target: Arc<ResolvedTarget>,
+        settings: &ClientSettings,
+    ) -> Arc<dyn HttpClient> {
+        Arc::new(pool::PooledClient::new((*self).clone(), target, settings))
+    }
+}
+
+impl SimulatedHttpNetwork {
+    /// One request on `conn`.
+    pub(super) async fn exchange(
+        &self,
+        conn: &mut Connection,
+        req: HttpRequest,
+    ) -> Result<HttpResponse, HttpError> {
+        let Some(dst) = conn.backend else {
+            return Err(HttpError::refused(conn.front));
+        };
         let _in_flight = InFlight::start(&self.shared, dst);
         let mut behaviour = self.next_behaviour(dst);
         loop {
@@ -341,8 +450,12 @@ impl HttpTransport for SimulatedHttpNetwork {
             tokio::time::sleep(delay).await;
             return Err(HttpError::eof(dst));
         }
+        conn.establish(dst, &service);
         let answer = service.answer(req).await;
         tokio::time::sleep(delay).await;
+        if !self.is_open(conn) {
+            return Err(HttpError::eof(dst));
+        }
         match answer {
             HttpAnswer::Response(_) if behaviour == Behaviour::StallBody => {
                 std::future::pending().await

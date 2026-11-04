@@ -22,16 +22,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{
-    call_index_keys, Call, CallBodyCodec, Dialog, DialogState, IndexHit, IndexLookup, KeyKind,
-    MsgpackCodec, OutboundInvite,
+    call_index_keys, Call, Dialog, DialogState, IndexHit, IndexLookup, KeyKind, OutboundInvite,
 };
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 
-use super::{
-    BufferedTerminateWriter, CallState, CallStore, InMemoryCallStore, PartitionRole, PutOpts,
-};
+use super::{CallState, CallStore, InMemoryCallStore, PartitionRole, PutOpts};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
@@ -73,7 +70,7 @@ fn call_with_b_leg(
 ) -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let src = SocketAddr::from(([10, 0, 0, 9], 5060));
-    let call = build_initial_call(
+    let mut call = build_initial_call(
         &invite(call_id, from_tag),
         src,
         &config,
@@ -83,11 +80,12 @@ fn call_with_b_leg(
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = b_call_id.into();
-    b.outbound_invite = Some(OutboundInvite::new(b_tag, 1, 0, None));
+    b.invite = Some(call::RequestRecord::dialled(1, None, OutboundInvite::new(b_tag, 0)));
     if !b_peer_tag.is_empty() {
         b.dialogs = vec![Dialog::new(b_tag, b_peer_tag, DialogState::Early, 1)].into();
     }
-    call::helpers::add_b_leg(call, b)
+    call::helpers::add_b_leg(&mut call, b);
+    call
 }
 
 /// Call 1 (alice's), its outgoing leg on `(X, F1)` ringing on dialog `T2`.
@@ -118,8 +116,8 @@ fn both_resident(last: u8) -> (CallState, String, String) {
     let s = state();
     let (one, two) = (call_1(), call_2());
     let (r1, r2) = (one.call_ref.clone(), two.call_ref.clone());
-    s.create(one);
-    s.create(two);
+    s.create_placed(one);
+    s.create_placed(two);
     let rewrite = if last == 1 { &r1 } else { &r2 };
     let again = s.peek(rewrite).expect("resident");
     s.update(again);
@@ -173,7 +171,7 @@ async fn every_hit_names_the_side_that_owns_the_identity() {
 #[test]
 fn a_cancel_never_resolves_through_an_outgoing_leg() {
     let s = state();
-    s.create(call_1());
+    s.create_placed(call_1());
     assert_eq!(s.resolve_from_sip_key_sync(cancel(X, F1)).map(|h| h.call_ref), None);
 }
 
@@ -183,7 +181,7 @@ fn a_cancel_never_resolves_through_an_outgoing_leg() {
 #[test]
 fn a_cancel_sharing_only_the_call_id_of_an_outgoing_leg_misses() {
     let s = state();
-    s.create(call_1());
+    s.create_placed(call_1());
     assert_eq!(s.resolve_from_sip_key_sync(cancel(X, "other-tag")).map(|h| h.call_ref), None);
 }
 
@@ -219,8 +217,7 @@ fn a_message_naming_an_outgoing_legs_own_tag_is_never_its_calls() {
 async fn backup_with_replicas(last: u8) -> (CallState, Arc<ReplicatingCallStore>, Call, Call) {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let store = Arc::new(InMemoryCallStore::new()) as Arc<dyn CallStore>;
-    let writer = BufferedTerminateWriter::spawn(repl.clone() as Arc<dyn CallStore>, 64);
-    let s = CallState::new(store, "w1", B2buaMetrics::new()).with_replication(repl.clone(), writer);
+    let s = CallState::new(store, "w1", B2buaMetrics::new()).with_replication(repl.clone());
     let (one, two) = (call_1(), call_2());
     let order: [&Call; 3] = if last == 1 { [&one, &two, &one] } else { [&two, &one, &two] };
     for call in order {
@@ -230,7 +227,7 @@ async fn backup_with_replicas(last: u8) -> (CallState, Arc<ReplicatingCallStore>
 }
 
 async fn put_replica(repl: &ReplicatingCallStore, call: &Call) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     let idx = call_index_keys(call);
     repl.put_call(
         PartitionRole::Backup,
@@ -288,8 +285,8 @@ fn a_shared_key_stays_with_its_last_writer_when_the_other_call_leaves() {
     one.callback_context = Some("shared".into());
     two.callback_context = Some("shared".into());
     let r1 = one.call_ref.clone();
-    s.create(one);
-    s.create(two);
+    s.create_placed(one);
+    s.create_placed(two);
     s.remove(&r1);
     assert!(
         s.inner.lock().unwrap().sip_index.contains_key(&call::index_key::callback_key("shared")),

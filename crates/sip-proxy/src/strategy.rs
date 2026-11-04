@@ -10,7 +10,9 @@
 //!   the core synthesizes a 503.
 //! - [`encode_stickiness`](RoutingStrategy::encode_stickiness) — given a chosen
 //!   target, optionally produce route params the core appends to the
-//!   Record-Route URI it inserts for dialog-creating requests (§16.6.5).
+//!   Record-Route URI it inserts for dialog-creating requests (§16.6.5);
+//!   [`encode_originated`](RoutingStrategy::encode_originated) the same for a
+//!   request a worker originates, naming the owners the worker states.
 //! - [`decode_stickiness`](RoutingStrategy::decode_stickiness) — given the parsed
 //!   params off the top-Route URI (which the core just stripped per §16.4),
 //!   recover the downstream target. Five outcomes, see [`DecodeResult`].
@@ -27,6 +29,16 @@ use crate::addr::ProxyAddr;
 /// deterministic. `ForwardAll` uses `{target: "host:port"}`; `LoadBalancer` uses
 /// `{w_pri, w_bak, e, v, kid, sig}`.
 pub type RouteParams = BTreeMap<String, String>;
+
+/// The call's owners a worker states on its own Via (ADR-0055 §8): `pri`, the
+/// call's primary, on a leg's dialog-creating request only, and `bak`. With a
+/// primary stated, `bak` is the call's backup; with none, the sender is the
+/// call's primary and `bak` its other owner. Empty: not stated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatedOwners {
+    pub primary: String,
+    pub backup: String,
+}
 
 /// Outcome of [`RoutingStrategy::decode_stickiness`]. Tagged so the core can
 /// dispatch without casts (port of the `DecodeResult` ADT).
@@ -56,13 +68,14 @@ pub enum SelectError {
     #[error("no target available: {reason}")]
     NoTarget { reason: String },
 
-    /// A target was selected, but its per-worker AIMD token bucket
-    /// ([`crate::load_observer`]) is empty — the LB is rate-capping this worker
-    /// to let it shed in-flight load. → 503 + `Retry-After: retry_after_sec`.
-    /// Only raised for non-emergency new-dialog requests (emergency + in-dialog
-    /// bypass the bucket); never for an unknown/unobserved worker (bootstrap is
-    /// admit). Port of the TS `selectForNewDialog-overload` `bucket_empty` reject.
-    #[error("worker {worker_id} rate-capped (bucket empty); retry after {retry_after_sec}s")]
+    /// Every candidate's per-worker AIMD token bucket ([`crate::load_observer`])
+    /// is empty — the LB is rate-capping each of them to let it shed in-flight
+    /// load (ADR-0009 X6). `worker_id` is the rendezvous winner,
+    /// `retry_after_sec` the earliest refill among them. → 503 +
+    /// `Retry-After: retry_after_sec`. Only raised for non-emergency new-dialog
+    /// requests (emergency + in-dialog bypass the bucket); never while an
+    /// unknown/unobserved worker is a candidate (bootstrap is admit).
+    #[error("every candidate rate-capped (winner {worker_id}); retry after {retry_after_sec}s")]
     RateCapExhausted { worker_id: String, retry_after_sec: u32 },
 }
 
@@ -72,11 +85,24 @@ pub struct SelectOpts {
     /// Set by the core's cookie-decode fallback path: an in-dialog request
     /// (BYE/CANCEL/re-INVITE) on an emergency call carries no Resource-Priority
     /// on the wire, so the cookie's `e=1` flag is forwarded here to keep the
-    /// request out of the (future) AIMD bucket.
+    /// request out of the AIMD bucket.
     pub emergency_override: bool,
     /// The request names a dialog (a To-tag) no verified cookie backs: the
     /// strategy admits it as a new dialog, under every new-call cap.
     pub admit_as_new: bool,
+}
+
+/// Where a strategy places a call by rank alone ([`RoutingStrategy::placement_by_rank`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RankPlacement {
+    /// The node a placement with no filter, spill or cap puts the call on,
+    /// read from the call's identity and the alive set alone.
+    Node(ProxyAddr),
+    /// No alive node takes the call.
+    NoNode,
+    /// The strategy places by nothing a later request can recompute: the
+    /// memo keeps each of its placements.
+    Unranked,
 }
 
 /// The routing-policy seam. `async` for symmetry with the registry the LB calls
@@ -93,13 +119,37 @@ pub trait RoutingStrategy: Send + Sync {
         opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError>;
 
+    /// Where a call `msg` names is placed by rank alone among the alive
+    /// nodes: no band filter, no spill, no cap (ADR-0050). A request of an
+    /// admitted call that no memo or cookie places goes there (ADR-0009 X7).
+    fn placement_by_rank(&self, _msg: &SipMessage) -> RankPlacement {
+        RankPlacement::Unranked
+    }
+
     /// Recover the target previously encoded into the topmost Route URI's params
     /// (the core already verified the URI points at us and stripped it).
     async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult;
 
     /// Build the URI params to stamp into the Record-Route for dialog-creating
-    /// requests. `None` → this strategy has no per-dialog stickiness.
+    /// requests the proxy places on `target`. `None` → this strategy has no
+    /// per-dialog stickiness.
     fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams>;
+
+    /// The cookie of a request a worker originates: `origin` is that worker's
+    /// address and `stated` the call's owners as the worker states them on
+    /// its request. The cookie names the stated primary, else the worker, and
+    /// the stated backup, never one the proxy picks, so every leg of a call
+    /// names the same owners whichever of them sent it (ADR-0055 §8). `None` →
+    /// this strategy has no per-dialog stickiness.
+    fn encode_originated(
+        &self,
+        origin: &ProxyAddr,
+        msg: &SipMessage,
+        stated: &StatedOwners,
+    ) -> Option<RouteParams> {
+        let _ = stated;
+        self.encode_stickiness(origin, msg)
+    }
 
     /// The worker id a cookie names as the call's primary, read without
     /// verifying it: which of several cookies on one message belongs to a
@@ -120,5 +170,19 @@ pub trait RoutingStrategy: Send + Sync {
     /// answers.
     fn verified_cookie(&self, _params: &RouteParams, _msg: &SipMessage) -> Option<RouteParams> {
         None
+    }
+
+    /// The signed field the Via cookie `cookie` carries beside it when the
+    /// request it rides is a leg's dialling INVITE whose worker states the
+    /// call's primary (ADR-0055 §8). `None` → this strategy marks nothing.
+    fn dialling_mark(&self, _cookie: &RouteParams) -> Option<(String, String)> {
+        None
+    }
+
+    /// Whether `params`, the params of one of the proxy's own Vias, carry a
+    /// [`dialling_mark`](Self::dialling_mark) that verifies for the cookie
+    /// beside it. Read only after that cookie verified.
+    fn marks_dialling(&self, _params: &RouteParams) -> bool {
+        false
     }
 }

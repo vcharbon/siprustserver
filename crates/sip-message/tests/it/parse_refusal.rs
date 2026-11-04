@@ -255,15 +255,15 @@ fn a_header_past_the_length_limit_leaves_no_partial() {
 #[test]
 fn a_header_block_past_the_line_limit_is_refused_unanswered() {
     let limit = SipParserLimits::default().max_header_lines;
-    let crowd = vec!["X:a"; 12_000];
+    let crowd = vec!["Q:a"; 12_000];
     let err = CustomParser::new().parse(&invite_with(&crowd)).expect_err("refused");
     assert_eq!(err.reason, format!("header block of 12009 lines exceeds limit {limit}"));
     assert!(err.partial().is_none(), "{err:?}");
 
     // The INVITE's own lines: request line, Via and seven more.
-    let at_limit = vec!["X:a"; limit - 9];
+    let at_limit = vec!["Q:a"; limit - 9];
     assert!(CustomParser::new().parse(&invite_with(&at_limit)).is_ok(), "{limit} lines parse");
-    let past = vec!["X:a"; limit - 8];
+    let past = vec!["Q:a"; limit - 8];
     assert!(CustomParser::new().parse(&invite_with(&past)).is_err(), "{limit} + 1 lines");
 }
 

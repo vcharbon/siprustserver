@@ -14,16 +14,16 @@
 //! - `GET /readyz` and its `GET /ready` alias — `200`/`503` driven by the
 //!   injected [`ProbeRoutes::ready`] closure's 3-valued [`ProbeState`], so the
 //!   k8s readinessProbe withholds traffic from a not-ready / draining pod.
-//! - `GET /vrrp` — the check of a node that holds a virtual address: `200 ok`
-//!   while `/healthz` passes and the injected [`ProbeRoutes::vrrp`] holds,
 //!   `503 stalled` / `503 not-ready` otherwise; `404` for a server given none.
-//! - any method on `/admin/…` — the runner's operator routes
-//!   ([`ProbeRoutes::admin`]); `404` for a server given none. They sit on the
-//!   observability port only, never on a SIP face.
+//! - `GET /fitz` — `200 fit` / `503 unfit <reason>` from the injected
+//!   [`ProbeRoutes::fit`] closure: whether the process could carry traffic,
+//!   its drain latch aside, read by a local guard that polls it far more
+//!   often than a kubelet probe; `404` for a server given none.
 //! - `GET /debug/flamegraph[?seconds=N]` — on-demand pprof CPU flamegraph SVG
 //!   (internal debug route, NOT the SIP datapath; blocks for the sample window
 //!   on a blocking thread).
-//! - everything else — `404`.
+//! - everything else — `404`, the operator routes under `/admin/` included:
+//!   they are served by an [`AdminServer`] on a loopback listener of their own.
 //!
 //! ## Why one module
 //! The servers differ only in the `/metrics` body and the readiness predicate —
@@ -65,15 +65,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 mod accept;
 mod admin;
+mod admin_server;
+mod request;
 
 use accept::Incoming;
 pub use admin::{AdminFn, AdminReply};
+pub use admin_server::AdminServer;
 
 /// The readiness a runner reports for `GET /readyz` (and the `/ready` alias).
 /// Three-valued so the HTTP probe can distinguish a node still coming up from
@@ -88,6 +91,19 @@ pub enum ProbeState {
     /// Shutting down (SIGTERM). `503 draining`. k8s unpublishes the pod.
     Draining,
 }
+
+/// What a runner reports for `GET /fitz`: fit to carry traffic, or unfit
+/// for the reason it names (one lowercase token, no space).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fitness {
+    /// `200 fit`.
+    Fit,
+    /// `503 unfit <reason>`.
+    Unfit(&'static str),
+}
+
+/// Fitness provider for `/fitz` — cheap + non-blocking, called per poll.
+pub type FitFn = Arc<dyn Fn() -> Fitness + Send + Sync>;
 
 /// Per-scrape `/metrics` body provider. Each runner builds its own (the lib
 /// can't depend on the runner's metric sources — e.g. jemalloc `mallctl` would
@@ -117,13 +133,11 @@ pub struct ProbeRoutes {
     pub ready: ReadyFn,
     /// `GET /debug/heap` jemalloc heap dump; `None` ⇒ route 503s "unavailable".
     pub heap: Option<HeapDumpFn>,
-    /// What `GET /vrrp` asks on top of liveness; `None` ⇒ the route is `404`.
-    pub vrrp: Option<LiveFn>,
-    /// The operator routes under `/admin/`; `None` ⇒ every one is `404`.
-    pub admin: Option<AdminFn>,
+    /// `GET /fitz` fitness; `None` ⇒ `404`.
+    pub fit: Option<FitFn>,
 }
 
-/// A connection that sends nothing for this long is cut and its fd reclaimed.
+/// A connection that sends nothing for this long is cut and its fd freed.
 /// See the module docs: this is bug-stranded-fd reclamation, not DDoS defence,
 /// so it is long enough that a healthy probe/scrape never nears it.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -196,7 +210,12 @@ impl ProbeServer {
         idle_timeout: Duration,
     ) -> std::io::Result<Self> {
         let local = listener.local_addr()?;
-        let task = tokio::spawn(accept::run(listener, routes, idle_timeout));
+        let task = tokio::spawn(accept::run(listener, move |stream| {
+            let served = routes.clone();
+            async move {
+                let _ = handle_conn(stream, served, idle_timeout).await;
+            }
+        }));
         Ok(Self { addr: local, task })
     }
 
@@ -224,27 +243,10 @@ pub(crate) async fn handle_conn(
     idle_timeout: Duration,
 ) -> std::io::Result<()> {
     let Served { routes, live } = served;
-    let mut buf = [0u8; 1024];
-    // Fully-idle cut: if no request line arrives within the window, drop the
-    // connection (reclaim the fd). Only a connection that sent *nothing* trips
-    // this — any first byte proceeds to handling.
-    let n = match tokio::time::timeout(idle_timeout, stream.read(&mut buf)).await {
-        Ok(read) => read?,
-        Err(_elapsed) => return Ok(()), // silent client — drop
+    let Some(request) = request::read(&mut stream, idle_timeout).await? else {
+        return Ok(()); // silent client — drop
     };
-    let req = String::from_utf8_lossy(buf.get(..n).unwrap_or(&buf));
-    let mut request_line = req.split_whitespace();
-    let method = request_line.next().unwrap_or("GET");
-    let path = request_line.next().unwrap_or("/");
-
-    if path.starts_with(admin::PREFIX) {
-        let route = path.split('?').next().unwrap_or(path);
-        let reply = routes.admin.as_ref().and_then(|admin| admin(method, route));
-        let reply = reply.unwrap_or_else(|| AdminReply::json(404, String::new()));
-        stream.write_all(reply.render().as_bytes()).await?;
-        stream.flush().await?;
-        return Ok(());
-    }
+    let path = request.path.as_str();
 
     // On-demand CPU flamegraph (pprof SIGPROF sampling -> inferno SVG). Internal
     // debug route on the observability port — NOT the SIP datapath. Blocks for
@@ -323,14 +325,6 @@ pub(crate) async fn handle_conn(
             true => ("200 OK", "text/plain", "ok\n".to_string()),
             false => ("503 Service Unavailable", "text/plain", "stalled\n".to_string()),
         },
-        "/vrrp" => match (&routes.vrrp, live.as_ref().is_none_or(|live| live())) {
-            (None, _) => ("404 Not Found", "text/plain", "not found\n".to_string()),
-            (Some(_), false) => ("503 Service Unavailable", "text/plain", "stalled\n".to_string()),
-            (Some(vrrp), true) => match vrrp() {
-                true => ("200 OK", "text/plain", "ok\n".to_string()),
-                false => ("503 Service Unavailable", "text/plain", "not-ready\n".to_string()),
-            },
-        },
         // `/ready` (worker) and `/readyz` (proxy) are the same probe.
         "/readyz" | "/ready" => match (routes.ready)() {
             ProbeState::Ready => ("200 OK", "text/plain", "ready\n".to_string()),
@@ -340,6 +334,13 @@ pub(crate) async fn handle_conn(
             ProbeState::Draining => {
                 ("503 Service Unavailable", "text/plain", "draining\n".to_string())
             }
+        },
+        "/fitz" => match routes.fit.as_ref().map(|fit| fit()) {
+            Some(Fitness::Fit) => ("200 OK", "text/plain", "fit\n".to_string()),
+            Some(Fitness::Unfit(reason)) => {
+                ("503 Service Unavailable", "text/plain", format!("unfit {reason}\n"))
+            }
+            None => ("404 Not Found", "text/plain", "not found\n".to_string()),
         },
         _ => ("404 Not Found", "text/plain", "not found\n".to_string()),
     };

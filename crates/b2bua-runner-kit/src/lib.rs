@@ -12,7 +12,7 @@
 //! - [`RunnerEnv::from_env`] — the `B2BUA_*`/`LIMITER_*`/`WORKER_*` env
 //!   grammar parsed into a plain struct of pub fields (tweak any before bind);
 //! - [`RunnerEnv::bind`] — UDP bind with the ingress brake installed,
-//!   advertise-address coercion, [`B2buaConfig`] assembly + validation;
+//!   the worker's addresses and mode, [`B2buaConfig`] assembly;
 //! - [`RunnerBase::deps`] — production-shaped defaults for every dependency
 //!   (store / buffered CDR / limiter-from-env / metrics / clock / id-gen),
 //!   each overridable field-by-field on the returned [`B2buaDeps`];
@@ -23,12 +23,16 @@
 //!   replication the `B2BUA_REPL*` grammar selects ([`ReplicationSettings`]:
 //!   static or EndpointSlice membership, per-attempt peer addressing), assigned
 //!   to `deps.replication`;
+//! - [`ConfigCheck`] — the one consistency check of the final composed
+//!   configuration: the runner records its own relations, and
+//!   [`RunnerBase::spawn`] adds the generic ones and refuses the start on any
+//!   violation, naming every variable involved;
 //! - [`RunnerBase::spawn`] / [`RunnerBase::spawn_probe_server`] /
 //!   [`RunnerBase::spawn_gauge_sampler`] / [`RunnerBase::run_until_shutdown`]
-//!   — core spawn, the `/metrics`+`/ready`+`/healthz` probe, the
-//!   memory-attribution sampler, and the stop handling (SIGTERM or the
-//!   worker's own withdrawal drains; a loop task ending exits non-zero);
-//! - the shared helpers ([`env_or`], [`env_flag`], [`resolve`],
+//!   — core spawn, the `/metrics`+`/ready`+`/healthz` probe, the memory
+//!   sampler, and the stop handling (SIGTERM or the worker's own withdrawal
+//!   drains; its supersession or a loop task ending exits non-zero);
+//! - the shared helpers ([`env_or`], [`env_switch`], [`resolve`],
 //!   [`split_host_port`], [`NullCdrWriter`]).
 //!
 //! The in-tree `b2bua-runner` is the first consumer, so the surface provably
@@ -42,7 +46,8 @@
 //! # ) -> Result<std::process::ExitCode, String> {
 //! let base = b2bua_runner_kit::RunnerEnv::from_env()?.bind("my-runner").await?;
 //! let deps = base.deps(my_engine, None).await; // swap any B2buaDeps field before spawn
-//! let core = base.spawn(deps, Vec::new()); // + your composed ServiceDefs
+//! // + your composed ServiceDefs and your own relations
+//! let core = base.spawn(deps, Vec::new(), b2bua_runner_kit::ConfigCheck::new())?;
 //! let _probe = base.spawn_probe_server(&core, None, None).await;
 //! base.spawn_gauge_sampler(&core);
 //! Ok(base.run_until_shutdown(&core).await)
@@ -52,12 +57,11 @@
 //! What deliberately does NOT live here: the decision engine (the one piece a
 //! runner exists to choose), the composed service list, and allocator wiring —
 //! those are the runner's own, injected through the seams above. Replication is
-//! the runner's choice to take: a runner may assign any other
-//! `ReplicationSetup` to `deps.replication`. The CDR sink is the runner's choice too:
-//! the kit ships the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env
-//! grammar) and the discarding default; a runner may give the RabbitMQ sink
-//! its own [`CdrEncoder`] or pass any other [`CdrWriter`] to
-//! [`RunnerBase::deps`].
+//! the runner's choice to take: a runner may assign any other `ReplicationSetup`
+//! to `deps.replication`. The CDR sink is the runner's choice too: the kit ships
+//! the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env grammar) and the
+//! discarding default; a runner may give the RabbitMQ sink its own
+//! [`CdrEncoder`] or pass any other [`CdrWriter`] to [`RunnerBase::deps`].
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(
@@ -78,18 +82,17 @@
 )]
 
 use std::env;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::admission::Refusals;
 use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrWriter};
-use b2bua::config::{B2buaConfig, CdrConfig};
+use b2bua::config::{B2buaConfig, Front};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::limiter::CallLimiter;
 use b2bua::metrics::{B2buaMetrics, LiveGauge, UdpTransportMetrics};
-use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use http_net::{RealHttpNetwork, SystemResolver};
@@ -99,33 +102,38 @@ use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 
 pub mod backend_url;
+mod base;
 mod capacity_env;
 mod cdr_rabbitmq;
+mod check;
 mod drain_env;
 mod entropy;
+mod front_env;
 mod limiter_client;
 mod limiter_env;
 mod liveness_env;
 mod null_cdr;
-mod outbound_proxy_env;
 pub mod poison;
-mod probe;
+pub mod probe;
 mod replication;
 mod runner_env;
 pub mod runtime;
 mod shutdown;
 mod socket_buffers;
+mod spawn;
 mod validate;
 mod worker_metrics;
+pub use base::RunnerBase;
 pub use cdr_rabbitmq::{
     rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter,
     MAX_DRAINER_WAIT_MS, MAX_WAIT_MS, MAX_WINDOW,
 };
+pub use check::ConfigCheck;
+pub use front_env::{addresses_from_lookup, WorkerAddresses};
 pub use null_cdr::NullCdrWriter;
-pub use outbound_proxy_env::{parse_outbound_proxy, validate_outbound_proxy_requirement};
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
-pub use runner_env::RunnerEnv;
+pub use runner_env::{switch, RunnerEnv};
 use socket_buffers::log_socket_buffers;
 pub use validate::{validate_default_dest, validate_ingress_brake_pct};
 pub use worker_metrics::{txn_metrics_text, WorkerMetrics, CATALOGUE};
@@ -155,13 +163,12 @@ pub fn env_stated(key: &str) -> Option<String> {
     stated(env::var(key).ok())
 }
 
-/// Truthy env flag: `1`/`true`/`yes`/`on` (case-insensitive) → true.
-pub fn env_flag(key: &str) -> bool {
-    is_truthy(&env_or(key, "0"))
-}
-
-fn is_truthy(s: &str) -> bool {
-    matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+/// The on/off env variable `key`: `1`/`true`/`yes`/`on` or
+/// `0`/`false`/`no`/`off` (case-insensitive), `default` when unset or blank.
+/// Any other value is the boot refusal naming `key`: a typo never reads as
+/// off.
+pub fn env_switch(key: &str, default: bool) -> Result<bool, String> {
+    runner_env::switch(key, env::var(key).ok(), default)
 }
 
 /// Resolve a `host:port` string to a socket address; `Err` is the boot
@@ -186,27 +193,22 @@ pub fn split_host_port(s: &str) -> (String, u16) {
 
 impl RunnerEnv {
     /// Bind the real UDP endpoint (ingress brake installed), coerce the
-    /// advertise address, assemble + validate the [`B2buaConfig`], and mint the
+    /// advertise address, assemble the [`B2buaConfig`], and mint the
     /// process-wide metrics registry / system clock. `Err` is the boot refusal
-    /// of a bind failure, an invalid config, a pre-epoch wall clock or an OS
-    /// RNG that does not answer. `name` names the service in every log line.
+    /// of a bind failure, a pre-epoch wall clock or an OS RNG that does not
+    /// answer. `name` names the service in every log line. Nothing is served
+    /// yet: the configuration is checked once composed, by
+    /// [`RunnerBase::spawn`].
     ///
     /// The runner installs the process subscriber (ADR-0026,
     /// [`observe::init_production`]) before it, so the refusal is logged.
     pub async fn bind(self, name: &str) -> Result<RunnerBase, String> {
-        let invalid = |e: String| format!("invalid B2BUA config: {e}");
         // The per-call trace gate, configured once from the environment before
         // any call arrives (ADR-0026): with no OTLP endpoint it is inert and no
         // call path pays more than one boolean check.
         b2bua::trace::install_process_traces(std::sync::Arc::new(
             b2bua::trace::CallTraces::from_env(0),
         ));
-        validate_ingress_brake_pct(self.udp_ingress_brake_pct).map_err(invalid)?;
-        validate_outbound_proxy_requirement(
-            self.require_outbound_proxy,
-            self.outbound_proxy.is_some(),
-        )
-        .map_err(invalid)?;
         let clock = Clock::checked_system().map_err(|e| e.to_string())?;
 
         let listen_sa = resolve(&self.listen)?;
@@ -282,34 +284,10 @@ impl RunnerEnv {
             "ingress brake armed: stateless-503 for new non-emergency INVITEs at ingress depth >= threshold"
         );
 
-        // Advertised SIP host:port stamped on every outbound Via / Contact /
-        // b-leg Call-ID (see `b2bua::stack_identity`). It MUST be an address the
-        // callee / proxy can route a response back to — the *bind* address may
-        // be `0.0.0.0`, which is NOT routable: a peer's 200 OK to a Via/Contact
-        // of `0.0.0.0` goes nowhere, the B2BUA never sees the answer, and it
-        // retransmits the INVITE then CANCELs → a retransmission storm. Take
-        // `B2BUA_ADVERTISE` (`host[:port]`) verbatim when set (k8s injects the
-        // pod IP via the downward API `status.podIP`); otherwise fall back to
-        // the bound address, coercing an unspecified `0.0.0.0` to loopback so
-        // the literal is at least routable.
-        let (advertise_ip, advertise_port) = match &self.advertise {
-            Some(s) => {
-                let s = s.trim();
-                match s.rsplit_once(':').and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h, p))) {
-                    Some((h, p)) => (h.to_string(), p),
-                    // No `:port` (or unparseable port) → host-only; listen port.
-                    None => (s.to_string(), local.port()),
-                }
-            }
-            None => {
-                let ip = if local.ip().is_unspecified() {
-                    IpAddr::V4(Ipv4Addr::LOCALHOST)
-                } else {
-                    local.ip()
-                };
-                (ip.to_string(), local.port())
-            }
-        };
+        // The worker's own address on every Via; behind the proxy, every
+        // Contact names the proxy instead ([`front_env`]).
+        let (advertise_ip, advertise_port) =
+            (self.addresses.advertise.ip().to_string(), self.addresses.advertise.port());
         tracing::info!(
             service = name,
             %advertise_ip,
@@ -317,28 +295,30 @@ impl RunnerEnv {
             bind = %local,
             "advertised SIP identity"
         );
-
-        match &self.outbound_proxy {
-            // Every b-leg request goes to the front proxy with a preloaded plain
-            // `;lr` Route; its internal face classifies it worker-outbound
-            // (ADR-0048) and it record-routes itself into the b-leg.
-            Some((h, p)) => tracing::info!(
+        match &self.addresses.front {
+            // Every b-leg request goes to the front proxy with a preloaded plain `;lr`
+            // Route; it classifies it worker-outbound (ADR-0048) and record-routes.
+            Front::Proxied { outbound_proxy: (h, p), contact_address: (ch, cp) } => tracing::info!(
                 service = name,
                 proxy_host = %h,
                 proxy_port = p,
-                "b-leg egress forced through the front proxy (all worker->callee SIP traverses the LB)"
+                contact_host = %ch,
+                contact_port = cp,
+                "behind the front proxy: b-leg egress through it, every Contact names it"
             ),
-            None => tracing::warn!(
+            Front::Standalone => tracing::info!(
                 service = name,
-                "B2BUA_OUTBOUND_PROXY unset — b-leg goes pod-direct (local/dev only; NOT for the cluster)"
+                "standalone: b-leg goes straight to the callee, every Contact names the worker"
             ),
         }
 
+        let identity = entropy::worker_identity(name, self.identity.clone(), &id_gen);
         let config = B2buaConfig {
             self_ordinal: self.ordinal.clone(),
+            cluster_key: self.cluster_key.clone(),
             sip_local_ip: advertise_ip,
             sip_local_port: advertise_port,
-            b2b_outbound_proxy: self.outbound_proxy.clone(),
+            front: self.addresses.front.clone(),
             cdr_buffer_queue_max: self.cdr_queue,
             event_dispatch_concurrency: self.concurrency,
             per_call_queue_cap: self.call_cap,
@@ -347,8 +327,6 @@ impl RunnerEnv {
             max_messages_per_call: self.max_messages_per_call,
             max_messages_per_call_lifetime: self.max_messages_per_call_lifetime,
             keepalive_interval_sec: self.keepalive_sec,
-            keepalive_timeout_sec: self.keepalive_timeout_sec,
-            reboot_budget_sec: self.reboot_budget_sec,
             limiter_refresh_sec: self.limiter_refresh_sec,
             limiter_refresh_batch_ms: self.limiter_refresh_batch_ms,
             limiter_refresh_batch_max: self.limiter_refresh_batch_max,
@@ -366,22 +344,11 @@ impl RunnerEnv {
             worker_allowed_target_suffixes: self.worker_allowed_target_suffixes.clone(),
             relay_headers: self.relay_headers.clone(),
             privacy_service: self.privacy_service,
-            cdr: CdrConfig {
-                message_ring: self.cdr_message_ring,
-                captured_headers: self.cdr_captured_headers.clone(),
-            },
+            cdr: self.cdr.clone(),
             capacity: self.capacity,
+            event_queue_gate: self.event_queue_gate,
             ..Default::default()
         };
-        // Forbid booting with a config that would silently break HA (too-short a
-        // keepalive, a reboot budget that cannot outlast a primary reboot or a
-        // keepalive refresh gap) or call setup (an INVITE transaction bound
-        // outside its supported range, an app setup deadline / reaper idle
-        // window that does not sit strictly under that bound).
-        config.validate().map_err(|e| invalid(e.to_string()))?;
-        let call_control =
-            Duration::from_millis(u64::try_from(config.call_control_timeout_ms).unwrap_or(0));
-        liveness_env::check_loop_stall(self.loop_stall, call_control).map_err(invalid)?;
         tracing::info!(service = name, capacity = ?config.capacity, "capacity ceilings");
 
         Ok(RunnerBase {
@@ -389,6 +356,7 @@ impl RunnerEnv {
             endpoint,
             local,
             config,
+            identity,
             udp_metrics,
             id_gen,
             refusals,
@@ -406,38 +374,6 @@ impl RunnerEnv {
 /// Comma-separated env list: trimmed, empties dropped.
 pub(crate) fn split_csv(s: &str) -> Vec<String> {
     s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
-}
-
-/// Everything a bound runner shares between its assembly steps: the endpoint,
-/// the validated config, and the process-wide metrics/clock. All fields pub so
-/// a runner can reach any piece (e.g. `base.metrics` for a custom CDR sink,
-/// `base.clock` for a replication store).
-pub struct RunnerBase {
-    /// Log-line prefix (the binary's name).
-    pub name: String,
-    /// The parsed env this base was built from (post any field overrides).
-    pub env: RunnerEnv,
-    /// The shared bound UDP endpoint (core recv loop + live metrics getters).
-    pub endpoint: Arc<dyn UdpEndpoint>,
-    /// The actually-bound local address.
-    pub local: SocketAddr,
-    /// The validated worker config (advertise coercion applied).
-    pub config: B2buaConfig,
-    /// The `UdpTransport` metrics facade over [`Self::endpoint`].
-    pub udp_metrics: UdpTransportMetrics,
-    /// The worker's identifier generator, keyed from the OS RNG at bind;
-    /// [`deps`](Self::deps) hands it to the core.
-    pub id_gen: Arc<sip_txn::IdGen>,
-    /// The worker's refusals of new INVITEs, held by the ingress brake on
-    /// [`Self::endpoint`]; [`deps`](Self::deps) hands the core the same
-    /// instance, so a runner swapping one swaps both.
-    pub refusals: Refusals,
-    /// The process-wide metrics registry the core exports at `/metrics`.
-    pub metrics: B2buaMetrics,
-    /// System wall clock (transaction/dialog timers fire for real).
-    pub clock: Clock,
-    /// Resolved probe/metrics HTTP listen address.
-    pub metrics_sa: SocketAddr,
 }
 
 impl RunnerBase {
@@ -514,14 +450,14 @@ impl RunnerBase {
         Arc::new(writer)
     }
 
-    /// The peer-to-peer replication the env selects ([`ReplicationSettings`]),
+    /// The peer-to-peer replication the env selected ([`RunnerEnv::replication`]),
     /// its store on [`Self::clock`]; `None` when replication is off. `Err` is
-    /// the boot refusal of a malformed replication variable or a replication
-    /// listener that cannot be bound.
+    /// the boot refusal of a replication listener that cannot be bound.
     pub async fn replication_setup_from_env(&self) -> Result<Option<ReplicationSetup>, String> {
-        replication_setup_from_lookup(|k| env::var(k).ok(), self.clock.clone())
-            .await
-            .map_err(|e| format!("invalid B2BUA config: {e}"))
+        let Some(settings) = self.env.replication.clone() else { return Ok(None) };
+        let setup = settings.into_setup(self.clock.clone(), replication::boot_incarnation());
+        let setup = setup.await.map_err(|e| format!("invalid B2BUA config: {e}"))?;
+        Ok(Some(ReplicationSetup { replica: self.env.replica, ..setup }))
     }
 
     /// Production-shaped [`B2buaDeps`] defaults around the injected decision
@@ -538,14 +474,15 @@ impl RunnerBase {
         let sink = cdr_sink.unwrap_or_else(|| Arc::new(NullCdrWriter));
         B2buaDeps {
             config: self.config.clone(),
+            identity: self.identity.clone(),
             decision,
             limiter: self.limiter_from_env().await,
             cdr: Arc::new(BufferedCdrWriter::spawn(sink, self.env.cdr_queue, self.metrics.clone())),
             store: Arc::new(InMemoryCallStore::new()),
-            // No injected store faults in production (ADR-0023: the live-path
-            // probe is a no-op while disarmed).
+            // No injected fault and no turn probe in production (ADR-0023).
             store_faults: Default::default(),
             wire_faults: Default::default(),
+            turn_probe: Default::default(),
             clock: self.clock.clone(),
             id_gen: self.id_gen.clone(),
             // The refusals the ingress brake holds (see [`RunnerBase::refusals`]).
@@ -565,12 +502,6 @@ impl RunnerBase {
             // from `config.capacity` (ADR-0037).
             capacity: None,
         }
-    }
-
-    /// Spawn the core over one boxed clone of the shared endpoint, composing
-    /// `services` (ADR-0016) above the defaults.
-    pub fn spawn(&self, deps: B2buaDeps, services: Vec<ServiceDef>) -> Arc<B2buaCore> {
-        Arc::new(B2buaCore::spawn_with_services(Box::new(self.endpoint.clone()), deps, services))
     }
 
     /// Memory-attribution sampler: push the store + replication map sizes into

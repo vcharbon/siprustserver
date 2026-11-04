@@ -36,7 +36,7 @@
 //!
 //! **HA scoping:** the probe defaults to no-fault and sits ONLY on the
 //! live-serving lookup sites. The HA replication/reclaim paths — reclaim
-//! discharge, the `(p,b)` reconciliation, the terminate writer — are
+//! discharge, the `(p,b)` reconciliation, the store write path — are
 //! deliberately un-probed and behave exactly as before.
 //!
 //! [`ScanCalls`]: StoreFaultPoint::ScanCalls

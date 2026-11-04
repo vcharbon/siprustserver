@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Freeze one front proxy's container, then wait until its node left both VIPs'
+# next hops. Facts as pod_freeze's, plus the node and, per "vip addr", the
+# withdrawal in ms after the freeze.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+hk_pick_targets
+read -r _ _ node <<<"$(hk_targets)"
+pairs="$(hk_route_pairs "$node")" || hk_die "the addresses of $node cannot be read"
+frozen="$(hk_timed_inject frozen pf_freeze_container "$HAKIT_PARAM_CONTAINER")"
+at="$(jq -r '.applied_at_ms' <<<"$frozen")"
+withdrawn="$(hk_route_wait absent "$at" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs")" \
+  || hk_die "$node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the freeze"
+jq -cn --argjson f "$frozen" --arg node "$node" --argjson w "$withdrawn" \
+  '$f + {node: $node, withdrawn_ms: $w}'

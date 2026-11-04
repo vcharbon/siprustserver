@@ -45,8 +45,9 @@ pub enum PeerFailureKind {
     /// The longer-horizon give-up: the configured out-of-dialog INVITE bound
     /// (default 158 s) fired (distinct from [`Self::ResponseTimeout`]).
     TransactionTimeout,
-    /// In-dialog keepalive OPTIONS got no 200 within its deadline (peer = that
-    /// leg's next hop).
+    /// In-dialog keepalive OPTIONS got no final by its Timer F (peer = that
+    /// leg's next hop); the same timeout also counts as a `ResponseTimeout`.
+    /// A refused probe counts no peer failure: the peer answered.
     KeepaliveTimeout,
     /// Outbound send to the peer failed (ENOBUFS/EPERM/…).
     SendFailure,

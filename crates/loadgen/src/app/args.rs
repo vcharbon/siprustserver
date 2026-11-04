@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::{ArgMatches, Parser};
@@ -39,6 +40,13 @@ pub struct Args {
     /// How long to offer load, in seconds.
     #[arg(long, default_value_t = 60)]
     pub duration: u64,
+    /// Worker threads of the process's runtime; the flag wins over
+    /// `TOKIO_WORKER_THREADS`. A `--load-profile` cannot set it: the runtime is
+    /// built before the profile is read. The default suits a process at a few
+    /// hundred calls per second; a process near its rate ceiling sets more,
+    /// about one worker per 400–500 cps at some 2 ms of CPU per call.
+    #[arg(long, default_value = "4")]
+    pub worker_threads: NonZeroUsize,
     /// Max concurrent in-flight calls (offered load above this is dropped+counted).
     #[arg(long, default_value_t = 2000)]
     pub max_in_flight: usize,
@@ -83,7 +91,10 @@ pub struct Args {
     /// for a SUT that keeps the calling party's number on every leg; every mix
     /// entry needs a case (checked at startup), and a call whose resolved From
     /// has no user, or whose number a concurrent call holds, is counted
-    /// `rejected` before any datagram.
+    /// `rejected` before any datagram; `--correlation-extract` keys on a
+    /// regex's capture group of the From user instead. `call-id`: the token IS
+    /// the caller's Call-ID, found in each SUT-originated leg's Call-ID by the
+    /// required `--correlation-extract` regex.
     #[arg(long, default_value = "header")]
     pub correlate: String,
     /// Correlation header name (the `header` strategy): the transparent
@@ -96,9 +107,13 @@ pub struct Args {
     /// the bare token.
     #[arg(long, default_value = "${token}")]
     pub correlation_template: String,
-    /// Override the token-extraction regex (FIRST capture group = the token).
-    /// Default: derived from `--correlation-template` (literal parts escaped,
-    /// the placeholder matched as unreserved URI chars).
+    /// The token-extraction regex (FIRST capture group = the token). `header`:
+    /// overrides the regex derived from `--correlation-template` (literal parts
+    /// escaped, the placeholder matched as unreserved URI chars). `from-user`:
+    /// applied to the From URI user of the caller and of every received leg
+    /// (e.g. `^(\+?[0-9]+)` drops `;ext=…`); unset → the whole user.
+    /// `call-id`: required, applied to a received leg's Call-ID (e.g.
+    /// `^leg[0-9]+-(.+)$`).
     #[arg(long)]
     pub correlation_extract: Option<String>,
     /// Shorthand for the `api-call-pin` egress policy: attach an X-Api-Call
@@ -110,7 +125,8 @@ pub struct Args {
     /// Shorthand: per-recv wall-clock timeout (ms).
     #[arg(long, default_value_t = 5000)]
     pub recv_timeout_ms: u64,
-    /// Max stored callflow samples per (scenario, result-class).
+    /// Max stored callflow samples per (scenario, result-class); the first N
+    /// calls of each scenario record their flow.
     #[arg(long, default_value_t = 10)]
     pub sample_cap: u32,
     /// Output directory for the on-disk report.
@@ -167,8 +183,9 @@ pub struct Args {
     /// the transfer target resolves through the egress seam).
     #[arg(long, default_value = "refer-allow-c")]
     pub refer_key: String,
-    /// Record roughly 1 call in N's flow (the sampling-gate background fraction).
-    /// `1` = full recording (every call); higher values record less. Stored
+    /// Record 1 call in N of each scenario, from the first call to the last
+    /// (the sampling-gate background share). `1` = full recording (every call);
+    /// higher values record less. Stored
     /// samples stay bounded by `--sample-cap` per bucket; the cost of full
     /// recording is per-call recording memory, so watch `loadgen_process_*` /
     /// `loadgen_inflight` when it is on.
@@ -226,6 +243,10 @@ pub struct Args {
     /// wants to override a `--load-profile` value with.
     #[arg(skip)]
     pub explicit: BTreeSet<String>,
+    /// The command line as typed, program first. Filled by the loadgen
+    /// parsers; echoed at the top of the report.
+    #[arg(skip)]
+    pub command_line: Vec<String>,
 }
 
 impl Args {
@@ -238,7 +259,11 @@ impl Args {
         T: Into<OsString> + Clone,
     {
         use clap::CommandFactory;
-        Self::from_matches(&Self::command().get_matches_from(itr)).unwrap_or_else(|e| e.exit())
+        let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+        let mut args = Self::from_matches(&Self::command().get_matches_from(argv.clone()))
+            .unwrap_or_else(|e| e.exit());
+        args.command_line = command_line(&argv);
+        args
     }
 
     /// The args of a parsed command line, with its explicit-flag record.
@@ -260,6 +285,11 @@ impl Args {
     pub fn explicit(&self, id: &str) -> bool {
         self.explicit.contains(id)
     }
+}
+
+/// `argv` as text, each argument converted lossily.
+pub(super) fn command_line(argv: &[OsString]) -> Vec<String> {
+    argv.iter().map(|a| a.to_string_lossy().into_owned()).collect()
 }
 
 /// The GLOBAL loss/retransmit default: an explicit loss flag
@@ -388,9 +418,20 @@ pub(super) fn correlation(args: &Args) -> Result<Correlation, String> {
         )
         .map_err(|e| format!("bad correlation config: {e}")),
         "to-user" | "to_user" => Ok(Correlation::to_user()),
-        "from-user" | "from_user" => Ok(Correlation::from_user()),
+        "from-user" | "from_user" => match args.correlation_extract.as_deref() {
+            None => Ok(Correlation::from_user()),
+            Some(re) => Correlation::from_user_extract(re)
+                .map_err(|e| format!("bad correlation config: {e}")),
+        },
+        "call-id" | "call_id" => {
+            let re = args.correlation_extract.as_deref().ok_or(
+                "--correlate call-id needs --correlation-extract (group 1 = the caller's Call-ID)",
+            )?;
+            Correlation::call_id(re).map_err(|e| format!("bad correlation config: {e}"))
+        }
         other => Err(format!(
-            "unknown --correlate {other:?} (expected `header`, `to-user` or `from-user`)"
+            "unknown --correlate {other:?} (expected `header`, `to-user`, `from-user` or \
+             `call-id`)"
         )),
     }
 }

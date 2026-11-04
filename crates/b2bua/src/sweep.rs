@@ -81,7 +81,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use call::{CallBodyCodec, CallLimiterState, CallModelState, MsgpackCodec};
+    use call::{CallLimiterState, CallModelState};
 
     use crate::config::B2buaConfig;
     use crate::initial_invite::build_initial_call;
@@ -133,7 +133,7 @@ mod tests {
                 PartitionRole::Backup,
                 "w0",
                 &call_ref,
-                MsgpackCodec::new().encode(&terminal).unwrap(),
+                crate::store::envelope::placed_body(&terminal).unwrap(),
                 &[],
                 500,
                 1,
@@ -265,7 +265,7 @@ mod tests {
                 PartitionRole::Backup,
                 "w0",
                 &terminal.call_ref,
-                MsgpackCodec::new().encode(&terminal).unwrap(),
+                crate::store::envelope::placed_body(&terminal).unwrap(),
                 &[],
                 ttl_ms,
                 1,

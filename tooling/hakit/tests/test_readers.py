@@ -402,3 +402,20 @@ def test_lease_lapses_outside_the_padded_windows_are_a_leak(tmp_path: Path) -> N
     assert check("in-pad", window_end + 100)[0]["verdict"] == "pass"
     leaked = check("leaked", window_end + 600)[0]
     assert leaked["verdict"] == "fail" and jv.string(leaked, "detail").startswith("2 in ")
+
+
+def test_a_quiet_counter_named_with_labels_is_read_in_the_namespace(tmp_path: Path) -> None:
+    queries: list[str] = []
+    lab = Lab()
+
+    def rule(c: Call) -> HttpResult | None:
+        if c.kind == "http" and "cancel_lookups" in c.url and "/query_range" not in c.url:
+            queries.append(urllib.parse.parse_qs(urllib.parse.urlsplit(c.url).query)["query"][0])
+            return HttpResult(200, vector([({}, 0)]))
+        return lab.rule(c)
+
+    spec = DriftSpec(quiet_zero_increase=['sip_proxy_cancel_lookups_total{outcome="miss"}'])
+    d = soak_dir(tmp_path, False)
+    doc = Drift(read_run(d), Vm(FakeExecutor([rule]), "vm"), spec, d / "drift").run()
+    assert checks(doc)['sip_proxy_cancel_lookups_total{outcome="miss"} quiet outside windows']["verdict"] == "pass"
+    assert queries and all('sip_proxy_cancel_lookups_total{namespace="sip-test",outcome="miss"}[' in q for q in queries)

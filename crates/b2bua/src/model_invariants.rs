@@ -20,7 +20,7 @@
 //! of the call checks what they left.
 //!
 //! The a-dialog's tag is checked against the 2xx the caller was sent while
-//! that 2xx awaits its ACK (`answered_2xx`), and afterwards against the
+//! that 2xx awaits its ACK (its answered INVITE), and afterwards against the
 //! message ring's record of it; with the ring off nothing records the 2xx's
 //! To-tag past the ACK, and only the one-live-dialog half holds.
 //!
@@ -268,7 +268,7 @@ fn confirmed_a_leg_one_dialog(turn: &Turn<'_>) -> Result<(), String> {
         ));
     };
     let tag = dialog.our_tag.as_str();
-    if let Some(answered) = &dialog.answered_2xx {
+    if let Some(answered) = call::helpers::answered_2xx(dialog) {
         if answered.dialog_tag != tag {
             return Err(format!(
                 "the a-dialog's local tag {tag} is not the To-tag {} of the 2xx awaiting its ACK",
@@ -323,7 +323,7 @@ fn own_tag_names_a_dialog(turn: &Turn<'_>) -> Result<(), String> {
             Some(own) if !leg.dialogs.iter().any(|d| d.our_tag == own) => {
                 return Err(format!("leg {}: its own tag {own} names no dialog", leg.leg_id));
             }
-            None if leg.outbound_invite.is_none() && !leg.dialogs.is_empty() => {
+            None if leg.outbound_invite().is_none() && !leg.dialogs.is_empty() => {
                 return Err(format!("leg {} holds dialogs but no own tag", leg.leg_id));
             }
             _ => {}
@@ -370,7 +370,7 @@ fn dialog_cseq_never_decreases(turn: &Turn<'_>) -> Result<(), String> {
 /// confirmed past it.
 fn no_a_dialog_past_a_rejection(turn: &Turn<'_>) -> Result<(), String> {
     let a = &turn.after.a_leg;
-    let Some(status) = a.invite_final_sent.filter(|s| *s >= 300) else { return Ok(()) };
+    let Some(status) = a.invite_final_sent().filter(|s| *s >= 300) else { return Ok(()) };
     let open = |d: &&call::Dialog| matches!(d.state, DialogState::Early | DialogState::Confirmed);
     match a.dialogs.iter().find(open) {
         Some(d) => Err(format!(
@@ -422,9 +422,10 @@ fn no_cancelled_dialog_past_its_invites_final(turn: &Turn<'_>) -> Result<(), Str
 }
 
 /// An in-dialog request the turn handled — an ACK aside, which takes no
-/// answer (§17.1.1.3) — ends the turn answered or relayed: a final sent on
-/// its transaction (§8.2.6), or its relay recorded on the dialog it went into,
-/// whose final answers it there (§8.1.3.3).
+/// answer (§17.1.1.3) — ends the turn answered, relayed or held: a final sent
+/// on its transaction (§8.2.6), or a record of its relay on the dialog it went
+/// into, whose final answers it there (§8.1.3.3), or of its hold for a
+/// service's later final (ADR-0055 §2).
 fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> {
     let Some(req) = turn.received else { return Ok(()) };
     let method = req.method();
@@ -444,12 +445,10 @@ fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> 
     });
     let relayed = legs(turn.after)
         .flat_map(|l| l.dialogs.iter())
-        .flat_map(|d| {
-            let retired = d.retired().map(|r| r.open_relays.as_slice()).unwrap_or_default();
-            d.inbound_pending_requests.iter().chain(retired)
-        })
+        .flat_map(|d| d.requests.iter().chain(d.sent_invite.iter()))
+        .filter(|p| !p.is_own())
         .any(|p| {
-            p.method.eq_ignore_ascii_case(method.as_str())
+            p.method == method.as_str()
                 && p.inbound_cseq == i64::from(cseq)
                 && p.source_call_id == req.call_id().as_str()
         });

@@ -63,9 +63,9 @@ pub enum ResponderAck {
     Pending,
     /// The PRACK of the party it was shown to was relayed.
     RelayedPrack,
-    /// This stack PRACKed it on its own account, on the client transaction
-    /// `branch`.
-    OwnPrack { branch: String },
+    /// This stack PRACKed it on its own account: the PRACK's request record
+    /// holds its transaction.
+    OwnPrack,
     /// Its offer was left to the ACK a 2xx awaits; the PRACK carrying that
     /// ACK's answer leaves with it (RFC 3262 §5, RFC 3264).
     DeferredToAck,

@@ -5,7 +5,12 @@ use std::sync::Arc;
 use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
+use super::bound_report::BoundPassed;
+use super::new_call_gate::NewCallGate;
 use super::refusals::InviteRefusals;
+
+/// What [`TransactionConfig::on_bound`] calls.
+pub type OnBound = Arc<dyn Fn(BoundPassed<'_>) + Send + Sync>;
 
 /// Tunables for the transaction layer.
 pub struct TransactionConfig {
@@ -31,6 +36,28 @@ pub struct TransactionConfig {
     /// default [`TIMER_B`](crate::timers::TIMER_B), which arms nothing. An
     /// in-dialog INVITE and a non-INVITE never read it.
     pub invite_first_response_timeout_ms: u64,
+    /// The §17.2.1 bound on an INVITE's first provisional, ms: a server INVITE
+    /// transaction whose consumer has sent nothing and released no 100
+    /// ([`TransactionLayer::release_trying`](crate::TransactionLayer::release_trying))
+    /// this long after its INVITE arrived sends the 100 itself. Default
+    /// [`TRYING_BOUND`](crate::timers::TRYING_BOUND); the RFC allows no more.
+    pub trying_bound_ms: u64,
+    /// The bound on the hop-by-hop ACK of a client INVITE's first non-2xx
+    /// final, ms: the layer holds the ACK until its consumer releases it
+    /// ([`TransactionLayer::release_ack`](crate::TransactionLayer::release_ack))
+    /// and sends it itself this long after the final arrived. `0`, the
+    /// default, sends it as the final arrives (RFC 3261 §17.1.1.2).
+    pub ack_bound_ms: u64,
+    /// The bound on the 200 to a CANCEL and the 487 to the INVITE it cancels,
+    /// ms: the layer holds both until its consumer releases them
+    /// ([`TransactionLayer::release_cancel`](crate::TransactionLayer::release_cancel))
+    /// and sends them itself this long after the CANCEL arrived. `0`, the
+    /// default, sends them as the CANCEL arrives (RFC 3261 §9.2).
+    pub cancel_bound_ms: u64,
+    /// Told each time a held ACK, or the held answers to a CANCEL, leave at
+    /// their bound rather than on their consumer's release, with the
+    /// transaction that held them.
+    pub on_bound: Option<OnBound>,
     /// Whether a response the TU hands over under a To-tag other than the
     /// bound one fails a debug build loudly (`debug_assert!`) besides being
     /// re-rendered. The wire is corrected either way; `true` — the default —
@@ -50,12 +77,24 @@ pub struct TransactionConfig {
     /// and an initial INVITE this layer admits is held there while its
     /// transaction lives. `None` — the default — shares nothing.
     pub invite_refusals: Option<InviteRefusals>,
+    /// The consumer's switch on new calls ([`NewCallGate`]), read as each new
+    /// INVITE arrives; it refuses through
+    /// [`invite_refusals`](Self::invite_refusals), which it requires. `None`
+    /// — the default — reads none.
+    pub new_call_gate: Option<NewCallGate>,
     /// Whether an out-of-dialog OPTIONS (no To-tag) opens no server
     /// transaction: every copy reaches the consumer as a `Message`, and the
     /// answer it sends leaves raw, so the consumer derives its To-tag from
     /// the request (RFC 3261 §8.2.7). `false` — the default — holds one
     /// transaction per OPTIONS for 64·T1 like any other non-INVITE.
     pub stateless_options: bool,
+    /// The bound of the keepalive lane, which carries every out-of-dialog
+    /// OPTIONS [`stateless_options`](Self::stateless_options) passes up, apart
+    /// from the event queue: a consumer that takes the lane first answers a
+    /// probe ahead of the events queued before it. A full lane drops the
+    /// newest and counts it; the prober repeats. `None` — the default — runs
+    /// no lane: every OPTIONS rides the event queue.
+    pub keepalive_lane: Option<usize>,
     /// The `hostport` this element is advertised as, which names it as the
     /// warn-agent of the 400 answering a refused request (RFC 3261 §20.43).
     /// `None` — the default — names it by the address the 400 leaves from.
@@ -73,19 +112,25 @@ impl TransactionConfig {
     }
 
     /// The defaults, identifiers drawn from `id_gen`: a 256-datagram receive
-    /// queue, the RFC 3261 INVITE bounds, strict To-tag binding, no deferred
-    /// bound, no shared refusals, a transaction per OPTIONS, no advertised
-    /// address.
+    /// queue, the RFC 3261 INVITE bounds and first-provisional bound, strict To-tag binding, no deferred
+    /// bound, no shared refusals, no new-call gate, a transaction per OPTIONS, no keepalive
+    /// lane, no advertised address.
     pub fn new(id_gen: Arc<IdGen>) -> Self {
         Self {
             udp_queue_max: 256,
             id_gen,
             invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
             invite_first_response_timeout_ms: crate::timers::TIMER_B,
+            trying_bound_ms: crate::timers::TRYING_BOUND,
+            ack_bound_ms: 0,
+            cancel_bound_ms: 0,
+            on_bound: None,
             strict_to_tag: true,
             deferred_bound: None,
             invite_refusals: None,
+            new_call_gate: None,
             stateless_options: false,
+            keepalive_lane: None,
             advertised: None,
         }
     }

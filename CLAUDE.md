@@ -11,6 +11,7 @@ Each file must have it own concern. No not mix concerns.
 Never implement SIP header or message extraction in crates other than sip-message.
 A crate a production binary links declares its tier and never panics on input, a pure one does no effects ([ADR-0051](docs/adr/0051-production-crates-never-panic-on-input.md)): `just purity` and `just panic-sites` check it, and `panic-sites.allow` only goes down, except by sites a rule the change adds reveals.
 A branch that touches `Cargo.lock` or `.cargo/audit.toml` passes `just audit-gate`: no RustSec vulnerability outside the `[advisories] ignore` list of `.cargo/audit.toml`, whose every entry states who links the crate and why it is acceptable.
+The flow viewer's UI (text, colours, dark mode) follows [ts/viewer-app/UI-STYLE.md](ts/viewer-app/UI-STYLE.md).
 Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it; `.githooks/prepare-commit-msg` refuses an amend on `develop`, the integration branch (commit on a topic branch).
 
 
@@ -33,14 +34,20 @@ summaries + hard directives only.
   test-infrastructure stack: which harness for which test, what `finish()`
   gates automatically vs what you must assert.
 - [docs/testing/ha-acceptance.md](docs/testing/ha-acceptance.md) — HA/chaos/
-  endurance triage: SUT bug vs accepted collateral vs infra artifact, and the
-  HA design invariants that must never be reintroduced.
+  endurance triage: SUT bug vs a declared window (ADR-0055 §11) vs infra
+  artifact, and the HA design invariants that must never be reintroduced.
+- [docs/testing/fuzzing.md](docs/testing/fuzzing.md) — coverage-guided
+  fuzzing (`fuzz/`, `just fuzz`): when to run it after a change to a reader,
+  and how a finding becomes a regression test.
 - [docs/observability.md](docs/observability.md) — **read before adding any
   `info!` or any per-call trace emission**: operating the lab trace stack, plus
   the directive guidelines for new code.
 - [docs/adr/](docs/adr/) — decisions. Load-bearing day-to-day:
+  [ADR-0055](docs/adr/0055-services-are-ha-blind.md) (services are HA-blind:
+  the replication write path, the evidence rule, containment, the failover
+  sweep), on
   [ADR-0014](docs/adr/0014-reactive-only-takeover-version-vector.md) (reactive
-  takeover, `(p,b)` reconciliation),
+  takeover, the `(p,b)` vector),
   [ADR-0022](docs/adr/0022-initial-invite-final-response-guarantee.md)
   (initial-INVITE final-response guarantee).
 
@@ -172,17 +179,26 @@ long-lived test process (SUT, loadgen, e2e-web) then gets its own small scope.
 
 ## HA / chaos — summary ([acceptance guide](docs/testing/ha-acceptance.md))
 
-A failover/kill failure is NOT automatically a SUT bug. Protected: ringing and
-established calls — a confirmed call dropping is always genuine. Accepted
-collateral: a dialog whose state changed at a kill (the confirm-race); the HA
-tooling attributes each impact to its incident window and judges it against
-that window's budget (ADR-0049 §3.5). A takeover keepalive firing ~one interval
-early on an endurance run is a host clock-STEP artifact (fix is infra; the SUT
-re-anchors restored timers to bound the residual). Design invariants — never
-reintroduce: time-based settle/handback (reconciliation is `(p,b)`-causal
-only), smoothing or skew re-anchoring inside the timer driver, reclaim
-discharge touching the SIP wire, a non-pristine reboot. Details + references
-in the guide.
+Services are HA-blind (ADR-0055 §1): HA lives only in the aware crates. What
+an incident may cost is ADR-0055 §11 and nothing else: per incident, the CDR
+count, what the parties may be left waiting for, and the declared windows (the
+only RFC deviations accepted). Once an incident strikes the SUT may end a call
+cleanly at any instant (§4); a kill may cost the calls whose state changed in
+the replication window (§3). Every effect a turn sends leaves through the
+call's ordered outbox, released by the replication sync level (`applied`, the
+default: once the backup applied the write, at most the cap; `off`: at once).
+A deviation no window declares is a SUT defect.
+The failover sweep (`just sweep`) checks every cell against the window table
+of §11 at its measured tier (Guaranteed: no row; Degraded; Off) and holds the
+failing ones, and each test's Guaranteed count, to a ratchet that only
+shrinks. On a real cluster the HA tooling
+judges each impact against its incident window's budget (ADR-0049 §3.5). A
+takeover keepalive firing ~one interval early on an endurance run is a host
+clock-STEP artifact (fix is infra; the SUT re-anchors replicated instants,
+§9). Design invariants — never reintroduce: time-based settle/handback (copies
+reconcile by containment, §7), smoothing or skew re-anchoring inside the timer
+driver, a discharge of an already-terminal body answering the caller, a
+non-pristine reboot. Details + references in the guide.
 
 ## Logging & tracing — summary ([guide](docs/observability.md), [ADR-0026](docs/adr/0026-observability-logging-tracing.md))
 

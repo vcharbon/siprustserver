@@ -3,6 +3,10 @@
 **Status:** accepted (2026-09-13). Amended (2026-10-12): the case table, leaving the slice takes over
 the worker's calls with an INVITE in flight (ADR-0047). Amended (2026-10-16): D4, the proxy's
 `Draining` grace is removed; Draining reports `new=refuse` on an OPTIONS `200` (ADR-0050).
+Amended (2026-10-23): D2, D4 and the per-axis fold, replaced by containment and one
+routing rule (ADR-0055 §3, §7, §8). Amended (2026-10-28): case 3a, the proxy tells its
+dead verdict to the workers and the backups take over the calls with work in flight at
+it (ADR-0050 §3, ADR-0047 D1).
 
 **Source:** this codebase. Triggered by the failover-harness scenario
 `crates/failover-harness/tests/it/withdrawn_primary_answers_in_its_window.rs` and its views
@@ -21,7 +25,7 @@ EndpointSlice API (`ready`, `serving`, `terminating`; the last two GA since Kube
 
 | | how the pod goes | what the slice shows | how long the process still runs | who replaces it |
 |---|---|---|---|---|
-| **1. Graceful** (rolling update, node drain, scale-down; the frequent case) | `delete` under the pod's `terminationGracePeriodSeconds` (30 s); SIGTERM at +0 | `ready=false, terminating=true` at +0 and the endpoint **stays in the slice** until the pod is gone; `serving` flips false a few seconds later, because the worker's own `/ready` answers 503 once it latches `Draining` | until it exits on its own (drain, ≤ `B2BUA_DRAIN_GRACE_MS` = 5 s, then the limiter release flush, ≤ 3 s, then the CDR sink's close, ≤ `B2BUA_DRAIN_CDR_FLUSH_MS` = 3 s) or SIGKILL at the grace | the same ordinal, **after** the old pod is gone (a StatefulSet never runs two pods of one ordinal) |
+| **1. Graceful** (rolling update, node drain, scale-down; the frequent case) | `delete` under the pod's `terminationGracePeriodSeconds` (30 s); SIGTERM at +0 | `ready=false, terminating=true` at +0 and the endpoint **stays in the slice** until the pod is gone; `serving` flips false a few seconds later, because the worker's own `/ready` answers 503 once it latches `Draining` | until it exits on its own (drain, ≤ `B2BUA_DRAIN_GRACE_MS` = 5 s, then the limiter release flush, ≤ 3 s, twice when the grace ended calls, then the CDR sink's close, ≤ `B2BUA_DRAIN_CDR_FLUSH_MS` = 3 s: 14 s at most; the chart refuses a `terminationGracePeriodSeconds` not above that plus 2 s) or SIGKILL at the grace | the same ordinal, **after** the old pod is gone (a StatefulSet never runs two pods of one ordinal) |
 | **2. Abrupt** (`delete --force --grace-period=0`) | the API object is removed at +0; kubelet still sends SIGTERM and SIGKILLs 2 s later | the endpoint **leaves the slice** at +0 (one `terminating=true` event may precede the removal) | 2 s | the same ordinal at a **new address** from +0.4 s, overlapping the old process |
 | **3. Vanished** (node crash, network partition) | 3a, the first ~40 s: nothing, the pod object is untouched. 3b: the node controller marks the node NotReady, its pods `Ready=False`; taint eviction (~5 min) stamps a deletion timestamp; with the kubelet unreachable the pod can stay `Terminating` indefinitely | 3a: **unchanged**, `ready=true`. 3b: `ready=false, serving=false`, then `terminating=true`, still in the slice | unknown: dead, or alive behind a partition and still firing its timers | nobody for minutes; on a heal, the **same process** is back |
 | **4. Restarted in place** (OOM-kill, kubelet restart, a readiness flap under load) | the pod object stays; the container restarts, or only the probe fails | `ready=false, serving=false, terminating=false`, still in the slice, **same address** | 0 (container restart) or the whole time (readiness flap: the process is alive and serving) | the same container, same address, seconds later |
@@ -30,15 +34,18 @@ Leaving the slice is also when a worker's backups take over its calls with an IN
 in flight (ADR-0047): at the end of case 1, the pod gone after its drain; at +0 in
 case 2, overlapping the process's last 2 s; and in case 3b when the pod on an
 unreachable node is force-deleted, while its process may still live behind the
-partition. Case 3a and case 4 never leave the slice, and their calls stay reactive.
+partition. Case 3a and case 4 never leave the slice. In case 3a the proxy's probe reads
+the worker dead and tells the workers that verdict: the backups take over the calls
+with work in flight at once, an undecided call's decision asked again, and the
+force-delete of case 3b discharges what is left (ADR-0047 D1, D2, D4). Case 4 is read by the tombstone and stays reactive.
 
 What each element believed about the leaving worker, per case, from the harness's views
 ledger and the kind cluster's logs:
 
 - **The proxy** learns of cases 1, 2 and 4 from membership (the ordinal leaves the
-  projection when `ready` drops) and of case 3a from its OPTIONS probe only (`Dead` after two
-  missed windows, ~2–3.5 s). Its request path fails an absent or `Dead` primary over to the
-  cookie's `w_bak`; its response path does so for an INVITE response from a `Dead` worker
+  projection when `ready` drops) and of case 3a from its OPTIONS probe only (`Dead` at the
+  end of the reply window of the second missed probe, 2.6–3.6 s by default; ADR-0047 D1).
+  Its request path fails an absent or `Dead` primary over to the cookie's `w_bak`; its response path does so for an INVITE response from a `Dead` worker
   and, since the tombstone, from a departed address.
 - **The peers** learn of cases 1, 2 and 4 from membership and **park** the ordinal: pullers
   cancelled, watermark kept. The informer today emits only `ready` endpoints, so leaving the
@@ -121,7 +128,8 @@ over the calls with an INVITE in flight (ADR-0047), the quiet ones on their next
 releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s, ADR-0040 decision 9); an exit is
 taken only with the queue empty, and a quiescent or caught-up one only if it still holds
 once the flush is done, since the worker serves its calls meanwhile; the drain never
-outlasts the grace plus the flush.
+outlasts the grace plus the flush, or the grace plus two flushes when its grace ended calls
+(their releases are flushed after they leave).
 Serves case 1. Case 2 runs the same drain for its 2 s: the
 peers have parked, (iii) never holds, SIGKILL ends it. Cases 3 and 4 run no drain.
 
@@ -147,24 +155,31 @@ writes its own (residual as amended below). (Amends ADR-0014 §3.)
 **D4 — Routing around a leaving worker has two signals, one branch.** Membership
 (cases 1, 2 and 4: the address is tombstoned `Dead`) and the OPTIONS probe (case 3a: `Dead`
 after the miss threshold) both land on the same `Dead` health, and the request and response
-paths already take the backup on it. The response path takes the backup for
+paths already take the backup on it. The probe's verdict is also told to the other workers,
+signed (ADR-0050 §3), so the backups take over at once what the proxy now routes to them,
+once their replication stream from the worker confirms it (ADR-0047 D1);
+the tombstone's is not, as a draining worker still serves its calls. The response path takes the backup for
 **INVITE responses only**: a non-INVITE response answers a client transaction
 only its sender holds (RFC 3261 §17.1.2), so it follows the Via to its sender
-whatever that sender's health. A dialog-creating request a leaving worker sends after
-its address is tombstoned is Record-Routed with the cookie it would have carried a moment
-earlier: `w_pri` the ordinal the tombstone names, `w_bak` the rendezvous winner among the
-other `Alive` workers (`strategies/load_balancer.rs`). The proxy also puts that cookie on
+whatever that sender's health. A dialog-creating request a worker sends is
+Record-Routed with a cookie naming the call's owners as the worker states them: `w_pri`
+the call's primary, else the sending worker, `w_bak` the call's backup (ADR-0055 §8); one
+a leaving worker sends after its address is tombstoned carries the cookie it would have
+carried a moment earlier, the ordinal the tombstone names standing for the sender
+(`strategies/load_balancer.rs`). The proxy also puts that cookie on
 the Via it pushes on a worker's INVITE (`core/request/via_cookie.rs`); the INVITE's
 CANCEL and non-2xx ACK carry the INVITE's Via, cookie included, from its memo, and a
 retransmission repeats its first copy's cookie on the Record-Route and the Via. So the
 cookie, not the tombstone's window, carries the dialog: an INVITE response whose
 sender's address names neither of the cookie's workers — nobody, past the window, or a
 worker that took the address since — goes to the cookie's worker at the address it
-holds now, else to `w_bak`, else nowhere; a response to the cookie's backup, a
-takeover copy's, follows the Via to it; a stranger's request carries no such Via and
-its response follows the Via. Its in-dialog requests resolve by ordinal for the
+holds now, else to `w_bak`, else nowhere; a response to a leg's dialling INVITE goes
+to the cookie's primary while it is alive, whichever owner sent the INVITE, else to
+`w_bak`; any other INVITE response to the cookie's backup, a takeover copy's re-INVITE,
+follows the Via to it; a stranger's request carries no such Via and its response
+follows the Via. Its in-dialog requests resolve by ordinal for the
 dialog's life; an address neither live nor tombstoned gets no cookie
-(`core/departed_originator_tests.rs`; `core/response/via_cookie_tests.rs`;
+(`core/departed_originator_tests.rs`; `core/owner_rule_tests.rs`; `core/response/via_cookie_tests.rs`;
 `outbound_invite_after_the_departure.rs`).
 The tombstone is **re-armed by every response the
 proxy sees for that address** (its next Via's sent-by names it, whatever the method),
@@ -276,7 +291,9 @@ sequenceDiagram
     participant C as callee
     Note over E: 3a: node crash or partition — the slice is unchanged
     P--xE: OPTIONS probe misses ×2
-    Note over P: health Dead after ~2–3.5 s (D4) — requests and responses take w_bak
+    Note over P: health Dead after 2.6–3.6 s (D4) — requests and responses take w_bak
+    P->>S: OPTIONS with the signed dead verdict
+    Note over S: takes over the primary's calls with work in flight (ADR-0047 D1)
     S--xE: pull stream breaks — backoff 100 ms → 30 s, retried
     C->>P: 200 OK
     P->>S: reverse-fails to w_bak

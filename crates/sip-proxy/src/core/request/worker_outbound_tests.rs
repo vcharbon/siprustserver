@@ -60,8 +60,8 @@ Content-Length: 0\r\n\r\n"
     CustomParser::default().parse(raw.as_bytes()).unwrap()
 }
 
-// The steady-state long-call-loss class: behind the keepalived
-// VIP a worker→proxy packet is SNAT'd to the NODE ip:ephemeral-port, so the
+// The steady-state long-call-loss class: through a masquerading
+// node a worker→proxy packet is SNAT'd to the NODE ip:ephemeral-port, so the
 // proxy's UDP source is NOT a registered worker. The worker-outbound
 // classification must therefore key off the SNAT-immune top Via sent-by, not
 // the socket source — otherwise the cookie's `target=worker` decode bounces

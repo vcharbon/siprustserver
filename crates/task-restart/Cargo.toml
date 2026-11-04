@@ -9,6 +9,9 @@ description = "Supervised long-lived tasks: a run that panics is logged, counted
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

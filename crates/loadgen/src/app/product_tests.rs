@@ -162,3 +162,40 @@ impl Product for Misnamed {
 fn a_default_naming_no_flag_fails_at_startup() {
     let _ = command(&Misnamed);
 }
+
+#[test]
+fn the_runtime_runs_on_the_worker_threads_flag() {
+    let (_, args) = parse_from(&Shipped, ["loadgen"]).unwrap();
+    assert_eq!(args.worker_threads.get(), 4, "the default suits a few hundred cps");
+    assert_eq!(runtime(&args).unwrap().metrics().num_workers(), 4);
+
+    let (_, args) = parse_from(&Shipped, ["loadgen", "--worker-threads", "2"]).unwrap();
+    assert!(args.explicit("worker_threads"));
+    assert_eq!(runtime(&args).unwrap().metrics().num_workers(), 2);
+
+    assert!(parse_from(&Shipped, ["loadgen", "--worker-threads", "0"]).is_err());
+}
+
+struct FewThreads;
+
+impl Product for FewThreads {
+    type Flags = NoFlags;
+    fn name(&self) -> &'static str {
+        "few-threads"
+    }
+    fn about(&self) -> &'static str {
+        "a product that runs on one worker thread"
+    }
+    fn flag_defaults(&self) -> &'static [(&'static str, &'static str)] {
+        &[("worker_threads", "1")]
+    }
+    fn registry(&self, _: &NoFlags, _: &RunLayout<'_>) -> Result<ShapeRegistry, String> {
+        Ok(ShapeRegistry::empty())
+    }
+}
+
+#[test]
+fn a_product_sets_its_worker_thread_default() {
+    let (_, args) = parse_from(&FewThreads, ["few-threads"]).unwrap();
+    assert_eq!(runtime(&args).unwrap().metrics().num_workers(), 1);
+}

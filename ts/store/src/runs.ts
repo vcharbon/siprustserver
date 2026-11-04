@@ -173,6 +173,8 @@ export interface Interface {
    * Answers the rows marked.
    */
   readonly dirty: (ids: ReadonlyArray<number>, finding: string) => Effect.Effect<number, SqlError>
+  /** What each of these runs' lanes lacked where the run was forced onto it; an unforced run is absent. */
+  readonly forced: (ids: ReadonlyArray<number>) => Effect.Effect<ReadonlyMap<number, ReadonlyArray<string>>, SqlError>
   /** The runs of a sweep still open, with their bundles: what closing a sweep whose process is gone closes. */
   readonly openOfSweep: (sweepId: number) => Effect.Effect<ReadonlyArray<Abandonable>, SqlError>
   /** Wipes every run row whose bundle is under `dir` (the tree, or one session of it); the rebuild's first act. */
@@ -328,7 +330,8 @@ export const layer = Layer.effect(
           batchSize: who.load?.batchSize ?? null,
           startsPerSecond: who.load?.startsPerSecond ?? null,
           maxSpanSeconds: who.load?.maxSpanSeconds ?? null,
-          memoryMax: who.load?.memoryMax ?? null
+          memoryMax: who.load?.memoryMax ?? null,
+          forced: who.forced === undefined || who.forced.length === 0 ? null : who.forced
         }
       })
       return yield* sql.withTransaction(Effect.gen(function*() {
@@ -337,17 +340,19 @@ export const layer = Layer.effect(
           INSERT INTO runs (capture, lane, mode, status, bundle_path, sweep_id, job_id, prep_id, set_kind,
                             components,
                             env, branch, lane_hash, concurrency, batch_size, starts_per_second,
-                            max_span_seconds, memory_max)
+                            max_span_seconds, memory_max, forced)
           SELECT r.capture, r.lane, r.mode, 'error', '', r."sweepId", r."jobId", r."prepId", r."setKind",
                  r.components,
                  r.env, r.branch, r."laneHash", r.concurrency, r."batchSize", r."startsPerSecond",
-                 r."maxSpanSeconds", r."memoryMax"
+                 r."maxSpanSeconds", r."memoryMax",
+                 CASE WHEN r.forced IS NULL THEN NULL ELSE ARRAY(SELECT jsonb_array_elements_text(r.forced)) END
           FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
             AS r(at int, capture text, lane text, mode text, "sweepId" bigint, "jobId" bigint, "prepId" bigint,
                  "setKind" text,
                  components jsonb,
                  env text, branch text, "laneHash" text, concurrency int, "batchSize" int,
-                 "startsPerSecond" double precision, "maxSpanSeconds" double precision, "memoryMax" text)
+                 "startsPerSecond" double precision, "maxSpanSeconds" double precision, "memoryMax" text,
+                 forced jsonb)
           ORDER BY r.at
           RETURNING id
         `
@@ -671,6 +676,14 @@ export const layer = Layer.effect(
       return rows.length
     })
 
+    const forced = Effect.fn("Runs.forced")(function*(ids: ReadonlyArray<number>) {
+      if (ids.length === 0) return new Map<number, ReadonlyArray<string>>()
+      const rows = yield* sql<{ id: string; forced: ReadonlyArray<string> }>`
+        SELECT id, forced FROM runs WHERE id IN ${sql.in(ids)} AND forced IS NOT NULL
+      `
+      return new Map(rows.map((row) => [Number(row.id), row.forced] as const))
+    })
+
     const openOfSweep = Effect.fn("Runs.openOfSweep")(function*(sweepId: number) {
       const rows = yield* sql<{ id: string; bundle_path: string }>`
         SELECT id, bundle_path FROM runs WHERE sweep_id = ${sweepId} AND finished_at IS NULL ORDER BY id
@@ -708,6 +721,7 @@ export const layer = Layer.effect(
       abandon,
       unfinishedOf,
       dirty,
+      forced,
       openOfSweep,
       forget
     })

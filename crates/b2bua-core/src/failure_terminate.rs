@@ -10,7 +10,8 @@ pub const OUTCOME: &str = "terminate";
 
 /// The fold's payload: the failed final's status and reason the seed stated
 /// in `request`, the failure's origin (what raised the consult: a final, a
-/// deadline, a limiter), the failed leg, and the relay decision's `label`.
+/// deadline, a limiter) and the deadline's kind, the failed leg, and the
+/// relay decision's `label`.
 pub fn payload(
     request: &serde_json::Value,
     failed_leg_id: &str,
@@ -25,6 +26,9 @@ pub fn payload(
     }
     if let Some(v) = request.get("origin") {
         p.insert("origin".into(), v.clone());
+    }
+    if let Some(v) = request.get("timeout_kind") {
+        p.insert("timeout_kind".into(), v.clone());
     }
     p.insert("failed_leg_id".into(), json!(failed_leg_id));
     if let Some(label) = label {

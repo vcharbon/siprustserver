@@ -420,14 +420,17 @@ mod tests {
         assert_eq!(*enc.seen.lock().unwrap(), vec![500]);
     }
 
-    /// The selected sink publishes: a write against an unparsable broker URI
-    /// fails before any socket is opened and counts one dropped record, which
-    /// the discarding default never does.
+    /// A broker address no one listens on: a connect is refused at once.
+    const REFUSING_BROKER: &str = "amqp://127.0.0.1:9/%2f";
+
+    /// The selected sink publishes: a write against a broker port that refuses
+    /// the connect counts one dropped record, which the discarding default
+    /// never does.
     #[tokio::test]
     async fn a_set_url_selects_the_broker_sink_not_the_discarding_default() {
         let metrics = B2buaMetrics::new();
         let sink = rabbitmq_cdr_writer_from_lookup(
-            lookup(&[("B2BUA_CDR_RABBITMQ_URL", "not an amqp uri")]),
+            lookup(&[("B2BUA_CDR_RABBITMQ_URL", REFUSING_BROKER)]),
             &metrics,
         )
         .expect("ok")
@@ -444,7 +447,7 @@ mod tests {
         let metrics = B2buaMetrics::new();
         let enc = Arc::new(RefusingEncoder::default());
         let sink = rabbitmq_cdr_writer_from_lookup_with_encoder(
-            lookup(&[("B2BUA_CDR_RABBITMQ_URL", "not an amqp uri")]),
+            lookup(&[("B2BUA_CDR_RABBITMQ_URL", REFUSING_BROKER)]),
             enc.clone(),
             &metrics,
         )

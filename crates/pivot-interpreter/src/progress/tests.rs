@@ -78,6 +78,7 @@ fn armed(id: &str, discriminator: Discriminator, optional: bool, order: usize) -
         after: Vec::new(),
         early: None,
         overlap: None,
+        awaits: None,
         discriminator,
         msg: MsgSpec::default(),
         checks: Vec::new(),
@@ -393,4 +394,171 @@ fn an_expect_naming_no_cseq_method_is_never_retired() {
 fn an_arrival_with_nothing_armed_decides_nothing() {
     let leg = ladder(&[(Dir::Out, INVITE.to_string())]);
     assert!(unmatched(&arrival(&response(486, "1 INVITE")), &[], &leg, false).is_none());
+}
+
+/// The leg's dialog up and a re-INVITE out: CSeq 1 answered and ACKed, CSeq 2
+/// the open INVITE client transaction its `s12` opened.
+fn reinvited() -> Vec<RecordedMessage> {
+    claimed_ladder(&[
+        (Dir::Out, INVITE.to_string(), Some("s1")),
+        (Dir::In, response(200, "1 INVITE"), Some("s3")),
+        (Dir::Out, request("ACK", "1 ACK"), Some("s4")),
+        (Dir::Out, sent("INVITE", 2), Some("s12")),
+    ])
+}
+
+/// RFC 3261 §17.2.1: an INVITE server transaction sends 100 only when its TU
+/// does not answer within 200 ms. The first response on the INVITE's own
+/// transaction, a final, meeting the armed 100 retires it as one it may stand
+/// in for; the end stated is a retired provisional's, which the runner does
+/// not take where it hands the final on.
+#[test]
+fn a_final_meeting_the_100_of_its_own_invite_transaction_omits_it() {
+    let leg = reinvited();
+    let steps = [expects("s13", 100, Some("INVITE"), false)];
+    let u = unmatched(
+        &arrival(&response(487, "2 INVITE")),
+        &opened(&steps, &[Some("s12")]),
+        &leg,
+        true,
+    )
+    .expect("armed");
+    assert_eq!((u.charged.id.as_str(), u.own_transaction), ("s13", true));
+    assert_eq!(ids(&u.retired), ["s13"]);
+    assert!(u.omitted, "the final may stand in for the 100");
+    assert!(u.ends, "a retired provisional's end, where no omission is taken");
+
+    // A 2xx stands in for it exactly as a reject does.
+    let u = unmatched(
+        &arrival(&response(200, "2 INVITE")),
+        &opened(&steps, &[Some("s12")]),
+        &leg,
+        true,
+    )
+    .expect("armed");
+    assert!(u.omitted);
+}
+
+/// A provisional on the transaction ahead of its final means the server
+/// transaction did not answer at once: the 18x was charged on the 100 and the
+/// final omits nothing, so the retired provisional ends the script as before.
+#[test]
+fn a_final_after_a_ringing_provisional_omits_no_100() {
+    let mut leg = reinvited();
+    leg.extend(claimed_ladder(&[(Dir::In, response(180, "2 INVITE"), None)]));
+    let steps = [expects("s13", 100, Some("INVITE"), false)];
+    let u = unmatched(
+        &arrival(&response(200, "2 INVITE")),
+        &opened(&steps, &[Some("s12")]),
+        &leg,
+        true,
+    )
+    .expect("armed");
+    assert_eq!(ids(&u.retired), ["s13"]);
+    assert!(!u.omitted, "the 180 says the server transaction did not answer at once");
+    assert!(u.ends);
+}
+
+/// The delay of an answer is measured from the FIRST emission of its own
+/// request: not a retransmission of it, not another transaction of the
+/// method, not a request the leg received in between.
+#[test]
+fn an_answer_s_delay_is_measured_from_its_request_s_first_emission() {
+    let recording = Recording::new();
+    recording.declare("A");
+    for (dir, at_us, raw) in [
+        (Dir::Out, 100_000, INVITE.to_string()),
+        (Dir::In, 900_000, request("BYE", "3 BYE")),
+        (Dir::Out, 1_000_000, sent("INVITE", 2)),
+        (Dir::Out, 1_020_000, sent("INVITE", 2)),
+    ] {
+        recording.push("A", dir, at_us, raw, None, None);
+    }
+    let leg = recording.legs().remove("A").expect("the leg was recorded");
+    let final_ = arrival(&response(487, "2 INVITE"));
+    assert_eq!(answered_after_ms(&leg, &final_, 1_037_000), Some(37));
+    assert_eq!(answered_after_ms(&leg, &arrival(&response(487, "9 INVITE")), 1_037_000), None);
+}
+
+/// A final for ANOTHER INVITE transaction omits nothing: the 100 the leg waits
+/// on is the re-INVITE's, and a late copy of the original's says nothing about it.
+#[test]
+fn a_final_for_another_invite_transaction_omits_no_100() {
+    let leg = reinvited();
+    let steps = [expects("s13", 100, Some("INVITE"), false)];
+    let u = unmatched(
+        &arrival(&response(487, "1 INVITE")),
+        &opened(&steps, &[Some("s12")]),
+        &leg,
+        true,
+    )
+    .expect("armed");
+    assert!(!u.own_transaction);
+    assert!(!u.omitted);
+    assert!(u.retired.is_empty() && !u.ends);
+}
+
+/// A provisional other than the 100 arriving first is no stand-in: it ends no
+/// transaction, so the step is charged, nothing is retired, and the 100 can
+/// still come.
+#[test]
+fn a_ringing_provisional_ahead_of_the_100_omits_nothing() {
+    let leg = reinvited();
+    let steps = [expects("s13", 100, Some("INVITE"), false)];
+    let u = unmatched(
+        &arrival(&response(180, "2 INVITE")),
+        &opened(&steps, &[Some("s12")]),
+        &leg,
+        true,
+    )
+    .expect("armed");
+    assert_eq!((u.charged.id.as_str(), u.own_transaction), ("s13", true));
+    assert!(!u.omitted);
+    assert!(u.retired.is_empty() && !u.ends);
+}
+
+/// A request arriving while the 100 is armed omits nothing: no final came, and
+/// what stands in for a 100 is the transaction's final alone.
+#[test]
+fn a_request_arriving_while_the_100_is_armed_omits_nothing() {
+    let leg = reinvited();
+    let steps = [expects("s13", 100, Some("INVITE"), false)];
+    let u =
+        unmatched(&arrival(&request("BYE", "3 BYE")), &opened(&steps, &[Some("s12")]), &leg, true)
+            .expect("armed");
+    assert!(!u.omitted);
+    assert!(u.retired.is_empty() && !u.ends);
+}
+
+/// The rule is the INVITE server transaction's (§17.2.1): a 100 named on a
+/// non-INVITE transaction is a provisional retired by a final, and the script
+/// ends as for any provisional so retired.
+#[test]
+fn a_final_meeting_a_100_on_a_non_invite_transaction_ends_as_today() {
+    let leg = claimed_ladder(&[
+        (Dir::Out, INVITE.to_string(), Some("s1")),
+        (Dir::In, response(200, "1 INVITE"), Some("s3")),
+        (Dir::Out, request("ACK", "1 ACK"), Some("s4")),
+        (Dir::Out, sent("BYE", 2), Some("s9")),
+    ]);
+    let steps = [expects("s10", 100, Some("BYE"), false)];
+    let u =
+        unmatched(&arrival(&response(200, "2 BYE")), &opened(&steps, &[Some("s9")]), &leg, true)
+            .expect("armed");
+    assert_eq!(ids(&u.retired), ["s10"]);
+    assert!(!u.omitted);
+    assert!(u.ends);
+}
+
+/// A block member is charged but never retired, so nothing is omitted either:
+/// the block keeps its all-or-none rule.
+#[test]
+fn a_100_inside_a_block_is_never_omitted() {
+    let leg = reinvited();
+    let steps = [expects("s13", 100, Some("INVITE"), false)];
+    let armed: Vec<Armed<'_>> =
+        steps.iter().map(|step| Armed { step, opener: Some("s12"), retirable: false }).collect();
+    let u = unmatched(&arrival(&response(487, "2 INVITE")), &armed, &leg, true).expect("armed");
+    assert!(!u.omitted);
+    assert!(u.retired.is_empty());
 }

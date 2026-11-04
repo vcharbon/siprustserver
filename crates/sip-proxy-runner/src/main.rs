@@ -18,8 +18,7 @@
 //!     self-overload (a stateless 503 + `Retry-After`, the same for every copy). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
-//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/vrrp` via the shared
-//!     `probe-http`.
+//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/fitz` (`probe-http`).
 //!
 //! Config via env, read once before the first bind
 //! ([`sip_proxy_runner::config`]). Unset takes the default; a value set
@@ -58,7 +57,7 @@
 //!                    clamps at rmem_max). Overflow is counted in
 //!                    sip_proxy_udp_kernel_rx_dropped_total
 //!   PROXY_SHARD_STALL_MS  a recv shard still on one packet past this is
-//!                    stalled: /healthz, /readyz and /vrrp 503, gauge
+//!                    stalled: /healthz and /readyz 503, gauge
 //!                    sip_proxy_recv_shards_stalled, ms ≥ 1 (default 2000);
 //!                    a shard waiting on an empty socket is never stalled
 //!   PROXY_RECV_SHARDS  N reuse-port recv sockets/cores, 1..1024 (default 1;
@@ -70,25 +69,35 @@
 //!                    (default 50; floored at one queued packet)
 //!   PROXY_BIND_RETRY_INTERVAL_MS  cadence of bind retries while a port is
 //!                    still held (EADDRINUSE), ms ≥ 1   (default 200)
-//!   PROXY_BIND_RETRY_DEADLINE_MS  bind-retry give-up deadline, ms ≥ 1; exceeds
-//!                    the SIGTERM drain grace so a recreated pod waits out its
-//!                    predecessor instead of crash-looping (default 10000)
-//!   PROXY_DRAIN_GRACE_MS  wait between SIGTERM (/readyz Draining) and exit,
-//!                    ms ≥ 1                               (default 5000)
+//!   PROXY_BIND_RETRY_DEADLINE_MS  bind-retry give-up deadline, ms ≥ 1; must
+//!                    exceed PROXY_DRAIN_GRACE_MS (refused at boot) so a
+//!                    recreated pod waits out its predecessor instead of
+//!                    crash-looping (default 20000)
+//!   PROXY_DRAIN_GRACE_MS  SIGTERM (/readyz Draining) to exit, ms ≥ 1 (8800),
+//!                    past the withdrawal of the node's routes (ADR-0056)
+//!   PROXY_EXT_INTERFACE / PROXY_EXT_NEXT_HOPS / PROXY_EXT_FACE_CHECK_MS  the
+//!                    external interface, its IPv4 next hops, read every 500 ms:
+//!                    /readyz wants it up, one hop resolved (default: no check)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 16 bytes  (REQUIRED, no
-//!                    default; every proxy of a cluster shares it)
+//!                    default; every proxy of a cluster shares it); a key
+//!                    derived from it keys the To-tags of the proxy's own finals
+//!   PROXY_CLUSTER_KEY  the workers' shared key, signing dead notices (none)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS  OPTIONS probe tick and reply
-//!                    window, ms ≥ 1                  (default 1000 / 1500)
+//!                    window, ms ≥ 1                  (default 1000 / 1600)
 //!   HEALTH_THRESHOLD  consecutive misses that mark a worker Dead, ≥ 1
 //!                    (default 2)
+//!   HEALTH_ISOLATION_MS  no worker answer for this long: /fitz unfit
+//!                    `isolated`, ms ≥ HEALTH_INTERVAL_MS + 500 (default 2000)
 //!   LB_ELU_SOFT / LB_ELU_HARD / LB_ELU_CRITICAL  worker ELU bands, each in
 //!                    (0, 1], soft < hard < critical (default 0.4 / 0.5 / 0.65)
 //!   LB_BAND_HYSTERESIS  in [0, 1), below the narrower band gap (default 0.05)
 //!   LB_AIMD_DECREASE_FACTOR  in (0, 1)                     (default 0.5)
 //!   LB_AIMD_INCREASE_STEP_CPS  > 0                         (default 2)
-//!   LB_CAP_CEILING_CPS / LB_CAP_FLOOR_CPS  > 0, floor ≤ 30 (the initial cap)
-//!                    ≤ ceiling                       (default 200 / 1)
+//!   LB_AIMD_COOLDOWN_TICKS  > 0, the 1000 ms ticks a decrease blocks
+//!                    increases for; × 1000 ms ≥ one probe cycle (default 5)
+//!   LB_CAP_INITIAL_CPS / LB_CAP_CEILING_CPS / LB_CAP_FLOOR_CPS  > 0,
+//!                    floor ≤ initial ≤ ceiling       (default 30 / 200 / 1)
 //!   PROXY_RESOLVER_PREWARM  comma-separated host:port DNS targets to resolve
 //!                    at startup and pin permanently warm      (default none)
 //!   PROXY_RESOLVER_POSITIVE_TTL_MS  resolver positive-cache TTL, ms ≥ 1
@@ -105,6 +114,15 @@
 //!   PROXY_RETRY_AFTER_JITTER_SEC  spread added to a refusal's Retry-After
 //!                    base, seconds 0..3600; every copy of one request draws
 //!                    the same value                           (default 5)
+//!   PROXY_BRANCH_MEMO_MAX_BYTES / _MAX_ENTRIES  accounted bytes and entries of
+//!                    the CANCEL/ACK/retransmission memo, ≥ 1 (default 192 MiB
+//!                    and the 78 643 heaviest entries it holds); at
+//!                    PROXY_BRANCH_MEMO_MEAN_RING_MS (default 30000), the
+//!                    INVITE entry cap and PROXY_BRANCH_MEMO_INVITES_PER_CALL
+//!                    (2 to 100, default 2) they hold PROXY_SELF_GATE_CPS_RATE's
+//!                    calls (refused at boot)
+//!   PROXY_INVITE_TXN_TIMEOUT_SEC  the workers' INVITE bound, 33..=600 (default
+//!                    158): an INVITE memo entry lives it + Timer H at most
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(
@@ -140,51 +158,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use sip_clock::Clock;
-use sip_proxy::health::FirstView;
+use sip_proxy::health::{FirstView, WorkerReach};
 use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::observability::ProxyMetrics;
-use sip_proxy::registry::WorkerRegistry;
+use sip_proxy::refusals::{Refusals, REFUSED_MEMO_MAX};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
+use sip_proxy::security::own_final_tag::own_final_tagger;
 use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::strategies::LoadBalancerStrategy;
 use sip_proxy::{ExternalFaceParts, RoutingStrategy};
 use sip_proxy_runner::binds::{bind_sockets, ShardSockets, Sockets};
 use sip_proxy_runner::config::{refusal, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
+use sip_proxy_runner::external_face::FaceMonitor;
 use sip_proxy_runner::health_sampler::HealthSampler;
+use sip_proxy_runner::listening::log_listening;
 use sip_proxy_runner::shards::SharedRouting;
 use sip_proxy_runner::signal::sigterm;
 use sip_proxy_runner::sweeps::{spawn_self_gate_sampler, spawn_stale_floor_sweep};
-
-/// The lifecycle line of a proxy about to serve: its faces, its workers and
-/// its socket settings.
-fn log_listening(cfg: &ProxyConfig, registry: &dyn WorkerRegistry) {
-    let face_note = match &cfg.external {
-        Some(ext) => format!(
-            " DUAL-FACE ext_listen={} ext_advertise={}:{} (int CIDRs from PROXY_FACE_INT_CIDRS)",
-            ext.listen, ext.advertise.host, ext.advertise.port,
-        ),
-        None => String::new(),
-    };
-    tracing::info!(
-        pid = std::process::id(),
-        listen = %cfg.listen,
-        advertise = %format_args!("{}:{}", cfg.advertise.host, cfg.advertise.port),
-        faces = %face_note,
-        workers = %registry
-            .snapshot()
-            .iter()
-            .map(|w| format!("{}@{}:{}", w.id, w.address.host, w.address.port))
-            .collect::<Vec<_>>()
-            .join(","),
-        queue = cfg.queue_max,
-        recv_shards = cfg.recv_shards,
-        udp_sndbuf = ?cfg.udp_sndbuf,
-        udp_rcvbuf = ?cfg.udp_rcvbuf,
-        shard_stall_ms = cfg.shard_stall_ms,
-        "listening"
-    );
-}
 
 fn main() -> std::process::ExitCode {
     sip_proxy_runner::runtime::block_on(serve())
@@ -234,6 +225,7 @@ async fn run() -> Result<i32, String> {
     let shard_stall_ms = cfg.shard_stall_ms;
     let recv_shards = cfg.recv_shards;
     let ext_face = cfg.external.clone();
+    let face = FaceMonitor::start(cfg.external_face_check.clone(), cfg.external_face_period);
     tracing::info!(observer = ?cfg.observer, "load-observer bands and AIMD ladder");
 
     // ONE process clock, built before the first bind: every signaling endpoint
@@ -242,7 +234,7 @@ async fn run() -> Result<i32, String> {
     // readings of a SINGLE monotonic-anchored timeline.
     let clock = Clock::checked_system().map_err(|e| e.to_string())?;
     let metrics = Arc::new(ProxyMetrics::new());
-    let Sockets { metrics: metrics_listener, shards, probe: probe_ep } =
+    let Sockets { metrics: metrics_listener, shards, probe: probe_ep, notice: notice_ep } =
         bind_sockets(&cfg, &clock, &metrics).await?;
 
     let hmac = Arc::new(
@@ -301,10 +293,16 @@ async fn run() -> Result<i32, String> {
 
     // The CANCEL/rtx LRU, the refusal memo and the cap on parse-refusal 400s
     // are ONE instance across shards (`SharedRouting`).
-    let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_clock(clock.clone()));
-    let refusals =
-        Arc::new(sip_proxy::refusals::Refusals::new(&id_gen, cfg.retry_after_jitter_sec));
-    let parse_refusals = Arc::new(sip_proxy::parse_refusals::ParseRefusals::new(&id_gen));
+    let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_bounds(
+        clock.clone(),
+        cfg.branch_memo,
+    ));
+    let metrics_memo = cancel_lru.clone();
+    // Their To-tags are keyed by the shared cookie key (ADR-0046 §7).
+    let tagger = own_final_tagger(cfg.hmac_key.as_bytes(), &id_gen);
+    let jitter = cfg.retry_after_jitter_sec;
+    let refusals = Arc::new(Refusals::keyed(tagger.clone(), jitter, REFUSED_MEMO_MAX));
+    let parse_refusals = Arc::new(sip_proxy::parse_refusals::ParseRefusals::keyed(tagger));
 
     // Named-target resolver tuning + startup prewarm. A COLD
     // name (fresh deploy, CoreDNS restart, TTL expiry) would cost the first
@@ -337,6 +335,7 @@ async fn run() -> Result<i32, String> {
         traces,
         pulse: pulse.clone(),
         first_view: FirstView::pending(),
+        reach: WorkerReach::unheard(),
     };
     // Health probe: OPTIONS to the pool from the first listing on, feeding the
     // band observer, and latching the first worker view the recv shards and
@@ -369,20 +368,20 @@ async fn run() -> Result<i32, String> {
 
     log_listening(&cfg, registry.as_ref());
 
-    // Readiness gate (ADR-0012 D4, ADR-0050 §11): the proxy is fit to take
-    // traffic only once its first worker view is in and with ≥1 routable
-    // (`Alive`) worker. With the k8s EndpointSlice informer the pool starts
-    // empty and fills asynchronously (and stays empty if the watch is
-    // RBAC-forbidden / the Service name is wrong), so `/readyz` turns a
-    // misconfigured watch into a loud rollout timeout. SIP reaches the proxy
-    // through the VRRP address, which follows `/vrrp` (`/healthz` and the
-    // first view), not readiness. SIGTERM latches Draining here.
+    // Readiness gate (ADR-0012 D4, ADR-0050 §11, ADR-0056): the first worker
+    // view in, ≥1 `Alive` worker, the external face usable; the node announces
+    // the VIPs exactly while it passes. An empty informer pool makes a loud
+    // rollout timeout. SIGTERM latches Draining here.
     let draining = Arc::new(AtomicBool::new(false));
     // A stalled recv shard (parked on one packet past PROXY_SHARD_STALL_MS —
     // see `sip_proxy::liveness`) is a proxy that black-holes a share of its
-    // flows while every activity meter reads idle: it fails `/readyz`,
-    // `/healthz` and `/vrrp` (ADR-0046 D4), and raises the gauge.
-    let proxy_probes = shared.probes(draining.clone(), shard_stall_ms);
+    // flows while every activity meter reads idle: it fails `/readyz` and
+    // `/healthz` (ADR-0046 D4), and raises the gauge.
+    // `/fitz` asks the same but the drain, plus a worker answer within
+    // HEALTH_ISOLATION_MS: the node's route guard withdraws the node while
+    // it fails (ADR-0056).
+    let proxy_probes =
+        shared.probes(draining.clone(), shard_stall_ms, face.clone(), cfg.isolation_window);
 
     // Health sampler: the worker-health, acceptance, shard-stall and
     // discovery gauges every 2 s.
@@ -393,6 +392,7 @@ async fn run() -> Result<i32, String> {
         pulse: pulse.clone(),
         clock: clock.clone(),
         stall_ms: shard_stall_ms,
+        external_face: face,
     }
     .spawn();
 
@@ -415,14 +415,14 @@ async fn run() -> Result<i32, String> {
             sip_proxy_runner::metrics_body::body(
                 &metrics,
                 gate.as_ref(),
+                &metrics_memo,
                 &jemalloc_stats::prometheus_text,
             )
         }),
         ready: proxy_probes.ready,
         // No heap profiling on the proxy (not the leak target): /debug/heap → 503.
         heap: None,
-        vrrp: Some(proxy_probes.vrrp),
-        admin: None,
+        fit: Some(proxy_probes.fit),
     };
     // The listener was bound FIRST (metrics-first bind order above); this only
     // starts the accept loop. A failure here is fatal — a proxy without its
@@ -430,20 +430,18 @@ async fn run() -> Result<i32, String> {
     let _metrics_server =
         probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
             .map_err(|e| format!("metrics server on {metrics_sa} failed to start: {e}"))?;
-    tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, VRRP check /vrrp)");
+    tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, liveness /healthz, fitness /fitz)");
 
-    let probe_task = tokio::spawn(probe.run());
+    let probe_task = tokio::spawn(shared.health(probe, notice_ep, cfg.cluster_key.clone()));
     let mut core_tasks = tokio::task::JoinSet::new();
     for core in cores {
         core_tasks.spawn(core.run());
     }
 
-    // Graceful shutdown on SIGTERM (k8s pod termination). The proxy holds no
-    // per-call state to quiesce — it is a stateless forwarder — so the drain is
-    // latch-then-grace: flip `/readyz` to Draining (k8s unpublishes the pod and
-    // stops routing new datagrams here), then wait the grace so in-flight
-    // transactions settle and the EndpointSlice withdrawal propagates before
-    // exit. Ctrl-C (interactive) exits at once.
+    // Graceful shutdown on SIGTERM: latch-then-grace. `/readyz` turns
+    // Draining, the node's routes are withdrawn, and the proxy keeps
+    // forwarding for the grace that covers the withdrawal (ADR-0056). Ctrl-C
+    // (interactive) exits at once.
     let drain_grace = cfg.drain_grace;
     let drain_grace_ms = u64::try_from(drain_grace.as_millis()).unwrap_or(u64::MAX);
 
@@ -472,7 +470,7 @@ async fn run() -> Result<i32, String> {
             1
         }
         res = probe_task => {
-            tracing::error!(outcome = ?res, "FATAL: health probe exited — exiting for restart");
+            tracing::error!(outcome = ?res, "FATAL: health probe or dead notifier exited — exiting for restart");
             1
         }
     };

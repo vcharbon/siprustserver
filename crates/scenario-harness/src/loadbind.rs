@@ -275,6 +275,8 @@ impl AgentBinder {
             holdback: Arc::default(),
             steps: Arc::default(),
             answers_as: crate::Party::Callee,
+            advertised: None,
+            arrivals: None,
         })
     }
 

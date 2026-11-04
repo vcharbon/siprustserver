@@ -103,6 +103,8 @@ export interface TriageTicket {
   readonly ref: string
   /** open | closed | wontfix | missing. */
   readonly state: string
+  /** Why the deployment has no tracker to read the state off, where it has none: shown in place of the state. */
+  readonly unavailable?: string
 }
 
 /** What a call failed on: the one line a queue row is picked on. */
@@ -413,6 +415,8 @@ export interface TriageStudySession {
    * cell opens it, and nothing on the page defaults to it.
    */
   readonly aside?: string
+  /** Set where the run was forced onto a lane lacking these capabilities. */
+  readonly forced?: readonly string[]
   /** When the run directory was last written: how fresh this run is. */
   readonly writtenAt?: string
   readonly campaign: unknown
@@ -525,7 +529,10 @@ export interface CaptureIngestStart {
   readonly capture: string
   readonly started: boolean
   readonly detail: string
+  /** The page the capture is followed on: its study view, or the pcaps page for an inbox drop. */
   readonly study: string
+  /** The drop went to the inbox, to enter the pcap root once made shareable. */
+  readonly inbox?: boolean | null
   /** The ingest job in the store; absent where the source command made none. */
   readonly jobId?: number | null
 }
@@ -744,7 +751,19 @@ export type JobStartBody =
     readonly recutFirst?: "stale-only" | "force"
   }
   | { readonly kind: "retire"; readonly captures: readonly string[] }
+  | {
+    readonly kind: "campaign"
+    readonly capture: string
+    readonly lanes: readonly string[]
+    /** One case, by its test id, and one of its sub-cases; absent, every case. */
+    readonly case?: string
+    readonly subcase?: string
+    /** Rebuild the system's data from scratch before the run. */
+    readonly rebuild?: boolean
+  }
   | { readonly kind: "ingest"; readonly paths: readonly string[]; readonly set?: boolean; readonly cut?: boolean }
+  /** A file of the pcap root on a lane: an ingest with its cut, then a replay after it. */
+  | { readonly kind: "pcap-replay"; readonly file: string; readonly lane: string; readonly force?: boolean }
 
 export interface JobStarted {
   readonly id: number
@@ -926,6 +945,48 @@ export interface SourcesPage {
   readonly roots: readonly string[]
 }
 
+/** One file of the pcap root: its stat, where the pipeline stands with it, its last run per lane. */
+export interface PcapFile {
+  readonly file: string
+  readonly size: number
+  readonly modifiedAt: string
+  /** The capture the population holds it as, or the name its ingest will give it. */
+  readonly capture: string
+  readonly state: "new" | "ingested" | "cut"
+  /** The standing cut's cases; null unless cut. */
+  readonly cases: number | null
+  readonly ingest: string | null
+  readonly cut: string | null
+  readonly problem: string | null
+  readonly standings: readonly SourceStanding[]
+}
+
+/** One capture of the inbox and where it stands. */
+export interface InboxEntry {
+  /** The file its shareable copy takes in the pcap root. */
+  readonly copy: string
+  readonly files: readonly { readonly name: string; readonly size: number; readonly modifiedAt: string }[]
+  readonly state: "settling" | "waiting" | "taking" | "refused"
+  readonly jobId: number | null
+}
+
+/** How a capture replay fits one lane: it fits, runs only forced, or runs nowhere. */
+export interface PcapLane {
+  readonly lane: string
+  readonly fit: "fits" | "forced" | "none"
+  readonly lacks: readonly string[]
+  readonly line: string | null
+}
+
+/** The pcaps page: the pcap root's files, the inbox, the lanes; the roots null where the server has none. */
+export interface PcapsView {
+  readonly pcaps: string | null
+  readonly inbox: string | null
+  readonly files: readonly PcapFile[]
+  readonly inboxEntries: readonly InboxEntry[]
+  readonly lanes: readonly PcapLane[]
+}
+
 /** What retiring one capture takes (§3 S4), read before the one confirmation. */
 export interface RetirePlan {
   readonly capture: string
@@ -962,6 +1023,195 @@ const search = (params: Record<string, string | number | ReadonlyArray<string> |
   }
   const text = query.toString()
   return text === "" ? "" : `?${text}`
+}
+
+/** One failed check of a campaign case: where, what, expected beside seen, what the decision said, whose side. */
+export interface CampaignCheck {
+  readonly anchor: string
+  readonly field: string
+  readonly expected: string | null
+  readonly seen: string | null
+  readonly said: string | null
+  readonly side: string | null
+  /**
+   * `value`: expected and seen are two values of one thing, read character by
+   * character; `statement`: the expected is a rule the seen broke. Absent
+   * where the store does not say.
+   */
+  readonly compare?: "value" | "statement" | null
+  /** The flow step it was made at; absent or null where none is named. */
+  readonly step?: string | null
+}
+
+/** One replay of a cell replayed more than once on its lane: its bundle directory, outcome, failed checks, whether it is the result. */
+export interface CampaignAttempt {
+  readonly cell: string | null
+  readonly outcome: "pass" | "failure" | "error" | "skipped"
+  readonly failed: number
+  readonly kept: boolean
+}
+
+export interface CampaignResult {
+  readonly caseId: string
+  readonly outcome: "pass" | "failure" | "error"
+  /** The cell's bundle directory under its lane's session; null where none was written. */
+  readonly cell: string | null
+  readonly log: { readonly records?: number; readonly missing?: string } | null
+  readonly detail: string | null
+  readonly checks: readonly CampaignCheck[]
+  /** Every attempt, in order, of a cell replayed more than once on its lane; absent for one attempt. */
+  readonly attempts?: readonly CampaignAttempt[]
+}
+
+export interface CampaignLane {
+  readonly lane: string
+  readonly runId: number
+  /** The run's bundle directory under the capture's session tree. */
+  readonly session: string
+  readonly status: string
+  readonly detail: string | null
+  /** Cases the lane did not run. */
+  readonly skipped: number
+  readonly results: readonly CampaignResult[]
+}
+
+export interface CampaignRun {
+  readonly id: number
+  /** The environment that made the run. */
+  readonly env: string | null
+  readonly startedAt: string
+  readonly finishedAt: string | null
+  /** What the run states it ran on, in the deployment's order. */
+  readonly labels: ReadonlyArray<{ readonly name: string; readonly value: string }>
+  readonly lanes: readonly CampaignLane[]
+  /** What the run covered where it was not the whole campaign (one case, a sub-case, a glob); null for a full run. */
+  readonly scope: string | null
+  /** Every check each case the run compiled makes, by case id. */
+  readonly checked: Readonly<Record<string, readonly CampaignChecked[]>>
+  /** The raw CDR lines each call of each case the run compiled declares, by case id; absent where the deployment states none. */
+  readonly rawCdr?: Readonly<Record<string, readonly CampaignDeclaredLines[]>>
+}
+
+/** One call's declared raw CDR lines: its id in the case, the caller leg its Call-ID is minted for, how many. */
+export interface CampaignDeclaredLines {
+  readonly call: string
+  readonly leg: string
+  readonly lines: number
+}
+
+/** One CDR of a cell as the call details draw it: a title, its fields, its tables, the whole as JSON where it is one. */
+export interface CdrBlock {
+  readonly title: string
+  readonly fields: ReadonlyArray<{ readonly name: string; readonly value: string }>
+  readonly tables: ReadonlyArray<{
+    readonly title: string
+    readonly columns: readonly string[]
+    readonly rows: ReadonlyArray<readonly string[]>
+  }>
+  readonly json: unknown
+}
+
+/** A campaign cell's CDRs: each file its bundle holds as blocks, its raw CDR lines per call, the counts its verdict states. */
+export interface CellCdr {
+  readonly files: ReadonlyArray<{
+    readonly name: string
+    readonly label: string
+    readonly blocks: readonly CdrBlock[]
+    /** Why a held file reads as no block; null where it reads. */
+    readonly note: string | null
+  }>
+  /** The raw CDR lines of each call, by the caller leg its Call-ID is minted for; null where the cell holds none. */
+  readonly lines: ReadonlyArray<{ readonly leg: string; readonly callId: string; readonly lines: number }> | null
+  readonly facts: ReadonlyArray<{ readonly name: string; readonly value: string }>
+}
+
+/**
+ * How a differing CDR field is read: `timing` and `identity` are expected to
+ * differ, `expected` differs and is accepted, `content` is not.
+ */
+export type CdrDeltaKind = "timing" | "identity" | "expected" | "content"
+
+/** The raw CDR lines of several cells, the fields that tell them apart. */
+export interface CdrDelta {
+  /** Each cell compared and its raw CDR lines; null where its bundle holds none. */
+  readonly columns: ReadonlyArray<{ readonly session: string; readonly cell: string; readonly lines: number | null }>
+  readonly rows: ReadonlyArray<{
+    readonly leg: string
+    readonly line: number
+    /** The last line the row stands for: `line` but for a run of missing lines. */
+    readonly last: number
+    readonly field: string
+    readonly kind: CdrDeltaKind
+    readonly values: ReadonlyArray<string | null>
+  }>
+  /** The fields compared that read the same in every cell holding their line. */
+  readonly same: number
+}
+
+/** One thing a campaign case uses, under the role it plays, with the page it is read on where there is one. */
+export interface CampaignLink {
+  readonly role: string
+  readonly label: string
+  readonly url: string | null
+}
+
+export interface CampaignCase {
+  readonly caseId: string
+  readonly ref: string
+  readonly subcase: string | null
+  readonly family: string
+  /** What the case tests, in a line; null where the campaign states none. */
+  readonly title: string | null
+  readonly description: string | null
+  /** The groups the case counts under, 0..N; the grid falls back on its family where there are none. */
+  readonly groups: readonly string[]
+  readonly links: readonly CampaignLink[]
+  /** The file the case was compiled from, as the newest run that compiled it read it; null where none kept it. */
+  readonly source: { readonly file: string; readonly text: string } | null
+}
+
+/**
+ * One check a campaign case makes: the flow step it is made at (null for a
+ * gate), where, which field (`*`: any the step's other checks do not name, or
+ * any at a gate's anchor), how, against what.
+ */
+export interface CampaignChecked {
+  readonly step: string | null
+  readonly anchor: string
+  readonly field: string
+  readonly op: string
+  readonly expected: string | null
+}
+
+/** One environment's latest runs of a campaign, newest first, and every case any of them ran. */
+export interface Campaign {
+  readonly capture: string
+  /** The environment whose runs these are. */
+  readonly env: string | null
+  /** Every environment that wrote the campaign's runs, the latest writer first. */
+  readonly envs: readonly string[]
+  /** The label of a check's `said`. */
+  readonly saidLabel: string
+  /** The side vocabulary, in the order the pages list it. */
+  readonly sides: readonly string[]
+  readonly lanes: readonly string[]
+  readonly runs: readonly CampaignRun[]
+  readonly cases: readonly CampaignCase[]
+  /**
+   * Every lane a run started from the page may name, in the server's order;
+   * null where the page reads another environment than the server's.
+   */
+  readonly launch: { readonly lanes: readonly LaunchLane[] } | null
+  /** The environment the server starts this campaign's runs in; null where it starts none. */
+  readonly own: string | null
+}
+
+/** One lane a page start may name: the lanes of one group run together, a refused one does not run here. */
+export interface LaunchLane {
+  readonly lane: string
+  readonly group: string
+  /** Why this lane does not run here; null where it does. */
+  readonly refused: string | null
 }
 
 /** A request whose failure, of any status, is the server's stated reason where it states one. */
@@ -1154,8 +1404,25 @@ export const api = {
     request<SourcesPage>(
       `/api/sources${search({ stale: query.stale === true ? "1" : undefined, q: query.q, limit: query.limit, offset: query.offset })}`
     ),
-  retirePlan: (capture: string) => request<RetirePlan>(`/api/sources/${encodeURIComponent(capture)}/retire-plan`)
+  retirePlan: (capture: string) => request<RetirePlan>(`/api/sources/${encodeURIComponent(capture)}/retire-plan`),
+  pcaps: () => request<PcapsView>("/api/pcaps"),
+  campaigns: () => request<readonly string[]>("/api/campaign"),
+  /** One environment's latest runs of a campaign (the server's choice where none is named), `run` among them. */
+  campaign: (capture: string, query: { readonly env?: string | undefined; readonly run?: number | undefined } = {}) =>
+    request<Campaign>(`/api/campaign/${encodeURIComponent(capture)}${search({ env: query.env, run: query.run })}`),
+  /** A campaign cell's CDRs, decoded. */
+  campaignCdr: (capture: string, session: string, cell: string) =>
+    request<CellCdr>(`${campaignCellPath(capture, session, cell)}/cdr`),
+  /** The raw CDR lines of `cells` compared, in their order. */
+  campaignCdrDelta: (capture: string, cells: ReadonlyArray<{ readonly session: string; readonly cell: string }>) =>
+    request<CdrDelta>(
+      `/api/campaign/${encodeURIComponent(capture)}/cdr-delta${search({ cells: cells.map((c) => `${c.session}/${c.cell}`).join(",") })}`
+    )
 }
+
+/** The path of one campaign cell under the API. */
+export const campaignCellPath = (capture: string, session: string, cell: string): string =>
+  `/api/campaign/${encodeURIComponent(capture)}/runs/${encodeURIComponent(session)}/cells/${encodeURIComponent(cell)}`
 
 export type Async<A> =
   | { readonly state: "loading" }

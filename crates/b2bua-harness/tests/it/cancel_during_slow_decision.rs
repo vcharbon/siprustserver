@@ -19,8 +19,8 @@
 //!  2. The `Cancelled` event is dispatched to the SAME per-call FIFO as the
 //!     in-flight INVITE body and so queues strictly BEHIND it (`PerCallDispatcher`
 //!     runs one body at a time), and the run loop marks the setup as CANCELed.
-//!     When the slow decision finally returns, the decision-application seam
-//!     reads the mark and DROPS the result whole — no b-leg is
+//!     When the slow decision finally returns, the consult reads the mark and
+//!     records the decision without applying it — no b-leg is
 //!     ever built toward a callee whose caller is gone — then the queued
 //!     `handle-cancel` rule runs and drives the call to Terminated. FIFO
 //!     ordering is what makes this deterministic — the cancel can never be
@@ -30,7 +30,7 @@
 //!
 //! Without (2) a CANCEL arriving mid-decision could be dropped as "unroutable"
 //! (no call yet) or the landing route could dial the b-leg anyway — the failure
-//! modes this test pins shut. The decision-drop seam itself (route AND reject
+//! modes this test pins shut. The decision-record seam itself (route AND reject
 //! variants, plus the async-fold family) is pinned in
 //! `decision_lands_on_cancelled_call.rs`.
 
@@ -122,9 +122,9 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
     cxl.expect(200).await; // 200 OK to the CANCEL itself
     call.expect(487).await; // 487 Request Terminated on the INVITE
 
-    // ── The slow decision finally returns — and is dropped ────────────────────
-    // The parked INVITE body resumes, reads the setup-CANCEL mark, and discards
-    // the route whole: bob is never dialed. The queued `handle-cancel`
+    // ── The slow decision finally returns — recorded, not applied ────────────
+    // The parked INVITE body resumes, reads the setup-CANCEL mark, and records
+    // the route without applying it: bob is never dialed. The queued `handle-cancel`
     // then terminates the call — nothing is left ringing, nothing to CANCEL.
     h.advance(DECISION_DELAY + Duration::from_secs(1)).await;
     assert!(
@@ -134,7 +134,7 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
     assert_eq!(
         b2bua.metrics().decision_dropped_cancelled_total(),
         1,
-        "the landing decision was dropped, not applied",
+        "the landing decision was recorded, not applied",
     );
 
     // ── The call must be fully reaped (active_calls -> 0) ──────────────────────

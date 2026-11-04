@@ -12,17 +12,16 @@
 //!
 //! A 2xx to a live call's INVITE ends the hold: its ACK is the dialog's.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use sip_message::generators::{
     generate_ack_for_2xx_from_invite, generate_ack_for_non_2xx, generate_bye_for_2xx_from_invite,
 };
 use sip_message::parser::custom::CustomParser;
-use sip_message::preparse::is_invite_request_buffer;
-use sip_message::sniff::{call_id, cseq_method_token, cseq_number, is_response, resp_status};
 use sip_message::{serialize, SipMessage, SipParser, SipRequest, SipResponse};
+
+use super::datagram::{key_of, Datagram};
 
 /// What one dialog's latest INVITE may still owe a final, and where its
 /// requests go (where the INVITE went).
@@ -35,13 +34,13 @@ pub(in crate::mux) struct Held {
 
 #[derive(Clone)]
 enum HeldState {
-    /// No final yet: the INVITE itself.
-    Open(Vec<u8>),
+    /// No final yet: the INVITE itself, as sent.
+    Open(Arc<[u8]>),
     /// A non-2xx final arrived: the ACK it drew.
-    Completed(Vec<u8>),
+    Completed(Arc<[u8]>),
     /// A 2xx arrived after the call released: its ACK, and the CSeq of the
     /// BYE sent to end the dialog.
-    Answered { ack: Vec<u8>, bye_cseq: u32 },
+    Answered { ack: Arc<[u8]>, bye_cseq: u32 },
 }
 
 /// What a final arriving for a held INVITE draws.
@@ -51,9 +50,9 @@ pub(in crate::mux) enum Reply {
     /// Absorbed: the final of the BYE the hold sent.
     Absorbed,
     /// The ACK of a non-2xx final.
-    AckNon2xx(Vec<u8>, SocketAddr),
+    AckNon2xx(Arc<[u8]>, SocketAddr),
     /// The ACK of a 2xx, and, the first time, the BYE ending its dialog.
-    Answered(Vec<(Vec<u8>, SocketAddr)>),
+    Answered(Vec<(Arc<[u8]>, SocketAddr)>),
 }
 
 fn parse_request(raw: &[u8]) -> Option<SipRequest> {
@@ -70,8 +69,8 @@ fn parse_response(raw: &[u8]) -> Option<SipResponse> {
     }
 }
 
-fn wire(request: SipRequest) -> Vec<u8> {
-    serialize(&SipMessage::Request(request))
+fn wire(request: SipRequest) -> Arc<[u8]> {
+    serialize(&SipMessage::Request(request)).into()
 }
 
 /// A fresh RFC 3261 branch for a request the hold originates.
@@ -81,17 +80,15 @@ fn branch() -> String {
 
 impl Held {
     /// What the final `response` draws from this hold.
-    pub(in crate::mux) fn on_final(&mut self, response: &[u8]) -> Reply {
+    pub(in crate::mux) fn on_final(&mut self, response: &Datagram<'_>) -> Reply {
+        let id = response.id();
         let (Some(status), Some(cseq), Some(method)) =
-            (resp_status(response), cseq_number(response), cseq_method_token(response))
+            (response.final_status(), id.cseq, id.cseq_method)
         else {
             return Reply::NotHeld;
         };
-        if !is_response(response) || status < 200 {
-            return Reply::NotHeld;
-        }
         let (dst, held_cseq) = (self.dst, self.cseq);
-        match (&self.state, method.as_str()) {
+        match (&self.state, method) {
             (HeldState::Answered { bye_cseq, .. }, "BYE") if *bye_cseq == cseq => Reply::Absorbed,
             _ if method != "INVITE" || cseq != held_cseq => Reply::NotHeld,
             (HeldState::Completed(ack), _) if status >= 300 => Reply::AckNon2xx(ack.clone(), dst),
@@ -99,7 +96,8 @@ impl Held {
                 Reply::Answered(vec![(ack.clone(), dst)])
             }
             (HeldState::Open(invite), _) => {
-                let (Some(invite), Some(resp)) = (parse_request(invite), parse_response(response))
+                let (Some(invite), Some(resp)) =
+                    (parse_request(invite), parse_response(response.raw()))
                 else {
                     return Reply::NotHeld;
                 };
@@ -128,43 +126,57 @@ impl Held {
     }
 }
 
-/// A caller endpoint's holds, one per dialog (Call-ID).
+/// A caller endpoint's holds, one per dialog (Call-ID, hashed).
 #[derive(Default)]
-pub(in crate::mux) struct SentInvites(Mutex<HashMap<String, Held>>);
+pub(in crate::mux) struct SentInvites(Mutex<Vec<(u64, Held)>>);
 
 impl SentInvites {
-    /// Hold `raw` when it is an INVITE request (its retransmission replaces it
+    /// Hold `d` when it is an INVITE request (its retransmission replaces it
     /// with the same bytes).
-    pub(in crate::mux) fn on_outbound(&self, raw: &[u8], dst: SocketAddr) {
-        if !is_invite_request_buffer(raw) {
+    pub(in crate::mux) fn on_outbound(&self, d: &Datagram<'_>, dst: SocketAddr) {
+        let id = d.id();
+        if id.method != Some("INVITE") {
             return;
         }
-        let (Some(cid), Some(cseq)) = (call_id(raw), cseq_number(raw)) else { return };
-        let held = Held { cseq, dst, state: HeldState::Open(raw.to_vec()) };
-        self.0.lock().unwrap().insert(cid, held);
+        let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) else { return };
+        let (dialog, held) = (key_of(cid), Held { cseq, dst, state: HeldState::Open(d.shared()) });
+        let mut holds = self.0.lock().unwrap();
+        match holds.iter_mut().find(|(k, _)| *k == dialog) {
+            Some((_, h)) => *h = held,
+            None => {
+                // A caller endpoint holds a handful of dialogs: room for one more.
+                holds.reserve_exact(1);
+                holds.push((dialog, held));
+            }
+        }
     }
 
     /// A final to the live call's held INVITE: a 2xx ends the hold, a non-2xx
     /// keeps only the ACK it draws.
-    pub(in crate::mux) fn on_inbound(&self, raw: &[u8]) {
-        if !is_response(raw) || !resp_status(raw).is_some_and(|s| s >= 200) {
+    pub(in crate::mux) fn on_inbound(&self, d: &Datagram<'_>) {
+        let id = d.id();
+        let Some(status) = d.final_status() else { return };
+        if id.cseq_method != Some("INVITE") {
             return;
         }
-        if cseq_method_token(raw).as_deref() != Some("INVITE") {
-            return;
-        }
-        let (Some(cid), Some(cseq)) = (call_id(raw), cseq_number(raw)) else { return };
+        let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) else { return };
+        let dialog = key_of(cid);
         let mut holds = self.0.lock().unwrap();
-        let Some(held) = holds.get_mut(&cid).filter(|h| h.cseq == cseq) else { return };
-        if resp_status(raw).is_some_and(|s| s < 300) {
-            holds.remove(&cid);
-        } else if matches!(held.state, HeldState::Open(_)) {
-            let _ = held.on_final(raw);
+        let Some(i) = holds.iter().position(|(k, h)| *k == dialog && h.cseq == cseq) else {
+            return;
+        };
+        if status < 300 {
+            holds.swap_remove(i);
+        } else if matches!(holds[i].1.state, HeldState::Open(_)) {
+            let _ = holds[i].1.on_final(d);
         }
     }
 
     /// The hold of dialog `call_id`, removed.
     pub(in crate::mux) fn take(&self, call_id: &str) -> Option<Held> {
-        self.0.lock().unwrap().remove(call_id)
+        let dialog = key_of(call_id);
+        let mut holds = self.0.lock().unwrap();
+        let i = holds.iter().position(|(k, _)| *k == dialog)?;
+        Some(holds.swap_remove(i).1)
     }
 }

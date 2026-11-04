@@ -15,12 +15,13 @@
 //! [`InviteRequest`] and [`SipResponseTagged`] are flat newtypes built once at a
 //! boundary, `Deref`-ing to the base so no accessor is duplicated.
 
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 
 use bytes::Bytes;
 
 use crate::draft::{RequestLine, StatusLine};
 use crate::header;
+use crate::header_table::HeaderTable;
 use crate::method::Method;
 use crate::sip_str::SipStr;
 
@@ -74,6 +75,11 @@ impl<T> NonEmpty<T> {
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         std::iter::once(&self.head).chain(self.tail.iter())
     }
+    /// The room the elements after the first hold.
+    #[cfg(test)]
+    pub(crate) fn tail_capacity(&self) -> usize {
+        self.tail.capacity()
+    }
 }
 
 /// Every Contact on a message. `Contact: *` (RFC 3261 §10.2.2 wildcard) is a
@@ -111,7 +117,8 @@ pub struct OptionalHeaders {
     pub history_info: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
     pub remote_party_id: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
     pub rack: Result<Option<header::RAck>, crate::error::SipParseError>,
-    pub refer_to: Result<Option<header::ReferTo>, crate::error::SipParseError>,
+    /// Boxed: only a REFER carries one, and a message is moved often.
+    pub refer_to: Result<Option<Box<header::ReferTo>>, crate::error::SipParseError>,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,8 +126,9 @@ pub struct OptionalHeaders {
 // ---------------------------------------------------------------------------
 
 /// The mandatory headers, typed and validated by the parser — so every reader
-/// gets them infallibly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// gets them infallibly. The route sets it keeps are derived from the header
+/// lines, so they take no part in its equality or its printed form.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CoreHeaders {
     pub(crate) from: header::From,
     pub(crate) to: header::To,
@@ -128,6 +136,21 @@ pub struct CoreHeaders {
     pub(crate) cseq: header::CSeq,
     pub(crate) via: NonEmpty<header::Via>,
     pub(crate) contacts: ContactSet,
+    pub(crate) routes: ReadRoutes,
+}
+
+impl std::fmt::Debug for CoreHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { from, to, call_id, cseq, via, contacts, routes: _ } = self;
+        f.debug_struct("CoreHeaders")
+            .field("from", from)
+            .field("to", to)
+            .field("call_id", call_id)
+            .field("cseq", cseq)
+            .field("via", via)
+            .field("contacts", contacts)
+            .finish()
+    }
 }
 
 impl CoreHeaders {
@@ -138,8 +161,9 @@ impl CoreHeaders {
         cseq: header::CSeq,
         via: NonEmpty<header::Via>,
         contacts: ContactSet,
+        routes: ReadRoutes,
     ) -> Self {
-        Self { from, to, call_id, cseq, via, contacts }
+        Self { from, to, call_id, cseq, via, contacts, routes }
     }
 
     pub fn from(&self) -> &header::From {
@@ -167,11 +191,43 @@ impl CoreHeaders {
     }
 }
 
-/// Everything a request and a response share, written once.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The Route and Record-Route entries the parse read and validated, top
+/// first, so a reader takes them instead of parsing the lines again; empty
+/// where the parse did not read them (a final of 300 or more, a message the
+/// stack built). They are derived from the header lines, so they take no part
+/// in equality.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum ReadRoutes {
+    /// The parse did not read them.
+    #[default]
+    Unread,
+    /// The parse read them: `None` where the message carries neither header.
+    /// Boxed, so a message that is moved often stays narrow.
+    Read(Option<Box<RouteSets>>),
+}
+
+/// The Route entries, then the Record-Route entries, of one message.
+pub(crate) type RouteSets = (Vec<header::RouteEntry>, Vec<header::RecordRouteEntry>);
+
+/// Always equal: the kept sets are derived from the header lines, which the
+/// message compares itself, so a message whose parse kept them equals the same
+/// lines read without them.
+impl PartialEq for ReadRoutes {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ReadRoutes {}
+
+/// Everything a request and a response share, written once. Where its body
+/// holds the session description is derived from the body and its headers,
+/// so it takes no part in its printed form.
+#[derive(Clone, PartialEq, Eq)]
 pub struct MessageCore {
-    /// Full header list in wire order — THE source of truth.
-    pub(crate) headers: Vec<SipHeader>,
+    /// Full header list in wire order, each line classified — THE source of
+    /// truth.
+    pub(crate) headers: HeaderTable,
     pub(crate) core: CoreHeaders,
     pub(crate) optional: OptionalHeaders,
     /// Raw body bytes — opaque to the B2BUA. A slice of the image on a parsed
@@ -179,17 +235,34 @@ pub struct MessageCore {
     pub(crate) body: Bytes,
     /// The datagram this message is, whether it was received or built.
     pub(crate) image: Bytes,
+    /// Where the body holds the session description, located once.
+    pub(crate) sdp: Option<Range<u32>>,
+}
+
+impl std::fmt::Debug for MessageCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { headers, core, optional, body, image, sdp: _ } = self;
+        f.debug_struct("MessageCore")
+            .field("headers", headers)
+            .field("core", core)
+            .field("optional", optional)
+            .field("body", body)
+            .field("image", image)
+            .finish()
+    }
 }
 
 impl MessageCore {
     pub(crate) fn new(
-        headers: Vec<SipHeader>,
+        headers: HeaderTable,
         core: CoreHeaders,
         optional: OptionalHeaders,
         body: Bytes,
         image: Bytes,
     ) -> Self {
-        Self { headers, core, optional, body, image }
+        let sdp = crate::multipart::message_sdp_range(&headers, &body)
+            .and_then(|r| Some(u32::try_from(r.start).ok()?..u32::try_from(r.end).ok()?));
+        Self { headers, core, optional, body, image, sdp }
     }
 }
 
@@ -236,7 +309,7 @@ impl SipMessage {
     }
 
     pub fn headers(&self) -> &[SipHeader] {
-        &self.core().headers
+        self.core().headers.lines()
     }
 
     pub fn body(&self) -> &Bytes {

@@ -9,6 +9,7 @@
 
 mod background;
 mod bodies;
+mod body_types;
 mod budgets;
 mod cancel;
 mod close;
@@ -23,6 +24,7 @@ mod matching;
 mod negative;
 mod retransmissions;
 mod settle_floor;
+mod trying;
 mod unscripted;
 
 use std::collections::BTreeMap;
@@ -352,6 +354,8 @@ struct LaneDirectives {
     local_refer: bool,
     /// The ± window this run states around a timer-anchored dwell (§9.2).
     timing_tolerance_ms: u64,
+    /// The defects this lane declares its system is known to produce.
+    known_bugs: Vec<pivot_schema::known_bug::KnownBug>,
 }
 
 impl LaneDirectives {
@@ -633,6 +637,8 @@ async fn replay_directed(
     let config = egress
         .iter()
         .fold(config, |config, hop| config.with_claim_number(&hop.identity, &hop.user));
+    let config =
+        directives.known_bugs.iter().fold(config, |config, bug| config.with_known_bug(*bug));
     // A hunt is a lane DIRECTIVE on the call's OWN outbound INVITE (§4.3): the
     // ordered attempt chain, in the decision backend's own plan vocabulary,
     // stamped on the dial that opens that call and on nothing else.
@@ -645,6 +651,7 @@ async fn replay_directed(
         media: Booking::new("127.0.0.1", LANE_RTP_BASE),
         base_dir,
         composer: &composer,
+        events: None,
     };
 
     let dir = bundle_dir(&case);

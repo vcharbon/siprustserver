@@ -35,6 +35,8 @@ pub(super) struct Served<'a> {
     pub(super) ts_us: u64,
     /// The request-line method, as the wire spelled it.
     pub(super) method: &'a str,
+    /// Who sent it: the UAC of the transaction.
+    pub(super) client: &'a str,
     /// It listed `100rel` in `Require`: §3 then obliges reliable provisionals
     /// or a 420.
     pub(super) requires_100rel: bool,

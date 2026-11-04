@@ -1,8 +1,8 @@
 //! **A datagram that arrives after the takeover copy has been released.**
 //!
 //! A backup that takes a call over sheds its live copy once the transaction(s)
-//! it served quiesce, reverse-flushing the terminal body so the primary folds or
-//! reclaims it (ADR-0014, ADR-0020 X3). That retained body is the image of a call
+//! it served quiesce, reverse-flushing the terminal body so the primary meets or
+//! reclaims it (ADR-0055 §7, ADR-0020 X3). That retained body is the image of a call
 //! that has ENDED — it is not a call to serve. Anything still addressing the
 //! dialog after the shed must be answered as a call that no longer exists:
 //!
@@ -24,6 +24,9 @@
 //! takeover log carries one hydration for the whole run), it counts the refusal
 //! instead, and the cluster still settles to exactly one CDR with no trace and
 //! clean memory on both nodes.
+//!
+//! Beyond the failover sweep: requests and responses naming a released takeover copy, and a handler
+//! panic on one.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -34,7 +37,7 @@ use b2bua::rules::{
 };
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, ProxySut,
-    ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
+    ReplicatedB2buaSut, WorkerHealth,
 };
 use scenario_harness::{Agent, Dialog};
 use sip_message::generators::InDialogMethod;
@@ -49,14 +52,6 @@ const BOB: &str = "127.0.0.1:5070";
 const PROXY: &str = "127.0.0.1:5080";
 const B1: &str = "127.0.0.1:5091";
 const B2: &str = "127.0.0.1:5092";
-
-/// Why `cseq-in-dialog-order` is accepted from the kill onward: with two
-/// potential owners of one leg in the takeover window, the b-leg CSeq the dead
-/// primary minted may be minted again by the survivor (ADR-0014).
-const CSEQ_OVERLAP: &str =
-    "ADR-0014 accepted trade-off: with two potential owners of one leg in the \
-                            takeover window, the b-leg CSeq the dead primary minted may be minted \
-                            again by the survivor";
 
 /// The proxy plus both workers, ready at steady state.
 async fn bring_up(fh: &mut FailoverHarness) -> (ProxySut, ReplicatedB2buaSut, ReplicatedB2buaSut) {
@@ -149,7 +144,6 @@ async fn kill_serving_node(
     pri_ord: &str,
     proxy: &ProxySut,
 ) {
-    fh.accept_rfc_deviations_from_now(RULE_CSEQ_IN_DIALOG_ORDER, CSEQ_OVERLAP);
     fh.mark(pri_ord, None, "crash", "serving node down on an established call");
     primary.crash();
     proxy.set_health(pri_ord, WorkerHealth::Dead);
@@ -517,7 +511,7 @@ async fn an_info_whose_handler_died_on_the_takeover_copy_draws_481_on_its_retran
 }
 
 /// Outranks the core re-INVITE relay and panics on an INVITE in a dialog:
-/// the handler dies after the layer's 100 Trying, before any answer.
+/// the handler dies before any answer, its 100 Trying included.
 fn panic_on_reinvite(ctx: &RuleContext) -> Option<RuleHandleResult> {
     if ctx.request().is_some_and(|r| r.to().tag().is_some()) {
         panic!("probe: handler panic on re-INVITE");
@@ -539,12 +533,11 @@ fn panic_on_reinvite_services() -> Vec<ServiceDef> {
 }
 
 /// A **re-INVITE whose handler died on the takeover copy**: the caller's
-/// re-INVITE takes the call over on the survivor, draws the layer's 100
-/// Trying, and its handler panics; the reaper tears the copy down on the
-/// wire — a BYE to each side — and the survivor sheds it
-/// (`SelfRelease { ended: true }`). The 100 stopped the caller's
-/// retransmissions, so the shed answers the re-INVITE 481 through its
-/// transaction instead of leaving it to the caller's Timer B.
+/// re-INVITE takes the call over on the survivor and its handler panics; the
+/// reaper tears the copy down on the wire — a BYE to each side — and the
+/// survivor sheds it (`SelfRelease { ended: true }`). No turn answers the
+/// re-INVITE, so the shed answers it 481 through its transaction instead of
+/// leaving it to the caller's Timer B.
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_whose_handler_died_on_the_takeover_copy_is_answered_481_at_its_release() {
     let mut fh = FailoverHarness::new("released-copy-reinvite-handler-died", &["b1", "b2"])
@@ -562,7 +555,6 @@ async fn a_reinvite_whose_handler_died_on_the_takeover_copy_is_answered_481_at_i
 
     // ── The caller's re-INVITE takes the call over; its handler dies ────────
     let mut reinvite = dialog.reinvite(Some(OFFER)).await;
-    reinvite.expect(100).await;
     alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);

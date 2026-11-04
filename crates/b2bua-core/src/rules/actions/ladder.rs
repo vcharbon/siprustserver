@@ -20,6 +20,7 @@ use sip_message::header::RAck;
 use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::{Class, Schedule};
 
+use crate::config::B2buaConfig;
 use crate::effects::{
     HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
@@ -51,18 +52,18 @@ impl ActionExecutor<'_> {
         };
         let (unacked, obligation, first) =
             unacked_2xx_of(resp, effect.destination.clone(), &call.a_leg.leg_id);
+        let cseq = unacked.cseq;
         if let Some(d) = call::helpers::caller_dialog_mut(call, &unacked.dialog_tag.clone()) {
-            d.answered_2xx = Some(unacked);
+            call::helpers::hold_answered_2xx(d, cseq, unacked);
         }
         self.arm_ack_ladder(call, fx, obligation, first);
     }
 
     /// Retain a **re-INVITE** 2xx relayed toward its originator (`target_leg`,
-    /// either face), on the originator's dialog the 2xx names, and arm its
-    /// §13.3.1.4 ladder. The
-    /// marker also holds the dialog's INVITE server transaction in RFC 6026
-    /// *Accepted* for `reinvite-glare`, for exactly as long as the ladder's
-    /// give-up stands.
+    /// either face), as the answered INVITE of the originator's dialog the 2xx
+    /// names, and arm its §13.3.1.4 ladder. The record also holds the dialog's
+    /// INVITE server transaction in RFC 6026 *Accepted* for `reinvite-glare`,
+    /// for exactly as long as the ladder's give-up stands.
     pub(super) fn retain_reinvite_2xx(
         &mut self,
         call: &mut Call,
@@ -74,9 +75,9 @@ impl ActionExecutor<'_> {
         let (unacked, obligation, first) = unacked_2xx_of(resp, dest, target_leg);
         let (ours, peer) =
             (resp.to().tag().map(str::to_string), resp.from().tag().map(str::to_string));
-        *call = call::helpers::update_leg(call.clone(), target_leg, |leg| {
+        call::helpers::update_leg(call, target_leg, |leg| {
             if let Some(d) = ours.zip(peer).and_then(|(o, p)| leg.dialogs.by_tags_mut(&o, &p)) {
-                d.pending_reinvite_2xx = Some(unacked);
+                call::helpers::hold_answered_2xx(d, unacked.cseq, unacked);
             }
         });
         self.arm_ack_ladder(call, fx, obligation, first);
@@ -153,30 +154,26 @@ impl ActionExecutor<'_> {
     /// equivalent — then arm the next rung, or cease at the last one inside
     /// the bound. A spent fire — the ladder is
     /// discharged, the call is no longer active, or the reliable provisional's
-    /// raising fork is torn down (a reclaim can restore a ladder whose cancel
-    /// died with the crashed node) — sends nothing and retires the obligation
-    /// so a later reclaim cannot re-fire it. A rung that arms the next one
+    /// raising fork is torn down (a restored record can hold a ladder whose
+    /// cancel was never written) — sends nothing and retires the obligation
+    /// so a later restore cannot re-fire it. A rung that arms the next one
     /// leaves the repeat and its re-arm as the turn's whole effect set
     /// ([`QuietTurn::OwnRung`](crate::effects::QuietTurn::OwnRung)); a cease or
     /// a spent fire cancels a ledger entry, and the router reads that as the
     /// write it is.
     pub fn repeat(&mut self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
         let rung = TimerKey::obligation(TimerType::Rung, obligation.clone());
-        let effect = (call.state == CallModelState::Active)
-            .then(|| repeat_toward(call, obligation))
-            .flatten();
+        // A terminating call repeats only the 2xx a BYE waits behind (§15).
+        let live = call.state == CallModelState::Active
+            || super::retire::bye_behind(call, obligation).is_some();
+        let effect = live.then(|| repeat_toward(call, obligation)).flatten();
         let Some(effect) = effect else {
             self.retire(call, fx, Scope::Obligation(obligation.clone()));
             return;
         };
         fx.outbound.push(effect);
-        let give_up = match obligation {
-            Obligation::AckOf2xx { .. } => Some(self.ack_ladder_bound()),
-            Obligation::AwaitPrack { .. } => None,
-        };
-        let (updated, next) = call::helpers::advance_ladder(call.clone(), obligation, give_up);
-        *call = updated;
-        match next {
+        let give_up = ladder_bound(self.config, obligation);
+        match call::helpers::advance_ladder(call, obligation, give_up) {
             Some(next) => self.schedule(call, fx, rung, ::call::millis_i64(next)),
             None => {
                 // The last rung inside the bound has been sent: re-asking stops
@@ -216,10 +213,11 @@ impl ActionExecutor<'_> {
         let Obligation::AckOf2xx { .. } = obligation else {
             return result;
         };
-        let HandlerResult { call, mut effects } = result;
+        let HandlerResult { mut call, mut effects } = result;
+        self.release_bye_at_give_up(&mut call, &mut effects, obligation);
         let forced = (call.state == CallModelState::Active)
             .then(|| unacked_2xx_give_up_actions(&RuleCall::new(&call), obligation));
-        let call = call::helpers::clear_retained(call, obligation);
+        call::helpers::clear_retained(&mut call, obligation);
         let Some(actions) = forced else {
             return HandlerResult { call, effects };
         };
@@ -297,20 +295,31 @@ impl ActionExecutor<'_> {
         self.scrub_where(call, fx, |t| t.key.obligation_of() == Some(obligation));
     }
 
-    /// The bound of a §13.3.1.4 ladder — no rung is scheduled at or past it:
-    /// Timer L (64·T1), where RFC 3261 ceases whatever local policy says, or
-    /// the deployment's ACK deadline where that comes sooner (a rung after the
-    /// teardown would repeat into a dead call). Protocol, not policy.
-    fn ack_ladder_bound(&mut self) -> Duration {
-        self.ack_give_up_deadline().min(Schedule::rfc(Class::Final2xx).give_up_after())
-    }
-
     /// When a §13.3.1.4 give-up fires — policy, distinct from the ladder's
     /// bound: the deployment's ACK deadline, either side of Timer L
     /// (`ack_timeout_ms`, never non-positive).
     fn ack_give_up_deadline(&self) -> Duration {
-        Duration::from_millis(self.config.ack_timeout_ms())
+        ack_give_up_deadline(self.config)
     }
+}
+
+/// The bound `obligation`'s ladder advances under ([`call::helpers::advance_ladder`]).
+/// A §13.3.1.4 ladder schedules no rung at or past Timer L (64·T1), where RFC
+/// 3261 ceases whatever local policy says, or the deployment's ACK deadline
+/// where that comes sooner (a rung after the teardown would repeat into a
+/// dead call): protocol, not policy. A reliable provisional's ladder runs to
+/// its class's own bound (`None`).
+pub fn ladder_bound(config: &B2buaConfig, obligation: &Obligation) -> Option<Duration> {
+    match obligation {
+        Obligation::AckOf2xx { .. } => {
+            Some(ack_give_up_deadline(config).min(Schedule::rfc(Class::Final2xx).give_up_after()))
+        }
+        Obligation::AwaitPrack { .. } => None,
+    }
+}
+
+fn ack_give_up_deadline(config: &B2buaConfig) -> Duration {
+    Duration::from_millis(config.ack_timeout_ms())
 }
 
 /// The repeat `obligation`'s rung sends, toward the leg that owes the

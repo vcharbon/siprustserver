@@ -46,7 +46,7 @@ const SelectorForm = (
         <input type="checkbox" checked={every} onChange={() => setEvery(!every)} /> unchanged calls too
       </label>
       <label>
-        <input type="checkbox" checked={moved} onChange={() => setMoved(!moved)} /> only calls whose ladders differ
+        <input type="checkbox" checked={moved} onChange={() => setMoved(!moved)} /> ladder differs only
       </label>
       <button type="submit">compare</button>
       <span className="muted">
@@ -86,12 +86,12 @@ export const RunComparePage = ({ path }: { path?: { readonly a: string; readonly
     <div className="page compare-runs-page">
       <header className="page-head">
         <div>
-          <h1>compare</h1>
-          <p className="muted">{asked ? <>{a} → {b}</> : "two run sets, call by call"}</p>
+          <h1>Compare</h1>
+          <p className="muted">{asked ? <>{a} → {b}</> : "two run sets"}</p>
         </div>
         {asked && (
           <div className="page-actions">
-            <a href={`/api/compare${window.location.search}`}>the JSON</a>
+            <a href={`/api/compare${window.location.search}`}>JSON</a>
           </div>
         )}
       </header>
@@ -104,7 +104,7 @@ export const RunComparePage = ({ path }: { path?: { readonly a: string; readonly
         ladderChanged={ladderChanged}
       />
       {!asked
-        ? <p className="muted">name both sides to compare them.</p>
+        ? <p className="muted">—</p>
         : doc.state === "loading"
         ? <p className="muted">comparing…</p>
         : doc.state === "error"

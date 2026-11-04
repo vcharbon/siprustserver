@@ -12,6 +12,7 @@ use bytes::Bytes;
 
 use crate::error::SipParseError;
 use crate::header::{ContentLength, HeaderName, HeaderValue, MediaType, Via};
+use crate::header_table::HeaderTable;
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::SipHeader;
 use crate::write_check::WriteRefusal;
@@ -24,9 +25,10 @@ use super::start::StartKind;
 /// Why a draft could not become a message.
 #[derive(Debug, Clone)]
 pub enum IncompleteDraft {
-    /// A header RFC 3261 requires on every message of this direction is absent.
-    /// Only a blank draft can reach this: a thawed draft started valid and no
-    /// operation removes a mandatory header without putting one back.
+    /// A header RFC 3261 requires on every message of this direction is absent:
+    /// the draft started blank, an edit removed it, or the draft thawed from a
+    /// message that arrived without it (a request without Max-Forwards, which
+    /// RFC 3261 §16.3 lets a receiver accept).
     Missing(Vec<HeaderName>),
     /// A header is present but does not read as the value its name promises.
     Unreadable(SipParseError),
@@ -90,26 +92,41 @@ impl<S: StartKind> Draft<S> {
     }
 
     pub fn has(&self, name: &HeaderName) -> bool {
-        self.entries.iter().any(|e| e.is(name))
+        let key = name.key();
+        self.entries.iter().any(|e| e.is_key(&key))
     }
 
     /// Every line of `name` as text, in wire order.
     pub fn raw(&self, name: &HeaderName) -> Vec<SipStr> {
-        self.entries.iter().filter(|e| e.is(name)).map(Entry::text).collect()
+        let key = name.key();
+        self.entries.iter().filter(|e| e.is_key(&key)).map(Entry::text).collect()
     }
 
     /// Every value of `H` the draft carries.
     pub fn values<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
         let name = H::header_name();
+        let key = name.key();
         let mut values = Vec::new();
-        for entry in self.entries.iter().filter(|e| e.is(&name)) {
+        for entry in self.entries.iter().filter(|e| e.is_key(&key)) {
             values.extend(entry.read::<H>()?);
         }
         Ok(values)
     }
 
     /// The single logical value of `H`, or `None` when the draft carries none.
+    /// A header read from its first line only
+    /// ([`HeaderValue::first_line_only`]) is that line's value, whatever a
+    /// later line of it holds, malformed or not, as on a message.
     pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
+        if H::first_line_only() {
+            let name = H::header_name();
+            let key = name.key();
+            let first = self.entries.iter().find(|e| e.is_key(&key))?;
+            return match first.read::<H>() {
+                Err(e) => Some(Err(e)),
+                Ok(values) => H::combine(values).map(Ok),
+            };
+        }
         match self.values::<H>() {
             Err(e) => Some(Err(e)),
             Ok(values) if values.is_empty() => None,
@@ -149,7 +166,8 @@ impl<S: StartKind> Draft<S> {
     /// edit; [`list`](Self::list) is the way in when the existing values matter.
     pub fn prepend(mut self, value: impl HeaderValue) -> Self {
         let name = value.name();
-        let at = self.entries.iter().position(|e| e.is(&name)).unwrap_or(self.entries.len());
+        let key = name.key();
+        let at = self.entries.iter().position(|e| e.is_key(&key)).unwrap_or(self.entries.len());
         insert_entry(&mut self.entries, at, Entry::typed(value));
         self
     }
@@ -177,16 +195,18 @@ impl<S: StartKind> Draft<S> {
     /// wire position the header already had.
     pub fn set(mut self, value: impl HeaderValue) -> Self {
         let name = value.name();
-        let Some(at) = self.entries.iter().position(|e| e.is(&name)) else {
+        let key = name.key();
+        let Some(at) = self.entries.iter().position(|e| e.is_key(&key)) else {
             return self.push(value);
         };
-        self.entries.retain(|e| !e.is(&name));
+        self.entries.retain(|e| !e.is_key(&key));
         insert_entry(&mut self.entries, at, Entry::typed(value));
         self
     }
 
     pub fn remove(mut self, name: &HeaderName) -> Self {
-        self.entries.retain(|e| !e.is(name));
+        let key = name.key();
+        self.entries.retain(|e| !e.is_key(&key));
         self
     }
 
@@ -212,19 +232,18 @@ impl<S: StartKind> Draft<S> {
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
     ) -> Result<Self, SipParseError> {
         let name = H::header_name();
+        let key = name.key();
         let mut values = Vec::new();
-        for entry in self.entries.iter().filter(|e| e.is(&name)) {
+        for entry in self.entries.iter().filter(|e| e.is_key(&key)) {
             values.extend(entry.read::<H>()?);
         }
 
         let updated = f(HeaderList::new(values)).into_vec();
         // The lines above the first one of this header are none of it, so the
         // first one's position survives taking them all out.
-        let at = self.entries.iter().position(|e| e.is(&name)).unwrap_or(self.entries.len());
-        self.entries.retain(|e| !e.is(&name));
-        for (offset, value) in updated.into_iter().enumerate() {
-            insert_entry(&mut self.entries, at + offset, Entry::typed(value));
-        }
+        let at = self.entries.iter().position(|e| e.is_key(&key)).unwrap_or(self.entries.len());
+        self.entries.retain(|e| !e.is_key(&key));
+        replace_entries(&mut self.entries, at..at, updated.into_iter().map(Entry::typed));
         Ok(self)
     }
 
@@ -259,15 +278,18 @@ impl<S: StartKind> Draft<S> {
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
     ) -> Result<Self, SipParseError> {
         let name = H::header_name();
-        let Some((at, entry)) = self.entries.iter().enumerate().find(|(_, e)| e.is(&name)) else {
+        let key = name.key();
+        let Some((at, entry)) = self.entries.iter().enumerate().find(|(_, e)| e.is_key(&key))
+        else {
             return Ok(self);
         };
         let values = entry.read::<H>()?;
-        let updated = f(HeaderList::new(values)).into_vec();
-        remove_entry(&mut self.entries, at);
-        for (offset, value) in updated.into_iter().enumerate() {
-            insert_entry(&mut self.entries, at + offset, Entry::typed(value));
-        }
+        let updated = f(HeaderList::new(values));
+        replace_entries(
+            &mut self.entries,
+            at..at.saturating_add(1),
+            updated.into_iter().map(Entry::typed),
+        );
         Ok(self)
     }
 
@@ -304,8 +326,21 @@ impl<S: StartKind> Draft<S> {
     /// header present on the draft cannot be read as the value its name
     /// promises, or when a line cannot be written whole.
     pub fn freeze(self) -> Result<S::Message, IncompleteDraft> {
-        let draft = self.complete()?;
+        self.complete()?.rendered()
+    }
 
+    /// The message a draft thawed from a RECEIVED message is once edited: it
+    /// keeps the header lines the peer sent, so the mandatory set of a message
+    /// this stack mints is not asked of it, and its body is the one received.
+    /// Fails, as [`freeze`](Self::freeze), on a header that cannot be read
+    /// as its name promises or a line that cannot be written whole.
+    pub(crate) fn refreeze_received(self) -> Result<S::Message, IncompleteDraft> {
+        self.rendered()
+    }
+
+    /// The single render of a draft and the typed message read back from it.
+    fn rendered(self) -> Result<S::Message, IncompleteDraft> {
+        let draft = self;
         let rendered = render::<S>(&draft.start, &draft.entries, &draft.body);
         if let Some(refusal) = rendered.refusal {
             return Err(IncompleteDraft::Unwritable(refusal));
@@ -316,7 +351,7 @@ impl<S: StartKind> Draft<S> {
             ))
         };
         let image = decode(rendered.bytes.get(..rendered.body_at).ok_or_else(outside)?);
-        let headers: Vec<SipHeader> = rendered
+        let lines: Vec<SipHeader> = rendered
             .headers
             .iter()
             .map(|(name, value)| SipHeader {
@@ -324,6 +359,8 @@ impl<S: StartKind> Draft<S> {
                 value: image.span(value.0, value.1),
             })
             .collect();
+        let ids = draft.entries.iter().map(|e| e.id()).collect();
+        let headers = HeaderTable::classified(lines, ids);
         let raw = Bytes::from(rendered.bytes);
         let body = crate::checked::slice(&raw, rendered.body_at..raw.len()).ok_or_else(outside)?;
         S::assemble(draft.start, &image, rendered.start, headers, body, raw)
@@ -387,16 +424,20 @@ impl<S: StartKind> Draft<S> {
 /// Puts `entry` at `at`, the lines from `at` on moving down one; past the end
 /// it goes last.
 fn insert_entry(entries: &mut Vec<Entry>, at: usize, entry: Entry) {
-    entries.push(entry);
-    if let Some(tail) = entries.get_mut(at..) {
-        tail.rotate_right(1);
-    }
+    let at = at.min(entries.len());
+    replace_entries(entries, at..at, std::iter::once(entry));
 }
 
-/// Takes out the line at `at`; `None` past the end.
-fn remove_entry(entries: &mut Vec<Entry>, at: usize) -> Option<Entry> {
-    entries.get_mut(at..).filter(|tail| !tail.is_empty())?.rotate_left(1);
-    entries.pop()
+/// Replaces the lines in `range` by `with`, moving the lines after them once
+/// whatever the number of lines put in. A range past the end appends.
+fn replace_entries(
+    entries: &mut Vec<Entry>,
+    range: std::ops::Range<usize>,
+    with: impl IntoIterator<Item = Entry>,
+) {
+    let end = range.end.min(entries.len());
+    let start = range.start.min(end);
+    entries.splice(start..end, with);
 }
 
 /// The rendered header block as one shared text image. Everything written came

@@ -1,6 +1,10 @@
 # Replication link liveness
 
 **Status:** accepted (2026-10-11)
+Amended (2026-10-23): the hold of the ACK and the first provisional reads the applied
+position (ADR-0055 §3).
+Amended (2026-10-29): the `Noop` is a 500 ms heartbeat and the idle bound 2 s, so the
+stream confirms a dead verdict on a silent peer within 2 s (ADR-0047 D1) (user ruling).
 
 **Owner:** `crates/b2bua/src/repl/puller.rs` (connect, idle and send bounds,
 the backoff), `repl/server.rs` (the `Noop` interval, the blocked-send bound,
@@ -34,8 +38,9 @@ life of the process, silently.
    one connect bound, so the low ceiling is cheap, and it bounds how long a
    healed link waits for its next reconnect.
 2. **Idle bound.** The server sends a `Noop` at least every `noop_interval`
-   (5 s) on a caught-up stream. A puller that receives nothing for
-   `idle_timeout_ms` (15 s) leaves the stream and pulls again from its
+   (500 ms, the heartbeat) on a caught-up stream, every stream alike. A
+   puller that receives nothing for `idle_timeout_ms` (2 s) leaves the stream
+   and pulls again from its
    retained watermark through the ordinary backoff. A stream that stayed
    connected for the idle bound resets the backoff to its floor; a shorter
    one does not, so a peer that closes every stream at once is redialled with
@@ -51,6 +56,12 @@ life of the process, silently.
 5. **Failed accepts.** A failed accept never stops the replication server: it
    logs a warning once per run of failures, pauses 100 ms and accepts again.
    Only a closed listener ends it.
+   An accepted connection that sends no opening `PullRequest` within the open
+   timeout is closed, and one accepted while the cap on concurrent
+   connections is served is closed at once; both are counted
+   (`b2bua_repl_inbound_dropped_total{reason}`). A peer reads either close as
+   its stream ending unheard, so the open timeout is at least the idle
+   timeout and the cap holds every peer's two flows and a reconnect of each.
 6. **Bounded lookup.** Each peer name lookup is bounded at 2 s, single-flight
    per name, with the stuck-lookup cap of `ResolvedTarget` (ADR-0043, the
    outbound backend client policy). A lookup past its bound reads as
@@ -59,6 +70,9 @@ life of the process, silently.
    link bound, an idle bound under twice the `Noop` interval, and a listen
    address that cannot be bound refuse the boot naming the variable. The host
    binds the listener before the core spawns (`ReplicationSetup::listener`).
+   A puller announcing another protocol version is refused at connect with a
+   `StreamRefused` naming the server's, counted
+   (`b2bua_repl_streams_refused_total`), and pulls again after its backoff.
 8. **Kube client retry.** A kube client that fails to build is built again in
    the background (1 s doubling to 30 s). The worker stays wired; its view is
    empty and unsynced until the informer lists.
@@ -80,20 +94,24 @@ that is not a positive integer refuses the boot, and so does a backoff
 ceiling under the 100 ms floor, a keepalive time
 that is not a whole number of seconds (1 s to 32 767 s), more than 127
 keepalive probes, or a user timeout above `u32::MAX` ms. The idle timeout must
-be at least twice the `Noop` interval. The two span nodes — a node's pullers
+be at least twice the `Noop` interval, and the dead-peer TTL above the idle
+timeout plus the backoff ceiling plus the connect timeout. The two span nodes — a node's pullers
 read its peers' `Noop`s — so a change raises the idle timeout first and the
 interval after.
 
 | key | meaning | default |
 |---|---|---|
-| `B2BUA_REPL_CONNECT_TIMEOUT_MS` | one connect to a peer | 2000 |
+| `B2BUA_REPL_CONNECT_TIMEOUT_MS` | one connect to a peer; a dead verdict meeting the Backup flow's stream down is confirmed by one connect at once within it (ADR-0047 D1), so a node lost whole is taken over at most idle + lookup + connect timeouts after the verdict, plus the idle timeout again for a frozen process whose kernel takes the connect (6–8 s by default) | 2000 |
 | `B2BUA_REPL_BACKOFF_MAX_MS` | the reconnect backoff's ceiling (its floor is 100 ms) | 2000 |
-| `B2BUA_REPL_IDLE_TIMEOUT_MS` | a stream delivering nothing is left | 15000 |
-| `B2BUA_REPL_NOOP_INTERVAL_MS` | the longest a served stream goes without a `Noop` | 5000 |
+| `B2BUA_REPL_IDLE_TIMEOUT_MS` | a stream delivering nothing is left; a dead verdict on a silent peer meets its stream down this long after its last frame at most, then the one connect confirms it (ADR-0047 D1); at least twice the `Noop` interval, far below a pod's force-delete | 2000 |
+| `B2BUA_REPL_NOOP_INTERVAL_MS` | the longest a served stream goes without a `Noop`, on every stream, each flow alike: the heartbeat; a position claim vouches for twice it | 500 |
 | `B2BUA_REPL_SEND_STALL_MS` | a send blocked this long leaves the stream, either end | 15000 |
+| `B2BUA_REPL_OPEN_TIMEOUT_MS` | an accepted connection with no opening request this long is closed; at least the idle timeout (worker start) | 4000 |
+| `B2BUA_REPL_MAX_CONNECTIONS` | inbound connections served at once; one above is closed; at least 4 (worker start) and 4 × (workers − 1) (render) | 64 |
 | `B2BUA_REPL_KEEPALIVE_IDLE_MS` / `_INTERVAL_MS` / `_RETRIES` | TCP keepalive | 5000 / 2000 / 3 |
 | `B2BUA_REPL_USER_TIMEOUT_MS` | `TCP_USER_TIMEOUT` | 15000 |
 | `B2BUA_REPL_LOOKUP_TIMEOUT_MS` | one peer name lookup | 2000 |
+| `B2BUA_REPL_DEAD_PEER_TTL_MS` | an HA timer of the serving side: a peer's change log no flow has served this long is dropped, writes or not (ADR-0055 §3); it decides only whether a peer coming back with the same identity resumes warm from its watermark or re-bootstraps cold; above the idle timeout plus the backoff ceiling plus one connect, so a short flow blip resumes warm | 60000 |
 
 ## Consequences
 

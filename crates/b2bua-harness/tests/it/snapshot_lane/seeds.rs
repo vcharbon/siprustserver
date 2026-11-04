@@ -83,8 +83,13 @@ async fn forked_call() -> Vec<Seed> {
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    let acked =
-        |c: &Call| c.b_legs.iter().all(|l| l.dialogs.iter().all(|d| d.awaited_ack_cseq.is_none()));
+    let acked = |c: &Call| {
+        c.b_legs.iter().all(|l| {
+            l.dialogs.iter().all(|d| {
+                call::helpers::sent_exchange(d).is_none_or(|x| x.awaited_ack_cseq.is_none())
+            })
+        })
+    };
     settle_until(|| b2bua.live_call(&call_ref).is_some_and(|c| acked(&c))).await;
     seeds.push(Seed::of("forked/answered", live()));
 
@@ -149,7 +154,8 @@ fn with_service_json(call: &Call) -> Seed {
         "limits": {"max": 3, "per": {"minute": 2}},
     });
     let a_leg = call.a_leg.leg_id.clone();
-    let call = call::helpers::set_call_ext(call.clone(), "lane-service", Some(state.clone()));
-    let call = call::helpers::set_leg_ext(call, &a_leg, "lane-service", state);
+    let mut call = call.clone();
+    call::helpers::set_call_ext(&mut call, "lane-service", Some(state.clone()));
+    call::helpers::set_leg_ext(&mut call, &a_leg, "lane-service", state);
     Seed::of("forked/answered+service-json", call)
 }

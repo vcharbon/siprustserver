@@ -6,6 +6,9 @@
 //! - [`IdKey`] — the keyed PRF; its counter stream is HMAC(key, n).
 //! - [`TurnIds`] — the draws of one turn: HMAC(key, turn ‖ n).
 //! - [`render`] — a draw rendered as a tag, a branch or a sequence start.
+//! - [`derived_tag`] — a tag any holder of a per-call seed derives alike.
+//! - [`SigningKey`] — the signature a node puts on what it states about its
+//!   own messages.
 //!
 //! Pure: the key enters as a value. The entropy that keys a process, and the
 //! counter its draws share, are the caller's.
@@ -29,10 +32,14 @@
     )
 )]
 
+mod derive;
 mod key;
 pub mod render;
+mod sign;
 mod turn;
 
+pub use derive::derived_tag;
 pub use key::IdKey;
 pub use render::MAGIC_COOKIE;
+pub use sign::{SigningKey, MAX_KEY_BYTES, MIN_KEY_BYTES, SIGNATURE_BYTES};
 pub use turn::TurnIds;

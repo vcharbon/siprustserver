@@ -66,16 +66,16 @@ async fn a_store_with_no_replication_wired_holds_nothing_after_a_call() {
     let store = Arc::new(InMemoryCallStore::new());
     let metrics = B2buaMetrics::new();
     let state = unwired_state(&store, &metrics);
-    assert!(state.terminate_writer().is_none(), "an unwired state constructs no writer");
+    assert!(state.repl_store().is_none(), "an unwired state holds no store write path");
 
     let call = cookie_call();
     let call_ref = call.call_ref.clone();
     assert_eq!(
-        call.topology.as_ref().map(|t| t.bak.as_str()),
-        Some("w1"),
+        crate::router::topology_cookie::placement(&call).map(|t| t.bak),
+        Some("w1".to_string()),
         "the cookie stamps a backup peer; the topology alone must not open the store"
     );
-    state.create(call);
+    state.create_placed(call);
 
     // Three authoritative turns, each flushed the way the router flushes an
     // Active call after a non-quiet turn (the pre-bump clone is what it passes).
@@ -171,7 +171,7 @@ async fn no_replication_wired_sends_the_store_neither_put_nor_delete() {
 
     let call = cookie_call();
     let call_ref = call.call_ref.clone();
-    state.create(call);
+    state.create_placed(call);
     let before = state.peek(&call_ref).unwrap();
     state.update(before.clone());
     state.flush(&before);
@@ -179,4 +179,35 @@ async fn no_replication_wired_sends_the_store_neither_put_nor_delete() {
 
     assert_eq!(store.puts.load(Ordering::SeqCst), 0, "no put reaches the store");
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0, "no delete reaches the store");
+}
+
+/// The state stamp is set where the vector is bumped (ADR-0055 §7): a write
+/// that changes only exempt fields moves the vector and leaves the stamp; a
+/// write that changes a compared field stamps the vector it bumps.
+#[test]
+fn a_write_stamps_the_vector_only_when_it_changes_a_compared_field() {
+    let store = Arc::new(InMemoryCallStore::new());
+    let state = unwired_state(&store, &B2buaMetrics::new());
+    let call = cookie_call();
+    let call_ref = state.create_placed(call.clone());
+    let versions = || {
+        let t = state.topology(&call_ref).expect("a proxied call");
+        (t.vector(), t.stamp())
+    };
+    let start = versions();
+
+    let mut exempt = state.peek(&call_ref).expect("resident");
+    exempt.message_count = Some(7);
+    exempt.timer_generation += 3;
+    state.update(exempt);
+    let (vector, stamp) = versions();
+    assert_eq!(vector, (start.0 .0 + 1, start.0 .1), "the write is counted");
+    assert_eq!(stamp, start.1, "an exempt-only write leaves the stamp");
+
+    let mut compared = state.peek(&call_ref).expect("resident");
+    compared.callback_context = Some("a compared field".into());
+    state.update(compared);
+    let (vector, stamp) = versions();
+    assert_eq!(stamp, vector, "a compared write stamps the vector it bumps");
+    assert_eq!(vector, (start.0 .0 + 2, start.0 .1));
 }

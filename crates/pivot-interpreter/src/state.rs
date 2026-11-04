@@ -28,6 +28,8 @@ pub struct LegState {
     pub cseq_remote: Option<u32>,
     /// The last RSeq seen on a reliable provisional of this leg.
     pub rseq: Option<u32>,
+    /// The `host:port` the leg's endpoint is bound at on this run.
+    pub local_hostport: Option<String>,
     /// The MSCML requests the leg has received and not yet answered, whose ids
     /// the responses it sends echo, oldest first per type (RFC 5022 §6,
     /// §10.2).

@@ -2,8 +2,9 @@
 
 Each pairing runs the scenario against a SIPp peer on loopback that drives one
 exit (answer, reject, a refusal with a Retry-After, ring forever, silence, a late answer, a 2xx crossing the
-CANCEL, far-end BYE, 481 or no final to the BYE, an in-dialog request the
-caller cannot serve, a 2xx retransmitted after the ACK) and checks the record
+CANCEL, a far-end BYE in the CANCEL wait, far-end BYE, 481 or no final to the BYE, an in-dialog request the
+caller cannot serve, a 2xx retransmitted after the ACK, a 200 landing while the
+caller serves an OPTIONS in the early dialog) and checks the record
 the call left and that the peer, which fails on any missing ACK, BYE or
 answer, exits 0. Needs `sipp` on PATH: without it the tests fail. The case
 of a response carrying `CSeq` text outside its CSeq header runs the SIPp image
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-from sipp_pairing import SIPP, Pairing, run_pair, sipp_image
+from sipp_pairing import SIPP, Pairing, run_burst_pair, run_pair, sipp_image
 
 from hakit import jsonval as jv
 from hakit.schemas import SchemaSet
@@ -50,6 +51,8 @@ CASES = [
     Case("peer-cancel-crossing.xml", "timeout", None, "timeout", "provisional"),
     Case("peer-silent.xml", "timeout", None, "timeout", "invited", provisional=False),
     Case("peer-late-answer.xml", "timeout", None, "timeout", "invited", provisional=False),
+    # The setup deadline decided the ending: the far end's BYE in the CANCEL wait is a failure only.
+    Case("peer-bye-then-late-answer.xml", "timeout", None, "timeout", "provisional", failures=["protocol", "dialog_request"]),
     Case("peer-tick.xml", "answered", 200, None, "released"),
     Case("peer-2xx-twice.xml", "answered", 200, None, "released"),
     Case("peer-ack-lost.xml", "answered", 200, None, "released"),
@@ -121,3 +124,22 @@ def test_a_response_whose_route_carries_cseq_text_is_acted_on(tmp_path: Path) ->
     assert SchemaSet.load().errors("call-outcome.v1", r) == []
     assert (r["ending"], r["final_code"], r["phase_reached"]) == ("answered", 200, "released")
     assert r["first_provisional_at_ms"] is not None
+
+
+def test_a_final_landing_while_the_handler_runs_still_ends_in_a_record(tmp_path: Path) -> None:
+    """The callee rings, then sends an OPTIONS in the early dialog and its 200
+    OK back to back: the 200 lands while the caller's unexpected-message
+    handler still serves the OPTIONS. SIPp discards it and the call goes on;
+    the 200's retransmission answers it. Every call writes its record, none is
+    aborted."""
+    calls = 10
+    p = run_burst_pair(tmp_path, calls)
+    assert p.uac_rc == 0, f"sipp {p.uac_exit}"
+    assert p.counter("FailedUnexpectedMessage(C)") == 0
+    # The race was hit: SIPp discarded a 200 that landed inside the handler.
+    assert "Continuing call on unexpected message" in p.errors
+    assert len(p.records) == calls
+    assert p.peer_rc == 0, f"{p.peer_rc} calls of the peer not complete"
+    for r in p.records:
+        assert SchemaSet.load().errors("call-outcome.v1", r) == []
+        assert (r["ending"], r["final_code"], r["phase_reached"], r["failures"]) == ("answered", 200, "released", [])

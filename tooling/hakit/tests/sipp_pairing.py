@@ -21,9 +21,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from burst_peer import BurstPeer
+
 from hakit.jsonval import Json, as_obj
 from hakit.paths import BASE_CONTENT, REPO_ROOT
 from hakit.scenario_lint import key_defaults
+from hakit.sipp_driver import UAC_BEHAVIOURS
 
 PEERS = Path(__file__).parent / "sipp_peers"
 SCENARIOS = BASE_CONTENT / "scenarios"
@@ -80,6 +83,7 @@ class Pairing:
     uac_pid: int = 0
     peer_pid: int = 0
     messages: str = ""
+    errors: str = ""
 
     def counter(self, column: str) -> int:
         return int(self.stats.get(column, "0") or 0)
@@ -178,18 +182,56 @@ def run_pair(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    uac = _start_uac(sipp, d, scenario, caller, callee, common, rate, keys, trace)
+    uac_rc = _wait(uac, 180)
+    peer_rc = _wait(proc, 30)
+    return _pairing(d, uac, uac_rc, peer_rc, proc.pid)
+
+
+def run_burst_pair(work: Path, calls: int = 1, rate: int = 10) -> Pairing:
+    """`calls` calls of the base UAC scenario at `rate` per second against the
+    burst peer (burst_peer.py), which sends an OPTIONS in the early dialog and
+    its 200 OK back to back; `peer_rc` is the number of calls the peer did not
+    complete."""
+    assert SIPP is not None, "sipp is not on PATH"
+    d = Path(tempfile.mkdtemp(prefix=f"{UAC.stem}-burst-{calls}-", dir=work))
+    (d / "inject.csv").write_text("SEQUENTIAL\nservice;X-Test: loopback;;;\n")
+    caller = _free_port_pair()
+    callee = caller + 1
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", callee))
+        common = ["-i", "127.0.0.1", "-m", str(calls), "-nostdin", "-max_invite_retrans", "3", "-max_non_invite_retrans", "3"]
+        uac = _start_uac([SIPP], d, UAC, caller, callee, common, rate, None, False)
+        peer_rc = BurstPeer(sock, calls).serve(120)
+        uac_rc = _wait(uac, 180)
+    return _pairing(d, uac, uac_rc, peer_rc, 0)
+
+
+def _start_uac(
+    sipp: list[str],
+    d: Path,
+    scenario: Path,
+    caller: int,
+    callee: int,
+    common: list[str],
+    rate: int,
+    keys: Mapping[str, str] | None,
+    trace: bool,
+) -> subprocess.Popen[bytes]:
+    """The UAC of a pairing, run with the command-line options of a stream (sipp_driver)."""
     traces = ["-trace_msg", "-message_file", "messages.log"] if trace else []
-    uac = subprocess.Popen(
+    return subprocess.Popen(
         [*sipp, f"127.0.0.1:{callee}", "-sf", str(scenario), "-p", str(caller), *common, "-r", str(rate)]
         + ["-inf", "inject.csv", *key_args(scenario, {**UAC_KEYS, **(keys or {})}), "-recv_timeout", "60000"]
         + ["-cid_str", "%u-%p-loopback@%s", "-trace_logs", "-log_file", "records.jsonl"]
-        + ["-trace_err", "-trace_stat", "-stf", "stat.csv", "-fd", "1", *traces],
+        + ["-trace_err", "-trace_stat", "-stf", "stat.csv", "-fd", "1", *UAC_BEHAVIOURS, *traces],
         cwd=d,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    uac_rc = _wait(uac, 180)
-    peer_rc = _wait(proc, 30)
+
+
+def _pairing(d: Path, uac: subprocess.Popen[bytes], uac_rc: int | None, peer_rc: int | None, peer_pid: int) -> Pairing:
     records = [as_obj(json.loads(line)) for line in _read(d / "records.jsonl").splitlines() if line.strip()]
     return Pairing(
         records,
@@ -197,8 +239,9 @@ def run_pair(
         peer_rc,
         _last_stats(d / "stat.csv"),
         uac.pid,
-        proc.pid,
+        peer_pid,
         _read(d / "messages.log"),
+        "".join(_read(f) for f in sorted(d.glob("*_errors.log"))),
     )
 
 

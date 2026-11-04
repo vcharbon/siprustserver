@@ -1,0 +1,16 @@
+# Minimal network tools image: the proxy pod's vip-loopback init container
+# (the VIPs on lo, strict ARP, the ICMP drop, the route guard's table
+# cleared), the masq-exempt DaemonSet and the kind lab's smokes
+# (deploy/helm/lib/smokes.sh).
+#
+# Built locally (not pulled) so a fresh build produces clean OCI layers that
+# `kind load` imports reliably. Alpine iproute2, iptables and nftables give
+# `ip`, `iptables` and `nft`; busybox gives `sh`, `nc` and `nslookup`.
+#
+#   docker build -f deploy/docker/Dockerfile.nettools -t siprustserver-nettools:dev .
+# nft 1.1 or later: 1.0.x segfaults on a node whose ruleset holds kube-proxy's
+# nftables tables.
+FROM alpine:3.22
+RUN apk add --no-cache iproute2 iptables nftables
+ENTRYPOINT []
+CMD ["/bin/sh"]

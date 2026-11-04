@@ -12,6 +12,7 @@ pub(crate) const ADMIT_BY_CALL: &str = "admit_by_call";
 pub(crate) const BACKEND_GATE: &str = "backend_gate";
 pub(crate) const CAPACITY_LIMITS: &str = "capacity_limits";
 pub(crate) const CDR_MEMORY: &str = "cdr_memory";
+pub(crate) const DEAD_VERDICTS: &str = "dead_verdicts";
 pub(crate) const DISPATCH_BODIES: &str = "dispatch_bodies";
 pub(crate) const DISPATCH_QUEUE: &str = "dispatch_queue";
 pub(crate) const DISPATCH_SLOTS: &str = "dispatch_slots";
@@ -21,9 +22,11 @@ pub(crate) const LIMITER_REFRESH_DUE: &str = "limiter_refresh_due";
 pub(crate) const LIMITER_RELEASE_WAITING: &str = "limiter_release_waiting";
 pub(crate) const LIMITER_REPORTS: &str = "limiter_reports";
 pub(crate) const MODEL_VIOLATIONS: &str = "model_violations";
+pub(crate) const OUTBOX: &str = "outbox";
 pub(crate) const OVERLOAD_SAMPLER: &str = "overload_sampler";
 pub(crate) const OVERLOAD_SIGNAL: &str = "overload_signal";
 pub(crate) const PULLER_BOOTSTRAP: &str = "puller_bootstrap";
+pub(crate) const PULLER_HELD_MEETINGS: &str = "puller_held_meetings";
 pub(crate) const READINESS_TRANSITIONS: &str = "readiness_transitions";
 pub(crate) const REAPER_LEDGERS: &str = "reaper_ledgers";
 pub(crate) const SUPERVISOR_PEERS: &str = "supervisor_peers";
@@ -32,11 +35,12 @@ pub(crate) const TRACE_PROCESS: &str = "trace_process";
 pub(crate) const TRACE_SPANS: &str = "trace_spans";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 22] = [
+pub const LOCKS: [&str; 25] = [
     ADMIT_BY_CALL,
     BACKEND_GATE,
     CAPACITY_LIMITS,
     CDR_MEMORY,
+    DEAD_VERDICTS,
     DISPATCH_BODIES,
     DISPATCH_QUEUE,
     DISPATCH_SLOTS,
@@ -46,9 +50,11 @@ pub const LOCKS: [&str; 22] = [
     LIMITER_RELEASE_WAITING,
     LIMITER_REPORTS,
     MODEL_VIOLATIONS,
+    OUTBOX,
     OVERLOAD_SAMPLER,
     OVERLOAD_SIGNAL,
     PULLER_BOOTSTRAP,
+    PULLER_HELD_MEETINGS,
     READINESS_TRANSITIONS,
     REAPER_LEDGERS,
     SUPERVISOR_PEERS,

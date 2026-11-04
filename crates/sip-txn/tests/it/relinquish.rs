@@ -20,10 +20,12 @@ fn seeds(client: &str, server: &str) -> Vec<TxnSeed> {
             dest: addr(PEER),
             provisional: true,
             cancel: None,
+            ack_ahead: None,
         },
         TxnSeed::ServerInvite {
             request: request_of(&inbound_request("INVITE", server, CALL_ID, None)),
             to_tag: Some("early-tag".to_string()),
+            provisional: None,
             leg_id: Some("a".to_string()),
         },
     ]
@@ -84,4 +86,27 @@ async fn a_relinquished_server_invite_draws_no_final_and_the_rest_stays() {
     let finals = stack.drain_peer().iter().filter(|m| matches!(m, SipMessage::Response(_))).count();
     assert_eq!(finals, 0, "no final");
     assert!(!stack.txn.relinquish_server(key).await.unwrap(), "idempotent");
+}
+
+/// `TransactionLayer::relinquish_client`: one INVITE client transaction goes
+/// with nothing sent, its bound with it, while the call's other transaction
+/// stays; a response on its branch afterwards is a new arrival.
+#[tokio::test(start_paused = true)]
+async fn a_relinquished_client_invite_never_times_out_and_the_rest_stays() {
+    let mut stack = Stack::build(5, 64, 64).await;
+    let (client, server) = ("z9hG4bK-rc-c", "z9hG4bK-rc-s");
+    assert_eq!(stack.txn.seed(CALL_REF, seeds(client, server)).await.unwrap(), 2);
+
+    assert!(stack.txn.relinquish_client(client).await.unwrap(), "the client goes");
+    assert!(!stack.txn.holds_client(client).await.unwrap());
+    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1, "the server stays");
+    elapse_ms(200_000).await;
+    let out = stack.drain_peer();
+    assert_eq!(count_requests(&out, "INVITE") + count_requests(&out, "CANCEL"), 0, "nothing sent");
+    let timed_out = stack
+        .drain_events()
+        .iter()
+        .any(|e| matches!(e, TransactionEvent::Timeout { branch, .. } if branch == client));
+    assert!(!timed_out, "the relinquished INVITE never times out");
+    assert!(!stack.txn.relinquish_client(client).await.unwrap(), "idempotent");
 }

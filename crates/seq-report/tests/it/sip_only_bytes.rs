@@ -1,5 +1,5 @@
-//! A doc with no HTTP row renders byte for byte as it did before the HTTP
-//! plane existed: the fixtures are that renderer's output for this doc.
+//! A doc with no HTTP row renders byte for byte the fixtures: the renderer's
+//! output for this doc, each SIP call in its own hue.
 
 use seq_report::{
     render_global_txt, render_html, render_svg, Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow,

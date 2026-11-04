@@ -48,14 +48,28 @@ pub fn rendezvous_select<'a, T: RendezvousCandidate>(
     let mut best: Option<&T> = None;
     let mut best_score: u128 = 0;
     for c in candidates {
-        let w = u128::from(c.weight().unwrap_or(1).max(1));
-        let s = u128::from(score64(key, c.id())) * w;
+        let s = weighted_score(key, c);
         if best.is_none() || s > best_score {
             best = Some(c);
             best_score = s;
         }
     }
     best
+}
+
+/// Every candidate in descending weighted score for `key`, ties in slice
+/// order: the first is [`rendezvous_select`]'s winner, each next one the
+/// winner once those before it are taken out.
+pub fn rendezvous_rank<'a, T: RendezvousCandidate>(key: &str, candidates: &'a [T]) -> Vec<&'a T> {
+    let mut ranked: Vec<(u128, &T)> =
+        candidates.iter().map(|c| (weighted_score(key, c), c)).collect();
+    ranked.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
+    ranked.into_iter().map(|(_, c)| c).collect()
+}
+
+fn weighted_score<T: RendezvousCandidate>(key: &str, c: &T) -> u128 {
+    let w = u128::from(c.weight().unwrap_or(1).max(1));
+    u128::from(score64(key, c.id())) * w
 }
 
 #[cfg(test)]
@@ -82,6 +96,19 @@ mod tests {
         let wa = rendezvous_select("call-abc", &a).unwrap().0;
         let wb = rendezvous_select("call-abc", &b).unwrap().0;
         assert_eq!(wa, wb);
+    }
+
+    #[test]
+    fn rank_heads_with_the_winner_and_drops_down_by_removal() {
+        let cs = [W("w1"), W("w2"), W("w3"), W("w4")];
+        for i in 0..50 {
+            let key = format!("call-{i}");
+            let ranked: Vec<&str> = rendezvous_rank(&key, &cs).iter().map(|c| c.0).collect();
+            assert_eq!(ranked.len(), cs.len());
+            assert_eq!(ranked[0], rendezvous_select(&key, &cs).unwrap().0);
+            let rest: Vec<W> = cs.iter().filter(|c| c.0 != ranked[0]).map(|c| W(c.0)).collect();
+            assert_eq!(ranked[1], rendezvous_select(&key, &rest).unwrap().0);
+        }
     }
 
     #[test]

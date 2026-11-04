@@ -37,7 +37,7 @@ pub enum CallOutcome {
     /// The call was refused before any datagram: its correlation key is
     /// missing, unusable, held by a concurrent call, or cooling after a failed
     /// call. Carries the bounded reason (`no_from`, `userless_from`,
-    /// `key_in_flight`, `key_cooling`).
+    /// `unmatched_from`, `key_in_flight`, `key_cooling`).
     Rejected(&'static str),
 }
 

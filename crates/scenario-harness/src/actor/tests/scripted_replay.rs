@@ -341,6 +341,7 @@ async fn observe_final_pinned_to_invite_skips_prack_200() {
                                 from: None,
                                 to: None,
                                 ruri: None,
+                                call_id: None,
                                 headers: vec![("Supported".into(), "100rel".into())],
                                 rewrite: Default::default(),
                             }),

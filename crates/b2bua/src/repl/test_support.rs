@@ -87,7 +87,7 @@ impl Node {
         net: &Arc<SimulatedReplicationNetwork>,
         clock: &Clock,
     ) -> Self {
-        let changelog = Changelog::new(gen, clock.clone()).with_ttls(30_000, 300_000);
+        let changelog = Changelog::new(gen, clock.clone());
         let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
         let listener = net.listen(addr).await.unwrap();
         let server = ReplServer::new(ordinal, changelog, Arc::new(store.clone()));

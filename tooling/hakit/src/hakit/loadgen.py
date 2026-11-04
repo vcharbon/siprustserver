@@ -262,6 +262,13 @@ class LoadgenStream:
             text = res.body if res.status == 200 else ""
         return parse_metrics(text, self.stream.name)
 
+    def held_tally(self) -> Tally | None:
+        """The live endpoint's counters: `POST /rate?cps=0` has parked the rate
+        by the time it answers."""
+        res = self.executor.http("GET", f"http://{self.ip}:{METRICS_PORT}/metrics", timeout_s=10)
+        t = parse_metrics(res.body, self.stream.name) if res.status == 200 else None
+        return t if t is not None and t.calls is not None else None
+
     def record_copy(self) -> RecordCopy:
         """loadgen writes its record file itself."""
         return RecordCopy(True)

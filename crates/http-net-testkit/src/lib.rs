@@ -4,7 +4,9 @@
 //! - [`SimulatedHttpNetwork`] — an in-memory routing table keyed by
 //!   `SocketAddr`. A `request` looks up the bound service, applies the per-`dst`
 //!   [`Fault`] (pause / cutoff / error), waits the transit delay, and invokes
-//!   the **real** handler in-process. Mandatory for the paused-clock tests:
+//!   the **real** handler in-process; a backend client pools its connections,
+//!   and a balanced address spreads new connections over its backends
+//!   ([`Pick`]). Mandatory for the paused-clock tests:
 //!   real sockets do not obey `tokio::time::pause`, so deterministic scenarios
 //!   cannot use real HTTP. This is the workhorse.
 //! - [`RecordingHttpNetwork`] — a decorator that records both sides of every
@@ -14,14 +16,22 @@
 //!   exchanges a scenario states as a program and answers anything else `500`,
 //!   recorded as a finding. Its faults include closing the connection without
 //!   a response, through [`HttpService::answer`] and [`HttpAnswer`].
+//! - [`ExternalHttp`] — an [`HttpService`] forwarding to a real backend
+//!   through `clock-bridge`: a paused-clock test reaches an external process,
+//!   its answer delivered at a virtual instant.
+//! - [`stub::Stub`] — a stub service for a test driving a real peer: request
+//!   mappings answered after a delay with any bytes or a close, a default for
+//!   the rest, every request recorded.
 //!
 //! The crate declares no purity tier (ADR-0051 §1): a production binary that
 //! links it fails the closure check.
 
 mod entries;
+mod external;
 mod recording;
 pub mod scripted;
 mod simulated;
+pub mod stub;
 
 // The seam's types and modules, imported under the paths this crate's modules read them by.
 use http_net::{
@@ -30,5 +40,6 @@ use http_net::{
 };
 
 pub use entries::{to_http_entries, CapturedExchange, ExchangeOutcome, RecordedHttpEntry};
+pub use external::ExternalHttp;
 pub use recording::{HttpNetworkEvent, HttpOutcome, RecordingHttpNetwork, HTTP_TAG};
-pub use simulated::{Behaviour, Fault, SimulatedHttpNetwork};
+pub use simulated::{Behaviour, Fault, Pick, SimulatedHttpNetwork};

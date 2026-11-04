@@ -93,6 +93,14 @@
       "type": "integer",
       "minimum": 0
     },
+    "disruptionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxUnavailable": { "type": "integer", "minimum": 1 }
+      }
+    },
     "port": {
       "type": "integer",
       "minimum": 1,
@@ -117,60 +125,30 @@
         "type": "string"
       }
     },
-    "virtualIp": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "address",
-        "interface"
-      ],
-      "properties": {
-        "address": {
-          "type": "string",
-          "minLength": 1
-        },
-        "interface": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
+    "asn": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
     },
-    "trackScript": {
+    "bgpPeer": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "name",
-        "script"
+        "address",
+        "asn"
       ],
       "properties": {
         "name": {
           "type": "string",
-          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
         },
-        "script": {
+        "address": {
           "type": "string",
           "minLength": 1
         },
-        "interval": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "timeout": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "fall": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "rise": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "weight": {
-          "type": "integer",
-          "minimum": -253,
-          "maximum": 253
+        "asn": {
+          "$ref": "#/definitions/asn"
         }
       }
     }
@@ -185,7 +163,7 @@
     "image": {
       "$ref": "#/definitions/fullImage"
     },
-    "keepalivedImage": {
+    "netToolsImage": {
       "$ref": "#/definitions/fullImage"
     },
     "imagePullSecrets": {
@@ -198,14 +176,19 @@
         "proxyVip": {
           "type": "string"
         },
-        "internalInterface": {
-          "type": "string"
-        },
         "externalVip": {
           "type": "string"
         },
         "externalInterface": {
           "type": "string"
+        },
+        "externalNextHops": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "ipv4",
+            "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$"
+          }
         },
         "externalSubnet": {
           "type": "string"
@@ -252,8 +235,14 @@
         "dest": {
           "type": "string"
         },
-        "outboundProxy": {
-          "type": "boolean"
+        "clusterKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecret": {
+              "type": "string"
+            }
+          }
         },
         "replication": {
           "type": "object",
@@ -264,6 +253,26 @@
             },
             "port": {
               "$ref": "#/definitions/port"
+            }
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "proxyNodeCidrs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F.:]+/[0-9]{1,3}$"
+              }
+            },
+            "monitoringNamespace": {
+              "type": "string",
+              "minLength": 1
             }
           }
         },
@@ -293,6 +302,9 @@
         },
         "terminationGracePeriodSeconds": {
           "$ref": "#/definitions/count"
+        },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/disruptionBudget"
         },
         "resources": {
           "$ref": "#/definitions/resources"
@@ -376,6 +388,9 @@
             "existingSecret": {
               "type": "string"
             },
+            "drawInCluster": {
+              "type": "boolean"
+            },
             "kid": {
               "type": "string",
               "minLength": 1
@@ -385,6 +400,105 @@
         "unresQlenBytes": {
           "type": "integer",
           "minimum": 1
+        },
+        "readinessProbe": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60
+            },
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            }
+          }
+        },
+        "minReadySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "announce": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "loadBalancerClass": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "propagationMs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "metallb": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "namespace": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "myASN": {
+                  "$ref": "#/definitions/asn"
+                },
+                "peers": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "internal": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/bgpPeer"
+                      }
+                    },
+                    "external": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/bgpPeer"
+                      }
+                    }
+                  }
+                },
+                "bfd": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "receiveIntervalMs": {
+                      "type": "integer",
+                      "minimum": 10,
+                      "maximum": 60000
+                    },
+                    "transmitIntervalMs": {
+                      "type": "integer",
+                      "minimum": 10,
+                      "maximum": 60000
+                    },
+                    "detectMultiplier": {
+                      "type": "integer",
+                      "minimum": 2,
+                      "maximum": 255
+                    }
+                  }
+                },
+                "connectTimeSeconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              }
+            }
+          }
         },
         "env": {
           "$ref": "#/definitions/env"
@@ -412,6 +526,9 @@
         },
         "terminationGracePeriodSeconds": {
           "$ref": "#/definitions/count"
+        },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/disruptionBudget"
         },
         "resources": {
           "$ref": "#/definitions/resources"
@@ -441,26 +558,41 @@
         "priorityClassName": {
           "type": "string"
         },
-        "keepalived": {
+        "routeGuard": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "virtualRouterId": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "peers": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "ipv4"
+              }
+            },
+            "pollMs": {
               "type": "integer",
-              "minimum": 1,
-              "maximum": 255
+              "minimum": 10,
+              "maximum": 10000
             },
-            "extraVirtualIps": {
-              "type": "array",
-              "items": {
-                "$ref": "#/definitions/virtualIp"
-              }
+            "deadMs": {
+              "type": "integer",
+              "minimum": 40,
+              "maximum": 600000
             },
-            "extraTrackScripts": {
-              "type": "array",
-              "items": {
-                "$ref": "#/definitions/trackScript"
-              }
+            "holdMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 600000
+            },
+            "metricsPort": {
+              "$ref": "#/definitions/port"
+            },
+            "withdrawWithinMs": {
+              "type": "integer",
+              "minimum": 1
             },
             "resources": {
               "$ref": "#/definitions/resources"
@@ -650,6 +782,52 @@
         },
         "resources": {
           "$ref": "#/definitions/resources"
+        }
+      }
+    },
+    "inviteTxnTimeoutSec": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 33,
+      "maximum": 600
+    },
+    "sizing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cps": { "type": ["integer", "null"], "minimum": 1 },
+            "holdSeconds": { "type": ["integer", "null"], "minimum": 1 },
+            "ringSeconds": { "type": ["integer", "null"], "minimum": 0 },
+            "invitesPerCall": { "type": ["number", "null"], "minimum": 2, "maximum": 100 }
+          }
+        },
+        "callMarginPct": { "type": ["integer", "null"], "minimum": 0 },
+        "emergencyPct": { "type": ["integer", "null"], "minimum": 1 },
+        "txnMarginPct": { "type": ["integer", "null"], "minimum": 0 },
+        "gateMarginPct": { "type": ["integer", "null"], "minimum": 1 },
+        "txnSecondsPerCall": { "type": ["integer", "null"], "minimum": 0 },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "baseBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "answeredCallBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "ringingCallBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "replicaBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "txnBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "outboundConnections": { "type": ["integer", "null"], "minimum": 0 },
+            "connectionBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "proxyBaseBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "memoEntryOverheadBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "slackPct": { "type": ["integer", "null"], "minimum": 0, "maximum": 99 }
+          }
         }
       }
     }

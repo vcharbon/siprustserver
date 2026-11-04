@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use sip_message::{SipMessage, SipRequest, SipResponse};
 use tokio::time::Instant;
 
+use super::reliable::ReliableSent;
 use super::table::{BackwardsCseq, DialogTable};
 use super::verdict::DialogVerdict;
 use crate::WaiverScope;
@@ -32,7 +33,9 @@ pub enum DialogJudging {
 struct Inner {
     judging: DialogJudging,
     table: DialogTable,
-    recorded: Vec<DialogVerdict>,
+    reliable: ReliableSent,
+    /// Each verdict with when it was first recorded.
+    recorded: Vec<(DialogVerdict, Instant)>,
 }
 
 /// The dialog table of one UA and the verdicts it recorded.
@@ -58,6 +61,7 @@ impl DialogJudge {
             inner: Mutex::new(Inner {
                 judging,
                 table: DialogTable::new(backwards),
+                reliable: ReliableSent::default(),
                 recorded: Vec::new(),
             }),
         }
@@ -90,8 +94,17 @@ impl DialogJudge {
         }
         match msg {
             SipMessage::Request(r) => inner.table.note_sent_request(r),
-            SipMessage::Response(r) => inner.table.note_sent_response(r, now_us),
+            SipMessage::Response(r) => {
+                inner.reliable.note(r);
+                inner.table.note_sent_response(r, now_us);
+            }
         }
+    }
+
+    /// Whether `prack`'s `RAck` names a reliable provisional this UA sent on
+    /// the dialog it rides (RFC 3262 §3).
+    pub fn prack_names_a_sent_provisional(&self, prack: &SipRequest) -> bool {
+        self.inner.lock().unwrap().reliable.names(prack)
     }
 
     /// Whether the judge is fed at all.
@@ -112,8 +125,8 @@ impl DialogJudge {
             SipMessage::Request(r) => inner.table.judge_received(r, now_us),
         };
         if let Some(v) = verdict {
-            if !inner.recorded.contains(&v) {
-                inner.recorded.push(v);
+            if !inner.recorded.iter().any(|(r, _)| *r == v) {
+                inner.recorded.push((v, Instant::now()));
             }
         }
     }
@@ -125,6 +138,7 @@ impl DialogJudge {
         inner
             .recorded
             .iter()
+            .map(|(v, _)| v)
             .rev()
             .find(|v| {
                 !v.kind.on_response()
@@ -154,7 +168,7 @@ impl DialogJudge {
             return None;
         }
         let tag = |t: Option<&str>| t.unwrap_or_default().to_string();
-        let found = inner.recorded.iter().rev().find(|v| {
+        let found = inner.recorded.iter().map(|(v, _)| v).rev().find(|v| {
             v.kind.on_response()
                 && v.call_id == response.call_id().as_str()
                 && v.method == response.cseq().method().as_str()
@@ -193,14 +207,15 @@ impl DialogJudge {
             DialogJudging::Harness => "",
             DialogJudging::Driver(_) | DialogJudging::Off => " (its driver answers for it)",
         };
-        for v in &inner.recorded {
+        for (v, _) in &inner.recorded {
             lines.push(format!("verdict [{}]{judged_by}: {v}", v.rule()));
         }
         lines
     }
 
-    /// Every verdict the harness gates: those recorded under harness judging.
-    pub fn gated(&self) -> Vec<DialogVerdict> {
+    /// Every verdict the harness gates — those recorded under harness
+    /// judging — with when it was first recorded.
+    pub fn gated(&self) -> Vec<(DialogVerdict, Instant)> {
         let inner = self.inner.lock().unwrap();
         match inner.judging {
             DialogJudging::Harness => inner.recorded.clone(),
@@ -210,10 +225,22 @@ impl DialogJudge {
 }
 
 /// Whether the waiver `w` opts the verdict `v` of the UA `party` out: the
-/// same rule, naming that party. A dialog verdict is a finding against the
-/// SUT, so a waiver naming no party covers none.
+/// same rule, naming that party, on the method it names if any, a request
+/// ending its subscription when it asks for one. A dialog
+/// verdict is a finding against the SUT, so a waiver naming no party covers
+/// none.
 pub fn covers(w: &WaiverScope, party: &str, v: &DialogVerdict) -> bool {
-    w.rule == v.rule() && w.position.is_none() && w.party.as_deref() == Some(party)
+    w.rule == v.rule()
+        && w.position.is_none()
+        && w.party.as_deref() == Some(party)
+        && w.method.as_deref().is_none_or(|m| m == v.method)
+        && (!w.terminating || v.terminating)
+}
+
+/// [`covers`], for the verdict `v` first recorded at `at`: a waiver that
+/// holds from an instant covers only what was recorded from then on.
+pub fn covers_at(w: &WaiverScope, party: &str, v: &DialogVerdict, at: Instant) -> bool {
+    covers(w, party, v) && w.since.is_none_or(|since| at >= since)
 }
 
 /// Whether `w` waives a dialog rule without naming the UA it is on: it

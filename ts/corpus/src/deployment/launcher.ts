@@ -20,7 +20,7 @@ import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 
 /** The kinds of job a launch starts. */
-export type JobKind = "replay" | "ingest" | "cut" | "retire" | "delete"
+export type JobKind = "replay" | "ingest" | "cut" | "retire" | "delete" | "campaign" | "inbox"
 
 /** One named shell line and the side of the job it runs on. */
 export interface Hook {

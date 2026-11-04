@@ -22,7 +22,7 @@ mod gate;
 mod probe;
 mod prometheus;
 
-pub use gate::{BackupBound, CapacityGate, CapacityReading, Level, Occupancy};
+pub use gate::{BackupBound, BackupCeilings, CapacityGate, CapacityReading, Level, Occupancy};
 pub use probe::{simulated, SimulatedSystemControl, SimulatedSystemProbe, SystemProbe};
 
 #[cfg(test)]

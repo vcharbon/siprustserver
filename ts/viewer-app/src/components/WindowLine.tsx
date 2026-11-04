@@ -23,7 +23,7 @@ export const windowLine = (window: FlowsWindow, total: number, beyond = 0): stri
   window.count >= total
     ? undefined
     : `legs ${window.from}–${window.from + window.count - 1} of ${total}` +
-      (beyond === 0 ? "" : `, and the case's ${beyond} leg${beyond === 1 ? "" : "s"} past them`)
+      (beyond === 0 ? "" : ` + ${beyond} case leg${beyond === 1 ? "" : "s"}`)
 
 /** The line, with the buttons that move the window; nothing where it drew the document. */
 export const WindowLine = ({ window }: { window: DrawnWindow }): JSX.Element | null => {
@@ -31,14 +31,14 @@ export const WindowLine = ({ window }: { window: DrawnWindow }): JSX.Element | n
   if (line === undefined) return null
   return (
     <p className="source-filter">
-      drawing {line}
+      {line}
       <button
         type="button"
         className="copy-ref"
         disabled={window.from === 0}
         onClick={() => window.onWindow(shiftWindow(window, window.total, -1).from)}
       >
-        earlier legs
+        ‹ earlier
       </button>
       <button
         type="button"
@@ -46,7 +46,7 @@ export const WindowLine = ({ window }: { window: DrawnWindow }): JSX.Element | n
         disabled={window.from + window.count >= window.total}
         onClick={() => window.onWindow(shiftWindow(window, window.total, 1).from)}
       >
-        later legs
+        later ›
       </button>
     </p>
   )

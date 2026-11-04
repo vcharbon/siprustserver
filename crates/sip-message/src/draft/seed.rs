@@ -8,9 +8,10 @@
 use bytes::Bytes;
 
 use crate::header::{HeaderName, Uri};
+use crate::header_table::HeaderTable;
 use crate::method::Method;
 use crate::sip_str::SipStr;
-use crate::types::{SipHeader, SipRequest, SipResponse};
+use crate::types::{SipRequest, SipResponse};
 
 use super::edit::Draft;
 use super::entry::Entry;
@@ -25,14 +26,16 @@ pub type ResponseDraft = Draft<kind::Response>;
 /// origination fills its entry list without a regrowth.
 const TYPICAL_HEADERS: usize = 12;
 
-fn seed(headers: &[SipHeader], keep: impl Fn(&HeaderName) -> bool) -> Vec<Entry> {
+/// The entries of a parsed message's lines, each keeping the header the parse
+/// classified it as.
+fn seed(headers: &HeaderTable, keep: impl Fn(&HeaderName) -> bool) -> Vec<Entry> {
     // Sized for the whole header list up front: a relay thaws every message it
     // forwards, so the entry list must not grow its way there.
-    let mut entries = Vec::with_capacity(headers.len());
-    for header in headers {
-        let name = HeaderName::of(&header.name);
-        if keep(&name) {
-            entries.push(Entry::raw(name, header.value.clone()));
+    let mut entries = Vec::with_capacity(headers.lines().len());
+    for (id, header) in headers.classified_lines() {
+        let entry = Entry::classified_raw(id, &header.name, header.value.clone());
+        if keep(entry.name()) {
+            entries.push(entry);
         }
     }
     entries
@@ -64,7 +67,7 @@ impl RequestDraft {
                 uri: msg.request_uri().clone(),
                 version: SipStr::owned(msg.version()),
             },
-            seed(msg.headers(), keep),
+            seed(msg.header_table(), keep),
             msg.body().clone(),
         )
     }
@@ -109,7 +112,7 @@ impl ResponseDraft {
                 status: msg.status(),
                 reason: SipStr::owned(msg.reason()),
             },
-            seed(msg.headers(), keep),
+            seed(msg.header_table(), keep),
             msg.body().clone(),
         )
     }

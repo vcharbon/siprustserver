@@ -6,23 +6,23 @@
 //! relinquished (ADR-0047 D7). The callee's 200, which still reaches the
 //! backup, takes the call over afresh: the round completes end to end and the
 //! call settles to one CDR.
+//!
+//! Beyond the failover sweep: a copy stood down mid-round takes the call over afresh.
 
 use std::time::Duration;
 
 use failover_harness::{assert_call_fully_over, WorkerHealth};
 use sip_message::generators::InDialogMethod;
 
-use crate::call_terminate_on_backup::{
-    accept_takeover_cseq_overlap, establish, Established, ANSWER, OFFER,
-};
+use crate::call_terminate_on_backup::{establish, Established, ANSWER, OFFER};
 
 #[tokio::test(start_paused = true)]
 async fn a_copy_stood_down_mid_round_takes_the_call_over_afresh_on_the_callees_answer() {
     let Established {
-        mut fh,
+        fh,
         alice,
         bob,
-        proxy,
+        mut proxy,
         store,
         lh: _lh,
         w_b1,
@@ -33,7 +33,8 @@ async fn a_copy_stood_down_mid_round_takes_the_call_over_afresh_on_the_callees_a
         mut bob_dialog,
         ..
     } = establish("copy-stood-down-mid-round").await;
-    accept_takeover_cseq_overlap(&mut fh);
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
     let backup = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
 
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
@@ -56,7 +57,7 @@ async fn a_copy_stood_down_mid_round_takes_the_call_over_afresh_on_the_callees_a
     at_bob.respond(200, "OK").with_sdp(ANSWER).await;
     round.expect(200).await;
     dialog.ack(None).await;
-    bob.receive("ACK").await;
+    bob.receive_ack_of(at_bob.request().cseq().seq()).await;
     fh.advance(Duration::from_millis(500)).await;
 
     proxy.set_health(&primary_ord, WorkerHealth::Alive);

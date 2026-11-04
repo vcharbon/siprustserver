@@ -41,7 +41,7 @@ pub(crate) fn clamped(text: &str, a: usize, b: usize) -> &str {
 }
 
 /// `base[a..b]` as a span of `base`, both indices clamped — the single
-/// materialization point for every field, and the reason a parsed value copies
+/// point a field is read out at, and the reason a parsed value copies
 /// no bytes.
 pub(crate) fn sub(base: &SipStr, a: usize, b: usize) -> SipStr {
     base.reslice(clamped(base.as_str(), a, b))

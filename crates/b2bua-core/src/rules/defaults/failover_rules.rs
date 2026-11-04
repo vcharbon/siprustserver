@@ -33,12 +33,22 @@ fn failure_let_stand_cause(payload: &serde_json::Value) -> TerminationCause {
 
 /// The caller's final when a failure with no final of its own is let stand,
 /// authored in the terminating turn so it precedes the record's cut: 480 for
-/// a callee that never answered, 408 for a transaction that drew nothing.
+/// a callee that never answered or a next hop that answered nothing by the
+/// first-response deadline, 408 for a transaction that answered and then
+/// drew no final.
 fn let_stand_final(payload: &serde_json::Value) -> RuleAction {
-    let (status, reason) = match payload.get("origin").and_then(|v| v.as_str()) {
-        Some("no_answer_timeout") => (480, "Temporarily Unavailable"),
-        _ => (408, "Request Timeout"),
-    };
+    let field = |k: &str| payload.get(k).and_then(|v| v.as_str());
+    timeout_final(
+        field("origin") == Some("no_answer_timeout") || field("timeout_kind") == Some("response"),
+    )
+}
+
+/// The caller's final for a b-leg INVITE that ended on a deadline:
+/// `unavailable` (no callee answered, or the next hop answered nothing) is a
+/// 480, a transaction that answered and then drew no final a 408.
+pub(super) fn timeout_final(unavailable: bool) -> RuleAction {
+    let (status, reason) =
+        if unavailable { (480, "Temporarily Unavailable") } else { (408, "Request Timeout") };
     RuleAction::RespondToALeg {
         status,
         reason: reason.into(),

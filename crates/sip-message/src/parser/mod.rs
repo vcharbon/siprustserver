@@ -1,23 +1,19 @@
-//! The parser DI seam. Port of `src/sip/parsers/interface.ts` +
-//! `src/sip/Parser.ts`.
+//! The parser DI seam.
 //!
-//! `SipParser` is the **layer interface** (the DI seam that mimics Effect
-//! Layer): consumers depend on the trait, not a concrete parser, and any
-//! impl is swappable behind it. Contract wrappers (the effect-layer-test
-//! 4-wrapper model: property/paranoid/parity/scopedAudit) implement this same
-//! trait as decorators. The parity oracle (module `rvoip`, feature
+//! `SipParser` is the layer interface: consumers depend on the trait, not a
+//! concrete parser, and a test swaps in a decorator (a parse counter, a
+//! fault) behind it. The parity oracle (module `rvoip`, feature
 //! `rvoip-oracle`) is no impl: it reads a datagram into the fields a
 //! differential test compares.
 //!
 //! Pure + synchronous + never-panics across the boundary: parse failures are
-//! `Err(SipParseError)`, never panics. There is no async / Effect runtime at
-//! this layer.
+//! `Err(SipParseError)`, never panics.
 
 use bytes::Bytes;
 
 use crate::error::SipParseError;
 use crate::types::SipMessage;
-use std::collections::BTreeSet;
+use std::borrow::Cow;
 
 pub mod custom;
 
@@ -41,9 +37,8 @@ pub trait SipParser {
     }
 }
 
-/// Length caps and grammar policy bounding adversarial input. Port of
-/// `SipParserLimits`. Lengths are measured against decoded (unfolded,
-/// trimmed) values.
+/// Length caps and grammar policy bounding adversarial input. Lengths are
+/// measured against decoded (unfolded, trimmed) values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SipParserLimits {
     /// Max bytes of a single header (`name + ": " + value`, unfolded).
@@ -56,11 +51,13 @@ pub struct SipParserLimits {
     pub max_header_lines: usize,
     /// Case-insensitive transport allowlist of the topmost Via, the hop this
     /// element answers. Fail-closed by default.
-    pub allowed_transports: BTreeSet<String>,
-    /// When `true` (default) the strict wire-grammar gates fire, those beyond
-    /// the RFC grammar listed in ADR-0001. Set
-    /// `false` for harness/rule-validator scenarios that must inspect
-    /// malformed-but-parseable messages without the parser pre-rejecting.
+    pub allowed_transports: Cow<'static, [Cow<'static, str>]>,
+    /// When `true` (default) the parse holds wire bytes to the RFC 3261 §25.1
+    /// grammar of every element it reads and to the gates of ADR-0001. Set
+    /// `false` for a message the stack built or a harness or rule validator
+    /// reads (ADR-0053 §6). The header split's gates — numeric values, a
+    /// repeated Content-Length or Max-Forwards, control bytes, quoted-strings,
+    /// Digest credentials — hold in both.
     pub wire_grammar: bool,
     /// How the bytes handed to `parse` were delimited, which decides the body
     /// of a message that states no `Content-Length` (RFC 3261 §18.3).
@@ -81,18 +78,31 @@ pub enum Framing {
     Stream,
 }
 
+/// The transports every SIP stack runs over (RFC 3261 §18, RFC 4168, RFC 7118).
+const STANDARD_TRANSPORTS: &[Cow<'static, str>] = &[
+    Cow::Borrowed("UDP"),
+    Cow::Borrowed("TCP"),
+    Cow::Borrowed("TLS"),
+    Cow::Borrowed("SCTP"),
+    Cow::Borrowed("WS"),
+    Cow::Borrowed("WSS"),
+];
+
+impl SipParserLimits {
+    /// The default bounds, built without allocating: what a stack-built
+    /// message is assembled under.
+    pub const DEFAULT: SipParserLimits = SipParserLimits {
+        max_header_length: 2048,
+        max_uri_length: 2048,
+        max_header_lines: 100,
+        allowed_transports: Cow::Borrowed(STANDARD_TRANSPORTS),
+        wire_grammar: true,
+        framing: Framing::Datagram,
+    };
+}
+
 impl Default for SipParserLimits {
     fn default() -> Self {
-        Self {
-            max_header_length: 2048,
-            max_uri_length: 2048,
-            max_header_lines: 100,
-            allowed_transports: ["UDP", "TCP", "TLS", "SCTP", "WS", "WSS"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            wire_grammar: true,
-            framing: Framing::Datagram,
-        }
+        Self::DEFAULT
     }
 }

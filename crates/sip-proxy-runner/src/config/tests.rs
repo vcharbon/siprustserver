@@ -1,6 +1,8 @@
 //! The boot configuration read through a scripted lookup: plain `#[test]`s, no
 //! process env, no runtime.
 
+use std::net::Ipv4Addr;
+
 use super::*;
 
 /// A lookup over `pairs`.
@@ -37,6 +39,30 @@ fn the_retry_after_jitter_is_bounded() {
     assert_eq!(cfg.retry_after_jitter_sec, 0);
     let errors = boot(&[("PROXY_RETRY_AFTER_JITTER_SEC", "3601")]).expect_err("out of range");
     assert!(errors.iter().any(|e| e.contains("PROXY_RETRY_AFTER_JITTER_SEC")), "{errors:?}");
+}
+
+/// The branch memo's bounds default to the design working set and take any
+/// positive count; zero is refused.
+#[test]
+fn the_branch_memo_bounds_are_read() {
+    let cfg = boot(&[]).expect("valid");
+    assert_eq!(cfg.branch_memo, sip_proxy::cancel_lru::MemoBounds::default());
+    let cfg = boot(&[
+        ("PROXY_BRANCH_MEMO_MAX_ENTRIES", "100000"),
+        ("PROXY_BRANCH_MEMO_MAX_BYTES", "8589934592"),
+        ("PROXY_BRANCH_MEMO_MEAN_RING_MS", "20000"),
+        ("PROXY_INVITE_TXN_TIMEOUT_SEC", "210"),
+        ("PROXY_BRANCH_MEMO_INVITES_PER_CALL", "2.5"),
+    ])
+    .expect("valid");
+    let memo = cfg.branch_memo;
+    assert_eq!((memo.max_entries, memo.max_bytes), (100_000, 8 << 30));
+    assert_eq!((memo.mean_ring_ms, memo.invite_ttl_ms), (20_000, 242_000));
+    assert_eq!(memo.invites_per_call_milli, 2_500);
+    let errors = boot(&[("PROXY_BRANCH_MEMO_MAX_BYTES", "0")]).expect_err("zero bytes");
+    assert!(errors.iter().any(|e| e.contains("PROXY_BRANCH_MEMO_MAX_BYTES")), "{errors:?}");
+    let errors = boot(&[("PROXY_BRANCH_MEMO_INVITES_PER_CALL", "1.5")]).expect_err("one leg");
+    assert!(errors.iter().any(|e| e.contains("PROXY_BRANCH_MEMO_INVITES_PER_CALL")), "{errors:?}");
 }
 
 // ── parse_ext_face_cidrs — dual-face boot rule ───────────────────────────
@@ -79,6 +105,9 @@ fn lb_overrides_replace_their_fields() {
         ("LB_ELU_CRITICAL", "0.6"),
         ("LB_BAND_HYSTERESIS", "0.05"),
         ("LB_AIMD_DECREASE_FACTOR", "0.4"),
+        ("LB_AIMD_INCREASE_STEP_CPS", "25"),
+        ("LB_AIMD_COOLDOWN_TICKS", "3.5"),
+        ("LB_CAP_INITIAL_CPS", "120"),
         ("LB_CAP_CEILING_CPS", "150"),
         ("LB_CAP_FLOOR_CPS", "2"),
     ])
@@ -86,9 +115,25 @@ fn lb_overrides_replace_their_fields() {
     assert_eq!(cfg.observer.elu_soft, 0.3);
     assert_eq!(cfg.observer.elu_hard, 0.45);
     assert_eq!(cfg.observer.elu_critical, 0.6);
+    assert_eq!(cfg.observer.band_hysteresis, 0.05);
     assert_eq!(cfg.observer.aimd_decrease_factor, 0.4);
+    assert_eq!(cfg.observer.aimd_increase_step_cps, 25.0);
+    assert_eq!(cfg.observer.aimd_cooldown_ticks, 3.5);
+    assert_eq!(cfg.observer.cap_initial_cps, 120.0);
     assert_eq!(cfg.observer.cap_ceiling_cps, 150.0);
     assert_eq!(cfg.observer.cap_floor_cps, 2.0);
+}
+
+/// An initial cap above the ceiling refuses the boot.
+#[test]
+fn an_initial_cap_above_the_ceiling_refuses_the_boot() {
+    refused(&[("LB_CAP_INITIAL_CPS", "300")], "cap_initial_cps");
+}
+
+/// A cooldown shorter than one probe cycle (1000 + 1600 ms) refuses the boot.
+#[test]
+fn a_cooldown_shorter_than_a_probe_cycle_refuses_the_boot() {
+    refused(&[("LB_AIMD_COOLDOWN_TICKS", "2")], "aimd cooldown");
 }
 
 /// An incoherent set (reversed bands) refuses the boot.
@@ -172,4 +217,53 @@ fn a_dual_face_wildcard_bind_refuses_the_boot() {
         dual[1],
     ];
     refused(&external, "PROXY_LISTEN_EXT 0.0.0.0:5060");
+}
+
+#[test]
+fn a_cluster_key_out_of_its_bounds_refuses_the_boot() {
+    refused(&[("PROXY_CLUSTER_KEY", "short")], "PROXY_CLUSTER_KEY");
+}
+
+#[test]
+fn the_cluster_key_is_optional() {
+    let cfg = boot(&[]).expect("boots");
+    assert!(cfg.cluster_key.is_none(), "no key: no dead notice");
+    let cfg = boot(&[("PROXY_CLUSTER_KEY", "0123456789abcdef0123456789abcdef")]).expect("boots");
+    assert!(cfg.cluster_key.is_some());
+}
+
+/// The external face check: an interface and its next hops, next hops only
+/// with an interface, an interface name that names no path elsewhere.
+#[test]
+fn the_external_face_check_is_read() {
+    assert_eq!(boot(&[]).expect("valid").external_face_check, None);
+    let cfg =
+        boot(&[("PROXY_EXT_INTERFACE", "eth1"), ("PROXY_EXT_NEXT_HOPS", "192.0.2.1, 192.0.2.2")])
+            .expect("valid");
+    let face = cfg.external_face_check.expect("a face check");
+    assert_eq!(face.interface, "eth1");
+    assert_eq!(face.next_hops, vec![Ipv4Addr::new(192, 0, 2, 1), Ipv4Addr::new(192, 0, 2, 2)]);
+    let errors = boot(&[("PROXY_EXT_NEXT_HOPS", "192.0.2.1")]).expect_err("no interface");
+    assert!(errors.iter().any(|e| e.contains("PROXY_EXT_INTERFACE")), "{errors:?}");
+    let errors = boot(&[("PROXY_EXT_INTERFACE", "../x")]).expect_err("a path");
+    assert!(errors.iter().any(|e| e.contains("PROXY_EXT_INTERFACE")), "{errors:?}");
+    let errors = boot(&[("PROXY_EXT_INTERFACE", "eth1"), ("PROXY_EXT_NEXT_HOPS", "tor")])
+        .expect_err("not an address");
+    assert!(errors.iter().any(|e| e.contains("PROXY_EXT_NEXT_HOPS")), "{errors:?}");
+}
+
+/// The isolation window defaults to 2 s and must hold one probe interval and
+/// the first retransmission; below that the boot is refused naming both.
+#[test]
+fn the_isolation_window_holds_a_probe_interval_and_its_first_retransmission() {
+    assert_eq!(boot(&[]).expect("valid").isolation_window, Duration::from_millis(2_000));
+    boot(&[("HEALTH_INTERVAL_MS", "1500"), ("HEALTH_ISOLATION_MS", "2000")]).expect("at the floor");
+    let errors = boot(&[("HEALTH_INTERVAL_MS", "1501"), ("HEALTH_ISOLATION_MS", "2000")])
+        .expect_err("below the floor");
+    assert!(
+        errors.iter().any(
+            |e| e.contains("HEALTH_ISOLATION_MS=2000") && e.contains("HEALTH_INTERVAL_MS=1501")
+        ),
+        "{errors:?}"
+    );
 }

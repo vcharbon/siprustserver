@@ -23,7 +23,9 @@
 //! identity (`b2bua-worker-0`) the runner also stamps into `B2BUA_ORDINAL`, so
 //! membership ordinals and callRef ordinals agree by construction. The `host`
 //! is the endpoint's first address (the Pod IP) — **port-agnostic**, as
-//! membership must be (the repl port is layered on by the consumer).
+//! membership must be (the repl port is layered on by the consumer). The
+//! worker identity is the Pod UID (`targetRef.uid`): a Pod recreated under the
+//! same name is a new identity (ADR-0055 §6).
 
 use std::future::Future;
 use std::sync::Arc;
@@ -221,14 +223,17 @@ impl Membership for K8sMembership {
 
 /// Translate a set of EndpointSlices into the desired [`Peer`] set: one peer per
 /// Pod **present** in any slice, whatever its conditions, identified by
-/// `targetRef.name` (falling back to `hostname`) at its first address.
+/// `targetRef.name` (falling back to `hostname`) at its first address, bound to
+/// the worker identity `targetRef.uid`.
 /// `ready` is the explicit `conditions.ready` (absent reads as not ready);
 /// `terminating` is `conditions.terminating` (absent reads as false). `serving`
 /// is not carried: pullable is keyed on presence, routable on `ready`
 /// (ADR-0031 D1). A Pod listed in two slices (a slice rebalance in flight) is one
 /// peer: the conditions are OR-ed across its copies and the first host seen
 /// wins, so a worker that is ready in either slice is ready — slice order is
-/// arbitrary. A slice with no endpoint list, and endpoints with no address or no
+/// arbitrary. Copies naming two identities (an old Pod's endpoint still listed
+/// beside its recreation's while the slices update) name none: no order tells
+/// which is current. A slice with no endpoint list, and endpoints with no address or no
 /// identity, are skipped. Pure — the testable heart of the informer (a synthetic
 /// slice in, the expected peers out; no cluster needed).
 fn peers_from_slices<'a>(slices: impl IntoIterator<Item = &'a EndpointSlice>) -> Vec<Peer> {
@@ -245,12 +250,19 @@ fn peers_from_slices<'a>(slices: impl IntoIterator<Item = &'a EndpointSlice>) ->
             let Some(ordinal) = ordinal else {
                 continue;
             };
+            let identity = ep.target_ref.as_ref().and_then(|r| r.uid.clone());
             match out.iter_mut().find(|p| p.ordinal == ordinal) {
                 Some(seen) => {
                     seen.ready |= ready;
                     seen.terminating |= terminating;
+                    if seen.identity != identity {
+                        seen.identity = None;
+                    }
                 }
-                None => out.push(Peer::with_conditions(ordinal, host, ready, terminating)),
+                None => out.push(Peer {
+                    identity,
+                    ..Peer::with_conditions(ordinal, host, ready, terminating)
+                }),
             }
         }
     }
@@ -283,6 +295,15 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    /// `endpoint` of the Pod whose UID is `uid`.
+    fn endpoint_of(pod: &str, uid: &str, ip: &str) -> Endpoint {
+        let mut ep = endpoint(pod, ip, Some(true));
+        if let Some(r) = ep.target_ref.as_mut() {
+            r.uid = Some(uid.to_string());
+        }
+        ep
     }
 
     fn slice(endpoints: Vec<Endpoint>) -> EndpointSlice {
@@ -380,5 +401,30 @@ mod tests {
         let empty = EndpointSlice { address_type: "IPv4".to_string(), ..Default::default() };
         let s = slice(vec![endpoint("b2bua-worker-0", "10.0.0.1", Some(true))]);
         assert_eq!(peers_from_slices([&empty, &s]), vec![Peer::new("b2bua-worker-0", "10.0.0.1")]);
+    }
+
+    #[test]
+    fn the_pod_uid_is_the_worker_identity() {
+        let s = slice(vec![endpoint_of("b2bua-worker-0", "uid-a", "10.0.0.1")]);
+        assert_eq!(
+            peers_from_slices([&s]),
+            vec![Peer::new("b2bua-worker-0", "10.0.0.1").with_identity("uid-a")]
+        );
+    }
+
+    #[test]
+    fn a_pod_listed_under_two_uids_names_no_identity() {
+        // A recreated Pod beside its predecessor's endpoint while the slices
+        // update: neither copy is known current, in either slice order.
+        let elder = slice(vec![endpoint_of("b2bua-worker-0", "uid-a", "10.0.0.1")]);
+        let successor = slice(vec![endpoint_of("b2bua-worker-0", "uid-b", "10.0.0.7")]);
+        assert_eq!(peers_from_slices([&elder, &successor])[0].identity, None);
+        assert_eq!(peers_from_slices([&successor, &elder])[0].identity, None);
+        let again = slice(vec![endpoint_of("b2bua-worker-0", "uid-b", "10.0.0.7")]);
+        assert_eq!(
+            peers_from_slices([&successor, &again])[0].identity.as_deref(),
+            Some("uid-b"),
+            "two copies of one Pod keep its identity"
+        );
     }
 }

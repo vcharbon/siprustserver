@@ -86,6 +86,12 @@ class Preflight:
     max_swapin_pages_s: float | None = None
 
 
+# SIP over UDP, and every later fragment of an IPv4 UDP datagram (no UDP header
+# to match on), so a request larger than the MTU can be reassembled from the
+# ring files.
+CAPTURE_FILTER = "(udp and portrange 5060-5100) or (ip[9] = 17 and ip[6:2] & 0x1fff != 0)"
+
+
 @dataclass(frozen=True)
 class Capture:
     file_mb: int
@@ -123,6 +129,17 @@ class LimiterSpec:
 
 
 @dataclass(frozen=True)
+class OneAtATime:
+    """Pods of a selector the run faults one at a time (one_at_a_time.py):
+    the replicas ready before the load, and the spacing of two events aimed
+    at them past the first one's recovery bound."""
+
+    selector: str
+    min_ready: int
+    gap_s: float
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     duration_s: float
@@ -141,6 +158,7 @@ class Profile:
     cdr_required: list[CdrRequired] = field(default_factory=lambda: [])
     cdr_in_flight_s: float = 0.0
     limiters: list[LimiterSpec] = field(default_factory=lambda: [])
+    one_at_a_time: list[OneAtATime] = field(default_factory=lambda: [])
 
     def stream(self, name: str) -> Stream | None:
         return next((s for s in self.streams if s.name == name), None)
@@ -152,7 +170,7 @@ def _capture(d: Json | None) -> Capture | None:
     return Capture(
         file_mb=jv.opt_int(d, "file_mb") or 100,
         files=jv.opt_int(d, "files") or 20,
-        filter=jv.string(d, "filter", "udp and portrange 5060-5100"),
+        filter=jv.string(d, "filter", CAPTURE_FILTER),
         nodes=jv.opt_string(d, "nodes"),
     )
 
@@ -221,6 +239,10 @@ def parse_profile(d: Json) -> Profile:
         limiters=[
             LimiterSpec(jv.string(e, "id"), int(jv.number(e, "cap")), jv.strings(e, "streams"), jv.number(e, "repair_s"))
             for e in jv.objs(d, "limiters")
+        ],
+        one_at_a_time=[
+            OneAtATime(jv.string(e, "selector"), int(jv.number(e, "min_ready", 2)), jv.number(e, "gap_s"))
+            for e in jv.objs(d, "one_at_a_time")
         ],
         capture=_capture(jv.opt_obj(d, "capture")),
         catalogs=jv.strings(d, "catalogs"),

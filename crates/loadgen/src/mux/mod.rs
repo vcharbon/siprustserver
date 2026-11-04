@@ -19,6 +19,8 @@
 //!
 //! - `correlation` — how the per-call token travels through the SUT
 //!   (pluggable per run: relayed header, To-user, or the caller's From user).
+//! - `datagram` — one datagram as the stores and watchers below read it:
+//!   sniffed once, copied once for every store that keeps it.
 //! - `demux` — the inbound path. Precedence per datagram: (1) **known
 //!   Call-ID** (our UAC dialog, or a UAS dialog after its first request) — this
 //!   tier demuxes EVERY in-dialog datagram with no token and no R-URI
@@ -51,7 +53,9 @@
 //! - a from-user key whose call ended not ok cools for [`RELEASE_HOLD`]
 //!   ([`MuxCore::release_key`]); a bind claiming it meanwhile fails with
 //!   `BindErrorReason::HeldBack`, checked under the registry lock in the step
-//!   that would claim it. A key whose call ended ok is reusable at once.
+//!   that would claim it. A key whose call ended ok is reusable at once;
+//! - a released Call-ID keeps, for the same hold, the finals its agent sent:
+//!   a retransmitted request draws its final again (`late_answer`).
 //!
 //! A new INVITE on a Call-ID a caller owns (a SUT reusing the dialog's Call-ID
 //! for a new leg, against RFC 3261 §8.1.1.4) is a `call_id_reuse` orphan.
@@ -62,8 +66,10 @@
 
 mod buffers;
 mod correlation;
+mod datagram;
 mod demux;
 mod endpoint;
+mod late_answer;
 mod late_final;
 mod loss;
 mod registry;
@@ -71,9 +77,11 @@ mod retransmit;
 mod routing;
 mod rtt;
 mod stats;
+mod tally;
 mod taps;
 
 pub use correlation::Correlation;
+pub use datagram::Datagram;
 pub use endpoint::MuxNetwork;
 pub use routing::CallRouting;
 // The data-driven claim rules live in their shared home, `scenario-harness`
@@ -84,8 +92,10 @@ pub use rtt::{Exchange, RttSink};
 pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 pub(crate) use stats::OrphanReason;
+pub use tally::{ArrowKey, ArrowStat, CallMessages, CallTally, LateSink, SUT_LANE};
 pub use taps::{Dir, Side, WireTap};
 
+use late_answer::SentAnswers;
 use late_final::SentInvites;
 use loss::DropModel;
 use registry::SocketRegistry;
@@ -135,13 +145,11 @@ pub enum Role {
 /// A registry key owned by one endpoint (removed on its `Drop`).
 #[derive(Debug, Clone)]
 pub(in crate::mux) enum Key {
-    CallId(String),
+    /// A dialog's Call-ID, shared with the registry entries that hold it.
+    CallId(Arc<str>),
     /// A receiver registered under `token`, identified by its `label` (agent
     /// name) so `Drop` removes exactly this receiver from a possibly-shared slot.
-    Token {
-        token: String,
-        label: String,
-    },
+    Token { token: String, label: String },
 }
 
 /// Everything the inbound route path needs to hand a datagram to one call: its
@@ -158,6 +166,8 @@ pub(in crate::mux) struct Delivery {
     pub(in crate::mux) taps: Option<Arc<Taps>>,
     /// A caller dialog's INVITEs still open to a non-2xx final.
     pub(in crate::mux) invites: Option<Arc<SentInvites>>,
+    /// The finals the endpoint's agent sent, told of each ACK delivered.
+    pub(in crate::mux) answers: Arc<SentAnswers>,
 }
 
 /// One receiver bound on a socket: an inbox + its label (the agent name a
@@ -170,6 +180,7 @@ pub(in crate::mux) struct ReceiverEntry {
     pub(in crate::mux) drop: Arc<DropModel>,
     pub(in crate::mux) txns: Option<Arc<CallTxns>>,
     pub(in crate::mux) taps: Option<Arc<Taps>>,
+    pub(in crate::mux) answers: Arc<SentAnswers>,
     /// The scenario-declared claim this receiver holds over its inbound
     /// initial INVITE (claim-mode slots only — all receivers of a slot either
     /// carry a claim or none do, enforced at bind).
@@ -232,6 +243,9 @@ impl CallGate {
 pub(in crate::mux) struct MuxSocket {
     pub(in crate::mux) addr: SocketAddr,
     pub(in crate::mux) role: Role,
+    /// Called as `endpoint.as_ref()`, here and wherever the mux holds the
+    /// fabric endpoint: the trait's impl for the `Arc` would box every
+    /// call's future a second time.
     pub(in crate::mux) endpoint: Arc<dyn UdpEndpoint>,
     pub(in crate::mux) reg: Mutex<SocketRegistry>,
     pub(in crate::mux) correlation: Correlation,
@@ -478,6 +492,7 @@ impl MuxCore {
             drop_seed: AtomicU64::new(seed | 1),
             drop_nth,
             rtt_sink: None,
+            tally: None,
             wire_tap: None,
             engines: Mutex::new(Vec::new()),
         }

@@ -241,7 +241,6 @@ async fn a_destroyed_callee_is_pracked_for_an_offer_still_owed() {
     let h = Harness::new("destroy-leg-owed-prack");
     for (rule, party, why) in [
         ("unacked-reliable-provisional", "alice", "alice never PRACKs the 183 shown to her"),
-        ("no-ack-to-dialog-creating-2xx", "alice", "alice has not ACKed when the service fires"),
         (
             "delay-2xx-on-unacked-reliable-1xx-with-sdp",
             "bob",
@@ -286,6 +285,8 @@ async fn a_destroyed_callee_is_pracked_for_an_offer_still_owed() {
     assert!(ack.request().body().is_empty(), "the answer rode the PRACK");
     assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq(), "the 2xx's INVITE");
     bob.receive("BYE").await.respond(200, "OK").await;
+    // §15: alice holds a 2xx she has not ACKed; her BYE waits behind her ACK.
+    let _dialog = call.ack().await;
     alice.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;
@@ -300,13 +301,6 @@ async fn a_destroyed_callee_is_pracked_for_an_offer_still_owed() {
 #[tokio::test(start_paused = true)]
 async fn a_callee_destroyed_before_the_callers_ack_is_acked_before_its_bye() {
     let h = Harness::new("destroy-leg-unacked-2xx");
-    h.waive(
-        scenario_harness::WaiverScope::rule(
-            "no-ack-to-dialog-creating-2xx",
-            "alice has not ACKed when the service fires",
-        )
-        .on_party("alice"),
-    );
     let alice = h.agent("alice", "127.0.0.1:7453").await;
     let bob = h.agent("bob", "127.0.0.1:7454").await;
     let b2bua =
@@ -327,6 +321,44 @@ async fn a_callee_destroyed_before_the_callers_ack_is_acked_before_its_bye() {
     assert!(ack.request().body().is_empty(), "the INVITE carried the offer");
     assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq(), "the 2xx's INVITE");
     bob.receive("BYE").await.respond(200, "OK").await;
+    // §15: alice holds a 2xx she has not ACKed; her BYE waits behind her ACK.
+    let _dialog = call.ack().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// A service ends an answered callee whose 2xx made the offer (the caller's
+/// INVITE carried none) before the caller ACKed: the callee is BYEd (RFC 5407
+/// §2 keeps the ACK owed past it), and the caller's ACK, still awaited, brings
+/// the answer the callee's ACK owes (RFC 3264 §4) — her answer, never one
+/// rejecting every stream.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_offer_callee_destroyed_before_the_callers_ack_gets_her_answer() {
+    let h = Harness::new("destroy-leg-unacked-delayed-offer-2xx");
+    let alice = h.agent("alice", "127.0.0.1:7456").await;
+    let bob = h.agent("bob", "127.0.0.1:7457").await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 7457)))
+            .services(vec![releaser::service_def()])
+            .tune(|c| c.keepalive_interval_sec = 3_600)
+            .start(&h, "b2bua", "127.0.0.1:7458")
+            .await;
+
+    let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+
+    h.advance(Duration::from_secs(releaser::FIRE_SEC as u64 + 1)).await;
+    alice.drain().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    let _dialog = call.ack_with(Some(OFFER)).await;
+    let ack = bob.receive("ACK").await;
+    let body = String::from_utf8_lossy(ack.request().body()).into_owned();
+    assert!(body.contains("m=audio 10000 "), "the caller's answer: {body:?}");
     alice.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;

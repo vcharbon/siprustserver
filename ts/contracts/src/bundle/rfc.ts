@@ -31,6 +31,8 @@ export const RfcFinding = Schema.Struct({
   gating: Schema.Boolean,
   /** The 1-based audit wire-entry index of the offending message, where the rule pinpoints one. */
   offending: Schema.optionalKey(Schema.Int),
+  /** The offending message as the run's recording holds it: its leg and that leg's `seq`; `offending`'s wire order need not be the recording's. */
+  offending_message: Schema.optionalKey(Schema.Struct({ leg: Schema.String, seq: Schema.Int })),
   /** The bind the rule holds responsible (`ip:port`, or `ip:port#label` for a labelled sub-lane): emitted the offending message, or owed the missing one. `lane` is where it was reported. */
   charged: Schema.optionalKey(Schema.String),
   /** The document actor `charged` names (through the leg the offending call rides), when it is a document endpoint: the violation is the scripted peer's. */

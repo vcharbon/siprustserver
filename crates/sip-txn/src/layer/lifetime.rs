@@ -138,8 +138,14 @@ impl Owner {
     /// Hold the transaction `id` names for `why`, from now
     /// ([`Lifetime::held`]).
     pub(super) fn hold(&mut self, id: TxnRef<'_>, why: Hold) {
+        self.hold_for(id, why, why.duration());
+    }
+
+    /// [`hold`](Self::hold) for `left` from now: what is left of a hold that
+    /// began on another node.
+    pub(super) fn hold_for(&mut self, id: TxnRef<'_>, why: Hold, left: Duration) {
         let Some(txn) = self.txn_mut(id) else { return };
-        txn.lifetime = txn.lifetime.held(why, deadline::from_now(why.duration()));
+        txn.lifetime = txn.lifetime.held(why, deadline::from_now(left));
         self.arm_deadline(id);
     }
 

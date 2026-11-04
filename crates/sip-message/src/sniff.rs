@@ -1,16 +1,18 @@
-//! Lenient raw-datagram scanners: extract one field from an unparsed SIP datagram without a
-//! full parse. For hot paths (demux, dedup, metrics labelling) that must stay cheap and
-//! tolerate malformed input by returning `None`/empty rather than erroring.
-//!
-//! This module is the ONLY sanctioned home for raw SIP header extraction — never re-implement
-//! these scanners in another crate. If a scanner you need is missing, add it here. For
-//! anything richer than single-field extraction, use the real parser ([`crate::parser`]).
+//! Lenient raw-datagram scanners: extract fields from an unparsed SIP datagram without a full
+//! parse, for hot paths (demux, dedup, metrics labelling) that must stay cheap and tolerate
+//! malformed input by returning `None`/empty rather than erroring. This module is the ONLY
+//! sanctioned home for raw SIP header extraction: never re-implement these scanners in another
+//! crate; add a missing one here. For anything richer, use the real parser ([`crate::parser`]).
 //! Strict, allocation-free pre-parse *classifiers* (overload brake, dispatcher fast-path) live
 //! in [`crate::preparse`] and its sibling modules.
 
+mod except;
+mod identity;
 mod uri_facts;
 mod via_hops;
 mod via_stamp;
+pub use except::{equal_except, header_row_spans, line_at, Except};
+pub use identity::{identity, Identity};
 use std::borrow::Cow;
 pub use uri_facts::UriFacts;
 pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};
@@ -148,21 +150,21 @@ pub fn cseq_value(raw: &[u8]) -> String {
     }
 }
 
-/// The CSeq method token, uppercased; `None` when the CSeq is absent or
-/// carries no method.
+/// The CSeq method token as written (a method is case-sensitive, RFC 3261
+/// §7.1); `None` when the CSeq is absent or carries no method.
 pub fn cseq_method_token(raw: &[u8]) -> Option<String> {
     let line = cseq_line(raw)?;
-    line.split_whitespace().nth(1).map(str::to_ascii_uppercase)
+    line.split_whitespace().nth(1).map(str::to_string)
 }
 
 /// The CSeq method mapped to a BOUNDED static label — safe as a low-cardinality
 /// metrics label AND usable for method comparison (every RFC 3261/3262/3515
-/// method maps to itself). `"none"` when absent, `"other"` for an unknown
-/// method.
+/// method maps to itself, in its own case: RFC 3261 §7.1). `"none"` when
+/// absent, `"other"` for any other method.
 pub fn cseq_method_label(raw: &[u8]) -> &'static str {
     let Some(l) = cseq_line(raw) else { return "none" };
     let m = l.split_whitespace().nth(1).unwrap_or("");
-    match m.to_ascii_uppercase().as_str() {
+    match m {
         "INVITE" => "INVITE",
         "ACK" => "ACK",
         "BYE" => "BYE",
@@ -330,9 +332,7 @@ pub fn via_branch(raw: &[u8]) -> Option<String> {
         let Some((h, v)) = line.split_once(':') else { continue };
         let h = h.trim();
         if h.eq_ignore_ascii_case("via") || h.eq_ignore_ascii_case("v") {
-            let rest = v.get(v.find("branch=")? + "branch=".len()..)?;
-            let b = up_to_delimiter(rest, &[';', ',', ' ', '\t']).trim();
-            return (!b.is_empty()).then(|| b.to_string());
+            return identity::branch_of(v.as_bytes()).map(str::to_string);
         }
     }
     None
@@ -379,19 +379,6 @@ fn header_rows_compact(raw: &[u8], name: &str) -> Vec<String> {
 /// it listed. A header written with an empty value is PRESENT.
 pub fn has_header(raw: &[u8], name: &str) -> bool {
     !header_rows_compact(raw, name).is_empty()
-}
-
-/// The line of `raw` that spans byte `offset` — the header row (or, past the
-/// blank line, the body line) a byte-level divergence between two copies of one
-/// message sits in — without its line ending. `None` where `offset` is past the
-/// end of `raw`, which is where a copy that is a strict prefix of another stops.
-pub fn line_at(raw: &[u8], offset: usize) -> Option<String> {
-    if offset >= raw.len() {
-        return None;
-    }
-    let start = raw.get(..offset)?.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
-    let end = raw.get(offset..)?.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| offset + p);
-    Some(as_str(raw.get(start..end)?).trim_end_matches('\r').to_string())
 }
 
 /// The body length a message declares in `Content-Length` (compact `l`), or

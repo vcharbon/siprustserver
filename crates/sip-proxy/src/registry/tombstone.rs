@@ -3,10 +3,10 @@
 //!
 //! A worker that leaves membership (or moves to a new host) can still be bound
 //! and still answering: its in-flight INVITE server transactions live on until
-//! Timer H. An INVITE response arriving from such an address must be recognised
-//! as coming from a worker the pool does not route to, so the response path
-//! reverse-fails it to the cookie's backup instead of relaying it back to a node
-//! that has left. Every response for a tombstoned address re-arms its window,
+//! Timer H. A response for such an address must be recognised as one for a
+//! worker the pool does not route to, so the response path sends it to the
+//! call's other owner (ADR-0055 §8) instead of relaying it back to a node that
+//! has left. Every response for a tombstoned address re-arms its window,
 //! so it lasts Timer H past the last one, however long the worker drains.
 //! Tombstones are keyed by **address**, never by ordinal, so
 //! ordinal resolution is untouched: a departed ordinal still resolves to `None`,
@@ -94,6 +94,16 @@ impl Tombstones {
         self.update(|recs| {
             recs.retain(|_, t| t.expires_at_ms > now_ms);
         });
+    }
+
+    /// The ordinals last bound at an address whose window is open at `now_ms`.
+    pub(crate) fn open_ids(&self, now_ms: u64) -> Vec<WorkerId> {
+        self.records
+            .load()
+            .values()
+            .filter(|t| t.expires_at_ms > now_ms)
+            .map(|t| t.id.clone())
+            .collect()
     }
 
     /// The departed worker last bound at `addr`, as a `Dead` entry, while its

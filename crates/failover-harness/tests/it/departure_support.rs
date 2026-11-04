@@ -17,7 +17,7 @@ use failover_harness::{FailoverHarness, ProxySut, ReplicatedB2buaSut, WorkerHeal
 
 use sip_proxy::strategies::rendezvous::{rendezvous_select, RendezvousCandidate};
 
-use crate::inflight_resend::KILL_SETTLE;
+use crate::inflight_resend::{bring_up, KILL_SETTLE};
 
 pub(crate) const PROXY: &str = "127.0.0.1:5080";
 pub(crate) const B1: &str = "127.0.0.1:5091";
@@ -84,6 +84,24 @@ pub(crate) async fn bring_up_deciding(
 /// The front proxy over both workers.
 pub(crate) async fn spawn_front_proxy(fh: &FailoverHarness) -> ProxySut {
     fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await
+}
+
+/// The front proxy over both workers, telling no dead verdict (ADR-0050 §3):
+/// a dead worker's calls are taken over only by a message that reaches their
+/// backup, the reactive path.
+pub(crate) async fn spawn_reactive_proxy(fh: &FailoverHarness) -> ProxySut {
+    let mut proxy = spawn_front_proxy(fh).await;
+    proxy.tell_no_dead_verdict();
+    proxy
+}
+
+/// [`bring_up`] behind a proxy telling no dead verdict: the reactive path.
+pub(crate) async fn bring_up_reactive(
+    fh: &mut FailoverHarness,
+) -> (ProxySut, ReplicatedB2buaSut, ReplicatedB2buaSut) {
+    let (mut proxy, b1, b2) = bring_up(fh).await;
+    proxy.tell_no_dead_verdict();
+    (proxy, b1, b2)
 }
 
 /// The call one worker placed, read back from the other's backup partition

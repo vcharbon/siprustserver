@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use call::TxnTimeoutKind;
 use sip_message::{Method, SipHeader, SipMessage};
 
@@ -20,17 +21,22 @@ pub enum TransactionEvent {
         /// (it shares its INVITE's branch and is never handed to that
         /// transaction); always `false` for a request.
         matched_client_txn: bool,
+        /// The datagram the message arrived as, byte for byte. A request's
+        /// `message` carries the top Via the server transport stamped on
+        /// receipt (RFC 3261 §18.2.1); this is what the peer sent.
+        datagram: Bytes,
     },
-    /// A CANCEL matched a server INVITE txn; the 200/487 were sent by this
-    /// layer. RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it
-    /// matched, so the event carries enough for the consumer to tell an
-    /// initial-INVITE CANCEL (tear the call down) from one targeting an
-    /// in-dialog re-INVITE (end that renegotiation only, keep the call):
-    /// `invite_cseq` is the matched INVITE's CSeq number and `in_dialog` is
-    /// whether its `To` already carried a tag (an established dialog — a
-    /// re-INVITE). Both derive from the matched txn's stored original request;
-    /// `(None, false)` only on the degenerate no-stored-request path, which
-    /// consumers treat as the initial-INVITE (teardown) case.
+    /// A CANCEL matched a server INVITE txn; this layer sent the 200/487, or
+    /// holds them for release (`TransactionConfig::cancel_bound_ms`). RFC 3261
+    /// §9 scopes a CANCEL to the one INVITE *transaction* it matched, so the
+    /// event carries enough for the consumer to tell an initial-INVITE CANCEL
+    /// (tear the call down) from one targeting an in-dialog re-INVITE (end
+    /// that renegotiation only, keep the call): `invite_cseq` is the matched
+    /// INVITE's CSeq number and `in_dialog` is whether its `To` already
+    /// carried a tag (an established dialog — a re-INVITE). Both derive from
+    /// the matched txn's stored original request; `(None, false)` only on the
+    /// degenerate no-stored-request path, which consumers treat as the
+    /// initial-INVITE (teardown) case.
     Cancelled {
         call_id: String,
         from_tag: String,
@@ -73,6 +79,18 @@ pub enum TransactionEvent {
         /// consumers split `response_timeout` from `transaction_timeout`.
         kind: TxnTimeoutKind,
     },
+    /// An initial INVITE's first-response deadline
+    /// (`TransactionConfig::invite_first_response_timeout_ms`, ADR-0044) passed
+    /// with a `100 Trying` as the only response: the next hop is alive and
+    /// nothing past it has answered. Told once per transaction, never on a
+    /// branch a 1xx above 100 answered (the TU received that one).
+    HopAlive {
+        branch: String,
+        call_ref: String,
+        leg_id: String,
+        /// The `ci` mark of the call incarnation that sent the INVITE.
+        incarnation_mark: Option<String>,
+    },
     /// **The last transaction for a *watched* call reached a terminal state** —
     /// every transaction attributed to `call_ref` has left the map (final response
     /// and ACK→Timer H for an INVITE, Timer J for a non-INVITE, or Timer B/F on
@@ -81,6 +99,23 @@ pub enum TransactionEvent {
     /// B2BUA's acting-backup self-release (ADR-0014) keys on it to shed its live
     /// takeover copy without polling.
     CallQuiesced { call_ref: String },
+}
+
+impl TransactionEvent {
+    /// The response `resp` received from `src`, its datagram its own image.
+    pub(crate) fn response(
+        resp: sip_message::SipResponse,
+        src: SocketAddr,
+        matched_client_txn: bool,
+    ) -> Self {
+        let datagram = resp.image().clone();
+        TransactionEvent::Message {
+            message: Box::new(SipMessage::Response(resp)),
+            src,
+            matched_client_txn,
+            datagram,
+        }
+    }
 }
 
 /// The class of an event the full output queue refused: the `reason` label of
@@ -100,7 +135,7 @@ impl EventQueueClass {
     pub(crate) fn of(event: &TransactionEvent) -> Self {
         match event {
             TransactionEvent::Cancelled { .. } => Self::Cancelled,
-            TransactionEvent::Timeout { .. } => Self::Timeout,
+            TransactionEvent::Timeout { .. } | TransactionEvent::HopAlive { .. } => Self::Timeout,
             TransactionEvent::CallQuiesced { .. } => Self::CallQuiesced,
             TransactionEvent::Message { message, .. } => match message.as_ref() {
                 SipMessage::Response(_) => Self::Response,

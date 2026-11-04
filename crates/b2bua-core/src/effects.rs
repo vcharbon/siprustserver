@@ -81,6 +81,13 @@ pub enum CriticalStateEffect {
     CancelAllTimers,
     /// Remove the call from memory + store, cancel its txns, poison its queue.
     RemoveCall,
+    /// The INVITE server transaction a request with this top Via opened was
+    /// answered by another node (ADR-0055 §4): it is relinquished here,
+    /// nothing sent and nothing owed, so no final follows that node's
+    /// (RFC 3261 §13.3.1.4, §17.2.1).
+    RelinquishAnsweredInvite {
+        via: sip_message::header::Via,
+    },
 }
 
 /// Soft-bounded effects — limiter work handed off the call's turn (never
@@ -273,6 +280,16 @@ pub struct HandlerEffects {
     /// what the turn's `AttemptStarted` deliveries carry
     /// (`rules::lifecycle`). Turn-local, never replicated.
     pub opened_attempts: Vec<(call::AttemptId, b2bua_sdk::lifecycle::RouteAnswer)>,
+    /// The turn was taken on the answer to a request the call sent off its
+    /// turn, or on its deadline's expiry (ADR-0039). Turn-local, never
+    /// replicated.
+    pub took_answer: bool,
+    /// The turn sent again requests another node had sent off the call's
+    /// turn. Turn-local, never replicated.
+    pub resent: bool,
+    /// The turn asked again the routing decision of a call another node
+    /// asked it for (ADR-0047 D4). Turn-local, never replicated.
+    pub reasked: bool,
 }
 
 impl HandlerEffects {
@@ -285,6 +302,9 @@ impl HandlerEffects {
     /// merged effect set is what the router classifies.
     pub fn extend(&mut self, other: HandlerEffects) {
         self.quiet = self.quiet.or(other.quiet);
+        self.took_answer |= other.took_answer;
+        self.resent |= other.resent;
+        self.reasked |= other.reasked;
         self.critical.extend(other.critical);
         self.outbound.extend(other.outbound);
         self.soft.extend(other.soft);

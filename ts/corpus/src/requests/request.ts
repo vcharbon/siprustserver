@@ -124,6 +124,18 @@ const wholeCaptures = Effect.fn("Request.captures")(function*(prepId: number, na
   return { selection: { kind: "captures", captures: wanted, whole: wanted }, cells, unkeyed: [] } satisfies Frozen
 })
 
+/**
+ * Captures meant whole that a cut queued ahead of the replay has yet to
+ * reach: no cell now, every call of each once the replay resolves the
+ * request against the prep that cut it (`Requests.resolve` grows a whole
+ * capture). Only a replay launched after that cut takes such a request; one
+ * the cut left uncut resolves to nothing and its run says so.
+ */
+export const ahead = (captures: ReadonlyArray<string>): Frozen => {
+  const wanted = [...new Set(captures)].sort()
+  return { selection: { kind: "captures", captures: wanted, whole: wanted }, cells: [], unkeyed: [] }
+}
+
 const universe = Effect.fn("Request.universe")(function*(
   paths: Paths,
   lane: string,

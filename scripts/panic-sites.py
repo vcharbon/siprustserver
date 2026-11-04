@@ -2,11 +2,17 @@
 """Panic-sites ratchet of the tiered crates (ADR-0051 §2-§3).
 
   panic-sites.py [-C DIR] [--allow FILE] [--base REV] [-p CRATE]... [--json FILE]
+                 [--record FILE]
                  [--staged | --update | --report]
 
 A tiered crate is a workspace member declaring `[package.metadata.purity]
-tier = "pure" | "shell"`. One clippy pass runs over their `--lib --bins`
-targets with the panic set force-warned (`--force-warn`), so no crate config,
+tier = "pure" | "shell"`. One clippy pass runs over the workspace's lib and bin
+targets, resolved with dev-dependencies (`--examples`, of which the workspace
+may have none) so its dependencies are the check build of `cargo clippy
+--workspace --all-targets` (the members' units, built with other clippy
+arguments, carry a profile difference and a hash of their own), and counts
+the tiered crates' sites. The panic set is
+force-warned (`--force-warn`), so no crate config,
 no `-D warnings` gate and no source attribute changes what it sees, under
 the root clippy.toml (`CLIPPY_CONF_DIR` is the root):
 
@@ -57,8 +63,9 @@ pass, are refused in a tiered crate (panic_sites_attrs).
              against the base, a refused attribute, a crate at zero without
              its attribute, a stale entry (above its file's count, or its
              file at zero or gone; `--update` fixes it)
-  -p CRATE   the pass over these members only, the untiered among them
+  -p CRATE   the sites of these members only, the untiered among them
              skipped; entries of the other crates are left alone
+  --record F writes the pass's clippy JSON to F
   --json F   reads the pass's clippy JSON from F instead of running it
   --staged   the staged allowlist and clippy.toml against the base only (a
              pre-commit hook; moved and revealed sites are not known there,
@@ -223,13 +230,17 @@ def tiered_crates(root):
     return root, [c for c in crates if c.tier], {c.name for c in crates}
 
 
-def clippy_pass(root, crates):
+def clippy_pass(root, members):
     """The pass: the counted lints force-warned, so no source attribute
     hides a site, under the root's clippy.toml whatever the environment
-    says."""
-    args = ["cargo", "clippy", "--keep-going", "--lib", "--bins", "--message-format=json"]
-    for c in crates:
-        args += ["-p", c.name]
+    says. The members' units carry `incremental = false`: a hash of their
+    own, so this pass and a plain clippy, whose clippy arguments differ,
+    never rebuild each other's units, and no incremental state is written;
+    every other unit is the plain clippy's."""
+    args = ["cargo", "clippy", "--workspace", "--keep-going", "--lib", "--bins", "--examples",
+            "--message-format=json"]
+    for name in sorted(members):
+        args += ["--config", f'profile.dev.package."{name}".incremental=false']
     args.append("--")
     for code in COUNTED:
         args += ["--force-warn", code]
@@ -491,12 +502,15 @@ BASE_HINT = ("the allowlist only tightens: an entry rises only by the sites move
 LIST_HINT = "the lists only tighten: a pass that sees fewer sites lowers every count"
 
 
-def run_pass(root, crates, json_file):
+def run_pass(root, crates, members, json_file, record=None):
     if json_file:
         with open(json_file) as f:
             text, rc, stderr = f.read(), 0, ""
     else:
-        rc, text, stderr = clippy_pass(root, crates)
+        rc, text, stderr = clippy_pass(root, members)
+        if record:
+            with open(record, "w") as f:
+                f.write(text)
     found, errors = findings_of(text, crates)
     found = expected(root, found)
     denied = [f for f in found if f.level == "error"]
@@ -537,8 +551,8 @@ def now_lints():
     return set(COUNTED) - set(PURE_COUNTED), set(PURE_COUNTED)
 
 
-def cmd_check(root, allow, base, crates, every, json_file):
-    found, ok = run_pass(root, crates, json_file)
+def cmd_check(root, allow, base, crates, every, members, json_file, record):
+    found, ok = run_pass(root, crates, members, json_file, record)
     counts = counts_of(found)
     (touched, moved, moved_from), renamed = diff_of(root, base)
     base_list = base_allow(root, base, allow.path)
@@ -613,8 +627,8 @@ def updated(allow, counts, moved_sites, base, renamed, crates, shown):
     return entries, notes, changes
 
 
-def cmd_update(root, allow, allow_file, base, crates, json_file):
-    found, ok = run_pass(root, crates, json_file)
+def cmd_update(root, allow, allow_file, base, crates, members, json_file, record):
+    found, ok = run_pass(root, crates, members, json_file, record)
     if not ok:
         return 1
     counts = counts_of(found)
@@ -638,8 +652,8 @@ def cmd_update(root, allow, allow_file, base, crates, json_file):
     return report(against_base(allow, base_list, renamed, moved_sites, shown), BASE_HINT) or rc
 
 
-def cmd_report(root, allow, crates, json_file):
-    found, _ = run_pass(root, crates, json_file)
+def cmd_report(root, allow, crates, members, json_file, record):
+    found, _ = run_pass(root, crates, members, json_file, record)
     counts = counts_of(found)
     for c in sorted(crates, key=lambda c: c.name):
         files = {rel: n for rel, n in counts.items() if c.owns(rel)}
@@ -659,6 +673,7 @@ def main():
     p.add_argument("--base", help="the revision the allowlist is held to (not with --staged)")
     p.add_argument("-p", dest="crates", action="append", default=[], metavar="CRATE")
     p.add_argument("--json", dest="json_file", help="the pass's clippy JSON, recorded")
+    p.add_argument("--record", help="where to write the pass's clippy JSON")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--staged", action="store_true")
     mode.add_argument("--update", action="store_true")
@@ -688,10 +703,11 @@ def main():
             print("panic-sites: no tiered crate among the named ones", file=sys.stderr)
             return 0
     if a.update:
-        return cmd_update(root, allow, os.path.join(root, a.allow), base, crates, a.json_file)
+        return cmd_update(root, allow, os.path.join(root, a.allow), base, crates, members,
+                          a.json_file, a.record)
     if a.report:
-        return cmd_report(root, allow, crates, a.json_file)
-    return cmd_check(root, allow, base, crates, every, a.json_file)
+        return cmd_report(root, allow, crates, members, a.json_file, a.record)
+    return cmd_check(root, allow, base, crates, every, members, a.json_file, a.record)
 
 
 if __name__ == "__main__":

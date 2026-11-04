@@ -1,7 +1,6 @@
 //! Custom SIP parser — RFC 3261 compliant, zero-regex, state-machine based.
-//! Port of `src/sip/parsers/custom/` + `src/sip/parsers/extract-fields.ts`.
 //!
-//! Pipeline (each submodule ports the like-named TS file):
+//! Pipeline:
 //!   scanner -> start_line -> headers -> structured_headers -> extract_fields
 //!
 //! Observationally pure: internal helpers may use early returns as control
@@ -12,6 +11,7 @@ use bytes::Bytes;
 
 use crate::draft::{RequestLine, StatusLine, SIP_VERSION};
 use crate::error::SipParseError;
+use crate::header_table::HeaderTable;
 use crate::parser::{Framing, SipParser, SipParserLimits};
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
@@ -40,8 +40,8 @@ use start_line::{parse_start_line, StartLine};
 use crate::types::SipHeader;
 
 /// Build a trusted [`SipRequest`] from already-structured components (method,
-/// Request-URI, header list, body) — the port of `extract-fields.ts`'
-/// `hydrateRequest`. Used by `generators` to assemble outbound messages.
+/// Request-URI, header list, body). Used by `generators` to assemble outbound
+/// messages.
 /// Runs the eager field extraction in [`ExtractMode::Hydrate`] (lenient: no
 /// strict wire-grammar gates), so well-formed stack-built input always hydrates.
 pub fn hydrate_request(
@@ -50,10 +50,16 @@ pub fn hydrate_request(
     headers: Vec<SipHeader>,
     body: impl Into<Bytes>,
 ) -> Result<SipRequest, SipParseError> {
-    let limits = SipParserLimits::default();
     let uri = SipStr::owned(uri);
+    let headers = HeaderTable::new(headers);
     let idx = HeaderIndex::build(&headers);
-    let eager = extract_request_fields(&idx, &uri, &limits, Some(method), ExtractMode::Hydrate)?;
+    let eager = extract_request_fields(
+        &idx,
+        &uri,
+        &SipParserLimits::DEFAULT,
+        Some(method),
+        ExtractMode::Hydrate,
+    )?;
     let optional = optional_headers::extract_optional_indexed(&idx);
     let body: Bytes = body.into();
     let start = RequestLine {
@@ -63,7 +69,7 @@ pub fn hydrate_request(
     };
     // A message always carries its datagram: `image()` is what the transport
     // sends, so a hydrated request renders it once here.
-    let image = Bytes::from(crate::serializer::render(&headers, &body, |out| {
+    let image = Bytes::from(crate::serializer::render(headers.lines(), &body, |out| {
         use std::io::Write;
         let _ = write!(out, "{} {} {}", start.method, start.uri.text(), start.version);
     }));
@@ -106,13 +112,16 @@ impl CustomParser {
         if let Some(bare) = block.bare_break {
             return Err(bare.refusal());
         }
-        let text = decode_image(head(raw, block.end)?);
+        let (text, not_utf8) = decode_image(head(raw, block.end)?);
+        if let Some(refusal) = not_utf8 {
+            return Err(refusal);
+        }
         let mut s = Scanner::new(text.as_str().as_bytes());
         parse_start_line(&mut s, text.as_str(), &self.limits)?;
         let parsed = headers::parse_headers(&mut s, &text, block.lines, &self.limits)?;
         match parsed.refusal {
             Some(refusal) => Err(refusal),
-            None => Ok(parsed.headers),
+            None => Ok(parsed.headers.into_lines()),
         }
     }
 
@@ -149,7 +158,7 @@ impl SipParser for CustomParser {
             return Err(bare.refusal());
         }
         let body_at = block.end;
-        let text = decode_image(head(&raw, body_at)?);
+        let (text, not_utf8) = decode_image(head(&raw, body_at)?);
         let image = text.as_str();
 
         let mut s = Scanner::new(image.as_bytes());
@@ -179,7 +188,7 @@ impl SipParser for CustomParser {
             },
             _ => error,
         };
-        if let Some(refusal) = refusal {
+        if let Some(refusal) = not_utf8.or(refusal) {
             return Err(refuse(refusal));
         }
 
@@ -213,7 +222,8 @@ impl SipParser for CustomParser {
 
         match start {
             StartLine::Request(ref rl) => {
-                // A method is case-sensitive (RFC 3261 §7.1): the token as written.
+                // A method is case-sensitive (RFC 3261 §7.1): the token as
+                // written, a known method only in its own spelling.
                 let method = scanner::span_text(image, &rl.method)?;
                 let uri = text.span(rl.uri.start, rl.uri.len());
                 let eager: RequestEager =
@@ -257,13 +267,25 @@ fn head(raw: &[u8], end: usize) -> Result<&[u8], SipParseError> {
         .ok_or_else(|| SipParseError::new(format!("header block end {end} past the datagram")))
 }
 
-/// The header block as one shared text image. Predominantly-ASCII input takes
-/// the `str::from_utf8` validation fast path; genuinely invalid bytes fall back
-/// to the same lossy decode the per-field path used, so the image is
-/// byte-identical either way.
-fn decode_image(header_block: &[u8]) -> SharedText {
-    match std::str::from_utf8(header_block) {
-        Ok(s) => SharedText::new(s),
-        Err(_) => SharedText::from(String::from_utf8_lossy(header_block).into_owned()),
+/// The header block as one shared text image, and the refusal of a block
+/// that is not UTF-8 (RFC 3629). A UTF-8 block is the image byte for byte.
+/// In a block that is not, each byte that is no UTF-8 stands as a CR in the
+/// image: a CR stands alone in no line of a block whose breaks are all CRLF,
+/// so the line holding one is refused like any line breaking the grammar, and
+/// a field a response echoes reads only from bytes exactly as received.
+fn decode_image(header_block: &[u8]) -> (SharedText, Option<SipParseError>) {
+    let e = match std::str::from_utf8(header_block) {
+        Ok(text) => return (SharedText::new(text), None),
+        Err(e) => e,
+    };
+    let refusal = SipParseError::new(format!(
+        "header block is not UTF-8 (RFC 3629) at byte {}",
+        e.valid_up_to()
+    ));
+    let mut image = String::with_capacity(header_block.len());
+    for chunk in header_block.utf8_chunks() {
+        image.push_str(chunk.valid());
+        image.extend(chunk.invalid().iter().map(|_| '\r'));
     }
+    (SharedText::from(image), Some(refusal))
 }

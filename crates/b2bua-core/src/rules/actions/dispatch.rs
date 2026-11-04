@@ -13,6 +13,7 @@ use b2bua_sdk::model::{Body, MessageTransform, RuleAction, RuleContext};
 use sip_message::SipHeader;
 
 use super::select::resolve_peer;
+use super::settle::{settle, Cause, Legs};
 use super::teardown::terminate_all;
 use super::unrelayed::Unrelayed;
 use super::ActionExecutor;
@@ -91,11 +92,16 @@ impl ActionExecutor<'_> {
             RuleAction::Respond { status, reason, body, content_type } => {
                 self.respond(call, fx, ctx, *status, reason, body, content_type.as_deref(), vec![]);
             }
+            RuleAction::HoldRequest => self.hold_request(call, fx, ctx),
+            RuleAction::AnswerHeld { leg_id, cseq, status, reason, body, content_type } => {
+                let content_type = content_type.as_deref();
+                self.answer_held(call, fx, leg_id, *cseq, *status, reason, body, content_type);
+            }
             RuleAction::RefuseGlare { refusal } => {
                 self.refuse_glare(call, fx, ctx, *refusal);
             }
             RuleAction::AckLeg { leg_id, body } => self.ack_authored(call, fx, leg_id, body),
-            RuleAction::AckLostRound { leg_id } => self.ack_lost_round(call, fx, ctx, leg_id),
+            RuleAction::EndOnEvidence { leg_id } => self.end_on_evidence(call, fx, ctx, leg_id),
             RuleAction::ReleaseStraggler2xx { leg_id } => {
                 self.release_straggler(call, fx, ctx, leg_id);
             }
@@ -118,7 +124,7 @@ impl ActionExecutor<'_> {
                 self.reject_pending_reinvite(call, fx, leg_id, *outbound_cseq, *status, reason);
             }
             RuleAction::TerminateCall { cause, by_leg } => {
-                self.reject_all_pending_non_invites(call, fx);
+                settle(call, fx, Legs::Every, Cause::LegEnd, self.now_ms);
                 terminate_all(call, self.now_ms, *cause, by_leg.clone());
             }
             RuleAction::BeginTermination { reason, cause, by_leg } => {
@@ -201,12 +207,7 @@ impl ActionExecutor<'_> {
                 // is keyed strictly on `(leg, b_tag)` — a fallback write would
                 // overwrite a different fork's cached answer.
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
-                *call = call::helpers::cache_sdp_on_leg_dialog(
-                    call.clone(),
-                    leg_id,
-                    b_tag,
-                    body.clone(),
-                );
+                call::helpers::cache_sdp_on_leg_dialog(call, leg_id, b_tag, body.clone());
             }
             RuleAction::RelayFirstBare180 { leg_id, b_tag } => {
                 self.relay_first_bare_180(call, fx, ctx, leg_id, b_tag);

@@ -55,9 +55,8 @@ export const StudyHead = (
     <>
       <h1>{disposition}{study.case}</h1>
       <p className="counts run-counts">
-        <span className="muted">one call of</span>
+        <span className="muted">call of</span>
         <Link to={href.triageStudy(study.capture, { lane, cell })}>{study.capture}</Link>
-        <span className="muted">— the capture study lists every call</span>
       </p>
     </>
   )

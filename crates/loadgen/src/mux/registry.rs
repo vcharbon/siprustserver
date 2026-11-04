@@ -1,37 +1,48 @@
 //! One socket's routing state: the dialogs it demuxes by Call-ID, the call
 //! slots it demuxes by token, and what a finished call leaves behind — its
-//! Call-IDs held back, and the INVITE transactions still owed an ACK.
+//! Call-IDs held back, the INVITE transactions still owed an ACK, and the
+//! answers a retransmitted request still draws.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
+use sip_message::sniff::Identity;
 use tokio::time::Instant;
 
+use super::late_answer::{HeldAnswers, LateReply};
 use super::late_final::Held;
 use super::stats::MuxStats;
 use super::{CallSlot, Delivery, Key};
 
+/// Every map keyed by a Call-ID shares the one copy of it its endpoint's
+/// keyset holds.
 #[derive(Default)]
 pub(in crate::mux) struct SocketRegistry {
-    pub(in crate::mux) by_call_id: HashMap<String, Delivery>,
+    pub(in crate::mux) by_call_id: HashMap<Arc<str>, Delivery>,
     pub(in crate::mux) by_token: HashMap<String, CallSlot>,
     /// Call-IDs released by finished calls, until their hold deadline.
-    released: HashMap<String, Instant>,
+    released: HashMap<Arc<str>, Instant>,
     /// The same holds in deadline order, so expiry pops only what expired.
-    released_order: VecDeque<(Instant, String)>,
+    released_order: VecDeque<(Instant, Arc<str>)>,
     /// The INVITE a released caller dialog last sent, held with its Call-ID:
     /// a non-2xx final to it is still ACKed (RFC 3261 §17.1.1.3).
-    released_invites: HashMap<String, Held>,
+    released_invites: HashMap<Arc<str>, Held>,
+    /// The answers a released dialog's agent sent, held with its Call-ID: a
+    /// retransmission of an answered request draws its final again (RFC 3261
+    /// §17.2.2).
+    released_answers: HashMap<Arc<str>, HeldAnswers>,
 }
 
 impl SocketRegistry {
     /// Drop every key an endpoint owned: its Call-IDs are held back until
-    /// `deadline` (with the INVITE each still owes an ACK, from `invites`), and
-    /// it leaves its token slots (a slot goes with its last receiver; a claim
-    /// that never fired is counted in `stats`).
+    /// `deadline` (with what `held` gives for each: the INVITE it still owes an
+    /// ACK, the answers its agent sent), and it leaves its token slots (a slot
+    /// goes with its last receiver; a claim that never fired is counted in
+    /// `stats`).
     pub(in crate::mux) fn release_keys(
         &mut self,
         keys: Vec<Key>,
-        mut invites: impl FnMut(&str) -> Option<Held>,
+        mut held: impl FnMut(&str) -> (Option<Held>, Option<HeldAnswers>),
         deadline: Instant,
         stats: &MuxStats,
     ) {
@@ -39,8 +50,12 @@ impl SocketRegistry {
             match key {
                 Key::CallId(c) => {
                     self.by_call_id.remove(&c);
-                    if let Some(invite) = invites(&c) {
+                    let (invite, answers) = held(&c);
+                    if let Some(invite) = invite {
                         self.released_invites.insert(c.clone(), invite);
+                    }
+                    if let Some(answers) = answers {
+                        self.released_answers.insert(c.clone(), answers);
                     }
                     self.released.insert(c.clone(), deadline);
                     self.released_order.push_back((deadline, c));
@@ -82,6 +97,21 @@ impl SocketRegistry {
         self.released_invites.get_mut(call_id)
     }
 
+    /// What the request `id` on the released dialog `call_id` draws from its
+    /// held answers, while its hold lasts at `now`.
+    pub(in crate::mux) fn released_answer(
+        &mut self,
+        call_id: &str,
+        id: &Identity<'_>,
+        now: Instant,
+    ) -> LateReply {
+        let live = self.is_released(call_id, now);
+        match self.released_answers.get_mut(call_id) {
+            Some(answers) if live => answers.on_request(id),
+            _ => LateReply::NotHeld,
+        }
+    }
+
     /// Drop the holds that expired by `now`, touching only those.
     pub(in crate::mux) fn expire_released(&mut self, now: Instant) {
         while let Some((deadline, _)) = self.released_order.front() {
@@ -92,6 +122,7 @@ impl SocketRegistry {
             if self.released.get(&call_id).is_some_and(|d| *d <= now) {
                 self.released.remove(&call_id);
                 self.released_invites.remove(&call_id);
+                self.released_answers.remove(&call_id);
             }
         }
     }

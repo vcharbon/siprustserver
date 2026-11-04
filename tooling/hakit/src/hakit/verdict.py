@@ -20,7 +20,8 @@ from .cdrjoin import DIFFERS
 from .classes import read_counts
 from .jsonl import read_jsonl
 from .classify import SETUP_FAILED, Classified, Impact, SetupLatency, classify
-from .judge import ALL_CALL_IDS, judge
+from .established import established_row, hurts, until_next
+from .judge import ALL_CALL_IDS, budget_of, judge
 from .limiters import judge_limiters
 from .jsonval import Json, as_obj
 from .model import Budget, Shape, parse_budget, parse_catalog
@@ -30,7 +31,9 @@ from .reconcile import integrity, reconcile
 from .schemas import SchemaSet
 from .generator_health import run_stalls
 from .host_stress import stress_findings, thresholds
+from .stall_source import stall_details
 from .stalls import Stall, stall_holding, stall_of
+from .unanswered import unanswered
 from .window_recovery import recover_windows
 from .windows import Window, build_windows
 
@@ -117,11 +120,13 @@ def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, 
     return {k: StreamSamples(v) for k, v in by_stream.items()}
 
 
-def _stall_findings(stalled: dict[Stall, list[str]]) -> list[Json]:
+def _stall_findings(stalled: dict[Stall, list[str]], details: dict[Stall, str]) -> list[Json]:
+    """One finding per stall that spoiled measurements, naming how it was seen
+    and where its source lies (stall_source.py)."""
     return [
         integrity(
             "generator_stall",
-            f"{len(ids)} measurements taken across a {st.ms:g} ms generator stall",
+            f"{len(ids)} measurements taken across {details[st]}",
             stream=st.stream,
             at_ms=st.at_ms,
             call_ids=ids[:MAX_CALL_IDS],
@@ -155,11 +160,11 @@ class _Run:
         for p in sorted((run_dir / "budgets").glob("*.json")):
             b = parse_budget(_load_json(p))
             self.budgets[b.name] = b
-        shapes: dict[str, Shape] = {}
+        self.shapes: dict[str, Shape] = {}
         for p in sorted((run_dir / "catalogs").glob("*.json")):
             for s in parse_catalog(_load_json(p)).shapes:
-                shapes[s.shape] = s
-        self.calls = _Calls(read_jsonl(run_dir / "records.jsonl"), shapes, schemas)
+                self.shapes[s.shape] = s
+        self.calls = _Calls(read_jsonl(run_dir / "records.jsonl"), self.shapes, schemas)
         load_start = jv.opt_number(self.meta, "load_started_at_ms") or jv.number(self.meta, "started_at_ms")
         self.load_start_ms = load_start
         self.stalls = run_stalls(run_dir, self.calls.starts(), self.profile, load_start)
@@ -257,17 +262,24 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
             {"at_ms": st.at_ms, "ms": round(st.ms, 3), "spoiled": len(stalled.get(st, [])), "source": st.source}
         )
     streams_out, reconciled = reconcile(streams_doc, calls.per_stream, success, stall_rows)
-    found += reconciled + _stall_findings(stalled) + _window_integrity(windows)
+    host_t = thresholds(profile.preflight)
+    found += reconciled + _stall_findings(stalled, stall_details(run_dir, host_t, list(stalled))) + _window_integrity(windows)
     spoiled = {st: len(ids) for st, ids in stalled.items()}
-    found = stress_findings(run_dir, thresholds(profile.preflight), stalls, spoiled, found, run.load_start_ms) + found
+    found = stress_findings(run_dir, host_t, stalls, spoiled, found, run.load_start_ms) + found
 
     load_end_ms = run.load_start_ms + profile.duration_s * 1000
     limiters = judge_limiters(profile, [r for r, _ in calls.valid], windows, budgets, run.load_start_ms, load_end_ms)
     windows_out: list[Json] = []
     findings = len(judged.in_dialog) + len(judged.unattributed) + len(limiters)
+    hurt = hurts(impacts, cdr_impacts + class_impacts)
     for w in windows:
         recs, rec_rows = recovered.get(w.event, ([], []))
         rows = judged.per_window.get(w.event, []) + rec_rows
+        established_min = budget_of(w, budgets).established_min
+        if established_min is not None:
+            rows.append(
+                established_row(w, established_min, (r for r, _ in calls.valid), hurt, until_next(windows, w))
+            )
         healed = w.last("healed")
         n = sum(1 for r in rows if r.get("finding") is True)
         findings += n
@@ -287,6 +299,9 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         if healed is not None and recs:
             out["recovery"] = [{"stream": r.stream, "recovery_s": r.recovery_s(healed)} for r in recs]
         windows_out.append(out)
+    by_cause = unanswered(
+        ((r, run.shapes[jv.string(r, "shape")]) for r, _ in calls.valid), windows, budgets, profile, run.shapes
+    )
     status = "invalid" if found else ("fail" if findings else "pass")
     return {
         "schema": "verdict.v1",
@@ -300,5 +315,6 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         "in_dialog": judged.in_dialog,
         "unattributed": judged.unattributed,
         "limiters": limiters,
+        "unanswered": by_cause,
         "integrity": found,
     }

@@ -77,6 +77,20 @@ fn pai_two_header_instances_combine() {
     assert_eq!(msg.optional().p_asserted_identity.as_ref().unwrap().len(), 2);
 }
 
+/// A name-addr list is reserved once for its header lines: one entry per line,
+/// the common form, leaves no spare slot in the message.
+#[test]
+fn pai_list_is_reserved_at_its_line_count() {
+    let msg = invite("P-Asserted-Identity: <sip:fluffy@cisco.com>\r\n");
+    let list = msg.optional().p_asserted_identity.as_ref().unwrap();
+    assert_eq!((list.len(), list.capacity()), (1, 1));
+    let msg = invite(
+        "P-Asserted-Identity: <sip:fluffy@cisco.com>\r\nP-Asserted-Identity: <tel:+14085551212>\r\n",
+    );
+    let list = msg.optional().p_asserted_identity.as_ref().unwrap();
+    assert_eq!((list.len(), list.capacity()), (2, 2));
+}
+
 #[test]
 fn pai_field_is_stored_once_eagerly() {
     // The TS "memoization" test: in the eager model the parsed value is stored
