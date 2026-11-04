@@ -139,9 +139,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    copy's: the decision may be in flight at a primary the proxy misread dead;
    a confirmed verdict, the departure or a reclaim asks it again (ADR-0047 D4). An initial INVITE whose cookie
    names another primary and that copies no such record gets no final
-   (`b2bua_foreign_invite_copies_dropped_total`; the transaction layer's 100
-   Trying has already gone out): the primary still owns that transaction, and
-   a final from this worker would end the caller's.
+   (`b2bua_foreign_invite_copies_dropped_total`; its transaction is relinquished
+   with nothing sent, ahead of the 100's 200 ms bound unless the router lags
+   that long): the primary still owns that transaction, and a final from this
+   worker would end the caller's.
    Accepted residuals:
    - a copy of an undecided call whose primary really died is dropped: the
      confirmed dead verdict (§3) takes the call over and asks its decision

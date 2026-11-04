@@ -131,7 +131,7 @@ proxy timer — decides when a dead downstream is given up on (local 408 at 64·
 adding one would re-introduce the per-INVITE proxy transaction state ADR-0009 /
 ADR-0014 deliberately keep out of the LB (and duplicate a backstop the endpoints
 already own). All proxy-*internal* errors do answer immediately with a final
-(483/420/400/403, and 503+Retry-After+Reason for every shed path); the only
+(483/420/400/403, and a 503 with a Retry-After and no Reason for every shed path); the only
 silent paths are pre-parse recv-queue overflow, unparseable datagrams, and the
 downstream-blackhole case — all three bounded by the caller's transaction timer.
 

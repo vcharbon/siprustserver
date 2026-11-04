@@ -97,8 +97,8 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
     // absorbed by the transaction the record rebuilds, which for the caller's
     // unanswered INVITE replaces the one the layer opened for the copy. One
     // placed here as another primary's backup and copying none belongs to
-    // that primary and gets no final (its 100 Trying went out on receipt),
-    // its transaction relinquished — never a second call.
+    // that primary and gets no final, its transaction relinquished with
+    // nothing sent — never a second call.
     match initial_invite_copy(ctx, &event, &res).await {
         InitialInvite::Own => {}
         InitialInvite::CopyOf { hit, unanswered } => {

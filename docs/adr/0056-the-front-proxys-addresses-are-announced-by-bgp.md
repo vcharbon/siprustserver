@@ -206,7 +206,8 @@ Via.
   its own view. The failover harness cell `split_proxy_views` judges that case with real B2BUAs:
   no leak, full cleanup, one CDR, no copy left serving.
 - An internal-plane blip both proxies see for about 2.1 s or more (the isolation window, two
-  readings) withdraws both nodes, the total-outage rule of §3. The VIP is unreachable from the
+  readings), or for as little as about 1.1 s when the last probe answer was one interval old at
+  the cut, withdraws both nodes, the total-outage rule of §3. The VIP is unreachable from the
   withdrawal (the BFD detection, 0.9 s, after those 2.1 s) until the blip's end, the next probe
   round that answers (up to 1 s), the guard's hold (3 s), the pod's readiness (up to 2 s, as in
   §3) and the announcement's propagation (4.65 s measured): for a blip just past the threshold,
