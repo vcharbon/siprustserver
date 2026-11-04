@@ -27,10 +27,11 @@
 //! A normal new call's turn holds its permits across the decision round
 //! trip, so new calls hold at most their share of the shared pool and the
 //! established calls keep the rest; an emergency new call draws the shared
-//! pool alone. A bounded row opens a call's queue only below its threshold,
-//! so a normal new INVITE leaves the last queues to the in-dialog requests of
-//! calls taken over here and to emergency calls; the other rooms open a
-//! queue past the cap (ADR-0037).
+//! pool alone. Either stops waiting for its permits when its setup budget runs
+//! out and runs holding none (ADR-0022 X1). A bounded row opens a call's queue
+//! only below its threshold, so a normal new INVITE leaves the last queues to
+//! the in-dialog requests of calls taken over here and to emergency calls; the
+//! other rooms open a queue past the cap (ADR-0037).
 //!
 //! A new INVITE, and every event after it, is never discarded behind its
 //! call's release: it waits for the call's next queue ([`super::queue`]). A

@@ -5,6 +5,7 @@ INVITE response bound for a dead worker fails over on the cookie of its Record-R
 Amended (2026-10-12): X4 and X5, a caller that heard the 100 is answered when its worker departs (ADR-0047).
 Amended (2026-10-23): the first provisional of an INVITE leaves after the call's write,
 up to a cap (ADR-0055 §3).
+Amended (2026-11-04): X1, one setup budget from the INVITE's receipt to its final.
 
 ## Context
 
@@ -77,6 +78,46 @@ bounded instead by the dedicated `refer_subscription_expiry_sec` (60 s) and
 This is a **documented divergence** from the TS `callControlReferTimeoutMs`: the
 Rust port bounds the REFER lifecycle with those subscription timers rather than a
 decision deadline, so `call_refer` passes straight through the wrapper.
+
+**One setup budget, from the INVITE's receipt to its final** (`b2bua::setup_budget`).
+On an initial INVITE's turn `call_control_timeout_ms` bounds the whole setup, not each
+round trip: a caller behind the 100 waits for all of it together. The budget runs from
+the instant the transaction layer opened the INVITE's server transaction
+(`TransactionEvent::Message::opened_at`), through the event queue and the router, and a
+retransmission moves nothing: the transaction absorbs it (RFC 3261 §17.2.3), and a copy
+on a new branch is no new call and carries no budget. It covers the wait for the turn's
+handler permits, the decision round trips with their retries, the limiter's admits and
+the failover chain they start. It has one check and one deadline:
+
+- **At the permit.** A turn stops waiting at the deadline and runs holding no permit
+  (`Runnable::due_by`). One whose budget is spent as it starts asks nothing: its caller
+  gets the 503 of an unavailable decision (X3), its call born only to write its record,
+  and the INVITE is counted once as `setup_budget` on `b2bua_new_calls_total`. A setup
+  its caller CANCELed first ends as cancelled, with no second final. This is no admission
+  rung: no rung of ADR-0037 reads it, and an emergency INVITE is held to it too, since a
+  caller left waiting serves nobody.
+- **On the turn.** `DeadlineDecisionEngine` is the one bound on a round trip: a consult
+  on a setup's turn is bounded by what is left of the budget and fails `Unavailable` at
+  the deadline, asking nothing once it is spent, and the admit of each route is cut there
+  as an unavailable limiter. A route the budget ran out on dials nothing: it ends
+  `Refused`, the caller gets the bare 503 wherever in the chain it was cut (ADR-0043
+  §10), and the call's record owes the release of any admit that left (ADR-0040).
+
+The final leaves through the call's outbox, so under the `applied` sync level it may
+leave up to the sync cap after the deadline (ADR-0055 §3). A re-ask after a takeover
+(ADR-0047 D4) gets a fresh budget from its notice: its caller's first one died with the
+node that spent it. The `/call/failure` consult after a b-leg's failure runs off the turn
+and keeps one deadline per round trip under its answer deadline (ADR-0039). With
+`call_control_timeout_ms <= 0` there is no budget, as there is no deadline.
+
+The bound assumes the message leaves the receive buffer inside the budget. One that
+waits there has no transaction and drew no 100, so its caller is still retransmitting
+under Timer A and gives up by its own Timer B (§17.1.1.2).
+
+`b2bua_new_call_turn_wait_seconds` reads the time from the receipt to the turn's start,
+`b2bua_new_call_permit_hold_seconds` the time a turn holds its permits. Coverage:
+`b2bua-harness/tests/it/setup_budget.rs`,
+`failover-harness/tests/it/undecided_call_settled_on_departure.rs` (the re-ask's budget).
 
 ## Decision X2 — one central "terminated-but-unanswered a-leg ⇒ 503" invariant
 

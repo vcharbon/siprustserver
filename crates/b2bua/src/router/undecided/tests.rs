@@ -70,3 +70,29 @@ fn a_call_with_an_attempt_open_is_decided() {
     call::helpers::open_attempt(&mut call, call::AttemptCause::Route, call::Deadline::Off);
     assert!(!is_undecided(&call), "an attempt is dialling");
 }
+
+/// A re-ask whose budget ran out before its turn ran, its permit wait being
+/// the only thing that spends it, asks nothing and refuses the caller as an
+/// unavailable decision: the record of a call no decision reached.
+#[tokio::test(start_paused = true)]
+async fn a_reask_past_its_budget_refuses_the_caller_unasked() {
+    use crate::router::test_support::node;
+    use crate::setup_budget::SetupBudget;
+
+    let node = node("w0").await;
+    let ctx = node.core.router_ctx().clone();
+    let call = born();
+    let call_ref = call.call_ref.clone();
+    ctx.state.create(call, None);
+
+    let started = tokio::time::Instant::now();
+    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    super::reask_turn(&ctx, &call_ref, SetupBudget::from_receipt(started, 100)).await;
+
+    assert!(!ctx.state.contains(&call_ref), "the refused call ended");
+    let records = node.cdr.snapshot();
+    let cdr = records.iter().find(|r| r.call_ref == call_ref).expect("its CDR");
+    assert!(cdr.decision_log.is_empty(), "no decision: {cdr:?}");
+    assert!(cdr.b_legs.is_empty(), "nothing dialled: {cdr:?}");
+    assert!(cdr.events.iter().any(|e| e.status_code == Some(503)), "its 503: {cdr:?}");
+}

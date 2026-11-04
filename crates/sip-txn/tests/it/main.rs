@@ -32,6 +32,7 @@ mod lifetime;
 mod long_ring_holds;
 mod new_call_gate;
 mod no_panic_lane;
+mod opened_at;
 mod orphan_bye;
 mod owner_pulse;
 mod parse_refusal;

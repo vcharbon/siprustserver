@@ -131,7 +131,8 @@ kills it, and a kill drops every call it serves.
     shed rung (item 11). An emergency INVITE and every other event draw the
     shared pool alone and open a queue up to the full cap, so new calls on a
     stalled decision backend leave the established calls their permits, and a
-    taken-over call's first request finds a queue.
+    taken-over call's first request finds a queue. No rung reads a turn's wait
+    for its permits: the setup budget bounds it (ADR-0022 X1).
 11. **The admission ladder is one table** (`b2bua::admission`, `LADDER`),
     in the order a new INVITE meets the rungs:
 

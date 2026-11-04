@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use b2bua::admission::Class;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
@@ -21,9 +22,12 @@ use b2bua::decision::{
     ScriptedDecisionEngine,
 };
 use b2bua::limiter::LimiterEntry;
+use b2bua::new_calls::Refusal;
 use b2bua::turn_probe::{Hold, TurnMark, TurnPoint, TurnProbe};
 use b2bua::TurnProbes;
-use b2bua_harness::limiter::doubles::{fail_open, never_answer_admit, refuse_on, spy};
+use b2bua_harness::limiter::doubles::{
+    admit_all, answer_nth_admit_late, fail_open, never_answer_admit, refuse_on, spy,
+};
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, Pace, RouterPace};
 use call::{CdrEventType, TerminationCause};
 use scenario_harness::callflow::{hangup, ANSWER_SDP, OFFER_SDP};
@@ -230,6 +234,19 @@ async fn a_turn_waiting_for_a_permit_past_the_budget_is_refused_and_asks_nothing
     open.send_replace(true);
     answer_and_hang_up(&mut holder, &s.bob).await;
     settle_until(|| s.b2bua.cdr_records().len() == 2).await;
+
+    let counts = s.b2bua.new_calls();
+    assert_eq!(counts.accepted(Class::Normal), 1, "the holder");
+    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Normal), 1, "the refused turn");
+    assert_eq!(counts.total(), 2, "one count per INVITE");
+    let header = s.b2bua.overload().x_overload_header_value();
+    assert!(header.ends_with("adm=1"), "the refused call is not counted as treated: {header}");
+
+    let text = s.b2bua.metrics().prometheus_text();
+    assert!(text.contains("b2bua_new_call_turn_wait_seconds_count 2"), "both turns: {text}");
+    assert!(text.contains("b2bua_new_call_turn_wait_seconds_bucket{le=\"3\"} 1"), "{text}");
+    assert!(text.contains("b2bua_new_call_turn_wait_seconds_bucket{le=\"5\"} 2"), "{text}");
+    assert!(text.contains("b2bua_new_call_permit_hold_seconds_count 1"), "only the holder: {text}");
     let _ = s.finish().await;
 }
 
@@ -265,6 +282,9 @@ async fn a_turn_past_its_budget_behind_a_wedged_router_is_refused_unasked() {
     assert!(s.bob.take_queued().await.is_none(), "no call dialled");
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     assert_refused_cdr(&s, &call);
+    let counts = s.b2bua.new_calls();
+    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Normal), 1);
+    assert_eq!(counts.total(), 1, "counted once");
     let _ = s.finish().await;
 }
 
@@ -299,6 +319,9 @@ async fn a_chain_of_slow_answers_and_refusals_is_cut_at_the_budget() {
     assert_eq!(admitted.len(), 3, "the route's admit and two failovers': {admitted:?}");
     settle_until(|| !limiter.released_keys().is_empty()).await;
     assert_eq!(limiter.released_keys(), vec![admitted[0].clone()], "the key released once");
+    let counts = s.b2bua.new_calls();
+    assert_eq!(counts.accepted(Class::Normal), 1, "its turn ran: an accepted call's outcome");
+    assert_eq!(counts.rejected_sum(), 0);
     let _ = s.finish().await;
 }
 
@@ -330,6 +353,37 @@ async fn an_admit_unanswered_at_the_budget_is_cut_and_its_key_released() {
     assert_eq!(admitted.len(), 1, "one admit sent");
     settle_until(|| !limiter.released_keys().is_empty()).await;
     assert_eq!(limiter.released_keys(), admitted, "its key released");
+    let _ = s.finish().await;
+}
+
+/// An admit whose grant comes back at the very instant the budget runs out is a
+/// route past its budget all the same: the callee is not dialled, and the hold
+/// the limiter granted is released.
+#[tokio::test(start_paused = true)]
+async fn a_hold_granted_at_the_budget_dials_nothing_and_is_released() {
+    let answered_late = answer_nth_admit_late(1, Duration::from_millis(1_000), admit_all());
+    let limiter = spy(answered_late);
+    let spied = limiter.clone();
+    let s = B2buaScene::with_b2bua("setup-budget-granted-at-the-budget", |bob_port| {
+        let inner = capped_chain(bob_port, "trunk", "trunk");
+        let e = Slow::new(inner, Duration::from_millis(4_000), Duration::ZERO);
+        B2buaSut::builder(e).limiter(spied)
+    })
+    .await;
+
+    let sent = tokio::time::Instant::now();
+    let mut call = invite(&s, &s.alice).await;
+    call.expect(100).await;
+    final_503_at_the_budget(&s, &s.alice, &mut call, sent).await;
+
+    s.h.advance(Duration::from_secs(1)).await;
+    assert!(s.bob.take_queued().await.is_none(), "no call dialled");
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    assert_refused_cdr(&s, &call);
+    let admitted = limiter.admitted_keys();
+    assert_eq!(admitted.len(), 1, "one admit sent");
+    settle_until(|| !limiter.released_keys().is_empty()).await;
+    assert_eq!(limiter.released_keys(), admitted, "the hold is released");
     let _ = s.finish().await;
 }
 
@@ -396,6 +450,8 @@ async fn an_emergency_invite_is_held_to_the_same_budget() {
     waiting.expect(100).await;
     final_503_at_the_budget(&s, &s.alice, &mut waiting, sent).await;
     assert!(!engine.asked_of("alice"), "no decision asked");
+    let counts = s.b2bua.new_calls();
+    assert_eq!(counts.rejected(Refusal::SetupBudget, Class::Emergency), 1, "in its own class");
 
     open.send_replace(true);
     answer_and_hang_up(&mut holder, &s.bob).await;
@@ -439,6 +495,9 @@ async fn a_setup_canceled_while_waiting_ends_at_the_budget_as_cancelled() {
     assert_eq!(events, [CdrEventType::InviteReceived, CdrEventType::Cancel], "{cdr:?}");
     assert!(!engine.asked_of("alice"), "no decision asked");
     assert!(s.alice.take_queued().await.is_none(), "the 487 was its one final");
+    let counts = s.b2bua.new_calls();
+    assert_eq!(counts.cancelled(Class::Normal), 1, "counted as cancelled");
+    assert_eq!(counts.rejected_sum(), 0, "not as refused");
 
     open.send_replace(true);
     answer_and_hang_up(&mut holder, &s.bob).await;

@@ -99,8 +99,9 @@ pub struct RunnerEnv {
     /// "response"` (ADR-0044). Default 5; supported range
     /// 2..=32. In-dialog INVITE and non-INVITE never read it.
     pub invite_first_response_timeout_sec: i64,
-    /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — decision-backend deadline per
-    /// round-trip (default 5000; <= 0 disables — ADR-0022).
+    /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — the setup budget from an initial
+    /// INVITE's receipt to its final, an off-turn consult's deadline per round
+    /// trip (default 5000; <= 0 disables — ADR-0022 X1).
     pub call_control_timeout_ms: i64,
     /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
     /// §13.3.1.4, 64·T1 = 32 s; <= 0 tears nothing down — the ladder itself

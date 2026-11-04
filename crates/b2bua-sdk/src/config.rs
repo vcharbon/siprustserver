@@ -261,21 +261,16 @@ pub struct B2buaConfig {
     /// `WORKER_ALLOWED_TARGET_SUFFIXES` (comma-separated, trimmed, empties
     /// dropped).
     pub worker_allowed_target_suffixes: Vec<String>,
-    /// **Decision-backend deadline** (ms) — the hard per-round-trip bound on a
-    /// caller-blocking `CallDecisionEngine` call (`new_call` and `call_failure`;
-    /// `call_refer` is bounded by the refer subscription/safety timers instead —
-    /// see `DeadlineDecisionEngine`), enforced by the CORE
-    /// (`b2bua::decision::DeadlineDecisionEngine` wraps whatever engine the host
-    /// injects at `B2buaCore::spawn`). This is the load-bearing half of the
-    /// initial-INVITE guarantee (ADR-0022): sip-txn auto-answers 100 Trying
-    /// before the router ever sees the INVITE, so the caller is already waiting
-    /// — a decision backend that hangs must NOT strand them. On expiry the call
-    /// takes the ordinary decision-error path (503 to the caller for
-    /// `new_call`; the per-site `Err` fallback for failure/refer). The core owns
-    /// this as ONE knob, not each adapter, so a third-party adapter cannot
-    /// forget it. Default **5000**. `<= 0` disables
-    /// (escape hatch for tests that need a genuinely wedged decision await —
-    /// the reaper ladder still cleans up, see `reaper.rs`). Overridable via
+    /// **The setup budget and the decision-backend deadline** (ms). On an
+    /// initial INVITE's turn: the bound from the INVITE's receipt to its final,
+    /// the wait for a handler permit, the decision round trips and the limiter's
+    /// admits together, then the bare 503 (ADR-0022 X1,
+    /// `b2bua::setup_budget`). Off the turn: the bound on one round trip of a
+    /// consult (`DeadlineDecisionEngine`; `call_refer` has the refer timers
+    /// instead). The core owns this as ONE knob, not each adapter, so a
+    /// third-party adapter cannot forget it. Default **5000**. `<= 0` disables
+    /// both (escape hatch for tests that need a genuinely wedged decision await
+    /// — the reaper ladder still cleans up, see `reaper.rs`). Overridable via
     /// `B2BUA_CALL_CONTROL_TIMEOUT_MS`.
     pub call_control_timeout_ms: i64,
     /// **Opt-in transparent header relay.** Header names whose *value* is copied
