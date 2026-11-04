@@ -65,8 +65,13 @@ pub(super) fn txn_config(
         deferred_bound: None,
         invite_refusals: Some(refusals.memo().clone()),
         // A new normal INVITE is refused on arrival while the event-queue gate
-        // refuses, ahead of the queue it would wait in.
-        new_call_gate: Some(NewCallGate::new(switch.clone(), crate::admission::class_of)),
+        // refuses, ahead of the queue it would wait in, or once the queue's
+        // oldest event has waited what would trip the gate at a single reading:
+        // a router held in one turn writes no refusal (ADR-0037 item 11).
+        new_call_gate: Some(
+            NewCallGate::new(switch.clone(), crate::admission::class_of)
+                .refusing_at_age(config.event_queue_gate.refuse_at_age()),
+        ),
         // The OPTIONS health answer derives its To-tag from the request
         // (`RouterCtx::options_tagger`).
         stateless_options: true,

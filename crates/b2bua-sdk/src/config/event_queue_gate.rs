@@ -90,6 +90,15 @@ pub enum GateViolation {
 }
 
 impl EventQueueGateConfig {
+    /// The age of the oldest waiting event that trips the gate at a single
+    /// reading: the refusal delay and the refusal interval together. A shorter
+    /// wait, a slow turn or a throttle gap, trips nothing.
+    pub fn refuse_at_age(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.refuse_delay_ms.saturating_add(self.refuse_interval_ms),
+        )
+    }
+
     /// The relations the gate needs: every bound positive, each accept bound
     /// below its refusal bound, the refusal depth within the queue's bound,
     /// and the refusal interval below the hold, else a refusal would end

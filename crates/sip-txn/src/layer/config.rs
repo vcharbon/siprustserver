@@ -77,8 +77,8 @@ pub struct TransactionConfig {
     /// and an initial INVITE this layer admits is held there while its
     /// transaction lives. `None` — the default — shares nothing.
     pub invite_refusals: Option<InviteRefusals>,
-    /// The consumer's switch on new calls ([`NewCallGate`]), read as each new
-    /// INVITE arrives; it refuses through
+    /// The consumer's switch on new calls and the age of its queue
+    /// ([`NewCallGate`]), read as each new INVITE arrives; it refuses through
     /// [`invite_refusals`](Self::invite_refusals), which it requires. `None`
     /// — the default — reads none.
     pub new_call_gate: Option<NewCallGate>,

@@ -3,7 +3,8 @@
 **Status:** accepted (2026-09-25)
 Amended (2026-10-23): items 4 and 6, a replica left out leaves the call without a backup
 (ADR-0055 §3). Amended (2026-11-01): item 11, the event-queue rung. Amended (2026-11-03): items 2, 4
-and 7, the backup ceilings at least the admission ones and the replica's own cost.
+and 7, the backup ceilings at least the admission ones and the replica's own cost. Amended
+(2026-11-05): item 11, the event-queue rung on arrival also reads the queue's age.
 
 ## Context
 
@@ -140,7 +141,7 @@ kills it, and a kill drops every call it serves.
     |---|---|---|---|---|---|---|
     | brake | arrival, before the datagram is queued | inbound queue depth | refused at the threshold | admitted | admitted | configured |
     | backlog | transaction layer, before any transaction | deferred events | refused at the normal ceiling | refused at the emergency ceiling | refused at the emergency ceiling | configured |
-    | event queue, on arrival | transaction layer, before any transaction | the state the event-queue gate (ADR-0050 §9) last wrote | refused while it refuses | admitted | admitted | configured |
+    | event queue, on arrival | transaction layer, before any transaction | the state the event-queue gate (ADR-0050 §9) last wrote, and the age of the queue's oldest event | refused while it refuses, or from the gate's delay plus its interval | admitted | admitted | configured |
     | capacity | router ingress | live calls (admitted INVITEs included), transactions, sampled RSS | refused at a normal ceiling | refused at an emergency ceiling | — | configured |
     | shed | router ingress | live per-call queues | refused at the cap less the headroom | refused at the cap | — | configured |
     | panic-ELU | router ingress | the worker's EWMA-ELU | refused above the backstop | admitted | — | configured |
@@ -178,8 +179,19 @@ kills it, and a kill drops every call it serves.
     the worker's one refusal, so a copy draws the same answer, counted once.
     The router writes that state at each event it takes, each probe and each
     INVITE it judges, and every 100 ms while idle and refusing; while it is
-    held in one turn the state is the one from before it. An INVITE admitted
-    on arrival is judged again at router ingress, after the other rungs, on
+    held in one turn the state is the one from before it. So the layer also
+    reads the age of the queue's oldest event itself (a clock read and a few
+    atomics) and refuses from the age that trips the gate at a single reading,
+    its delay plus its interval (300 + 150 ms): a router stopped on one turn
+    draws the refusal from about 0.45 s after the first event behind it, and a
+    gap the gate tolerates, a CPU-quota throttle or a slow turn, refuses nothing.
+    The age holds no state: the refusing the gate latches for its hold starts
+    at the router's next reading. An INVITE admitted under that age still hears
+    its 100 at the §17.2.1 bound and waits in the queue: at 1000 calls/s on two
+    workers about 225 INVITEs behind a stopped router, which reach no record
+    until it turns or the process exits (ADR-0033 §4).
+    An INVITE admitted on arrival is judged again at router ingress, after the
+    other rungs, on
     a fresh reading: it catches an INVITE that queued before the gate
     tripped. On arrival the rung comes right after the backlog, so an INVITE
     that the capacity, shed, panic-ELU or bucket rung would also refuse is

@@ -7,6 +7,8 @@ Amended (2026-11-01): §2 and §9, a backed-up event queue refuses new calls
 keepalive lane. Amended (2026-11-03): §11, the node's announcement follows `/readyz` (ADR-0056).
 Amended (2026-11-04): §3 and §5, the flip of a worker read `Alive` to not ready, not
 terminating, is a dead verdict.
+Amended (2026-11-05): §9, the transaction layer refuses on the queue's age by itself while
+its router writes nothing.
 
 **Owner:** `crates/sip-message` (the `X-Readiness` and `X-Incarnation` headers),
 `crates/b2bua/src/repl/readiness.rs` and `router/responses.rs` (the worker's
@@ -207,7 +209,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
      while the gate refuses gets the ladder's `503` as it arrives, ahead of
      the queue it would wait in, from the gate's first refusing reading on,
      before any probe reads it; emergency INVITEs and in-dialog requests are
-     never refused by it. The bounds, their defaults
+     never refused by it. Only the router reads the gate, so a router held in
+     one turn writes no refusal: the transaction layer reads the queue's age
+     itself as each new INVITE arrives, and refuses from that same 450 ms
+     (ADR-0037 item 11). The bounds, their defaults
      and the boot checks between them are the runner's `B2BUA_EVENT_QUEUE_*`
      grammar. The proxy keeps a refusing worker `Alive` and every dialog it
      owns on it (§4), and places new calls elsewhere (§6): a worker whose
@@ -307,7 +312,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
   after a primary returns, served by the primary), and the event-queue cells
   (an OPTIONS behind a backlog answered within the reply window; the refusal
   by depth and by a persisting delay with its hold; a stalled router reading
-  the age of the event behind it; a wait shorter than the interval refusing
+  the age of the event behind it; a held router's INVITE refused on arrival
+  past that age, with no 100; a wait shorter than the interval refusing
   nothing; a backed-up worker kept alive, its
   dialogs on it, new calls elsewhere; a dead notice behind a backlog taken
   once, in order; a wedged or partitioned worker read dead).
