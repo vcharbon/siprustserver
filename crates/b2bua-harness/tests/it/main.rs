@@ -214,6 +214,7 @@ mod service_admission_set;
 mod service_http;
 mod service_timers;
 mod session_timer_transparency;
+mod setup_budget;
 mod setup_deadline_media_leg;
 mod setup_stall_global_duration_reap;
 mod setup_timeout;
