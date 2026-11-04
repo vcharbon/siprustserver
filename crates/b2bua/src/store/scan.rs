@@ -1,8 +1,10 @@
-//! The bulk reads of one partition of the replicating store: its call bodies
-//! decoded, or its `callRef`s alone.
+//! The reads of one partition of the replicating store as they are stored: its
+//! call bodies decoded, its `callRef`s alone, one Element's body undecoded.
+
+use std::sync::Arc;
 
 use super::envelope::{self, Enveloped};
-use super::{CallState, CallStore, PartitionRole};
+use super::{partition_of, CallState, CallStore, PartitionRole};
 
 impl CallState {
     /// Decode every call body `(role, primary)` holds in the replicating store
@@ -42,5 +44,15 @@ impl CallState {
     /// which reads each body in turn. Empty when no replicating store is wired.
     pub fn partition_refs(&self, role: PartitionRole, primary: &str) -> Vec<String> {
         self.repl_store().map(|repl| repl.scan_call_refs(role, primary)).unwrap_or_default()
+    }
+
+    /// The body of the `bak:{primary}` Element of `call_ref` as its primary
+    /// wrote it, not decoded; `None` for a ref this node holds no Element of.
+    pub async fn replica_body(&self, call_ref: &str) -> Option<Arc<[u8]>> {
+        let (role, primary) = partition_of(&self.self_ordinal, call_ref);
+        if role != PartitionRole::Backup {
+            return None;
+        }
+        self.repl_store()?.peek_body_raw(role, &primary, call_ref).await
     }
 }

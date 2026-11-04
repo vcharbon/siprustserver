@@ -117,9 +117,11 @@ down on the restarted process's reclaim write (D7;
 A write of another generation refutes the verdict: that process holds its calls again,
 and a copy made after its reclaim write would meet no write to stand down on
 (the cell reclaiming inside the backoff). For the same reason the sweep of a verdict so
-confirmed stops at the first such write, read before each copy, a frame being heard before
-it is applied: the copies it made stand down, the calls it did not reach are the process's
-(`sweep_meets_the_reclaim_write.rs`, the sweep's duration its axis). A restarted process
+confirmed stops at the first write of a later generation than it named, read before each
+copy, a frame being heard before it is applied: the copies it made stand down, the calls it
+did not reach are the process's (`sweep_meets_the_reclaim_write.rs`, the sweep's duration
+its axis; an older generation's write stops nothing, its cell of a restart that dies
+before it writes). A restarted process
 the flow already streams from at the verdict is that generation, and its own reclaim
 takes its calls back (the cell returning before the flip)
 (`b2bua_dead_verdicts_unconfirmed_total`, one wait per peer however many verdicts;
@@ -422,6 +424,12 @@ the call has one CDR.
   work in flight while the primary may still serve them, so the callee may get the
   dialled INVITE twice and an outside service the request twice
   (`read_dead_primary_taken_over.rs`, the silent-host cell, confirmed by its partition).
+- **A sweep stopped by a write, then a second death.** The sweep stops at the restarted
+  process's first write; if that process dies after it, the calls past the stop are left to
+  a message, a later verdict, the next restart's reclaim or the departure.
+- **A confirmation that read no generation.** A connect that fails on a puller with no frame
+  heard yet names none (`generation: None`), so nothing stops that sweep: a reclaim write
+  landing during it can still reach a copy read after it.
 - **A peer that goes silent** is confirmed once its stream is left at the pullers'
   idle bound (2 s after its last frame, `B2BUA_REPL_IDLE_TIMEOUT_MS`; ADR-0045) and the
   one connect fails: at once when the path to it refuses connects

@@ -102,15 +102,16 @@ impl ReplicationSupervisor {
             .and_then(|rx| rx.borrow().last_frame_gen)
     }
 
-    /// Whether a write of another generation than `generation` arrived on the
-    /// Backup flow from `peer`. A frame is heard before it is applied, so a
-    /// write this reads `false` for is not in the store yet.
-    pub fn writes_another_generation(&self, peer: &str, generation: u64) -> bool {
+    /// Whether a write of a later generation than `generation` arrived on the
+    /// Backup flow from `peer`; an older generation's write says nothing of a
+    /// later process. A frame is heard before it is applied, so a write this
+    /// reads `false` for is not in the store yet.
+    pub fn writes_a_later_generation(&self, peer: &str, generation: u64) -> bool {
         self.inner
             .peers()
             .get(peer)
             .and_then(|e| e.backup.status_rx.as_ref())
-            .is_some_and(|rx| rx.borrow().last_write_gen.is_some_and(|gen| gen != generation))
+            .is_some_and(|rx| rx.borrow().last_write_gen.is_some_and(|gen| gen > generation))
     }
 
     /// The longest an open stream from a peer that went silent stays open:

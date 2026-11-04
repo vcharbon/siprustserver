@@ -31,8 +31,8 @@
 //! its departure; the final a finished call may still owe its caller is sent
 //! at once, and the limiter key it owes is released (ADR-0047 D8): the
 //! release is keyed by the call, so the peer's own release, or the
-//! discharge's, frees nothing more. That half stops at the first write of
-//! another generation than the verdict named: the restarted peer holds its calls
+//! discharge's, frees nothing more. That half stops at the first write of a
+//! later generation than the verdict named: the restarted peer holds its calls
 //! again, and a copy read from a replica its reclaim write already reached meets
 //! no later write to stand down on (ADR-0047 D1, D7).
 //!
@@ -101,7 +101,8 @@ pub(super) fn backs_calls_of(ctx: &RouterCtx, ordinal: &str) -> bool {
 /// Start the sweep for `cause` unless `ordinal`'s backup partition is empty;
 /// whether it started.
 fn start(ctx: &Arc<RouterCtx>, ordinal: &str, cause: Cause) -> bool {
-    let refs = ctx.state.partition_refs(PartitionRole::Backup, ordinal);
+    let mut refs = ctx.state.partition_refs(PartitionRole::Backup, ordinal);
+    refs.sort_unstable();
     if refs.is_empty() && matches!(cause, Cause::ReadDead { .. }) {
         return false;
     }
@@ -219,8 +220,9 @@ async fn sweep<F, Fut>(
 /// verdict the flow from the peer is read before the call is touched, again
 /// under the lock right before the copy reads the replica, and once the copy is
 /// marked ([`peer_returned`]): a write heard after that mark rides up to the
-/// copy, and one heard before it may have found no mark, so the copy meets the
-/// Element ([`meet_the_element`](super::stand_down::meet_the_element)).
+/// copy, and one heard before it may have found no mark, so the copy is offered
+/// the Element as that write
+/// ([`offer_the_element`](super::stand_down::offer_the_element)).
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
     if peer_returned(ctx, call_ref, cause) {
         return Swept::PeerReturned;
@@ -260,7 +262,7 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
     }
     match materialise(ctx, call_ref, Origin::Takeover).await {
         Materialised::Served { .. } if peer_returned(ctx, call_ref, cause) => {
-            super::stand_down::meet_the_element(ctx, call_ref).await;
+            super::stand_down::offer_the_element(ctx, call_ref).await;
             Swept::PeerReturned
         }
         Materialised::Served { call, seeded } => match seeded {
@@ -283,12 +285,12 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
 }
 
 /// Whether, on a dead verdict, the flow from `call_ref`'s primary heard a write
-/// of another generation than the verdict named. A frame is heard before it is
+/// of a later generation than the verdict named. A frame is heard before it is
 /// applied, so a reclaim write this reads `false` for is not in the replica yet.
 fn peer_returned(ctx: &RouterCtx, call_ref: &str, cause: Cause) -> bool {
     let Cause::ReadDead { generation: Some(generation) } = cause else { return false };
     let Some(primary) = call::call_ref_primary(call_ref) else { return false };
-    ctx.peer_streams.as_ref().is_some_and(|s| s.writes_another_generation(primary, generation))
+    ctx.peer_streams.as_ref().is_some_and(|s| s.writes_a_later_generation(primary, generation))
 }
 
 /// Whether `call` needs no copy to serve it, only its discharge: ended, or
