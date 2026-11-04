@@ -65,6 +65,7 @@ pub mod reaper;
 pub mod release_all;
 pub mod repl;
 pub mod router;
+pub mod setup_budget;
 pub mod store;
 pub mod supervise;
 pub(crate) mod sweep;

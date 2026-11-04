@@ -27,21 +27,22 @@ use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
 use crate::rule_chain::{enforced, fired, rule_chain_turn, TurnInput};
+use crate::setup_budget::SetupBudget;
 use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 
 /// The per-call handler body: check the call out, run the handler, interpret.
 /// `matched_client_txn`: a response `event` carries answered a client
-/// transaction the transaction layer holds. `unborn` holds a new call
-/// admitted at ingress until its call is created; every other exit drops it.
-/// `true` when a turn's outbox entry took the event, and with it what the
-/// transaction layer holds for that entry's release.
+/// transaction the transaction layer holds. `admitted` is a new call admitted
+/// at ingress: its hold, until its call is created (every other exit drops
+/// it), and its setup budget. `true` when a turn's outbox entry took the event,
+/// and with it what the transaction layer holds for that entry's release.
 pub(super) async fn process(
     ctx: &Arc<RouterCtx>,
     event: &CallEvent,
     matched_client_txn: bool,
     mut res: Resolution,
-    unborn: Option<UnbornCall>,
+    admitted: Option<(UnbornCall, SetupBudget)>,
 ) -> bool {
     let Some(call_ref) = res.call_ref.clone() else {
         // The dispatcher keys every event it runs by its callRef.
@@ -73,7 +74,7 @@ pub(super) async fn process(
             _ => return false,
         };
         let initial = super::initial_turn::initial_invite_turn(
-            ctx, &call_ref, &req, src, datagram, now_ms, unborn, &mut turn,
+            ctx, &call_ref, &req, src, datagram, now_ms, admitted, &mut turn,
         );
         match initial.await {
             super::initial_turn::Turn::Consumed => return false,

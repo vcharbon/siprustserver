@@ -31,6 +31,7 @@ use crate::initial_consult::{handle_initial_invite, Consulted};
 use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::ActionExecutor;
+use crate::setup_budget::SetupBudget;
 use b2bua_sdk::event::CallEvent;
 
 /// The topic of the re-ask notice, an internal event the router raises itself
@@ -152,12 +153,13 @@ pub(super) fn notice_of(event: &CallEvent) -> Option<&str> {
 }
 
 /// The re-ask turn of `call_ref`, under its per-call lock: the resident call,
-/// still undecided, is consulted as its initial INVITE's turn consults, and
-/// the turn lands as that one does. A call gone, decided meanwhile or whose
-/// setup the caller CANCELed asks nothing; a copy its primary wrote over
-/// ([`primary_wrote_since`]) asks nothing, and applies no answer that returns
-/// after that write.
-pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
+/// still undecided, is consulted as its initial INVITE's turn consults, under
+/// the fresh `budget` its notice started, and the turn lands as that one does;
+/// the budget spent before the turn ran, its caller is refused unasked. A call
+/// gone, decided meanwhile or whose setup the caller CANCELed asks nothing; a
+/// copy its primary wrote over ([`primary_wrote_since`]) asks nothing, and
+/// applies no answer that returns after that write.
+pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: SetupBudget) {
     let _guard = ctx.state.lock(call_ref).await;
     let Some(call) = ctx.state.peek(call_ref) else { return };
     let cseq = call.a_leg_invite.cseq;
@@ -176,30 +178,36 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
     let owners = crate::store::envelope::owners(&ctx.relay_owner, topology.as_ref());
     // The INVITE as it arrived is in no record: a trace backfills its image.
     let wire = caller.image().to_vec();
-    let consult = handle_initial_invite(
-        call.clone(),
-        &caller,
-        ctx.decision.as_ref(),
-        &ctx.limiter,
-        &ctx.config,
-        &owners,
-        &mut turn,
-        &ctx.services,
-        &wire,
-        &ctx.clock,
-        now_ms,
-        &cancelled,
-    );
-    let consult = consult_writing_its_cancel(ctx, call_ref, &call, &caller, consult).await;
-    let (handled, recorded) = match consult {
-        Consulted::Applied(handled) => (*handled, false),
-        // The caller CANCELed during the round trip: the decision is recorded,
-        // never applied, and her CANCEL's turn, queued behind this one, ends
-        // the call and releases what the decision admitted.
-        Consulted::Cancelled(decided) => {
-            ctx.metrics.bump_decision_dropped_cancelled();
-            let call = super::initial_turn::recorded_turn(&call, *decided);
-            (HandlerResult { call, effects: crate::effects::HandlerEffects::new() }, true)
+    let refused = budget.spent();
+    let (handled, recorded) = if refused {
+        let ids = &mut turn.ids;
+        (super::initial_turn::refused_unavailable(ctx, call.clone(), &caller, now_ms, ids), false)
+    } else {
+        let consult = handle_initial_invite(
+            call.clone(),
+            &caller,
+            ctx.decision.as_ref(),
+            &ctx.limiter,
+            &ctx.config,
+            &owners,
+            &mut turn,
+            &ctx.services,
+            &wire,
+            &ctx.clock,
+            now_ms,
+            budget,
+            &cancelled,
+        );
+        match consult_writing_its_cancel(ctx, call_ref, &call, &caller, consult).await {
+            Consulted::Applied(handled) => (*handled, false),
+            // The caller CANCELed during the round trip: the decision is recorded,
+            // never applied, and her CANCEL's turn, queued behind this one, ends
+            // the call and releases what the decision admitted.
+            Consulted::Cancelled(decided) => {
+                ctx.metrics.bump_decision_dropped_cancelled();
+                let call = super::initial_turn::recorded_turn(&call, *decided);
+                (HandlerResult { call, effects: crate::effects::HandlerEffects::new() }, true)
+            }
         }
     };
     let handled = if !recorded && ctx.readiness.left_the_slice() {
@@ -227,7 +235,7 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
         close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)
     };
     // A decision another node may have asked.
-    result.effects.reasked = true;
+    result.effects.reasked = !refused;
     super::notes::drain(ctx, call_ref, &mut turn);
     let turn_label = &"the re-ask of an undecided call's decision";
     process_result(ctx, call_ref, result, now_ms, turn_label, None).await;

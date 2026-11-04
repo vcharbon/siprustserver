@@ -1,9 +1,11 @@
 //! The initial INVITE's consult (ADR-0052 §7): the trace intake, the decision
 //! round trip with the clock readings around it, and the route applied with
 //! its admit, each step between two awaits a fold of
-//! [`crate::initial_invite`]. A setup its caller CANCELed before its turn ran
-//! asks the decision engine nothing ([`cancelled_setup`]); one CANCELed during
-//! the round trip keeps the decision unapplied ([`Consulted::Cancelled`]).
+//! [`crate::initial_invite`]. Every await runs under the turn's
+//! [`SetupBudget`], and a cut ends as an unavailable decision does. A setup its
+//! caller CANCELed before its turn ran asks the decision engine nothing
+//! ([`cancelled_setup`]); one CANCELed during the round trip keeps the decision
+//! unapplied ([`Consulted::Cancelled`]).
 
 use call::{Call, Direction};
 use sip_clock::Clock;
@@ -11,12 +13,13 @@ use sip_message::SipRequest;
 
 use crate::config::B2buaConfig;
 use crate::decision::apply_route::apply_route;
-use crate::decision::{CallDecisionEngine, NewCallResponse};
+use crate::decision::{DeadlineDecisionEngine, NewCallResponse};
 use crate::effects::{HandlerEffects, HandlerResult};
 use crate::initial_invite::{build_request, setup_event, treatment, Initial};
 use crate::limiter::LimiterWorker;
 use crate::owners::Owners;
 use crate::rules::{seed_services, ActionExecutor, ServiceDef};
+use crate::setup_budget::SetupBudget;
 use crate::trace;
 use crate::turn_scope::TurnScope;
 
@@ -50,14 +53,15 @@ pub enum Consulted {
 /// the router holds (the call carries a header snapshot, not bytes). `now_ms` is
 /// the turn's timestamp — every CDR entry and timer deadline this handler mints
 /// reads it, so it is taken once; `clock` measures the decision round trip,
-/// whose two ends are by definition not the same instant. `cancelled` reads
+/// whose two ends are by definition not the same instant. `budget` bounds every
+/// await of the consult and the failover chain behind it. `cancelled` reads
 /// whether the caller CANCELed the setup; it is read once, after the consult's
 /// last await.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_initial_invite(
     mut call: Call,
     a_invite: &SipRequest,
-    decision: &dyn CallDecisionEngine,
+    decision: &DeadlineDecisionEngine,
     limiter: &LimiterWorker,
     config: &B2buaConfig,
     owners: &Owners,
@@ -66,6 +70,7 @@ pub async fn handle_initial_invite(
     invite_wire: &[u8],
     clock: &Clock,
     now_ms: i64,
+    budget: SetupBudget,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Consulted {
     let req = build_request(a_invite);
@@ -79,7 +84,7 @@ pub async fn handle_initial_invite(
     let mut request_json = trace::intake::request_body(&call, &req);
 
     let sent_at_ms = clock.now_ms();
-    let response = decision.new_call(req).await;
+    let response = decision.new_call_within(req, budget).await;
     let received_at_ms = clock.now_ms();
     if let Ok(NewCallResponse::Route(route)) = &response {
         // The route that turned the trace on arrived after its own request was
@@ -107,6 +112,7 @@ pub async fn handle_initial_invite(
                 clock,
                 now_ms,
                 0,
+                budget,
             )
             .await;
             (result, true)

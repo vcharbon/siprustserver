@@ -147,18 +147,30 @@ pub fn treatment(
                 now_ms,
             )
         }
-        Err(CallDecisionError::Unavailable(_)) => crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            503,
-            None,
-            None,
-            &[],
-            advertisement,
-            ids,
-            now_ms,
-            TerminationCause::Admission,
-        ),
+        Err(CallDecisionError::Unavailable(_)) => unavailable(call, a_invite, config, ids, now_ms),
     };
     Failover::Final(Box::new(result))
+}
+
+/// The call's final when no decision can answer: the stack's own bare 503
+/// (ADR-0043), no decision and no mark.
+pub fn unavailable(
+    call: Call,
+    a_invite: &SipRequest,
+    config: &B2buaConfig,
+    ids: &mut TurnIds,
+    now_ms: i64,
+) -> HandlerResult {
+    crate::initial_invite::reject_call(
+        call,
+        a_invite,
+        503,
+        None,
+        None,
+        &[],
+        &config.minted_final_advertisement,
+        ids,
+        now_ms,
+        TerminationCause::Admission,
+    )
 }

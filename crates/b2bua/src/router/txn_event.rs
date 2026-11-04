@@ -1,19 +1,32 @@
-//! A transaction-layer event as the call sees it ([`call_event`]).
+//! A transaction-layer event as the call sees it ([`call_event`]), and what the
+//! layer states beside it ([`Arrival`]).
 
 use b2bua_sdk::event::{CallEvent, HOP_ALIVE_TOPIC};
 use sip_txn::TransactionEvent;
+use tokio::time::Instant;
 
-/// `event`, the transaction layer's, as a [`CallEvent`], with whether a
-/// response it carries answered a client transaction the layer holds: a
+/// What the transaction layer states of an event, beside the event. An event
+/// the node raised itself states nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Arrival {
+    /// A response it carries answered a client transaction the layer holds.
+    pub(crate) matched_client_txn: bool,
+    /// The instant the server transaction of a request it carries opened: the
+    /// request's receipt.
+    pub(crate) opened_at: Option<Instant>,
+}
+
+/// `event`, the transaction layer's, as a [`CallEvent`] and its [`Arrival`]: a
 /// timeout names the incarnation its Via marked, and the notice that a
 /// watched call's last transaction cleared is the self-release notice
 /// ([`super::quiesced::notice`]); a hop reported alive is the
 /// [`HOP_ALIVE_TOPIC`] internal event of its call. A CANCEL the layer answered is stamped
 /// `now_ms`, the instant its event reached the run loop.
-pub(crate) fn call_event(event: TransactionEvent, now_ms: i64) -> (CallEvent, bool) {
+pub(crate) fn call_event(event: TransactionEvent, now_ms: i64) -> (CallEvent, Arrival) {
     let event = match event {
-        TransactionEvent::Message { message, src, matched_client_txn, datagram } => {
-            return (CallEvent::Sip { message, src, datagram }, matched_client_txn);
+        TransactionEvent::Message { message, src, matched_client_txn, datagram, opened_at } => {
+            let arrival = Arrival { matched_client_txn, opened_at };
+            return (CallEvent::Sip { message, src, datagram }, arrival);
         }
         TransactionEvent::Cancelled {
             call_id,
@@ -70,7 +83,7 @@ pub(crate) fn call_event(event: TransactionEvent, now_ms: i64) -> (CallEvent, bo
         }
         TransactionEvent::CallQuiesced { call_ref } => super::quiesced::notice(call_ref),
     };
-    (event, false)
+    (event, Arrival::default())
 }
 
 #[cfg(test)]
@@ -105,7 +118,7 @@ mod tests {
 
     #[test]
     fn a_hop_reported_alive_is_its_calls_internal_event() {
-        let (event, matched) = call_event(
+        let (event, arrival) = call_event(
             TransactionEvent::HopAlive {
                 branch: "z9hG4bK-a".into(),
                 call_ref: "w0|cid|tag".into(),
@@ -114,7 +127,7 @@ mod tests {
             },
             0,
         );
-        assert!(!matched);
+        assert!(!arrival.matched_client_txn);
         let CallEvent::InternalEvent { call_ref, topic, payload, .. } = &event else {
             panic!("an internal event: {event:?}");
         };

@@ -6,11 +6,14 @@
 //! class ([`crate::dispatch::class`]). The router acts on the offer: an
 //! admitted new INVITE spends its CPS token once its turn is queued, the reaper
 //! hears a call past its lifetime cap or at its overflow ceiling, and a
-//! discarded request is paid what it is owed ([`super::owed`]).
+//! discarded request is paid what it is owed ([`super::owed`]). An admitted new
+//! INVITE's turn carries the setup budget from the INVITE's receipt, a re-ask's
+//! a fresh one ([`SetupBudget`]).
 
 use std::sync::Arc;
 
 use sip_message::SipMessage;
+use tokio::time::Instant;
 
 use super::admit;
 use super::owed::OwedAnswer;
@@ -18,14 +21,16 @@ use super::peer_metrics::classify_b2bua_peer;
 use super::resolve::{initial_invite_copy, replica_takeover, resolve, InitialInvite};
 use super::responses::build_options_health_response;
 use super::turn::Turn;
+use super::txn_event::Arrival;
 use super::unroutable::Lookup;
 use super::RouterCtx;
 use crate::dispatch::{Discarded, DispatchClass, Outcome};
+use crate::setup_budget::SetupBudget;
 use b2bua_sdk::event::CallEvent;
 
-/// Take `event` in; `matched_client_txn`: a response it carries answered a
-/// client transaction the transaction layer holds.
-pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_client_txn: bool) {
+/// Take `event` in, with what the transaction layer states of it.
+pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, arrival: Arrival) {
+    let Arrival { matched_client_txn, opened_at } = arrival;
     // Per-method / per-(method,code) data-path counters. Every inbound SIP
     // message lands here once, so this is the single chokepoint to meter them.
     if let CallEvent::Sip { message, .. } = &event {
@@ -186,7 +191,15 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
         }
     }
     let admitted = unborn.is_some();
-    let turn = Turn { ctx: ctx.clone(), event, matched_client_txn, res, class, unborn };
+    let budget_ms = ctx.config.call_control_timeout_ms;
+    let budget = if admitted {
+        SetupBudget::from_receipt(opened_at.unwrap_or_else(Instant::now), budget_ms)
+    } else if super::undecided::notice_of(&event).is_some() {
+        SetupBudget::from_receipt(Instant::now(), budget_ms)
+    } else {
+        SetupBudget::NONE
+    };
+    let turn = Turn { ctx: ctx.clone(), event, matched_client_txn, res, class, unborn, budget };
     let offer = ctx.dispatcher.offer(&call_ref, turn, class);
     if admitted && matches!(offer.outcome, Outcome::Queued) {
         admit::queued(ctx);

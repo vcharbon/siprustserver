@@ -10,6 +10,7 @@ pub mod capacity;
 pub mod limiter;
 pub mod plain;
 pub mod readiness;
+pub mod setup;
 pub mod shell;
 pub mod udp;
 pub mod worker;
@@ -60,6 +61,7 @@ assert_exposition_order!(
     Cordoned,
     Unrecoverable,
     EventQueue,
+    SetupBudget,
 );
 assert_exposition_order!(Class: Normal, Emergency, InDialog);
 
@@ -162,6 +164,8 @@ const WORKER_REST: &[Family] = &[
     worker::REPL_INBOUND_DROPPED,
     worker::DRAIN_EXITS,
     worker::DRAIN_SECONDS,
+    setup::TURN_WAIT_SECONDS,
+    setup::PERMIT_HOLD_SECONDS,
     worker::OPERATOR_RELEASED,
     limiter::REQUESTS,
     limiter::FAILURES,

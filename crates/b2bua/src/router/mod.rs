@@ -110,7 +110,6 @@ use tokio::sync::mpsc;
 
 use crate::cdr::CdrWriter;
 use crate::config::B2buaConfig;
-use crate::decision::CallDecisionEngine;
 use crate::dispatch::PerCallDispatcher;
 use crate::limiter::LimiterWorker;
 use crate::metrics::B2buaMetrics;
@@ -153,7 +152,7 @@ pub struct RouterCtx {
     /// Hears a call past its lifetime cap or at its overflow ceiling, as the
     /// dispatcher's offers state them.
     pub reaper: crate::reaper::Reaper,
-    pub decision: Arc<dyn CallDecisionEngine>,
+    pub decision: Arc<crate::decision::DeadlineDecisionEngine>,
     /// The worker's one handle on its call limiter: every admit, release
     /// and refresh, none of which a call waits on beyond the admit bound.
     pub limiter: LimiterWorker,
@@ -315,11 +314,10 @@ pub enum PrimaryWrite {
     Delete(Option<String>),
 }
 
-/// What one turn of the router took: an event, with whether a response it
-/// carries answered a client transaction the layer holds, or a replication
-/// command.
+/// What one turn of the router took: an event, with what the transaction layer
+/// states of it, or a replication command.
 enum Work {
-    Event(CallEvent, bool),
+    Event(CallEvent, txn_event::Arrival),
     Repl(ReplCommand),
     /// What `readmission` held: the arming of parked calls, then the reclaim
     /// commands in arrival order.
@@ -347,8 +345,8 @@ pub async fn run(
     loop {
         let work = match inbox.next(&ctx, &mut readmission).await {
             inbox::Taken::Keepalive(ev) => {
-                let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
-                Work::Event(ev, matched_client_txn)
+                let (ev, arrival) = txn_event::call_event(ev, ctx.clock.now_ms());
+                Work::Event(ev, arrival)
             }
             inbox::Taken::Work(work) => work,
             inbox::Taken::Closed => break,
@@ -356,9 +354,7 @@ pub async fn run(
         pulse.turning();
         ctx.turn_probe.router_turn(&ctx.config.self_ordinal).await;
         match work {
-            Work::Event(ev, matched_client_txn) => {
-                ingress::on_event(&ctx, ev, matched_client_txn).await
-            }
+            Work::Event(ev, arrival) => ingress::on_event(&ctx, ev, arrival).await,
             Work::Repl(cmd) => {
                 if let Some(cmd) = readmission.admit(cmd) {
                     on_repl_command(&ctx, cmd, &mut readmission).await

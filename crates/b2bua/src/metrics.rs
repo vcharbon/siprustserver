@@ -5,14 +5,13 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use metric_catalogue::HistogramValue;
-
 use crate::dispatch::{Discard, PastBound};
 use crate::drain::DrainExit;
 use catalogue::worker::{DRAIN_BUCKETS, PAST_BOUND, REMOVAL_CLASS};
 
 pub mod catalogue;
 mod cells;
+mod durations;
 mod limiter;
 mod operator;
 mod removal_class;
@@ -20,6 +19,7 @@ mod repl_gauges;
 mod repl_hold;
 mod retransmit_row;
 mod rows;
+mod setup_times;
 pub mod shell;
 mod turn_counts;
 mod udp_transport;
@@ -47,11 +47,10 @@ struct Inner {
     // departing worker abandoned live calls no peer reported holding: a lost
     // flush window, the one reason that must never be read as a clean drain.
     drain_exits: [AtomicU64; DrainExit::ALL.len()],
-    // Time-in-drain: fixed-bucket cumulative counts (`le` in seconds), the sum in
-    // milliseconds and the observation count.
-    drain_seconds_buckets: [AtomicU64; catalogue::worker::DRAIN_BUCKETS.len()],
-    drain_seconds_sum_ms: AtomicU64,
-    drain_seconds_count: AtomicU64,
+    // Time-in-drain.
+    drain_seconds: durations::Durations<{ DRAIN_BUCKETS.len() }>,
+    // A new call's turn wait and permit hold (ADR-0022 X1).
+    setup_times: setup_times::SetupTimes,
     // What every operator release-all reached, by kind (ADR-0050 §10).
     operator_releases: operator::OperatorReleases,
     // The worker's view of its call limiter (ADR-0040).
@@ -349,14 +348,9 @@ impl B2buaMetrics {
     /// into `b2bua_limiter_release_flushes_total{outcome}` and
     /// `b2bua_limiter_release_flush_seconds_total` (ADR-0040 decision 9).
     pub fn record_drain_exit(&self, outcome: &crate::drain::DrainOutcome) {
-        let elapsed = outcome.elapsed;
         cells::add_at(&self.inner.drain_exits, outcome.exit as usize, 1);
         self.inner.limiter.count_release_flush(&outcome.release_flush);
-        let secs = elapsed.as_secs_f64();
-        let buckets = DRAIN_BUCKETS.iter().zip(&self.inner.drain_seconds_buckets);
-        buckets.filter(|(le, _)| secs <= **le).for_each(|(_, n)| cells::add(n, 1));
-        cells::add(&self.inner.drain_seconds_sum_ms, sip_clock::wall::millis_u64(elapsed));
-        self.inner.drain_seconds_count.fetch_add(1, Ordering::Relaxed);
+        self.inner.drain_seconds.observe(&DRAIN_BUCKETS, outcome.elapsed);
     }
 
     /// Drains that returned for `reason` (test/observability).
@@ -608,15 +602,8 @@ impl B2buaMetrics {
         catalogue::worker::DRAIN_EXITS.render(&mut s, |series| {
             cells::get_at(&i.drain_exits, series.index(&catalogue::worker::DRAIN_REASON))
         });
-        catalogue::worker::DRAIN_SECONDS.render_histogram(&mut s, |_| HistogramValue {
-            buckets: catalogue::worker::DRAIN_BUCKETS
-                .iter()
-                .zip(&i.drain_seconds_buckets)
-                .map(|(le, n)| (*le, n.load(Ordering::Relaxed)))
-                .collect(),
-            sum: i.drain_seconds_sum_ms.load(Ordering::Relaxed) as f64 / 1_000.0,
-            count: i.drain_seconds_count.load(Ordering::Relaxed),
-        });
+        i.drain_seconds.render(&catalogue::worker::DRAIN_SECONDS, &DRAIN_BUCKETS, &mut s);
+        i.setup_times.render(&mut s);
         operator::render(self, &mut s);
         self.inner.limiter.render(&mut s);
         catalogue::worker::CALL_REMOVALS_BY_CLASS.render(&mut s, |r| {

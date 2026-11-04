@@ -336,10 +336,9 @@ impl Owner {
 
         // An INVITE's first provisional is its consumer's to release, or this
         // layer's at the §17.2.1 bound (`layer::trying`).
-        if is_invite {
-            if let Some(opened) = self.server(id).map(|t| t.created_at) {
-                self.arm_trying_bound(id.to_key(), opened);
-            }
+        let opened_at = self.server(id).map(|t| t.created_at);
+        if let (true, Some(opened)) = (is_invite, opened_at) {
+            self.arm_trying_bound(id.to_key(), opened);
         }
 
         // Critical for INVITE: the 100 the bound sends stops the UAC
@@ -353,6 +352,7 @@ impl Owner {
             src,
             matched_client_txn: false,
             datagram,
+            opened_at,
         };
         if is_invite {
             self.emit_critical(event);
@@ -390,6 +390,7 @@ impl Owner {
             src,
             matched_client_txn: false,
             datagram,
+            opened_at: None,
         }
     }
 

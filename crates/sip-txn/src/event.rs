@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use call::TxnTimeoutKind;
 use sip_message::{Method, SipHeader, SipMessage};
+use tokio::time::Instant;
 
 /// A deduplicated/processed event for the upstream router. The peer address is
 /// a `SocketAddr` (sip-net's everywhere-`SocketAddr` convention, ADR-0005).
@@ -25,6 +26,11 @@ pub enum TransactionEvent {
         /// `message` carries the top Via the server transport stamped on
         /// receipt (RFC 3261 §18.2.1); this is what the peer sent.
         datagram: Bytes,
+        /// A request that opened a server transaction: the instant it opened,
+        /// the request's receipt, however long the event then waited in the
+        /// queue. A retransmission the transaction absorbs (§17.2.3) draws no
+        /// event. `None` for a response and a request with no transaction.
+        opened_at: Option<Instant>,
     },
     /// A CANCEL matched a server INVITE txn; this layer sent the 200/487, or
     /// holds them for release (`TransactionConfig::cancel_bound_ms`). RFC 3261
@@ -114,6 +120,7 @@ impl TransactionEvent {
             src,
             matched_client_txn,
             datagram,
+            opened_at: None,
         }
     }
 }

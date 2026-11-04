@@ -37,7 +37,7 @@ pub(super) async fn offer(ctx: &Arc<RouterCtx>, call_ref: String, incarnation: O
         body: Vec::new(),
         incarnation: None,
     };
-    super::ingress::on_event(ctx, event, false).await;
+    super::ingress::on_event(ctx, event, Default::default()).await;
 }
 
 /// The drop turn of `call_ref` on the notice's `payload`, the incarnation the

@@ -42,7 +42,7 @@ pub(super) async fn offer(ctx: &Arc<RouterCtx>, call_ref: String, write: Primary
     if !ctx.state.is_takeover(&call_ref) {
         return;
     }
-    super::ingress::on_event(ctx, notice(call_ref, write), false).await;
+    super::ingress::on_event(ctx, notice(call_ref, write), Default::default()).await;
 }
 
 /// Queue the stand-down notice of the takeover copy of `call_ref` a sweep just

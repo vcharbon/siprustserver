@@ -10,21 +10,23 @@ use sip_message::SipRequest;
 
 use crate::config::B2buaConfig;
 use crate::decision::failover_fold::{self, Consult, Failover};
-use crate::decision::{CallDecisionEngine, CallTreatment};
+use crate::decision::{CallTreatment, DeadlineDecisionEngine};
 use crate::effects::HandlerResult;
 use crate::limiter::LimiterWorker;
 use crate::owners::Owners;
+use crate::setup_budget::SetupBudget;
 
 /// The limiter refused this route: consult `/call/failure` for a failover
 /// treatment and apply it, or answer the call's final
-/// ([`failover_fold::consult_or_busy`]).
+/// ([`failover_fold::consult_or_busy`]). The consult runs under `budget`: with
+/// none left it asks nothing and the call ends as an unanswered consult does.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn limiter_reject_failover(
     call: Call,
     limiter_id: String,
     a_invite: &SipRequest,
     invite_wire: &[u8],
-    decision: &dyn CallDecisionEngine,
+    decision: &DeadlineDecisionEngine,
     limiter: &LimiterWorker,
     config: &B2buaConfig,
     owners: &Owners,
@@ -32,6 +34,7 @@ pub(super) async fn limiter_reject_failover(
     clock: &Clock,
     now_ms: i64,
     depth: u32,
+    budget: SetupBudget,
 ) -> HandlerResult {
     let consult =
         failover_fold::consult_or_busy(call, &limiter_id, a_invite, config, ids, now_ms, depth);
@@ -41,7 +44,7 @@ pub(super) async fn limiter_reject_failover(
     };
     let mut request_json = crate::trace::intake::request_body(&call, &req);
     let sent_at_ms = clock.now_ms();
-    let response = decision.call_failure(req).await;
+    let response = decision.call_failure_within(req, budget).await;
     let received_at_ms = clock.now_ms();
     // A failover route carrying `trace: true` opens the trace right here, so
     // activate before recording: the consult that turned tracing on is the first
@@ -74,6 +77,7 @@ pub(super) async fn limiter_reject_failover(
                 clock,
                 now_ms,
                 depth + 1,
+                budget,
             ))
             .await
         }

@@ -22,6 +22,7 @@ use crate::new_calls::Refusal;
 use crate::repl::ReadinessState;
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::ActionExecutor;
+use crate::setup_budget::SetupBudget;
 use crate::store::StoreFaultPoint;
 use crate::turn_scope::TurnScope;
 
@@ -40,11 +41,15 @@ pub(super) enum Turn {
 /// at ingress (`super::admit`, ADR-0037); here the store-fault probe, the
 /// identity guard, then build + rule the new call. A setup its caller
 /// CANCELed before this turn ran is born and ruled by no one: no decision, no
-/// limiter admit. The probe's 500, the identity guard's 500, the cancelled
-/// setup, the cordon's 503 or the accept counts the INVITE's outcome once
+/// limiter admit. A setup whose budget ran out before this turn ran is refused
+/// as an unavailable decision, its call born only to write its record. The
+/// probe's 500, the identity guard's 500, the cancelled setup, the cordon's or
+/// the budget's 503, or the accept counts the INVITE's outcome once
 /// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
-/// Every identifier the turn mints is drawn from `turn`; `datagram` is the
-/// INVITE as it arrived, what a trace activation backfills its `sip.in` from.
+/// `admitted` is the hold and the setup budget of a new call, `None` for a
+/// copy. Every identifier the turn mints is drawn from `turn`; `datagram` is
+/// the INVITE as it arrived, what a trace activation backfills its `sip.in`
+/// from.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn initial_invite_turn(
     ctx: &Arc<RouterCtx>,
@@ -53,7 +58,7 @@ pub(super) async fn initial_invite_turn(
     src: SocketAddr,
     datagram: &sip_message::Bytes,
     now_ms: i64,
-    unborn: Option<UnbornCall>,
+    admitted: Option<(UnbornCall, SetupBudget)>,
     turn: &mut TurnScope,
 ) -> Turn {
     // ── Live-path store-fault probe (ADR-0023): initial INVITE ──────────────
@@ -68,7 +73,12 @@ pub(super) async fn initial_invite_turn(
     let cseq = req.cseq().seq();
     // A turn with no admission hold is a copy, offered unjudged: never a new
     // call (`super::admit`).
-    let copy = unborn.is_none();
+    let copy = admitted.is_none();
+    let (unborn, budget) = admitted.unzip();
+    let budget = budget.unwrap_or(SetupBudget::NONE);
+    if let Some(waited) = budget.elapsed() {
+        ctx.metrics.observe_new_call_turn_wait(waited);
+    }
     if ctx.store_faults.check(StoreFaultPoint::LiveInitialInvite).is_err() {
         let resp = build_unborn_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
         if let Ok(resp) = resp {
@@ -135,13 +145,17 @@ pub(super) async fn initial_invite_turn(
     // transaction layer already answered 487. The call is born so the queued
     // `Cancelled` turn ends it with its Cancel CDR; it is neither accepted nor
     // treated (`adm`). A cordoned node refuses the call before its decision;
-    // the call is born only to write its record (ADR-0050 §9).
+    // the call is born only to write its record (ADR-0050 §9). So does a turn
+    // whose setup budget ran out before it ran (ADR-0022 X1).
     let cancelled = ctx.state.is_setup_cancelled(call_ref, cseq);
     let cordoned = !cancelled && ctx.readiness.state() == ReadinessState::Cordoned;
+    let spent = !cancelled && !cordoned && budget.spent();
     if cancelled {
         ctx.metrics.new_calls().cancel(class);
     } else if cordoned {
         ctx.metrics.new_calls().reject(Refusal::Cordoned, class);
+    } else if spent {
+        ctx.metrics.new_calls().reject(Refusal::SetupBudget, class);
     } else {
         ctx.metrics.new_calls().accept(class);
         // The `adm` published on X-Overload counts non-emergency calls only:
@@ -191,7 +205,7 @@ pub(super) async fn initial_invite_turn(
     let (mut consulted, mut recorded) = (false, false);
     let mut handled = if cancelled {
         cancelled_setup(call.clone(), &caller, datagram, now_ms)
-    } else if cordoned {
+    } else if cordoned || spent {
         refused_unavailable(ctx, call.clone(), &caller, now_ms, &mut turn.ids)
     } else if call.a_leg_invite.from_tag.is_empty() {
         crate::initial_invite::reject_call(
@@ -223,6 +237,7 @@ pub(super) async fn initial_invite_turn(
             datagram,
             &ctx.clock,
             now_ms,
+            budget,
             &setup_cancelled,
         );
         let consult = consult_writing_its_cancel(ctx, call_ref, &call, &caller, consult).await;
@@ -295,7 +310,7 @@ pub(super) fn refused_after_leaving_the_slice(
 /// `call`, whose caller's INVITE is `caller`, refused 503 with no
 /// Retry-After, as for an unavailable decision (ADR-0022 X3): the record of a
 /// call no decision reached.
-fn refused_unavailable(
+pub(super) fn refused_unavailable(
     ctx: &RouterCtx,
     call: Call,
     caller: &SipRequest,
