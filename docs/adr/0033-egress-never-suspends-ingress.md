@@ -1,6 +1,7 @@
 # Egress never suspends an ingress loop: UDP sends are non-blocking, drop-and-count
 
-**Status:** accepted (2026-09-13)
+**Status:** accepted (2026-09-13). Amended (2026-11-05): §4, a worker loop that stays stalled exits
+the process; §5, the router loop queues a replicated flush as a turn of its call.
 
 ## Context
 
@@ -96,23 +97,52 @@ the one await with no timeout, no queue and no drop policy.
    The b2bua worker's two loops, the transaction owner (recv, timer wheel,
    sweep) and the router, state theirs the same way (`sip_txn::LoopPulse`,
    `b2bua::loops`): one on a piece of work past `B2BUA_LOOP_STALL_MS` turns
-   `/ready` and `/healthz` to 503 and raises `b2bua_loop_stalled{loop}`, and
-   the worker's livenessProbe restarts it; a loop task that ends exits the
-   process non-zero after the limiter release flush. A router turn that needs
-   a call's lock waits out that call's turn, which holds it across its
-   decision round trip (`B2BUA_CALL_CONTROL_TIMEOUT_MS`), so the threshold
-   defaults to the larger of 10 s and that timeout plus 5 s, and boot refuses
-   one not above it by 2 s. A bulk reclaim beats the router's pulse per call.
-   Under the `cpu_starve` chaos the 0.3 CPU quota is shared by every runnable
-   thread: with N runtime threads busy, a turn reads stalled only when its own
-   work needs more than 3/N CPU-seconds. The pulse cannot see a loop that is
-   waiting yet never scheduled while input is queued for it: a starved
+   `/ready` and `/healthz` to 503 and raises `b2bua_loop_stalled{loop}`. One
+   still on it past `B2BUA_LOOP_EXIT_MS`, read on two polls in a row, exits the
+   process non-zero, as a loop task that ends does: after the limiter release
+   flush and the CDR close, each on its own task and its own bound, the runtime
+   then letting go of a thread the loop holds in one poll within 1 s. The exit
+   threshold defaults to the larger of 15 s and the stall threshold plus 5 s,
+   and boot refuses one not above the stall threshold and the decision wait,
+   so a worker reads not ready before it exits. It sits under the
+   livenessProbe's 30 to 40 s, which stays the backstop for a runtime wedged
+   whole, whose watch never polls. A stall during a drain exits the same way;
+   a drain whose grace ends first returns by its own bound, which reads nothing
+   of the router. A worker's bulk reclaim is the turn that still needs a call's
+   lock on the router loop, and that lock's holder may hold it across its
+   decision round trip (`B2BUA_CALL_CONTROL_TIMEOUT_MS`), so the stall
+   threshold defaults to the larger of 10 s and that timeout plus 5 s, and boot
+   refuses one not above it by 2 s. A bulk reclaim beats the router's pulse per
+   call. Under the `cpu_starve` chaos the 0.3 CPU quota is shared by every
+   runnable thread: with N runtime threads busy, a turn reads stalled only when
+   its own work needs more than 3/N CPU-seconds, and exits the worker only when
+   it needs more than 4.5/N (one SIP event, timer firing or sweep takes
+   milliseconds); a process frozen past the threshold wakes on one reading of a
+   turn it then finishes, which exits nothing. The pulse cannot see a loop that
+   is waiting yet never scheduled while input is queued for it: a starved
    runtime reads as idle, and only the probe's own timeout catches it.
+
+   A stalled router still draws the proxy's dead verdict, which its backup
+   refutes on the heartbeats it still hears; the flip of its endpoint at the
+   stall threshold tells nothing, the proxy already reading it dead, and neither
+   does the exit (ADR-0047, "A refuted verdict is spent"). Its calls wait for
+   the restart's reclaim, a message or the departure: about 22 s from the stall
+   on a 3 s restart (`stalled_worker_exits.rs`). New INVITEs meanwhile draw the
+   refusal on arrival from the queue's age (ADR-0037 item 11).
 5. **The invariant, stated:** an ingress loop awaits nothing whose completion
    a third party controls. The `RoutingStrategy` trait is `async` and its
    three call sites sit on the recv loop; a strategy that consults a network
    service must resolve off-loop (the DNS resolver's spawned single-flight is
-   the pattern).
+   the pattern). A replicated flush that needs a call's lock is queued as a turn
+   of that call (`router/flush_turn.rs`), as a stand-down and a drop on a
+   backup's delete are, since a call's turn holds its lock across a decision
+   round trip: the loop goes on answering the proxy's probes, and a message
+   queued before the flush is served first (ADR-0010 X2). A flush offered behind
+   the call's queued release is lost with the other notices of that row
+   (`dispatch::class`); the copy stays in the store for a later message, a
+   reclaim or the reap. The bulk reclaim's passes, run as a restarted node
+   returns, before a proxy reads it alive, still take each call's lock on the
+   loop.
 
 ## Consequences
 

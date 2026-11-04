@@ -446,12 +446,15 @@ the call has one CDR.
   longer than the idle bound is pulled again from its watermark.
 - **A refuted verdict is spent.** The proxy tells one notice per health change or flip; a
   primary that sends one frame on the backup's reconnect and then dies, or whose readiness
-  flips with its stream open and which then dies while it reads not ready (a stalled loop
-  its liveness probe ends), is not taken over proactively: the proxy has no entry left to
-  read it dead. Its calls are taken over by a message (the reactive path), at a
-  later verdict on another health change (`live_primary_read_dead.rs`, the second
-  verdict), or at its departure (`not_ready_flip_tells_a_dead_verdict.rs`, the cell of a
-  death after a refuted flip).
+  flips with its stream open and which then dies while it reads not ready, is not taken
+  over proactively: the proxy has no entry left to read it dead. Its calls are taken over
+  by a message (the reactive path), at a later verdict on another health change
+  (`live_primary_read_dead.rs`, the second verdict), or at its departure
+  (`not_ready_flip_tells_a_dead_verdict.rs`, the cell of a death after a refuted flip).
+  A stalled loop goes this way: the probe's verdict is refuted on its heartbeats, the flip
+  of its endpoint comes while the proxy reads it dead and tells nothing, whichever side of
+  the flip the process exits on (ADR-0033 §4); its restart's reclaim serves its calls
+  (`stalled_worker_exits.rs`).
 - **A split healing on both planes at once.** The partitioned primary's ladders (its
   480's Timer G repeats, its CANCEL) reach the parties until its own pull reconnects
   and it learns the takeover; the parties draw 481s and hop-ACKs. Judged as a split:

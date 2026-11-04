@@ -18,6 +18,12 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().is_some_and(|c| c.parks(call_ref))
     }
 
+    /// This worker's two loops, read as its host reads them; `None` while
+    /// crashed.
+    pub fn loops(&self) -> Option<b2bua::loops::WorkerLoops> {
+        self.core.as_ref().map(|c| c.loops().clone())
+    }
+
     /// The live copy this worker serves for `call_ref`, if any — what its rules
     /// read at the next event.
     pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {

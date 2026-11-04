@@ -1172,28 +1172,11 @@ impl FailoverHarness {
         self.spawn_proxy_inner(addr, workers, None).await
     }
 
-    /// Like [`spawn_proxy`](Self::spawn_proxy) but with the REAL OPTIONS health
-    /// probe running on `probe_addr` (ADR-0012): health and acceptance follow
-    /// the workers' probe replies (ADR-0050 §3), not `set_health`, as on the
-    /// production LB proxy. A freshly-rebooted worker stays `Unknown` while it
-    /// answers `503` and reads `Alive` once its replication drained, so the
-    /// reclaimed call's first keepalive-200 round-trips while the worker is
-    /// genuinely non-`Alive` — exercising the response-path reverse-failover guard
-    /// (`core/response.rs`) the code ties to the long-call-on-reboot teardown.
-    pub async fn spawn_proxy_with_health_probe(
-        &self,
-        addr: &str,
-        probe_addr: &str,
-        workers: &[(&str, SocketAddr)],
-    ) -> ProxySut {
-        self.spawn_proxy_inner(addr, workers, Some(probe_addr)).await
-    }
-
     async fn spawn_proxy_inner(
         &self,
         addr: &str,
         workers: &[(&str, SocketAddr)],
-        probe_addr: Option<&str>,
+        probe: Option<(&str, sip_proxy::health::HealthProbeConfig)>,
     ) -> ProxySut {
         // The registry→hmac→observer→strategy→ProxyCore wiring is the shared
         // `b2bua_harness::spawn_proxy_core` primitive (ADR-0013 §0): bind the
@@ -1207,8 +1190,10 @@ impl FailoverHarness {
         let parts = node.enter(|| spawn_proxy_core(ep, sock, workers, self.clock.clone()));
         let b2bua_harness::ProxyCoreParts { addr: sock, registry, metrics, observer, task } = parts;
 
-        let probe_task = match probe_addr {
-            Some(at) => Some(self.spawn_health_probe(&node, at, &registry, observer).await),
+        let probe_task = match probe {
+            Some((at, cadence)) => {
+                Some(self.spawn_health_probe(&node, at, cadence, &registry, observer).await)
+            }
             None => None,
         };
 

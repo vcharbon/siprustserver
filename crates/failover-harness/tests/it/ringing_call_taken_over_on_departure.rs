@@ -41,7 +41,7 @@ const DEADLINE_SLACK_MS: i64 = 1_000;
 
 /// Every call is routed to bob with the ring deadline `no_answer` and no
 /// failover.
-fn ring_deadline_decision(no_answer: Duration) -> Arc<dyn CallDecisionEngine> {
+pub(crate) fn ring_deadline_decision(no_answer: Duration) -> Arc<dyn CallDecisionEngine> {
     let engine = ScriptedDecisionEngine::builder()
         .fallback(move |_| {
             let mut r = route_to("127.0.0.1", 5070);
@@ -108,7 +108,28 @@ async fn place_offering(
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let (proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, ring_deadline_decision(no_answer)).await;
+    let cluster = Cluster { fh, alice, bob, proxy, w_b1, w_b2 };
+    place_on(cluster, callee, no_answer, offer).await
+}
 
+/// A cluster up, the calls not placed yet.
+pub(crate) struct Cluster {
+    pub(crate) fh: FailoverHarness,
+    pub(crate) alice: Agent,
+    pub(crate) bob: Agent,
+    pub(crate) proxy: ProxySut,
+    pub(crate) w_b1: ReplicatedB2buaSut,
+    pub(crate) w_b2: ReplicatedB2buaSut,
+}
+
+/// The established call and the ringing call of [`place`], on `cluster`.
+pub(crate) async fn place_on(
+    cluster: Cluster,
+    callee: Callee,
+    no_answer: Duration,
+    offer: Option<&str>,
+) -> Placed {
+    let Cluster { fh, alice, bob, proxy, w_b1, w_b2 } = cluster;
     let quiet_cid = call_id_placed_on("b1", "quiet");
     let mut call = alice
         .invite(&bob)

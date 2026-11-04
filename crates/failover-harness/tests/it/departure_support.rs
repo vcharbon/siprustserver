@@ -71,6 +71,16 @@ pub(crate) async fn bring_up_deciding(
     decision: Arc<dyn CallDecisionEngine>,
 ) -> (ProxySut, ReplicatedB2buaSut, ReplicatedB2buaSut) {
     let proxy = spawn_front_proxy(fh).await;
+    let (b1, b2) = spawn_workers_deciding(fh, decision).await;
+    (proxy, b1, b2)
+}
+
+/// Both workers on `decision`, ready at steady state, behind the proxy already
+/// up; the b-leg goes to the callee through it.
+pub(crate) async fn spawn_workers_deciding(
+    fh: &mut FailoverHarness,
+    decision: Arc<dyn CallDecisionEngine>,
+) -> (ReplicatedB2buaSut, ReplicatedB2buaSut) {
     let (rt, ob) = (("127.0.0.1", 5070), ("127.0.0.1", 5080));
     let noop = || Arc::new(NoopLimiter);
     let b1 =
@@ -78,7 +88,7 @@ pub(crate) async fn bring_up_deciding(
     let b2 = fh.spawn_worker_limited("b2", "b2", B2, &["b1"], rt, ob, decision, noop()).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(b1.is_ready() && b2.is_ready(), "both workers ready at steady state");
-    (proxy, b1, b2)
+    (b1, b2)
 }
 
 /// The front proxy over both workers.

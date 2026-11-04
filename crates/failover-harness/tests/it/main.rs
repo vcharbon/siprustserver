@@ -116,6 +116,7 @@ mod spiral_takeover;
 mod split_dialog_sequence;
 mod split_proxy_views;
 mod stale_no_answer_reclaim;
+mod stalled_worker_exits;
 mod stood_down_round;
 mod stopped_worker_read_dead;
 mod superseded_incarnation;
