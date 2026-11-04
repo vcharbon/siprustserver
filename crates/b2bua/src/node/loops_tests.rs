@@ -11,7 +11,7 @@ use sip_ids::TurnIds;
 use super::unwired_tests::unwired_core;
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
-use crate::loops::ENDED_POLL;
+use crate::loops::{LoopOut, ENDED_POLL};
 use crate::router::test_support::{invite, node, src, Node};
 use crate::router::ReplCommand;
 use crate::store::{CallStore, PartitionRole, PutOpts};
@@ -31,8 +31,8 @@ async fn a_crashed_cores_loops_read_ended_within_one_poll() {
     let mut core = unwired_core("w0").await;
     let loops = core.loops().clone();
     core.abort();
-    let ended = tokio::time::timeout(ENDED_POLL * 2, loops.wait_ended()).await;
-    assert!(ended.is_ok(), "a loop task ended");
+    let out = tokio::time::timeout(ENDED_POLL * 2, loops.wait_out(THRESHOLD)).await;
+    assert!(matches!(out, Ok(LoopOut::Ended(_))), "a loop task ended: {out:?}");
 }
 
 /// Put a ringing call of this node's own into its `pri:` partition, not live:
@@ -64,13 +64,14 @@ fn send(n: &Node, cmd: ReplCommand) {
 }
 
 /// A router turn waiting on one call's lock past the threshold reads stalled,
-/// and turns again once the lock is free.
+/// and turns again once the lock is free. The bulk reclaim is the turn that
+/// still takes a call's lock on the loop.
 #[tokio::test(start_paused = true)]
 async fn a_router_parked_on_one_event_reads_stalled() {
     let n = node("w0").await;
     let call_ref = seeded(&n, "parked").await;
     let held = n.core.ctx.state.lock(&call_ref).await;
-    send(&n, ReplCommand::ReclaimCall(call_ref));
+    send(&n, ReplCommand::ReclaimAll);
     tokio::time::sleep(THRESHOLD).await;
     assert!(n.core.loops().stalled(THRESHOLD).is_empty(), "at the threshold, not past it");
     tokio::time::sleep(Duration::from_millis(1)).await;

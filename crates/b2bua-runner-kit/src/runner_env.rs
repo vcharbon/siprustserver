@@ -184,6 +184,9 @@ pub struct RunnerEnv {
     /// the loop reads stalled; the grammar, its default and the boot check
     /// against the call-control timeout in `liveness_env`.
     pub loop_stall: Duration,
+    /// How long one such turn may run before the worker exits non-zero; the
+    /// grammar, its default and the boot check in `liveness_env`.
+    pub loop_exit: Duration,
     /// The event-queue gate's bounds (ADR-0050 §9), the grammar, defaults
     /// and boot checks in `runner_env::event_queue_env`.
     pub event_queue_gate: b2bua::config::EventQueueGateConfig,
@@ -280,6 +283,8 @@ impl RunnerEnv {
         let call_control_timeout_ms: i64 = knob("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")?;
         let call_control =
             Duration::from_millis(u64::try_from(call_control_timeout_ms).unwrap_or(0));
+        let loop_stall =
+            liveness_env::loop_stall_from_lookup(lookup, call_control).map_err(invalid)?;
         let addresses = addresses_from_lookup(lookup)?;
         Ok(Self {
             listen: env_or("B2BUA_LISTEN", "0.0.0.0:5060"),
@@ -354,8 +359,8 @@ impl RunnerEnv {
             limiter_backend: limiter.backend,
             drain: drain_env::drain_from_lookup(lookup).map_err(invalid)?,
             capacity: capacity_env::capacity_from_lookup(lookup).map_err(invalid)?,
-            loop_stall: liveness_env::loop_stall_from_lookup(lookup, call_control)
-                .map_err(invalid)?,
+            loop_stall,
+            loop_exit: liveness_env::loop_exit_from_lookup(lookup, loop_stall).map_err(invalid)?,
             event_queue_gate: event_queue_env::event_queue_gate_from_lookup(lookup)
                 .map_err(invalid)?,
             replication: ReplicationSettings::from_lookup(lookup).map_err(invalid)?,

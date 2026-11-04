@@ -17,6 +17,10 @@
 //!   returned, was aborted or panicked, before or during a
 //!   drain: nothing serves any more. The queued limiter releases are flushed within the same bound,
 //!   and the process exits non-zero; the orchestrator restarts it.
+//! - **A loop stayed stalled** past `B2BUA_LOOP_EXIT_MS`, before or during a
+//!   drain: the same exit. The flush and the CDR close run on their own tasks
+//!   and their own bounds, and the runtime lets go of a thread the wedged loop
+//!   holds (`runtime`), so the wedge cannot hold the exit (ADR-0033 §4).
 //!
 //! Every exit then closes the CDR sink within `B2BUA_DRAIN_CDR_FLUSH_MS`, which
 //! no signal cuts short: the records of the calls that ended are delivered or
@@ -30,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::drain::{DrainBounds, DrainExit};
+use b2bua::loops::LoopOut;
 use b2bua::B2buaCore;
 use sip_clock::wall::millis_u64;
 
@@ -42,22 +47,22 @@ pub(crate) enum Stop {
     Interrupt,
     Terminate,
     Withdrawn,
-    LoopEnded(&'static str),
+    Loop(LoopOut),
 }
 
 /// The first of the stops to happen. A supersession wins a tie, since its
-/// fence ends the loops; a loop that ended wins over the signals.
+/// fence ends the loops; a loop gone wins over the signals.
 pub(crate) async fn next_stop(
     superseded: impl Future<Output = ()>,
     interrupt: impl Future<Output = ()>,
     terminate: impl Future<Output = ()>,
     withdrawn: impl Future<Output = ()>,
-    loop_ended: impl Future<Output = &'static str>,
+    loop_out: impl Future<Output = LoopOut>,
 ) -> Stop {
     tokio::select! {
         biased;
         _ = superseded => Stop::Superseded,
-        name = loop_ended => Stop::LoopEnded(name),
+        out = loop_out => Stop::Loop(out),
         _ = interrupt => Stop::Interrupt,
         _ = terminate => Stop::Terminate,
         _ = withdrawn => Stop::Withdrawn,
@@ -72,29 +77,30 @@ impl RunnerBase {
             let _ = tokio::signal::ctrl_c().await;
         };
         let terminate = wait_sigterm(&self.name);
-        serve_until_stop(core, &self.name, self.env.drain, interrupt, terminate).await
+        let exit = self.env.loop_exit;
+        serve_until_stop(core, &self.name, self.env.drain, exit, interrupt, terminate).await
     }
 }
 
 /// Serve `core` until `interrupt`, `terminate`, its own withdrawal, its
-/// supersession or a loop task ending, act on it under `bounds`, and return
-/// the exit code.
+/// supersession, a loop task ending or a loop stalled past `loop_exit`, act on
+/// it under `bounds`, and return the exit code.
 pub(crate) async fn serve_until_stop(
     core: &B2buaCore,
     name: &str,
     bounds: DrainBounds,
+    loop_exit: Duration,
     interrupt: impl Future<Output = ()>,
     terminate: impl Future<Output = ()>,
 ) -> ExitCode {
     let loops = core.loops().clone();
-    let stop =
-        next_stop(core.superseded(), interrupt, terminate, core.withdrawn(), loops.wait_ended())
-            .await;
+    let gone = loops.wait_out(loop_exit);
+    let stop = next_stop(core.superseded(), interrupt, terminate, core.withdrawn(), gone).await;
     match stop {
         Stop::Superseded => superseded(core, name, bounds).await,
         Stop::Interrupt => interrupted(core, name, bounds).await,
-        Stop::Terminate | Stop::Withdrawn => drained(core, name, bounds, stop).await,
-        Stop::LoopEnded(ended) => loop_ended(core, name, bounds, ended).await,
+        Stop::Terminate | Stop::Withdrawn => drained(core, name, bounds, loop_exit, stop).await,
+        Stop::Loop(out) => loop_gone(core, name, bounds, out).await,
     }
 }
 
@@ -116,9 +122,15 @@ async fn interrupted(core: &B2buaCore, name: &str, bounds: DrainBounds) -> ExitC
 }
 
 /// SIGTERM or the worker's own withdrawal: the D2 drain, the loops still
-/// watched — one ending mid-drain cuts it short and exits non-zero. The exit
-/// reason and the residual are logged, never silently cut.
-async fn drained(core: &B2buaCore, name: &str, bounds: DrainBounds, stop: Stop) -> ExitCode {
+/// watched — one ending or staying stalled mid-drain cuts it short and exits
+/// non-zero. The exit reason and the residual are logged, never silently cut.
+async fn drained(
+    core: &B2buaCore,
+    name: &str,
+    bounds: DrainBounds,
+    loop_exit: Duration,
+    stop: Stop,
+) -> ExitCode {
     let cause = match stop {
         Stop::Withdrawn => "own endpoint withdrawn",
         _ => "SIGTERM",
@@ -134,7 +146,7 @@ async fn drained(core: &B2buaCore, name: &str, bounds: DrainBounds, stop: Stop) 
     let loops = core.loops().clone();
     let out = tokio::select! {
         out = core.drain(bounds) => out,
-        ended = loops.wait_ended() => return loop_ended(core, name, bounds, ended).await,
+        out = loops.wait_out(loop_exit) => return loop_gone(core, name, bounds, out).await,
     };
     let (reason, residual) = (out.exit.label(), out.residual);
     match out.exit {
@@ -166,23 +178,27 @@ async fn superseded(core: &B2buaCore, name: &str, bounds: DrainBounds) -> ExitCo
     ExitCode::FAILURE
 }
 
-/// A loop or vital task ended ([`b2bua::loops::WorkerLoops`]): nothing serves
-/// any more. The queued limiter releases
-/// still leave, within the drain's flush bound (ADR-0040 decision 9: the
-/// release queue runs on its own task), then the process exits non-zero.
-async fn loop_ended(
-    core: &B2buaCore,
-    name: &str,
-    bounds: DrainBounds,
-    ended: &'static str,
-) -> ExitCode {
-    tracing::error!(service = name, ended, "a worker loop task ended — nothing serves any more");
+/// A loop or vital task ended, or a loop stayed stalled
+/// ([`b2bua::loops::WorkerLoops`]): nothing serves any more. The queued limiter
+/// releases still leave, within the drain's flush bound (ADR-0040 decision 9:
+/// the release queue runs on its own task), then the process exits non-zero.
+async fn loop_gone(core: &B2buaCore, name: &str, bounds: DrainBounds, out: LoopOut) -> ExitCode {
+    let gone = match out {
+        LoopOut::Ended(ended) => {
+            tracing::error!(service = name, ended, "a worker loop task ended: nothing serves");
+            ended
+        }
+        LoopOut::Stalled(stalled) => {
+            tracing::error!(service = name, stalled, "a worker loop stays stalled: exiting");
+            stalled
+        }
+    };
     core.begin_draining();
     let flush = core.limiter().flush(bounds.release_flush).await;
     core.metrics().limiter().count_release_flush(&flush);
     tracing::error!(
         service = name,
-        ended,
+        gone,
         releases_queued = flush.queued,
         releases_given_up = flush.given_up,
         "exiting non-zero"

@@ -119,7 +119,8 @@
 //! the worker into `Draining` (OPTIONS 503 + readiness probe fails) so k8s
 //! steers new calls away while in-flight calls finish, then exits 0. A
 //! transaction owner or router loop stalled past `B2BUA_LOOP_STALL_MS` fails
-//! `/ready` and `/healthz`; one whose task ended exits the process non-zero.
+//! `/ready` and `/healthz`; one stalled past `B2BUA_LOOP_EXIT_MS`, or whose
+//! task ended, exits the process non-zero.
 
 // Use jemalloc instead of the glibc system allocator. Under the many tokio worker
 // threads, glibc malloc spawns up to 8×ncpu arenas and retains freed chunks (it
