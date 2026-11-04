@@ -1234,6 +1234,7 @@ spec:
             port: 9091
           initialDelaySeconds: 1
           periodSeconds: 2
+          timeoutSeconds: 2
         resources:
           limits:
             memory: 2Gi

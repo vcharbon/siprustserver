@@ -123,6 +123,8 @@ pub struct TurnPoints {
     stamp: Option<Stamp>,
     /// The pace of each worker's router loop.
     router_pace: Arc<RouterPace>,
+    /// How long each worker's takeover sweep spends on each call.
+    sweep_pace: Mutex<std::time::Duration>,
 }
 
 /// A source of places in the order of the run's recorded messages.
@@ -173,6 +175,12 @@ impl TurnPoints {
     /// test sets one.
     pub fn router_pace(&self) -> &Arc<RouterPace> {
         &self.router_pace
+    }
+
+    /// From now on each worker's takeover sweep spends `per_call` before it
+    /// takes each call: the duration of a sweep over a large partition.
+    pub fn pace_sweep(&self, per_call: std::time::Duration) {
+        *locked(&self.sweep_pace) = per_call;
     }
 
     /// Every bound pass of the run so far, the calls a backup deleted
@@ -371,6 +379,11 @@ fn covers(mark: &TurnMark<'_>, turn: &Turn) -> bool {
 impl TurnProbe for TurnPoints {
     fn router_turn(&self, node: &str) -> Option<Hold> {
         self.router_pace.hold(node)
+    }
+
+    fn sweep_step(&self, _node: &str) -> Option<Hold> {
+        let per_call = *locked(&self.sweep_pace);
+        (!per_call.is_zero()).then(|| Box::pin(tokio::time::sleep(per_call)) as Hold)
     }
 
     fn bound_passed(&self, node: &str, call_ref: Option<&str>) {

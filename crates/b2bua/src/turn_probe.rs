@@ -137,6 +137,12 @@ pub trait TurnProbe: Send + Sync {
     fn router_turn(&self, _node: &str) -> Option<Hold> {
         None
     }
+
+    /// Called by the takeover sweep of `node` before it takes each call; `Some`
+    /// holds the sweep there, as a large partition's reads stretch it.
+    fn sweep_step(&self, _node: &str) -> Option<Hold> {
+        None
+    }
 }
 
 /// The handle a worker carries: no probe by default.
@@ -169,6 +175,17 @@ impl TurnProbes {
             return;
         };
         if let Some(hold) = probe.router_turn(node) {
+            hold.await;
+        }
+    }
+
+    /// Report that the takeover sweep of `node` is about to take a call and
+    /// wait out the hold, if any.
+    pub(crate) async fn sweep_step(&self, node: &str) {
+        let Some(probe) = &self.0 else {
+            return;
+        };
+        if let Some(hold) = probe.sweep_step(node) {
             hold.await;
         }
     }

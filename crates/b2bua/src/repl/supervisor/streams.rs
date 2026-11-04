@@ -92,6 +92,27 @@ impl ReplicationSupervisor {
             .is_some_and(|rx| rx.borrow().last_frame_at.is_some_and(|at| at > since))
     }
 
+    /// The incarnation generation this node's Backup flow from `peer` last
+    /// heard; `None` before its first frame or for a flow not running.
+    pub fn heard_generation(&self, peer: &str) -> Option<u64> {
+        self.inner
+            .peers()
+            .get(peer)
+            .and_then(|e| e.backup.status_rx.as_ref())
+            .and_then(|rx| rx.borrow().last_frame_gen)
+    }
+
+    /// Whether a write of another generation than `generation` arrived on the
+    /// Backup flow from `peer`. A frame is heard before it is applied, so a
+    /// write this reads `false` for is not in the store yet.
+    pub fn writes_another_generation(&self, peer: &str, generation: u64) -> bool {
+        self.inner
+            .peers()
+            .get(peer)
+            .and_then(|e| e.backup.status_rx.as_ref())
+            .is_some_and(|rx| rx.borrow().last_write_gen.is_some_and(|gen| gen != generation))
+    }
+
     /// The longest an open stream from a peer that went silent stays open:
     /// the pullers' idle bound (ADR-0045).
     pub fn silence_bound(&self) -> Duration {

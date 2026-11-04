@@ -22,8 +22,9 @@ Amended (2026-10-31): D2 and D8, a dead verdict that acted releases the limiter 
 every ended call of the peer here, and a copy that ends a call while its primary reads
 dead releases the key at its end; the CDR still waits for the departure or the reconcile.
 Amended (2026-11-04): D1, a worker read `Alive` whose endpoint flips not ready and not
-terminating is a dead verdict too, and a write of another generation refutes a verdict;
-the residuals of a death no proxy reads dead and of a verdict that is spent.
+terminating is a dead verdict too, and a write of another generation refutes a verdict
+and stops its sweep; the residuals of a death no proxy reads dead and of a verdict that
+is spent.
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -115,7 +116,10 @@ down on the restarted process's reclaim write (D7;
 `not_ready_flip_tells_a_dead_verdict.rs`, the cell returning during the confirmation).
 A write of another generation refutes the verdict: that process holds its calls again,
 and a copy made after its reclaim write would meet no write to stand down on
-(the cell reclaiming inside the backoff). A restarted process
+(the cell reclaiming inside the backoff). For the same reason the sweep of a verdict so
+confirmed stops at the first such write, read before each copy, a frame being heard before
+it is applied: the copies it made stand down, the calls it did not reach are the process's
+(`sweep_meets_the_reclaim_write.rs`, the sweep's duration its axis). A restarted process
 the flow already streams from at the verdict is that generation, and its own reclaim
 takes its calls back (the cell returning before the flip)
 (`b2bua_dead_verdicts_unconfirmed_total`, one wait per peer however many verdicts;

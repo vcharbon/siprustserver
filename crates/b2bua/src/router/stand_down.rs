@@ -100,6 +100,25 @@ pub(super) async fn stand_down_turn(
     }
 }
 
+/// Meet the takeover copy of `call_ref` a sweep just made, under the per-call
+/// lock its caller holds, with the Element the store holds now: a write of the
+/// primary applied while the copy was being made found no takeover mark, and
+/// rode up to nothing.
+pub(super) async fn meet_the_element(ctx: &Arc<RouterCtx>, call_ref: &str) {
+    let Some(copy) = ctx.state.peek_enveloped(call_ref) else { return };
+    match ctx.state.peek_replica(call_ref).await {
+        Ok((mut primary, skew)) => {
+            reanchor(&mut primary.call, skew);
+            let now_ms = ctx.clock.now_ms();
+            meet_live(ctx, FlushDirection::Forward, call_ref, &copy, primary, now_ms).await;
+        }
+        Err(_) if finishes_nothing_alone(None, &copy.call, &ctx.relay_owner) => {
+            release_call(ctx, call_ref, ReleaseKind::StandDown).await;
+        }
+        Err(_) => {}
+    }
+}
+
 /// Whether the primary's body `primary` covers the takeover `copy` on worker
 /// `by`: the same call (one incarnation), the primary's copy containing the
 /// copy (ADR-0055 §7: the copy's state stamp at or below the primary's

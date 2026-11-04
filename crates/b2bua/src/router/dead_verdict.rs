@@ -24,8 +24,8 @@
 //! flow streamed then, speaks for a live worker the proxy misread, and a write
 //! of another generation for a restarted one that holds its calls again:
 //! nothing is taken over. Another generation's frame that writes nothing
-//! confirms it (ADR-0047 D1). One wait runs per worker. A node that pulls no
-//! stream acts at once.
+//! confirms it, and its first write then stops the sweep (ADR-0047 D1). One wait
+//! runs per worker. A node that pulls no stream acts at once.
 //!
 //! A worker whose verdict acted reads dead here until a frame from it arrives
 //! ([`primary_read_dead`]), which clears the verdict: a call a copy here ends
@@ -171,15 +171,16 @@ fn take(ctx: &Arc<RouterCtx>, received: &ReceivedNotice) {
                 confirm(ctx, streams.clone(), notice.ordinal.clone(), notice.at_ms);
             }
         }
-        None => act(ctx, &notice.ordinal, notice.at_ms),
+        None => act(ctx, &notice.ordinal, notice.at_ms, None),
     }
 }
 
 /// Read `ordinal` dead and take over the calls this node backs for it with
-/// work in flight.
-fn act(ctx: &Arc<RouterCtx>, ordinal: &str, at_ms: i64) {
+/// work in flight. `generation` is the incarnation the verdict named, the one
+/// the Backup flow from it last heard before the verdict.
+fn act(ctx: &Arc<RouterCtx>, ordinal: &str, at_ms: i64, generation: Option<u64>) {
     ctx.dead_verdicts.acted(ordinal);
-    if !take_over_read_dead(ctx, ordinal) {
+    if !take_over_read_dead(ctx, ordinal, generation) {
         return;
     }
     tracing::info!(
@@ -197,10 +198,11 @@ fn confirm(ctx: &Arc<RouterCtx>, streams: ReplicationSupervisor, ordinal: String
     let since = Instant::now();
     let confirm: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = Box::pin(
         async move {
+            let generation = streams.heard_generation(&ordinal);
             let confirmed = streams.confirms_dead(&ordinal, since).await;
             task_ctx.dead_verdicts.end_pending(&ordinal);
             if confirmed {
-                act(&task_ctx, &ordinal, at_ms);
+                act(&task_ctx, &ordinal, at_ms, generation);
                 return;
             }
             task_ctx.metrics.bump_dead_verdict_unconfirmed();

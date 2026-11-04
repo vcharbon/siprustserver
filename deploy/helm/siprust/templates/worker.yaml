@@ -131,6 +131,10 @@ spec:
             httpGet: { path: /ready, port: 9091 }
             initialDelaySeconds: 1
             periodSeconds: 2
+            # A flip to not ready tells the proxies' dead verdict (ADR-0050 §3):
+            # the timeout holds on a CPU-starved node, and a process that died
+            # refuses at once.
+            timeoutSeconds: 2
             failureThreshold: 2
           # Three misses 10 s apart restart the container; the 5 s timeout
           # holds on a CPU-starved node.
