@@ -4,7 +4,9 @@
 //! its endpoint in the slice at the same address with `ready=false` (ADR-0031
 //! case 4). Routing and replication read that one snapshot with two predicates:
 //! the proxy departs the ordinal (out of the projection, address tombstoned
-//! `Dead`) while its peers keep pulling it on presence alone (D1).
+//! `Dead`) while its peers keep pulling it on presence alone (D1). The proxy
+//! tells the flip as its dead verdict, which the elder's open stream refutes
+//! (ADR-0047 D1).
 //!
 //! ```text
 //!   ringing · elder serves · survivor holds the ringing replica

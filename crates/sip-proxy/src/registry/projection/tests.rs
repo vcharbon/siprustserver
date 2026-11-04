@@ -180,6 +180,131 @@ fn a_terminating_flip_on_a_ready_member_changes_nothing() {
     );
 }
 
+/// The verdicts a reader has been told so far.
+fn told(rx: &mut broadcast::Receiver<WorkerId>) -> Vec<WorkerId> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+#[test]
+fn a_worker_read_alive_flipping_not_ready_is_one_dead_verdict() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+    set.set_health("w1", WorkerHealth::Alive);
+    let mut verdicts = set.read_dead();
+    sim.set_conditions("w1", false, false);
+    set.recompose();
+    assert!(set.resolve("w1").is_none(), "told once the projection holds the flip");
+    assert_eq!(told(&mut verdicts), ["w1"]);
+
+    set.recompose();
+    sim.set_conditions("w1", false, true);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new(), "one verdict per flip");
+}
+
+#[test]
+fn a_flip_of_a_worker_not_read_alive_is_no_verdict() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2"), ("w2", "10.0.0.3")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    set.set_health("w2", WorkerHealth::Dead);
+    let mut verdicts = set.read_dead();
+    sim.set_conditions("w1", false, false);
+    sim.set_conditions("w2", false, false);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new(), "unknown, and already read dead");
+}
+
+#[test]
+fn a_terminating_flip_and_a_departure_are_no_verdict() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    set.set_health("w1", WorkerHealth::Alive);
+    let mut verdicts = set.read_dead();
+    sim.set_conditions("w0", false, true);
+    sim.remove("w1");
+    set.recompose();
+    assert!(set.snapshot().is_empty(), "both left the projection");
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new());
+}
+
+#[test]
+fn a_worker_read_alive_again_after_its_return_flips_into_a_second_verdict() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    let mut verdicts = set.read_dead();
+    sim.set_conditions("w0", false, false);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), ["w0"]);
+
+    sim.set_conditions("w0", true, false);
+    set.recompose();
+    sim.set_conditions("w0", false, false);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new(), "unprobed since its return");
+
+    sim.set_conditions("w0", true, false);
+    set.recompose();
+    set.set_health("w0", WorkerHealth::Alive);
+    sim.set_conditions("w0", false, false);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), ["w0"]);
+}
+
+#[test]
+fn a_flip_read_at_a_new_host_is_the_verdict_of_the_worker_read_alive() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    let mut verdicts = set.read_dead();
+    sim.change_address(Peer::new("w0", "10.0.0.2"));
+    sim.set_conditions("w0", false, false);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), ["w0"]);
+    let old = set.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060)).expect("tombstoned");
+    assert_eq!(old.health, WorkerHealth::Dead);
+}
+
+#[test]
+fn a_host_move_of_a_ready_worker_is_no_verdict() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    let mut verdicts = set.read_dead();
+    sim.change_address(Peer::new("w0", "10.0.0.2"));
+    set.recompose();
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new());
+}
+
+/// Two recomposes racing over one flip: only the one whose write removed the
+/// worker's record tells it.
+#[test]
+fn a_flip_is_told_once_whichever_recompose_reads_it() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    let set = Arc::new(set);
+    let mut verdicts = set.read_dead();
+    sim.set_conditions("w0", false, false);
+    let runs: Vec<_> = (0..8)
+        .map(|_| {
+            let set = set.clone();
+            std::thread::spawn(move || set.recompose())
+        })
+        .collect();
+    for run in runs {
+        run.join().expect("a recompose");
+    }
+    assert_eq!(told(&mut verdicts), ["w0"]);
+}
+
+#[test]
+fn read_dead_now_names_the_workers_read_dead_and_the_flipped_members() {
+    let (set, sim) =
+        ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2"), ("w2", "10.0.0.3"), ("w3", "10.0.0.4")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    set.set_health("w1", WorkerHealth::Dead);
+    sim.set_conditions("w2", false, false);
+    sim.set_conditions("w3", false, true);
+    set.recompose();
+    assert_eq!(set.read_dead_now(), ["w1", "w2"], "a terminating member stands on no verdict");
+}
+
 #[test]
 fn preset_port_override_survives_recompose() {
     let (set, sim) = ws(&[], 5060);

@@ -73,6 +73,7 @@ mod message_ring_takeover;
 mod new_call_acceptance;
 mod new_call_queue_headroom;
 mod new_call_replication_window;
+mod not_ready_flip_tells_a_dead_verdict;
 mod not_ready_member_stays_pulled;
 mod one_backup_on_every_leg;
 mod outbound_invite_after_the_departure;

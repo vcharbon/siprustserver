@@ -164,7 +164,7 @@ async fn place_offering(
 
 /// The ring deadline of `b2`'s replica of the ringing call: the one it carries, or,
 /// its callee not having rung, the one a takeover presumes from its INVITE.
-async fn replicated_deadline(p: &Placed) -> i64 {
+pub(crate) async fn replicated_deadline(p: &Placed) -> i64 {
     let body = p.w_b2.get(PartitionRole::Backup, "b1", &p.ringing_ref).await.expect("the replica");
     let call = envelope::decode(&MsgpackCodec::new(), &body).expect("the replica decodes").call;
     let presumed = || {

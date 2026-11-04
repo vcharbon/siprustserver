@@ -59,7 +59,7 @@ fn reached(fh: &FailoverHarness, agent: &Agent) -> bool {
 }
 
 /// How many INVITEs reached `agent` this run, a retransmission counted once.
-fn dialled(fh: &FailoverHarness, agent: &Agent) -> usize {
+pub(crate) fn dialled(fh: &FailoverHarness, agent: &Agent) -> usize {
     fh.sip_entries()
         .iter()
         .filter(|e| e.to == agent.addr() && e.opens_with("INVITE "))
@@ -76,7 +76,7 @@ fn dialled(fh: &FailoverHarness, agent: &Agent) -> usize {
 
 /// The callee answers the INVITE the backup dials, the caller takes the 2xx,
 /// ACKs it and hangs up.
-async fn answer_and_hang_up(call: &mut scenario_harness::ClientInvite, bob: &Agent) {
+pub(crate) async fn answer_and_hang_up(call: &mut scenario_harness::ClientInvite, bob: &Agent) {
     let mut uas = bob.receive("INVITE").await;
     uas.respond(200, "OK").with_sdp(OFFER).await;
     call.expect(200).await;
@@ -87,7 +87,7 @@ async fn answer_and_hang_up(call: &mut scenario_harness::ClientInvite, bob: &Age
 }
 
 /// How many 503 responses reached `agent` this run.
-fn rejections_to(fh: &FailoverHarness, agent: &Agent) -> usize {
+pub(crate) fn rejections_to(fh: &FailoverHarness, agent: &Agent) -> usize {
     fh.sip_entries().iter().filter(|e| e.to == agent.addr() && e.opens_with("SIP/2.0 503")).count()
 }
 
@@ -178,8 +178,8 @@ async fn an_undecided_call_reclaimed_by_its_restarted_node_is_asked_again() {
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
     let (mut proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
-    // A restart in place is read by the tombstone, not the probe (ADR-0031
-    // case 4): the proxy tells no dead verdict.
+    // A proxy with no cluster key tells no dead verdict: the restart's own
+    // reclaim serves the call (ADR-0031 case 4).
     proxy.tell_no_dead_verdict();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
