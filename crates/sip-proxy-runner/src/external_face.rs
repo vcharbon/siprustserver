@@ -72,7 +72,7 @@ impl FaceCheck {
     /// The face as the running kernel reports it, `latch` carried from the
     /// previous reading.
     pub fn read(&self, latch: &mut FaceLatch) -> FaceState {
-        self.read_at(Path::new(SYS_CLASS_NET), dump_ipv4, latch)
+        self.read_at(Path::new(SYS_CLASS_NET), dump_ipv4, |_| {}, latch)
     }
 
     /// The face read from the interface directory under `class_net` and the
@@ -83,6 +83,7 @@ impl FaceCheck {
         &self,
         class_net: &Path,
         neighbours: impl FnOnce() -> std::io::Result<Vec<Neighbour>>,
+        _solicit: impl FnMut(Ipv4Addr),
         latch: &mut FaceLatch,
     ) -> FaceState {
         let dir: PathBuf = class_net.join(&self.interface);

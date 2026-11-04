@@ -84,6 +84,20 @@ class GuardRelations(unittest.TestCase):
         self.assertIn("proxy.routeGuard.deadMs=2600", err)
         self.assertIn("a hung or dead proxy", err)
 
+    def test_a_lost_link_counts_two_face_readings(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set-string", "proxy.env.PROXY_EXT_FACE_CHECK_MS=1151")
+        for name in ("2 × proxy PROXY_EXT_FACE_CHECK_MS=1151", "withdrawWithinMs=3400",
+                     "whose external link is lost"):
+            self.assertIn(name, err)
+        render(SIPRUST, *KIND, "--set-string", "proxy.env.PROXY_EXT_FACE_CHECK_MS=1150")
+
+    def test_a_dead_next_hop_is_read_inside_a_transactions_lifetime(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=17601")
+        for name in ("baseReachableTimeMs=17601", "delayFirstProbeSeconds=1", "ucastSolicit=3",
+                     "retransTimeMs=1000", "PROXY_EXT_FACE_CHECK_MS=500", "32000 ms"):
+            self.assertIn(name, err)
+        render(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=17600")
+
     def test_a_rollout_waits_for_the_let_out_nodes_sessions(self) -> None:
         err = render_error(SIPRUST, *KIND, "--set", "proxy.announce.metallb.connectTimeSeconds=7")
         for name in ("proxy.minReadySeconds=10 s", "connectTimeSeconds=7 s"):
