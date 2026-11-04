@@ -54,12 +54,15 @@ impl B2buaCore {
         self.ctx.state.active_count()
     }
 
-    /// [`active_calls`](Self::active_calls) as an OWNED probe — the live-call
-    /// input of [`drain_probe`](Self::drain_probe), handed out on its own for a
-    /// caller that watches quiescence alone. Read-only.
+    /// [`active_calls`](Self::active_calls) and the new calls admitted and not
+    /// born yet, whose callers are owed a final, as an OWNED probe: the
+    /// live-call input of [`drain_probe`](Self::drain_probe), handed out on its
+    /// own for a caller that watches quiescence alone. Read-only.
     pub fn active_calls_probe(&self) -> Arc<dyn Fn() -> usize + Send + Sync> {
         let ctx = self.ctx.clone();
-        Arc::new(move || ctx.state.active_count())
+        Arc::new(move || {
+            ctx.state.active_count() + usize::try_from(ctx.unborn.count()).unwrap_or(usize::MAX)
+        })
     }
 
     /// Does this worker currently **serve** `call_ref` (hold it live in its call

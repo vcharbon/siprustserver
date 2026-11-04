@@ -100,6 +100,36 @@ async fn the_next_cseq_on_an_admitted_identity_is_judged() {
     drop(held);
 }
 
+/// An admitted INVITE not born yet holds a drain: its caller is owed a final, so
+/// the worker holds no quiescent exit while the INVITE's turn waits, and takes
+/// one once the call it creates has gone.
+#[tokio::test(start_paused = true)]
+async fn an_admitted_invite_not_born_yet_holds_a_clean_exit() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let node = node_on(&net, "w0", |c| c.overload_panic_elu_threshold = 1.1, Vec::new()).await;
+    let peer = net.bind_udp(BindUdpOpts::new(PEER.parse().unwrap(), 64)).await.unwrap();
+    let ctx = node.core.router_ctx().clone();
+    let call_ref = call::derive_call_ref("w0", "copy@unit", "a");
+    // The INVITE's turn parks on the held lock, its call unborn.
+    let held = ctx.state.lock(&call_ref).await;
+    peer.send_to(&invite("z9hG4bK-first"), SocketAddr::from(NODE_SIP_ADDR)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(ctx.unborn.count(), 1, "admitted, not born");
+    assert_eq!(node.core.active_calls(), 0, "no call yet");
+    assert_eq!((node.core.active_calls_probe())(), 1, "a caller is owed a final");
+
+    let bounds = crate::drain::DrainBounds {
+        grace: Duration::from_secs(1),
+        floor: Duration::ZERO,
+        release_flush: Duration::from_millis(100),
+        cdr_flush: Duration::from_millis(100),
+    };
+    let outcome = node.core.drain(bounds).await;
+    assert_eq!(outcome.exit, crate::drain::DrainExit::Grace, "no quiescent exit: {outcome:?}");
+    assert_eq!(outcome.residual, 1, "the admitted INVITE, named");
+    drop(held);
+}
+
 /// The peer's CANCEL of the INVITE on Via branch `branch` with CSeq
 /// `cseq` (RFC 3261 §9.1).
 fn cancel_cseq(branch: &str, cseq: u32) -> Vec<u8> {
