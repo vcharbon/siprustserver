@@ -120,6 +120,7 @@ mod stood_down_round;
 mod stopped_worker_read_dead;
 mod superseded_incarnation;
 mod sweep;
+mod sweep_meets_the_reclaim_write;
 mod sweep_shape_seam;
 mod swept_call_answered_inside_the_lag;
 mod swept_call_answered_once_routable;

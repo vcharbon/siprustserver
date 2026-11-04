@@ -50,13 +50,13 @@ const SECOND_PROXY: &str = "127.0.0.1:5081";
 
 /// How long the orchestrator takes to flip a dead process's endpoint: ahead of
 /// the probe's earliest verdict.
-const FLIP_AFTER_THE_CRASH: Duration = Duration::from_millis(1_500);
+pub(crate) const FLIP_AFTER_THE_CRASH: Duration = Duration::from_millis(1_500);
 /// How soon after a flip a process that refuses the connect is taken over.
 const TAKEOVER_BOUND: Duration = Duration::from_millis(500);
 /// Past every confirmation of a live stream: its idle bound and one connect.
 const CONFIRMED_BY_NOW: Duration = Duration::from_secs(5);
 /// Inside the connect bound (ADR-0045): the confirmation still waits.
-const INSIDE_THE_CONNECT_BOUND: Duration = Duration::from_millis(800);
+pub(crate) const INSIDE_THE_CONNECT_BOUND: Duration = Duration::from_millis(800);
 /// A ring deadline that outlasts a return and a second death.
 const LONG_RING: Duration = Duration::from_secs(40);
 /// Just after the backup's puller failed a connect, 800 ms before its next.
@@ -65,9 +65,9 @@ const INSIDE_THE_BACKOFF: Duration = Duration::from_millis(750);
 const LONG_ABSENCE: Duration = Duration::from_secs(13);
 /// How soon the reclaim of a returned worker reaches the backup: the pullers'
 /// backoff ceiling, one connect and its first frames.
-const STANDS_DOWN_WITHIN: Duration = Duration::from_millis(2_500);
+pub(crate) const STANDS_DOWN_WITHIN: Duration = Duration::from_millis(2_500);
 /// How long the routing decision takes in the undecided cells.
-const DECISION_DELAY: Duration = Duration::from_secs(3);
+pub(crate) const DECISION_DELAY: Duration = Duration::from_secs(3);
 /// When the worker returns inside the copy's asked-again decision.
 const RETURNS_INSIDE_THE_DECISION: Duration = Duration::from_secs(1);
 
@@ -221,7 +221,7 @@ async fn an_undecided_call_is_asked_again_on_the_flip() {
 
 /// `b1` restarts in place: a higher generation at a new address, its own
 /// informer showing its endpoint not ready until its readiness passes.
-async fn restarts_in_place(p: &mut Placed) -> SocketAddr {
+pub(crate) async fn restarts_in_place(p: &mut Placed) -> SocketAddr {
     p.fh.mark("b1", None, "reboot", "the container restarts in place");
     let addr = p.w_b1.reboot().await;
     p.fh.note_worker_rebound("b1", addr);
@@ -230,7 +230,7 @@ async fn restarts_in_place(p: &mut Placed) -> SocketAddr {
 
 /// `b1`'s readiness passes: its endpoint reads ready and the proxy reads it
 /// alive at `addr`.
-async fn routable_once_ready(p: &mut Placed, addr: SocketAddr) {
+pub(crate) async fn routable_once_ready(p: &mut Placed, addr: SocketAddr) {
     let ready = p
         .fh
         .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || p.w_b1.is_ready())
@@ -243,7 +243,7 @@ async fn routable_once_ready(p: &mut Placed, addr: SocketAddr) {
 
 /// The returned primary alone ends the ringing call at its deadline: one
 /// CANCEL, its 487 ACKed, one 480.
-async fn ends_at_the_deadline_on_the_primary(p: &mut Placed, deadline: i64) {
+pub(crate) async fn ends_at_the_deadline_on_the_primary(p: &mut Placed, deadline: i64) {
     ring_until(p, deadline).await;
     p.fh.advance(Duration::from_millis(600)).await;
     p.bob.receive("CANCEL").await.respond(200, "OK").await;
