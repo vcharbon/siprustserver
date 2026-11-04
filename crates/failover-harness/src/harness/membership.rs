@@ -61,8 +61,9 @@ impl FailoverHarness {
     /// **Flap `ordinal` not ready at the same address** — the restarted-in-place
     /// shape (ADR-0031 case 4): a readiness probe fails, the endpoint reads
     /// `ready=false, terminating=false` and stays in the slice. The proxy departs
-    /// the ordinal and tombstones its address; every other live worker keeps
-    /// pulling it (D1). The process is untouched.
+    /// the ordinal and tombstones its address, and tells a worker it read `Alive`
+    /// dead (ADR-0050 §3); every other live worker keeps pulling it (D1). The
+    /// process is untouched.
     pub fn flap_not_ready(&mut self, ordinal: &str) {
         self.mark(
             ordinal,
@@ -91,7 +92,7 @@ impl FailoverHarness {
     /// a peer keeps a not-ready member and treats a ready one as plain active.
     fn set_member_ready(&mut self, ordinal: &str, ready: bool, terminating: bool, signal: &str) {
         if let Some(registry) = self.views.proxy_registry() {
-            registry.set_ready(ordinal, ready);
+            registry.set_conditions(ordinal, ready, terminating);
             let belief =
                 if ready { Belief::Registered(WorkerHealth::Unknown) } else { Belief::Absent };
             self.views.record("proxy", ordinal, belief, signal);
@@ -103,9 +104,17 @@ impl FailoverHarness {
         }
         // The informer shows a worker its own endpoint too: a condition flip
         // reaches the member itself, which is how it observes its own
-        // withdrawal (ADR-0031 D6).
+        // withdrawal (ADR-0031 D6). An incarnation restarted while its endpoint
+        // read not ready still lists its predecessor: the flip lists the
+        // endpoint under the newest incarnation, as the slice binds it.
+        let member = Peer { ready, terminating, ..self.bound_member(ordinal) };
         for (_, membership) in self.views.live_incarnations_of(ordinal) {
-            membership.set_conditions(ordinal, ready, terminating);
+            match membership.resolve(ordinal) {
+                Some(listed) if listed.identity == member.identity => {
+                    membership.set_conditions(ordinal, ready, terminating)
+                }
+                _ => membership.add(member.clone()),
+            }
         }
     }
 

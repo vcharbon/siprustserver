@@ -29,7 +29,10 @@ impl ReplicationSupervisor {
     /// Whether this node's Backup flow from `peer` confirms a dead verdict
     /// taken at `since` on the incarnation it streams then: `false` once a
     /// frame of that incarnation arrives after `since`, the peer speaking for
-    /// itself; a frame of another generation (the peer restarted) confirms it.
+    /// itself, or a write of another generation, the restarted peer holding
+    /// its calls again. Another generation's frame that writes nothing confirms
+    /// it: a takeover copy made then meets that peer's reclaim write
+    /// (ADR-0047 D7).
     ///
     /// - An open stream is waited on until it ends; one still open a tick past
     ///   the silence bound refutes the verdict, so a silent stream's idle end
@@ -109,10 +112,14 @@ struct Reading {
 }
 
 impl Reading {
-    /// A frame of the verdict's incarnation arrived after the verdict; with no
-    /// generation heard before it, any frame is of that incarnation.
+    /// The peer speaks for its calls after the verdict: a frame of the
+    /// verdict's incarnation (with no generation heard before it, any frame is
+    /// of that incarnation), or a write of another generation. A restarted
+    /// process writes once it recovered its calls, and a takeover copy made
+    /// after its reclaim write would never meet that write.
     fn heard(self, s: &PullerStatus) -> bool {
-        s.last_frame_at.is_some_and(|at| at > self.since) && !self.another(s)
+        let writing = s.last_write_gen == s.last_frame_gen;
+        s.last_frame_at.is_some_and(|at| at > self.since) && (!self.another(s) || writing)
     }
 
     /// A frame of another generation arrived: the peer restarted, and the

@@ -100,6 +100,14 @@ pub trait WorkerRegistry: Send + Sync {
     /// has listed the workers (`topology::Membership::synced`).
     fn synced(&self) -> bool;
     /// Every later dead verdict: the ordinal of a worker whose health turns
-    /// `Dead` from another health (ADR-0050 §3). A departure is none.
+    /// `Dead` from another health, or of a worker read `Alive` whose endpoint
+    /// flips not ready and not terminating (ADR-0050 §3). A departure and a
+    /// terminating flip are none.
     fn read_dead(&self) -> tokio::sync::broadcast::Receiver<WorkerId>;
+    /// The ordinals a verdict may stand on now, for a reader that lagged
+    /// behind [`read_dead`]: every worker read `Dead`, and every member whose
+    /// endpoint reads not ready and not terminating.
+    ///
+    /// [`read_dead`]: WorkerRegistry::read_dead
+    fn read_dead_now(&self) -> Vec<WorkerId>;
 }

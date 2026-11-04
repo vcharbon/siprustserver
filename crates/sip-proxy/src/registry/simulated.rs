@@ -98,6 +98,15 @@ impl SimulatedWorkerRegistry {
         let Some(cur) = self.membership.resolve(id) else {
             return;
         };
+        self.set_conditions(id, ready, cur.terminating);
+    }
+
+    /// Set a worker's endpoint `ready` and `terminating` conditions at once
+    /// (no-op if unknown), as [`set_ready`](Self::set_ready) does.
+    pub fn set_conditions(&self, id: &str, ready: bool, terminating: bool) {
+        let Some(cur) = self.membership.resolve(id) else {
+            return;
+        };
         if ready && !cur.ready {
             // The per-worker port is a proxy annotation, dropped with the
             // departure; re-seed it so the returning endpoint keeps its bind.
@@ -112,7 +121,7 @@ impl SimulatedWorkerRegistry {
                 );
             }
         }
-        self.membership.set_conditions(id, ready, cur.terminating);
+        self.membership.set_conditions(id, ready, terminating);
         self.set.recompose();
     }
 
@@ -189,6 +198,9 @@ impl WorkerRegistry for SimulatedWorkerRegistry {
     }
     fn read_dead(&self) -> tokio::sync::broadcast::Receiver<super::WorkerId> {
         self.set.read_dead()
+    }
+    fn read_dead_now(&self) -> Vec<super::WorkerId> {
+        self.set.read_dead_now()
     }
 }
 

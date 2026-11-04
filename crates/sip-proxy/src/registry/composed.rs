@@ -106,6 +106,9 @@ impl WorkerRegistry for ComposedWorkerRegistry {
     fn read_dead(&self) -> tokio::sync::broadcast::Receiver<super::WorkerId> {
         self.set.read_dead()
     }
+    fn read_dead_now(&self) -> Vec<super::WorkerId> {
+        self.set.read_dead_now()
+    }
 }
 
 #[cfg(test)]

@@ -21,9 +21,11 @@
 //! ends within its silence bound with no frame since the verdict, or, with
 //! the stream down or reconnecting, one connect made at once that is refused
 //! or runs out its bound. A frame after the verdict, of the incarnation the
-//! flow streamed then, speaks for a live worker the proxy misread, and nothing
-//! is taken over; a frame of another generation confirms it (ADR-0047 D1).
-//! One wait runs per worker. A node that pulls no stream acts at once.
+//! flow streamed then, speaks for a live worker the proxy misread, and a write
+//! of another generation for a restarted one that holds its calls again:
+//! nothing is taken over. Another generation's frame that writes nothing
+//! confirms it (ADR-0047 D1). One wait runs per worker. A node that pulls no
+//! stream acts at once.
 //!
 //! A worker whose verdict acted reads dead here until a frame from it arrives
 //! ([`primary_read_dead`]), which clears the verdict: a call a copy here ends

@@ -25,7 +25,8 @@
 //!   here, at the projection, so a member whose endpoint is not ready
 //!   departs exactly as a removed one: its ordinal leaves the projection and its
 //!   address is tombstoned. Filtering in the LB instead would keep a live entry
-//!   and never insert the tombstone.
+//!   and never insert the tombstone. The flip of a worker read `Alive`, unless
+//!   its endpoint reads `terminating`, is also a dead verdict (ADR-0050 §3).
 //! - **The projection** is cached in one [`ArcSwap`] for lock-free hot reads and
 //!   is a pure function of the two authoritative sources — never an independent
 //!   source of truth, always re-derivable, inherently lag-immune (it recomposes
@@ -45,193 +46,14 @@ use crate::addr::ProxyAddr;
 use super::tombstone::{Tombstones, DEPARTED_ADDRESS_TTL_MS};
 use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerId};
 
-/// Per-ordinal proxy annotation — everything a [`WorkerEntry`] carries that
-/// membership does not. `host` is shadowed only to detect an address move (→ a
-/// fresh, re-probed endpoint); routing always takes the host from membership at
-/// projection time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Annot {
-    health: WorkerHealth,
-    acceptance: Acceptance,
-    host: String,
-    /// Per-worker port. `None` → use the registry's `default_port` (the
-    /// production/k8s case; every worker shares the cluster SIP port).
-    port_override: Option<u16>,
-}
+mod annotations;
 
-impl Annot {
-    /// A brand-new annotation for a just-(re)joined endpoint: `Unknown`, not
-    /// routable until the OPTIONS probe reads it `Alive` (ADR-0050 §8).
-    fn fresh(host: String) -> Self {
-        Self {
-            health: WorkerHealth::Unknown,
-            acceptance: Acceptance::Accept,
-            host,
-            port_override: None,
-        }
-    }
-}
+use annotations::{Annot, Departed, WorkerAnnotations};
 
-/// Proxy-only worker annotations keyed by ordinal — the OPTIONS/health + port
-/// concerns lifted out of the worker set. Lock-free reads via [`ArcSwap`].
-#[derive(Default)]
-struct WorkerAnnotations {
-    records: ArcSwap<HashMap<WorkerId, Annot>>,
-}
-
-impl WorkerAnnotations {
-    fn snapshot(&self) -> Arc<HashMap<WorkerId, Annot>> {
-        self.records.load_full()
-    }
-
-    /// Read-modify-write helper (annotations only mutate off the hot path).
-    /// `rcu`, not load-clone-store: the probe task's `set_health` and the
-    /// reconcile task's `sync_membership` run concurrently, and a plain store
-    /// could publish a map cloned BEFORE the other writer's update — silently
-    /// erasing a `Dead` mark until the next probe tick re-wrote it (a window
-    /// where new dialogs kept routing to a dead worker). `rcu` re-runs the
-    /// closure on contention, so `f` must be idempotent over its captures.
-    fn update(&self, f: impl Fn(&mut HashMap<WorkerId, Annot>)) {
-        self.records.rcu(|cur| {
-            let mut next = (**cur).clone();
-            f(&mut next);
-            next
-        });
-    }
-
-    /// Keep the overlay in step with the membership set: drop departed ordinals,
-    /// seed a fresh record for a new ordinal, and **reset** an ordinal whose host
-    /// moved (a recreated pod must be re-probed — a stale `Dead`/`Alive` must not
-    /// survive). An unchanged ordinal keeps its probe-written health and port.
-    /// This is the only proxy-specific lifecycle rule; it has no membership twin.
-    ///
-    /// Returns the `(ordinal, address)` pairs the overlay stopped serving — a
-    /// departure or a host move — for the caller to tombstone.
-    fn sync_membership(&self, peers: &[Peer], default_port: u16) -> Vec<(WorkerId, ProxyAddr)> {
-        let live: HashSet<&str> = peers.iter().map(|p| p.ordinal.as_str()).collect();
-        let mut departed = Vec::new();
-        // Membership deltas are rare state changes: each gets its own line. The
-        // diff is read before the `rcu` update so a retried closure cannot
-        // double-log it.
-        {
-            let current = self.snapshot();
-            let addr_of = |rec: &Annot| {
-                ProxyAddr::new(rec.host.clone(), rec.port_override.unwrap_or(default_port))
-            };
-            for (id, rec) in current.iter() {
-                if !live.contains(id.as_str()) {
-                    tracing::info!(
-                        node = observe::node(),
-                        worker = %id,
-                        host = %rec.host,
-                        "worker left the registry"
-                    );
-                    departed.push((id.clone(), addr_of(rec)));
-                }
-            }
-            for p in peers {
-                match current.get(&p.ordinal) {
-                    Some(rec) if rec.host == p.host => {}
-                    Some(rec) => {
-                        tracing::info!(
-                            node = observe::node(),
-                            worker = %p.ordinal,
-                            from_host = %rec.host,
-                            host = %p.host,
-                            "worker re-created at a new host"
-                        );
-                        departed.push((p.ordinal.clone(), addr_of(rec)));
-                    }
-                    None => tracing::info!(
-                        node = observe::node(),
-                        worker = %p.ordinal,
-                        host = %p.host,
-                        "worker joined the registry"
-                    ),
-                }
-            }
-        }
-        self.update(|recs| {
-            recs.retain(|id, _| live.contains(id.as_str()));
-            for p in peers {
-                match recs.get(&p.ordinal) {
-                    Some(rec) if rec.host == p.host => {} // unchanged → preserve
-                    _ => {
-                        recs.insert(p.ordinal.clone(), Annot::fresh(p.host.clone()));
-                    }
-                }
-            }
-        });
-        departed
-    }
-
-    /// Annotate health and acceptance of new calls in one write, `None`
-    /// leaving that one as it is. No-op if the worker is unknown or unchanged.
-    /// Returns whether the write turned the worker's health `Dead`.
-    ///
-    /// A write reading a worker `Alive` while the view reads no worker alive
-    /// returns every other worker read `Dead` to `Unknown`: verdicts taken
-    /// while the proxy reached no worker speak of its own reach, not of the
-    /// workers, so a rejoining proxy routes no response or request away from
-    /// a worker on them. Its probe judges each afresh.
-    fn set_view(
-        &self,
-        id: &str,
-        health: Option<WorkerHealth>,
-        acceptance: Option<Acceptance>,
-    ) -> bool {
-        let snapshot = self.snapshot();
-        let Some(previous) = snapshot.get(id).map(|r| (r.health, r.acceptance)) else {
-            return false;
-        };
-        let next = (health.unwrap_or(previous.0), acceptance.unwrap_or(previous.1));
-        if next == previous {
-            return false;
-        }
-        let blind = !snapshot.values().any(|r| r.health == WorkerHealth::Alive);
-        let forgotten: Vec<WorkerId> = if blind && next.0 == WorkerHealth::Alive {
-            snapshot
-                .iter()
-                .filter(|(other, r)| other.as_str() != id && r.health == WorkerHealth::Dead)
-                .map(|(other, _)| other.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        for other in &forgotten {
-            tracing::info!(
-                node = observe::node(),
-                worker = %other,
-                read_alive = id,
-                "dead verdict taken while no worker read alive forgotten"
-            );
-        }
-        if next.0 != previous.0 {
-            let (from, to) = (previous.0, next.0);
-            tracing::info!(node = observe::node(), worker = id, ?from, ?to, "worker health flip");
-        }
-        if next.1 != previous.1 {
-            let (from, to) = (previous.1, next.1);
-            tracing::info!(
-                node = observe::node(),
-                worker = id,
-                ?from,
-                ?to,
-                "worker acceptance flip"
-            );
-        }
-        self.update(|recs| {
-            if let Some(rec) = recs.get_mut(id) {
-                (rec.health, rec.acceptance) = next;
-            }
-            for other in &forgotten {
-                if let Some(rec) = recs.get_mut(other).filter(|r| r.health == WorkerHealth::Dead) {
-                    rec.health = WorkerHealth::Unknown;
-                }
-            }
-        });
-        next.0 == WorkerHealth::Dead && previous.0 != WorkerHealth::Dead
-    }
+/// Whether `peer`'s endpoint reads the way a process that died on a live node
+/// does: not `ready`, and no orchestrator removal under way (ADR-0031 case 4).
+fn reads_down(peer: &Peer) -> bool {
+    !peer.ready && !peer.terminating
 }
 
 /// Project the membership peer set + the annotation overlay into the worker set
@@ -313,14 +135,20 @@ impl WorkerSet {
     /// overlay in step: an address the set stopped serving — the member left, or
     /// its endpoint reads not `ready` — is tombstoned, an address a worker
     /// joined at is forgotten. A `terminating` flip on a ready member changes
-    /// nothing. Idempotent; the single write path for every registry.
+    /// nothing. A worker read `Alive` whose endpoint now reads not `ready` and
+    /// not `terminating` is a dead verdict, told to every
+    /// [`read_dead`](Self::read_dead) reader once the projection holds it: its
+    /// record is dropped with it, so one flip tells once. Idempotent; the
+    /// single write path for every registry.
     pub(crate) fn recompose(&self) {
-        let peers: Vec<Peer> = self.membership.snapshot().into_iter().filter(|p| p.ready).collect();
+        let members = self.membership.snapshot();
+        let peers: Vec<Peer> = members.iter().filter(|p| p.ready).cloned().collect();
         let now_ms = self.now_ms();
         let departed = self.annotations.sync_membership(&peers, self.default_port);
         let annots = self.annotations.snapshot();
         let entries = project(&peers, &annots, self.default_port);
-        for (id, address) in departed {
+        let mut flipped = Vec::new();
+        for Departed { id, address, read_alive } in departed {
             tracing::info!(
                 node = observe::node(),
                 worker = %id,
@@ -328,6 +156,9 @@ impl WorkerSet {
                 ttl_ms = DEPARTED_ADDRESS_TTL_MS,
                 "departed worker address tombstoned"
             );
+            if read_alive && members.iter().any(|p| p.ordinal == id && reads_down(p)) {
+                flipped.push(id.clone());
+            }
             self.tombstones.insert(address, id, now_ms);
         }
         for e in &entries {
@@ -335,6 +166,14 @@ impl WorkerSet {
         }
         self.tombstones.prune(now_ms);
         self.projection.store(Arc::new(entries));
+        for id in flipped {
+            tracing::info!(
+                node = observe::node(),
+                worker = %id,
+                "a worker read alive reads not ready, not terminating: a dead verdict"
+            );
+            let _ = self.read_dead.send(id);
+        }
     }
 
     /// Annotate a worker's health (the OPTIONS write seam) and recompose.
@@ -366,10 +205,26 @@ impl WorkerSet {
     }
 
     /// Every later dead verdict: a worker whose health the view turns `Dead`
-    /// from another health. A membership departure is no verdict: its address
-    /// is tombstoned and its ordinal leaves the projection.
+    /// from another health, and a worker read `Alive` whose endpoint flips not
+    /// `ready` and not `terminating` (ADR-0050 §3). A membership departure and
+    /// a `terminating` flip are none: its address is tombstoned and its ordinal
+    /// leaves the projection.
     pub(crate) fn read_dead(&self) -> broadcast::Receiver<WorkerId> {
         self.read_dead.subscribe()
+    }
+
+    /// The ordinals a verdict may stand on now, for a reader that lost track
+    /// of them: every worker the view reads `Dead`, and every member whose
+    /// endpoint reads not `ready` and not `terminating`. Sorted, no duplicate.
+    pub(crate) fn read_dead_now(&self) -> Vec<WorkerId> {
+        let projected = self.projection.load();
+        let dead =
+            projected.iter().filter(|w| w.health == WorkerHealth::Dead).map(|w| w.id.clone());
+        let down = self.membership.snapshot().into_iter().filter(reads_down).map(|p| p.ordinal);
+        let mut now: Vec<WorkerId> = dead.chain(down).collect();
+        now.sort();
+        now.dedup();
+        now
     }
 
     /// Pin a per-worker `port_override` for `id` (the `static`/`simulated` per-worker

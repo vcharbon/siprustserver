@@ -1,6 +1,6 @@
 //! A front proxy SUT's own tasks beside its core: the OPTIONS health probe,
 //! when a scenario runs it, and the dead notifier, which tells each dead
-//! verdict a health write makes to the other alive workers, signed with the
+//! verdict of the registry to the other alive workers, signed with the
 //! workers' cluster key (ADR-0050 §3).
 
 use std::net::SocketAddr;

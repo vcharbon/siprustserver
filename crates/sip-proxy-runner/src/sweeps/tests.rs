@@ -38,6 +38,9 @@ impl WorkerRegistry for PanicsOnce {
     fn read_dead(&self) -> tokio::sync::broadcast::Receiver<String> {
         tokio::sync::broadcast::channel(1).1
     }
+    fn read_dead_now(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[tokio::test(start_paused = true)]

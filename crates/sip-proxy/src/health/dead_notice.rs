@@ -4,12 +4,15 @@
 //! the dead one's calls takes over those with work in flight at once, as the
 //! proxy now routes the dead worker's traffic to it (ADR-0047 D1).
 //!
-//! The verdict is the health view's, whatever wrote it: the probe's misses in
-//! a runner, a harness's health write in a test. A membership departure is no
-//! verdict ([`WorkerRegistry::read_dead`]). Each notice is one non-INVITE
-//! client transaction, retransmitted on Timer E until it is answered or
-//! Timer F ends it; the answer is the worker's ordinary OPTIONS report, read
-//! by the probe only.
+//! The verdict is the registry's ([`WorkerRegistry::read_dead`]): a turn to
+//! `Dead` of the health view, whatever wrote it, the probe's misses in a runner
+//! or a harness's health write in a test, and the flip of a worker read `Alive`
+//! to not ready, not terminating. A membership departure and a terminating flip
+//! are no verdict. The notice's instant is when it is told, so another proxy's
+//! notice of the same flip is the same verdict only at the same instant, a
+//! later one otherwise. Each notice is one non-INVITE client transaction,
+//! retransmitted on Timer E until it is answered or Timer F ends it; the answer
+//! is the worker's ordinary OPTIONS report, read by the probe only.
 
 use std::sync::Arc;
 
@@ -28,7 +31,7 @@ use sip_txn::{IdGen, TransactionConfig, TransactionLayer, TransactionLayerClosed
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::registry::{WorkerEntry, WorkerHealth, WorkerId, WorkerRegistry};
+use crate::registry::{WorkerEntry, WorkerId, WorkerRegistry};
 
 /// The sender of dead notices. Owns a UAC endpoint of its own.
 pub struct DeadNotifier {
@@ -74,8 +77,8 @@ impl DeadNotifier {
     }
 
     /// Tell every verdict until the transaction layer or the registry closes
-    /// (spawn it; abort to stop). A reader that lags tells every worker the
-    /// view reads `Dead` now.
+    /// (spawn it; abort to stop). A reader that lags tells every ordinal a
+    /// verdict may stand on now ([`WorkerRegistry::read_dead_now`]).
     pub async fn run(mut self) {
         loop {
             tokio::select! {
@@ -97,14 +100,7 @@ impl DeadNotifier {
     }
 
     async fn tell_every_dead(&self) -> Result<(), TransactionLayerClosed> {
-        let dead: Vec<WorkerId> = self
-            .registry
-            .snapshot()
-            .into_iter()
-            .filter(|w| w.health == WorkerHealth::Dead)
-            .map(|w| w.id)
-            .collect();
-        for id in dead {
+        for id in self.registry.read_dead_now() {
             self.tell(&id).await?;
         }
         Ok(())

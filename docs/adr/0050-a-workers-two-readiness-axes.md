@@ -5,6 +5,8 @@ each dead verdict to the workers; §5, the undecided call's residual.
 Amended (2026-11-01): §2 and §9, a backed-up event queue refuses new calls
 (`cause=overload`, and the admission ladder's event-queue rung); §12, the
 keepalive lane. Amended (2026-11-03): §11, the node's announcement follows `/readyz` (ADR-0056).
+Amended (2026-11-04): §3 and §5, the flip of a worker read `Alive` to not ready, not
+terminating, is a dead verdict.
 
 **Owner:** `crates/sip-message` (the `X-Readiness` and `X-Incarnation` headers),
 `crates/b2bua/src/repl/readiness.rs` and `router/responses.rs` (the worker's
@@ -91,16 +93,19 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    health, its grace, and the `503` Reason-text split are gone.
 
    A turn of a worker's health to `Dead` from another health is a **dead
-   verdict**. The proxy tells it to every other `Alive` worker on an
-   out-of-dialog OPTIONS carrying the notice, signed with the cluster key the
-   workers share (ADR-0055 §12) over the ordinal and the verdict's instant:
+   verdict**, and so is the flip of a worker read `Alive` to an endpoint not
+   `ready` and not `terminating` (ADR-0031 case 4), which takes it out of the
+   projection before the probe can turn it. The proxy tells it to every other
+   `Alive` worker on an out-of-dialog OPTIONS carrying the notice, signed with
+   the cluster key the workers share (ADR-0055 §12) over the ordinal and the
+   verdict's instant, the instant the proxy tells it:
 
    ```
    X-Worker-Dead: worker-0; at=1792155573698; sig=<base64url>
    ```
 
-   A departure is no verdict: the ordinal leaves the projection and its
-   address is tombstoned. A worker takes a notice only when it verifies and
+   A departure and a `terminating` flip are no verdict: the ordinal leaves the
+   projection and its address is tombstoned. A worker takes a notice only when it verifies and
    its instant stands within the freshness window of the worker's own clock,
    either way (`B2BUA_DEAD_NOTICE_FRESH_MS`, 10 s); it refuses and counts any
    other (`b2bua_dead_notices_refused_total`). A taken verdict is held for
@@ -145,8 +150,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    worker would end the caller's.
    Accepted residuals:
    - a copy of an undecided call whose primary really died is dropped: the
-     confirmed dead verdict (§3) takes the call over and asks its decision
-     again;
+     confirmed dead verdict (§3), the probe's or the endpoint's flip, takes the
+     call over and asks its decision again;
    - an INVITE that never replicated, from a primary that really died, gets
      no final from the backup; the caller's transaction timers end it;
    - a discovered pool whose watch never delivers a listing never has a first
