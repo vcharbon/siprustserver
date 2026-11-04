@@ -646,18 +646,18 @@ spec:
           # A next hop that dies with its carrier up reads FAILED only at the end\
           \ of the\n# neighbour cycle: the NEIGH_* timers bound that cycle on every\
           \ interface, and\n# fib_multipath_use_neigh makes multipath egress leave\
-          \ a next hop not resolved\n# (ADR-0056 \xA710). The default entry reaches\
-          \ an interface created later.\n#\n# With ROUTE_GUARD=off, a table an earlier\
-          \ route guard left on the node is\n# removed, so the node's BFD and BGP\
-          \ pass; with it on, the pod's own guard\n# owns the table (its init step\
-          \ left it withdrawing).\nset -e\nif [ \"$ROUTE_GUARD\" = off ]; then\n \
-          \ nft delete table inet route_guard 2>/dev/null || true\nfi\nfor vip in\
-          \ $PROXY_VIP $EXTERNAL_VIP; do\n  ip addr add \"$vip/32\" dev lo 2>/dev/null\
-          \ || ip addr show dev lo | grep -q \"$vip/32\"\n  iptables -C OUTPUT -s\
-          \ \"$vip/32\" -p icmp --icmp-type port-unreachable -j DROP 2>/dev/null \\\
-          \n    || iptables -I OUTPUT 1 -s \"$vip/32\" -p icmp --icmp-type port-unreachable\
-          \ -j DROP\ndone\necho 1 > /proc/sys/net/ipv4/conf/all/arp_ignore\necho 2\
-          \ > /proc/sys/net/ipv4/conf/all/arp_announce\necho 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore\n\
+          \ a next hop not resolved\n# (ADR-0056 \xA710). A host namespace's default\
+          \ entry reaches an interface created\n# later.\n#\n# With ROUTE_GUARD=off,\
+          \ a table an earlier route guard left on the node is\n# removed, so the\
+          \ node's BFD and BGP pass; with it on, the pod's own guard\n# owns the table\
+          \ (its init step left it withdrawing).\nset -e\nif [ \"$ROUTE_GUARD\" =\
+          \ off ]; then\n  nft delete table inet route_guard 2>/dev/null || true\n\
+          fi\nfor vip in $PROXY_VIP $EXTERNAL_VIP; do\n  ip addr add \"$vip/32\" dev\
+          \ lo 2>/dev/null || ip addr show dev lo | grep -q \"$vip/32\"\n  iptables\
+          \ -C OUTPUT -s \"$vip/32\" -p icmp --icmp-type port-unreachable -j DROP\
+          \ 2>/dev/null \\\n    || iptables -I OUTPUT 1 -s \"$vip/32\" -p icmp --icmp-type\
+          \ port-unreachable -j DROP\ndone\necho 1 > /proc/sys/net/ipv4/conf/all/arp_ignore\n\
+          echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce\necho 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore\n\
           echo 2 > /proc/sys/net/ipv4/conf/lo/arp_announce\nfor f in /proc/sys/net/ipv4/neigh/*/unres_qlen_bytes;\
           \ do\n  echo \"$UNRES_QLEN_BYTES\" > \"$f\" || echo \"vip-loopback: WARN\
           \ could not set $f\"\ndone\nneigh_set() {\n  for f in /proc/sys/net/ipv4/neigh/*/\"\

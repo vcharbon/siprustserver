@@ -47,9 +47,15 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    `PROXY_EXT_NEXT_HOPS`). A next hop read `FAILED` or `INCOMPLETE` latches the face unusable until
    one reads resolved again, so an entry flapping between `INCOMPLETE` and gone never reads usable.
    The next hops are the external plane's BGP peers (checked at render when the chart renders
-   MetalLB's objects), whose BFD and keepalive traffic keeps them resolved. That is a read of local
-   kernel state, every `PROXY_EXT_FACE_CHECK_MS` off the async runtime; nothing is probed on the
-   wire. It ties the two faces together: a node whose
+   MetalLB's objects), whose BFD and keepalive traffic keeps them resolved while the node is let
+   out. The route guard drops that traffic at output, before neighbour resolution, so while the
+   face is latched each reading solicits every next hop itself: one empty datagram to the discard
+   port from a fresh UDP socket, which needs no capability and which the guard's chain lets pass
+   (§10). An answer clears the latch, so a recovered next hop brings the node back with nothing
+   sent from outside. The interface read not up once, from a usable face, is a carrier flap and
+   holds the face usable; the second reading in a row is the face down; a removed interface is
+   unusable at its first reading. All of it is local kernel state read every
+   `PROXY_EXT_FACE_CHECK_MS` off the async runtime. It ties the two faces together: a node whose
    caller-facing uplink is gone stops announcing the internal VIP as well. No component detects
    the reachability of a peer beyond the first router: a fault in the routed network hits both
    proxies alike and is the network's to converge. Consequences:
@@ -136,10 +142,20 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       proxy's own reach, read before any per-worker dead verdict (2.6-3.6 s), which stays the
       routing's. A proxy is never fit before it has read a worker alive.
     - Bounds, checked at render against `proxy.routeGuard.withdrawWithinMs` (3.4 s): a worker cut
-      2 s + two readings 0.2 s + 0.9 s = 3.1 s; an external interface or link lost
-      `PROXY_EXT_FACE_CHECK_MS` 0.5 s + 0.2 s + 0.9 s = 1.6 s; a hung or dead proxy 1 s + 0.9 s =
-      1.9 s. A next hop that dies with its carrier up is outside the bound: its neighbour entry
-      reads unresolved only after the kernel's STALE, DELAY and PROBE cycle, tens of seconds.
+      2 s + two readings 0.2 s + 0.9 s = 3.1 s; an external link lost, read down twice, 2 ×
+      `PROXY_EXT_FACE_CHECK_MS` 1 s + 0.2 s + 0.9 s = 2.1 s (an interface removed reads unusable
+      at once, 1.6 s); a hung or dead proxy 1 s + 0.9 s = 1.9 s.
+    - A next hop that dies with its carrier up is outside that bound and inside Timer H: its
+      neighbour entry reads `FAILED` at the end of the kernel's STALE, DELAY and PROBE cycle, 1.5
+      × `base_reachable_time_ms` + `delay_first_probe_time` + `ucast_solicit` × `retrans_time_ms`,
+      10 s at the chart's `proxy.neighbour` (the init step sets them on every interface; the
+      kernel's defaults give about 50 s). Multipath egress leaves that next hop then
+      (`fib_multipath_use_neigh`, set by the same step, the routes over both next hops being a
+      deployment requirement), so a worker's retransmitted final reaches its caller inside Timer
+      H; with no next hop left the face reads unusable and the node leaves the routers' ECMP. The
+      render checks the cycle + one reading + two unfit readings + the BFD detection against 32 s.
+      The timers rest on the solicit (§3): without it a shorter cycle reaches a latch nothing
+      clears sooner.
     - A withdrawn node is let out after the proxy read fit for `ROUTE_GUARD_HOLD_MS` (3 s), so a
       flapping fault does not rehash flows each time; its BGP sessions come back within the
       BGPPeer `connectTime` (`proxy.announce.metallb.connectTimeSeconds`, 1 s). A restarted guard
@@ -226,3 +242,9 @@ Via.
 - A guard removed from a node (the pod gone, no successor) leaves its table withdrawing; a pod
   without the guard deletes it at start (`vip-loopback.sh`), or an operator does
   (`nft delete table inet route_guard`).
+- A next hop that answers ARP and forwards nothing reads alive to the face: its BFD session
+  withdraws the routes through it on the routers, and the node's own egress keeps using it.
+- An interface whose operstate stays down longer than the flap (a driver or the kernel's link
+  event rate limit holding it) gives the second reading, and the node withdraws for that flap.
+- A bond keeps its carrier up while one member lives: the face reads the bond and sees a lost
+  member only through the next hop it served.

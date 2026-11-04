@@ -23,7 +23,8 @@
 # A next hop that dies with its carrier up reads FAILED only at the end of the
 # neighbour cycle: the NEIGH_* timers bound that cycle on every interface, and
 # fib_multipath_use_neigh makes multipath egress leave a next hop not resolved
-# (ADR-0056 §10). The default entry reaches an interface created later.
+# (ADR-0056 §10). A host namespace's default entry reaches an interface created
+# later.
 #
 # With ROUTE_GUARD=off, a table an earlier route guard left on the node is
 # removed, so the node's BFD and BGP pass; with it on, the pod's own guard

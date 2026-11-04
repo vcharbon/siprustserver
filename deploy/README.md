@@ -149,10 +149,24 @@ provides:
 - **The internal plane's isolation** of ADR-0048: nothing on the external plane reaches
   a worker or the proxies' internal face.
 - Each proxy node's external interface (`network.externalInterface`) and its external BGP
-  peers' addresses on it (`network.externalNextHops`): the proxy's readiness requires the
-  interface up and one of those next hops resolved; their BFD and keepalive traffic keeps them
-  resolved. A lab router also holds a blackhole route per VIP below BGP, so a VIP nobody
-  announces is unreachable instead of following a default route.
+  peers' addresses on it (`network.externalNextHops`), each on the interface's own subnet: the
+  proxy's readiness requires the interface up and one of those next hops resolved; their BFD and
+  keepalive traffic keeps them resolved. While none is resolved after one read `FAILED` or
+  `INCOMPLETE`, the proxy sends each next hop one empty UDP datagram to port 9 per
+  `PROXY_EXT_FACE_CHECK_MS` to make the kernel resolve it (ADR-0056 §3), so the routers answer ARP
+  from the proxy nodes and an ACL may drop the datagram, not the ARP. A lab router also holds a
+  blackhole route per VIP below BGP, so a VIP nobody announces is unreachable instead of following
+  a default route.
+- **Egress over both next hops.** A proxy node's routes toward the callers are multipath over
+  every address of `network.externalNextHops`, which the operator provisions (the node learns no
+  route over its BGP sessions). A route through one of them alone keeps sending a worker's finals
+  to a next hop that died with its carrier up, while the other keeps the face usable: a caller
+  who heard a 100 then loses its final once Timer H runs out. The `vip-loopback` init step turns
+  `net.ipv4.fib_multipath_use_neigh` on, so multipath leaves a next hop not resolved, and sets the
+  neighbour timers of every interface from `proxy.neighbour`: such a next hop reads `FAILED`
+  within 10 s by default, and a router silent to ARP for 3 s reads dead (`docs/TUNING.md`).
+- A bond as the external interface monitors its own members (its `miimon` or ARP monitoring is
+  the operator's): the face reads the bond, which stays up while one member lives.
 - The drain grace, `minReadySeconds` and the readiness probe set from the measured
   withdrawal and announcement latency (`proxy.announce.propagationMs`,
   `docs/TUNING.md`).

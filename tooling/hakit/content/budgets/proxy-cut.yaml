@@ -7,7 +7,7 @@ description: >-
   VIPs within W of the cut (ADR-0056 §10). W is the route guard's bound
   (proxy.routeGuard.withdrawWithinMs, 3.4 s, checked at render): detection
   (the worker cut's isolation verdict, HEALTH_ISOLATION_MS 2 s; the external
-  cut's face check, 0.5 s) + one poll (0.1 s) + the routers' BFD detection
+  cut's face check, 0.5 s, the interface being removed) + one poll (0.1 s) + the routers' BFD detection
   (3 × 300 ms). Until then every datagram of a flow that hashes to the cut
   node is lost; one peer address and port is one flow, so a single-flow peer
   (a caller, a worker, a callee) has all its traffic on one node or none
