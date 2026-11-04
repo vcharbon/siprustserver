@@ -48,6 +48,15 @@ Contact names its external VIP; without it the worker is standalone. */ -}}
 {{- $_ := set $env "B2BUA_CDR_RABBITMQ_MAX_LEN" (toString (int .Values.cdr.maxLength)) }}
 {{- end }}
 {{- include "siprust.overlayEnv" (dict "into" $env "from" $w.env) }}
+{{- /* Sizing's computed values (templates/_sizing.tpl): checks.yaml refuses
+an env stating one of them; the computed memory replaces the resources'. */ -}}
+{{- $sizing := include "siprust.sizing" .Values | fromJson }}
+{{- $resources := deepCopy ($w.resources | default dict) }}
+{{- with $sizing.workerEnv }}
+{{- include "siprust.overlayEnv" (dict "into" $env "from" .) }}
+{{- $_ := set $resources "requests" (merge (dict "memory" $sizing.workerMemory) (get $resources "requests" | default dict)) }}
+{{- $_ := set $resources "limits" (merge (dict "memory" $sizing.workerMemory) (get $resources "limits" | default dict)) }}
+{{- end }}
 {{- $clusterKeySecret := "" }}
 {{- if $w.replication.enabled }}
 {{- $clusterKeySecret = required "worker.clusterKey.existingSecret: replication needs the Secret of the workers' shared key (ADR-0055 §12)" $w.clusterKey.existingSecret }}
@@ -132,7 +141,7 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
           resources:
-            {{- toYaml $w.resources | nindent 12 }}
+            {{- toYaml $resources | nindent 12 }}
           {{- with $w.extraVolumeMounts }}
           volumeMounts:
             {{- toYaml . | nindent 12 }}

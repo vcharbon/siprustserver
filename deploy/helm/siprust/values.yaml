@@ -65,6 +65,57 @@ network:
 # whose component env states them apart fails. Null keeps the runners' default.
 inviteTxnTimeoutSec: null
 
+# Capacity sizing from a traffic profile: when enabled, the chart computes the
+# workers' call, transaction and RSS ceilings and memory, and the proxies'
+# self-gate, branch memo and memory, from the inputs below
+# (templates/_sizing.tpl states each formula). Those values are then
+# computed only: a component env or the self-gate stating one fails the
+# render, and the computed memory replaces the components' memory resources.
+# Every input is required when enabled; the per-call costs are a product's
+# measurements.
+sizing:
+  enabled: false
+  profile:
+    # New calls a second the whole cluster takes, and that one proxy and one
+    # worker each take alone.
+    cps: null
+    # The mean call duration, ringing included, and the mean ring, seconds.
+    holdSeconds: null
+    ringSeconds: null
+    # The INVITEs a call sends across the proxies on average, at least a basic
+    # call's 2: re-INVITEs and rerouted or transferred legs add theirs.
+    invitesPerCall: null
+  # The normal call ceiling above a worker's mean share of the live calls,
+  # percent; the emergency ceilings above the normal ones; the transaction
+  # ceiling above the transactions at the admitted rate; the proxies'
+  # self-gate above the profile's rate.
+  callMarginPct: null
+  emergencyPct: null
+  txnMarginPct: null
+  gateMarginPct: null
+  # Transaction-seconds a call holds outside its ring (its two INVITE
+  # transactions also live through the ring).
+  txnSecondsPerCall: null
+  memory:
+    # A worker's resident memory with no call, bytes.
+    baseBytes: null
+    # One live call, answered and ringing, and one backup copy held for a
+    # peer, bytes allocated.
+    answeredCallBytes: null
+    ringingCallBytes: null
+    replicaBytes: null
+    # One live transaction, bytes.
+    txnBytes: null
+    # The worker's outbound connections at most, and the bytes of one.
+    outboundConnections: null
+    connectionBytes: null
+    # Slack of each memory limit for RSS lag and allocator retention, percent.
+    slackPct: null
+    # The proxy's resident memory with an empty memo, and what one memo entry
+    # holds outside the bytes the memo accounts for it.
+    proxyBaseBytes: null
+    memoEntryOverheadBytes: null
+
 # Per-call tracing (ADR-0026).
 tracing:
   # OTLP/HTTP base the runners export spans to (they append /v1/traces).

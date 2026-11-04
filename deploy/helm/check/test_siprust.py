@@ -157,6 +157,69 @@ class ProxyKnobs(unittest.TestCase):
         self.assertIn("recvShards", render_error(SIPRUST, *KIND, "--set", "proxy.recvShards=0"))
 
 
+SIZING = {
+    "sizing.enabled": "true", "inviteTxnTimeoutSec": "158",
+    "sizing.profile.cps": "100", "sizing.profile.holdSeconds": "120",
+    "sizing.profile.ringSeconds": "20", "sizing.profile.invitesPerCall": "2.5",
+    "sizing.callMarginPct": "10", "sizing.emergencyPct": "5", "sizing.txnMarginPct": "15",
+    "sizing.gateMarginPct": "25", "sizing.txnSecondsPerCall": "100",
+    "sizing.memory.baseBytes": str(200 << 20), "sizing.memory.answeredCallBytes": "40000",
+    "sizing.memory.ringingCallBytes": "60000", "sizing.memory.replicaBytes": "10000",
+    "sizing.memory.txnBytes": "5000", "sizing.memory.outboundConnections": "256",
+    "sizing.memory.connectionBytes": "40960", "sizing.memory.slackPct": "10",
+    "sizing.memory.proxyBaseBytes": str(64 << 20), "sizing.memory.memoEntryOverheadBytes": "128",
+}
+
+
+def sizing_args(**over: str) -> list[str]:
+    values = {**SIZING, **over}
+    return [a for k, v in values.items() for a in ("--set-json", f"{k}={v}")]
+
+
+class Sizing(unittest.TestCase):
+    """templates/_sizing.tpl: the capacity values computed from a profile."""
+
+    def test_a_profile_computes_every_capacity_value(self) -> None:
+        docs = render(SIPRUST, *KIND, *sizing_args())
+        worker = container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker")
+        proxy = container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy")
+        w, p = env(worker), env(proxy)
+        mib, up = 1 << 20, lambda x, n: -(-x // n) * n
+        # 100 calls/s × 120 s over 2 workers = 6 000, + 10 % = 6 600 → 7 000.
+        calls = up(6_000 * 110 // 100, 1_000)
+        calls_e = up(calls * 105 // 100, 1_000)
+        call = 40_000 + 20_000 * 20 // 120
+        per_cps = 100 + 2 * 20
+        peak = max(100 * per_cps, calls * per_cps // 120 + calls * 64 // 300)
+        txns = up(peak * 115 // 100, 1_000)
+        txns_e = up(txns * 105 // 100, 1_000)
+        rss_e = -(-((200 << 20) + calls_e * call + calls_e * 10_000 + txns_e * 5_000) // mib)
+        held = 2 * calls_e
+        reserve = held * 2 + held * 64 // 300 + 100 * 32
+        full = (200 << 20) + held * call + (txns_e + reserve) * 5_000 + 256 * 40_960
+        grow = rss_e * mib + calls_e * (call - 10_000) + reserve * 5_000
+        memory = -(-(max(full, grow) * 100 // 90) // mib)
+        self.assertEqual(
+            (w["B2BUA_MAX_CALLS"], w["B2BUA_MAX_CALLS_EMERGENCY"], w["B2BUA_REPL_BACKUP_MAX_CALLS"]),
+            (str(calls), str(calls_e), str(calls_e)))
+        self.assertEqual((w["B2BUA_MAX_TXNS"], w["B2BUA_MAX_TXNS_EMERGENCY"]), (str(txns), str(txns_e)))
+        self.assertEqual(w["B2BUA_MAX_RSS_EMERGENCY"], f"{rss_e}Mi")
+        self.assertEqual(worker["resources"]["limits"]["memory"], f"{memory}Mi")
+        # A call of 2.5 INVITEs at a 20 s ring and a 190 s cap: 1.5 × 190 + 20
+        # in the INVITE pool, 288 + 64 + 0.5 × 96 in the retransmission pool.
+        seconds = (1.5 * 190_000 + 20_000 + 288_000 + 64_000 + 48_000) // 1_000
+        entries = up(-(-(125 * int(seconds) * 5) // 4), 16)
+        self.assertEqual((p["PROXY_SELF_GATE_CPS_RATE"], p["PROXY_BRANCH_MEMO_MAX_ENTRIES"],
+                          p["PROXY_BRANCH_MEMO_MAX_BYTES"], p["PROXY_BRANCH_MEMO_INVITES_PER_CALL"]),
+                         ("125", str(entries), str(entries * 2_560), "2.5"))
+        need = entries * 2_560 + entries * 128 + (64 << 20)
+        self.assertEqual(proxy["resources"]["limits"]["memory"], f"{-(-(need * 100 // 90) // mib)}Mi")
+
+    def test_a_value_sizing_computes_stated_again_fails_the_render(self) -> None:
+        err = render_error(SIPRUST, *KIND, *sizing_args(), "--set-string", "worker.env.B2BUA_MAX_TXNS=1")
+        self.assertIn("worker.env.B2BUA_MAX_TXNS is computed by sizing", err)
+
+
 class ClusterKey(unittest.TestCase):
     """The workers' shared key comes from a Secret the chart never draws (ADR-0055 §12)."""
 

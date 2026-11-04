@@ -84,6 +84,12 @@ The proxy's intake knobs are values: `proxy.recvShards`
 (`PROXY_SELF_GATE_CPS_RATE` / `_SIZE`); null keeps the runner default.
 `check/test_downstream.py` builds such a product chart and checks each point.
 
+`sizing` computes the capacity values from a profile and measured per-call
+costs instead: the workers' call, transaction and RSS ceilings and memory,
+the proxies' self-gate, branch memo and memory (`templates/_sizing.tpl`,
+`docs/TUNING.md`). A product states the inputs once; a lab states a smaller
+profile over them.
+
 ## The proxy's cookie key
 
 The proxy's cookie key lives in the Secret `proxy.hmac.existingSecret` names,

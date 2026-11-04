@@ -792,6 +792,44 @@
       ],
       "minimum": 33,
       "maximum": 600
+    },
+    "sizing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cps": { "type": ["integer", "null"], "minimum": 1 },
+            "holdSeconds": { "type": ["integer", "null"], "minimum": 1 },
+            "ringSeconds": { "type": ["integer", "null"], "minimum": 0 },
+            "invitesPerCall": { "type": ["number", "null"], "minimum": 2, "maximum": 100 }
+          }
+        },
+        "callMarginPct": { "type": ["integer", "null"], "minimum": 0 },
+        "emergencyPct": { "type": ["integer", "null"], "minimum": 1 },
+        "txnMarginPct": { "type": ["integer", "null"], "minimum": 0 },
+        "gateMarginPct": { "type": ["integer", "null"], "minimum": 1 },
+        "txnSecondsPerCall": { "type": ["integer", "null"], "minimum": 0 },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "baseBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "answeredCallBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "ringingCallBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "replicaBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "txnBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "outboundConnections": { "type": ["integer", "null"], "minimum": 0 },
+            "connectionBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "proxyBaseBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "memoEntryOverheadBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "slackPct": { "type": ["integer", "null"], "minimum": 0, "maximum": 99 }
+          }
+        }
+      }
     }
   }
 }

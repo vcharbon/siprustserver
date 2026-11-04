@@ -29,11 +29,26 @@ each runner's startup check.
 | proxy PROXY_BRANCH_MEMO_MAX_BYTES < proxy `resources.limits.memory` | the memo's accounted bytes fit the process |
 | `callLimiter.leaseSeconds` > 2 × worker LIMITER_REFRESH_SECONDS + LIMITER_REFRESH_BATCH_MS | a counted call's lease survives one missed refresh |
 | `proxy.hmac.existingSecret` set, or `proxy.hmac.drawInCluster` | a render without a cluster (helm template, GitOps) draws a new cookie key each time |
+| `sizing.enabled` ⇒ no component env or `proxy.selfGate` states a value sizing computes | one source for each capacity value: the computed ones keep the relations above by construction (templates/_sizing.tpl); the computed memory replaces the components' memory requests and limits |
 
 An `extraEnv` entry is outside these relations: a value set there is the
 operator's to keep consistent.
 */ -}}
 {{- $margin := 2000 }}
+{{- $sizing := include "siprust.sizing" .Values | fromJson }}
+{{- if $sizing.workerEnv }}
+{{- range $component := list "worker" "proxy" }}
+{{- $c := index $.Values $component }}
+{{- range $name, $_ := index $sizing (printf "%sEnv" $component) }}
+{{- if hasKey ($c.env | default dict) $name }}
+{{- fail (printf "%s.env.%s is computed by sizing (sizing.enabled): state the sizing inputs instead" $component $name) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if or (not (kindIs "invalid" .Values.proxy.selfGate.cpsRate)) (not (kindIs "invalid" .Values.proxy.selfGate.cpsSize)) }}
+{{- fail "proxy.selfGate is computed by sizing (sizing.enabled): state sizing.profile.cps and sizing.gateMarginPct instead" }}
+{{- end }}
+{{- end }}
 {{- if .Values.worker.enabled }}
 {{- $w := .Values.worker }}
 {{- $wenv := $w.env | default dict }}

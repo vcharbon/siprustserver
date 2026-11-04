@@ -44,6 +44,16 @@ discovered from the EndpointSlices of the headless b2bua-worker Service
 {{- $_ := set $env "PROXY_SELF_GATE_CPS_SIZE" (toString (int $p.selfGate.cpsSize)) }}
 {{- end }}
 {{- include "siprust.overlayEnv" (dict "into" $env "from" $p.env) }}
+{{- /* Sizing's computed values (templates/_sizing.tpl): checks.yaml refuses
+an env or a self-gate stating one of them; the computed memory replaces the
+resources'. */ -}}
+{{- $sizing := include "siprust.sizing" .Values | fromJson }}
+{{- $resources := deepCopy ($p.resources | default dict) }}
+{{- with $sizing.proxyEnv }}
+{{- include "siprust.overlayEnv" (dict "into" $env "from" .) }}
+{{- $_ := set $resources "requests" (merge (dict "memory" $sizing.proxyMemory) (get $resources "requests" | default dict)) }}
+{{- $_ := set $resources "limits" (merge (dict "memory" $sizing.proxyMemory) (get $resources "limits" | default dict)) }}
+{{- end }}
 {{- $hmacSecret := $p.hmac.existingSecret | default "sip-front-proxy-hmac" }}
 {{- $clusterKeySecret := "" }}
 {{- if .Values.worker.replication.enabled }}
@@ -181,7 +191,7 @@ spec:
             initialDelaySeconds: 3
             periodSeconds: 10
           resources:
-            {{- toYaml $p.resources | nindent 12 }}
+            {{- toYaml $resources | nindent 12 }}
           {{- with $p.extraVolumeMounts }}
           volumeMounts:
             {{- toYaml . | nindent 12 }}
