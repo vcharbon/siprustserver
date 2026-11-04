@@ -1103,21 +1103,26 @@ export interface CampaignDeclaredLines {
 export interface CdrBlock {
   readonly title: string
   readonly fields: ReadonlyArray<{ readonly name: string; readonly value: string }>
-  readonly tables: ReadonlyArray<{
-    readonly title: string
-    readonly columns: readonly string[]
-    readonly rows: ReadonlyArray<readonly string[]>
-  }>
+  readonly tables: readonly CdrTable[]
   readonly json: unknown
 }
 
-/** A campaign cell's CDRs: each file its bundle holds as blocks, its raw CDR lines per call, the counts its verdict states. */
+/** A titled table of text cells: its column headings, its rows. */
+export interface CdrTable {
+  readonly title: string
+  readonly columns: readonly string[]
+  readonly rows: ReadonlyArray<readonly string[]>
+}
+
+/** A campaign cell's CDRs: each file its bundle holds as blocks or one table, its raw CDR lines per call, the counts its verdict states. */
 export interface CellCdr {
   readonly files: ReadonlyArray<{
     readonly name: string
     readonly label: string
     readonly blocks: readonly CdrBlock[]
-    /** Why a held file reads as no block; null where it reads. */
+    /** The whole file as one table, a column per line where it is lines; null where it reads as blocks. */
+    readonly table: CdrTable | null
+    /** Why a held file reads as neither blocks nor a table; null where it reads. */
     readonly note: string | null
   }>
   /** The raw CDR lines of each call, by the caller leg its Call-ID is minted for; null where the cell holds none. */

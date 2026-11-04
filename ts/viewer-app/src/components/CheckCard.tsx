@@ -2,6 +2,8 @@
  * One failed check as a card: where and what, expected beside seen, what the
  * decision said, whose side. Two values of one thing read character by
  * character; a statement the seen broke reads plain, with no empty said line.
+ * Where the host can show the message the check was made at, the anchor is a
+ * link to it.
  */
 import type { JSX, ReactNode } from "react"
 import type { CampaignCheck } from "../api.ts"
@@ -30,7 +32,7 @@ export const SideTag = (
 export const comparesCharacters = (check: CampaignCheck): boolean =>
   check.compare !== "statement" && check.expected !== null && check.seen !== null
 
-export const CheckCard = ({ check, sides, saidLabel, head, said }: {
+export const CheckCard = ({ check, sides, saidLabel, head, said, onAnchor }: {
   readonly check: CampaignCheck
   readonly sides: readonly string[]
   readonly saidLabel: string
@@ -38,6 +40,8 @@ export const CheckCard = ({ check, sides, saidLabel, head, said }: {
   readonly head?: ReactNode
   /** What follows the said line: the log link. */
   readonly said?: ReactNode
+  /** Shows the message the check was made at; absent where there is none to show. */
+  readonly onAnchor?: (() => void) | undefined
 }): JSX.Element => {
   const diff = charDiff(check.expected, check.seen)
   const byCharacter = comparesCharacters(check)
@@ -45,7 +49,17 @@ export const CheckCard = ({ check, sides, saidLabel, head, said }: {
   return (
     <div className="cp-card">
       <div className="cp-card-head">
-        {head ?? <span className="mono">✗ {check.anchor} · {check.field}</span>}
+        {head ?? (
+          <span className="mono">
+            ✗{" "}
+            {onAnchor === undefined ? check.anchor : (
+              <button type="button" className="cp-anchor" title="show the message in the ladder" onClick={onAnchor}>
+                {check.anchor} →
+              </button>
+            )}{" "}
+            · {check.field}
+          </span>
+        )}
         <SideTag side={check.side ?? "untyped"} sides={sides} />
       </div>
       <dl className="cp-kv">

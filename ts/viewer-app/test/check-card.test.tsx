@@ -48,4 +48,13 @@ describe("check card", () => {
   it("keeps the said line of a value check, empty or not", () => {
     expect(render(value)).toContain("decision said")
   })
+
+  it("links its anchor to the message it was made at, where the host shows one, and reads it plain otherwise", () => {
+    const linked = renderToStaticMarkup(
+      <CheckCard check={value} sides={["sut"]} saidLabel="said" onAnchor={() => undefined} />
+    )
+    expect(linked).toMatch(/<button type="button" class="cp-anchor"[^>]*>C1 INVITE →<\/button> · header\(Content-Type\)/)
+    expect(render(value)).not.toContain("cp-anchor")
+    expect(render(value)).toContain("✗ C1 INVITE · header(Content-Type)")
+  })
 })

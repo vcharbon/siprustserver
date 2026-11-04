@@ -5,9 +5,8 @@
  * The text is rendered on the click, never on every render: a study page holds
  * three ladders and a capture ladder is thousands of lines.
  */
-import { useState, type JSX } from "react"
-
-type State = "idle" | "copied" | "failed"
+import type { JSX } from "react"
+import { useCopy } from "../use-copy.ts"
 
 export const CopyText = (
   { text, label = "copy as text", title }: {
@@ -17,21 +16,15 @@ export const CopyText = (
     readonly title?: string | undefined
   }
 ): JSX.Element => {
-  const [state, setState] = useState<State>("idle")
+  const copy = useCopy()
   return (
     <button
       type="button"
       className="copy-ref"
       title={title ?? "ladder as text, one line per message"}
-      onClick={() => {
-        const flip = (next: State): void => {
-          setState(next)
-          window.setTimeout(() => setState("idle"), 1600)
-        }
-        void navigator.clipboard.writeText(text()).then(() => flip("copied"), () => flip("failed"))
-      }}
+      onClick={() => copy.copy(text())}
     >
-      {state === "copied" ? "copied" : state === "failed" ? "copy refused" : label}
+      {copy.label(label)}
     </button>
   )
 }

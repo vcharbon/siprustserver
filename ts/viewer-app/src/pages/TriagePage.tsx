@@ -33,6 +33,7 @@ import { RequestBuilder } from "../components/RequestBuilder.tsx"
 import { useHeld } from "../held.ts"
 import { laneOf, rememberLane } from "../lane-memory.ts"
 import { useCommands } from "../commands.ts"
+import { useCopy } from "../use-copy.ts"
 import { launchRef } from "../launch.ts"
 import { callStudyOf, captureStudyOf, deltasOf } from "../queue-links.ts"
 import {
@@ -84,7 +85,7 @@ const useSettled = <A,>(value: A, delay: number): readonly [A, () => void] => {
 
 /** The row's launch ref: a case row hands over its one call, a refused row the capture. */
 const CopyRef = ({ row, lane }: { row: TriageCallRow; lane?: string }): JSX.Element | null => {
-  const [copied, setCopied] = useState(false)
+  const copy = useCopy()
   const command = useCommands().triage
   if (command === undefined) return null
   const ref = launchRef(command, row.capture, lane, row.kind === "case" ? row.caseId : undefined)
@@ -93,14 +94,9 @@ const CopyRef = ({ row, lane }: { row: TriageCallRow; lane?: string }): JSX.Elem
       type="button"
       className="copy-ref"
       title={`copy "${ref}"`}
-      onClick={() => {
-        void navigator.clipboard.writeText(ref).then(() => {
-          setCopied(true)
-          window.setTimeout(() => setCopied(false), 1200)
-        })
-      }}
+      onClick={() => copy.copy(ref)}
     >
-      {copied ? "copied" : "copy ref"}
+      {copy.label("copy ref")}
     </button>
   )
 }

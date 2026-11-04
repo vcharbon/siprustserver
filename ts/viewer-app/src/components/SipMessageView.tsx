@@ -20,6 +20,7 @@
 import { ARM_KEYS, bodySegments, bodyText, carriesWire, parseSip, readBody, readPayload, type BodySegment } from "@sip/viewer-core"
 import type { JSX } from "react"
 import { useState } from "react"
+import { useCopy } from "../use-copy.ts"
 import { DetailChips } from "./DetailChips.tsx"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -63,7 +64,7 @@ export const SipMessageView = (
     body?: readonly BodySegment[] | undefined
   }
 ): JSX.Element => {
-  const [copied, setCopied] = useState(false)
+  const copy = useCopy()
   const source = isRecord(record) ? record : undefined
   const message = source ? rawMessage(source) : undefined
   const raw = message?.raw
@@ -96,13 +97,9 @@ export const SipMessageView = (
           )}
           <button
             type="button"
-            onClick={() => {
-              void navigator.clipboard?.writeText(copyText)
-              setCopied(true)
-              window.setTimeout(() => setCopied(false), 1200)
-            }}
+            onClick={() => copy.copy(copyText)}
           >
-            {copied ? "copied" : "copy"}
+            {copy.label("copy")}
           </button>
         </span>
       </div>

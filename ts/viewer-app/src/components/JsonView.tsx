@@ -7,10 +7,11 @@
 import type { JSX } from "react"
 import { useMemo, useState } from "react"
 import { choiceFor, describeJson, type FoldChoice, formatBytes, hasToggle, isOpen } from "../json-size.ts"
+import { useCopy } from "../use-copy.ts"
 
 export const JsonView = ({ value, label }: { value: unknown; label?: string }): JSX.Element => {
   const size = useMemo(() => describeJson(value), [value])
-  const [copied, setCopied] = useState(false)
+  const copy = useCopy()
   // The choice is remembered with the text it was made on: a hidden large
   // step must not leave the next, small step closed with no toggle.
   const [choice, setChoice] = useState<FoldChoice | undefined>(undefined)
@@ -30,13 +31,9 @@ export const JsonView = ({ value, label }: { value: unknown; label?: string }): 
           )}
           <button
             type="button"
-            onClick={() => {
-              void navigator.clipboard?.writeText(size.text)
-              setCopied(true)
-              window.setTimeout(() => setCopied(false), 1200)
-            }}
+            onClick={() => copy.copy(size.text)}
           >
-            {copied ? "copied" : "copy"}
+            {copy.label("copy")}
           </button>
         </span>
       </div>
