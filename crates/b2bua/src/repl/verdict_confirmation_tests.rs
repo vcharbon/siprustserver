@@ -449,6 +449,22 @@ async fn a_write_of_a_new_generation_refutes_the_verdict() {
     assert!(!confirmed.await.unwrap(), "the restarted process holds its calls: not confirmed");
 }
 
+/// A write of the generation before the one the flow hears now is no return:
+/// the restarted process wrote nothing, and may die without.
+#[tokio::test(start_paused = true)]
+async fn a_write_of_an_older_generation_is_no_write_of_a_later_one() {
+    let (sup, script) = backing_up(fast_config()).await;
+    script.writes.store(true, Ordering::SeqCst);
+    tick(1_000).await;
+    script.writes.store(false, Ordering::SeqCst);
+    into_a_long_backoff(&script).await;
+    script.gen.store(2, Ordering::SeqCst);
+    tick(5_000).await;
+    assert_eq!(sup.heard_generation(PEER), Some(2), "the verdict would name the restart");
+    assert!(!sup.writes_a_later_generation(PEER, 2), "generation 2 wrote nothing, 1 is older");
+    assert!(sup.writes_a_later_generation(PEER, 0), "generation 1 is later than 0");
+}
+
 /// The peer's kernel takes the connect, its process sends nothing: the
 /// stream opened is left at the idle bound with no frame, which confirms.
 #[tokio::test(start_paused = true)]

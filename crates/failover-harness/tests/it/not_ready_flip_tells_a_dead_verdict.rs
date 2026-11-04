@@ -116,7 +116,7 @@ async fn dies_on_a_live_node(p: &mut Placed, flip: Flip) {
 
 /// The established call ends with the caller's BYE, which reaches the backup;
 /// the endpoint then leaves the slice and every call settles to one CDR.
-async fn hang_up_and_depart(mut p: Placed) {
+pub(crate) async fn hang_up_and_depart(mut p: Placed) {
     let mut bye = p.quiet.bye().await;
     p.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
@@ -129,7 +129,7 @@ async fn hang_up_and_depart(mut p: Placed) {
 }
 
 /// The ringing call runs to the deadline on the copy, the worker staying away.
-async fn ends_at_the_deadline_on_the_copy(p: &mut Placed, deadline: i64) {
+pub(crate) async fn ends_at_the_deadline_on_the_copy(p: &mut Placed, deadline: i64) {
     ring_until(p, deadline).await;
     p.fh.advance(Duration::from_millis(600)).await;
     p.bob.receive("CANCEL").await.respond(200, "OK").await;
