@@ -135,6 +135,10 @@ spec:
             - { name: PROXY_VIP, value: {{ $vip | quote }} }
             - { name: EXTERNAL_VIP, value: {{ $extVip | quote }} }
             - { name: UNRES_QLEN_BYTES, value: {{ int $p.unresQlenBytes | toString | quote }} }
+            - { name: NEIGH_BASE_REACHABLE_TIME_MS, value: {{ int $p.neighbour.baseReachableTimeMs | toString | quote }} }
+            - { name: NEIGH_DELAY_FIRST_PROBE_S, value: {{ int $p.neighbour.delayFirstProbeSeconds | toString | quote }} }
+            - { name: NEIGH_UCAST_SOLICIT, value: {{ int $p.neighbour.ucastSolicit | toString | quote }} }
+            - { name: NEIGH_RETRANS_TIME_MS, value: {{ int $p.neighbour.retransTimeMs | toString | quote }} }
             - { name: ROUTE_GUARD, value: {{ ternary "on" "off" $p.routeGuard.enabled | quote }} }
           securityContext:
             privileged: true

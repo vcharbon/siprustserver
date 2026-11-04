@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Let the next hop's frames through again on each node inject silenced.
+# Idempotent: a node whose table is gone is left alone. Nothing is sent toward
+# the node. Facts: the instant.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+for node in $(hk_state silenced); do
+  if docker exec "$node" nft list table netdev hakit_next_hop_dead >/dev/null 2>&1; then
+    docker exec "$node" nft delete table netdev hakit_next_hop_dead >&2
+  fi
+done
+jq -cn --argjson at "$(hk_now_ms)" '{healed_at_ms: $at}'

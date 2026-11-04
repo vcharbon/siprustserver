@@ -301,6 +301,55 @@ def test_cut_probe_waits_for_the_reconnected_node_in_the_routes(tmp_path: Path) 
     assert as_obj(facts(sb.run("probe"))["next_hops"])[IVIP] == ["172.20.0.3", "172.20.0.4"]
 
 
+NEIGHBOUR = Rule(r"docker exec e2 ip -j neigh show to 192\.168\.60\.1 dev eth1$", '[{"dst":"192.168.60.1","lladdr":"02:00:00:00:00:01","state":["REACHABLE"]}]')
+SILENCE = Rule(r"docker exec -i e2 nft -f -$")
+
+
+def test_next_hop_dead_silences_the_hop_below_ip_and_arp_and_waits_for_the_proxy_unfit(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "next_hop_dead")
+    fitz = r"docker exec e2 curl -s -m 1 127\.0\.0\.1:9090/fitz$"
+    sb.rules(ONE_PROXY, *PLANES, NEIGHBOUR, SILENCE, *E1_ONLY,
+             Rule(fitz, "fit", once=True), Rule(fitz, "unfit external-face"))
+    f = facts(sb.run("inject"))
+    assert sb.index("neigh show") < sb.index("nft -f -") < sb.index("ip -j route show")
+    assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
+    assert set(as_obj(f["unfit_ms"])) == {"e2"}
+    assert (sb.event_dir / "silenced").read_text().split() == ["e2"]
+    assert len(sb.lines("/fitz")) == 2, "the wait reads on until the proxy turns unfit"
+
+
+def test_next_hop_dead_refuses_a_node_that_holds_no_address_for_the_hop(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "next_hop_dead")
+    sb.rules(ONE_PROXY, *PLANES, Rule(r"ip -j neigh show", "[]"), SILENCE, *E1_ONLY)
+    failed(sb.run("inject"), "holds no address for 192.168.60.1")
+    assert sb.index("nft -f -") == -1
+
+
+def test_next_hop_dead_fails_while_the_proxy_stays_fit(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "next_hop_dead", withdraw_timeout_s="1")
+    sb.rules(ONE_PROXY, *PLANES, NEIGHBOUR, SILENCE, *E1_ONLY, Rule(r"/fitz$", "fit"))
+    failed(sb.run("inject"), "still reads fit")
+
+
+def test_next_hop_dead_heal_lets_the_frames_through_and_is_idempotent(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "next_hop_dead")
+    sb.state("silenced", "e2\n")
+    sb.rules(Rule(r"nft list table netdev hakit_next_hop_dead$"), Rule(r"nft delete table netdev hakit_next_hop_dead$"))
+    facts(sb.run("heal"))
+    assert sb.index("nft delete table") >= 0
+    sb.rules(Rule(r"nft list table netdev hakit_next_hop_dead$", rc=1))
+    facts(sb.run("heal"))
+    assert sb.index("nft delete table") == -1
+
+
+def test_next_hop_dead_probe_waits_for_every_live_node_in_the_routes(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "next_hop_dead")
+    sb.rules(PROXIES, *PLANES, *E1_ONLY)
+    assert sb.run("probe").returncode == 75
+    sb.rules(PROXIES, *PLANES, *BOTH)
+    assert as_obj(facts(sb.run("probe"))["next_hops"])[EVIP] == ["192.168.60.11", "192.168.60.12"]
+
+
 def successor(node: str, name: str) -> Rule:
     """The pods of the proxy selector on `node`: the old one gone, its Ready successor."""
     pods = {"items": [{"metadata": {"name": name}, "status": {"conditions": [

@@ -401,6 +401,16 @@
           "type": "integer",
           "minimum": 1
         },
+        "neighbour": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "baseReachableTimeMs": { "type": "integer", "minimum": 1 },
+            "delayFirstProbeSeconds": { "type": "integer", "minimum": 1 },
+            "ucastSolicit": { "type": "integer", "minimum": 1 },
+            "retransTimeMs": { "type": "integer", "minimum": 1 }
+          }
+        },
         "readinessProbe": {
           "type": "object",
           "additionalProperties": false,

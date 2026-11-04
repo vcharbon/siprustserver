@@ -1,19 +1,23 @@
-//! Whether the external face can carry traffic, read from local kernel state
-//! only: the external interface is present and up, and at least one of its
-//! configured next hops resolved in the neighbour table. Nothing is probed on
-//! the wire: the next hops are the external plane's BGP peers, whose BFD and
-//! keepalive traffic keeps their entries resolved. `/readyz` requires the face
-//! usable, so a node whose caller-facing uplink is gone stops announcing both
-//! faces' addresses together (ADR-0056).
+//! Whether the external face can carry traffic, read from local kernel state:
+//! the external interface is present and up, and at least one of its
+//! configured next hops resolved in the neighbour table. The next hops are the
+//! external plane's BGP peers, whose BFD and keepalive traffic keeps their
+//! entries resolved while the node is let out; while the face is latched
+//! unusable the route guard drops that traffic, so each reading solicits the
+//! next hops itself. `/readyz` requires the face usable, so a node whose
+//! caller-facing uplink is gone stops announcing both faces' addresses
+//! together (ADR-0056).
 
 mod monitor;
 mod neighbours;
+mod solicit;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 pub use monitor::FaceMonitor;
 pub use neighbours::{dump_ipv4, Neighbour, NUD_FAILED, NUD_INCOMPLETE, NUD_RESOLVED};
+pub use solicit::solicit;
 
 /// The external interface and the next hops the face is reached through
 /// (`PROXY_EXT_INTERFACE`, `PROXY_EXT_NEXT_HOPS`).
@@ -27,6 +31,10 @@ pub struct FaceCheck {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaceState {
     Usable,
+    /// The interface exists and is not up, at the first reading since it read
+    /// usable: a carrier flap unless the next reading finds it down too.
+    /// Usable, so a flap shorter than the reading period withdraws nothing.
+    DownOnce(String),
     /// The interface does not exist, or its state cannot be read.
     Missing,
     /// The interface exists and is not up.
@@ -40,18 +48,25 @@ pub enum FaceState {
 
 impl FaceState {
     pub fn is_usable(&self) -> bool {
-        matches!(self, FaceState::Usable)
+        matches!(self, FaceState::Usable | FaceState::DownOnce(_))
     }
 }
 
-/// What the readings before this one saw of the next hops: set by a reading
-/// that finds no next hop resolved and one `FAILED` or `INCOMPLETE`, cleared
-/// only by a reading that finds one resolved. While set, a reading that finds
-/// every next hop absent from the table stays unusable, so an entry that
-/// flaps between `INCOMPLETE` and gone never reads usable.
+/// What the readings before this one saw.
+///
+/// `unresolved`: set by a reading that finds no next hop resolved and one
+/// `FAILED` or `INCOMPLETE`, cleared only by a reading that finds one
+/// resolved. While set, a reading that finds every next hop absent from the
+/// table stays unusable, so an entry that flaps between `INCOMPLETE` and gone
+/// never reads usable.
+///
+/// `usable` and `down_once`: whether the latest reading was usable, and
+/// whether it was [`FaceState::DownOnce`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FaceLatch {
     unresolved: bool,
+    usable: bool,
+    down_once: bool,
 }
 
 /// One next hop in the neighbour table.
@@ -70,20 +85,33 @@ pub const SYS_CLASS_NET: &str = "/sys/class/net";
 
 impl FaceCheck {
     /// The face as the running kernel reports it, `latch` carried from the
-    /// previous reading.
+    /// previous reading; a latched next hop solicited on the wire.
     pub fn read(&self, latch: &mut FaceLatch) -> FaceState {
-        self.read_at(Path::new(SYS_CLASS_NET), dump_ipv4, |_| {}, latch)
+        self.read_at(Path::new(SYS_CLASS_NET), dump_ipv4, solicit, latch)
     }
 
     /// The face read from the interface directory under `class_net` and the
-    /// IPv4 neighbour table `neighbours` returns. Operstate `up` is up; an
-    /// interface that reports `unknown` (one that tracks no carrier state) is
-    /// up while its carrier reads 1.
+    /// IPv4 neighbour table `neighbours` returns, `solicit` called for each
+    /// next hop while the reading leaves the latch set. Operstate `up` is up;
+    /// an interface that reports `unknown` (one that tracks no carrier state)
+    /// is up while its carrier reads 1.
     pub fn read_at(
         &self,
         class_net: &Path,
         neighbours: impl FnOnce() -> std::io::Result<Vec<Neighbour>>,
-        _solicit: impl FnMut(Ipv4Addr),
+        solicit: impl FnMut(Ipv4Addr),
+        latch: &mut FaceLatch,
+    ) -> FaceState {
+        let state = self.reading(class_net, neighbours, solicit, latch);
+        latch.usable = state.is_usable();
+        state
+    }
+
+    fn reading(
+        &self,
+        class_net: &Path,
+        neighbours: impl FnOnce() -> std::io::Result<Vec<Neighbour>>,
+        mut solicit: impl FnMut(Ipv4Addr),
         latch: &mut FaceLatch,
     ) -> FaceState {
         let dir: PathBuf = class_net.join(&self.interface);
@@ -96,8 +124,14 @@ impl FaceCheck {
             _ => false,
         };
         if !up {
-            return FaceState::Down(operstate);
+            latch.down_once = latch.usable && !latch.down_once;
+            return if latch.down_once {
+                FaceState::DownOnce(operstate)
+            } else {
+                FaceState::Down(operstate)
+            };
         }
+        latch.down_once = false;
         if self.next_hops.is_empty() {
             return FaceState::Usable;
         }
@@ -116,6 +150,7 @@ impl FaceCheck {
             latch.unresolved = true;
         }
         if latch.unresolved {
+            self.next_hops.iter().for_each(|hop| solicit(*hop));
             FaceState::NextHopsUnresolved
         } else {
             FaceState::Usable

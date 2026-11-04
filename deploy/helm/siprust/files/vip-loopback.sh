@@ -1,7 +1,8 @@
 #!/bin/sh
 # The proxy pod's init container, on the node's network namespace
-# (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, UNRES_QLEN_BYTES and
-# ROUTE_GUARD from its env; the chart never rewrites this text.
+# (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, UNRES_QLEN_BYTES, the
+# NEIGH_* timers and ROUTE_GUARD from its env; the chart never rewrites this
+# text.
 #
 # Both VIPs go on lo before the proxy starts: the node owns them for good and
 # the routers reach them through the node's announcement (ADR-0056). Strict
@@ -18,6 +19,11 @@
 # ARP cycle (ADR-0033). The default bound equals a default socket send buffer;
 # UNRES_QLEN_BYTES bounds it per neighbour on every interface. net.core.wmem_max
 # is the host's and read-only here (the host preflight raises it).
+#
+# A next hop that dies with its carrier up reads FAILED only at the end of the
+# neighbour cycle: the NEIGH_* timers bound that cycle on every interface, and
+# fib_multipath_use_neigh makes multipath egress leave a next hop not resolved
+# (ADR-0056 §10). The default entry reaches an interface created later.
 #
 # With ROUTE_GUARD=off, a table an earlier route guard left on the node is
 # removed, so the node's BFD and BGP pass; with it on, the pod's own guard
@@ -38,4 +44,14 @@ echo 2 > /proc/sys/net/ipv4/conf/lo/arp_announce
 for f in /proc/sys/net/ipv4/neigh/*/unres_qlen_bytes; do
   echo "$UNRES_QLEN_BYTES" > "$f" || echo "vip-loopback: WARN could not set $f"
 done
-echo "vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES + route guard $ROUTE_GUARD ready"
+neigh_set() {
+  for f in /proc/sys/net/ipv4/neigh/*/"$1"; do
+    echo "$2" > "$f" || echo "vip-loopback: WARN could not set $f"
+  done
+}
+neigh_set base_reachable_time_ms "$NEIGH_BASE_REACHABLE_TIME_MS"
+neigh_set delay_first_probe_time "$NEIGH_DELAY_FIRST_PROBE_S"
+neigh_set ucast_solicit "$NEIGH_UCAST_SOLICIT"
+neigh_set retrans_time_ms "$NEIGH_RETRANS_TIME_MS"
+echo 1 > /proc/sys/net/ipv4/fib_multipath_use_neigh
+echo "vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S ucast_solicit=$NEIGH_UCAST_SOLICIT retrans_time_ms=$NEIGH_RETRANS_TIME_MS + multipath off unresolved next hops + route guard $ROUTE_GUARD ready"

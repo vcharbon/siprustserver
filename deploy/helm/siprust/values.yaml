@@ -240,6 +240,20 @@ proxy:
   # Per-neighbour bound of the unresolved ARP queue in the proxy node's
   # network namespace (ADR-0033), set by the vip-loopback init container.
   unresQlenBytes: 16384
+  # The neighbour timers of every interface of the proxy node, set by the
+  # vip-loopback init container, with net.ipv4.fib_multipath_use_neigh on. A next
+  # hop that dies with its carrier up reads FAILED within 1.5 ×
+  # baseReachableTimeMs + delayFirstProbeSeconds + ucastSolicit × retransTimeMs
+  # (10 s here, about 50 s at the kernel's defaults), when multipath egress
+  # leaves it and, if no next hop is left, the face reads unusable (ADR-0056 §10).
+  # A worker's retransmitted final then still reaches its caller inside Timer H
+  # (32 s). An ARP probe every few seconds per next hop is the cost; a router
+  # silent for ucastSolicit × retransTimeMs reads dead, so 3 s stays tolerated.
+  neighbour:
+    baseReachableTimeMs: 4000
+    delayFirstProbeSeconds: 1
+    ucastSolicit: 3
+    retransTimeMs: 1000
   # The readiness probe the node's announcement follows (ADR-0056):
   # periodSeconds × failureThreshold bounds how long a failing proxy stays
   # announced before the withdrawal starts.
@@ -321,9 +335,9 @@ proxy:
     metricsPort: 9095
     # The bound, ms, from a fault to the routers' withdrawal that the render
     # checks every detection path against: its detection (HEALTH_ISOLATION_MS,
-    # PROXY_EXT_FACE_CHECK_MS for a lost interface or link, or deadMs for a
-    # hung or dead proxy), two unfit readings (2 × pollMs, none for deadMs),
-    # and detectMultiplier × the BFD interval.
+    # 2 × PROXY_EXT_FACE_CHECK_MS for a lost link, or deadMs for a hung or dead
+    # proxy), two unfit readings (2 × pollMs, none for deadMs), and
+    # detectMultiplier × the BFD interval.
     withdrawWithinMs: 3400
     resources:
       requests: { cpu: "20m", memory: "16Mi" }

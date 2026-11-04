@@ -168,7 +168,8 @@ fn one_down_reading_withdraws_nothing_and_two_do() {
     assert_eq!(step("up"), FaceState::Usable);
     assert!(step("down").is_usable(), "one down reading");
     assert_eq!(step("up"), FaceState::Usable);
-    assert!(step("lowerlayerdown").is_usable(), "the count started again");
+    let again = step("lowerlayerdown");
+    assert_eq!(again, FaceState::DownOnce("lowerlayerdown".into()), "the count started again");
     assert_eq!(step("lowerlayerdown"), FaceState::Down("lowerlayerdown".into()));
     assert_eq!(step("down"), FaceState::Down("down".into()), "stays down");
     assert_eq!(step("up"), FaceState::Usable);
