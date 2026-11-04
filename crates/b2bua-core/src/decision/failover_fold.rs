@@ -24,11 +24,11 @@ pub enum Consult {
 }
 
 /// The limiter refused this route: consult `/call/failure` for a failover
-/// treatment, or answer `486 Busy Here` when the call has no callback context
-/// to fail over with — or has already burned [`MAX_LIMITER_FAILOVER`] hops,
-/// so a plan that keeps returning limited destinations terminates instead of
-/// looping.
-pub fn consult_or_busy(
+/// treatment, or answer the bare 503 of an unavailable decision
+/// ([`unavailable`]) when the call has no callback context to fail over with,
+/// or has already burned [`MAX_LIMITER_FAILOVER`] hops, so a plan that keeps
+/// returning limited destinations terminates instead of looping.
+pub fn consult_or_unavailable(
     call: Call,
     limiter_id: &str,
     a_invite: &SipRequest,
@@ -38,18 +38,7 @@ pub fn consult_or_busy(
     depth: u32,
 ) -> Consult {
     if call.callback_context.is_none() || depth >= MAX_LIMITER_FAILOVER {
-        return Consult::Final(Box::new(crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            486,
-            Some("Busy Here".into()),
-            None,
-            &[],
-            &config.minted_final_advertisement,
-            ids,
-            now_ms,
-            TerminationCause::Admission,
-        )));
+        return Consult::Final(Box::new(unavailable(call, a_invite, config, ids, now_ms)));
     }
     let request = Box::new(limiter_failure_request(&call, limiter_id));
     Consult::Raise { call: Box::new(call), request }

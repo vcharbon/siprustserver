@@ -238,7 +238,7 @@ pub(super) fn spawn_failure_callout(
 /// chain (`MAX_LIMITER_FAILOVER`) `apply_route` runs for the initial route.
 /// `failed_leg_id` is echoed on every fold so the resolution rule can cancel
 /// the right no-answer timer / relay the failure. A reject/redirect resolved
-/// AFTER a `call_limiter` re-consult (and the terminal 486) answers the
+/// AFTER a `call_limiter` re-consult (and the terminal 503) answers the
 /// limiter refusal, not the failed peer's final — the fold says so via
 /// `origin`, so the a-facing mint carries none of the peer's relayed headers
 /// (ADR-0017 X2). A resolution other than a route after a refusal carries the
@@ -303,13 +303,12 @@ async fn failure_outcome(
                                 continue;
                             }
                             // Chain exhausted / no context → the initial path's
-                            // terminal limiter treatment (486 Busy Here) — the
-                            // stack's own capacity statement.
+                            // terminal limiter treatment: the bare 503 of an
+                            // unavailable decision.
                             break (
-                                "reject",
+                                failure_unavailable::OUTCOME,
                                 json!({
-                                    "code": 486,
-                                    "reason": "Busy Here",
+                                    "code": failure_unavailable::STATUS,
                                     "failed_leg_id": failed_leg_id,
                                     "origin": "call_limiter",
                                     STACK_AUTHORED: true,

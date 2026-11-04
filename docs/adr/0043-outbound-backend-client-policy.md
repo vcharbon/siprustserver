@@ -107,7 +107,8 @@ worker reporting itself healthy.
     error or the answer's deadline, after a b-leg final or after a limiter
     refusal alike; none of the failed peer's relayed headers), a setup whose
     budget ran out, before its turn ran or anywhere in its failover chain
-    (ADR-0022 X1), and the REFER NOTIFY sipfrag (`SIP/2.0 503`, as if the
+    (ADR-0022 X1), a limiter refusal with no way to fail over (ADR-0022 X3),
+    and the REFER NOTIFY sipfrag (`SIP/2.0 503`, as if the
     transfer target had answered 503). It is no decision: it marks nothing in
     the decision log.
 11. **Backend gate on the OPTIONS self-health only**

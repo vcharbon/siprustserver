@@ -16,7 +16,7 @@ pub const OUTCOME: &str = "reject";
 pub const ORIGIN: &str = "decision_unavailable";
 
 /// The status the caller gets.
-const STATUS: u16 = 503;
+pub const STATUS: u16 = 503;
 
 /// The fold's payload for the consult `request` left unanswered.
 pub fn payload(request: &serde_json::Value) -> serde_json::Value {
@@ -30,7 +30,7 @@ pub fn payload(request: &serde_json::Value) -> serde_json::Value {
 
 /// Whether a `/call/failure` fold's final answers the failed peer's own:
 /// not one resolving a limiter refusal (`origin` `call_limiter`: the
-/// router's re-consult or terminal 486), nor one answering a consult left
+/// router's re-consult or terminal 503), nor one answering a consult left
 /// unanswered ([`ORIGIN`]).
 pub fn answers_the_peer(payload: &serde_json::Value) -> bool {
     !matches!(payload.get("origin").and_then(|v| v.as_str()), Some("call_limiter" | ORIGIN))

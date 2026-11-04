@@ -18,7 +18,7 @@ use crate::setup_budget::SetupBudget;
 
 /// The limiter refused this route: consult `/call/failure` for a failover
 /// treatment and apply it, or answer the call's final
-/// ([`failover_fold::consult_or_busy`]). The consult runs under `budget`: with
+/// ([`failover_fold::consult_or_unavailable`]). The consult runs under `budget`: with
 /// none left it asks nothing and the call ends as an unanswered consult does.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn limiter_reject_failover(
@@ -36,8 +36,15 @@ pub(super) async fn limiter_reject_failover(
     depth: u32,
     budget: SetupBudget,
 ) -> HandlerResult {
-    let consult =
-        failover_fold::consult_or_busy(call, &limiter_id, a_invite, config, ids, now_ms, depth);
+    let consult = failover_fold::consult_or_unavailable(
+        call,
+        &limiter_id,
+        a_invite,
+        config,
+        ids,
+        now_ms,
+        depth,
+    );
     let (mut call, req) = match consult {
         Consult::Final(result) => return *result,
         Consult::Raise { call, request } => (*call, *request),

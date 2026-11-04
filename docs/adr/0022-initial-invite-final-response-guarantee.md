@@ -5,7 +5,9 @@ INVITE response bound for a dead worker fails over on the cookie of its Record-R
 Amended (2026-10-12): X4 and X5, a caller that heard the 100 is answered when its worker departs (ADR-0047).
 Amended (2026-10-23): the first provisional of an INVITE leaves after the call's write,
 up to a cap (ADR-0055 §3).
-Amended (2026-11-04): X1, one setup budget from the INVITE's receipt to its final.
+Amended (2026-11-04): X1, one setup budget from the INVITE's receipt to its final; X3, a limiter
+chain that ends with no route is an internal error, and every final the stack mints for an initial
+INVITE has a class.
 
 ## Context
 
@@ -157,7 +159,20 @@ paths, and it lets an upstream proxy or caller fail over. The X2 synthesis and
 the decision-error reject carry **no Reason header** (the bare canonical reject).
 A new INVITE refused at admission — the overload and capacity gates, the
 ingress brake, the deferred backlog — gets the 503 with a jittered
-`Retry-After` and no `Reason` either (ADR-0037 item 3).
+`Retry-After` and no `Reason` either (ADR-0037 item 3). A route the limiter refused with
+no way to fail over, past `MAX_LIMITER_FAILOVER` or with no callback context, on the
+initial INVITE's turn or off it (ADR-0039), is no capacity statement to its caller: it
+gets the same bare 503, and its record still owes the release of the admits that left.
+
+This rule is the initial INVITE's alone: a re-INVITE or another request in a dialog is
+answered by its own rules. Every final the stack mints for an initial INVITE is one of:
+an internal error (this 5xx, no `Reason`); a status a decision engine or a peer stated;
+the plain 500 refusing an engine's answer whose status is no final it may state; RFC
+3261's own (400 §8.1.1.3, 482 §8.2.2.2, 483 §16.3, 487 §9.2); or the generic default
+of a callee's silence (480 or 408: a no-answer deadline with no consult, a timeout let
+stand, a relay treatment with no failure captured, the setup deadline). A deployment's
+service may state otherwise. `b2bua-harness/tests/it/initial_invite_finals.rs` reads
+them off the sources and pins each to its class, so a new one needs a row and a class.
 
 ## Decision X4 — the LB proxy stays transaction-less; the caller's timer owns downstream silence
 
