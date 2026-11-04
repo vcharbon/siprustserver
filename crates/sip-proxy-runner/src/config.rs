@@ -2,6 +2,7 @@
 //! through a lookup ([`ProxyConfig::from_lookup`]). The keys, their defaults
 //! and their ranges are listed in the `sip-proxy-runner` binary's module doc.
 
+mod branch_memo;
 mod external_face;
 mod preflight;
 mod process_env;
@@ -10,7 +11,7 @@ mod reader;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use sip_proxy::cancel_lru::{calls_per_second, invite_entry_ttl_ms, MemoBounds};
+use sip_proxy::cancel_lru::{calls_per_second, MemoBounds};
 use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
 use sip_proxy::resolver::ResolverConfig;
@@ -21,6 +22,7 @@ pub use preflight::{refusal, validate_config, ProbeTimingConfig};
 use reader::{EnvReader, Span};
 
 use crate::external_face::FaceCheck;
+use branch_memo::branch_memo;
 use external_face::external_face_check;
 
 /// Where the worker pool comes from.
@@ -422,44 +424,6 @@ fn self_gate(env: &mut EnvReader) -> Option<ProxySelfGateConfig> {
         ..d
     };
     on.then_some(cfg)
-}
-
-/// `PROXY_BRANCH_MEMO_INVITES_PER_CALL`, thousandths: the INVITEs a call
-/// sends across the pair on average, from 2 (a basic call's) to 100.
-fn invites_per_call_milli(env: &mut EnvReader) -> u64 {
-    let key = "PROXY_BRANCH_MEMO_INVITES_PER_CALL";
-    let invites = env.real(key, 2.0, Span::Positive);
-    if !(2.0..=100.0).contains(&invites) {
-        env.refuse(format!("{key} must be from 2 to 100, got {invites}"));
-        return 2_000;
-    }
-    // In 2..=100, so the thousandths fit a u64.
-    (invites * 1_000.0).round() as u64
-}
-
-/// The branch memo's entry cap and byte budget, the mean ring they are
-/// split on, and the INVITE entry's cap, derived from the downstream INVITE
-/// transaction bound `PROXY_INVITE_TXN_TIMEOUT_SEC` (the workers' bound).
-fn branch_memo(env: &mut EnvReader) -> MemoBounds {
-    let d = MemoBounds::default();
-    let size = |env: &mut EnvReader, key: &str, default: usize| {
-        let default = u64::try_from(default).unwrap_or(u64::MAX);
-        usize::try_from(env.int(key, default, 1, u64::MAX)).unwrap_or(usize::MAX)
-    };
-    let bound_sec = env.int(
-        "PROXY_INVITE_TXN_TIMEOUT_SEC",
-        sip_txn::timers::INVITE_INITIAL_TIMEOUT / 1000,
-        33,
-        600,
-    );
-    MemoBounds {
-        max_entries: size(env, "PROXY_BRANCH_MEMO_MAX_ENTRIES", d.max_entries),
-        max_bytes: size(env, "PROXY_BRANCH_MEMO_MAX_BYTES", d.max_bytes),
-        mean_ring_ms: env.int("PROXY_BRANCH_MEMO_MEAN_RING_MS", d.mean_ring_ms, 1, MAX_MS),
-        invite_ttl_ms: invite_entry_ttl_ms(bound_sec),
-        invites_per_call_milli: invites_per_call_milli(env),
-        ..d
-    }
 }
 
 /// The named-target resolver's cache and lookup bounds.
