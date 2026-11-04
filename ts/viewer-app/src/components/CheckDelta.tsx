@@ -16,12 +16,14 @@ import { declaredOf } from "../campaign-cdr.ts"
 import { checkMessages } from "../campaign-check-message.ts"
 import { exchangesAfter } from "../exchange-after.ts"
 import { cellDocument } from "../opening.ts"
+import { useLinkOrigin } from "../server-config.ts"
 import { useCopy } from "../use-copy.ts"
 import { CdrDeltaTable } from "./CdrDeltaTable.tsx"
 import { CellCdrs } from "./CellCdrs.tsx"
 import { CheckCard } from "./CheckCard.tsx"
 import { Exchange } from "./Exchange.tsx"
 import { LadderPane } from "./LadderPane.tsx"
+import { scrollTopFor } from "./scroll.ts"
 import { SipMessageView } from "./SipMessageView.tsx"
 
 const logPath = (capture: string, session: string, cell: string) =>
@@ -76,6 +78,12 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
   const show = (id: string): void => {
     setSelected(id)
     ladderRef.current?.scrollIntoView({ block: "start" })
+    // The pane scrolls its box on a change of selection; the same one again is brought back here.
+    const box = ladderRef.current?.querySelector<HTMLElement>(".ladder-scroll") ?? undefined
+    const y = layout?.events.find((event) => event.id === id)?.y
+    if (id !== selected || box === undefined || y === undefined) return
+    const top = scrollTopFor(box, y, undefined)
+    if (top !== undefined) box.scrollTo({ top })
   }
   const picked = layout?.events.find((event: LadderEvent) => event.id === selected)
   return (
@@ -150,7 +158,8 @@ export const CheckDelta = ({ view, caseId, run, lane, onClose }: {
 }): JSX.Element => {
   const laneRun = view.runs.find((r) => r.id === run)?.lanes.find((l) => l.lane === lane)
   const result = laneRun?.results.find((r) => r.caseId === caseId)
-  const link = caseLink(window.location.origin, view.capture, { env: view.env ?? undefined, caseId, run, lane })
+  const origin = useLinkOrigin(window.location.origin)
+  const link = caseLink(origin, view.capture, { env: view.env ?? undefined, caseId, run, lane })
   return (
     <div className="cp-modal" onClick={(event) => event.target === event.currentTarget && onClose()}>
       <div className="cp-modal-body">

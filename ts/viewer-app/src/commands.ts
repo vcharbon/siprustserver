@@ -6,7 +6,7 @@
  * its own.
  */
 import { useEffect, useState } from "react"
-import { api } from "./api.ts"
+import { loadServerConfig } from "./server-config.ts"
 
 export interface Commands {
   readonly triage?: string | undefined
@@ -18,7 +18,7 @@ let loaded: Promise<Commands> | undefined
 
 /** The commands, read once per page load; none where the server states none or does not answer. */
 export const loadCommands = (): Promise<Commands> =>
-  loaded ??= api.config().then((config) => config.commands ?? {}).catch(() => ({}))
+  loaded ??= loadServerConfig().then((config) => config?.commands ?? {})
 
 export const useCommands = (): Commands => {
   const [commands, setCommands] = useState<Commands>({})

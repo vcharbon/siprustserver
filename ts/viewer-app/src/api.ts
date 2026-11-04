@@ -1008,6 +1008,8 @@ export interface ServerConfig {
   /** The triage deployment, where one is configured: the drop zone reads its lane. */
   readonly triage?: { readonly lane: string; readonly repoRoot: string; readonly corpus: string }
   readonly port: number
+  /** The site's public URL: the origin the links a view copies are built under; absent where the server states none. */
+  readonly publicUrl?: string
   readonly staticDir?: string
   /** The deployment's command lines a view offers for copying (`commands.ts`). */
   readonly commands?: { readonly triage?: string; readonly request?: string; readonly job?: string }

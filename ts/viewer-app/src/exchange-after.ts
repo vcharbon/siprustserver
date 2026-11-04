@@ -1,8 +1,8 @@
 /**
  * The recorded message each HTTP exchange follows: the last ladder message
- * observed at or before the exchange went out, on the recording's own clock
- * (`observed.atUs` beside `atMs`). An exchange before the first message
- * follows none.
+ * observed in or before the whole ms the exchange went out at, on the
+ * recording's own clock (`observed.atUs` beside `atMs`, which is whole ms
+ * rounded down). An exchange before the first message follows none.
  */
 import type { HttpExchange } from "@sip/viewer-core/http"
 import type { LadderEvent } from "@sip/viewer-core"
@@ -30,7 +30,7 @@ export const exchangesAfter = (
   })
   return exchanges.map((exchange) => {
     let after: MessageRef | undefined
-    for (const message of timed) if (message.atUs / 1000 <= exchange.atMs) after = message.ref
+    for (const message of timed) if (Math.floor(message.atUs / 1000) <= exchange.atMs) after = message.ref
     return after
   })
 }
