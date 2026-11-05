@@ -2,8 +2,7 @@
 //! thread, whether it is usable published for `/readyz` and the health
 //! sampler: no reader waits on the kernel on the async runtime. Before the
 //! first reading completes the face reads unusable. Each change is logged
-//! once, with the reading that made it, and so is each carrier flap one
-//! reading saw.
+//! once, with the reading that made it, and so is each reading held once.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -87,11 +86,11 @@ impl FaceMonitor {
             }
         };
         drop(carried);
-        if let FaceState::DownOnce(operstate) = &state {
+        if matches!(state, FaceState::DownOnce(_) | FaceState::UnresolvedOnce) {
             tracing::warn!(
                 interface = %self.check.interface,
-                operstate = %operstate,
-                "external face read down once: a second reading withdraws it"
+                state = ?state,
+                "external face read unusable once: a second reading withdraws it"
             );
         }
         let usable = state.is_usable();

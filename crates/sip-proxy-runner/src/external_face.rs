@@ -4,9 +4,10 @@
 //! external plane's BGP peers, whose BFD and keepalive traffic keeps their
 //! entries resolved while the node is let out; while the face is latched
 //! unusable the route guard drops that traffic, so each reading solicits the
-//! next hops itself. `/readyz` requires the face usable, so a node whose
-//! caller-facing uplink is gone stops announcing both faces' addresses
-//! together (ADR-0056).
+//! next hops itself. One reading of the interface down or of the next hops
+//! unresolved holds a usable face, so a carrier flap and its aftermath withdraw
+//! nothing. `/readyz` requires the face usable, so a node whose caller-facing
+//! uplink is gone stops announcing both faces' addresses together (ADR-0056).
 
 mod monitor;
 mod neighbours;
@@ -35,12 +36,16 @@ pub enum FaceState {
     /// usable: a carrier flap unless the next reading finds it down too.
     /// Usable, so a flap shorter than the reading period withdraws nothing.
     DownOnce(String),
+    /// No next hop resolved and one `FAILED` or `INCOMPLETE`, at the first
+    /// such reading since one resolved on a usable face: a carrier flap leaves
+    /// the entry unresolved until its ARP retry, past the flap. Usable.
+    UnresolvedOnce,
     /// The interface does not exist, or its state cannot be read.
     Missing,
     /// The interface exists and is not up.
     Down(String),
-    /// No next hop resolved, and one read `FAILED` or `INCOMPLETE` since the
-    /// last that did.
+    /// No next hop resolved, and one read `FAILED` or `INCOMPLETE` twice since
+    /// the last that did, or once on a face that was not usable.
     NextHopsUnresolved,
     /// The neighbour table cannot be read, or no reading has completed yet.
     Unreadable(String),
@@ -48,23 +53,26 @@ pub enum FaceState {
 
 impl FaceState {
     pub fn is_usable(&self) -> bool {
-        matches!(self, FaceState::Usable | FaceState::DownOnce(_))
+        matches!(self, FaceState::Usable | FaceState::DownOnce(_) | FaceState::UnresolvedOnce)
     }
 }
 
 /// What the readings before this one saw.
 ///
-/// `unresolved`: set by a reading that finds no next hop resolved and one
-/// `FAILED` or `INCOMPLETE`, cleared only by a reading that finds one
-/// resolved. While set, a reading that finds every next hop absent from the
-/// table stays unusable, so an entry that flaps between `INCOMPLETE` and gone
-/// never reads usable.
+/// `unresolved`: the latch, set as [`FaceState::NextHopsUnresolved`] states,
+/// cleared only by a reading that finds a next hop resolved. While set, a
+/// reading that finds every next hop absent from the table stays unusable, so
+/// an entry that flaps between `INCOMPLETE` and gone never reads usable.
+///
+/// `unresolved_once`: an [`FaceState::UnresolvedOnce`] reading since a next
+/// hop last resolved; an absent reading leaves it standing.
 ///
 /// `usable` and `down_once`: whether the latest reading was usable, and
 /// whether it was [`FaceState::DownOnce`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FaceLatch {
     unresolved: bool,
+    unresolved_once: bool,
     usable: bool,
     down_once: bool,
 }
@@ -146,7 +154,12 @@ impl FaceCheck {
         let hops: Vec<Hop> = self.next_hops.iter().map(|h| hop(&table, ifindex, *h)).collect();
         if hops.contains(&Hop::Resolved) {
             latch.unresolved = false;
+            latch.unresolved_once = false;
         } else if hops.contains(&Hop::Unresolved) {
+            if latch.usable && !latch.unresolved_once {
+                latch.unresolved_once = true;
+                return FaceState::UnresolvedOnce;
+            }
             latch.unresolved = true;
         }
         if latch.unresolved {

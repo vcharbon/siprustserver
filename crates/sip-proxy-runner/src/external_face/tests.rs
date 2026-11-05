@@ -99,6 +99,7 @@ fn an_incomplete_flap_stays_unusable_until_the_next_hop_resolves() {
     let mut latch = FaceLatch::default();
     let mut step = |table: Vec<Neighbour>| face.read_at(&root, || Ok(table), |_| {}, &mut latch);
     assert_eq!(step(vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+    assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), FaceState::UnresolvedOnce);
     assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), FaceState::NextHopsUnresolved);
     assert_eq!(step(vec![]), FaceState::NextHopsUnresolved, "gone after INCOMPLETE");
     assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), FaceState::NextHopsUnresolved);
@@ -145,6 +146,8 @@ fn the_latch_clears_on_the_solicits_answer_and_stays_while_none_answers() {
     let latched = (FaceState::NextHopsUnresolved, vec![TOR, TOR_B]);
     assert_eq!(step(vec![entry(TOR, REACHABLE), entry(TOR_B, REACHABLE)]), usable);
     assert_eq!(step(vec![entry(TOR, NUD_FAILED), entry(TOR_B, REACHABLE)]), usable);
+    let once = (FaceState::UnresolvedOnce, vec![]);
+    assert_eq!(step(vec![entry(TOR, NUD_FAILED), entry(TOR_B, NUD_FAILED)]), once);
     assert_eq!(step(vec![entry(TOR, NUD_FAILED), entry(TOR_B, NUD_FAILED)]), latched);
     assert_eq!(step(vec![]), latched, "no answer: the entries gone");
     assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), latched, "no answer: the solicit pending");

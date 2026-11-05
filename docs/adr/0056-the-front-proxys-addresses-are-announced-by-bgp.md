@@ -44,9 +44,9 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    first worker view in, at least one worker `Alive`, and the external face usable: the external
    interface present and up and at least one of its configured next hops resolved (`REACHABLE`,
    `STALE`, `DELAY`, `PROBE`, `PERMANENT`) in the kernel's neighbour table (`PROXY_EXT_INTERFACE`,
-   `PROXY_EXT_NEXT_HOPS`). A next hop read `FAILED` or `INCOMPLETE` latches the face unusable until
-   one reads resolved again, so an entry flapping between `INCOMPLETE` and gone never reads usable.
-   The next hops are the external plane's BGP peers (checked at render when the chart renders
+   `PROXY_EXT_NEXT_HOPS`). A next hop read `FAILED` or `INCOMPLETE` in two readings, none resolved
+   between them, latches the face unusable until one reads resolved again, so an entry flapping
+   between `INCOMPLETE` and gone never reads usable. The next hops are the external plane's BGP peers (checked at render when the chart renders
    MetalLB's objects), whose BFD and keepalive traffic keeps them resolved while the node is let
    out. The route guard drops that traffic at output, before neighbour resolution, so while the
    face is latched each reading solicits every next hop itself: one empty datagram to the discard
@@ -54,7 +54,9 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    (§10). An answer clears the latch, so a recovered next hop brings the node back with nothing
    sent from outside. The interface read not up once, from a usable face, is a carrier flap and
    holds the face usable; the second reading in a row is the face down; a removed interface is
-   unusable at its first reading. All of it is local kernel state read every
+   unusable at its first reading. The flap also empties the neighbour table and the next packet
+   leaves the entry `INCOMPLETE` until its ARP retry, past the flap: hence the two readings of a
+   next hop. All of it is local kernel state read every
    `PROXY_EXT_FACE_CHECK_MS` off the async runtime. It ties the two faces together: a node whose
    caller-facing uplink is gone stops announcing the internal VIP as well. No component detects
    the reachability of a peer beyond the first router: a fault in the routed network hits both
@@ -153,7 +155,8 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       (`fib_multipath_use_neigh`, set by the same step, the routes over both next hops being a
       deployment requirement), so a worker's retransmitted final reaches its caller inside Timer
       H; with no next hop left the face reads unusable and the node leaves the routers' ECMP. The
-      render checks the cycle + one reading + two unfit readings + the BFD detection against 32 s.
+      render checks the cycle + two face readings + two unfit readings + the BFD detection against
+      32 s.
       The timers rest on the solicit (§3): without it a shorter cycle reaches a latch nothing
       clears sooner.
     - A withdrawn node is let out after the proxy read fit for `ROUTE_GUARD_HOLD_MS` (3 s), so a

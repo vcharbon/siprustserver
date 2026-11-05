@@ -151,7 +151,7 @@ provides:
 - Each proxy node's external interface (`network.externalInterface`) and its external BGP
   peers' addresses on it (`network.externalNextHops`), each on the interface's own subnet: the
   proxy's readiness requires the interface up and one of those next hops resolved; their BFD and
-  keepalive traffic keeps them resolved. While none is resolved after one read `FAILED` or
+  keepalive traffic keeps them resolved. While none is resolved after two readings of `FAILED` or
   `INCOMPLETE`, the proxy sends each next hop one empty UDP datagram to port 9 per
   `PROXY_EXT_FACE_CHECK_MS` to make the kernel resolve it (ADR-0056 §3), so the routers answer ARP
   from the proxy nodes and an ACL may drop the datagram, not the ARP. A lab router also holds a
