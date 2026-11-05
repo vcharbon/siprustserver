@@ -203,6 +203,64 @@ def test_node_stop_heal_fails_when_a_node_is_not_running_a_second_later(tmp_path
     failed(node_heal(tmp_path, running="false").run("heal"), "a1 is not running a second after its start")
 
 
+# ── kubelet_stop ──────────────────────────────────────────────────────────
+
+
+def test_kubelet_stop_stops_the_kubelets_its_node_selector_names(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "kubelet_stop", node_selector="tier=app")
+    sb.rules(
+        Rule(r"get nodes -l tier=app -o jsonpath", "a1\na2\n"),
+        Rule(r"get pods --field-selector spec.nodeName=a[12] -o json", '{"items": [{"metadata": {"name": "w"}}]}'),
+        Rule(r"docker exec a[12] systemctl stop kubelet$"),
+    )
+    f = facts(sb.run("inject"))
+    assert sb.lines("systemctl stop") == ["docker exec a1 systemctl stop kubelet", "docker exec a2 systemctl stop kubelet"]
+    assert f["nodes"] == ["a1", "a2"] and f["pods"] == ["w", "w"]
+
+
+def test_kubelet_stop_with_no_selector_stops_every_kubelet(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "kubelet_stop")
+    sb.rules(
+        Rule(r"get nodes -o jsonpath", "cp\na1\n"),
+        Rule(r"get pods --field-selector spec.nodeName=(cp|a1) -o json", '{"items": []}'),
+        Rule(r"docker exec (cp|a1) systemctl stop kubelet$"),
+    )
+    assert facts(sb.run("inject"))["nodes"] == ["cp", "a1"]
+
+
+def kubelet_heal(tmp_path: Path, ready: str = "Unknown", active_rc: int = 0) -> Sandbox:
+    sb = Sandbox(tmp_path, "kubelet_stop")
+    sb.state("nodes", "a1\n")
+    sb.rules(
+        Rule(r"get node a1 -o jsonpath=\{\.status\.conditions", ready),
+        Rule(r"docker exec a1 systemctl start kubelet$"),
+        Rule(r"docker exec a1 systemctl is-active --quiet kubelet$", rc=active_rc),
+    )
+    return sb
+
+
+def test_kubelet_stop_heal_starts_the_kubelet_and_says_the_loss_was_seen(tmp_path: Path) -> None:
+    f = facts(kubelet_heal(tmp_path).run("heal"))
+    assert as_obj(f["nodes"])["a1"] == {"not_ready_seen": True}
+
+
+def test_kubelet_stop_heal_fails_when_the_kubelet_does_not_run(tmp_path: Path) -> None:
+    failed(kubelet_heal(tmp_path, active_rc=3).run("heal"), "the kubelet of a1 does not run")
+
+
+def test_kubelet_stop_probe_waits_for_the_node_and_its_pods(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "kubelet_stop")
+    sb.state("nodes", "a1\n")
+    sb.rules(
+        Rule(r"get node a1 -o jsonpath=\{\.status\.conditions", "True"),
+        Rule(
+            r"get pods --field-selector spec.nodeName=a1 -o json",
+            json.dumps({"items": [{"metadata": {"name": "w"}, "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "False"}]}}]}),
+        ),
+    )
+    assert sb.run("probe").returncode == 75
+
+
 def test_freeze_heal_counts_a_container_terminated_since_the_freeze(tmp_path: Path) -> None:
     """A liveness restart the count does not show yet: the container's last
     termination after the freeze is counted."""

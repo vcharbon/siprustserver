@@ -1,0 +1,27 @@
+schema: incident.v1
+name: kubelet_stop
+description: >-
+  Stop the kubelet on the kind nodes node_selector names (every node, the
+  control plane too, when empty), for duration_s, then start it. Containers
+  and their network keep running: the node's heartbeats stop with its
+  workloads untouched. Past the controller manager's node grace period the node
+  reads NotReady and its pods not ready, whatever they answer. A short
+  duration_s is a kubelet restart. The probe waits until every node is Ready
+  and every pod of the namespace bound to it reads Ready again.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: all
+params:
+  node_selector:
+    type: string
+    default: ""
+    description: A node label selector naming the nodes; empty is every node.
+duration_s: 120
+expected_s: 180
+timeouts:
+  inject_s: 60
+  heal_s: 60
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind, docker]

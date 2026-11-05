@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Start every stopped kubelet, then prove each runs. Idempotent. Facts: per node
+# whether the API server had marked it not ready, the proof the loss was seen.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+nodes="$(hk_state nodes)"
+facts="{}"
+while read -r n; do
+  [ -n "$n" ] || continue
+  ready="$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')"
+  if [ "$ready" = True ]; then seen=false; else seen=true; fi
+  docker exec "$n" systemctl start kubelet
+  docker exec "$n" systemctl is-active --quiet kubelet || hk_die "the kubelet of $n does not run"
+  facts="$(jq -c --arg n "$n" --argjson s "$seen" '. + {($n): {not_ready_seen: $s}}' <<<"$facts")"
+done <<<"$nodes"
+jq -cn --argjson f "$facts" --argjson at "$(hk_now_ms)" '{nodes: $f, started_at_ms: $at}'
