@@ -18,12 +18,12 @@ for ((round = 1; round <= HAKIT_PARAM_MAX_ROUNDS; round++)); do
   restarted="$(hk_now_ms)"
   rounds="$(jq -c --argjson d "$dead" --argjson r "$restarted" --argjson n "$round" \
     '. + [{round: $n, killed_at_ms: $d.killed_at_ms, dead_at_ms: $d.dead_at_ms, restarted_at_ms: $r, away_ms: ($r - $d.dead_at_ms)}]' <<<"$rounds")"
-  printf '%s\n' "$next" > "$HAKIT_EVENT_DIR/crashed"
   if [ "$(jq '.[-1].away_ms' <<<"$rounds")" -ge "$away_ms" ]; then
     jq -cn --argjson pods "$(hk_target_pods_json)" --argjson rounds "$rounds" \
       --argjson before "$(cat "$HAKIT_EVENT_DIR/live_before")" '{pods: $pods, live_before: $before, rounds: $rounds}'
     exit 0
   fi
+  printf '%s\n' "$next" > "$HAKIT_EVENT_DIR/crashed"
   sleep "$HAKIT_PARAM_KILL_AFTER_S"
 done
 hk_die "no restart of $HAKIT_PARAM_MAX_ROUNDS rounds stayed away ${HAKIT_PARAM_AWAY_S}s"

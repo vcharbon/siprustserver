@@ -147,8 +147,9 @@ def test_the_loop_kills_each_incarnation_until_a_restart_stayed_away_and_lets_th
     assert (first["round"], last["round"]) == (1, 2)
     assert jv.number(first, "away_ms") < 300 <= jv.number(last, "away_ms")
     assert jv.number(first, "killed_at_ms") <= jv.number(first, "dead_at_ms") <= jv.number(first, "restarted_at_ms")
-    # The probe reads the living incarnation against the one before it.
-    assert (sb.event_dir / "crashed").read_text() == "w-0 u0 n1 worker c3 2\n"
+    # `crashed` holds the last one killed, so the probe waits for its restart
+    # and reads the one living against it.
+    assert (sb.event_dir / "crashed").read_text() == "w-0 u0 n1 worker c2 1\n"
 
 
 def test_a_backoff_that_never_reaches_away_s_fails_the_inject(tmp_path: Path) -> None:
