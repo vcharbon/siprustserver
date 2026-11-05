@@ -154,8 +154,9 @@ provides:
   keepalive traffic keeps them resolved. While none is resolved after two readings of `FAILED` or
   `INCOMPLETE`, the proxy sends each next hop one empty UDP datagram to port 9 per
   `PROXY_EXT_FACE_CHECK_MS` to make the kernel resolve it (ADR-0056 §3), so the routers answer ARP
-  from the proxy nodes and an ACL may drop the datagram, not the ARP. A lab router also holds a
-  blackhole route per VIP below BGP, so a VIP nobody announces is unreachable instead of following
+  from the proxy nodes and an ACL may drop the datagram, not the ARP. The node's own firewall must
+  let that datagram out (dropped at output the send fails, the proxy warns once per latch, and the
+  latch waits for outside traffic). A lab router also holds a blackhole route per VIP below BGP, so a VIP nobody announces is unreachable instead of following
   a default route.
 - **Egress over both next hops.** A proxy node's routes toward the callers are multipath over
   every address of `network.externalNextHops`, which the operator provisions (the node learns no
@@ -164,7 +165,7 @@ provides:
   who heard a 100 then loses its final once Timer H runs out. The `vip-loopback` init step turns
   `net.ipv4.fib_multipath_use_neigh` on, so multipath leaves a next hop not resolved, and sets the
   neighbour timers of every interface from `proxy.neighbour`: such a next hop reads `FAILED`
-  within about 11 s by default, a router silent to ARP for 3 s reads dead, and a dead next hop draws 4
+  within at most about 11 s by default, a router silent to ARP for 3 s reads dead, and a dead next hop draws 4
   ARP broadcasts a second from each node (`docs/TUNING.md`).
 - A bond as the external interface monitors its own members (its `miimon` or ARP monitoring is
   the operator's): the face reads the bond, which stays up while one member lives.

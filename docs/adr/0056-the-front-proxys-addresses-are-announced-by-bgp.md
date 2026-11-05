@@ -46,22 +46,24 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    `STALE`, `DELAY`, `PROBE`, `PERMANENT`) in the kernel's neighbour table (`PROXY_EXT_INTERFACE`,
    `PROXY_EXT_NEXT_HOPS`). A next hop read `FAILED` or `INCOMPLETE` in two readings, none resolved
    between them, latches the face unusable until one reads resolved again, so an entry flapping
-   between `INCOMPLETE` and gone never reads usable. The next hops are the external plane's BGP peers (checked at render when the chart renders
-   MetalLB's objects), whose BFD and keepalive traffic keeps them resolved while the node is let
-   out. The route guard drops that traffic at output, before neighbour resolution, so while the
-   face is latched each reading solicits every next hop itself: one empty datagram to the discard
-   port from a fresh UDP socket, which needs no capability and which the guard's chain lets pass
-   (§10). An answer clears the latch, so a recovered next hop brings the node back with nothing
-   sent from outside. The interface read not up once, from a usable face, is a carrier flap and
-   holds the face usable; the second reading in a row is the face down; a removed interface is
-   unusable at its first reading. The flap also empties the neighbour table and the next packet
-   leaves the entry `INCOMPLETE` until its ARP retry, past the flap: hence the two readings of a
-   next hop, and an ARP retry of at most half a reading period (render, §10). All of it is local
-   kernel state read every
-   `PROXY_EXT_FACE_CHECK_MS` off the async runtime. It ties the two faces together: a node whose
-   caller-facing uplink is gone stops announcing the internal VIP as well. No component detects
-   the reachability of a peer beyond the first router: a fault in the routed network hits both
-   proxies alike and is the network's to converge. Consequences:
+   between `INCOMPLETE` and gone never reads usable. The next hops are the external plane's BGP
+   peers (checked at render when the chart renders MetalLB's objects), whose BFD and keepalive
+   traffic keeps them resolved while the node is let out. The route guard drops that traffic at
+   output, before neighbour resolution, so while the face is latched each reading solicits every
+   next hop itself: one empty datagram to the discard port from a fresh UDP socket, which needs no
+   capability and which the guard's chain lets pass (§10). An answer clears the latch, so a
+   recovered next hop brings the node back with nothing sent from outside. A solicit the node's
+   own firewall refuses warns once per latch, and that latch then waits for outside traffic. The
+   interface read not up once, from a usable face, is a carrier flap and holds the face usable; the
+   second reading in a row is the face down; a removed interface is unusable at its first reading.
+   The flap also empties the neighbour table and the next packet leaves the entry `INCOMPLETE`
+   until an ARP retry is answered, past the flap: hence the two readings of a next hop, and an ARP
+   retry of at most half a reading period (render, §10). All of it is local kernel state read
+   every `PROXY_EXT_FACE_CHECK_MS` off the async runtime, two readings always a period apart. It
+   ties the two faces together: a node whose caller-facing uplink is gone stops announcing the
+   internal VIP as well. No component detects the reachability of a peer beyond the first router: a
+   fault in the routed network hits both proxies alike and is the network's to converge.
+   Consequences:
    - a proxy with no live worker answers a new call `503` with a `Retry-After` until its route is
      withdrawn, so the caller may retry elsewhere at once; a short loss is answered rather than
      left to time out;
@@ -149,23 +151,32 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       `PROXY_EXT_FACE_CHECK_MS` 1 s + 0.2 s + 0.9 s = 2.1 s (an interface removed reads unusable
       at once, 1.6 s); a hung or dead proxy 1 s + 0.9 s = 1.9 s.
     - A next hop that dies with its carrier up is outside that bound and inside Timer H: its
-      neighbour entry reads `FAILED` at the end of the kernel's STALE, DELAY and PROBE cycle, 1.5
-      × `base_reachable_time_ms` + `delay_first_probe_time` + `ucast_solicit` × `retrans_time_ms`,
-      10 s at the chart's `proxy.neighbour` (the init step sets them on every interface; the
-      kernel's defaults give about 50 s), and the entry leaves STALE at the next packet, up to 1 s
-      later once the session's BFD went down. Multipath egress leaves that next hop then
+      neighbour entry reads `FAILED` at the end of the kernel's STALE, DELAY and PROBE cycle. By
+      phase that takes from `ucast_solicit` × `retrans_time_ms`, 3 s on an entry already entering
+      PROBE, up to 1.5 × `base_reachable_time_ms` + `delay_first_probe_time` + 3 s, 10 s at the
+      chart's `proxy.neighbour` (the init step sets them on every interface; the kernel's defaults
+      give about 50 s), + up to 1 s for the next packet that takes the entry out of STALE once the
+      session's BFD went down. Multipath egress leaves that next hop then
       (`fib_multipath_use_neigh`, set by the same step, the routes over both next hops being a
       deployment requirement), so a worker's retransmitted final reaches its caller inside Timer
-      H; with no next hop left the face reads unusable and the node leaves the routers' ECMP. The
-      render checks the cycle + two face readings + two unfit readings + the BFD detection against
-      32 s.
-      The timers rest on the solicit (§3): without it a shorter cycle reaches a latch nothing
-      clears sooner. Measured on the lab (`next_hop_dead`, one next hop, kernel 7.2): a proxy unfit
-      7 to 12 s after the death, its node routed again about 9 s after the next hop's return, with
-      nothing sent from outside; the kernel's default timers read the death in 47 s.
-    - A carrier flap leaves the proxy fit: the face holds through it (§3), and no hold applies. The
-      node's external BGP session re-establishes after it: on the lab every flap of 0.1 to 0.4 s
-      took the node's external routes away for about 1 s.
+      H. With no next hop left two face readings latch the face, up to 1 s: the proxy reads unfit
+      from about 4 s to about 12 s after the death. The guard's two readings and the BFD detection
+      then take the node out of the routers' ECMP, 13.1 s at most. The render checks that chain
+      against 32 s, without the guard's terms when the guard is off. The timers rest on the solicit
+      (§3): without it a shorter cycle reaches a latch nothing clears sooner. Measured on the lab
+      (`next_hop_dead`, one next hop, kernel 7.2): the proxy unfit 6.0 to 8.0 s after the death, the
+      internal VIP's route gone 6.8 to 8.9 s after it (up to 12.0 s over the earlier runs of these
+      timers), the external VIP's 0.85 s after it through the BFD of the router that died, its node
+      routed again 8.6 s after the next hop's return, with nothing sent from outside; the kernel's
+      default timers read the death in 47 s.
+    - So a carrier-up silence of the next hops latches by phase from about 4 s, and always past
+      the ceiling of the read, about 12 s. Next hops both proxies share then withdraw both VIPs,
+      and the routes return about 9 s after the silence ends: the solicit's answer, the hold 3 s,
+      the connect time 1 s, BFD up. That is the price of the shorter cycle.
+    - A carrier flap leaves the proxy fit: the face holds through it when the first ARP retry after
+      it is answered (§3), and no hold applies. The node's external BGP session re-establishes
+      after it: on the lab every flap of 0.1 to 0.4 s took the node's external routes away for about
+      1 s, on both nodes for a flap they share.
     - A withdrawn node is let out after the proxy read fit for `ROUTE_GUARD_HOLD_MS` (3 s), so a
       flapping fault does not rehash flows each time; its BGP sessions come back within the
       BGPPeer `connectTime` (`proxy.announce.metallb.connectTimeSeconds`, 1 s). A restarted guard
@@ -256,5 +267,13 @@ Via.
   withdraws the routes through it on the routers, and the node's own egress keeps using it.
 - An interface whose operstate stays down longer than the flap (a driver or the kernel's link
   event rate limit holding it) gives the second reading, and the node withdraws for that flap.
+- A link down for under one reading period, again and again (a bad optic down 400 ms every second),
+  never withdraws: the proxy stays fit, the external BGP session resets at each flap, and the
+  internal VIP stays announced, so the node keeps drawing workers' finals that leave over that
+  link.
+- A carrier flap holds the face only when the first ARP retry after it is answered. A router port
+  that forwards more than about 250 ms after the carrier returns (LACP, STP) leaves the entry
+  `INCOMPLETE` across two readings: the face latches, the node withdraws, and the solicit brings it
+  back.
 - A bond keeps its carrier up while one member lives: the face reads the bond and sees a lost
   member only through the next hop it served.
