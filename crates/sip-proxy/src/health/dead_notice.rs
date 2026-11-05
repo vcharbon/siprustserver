@@ -11,9 +11,8 @@
 //! departure and a terminating flip are no verdict. The notice's instant is when
 //! it is told, so another proxy's notice of the same flip is the same verdict only
 //! at the same instant, a later one otherwise. Each notice is one non-INVITE client
-//! transaction,
-//! retransmitted on Timer E until it is answered or Timer F ends it; the answer
-//! is the worker's ordinary OPTIONS report, read by the probe only.
+//! transaction, retransmitted on Timer E until it is answered or Timer F ends it; the
+//! answer is the worker's ordinary OPTIONS report, read by the probe only.
 
 use std::sync::Arc;
 

@@ -165,6 +165,21 @@ fn a_member_ready_again_clears_its_tombstone_and_awaits_its_probe_since_the_flip
     assert_eq!((live.id.as_str(), live.health), ("w0", WorkerHealth::Unknown));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_member_out_of_the_routing_reads_dead_for_as_long_as_it_is_a_member() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+    let addr = ProxyAddr::new("10.0.0.2", 5060);
+    sim.set_conditions("w1", false, false);
+    set.recompose();
+    tokio::time::advance(Duration::from_millis(DEPARTED_ADDRESS_TTL_MS + 1)).await;
+    let read = set.lookup_by_address(&addr).expect("still a member past the window");
+    assert_eq!((read.id.as_str(), read.health), ("w1", WorkerHealth::Dead));
+
+    sim.remove("w1");
+    set.recompose();
+    assert!(set.lookup_by_address(&addr).is_none(), "gone with its membership");
+}
+
 #[test]
 fn a_member_that_answered_while_not_ready_returns_alive() {
     let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);

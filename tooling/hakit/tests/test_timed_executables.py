@@ -248,6 +248,32 @@ def test_kubelet_stop_heal_fails_when_the_kubelet_does_not_run(tmp_path: Path) -
     failed(kubelet_heal(tmp_path, active_rc=3).run("heal"), "the kubelet of a1 does not run")
 
 
+def test_kubelet_stop_heal_starts_the_kubelet_when_the_api_cannot_be_read(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "kubelet_stop")
+    sb.state("nodes", "a1\n")
+    sb.rules(
+        Rule(r"get node a1 -o jsonpath=\{\.status\.conditions", rc=1),
+        Rule(r"docker exec a1 systemctl start kubelet$"),
+        Rule(r"docker exec a1 systemctl is-active --quiet kubelet$"),
+    )
+    f = facts(sb.run("heal"))
+    assert sb.index("systemctl start kubelet") >= 0
+    assert as_obj(f["nodes"])["a1"] == {"not_ready_seen": None}
+
+
+def test_kubelet_stop_heal_fails_a_long_stop_with_no_effect_after_starting_the_kubelet(tmp_path: Path) -> None:
+    sb = kubelet_heal(tmp_path, ready="True")
+    sb.state("stopped_at_ms", "1000\n")
+    failed(sb.run("heal"), "no effect: a1")
+    assert sb.index("systemctl start kubelet") >= 0
+
+
+def test_kubelet_stop_heal_passes_a_restart_too_short_to_flip(tmp_path: Path) -> None:
+    sb = kubelet_heal(tmp_path, ready="True")
+    f = facts(sb.run("heal"))
+    assert as_obj(f["nodes"])["a1"] == {"not_ready_seen": False}
+
+
 def test_kubelet_stop_probe_waits_for_the_node_and_its_pods(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "kubelet_stop")
     sb.state("nodes", "a1\n")

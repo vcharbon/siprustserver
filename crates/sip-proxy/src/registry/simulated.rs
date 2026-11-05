@@ -82,7 +82,7 @@ impl SimulatedWorkerRegistry {
     /// Remove a worker (no-op if absent). Membership prunes the ordinal; the
     /// recompose drops its annotation.
     pub fn remove(&self, id: &str) {
-        if self.set.resolve(id).is_none() {
+        if self.membership.resolve(id).is_none() {
             return;
         }
         locked(&self.ports, SIMULATED_REGISTRY).remove(id);

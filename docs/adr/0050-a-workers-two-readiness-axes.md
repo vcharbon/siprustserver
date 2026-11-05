@@ -276,7 +276,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
     - **A worker that does not answer** reads `Dead` by the usual misses, whatever
       its endpoint says, and that is the verdict (§3). A fleet booting silent, or a
       stalled worker (ADR-0033 §4), is no worker: `/readyz` fails and new calls get
-      the proxy's refusal until the routes withdraw.
+      the proxy's refusal until the routes withdraw. A whole fleet crashing on live
+      nodes is read by the probe, 2.6 to 3.6 s, and not by its flips; `/fitz` turns
+      unfit on the isolation window, 2 s, so the withdrawal comes about as it does
+      with a ready member left, and new INVITEs reach a dead worker for about 2 s.
     - **A `terminating` worker never counts**, and the proxy stops probing it. Every
       member terminating is no worker.
     - **It ends** at the first reading of a ready member: routing follows readiness
@@ -290,9 +293,26 @@ take a new call, and may an in-dialog request of a call it owns reach it.
     - **A proxy started inside it** needs no memory of an earlier view: its first
       round reads the workers, and its first view latches at the round's end.
     - **A proxy's own pod read not ready** is another matter: its node's speaker
-      withdraws the node whatever `/readyz` answers (ADR-0056 §3).
+      withdraws the node whatever `/readyz` answers (ADR-0056 §1).
 
     `sip_proxy_routing_on_answers` is 1 meanwhile, and each turn logs a line.
+
+    Open: the rule reads "none ready" literally. A worker the slice still reads ready
+    while the probe reads it `Dead`, beside a not-ready worker that answers, leaves no
+    worker to route to. Say w1 reads not ready and w0 powers off: the probe reads w0
+    `Dead` within 3.6 s, the slice reads it ready until the node controller's grace
+    runs out, 45 to 53 s after the loss (measured), the projection holds only w0,
+    `/readyz` and `/fitz` fail, every proxy withdraws, and in-dialog requests are
+    dropped as unroutable. About 50 s; as long as the cut when only the path from the
+    proxy to w0 is cut, bounded by w1's own toleration of the orchestrator's eviction.
+
+    A worker out of the routing while another reads ready stays one the proxy knows:
+    its address reads `Dead` for as long as it is a member, so its own requests leave
+    as a worker's. The answers to them follow the owner rule to its backup, so a
+    keepalive falling due then is unanswered and ends the call at Timer F
+    (`no_worker_reads_ready.rs`, the keepalive cell), and a call whose two owners are
+    both out, with a third worker ready, has its in-dialog requests dropped for as
+    long as that lasts.
 
 12. **The keepalive lane.** The worker's transaction layer passes each
     out-of-dialog OPTIONS (§2: no transaction) up on a small bounded lane of

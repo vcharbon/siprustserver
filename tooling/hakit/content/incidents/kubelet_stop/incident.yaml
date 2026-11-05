@@ -17,6 +17,10 @@ params:
     type: string
     default: ""
     description: A node label selector naming the nodes; empty is every node.
+  not_ready_within_s:
+    type: integer
+    default: 60
+    description: A stop at least this long must have read each node not ready, past the controller manager's grace; heal fails the event otherwise. A shorter stop is a kubelet restart and proves nothing.
 duration_s: 120
 expected_s: 180
 timeouts:

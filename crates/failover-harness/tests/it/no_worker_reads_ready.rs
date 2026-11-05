@@ -33,7 +33,7 @@ use crate::not_ready_flip_tells_a_dead_verdict::{
 use crate::ringing_call_taken_over_on_departure::{
     place_on, replicated_deadline, ring_deadline_decision, Callee, Cluster, Placed, ANSWER, OFFER,
 };
-use crate::swept_call_primary_returns::{answer, hang_up_and_settle};
+use crate::swept_call_primary_returns::{answer, hang_up_and_settle, sent};
 
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
@@ -441,10 +441,76 @@ async fn a_terminating_worker_is_never_routed_on_its_answers() {
     hang_up_and_depart(p).await;
 }
 
+/// The residual of a live worker left out of the routing, another reading ready
+/// (ADR-0050 §11): its keepalive leaves on the Route's `;outbound` marker and reaches
+/// both parties, past its address's window too. Their answers follow the owner rule
+/// to its backup (ADR-0055 §8), so it hears none and ends its calls at Timer F, 32 s
+/// on, each with its BYE and one CDR.
+#[tokio::test(start_paused = true)]
+async fn a_keepalive_due_while_its_worker_is_out_of_the_routing_ends_the_call() {
+    let mut p = placed("no-ready-keepalive-while-out").await;
+    let answered = answer(&mut p).await;
+    p.fh.advance(Duration::from_secs(1)).await;
+    let flipped_at = p.fh.now_ms();
+    p.fh.flap_not_ready("b1");
+
+    let (mut byes_to_alice, mut byes_to_bob) = (0, 0);
+    for _ in 0..3_400 {
+        p.fh.advance(Duration::from_millis(100)).await;
+        if let Some(mut bye) = p.alice.try_receive_tolerating("BYE", &["OPTIONS"]).await {
+            bye.respond(200, "OK").await;
+            byes_to_alice += 1;
+        }
+        if let Some(mut bye) = p.bob.try_receive_tolerating("BYE", &["OPTIONS"]).await {
+            bye.respond(200, "OK").await;
+            byes_to_bob += 1;
+        }
+        if byes_to_alice >= 2 && byes_to_bob >= 2 {
+            break;
+        }
+    }
+    assert!(byes_to_alice >= 2 && byes_to_bob >= 2, "both calls are ended, on both legs");
+    let out_for = p.fh.now_ms() - flipped_at;
+    assert!(out_for > 300_000, "at the keepalive and Timer F, {out_for} ms on");
+    assert!(!sent(&p, p.alice.addr(), b"OPTIONS").is_empty(), "the worker sent its keepalive");
+    let reached = |to| p.fh.sip_entries().iter().any(|e| e.to == to && e.opens_with("OPTIONS "));
+    assert!(reached(p.alice.addr()) && reached(p.bob.addr()), "and it reached both parties");
+
+    drop(answered);
+    p.fh.flap_ready("b1");
+    p.fh.advance(Duration::from_secs(60)).await;
+    for call_ref in [&p.ringing_ref, &p.quiet_ref] {
+        settle_to_one_cdr(&p.fh, &[&p.alice, &p.bob], &[&p.w_b1, &p.w_b2], call_ref).await;
+    }
+    drop(p.proxy);
+}
+
+/// A worker that left the slice while it read not ready leaves the probe too, and
+/// its departure takes its calls over.
+#[tokio::test(start_paused = true)]
+async fn an_unrouted_worker_that_departs_is_no_longer_probed() {
+    let mut p = placed("no-ready-unrouted-departs").await;
+    let deadline = replicated_deadline(&p).await;
+    p.fh.flap_not_ready("b1");
+    p.fh.advance(CONFIRMED_BY_NOW).await;
+    assert_eq!(p.proxy.probed_health("b1"), Some(WorkerHealth::Alive), "it answers while out");
+
+    p.fh.mark("b1", None, "crash", "the pod is gone");
+    p.w_b1.crash();
+    p.fh.depart("b1");
+    assert_eq!(p.proxy.probed_health("b1"), None, "no longer judged");
+    p.fh.advance(Duration::from_millis(500)).await;
+    assert!(p.w_b2.serves(&p.ringing_ref), "the departure takes the call over");
+    ends_at_the_deadline_on_the_copy(&mut p, deadline).await;
+    hang_up_and_depart(p).await;
+}
+
 /// A worker restarted inside the view holds its reclaimed calls parked until its
 /// own endpoint reads ready. Its answers route new calls to it meanwhile: they
-/// complete beside the parked calls, which stay parked, a message for one arming
-/// it, and the endpoint's return arming the rest.
+/// complete beside the parked calls, which stay parked. A message for one arms it
+/// and is served, and the endpoint's return arms the rest. No copy serves here: the
+/// process returned before any verdict, so nothing writes against the reclaimed
+/// record; a copy still writing is `reclaim_takes_the_copys_dialled_invite.rs`.
 #[tokio::test(start_paused = true)]
 async fn a_worker_restarted_inside_the_view_takes_new_calls_beside_its_parked_ones() {
     let mut p = placed("no-ready-restart-inside").await;
@@ -463,18 +529,32 @@ async fn a_worker_restarted_inside_the_view_takes_new_calls_beside_its_parked_on
         .await;
     assert!(answering, "the restarted worker answers its probe");
     assert!(p.w_b1.parks(&p.ringing_ref), "its reclaimed call waits for its endpoint");
+    assert!(p.w_b1.parks(&p.quiet_ref), "and so does its established one");
     assert!(!p.w_b2.serves(&p.ringing_ref), "the copy stood down or never was");
 
     let new_call = a_new_call_completes(&mut p, call_id_placed_on("b1", "beside-parked")).await;
     assert_eq!(new_call.primary, "b1", "placed on the worker that answers");
     assert!(p.w_b1.parks(&p.ringing_ref), "the new call arms nothing");
 
+    let mut bye = p.quiet.bye().await;
+    p.bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
+    assert!(p.w_b1.parks(&p.ringing_ref), "a message arms its own call alone");
+    assert!(!p.w_b2.serves(&p.quiet_ref), "served by its worker, no copy made");
+
     p.fh.flap_ready("b1");
     p.fh.flap_ready("b2");
     p.fh.advance(ONE_ROUND).await;
     assert!(p.w_b1.serves(&p.ringing_ref), "armed once its endpoint reads ready");
-    let answered = answer(&mut p).await;
-    hang_up_and_settle(p, answered, &[new_call.call_ref]).await;
+    let mut answered = answer(&mut p).await;
+    let mut bye = answered.bye().await;
+    p.bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
+    p.fh.advance(Duration::from_secs(60)).await;
+    for call_ref in [&p.ringing_ref, &p.quiet_ref, &new_call.call_ref] {
+        settle_to_one_cdr(&p.fh, &[&p.alice, &p.bob], &[&p.w_b1, &p.w_b2], call_ref).await;
+    }
+    drop(p.proxy);
 }
 
 /// A proxy started inside the view holds no memory of an earlier one: its first

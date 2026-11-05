@@ -1,9 +1,11 @@
 //! The readmission gate (ADR-0055 §8): a node serves its reclaimed calls only
 //! while its own endpoint reads ready in its membership, the slice the proxy
-//! routes from. While it does not, the proxy holds no address for the node,
-//! so a response to a request it sends on a reclaimed call goes to the call's
-//! other owner, which reads it as evidence of a lost write and ends the call
-//! (§4). The bulk reclaim parks its calls at once, nothing armed; the gate
+//! routes from. While it does not and another worker does, the proxy routes
+//! nothing to the node, so a response to a request it sends on a reclaimed call
+//! goes to the call's other owner, which reads it as evidence of a lost write and
+//! ends the call (§4). With no worker ready the proxy routes on the workers'
+//! answers (ADR-0050 §11), and the gate holds all the same: the node cannot tell
+//! the two apart. The bulk reclaim parks its calls at once, nothing armed; the gate
 //! holds their arming, the straggler reclaims and the refused reverse flushes
 //! that meet what they reclaim until the endpoint reads ready, then releases
 //! the arming first and the commands in arrival order; every other command

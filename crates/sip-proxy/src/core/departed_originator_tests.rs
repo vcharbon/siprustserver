@@ -206,6 +206,24 @@ async fn a_departed_workers_invite_is_recorded_with_its_ordinal_and_its_stated_b
     }
 }
 
+// A live worker read not ready, another ready, stays a worker for as long as it is
+// a member: its INVITE past the departed address's window, on a failover chain or a
+// transfer, leaves for the callee, and is not read as a new call from outside.
+#[tokio::test(start_paused = true)]
+async fn a_not_ready_workers_invite_past_the_window_still_leaves_for_the_callee() {
+    let f = fixture();
+    f.registry.set_ready("w1", false);
+    let window = std::time::Duration::from_millis(DEPARTED_ADDRESS_TTL_MS);
+    tokio::time::advance(window + std::time::Duration::from_secs(7)).await;
+
+    let invite = parse(&initial_invite(W1_POD));
+    f.core.handle_request_from(invite, format!("{W1_POD}:5060").parse().unwrap()).await;
+    let (dst, fwd) = f.one_sent();
+    assert_eq!(dst, uas(), "forwarded to the UAS");
+    let cookie = recorded_cookie(&fwd);
+    assert_eq!(cookie.get("w_pri").map(String::as_str), Some("w1"), "{cookie:?}");
+}
+
 /// `w1`'s initial INVITE forwarded after `w1` departed, its 180 relayed at
 /// +1 s; then the clock runs past the tombstone's window, as on a long ring.
 /// The forwarded bytes.

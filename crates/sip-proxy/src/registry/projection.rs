@@ -362,7 +362,9 @@ impl WorkerSet {
     }
     /// The worker bound at `addr`. An address that left the set answers as its
     /// last ordinal with health `Dead` for [`DEPARTED_ADDRESS_TTL_MS`], so a
-    /// response still coming from it is recognised as a departed worker's.
+    /// response still coming from it is recognised as a departed worker's. A
+    /// member out of the projection answers the same for as long as the probe
+    /// judges it: a live worker's own requests stay a worker's.
     pub(crate) fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry> {
         self.projection
             .load()
@@ -370,6 +372,11 @@ impl WorkerSet {
             .find(|w| &w.address == addr)
             .cloned()
             .or_else(|| self.tombstones.lookup(addr, self.now_ms()))
+            .or_else(|| {
+                let probed = self.probed.load();
+                let member = probed.iter().find(|w| &w.address == addr)?;
+                Some(WorkerEntry { health: WorkerHealth::Dead, ..member.clone() })
+            })
     }
     /// A response for `addr` was seen: a departed address's open window is
     /// re-armed to [`DEPARTED_ADDRESS_TTL_MS`] from now.

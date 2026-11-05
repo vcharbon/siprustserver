@@ -17,6 +17,7 @@ for n in "${nodes[@]}"; do
   held="$(jq -c --argjson h "$held" '$h + [.items[].metadata.name]' <<<"$pods")"
 done
 at="$(hk_now_ms)"
+echo "$at" > "$HAKIT_EVENT_DIR/stopped_at_ms"
 for n in "${nodes[@]}"; do docker exec "$n" systemctl stop kubelet; done
 jq -cn --argjson n "$(printf '%s\n' "${nodes[@]}" | jq -Rnc '[inputs]')" --argjson p "$held" --argjson at "$at" \
   '{nodes: $n, pods: $p, stopped_at_ms: $at, applied_at_ms: $at}'

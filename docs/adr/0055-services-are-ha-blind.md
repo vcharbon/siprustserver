@@ -590,9 +590,11 @@ and a 2xx it takes from the copy goes on along the copy's §13.3.1.4 ladder,
 never sent again at once (`reclaim_takes_the_copys_dialled_invite.rs`). The worker arms the parked calls —
 their timers, their transactions, the re-ask of an undecided call — only
 while its own endpoint reads ready in the slice the proxy routes from. While
-it does not, the proxy holds no address for it, so the response to a request
-it sends goes to the call's other owner, which reads it as evidence (§4) and
-ends the call. The evidence rule stays as it is, every method alike
+it does not and another worker does, the proxy routes nothing to it, so the
+response to a request it sends goes to the call's other owner, which reads it as
+evidence (§4) and ends the call. With no worker ready the proxy routes on the
+workers' answers (ADR-0050 §11), and the worker, which cannot tell the two apart,
+holds its calls all the same. The evidence rule stays as it is, every method alike
 (`reclaim_waits_for_a_routable_endpoint.rs`,
 `swept_call_answered_once_routable.rs`). The worker and the proxy read the
 slice through informers of their own, so the two can see the endpoint ready a
