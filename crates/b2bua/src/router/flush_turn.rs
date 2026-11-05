@@ -5,8 +5,9 @@
 //! them (ADR-0033 decision 5), and a message queued for the call before the
 //! flush is served first (ADR-0010 X2).
 //!
-//! A turn that leaves no call live here releases what the turn opened: its
-//! queue and lock entry.
+//! A turn that leaves no call live here and nothing queued behind it releases
+//! the queue and the lock entry. With an item behind it the queue stays: that
+//! item may make the call live, and its own turn releases what it leaves.
 
 use std::sync::Arc;
 
@@ -86,7 +87,7 @@ pub(super) async fn flush_turn(ctx: &Arc<RouterCtx>, event: &CallEvent) {
         }
         _ => {}
     }
-    if !ctx.state.contains(call_ref) {
+    if !ctx.state.contains(call_ref) && ctx.dispatcher.is_idle(call_ref) {
         release_call(ctx, call_ref, ReleaseKind::Orphan).await;
     }
 }

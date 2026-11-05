@@ -26,15 +26,9 @@ const NOTICE_PORT_OFFSET: u16 = 1000;
 /// The dead notifiers bound so far in this process.
 static NOTIFIERS: AtomicU16 = AtomicU16::new(0);
 
-/// The health probe's cadence in the harness: 10 s / 1.5 s, not the production
-/// 1 s tick. Every tick fans a real sip-txn OPTIONS to every worker, and under
-/// the paused clock that churn is pure CPU (each probe = client txn + worker
-/// server txn + Timer E/F/J entries + recorded-trace events the Drop-time RFC
-/// audit must scan): at the production cadence the long keepalive cell (≈700
-/// sim-seconds pumped in 100 ms chunks) ran ~420 s wall, ~10 s at this cadence
-/// (super-linear: trace-scanning costs grow with probe-event count). Cells pump
-/// until a health transition is observed (`reboot_and_reclaim` waits for Alive,
-/// kill/drain set health directly), so a slower tick is semantics-preserving.
+/// The health probe's cadence in the harness: 10 s / 1.5 s, slower than
+/// production's because every tick costs CPU under the paused clock. Cells pump
+/// until a health transition is observed, so the slower tick changes no outcome.
 /// Both values are multiples of the 100 ms advance chunk, so there is no
 /// paused-clock reply race. A cell that measures the verdict's timing states
 /// the production cadence ([`FailoverHarness::spawn_proxy_with_probe_cadence`]).

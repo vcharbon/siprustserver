@@ -231,6 +231,13 @@ impl<T> PerCallDispatcher<T> {
         locked(&self.slots, DISPATCH_SLOTS).contains_key(call_ref)
     }
 
+    /// Whether nothing waits on `call_ref`'s queue, the turn its worker is
+    /// running apart.
+    pub fn is_idle(&self, call_ref: &str) -> bool {
+        let slot = locked(&self.slots, DISPATCH_SLOTS).get(call_ref).cloned();
+        slot.is_none_or(|slot| locked(&slot.queue, DISPATCH_QUEUE).is_empty())
+    }
+
     pub fn queue_count(&self) -> usize {
         locked(&self.slots, DISPATCH_SLOTS).len()
     }

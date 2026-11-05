@@ -7,11 +7,17 @@
 //!                b2 hears b1's heartbeats: refuted, nothing taken over, spent
 //!   10 s         /ready 503 (B2BUA_LOOP_STALL_MS); the endpoint flips a probe
 //!                period or two later: the proxy already reads b1 dead, no verdict
-//!   15 to 17 s   the process exits (B2BUA_LOOP_EXIT_MS): no verdict is left to
-//!                tell, so the backup takes nothing over on the exit
-//!   + restart    b1 returns and reclaims its calls: about 22 s from the stall
-//!                on a 3 s restart, about 29 s behind a 10 s crash-loop backoff
+//!   16 to 17 s   the exit is asked (B2BUA_LOOP_EXIT_MS, its second reading past
+//!                the threshold): no verdict is left to tell, so the backup takes
+//!                nothing over on the exit
+//!   + restart    b1 returns and reclaims its calls
 //! ```
+//!
+//! The cells read 21.7 s from the stall to the call served again on a 3 s boot:
+//! the exit at 17 s, 1 s the cell waits after it, the boot, 0.7 s to read ready.
+//! Behind a 10 s crash-loop backoff they read 28.7 s, the backoff standing in for
+//! the boot; a real one adds it, about 32 s. Quick sinks: a silent limiter and a
+//! slow CDR sink hold the process up to 6 s more past the ask.
 //!
 //! The exit threshold against the readiness flip and the restart's length are
 //! the cells' axes. A stall that ends under the exit threshold keeps the worker

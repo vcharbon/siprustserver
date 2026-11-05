@@ -125,10 +125,13 @@ the one await with no timeout, no queue and no drop policy.
    A stalled router still draws the proxy's dead verdict, which its backup
    refutes on the heartbeats it still hears; the flip of its endpoint at the
    stall threshold tells nothing, the proxy already reading it dead, and neither
-   does the exit (ADR-0047, "A refuted verdict is spent"). Its calls wait for
-   the restart's reclaim, a message or the departure: about 22 s from the stall
-   on a 3 s restart (`stalled_worker_exits.rs`). New INVITEs meanwhile draw the
-   refusal on arrival from the queue's age (ADR-0037 item 11).
+   does the exit (ADR-0047, "A refuted verdict is spent"). The exit is asked 16
+   to 17 s after the stall, on its second reading past the threshold; the process
+   ends then with quick sinks, and up to about 24 s with a silent limiter and a
+   slow CDR sink (flush 3 s, close 3 s, threads 1 s). Its calls wait for the
+   restart's reclaim, a message or the departure: about 22 s from the stall with
+   quick sinks and a boot of 3 s (`stalled_worker_exits.rs`). New INVITEs meanwhile
+   draw the refusal on arrival from the queue's age (ADR-0037 item 11).
 5. **The invariant, stated:** an ingress loop awaits nothing whose completion
    a third party controls. The `RoutingStrategy` trait is `async` and its
    three call sites sit on the recv loop; a strategy that consults a network
@@ -139,8 +142,11 @@ the one await with no timeout, no queue and no drop policy.
    round trip: the loop goes on answering the proxy's probes, and a message
    queued before the flush is served first (ADR-0010 X2). A flush offered behind
    the call's queued release is lost with the other notices of that row
-   (`dispatch::class`): a refused copy has no live call left to meet, and a
-   stored one waits for a later message, the next flush or the reap. The bulk
+   (`dispatch::class`): a refused copy, whose body rode the flush, is gone with
+   it, the call it would have met being released, and a stored one waits for a
+   later message, the next flush or the reap. A flush that finds no call releases
+   the queue only with nothing queued behind it, so an item that makes the call
+   live keeps the queue for the offers that follow. The bulk
    reclaim's passes, run as a restarted node
    returns, before a proxy reads it alive, still take each call's lock on the
    loop.

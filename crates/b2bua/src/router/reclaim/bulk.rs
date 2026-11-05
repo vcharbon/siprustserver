@@ -88,7 +88,13 @@ pub(in crate::router) async fn arm_parked(ctx: &Arc<RouterCtx>) {
     let start_ms = ctx.clock.now_ms();
     let beat = || ctx.router_pulse.turning();
     let parked = ctx.state.parked();
-    let calls: Vec<Call> = parked.iter().filter_map(|call_ref| ctx.state.peek(call_ref)).collect();
+    let calls: Vec<Call> = parked
+        .iter()
+        .filter_map(|call_ref| {
+            beat();
+            ctx.state.peek(call_ref)
+        })
+        .collect();
     let l_max = largest_keepalive_gap(&calls, start_ms, &beat);
     let smoothing = Smoothing {
         now_ms: start_ms,

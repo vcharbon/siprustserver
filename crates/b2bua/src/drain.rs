@@ -103,8 +103,9 @@ impl DrainExit {
 pub struct DrainOutcome {
     /// Why it returned.
     pub exit: DrainExit,
-    /// Live calls at the exit — `0` for [`DrainExit::Quiescent`], the count the
-    /// node is about to abandon otherwise.
+    /// Live calls and new calls admitted and not born yet at the exit — `0` for
+    /// [`DrainExit::Quiescent`], the count the node is about to abandon
+    /// otherwise.
     pub residual: usize,
     /// How long the drain waited, its release flushes included.
     pub elapsed: Duration,
@@ -114,7 +115,8 @@ pub struct DrainOutcome {
 
 /// The three things the drain reads, each on every poll tick.
 pub struct DrainInputs {
-    /// Live calls this node is serving.
+    /// Live calls this node is serving, and new calls admitted and not born
+    /// yet.
     pub active: Probe<usize>,
     /// Whether every live call's other copy is held by a peer that has applied
     /// this node's changelog head (ADR-0031 D2).

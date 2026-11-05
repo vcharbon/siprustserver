@@ -55,9 +55,10 @@ impl B2buaCore {
     }
 
     /// [`active_calls`](Self::active_calls) and the new calls admitted and not
-    /// born yet, whose callers are owed a final, as an OWNED probe: the
-    /// live-call input of [`drain_probe`](Self::drain_probe), handed out on its
-    /// own for a caller that watches quiescence alone. Read-only.
+    /// born yet, whose callers are owed a final, as an OWNED probe: the input
+    /// of [`drain_probe`](Self::drain_probe) that says the node holds nothing,
+    /// handed out on its own for a caller that watches quiescence alone.
+    /// Read-only.
     pub fn active_calls_probe(&self) -> Arc<dyn Fn() -> usize + Send + Sync> {
         let ctx = self.ctx.clone();
         Arc::new(move || {

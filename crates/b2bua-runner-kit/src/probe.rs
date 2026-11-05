@@ -57,9 +57,10 @@ impl RunnerBase {
             fit: None,
         };
         let live = live_fn(core.loops().clone(), stall);
+        let serving = core.clone();
         let admin = admin::admin_routes(
             core.readiness(),
-            core.active_calls_probe(),
+            Arc::new(move || serving.active_calls()),
             live_calls(core),
             core.release_all_handle(),
         );

@@ -127,9 +127,13 @@ impl B2buaCore {
 /// both the borrowing accessor and the owned [`B2buaCore::drain_probe`] closure
 /// read one implementation. The drain polls it every tick: it reads the distinct
 /// topologies of the resident calls under one lock, no call cloned, and asks
-/// each holder's flow once.
+/// each holder's flow once. A new call admitted and not born yet has no copy
+/// anywhere, so no peer holds it.
 fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> bool {
     use repl_net::frame::Partition;
+    if ctx.unborn.count() > 0 {
+        return false;
+    }
     let me = &ctx.config.self_ordinal;
     // A call naming no topology, or with no backup, names no holder: nothing
     // can be holding it.
