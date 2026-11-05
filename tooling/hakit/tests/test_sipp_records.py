@@ -124,6 +124,15 @@ def test_a_call_served_late_after_its_100_runs_past_the_setup_deadline_to_its_an
     assert r["trying_at_ms"] is not None and r["first_provisional_at_ms"] is None
 
 
+def test_a_100_after_the_give_up_is_stamped_as_a_100_and_no_provisional(tmp_path: Path) -> None:
+    p = run_pair("peer-late-trying.xml", tmp_path)
+    assert p.uac_rc == 0, p.uac_exit
+    assert p.peer_rc == 0, p.peer_exit
+    (r,) = p.records
+    assert (r["ending"], r["final_code"], r["first_provisional_at_ms"]) == ("timeout", None, None)
+    assert jv.number(r, "trying_at_ms") > jv.number(r, "setup_ended_at_ms")
+
+
 def test_no_response_still_gives_up_at_the_setup_deadline_whatever_the_final_wait(tmp_path: Path) -> None:
     p = run_pair("peer-silent.xml", tmp_path, keys={"final_ms": "20000"})
     assert p.uac_rc == 0, p.uac_exit

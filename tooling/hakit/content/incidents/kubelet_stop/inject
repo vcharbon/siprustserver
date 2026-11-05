@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Stop the kubelet of every node node_selector names, every node when empty.
-# Facts: the nodes, the pods they hold in the namespace, the instant.
+# Stop the kubelet of the node pod runs on, or else of every node node_selector
+# names, every node when both are empty. Facts: the nodes, the pods they hold in
+# the namespace, the instant.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
-if [ -n "$HAKIT_PARAM_NODE_SELECTOR" ]; then
+if [ -n "$HAKIT_PARAM_POD" ]; then
+  list="$(kubectl -n "$NS" get pod "$HAKIT_PARAM_POD" -o jsonpath='{.spec.nodeName}')"
+elif [ -n "$HAKIT_PARAM_NODE_SELECTOR" ]; then
   list="$(kubectl get nodes -l "$HAKIT_PARAM_NODE_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
 else
   list="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"

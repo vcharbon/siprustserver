@@ -1,13 +1,20 @@
 schema: budget.v1
 name: worker-crash-loop
 description: >-
-  A worker crashing again and again on its live node: each death costs what
-  worker-kill allows, about 2 s of the offered rate that hears nothing and ends
-  its setup without a final, over the rounds a crash loop takes to reach a long
-  backoff, five at most on the kubelet's default. A caller who heard a provisional
-  and no final takes no allowance here or in any budget
-  (`silent_after_provisional`). Every other failed setup is a finding.
+  A worker crashing again and again on its live node, five rounds at most before
+  the kubelet's backoff is long: INVITEs placed on it before each death hear
+  nothing and end their setup without a final, about 0.5 s of the offered rate per
+  death when it read ready between them, so about 3 s over a loop for a stream of
+  a few calls a second, and setups slower for as long. A callee's 2xx in flight to
+  a dying process reaches the caller on a retransmission, the one at 3.5 s at the
+  latest, past a flip's verdict, so a CDR's answer may lead the caller's by that
+  much. A caller who heard a provisional and no final takes no allowance here or in
+  any budget (`silent_after_provisional`). Every other failed setup is a finding.
 setup_failed:
-  - { stream: "*", code: 0, reason: timeout, max_seconds: 10 }
+  - { stream: "*", code: 0, reason: timeout, max_seconds: 3 }
 setup_slow:
-  max_seconds: 10
+  max_seconds: 3
+cdr_mismatch:
+  differs:
+    max_calls: 0
+    excess_ms: 3500

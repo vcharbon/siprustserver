@@ -259,7 +259,8 @@ Content-Length: 0
   </action>
  </nop>
  <nop test="fp_seen" next="cancel"/>
- <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="1000" ontimeout="late_tick" next="cancel">
+ <recv response="100" optional="true" timeout="1000" ontimeout="late_tick" next="try_late"/>
+ <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="cancel">
   <action>
    <assignstr assign_to="now_t" value="[clock_tick]"/>
    <todouble assign_to="now_s" variable="now_t"/>
@@ -275,6 +276,17 @@ Content-Length: 0
  </recv>
  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" rrs="true" next="answer_ack"/>
  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="late_final"/>
+
+ <nop/>
+ <label id="try_late"/>
+ <nop next="cancel">
+  <action>
+   <assignstr assign_to="now_t" value="[clock_tick]"/>
+   <todouble assign_to="try_ms" variable="now_t"/>
+   <add assign_to="try_ms" variable="t_off"/>
+   <assign assign_to="try_flag" value="1"/>
+  </action>
+ </nop>
 
  <nop/>
  <label id="setup_abort"/>

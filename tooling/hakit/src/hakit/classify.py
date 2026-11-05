@@ -8,8 +8,10 @@ drew no final at all whatever the shape expects; a final the shape does not
 expect is otherwise an `unexpected_ending`. A setup the generator gave up on
 after hearing a provisional, 100 Trying included, is `silent_after_provisional`:
 past it the caller sends nothing more (RFC 3261 §17.1.1.2), so nothing but its
-own timer ends the wait, and no budget allows it. `producer_verdict` is never
-read.
+own timer ends the wait, and no budget allows it. A final that came more than
+the stream's setup deadline after the first provisional heard is `final_late`:
+`setup_slow` stops at that provisional, and the caller's wait past it is read
+here. `producer_verdict` is never read.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from .model import ExpectedEnding, Leg, Shape
 
 SETUP_FAILED = "setup_failed"
 SILENT_AFTER_PROVISIONAL = "silent_after_provisional"
+FINAL_LATE = "final_late"
 UNEXPECTED_ENDING = "unexpected_ending"
 SETUP_SLOW = "setup_slow"
 DIALOG_REQUEST_FAILED = "dialog_request_failed"
@@ -164,12 +167,32 @@ def silent_after_provisional(r: Json) -> bool:
     heard nothing, the generator's CANCEL being all that came of it."""
     if jv.string(r, "ending") != "timeout" or jv.opt_int(r, "final_code") is not None:
         return False
-    heard = [t for t in (jv.opt_number(r, "trying_at_ms"), jv.opt_number(r, "first_provisional_at_ms")) if t is not None]
+    heard = _first_heard(r)
     gave_up = jv.opt_number(r, "setup_ended_at_ms")
-    return bool(heard) and (gave_up is None or min(heard) <= gave_up)
+    return heard is not None and (gave_up is None or heard <= gave_up)
 
 
-def classify(r: Json, shape: Shape) -> Classified:
+def _first_heard(r: Json) -> float | None:
+    """When the caller first heard a provisional, 100 Trying included."""
+    heard = [t for t in (jv.opt_number(r, "trying_at_ms"), jv.opt_number(r, "first_provisional_at_ms")) if t is not None]
+    return min(heard) if heard else None
+
+
+def _final_late(r: Json, base: Impact, wait_ms: float | None) -> Impact | None:
+    """The `final_late` impact of a call whose final came more than `wait_ms`
+    after the first provisional it heard; a caller's own CANCEL is not waited on."""
+    heard = _first_heard(r)
+    final = jv.opt_number(r, "setup_ended_at_ms")
+    if wait_ms is None or heard is None or final is None or jv.opt_int(r, "final_code") is None:
+        return None
+    if jv.string(r, "ending") == "abandoned" or final - heard <= wait_ms:
+        return None
+    return replace(base, cls=FINAL_LATE, at_ms=final, detail=f"{round(final - heard)} ms", answered=False)
+
+
+def classify(r: Json, shape: Shape, final_late_after_ms: float | None = None) -> Classified:
+    """`final_late_after_ms` is the stream's setup deadline: past it a heard
+    caller's final is `final_late`; None reads no such impact."""
     stream = jv.string(r, "stream")
     call_id = jv.string(r, "call_id")
     started = jv.number(r, "started_at_ms")
@@ -211,6 +234,9 @@ def classify(r: Json, shape: Shape) -> Classified:
             out.impacts.append(replace(base, code=code or 0, reason=reason or ending, detail=f"ending {ending}"))
     leg_impacts = _leg_impacts(r, shape, base) if caller_ok else []
     out.impacts.extend(leg_impacts)
+    late = _final_late(r, base, final_late_after_ms)
+    if late is not None:
+        out.impacts.append(late)
 
     for f in failures:
         kind = jv.string(f, "kind")

@@ -125,6 +125,10 @@ pub struct Args {
     /// Shorthand: per-recv wall-clock timeout (ms).
     #[arg(long, default_value_t = 5000)]
     pub recv_timeout_ms: u64,
+    /// How long a call waits on one step, the caller's wait for its INVITE's
+    /// final among them (ms). Unset: each plan's ceiling, else 32 s.
+    #[arg(long)]
+    pub final_wait_ms: Option<u64>,
     /// Max stored callflow samples per (scenario, result-class); the first N
     /// calls of each scenario record their flow.
     #[arg(long, default_value_t = 10)]

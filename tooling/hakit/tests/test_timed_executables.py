@@ -218,6 +218,17 @@ def test_kubelet_stop_stops_the_kubelets_its_node_selector_names(tmp_path: Path)
     assert f["nodes"] == ["a1", "a2"] and f["pods"] == ["w", "w"]
 
 
+def test_kubelet_stop_reads_the_node_its_pod_runs_on(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "kubelet_stop", pod="w-1")
+    sb.rules(
+        Rule(r"get pod w-1 -o jsonpath=\{\.spec\.nodeName\}$", "a2"),
+        Rule(r"get pods --field-selector spec.nodeName=a2 -o json", '{"items": [{"metadata": {"name": "w-1"}}]}'),
+        Rule(r"docker exec a2 systemctl stop kubelet$"),
+    )
+    assert facts(sb.run("inject"))["nodes"] == ["a2"]
+    assert sb.lines("systemctl stop") == ["docker exec a2 systemctl stop kubelet"]
+
+
 def test_kubelet_stop_with_no_selector_stops_every_kubelet(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "kubelet_stop")
     sb.rules(

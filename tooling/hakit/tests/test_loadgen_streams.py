@@ -18,7 +18,7 @@ from hakit.dryrun import simulated
 from hakit.executor import Call, HttpResult, ProcResult, Rule
 from hakit.jsonval import Json, as_obj
 from hakit.lab import lab_from_env
-from hakit.loadgen import parse_metrics
+from hakit.loadgen import LoadgenStream, give_up_s, parse_metrics
 from hakit.paths import BASE_CONTENT
 from hakit.profile import parse_profile
 from hakit.runner import Runner, RunRefused
@@ -150,13 +150,25 @@ def test_a_loadgen_firing_runs_the_product_image_at_its_slot_with_the_runners_fl
     assert flag(argv, "--records-url") == lab.vlogs_url_from_generators
     assert (flag(argv, "--ring-delay-ms"), flag(argv, "--talk-time-ms")) == ("1000", "2000")
     assert flag(argv, "--recv-timeout-ms") == "10000"
+    assert not any(a.startswith("--final-wait-ms") for a in argv)
     assert flag(argv, "--case") == "/cases/c.json" and "--auto-retransmit" in argv and "--quiet" not in argv
+
+
+def test_the_final_wait_reaches_the_generator_as_its_own_flag(tmp_path: Path) -> None:
+    c = content(tmp_path, [SPIKE], [base(), burst()])
+    raw = c.profiles["load"].raw
+    s = parse_profile({**raw, "final_wait_s": 250}).stream("burst")
+    assert s is not None
+    argv = LoadgenStream("r", s, 1, tmp_path, lab_from_env({}), simulated()[1]).argv()
+    assert "--final-wait-ms=250000" in argv
+    assert flag(argv, "--recv-timeout-ms") == "10000"
+    assert give_up_s(s) == 250
 
 
 def test_the_call_limit_is_the_in_flight_cap(tmp_path: Path) -> None:
     run_dir, calls = run(tmp_path, [final_metrics(metrics(0))])
     [argv] = started(calls)
-    worst = 10 + 1 + 2 + 32
+    worst = 32 + 1 + 2 + 32
     assert flag(argv, "--max-in-flight") == str(50 * worst + 10)
     docs = {str(d["stream"]): d for d in json.loads((run_dir / "streams.json").read_text())}
     assert docs["burst"]["call_limit"] == 50 * worst + 10

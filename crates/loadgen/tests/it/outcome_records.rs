@@ -18,7 +18,7 @@ use loadgen::{
 use scenario_harness::Harness;
 use serde_json::Value;
 
-use crate::fake_rig::{addr, cfg, mix, setup_fake, setup_fake_faulty, setup_fake_tuned};
+use crate::fake_rig::{addr, cfg, mix, setup_fake, setup_fake_faulty, setup_fake_tuned, RECV};
 
 type Rig = (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>);
 
@@ -165,6 +165,121 @@ async fn a_stalled_setup_is_a_timeout_whatever_its_teardown_draws() {
         assert_eq!(r["setup_ended_at_ms"], r["ended_at_ms"], "{r}");
         assert_eq!(r["producer_verdict"], "timeout", "{r}");
         assert_eq!(r["legs"], serde_json::json!([]), "the callee leg never opened: {r}");
+    }
+}
+
+/// The records of one call against a raw peer that answers an INVITE 100 Trying
+/// and nothing else, with `final_wait` on the call.
+async fn against_a_peer_silent_after_its_100(
+    base: u16,
+    final_wait: Option<Duration>,
+) -> Vec<Value> {
+    use loadgen::{Correlation, EndpointSpec, Role};
+    use sip_net::{BindUdpOpts, SignalingNetwork};
+
+    let sim = Arc::new(sip_net_testkit::SimulatedSignalingNetwork::new(1));
+    let clock = sip_clock::Clock::test_at(0);
+    let correlation = Correlation::header("X-Loadgen-Id");
+    let (uac, uas, refer, peer) = (addr(base), addr(base + 1), addr(base + 2), addr(base + 3));
+    let core = MuxCore::bind_on(
+        sim.as_ref(),
+        vec![
+            EndpointSpec { addr: uac, role: Role::Caller },
+            EndpointSpec { addr: uas, role: Role::Callee },
+            EndpointSpec { addr: refer, role: Role::Callee },
+        ],
+        correlation.clone(),
+        64,
+        8,
+        RECV,
+        clock.clone(),
+    )
+    .await
+    .unwrap();
+    let socket = sim.bind_udp(BindUdpOpts::new(peer, 64)).await.unwrap();
+    let silent = tokio::spawn(async move {
+        while let Some(p) = socket.recv().await {
+            let text = String::from_utf8_lossy(&p.raw).into_owned();
+            if !text.starts_with("INVITE ") {
+                continue;
+            }
+            let copied: Vec<&str> = text
+                .lines()
+                .filter(|l| {
+                    ["Via:", "From:", "To:", "Call-ID:", "CSeq:"].iter().any(|h| l.starts_with(h))
+                })
+                .collect();
+            let trying = format!(
+                "SIP/2.0 100 Trying\r\n{}\r\nContent-Length: 0\r\n\r\n",
+                copied.join("\r\n")
+            );
+            let _ = socket.send_to(trying.as_bytes(), p.src).await;
+        }
+    });
+    let transport = Arc::new(MuxTransport {
+        core: core.clone(),
+        uac_addr: uac,
+        uas_addr: uas,
+        refer_addr: refer,
+        correlation,
+        recv_timeout: RECV,
+        clock,
+    });
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 }));
+    let file =
+        std::env::temp_dir().join(format!("loadgen-silent-{}-{base}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let sink = Arc::new(OutcomeSink::new("run-1", "loadgen", "main", &file, None).unwrap());
+    let mut c = cfg(peer, 1.0, 1, 4, 0x51);
+    c.call.final_wait = final_wait;
+    Driver::new(c, vec![mix("basic_call", 1.0)], reporter, transport)
+        .with_outcomes(sink.clone())
+        .run()
+        .await;
+    sink.close();
+    silent.abort();
+    let records = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("one JSON record per line"))
+        .collect();
+    let _ = std::fs::remove_file(&file);
+    records
+}
+
+/// How long the record's caller waited for its final, and its 100's instant.
+fn waited_for_its_final(r: &Value) -> i64 {
+    assert_common(r);
+    assert_eq!((r["ending"].as_str(), r["final_code"].as_u64()), (Some("timeout"), None), "{r}");
+    let started = r["started_at_ms"].as_i64().unwrap();
+    let trying = r["trying_at_ms"].as_i64().expect("the caller heard the 100");
+    assert!(trying - started < 1_000, "{r}");
+    r["setup_ended_at_ms"].as_i64().unwrap() - started
+}
+
+/// A caller who heard a 100 and no final waits the final wait, far past the
+/// standard 32 s step, and records both the 100 and the instant it gave up.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_100_and_no_final_waits_the_final_wait() {
+    let records = against_a_peer_silent_after_its_100(7830, Some(Duration::from_secs(250))).await;
+    assert!(!records.is_empty());
+    for r in &records {
+        let waited = waited_for_its_final(r);
+        assert!((250_000..255_000).contains(&waited), "gave up at the final wait: {r}");
+    }
+}
+
+/// With no final wait the caller gives up at the standard 32 s step.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_100_and_no_final_gives_up_at_the_standard_step_with_no_final_wait() {
+    let records = against_a_peer_silent_after_its_100(7840, None).await;
+    assert!(!records.is_empty());
+    for r in &records {
+        let waited = waited_for_its_final(r);
+        assert!((32_000..37_000).contains(&waited), "gave up at the standard step: {r}");
     }
 }
 

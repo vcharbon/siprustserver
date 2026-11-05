@@ -51,7 +51,7 @@ def content(tmp_path: Path, streams: list[Json]) -> Content:
         "name": "pods",
         "description": "d",
         "duration_s": 300,
-        "drain_s": 60,
+        "drain_s": 70,
         "settle_s": 15,
         "setup_slow_ms": 1000,
         "catalogs": ["x-api-call"],

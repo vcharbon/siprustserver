@@ -83,6 +83,42 @@ def test_a_give_up_after_every_window_closed_is_charged_to_the_window_it_was_pen
     assert len(rows_of(v, "silent_after_provisional")) == 1
 
 
+def test_a_call_pending_across_two_windows_names_the_first(tmp_path: Path) -> None:
+    second_at = AT + 150_000
+    events = [*kill(1, AT), *kill(2, second_at)]
+    # Sent into the first fault; its give-up, 250 s later, falls inside no window
+    # or a later one: it is charged to the fault it met.
+    started = AT + 1_000
+    v = compute(run_dir(tmp_path, [silent_after("heard-100", started, deadline_ms=152_000)], calls=1, events=events), SCHEMAS)
+    w1, w2 = jv.objs(v, "windows")
+    assert [r["class"] for r in jv.objs(w1, "impacts")] == ["silent_after_provisional"]
+    assert jv.objs(w2, "impacts") == []
+
+
+def test_a_final_late_after_the_provisional_is_read_and_a_budget_may_allow_it(tmp_path: Path) -> None:
+    # kill-worker-smoke's basic stream has a 32 s setup deadline.
+    late = record("late", AT + 1_000, provisional=300, setup=120_000, answered=120_000, ended=150_000)
+    on_time = record("on-time", AT + 1_000, provisional=300, setup=32_000, answered=32_000, ended=60_000)
+    v = compute(run_dir(tmp_path, [late, on_time], calls=2, events=kill(1, AT)), SCHEMAS)
+    assert SCHEMAS.errors("verdict.v1", v) == []
+    assert v["status"] == "fail"
+    (row,) = rows_of(v, "final_late")
+    assert (row["stream"], row["count"], row["allowed"], row["finding"], row["call_ids"]) == ("basic", 1, 0, True, ["late"])
+
+    allows: Json = {"schema": "budget.v1", "name": "late-ok", "description": "d", "final_late": {"max_calls": 1}}
+    d = run_dir(tmp_path / "b", [late, on_time], calls=2, events=kill(1, AT, budget="late-ok"), budgets=[allows])
+    (row,) = rows_of(compute(d, SCHEMAS), "final_late")
+    assert (row["allowed"], row["finding"]) == (1, False)
+
+
+def test_a_late_final_measures_from_the_first_thing_heard(tmp_path: Path) -> None:
+    # Heard only 40 s in, answered 8 s later: a first response that late is a
+    # `setup_slow`, not a wait past a provisional.
+    late_first = record("late-first", AT + 1_000, provisional=40_000, setup=48_000, answered=48_000, ended=70_000)
+    v = compute(run_dir(tmp_path, [late_first], calls=1, events=kill(1, AT)), SCHEMAS)
+    assert rows_of(v, "final_late") == []
+
+
 def test_outside_every_window_it_is_unattributed_and_a_finding(tmp_path: Path) -> None:
     v = compute(run_dir(tmp_path, [silent_after("heard-100", T0 + 1_000)], calls=1, events=[]), SCHEMAS)
     assert v["status"] == "fail"

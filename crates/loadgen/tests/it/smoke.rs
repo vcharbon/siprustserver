@@ -247,9 +247,8 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
         seed,
         call: CallConfig {
             via,
-            // route_all_* routes the b-leg by config — the transparent layout
-            // (the refer scenarios resolve charlie through the same seam and
-            // authorize via their per-run `refer_key`).
+            // route_all_* routes the b-leg by config, the transparent layout; the
+            // refer scenarios resolve charlie and authorize via their `refer_key`.
             egress: EgressPolicy::Transparent,
             options_hold: Duration::from_millis(120),
             options_cadence: Duration::from_millis(40),
@@ -260,6 +259,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
             reinvite_gap: Duration::from_millis(0),
             long_hold: Duration::from_millis(120),
             teardown_quiesce: Duration::from_millis(200),
+            final_wait: None,
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),

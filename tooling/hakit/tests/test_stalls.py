@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kit import T0, paced, record, silent_after, timed_out
-from rundir import SCHEMAS, kill, run_dir
+from rundir import CONTENT, SCHEMAS, kill, run_dir
 
 from hakit import jsonval as jv
 from hakit.jsonval import Json
@@ -147,6 +147,20 @@ def test_a_give_up_after_a_provisional_inside_a_stall_is_a_generator_stall_findi
     assert [(u["class"], u["call_ids"]) for u in jv.objs(v, "unattributed")] == [("silent_after_provisional", ["before"])]
     (i,) = jv.objs(v, "integrity")
     assert (i["kind"], i["call_ids"]) == ("generator_stall", ["gave-up"])
+
+
+def test_a_loadgen_give_up_is_read_at_its_own_wait_not_the_final_wait_it_does_not_have(tmp_path: Path) -> None:
+    at = T0 + 60_000
+    recs = paced_with_stall(at, 1000)
+    profile = CONTENT.profiles["kill-worker-smoke"].raw
+    loadgen_stream: Json = {**jv.objs(profile, "streams")[0], "driver": "loadgen", "params": {"image": "i", "command": "c"}}
+    del loadgen_stream["scenario"]
+    late = timed_out("loadgen", at - 31_500)
+    late["setup_ended_at_ms"] = late["ended_at_ms"] = at + 1_005
+    recs.append(late)
+    d = run_dir(tmp_path, recs, calls=len(recs), events=[], profile={"generator_stall_ms": 500, "streams": [{**loadgen_stream, "setup_deadline_s": 10}]})
+    (i,) = jv.objs(compute(d, SCHEMAS), "integrity")
+    assert (i["kind"], i["call_ids"]) == ("generator_stall", ["loadgen"])
 
 
 def test_a_measurement_across_a_stall_is_left_out_of_the_recovery_baseline(tmp_path: Path) -> None:

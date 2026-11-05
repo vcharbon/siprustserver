@@ -42,6 +42,16 @@
       "then": { "required": ["max_seconds"] },
       "not": { "required": ["max_calls", "max_seconds"] }
     },
+    "final_late": {
+      "description": "Callers whose INVITE's final came more than the stream's setup deadline after the first provisional they heard. `setup_slow` stops at that provisional, so this reads the wait past it. Absent: none may be late.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_calls": { "type": "integer", "minimum": 0 },
+        "max_seconds": { "type": "number", "minimum": 0 }
+      },
+      "not": { "required": ["max_calls", "max_seconds"] }
+    },
     "cdr_mismatch": {
       "description": "CDR mismatches in the window, by kind: `missing` (a call that owes a CDR has none), `extra` (a CDR no call of the run owns), `duplicate` (a second distinct CDR of a call), `differs` (a disposition or a duration other than the caller saw). A kind not named allows 0.",
       "type": "object",

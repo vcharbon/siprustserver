@@ -13,8 +13,9 @@ An in-dialog impact the window holding its instant allows (`in_dialog`) is
 charged there like a failed setup; any other carries every window whose
 inject fell inside the call's lifetime before the impact or that holds the
 impact's instant, and with none it is `unattributed`. A slow setup measured across a generator stall is no impact:
-it is returned apart, with its stall. `silent_after_provisional` belongs to its
-window as a failed setup does and every budget allows it 0.
+it is returned apart, with its stall. `silent_after_provisional` and `final_late`
+belong to the first window open while the call was pending, naming the fault it
+met, not one its wait outlasted; every budget allows the first 0.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .cdrjoin import CDR_MISMATCH, MISSING
-from .classify import SETUP_FAILED, SETUP_SLOW, SILENT_AFTER_PROVISIONAL, UNEXPECTED_ENDING, Impact, SetupLatency
+from .classify import FINAL_LATE, SETUP_FAILED, SETUP_SLOW, SILENT_AFTER_PROVISIONAL, UNEXPECTED_ENDING, Impact, SetupLatency
 from .jsonval import Json
 from .model import NO_BUDGET, Allowance, Budget, InDialogAllowance
 from .stalls import Stall
@@ -143,9 +144,16 @@ def _budget_window(windows: list[Window], imp: Impact) -> Window | None:
     treatment's unexpected ending before answer), the first window open while
     it was pending: its INVITE went out into the fault, and its end came after
     the window closed."""
+    if imp.cls in (SILENT_AFTER_PROVISIONAL, FINAL_LATE):
+        return _first_pending(windows, imp)
     w = _holding(windows, imp.at_ms)
-    if w is not None or imp.answered or imp.cls not in (SETUP_FAILED, SILENT_AFTER_PROVISIONAL, UNEXPECTED_ENDING):
+    if w is not None or imp.answered or imp.cls not in (SETUP_FAILED, UNEXPECTED_ENDING):
         return w
+    return _first_pending(windows, imp)
+
+
+def _first_pending(windows: list[Window], imp: Impact) -> Window | None:
+    """The first window open while the setup was pending."""
     return next((w for w in windows if w.opened_at_ms <= imp.at_ms and imp.started_at_ms <= w.closed_at_ms), None)
 
 
@@ -193,7 +201,7 @@ def judge(
     stalled: list[tuple[SetupLatency, Stall]] = []
 
     for imp in impacts:
-        if imp.setup_lost:
+        if imp.setup_lost or imp.cls == FINAL_LATE:
             w = _budget_window(windows, imp)
             if w is None:
                 outside[(imp.cls, imp.stream, imp.code or 0, imp.reason or "", imp.retry_after)].append(imp)
@@ -259,10 +267,17 @@ def judge(
         out_s = outage_s(w)
         rows = _keyed(SETUP_FAILED, [i for i in mine if i.cls == SETUP_FAILED], budget.setup_failed, cps, out_s)
         silent: dict[str, list[Impact]] = defaultdict(list)
+        late: dict[str, list[Impact]] = defaultdict(list)
         for imp in mine:
             if imp.cls == SILENT_AFTER_PROVISIONAL:
                 silent[imp.stream].append(imp)
+            elif imp.cls == FINAL_LATE:
+                late[imp.stream].append(imp)
         rows += [_row(SILENT_AFTER_PROVISIONAL, s, items, 0, cps.get(s, 0.0)) for s, items in sorted(silent.items())]
+        rows += [
+            _row(FINAL_LATE, s, items, budget.final_late.allowed(cps.get(s, 0.0), out_s), cps.get(s, 0.0))
+            for s, items in sorted(late.items())
+        ]
         rows += _keyed(UNEXPECTED_ENDING, [i for i in mine if i.cls == UNEXPECTED_ENDING], budget.unexpected_ending, cps, out_s)
         rows += _in_dialog_rows(dialog_in_window.get(w.event, []), budget.in_dialog, cps)
         by_stream: dict[str, list[SetupLatency]] = defaultdict(list)

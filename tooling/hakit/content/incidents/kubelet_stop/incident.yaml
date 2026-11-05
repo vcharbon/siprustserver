@@ -1,8 +1,9 @@
 schema: incident.v1
 name: kubelet_stop
 description: >-
-  Stop the kubelet on the kind nodes node_selector names (every node, the
-  control plane too, when empty), for duration_s, then start it. Containers
+  Stop the kubelet on the node pod runs on, or else on the kind nodes
+  node_selector names (every node, the control plane too, when both are empty),
+  for duration_s, then start it. Containers
   and their network keep running: the node's heartbeats stop with its
   workloads untouched. Past the controller manager's node grace period the node
   reads NotReady and its pods not ready, whatever they answer. A short
@@ -13,6 +14,10 @@ target:
   selector: app=b2bua-worker
   pick: all
 params:
+  pod:
+    type: string
+    default: ""
+    description: A pod of the namespace, read at inject; the node it runs on loses its kubelet.
   node_selector:
     type: string
     default: ""

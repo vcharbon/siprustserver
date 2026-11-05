@@ -148,6 +148,14 @@ class OneAtATime:
 
 
 @dataclass(frozen=True)
+class Placement:
+    """Pods of a selector that must run on nodes of a node selector (placement.py)."""
+
+    selector: str
+    node_selector: str
+
+
+@dataclass(frozen=True)
 class ReportMetric:
     """A series the run's report reads per window, per pod (report_metrics.py):
     a counter's `increase`, or a gauge's `max`."""
@@ -177,6 +185,7 @@ class Profile:
     limiters: list[LimiterSpec] = field(default_factory=lambda: [])
     one_at_a_time: list[OneAtATime] = field(default_factory=lambda: [])
     report_metrics: list[ReportMetric] = field(default_factory=lambda: [])
+    placement: list[Placement] = field(default_factory=lambda: [])
 
     def stream(self, name: str) -> Stream | None:
         return next((s for s in self.streams if s.name == name), None)
@@ -283,4 +292,5 @@ def parse_profile(d: Json) -> Profile:
         defaults={k: jv.as_obj(v, k) for k, v in jv.obj(d, "defaults").items()},
         raw=d,
         report_metrics=[_report_metric(m) for m in jv.objs(d, "report_metrics")],
+        placement=[Placement(jv.string(p, "selector"), jv.string(p, "node_selector")) for p in jv.objs(d, "placement")],
     )

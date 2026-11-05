@@ -36,6 +36,7 @@ from .loadgen import LoadgenStream
 from .model import Incident
 from .offschedule import OffSchedule, clear_active, mark_active
 from .paths import REPO_ROOT
+from .placement import placement_errors
 from .preflight import earlier_open_events, host_facts, limit_errors
 from .profile import Profile
 from .rate_steps import RateSteps
@@ -184,7 +185,7 @@ class Runner:
         errs = self.refusals(profile, lab_capabilities(self.lab, self.executor))
         if errs:
             raise RunRefused("\n".join(errs))
-        errs = ready_errors(profile, self.lab, self.executor)
+        errs = ready_errors(profile, self.lab, self.executor) + placement_errors(profile, self.lab, self.executor)
         if errs:
             raise RunRefused("\n".join(errs))
         stale = earlier_open_events(self.results)

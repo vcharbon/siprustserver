@@ -200,8 +200,9 @@ async fn run_built_actor_call_observed(
     let caller = originating_role(&actors);
     let expect = expect.in_context(env);
     let obs = ObservedState::new();
-    // An explicit ceiling replaces the standard re-emission bound.
-    let step_timeout = ceiling.unwrap_or(STEP_TIMEOUT);
+    // An explicit ceiling replaces the standard re-emission bound; the longer of
+    // the plan's and the environment's holds.
+    let step_timeout = ceiling.max(env.wait_ceiling).unwrap_or(STEP_TIMEOUT);
     // The deferred-auth adapter (RFC 3261 §22.2) reaches the caller's
     // establishing INVITE from the call env — `None` on every current surface
     // (no CLI flag mints one yet), so a challenge classifies unchanged.

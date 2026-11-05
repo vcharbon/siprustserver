@@ -215,9 +215,11 @@ class Budget:
     # least this many of them (established.py); None: not judged.
     established_min: int | None = None
     in_dialog: list[InDialogAllowance] = field(default_factory=lambda: [])
+    # Finals later than the stream's setup deadline after the first provisional.
+    final_late: SetupSlowAllowance = SetupSlowAllowance(None, None, None)
 
 
-NO_BUDGET = Budget("", [], [], SetupSlowAllowance(None, None, None), raw={})
+NO_BUDGET =Budget("", [], [], SetupSlowAllowance(None, None, None), raw={})
 
 
 def _allowances(d: Json, key: str) -> list[Allowance]:
@@ -251,6 +253,7 @@ def _count_allowance(d: Json) -> CountAllowance:
 
 def parse_budget(d: Json) -> Budget:
     slow = jv.obj(d, "setup_slow")
+    late = jv.obj(d, "final_late")
     rec = jv.obj(d, "recovery")
     return Budget(
         name=jv.string(d, "name"),
@@ -272,6 +275,11 @@ def parse_budget(d: Json) -> Budget:
             latency_slack_ms=jv.number(rec, "latency_slack_ms", 50),
         ),
         classes={k: jv.number(jv.as_obj(v, k), "max") for k, v in jv.obj(d, "classes").items()},
+        final_late=SetupSlowAllowance(
+            threshold_ms=None,
+            max_calls=jv.opt_int(late, "max_calls"),
+            max_seconds=jv.opt_number(late, "max_seconds"),
+        ),
         established_min=jv.opt_int(jv.obj(d, "established"), "min_calls"),
         in_dialog=[
             InDialogAllowance(
