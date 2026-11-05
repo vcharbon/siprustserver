@@ -329,9 +329,9 @@ def test_next_hop_dead_times_the_first_unfit_reading_apart_from_the_withdrawal(t
     still_routed = [route_rule(IVIP, "172.20.0.3", "172.20.0.4", once=True) for _ in range(6)]
     sb.rules(ONE_PROXY, *PLANES, NEIGHBOUR, SILENCE, *still_routed, *E1_ONLY, Rule(FITZ, "unfit external-face"))
     f = facts(sb.run("inject"))
-    unfit = as_obj(f["unfit_ms"])["e2"]
-    assert isinstance(unfit, int)
-    assert unfit < as_obj(f["withdrawn_ms"])[f"{IVIP} 172.20.0.4"], "the reading does not wait for the routes"
+    unfit, gone = as_obj(f["unfit_ms"])["e2"], as_obj(f["withdrawn_ms"])[f"{IVIP} 172.20.0.4"]
+    assert isinstance(unfit, int) and isinstance(gone, int)
+    assert unfit < gone, "the reading does not wait for the routes"
 
 
 def test_next_hop_dead_counts_only_an_unfit_external_face(tmp_path: Path) -> None:
