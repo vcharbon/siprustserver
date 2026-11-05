@@ -69,14 +69,17 @@ class ShellScripts(unittest.TestCase):
         for sysctl, var in (("base_reachable_time_ms", "NEIGH_BASE_REACHABLE_TIME_MS"),
                             ("delay_first_probe_time", "NEIGH_DELAY_FIRST_PROBE_S"),
                             ("ucast_solicit", "NEIGH_UCAST_SOLICIT"),
+                            ("mcast_solicit", "NEIGH_MCAST_SOLICIT"),
                             ("retrans_time_ms", "NEIGH_RETRANS_TIME_MS")):
             self.assertIn(f'neigh_set {sysctl} "${var}"', script)
         self.assertIn("echo 1 > /proc/sys/net/ipv4/fib_multipath_use_neigh", script)
         self.assertEqual(
             {v: env(c)[v] for v in ("NEIGH_BASE_REACHABLE_TIME_MS", "NEIGH_DELAY_FIRST_PROBE_S",
-                                    "NEIGH_UCAST_SOLICIT", "NEIGH_RETRANS_TIME_MS")},
+                                    "NEIGH_UCAST_SOLICIT", "NEIGH_MCAST_SOLICIT",
+                                    "NEIGH_RETRANS_TIME_MS")},
             {"NEIGH_BASE_REACHABLE_TIME_MS": "4000", "NEIGH_DELAY_FIRST_PROBE_S": "1",
-             "NEIGH_UCAST_SOLICIT": "3", "NEIGH_RETRANS_TIME_MS": "1000"})
+             "NEIGH_UCAST_SOLICIT": "12", "NEIGH_MCAST_SOLICIT": "12",
+             "NEIGH_RETRANS_TIME_MS": "250"})
 
     def test_masq_exempt_reads_only_what_it_is_given(self) -> None:
         ds = find(render(SIPRUST, *KIND), "DaemonSet", "masq-exempt")

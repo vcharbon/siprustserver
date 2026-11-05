@@ -15,6 +15,7 @@ each runner's startup check.
 | proxy HEALTH_ISOLATION_MS + 2 × `routeGuard.pollMs` + `bfd.detectMultiplier` × max(`bfd.receiveIntervalMs`, `bfd.transmitIntervalMs`) ≤ `routeGuard.withdrawWithinMs` (route guard on) | a proxy cut off every worker leaves the routers' ECMP within the bound (ADR-0056 §10) |
 | 2 × proxy PROXY_EXT_FACE_CHECK_MS + 2 × `routeGuard.pollMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a proxy whose external link is lost, read down twice in a row, leaves it within the bound |
 | 1.5 × `neighbour.baseReachableTimeMs` + `neighbour.delayFirstProbeSeconds` + `neighbour.ucastSolicit` × `neighbour.retransTimeMs` + 2 × proxy PROXY_EXT_FACE_CHECK_MS + 2 × `routeGuard.pollMs` + the BFD detection time ≤ 32000 ms (route guard on) | a next hop dying with its carrier up leaves the node's egress, and with no next hop left the node leaves the routers' ECMP, while a final retransmitted through it can still reach its caller inside Timer H (64 × T1); it stays outside the 3.4 s bound |
+| 2 × `neighbour.retransTimeMs` ≤ proxy PROXY_EXT_FACE_CHECK_MS (route guard on) | a carrier flap's INCOMPLETE aftermath, until the ARP retry, meets one reading only, which holds the face |
 | `routeGuard.deadMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a hung or dead proxy, whose guard stops refreshing, leaves it within the bound |
 | proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.metallb.connectTimeSeconds` + 2 s (route guard on) | the pod is Ready once its guard let the node out; its BGP sessions are back before the rollout stops the next proxy |
 | proxy PROXY_METRICS keeps port 9090 | the readiness and liveness probes and the route guard read the proxy there |
@@ -133,6 +134,9 @@ operator's to keep consistent.
 {{- $deadHop := add (div (mul 3 (int64 $n.baseReachableTimeMs)) 2) (mul (int64 $n.delayFirstProbeSeconds) 1000) (mul (int64 $n.ucastSolicit) (int64 $n.retransTimeMs)) (mul 2 $faceCheck) (mul 2 $poll) (mul $mult $interval) }}
 {{- if gt $deadHop 32000 }}
 {{- fail (printf "1.5 × proxy.neighbour.baseReachableTimeMs=%d + proxy.neighbour.delayFirstProbeSeconds=%d s + proxy.neighbour.ucastSolicit=%d × proxy.neighbour.retransTimeMs=%d + 2 × proxy PROXY_EXT_FACE_CHECK_MS=%d + 2 × proxy.routeGuard.pollMs=%d + the BFD detection %d ms = %d ms must not exceed 32000 ms, RFC 3261 Timer H: a next hop dying with its carrier up would swallow a final until its transaction gives up" (int64 $n.baseReachableTimeMs) (int64 $n.delayFirstProbeSeconds) (int64 $n.ucastSolicit) (int64 $n.retransTimeMs) $faceCheck $poll (mul $mult $interval) $deadHop) }}
+{{- end }}
+{{- if gt (mul 2 (int64 $n.retransTimeMs)) $faceCheck }}
+{{- fail (printf "2 × proxy.neighbour.retransTimeMs=%d must not exceed proxy PROXY_EXT_FACE_CHECK_MS=%d: a carrier flap's INCOMPLETE aftermath would meet two readings and latch the face" (int64 $n.retransTimeMs) $faceCheck) }}
 {{- end }}
 {{- $connect := mul (int64 $p.announce.metallb.connectTimeSeconds) 1000 }}
 {{- if le (mul (int64 $p.minReadySeconds) 1000) (add (mul $period 1000) $connect $margin) }}

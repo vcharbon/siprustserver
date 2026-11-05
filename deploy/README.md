@@ -164,7 +164,8 @@ provides:
   who heard a 100 then loses its final once Timer H runs out. The `vip-loopback` init step turns
   `net.ipv4.fib_multipath_use_neigh` on, so multipath leaves a next hop not resolved, and sets the
   neighbour timers of every interface from `proxy.neighbour`: such a next hop reads `FAILED`
-  within 10 s by default, and a router silent to ARP for 3 s reads dead (`docs/TUNING.md`).
+  within 10 s by default, a router silent to ARP for 3 s reads dead, and a dead next hop draws 4
+  ARP broadcasts a second from each node (`docs/TUNING.md`).
 - A bond as the external interface monitors its own members (its `miimon` or ARP monitoring is
   the operator's): the face reads the bond, which stays up while one member lives.
 - The drain grace, `minReadySeconds` and the readiness probe set from the measured

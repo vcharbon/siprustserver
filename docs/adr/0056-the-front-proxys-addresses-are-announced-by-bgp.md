@@ -56,7 +56,8 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    holds the face usable; the second reading in a row is the face down; a removed interface is
    unusable at its first reading. The flap also empties the neighbour table and the next packet
    leaves the entry `INCOMPLETE` until its ARP retry, past the flap: hence the two readings of a
-   next hop. All of it is local kernel state read every
+   next hop, and an ARP retry of at most half a reading period (render, §10). All of it is local
+   kernel state read every
    `PROXY_EXT_FACE_CHECK_MS` off the async runtime. It ties the two faces together: a node whose
    caller-facing uplink is gone stops announcing the internal VIP as well. No component detects
    the reachability of a peer beyond the first router: a fault in the routed network hits both
@@ -158,7 +159,12 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       render checks the cycle + two face readings + two unfit readings + the BFD detection against
       32 s.
       The timers rest on the solicit (§3): without it a shorter cycle reaches a latch nothing
-      clears sooner.
+      clears sooner. Measured on the lab (`next_hop_dead`, one next hop, kernel 7.2): a proxy unfit
+      8 to 9 s after the death, its node routed again 9 to 11 s after the next hop's return, with
+      nothing sent from outside; the kernel's default timers read the death in 47 s.
+    - A carrier flap leaves the proxy fit: the face holds through it (§3), and no hold applies. The
+      node's external BGP session re-establishes after it: on the lab every flap of 0.1 to 0.4 s
+      took the node's external routes away for about 1 s.
     - A withdrawn node is let out after the proxy read fit for `ROUTE_GUARD_HOLD_MS` (3 s), so a
       flapping fault does not rehash flows each time; its BGP sessions come back within the
       BGPPeer `connectTime` (`proxy.announce.metallb.connectTimeSeconds`, 1 s). A restarted guard

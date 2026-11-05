@@ -664,11 +664,12 @@ spec:
           $1\"; do\n    echo \"$2\" > \"$f\" || echo \"vip-loopback: WARN could not\
           \ set $f\"\n  done\n}\nneigh_set base_reachable_time_ms \"$NEIGH_BASE_REACHABLE_TIME_MS\"\
           \nneigh_set delay_first_probe_time \"$NEIGH_DELAY_FIRST_PROBE_S\"\nneigh_set\
-          \ ucast_solicit \"$NEIGH_UCAST_SOLICIT\"\nneigh_set retrans_time_ms \"$NEIGH_RETRANS_TIME_MS\"\
-          \necho 1 > /proc/sys/net/ipv4/fib_multipath_use_neigh\necho \"vip-loopback:\
-          \ $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP port unreachable\
-          \ from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS\
-          \ delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S ucast_solicit=$NEIGH_UCAST_SOLICIT\
+          \ ucast_solicit \"$NEIGH_UCAST_SOLICIT\"\nneigh_set mcast_solicit \"$NEIGH_MCAST_SOLICIT\"\
+          \nneigh_set retrans_time_ms \"$NEIGH_RETRANS_TIME_MS\"\necho 1 > /proc/sys/net/ipv4/fib_multipath_use_neigh\n\
+          echo \"vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP\
+          \ port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES\
+          \ base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S\
+          \ ucast_solicit=$NEIGH_UCAST_SOLICIT mcast_solicit=$NEIGH_MCAST_SOLICIT\
           \ retrans_time_ms=$NEIGH_RETRANS_TIME_MS + multipath off unresolved next\
           \ hops + route guard $ROUTE_GUARD ready\"\n"
         command:
@@ -686,9 +687,11 @@ spec:
         - name: NEIGH_DELAY_FIRST_PROBE_S
           value: '1'
         - name: NEIGH_UCAST_SOLICIT
-          value: '3'
+          value: '12'
+        - name: NEIGH_MCAST_SOLICIT
+          value: '12'
         - name: NEIGH_RETRANS_TIME_MS
-          value: '1000'
+          value: '250'
         - name: ROUTE_GUARD
           value: 'on'
         image: siprustserver-nettools:dev

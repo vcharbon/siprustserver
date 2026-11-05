@@ -247,13 +247,16 @@ proxy:
   # (10 s here, about 50 s at the kernel's defaults), when multipath egress
   # leaves it and, if no next hop is left, the face reads unusable (ADR-0056 §10).
   # A worker's retransmitted final then still reaches its caller inside Timer H
-  # (32 s). An ARP probe every few seconds per next hop is the cost; a router
-  # silent for ucastSolicit × retransTimeMs reads dead, so 3 s stays tolerated.
+  # (32 s). retransTimeMs is the ARP retry: at most half of PROXY_EXT_FACE_CHECK_MS,
+  # so a carrier flap's INCOMPLETE aftermath meets one reading only; the solicit
+  # counts keep a router silent to ARP for 3 s alive. The cost: an ARP probe every
+  # few seconds per live next hop, 4 broadcasts a second per dead one.
   neighbour:
     baseReachableTimeMs: 4000
     delayFirstProbeSeconds: 1
-    ucastSolicit: 3
-    retransTimeMs: 1000
+    ucastSolicit: 12
+    mcastSolicit: 12
+    retransTimeMs: 250
   # The readiness probe the node's announcement follows (ADR-0056):
   # periodSeconds × failureThreshold bounds how long a failing proxy stays
   # announced before the withdrawal starts.

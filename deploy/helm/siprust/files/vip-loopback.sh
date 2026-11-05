@@ -53,6 +53,7 @@ neigh_set() {
 neigh_set base_reachable_time_ms "$NEIGH_BASE_REACHABLE_TIME_MS"
 neigh_set delay_first_probe_time "$NEIGH_DELAY_FIRST_PROBE_S"
 neigh_set ucast_solicit "$NEIGH_UCAST_SOLICIT"
+neigh_set mcast_solicit "$NEIGH_MCAST_SOLICIT"
 neigh_set retrans_time_ms "$NEIGH_RETRANS_TIME_MS"
 echo 1 > /proc/sys/net/ipv4/fib_multipath_use_neigh
-echo "vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S ucast_solicit=$NEIGH_UCAST_SOLICIT retrans_time_ms=$NEIGH_RETRANS_TIME_MS + multipath off unresolved next hops + route guard $ROUTE_GUARD ready"
+echo "vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S ucast_solicit=$NEIGH_UCAST_SOLICIT mcast_solicit=$NEIGH_MCAST_SOLICIT retrans_time_ms=$NEIGH_RETRANS_TIME_MS + multipath off unresolved next hops + route guard $ROUTE_GUARD ready"

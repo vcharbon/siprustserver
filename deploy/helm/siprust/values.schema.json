@@ -408,6 +408,7 @@
             "baseReachableTimeMs": { "type": "integer", "minimum": 1 },
             "delayFirstProbeSeconds": { "type": "integer", "minimum": 1 },
             "ucastSolicit": { "type": "integer", "minimum": 1 },
+            "mcastSolicit": { "type": "integer", "minimum": 1 },
             "retransTimeMs": { "type": "integer", "minimum": 1 }
           }
         },

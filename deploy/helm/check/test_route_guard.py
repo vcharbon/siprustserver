@@ -93,10 +93,16 @@ class GuardRelations(unittest.TestCase):
 
     def test_a_dead_next_hop_is_read_inside_a_transactions_lifetime(self) -> None:
         err = render_error(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=17268")
-        for name in ("baseReachableTimeMs=17268", "delayFirstProbeSeconds=1", "ucastSolicit=3",
-                     "retransTimeMs=1000", "2 × proxy PROXY_EXT_FACE_CHECK_MS=500", "32000 ms"):
+        for name in ("baseReachableTimeMs=17268", "delayFirstProbeSeconds=1", "ucastSolicit=12",
+                     "retransTimeMs=250", "2 × proxy PROXY_EXT_FACE_CHECK_MS=500", "32000 ms"):
             self.assertIn(name, err)
         render(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=17267")
+
+    def test_an_arp_retry_fits_half_a_face_reading(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.neighbour.retransTimeMs=251")
+        for name in ("retransTimeMs=251", "PROXY_EXT_FACE_CHECK_MS=500", "two readings"):
+            self.assertIn(name, err)
+        render(SIPRUST, *KIND, "--set", "proxy.neighbour.retransTimeMs=250")
 
     def test_a_rollout_waits_for_the_let_out_nodes_sessions(self) -> None:
         err = render_error(SIPRUST, *KIND, "--set", "proxy.announce.metallb.connectTimeSeconds=7")
