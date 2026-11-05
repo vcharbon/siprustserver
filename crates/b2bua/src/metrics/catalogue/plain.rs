@@ -153,7 +153,7 @@ plain_counters! {
     // with no final rather than placed as a second call.
     FOREIGN_INVITE_COPY_DROPPED = (
         "b2bua_foreign_invite_copies_dropped_total",
-        "initial INVITEs whose stickiness cookie names another worker as primary and that copy no replica this node holds, dropped with no final (the transaction layer's 100 Trying went out on receipt; the transaction is then relinquished): the primary owns the transaction, so placing them would dial a second call",
+        "initial INVITEs whose stickiness cookie names another worker as primary and that copy no replica this node holds, dropped with no final, their transaction relinquished with nothing sent, ahead of the 100 Trying's 200 ms bound unless the router lags that long: the primary owns the transaction, so placing them would dial a second call",
     ) => foreign_invite_copy_dropped, bump_foreign_invite_copy_dropped, foreign_invite_copies_dropped_total;
     // Another incarnation's event: a timer fire, transaction timeout,
     // callout result or late message of an earlier call on the same

@@ -64,9 +64,9 @@ _SAMPLE = re.compile(r"^(?P<name>[a-z_]+)\{(?P<labels>[^}]*)\}\s+(?P<value>\S+)$
 
 
 def worst_call_s(stream: Stream) -> float:
-    """The longest a call can take: its setup deadline, its ring and hold, and
-    a teardown request that gets no final."""
-    return stream.setup_deadline_s + stream.ring_s + stream.hold_s + TXN_BOUND_S
+    """The longest a call can take: its give-up, its ring and hold, and a
+    teardown request that gets no final."""
+    return stream.give_up_s + stream.ring_s + stream.hold_s + TXN_BOUND_S
 
 
 def param_errors(stream: Stream) -> list[str]:
@@ -168,7 +168,7 @@ class LoadgenStream:
             "--max-in-flight",
             str(self.max_concurrent()),
             "--recv-timeout-ms",
-            str(int(s.setup_deadline_s * 1000)),
+            str(int(s.give_up_s * 1000)),
             "--ring-delay-ms",
             str(int(s.ring_s * 1000)),
             "--talk-time-ms",

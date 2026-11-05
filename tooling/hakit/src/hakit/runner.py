@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import report_metrics
 from .capture import CaptureFailed, Captures
 from .check import profile_errors
 from .one_at_a_time import ready_errors
@@ -28,7 +29,7 @@ from .freshness import Freshness
 from .host import HostSampler, preflight_errors
 from .host_stress import thresholds
 from .incident_exec import EventRunner
-from .jsonl import JsonlLog, write_jsonl
+from .jsonl import JsonlLog, read_jsonl, write_jsonl
 from .jsonval import Json
 from .lab import Lab, lab_capabilities
 from .loadgen import LoadgenStream
@@ -46,6 +47,7 @@ from .verdict import compute_with_calls
 from .verdict_series import verdict_lines
 from .vlogs import VictoriaLogs
 from .vm import QueryFailed, VictoriaMetrics
+from .windows import build_windows
 
 
 class RunRefused(Exception):
@@ -295,6 +297,7 @@ class Runner:
         if profile.cdr_join:
             integrity.add(collect_cdrs(self.vlogs, self.vm, self.lab, self.clock, run, run_dir, started))
         run_counts(self.content.classes, run_dir, self.executor)
+        report_metrics.collect(profile, build_windows(read_jsonl(run_dir / "events.jsonl")), self.vm, run_dir)
         write_jsonl(run_dir / "integrity.jsonl", integrity.items)
         meta = json.loads((run_dir / "run-meta.json").read_text())
         meta["ended_at_ms"] = self.clock.now_ms()

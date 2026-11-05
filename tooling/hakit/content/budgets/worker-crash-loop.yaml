@@ -1,0 +1,13 @@
+schema: budget.v1
+name: worker-crash-loop
+description: >-
+  A worker crashing again and again on its live node: each death costs what
+  worker-kill allows, about 2 s of the offered rate that hears nothing and ends
+  its setup without a final, over the rounds a crash loop takes to reach a long
+  backoff, five at most on the kubelet's default. A caller who heard a provisional
+  and no final takes no allowance here or in any budget
+  (`silent_after_provisional`). Every other failed setup is a finding.
+setup_failed:
+  - { stream: "*", code: 0, reason: timeout, max_seconds: 10 }
+setup_slow:
+  max_seconds: 10

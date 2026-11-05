@@ -21,16 +21,34 @@
       "exclusiveMinimum": 0
     },
     "drain_s": {
-      "description": "After the load stops, how long the runner waits for every generator to finish its calls before it reads the records. At least max(`setup_deadline_s`, `ring_s` + `hold_s`) of every stream; the runner refuses a shorter one.",
+      "description": "After the load stops, how long the runner waits for every generator to finish its calls before it reads the records. At least the longest a call of every stream can take, its give-up included; the runner refuses a shorter one.",
       "type": "number",
       "minimum": 0,
       "default": 120
     },
     "settle_s": {
-      "description": "The default tail of a window after its `recovered` instant. At least the longest `setup_deadline_s` of the streams plus 1 s (the deadline tick); the runner refuses a shorter one.",
+      "description": "The default tail of a window after its `recovered` instant. At least the longest `setup_deadline_s` of the streams plus 1 s (the deadline tick); the runner refuses a shorter one. A give-up past that tail belongs to the first window open while its call was pending.",
       "type": "number",
       "minimum": 0,
       "default": 60
+    },
+    "final_wait_s": {
+      "description": "How long a caller who heard a provisional, 100 Trying included, keeps waiting for the INVITE's final, from its first send. Past it the generator gives up, and the call is `silent_after_provisional`, which no budget allows. A call served later than this reads as silence: state a value past every bound the system under test keeps on a caller. Absent: each stream's `setup_deadline_s`. At least every stream's `setup_deadline_s`. A loadgen stream has one wait for every response, so it waits this long with no response heard too.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "report_metrics": {
+      "description": "Series of the system under test the run's report reads per window and per pod, from the window's open to its close, a reading and never a judgement: `increase` of a counter, `max` of a gauge.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metric", "read"],
+        "properties": {
+          "metric": { "type": "string", "pattern": "^[a-zA-Z_:][a-zA-Z0-9_:]*$" },
+          "read": { "enum": ["increase", "max"] }
+        }
+      }
     },
     "setup_slow_ms": {
       "description": "A setup (INVITE to its first provisional, or to its final when none came) longer than this is `setup_slow`, unless a window's budget raises it.",
@@ -254,7 +272,7 @@
           }
         },
         "setup_deadline_s": {
-          "description": "How long the generator waits for the INVITE's final before it gives up (`ending: timeout`).",
+          "description": "How long the generator waits for the INVITE's first response or final before it gives up (`ending: timeout`). A caller who heard a provisional waits the profile's `final_wait_s` instead, when it states one.",
           "type": "number",
           "exclusiveMinimum": 0
         },

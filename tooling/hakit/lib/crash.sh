@@ -94,6 +94,27 @@ hk_crash_dead() {
     '{pods: $pods, containers: $c, live_before: $before, killed_at_ms: $at, dead_at_ms: $dead}'
 }
 
+# Wait until the kubelet restarted every recorded container (at most
+# HK_LOOP_WAIT_S, 600 s), reading each from its node, ahead of the API server's
+# status: the `crashed` lines of the new incarnations on stdout, each restart
+# count one up. Fails when one never runs.
+hk_crash_restarted() {
+  local wait_s="${HK_LOOP_WAIT_S:-600}" poll_s="${HK_LOOP_POLL_S:-0.1}" pod uid node cname cid rc crashed deadline running out=""
+  crashed="$(cat "$HAKIT_EVENT_DIR/crashed")"
+  deadline=$(( $(date +%s) + wait_s ))
+  while read -r pod uid node cname cid rc; do
+    while :; do
+      running="$(docker exec "$node" crictl ps --state running --name "^${cname}\$" --label "io.kubernetes.pod.uid=$uid" -q)" || running=""
+      running="${running%%$'\n'*}"
+      if [ -n "$running" ] && [ "$running" != "$cid" ]; then break; fi
+      [ "$(date +%s)" -lt "$deadline" ] || return 1
+      sleep "$poll_s"
+    done
+    out+="$pod $uid $node $cname $running $(( rc + 1 ))"$'\n'
+  done <<<"$crashed"
+  printf '%s' "$out"
+}
+
 # The instant (epoch ms) of the first or last line of a container's log, by
 # the runtime's own timestamps; empty when the log has no line.
 hk_log_edge() { # pod container first|last [--previous]

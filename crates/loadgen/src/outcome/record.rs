@@ -148,6 +148,7 @@ pub fn build(
         "call_id": call_id,
         "started_at_ms": started,
         "first_provisional_at_ms": wire.first_provisional_at_ms,
+        "trying_at_ms": wire.trying_at_ms,
         "setup_ended_at_ms": setup_ended,
         "answered_at_ms": wire.answered_at_ms,
         "ended_at_ms": ended_at_ms,

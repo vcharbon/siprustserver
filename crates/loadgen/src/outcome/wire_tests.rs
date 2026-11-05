@@ -74,6 +74,7 @@ async fn the_setup_facts_are_read_from_the_caller_side() {
     let f = wire.facts();
     assert_eq!(f.call_id.as_deref(), Some("c1"));
     assert_eq!(f.started_at_ms, Some(1_000));
+    assert_eq!(f.trying_at_ms, Some(1_010));
     assert_eq!(f.first_provisional_at_ms, Some(1_020));
     assert!(f.early_media);
     assert_eq!((f.setup_ended_at_ms, f.final_code), (Some(1_030), Some(486)));

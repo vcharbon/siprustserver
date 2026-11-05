@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Kill one ready worker, then each incarnation the kubelet restarts,
+# kill_after_s after it is seen running, until a restart comes away_s or more
+# after the death before it; that one lives. Each new container is read from
+# its node, ahead of the API server's status. Facts: the pod, then per round its
+# kill, its proven death, the restart seen and the away time between them.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=crash.sh
+source "$HAKIT_LIB/crash.sh"
+away_ms="$(awk -v s="$HAKIT_PARAM_AWAY_S" 'BEGIN { printf "%d", s * 1000 }')"
+hk_pick_targets
+hk_crash_prepare
+rounds="[]"
+for ((round = 1; round <= HAKIT_PARAM_MAX_ROUNDS; round++)); do
+  dead="$(hk_crash_kill)"
+  next="$(hk_crash_restarted)" || hk_die "the kubelet restarted nothing within ${HK_LOOP_WAIT_S:-600}s of round $round"
+  restarted="$(hk_now_ms)"
+  rounds="$(jq -c --argjson d "$dead" --argjson r "$restarted" --argjson n "$round" \
+    '. + [{round: $n, killed_at_ms: $d.killed_at_ms, dead_at_ms: $d.dead_at_ms, restarted_at_ms: $r, away_ms: ($r - $d.dead_at_ms)}]' <<<"$rounds")"
+  printf '%s\n' "$next" > "$HAKIT_EVENT_DIR/crashed"
+  if [ "$(jq '.[-1].away_ms' <<<"$rounds")" -ge "$away_ms" ]; then
+    jq -cn --argjson pods "$(hk_target_pods_json)" --argjson rounds "$rounds" \
+      --argjson before "$(cat "$HAKIT_EVENT_DIR/live_before")" '{pods: $pods, live_before: $before, rounds: $rounds}'
+    exit 0
+  fi
+  sleep "$HAKIT_PARAM_KILL_AFTER_S"
+done
+hk_die "no restart of $HAKIT_PARAM_MAX_ROUNDS rounds stayed away ${HAKIT_PARAM_AWAY_S}s"

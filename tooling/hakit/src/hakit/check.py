@@ -84,7 +84,7 @@ def _teardown_s(s: Stream, content: Content | None = None) -> float:
     """How long a stream's last call can take after the drain starts: ADR-0049
     §3.7's bound, and the generator's own worst case: for SIPp the base
     scenario's under the scenario's declared keys."""
-    bound = max(s.setup_deadline_s, s.ring_s + s.hold_s)
+    bound = max(s.give_up_s, s.ring_s + s.hold_s)
     if s.driver != "sipp":
         return max(bound, loadgen.worst_call_s(s))
     path = None if content is None else content.scenarios.get(s.scenario or "")
@@ -160,6 +160,9 @@ def profile_errors(profile: Profile, content: Content) -> list[str]:
                 f"{where}: stream {s.name!r}: only a loadgen stream runs as a pod; a SIPp UAC's callees answer on the generator network"
             )
     deadline = max((s.setup_deadline_s for s in profile.streams), default=0.0)
+    wait = next((s.final_wait_s for s in profile.streams if s.final_wait_s is not None), None)
+    if wait is not None and wait < deadline:
+        errs.append(f"{where}: final_wait_s {wait:g} is below the longest setup_deadline_s {deadline:g}")
     teardown = max((_teardown_s(s, content) for s in profile.streams), default=0.0)
     if profile.drain_s < teardown:
         errs.append(f"{where}: drain_s {profile.drain_s:g} is below the longest stream teardown {teardown:g}")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kit import T0, record, rejected, timed_out
+from kit import T0, record, rejected, silent_after, timed_out
 
 from hakit.classify import classify
 from hakit.model import ExpectedEnding, Leg, Shape
@@ -46,6 +46,37 @@ def test_a_reject_where_an_answer_is_expected_is_setup_failed_keyed_by_code_and_
 def test_a_timeout_is_setup_failed_with_code_0_at_its_deadline() -> None:
     (imp,) = classify(timed_out("a", T0), ANSWER).impacts
     assert (imp.cls, imp.code, imp.reason, imp.at_ms) == ("setup_failed", 0, "timeout", T0 + 32_000)
+
+
+def test_a_100_then_no_final_is_its_own_class_and_takes_no_budget() -> None:
+    c = classify(silent_after("a", T0), ANSWER)
+    assert not c.success
+    (imp,) = c.impacts
+    assert (imp.cls, imp.at_ms, imp.budgetable, imp.setup_lost) == ("silent_after_provisional", T0 + 250_000, False, True)
+
+
+def test_a_later_provisional_then_no_final_is_the_same_class() -> None:
+    (imp,) = classify(silent_after("a", T0, trying=None, provisional=300), ANSWER).impacts
+    assert imp.cls == "silent_after_provisional"
+
+
+def test_a_shape_that_expects_a_reject_takes_the_same_class() -> None:
+    (imp,) = classify(silent_after("a", T0), REJECT_486).impacts
+    assert imp.cls == "silent_after_provisional"
+
+
+def test_a_first_response_after_the_give_up_is_a_setup_with_no_response_at_its_deadline() -> None:
+    late = {**timed_out("a", T0, 10_000), "first_provisional_at_ms": T0 + 15_500}
+    (imp,) = classify(late, ANSWER).impacts
+    assert (imp.cls, imp.code, imp.reason) == ("setup_failed", 0, "timeout")
+
+
+def test_a_call_served_late_after_its_100_is_not_in_the_class() -> None:
+    served = {**record("a", T0, provisional=17_000, setup=28_000, answered=28_000), "trying_at_ms": T0 + 20}
+    assert classify(served, ANSWER).success
+    refused = {**rejected("b", T0, 503, "503"), "trying_at_ms": T0 + 20}
+    (imp,) = classify(refused, ANSWER).impacts
+    assert (imp.cls, imp.code) == ("setup_failed", 503)
 
 
 def test_the_latency_without_a_provisional_runs_to_the_setup_end() -> None:

@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kit import T0, paced, record, timed_out
+from kit import T0, paced, record, silent_after, timed_out
 from rundir import SCHEMAS, kill, run_dir
 
 from hakit import jsonval as jv
@@ -136,6 +136,17 @@ def test_a_setup_deadline_inside_a_stall_is_a_generator_stall_finding(tmp_path: 
     assert [(u["class"], u["call_ids"]) for u in jv.objs(v, "unattributed")] == [("setup_failed", ["before"])]
     (i,) = jv.objs(v, "integrity")
     assert (i["kind"], i["call_ids"]) == ("generator_stall", ["deadline"])
+
+
+def test_a_give_up_after_a_provisional_inside_a_stall_is_a_generator_stall_finding(tmp_path: Path) -> None:
+    at = T0 + 60_000
+    recs = paced_with_stall(at, 1000)
+    recs.append(silent_after("gave-up", at - 31_500, deadline_ms=32_505))
+    recs.append(silent_after("before", at - 32_100 + 50, deadline_ms=32_000))
+    v = verdict(tmp_path, recs)
+    assert [(u["class"], u["call_ids"]) for u in jv.objs(v, "unattributed")] == [("silent_after_provisional", ["before"])]
+    (i,) = jv.objs(v, "integrity")
+    assert (i["kind"], i["call_ids"]) == ("generator_stall", ["gave-up"])
 
 
 def test_a_measurement_across_a_stall_is_left_out_of_the_recovery_baseline(tmp_path: Path) -> None:

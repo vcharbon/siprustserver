@@ -153,21 +153,24 @@ def test_the_verdict_carries_it_and_the_summary_answers_the_priority_question(tm
     ]
     assert s["answered_share"] == round(20 / 22, 7)
     text = render(v)
-    assert "| basic | 26 | 20 | 0 | 4 | 1 | 0 | 0 | 1 | 90.9091% |" in text
+    assert "| basic | 26 | 20 | 0 | 4 | 1 | 0 | 0 | 0 | 1 | 90.9091% |" in text
     assert "- basic: overload (503 + Retry-After) rejected 503: 1 (outside 1); dependency fault (503) rejected 503: 4 (kill_worker 4)" in text
     assert "No `run` stream places priority calls." in text
 
 
 def test_the_priority_sentence_names_each_loss() -> None:
     group: Json = {"streams": ["prio"], "causes": [{"cause": "dependency_fault", "detail": "rejected 503", "count": 3, "where": {}}]}
-    assert priority_verdict(group) == "No priority call was refused for overload, timed out, cut or ended otherwise."
+    assert priority_verdict(group) == (
+        "No priority call was refused for overload, left with a provisional and no final, timed out, cut or ended otherwise."
+    )
     group["causes"] = [
         {"cause": "overload", "detail": "rejected 503", "count": 2, "where": {"spike": 2}},
         {"cause": "cut", "detail": "cut 200", "count": 1, "where": {"outside": 1}},
         {"cause": "cut", "detail": "stranded 200", "count": 3, "where": {"fault": 2, "spike": 1}},
     ]
     assert priority_verdict(group) == (
-        "Priority calls: 2 refused for overload (spike 2), none timed out, 4 cut or never released (outside 1; fault 2, spike 1)."
+        "Priority calls: 2 refused for overload (spike 2), none left with a provisional and no final, none timed out, "
+        "4 cut or never released (outside 1; fault 2, spike 1)."
     )
     assert priority_verdict({"streams": []}) == "No `run` stream places priority calls."
 
@@ -176,7 +179,7 @@ def test_the_priority_sentence_never_says_none_lost_while_a_priority_call_ended_
     other: Json = {"cause": "other", "detail": "503 without Retry-After in kill window", "count": 2, "where": {"kill": 2}}
     group: Json = {"streams": ["prio"], "causes": [other]}
     assert priority_verdict(group) == (
-        "Priority calls: none refused for overload, none timed out, none cut or never released, "
+        "Priority calls: none refused for overload, none left with a provisional and no final, none timed out, none cut or never released, "
         "and 2 ended otherwise (503 without Retry-After in kill window: kill 2)."
     )
 

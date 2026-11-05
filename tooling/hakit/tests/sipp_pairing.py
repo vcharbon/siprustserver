@@ -35,8 +35,8 @@ UAS = SCENARIOS / "uas-basic.xml"
 SIPP = shutil.which("sipp")
 # The build context of the SIPp image the deployment runs (its source patches included).
 SIPP_CONTEXT = REPO_ROOT / "deploy" / "k8s" / "sipp"
-# The keys every UAC pairing passes: a 3 s setup deadline, a 1.5 s hold.
-UAC_KEYS = {"run": "loopback", "stream": "basic", "shape": "basic", "hold_ms": "1500", "setup_ms": "3000"}
+# The keys every UAC pairing passes: a 3 s setup deadline and final wait, a 1.5 s hold.
+UAC_KEYS = {"run": "loopback", "stream": "basic", "shape": "basic", "hold_ms": "1500", "setup_ms": "3000", "final_ms": "3000"}
 
 
 def sipp_image() -> str:

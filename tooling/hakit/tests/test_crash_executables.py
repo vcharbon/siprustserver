@@ -12,6 +12,8 @@ from pathlib import Path
 
 from exe_kit import Rule, Sandbox, crash_rules, facts, failed, live
 
+from hakit import jsonval as jv
+
 T0 = 1_792_103_350_000
 STATE = r"docker exec n1 crictl inspect --output go-template --template \{\{\.status\.state\}\} c1$"
 
@@ -106,6 +108,58 @@ def test_the_crash_probe_waits_while_the_pod_cannot_be_read(tmp_path: Path) -> N
     sb = crashed_probe(tmp_path, 1, T0, T0 + 900)
     sb.rules(Rule(r"get pod l-0 --ignore-not-found -o json$", rc=1))
     assert sb.run("probe").returncode == 75
+
+
+# ── kill_worker_loop ──────────────────────────────────────────────────────
+
+RUNNING = r"docker exec n1 crictl ps --state running --name \^worker\$ --label io.kubernetes.pod.uid=u0 -q$"
+
+
+def state_rules(cid: str) -> list[Rule]:
+    state = rf"docker exec n1 crictl inspect --output go-template --template \{{\{{\.status\.state\}}\}} {cid}$"
+    return [Rule(rf"docker exec n1 ctr -n k8s.io task kill -s SIGKILL {cid}$"), Rule(state, "CONTAINER_EXITED")]
+
+
+def loop(tmp_path: Path, *after: Rule, **params: str) -> Sandbox:
+    sb = Sandbox(tmp_path, "kill_worker_loop", kill_after_s="0", **params)
+    sb.env["HK_LOOP_POLL_S"] = "0.05"
+    sb.rules(
+        live("app=b2bua-worker", "w-0 u0 n1 True\n"),
+        *crash_rules("w-0", "n1", [("worker", "c1")]),
+        *state_rules("c2"),
+        *state_rules("c3"),
+        *after,
+    )
+    return sb
+
+
+def test_the_loop_kills_each_incarnation_until_a_restart_stayed_away_and_lets_that_one_live(tmp_path: Path) -> None:
+    # c1's container reads gone at once, c2 follows at once: a short round. c3
+    # comes after eight polls, past away_s: that one lives.
+    silent = [Rule(RUNNING, "", once=True) for _ in range(8)]
+    sb = loop(tmp_path, Rule(RUNNING, "c2\n", once=True), *silent, Rule(RUNNING, "c3\n"), away_s="0.3")
+    f = facts(sb.run("inject"))
+    assert sb.lines("task kill") == [
+        "docker exec n1 ctr -n k8s.io task kill -s SIGKILL c1",
+        "docker exec n1 ctr -n k8s.io task kill -s SIGKILL c2",
+    ]
+    first, last = jv.objs(f, "rounds")
+    assert (first["round"], last["round"]) == (1, 2)
+    assert jv.number(first, "away_ms") < 300 <= jv.number(last, "away_ms")
+    assert jv.number(first, "killed_at_ms") <= jv.number(first, "dead_at_ms") <= jv.number(first, "restarted_at_ms")
+    # The probe reads the living incarnation against the one before it.
+    assert (sb.event_dir / "crashed").read_text() == "w-0 u0 n1 worker c3 2\n"
+
+
+def test_a_backoff_that_never_reaches_away_s_fails_the_inject(tmp_path: Path) -> None:
+    sb = loop(tmp_path, Rule(RUNNING, "c2\n", once=True), Rule(RUNNING, "c3\n"), away_s="60", max_rounds="2")
+    failed(sb.run("inject"), "no restart of 2 rounds stayed away 60s")
+
+
+def test_a_restart_that_never_comes_fails_the_inject(tmp_path: Path) -> None:
+    sb = loop(tmp_path, Rule(RUNNING, ""), away_s="60")
+    sb.env["HK_LOOP_WAIT_S"] = "0"
+    failed(sb.run("inject"), "the kubelet restarted nothing within 0s of round 1")
 
 
 # ── force_delete ──────────────────────────────────────────────────────────

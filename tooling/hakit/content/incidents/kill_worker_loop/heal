@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# The last round's container restarted and stays: nothing to undo.
+exit 0

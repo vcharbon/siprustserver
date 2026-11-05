@@ -84,6 +84,8 @@ pub struct WireFacts {
     pub call_id: Option<String>,
     pub(crate) invite_cseq: Option<u32>,
     pub started_at_ms: Option<i64>,
+    /// The first 100 Trying to the INVITE.
+    pub trying_at_ms: Option<i64>,
     pub first_provisional_at_ms: Option<i64>,
     pub setup_ended_at_ms: Option<i64>,
     pub answered_at_ms: Option<i64>,
@@ -291,6 +293,7 @@ impl WireFacts {
     /// Forget the previous attempt's setup facts; the call's start stays.
     fn restart_setup(&mut self, cseq: u32) {
         self.invite_cseq = Some(cseq);
+        self.trying_at_ms = None;
         self.first_provisional_at_ms = None;
         self.setup_ended_at_ms = None;
         self.answered_at_ms = None;
@@ -310,6 +313,8 @@ impl WireFacts {
             if code > 100 {
                 self.first_provisional_at_ms.get_or_insert(now);
                 self.early_media |= has_sdp(raw);
+            } else {
+                self.trying_at_ms.get_or_insert(now);
             }
             return;
         }

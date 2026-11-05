@@ -28,6 +28,14 @@ class Stream:
     # `host:port` the calls go to instead of the lab's SIP target; a host that
     # is not an IPv4 address names a Service of the lab's namespace.
     target: str | None = None
+    # The profile's `final_wait_s`: how long a caller who heard a provisional
+    # waits for the final, from the INVITE; None: its setup deadline.
+    final_wait_s: float | None = None
+
+    @property
+    def give_up_s(self) -> float:
+        """How long the generator can wait for the INVITE's final."""
+        return max(self.setup_deadline_s, self.final_wait_s or 0.0)
 
     def cps_at(self, load_s: float) -> float:
         """The offered rate `load_s` seconds after the load started."""
@@ -140,6 +148,15 @@ class OneAtATime:
 
 
 @dataclass(frozen=True)
+class ReportMetric:
+    """A series the run's report reads per window, per pod (report_metrics.py):
+    a counter's `increase`, or a gauge's `max`."""
+
+    metric: str
+    read: str
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     duration_s: float
@@ -159,6 +176,7 @@ class Profile:
     cdr_in_flight_s: float = 0.0
     limiters: list[LimiterSpec] = field(default_factory=lambda: [])
     one_at_a_time: list[OneAtATime] = field(default_factory=lambda: [])
+    report_metrics: list[ReportMetric] = field(default_factory=lambda: [])
 
     def stream(self, name: str) -> Stream | None:
         return next((s for s in self.streams if s.name == name), None)
@@ -190,7 +208,7 @@ def _event(d: Json) -> EventSpec:
     )
 
 
-def _stream(d: Json) -> Stream:
+def _stream(d: Json, final_wait_s: float | None) -> Stream:
     mc = jv.opt_int(d, "max_concurrent")
     return Stream(
         name=jv.string(d, "name"),
@@ -207,7 +225,12 @@ def _stream(d: Json) -> Stream:
         steps=sorted((jv.number(s, "at_s"), jv.number(s, "cps")) for s in jv.objs(d, "steps")),
         placement=jv.string(d, "placement", "docker"),
         target=jv.opt_string(d, "target"),
+        final_wait_s=final_wait_s,
     )
+
+
+def _report_metric(d: Json) -> ReportMetric:
+    return ReportMetric(metric=jv.string(d, "metric"), read=jv.string(d, "read"))
 
 
 def parse_profile(d: Json) -> Profile:
@@ -255,8 +278,9 @@ def parse_profile(d: Json) -> Profile:
             max_memory_full_pct=jv.opt_number(pf, "max_memory_full_pct"),
             max_swapin_pages_s=jv.opt_number(pf, "max_swapin_pages_s"),
         ),
-        streams=[_stream(s) for s in jv.objs(d, "streams")],
+        streams=[_stream(s, jv.opt_number(d, "final_wait_s")) for s in jv.objs(d, "streams")],
         schedule=schedule,
         defaults={k: jv.as_obj(v, k) for k, v in jv.obj(d, "defaults").items()},
         raw=d,
+        report_metrics=[_report_metric(m) for m in jv.objs(d, "report_metrics")],
     )

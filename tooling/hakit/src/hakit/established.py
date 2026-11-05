@@ -61,7 +61,7 @@ def hurts(impacts: Iterable[Impact], counted: Iterable[Impact]) -> list[tuple[st
     """Each impact no budget allowance takes, by call and instant: every
     in-dialog impact and every counted one (a CDR mismatch, a product's
     class)."""
-    return [(i.call_id, i.at_ms) for i in impacts if not i.budgetable] + [(i.call_id, i.at_ms) for i in counted]
+    return [(i.call_id, i.at_ms) for i in impacts if not i.setup_lost] + [(i.call_id, i.at_ms) for i in counted]
 
 
 def until_next(windows: list[Window], w: Window) -> float:

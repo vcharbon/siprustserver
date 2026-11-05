@@ -55,7 +55,7 @@ RECV_BACKSTOP_MARGIN_S = 60
 # SIPp's remote control port, where a rate step is sent.
 CONTROL_PORT = 8888
 # The `-key`s every stream passes; a scenario's other keys come from the stream's params.
-DRIVER_KEYS = ("run", "stream", "shape", "hold_ms", "setup_ms")
+DRIVER_KEYS = ("run", "stream", "shape", "hold_ms", "setup_ms", "final_ms")
 # SIPp's default behaviours but the abort on an unexpected message: a message
 # landing while the call runs its unexpected-message handler is discarded and
 # the call goes on, acting on the peer's retransmission (ADR-0049 §4.2).
@@ -71,8 +71,8 @@ def _key_number(stream: Stream, defaults: Mapping[str, str], key: str) -> float:
 
 
 def worst_call_s(stream: Stream, defaults: Mapping[str, str] | None = None) -> float:
-    """The longest a call of the base UAC scenario can take: the setup deadline
-    (or Timer B, when later), then either the hold (or a flood) with each
+    """The longest a call of the base UAC scenario can take: its give-up (or
+    Timer B, when later), then either the hold (or a flood) with each
     re-INVITE's transaction bound, or the 64*T1 wait for the INVITE's final
     after a CANCEL, then a BYE that gets no final. `defaults` are the
     scenario's declared keys, under the stream's params."""
@@ -80,7 +80,7 @@ def worst_call_s(stream: Stream, defaults: Mapping[str, str] | None = None) -> f
     flood_s = _key_number(stream, d, "flood_count") * _key_number(stream, d, "flood_gap_ms") / 1000
     flooding = str(stream.params.get("abuse", d.get("abuse", "none"))).endswith("_flood")
     hold = max(stream.hold_s, flood_s if flooding else 0.0) + _key_number(stream, d, "reinvites") * TXN_BOUND_S
-    return max(stream.setup_deadline_s, TXN_BOUND_S) + max(hold, TXN_BOUND_S) + TXN_BOUND_S
+    return max(stream.give_up_s, TXN_BOUND_S) + max(hold, TXN_BOUND_S) + TXN_BOUND_S
 
 
 @dataclass(frozen=True)
@@ -196,6 +196,9 @@ class SippStream:
             "-key",
             "setup_ms",
             str(int(s.setup_deadline_s * 1000)),
+            "-key",
+            "final_ms",
+            str(int(s.give_up_s * 1000)),
             "-cid_str",
             f"%u-%p-{self.run}{self.call_id_tag}@%s",
             "-i",

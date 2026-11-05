@@ -4,8 +4,9 @@ The run directory holds what the verdict reads: the resolved profile, the
 budgets and catalogs it used, `events.jsonl`, the exported `records.jsonl`,
 `cdrs.jsonl` when the profile joins CDRs, the kept answers of the product
 classes (`classes/`), `streams.json` (each generator's own counters),
-`integrity.jsonl` (what the runner saw go wrong while it ran) and `host.jsonl`
-(the host's pressure, host_stress.py).
+`integrity.jsonl` (what the runner saw go wrong while it ran), `host.jsonl`
+(the host's pressure, host_stress.py) and `report-metrics.json` (the series the
+profile asks the report to read per window, report_metrics.py).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from .cdr_check import cdr_impacts_of
 from .cdrjoin import DIFFERS
 from .classes import read_counts
 from .jsonl import read_jsonl
-from .classify import SETUP_FAILED, Classified, Impact, SetupLatency, classify
+from .classify import SETUP_FAILED, SILENT_AFTER_PROVISIONAL, Classified, Impact, SetupLatency, classify
 from .established import established_row, hurts, until_next
 from .judge import ALL_CALL_IDS, budget_of, judge
 from .limiters import judge_limiters
@@ -27,6 +28,7 @@ from .jsonval import Json, as_obj
 from .model import Budget, Shape, parse_budget, parse_catalog
 from .profile import Profile, parse_profile
 from .recovery import Sample, StreamSamples
+from .report_metrics import kept as kept_report_metrics
 from .reconcile import integrity, reconcile
 from .schemas import SchemaSet
 from .generator_health import run_stalls
@@ -77,12 +79,15 @@ class _Calls:
 
 
 def _spoiled_timeout(imp: Impact, stalls: list[Stall], profile: Profile) -> Stall | None:
-    """The stall a timeout's setup deadline (its start + the stream's
-    `setup_deadline_s`) falls in: the generator checked it while it stalled."""
+    """The stall a give-up falls in: at the call's start + the stream's
+    `setup_deadline_s` for a SIPp caller who heard nothing, its final wait
+    otherwise. The generator checked it while it stalled."""
     s = profile.stream(imp.stream)
-    if imp.cls != SETUP_FAILED or imp.reason != "timeout" or s is None:
+    if imp.reason != "timeout" or s is None or imp.cls not in (SETUP_FAILED, SILENT_AFTER_PROVISIONAL):
         return None
-    return stall_holding(stalls, imp.stream, imp.started_at_ms + s.setup_deadline_s * 1000)
+    heard_nothing = imp.cls == SETUP_FAILED and s.driver == "sipp"
+    deadline_s = s.setup_deadline_s if heard_nothing else s.give_up_s
+    return stall_holding(stalls, imp.stream, imp.started_at_ms + deadline_s * 1000)
 
 
 def _spoiled_cdr(imp: Impact, by_id: dict[str, Json], stalls: list[Stall]) -> Stall | None:
@@ -115,7 +120,7 @@ def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, 
         ms = None
         if lat is not None and stall_of(stalls, stream, lat.at_ms - lat.ms, lat.at_ms) is None:
             ms = lat.ms
-        ok = not any(i.budgetable for i in c.impacts)
+        ok = not any(i.setup_lost for i in c.impacts)
         by_stream[stream].append(Sample(jv.number(r, "started_at_ms"), ok, ms))
     return {k: StreamSamples(v) for k, v in by_stream.items()}
 
@@ -270,6 +275,7 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
     load_end_ms = run.load_start_ms + profile.duration_s * 1000
     limiters = judge_limiters(profile, [r for r, _ in calls.valid], windows, budgets, run.load_start_ms, load_end_ms)
     windows_out: list[Json] = []
+    read_series = kept_report_metrics(run_dir)
     findings = len(judged.in_dialog) + len(judged.unattributed) + len(limiters)
     hurt = hurts(impacts, cdr_impacts + class_impacts)
     for w in windows:
@@ -298,6 +304,8 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         }
         if healed is not None and recs:
             out["recovery"] = [{"stream": r.stream, "recovery_s": r.recovery_s(healed)} for r in recs]
+        if w.event in read_series:
+            out["metrics"] = read_series[w.event]
         windows_out.append(out)
     by_cause = unanswered(
         ((r, run.shapes[jv.string(r, "shape")]) for r, _ in calls.valid), windows, budgets, profile, run.shapes

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
-<!-- Rings and never answers; answers the CANCEL 200 and the INVITE 487. -->
+<!-- Acknowledges with a 100, rings and never answers; answers the CANCEL 200 and the INVITE 487. -->
 <scenario name="peer-ring-no-answer">
   <recv request="INVITE" crlf="true"/>
   <send>
