@@ -169,9 +169,10 @@ folded in, it does not fail the suite, it wedges it.
 
 ## Agent & build concurrency
 
-**Never run more than ONE agent (subagent / workflow stage) at a time that
-compiles or runs tests.** Builds serialise on the target directory and a build
-racing a running SUT or loadgen skews what the run measures. The jobs cap in
+**By default two agents (subagent / workflow stage) compile or run tests at
+once;** other work that is not heavy on disk, CPU or memory runs without limit.
+Builds serialise on the target directory and a build racing a running SUT or
+loadgen skews what the run measures. The jobs cap in
 `.cargo/config.toml` is sized for a quiet host; beside other builds lower it
 (`cargo test --workspace --jobs 2`) and, on a host short on memory, cap the
 command in a scope: `systemd-run --user --scope -q -p MemoryMax=12G cargo …`; a
