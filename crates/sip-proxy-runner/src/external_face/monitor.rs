@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 
 use super::{FaceCheck, FaceLatch, FaceState};
 
@@ -59,6 +60,9 @@ impl FaceMonitor {
             async move {
                 #[expect(clippy::disallowed_methods, reason = "the period is validated positive")]
                 let mut ticker = tokio::time::interval(period);
+                // Two readings are always a period apart, or a runtime stall
+                // would make a flap shorter than the period read down twice.
+                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 loop {
                     ticker.tick().await;
                     monitor.read_once(read.clone()).await;

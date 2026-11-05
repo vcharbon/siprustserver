@@ -92,11 +92,18 @@ class GuardRelations(unittest.TestCase):
         render(SIPRUST, *KIND, "--set-string", "proxy.env.PROXY_EXT_FACE_CHECK_MS=1150")
 
     def test_a_dead_next_hop_is_read_inside_a_transactions_lifetime(self) -> None:
-        err = render_error(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=17268")
-        for name in ("baseReachableTimeMs=17268", "delayFirstProbeSeconds=1", "ucastSolicit=12",
-                     "retransTimeMs=250", "2 × proxy PROXY_EXT_FACE_CHECK_MS=500", "32000 ms"):
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=16601")
+        for name in ("baseReachableTimeMs=16601", "delayFirstProbeSeconds=1", "ucastSolicit=12",
+                     "retransTimeMs=250", "the next packet 1000 ms",
+                     "2 × proxy PROXY_EXT_FACE_CHECK_MS=500", "32000 ms"):
             self.assertIn(name, err)
-        render(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=17267")
+        render(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=16600")
+
+    def test_a_dead_next_hop_is_bounded_with_the_guard_off_too(self) -> None:
+        off = ("--set", "proxy.routeGuard.enabled=false")
+        self.assertIn("32000 ms", render_error(SIPRUST, *KIND, *off,
+                                               "--set", "proxy.neighbour.baseReachableTimeMs=17334"))
+        render(SIPRUST, *KIND, *off, "--set", "proxy.neighbour.baseReachableTimeMs=17333")
 
     def test_an_arp_retry_fits_half_a_face_reading(self) -> None:
         err = render_error(SIPRUST, *KIND, "--set", "proxy.neighbour.retransTimeMs=251")

@@ -305,17 +305,39 @@ NEIGHBOUR = Rule(r"docker exec e2 ip -j neigh show to 192\.168\.60\.1 dev eth1$"
 SILENCE = Rule(r"docker exec -i e2 nft -f -$")
 
 
+FITZ = r"docker exec e2 curl -s -m 1 127\.0\.0\.1:9090/fitz$"
+
+
 def test_next_hop_dead_silences_the_hop_below_ip_and_arp_and_waits_for_the_proxy_unfit(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "next_hop_dead")
-    fitz = r"docker exec e2 curl -s -m 1 127\.0\.0\.1:9090/fitz$"
     sb.rules(ONE_PROXY, *PLANES, NEIGHBOUR, SILENCE, *E1_ONLY,
-             Rule(fitz, "fit", once=True), Rule(fitz, "unfit external-face"))
+             Rule(FITZ, "fit", once=True), Rule(FITZ, "unfit external-face"))
     f = facts(sb.run("inject"))
     assert sb.index("neigh show") < sb.index("nft -f -") < sb.index("ip -j route show")
     assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
     assert set(as_obj(f["unfit_ms"])) == {"e2"}
     assert (sb.event_dir / "silenced").read_text().split() == ["e2"]
     assert len(sb.lines("/fitz")) == 2, "the wait reads on until the proxy turns unfit"
+    ruleset = next(c.stdin for c in sb.calls() if "nft -f -" in c.line)
+    for rule in ('type filter hook ingress device "eth1" priority -500;', "ether saddr 02:00:00:00:00:01 drop",
+                 'type filter hook egress device "eth1" priority -500;', "ether daddr 02:00:00:00:00:01 drop"):
+        assert rule in ruleset, ruleset
+
+
+def test_next_hop_dead_times_the_first_unfit_reading_apart_from_the_withdrawal(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "next_hop_dead")
+    still_routed = [route_rule(IVIP, "172.20.0.3", "172.20.0.4", once=True) for _ in range(6)]
+    sb.rules(ONE_PROXY, *PLANES, NEIGHBOUR, SILENCE, *still_routed, *E1_ONLY, Rule(FITZ, "unfit external-face"))
+    f = facts(sb.run("inject"))
+    unfit = as_obj(f["unfit_ms"])["e2"]
+    assert isinstance(unfit, int)
+    assert unfit < as_obj(f["withdrawn_ms"])[f"{IVIP} 172.20.0.4"], "the reading does not wait for the routes"
+
+
+def test_next_hop_dead_counts_only_an_unfit_external_face(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "next_hop_dead", withdraw_timeout_s="1")
+    sb.rules(ONE_PROXY, *PLANES, NEIGHBOUR, SILENCE, *E1_ONLY, Rule(FITZ, "unfit no-worker-alive"))
+    failed(sb.run("inject"), "still reads its external face fit")
 
 
 def test_next_hop_dead_refuses_a_node_that_holds_no_address_for_the_hop(tmp_path: Path) -> None:
@@ -328,7 +350,7 @@ def test_next_hop_dead_refuses_a_node_that_holds_no_address_for_the_hop(tmp_path
 def test_next_hop_dead_fails_while_the_proxy_stays_fit(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "next_hop_dead", withdraw_timeout_s="1")
     sb.rules(ONE_PROXY, *PLANES, NEIGHBOUR, SILENCE, *E1_ONLY, Rule(r"/fitz$", "fit"))
-    failed(sb.run("inject"), "still reads fit")
+    failed(sb.run("inject"), "still reads its external face fit")
 
 
 def test_next_hop_dead_heal_lets_the_frames_through_and_is_idempotent(tmp_path: Path) -> None:

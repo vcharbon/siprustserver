@@ -7,10 +7,13 @@ description: >-
   entry reads unresolved at the end of the neighbour cycle, its proxy turns
   unfit and its route guard drops the node's BFD and BGP. At heal the frames
   pass again and nothing is sent from outside: the face check's own solicit
-  must clear the latch. The default duration outlasts the router's own
-  retransmissions on the session it closed, which would answer for it. The
-  probe wants both VIPs routed over every live proxy's node. `pick: all`
-  takes the VIPs away altogether until the heal.
+  must clear the latch. A recovery proves that only against a passive router
+  (one that opens no session toward the node and sends it no BFD while its
+  session is down) with a duration_s past the router's own ARP window: for
+  about 100 s after the death its retransmissions on the session it closed
+  make it ARP for the node, which would answer for the solicit. The probe
+  wants both VIPs routed over every live proxy's node. `pick: all` takes the
+  VIPs away altogether until the heal.
 kind: fault
 target:
   selector: app=sip-front-proxy

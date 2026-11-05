@@ -5,9 +5,11 @@
 //! entries resolved while the node is let out; while the face is latched
 //! unusable the route guard drops that traffic, so each reading solicits the
 //! next hops itself. One reading of the interface down or of the next hops
-//! unresolved holds a usable face, so a carrier flap and its aftermath withdraw
-//! nothing. `/readyz` requires the face usable, so a node whose caller-facing
-//! uplink is gone stops announcing both faces' addresses together (ADR-0056).
+//! unresolved holds a usable face, so a carrier flap withdraws nothing when the
+//! first ARP retry after it is answered; a router answering later latches the
+//! face until the solicit is answered. `/readyz` requires the face usable, so a
+//! node whose caller-facing uplink is gone stops announcing both faces'
+//! addresses together (ADR-0056).
 
 mod monitor;
 mod neighbours;
@@ -18,7 +20,6 @@ use std::path::{Path, PathBuf};
 
 pub use monitor::FaceMonitor;
 pub use neighbours::{dump_ipv4, Neighbour, NUD_FAILED, NUD_INCOMPLETE, NUD_RESOLVED};
-pub use solicit::solicit;
 
 /// The external interface and the next hops the face is reached through
 /// (`PROXY_EXT_INTERFACE`, `PROXY_EXT_NEXT_HOPS`).
@@ -34,11 +35,12 @@ pub enum FaceState {
     Usable,
     /// The interface exists and is not up, at the first reading since it read
     /// usable: a carrier flap unless the next reading finds it down too.
-    /// Usable, so a flap shorter than the reading period withdraws nothing.
+    /// Usable.
     DownOnce(String),
     /// No next hop resolved and one `FAILED` or `INCOMPLETE`, at the first
     /// such reading since one resolved on a usable face: a carrier flap leaves
-    /// the entry unresolved until its ARP retry, past the flap. Usable.
+    /// the entry unresolved until an ARP retry is answered, past the flap.
+    /// Usable.
     UnresolvedOnce,
     /// The interface does not exist, or its state cannot be read.
     Missing,
@@ -69,12 +71,16 @@ impl FaceState {
 ///
 /// `usable` and `down_once`: whether the latest reading was usable, and
 /// whether it was [`FaceState::DownOnce`].
+///
+/// `solicit_failed`: a solicit failed to send since a next hop last resolved,
+/// so one latch logs one warning.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FaceLatch {
     unresolved: bool,
     unresolved_once: bool,
     usable: bool,
     down_once: bool,
+    solicit_failed: bool,
 }
 
 /// One next hop in the neighbour table.
@@ -95,7 +101,13 @@ impl FaceCheck {
     /// The face as the running kernel reports it, `latch` carried from the
     /// previous reading; a latched next hop solicited on the wire.
     pub fn read(&self, latch: &mut FaceLatch) -> FaceState {
-        self.read_at(Path::new(SYS_CLASS_NET), dump_ipv4, solicit, latch)
+        self.read_soliciting(solicit::DISCARD_PORT, latch)
+    }
+
+    /// [`Self::read`], a latched next hop solicited on `port`.
+    fn read_soliciting(&self, port: u16, latch: &mut FaceLatch) -> FaceState {
+        let send = |hop| solicit::solicit(hop, port);
+        self.read_at(Path::new(SYS_CLASS_NET), dump_ipv4, send, latch)
     }
 
     /// The face read from the interface directory under `class_net` and the
@@ -107,7 +119,7 @@ impl FaceCheck {
         &self,
         class_net: &Path,
         neighbours: impl FnOnce() -> std::io::Result<Vec<Neighbour>>,
-        solicit: impl FnMut(Ipv4Addr),
+        solicit: impl FnMut(Ipv4Addr) -> std::io::Result<()>,
         latch: &mut FaceLatch,
     ) -> FaceState {
         let state = self.reading(class_net, neighbours, solicit, latch);
@@ -119,7 +131,7 @@ impl FaceCheck {
         &self,
         class_net: &Path,
         neighbours: impl FnOnce() -> std::io::Result<Vec<Neighbour>>,
-        mut solicit: impl FnMut(Ipv4Addr),
+        mut solicit: impl FnMut(Ipv4Addr) -> std::io::Result<()>,
         latch: &mut FaceLatch,
     ) -> FaceState {
         let dir: PathBuf = class_net.join(&self.interface);
@@ -155,6 +167,7 @@ impl FaceCheck {
         if hops.contains(&Hop::Resolved) {
             latch.unresolved = false;
             latch.unresolved_once = false;
+            latch.solicit_failed = false;
         } else if hops.contains(&Hop::Unresolved) {
             if latch.usable && !latch.unresolved_once {
                 latch.unresolved_once = true;
@@ -163,7 +176,19 @@ impl FaceCheck {
             latch.unresolved = true;
         }
         if latch.unresolved {
-            self.next_hops.iter().for_each(|hop| solicit(*hop));
+            for hop in &self.next_hops {
+                if let Err(e) = solicit(*hop) {
+                    if !latch.solicit_failed {
+                        tracing::warn!(
+                            %hop,
+                            error = %e,
+                            "next hop solicit not sent: nothing else resolves it while the node \
+                             is withdrawn; the node's firewall must let it out"
+                        );
+                    }
+                    latch.solicit_failed = true;
+                }
+            }
             FaceState::NextHopsUnresolved
         } else {
             FaceState::Usable
