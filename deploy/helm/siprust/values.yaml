@@ -244,7 +244,7 @@ proxy:
   # vip-loopback init container, with net.ipv4.fib_multipath_use_neigh on. A next
   # hop that dies with its carrier up reads FAILED within 1.5 ×
   # baseReachableTimeMs + delayFirstProbeSeconds + ucastSolicit × retransTimeMs
-  # (10 s here, about 50 s at the kernel's defaults), when multipath egress
+  # (10 s here, about 50 s at the kernel's defaults) + up to 1 s for the next packet, when multipath egress
   # leaves it and, if no next hop is left, the face reads unusable (ADR-0056 §10).
   # A worker's retransmitted final then still reaches its caller inside Timer H
   # (32 s). retransTimeMs is the ARP retry: at most half of PROXY_EXT_FACE_CHECK_MS,

@@ -152,7 +152,8 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       neighbour entry reads `FAILED` at the end of the kernel's STALE, DELAY and PROBE cycle, 1.5
       × `base_reachable_time_ms` + `delay_first_probe_time` + `ucast_solicit` × `retrans_time_ms`,
       10 s at the chart's `proxy.neighbour` (the init step sets them on every interface; the
-      kernel's defaults give about 50 s). Multipath egress leaves that next hop then
+      kernel's defaults give about 50 s), and the entry leaves STALE at the next packet, up to 1 s
+      later once the session's BFD went down. Multipath egress leaves that next hop then
       (`fib_multipath_use_neigh`, set by the same step, the routes over both next hops being a
       deployment requirement), so a worker's retransmitted final reaches its caller inside Timer
       H; with no next hop left the face reads unusable and the node leaves the routers' ECMP. The
@@ -160,7 +161,7 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       32 s.
       The timers rest on the solicit (§3): without it a shorter cycle reaches a latch nothing
       clears sooner. Measured on the lab (`next_hop_dead`, one next hop, kernel 7.2): a proxy unfit
-      8 to 9 s after the death, its node routed again 9 to 11 s after the next hop's return, with
+      7 to 12 s after the death, its node routed again about 9 s after the next hop's return, with
       nothing sent from outside; the kernel's default timers read the death in 47 s.
     - A carrier flap leaves the proxy fit: the face holds through it (§3), and no hold applies. The
       node's external BGP session re-establishes after it: on the lab every flap of 0.1 to 0.4 s

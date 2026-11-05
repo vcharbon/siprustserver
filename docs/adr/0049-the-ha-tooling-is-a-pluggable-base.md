@@ -223,6 +223,7 @@ tolerated (§3).
     | `io_stall` | fault | delay the file operations of one pod's volume for `duration_s` (Chaos Mesh) | (new) |
     | `clock_skew` | fault | shift one pod's wall clock for `duration_s` (Chaos Mesh) | (new) |
     | `cut_external_plane` | fault | disconnect one proxy's node from the callers' network; time its withdrawal from both VIPs' routes | `cut_external_plane` |
+    | `next_hop_dead` | fault | silence a next hop of one or both proxy nodes with the carrier up, below IP and ARP; time the withdrawal and the proxy's unfit reading; the node returns with nothing sent from outside | (new) |
     | `spike` | load | a burst stream, drained at heal | `peak` |
     | `abuse` | load | a stream of an abuse scenario, drained at heal | `abuse_up`, `abuse_down` |
     | `orphan` | load | a stream abandoned mid-call at heal (`stop: abandon`) | `orphan_kill` |
