@@ -138,6 +138,11 @@ impl ProxySut {
         self.registry.resolve(ordinal).map(|w| w.health)
     }
 
+    /// The health the proxy's probe holds for a worker, routed or not.
+    pub fn probed_health(&self, ordinal: &str) -> Option<WorkerHealth> {
+        self.registry.probed().into_iter().find(|w| w.id == ordinal).map(|w| w.health)
+    }
+
     /// The `(primary, backup)` the proxy places a new call with `call_id` on
     /// under its current view: rendezvous hashing over the workers that take
     /// new calls, then for the backup over the other alive ones, else over

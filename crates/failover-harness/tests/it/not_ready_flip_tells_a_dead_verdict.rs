@@ -472,9 +472,10 @@ async fn a_live_workers_flip_takes_nothing_over() {
     hang_up_and_settle(p, answered, &[]).await;
 }
 
-/// A refuted verdict is spent (ADR-0047, residual): the worker that dies while
+/// With no probe running a refuted verdict is spent: the worker that dies while
 /// it still reads not ready draws no second verdict, its ringing call waits for
-/// a message or the departure, and the departure takes it over.
+/// a message or the departure, and the departure takes it over. The probe's
+/// reading of that silence is the second verdict (`no_worker_reads_ready.rs`).
 #[tokio::test(start_paused = true)]
 async fn a_death_after_a_refuted_flip_waits_for_the_departure() {
     let mut p =
@@ -500,9 +501,9 @@ async fn a_death_after_a_refuted_flip_waits_for_the_departure() {
     hang_up_and_depart(p).await;
 }
 
-/// A second death right after the return, before the proxy read the worker
-/// alive: no flip reads `Alive`, so no verdict; the copy stood down on the
-/// reclaim, and the call waits for a message or the departure.
+/// A second death right after the return, before any probe answered: no flip
+/// reads `Alive`, so no verdict; the copy stood down on the reclaim, and the call
+/// waits for a message or the departure (ADR-0047, residual).
 #[tokio::test(start_paused = true)]
 async fn a_second_death_before_the_proxy_read_the_worker_alive_draws_no_verdict() {
     let mut p =

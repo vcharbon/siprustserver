@@ -21,12 +21,21 @@
 //! - **Departed addresses** live in `Tombstones`, keyed by address: an address
 //!   the set stopped serving still resolves as `Dead` for Timer H, so a response
 //!   from a node that left the pool is recognised as such.
-//! - **Only a `ready` member is routable** (ADR-0031 D1). The filter is applied
-//!   here, at the projection, so a member whose endpoint is not ready
-//!   departs exactly as a removed one: its ordinal leaves the projection and its
-//!   address is tombstoned. Filtering in the LB instead would keep a live entry
-//!   and never insert the tombstone. The flip of a worker read `Alive`, unless
-//!   its endpoint reads `terminating`, is also a dead verdict (ADR-0050 §3).
+//! - **Only a `ready` member is routable, while one reads ready** (ADR-0031 D1).
+//!   The filter is applied here, at the projection, so a member whose endpoint is
+//!   not ready departs exactly as a removed one: its ordinal leaves the projection
+//!   and its address is tombstoned. Filtering in the LB instead would keep a live
+//!   entry and never insert the tombstone. The flip of a worker read `Alive`,
+//!   unless its endpoint reads `terminating`, is also a dead verdict (ADR-0050 §3).
+//! - **A view where no member reads ready routes on the probe.** Every member
+//!   present and not `terminating` is projected, and the workers that answer are
+//!   `Alive`: the slice speaks of the orchestrator's reach to the nodes, the probe
+//!   of the workers (ADR-0050 §11). The rule reads the slice and the health as they
+//!   stand now, so it holds no state, no timer, and a proxy started inside such a
+//!   view needs no memory of an earlier one.
+//! - **The probe judges every member present and not `terminating`**, projected
+//!   or not (`WorkerSet::probed`), so a worker that flips keeps a health
+//!   as current as any other's when the view empties or it returns.
 //! - **The projection** is cached in one [`ArcSwap`] for lock-free hot reads and
 //!   is a pure function of the two authoritative sources — never an independent
 //!   source of truth, always re-derivable, inherently lag-immune (it recomposes
@@ -48,12 +57,17 @@ use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerId};
 
 mod annotations;
 
-use annotations::{Annot, Departed, WorkerAnnotations};
+use annotations::{standing_of, Annot, Departed, WorkerAnnotations};
 
 /// Whether `peer`'s endpoint reads the way a process that died on a live node
 /// does: not `ready`, and no orchestrator removal under way (ADR-0031 case 4).
 fn reads_down(peer: &Peer) -> bool {
     !peer.ready && !peer.terminating
+}
+
+/// Whether no member of the view reads `ready`.
+fn no_member_ready(members: &[Peer]) -> bool {
+    !members.iter().any(|p| p.ready)
 }
 
 /// Project the membership peer set + the annotation overlay into the worker set
@@ -94,6 +108,11 @@ pub(crate) struct WorkerSet {
     annotations: WorkerAnnotations,
     tombstones: Tombstones,
     projection: ArcSwap<Vec<WorkerEntry>>,
+    /// Every worker the probe judges, whether the projection holds it or not.
+    probed: ArcSwap<Vec<WorkerEntry>>,
+    /// The projection routes on the probe's answers: members are present and
+    /// none reads ready.
+    routing_on_answers: AtomicBool,
     /// The projection was composed from an authoritative listing.
     listed: AtomicBool,
     default_port: u16,
@@ -117,6 +136,8 @@ impl WorkerSet {
             annotations: WorkerAnnotations::default(),
             tombstones: Tombstones::default(),
             projection: ArcSwap::from_pointee(Vec::new()),
+            probed: ArcSwap::from_pointee(Vec::new()),
+            routing_on_answers: AtomicBool::new(false),
             listed: AtomicBool::new(false),
             default_port,
             clock,
@@ -130,25 +151,30 @@ impl WorkerSet {
         u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
-    /// Recompute the projection from the **ready** members of the authoritative
-    /// membership snapshot + the annotation overlay, and keep the departed-address
-    /// overlay in step: an address the set stopped serving — the member left, or
-    /// its endpoint reads not `ready` — is tombstoned, an address a worker
-    /// joined at is forgotten. A `terminating` flip on a ready member changes
-    /// nothing. A worker read `Alive` whose endpoint now reads not `ready` and
-    /// not `terminating` is a dead verdict, told to every
+    /// Recompute the projection from the authoritative membership snapshot + the
+    /// annotation overlay: the **ready** members, or every member present and
+    /// not `terminating` while none reads ready. Keep the departed-address overlay
+    /// in step: an address the set stopped serving — the member left, or it no
+    /// longer stands in the projection — is tombstoned, an address a worker joined
+    /// at is forgotten. A `terminating` flip on a ready member changes nothing.
+    /// A worker read `Alive` whose endpoint flips not `ready`, not `terminating`,
+    /// with another member still ready, is a dead verdict, told to every
     /// [`read_dead`](Self::read_dead) reader once the projection holds it: its
-    /// record is dropped with it, so one flip tells once. Idempotent; the
+    /// health turns `Unknown` with it, so one flip tells once. Idempotent; the
     /// single write path for every registry.
     pub(crate) fn recompose(&self) {
         let members = self.membership.snapshot();
-        let peers: Vec<Peer> = members.iter().filter(|p| p.ready).cloned().collect();
+        let no_ready = no_member_ready(&members);
         let now_ms = self.now_ms();
-        let departed = self.annotations.sync_membership(&peers, self.default_port);
+        let departed = self.annotations.sync_membership(&members, no_ready, self.default_port);
         let annots = self.annotations.snapshot();
+        let judged = |p: &&Peer| standing_of(p, no_ready).is_some();
+        let probed: Vec<Peer> = members.iter().filter(judged).cloned().collect();
+        let routed = |p: &&Peer| standing_of(p, no_ready).is_some_and(|s| s.routed);
+        let peers: Vec<Peer> = members.iter().filter(routed).cloned().collect();
         let entries = project(&peers, &annots, self.default_port);
         let mut flipped = Vec::new();
-        for Departed { id, address, read_alive } in departed {
+        for Departed { id, address, flipped: flip } in departed {
             tracing::info!(
                 node = observe::node(),
                 worker = %id,
@@ -156,7 +182,7 @@ impl WorkerSet {
                 ttl_ms = DEPARTED_ADDRESS_TTL_MS,
                 "departed worker address tombstoned"
             );
-            if read_alive && members.iter().any(|p| p.ordinal == id && reads_down(p)) {
+            if flip {
                 flipped.push(id.clone());
             }
             self.tombstones.insert(address, id, now_ms);
@@ -165,6 +191,8 @@ impl WorkerSet {
             self.tombstones.clear(&e.address);
         }
         self.tombstones.prune(now_ms);
+        self.note_routing(!entries.is_empty() && no_ready);
+        self.probed.store(Arc::new(project(&probed, &annots, self.default_port)));
         self.projection.store(Arc::new(entries));
         for id in flipped {
             tracing::info!(
@@ -173,6 +201,22 @@ impl WorkerSet {
                 "a worker read alive reads not ready, not terminating: a dead verdict"
             );
             let _ = self.read_dead.send(id);
+        }
+    }
+
+    /// Record whether the projection routes on the probe's answers; each turn
+    /// gets its line.
+    fn note_routing(&self, on_answers: bool) {
+        if self.routing_on_answers.swap(on_answers, Ordering::AcqRel) == on_answers {
+            return;
+        }
+        if on_answers {
+            tracing::warn!(
+                node = observe::node(),
+                "no worker reads ready: routing on the workers' probe answers"
+            );
+        } else {
+            tracing::info!(node = observe::node(), "routing on the workers' readiness again");
         }
     }
 
@@ -189,38 +233,46 @@ impl WorkerSet {
 
     /// Annotate a worker's health and acceptance at once (`None` keeps that
     /// one) and recompose once: no read sees one without the other. A write
-    /// that turns the worker `Dead` is a dead verdict, told to every
-    /// [`read_dead`](Self::read_dead) reader once the projection holds it.
+    /// that is a dead verdict is told to every [`read_dead`](Self::read_dead)
+    /// reader once the projection holds it.
     pub(crate) fn set_view(
         &self,
         id: &str,
         health: Option<WorkerHealth>,
         acceptance: Option<Acceptance>,
     ) {
-        let turned_dead = self.annotations.set_view(id, health, acceptance);
+        let verdict = self.annotations.set_view(id, health, acceptance);
         self.recompose();
-        if turned_dead {
+        if verdict {
             let _ = self.read_dead.send(id.to_string());
         }
     }
 
     /// Every later dead verdict: a worker whose health the view turns `Dead`
-    /// from another health, and a worker read `Alive` whose endpoint flips not
-    /// `ready` and not `terminating` (ADR-0050 §3). A membership departure and
-    /// a `terminating` flip are none: its address is tombstoned and its ordinal
-    /// leaves the projection.
+    /// from `Alive`, or from `Unknown` while its endpoint reads ready, and a
+    /// worker read `Alive` whose endpoint flips not `ready` and not `terminating`
+    /// while another member reads ready (ADR-0050 §3). A membership departure, a
+    /// `terminating` flip and a flip that empties the view of ready members are
+    /// none.
     pub(crate) fn read_dead(&self) -> broadcast::Receiver<WorkerId> {
         self.read_dead.subscribe()
     }
 
     /// The ordinals a verdict may stand on now, for a reader that lost track
-    /// of them: every worker the view reads `Dead`, and every member whose
-    /// endpoint reads not `ready` and not `terminating`. Sorted, no duplicate.
+    /// of them: every worker the probe reads `Dead`, and every member out of the
+    /// projection whose endpoint reads not `ready` and not `terminating`. Sorted,
+    /// no duplicate.
     pub(crate) fn read_dead_now(&self) -> Vec<WorkerId> {
         let projected = self.projection.load();
-        let dead =
-            projected.iter().filter(|w| w.health == WorkerHealth::Dead).map(|w| w.id.clone());
-        let down = self.membership.snapshot().into_iter().filter(reads_down).map(|p| p.ordinal);
+        let probed = self.probed.load();
+        let dead = probed.iter().filter(|w| w.health == WorkerHealth::Dead).map(|w| w.id.clone());
+        let down = self
+            .membership
+            .snapshot()
+            .into_iter()
+            .filter(reads_down)
+            .map(|p| p.ordinal)
+            .filter(|id| !projected.iter().any(|w| &w.id == id));
         let mut now: Vec<WorkerId> = dead.chain(down).collect();
         now.sort();
         now.dedup();
@@ -250,9 +302,17 @@ impl WorkerSet {
         acceptance: Acceptance,
     ) {
         self.annotations.update(|recs| {
+            let (ready, routed) = recs.get(id).map_or((true, true), |r| (r.ready, r.routed));
             recs.insert(
                 id.to_string(),
-                Annot { health, acceptance, host: host.clone(), port_override: Some(port) },
+                Annot {
+                    health,
+                    acceptance,
+                    host: host.clone(),
+                    port_override: Some(port),
+                    ready,
+                    routed,
+                },
             );
         });
     }
@@ -267,6 +327,16 @@ impl WorkerSet {
 
     pub(crate) fn snapshot(&self) -> Vec<WorkerEntry> {
         self.projection.load().as_ref().clone()
+    }
+    /// Every worker the probe judges: each member present and not `terminating`,
+    /// and any ready one, whether the projection holds it or not.
+    pub(crate) fn probed(&self) -> Vec<WorkerEntry> {
+        self.probed.load().as_ref().clone()
+    }
+    /// Whether the projection routes on the probe's answers: members are
+    /// present and none reads ready.
+    pub(crate) fn routes_on_answers(&self) -> bool {
+        self.routing_on_answers.load(Ordering::Acquire)
     }
     pub(crate) fn resolve(&self, id: &str) -> Option<WorkerEntry> {
         self.projection.load().iter().find(|w| w.id == id).cloned()

@@ -323,6 +323,12 @@ pub const EXTERNAL_FACE_USABLE: Family = Family::gauge(
     "1 while the external interface is up and one of its next hops is not FAILED in the neighbour table, or no face check is set; 0 flips /readyz and withdraws the node's announcements.",
 );
 
+pub const ROUTING_ON_ANSWERS: Family = Family::gauge(
+    "sip_proxy_routing_on_answers",
+    Labels::None,
+    "1 while no worker endpoint reads ready in the slice and the proxy routes on the workers' OPTIONS answers instead.",
+);
+
 pub const WORKER_POOL_EMPTY: Family = Family::gauge(
     "sip_proxy_worker_pool_empty",
     Labels::None,
@@ -466,6 +472,7 @@ pub const PROXY: &[Family] = &[
     INTAKE_UNANSWERABLE,
     RECV_SHARDS_STALLED,
     EXTERNAL_FACE_USABLE,
+    ROUTING_ON_ANSWERS,
     WORKER_POOL_EMPTY,
     DISCOVERY_NO_CLIENT,
     DISCOVERY_WATCH_BROKEN_SINCE,

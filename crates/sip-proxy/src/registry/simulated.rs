@@ -92,8 +92,9 @@ impl SimulatedWorkerRegistry {
 
     /// Set a worker's endpoint `ready` condition (no-op if unknown). The worker
     /// stays a member; a `ready=false` one leaves the projection and its address
-    /// is tombstoned, a `ready=true` one joins as a fresh `Unknown` endpoint
-    /// (ADR-0031 D1). The orchestrator's condition, never the probe's health.
+    /// is tombstoned while another member reads ready, a `ready=true` one is
+    /// routed again on the health the probe holds for it (ADR-0031 D1). The
+    /// orchestrator's condition, never the probe's health.
     pub fn set_ready(&self, id: &str, ready: bool) {
         let Some(cur) = self.membership.resolve(id) else {
             return;
@@ -102,15 +103,14 @@ impl SimulatedWorkerRegistry {
     }
 
     /// Set a worker's endpoint `ready` and `terminating` conditions at once
-    /// (no-op if unknown), as [`set_ready`](Self::set_ready) does.
+    /// (no-op if unknown), as [`set_ready`](Self::set_ready) does. A terminating
+    /// worker that reads ready again joins afresh, its record gone: its
+    /// per-worker port is re-seeded, the rest is what a fresh join gets.
     pub fn set_conditions(&self, id: &str, ready: bool, terminating: bool) {
         let Some(cur) = self.membership.resolve(id) else {
             return;
         };
-        if ready && !cur.ready {
-            // The per-worker port is a proxy annotation, dropped with the
-            // departure; re-seed it so the returning endpoint keeps its bind.
-            // Everything else is what a fresh join gets.
+        if ready && !cur.ready && cur.terminating {
             if let Some(port) = locked(&self.ports, SIMULATED_REGISTRY).get(id).copied() {
                 self.set.preset(
                     id,
@@ -136,12 +136,12 @@ impl SimulatedWorkerRegistry {
         self.set.set_acceptance(id, acceptance);
     }
 
-    /// Change a worker's address (no-op if unknown, unchanged, or not ready — it
-    /// resolves through the projection, which holds ready members only). The host
-    /// is membership identity (driven through topology, preserving health); the
+    /// Change a worker's address (no-op if unknown, unchanged, or terminating and
+    /// not ready: the worker is judged at it, routed or not). The host is
+    /// membership identity (driven through topology, preserving health); the
     /// port is the proxy's per-worker annotation.
     pub fn set_address(&self, id: &str, address: ProxyAddr) {
-        let Some(cur) = self.set.resolve(id) else {
+        let Some(cur) = self.set.probed().into_iter().find(|w| w.id == id) else {
             return;
         };
         if cur.address == address {
@@ -153,7 +153,14 @@ impl SimulatedWorkerRegistry {
             // host (carrying the current health/acceptance + new port) so the
             // recompose preserves it rather than resetting to a fresh endpoint.
             self.set.preset(id, address.host.clone(), address.port, cur.health, cur.acceptance);
-            self.membership.change_address(Peer::new(id.to_string(), address.host.clone()));
+            let member = self.membership.resolve(id);
+            let conditions = member.map_or((true, false), |m| (m.ready, m.terminating));
+            self.membership.change_address(Peer::with_conditions(
+                id.to_string(),
+                address.host.clone(),
+                conditions.0,
+                conditions.1,
+            ));
             self.set.recompose();
             // The preset hid the move from the recompose: tombstone the old address.
             self.set.depart(cur.address, id);
@@ -180,6 +187,12 @@ impl SimulatedWorkerRegistry {
 impl WorkerRegistry for SimulatedWorkerRegistry {
     fn snapshot(&self) -> Vec<WorkerEntry> {
         self.set.snapshot()
+    }
+    fn probed(&self) -> Vec<WorkerEntry> {
+        self.set.probed()
+    }
+    fn routes_on_answers(&self) -> bool {
+        self.set.routes_on_answers()
     }
     fn resolve(&self, id: &str) -> Option<WorkerEntry> {
         self.set.resolve(id)
@@ -232,6 +245,7 @@ mod tests {
     fn set_ready_false_departs_the_worker_and_true_readmits_it_unknown() {
         let reg = SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(0));
         reg.add(WorkerEntry::alive("w", ProxyAddr::new("10.0.0.1", 5070)));
+        reg.add(WorkerEntry::alive("other", ProxyAddr::new("10.0.0.2", 5070)));
         let addr = ProxyAddr::new("10.0.0.1", 5070);
 
         reg.set_ready("w", false);

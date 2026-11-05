@@ -32,8 +32,10 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    at render), `externalTrafficPolicy: Local`, `allocateLoadBalancerNodePorts: false`, the VIP
    pinned by `metallb.io/loadBalancerIPs`, the proxy pods as endpoints. MetalLB in BGP mode
    (frr-k8s backend) announces a Local Service only from nodes with an endpoint that can serve
-   (Ready, or Serving while it terminates), so each VIP's route follows `/readyz`. The routers
-   spread flows over the announcing nodes (ECMP): the pair is active-active.
+   (Ready, or Serving while it terminates), so each VIP's route follows `/readyz` while the kubelet
+   reports it. A node whose heartbeats are lost has its pod marked not ready by the node controller,
+   whatever `/readyz` answers, and its speaker withdraws it: an open limit, that path has no answer
+   here. The routers spread flows over the announcing nodes (ECMP): the pair is active-active.
 2. **kube-proxy runs in iptables or nftables mode.** Both match a LoadBalancer address per
    protocol and port, so VIP:5060/UDP reaches the proxy's socket untouched. IPVS binds every
    LoadBalancer address to every node and its filter refuses the ports a Service does not list:

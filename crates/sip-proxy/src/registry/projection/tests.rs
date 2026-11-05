@@ -149,8 +149,8 @@ fn a_member_no_longer_ready_departs_and_its_address_reads_dead() {
 }
 
 #[test]
-fn a_member_ready_again_joins_fresh_and_clears_its_tombstone() {
-    let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+fn a_member_ready_again_clears_its_tombstone_and_awaits_its_probe_since_the_flip() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
     set.set_health("w0", WorkerHealth::Alive);
     sim.set_conditions("w0", false, false);
     set.recompose();
@@ -160,9 +160,200 @@ fn a_member_ready_again_joins_fresh_and_clears_its_tombstone() {
     sim.set_conditions("w0", true, false);
     set.recompose();
     let back = set.resolve("w0").expect("routable again");
-    assert_eq!(back.health, WorkerHealth::Unknown, "a returning endpoint awaits its probe");
+    assert_eq!(back.health, WorkerHealth::Unknown, "no answer since its flip");
     let live = set.lookup_by_address(&addr).unwrap();
     assert_eq!((live.id.as_str(), live.health), ("w0", WorkerHealth::Unknown));
+}
+
+#[test]
+fn a_member_that_answered_while_not_ready_returns_alive() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    sim.set_conditions("w0", false, false);
+    set.recompose();
+    set.set_health("w0", WorkerHealth::Alive);
+    assert!(set.resolve("w0").is_none(), "an answer routes no worker while another reads ready");
+
+    sim.set_conditions("w0", true, false);
+    set.recompose();
+    assert_eq!(set.resolve("w0").unwrap().health, WorkerHealth::Alive);
+}
+
+#[test]
+fn the_probe_judges_every_member_present_and_not_terminating() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2"), ("w2", "10.0.0.3")], 5060);
+    sim.set_conditions("w1", false, false);
+    sim.set_conditions("w2", false, true);
+    set.recompose();
+    let probed: Vec<WorkerId> = set.probed().into_iter().map(|w| w.id).collect();
+    assert_eq!(probed, ["w0", "w1"]);
+    let routed: Vec<WorkerId> = set.snapshot().into_iter().map(|w| w.id).collect();
+    assert_eq!(routed, ["w0"]);
+    assert!(!set.routes_on_answers());
+}
+
+#[test]
+fn no_member_ready_routes_every_member_present_on_its_health() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2"), ("w2", "10.0.0.3")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    set.set_health("w2", WorkerHealth::Dead);
+    let mut verdicts = set.read_dead();
+    for w in ["w0", "w1", "w2"] {
+        sim.set_conditions(w, false, false);
+    }
+    set.recompose();
+    let healths: Vec<(WorkerId, WorkerHealth)> =
+        set.snapshot().into_iter().map(|w| (w.id, w.health)).collect();
+    assert_eq!(
+        healths,
+        [
+            ("w0".to_string(), WorkerHealth::Alive),
+            ("w1".to_string(), WorkerHealth::Unknown),
+            ("w2".to_string(), WorkerHealth::Dead),
+        ]
+    );
+    assert!(set.routes_on_answers());
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new(), "no worker stopped answering");
+    assert_eq!(
+        set.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060)).unwrap().health,
+        WorkerHealth::Alive,
+        "no tombstone for an address still served"
+    );
+    assert_eq!(set.read_dead_now(), ["w2"], "a verdict stands on the probe alone");
+    assert!(set.away_ordinals().is_empty(), "every ordinal is routed");
+}
+
+/// The fleet flips one at a time: the workers left before the last flip come
+/// back at it, on the health their probe kept, and only those flips are told.
+#[test]
+fn the_flip_that_empties_the_view_tells_nothing_and_returns_the_workers_left_before_it() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2"), ("w2", "10.0.0.3")], 5060);
+    for w in ["w0", "w1", "w2"] {
+        set.set_health(w, WorkerHealth::Alive);
+    }
+    let mut verdicts = set.read_dead();
+    sim.set_conditions("w0", false, false);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), ["w0"]);
+    set.set_health("w0", WorkerHealth::Alive);
+    sim.set_conditions("w1", false, false);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), ["w1"]);
+    assert!(set.resolve("w0").is_none() && set.resolve("w1").is_none());
+
+    // w1 answered no probe since its flip; w2 flips last and empties the view.
+    sim.set_conditions("w2", false, false);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new(), "the last flip is no verdict");
+    assert_eq!(set.resolve("w0").unwrap().health, WorkerHealth::Alive, "answered all along");
+    assert_eq!(set.resolve("w1").unwrap().health, WorkerHealth::Unknown, "not yet answered");
+    assert_eq!(set.resolve("w2").unwrap().health, WorkerHealth::Alive, "never left");
+    assert_eq!(
+        set.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060)).unwrap().health,
+        WorkerHealth::Alive,
+        "its tombstone is cleared"
+    );
+}
+
+#[test]
+fn a_silent_worker_inside_the_view_is_a_verdict_only_if_it_answered() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    sim.set_conditions("w0", false, false);
+    sim.set_conditions("w1", false, false);
+    set.recompose();
+    let mut verdicts = set.read_dead();
+    set.set_health("w0", WorkerHealth::Dead);
+    assert_eq!(told(&mut verdicts), ["w0"], "it answered, it stopped");
+    assert!(!set.resolve("w0").unwrap().is_alive());
+    set.set_health("w1", WorkerHealth::Dead);
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new(), "it never answered: a booting pod");
+    assert!(set.snapshot().iter().all(|w| !w.is_alive()), "no worker to route to");
+}
+
+#[test]
+fn a_flipped_worker_that_stays_silent_tells_no_second_verdict() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    let mut verdicts = set.read_dead();
+    sim.set_conditions("w0", false, false);
+    set.recompose();
+    assert_eq!(told(&mut verdicts), ["w0"]);
+    set.set_health("w0", WorkerHealth::Dead);
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new(), "one death tells once");
+    set.set_health("w0", WorkerHealth::Alive);
+    set.set_health("w0", WorkerHealth::Dead);
+    assert_eq!(told(&mut verdicts), ["w0"], "it answered since: a death of its own");
+}
+
+#[test]
+fn a_ready_member_never_read_alive_is_still_a_verdict_when_it_turns_dead() {
+    let (set, _sim) = ws(&[("w0", "10.0.0.1")], 5060);
+    let mut verdicts = set.read_dead();
+    set.set_health("w0", WorkerHealth::Dead);
+    assert_eq!(told(&mut verdicts), ["w0"]);
+}
+
+#[test]
+fn one_member_ready_again_routes_on_readiness_with_no_verdict_on_the_others() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    set.set_health("w1", WorkerHealth::Alive);
+    sim.set_conditions("w0", false, false);
+    sim.set_conditions("w1", false, false);
+    set.recompose();
+    let mut verdicts = set.read_dead();
+
+    sim.set_conditions("w0", true, false);
+    set.recompose();
+    assert!(!set.routes_on_answers());
+    assert_eq!(set.resolve("w0").unwrap().health, WorkerHealth::Alive, "it never left");
+    assert!(set.resolve("w1").is_none(), "out of the routing");
+    assert_eq!(
+        set.lookup_by_address(&ProxyAddr::new("10.0.0.2", 5060)).unwrap().health,
+        WorkerHealth::Dead,
+        "its address reads as any not-ready member's"
+    );
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new(), "its flip came and went untold");
+
+    sim.set_conditions("w0", false, false);
+    set.recompose();
+    assert!(set.routes_on_answers(), "the view empties again");
+    assert_eq!(set.resolve("w1").unwrap().health, WorkerHealth::Alive, "answered all along");
+    assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new());
+}
+
+#[test]
+fn a_terminating_member_never_counts_in_a_view_with_none_ready() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+    set.set_health("w0", WorkerHealth::Alive);
+    set.set_health("w1", WorkerHealth::Alive);
+    sim.set_conditions("w0", false, true);
+    sim.set_conditions("w1", false, false);
+    set.recompose();
+    assert!(set.resolve("w0").is_none(), "terminating");
+    assert!(set.probed().iter().all(|w| w.id != "w0"), "and no longer probed");
+    assert_eq!(set.resolve("w1").unwrap().health, WorkerHealth::Alive);
+
+    sim.set_conditions("w1", false, true);
+    set.recompose();
+    assert!(set.snapshot().is_empty(), "every member terminating: no worker");
+    assert!(!set.routes_on_answers());
+}
+
+/// A view with no worker ready at the first listing: nothing to remember, the
+/// first answers route.
+#[test]
+fn a_first_listing_with_none_ready_routes_on_the_first_answers() {
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+    sim.set_conditions("w0", false, false);
+    sim.set_conditions("w1", false, false);
+    set.recompose();
+    assert!(set.snapshot().iter().all(|w| !w.is_alive()), "booting: no worker yet");
+    set.set_health("w1", WorkerHealth::Alive);
+    let alive: Vec<WorkerId> =
+        set.snapshot().into_iter().filter(|w| w.is_alive()).map(|w| w.id).collect();
+    assert_eq!(alive, ["w1"]);
 }
 
 #[test]
@@ -228,7 +419,7 @@ fn a_terminating_flip_and_a_departure_are_no_verdict() {
 
 #[test]
 fn a_worker_read_alive_again_after_its_return_flips_into_a_second_verdict() {
-    let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
     set.set_health("w0", WorkerHealth::Alive);
     let mut verdicts = set.read_dead();
     sim.set_conditions("w0", false, false);
@@ -251,7 +442,7 @@ fn a_worker_read_alive_again_after_its_return_flips_into_a_second_verdict() {
 
 #[test]
 fn a_flip_read_at_a_new_host_is_the_verdict_of_the_worker_read_alive() {
-    let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
     set.set_health("w0", WorkerHealth::Alive);
     let mut verdicts = set.read_dead();
     sim.change_address(Peer::new("w0", "10.0.0.2"));
@@ -272,11 +463,11 @@ fn a_host_move_of_a_ready_worker_is_no_verdict() {
     assert_eq!(told(&mut verdicts), Vec::<WorkerId>::new());
 }
 
-/// Two recomposes racing over one flip: only the one whose write removed the
-/// worker's record tells it.
+/// Two recomposes racing over one flip: only the one whose write took the
+/// worker out of the routing tells it.
 #[test]
 fn a_flip_is_told_once_whichever_recompose_reads_it() {
-    let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+    let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
     set.set_health("w0", WorkerHealth::Alive);
     let set = Arc::new(set);
     let mut verdicts = set.read_dead();

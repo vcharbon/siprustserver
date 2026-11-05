@@ -7,10 +7,11 @@
 //! The verdict is the registry's ([`WorkerRegistry::read_dead`]): a turn to
 //! `Dead` of the health view, whatever wrote it, the probe's misses in a runner
 //! or a harness's health write in a test, and the flip of a worker read `Alive`
-//! to not ready, not terminating. A membership departure and a terminating flip
-//! are no verdict. The notice's instant is when it is told, so another proxy's
-//! notice of the same flip is the same verdict only at the same instant, a
-//! later one otherwise. Each notice is one non-INVITE client transaction,
+//! to not ready, not terminating, with another member still ready. A membership
+//! departure and a terminating flip are no verdict. The notice's instant is when
+//! it is told, so another proxy's notice of the same flip is the same verdict only
+//! at the same instant, a later one otherwise. Each notice is one non-INVITE client
+//! transaction,
 //! retransmitted on Timer E until it is answered or Timer F ends it; the answer
 //! is the worker's ordinary OPTIONS report, read by the probe only.
 
@@ -106,7 +107,8 @@ impl DeadNotifier {
         Ok(())
     }
 
-    /// Tell every other `Alive` worker that `dead` is read dead now.
+    /// Tell every other `Alive` worker, routed or not, that `dead` is read dead
+    /// now.
     async fn tell(&self, dead: &str) -> Result<(), TransactionLayerClosed> {
         let notice = DeadNotice { ordinal: dead.to_string(), at_ms: self.clock.now_ms() };
         let fields = notice.signed_fields();
@@ -116,7 +118,7 @@ impl DeadNotifier {
             return Ok(());
         };
         tracing::info!(node = observe::node(), worker = dead, "dead verdict told to the workers");
-        for w in self.registry.snapshot() {
+        for w in self.registry.probed() {
             if w.id == dead || !w.is_alive() {
                 continue;
             }

@@ -202,6 +202,7 @@ pub struct ProxyMetrics {
     recv_shards_stalled: AtomicU64,
     /// 1 while the external face is usable (or unchecked).
     external_face_usable: AtomicU64,
+    routing_on_answers: AtomicU64,
     /// Per-face traffic counters (dual-face mode): `[face][direction]` where
     /// face ∈ {int, ext} and direction ∈ {inbound (recv), outbound (egress)}.
     /// A single-face proxy only ever touches the `int` slots — cheap fixed
@@ -244,6 +245,7 @@ impl Default for ProxyMetrics {
             pool: Default::default(),
             recv_shards_stalled: Default::default(),
             external_face_usable: AtomicU64::new(1),
+            routing_on_answers: AtomicU64::new(0),
             face_messages: Default::default(),
             external_untrusted: FixedCounts::new(&catalogue::EXTERNAL_UNTRUSTED),
             per_peer: Default::default(),
@@ -363,6 +365,11 @@ impl ProxyMetrics {
         self.external_face_usable.store(u64::from(usable), Ordering::Relaxed);
     }
 
+    /// Publish whether the proxy routes on the workers' probe answers.
+    pub fn set_routing_on_answers(&self, on_answers: bool) {
+        self.routing_on_answers.store(u64::from(on_answers), Ordering::Relaxed);
+    }
+
     /// Render Prometheus text exposition (the `/metrics` body): every
     /// family of [`catalogue::PROXY`], in order.
     pub fn prometheus_text(&self) -> String {
@@ -407,6 +414,7 @@ impl ProxyMetrics {
         self.intake.render(&mut s);
         c::RECV_SHARDS_STALLED.render_value(&mut s, load(&self.recv_shards_stalled));
         c::EXTERNAL_FACE_USABLE.render_value(&mut s, load(&self.external_face_usable));
+        c::ROUTING_ON_ANSWERS.render_value(&mut s, load(&self.routing_on_answers));
         self.pool.render_pool(&mut s);
 
         self.overload.render(&mut s);

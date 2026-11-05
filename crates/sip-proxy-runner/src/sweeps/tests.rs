@@ -22,6 +22,12 @@ impl WorkerRegistry for PanicsOnce {
         }
         Vec::new()
     }
+    fn probed(&self) -> Vec<WorkerEntry> {
+        Vec::new()
+    }
+    fn routes_on_answers(&self) -> bool {
+        false
+    }
     fn resolve(&self, _id: &str) -> Option<WorkerEntry> {
         None
     }

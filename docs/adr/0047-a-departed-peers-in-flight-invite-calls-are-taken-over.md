@@ -26,6 +26,8 @@ Amended (2026-11-04): D1, a worker read `Alive` whose endpoint flips not ready a
 terminating is a dead verdict too, and a write of another generation refutes a verdict
 and stops its sweep; the residuals of a death no proxy reads dead and of a verdict that
 is spent.
+Amended (2026-11-05): D1, the probe keeps reading a worker after its flip, so a death after
+a refuted flip is a verdict; the residuals narrowed to a process that never answered.
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -90,11 +92,15 @@ notice naming this node is ignored (`router/dead_verdict/tests.rs`;
 `read_dead_primary_taken_over.rs`).
 
 A process that dies on a live node flips its endpoint not ready, not terminating, usually
-before the probe's verdict (ADR-0031 case 4), and the proxy then has no entry for the
-probe to read. So the flip of a worker it read `Alive` is its verdict, whichever comes
-first: one verdict per flip, none for a worker it read `Unknown` or `Dead`, none for a
-`terminating` flip (a planned drain) or for leaving the slice
-(`not_ready_flip_tells_a_dead_verdict.rs`, the flip-timing cells and the terminating cell).
+before the probe's verdict (ADR-0031 case 4), and the proxy stops routing to it at once. So
+the flip of a worker it read `Alive` is its verdict, whichever comes first: one verdict per
+flip, none for a worker it read `Unknown` or `Dead`, none for a `terminating` flip (a
+planned drain), for leaving the slice, or for the flip that leaves no member ready, whose
+worker the probe goes on reading (ADR-0050 §11)
+(`not_ready_flip_tells_a_dead_verdict.rs`, the flip-timing cells and the terminating cell;
+`no_worker_reads_ready.rs`). The probe keeps reading a flipped worker, so a death after it
+answered again is a verdict of its own, and the reading of the silence the flip already told
+is none.
 Two proxies read one flip at their own instants: a copy at the same instant is the same
 verdict, a later one is a later verdict, which joins a confirmation still waiting or else
 sweeps again and takes over nothing more (the second-proxy cells there).
@@ -412,11 +418,12 @@ the call has one CDR.
   on a proxy that tells no verdict; `not_ready_flip_tells_a_dead_verdict.rs`, the no-key
   cell). An undecided call there is taken over by a message (the CANCEL cell of
   `undecided_call_settled_on_departure.rs`), and a restarted node asks its own
-  undecided calls' decisions again on its reclaim (the restart cell there). A worker the
-  proxy does not read `Alive` draws no verdict from its flip: a process that dies again
-  after it reclaimed its calls, its copies stood down, and before a probe read it, leaves
-  them to a message or the departure (`not_ready_flip_tells_a_dead_verdict.rs`, the cell
-  of a second death before the proxy read it alive; the cell after is a second verdict).
+  undecided calls' decisions again on its reclaim (the restart cell there). A process
+  the proxy never read `Alive` draws no verdict: one that dies again after it reclaimed
+  its calls, its copies stood down, and before it answered a probe `200`, leaves them to a
+  message or the departure (`not_ready_flip_tells_a_dead_verdict.rs`, the cell of a second
+  death before the proxy read it alive). One that answered first, its endpoint ready or
+  not, is read dead by the probe (`no_worker_reads_ready.rs`, the crash loop cell).
 - **A primary read dead while it lives.** A flap or a partition between the proxy and
   the primary alone takes nothing over, the stream open or reconnecting: nothing is
   dialled, asked or relayed twice (`cancel_and_retransmission_follow_a_live_hop.rs`, the
@@ -444,16 +451,17 @@ the call has one CDR.
   lost whole is taken over at most idle + lookup + connect after the verdict, plus idle
   once more for a frozen process: 6 to 8 s by default. A live peer whose stream stalls
   longer than the idle bound is pulled again from its watermark.
-- **A refuted verdict is spent.** The proxy tells one notice per health change or flip; a
-  primary that sends one frame on the backup's reconnect and then dies, or whose readiness
-  flips with its stream open and which then dies while it reads not ready, is not taken
-  over proactively: the proxy has no entry left to read it dead. Its calls are taken over
-  by a message (the reactive path), at a later verdict on another health change
-  (`live_primary_read_dead.rs`, the second verdict), or at its departure
-  (`not_ready_flip_tells_a_dead_verdict.rs`, the cell of a death after a refuted flip).
-  A stalled loop goes this way: the probe's verdict is refuted on its heartbeats, the flip
-  of its endpoint comes while the proxy reads it dead and tells nothing, whichever side of
-  the flip the process exits on (ADR-0033 §4); its restart's reclaim serves its calls
+- **A refuted verdict is spent until the worker answers.** The proxy tells one notice per
+  health change or flip; a primary read dead that sends one frame on the backup's reconnect
+  and then dies, answering no probe in between, is not taken over proactively. Its calls
+  are taken over by a message (the reactive path), at a later verdict on another health
+  change (`live_primary_read_dead.rs`, the second verdict), or at its departure. A worker
+  whose readiness flips with its stream open answers its next probe, and the probe's reading
+  of its later death is a second verdict (`no_worker_reads_ready.rs`, the cell of a death
+  after a refuted flip).
+  A stalled loop goes the first way: the probe's verdict is refuted on its heartbeats, the
+  flip of its endpoint comes while the proxy reads it dead and tells nothing, whichever side
+  of the flip the process exits on (ADR-0033 §4); its restart's reclaim serves its calls
   (`stalled_worker_exits.rs`).
 - **A split healing on both planes at once.** The partitioned primary's ladders (its
   480's Timer G repeats, its CANCEL) reach the parties until its own pull reconnects

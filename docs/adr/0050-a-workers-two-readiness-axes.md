@@ -8,7 +8,8 @@ keepalive lane. Amended (2026-11-03): §11, the node's announcement follows `/re
 Amended (2026-11-04): §3 and §5, the flip of a worker read `Alive` to not ready, not
 terminating, is a dead verdict.
 Amended (2026-11-05): §9, the transaction layer refuses on the queue's age by itself while
-its router writes nothing.
+its router writes nothing. Amended (2026-11-05): §3, §8 and §11, the proxy probes every worker
+present in the slice, and a view where none reads ready routes on the answers.
 
 **Owner:** `crates/sip-message` (the `X-Readiness` and `X-Incarnation` headers),
 `crates/b2bua/src/repl/readiness.rs` and `router/responses.rs` (the worker's
@@ -94,20 +95,24 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    address tombstone (ADR-0031 D4) make it `Dead`. The proxy's `Draining`
    health, its grace, and the `503` Reason-text split are gone.
 
-   A turn of a worker's health to `Dead` from another health is a **dead
-   verdict**, and so is the flip of a worker read `Alive` to an endpoint not
-   `ready` and not `terminating` (ADR-0031 case 4), which takes it out of the
-   projection before the probe can turn it. The proxy tells it to every other
-   `Alive` worker on an out-of-dialog OPTIONS carrying the notice, signed with
-   the cluster key the workers share (ADR-0055 §12) over the ordinal and the
-   verdict's instant, the instant the proxy tells it:
+   A turn of a worker's health to `Dead` is a **dead verdict** from `Alive`, or
+   from `Unknown` while its endpoint reads ready; and so is the flip of a worker
+   read `Alive` to an endpoint not `ready` and not `terminating` (ADR-0031 case 4)
+   while another member reads ready, which usually comes before the probe's
+   reading. The flip leaves the worker's health `Unknown` until it answers
+   again, so the probe's reading of the same silence tells nothing more, and a
+   death after an answer is a verdict of its own. The proxy tells it to every
+   other `Alive` worker, routed or not, on an out-of-dialog OPTIONS carrying the
+   notice, signed with the cluster key the workers share (ADR-0055 §12) over the
+   ordinal and the verdict's instant, the instant the proxy tells it:
 
    ```
    X-Worker-Dead: worker-0; at=1792155573698; sig=<base64url>
    ```
 
-   A departure and a `terminating` flip are no verdict: the ordinal leaves the
-   projection and its address is tombstoned. A worker takes a notice only when it verifies and
+   A departure, a `terminating` flip and a flip that empties the view of ready
+   members (§11) are no verdict, and neither is the silence of a worker not ready
+   that never answered, a booting pod. A worker takes a notice only when it verifies and
    its instant stands within the freshness window of the worker's own clock,
    either way (`B2BUA_DEAD_NOTICE_FRESH_MS`, 10 s); it refuses and counts any
    other (`b2bua_dead_notices_refused_total`). A taken verdict is held for
@@ -177,8 +182,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    the cookie's `w_bak`, unchanged.
 8. **No fresh-pod guard.** The guard, its 20 s window and its promotion
    reason are removed. A worker joins `Unknown` (ADR-0012 D4) and is routed
-   once a probe answers `200`, which its Ready gate allows only after its
-   partition is bootstrapped and current; the calls its backup changed while
+   once a probe answers `200`, its endpoint ready or none ready (§11), which its
+   Ready gate allows only after its partition is bootstrapped and current; a
+   worker that answered while it read not ready is routed as soon as it reads
+   ready. The calls its backup changed while
    it was away are folded by on-demand reclaim, stand-down (ADR-0047 D7) and
    the version vector (ADR-0014). The proxy resets a worker to `Unknown`
    when its `X-Incarnation` changes, so a restart in place at the same address
@@ -250,6 +257,43 @@ take a new call, and may an in-dialog request of a call it owns reach it.
     face usable (ADR-0056 §3); the livenessProbe keeps reading `/healthz`
     alone.
 
+    The proxy probes every worker present in the slice and not `terminating`,
+    routed or not. While one reads ready, only the ready ones are routed. **While
+    none reads ready the proxy routes on the probe's answers**: every worker
+    present and not `terminating` stands in its view on the health the probe holds,
+    so those that answer are `Alive` and those that stay silent are not. The slice
+    then speaks of the orchestrator's reach to the nodes, not of the workers: a
+    node controller that loses their heartbeats marks every endpoint not ready
+    while the workers serve, replicate and do not drain (ADR-0031 case 3b,
+    ADR-0055 §6). The rule reads the slice and the health as they stand, with no
+    state of its own and no timer:
+
+    - **The fleet flips one worker at a time.** Each flip with a ready member left
+      leaves the routing and is told as a verdict, which the worker's stream refutes;
+      its in-dialog requests go to its backup meanwhile (§4). The last flip empties
+      the view, tells nothing, and the workers left before it are routed at once on
+      the health their probes kept.
+    - **A worker that does not answer** reads `Dead` by the usual misses, whatever
+      its endpoint says, and that is the verdict (§3). A fleet booting silent, or a
+      stalled worker (ADR-0033 §4), is no worker: `/readyz` fails and new calls get
+      the proxy's refusal until the routes withdraw.
+    - **A `terminating` worker never counts**, and the proxy stops probing it. Every
+      member terminating is no worker.
+    - **It ends** at the first reading of a ready member: routing follows readiness
+      again. A worker still not ready leaves the routing with no verdict, nothing
+      about it having changed, and its in-dialog requests go to its backup until it
+      reads ready, as any not-ready worker's. A second emptying reopens it.
+    - **A worker restarted inside it** answers its probe once bootstrapped and takes
+      new calls and in-dialog requests. Its reclaimed calls stay parked until a
+      message arms them or its own endpoint reads ready (ADR-0055 §8), since it
+      cannot tell a proxy routing on answers from one that holds no address for it.
+    - **A proxy started inside it** needs no memory of an earlier view: its first
+      round reads the workers, and its first view latches at the round's end.
+    - **A proxy's own pod read not ready** is another matter: its node's speaker
+      withdraws the node whatever `/readyz` answers (ADR-0056 §3).
+
+    `sip_proxy_routing_on_answers` is 1 meanwhile, and each turn logs a line.
+
 12. **The keepalive lane.** The worker's transaction layer passes each
     out-of-dialog OPTIONS (§2: no transaction) up on a small bounded lane of
     its own, apart from the event queue; a full lane drops the newest and
@@ -279,8 +323,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
   in-dialog requests move when its ordinal leaves the projection or the probe
   reads it `Dead`.
 - ADR-0046 §2: readiness counts `Alive` workers, whatever their acceptance,
-  and waits for the first worker view; D4: the VRRP check also reads the
-  first-view latch.
+  among those it routes to, and waits for the first worker view; D4: the VRRP
+  check also reads the first-view latch.
+- ADR-0031 D1: a `ready` member is the routing target while one reads ready;
+  none reading ready, every member present and not terminating is, on its answers.
 - ADR-0012 D4, ADR-0014 §5, ADR-0009: an address change resets health to
   `Unknown` and re-arms nothing; affinity is the ACK/CANCEL exemption and
   liveness routing (4); the drain grace and the fresh-pod guard are removed.
@@ -316,4 +362,7 @@ take a new call, and may an in-dialog request of a call it owns reach it.
   past that age, with no 100; a wait shorter than the interval refusing
   nothing; a backed-up worker kept alive, its
   dialogs on it, new calls elsewhere; a dead notice behind a backlog taken
-  once, in order; a wedged or partitioned worker read dead).
+  once, in order; a wedged or partitioned worker read dead), and the cells of
+  `no_worker_reads_ready.rs` (the flips' spacing and order; a death inside the
+  view and after a refuted flip; the view's end; a restart and a proxy started
+  inside it; a terminating worker).

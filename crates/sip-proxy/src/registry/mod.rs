@@ -78,8 +78,18 @@ impl WorkerEntry {
 ///
 /// [`read_dead`]: WorkerRegistry::read_dead
 pub trait WorkerRegistry: Send + Sync {
-    /// Snapshot the current worker set.
+    /// Snapshot the current worker set: the workers requests are routed among.
     fn snapshot(&self) -> Vec<WorkerEntry>;
+    /// Every worker the probe judges, routed or not: each member present and
+    /// not terminating, and any ready one. A superset of [`snapshot`].
+    ///
+    /// [`snapshot`]: WorkerRegistry::snapshot
+    fn probed(&self) -> Vec<WorkerEntry>;
+    /// Whether [`snapshot`] routes on the probe's answers: members are present
+    /// and none reads ready (ADR-0050 §11).
+    ///
+    /// [`snapshot`]: WorkerRegistry::snapshot
+    fn routes_on_answers(&self) -> bool;
     /// Resolve a worker by id (`None` if unregistered/removed).
     fn resolve(&self, id: &str) -> Option<WorkerEntry>;
     /// Reverse-lookup the worker bound at `addr` (`None` for any non-worker
@@ -100,13 +110,14 @@ pub trait WorkerRegistry: Send + Sync {
     /// has listed the workers (`topology::Membership::synced`).
     fn synced(&self) -> bool;
     /// Every later dead verdict: the ordinal of a worker whose health turns
-    /// `Dead` from another health, or of a worker read `Alive` whose endpoint
-    /// flips not ready and not terminating (ADR-0050 §3). A departure and a
-    /// terminating flip are none.
+    /// `Dead` from `Alive`, or from `Unknown` while its endpoint reads ready, or
+    /// of a worker read `Alive` whose endpoint flips not ready and not terminating
+    /// while another member reads ready (ADR-0050 §3). A departure, a terminating
+    /// flip and a flip that empties the view of ready members are none.
     fn read_dead(&self) -> tokio::sync::broadcast::Receiver<WorkerId>;
     /// The ordinals a verdict may stand on now, for a reader that lagged
-    /// behind [`read_dead`]: every worker read `Dead`, and every member whose
-    /// endpoint reads not ready and not terminating.
+    /// behind [`read_dead`]: every worker read `Dead`, and every unrouted member
+    /// whose endpoint reads not ready and not terminating.
     ///
     /// [`read_dead`]: WorkerRegistry::read_dead
     fn read_dead_now(&self) -> Vec<WorkerId>;

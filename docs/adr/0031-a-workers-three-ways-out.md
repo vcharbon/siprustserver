@@ -6,7 +6,8 @@ the worker's calls with an INVITE in flight (ADR-0047). Amended (2026-10-16): D4
 Amended (2026-10-23): D2, D4 and the per-axis fold, replaced by containment and one
 routing rule (ADR-0055 §3, §7, §8). Amended (2026-10-28): case 3a, the proxy tells its
 dead verdict to the workers and the backups take over the calls with work in flight at
-it (ADR-0050 §3, ADR-0047 D1).
+it (ADR-0050 §3, ADR-0047 D1). Amended (2026-11-05): D1, with no member ready the proxy routes
+on the probe's answers (ADR-0050 §11).
 
 **Source:** this codebase. Triggered by the failover-harness scenario
 `crates/failover-harness/tests/it/withdrawn_primary_answers_in_its_window.rs` and its views
@@ -93,11 +94,14 @@ quiescence-or-grace.
 routing target.** The informer emits every endpoint in the slice as a `Peer` carrying
 `ready` and `terminating`; a condition flip is a delta, never a host move: a `terminating`
 flip on a ready member must not reset the proxy's health or re-arm its fresh-pod guard, while a
-`ready` flip departs the member at the proxy and a return rejoins it as a fresh endpoint. *Pullable* is "present in the slice", whatever its
+`ready` flip departs the member at the proxy, which keeps probing it, and a return routes it on
+what the probe read. *Pullable* is "present in the slice", whatever its
 conditions: the supervisor pulls it like a ready peer until it leaves the slice. *Routable*
-is `ready`: the proxy's `WorkerSet::recompose` filters the snapshot at the projection, so a
-`ready=false` member departs exactly as today — the ordinal leaves the projection and its
-address is tombstoned — and the response-path failover is unchanged. Pullable is keyed
+is `ready` while a member reads ready: the proxy's `WorkerSet::recompose` filters the snapshot
+at the projection, so a `ready=false` member departs exactly as today — the ordinal leaves the
+projection and its address is tombstoned — and the response-path failover is unchanged. With
+no member ready, every member present and not `terminating` is routable on its probe's answers
+(ADR-0050 §11). Pullable is keyed
 on presence, not on `serving`: the draining worker's own `/ready` 503 drives
 `serving=false` within seconds of SIGTERM, long before its drain ends.
 Serves case 1 (the peers ingest what the draining worker authors within one 100 ms poll

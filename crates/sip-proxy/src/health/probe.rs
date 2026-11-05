@@ -5,7 +5,8 @@
 //! The first tick fires as soon as the registry holds its first listing, and
 //! its round latches the proxy's [`FirstView`] (ADR-0050 §11). Per tick (every
 //! `interval_ms`): prune per-worker state for departed/recreated workers, then
-//! fan one OPTIONS client transaction out to every registered worker. Each
+//! fan one OPTIONS client transaction out to every worker the registry holds for
+//! judging ([`WorkerRegistry::probed`]), ready or not (ADR-0050 §11). Each
 //! probe is reaped at the end of its own `timeout_ms` reply window (each reap =
 //! one miss; `threshold` consecutive misses → `Dead`), so the verdict lands
 //! [`HealthProbeConfig::verdict_after_first_miss`] after the first unanswered
@@ -307,7 +308,7 @@ impl HealthProbe {
         // Departed ordinals are dropped (bounded maps under worker churn); a
         // host move (recreated pod under the same ordinal) resets the miss
         // count and the overload band — the fresh pod is judged from scratch.
-        let snapshot = self.registry.snapshot();
+        let snapshot = self.registry.probed();
         for w in &snapshot {
             if state.last_addr.get(&w.id).is_some_and(|prev| prev != &w.address) {
                 state.misses.remove(&w.id);
@@ -366,7 +367,7 @@ impl HealthProbe {
         // Stale-origin guard: only the worker's CURRENT registry address may
         // report its health — a late 200 from a dead pod's old IP must not
         // resurrect the recreated, never-probed pod.
-        if !self.registry.resolve(&p.worker_id).is_some_and(|w| w.address == p.addr) {
+        if !self.still_at(&p) {
             return;
         }
 
@@ -411,11 +412,16 @@ impl HealthProbe {
         self.control.set_view(&p.worker_id, health, reading.acceptance);
     }
 
+    /// Whether `p`'s worker is still judged at the address it was probed at.
+    fn still_at(&self, p: &PendingProbe) -> bool {
+        self.registry.probed().iter().any(|w| w.id == p.worker_id && w.address == p.addr)
+    }
+
     /// Count one missed reply window. Only a worker still registered at the
     /// probed address accrues it — a departed or recreated worker's silence is
     /// not the fresh pod's fault.
     fn count_miss(&self, p: PendingProbe, misses: &mut HashMap<String, u32>) {
-        if !self.registry.resolve(&p.worker_id).is_some_and(|w| w.address == p.addr) {
+        if !self.still_at(&p) {
             return;
         }
         // Per-peer attribution: a probe OPTIONS to a worker got no final response.
