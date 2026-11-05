@@ -139,8 +139,9 @@ the one await with no timeout, no queue and no drop policy.
    round trip: the loop goes on answering the proxy's probes, and a message
    queued before the flush is served first (ADR-0010 X2). A flush offered behind
    the call's queued release is lost with the other notices of that row
-   (`dispatch::class`); the copy stays in the store for a later message, a
-   reclaim or the reap. The bulk reclaim's passes, run as a restarted node
+   (`dispatch::class`): a refused copy has no live call left to meet, and a
+   stored one waits for a later message, the next flush or the reap. The bulk
+   reclaim's passes, run as a restarted node
    returns, before a proxy reads it alive, still take each call's lock on the
    loop.
 
