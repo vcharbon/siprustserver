@@ -342,10 +342,14 @@ def test_next_hop_dead_heal_lets_the_frames_through_and_is_idempotent(tmp_path: 
     assert sb.index("nft delete table") == -1
 
 
-def test_next_hop_dead_probe_waits_for_every_live_node_in_the_routes(tmp_path: Path) -> None:
+def test_next_hop_dead_probe_waits_for_the_silenced_node_and_every_live_node_in_the_routes(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "next_hop_dead")
+    sb.state("silenced", "e2\n")
+    only_the_peer_ready = live("app=sip-front-proxy", "p-0 u0 e1 True\np-1 u1 e2 False\n")
+    sb.rules(only_the_peer_ready, *PLANES, *E1_ONLY)
+    assert sb.run("probe").returncode == 75, "the silenced node's proxy is not Ready"
     sb.rules(PROXIES, *PLANES, *E1_ONLY)
-    assert sb.run("probe").returncode == 75
+    assert sb.run("probe").returncode == 75, "Ready, not yet routed"
     sb.rules(PROXIES, *PLANES, *BOTH)
     assert as_obj(facts(sb.run("probe"))["next_hops"])[EVIP] == ["192.168.60.11", "192.168.60.12"]
 

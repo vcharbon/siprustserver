@@ -175,6 +175,41 @@ fn one_down_reading_withdraws_nothing_and_two_do() {
     assert_eq!(step("up"), FaceState::Usable);
 }
 
+/// A carrier flap flushes the neighbour table, and the traffic that meets the
+/// flushed entry leaves it `INCOMPLETE` until the ARP retry, past the flap
+/// itself. One such reading is the flap's own aftermath, not a dead next hop.
+#[test]
+fn a_flap_read_down_then_unresolved_then_resolved_stays_usable() {
+    let root = class_net("flap-aftermath", "up", None);
+    let face = check(&[TOR]);
+    let mut latch = FaceLatch::default();
+    let mut step = |operstate: &str, table: Vec<Neighbour>| {
+        set_operstate(&root, operstate);
+        face.read_at(&root, || Ok(table), |_| {}, &mut latch)
+    };
+    assert_eq!(step("up", vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+    assert!(step("down", vec![]).is_usable(), "the flap");
+    assert!(step("up", vec![entry(TOR, NUD_INCOMPLETE)]).is_usable(), "the flap's aftermath");
+    assert_eq!(step("up", vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+}
+
+/// A next hop read unresolved twice since the last that resolved latches the
+/// face, with an absent reading between the two, or the first reading on a
+/// face that was not usable.
+#[test]
+fn a_next_hop_read_unresolved_twice_latches_the_face() {
+    let root = class_net("two-unresolved", "up", None);
+    let face = check(&[TOR]);
+    let mut latch = FaceLatch::default();
+    let mut step = |table: Vec<Neighbour>| face.read_at(&root, || Ok(table), |_| {}, &mut latch);
+    assert_eq!(step(vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+    assert!(step(vec![entry(TOR, NUD_INCOMPLETE)]).is_usable(), "one reading holds");
+    assert!(step(vec![]).is_usable(), "gone: no verdict either way");
+    assert_eq!(step(vec![entry(TOR, NUD_FAILED)]), FaceState::NextHopsUnresolved);
+    assert_eq!(step(vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+    assert!(step(vec![entry(TOR, NUD_FAILED)]).is_usable(), "a resolved reading starts over");
+}
+
 /// A face that read unusable has no verdict to hold: its first down reading is
 /// down, so a proxy that starts on a dead carrier, or a latched face whose
 /// carrier then drops, never reads usable for one reading.
