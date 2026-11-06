@@ -1,7 +1,7 @@
 //! The stateless path's answer to a datagram the parser refused (RFC 3261
-//! §16.3): the 400 [`crate::parse_refusals::ParseRefusals`] builds, sent to
-//! the source as the proxy's own final, whose ACK is recognised by its To-tag
-//! and absorbed (`route`); or nothing. Each outcome is counted.
+//! §16.3): the 400 [`crate::parse_refusals::ParseRefusals`] builds, sent as the
+//! proxy's own final, whose ACK is recognised by its To-tag and absorbed
+//! (`route`); or nothing. Each outcome is counted.
 
 use std::net::SocketAddr;
 

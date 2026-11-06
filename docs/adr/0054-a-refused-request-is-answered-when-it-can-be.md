@@ -62,8 +62,9 @@ letters, digits, space and `.,:;-_()/=+'@[]<>`, every other byte becomes `?`,
 and it stops at 200 bytes: no byte of a reason can close the quoted-string or
 the header line, and no escaping is needed. No body.
 
-The 400 is stateless: no server transaction, sent to the datagram's source
-address and port. Every copy of the request is answered again under the same
+The 400 is stateless: no server transaction, sent to its stamped top Via's
+response target, where every response to that request goes (§18.2.2, RFC 3581
+§4). Every copy of the request is answered again under the same
 To-tag (derived from the request with a per-instance secret, §8.2.6.2). The
 ACK to a 400 under that derived To-tag ends at the element that sent it: the
 transaction layer recognises the tag on an ACK matching no transaction, the

@@ -1,5 +1,5 @@
-//! Self-generated UAS finals: the synthesized response to the packet source,
-//! the refusal of a new request (one 503 for every copy, [`crate::refusals`]),
+//! Self-generated UAS finals: the synthesized response to its stamped top Via's
+//! response target (RFC 3261 §18.2.2, RFC 3581 §4), the refusal of a new request (one 503 for every copy, [`crate::refusals`]),
 //! the select-failure → 503 mapping, and the rule that an ACK is never
 //! answered (RFC 3261 §17): a reject of an ACK drops it. The ACK to a non-2xx
 //! final sent here is recognised by its To-tag (`route`), so sending one
@@ -16,7 +16,7 @@ use sip_message::{Method, SipRequest, SipResponse};
 use crate::observability::metrics::{Direction, MessageResult, NoTargetDrop, RoutingDecisionKind};
 use crate::strategy::SelectError;
 use crate::trace::emit;
-use sip_message::received::observed_source;
+use sip_message::received::{observed_source, response_destination};
 
 use super::super::ProxyCore;
 use super::RouteOutcome;
@@ -115,8 +115,8 @@ impl ProxyCore {
         Some(RouteOutcome { decision: RoutingDecisionKind::Cancel, target: None })
     }
 
-    /// Synthesize a UAS response to the source, recorded on its topmost Via
-    /// (RFC 3261 §18.2.1, RFC 3581 §4).
+    /// Synthesize a UAS response, the source recorded on its topmost Via (RFC
+    /// 3261 §18.2.1, RFC 3581 §4).
     async fn reply(
         &self,
         req: &SipRequest,
@@ -136,27 +136,30 @@ impl ProxyCore {
         }
     }
 
-    /// Send `resp`, the proxy's own final to `req`, to the source.
+    /// Send `resp`, the proxy's own final to `req` received from `src`.
     async fn send_own_final(&self, req: &SipRequest, src: SocketAddr, resp: &SipResponse) {
         self.send_own_final_to(req.call_id().as_str(), src, resp).await;
     }
 
-    /// Send `resp`, the proxy's own final to a request of call `call_id`, to
-    /// the source.
+    /// Send `resp`, the proxy's own final to a request of call `call_id`
+    /// received from `src`, to the response target of its stamped top Via, the
+    /// one address every response to that request goes to. `src` where that
+    /// target names no IP address.
     pub(super) async fn send_own_final_to(
         &self,
         call_id: &str,
         src: SocketAddr,
         resp: &SipResponse,
     ) {
+        let dst = response_destination(resp.top_via()).unwrap_or(src);
         // A recipe freezes into its own image, and that image IS the wire form.
-        self.reply_to_source(resp.image(), src).await;
+        self.send_response(resp.image(), dst).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Responded);
         // This is the proxy's ONLY self-generated-final seam, so it is the only
         // place a traced call's own 503 / 483 / 420 / 400 becomes a `sip.out`.
         // A shed call never reaches a downstream hop, so without this its span
         // would show the INVITE arriving and nothing leaving.
-        emit::responded(&self.traces, call_id, self.trace_ms(), src, resp.image());
+        emit::responded(&self.traces, call_id, self.trace_ms(), dst, resp.image());
     }
 
     /// Refuse the request a `select_for_new_dialog` failure leaves without a

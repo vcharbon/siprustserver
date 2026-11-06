@@ -157,6 +157,33 @@ mod tests {
         assert_eq!(got.stamp, Stamp::Unchanged, "the same address");
     }
 
+    /// ADR-0001: a Via's `maddr` chooses no destination, whether or not the
+    /// hop asks `rport`.
+    #[test]
+    fn a_via_maddr_changes_no_response_target() {
+        for tail in ["", ";rport"] {
+            let plain = format!("SIP/2.0/UDP 10.0.0.5:5070;branch=z9hG4bK-1{tail}");
+            let aimed = format!("{plain};maddr=203.0.113.9;ttl=1");
+            let from = src("192.0.2.2:40000");
+            let plain = stamp_received(request(&plain), from);
+            let aimed = stamp_received(request(&aimed), from);
+            assert_eq!(aimed.destination, plain.destination, "{tail:?}");
+            assert_eq!(
+                response_destination(aimed.request.top_via()),
+                Some(plain.destination),
+                "{tail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mapped_sent_by_is_answered_at_its_ipv4_address() {
+        let req = request("SIP/2.0/UDP [::ffff:192.0.2.7]:5070;branch=z9hG4bK-1");
+        let got = stamp_received(req, src("192.0.2.7:40000"));
+        assert_eq!(got.stamp, Stamp::Unchanged, "the sent-by is the source address");
+        assert_eq!(got.destination, src("192.0.2.7:5070"));
+    }
+
     #[test]
     fn a_named_sent_by_is_answered_at_received() {
         let req = request("SIP/2.0/UDP alice.invalid:5060;branch=z9hG4bK-1");

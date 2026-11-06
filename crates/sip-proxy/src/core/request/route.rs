@@ -123,9 +123,12 @@ impl ProxyCore {
         // Request-URI, never by the INVITE's entry.
         //
         // A match is a relayed final (the memo names the node the final
-        // arrived from): RELAY the ACK there, where §16.11 puts it on the
-        // INVITE's outbound branch so the downstream server transaction
+        // arrived from): a caller's ACK is RELAYED there, where §16.11 puts it
+        // on the INVITE's outbound branch so the downstream server transaction
         // (§17.2.3) matches it and stops retransmitting the final (Timer G).
+        // A worker's ACK stays out of it: §17.1.1.2 sends it where its INVITE
+        // went, which its Route and Request-URI still name, whichever socket
+        // the callee answered from.
         // This transaction-less proxy never synthesizes the hop ACK itself
         // (ADR-0022 X4; see `core/response`) — the upstream's ACK is the
         // only quench, end-to-end, which is what keeps a lossy caller hop
@@ -250,9 +253,9 @@ impl ProxyCore {
         let chosen: Result<Chosen, RouteOutcome> = if method == Method::Cancel {
             let target = self.cancel_target(msg, req, src, &c).await;
             target.map(|t| (t, RoutingDecisionKind::Cancel, None))
-        } else if let Some(found) = ack_hop {
-            // The §17.1.1.3 ACK for a relayed non-2xx final: to the node the
-            // final arrived from (see the hop-decision block above). It shares
+        } else if let Some(found) = ack_hop.filter(|_| !c.worker_outbound) {
+            // A caller's §17.1.1.3 ACK for a relayed non-2xx final: to the node
+            // the final arrived from (see the hop-decision block above). It shares
             // the INVITE's Call-ID, From tag, CSeq number and received branch,
             // so §16.11 already puts it on the INVITE's outbound branch.
             Ok((found.target, RoutingDecisionKind::AckHop, None))

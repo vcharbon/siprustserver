@@ -525,3 +525,109 @@ async fn single_face_rr_format_is_unchanged() {
         "single-face RR wire shape must be byte-identical to the pre-dual-face proxy",
     );
 }
+
+// ── §17.1.1.2: the non-2xx ACK of a worker's INVITE goes where the INVITE went ─
+
+const CALLEE_SEND_PORT: u16 = 40000;
+
+/// A callee's 486 to the b-leg INVITE the proxy forwarded under `proxy_branch`.
+fn callee_486(call_id: &str, proxy_branch: &str) -> SipMessage {
+    parse_msg(&format!(
+        "SIP/2.0 486 Busy Here\r\n\
+Via: SIP/2.0/UDP {EXT_VIP}:{EXT_PORT};branch={proxy_branch}\r\n\
+Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKbleg1;rport\r\n\
+From: <sip:service@{INT_VIP}:{INT_PORT}>;tag=svc\r\n\
+To: <sip:bob@{CALLEE}>;tag=b-1\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+    ))
+}
+
+/// The worker's §17.1.1.3 ACK of that 486: the INVITE's Request-URI, Route,
+/// branch and CSeq number, the final's To.
+fn worker_ack_of_the_486(call_id: &str) -> SipMessage {
+    parse_msg(&format!(
+        "ACK sip:bob@{CALLEE}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKbleg1;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:service@{INT_VIP}:{INT_PORT}>;tag=svc\r\n\
+To: <sip:bob@{CALLEE}>;tag=b-1\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: 1 ACK\r\n\
+Route: <sip:{INT_VIP}:{INT_PORT};lr>\r\n\
+Content-Length: 0\r\n\r\n"
+    ))
+}
+
+fn top_via_branch_of(bytes: &[u8]) -> String {
+    let via = header_lines(bytes, "Via");
+    via[0]
+        .split("branch=")
+        .nth(1)
+        .and_then(|b| b.split(&[';', ',', ' '][..]).next())
+        .expect("a branch")
+        .to_string()
+}
+
+/// One instance forwards the INVITE; the callee's 486 comes back to it from a
+/// send socket; the worker's ACK then crosses `ack_instance`, or the same
+/// instance. Returns the ACK's destination and the branches of INVITE and ACK.
+async fn ack_of_a_final_from_another_port(
+    call_id: &str,
+    through_another_instance: bool,
+) -> (RoutingDecisionKind, Option<ProxyAddr>, SocketAddr, String, String) {
+    let worker: SocketAddr = format!("{W1}:5060").parse().unwrap();
+    let callee_send: SocketAddr = format!("{CALLEE}:{CALLEE_SEND_PORT}").parse().unwrap();
+    let f = dual_face_core();
+    let outcome = f.core.route_request_from(&worker_bleg_invite(call_id), worker).await;
+    assert_eq!(outcome.target, Some(ProxyAddr::new(CALLEE, 5060)), "the INVITE's destination");
+    let forwarded = f.take_sent();
+    assert_eq!(forwarded[0].1, callee_src());
+    let invite_branch = top_via_branch_of(&forwarded[0].2);
+
+    let SipMessage::Response(final_486) = callee_486(call_id, &invite_branch) else {
+        panic!("response")
+    };
+    f.core.handle_response(final_486, callee_send, Face::External).await;
+    let relayed = f.take_sent();
+    assert_eq!(relayed.len(), 1, "the 486 relays to the worker");
+    assert_eq!(relayed[0].1, worker);
+
+    let other = dual_face_core();
+    let instance = if through_another_instance { &other } else { &f };
+    let ack = instance.core.route_request_from(&worker_ack_of_the_486(call_id), worker).await;
+    let sent = instance.take_sent();
+    assert_eq!(sent.len(), 1, "the ACK is forwarded: {:?}", ack.decision);
+    let ack_branch = top_via_branch_of(&sent[0].2);
+    (ack.decision, ack.target, sent[0].1, invite_branch, ack_branch)
+}
+
+/// RFC 3261 §17.1.1.2: "The ACK MUST be sent to the same address, port, and
+/// transport to which the original request was sent."
+#[tokio::test]
+async fn worker_non_2xx_ack_goes_to_the_invites_destination_not_the_finals_source() {
+    let (decision, target, dst, invite_branch, ack_branch) =
+        ack_of_a_final_from_another_port("df-ack-port@test", false).await;
+    assert_eq!(invite_branch, ack_branch, "§16.11: the ACK rides the INVITE's outbound branch");
+    assert_eq!(
+        (target, dst),
+        (Some(ProxyAddr::new(CALLEE, 5060)), callee_src()),
+        "the ACK follows the INVITE to port 5060, decided {decision:?}"
+    );
+}
+
+/// The instance without the memo decides from the ACK alone: its Route and
+/// Request-URI (ADR-0009 X7).
+#[tokio::test]
+async fn the_instance_without_the_memo_sends_the_workers_ack_to_the_invites_destination() {
+    let (decision, target, dst, invite_branch, ack_branch) =
+        ack_of_a_final_from_another_port("df-ack-miss@test", true).await;
+    assert_eq!(invite_branch, ack_branch, "§16.11: the ACK rides the INVITE's outbound branch");
+    assert_eq!(
+        (target, dst),
+        (Some(ProxyAddr::new(CALLEE, 5060)), callee_src()),
+        "the ACK follows the INVITE to port 5060, decided {decision:?}"
+    );
+    assert_eq!(decision, RoutingDecisionKind::WorkerOutbound);
+}

@@ -239,3 +239,28 @@ async fn an_unwritable_stamp_is_counted_and_the_responses_still_reach_the_source
     elapse_ms(60).await;
     assert!(elsewhere.try_recv().is_none(), "nothing reaches the sent-by");
 }
+
+/// A sent-by in the IPv4-mapped form names the IPv4 address: an IPv4 socket
+/// reaches it, where the mapped text would be refused by the OS.
+#[tokio::test(start_paused = true)]
+async fn a_mapped_sent_by_is_answered_at_its_ipv4_address() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let target = decoy(&stack, "10.0.0.1:5070").await;
+    let (branch, call_id) = ("z9hG4bK-dest-mapped", "dest-mapped");
+    let sent_by = "[::ffff:10.0.0.1]:5070";
+
+    stack.inject(&request_via("INVITE", sent_by, "", branch, call_id)).await;
+    elapse_ms(60).await;
+    let trying = drained(target.as_ref());
+    assert_eq!(responses(&trying, 100).len(), 1, "the 100 at the IPv4 address: {trying:?}");
+    let invite = handed_up(stack.drain_events(), "INVITE");
+
+    let busy = answer(&invite, 603, "Decline");
+    stack.txn.send_response(busy, addr("10.0.0.1:5070")).await.unwrap();
+    elapse_ms(60).await;
+    assert_eq!(responses(&drained(target.as_ref()), 603).len(), 1, "the 603 at the IPv4 address");
+
+    stack.inject(&request_via("ACK", sent_by, "", branch, call_id)).await;
+    elapse_ms(60).await;
+    assert!(stack.drain_peer().is_empty(), "nothing reaches the source port (§18.2.2)");
+}

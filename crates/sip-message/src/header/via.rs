@@ -143,7 +143,8 @@ impl Via {
 
     /// The address a response to this hop is actually sent to: `received` (and
     /// an observed `rport`) override the sent-by (RFC 3261 §18.2.2, RFC 3581).
-    /// A `received` that is no IP address (§25.1) is no target.
+    /// A `received` that is no IP address (§25.1) is no target. `maddr` chooses
+    /// no destination (ADR-0001).
     pub fn response_target(&self) -> (&str, u16) {
         let host = self.received().filter(|r| ip_host(r).is_some()).unwrap_or_else(|| self.host());
         let port = match self.rport() {

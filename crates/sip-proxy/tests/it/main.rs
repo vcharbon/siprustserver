@@ -17,6 +17,7 @@ mod load_balancer;
 mod load_balancer_routing;
 mod no_panic_lane;
 mod options_e2e;
+mod own_final_destination;
 mod own_final_source_stamp;
 mod parse_refusal;
 mod per_call_trace;

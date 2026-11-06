@@ -352,16 +352,16 @@ impl ProxyCore {
 
     /// Reply to the packet's source (egresses on the face the source lives on
     /// — which is the face the packet arrived on).
-    async fn reply_to_source(&self, bytes: &[u8], src: SocketAddr) {
-        self.metrics.record_face_egress(self.egress_face(src));
-        if let Err(e) = self.egress_endpoint(src).send_to(bytes, src).await {
+    async fn send_response(&self, bytes: &[u8], dst: SocketAddr) {
+        self.metrics.record_face_egress(self.egress_face(dst));
+        if let Err(e) = self.egress_endpoint(dst).send_to(bytes, dst).await {
             self.metrics.record_send_failure();
-            // The reply source is whoever sent us the packet (typically an
+            // The destination is whoever the request's Via names (typically an
             // upstream UAC/UAS — external); still classify via the registry in
             // case it is a worker.
-            let target = ProxyAddr::from(src);
+            let target = ProxyAddr::from(dst);
             self.metrics.record_peer_failure(
-                &src,
+                &dst,
                 self.classify_peer(&target),
                 peer_failure_kind(&e),
             );

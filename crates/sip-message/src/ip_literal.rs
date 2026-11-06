@@ -30,10 +30,11 @@ fn extra_colon_ipv6(text: &str) -> Option<Ipv6Addr> {
     format!("{head}{tail}").parse().ok()
 }
 
-/// The socket address of an IP-literal `host` at `port`. `None` when `host`
-/// is not an IP literal.
+/// The socket address of an IP-literal `host` at `port`, an IPv4-mapped IPv6
+/// address being its IPv4 address, which an IPv4 socket can send to. `None`
+/// when `host` is not an IP literal.
 pub fn ip_socket_addr(host: &str, port: u16) -> Option<SocketAddr> {
-    ip_host(host).map(|ip| SocketAddr::new(ip, port))
+    ip_host(host).map(|ip| SocketAddr::new(ip.to_canonical(), port))
 }
 
 #[cfg(test)]
@@ -60,6 +61,13 @@ mod tests {
             ip_socket_addr("[2001:db8::1]", 5070),
             Some("[2001:db8::1]:5070".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn a_mapped_literal_names_its_ipv4_address() {
+        let v4: SocketAddr = "198.51.100.4:5070".parse().unwrap();
+        assert_eq!(ip_socket_addr("::ffff:198.51.100.4", 5070), Some(v4));
+        assert_eq!(ip_socket_addr("[::ffff:198.51.100.4]", 5070), Some(v4));
     }
 
     #[test]
