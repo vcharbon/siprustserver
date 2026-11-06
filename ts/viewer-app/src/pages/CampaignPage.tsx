@@ -32,7 +32,9 @@ const notRun = (run: CampaignRun | undefined, lane: string): number =>
 const runLabel = (run: CampaignRun): string =>
   `#${run.id}${run.scope === null ? "" : "°"} · ${run.startedAt.slice(5, 16).replace("T", " ")}${
     run.labels.filter((l) => l.name !== "branch" && l.name !== "env").slice(0, 3).map((l) => ` · ${l.value}`).join("")
-  }${run.finishedAt === null ? " · running" : ""}`
+  }${(run.selection?.allow.length ?? 0) === 0 ? "" : ` · allowed ${run.selection!.allow.join(",")}`}${
+    run.finishedAt === null ? " · running" : ""
+  }`
 
 const Tiles = ({ view, run, vs, lanes }: {
   readonly view: Campaign
@@ -183,7 +185,9 @@ const Summary = ({ view: whole }: { readonly view: Campaign }): JSX.Element => {
           {flag("failing", "failing", "fails on a lane read")}
           {flag("oneLane", "one lane", "fails on exactly one lane read")}
           {flag("fresh", "new", "fails where the compared run did not")}
-          {view.launch !== null && <CampaignStart capture={view.capture} lanes={view.launch.lanes} />}
+          {view.launch !== null && (
+            <CampaignStart capture={view.capture} lanes={view.launch.lanes} tags={view.launch.tags} cases={view.cases} />
+          )}
           <input
             className="cp-filter"
             placeholder="filter"

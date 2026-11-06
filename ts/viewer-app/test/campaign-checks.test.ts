@@ -33,6 +33,7 @@ const lane = (name: string, results: readonly CampaignResult[]) => ({
   status: "done",
   detail: null,
   skipped: 0,
+  excluded: [],
   results
 })
 
@@ -64,7 +65,7 @@ const view = (...runs: Run[]): Campaign => ({
   saidLabel: "said",
   sides: [],
   lanes: [...new Set(runs.flatMap((r) => r.lanes.map((l) => l.lane)))],
-  cases: [{ caseId: "c", ref: "c", subcase: null, family: "f", title: null, description: null, groups: [], links: [], source: null }],
+  cases: [{ caseId: "c", ref: "c", subcase: null, family: "f", title: null, description: null, groups: [], tags: [], links: [], source: null }],
   launch: null,
   own: null,
   runs: runs.map((r) => ({
@@ -75,6 +76,7 @@ const view = (...runs: Run[]): Campaign => ({
     labels: [],
     lanes: r.lanes,
     scope: null,
+    selection: null,
     checked: { c: r.checked ?? LISTED }
   }))
 })

@@ -25,7 +25,7 @@ const kase = (ref: string, subcase: string | null): CampaignCase => ({
   family: "f",
   title: null,
   description: null,
-  groups: [],
+  groups: [], tags: [],
   links: [],
   source: null
 })
@@ -46,7 +46,7 @@ const VIEW: Campaign = {
     startedAt: "",
     finishedAt: null,
     labels: [],
-    scope: null,
+    scope: null, selection: null,
     checked: {},
     rawCdr: { "R/a [bye]": [{ call: "c1", leg: "A", lines: 1 }] },
     lanes: [
@@ -56,10 +56,10 @@ const VIEW: Campaign = {
         session: "run1",
         status: "done",
         detail: null,
-        skipped: 0,
+        skipped: 0, excluded: [],
         results: [result("R/a [bye]", "a--bye"), result("R/a [cancel]", null), result("R/a [prack]", "a--prack"), result("R/b", "b")]
       },
-      { lane: "real", runId: 2, session: "run2", status: "done", detail: null, skipped: 0, results: [result("R/a [bye]", "a--bye")] }
+      { lane: "real", runId: 2, session: "run2", status: "done", detail: null, skipped: 0, excluded: [], results: [result("R/a [bye]", "a--bye")] }
     ]
   }]
 }

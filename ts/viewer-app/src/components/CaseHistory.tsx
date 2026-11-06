@@ -13,6 +13,7 @@ import type { Campaign } from "../api.ts"
 import { resultOf } from "../campaign-facets.ts"
 import { attemptLines } from "../campaign-attempts.ts"
 import { checkList } from "../campaign-checks.ts"
+import { exclusionsOf } from "../campaign-tags.ts"
 import { CaseReplay } from "./CampaignLaunch.tsx"
 import { history } from "../campaign-history.ts"
 import { sourceLines } from "../source-lines.ts"
@@ -53,8 +54,13 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
           capture={view.capture}
           lanes={view.launch.lanes}
           scope={{ case: known.ref, ...(known.subcase === null ? {} : { subcase: known.subcase }) }}
+          tags={view.launch.tags}
+          carried={known.tags}
         />
       )}
+      {exclusionsOf(view.runs, caseId).map((one) => (
+        <p key={one.lane} className="muted mono">{one.lane} · {one.reason}</p>
+      ))}
       {known !== undefined && known.groups.length > 0 && (
         <div className="cp-chips">{known.groups.map((group) => <span key={group} className="cp-chip">{group}</span>)}</div>
       )}

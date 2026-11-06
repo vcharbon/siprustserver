@@ -760,6 +760,8 @@ export type JobStartBody =
     readonly subcase?: string
     /** Rebuild the system's data from scratch before the run. */
     readonly rebuild?: boolean
+    /** Case tags the run takes on the lanes that exclude them. */
+    readonly allow?: readonly string[]
   }
   | { readonly kind: "ingest"; readonly paths: readonly string[]; readonly set?: boolean; readonly cut?: boolean }
   /** A file of the pcap root on a lane: an ingest with its cut, then a replay after it. */
@@ -1074,6 +1076,8 @@ export interface CampaignLane {
   readonly detail: string | null
   /** Cases the lane did not run. */
   readonly skipped: number
+  /** The cases a tag left out on the lane, each with why. */
+  readonly excluded: readonly { readonly caseId: string; readonly reason: string }[]
   readonly results: readonly CampaignResult[]
 }
 
@@ -1088,6 +1092,8 @@ export interface CampaignRun {
   readonly lanes: readonly CampaignLane[]
   /** What the run covered where it was not the whole campaign (one case, a sub-case, a glob); null for a full run. */
   readonly scope: string | null
+  /** The case tags the run opted into and those each lane left out; null where the run states none. */
+  readonly selection: { readonly allow: readonly string[]; readonly lanes: Readonly<Record<string, readonly string[]>> } | null
   /** Every check each case the run compiled makes, by case id. */
   readonly checked: Readonly<Record<string, readonly CampaignChecked[]>>
   /** The raw CDR lines each call of each case the run compiled declares, by case id; absent where the deployment states none. */
@@ -1172,6 +1178,8 @@ export interface CampaignCase {
   readonly description: string | null
   /** The groups the case counts under, 0..N; the grid falls back on its family where there are none. */
   readonly groups: readonly string[]
+  /** The tags the case carries, 0..N: what a lane may leave out of a campaign. */
+  readonly tags: readonly string[]
   readonly links: readonly CampaignLink[]
   /** The file the case was compiled from, as the newest run that compiled it read it; null where none kept it. */
   readonly source: { readonly file: string; readonly text: string } | null
@@ -1208,9 +1216,18 @@ export interface Campaign {
    * Every lane a run started from the page may name, in the server's order;
    * null where the page reads another environment than the server's.
    */
-  readonly launch: { readonly lanes: readonly LaunchLane[] } | null
+  readonly launch: { readonly lanes: readonly LaunchLane[]; readonly tags: readonly LaunchTag[] } | null
   /** The environment the server starts this campaign's runs in; null where it starts none. */
   readonly own: string | null
+}
+
+/** One case tag the server declares: what a start offers it as, and the lanes excluding it. */
+export interface LaunchTag {
+  readonly tag: string
+  readonly label: string
+  /** What a start shows before it takes the tag's cases; null where none is stated. */
+  readonly warning: string | null
+  readonly excludedOn: readonly string[]
 }
 
 /** One lane a page start may name: the lanes of one group run together, a refused one does not run here. */

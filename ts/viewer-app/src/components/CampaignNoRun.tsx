@@ -17,7 +17,9 @@ export const CampaignNoRun = ({ view }: { readonly view: Campaign }): JSX.Elemen
       </div>
       <div className="cp-controls">
         <CampaignEnvPick view={view} />
-        {view.launch !== null && <CampaignStart capture={view.capture} lanes={view.launch.lanes} open />}
+        {view.launch !== null && (
+          <CampaignStart capture={view.capture} lanes={view.launch.lanes} tags={view.launch.tags} cases={view.cases} open />
+        )}
       </div>
     </header>
     <p className="muted">{view.envs.length === 0 ? "no run yet" : "no run in this environment"}</p>

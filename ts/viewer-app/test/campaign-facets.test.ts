@@ -46,6 +46,7 @@ const run = (id: number, lanes: Readonly<Record<string, ReadonlyArray<CampaignRe
   labels: [],
   checked: {},
     scope: null,
+    selection: null,
   lanes: Object.entries(lanes).map(([lane, results], at) => ({
     lane,
     runId: id * 10 + at,
@@ -53,6 +54,7 @@ const run = (id: number, lanes: Readonly<Record<string, ReadonlyArray<CampaignRe
     status: "done",
     detail: null,
     skipped: 2,
+    excluded: [],
     results
   }))
 })
@@ -83,6 +85,7 @@ const VIEW: Campaign = {
     title: caseId === "fam-a/one" ? "Number one" : null,
     description: null,
     groups: GROUPS[caseId] ?? [],
+    tags: [],
     links: [],
     source: null
   })),

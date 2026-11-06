@@ -201,8 +201,9 @@ const deleteArgs = (id: number, request: DeleteRequest): ReadonlyArray<string> =
 
 /**
  * What a campaign job is asked: the campaign, its lanes, one case (by its
- * test id) and one of its sub-cases or every case, and whether the system's
- * data is rebuilt from scratch before the run.
+ * test id) and one of its sub-cases or every case, whether the system's data
+ * is rebuilt from scratch before the run, and the case tags it takes on the
+ * lanes that exclude them.
  */
 export interface CampaignRequest {
   readonly capture: string
@@ -210,6 +211,7 @@ export interface CampaignRequest {
   readonly case: string | null
   readonly subcase: string | null
   readonly rebuild: boolean
+  readonly allow: ReadonlyArray<string>
 }
 
 /** One inbox file as an inbox take found it: what tells a later copy over it from the one taken. */
@@ -242,7 +244,8 @@ export const campaignArgs = (id: number, request: CampaignRequest): ReadonlyArra
   request.lanes.join(","),
   ...(request.case === null ? [] : ["--case", request.case]),
   ...(request.subcase === null ? [] : ["--subcase", request.subcase]),
-  ...(request.rebuild ? ["--recreate"] : [])
+  ...(request.rebuild ? ["--recreate"] : []),
+  ...(request.allow.length === 0 ? [] : ["--allow", request.allow.join(",")])
 ]
 
 /** The row, then the process; a launch that made no process closes the row `failed`. */

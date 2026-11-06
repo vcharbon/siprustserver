@@ -27,7 +27,8 @@ const view: Campaign = {
     lanes: [
       { lane: "sut-a", group: "group-1", refused: null },
       { lane: "sut-b", group: "group-1", refused: REFUSED }
-    ]
+    ],
+    tags: []
   }
 }
 
