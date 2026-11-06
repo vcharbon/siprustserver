@@ -60,6 +60,7 @@ type Run = { readonly id: number; readonly lanes: ReturnType<typeof lane>[]; rea
 
 const view = (...runs: Run[]): Campaign => ({
   capture: "c",
+  title: null,
   env: null,
   envs: [],
   saidLabel: "said",

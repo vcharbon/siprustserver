@@ -4,16 +4,17 @@
  * group of lanes (the case drawer's), each with the system's data rebuilt
  * first or not. Only the lanes the server runs are offered; the others show
  * disabled with their reason, and a pick of two groups is refused before any
- * job starts (`campaign-pick.ts`). A whole-campaign start offers the case tags
- * its lanes exclude, unchecked (`campaign-tags.ts`); one case always runs,
- * showing what its tags warn of. A start answers its job, linked to its page,
+ * job starts (`campaign-pick.ts`). A whole-campaign start opens on the lanes the
+ * campaign states and offers the case tags its lanes exclude, unchecked, those
+ * the campaign opts into checked and fixed (`campaign-tags.ts`); one case always
+ * runs, showing what its tags warn of. A start answers its job, linked to its page,
  * or the server's refusal.
  */
 import type { JSX } from "react"
 import { useState } from "react"
 import { api, type CampaignCase, type JobStarted, type LaunchLane, type LaunchTag } from "../api.ts"
 import { defaultPick, groups, pickRefusal } from "../campaign-pick.ts"
-import { asked as askedTags, carriedBy, offered } from "../campaign-tags.ts"
+import { asked as askedTags, carriedBy, offered, taken } from "../campaign-tags.ts"
 import { JobLinks } from "./JobLink.tsx"
 
 const said = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -76,14 +77,16 @@ const Warnings = ({ tags }: { readonly tags: readonly LaunchTag[] }): JSX.Elemen
 }
 
 /** The whole campaign on the lanes picked; `open` shows the lanes and the run control unfolded. */
-export const CampaignStart = ({ capture, lanes, tags, cases, open = false }: {
+export const CampaignStart = ({ capture, lanes, stated, tags, cases, open = false }: {
   readonly capture: string
   readonly lanes: readonly LaunchLane[]
+  /** The lanes the campaign states; null where it states none. */
+  readonly stated: readonly string[] | null
   readonly tags: readonly LaunchTag[]
   readonly cases: readonly CampaignCase[]
   readonly open?: boolean
 }): JSX.Element => {
-  const [picked, setPicked] = useState<readonly string[]>(() => defaultPick(lanes))
+  const [picked, setPicked] = useState<readonly string[]>(() => defaultPick(lanes, stated))
   const [rebuild, setRebuild] = useState(false)
   const [allowed, setAllowed] = useState<readonly string[]>([])
   const { busy, outcome, start } = useStart(capture)
@@ -111,8 +114,17 @@ export const CampaignStart = ({ capture, lanes, tags, cases, open = false }: {
         ))}
         <Rebuild on={rebuild} set={setRebuild} />
         {offers.map((offer) => (
-          <label key={offer.tag} className="cp-check" title={`excluded on ${offer.excludedOn.join(", ")}`}>
-            <input type="checkbox" checked={allowing.includes(offer.tag)} onChange={() => allow(offer.tag)} />
+          <label
+            key={offer.tag}
+            className="cp-check"
+            title={offer.allowed ? "this campaign takes it" : `excluded on ${offer.excludedOn.join(", ")}`}
+          >
+            <input
+              type="checkbox"
+              disabled={offer.allowed}
+              checked={offer.allowed || allowing.includes(offer.tag)}
+              onChange={() => allow(offer.tag)}
+            />
             {offer.label}{offer.cases === 0 ? "" : ` (${offer.cases})`}
           </label>
         ))}
@@ -121,7 +133,7 @@ export const CampaignStart = ({ capture, lanes, tags, cases, open = false }: {
         </button>
         {refusal !== null && picked.length > 0 ? <span className="cp-nok">run: {refusal}</span> : <Said outcome={outcome} />}
       </div>
-      <Warnings tags={offers.filter((offer) => allowing.includes(offer.tag))} />
+      <Warnings tags={taken(allowing, offers)} />
       <RefusedLanes lanes={lanes} />
     </details>
   )

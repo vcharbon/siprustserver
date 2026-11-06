@@ -34,6 +34,7 @@ const run: CampaignRun = {
 
 const view: Campaign = {
   capture: "c",
+  title: null,
   env: null,
   envs: [],
   saidLabel: "said",
@@ -54,7 +55,8 @@ const view: Campaign = {
   }],
   launch: {
     lanes: [{ lane: "real", group: "g", refused: null }],
-    tags: [{ tag: "harsh", label: "Harsh", warning: "May degrade", excludedOn: ["real"] }]
+    tags: [{ tag: "harsh", label: "Harsh", warning: "May degrade", excludedOn: ["real"], allowed: false }],
+    defaultLanes: null
   },
   own: null
 }

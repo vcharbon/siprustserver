@@ -21,6 +21,7 @@ const UNGROUPED = { title: null, description: null, groups: [], tags: [], links:
 
 const VIEW: Campaign = {
   capture: "campaign",
+  title: null,
   env: null,
   envs: [],
   launch: null,

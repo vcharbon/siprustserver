@@ -240,6 +240,8 @@ export const inboxArgs = (id: number, request: InboxRequest): ReadonlyArray<stri
 export const campaignArgs = (id: number, request: CampaignRequest): ReadonlyArray<string> => [
   "--job",
   String(id),
+  "--campaign",
+  request.capture,
   "--lanes",
   request.lanes.join(","),
   ...(request.case === null ? [] : ["--case", request.case]),

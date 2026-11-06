@@ -20,9 +20,13 @@ export const offered = (
     .filter((tag) => tag.excludedOn.some((lane) => picked.includes(lane)))
     .map((tag) => ({ ...tag, cases: cases.filter((one) => one.tags.includes(tag.tag)).length }))
 
-/** What a start asks for: the tags allowed that the picked lanes still exclude. */
+/** What a start asks for: the tags allowed that the picked lanes still exclude; the server applies those the campaign opts into. */
 export const asked = (allowed: readonly string[], offers: readonly OfferedTag[]): readonly string[] =>
-  offers.map((offer) => offer.tag).filter((tag) => allowed.includes(tag))
+  offers.filter((offer) => !offer.allowed).map((offer) => offer.tag).filter((tag) => allowed.includes(tag))
+
+/** The offers a run takes, so their warnings show: those asked for and those the campaign opts into. */
+export const taken = (allowing: readonly string[], offers: readonly OfferedTag[]): readonly OfferedTag[] =>
+  offers.filter((offer) => offer.allowed || allowing.includes(offer.tag))
 
 /** Why the newest whole-campaign run left `caseId` out, one line per lane; none where it ran it or no such run is read. */
 export const exclusionsOf = (

@@ -1198,9 +1198,17 @@ export interface CampaignChecked {
   readonly expected: string | null
 }
 
+/** One campaign the server knows, with its title; null where none is stated. */
+export interface CampaignListed {
+  readonly capture: string
+  readonly title: string | null
+}
+
 /** One environment's latest runs of a campaign, newest first, and every case any of them ran. */
 export interface Campaign {
   readonly capture: string
+  /** Its name on the page; null where none is stated. */
+  readonly title: string | null
   /** The environment whose runs these are. */
   readonly env: string | null
   /** Every environment that wrote the campaign's runs, the latest writer first. */
@@ -1213,21 +1221,27 @@ export interface Campaign {
   readonly runs: readonly CampaignRun[]
   readonly cases: readonly CampaignCase[]
   /**
-   * Every lane a run started from the page may name, in the server's order;
-   * null where the page reads another environment than the server's.
+   * Every lane a run started from the page may name, in the server's order,
+   * and those the campaign states (null where it states none); null where the
+   * page reads another environment than the server's.
    */
-  readonly launch: { readonly lanes: readonly LaunchLane[]; readonly tags: readonly LaunchTag[] } | null
+  readonly launch: {
+    readonly lanes: readonly LaunchLane[]
+    readonly tags: readonly LaunchTag[]
+    readonly defaultLanes: readonly string[] | null
+  } | null
   /** The environment the server starts this campaign's runs in; null where it starts none. */
   readonly own: string | null
 }
 
-/** One case tag the server declares: what a start offers it as, and the lanes excluding it. */
+/** One case tag the server declares: what a start offers it as, the lanes excluding it, whether the campaign opts into it. */
 export interface LaunchTag {
   readonly tag: string
   readonly label: string
   /** What a start shows before it takes the tag's cases; null where none is stated. */
   readonly warning: string | null
   readonly excludedOn: readonly string[]
+  readonly allowed: boolean
 }
 
 /** One lane a page start may name: the lanes of one group run together, a refused one does not run here. */
@@ -1430,7 +1444,7 @@ export const api = {
     ),
   retirePlan: (capture: string) => request<RetirePlan>(`/api/sources/${encodeURIComponent(capture)}/retire-plan`),
   pcaps: () => request<PcapsView>("/api/pcaps"),
-  campaigns: () => request<readonly string[]>("/api/campaign"),
+  campaigns: () => request<readonly CampaignListed[]>("/api/campaign"),
   /** One environment's latest runs of a campaign (the server's choice where none is named), `run` among them. */
   campaign: (capture: string, query: { readonly env?: string | undefined; readonly run?: number | undefined } = {}) =>
     request<Campaign>(`/api/campaign/${encodeURIComponent(capture)}${search({ env: query.env, run: query.run })}`),

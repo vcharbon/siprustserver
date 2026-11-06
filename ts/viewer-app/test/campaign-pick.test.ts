@@ -26,6 +26,12 @@ describe("a campaign start's lanes", () => {
     expect(defaultPick([lane("lab-a", "g2", "no")])).toEqual([])
   })
 
+  it("open on the lanes the campaign states, leaving out one refused here, whatever the first group is", () => {
+    expect(defaultPick(SPLIT, ["lab-a"])).toEqual(["lab-a"])
+    expect(defaultPick([lane("sim", "g1"), lane("lab-a", "g2", "no")], ["lab-a"])).toEqual([])
+    expect(defaultPick(SPLIT, ["gone"])).toEqual(["gone"])
+  })
+
   it("start a pick of one group of runnable lanes", () => {
     expect(pickRefusal(["lab-a", "lab-b"], SPLIT)).toBeNull()
     expect(pickRefusal(["sim"], AWAY)).toBeNull()

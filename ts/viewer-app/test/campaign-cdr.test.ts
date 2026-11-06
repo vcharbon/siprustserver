@@ -32,6 +32,7 @@ const kase = (ref: string, subcase: string | null): CampaignCase => ({
 
 const VIEW: Campaign = {
   capture: "c",
+  title: null,
   env: null,
   envs: [],
   saidLabel: "said",

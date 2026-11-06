@@ -70,6 +70,7 @@ const GROUPS: Readonly<Record<string, ReadonlyArray<string>>> = {
 /** Four runs, newest first: run 3 a pre-run error; PAI failing since run 2, URI new in run 4. */
 const VIEW: Campaign = {
   capture: "campaign",
+  title: null,
   env: null,
   envs: [],
   launch: null,

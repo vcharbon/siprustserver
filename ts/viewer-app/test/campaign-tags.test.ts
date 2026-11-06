@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest"
 import type { CampaignCase, CampaignRun, LaunchTag } from "../src/api.ts"
-import { asked, carriedBy, exclusionsOf, offered } from "../src/campaign-tags.ts"
+import { asked, carriedBy, exclusionsOf, offered, taken } from "../src/campaign-tags.ts"
 
 const tag = (name: string, excludedOn: readonly string[]): LaunchTag => ({
   tag: name,
   label: `label of ${name}`,
   warning: null,
-  excludedOn
+  excludedOn,
+  allowed: false
 })
 
 const carrying = (...tags: readonly string[]): CampaignCase => ({
@@ -73,6 +74,10 @@ describe("the tags a campaign start offers", () => {
     const offers = offered(TAGS, ["lab"], [])
     expect(asked(["slow", "harsh"], offers)).toEqual(["harsh"])
     expect(asked([], offers)).toEqual([])
+    const fixed = offered([{ ...tag("own", ["lab"]), allowed: true }, tag("harsh", ["lab"])], ["lab"], [])
+    expect(asked(["own", "harsh"], fixed)).toEqual(["harsh"])
+    expect(taken([], fixed).map((offer) => offer.tag)).toEqual(["own"])
+    expect(taken(["harsh"], fixed).map((offer) => offer.tag)).toEqual(["own", "harsh"])
   })
 
   it("name a case's tags as the server declares them, an undeclared one left out", () => {
