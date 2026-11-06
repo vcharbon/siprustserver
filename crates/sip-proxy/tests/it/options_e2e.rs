@@ -14,6 +14,7 @@ use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::parser::custom::CustomParser;
+use sip_message::received::observed_source;
 use sip_message::types::SipHeader;
 use sip_message::worker_report::{incarnation_value, Readiness, X_INCARNATION, X_READINESS};
 use sip_message::{serialize, SipMessage, SipParser};
@@ -88,6 +89,7 @@ fn spawn_responder(
                 Mode::NotReady => (503, "Service Unavailable", vec![incarnation.clone()]),
             };
             let opts = GenerateResponseOpts {
+                incoming_source: Some(observed_source(pkt.src)),
                 to_tag: Some("uas".into()),
                 extra_headers: extra,
                 ..Default::default()
@@ -362,6 +364,7 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
                 continue; // first transmission lost
             }
             let opts = GenerateResponseOpts {
+                incoming_source: Some(observed_source(pkt.src)),
                 to_tag: Some("uas".into()),
                 extra_headers: crate::common::options_capabilities(),
                 ..Default::default()

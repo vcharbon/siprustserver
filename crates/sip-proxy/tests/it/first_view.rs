@@ -13,6 +13,7 @@ use scenario_harness::{Harness, ServerTxn};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts, InDialogMethod};
 use sip_message::parser::custom::CustomParser;
+use sip_message::received::observed_source;
 use sip_message::types::SipHeader;
 use sip_message::worker_report::{incarnation_value, Readiness, X_INCARNATION, X_READINESS};
 use sip_message::{serialize, SipMessage, SipParser};
@@ -209,6 +210,7 @@ fn spawn_responder(ep: Box<dyn UdpEndpoint>, worker: Arc<Responder>) {
                 ])
                 .collect();
             let opts = GenerateResponseOpts {
+                incoming_source: Some(observed_source(pkt.src)),
                 to_tag: Some("uas".into()),
                 extra_headers: extra,
                 ..Default::default()

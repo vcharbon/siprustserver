@@ -25,6 +25,7 @@ mod probe_dead_verdict;
 mod probe_isolation;
 mod probe_not_ready_member;
 mod probe_period;
+mod probe_sent_by;
 mod rate_cap_spill;
 mod receive_path_parse;
 mod refused_invite_copies;

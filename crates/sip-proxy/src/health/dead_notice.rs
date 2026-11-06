@@ -31,6 +31,7 @@ use sip_txn::{IdGen, TransactionConfig, TransactionLayer, TransactionLayerClosed
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
+use super::stated_host::stated_host;
 use crate::registry::{WorkerEntry, WorkerId, WorkerRegistry};
 
 /// The sender of dead notices. Owns a UAC endpoint of its own.
@@ -66,7 +67,7 @@ impl DeadNotifier {
         Self {
             txn,
             events,
-            host: local.ip().to_string(),
+            host: stated_host(local),
             port: local.port(),
             registry,
             verdicts,
@@ -154,7 +155,8 @@ impl DeadNotifier {
                 cseq: 1,
                 via: Some(
                     Via::udp(SipStr::owned(&self.host), self.port)
-                        .with_branch(SipStr::owned(&branch)),
+                        .with_branch(SipStr::owned(&branch))
+                        .requesting_rport(),
                 ),
                 contact: Some(header::Contact::from_uri(
                     Uri::sip_user(SipStr::from_static("proxy"), SipStr::owned(&self.host))

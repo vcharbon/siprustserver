@@ -61,14 +61,10 @@ use std::time::Duration;
 
 use call::TxnKind;
 use sip_clock::Clock;
-use sip_message::generators::{
-    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
-};
-use sip_message::header::{self, ParamValue, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipResponse;
 use sip_message::worker_report;
-use sip_message::{SipMessage, SipRequest, SipStr};
+use sip_message::SipMessage;
 use sip_net::UdpEndpoint;
 use sip_txn::{
     IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed,
@@ -77,14 +73,16 @@ use tokio::time::Instant;
 
 use super::first_view::{FirstRound, FirstView};
 use super::reach::WorkerReach;
+use super::stated_host::stated_host;
 use crate::addr::ProxyAddr;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
-use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use crate::registry::{WorkerHealth, WorkerRegistry};
 
 mod answer;
 mod config;
+mod options;
 
 pub use answer::{read_answer, AnswerReading};
 pub use config::HealthProbeConfig;
@@ -171,7 +169,7 @@ impl HealthProbe {
         Self {
             txn,
             events,
-            probe_host: local.ip().to_string(),
+            probe_host: stated_host(local),
             probe_port: local.port(),
             registry,
             control,
@@ -441,50 +439,6 @@ impl HealthProbe {
         if *n >= self.config.threshold {
             self.control.set_health(&p.worker_id, WorkerHealth::Dead);
         }
-    }
-
-    /// The OPTIONS probing `w`; `None` where its address does not make one.
-    fn build_options(&self, w: &WorkerEntry, branch: &str, now_ms: u64) -> Option<SipRequest> {
-        generate_out_of_dialog_request(
-            OutOfDialogMethod::Options,
-            &GenerateOutOfDialogRequestOpts {
-                request_uri: Some(
-                    Uri::sip(SipStr::owned(&w.address.host)).with_port(w.address.port),
-                ),
-                // Diagnostic only — correlation is the transaction branch.
-                call_id: format!("probe-{}-{}@{}", w.id, now_ms, self.probe_host),
-                from: Some(
-                    header::From::from_uri(Uri::sip_user(
-                        SipStr::from_static("probe"),
-                        SipStr::owned(&self.probe_host),
-                    ))
-                    .with_tag(SipStr::from_static("probe")),
-                ),
-                to: Some(header::To::from_uri(
-                    Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&w.address.host))
-                        .with_port(w.address.port),
-                )),
-                cseq: 1,
-                via: Some(
-                    Via::udp(SipStr::owned(&self.probe_host), self.probe_port)
-                        .with_branch(SipStr::owned(branch))
-                        .with_param(
-                            "cr",
-                            ParamValue::Token(SipStr::owned(&probe_call_ref(branch))),
-                        ),
-                ),
-                contact: Some(header::Contact::from_uri(
-                    Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&self.probe_host))
-                        .with_port(self.probe_port),
-                )),
-                max_forwards: Some(70),
-                ..Default::default()
-            },
-        )
-        .inspect_err(|e| {
-            tracing::warn!(worker = %w.id, error = %e, "health probe not sent: its address makes no OPTIONS");
-        })
-        .ok()
     }
 }
 
