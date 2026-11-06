@@ -44,6 +44,10 @@ macro_rules! plain_counters {
 }
 
 plain_counters! {
+    UNEXPLAINED_ACKS = (
+        "b2bua_unexplained_acks_total",
+        "ACKs of an INVITE the call record holds no final sent for, on a call no other owner served: ignored, the dialog untouched (a re-INVITE refused statelessly before it reached the call, or a live copy's write on its way)",
+    ) => unexplained_acks, bump_unexplained_ack, unexplained_acks_total;
     MESSAGE_CAP_LIFETIME_CROSSED = (
         "b2bua_message_cap_lifetime_crossed_total",
         "calls that crossed max_messages_per_call_lifetime: more events offered over the call's life than any healthy call sees, counted at dispatch until the call's release is queued; each is sent one verdict that ends it",

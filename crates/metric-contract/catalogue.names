@@ -1,3 +1,4 @@
+b2bua-runner b2bua_unexplained_acks_total counter fixed {}
 b2bua-runner b2bua_message_cap_lifetime_crossed_total counter fixed {}
 b2bua-runner b2bua_dispatch_capped_refusals_total counter fixed {}
 b2bua-runner b2bua_dispatch_capped_request_answered_total counter fixed {}

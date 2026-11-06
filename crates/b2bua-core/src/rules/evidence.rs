@@ -9,8 +9,8 @@
 //!    under another branch: this side re-used a number another owner had
 //!    sent, whose request it answers (`evidence-final`);
 //! 3. an ACK naming a dialog by its To-tag and an INVITE on a leg for which
-//!    the record holds no final sent (`evidence-ack`); the router passes the
-//!    caller's own only on a call a copy served;
+//!    the record holds no final sent (`evidence-ack`, on a call a copy served;
+//!    on one node served it proves nothing and the dialog gate drops it);
 //! 4. a BYE from the callee on a dialog the record holds as early: RFC 3261
 //!    §15 forbids it before a 2xx (`evidence-early-bye`, on a call a copy
 //!    served; on one node served it is a broken callee and `relay-bye`'s);
@@ -28,7 +28,9 @@
 //! sends the retained ACK again for a repeat of an evidence final's non-2xx,
 //! which no transaction here absorbs (§17.1.1.2).
 
-use call::{CallModelState, CdrEventType, DialogState, Direction, LegState, TerminationCause};
+use call::{
+    CallModelState, CdrEventType, Dialog, DialogState, Direction, LegState, TerminationCause,
+};
 
 use b2bua_sdk::model::{
     LegEnd, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, CORE_LAYER,
@@ -41,7 +43,9 @@ const EVIDENCE: &str = "evidence";
 /// (ADR-0055 §4), so no service sees or pre-empts a message only a lost write
 /// explains. Triggers 4 and 6 are rules only on a call another owner served
 /// (`copy_served`); on a call one node served the callee's BYE is
-/// `relay-bye`'s and the caller's re-INVITE the chain's.
+/// `relay-bye`'s and the caller's re-INVITE the chain's. An ACK of trigger 3
+/// reaches this stage only on a call another owner served: on any other the
+/// dialog gate drops it ([`crate::dialog_gate`]).
 pub fn evidence_rules(copy_served: bool) -> Vec<RuleDefinition> {
     let mut rules = vec![
         RuleDefinition::core(
@@ -162,21 +166,18 @@ fn ack_of_unanswered_invite(ctx: &RuleContext) -> bool {
     if leg.leg_id == a_leg.leg_id && cseq == i64::from(ctx.call.a_leg_invite().cseq) {
         return a_leg.invite_final_sent().is_none() && req.to().tag().is_some();
     }
-    let Some(dialog) = ctx.dialog() else { return false };
-    if dialog.state != DialogState::Confirmed {
-        return false;
-    }
-    if dialog.peer_cseq.is_none_or(|last| cseq > last) {
-        return true;
-    }
-    relayed_open(ctx, cseq)
+    ctx.dialog().is_some_and(|dialog| holds_no_final(dialog, ctx.peer_dialog(), cseq))
 }
 
-/// Whether the INVITE of CSeq `cseq` the source leg's peer sent was relayed
-/// to the other leg and no final settled it there.
-fn relayed_open(ctx: &RuleContext, cseq: i64) -> bool {
-    let Some(peer) = ctx.peer_dialog() else { return false };
-    call::helpers::invite_relay(peer).is_some_and(|r| r.inbound_cseq == cseq)
+/// Whether confirmed `dialog` holds no final sent for the INVITE of CSeq `cseq`
+/// its peer sent: above the last CSeq it knows, or relayed on `relayed_to`, the
+/// other leg's dialog, with no final settling it there.
+pub(crate) fn holds_no_final(dialog: &Dialog, relayed_to: Option<&Dialog>, cseq: i64) -> bool {
+    dialog.state == DialogState::Confirmed
+        && (dialog.peer_cseq.is_none_or(|last| cseq > last)
+            || relayed_to
+                .and_then(call::helpers::invite_relay)
+                .is_some_and(|r| r.inbound_cseq == cseq))
 }
 
 /// Trigger 4, on a call another owner may have answered: a BYE from the

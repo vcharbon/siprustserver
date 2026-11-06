@@ -65,9 +65,14 @@ the header line, and no escaping is needed. No body.
 The 400 is stateless: no server transaction, sent to the datagram's source
 address and port. Every copy of the request is answered again under the same
 To-tag (derived from the request with a per-instance secret, §8.2.6.2). The
-ACK to the 400 ends at the element that sent it: the transaction layer
-recognises its derived To-tag on an ACK matching no transaction, the proxy
-absorbs it as the ACK to its own non-2xx final.
+ACK to a 400 under that derived To-tag ends at the element that sent it: the
+transaction layer recognises the tag on an ACK matching no transaction, the
+proxy absorbs it as the ACK to its own non-2xx final. A request that already
+had a To-tag keeps it in the 400 (a re-INVITE keeps the dialog's), so no
+stateless element can recognise its ACK, and the ACK travels on to the call it
+names. There it answers an INVITE the call never saw, as the ACK of any final a
+hop gave that re-INVITE does: ADR-0055 §4's trigger 3 ignores it, and on a call
+a takeover copy served ends the call with a clean BYE.
 
 ### 4. What is never answered
 

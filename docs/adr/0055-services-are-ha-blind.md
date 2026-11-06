@@ -367,12 +367,13 @@ transparency is not the goal; the window is the transport delay.
 
 ### 4. Evidence the call record cannot explain: one rule, any method
 
-One rule, in `b2bua-core`, fires on any node; on a single node only a broken or
-forged peer can trigger it. It is a stage of its own, read before every rule of
-the chain (user ruling): no service rule sees or pre-empts a message only a lost
-write explains, and whether another owner served the call reaches that stage
-alone, never a rule's context. On a single node it changes nothing. Its triggers
-are closed:
+One rule, in `b2bua-core`, fires on any node. On a call one node served,
+triggers 3 and 6 and an early BYE of trigger 4 do not fire, and only a broken or
+forged peer can trigger the others. It is a stage of its own, read before every
+rule of the chain (user ruling): no service rule sees or pre-empts a message
+only a lost write explains, and whether another owner served the call reaches
+that stage, and the dialog gate in front of it for trigger 3, never a rule's
+context. On a single node it changes nothing. Its triggers are closed:
 
 1. a final in a dialog whose CSeq is strictly above the dialog's local sequence,
    any method;
@@ -381,10 +382,19 @@ are closed:
    another branch (the copy re-used a sequence number the dead owner had sent,
    and this final answers the dead owner's request);
 3. an ACK naming a dialog by its To-tag and an INVITE on a leg for which the
-   call record holds no final sent; the caller's own INVITE counts only on a
-   call a takeover copy served (this node is the copy, or the record holds a
-   write a copy made): otherwise the copy that answered her is live and its
-   write is on its way;
+   call record holds no final sent, only on a call a takeover copy served (this
+   node is the copy, or the record holds a write a copy made). On any other call
+   it proves nothing: the final it answers may be a stateless refusal of a
+   re-INVITE that never reached the call, which leaves the session unchanged
+   (RFC 3261 §14.1, ADR-0054 §3), or the copy that answered is live and its
+   write is on its way. The dialog gate drops it, the dialog untouched, and
+   counts it (`b2bua_unexplained_acks_total`). On a served call the two cannot
+   be told apart, so a re-INVITE the proxy refused, then its ACK, ends the call
+   with a clean BYE (user ruling; `reinvite_refused_by_proxy.rs`). A primary
+   returned behind what its previous run sent, no copy having written the call,
+   reads as a call no other owner served: a lost round's ACK is dropped there,
+   and the callee's repeat of the 2xx that ACK never reached is the evidence,
+   trigger 1 (`reinvite_round_not_yet_replicated.rs`);
 4. a BYE from the callee on a dialog the call record holds as early (RFC 3261
    §15 forbids it before a 2xx); on a call one node served it is a broken
    callee, whose caller holds no 2xx, and the default `relay-bye` ends the call

@@ -13,6 +13,7 @@
 // Shared fixtures, reached from a test module as `crate::common::…`.
 mod ack_body_relayed;
 mod ack_header_relay;
+mod ack_of_a_stateless_final;
 mod admit_owes_release;
 mod advertisement_policy;
 mod announcement;
