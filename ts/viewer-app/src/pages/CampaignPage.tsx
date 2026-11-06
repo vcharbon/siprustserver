@@ -66,7 +66,7 @@ const Tiles = ({ view, run, vs, lanes }: {
           <div>
             <span className={`cp-big ${failing > 0 ? "cp-nok" : "cp-ok"}`}>{failing}</span> ✗ ·{" "}
             <span className="cp-err">{errors}</span> ! · <span className="cp-ok">{passing}</span> ✓ ·{" "}
-            <span className="muted">{skipped}</span> —
+            <span className="muted" title={status.excluded.length === 0 ? undefined : `${status.excluded.length} excluded`}>{skipped}</span> —
           </div>
           <div className="cp-bar">
             <i className="pass" style={{ width: `${(passing / total) * 100}%` }} />

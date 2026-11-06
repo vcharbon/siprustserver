@@ -138,7 +138,7 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
       </section>
       <section className="cp-panel">
         <h3>Flips</h3>
-        {h.flips.length === 0 ? <p className="muted">✓ every run</p> : (
+        {h.runs.length === 0 ? <p className="muted">none</p> : h.flips.length === 0 ? <p className="muted">✓ every run</p> : (
           <table className="cp-hist">
             <thead>
               <tr><th />{h.runs.map((id) => <RunHead key={id} id={id} scope={scopeOf(id)} />)}</tr>

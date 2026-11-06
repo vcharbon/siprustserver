@@ -45,6 +45,16 @@ describe("a campaign with no run", () => {
     expect(markup).toContain("run campaign")
   })
 
+  it("offers a tag a lane it opens with excludes, unchecked, and no tag no such lane excludes", () => {
+    const tag = (name: string, excludedOn: readonly string[]) => ({ tag: name, label: `Label ${name}`, warning: "Warned", excludedOn })
+    const launch = { ...view.launch!, tags: [tag("left", ["sut-a"]), tag("free", ["sut-c"])] }
+    const markup = renderToStaticMarkup(<CampaignNoRun view={{ ...view, launch }} />)
+    expect(markup).toMatch(/<input type="checkbox"\/>Label left/)
+    expect(markup).not.toContain("Label left (")
+    expect(markup).not.toContain("Label free")
+    expect(markup).not.toContain("Warned")
+  })
+
   it("offers no start where the server does not run the environment read", () => {
     const markup = renderToStaticMarkup(<CampaignNoRun view={{ ...view, env: "env-b", envs: [], launch: null, own: null }} />)
     expect(markup).toContain("no run yet")

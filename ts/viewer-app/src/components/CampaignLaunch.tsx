@@ -113,7 +113,7 @@ export const CampaignStart = ({ capture, lanes, tags, cases, open = false }: {
         {offers.map((offer) => (
           <label key={offer.tag} className="cp-check" title={`excluded on ${offer.excludedOn.join(", ")}`}>
             <input type="checkbox" checked={allowing.includes(offer.tag)} onChange={() => allow(offer.tag)} />
-            {offer.label} ({offer.cases})
+            {offer.label}{offer.cases === 0 ? "" : ` (${offer.cases})`}
           </label>
         ))}
         <button type="button" disabled={busy || refusal !== null} onClick={() => void start(picked, {}, rebuild, allowing)}>
