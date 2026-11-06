@@ -1,9 +1,9 @@
 //! Self-generated UAS finals: the synthesized response to its stamped top Via's
-//! response target (RFC 3261 §18.2.2, RFC 3581 §4), the refusal of a new request (one 503 for every copy, [`crate::refusals`]),
-//! the select-failure → 503 mapping, and the rule that an ACK is never
-//! answered (RFC 3261 §17): a reject of an ACK drops it. The ACK to a non-2xx
-//! final sent here is recognised by its To-tag (`route`), so sending one
-//! writes no memo.
+//! response target (RFC 3261 §18.2.2, RFC 3581 §4), the refusal of a new request
+//! (one 503 for every copy, [`crate::refusals`]), the select-failure → 503
+//! mapping, and the rule that an ACK is never answered (RFC 3261 §17): a reject
+//! of an ACK drops it. The ACK to a non-2xx final sent here is recognised by its
+//! To-tag (`route`), so sending one writes no memo.
 //! Relayed responses do NOT live here — see `core/response`.
 
 use std::net::SocketAddr;

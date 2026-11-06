@@ -24,10 +24,10 @@ pub(super) type Chosen = (ProxyAddr, RoutingDecisionKind, Option<&'static str>);
 
 impl ProxyCore {
     /// The Request-URI as the target, past §16.4 ([`Classified`]), its `maddr`
-    /// where it has one (RFC 3261 §16.5). An out-of-range
-    /// port is malformed (400), not truncated: `sip:host:70596` must not be
-    /// forwarded to port 5060. A URI of a scheme that names no host (`urn:`,
-    /// `http:` …) is no target this hop resolves (416, RFC 3261 §16.3).
+    /// where it has one (RFC 3261 §16.5). An out-of-range port is malformed
+    /// (400), not truncated: `sip:host:70596` must not be forwarded to port 5060.
+    /// A URI of a scheme that names no host (`urn:`, `http:` …) is no target this
+    /// hop resolves (416, RFC 3261 §16.3).
     pub(super) async fn request_uri_target(
         &self,
         req: &SipRequest,

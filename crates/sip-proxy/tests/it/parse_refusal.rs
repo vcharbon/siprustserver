@@ -238,6 +238,8 @@ async fn well_formed_traffic_draws_no_400() {
 /// caller listens on, and a socket at a `maddr` it writes.
 const SENDER: &str = "192.0.2.20:40000";
 const MADDR: &str = "192.0.2.99:5060";
+/// A sent-by on another host than the source, at the caller's port.
+const ELSEWHERE: &str = "198.51.100.7:5060";
 
 /// `malformed_invite` with `via_tail` after the branch of its top Via.
 fn malformed_invite_via(branch: &str, via_tail: &str) -> Vec<u8> {
@@ -278,19 +280,26 @@ async fn with_rport_the_400_reaches_the_source_port() {
 }
 
 /// A Via's `maddr` chooses no destination (ADR-0001), with no `rport`: `received`
-/// at the sent-by port, and nothing reaches the address the sender wrote.
+/// at the sent-by port, and nothing reaches the sent-by host, the address the
+/// sender wrote, or the source port.
 #[tokio::test(start_paused = true)]
-async fn a_via_maddr_draws_nothing_and_the_400_reaches_the_sent_by_port() {
+async fn a_via_maddr_draws_nothing_and_the_400_reaches_received_at_the_sent_by_port() {
     let rig = Rig::new().await;
     let sender = rig.bind(SENDER).await;
     let aimed = rig.bind(MADDR).await;
-    let invite = malformed_invite_via("z9hG4bK-maddr", ";maddr=192.0.2.99");
-    sender.send_to(&invite, addr(PROXY)).await.expect("sent");
+    let named = rig.bind(ELSEWHERE).await;
+    let invite = String::from_utf8(malformed_invite_via("z9hG4bK-maddr", ";maddr=192.0.2.99"))
+        .expect("text")
+        .replacen(CALLER, ELSEWHERE, 1);
+    sender.send_to(invite.as_bytes(), addr(PROXY)).await.expect("sent");
     rig.settle().await;
 
     let sent = rig.to_caller();
-    assert_eq!(sent.len(), 1, "the 400 reaches the sent-by port");
-    assert_eq!(response(&sent[0]).status(), 400);
+    assert_eq!(sent.len(), 1, "the 400 reaches `received` at the sent-by port");
+    let refusal = response(&sent[0]);
+    assert_eq!(refusal.status(), 400);
+    assert_eq!(refusal.top_via().received(), Some("192.0.2.20"));
     assert!(aimed.try_recv().is_none(), "nothing reaches the maddr");
+    assert!(named.try_recv().is_none(), "nothing reaches the sent-by host");
     assert!(sender.try_recv().is_none(), "nothing reaches the source port");
 }
