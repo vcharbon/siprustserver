@@ -165,6 +165,8 @@ fn uri(u: &Uri, d: &mut Digest) {
             u.scheme(),
             u.user(),
             u.host_port(),
+            u.next_hop(),
+            u.maddr(),
             u.is_loose_route(),
             u.user_identity(),
             u.user_digits(),

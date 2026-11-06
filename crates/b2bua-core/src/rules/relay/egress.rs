@@ -12,8 +12,8 @@ use crate::config::B2buaConfig;
 ///
 /// Two effects, both RFC 3261 §16.12:
 ///   1. **Route-set wire destination** (any leg): when the dialog's route set
-///      is non-empty, the request is *sent* to its first route's host:port
-///      (§8.1.2, §12.2.1.1). Behind a loose router (`;lr`) the Request-URI
+///      is non-empty, the request is *sent* to its first route's next hop
+///      ([`Uri::next_hop`], §8.1.2, §12.2.1.1). Behind a loose router (`;lr`) the Request-URI
 ///      stays at the remote target; behind a strict one the generator already
 ///      put that route's URI in the Request-URI and the remote target last in
 ///      the Route set. Either way the first route is the next hop, so
@@ -48,7 +48,7 @@ pub fn apply_b_leg_egress(
             // top, and the proxy reads direction from its self-issued RR
             // (registry- and pod-IP-independent, so it survives a worker
             // reboot), not from anything the worker adds.
-            let (host, port) = uri.host_port();
+            let (host, port) = uri.next_hop();
             return (req, (host.to_string(), port));
         }
         return (req, dest);
@@ -124,7 +124,7 @@ pub fn leg_egress_dest(
 ) -> (String, u16) {
     if let Some(first) = route_set.first() {
         if let Some(uri) = route_uri(first) {
-            let (host, port) = uri.host_port();
+            let (host, port) = uri.next_hop();
             return (host.to_string(), port);
         }
         return base_dest;
@@ -266,6 +266,25 @@ Content-Length: 0\r\n\r\n",
         assert_eq!(
             leg_egress_dest(&B2buaConfig::default(), "b-1", &[route.to_string()], base),
             ("10.0.0.9".to_string(), 5060),
+        );
+    }
+
+    // A route's `maddr` is its next hop (RFC 3263 §4), on both paths.
+    #[test]
+    fn a_first_routes_maddr_is_the_wire_destination() {
+        let route = "<sip:next.example:5070;maddr=192.0.2.9;lr>";
+        let base = ("10.244.2.7".to_string(), 5060);
+        let (_, dest) = apply_b_leg_egress(
+            &B2buaConfig::default(),
+            "b-1",
+            &[route.to_string()],
+            in_dialog_options(route),
+            base.clone(),
+        );
+        assert_eq!(dest, ("192.0.2.9".to_string(), 5070));
+        assert_eq!(
+            leg_egress_dest(&B2buaConfig::default(), "b-1", &[route.to_string()], base),
+            ("192.0.2.9".to_string(), 5070),
         );
     }
 

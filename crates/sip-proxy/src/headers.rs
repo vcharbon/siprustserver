@@ -104,11 +104,12 @@ pub fn via_with_cookie(via: Via, cookie: Option<&RouteParams>) -> Via {
     })
 }
 
-/// The transport destination a Route / Record-Route entry names. The port
-/// defaults to 5060 (RFC 3261 §19.1.2); an out-of-range one never reaches here,
-/// because a URI that states it does not parse.
+/// The transport destination a Route / Record-Route entry names, its `maddr`
+/// where it has one ([`Uri::next_hop`]). The port defaults to 5060 (RFC 3261
+/// §19.1.2); an out-of-range one never reaches here, because a URI that states
+/// it does not parse.
 pub fn route_target(uri: &Uri) -> ProxyAddr {
-    let (host, port) = uri.host_port();
+    let (host, port) = uri.next_hop();
     ProxyAddr::new(host, port)
 }
 

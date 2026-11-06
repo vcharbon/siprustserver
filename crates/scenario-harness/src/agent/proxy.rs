@@ -129,7 +129,7 @@ pub fn forwarded_response(resp: &SipResponse, hop: SocketAddr) -> SipResponse {
 /// else its Request-URI.
 pub fn request_next_hop(req: &SipRequest) -> Option<SocketAddr> {
     top_route_addr(req).or_else(|| {
-        let (host, port) = req.request_uri().host_port();
+        let (host, port) = req.request_uri().next_hop();
         hostport_to_addr(&format!("{host}:{port}"))
     })
 }
@@ -142,7 +142,7 @@ pub fn response_next_hop(resp: &SipResponse) -> Option<SocketAddr> {
 /// The address the request's first Route entry names, if it has one.
 fn top_route_addr(req: &SipRequest) -> Option<SocketAddr> {
     let routes = req.route_set().ok()?;
-    let (host, port) = routes.first()?.uri().host_port();
+    let (host, port) = routes.first()?.uri().next_hop();
     hostport_to_addr(&format!("{host}:{port}"))
 }
 

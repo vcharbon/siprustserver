@@ -15,6 +15,8 @@
 //!   counted, every Route entry past the proxy's own is removed and counted,
 //!   and the request is routed as an inbound one, by its cookie or by a fresh
 //!   selection.
+//!
+//! On either face, a Request-URI whose `maddr` names this proxy loses it.
 
 use std::net::SocketAddr;
 
@@ -42,6 +44,8 @@ pub(super) struct Classified {
     pub(super) via_worker: Option<ProxyAddr>,
     /// The loose Route past the proxy's own, internal face only.
     pub(super) loose_route_next_hop: Option<ProxyAddr>,
+    /// The Request-URI as forwarded, when its `maddr` named this proxy.
+    pub(super) request_uri_past_own_maddr: Option<Uri>,
 }
 
 impl ProxyCore {
@@ -53,10 +57,21 @@ impl ProxyCore {
         self.registry.lookup_by_address(&addr).is_some().then_some(addr)
     }
 
-    /// Whether a Route / Record-Route URI names this proxy, on either face.
+    /// Whether a Route / Record-Route URI names this proxy, on either face, by
+    /// its authority or by its next hop: forwarding an entry whose `maddr`
+    /// names this proxy would loop on Max-Forwards.
     fn is_self_route(&self, uri: &Uri) -> bool {
         let (host, port) = uri.host_port();
-        self.is_self_addr(host, port)
+        let (target, target_port) = uri.next_hop();
+        self.is_self_addr(host, port) || self.is_self_addr(target, target_port)
+    }
+
+    /// `uri`, a Request-URI, without its `maddr` when that names this proxy at
+    /// the URI's port (RFC 3261 §16.4); `None` when it does not.
+    fn past_own_maddr(&self, uri: &Uri) -> Option<Uri> {
+        uri.maddr()?;
+        let (target, port) = uri.next_hop();
+        self.is_self_addr(target, port).then(|| uri.clone().without_own_maddr())
     }
 
     /// Pop the proxy's own Route entries off `draft` and classify `req`,
@@ -98,6 +113,10 @@ impl ProxyCore {
             // header, so the pop drops one ENTRY, never the line.
             draft = draft.pop_top::<RouteEntry>().ok()?;
         }
+        let request_uri_past_own_maddr = self.past_own_maddr(req.request_uri());
+        if let Some(uri) = &request_uri_past_own_maddr {
+            draft = draft.with_uri(uri.clone());
+        }
 
         if external {
             if routes.len() > self_routes || (routes.is_empty() && req.has(&HeaderName::Route)) {
@@ -117,6 +136,7 @@ impl ProxyCore {
                 worker_outbound: false,
                 via_worker: None,
                 loose_route_next_hop: None,
+                request_uri_past_own_maddr,
             };
             return Some((draft, classified));
         }
@@ -154,6 +174,7 @@ impl ProxyCore {
             worker_outbound,
             via_worker,
             loose_route_next_hop,
+            request_uri_past_own_maddr,
         };
         Some((draft, classified))
     }

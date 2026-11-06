@@ -410,9 +410,10 @@ fn extra_header(value: impl HeaderValue) -> SipHeader {
     SipHeader { name: value.name().as_wire_str().into(), value: value.to_wire().into() }
 }
 
-/// The transport address a URI names, defaulting the port per RFC 3261 §19.1.2.
+/// The transport address a URI names, its `maddr` where it has one, defaulting
+/// the port per RFC 3261 §19.1.2.
 fn uri_addr(uri: &Uri) -> Option<SocketAddr> {
-    let (host, port) = uri.host_port();
+    let (host, port) = uri.next_hop();
     hostport_to_addr(&format!("{host}:{port}"))
 }
 

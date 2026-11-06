@@ -14,6 +14,7 @@ use super::params::{ParamValue, Params};
 use super::wire::Wire;
 
 mod equivalent;
+mod next_hop;
 mod read;
 pub(crate) use read::{host_refusal, read_sent_by};
 

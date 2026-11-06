@@ -1,18 +1,20 @@
 //! Remote-target header (`Contact`/`Route`/`Record-Route`) handling: the
-//! ROUTING-CRITICAL part is host:port ONLY. Emission rewrites host:port to the
-//! bound socket while preserving the user part and ALL parameters (URI and
-//! header params, in their captured placement); matching compares the user part
-//! and the two parameter sets (URI vs header) separately, host:port ignored.
+//! ROUTING-CRITICAL part is host:port and a URI's `maddr`, which overrides the
+//! host. Emission rewrites host:port to the bound socket and re-points a `maddr`
+//! at it, preserving the user part and every other parameter (URI and header
+//! params, in their captured placement); matching compares the user part and
+//! the two parameter sets (URI vs header) separately, host:port and `maddr`
+//! ignored.
 //!
 //! Structured parsing goes through the parser's name-addr scan and the one URI
-//! reader ([`Uri::parse`]). The host:port *rewrite* reads each element with the
+//! reader ([`Uri::parse`]). The address *rewrite* reads each element with the
 //! strict name-addr reader and splices the re-rendered URI into the element,
 //! so the display name and header parameters keep their captured spelling and
 //! placement.
 
 use std::collections::BTreeMap;
 
-use crate::header::{AddrForm, HostPort, NameAddr, Uri, UriRole};
+use crate::header::{AddrForm, HostPort, NameAddr, ParamValue, Uri, UriRole};
 use crate::parser::custom::compact_forms::expanded_name;
 use crate::parser::custom::structured_headers::{parse_name_addr, split_top_level_commas};
 use crate::sip_str::SipStr;
@@ -22,7 +24,7 @@ pub fn canonical(name: &str) -> String {
     expanded_name(name).to_ascii_lowercase()
 }
 
-/// Header names whose routing-critical part is host:port only.
+/// Header names whose routing-critical part is their address.
 pub(crate) const REMOTE_TARGET: &[&str] = &["contact", "route", "record-route"];
 
 /// Whether `name` (canonical or compact) is a remote-target header.
@@ -35,7 +37,8 @@ pub fn is_remote_target(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtElement {
     pub user: Option<String>,
-    /// URI parameters (inside the addr-spec), lowercase keys, flag = empty value.
+    /// URI parameters (inside the addr-spec), lowercase keys, flag = empty value,
+    /// `maddr` left out: it is part of the address, not of what is compared.
     pub uri_params: BTreeMap<String, String>,
     /// Header (name-addr) parameters (after `>`), lowercase keys, flag = empty.
     pub header_params: BTreeMap<String, String>,
@@ -51,7 +54,11 @@ fn params_to_map(params: crate::header::Params) -> BTreeMap<String, String> {
 fn parse_element(elem: &str) -> RtElement {
     let na = parse_name_addr(&SipStr::owned(elem.trim()));
     let (user, uri_params) = match Uri::parse(&na.uri) {
-        Ok(u) => (u.user().map(String::from), params_to_map(u.params().clone())),
+        Ok(u) => {
+            let mut uri_params = params_to_map(u.params().clone());
+            uri_params.remove("maddr");
+            (u.user().map(String::from), uri_params)
+        }
         Err(_) => (None, BTreeMap::new()),
     };
     RtElement { user, uri_params, header_params: params_to_map(na.params) }
@@ -72,8 +79,8 @@ pub fn first_hostport(value: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
-/// Rewrite the host:port of one element to `(host, port)`. The element is read
-/// by the strict name-addr reader, so the URI rewritten is the one its grammar
+/// Rewrite the host:port of one element to `(host, port)`, and its `maddr`, when
+/// it has one, to `host`. The element is read by the strict name-addr reader, so the URI rewritten is the one its grammar
 /// names, never a `<` inside a quoted display name; the URI is re-rendered
 /// from its parts and spliced back, its scheme and every byte around it kept
 /// as written. An element the reader refuses, or whose URI is not `sip` /
@@ -90,7 +97,12 @@ fn rewritten_element(elem: &str, host: &str, port: u16) -> Option<String> {
         return None;
     }
     let scheme = addr.uri().scheme();
-    let uri = addr.uri().clone().with_authority(HostPort::new(host, Some(port))).to_string();
+    let mut rewritten = addr.uri().clone().with_authority(HostPort::new(host, Some(port)));
+    if addr.uri().maddr().is_some() {
+        let target = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+        rewritten = rewritten.with_param("maddr", ParamValue::text(SipStr::owned(&target)));
+    }
+    let uri = rewritten.to_string();
     Some(format!(
         "{}{}{}{}",
         elem.get(..span.start)?,
@@ -162,6 +174,30 @@ mod tests {
             rewrite_hostport("<sip:+331;npdi@example.com:5060;user=phone>", "192.0.2.1", 5070),
             "<sip:+331;npdi@192.0.2.1:5070;user=phone>"
         );
+    }
+
+    /// A captured `maddr` would send the peer to the captured address: it
+    /// follows the host to the bound socket, in its placement.
+    #[test]
+    fn a_maddr_follows_the_rewritten_host() {
+        assert_eq!(
+            rewrite_hostport(
+                "<sip:bob@name.example:5060;maddr=203.0.113.9;transport=udp>;q=0.5",
+                "127.0.0.1",
+                5070
+            ),
+            "<sip:bob@127.0.0.1:5070;maddr=127.0.0.1;transport=udp>;q=0.5"
+        );
+        assert_eq!(
+            rewrite_hostport("<sip:name.example;maddr=[2001:db8::9];lr>", "2001:db8::1", 5070),
+            "<sip:[2001:db8::1]:5070;maddr=[2001:db8::1];lr>"
+        );
+    }
+
+    #[test]
+    fn matching_ignores_a_maddr() {
+        let a = parse_elements("<sip:bob@h;maddr=203.0.113.9;lr>");
+        assert_eq!(a, parse_elements("<sip:bob@h;lr>"));
     }
 
     #[test]

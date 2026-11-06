@@ -35,12 +35,53 @@ compatibility rules admit, on purpose:
   §19.3).
 - **Readable credentials.** An Authorization or Proxy-Authorization whose
   Digest credentials do not read is refused with its message (§22.4).
+- **A URI's `maddr`.** A URI a request is sent to or routed on (Request-URI,
+  Contact, Route, Record-Route, Refer-To) names a host in its `maddr`, or has
+  none: `other-param` admits a flag or a port, and neither has a target to read.
 - **Numeric headers.** A header of the numeric registry carries a decimal value
   within its range, digits only, followed by nothing but the tail its grammar
   has: CSeq's method, a session timer's parameters.
 
 A gate refuses like any other rule: a refused request whose echoed fields read
 is answered 400 (ADR-0054).
+
+## A response never follows a Via's `maddr`, and a URI's `maddr` is its target
+
+A Via carrying `maddr` is accepted and relayed, and its `maddr` chooses no
+destination. A response goes to `received` and `rport` as the receiving hop
+stamped them, else to the sent-by (`Via::response_target`). This departs on
+purpose from RFC 3261 §18.2.2, which forwards a response to the `maddr`, and from
+the `maddr` condition of RFC 3581 §4.
+
+- **It would let any sender aim our traffic.** The `received` stamp ties a
+  response to the address the request came from. A Via's `maddr` is text the
+  sender wrote, so honoring it sends each response to whichever address the
+  sender names, with no check that the address asked for anything. RFC 3261
+  §26.1.5 describes this kind of attack using a falsified source address and Via;
+  `maddr` would not even need the source address falsified, so source-address
+  filtering would not stop it. A multicast `maddr` would also spread the response
+  to a whole group.
+- **Its purpose does not arise here.** §18.1.1 has a client add `maddr` when it
+  sends a request to a multicast address. This stack joins no multicast group, so
+  a request reaching it was sent to a unicast address, and the response target
+  already holds what the response needs.
+
+A URI is different. Its host is already chosen by whoever wrote the URI, so its
+`maddr` adds no steering, and RFC 3261 §16.5 and RFC 3263 §4 make it the target.
+A URI's `maddr` is honored, at the URI's own port, wherever a URI picks the next
+hop (`Uri::next_hop`): a remote target, a Route entry, a decided Request-URI, a
+relayed one. It stays on the Request-URI sent onward, and the stack never mints
+one. A proxy strips a Request-URI's `maddr` naming itself (§16.4) and takes a Route
+naming itself by `maddr` as its own.
+
+An inbound Request-URI on a proxy's external face chooses no destination: there a
+sender is asking the proxy to take the request, and following what it wrote would
+make the proxy an open relay. The request reaches a worker, which decides what it
+sends onward.
+
+The Via rule matches ADR-0048: a value the sender wrote never steers a response.
+Serving multicast SIP would reopen it, and would need a way to check the `maddr`
+against the group the request actually arrived on.
 
 ## Considered and rejected
 

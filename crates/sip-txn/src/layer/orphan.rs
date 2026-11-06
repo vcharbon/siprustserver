@@ -170,14 +170,14 @@ impl Owner {
 
 /// Where an in-dialog `req` goes (RFC 3261 §8.1.2, §12.2.1.1): its first
 /// `Route` when that one is loose, else its Request-URI — the remote target,
-/// or a strict first hop — when its host is an address.
+/// or a strict first hop — when its next hop (`Uri::next_hop`) is an address.
 fn next_hop(req: &SipRequest) -> Option<SocketAddr> {
     let routes = req.route_set().ok()?;
     let uri = match routes.first() {
         Some(route) if route.uri().is_loose_route() => route.uri(),
         _ => req.request_uri(),
     };
-    let (host, port) = uri.host_port();
+    let (host, port) = uri.next_hop();
     sip_net::ip_socket_addr(host, port)
 }
 

@@ -11,6 +11,7 @@ pub struct UriFacts {
     /// The URI rendered from its parts — the spelling two URIs compare on, so
     /// whitespace and the original layout never decide equality.
     pub uri: String,
+    /// The URI's `maddr`, else its host.
     pub host: String,
     /// The port the URI names, defaulted when it names none.
     pub port: u16,
@@ -23,7 +24,7 @@ pub struct UriFacts {
 
 impl UriFacts {
     pub(super) fn of(uri: &crate::header::Uri) -> Self {
-        let (host, port) = uri.host_port();
+        let (host, port) = uri.next_hop();
         UriFacts {
             uri: uri.to_string(),
             host: host.to_string(),

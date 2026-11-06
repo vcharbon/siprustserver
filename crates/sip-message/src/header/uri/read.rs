@@ -35,6 +35,14 @@ pub(super) struct UriParts {
     pub(super) opaque: Option<SipStr>,
 }
 
+/// The URI parameter naming the address a target's requests go to.
+pub(super) const MADDR: &str = "maddr";
+
+/// `host` without one pair of brackets around it.
+pub(super) fn unbracketed(host: &str) -> &str {
+    host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
+}
+
 /// Read all of `value` as one URI.
 pub(super) fn read(value: &SipStr, role: UriRole) -> Result<UriParts, SipParseError> {
     let bytes = value.as_bytes();
@@ -92,10 +100,18 @@ fn read_sip(value: &SipStr, scheme: SipStr, i: usize, role: UriRole) -> Result<U
         let name = sub(value, name_at, name_end);
         if byte_at(bytes, name_end) == Some(b'=') {
             let value_end = scan_until(bytes, name_end + 1, b";?");
-            paramchar_refusal("uri-parameter value", clamped(text, name_end + 1, value_end))?;
+            let param = clamped(text, name_end + 1, value_end);
+            paramchar_refusal("uri-parameter value", param)?;
+            if role == UriRole::Target && name.eq_ignore_ascii_case(MADDR) {
+                host_refusal(unbracketed(param), role)
+                    .map_or(Ok(()), |r| Err(format!("maddr: {r}")))?;
+            }
             params.push(name, ParamValue::Token(sub(value, name_end + 1, value_end)));
             j = value_end;
         } else {
+            if role == UriRole::Target && name.eq_ignore_ascii_case(MADDR) {
+                return Err("maddr names no host".to_string());
+            }
             params.push(name, ParamValue::Flag);
             j = name_end;
         }

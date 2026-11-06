@@ -234,6 +234,18 @@ fn remote_target_hostport_ignored_but_user_compared() {
     }
 }
 
+/// `maddr` is part of the address: emission re-points it, matching ignores it.
+#[test]
+fn remote_target_maddr_ignored_like_the_host() {
+    let tmpl = MessageTemplate::from_message(&response_with_contact(
+        "<sip:bob@203.0.113.7:5060;maddr=203.0.113.9;x=1>",
+    ));
+    let inbound = response_with_contact("<sip:bob@127.0.0.1:5070;maddr=127.0.0.1;x=1>");
+    assert_eq!(tmpl.match_inbound(&inbound, &MatchOpts::default()), Ok(()));
+    let without = response_with_contact("<sip:bob@127.0.0.1:5070;x=1>");
+    assert_eq!(tmpl.match_inbound(&without, &MatchOpts::default()), Ok(()));
+}
+
 #[test]
 fn remote_target_added_param_tolerated_only_when_ignored() {
     let tmpl =

@@ -22,6 +22,8 @@ mod first_view_tests;
 #[cfg(test)]
 mod liveness_routing_tests;
 #[cfg(test)]
+mod maddr_tests;
+#[cfg(test)]
 mod owner_rule_tests;
 mod request;
 mod response;

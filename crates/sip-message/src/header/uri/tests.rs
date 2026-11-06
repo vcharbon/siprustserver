@@ -214,3 +214,66 @@ fn a_user_part_holding_semicolons_and_escapes_ends_at_the_at_sign() {
         "sip:+33612345678;foo=bar@198.51.100.1:5080"
     );
 }
+
+/// RFC 3263 §4: `TARGET = maddr, else host`, with the URI's own port or the
+/// default; RFC 3261 §19.1.1: the port applies to the `maddr`.
+#[test]
+fn the_next_hop_is_the_maddr_at_the_uris_own_port() {
+    for (text, hop) in [
+        ("sip:bob@name.example", ("name.example", 5060)),
+        ("sip:bob@name.example:5070", ("name.example", 5070)),
+        ("sip:bob@name.example;maddr=192.0.2.9", ("192.0.2.9", 5060)),
+        ("sip:bob@name.example:5070;maddr=192.0.2.9", ("192.0.2.9", 5070)),
+        ("sip:bob@name.example;MADDR=other.example;lr", ("other.example", 5060)),
+        ("sip:bob@name.example;maddr=[2001:db8::9]", ("2001:db8::9", 5060)),
+        ("sip:bob@name.example;maddr=2001:db8::9", ("2001:db8::9", 5060)),
+        ("sips:bob@name.example:5061;maddr=192.0.2.9", ("192.0.2.9", 5061)),
+    ] {
+        assert_eq!(uri(text).next_hop(), hop, "{text}");
+    }
+    assert_eq!(
+        uri("sip:bob@name.example;maddr=192.0.2.9").host_port(),
+        ("name.example", 5060),
+        "`host_port` stays the authority"
+    );
+}
+
+/// A tel URI's parameters name no address, and an opaque value has none.
+#[test]
+fn only_a_sip_uri_has_a_maddr_target() {
+    assert_eq!(uri("tel:+15551212;maddr=192.0.2.9").maddr(), None);
+    assert_eq!(Uri::opaque("not a uri;maddr=192.0.2.9").maddr(), None);
+}
+
+/// A target-role read refuses a `maddr` that names no host, so `next_hop` never
+/// fails; a URI that names a party is never routed on.
+#[test]
+fn a_maddr_that_names_no_host_refuses_a_target_uri() {
+    for bad in [
+        "sip:bob@h.example;maddr",
+        "sip:bob@h.example;maddr=1.2.3.4:5060",
+        "sip:bob@h.example;maddr=1.2.3.999",
+        "sip:bob@h.example;maddr=[[2001:db8::9]]",
+        "sip:bob@h.example;maddr=[2001:db8::9",
+        "sip:bob@h.example;maddr=a%20b",
+        "sip:bob@h.example;MADDR",
+    ] {
+        assert!(Uri::parse(&SipStr::owned(bad)).is_err(), "{bad}");
+        assert!(Uri::parse_as(&SipStr::owned(bad), UriRole::Identity).is_ok(), "{bad}");
+    }
+}
+
+/// RFC 3261 §16.4: the `maddr` goes with any non-default port or transport.
+#[test]
+fn past_its_own_maddr_a_uri_keeps_every_other_part() {
+    for (text, past) in [
+        ("sip:bob@h.example;maddr=192.0.2.9", "sip:bob@h.example"),
+        ("sip:bob@h.example:5060;maddr=192.0.2.9", "sip:bob@h.example:5060"),
+        ("sip:bob@h.example:5080;maddr=192.0.2.9;user=phone", "sip:bob@h.example;user=phone"),
+        ("sip:bob@h.example;transport=tcp;maddr=192.0.2.9;lr", "sip:bob@h.example;lr"),
+        ("sip:bob@h.example;transport=UDP;maddr=192.0.2.9", "sip:bob@h.example;transport=UDP"),
+        ("sip:bob@[2001:db8::1]:5080;maddr=192.0.2.9", "sip:bob@[2001:db8::1]"),
+    ] {
+        assert_eq!(uri(text).without_own_maddr().to_string(), past, "{text}");
+    }
+}

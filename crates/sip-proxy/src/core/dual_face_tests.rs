@@ -32,17 +32,17 @@ use crate::{ProxyMetrics, RoutingStrategy};
 
 // Internal plane (worker/pod CIDR).
 const INT_CIDRS: &str = "10.244.0.0/16";
-const INT_VIP: &str = "10.244.255.250";
-const INT_PORT: u16 = 5080;
-const W1: &str = "10.244.5.8";
+pub(super) const INT_VIP: &str = "10.244.255.250";
+pub(super) const INT_PORT: u16 = 5080;
+pub(super) const W1: &str = "10.244.5.8";
 // External plane (callers/callees).
-const EXT_VIP: &str = "192.168.60.250";
+pub(super) const EXT_VIP: &str = "192.168.60.250";
 const EXT_PORT: u16 = 5060;
-const CALLER: &str = "192.168.60.10";
-const CALLEE: &str = "192.168.60.20";
+pub(super) const CALLER: &str = "192.168.60.10";
+pub(super) const CALLEE: &str = "192.168.60.20";
 
 /// One captured egress datagram: which FACE sent it, to where, the bytes.
-type Sent = (&'static str, SocketAddr, Vec<u8>);
+pub(super) type Sent = (&'static str, SocketAddr, Vec<u8>);
 
 /// A capturing endpoint labelled with its face.
 struct TapEndpoint {
@@ -77,20 +77,20 @@ impl UdpEndpoint for TapEndpoint {
     }
 }
 
-struct Fixture {
-    core: ProxyCore,
+pub(super) struct Fixture {
+    pub(super) core: ProxyCore,
     sent: Arc<Mutex<Vec<Sent>>>,
     metrics: Arc<ProxyMetrics>,
 }
 
 impl Fixture {
     /// Drain the captured sends.
-    fn take_sent(&self) -> Vec<Sent> {
+    pub(super) fn take_sent(&self) -> Vec<Sent> {
         std::mem::take(&mut *self.sent.lock().unwrap())
     }
 }
 
-fn dual_face_core() -> Fixture {
+pub(super) fn dual_face_core() -> Fixture {
     let sent: Arc<Mutex<Vec<Sent>>> = Arc::new(Mutex::new(Vec::new()));
     let int_ep = TapEndpoint {
         face: "int",
@@ -122,7 +122,7 @@ fn dual_face_core() -> Fixture {
     Fixture { core, sent, metrics }
 }
 
-fn parse_msg(raw: &str) -> SipMessage {
+pub(super) fn parse_msg(raw: &str) -> SipMessage {
     CustomParser::default().parse(raw.as_bytes()).unwrap()
 }
 
@@ -135,7 +135,7 @@ fn callee_src() -> SocketAddr {
 }
 
 /// Header lines named `name` (case-insensitive), in wire order.
-fn header_lines(bytes: &[u8], name: &str) -> Vec<String> {
+pub(super) fn header_lines(bytes: &[u8], name: &str) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes).to_string();
     let prefix = format!("{}:", name.to_ascii_lowercase());
     text.lines()

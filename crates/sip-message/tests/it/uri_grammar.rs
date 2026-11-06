@@ -506,3 +506,18 @@ fn a_malformed_date_never_refuses_the_message() {
     request(&invite("", "", "Date: Sat, 3 Nov 2010 23:29:00 GMT\r\n"));
     request(&invite("", "", "Date: Sat, 13 Nov 2010 23:29:00 GMT\r\n"));
 }
+
+/// A URI a target role reads holds a `maddr` naming a host or none, on every line
+/// that picks a next hop; a party's URI on From or To is never routed on.
+#[test]
+fn a_maddr_naming_no_host_refuses_the_lines_that_route() {
+    for bad in [";maddr", ";maddr=1.2.3.4:5060", ";maddr=[::1"] {
+        let target = format!("sip:h.example{bad}");
+        refused("Request-URI", &invite("INVITE", &format!("INVITE {target} SIP/2.0"), ""));
+        refused("Contact", &invite("Contact", &format!("Contact: <{target}>"), ""));
+        refused("Route", &invite("", "", &format!("Route: <{target};lr>\r\n")));
+        refused("Record-Route", &invite("", "", &format!("Record-Route: <{target};lr>\r\n")));
+    }
+    assert!(parse(&invite("From", "From: <sip:alice@example.com;maddr>;tag=a1", "")).is_ok());
+    assert!(parse(&invite("Contact", "Contact: <sip:a@h.example;maddr=192.0.2.9>", "")).is_ok());
+}

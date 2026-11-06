@@ -23,23 +23,25 @@ use super::RouteOutcome;
 pub(super) type Chosen = (ProxyAddr, RoutingDecisionKind, Option<&'static str>);
 
 impl ProxyCore {
-    /// The Request-URI as the target. An out-of-range port is malformed (400),
-    /// not truncated: `sip:host:70596` must not be forwarded to port 5060. A
-    /// URI of a scheme that names no host (`urn:`, `http:` …) is no target
-    /// this hop resolves (416, RFC 3261 §16.3).
+    /// The Request-URI as the target, past §16.4 ([`Classified`]), its `maddr`
+    /// where it has one (RFC 3261 §16.5). An out-of-range
+    /// port is malformed (400), not truncated: `sip:host:70596` must not be
+    /// forwarded to port 5060. A URI of a scheme that names no host (`urn:`,
+    /// `http:` …) is no target this hop resolves (416, RFC 3261 §16.3).
     pub(super) async fn request_uri_target(
         &self,
         req: &SipRequest,
         src: SocketAddr,
+        c: &Classified,
     ) -> Result<ProxyAddr, RouteOutcome> {
-        let uri = req.request_uri();
+        let uri = c.request_uri_past_own_maddr.as_ref().unwrap_or_else(|| req.request_uri());
         if uri.is_opaque() {
             return Err(self.reply_malformed_uri(req, src).await);
         }
         if uri.opaque_part().is_some() {
             return Err(self.reply_unsupported_scheme(req, src).await);
         }
-        let (host, port) = uri.host_port();
+        let (host, port) = uri.next_hop();
         Ok(ProxyAddr::new(host, port))
     }
 
@@ -102,7 +104,7 @@ impl ProxyCore {
                 return Ok(next.clone());
             }
             if c.worker_outbound {
-                return self.request_uri_target(req, src).await;
+                return self.request_uri_target(req, src, c).await;
             }
             let cookie = c.cookie.as_ref();
             return self.admitted_target(msg, cookie, NoTargetDrop::Cancel).await;

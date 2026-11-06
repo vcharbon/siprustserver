@@ -264,7 +264,7 @@ impl ProxyCore {
         } else if let Some(next) = c.loose_route_next_hop.clone() {
             Ok((next, RoutingDecisionKind::LooseRoute, None))
         } else if c.worker_outbound {
-            let target = self.request_uri_target(req, src).await;
+            let target = self.request_uri_target(req, src, &c).await;
             target.map(|t| (t, RoutingDecisionKind::WorkerOutbound, None))
         } else if let Some(cookie) = &c.cookie {
             self.cookie_target(msg, req, src, cookie, rtx_hit.as_ref(), face).await
