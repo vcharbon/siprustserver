@@ -75,7 +75,10 @@ impl CallId {
     /// The host a Call-ID written `localid@host` names (RFC 3261 §8.1.1.4):
     /// the text after its last `@`, or `None` where it has none.
     pub fn host(&self) -> Option<&str> {
-        self.0.as_str().trim().rsplit_once('@').map(|(_, host)| host).filter(|h| !h.is_empty())
+        crate::whitespace::trim(self.0.as_str())
+            .rsplit_once('@')
+            .map(|(_, host)| host)
+            .filter(|h| !h.is_empty())
     }
 }
 

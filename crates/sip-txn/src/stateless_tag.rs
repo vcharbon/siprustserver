@@ -62,11 +62,14 @@ impl StatelessTagger {
         ack.to().tag() == Some(tag.as_str())
     }
 
+    /// The branch signs folded to lower case: one re-cased in transit is the
+    /// same branch (RFC 3261 §7.3.1), so it derives the same tag.
     fn derive(&self, call_id: &CallId, from: &From, top_via: &Via, cseq: &CSeq) -> (String, u64) {
+        let branch = top_via.branch().unwrap_or("").to_ascii_lowercase();
         let signature = self.key.sign(&[
             call_id.as_str().as_bytes(),
             from.tag().unwrap_or("").as_bytes(),
-            top_via.branch().unwrap_or("").as_bytes(),
+            branch.as_bytes(),
             &cseq.seq().to_le_bytes(),
             cseq.method().as_str().as_bytes(),
         ]);

@@ -392,7 +392,7 @@ fn sets_up_own_connection(media: &MediaLine, session: &str) -> bool {
 fn bundles(session: &str) -> bool {
     lines(session).any(|l| {
         l.strip_prefix("a=group:").is_some_and(|g| {
-            g.split_whitespace().next().is_some_and(|s| s.eq_ignore_ascii_case("BUNDLE"))
+            crate::whitespace::split(g).next().is_some_and(|s| s.eq_ignore_ascii_case("BUNDLE"))
         })
     })
 }
@@ -421,7 +421,7 @@ const PER_FORMAT: [&str; 3] = ["rtpmap:", "fmtp:", "rtcp-fb:"];
 fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &str) {
     let mut section = lines(text);
     let m_value = section.next().and_then(|l| l.get(2..)).unwrap_or_default();
-    let port_field = m_value.split_whitespace().nth(1).unwrap_or("0");
+    let port_field = crate::whitespace::split(m_value).nth(1).unwrap_or("0");
     let formats: Vec<&str> = answer.kept.iter().map(|k| k.offered.as_str()).collect();
     push_line(
         out,
@@ -458,7 +458,8 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
                 Some(enc) if name == "rtpmap:" => enc.as_str(),
                 _ => tail,
             };
-            push_line(out, format!("a={name}{} {tail}", kept.offered).trim_end(), eol);
+            let line = format!("a={name}{} {tail}", kept.offered);
+            push_line(out, crate::whitespace::trim_end(&line), eol);
             continue;
         }
         if attr.is_some_and(|a| a.starts_with("mid:")) {
@@ -512,10 +513,9 @@ fn session_direction(session: &str) -> Option<SdpDirection> {
 
 /// An `m=` value with its port set to 0, every other token as written.
 fn with_port_zero(m_value: &str) -> String {
-    let mut tokens = m_value.split_whitespace();
+    let mut tokens = crate::whitespace::split(m_value);
     let kind = tokens.next().unwrap_or_default();
-    let _port = tokens.next();
-    let rest: Vec<&str> = tokens.collect();
+    let rest: Vec<&str> = tokens.skip(1).collect();
     if rest.is_empty() {
         format!("{kind} 0")
     } else {

@@ -31,7 +31,7 @@ pub fn site_at(raw: &[u8], at: usize) -> Site {
     // A line with no colon names no header: the empty name.
     let line = raw.get(start..).unwrap_or_default();
     let name = line.iter().position(|&b| b == b':').and_then(|c| line.get(..c)).unwrap_or_default();
-    Site::Header(String::from_utf8_lossy(name).trim().to_string())
+    Site::Header(crate::whitespace::trim(&String::from_utf8_lossy(name)).to_string())
 }
 
 #[cfg(test)]

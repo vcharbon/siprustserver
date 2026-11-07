@@ -16,7 +16,7 @@ use sip_message::header::{
 };
 use sip_message::{
     answer_from_own, decompose_multipart, extract_codec_profile, parse_sdp_body, Bytes,
-    FormatPreference, HeaderName, Method, SipParser, SipRequest,
+    FormatPreference, HeaderName, Method, SipMessage, SipParser, SipRequest,
 };
 
 use super::wire::{self, Shape, PROXY_HOST};
@@ -285,13 +285,17 @@ pub fn clone_request_lines(n: usize) -> Op {
     })
 }
 
-/// One read of a single-valued header the request repeats on `n` lines.
+/// One read of a single-valued header the request repeats on `n` lines: a
+/// stored image, which ingress would have refused, still reads the first.
 pub fn read_single_repeated(n: usize) -> Op {
     let wire = wire::invite(&Shape::lines(0));
     let text = String::from_utf8(wire.to_vec()).expect("ascii");
     let lines = "Expires: 3600\r\n".repeat(n.max(1));
     let text = text.replacen("Max-Forwards: 70\r\n", &format!("Max-Forwards: 70\r\n{lines}"), 1);
-    let request = wire::request(&Bytes::from(text.into_bytes()));
+    let request = match sip_message::read_stored(text.as_bytes()).expect("a stored image reads") {
+        SipMessage::Request(request) => request,
+        SipMessage::Response(_) => panic!("the fixture is a request"),
+    };
     Box::new(move || {
         black_box(request.header::<header::Expires>());
     })

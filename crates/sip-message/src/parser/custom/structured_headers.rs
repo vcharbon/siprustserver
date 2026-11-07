@@ -79,14 +79,14 @@ impl<'a> Iterator for TopLevelEntries<'a> {
                 c if depth == 0 && self.seps.contains(&c) => {
                     self.pos = i + 1;
                     self.emitted += 1;
-                    return Some(self.value.get(start..i)?.trim());
+                    return Some(crate::whitespace::trim(self.value.get(start..i)?));
                 }
                 _ => {}
             }
             i += 1;
         }
         self.done = true;
-        let tail = self.value.get(start..)?.trim();
+        let tail = crate::whitespace::trim(self.value.get(start..)?);
         // A lone empty value has no entries; a trailing empty entry after a
         // separator is one.
         if tail.is_empty() && self.emitted == 0 {
@@ -114,7 +114,9 @@ pub fn parse_cseq(value: &SipStr) -> ParsedCSeq {
         .bytes()
         .take(digits)
         .fold(0u64, |n, d| n.saturating_mul(10).saturating_add(u64::from(d.saturating_sub(b'0'))));
-    let method = text.get(digits..).map_or(SipStr::EMPTY, |rest| value.reslice(rest.trim()));
+    let method = text
+        .get(digits..)
+        .map_or(SipStr::EMPTY, |rest| value.reslice(crate::whitespace::trim(rest)));
     ParsedCSeq { seq, method }
 }
 

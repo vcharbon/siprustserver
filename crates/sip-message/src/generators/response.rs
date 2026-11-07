@@ -40,7 +40,9 @@ pub fn retag_response(response: &SipResponse, tag: &str) -> Option<SipResponse> 
 }
 
 /// Inputs for [`generate_response`]. Via / From / To / Call-ID / CSeq are not
-/// inputs at all — §8.2.6.2 makes them echoes of the request, carried verbatim.
+/// inputs at all — §8.2.6.2 makes them echoes of the request, carried as their
+/// lines read (a surrogate pair the request wrote in CESU-8 echoes in UTF-8,
+/// ADR-0053 §3).
 #[derive(Debug, Clone, Default)]
 pub struct GenerateResponseOpts {
     /// Tag added to To when status > 100 and the request's To lacks one.
@@ -124,7 +126,7 @@ pub fn delayed_trying_timestamp(
     delay: std::time::Duration,
 ) -> Option<SipHeader> {
     let stated = request.raw_text(HeaderName::Timestamp).next()?;
-    let value = stated.as_str().split_whitespace().next()?;
+    let value = crate::whitespace::split(stated.as_str()).next()?;
     let ms = delay.as_millis();
     let delayed = format!("{value} {}.{:03}", ms / 1000, ms % 1000);
     Some(SipHeader::new(HeaderName::Timestamp.as_wire_str().to_string(), delayed))

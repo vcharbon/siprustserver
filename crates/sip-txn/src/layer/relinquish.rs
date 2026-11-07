@@ -29,7 +29,7 @@ impl Owner {
         self.self_release_watch.remove(call_ref);
         let txns = self.txn_index.get(call_ref);
         let clients: Vec<String> =
-            txns.into_iter().flat_map(|t| t.every_client().cloned()).collect();
+            txns.into_iter().flat_map(|t| t.every_client().map(str::to_string)).collect();
         let servers: Vec<ServerTxnKey> =
             txns.into_iter().flat_map(|t| t.server.iter().cloned()).collect();
         for branch in &clients {
@@ -52,7 +52,7 @@ impl Owner {
             .txn_index
             .get(call_ref)
             .into_iter()
-            .flat_map(|t| t.accepted.iter().cloned())
+            .flat_map(|t| t.accepted.iter().map(str::to_string))
             .collect();
         accepted.iter().filter(|b| self.delete_txn(TxnRef::Client(b))).count()
     }

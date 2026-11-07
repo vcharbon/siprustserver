@@ -48,6 +48,7 @@ mod bound_report;
 mod call_txns;
 mod client;
 mod client_give_up;
+mod client_key;
 mod commands;
 mod config;
 mod event_age;

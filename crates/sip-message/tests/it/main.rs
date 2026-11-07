@@ -49,4 +49,5 @@ mod uri_equivalence;
 mod uri_grammar;
 mod via_lower_hops;
 mod via_sent_by;
+mod whitespace_guard;
 mod write_line_safety;

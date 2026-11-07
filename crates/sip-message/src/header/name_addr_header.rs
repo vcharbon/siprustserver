@@ -157,7 +157,7 @@ impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
     }
 
     fn parse_line_into(raw: &SipStr, out: &mut Vec<Self>) -> Result<(), SipParseError> {
-        if K::WILDCARD && raw.as_str().trim() == "*" {
+        if K::WILDCARD && crate::whitespace::trim(raw.as_str()) == "*" {
             return Ok(());
         }
         read_line_into(raw, out)

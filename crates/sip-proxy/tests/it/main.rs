@@ -36,4 +36,5 @@ mod self_gate_admission;
 mod shard_e2e;
 mod single_face_wire;
 mod stateless_final_response_contract;
+mod surrogate_pair_display_name;
 mod transit_only;

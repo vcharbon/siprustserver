@@ -11,7 +11,7 @@
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 
-use sip_message::header::{SentBy, SentByRef, Via};
+use sip_message::header::{hash_branch, same_branch, SentBy, SentByRef, Via};
 use sip_message::{Method, SipRequest, SipResponse};
 
 /// The method a server transaction is filed under for `method`: an ACK's is
@@ -103,15 +103,18 @@ impl<'a> ServerTxnId<'a> {
     }
 }
 
+/// The branch compares and hashes ignoring ASCII case (RFC 3261 §7.3.1).
 impl PartialEq for ServerTxnId<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.branch == other.branch && self.method == other.method && self.sent_by == other.sent_by
+        same_branch(self.branch, other.branch)
+            && self.method == other.method
+            && self.sent_by == other.sent_by
     }
 }
 
 impl Hash for ServerTxnId<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.branch.hash(state);
+        hash_branch(self.branch, state);
         self.sent_by.hash(state);
         self.method.hash(state);
     }

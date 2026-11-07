@@ -103,7 +103,7 @@ pub struct SdpOrigin {
 /// Leading-digit integer read: an optional sign, then digits, stopping at the
 /// first byte that is not one. `None` where no digit follows the sign.
 fn leading_int(s: &str) -> Option<i64> {
-    let s = s.trim_start();
+    let s = crate::whitespace::trim_start(s);
     let (neg, unsigned) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, s.strip_prefix('+').unwrap_or(s)),
@@ -151,7 +151,7 @@ struct MutableMedia {
 
 /// Start a media block from an `m=` line's value (no leading `m=`).
 fn new_media(raw_m_line: &str) -> MutableMedia {
-    let tokens: Vec<&str> = raw_m_line.split_whitespace().collect();
+    let tokens: Vec<&str> = crate::whitespace::split(raw_m_line).collect();
     MutableMedia {
         r#type: tokens.first().copied().unwrap_or("").to_string(),
         port: tokens.get(1).and_then(|p| leading_int(p)),
@@ -230,7 +230,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
                 current.attributes.push(value.to_string());
                 if current.ptime.is_none() {
                     if let Some(rest) = strip_prefix_ci(value, "ptime:") {
-                        current.ptime = leading_int(rest.trim());
+                        current.ptime = leading_int(crate::whitespace::trim(rest));
                     }
                 }
             }
@@ -263,7 +263,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
 /// The tokens after `<type> <port> <transport>` on an `m=` line's value — the
 /// format / payload-type list. Empty where the line carries none.
 pub fn extract_format_list(m_line: &str) -> Vec<String> {
-    m_line.split_whitespace().skip(3).map(str::to_string).collect()
+    crate::whitespace::split(m_line).skip(3).map(str::to_string).collect()
 }
 
 /// The block's direction attribute; absence is [`SdpDirection::SendRecv`]
@@ -275,7 +275,7 @@ pub fn extract_direction(media: &MediaLine) -> SdpDirection {
 /// The direction an attribute value (without the leading `a=`) states, or
 /// `None` where it is not one of the four direction attributes (RFC 3264 §6.1).
 pub fn direction_of(attr: &str) -> Option<SdpDirection> {
-    match attr.trim().to_ascii_lowercase().as_str() {
+    match crate::whitespace::trim(attr).to_ascii_lowercase().as_str() {
         "sendrecv" => Some(SdpDirection::SendRecv),
         "sendonly" => Some(SdpDirection::SendOnly),
         "recvonly" => Some(SdpDirection::RecvOnly),
@@ -292,8 +292,8 @@ pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
     let mut seen: LookupSet<&str> = LookupSet::new();
     for attr in &media.attributes {
         let Some(tail) = strip_prefix_ci(attr, "rtpmap:") else { continue };
-        let Some((pt, enc)) = tail.trim().split_once(' ') else { continue };
-        let (pt, enc) = (pt.trim(), enc.trim());
+        let Some((pt, enc)) = crate::whitespace::trim(tail).split_once(' ') else { continue };
+        let (pt, enc) = (crate::whitespace::trim(pt), crate::whitespace::trim(enc));
         if pt.is_empty() || enc.is_empty() {
             continue;
         }
@@ -312,10 +312,10 @@ pub fn extract_fmtps(media: &MediaLine) -> Vec<(String, String)> {
     let mut seen: LookupSet<&str> = LookupSet::new();
     for attr in &media.attributes {
         let Some(tail) = strip_prefix_ci(attr, "fmtp:") else { continue };
-        let tail = tail.trim();
+        let tail = crate::whitespace::trim(tail);
         let (format, params) = tail.split_once(' ').unwrap_or((tail, ""));
         if !format.is_empty() && seen.insert(format) {
-            out.push((format.to_string(), params.trim().to_string()));
+            out.push((format.to_string(), crate::whitespace::trim(params).to_string()));
         }
     }
     out
@@ -329,11 +329,11 @@ pub fn extract_cryptos(media: &MediaLine) -> Vec<(String, String, String)> {
         .attributes
         .iter()
         .filter_map(|attr| {
-            let tail = strip_prefix_ci(attr, "crypto:")?.trim();
+            let tail = crate::whitespace::trim(strip_prefix_ci(attr, "crypto:")?);
             let (tag, tail) = tail.split_once(' ')?;
-            let tail = tail.trim_start();
+            let tail = crate::whitespace::trim_start(tail);
             let (suite, rest) = tail.split_once(' ').unwrap_or((tail, ""));
-            Some((tag.to_string(), suite.to_string(), rest.trim().to_string()))
+            Some((tag.to_string(), suite.to_string(), crate::whitespace::trim(rest).to_string()))
         })
         .collect()
 }
@@ -372,7 +372,7 @@ pub fn parse_origin(body: &[u8]) -> Option<SdpOrigin> {
     let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
     let (o_idx, o_line, o_value) =
         lines.iter().enumerate().find_map(|(i, l)| Some((i, *l, l.strip_prefix("o=")?)))?;
-    let parts: Vec<&str> = o_value.split_whitespace().collect();
+    let parts: Vec<&str> = crate::whitespace::split(o_value).collect();
     let [username, session_id, version, nettype, addrtype, unicast_address, ..] = parts.as_slice()
     else {
         return None;

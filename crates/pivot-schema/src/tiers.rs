@@ -268,10 +268,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_compact_form_map_is_the_rfc_3261_table_and_session_expires() {
+    fn the_compact_form_map_is_every_registered_compact_form_the_stack_knows() {
         let forms = compact_forms();
-        assert_eq!(forms.len(), 11, "{forms:?}");
+        assert_eq!(forms.len(), 15, "{forms:?}");
         for (compact, canonical) in [
+            ("b", "Referred-By"),
+            ("o", "Event"),
+            ("r", "Refer-To"),
+            ("u", "Allow-Events"),
             ("i", "Call-ID"),
             ("m", "Contact"),
             ("e", "Content-Encoding"),

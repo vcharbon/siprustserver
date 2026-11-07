@@ -144,7 +144,8 @@ pub fn close_rejected_invite_round(call: &mut Call, leg_id: &str, branch: &str) 
                 None => None,
             };
             let taken = record.invite.as_ref().is_some_and(InviteExchange::taken);
-            if !taken && sent_branch == Some(branch) {
+            // A branch compares ignoring case (RFC 3261 §7.3.1).
+            if !taken && sent_branch.is_some_and(|b| b.eq_ignore_ascii_case(branch)) {
                 d.sent_invite = None;
             }
         }

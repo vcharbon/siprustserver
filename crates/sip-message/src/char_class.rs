@@ -101,6 +101,17 @@ pub fn is_utf8_nonascii(b: u8) -> bool {
     b >= 0x80
 }
 
+/// What a refusal of `text` adds when `text` holds non-ASCII: UTF-8 stands
+/// only where the grammar takes `UTF8-NONASCII` (ADR-0053 §3), and a reader of
+/// an ASCII class meeting it says so.
+pub fn utf8_note(text: &str) -> &'static str {
+    if text.is_ascii() {
+        ""
+    } else {
+        ", UTF-8 where the grammar takes ASCII alone"
+    }
+}
+
 /// Whether `text` is one or more bytes of `class`, an `escaped` triplet
 /// (`"%" HEXDIG HEXDIG`) standing for any byte where `escapes` is true.
 pub fn is_run_of(text: &str, class: fn(u8) -> bool, escapes: bool) -> bool {

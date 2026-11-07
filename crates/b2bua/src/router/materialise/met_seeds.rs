@@ -55,5 +55,6 @@ pub(in crate::router) fn dialled_invite_seeds(
 
 /// Whether `call` holds a leg whose dialling INVITE left on `branch`.
 fn dials_on(call: &Call, branch: &str) -> bool {
-    call.b_legs.iter().filter_map(|leg| leg.dialled_sent()).any(|sent| sent.branch == branch)
+    let mut dialled = call.b_legs.iter().filter_map(|leg| leg.dialled_sent());
+    dialled.any(|sent| sip_message::header::same_branch(&sent.branch, branch))
 }

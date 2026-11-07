@@ -89,7 +89,8 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
 
     /// The single logical value a reader sees when the message carries several
     /// lines of this header. Set-like headers union; everything else is the
-    /// first line, which is the value RFC 3261 gives meaning to.
+    /// first line. Ingress refuses a second line of a single-valued header
+    /// (`header::SINGLE_VALUED`), so only a stored image or a draft holds one.
     fn combine(values: Vec<Self>) -> Option<Self> {
         values.into_iter().next()
     }

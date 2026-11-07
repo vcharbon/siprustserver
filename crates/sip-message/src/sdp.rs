@@ -21,7 +21,7 @@ pub(crate) fn split_lines(text: &str) -> Vec<&str> {
 /// A leading integer: optional sign, leading digits, stop at the first
 /// non-digit; `None` when no digits are present.
 fn leading_integer(s: &str) -> Option<i64> {
-    let s = s.trim_start();
+    let s = crate::whitespace::trim_start(s);
     let (neg, unsigned) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, s.strip_prefix('+').unwrap_or(s)),
@@ -40,9 +40,9 @@ fn line_with<'a>(lines: &[&'a str], prefix: &str) -> Option<(&'a str, &'a str)> 
     lines.iter().find_map(|l| l.strip_prefix(prefix).map(|value| (*l, value)))
 }
 
-/// Split a value on runs of whitespace, dropping empties.
+/// Split a value on runs of SP and HTAB, dropping empties.
 fn ws_tokens(s: &str) -> Vec<&str> {
-    s.split_whitespace().collect()
+    crate::whitespace::split(s).collect()
 }
 
 // ===========================================================================
@@ -221,7 +221,7 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
         if let Some(raw) = line.strip_prefix("a=ptime:") {
             // Digit string with a non-zero digit — positive without an integer
             // width the value would have to fit.
-            let raw = raw.trim();
+            let raw = crate::whitespace::trim(raw);
             let positive_integer = !raw.is_empty()
                 && raw.bytes().all(|b| b.is_ascii_digit())
                 && raw.bytes().any(|b| b != b'0');
@@ -327,7 +327,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("a=rtpmap:") {
-            if let Some((pt, _)) = rest.trim().split_once(' ') {
+            if let Some((pt, _)) = crate::whitespace::trim(rest).split_once(' ') {
                 if let Some(pt) = leading_integer(pt) {
                     if allowed.contains(&pt) {
                         rtpmaps.push((*line).to_string());
@@ -335,7 +335,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("a=fmtp:") {
-            if let Some((pt, _)) = rest.trim().split_once(' ') {
+            if let Some((pt, _)) = crate::whitespace::trim(rest).split_once(' ') {
                 if let Some(pt) = leading_integer(pt) {
                     if allowed.contains(&pt) {
                         fmtp.push((*line).to_string());

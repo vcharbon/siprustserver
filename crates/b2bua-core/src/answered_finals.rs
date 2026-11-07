@@ -36,7 +36,9 @@ pub fn retain(mut result: HandlerResult, now_ms: i64) -> HandlerResult {
             eff.destination.clone(),
             Repeated::response(method.as_str(), resp.status()),
         );
-        call.answered.retain(|a| !(a.branch == branch && a.method == method.as_str()));
+        call.answered.retain(|a| {
+            !(sip_message::header::same_branch(&a.branch, branch) && a.method == method.as_str())
+        });
         call.answered.push(AnsweredRequest::new(method.as_str(), branch, retained, now_ms));
     }
     result

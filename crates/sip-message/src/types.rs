@@ -8,7 +8,7 @@
 //!
 //! What requests and responses share is written once in [`MessageCore`]:
 //! the ordered header list, the typed [`CoreHeaders`] the parser validated, the
-//! body, and the datagram image every span points into. Only the start line and
+//! body, and the datagram image. Only the start line and
 //! the per-direction cardinality rules live on the outer types.
 //!
 //! The refined views of ADR-0003 are unchanged in spirit: [`InDialogRequest`],
@@ -321,7 +321,10 @@ impl SipMessage {
         &self.core().body
     }
 
-    /// The datagram this message is.
+    /// The datagram this message is. On a parsed message it is the bytes that
+    /// arrived, kept as they were; what the stack sends of the message is
+    /// rendered from its lines, so a surrogate pair the bytes wrote in CESU-8
+    /// leaves in UTF-8 (ADR-0053 §3).
     pub fn image(&self) -> &Bytes {
         &self.core().image
     }

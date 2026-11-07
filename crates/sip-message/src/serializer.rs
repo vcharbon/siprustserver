@@ -62,7 +62,9 @@ fn finish(mut out: Vec<u8>, headers: &[SipHeader], body: &[u8]) -> Vec<u8> {
     let cl = headers.iter().enumerate().find(|(_, h)| is_content_length(h));
     let cl_index = cl.map(|(i, _)| i);
     let declared_ok = match cl {
-        Some((_, h)) => h.value.trim().parse::<usize>().ok() == Some(actual_length),
+        Some((_, h)) => {
+            crate::whitespace::trim(&h.value).parse::<usize>().ok() == Some(actual_length)
+        }
         None => actual_length == 0,
     };
 

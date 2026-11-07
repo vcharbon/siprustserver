@@ -78,6 +78,8 @@ pub trait TokenParamsKind: HeaderKind {
     const REQUIRED: &'static [&'static str] = &[];
     /// The grammar admits an empty line (RFC 3261 §25.1 `Accept`).
     const EMPTY_LINE_READS: bool = false;
+    /// The leading token compares byte by byte, not ignoring case.
+    const EXACT: bool = false;
 }
 
 /// A header whose value is a single number, bounded by the range its own
@@ -254,7 +256,12 @@ impl TokenKind for Allow {
     const MAY_BE_EMPTY: bool = true;
 }
 
-capability! { TokenParamsKind: Event, SubscriptionState, ContentDisposition }
+capability! { TokenParamsKind: SubscriptionState, ContentDisposition }
+
+/// RFC 6665 §8.2.1: the event package compares byte by byte.
+impl TokenParamsKind for Event {
+    const EXACT: bool = true;
+}
 
 impl TokenParamsKind for Accept {
     const LEADING: Leading = Leading::MediaType;

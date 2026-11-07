@@ -83,8 +83,8 @@ crate::registry::rules! {
     CancelCseqMethod = "cancel-cseq-method";
 }
 
-/// The RFC 3261 §8.1.1.7 magic cookie every `branch` begins with.
-const MAGIC_COOKIE: &str = "z9hG4bK";
+/// The magic cookie every `branch` begins with (RFC 3261 §8.1.1.7), in any case.
+const MAGIC_COOKIE: &str = sip_message::header::BRANCH_MAGIC_COOKIE;
 
 /// The start-line half an occasion keys on: the request method, or the response
 /// status as decimal.
@@ -118,7 +118,7 @@ impl Obligation for BranchPrefix {
                 continue;
             };
             match sniff::via_branch(head) {
-                Some(branch) if branch.starts_with(MAGIC_COOKIE) => {
+                Some(branch) if sip_message::header::has_magic_cookie(&branch) => {
                     out.push(finding(Decision::Compliant))
                 }
                 Some(branch) => {

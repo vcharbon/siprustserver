@@ -23,7 +23,8 @@ compatibility rules admit, on purpose:
   any other off-grammar shape, and a deployment may name an exemption.
 
 - **The magic cookie.** The topmost Via's branch starts with `z9hG4bK`
-  (§8.1.1.7) and carries an identifier after it. A scope choice: RFC 2543
+  (§8.1.1.7), in any case like the rest of the branch (§7.3.1), and carries an
+  identifier after it. A scope choice: RFC 2543
   elements are not served, departing from the backward-compatible matching of
   §17.2.3, so RFC 4475 §3.1.1.1, §3.1.1.7 and §3.4.1 are refused, and so is
   §3.2.1's bare cookie.
@@ -44,6 +45,10 @@ compatibility rules admit, on purpose:
   one parameter twice with one value reads as one copy, and the stack's own
   output carries one copy; ingress refuses it unless an exemption names that
   parameter of that header. A repeat with a different value is always refused.
+- **One line of a single-valued header.** A header the stack lists as
+  single-valued (`header::SINGLE_VALUED`), from its RFC grammar with errata,
+  appears once (§7.3.1), compact forms counted; a second line refuses the
+  message. A header the stack does not list may repeat.
 - **Readable credentials.** An Authorization or Proxy-Authorization that
   `Credentials::parse` does not read is refused with its message, whatever its
   scheme (§22.4).

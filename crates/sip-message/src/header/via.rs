@@ -20,6 +20,29 @@ use crate::parser::custom::structured_headers::top_level_comma_entries;
 /// with.
 pub const BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
 
+/// Whether `branch` starts with the magic cookie, compared ignoring ASCII case
+/// as every branch is (RFC 3261 §7.3.1: `via-branch` states no exception).
+pub fn has_magic_cookie(branch: &str) -> bool {
+    branch
+        .get(..BRANCH_MAGIC_COOKIE.len())
+        .is_some_and(|lead| lead.eq_ignore_ascii_case(BRANCH_MAGIC_COOKIE))
+}
+
+/// Whether two branches name one transaction: compared ignoring ASCII case
+/// (RFC 3261 §7.3.1, §17.1.3, §17.2.3).
+pub fn same_branch(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// Feeds `branch` to `state` as [`same_branch`] compares it, so two branches
+/// that are one hash alike.
+pub fn hash_branch<H: std::hash::Hasher>(branch: &str, state: &mut H) {
+    for b in branch.bytes() {
+        state.write_u8(b.to_ascii_lowercase());
+    }
+    state.write_u8(0xff);
+}
+
 /// The parameter names a router writes, spelled once so stamping a hop copies
 /// no name text.
 const BRANCH: SipStr = SipStr::from_static("branch");
@@ -111,9 +134,9 @@ impl Via {
         self.params.value("branch")
     }
 
-    /// Whether the branch carries the RFC 3261 magic cookie.
+    /// Whether the branch carries the RFC 3261 magic cookie, in any case.
     pub fn is_rfc3261_branch(&self) -> bool {
-        self.branch().is_some_and(|b| b.starts_with(BRANCH_MAGIC_COOKIE))
+        self.branch().is_some_and(has_magic_cookie)
     }
 
     /// The source address the previous hop was seen from (RFC 3261 §18.2.1).

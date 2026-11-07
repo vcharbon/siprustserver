@@ -85,7 +85,9 @@ pub fn record_with_branch(
     }
     let leg = find_leg(call, leg_id)?;
     leg.dialogs.iter().find_map(|d| {
-        d.requests.iter().find(|r| r.branch() == Some(branch)).map(|r| (holder_of(d), r.clone()))
+        // A branch compares ignoring case (RFC 3261 §7.3.1).
+        let named = |r: &&RequestRecord| r.branch().is_some_and(|b| b.eq_ignore_ascii_case(branch));
+        d.requests.iter().find(named).map(|r| (holder_of(d), r.clone()))
     })
 }
 

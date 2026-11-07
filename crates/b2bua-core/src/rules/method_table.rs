@@ -97,9 +97,9 @@ pub fn usage_of(req: &SipRequest) -> DialogUsage {
     }
 }
 
-/// The subscription an `Event` names (RFC 6665 §4.5): its package,
-/// lower-case, and its `id` parameter.
+/// The subscription an `Event` names (RFC 6665 §4.5): its package and its
+/// `id` parameter, as written, both compared byte by byte (§8.2.1).
 pub fn subscription_key(event: &Event) -> (String, Option<String>) {
     let id = event.param("id").and_then(|v| v.as_str()).map(str::to_string);
-    (event.token().to_ascii_lowercase(), id)
+    (event.token().to_string(), id)
 }

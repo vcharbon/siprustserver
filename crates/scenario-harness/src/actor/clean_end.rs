@@ -22,10 +22,7 @@ pub(super) fn ends_own_subscription(st: &ActorState<'_>, notify: &SipRequest) ->
         .header::<SubscriptionState>()
         .and_then(Result::ok)
         .is_some_and(|s| s.token().eq_ignore_ascii_case("terminated"));
-    let refer = notify
-        .header::<Event>()
-        .and_then(Result::ok)
-        .is_some_and(|e| e.token().eq_ignore_ascii_case("refer"));
+    let refer = notify.header::<Event>().and_then(Result::ok).is_some_and(|e| e.is("refer"));
     terminated && refer && st.obs.with_snapshot(|s| s.leg(st.role).subflow(SUBFLOW_REFER).is_some())
 }
 

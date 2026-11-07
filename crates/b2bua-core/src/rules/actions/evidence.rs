@@ -325,5 +325,9 @@ impl ActionExecutor<'_> {
 /// own (§13.2.2.4).
 fn acks_a_refusal(via: &Via, ack: &SipRequest) -> bool {
     let top = ack.top_via();
-    via.is_rfc3261_branch() && top.branch() == via.branch() && top.sent_by() == via.sent_by()
+    let same = match (top.branch(), via.branch()) {
+        (Some(a), Some(b)) => sip_message::header::same_branch(a, b),
+        (a, b) => a == b,
+    };
+    via.is_rfc3261_branch() && same && top.sent_by() == via.sent_by()
 }

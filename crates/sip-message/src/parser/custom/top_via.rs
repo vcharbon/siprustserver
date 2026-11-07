@@ -4,11 +4,8 @@
 
 use super::extract_fields::is_valid_port;
 use crate::error::SipParseError;
-use crate::header::Via;
+use crate::header::{has_magic_cookie, Via, BRANCH_MAGIC_COOKIE};
 use crate::parser::SipParserLimits;
-
-/// RFC 3261 §8.1.1.7 — the top-Via branch starts with this magic cookie.
-const VIA_BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
 
 /// Whether a Via port is out of range: beyond 65535 on any Via, 0 on the
 /// topmost one.
@@ -18,16 +15,12 @@ pub(super) fn port_out_of_range(port: u16, top: bool) -> bool {
 
 /// The refusal of a topmost Via whose branch lacks the magic cookie, or is
 /// the cookie alone: a branch is the cookie followed by the transaction's
-/// identifier (RFC 3261 §8.1.1.7; RFC 4475 §3.2.1).
+/// identifier (RFC 3261 §8.1.1.7; RFC 4475 §3.2.1). The cookie compares
+/// ignoring ASCII case, as the whole branch does (§7.3.1).
 pub(super) fn cookie_refusal(v: &Via) -> Option<SipParseError> {
     let shown = match v.branch() {
-        Some(b)
-            if b.len() > VIA_BRANCH_MAGIC_COOKIE.len()
-                && b.starts_with(VIA_BRANCH_MAGIC_COOKIE) =>
-        {
-            return None
-        }
-        Some(b) if b == VIA_BRANCH_MAGIC_COOKIE => {
+        Some(b) if b.len() > BRANCH_MAGIC_COOKIE.len() && has_magic_cookie(b) => return None,
+        Some(b) if has_magic_cookie(b) => {
             return Some(SipParseError::new(
                 "Top Via branch is the magic cookie alone, no transaction identifier",
             ))
@@ -36,7 +29,7 @@ pub(super) fn cookie_refusal(v: &Via) -> Option<SipParseError> {
         Some(b) => format!("\"{b}\""),
     };
     Some(SipParseError::new(format!(
-        "Top Via branch missing magic cookie \"{VIA_BRANCH_MAGIC_COOKIE}\": {shown}"
+        "Top Via branch missing magic cookie \"{BRANCH_MAGIC_COOKIE}\": {shown}"
     )))
 }
 

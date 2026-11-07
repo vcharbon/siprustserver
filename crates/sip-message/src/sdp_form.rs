@@ -101,7 +101,7 @@ fn media_in_form<'a>(section: &'a str, session_direction: &'a str) -> Vec<&'a st
 
 /// The format a `prefix` attribute (`a=rtpmap:` / `a=fmtp:`) names.
 fn format_of<'a>(attribute: &'a str, prefix: &str) -> Option<&'a str> {
-    attribute.strip_prefix(prefix)?.split_whitespace().next()
+    crate::whitespace::split(attribute.strip_prefix(prefix)?).next()
 }
 
 fn is_direction(line: &str) -> bool {

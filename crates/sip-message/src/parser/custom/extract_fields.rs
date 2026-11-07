@@ -153,7 +153,8 @@ pub(super) fn extract_identity(
     };
     if wire && !is_call_id(&call_id) {
         return Err(SipParseError::new(format!(
-            "Call-ID is not word [\"@\" word] (RFC 3261 §25.1): \"{call_id}\""
+            "Call-ID is not word [\"@\" word] (RFC 3261 §25.1){}: \"{call_id}\"",
+            crate::char_class::utf8_note(&call_id)
         )));
     }
 
@@ -361,9 +362,9 @@ pub fn extract_request_fields(
     // (RFC 3261 §7.1, §8.1.1.5).
     if let Some(method) = method {
         if let Some(cseq_val) = idx.cseq.first {
-            let trimmed = cseq_val.trim();
+            let trimmed = crate::whitespace::trim(cseq_val);
             let cseq_method = match trimmed.split_once([' ', '\t']) {
-                Some((_, method)) => method.trim(),
+                Some((_, method)) => crate::whitespace::trim(method),
                 None => "",
             };
             if !cseq_method.is_empty()

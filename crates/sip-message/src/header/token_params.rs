@@ -34,8 +34,15 @@ impl<K: TokenParamsKind> TokenParamsHeader<K> {
         self.token.as_str()
     }
 
+    /// Whether the leading token is `token`, compared as its grammar compares
+    /// it: byte by byte where [`TokenParamsKind::EXACT`] says so (an event
+    /// package, RFC 6665 §8.2.1), ignoring ASCII case otherwise.
     pub fn is(&self, token: &str) -> bool {
-        self.token.eq_ignore_ascii_case(token)
+        if K::EXACT {
+            self.token.as_str() == token
+        } else {
+            self.token.eq_ignore_ascii_case(token)
+        }
     }
 
     pub fn params(&self) -> &Params {

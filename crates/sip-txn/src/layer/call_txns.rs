@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use super::client_key::ClientSet;
 use super::key::ServerTxnKey;
 
 /// The live transactions of one call, by role (`Owner::txn_index`).
@@ -10,9 +11,9 @@ use super::key::ServerTxnKey;
 /// books, yet the call's release still orphans or relinquishes them.
 #[derive(Default)]
 pub(super) struct CallTxns {
-    pub(super) client: HashSet<String>,
+    pub(super) client: ClientSet,
     pub(super) server: HashSet<ServerTxnKey>,
-    pub(super) accepted: HashSet<String>,
+    pub(super) accepted: ClientSet,
 }
 
 impl CallTxns {
@@ -28,7 +29,7 @@ impl CallTxns {
     }
 
     /// Every client transaction of the call, Accepted ones included.
-    pub(super) fn every_client(&self) -> impl Iterator<Item = &String> {
-        self.client.iter().chain(&self.accepted)
+    pub(super) fn every_client(&self) -> impl Iterator<Item = &str> {
+        self.client.iter().chain(self.accepted.iter())
     }
 }

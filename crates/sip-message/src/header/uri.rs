@@ -138,7 +138,7 @@ impl Uri {
     /// colon alone does not say so — `anonymous@10.0.0.1:5060` carries a PORT
     /// colon, and reading it as a scheme mints a name-addr holding no URI.
     pub fn value_has_scheme(value: &str) -> bool {
-        let bytes = value.trim().as_bytes();
+        let bytes = crate::whitespace::trim(value).as_bytes();
         let Some(&first) = bytes.first() else { return false };
         if !first.is_ascii_alphabetic() {
             return false;

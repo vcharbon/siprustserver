@@ -17,9 +17,11 @@ pub(crate) const EMERGENCY_RPH_TOKENS: [&str; 3] = ["esnet.0", "wps.0", "q735.0"
 /// emergency tokens.
 pub fn is_emergency_request(req: &SipRequest) -> bool {
     req.raw(HeaderName::ResourcePriority).any(|value| {
-        value
-            .split(',')
-            .any(|rv| EMERGENCY_RPH_TOKENS.iter().any(|tok| rv.trim().eq_ignore_ascii_case(tok)))
+        value.split(',').any(|rv| {
+            EMERGENCY_RPH_TOKENS
+                .iter()
+                .any(|tok| crate::whitespace::trim(rv).eq_ignore_ascii_case(tok))
+        })
     })
 }
 

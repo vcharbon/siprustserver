@@ -21,15 +21,9 @@ pub enum Restatement {
 }
 
 /// Headers whose value the transaction, a negotiation, an authentication
-/// exchange, a dialog reference or the body binds, with the compact forms
-/// RFC 3261 §7.3.3, RFC 3265 and RFC 3515 / RFC 4028 give them.
+/// exchange, a dialog reference or the body binds. A compact form names its
+/// header through the one compact-form table.
 const BOUND: &[&str] = &[
-    "c",
-    "e",
-    "o",
-    "r",
-    "u",
-    "x",
     "Content-Language",
     "Content-ID",
     "Proxy-Require",
@@ -57,8 +51,8 @@ const BOUND: &[&str] = &[
     "Min-SE",
 ];
 
-/// Capability advertisements a mint narrows (`k` is `Supported`'s compact form).
-const ADVERTISED: &[&str] = &["Allow", "Supported", "k", "Accept"];
+/// Capability advertisements a mint narrows.
+const ADVERTISED: &[&str] = &["Allow", "Supported", "Accept"];
 
 impl HeaderName {
     /// How far the header named `name` (any casing, compact or long form) may

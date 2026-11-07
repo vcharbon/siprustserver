@@ -54,7 +54,10 @@ pub fn parse_start_line(
         return Err(SipParseError::new("Multiple SP in start line"));
     }
 
-    if span_text(image, &first_token)?.starts_with("SIP/") {
+    // A status line opens with the SIP-Version, case-insensitive (§7.1); no
+    // method holds the `/`, which is no token character.
+    let first = span_text(image, &first_token)?;
+    if first.get(..4).is_some_and(|lead| lead.eq_ignore_ascii_case("SIP/")) {
         parse_status_line(s, image, first_token).map(StartLine::Status)
     } else {
         parse_request_line(s, image, first_token, limits).map(StartLine::Request)
@@ -98,10 +101,10 @@ fn parse_request_line(
     // SIP-Version: rest until CRLF, no trailing whitespace (3.1.2.10).
     let version = read_until_crlf(s);
     let version_text = span_text(image, &version)?;
-    if version_text != version_text.trim_end() {
+    if version_text != crate::whitespace::trim_end(version_text) {
         return Err(SipParseError::new("Trailing whitespace in request line"));
     }
-    if version_text != "SIP/2.0" {
+    if !is_sip_2_0(version_text) {
         return Err(SipParseError::new(format!("Unsupported SIP version: \"{version_text}\"")));
     }
 
@@ -116,7 +119,7 @@ fn parse_status_line(
     version: Span,
 ) -> Result<StatusLine, SipParseError> {
     let version_text = span_text(image, &version)?;
-    if version_text != "SIP/2.0" {
+    if !is_sip_2_0(version_text) {
         return Err(SipParseError::new(format!("Unsupported SIP version: \"{version_text}\"")));
     }
 
@@ -147,6 +150,11 @@ fn parse_status_line(
     s.expect_crlf()?;
 
     Ok(StatusLine { version, status, reason })
+}
+
+/// Whether `version` is SIP/2.0, compared ignoring ASCII case (RFC 3261 §7.1).
+pub(crate) fn is_sip_2_0(version: &str) -> bool {
+    version.eq_ignore_ascii_case(crate::draft::SIP_VERSION)
 }
 
 /// Read bytes up to SP, or up to the line end (an empty reason phrase),

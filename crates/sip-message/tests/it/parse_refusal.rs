@@ -156,12 +156,24 @@ fn a_bad_request_line_leaves_no_partial() {
     assert!(err.partial().is_none(), "{err:?}");
 }
 
-/// A line with no colon ends neither the split nor the reading of the five.
+/// A value breaking its grammar ends neither the split nor the reading of the
+/// five.
 #[test]
 fn the_split_reads_past_a_line_breaking_the_grammar() {
-    let err = refusal(&invite_with(&["Bad Header: x"]));
-    assert!(err.reason.starts_with("Expected byte 0x3a"), "{}", err.reason);
+    let err = refusal(&invite_with(&["Subject: a\u{1}b"]));
+    assert!(err.reason.contains("control byte 0x01"), "{}", err.reason);
     assert!(err.partial().is_some(), "the five after the bad line still read: {err:?}");
+}
+
+/// A name that stops short of its colon did not read (ADR-0054 §2): what was
+/// read may be a part of any name, one of the five included, so no partial.
+#[test]
+fn a_line_with_no_colon_after_its_name_leaves_no_partial() {
+    for line in ["Bad Header: x", "Vi a: SIP/2.0/UDP 192.0.2.99;branch=z9hG4bK-real-top"] {
+        let err = refusal(&invite_with(&[line]));
+        assert!(err.reason.starts_with("Expected byte 0x3a"), "{}", err.reason);
+        assert!(err.partial().is_none(), "{line}: {err:?}");
+    }
 }
 
 /// A line whose name does not read may have been one of the five: no partial.

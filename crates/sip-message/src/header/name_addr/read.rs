@@ -69,7 +69,7 @@ fn display_part(value: &SipStr, strict: bool) -> Result<(Option<SipStr>, Option<
 }
 
 pub(super) fn read_strict(raw: &SipStr, grammar: &AddrGrammar) -> Result<AddrRead, SipParseError> {
-    let lead = raw.as_str().len() - raw.as_str().trim_start().len();
+    let lead = raw.as_str().len() - crate::whitespace::trim_start(raw.as_str()).len();
     let value = raw.trimmed();
     let bytes = value.as_bytes();
     let (display, open) = display_part(&value, true).map_err(SipParseError::new)?;
@@ -126,16 +126,16 @@ fn bare_uri_span(
     if grammar.header_params && spec.contains([',', '?']) {
         return Err(SipParseError::new(format!(
             "bare addr-spec with `,` or `?`; name-addr \"<uri>\" form required (RFC 3261 §20): {:?}",
-            spec.trim_end()
+            crate::whitespace::trim_end(spec)
         )));
     }
-    Ok((0..spec.trim_end().len(), semi))
+    Ok((0..crate::whitespace::trim_end(spec).len(), semi))
 }
 
 /// The [`AddrGrammar::bare_user_semicolon`] reading of a bare value, `None`
 /// when it does not read that way either.
 pub(super) fn read_bare_user_semicolon(raw: &SipStr, grammar: &AddrGrammar) -> Option<AddrRead> {
-    let lead = raw.as_str().len() - raw.as_str().trim_start().len();
+    let lead = raw.as_str().len() - crate::whitespace::trim_start(raw.as_str()).len();
     let value = raw.trimmed();
     let bytes = value.as_bytes();
     if byte_at(bytes, 0) == Some(b'"') || index_of(bytes, b'<', 0).is_some() {
@@ -166,7 +166,7 @@ fn unquoted_at(bytes: &[u8]) -> Option<usize> {
 }
 
 pub(super) fn read_lenient(raw: &SipStr, grammar: &AddrGrammar) -> AddrRead {
-    let lead = raw.as_str().len() - raw.as_str().trim_start().len();
+    let lead = raw.as_str().len() - crate::whitespace::trim_start(raw.as_str()).len();
     let value = raw.trimmed();
     let bytes = value.as_bytes();
     let (display, open) = display_part(&value, false).unwrap_or((None, None));
@@ -178,7 +178,7 @@ pub(super) fn read_lenient(raw: &SipStr, grammar: &AddrGrammar) -> AddrRead {
         Some(open) => (open..bytes.len(), bytes.len()),
         None => {
             let semi = index_of(bytes, b';', 0).unwrap_or(bytes.len());
-            (0..clamped(value.as_str(), 0, semi).trim_end().len(), semi)
+            (0..crate::whitespace::trim_end(clamped(value.as_str(), 0, semi)).len(), semi)
         }
     };
     let text = sub_trimmed(&value, uri_span.start, uri_span.end);

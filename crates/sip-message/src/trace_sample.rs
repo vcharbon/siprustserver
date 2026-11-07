@@ -37,7 +37,7 @@ pub fn trace_sample(req: &SipRequest) -> TraceSample {
     else {
         return TraceSample::Absent;
     };
-    match raw.trim().parse::<f64>() {
+    match crate::whitespace::trim(raw).parse::<f64>() {
         Ok(rate) if rate.is_finite() && (0.0..=1.0).contains(&rate) => TraceSample::Rate(rate),
         _ => TraceSample::Malformed,
     }

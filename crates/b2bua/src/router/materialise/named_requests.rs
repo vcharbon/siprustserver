@@ -2,6 +2,7 @@
 //! of a request meets, read off the record alone.
 
 use call::{Call, RequestRecord};
+use sip_message::header::same_branch;
 
 use super::seeds::{invite_record, pending_via};
 
@@ -27,7 +28,7 @@ pub(in crate::router) fn received_record<'a>(
     }
     call::helpers::every_record(call)
         .filter(|(_, _, r)| !r.is_own() && !invite_record(r))
-        .find(|(_, _, r)| pending_via(r).is_some_and(|v| v.branch() == Some(branch)))
+        .find(|(_, _, r)| names(r, branch))
         .map(|(_, _, r)| r)
 }
 
@@ -44,20 +45,24 @@ pub(in crate::router) fn names_answered_branch(
         && call
             .answered
             .iter()
-            .any(|a| a.branch == branch && a.method == method && a.completed_at(now_ms))
+            .any(|a| same_branch(&a.branch, branch) && a.method == method && a.completed_at(now_ms))
 }
 
 /// `call` without the relay a copy of its originator's request on `branch`
 /// supersedes: the relay's final returns to another node, so the copy is
 /// relayed afresh and that relay settles nothing here.
 pub(in crate::router) fn drop_superseded(mut call: Call, branch: &str) -> Call {
-    let superseded = |r: &RequestRecord| {
-        r.is_relay() && pending_via(r).is_some_and(|v| v.branch() == Some(branch))
-    };
+    let superseded = |r: &RequestRecord| r.is_relay() && names(r, branch);
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         for d in leg.dialogs.iter_mut() {
             d.requests.retain(|r| !superseded(r));
         }
     }
     call
+}
+
+/// Whether the request `r` records arrived on `branch`, compared ignoring case
+/// (RFC 3261 §7.3.1).
+fn names(r: &RequestRecord, branch: &str) -> bool {
+    pending_via(r).is_some_and(|v| v.branch().is_some_and(|b| same_branch(b, branch)))
 }

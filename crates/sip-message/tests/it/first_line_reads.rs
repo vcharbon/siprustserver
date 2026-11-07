@@ -1,6 +1,7 @@
-//! A header RFC 3261 §7.3.1 allows once is read from its first line: a later
-//! line of it, malformed or not, takes no part in the value a reader sees, on
-//! a parsed message and on a draft alike. Reading every value still sees it.
+//! A header RFC 3261 §7.3.1 allows once appears once at ingress, which refuses
+//! a second line of it. A stored image or a draft holding a second line reads
+//! the first: the later line, malformed or not, takes no part in the value a
+//! reader sees. Reading every value still sees it.
 
 use sip_message::draft::RequestDraft;
 use sip_message::header::{self, CSeq, CallId, Expires, HeaderValue, MaxForwards, To, Uri, Via};
@@ -19,8 +20,9 @@ Contact: <sip:alice@192.0.2.5>\r\n\
 Event: presence\r\n\
 Event: ;id=1\r\n\
 Content-Length: 0\r\n\r\n";
-    // Ingress refuses the malformed line; a stored image holding one reads.
-    assert!(CustomParser::new().parse(raw.as_bytes()).is_err(), "ingress reads every line");
+    // Ingress refuses the second line; a stored image holding one reads.
+    let refused = CustomParser::new().parse(raw.as_bytes()).expect_err("ingress refuses it");
+    assert!(refused.reason.starts_with("Multiple Event headers"), "{}", refused.reason);
     let SipMessage::Request(request) = read_stored(raw.as_bytes()).unwrap() else {
         panic!("a request")
     };

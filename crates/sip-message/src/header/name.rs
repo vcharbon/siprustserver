@@ -235,6 +235,11 @@ mod tests {
         assert_eq!(HeaderName::known("c"), Some(HeaderName::ContentType));
         assert_eq!(HeaderName::known("e"), Some(HeaderName::ContentEncoding));
         assert_eq!(HeaderName::known("s"), Some(HeaderName::Subject));
+        assert_eq!(HeaderName::known("o"), Some(HeaderName::Event));
+        assert_eq!(HeaderName::known("U"), Some(HeaderName::AllowEvents));
+        assert_eq!(HeaderName::known("r"), Some(HeaderName::ReferTo));
+        assert_eq!(HeaderName::known("b"), Some(HeaderName::ReferredBy));
+        assert_eq!(HeaderName::known("x"), Some(HeaderName::SessionExpires));
     }
 
     #[test]

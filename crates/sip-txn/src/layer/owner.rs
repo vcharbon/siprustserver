@@ -22,6 +22,7 @@ use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
 use super::call_txns::CallTxns;
+use super::client_key::ClientMap;
 use super::event_age::EventAges;
 use super::handle::TransactionConfig;
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
@@ -38,7 +39,7 @@ pub(super) struct Owner {
     /// footprint after a drain scale with the live count only through 32-byte
     /// buckets, and a txn's own memory goes back to the allocator when it is
     /// deleted.
-    pub(super) clients: HashMap<String, Box<Transaction>>,
+    pub(super) clients: ClientMap<Box<Transaction>>,
     /// The server transactions, by the §17.2.3 identity of the request that
     /// opened them: top-Via branch, sent-by and method ([`ServerTxnKey`],
     /// looked up by a [`ServerTxnId`] borrowed from the message). Only a
@@ -152,7 +153,7 @@ impl Owner {
             );
         }
         Self {
-            clients: HashMap::new(),
+            clients: ClientMap::new(),
             servers: HashMap::new(),
             timers: DelayQueue::new(),
             parser,
@@ -462,7 +463,7 @@ impl Owner {
     pub(super) fn sweep(&mut self) {
         self.reap_overdue();
         self.forget_expired_uas_tags();
-        shrink_idle(&mut self.clients);
+        self.clients.shrink_idle();
         shrink_idle(&mut self.servers);
         shrink_idle(&mut self.txn_index);
         // `shrink_to_fit` only trims the slab's free tail and never moves an

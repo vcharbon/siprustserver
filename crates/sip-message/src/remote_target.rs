@@ -55,7 +55,8 @@ fn params_to_map(params: crate::header::Params) -> BTreeMap<String, String> {
 /// value states, never refused.
 fn read_element(elem: &str) -> NameAddr {
     let grammar = AddrGrammar::of(AddrForm::NameAddrOrSpec, UriRole::Target);
-    let read = NameAddr::read(&SipStr::owned(elem.trim()), &grammar, Reading::Lenient);
+    let read =
+        NameAddr::read(&SipStr::owned(crate::whitespace::trim(elem)), &grammar, Reading::Lenient);
     read.map_or_else(|_| NameAddr::new(Uri::opaque(SipStr::EMPTY)), |read| read.addr)
 }
 
@@ -127,7 +128,7 @@ fn rewritten_element(elem: &str, host: &str, port: u16) -> Option<String> {
 pub fn rewrite_hostport(value: &str, host: &str, port: u16) -> String {
     split_top_level_commas(value)
         .into_iter()
-        .map(|e| rewrite_element_hostport(e.trim(), host, port))
+        .map(|e| rewrite_element_hostport(crate::whitespace::trim(e), host, port))
         .collect::<Vec<_>>()
         .join(", ")
 }

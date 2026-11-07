@@ -30,7 +30,7 @@ pub fn warn_agents(value: &str) -> Vec<&str> {
     crate::parser::custom::structured_headers::split_top_level_commas(value)
         .into_iter()
         .filter_map(|item| {
-            let mut words = item.split_ascii_whitespace();
+            let mut words = crate::whitespace::split(item);
             let code = words.next()?;
             let agent = words.next()?;
             (code.len() == 3 && code.bytes().all(|b| b.is_ascii_digit())).then_some(agent)

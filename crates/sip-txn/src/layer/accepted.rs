@@ -71,14 +71,14 @@ impl Owner {
             .accepted
             .iter()
             .find(|b| {
-                self.clients.get(b.as_str()).is_some_and(|t| {
+                self.clients.get(b).is_some_and(|t| {
                     t.state == TxnState::Accepted
                         && t.call_id == call_id
                         && t.from_tag == from_tag
                         && t.cseq == seq
                 })
             })
-            .cloned()
+            .map(str::to_string)
         else {
             return;
         };

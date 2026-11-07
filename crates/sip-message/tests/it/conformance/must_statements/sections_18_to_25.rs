@@ -198,7 +198,7 @@ pub(super) fn rows() -> Vec<Row> {
 /// ADR-0001's first-ingress bound: a party's new request at its first hop.
 pub(super) fn bounds() -> Vec<Row> {
     let line = |length: usize| format!("Subject: {}", "x".repeat(length - "Subject: ".len()));
-    let with_lines = |count: usize| (0..count).fold(options(), |t, _| t.add("Subject: a"));
+    let with_lines = |count: usize| (0..count).fold(options(), |t, _| t.add("X-Pad: a"));
     // The template's own lines, the start line and its Content-Length among them.
     let own = options().bytes().iter().filter(|b| **b == b'\n').count() - 1;
     let uri = |length: usize| {

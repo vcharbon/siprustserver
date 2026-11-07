@@ -49,6 +49,6 @@ mod tests {
         // Pinned: every proxy of a deployment, whatever its build, derives
         // this tag, so a change of derivation shows here before a rolling
         // upgrade stops absorbing the other proxies' ACKs.
-        assert_eq!(tag(b"0123456789abcdef-golden"), "b362222fb49239cb");
+        assert_eq!(tag(b"0123456789abcdef-golden"), "16bf91b42197364c");
     }
 }

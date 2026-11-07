@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
-use sip_message::header::{HeaderValue, BRANCH_MAGIC_COOKIE};
+use sip_message::header::{has_magic_cookie, HeaderValue, BRANCH_MAGIC_COOKIE};
 use sip_message::SipRequest;
 
 /// Domain tags keeping §16.11's two input sets in disjoint hash spaces.
@@ -18,16 +18,18 @@ const BRANCHLESS_VIA: &str = "v";
 pub(crate) fn stateless_branch(req: &SipRequest) -> String {
     let mut hasher = Sha256::new();
     let top = req.top_via();
-    match top.branch().filter(|b| b.starts_with(BRANCH_MAGIC_COOKIE)) {
+    match top.branch().filter(|b| has_magic_cookie(b)) {
         // The received sent-by, Call-ID, From tag and CSeq number ride beside
         // the received branch (the last three fed below): identical across a
         // request, its retransmissions, its CANCEL and its non-2xx ACK, so
         // §16.11's mapping holds — while one branch token from two senders
         // (two transactions, §17.2.3), or spent twice by one upstream across
-        // a restart (§8.1.1.7 violated), still maps to two branches.
+        // a restart (§8.1.1.7 violated), still maps to two branches. The
+        // branch is folded to lower case: one re-cased in transit is the
+        // same branch (§7.3.1), so it maps to the same forward.
         Some(received) => {
             field(&mut hasher, COOKIED_VIA);
-            field(&mut hasher, received);
+            field(&mut hasher, &received.to_ascii_lowercase());
             let _ = top.sent_by_ref().write_canonical(&mut HashText(&mut hasher));
             hasher.update([0u8]);
         }

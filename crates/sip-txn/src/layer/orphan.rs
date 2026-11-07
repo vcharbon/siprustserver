@@ -136,7 +136,7 @@ impl Owner {
         let (call_id, from_tag) = (req.call_id().as_str(), req.from().tag().unwrap_or_default());
         let seq = req.cseq().seq();
         for branch in txns.every_client() {
-            let Some(t) = self.clients.get_mut(branch.as_str()).filter(|t| {
+            let Some(t) = self.clients.get_mut(branch).filter(|t| {
                 t.kind == TxnKind::Invite && t.call_id == call_id && t.from_tag == from_tag
             }) else {
                 continue;
@@ -158,7 +158,7 @@ impl Owner {
         // O(k-branches) over just this call's live branches (the lockstep index),
         // not an O(total_txns) scan of the whole map.
         let branches: Vec<String> = match self.txn_index.get(call_ref) {
-            Some(txns) => txns.every_client().cloned().collect(),
+            Some(txns) => txns.every_client().map(str::to_string).collect(),
             None => return,
         };
         for branch in branches {

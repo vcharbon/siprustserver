@@ -11,7 +11,7 @@
 use std::fmt;
 
 use crate::char_class::is_token_char;
-use crate::control_bytes::{bare_control_byte, has_comments, is_control};
+use crate::control_bytes::{bare_control_byte, is_control, Escapes};
 use crate::header::HeaderName;
 
 /// Where a writer was asked to put text.
@@ -75,15 +75,15 @@ pub fn header_name(name: &str) -> Result<(), WriteRefusal> {
 /// A header value: no NUL, and no other control byte but HTAB outside a
 /// quoted-pair of a quoted-string.
 pub fn header_value(value: &str) -> Result<(), WriteRefusal> {
-    value_refusal(value, false).map_or(Ok(()), |reason| Err(refusal(Position::HeaderValue, reason)))
+    value_refusal(value, Escapes::of(None))
+        .map_or(Ok(()), |reason| Err(refusal(Position::HeaderValue, reason)))
 }
 
-/// One header line: [`header_name`] and [`header_value`], a comment of a
-/// header whose grammar has one carrying quoted-pairs too.
+/// One header line: [`header_name`], and its value holding a quoted-pair only
+/// in a quoted-string or comment its header's grammar has.
 pub fn header_line(name: &str, value: &str) -> Result<(), WriteRefusal> {
     header_name(name)?;
-    let comments = HeaderName::known(name).is_some_and(|known| has_comments(&known));
-    match value_refusal(value, comments) {
+    match value_refusal(value, Escapes::of(HeaderName::known(name).as_ref())) {
         Some(reason) => Err(refusal(Position::HeaderValue, format!("{name}: {reason}"))),
         None => Ok(()),
     }
@@ -108,19 +108,19 @@ pub fn quoted_text(text: &str) -> Result<(), WriteRefusal> {
 
 /// Why caller text cannot be a header value: a NUL, or a control byte outside
 /// a quoted-pair.
-fn value_refusal(value: &str, comments: bool) -> Option<String> {
+fn value_refusal(value: &str, escapes: Escapes) -> Option<String> {
     let at = value
         .bytes()
         .position(|b| b == 0)
-        .or_else(|| bare_control_byte(value.as_bytes(), comments))?;
+        .or_else(|| bare_control_byte(value.as_bytes(), escapes))?;
     Some(byte_reason(value, at))
 }
 
 /// Why a rendered header value cannot be written: a control byte outside a
 /// quoted-pair, CR and LF included. The check a freeze runs on every header
 /// line it renders, relayed ones too: a quoted-pair a peer sent passes.
-pub(crate) fn rendered_value(text: &[u8], comments: bool) -> Option<String> {
-    let at = bare_control_byte(text, comments)?;
+pub(crate) fn rendered_value(text: &[u8], escapes: Escapes) -> Option<String> {
+    let at = bare_control_byte(text, escapes)?;
     Some(byte_reason(&String::from_utf8_lossy(text), at))
 }
 
@@ -169,6 +169,13 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_pair_stands_only_where_the_header_quotes() {
+        assert!(header_line("X-Note", "\"a \\\x07 b\"").is_ok());
+        assert!(header_line("Organization", "\"a \\\x07 b\"").is_err());
+        assert!(header_line("Server", "\"a \\\x07 b\"").is_err());
+    }
+
+    #[test]
     fn a_line_refusal_names_the_header() {
         let e = header_line("X-A", "a\r\nb").expect_err("refused");
         assert_eq!(e.position, Position::HeaderValue);
@@ -178,10 +185,13 @@ mod tests {
     #[test]
     fn a_freeze_finds_every_bare_control_byte() {
         for bad in [&b"a\0b"[..], b"a\rb", b"a\nb", b"a\x07b", b"\"a\\\r\""] {
-            assert!(rendered_value(bad, false).is_some(), "{bad:?}");
+            assert!(rendered_value(bad, Escapes::of(None)).is_some(), "{bad:?}");
             assert!(rendered_start_line(bad).is_some(), "{bad:?}");
         }
-        assert!(rendered_value(b"\"a\\\0b\"", false).is_none(), "a quoted-pair a peer sent");
+        assert!(
+            rendered_value(b"\"a\\\0b\"", Escapes::of(None)).is_none(),
+            "a quoted-pair a peer sent"
+        );
         assert!(rendered_start_line(b"SIP/2.0 200 O\tK").is_none());
     }
 }

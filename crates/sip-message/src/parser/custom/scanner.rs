@@ -21,8 +21,9 @@ pub fn is_digit(b: u8) -> bool {
     b.is_ascii_digit()
 }
 
+/// SP or HTAB, the one whitespace of a header value (`crate::whitespace`).
 pub fn is_wsp(b: u8) -> bool {
-    b == SP || b == HTAB
+    crate::whitespace::is_wsp(b)
 }
 
 /// A byte range of the message image. Every token the scanner reads is one of
@@ -72,8 +73,8 @@ impl BareBreak {
 
 /// Locate the blank line that ends the header block — the message's
 /// header/body split — and the first bare CR or LF before it. `end` is
-/// `raw.len()` when the datagram ends without a blank line (the lenient EOF
-/// case [`Scanner::at_end_of_headers`] accepts).
+/// `raw.len()` when the datagram ends without a blank line, which a message's
+/// parse refuses (RFC 3261 §7) and a fragment's (RFC 3420 §2) accepts.
 ///
 /// A header line ends with CRLF and nowhere else; the parser refuses a block
 /// holding a bare CR or LF here, before any line of it is read, so no reader
@@ -115,13 +116,13 @@ pub enum HeaderValue {
     Unfolded(String),
 }
 
-/// `range` with leading/trailing whitespace excluded. Trimming a span is index
-/// arithmetic — no copy, unlike trimming an owned value. `None` when `range`
-/// is not a span of `image`.
+/// `range` with the SP and HTAB at its edges excluded, and no other byte.
+/// Trimming a span is index arithmetic — no copy, unlike trimming an owned
+/// value. `None` when `range` is not a span of `image`.
 pub fn trim_span(image: &str, range: Span) -> Option<Span> {
     let slice = image.get(range.clone())?;
-    let after_lead = slice.trim_start();
-    let trimmed = after_lead.trim_end();
+    let after_lead = crate::whitespace::trim_start(slice);
+    let trimmed = crate::whitespace::trim_end(after_lead);
     if trimmed.is_empty() {
         return Some(range.start..range.start);
     }
@@ -325,9 +326,9 @@ impl<'a> Scanner<'a> {
         )))
     }
 
-    /// At the blank line marking end of headers? (Each header's trailing CRLF
-    /// is already consumed by `read_header_value`, so this is a single CRLF —
-    /// or EOF.)
+    /// At the blank line marking end of headers, or at the end of the buffer?
+    /// (Each header's trailing CRLF is already consumed by
+    /// `read_header_value`, so this is a single CRLF.)
     pub fn at_end_of_headers(&self) -> bool {
         self.at_end() || self.at_crlf()
     }

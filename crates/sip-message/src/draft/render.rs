@@ -8,7 +8,7 @@
 //! quoted-pair inside a header value (CR and LF always), is the render's
 //! refusal (ADR-0053).
 
-use crate::control_bytes::has_comments;
+use crate::control_bytes::Escapes;
 use crate::header::{HeaderName, Wire};
 use crate::write_check::{self, Position, WriteRefusal};
 
@@ -95,7 +95,7 @@ fn line_refusal(entry: &Entry, value: &[u8]) -> Option<WriteRefusal> {
             return Some(refusal);
         }
     }
-    write_check::rendered_value(value, has_comments(name)).map(|reason| WriteRefusal {
+    write_check::rendered_value(value, Escapes::of(Some(name))).map(|reason| WriteRefusal {
         position: Position::HeaderValue,
         reason: format!("{}: {reason}", name.as_wire_str()),
     })

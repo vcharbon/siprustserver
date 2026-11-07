@@ -14,10 +14,14 @@ pub fn sipfrag_from_status(code: u16, reason: &str) -> Vec<u8> {
 }
 
 /// The status code of a fragment that starts with a status line
-/// (`SIP/2.0 <code> <reason>`, RFC 3420 §2); None for a request line, no start
-/// line, or a code that does not read as three digits.
+/// (`SIP/2.0 <code> <reason>`, RFC 3420 §2, the version in any case per RFC
+/// 3261 §7.1); None for a request line, no start line, or a code that does not
+/// read as three digits.
 pub fn status(fragment: &[u8]) -> Option<u16> {
-    let rest = fragment.strip_prefix(b"SIP/2.0 ")?;
+    let (version, rest) = fragment.split_at_checked(b"SIP/2.0 ".len())?;
+    if !version.eq_ignore_ascii_case(b"SIP/2.0 ") {
+        return None;
+    }
     let digits = rest.get(..3)?;
     let follows = rest.get(3).copied();
     if !digits.iter().all(u8::is_ascii_digit) || follows.is_some_and(|b| b != b' ' && b != b'\r') {
@@ -35,7 +39,13 @@ pub fn header_fields(fragment: &[u8]) -> Vec<SipHeader> {
     let first = fragment.split(|b| *b == b'\n').next().unwrap_or_default();
     let first = first.strip_suffix(b"\r").unwrap_or(first);
     let mut image = Vec::with_capacity(fragment.len() + 20);
-    if !(first.starts_with(b"SIP/") || first.ends_with(b" SIP/2.0")) {
+    let opens = first.get(..4).is_some_and(|lead| lead.eq_ignore_ascii_case(b"SIP/"));
+    let closes = first
+        .len()
+        .checked_sub(b" SIP/2.0".len())
+        .and_then(|at| first.get(at..))
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(b" SIP/2.0"));
+    if !(opens || closes) {
         image.extend_from_slice(b"SIP/2.0 200 OK\r\n");
     }
     image.extend_from_slice(fragment);
@@ -65,6 +75,7 @@ mod tests {
     fn a_fragment_states_its_status_only_on_a_status_line() {
         assert_eq!(status(&sipfrag_from_status(503, "Service Unavailable")), Some(503));
         assert_eq!(status(b"SIP/2.0 200 OK"), Some(200));
+        assert_eq!(status(b"sip/2.0 200 OK"), Some(200), "RFC 3261 §7.1: any case");
         assert_eq!(status(b"INVITE sip:b@h SIP/2.0\r\n"), None);
         assert_eq!(status(b"SIP/2.0 5030 X\r\n"), None);
         assert_eq!(status(b"To: <sip:b@h>\r\n"), None);
@@ -80,5 +91,7 @@ mod tests {
         let without = b"To: <sip:bob@example.com>\r\nSubject: hi\r\n\r\n";
         assert_eq!(fields(without).len(), 2);
         assert!(fields(&sipfrag_from_status(180, "Ringing")).is_empty());
+        assert_eq!(fields(b"sip/2.0 200 OK\r\nFrom: <sip:a@example.com>;tag=1\r\n").len(), 1);
+        assert_eq!(fields(b"INVITE sip:b@example.com sip/2.0\r\nSubject: hi\r\n").len(), 1);
     }
 }

@@ -45,7 +45,7 @@ use std::collections::HashSet;
 use b2bua_sdk::event::CallEvent;
 use call::{Call, Dialog, Leg, RequestRecord, RetainedEmission, SentRequest, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
-use sip_message::header::{SentBy, Via};
+use sip_message::header::{same_branch, SentBy, Via};
 use sip_message::{SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
 use sip_txn::{ServerTxnKey, TxnSeed};
 
@@ -86,7 +86,8 @@ pub(super) fn seeds_reading(call: &Call, now_ms: i64, reads: &ImageReads) -> Vec
                     TxnSeed::ServerNonInvite { request, .. } => (true, request.top_via()),
                     TxnSeed::ServerNonInviteAnswered { response, .. } => (true, response.top_via()),
                 };
-                let branch = via.branch().unwrap_or_default().to_string();
+                // One branch in any case is one transaction (§7.3.1).
+                let branch = via.branch().unwrap_or_default().to_ascii_lowercase();
                 if !branch.is_empty() && branches.insert((server, branch)) {
                     seeds.push(seed);
                 }
@@ -367,12 +368,12 @@ pub(in crate::router) fn names_server_branch(call: &Call, branch: &str) -> bool 
         .filter(|d| call::helpers::relayed_invite_pending(d))
         .filter_map(|d| d.sent_invite.as_ref())
         .filter_map(pending_via)
-        .any(|v| v.branch() == Some(branch));
+        .any(|v| v.branch().is_some_and(|b| same_branch(b, branch)));
     relayed
         || dialogs()
             .filter_map(call::helpers::answered_2xx)
             .filter_map(|retained| parse_response(retained, &ImageReads::default()))
-            .any(|r| r.top_via().branch() == Some(branch))
+            .any(|r| r.top_via().branch().is_some_and(|b| same_branch(b, branch)))
 }
 
 /// Whether `branch` names the caller's dialog-creating INVITE while it has no
@@ -388,7 +389,7 @@ pub(in crate::router) fn names_unanswered_caller_invite(call: &Call, branch: &st
         .as_ref()
         .and_then(|r| dialog_creating_seed(call, a_leg, r, &ImageReads::default()));
     matches!(seed, Some(TxnSeed::ServerInvite { request, .. })
-        if request.top_via().branch() == Some(branch))
+        if request.top_via().branch().is_some_and(|b| same_branch(b, branch)))
 }
 
 /// The INVITE server transaction the originator's request of the pending

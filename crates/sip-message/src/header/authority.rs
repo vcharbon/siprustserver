@@ -7,7 +7,7 @@
 /// The host of `uri`'s authority — an IPv6 literal with its brackets — or
 /// `None` where the URI has no `//` authority or an empty host.
 pub fn network_host(uri: &str) -> Option<&str> {
-    let uri = uri.trim().trim_start_matches('<');
+    let uri = crate::whitespace::trim(uri).trim_start_matches('<');
     let (scheme, rest) = uri.split_once("://")?;
     if scheme.is_empty()
         || !scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b))
@@ -27,7 +27,7 @@ pub fn network_host(uri: &str) -> Option<&str> {
 /// The host of a `hostport` (RFC 3261 §25.1: `host [":" port]`), an IPv6
 /// reference with its brackets: the port, which names no one, left out.
 pub fn host_of(hostport: &str) -> &str {
-    let hostport = hostport.trim();
+    let hostport = crate::whitespace::trim(hostport);
     if hostport.starts_with('[') {
         return hostport.split_inclusive(']').next().unwrap_or(hostport);
     }
@@ -43,7 +43,7 @@ pub fn host_of(hostport: &str) -> &str {
 /// `Content-ID` value (`<id-left@id-right>`, RFC 5322 §3.6.4), the text
 /// after its last `@`; `None` for any other value.
 pub fn message_id_domain(value: &str) -> Option<&str> {
-    let value = value.trim().trim_start_matches('<').trim_end_matches('>');
+    let value = crate::whitespace::trim(value).trim_start_matches('<').trim_end_matches('>');
     let id = ["cid:", "mid:"].iter().find_map(|scheme| {
         value
             .get(..scheme.len())

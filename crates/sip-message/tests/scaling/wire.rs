@@ -12,9 +12,9 @@ const KNOWN_FILLER: &[&str] = &[
     "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS",
     "Supported: timer, replaces",
     "Accept: application/sdp",
-    "User-Agent: scaling-probe/1.0",
+    "Accept-Language: en",
     "P-Early-Media: supported",
-    "Date: Sat, 13 Nov 2010 23:29:00 GMT",
+    "Allow-Events: refer",
 ];
 
 /// What a request is grown on.

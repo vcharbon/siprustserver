@@ -93,12 +93,13 @@ fn keys(result: &HandlerResult) -> impl Iterator<Item = Key> + '_ {
     })
 }
 
-/// The transaction `req` opens.
+/// The transaction `req` opens, its branch folded: a branch compares ignoring
+/// case (RFC 3261 §7.3.1).
 fn key_of_request(req: &SipRequest) -> Option<Key> {
-    Some((req.top_via().branch()?.to_string(), req.method().as_str().to_string()))
+    Some((req.top_via().branch()?.to_ascii_lowercase(), req.method().as_str().to_string()))
 }
 
-/// The transaction `resp` answers.
+/// The transaction `resp` answers, keyed as [`key_of_request`] keys.
 fn key_of_response(resp: &SipResponse) -> Option<Key> {
-    Some((resp.top_via().branch()?.to_string(), resp.cseq().method().as_str().to_string()))
+    Some((resp.top_via().branch()?.to_ascii_lowercase(), resp.cseq().method().as_str().to_string()))
 }

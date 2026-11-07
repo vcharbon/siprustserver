@@ -137,7 +137,8 @@ fn txn_key(
         key.push_str(part);
         key.push('|');
     }
-    key.push_str(branch);
+    // A branch compares ignoring case (RFC 3261 §7.3.1): the key holds it folded.
+    key.extend(branch.chars().map(|c| c.to_ascii_lowercase()));
     key.push('|');
     let _ = sent_by.write_canonical(&mut key);
     let _ = write!(key, "|{call_id}|{from_tag}|{cseq}");

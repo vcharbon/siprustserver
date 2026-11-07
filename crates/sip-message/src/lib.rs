@@ -74,6 +74,7 @@ pub mod site;
 pub mod sniff;
 pub mod trace_sample;
 pub mod via_extension;
+mod whitespace;
 pub mod worker_report;
 pub mod write_check;
 

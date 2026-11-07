@@ -11,8 +11,9 @@ use crate::sip_str::SipStr;
 use crate::types::NonEmpty;
 
 /// A refused request's method and its Via, From, To, Call-ID and CSeq: typed,
-/// each having passed the parse's full rules, and as their lines read on the
-/// wire, which a response echoes byte for byte.
+/// each having passed the parse's full rules, and as their lines read, which a
+/// response echoes: the bytes received, a surrogate pair written in CESU-8 in
+/// its UTF-8 form (ADR-0053 §3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestPartial {
     method: Method,

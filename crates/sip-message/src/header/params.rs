@@ -372,8 +372,10 @@ fn read_generic_param(
                 )));
             }
             if end == value_at {
+                let rest = clamped(text, value_at, scan_until(bytes, value_at, b"; \t,"));
                 return Err(SipParseError::new(format!(
-                    "value of parameter {name} is not a token, host or quoted-string"
+                    "value of parameter {name} is not a token, host or quoted-string{}",
+                    crate::char_class::utf8_note(rest)
                 )));
             }
             (ParamValue::Token(sub(base, value_at, end)), end)

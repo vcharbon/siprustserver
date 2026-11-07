@@ -48,9 +48,9 @@ pub(crate) fn sub(base: &SipStr, a: usize, b: usize) -> SipStr {
     base.reslice(clamped(base.as_str(), a, b))
 }
 
-/// [`sub`] with surrounding whitespace excluded.
+/// [`sub`] with the SP and HTAB at its edges excluded.
 pub(crate) fn sub_trimmed(base: &SipStr, a: usize, b: usize) -> SipStr {
-    base.reslice(clamped(base.as_str(), a, b).trim())
+    base.reslice(crate::whitespace::trim(clamped(base.as_str(), a, b)))
 }
 
 /// [`sub`] lowercased — a span when it is already lowercase, an owned copy only
@@ -150,7 +150,7 @@ pub(crate) fn digits_end(s: &[u8], mut i: usize) -> usize {
 /// input is a parse error rather than a saturated value — a stack that rounds a
 /// sequence number silently corrupts a dialog.
 pub(crate) fn parse_u32(text: &str, field: &str) -> Result<u32, SipParseError> {
-    let t = text.trim();
+    let t = crate::whitespace::trim(text);
     if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
         return Err(SipParseError::new(format!("{field} is not 1*DIGIT: {t:?}")));
     }

@@ -102,9 +102,27 @@ in the same case, and a known method is its upper-case spelling alone, so
 A header line ends with CRLF and nowhere else, in and out: the parser refuses
 a bare CR or LF anywhere in the header block, and no writer puts a CR or LF
 inside a line (`src/write_check.rs`). Any other control byte but HTAB stands in
-a header value only as the escaped byte of a quoted-pair, and nowhere in a
-reason phrase (`src/control_bytes.rs`). A header block that is not UTF-8 (RFC
-3629) is refused, its bytes never replaced (`src/parser/custom/mod.rs`).
+a header value only as the escaped byte of a quoted-pair, in a quoted-string or
+comment its header's grammar has (a header the stack does not know reads as
+holding quoted-strings), and nowhere in a reason phrase
+(`src/control_bytes.rs`). Whitespace is SP and HTAB alone: a value is trimmed
+of them and of nothing else (`src/whitespace.rs`). A header block ends with
+its blank line (§7); one that ends without it is refused.
+
+A header block that is not UTF-8 (RFC 3629) is refused, except a well-formed
+surrogate pair, re-encoded; no other byte is replaced. A pair written as two
+adjacent three-byte forms (CESU-8, `ED A0-AF 80-BF ED B0-BF 80-BF`) reads as
+the one character it encodes, in UTF-8, wherever it stands, and is then
+ordinary non-ASCII: read where the grammar takes `UTF8-NONASCII`, refused in a
+URI, a tag, a Call-ID, a branch, a method or a header name. The message's
+`image()` stays the bytes that arrived, and what the stack sends is rendered
+from its lines, so the wire carries the UTF-8 form. A lone or reversed half, a
+Latin-1 byte, an overlong form and a five- or six-byte form stay refused, an
+exception to the goal that every valid message parses: their reading is in
+doubt. Accepted risks: a quoted Digest `username` holding a pair is relayed in
+its UTF-8 form, which no longer matches the credentials the sender computed
+over its bytes, and a peer comparing its From bytes with our echo sees the
+UTF-8 form (`src/parser/custom/mod.rs`).
 
 ### 4. The name-addr
 

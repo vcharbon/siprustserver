@@ -62,7 +62,7 @@ impl Readiness {
         let mut cause = None;
         for param in value.split(';') {
             let Some((name, val)) = param.split_once('=') else { continue };
-            let (name, val) = (name.trim(), val.trim());
+            let (name, val) = (crate::whitespace::trim(name), crate::whitespace::trim(val));
             if name.eq_ignore_ascii_case("new") {
                 new = if val.eq_ignore_ascii_case("accept") {
                     Some(NewCalls::Accept)
@@ -87,7 +87,9 @@ pub fn readiness(resp: &SipResponse) -> Option<Readiness> {
 /// The `X-Incarnation` `resp` carries. `None` when absent or not an unsigned
 /// integer.
 pub fn incarnation(resp: &SipResponse) -> Option<u64> {
-    resp.raw(HeaderName::from(X_INCARNATION)).next().and_then(|v| v.trim().parse().ok())
+    resp.raw(HeaderName::from(X_INCARNATION))
+        .next()
+        .and_then(|v| crate::whitespace::trim(v).parse().ok())
 }
 
 /// The `X-Incarnation` header value for boot generation `gen`.
