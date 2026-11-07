@@ -87,6 +87,7 @@ fn body_rows() -> Vec<Row> {
         Row::new("body/delimiter-text-inside-a-line".to_string(), inside_a_line()),
         answered("line-starting-with-the-delimiter", mixed(&format!("--b\r\nContent-Type: application/sdp\r\n\r\n{SDP}--bb\r\n\r\n--b--\r\n"))),
         answered("delimiter-line-ended-by-lf", mixed(&format!("--b\nContent-Type: application/sdp\n\n{SDP}\n--b--\n"))),
+        answered("first-delimiter-closes", mixed(&format!("--b--\r\n--b\r\n{part}\r\n--b--\r\n"))),
         answered("two-delimiters-on-one-crlf", mixed(&format!("--b\r\n--b\r\n{part}\r\n--b--\r\n"))),
         offers_nothing("description-in-the-epilogue", mixed(&format!("--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b--\r\n--b\r\n{part}"))),
         // RFC 2045 §3, RFC 2046 §5.1: a part's head.

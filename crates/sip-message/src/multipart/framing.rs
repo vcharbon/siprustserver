@@ -118,22 +118,44 @@ fn blocks(body: &[u8], boundary: &[u8]) -> Vec<std::ops::Range<usize>> {
     starts.zip(ends).map(|(start, end)| start..end).collect()
 }
 
-/// Whether `body` frames cleanly under `boundary`: every line up to the close
-/// delimiter that starts with `--boundary` is a delimiter. RFC 2046 §5.1.1
-/// recognises a delimiter by the start of its line, so a line that starts with
-/// one and is none (`--bb` under `b`, a delimiter ended by LF alone, two
-/// delimiters sharing one CRLF) leaves the body with no one reading.
+/// Whether `body` frames cleanly under `boundary`: its first delimiter opens a
+/// part, and every line up to the close delimiter that starts with
+/// `--boundary` is a delimiter. RFC 2046 §5.1.1 recognises a delimiter by the
+/// start of its line, so a line that starts with one and is none (`--bb` under
+/// `b`, a delimiter ended by LF alone, two delimiters sharing one CRLF) leaves
+/// the body with no one reading, and so does a body that closes first.
 pub(crate) fn frames_cleanly(body: &[u8], boundary: &str) -> bool {
+    frames_cleanly_counting(body, boundary, &mut 0)
+}
+
+/// [`frames_cleanly`], one walk over the line starts and the delimiters
+/// together, both ascending: each line start and each delimiter passed adds
+/// one to `steps`.
+fn frames_cleanly_counting(body: &[u8], boundary: &str, steps: &mut usize) -> bool {
     let dash_boundary = [b"--".as_slice(), boundary.as_bytes()].concat();
     let found = delimiters(body, &dash_boundary);
+    if found.first().is_some_and(|(_, d)| *d == Delimiter::Close) {
+        return false;
+    }
     let close =
-        found.iter().find(|(_, d)| *d == Delimiter::Close).map_or(body.len(), |(at, _)| *at);
+        found.last().filter(|(_, d)| *d == Delimiter::Close).map_or(body.len(), |(at, _)| *at);
     let line_starts = std::iter::once(0)
         .chain(memchr::memmem::find_iter(body, b"\r\n").map(|at| at + 2))
         .take_while(|&at| at <= close);
-    let mut candidates = line_starts
-        .filter(|&at| body.get(at..).is_some_and(|rest| rest.starts_with(&dash_boundary)));
-    candidates.all(|at| found.iter().any(|(line, _)| *line == at))
+    let mut known = found.iter().map(|(at, _)| *at).peekable();
+    for at in line_starts {
+        *steps += 1;
+        if !body.get(at..).is_some_and(|rest| rest.starts_with(&dash_boundary)) {
+            continue;
+        }
+        while known.next_if(|&line| line < at).is_some() {
+            *steps += 1;
+        }
+        if known.peek() != Some(&at) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -176,6 +198,23 @@ mod tests {
         assert!(!frames_cleanly(b"--bb\r\n--b\r\none\r\n--b--", "b"), "in the preamble");
         assert!(!frames_cleanly(b"--b\none\n--b--\n", "b"), "LF alone");
         assert!(!frames_cleanly(b"--b\r\n--b--\r\n", "b"), "one CRLF for two lines");
+        assert!(!frames_cleanly(b"--b--\r\n--b\r\none\r\n--b--", "b"), "it closes first");
+    }
+
+    /// The walk is linear in the lines: a datagram's worth of delimiter lines,
+    /// and twice that, cost one step per line start and per delimiter.
+    #[test]
+    fn framing_a_body_of_delimiter_lines_is_linear() {
+        let steps = |lines: usize| {
+            let body = "--b\r\n\r\n".repeat(lines);
+            let mut steps = 0;
+            assert!(frames_cleanly_counting(body.as_bytes(), "b", &mut steps));
+            steps
+        };
+        let most = 65_535 / "--b\r\n\r\n".len();
+        let (one, two) = (steps(most), steps(2 * most));
+        assert!(one <= 3 * most + 1, "{one} steps for {most} lines");
+        assert!(two <= 2 * one + 1, "{two} steps for twice {one}");
     }
 
     #[test]

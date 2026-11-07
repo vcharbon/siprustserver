@@ -83,9 +83,13 @@ compatibility rules admit, on purpose:
   (RFC 3262 §7.1).
 - **A body a reader can frame.** A message with a body states its Content-Type
   (§20.15), and a `multipart/…` one names one boundary of 1 to 70 `bchars`, the
-  last no space (RFC 2046 §5.1.1). A delimiter line ends in CRLF. A
-  Content-Disposition reads whole (§20.11), since it decides whether a body is
-  a session description.
+  last no space (RFC 2046 §5.1.1). RFC 2046 §5.1.1 recognises a delimiter by
+  the start of its line, so a message body refuses each framing with no one
+  reading: a line starting with `--boundary` that is no delimiter (`--bb`
+  under `b`), a delimiter line ended by LF alone (a delimiter line ends in
+  CRLF), two delimiter lines sharing one CRLF, and a first delimiter that
+  closes. A Content-Disposition reads whole (§20.11), since it decides whether
+  a body is a session description.
 - **Empty values.** A Via, Contact, Route, Record-Route, Content-Type or
   Content-Disposition line holding no value, and an empty entry of a comma list,
   is refused: their grammar needs one. `Supported:`, `Allow:`, `Accept:` and `Accept-Encoding:`
