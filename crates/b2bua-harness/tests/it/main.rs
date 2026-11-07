@@ -237,6 +237,7 @@ mod spiral_through_the_front_proxy;
 mod stated_headers;
 mod stated_line_safety;
 mod stated_refusal;
+mod stated_single_valued_twice;
 mod stateful_proxy_fixture;
 mod store_fault;
 mod stored_image_reads;

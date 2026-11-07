@@ -16,6 +16,7 @@ use crate::control_bytes::{bare_control_byte, is_control, Escapes};
 use crate::header::{is_single_valued, HeaderName};
 use crate::parser::custom::headers::line_refusal;
 use crate::parser::{FirstIngressBound, SipParserLimits};
+use crate::types::SipHeader;
 
 /// Where a writer was asked to put text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,22 +115,58 @@ fn line_within(name: &str, value: &str, max_length: usize) -> Result<(), WriteRe
 }
 
 /// Every line a writer states for one header: at most one of a single-valued
-/// header (`header::SINGLE_VALUED`, RFC 3261 §7.3.1), and each a
-/// [`header_line`], or a [`new_request_line`] under `first_ingress` on a new
-/// request.
+/// header ([`repeated_single`]), and each a [`header_line`], or a
+/// [`new_request_line`] under `first_ingress` on a new request.
 pub fn header_lines<S: AsRef<str>>(
     name: &str,
     values: &[S],
     first_ingress: Option<&FirstIngressBound>,
 ) -> Result<(), WriteRefusal> {
-    if values.len() > 1 && is_single_valued(&HeaderName::from(name)) {
-        let reason = format!("{name} is single-valued, {} lines stated", values.len());
-        return Err(refusal(Position::HeaderLines, reason));
+    if let Some(refused) = repeated_single(name, values.len()) {
+        return Err(refused);
     }
     values.iter().try_for_each(|value| match first_ingress {
         Some(bound) => new_request_line(name, value.as_ref(), bound),
         None => header_line(name, value.as_ref()),
     })
+}
+
+/// The refusal of `count` lines stated for the header `name` names when it is
+/// single-valued (`header::SINGLE_VALUED`, RFC 3261 §7.3.1): a writer leaves
+/// every one of them out, as though none was stated (ADR-0053 §7).
+pub fn repeated_single(name: &str, count: usize) -> Option<WriteRefusal> {
+    (count > 1 && is_single_valued(&HeaderName::from(name))).then(|| {
+        refusal(Position::HeaderLines, format!("{name} is single-valued, {count} lines stated"))
+    })
+}
+
+/// `lines` without every line of a single-valued header they state more than
+/// once, names compared as the header they name (casing and compact forms
+/// counted), each such header's refusal pushed onto `skipped`
+/// ([`repeated_single`]).
+pub fn one_line_each(lines: Vec<SipHeader>, skipped: &mut Vec<WriteRefusal>) -> Vec<SipHeader> {
+    let mut stated: Vec<(HeaderName, usize)> = Vec::new();
+    for line in &lines {
+        let name = HeaderName::from(line.name.as_str());
+        if !is_single_valued(&name) {
+            continue;
+        }
+        match stated.iter_mut().find(|(seen, _)| seen.matches(&line.name)) {
+            Some((_, count)) => *count += 1,
+            None => stated.push((name, 1)),
+        }
+    }
+    let mut refused: Vec<HeaderName> = Vec::new();
+    for (name, count) in stated {
+        if let Some(refusal) = repeated_single(name.as_wire_str(), count) {
+            skipped.push(refusal);
+            refused.push(name);
+        }
+    }
+    if refused.is_empty() {
+        return lines;
+    }
+    lines.into_iter().filter(|line| !refused.iter().any(|name| name.matches(&line.name))).collect()
 }
 
 /// A reason phrase: any text but a control byte other than HTAB.
@@ -186,6 +223,7 @@ fn byte_reason(text: &str, at: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sip_str::SipStr;
 
     #[test]
     fn a_header_name_is_a_token() {
@@ -259,6 +297,26 @@ mod tests {
         let bound = FirstIngressBound { header_length: 8, ..FirstIngressBound::DEFAULT };
         assert!(header_lines("X-A", &["a"], Some(&bound)).is_ok());
         assert!(header_lines("X-A", &["a long value"], Some(&bound)).is_err());
+    }
+
+    #[test]
+    fn every_line_of_a_single_valued_header_stated_twice_is_left_out() {
+        let line = |n: &str, v: &str| SipHeader::new(SipStr::owned(n), SipStr::owned(v));
+        let lines = vec![
+            line("Subject", "one"),
+            line("X-Note", "a"),
+            line("s", "two"),
+            line("X-Note", "b"),
+            line("subject", "three"),
+            line("Expires", "60"),
+        ];
+        let mut skipped = Vec::new();
+        let kept = one_line_each(lines, &mut skipped);
+        let names: Vec<&str> = kept.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["X-Note", "X-Note", "Expires"]);
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert_eq!(skipped[0].position, Position::HeaderLines);
+        assert!(skipped[0].reason.contains("3 lines"), "{}", skipped[0]);
     }
 
     #[test]

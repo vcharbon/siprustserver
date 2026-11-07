@@ -178,6 +178,7 @@ impl ActionExecutor<'_> {
                 value: value.clone().into(),
             })
             .collect();
+        let stated = relay::writable_lines("the release of a leg", stated, fx);
         let leg = call::helpers::find_leg(call, leg_id);
         let state = leg.map(|l| l.state());
         let ringing = leg.is_some_and(|l| l.invite_ringing());

@@ -1,6 +1,7 @@
 //! Stated text a message the stack builds cannot carry whole (ADR-0053): a
 //! header line with a name off `token` or a CR, LF or NUL in its value, a
-//! reason phrase with a CR, LF or NUL. Such text is left out — the line
+//! single-valued header stated on more than one line (§7), a reason phrase
+//! with a CR, LF or NUL. Such text is left out — the line
 //! dropped, the phrase giving way to the status's default — and each skip is
 //! reported ([`BufferedObservabilityEffect::StatedTextSkipped`]), so the
 //! message still leaves.
@@ -36,14 +37,17 @@ fn kept(checked: Result<(), WriteRefusal>, skipped: &mut Vec<WriteRefusal>) -> b
     }
 }
 
-/// `lines` without those the wire cannot carry whole, each one left out
-/// reported on `fx` under `what`.
+/// `lines` without those the wire cannot carry whole and without every line
+/// of a single-valued header they state more than once
+/// ([`write_check::one_line_each`]), each one left out reported on `fx` under
+/// `what`.
 pub(crate) fn writable_lines(
     what: &str,
     lines: Vec<MsgHeader>,
     fx: &mut HandlerEffects,
 ) -> Vec<MsgHeader> {
     let mut skipped = Vec::new();
+    let lines = write_check::one_line_each(lines, &mut skipped);
     let kept = lines.into_iter().filter(|line| writable(line, &mut skipped)).collect();
     fx.buffered.extend(BufferedObservabilityEffect::skipped(what, skipped));
     kept

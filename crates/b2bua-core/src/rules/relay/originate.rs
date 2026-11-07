@@ -266,13 +266,17 @@ pub fn build_b_leg(
     // those on the leg it mints, so a decision stating one would ride BESIDE the
     // stack's line rather than replace it — two `Max-Forwards`, and a budget the
     // decision could refill.
-    // A set the wire cannot carry whole is skipped, as though never stated.
-    let mut extra_headers: Vec<MsgHeader> = header_updates
+    // A set the wire cannot carry whole, or a single-valued header set on more
+    // than one line (ADR-0053 §7), is skipped, as though never stated.
+    let set: Vec<MsgHeader> = header_updates
         .iter()
         .filter(|(n, _)| HeaderName::class_of(n) != HeaderClass::Structural)
         .filter_map(|(n, v)| {
             v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
         })
+        .collect();
+    let mut extra_headers: Vec<MsgHeader> = write_check::one_line_each(set, skipped)
+        .into_iter()
         .filter(|h| writable_on_new_request(h, first_ingress, skipped))
         .collect();
     // The entity headers the minted body states for itself; a name the decision
