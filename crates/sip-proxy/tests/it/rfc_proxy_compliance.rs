@@ -74,6 +74,14 @@ async fn response_with_foreign_top_via_is_discarded() {
     // so the locally-minted-tag audit legitimately fires on the fixture. The
     // proxy (not the UA) is the SUT here; waive that UA-side rule.
     h.allow_violation("mid-dialog-tags", "raw-injected response; proxy is the SUT, not a real UA");
+    // The response is aimed at the proxy whose Via it lacks: the defect under test.
+    h.waive(
+        scenario_harness::WaiverScope::rule(
+            "response-destination",
+            "raw-injected response sent past its top Via; the proxy is the subject",
+        )
+        .on_party("alice"),
+    );
     let (strategy, registry) = forward_all("127.0.0.1:5070".parse().unwrap());
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
     let (alice, _alice_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;

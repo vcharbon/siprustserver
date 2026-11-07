@@ -1,4 +1,4 @@
-//! What a datagram's Via rows say about its hops: the top Via's `rport`
+//! What a datagram's Via rows say about its hops: the top Via, its `rport`
 //! (RFC 3581) and the originating hop at the bottom (RFC 3261 §16.6).
 
 use crate::header::{HeaderValue, ParamValue, Rport, SentBy, Via};
@@ -45,6 +45,14 @@ pub fn via_rport(raw: &[u8]) -> ViaRport {
         };
     }
     ViaRport::Absent
+}
+
+/// The TOP-most Via of `raw`: the hop a response answers (RFC 3261 §18.2.2).
+/// `None` where the message carries no Via or its first Via row does not
+/// parse.
+pub fn top_via(raw: &[u8]) -> Option<Via> {
+    let row = header_rows_compact(raw, "via").into_iter().next()?;
+    Via::parse_line(&SipStr::owned(&row)).ok()?.into_iter().next()
 }
 
 /// The originating hop of a request, read off its BOTTOM-most Via: every

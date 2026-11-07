@@ -321,7 +321,7 @@ Severity = operational risk if the behaviour is wrong.
 
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
-| RPORT-1 | 3581 §4 | rport on inbound Via | UAS responds to received:rport, stamps it | high | 🟡 | proxy `...keeps_the_received_rport_target`; add B2BUA UAS-path `rport_uas_response_to_source_port` |
+| RPORT-1 | 3581 §4 | rport on inbound Via | UAS responds to received:rport, stamps it | high | 🟡 | proxy `...keeps_the_received_rport_target`; rfc-audit `rport-echo` (the source port) and `response-destination` (§18.2.2, every UDP response) gate the SUT; add B2BUA UAS-path `rport_uas_response_to_source_port` |
 | LOCATE-2 | 3263 §4.3 | First SRV target times out | Failover to next target | high | 🟡 | numbering_plan reroute on failure (app-list); no DNS SRV. add `locate_failover_next_srv_on_timeout` |
 | LOCATE-3 | 3263/16.7 | B-leg 503 | Try next target, honour Retry-After | high | ✅ | fake_prack/suppress_18x `failover` on 503 |
 | IDENT-1 | 3325 §5 | PAI from trusted peer | Forward only within trust domain | high | ❌ | add `pai_forward_within_trust_domain` |

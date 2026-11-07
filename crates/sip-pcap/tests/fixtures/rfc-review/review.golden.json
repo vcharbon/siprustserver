@@ -384,6 +384,15 @@
       "relayed": 0,
       "buckets": {}
     },
+    "response-destination": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 13,
+      "decided": 13,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
     "response-echoes-request-via": {
       "hits": 2,
       "documents": 1,

@@ -19,7 +19,7 @@ pub use identity::{identity, Identity};
 pub use reliability::{rack_cseq, rack_rseq, require_has_100rel, rseq_of};
 use std::borrow::Cow;
 pub use uri_facts::UriFacts;
-pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};
+pub use via_hops::{bottom_via, top_via, via_rport, OriginVia, ViaRport};
 pub use via_stamp::relay_stamp_spans;
 
 use crate::char_class::is_token_char;

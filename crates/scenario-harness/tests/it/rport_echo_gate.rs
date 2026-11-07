@@ -8,9 +8,18 @@ use sip_message::generators::{generate_response, GenerateResponseOpts, OutOfDial
 use sip_message::received::observed_source;
 use sip_message::{CustomParser, SipMessage, SipParser};
 
-/// Alice, behind a NAT, sends an OPTIONS to the SUT, which answers 480 with
-/// its top Via stamped from the source when `stamps`.
+/// Alice, behind a NAT, sends an OPTIONS to the SUT, which answers 480 to the
+/// source it took, with its top Via stamped from that source when `stamps`.
+/// Unstamped, the Via names alice's address inside the NAT, so the answer to
+/// the source misses it too (`response-destination`), waived here: the echo is
+/// the subject.
 async fn sut_answers_an_rport_ask(h: &Harness, stamps: bool) {
+    if !stamps {
+        h.waive(
+            scenario_harness::WaiverScope::rule("response-destination", "the echo is the subject")
+                .on_party("sut"),
+        );
+    }
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let alice = h.agent("alice", "127.0.0.1:5060").await.behind_nat(h.next_addr());
     let (sut, sut_addr) = h.bind_sut("sut", "127.0.0.1:5080").await;
