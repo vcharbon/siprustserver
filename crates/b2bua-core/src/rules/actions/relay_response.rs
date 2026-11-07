@@ -65,11 +65,12 @@ impl<'a> Relaying<'a> {
         } else if let Some(call::PolicyUpdateBody::Bytes(b)) = call.policy_update_body.take() {
             (b, Some(relay::sdp()), SourceBody::Replaced)
         } else {
-            (
-                resp.body().to_vec(),
-                resp.raw(HeaderName::ContentType).next().and_then(relay::media_type),
-                SourceBody::Verbatim,
-            )
+            // A body stating no type (a 200 to OPTIONS under an exemption) has
+            // none this stack can state for it, so it does not ride.
+            match resp.raw(HeaderName::ContentType).next().and_then(relay::media_type) {
+                None if !resp.body().is_empty() => (vec![], None, SourceBody::Dropped),
+                stated => (resp.body().to_vec(), stated, SourceBody::Verbatim),
+            }
         };
         let disposition = match source_body {
             SourceBody::Verbatim => resp.raw(HeaderName::ContentDisposition).next(),
