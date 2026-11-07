@@ -1,7 +1,8 @@
 //! The egress routing policy for worker-originated requests: route-set wire
 //! destinations and the b-leg front-proxy bootstrap (RFC 3261 §16.12). The
-//! deployment invariant: every B2BUA→callee message traverses the front proxy,
-//! never pod-direct.
+//! deployment invariant: behind a front proxy a worker's first hop is the proxy,
+//! never pod-direct, whatever a peer's Record-Route states; the route set rides
+//! intact, and the proxy reads it. A standalone worker sends along its route set.
 
 use sip_message::header::{HeaderValue, RouteEntry, Uri};
 use sip_message::{SipRequest, SipStr};
@@ -12,12 +13,11 @@ use crate::config::B2buaConfig;
 ///
 /// Two effects, both RFC 3261 §16.12:
 ///   1. **Route-set wire destination** (any leg): when the dialog's route set
-///      is non-empty, the request is *sent* to its first route's next hop
-///      ([`Uri::next_hop`], §8.1.2, §12.2.1.1). Behind a loose router (`;lr`) the Request-URI
-///      stays at the remote target; behind a strict one the generator already
-///      put that route's URI in the Request-URI and the remote target last in
-///      the Route set. Either way the first route is the next hop, so
-///      in-dialog requests toward a record-routing proxy traverse it.
+///      is non-empty, the request is *sent* to the front proxy, standalone to its
+///      first route's next hop ([`Uri::next_hop`], §8.1.2, §12.2.1.1). Behind a
+///      loose router (`;lr`) the Request-URI stays at the remote target; behind a
+///      strict one the generator already put that route's URI in the Request-URI
+///      and the remote target last in the Route set.
 ///   2. **b-leg outbound-proxy bootstrap**: when the route set is empty (the
 ///      pre-confirmation initial INVITE), `leg_id` is a b-leg, and
 ///      the worker runs behind the proxy (`Front::Proxied`), preload a *plain* loose `Route` at the
@@ -38,20 +38,14 @@ pub fn apply_b_leg_egress(
     req: SipRequest,
     dest: (String, u16),
 ) -> (SipRequest, (String, u16)) {
-    // (1) Route set: send to the first route's next hop.
-    if let Some(first) = route_set.first() {
-        if let Some(uri) = route_uri(first) {
-            // The worker forwards the route set verbatim and stamps nothing:
-            // under double-record-routing, the worker-facing half of the dialog
-            // route set — captured from the dialog-creating message
-            // (§12.1.1/§12.1.2) — is the proxy's own `;outbound` Record-Route on
-            // top, and the proxy reads direction from its self-issued RR
-            // (registry- and pod-IP-independent, so it survives a worker
-            // reboot), not from anything the worker adds.
-            let (host, port) = uri.next_hop();
-            return (req, (host.to_string(), port));
-        }
-        return (req, dest);
+    // (1) Route set: the worker forwards it verbatim and stamps nothing: under
+    // double-record-routing, the worker-facing half of the dialog route set —
+    // captured from the dialog-creating message (§12.1.1/§12.1.2) — is the
+    // proxy's own `;outbound` Record-Route on top, and the proxy reads direction
+    // from its self-issued RR (registry- and pod-IP-independent, so it survives a
+    // worker reboot), not from anything the worker adds.
+    if !route_set.is_empty() {
+        return (req, route_set_dest(config, route_set, dest));
     }
     // (2) Empty route set (pre-confirmation INVITE) + b-leg outbound-proxy
     // bootstrap. There is no dialog route set yet, so preload a plain loose Route
@@ -121,14 +115,33 @@ pub fn outbound_proxy_route_set(config: &B2buaConfig) -> Vec<String> {
     outbound_proxy_route(config).map(|(route, _)| route.to_wire()).into_iter().collect()
 }
 
+/// The wire destination of a request on a non-empty `route_set`: the front
+/// proxy, else the first route's next hop, else `base_dest` when that does not
+/// read.
+fn route_set_dest(
+    config: &B2buaConfig,
+    route_set: &[String],
+    base_dest: (String, u16),
+) -> (String, u16) {
+    if let Some(proxy) = config.front.outbound_proxy() {
+        return proxy.clone();
+    }
+    match route_set.first().and_then(|first| route_uri(first)) {
+        Some(uri) => {
+            let (host, port) = uri.next_hop();
+            (host.to_string(), port)
+        }
+        None => base_dest,
+    }
+}
+
 /// The URI of a dialog route-set entry, loose or strict.
 fn route_uri(route: &str) -> Option<Uri> {
     RouteEntry::parse(&SipStr::owned(route)).ok().map(|entry| entry.uri().clone())
 }
 
 /// Egress-aware wire destination for a leg's in-dialog request, WITHOUT mutating
-/// a request. Mirrors `apply_b_leg_egress`'s destination decision (keep in sync) —
-/// used for observability attribution (the keepalive-failure peer metric), where
+/// a request: `apply_b_leg_egress`'s destination decision, used for observability attribution (the keepalive-failure peer metric), where
 /// we need the wire hop the unanswered OPTIONS used but must not synthesize a
 /// request to find it.
 pub fn leg_egress_dest(
@@ -137,12 +150,8 @@ pub fn leg_egress_dest(
     route_set: &[String],
     base_dest: (String, u16),
 ) -> (String, u16) {
-    if let Some(first) = route_set.first() {
-        if let Some(uri) = route_uri(first) {
-            let (host, port) = uri.next_hop();
-            return (host.to_string(), port);
-        }
-        return base_dest;
+    if !route_set.is_empty() {
+        return route_set_dest(config, route_set, base_dest);
     }
     if leg_id == "a" {
         return base_dest;
@@ -327,6 +336,29 @@ Content-Length: 0\r\n\r\n",
             leg_egress_dest(&B2buaConfig::default(), "b-1", &[route.to_string()], base),
             ("192.0.2.9".to_string(), 5070),
         );
+    }
+
+    // Behind a front proxy, a route set whose first entry the proxy did not write
+    // (a callee's Record-Route below the proxy's pair, reversed on top by the UAC
+    // rule, §12.1.2) still goes to the proxy, the set unchanged: no peer chooses a
+    // worker's first hop. On every leg, and for the strict form too.
+    #[test]
+    fn behind_a_front_proxy_a_foreign_first_route_goes_to_the_proxy_intact() {
+        let mut config = B2buaConfig::default();
+        config.front = crate::config::Front::single_face("10.0.0.9", 5060);
+        let base = ("10.244.2.7".to_string(), 5060);
+        let proxy = ("10.0.0.9".to_string(), 5060);
+        for foreign in ["<sip:203.0.113.9:5060;lr>", "<sip:203.0.113.9:5060>"] {
+            let set = [foreign.to_string(), "<sip:10.0.0.9:5060;outbound;lr>".to_string()];
+            let route = set.join(", ");
+            for leg in ["a", "b-1"] {
+                let (out, dest) =
+                    apply_b_leg_egress(&config, leg, &set, in_dialog_options(&route), base.clone());
+                assert_eq!(dest, proxy, "{leg} {foreign}");
+                assert_eq!(top_route(&out), route, "the route set rides intact");
+                assert_eq!(leg_egress_dest(&config, leg, &set, base.clone()), proxy);
+            }
+        }
     }
 
     // `leg_egress_dest` mirrors apply_b_leg_egress's destination decision WITHOUT

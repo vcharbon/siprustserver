@@ -235,3 +235,86 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
     let cancel_via = cancel.raw(HeaderName::Via).next().expect("CANCEL has a Via").to_string();
     assert_eq!(cancel_via, invite_via, "CANCEL top Via (incl. branch) must equal the INVITE's");
 }
+
+// A callee's Record-Route below the proxy's pair reverses onto the top of the
+// b-leg's route set (§12.1.2). Behind the front proxy it chooses no first hop:
+// the ACK and every later request go to the proxy, the route set intact, and
+// standalone they go where the set says.
+fn after_a_foreign_record_route(config: &B2buaConfig) -> Vec<(String, (String, u16), Vec<String>)> {
+    let mut call = test_call();
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
+    let raw = "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKb\r\n\
+From: <sip:svc@10.0.0.9:5060>;tag=svc\r\n\
+To: <sip:bob@10.0.0.2:5070>;tag=bobtag\r\n\
+Call-ID: bcid@x\r\n\
+CSeq: 1 INVITE\r\n\
+Record-Route: <sip:10.0.0.8:5060;w_pri=w0;lr>, <sip:10.0.0.9:5060;outbound;lr>, <sip:203.0.113.9:5060;lr>\r\n\
+Contact: <sip:bob@10.0.0.2:5070>\r\n\
+Content-Length: 0\r\n\r\n";
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
+        panic!("expected a response")
+    };
+    let event = CallEvent::sip(SipMessage::Response(resp), "10.0.0.9:5060".parse().unwrap());
+    let ctx = context(&call, &event, "b-1", config);
+    let mut id_gen = scope(1);
+    let mut exec = executor(config, &mut id_gen);
+    let confirmed =
+        exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx).call;
+
+    let ctx = context(&confirmed, &event, "b-1", config);
+    let mut id_gen = scope(2);
+    let mut exec = executor(config, &mut id_gen);
+    let actions = [
+        RuleAction::AckLeg { leg_id: "b-1".into(), body: None },
+        RuleAction::SendRequestToLeg {
+            leg_id: "b-1".into(),
+            method: "BYE".into(),
+            body: None,
+            headers: Vec::new(),
+        },
+    ];
+    let sent = exec.execute(&actions, &confirmed, &ctx).effects.outbound;
+    sent.into_iter()
+        .filter_map(|e| match &e.body {
+            b2bua_core::effects::OutboundBody::Request(r) => Some((
+                r.method().to_string(),
+                e.destination.clone(),
+                r.raw(HeaderName::Route).map(|l| l.to_string()).collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn the_route_set() -> Vec<String> {
+    vec![
+        "<sip:203.0.113.9:5060;lr>".to_string(),
+        "<sip:10.0.0.9:5060;outbound;lr>".to_string(),
+        "<sip:10.0.0.8:5060;w_pri=w0;lr>".to_string(),
+    ]
+}
+
+#[test]
+fn behind_the_front_proxy_a_callees_record_route_chooses_no_first_hop() {
+    let config = B2buaConfig {
+        front: b2bua_core::config::Front::single_face("10.0.0.9", 5060),
+        ..B2buaConfig::default()
+    };
+    let sent = after_a_foreign_record_route(&config);
+    let methods: Vec<&str> = sent.iter().map(|(m, _, _)| m.as_str()).collect();
+    assert_eq!(methods, ["ACK", "BYE"]);
+    for (method, destination, routes) in sent {
+        assert_eq!(destination, ("10.0.0.9".to_string(), 5060), "{method} goes to the proxy");
+        assert_eq!(routes.join(", ").split(", ").collect::<Vec<_>>(), the_route_set(), "{method}");
+    }
+}
+
+#[test]
+fn a_standalone_worker_sends_along_the_route_set() {
+    let sent = after_a_foreign_record_route(&B2buaConfig::default());
+    assert_eq!(sent.len(), 2);
+    for (method, destination, _) in sent {
+        assert_eq!(destination, ("203.0.113.9".to_string(), 5060), "{method}");
+    }
+}
