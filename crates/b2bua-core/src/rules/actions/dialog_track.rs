@@ -237,7 +237,9 @@ impl ActionExecutor<'_> {
     /// uses `preferred` as its tag instead of minting a fresh one (tag
     /// continuity across forking/failover, `relayFirst18xTo180`). A caller
     /// whose INVITE took a non-2xx final holds no dialog of it (RFC 3261
-    /// §12.1): none is opened then, and the tag returned names none.
+    /// §12.1): none is opened then, and the tag returned names none; nor is one
+    /// for a stored INVITE naming no remote target, a defect
+    /// ([`crate::turn_notes::STORED_IMAGE_READS`]).
     pub(super) fn ensure_a_dialog_with(
         &mut self,
         call: &mut Call,
@@ -254,11 +256,15 @@ impl ActionExecutor<'_> {
         let tag = preferred.unwrap_or_else(|| crate::caller_tags::own(call));
         let Some(a_invite) = self.caller_invite(call) else { return tag };
         let a_leg_id = call.a_leg.leg_id.clone();
-        // Ingress refuses an INVITE with no Contact (RFC 3261 §8.1.1.8), so the
-        // caller's target is always the one it named.
-        let remote_target =
+        // Ingress refuses an INVITE with no readable Contact (RFC 3261
+        // §8.1.1.8): a stored one without is a defect, and opens no dialog.
+        let Some(remote_target) =
             contact_uri(a_invite.header::<header::Contact>(), &call.call_ref, &a_leg_id)
-                .unwrap_or_default();
+        else {
+            let detail = "the caller's stored INVITE names no remote target".to_string();
+            self.turn.notes.defect(crate::turn_notes::STORED_IMAGE_READS, detail, call);
+            return tag;
+        };
         // §12.1.1: the a-leg is a UAS dialog — route set is the INVITE's
         // Record-Route entries in forward order, one entry per recorded route (a
         // comma-combined header — the proxy's double-record-route halves — is

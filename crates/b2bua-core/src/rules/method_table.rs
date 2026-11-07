@@ -70,17 +70,26 @@ pub fn row_of(method: &str) -> MethodRow {
 
 /// The usage `req` belongs to (RFC 5057 §3): a REFER opens the implicit
 /// subscription its CSeq names (RFC 3515 §2.4.4), a NOTIFY reports the one
-/// its `Event` names (RFC 6665 §4.5); anything else rides the session.
+/// its `Event` names (RFC 6665 §4.5); anything else rides the session. A
+/// NOTIFY whose `Event` does not read is a defect (ingress refuses one):
+/// logged, and read as riding the session.
 pub fn usage_of(req: &SipRequest) -> DialogUsage {
     match req.method() {
         Method::Refer => DialogUsage::Subscription {
             event: "refer".into(),
             id: Some(req.cseq().seq().to_string()),
         },
-        Method::Notify => match req.header::<Event>().and_then(Result::ok) {
-            Some(event) => {
+        Method::Notify => match req.header::<Event>() {
+            Some(Ok(event)) => {
                 let (event, id) = subscription_key(&event);
                 DialogUsage::Subscription { event, id }
+            }
+            Some(Err(e)) => {
+                tracing::error!(
+                    reason = %e.reason,
+                    "DEFECT: a NOTIFY's Event past ingress does not read; read as the session's"
+                );
+                DialogUsage::Session
             }
             None => DialogUsage::Session,
         },

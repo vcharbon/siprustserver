@@ -253,6 +253,7 @@ mod unaddressable_next_hop;
 mod unanswered_at_release;
 mod unanswered_failure_consult;
 mod unparseable_final;
+mod unreadable_reliable_provisional;
 mod unreadable_routing_target;
 mod unrelayed_in_dialog_request;
 mod unroutable;

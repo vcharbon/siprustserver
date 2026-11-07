@@ -41,10 +41,10 @@ fn max_forwards_zero_is_rejected() {
 }
 
 #[test]
-fn max_forwards_absent_is_the_decremented_default() {
-    // A request missing the header, where a deployment names the shape, is
-    // treated as the §8.1.1.6 default (70).
-    assert_eq!(hops(&register(&[])), Some(69));
+fn max_forwards_absent_is_stated_as_70() {
+    // A request missing the header, where a deployment names the shape, gains
+    // a count of 70 (§16.6 step 3).
+    assert_eq!(hops(&register(&[])), Some(70), "RFC 3261 §16.6 step 3");
 }
 
 /// A hop count no reader accepts never reaches the forwarding path: the

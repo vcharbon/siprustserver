@@ -218,7 +218,7 @@ impl ActionExecutor<'_> {
             }
             let shown = self.own_relayed_rseq(
                 call,
-                a_invite.offers_100rel(),
+                relay::offers_100rel(&a_invite),
                 &a_face,
                 i64::from(a_invite.cseq().seq()),
                 source_leg_id,
@@ -302,7 +302,7 @@ impl ActionExecutor<'_> {
         }
         let shown = self.own_relayed_rseq(
             call,
-            a_invite.offers_100rel(),
+            relay::offers_100rel(&a_invite),
             &a_tag,
             i64::from(a_invite.cseq().seq()),
             source_leg_id,

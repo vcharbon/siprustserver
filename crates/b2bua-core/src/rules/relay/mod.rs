@@ -65,7 +65,7 @@ pub use a_leg_response::{provisional_after_final, response_to_a_leg};
 pub use ack::{ack_b_leg, ack_lost_non_2xx};
 pub(crate) use ack::{acked_invite, acked_invite_carries_offer, acked_invite_cseq};
 pub use cancelled_final::cancelled_final;
-pub(crate) use option_tags::apply_withheld_option_tags;
+pub(crate) use option_tags::{apply_withheld_option_tags, offers_100rel};
 pub use originate::build_b_leg;
 pub(crate) use originate::dialling_invite;
 pub(crate) use owed_answer::{

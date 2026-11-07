@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::header::MaxForwards;
 use sip_message::{CustomParser, Exemptions, SipMessage, SipParser, SipParserLimits, SipRequest};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
@@ -170,8 +171,8 @@ fn answered_400_at_first_ingress(rig: &Rig, forward: Option<Vec<u8>>) {
 }
 
 /// On a deployment naming `max-forwards:absent`, a request with no hop count at
-/// the line bound gains the proxy's Max-Forwards with its other lines (RFC 3261
-/// §16.6), and the next hop still reads it.
+/// the line bound gains the proxy's Max-Forwards of 70 with its other lines
+/// (RFC 3261 §16.6 step 3), and the next hop still reads it.
 #[tokio::test(start_paused = true)]
 async fn an_invite_at_the_line_bound_with_no_max_forwards_reads_at_the_next_hop() {
     let exemptions = Exemptions::read(Some("max-forwards:absent")).expect("named");
@@ -179,7 +180,8 @@ async fn an_invite_at_the_line_bound_with_no_max_forwards_reads_at_the_next_hop(
     let request = invite(&plain_via(), PLAIN_TO, false, LINES_BOUND);
     assert_eq!(lines_of(request.as_bytes()), LINES_BOUND);
     let forward = rig.forward_of(&request).await.expect("the proxy forwards it");
-    read(&forward);
+    let hops = read(&forward).header::<MaxForwards>().expect("stated").expect("reads");
+    assert_eq!(hops.value(), 70, "RFC 3261 §16.6 step 3: an absent count is added as 70");
     assert!(lines_of(&forward) > LINES_BOUND, "the forward carries the proxy's additions");
 }
 

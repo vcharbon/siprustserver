@@ -395,13 +395,13 @@ fn effective_expires(req: &SipRequest, contact: Option<&Contact>) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// The hop count a forwarded request carries (RFC 3261 §16.6 step 3): the
-/// inbound value decremented, or the §8.1.1.6 default decremented when the
-/// request states no readable count. `Err(())` when the inbound count is
+/// inbound value decremented, or 70 when the request states no readable
+/// count. `Err(())` when the inbound count is
 /// already 0 — the caller answers 483 Too Many Hops or drops an ACK.
 fn forwarded_max_forwards(req: &SipRequest) -> Result<MaxForwards, ()> {
     match req.header::<MaxForwards>() {
         Some(Ok(hops)) => hops.decremented().ok_or(()),
-        _ => Ok(MaxForwards::new(DEFAULT_MAX_FORWARDS - 1)),
+        _ => Ok(MaxForwards::new(DEFAULT_MAX_FORWARDS)),
     }
 }
 

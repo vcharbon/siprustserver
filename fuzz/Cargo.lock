@@ -136,6 +136,7 @@ dependencies = [
  "sip-ids",
  "sip-message",
  "sip-retransmit",
+ "tracing",
 ]
 
 [[package]]

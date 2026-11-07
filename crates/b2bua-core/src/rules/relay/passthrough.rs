@@ -61,7 +61,9 @@ pub fn own_the_rseq(headers: &mut [MsgHeader], shown: call::RSeq) {
 /// is the ordinary provisional RFC 3262 §3 obliges this stack to send where
 /// the originator never offered the extension, or where the request is not an
 /// INVITE (the one method the mechanism serves). The responder's own
-/// reliability is this stack's to acknowledge, not the originator's.
+/// reliability is this stack's to acknowledge, not the originator's. A
+/// `Require` that does not read stays as written (a defect: ingress refuses
+/// one).
 pub fn strip_reliability(headers: &mut Vec<MsgHeader>) {
     headers.retain(|h| !HeaderName::RSeq.matches(&h.name));
     let mut kept = Vec::with_capacity(headers.len());
@@ -70,9 +72,13 @@ pub fn strip_reliability(headers: &mut Vec<MsgHeader>) {
             kept.push(h);
             continue;
         }
-        let Ok(required) = header::Require::parse(&h.value) else {
-            kept.push(h);
-            continue;
+        let required = match header::Require::parse(&h.value) {
+            Ok(required) => required,
+            Err(e) => {
+                super::option_tags::unreadable_option_tags(&HeaderName::Require, &e);
+                kept.push(h);
+                continue;
+            }
         };
         let rest = required.without("100rel");
         if !rest.is_empty() {

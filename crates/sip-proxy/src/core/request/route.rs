@@ -10,8 +10,8 @@
 use std::net::SocketAddr;
 
 use sip_message::emergency::is_emergency_request;
-use sip_message::header::{MaxForwards, ProxyRequire, Unsupported, Via};
-use sip_message::{Method, SipMessage};
+use sip_message::header::{ProxyRequire, Unsupported, Via};
+use sip_message::{hops, Method, SipMessage};
 
 use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
@@ -28,11 +28,6 @@ use super::super::ProxyCore;
 use super::reply::extra_header;
 use super::target::Chosen;
 use super::{top_via_branch, Arrival, RouteOutcome};
-
-/// The hop budget RFC 3261 §8.1.1.6 gives a request that names none — and the
-/// one a proxy applies to a value no reader can make sense of, so a malformed
-/// count neither exhausts the loop bound nor lets a request ride forever.
-const DEFAULT_MAX_FORWARDS: u32 = 70;
 
 impl ProxyCore {
     /// Abandon a forward whose own edit the message will not allow. Unreachable
@@ -63,11 +58,9 @@ impl ProxyCore {
         let select = RoutingDecisionKind::SelectNew;
 
         // ── §16.3 + Max-Forwards ────────────────────────────────────────────
-        let mf = match req.header::<MaxForwards>() {
-            Some(Ok(mf)) => mf,
-            _ => MaxForwards::new(DEFAULT_MAX_FORWARDS),
-        };
-        let Some(mf_next) = mf.decremented() else {
+        // The copy states the count less one, or 70 where the request states
+        // none (§16.6 step 3).
+        if hops::hops_exhausted(&req) {
             // §16.3 check 2: an exhausted ACK is silently discarded, never
             // answered — a response to an ACK is a stray message (the ACK
             // terminates a transaction; nothing upstream awaits a reply to it).
@@ -78,7 +71,8 @@ impl ProxyCore {
             return self
                 .reply_reject(req, arrival, 483, "Too Many Hops", &[], "too_many_hops")
                 .await;
-        };
+        }
+        let mf_next = hops::forwarded_max_forwards(&req);
 
         // ── §16.3 check 4: loop detection ───────────────────────────────────
         // A request from one of this proxy's own addresses is one it forwarded
@@ -96,8 +90,8 @@ impl ProxyCore {
         // be forwarded. ACK is exempt: a proxy never answers an ACK (it
         // terminates a transaction; nothing upstream awaits a reply), so an ACK
         // with an unsupported Proxy-Require is silently dropped, never 420'd.
-        // A Proxy-Require that is no option-tag list (§25.1) names nothing this
-        // proxy could list as unsupported: 400.
+        // Ingress refuses a Proxy-Require that is no option-tag list (§25.1),
+        // so one here is a defect, logged and answered 400.
         match req.header::<ProxyRequire>() {
             Some(Ok(required)) if !required.is_empty() => {
                 if method == Method::Ack {
@@ -116,7 +110,11 @@ impl ProxyCore {
                     )
                     .await;
             }
-            Some(Err(_)) => {
+            Some(Err(e)) => {
+                tracing::error!(
+                    reason = %e.reason,
+                    "DEFECT: a Proxy-Require past ingress does not read"
+                );
                 if method == Method::Ack {
                     self.metrics.record_reject("ack_proxy_require_unreadable");
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };

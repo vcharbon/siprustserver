@@ -279,7 +279,7 @@ impl ActionExecutor<'_> {
                 source_call_id: req.call_id().as_str().to_string(),
                 source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
                 source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
-                offered_100rel: req.offers_100rel(),
+                offered_100rel: relay::offers_100rel(req),
                 offered: relay::carries_sdp(req),
                 source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
                 relayed_by: self.owners.this.clone(),
