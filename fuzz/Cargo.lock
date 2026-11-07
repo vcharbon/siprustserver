@@ -135,6 +135,7 @@ dependencies = [
  "serde_json",
  "sip-ids",
  "sip-message",
+ "sip-retransmit",
 ]
 
 [[package]]
@@ -281,6 +282,13 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "rand_core",
+]
+
+[[package]]
+name = "clock-bridge"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]
@@ -550,6 +558,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "clock-bridge",
  "http-net",
  "layer-harness",
  "serde",
@@ -1216,6 +1225,7 @@ dependencies = [
  "sha1",
  "sha2",
  "sip-clock",
+ "sip-ids",
  "sip-message",
  "sip-net",
  "sip-txn",
