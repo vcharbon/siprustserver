@@ -13,11 +13,9 @@ use std::sync::Arc;
 use call::Call;
 use sip_message::SipRequest;
 
-use super::interpret::{push, reach, TurnKind};
-use super::turn_entry::{HeldCancel, TurnEntry};
+use super::commit::{commit_cancel, held_cancel_of};
 use super::RouterCtx;
 use crate::initial_consult::Consulted;
-use crate::turn_probe::TurnPoint;
 
 /// Run `consult`, the consult of `call` whose caller's INVITE is `invite`,
 /// writing the CANCEL that marks the setup while it runs.
@@ -41,26 +39,10 @@ pub(super) async fn consult_writing_its_cancel(
     consult.await
 }
 
-/// Write `call` marked cancelled and queue the release of the CANCEL's held
+/// Write `call` marked cancelled, with the release of the CANCEL's held
 /// answers behind that write.
 async fn write_the_cancel(ctx: &Arc<RouterCtx>, call_ref: &str, call: &Call, invite: &SipRequest) {
     let mut marked = call.clone();
     marked.setup_cancelled = true;
-    let marked = Arc::new(marked);
-    let wrote = ctx.state.write(Arc::clone(&marked));
-    let version = ctx.state.topology(call_ref).map_or((0, 0), |t| (t.gen, t.bak_gen));
-    let kind = TurnKind::on_request();
-    reach(ctx, call_ref, TurnPoint::Logged, version, wrote, kind, None).await;
-    let held = HeldCancel {
-        call_id: invite.call_id().as_str().to_string(),
-        from_tag: invite.from().tag().unwrap_or_default().to_string(),
-        cseq: invite.cseq().seq(),
-    };
-    let now_ms = ctx.clock.now_ms();
-    let entry = TurnEntry {
-        cancel: Some(held),
-        mark: (version, wrote, kind),
-        ..TurnEntry::sending(ctx, call_ref, marked, now_ms, Vec::new())
-    };
-    push(ctx, call_ref, entry).await;
+    commit_cancel(ctx, call_ref, marked, held_cancel_of(invite)).await;
 }

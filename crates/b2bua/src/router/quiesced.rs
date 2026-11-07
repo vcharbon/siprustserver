@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use super::interpret::primary_departed;
+use super::departure::primary_departed;
 use super::release::{release_call, ReleaseKind};
 use super::RouterCtx;
 use b2bua_sdk::event::CallEvent;

@@ -10,7 +10,7 @@ use b2bua_sdk::model::RuleAction;
 use call::helpers::{keep_dialogs, raise_sequences};
 use call::{Call, Direction, RelayOwner, RequestRecord};
 
-use super::super::interpret::process_result;
+use super::super::commit::{behind_the_write, commit_turn, Rider};
 use super::super::materialise::relayed_server_key;
 use super::super::RouterCtx;
 use crate::effects::HandlerResult;
@@ -25,7 +25,7 @@ use crate::turn_scope::TurnScope;
 /// they synthesise the terminal from a NON-terminal call, whereas this body is
 /// already Terminated (the edge would be vacuous and the ObligationSet would never
 /// settle the CDR / limiter / RemoveCall). The CDR + limiter release + propagated
-/// delete all ride `process_result`, exactly as a primary-served BYE would. The
+/// delete all ride `commit_turn`, exactly as a primary-served BYE would. The
 /// discharged body keeps the higher of both views' dialog sequences, and the
 /// dialogs only this node's copy holds.
 ///
@@ -53,15 +53,7 @@ pub(super) async fn discharge_met_ending(
     // Behind the sends the call's outbox still holds (ADR-0055 §3).
     let keys: Vec<_> = answered_there.iter().filter_map(relayed_server_key).collect();
     if !keys.is_empty() {
-        let sender = ctx.clone();
-        let relinquish: crate::router::outbox::Effects = Box::new(move |_| {
-            Box::pin(async move {
-                for key in keys {
-                    let _ = sender.txn.relinquish_server(key).await;
-                }
-            })
-        });
-        ctx.outboxes.push(call_ref, ctx.state.hold_target(call_ref), relinquish).await;
+        behind_the_write(ctx, call_ref, Rider::Relinquish(keys)).await;
     }
     let mut result = HandlerResult::new(keep_dialogs(raise_sequences(terminal, before), before));
     let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
@@ -80,15 +72,8 @@ pub(super) async fn discharge_met_ending(
         &mut turn.notes,
     );
     super::super::notes::drain(ctx, call_ref, &mut turn);
-    process_result(
-        ctx,
-        call_ref,
-        result,
-        now_ms,
-        &"the discharge of the other copy's ending",
-        None,
-    )
-    .await;
+    commit_turn(ctx, call_ref, result, now_ms, &"the discharge of the other copy's ending", None)
+        .await;
 }
 
 /// The record's re-INVITE relays to answer — `(leg, outbound CSeq)` — and

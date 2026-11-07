@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use call::CallModelState;
 
-use super::interpret::process_result;
+use super::commit::commit_turn;
 use super::restore_hygiene::reanchor;
 use super::RouterCtx;
 use crate::store::{role_of, CallTopology, Enveloped, MaterialiseOrigin, PartitionRole};
@@ -80,7 +80,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
 /// Materialise a not-live deferred-terminal body and discharge it through the ONE
 /// funnel with a synthetic non-terminal `before` so `enforce`'s `became_terminated`
 /// edge fires (the body is already terminal, so the edge must be synthesised). The
-/// single materialise + synth-`before` + enforce + `process_result` site, shared by
+/// single materialise + synth-`before` + enforce + `commit_turn` site, shared by
 /// every "discharge a body we don't hold live" caller:
 ///   - the reverse-flush reconcile (a backup's deferral for a call we released) and
 ///     the reboot bulk/on-demand reclaim of a `Terminated` body → `force_terminal =
@@ -125,7 +125,7 @@ pub(super) async fn discharge_materialized_terminal(
         &mut notes,
     );
     super::notes::drain_notes(ctx, call_ref, notes);
-    process_result(
+    commit_turn(
         ctx,
         call_ref,
         result,
@@ -235,11 +235,11 @@ pub(super) async fn meet_refused_flush(
 }
 
 /// Force the last persisted snapshot of `call_ref` terminal and run it through
-/// the ordinary `finalize → enforce → process_result` funnel: the `ObligationSet`
+/// the ordinary `finalize → enforce → commit_turn` funnel: the `ObligationSet`
 /// discharges the CDR + limiter holds, and `RemoveCall` logs the delete and
 /// rides `release_call(Terminated)`. Reached ONLY by the
 /// reaper `OUTCOME_DISCHARGE` branch — a takeover copy DEFERS its discharge to
-/// the primary instead of discharging here (see `process_result`). `discharge_result` forces every leg terminal with NO wire
+/// the primary instead of discharging here (see `commit_turn`). `discharge_result` forces every leg terminal with NO wire
 /// traffic. The caller MUST hold the per-call lock.
 pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) {
     let Some(call) = ctx.state.peek(call_ref) else { return };
@@ -256,7 +256,7 @@ pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_m
         &mut notes,
     );
     super::notes::drain_notes(ctx, call_ref, notes);
-    process_result(ctx, call_ref, result, now_ms, &"the reaper discharge", None).await;
+    commit_turn(ctx, call_ref, result, now_ms, &"the reaper discharge", None).await;
 }
 
 #[cfg(test)]

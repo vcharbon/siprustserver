@@ -11,8 +11,8 @@ use call::{Call, TimerType};
 use sip_message::{Method, SipMessage};
 
 use super::admit::UnbornCall;
+use super::commit::{behind_the_write, commit_turn, Rider};
 use super::incarnation_gate::of_another_incarnation;
-use super::interpret::process_result;
 
 use super::materialise::{
     materialise, materialise_after, reoffer_trigger, Materialised, Offered, Origin, Reason,
@@ -261,7 +261,7 @@ pub(super) async fn process(
     }
 
     let turn = super::turn_label::EventSummary { call_ref: &call_ref, event };
-    process_result(ctx, &call_ref, result, now_ms, &turn, Some(event)).await;
+    commit_turn(ctx, &call_ref, result, now_ms, &turn, Some(event)).await;
     true
 }
 
@@ -306,7 +306,7 @@ async fn reaper_verdict_gate(
             if outcome == crate::reaper::OUTCOME_DISCHARGE {
                 // Strike-2: the rules path itself failed. Force the last
                 // persisted snapshot terminal and run it through the ORDINARY
-                // finalize → enforce → process_result — the ObligationSet
+                // finalize → enforce → commit_turn — the ObligationSet
                 // discharges the CDR + limiter holds, RemoveCall logs the
                 // delete and rides release_call(Terminated) (X6).
                 if !ctx.state.contains(call_ref) {
@@ -324,7 +324,7 @@ async fn reaper_verdict_gate(
     } else if matches!(event, CallEvent::Sip { .. }) {
         // The last-touched stamp (ADR-0020 X4): liveness derives from **real
         // SIP traffic only** — a received message here, or a turn that sent
-        // SIP out (stamped in `process_result` after the outbound effects).
+        // SIP out (stamped in `commit_turn` after the outbound effects).
         // Self-generated turns that touch no wire (`LimiterRefresh`, internal
         // events, timer fires whose rules emit nothing) deliberately do NOT
         // stamp — the call must not vouch for itself, or a crash-orphaned call
@@ -424,8 +424,8 @@ fn record_refusal(
     }
 }
 
-/// Send `answer`, the router's answer to `event`'s request, through
-/// `call_ref`'s outbox, after the write that recorded it.
+/// Send `answer`, the router's answer to `event`'s request, behind the write
+/// that recorded it.
 async fn answer_after_the_write(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -437,12 +437,5 @@ async fn answer_after_the_write(
         SipMessage::Request(req) => super::reply_to::reply_to(req, *src),
         SipMessage::Response(_) => *src,
     };
-    let sender = ctx.clone();
-    let wait = ctx.state.hold_target(call_ref);
-    let send: super::outbox::Effects = Box::new(move |_| {
-        Box::pin(async move {
-            let _ = sender.txn.send_response(*answer, dest).await;
-        })
-    });
-    ctx.outboxes.push(call_ref, wait, send).await;
+    behind_the_write(ctx, call_ref, Rider::Answer(answer, dest)).await;
 }

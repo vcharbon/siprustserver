@@ -1,22 +1,25 @@
 //! A turn's outbox entry (ADR-0055 §3): everything the turn sends off the
 //! node, run in one go when the call's outbox releases it. It runs the turn's
 //! first provisional of a re-INVITE, the ACK of the non-2xx final it took, the
-//! answers to the CANCEL it took,
-//! then the transactions it relinquishes, its
+//! answers to the CANCEL it took, then the transactions it relinquishes, its
 //! SIP in emission order, its limiter releases and its requests to outside
-//! services, and marks the turn [`Left`](TurnPoint::Left) last.
+//! services, and marks the turn [`Left`](TurnPoint::Left) last. A [`Rider`] is
+//! what the router sends behind a call's latest write for a turn that lands no
+//! record of its own.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{Call, TxnKind};
 use sip_message::header::Via;
-use sip_message::{Method, SipRequest};
+use sip_message::{Method, SipRequest, SipResponse};
+use sip_txn::ServerTxnKey;
 
-use super::callouts;
-use super::cannot_leave::{self, CannotLeave};
-use super::interpret::{reach, TurnKind};
-use super::RouterCtx;
 use crate::effects::{FireAndForgetEffect, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::router::callouts;
+use crate::router::cannot_leave::{self, CannotLeave};
+use crate::router::turn_mark::{reach, TurnKind};
+use crate::router::RouterCtx;
 use crate::turn_probe::{Released, TurnPoint};
 
 /// What one turn sends off the node.
@@ -44,12 +47,12 @@ pub(super) struct TurnEntry {
     pub callouts: Vec<FireAndForgetEffect>,
     /// The turn's `Left` mark: its `(primary, backup)` version at `Logged`,
     /// whether it wrote, and what it was taken on.
-    pub mark: ((i64, i64), bool, TurnKind),
+    pub mark: Option<((i64, i64), bool, TurnKind)>,
 }
 
 impl TurnEntry {
-    /// An entry of `call`'s turn sending `outbound` and nothing else, marked
-    /// as a turn that wrote nothing.
+    /// An entry of `call`'s turn sending `outbound` and nothing else, with no
+    /// mark.
     pub fn sending(
         ctx: &Arc<RouterCtx>,
         call_ref: &str,
@@ -69,11 +72,12 @@ impl TurnEntry {
             outbound,
             limiter_releases: Vec::new(),
             callouts: Vec::new(),
-            mark: ((0, 0), false, TurnKind::default()),
+            mark: None,
         }
     }
 
-    /// Send everything, then mark the turn left, `released` as it was.
+    /// Send everything, then mark the turn left, `released` as it was, when
+    /// it carries a mark.
     pub async fn run(self, released: Released) {
         let ctx = &self.ctx;
         let call_ref = self.call_ref.as_str();
@@ -84,14 +88,12 @@ impl TurnEntry {
             let _ = ctx.txn.release_ack(branch).await;
         }
         if let Some(held) = &self.cancel {
-            let _ = ctx.txn.release_cancel(&held.call_id, &held.from_tag, held.cseq).await;
+            held.release(ctx).await;
         }
         for via in &self.relinquish {
             if let Some(branch) = via.branch() {
-                let key = sip_txn::ServerTxnKey::invite(
-                    branch.to_string(),
-                    sip_message::header::SentBy::of(via),
-                );
+                let key =
+                    ServerTxnKey::invite(branch.to_string(), sip_message::header::SentBy::of(via));
                 let _ = ctx.txn.relinquish_server(key).await;
             }
         }
@@ -107,8 +109,9 @@ impl TurnEntry {
         for eff in self.callouts {
             call_out(ctx, &self.call, eff);
         }
-        let (version, wrote, kind) = self.mark;
-        reach(ctx, call_ref, TurnPoint::Left, version, wrote, kind, Some(released)).await;
+        if let Some((version, wrote, kind)) = self.mark {
+            reach(ctx, call_ref, TurnPoint::Left, version, wrote, kind, Some(released)).await;
+        }
     }
 }
 
@@ -269,4 +272,41 @@ pub struct HeldCancel {
     pub call_id: String,
     pub from_tag: String,
     pub cseq: u32,
+}
+
+impl HeldCancel {
+    /// Let the layer send the 200 to the CANCEL and the 487 to its INVITE.
+    pub async fn release(&self, ctx: &RouterCtx) {
+        let _ = ctx.txn.release_cancel(&self.call_id, &self.from_tag, self.cseq).await;
+    }
+}
+
+/// What the router sends behind a call's latest write for a turn that lands
+/// no record of its own.
+pub enum Rider {
+    /// The caller's 100 to the INVITE whose call the write created.
+    Trying(Box<SipRequest>),
+    /// The router's answer to a request it refused, to where it is sent.
+    Answer(Box<SipResponse>, SocketAddr),
+    /// The server transactions of requests another copy answered.
+    Relinquish(Vec<ServerTxnKey>),
+}
+
+impl Rider {
+    /// Send it.
+    pub async fn send(self, ctx: &RouterCtx) {
+        match self {
+            Rider::Trying(invite) => {
+                let _ = ctx.txn.release_trying(&invite).await;
+            }
+            Rider::Answer(answer, dest) => {
+                let _ = ctx.txn.send_response(*answer, dest).await;
+            }
+            Rider::Relinquish(keys) => {
+                for key in keys {
+                    let _ = ctx.txn.relinquish_server(key).await;
+                }
+            }
+        }
+    }
 }

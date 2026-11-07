@@ -31,7 +31,7 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
     let reaped = ctx.state.reap_replica(now_ms).await;
     for ghost in reaped.ghosts {
         let call_ref = ghost.call.call_ref.clone();
-        if !super::super::interpret::primary_departed(ctx, &call_ref) {
+        if !super::super::departure::primary_departed(ctx, &call_ref) {
             continue;
         }
         let guard = ctx.state.lock(&call_ref).await;

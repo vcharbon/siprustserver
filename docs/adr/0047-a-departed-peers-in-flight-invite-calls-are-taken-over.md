@@ -46,7 +46,7 @@ the slice does not apply), `rules/evidence.rs` and
 `store/adoption.rs` and `repl/store/admission.rs` (an adopted version's write),
 `router/reclaim.rs` (the reverse fold of a copy's ending), `call`'s
 `helpers/lifecycle.rs` (the lifecycle order), `sip-txn`'s `layer/relinquish.rs`,
-`repl/departed.rs`, `router/interpret.rs` and `router/departure.rs` (the discharge of a departed primary's call), `router/dropped_on_delete.rs` (the drop of a live copy on the backup's delete).
+`repl/departed.rs`, `router/commit.rs` and `router/departure.rs` (the discharge of a departed primary's call), `router/dropped_on_delete.rs` (the drop of a live copy on the backup's delete).
 
 ## Context
 

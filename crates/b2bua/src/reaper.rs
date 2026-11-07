@@ -15,7 +15,7 @@
 //! four CORE_LAYER rules (`reaper-stale`, `reaper-fatal-error`,
 //! `reaper-overflow`, `reaper-message-cap`). Only the
 //! strike-2 **discharge** bypasses the *rules* stage (rules are the thing that
-//! failed); it still runs `finalize → enforce → process_result` — the
+//! failed); it still runs `finalize → enforce → commit_turn` — the
 //! [`ObligationSet`](crate::obligations::ObligationSet) derivation, the CDR,
 //! and the propagated delete all ride the one funnel.
 //!
@@ -338,7 +338,7 @@ pub fn verdict_confirmed(outcome: &str, watermark: Option<i64>, current: Option<
 /// reason-carrying `CdrEvent` is appended, the termination record names the
 /// supervisor where nothing ended the call before, `state = Terminated` — and return
 /// it with EMPTY effects: the caller runs the ordinary
-/// `finalize → enforce → process_result`, so the CDR write, the limiter
+/// `finalize → enforce → commit_turn`, so the CDR write, the limiter
 /// release (owed by a counted call, derived by the `ObligationSet`), and the
 /// final `RemoveCall → release_call(Terminated)` all come from the ONE
 /// enforcement path. Pure, panic-free by construction (no rule code, no SDP,

@@ -43,7 +43,7 @@ impl Caller {
 
 /// Fold a callout result back into the router as a re-entrant internal event.
 /// Sent via the router's event channel rather than calling `on_event` directly:
-/// the `on_event → process → process_result → on_event` cycle has an opaque
+/// the `on_event → process → commit_turn → on_event` cycle has an opaque
 /// future type the compiler cannot prove `Send`; routing back through `run`'s
 /// loop keeps re-entry single-threaded and breaks the recursion.
 fn send_internal(

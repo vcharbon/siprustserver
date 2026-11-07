@@ -12,7 +12,7 @@ use b2bua_sdk::event::CallEvent;
 use call::Call;
 use sip_ids::TurnIds;
 
-use super::interpret::process_result;
+use super::commit::commit_turn;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
@@ -89,6 +89,6 @@ async fn discharge(
     let leave = UnansweredCaller::Leave;
     let result = enforce(&ctx.obligations, &before, discharged, now_ms, leave, &mut notes);
     super::notes::drain_notes(ctx, call_ref, notes);
-    process_result(ctx, call_ref, result, now_ms, &"the discharge of an unrecoverable call", None)
+    commit_turn(ctx, call_ref, result, now_ms, &"the discharge of an unrecoverable call", None)
         .await;
 }

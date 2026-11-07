@@ -61,6 +61,14 @@ use crate::abort_on_drop::AbortOnDrop;
 use crate::rules::actions::possibly_confirmed;
 use crate::store::PartitionRole;
 
+/// Whether `call_ref`'s primary is another node that has departed.
+pub(super) fn primary_departed(ctx: &RouterCtx, call_ref: &str) -> bool {
+    match (&ctx.departed, call::call_ref_primary(call_ref)) {
+        (Some(departed), Some(primary)) => primary != ctx.config.self_ordinal && departed(primary),
+        _ => false,
+    }
+}
+
 /// How many calls the sweep reads between two yields to the runtime.
 const YIELD_EVERY: usize = 32;
 

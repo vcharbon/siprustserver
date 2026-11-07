@@ -1,5 +1,5 @@
 //! Model invariants: what the call record states at the end of every turn,
-//! checked before the record lands (`router::interpret::process_result`) when
+//! checked before the record lands (`router::commit::commit_turn`) when
 //! [`B2buaConfig::model_invariants`](crate::B2buaConfig) is on, and the
 //! defects a turn's notes report (ADR-0052 §8). A violation never stops the
 //! turn: it is kept in the process's record (its first line names the
@@ -13,7 +13,7 @@
 //! landing); the answer check also reads the request the turn handled and
 //! what the turn sends.
 //!
-//! Not covered: the turns that land a record without `process_result` — a
+//! Not covered: the turns that land a record without `commit_turn` — a
 //! request refused before the rules (foreign dialog, stray CANCEL, CSeq below
 //! the dialog's), the record created for an initial INVITE before its turn
 //! runs, a reclaim's materialisation and the reaper's eviction. The next turn

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use call::{Call, CallModelState, CdrEvent, CdrEventType, TerminationCause};
 
 use super::cancel_in_consult::consult_writing_its_cancel;
-use super::interpret::process_result;
+use super::commit::commit_turn;
 use super::RouterCtx;
 use crate::effects::HandlerResult;
 use crate::initial_consult::{handle_initial_invite, Consulted};
@@ -129,7 +129,7 @@ pub(super) async fn settle_undecided(
     let notes = &mut turn.notes;
     let result = enforce(&ctx.obligations, &before, finalize(handled), now_ms, unanswered, notes);
     super::notes::drain(ctx, call_ref, &mut turn);
-    process_result(ctx, call_ref, result, now_ms, &"the settle of an undecided call", None).await;
+    commit_turn(ctx, call_ref, result, now_ms, &"the settle of an undecided call", None).await;
 }
 
 /// The re-ask notice of `call`.
@@ -238,7 +238,7 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
     result.effects.reasked = !refused;
     super::notes::drain(ctx, call_ref, &mut turn);
     let turn_label = &"the re-ask of an undecided call's decision";
-    process_result(ctx, call_ref, result, now_ms, turn_label, None).await;
+    commit_turn(ctx, call_ref, result, now_ms, turn_label, None).await;
 }
 
 /// Whether `call_ref` is a takeover copy whose primary wrote the call since

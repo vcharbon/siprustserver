@@ -23,7 +23,7 @@ use call::{
     RelayOwner, RequestRecord,
 };
 
-use super::super::interpret::process_result;
+use super::super::commit::commit_turn;
 use super::super::RouterCtx;
 use super::meeting::resync_timers;
 use super::FlushDirection;
@@ -291,6 +291,5 @@ async fn end_cleanly(
         &mut turn.notes,
     );
     super::super::notes::drain(ctx, call_ref, &mut turn);
-    process_result(ctx, call_ref, result, now_ms, &"the clean end of two diverged copies", None)
-        .await;
+    commit_turn(ctx, call_ref, result, now_ms, &"the clean end of two diverged copies", None).await;
 }

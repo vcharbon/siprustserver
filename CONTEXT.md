@@ -440,6 +440,24 @@ that ends a call waits for its delete, the call resident until then (ADR-0055
 _Avoid_: "sync replication" (no entry waits past the cap), "hold" (every
 effect goes through the outbox).
 
+**Turn commit**:
+The one tail of a call's turn (`router/commit.rs`): it persists the landed
+record, reports the turn logged, takes in the turn what never leaves the node,
+queues what the turn sends on the call's outbox behind the write that records
+it, and ends the call once that outbox drained. How a turn persists and ends is
+one **commit kind**: quiet, update, write, delete before send, delete after
+drain, or defer to the primary (a takeover copy's terminal while its primary
+lives). No other router module reads a hold target, pushes on an outbox or
+reports a turn mark (ADR-0055 §3).
+_Avoid_: "interpret" (the commit decides the persist and the end, it does not
+interpret effects one by one).
+
+**Rider**:
+What the router sends behind a call's latest write for a turn that lands no
+record of its own: the caller's 100 after the creation write, the answer to a
+request the router refused, the server transactions another copy answered.
+It reports no turn mark.
+
 **Silent stream**:
 A replication stream that has delivered nothing for the idle bound (15 s; a
 served stream carries a `Noop` at least every 5 s). The puller leaves it and

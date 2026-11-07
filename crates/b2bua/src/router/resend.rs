@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use call::{Call, CallModelState, OffTurnRequest, TimerType};
 
-use super::interpret::process_result;
+use super::commit::commit_turn;
 use super::RouterCtx;
 use crate::effects::{CriticalStateEffect, FireAndForgetEffect, HandlerEffects, HandlerResult};
 use crate::limiter::report::LimiterAdmitResult;
@@ -95,7 +95,7 @@ pub(super) async fn resend_turn(
     );
     let result = HandlerResult { call, effects };
     let turn = &"the re-send of the requests the call awaits";
-    process_result(ctx, call_ref, result, now_ms, turn, None).await;
+    commit_turn(ctx, call_ref, result, now_ms, turn, None).await;
 }
 
 /// Whether `deadline` is the answer deadline of a request `call` awaits.
