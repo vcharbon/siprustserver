@@ -17,12 +17,14 @@ use std::borrow::Cow;
 
 pub mod custom;
 mod exemptions;
+mod first_ingress;
 mod stored;
 
 #[cfg(feature = "rvoip-oracle")]
 pub mod rvoip;
 
 pub use exemptions::{Exemption, Exemptions};
+pub use first_ingress::FirstIngressBound;
 pub use stored::read_stored;
 
 /// The layer interface. Every parser implementation conforms to this.
@@ -43,7 +45,9 @@ pub trait SipParser {
 }
 
 /// Length caps and grammar policy bounding adversarial input. Lengths are
-/// measured against decoded (unfolded, trimmed) values.
+/// measured against decoded (unfolded, trimmed) values. The `max_*` fields bound
+/// every read of the wire; [`first_ingress`](Self::first_ingress) is the smaller
+/// bound on a party's new request (ADR-0001).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SipParserLimits {
     /// Max bytes of a single header (`name + ": " + value`, unfolded).
@@ -77,6 +81,13 @@ pub struct SipParserLimits {
     /// parser and consulted only by its gates (ADR-0001): a stored read and a
     /// harness reader carry none.
     pub exemptions: Exemptions,
+    /// What a party's new request may hold at the hop it first reaches.
+    pub first_ingress: FirstIngressBound,
+    /// Whether every datagram this parser reads is at first ingress: it refuses
+    /// a new request past [`first_ingress`](Self::first_ingress), with the
+    /// partial that answers it. An element that cannot tell by the datagram asks
+    /// [`CustomParser::first_ingress_refusal`](custom::CustomParser::first_ingress_refusal).
+    pub at_first_ingress: bool,
 }
 
 /// The transport framing of the bytes a parser is handed. Over a datagram the
@@ -103,37 +114,28 @@ const STANDARD_TRANSPORTS: &[Cow<'static, str>] = &[
     Cow::Borrowed("WSS"),
 ];
 
-/// The most header lines one forward through the front proxy adds to a request:
-/// its Via and a double Record-Route.
-const PROXY_HOP_LINES: usize = 3;
+/// The lines every hop of a request's path may add past
+/// [`FirstIngressBound::header_lines`]: a forward's Via, double Record-Route and
+/// Max-Forwards, a worker's preloaded Route, what a route states.
+const HOP_ROOM_LINES: usize = 32;
 
-/// The most bytes one forward through the front proxy adds to a line it keeps:
-/// `;received=<IPv6 address>;rport=<port>` on the top Via.
-const PROXY_HOP_LINE_BYTES: usize = 128;
+/// The largest UDP datagram: past first ingress, nothing else bounds a line.
+const DATAGRAM_BYTES: usize = 65_535;
 
 impl SipParserLimits {
-    /// The default bounds (ADR-0001), built without allocating: what the edge
-    /// of the stack reads under and a stack-built message is assembled under.
+    /// The default bounds (ADR-0001), built without allocating.
     pub const DEFAULT: SipParserLimits = SipParserLimits {
-        max_header_length: 8192,
-        max_uri_length: 8192,
-        max_header_lines: 100,
+        max_header_length: DATAGRAM_BYTES,
+        max_uri_length: DATAGRAM_BYTES,
+        max_header_lines: FirstIngressBound::DEFAULT.header_lines + HOP_ROOM_LINES,
         allowed_transports: Cow::Borrowed(STANDARD_TRANSPORTS),
         wire_grammar: true,
         value_gates: true,
         framing: Framing::Datagram,
         exemptions: Exemptions::NONE,
+        first_ingress: FirstIngressBound::DEFAULT,
+        at_first_ingress: false,
     };
-
-    /// These bounds for an element behind the front proxy: a request the proxy
-    /// read under them still reads here, its forward's additions included.
-    pub fn behind_proxy(self) -> Self {
-        Self {
-            max_header_length: self.max_header_length.saturating_add(PROXY_HOP_LINE_BYTES),
-            max_header_lines: self.max_header_lines.saturating_add(PROXY_HOP_LINES),
-            ..self
-        }
-    }
 }
 
 impl Default for SipParserLimits {

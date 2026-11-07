@@ -161,7 +161,8 @@ pub struct Absorption {
 impl Absorption {
     /// `raw` as this endpoint reads it.
     pub(crate) fn read(&self, raw: &[u8]) -> Result<SipMessage, SipParseError> {
-        self.reader.lock().unwrap_or_else(PoisonError::into_inner).parse(raw)
+        let reader = self.reader.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        reader.parse(raw)
     }
 
     /// Read the wire under `limits` from now on.

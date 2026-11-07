@@ -131,7 +131,7 @@ pub use cdr_rabbitmq::{
     MAX_DRAINER_WAIT_MS, MAX_WAIT_MS, MAX_WINDOW,
 };
 pub use check::ConfigCheck;
-pub use env_read::{env_stated, stated, stated_list};
+pub use env_read::{env_stated, split_host_port, stated, stated_list};
 pub use front_env::{addresses_from_lookup, WorkerAddresses};
 pub use null_cdr::NullCdrWriter;
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
@@ -163,17 +163,6 @@ pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
         .map_err(|e| format!("cannot resolve {addr:?}: {e}"))?
         .next()
         .ok_or_else(|| format!("no address resolved from {addr:?}"))
-}
-
-/// Split a `host:port` into its parts WITHOUT DNS resolution (the host may be a
-/// service name resolved per-call downstream). Port defaults to 5060 if absent
-/// or unparseable. Used for a b-leg callee default (`B2BUA_DEST`-style knobs) —
-/// resolving at boot would pin every call to one startup-resolved pod.
-pub fn split_host_port(s: &str) -> (String, u16) {
-    match s.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(5060)),
-        None => (s.to_string(), 5060),
-    }
 }
 
 impl RunnerEnv {
@@ -224,7 +213,9 @@ impl RunnerEnv {
             brake_config,
             brake_counters.clone(),
             refusals.clone(),
-            sip_message::CustomParser::with_limits(self.parser_limits.clone()),
+            sip_message::CustomParser::with_limits(
+                self.addresses.front.reads_under(&self.parser_limits),
+            ),
         );
 
         // Real, non-recording transport: a plain tokio UDP socket. Bind into an

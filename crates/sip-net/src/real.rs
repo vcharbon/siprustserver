@@ -41,9 +41,9 @@ use crate::types::{
 /// 4-tuple, so all datagrams from one src:port land on ONE socket and per-flow
 /// ordering (INVITE→CANCEL, retransmits) is preserved. `SO_SNDBUF` and
 /// `SO_RCVBUF` are requested from `opts` (`None` keeps the kernel default). An
-/// IPv6 socket is `IPV6_V6ONLY`: no IPv4-mapped source reaches the stack, and
-/// it serves IPv6 alone. Public so a test reads the options back off the very socket the bind path
-/// produces.
+/// IPv6 socket is `IPV6_V6ONLY`: no IPv4-mapped source reaches the stack, and it
+/// serves IPv6 alone. Public so a test reads the options back off the very
+/// socket the bind path produces.
 pub fn build_bound_socket(opts: &BindUdpOpts) -> std::io::Result<socket2::Socket> {
     let addr = opts.addr;
     let domain = socket2::Domain::for_address(addr);

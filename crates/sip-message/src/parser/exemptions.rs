@@ -25,12 +25,14 @@ impl Exemptions {
     /// No exemption: every shape is held to the RFC.
     pub const NONE: Exemptions = Exemptions(Cow::Borrowed(&[]));
 
-    /// The comma-separated names `stated` lists; a blank value and a blank
-    /// entry state nothing. `Err` names the entry no exemption has as its name.
-    pub fn parse(stated: &str) -> Result<Self, String> {
-        let names = stated.split(',').map(str::trim).filter(|name| !name.is_empty());
-        let named = names.map(|name| {
-            Exemption::named(name).ok_or_else(|| format!("no exemption is named {name:?}"))
+    /// The set a variable states: none when unset. A value set blank, a blank
+    /// entry, and a name no exemption has are each refused, on every tier alike:
+    /// a typo never reads as a setting (ADR-0046).
+    pub fn read(stated: Option<&str>) -> Result<Self, String> {
+        let Some(stated) = stated else { return Ok(Self::NONE) };
+        let named = stated.split(',').map(str::trim).map(|name| match name {
+            "" => Err(format!("names nothing in {stated:?}")),
+            name => Exemption::named(name).ok_or_else(|| format!("names no exemption: {name:?}")),
         });
         named.collect::<Result<Vec<_>, _>>().map(|set| Exemptions(Cow::Owned(set)))
     }
@@ -57,15 +59,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_blank_value_states_nothing() {
+    fn unset_states_nothing() {
+        assert!(Exemptions::read(None).expect("nothing to refuse").is_empty());
+    }
+
+    #[test]
+    fn a_blank_value_or_entry_is_refused() {
         for stated in ["", "  ", ",", " , "] {
-            assert!(Exemptions::parse(stated).expect("nothing to refuse").is_empty(), "{stated:?}");
+            assert!(Exemptions::read(Some(stated)).is_err(), "{stated:?}");
         }
     }
 
     #[test]
     fn a_name_no_exemption_has_is_refused_naming_it() {
-        let refusal = Exemptions::parse(", not-an-exemption").expect_err("refused");
+        let refusal = Exemptions::read(Some("not-an-exemption")).expect_err("refused");
         assert!(refusal.contains("not-an-exemption"), "{refusal}");
     }
 }

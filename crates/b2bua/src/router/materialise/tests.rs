@@ -464,6 +464,31 @@ async fn a_body_holding_an_unreadable_image_is_discharged_with_nothing_sent() {
     assert_eq!(n.metrics.unrecoverable_calls_total(), 1);
 }
 
+/// An image no seed names costs a live call nothing: a final whose Completed
+/// state ended holds no seed, so a takeover serves the call whatever that image
+/// holds.
+#[tokio::test(start_paused = true)]
+async fn an_unreadable_image_no_seed_names_does_not_discharge_the_call() {
+    let n = node("w1").await;
+    let ctx = n.core.router_ctx();
+    let mut call = call_in("w0", "w1", "cid-stale", CallModelState::Active, &n.clock);
+    call.answered.push(call::AnsweredRequest {
+        method: "INFO".into(),
+        branch: "z9hG4bK-stale".into(),
+        response: call::RetainedEmission::on_trigger(
+            b"\xffnot a message".to_vec(),
+            ("192.0.2.77".to_string(), 5070),
+            call::Repeated::response("INFO", 200),
+        ),
+        until_ms: n.clock.now_ms() - 1,
+    });
+    put(&n.store, BAK, "w0", &call).await;
+
+    let _guard = ctx.state.lock(&call.call_ref).await;
+    served(materialise(ctx, &call.call_ref, Origin::Takeover).await);
+    assert_eq!(n.metrics.unrecoverable_calls_total(), 0);
+}
+
 /// Every reclaim miss is typed: a ref this node backs up, a ref with no body.
 #[tokio::test(start_paused = true)]
 async fn reclaim_misses_are_typed() {

@@ -631,3 +631,35 @@ async fn the_instance_without_the_memo_sends_the_workers_ack_to_the_invites_dest
     );
     assert_eq!(decision, RoutingDecisionKind::WorkerOutbound);
 }
+
+/// `msg` carrying a header line past ADR-0001's first-ingress bound.
+fn past_the_bound(msg: &SipMessage) -> SipMessage {
+    let long = format!("X-Long: {}\r\nContent-Length:", "a".repeat(9_000));
+    let text = String::from_utf8_lossy(msg.image()).replace("Content-Length:", &long);
+    parse_msg(&text)
+}
+
+/// A party's new request past the bound is answered on the external face at
+/// first ingress, and nothing reaches the internal plane.
+#[tokio::test]
+async fn a_new_request_past_the_bound_is_answered_on_the_external_face() {
+    let fx = dual_face_core();
+    fx.core.handle_request_from(past_the_bound(&caller_invite("past-ext")), caller_src()).await;
+    let sent = fx.take_sent();
+    let [(face, dst, bytes)] = sent.as_slice() else { panic!("one answer: {sent:?}") };
+    assert_eq!((*face, *dst), ("ext", caller_src()));
+    assert!(bytes.starts_with(b"SIP/2.0 400 "), "{}", String::from_utf8_lossy(bytes));
+}
+
+/// A worker's request arriving on the internal face reads with room: what it
+/// relayed from a caller, grown by the hops, is forwarded.
+#[tokio::test]
+async fn a_workers_request_past_the_bound_is_forwarded_on_the_internal_face() {
+    let fx = dual_face_core();
+    let worker: SocketAddr = format!("{W1}:5070").parse().expect("an address");
+    fx.core.handle_request_from(past_the_bound(&worker_bleg_invite("past-int")), worker).await;
+    let sent = fx.take_sent();
+    let [(face, _, bytes)] = sent.as_slice() else { panic!("one forward: {sent:?}") };
+    assert_eq!(*face, "ext");
+    assert!(bytes.starts_with(b"INVITE "), "{}", String::from_utf8_lossy(bytes));
+}

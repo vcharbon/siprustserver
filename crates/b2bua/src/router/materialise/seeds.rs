@@ -46,16 +46,22 @@ use b2bua_sdk::event::CallEvent;
 use call::{Call, Dialog, Leg, RequestRecord, RetainedEmission, SentRequest, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::header::{HeaderValue, SentBy, Via};
-use sip_message::{read_stored, SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
+use sip_message::{SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
 use sip_txn::{ServerTxnKey, TxnSeed};
 
 use super::received_request::rebuild_received_request;
+use super::seed_images::ImageReads;
 use crate::rules::relay::rebuild_a_leg_invite;
 
 /// Every in-flight transaction `call` names at `now_ms`, one seed per branch
 /// and role. A sent non-INVITE request whose deadline passed is not in
 /// flight: its record settles as a timeout ([`overdue_sent`]).
 pub(super) fn seeds_for(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
+    seeds_reading(call, now_ms, &ImageReads::default())
+}
+
+/// [`seeds_for`], its image reads met by `reads`.
+pub(super) fn seeds_reading(call: &Call, now_ms: i64, reads: &ImageReads) -> Vec<TxnSeed> {
     let mut seeds = Vec::new();
     let mut branches = HashSet::new();
     for leg in std::iter::once(&call.a_leg).chain(call.b_legs.iter()) {
@@ -67,7 +73,7 @@ pub(super) fn seeds_for(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
                 .map(move |r| (Some(d), r))
         });
         for (dialog, record) in leg.invite.iter().map(|r| (None, r)).chain(dialog_records) {
-            for seed in record_seeds(call, leg, dialog, record, now_ms) {
+            for seed in record_seeds(call, leg, dialog, record, now_ms, reads) {
                 // A client and a server transaction are told apart (RFC 3261
                 // §17.1.3, §17.2.3): one of each may share a branch.
                 let (server, via) = match &seed {
@@ -114,19 +120,21 @@ fn record_seeds(
     dialog: Option<&Dialog>,
     record: &RequestRecord,
     now_ms: i64,
+    reads: &ImageReads,
 ) -> Vec<TxnSeed> {
     let Some(dialog) = dialog else {
-        return dialog_creating_seed(call, leg, record).into_iter().collect();
+        return dialog_creating_seed(call, leg, record, reads).into_iter().collect();
     };
     if dialog.answered_invite.as_ref() == Some(record) {
         let answered = record.invite.as_ref().and_then(|x| x.answered_2xx.as_ref());
         let accepted = answered
-            .and_then(parse_response)
+            .and_then(|retained| parse_response(retained, reads))
             .map(|response| TxnSeed::ServerAccepted { response, leg_id: Some(leg.leg_id.clone()) });
         return accepted.into_iter().collect();
     }
     if record.is_invite() {
-        let mut seeds: Vec<TxnSeed> = sent_invite_seed(leg, dialog, record).into_iter().collect();
+        let mut seeds: Vec<TxnSeed> =
+            sent_invite_seed(leg, dialog, record, reads).into_iter().collect();
         if call::helpers::relayed_invite_pending(dialog) {
             seeds.extend(relayed_server_seed(call, leg, record));
         }
@@ -137,7 +145,8 @@ fn record_seeds(
     // flight either.
     let overdue_relay =
         record.is_relay() && record.sent.is_some() && remaining_ms(record, now_ms).is_none();
-    let mut seeds: Vec<TxnSeed> = client_non_invite_seed(record, now_ms).into_iter().collect();
+    let mut seeds: Vec<TxnSeed> =
+        client_non_invite_seed(record, now_ms, reads).into_iter().collect();
     if !record.is_own() && !overdue_relay {
         seeds.extend(server_non_invite_seed(call, leg, record));
     }
@@ -150,13 +159,18 @@ fn record_seeds(
 /// it while it had drawn no provisional (RFC 3261 §9.1). A record that does
 /// not rebuild the caller's INVITE is never served (ADR-0052 §11): it seeds
 /// none.
-fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Option<TxnSeed> {
+fn dialog_creating_seed(
+    call: &Call,
+    leg: &Leg,
+    record: &RequestRecord,
+    reads: &ImageReads,
+) -> Option<TxnSeed> {
     let Some(dialled) = leg.outbound_invite() else {
         if leg.leg_id != call.a_leg.leg_id {
             return None;
         }
         if leg.invite_final_sent().is_some() {
-            return rejected_seed(leg);
+            return rejected_seed_reading(leg, reads);
         }
         let request = rebuild_a_leg_invite(&call.a_leg_invite).ok()?;
         return Some(TxnSeed::ServerInvite {
@@ -170,7 +184,10 @@ fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Optio
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| b2bua_core::caller_tags::own(call)),
             ),
-            provisional: leg.invite_provisional().and_then(parse_emitted_response).map(Box::new),
+            provisional: leg
+                .invite_provisional()
+                .and_then(|retained| parse_emitted_response(retained, reads))
+                .map(Box::new),
             leg_id: Some(leg.leg_id.clone()),
         });
     };
@@ -187,15 +204,20 @@ fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Optio
     // ends the transaction with the CANCEL unsent (§17.2.1).
     let cancel = dialled.cancel_sent.then_some(dialled.cancel_headers.as_slice());
     let provisional = !leg.dialogs.is_empty() && cancel.is_none();
-    client_seed(record.sent.as_ref()?, provisional, cancel)
+    client_seed(record.sent.as_ref()?, provisional, cancel, reads)
 }
 
 /// The seed of the caller's INVITE answered with the non-2xx final the record
 /// keeps: Completed on it, so the final reaches her even when the record ran
 /// ahead of the wire (RFC 3261 §17.2.1).
 pub(in crate::router) fn rejected_seed(leg: &Leg) -> Option<TxnSeed> {
+    rejected_seed_reading(leg, &ImageReads::default())
+}
+
+/// [`rejected_seed`], its image read met by `reads`.
+fn rejected_seed_reading(leg: &Leg, reads: &ImageReads) -> Option<TxnSeed> {
     let (bytes, (host, port)) = leg.invite_rejection()?.wire();
-    let response = match read_stored(bytes).ok()? {
+    let response = match reads.read(bytes)? {
         SipMessage::Response(r) => r,
         SipMessage::Request(_) => return None,
     };
@@ -212,7 +234,12 @@ pub(in crate::router) fn rejected_seed(leg: &Leg) -> Option<TxnSeed> {
 /// the leg's dialling INVITE has no final, or no 2xx was taken for it and,
 /// for a relay, it was not CANCELled toward its target. A re-INVITE records
 /// no provisional, and carries the ACK of the 2xx before it.
-fn sent_invite_seed(leg: &Leg, dialog: &Dialog, record: &RequestRecord) -> Option<TxnSeed> {
+fn sent_invite_seed(
+    leg: &Leg,
+    dialog: &Dialog,
+    record: &RequestRecord,
+    reads: &ImageReads,
+) -> Option<TxnSeed> {
     let sent = call::helpers::invite_image(leg, record)?;
     let initial_in_flight = leg.outbound_invite().is_some_and(|i| i.final_received.is_none());
     let round_open = !call::helpers::invite_taken(dialog) && !record.cancelled;
@@ -220,7 +247,7 @@ fn sent_invite_seed(leg: &Leg, dialog: &Dialog, record: &RequestRecord) -> Optio
         return None;
     }
     let provisional = initial_in_flight && !leg.dialogs.is_empty();
-    let mut seed = client_seed(sent, provisional, None)?;
+    let mut seed = client_seed(sent, provisional, None, reads)?;
     if let TxnSeed::ClientInvite { ack_ahead, .. } = &mut seed {
         *ack_ahead = call::helpers::sent_exchange(dialog)
             .and_then(|x| x.ack_ahead.as_ref())
@@ -234,50 +261,8 @@ fn sent_invite_seed(leg: &Leg, dialog: &Dialog, record: &RequestRecord) -> Optio
 
 /// Whether the record is an INVITE's, whose transactions the INVITE seeds
 /// above rebuild.
-fn invite_record(record: &RequestRecord) -> bool {
+pub(super) fn invite_record(record: &RequestRecord) -> bool {
     record.method == "INVITE"
-}
-
-/// Whether `call` holds a non-INVITE request in flight on a dialog, other
-/// than the keepalive: a relay or a request of its own awaiting its final, or
-/// a request received and owed one — a transaction a copy serves, which the
-/// party that began it may never repeat. The keepalive is left out: every
-/// quiet dialog sends one, and taking each over is the stale-CSeq storm
-/// ADR-0014 D1 avoids.
-pub(in crate::router) fn names_request_in_flight(call: &Call) -> bool {
-    call::helpers::every_record(call).any(|(_, _, r)| !invite_record(r) && !r.is_keepalive())
-}
-
-/// The non-INVITE record of `call` whose received half `branch` names: a
-/// request a relay was made for, or one held for a later final. A copy of it
-/// is no new request.
-pub(in crate::router) fn received_record<'a>(
-    call: &'a Call,
-    branch: &str,
-) -> Option<&'a RequestRecord> {
-    if branch.is_empty() {
-        return None;
-    }
-    call::helpers::every_record(call)
-        .filter(|(_, _, r)| !r.is_own() && !invite_record(r))
-        .find(|(_, _, r)| pending_via(r).is_some_and(|v| v.branch() == Some(branch)))
-        .map(|(_, _, r)| r)
-}
-
-/// Whether `call` holds a final it sent on `branch` to a received `method`
-/// request whose server transaction is Completed at `now_ms`: a copy of that
-/// request draws the final again and is no new request (RFC 3261 §17.2.2).
-pub(in crate::router) fn names_answered_branch(
-    call: &Call,
-    branch: &str,
-    method: &str,
-    now_ms: i64,
-) -> bool {
-    !branch.is_empty()
-        && call
-            .answered
-            .iter()
-            .any(|a| a.branch == branch && a.method == method && a.completed_at(now_ms))
 }
 
 /// The seeds of the received non-INVITE requests `call` answered whose
@@ -285,11 +270,16 @@ pub(in crate::router) fn names_answered_branch(
 /// sent once at the seed — the record may hold it before the wire saw it —
 /// and drawn by each copy of its request (RFC 3261 §17.2.2).
 pub(super) fn answered_seeds(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
+    answered_reading(call, now_ms, &ImageReads::default())
+}
+
+/// [`answered_seeds`], its image reads met by `reads`.
+pub(super) fn answered_reading(call: &Call, now_ms: i64, reads: &ImageReads) -> Vec<TxnSeed> {
     call.answered
         .iter()
         .filter(|a| a.completed_at(now_ms))
         .filter_map(|a| {
-            let response = parse_emitted_response(&a.response)?;
+            let response = parse_emitted_response(&a.response, reads)?;
             let (_, (host, port)) = a.response.wire();
             let dest = sip_net::ip_socket_addr(host, port)?;
             let bound_ms = u64::try_from(a.until_ms.saturating_sub(now_ms)).ok()?;
@@ -298,27 +288,16 @@ pub(super) fn answered_seeds(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
         .collect()
 }
 
-/// `call` without the relay a copy of its originator's request on `branch`
-/// supersedes: the relay's final returns to another node, so the copy is
-/// relayed afresh and that relay settles nothing here.
-pub(in crate::router) fn drop_superseded(mut call: Call, branch: &str) -> Call {
-    let superseded = |r: &RequestRecord| {
-        r.is_relay() && pending_via(r).is_some_and(|v| v.branch() == Some(branch))
-    };
-    for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
-        for d in leg.dialogs.iter_mut() {
-            d.requests.retain(|r| !superseded(r));
-        }
-    }
-    call
-}
-
 /// The client seed of a sent non-INVITE request: the request as it left and
 /// the wire destination it was sent to. `None` when neither reads back.
-fn client_non_invite_seed(record: &RequestRecord, now_ms: i64) -> Option<TxnSeed> {
+fn client_non_invite_seed(
+    record: &RequestRecord,
+    now_ms: i64,
+    reads: &ImageReads,
+) -> Option<TxnSeed> {
     let sent = record.sent.as_ref()?;
     let bound_ms = remaining_ms(record, now_ms)?;
-    let request = parse_request(&sent.image)?;
+    let request = parse_request(&sent.image, reads)?;
     let dest = sip_net::ip_socket_addr(&sent.destination.host, sent.destination.port)?;
     Some(TxnSeed::ClientNonInvite { request, dest, bound_ms })
 }
@@ -392,7 +371,7 @@ pub(in crate::router) fn names_server_branch(call: &Call, branch: &str) -> bool 
     relayed
         || dialogs()
             .filter_map(call::helpers::answered_2xx)
-            .filter_map(parse_response)
+            .filter_map(|retained| parse_response(retained, &ImageReads::default()))
             .any(|r| r.top_via().branch() == Some(branch))
 }
 
@@ -404,7 +383,10 @@ pub(in crate::router) fn names_unanswered_caller_invite(call: &Call, branch: &st
     if branch.is_empty() || a_leg.invite_final_sent().is_some() {
         return false;
     }
-    let seed = a_leg.invite.as_ref().and_then(|r| dialog_creating_seed(call, a_leg, r));
+    let seed = a_leg
+        .invite
+        .as_ref()
+        .and_then(|r| dialog_creating_seed(call, a_leg, r, &ImageReads::default()));
     matches!(seed, Some(TxnSeed::ServerInvite { request, .. })
         if request.top_via().branch() == Some(branch))
 }
@@ -418,7 +400,7 @@ pub(in crate::router) fn relayed_server_key(p: &RequestRecord) -> Option<ServerT
 }
 
 /// The originator's top Via a pending relayed request was received with.
-fn pending_via(p: &RequestRecord) -> Option<Via> {
+pub(super) fn pending_via(p: &RequestRecord) -> Option<Via> {
     let top_via = p.source_vias.first()?;
     Via::parse(&SipStr::owned(top_via)).ok()
 }
@@ -432,8 +414,9 @@ fn client_seed(
     sent: &SentRequest,
     provisional: bool,
     cancel: Option<&[(String, String)]>,
+    reads: &ImageReads,
 ) -> Option<TxnSeed> {
-    let invite = parse_request(&sent.image)?;
+    let invite = parse_request(&sent.image, reads)?;
     let dest = sip_net::ip_socket_addr(&sent.destination.host, sent.destination.port)?;
     let cancel = cancel.map(|stated| {
         let stated: Vec<SipHeader> = stated
@@ -470,21 +453,21 @@ fn relayed_server_seed(call: &Call, leg: &Leg, pending: &RequestRecord) -> Optio
 }
 
 /// A request re-parsed from the bytes a record keeps it as.
-fn parse_request(bytes: &[u8]) -> Option<SipRequest> {
-    match read_stored(bytes).ok()? {
+fn parse_request(bytes: &[u8], reads: &ImageReads) -> Option<SipRequest> {
+    match reads.read(bytes)? {
         SipMessage::Request(r) => Some(r),
         SipMessage::Response(_) => None,
     }
 }
 
 /// The retained 2xx re-parsed from the datagram it left as.
-fn parse_response(retained: &Unacked2xx) -> Option<SipResponse> {
-    parse_emitted_response(&retained.emission)
+fn parse_response(retained: &Unacked2xx, reads: &ImageReads) -> Option<SipResponse> {
+    parse_emitted_response(&retained.emission, reads)
 }
 
 /// A retained response re-parsed from the datagram it left as.
-fn parse_emitted_response(emission: &RetainedEmission) -> Option<SipResponse> {
-    match read_stored(emission.wire().0).ok()? {
+fn parse_emitted_response(emission: &RetainedEmission, reads: &ImageReads) -> Option<SipResponse> {
+    match reads.read(emission.wire().0)? {
         SipMessage::Response(r) => Some(r),
         SipMessage::Request(_) => None,
     }

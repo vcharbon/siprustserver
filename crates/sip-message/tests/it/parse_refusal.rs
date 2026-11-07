@@ -249,26 +249,45 @@ fn a_header_past_the_length_limit_leaves_no_partial() {
     assert!(err.partial().is_none(), "{err:?}");
 }
 
-/// ADR-0001's bounds: a header line and a Request-URI of 8,192 bytes read, one
-/// byte more is refused. A Contact URI that fits its line fits a Request-URI,
-/// so it can become the target of this stack's in-dialog request.
+/// ADR-0001's first-ingress bound: a line and a Request-URI of 8,192 bytes and a
+/// block of 100 lines read at first ingress, one more of any is refused with the
+/// partial that answers it. A parser that is not at first ingress reads them.
 #[test]
-fn a_line_and_a_request_uri_read_up_to_their_stated_bound() {
-    let limits = SipParserLimits::default();
-    assert_eq!((limits.max_header_length, limits.max_uri_length), (8192, 8192));
-
-    let padded = |len: usize| format!("X-Long: {}", "a".repeat(len - "X-Long: ".len()));
-    assert!(CustomParser::new().parse(&invite_with(&[&padded(8192)])).is_ok());
-    let err = CustomParser::new().parse(&invite_with(&[&padded(8193)])).expect_err("refused");
-    assert!(err.reason.contains("exceeds limit 8192"), "{}", err.reason);
-
-    let at = |len: usize| {
+fn a_new_request_meets_the_first_ingress_bound() {
+    let bound = SipParserLimits::default().first_ingress;
+    assert_eq!((bound.header_length, bound.uri_length, bound.header_lines), (8192, 8192, 100));
+    let gated =
+        CustomParser::with_limits(SipParserLimits { at_first_ingress: true, ..Default::default() });
+    let long = |len: usize| format!("X-Long: {}", "a".repeat(len - "X-Long: ".len()));
+    let at_uri = |len: usize| {
         let target = format!("sip:{}@192.0.2.20", "b".repeat(len - "sip:@192.0.2.20".len()));
         wire(&invite_lines(&format!("INVITE {target} SIP/2.0"), &[]))
     };
-    assert!(CustomParser::new().parse(&at(8192)).is_ok());
-    let err = CustomParser::new().parse(&at(8193)).expect_err("refused");
-    assert!(err.reason.contains("exceeds limit 8192"), "{}", err.reason);
+    let at_lines = |n: usize| invite_with(&vec!["Q:a"; n - 9]);
+    for (at, past) in [
+        (invite_with(&[&long(8192)]), invite_with(&[&long(8193)])),
+        (at_uri(8192), at_uri(8193)),
+        (at_lines(100), at_lines(101)),
+    ] {
+        assert!(gated.parse(&at).is_ok(), "at the bound");
+        let refused = gated.parse(&past).expect_err("one past it");
+        assert!(refused.reason.contains("first-ingress bound"), "{}", refused.reason);
+        assert!(refused.partial().is_some(), "answerable: {refused:?}");
+        assert!(CustomParser::new().parse(&past).is_ok(), "read with room");
+    }
+}
+
+/// A request with a To-tag carries what hops added to its dialog's lines.
+#[test]
+fn a_request_with_a_to_tag_is_not_held_to_the_first_ingress_bound() {
+    let gated =
+        CustomParser::with_limits(SipParserLimits { at_first_ingress: true, ..Default::default() });
+    let long = format!("X-Long: {}", "a".repeat(9_000));
+    let raw = invite_with(&[&long]);
+    let tagged = String::from_utf8(raw)
+        .expect("text")
+        .replace(&format!("To: {TO}"), &format!("To: {TO};tag=dialog"));
+    assert!(gated.parse(tagged.as_bytes()).is_ok());
 }
 
 /// A header block past the line limit is refused before any header is read,

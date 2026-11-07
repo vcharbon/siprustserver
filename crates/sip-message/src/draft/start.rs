@@ -163,6 +163,9 @@ impl StartKind for kind::Response {
         body: Bytes,
         raw: Bytes,
     ) -> Result<Self::Message, SipParseError> {
+        if let Some(refusal) = crate::parser::custom::start_line::status_refusal(line.status) {
+            return Err(refusal);
+        }
         let idx = HeaderIndex::build(&headers);
         let core = extract_response_fields(
             &idx,

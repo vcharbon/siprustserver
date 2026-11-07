@@ -177,10 +177,7 @@ fn hop_popping(shape: Shape) -> Op {
     let request = wire::request(&wire::invite(&shape));
     Box::new(move || {
         let own = request.route_set().expect("the routes read").len();
-        let mut draft = request.thaw();
-        for _ in 0..own {
-            draft = draft.pop_top::<RouteEntry>().expect("an own Route reads");
-        }
+        let draft = request.thaw().pop_top_values::<RouteEntry>(own).expect("own Routes read");
         black_box(draft.freeze_bytes().expect("a thawed draft is complete"));
     })
 }

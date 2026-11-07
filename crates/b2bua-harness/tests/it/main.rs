@@ -123,6 +123,7 @@ mod no_answer_cancelled_call;
 mod numbering_plan;
 mod offerless_reinvite_relay;
 mod one_count_per_refusal;
+mod one_parser;
 mod options_answer_under_backlog;
 mod options_backend_gate;
 mod options_capabilities;

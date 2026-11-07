@@ -33,7 +33,7 @@ fn a_line_past_every_limit_reads() {
 fn a_request_uri_past_its_limit_reads() {
     let image = String::from_utf8(bye_with("X-Fine: 1"))
         .expect("text")
-        .replace("sip:bob@192.0.2.20 ", &format!("sip:{}@192.0.2.20 ", "b".repeat(9_000)));
+        .replace("sip:bob@192.0.2.20 ", &format!("sip:{}@192.0.2.20 ", "b".repeat(70_000)));
     only_the_stored_read_takes(image.as_bytes());
 }
 
@@ -75,6 +75,24 @@ fn a_final_with_no_to_tag_reads() {
         panic!("a response");
     };
     assert_eq!(read.status(), 486);
+}
+
+/// A freeze refuses what a stored read would: a status past 699 is no message,
+/// so no retained final can hold one.
+#[test]
+fn a_status_no_reader_takes_is_never_frozen() {
+    use sip_message::generators::{generate_response, GenerateResponseOpts};
+    let SipMessage::Request(req) =
+        CustomParser::new().parse(&bye_with("X-Fine: 1")).expect("reads")
+    else {
+        panic!("a request");
+    };
+    let opts = GenerateResponseOpts { to_tag: Some("t".into()), ..Default::default() };
+    for status in [0, 99, 700, 999] {
+        assert!(generate_response(&req, status, "Past", &opts).is_err(), "{status}");
+    }
+    let frozen = generate_response(&req, 699, "Last", &opts).expect("the last class");
+    assert!(read_stored(frozen.image()).is_ok());
 }
 
 #[test]

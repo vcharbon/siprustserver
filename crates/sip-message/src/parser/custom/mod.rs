@@ -128,6 +128,22 @@ impl CustomParser {
     pub fn with_limits(limits: SipParserLimits) -> Self {
         Self { limits }
     }
+
+    /// The refusal `req`, read by this parser, draws at first ingress, with the
+    /// partial that answers it: for an element that learns only after the read
+    /// that a request is at its first hop. `None` for a request with a To-tag,
+    /// which carries what hops added to its dialog's lines, or one within
+    /// the bound.
+    pub fn first_ingress_refusal(&self, req: &SipRequest) -> Option<SipParseError> {
+        if req.to().tag().is_some() {
+            return None;
+        }
+        let lines = scanner::header_block(req.image()).lines;
+        let uri_length = req.request_uri().text().len();
+        self.limits.first_ingress.refusal(lines, uri_length, req.headers().iter())?;
+        let at_first_ingress = SipParserLimits { at_first_ingress: true, ..self.limits.clone() };
+        Self::with_limits(at_first_ingress).parse(req.image()).err()
+    }
 }
 
 impl Default for CustomParser {
@@ -229,6 +245,13 @@ impl SipParser for CustomParser {
                 let eager: RequestEager =
                     extract_request_fields(&idx, &uri, limits, Some(method), mode)
                         .map_err(refuse)?;
+                if limits.at_first_ingress && eager.common.to().tag().is_none() {
+                    let lines = headers_vec.lines().iter();
+                    if let Some(past) = limits.first_ingress.refusal(block.lines, uri.len(), lines)
+                    {
+                        return Err(refuse(past));
+                    }
+                }
                 let optional = optional_headers::extract_optional_indexed(&idx);
                 Ok(SipMessage::Request(SipRequest::new(
                     RequestLine {

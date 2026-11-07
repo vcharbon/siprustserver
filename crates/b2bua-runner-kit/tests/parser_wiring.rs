@@ -2,7 +2,8 @@
 //! limit no default states, a datagram reads the same whichever stage parses
 //! it: the transaction layer below the brake's threshold, the brake at it, and
 //! the brake below it while a refused INVITE is remembered. Its own target: it
-//! sets the process environment.
+//! sets the process environment. Real sockets, so a real clock: the slow lane.
+//! `b2bua-harness`'s `one_parser` states the same on the fake clock.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,7 +59,7 @@ async fn answer(worker: std::net::SocketAddr, lines: usize, id: &str) -> Option<
     let port = peer.local_addr().expect("its address").port();
     peer.send_to(&options(lines, id, port), worker).await.expect("sent");
     let mut buf = vec![0u8; 65_535];
-    let got = tokio::time::timeout(Duration::from_millis(150), peer.recv_from(&mut buf)).await;
+    let got = tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut buf)).await;
     got.ok().map(|got| {
         let (n, _) = got.expect("received");
         buf.truncate(n);
@@ -79,6 +80,7 @@ async fn reads_the_same(stage: &str, base: &b2bua_runner_kit::RunnerBase) {
 }
 
 #[tokio::test]
+#[ignore = "slow lane: real clock >= 1 s"]
 async fn a_datagram_reads_the_same_whichever_stage_parses_it() {
     // SAFETY: the one test of this target, before any thread reads the environment.
     for (key, value) in [

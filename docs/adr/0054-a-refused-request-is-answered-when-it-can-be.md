@@ -43,7 +43,9 @@ A header line that breaks the grammar or a gate beyond it (ADR-0001) is left
 out and the split reads on, so the five fields after it are still read; the
 first refused line is the one reported. A limit (the header length) stops the
 split at once and leaves no partial: a message past a limit is not worth
-reading further. A refused line naming Via, From, To, Call-ID or CSeq leaves
+reading further. The first-ingress bound (ADR-0001) is no limit of the read: the
+message was read whole, so a request past it leaves its partial and is answered.
+A refused line naming Via, From, To, Call-ID or CSeq leaves
 no partial either, since the field it held is not echoed, and so does a refused
 line whose name did not read, which may have been any of them. A line holding
 a byte that is not UTF-8 (RFC 3629) is a refused line: the message is refused

@@ -58,6 +58,9 @@ pub struct Invite<'a> {
     /// A declared `delayed-automatic` deviation carried onto the
     /// [`ClientInvite`] (honoured by `ack`/`ack_delayed`).
     delayed_automatic: Option<DelayedAutomatic>,
+    /// What the datagram is edited with on its way out; the transaction keeps
+    /// the INVITE as built.
+    wire_edit: Option<fn(&str) -> String>,
     /// The `(Call-ID, From tag)` the dialog is created under; `None` mints both.
     identity: Option<(String, String)>,
     /// The Call-ID the dialog is created under when no `identity` is set;
@@ -89,6 +92,7 @@ impl<'a> Invite<'a> {
             request_uri: None,
             max_forwards: None,
             delayed_automatic: None,
+            wire_edit: None,
             identity: None,
             call_id: None,
             cseq: None,
@@ -230,6 +234,14 @@ impl<'a> Invite<'a> {
         self
     }
 
+    /// Edit the head of the datagram this INVITE leaves as: a shape the builder
+    /// does not write. The transaction keeps the INVITE as built, so what the
+    /// edit changes stays RFC-valid only if the test keeps it so.
+    pub fn wire_edit(mut self, edit: fn(&str) -> String) -> Self {
+        self.wire_edit = Some(edit);
+        self
+    }
+
     /// Generate the INVITE (all headers filled in), send it, and return the
     /// client transaction handle. Panics on a transport failure — use
     /// [`try_send`](Self::try_send) where a refused send is an outcome.
@@ -296,6 +308,10 @@ impl<'a> Invite<'a> {
             &self.remote_emits,
         );
         let invite_wire = emitted_wire(&msg, &headers);
+        let invite_wire = match self.wire_edit {
+            Some(edit) => edit(&String::from_utf8_lossy(&invite_wire)).into_bytes(),
+            None => invite_wire,
+        };
         caller.try_send_emitted(&msg, &invite_wire, wire_dst).await?;
 
         let dialog = StackDialog {

@@ -129,8 +129,8 @@ fn parse_status_line(
         }
         _ => return Err(SipParseError::new(format!("Invalid status code: \"{status_str}\""))),
     };
-    if !(100..=699).contains(&status) {
-        return Err(SipParseError::new(format!("Status code out of range: {status}")));
+    if let Some(refusal) = status_refusal(status) {
+        return Err(refusal);
     }
 
     // SP before reason phrase, but the reason may be empty (3.1.1.13) so the
@@ -158,4 +158,11 @@ fn read_until_sp(s: &mut Scanner) -> Span {
 /// Read bytes up to the line's CRLF, without consuming it.
 fn read_until_crlf(s: &mut Scanner) -> Span {
     s.take_while(|b| b != CR && b != LF)
+}
+
+/// The refusal a status code draws in any reading, built or received: RFC 3261
+/// §7.2 gives it six classes, 100 to 699.
+pub(crate) fn status_refusal(status: u16) -> Option<SipParseError> {
+    (!(100..=699).contains(&status))
+        .then(|| SipParseError::new(format!("Status code out of range: {status}")))
 }

@@ -5,7 +5,7 @@ use super::*;
 impl Default for B2buaConfig {
     fn default() -> Self {
         Self {
-            parser_limits: sip_message::SipParserLimits::DEFAULT.behind_proxy(),
+            parser_limits: sip_message::SipParserLimits::DEFAULT,
             self_ordinal: "w0".to_string(),
             cluster_key: None,
             sip_local_ip: "127.0.0.1".to_string(),

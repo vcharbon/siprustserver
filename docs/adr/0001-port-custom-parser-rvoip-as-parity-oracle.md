@@ -90,28 +90,47 @@ the group the request actually arrived on.
 
 ## The bounds
 
-A bound stops the work one datagram can cost, and may refuse a valid message: a
-bound is a stated exception to the goal that every valid message parses. A
-message past one is refused with no partial (ADR-0054), so its sender hears
-nothing.
+A party's new request meets one bound, at the hop it first reaches, and everything
+after that hop reads with room. A refusal happens once, where it can be answered:
+a message a party's first hop accepts never fails a later read of this stack
+because of what a hop legitimately added.
+
+**The first-ingress bound** (`SipParserLimits::first_ingress`) is a stated
+exception to the goal that every valid message parses:
 
 - **A header line** is at most 8,192 bytes, `name + ": " + value`, unfolded and
-  trimmed (`max_header_length`).
-- **A Request-URI** is at most 8,192 bytes (`max_uri_length`), so a Contact URI
-  that fits its line can become the Request-URI of this stack's request.
+  trimmed.
+- **A Request-URI** is at most 8,192 bytes, so a Contact URI that fits its line
+  can become the Request-URI of this stack's request.
 - **A header block** is at most 100 lines, its start line and fold continuations
-  included (`max_header_lines`).
+  included.
 
-A process states its limits once, at startup, and every stage that reads its
-wire holds the one parser built from them: the front proxy's intake hook and
-core, the worker's ingress brake and transaction layer. A worker reads behind
-the front proxy, so its limits leave room for what one forward adds
-(`SipParserLimits::behind_proxy`): the Via and the double Record-Route the proxy
-pushes, and `received` and `rport` on the top Via. What a worker's own emission
-adds to a line at the bound is not covered: the proxy reads a worker's output
-under the same bounds as a peer's.
+It holds a request with no To-tag at its first hop: the front proxy's external
+face, on a proxy with one face a source that is no registry worker, or a worker
+with no proxy (`at_first_ingress`). One past it is answered 400 there (ADR-0054).
+A request with a To-tag carries what hops added to its dialog's lines, so it
+meets no bound of its own.
 
-A stored image is read under none of them (ADR-0053 §6).
+**The room** (`max_*`) is what every read of the wire is held to. A line and a
+Request-URI are bounded by the datagram, 65,535 bytes: a hop adds `received` and
+`rport`, a To-tag, and lines a worker writes from a party's values, its Via and
+Contact carrying the Call-ID and From tag escaped, which no constant smaller than
+the datagram holds. A block has 32 lines past the bound: a forward adds its Via,
+a double Record-Route and a Max-Forwards, a worker a preloaded Route and what a
+route states. A hop's edit of a comma-folded line keeps it on one line, so no edit
+adds a line per value. A message past the room is refused unanswered, with no
+partial. A body already reaches the datagram, and the proxy's memo counts the
+bytes of what it keeps, so the room costs nothing a party could not spend today.
+
+A process states these once, at startup, and every stage that reads its wire holds
+the one parser built from them: the proxy's intake hook and core, a worker's
+ingress brake and transaction layer. A stored image is read under none of them
+(ADR-0053 §6).
+
+The band this leaves is the datagram: a worker's own lines grown from a Call-ID
+and a From tag both near the bound, escaped, can pass 65,535 bytes together, and
+that send fails. No test measures it: it takes two 8 KB values of bytes that
+escape to three.
 
 ## Considered and rejected
 

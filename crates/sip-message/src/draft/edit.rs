@@ -265,14 +265,38 @@ impl<S: StartKind> Draft<S> {
     /// pop. A comma-folded line keeps the values below the one removed; a line
     /// carrying only that value goes away. Only that line is read.
     pub fn pop_top<H: HeaderValue>(self) -> Result<Self, SipParseError> {
-        self.edit_top_line::<H>(|mut list| {
-            list.pop_front();
-            list
-        })
+        self.pop_top_values::<H>(1)
+    }
+
+    /// Drop the first `count` values of one header, reading each line it
+    /// reaches once, so the work is linear in the header's values whatever its
+    /// folding.
+    pub fn pop_top_values<H: HeaderValue>(
+        mut self,
+        mut count: usize,
+    ) -> Result<Self, SipParseError> {
+        let name = H::header_name();
+        let key = name.key();
+        let mut at = 0;
+        while count > 0 {
+            let Some(found) = self.entries.iter().skip(at).position(|e| e.is_key(&key)) else {
+                break;
+            };
+            at = at.saturating_add(found);
+            let Some(entry) = self.entries.get(at) else { break };
+            let values = entry.read::<H>()?;
+            let dropped = count.min(values.len());
+            count -= dropped;
+            let kept = values.into_iter().skip(dropped);
+            replace_entries(&mut self.entries, at..at.saturating_add(1), one_line(kept));
+        }
+        Ok(self)
     }
 
     /// Replace the first line of one header with the values `f` yields, at the
-    /// position that line held. Every other line is left as it stands.
+    /// position that line held and on that one line (RFC 3261 §7.3.1): an edit
+    /// adds no line to what a reader bounds. Every other line is left as it
+    /// stands.
     fn edit_top_line<H: HeaderValue>(
         mut self,
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
@@ -285,11 +309,7 @@ impl<S: StartKind> Draft<S> {
         };
         let values = entry.read::<H>()?;
         let updated = f(HeaderList::new(values));
-        replace_entries(
-            &mut self.entries,
-            at..at.saturating_add(1),
-            updated.into_iter().map(Entry::typed),
-        );
+        replace_entries(&mut self.entries, at..at.saturating_add(1), one_line(updated));
         Ok(self)
     }
 
@@ -430,6 +450,16 @@ fn insert_entry(entries: &mut Vec<Entry>, at: usize, entry: Entry) {
 
 /// Replaces the lines in `range` by `with`, moving the lines after them once
 /// whatever the number of lines put in. A range past the end appends.
+/// The one line `values` take, comma-folded past the first; none for no value.
+fn one_line<H: HeaderValue>(values: impl IntoIterator<Item = H>) -> Option<Entry> {
+    let mut values = values.into_iter();
+    let first = values.next()?;
+    let Some(second) = values.next() else { return Some(Entry::typed(first)) };
+    let wire: Vec<String> =
+        [first, second].into_iter().chain(values).map(|v| v.to_wire()).collect();
+    Some(Entry::raw(H::header_name(), wire.join(", ")))
+}
+
 fn replace_entries(
     entries: &mut Vec<Entry>,
     range: std::ops::Range<usize>,

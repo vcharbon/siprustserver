@@ -134,11 +134,10 @@ pub fn hop_minimal(req: &SipRequest) -> Bytes {
 pub fn hop_rewrite_set(req: &SipRequest) -> Bytes {
     let routes: Vec<RouteEntry> = req.list::<RouteEntry>().unwrap_or_default();
     let ours = routes.iter().take_while(|r| r.uri().host() == PROXY_HOST).count();
-    let mut draft = req.thaw();
-    for _ in 0..ours {
-        draft = draft.pop_top::<RouteEntry>().expect("our own Route entries read");
-    }
-    draft = draft
+    let mut draft = req
+        .thaw()
+        .pop_top_values::<RouteEntry>(ours)
+        .expect("our own Route entries read")
         .update_top::<Via>(|via| via.stamped_from("192.0.2.10", 33000))
         .expect("the top Via reads");
     draft = draft.set(MaxForwards::new(69));

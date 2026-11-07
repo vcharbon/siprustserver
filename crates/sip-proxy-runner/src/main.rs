@@ -50,7 +50,7 @@
 //!   PROXY_QUEUE      inbound UDP queue depth, packets ≥ 1  (default 8192)
 //!   SIP_EXEMPTIONS   comma-separated shapes accepted against the RFC, read at
 //!                    ingress only (default none; a name no exemption has is
-//!                    refused)
+//!                    refused, as is a blank value)
 //!   PROXY_UDP_SNDBUF SO_SNDBUF requested on every signalling socket, bytes ≥ 1
 //!                    (default 4 MiB; empty = kernel wmem_default; the kernel
 //!                    clamps at wmem_max). Size it well above the neighbour

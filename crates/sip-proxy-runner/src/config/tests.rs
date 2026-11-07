@@ -282,4 +282,8 @@ fn an_exemption_no_name_matches_refuses_the_boot() {
         refused.iter().any(|e| e.contains("SIP_EXEMPTIONS") && e.contains("not-an-exemption")),
         "{refused:?}"
     );
+    for blank in ["", ",", " , "] {
+        let refused = boot(&[("SIP_EXEMPTIONS", blank)]).expect_err("refused");
+        assert!(refused.iter().any(|e| e.contains("SIP_EXEMPTIONS")), "{blank:?}: {refused:?}");
+    }
 }

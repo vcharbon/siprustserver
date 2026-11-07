@@ -20,4 +20,5 @@ mod lifecycle;
 mod model_helpers;
 mod request_records;
 mod sequence;
+mod stored_images;
 mod timer_scope;

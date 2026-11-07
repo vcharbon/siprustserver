@@ -15,6 +15,7 @@
 
 mod admission;
 mod classify;
+mod first_ingress;
 mod parse_refusal;
 mod record_route;
 mod reply;
@@ -81,6 +82,10 @@ impl ProxyCore {
     pub(super) async fn handle_request(&self, msg: SipMessage, src: SocketAddr, face: Face) {
         let start_ms = self.now_ms();
         let SipMessage::Request(req) = &msg else { return };
+        if let Some(refusal) = self.first_ingress_refusal(req, src, face) {
+            self.refuse_unparsed(&refusal, src).await;
+            return;
+        }
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         // A known method is its upper-case spelling (RFC 3261 §7.1); any
         // other token is an extension method on its own row under the

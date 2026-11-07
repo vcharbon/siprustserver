@@ -2,6 +2,8 @@
 //! proxy. The mode decides where b-leg requests are sent and what address
 //! every Contact the worker allocates names.
 
+use sip_message::SipParserLimits;
+
 use super::B2buaConfig;
 
 /// The worker's deployment mode.
@@ -27,6 +29,13 @@ pub enum Front {
 }
 
 impl Front {
+    /// `limits` as this mode reads the wire: a worker alone is the first hop of
+    /// a party's new request, and one behind the proxy reads what the proxy
+    /// accepted, with room (ADR-0001).
+    pub fn reads_under(&self, limits: &SipParserLimits) -> SipParserLimits {
+        SipParserLimits { at_first_ingress: *self == Front::Standalone, ..limits.clone() }
+    }
+
     /// Behind a proxy with one face: peers and workers reach it at the same
     /// `(host, port)`, which is both the outbound proxy and the contact
     /// address.

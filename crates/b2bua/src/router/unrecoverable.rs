@@ -1,10 +1,10 @@
-//! An unrecoverable call (ADR-0052 §11): one whose record does not rebuild
-//! its caller's INVITE, or whose copy holds a stored image that does not read.
-//! It is discharged silently, as the reaper's second
-//! strike discharges a call (ADR-0020 X6): its legs are abandoned, its CDR and
-//! its limiter release go through the one enforcement path with nothing on the
-//! wire, the call is removed, and the discharge is counted. The request that
-//! met it is answered as one for a vanished call.
+//! An unrecoverable call (ADR-0052 §11): one whose record does not rebuild its
+//! caller's INVITE, or holds a stored image a seed of its copy needs that does
+//! not read. It is discharged silently, as the reaper's second strike discharges
+//! a call (ADR-0020 X6): its legs are abandoned, its CDR and its limiter release
+//! go through the one enforcement path with nothing on the wire, the call is
+//! removed, and the discharge is counted. The request that met it is answered
+//! as one for a vanished call.
 
 use std::sync::Arc;
 
@@ -19,9 +19,10 @@ use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
 use crate::store::{Enveloped, MaterialiseOrigin};
 
 /// Whether the materialised `copy` rebuilds its caller's INVITE and every image
-/// it holds reads back: its seeds form from them, and the record may be behind
-/// the wire, so a copy that fails either sends nothing. One that fails is made
-/// resident under `origin` and discharged. The caller holds the per-call lock.
+/// its seeds name at `now_ms` reads back. One that fails either cannot serve the
+/// transactions its record names, and the record may be behind the wire, so it
+/// sends nothing: it is made resident under `origin` and discharged. An image no
+/// seed names costs a live call nothing. The caller holds the per-call lock.
 pub(super) async fn copy_recoverable(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -29,7 +30,7 @@ pub(super) async fn copy_recoverable(
     origin: MaterialiseOrigin,
     now_ms: i64,
 ) -> bool {
-    let Err(err) = record_reads(&copy.call) else {
+    let Err(err) = record_reads(&copy.call, now_ms) else {
         return true;
     };
     if ctx.state.materialize_if_absent(copy.clone(), origin) {
@@ -38,18 +39,16 @@ pub(super) async fn copy_recoverable(
     false
 }
 
-/// Whether `call`'s record serves a copy of it: `Err` names the first part that
-/// does not read.
-pub(super) fn record_reads(call: &Call) -> Result<(), String> {
+/// Whether `call`'s record serves a copy of it at `now_ms`: `Err` names the part
+/// that does not read.
+pub(super) fn record_reads(call: &Call, now_ms: i64) -> Result<(), String> {
     if let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite) {
         return Err(format!("the caller's INVITE does not rebuild: {err}"));
     }
-    for image in call::helpers::stored_images(call) {
-        if let Err(refusal) = sip_message::read_stored(image) {
-            return Err(format!("a stored image does not read: {}", refusal.reason));
-        }
+    match super::materialise::unreadable_seed_image(call, now_ms) {
+        Some(refusal) => Err(format!("an image a seed names does not read: {refusal}")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// The call whose turn on `event` met a record that does not rebuild its

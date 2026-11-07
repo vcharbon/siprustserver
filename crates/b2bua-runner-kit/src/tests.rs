@@ -133,22 +133,3 @@ fn the_admin_address_defaults_to_loopback_and_refuses_any_other() {
         assert!(e.contains("B2BUA_ADMIN"), "{refused}: {e}");
     }
 }
-
-#[test]
-fn a_worker_reads_with_room_for_the_proxy_and_no_exemption_unless_one_is_named() {
-    let limits = crate::runner_env::parser_limits(None).expect("nothing stated");
-    assert_eq!(limits, sip_message::SipParserLimits::default().behind_proxy());
-    assert!(limits.exemptions.is_empty());
-    let blank = crate::runner_env::parser_limits(Some(" , ".into())).expect("a blank list");
-    assert!(blank.exemptions.is_empty());
-}
-
-#[test]
-fn an_exemption_no_name_matches_refuses_the_boot() {
-    let refused = crate::runner_env::parser_limits(Some("not-an-exemption".into()));
-    let refused = refused.expect_err("refused");
-    assert!(
-        refused.contains("SIP_EXEMPTIONS") && refused.contains("not-an-exemption"),
-        "{refused}"
-    );
-}

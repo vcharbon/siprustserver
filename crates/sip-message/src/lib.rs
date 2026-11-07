@@ -94,7 +94,9 @@ pub use multipart::{
 pub use parser::custom::compact_forms::compact_form_canonical;
 pub use parser::custom::partial::RequestPartial;
 pub use parser::custom::{hydrate_request, CustomParser};
-pub use parser::{read_stored, Exemption, Exemptions, Framing, SipParser, SipParserLimits};
+pub use parser::{
+    read_stored, Exemption, Exemptions, FirstIngressBound, Framing, SipParser, SipParserLimits,
+};
 pub use projection::HeaderProjection;
 pub use sdp::{
     build_held_sdp_from_profile, extract_codec_profile, rewrite_connection_and_ports,

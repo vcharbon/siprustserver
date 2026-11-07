@@ -243,20 +243,20 @@ impl ProxyConfig {
     }
 }
 
-/// The address stamped on Via and Record-Route for egress on the face that
-/// listens on `listen`: `key`, else the listen address. An unspecified listen
-/// address names no reachable host, so `key` is then required. A refused
-/// listen address (`None`) asks nothing more of `key`.
 /// The default limits with the exemptions `SIP_EXEMPTIONS` states.
 fn parser_limits(env: &mut EnvReader) -> SipParserLimits {
-    let stated = env.present("SIP_EXEMPTIONS").unwrap_or_default();
-    let exemptions = Exemptions::parse(&stated).unwrap_or_else(|problem| {
-        env.refuse(format!("SIP_EXEMPTIONS: {problem}"));
+    let stated = env.raw("SIP_EXEMPTIONS");
+    let exemptions = Exemptions::read(stated.as_deref()).unwrap_or_else(|problem| {
+        env.refuse(format!("SIP_EXEMPTIONS {problem}"));
         Exemptions::NONE
     });
     SipParserLimits { exemptions, ..SipParserLimits::DEFAULT }
 }
 
+/// The address stamped on Via and Record-Route for egress on the face that
+/// listens on `listen`: `key`, else the listen address. An unspecified listen
+/// address names no reachable host, so `key` is then required. A refused
+/// listen address (`None`) asks nothing more of `key`.
 fn advertise(env: &mut EnvReader, key: &str, listen: Option<SocketAddr>) -> ProxyAddr {
     let Some(listen) = listen else {
         return ProxyAddr::new("0.0.0.0", 0);

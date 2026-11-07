@@ -25,7 +25,6 @@ pub use retry_after::RetryAfterRange;
 pub struct B2buaConfig {
     /// What the process reads the wire under: stated once at startup, held by
     /// the transaction layer and the ingress brake alike ([`Self::parser`]).
-    /// The default leaves room for what the front proxy adds (ADR-0001).
     pub parser_limits: sip_message::SipParserLimits,
     /// This worker's ordinal, encoded into `callRef` for partition routing.
     pub self_ordinal: String,
@@ -354,7 +353,7 @@ pub struct B2buaConfig {
 impl B2buaConfig {
     /// The reader of the wire, whichever stage reads a datagram first.
     pub fn parser(&self) -> sip_message::CustomParser {
-        sip_message::CustomParser::with_limits(self.parser_limits.clone())
+        sip_message::CustomParser::with_limits(self.front.reads_under(&self.parser_limits))
     }
 
     /// The configured initial-INVITE transaction bound in ms — the value wired

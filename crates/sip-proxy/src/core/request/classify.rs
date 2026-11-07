@@ -108,11 +108,9 @@ impl ProxyCore {
                 worker_outbound = true;
             }
         }
-        for _ in 0..self_routes {
-            // §7.3.1: a UA may fold its whole route set into one comma-combined
-            // header, so the pop drops one ENTRY, never the line.
-            draft = draft.pop_top::<RouteEntry>().ok()?;
-        }
+        // §7.3.1: a UA may fold its whole route set into one comma-combined
+        // header, so the pop drops ENTRIES, never the line.
+        draft = draft.pop_top_values::<RouteEntry>(self_routes).ok()?;
         let request_uri_past_own_maddr = self.past_own_maddr(req.request_uri());
         if let Some(uri) = &request_uri_past_own_maddr {
             draft = draft.with_uri(uri.clone());

@@ -162,7 +162,7 @@ async fn take_whole(
     taken: Enveloped,
     now_ms: i64,
 ) {
-    if let Err(err) = crate::router::unrecoverable::record_reads(&taken.call) {
+    if let Err(err) = crate::router::unrecoverable::record_reads(&taken.call, now_ms) {
         ctx.metrics.bump_unrecoverable_meeting();
         tracing::error!(%call_ref, error = %err, "a met copy does not read: the live copy stays");
         let mut kept = live.clone().merge_exempt(incoming);

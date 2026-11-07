@@ -7,6 +7,7 @@ use std::borrow::Cow;
 
 use super::custom::CustomParser;
 use super::exemptions::Exemptions;
+use super::first_ingress::FirstIngressBound;
 use super::{Framing, SipParser, SipParserLimits, STANDARD_TRANSPORTS};
 use crate::error::SipParseError;
 use crate::types::SipMessage;
@@ -21,6 +22,8 @@ const STORED: SipParserLimits = SipParserLimits {
     value_gates: false,
     framing: Framing::Datagram,
     exemptions: Exemptions::NONE,
+    first_ingress: FirstIngressBound::DEFAULT,
+    at_first_ingress: false,
 };
 
 /// The message `image` holds. A refusal is a stack defect or a damaged
