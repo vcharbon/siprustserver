@@ -24,7 +24,7 @@ heap profiling, the loadgen relay header, the stress limiter), replication on,
 traces exported with the trace header trusted, and `masq-exempt`.
 
 The SUT chart requires its network (`network.proxyVip`, `externalVip`, both
-interfaces, `internalCidrs`, and `externalSubnet` for `masq-exempt`) and,
+interfaces and next hops, and `externalSubnet` for `masq-exempt`) and,
 with the workers' NetworkPolicy on, `worker.networkPolicy.proxyNodeCidrs`
 while the proxy is enabled; the collectors chart requires `hostStack.address` and
 `clusterName`. A top-level `enabled` in each chart serves a parent's
@@ -62,6 +62,23 @@ A product chart depends on `siprust` and sets, per component (`worker`,
 A component on the external plane, such as a media relay, is a sidecar of the
 proxy pod: it shares the edge node's network (hostNetwork) and the proxy's
 fate.
+
+## Removing the chart from a proxy node
+
+A pod stop removes nothing from its node, so the routes hold through a restart (ADR-0056 §7, §11).
+After `helm uninstall`, on each node that ran a proxy, for the VIPs and the external VIP's routing:
+
+```bash
+iptables -D OUTPUT -j SIP-EXT-EGRESS
+iptables -F SIP-EXT-EGRESS
+iptables -X SIP-EXT-EGRESS
+ip rule del priority 5060
+ip route flush table 5060
+ip addr del <internal VIP>/32 dev lo
+ip addr del <external VIP>/32 dev lo
+iptables -D OUTPUT -s <internal VIP>/32 -p icmp --icmp-type port-unreachable -j DROP
+iptables -D OUTPUT -s <external VIP>/32 -p icmp --icmp-type port-unreachable -j DROP
+```
 
 ## The VIPs' announcement
 

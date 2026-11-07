@@ -259,19 +259,23 @@ def test_kill_proxy_probe_waits_for_both_nodes_in_the_routes(tmp_path: Path) -> 
     assert f["next_hops"] == {IVIP: ["172.20.0.3", "172.20.0.4"], EVIP: ["192.168.60.11", "192.168.60.12"]}
 
 
+CUT_RESTARTS_0 = Rule(r"-n ns get pod p-1 --ignore-not-found", "0\n0\n0\n")
+
+
 def test_cut_external_plane_disconnects_one_proxy_node_and_times_both_withdrawals(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "cut_external_plane")
-    sb.rules(ONE_PROXY, *PLANES, Rule(r"docker network disconnect sipext e2$"), *E1_ONLY)
+    sb.rules(ONE_PROXY, *PLANES, CUT_RESTARTS_0, Rule(r"docker network disconnect sipext e2$"), *E1_ONLY)
     f = facts(sb.run("inject"))
     assert sb.index("docker network disconnect sipext e2") < sb.index("ip -j route show")
     assert (sb.event_dir / "cut").read_text().split() == ["e2", "192.168.60.12"]
+    assert (sb.event_dir / "restarts").read_text().split() == ["p-1", "0"]
     assert (f["node"], f["address"]) == ("e2", "192.168.60.12")
     assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
 
 
 def test_cut_external_plane_fails_while_the_internal_vip_stays_announced(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "cut_external_plane", withdraw_timeout_s="1")
-    sb.rules(ONE_PROXY, *PLANES, Rule(r"docker network disconnect sipext e2$"),
+    sb.rules(ONE_PROXY, *PLANES, CUT_RESTARTS_0, Rule(r"docker network disconnect sipext e2$"),
              route_rule(IVIP, "172.20.0.3", "172.20.0.4"), route_rule(EVIP, "192.168.60.11"))
     failed(sb.run("inject"), f"{IVIP} via 172.20.0.4")
 
@@ -292,13 +296,32 @@ def test_cut_heal_reconnects_at_the_kept_address_only_when_disconnected(tmp_path
 def test_cut_probe_waits_for_the_reconnected_node_in_the_routes(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "cut_external_plane")
     sb.state("cut", "e2 192.168.60.12\n")
+    sb.state("restarts", "p-1 0\n")
     link = Rule(r"^docker exec e2 ip link show eth1$")
-    sb.rules(link, PROXIES, *PLANES, route_rule(IVIP, "172.20.0.3"), route_rule(EVIP, "192.168.60.11", "192.168.60.12"))
+    table = Rule(r"^docker exec e2 ip -o route show table 5060 default$",
+                 "default via 192.168.60.1 dev eth1 \nunreachable default metric 4294967295 \n")
+    sb.rules(link, table, CUT_RESTARTS_0, PROXIES, *PLANES, route_rule(IVIP, "172.20.0.3"), route_rule(EVIP, "192.168.60.11", "192.168.60.12"))
     assert sb.run("probe").returncode == 75
-    sb.rules(Rule(r"^docker exec e2 ip link show eth1$", rc=1), PROXIES, *PLANES, *BOTH)
+    sb.rules(Rule(r"^docker exec e2 ip link show eth1$", rc=1), table, CUT_RESTARTS_0, PROXIES, *PLANES, *BOTH)
     assert sb.run("probe").returncode == 75, "the interface is not back under its name"
-    sb.rules(link, PROXIES, *PLANES, *BOTH)
+    sb.rules(link, table, CUT_RESTARTS_0, PROXIES, *PLANES, *BOTH)
     assert as_obj(facts(sb.run("probe"))["next_hops"])[IVIP] == ["172.20.0.3", "172.20.0.4"]
+
+
+def test_cut_probe_waits_for_the_tables_next_hops_and_refuses_a_restart(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "cut_external_plane")
+    sb.state("cut", "e2 192.168.60.12\n")
+    sb.state("restarts", "p-1 0\n")
+    link = Rule(r"^docker exec e2 ip link show eth1$")
+    unreachable = Rule(r"^docker exec e2 ip -o route show table 5060 default$",
+                       "unreachable default metric 4294967295 \n")
+    sb.rules(link, unreachable, CUT_RESTARTS_0, PROXIES, *PLANES, *BOTH)
+    assert sb.run("probe").returncode == 75, "the table holds no next hop yet"
+    table = Rule(r"^docker exec e2 ip -o route show table 5060 default$",
+                 "default via 192.168.60.1 dev eth1 \n")
+    restarted = Rule(r"-n ns get pod p-1 --ignore-not-found", "0\n1\n0\n")
+    sb.rules(link, table, restarted, PROXIES, *PLANES, *BOTH)
+    failed(sb.run("probe"), "p-1 restarted a container")
 
 
 NEIGHBOUR = Rule(r"docker exec e2 ip -j neigh show to 192\.168\.60\.1 dev eth1$", '[{"dst":"192.168.60.1","lladdr":"02:00:00:00:00:01","state":["REACHABLE"]}]')

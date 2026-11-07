@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Disconnect the node of one front proxy from the callers' docker network,
 # then wait until it left both VIPs' next hops. The node's address on that
-# network is kept in `cut` for heal. Facts: the pod, its node and address, the
+# network is kept in `cut` for heal, the pod's restart count in `restarts` for
+# the probe. Facts: the pod, its node and address, the
 # instant, and the withdrawal of each VIP in ms after the cut.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
@@ -11,6 +12,8 @@ hk_pick_targets
 read -r pod _ node <<<"$(hk_targets)"
 pairs="$(hk_route_pairs "$node")" || hk_die "the addresses of $node cannot be read"
 ip="$(hk_plane_addr "$node" "$HAKIT_PARAM_EXTERNAL_VIP")" || hk_die "$node has no address on $HAKIT_PARAM_NETWORK"
+restarts="$(hk_restarts "$pod")" || hk_die "the restart count of $pod cannot be read"
+echo "$pod $restarts" > "$HAKIT_EVENT_DIR/restarts"
 echo "$node $ip" > "$HAKIT_EVENT_DIR/cut"
 at="$(hk_now_ms)"
 docker network disconnect "$HAKIT_PARAM_NETWORK" "$node" >&2

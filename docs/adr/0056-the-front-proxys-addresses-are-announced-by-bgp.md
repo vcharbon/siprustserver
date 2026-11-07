@@ -6,7 +6,8 @@ ADR-0033 and ADR-0048.
 
 **Owner:** `deploy/helm/siprust/templates/proxy-announce.yaml` (the announce-only Services),
 `templates/proxy-metallb.yaml` (the MetalLB objects), `templates/proxy.yaml` (readiness probe,
-`minReadySeconds`, anti-affinity), `files/vip-loopback.sh` (the VIPs on `lo`, the ICMP drop),
+`minReadySeconds`, anti-affinity), `files/vip-loopback.sh` (the VIPs on `lo`, the ICMP drop, the
+external VIP's routing), `files/vip-egress-routes.sh` (its next hops),
 `templates/checks.yaml` (the timing relations), `crates/sip-proxy-runner/src/readiness.rs` and
 `external_face.rs` (what `/readyz` and `/fitz` read), `crates/sip-proxy/src/health/reach.rs`
 (the isolation verdict), `crates/route-guard` (the route guard), `deploy/k8s/tor/` and
@@ -159,8 +160,7 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       chart's `proxy.neighbour` (the init step sets them on every interface; the kernel's defaults
       give about 50 s), + up to 1 s for the next packet that takes the entry out of STALE once the
       session's BFD went down. Multipath egress leaves that next hop then
-      (`fib_multipath_use_neigh`, set by the same step, the routes over both next hops being a
-      deployment requirement), so a worker's retransmitted final reaches its caller inside Timer
+      (`fib_multipath_use_neigh`, set by the same step, over the table of §11), so a worker's retransmitted final reaches its caller inside Timer
       H. With no next hop left two face readings latch the face, up to 1 s: the proxy reads unfit
       from about 4 s to about 12 s after the death. The guard's two readings and the BFD detection
       then take the node out of the routers' ECMP, 13.1 s at most. The render checks that chain
@@ -194,6 +194,35 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       worker answers, readiness and the hold allowing.
     - The guard reports `route_guard_withdrawn`, `route_guard_withdrawals_total{cause}` and
       `route_guard_restores_total`, and logs one line per withdrawal and per return.
+
+11. **Traffic from the external VIP leaves only through the external interface.** The proxy
+    crosses (ADR-0048 §10), so a request or a response a worker's peer named, whatever address it
+    holds, leaves from the external VIP, and the node holds that to the external plane in three
+    layers. Each layer's trust rule is ADR-0048's: nothing here reads a datagram's content.
+    - **Policy routing.** `ip rule priority 5060 from <external VIP> lookup 5060`, in table 5060 an
+      `unreachable` default at the highest metric and the external next hops
+      (`network.externalNextHops`) below it, so a miss never falls through to the main table and a
+      send with no next hop fails at once. The init step writes the rule, the `unreachable` route
+      and the chain, none of which reads the interface, so a pod starting during a cut comes up, and
+      reads unfit (§3).
+    - **A drop on the node.** An owned chain, `SIP-EXT-EGRESS`, swapped whole by
+      `iptables-restore --noflush`, jumped from `OUTPUT`: `-s <external VIP>/32 ! -o <external
+      interface> -j DROP`. No address list and no exemption for `lo`: the kernel consults the local
+      table before any rule, so a send from the external socket to the internal VIP would be
+      delivered locally to a socket trusted by its face, and this rule is what stops it. On a CNI
+      that does not enforce NetworkPolicy it is also what protects the workers.
+    - **Plane isolation at the routers**, a deployment requirement (`deploy/README.md`).
+
+    A container on the network tools image, `egress-routes`, with `NET_ADMIN` alone, keeps the next
+    hops in the table: the kernel drops a gateway route when its interface goes and they return
+    with it, with no pod restart. Each turn (`proxy.egressRoutes.periodSeconds`, 1 s) it reads the
+    table and writes only on a difference, so no route or cached entry churns. A write failing three
+    turns in a row with the interface up and addressed exits it, so the pod reads not Ready and the
+    node withdraws by the slow path (§3). It is not the route guard: the guard is optional, its image
+    has no `ip`, and a stuck route call there would delay its refresh and falsely withdraw the
+    node. The render requires next hops and a period below `routeGuard.holdMs`, so the table is
+    filled before the guard lets the node out. A pod stop removes nothing, as for the VIPs on `lo`
+    (§7); `deploy/helm/README.md` states the uninstall commands.
 
 ## Rejected
 
@@ -265,6 +294,12 @@ Via.
 - A guard removed from a node (the pod gone, no successor) leaves its table withdrawing; a pod
   without the guard deletes it at start (`vip-loopback.sh`), or an operator does
   (`nft delete table inet route_guard`).
+- A request a worker aims at a VIP its proxy node holds, the external VIP included, is delivered
+  locally or not at all, and §11's chain refuses it: it fails at the socket, counted as a send
+  failure, and its sender gives up at Timer B. A call looping back through the platform reaches
+  it through a hop on the external plane, as `dual_face` and the spiral scenarios state it.
+- Silencing a next hop now also cuts the node's egress to callers through it, as for any route
+  through that router (§10's chain of timers): the node's own traffic has no other way out.
 - A next hop that answers ARP and forwards nothing reads alive to the face: its BFD session
   withdraws the routes through it on the routers, and the node's own egress keeps using it.
 - An interface whose operstate stays down longer than the flap (a driver or the kernel's link

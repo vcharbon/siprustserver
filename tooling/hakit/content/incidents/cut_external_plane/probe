@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Recovered when the cut node has its interface back under its name and both
-# VIPs are routed over every live proxy's node, the reconnected one among them. Exit 75 while not yet, or while a read fails.
+# Recovered when the cut node has its interface back under its name, the table
+# of the external VIP's traffic holds its next hops again with no container of
+# the pod restarted, and both VIPs are routed over every live proxy's node, the
+# reconnected one among them. Exit 75 while not yet, or while a read fails.
 # Facts: the next hops and the instant.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
@@ -10,6 +12,14 @@ cut="$(hk_state cut)"
 if [ -n "$cut" ]; then
   read -r node _ <<<"$cut"
   docker exec "$node" ip link show "$HAKIT_PARAM_INTERFACE" >/dev/null 2>&1 || exit "$HK_NOT_YET"
+  table="$(docker exec "$node" ip -o route show table 5060 default)" || exit "$HK_NOT_YET"
+  grep -q "via .* dev $HAKIT_PARAM_INTERFACE" <<<"$table" || exit "$HK_NOT_YET"
+fi
+restarted="$(hk_state restarts)"
+if [ -n "$restarted" ]; then
+  read -r pod before <<<"$restarted"
+  now="$(hk_restarts "$pod")" || exit "$HK_NOT_YET"
+  [ "$now" = "$before" ] || hk_die "$pod restarted a container (restarts $before, now '$now'): the table must come back with no restart"
 fi
 routes="$(hk_probe_routed_over_live)"
 jq -cn --argjson r "$routes" --argjson at "$(hk_now_ms)" '{next_hops: $r, announced_at_ms: $at}'

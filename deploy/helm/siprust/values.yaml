@@ -45,18 +45,16 @@ network:
   externalVip: ""
   externalInterface: ""
   # The external interface's next hops (IPv4): the external plane's BGP peers,
-  # whose BFD and keepalive traffic keeps them resolved. Readiness requires one
-  # of them resolved in the node's neighbour table (PROXY_EXT_NEXT_HOPS); equal
-  # to proxy.announce.metallb.peers.external when the chart renders MetalLB's
-  # objects (refused at render otherwise). Empty checks the interface only.
+  # whose BFD and keepalive traffic keeps them resolved. Required: traffic from
+  # the external VIP leaves through them and nowhere else (ADR-0056 §11), and
+  # readiness requires one of them resolved in the node's neighbour table
+  # (PROXY_EXT_NEXT_HOPS). Equal to proxy.announce.metallb.peers.external when the
+  # chart renders MetalLB's objects (refused at render otherwise).
   externalNextHops: []
   # The external plane's subnet (masq-exempt only).
   externalSubnet: ""
   # UDP port both VIPs listen on.
   sipPort: 5060
-  # The proxy's egress face-picker: a destination in these comma-separated
-  # CIDRs leaves on the internal face, any other on the external face.
-  internalCidrs: ""
 
 # The INVITE transaction bound, seconds (33..=600): the workers' give-up on a
 # ringing call (B2BUA_INVITE_TXN_TIMEOUT_SEC) and what the proxy's branch memo
@@ -345,6 +343,14 @@ proxy:
     resources:
       requests: { cpu: "20m", memory: "16Mi" }
       limits: { memory: "64Mi" }
+  # The container that keeps network.externalNextHops in the table of the
+  # external VIP's traffic (ADR-0056 §11). A turn writes only on a difference.
+  # Below routeGuard.holdMs, so the table is filled before the node is let out.
+  egressRoutes:
+    periodSeconds: 1
+    resources:
+      requests: { cpu: "5m", memory: "8Mi" }
+      limits: { memory: "32Mi" }
   env: {}
   extraEnv: []
   extraPorts: []

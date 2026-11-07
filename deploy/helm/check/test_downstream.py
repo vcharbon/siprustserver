@@ -108,7 +108,7 @@ class DownstreamChart(unittest.TestCase):
     def test_a_media_relay_rides_the_proxy_pod_on_the_external_plane(self) -> None:
         spec = pod_spec(self.proxy())
         self.assertEqual([c["name"] for c in spec["containers"]],
-                         ["sip-front-proxy", "route-guard", "media-relay"])
+                         ["sip-front-proxy", "route-guard", "egress-routes", "media-relay"])
         self.assertEqual(spec["volumes"], [{"name": "relay-state", "emptyDir": {}}])
         self.assertTrue(spec["hostNetwork"])
 

@@ -55,7 +55,8 @@ class GuardContainer(unittest.TestCase):
                           "route-guard")
         self.assertEqual(env(guard)["ROUTE_GUARD_PEERS"], "10.1.1.1,10.1.1.2")
         off = proxy("--set", "proxy.routeGuard.enabled=false")
-        self.assertEqual([c["name"] for c in pod_spec(off)["containers"]], ["sip-front-proxy"])
+        self.assertEqual([c["name"] for c in pod_spec(off)["containers"]],
+                         ["sip-front-proxy", "egress-routes"])
         self.assertNotIn("prometheus.io/sidecar-port",
                          off["spec"]["template"]["metadata"]["annotations"])
 

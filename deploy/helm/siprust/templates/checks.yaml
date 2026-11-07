@@ -21,6 +21,8 @@ each runner's startup check.
 | proxy PROXY_METRICS keeps port 9090 | the readiness and liveness probes and the route guard read the proxy there |
 | proxy `announce.port` ≠ the metrics port 9090 and ≠ `network.sipPort` | the announce-only Services expose nothing kube-proxy would forward to a listener |
 | `proxy.nodeSelector` set | the workers' node affinity keeps them off every node it names: a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056 §7) |
+| `network.externalNextHops` set | traffic from the external VIP leaves only through the table these next hops fill (ADR-0056 §11): with none, nothing reaches a caller |
+| `proxy.egressRoutes.periodSeconds` × 1000 < `routeGuard.holdMs` (route guard on) | the table's next hops are installed before the guard lets the node out |
 | `network.externalNextHops` = the addresses of `proxy.announce.metallb.peers.external` (MetalLB objects rendered) | the face check reads next hops whose BFD and keepalive traffic keeps them resolved |
 | `worker.replication.enabled` ⇒ `worker.replicas` ≥ 2 | a backup lives on another worker |
 | `worker.replication.enabled` ⇒ worker B2BUA_REPL_MAX_CONNECTIONS ≥ 4 × (`worker.replicas` − 1) | ADR-0045 item 5 |
@@ -156,6 +158,12 @@ operator's to keep consistent.
 {{- end }}
 {{- if not $p.nodeSelector }}
 {{- fail "proxy.nodeSelector is required: the workers' node affinity keeps them off every node it names, since a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056)" }}
+{{- end }}
+{{- if not .Values.network.externalNextHops }}
+{{- fail "network.externalNextHops is required: traffic from the external VIP leaves only through the table these next hops fill (ADR-0056 §11), so with none nothing reaches a caller" }}
+{{- end }}
+{{- if and $p.routeGuard.enabled (ge (mul (int64 $p.egressRoutes.periodSeconds) 1000) (int64 $p.routeGuard.holdMs)) }}
+{{- fail (printf "proxy.egressRoutes.periodSeconds=%d s must stay below proxy.routeGuard.holdMs=%d ms: the guard would let the node out before the external VIP's table holds its next hops" (int64 $p.egressRoutes.periodSeconds) (int64 $p.routeGuard.holdMs)) }}
 {{- end }}
 {{- if $p.announce.metallb.enabled }}
 {{- $peers := list }}

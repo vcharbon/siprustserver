@@ -140,7 +140,6 @@ its family.
 |---|---|---|
 | `PROXY_LISTEN`, `PROXY_LISTEN_EXT`, `PROXY_METRICS` | IP literal `ip:port` | `0.0.0.0:5060`, unset, `0.0.0.0:9090` |
 | `PROXY_ADVERTISE`, `PROXY_ADVERTISE_EXT` | `host:port`; required when the listen IP is unspecified | the listen address |
-| `PROXY_FACE_INT_CIDRS` | IPv4 CIDR list; required with `PROXY_LISTEN_EXT` | — |
 | `PROXY_WORKERS` | `id@ip:port,..` | unset: discovery |
 | `PROXY_WORKER_SERVICE` | non-empty | `b2bua-worker` |
 | `PROXY_WORKER_PORT` | 1..65535 | 5060 |

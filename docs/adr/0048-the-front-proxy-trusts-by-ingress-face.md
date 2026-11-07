@@ -4,8 +4,8 @@
 
 **Owner:** `crates/sip-proxy/src/core/request/classify.rs` (a request's
 direction), `core/request/admission.rs` (the To-tag rule and the gate),
-`core/response.rs` (the response rule), `crates/sip-message/src/header/via.rs`
-(`received`), `crates/sip-proxy-runner/src/config.rs` (the single-face warning,
+`core/response.rs` (the response rule), `crates/sip-proxy/src/face.rs` (the
+egress face), `crates/sip-message/src/header/via.rs` (`received`), `crates/sip-proxy-runner/src/config.rs` (the single-face warning,
 the wildcard refusal), `deploy/helm/siprust/templates/masq-exempt.yaml` and
 `files/masq-exempt.sh` (the edge node's drop rule).
 
@@ -41,7 +41,10 @@ but used it only for a metric.
      external plane (a requirement, `deploy/README.md`); on the kind lab the
      node also drops every packet to `PROXY_VIP` that arrives on the external
      interface (`deploy/helm/siprust/files/masq-exempt.sh`, re-asserted with
-     its other rules).
+     its other rules);
+   - a datagram the proxy sends from the external VIP stays off the internal
+     socket: nothing leaves that address but through the external interface,
+     local delivery included (ADR-0056 §11).
 2. **On the internal face a request is worker-outbound** when its direction
    entry carries `;outbound`, when its source is a registry worker, or when its
    top Via sent-by is one. The marker is what recognises a worker rebooted onto
@@ -96,6 +99,41 @@ but used it only for a metric.
    `wps.0` or `q735.0` arriving on the external face still bypasses the gate and
    the new-call caps. Such a request still goes to a worker, never to a host the
    sender names. The external plane is semi-trusted for this.
+10. **A dual-face proxy crosses, with two exceptions the registry decides.** The
+    egress face, and with it the socket and the advertise a message states, comes
+    from the ingress face, the message and the registry through one pure function
+    (`face::EgressPolicy`, single-face or crossing). No address plan enters: the
+    proxy holds no CIDR, a name and its resolved address are one face, and any
+    instance picks the same egress with nothing stored, so a flow that moves keeps
+    its one sent-by (RFC 3261 §17.2.3).
+
+    | Message | Condition | Leaves on |
+    |---|---|---|
+    | Request | arrived external | internal |
+    | Request | arrived internal, worker-outbound or a loose hop | external, whatever the target |
+    | Request | arrived internal, neither, target a registry worker | internal |
+    | Request | arrived internal, any other target | external |
+    | Response | arrived external | internal (D4: every destination is a worker) |
+    | Response | arrived internal, the owner rule names a worker | internal |
+    | Response | arrived internal, its next Via's sent-by a registry worker | internal |
+    | Response | arrived internal, otherwise | external |
+    | Own final | any | the face its request arrived on (RFC 3581 §4) |
+
+    Via states the egress face. In Record-Route the top entry states the egress
+    face and the lower one the ingress face, so each party's later requests reach
+    the face it talks to; the `;outbound` marker stays on the worker's half. The
+    sent-by decides the response row, not `received`: a translated worker's
+    `received` is a node address. The third row keeps a call that loops back
+    through the platform on the workers' plane: its in-dialog request re-enters
+    with two of this proxy's pairs back to back when no hop between the passes
+    Record-Routes, and the workers admit SIP only from the internal VIP and the
+    proxy nodes. This rests on two assumptions of the deployment: everything dialled
+    through the proxy, a media resource function included, is on the external plane,
+    and no sender on the internal VIP but a worker needs a response relayed. Tests:
+    `core::crossing_tests`, `face::tests`,
+    `ingress_trust::an_own_final_to_a_translated_worker_leaves_the_face_it_arrived_on`,
+    `ingress_trust::own_finals_to_a_sender_near_the_workers_leave_the_external_face`.
+    `failover-harness`'s `dual_face` runs the callflows through real workers.
 
 ## Consequences
 
@@ -114,3 +152,21 @@ but used it only for a metric.
   transactions.
 - A sender placed on the internal plane is trusted whatever it is: a caller
   that dials the internal address bypasses every rule above.
+- A peer's Contact or Record-Route chooses the Request-URI or the next hop of a
+  worker's request, and that request leaves on the external face whatever it names
+  (`crossing_tests::a_contact_naming_a_registry_worker_leaves_external`): no peer aims
+  a worker's request onto the internal plane through this proxy. The node's rule of
+  ADR-0056 §11 drops it there; on a CNI that does not enforce NetworkPolicy, that
+  rule is what protects the workers.
+- A worker's first hop is the front proxy whatever a callee's Record-Route says,
+  the route set intact (`b2bua-core` `relay::egress`); standalone it follows its
+  route set.
+- A sender on the internal face that no registry lists gets no relayed response:
+  it arrives internal, names no worker and leaves external
+  (`crossing_tests::a_response_for_a_sender_no_registry_holds_leaves_external`).
+  A worker rebooted onto an unlisted address loses such a response the way D4's
+  consequence above states, until it is listed.
+- The ACK of a non-2xx final a translated worker sent on a spiral goes to the node
+  address the final came from, no registry worker, so it leaves external and misses;
+  that worker repeats its final to Timer H, on a call that already failed
+  (`crossing_tests::a_spirals_ack_to_a_translated_worker_leaves_external`).

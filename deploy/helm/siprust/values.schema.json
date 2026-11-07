@@ -195,9 +195,6 @@
         },
         "sipPort": {
           "$ref": "#/definitions/port"
-        },
-        "internalCidrs": {
-          "type": "string"
         }
       }
     },
@@ -568,6 +565,19 @@
         },
         "priorityClassName": {
           "type": "string"
+        },
+        "egressRoutes": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
         },
         "routeGuard": {
           "type": "object",
