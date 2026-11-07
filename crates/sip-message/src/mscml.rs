@@ -5,11 +5,12 @@
 //! `<response>` or `<notification>`. A request's command element (`<play>`,
 //! `<playcollect>`, `<stop>` …) MAY carry a client-defined `id` (§4.1), and the
 //! `<response>` that answers it echoes that `id` beside its `request` attribute,
-//! which names the command type (§10.2). This module reads those three
-//! attributes and sets or removes a response's `id`, every other byte of the
-//! body kept as it was. It is no XML parser: it walks the leading tags only,
-//! skipping the declaration, comments and processing instructions, and reads
-//! attribute values in either XML quote, raw (entities are not expanded).
+//! which names the command type (§10.2) and reports its outcome in `code`
+//! and `reason`. This module reads those attributes and sets or removes a
+//! response's `id`, every other byte of the body kept as it was. It is no XML
+//! parser: it walks the leading tags only, skipping the declaration, comments
+//! and processing instructions, and reads attribute values in either XML
+//! quote, raw (entities are not expanded).
 
 use crate::header::{HeaderValue, MediaType};
 use crate::multipart::entity_parts;
@@ -29,6 +30,19 @@ pub struct Request {
     pub command: String,
     /// The command element's `id` attribute, raw.
     pub id: Option<String>,
+}
+
+/// What one MSCML `<response>` reports (RFC 5022 §10.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    /// The `request` attribute: the command type answered, raw.
+    pub request: Option<String>,
+    /// The `code` attribute where it is a status code of three digits (an
+    /// RFC 3261 status class, §10.2); `None` where it is absent or anything
+    /// else.
+    pub code: Option<u16>,
+    /// The `reason` attribute, raw.
+    pub reason: Option<String>,
 }
 
 /// Whether `content_type` names the MSCML media type, parameters and casing
@@ -60,6 +74,38 @@ pub fn requests_in(content_type: Option<&str>, body: &[u8]) -> Vec<Request> {
         .filter(|part| is_mscml(&part.content_type))
         .filter_map(|part| std::str::from_utf8(&part.payload).ok().and_then(request))
         .collect()
+}
+
+/// The response an MSCML body holds, or `None` where its root holds no
+/// `<response>`. Only the attributes of the response element itself are
+/// read: a name that merely ends in `code`, or `code=` inside another
+/// attribute's value, is not its code.
+pub fn response(xml: &str) -> Option<Response> {
+    let element = response_element(xml)?;
+    let value = |name: &str| attribute(xml, &element, name).map(|a| a.value);
+    Some(Response {
+        request: value("request").map(str::to_string),
+        code: value("code").and_then(three_digits),
+        reason: value("reason").map(str::to_string),
+    })
+}
+
+/// Every MSCML response a message body carries under `content_type`, read by
+/// the rule of [`requests_in`].
+pub fn responses_in(content_type: Option<&str>, body: &[u8]) -> Vec<Response> {
+    entity_parts(content_type, &[], body)
+        .iter()
+        .filter(|part| is_mscml(&part.content_type))
+        .filter_map(|part| std::str::from_utf8(&part.payload).ok().and_then(response))
+        .collect()
+}
+
+/// `value` as a three-digit code, nothing else around it.
+fn three_digits(value: &str) -> Option<u16> {
+    if value.len() != 3 || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
 }
 
 /// The `request` attribute of an MSCML body's `<response>` — the command type
@@ -251,179 +297,4 @@ fn attribute<'a>(xml: &'a str, tag: &Tag<'_>, name: &str) -> Option<Attribute<'a
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const DECL: &str = r#"<?xml version="1.0" encoding="utf-8"?>"#;
-
-    /// The response a media resource sends for a `playcollect`, as captured.
-    const PLAYCOLLECT_RESPONSE: &str = r#"<MediaServerControl version="1.0"><response playduration="11081" reason="timeout" playoffset="11081" text="The request has succeeded" request="playcollect" code="200" digits=""></response></MediaServerControl>"#;
-
-    fn wrap(inner: &str) -> String {
-        format!(r#"{DECL}<MediaServerControl version="1.0">{inner}</MediaServerControl>"#)
-    }
-
-    #[test]
-    fn a_request_names_its_command_element_and_its_client_defined_id() {
-        let body = wrap(
-            r#"<request><play id="332985001"><prompt><audio url="file://a.wav"/></prompt></play></request>"#,
-        );
-        assert_eq!(
-            request(&body),
-            Some(Request { command: "play".into(), id: Some("332985001".into()) })
-        );
-    }
-
-    #[test]
-    fn a_request_without_an_id_reads_as_its_command_alone() {
-        let body = wrap(
-            r#"<request><playcollect maxdigits="1" barge="yes"><prompt><audio url="file://a.wav"/></prompt></playcollect></request>"#,
-        );
-        assert_eq!(request(&body), Some(Request { command: "playcollect".into(), id: None }));
-    }
-
-    /// XML admits either quote around a value, and whitespace around `=`.
-    #[test]
-    fn an_id_reads_in_either_quote_on_an_empty_element() {
-        let single = wrap("<request><stop id='s-1'/></request>");
-        assert_eq!(
-            request(&single),
-            Some(Request { command: "stop".into(), id: Some("s-1".into()) })
-        );
-        let spaced = wrap("<request>\r\n  <stop  id = \"s 2\" />\r\n</request>");
-        assert_eq!(
-            request(&spaced),
-            Some(Request { command: "stop".into(), id: Some("s 2".into()) })
-        );
-    }
-
-    /// Only the attribute NAMED `id` is the id: a longer name ending in it, or
-    /// an `id` on the `<request>` wrapper, is not the command's.
-    #[test]
-    fn only_the_command_element_s_own_id_attribute_is_read() {
-        let body = wrap(r#"<request id="wrapper"><play xid="x" uid='u'/></request>"#);
-        assert_eq!(request(&body), Some(Request { command: "play".into(), id: None }));
-    }
-
-    /// A comment, a processing instruction and an attribute value holding `>`
-    /// before the command element do not move the walk.
-    #[test]
-    fn the_walk_skips_comments_and_reads_through_a_quoted_angle_bracket() {
-        let body = "<!-- lead --><?pi x?>\r\n<MediaServerControl version=\"1.0\" note=\"a>b\">\
-                    <!-- inner --><request><playrecord id=\"r1\" dest=\"x>y\"/></request>\
-                    </MediaServerControl>";
-        assert_eq!(
-            request(body),
-            Some(Request { command: "playrecord".into(), id: Some("r1".into()) })
-        );
-    }
-
-    #[test]
-    fn a_response_a_notification_or_another_root_is_no_request() {
-        assert_eq!(request(PLAYCOLLECT_RESPONSE), None);
-        assert_eq!(request(&wrap(r#"<notification><keypress digit="1"/></notification>"#)), None);
-        assert_eq!(request(r#"<other><request><play id="1"/></request></other>"#), None);
-        assert_eq!(request(&wrap("<request/>")), None, "a request with no command names none");
-        assert_eq!(request("not xml at all"), None);
-    }
-
-    #[test]
-    fn a_response_names_the_command_type_it_answers() {
-        assert_eq!(response_request(PLAYCOLLECT_RESPONSE), Some("playcollect"));
-        assert_eq!(
-            response_request(&wrap(r#"<response request='stop' code="200"/>"#)),
-            Some("stop")
-        );
-        assert_eq!(response_request(&wrap(r#"<request><play id="1"/></request>"#)), None);
-        assert_eq!(response_request(&wrap(r#"<notification><keypress/></notification>"#)), None);
-        assert_eq!(response_request(&wrap(r#"<response code="400"/>"#)), None);
-    }
-
-    /// Inserted right after the element name; every other byte as it was.
-    #[test]
-    fn an_id_is_inserted_into_a_response_that_states_none() {
-        let echoed = with_response_id(PLAYCOLLECT_RESPONSE, Some("332985001"));
-        assert_eq!(
-            echoed,
-            PLAYCOLLECT_RESPONSE.replacen("<response ", "<response id=\"332985001\" ", 1)
-        );
-        assert_eq!(response_request(&echoed), Some("playcollect"));
-    }
-
-    #[test]
-    fn a_stated_id_is_replaced_in_place_keeping_its_quote() {
-        let body = wrap(r#"<response request="play" id='old-1' code="200" reason="stopped"/>"#);
-        assert_eq!(
-            with_response_id(&body, Some("live-7")),
-            wrap(r#"<response request="play" id='live-7' code="200" reason="stopped"/>"#)
-        );
-    }
-
-    /// A value holding the stated quote takes the other one, so the attribute
-    /// stays well-formed.
-    #[test]
-    fn a_value_holding_the_quote_takes_the_other_quote() {
-        let body = wrap(r#"<response request="play" id="old" code="200"/>"#);
-        assert_eq!(
-            with_response_id(&body, Some(r#"a"b"#)),
-            wrap(r#"<response request="play" id='a"b' code="200"/>"#)
-        );
-        let bare = wrap(r#"<response request="play" code="200"/>"#);
-        assert_eq!(
-            with_response_id(&bare, Some(r#"a"b"#)),
-            wrap(r#"<response id='a"b' request="play" code="200"/>"#)
-        );
-    }
-
-    /// Removed with the whitespace that led it; a response stating none and
-    /// asked for none is unchanged.
-    #[test]
-    fn a_stated_id_is_removed_where_the_request_carried_none() {
-        let body = wrap(r#"<response request="stop"  id = "old" code="200"></response>"#);
-        assert_eq!(
-            with_response_id(&body, None),
-            wrap(r#"<response request="stop" code="200"></response>"#)
-        );
-        assert_eq!(with_response_id(PLAYCOLLECT_RESPONSE, None), PLAYCOLLECT_RESPONSE);
-    }
-
-    #[test]
-    fn a_body_holding_no_response_is_never_rewritten() {
-        let notification = wrap(r#"<notification><keypress digit="1" id="k"/></notification>"#);
-        assert_eq!(with_response_id(&notification, Some("x")), notification);
-        let req = wrap(r#"<request><play id="1"/></request>"#);
-        assert_eq!(with_response_id(&req, Some("x")), req);
-        assert_eq!(with_response_id(&req, None), req);
-    }
-
-    #[test]
-    fn the_media_type_is_read_by_token() {
-        assert!(is_mscml("application/mediaservercontrol+xml"));
-        assert!(is_mscml(" Application/MediaServerControl+XML ; charset=utf-8"));
-        assert!(!is_mscml("application/xml"));
-        assert!(!is_mscml("application/mediaservercontrol+xml-x"));
-    }
-
-    /// A bare MSCML body is one request; a multipart body yields each MSCML
-    /// part's; any other type, or an empty body, yields none.
-    #[test]
-    fn requests_are_read_off_a_bare_body_and_off_each_mscml_part() {
-        let play = wrap(r#"<request><play id="p1"/></request>"#);
-        assert_eq!(
-            requests_in(Some(CONTENT_TYPE), play.as_bytes()),
-            vec![Request { command: "play".into(), id: Some("p1".into()) }]
-        );
-        assert!(requests_in(Some("application/xml"), play.as_bytes()).is_empty());
-        assert!(requests_in(None, play.as_bytes()).is_empty());
-        assert!(requests_in(Some(CONTENT_TYPE), b"").is_empty());
-
-        let framed = format!(
-            "--b1\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\r\n\
-             --b1\r\nContent-Type: {CONTENT_TYPE}\r\n\r\n{play}\r\n--b1--\r\n"
-        );
-        assert_eq!(
-            requests_in(Some("multipart/mixed;boundary=b1"), framed.as_bytes()),
-            vec![Request { command: "play".into(), id: Some("p1".into()) }]
-        );
-    }
-}
+mod tests;
