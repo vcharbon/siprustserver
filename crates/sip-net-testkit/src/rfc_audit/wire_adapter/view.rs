@@ -1,5 +1,5 @@
 //! One bind's stream in the wire model: the audit-visible events projected
-//! per bind, and the closed observation over each. A datagram the audit's
+//! per bind, and the closed observation over each. A request the audit's
 //! lenient reading refuses is projected off its identity lines.
 
 use std::collections::{HashMap, HashSet};
@@ -54,21 +54,18 @@ impl Facts {
         }
     }
 
-    /// A datagram no reading accepts, read off its identity lines: a request
-    /// refused for a line every reading refuses (a single-valued header stated
-    /// twice) still names the transaction its refusal answers and the CSeq its
-    /// dialog moved to (RFC 3261 §12.2.1.1). `None` where the start line, the
-    /// Call-ID or the CSeq does not read: such a datagram can key nothing.
+    /// A request no reading accepts, read off its identity lines: refused for a
+    /// line every reading refuses (a single-valued header stated twice), it
+    /// still names the transaction its refusal answers and the CSeq its dialog
+    /// moved to (RFC 3261 §12.2.1.1). A response no reading accepts is
+    /// discarded by its taker and owes nothing, so it stays out, as does a
+    /// datagram whose start line, Call-ID or CSeq does not read.
     fn sniffed(raw: &[u8]) -> Option<Facts> {
         let id = sniff::identity(raw);
-        let kind = match (id.method, id.status) {
-            (Some(method), None) => Kind::Request { method: method.to_string() },
-            (None, Some(status)) => Kind::Response { status },
-            _ => return None,
-        };
+        let (Some(method), None) = (id.method, id.status) else { return None };
         let tag = |t: String| (!t.is_empty()).then_some(t);
         Some(Facts {
-            kind,
+            kind: Kind::Request { method: method.to_string() },
             call_id: id.call_id?.to_string(),
             cseq: id.cseq?,
             cseq_method: id.cseq_method?.to_string(),
@@ -90,7 +87,7 @@ pub(super) fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindV
     // (modeled loss) starts at the first copy that is: the endpoint took it
     // as new.
     let mut held_chains: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    // The datagrams no reading accepts, per bind: a byte-identical copy of one
+    // The requests no reading accepts, per bind: a byte-identical copy of one
     // is its repeat.
     let mut unread: HashSet<(LaneKey, Vec<u8>)> = HashSet::new();
     let parser = crate::rfc_audit::lenient_parser();
