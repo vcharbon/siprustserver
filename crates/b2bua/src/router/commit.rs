@@ -393,7 +393,8 @@ pub(super) async fn commit_cancel(
 
 /// Queue `entry` on `call_ref`'s outbox behind the call's latest write.
 async fn push(ctx: &Arc<RouterCtx>, call_ref: &str, entry: TurnEntry) {
-    rider::behind(ctx, call_ref, Box::new(|released| Box::pin(entry.run(released)))).await;
+    let wait = ctx.state.hold_target(call_ref);
+    ctx.outboxes.push(call_ref, wait, Box::new(|released| Box::pin(entry.run(released)))).await;
 }
 
 #[cfg(test)]

@@ -447,8 +447,8 @@ queues what the turn sends on the call's outbox behind the write that records
 it, and ends the call once that outbox drained. How a turn persists and ends is
 one **commit kind**: quiet, update, write, delete before send, delete after
 drain, or defer to the primary (a takeover copy's terminal while its primary
-lives). Only the commit pushes on a call's outbox and reports a turn's marks
-(ADR-0055 §3).
+lives). Only the commit module pushes on a call's outbox and reports a turn's
+`Logged` and `Left` marks (ADR-0055 §3).
 _Avoid_: "interpret" (the commit decides the persist and the end, it does not
 interpret effects one by one).
 

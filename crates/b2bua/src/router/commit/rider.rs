@@ -23,33 +23,32 @@ pub enum Rider {
 }
 
 impl Rider {
-    async fn send(self, ctx: &RouterCtx) {
+    /// What sending it does once the outbox releases it, sized to its kind.
+    fn into_effects(self, ctx: Arc<RouterCtx>) -> Effects {
         match self {
-            Rider::Trying(invite) => {
-                let _ = ctx.txn.release_trying(&invite).await;
-            }
-            Rider::Answer(answer, dest) => {
-                let _ = ctx.txn.send_response(*answer, dest).await;
-            }
-            Rider::Relinquish(keys) => {
-                for key in keys {
-                    let _ = ctx.txn.relinquish_server(key).await;
-                }
-            }
+            Rider::Trying(invite) => Box::new(move |_| {
+                Box::pin(async move {
+                    let _ = ctx.txn.release_trying(&invite).await;
+                })
+            }),
+            Rider::Answer(answer, dest) => Box::new(move |_| {
+                Box::pin(async move {
+                    let _ = ctx.txn.send_response(*answer, dest).await;
+                })
+            }),
+            Rider::Relinquish(keys) => Box::new(move |_| {
+                Box::pin(async move {
+                    for key in keys {
+                        let _ = ctx.txn.relinquish_server(key).await;
+                    }
+                })
+            }),
         }
     }
 }
 
 /// Queue `rider` on `call_ref`'s outbox behind the call's latest write.
 pub async fn behind_the_write(ctx: &Arc<RouterCtx>, call_ref: &str, rider: Rider) {
-    let sender = ctx.clone();
-    behind(ctx, call_ref, Box::new(move |_| Box::pin(async move { rider.send(&sender).await })))
-        .await;
-}
-
-/// Queue `effects` on `call_ref`'s outbox, waiting for the backup to apply
-/// the call's current change-log entry.
-pub(super) async fn behind(ctx: &Arc<RouterCtx>, call_ref: &str, effects: Effects) {
     let wait = ctx.state.hold_target(call_ref);
-    ctx.outboxes.push(call_ref, wait, effects).await;
+    ctx.outboxes.push(call_ref, wait, rider.into_effects(ctx.clone())).await;
 }
