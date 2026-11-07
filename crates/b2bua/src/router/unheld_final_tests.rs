@@ -122,11 +122,12 @@ async fn heard(ep: &dyn UdpEndpoint) -> Vec<sip_message::SipRequest> {
 
 #[tokio::test(start_paused = true)]
 async fn a_non_2xx_on_a_leg_the_held_call_lacks_is_acked_from_its_extension() {
-    let (_node, proxy, _callee, call_ref, mark) = holding_a_call().await;
+    let (_node, proxy, callee, call_ref, mark) = holding_a_call().await;
     let refused = final_to_the_dial(&call_ref, &mark, OTHER, 487, true);
     let SipMessage::Response(resp) = &refused else { unreachable!() };
     proxy.send_to(resp.image(), SocketAddr::from(NODE_SIP_ADDR)).await.unwrap();
-    let acks = heard(proxy.as_ref()).await;
+    // With no front proxy the ACK goes where the INVITE went (RFC 3261 §17.1.1.2).
+    let acks = heard(callee.as_ref()).await;
     assert_eq!(acks.len(), 1, "one ACK: {acks:?}");
     assert_eq!(acks[0].method().as_str(), "ACK");
     assert_eq!(acks[0].request_uri().text(), CALLEE_URI, "at the Request-URI the extension states");
