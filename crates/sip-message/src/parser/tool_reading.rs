@@ -20,6 +20,7 @@ use super::custom::CustomParser;
 use super::{Exemptions, SipParser, SipParserLimits, DATAGRAM_BYTES};
 use crate::error::SipParseError;
 use crate::types::SipMessage;
+use crate::whitespace::trim;
 
 /// A tool's reading of the messages it is handed.
 #[derive(Debug, Clone)]
@@ -47,12 +48,13 @@ impl ToolReading {
         let mut limits = SipParserLimits::DEFAULT;
         let mut max_datagram = DATAGRAM_BYTES;
         for (n, line) in text.lines().enumerate() {
-            let line = line.split_once('#').map_or(line, |(kept, _)| kept).trim();
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            let line = trim(line.split_once('#').map_or(line, |(kept, _)| kept));
             if line.is_empty() {
                 continue;
             }
             let at = n + 1;
-            let Some((key, value)) = line.split_once('=').map(|(k, v)| (k.trim(), v.trim())) else {
+            let Some((key, value)) = line.split_once('=').map(|(k, v)| (trim(k), trim(v))) else {
                 problems.push(format!("line {at}: no `key = value` in {line:?}"));
                 continue;
             };
@@ -170,6 +172,14 @@ Content-Length: 0\r\n\r\n";
         assert!(joined.contains("line 5: max-blank is no key"), "{joined}");
         assert!(joined.contains("line 6: max-datagram stated twice"), "{joined}");
         assert_eq!(problems.len(), 6, "{joined}");
+    }
+
+    #[test]
+    fn a_file_with_crlf_line_ends_reads() {
+        let stated =
+            ToolReading::stated("exemptions = max-forwards:absent\r\nmax-datagram = 300\r\n")
+                .expect("CRLF lines read");
+        assert_eq!(stated.max_datagram(), 300);
     }
 
     #[test]

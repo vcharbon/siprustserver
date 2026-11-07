@@ -122,7 +122,6 @@ fn recording(arrival: Option<(&str, Option<&str>)>) -> Recording {
 
 fn refused(leg: &str, raw: &str) -> Failure {
     let message = sip_message::SipParser::parse(&sip_message::CustomParser::new(), raw.as_bytes())
-        .ok()
         .expect("the fixture parses");
     Failure::UnexpectedDatagram {
         leg: leg.to_string(),
