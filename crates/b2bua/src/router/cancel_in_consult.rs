@@ -13,7 +13,7 @@ use std::sync::Arc;
 use call::Call;
 use sip_message::SipRequest;
 
-use super::commit::{commit_cancel, held_cancel_of};
+use super::commit::commit_cancel;
 use super::RouterCtx;
 use crate::initial_consult::Consulted;
 
@@ -44,5 +44,5 @@ pub(super) async fn consult_writing_its_cancel(
 async fn write_the_cancel(ctx: &Arc<RouterCtx>, call_ref: &str, call: &Call, invite: &SipRequest) {
     let mut marked = call.clone();
     marked.setup_cancelled = true;
-    commit_cancel(ctx, call_ref, marked, held_cancel_of(invite)).await;
+    commit_cancel(ctx, call_ref, marked, invite).await;
 }

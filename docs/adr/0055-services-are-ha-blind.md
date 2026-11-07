@@ -46,7 +46,7 @@ three facts make every in-dialog method a separate HA problem:
 
 1. **The wire runs ahead of the replica, and the replica can miss a write.** A
    turn replaces the live copy, queues its flush and sends at once
-   (`router/interpret.rs:77-171`). The flush goes through a bounded channel whose
+   (`router/commit.rs`). The flush goes through a bounded channel whose
    `try_send` drops the write when full (`store/terminate_writer.rs:1-3, 69`); the
    backup polls every 100 ms (`repl/server.rs:65`); a backup at its memory
    ceiling leaves a new call's replica out (ADR-0037 item 4). The transaction

@@ -250,6 +250,27 @@ impl RouterCtx {
         }
     }
 
+    /// What a turn's result lands under: the configuration, the budgets the
+    /// requests sent off a call's turn are answered by (the adaptation port's
+    /// default, the limiter's admit budget, a `/call/failure` consult's chain
+    /// under the decision deadline) and the limiter's refresh period.
+    pub(crate) fn landing(&self) -> crate::landing::Landing<'_> {
+        let admit = self.limiter.admit_budget();
+        crate::landing::Landing {
+            config: &self.config,
+            budgets: crate::answer_deadline::AnswerBudgets {
+                http: self
+                    .adaptation_http
+                    .as_ref()
+                    .map_or(std::time::Duration::ZERO, |p| p.default_timeout),
+                admit,
+                failure: crate::answer_deadline::failure_budget_under(&self.config, admit),
+                release: crate::answer_deadline::release_budget_under(&self.config, admit),
+            },
+            refresh_period: self.limiter.refresh_period(),
+        }
+    }
+
     /// The owners a turn on the resident call `call_ref` reads, from its
     /// store envelope (ADR-0055 §11).
     pub(crate) fn owners(&self, call_ref: &str) -> crate::owners::Owners {

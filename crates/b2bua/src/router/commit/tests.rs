@@ -6,9 +6,9 @@ use call::CallModelState::{self, Active, Terminated, Terminating};
 use super::{classify, CommitKind, Landed, Residency};
 use crate::effects::QuietTurn;
 
-const PRIMARY: Residency = Residency { takeover: false, primary_departed: false };
-const COPY: Residency = Residency { takeover: true, primary_departed: false };
-const ORPHANED_COPY: Residency = Residency { takeover: true, primary_departed: true };
+const PRIMARY: Residency = Residency::Primary;
+const COPY: Residency = Residency::Copy;
+const ORPHANED_COPY: Residency = Residency::OrphanedCopy;
 
 fn landed(state: CallModelState, removes: bool, sends_a_rejection: bool) -> Landed {
     Landed { quiet: None, state, removes, sends_a_rejection }

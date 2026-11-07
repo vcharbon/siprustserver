@@ -3,18 +3,16 @@
 //! first provisional of a re-INVITE, the ACK of the non-2xx final it took, the
 //! answers to the CANCEL it took, then the transactions it relinquishes, its
 //! SIP in emission order, its limiter releases and its requests to outside
-//! services, and marks the turn [`Left`](TurnPoint::Left) last. A [`Rider`] is
-//! what the router sends behind a call's latest write for a turn that lands no
-//! record of its own.
+//! services, and marks the turn [`Left`](TurnPoint::Left) last.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{Call, TxnKind};
 use sip_message::header::Via;
-use sip_message::{Method, SipRequest, SipResponse};
+use sip_message::{Method, SipRequest};
 use sip_txn::ServerTxnKey;
 
+use super::held::HeldCancel;
 use crate::effects::{FireAndForgetEffect, OutboundBody, OutboundSipEffect, OutboundTxnMode};
 use crate::router::callouts;
 use crate::router::cannot_leave::{self, CannotLeave};
@@ -47,18 +45,19 @@ pub(super) struct TurnEntry {
     pub callouts: Vec<FireAndForgetEffect>,
     /// The turn's `Left` mark: its `(primary, backup)` version at `Logged`,
     /// whether it wrote, and what it was taken on.
-    pub mark: Option<((i64, i64), bool, TurnKind)>,
+    pub mark: ((i64, i64), bool, TurnKind),
 }
 
 impl TurnEntry {
-    /// An entry of `call`'s turn sending `outbound` and nothing else, with no
-    /// mark.
-    pub fn sending(
+    /// An entry of `call`'s turn sending `outbound` and nothing else, marked
+    /// `mark` once it left.
+    pub fn new(
         ctx: &Arc<RouterCtx>,
         call_ref: &str,
         call: Arc<Call>,
         now_ms: i64,
         outbound: Vec<OutboundSipEffect>,
+        mark: ((i64, i64), bool, TurnKind),
     ) -> Self {
         Self {
             ctx: ctx.clone(),
@@ -72,12 +71,11 @@ impl TurnEntry {
             outbound,
             limiter_releases: Vec::new(),
             callouts: Vec::new(),
-            mark: None,
+            mark,
         }
     }
 
-    /// Send everything, then mark the turn left, `released` as it was, when
-    /// it carries a mark.
+    /// Send everything, then mark the turn left, `released` as it was.
     pub async fn run(self, released: Released) {
         let ctx = &self.ctx;
         let call_ref = self.call_ref.as_str();
@@ -109,9 +107,8 @@ impl TurnEntry {
         for eff in self.callouts {
             call_out(ctx, &self.call, eff);
         }
-        if let Some((version, wrote, kind)) = self.mark {
-            reach(ctx, call_ref, TurnPoint::Left, version, wrote, kind, Some(released)).await;
-        }
+        let (version, wrote, kind) = self.mark;
+        reach(ctx, call_ref, TurnPoint::Left, version, wrote, kind, Some(released)).await;
     }
 }
 
@@ -262,51 +259,6 @@ async fn emit(ctx: &RouterCtx, call_ref: &str, call: &Call, eff: &OutboundSipEff
         (OutboundBody::Request(req), OutboundTxnMode::ServerResponse) => {
             // A request tagged ServerResponse is a misuse; send raw as a fallback.
             let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
-        }
-    }
-}
-
-/// The CANCEL of the INVITE named by its Call-ID, From-tag and CSeq number,
-/// whose answers the layer holds.
-pub struct HeldCancel {
-    pub call_id: String,
-    pub from_tag: String,
-    pub cseq: u32,
-}
-
-impl HeldCancel {
-    /// Let the layer send the 200 to the CANCEL and the 487 to its INVITE.
-    pub async fn release(&self, ctx: &RouterCtx) {
-        let _ = ctx.txn.release_cancel(&self.call_id, &self.from_tag, self.cseq).await;
-    }
-}
-
-/// What the router sends behind a call's latest write for a turn that lands
-/// no record of its own.
-pub enum Rider {
-    /// The caller's 100 to the INVITE whose call the write created.
-    Trying(Box<SipRequest>),
-    /// The router's answer to a request it refused, to where it is sent.
-    Answer(Box<SipResponse>, SocketAddr),
-    /// The server transactions of requests another copy answered.
-    Relinquish(Vec<ServerTxnKey>),
-}
-
-impl Rider {
-    /// Send it.
-    pub async fn send(self, ctx: &RouterCtx) {
-        match self {
-            Rider::Trying(invite) => {
-                let _ = ctx.txn.release_trying(&invite).await;
-            }
-            Rider::Answer(answer, dest) => {
-                let _ = ctx.txn.send_response(*answer, dest).await;
-            }
-            Rider::Relinquish(keys) => {
-                for key in keys {
-                    let _ = ctx.txn.relinquish_server(key).await;
-                }
-            }
         }
     }
 }
