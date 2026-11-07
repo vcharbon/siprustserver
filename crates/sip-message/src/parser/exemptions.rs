@@ -1,7 +1,7 @@
 //! The shapes a deployment accepts against the RFC: empty by default, each one
 //! stated at startup, consulted only by the ingress gates (ADR-0001). Only a
 //! shape with one reading can be exempted, and every typed reader accepts it on
-//! every deployment, so a stored read and a takeover need no configuration.
+//! every deployment, so a read of stored bytes needs no configuration.
 
 use std::borrow::Cow;
 
