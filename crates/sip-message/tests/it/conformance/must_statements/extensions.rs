@@ -110,6 +110,13 @@ pub(super) fn rows() -> Vec<Row> {
             "rule-charging-vector-unquoted-at",
             head.clone().add("P-Charging-Vector: icid-value=abc@example.com"),
         ),
+        // RFC 3515 §2.1: one Refer-To value, no comma-folded second address.
+        unread(
+            "3515-2.1-refer-to-second-address",
+            request("REFER")
+                .with("refer-to", "Refer-To: <sip:carol@example.com>, <sip:dave@example.com>"),
+            typed::<header::ReferTo>,
+        ),
         // RFC 3891 §6.1: exactly one to-tag and one from-tag, after one callid.
         unread(
             "3891-6.1-replaces-no-tags",
