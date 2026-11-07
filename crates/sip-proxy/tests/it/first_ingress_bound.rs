@@ -47,7 +47,7 @@ impl Drop for Rig {
 
 impl Rig {
     async fn new() -> Rig {
-        Self::reading(SipParserLimits::default()).await
+        Self::reading(SipParserLimits::DEFAULT).await
     }
 
     /// A proxy whose parser reads under `limits`.
@@ -70,10 +70,10 @@ impl Rig {
             strategy,
             registry,
             Arc::new(IdGen::seeded(0x847)),
+            CustomParser::with_limits(limits),
         )
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
-        .parser(CustomParser::with_limits(limits))
         .build(endpoint);
         Rig { task: tokio::spawn(core.run()), metrics, caller, worker }
     }
@@ -176,7 +176,7 @@ fn answered_400_at_first_ingress(rig: &Rig, forward: Option<Vec<u8>>) {
 #[tokio::test(start_paused = true)]
 async fn an_invite_at_the_line_bound_with_no_max_forwards_reads_at_the_next_hop() {
     let exemptions = Exemptions::read(Some("max-forwards:absent")).expect("named");
-    let rig = Rig::reading(SipParserLimits { exemptions, ..SipParserLimits::default() }).await;
+    let rig = Rig::reading(SipParserLimits { exemptions, ..SipParserLimits::DEFAULT }).await;
     let request = invite(&plain_via(), PLAIN_TO, false, LINES_BOUND);
     assert_eq!(lines_of(request.as_bytes()), LINES_BOUND);
     let forward = rig.forward_of(&request).await.expect("the proxy forwards it");

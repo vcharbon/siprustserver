@@ -122,7 +122,11 @@ fn correlate(v: &Value, path: &str) -> R<FlowConfig> {
     let obj = v
         .as_object()
         .ok_or_else(|| QueryError { path: path.into(), msg: "expected an object".into() })?;
-    let mut cfg = FlowConfig { strategies: Vec::new(), dedup_window_us: DEFAULT_DEDUP_WINDOW_US };
+    let mut cfg = FlowConfig {
+        strategies: Vec::new(),
+        dedup_window_us: DEFAULT_DEDUP_WINDOW_US,
+        reading: crate::reading::Reading::rfc(),
+    };
     let mut saw_strategies = false;
     for (k, val) in obj {
         match k.as_str() {

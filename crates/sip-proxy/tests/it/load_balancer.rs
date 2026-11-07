@@ -62,7 +62,7 @@ Max-Forwards: 70\r\n\
 {rph_line}\
 Content-Length: 0\r\n\r\n"
     );
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 /// An emergency INVITE (`Resource-Priority: esnet.0`), the on-wire signal.

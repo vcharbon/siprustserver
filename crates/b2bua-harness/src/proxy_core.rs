@@ -72,7 +72,7 @@ pub fn spawn_proxy_core(
     workers: &[(&str, SocketAddr)],
     clock: Clock,
 ) -> ProxyCoreParts {
-    spawn_proxy_reading(endpoint, addr, None, workers, clock, 0xC0FFEE, Default::default())
+    spawn_proxy_reading(endpoint, addr, None, workers, clock, 0xC0FFEE, SipParserLimits::DEFAULT)
 }
 
 /// The **external face** of a dual-face proxy SUT (see
@@ -118,10 +118,11 @@ pub fn spawn_proxy_reading(
 
     let metrics = Arc::new(ProxyMetrics::new());
     let id_gen = Arc::new(IdGen::seeded(id_seed));
-    let mut builder = ProxyCoreBuilder::new(ProxyAddr::from(addr), strategy, registry_dyn, id_gen)
-        .clock(clock)
-        .metrics(metrics.clone())
-        .parser(CustomParser::with_limits(limits));
+    let parser = CustomParser::ingress(limits);
+    let mut builder =
+        ProxyCoreBuilder::new(ProxyAddr::from(addr), strategy, registry_dyn, id_gen, parser)
+            .clock(clock)
+            .metrics(metrics.clone());
     if let Some(ext) = external {
         builder = builder.external_face(sip_proxy::ExternalFaceParts {
             endpoint: ext.endpoint,

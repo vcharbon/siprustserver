@@ -100,15 +100,53 @@ fn bounded_header_block(
     Ok(block)
 }
 
-/// The production parser. Built with `SipParserLimits`.
+/// The production parser. Each constructor names the reading it is for
+/// (ADR-0053 §6); production code builds one only through a reading role, and
+/// `clippy.toml` refuses [`new`](Self::new) and [`with_limits`](Self::with_limits)
+/// there.
 #[derive(Debug, Clone)]
 pub struct CustomParser {
     limits: SipParserLimits,
 }
 
 impl CustomParser {
+    /// A deployment's ingress: the bounds and exemptions its configuration
+    /// states, validated at startup. The process builds it once in `main` and
+    /// hands it to every stage that reads the wire.
+    pub fn ingress(limits: SipParserLimits) -> Self {
+        Self { limits }
+    }
+
+    /// A message built rather than received (by the stack, a harness or a
+    /// test fixture) and read back: the RFC grammar held strictly, the
+    /// default bounds, no exemption, so a defect of whoever built it surfaces.
+    pub fn built() -> Self {
+        Self { limits: SipParserLimits::DEFAULT }
+    }
+
+    /// A tool's reading of captured traffic: the bounds and exemptions its own
+    /// configuration states, which may admit more than any deployment does.
+    pub fn tool(limits: SipParserLimits) -> Self {
+        Self { limits }
+    }
+
+    /// A stored image's reading, which [`read_stored`](crate::read_stored)
+    /// states.
+    pub(crate) fn stored(limits: SipParserLimits) -> Self {
+        Self { limits }
+    }
+
+    /// The fragment a `message/sipfrag` body carries (RFC 3420), read as a
+    /// message's header block is: the RFC grammar and the default bounds.
+    pub(crate) fn fragment() -> Self {
+        Self { limits: SipParserLimits::DEFAULT }
+    }
+
+    /// Test support: the default bounds and no exemption. Production code
+    /// names its reading instead.
+    #[expect(clippy::new_without_default, reason = "no reading is the default one")]
     pub fn new() -> Self {
-        Self { limits: SipParserLimits::default() }
+        Self { limits: SipParserLimits::DEFAULT }
     }
 
     /// The start line and header block of `raw` read as a message's, its
@@ -133,6 +171,10 @@ impl CustomParser {
         }
     }
 
+    /// Test support: `limits`, stated with struct-update syntax so a test
+    /// names only the bound it is about
+    /// (`SipParserLimits { max_header_length: 512, ..SipParserLimits::DEFAULT }`).
+    /// Production code names its reading instead.
     pub fn with_limits(limits: SipParserLimits) -> Self {
         Self { limits }
     }
@@ -150,13 +192,7 @@ impl CustomParser {
         let uri_length = req.request_uri().text().len();
         self.limits.first_ingress.refusal(lines, uri_length, req.headers().iter())?;
         let at_first_ingress = SipParserLimits { at_first_ingress: true, ..self.limits.clone() };
-        Self::with_limits(at_first_ingress).parse(req.image()).err()
-    }
-}
-
-impl Default for CustomParser {
-    fn default() -> Self {
-        Self::new()
+        Self { limits: at_first_ingress }.parse(req.image()).err()
     }
 }
 

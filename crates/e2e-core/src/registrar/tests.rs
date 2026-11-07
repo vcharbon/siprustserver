@@ -15,8 +15,11 @@ fn parse_register(extra: &[(&str, &str)]) -> Result<SipMessage, sip_message::Sip
     }
     raw.push_str("Content-Length: 0\r\n\r\n");
     let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).expect("named");
-    CustomParser::with_limits(sip_message::SipParserLimits { exemptions, ..Default::default() })
-        .parse(raw.as_bytes())
+    CustomParser::with_limits(sip_message::SipParserLimits {
+        exemptions,
+        ..sip_message::SipParserLimits::DEFAULT
+    })
+    .parse(raw.as_bytes())
 }
 
 fn register(extra: &[(&str, &str)]) -> SipRequest {

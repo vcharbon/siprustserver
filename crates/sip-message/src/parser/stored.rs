@@ -29,5 +29,5 @@ const STORED: SipParserLimits = SipParserLimits {
 /// The message `image` holds. A refusal is a stack defect or a damaged
 /// replication frame, which the caller reports; it never panics.
 pub fn read_stored(image: &[u8]) -> Result<SipMessage, SipParseError> {
-    CustomParser::with_limits(STORED).parse(image)
+    CustomParser::stored(STORED).parse(image)
 }

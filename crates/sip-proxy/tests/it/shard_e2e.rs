@@ -127,6 +127,7 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
             strategy.clone(),
             registry.clone(),
             Arc::new(IdGen::seeded(0xBEEF + shard as u64)),
+            sip_message::CustomParser::new(),
         )
         .clock(clock.clone())
         .metrics(metrics.clone())

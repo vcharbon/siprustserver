@@ -173,9 +173,10 @@ parser validates" is the Date: a malformed Date never refuses the message
 
 ### 6. The lenient mode
 
-`SipParserLimits::wire_grammar = false` is the reading of a message built by
-the stack or read by a test harness: a mode of the one reader of each grammar,
-not a second implementation. A value the strict reading takes reads the same
+`SipParserLimits::wire_grammar = false` is the reading of a stored image, of a
+message the stack assembles from its own parts, and of a recorded exchange an
+audit judges: a mode of the one reader of each grammar, not a second
+implementation. A value the strict reading takes reads the same
 way; one it refuses keeps its scanned parts: an open quote or `<` runs to the
 end, parameters read on past a byte off their grammar, a URI the reader refuses
 is held opaque instead of refusing the message, and a Via sent-by the reader
@@ -186,6 +187,31 @@ is no request's target, whoever built the request.
 A stored image reads through `sip_message::read_stored`: this mode with every
 limit off and the value gates off, no setting, so a node reads what another
 stored whatever either states.
+
+Each reading has a named constructor on `CustomParser`, and a parser is built
+only through one, so every site states what it reads:
+
+| role | constructor | limits |
+|---|---|---|
+| a deployment's wire | `ingress(limits)` | what its configuration states, validated at startup |
+| a message built rather than received, read back by a harness or a test party | `built()` | the default bounds, no exemption, the grammar held strictly |
+| a stored image | `read_stored(image)` | this mode, every limit off |
+| a tool's reading of captured traffic | `tool(limits)` | what the tool's own configuration states |
+
+The configuration is data, validated once at the edge (`main`, a command
+line, a file) and injected by constructor: a process builds its ingress
+parser in `main` and hands it to every stage that reads the wire, the proxy's
+core, health probe and dead notifier included. The roles are constructors on
+one type rather than a newtype each, because consumers depend on the
+`SipParser` seam and a test decorates the parser behind it; the role is
+decided where the parser is built. `CustomParser::new` and
+`CustomParser::with_limits` stay for tests, and `clippy.toml` refuses them in
+every tiered crate (the panic-sites pass, ADR-0051).
+
+A tool's reading may admit more than any deployment: `sipflow --reading FILE`
+names its exemptions and its bounds on a line, a Request-URI, a header block
+and a datagram, and refuses the run on a line that does not read. With no file
+it reads the RFC, with no exemption.
 
 ## Considered and rejected
 
@@ -202,10 +228,10 @@ stored whatever either states.
 - A message the grammar refuses is refused where it was read before; the
   refusal is the packet's alone (ADR-0051), a request answered 400 when it can
   be (ADR-0054).
-- Capture ingest (`sipflow`) sets aside the messages it refuses and copies the
-  accepted ones whose non-fatal header reading failed beside them, counting
-  each (`parse_failed`, `header_failed`), so a stricter grammar's cost on a
-  capture is seen, not silent.
+- Capture ingest (`sipflow`) sets aside the messages its reading refuses and
+  copies the accepted ones whose non-fatal header reading failed beside them,
+  counting each (`parse_failed`, `header_failed`), so a stricter grammar's cost
+  on a capture is seen, not silent.
 - A test or fixture that relied on a URI the grammar refuses carries a
   compliant one; a test whose subject is that input asserts the refusal.
 - The vendored ABNF grammars of the fuzz corpus draw a header parameter's name

@@ -93,7 +93,7 @@ CSeq: 1 INVITE\r\n\
 Contact: <sip:b2bua@{top_via_host}:5060;leg=b>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 // The b-leg long-call-loss class: through a masquerading node

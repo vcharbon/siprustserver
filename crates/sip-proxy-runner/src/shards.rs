@@ -60,6 +60,7 @@ impl SharedRouting {
             self.strategy.clone(),
             self.registry.clone(),
             self.id_gen.clone(),
+            self.parser.clone(),
         )
         .clock(self.clock.clone())
         .metrics(self.metrics.clone())
@@ -72,7 +73,6 @@ impl SharedRouting {
         .traces(self.traces.clone())
         .pulse(self.pulse.clone())
         .first_view(self.first_view.clone())
-        .parser(self.parser.clone())
         .shard(shard)
     }
 
@@ -90,6 +90,7 @@ impl SharedRouting {
     ) -> HealthProbe {
         HealthProbe::new(
             endpoint,
+            self.parser.clone(),
             self.registry.clone(),
             control,
             observer,
@@ -112,9 +113,10 @@ impl SharedRouting {
         notice: Box<dyn UdpEndpoint>,
         key: Option<SigningKey>,
     ) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let (registry, clock, id_gen) =
-            (self.registry.clone(), self.clock.clone(), self.id_gen.clone());
-        let notifier = key.map(|key| DeadNotifier::new(notice, registry, key, clock, id_gen));
+        let (parser, registry, clock, id_gen) =
+            (self.parser.clone(), self.registry.clone(), self.clock.clone(), self.id_gen.clone());
+        let notifier =
+            key.map(|key| DeadNotifier::new(notice, parser, registry, key, clock, id_gen));
         if notifier.is_none() {
             tracing::warn!("PROXY_CLUSTER_KEY unset: no dead verdict is told to the workers");
         }

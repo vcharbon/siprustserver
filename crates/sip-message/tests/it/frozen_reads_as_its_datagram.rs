@@ -10,7 +10,7 @@ use sip_message::{
 };
 
 fn reread(image: &[u8]) -> SipMessage {
-    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     CustomParser::with_limits(lenient).parse(image).expect("its own datagram reads back")
 }
 

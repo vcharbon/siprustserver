@@ -213,7 +213,7 @@ impl RunnerEnv {
             brake_config,
             brake_counters.clone(),
             refusals.clone(),
-            sip_message::CustomParser::with_limits(
+            sip_message::CustomParser::ingress(
                 self.addresses.front.reads_under(&self.parser_limits),
             ),
         );

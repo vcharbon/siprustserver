@@ -57,7 +57,7 @@ pub fn header_fields(fragment: &[u8]) -> Vec<SipHeader> {
         }
         image.extend_from_slice(b"\r\n");
     }
-    CustomParser::new().parse_header_fields(&image).unwrap_or_default()
+    CustomParser::fragment().parse_header_fields(&image).unwrap_or_default()
 }
 
 #[cfg(test)]

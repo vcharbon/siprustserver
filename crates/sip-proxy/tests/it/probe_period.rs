@@ -57,6 +57,7 @@ async fn a_zero_probe_interval_rounds_every_millisecond() {
     ));
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         registry.control(),
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),

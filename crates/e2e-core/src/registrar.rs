@@ -159,7 +159,7 @@ struct RegisterProxy {
 impl RegisterProxy {
     async fn run(&self) {
         while let Some(pkt) = self.ep.recv().await {
-            let Ok(msg) = CustomParser::new().parse(&pkt.raw) else {
+            let Ok(msg) = CustomParser::built().parse(&pkt.raw) else {
                 continue; // ignore garbage on the wire (same as the real proxy)
             };
             match msg {

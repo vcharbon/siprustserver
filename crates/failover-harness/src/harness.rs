@@ -1018,7 +1018,7 @@ impl FailoverHarness {
             struck: Vec::new(),
             dialog_rows: Vec::new(),
             worker_tune: Arc::new(|_| {}),
-            proxy_limits: sip_message::SipParserLimits::default(),
+            proxy_limits: sip_message::SipParserLimits::DEFAULT,
             worker_replica: b2bua::ReplicaConfig::default(),
             worker_services: Vec::new,
             worker_adaptation_http: None,

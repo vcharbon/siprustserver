@@ -221,6 +221,7 @@ async fn spawn_probe(
     let (probe_ep, _probe_sock) = h.bind_sut("probe", probe_addr).await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry,
         control,
         observer,

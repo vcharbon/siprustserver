@@ -202,10 +202,16 @@ impl Rig {
         let id_gen = Arc::new(IdGen::seeded(0x1a5e));
         let advertised = ProxyAddr::new(face.0, face.1);
         let gaps = variant == Variant::ResolverGaps;
-        let mut builder = ProxyCoreBuilder::new(advertised, strategy, registry.clone(), id_gen)
-            .clock(clock.clone())
-            .metrics(metrics.clone())
-            .resolver(Arc::new(CalleeResolver { gaps }));
+        let mut builder = ProxyCoreBuilder::new(
+            advertised,
+            strategy,
+            registry.clone(),
+            id_gen,
+            sip_message::CustomParser::new(),
+        )
+        .clock(clock.clone())
+        .metrics(metrics.clone())
+        .resolver(Arc::new(CalleeResolver { gaps }));
         if dual {
             builder = builder.external_face(ExternalFaceParts {
                 endpoint: bind(PROXY).await.expect("bind the external face"),
@@ -221,6 +227,7 @@ impl Rig {
                 let endpoint = bind(PROBE).await.expect("bind the probe");
                 let probe = HealthProbe::new(
                     endpoint,
+                    sip_message::CustomParser::new(),
                     registry,
                     workers.control(),
                     observer.clone(),

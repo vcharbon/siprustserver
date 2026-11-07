@@ -66,7 +66,7 @@ Contact: <sip:b2bua@{W1_POD}:5060;leg=a>\r\n\
 Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 // The steady-state long-call-loss class: through a masquerading
@@ -152,7 +152,7 @@ CSeq: 2 OPTIONS\r\n\
 Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(raw.as_bytes()).unwrap();
 
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -196,7 +196,7 @@ CSeq: 2 OPTIONS\r\n\
 Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(raw.as_bytes()).unwrap();
 
     let outcome = core.route_request_from(&msg, format!("{W1_POD}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
@@ -246,7 +246,7 @@ CSeq: 2 BYE\r\n\
 Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(raw.as_bytes()).unwrap();
     let outcome = core.route_request_from(&msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward);
@@ -302,7 +302,7 @@ Contact: <sip:b2bua@{new_pod_ip}:5060;leg=a>\r\n\
 Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr;outbound>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(raw.as_bytes()).unwrap();
     let snat_src = "192.0.2.12:51000".parse().unwrap();
 
     let internal = core.route_request(&msg, snat_src, Face::Internal).await;
@@ -348,7 +348,7 @@ Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(raw.as_bytes()).unwrap();
     let snat_src = "192.0.2.12:51000".parse().unwrap(); // node IP, not a worker
     let outcome = core.route_request_from(&msg, snat_src).await;
 
@@ -390,7 +390,7 @@ Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(raw.as_bytes()).unwrap();
     let outcome = core.route_request_from(&msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     assert_eq!(
@@ -413,7 +413,7 @@ const THIRD_PARTY: &str = "10.244.9.1";
 /// recorded relaying it in to w2. The Request-URI is call 2's Contact at the
 /// pod that held it before a takeover.
 fn spiralled_reinvite(between: &str) -> SipMessage {
-    CustomParser::default().parse(spiralled_reinvite_text(between).as_bytes()).unwrap()
+    CustomParser::new().parse(spiralled_reinvite_text(between).as_bytes()).unwrap()
 }
 
 fn spiralled_reinvite_text(between: &str) -> String {
@@ -469,7 +469,7 @@ async fn a_route_set_with_two_own_pairs_back_to_back_follows_the_last_pair() {
     let signed = spiralled_reinvite_text("")
         .replace(&format!(";target={W1_POD}:5060"), &cookie(W1_POD))
         .replace(&format!(";target={W2_POD}:5060"), &cookie(W2_POD));
-    let msg = CustomParser::default().parse(signed.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(signed.as_bytes()).unwrap();
     let outcome = core.route_request_from(&msg, format!("{W1_POD}:5060").parse().unwrap()).await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward);
@@ -511,7 +511,7 @@ Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Route: <sip:{PROXY_VIP}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(raw.as_bytes()).unwrap();
     let outcome = core.route_request_from(&msg, format!("{W1_POD}:5060").parse().unwrap()).await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);

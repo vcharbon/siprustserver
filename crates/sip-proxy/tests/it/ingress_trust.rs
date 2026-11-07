@@ -128,22 +128,34 @@ async fn proxy_lab(dual: bool, admit: bool) -> Lab {
     let core = if dual {
         let int_ep = bind(int_vip()).await;
         let ext_ep = bind(ext_vip()).await;
-        ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg, id_gen(1))
-            .clock(Clock::test_at(0))
-            .metrics(metrics.clone())
-            .self_gate(gate.clone())
-            .external_face(ExternalFaceParts {
-                endpoint: ext_ep,
-                advertised: ProxyAddr::new(EXT_VIP, EXT_PORT),
-            })
-            .build(int_ep)
+        ProxyCoreBuilder::new(
+            ProxyAddr::new(INT_VIP, INT_PORT),
+            strategy,
+            reg,
+            id_gen(1),
+            sip_message::CustomParser::new(),
+        )
+        .clock(Clock::test_at(0))
+        .metrics(metrics.clone())
+        .self_gate(gate.clone())
+        .external_face(ExternalFaceParts {
+            endpoint: ext_ep,
+            advertised: ProxyAddr::new(EXT_VIP, EXT_PORT),
+        })
+        .build(int_ep)
     } else {
         let ep = bind(ext_vip()).await;
-        ProxyCoreBuilder::new(ProxyAddr::new(EXT_VIP, EXT_PORT), strategy, reg, id_gen(2))
-            .clock(Clock::test_at(0))
-            .metrics(metrics.clone())
-            .self_gate(gate.clone())
-            .build(ep)
+        ProxyCoreBuilder::new(
+            ProxyAddr::new(EXT_VIP, EXT_PORT),
+            strategy,
+            reg,
+            id_gen(2),
+            sip_message::CustomParser::new(),
+        )
+        .clock(Clock::test_at(0))
+        .metrics(metrics.clone())
+        .self_gate(gate.clone())
+        .build(ep)
     };
     let core = tokio::spawn(core.run());
     Lab { worker, unlisted_worker, translated_worker, outsider, far, gate, metrics, core }

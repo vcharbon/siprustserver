@@ -137,7 +137,7 @@ fn the_admin_address_defaults_to_loopback_and_refuses_any_other() {
 #[test]
 fn a_worker_states_no_exemption_unless_the_variable_names_one() {
     let limits = crate::runner_env::parser_limits(|_| None).expect("unset states nothing");
-    assert_eq!(limits, sip_message::SipParserLimits::default());
+    assert_eq!(limits, sip_message::SipParserLimits::DEFAULT);
 }
 
 /// A blank value or a name no exemption has refuses the boot, naming the

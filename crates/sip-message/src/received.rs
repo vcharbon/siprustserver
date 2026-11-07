@@ -209,7 +209,7 @@ mod tests {
                    Content-Length: 0\r\n\r\n";
         let lenient = CustomParser::with_limits(crate::SipParserLimits {
             wire_grammar: false,
-            ..Default::default()
+            ..crate::SipParserLimits::DEFAULT
         });
         let Ok(SipMessage::Request(req)) = lenient.parse(raw.as_bytes()) else {
             panic!("the lenient reader takes it");

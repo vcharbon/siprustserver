@@ -73,6 +73,7 @@ async fn probed(answers: bool, for_long: Duration) -> (SimulatedWorkerRegistry, 
     let view = FirstView::pending();
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         Arc::new(registry.clone()),
         registry.control(),
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),
@@ -127,6 +128,7 @@ async fn a_booting_members_silence_is_no_verdict() {
     let mut verdicts = registry.read_dead();
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         Arc::new(registry.clone()),
         registry.control(),
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),

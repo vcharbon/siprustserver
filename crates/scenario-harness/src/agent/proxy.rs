@@ -180,7 +180,8 @@ mod tests {
         );
         // A request stating no count reads where a deployment names the shape.
         let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).unwrap();
-        let limits = sip_message::SipParserLimits { exemptions, ..Default::default() };
+        let limits =
+            sip_message::SipParserLimits { exemptions, ..sip_message::SipParserLimits::DEFAULT };
         match CustomParser::with_limits(limits).parse(raw.as_bytes()) {
             Ok(SipMessage::Request(r)) => r,
             other => panic!("not a request: {other:?}"),
@@ -206,7 +207,10 @@ mod tests {
         );
         for raw in [by_request_uri, by_route] {
             let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).unwrap();
-            let limits = sip_message::SipParserLimits { exemptions, ..Default::default() };
+            let limits = sip_message::SipParserLimits {
+                exemptions,
+                ..sip_message::SipParserLimits::DEFAULT
+            };
             let Ok(SipMessage::Request(req)) =
                 CustomParser::with_limits(limits).parse(raw.as_bytes())
             else {

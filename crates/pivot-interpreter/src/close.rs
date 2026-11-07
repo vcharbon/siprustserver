@@ -629,7 +629,7 @@ fn view(messages: &[RecordedMessage]) -> LegView {
 }
 
 fn parse(wire: &[u8]) -> Option<SipMessage> {
-    CustomParser::new().parse(wire).ok()
+    CustomParser::built().parse(wire).ok()
 }
 
 /// The server transaction a taken request opens, as the dialog names it.

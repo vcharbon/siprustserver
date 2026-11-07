@@ -401,7 +401,7 @@ fn names(failure: &Failure, predicted: &Predicted) -> bool {
 }
 
 fn parse(wire: &[u8]) -> Option<SipMessage> {
-    CustomParser::new().parse(wire).ok()
+    CustomParser::built().parse(wire).ok()
 }
 
 #[cfg(test)]

@@ -41,7 +41,7 @@ Call-ID: t100-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("expected response")
     };
     core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
@@ -136,7 +136,7 @@ Call-ID: ackuri-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let msg = CustomParser::default().parse(raw_invite.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(raw_invite.as_bytes()).unwrap();
     core.handle_request_from(msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     // The branch the proxy stamped on its forwarded INVITE — the relayed
@@ -163,8 +163,7 @@ Call-ID: ackuri-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let SipMessage::Response(resp) = CustomParser::default().parse(raw_486.as_bytes()).unwrap()
-    else {
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw_486.as_bytes()).unwrap() else {
         panic!("expected response")
     };
     core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
@@ -192,7 +191,7 @@ Call-ID: ackuri-1@test\r\n\
 CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let ack_msg = CustomParser::default().parse(raw_ack.as_bytes()).unwrap();
+    let ack_msg = CustomParser::new().parse(raw_ack.as_bytes()).unwrap();
     core.handle_request_from(ack_msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();

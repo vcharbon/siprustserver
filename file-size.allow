@@ -94,8 +94,8 @@ crates/sip-message/src/sdp_answer.rs 534
 crates/sip-message/src/sniff.rs 567
 crates/sip-message/tests/it/generators.rs 1401
 crates/sip-net-testkit/src/contracts.rs 802
-crates/sip-pcap/src/bin/sipflow.rs 1028
-crates/sip-pcap/src/flow.rs 801
+crates/sip-pcap/src/bin/sipflow.rs 938
+crates/sip-pcap/src/flow.rs 787
 crates/sip-pcap/src/flow/tests.rs 1000
 crates/sip-txn/src/layer/client.rs 568
 crates/sip-txn/tests/it/bounded_queue.rs 803

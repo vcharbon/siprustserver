@@ -88,7 +88,7 @@ fn cancel_sent(leg: &[RecordedMessage], opener: Option<&str>) -> Option<(usize, 
 }
 
 fn parse(recorded: &RecordedMessage) -> Option<SipMessage> {
-    CustomParser::new().parse(recorded.wire()).ok()
+    CustomParser::built().parse(recorded.wire()).ok()
 }
 
 #[cfg(test)]

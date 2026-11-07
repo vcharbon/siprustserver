@@ -101,7 +101,7 @@ const T1_MS: u64 = 500;
 impl ProxyConfig {
     /// The reader of the wire, whichever stage reads a datagram first.
     pub fn parser(&self) -> CustomParser {
-        CustomParser::with_limits(self.parser_limits.clone())
+        CustomParser::ingress(self.parser_limits.clone())
     }
 
     /// Reads every boot variable through `get` (`None` = unset).

@@ -55,6 +55,7 @@ impl Rig {
             strategy,
             registry,
             Arc::new(IdGen::seeded(0x400)),
+            sip_message::CustomParser::new(),
         )
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())

@@ -72,11 +72,11 @@ impl Digest {
 
 /// The limit sets a datagram is parsed under.
 fn parsers() -> Vec<(&'static str, CustomParser)> {
-    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     let stream =
-        SipParserLimits { framing: sip_message::Framing::Stream, ..SipParserLimits::default() };
+        SipParserLimits { framing: sip_message::Framing::Stream, ..SipParserLimits::DEFAULT };
     let tight =
-        SipParserLimits { max_header_length: 16, max_uri_length: 8, ..SipParserLimits::default() };
+        SipParserLimits { max_header_length: 16, max_uri_length: 8, ..SipParserLimits::DEFAULT };
     vec![
         ("default", CustomParser::new()),
         ("lenient", CustomParser::with_limits(lenient)),

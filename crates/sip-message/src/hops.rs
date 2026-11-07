@@ -53,7 +53,7 @@ Content-Length: 0\r\n\r\n"
         );
         // A request with no hop count reads only where a deployment names it.
         let exemptions = crate::Exemptions::read(Some("max-forwards:absent")).unwrap();
-        let limits = crate::SipParserLimits { exemptions, ..Default::default() };
+        let limits = crate::SipParserLimits { exemptions, ..crate::SipParserLimits::DEFAULT };
         match CustomParser::with_limits(limits).parse(raw.as_bytes()).unwrap() {
             SipMessage::Request(req) => req,
             _ => panic!("request"),

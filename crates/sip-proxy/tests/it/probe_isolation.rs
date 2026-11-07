@@ -92,6 +92,7 @@ async fn run(answered: [usize; 2], run_for: Duration) -> Run {
     let reach = WorkerReach::unheard();
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         registry.control(),
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),

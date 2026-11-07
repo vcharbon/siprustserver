@@ -205,7 +205,7 @@ pub fn answered_after_ms(
 ) -> Option<u64> {
     let method = Method::from_wire(&inbound.cseq_method);
     let sent_us = leg.iter().filter(|recorded| recorded.dir == Dir::Out).find_map(|recorded| {
-        match CustomParser::new().parse(recorded.wire()).ok()? {
+        match CustomParser::built().parse(recorded.wire()).ok()? {
             SipMessage::Request(request)
                 if *request.method() == method && request.cseq().seq() == inbound.cseq =>
             {
@@ -221,7 +221,7 @@ pub fn answered_after_ms(
 /// arrived: a server transaction that sent one did not answer at once.
 fn provisional_received(leg: &[RecordedMessage], method: &Method, cseq: u32) -> bool {
     leg.iter().filter(|recorded| recorded.dir == Dir::In).any(|recorded| {
-        matches!(CustomParser::new().parse(recorded.wire()).ok(),
+        matches!(CustomParser::built().parse(recorded.wire()).ok(),
             Some(SipMessage::Response(response))
                 if response.status() < 200
                     && response.cseq().method() == method
@@ -233,7 +233,7 @@ fn provisional_received(leg: &[RecordedMessage], method: &Method, cseq: u32) -> 
 fn sent_under(leg: &[RecordedMessage], step: &str) -> Option<u32> {
     leg.iter()
         .filter(|recorded| recorded.dir == Dir::Out && recorded.step.as_deref() == Some(step))
-        .find_map(|recorded| match CustomParser::new().parse(recorded.wire()).ok()? {
+        .find_map(|recorded| match CustomParser::built().parse(recorded.wire()).ok()? {
             SipMessage::Request(request) => Some(request.cseq().seq()),
             _ => None,
         })
@@ -291,7 +291,7 @@ fn last_sent(leg: &[RecordedMessage], method: &Method) -> Option<u32> {
     let want = method.clone();
     leg.iter()
         .filter(|recorded| recorded.dir == Dir::Out)
-        .filter_map(|recorded| match CustomParser::new().parse(recorded.wire()).ok()? {
+        .filter_map(|recorded| match CustomParser::built().parse(recorded.wire()).ok()? {
             SipMessage::Request(request) if *request.method() == want => Some(request.cseq().seq()),
             _ => None,
         })

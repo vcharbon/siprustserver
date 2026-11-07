@@ -115,7 +115,7 @@ fn fixture() -> Fixture {
 }
 
 fn parse(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 /// The initial INVITE the worker at `pod` sends toward the UAS through the

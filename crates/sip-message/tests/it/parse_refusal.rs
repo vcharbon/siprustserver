@@ -247,7 +247,7 @@ fn limited_refusal(tail: &[&str]) -> SipParseError {
     ];
     lines.extend(tail.iter().map(|l| l.to_string()));
     lines.push("Content-Length: 0".to_string());
-    let limits = SipParserLimits { max_header_length: 60, ..SipParserLimits::default() };
+    let limits = SipParserLimits { max_header_length: 60, ..SipParserLimits::DEFAULT };
     CustomParser::with_limits(limits).parse(&wire(&lines)).expect_err("refused")
 }
 
@@ -266,10 +266,12 @@ fn a_header_past_the_length_limit_leaves_no_partial() {
 /// partial that answers it. A parser that is not at first ingress reads them.
 #[test]
 fn a_new_request_meets_the_first_ingress_bound() {
-    let bound = SipParserLimits::default().first_ingress;
+    let bound = SipParserLimits::DEFAULT.first_ingress;
     assert_eq!((bound.header_length, bound.uri_length, bound.header_lines), (8192, 8192, 100));
-    let gated =
-        CustomParser::with_limits(SipParserLimits { at_first_ingress: true, ..Default::default() });
+    let gated = CustomParser::with_limits(SipParserLimits {
+        at_first_ingress: true,
+        ..SipParserLimits::DEFAULT
+    });
     let long = |len: usize| format!("X-Long: {}", "a".repeat(len - "X-Long: ".len()));
     let at_uri = |len: usize| {
         let target = format!("sip:{}@192.0.2.20", "b".repeat(len - "sip:@192.0.2.20".len()));
@@ -292,8 +294,10 @@ fn a_new_request_meets_the_first_ingress_bound() {
 /// A request with a To-tag carries what hops added to its dialog's lines.
 #[test]
 fn a_request_with_a_to_tag_is_not_held_to_the_first_ingress_bound() {
-    let gated =
-        CustomParser::with_limits(SipParserLimits { at_first_ingress: true, ..Default::default() });
+    let gated = CustomParser::with_limits(SipParserLimits {
+        at_first_ingress: true,
+        ..SipParserLimits::DEFAULT
+    });
     let long = format!("X-Long: {}", "a".repeat(9_000));
     let raw = invite_with(&[&long]);
     let tagged = String::from_utf8(raw)
@@ -307,7 +311,7 @@ fn a_request_with_a_to_tag_is_not_held_to_the_first_ingress_bound() {
 /// at the limit parses.
 #[test]
 fn a_header_block_past_the_line_limit_is_refused_unanswered() {
-    let limit = SipParserLimits::default().max_header_lines;
+    let limit = SipParserLimits::DEFAULT.max_header_lines;
     let crowd = vec!["Q:a"; 12_000];
     let err = CustomParser::new().parse(&invite_with(&crowd)).expect_err("refused");
     assert_eq!(err.reason, format!("header block of 12009 lines exceeds limit {limit}"));

@@ -84,7 +84,7 @@ Call-ID: c1@h\r\n\
 CSeq: 1 INVITE\r\n\
 Max-Forwards: 70\r\n\
 Content-Length: 0\r\n\r\n";
-        CustomParser::default().parse(raw).unwrap()
+        CustomParser::new().parse(raw).unwrap()
     }
 
     #[tokio::test]

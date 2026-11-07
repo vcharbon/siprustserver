@@ -75,11 +75,17 @@ async fn spawn_proxy(
     ));
     let (ep, sock) = h.bind_sut(lane, PROXY).await;
     let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
-        .clock(Clock::test_at(0))
-        .metrics(metrics.clone())
-        .first_view(view)
-        .build(ep);
+    let core = ProxyCoreBuilder::new(
+        ProxyAddr::from(sock),
+        strategy,
+        registry,
+        id_gen,
+        sip_message::CustomParser::new(),
+    )
+    .clock(Clock::test_at(0))
+    .metrics(metrics.clone())
+    .first_view(view)
+    .build(ep);
     common::ProxySut::from_task(sock, metrics, tokio::spawn(core.run()))
 }
 
@@ -94,6 +100,7 @@ async fn spawn_probe(
     let (probe_ep, _) = h.bind_sut("probe", "127.0.0.1:5099").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry,
         control,
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),

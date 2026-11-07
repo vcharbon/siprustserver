@@ -87,7 +87,7 @@ async fn received(worker: &dyn UdpEndpoint) -> SipRequest {
         .await
         .expect("an OPTIONS arrives")
         .expect("queue open");
-    match CustomParser::default().parse(&packet.raw) {
+    match CustomParser::new().parse(&packet.raw) {
         Ok(SipMessage::Request(req)) => req,
         other => panic!("a request: {other:?}"),
     }
@@ -114,6 +114,7 @@ async fn the_probe_states_no_wildcard_and_asks_rport() {
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let probe = HealthProbe::new(
         r.sender,
+        sip_message::CustomParser::new(),
         registry,
         control,
         observer,
@@ -132,6 +133,7 @@ async fn the_dead_notice_states_no_wildcard_and_asks_rport() {
     let key = SigningKey::new(&[3u8; 32]).expect("a 32-byte key");
     let notifier = DeadNotifier::new(
         r.sender,
+        sip_message::CustomParser::new(),
         Arc::new(r.registry.clone()),
         key,
         r.clock.clone(),

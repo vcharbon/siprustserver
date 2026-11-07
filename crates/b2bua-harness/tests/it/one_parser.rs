@@ -81,14 +81,14 @@ async fn reads_the_same(name: &str, limits: SipParserLimits, past: Option<u16>) 
 /// Past the limit the process reads, nothing answers at any stage.
 #[tokio::test(start_paused = true)]
 async fn past_the_read_limit_nothing_answers_at_any_stage() {
-    let limits = SipParserLimits { max_header_lines: READS, ..SipParserLimits::default() };
+    let limits = SipParserLimits { max_header_lines: READS, ..SipParserLimits::DEFAULT };
     reads_the_same("one-parser-read-limit", limits, None).await;
 }
 
 /// Past a stated first-ingress bound, a 400 answers at every stage.
 #[tokio::test(start_paused = true)]
 async fn past_the_first_ingress_bound_a_400_answers_at_every_stage() {
-    let mut limits = SipParserLimits::default();
+    let mut limits = SipParserLimits::DEFAULT;
     limits.first_ingress.header_lines = READS;
     reads_the_same("one-parser-bound", limits, Some(400)).await;
 }

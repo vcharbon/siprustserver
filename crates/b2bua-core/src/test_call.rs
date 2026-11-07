@@ -43,7 +43,7 @@ pub fn invite(cid: &str) -> SipRequest {
          Contact: <sip:alice@10.0.0.9:5060>\r\n\
          Content-Length: 0\r\n\r\n"
     );
-    match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+    match CustomParser::built().parse(raw.as_bytes()).unwrap() {
         SipMessage::Request(r) => r,
         _ => panic!("expected a request"),
     }

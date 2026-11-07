@@ -132,7 +132,7 @@ fn dialled(invite: &SipRequest) -> Peer {
 /// `raw` read back; `None` when the parser refuses it, as the shell drops
 /// what does not parse.
 pub fn parsed(raw: &[u8]) -> Option<SipMessage> {
-    CustomParser::new().parse(raw).ok()
+    CustomParser::built().parse(raw).ok()
 }
 
 /// The address the peer on `leg` sends from.

@@ -199,7 +199,10 @@ async fn lenient_stack() -> Stack {
     let net = sip_net_testkit::SimulatedSignalingNetwork::new(TRANSIT);
     let b2bua_ep = net.bind_udp(BindUdpOpts::new(addr(B2BUA), 64)).await.expect("bind b2bua");
     let peer = net.bind_udp(BindUdpOpts::new(addr(PEER), 1024)).await.expect("bind peer");
-    let lenient = sip_message::SipParserLimits { wire_grammar: false, ..Default::default() };
+    let lenient = sip_message::SipParserLimits {
+        wire_grammar: false,
+        ..sip_message::SipParserLimits::DEFAULT
+    };
     let parser = std::sync::Arc::new(CustomParser::with_limits(lenient));
     let (txn, events) = sip_txn::TransactionLayer::spawn(b2bua_ep, parser, config());
     Stack { txn, events, peer, net }
@@ -208,7 +211,10 @@ async fn lenient_stack() -> Stack {
 /// What `ep` received, read with the lenient grammar: the responses echo
 /// the Via line as it came.
 fn drained_leniently(ep: &dyn UdpEndpoint) -> Vec<SipMessage> {
-    let lenient = sip_message::SipParserLimits { wire_grammar: false, ..Default::default() };
+    let lenient = sip_message::SipParserLimits {
+        wire_grammar: false,
+        ..sip_message::SipParserLimits::DEFAULT
+    };
     let parser = CustomParser::with_limits(lenient);
     std::iter::from_fn(|| ep.try_recv()).filter_map(|p| parser.parse(&p.raw).ok()).collect()
 }

@@ -213,7 +213,7 @@ pub async fn run(scenario: &Scenario) -> RunReport {
         endpoints.insert(i, ep);
     }
 
-    let parser = CustomParser::new();
+    let parser = CustomParser::built();
     let mut expects = Vec::new();
 
     for step in &scenario.steps {

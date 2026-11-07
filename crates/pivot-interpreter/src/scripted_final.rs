@@ -147,7 +147,7 @@ pub fn scripts_final_ack(
 }
 
 fn parse(wire: &[u8]) -> Option<SipMessage> {
-    CustomParser::new().parse(wire).ok()
+    CustomParser::built().parse(wire).ok()
 }
 
 #[cfg(test)]

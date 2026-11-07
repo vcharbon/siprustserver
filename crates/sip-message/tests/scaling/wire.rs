@@ -138,7 +138,7 @@ pub fn parser() -> CustomParser {
     CustomParser::with_limits(SipParserLimits {
         max_header_lines: 100_000,
         max_header_length: 1 << 20,
-        ..SipParserLimits::default()
+        ..SipParserLimits::DEFAULT
     })
 }
 

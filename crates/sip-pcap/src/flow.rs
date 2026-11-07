@@ -38,13 +38,15 @@ use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
 
 use sip_message::header::{HeaderName, Params, Uri};
-use sip_message::parser::SipParser;
-use sip_message::{CustomParser, Method, SipMessage};
+use sip_message::{Method, SipMessage};
 
 use crate::align::{align_probes, rides_no_timer};
+use crate::reading::Reading;
 use crate::Datagram;
 
+mod sift;
 mod stats;
+use sift::{hash_datagram, looks_like_sip};
 pub use stats::{FlowStats, HeaderFailure};
 
 /// Leg index into [`Flows::legs`].
@@ -97,6 +99,8 @@ pub struct FlowConfig {
     /// Also the tolerance of the probe alignment ([`crate::align`]) that puts
     /// a merged capture's probes on one clock first.
     pub dedup_window_us: u64,
+    /// How each captured message is read.
+    pub reading: Reading,
 }
 
 /// Default pairing window for the strategies that bound one: two legs of one
@@ -126,6 +130,7 @@ impl Default for FlowConfig {
                 CorrelateStrategy::IdentityAdjacency { window_us: DEFAULT_PAIR_WINDOW_US },
             ],
             dedup_window_us: DEFAULT_DEDUP_WINDOW_US,
+            reading: Reading::rfc(),
         }
     }
 }
@@ -351,11 +356,11 @@ pub struct Flows {
 /// regardless of input order — the order of the ALIGNED timestamps, which
 /// is also what every [`FlowMsg::ts_us`] carries.
 pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
-    let parser = CustomParser::new();
+    let reading = &cfg.reading;
     let keys: Vec<Option<u64>> =
         datagrams.iter().map(|d| looks_like_sip(&d.payload).then(|| hash_datagram(d))).collect();
     let (ts, aligned_probes) = align_probes(datagrams, &keys, cfg.dedup_window_us, |i| {
-        parser.parse(&datagrams[i].payload).is_ok_and(|m| rides_no_timer(&m))
+        reading.parse(&datagrams[i].payload).is_ok_and(|m| rides_no_timer(&m))
     });
     let mut order: Vec<usize> = (0..datagrams.len()).collect();
     order.sort_by_key(|&i| ts[i]);
@@ -379,7 +384,7 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
         }
         dedup.insert(key, ts[i]);
 
-        let msg = match parser.parse(&d.payload) {
+        let msg = match reading.parse(&d.payload) {
             Ok(m) => m,
             Err(_) => {
                 stats.parse_failed += 1;
@@ -411,25 +416,6 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
 
     let groups = correlate(&legs, cfg);
     Flows { legs, groups, stats }
-}
-
-/// Cheap pre-filter so RTP/STUN/DNS on captured ports never reaches the parser.
-fn looks_like_sip(payload: &[u8]) -> bool {
-    if payload.len() < 16 {
-        return false;
-    }
-    let head = &payload[..payload.len().min(256)];
-    (head.starts_with(b"SIP/2.0 ") || head.windows(9).any(|w| w == b" SIP/2.0\r"))
-        && payload[0].is_ascii_uppercase()
-}
-
-fn hash_datagram(d: &Datagram) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    d.src.hash(&mut h);
-    d.dst.hash(&mut h);
-    d.payload.hash(&mut h);
-    h.finish()
 }
 
 fn ingest(

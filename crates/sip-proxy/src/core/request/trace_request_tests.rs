@@ -139,7 +139,7 @@ CSeq: {cseq} INVITE\r\n\
 Contact: <sip:alice@{UAC}:5060>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    CustomParser::default().parse(raw.as_bytes()).expect("fixture INVITE")
+    CustomParser::new().parse(raw.as_bytes()).expect("fixture INVITE")
 }
 
 /// An in-dialog request from the caller — the To-tag the callee gave the dialog
@@ -156,7 +156,7 @@ Call-ID: {call_id}\r\n\
 CSeq: {cseq} {method}\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    CustomParser::default().parse(raw.as_bytes()).expect("fixture in-dialog request")
+    CustomParser::new().parse(raw.as_bytes()).expect("fixture in-dialog request")
 }
 
 /// The downstream's answer on its way back through us: our own Via on top
@@ -179,7 +179,7 @@ CSeq: {cseq}\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) =
-        CustomParser::default().parse(raw.as_bytes()).expect("fixture response")
+        CustomParser::new().parse(raw.as_bytes()).expect("fixture response")
     else {
         panic!("expected a response")
     };

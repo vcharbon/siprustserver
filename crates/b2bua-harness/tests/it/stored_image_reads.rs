@@ -18,7 +18,7 @@ fn larger() -> SipParserLimits {
     SipParserLimits {
         max_header_lines: LINES + 32,
         first_ingress: FirstIngressBound { header_lines: LINES, ..FirstIngressBound::DEFAULT },
-        ..SipParserLimits::default()
+        ..SipParserLimits::DEFAULT
     }
 }
 

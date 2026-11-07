@@ -24,8 +24,7 @@ const NAMES: &[&str] = &[
 /// The parser a deployment stating `names` runs, `Err` while a name reads as none.
 fn parser_naming(names: &[&str]) -> Result<CustomParser, String> {
     let exemptions = Exemptions::read(Some(&names.join(",")))?;
-    let limits =
-        SipParserLimits { at_first_ingress: true, exemptions, ..SipParserLimits::default() };
+    let limits = SipParserLimits { at_first_ingress: true, exemptions, ..SipParserLimits::DEFAULT };
     Ok(CustomParser::with_limits(limits))
 }
 

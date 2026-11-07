@@ -37,6 +37,7 @@ mod msgfacts;
 mod pcapng;
 pub mod pcapout;
 pub mod query;
+pub mod reading;
 mod reassembly;
 pub mod rfc;
 mod source;

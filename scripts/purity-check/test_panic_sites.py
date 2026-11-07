@@ -864,6 +864,35 @@ class RealPass(Case):
         self.assertIn("crates/a/src/hidden.rs 6\n", out)
         self.assertIn("crates/a/src/included.in 1\n", out)
 
+    # A stand-in for the crate whose parser the list names, at the same path.
+    PARSER = ("pub mod parser {\n    pub mod custom {\n        pub struct CustomParser;\n"
+              "        impl CustomParser {\n"
+              "            pub fn new() -> Self { CustomParser }\n"
+              "            pub fn with_limits(_: u8) -> Self { CustomParser }\n"
+              "            pub fn built() -> Self { CustomParser }\n"
+              "        }\n    }\n}\n")
+
+    def test_a_parser_with_no_reading_role_is_a_site_outside_tests(self):
+        ws = Workspace()
+        self.addCleanup(ws.tmp.cleanup)
+        ws.crate("sip-message", lib=self.PARSER)
+        ws.crate("a", "shell", deps=("sip-message",), lib=(
+            "use sip_message::parser::custom::CustomParser;\n"
+            "pub fn anonymous() -> CustomParser {\n    CustomParser::new()\n}\n"
+            "pub fn stated() -> CustomParser {\n    CustomParser::with_limits(1)\n}\n"
+            "pub fn named() -> CustomParser {\n    CustomParser::built()\n}\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n    #[test]\n"
+            "    fn t() { let _ = super::CustomParser::new(); }\n}\n"))
+        with open(REAL_CLIPPY_TOML) as f:
+            ws.write("clippy.toml", f.read())
+        ws.write("panic-sites.allow", HEADER)
+        ws.commit()
+        rc, out = ws.run(SCRIPT, "--report")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("crates/a/src/lib.rs 2\n", out)
+        self.assertNotIn("does not refer to", out)
+
 
 if __name__ == "__main__":
     unittest.main()

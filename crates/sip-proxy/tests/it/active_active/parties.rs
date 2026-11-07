@@ -16,7 +16,7 @@ use sip_message::{HeaderName, SipMessage, SipParser, SipRequest, SipResponse, Si
 use super::rig::{Party, SHARED};
 
 fn parse_request(raw: &str) -> SipRequest {
-    match CustomParser::default().parse(raw.as_bytes()) {
+    match CustomParser::new().parse(raw.as_bytes()) {
         Ok(SipMessage::Request(r)) => r,
         other => panic!("a request: {other:?}"),
     }

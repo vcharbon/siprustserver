@@ -63,10 +63,10 @@ impl Rig {
             strategy,
             registry,
             Arc::new(IdGen::seeded(0x645)),
+            parser,
         )
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
-        .parser(parser)
         .build(endpoint);
         Rig { task: tokio::spawn(core.run()), metrics, caller, worker }
     }
@@ -163,8 +163,12 @@ async fn the_core_routes_and_answers_the_parse_the_production_hook_queued() {
 /// route the same datagram.
 #[tokio::test(start_paused = true)]
 async fn the_limit_the_process_states_is_read_at_every_stage() {
-    let strict =
-        || CustomParser::with_limits(SipParserLimits { max_header_lines: 3, ..Default::default() });
+    let strict = || {
+        CustomParser::with_limits(SipParserLimits {
+            max_header_lines: 3,
+            ..SipParserLimits::DEFAULT
+        })
+    };
     let with_hook = {
         let metrics = Arc::new(ProxyMetrics::new());
         let hook = intake_shed_hook(QUEUE_MAX, metrics.clone(), strict());

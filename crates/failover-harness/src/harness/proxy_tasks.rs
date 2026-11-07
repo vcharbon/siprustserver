@@ -80,6 +80,7 @@ impl FailoverHarness {
         let control = registry.control();
         let probe = HealthProbe::new(
             probe_ep,
+            sip_message::CustomParser::ingress(self.proxy_limits.clone()),
             registry_dyn,
             control,
             observer,
@@ -107,6 +108,7 @@ impl FailoverHarness {
         let notifier = node.enter(|| {
             DeadNotifier::new(
                 ep,
+                sip_message::CustomParser::ingress(self.proxy_limits.clone()),
                 registry,
                 b2bua_harness::cluster_key(),
                 self.clock.clone(),

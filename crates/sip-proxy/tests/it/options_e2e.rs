@@ -125,6 +125,7 @@ async fn probed(name: &str, mode: Mode) -> Probed {
     let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         registry.control(),
         observer.clone(),
@@ -230,6 +231,7 @@ async fn a_restart_answered_200_is_read_alive_in_one_write() {
     let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         control,
         observer,
@@ -276,6 +278,7 @@ async fn the_stale_sweep_floors_a_silent_worker_and_never_a_refusing_one() {
     let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         registry.control(),
         observer.clone(),
@@ -389,6 +392,7 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
     let (probe_ep, _probe_sock) = h.bind_sut("probe-rtx", "127.0.0.1:5098").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         control,
         observer,

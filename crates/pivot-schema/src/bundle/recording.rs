@@ -82,7 +82,7 @@ impl RecordedMessage {
     /// [`BodyLayout::of`] read off it; a datagram that does not parse, or
     /// carries no body, has none.
     pub fn layout_of(wire: &[u8]) -> Option<BodyLayout> {
-        CustomParser::new().parse(wire).ok().and_then(|parsed| BodyLayout::of(&parsed))
+        CustomParser::built().parse(wire).ok().and_then(|parsed| BodyLayout::of(&parsed))
     }
 }
 

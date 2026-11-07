@@ -8,12 +8,11 @@
 //! kept in step by hand. Nothing here reads state the document does not carry.
 
 use sip_message::header::HeaderName;
-use sip_message::parser::SipParser;
-use sip_message::CustomParser;
 
 use crate::callfacts;
 use crate::doc::{FlowsDoc, EMIT_SCHEMA_VERSION};
 use crate::msgfacts;
+use crate::reading::Reading;
 
 /// What the enrichment needs beyond the document itself.
 #[derive(Debug, Clone, Default)]
@@ -21,12 +20,15 @@ pub struct EnrichOptions {
     /// Headers `msgs[].headers` projects, by identity. Order is preserved into
     /// the document's `emit_headers`.
     pub headers: Vec<HeaderName>,
+    /// How each message's bytes are read: the reading that extracted them.
+    pub reading: Reading,
 }
 
 impl EnrichOptions {
     /// Resolve an allow-list given as wire names — casing and compact forms
-    /// collapse, so `r` and `Refer-To` name the same header once.
-    pub fn with_headers<S: AsRef<str>>(names: &[S]) -> Self {
+    /// collapse, so `r` and `Refer-To` name the same header once. The bytes
+    /// are read under `reading`.
+    pub fn with_headers<S: AsRef<str>>(names: &[S], reading: Reading) -> Self {
         let mut headers: Vec<HeaderName> = Vec::new();
         for name in names {
             let name = HeaderName::from(name.as_ref().trim());
@@ -34,7 +36,7 @@ impl EnrichOptions {
                 headers.push(name);
             }
         }
-        Self { headers }
+        Self { headers, reading }
     }
 }
 
@@ -43,14 +45,13 @@ impl EnrichOptions {
 /// Fails loudly on a message whose bytes no longer parse: a document that
 /// cannot be re-derived must not be emitted with a stale enrichment.
 pub fn enrich(doc: &mut FlowsDoc, opts: &EnrichOptions) -> Result<(), String> {
-    let parser = CustomParser::new();
     doc.schema = EMIT_SCHEMA_VERSION;
     doc.emit_headers = opts.headers.iter().map(|h| h.as_wire_str().to_string()).collect();
 
     for (li, leg) in doc.legs.iter_mut().enumerate() {
         for (mi, msg) in leg.msgs.iter_mut().enumerate() {
             let raw = msg.payload.bytes().map_err(|e| at(li, mi, &e))?;
-            let parsed = parser.parse(&raw).map_err(|e| at(li, mi, &e.reason))?;
+            let parsed = opts.reading.parse(&raw).map_err(|e| at(li, mi, &e.reason))?;
             msgfacts::apply(&parsed, &opts.headers, msg);
         }
         callfacts::mark_repeats(leg);
@@ -121,7 +122,7 @@ Content-Length: 0\r\n\r\n";
         crate::emit::flows_to_doc(
             &flows,
             &DecodeStats::default(),
-            &EnrichOptions::with_headers(&["X-Api-Call"]),
+            &EnrichOptions::with_headers(&["X-Api-Call"], Reading::rfc()),
         )
         .expect("the model enriches")
     }
@@ -152,7 +153,7 @@ Content-Length: 0\r\n\r\n";
     /// back in step.
     #[test]
     fn re_enriching_a_serialized_document_is_idempotent() {
-        let opts = EnrichOptions::with_headers(&["X-Api-Call"]);
+        let opts = EnrichOptions::with_headers(&["X-Api-Call"], Reading::rfc());
         let once = serde_json::to_string_pretty(&doc()).unwrap();
         let twice = enrich_str(&once, &opts).unwrap();
         assert_eq!(once, twice);
@@ -186,7 +187,7 @@ Content-Length: 0\r\n\r\n";
 
     #[test]
     fn a_rewritten_document_keeps_its_mark_through_re_enrichment() {
-        let opts = EnrichOptions::with_headers(&["X-Api-Call"]);
+        let opts = EnrichOptions::with_headers(&["X-Api-Call"], Reading::rfc());
         let mut marked = doc();
         assert_eq!(marked.rewritten, None, "a document as read carries no mark");
         marked.rewritten = Some("anonymised".to_string());

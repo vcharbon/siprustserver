@@ -151,6 +151,7 @@ async fn run(config: HealthProbeConfig, answers: Answers, run_for: Duration) -> 
     let control = Arc::new(DeadAt { inner: registry.control(), at: dead.clone() });
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         control,
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),

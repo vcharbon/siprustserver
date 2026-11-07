@@ -92,14 +92,23 @@ _Avoid_: "header registry" (there is no global mutable registry anymore).
 **Strict reading** / **Lenient reading** (ADR-0053 §6):
 The two readings of the one reader of each grammar. *Strict* holds wire bytes to
 RFC 3261 §25.1 whole and refuses anything else. *Lenient* is the reading of a
-message the stack built, stored or a harness reads (`wire_grammar = false`,
-`read_stored`): a value the strict reading takes reads the same way, and one it
-refuses keeps what can be read, never a refusal.
+stored image, of a message the stack assembles from its own parts, and of a
+recorded exchange an audit judges (`wire_grammar = false`, `read_stored`): a
+value the strict reading takes reads the same way, and one it refuses keeps
+what can be read, never a refusal.
 _Avoid_: "relaxed parser", "second parser" (it is a mode, not an implementation).
+
+**Reading role** (ADR-0053 §6):
+What a parser is built to read, named by its constructor: a deployment's
+`ingress`, a message `built` rather than received, a `tool`'s reading of
+captured traffic, `read_stored`. Production code builds a parser only through a
+role; `CustomParser::new` and `with_limits` are test support.
+_Avoid_: "default parser" (no reading is the default one).
 
 **Exemption** (ADR-0001, `SipParserLimits::exemptions`):
 A shape a deployment accepts against the RFC, named in `SIP_EXEMPTIONS`: empty by
-default, consulted only by the ingress gate. Only a shape with one reading can be
+default, consulted only by the ingress gate. A tool's reading names its own set
+(`sipflow --reading`). Only a shape with one reading can be
 exempted, and every typed reader reads it on every deployment.
 _Avoid_: "tolerance", "quirk mode".
 

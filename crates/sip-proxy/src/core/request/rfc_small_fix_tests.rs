@@ -40,7 +40,7 @@ async fn core_with_metrics() -> (ProxyCore, Arc<ProxyMetrics>) {
 }
 
 fn parse_req(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 // §16.3 check 2: an ACK with Max-Forwards: 0 is silently discarded — a 483
@@ -117,8 +117,8 @@ CSeq: 2 BYE\r\n\
 Route: <sip:{PROXY_VIP}:70596;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    assert!(CustomParser::default().parse(raw.as_bytes()).is_err(), "the wire parse refuses it");
-    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    assert!(CustomParser::new().parse(raw.as_bytes()).is_err(), "the wire parse refuses it");
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     let req = CustomParser::with_limits(lenient).parse(raw.as_bytes()).unwrap();
     let outcome = core.route_request_from(&req, format!("{UAC}:5060").parse().unwrap()).await;
     // A 70596→5060 wrap would match the advertised VIP and strip the entry

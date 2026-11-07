@@ -234,7 +234,7 @@ impl Pair {
             .await
             .unwrap_or_else(|_| panic!("{at:?} receives nothing"))
             .unwrap_or_else(|| panic!("{at:?}'s endpoint closed"));
-        let msg = CustomParser::default().parse(&pkt.raw).expect("the proxy sends SIP");
+        let msg = CustomParser::new().parse(&pkt.raw).expect("the proxy sends SIP");
         (msg, pkt.src)
     }
 
@@ -312,12 +312,18 @@ async fn instance(
     let refusals = Arc::new(Refusals::keyed(tagger, 0, sip_proxy::refusals::REFUSED_MEMO_MAX));
     let memo = Arc::new(CancelBranchLru::with_bounds(clock.clone(), opts.memo));
     let advertised = ProxyAddr::new(SHARED.0, SHARED.1);
-    let core = ProxyCoreBuilder::new(advertised, strategy, registry_dyn, id_gen)
-        .clock(clock.clone())
-        .metrics(metrics)
-        .refusals(refusals)
-        .cancel_lru(memo.clone())
-        .build(ep);
+    let core = ProxyCoreBuilder::new(
+        advertised,
+        strategy,
+        registry_dyn,
+        id_gen,
+        sip_message::CustomParser::new(),
+    )
+    .clock(clock.clone())
+    .metrics(metrics)
+    .refusals(refusals)
+    .cancel_lru(memo.clone())
+    .build(ep);
     let task = tokio::spawn(core.run());
     Instance { node, registry, observer, memo, clock: clock.clone(), task }
 }

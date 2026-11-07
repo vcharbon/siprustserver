@@ -174,7 +174,7 @@ impl Absorption {
     /// The functional default: dedup on, both views recorded.
     pub fn transaction_view() -> Self {
         Absorption {
-            reader: Mutex::new(CustomParser::new()),
+            reader: Mutex::new(CustomParser::built()),
             dedup: AtomicBool::new(true),
             logging: true,
             tables: RepeatTables::default(),
@@ -197,7 +197,7 @@ impl Absorption {
     /// The load-lane default: no dedup (the mux owns it) and no log.
     pub fn raw_wire() -> Self {
         Absorption {
-            reader: Mutex::new(CustomParser::new()),
+            reader: Mutex::new(CustomParser::built()),
             dedup: AtomicBool::new(false),
             logging: false,
             tables: RepeatTables::default(),

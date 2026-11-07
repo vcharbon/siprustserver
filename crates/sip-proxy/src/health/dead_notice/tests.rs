@@ -44,8 +44,14 @@ async fn three_alive_workers() -> Fixture {
         workers.push(net.bind_udp(bind(format!("{host}:{port}"))).await.unwrap());
     }
     let ep = net.bind_udp(bind(NOTIFIER.into())).await.unwrap();
-    let notifier =
-        DeadNotifier::new(ep, Arc::new(registry.clone()), key(), clock, Arc::new(IdGen::seeded(9)));
+    let notifier = DeadNotifier::new(
+        ep,
+        sip_message::CustomParser::new(),
+        Arc::new(registry.clone()),
+        key(),
+        clock,
+        Arc::new(IdGen::seeded(9)),
+    );
     let task = tokio::spawn(notifier.run());
     Fixture { registry, workers, task }
 }
@@ -53,7 +59,7 @@ async fn three_alive_workers() -> Fixture {
 /// The OPTIONS `worker` received within a second, if any.
 async fn received(worker: &dyn UdpEndpoint) -> Option<SipRequest> {
     let packet = tokio::time::timeout(Duration::from_secs(1), worker.recv()).await.ok()??;
-    match CustomParser::default().parse(&packet.raw).ok()? {
+    match CustomParser::new().parse(&packet.raw).ok()? {
         SipMessage::Request(req) => Some(req),
         SipMessage::Response(_) => None,
     }

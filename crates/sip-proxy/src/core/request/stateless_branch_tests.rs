@@ -80,7 +80,7 @@ impl Fabric {
     /// branch AND sent-by, the pair §17.2.3 matches a server transaction on.
     async fn pushed_via(&self) -> String {
         let pkt = self.downstream.recv().await.expect("the proxy forwards a datagram");
-        let SipMessage::Request(req) = CustomParser::default().parse(&pkt.raw).unwrap() else {
+        let SipMessage::Request(req) = CustomParser::new().parse(&pkt.raw).unwrap() else {
             panic!("a forwarded request")
         };
         req.top_via().to_wire()
@@ -89,7 +89,7 @@ impl Fabric {
     /// Just its `branch` token, for the shape and no-merge assertions.
     async fn pushed_branch(&self) -> String {
         let pkt = self.downstream.recv().await.expect("the proxy forwards a datagram");
-        let SipMessage::Request(req) = CustomParser::default().parse(&pkt.raw).unwrap() else {
+        let SipMessage::Request(req) = CustomParser::new().parse(&pkt.raw).unwrap() else {
             panic!("a forwarded request")
         };
         req.top_via().branch().expect("the proxy pushes a branch").to_string()
@@ -97,7 +97,7 @@ impl Fabric {
 }
 
 fn parse_req(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 /// A worker-originated INVITE toward the downstream UA: top Via sent-by is the
@@ -135,7 +135,7 @@ Content-Length: 0\r\n\r\n"
 /// §8.1.1.7 magic-cookie gate is a wire-grammar rule, so such a message is
 /// hydrated rather than read off the wire.
 fn branchless_options(call_id: &str, cseq: u32) -> SipMessage {
-    let limits = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let limits = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     let raw = format!(
         "OPTIONS sip:bob@{DOWNSTREAM}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {WORKER}:5060;rport\r\n\
@@ -372,7 +372,7 @@ async fn one_branch_token_from_two_senders_leaves_on_two_branches() {
         .unwrap();
     let pushed = || async {
         let pkt = worker.recv().await.expect("the proxy forwards to the worker");
-        let SipMessage::Request(req) = CustomParser::default().parse(&pkt.raw).unwrap() else {
+        let SipMessage::Request(req) = CustomParser::new().parse(&pkt.raw).unwrap() else {
             panic!("a forwarded request")
         };
         req.top_via().to_wire()

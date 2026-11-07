@@ -207,6 +207,7 @@ async fn without_rport_the_200_to_a_cancel_reaches_the_sent_by_port() {
         strategy,
         registry,
         Arc::new(IdGen::seeded(0x846)),
+        sip_message::CustomParser::new(),
     )
     .clock(Clock::test_at(0))
     .build(endpoint);

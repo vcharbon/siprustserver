@@ -45,7 +45,7 @@ async fn core(lru: Arc<CancelBranchLru>, metrics: Arc<ProxyMetrics>) -> ProxyCor
 }
 
 fn parse(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 fn uac_request(method: &str, cseq_method: &str, to_tag: &str) -> SipMessage {
@@ -88,7 +88,7 @@ Call-ID: bounded-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("expected a response")
     };
     resp

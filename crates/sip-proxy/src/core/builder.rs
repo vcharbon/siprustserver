@@ -43,17 +43,20 @@ pub struct ProxyCoreBuilder {
     traces: Option<Arc<ProxyTraces>>,
     pulse: Option<Arc<ShardPulse>>,
     first_view: Option<Arc<FirstView>>,
-    parser: Option<CustomParser>,
+    parser: CustomParser,
 }
 
 impl ProxyCoreBuilder {
     /// The builder of a core advertising `advertised`, routing by `strategy`
     /// over `registry`; `id_gen` keys the default [`Refusals`]' To-tag secret.
+    /// `parser` reads a datagram no intake hook parsed: the process's ingress
+    /// parser, the one its hook holds.
     pub fn new(
         advertised: ProxyAddr,
         strategy: Arc<dyn RoutingStrategy>,
         registry: Arc<dyn WorkerRegistry>,
         id_gen: Arc<IdGen>,
+        parser: CustomParser,
     ) -> Self {
         Self {
             advertised,
@@ -74,7 +77,7 @@ impl ProxyCoreBuilder {
             traces: None,
             pulse: None,
             first_view: None,
-            parser: None,
+            parser,
         }
     }
 
@@ -86,7 +89,13 @@ impl ProxyCoreBuilder {
         strategy: Arc<dyn RoutingStrategy>,
         registry: Arc<dyn WorkerRegistry>,
     ) -> Self {
-        Self::new(advertised, strategy, registry, Arc::new(IdGen::seeded(0xC0FFEE)))
+        Self::new(
+            advertised,
+            strategy,
+            registry,
+            Arc::new(IdGen::seeded(0xC0FFEE)),
+            CustomParser::new(),
+        )
     }
 
     pub fn clock(mut self, clock: Clock) -> Self {
@@ -175,13 +184,6 @@ impl ProxyCoreBuilder {
         self.first_view = Some(view);
         self
     }
-    /// What reads a datagram no intake hook parsed: the parser the process's
-    /// hook holds. The default reads under the default limits.
-    pub fn parser(mut self, parser: CustomParser) -> Self {
-        self.parser = Some(parser);
-        self
-    }
-
     /// Finish into a [`ProxyCore`] bound on `endpoint`.
     pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
         let clock = self.clock.unwrap_or_else(Clock::system);
@@ -210,7 +212,7 @@ impl ProxyCoreBuilder {
             traces,
             pulse: self.pulse.unwrap_or_else(|| Arc::new(ShardPulse::new(self.shard + 1))),
             first_view: self.first_view.unwrap_or_else(FirstView::given),
-            parser: self.parser.unwrap_or_default(),
+            parser: self.parser,
         })
     }
 }

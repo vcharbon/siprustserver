@@ -179,7 +179,7 @@ fn a_received_is_stamped_on_an_address_difference_only() {
 fn a_lenient_reading_holds_a_refused_sent_by_whole() {
     let lenient = CustomParser::with_limits(SipParserLimits {
         wire_grammar: false,
-        ..SipParserLimits::default()
+        ..SipParserLimits::DEFAULT
     });
     for sent_by in [
         "[2001:db8::00001]",

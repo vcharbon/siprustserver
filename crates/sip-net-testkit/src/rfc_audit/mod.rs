@@ -50,12 +50,12 @@ use crate::types::{all_ua_roles, UaRole};
 /// is what flags the violation. No bound applies: a deployment's limits decide
 /// what it accepts, and what crossed the wire is judged whatever its size.
 pub(crate) fn lenient_parser() -> CustomParser {
-    CustomParser::with_limits(SipParserLimits {
+    CustomParser::tool(SipParserLimits {
         wire_grammar: false,
         max_header_length: usize::MAX,
         max_uri_length: usize::MAX,
         max_header_lines: usize::MAX,
-        ..Default::default()
+        ..SipParserLimits::DEFAULT
     })
 }
 

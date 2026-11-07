@@ -80,7 +80,7 @@ async fn fixture() -> Fixture {
 }
 
 fn parse(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 fn src() -> SocketAddr {

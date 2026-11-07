@@ -22,28 +22,30 @@ afterAll(() => fs.rmSync(scratch, { recursive: true, force: true }))
 const EXTRACTOR = path.join(scratch, "extractor")
 fs.writeFileSync(EXTRACTOR, "#!/bin/sh\nprintf 'enriched:'; cat \"$2\"\n", { mode: 0o755 })
 
+const extraction = Extraction.layerWith({
+  documentName: (capture) => Effect.succeed(`${capture}.flows.json`),
+  anonymise: () => Effect.die("unused"),
+  keptSeed: () => Effect.die("unused"),
+  carrySeed: () => Effect.die("unused"),
+  failureOf: (dir) =>
+    Effect.sync(() => {
+      const file = path.join(dir, "failed.txt")
+      return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : undefined
+    }),
+  recordFailure: () => Effect.die("unused"),
+  sourceRefusal: (failure) =>
+    Effect.succeed({
+      caseId: "source",
+      reason: "source-refused",
+      legs: [],
+      callIds: [],
+      sut: [],
+      line: `${failure.capture}: ${failure.error}`
+    })
+})
+
 const services = Layer.mergeAll(
-  Extraction.layerWith({
-    documentName: (capture) => Effect.succeed(`${capture}.flows.json`),
-    anonymise: () => Effect.die("unused"),
-    keptSeed: () => Effect.die("unused"),
-    carrySeed: () => Effect.die("unused"),
-    failureOf: (dir) =>
-      Effect.sync(() => {
-        const file = path.join(dir, "failed.txt")
-        return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : undefined
-      }),
-    recordFailure: () => Effect.die("unused"),
-    sourceRefusal: (failure) =>
-      Effect.succeed({
-        caseId: "source",
-        reason: "source-refused",
-        legs: [],
-        callIds: [],
-        sut: [],
-        line: `${failure.capture}: ${failure.error}`
-      })
-  }),
+  extraction,
   Tools.layerWith({
     ready: () => Effect.succeed(EXTRACTOR),
     generator: Effect.die("unused"),
@@ -106,5 +108,32 @@ describe("enrichAll", () => {
     } finally {
       fs.chmodSync(shut, 0o700)
     }
+  })
+})
+
+describe("the deployment's reading", () => {
+  /** A stand-in extractor that prints the arguments it was given, then the document. */
+  const ECHOING = path.join(scratch, "echoing")
+  fs.writeFileSync(ECHOING, "#!/bin/sh\nprintf '%s ' \"$@\"; eval cat \\\"\\${$#}\\\"\n", { mode: 0o755 })
+  const stating = Layer.mergeAll(
+    extraction,
+    Tools.layerWith({
+      ready: () => Effect.succeed(ECHOING),
+      generator: Effect.die("unused"),
+      measure: Effect.die("unused"),
+      compileMs: Effect.succeed(0),
+      decides: Effect.die("unused"),
+      reading: ["--reading", "/the/stated.reading"]
+    }),
+    NodeServices.layer
+  )
+
+  it("is passed to the extractor ahead of the enrichment", async () => {
+    captureDir("read", undefined, "{}")
+    const work = workOf(path.join(scratch, "reading"), "read")
+    const why = await Effect.runPromise(enrich(work, corpus, ECHOING).pipe(Effect.provide(stating)))
+    expect(why).toBeUndefined()
+    const out = fs.readFileSync(await Effect.runPromise(flowsOf(work).pipe(Effect.provide(stating))), "utf8")
+    expect(out).toBe(`--reading /the/stated.reading --enrich ${path.join(corpus, "read", "read.flows.json")} {}`)
   })
 })

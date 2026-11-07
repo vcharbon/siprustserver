@@ -467,7 +467,7 @@ async fn after_release_a_forked_2xx_is_acked_and_byed_at_its_contact() {
 async fn a_late_2xx_to_an_own_invite_past_the_bound_is_acked_and_byed() {
     let gated = sip_message::CustomParser::with_limits(sip_message::SipParserLimits {
         at_first_ingress: true,
-        ..Default::default()
+        ..sip_message::SipParserLimits::DEFAULT
     });
     let mut stack = Stack::build_reading(5, 64, config(), gated).await;
     let call_ref = format!("self|{}", "c".repeat(9_000));

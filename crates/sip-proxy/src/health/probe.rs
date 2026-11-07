@@ -149,10 +149,12 @@ pub struct HealthProbe {
 
 impl HealthProbe {
     /// Must be called within a tokio runtime (it spawns the transaction-layer
-    /// owner task over `endpoint`).
+    /// owner task over `endpoint`). `parser` is the process's ingress parser:
+    /// the workers' answers are read as the rest of the wire is.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         endpoint: Box<dyn UdpEndpoint>,
+        parser: CustomParser,
         registry: Arc<dyn WorkerRegistry>,
         control: Arc<dyn WorkerRegistryControl>,
         observer: Arc<WorkerLoadObserver>,
@@ -163,7 +165,7 @@ impl HealthProbe {
         let local = endpoint.local_addr();
         let (txn, events) = TransactionLayer::spawn(
             endpoint,
-            Arc::new(CustomParser::default()),
+            Arc::new(parser),
             TransactionConfig::new(id_gen.clone()),
         );
         Self {

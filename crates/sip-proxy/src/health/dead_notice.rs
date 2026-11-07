@@ -50,8 +50,10 @@ pub struct DeadNotifier {
 impl DeadNotifier {
     /// Must be called within a tokio runtime (it spawns the transaction-layer
     /// owner task over `endpoint`). Every verdict from now on is told.
+    /// `parser` is the process's ingress parser.
     pub fn new(
         endpoint: Box<dyn UdpEndpoint>,
+        parser: CustomParser,
         registry: Arc<dyn WorkerRegistry>,
         key: SigningKey,
         clock: Clock,
@@ -60,7 +62,7 @@ impl DeadNotifier {
         let local = endpoint.local_addr();
         let (txn, events) = TransactionLayer::spawn(
             endpoint,
-            Arc::new(CustomParser::default()),
+            Arc::new(parser),
             TransactionConfig::new(id_gen.clone()),
         );
         let verdicts = registry.read_dead();

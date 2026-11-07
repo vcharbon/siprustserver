@@ -153,7 +153,7 @@ pub(super) fn dual_face_core_over(
 }
 
 pub(super) fn parse_msg(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 pub(super) fn caller_src() -> SocketAddr {

@@ -26,7 +26,7 @@ const CONTACT: &str = "sip:alice@127.0.0.1:5060;x-two=a;x-two=a";
 fn naming() -> SipParserLimits {
     let named = "repeat:from.uri:x-dup,repeat:contact.uri:x-two";
     let exemptions = Exemptions::read(Some(named)).expect("the names read");
-    SipParserLimits { exemptions, ..SipParserLimits::default() }
+    SipParserLimits { exemptions, ..SipParserLimits::DEFAULT }
 }
 
 async fn scene(name: &str) -> B2buaScene {

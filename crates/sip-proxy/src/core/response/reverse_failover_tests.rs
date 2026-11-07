@@ -203,7 +203,7 @@ Call-ID: dlg-1@{UAC}\r\n\
 CSeq: {cseq}\r\n\
 {contact}{extra_headers}Content-Length: 0\r\n\r\n"
     );
-    let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         unreachable!()
     };
     resp

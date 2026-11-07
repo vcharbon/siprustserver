@@ -40,9 +40,15 @@ async fn spawn_proxy(
     let metrics = Arc::new(ProxyMetrics::new());
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
     let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
-    let mut builder = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
-        .clock(Clock::test_at(0))
-        .metrics(metrics.clone());
+    let mut builder = ProxyCoreBuilder::new(
+        ProxyAddr::from(sock),
+        strategy,
+        registry,
+        id_gen,
+        sip_message::CustomParser::new(),
+    )
+    .clock(Clock::test_at(0))
+    .metrics(metrics.clone());
     if let Some(gate) = gate {
         builder = builder.self_gate(gate);
     }

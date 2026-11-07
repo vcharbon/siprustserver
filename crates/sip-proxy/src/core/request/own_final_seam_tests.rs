@@ -92,7 +92,7 @@ CSeq: 1 INVITE\r\n\
 Contact: <sip:alice@{SENT_BY}>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    CustomParser::default().parse(raw.as_bytes()).expect("an INVITE")
+    CustomParser::new().parse(raw.as_bytes()).expect("an INVITE")
 }
 
 #[tokio::test]

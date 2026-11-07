@@ -23,7 +23,7 @@ fn read(raw: &str, record_route: &str) -> SipMessage {
         return wire.expect("parses");
     }
     assert!(wire.is_err(), "the wire parse refuses a recorded route no reader accepts");
-    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     CustomParser::with_limits(lenient).parse(raw.as_bytes()).expect("parses leniently")
 }
 

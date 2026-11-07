@@ -137,9 +137,3 @@ impl SipParserLimits {
         at_first_ingress: false,
     };
 }
-
-impl Default for SipParserLimits {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}

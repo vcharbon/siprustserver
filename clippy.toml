@@ -132,6 +132,10 @@ disallowed-methods = [
   { path = "std::collections::HashSet::intersection", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
   { path = "std::collections::HashSet::difference", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
   { path = "std::collections::HashSet::symmetric_difference", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
+  # A parser with no reading role (ADR-0053 §6): production code states what
+  # it reads, and tests keep these two.
+  { path = "sip_message::parser::custom::CustomParser::new", reason = "a parser with no reading role; build it through `ingress`, `built` or `tool`, or read a stored image with `read_stored`" },
+  { path = "sip_message::parser::custom::CustomParser::with_limits", reason = "a parser with no reading role; build it through `ingress`, `built` or `tool`, or read a stored image with `read_stored`" },
 ]
 
 disallowed-types = [

@@ -121,9 +121,15 @@ async fn a_single_face_proxys_wire_is_this() {
             ProxyAddr::from(addr(WORKER)),
         )]));
     let id_gen = Arc::new(sip_txn::IdGen::seeded(0x51F));
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(addr(PROXY)), strategy, registry, id_gen)
-        .clock(Clock::test_at(0))
-        .build(endpoint);
+    let core = ProxyCoreBuilder::new(
+        ProxyAddr::from(addr(PROXY)),
+        strategy,
+        registry,
+        id_gen,
+        sip_message::CustomParser::new(),
+    )
+    .clock(Clock::test_at(0))
+    .build(endpoint);
     let task = tokio::spawn(core.run());
 
     let cookie = format!("Route: <sip:{PROXY};target={WORKER};lr>\r\n");

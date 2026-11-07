@@ -54,7 +54,7 @@ fn has_sdp(msg: &SipMessage) -> bool {
 
 /// Extract the renderer facets from raw packet bytes.
 pub fn facets(raw: &[u8]) -> Facets {
-    let parser = CustomParser::new();
+    let parser = CustomParser::built();
     let Ok(msg) = parser.parse(raw) else {
         return Facets {
             label: first_line(raw),

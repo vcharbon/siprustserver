@@ -603,8 +603,7 @@ async fn spawn_lb_proxy(
         Clock::test_at(0),
     ));
 
-    // The LB is a real `ProxyCore` — role-tag its bind `{Proxy}` so the RFC
-    // suite judges this lane by the proxy rules (and only those).
+    // A real `ProxyCore`, its bind role-tagged `{Proxy}`: the RFC suite judges it as a proxy.
     let (ep, sock) = h
         .bind_sut_with_roles(
             "lb",
@@ -613,7 +612,8 @@ async fn spawn_lb_proxy(
         )
         .await;
     let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
+    let parser = sip_message::CustomParser::ingress(sip_message::SipParserLimits::DEFAULT);
+    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen, parser)
         .clock(Clock::test_at(0))
         .metrics(Arc::new(ProxyMetrics::new()))
         .build(ep);

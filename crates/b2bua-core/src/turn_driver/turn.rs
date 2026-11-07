@@ -130,7 +130,7 @@ impl Turn {
             .filter_map(|e| match &e.body {
                 OutboundBody::Request(r) => Some(SipMessage::Request(r.clone())),
                 OutboundBody::Response(r) => Some(SipMessage::Response(r.clone())),
-                OutboundBody::Datagram(d) => CustomParser::new().parse(d.wire().0).ok(),
+                OutboundBody::Datagram(d) => CustomParser::built().parse(d.wire().0).ok(),
             })
     }
 }

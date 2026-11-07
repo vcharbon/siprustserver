@@ -87,7 +87,7 @@ fn an_unterminated_name_addr_is_refused_on_the_wire() {
 /// tag, which the lenient reading reads past them.
 #[test]
 fn a_response_to_an_unechoable_to_is_refused() {
-    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     let parser = CustomParser::with_limits(lenient);
     for (to, echoed) in
         [("sipuser@example.com;tag=bd76ya", false), ("sip:user@example.com;t<ag=bd76ya", true)]

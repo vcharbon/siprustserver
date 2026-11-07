@@ -124,6 +124,7 @@ async fn a_surrogate_pair_in_the_callers_display_name_crosses_the_proxy_as_its_c
         strategy,
         registry,
         Arc::new(IdGen::seeded(0x5ead)),
+        sip_message::CustomParser::new(),
     )
     .clock(Clock::test_at(0))
     .build(endpoint);

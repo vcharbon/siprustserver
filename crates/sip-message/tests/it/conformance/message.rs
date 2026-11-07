@@ -169,7 +169,10 @@ impl Template {
 /// The parser a party's new request meets at its first hop, at the default
 /// limits and with no exemption.
 pub fn production() -> CustomParser {
-    CustomParser::with_limits(SipParserLimits { at_first_ingress: true, ..Default::default() })
+    CustomParser::with_limits(SipParserLimits {
+        at_first_ingress: true,
+        ..SipParserLimits::DEFAULT
+    })
 }
 
 /// `raw` through the production parser.
