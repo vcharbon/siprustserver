@@ -191,7 +191,7 @@ fn continue_session(
     if carried == Carried::Outside {
         return body;
     }
-    let Some(range) = content_type.and_then(|ct| sdp_range(ct, &body)) else {
+    let Some(range) = content_type.and_then(|ct| sdp_range(ct, None, &body)) else {
         return body;
     };
     let Some(sdp) = body.get(range.clone()) else {

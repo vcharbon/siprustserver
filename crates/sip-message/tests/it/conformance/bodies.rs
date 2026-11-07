@@ -89,6 +89,8 @@ fn body_rows() -> Vec<Row> {
         offers_nothing("description-in-the-epilogue", mixed(&format!("--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b--\r\n--b\r\n{part}"))),
         // RFC 2045 §3, RFC 2046 §5.1: a part's head.
         offers("folded-part-header", mixed(&format!("--b\r\nContent-Type:\r\n application/sdp\r\n\r\n{SDP}\r\n--b--\r\n"))),
+        offers("folded-part-subtype", mixed(&format!("--b\r\nContent-Type: application/\r\n sdp\r\n\r\n{SDP}\r\n--b--\r\n"))),
+        offers("part-content-length", mixed(&format!("--b\r\nContent-Length: {}\r\n{part}\r\n--b--\r\n", SDP.len()))),
         offers_nothing("continuation-is-no-header", mixed(&format!("--b\r\nX-Note: first\r\n Content-Type: application/sdp\r\n\r\n{SDP}\r\n--b--\r\n"))),
         offers_nothing("part-with-no-headers-is-text", mixed(&format!("--b\r\n\r\nContent-Type: application/sdp\r\n\r\n{SDP}\r\n--b--\r\n"))),
         Row::new("body/part-with-no-headers-keeps-its-content".to_string(), part_content("--b\r\n\r\nline one\r\n\r\nline: three\r\n--b--\r\n", "line one\r\n\r\nline: three")),
@@ -100,11 +102,14 @@ fn body_rows() -> Vec<Row> {
             &[],
             format!("--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\r\n--b\r\n{part}\r\n--b--\r\n"),
         )),
+        offers("nesting-at-the-depth-cap", nested(4)),
         offers_nothing("nesting-past-the-depth-cap", nested(5)),
         // RFC 5621 §8.2: a description's disposition.
         offers_nothing("bare-early-session", invite("application/sdp", &["Content-Disposition: early-session"], SDP)),
         offers_nothing("bare-render", invite("application/sdp", &["Content-Disposition: render"], SDP)),
         offers_nothing("early-session-part", mixed(&format!("--b\r\nContent-Disposition: early-session\r\n{part}\r\n--b--\r\n"))),
+        offers("session-after-an-early-session-part", mixed(&format!("--b\r\nContent-Disposition: early-session\r\nContent-Type: application/sdp\r\n\r\n{}\r\n--b\r\n{part}\r\n--b--\r\n", SDP.replace("49170", "40000")))),
+        offers("session-on-a-bare-description", invite("application/sdp", &["Content-Disposition: session;handling=required"], SDP)),
         // RFC 3261 §20.15, RFC 2046 §5.1.1: ingress refuses what no reader frames.
         answered("no-content-type", Template::request("INVITE").body(SDP)),
         answered("content-type-with-no-subtype", invite("application", &[], SDP)),

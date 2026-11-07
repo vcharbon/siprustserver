@@ -27,6 +27,7 @@ mod id;
 mod identity;
 mod item_separator;
 pub mod kind;
+mod media_type;
 mod name;
 mod name_addr;
 mod name_addr_header;
@@ -50,7 +51,7 @@ mod wire;
 
 pub use aliases::{
     AcceptRange, Allow, AllowEvents, Authorization, Contact, ContentDisposition, ContentLength,
-    Diversion, Event, Expires, From, HistoryInfo, MaxForwards, MediaType, MinExpires, MinSe,
+    Diversion, Event, Expires, From, HistoryInfo, MaxForwards, MinExpires, MinSe,
     PAssertedIdentity, PPreferredIdentity, PathEntry, Privacy, ProxyAuthenticate,
     ProxyAuthorization, ProxyRequire, RSeq, Reason, RecordRouteEntry, ReferSub, ReferTo,
     ReferredBy, RemotePartyId, Replaces, ReplyTo, Require, RetryAfter, RouteEntry,
@@ -67,6 +68,7 @@ pub use id::HeaderKey;
 pub(crate) use identity::is_call_id;
 pub use identity::{CSeq, CallId, RAck};
 pub use item_separator::ItemSeparator;
+pub use media_type::MediaType;
 pub use name::{HeaderId, HeaderName};
 pub(crate) use name_addr::AddrGrammar;
 pub use name_addr::{AddrForm, NameAddr};

@@ -71,9 +71,13 @@ impl<'a> Relaying<'a> {
                 SourceBody::Verbatim,
             )
         };
+        let disposition = match source_body {
+            SourceBody::Verbatim => resp.raw(HeaderName::ContentDisposition).next(),
+            SourceBody::Replaced | SourceBody::Dropped => None,
+        };
         let carried_sdp = content_type
             .as_ref()
-            .is_some_and(|ct| sip_message::multipart::sdp_range(ct, &body).is_some());
+            .is_some_and(|ct| sip_message::sdp_range(ct, disposition, &body).is_some());
         let cseq = resp.cseq();
         let cseq_method = if cseq.method().as_str().is_empty() {
             "INVITE".to_string()

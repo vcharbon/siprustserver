@@ -79,7 +79,10 @@ fn describes_minted_body(scope: RelayScope<'_>, name: &str) -> bool {
 /// taken from ([`Body::descriptors`]), else the originator's as far as
 /// [`override_role`] keeps them describing it — all of its entity headers
 /// beside its own bytes, the role alone beside a stand-in.
-fn override_descriptors(a_leg_invite: &SipRequest, body: &Body) -> Vec<(String, String)> {
+pub(super) fn override_descriptors(
+    a_leg_invite: &SipRequest,
+    body: &Body,
+) -> Vec<(String, String)> {
     let pairs = |lines: &[MsgHeader]| -> Vec<(String, String)> {
         lines.iter().map(|h| (h.name.to_string(), h.value.to_string())).collect()
     };

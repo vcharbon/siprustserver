@@ -268,10 +268,6 @@ impl TokenParamsKind for Accept {
     const EMPTY_LINE_READS: bool = true;
 }
 
-impl TokenParamsKind for ContentType {
-    const LEADING: Leading = Leading::MediaType;
-}
-
 impl TokenParamsKind for SessionExpires {
     const LEADING: Leading = Leading::DeltaSeconds;
 }

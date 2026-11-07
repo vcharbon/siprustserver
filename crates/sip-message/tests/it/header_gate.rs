@@ -216,7 +216,10 @@ fn a_header_block_that_is_not_utf8_is_refused_and_answered() {
     let Err(err) = parse(&raw) else { panic!("refused") };
     assert!(err.partial().is_none(), "{}", err.reason);
     // The body is bytes, never text: a binary body parses.
-    let raw = options(&[b"Max-Forwards: 70", b"Content-Length: 2"], b"\xe9\xff");
+    let raw = options(
+        &[b"Max-Forwards: 70", b"Content-Type: application/octet-stream", b"Content-Length: 2"],
+        b"\xe9\xff",
+    );
     assert_eq!(accepted(&raw).body().as_ref(), b"\xe9\xff");
 }
 

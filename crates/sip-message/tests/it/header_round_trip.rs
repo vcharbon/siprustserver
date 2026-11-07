@@ -306,8 +306,9 @@ fn token_parameter_headers_are_a_render_parse_fixpoint() {
         "application/sdp",
         "multipart/mixed;boundary=unique-boundary-1",
         "text/plain ; charset=\"utf-8\"",
+        "application / sdp",
     ]);
-    assert_fixpoint::<TokenParamsHeader<header::kind::ContentType>>("Content-Type", &media, 3);
+    assert_fixpoint::<header::MediaType>("Content-Type", &media, 4);
     let tokens = owned(&[
         "presence;id=4567",
         "terminated;reason=noresource",

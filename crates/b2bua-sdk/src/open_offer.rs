@@ -128,10 +128,11 @@ fn responder_answered(call: &Call, leg_id: &str, tag: &str, cseq: Option<i64>) -
 
 /// The caller's INVITE carried a session description (RFC 5621 §3.1).
 fn snapshot_carries_sdp(invite: &call::ALegInviteSnapshot) -> bool {
-    invite
-        .headers
-        .iter()
-        .filter(|h| HeaderName::ContentType.matches(&h.name))
-        .filter_map(|h| MediaType::parse(&SipStr::owned(&h.value)).ok())
-        .any(|ct| sip_message::multipart::sdp_range(&ct, &invite.body).is_some())
+    let first = |name: HeaderName| {
+        invite.headers.iter().find(|h| name.matches(&h.name)).map(|h| h.value.as_str())
+    };
+    let disposition = first(HeaderName::ContentDisposition);
+    first(HeaderName::ContentType)
+        .and_then(|ct| MediaType::parse(&SipStr::owned(ct)).ok())
+        .is_some_and(|ct| sip_message::sdp_range(&ct, disposition, &invite.body).is_some())
 }

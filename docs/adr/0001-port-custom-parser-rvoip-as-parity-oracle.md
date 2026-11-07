@@ -65,8 +65,10 @@ compatibility rules admit, on purpose:
   `repeat:<header>.uri:<param>` (a URI parameter written twice with one value,
   on From, To, Contact, Route, Record-Route or Refer-To), `bare-user-semicolon`
   (a bare From or To whose `;` comes before its `@`, which §20 brackets, read up
-  to an `@` outside any quoted-string once the strict read fails) and
-  `max-forwards:absent` (a request with no Max-Forwards, read as 70, §16.6). A
+  to an `@` outside any quoted-string once the strict read fails),
+  `max-forwards:absent` (a request with no Max-Forwards, read as 70, §16.6) and
+  `options-body-no-type` (a 200 to OPTIONS whose body states no Content-Type,
+  §20.15, read as no session description). A
   non-fatal identity header in an exempted shape reads as any other value of it
   (ADR-0053 §5).
 - **A URI's `maddr`.** A URI a request is sent to or routed on (Request-URI,
@@ -79,6 +81,9 @@ compatibility rules admit, on purpose:
   reader. CSeq reads 0 to 2^32-1 in or out of a dialog (§20.16; §8.1.1.5's bound
   is the sender's first number), RSeq and RAck's response-num 1 to 2^32-1
   (RFC 3262 §7.1).
+- **A body a reader can frame.** A message with a body states its Content-Type
+  (§20.15), and a `multipart/…` one names one boundary of 1 to 70 `bchars`, the
+  last no space (RFC 2046 §5.1.1). A delimiter line ends in CRLF.
 - **Empty values.** A Via, Contact, Route, Record-Route or Content-Type line
   holding no value, and an empty entry of a comma list, is refused: their
   grammar needs one. `Supported:`, `Allow:`, `Accept:` and `Accept-Encoding:`

@@ -23,6 +23,10 @@ pub enum Exemption {
     /// `max-forwards:absent`: a request with no Max-Forwards (§8.1.1), read
     /// as 70 (§16.6).
     MaxForwardsAbsent,
+    /// `options-body-no-type`: a 200 to OPTIONS whose body states no
+    /// Content-Type, which §20.15 requires; the body is no session
+    /// description.
+    OptionsBodyNoType,
 }
 
 /// The headers whose URI a `repeat:<header>.uri:<param>` may name: those
@@ -42,6 +46,7 @@ impl Exemption {
         match name {
             "bare-user-semicolon" => return Some(Self::BareUserSemicolon),
             "max-forwards:absent" => return Some(Self::MaxForwardsAbsent),
+            "options-body-no-type" => return Some(Self::OptionsBodyNoType),
             _ => {}
         }
         let (header, param) = name.strip_prefix("repeat:")?.split_once(".uri:")?;
@@ -116,7 +121,8 @@ mod tests {
     #[test]
     fn every_name_reads_as_its_exemption() {
         let set = Exemptions::read(Some(
-            "repeat:from.uri:x-dup, repeat:Contact.uri:x-two,bare-user-semicolon,max-forwards:absent",
+            "repeat:from.uri:x-dup, repeat:Contact.uri:x-two,bare-user-semicolon,max-forwards:absent,\
+             options-body-no-type",
         ))
         .expect("each name reads");
         assert!(set.repeats(&HeaderName::From, "X-DUP"));
@@ -124,6 +130,7 @@ mod tests {
         assert!(!set.repeats(&HeaderName::To, "x-dup"));
         assert!(set.holds(&Exemption::BareUserSemicolon));
         assert!(set.holds(&Exemption::MaxForwardsAbsent));
+        assert!(set.holds(&Exemption::OptionsBodyNoType));
     }
 
     /// A repeat names a header ingress reads an address of, and a parameter.

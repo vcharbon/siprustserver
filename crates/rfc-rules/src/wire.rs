@@ -95,16 +95,19 @@ impl Msg {
         }
     }
 
-    /// The session description this message DECLARED it carried: the body under
-    /// `application/sdp`, the SDP part of a `multipart/…` body (RFC 5621 §3.1),
-    /// `None` where the head or body is unreadable, empty, or names neither.
+    /// The session description this message DECLARED it carried, as
+    /// [`sip_message::sdp_range`] reads it: the body under `application/sdp`
+    /// disposed as a session's, the SDP part of a `multipart/…` body (RFC 5621
+    /// §3.1), `None` where the head or body is unreadable, empty, or holds none.
     pub fn sdp(&self) -> Option<&[u8]> {
         let head = self.head.as_deref()?;
         let body = self.body.as_deref()?;
         use sip_message::header::{HeaderValue, MediaType};
         let ct = sip_message::sniff::header_values(head, "Content-Type").into_iter().next()?;
         let ct = MediaType::parse(&sip_message::SipStr::owned(&ct)).ok()?;
-        sip_message::sdp_range(&ct, body).map(|r| &body[r])
+        let disposition =
+            sip_message::sniff::header_values(head, "Content-Disposition").into_iter().next();
+        sip_message::sdp_range(&ct, disposition.as_deref(), body).map(|r| &body[r])
     }
 }
 

@@ -335,7 +335,8 @@ fn body(msg: &SipMessage, d: &mut Digest) {
     d.note("sipfrag-fields", &sipfrag::header_fields(body));
     d.note("entity-parts", &entity_parts(ct, &[], body));
     if let Some(Ok(media_type)) = msg.header::<MediaType>() {
-        d.note("sdp-range", &sdp_range(&media_type, body));
+        let disposition = raw_text(msg, HeaderName::ContentDisposition).into_iter().next();
+        d.note("sdp-range", &sdp_range(&media_type, disposition.as_deref(), body));
         if let Some(boundary) = media_type.params().value("boundary") {
             d.note("decompose", &decompose_multipart(body, boundary));
         }

@@ -1,30 +1,6 @@
 # Rows known to fail: the row's name, then the area of the stack that owns its fix.
 # The list only shrinks: a listed row that no longer fails fails the suite.
 
-body/bare-early-session multipart-and-media-type
-body/bare-render multipart-and-media-type
-body/continuation-is-no-header multipart-and-media-type
-body/delimiter-line-ends-in-crlf multipart-and-media-type
-body/delimiter-prefix-of-a-line multipart-and-media-type
-body/delimiter-text-inside-a-line multipart-and-media-type
-body/description-in-the-epilogue multipart-and-media-type
-body/early-session-part multipart-and-media-type
-body/folded-part-header multipart-and-media-type
-body/last-of-an-alternative multipart-and-media-type
-body/multipart-boundary-ending-in-a-space multipart-and-media-type
-body/multipart-boundary-of-80-bytes multipart-and-media-type
-body/multipart-boundary-with-no-value multipart-and-media-type
-body/multipart-empty-boundary multipart-and-media-type
-body/multipart-no-boundary multipart-and-media-type
-body/nested-alternative multipart-and-media-type
-body/no-content-type multipart-and-media-type
-body/part-with-headers-only-keeps-its-type multipart-and-media-type
-body/part-with-no-headers-is-text multipart-and-media-type
-body/part-with-no-headers-keeps-its-content multipart-and-media-type
-body/spaces-around-the-slash multipart-and-media-type
-exempt/options-body-no-type/accepted-when-named multipart-and-media-type
-exempt/options-body-no-type/neighbour-refused-when-named multipart-and-media-type
-exempt/options-body-no-type/refused-by-default multipart-and-media-type
 sdp/8866-5-address-at-either-level offer-answer
 sdp/8866-5-origin-only-before-media offer-answer
 sdp/8866-5-session-address-moved offer-answer

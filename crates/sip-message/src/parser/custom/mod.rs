@@ -18,6 +18,7 @@ use crate::parser::{Framing, SipParser, SipParserLimits};
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 
+mod body_type;
 pub(crate) mod compact_forms;
 pub mod contact_entries;
 mod dialog_contact;
@@ -36,6 +37,8 @@ pub mod structured_headers;
 mod top_via;
 mod vouched;
 
+use crate::method::Method;
+use body_type::body_type_refusal;
 use extract_fields::{extract_request_fields, extract_response_fields, ExtractMode, RequestEager};
 use header_index::HeaderIndex;
 use scanner::Scanner;
@@ -256,6 +259,11 @@ impl SipParser for CustomParser {
                 let eager: RequestEager =
                     extract_request_fields(&idx, &uri, limits, Some(method), mode)
                         .map_err(refuse)?;
+                if let Some(refusal) = body_type_refusal(&headers_vec, &body, false, limits)
+                    .filter(|_| mode == ExtractMode::Wire)
+                {
+                    return Err(refuse(refusal));
+                }
                 if limits.at_first_ingress && eager.common.to().tag().is_none() {
                     let lines = headers_vec.lines().iter();
                     if let Some(past) = limits.first_ingress.refusal(block.lines, uri.len(), lines)
@@ -275,6 +283,12 @@ impl SipParser for CustomParser {
             }
             StartLine::Status(sl) => {
                 let core = extract_response_fields(&idx, sl.status, limits, mode)?;
+                let options_200 = sl.status == 200 && *core.cseq().method() == Method::Options;
+                if let Some(refusal) = body_type_refusal(&headers_vec, &body, options_200, limits)
+                    .filter(|_| mode == ExtractMode::Wire)
+                {
+                    return Err(refusal);
+                }
                 let optional = optional_headers::extract_optional_indexed(&idx);
                 Ok(SipMessage::Response(SipResponse::new(
                     StatusLine {

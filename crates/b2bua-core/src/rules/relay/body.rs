@@ -62,9 +62,16 @@ pub fn mints_offer(a_invite: &SipRequest, body_override: Option<&Body>) -> bool 
     match body_override {
         None => carries_sdp(a_invite),
         Some(body) if body.parts.is_none() => !body.bytes.is_empty(),
-        Some(body) => source_content_type(a_invite, body)
-            .and_then(|ct| MediaType::parse(&SipStr::owned(&ct)).ok())
-            .is_some_and(|ct| sip_message::sdp_range(&ct, &body.bytes).is_some()),
+        Some(body) => {
+            let described = super::originate::override_descriptors(a_invite, body);
+            let disposition = described
+                .iter()
+                .find(|(name, _)| HeaderName::ContentDisposition.matches(name))
+                .map(|(_, value)| value.as_str());
+            source_content_type(a_invite, body)
+                .and_then(|ct| MediaType::parse(&SipStr::owned(&ct)).ok())
+                .is_some_and(|ct| sip_message::sdp_range(&ct, disposition, &body.bytes).is_some())
+        }
     }
 }
 

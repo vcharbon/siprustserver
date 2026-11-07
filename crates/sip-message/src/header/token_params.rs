@@ -1,6 +1,6 @@
 //! [`TokenParamsHeader`] — the leading-token-plus-parameters family (Event,
-//! Subscription-State, Content-Type, Reason, Retry-After, Session-Expires,
-//! Replaces, Refer-Sub, Content-Disposition, Accept). Each kind states what
+//! Subscription-State, Reason, Retry-After, Session-Expires, Replaces,
+//! Refer-Sub, Content-Disposition, Accept). Each kind states what
 //! leads its value ([`Leading`]) and how its parameters read.
 
 use std::marker::PhantomData;
@@ -83,7 +83,9 @@ pub enum Leading {
     OneOf(&'static [&'static str]),
     /// `callid = word [ "@" word ]` (RFC 3891 §6.1).
     CallId,
-    /// `m-type SLASH m-subtype`, two tokens.
+    /// `m-type SLASH m-subtype`, two tokens, kept as written: the media range
+    /// of an Accept line. A Content-Type reads through its own type,
+    /// [`MediaType`](super::MediaType).
     MediaType,
     /// `delta-seconds = 1*DIGIT` (RFC 4028 §4).
     DeltaSeconds,
@@ -222,13 +224,13 @@ impl<K: TokenParamsKind> std::fmt::Display for TokenParamsHeader<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::{MediaType, SubscriptionState};
+    use crate::header::{AcceptRange, SubscriptionState};
 
     #[test]
-    fn a_media_type_reads_its_token_and_parameters() {
-        let ct = MediaType::parse(&SipStr::owned("multipart/mixed;boundary=abc")).unwrap();
-        assert!(ct.is("MULTIPART/MIXED"));
-        assert_eq!(ct.param("boundary").and_then(ParamValue::as_str), Some("abc"));
+    fn a_media_range_reads_its_token_and_parameters() {
+        let range = AcceptRange::parse(&SipStr::owned("application/sdp;level=1")).unwrap();
+        assert!(range.is("APPLICATION/SDP"));
+        assert_eq!(range.param("level").and_then(ParamValue::as_str), Some("1"));
     }
 
     #[test]
@@ -263,6 +265,6 @@ mod tests {
 
     #[test]
     fn an_empty_value_is_rejected() {
-        assert!(MediaType::parse(&SipStr::owned("  ")).is_err());
+        assert!(SubscriptionState::parse(&SipStr::owned("  ")).is_err());
     }
 }
