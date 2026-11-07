@@ -68,9 +68,11 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
             meet_live(ctx, FlushDirection::Reverse, call_ref, &live, replica, now_ms).await;
         }
         // A reverse-flushed deferral for a call we no longer hold live (the
-        // reactive straggler equivalent of the reboot-reclaim terminal): discharge.
+        // reactive straggler equivalent of the reboot-reclaim terminal): the
+        // final it may owe its caller sent, then discharged.
         None => {
             if replica.call.state == CallModelState::Terminated {
+                super::owed_final::deliver(ctx, call_ref, &replica.call).await;
                 discharge_materialized_terminal(ctx, call_ref, replica, now_ms, false).await;
             }
         }

@@ -2,8 +2,8 @@
 //! that ends the call with the non-2xx it answers her INVITE with writes the
 //! ended body before that final leaves, and deletes the call once it left. A
 //! node that meets the ended body with no live copy of the call — the
-//! backup at a departure or a dead verdict, a restarted primary at its
-//! reclaim — cannot tell whether it left, so it sends it again on a
+//! backup at a departure or a dead verdict, a primary at its reclaim or at a
+//! backup's reverse flush — cannot tell whether it left, so it sends it again on a
 //! Completed server transaction that repeats it until her ACK (RFC 3261
 //! §17.2.1); a copy that did reach her draws only her re-ACK. The ACK of a
 //! callee's non-2xx may have died held with the node too: each copy of that
