@@ -13,6 +13,7 @@ use sip_message::header::Via;
 use sip_message::{Method, SipRequest};
 
 use super::callouts;
+use super::cannot_leave::{self, CannotLeave};
 use super::interpret::{reach, TurnKind};
 use super::RouterCtx;
 use crate::effects::{FireAndForgetEffect, OutboundBody, OutboundSipEffect, OutboundTxnMode};
@@ -176,9 +177,13 @@ fn call_out(ctx: &Arc<RouterCtx>, call: &Call, eff: FireAndForgetEffect) {
 /// Put the outbound SIP `eff` of `call` on the wire.
 async fn emit(ctx: &RouterCtx, call_ref: &str, call: &Call, eff: &OutboundSipEffect, now_ms: i64) {
     let Some(dest) = sip_net::ip_socket_addr(&eff.destination.0, eff.destination.1) else {
-        super::unaddressable::fail_unaddressable(ctx, call_ref, call.incarnation(), eff);
+        cannot_leave::fail(ctx, call_ref, call.incarnation(), eff, CannotLeave::Unaddressable);
         return;
     };
+    if cannot_leave::too_long(eff, dest) {
+        cannot_leave::fail(ctx, call_ref, call.incarnation(), eff, CannotLeave::TooLong);
+        return;
+    }
     // Meter outbound requests we originate/relay (the in-dialog keepalive
     // OPTIONS lands here) — pairs with inbound responses_total{OPTIONS,200} to
     // isolate the keepalive round-trip (sent vs answered) on the b2bua itself.

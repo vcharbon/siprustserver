@@ -29,6 +29,7 @@ pub mod arrival;
 pub mod fragmentation;
 pub mod net;
 pub mod parse_guard;
+pub mod payload;
 pub mod pre_ingress;
 pub mod queue;
 pub mod real;
@@ -38,10 +39,11 @@ pub mod types;
 pub use arrival::Arrival;
 pub use net::{SignalingNetwork, UdpEndpoint};
 pub use parse_guard::{parse_datagram, ParseOutcome, ParserPanicked};
+pub use payload::{max_udp_payload, MAX_UDP6_PAYLOAD, MAX_UDP_PAYLOAD};
 pub use real::RealSignalingNetwork;
 pub use sip_message::ip_literal::{ip_host, ip_socket_addr};
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
     PreIngressHook, ReEmitKind, RecvDisposition, RecvTap, SendError, SendErrorKind, SendTap,
-    SocketBuffers, UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket, MAX_UDP_PAYLOAD,
+    SocketBuffers, UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };

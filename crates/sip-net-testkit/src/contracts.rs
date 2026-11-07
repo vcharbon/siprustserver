@@ -647,8 +647,8 @@ impl Drop for RecordedEndpoint {
 // ParanoidSignalingNetwork (paranoidInputs equivalent)
 // ---------------------------------------------------------------------------
 
-use crate::types::MAX_UDP_PAYLOAD;
 use layer_harness::ParanoidViolation;
+use sip_net::max_udp_payload;
 
 /// Caller-side precondition checks. A violation is a programmer error and is
 /// raised by panic (the Rust analogue of `Effect.die`). Checks (all always-on,
@@ -657,7 +657,7 @@ use layer_harness::ParanoidViolation;
 ///   - `PA2_bindOpts_queueMax`  bind_udp queue_max ≥ 1
 ///   - `PA3_send_validDest`     send dst port ≠ 0
 ///   - `PA4_send_msgBuffer`     send buf non-empty
-///   - `PA5_send_msgSizeBound`  send buf.len() ≤ MAX_UDP_PAYLOAD
+///   - `PA5_send_msgSizeBound`  send buf.len() ≤ the largest UDP payload of dst's family
 ///
 /// (PA1 — a valid bind address — is enforced by the `SocketAddr` type itself:
 /// an ip and a u16 port always exist, and port 0 = ephemeral is allowed.)
@@ -730,15 +730,13 @@ impl UdpEndpoint for ParanoidEndpoint {
                 ParanoidViolation::new("PA4_send_msgBuffer", "send buf must be non-empty")
             );
         }
-        if buf.len() > MAX_UDP_PAYLOAD {
+        let max = max_udp_payload(dst);
+        if buf.len() > max {
             panic!(
                 "{}",
                 ParanoidViolation::new(
                     "PA5_send_msgSizeBound",
-                    format!(
-                        "send buf.len()={} exceeds MAX_UDP_PAYLOAD={MAX_UDP_PAYLOAD}",
-                        buf.len()
-                    ),
+                    format!("send buf.len()={} exceeds the largest UDP payload {max}", buf.len()),
                 )
             );
         }

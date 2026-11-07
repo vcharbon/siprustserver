@@ -155,7 +155,7 @@ impl SignalingNetwork for RealSignalingNetwork {
 /// datagram and a torn SIP message (ADR-0027).
 const RECV_BUF_LEN: usize = 65_536;
 #[expect(clippy::disallowed_macros, reason = "checked at compile time")]
-const _: () = assert!(RECV_BUF_LEN > crate::types::MAX_UDP_PAYLOAD);
+const _: () = assert!(RECV_BUF_LEN > crate::payload::MAX_UDP6_PAYLOAD);
 
 /// The wait after a receive error that is not about one datagram, so a lasting
 /// failure (memory exhausted) does not spin the pump. The kernel buffers what

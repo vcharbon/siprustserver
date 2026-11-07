@@ -13,6 +13,7 @@ pub mod readiness;
 pub mod setup;
 pub mod shell;
 pub mod udp;
+pub mod wire_drops;
 pub mod worker;
 
 pub use sip_txn::catalogue as txn;
@@ -149,12 +150,12 @@ const WORKER_REST: &[Family] = &[
     worker::REQUESTS_OUT,
     worker::REQUESTS_OUT_OVERFLOW,
     worker::RETRANSMITS,
-    worker::OUTBOUND_UNADDRESSABLE,
-    worker::UNROUTABLE_DROPPED,
-    worker::UNROUTABLE_REFUSED,
-    worker::UNROUTABLE_REFUSED_OVERFLOW,
-    worker::UNROUTABLE_INTERNAL,
-    worker::UNROUTABLE_INTERNAL_OVERFLOW,
+    wire_drops::OUTBOUND_UNSENT,
+    wire_drops::UNROUTABLE_DROPPED,
+    wire_drops::UNROUTABLE_REFUSED,
+    wire_drops::UNROUTABLE_REFUSED_OVERFLOW,
+    wire_drops::UNROUTABLE_INTERNAL,
+    wire_drops::UNROUTABLE_INTERNAL_OVERFLOW,
     worker::REPEAT_GIVE_UPS,
     worker::MODEL_DEFECTS,
     worker::REPL_QUIET_TURNS,

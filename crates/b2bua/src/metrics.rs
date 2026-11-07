@@ -588,7 +588,7 @@ impl B2buaMetrics {
         rows.responses.render(&mut s);
         rows.requests_out.render(&mut s);
         rows.retransmits.render(&mut s);
-        rows.outbound_unaddressable.render(&mut s);
+        rows.outbound_unsent.render(&mut s);
         rows.unroutable_dropped.render(&mut s);
         rows.unroutable_refused.render(&mut s);
         rows.unroutable_internal.render(&mut s);

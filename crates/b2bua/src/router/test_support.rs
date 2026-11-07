@@ -18,7 +18,7 @@ use topology::{Membership, Peer, SimulatedMembership};
 
 use crate::cdr::InMemoryCdrWriter;
 use crate::config::B2buaConfig;
-use crate::decision::ScriptedDecisionEngine;
+use crate::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use crate::limiter::NoopLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::repl::{AddrResolver, FnPeerResolver, PullerConfig, ReplicatingCallStore, ServeConfig};
@@ -92,6 +92,18 @@ pub async fn node_on(
     tune: impl FnOnce(&mut B2buaConfig),
     services: Vec<crate::rules::ServiceDef>,
 ) -> Node {
+    let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.2", 9));
+    node_deciding(net, ordinal, decision, tune, services).await
+}
+
+/// [`node_on`] consulting `decision`.
+pub async fn node_deciding(
+    net: &SimulatedSignalingNetwork,
+    ordinal: &str,
+    decision: Arc<dyn CallDecisionEngine>,
+    tune: impl FnOnce(&mut B2buaConfig),
+    services: Vec<crate::rules::ServiceDef>,
+) -> Node {
     let clock = Clock::test_at(0);
     let sip_addr = SocketAddr::from(NODE_SIP_ADDR);
     let endpoint = net
@@ -134,7 +146,7 @@ pub async fn node_on(
     let deps = B2buaDeps {
         config,
         identity: String::new(),
-        decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.2", 9)),
+        decision,
         limiter: Arc::new(NoopLimiter),
         cdr: Arc::new(cdr.clone()),
         store: Arc::new(InMemoryCallStore::new()),

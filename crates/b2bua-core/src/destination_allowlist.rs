@@ -4,7 +4,7 @@
 //! The b2bua worker accepts call-control's `route.destination.host` verbatim and
 //! resolves no name: an IP literal is sent as is, and a name reaches the wire only
 //! through the configured outbound proxy, which resolves the Request-URI (a name
-//! next hop fails its attempt at send, `router::unaddressable`).
+//! next hop fails its attempt at send, `router::cannot_leave`).
 //!
 //! This module rejects targets whose host is neither an IP literal nor in the
 //! allow-list at the **decision boundary** — before any state is allocated for

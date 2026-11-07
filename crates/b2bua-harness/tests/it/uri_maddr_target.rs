@@ -42,7 +42,11 @@ async fn a_callee_bye_reaches_a_caller_whose_contact_names_a_maddr() {
 
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     assert_eq!(s.b2bua.cdr_records().len(), 1, "the call's CDR is written");
-    assert_eq!(s.b2bua.metrics().outbound_unaddressable_of("request"), 0, "the name is not read");
+    assert_eq!(
+        s.b2bua.metrics().outbound_unsent_of("unaddressable", "request"),
+        0,
+        "the name is not read"
+    );
     s.finish().await;
 }
 

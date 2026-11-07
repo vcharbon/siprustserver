@@ -37,9 +37,6 @@ use crate::types::{
     UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };
 
-/// The largest UDP payload over IPv4: past it a real socket refuses the send.
-const MAX_DATAGRAM: usize = 65_507;
-
 /// Optional per-pair send-failure injector: `(src, dst) -> Some(reason)` fails
 /// that send synchronously (the TS `sendFault`).
 pub type SendFault = Arc<dyn Fn(SocketAddr, SocketAddr) -> Option<String> + Send + Sync>;
@@ -302,9 +299,11 @@ struct SimEndpoint {
 #[async_trait]
 impl UdpEndpoint for SimEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
-        if buf.len() > MAX_DATAGRAM {
+        // Past the largest payload of its family a real socket refuses the send.
+        let max = sip_net::max_udp_payload(dst);
+        if buf.len() > max {
             return Err(SendError {
-                message: format!("datagram of {} bytes exceeds {MAX_DATAGRAM}", buf.len()),
+                message: format!("datagram of {} bytes exceeds {max}", buf.len()),
                 kind: sip_net::SendErrorKind::MessageTooLong,
             });
         }

@@ -1,16 +1,21 @@
-//! What a worker does when a message it built cannot leave: a datagram past the
-//! largest UDP payload is refused by the socket and the refusal is counted. The
-//! transaction runs as if the message were lost, so its own timer ends it and the
-//! call is released with its CDR (ADR-0001). The cells stand on the bare fabric:
-//! the harness's recording fabric fails any send past the payload as a test error.
+//! What a worker does when a message it built cannot leave (ADR-0001). A request
+//! that would open a client transaction past the largest UDP payload fails at
+//! once, as a dead hop's does: a b-leg INVITE reaches the failure consult, an
+//! in-dialog request its timeout rule. Any other datagram past the payload is
+//! refused by the socket and the refusal is counted; its transaction runs as if
+//! it were lost. The cells stand on the bare fabric: the harness's recording
+//! fabric fails any send past the payload as a test error.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 
-use crate::router::test_support::{invite, node_on, src, Node, NODE_SIP_ADDR};
+use crate::decision::test_adapter::route_to;
+use crate::decision::{CallFailureRequest, CallTreatment, NewCallResponse, ScriptedDecisionEngine};
+use crate::router::test_support::{invite, node_deciding, node_on, src, Node, NODE_SIP_ADDR};
 
 /// The callee the scripted decision routes every call to.
 const CALLEE: ([u8; 4], u16) = ([127, 0, 0, 2], 9);
@@ -92,12 +97,13 @@ fn answer_filling(invite: &str, tag: &str, contact: bool) -> String {
 }
 
 /// Bob's 2xx names a Contact that fills a datagram: the ACK to that target does not
-/// fit one, and neither does alice's BYE with the line she adds. Each refusal is
-/// counted, her BYE is answered, and the leg's Timer F releases the call with its
-/// CDR. Bob hears nothing of it, and ends his side on his own 2xx give-up (RFC 3261
+/// fit one, and neither does alice's BYE with the line she adds. The ACK's refusal
+/// by the socket is counted. The BYE fails at once as a timed-out BYE does: her
+/// BYE is answered and the call is released with its CDR, with no timer elapsed.
+/// Bob hears nothing of it, and ends his side on his own 2xx give-up (RFC 3261
 /// §13.3.1.4).
 #[tokio::test(start_paused = true)]
-async fn a_bye_that_cannot_leave_ends_on_its_timer_with_the_cdr() {
+async fn a_bye_that_cannot_leave_releases_the_call_at_once_with_the_cdr() {
     let c = Cell::new().await;
     let offer = invite("w0", "w1", "oversize-bye");
     c.caller.send_to(offer.image(), c.node).await.unwrap();
@@ -126,27 +132,68 @@ async fn a_bye_that_cannot_leave_ends_on_its_timer_with_the_cdr() {
         "g".repeat(800)
     );
     c.caller.send_to(bye.as_bytes(), c.node).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(c.send_errors() > 1, "the BYE's refusal is counted");
+    let answered = next_starting(c.caller.as_ref(), "SIP/2.0 ", Duration::from_millis(100)).await;
+    let line = answered.expect("her BYE is answered");
+    assert!(line.contains("CSeq: 2 BYE"), "{}", &line[..line.len().min(200)]);
+    c.released_with_its_cdr().await;
+    assert_eq!(c.send_errors(), 1, "the BYE never reached the socket");
+    assert_eq!(c.n.metrics.outbound_unsent_of("too_long", "request"), 1, "the BYE is counted");
     assert!(
         next_starting(c.callee.as_ref(), "BYE ", Duration::from_secs(40)).await.is_none(),
         "bob hears nothing of it"
     );
-    let answered = next_starting(c.caller.as_ref(), "SIP/2.0 ", Duration::from_millis(10)).await;
-    let line = answered.expect("her BYE is answered");
-    assert!(line.contains("CSeq: 2 BYE"), "{}", &line[..line.len().min(200)]);
-    c.released_with_its_cdr().await;
 }
 
-/// A caller's INVITE that fits a datagram, whose b-leg with the worker's Via and
-/// Contact does not: nothing reaches the callee, and the worker's first-response
-/// timer draws the caller's final with the CDR.
+/// The callee the failure consult routes the call to.
+const SECOND: ([u8; 4], u16) = ([127, 0, 0, 3], 9);
+
+/// The 200 `tag` answers `invite` with, carrying an SDP answer.
+fn answer(invite: &str, tag: &str) -> String {
+    let vias: String =
+        invite.lines().filter(|l| l.starts_with("Via:")).map(|l| format!("{l}\r\n")).collect();
+    format!(
+        "SIP/2.0 200 OK\r\n{vias}From: {}\r\nTo: {};tag={tag}\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:carol@127.0.0.3:9>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{SDP}",
+        header(invite, "From"),
+        header(invite, "To"),
+        header(invite, "Call-ID"),
+        header(invite, "CSeq"),
+        SDP.len(),
+    )
+}
+
+/// A caller's INVITE that fits a datagram, whose b-leg with the first route's
+/// Request-URI and the worker's Via and Contact does not: nothing reaches that
+/// callee, and the attempt fails at once into the failure consult, as a dead
+/// hop's does, with no timer elapsed. The consult's route fits and connects;
+/// the call ends on the caller's BYE, and is released with its CDR by its
+/// terminating timeout.
 #[tokio::test(start_paused = true)]
 async fn a_b_leg_that_cannot_leave_draws_the_callers_final() {
-    let c = Cell::new().await;
+    let consulted = Arc::new(Mutex::new(Vec::new()));
+    let seen = consulted.clone();
+    let decision = ScriptedDecisionEngine::builder()
+        .fallback(|_| {
+            let mut first = route_to("127.0.0.2", 9);
+            first.new_ruri = Some(format!("sip:{}@127.0.0.2:9", "u".repeat(6_000)));
+            first.callback_context = Some("first".into());
+            NewCallResponse::Route(first)
+        })
+        .on_failure(move |req: &CallFailureRequest| {
+            let at = tokio::time::Instant::now();
+            seen.lock().unwrap().push((req.failure.clone(), at));
+            CallTreatment::Route(route_to("127.0.0.3", 9))
+        })
+        .build();
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_deciding(&net, "w0", Arc::new(decision), |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let callee = net.bind_udp(BindUdpOpts::new(SocketAddr::from(CALLEE), 64)).await.unwrap();
+    let second = net.bind_udp(BindUdpOpts::new(SocketAddr::from(SECOND), 64)).await.unwrap();
+    let node = SocketAddr::from(NODE_SIP_ADDR);
+
     let offer = String::from_utf8_lossy(invite("w0", "w1", "oversize-b-leg").image()).to_string();
     let mut pads = String::new();
-    let mut left = DATAGRAM - 50 - offer.len();
+    let mut left = DATAGRAM - 3_000 - offer.len();
     for n in 0.. {
         let frame = format!("X-Fill-{n}: \r\n").len();
         if left <= frame {
@@ -157,16 +204,50 @@ async fn a_b_leg_that_cannot_leave_draws_the_callers_final() {
         left -= frame + each;
     }
     let grown = offer.replacen("Content-Length:", &format!("{pads}Content-Length:"), 1);
-    assert!(grown.len() < DATAGRAM, "{}", grown.len());
-    c.caller.send_to(grown.as_bytes(), c.node).await.unwrap();
-    let wait = Duration::from_secs(40);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(c.send_errors() > 0, "the b-leg's refusal is counted: {}", grown.len());
-    assert!(next_starting(c.callee.as_ref(), "INVITE ", Duration::from_secs(1)).await.is_none());
-    let answered = next_starting(c.caller.as_ref(), "SIP/2.0 4", wait).await;
-    let answered = answered.or(next_starting(c.caller.as_ref(), "SIP/2.0 5", wait).await);
-    answered.expect("the caller draws a final");
-    c.released_with_its_cdr().await;
+    let sent_at = tokio::time::Instant::now();
+    caller.send_to(grown.as_bytes(), node).await.unwrap();
+    let wait = Duration::from_millis(50);
+    let dialled = next_starting(second.as_ref(), "INVITE ", wait).await;
+    let dialled = dialled.expect("the second route is dialled at once, with no timer elapsed");
+    {
+        let consults = consulted.lock().unwrap();
+        let [(failure, at)] = consults.as_slice() else { panic!("one consult: {consults:?}") };
+        assert_eq!(failure.origin, "transaction_timeout");
+        assert_eq!(failure.timeout_kind.as_deref(), Some("response"), "as for a dead hop");
+        assert!(at.duration_since(sent_at) < wait, "no timer elapsed before the consult");
+    }
+    assert!(next_starting(callee.as_ref(), "INVITE ", wait).await.is_none(), "nothing left");
+    assert_eq!(n.core.txn_metrics().send_errors(), 0, "nothing reached the socket");
+    assert_eq!(n.metrics.outbound_unsent_of("too_long", "request"), 1, "the INVITE is counted");
+
+    second.send_to(answer(&dialled, "carol").as_bytes(), node).await.unwrap();
+    let ok = next_starting(caller.as_ref(), "SIP/2.0 200", wait).await.expect("connected");
+    let target = header(&ok, "Contact").trim_start_matches('<').trim_end_matches('>').to_string();
+    let (to, from, call_id) = (header(&ok, "To"), header(&ok, "From"), header(&ok, "Call-ID"));
+    let in_dialog = |method: &str, seq: u32| {
+        format!(
+            "{method} {target} SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{seq}\r\nMax-Forwards: 70\r\nFrom: {from}\r\nTo: {to}\r\nCall-ID: {call_id}\r\nCSeq: {seq} {method}\r\nContent-Length: 0\r\n\r\n"
+        )
+    };
+    caller.send_to(in_dialog("ACK", 1).as_bytes(), node).await.unwrap();
+    next_starting(second.as_ref(), "ACK ", wait).await.expect("the ACK reaches the callee");
+    caller.send_to(in_dialog("BYE", 2).as_bytes(), node).await.unwrap();
+    let bye = next_starting(second.as_ref(), "BYE ", wait).await.expect("the BYE is relayed");
+    let vias: String =
+        bye.lines().filter(|l| l.starts_with("Via:")).map(|l| format!("{l}\r\n")).collect();
+    let bye_ok = format!(
+        "SIP/2.0 200 OK\r\n{vias}From: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n",
+        header(&bye, "From"),
+        header(&bye, "To"),
+        header(&bye, "Call-ID"),
+        header(&bye, "CSeq"),
+    );
+    second.send_to(bye_ok.as_bytes(), node).await.unwrap();
+    let answered = next_starting(caller.as_ref(), "SIP/2.0 200", wait).await;
+    assert!(answered.expect("her BYE is answered").contains("CSeq: 2 BYE"));
+    tokio::time::sleep(Duration::from_secs(33)).await;
+    assert_eq!(n.core.router_ctx().state.active_count(), 0, "the call is released");
+    assert_eq!(n.cdr.snapshot().len(), 1, "with its CDR");
 }
 
 /// Bob's 2xx fills a datagram with a line the worker relays, and the worker's own

@@ -21,9 +21,9 @@ pub(super) struct Rows {
     pub(super) repeat_give_ups: FixedCounts,
     // Model invariants broken and defects met, by name (ADR-0052 §8).
     pub(super) model_defects: FixedCounts,
-    // Outbound messages left unsent: their next hop is not an IP literal
-    // (`router::unaddressable`), by kind.
-    pub(super) outbound_unaddressable: FixedCounts,
+    // Outbound messages that could not leave (`router::cannot_leave`), by
+    // reason and kind.
+    pub(super) outbound_unsent: FixedCounts,
     // Messages and events that resolved to no call (`router::unroutable`),
     // in three classes that never overlap: wire messages that drew no
     // answer (by kind), wire requests answered on no call's behalf (by
@@ -54,6 +54,7 @@ pub(super) struct Rows {
 
 impl Default for Rows {
     fn default() -> Self {
+        use super::catalogue::wire_drops as d;
         use super::catalogue::worker as w;
         Self {
             requests: OpenRows::new(&w::REQUESTS),
@@ -62,10 +63,10 @@ impl Default for Rows {
             retransmits: OpenRows::new(&w::RETRANSMITS),
             repeat_give_ups: FixedCounts::new(&w::REPEAT_GIVE_UPS),
             model_defects: FixedCounts::new(&w::MODEL_DEFECTS),
-            outbound_unaddressable: FixedCounts::new(&w::OUTBOUND_UNADDRESSABLE),
-            unroutable_dropped: FixedCounts::new(&w::UNROUTABLE_DROPPED),
-            unroutable_refused: OpenRows::new(&w::UNROUTABLE_REFUSED),
-            unroutable_internal: OpenRows::new(&w::UNROUTABLE_INTERNAL),
+            outbound_unsent: FixedCounts::new(&d::OUTBOUND_UNSENT),
+            unroutable_dropped: FixedCounts::new(&d::UNROUTABLE_DROPPED),
+            unroutable_refused: OpenRows::new(&d::UNROUTABLE_REFUSED),
+            unroutable_internal: OpenRows::new(&d::UNROUTABLE_INTERNAL),
             repl_quiet_turns: FixedCounts::new(&w::REPL_QUIET_TURNS),
             repl_applied: OpenRows::new(&w::REPL_APPLIED),
             repl_noops_sent: OpenRows::new(&w::REPL_NOOPS_SENT),

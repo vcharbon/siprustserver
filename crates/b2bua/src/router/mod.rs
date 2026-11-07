@@ -33,6 +33,7 @@ mod callouts;
 #[cfg(test)]
 mod cancel_crossing_tests;
 mod cancel_in_consult;
+mod cannot_leave;
 mod dead_verdict;
 mod departure;
 mod dialog_gate;
@@ -89,7 +90,6 @@ mod turn;
 mod turn_entry;
 mod turn_label;
 pub(crate) mod txn_event;
-mod unaddressable;
 mod undecided;
 mod unheld;
 #[cfg(test)]
@@ -178,7 +178,7 @@ pub struct RouterCtx {
     /// Self-reported readiness driving the OPTIONS health responder. The
     /// unwired node uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
-    /// Outbound messages left unsent, by next hop (`router::unaddressable`).
+    /// Outbound messages left unsent, by next hop (`router::cannot_leave`).
     pub unsent_waves: Arc<observe::WaveSet<crate::lifecycle::Unsent>>,
     /// The To-tag of the OPTIONS health answer, derived from the request: the
     /// transaction layer holds no transaction for an out-of-dialog OPTIONS.

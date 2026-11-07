@@ -84,29 +84,33 @@ pub fn backend_waves(backend: &'static str) -> Arc<WaveSet> {
     })
 }
 
-/// The latest outbound message an unsent episode holds: its call, its label
-/// and, for a request, its Request-URI.
+/// The latest outbound message an unsent episode holds: its call, its label,
+/// why it could not leave and, for a request, its Request-URI.
 #[derive(Debug, Clone)]
 pub struct Unsent {
     pub call_ref: String,
     pub label: String,
+    /// `unaddressable` (no IP-literal next hop) or `too_long` (past the
+    /// largest UDP payload).
+    pub reason: &'static str,
     pub request_uri: Option<String>,
 }
 
-/// Outbound messages left unsent for a next hop that is not an IP literal
-/// (`router::unaddressable`), keyed by that hop and counted by kind
-/// (`request`, `response`, `datagram`), at warn: a flood toward one target
-/// prints its rising edge, a summary every few seconds and its total.
+/// Outbound messages that could not leave (`router::cannot_leave`), keyed by
+/// their next hop and counted by kind (`request`, `response`, `datagram`), at
+/// warn: a flood toward one target prints its rising edge, a summary every few
+/// seconds and its total.
 pub fn unsent_waves() -> Arc<WaveSet<Unsent>> {
     WaveSet::with_payload(|hop: &str, r: &WaveReport, u: &Unsent| {
-        const UNSENT: &str = "outbound message not sent: its next hop is not an IP literal";
-        let (call_ref, label) = (&u.call_ref, &u.label);
+        const UNSENT: &str = "outbound message not sent";
+        let (call_ref, label, reason) = (&u.call_ref, &u.label, u.reason);
         match &u.request_uri {
             Some(request_uri) => tracing::warn!(
                 node = observe::node(),
                 hop,
                 %call_ref,
                 %label,
+                reason,
                 %request_uri,
                 edge = %r.edge,
                 elapsed_ms = r.elapsed_ms,
@@ -118,6 +122,7 @@ pub fn unsent_waves() -> Arc<WaveSet<Unsent>> {
                 hop,
                 %call_ref,
                 %label,
+                reason,
                 edge = %r.edge,
                 elapsed_ms = r.elapsed_ms,
                 totals = %r.tally,
@@ -223,6 +228,7 @@ mod tests {
         let unsent = |request_uri: Option<&str>| Unsent {
             call_ref: "c".into(),
             label: "BYE → a".into(),
+            reason: "unaddressable",
             request_uri: request_uri.map(str::to_string),
         };
         for _ in 0..2_000 {

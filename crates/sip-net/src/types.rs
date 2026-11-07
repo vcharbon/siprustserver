@@ -18,10 +18,6 @@ use sip_message::Bytes;
 use crate::arrival::Arrival;
 use crate::parse_guard::ParseOutcome;
 
-/// Theoretical max single-UDP-datagram payload (65535 − 20 IP − 8 UDP). The
-/// paranoid decorator rejects sends above this; SIP fragments far below it.
-pub const MAX_UDP_PAYLOAD: usize = 65507;
-
 /// One received datagram handed up from an endpoint's inbound queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpPacket {
