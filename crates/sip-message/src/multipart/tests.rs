@@ -473,6 +473,56 @@ fn a_part_reads_its_head_and_keeps_its_content() {
     assert_eq!(&body[parts[1].offset..][..parts[1].len], b"v=0\n", "the 0x0a is content");
 }
 
+/// The description `attach` lifts keeps no `Content-Length` or `MIME-Version`
+/// of its head, and a head line that was not UTF-8 is left out as refused,
+/// never re-framed with a replacement character.
+#[test]
+fn attach_lifts_a_description_head_it_can_write() {
+    let sdp_text = String::from_utf8(sdp().payload).unwrap();
+    let body = [
+        b"--b\r\nContent-Type: application/sdp\r\nContent-Length: 4\r\nMIME-Version: 1.0\r\n\
+          Content-Description: caf\xe9\r\nContent-ID: <s@x>\r\n\r\n"
+            .as_slice(),
+        sdp_text.as_bytes(),
+        b"\r\n--b--\r\n",
+    ]
+    .concat();
+    let attached = attach(Some("multipart/mixed;boundary=b"), &[], &body, &[]);
+    assert_eq!(attached.content_type.as_deref(), Some("application/sdp"));
+    assert_eq!(attached.headers, [("Content-ID".to_string(), "<s@x>".to_string())]);
+    assert_eq!(attached.refused.len(), 1, "{:?}", attached.refused);
+    assert!(attached.refused[0].reason.contains("Content-Description"));
+}
+
+/// Which entity part holds the description: the one `attach` lifts, nested or
+/// not; none for a bare early-session body.
+#[test]
+fn the_description_entity_is_the_part_attach_lifts() {
+    let early = sdp().with_header("Content-Disposition", "early-session");
+    let framed = compose("multipart/mixed", &[early.clone(), indata(), sdp()]).unwrap();
+    assert_eq!(description_entity(Some(&framed.content_type), &[], &framed.body), Some(2));
+    let inner = compose("multipart/alternative", &[location(), sdp()]).unwrap();
+    let nested = compose(
+        "multipart/mixed",
+        &[data(), MultipartPart::new(inner.content_type.clone(), inner.body.clone())],
+    )
+    .unwrap();
+    assert_eq!(description_entity(Some(&nested.content_type), &[], &nested.body), Some(1));
+    assert_eq!(description_entity(Some("application/sdp"), &[], &sdp().payload), Some(0));
+    let disposed = [("Content-Disposition".to_string(), "early-session".to_string())];
+    assert_eq!(description_entity(Some("application/sdp"), &disposed, &sdp().payload), None);
+}
+
+/// RFC 2046 §5.1.5: a `multipart/digest` part stating no type is a message.
+#[test]
+fn a_digest_part_stating_no_type_is_a_message() {
+    let body = b"--b\r\n\r\nFrom: a\r\n--b--\r\n";
+    let parts = entity_parts(Some("multipart/digest;boundary=b"), &[], body);
+    assert_eq!(parts[0].content_type, "message/rfc822");
+    let parts = entity_parts(Some("multipart/mixed;boundary=b"), &[], body);
+    assert_eq!(parts[0].content_type, "text/plain");
+}
+
 /// A body's entity parts: each part of a multipart body, or the bare body
 /// as one part described by the message's entity headers.
 #[test]

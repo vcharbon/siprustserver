@@ -2,8 +2,10 @@
 //! the one reading every offer/answer decision rests on.
 //!
 //! - A description is a non-empty body or part typed `application/sdp` whose
-//!   disposition is absent or `session` (RFC 3261 §20.11, RFC 5621 §8.2); an
-//!   `early-session` or `render` one is no offer or answer.
+//!   disposition is absent or `session`, SDP's default (RFC 3261 §20.11, RFC
+//!   5621 §8.2); an `early-session` or `render` one is no offer or answer. A
+//!   part stating its Content-Type or Content-Disposition twice has no one
+//!   reading, so it is none.
 //! - A `multipart/…` body is searched part by part, nested ones included, down
 //!   to [`MAX_DEPTH`] levels: the first description of a `mixed` (or any other)
 //!   body, the last of an `alternative` one (RFC 2046 §5.1.4, RFC 5621 §6.1).
@@ -22,11 +24,13 @@ use super::framing::framed_parts;
 /// no description.
 pub(super) const MAX_DEPTH: usize = 4;
 
-/// A session description found in a body: its range, and the head of the part
-/// framing it, `None` when the body is the description.
+/// A session description found in a body: its range, the head of the part
+/// framing it (`None` when the body is the description), and which part of
+/// the searched body holds it (0 when the body is the description).
 pub(super) struct Found {
     pub(super) range: Range<usize>,
     pub(super) part: Option<PartHead>,
+    pub(super) index: usize,
 }
 
 /// Whether a body of disposition `disposition` (a `Content-Disposition`
@@ -50,19 +54,22 @@ pub(super) fn find(
         return None;
     }
     if content_type.is_sdp() {
-        return is_session(disposition).then_some(Found { range: 0..body.len(), part: None });
+        let whole = Found { range: 0..body.len(), part: None, index: 0 };
+        return is_session(disposition).then_some(whole);
     }
     if !content_type.is_multipart() || depth > MAX_DEPTH {
         return None;
     }
     let boundary = content_type.param("boundary").and_then(ParamValue::as_str)?;
-    let mut found = framed_parts(body, boundary).into_iter().filter_map(|part| {
-        let part_type = MediaType::parse(&SipStr::owned(part.head.get("content-type")?)).ok()?;
+    let parts = framed_parts(body, boundary).into_iter().enumerate();
+    let mut found = parts.filter_map(|(index, part)| {
+        let part_type = part.head.single("content-type").ok()??;
+        let part_type = MediaType::parse(&SipStr::owned(part_type)).ok()?;
         let content = body.get(part.offset..part.offset + part.len)?;
-        let disposition = part.head.get("content-disposition");
+        let disposition = part.head.single("content-disposition").ok()?;
         let inner = find(&part_type, disposition, content, depth + 1)?;
         let range = part.offset + inner.range.start..part.offset + inner.range.end;
-        Some(Found { range, part: inner.part.or(Some(part.head)) })
+        Some(Found { range, part: inner.part.or(Some(part.head)), index })
     });
     if content_type.subtype().eq_ignore_ascii_case("alternative") {
         found.next_back()

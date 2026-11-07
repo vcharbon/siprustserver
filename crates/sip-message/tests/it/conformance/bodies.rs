@@ -82,10 +82,12 @@ fn body_rows() -> Vec<Row> {
         // RFC 3261 §25.1: SLASH = SWS "/" SWS.
         offers("spaces-around-the-slash", invite("application / sdp", &[], SDP)),
         offers("media-type-case", invite("APPLICATION/SDP", &[], SDP)),
-        // RFC 2046 §5.1.1: a delimiter is a line.
+        // RFC 2046 §5.1.1: a delimiter is a line, recognised by its start, so
+        // a line that starts with one and is none leaves no reading.
         Row::new("body/delimiter-text-inside-a-line".to_string(), inside_a_line()),
-        Row::new("body/delimiter-prefix-of-a-line".to_string(), prefix_of_a_line()),
-        offers_nothing("delimiter-line-ends-in-crlf", mixed(&format!("--b\nContent-Type: application/sdp\n\n{SDP}\n--b--\n"))),
+        answered("line-starting-with-the-delimiter", mixed(&format!("--b\r\nContent-Type: application/sdp\r\n\r\n{SDP}--bb\r\n\r\n--b--\r\n"))),
+        answered("delimiter-line-ended-by-lf", mixed(&format!("--b\nContent-Type: application/sdp\n\n{SDP}\n--b--\n"))),
+        answered("two-delimiters-on-one-crlf", mixed(&format!("--b\r\n--b\r\n{part}\r\n--b--\r\n"))),
         offers_nothing("description-in-the-epilogue", mixed(&format!("--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b--\r\n--b\r\n{part}"))),
         // RFC 2045 §3, RFC 2046 §5.1: a part's head.
         offers("folded-part-header", mixed(&format!("--b\r\nContent-Type:\r\n application/sdp\r\n\r\n{SDP}\r\n--b--\r\n"))),
@@ -107,6 +109,10 @@ fn body_rows() -> Vec<Row> {
         // RFC 5621 §8.2: a description's disposition.
         offers_nothing("bare-early-session", invite("application/sdp", &["Content-Disposition: early-session"], SDP)),
         offers_nothing("bare-render", invite("application/sdp", &["Content-Disposition: render"], SDP)),
+        // A part stating its type or disposition twice has no one reading.
+        offers_nothing("part-content-type-twice", mixed(&format!("--b\r\nContent-Type: text/plain\r\n{part}\r\n--b--\r\n"))),
+        offers_nothing("part-content-type-twice-sdp-first", mixed(&format!("--b\r\nContent-Type: application/sdp\r\nContent-Type: text/plain\r\n\r\n{SDP}\r\n--b--\r\n"))),
+        offers_nothing("part-disposition-twice", mixed(&format!("--b\r\nContent-Disposition: session\r\nContent-Disposition: render\r\n{part}\r\n--b--\r\n"))),
         offers_nothing("early-session-part", mixed(&format!("--b\r\nContent-Disposition: early-session\r\n{part}\r\n--b--\r\n"))),
         offers("session-after-an-early-session-part", mixed(&format!("--b\r\nContent-Disposition: early-session\r\nContent-Type: application/sdp\r\n\r\n{}\r\n--b\r\n{part}\r\n--b--\r\n", SDP.replace("49170", "40000")))),
         offers("session-on-a-bare-description", invite("application/sdp", &["Content-Disposition: session;handling=required"], SDP)),
@@ -159,16 +165,6 @@ fn part_type(body: &str, content_type: &str) -> Result<(), String> {
 /// A line of the description holding the delimiter's text ends no part.
 fn inside_a_line() -> Result<(), String> {
     let description = format!("{SDP}a=x:prefix--b-suffix\r\n");
-    let body = format!("--b\r\nContent-Type: application/sdp\r\n\r\n{description}\r\n--b--\r\n");
-    match sdp_of(&mixed(&body).bytes())? {
-        Some(found) if found == description.as_bytes() => Ok(()),
-        other => Err(format!("read {:?}", other.map(|f| String::from_utf8_lossy(&f).into_owned()))),
-    }
-}
-
-/// `--bb` is a line of its part under boundary `b`.
-fn prefix_of_a_line() -> Result<(), String> {
-    let description = format!("{SDP}--bb\r\n");
     let body = format!("--b\r\nContent-Type: application/sdp\r\n\r\n{description}\r\n--b--\r\n");
     match sdp_of(&mixed(&body).bytes())? {
         Some(found) if found == description.as_bytes() => Ok(()),

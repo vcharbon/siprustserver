@@ -162,7 +162,6 @@ kinds! {
     Event => Event, Single;
     SubscriptionState => SubscriptionState, Single;
     Accept => Accept, Comma;
-    ContentType => ContentType, Single;
     ContentDisposition => ContentDisposition, Single;
     SessionExpires => SessionExpires, Single;
     RetryAfter => RetryAfter, Single;

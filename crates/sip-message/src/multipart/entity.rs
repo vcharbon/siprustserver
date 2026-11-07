@@ -17,6 +17,9 @@ struct Field {
     value: String,
     /// The value's range in the body, folds included.
     span: Range<usize>,
+    /// Whether the name and the value are UTF-8 as written, so read without
+    /// a replacement character.
+    text: bool,
 }
 
 /// The entity headers of a part's head, in wire order.
@@ -69,7 +72,7 @@ impl PartHead {
     /// colon, and a continuation with no header before it, is no field.
     fn read(body: &[u8], head: Range<usize>) -> PartHead {
         let mut fields: Vec<Field> = Vec::new();
-        let mut open: Option<(String, Range<usize>)> = None;
+        let mut open: Option<(Vec<u8>, Range<usize>)> = None;
         for line in lines(body, head) {
             let text = body.get(line.clone()).unwrap_or_default();
             if text.first().copied().is_some_and(is_wsp) {
@@ -82,8 +85,7 @@ impl PartHead {
             let Some(colon) = text.iter().position(|&b| b == b':') else { continue };
             let name = trim_wsp(text.get(..colon).unwrap_or_default());
             if !name.is_empty() {
-                let name = String::from_utf8_lossy(name).into_owned();
-                open = Some((name, line.start + colon + 1..line.end));
+                open = Some((name.to_vec(), line.start + colon + 1..line.end));
             }
         }
         fields.extend(open.take().map(|(name, value)| field(body, name, value)));
@@ -94,6 +96,23 @@ impl PartHead {
     pub(super) fn get(&self, name: &str) -> Option<&str> {
         let field = self.fields.iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
         Some(field.value.as_str())
+    }
+
+    /// The one value of `name`, case aside: `Ok(None)` when the head states
+    /// none, `Err(())` when it states it twice.
+    pub(super) fn single(&self, name: &str) -> Result<Option<&str>, ()> {
+        let mut found = self.fields.iter().filter(|f| f.name.eq_ignore_ascii_case(name));
+        let first = found.next();
+        match found.next() {
+            Some(_) => Err(()),
+            None => Ok(first.map(|f| f.value.as_str())),
+        }
+    }
+
+    /// Every header as `(name, value, text)`, in wire order: `text` is whether
+    /// both were UTF-8 as written.
+    pub(super) fn written(&self) -> impl Iterator<Item = (&str, &str, bool)> {
+        self.fields.iter().map(|f| (f.name.as_str(), f.value.as_str(), f.text))
     }
 
     /// Every header but those named in `own_fields`, `(name, value)`, in wire
@@ -112,7 +131,7 @@ impl PartHead {
 }
 
 /// The field `name` whose raw value, folds included, lies at `raw` of `body`.
-fn field(body: &[u8], name: String, raw: Range<usize>) -> Field {
+fn field(body: &[u8], name: Vec<u8>, raw: Range<usize>) -> Field {
     let bytes = body.get(raw.clone()).unwrap_or_default();
     let lead = bytes.iter().take_while(|&&b| is_wsp(b) || b == b'\r' || b == b'\n').count();
     let trail = bytes.iter().rev().take_while(|&&b| is_wsp(b)).count();
@@ -128,8 +147,11 @@ fn field(body: &[u8], name: String, raw: Range<usize>) -> Field {
         out.extend_from_slice(rest);
         out
     };
-    let value = String::from_utf8_lossy(trim_wsp(&unfolded)).into_owned();
-    Field { name, value, span }
+    let value = trim_wsp(&unfolded);
+    let text = std::str::from_utf8(&name).is_ok() && std::str::from_utf8(value).is_ok();
+    let value = String::from_utf8_lossy(value).into_owned();
+    let name = String::from_utf8_lossy(&name).into_owned();
+    Field { name, value, span, text }
 }
 
 #[cfg(test)]

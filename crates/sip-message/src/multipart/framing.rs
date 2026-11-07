@@ -85,30 +85,55 @@ fn next_delimiter(
     }
 }
 
+/// The delimiters of `body` under `boundary`: where each line starts, the
+/// close delimiter last when the body has one.
+fn delimiters(body: &[u8], dash_boundary: &[u8]) -> Vec<(usize, Delimiter)> {
+    let mut out = Vec::new();
+    let Some(first) = next_delimiter(body, dash_boundary, 0, 0) else {
+        return out;
+    };
+    out.push(first);
+    let mut delimiter = first.1;
+    while let Delimiter::Open { next: start } = delimiter {
+        let Some(found) = next_delimiter(body, dash_boundary, start, start) else { break };
+        out.push(found);
+        delimiter = found.1;
+    }
+    out
+}
+
 /// The byte range of every part's block: from the end of its delimiter line
 /// to the CRLF of the next delimiter, or to the body's end when none follows.
 fn blocks(body: &[u8], boundary: &[u8]) -> Vec<std::ops::Range<usize>> {
-    let mut out = Vec::new();
     if boundary.is_empty() {
-        return out;
+        return Vec::new();
     }
     let dash_boundary = [b"--".as_slice(), boundary].concat();
-    let Some((_, mut delimiter)) = next_delimiter(body, &dash_boundary, 0, 0) else {
-        return out;
-    };
-    while let Delimiter::Open { next: start } = delimiter {
-        match next_delimiter(body, &dash_boundary, start, start) {
-            Some((at, found)) => {
-                out.push(start..at - 2);
-                delimiter = found;
-            }
-            None => {
-                out.push(start..body.len());
-                break;
-            }
-        }
-    }
-    out
+    let found = delimiters(body, &dash_boundary);
+    let starts = found.iter().filter_map(|(_, d)| match d {
+        Delimiter::Open { next } => Some(*next),
+        Delimiter::Close => None,
+    });
+    let ends = found.iter().skip(1).map(|(at, _)| at - 2).chain(std::iter::once(body.len()));
+    starts.zip(ends).map(|(start, end)| start..end).collect()
+}
+
+/// Whether `body` frames cleanly under `boundary`: every line up to the close
+/// delimiter that starts with `--boundary` is a delimiter. RFC 2046 §5.1.1
+/// recognises a delimiter by the start of its line, so a line that starts with
+/// one and is none (`--bb` under `b`, a delimiter ended by LF alone, two
+/// delimiters sharing one CRLF) leaves the body with no one reading.
+pub(crate) fn frames_cleanly(body: &[u8], boundary: &str) -> bool {
+    let dash_boundary = [b"--".as_slice(), boundary.as_bytes()].concat();
+    let found = delimiters(body, &dash_boundary);
+    let close =
+        found.iter().find(|(_, d)| *d == Delimiter::Close).map_or(body.len(), |(at, _)| *at);
+    let line_starts = std::iter::once(0)
+        .chain(memchr::memmem::find_iter(body, b"\r\n").map(|at| at + 2))
+        .take_while(|&at| at <= close);
+    let mut candidates = line_starts
+        .filter(|&at| body.get(at..).is_some_and(|rest| rest.starts_with(&dash_boundary)));
+    candidates.all(|at| found.iter().any(|(line, _)| *line == at))
 }
 
 #[cfg(test)]
@@ -141,6 +166,16 @@ mod tests {
     fn a_body_that_never_closes_keeps_its_last_part() {
         assert_eq!(block_texts("--b\r\none\r\n--b\r\ntwo\r\n"), ["one", "two\r\n"]);
         assert_eq!(block_texts("--b\r\none\r\n--b"), ["one", ""]);
+    }
+
+    #[test]
+    fn a_line_starting_with_the_delimiter_is_one() {
+        assert!(frames_cleanly(b"pre --b\r\n--b\r\none\r\n--b--\r\nepi\r\n--bb", "b"));
+        assert!(frames_cleanly(b"--b \r\none\r\n--b--", "b"), "transport padding");
+        assert!(!frames_cleanly(b"--b\r\none\r\n--bb\r\n--b--", "b"), "a longer line");
+        assert!(!frames_cleanly(b"--bb\r\n--b\r\none\r\n--b--", "b"), "in the preamble");
+        assert!(!frames_cleanly(b"--b\none\n--b--\n", "b"), "LF alone");
+        assert!(!frames_cleanly(b"--b\r\n--b--\r\n", "b"), "one CRLF for two lines");
     }
 
     #[test]
