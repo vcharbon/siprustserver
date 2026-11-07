@@ -7,7 +7,8 @@
 //! - **stated**: the status a decision engine or a peer stated.
 //! - **refused answer**: an engine's answer whose status is no final it may state,
 //!   the plain 500 under the headers that engine stated.
-//! - **RFC 3261's own**: 400 (§8.1.1.3), 482 (§8.2.2.2), 483 (§16.3), 487 (§9.2).
+//! - **RFC 3261's own**: 400 (§8.1.1.3), 420 (§8.2.2.3), 482 (§8.2.2.2), 483
+//!   (§16.3), 487 (§9.2).
 //! - **no callee answered**: the generic defaults of a callee's silence, 480 or 408.
 //!
 //! The scan reads the places a final is built: [`SITES`], [`RESPOND`] and the
@@ -45,8 +46,10 @@ const FINALS: &[Row] = &[
     // A Relay treatment with no captured failure to relay.
     ("b2bua-core/src/decision/failover_fold.rs", "480", NoCalleeAnswered),
     ("b2bua-core/src/decision/failover_fold.rs", "503", InternalError),
-    // RFC 3261 §16.3, the destination allow-list, a route that does not mint.
+    // RFC 3261 §16.3, a required extension the call withholds (§8.2.2.3), the
+    // destination allow-list, a route that does not mint.
     ("b2bua-core/src/decision/route_fold.rs", "483", Rfc3261),
+    ("b2bua-core/src/decision/route_fold.rs", "420", Rfc3261),
     ("b2bua-core/src/decision/route_fold.rs", "503", InternalError),
     ("b2bua-core/src/decision/route_fold.rs", "500", InternalError),
     // A Relay treatment with no captured failure to relay; an unavailable
@@ -240,7 +243,7 @@ fn fits(class: Class, status: &str, bare: bool) -> bool {
         InternalError => bare && literal.is_some_and(|s| (500..=599).contains(&s)),
         Stated | Builder => literal.is_none(),
         RefusedAnswer => literal == Some(500),
-        Rfc3261 => matches!(literal, Some(400 | 482 | 483 | 487)),
+        Rfc3261 => matches!(literal, Some(400 | 420 | 482 | 483 | 487)),
         NoCalleeAnswered => matches!(literal, Some(480 | 408)) || status == "status",
         OtherRequest => true,
     }
