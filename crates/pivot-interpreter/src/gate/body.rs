@@ -5,7 +5,7 @@
 //! The TYPE is the body's presence, its bare media type (`type/subtype`,
 //! parameters such as `boundary` ignored) and, for a decomposed multipart
 //! expectation, the part count and each part's bare media type by position.
-//! The multipart framing — boundary, delimiter layout, preamble — and a part's
+//! The multipart framing — boundary, padding, preamble — and a part's
 //! entity headers other than `Content-Type` are never part of it. Content
 //! stays the post-run confrontation's under `check: record`.
 

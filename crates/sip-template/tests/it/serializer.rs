@@ -22,6 +22,7 @@ From: <sip:alice@example.com>;tag=tagA\r\n\
 To: <sip:bob@example.com>;tag=tagB\r\n\
 Call-ID: serializer-test-call\r\n\
 CSeq: 1 INVITE\r\n\
+Content-Type: application/sdp\r\n\
 Content-Length: {content_length}\r\n\r\n"
     )
     .into_bytes();
