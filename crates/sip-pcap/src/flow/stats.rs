@@ -1,6 +1,9 @@
 //! The ingest counters of a capture, and the messages ingest sets aside.
 
-use sip_message::SipMessage;
+use std::collections::{BTreeMap, BTreeSet};
+
+use sip_message::error::reason_key;
+use sip_message::{SipMessage, SipParseError};
 
 use crate::align::ProbeOffset;
 use crate::header_errors;
@@ -20,12 +23,18 @@ pub struct FlowStats {
     /// The index in the input slice of each datagram counted in
     /// `parse_failed`, in capture-time order.
     pub parse_failed_at: Vec<usize>,
+    /// The `parse_failed` datagrams by the key of their refusal reason
+    /// ([`reason_key`]).
+    pub parse_failed_by_reason: BTreeMap<String, u64>,
     /// Accepted messages carrying a non-fatal header reading that failed
     /// ([`header_errors`]): ingested like any other, and counted here.
     pub header_failed: u64,
     /// The index in the input slice of each datagram counted in
     /// `header_failed`, in capture-time order.
     pub header_failed_at: Vec<usize>,
+    /// The `header_failed` messages by the key of each failed reading's
+    /// reason: a message counts once under each key its readings name.
+    pub header_failed_by_reason: BTreeMap<String, u64>,
     /// Every failed reading of those messages, in capture-time order.
     pub header_failures: Vec<HeaderFailure>,
     /// Datagrams that did not look like SIP (RTP/STUN/DNS on captured ports).
@@ -47,6 +56,13 @@ pub struct HeaderFailure {
 }
 
 impl FlowStats {
+    /// Count datagram `at` of the input as refused by the parser for `error`.
+    pub(crate) fn note_refusal(&mut self, at: usize, error: &SipParseError) {
+        self.parse_failed += 1;
+        self.parse_failed_at.push(at);
+        *self.parse_failed_by_reason.entry(error.reason_key()).or_default() += 1;
+    }
+
     /// Count `msg`, datagram `at` of the input, and record its failed header
     /// readings, when it carries any; it is the `msg`-th message of the leg
     /// named `call_id`.
@@ -63,6 +79,10 @@ impl FlowStats {
         }
         self.header_failed += 1;
         self.header_failed_at.push(at);
+        let keys: BTreeSet<String> = failed.iter().map(|e| reason_key(&e.reason)).collect();
+        for key in keys {
+            *self.header_failed_by_reason.entry(key).or_default() += 1;
+        }
         self.header_failures.extend(failed.into_iter().map(|e| HeaderFailure {
             call_id: call_id.to_string(),
             msg: position,

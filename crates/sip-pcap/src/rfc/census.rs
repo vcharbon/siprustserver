@@ -44,6 +44,15 @@ pub struct RuleTally {
     pub buckets: BTreeMap<String, u64>,
 }
 
+/// The messages the extraction set aside for one refusal reason key, summed
+/// over the documents.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetAsideTally {
+    pub messages: u64,
+    /// The captures carrying at least one of those messages, each once.
+    pub captures: BTreeSet<String>,
+}
+
 /// One hit, located in the corpus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocatedHit {
@@ -76,6 +85,16 @@ pub struct Census {
     pub legs: u64,
     pub messages: u64,
     pub rules: BTreeMap<String, RuleTally>,
+    /// The messages the documents' extraction refused, which no rule read, by
+    /// refusal reason key (the documents' `parse_failed_by_reason`). Absent
+    /// when none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parse_failed_by_reason: BTreeMap<String, SetAsideTally>,
+    /// The messages the documents' extraction read with a failed header
+    /// reading, by its reason key (the documents' `header_failed_by_reason`).
+    /// Absent when none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub header_failed_by_reason: BTreeMap<String, SetAsideTally>,
     pub hits: Vec<LocatedHit>,
     pub failures: Vec<ReadFailure>,
     /// The SUT set every hit's `side` was placed by; absent when none was
@@ -134,6 +153,9 @@ impl Census {
         self.groups += doc.groups.len() as u64;
         self.legs += doc.legs.len() as u64;
         self.messages += doc.legs.iter().map(|l| l.msgs.len() as u64).sum::<u64>();
+        let stats = &doc.flow_stats;
+        add_set_aside(&mut self.parse_failed_by_reason, &stats.parse_failed_by_reason, capture);
+        add_set_aside(&mut self.header_failed_by_reason, &stats.header_failed_by_reason, capture);
         let scan = scan_sut(doc, &self.candidates, sut);
         // Each detector brings its own denominators; the census only adds them
         // up under the token the detector counted them against.
@@ -193,6 +215,16 @@ impl Census {
             }
             for (bucket, n) in tally.buckets {
                 *mine.buckets.entry(bucket).or_default() += n;
+            }
+        }
+        for (mine, theirs) in [
+            (&mut self.parse_failed_by_reason, other.parse_failed_by_reason),
+            (&mut self.header_failed_by_reason, other.header_failed_by_reason),
+        ] {
+            for (reason, tally) in theirs {
+                let row = mine.entry(reason).or_default();
+                row.messages += tally.messages;
+                row.captures.extend(tally.captures);
             }
         }
         self.hits.extend(other.hits);
@@ -266,7 +298,32 @@ impl Census {
                 out.push_str(&format!("  {bucket}: {n}\n"));
             }
         }
+        for (level, table) in [
+            ("refused", &self.parse_failed_by_reason),
+            ("header failed", &self.header_failed_by_reason),
+        ] {
+            if table.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("set aside, {level}: message(s), capture(s), reason\n"));
+            for (reason, tally) in table {
+                out.push_str(&format!("  {} {} {reason}\n", tally.messages, tally.captures.len()));
+            }
+        }
         out
+    }
+}
+
+/// Add one document's `by_reason` counts, from `capture`, to `table`.
+fn add_set_aside(
+    table: &mut BTreeMap<String, SetAsideTally>,
+    by_reason: &BTreeMap<String, u64>,
+    capture: &str,
+) {
+    for (reason, &n) in by_reason {
+        let row = table.entry(reason.clone()).or_default();
+        row.messages += n;
+        row.captures.insert(capture.to_string());
     }
 }
 

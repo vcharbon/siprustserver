@@ -210,6 +210,14 @@ export const RuleTally = Schema.Struct({
 })
 export interface RuleTally extends Schema.Schema.Type<typeof RuleTally> {}
 
+/** The messages the extraction set aside for one refusal reason key, summed over the documents. */
+export const SetAsideTally = Schema.Struct({
+  messages: Schema.Int,
+  /** The captures carrying at least one of those messages, each once. */
+  captures: Schema.Array(Schema.String)
+})
+export interface SetAsideTally extends Schema.Schema.Type<typeof SetAsideTally> {}
+
 /** One document the sweep could not read, and why. */
 export const CensusFailure = Schema.Struct({
   document: Schema.String,
@@ -232,6 +240,10 @@ export const CensusReport = Schema.Struct({
   legs: Schema.Int,
   messages: Schema.Int,
   rules: Schema.Record(Schema.Literals(RFC_RULES), Schema.optionalKey(RuleTally)),
+  /** The messages the documents' extraction refused, by refusal reason key. Absent when none. */
+  parse_failed_by_reason: Schema.optionalKey(Schema.Record(Schema.String, SetAsideTally)),
+  /** The messages read with a failed header reading, by its reason key. Absent when none. */
+  header_failed_by_reason: Schema.optionalKey(Schema.Record(Schema.String, SetAsideTally)),
   hits: Schema.Array(CensusHit),
   failures: Schema.Array(CensusFailure),
   /** The SUT set every hit's `side` was placed by; absent on a sweep. */

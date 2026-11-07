@@ -1,9 +1,13 @@
-//! The parser's refusal of a message: why it was refused, and what of a
-//! refused request can still be answered.
+//! The parser's refusal of a message: why it was refused, the key that reason
+//! is counted under, and what of a refused request can still be answered.
 
 use std::fmt;
 
 use crate::parser::custom::partial::RequestPartial;
+
+mod reason_key;
+
+pub use reason_key::reason_key;
 
 /// A message the parser refused. `reason` names the first rule it broke.
 /// `partial` holds what a response to a refused request echoes; it is present
@@ -23,6 +27,12 @@ impl SipParseError {
     /// can answer it.
     pub fn partial(&self) -> Option<&RequestPartial> {
         self.partial.as_deref()
+    }
+
+    /// The key this refusal is counted under: `reason` with the values it
+    /// quotes left out ([`reason_key`]).
+    pub fn reason_key(&self) -> String {
+        reason_key(&self.reason)
     }
 }
 

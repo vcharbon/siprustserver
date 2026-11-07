@@ -66,11 +66,19 @@ pub struct FlowStatsJson {
     pub sip_messages: u64,
     pub capture_dups: u64,
     pub parse_failed: u64,
+    /// The `parse_failed` datagrams by the key of their refusal reason
+    /// (`sip_message::error::reason_key`). Absent when none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parse_failed_by_reason: BTreeMap<String, u64>,
     /// Ingested messages carrying a non-fatal header reading that failed
     /// (`sip_pcap::header_errors`), set aside beside the `parse_failed` ones.
     /// Absent when none.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub header_failed: u64,
+    /// The `header_failed` messages by the key of each failed reading's
+    /// reason, a message counted once under each key. Absent when none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub header_failed_by_reason: BTreeMap<String, u64>,
     /// Each failed reading of those messages. Absent when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub header_failures: Vec<HeaderFailureJson>,

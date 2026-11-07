@@ -386,9 +386,8 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
 
         let msg = match reading.parse(&d.payload) {
             Ok(m) => m,
-            Err(_) => {
-                stats.parse_failed += 1;
-                stats.parse_failed_at.push(i);
+            Err(error) => {
+                stats.note_refusal(i, &error);
                 continue;
             }
         };

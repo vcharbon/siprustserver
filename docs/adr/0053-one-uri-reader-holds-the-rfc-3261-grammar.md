@@ -239,8 +239,9 @@ recording, and its parties read the wire, under the reading its lane states
   be (ADR-0054).
 - Capture ingest (`sipflow`) sets aside the messages its reading refuses and
   copies the accepted ones whose non-fatal header reading failed beside them,
-  counting each (`parse_failed`, `header_failed`), so a stricter grammar's cost
-  on a capture is seen, not silent.
+  counting each (`parse_failed`, `header_failed`) and each by its reason's
+  key (`SipParseError::reason_key`), so a stricter grammar's cost on a capture
+  is seen and attributed, not silent.
 - A test or fixture that relied on a URI the grammar refuses carries a
   compliant one; a test whose subject is that input asserts the refusal.
 - The vendored ABNF grammars of the fuzz corpus draw a header parameter's name

@@ -143,3 +143,43 @@ fn every_rule_is_tallied_without_being_named() {
     assert!(census.summary().contains("rung-byte-identical: 1 hit(s)"));
     assert_eq!(census.rules.len(), RfcRule::ALL.len(), "every rule is a reported result");
 }
+
+/// The set-aside tables sum across documents and across merged sweeps: a
+/// reason's messages add up, and its captures count each capture once.
+#[test]
+fn the_set_aside_tables_sum_across_documents() {
+    let with = |refused: &[(&str, u64)], header: &[(&str, u64)]| {
+        let mut doc = doc_of(vec![dg(1_000, A, B, request("OPTIONS", 1, "s1", "fa", None))]);
+        let table = |rows: &[(&str, u64)]| rows.iter().map(|&(k, n)| (k.to_string(), n)).collect();
+        doc.flow_stats.parse_failed_by_reason = table(refused);
+        doc.flow_stats.header_failed_by_reason = table(header);
+        doc
+    };
+    let mut first = Census::new();
+    first.absorb("a/1.json", "cap-a", &with(&[("no Contact", 2), ("repeat", 1)], &[]));
+    first.absorb("a/2.json", "cap-a", &with(&[("no Contact", 3)], &[("Strict Diversion", 1)]));
+    let mut second = Census::new();
+    second.absorb("b/1.json", "cap-b", &with(&[("no Contact", 4)], &[("Strict Diversion", 2)]));
+    first.merge(second);
+
+    let row = |table: &BTreeMap<String, SetAsideTally>, key: &str| {
+        let tally = &table[key];
+        (tally.messages, tally.captures.iter().cloned().collect::<Vec<_>>())
+    };
+    assert_eq!(
+        row(&first.parse_failed_by_reason, "no Contact"),
+        (9, vec!["cap-a".to_string(), "cap-b".to_string()])
+    );
+    assert_eq!(row(&first.parse_failed_by_reason, "repeat"), (1, vec!["cap-a".to_string()]));
+    assert_eq!(
+        row(&first.header_failed_by_reason, "Strict Diversion"),
+        (3, vec!["cap-a".to_string(), "cap-b".to_string()])
+    );
+
+    let report = serde_json::to_value(&first).unwrap();
+    assert_eq!(report["parse_failed_by_reason"]["no Contact"]["messages"], 9);
+    let summary = first.summary();
+    assert!(summary.contains("set aside, refused: message(s), capture(s), reason\n"), "{summary}");
+    assert!(summary.contains("  9 2 no Contact\n"), "{summary}");
+    assert!(summary.contains("  3 2 Strict Diversion\n"), "{summary}");
+}

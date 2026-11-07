@@ -68,7 +68,9 @@ pub fn flows_to_doc_selected(
             sip_messages: flows.stats.sip_messages,
             capture_dups: flows.stats.capture_dups,
             parse_failed: flows.stats.parse_failed,
+            parse_failed_by_reason: flows.stats.parse_failed_by_reason.clone(),
             header_failed: flows.stats.header_failed,
+            header_failed_by_reason: flows.stats.header_failed_by_reason.clone(),
             header_failures: flows
                 .stats
                 .header_failures
