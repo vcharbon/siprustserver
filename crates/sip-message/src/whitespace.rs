@@ -29,6 +29,14 @@ pub(crate) fn trim_end(text: &str) -> &str {
     text.trim_end_matches(is_wsp_char)
 }
 
+/// `bytes` without the SP and HTAB at its edges: text that need not be UTF-8,
+/// such as a MIME part's head.
+pub(crate) fn trim_bytes(bytes: &[u8]) -> &[u8] {
+    let start = bytes.iter().position(|&b| !is_wsp(b)).unwrap_or(bytes.len());
+    let end = bytes.iter().rposition(|&b| !is_wsp(b)).map_or(start, |i| i + 1);
+    bytes.get(start..end).unwrap_or_default()
+}
+
 /// The runs of `text` that SP and HTAB separate, empty runs left out.
 pub(crate) fn split(text: &str) -> impl DoubleEndedIterator<Item = &str> {
     text.split(is_wsp_char).filter(|run| !run.is_empty())
@@ -48,5 +56,7 @@ mod tests {
         assert_eq!(trim_start(" a "), "a ");
         assert_eq!(trim_end(" a "), " a");
         assert_eq!(split("a  b\tc\u{a0}d").collect::<Vec<_>>(), ["a", "b", "c\u{a0}d"]);
+        assert_eq!(trim_bytes(b" \t\xe9\x0b \t"), b"\xe9\x0b");
+        assert_eq!(trim_bytes(b" \t"), b"");
     }
 }

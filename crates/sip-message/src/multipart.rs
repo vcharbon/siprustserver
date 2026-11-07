@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::header::{HeaderId, HeaderValue, MediaType};
 use crate::header_table::HeaderTable;
 use crate::sip_str::SipStr;
+use crate::whitespace;
 use crate::write_check::WriteRefusal;
 
 /// One entity part: its media type, any further entity headers it states, and
@@ -183,7 +184,7 @@ fn find_description(
     let media = MediaType::parse(&SipStr::owned(content_type?)).ok()?;
     let disposition = entity_headers
         .iter()
-        .find(|(name, _)| name.trim().eq_ignore_ascii_case("Content-Disposition"))
+        .find(|(name, _)| whitespace::trim(name).eq_ignore_ascii_case("Content-Disposition"))
         .map(|(_, value)| value.as_str());
     description::find(&media, disposition, body, 1)
 }
@@ -230,7 +231,11 @@ pub fn entity_parts(
             .collect();
     }
     let headers = describing_entity_headers(entity_headers);
-    vec![MultipartPart { content_type: text.trim().to_string(), headers, payload: body.to_vec() }]
+    vec![MultipartPart {
+        content_type: whitespace::trim(text).to_string(),
+        headers,
+        payload: body.to_vec(),
+    }]
 }
 
 /// The message's entity headers that describe a bare body as one part: every
@@ -239,7 +244,7 @@ fn describing_entity_headers(entity_headers: &[(String, String)]) -> Vec<(String
     entity_headers
         .iter()
         .filter(|(name, _)| {
-            let name = name.trim();
+            let name = whitespace::trim(name);
             is_entity_header(name)
                 && !name.eq_ignore_ascii_case("Content-Type")
                 && !name.eq_ignore_ascii_case("Content-Length")
@@ -254,8 +259,8 @@ fn describing_entity_headers(entity_headers: &[(String, String)]) -> Vec<(String
 /// rides only with that body.
 pub fn is_entity_header(name: &str) -> bool {
     const CONTENT: &[u8] = b"content-";
-    let bytes = name.trim().as_bytes();
-    name.trim().eq_ignore_ascii_case("MIME-Version")
+    let bytes = whitespace::trim(name).as_bytes();
+    whitespace::trim(name).eq_ignore_ascii_case("MIME-Version")
         || (bytes.len() > CONTENT.len()
             && bytes.get(..CONTENT.len()).is_some_and(|head| head.eq_ignore_ascii_case(CONTENT)))
 }

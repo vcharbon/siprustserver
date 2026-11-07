@@ -5,6 +5,7 @@
 use super::part_lines::writable;
 use super::{derive_boundary, describing_entity_headers, find_description, frame, MultipartPart};
 use crate::header::{HeaderClass, HeaderName};
+use crate::whitespace;
 use crate::write_check::{Position, WriteRefusal};
 
 /// A message body built by [`attach`]: the bytes, the `Content-Type` that
@@ -90,7 +91,11 @@ fn description_part(
     let payload = body.get(found.range)?.to_vec();
     let Some(head) = found.part else {
         let headers = describing_entity_headers(entity_headers);
-        return Some(MultipartPart { content_type: text.trim().to_string(), headers, payload });
+        return Some(MultipartPart {
+            content_type: whitespace::trim(text).to_string(),
+            headers,
+            payload,
+        });
     };
     let mut part = MultipartPart::new(head.get("content-type").unwrap_or_default(), payload);
     for (name, value, utf8) in head.written() {
@@ -118,7 +123,7 @@ fn rides_with_a_part(name: &str) -> bool {
 fn normalized(part: &MultipartPart) -> MultipartPart {
     let mut out = MultipartPart::new(part.content_type.clone(), part.payload.clone());
     for (name, value) in &part.headers {
-        let name_trimmed = name.trim();
+        let name_trimmed = whitespace::trim(name);
         if name_trimmed.eq_ignore_ascii_case("Content-Type") {
             out.content_type = value.clone();
         } else if rides_with_a_part(name_trimmed) {

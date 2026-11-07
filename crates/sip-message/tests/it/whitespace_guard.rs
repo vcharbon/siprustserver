@@ -27,7 +27,6 @@ const ROUTINES: &[&str] = &[
 const OUTSIDE: &[(&str, &str)] = &[
     ("sniff", "tooling that reads captured text as found"),
     ("mscml.rs", "XML, whose whitespace is XML 1.0 §2.3 `S`"),
-    ("multipart", "the multipart framing and part-head readers"),
 ];
 
 /// `line` up to a `//` comment, a `//` inside a string literal (`"sip://"`)

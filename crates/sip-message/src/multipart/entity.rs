@@ -9,6 +9,8 @@
 
 use std::ops::Range;
 
+use crate::whitespace::{is_wsp, trim_bytes};
+
 /// One entity header of a part's head.
 #[derive(Debug, Clone)]
 struct Field {
@@ -26,16 +28,6 @@ struct Field {
 #[derive(Debug, Clone, Default)]
 pub(super) struct PartHead {
     fields: Vec<Field>,
-}
-
-fn is_wsp(b: u8) -> bool {
-    b == b' ' || b == b'\t'
-}
-
-fn trim_wsp(bytes: &[u8]) -> &[u8] {
-    let start = bytes.iter().position(|&b| !is_wsp(b)).unwrap_or(bytes.len());
-    let end = bytes.iter().rposition(|&b| !is_wsp(b)).map_or(start, |i| i + 1);
-    bytes.get(start..end.max(start)).unwrap_or_default()
 }
 
 /// The CRLF-ended lines of `bytes[range]`, each as its range in `bytes`, the
@@ -83,7 +75,7 @@ impl PartHead {
             }
             fields.extend(open.take().map(|(name, value)| field(body, name, value)));
             let Some(colon) = text.iter().position(|&b| b == b':') else { continue };
-            let name = trim_wsp(text.get(..colon).unwrap_or_default());
+            let name = trim_bytes(text.get(..colon).unwrap_or_default());
             if !name.is_empty() {
                 open = Some((name.to_vec(), line.start + colon + 1..line.end));
             }
@@ -147,7 +139,7 @@ fn field(body: &[u8], name: Vec<u8>, raw: Range<usize>) -> Field {
         out.extend_from_slice(rest);
         out
     };
-    let value = trim_wsp(&unfolded);
+    let value = trim_bytes(&unfolded);
     let text = std::str::from_utf8(&name).is_ok() && std::str::from_utf8(value).is_ok();
     let value = String::from_utf8_lossy(value).into_owned();
     let name = String::from_utf8_lossy(&name).into_owned();
