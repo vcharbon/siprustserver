@@ -27,7 +27,7 @@ use sip_proxy::resolver::HostResolver;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::self_gate::{AdmitDecision, ProxySelfGate, ShedReason};
 use sip_proxy::{
-    ExternalFaceParts, FaceCidrs, LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
+    ExternalFaceParts, LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
 };
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
@@ -38,8 +38,6 @@ use tokio::time::Instant;
 pub const PROXY: (&str, u16) = ("192.0.2.1", 5060);
 /// The proxy's internal face, where it has two: the workers' plane.
 pub const PROXY_INTERNAL: (&str, u16) = ("10.0.0.1", 5060);
-/// The internal plane of a dual-face proxy.
-const INTERNAL_CIDRS: &str = "10.0.0.0/24";
 /// Where the health probe listens.
 pub const PROBE: (&str, u16) = ("10.0.0.1", 5061);
 /// The peers, by role.
@@ -212,7 +210,6 @@ impl Rig {
             builder = builder.external_face(ExternalFaceParts {
                 endpoint: bind(PROXY).await.expect("bind the external face"),
                 advertised: ProxyAddr::new(PROXY.0, PROXY.1),
-                int_cidrs: FaceCidrs::parse(INTERNAL_CIDRS).expect("the internal plane"),
             });
         }
         if variant == Variant::GateClosed {

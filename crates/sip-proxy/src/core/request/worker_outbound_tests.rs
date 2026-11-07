@@ -12,7 +12,6 @@ use sip_net_testkit::SimulatedSignalingNetwork;
 
 use crate::addr::ProxyAddr;
 use crate::core::{ExternalFaceParts, ProxyCoreBuilder};
-use crate::face::FaceCidrs;
 use crate::observability::metrics::{Face, RoutingDecisionKind, UntrustedClaim};
 use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::{WorkerEntry, WorkerRegistry};
@@ -245,7 +244,7 @@ Content-Length: 0\r\n\r\n"
 }
 
 /// A dual-face core: the internal face on `PROXY_VIP`, the external one on
-/// `EXT_VIP`, the internal plane `10.244.0.0/16`.
+/// `EXT_VIP`.
 async fn dual_face_core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore {
     let net = SimulatedSignalingNetwork::new(1);
     let bind = |addr: &str| {
@@ -263,7 +262,6 @@ async fn dual_face_core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore 
         .external_face(ExternalFaceParts {
             endpoint: ext_ep,
             advertised: ProxyAddr::new(EXT_VIP, 5060),
-            int_cidrs: FaceCidrs::parse("10.244.0.0/16").unwrap(),
         })
         .build(int_ep)
 }

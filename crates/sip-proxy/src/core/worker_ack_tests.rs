@@ -51,7 +51,7 @@ Content-Length: 0\r\n\r\n"
 /// The re-INVITE leaves through the Route past the proxy, and its 488 comes back
 /// from that hop through `f`.
 async fn final_relayed(f: &Fixture, call_id: &str) {
-    let out = f.core.route_request_from(&reinvite(call_id), worker()).await;
+    let out = f.core.route_request(&reinvite(call_id), worker(), Face::Internal).await;
     assert_eq!(out.target, Some(ProxyAddr::new(HOP, 5060)), "the re-INVITE's destination");
     let via = header_lines(&f.take_sent()[0].2, "Via");
     let ours = via[0].trim().to_string();
@@ -81,7 +81,7 @@ async fn an_ack_copying_the_invites_route_reaches_the_invites_hop() {
     let f = dual_face_core();
     final_relayed(&f, "held@test").await;
     let route = format!("<sip:{INT_VIP}:{INT_PORT};outbound;lr>, <sip:{HOP}:5060;lr>");
-    let out = f.core.route_request_from(&ack("held@test", &route), worker()).await;
+    let out = f.core.route_request(&ack("held@test", &route), worker(), Face::Internal).await;
     assert_eq!(out.target, Some(ProxyAddr::new(HOP, 5060)));
 }
 
@@ -91,7 +91,8 @@ async fn an_ack_copying_the_invites_route_reaches_the_invites_hop() {
 async fn an_ack_with_no_route_past_the_proxy_reaches_the_invites_hop_where_it_is_remembered() {
     let f = dual_face_core();
     final_relayed(&f, "unheld@test").await;
-    let out = f.core.route_request_from(&ack("unheld@test", &plain_route()), worker()).await;
+    let out =
+        f.core.route_request(&ack("unheld@test", &plain_route()), worker(), Face::Internal).await;
     assert_eq!(out.target, Some(ProxyAddr::new(HOP, 5060)), "§17.1.1.2");
 }
 
@@ -101,7 +102,7 @@ async fn an_ack_with_no_route_past_the_proxy_reaches_the_invites_hop_where_it_is
 async fn an_ack_stating_the_hop_reaches_it_at_another_instance() {
     let other = dual_face_core();
     let route = format!("{}, <sip:{HOP}:5060;lr>", plain_route());
-    let out = other.core.route_request_from(&ack("stated@test", &route), worker()).await;
+    let out = other.core.route_request(&ack("stated@test", &route), worker(), Face::Internal).await;
     assert_eq!(out.target, Some(ProxyAddr::new(HOP, 5060)));
 }
 
@@ -110,6 +111,9 @@ async fn an_ack_stating_the_hop_reaches_it_at_another_instance() {
 #[tokio::test]
 async fn an_ack_stating_no_hop_goes_to_its_request_uri_at_another_instance() {
     let other = dual_face_core();
-    let out = other.core.route_request_from(&ack("unstated@test", &plain_route()), worker()).await;
+    let out = other
+        .core
+        .route_request(&ack("unstated@test", &plain_route()), worker(), Face::Internal)
+        .await;
     assert_eq!(out.target, Some(ProxyAddr::new(CALLEE, 5070)));
 }

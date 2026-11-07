@@ -9,7 +9,7 @@ use crate::config::ProxyConfig;
 pub fn log_listening(cfg: &ProxyConfig, registry: &dyn WorkerRegistry) {
     let face_note = match &cfg.external {
         Some(ext) => format!(
-            " DUAL-FACE ext_listen={} ext_advertise={}:{} (int CIDRs from PROXY_FACE_INT_CIDRS)",
+            " DUAL-FACE ext_listen={} ext_advertise={}:{}",
             ext.listen, ext.advertise.host, ext.advertise.port,
         ),
         None => String::new(),

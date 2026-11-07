@@ -94,8 +94,8 @@ impl ProxyCoreBuilder {
         self
     }
     /// Enable **dual-face mode**: a second socket on the external (caller)
-    /// plane with its own advertise, and the internal CIDR list that picks the
-    /// egress face per destination IP. Absent → single-face.
+    /// plane with its own advertise; a message crosses between the faces
+    /// (`crate::face`). Absent → single-face.
     pub fn external_face(mut self, parts: ExternalFaceParts) -> Self {
         self.external = Some(parts);
         self

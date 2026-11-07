@@ -12,7 +12,7 @@ use super::dual_face_tests::{
     dual_face_core, header_lines, parse_msg, Sent, CALLEE, CALLER, EXT_VIP, INT_PORT, INT_VIP, W1,
 };
 use crate::addr::ProxyAddr;
-use crate::observability::metrics::RoutingDecisionKind;
+use crate::observability::metrics::{Face, RoutingDecisionKind};
 
 const TARGET: &str = "192.0.2.9";
 
@@ -65,7 +65,7 @@ Contact: <sip:alice@{CALLER}:5060>\r\n\
 async fn a_workers_request_goes_to_the_maddr_of_its_request_uri() {
     let f = dual_face_core();
     let uri = format!("sip:bob@name.invalid:5070;maddr={TARGET}");
-    let out = f.core.route_request_from(&worker_bye(&uri, ""), worker()).await;
+    let out = f.core.route_request(&worker_bye(&uri, ""), worker(), Face::Internal).await;
     assert_eq!(out.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(out.target, Some(ProxyAddr::new(TARGET, 5070)), "the URI's own port");
     let sent = f.take_sent();
@@ -78,7 +78,7 @@ async fn a_loose_route_past_the_proxys_own_goes_to_its_maddr() {
     let f = dual_face_core();
     let route = format!(", <sip:next.invalid;maddr={TARGET};lr>");
     let uri = format!("sip:bob@{CALLEE}:5060");
-    let out = f.core.route_request_from(&worker_bye(&uri, &route), worker()).await;
+    let out = f.core.route_request(&worker_bye(&uri, &route), worker(), Face::Internal).await;
     assert_eq!(out.decision, RoutingDecisionKind::LooseRoute);
     assert_eq!(out.target, Some(ProxyAddr::new(TARGET, 5060)), "the default port");
 }
@@ -90,7 +90,7 @@ async fn a_route_naming_the_proxy_by_its_maddr_is_the_proxys_own() {
     let f = dual_face_core();
     let route = format!(", <sip:name.invalid:{INT_PORT};maddr={INT_VIP};lr>");
     let uri = format!("sip:bob@{CALLEE}:5060");
-    let out = f.core.route_request_from(&worker_bye(&uri, &route), worker()).await;
+    let out = f.core.route_request(&worker_bye(&uri, &route), worker(), Face::Internal).await;
     assert_eq!(out.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(out.target, Some(ProxyAddr::new(CALLEE, 5060)), "past the proxy's own entries");
     let sent = f.take_sent();
@@ -103,7 +103,7 @@ async fn a_route_naming_the_proxy_by_its_maddr_is_the_proxys_own() {
 async fn a_request_uri_naming_the_proxy_by_its_maddr_loses_it_on_the_internal_face() {
     let f = dual_face_core();
     let uri = format!("sip:bob@{CALLEE}:{INT_PORT};transport=tcp;maddr={INT_VIP};user=phone");
-    let out = f.core.route_request_from(&worker_bye(&uri, ""), worker()).await;
+    let out = f.core.route_request(&worker_bye(&uri, ""), worker(), Face::Internal).await;
     assert_eq!(out.target, Some(ProxyAddr::new(CALLEE, 5060)), "the URI as if never stated");
     let sent = f.take_sent();
     assert_eq!(request_line(&sent[0]), format!("BYE sip:bob@{CALLEE};user=phone SIP/2.0"));
@@ -113,7 +113,7 @@ async fn a_request_uri_naming_the_proxy_by_its_maddr_loses_it_on_the_internal_fa
 async fn a_request_uri_naming_the_proxy_by_its_maddr_loses_it_on_the_external_face() {
     let f = dual_face_core();
     let uri = format!("sip:bob@{CALLEE};maddr={EXT_VIP}");
-    let out = f.core.route_request_from(&caller_invite_to(&uri, ""), caller()).await;
+    let out = f.core.route_request(&caller_invite_to(&uri, ""), caller(), Face::External).await;
     assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)));
     let sent = f.take_sent();
     assert_eq!(request_line(&sent[0]), format!("INVITE sip:bob@{CALLEE} SIP/2.0"));
@@ -125,7 +125,7 @@ async fn a_request_uri_naming_the_proxy_by_its_maddr_loses_it_on_the_external_fa
 async fn an_inbound_request_uris_maddr_on_the_external_face_chooses_nothing() {
     let f = dual_face_core();
     let uri = format!("sip:bob@{CALLEE};maddr={TARGET}");
-    let out = f.core.route_request_from(&caller_invite_to(&uri, ""), caller()).await;
+    let out = f.core.route_request(&caller_invite_to(&uri, ""), caller(), Face::External).await;
     assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)));
     let sent = f.take_sent();
     assert_eq!(request_line(&sent[0]), format!("INVITE {uri} SIP/2.0"));
@@ -138,7 +138,7 @@ async fn a_route_naming_the_proxy_by_a_mapped_maddr_is_the_proxys_own() {
     let f = dual_face_core();
     let route = format!(", <sip:name.invalid:{INT_PORT};maddr=[::ffff:{INT_VIP}];lr>");
     let uri = format!("sip:bob@{CALLEE}:5060");
-    let out = f.core.route_request_from(&worker_bye(&uri, &route), worker()).await;
+    let out = f.core.route_request(&worker_bye(&uri, &route), worker(), Face::Internal).await;
     assert_eq!(out.target, Some(ProxyAddr::new(CALLEE, 5060)));
     assert!(header_lines(&f.take_sent()[0].2, "Route").is_empty(), "the own entries are popped");
 }
@@ -148,7 +148,7 @@ async fn a_route_naming_the_proxy_by_a_mapped_authority_is_the_proxys_own() {
     let f = dual_face_core();
     let route = format!(", <sip:[::ffff:{INT_VIP}]:{INT_PORT};lr>");
     let uri = format!("sip:bob@{CALLEE}:5060");
-    let out = f.core.route_request_from(&worker_bye(&uri, &route), worker()).await;
+    let out = f.core.route_request(&worker_bye(&uri, &route), worker(), Face::Internal).await;
     assert_eq!(out.target, Some(ProxyAddr::new(CALLEE, 5060)));
     assert!(header_lines(&f.take_sent()[0].2, "Route").is_empty(), "the own entries are popped");
 }
@@ -157,7 +157,7 @@ async fn a_route_naming_the_proxy_by_a_mapped_authority_is_the_proxys_own() {
 async fn a_request_uri_naming_the_proxy_by_a_mapped_maddr_loses_it() {
     let f = dual_face_core();
     let uri = format!("sip:bob@{CALLEE}:{INT_PORT};maddr=[::ffff:{INT_VIP}]");
-    let out = f.core.route_request_from(&worker_bye(&uri, ""), worker()).await;
+    let out = f.core.route_request(&worker_bye(&uri, ""), worker(), Face::Internal).await;
     assert_eq!(out.target, Some(ProxyAddr::new(CALLEE, 5060)));
     assert_eq!(request_line(&f.take_sent()[0]), format!("BYE sip:bob@{CALLEE} SIP/2.0"));
 }

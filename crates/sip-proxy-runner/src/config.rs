@@ -17,7 +17,7 @@ use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
 use sip_proxy::resolver::ResolverConfig;
 use sip_proxy::self_gate::ProxySelfGateConfig;
-use sip_proxy::{FaceCidrs, ProxyAddr};
+use sip_proxy::ProxyAddr;
 
 pub use preflight::{refusal, validate_config, ProbeTimingConfig};
 use reader::{EnvReader, Span};
@@ -41,7 +41,6 @@ pub enum WorkerSource {
 pub struct ExternalFace {
     pub listen: SocketAddr,
     pub advertise: ProxyAddr,
-    pub int_cidrs: FaceCidrs,
 }
 
 /// The proxy's boot configuration.
@@ -279,26 +278,12 @@ fn advertise(env: &mut EnvReader, key: &str, listen: Option<SocketAddr>) -> Prox
     }
 }
 
-/// `PROXY_LISTEN_EXT` enables the external face; it then needs
-/// `PROXY_FACE_INT_CIDRS`, and each face binds its own address: a wildcard
-/// bind of `PROXY_LISTEN` (the internal face, `listen`) or of
-/// `PROXY_LISTEN_EXT` would let the external plane reach the trusted internal
-/// socket (ADR-0048).
+/// `PROXY_LISTEN_EXT` enables the external face, and each face then binds its
+/// own address: a wildcard bind of `PROXY_LISTEN` (the internal face, `listen`)
+/// or of `PROXY_LISTEN_EXT` would let the external plane reach the trusted
+/// internal socket (ADR-0048).
 fn external_face(env: &mut EnvReader, listen: Option<SocketAddr>) -> Option<ExternalFace> {
     let listen_ext = env.present("PROXY_LISTEN_EXT");
-    let cidrs = env.present("PROXY_FACE_INT_CIDRS");
-    let int_cidrs = match parse_ext_face_cidrs(listen_ext.is_some(), cidrs.as_deref()) {
-        Ok(c) => c,
-        Err(e) => {
-            env.refuse(e);
-            return None;
-        }
-    };
-    if listen_ext.is_none() && cidrs.is_some() {
-        tracing::warn!(
-            "PROXY_FACE_INT_CIDRS set but PROXY_LISTEN_EXT unset — single-face mode, CIDR list ignored"
-        );
-    }
     if listen_ext.is_none() {
         tracing::warn!(
             "single-face proxy (PROXY_LISTEN_EXT unset): every sender is trusted as the internal \
@@ -317,31 +302,7 @@ fn external_face(env: &mut EnvReader, listen: Option<SocketAddr>) -> Option<Exte
         }
     }
     let listen = listen.unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
-    Some(ExternalFace { listen, advertise, int_cidrs: int_cidrs? })
-}
-
-/// Dual-face boot rule: `PROXY_FACE_INT_CIDRS` is required, and must parse,
-/// whenever `PROXY_LISTEN_EXT` enables the second face — a dual-face proxy
-/// without a plane classifier would egress worker traffic on the caller plane.
-/// A single-face proxy never reads it.
-pub fn parse_ext_face_cidrs(
-    listen_ext_set: bool,
-    cidrs: Option<&str>,
-) -> Result<Option<FaceCidrs>, String> {
-    if !listen_ext_set {
-        return Ok(None);
-    }
-    match cidrs.map(str::trim).filter(|s| !s.is_empty()) {
-        None => {
-            Err("PROXY_FACE_INT_CIDRS is REQUIRED when PROXY_LISTEN_EXT is set: the dual-face \
-             egress picker needs the internal-plane CIDR list (e.g. \
-             PROXY_FACE_INT_CIDRS=10.244.0.0/16,172.20.0.0/16)."
-                .to_string())
-        }
-        Some(s) => {
-            FaceCidrs::parse(s).map(Some).map_err(|e| format!("bad PROXY_FACE_INT_CIDRS: {e}"))
-        }
-    }
+    Some(ExternalFace { listen, advertise })
 }
 
 /// `PROXY_WORKERS` when set, else EndpointSlice discovery in

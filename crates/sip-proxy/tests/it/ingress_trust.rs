@@ -22,11 +22,10 @@ use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
 use sip_proxy::self_gate::{AdmitDecision, BypassKind, ProxySelfGate, ShedReason};
 use sip_proxy::{
-    ExternalFaceParts, FaceCidrs, ForwardAllStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
+    ExternalFaceParts, ForwardAllStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
     RoutingStrategy,
 };
 
-const INT_CIDRS: &str = "10.244.0.0/16";
 const INT_VIP: &str = "10.244.255.250";
 const INT_PORT: u16 = 5080;
 const EXT_VIP: &str = "192.168.60.250";
@@ -37,7 +36,7 @@ const W1: &str = "10.244.5.8";
 const UNLISTED_WORKER: &str = "10.244.9.99";
 /// The node address a worker's packets carry when they are translated on the
 /// way to the proxy.
-const NODE: &str = "10.244.0.1";
+const NODE: &str = "198.51.100.4";
 /// A sender on the external plane: not a worker, not internal.
 const OUTSIDER: &str = "203.0.113.66";
 /// The Request-URI host: neither a worker nor the proxy.
@@ -136,7 +135,6 @@ async fn proxy_lab(dual: bool, admit: bool) -> Lab {
             .external_face(ExternalFaceParts {
                 endpoint: ext_ep,
                 advertised: ProxyAddr::new(EXT_VIP, EXT_PORT),
-                int_cidrs: FaceCidrs::parse(INT_CIDRS).unwrap(),
             })
             .build(int_ep)
     } else {
@@ -432,4 +430,50 @@ async fn the_answer_to_a_translated_worker_reaches_it_on_the_external_face() {
         to_worker.iter().any(|(_, b)| start_line(b).starts_with("SIP/2.0 200")),
         "the far end's 200 reaches the worker at its registry address"
     );
+}
+
+/// `request`, with its hops spent: the proxy answers it 483 itself.
+fn out_of_hops(call_id: &str, top_via: &str) -> String {
+    request("OPTIONS", call_id, top_via, None, None).replace("Max-Forwards: 70", "Max-Forwards: 0")
+}
+
+/// RFC 3581 §4: an own final leaves from the address its request reached. The
+/// source here is a node address no worker holds, and the response target it
+/// stamps is that node's.
+#[tokio::test(start_paused = true)]
+async fn an_own_final_to_a_translated_worker_leaves_the_face_it_arrived_on() {
+    let lab = proxy_lab(true, true).await;
+    let spent = out_of_hops("translated-final", &worker_via());
+    lab.translated_worker.send_to(spent.as_bytes(), int_vip()).await.unwrap();
+    settle().await;
+    let answers = drain(&*lab.translated_worker);
+    let [(from, answer)] = answers.as_slice() else { panic!("one answer: {answers:?}") };
+    assert!(start_line(answer).starts_with("SIP/2.0 483"), "{}", start_line(answer));
+    assert_eq!(*from, int_vip(), "from the face the request arrived on");
+}
+
+/// A sender on the workers' prefix that reaches the external face gets answered
+/// from that face, and the 400's Warning names it.
+#[tokio::test(start_paused = true)]
+async fn own_finals_to_a_sender_near_the_workers_leave_the_external_face() {
+    let lab = proxy_lab(true, true).await;
+    let via = format!("{UNLISTED_WORKER}:5060");
+    let spent = out_of_hops("near-final", &via);
+    lab.unlisted_worker.send_to(spent.as_bytes(), ext_vip()).await.unwrap();
+    settle().await;
+    let answers = drain(&*lab.unlisted_worker);
+    let [(from, answer)] = answers.as_slice() else { panic!("one answer: {answers:?}") };
+    assert!(start_line(answer).starts_with("SIP/2.0 483"), "{}", start_line(answer));
+    assert_eq!(*from, ext_vip());
+
+    let refused = request("INVITE", "near-refused", &via, None, None)
+        .replace("Max-Forwards: 70", "Max-Forwards: abc");
+    lab.unlisted_worker.send_to(refused.as_bytes(), ext_vip()).await.unwrap();
+    settle().await;
+    let answers = drain(&*lab.unlisted_worker);
+    let [(from, answer)] = answers.as_slice() else { panic!("one answer: {answers:?}") };
+    assert!(start_line(answer).starts_with("SIP/2.0 400"), "{}", start_line(answer));
+    assert_eq!(*from, ext_vip());
+    let warning = header_lines(answer, "Warning");
+    assert!(warning[0].contains(&format!("{EXT_VIP}:{EXT_PORT}")), "{warning:?}");
 }

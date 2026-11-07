@@ -100,19 +100,19 @@ impl ProxyCore {
         let msg = SipMessage::Response(resp);
         let route = self.owner_route(&msg, ours, &sent_by).await;
         let SipMessage::Response(resp) = msg else { return };
-        let (host, port) = match (route, face) {
-            (OwnerRoute::To(target), _) => (target.host, target.port),
+        let (host, port, to_worker) = match (route, face) {
+            (OwnerRoute::To(target), _) => (target.host, target.port, true),
             (OwnerRoute::Nowhere, _) => {
                 self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
                 return;
             }
             // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
-            (OwnerRoute::Via, Face::Internal) => {
+            (OwnerRoute::Via { to_worker }, Face::Internal) => {
                 let (host, port) = next.response_target();
-                (host.to_string(), port)
+                (host.to_string(), port, to_worker)
             }
-            (OwnerRoute::Via, Face::External) => match self.external_response_target(next) {
-                Some(target) => (target.host, target.port),
+            (OwnerRoute::Via { .. }, Face::External) => match self.external_response_target(next) {
+                Some(target) => (target.host, target.port, true),
                 None => {
                     self.metrics.record_external_untrusted(UntrustedClaim::ResponseNotToWorker);
                     self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
@@ -133,7 +133,7 @@ impl ProxyCore {
             return;
         };
         let next_hop = ProxyAddr::new(host, port);
-        self.send_to(&bytes, &next_hop).await;
+        self.send_to(&bytes, &next_hop, self.egress.response(face, to_worker)).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
         if let Some(call_id) = &traced {
             emit::relayed(&self.traces, call_id, at_ms, &next_hop, &bytes);

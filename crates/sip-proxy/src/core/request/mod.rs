@@ -59,6 +59,14 @@ use crate::trace::emit;
 
 use super::ProxyCore;
 
+/// How a request reached this proxy: its datagram's source and the face it
+/// arrived on. An own final to it leaves on that face.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::core) struct Arrival {
+    pub(in crate::core) src: SocketAddr,
+    pub(in crate::core) face: Face,
+}
+
 /// Outcome of routing a request — what to meter after the work is done.
 pub(super) struct RouteOutcome {
     pub(super) decision: RoutingDecisionKind,
@@ -131,11 +139,12 @@ impl ProxyCore {
         self.metrics.record_routing_decision(outcome.decision);
     }
 
-    /// A test's `handle_request`: the request arrives on the face of its
-    /// source's plane, as a deployed network delivers it.
+    /// A test's `handle_request` on a single-face proxy, where every request
+    /// arrives on the internal face. A dual-face test names the face itself.
     #[cfg(test)]
     pub(in crate::core) async fn handle_request_from(&self, msg: SipMessage, src: SocketAddr) {
-        self.handle_request(msg, src, self.egress_face(src)).await
+        assert!(self.external.is_none(), "a dual-face test names the request's face");
+        self.handle_request(msg, src, Face::Internal).await
     }
 
     /// A test's `route_request`, as [`Self::handle_request_from`].
@@ -145,6 +154,7 @@ impl ProxyCore {
         msg: &SipMessage,
         src: SocketAddr,
     ) -> RouteOutcome {
-        self.route_request(msg, src, self.egress_face(src)).await
+        assert!(self.external.is_none(), "a dual-face test names the request's face");
+        self.route_request(msg, src, Face::Internal).await
     }
 }

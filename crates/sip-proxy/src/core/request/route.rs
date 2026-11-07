@@ -27,7 +27,7 @@ use sip_message::received::observed_source;
 use super::super::ProxyCore;
 use super::reply::extra_header;
 use super::target::Chosen;
-use super::{top_via_branch, RouteOutcome};
+use super::{top_via_branch, Arrival, RouteOutcome};
 
 /// The hop budget RFC 3261 §8.1.1.6 gives a request that names none — and the
 /// one a proxy applies to a value no reader can make sense of, so a malformed
@@ -51,6 +51,7 @@ impl ProxyCore {
         src: SocketAddr,
         face: Face,
     ) -> RouteOutcome {
+        let arrival = Arrival { src, face };
         let SipMessage::Request(req) = msg else {
             self.metrics.record_reject("non_request");
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
@@ -74,7 +75,9 @@ impl ProxyCore {
                 self.metrics.record_reject("ack_max_forwards_exhausted");
                 return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
             }
-            return self.reply_reject(req, src, 483, "Too Many Hops", &[], "too_many_hops").await;
+            return self
+                .reply_reject(req, arrival, 483, "Too Many Hops", &[], "too_many_hops")
+                .await;
         };
 
         // ── §16.3 check 5: Proxy-Require ────────────────────────────────────
@@ -94,7 +97,7 @@ impl ProxyCore {
                 return self
                     .reply_reject(
                         req,
-                        src,
+                        arrival,
                         420,
                         "Bad Extension",
                         &extra,
@@ -208,7 +211,7 @@ impl ProxyCore {
             && method != Method::Ack
             && method != Method::Cancel
         {
-            if let Some(repeated) = self.repeat_refusal(req, src).await {
+            if let Some(repeated) = self.repeat_refusal(req, arrival).await {
                 return repeated;
             }
         }
@@ -232,7 +235,7 @@ impl ProxyCore {
         if rtx_hit.is_none() && method == Method::Invite && !has_to_tag {
             if c.worker_outbound && !is_emergency {
                 self.self_gate.note_bypass(BypassKind::Internal);
-            } else if let Err(refused) = self.admit_new_call(req, src, is_emergency).await {
+            } else if let Err(refused) = self.admit_new_call(req, arrival, is_emergency).await {
                 return refused;
             }
         }
@@ -256,7 +259,7 @@ impl ProxyCore {
             None
         };
         let chosen: Result<Chosen, RouteOutcome> = if method == Method::Cancel {
-            let target = self.cancel_target(msg, req, src, &c).await;
+            let target = self.cancel_target(msg, req, arrival, &c).await;
             target.map(|t| (t, RoutingDecisionKind::Cancel, None))
         } else if let Some(found) = ack_hop.filter(|_| !c.worker_outbound) {
             // A caller's §17.1.1.3 ACK for a relayed non-2xx final: to the node
@@ -269,10 +272,10 @@ impl ProxyCore {
         } else if let Some(next) = c.loose_route_next_hop.clone() {
             Ok((next, RoutingDecisionKind::LooseRoute, None))
         } else if c.worker_outbound {
-            let target = self.request_uri_target(req, src, &c).await;
+            let target = self.request_uri_target(req, arrival, &c).await;
             target.map(|t| (t, RoutingDecisionKind::WorkerOutbound, None))
         } else if let Some(cookie) = &c.cookie {
-            self.cookie_target(msg, req, src, cookie, rtx_hit.as_ref(), face).await
+            self.cookie_target(msg, req, arrival, cookie, rtx_hit.as_ref()).await
         } else if let Some(found) = &rtx_hit {
             // Retransmitted out-of-dialog request: repeat the original
             // selection. Re-running the strategy under a changed candidate set
@@ -298,13 +301,19 @@ impl ProxyCore {
         } else {
             let admit_as_new = self.admits_as_new(msg, face, None);
             let opts = SelectOpts { admit_as_new, ..SelectOpts::default() };
-            let target = self.select_target(msg, req, src, opts).await;
+            let target = self.select_target(msg, req, arrival, opts).await;
             target.map(|t| (t, RoutingDecisionKind::SelectNew, None))
         };
         let (target, decision, stickiness) = match chosen {
             Ok(chosen) => chosen,
             Err(refused) => return refused,
         };
+
+        // The face it leaves on, whatever its target's address (`crate::face`).
+        let egress =
+            self.egress.request(face, c.worker_outbound, c.loose_route_next_hop.is_some(), || {
+                self.registry.lookup_by_address(&target).is_some()
+            });
 
         // ── §16.6 received/rport, Max-Forwards, Record-Route, Via ───────────
         let (src_host, src_port) = observed_source(src);
@@ -330,6 +339,7 @@ impl ProxyCore {
             c.worker_outbound,
             &c.via_worker,
             repeated.as_ref(),
+            (face, egress),
         );
         draft = routed;
         let originator = c.via_worker.clone().unwrap_or_else(|| ProxyAddr::from(src));
@@ -348,7 +358,7 @@ impl ProxyCore {
         // sent-by must be an address the next hop can return the response to —
         // in dual-face mode that is the face the request leaves on, so the
         // response arrives back on the same face).
-        let egress_adv = self.egress_advertised(&target);
+        let egress_adv = self.advertised_of(egress);
         let pushed = Via::udp(egress_adv.host.as_str(), egress_adv.port)
             .with_branch(our_branch.as_str())
             .requesting_rport();
@@ -403,9 +413,9 @@ impl ProxyCore {
 
         // ── Freeze + forward ────────────────────────────────────────────────
         let Ok(bytes) = draft.freeze_bytes() else { return self.drop_unforwardable() };
-        self.send_to(&bytes, &target).await;
+        self.send_to(&bytes, &target, egress).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
-        self.trace_forward(call_id.as_str(), decision, &target, stickiness, &bytes);
+        self.trace_forward(call_id.as_str(), decision, &target, egress, stickiness, &bytes);
 
         RouteOutcome { decision, target: Some(target) }
     }

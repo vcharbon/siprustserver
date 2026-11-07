@@ -1206,10 +1206,8 @@ impl FailoverHarness {
 
     /// Stand up a **dual-face** load-balancing proxy SUT: the internal face at
     /// `int_addr` (workers' outbound-proxy target, worker plane), the external
-    /// face at `ext_addr` (what callers dial), and `int_cidrs` (the
-    /// `PROXY_FACE_INT_CIDRS` equivalent) driving the per-destination egress
-    /// face picker. `name` prefixes the two bind lanes (`{name}-int` /
-    /// `{name}-ext`); `id_seed` seeds the proxy's Via-branch generator — a
+    /// face at `ext_addr` (what callers dial). `name` prefixes the two bind
+    /// lanes (`{name}-int` / `{name}-ext`); `id_seed` seeds the proxy's Via-branch generator — a
     /// takeover twin re-bound on the SAME VIPs must use a different seed so it
     /// cannot replay the dead proxy's branch sequence into live dialogs.
     ///
@@ -1226,7 +1224,6 @@ impl FailoverHarness {
         name: &str,
         int_addr: &str,
         ext_addr: &str,
-        int_cidrs: &str,
         workers: &[(&str, SocketAddr)],
         id_seed: u64,
     ) -> ProxySut {
@@ -1238,12 +1235,7 @@ impl FailoverHarness {
         self.relay_lanes.push(int_sock.to_string());
         self.relay_lanes.push(ext_sock.to_string());
 
-        let external = b2bua_harness::ExternalProxyFace {
-            endpoint: ext_ep,
-            addr: ext_sock,
-            int_cidrs: sip_proxy::FaceCidrs::parse(int_cidrs)
-                .unwrap_or_else(|e| panic!("bad dual-face int CIDRs {int_cidrs:?}: {e}")),
-        };
+        let external = b2bua_harness::ExternalProxyFace { endpoint: ext_ep, addr: ext_sock };
         let node = NodeScope::named(name);
         let parts = node.enter(|| {
             b2bua_harness::spawn_proxy_core_with(

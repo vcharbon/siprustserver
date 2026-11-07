@@ -11,7 +11,7 @@
 //! The proxy is the ONLY bridge between the planes: every datagram a caller
 //! ever sees must originate from the EXT face's bind, every worker-bound one
 //! from the INT face's — asserted from the recorded wire trace on every test
-//! ([`assert_plane_discipline`]), which is simultaneously the face-picker
+//! ([`assert_plane_discipline`]), which is simultaneously the crossing
 //! check (requests AND responses) and the per-face source-address discipline
 //! check. Double-RR order/cookie, in-dialog traversal in both directions,
 //! CANCEL/ACK correlation across faces, and the dual-VIP takeover ride the
@@ -43,7 +43,6 @@ const PROXY_EXT: &str = "192.168.60.250:5060"; // external VIP
                                                // Internal (worker) plane.
 const PROXY_INT: &str = "10.244.255.250:5080"; // internal VIP
 const B1: &str = "10.244.0.11:5091";
-const INT_CIDRS: &str = "10.244.0.0/16";
 
 /// Which plane an address lives on (the test topology is two disjoint IPv4
 /// prefixes, so this is total).
@@ -59,10 +58,9 @@ fn plane(a: SocketAddr) -> &'static str {
 }
 
 /// THE dual-face invariant, read off the recorded wire trace: **no datagram
-/// ever crosses the planes** — the proxy bridges by re-originating from the
-/// face the destination lives on, so every recorded send has `from` and `to`
-/// on the SAME plane. This is simultaneously (a) the egress face picker check
-/// for requests and responses (a response relayed out the wrong socket would
+/// ever crosses the planes** — the proxy bridges by re-originating from its
+/// other face, so every recorded send has `from` and `to` on the SAME plane.
+/// This is simultaneously (a) the crossing check for requests and responses (a response relayed out the wrong socket would
 /// pair an int `from` with an ext `to`) and (e) the per-face source-address
 /// discipline (each face's egress sources from that face's bind).
 fn assert_plane_discipline(fh: &FailoverHarness) {
@@ -175,14 +173,7 @@ async fn stand_up(
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let proxy = fh
-        .spawn_proxy_dual(
-            "proxy",
-            PROXY_INT,
-            PROXY_EXT,
-            INT_CIDRS,
-            &[("b1", B1.parse().unwrap())],
-            0xC0FFEE,
-        )
+        .spawn_proxy_dual("proxy", PROXY_INT, PROXY_EXT, &[("b1", B1.parse().unwrap())], 0xC0FFEE)
         .await;
     let b1 = fh
         .spawn_worker_limited(
@@ -456,14 +447,7 @@ async fn dual_face_takeover_moves_both_faces_together() {
     // before the peer claims the same two VIP addresses.
     fh.advance(Duration::from_millis(100)).await;
     let proxy_b = fh
-        .spawn_proxy_dual(
-            "proxy2",
-            PROXY_INT,
-            PROXY_EXT,
-            INT_CIDRS,
-            &[("b1", B1.parse().unwrap())],
-            0xFACE2,
-        )
+        .spawn_proxy_dual("proxy2", PROXY_INT, PROXY_EXT, &[("b1", B1.parse().unwrap())], 0xFACE2)
         .await;
     fh.mark("proxy", None, "reboot", "peer proxy holds both VIPs");
 

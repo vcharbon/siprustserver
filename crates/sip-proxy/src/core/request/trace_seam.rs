@@ -12,7 +12,7 @@ use sip_message::trace_sample::{trace_sample, TraceSample};
 use sip_message::SipRequest;
 
 use crate::addr::ProxyAddr;
-use crate::observability::metrics::RoutingDecisionKind;
+use crate::observability::metrics::{Face, RoutingDecisionKind};
 use crate::trace::{emit, Activation, ProxyTraces};
 
 use super::super::ProxyCore;
@@ -52,6 +52,7 @@ impl ProxyCore {
         call_id: &str,
         decision: RoutingDecisionKind,
         target: &ProxyAddr,
+        face: Face,
         stickiness: Option<&'static str>,
         wire: &[u8],
     ) {
@@ -59,13 +60,7 @@ impl ProxyCore {
             &self.traces,
             call_id,
             self.trace_ms(),
-            emit::RouteFacts {
-                decision,
-                target,
-                // A DNS-named target's face is only known once resolved.
-                face: target.to_socket_addr().map(|sa| self.egress_face(sa)),
-                stickiness,
-            },
+            emit::RouteFacts { decision, target, face, stickiness },
             wire,
         );
     }

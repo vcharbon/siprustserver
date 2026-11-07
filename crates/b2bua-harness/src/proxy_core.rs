@@ -75,13 +75,11 @@ pub fn spawn_proxy_core(
 }
 
 /// The **external face** of a dual-face proxy SUT (see
-/// [`spawn_proxy_core_with`]): a second bound endpoint on the caller plane +
-/// its advertise + the internal-plane CIDR list driving the egress face picker
-/// (`PROXY_FACE_INT_CIDRS` equivalent).
+/// [`spawn_proxy_core_with`]): a second bound endpoint on the caller plane and
+/// its advertise.
 pub struct ExternalProxyFace {
     pub endpoint: Box<dyn UdpEndpoint>,
     pub addr: SocketAddr,
-    pub int_cidrs: sip_proxy::FaceCidrs,
 }
 
 /// [`spawn_proxy_core`] generalized: optional dual-face external endpoint and
@@ -123,7 +121,6 @@ pub fn spawn_proxy_core_with(
         builder = builder.external_face(sip_proxy::ExternalFaceParts {
             endpoint: ext.endpoint,
             advertised: ProxyAddr::from(ext.addr),
-            int_cidrs: ext.int_cidrs,
         });
     }
     let core = builder.build(endpoint);

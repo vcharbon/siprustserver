@@ -6,8 +6,6 @@
 //! To-tag (`route`), so sending one writes no memo.
 //! Relayed responses do NOT live here — see `core/response`.
 
-use std::net::SocketAddr;
-
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::header::HeaderValue;
 use sip_message::types::SipHeader;
@@ -19,7 +17,7 @@ use crate::trace::emit;
 use sip_message::received::{observed_source, response_destination};
 
 use super::super::ProxyCore;
-use super::RouteOutcome;
+use super::{Arrival, RouteOutcome};
 
 /// A typed value on the response generator's extra-header seam, which still
 /// takes wire lines.
@@ -36,7 +34,7 @@ impl ProxyCore {
     pub(super) async fn reply_reject(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
         status: u16,
         reason: &str,
         extra: &[SipHeader],
@@ -45,7 +43,7 @@ impl ProxyCore {
         if req.method() == Method::Ack {
             self.metrics.record_reject("ack_not_answered");
         } else {
-            self.reply(req, src, status, reason, extra).await;
+            self.reply(req, arrival, status, reason, extra).await;
             self.metrics.record_reject(metric);
         }
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
@@ -55,9 +53,9 @@ impl ProxyCore {
     pub(super) async fn reply_malformed_uri(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
     ) -> RouteOutcome {
-        self.reply_reject(req, src, 400, "Bad Request", &[], "malformed_request_uri").await
+        self.reply_reject(req, arrival, 400, "Bad Request", &[], "malformed_request_uri").await
     }
 
     /// A Request-URI whose scheme names no host this hop can forward to: 416,
@@ -65,10 +63,17 @@ impl ProxyCore {
     pub(super) async fn reply_unsupported_scheme(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
     ) -> RouteOutcome {
-        self.reply_reject(req, src, 416, "Unsupported URI Scheme", &[], "unsupported_uri_scheme")
-            .await
+        self.reply_reject(
+            req,
+            arrival,
+            416,
+            "Unsupported URI Scheme",
+            &[],
+            "unsupported_uri_scheme",
+        )
+        .await
     }
 
     /// Refuse the new request `req` with a 503, `retry_after_sec` being the
@@ -77,13 +82,13 @@ impl ProxyCore {
     pub(super) async fn refuse_new(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
         retry_after_sec: u32,
         metric: &str,
     ) -> RouteOutcome {
         // A request whose lines no response can echo is refused unanswered.
-        if let Ok(resp) = self.refusals.refuse(req, src, retry_after_sec, self.now_ms()) {
-            self.send_own_final(req, src, &resp).await;
+        if let Ok(resp) = self.refusals.refuse(req, arrival.src, retry_after_sec, self.now_ms()) {
+            self.send_own_final(req, arrival, &resp).await;
         }
         self.metrics.record_reject(metric);
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
@@ -94,10 +99,10 @@ impl ProxyCore {
     pub(super) async fn repeat_refusal(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
     ) -> Option<RouteOutcome> {
-        let resp = self.refusals.repeat(req, src, self.now_ms())?;
-        self.send_own_final(req, src, &resp).await;
+        let resp = self.refusals.repeat(req, arrival.src, self.now_ms())?;
+        self.send_own_final(req, arrival, &resp).await;
         Some(RouteOutcome { decision: RoutingDecisionKind::Reject, target: None })
     }
 
@@ -108,10 +113,10 @@ impl ProxyCore {
     pub(super) async fn cancel_refused(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
     ) -> Option<RouteOutcome> {
-        let resp = self.refusals.cancel(req, src, self.now_ms())?;
-        self.send_own_final(req, src, &resp).await;
+        let resp = self.refusals.cancel(req, arrival.src, self.now_ms())?;
+        self.send_own_final(req, arrival, &resp).await;
         Some(RouteOutcome { decision: RoutingDecisionKind::Cancel, target: None })
     }
 
@@ -120,7 +125,7 @@ impl ProxyCore {
     async fn reply(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
         status: u16,
         reason: &str,
         extra: &[SipHeader],
@@ -128,32 +133,32 @@ impl ProxyCore {
         let opts = GenerateResponseOpts {
             to_tag: Some(self.refusals.to_tag(req)),
             extra_headers: extra.to_vec(),
-            incoming_source: Some(observed_source(src)),
+            incoming_source: Some(observed_source(arrival.src)),
             ..Default::default()
         };
         if let Ok(resp) = generate_response(req, status, reason, &opts) {
-            self.send_own_final(req, src, &resp).await;
+            self.send_own_final(req, arrival, &resp).await;
         }
     }
 
-    /// Send `resp`, the proxy's own final to `req` received from `src`.
-    async fn send_own_final(&self, req: &SipRequest, src: SocketAddr, resp: &SipResponse) {
-        self.send_own_final_to(req.call_id().as_str(), src, resp).await;
+    /// Send `resp`, the proxy's own final to `req`.
+    async fn send_own_final(&self, req: &SipRequest, arrival: Arrival, resp: &SipResponse) {
+        self.send_own_final_to(req.call_id().as_str(), arrival, resp).await;
     }
 
-    /// Send `resp`, the proxy's own final to a request of call `call_id`
-    /// received from `src`, to the response target of its stamped top Via, the
-    /// one address every response to that request goes to. `src` where that
-    /// target names no IP address.
+    /// Send `resp`, the proxy's own final to a request of call `call_id`, from
+    /// the face that request arrived on (RFC 3581 §4) to the response target of
+    /// its stamped top Via, the one address every response to that request
+    /// goes to. The request's source where that target names no IP address.
     pub(super) async fn send_own_final_to(
         &self,
         call_id: &str,
-        src: SocketAddr,
+        arrival: Arrival,
         resp: &SipResponse,
     ) {
-        let dst = response_destination(resp.top_via()).unwrap_or(src);
+        let dst = response_destination(resp.top_via()).unwrap_or(arrival.src);
         // A recipe freezes into its own image, and that image IS the wire form.
-        self.send_response(resp.image(), dst).await;
+        self.send_response(resp.image(), dst, arrival.face).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Responded);
         // This is the proxy's ONLY self-generated-final seam, so it is the only
         // place a traced call's own 503 / 483 / 420 / 400 becomes a `sip.out`.
@@ -170,7 +175,7 @@ impl ProxyCore {
     pub(super) async fn reply_select_failure(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
         err: SelectError,
     ) -> RouteOutcome {
         let (retry_after, metric) = match &err {
@@ -185,6 +190,6 @@ impl ProxyCore {
         if matches!(err, SelectError::NoTarget { .. }) && !self.first_view.is_in() {
             return self.drop_without_target(NoTargetDrop::of(req));
         }
-        self.refuse_new(req, src, retry_after, metric).await
+        self.refuse_new(req, arrival, retry_after, metric).await
     }
 }

@@ -2,7 +2,6 @@
 //! contracts of the RFC 3261 §16 two-plane split:
 //!
 //!   external plane (callers)  ⇄  proxy  ⇄  internal plane (workers)
-//!         192.168.60.0/24                     10.244.0.0/16
 //!
 //! Each test drives `route_request`/`handle_response` directly over two
 //! capturing endpoints (one per face) and asserts WHICH socket egressed, WHAT
@@ -23,21 +22,20 @@ use sip_net::{SendError, UdpEndpoint, UdpEndpointCounters, UdpPacket};
 
 use crate::addr::ProxyAddr;
 use crate::core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};
-use crate::face::FaceCidrs;
 use crate::observability::metrics::{Face, RoutingDecisionKind};
 use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::{WorkerEntry, WorkerRegistry};
+use crate::resolver::HostResolver;
 use crate::strategies::forward_all::ForwardAllStrategy;
 use crate::{ProxyMetrics, RoutingStrategy};
 
-// Internal plane (worker/pod CIDR).
-const INT_CIDRS: &str = "10.244.0.0/16";
+// Internal plane (the workers).
 pub(super) const INT_VIP: &str = "10.244.255.250";
 pub(super) const INT_PORT: u16 = 5080;
 pub(super) const W1: &str = "10.244.5.8";
 // External plane (callers/callees).
 pub(super) const EXT_VIP: &str = "192.168.60.250";
-const EXT_PORT: u16 = 5060;
+pub(super) const EXT_PORT: u16 = 5060;
 pub(super) const CALLER: &str = "192.168.60.10";
 pub(super) const CALLEE: &str = "192.168.60.20";
 
@@ -88,9 +86,27 @@ impl Fixture {
     pub(super) fn take_sent(&self) -> Vec<Sent> {
         std::mem::take(&mut *self.sent.lock().unwrap())
     }
+
+    pub(super) fn metrics(&self) -> &ProxyMetrics {
+        &self.metrics
+    }
 }
 
 pub(super) fn dual_face_core() -> Fixture {
+    let reg: Arc<dyn WorkerRegistry> =
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1, 5060),
+        )]));
+    dual_face_core_over(reg, None)
+}
+
+/// A dual-face core over `reg`, forwarding every new dialog to `W1`, resolving
+/// names through `resolver` when one is given.
+pub(super) fn dual_face_core_over(
+    reg: Arc<dyn WorkerRegistry>,
+    resolver: Option<Arc<dyn HostResolver>>,
+) -> Fixture {
     let sent: Arc<Mutex<Vec<Sent>>> = Arc::new(Mutex::new(Vec::new()));
     let int_ep = TapEndpoint {
         face: "int",
@@ -102,23 +118,20 @@ pub(super) fn dual_face_core() -> Fixture {
         addr: format!("{EXT_VIP}:{EXT_PORT}").parse().unwrap(),
         sent: sent.clone(),
     };
-    let reg: Arc<dyn WorkerRegistry> =
-        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
-            "w1",
-            ProxyAddr::new(W1, 5060),
-        )]));
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let metrics = Arc::new(ProxyMetrics::new());
-    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
+    let mut builder = ProxyCoreBuilder::for_test(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
         .external_face(ExternalFaceParts {
             endpoint: Box::new(ext_ep),
             advertised: ProxyAddr::new(EXT_VIP, EXT_PORT),
-            int_cidrs: FaceCidrs::parse(INT_CIDRS).unwrap(),
-        })
-        .build(Box::new(int_ep));
+        });
+    if let Some(resolver) = resolver {
+        builder = builder.resolver(resolver);
+    }
+    let core = builder.build(Box::new(int_ep));
     Fixture { core, sent, metrics }
 }
 
@@ -176,12 +189,13 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
-// ── (a) egress face picking + (3) per-face Via ──────────────────────────────
+// ── (a) the egress face + (3) per-face Via ───────────────────────────────────
 
 #[tokio::test]
 async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
     let f = dual_face_core();
-    let outcome = f.core.route_request_from(&caller_invite("df-in@test"), caller_src()).await;
+    let outcome =
+        f.core.route_request(&caller_invite("df-in@test"), caller_src(), Face::External).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::SelectNew);
     assert_eq!(outcome.target, Some(ProxyAddr::new(W1, 5060)));
 
@@ -232,7 +246,7 @@ async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
     assert!(!rrs[1].contains(";outbound"), "caller-facing RR is NOT the outbound half: {}", rrs[1]);
 
     // Per-face egress metric.
-    use crate::observability::metrics::{Direction, Face};
+    use crate::observability::metrics::Direction;
     assert_eq!(f.metrics.face_messages_total(Face::Internal, Direction::Outbound), 1);
     assert_eq!(f.metrics.face_messages_total(Face::External, Direction::Outbound), 0);
 }
@@ -241,7 +255,8 @@ async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
 async fn worker_outbound_invite_egresses_external_with_external_via_and_mirrored_rr() {
     let f = dual_face_core();
     let src = format!("{W1}:5060").parse().unwrap();
-    let outcome = f.core.route_request_from(&worker_bleg_invite("df-out@test"), src).await;
+    let outcome =
+        f.core.route_request(&worker_bleg_invite("df-out@test"), src, Face::Internal).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(outcome.target, Some(ProxyAddr::new(CALLEE, 5060)));
 
@@ -287,7 +302,7 @@ async fn worker_outbound_invite_egresses_external_with_external_via_and_mirrored
     );
 }
 
-// ── (a) response face picking, both directions ──────────────────────────────
+// ── (a) a response's egress, both directions ────────────────────────────────
 
 #[tokio::test]
 async fn responses_route_by_next_via_face_in_both_directions() {
@@ -339,7 +354,7 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test]
 async fn relayed_non_2xx_ack_follows_the_invite_face() {
     let f = dual_face_core();
-    f.core.route_request_from(&caller_invite("df-ack@test"), caller_src()).await;
+    f.core.route_request(&caller_invite("df-ack@test"), caller_src(), Face::External).await;
     let fwd_invite = f.take_sent();
     let invite_via = header_lines(&fwd_invite[0].2, "Via");
     let proxy_branch = invite_via[0]
@@ -387,7 +402,7 @@ Call-ID: df-ack@test\r\n\
 CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let outcome = f.core.route_request_from(&parse_msg(&raw_ack), caller_src()).await;
+    let outcome = f.core.route_request(&parse_msg(&raw_ack), caller_src(), Face::External).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::AckHop);
 
     let sent = f.take_sent();
@@ -434,7 +449,7 @@ Content-Length: 0\r\n\r\n"
     );
     let outcome = f
         .core
-        .route_request_from(&parse_msg(&raw), format!("{CALLEE}:5060").parse().unwrap())
+        .route_request(&parse_msg(&raw), format!("{CALLEE}:5060").parse().unwrap(), Face::External)
         .await;
     assert_eq!(
         outcome.decision,
@@ -471,8 +486,10 @@ Route: <sip:{INT_VIP}:{INT_PORT};target={W1}:5060;outbound;lr>\r\n\
 Route: <sip:{EXT_VIP}:{EXT_PORT};target={W1}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let outcome =
-        f.core.route_request_from(&parse_msg(&raw), format!("{W1}:5060").parse().unwrap()).await;
+    let outcome = f
+        .core
+        .route_request(&parse_msg(&raw), format!("{W1}:5060").parse().unwrap(), Face::Internal)
+        .await;
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(outcome.target, Some(ProxyAddr::new(CALLER, 5060)));
 
@@ -580,7 +597,7 @@ async fn ack_of_a_final_from_another_port(
     let worker: SocketAddr = format!("{W1}:5060").parse().unwrap();
     let callee_send: SocketAddr = format!("{CALLEE}:{CALLEE_SEND_PORT}").parse().unwrap();
     let f = dual_face_core();
-    let outcome = f.core.route_request_from(&worker_bleg_invite(call_id), worker).await;
+    let outcome = f.core.route_request(&worker_bleg_invite(call_id), worker, Face::Internal).await;
     assert_eq!(outcome.target, Some(ProxyAddr::new(CALLEE, 5060)), "the INVITE's destination");
     let forwarded = f.take_sent();
     assert_eq!(forwarded[0].1, callee_src());
@@ -596,7 +613,8 @@ async fn ack_of_a_final_from_another_port(
 
     let other = dual_face_core();
     let instance = if through_another_instance { &other } else { &f };
-    let ack = instance.core.route_request_from(&worker_ack_of_the_486(call_id), worker).await;
+    let ack =
+        instance.core.route_request(&worker_ack_of_the_486(call_id), worker, Face::Internal).await;
     let sent = instance.take_sent();
     assert_eq!(sent.len(), 1, "the ACK is forwarded: {:?}", ack.decision);
     let ack_branch = top_via_branch_of(&sent[0].2);

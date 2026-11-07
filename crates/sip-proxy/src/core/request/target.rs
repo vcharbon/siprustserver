@@ -4,19 +4,17 @@
 //! stickiness cookie's, an admitted transaction's no memo places (ADR-0009
 //! X7), or a fresh selection's.
 
-use std::net::SocketAddr;
-
 use sip_message::emergency::is_emergency_request;
 use sip_message::{SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::{invite_txn_key, CancelEntry};
-use crate::observability::metrics::{CancelLookup, Face, NoTargetDrop, RoutingDecisionKind};
+use crate::observability::metrics::{CancelLookup, NoTargetDrop, RoutingDecisionKind};
 use crate::strategy::{DecodeResult, RankPlacement, RouteParams, SelectOpts};
 
 use super::super::ProxyCore;
 use super::classify::Classified;
-use super::RouteOutcome;
+use super::{Arrival, RouteOutcome};
 
 /// A target with the decision that chose it and, when a cookie was read, the
 /// cookie's verdict for the traced routing fact.
@@ -31,15 +29,15 @@ impl ProxyCore {
     pub(super) async fn request_uri_target(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
         c: &Classified,
     ) -> Result<ProxyAddr, RouteOutcome> {
         let uri = c.request_uri_past_own_maddr.as_ref().unwrap_or_else(|| req.request_uri());
         if uri.is_opaque() {
-            return Err(self.reply_malformed_uri(req, src).await);
+            return Err(self.reply_malformed_uri(req, arrival).await);
         }
         if uri.opaque_part().is_some() {
-            return Err(self.reply_unsupported_scheme(req, src).await);
+            return Err(self.reply_unsupported_scheme(req, arrival).await);
         }
         let (host, port) = uri.next_hop();
         Ok(ProxyAddr::new(host, port))
@@ -51,15 +49,15 @@ impl ProxyCore {
         &self,
         msg: &SipMessage,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
         opts: SelectOpts,
     ) -> Result<ProxyAddr, RouteOutcome> {
         if opts.admit_as_new {
-            self.admit_new_call(req, src, is_emergency_request(req)).await?;
+            self.admit_new_call(req, arrival, is_emergency_request(req)).await?;
         }
         match self.strategy.select_for_new_dialog(msg, opts).await {
             Ok(target) => Ok(target),
-            Err(e) => Err(self.reply_select_failure(req, src, e).await),
+            Err(e) => Err(self.reply_select_failure(req, arrival, e).await),
         }
     }
 
@@ -85,7 +83,7 @@ impl ProxyCore {
         &self,
         msg: &SipMessage,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
         c: &Classified,
     ) -> Result<ProxyAddr, RouteOutcome> {
         let key = invite_txn_key(
@@ -95,7 +93,7 @@ impl ProxyCore {
             req.cseq().seq(),
         );
         let Some(found) = self.cancel_lru.lookup(&key) else {
-            if let Some(answered) = self.cancel_refused(req, src).await {
+            if let Some(answered) = self.cancel_refused(req, arrival).await {
                 self.metrics.record_cancel_lookup(CancelLookup::Hit);
                 return Err(answered);
             }
@@ -104,7 +102,7 @@ impl ProxyCore {
                 return Ok(next.clone());
             }
             if c.worker_outbound {
-                return self.request_uri_target(req, src, c).await;
+                return self.request_uri_target(req, arrival, c).await;
             }
             let cookie = c.cookie.as_ref();
             return self.admitted_target(msg, cookie, NoTargetDrop::Cancel).await;
@@ -226,17 +224,15 @@ impl ProxyCore {
     /// The target `cookie` places the request on. A cookie the strategy
     /// cannot read falls to a fresh selection, which a retransmission
     /// (`rtx_hit`) repeats from its memo instead of rolling the dice again; a
-    /// verified cookie naming no alive worker drops the request.
-    /// `face`: the request's ingress face, for the To-tag rule
-    /// ([`ProxyCore::admits_as_new`]).
+    /// verified cookie naming no alive worker drops the request. The request's
+    /// ingress face decides the To-tag rule ([`ProxyCore::admits_as_new`]).
     pub(super) async fn cookie_target(
         &self,
         msg: &SipMessage,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
         cookie: &RouteParams,
         rtx_hit: Option<&CancelEntry>,
-        face: Face,
     ) -> Result<Chosen, RouteOutcome> {
         let decoded = self.strategy.decode_stickiness(cookie, msg).await;
         let miss = match decoded {
@@ -250,7 +246,7 @@ impl ProxyCore {
                 // The decode reasons are free-form diagnostics — one static
                 // label keeps the reason set bounded.
                 let metric = "stickiness_decode_rejected";
-                return Err(self.reply_reject(req, src, status, &reason, &[], metric).await);
+                return Err(self.reply_reject(req, arrival, status, &reason, &[], metric).await);
             }
             DecodeResult::Unroutable => {
                 return Err(self.drop_without_target(NoTargetDrop::InDialog));
@@ -260,9 +256,9 @@ impl ProxyCore {
         let target = match rtx_hit {
             Some(found) => found.target.clone(),
             None => {
-                let admit_as_new = self.admits_as_new(msg, face, Some(cookie));
+                let admit_as_new = self.admits_as_new(msg, arrival.face, Some(cookie));
                 let opts = SelectOpts { emergency_override: miss, admit_as_new };
-                self.select_target(msg, req, src, opts).await?
+                self.select_target(msg, req, arrival, opts).await?
             }
         };
         Ok((target, RoutingDecisionKind::DecodeForward, Some("miss")))

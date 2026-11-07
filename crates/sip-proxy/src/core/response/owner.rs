@@ -38,8 +38,9 @@ use super::super::ProxyCore;
 /// Where a response bound for a worker goes.
 pub(super) enum OwnerRoute {
     /// Along its next Via: the owner holding its transaction is there, or no
-    /// cookie names the call's owners.
-    Via,
+    /// cookie names the call's owners. `to_worker`: that Via's sent-by is a
+    /// registry worker.
+    Via { to_worker: bool },
     /// To this address: the holder's own, moved since, or the other owner's.
     To(ProxyAddr),
     /// No owner can take it.
@@ -64,7 +65,7 @@ impl ProxyCore {
         let Some(cookie) = cookie else {
             return match dead {
                 Some(dead) => self.moved(dead).map_or(OwnerRoute::Nowhere, OwnerRoute::To),
-                None => OwnerRoute::Via,
+                None => OwnerRoute::Via { to_worker: named.is_some() },
             };
         };
         let primary = self.strategy.stickiness_primary(&cookie).unwrap_or_default();
@@ -79,7 +80,7 @@ impl ProxyCore {
             .filter(|n| n.id == primary || n.id == backup)
             .map_or(primary, |n| n.id.as_str());
         if named.as_ref().is_some_and(|n| n.id == holder && n.health != WorkerHealth::Dead) {
-            return OwnerRoute::Via;
+            return OwnerRoute::Via { to_worker: true };
         }
         let at_now = self.registry.resolve(holder).filter(|w| w.health != WorkerHealth::Dead);
         if let Some(holder) = at_now {

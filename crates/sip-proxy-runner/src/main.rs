@@ -30,14 +30,10 @@
 //!                    egress (default: the listen address; REQUIRED when the
 //!                    listen IP is unspecified)
 //!   PROXY_LISTEN_EXT external-face listen ip:port, an IP literal — enables
-//!                    DUAL-FACE mode: a second UDP socket on the caller plane;
-//!                    the egress socket and advertise follow the destination IP
+//!                    DUAL-FACE mode: a second UDP socket on the caller plane; a
+//!                    message crosses between the faces (ADR-0048)
 //!   PROXY_ADVERTISE_EXT  external-face advertise (default: PROXY_LISTEN_EXT,
 //!                    which is never a wildcard: each face binds its own IP)
-//!   PROXY_FACE_INT_CIDRS comma-separated IPv4 CIDRs of the INTERNAL plane
-//!                    (e.g. 10.244.0.0/16,172.20.0.0/16). REQUIRED when
-//!                    PROXY_LISTEN_EXT is set; ignored with a warning otherwise.
-//!                    Destination ∈ any CIDR → internal socket; else external.
 //!   PROXY_WORKERS    fixed worker pool "id@ip:port,..." (default unset →
 //!                    EndpointSlice discovery; ADR-0012 D4)
 //!   PROXY_WORKER_SERVICE  headless worker Service to watch  (default b2bua-worker)
@@ -349,11 +345,8 @@ async fn run() -> Result<i32, String> {
     for (shard, ShardSockets { internal, external }) in shards.into_iter().enumerate() {
         let mut builder = shared.shard(shard);
         if let (Some(ext), Some(endpoint)) = (&ext_face, external) {
-            builder = builder.external_face(ExternalFaceParts {
-                endpoint,
-                advertised: ext.advertise.clone(),
-                int_cidrs: ext.int_cidrs.clone(),
-            });
+            builder = builder
+                .external_face(ExternalFaceParts { endpoint, advertised: ext.advertise.clone() });
         }
         cores.push(builder.build(internal));
     }
