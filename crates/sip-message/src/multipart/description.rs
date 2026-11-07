@@ -50,7 +50,7 @@ pub(super) fn find(
         return None;
     }
     if content_type.is_sdp() {
-        return is_session(disposition).then(|| Found { range: 0..body.len(), part: None });
+        return is_session(disposition).then_some(Found { range: 0..body.len(), part: None });
     }
     if !content_type.is_multipart() || depth > MAX_DEPTH {
         return None;
@@ -65,7 +65,7 @@ pub(super) fn find(
         Some(Found { range, part: inner.part.or(Some(part.head)) })
     });
     if content_type.subtype().eq_ignore_ascii_case("alternative") {
-        found.last()
+        found.next_back()
     } else {
         found.next()
     }

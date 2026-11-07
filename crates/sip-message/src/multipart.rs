@@ -425,11 +425,16 @@ pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
 }
 
 /// The session description a body typed `content_type` carries, as the range
-/// of `body` holding it ([`description`](self::description) states the
-/// reading): the whole body under `application/sdp`, a part of a
-/// `multipart/…` body (RFC 5621 §3.1), `None` where neither holds one.
-/// `disposition` is the body's `Content-Disposition` value, `None` when the
-/// message states none: it decides only for a bare description.
+/// of `body` holding it, `None` where it holds none:
+///
+/// - the whole body under `application/sdp`, when `disposition` (the body's
+///   `Content-Disposition` value, `None` when none is stated) is absent or
+///   `session` (RFC 3261 §13.2.1, RFC 5621 §8.2);
+/// - under `multipart/…`, a part read by the same rule with its own head,
+///   nested multiparts searched four levels down, the message's own included:
+///   the first found in a `mixed` (or any other) body, the last in an
+///   `alternative` one (RFC 2046 §5.1.4, RFC 5621 §6.1). The disposition of a
+///   multipart body or part never hides what it frames.
 pub fn sdp_range(
     content_type: &MediaType,
     disposition: Option<&str>,
