@@ -109,7 +109,8 @@ It holds a request with no To-tag at its first hop: the front proxy's external
 face, on a proxy with one face a source that is no registry worker, or a worker
 with no proxy (`at_first_ingress`). One past it is answered 400 there (ADR-0054).
 A request with a To-tag carries what hops added to its dialog's lines, so it
-meets no bound of its own.
+meets no bound of its own: a body already reaches the datagram, so a bound on it
+would not lower what a party can spend on the proxy's memo.
 
 **The room** (`max_*`) is what every read of the wire is held to. A line and a
 Request-URI are bounded by the datagram, 65,535 bytes: a hop adds `received` and
