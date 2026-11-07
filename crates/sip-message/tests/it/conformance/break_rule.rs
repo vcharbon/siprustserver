@@ -449,7 +449,7 @@ impl Subject {
     /// The refusal of `raw` is the one ADR-0054 gives this line.
     fn refused(&self, raw: &[u8]) -> Result<(), String> {
         let is_response = (self.base)().bytes().starts_with(b"SIP/2.0");
-        refused(raw, !self.echoed && !is_response)
+        refused(raw, !self.echoed && !is_response, Some(self.name))
     }
 
     /// `raw` is refused, or, where ingress does not vouch for this header, its
@@ -473,7 +473,8 @@ impl Subject {
     /// reads, so a request is answered (ADR-0054 §2) and a response is not.
     fn message_row(&self, operator: &str, raw: &[u8]) -> Row {
         let is_response = (self.base)().bytes().starts_with(b"SIP/2.0");
-        Row::new(format!("refuse/{operator}/{}", self.row), refused(raw, !is_response))
+        let because = Some("blank line|empty line");
+        Row::new(format!("refuse/{operator}/{}", self.row), refused(raw, !is_response, because))
     }
 
     fn at_mid(&self, inserted: &[u8]) -> Vec<u8> {
@@ -487,12 +488,21 @@ impl Subject {
     }
 }
 
-/// `raw` is refused, answered or left unanswered as `answered` states.
-pub fn refused(raw: &[u8], answered: bool) -> Result<(), String> {
+/// `raw` is refused, answered or left unanswered as `answered` states, for a
+/// reason naming one of `because`'s `|`-separated words, case aside: a refusal
+/// for another reason passes no row. Every refusal carries a reason; `None`
+/// leaves it unread.
+pub fn refused(raw: &[u8], answered: bool, because: Option<&str>) -> Result<(), String> {
     let error = match read(raw) {
         Ok(_) => return Err("accepted".to_string()),
         Err(error) => error,
     };
+    if let Some(because) = because {
+        let reason = error.reason.to_ascii_lowercase();
+        if !because.split('|').any(|word| reason.contains(&word.to_ascii_lowercase())) {
+            return Err(format!("refused for another reason: {}", error.reason));
+        }
+    }
     match (answered, error.partial().is_some()) {
         (true, false) => Err(format!("refused with no partial: {}", error.reason)),
         (false, true) => Err(format!("refused and answered: {}", error.reason)),

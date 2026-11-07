@@ -50,7 +50,8 @@ fn offers_nothing(name: &str, template: Template) -> Row {
 }
 
 fn answered(name: &str, template: Template) -> Row {
-    Row::new(format!("body/{name}"), refused(&template.bytes(), true))
+    let because = Some("content-type|boundary|multipart|body");
+    Row::new(format!("body/{name}"), refused(&template.bytes(), true, because))
 }
 
 fn mixed(parts: &str) -> Template {

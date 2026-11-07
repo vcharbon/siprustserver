@@ -18,6 +18,10 @@ The wire-grammar gates mostly enforce RFC 3261 §25.1 as written, every URI
 through one reader (ADR-0053). These refuse what the grammar or the RFC's
 compatibility rules admit, on purpose:
 
+- **No RFC 2543 compatibility.** RFC compliance is the goal, except where an RFC
+  keeps a shape only for compatibility with RFC 2543: such a shape is refused like
+  any other off-grammar shape, and a deployment may name an exemption.
+
 - **The magic cookie.** The topmost Via's branch starts with `z9hG4bK`
   (§8.1.1.7) and carries an identifier after it. A scope choice: RFC 2543
   elements are not served, departing from the backward-compatible matching of

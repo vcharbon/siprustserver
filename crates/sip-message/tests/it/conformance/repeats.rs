@@ -55,13 +55,13 @@ const SINGLE_VALUED: &[Single] = &[
     ("min-expires", "Min-Expires", "", Base::Response(423, "REGISTER"), "60", "120"),
     ("session-expires", "Session-Expires", "", Base::Request("INVITE"), "1800;refresher=uac", "90"),
     ("min-se", "Min-SE", "", Base::Request("INVITE"), "90;x=1", "120"),
-    ("rseq", "RSeq", "", Base::Response(183, "INVITE"), "987", "988"),
+    ("rseq", "RSeq", "rseq", Base::Response(183, "INVITE"), "987", "988"),
     ("rack", "RAck", "", Base::Request("PRACK"), "776656 1 INVITE", "776657 1 INVITE"),
-    ("event", "Event", "", Base::Request("SUBSCRIBE"), "refer;id=1", "presence"),
+    ("event", "Event", "event", Base::Request("SUBSCRIBE"), "refer;id=1", "presence"),
     (
         "subscription-state",
         "Subscription-State",
-        "",
+        "subscription-state",
         Base::Request("NOTIFY"),
         "active;expires=60",
         "pending",
@@ -69,7 +69,7 @@ const SINGLE_VALUED: &[Single] = &[
     (
         "refer-to",
         "Refer-To",
-        "",
+        "refer-to",
         Base::Request("REFER"),
         "<sip:carol@example.com>;x=1",
         "<sip:dave@example.com>",
@@ -123,28 +123,52 @@ const SINGLE_VALUED: &[Single] = &[
     ("user-agent", "User-Agent", "", OPTIONS, "stack/1", "stack/2"),
 ];
 
-/// A long and a compact name of one header, on two lines: one repeat.
-const COMPACT_PAIRS: &[(&str, &str, &str, Base)] = &[
-    ("content-type", "Content-Type: text/plain", "c: text/plain", OPTIONS),
-    ("session-expires", "Session-Expires: 1800", "x: 1800", Base::Request("INVITE")),
-    ("event", "Event: refer", "o: refer", Base::Request("SUBSCRIBE")),
+/// One header on two lines, compact forms counted: `(row, name, first, second,
+/// base)`.
+type Pair = (&'static str, &'static str, &'static str, &'static str, Base);
+
+const COMPACT_PAIRS: &[Pair] = &[
+    ("content-type", "Content-Type", "Content-Type: text/plain", "c: text/plain", OPTIONS),
+    ("content-type-compact-twice", "Content-Type", "c: text/plain", "c: text/plain", OPTIONS),
+    (
+        "session-expires",
+        "Session-Expires",
+        "Session-Expires: 1800",
+        "x: 1800",
+        Base::Request("INVITE"),
+    ),
+    ("event", "Event", "Event: refer", "o: refer", Base::Request("SUBSCRIBE")),
     (
         "refer-to",
+        "Refer-To",
         "Refer-To: <sip:carol@example.com>",
         "r: <sip:carol@example.com>",
         Base::Request("REFER"),
     ),
     (
         "referred-by",
+        "Referred-By",
         "Referred-By: <sip:alice@example.com>",
         "b: <sip:alice@example.com>",
         Base::Request("REFER"),
     ),
-    ("subject", "Subject: a", "s: a", OPTIONS),
-    ("from", "From: <sip:alice@example.com>;tag=a1", "f: <sip:alice@example.com>;tag=a1", OPTIONS),
-    ("to", "To: <sip:bob@example.com>", "t: <sip:bob@example.com>", OPTIONS),
-    ("call-id", "Call-ID: conformance-1@192.0.2.10", "i: conformance-1@192.0.2.10", OPTIONS),
-    ("content-length", "Content-Length: 0", "l: 0", OPTIONS),
+    ("subject", "Subject", "Subject: a", "s: a", OPTIONS),
+    (
+        "from",
+        "From",
+        "From: <sip:alice@example.com>;tag=a1",
+        "f: <sip:alice@example.com>;tag=a1",
+        OPTIONS,
+    ),
+    ("to", "To", "To: <sip:bob@example.com>", "t: <sip:bob@example.com>", OPTIONS),
+    (
+        "call-id",
+        "Call-ID",
+        "Call-ID: conformance-1@192.0.2.10",
+        "i: conformance-1@192.0.2.10",
+        OPTIONS,
+    ),
+    ("content-length", "Content-Length", "Content-Length: 0", "l: 0", OPTIONS),
 ];
 
 /// The two lines in a message of `base`: `first` in place of its own line of
@@ -162,9 +186,9 @@ fn twice(base: Base, slot: &'static str, first: String, second: String) -> Vec<u
 
 /// A refused second line: one of the fields a response echoes leaves no partial,
 /// and a response is never answered.
-fn outcome(raw: &[u8], row: &str, base: Base) -> Result<(), String> {
+fn outcome(raw: &[u8], row: &str, name: &str, base: Base) -> Result<(), String> {
     let echoed = matches!(row, "from" | "to" | "call-id" | "cseq");
-    refused(raw, !echoed && matches!(base, Base::Request(_)))
+    refused(raw, !echoed && matches!(base, Base::Request(_)), Some(name))
 }
 
 /// Every repeat datagram, row named.
@@ -173,17 +197,17 @@ fn cases() -> Vec<(String, Vec<u8>, Result<(), String>)> {
     for &(row, name, slot, base, one, other) in SINGLE_VALUED {
         for (operator, second) in [("same", one), ("different", other)] {
             let raw = twice(base, slot, format!("{name}: {one}"), format!("{name}: {second}"));
-            let result = outcome(&raw, row, base);
+            let result = outcome(&raw, row, name, base);
             all.push((format!("refuse/repeated-header-{operator}/{row}"), raw, result));
         }
     }
-    for &(row, long, compact, base) in COMPACT_PAIRS {
+    for &(row, name, first, second, base) in COMPACT_PAIRS {
         let slot = match row {
-            "from" | "to" | "call-id" => row,
+            "from" | "to" | "call-id" | "event" | "refer-to" => row,
             _ => "",
         };
-        let raw = twice(base, slot, long.to_string(), compact.to_string());
-        let result = outcome(&raw, row, base);
+        let raw = twice(base, slot, first.to_string(), second.to_string());
+        let result = outcome(&raw, row, name, base);
         all.push((format!("refuse/compact-repeat/{row}"), raw, result));
     }
     all

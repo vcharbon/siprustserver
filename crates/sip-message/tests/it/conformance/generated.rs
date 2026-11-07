@@ -116,7 +116,7 @@ fn targets() -> Vec<Target> {
         typed_target!(
             "subscription-state",
             "Subscription-State",
-            "ss",
+            "subscription-state",
             Base::Request("NOTIFY"),
             header::SubscriptionState
         ),

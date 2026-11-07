@@ -125,6 +125,7 @@ fn the_list_names_each_row_once_with_a_known_owner() {
         assert!(rows.insert(row), "{row} is listed twice");
         let family = row.split('/').next().unwrap_or_default();
         assert!(FAMILIES.contains(&family), "{row}: no test settles {family}");
+        assert!(!row.ends_with("/unexplained"), "{row}: an unexplained refusal is named first");
         assert!(OWNERS.contains(&owner), "{row}: no owner named {owner}");
         *owners.entry(owner).or_default() += 1;
     }
@@ -142,4 +143,24 @@ fn a_new_failure_and_a_listed_row_that_passes_each_fail_the_suite() {
     );
     let held = BTreeMap::from([("t/held".to_string(), "why".to_string())]);
     assert!(disagreement(&held, &BTreeSet::from(["t/held"])).is_empty());
+}
+
+/// Every family has a test that settles it.
+#[test]
+fn every_family_is_settled_by_a_test() {
+    let sources = [
+        include_str!("generated.rs"),
+        include_str!("../abnf_fuzz.rs"),
+        include_str!("rfc_examples.rs"),
+        include_str!("must_statements/mod.rs"),
+        include_str!("break_rule.rs"),
+        include_str!("bodies.rs"),
+        include_str!("exemption_mode.rs"),
+        include_str!("readable_rows.rs"),
+    ];
+    for family in FAMILIES {
+        let settles = [format!("settle(\"{family}\""), format!("settle_rows(\"{family}\"")];
+        let found = sources.iter().any(|text| settles.iter().any(|call| text.contains(call)));
+        assert!(found, "no test settles {family}");
+    }
 }

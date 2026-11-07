@@ -32,9 +32,11 @@ impl Scope {
     }
 }
 
-/// The name that starts at `at`, up to its value or the next separator.
+/// The name that starts at `at`, after any whitespace or fold (SWS), up to its
+/// value or the next separator.
 fn name_at(line: &[u8], at: usize) -> &[u8] {
-    let rest = &line[at..];
+    let skipped = line[at..].iter().take_while(|b| b" \t\r\n".contains(b)).count();
+    let rest = &line[at + skipped..];
     let end = rest.iter().position(|b| b"=;,>?\"\r\n".contains(b)).unwrap_or(rest.len());
     &rest[..end]
 }
@@ -112,12 +114,18 @@ fn a_repeat_is_found_in_its_scope_only() {
     assert!(repeats_a_name(b"From: <sip:a@b>;tag=1;TAG=2", plain));
     assert!(repeats_a_name(b"From: <sip:a@b;x=1;x=2>;tag=1", plain));
     assert!(!repeats_a_name(b"From: <sip:a@b;tag=1>;tag=1", plain));
+    assert!(repeats_a_name(b"From: <sip:a@b>;tag=1;\r\n tag=2", plain));
+    assert!(repeats_a_name(b"From: <sip:a@b>;tag=1\r\n ;tag=2", plain));
+    assert!(repeats_a_name(b"From: <sip:a@b;x=1;\r\n x=2>;tag=1", plain));
+    assert!(repeats_a_name(b"Contact: <sip:a@b>;q=0.5;\r\n\tq=0.7", plain));
     assert!(!repeats_a_name(b"Via: SIP/2.0/UDP a;branch=1, SIP/2.0/UDP b;branch=2", plain));
     assert!(!repeats_a_name(b"From: \"a;x;x\" <sip:a@b>;x=1", plain));
     assert!(!repeats_a_name(b"Refer-To: <sip:a@b?h=1;x;x>;x=1", plain));
     let credentials = Layout { comma_separated: true, comments: false };
     assert!(repeats_a_name(b"Authorization: Digest realm=\"a\", realm=\"b\"", credentials));
     assert!(!repeats_a_name(b"Authorization: Digest realm=\"a\", nonce=\"b\"", credentials));
+    assert!(repeats_a_name(b"Authorization: Digest realm=\"a\",\r\n realm=\"b\"", credentials));
+    assert!(repeats_a_name(b"Authorization: Digest\r\n realm=\"a\", realm=\"b\"", credentials));
     let comments = Layout { comma_separated: false, comments: true };
     assert!(!repeats_a_name(b"Retry-After: 120 (a;x;x);duration=1", comments));
 }

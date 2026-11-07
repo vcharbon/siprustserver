@@ -114,7 +114,8 @@ fn an_exempted_shape_is_accepted_only_where_it_is_named() {
         "bare-user-semicolon",
         "bare-user-semicolon",
         &options().with("from", "From: sip:a;b=c@example.com;tag=a1").bytes(),
-        &options().with("from", "From: sip:a;b=c@;tag=a1").bytes(),
+        // The exemption reads a `;` before the `@`; a `?` there it leaves refused.
+        &options().with("from", "From: sip:a?b=c@example.com;tag=a1").bytes(),
     ));
     rows.extend(shape_rows(
         "options-body-no-type",

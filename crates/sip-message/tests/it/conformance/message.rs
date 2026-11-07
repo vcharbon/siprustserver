@@ -17,6 +17,14 @@ pub struct Template {
     lines: Vec<(&'static str, Vec<u8>)>,
     body: Vec<u8>,
     frame: bool,
+    /// The header name of the line set last, `None` after the start line.
+    subject: Option<String>,
+}
+
+/// The header name of `line`, as written before its colon.
+fn name_of(line: &[u8]) -> Option<String> {
+    let colon = line.iter().position(|&b| b == b':')?;
+    Some(String::from_utf8_lossy(&line[..colon]).trim().to_string())
 }
 
 /// A method whose request can establish a dialog (RFC 3261 §8.1.1.8, RFC 6665,
@@ -41,11 +49,22 @@ impl Template {
         if opens_dialog(method) {
             lines.push(("contact", "Contact: <sip:alice@192.0.2.10:5060>".into()));
         }
+        // What each method requires: RFC 3515 §2.4.1, RFC 6665 §8.1.
+        match method {
+            "REFER" => lines.push(("refer-to", "Refer-To: <sip:carol@example.com>".into())),
+            "SUBSCRIBE" => lines.push(("event", "Event: refer".into())),
+            "NOTIFY" => {
+                lines.push(("event", "Event: refer".into()));
+                lines.push(("subscription-state", "Subscription-State: active;expires=60".into()));
+            }
+            _ => {}
+        }
         Self {
             start: format!("{method} sip:bob@example.com SIP/2.0").into_bytes(),
             lines,
             body: Vec::new(),
             frame: true,
+            subject: None,
         }
     }
 
@@ -61,17 +80,24 @@ impl Template {
         if (200..300).contains(&status) && opens_dialog(method) && method != "NOTIFY" {
             lines.push(("contact", "Contact: <sip:bob@192.0.2.20:5060>".into()));
         }
+        // A reliable provisional states it (RFC 3262 §7.1).
+        if status == 183 {
+            lines.push(("require", "Require: 100rel".into()));
+            lines.push(("rseq", "RSeq: 1".into()));
+        }
         Self {
             start: format!("SIP/2.0 {status} Reason").into_bytes(),
             lines,
             body: Vec::new(),
             frame: true,
+            subject: None,
         }
     }
 
     /// `line` in place of the line named `name`, or after every other line.
     pub fn with(mut self, name: &'static str, line: impl Into<Vec<u8>>) -> Self {
         let line = line.into();
+        self.subject = name_of(&line);
         match self.lines.iter_mut().find(|(known, _)| *known == name) {
             Some(slot) => slot.1 = line,
             None => self.lines.push((name, line)),
@@ -81,13 +107,21 @@ impl Template {
 
     /// `line` after every other line, whatever its name.
     pub fn add(mut self, line: impl Into<Vec<u8>>) -> Self {
-        self.lines.push(("", line.into()));
+        let line = line.into();
+        self.subject = name_of(&line);
+        self.lines.push(("", line));
         self
+    }
+
+    /// The header name of the line set last, `None` when the start line was.
+    pub fn subject(&self) -> Option<&str> {
+        self.subject.as_deref()
     }
 
     /// `start` as the start line.
     pub fn start_line(mut self, start: impl Into<Vec<u8>>) -> Self {
         self.start = start.into();
+        self.subject = None;
         self
     }
 

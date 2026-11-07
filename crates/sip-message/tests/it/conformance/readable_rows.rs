@@ -17,9 +17,9 @@ fn shapes() -> Vec<(&'static str, Template)> {
     let mut all = vec![
         ("readable/min-se", options().add("Min-SE: 90;foo=bar")),
         ("readable/min-se", options().add("Min-SE: 90;=;;")),
-        ("readable/rseq", Template::response(183, "INVITE").add("RSeq: abc")),
-        ("readable/rseq", Template::response(183, "INVITE").add("RSeq: 0")),
-        ("readable/rseq", Template::response(183, "INVITE").add("RSeq: 1 foo")),
+        ("readable/rseq", Template::response(183, "INVITE").with("rseq", "RSeq: abc")),
+        ("readable/rseq", Template::response(183, "INVITE").with("rseq", "RSeq: 0")),
+        ("readable/rseq", Template::response(183, "INVITE").with("rseq", "RSeq: 1 foo")),
         ("readable/authorization", digest("Digest realm=\"a\" nonce=\"b\"")),
         ("readable/authorization", digest("Digest realm=a b")),
         ("readable/authorization", digest("Digest realm=(x)")),

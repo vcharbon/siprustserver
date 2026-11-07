@@ -310,7 +310,11 @@ Require = "Require" HCOLON option-tag *(COMMA option-tag)
 Retry-After = "Retry-After" HCOLON delta-seconds [comment] *(SEMI retry-param)
 retry-param = ("duration" EQUAL delta-seconds) / generic-param
 Route = "Route" HCOLON route-param *(COMMA route-param)
-route-param = hop-addr *(SEMI rr-param)
+; ADR-0053 §2: a tel URI's number stands as its host, so a Route entry of one reads
+; (must/adr-0053-2-route-tel).
+route-param = (hop-addr / tel-hop-addr) *(SEMI rr-param)
+tel-hop-addr = [display-name] LAQUOT "tel:" ["+"] 1*(DIGIT / "-" / "." / "(" / ")")
+    *(";" pname ["=" pvalue]) RAQUOT
 ; ADR-0053 §2: a route-family entry names a hop (must/rule-route-opaque-scheme).
 ; §19.1.1 Table 1: a route's URI carries no headers component, and a recorded
 ; route is held to it (must/adr-0053-2-record-route-headers).
@@ -340,8 +344,8 @@ protocol-name = "SIP" / token
 protocol-version = token
 transport = "UDP" / "TCP" / "TLS" / "SCTP" / other-transport
 sent-by = host [COLON port]
-; §25.1 comments it "0 to 255".
-ttl = dec-octet
+; §25.1: 1*3DIGIT, commented "0 to 255".
+ttl = dec-octet / "0" DIGIT / "0" %x31-39 DIGIT / "00" DIGIT
 ; ADR-0001, the magic cookie and the transport allowlist: the Via an element
 ; answers holds one branch, the cookie and an identifier after it
 ; (must/adr-0001-top-via-*). A lower Via is the Via rule above.

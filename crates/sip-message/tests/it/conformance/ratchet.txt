@@ -28,7 +28,6 @@ abnf/contact/contact-star-typed one-reader
 abnf/contact/uri-parameter-token-value one-reader
 abnf/cseq/cseq-past-2-31 one-reader
 abnf/diversion/uri-parameter-token-value one-reader
-abnf/geolocation/uri-parameter-token-value one-reader
 abnf/history-info/uri-parameter-token-value one-reader
 abnf/min-se/min-se-parameters one-reader
 abnf/pai/uri-parameter-token-value one-reader
@@ -38,7 +37,6 @@ abnf/record-route/uri-parameter-token-value one-reader
 abnf/remote-party-id/uri-parameter-token-value one-reader
 abnf/route/uri-parameter-token-value one-reader
 abnf/rseq/rseq-past-2-31 one-reader
-abnf/service-route/uri-parameter-token-value one-reader
 exempt/bare-user-semicolon/accepted-when-named one-reader
 exempt/bare-user-semicolon/neighbour-refused-when-named one-reader
 exempt/max-forwards-absent/accepted-when-named one-reader
@@ -94,6 +92,7 @@ must/3262-7.1-rseq-zero one-reader
 must/3262-7.2-rack-highest one-reader
 must/3323-4.2-privacy-both-separators one-reader
 must/3323-4.2-privacy-commas one-reader
+must/3323-4.2-privacy-written-with-commas one-reader
 must/3325-9.1-bare-tel-keeps-its-parameter one-reader
 must/3325-9.1-empty-p-asserted-identity one-reader
 must/3325-9.1-pai-header-parameter one-reader
@@ -232,6 +231,7 @@ must/3261-7.3.3-compact-u case-and-framing
 must/adr-0054-2-non-utf8-in-a-name case-and-framing
 must/rule-cesu8-pair-in-a-display-name case-and-framing
 refuse/compact-repeat/content-type case-and-framing
+refuse/compact-repeat/content-type-compact-twice case-and-framing
 refuse/compact-repeat/event case-and-framing
 refuse/compact-repeat/refer-to case-and-framing
 refuse/compact-repeat/referred-by case-and-framing
