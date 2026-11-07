@@ -9,6 +9,7 @@ use sip_message::header;
 
 use super::message::{read, typed, ReadCheck, Template};
 use super::ratchet::{settle, Row};
+use super::repeats;
 
 /// A header the operators break.
 struct Subject {
@@ -101,31 +102,6 @@ const BASE: Subject = Subject {
     recased: None,
     read: |_| Ok(()),
 };
-
-/// The subjects a second line of is refused: the one list the repeat operators
-/// read. A list header takes several lines, and so do the credentials, which
-/// §7.3.1 names though their grammar has no list.
-const REFUSED_WHEN_REPEATED: &[&str] = &[
-    "from",
-    "to",
-    "call-id",
-    "cseq",
-    "max-forwards",
-    "content-length",
-    "expires",
-    "min-expires",
-    "session-expires",
-    "min-se",
-    "rseq",
-    "rack",
-    "content-type",
-    "content-disposition",
-    "event",
-    "refer-to",
-    "replaces",
-    "subscription-state",
-    "retry-after",
-];
 
 /// The headers ingress vouches for, and those the stack acts on.
 fn subjects() -> Vec<Subject> {
@@ -493,12 +469,6 @@ impl Subject {
         Row::new(format!("refuse/{operator}/{}", self.row), self.not_read(raw))
     }
 
-    /// A row whose operator breaks the message's shape: ingress answers for it,
-    /// whatever the header.
-    fn strict_row(&self, operator: &str, raw: &[u8]) -> Row {
-        Row::new(format!("refuse/{operator}/{}", self.row), self.refused(raw))
-    }
-
     /// A row whose operator breaks the message, not a line: every line still
     /// reads, so a request is answered (ADR-0054 §2) and a response is not.
     fn message_row(&self, operator: &str, raw: &[u8]) -> Row {
@@ -536,8 +506,6 @@ enum Judge {
     /// The value: ingress, or the typed reader of a header ingress does not
     /// vouch for.
     Value,
-    /// The header's lines: ingress, whatever the header.
-    Lines,
     /// The message: ingress, every line still read.
     Message,
 }
@@ -596,55 +564,15 @@ fn cases(subject: &Subject) -> Vec<Case> {
         raw: last.bytes_without_blank_line(),
         judge: Judge::Message,
     });
-    if REFUSED_WHEN_REPEATED.contains(&subject.row) {
-        let twice = subject.message(line.clone()).add(line.clone());
-        all.push(Case {
-            operator: "repeated-header-same".to_string(),
-            raw: twice.bytes(),
-            judge: Judge::Lines,
-        });
-        let other = subject.line(other_value(subject).as_bytes());
-        let twice = subject.message(line).add(other);
-        all.push(Case {
-            operator: "repeated-header-different".to_string(),
-            raw: twice.bytes(),
-            judge: Judge::Lines,
-        });
-    }
     all
 }
-
-/// A second valid value of a header that holds one.
-fn other_value(subject: &Subject) -> String {
-    let (name, same, other) = subject.param.unwrap_or_default();
-    if name.is_empty() {
-        return match subject.row {
-            "call-id" => "conformance-3@192.0.2.10".to_string(),
-            "cseq" => "11 OPTIONS".to_string(),
-            "content-length" => "0".to_string(),
-            "rack" => "776657 1 INVITE".to_string(),
-            _ => "9".to_string(),
-        };
-    }
-    subject.plain().replacen(&format!("{name}={same}"), &format!("{name}={other}"), 1)
-}
-
-/// A long and a compact name of one header, on two lines: one repeat.
-const COMPACT_PAIRS: &[(&str, &str, &str)] = &[
-    ("content-type", "Content-Type: text/plain", "c: text/plain"),
-    ("session-expires", "Session-Expires: 1800", "x: 1800"),
-    ("event", "Event: refer", "o: refer"),
-    ("refer-to", "Refer-To: <sip:carol@example.com>", "r: <sip:carol@example.com>"),
-    ("from", "From: <sip:alice@example.com>;tag=a1", "f: <sip:alice@example.com>;tag=a1"),
-    ("to", "To: <sip:bob@example.com>", "t: <sip:bob@example.com>"),
-    ("call-id", "Call-ID: conformance-1@192.0.2.10", "i: conformance-1@192.0.2.10"),
-    ("content-length", "Content-Length: 0", "l: 0"),
-];
 
 /// Every datagram the operators build: no exemption of the suite's generic set
 /// lifts one.
 pub fn datagrams() -> Vec<Vec<u8>> {
-    subjects().iter().flat_map(cases).map(|case| case.raw).collect()
+    let mut all: Vec<Vec<u8>> = subjects().iter().flat_map(cases).map(|case| case.raw).collect();
+    all.extend(repeats::datagrams());
+    all
 }
 
 #[test]
@@ -654,7 +582,6 @@ fn every_operator_breaks_its_rule() {
         for case in cases(&subject) {
             rows.push(match case.judge {
                 Judge::Value => subject.row(&case.operator, &case.raw),
-                Judge::Lines => subject.strict_row(&case.operator, &case.raw),
                 Judge::Message => subject.message_row(&case.operator, &case.raw),
             });
         }
@@ -672,17 +599,7 @@ fn every_operator_breaks_its_rule() {
             rows.push(Row::new(format!("refuse/{operator}/{row}"), outcome));
         }
     }
-    for &(row, long, compact) in COMPACT_PAIRS {
-        let raw = match row {
-            "from" | "to" | "call-id" => options().with(row, long).add(compact).bytes(),
-            "content-length" => options().unframed().add(long).add(compact).bytes(),
-            "event" => subscribe().add(long).add(compact).bytes(),
-            "refer-to" => refer().add(long).add(compact).bytes(),
-            _ => options().add(long).add(compact).bytes(),
-        };
-        let echoed = matches!(row, "from" | "to" | "call-id");
-        rows.push(Row::new(format!("refuse/compact-repeat/{row}"), refused(&raw, !echoed)));
-    }
+    rows.extend(repeats::rows());
     settle("refuse", &rows);
 }
 

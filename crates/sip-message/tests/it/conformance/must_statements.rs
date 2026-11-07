@@ -190,17 +190,8 @@ fn section_7() -> Vec<Row> {
             options().add("Content-Disposition:"),
             typed::<header::ContentDisposition>,
         ),
-        // A descriptive header nothing reads passes repeated.
-        accept("rule-repeat-subject", options().add("Subject: a").add("Subject: b")),
-        accept("rule-repeat-user-agent", options().add("User-Agent: a").add("User-Agent: b")),
-        accept("rule-repeat-server", options().add("Server: a").add("Server: b")),
-        accept("rule-repeat-organization", options().add("Organization: a").add("Organization: b")),
-        accept(
-            "rule-repeat-date",
-            options()
-                .add("Date: Sat, 13 Nov 2010 23:29:00 GMT")
-                .add("Date: Sat, 13 Nov 2010 23:29:01 GMT"),
-        ),
+        // A header the stack does not know may repeat, and so may a list header.
+        accept("rule-repeat-extension-header", options().add("X-Note: a").add("X-Note: b")),
         accept(
             "rule-repeat-p-asserted-identity",
             options()
