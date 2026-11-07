@@ -1,6 +1,8 @@
 # Services are HA-blind
 
 **Status:** proposed (2026-10-23)
+Amended (2026-11-07): §1, an off-turn request is made for its answer, never
+for its effect at the service; an ending call sends none again.
 
 **Amends:** ADR-0011 X5 (fencing by identity, §6), ADR-0014 (the replication
 write path, the confirm-race trade-off, the INVITE-only seeds, §2–§4), ADR-0016
@@ -87,11 +89,14 @@ What a service may rely on, and all it must know:
 
 - every per-call fact lives in the call record (`ext`, a typed slice, the
   ledger);
-- an off-turn request is delivered at least once: the backend may receive it
-  more than once — a node serving the call from its record sends every
-  request the call awaits again (ADR-0039 decision 5) — and its answer may
-  come back as "no answer" at the deadline though the backend acted
-  (ADR-0039); only the first answer the call awaits reaches the service. No
+- an off-turn request is made for its answer alone: its side effects at the
+  backend, and any load balancing or rate limiting done over HTTP, are no
+  concern. The backend may receive it more than once — a node serving an
+  `Active` call from its record sends every request the call awaits again
+  (ADR-0039 decision 5) — or, for an ending call whose sender was lost, not
+  at all; its answer may come back as "no answer" at the deadline though the
+  backend acted (ADR-0039); only the first answer the call awaits reaches
+  the service. No
   idempotency key rides the request while no backend reads one;
 - a call may end cleanly at any instant (§4);
 - it keeps durations or timers in its own state, never absolute times (§9
@@ -125,8 +130,8 @@ triggers, each with its caller, kept as one list in the settle module's doc
 (`crates/b2bua-core/src/rules/actions/settle.rs`). A Confirmed leg BYEd at
 termination is not settled there: its relays wait for their real finals.
 Discharge, reclaim and takeover never call the entry (ADR-0022 X5). What a
-record owes the wire at a takeover or a reclaim (a retained final, an awaited
-request sent again, an undecided call's answer) is sent from the record as it
+record owes the wire at a takeover or a reclaim (a retained final, an `Active`
+call's awaited request sent again for its answer, an undecided call's answer) is sent from the record as it
 stands, not settled.
 
 What differs by method is split three ways, none of which knows HA. The method
@@ -453,7 +458,7 @@ call record or the evidence names:
 Every effect outside SIP is keyed per call: a limiter admit is keyed and expires
 by lease unless an owner refreshes it (ADR-0040), and a consult whose route
 fold the record never applied counts as one that may have sent its admit; an
-off-turn request is delivered at least once (§1); the CDR is written by
+off-turn request is made for its answer alone (§1); the CDR is written by
 whoever ends the call (§5).
 
 ### 5. The CDR: whoever ends the call writes it
@@ -681,8 +686,8 @@ the re-anchor deadband of each other.
     leave two (the dead primary's and the survivor's, §5), never none;
   - primary killed unannounced (ADR-0031 case 3): the proxy's probe reads it
     dead 2 s later and tells the backup, which takes over the calls with work
-    in flight, an awaited outside answer and an undecided call's decision
-    included (ADR-0039 decision 5, ADR-0047 D4); its endpoint reads not ready
+    in flight, an `Active` call's awaited outside answer and an undecided
+    call's decision included (ADR-0039 decision 5, ADR-0047 D4); its endpoint reads not ready
     but stays in the slice 40 s later, and leaves it when the evicted pod is
     force-deleted 5 min later, when the backup settles and discharges what is
     left; judged as a kill of the primary;

@@ -1545,6 +1545,14 @@ A replicated body is the envelope, then the call body. The core reads none of it
 the shell hands each turn the call's **owners** as a plain input
 (`b2bua_core::owners::Owners`).
 
+**Off-turn request**:
+An HTTP request a call sends off its turn and awaits the answer of (ADR-0039):
+a release or failure consult, a REFER authorization, a service's request, a
+limiter admit. It is made for its answer alone: its side effects at the
+service, and load balancing or rate limiting over HTTP, are no concern. A node
+serving an `Active` call from its record sends it again; an ending call needs
+no answer and sends none again.
+
 ## Failover sweep vocabulary
 
 The in-process proof of HA-blind services

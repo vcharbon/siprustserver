@@ -4,8 +4,8 @@
 //! §17.1.1.2), a silent callee stays silent, nobody else repeats a 2xx the
 //! caller lost (§13.3.1.4), and nobody else ends a call the peer was ending.
 //! Every call this node backs up for the peer with an INVITE transaction to
-//! serve or an in-dialog request in flight but the keepalive, every one
-//! awaiting the answer to a request it sent off its turn,
+//! serve or an in-dialog request in flight but the keepalive, every `Active`
+//! one awaiting the answer to a request it sent off its turn,
 //! which died with the peer's task (ADR-0039), and every `Terminating` one
 //! with any request record open — its own BYE in flight, a request it held —
 //! or a caller dialog held possibly confirmed (ADR-0055 §4), is taken over at
@@ -218,8 +218,8 @@ async fn sweep<F, Fut>(
 /// serve, and the peer departed; else take it over when it names an INVITE
 /// transaction to serve ([`has_invite_to_serve`]) or an in-dialog request in
 /// flight ([`names_request_in_flight`]), is ending with work left
-/// ([`ending_work`]), or awaits the answer to a request it sent off its turn,
-/// which the copy sends again; an undecided call's decision is asked again
+/// ([`ending_work`]), or, `Active`, awaits the answer to a request it sent off
+/// its turn, which the copy sends again; an undecided call's decision is asked again
 /// ([`settle_undecided`]). On a dead verdict a finished call is left to the
 /// departure, the final it may still owe its caller sent
 /// ([`super::owed_final`]), and the limiter key it owes released while the

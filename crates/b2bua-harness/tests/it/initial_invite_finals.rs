@@ -61,6 +61,8 @@ const FINALS: &[Row] = &[
     ("b2bua-core/src/rule_chain/message_cap.rs", "503", InternalError),
     ("b2bua-core/src/rules/invariants.rs", "503", InternalError),
     ("b2bua-core/src/rules/operator_release.rs", "503", InternalError),
+    // An undecided call no node asks again.
+    ("b2bua-core/src/undecided.rs", "503", InternalError),
     // A BYE on the caller's early dialog ends her INVITE (RFC 3261 §15.1.2).
     ("b2bua-core/src/rules/defaults/core_rules.rs", "487", Rfc3261),
     // A no-answer deadline with no consult to raise, and the setup deadline.
@@ -84,7 +86,6 @@ const FINALS: &[Row] = &[
     // The turn's own refusals: no From tag; a cordon or a spent setup budget.
     ("b2bua/src/router/initial_turn.rs", "400", Rfc3261),
     ("b2bua/src/router/initial_turn.rs", "503", InternalError),
-    ("b2bua/src/router/undecided.rs", "503", InternalError),
     ("b2bua/src/router/responses.rs", "482", Rfc3261),
     ("b2bua/src/router/responses.rs", "500", InternalError),
     ("b2bua/src/router/responses.rs", "500", InternalError),

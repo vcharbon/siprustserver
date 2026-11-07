@@ -15,6 +15,8 @@ undecided call on a departure only; the residual of a death the peers are not to
 Amended (2026-10-29): D2, the sweep also takes over a call with an in-dialog request in
 flight, and one that awaits the answer to a request sent off its turn, which the copy
 sends again (ADR-0039 decision 5).
+Amended (2026-11-07): D2, only an `Active` call is taken over for an awaited answer: a
+request is made for its answer, and an ending call needs none (ADR-0039 decision 5).
 Amended (2026-10-29): D1, a dead verdict acts once this node's replication stream from
 the peer is down; D2, the takeover half then takes every such call over at once; D4, an
 undecided call's decision is asked again, on a verdict too, and a copy written over by
@@ -148,8 +150,8 @@ crash of the node stops it (`router/departure/tests.rs`). It
 reads the bodies one at a time, yielding as it goes, and for every call that names an
 INVITE transaction in flight — exactly the calls a materialisation would seed — or an
 in-dialog request in flight but the keepalive (a relay, a request of its own or one it
-holds), or holds the answer to a request it sent off its turn, whose task died with the
-peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover
+holds), or, `Active`, awaits the answer to a request it sent off its turn, whose task died
+with the peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover
 at once: its timers re-arm at their
 replicated deadlines, its INVITE transactions are rebuilt, the self-release watch is
 armed. A call already live here is left as it is. A call with nothing in flight is

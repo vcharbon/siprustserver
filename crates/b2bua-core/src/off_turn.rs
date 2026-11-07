@@ -3,7 +3,8 @@
 //! pass writes each request the turn sends into the record it lands, so the
 //! write carries the request before the request leaves, and the answer, or
 //! its deadline's expiry, takes it off before the rules read the event. A
-//! node that serves the call from the record sends what is left again.
+//! node that serves an `Active` call from the record sends what is left again
+//! ([`resend`]).
 
 use call::{Call, CallModelState, OffTurnRequest, TimerType};
 
