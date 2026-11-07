@@ -96,18 +96,13 @@ impl Msg {
     }
 
     /// The session description this message DECLARED it carried, as
-    /// [`sip_message::sdp_range`] reads it: the body under `application/sdp`
-    /// disposed as a session's, the SDP part of a `multipart/…` body (RFC 5621
-    /// §3.1), `None` where the head or body is unreadable, empty, or holds none.
+    /// [`sip_message::head_sdp_range`] reads it: the body under
+    /// `application/sdp` disposed as a session's, the SDP part of a
+    /// `multipart/…` body (RFC 5621 §3.1), `None` where the head or body is
+    /// unreadable, empty, or holds none.
     pub fn sdp(&self) -> Option<&[u8]> {
-        let head = self.head.as_deref()?;
         let body = self.body.as_deref()?;
-        use sip_message::header::{HeaderValue, MediaType};
-        let ct = sip_message::sniff::header_values(head, "Content-Type").into_iter().next()?;
-        let ct = MediaType::parse(&sip_message::SipStr::owned(&ct)).ok()?;
-        let disposition =
-            sip_message::sniff::header_values(head, "Content-Disposition").into_iter().next();
-        sip_message::sdp_range(&ct, disposition.as_deref(), body).map(|r| &body[r])
+        body.get(sip_message::head_sdp_range(self.head.as_deref()?, body)?)
     }
 }
 
@@ -156,6 +151,36 @@ pub struct WireView<'a> {
 #[cfg(test)]
 mod tests {
     use super::{endpoint_addr, Kind, Msg};
+
+    /// A Content-Type folded onto a second line, and one whose slash is set
+    /// off by white space, declare the description as the parser reads them
+    /// (RFC 3261 §7.3.1, §25.1).
+    #[test]
+    fn a_folded_or_spaced_content_type_declares_the_description() {
+        let sdp = b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_vec();
+        for ct in ["Content-Type:\r\n application/sdp", "Content-Type: application / sdp"] {
+            let msg = Msg {
+                at_us: 0,
+                src: "a".into(),
+                dst: "b".into(),
+                hop: 0,
+                repeat: false,
+                kind: Kind::Request { method: "INVITE".into() },
+                call_id: "c".into(),
+                cseq: 1,
+                cseq_method: "INVITE".into(),
+                via_branch: None,
+                from_tag: None,
+                to_tag: None,
+                head: Some(
+                    format!("INVITE sip:b SIP/2.0\r\nMax-Forwards: 70\r\n{ct}\r\n\r\n")
+                        .into_bytes(),
+                ),
+                body: Some(sdp.clone()),
+            };
+            assert_eq!(msg.sdp(), Some(&sdp[..]), "{ct:?}");
+        }
+    }
 
     /// The compact `c` spelling declares the body as the full name does (RFC
     /// 3261 §7.3.3).

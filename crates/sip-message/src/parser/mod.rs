@@ -26,6 +26,7 @@ pub mod rvoip;
 
 pub use exemptions::{Exemption, Exemptions};
 pub use first_ingress::FirstIngressBound;
+pub(crate) use stored::lenient_header_fields;
 pub use stored::read_stored;
 pub use tool_reading::ToolReading;
 

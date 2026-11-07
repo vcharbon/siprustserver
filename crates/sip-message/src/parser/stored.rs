@@ -10,7 +10,7 @@ use super::exemptions::Exemptions;
 use super::first_ingress::FirstIngressBound;
 use super::{Framing, SipParser, SipParserLimits, STANDARD_TRANSPORTS};
 use crate::error::SipParseError;
-use crate::types::SipMessage;
+use crate::types::{SipHeader, SipMessage};
 
 /// The lenient reading with every limit off.
 const STORED: SipParserLimits = SipParserLimits {
@@ -30,4 +30,11 @@ const STORED: SipParserLimits = SipParserLimits {
 /// replication frame, which the caller reports; it never panics.
 pub fn read_stored(image: &[u8]) -> Result<SipMessage, SipParseError> {
     CustomParser::stored(STORED).parse(image)
+}
+
+/// The start line and header block of `raw` read as [`read_stored`] reads a
+/// message's, its header fields returned without the mandatory-field
+/// extraction: the lenient reading of a head whose body is judged apart.
+pub(crate) fn lenient_header_fields(raw: &[u8]) -> Result<Vec<SipHeader>, SipParseError> {
+    CustomParser::stored(STORED).parse_header_fields(raw)
 }

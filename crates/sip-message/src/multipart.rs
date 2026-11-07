@@ -393,6 +393,18 @@ pub(crate) fn message_sdp_range(
     sdp_range(&content_type, disposition.map(|d| d.value.as_str()), body)
 }
 
+/// Where `body` holds the session description of the message whose start
+/// line and header block `head` holds, read as a stored message's head is
+/// (lenient, every bound off) and then as [`message_sdp_range`] reads a
+/// parsed one; `None` where the head does not read or names none.
+pub fn head_sdp_range(head: &[u8], body: &[u8]) -> Option<std::ops::Range<usize>> {
+    if body.is_empty() {
+        return None;
+    }
+    let lines = crate::parser::lenient_header_fields(head).ok()?;
+    message_sdp_range(&HeaderTable::new(lines), body)
+}
+
 mod attach;
 pub use attach::{attach, Attached};
 

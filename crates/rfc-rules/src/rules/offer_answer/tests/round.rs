@@ -82,7 +82,7 @@ fn a_retransmitted_offending_ack_is_one_occasion() {
 /// description BINDS (RFC 3262 §5).
 fn reliable_1xx(at_us: u64, status: u16, cseq: u32, body: Option<&str>) -> Msg {
     Msg {
-        head: Some(head("Require: 100rel\r\nRSeq: 1\r\n", body)),
+        head: Some(head(&status_line(status), "Require: 100rel\r\nRSeq: 1\r\n", body)),
         ..resp(at_us, BOB, ALICE, status, cseq, "INVITE", body)
     }
 }
@@ -113,7 +113,10 @@ fn an_answer_framed_in_a_multipart_body_meets_the_offer() {
     )
     .unwrap();
     let answer = Msg {
-        head: Some(format!("X: y\r\nContent-Type: {}\r\n\r\n", framed.content_type).into_bytes()),
+        head: Some(
+            format!("SIP/2.0 200 OK\r\nX: y\r\nContent-Type: {}\r\n\r\n", framed.content_type)
+                .into_bytes(),
+        ),
         body: Some(framed.body),
         ..resp(2, BOB, ALICE, 200, 1, "INVITE", None)
     };
@@ -426,7 +429,7 @@ m=video 60790 RTP/AVP 96\r\n";
 /// description binds (RFC 3262 §5).
 fn reliable(at_us: u64, status: u16, body: Option<&str>) -> Msg {
     Msg {
-        head: Some(head("Require: 100rel\r\nRSeq: 1\r\n", body)),
+        head: Some(head(&status_line(status), "Require: 100rel\r\nRSeq: 1\r\n", body)),
         ..resp(at_us, BOB, ALICE, status, 1, "INVITE", body)
     }
 }

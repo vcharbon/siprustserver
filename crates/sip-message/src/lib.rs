@@ -90,8 +90,8 @@ pub use header::{canonical_header_items, header_forms_equivalent, HeaderClass, H
 pub use method::Method;
 pub use multipart::{
     attach as attach_parts, compose as compose_multipart, decompose as decompose_multipart,
-    description_entity, entity_parts, is_entity_header, sdp_range, Attached, Composed, LocatedPart,
-    MultipartError, MultipartPart,
+    description_entity, entity_parts, head_sdp_range, is_entity_header, sdp_range, Attached,
+    Composed, LocatedPart, MultipartError, MultipartPart,
 };
 /// RFC 3261 §7.3.3 compact-form expansion, probed one name at a time.
 pub use parser::custom::compact_forms::compact_form_canonical;
@@ -117,8 +117,8 @@ pub use sdp_diff::sdp_media_equivalent;
 /// The session description read as a document — the only home for SDP grammar.
 pub use sdp_doc::{
     canonical_rtpmap, direction_of, extract_cryptos, extract_direction, extract_fmtps,
-    extract_format_list, extract_rtpmaps, media_line, parse_origin, parse_sdp_body, MediaLine,
-    SdpDirection, SdpDoc, SdpOrigin,
+    extract_format_list, extract_rtpmaps, is_non_zero_int_or_real, media_line, parse_origin,
+    parse_sdp_body, ptime_value, stated_direction, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
 };
 /// A description serialized by the stack itself: canonical attribute order,
 /// the direction always stated.
