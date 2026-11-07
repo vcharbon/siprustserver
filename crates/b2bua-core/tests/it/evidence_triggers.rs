@@ -163,6 +163,38 @@ fn a_2xx_to_the_relayed_reinvite_on_its_branch_is_relayed_to_the_caller() {
     assert_eq!(turn.statuses_to("a"), vec![200]);
 }
 
+/// `raw` with its top Via's branch cookie re-cased: the same branch (RFC 3261
+/// §7.3.1).
+fn recased(raw: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(raw).replacen("branch=z9hG4bK", "branch=Z9HG4BK", 1).into_bytes()
+}
+
+/// The 2xx to the relayed re-INVITE whose branch a hop re-cased is still
+/// the caller's answer: relayed to her, no evidence.
+#[test]
+fn a_2xx_to_the_relayed_reinvite_on_its_branch_recased_is_relayed_to_the_caller() {
+    let driver = Driver::new();
+    let mut call = bridged(&driver);
+    call.run([Step::Sends("a", Method::Invite)]);
+    let outcome = call.step_edited(Step::AnswersLast("b-1", Method::Invite, 200), &recased);
+    let turn = outcome.turn().expect("the 2xx reaches the rules");
+    assert_eq!(turn.rule, Some("relay-reinvite-response"));
+    assert_eq!(turn.statuses_to("a"), vec![200]);
+}
+
+/// This side re-used a number another owner sent: the final to this side's
+/// own request at that number, its branch re-cased, answers that request and
+/// is no evidence.
+#[test]
+fn a_final_at_a_reused_number_on_its_own_branch_recased_is_no_evidence() {
+    let driver = Driver::new();
+    let mut call = losing(bridged(&driver), [Step::Sends("a", Method::Info)]);
+    call.run([Step::Sends("a", Method::Info)]);
+    let outcome = call.step_edited(Step::AnswersHeard("b-1", Method::Info, 1, 200), &recased);
+    let turn = outcome.turn().expect("the final reaches the rules");
+    assert_ne!(turn.rule, Some("evidence-final"));
+}
+
 /// A final at or below the sequence that answers no request held open at its
 /// number is a stray, not evidence: a 200 at the number of an INFO the record
 /// holds answered, under a branch no request of this stack's carried.

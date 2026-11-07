@@ -42,6 +42,7 @@
 //! with its own answers (§17); without one nothing can say what is still in
 //! flight, so the rules state nothing rather than guessing.
 
+use crate::rules::branch::BranchName;
 use std::collections::{BTreeMap, BTreeSet};
 
 use sip_message::header::SentBy;
@@ -127,7 +128,11 @@ impl Obligation for ConcurrentReInvite500Or491 {
                 Kind::Request { method } if method.eq_ignore_ascii_case("INVITE") => {
                     let taker = msg.dst.as_str();
                     let (Some(from_tag), Some(to_tag)) = tags(msg) else { continue };
-                    let txn = TxnKey { endpoint: taker, call_id: msg.call_id.as_str(), branch };
+                    let txn = TxnKey {
+                        endpoint: taker,
+                        call_id: msg.call_id.as_str(),
+                        branch: BranchName(branch),
+                    };
                     // §17.2.1: an INVITE repeating an ALREADY-ANSWERED branch
                     // draws the recorded final again — never a new transaction,
                     // and never back into the in-progress window.
@@ -141,7 +146,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                     // A Timer-A retransmission reuses its own branch.
                     if !in_flight.contains(branch) && !spiral {
                         let same_sender = |b: &&&str| {
-                            let pending = TxnKey { branch: b, ..txn };
+                            let pending = TxnKey { branch: BranchName(b), ..txn };
                             sender_tag.get(&pending) == Some(&from_tag)
                         };
                         let pending = in_flight
@@ -171,7 +176,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                     let txn = TxnKey {
                         endpoint: msg.src.as_str(),
                         call_id: msg.call_id.as_str(),
-                        branch,
+                        branch: BranchName(branch),
                     };
                     if *status < 200 || *status >= 700 {
                         continue;
@@ -360,7 +365,7 @@ impl Obligation for FailedReinviteTearsDownDialog {
 struct TxnKey<'a> {
     endpoint: &'a str,
     call_id: &'a str,
-    branch: &'a str,
+    branch: BranchName<'a>,
 }
 
 /// One endpoint's view of a dialog, tags UNORDERED: §14.2 judges a UAS against
@@ -438,7 +443,8 @@ impl<'a> Origins<'a> {
     fn copies_one_of(&self, msg: &Msg, endpoint: &str, in_flight: &BTreeSet<&str>) -> bool {
         let Some(origin) = origin(msg) else { return false };
         in_flight.iter().any(|branch| {
-            let txn = TxnKey { endpoint, call_id: msg.call_id.as_str(), branch };
+            let txn =
+                TxnKey { endpoint, call_id: msg.call_id.as_str(), branch: BranchName(branch) };
             self.of.get(&txn) == Some(&origin)
         })
     }
@@ -477,9 +483,9 @@ fn raced_pending_msg(msgs: &[Msg], race: &Race<'_>) -> usize {
         .unwrap_or(race.msg)
 }
 
-/// Whether `msg` carries `branch` as its top-Via branch.
+/// Whether `msg` carries `branch` as its top-Via branch, in any case (§7.3.1).
 fn names(msg: &Msg, branch: &str) -> bool {
-    msg.via_branch.as_deref() == Some(branch)
+    crate::rules::branch::same_branch(msg.via_branch.as_deref(), Some(branch))
 }
 
 #[cfg(test)]

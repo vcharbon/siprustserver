@@ -30,7 +30,7 @@ fn response_echoes_request_via(f: &rfc_rules::Finding, _cid: &str) -> String {
         return String::new();
     };
     let mut parts = Vec::new();
-    if response_branch != request_branch {
+    if !sip_message::header::same_branch(response_branch, request_branch) {
         parts.push(format!(
             "response top Via branch \"{response_branch}\" differs from the branch \
              this bind sent \"{request_branch}\" (the response cannot be matched to \

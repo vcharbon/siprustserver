@@ -11,6 +11,11 @@ const ROUTINES: &[&str] = &[
     ".trim()",
     ".trim_start()",
     ".trim_end()",
+    "str::trim",
+    "str::trim_start",
+    "str::trim_end",
+    "trim_left",
+    "trim_right",
     "split_whitespace",
     "split_ascii_whitespace",
     "is_ascii_whitespace",
@@ -24,6 +29,35 @@ const OUTSIDE: &[(&str, &str)] = &[
     ("mscml.rs", "XML, whose whitespace is XML 1.0 §2.3 `S`"),
     ("multipart", "the multipart framing and part-head readers"),
 ];
+
+/// `line` up to a `//` comment, a `//` inside a string literal (`"sip://"`)
+/// kept as code.
+fn code_of(line: &str) -> &str {
+    let line_no_quote_char = line.replace("'\"'", "'_'");
+    let bytes = line_no_quote_char.as_bytes();
+    let mut in_string = false;
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            b'\\' if in_string => i += 1,
+            b'"' => in_string = !in_string,
+            b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => {
+                return line.get(..i).unwrap_or(line);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
+#[test]
+fn a_comment_ends_the_code_and_a_string_does_not() {
+    assert_eq!(code_of("let a = 1; // x.trim()"), "let a = 1; ");
+    assert_eq!(code_of(r#"f("sip://h").trim()"#), r#"f("sip://h").trim()"#);
+    assert_eq!(code_of(r#"f("a\"//").trim() // c"#), r#"f("a\"//").trim() "#);
+    assert_eq!(code_of("x == '\"' // c"), "x == '\"' ");
+}
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("the source tree reads") {
@@ -49,7 +83,7 @@ fn no_source_calls_a_standard_whitespace_routine() {
         }
         let text = std::fs::read_to_string(&file).expect("a source reads");
         for (at, line) in text.lines().enumerate() {
-            let code = line.split("//").next().unwrap_or_default();
+            let code = code_of(line);
             for routine in ROUTINES.iter().filter(|r| code.contains(*r)) {
                 found.push(format!("src/{relative}:{}: {routine}", at + 1));
             }

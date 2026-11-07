@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
-use sip_message::header::{has_magic_cookie, HeaderValue, BRANCH_MAGIC_COOKIE};
+use sip_message::header::{fold_branch, has_magic_cookie, HeaderValue, BRANCH_MAGIC_COOKIE};
 use sip_message::SipRequest;
 
 /// Domain tags keeping §16.11's two input sets in disjoint hash spaces.
@@ -29,7 +29,8 @@ pub(crate) fn stateless_branch(req: &SipRequest) -> String {
         // same branch (§7.3.1), so it maps to the same forward.
         Some(received) => {
             field(&mut hasher, COOKIED_VIA);
-            field(&mut hasher, &received.to_ascii_lowercase());
+            fold_branch(received, |chunk| hasher.update(chunk));
+            hasher.update([0u8]);
             let _ = top.sent_by_ref().write_canonical(&mut HashText(&mut hasher));
             hasher.update([0u8]);
         }

@@ -116,10 +116,11 @@ the one character it encodes, in UTF-8, wherever it stands, and is then
 ordinary non-ASCII: read where the grammar takes `UTF8-NONASCII`, refused in a
 URI, a tag, a Call-ID, a branch, a method or a header name. The message's
 `image()` stays the bytes that arrived, and what the stack sends is rendered
-from its lines, so the wire carries the UTF-8 form. A lone or reversed half, a
-Latin-1 byte, an overlong form and a five- or six-byte form stay refused, an
-exception to the goal that every valid message parses: their reading is in
-doubt. Accepted risks: a quoted Digest `username` holding a pair is relayed in
+from its lines, so the wire carries the UTF-8 form. A byte no UTF-8 form
+admits, a Latin-1 byte among them, is refused as invalid. A lone or reversed
+half, an overlong form and a five- or six-byte form, which RFC 3261's
+`UTF8-NONASCII` admits, stay refused too, an exception to the goal that every
+valid message parses: their reading is in doubt. Accepted risks: a quoted Digest `username` holding a pair is relayed in
 its UTF-8 form, which no longer matches the credentials the sender computed
 over its bytes, and a peer comparing its From bytes with our echo sees the
 UTF-8 form (`src/parser/custom/mod.rs`).

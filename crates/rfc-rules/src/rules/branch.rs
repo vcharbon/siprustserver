@@ -33,9 +33,56 @@
 //! pairing; without one no pair can be formed, and the reading states nothing
 //! rather than guessing at one.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use crate::wire::Msg;
+
+/// Whether two top-Via branches name one transaction: compared ignoring ASCII
+/// case (RFC 3261 §7.3.1), two absent branches alike.
+pub(crate) fn same_branch(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => sip_message::header::same_branch(a, b),
+        (a, b) => a == b,
+    }
+}
+
+/// A top-Via branch as a key: ordered and compared ignoring ASCII case
+/// (RFC 3261 §7.3.1), shown as written.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BranchName<'a>(pub &'a str);
+
+impl BranchName<'_> {
+    fn folded(&self) -> impl Iterator<Item = u8> + '_ {
+        self.0.bytes().map(|b| b.to_ascii_lowercase())
+    }
+}
+
+impl PartialEq for BranchName<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        sip_message::header::same_branch(self.0, other.0)
+    }
+}
+
+impl Eq for BranchName<'_> {}
+
+impl PartialOrd for BranchName<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BranchName<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.folded().cmp(other.folded())
+    }
+}
+
+impl std::fmt::Display for BranchName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
 
 /// One branch as ONE endpoint drove it: the call it rides and the top-Via
 /// branch its transaction is named by. Spelled out as a struct so the three
@@ -45,17 +92,19 @@ pub(super) struct BranchKey<'a> {
     /// The endpoint judged: the one that SENT the requests on the branch.
     pub emitter: &'a str,
     pub call_id: &'a str,
-    pub branch: &'a str,
+    pub branch: BranchName<'a>,
 }
 
 impl<'a> BranchKey<'a> {
     /// The branch `msg`'s SENDER drives — a request going out.
     pub fn sent_by(msg: &'a Msg, branch: &'a str) -> Self {
+        let branch = BranchName(branch);
         BranchKey { emitter: msg.src.as_str(), call_id: msg.call_id.as_str(), branch }
     }
 
     /// The branch `msg`'s RECIPIENT drives — a response coming back.
     pub fn taken_by(msg: &'a Msg, branch: &'a str) -> Self {
+        let branch = BranchName(branch);
         BranchKey { emitter: msg.dst.as_str(), call_id: msg.call_id.as_str(), branch }
     }
 }

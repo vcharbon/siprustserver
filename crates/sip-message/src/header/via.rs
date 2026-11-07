@@ -37,10 +37,38 @@ pub fn same_branch(a: &str, b: &str) -> bool {
 /// Feeds `branch` to `state` as [`same_branch`] compares it, so two branches
 /// that are one hash alike.
 pub fn hash_branch<H: std::hash::Hasher>(branch: &str, state: &mut H) {
-    for b in branch.bytes() {
-        state.write_u8(b.to_ascii_lowercase());
-    }
+    fold_branch(branch, |chunk| state.write(chunk));
     state.write_u8(0xff);
+}
+
+/// Hands `branch` to `feed` folded to lower case, chunk by chunk, folded on
+/// the stack: what a digest of a branch reads, as [`same_branch`] compares.
+pub fn fold_branch(branch: &str, mut feed: impl FnMut(&[u8])) {
+    let mut room = [0u8; 64];
+    for chunk in branch.as_bytes().chunks(room.len()) {
+        let Some(folded) = room.get_mut(..chunk.len()) else { return };
+        for (slot, byte) in folded.iter_mut().zip(chunk) {
+            *slot = byte.to_ascii_lowercase();
+        }
+        feed(folded);
+    }
+}
+
+/// `branch` folded to lower case as one byte string: in `room` when it fits,
+/// allocated only past it.
+pub fn folded_branch<'r, const N: usize>(
+    branch: &str,
+    room: &'r mut [u8; N],
+) -> std::borrow::Cow<'r, [u8]> {
+    match room.get_mut(..branch.len()) {
+        Some(folded) => {
+            for (slot, byte) in folded.iter_mut().zip(branch.bytes()) {
+                *slot = byte.to_ascii_lowercase();
+            }
+            std::borrow::Cow::Borrowed(folded)
+        }
+        None => std::borrow::Cow::Owned(branch.to_ascii_lowercase().into_bytes()),
+    }
 }
 
 /// The parameter names a router writes, spelled once so stamping a hop copies

@@ -160,7 +160,10 @@ impl<'a> Reading<'a> {
                 let in_dialog = both_tags
                     && !(method.eq_ignore_ascii_case("INVITE")
                         && !branch.is_empty()
-                        && branch == dialog.initial_invite_sent_branch);
+                        && crate::rules::branch::same_branch(
+                            Some(branch),
+                            Some(&dialog.initial_invite_sent_branch),
+                        ));
                 self.requests.push(Sent {
                     msg: mi,
                     hop: msg.hop,
@@ -205,7 +208,10 @@ impl<'a> Reading<'a> {
         // The UAC's own reading of its establishing INVITE's outcome.
         if !sent && msg.cseq_method.eq_ignore_ascii_case("INVITE") {
             let on_initial = !dialog.initial_invite_sent_branch.is_empty()
-                && msg.via_branch.as_deref() == Some(dialog.initial_invite_sent_branch.as_str());
+                && crate::rules::branch::same_branch(
+                    msg.via_branch.as_deref(),
+                    Some(&dialog.initial_invite_sent_branch),
+                );
             dialog.took_establishing_2xx |= on_initial && (200..300).contains(status);
             if (200..300).contains(status) || (*status > 100 && *status < 200 && !on_initial) {
                 dialog.rejected_at_us = None;
@@ -221,7 +227,10 @@ impl<'a> Reading<'a> {
         if sent
             && msg.cseq_method.eq_ignore_ascii_case("INVITE")
             && !dialog.initial_invite_received_branch.is_empty()
-            && msg.via_branch.as_deref() == Some(dialog.initial_invite_received_branch.as_str())
+            && crate::rules::branch::same_branch(
+                msg.via_branch.as_deref(),
+                Some(&dialog.initial_invite_received_branch),
+            )
             && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty())
         {
             dialog.answered_establishing_invite = true;

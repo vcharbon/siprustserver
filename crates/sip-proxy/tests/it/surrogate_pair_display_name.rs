@@ -123,7 +123,7 @@ async fn a_surrogate_pair_in_the_callers_display_name_crosses_the_proxy_as_its_c
         ProxyAddr::from(addr(PROXY)),
         strategy,
         registry,
-        Arc::new(IdGen::seeded(0x849)),
+        Arc::new(IdGen::seeded(0x5ead)),
     )
     .clock(Clock::test_at(0))
     .build(endpoint);

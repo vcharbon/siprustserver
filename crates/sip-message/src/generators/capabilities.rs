@@ -201,8 +201,8 @@ fn accept_value(received: &[SipHeader]) -> Option<Vec<AcceptRange>> {
 impl Default for CapabilitySet {
     fn default() -> Self {
         Self {
-            allow: Some(Allow::of(B2BUA_ALLOW.split(',').map(str::trim))),
-            supported: Some(Supported::of(B2BUA_SUPPORTED.split(',').map(str::trim))),
+            allow: Some(Allow::of(B2BUA_ALLOW.split(',').map(crate::whitespace::trim))),
+            supported: Some(Supported::of(B2BUA_SUPPORTED.split(',').map(crate::whitespace::trim))),
             accept: Some(vec![AcceptRange::new(B2BUA_ACCEPT)]),
         }
     }

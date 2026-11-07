@@ -40,9 +40,7 @@ const STATED: &[(&str, &str)] = &[
 /// The refusals of a valid form the stack still makes: the text of the refusal,
 /// then the row that holds it.
 const FAILING: &[(&str, &str)] = &[
-    ("/2.0\"", "version-case"),
     ("uri-parameter value", "uri-parameter-token-value"),
-    ("under its canonical name", "compact-name"),
     ("URI has no scheme: \"*\"", "contact-star-typed"),
     ("Min-SE is not 1*DIGIT", "min-se-parameters"),
     ("holds control byte", "control-byte-after-a-word-dquote"),

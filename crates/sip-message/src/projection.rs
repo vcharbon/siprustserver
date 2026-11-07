@@ -46,7 +46,7 @@ impl HeaderProjection {
     pub fn item(&self, name: &str, n: usize) -> Option<&str> {
         let rows = self.all(name).into_iter();
         if HeaderName::one_item_per_row_of(name) {
-            return rows.map(str::trim).nth(n);
+            return rows.map(crate::whitespace::trim).nth(n);
         }
         let sep = HeaderName::item_separator_of(name);
         rows.flat_map(|row| sep.split(row)).nth(n)

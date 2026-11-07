@@ -47,7 +47,9 @@ reading further. The first-ingress bound (ADR-0001) is no limit of the read: the
 message was read whole, so a request past it leaves its partial and is answered.
 A refused line naming Via, From, To, Call-ID or CSeq leaves
 no partial either, since the field it held is not echoed, and so does a refused
-line whose name did not read, which may have been any of them. A line holding
+line whose name did not read, which may have been any of them. A name no colon
+follows did not read: what was read may be a part of a name (`Vi a:` may be a
+Via). A line holding
 a byte that is not UTF-8 (RFC 3629) is a refused line: the message is refused
 as not UTF-8, and answered when the five fields read.
 

@@ -104,7 +104,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use sip_message::header::SentBy;
+use sip_message::header::{same_branch, SentBy};
 use sip_message::sniff::{self, OriginVia};
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
@@ -134,8 +134,7 @@ crate::registry::rules! {
 /// (each new OPTIONS, and the eventual BYE, reuses the previous request's
 /// number) and for a takeover that re-originates a dialog request from a stale
 /// pre-failover CSeq snapshot (the survivor mints a `local_cseq + 1` the dialog
-/// already spent). Both are invisible to a test UA that answers whatever it is
-/// handed.
+/// already spent). Both are invisible to a test UA that answers whatever it is handed.
 pub struct CseqInDialogOrder;
 
 impl Obligation for CseqInDialogOrder {
@@ -444,7 +443,8 @@ impl Request<'_> {
         if !first.sent_by.as_borrowed().same_host(&again.sent_by.as_borrowed()) {
             return false;
         }
-        first.branch.is_none() || first.branch != again.branch
+        let same = first.branch.as_deref().zip(again.branch.as_deref());
+        first.branch.is_none() || !same.is_some_and(|(a, b)| same_branch(a, b))
     }
 
     fn not_contiguous(&self, prior_cseq: u32, to_tag: &str) -> Evidence {
@@ -616,7 +616,7 @@ impl<'a> Reading<'a> {
             // A DIFFERENT transaction carried a CSeq the dialog already spent →
             // the dialog CSeq failed to increment. Same branch, different method
             // is one transaction's shape restated, and records nothing new.
-            Some(first) if first.branch != req.branch => dialog.reuses.push(req),
+            Some(first) if !same_branch(first.branch, req.branch) => dialog.reuses.push(req),
             Some(_) => {}
         }
     }

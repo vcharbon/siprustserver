@@ -89,8 +89,10 @@ fn response_branch(resp: &SipResponse) -> Option<String> {
     resp.top_via().branch().map(str::to_string)
 }
 
+/// The branch as a key: one carrying the magic cookie, in any case, folded
+/// so a re-cased copy keys alike (RFC 3261 §7.3.1).
 fn keyable(branch: Option<String>) -> Option<String> {
-    branch.filter(|b| b.starts_with("z9hG4bK"))
+    branch.filter(|b| sip_message::header::has_magic_cookie(b)).map(|b| b.to_ascii_lowercase())
 }
 
 fn note<K: std::hash::Hash + Eq>(

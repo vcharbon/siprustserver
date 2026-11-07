@@ -185,6 +185,46 @@ async fn cancel_at_a_second_proxy_instance_carries_the_invites_branch() {
     );
 }
 
+// A branch compares ignoring case (§7.3.1): a CANCEL whose branch a hop
+// re-cased, at a second instance, still carries the INVITE's pushed branch.
+#[tokio::test(start_paused = true)]
+async fn a_recased_cancel_at_a_second_proxy_instance_carries_the_invites_branch() {
+    let f = fabric().await;
+    let first = f.proxy(NODE_A).await;
+    let second = f.proxy(NODE_B).await;
+    first
+        .route_request_from(&invite("recased@test", "tag-a", 1, "z9hG4bKup9x"), worker_src())
+        .await;
+    let invite_via = f.pushed_via().await;
+    second
+        .route_request_from(&cancel("recased@test", "tag-a", 1, "Z9HG4BKUP9X"), worker_src())
+        .await;
+    assert_eq!(f.pushed_via().await, invite_via, "the re-cased CANCEL on the INVITE's branch");
+}
+
+// The §16.11 function itself: the INVITE, its CANCEL and its non-2xx ACK map
+// to one branch whatever the case their received branch is written in.
+#[test]
+fn a_recased_cancel_and_ack_map_to_the_invites_branch() {
+    let of = |msg: SipMessage| match msg {
+        SipMessage::Request(req) => crate::branch::stateless_branch(&req),
+        SipMessage::Response(_) => panic!("a request"),
+    };
+    let ack = parse_req(&format!(
+        "ACK sip:bob@{DOWNSTREAM}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {WORKER}:5060;branch=z9hG4bKUp9X;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{WORKER}>;tag=tag-a\r\n\
+To: <sip:bob@{DOWNSTREAM}>;tag=b1\r\n\
+Call-ID: recased@test\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\r\n"
+    ));
+    let pushed = of(invite("recased@test", "tag-a", 1, "z9hG4bKup9x"));
+    assert_eq!(of(cancel("recased@test", "tag-a", 1, "Z9HG4BKUP9X")), pushed);
+    assert_eq!(of(ack), pushed);
+}
+
 // The same mapping when the INVITE's memo has aged out of the one instance
 // that wrote it: a CANCEL is legal for the whole INVITE window and beyond.
 #[tokio::test(start_paused = true)]

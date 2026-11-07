@@ -86,6 +86,9 @@ pub use token_params::{parse_token_params, TokenParamsHeader};
 pub use uri::{HostPort, Uri, UriRole};
 pub use user_to_user::UserToUser;
 pub use value::{Folding, HeaderValue};
-pub use via::{has_magic_cookie, hash_branch, same_branch, Rport, Via, BRANCH_MAGIC_COOKIE};
+pub use via::{
+    fold_branch, folded_branch, has_magic_cookie, hash_branch, same_branch, Rport, Via,
+    BRANCH_MAGIC_COOKIE,
+};
 pub use warning::{warn_agents, warning_value, WARN_TEXT_MAX};
 pub use wire::Wire;

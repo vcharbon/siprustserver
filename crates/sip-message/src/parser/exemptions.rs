@@ -64,7 +64,7 @@ impl Exemptions {
     /// a typo never reads as a setting (ADR-0046).
     pub fn read(stated: Option<&str>) -> Result<Self, String> {
         let Some(stated) = stated else { return Ok(Self::NONE) };
-        let named = stated.split(',').map(str::trim).map(|name| match name {
+        let named = stated.split(',').map(crate::whitespace::trim).map(|name| match name {
             "" => Err(format!("names nothing in {stated:?}")),
             name => Exemption::named(name).ok_or_else(|| format!("names no exemption: {name:?}")),
         });

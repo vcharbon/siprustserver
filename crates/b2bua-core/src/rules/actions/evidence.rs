@@ -10,6 +10,7 @@ use sip_message::header::Via;
 use sip_message::{HeaderName, Method, SipRequest, SipResponse, SipStr};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, OutboundBody, Provenance};
+use crate::rules::evidence::names_branch;
 use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{LegEnd, RuleContext};
@@ -99,7 +100,7 @@ impl ActionExecutor<'_> {
                 d.our_cseq = d.our_cseq.max(cseq);
                 if invite {
                     open_relay = d.sent_invite.take().filter(|r| {
-                        r.awaits_final() && r.branch().is_some_and(|b| Some(b) != branch)
+                        r.awaits_final() && r.branch().is_some_and(|b| !names_branch(b, branch))
                     });
                 }
                 if reinvite && d.awaits_invite_final() {

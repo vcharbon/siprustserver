@@ -147,10 +147,10 @@ fn final_beyond_record(ctx: &RuleContext) -> bool {
 }
 
 /// Whether `dialog` holds open a request it sent at `cseq` under a branch
-/// other than `branch`.
+/// other than `branch`, branches compared ignoring case (RFC 3261 §7.3.1).
 fn reused_cseq(dialog: &call::Dialog, cseq: i64, branch: Option<&str>) -> bool {
     let other = |r: &call::RequestRecord| {
-        r.outbound_cseq == cseq && r.branch().is_some_and(|b| Some(b) != branch)
+        r.outbound_cseq == cseq && r.branch().is_some_and(|b| !names_branch(b, branch))
     };
     let open_invite = dialog.sent_invite.as_ref().is_some_and(|r| r.is_sent() && other(r))
         && !call::helpers::invite_taken(dialog);
@@ -247,4 +247,9 @@ fn end_on_evidence(ctx: &RuleContext) -> Option<RuleHandleResult> {
             by_leg: Some(leg),
         },
     ]))
+}
+
+/// Whether `branch` is `sent`'s, compared ignoring case (RFC 3261 §7.3.1).
+pub(crate) fn names_branch(sent: &str, branch: Option<&str>) -> bool {
+    branch.is_some_and(|b| sip_message::header::same_branch(sent, b))
 }

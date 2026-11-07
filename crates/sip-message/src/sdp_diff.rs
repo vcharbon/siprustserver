@@ -23,7 +23,7 @@ struct MediaBlock<'a> {
 fn media_blocks(text: &str) -> Vec<MediaBlock<'_>> {
     let mut blocks: Vec<MediaBlock<'_>> = Vec::new();
 
-    for line in split_lines(text).into_iter().map(str::trim_end) {
+    for line in split_lines(text).into_iter().map(crate::whitespace::trim_end) {
         if line.starts_with(MEDIA_LINE_PREFIX) {
             blocks.push(MediaBlock { m_line: line, attributes: Vec::new() });
         } else if let Some(block) = blocks.last_mut() {

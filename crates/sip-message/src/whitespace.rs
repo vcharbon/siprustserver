@@ -2,9 +2,8 @@
 //! is once a fold is unfolded. A value's edges are trimmed of these two bytes
 //! and of nothing else, so VT, FF, CR, LF and NBSP stay in the value for the
 //! gates and readers past the trim. SDP fields split on the same two bytes
-//! (RFC 4566 §5 separates them with SP), and a part head of a multipart body
-//! reads the same whitespace as a message head. XML text (MSCML) follows XML's
-//! own whitespace rule, not this one.
+//! (RFC 4566 §5 separates them with SP). XML text (MSCML) follows XML's own
+//! whitespace rule, not this one.
 
 /// Whether `b` is SP or HTAB.
 pub(crate) fn is_wsp(b: u8) -> bool {

@@ -38,12 +38,17 @@ fn cap_key() -> TimerKey {
     TimerKey::call(TimerType::NotifyAnswerCap)
 }
 
-/// The subscription an `Event` value names: its package and `id`. A value
-/// the reader rejects names the package it spells.
+/// The subscription an `Event` value of a NOTIFY this stack sends names: its
+/// package and `id`, compared byte by byte (RFC 6665 §8.2.1). The value is
+/// the stack's own and ingress refuses an unreadable Event, so one the reader
+/// rejects is a defect, logged, and keyed as written.
 fn named(event: &str) -> (String, Option<String>) {
     match Event::parse(&SipStr::owned(event)) {
         Ok(event) => subscription_key(&event),
-        Err(_) => (event.trim().to_ascii_lowercase(), None),
+        Err(e) => {
+            tracing::error!(event, reason = %e.reason, "DEFECT: an Event this stack states does not read");
+            (event.to_string(), None)
+        }
     }
 }
 
