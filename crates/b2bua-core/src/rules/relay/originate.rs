@@ -17,7 +17,7 @@ use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 
 use super::address::{address, identity, UnreadableAddress};
-use super::body::{media_type, sdp, source_content_type};
+use super::body::{description_in, media_type, override_content_type};
 use super::egress::apply_b_leg_egress;
 use super::identity::{allocate_leg_contact, dialling_via, stated_contact, CallMarks};
 use super::option_tags::{apply_offered_option_tags, apply_withheld_option_tags};
@@ -26,10 +26,10 @@ use b2bua_sdk::model::Body;
 
 /// What an override's bytes are to the originator's body, the one place an
 /// override is classed: the originator's own bytes are [`SourceBody::Verbatim`];
-/// a body of the originator's media type standing in its place (an untyped
-/// override re-sends that type) is [`SourceBody::Replaced`]; none at all, a body
-/// of another type, or one described by the message it was taken from
-/// ([`Body::descriptors`]) is [`SourceBody::Dropped`] — nothing of the
+/// a body of the originator's media type standing in its place, typed as
+/// [`override_content_type`] types it, is [`SourceBody::Replaced`]; none at
+/// all, a body of another type, or one described by the message it was taken
+/// from ([`Body::descriptors`]) is [`SourceBody::Dropped`] — nothing of the
 /// originator's describes it.
 fn override_role(a_leg_invite: &SipRequest, body: &Body) -> SourceBody {
     let source = a_leg_invite.body();
@@ -40,9 +40,8 @@ fn override_role(a_leg_invite: &SipRequest, body: &Body) -> SourceBody {
         return SourceBody::Verbatim;
     }
     let source_type = a_leg_invite.raw(HeaderName::ContentType).next().and_then(media_type);
-    let override_type = body.content_type.as_deref().and_then(media_type);
-    match (source_type, override_type) {
-        (Some(_), None) => SourceBody::Replaced,
+    let override_type = override_content_type(a_leg_invite, body);
+    match (source_type, override_type.as_deref().and_then(media_type)) {
         (Some(source), Some(stated)) if source.is(stated.token()) => SourceBody::Replaced,
         _ => SourceBody::Dropped,
     }
@@ -114,7 +113,7 @@ fn minted_body(
     skipped: &mut Vec<WriteRefusal>,
 ) -> (Vec<u8>, Option<header::MediaType>, Vec<(String, String)>) {
     if let Some((body, parts)) = body_override.and_then(|b| Some((b, b.parts.as_ref()?))) {
-        let ct = source_content_type(a_leg_invite, body);
+        let ct = override_content_type(a_leg_invite, body);
         let described = override_descriptors(a_leg_invite, body);
         let attached = sip_message::attach_parts(ct.as_deref(), &described, &body.bytes, parts);
         skipped.extend(attached.refused);
@@ -128,16 +127,15 @@ fn minted_body(
         Some(b) => (b.bytes.clone(), Vec::new()),
         None => (a_leg_invite.body().to_vec(), Vec::new()),
     };
-    // An override typed for itself states its type; an untyped one re-sends
-    // the originator's kind of body.
     let content_type = if body.is_empty() {
         None
     } else {
-        body_override
-            .and_then(|b| b.content_type.as_deref())
-            .and_then(media_type)
-            .or_else(|| a_leg_invite.raw(HeaderName::ContentType).next().and_then(media_type))
-            .or_else(|| body_override.map(|_| sdp()))
+        match body_override {
+            Some(b) => override_content_type(a_leg_invite, b),
+            None => a_leg_invite.raw(HeaderName::ContentType).next().map(str::to_string),
+        }
+        .as_deref()
+        .and_then(media_type)
     };
     (body, content_type, described)
 }
@@ -376,6 +374,8 @@ pub fn build_b_leg(
         }
     }
 
+    // The via-extension's offer flag reads the minted body as `sdp()` will.
+    let offer = description_in(&body, content_type.as_ref(), &extra_headers).is_some();
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(request_uri.clone()),
         call_id: b_call_id.clone(),
@@ -386,12 +386,7 @@ pub fn build_b_leg(
             config,
             marks,
             leg_id,
-            super::RequestFacts {
-                method: "INVITE",
-                uri: &request_uri.text(),
-                route: "",
-                offer: !body.is_empty(),
-            },
+            super::RequestFacts { method: "INVITE", uri: &request_uri.text(), route: "", offer },
             branch.clone(),
         )),
         contact: stated_contact(&contact),

@@ -39,6 +39,16 @@ pub fn description_in(
     sip_message::sdp_range(content_type?, disposition, body)
 }
 
+/// The session description `body` holds, typed `content_type` and leaving
+/// beside `lines` ([`description_in`]).
+pub fn description_of<'b>(
+    body: &'b [u8],
+    content_type: Option<&MediaType>,
+    lines: &[SipHeader],
+) -> Option<&'b [u8]> {
+    body.get(description_in(body, content_type, lines)?)
+}
+
 /// True iff `req` carries a session description: a body typed
 /// `application/sdp`, or a `multipart/…` body framing one (RFC 5621 §3.1).
 /// What the offer/answer paths read to tell an offer from a delayed-offer
@@ -47,12 +57,22 @@ pub fn carries_sdp(req: &SipRequest) -> bool {
     req.sdp().is_some()
 }
 
-/// The media type of an override's bytes: the one it states, else the
-/// originator's — an override without one re-sends the originator's body.
-pub fn source_content_type(a_invite: &SipRequest, body: &Body) -> Option<String> {
-    body.content_type
-        .clone()
-        .or_else(|| a_invite.raw(HeaderName::ContentType).next().map(str::to_string))
+/// The media type of an override's bytes (RFC 3261 §20.15): the one its
+/// author states, else the originator's where the bytes are her own body,
+/// else `application/sdp`, the type of a description this stack writes. The
+/// framing of the originator's body never types bytes she did not write.
+/// `None` for an override with no bytes and no stated type.
+pub fn override_content_type(a_invite: &SipRequest, body: &Body) -> Option<String> {
+    if let Some(stated) = &body.content_type {
+        return Some(stated.clone());
+    }
+    if body.bytes.is_empty() {
+        return None;
+    }
+    let own = (body.bytes.as_slice() == a_invite.body().as_ref())
+        .then(|| a_invite.raw(HeaderName::ContentType).next())
+        .flatten();
+    Some(own.map_or_else(|| sdp().token().to_string(), str::to_string))
 }
 
 /// `headers` with the lines describing a sent body ([`Body::descriptors`])
@@ -71,24 +91,22 @@ pub fn describe_body(headers: &mut Vec<SipHeader>, sent: &[u8], descriptors: &[S
 }
 
 /// Whether the INVITE minted from `a_invite` under `body_override` makes an
-/// offer: the originator's body when there is no override, an override's
-/// bytes when it has any, and the session description an override with
-/// attached parts carries (RFC 5621 §3.1).
+/// offer: what `sdp()` reads of the originator's body when there is no
+/// override, else of the override's bytes under their type
+/// (`override_content_type`) and the disposition describing them, a
+/// description beside attached parts included (RFC 5621 §3.1).
 pub fn mints_offer(a_invite: &SipRequest, body_override: Option<&Body>) -> bool {
-    match body_override {
-        None => carries_sdp(a_invite),
-        Some(body) if body.parts.is_none() => !body.bytes.is_empty(),
-        Some(body) => {
-            let described = super::originate::override_descriptors(a_invite, body);
-            let disposition = described
-                .iter()
-                .find(|(name, _)| HeaderName::ContentDisposition.matches(name))
-                .map(|(_, value)| value.as_str());
-            source_content_type(a_invite, body)
-                .and_then(|ct| MediaType::parse(&SipStr::owned(&ct)).ok())
-                .is_some_and(|ct| sip_message::sdp_range(&ct, disposition, &body.bytes).is_some())
-        }
-    }
+    let Some(body) = body_override else {
+        return carries_sdp(a_invite);
+    };
+    let described = super::originate::override_descriptors(a_invite, body);
+    let disposition = described
+        .iter()
+        .find(|(name, _)| HeaderName::ContentDisposition.matches(name))
+        .map(|(_, value)| value.as_str());
+    override_content_type(a_invite, body)
+        .and_then(|ct| MediaType::parse(&SipStr::owned(&ct)).ok())
+        .is_some_and(|ct| sip_message::sdp_range(&ct, disposition, &body.bytes).is_some())
 }
 
 #[cfg(test)]

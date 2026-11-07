@@ -135,4 +135,9 @@ pub struct PromotePemState {
     pub window_open: bool,
     /// CSeq of an outstanding B2BUA-originated resync re-INVITE toward Alice.
     pub resync_reinvite_cseq: Option<i64>,
+    /// Alice's answer in her ACK of the synthetic 200, where her INVITE made
+    /// no offer and the promoted description was B's offer (RFC 3264 §4): the
+    /// ACK of B's 200 carries it.
+    #[serde(default, with = "serde_bytes")]
+    pub caller_answer: Option<Vec<u8>>,
 }

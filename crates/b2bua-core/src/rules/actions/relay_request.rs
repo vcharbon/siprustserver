@@ -97,6 +97,9 @@ impl ActionExecutor<'_> {
             let (body, content_type, author) = match self.answer_owed(call, target_leg, req) {
                 Some((answer, true)) => (answer, Some(relay::sdp()), caller),
                 Some((answer, false)) => (answer, Some(relay::sdp()), relay::Author::Stack),
+                None if self.answers_her_face_only(call, target_leg, req) => {
+                    (Vec::new(), None, caller)
+                }
                 None => (req.body().to_vec(), content_type, caller),
             };
             self.ack_leg(

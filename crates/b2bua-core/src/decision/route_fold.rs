@@ -229,23 +229,24 @@ pub fn admitted(
     // map (ADR-0017 X2).
     let header_updates: Vec<(String, Option<String>)> =
         route.update_headers.as_ref().map(header_lines).unwrap_or_default();
-    // Whether the INVITE this route mints carries an offer: the relayed
-    // a-leg description under `Keep` and `AttachParts`, none under `Drop`, the
-    // substitute under `Replace`. The strategy's withhold and the `fake-prack`
-    // delayed-offer fallback both read it.
-    let offers_sdp = match &route.update_body {
-        BodyUpdate::Keep | BodyUpdate::AttachParts(_) => relay::carries_sdp(a_invite),
-        BodyUpdate::Drop => false,
-        BodyUpdate::Replace(body) => !body.is_empty(),
-    };
-    // Attached parts are composed at the mint, beside the a-leg's description.
-    let attached = match &route.update_body {
+    // The body the route mints the INVITE with: the a-leg's under `Keep`, its
+    // description beside the attached parts under `AttachParts`, none under
+    // `Drop`, the substitute (a body of this stack's, typed by its bytes)
+    // under `Replace`.
+    let body_override = match &route.update_body {
+        BodyUpdate::Keep => None,
         BodyUpdate::AttachParts(parts) => Some(
             b2bua_sdk::model::Body::from_leg(a_invite.body().to_vec(), call.a_leg.leg_id.clone())
                 .with_parts(parts.clone()),
         ),
-        _ => None,
+        BodyUpdate::Drop => Some(b2bua_sdk::model::Body::own(Vec::new(), None)),
+        BodyUpdate::Replace(body) => {
+            Some(b2bua_sdk::model::Body::own(body.clone().into_bytes(), None))
+        }
     };
+    // Whether that INVITE carries an offer: the strategy's withhold and the
+    // `fake-prack` delayed-offer fallback both read it.
+    let offers_sdp = relay::mints_offer(a_invite, body_override.as_ref());
     // A decision field that does not read has no destination behind it: refuse
     // the route rather than originate toward a fabricated address. The
     // caller gets a final (ADR-0022's guarantee holds) and the CDR names the
@@ -262,7 +263,7 @@ pub fn admitted(
         route.new_to.as_deref(),
         config,
         ids,
-        attached.as_ref(),
+        body_override.as_ref(),
         &header_updates,
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
         crate::rules::charging::minting_arm(&call, leg_id, None),
@@ -307,31 +308,6 @@ pub fn admitted(
     // After the mint read the armed strategy's withhold: the fallback the
     // INVITE was minted under is the one the call now runs.
     disable_fake_prack_on_a_delayed_offer(&mut call, offers_sdp);
-
-    // Body substitution on the b-leg INVITE (route.update_body) — one
-    // thaw/freeze, so the INVITE the wire sees and the image it carries stay
-    // the same message.
-    if let crate::effects::OutboundBody::Request(req) = &mut effect.body {
-        let mut draft = req.thaw();
-        match &route.update_body {
-            BodyUpdate::Keep | BodyUpdate::AttachParts(_) => {}
-            BodyUpdate::Drop => {
-                draft = draft.without_body();
-            }
-            BodyUpdate::Replace(s) => {
-                draft = draft.with_body(s.clone().into_bytes().into());
-                effect.provenance = crate::effects::Provenance::Authored;
-            }
-        }
-        if let Ok(edited) = draft.freeze() {
-            *req = edited;
-        }
-        // The dialling INVITE's record holds the INVITE as it leaves; the
-        // leg holds no dialog before a response to it.
-        if let Some(sent) = leg.invite.as_mut().and_then(|r| r.sent.as_mut()) {
-            sent.image = req.image().to_vec();
-        }
-    }
 
     leg.sdp_session = relay::opened(
         &effect,

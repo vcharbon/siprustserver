@@ -136,12 +136,12 @@ impl ActionExecutor<'_> {
         if let Some(pref) = preferred.filter(|p| !p.is_empty() && answers_the_caller) {
             adopt_a_tag(call, &pref);
         }
-        // The relayFirst18x / fake-PRACK cache: the body the relay carries
-        // toward the caller, the policy override else the callee's.
+        // The relayFirst18x / fake-PRACK cache: the description the relay
+        // carries toward the caller, the policy override else the callee's,
+        // the description alone wherever the body framed it.
         let answer_body = match call.policy_update_body.clone() {
             Some(call::PolicyUpdateBody::Bytes(b)) => Some(b),
-            _ if !resp.body().is_empty() => Some(resp.body().to_vec()),
-            _ => None,
+            _ => resp.sdp().map(<[u8]>::to_vec),
         };
         if let (Some(body), Some(d)) = (answer_body, own_a_dialog_mut(call)) {
             d.cached_sdp = Some(body);

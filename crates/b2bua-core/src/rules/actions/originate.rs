@@ -172,6 +172,7 @@ impl ActionExecutor<'_> {
         relay::describe_body(&mut extra, body, descriptors);
         let content_type = (!body.is_empty())
             .then(|| content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp));
+        let description = relay::description_in(body, content_type.as_ref(), &extra);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
@@ -181,7 +182,7 @@ impl ActionExecutor<'_> {
                     method: "INVITE",
                     uri: &gen_dialog.remote_target,
                     route: &relay::route_past_front(self.config, &gen_dialog.route_set),
-                    offer: !body.is_empty(),
+                    offer: description.is_some(),
                 }),
                 branch.clone(),
             )),
@@ -193,7 +194,7 @@ impl ActionExecutor<'_> {
                 author,
                 relay::Carried::InDialog,
                 body.to_vec(),
-                relay::description_in(body, content_type.as_ref(), &extra),
+                description,
                 self.config.sdp_form.as_ref(),
             ),
             content_type,
@@ -329,6 +330,7 @@ impl ActionExecutor<'_> {
             return;
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
+        let description = relay::description_in(body, content_type.as_ref(), &extra_headers);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
@@ -342,7 +344,7 @@ impl ActionExecutor<'_> {
                     } else {
                         String::new()
                     },
-                    offer: m == InDialogMethod::Invite && !body.is_empty(),
+                    offer: m == InDialogMethod::Invite && description.is_some(),
                 }),
                 branch,
             )),
@@ -355,7 +357,7 @@ impl ActionExecutor<'_> {
                 author,
                 relay::Carried::of(&Method::from_wire(method), None, true),
                 body.to_vec(),
-                relay::description_in(body, content_type.as_ref(), &extra_headers),
+                description,
                 self.config.sdp_form.as_ref(),
             ),
             content_type,

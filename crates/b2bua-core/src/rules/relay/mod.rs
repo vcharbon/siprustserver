@@ -58,6 +58,8 @@ mod originate_charging_tests;
 mod originate_line_safety_tests;
 #[cfg(test)]
 mod originate_tests;
+#[cfg(test)]
+mod originate_typing_tests;
 
 // Originating a leg + answering/acknowledging on an existing one.
 pub use a_leg_invite::{caller_invite, note_unrebuilt, rebuild_a_leg_invite};
@@ -99,7 +101,9 @@ pub use provisional_withhold::withhold_from_relayed_provisional;
 
 // Reading text back into typed values (decision fields, dialog state, bodies).
 pub use address::{redirect_contact, UnreadableAddress};
-pub use body::{carries_sdp, describe_body, description_in, media_type, mints_offer, sdp};
+pub use body::{
+    carries_sdp, describe_body, description_in, description_of, media_type, mints_offer, sdp,
+};
 pub use dialog::{received_on, target_dest, to_gen_dialog, uas_addresses, wire_cseq};
 
 // The relayed-failure-headers Call.ext slot.

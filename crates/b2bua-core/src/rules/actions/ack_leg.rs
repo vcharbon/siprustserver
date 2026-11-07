@@ -213,6 +213,23 @@ impl ActionExecutor<'_> {
         );
     }
 
+    /// Whether `ack`, the caller's ACK of her initial INVITE, answers an offer
+    /// made on her face alone: her INVITE made none, and the INVITE this stack
+    /// sent `target_leg` made its own, so that leg's ACK owes no answer (RFC
+    /// 3264 §4) and her description is no part of its round.
+    pub(super) fn answers_her_face_only(
+        &mut self,
+        call: &Call,
+        target_leg: &str,
+        ack: &sip_message::SipRequest,
+    ) -> bool {
+        ack.sdp().is_some()
+            && relay::owes_bare_ack(call, target_leg)
+            && self
+                .caller_invite(call)
+                .is_some_and(|c| c.cseq().seq() == ack.cseq().seq() && c.sdp().is_none())
+    }
+
     /// The answer a relayed ACK of the caller's initial INVITE carrying none
     /// owes `target_leg`'s delayed offer ([`call::OwedAnswer::InAck`]), and
     /// whether it is the caller's: the offer answered out of her own

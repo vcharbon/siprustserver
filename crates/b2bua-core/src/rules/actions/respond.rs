@@ -402,8 +402,8 @@ impl ActionExecutor<'_> {
     /// abandoned early dialog / the ADR-0022 `invariants::enforce` unanswered-a-leg
     /// funnel own the failure paths). Steps: mint/adopt A2, OVERWRITE the a-dialog
     /// `local_tag` to A2 (the MRF `ConfirmDialog` / an earlier 18x pinned A1),
-    /// relay the final/SDP under A2, and confirm the a-leg. The answer SDP is
-    /// kept as the dialog's `cached_sdp` (the relayFirst18x / fake-PRACK
+    /// relay the final/SDP under A2, and confirm the a-leg. The answer's
+    /// description is kept as the dialog's `cached_sdp` (the relayFirst18x / fake-PRACK
     /// cache, mirroring `confirm_dialog`); the §13.3.1.4 repeat needs none of
     /// it — it re-sends the retained datagram.
     ///
@@ -486,6 +486,8 @@ impl ActionExecutor<'_> {
                 })
                 .collect();
         relay::stamp_advertisement(&mut extra_headers, &service_owned, &advert);
+        // The description the answer holds, wherever the body frames it.
+        let answer = relay::description_of(body, content_type.as_ref(), &extra_headers);
         // Built before the a-dialog moves to A2: a refused answer (the INVITE
         // already carries its final) leaves the dialog the caller holds intact.
         let Some(effect) = relay::response_to_a_leg(
@@ -507,14 +509,12 @@ impl ActionExecutor<'_> {
         // Seed the a-dialog if absent (fresh minting adopts A2 directly); when it
         // already exists under the early-media A1, `adopt_a_tag` confirms a
         // dialog of its own under A2 and retires A1 — the early dialog is
-        // superseded, not kept. The answer SDP becomes the dialog's
+        // superseded, not kept. The answer's description becomes the dialog's
         // `cached_sdp`, as `confirm_dialog` keeps it.
         self.ensure_a_dialog_with(call, Some(a2.clone()));
         super::dialog_track::adopt_a_tag(call, &a2);
-        if let Some(d) = super::dialog_track::own_a_dialog_mut(call) {
-            if !body.is_empty() {
-                d.cached_sdp = Some(body.to_vec());
-            }
+        if let (Some(d), Some(answer)) = (super::dialog_track::own_a_dialog_mut(call), answer) {
+            d.cached_sdp = Some(answer.to_vec());
         }
         // This 2xx answers the caller: it goes through the one seam that
         // retains the datagram + arms the §13.3.1.4 ladder.
