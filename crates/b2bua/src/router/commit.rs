@@ -6,15 +6,14 @@
 //! the commit pushes on a call's outbox and reports a turn's marks.
 
 mod held;
+mod rider;
 mod turn_entry;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use b2bua_sdk::event::CallEvent;
 use call::{Call, CallModelState};
-use sip_message::{Method, SipMessage, SipRequest, SipResponse};
-use sip_txn::ServerTxnKey;
+use sip_message::{Method, SipMessage, SipRequest};
 
 use super::departure::primary_departed;
 use super::release::{release_call, ReleaseKind};
@@ -26,7 +25,8 @@ use crate::effects::{
 };
 use crate::turn_probe::TurnPoint;
 pub(super) use held::release_untaken;
-use held::{held_ack_branch, held_cancel_answers, HeldCancel};
+use held::HeldCancel;
+pub(super) use rider::{behind_the_write, Rider};
 use turn_entry::TurnEntry;
 
 /// How a landed turn persists the call and ends it.
@@ -109,14 +109,15 @@ impl Residency {
 }
 
 /// The commit of a turn that landed `landed` on a call living as `residency`
-/// states. A quiet turn is `Active` with no critical effect but its own rung
+/// states, read only for a terminated record. A quiet turn is `Active` with
+/// no critical effect but its own rung
 /// ([`crate::rule_chain::quiet_turn::class`]), so it ends neither the call
 /// nor a takeover.
-fn classify(landed: Landed, residency: Residency) -> CommitKind {
+fn classify(landed: Landed, residency: impl FnOnce() -> Residency) -> CommitKind {
     if let Some(kind) = landed.quiet {
         return CommitKind::Quiet(kind);
     }
-    if landed.state == CallModelState::Terminated && matches!(residency, Residency::Copy) {
+    if landed.state == CallModelState::Terminated && matches!(residency(), Residency::Copy) {
         return CommitKind::DeferToPrimary;
     }
     match (landed.removes, landed.sends_a_rejection, landed.state) {
@@ -146,8 +147,7 @@ pub(super) async fn commit_turn(
         SipMessage::Request(r) => Some(r),
         SipMessage::Response(_) => None,
     });
-    let ack = message.and_then(held_ack_branch);
-    let cancel = trigger.and_then(held_cancel_answers);
+    let (ack, cancel) = trigger.map_or((None, None), held::of);
     let result = crate::landing::land(result, &ctx.landing(), now_ms);
     let kind = TurnKind::of(&result, received);
     let awaited_before = ctx.state.resident(call_ref).is_some_and(|c| !c.awaited.is_empty());
@@ -170,13 +170,7 @@ pub(super) async fn commit_turn(
         };
         crate::model_invariants::check(&turn_record, turn, &ctx.metrics);
     }
-    let landed = Landed::of(&result);
-    // Where the call lives decides only a terminated record's commit.
-    let residency = match landed.state {
-        CallModelState::Terminated => Residency::of(ctx, call_ref),
-        _ => Residency::Primary,
-    };
-    let commit = classify(landed, residency);
+    let commit = classify(Landed::of(&result), || Residency::of(ctx, call_ref));
     let cdr =
         result.effects.buffered.iter().any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr));
     // The landed record is shared with the store from here on: what follows
@@ -196,7 +190,7 @@ pub(super) async fn commit_turn(
         // H. A primary read dead is not there to release the call's keys:
         // they leave with the wire, and the CDR still waits for the primary.
         let limiter_releases = if super::dead_verdict::primary_read_dead(ctx, call_ref) {
-            effects.soft.into_iter().map(|SoftBoundedEffect::ReleaseLimiter { key }| key).collect()
+            limiter_keys(effects.soft)
         } else {
             Vec::new()
         };
@@ -253,11 +247,7 @@ pub(super) async fn commit_turn(
         ack,
         cancel,
         relinquish,
-        limiter_releases: effects
-            .soft
-            .into_iter()
-            .map(|SoftBoundedEffect::ReleaseLimiter { key }| key)
-            .collect(),
+        limiter_releases: limiter_keys(effects.soft),
         callouts,
         ..TurnEntry::new(ctx, call_ref, call, now_ms, effects.outbound, mark)
     };
@@ -319,10 +309,24 @@ async fn persist(
     }
 }
 
-/// Take the turn's buffered observability in: its CDR where the persist did
-/// not take it, and its counters. A copy deferring to its primary leaves the
-/// CDR and the unrecorded termination to the primary's discharge, which
-/// counts it.
+/// Whether a turn committed as `commit` takes `eff` in itself. A turn that
+/// ends the call enqueued its CDR at the persist; a copy deferring to its
+/// primary leaves the CDR and the unrecorded termination to the primary's
+/// discharge, which counts it. Stated text skipped is reported as the turn
+/// landed.
+fn takes(commit: CommitKind, eff: &BufferedObservabilityEffect) -> bool {
+    let deferred = commit == CommitKind::DeferToPrimary;
+    match eff {
+        BufferedObservabilityEffect::WriteCdr => !commit.removes() && !deferred,
+        BufferedObservabilityEffect::TerminationUnrecorded => !deferred,
+        BufferedObservabilityEffect::StatedTextSkipped { .. } => false,
+        BufferedObservabilityEffect::SecondFinalRefused { .. }
+        | BufferedObservabilityEffect::ProvisionalAfterFinalRefused { .. }
+        | BufferedObservabilityEffect::GoingAwayAbsorbed { .. } => true,
+    }
+}
+
+/// Take in the buffered observability a turn committed as `commit` takes.
 async fn observe(
     ctx: &RouterCtx,
     call: &Call,
@@ -330,10 +334,8 @@ async fn observe(
     commit: CommitKind,
     now_ms: i64,
 ) {
-    let deferred = commit == CommitKind::DeferToPrimary;
-    for eff in buffered {
+    for eff in buffered.iter().filter(|eff| takes(commit, eff)) {
         match eff {
-            BufferedObservabilityEffect::WriteCdr if commit.removes() || deferred => {}
             BufferedObservabilityEffect::WriteCdr => ctx.cdr.write(call, now_ms).await,
             BufferedObservabilityEffect::SecondFinalRefused { .. } => {
                 ctx.metrics.bump_second_final_refused()
@@ -344,26 +346,32 @@ async fn observe(
             BufferedObservabilityEffect::GoingAwayAbsorbed { .. } => {
                 ctx.metrics.bump_going_away_absorbed()
             }
-            BufferedObservabilityEffect::TerminationUnrecorded if deferred => {}
             BufferedObservabilityEffect::TerminationUnrecorded => {
                 ctx.metrics.bump_termination_unrecorded()
             }
-            // Reported as the turn landed.
             BufferedObservabilityEffect::StatedTextSkipped { .. } => {}
         }
     }
 }
 
-/// Commit `call`, the setup a CANCEL of `invite` marked while its routing
-/// decision was asked, with the release of the CANCEL's held answers behind
-/// its write: the turn reports `Logged` and `Left` as a handler turn does.
+/// The limiter keys the turn's `soft` effects release.
+fn limiter_keys(soft: Vec<SoftBoundedEffect>) -> Vec<String> {
+    soft.into_iter().map(|SoftBoundedEffect::ReleaseLimiter { key }| key).collect()
+}
+
+/// Commit `call` marked cancelled ([`Call::setup_cancelled`]), the setup a
+/// CANCEL of `invite` reached while its routing decision was asked, with the
+/// release of the CANCEL's held answers behind its write: the turn reports
+/// `Logged` and `Left` as a handler turn does.
 pub(super) async fn commit_cancel(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    call: Call,
+    call: &Call,
     invite: &SipRequest,
 ) {
-    let call = Arc::new(call);
+    let mut marked = call.clone();
+    marked.setup_cancelled = true;
+    let call = Arc::new(marked);
     let wrote = ctx.state.write(Arc::clone(&call));
     let version = ctx.state.topology(call_ref).map_or((0, 0), |t| (t.gen, t.bak_gen));
     let kind = TurnKind::on_request();
@@ -373,49 +381,9 @@ pub(super) async fn commit_cancel(
     push(ctx, call_ref, TurnEntry { cancel: Some(HeldCancel::of(invite)), ..entry }).await;
 }
 
-/// What the router sends behind a call's latest write for a turn that lands
-/// no record of its own. It reports no turn mark.
-pub(super) enum Rider {
-    /// The caller's 100 to the INVITE whose call the write created.
-    Trying(Box<SipRequest>),
-    /// The router's answer to a request it refused, to where it is sent.
-    Answer(Box<SipResponse>, SocketAddr),
-    /// The server transactions of requests another copy answered.
-    Relinquish(Vec<ServerTxnKey>),
-}
-
-impl Rider {
-    async fn send(self, ctx: &RouterCtx) {
-        match self {
-            Rider::Trying(invite) => {
-                let _ = ctx.txn.release_trying(&invite).await;
-            }
-            Rider::Answer(answer, dest) => {
-                let _ = ctx.txn.send_response(*answer, dest).await;
-            }
-            Rider::Relinquish(keys) => {
-                for key in keys {
-                    let _ = ctx.txn.relinquish_server(key).await;
-                }
-            }
-        }
-    }
-}
-
-/// Queue `rider` on `call_ref`'s outbox behind the call's latest write.
-pub(super) async fn behind_the_write(ctx: &Arc<RouterCtx>, call_ref: &str, rider: Rider) {
-    let sender = ctx.clone();
-    let wait = ctx.state.hold_target(call_ref);
-    let send: super::outbox::Effects =
-        Box::new(move |_| Box::pin(async move { rider.send(&sender).await }));
-    ctx.outboxes.push(call_ref, wait, send).await;
-}
-
-/// Queue `entry` on `call_ref`'s outbox, waiting for the call's current
-/// change-log entry.
+/// Queue `entry` on `call_ref`'s outbox behind the call's latest write.
 async fn push(ctx: &Arc<RouterCtx>, call_ref: &str, entry: TurnEntry) {
-    let wait = ctx.state.hold_target(call_ref);
-    ctx.outboxes.push(call_ref, wait, Box::new(|released| Box::pin(entry.run(released)))).await;
+    rider::behind(ctx, call_ref, Box::new(|released| Box::pin(entry.run(released)))).await;
 }
 
 #[cfg(test)]

@@ -24,7 +24,7 @@ Two structural defects follow from the split.
 **A repeat can be re-composed rather than repeated.** RFC 3261 §13.3.1.4 and
 RFC 3262 §3 both make a retransmission *the same response*, and both sites say
 so in a doc comment — but the retained bytes reach the socket through
-`OutboundBody::Response`, so `emit_outbound` (`router/commit/turn_entry.rs`)
+`OutboundBody::Response`, so `emit_outbound` (`router/interpret.rs:224`)
 re-parses and re-serializes them. Every field the parser normalises or the
 serializer re-orders is a divergence the type system permits. This class of
 bug has been fixed three times from the wire (`0be93ff`, `0fd2c3a`, `dee5e36`)

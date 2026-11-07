@@ -1,13 +1,14 @@
 //! `SipRouter` — consumes the transaction-layer event stream + the timer fire
 //! channel, resolves each event's `callRef` (synchronously), dispatches the
-//! handler body to the per-call FIFO, and interprets the typed effects in the
-//! fixed order (persist → critical → outbound → soft → buffered).
+//! handler body to the per-call FIFO, and commits each turn's result
+//! (`commit`).
 //!
 //! One concern per submodule: `inbox` what the loop takes next (the keepalive
 //! lane first), `resolve` keys events to calls, `ingress` is
 //! the pre-dispatch pipeline, `admit` a new INVITE's router rungs of the
 //! admission ladder, `process` the per-call handler body,
-//! `interpret` the effect interpreter, `callouts` the fire-and-forget
+//! `commit` the tail of a turn, `turn_mark` a turn's marks at the turn-point
+//! seam, `callouts` the fire-and-forget
 //! async-HTTP folds, `materialise` the one path a stored replica takes to
 //! become the live copy this node serves (takeover or reclaim), `departure`
 //! the takeover of a departed peer's in-flight calls, `undecided` the end of
@@ -127,7 +128,7 @@ use b2bua_sdk::event::CallEvent;
 
 pub use b2bua_decision::AdaptationHttpPort;
 
-/// Everything a handler body + the interpreter need. Shared via `Arc`.
+/// Everything a handler body and the turn commit need. Shared via `Arc`.
 pub struct RouterCtx {
     pub config: B2buaConfig,
     /// This worker as a request record names the worker that relayed it: its

@@ -35,14 +35,6 @@ pub(super) async fn consult_writing_its_cancel(
         () = watch.marked() => {}
     }
     drop(watch);
-    write_the_cancel(ctx, call_ref, call, invite).await;
+    commit_cancel(ctx, call_ref, call, invite).await;
     consult.await
-}
-
-/// Write `call` marked cancelled, with the release of the CANCEL's held
-/// answers behind that write.
-async fn write_the_cancel(ctx: &Arc<RouterCtx>, call_ref: &str, call: &Call, invite: &SipRequest) {
-    let mut marked = call.clone();
-    marked.setup_cancelled = true;
-    commit_cancel(ctx, call_ref, marked, invite).await;
 }

@@ -31,9 +31,19 @@ impl HeldCancel {
     }
 }
 
+/// What the layer holds for the turn `trigger` starts: the branch of the
+/// client INVITE whose non-2xx final it is, and the CANCEL it reports.
+pub fn of(trigger: &CallEvent) -> (Option<String>, Option<HeldCancel>) {
+    let ack = match trigger {
+        CallEvent::Sip { message, .. } => held_ack_branch(message),
+        _ => None,
+    };
+    (ack, held_cancel_answers(trigger))
+}
+
 /// The branch of the client INVITE transaction whose non-2xx final `trigger`
 /// is: the layer holds its ACK until the turn's entry releases it.
-pub fn held_ack_branch(trigger: &SipMessage) -> Option<String> {
+fn held_ack_branch(trigger: &SipMessage) -> Option<String> {
     let SipMessage::Response(resp) = trigger else { return None };
     if *resp.cseq().method() != Method::Invite || resp.status() < 300 {
         return None;
@@ -43,7 +53,7 @@ pub fn held_ack_branch(trigger: &SipMessage) -> Option<String> {
 
 /// The CANCEL `trigger` reports: the layer holds the 200 to it and the 487
 /// to the INVITE until the turn's entry releases them.
-pub fn held_cancel_answers(trigger: &CallEvent) -> Option<HeldCancel> {
+fn held_cancel_answers(trigger: &CallEvent) -> Option<HeldCancel> {
     let CallEvent::Cancelled { call_id, from_tag, invite_cseq, .. } = trigger else {
         return None;
     };
@@ -54,14 +64,11 @@ pub fn held_cancel_answers(trigger: &CallEvent) -> Option<HeldCancel> {
 /// Release what the layer holds for `event`'s turn when no turn's outbox
 /// entry took it: no write records it, so nothing is waited for.
 pub async fn release_untaken(ctx: &RouterCtx, event: &CallEvent) {
-    let held_ack = match event {
-        CallEvent::Sip { message, .. } => held_ack_branch(message),
-        _ => None,
-    };
-    if let Some(branch) = held_ack {
+    let (ack, cancel) = of(event);
+    if let Some(branch) = ack {
         let _ = ctx.txn.release_ack(&branch).await;
     }
-    if let Some(held) = held_cancel_answers(event) {
+    if let Some(held) = cancel {
         held.release(ctx).await;
     }
 }
