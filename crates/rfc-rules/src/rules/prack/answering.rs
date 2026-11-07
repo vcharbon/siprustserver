@@ -85,7 +85,9 @@ impl Obligation for UnmatchedPrackProxied {
 /// transaction drew a 2xx for left the unacknowledged list as that PRACK
 /// arrived, whenever its 2xx left (§3), the right `RSeq`
 /// under another INVITE's CSeq names nothing, and a sibling fork's number
-/// names nothing here (§3, errata 4600). Charges the UAS.
+/// names nothing here (§3, errata 4600). Charges the UAS. A PRACK the strict
+/// reading refuses ([`crate::Msg::refused`]) owes its 400 instead and is no
+/// occasion.
 pub struct Prack2xxOr481;
 
 impl Obligation for Prack2xxOr481 {
@@ -93,8 +95,10 @@ impl Obligation for Prack2xxOr481 {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for (key, list) in &seen.answers {
-            let Some(prack) =
-                seen.served.get(key).filter(|s| s.method.eq_ignore_ascii_case("PRACK"))
+            let Some(prack) = seen
+                .served
+                .get(key)
+                .filter(|s| s.method.eq_ignore_ascii_case("PRACK") && !wire.msgs[s.msg].refused)
             else {
                 continue;
             };

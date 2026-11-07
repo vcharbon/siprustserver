@@ -24,6 +24,7 @@ fn answer(dst: &str, via: &str) -> Msg {
          Content-Length: 0\r\n\r\n"
     );
     Msg {
+        refused: false,
         at_us: 1_000,
         src: BOB.to_string(),
         dst: dst.to_string(),
@@ -107,15 +108,17 @@ fn a_name_or_an_unaddressed_vantage_is_undecidable() {
     assert!(matches!(unaddressed, Decision::Undecidable(_)), "{unaddressed:?}");
 }
 
-/// A reliable transport answers on the request's connection, a repeat opens
-/// no occasion of its own, and a request is no response.
+/// A reliable transport answers on the request's connection, a repeat to its
+/// first copy's destination opens no occasion of its own, and a request is no
+/// response.
 #[test]
 fn a_reliable_transport_a_repeat_and_a_request_open_no_occasion() {
     assert!(eval(&[answer("192.0.2.10:6000", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bK-d")])
         .is_empty());
-    let mut repeat = answer("192.0.2.10:6000", "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-d");
+    let via = "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-d";
+    let mut repeat = answer(ALICE, via);
     repeat.repeat = true;
-    assert!(eval(&[repeat]).is_empty());
+    assert_eq!(eval(&[answer(ALICE, via), repeat]).len(), 1, "the copy to the same place");
     let mut request = answer(ALICE, "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-d");
     request.kind = Kind::Request { method: "OPTIONS".to_string() };
     assert!(eval(&[request]).is_empty());
@@ -126,4 +129,44 @@ fn a_reliable_transport_a_repeat_and_a_request_open_no_occasion() {
 fn the_sender_is_charged() {
     let all = eval(&[answer("192.0.2.10:6000", "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-d")]);
     assert_eq!((all[0].emitter.as_str(), all[0].taker.as_str()), (BOB, "192.0.2.10:6000"));
+}
+
+/// A repeat sent somewhere its first copy was not is judged on its own: a
+/// stray copy after a correct one is the miss.
+#[test]
+fn a_repeat_sent_elsewhere_is_judged() {
+    let via = "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-d";
+    let mut stray = answer("192.0.2.10:6000", via);
+    stray.repeat = true;
+    let all = eval(&[answer(ALICE, via), stray]);
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert!(matches!(all[0].decision, Decision::Compliant), "{:?}", all[0].decision);
+    assert!(matches!(all[1].decision, Decision::Violated(_)), "{:?}", all[1].decision);
+}
+
+/// A Via still asking for `rport` names its sent-by port, and the evidence
+/// says the stamp was never written.
+#[test]
+fn an_unfilled_rport_is_named_on_the_evidence() {
+    let unfilled =
+        decision("192.0.2.10:6000", "SIP/2.0/UDP 192.0.2.10:5061;rport;branch=z9hG4bK-d");
+    let Decision::Violated(Evidence::ResponseDestinationDiverged {
+        rport_unfilled,
+        via_target,
+        ..
+    }) = unfilled
+    else {
+        panic!("{unfilled:?}");
+    };
+    assert!(rport_unfilled);
+    assert_eq!(via_target, "192.0.2.10:5061");
+    let stamped =
+        decision("192.0.2.10:6000", "SIP/2.0/UDP 192.0.2.10:5061;rport=6001;branch=z9hG4bK-d");
+    assert!(
+        matches!(
+            stamped,
+            Decision::Violated(Evidence::ResponseDestinationDiverged { rport_unfilled: false, .. })
+        ),
+        "{stamped:?}"
+    );
 }

@@ -26,6 +26,7 @@ fn msg(
     to_tag: Option<&str>,
 ) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),

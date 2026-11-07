@@ -69,6 +69,16 @@ fn a_plain_18x_against_require_100rel_charges_the_uas() {
     );
 }
 
+/// A request the strict reading refuses owes its 400, not the reliable
+/// provisional its `Require: 100rel` would otherwise demand.
+#[test]
+fn a_refused_invite_requiring_100rel_is_no_occasion() {
+    let mut refused = invite_on(1_000_000, "Require: 100rel\r\n", None, false);
+    refused.refused = true;
+    let msgs = vec![refused, inv_resp(1_100_000, 180, "", false)];
+    assert!(decide(&RequireReliable1xxOnRequire, &msgs).is_empty());
+}
+
 /// `reliable-needs-client-opt-in`: `Supported` alone licenses the PRACK
 /// machinery; an INVITE this vantage never carried witnesses no
 /// negotiation and settles nothing.

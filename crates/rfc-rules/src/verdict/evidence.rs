@@ -445,11 +445,9 @@ pub enum Evidence {
         /// The response kept an `rport` carrying no readable port, rather than
         /// dropping the parameter outright.
         echoed_empty: bool,
-        /// The port the response's `rport` names, where it names one other than
-        /// `source_port`.
+        /// The port the echo names, where it is not `source_port`.
         echoed_port: Option<u16>,
-        /// The source port the request left from at this vantage, where the
-        /// response echoed another.
+        /// The port the request left from, where the echo names another.
         source_port: Option<u16>,
     },
     /// The response sent over unreliable unicast to an address other than the
@@ -471,6 +469,8 @@ pub enum Evidence {
         /// The `host:port` the top Via names: `received` over the sent-by
         /// host, an observed `rport` over its port.
         via_target: String,
+        /// The top Via still asks for `rport`: the source port was never stamped.
+        rport_unfilled: bool,
     },
     /// The re-INVITE or INVITE 2xx that advertised no capability set.
     ///

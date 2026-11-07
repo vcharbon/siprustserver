@@ -25,6 +25,7 @@ fn on(branch: &str, mut m: Msg) -> Msg {
 
 fn msg(at_us: u64, src: &str, dst: &str, kind: Kind, cseq_method: &str) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),

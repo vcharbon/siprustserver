@@ -67,3 +67,40 @@ fn a_response_past_its_via_target_is_reported_at_the_sender() {
     let aimed = vec![sent(SUT, answer, ALICE, 0)];
     assert!(live(RuleId::ResponseDestination).check_positioned(&aimed).is_empty());
 }
+
+/// A response whose Via still asks for `rport` names the missing stamp.
+#[test]
+fn a_response_with_an_unfilled_rport_names_the_missing_stamp() {
+    let answer = format!(
+        "SIP/2.0 200 OK\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5061;rport;branch=z9hG4bK-o\r\n\
+             From: <{A}>;tag=at\r\n\
+             To: <{B}>;tag=bt\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: 5 OPTIONS\r\n\
+             Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes();
+    let out = live(RuleId::ResponseDestination).check_positioned(&[sent(SUT, answer, ALICE, 0)]);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(out[0].1.contains("still asks for rport"), "{}", out[0].1);
+}
+
+/// A byte-identical copy sent somewhere its first copy was not is reported.
+#[test]
+fn a_stray_copy_after_a_correct_one_is_reported() {
+    let answer = format!(
+        "SIP/2.0 200 OK\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-rep;received=127.0.0.1;rport=5060\r\n\
+             From: <{A}>;tag=at\r\n\
+             To: <{B}>;tag=bt\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: 5 INVITE\r\n\
+             Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes();
+    let evs = vec![sent(SUT, answer.clone(), ALICE, 0), sent(SUT, answer, "127.0.0.1:5999", 500)];
+    let out = live(RuleId::ResponseDestination).check_positioned(&evs);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(out[0].1.contains("sent to 127.0.0.1:5999"), "{}", out[0].1);
+}

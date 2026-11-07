@@ -80,6 +80,10 @@ pub struct Msg {
     /// never a guess. `Some(&[])` is the opposite fact: the message
     /// demonstrably carried no body.
     pub body: Option<Vec<u8>>,
+    /// The strict reading of RFC 3261 refuses this message: a request a stack
+    /// answers 400 or drops at ingress. It owes no other final, so a rule that
+    /// dictates which final a request is owed opens no occasion on it.
+    pub refused: bool,
 }
 
 impl Msg {
@@ -160,6 +164,7 @@ mod tests {
         let sdp = b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_vec();
         for ct in ["Content-Type:\r\n application/sdp", "Content-Type: application / sdp"] {
             let msg = Msg {
+                refused: false,
                 at_us: 0,
                 src: "a".into(),
                 dst: "b".into(),
@@ -189,6 +194,7 @@ mod tests {
         let sdp = b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_vec();
         let msg = |ct: &str| {
             Msg {
+                refused: false,
             at_us: 0,
             src: "a".into(),
             dst: "b".into(),

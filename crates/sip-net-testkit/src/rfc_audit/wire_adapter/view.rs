@@ -91,6 +91,10 @@ pub(super) fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindV
     // is its repeat.
     let mut unread: HashSet<(LaneKey, Vec<u8>)> = HashSet::new();
     let parser = crate::rfc_audit::lenient_parser();
+    // The strict reading of RFC 3261, which marks what a stack refuses at
+    // ingress (`Msg::refused`). A shape a deployment exempts reads as refused
+    // here too: it then opens no owed-final occasion, and no false one.
+    let strict = sip_message::CustomParser::built();
 
     for s in events {
         let (bind, facts, repeat, src, dst, head): (
@@ -152,6 +156,7 @@ pub(super) fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindV
         // model's tiebreak); a µs bump inside the tied ms preserves it.
         let at_us = (s.at_ms * 1_000).max(view.msgs.last().map_or(0, |m| m.at_us + 1));
         view.meta.push((s.seq, facts.call_id.clone()));
+        let refused = strict.parse(&head).is_err();
         view.msgs.push(Msg {
             at_us,
             src,
@@ -169,6 +174,7 @@ pub(super) fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindV
             // The vantage IS the datagram, so the body is always carried: a
             // message with none states an EMPTY one, never an unknown one.
             body: Some(facts.body),
+            refused,
         });
     }
     order.into_iter().filter_map(|b| views.remove(&b)).collect()

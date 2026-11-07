@@ -31,6 +31,7 @@ fn request(method: &str, extra: &str, body: &[u8]) -> Msg {
     let mut head = text.into_bytes();
     head.extend_from_slice(body);
     Msg {
+        refused: false,
         at_us: 1_000,
         src: UA.to_string(),
         dst: PEER.to_string(),

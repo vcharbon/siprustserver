@@ -60,6 +60,8 @@ fn msg_of(m: &MsgJson, call_id: &str) -> Msg {
         to_tag: to.tag.clone(),
         head: head_bytes(&m.payload),
         body: m.payload.body(),
+        // Extraction set aside every message its reading refuses.
+        refused: false,
     }
 }
 

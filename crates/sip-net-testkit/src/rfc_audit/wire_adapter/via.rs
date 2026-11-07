@@ -45,11 +45,19 @@ fn response_destination(f: &rfc_rules::Finding, _cid: &str) -> String {
         response_dest_method,
         dest_sent_to,
         via_target,
+        rport_unfilled,
         ..
     }) = &f.decision
     else {
         return String::new();
     };
+    if *rport_unfilled {
+        return format!(
+            "response {status} to {response_dest_method} sent to {dest_sent_to}, where its top \
+             Via names {via_target}: the Via still asks for rport, which RFC 3581 §4 has the \
+             server fill with the source port it then answers at"
+        );
+    }
     format!(
         "response {status} to {response_dest_method} sent to {dest_sent_to}, where its top Via \
          names {via_target} — RFC 3261 §18.2.2 / RFC 3581 §4"

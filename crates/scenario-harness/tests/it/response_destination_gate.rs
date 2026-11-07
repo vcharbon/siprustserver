@@ -6,9 +6,19 @@ use scenario_harness::{report, Harness, RunReport};
 use sip_message::generators::{generate_response, GenerateResponseOpts, OutOfDialogMethod};
 use sip_message::{CustomParser, SipMessage, SipParser};
 
+/// Where the SUT sends a copy of its answer no one listens for.
+#[derive(Clone, Copy)]
+enum Stray {
+    None,
+    /// Before the copy to her Via target.
+    First,
+    /// After it: a repeat sent where its first copy was not.
+    After,
+}
+
 /// Alice sends an OPTIONS to the SUT, which answers 480 to her Via target,
-/// after a first copy to an address no one listens on when `strays`.
-async fn sut_answers(h: &Harness, strays: bool) {
+/// with a copy to an address no one listens on where `stray` says.
+async fn sut_answers(h: &Harness, stray: Stray) {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let (sut, sut_addr) = h.bind_sut("sut", "127.0.0.1:5080").await;
@@ -22,11 +32,14 @@ async fn sut_answers(h: &Harness, strays: bool) {
     let opts = GenerateResponseOpts { to_tag: Some("sut-tag".into()), ..Default::default() };
     let answer =
         generate_response(&req, 480, "Temporarily Unavailable", &opts).expect("the SUT's answer");
-    if strays {
+    if matches!(stray, Stray::First) {
         sut.send_to(answer.image(), h.next_addr()).await.expect("the stray copy leaves");
     }
     sut.send_to(answer.image(), packet.src).await.expect("the answer leaves");
     options.expect(480).await;
+    if matches!(stray, Stray::After) {
+        sut.send_to(answer.image(), h.next_addr()).await.expect("the stray copy leaves");
+    }
 }
 
 /// The report's severity of the response-destination finding the run recorded.
@@ -42,14 +55,22 @@ fn response_destination_advisory(run: &RunReport) -> Option<bool> {
 #[should_panic(expected = "red because RFC audit rule response-destination fired (charged to sut)")]
 async fn a_sut_answering_past_the_via_target_fails_the_run() {
     let h = Harness::new("response-destination-sut-strays");
-    sut_answers(&h, true).await;
+    sut_answers(&h, Stray::First).await;
+    h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "red because RFC audit rule response-destination fired (charged to sut)")]
+async fn a_sut_repeating_its_answer_past_the_via_target_fails_the_run() {
+    let h = Harness::new("response-destination-sut-strays-after");
+    sut_answers(&h, Stray::After).await;
     h.finish().await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_sut_answering_the_via_target_passes() {
     let h = Harness::new("response-destination-sut-aims");
-    sut_answers(&h, false).await;
+    sut_answers(&h, Stray::None).await;
     h.finish().await;
 }
 

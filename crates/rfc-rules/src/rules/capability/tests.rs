@@ -32,6 +32,7 @@ fn invite(at_us: u64, branch: &str, cseq: u32, to_tag: Option<&str>, extra: &str
              {extra}Content-Length: 0\r\n\r\n"
     );
     Msg {
+        refused: false,
         at_us,
         src: ALICE.to_string(),
         dst: BOB.to_string(),
@@ -61,6 +62,7 @@ fn ok(at_us: u64, cseq: u32, extra: &str) -> Msg {
              {extra}Content-Length: 0\r\n\r\n"
     );
     Msg {
+        refused: false,
         at_us,
         src: BOB.to_string(),
         dst: ALICE.to_string(),
@@ -200,6 +202,7 @@ fn taken(at_us: u64, method: &str, branch: &str, cseq: u32, extra: &str) -> Msg 
              {extra}Content-Length: 0\r\n\r\n"
     );
     Msg {
+        refused: false,
         at_us,
         src: ALICE.to_string(),
         dst: BOB.to_string(),
@@ -229,6 +232,7 @@ fn answered(at_us: u64, status: u16, method: &str, branch: &str, cseq: u32, extr
              {extra}Content-Length: 0\r\n\r\n"
     );
     Msg {
+        refused: false,
         at_us,
         src: BOB.to_string(),
         dst: ALICE.to_string(),
@@ -397,6 +401,26 @@ fn a_request_with_no_head_opens_no_require_occasion() {
         answered(2_000, 200, "INVITE", "z9hG4bK-i", 1, ""),
     ];
     msgs[0].head = None;
+    assert!(run(&UnsupportedExtension420, &msgs).is_empty());
+}
+
+/// A request the strict reading refuses owes its 400, whatever method it
+/// names: an unknown one opens no §8.2.1 occasion.
+#[test]
+fn a_refused_request_owes_no_405() {
+    let mut refused = taken(1_000, "FROBNICATE", "z9hG4bK-x", 1, "");
+    refused.refused = true;
+    let msgs = [refused, answered(2_000, 400, "FROBNICATE", "z9hG4bK-x", 1, "")];
+    assert!(run(&UnsupportedMethod405Allow, &msgs).is_empty());
+}
+
+/// A request the strict reading refuses owes its 400, whatever it requires:
+/// an unsupported tag opens no §8.2.2 occasion.
+#[test]
+fn a_refused_request_owes_no_420() {
+    let mut refused = taken(1_000, "INVITE", "z9hG4bK-i", 1, "Require: frobnicate\r\n");
+    refused.refused = true;
+    let msgs = [refused, answered(2_000, 400, "INVITE", "z9hG4bK-i", 1, "")];
     assert!(run(&UnsupportedExtension420, &msgs).is_empty());
 }
 

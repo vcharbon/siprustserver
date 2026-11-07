@@ -15,6 +15,7 @@ const UAS: &str = "10.0.0.2:5060";
 /// A response the UAS sent, its bytes given in full.
 fn rsp(at_us: u64, status: u16, method: &str, to_tag: &str, raw: &str) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: UAS.to_string(),
         dst: UAC.to_string(),
@@ -35,6 +36,7 @@ fn rsp(at_us: u64, status: u16, method: &str, to_tag: &str, raw: &str) -> Msg {
 /// A request the UAC sent, its bytes given in full.
 fn req(at_us: u64, method: &str, branch: &str, raw: &str) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: UAC.to_string(),
         dst: UAS.to_string(),

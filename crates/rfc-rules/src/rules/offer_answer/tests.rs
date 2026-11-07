@@ -76,6 +76,7 @@ fn req(
     body: Option<&str>,
 ) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),
@@ -103,6 +104,7 @@ fn resp(
     body: Option<&str>,
 ) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),

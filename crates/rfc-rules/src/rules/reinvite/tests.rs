@@ -30,6 +30,7 @@ fn req(
     to_tag: &str,
 ) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),
@@ -61,6 +62,7 @@ fn rsp(
     head: &str,
 ) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),
@@ -131,6 +133,23 @@ fn a_same_sender_race_answered_491_is_violated() {
         panic!("{:?}", f[0].decision)
     };
     assert_eq!(*answered_status, 491);
+}
+
+/// A re-INVITE the strict reading refuses is neither an occasion nor in
+/// progress: its 400 is owed, and a later re-INVITE races nothing.
+#[test]
+fn a_refused_reinvite_opens_no_race() {
+    let mut refused = req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt");
+    refused.refused = true;
+    let mut racing = req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt");
+    racing.refused = true;
+    let msgs = [
+        refused,
+        racing,
+        req(3_000, ALICE, BOB, "INVITE", "z9hG4bK-3", 4, "at", "bt"),
+        rsp(4_000, BOB, ALICE, 200, "z9hG4bK-3", 4, "at", "bt", ""),
+    ];
+    assert!(eval(&ConcurrentReInvite500Or491, &msgs).is_empty());
 }
 
 /// A re-INVITE crossing one of the other party's at a hop that carries

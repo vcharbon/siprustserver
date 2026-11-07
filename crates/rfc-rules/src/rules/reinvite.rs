@@ -103,6 +103,10 @@ pub const REINVITE_FINAL_WINDOW_US: u64 = 180_000_000;
 /// **Only the FINAL answers §14.2.** A 100 Trying precedes a compliant 491 and
 /// must not stand in for it, so the verdict reads the transaction's first final
 /// and nothing earlier.
+///
+/// **A re-INVITE the strict reading refuses ([`Msg::refused`]) is neither an
+/// occasion nor in progress**: the UAS answers it 400 or drops it, and no
+/// session change rides it.
 pub struct ConcurrentReInvite500Or491;
 
 impl Obligation for ConcurrentReInvite500Or491 {
@@ -125,7 +129,9 @@ impl Obligation for ConcurrentReInvite500Or491 {
                 continue;
             };
             match &msg.kind {
-                Kind::Request { method } if method.eq_ignore_ascii_case("INVITE") => {
+                Kind::Request { method }
+                    if method.eq_ignore_ascii_case("INVITE") && !msg.refused =>
+                {
                     let taker = msg.dst.as_str();
                     let (Some(from_tag), Some(to_tag)) = tags(msg) else { continue };
                     let txn = TxnKey {

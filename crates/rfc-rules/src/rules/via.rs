@@ -162,6 +162,7 @@ mod tests {
              Content-Length: 0\r\n\r\n"
         );
         Msg {
+            refused: false,
             at_us,
             src: ALICE.to_string(),
             dst: BOB.to_string(),
@@ -191,6 +192,7 @@ mod tests {
              Content-Length: 0\r\n\r\n"
         );
         Msg {
+            refused: false,
             at_us,
             src: BOB.to_string(),
             dst: ALICE.to_string(),

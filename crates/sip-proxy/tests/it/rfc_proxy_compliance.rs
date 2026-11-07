@@ -9,6 +9,7 @@
 //!   * §16.7.3       — response with a foreign top Via is discarded
 //!   * §16.7.3       — response with fewer than two Via values is not forwarded
 //!   * §16.7.4       — proxy removes its own (top) Via before relaying a response
+//!   * §18.2.2       — a relayed response goes to the received/rport target
 //!   * §16.3 step 5  — Proxy-Require with an unsupported option-tag → 420 + Unsupported
 //!                     (EXPECTED GAP — currently unimplemented; see test note)
 
@@ -17,6 +18,7 @@ use std::time::Duration;
 
 use common::{forward_all, spawn_proxy};
 use scenario_harness::{Harness, WaiverScope};
+use sip_message::generators::OutOfDialogMethod;
 use sip_message::header::{MaxForwards, Unsupported, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::HeaderName;
@@ -290,5 +292,26 @@ Content-Length: 0\r\n\r\n",
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(bob_ep.try_recv().is_none(), "bob must see nothing on a 400");
+    let _ = h.finish().await;
+}
+
+// ── §18.2.2 / RFC 3581 §4 — a relayed response goes to the received/rport target ──
+/// Alice behind a NAT names an address she does not listen on as her Via
+/// sent-by and asks for `rport`: the proxy stamps her source on that Via, and
+/// bob's 200 relayed back reaches her there, as `response-destination` gates.
+#[tokio::test(start_paused = true)]
+async fn a_relayed_response_reaches_a_caller_behind_nat_at_her_source() {
+    let h = Harness::new("rfc-relayed-response-behind-nat");
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (strategy, registry) = forward_all(bob.addr());
+    let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
+    let alice = h
+        .agent("alice", "127.0.0.1:5060")
+        .await
+        .behind_nat("192.0.2.77:5099".parse().expect("an address"));
+    let mut options =
+        alice.request(OutOfDialogMethod::Options, &bob).through(proxy.addr()).send().await;
+    bob.receive("OPTIONS").await.respond(200, "OK").await;
+    options.expect(200).await;
     let _ = h.finish().await;
 }

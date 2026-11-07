@@ -16,6 +16,7 @@ const UAS: &str = "10.0.0.2:5060";
 /// A response the UAS sent on `branch` for a `method` transaction.
 fn rsp(at_us: u64, status: u16, branch: &str, method: &str) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: UAS.to_string(),
         dst: UAC.to_string(),

@@ -1,8 +1,10 @@
 //! RFC 3261 §18.2.2 — where a response over unreliable unicast goes: the
 //! address its own top Via names.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
+use sip_message::header::Rport;
 use sip_message::ip_literal::ip_host;
 use sip_message::sniff;
 
@@ -19,8 +21,9 @@ use super::super::Obligation;
 /// reaches no one the request came from: a NAT binding, or a socket that is not
 /// listening.
 ///
-/// **The occasion is ONE fresh response over UDP whose top Via reads.** The
-/// stamp is on the response itself, so no request is paired. A reliable
+/// **The occasion is ONE response over UDP whose top Via reads: a fresh one,
+/// or a repeat sent somewhere its first copy was not.** The stamp is on the
+/// response itself, so no request is paired. A reliable
 /// transport answers on the request's connection, and a sent-by name is
 /// resolved by RFC 3263 §5, which this view does not hold: the first opens no
 /// occasion, the second is `Undecidable`. Charges the sender.
@@ -28,10 +31,21 @@ pub struct ResponseDestination;
 
 impl Obligation for ResponseDestination {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        // Where each response first went, by sender and transaction: a repeat
+        // to the same place is that copy again.
+        let mut first: BTreeMap<(&str, &str, Option<&str>, u32, u16), &str> = BTreeMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             let Kind::Response { status } = msg.kind else { continue };
-            if msg.repeat {
+            let key = (
+                msg.src.as_str(),
+                msg.call_id.as_str(),
+                msg.via_branch.as_deref(),
+                msg.cseq,
+                status,
+            );
+            let went = *first.entry(key).or_insert(msg.dst.as_str());
+            if msg.repeat && went == msg.dst {
                 continue;
             }
             let finding = |decision| Finding {
@@ -77,6 +91,7 @@ impl Obligation for ResponseDestination {
                 response_dest_method: msg.cseq_method.clone(),
                 dest_sent_to: sent_to.to_string(),
                 via_target: target.to_string(),
+                rport_unfilled: matches!(via.rport(), Some(Rport::Requested)),
             })));
         }
         out

@@ -40,6 +40,7 @@ fn msg(
     head: String,
 ) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),

@@ -221,6 +221,7 @@ mod tests {
              {extra}\r\n"
         );
         Msg {
+            refused: false,
             at_us,
             src: UAC.to_string(),
             dst: REGISTRAR.to_string(),
