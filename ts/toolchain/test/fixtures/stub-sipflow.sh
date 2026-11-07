@@ -4,7 +4,16 @@
 #
 # The emitted `emit_headers` is the `--emit-headers` argv the adapter passed, so
 # a test reads the argv off the decoded document — the allow-list reaching the
-# emitter is the one thing this adapter can get wrong on its own.
+# emitter is the one thing this adapter can get wrong on its own. A leading
+# `--reading FILE` is taken off first; the file `unreadable.reading` refuses the
+# run as a reading that does not read does.
+if [ "$1" = "--reading" ]; then
+  if [ "$2" = "unreadable.reading" ]; then
+    printf 'sipflow: --reading %s: line 1: no `key = value`\n' "$2" >&2
+    exit 2
+  fi
+  shift 2
+fi
 case "$1" in
   --schema)
     printf '{"title":"FlowsDoc"}\n'

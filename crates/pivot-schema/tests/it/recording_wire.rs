@@ -272,7 +272,14 @@ fn a_head_ended_by_any_terminator_records_and_reads_back_alike() {
         )
         .into_bytes();
         wire.extend_from_slice(blob);
-        let message = RecordedMessage::new(1, Dir::In, 0, None, wire.clone());
+        let message = RecordedMessage::new(
+            1,
+            Dir::In,
+            0,
+            None,
+            wire.clone(),
+            &sip_message::CustomParser::new(),
+        );
         let layout = (terminator == "\r\n\r\n").then_some(6);
         assert_eq!(message.body.as_ref().map(|b| b.len), layout, "{terminator:?}: the layout");
         assert!(

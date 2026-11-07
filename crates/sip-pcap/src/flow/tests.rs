@@ -54,7 +54,7 @@ fn one_leg_splits_by_observation_hop() {
         dg(9_000, "10.0.0.9:5060", "10.0.0.5:5060", &ok),
         dg(10_000, "10.0.0.2:5060", "10.0.0.1:5060", &ok),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.legs.len(), 1);
     let leg = &flows.legs[0];
     assert_eq!(leg.hops.len(), 3, "3 vantages from 5 ordered socket pairs");
@@ -86,7 +86,7 @@ fn capture_dup_collapsed_but_retransmission_kept() {
         dg(1_000_050, "10.0.0.1:5060", "10.0.0.2:5060", &inv), // veth+bridge dup
         dg(1_600_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv), // Timer-T1 retx
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.stats.capture_dups, 1);
     assert_eq!(flows.stats.sip_messages, 2);
     let leg = &flows.legs[0];
@@ -105,7 +105,7 @@ fn a_repeat_past_the_transaction_envelope_is_not_a_retransmission() {
         dg(1_000_000 + REPEAT_ENVELOPE_US, "10.0.0.1:5060", "10.0.0.2:5060", &inv),
         dg(1_000_000 + REPEAT_ENVELOPE_US + 1_000_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv),
     ];
-    let leg = &build_flows(&datagrams, &FlowConfig::default()).legs[0];
+    let leg = &build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc())).legs[0];
     assert_eq!(leg.msgs.len(), 3);
     assert_eq!(leg.msgs.iter().map(|m| m.retx).collect::<Vec<_>>(), vec![false, true, false]);
 }
@@ -184,7 +184,7 @@ fn methods(leg: &FlowLeg) -> Vec<String> {
 #[test]
 fn a_probe_pair_with_a_constant_offset_collapses_to_one_vantage() {
     let (datagrams, messages) = doubled_dialog(250_000);
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.legs.len(), 1);
     let leg = &flows.legs[0];
     assert_eq!(
@@ -227,7 +227,7 @@ fn a_rebased_probes_own_messages_land_on_the_reference_clock() {
     // 1_150_000 - 7_000 + 250_000.
     let early = sip_response(183, "Session Progress", "doubled-1", 1, "b1");
     datagrams.push(dgp(1_393_000, "10.0.0.2:5060", "10.0.0.1:5060", &early, 1));
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     let leg = &flows.legs[0];
     let at = leg
         .msgs
@@ -250,7 +250,7 @@ fn a_rebased_probes_own_messages_land_on_the_reference_clock() {
 #[test]
 fn a_probe_pair_inside_the_dedup_window_is_not_rebased() {
     let (datagrams, messages) = doubled_dialog(50_000);
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.legs[0].msgs.len(), messages);
     assert_eq!(flows.stats.capture_dups as usize, messages);
     assert!(flows.stats.aligned_probes.is_empty());
@@ -268,7 +268,7 @@ fn a_probe_pair_sharing_too_few_datagrams_is_not_aligned() {
         dgp(2_000_000, "10.0.0.2:5060", "10.0.0.1:5060", &ok, 0),
         dgp(2_250_000, "10.0.0.2:5060", "10.0.0.1:5060", &ok, 1),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.legs[0].msgs.len(), 4);
     assert!(flows.stats.aligned_probes.is_empty());
 }
@@ -290,7 +290,7 @@ fn a_ladder_both_probes_wrote_survives_the_alignment() {
     datagrams.push(dgp(5_600_000, "10.0.0.2:5060", "10.0.0.1:5060", &ok, 1));
     datagrams.push(dgp(5_100_000, "10.0.0.1:5060", "10.0.0.2:5060", &ack, 0));
     datagrams.push(dgp(5_700_000, "10.0.0.1:5060", "10.0.0.2:5060", &ack, 1));
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     let leg = &flows.legs[0];
     assert_eq!(methods(leg), vec!["INVITE", "INVITE", "INVITE", "INVITE", "200 INVITE", "ACK"]);
     assert_eq!(
@@ -320,7 +320,7 @@ fn a_ladder_split_between_two_probes_is_not_an_offset() {
             datagrams.push(dgp(t0 + rung, "10.0.0.1:5060", "10.0.0.2:5060", &inv, 0));
         }
     }
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert!(flows.stats.aligned_probes.is_empty(), "{:?}", flows.stats.aligned_probes);
     assert_eq!(flows.stats.capture_dups, 0);
     for leg in &flows.legs {
@@ -365,7 +365,7 @@ fn a_clock_step_is_aligned_stretch_by_stretch() {
             datagrams.push(dgp(far + offset, src, dst, payload, 1));
         }
     }
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.legs.len(), 2);
     for leg in &flows.legs {
         assert_eq!(
@@ -426,7 +426,7 @@ fn a_chain_of_probes_lands_on_the_earliest_clock() {
         datagrams.push(dgp(ts + 20_000 + 300_000, src, dst, payload, 0));
         datagrams.push(dgp(ts + 20_000 + 700_000, src, dst, payload, 2));
     }
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     let leg = &flows.legs[0];
     assert_eq!(leg.msgs.len(), 8, "each hop's four messages once: {:?}", methods(leg));
     assert!(leg.msgs.iter().all(|m| !m.retx));
@@ -451,7 +451,7 @@ fn non_sip_and_parse_failures_are_counted_not_ingested() {
         dg(1_000, "10.0.0.1:9000", "10.0.0.2:9000", &[0x80; 64]), // RTP-ish
         dg(2_000, "10.0.0.1:5060", "10.0.0.2:5060", b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nGarbage\r\n\r\n"),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.stats.non_sip, 1);
     assert_eq!(flows.stats.parse_failed, 1);
     assert_eq!(flows.stats.parse_failed_at, vec![1]);
@@ -469,7 +469,7 @@ fn shared_token_groups_legs_with_evidence() {
         dg(2_000, "10.0.0.2:5062", "10.0.0.9:5060", &b),
         dg(3_000, "10.0.0.7:5060", "10.0.0.8:5060", &lone),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.legs.len(), 3);
     assert_eq!(flows.groups.len(), 2);
     let joined = &flows.groups[0];
@@ -494,7 +494,7 @@ fn identity_adjacency_fallback_records_evidence() {
         dg(1_000_000, "10.0.0.1:5060", "10.0.0.5:5060", &a), // lands on the B2BUA
         dg(1_200_000, "10.0.0.5:5062", "10.0.0.9:5060", &b), // departs from it
     ];
-    let cfg = FlowConfig::default();
+    let cfg = FlowConfig::standard(ToolReading::plain_rfc());
     let flows = build_flows(&datagrams, &cfg);
     assert_eq!(flows.groups.len(), 1);
     let g = &flows.groups[0];
@@ -516,7 +516,7 @@ fn identity_adjacency_fallback_records_evidence() {
             .filter(|s| !matches!(s, CorrelateStrategy::IdentityAdjacency { .. }))
             .cloned()
             .collect(),
-        ..FlowConfig::default()
+        ..FlowConfig::standard(ToolReading::plain_rfc())
     };
     let flows = build_flows(&datagrams, &token_only);
     assert_eq!(flows.groups.len(), 2, "fallback disabled → legs stay apart");
@@ -575,7 +575,7 @@ fn header_param_strategy_pairs_b2bua_legs_on_icid() {
         dg(1_000_000, "198.51.100.41:5092", "198.51.100.226:5090", &a),
         dg(1_100_000, "198.51.100.226:54448", "10.20.0.1:5060", &b),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 1, "icid must pair the B2BUA legs");
     let g = &flows.groups[0];
     assert_eq!(g.legs, vec![0, 1]);
@@ -622,7 +622,7 @@ fn identity_adjacency_crosses_at_any_traversed_hop() {
         // b-leg departs the AS from an ephemeral port.
         dg(1_200_000, "10.0.0.9:54448", "10.0.0.7:5060", &b),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.legs.len(), 2);
     // The shape genuinely defeats first-socket-pair crossing: neither
     // first-observed INVITE (src, dst) shares an IP the right way round.
@@ -655,7 +655,7 @@ fn identity_adjacency_stays_silent_once_a_token_paired_the_legs() {
         dg(1_000_000, "10.0.0.1:5060", "10.0.0.5:5060", &a),
         dg(1_200_000, "10.0.0.5:5062", "10.0.0.9:5060", &b),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 1);
     let g = &flows.groups[0];
     assert_eq!(g.evidence.len(), 1, "one join → one evidence entry: {:?}", g.evidence);
@@ -679,7 +679,7 @@ fn every_attesting_strategy_records_its_evidence() {
         dg(1_000_000, "192.0.2.9:5061", "192.0.2.67:5060", &base),
         dg(1_040_000, "192.0.2.67:5060", "192.0.2.9:5061", &derived),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 1);
     let g = &flows.groups[0];
     assert_eq!(g.evidence.len(), 2, "icid AND derivation must both record: {:?}", g.evidence);
@@ -716,7 +716,7 @@ fn unrelated_legs_are_not_paired() {
         dg(1_000_000, "10.0.0.1:5060", "10.0.0.2:5060", &a),
         dg(1_100_000, "10.0.0.3:5060", "10.0.0.4:5060", &b),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 2, "unrelated legs must not group");
     assert!(flows.groups.iter().all(|g| g.evidence.is_empty()));
 }
@@ -734,7 +734,7 @@ fn disjoint_tokens_veto_identity_adjacency() {
         dg(1_000_000, "10.0.0.1:5060", "10.0.0.5:5060", &a),
         dg(1_200_000, "10.0.0.5:5062", "10.0.0.9:5060", &b),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 2, "disagreeing tokens must veto the identity pairing");
     assert!(flows.groups.iter().all(|g| g.evidence.is_empty()));
 }
@@ -749,7 +749,7 @@ fn one_sided_token_does_not_veto_adjacency() {
         dg(1_000_000, "10.0.0.1:5060", "10.0.0.5:5060", &a),
         dg(1_200_000, "10.0.0.5:5062", "10.0.0.9:5060", &b),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 1, "an unechoed token must not block the pairing");
     assert!(matches!(
         &flows.groups[0].evidence[0],
@@ -781,7 +781,7 @@ fn empty_or_flag_icid_never_correlates() {
         dg(1_000_000, "10.0.0.1:5060", "10.0.0.2:5060", &a),
         dg(1_100_000, "10.0.0.3:5060", "10.0.0.4:5060", &b),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert!(flows.legs.iter().all(|l| l.tokens().is_empty()), "empty values are not tokens");
     assert_eq!(flows.groups.len(), 2);
 }
@@ -810,7 +810,7 @@ fn icid_on_one_leg_only_does_not_pair() {
         dg(1_000_000, "10.0.0.1:5060", "10.0.0.2:5060", &a),
         dg(1_100_000, "10.0.0.3:5060", "10.0.0.4:5060", &b),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 2);
     assert!(flows.groups.iter().all(|g| g.evidence.is_empty()));
 }
@@ -829,7 +829,7 @@ fn three_legs_sharing_one_icid_form_one_group() {
         dg(1_100_000, "10.0.0.3:5060", "10.0.0.4:5060", &b),
         dg(1_200_000, "10.0.0.5:5060", "10.0.0.6:5060", &c),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 1);
     assert_eq!(flows.groups[0].legs, vec![0, 1, 2]);
     assert_eq!(flows.groups[0].evidence.len(), 1);
@@ -850,7 +850,7 @@ fn derived_call_id_pairs_an_as_loopback() {
         dg(1_000_000, "192.0.2.9:5061", "192.0.2.67:5060", &base),
         dg(1_040_000, "192.0.2.67:5060", "192.0.2.9:5061", &derived),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 1, "the loopback must pair the legs");
     let g = &flows.groups[0];
     assert_eq!(g.legs, vec![0, 1]);
@@ -892,7 +892,7 @@ fn derived_call_id_without_a_shared_hop_needs_the_relaxed_strategy() {
             require_shared_hop: true,
             min_base_len: 8,
         }],
-        ..FlowConfig::default()
+        ..FlowConfig::standard(ToolReading::plain_rfc())
     };
     assert_eq!(build_flows(&datagrams, &strict).groups.len(), 2, "no loopback → no pairing");
 
@@ -902,7 +902,7 @@ fn derived_call_id_without_a_shared_hop_needs_the_relaxed_strategy() {
             require_shared_hop: false,
             min_base_len: 8,
         }],
-        ..FlowConfig::default()
+        ..FlowConfig::standard(ToolReading::plain_rfc())
     };
     let flows = build_flows(&datagrams, &relaxed);
     assert_eq!(flows.groups.len(), 1);
@@ -926,7 +926,7 @@ fn short_call_ids_and_distant_legs_never_derive() {
             require_shared_hop: true,
             min_base_len: 8,
         }],
-        ..FlowConfig::default()
+        ..FlowConfig::standard(ToolReading::plain_rfc())
     };
     let base = sip_request("INVITE", "abc", 1, "ba", "");
     let derived = sip_request("INVITE", "xyzabc", 1, "bb", "");
@@ -959,7 +959,7 @@ fn chained_derivations_form_one_group() {
         dg(1_040_000, "192.0.2.67:5060", "192.0.2.9:5061", &b),
         dg(1_080_000, "192.0.2.9:5061", "192.0.2.67:5060", &c),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 1);
     assert_eq!(flows.groups[0].legs, vec![0, 1, 2]);
     assert!(flows.groups[0]
@@ -983,7 +983,7 @@ fn later_strategy_joins_unpaired_leg_into_earlier_group() {
         dg(1_100_000, "10.0.0.3:5060", "10.0.0.4:5060", &b),
         dg(1_200_000, "10.0.0.5:5060", "10.0.0.6:5060", &c),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
     assert_eq!(flows.groups.len(), 1);
     let g = &flows.groups[0];
     assert_eq!(g.legs, vec![0, 1, 2]);

@@ -38,10 +38,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
 
 use sip_message::header::{HeaderName, Params, Uri};
-use sip_message::{Method, SipMessage};
+use sip_message::{Method, SipMessage, SipParser, ToolReading};
 
 use crate::align::{align_probes, rides_no_timer};
-use crate::reading::Reading;
 use crate::Datagram;
 
 mod sift;
@@ -100,7 +99,7 @@ pub struct FlowConfig {
     /// a merged capture's probes on one clock first.
     pub dedup_window_us: u64,
     /// How each captured message is read.
-    pub reading: Reading,
+    pub reading: ToolReading,
 }
 
 /// Default pairing window for the strategies that bound one: two legs of one
@@ -111,8 +110,9 @@ pub const DEFAULT_PAIR_WINDOW_US: u64 = 5_000_000;
 /// (Timer T1) away, so anything closer is the capture stack, not the wire.
 pub const DEFAULT_DEDUP_WINDOW_US: u64 = 200_000;
 
-impl Default for FlowConfig {
-    fn default() -> Self {
+impl FlowConfig {
+    /// The standard correlation pipeline, each message read under `reading`.
+    pub fn standard(reading: ToolReading) -> Self {
         Self {
             strategies: vec![
                 CorrelateStrategy::HeaderToken {
@@ -130,7 +130,7 @@ impl Default for FlowConfig {
                 CorrelateStrategy::IdentityAdjacency { window_us: DEFAULT_PAIR_WINDOW_US },
             ],
             dedup_window_us: DEFAULT_DEDUP_WINDOW_US,
-            reading: Reading::rfc(),
+            reading,
         }
     }
 }

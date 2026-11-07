@@ -31,6 +31,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         is_bye(step)
             && !scripted_behind
             && close::bye_moot(
+                self.instance.recording().reader(),
                 &self.instance.recording().legs().remove(&step.leg).unwrap_or_default(),
             )
     }
@@ -46,8 +47,10 @@ impl<'a, 'p> Runner<'a, 'p> {
         let steps = self.instance.plan().steps();
         let Some(at) = steps.iter().position(|s| s.id == step.id) else { return false };
         let fork_tag = self.fork_tag_of(step);
-        scripted_final::answered_invite(&steps, at, &ladder)
-            .is_some_and(|cseq| scripted_final::invite_answered(&ladder, cseq, fork_tag))
+        let recording = self.instance.recording();
+        let reader = recording.reader();
+        scripted_final::answered_invite(reader, &steps, at, &ladder)
+            .is_some_and(|cseq| scripted_final::invite_answered(reader, &ladder, cseq, fork_tag))
     }
 
     /// Whether `step` answers a tolerated absence that never came: a response

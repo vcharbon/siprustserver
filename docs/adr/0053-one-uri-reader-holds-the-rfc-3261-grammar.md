@@ -196,22 +196,28 @@ only through one, so every site states what it reads:
 | a deployment's wire | `ingress(limits)` | what its configuration states, validated at startup |
 | a message built rather than received, read back by a harness or a test party | `built()` | the default bounds, no exemption, the grammar held strictly |
 | a stored image | `read_stored(image)` | this mode, every limit off |
-| a tool's reading of captured traffic | `tool(limits)` | what the tool's own configuration states |
+| a tool's reading of captured traffic | `tool(limits)`, or a `ToolReading` | what the tool's own configuration states |
 
 The configuration is data, validated once at the edge (`main`, a command
 line, a file) and injected by constructor: a process builds its ingress
-parser in `main` and hands it to every stage that reads the wire, the proxy's
-core, health probe and dead notifier included. The roles are constructors on
-one type rather than a newtype each, because consumers depend on the
-`SipParser` seam and a test decorates the parser behind it; the role is
+parser at its composition root (the worker's `Front::parser`, the proxy's
+`ProxyConfig::parser`) and hands it to every stage that reads the wire, the
+proxy's core, health probe and dead notifier included. The roles are
+constructors on one type rather than a newtype each, because consumers depend
+on the `SipParser` seam and a test decorates the parser behind it; the role is
 decided where the parser is built. `CustomParser::new` and
-`CustomParser::with_limits` stay for tests, and `clippy.toml` refuses them in
-every tiered crate (the panic-sites pass, ADR-0051).
+`CustomParser::with_limits` stay for tests. `clippy.toml` lists both, which
+the panic-sites pass refuses in every member's library and binary code, and
+lists `ingress`, which it refuses in a tiered crate outside a composition root
+marked `#[expect(clippy::disallowed_methods, reason = …)]` (ADR-0051 §2).
 
-A tool's reading may admit more than any deployment: `sipflow --reading FILE`
-names its exemptions and its bounds on a line, a Request-URI, a header block
-and a datagram, and refuses the run on a line that does not read. With no file
-it reads the RFC, with no exemption.
+A tool's reading may admit more than any deployment. `ToolReading` holds the
+exemptions and the bounds on a line, a Request-URI, a header block and a
+datagram, stated as `key = value` lines (`sipflow --reading FILE`) and refused
+whole on a line that does not read; with none stated a tool reads
+`ToolReading::plain_rfc`. A harness that replays captured traffic reads its
+recording, and its parties read the wire, under the reading its lane states
+(the interpreter's `Lane::reader`); upstream's lanes state `built()`.
 
 ## Considered and rejected
 

@@ -213,9 +213,7 @@ impl RunnerEnv {
             brake_config,
             brake_counters.clone(),
             refusals.clone(),
-            sip_message::CustomParser::ingress(
-                self.addresses.front.reads_under(&self.parser_limits),
-            ),
+            self.addresses.front.parser(&self.parser_limits),
         );
 
         // Real, non-recording transport: a plain tokio UDP socket. Bind into an

@@ -216,6 +216,7 @@ mod tests {
     use crate::flow::{build_flows, FlowConfig};
     use crate::Datagram;
     use serde_json::Value;
+    use sip_message::ToolReading;
 
     fn dg(ts_us: u64, src: &str, dst: &str, payload: &[u8]) -> Datagram {
         Datagram {
@@ -228,7 +229,8 @@ mod tests {
     }
 
     fn json(flows: &Flows, decode: &DecodeStats) -> Value {
-        let doc = flows_to_doc(flows, decode, &EnrichOptions::default()).expect("model enriches");
+        let doc = flows_to_doc(flows, decode, &EnrichOptions::under(ToolReading::plain_rfc()))
+            .expect("model enriches");
         serde_json::to_value(&doc).expect("document serializes")
     }
 
@@ -272,7 +274,7 @@ mod tests {
             dg(9_000, "10.0.0.9:5060", "10.0.0.2:5062", &ok),
             dg(10_000, "10.0.0.2:5060", "10.0.0.1:5060", &ok),
         ];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         let decode = DecodeStats { records: 4, datagrams: 4, ..Default::default() };
         let v = json(&flows, &decode);
 
@@ -309,7 +311,7 @@ mod tests {
     fn utf8_payload_emits_as_text() {
         let inv = sip_request("INVITE", "emit-raw", 1, "b1", "X-Mixed-Case-HDR: kept\r\n");
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         let v = json(&flows, &DecodeStats::default());
         let m = &v["legs"][0]["msgs"][0];
         assert_eq!(m["raw"].as_str().unwrap().as_bytes(), &inv[..]);
@@ -342,7 +344,7 @@ mod tests {
         let head_len = inv.len();
         inv.extend_from_slice(&body);
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         assert_eq!(flows.stats.sip_messages, 1, "binary-body INVITE must parse");
         let v = json(&flows, &DecodeStats::default());
         let m = &v["legs"][0]["msgs"][0];
@@ -386,7 +388,7 @@ mod tests {
             let mut inv = head(declared);
             inv.extend_from_slice(tail);
             let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
-            let flows = build_flows(&datagrams, &FlowConfig::default());
+            let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
             assert_eq!(flows.stats.sip_messages, 1, "Content-Length {declared}: the INVITE parses");
             let v = json(&flows, &DecodeStats::default());
             let m = &v["legs"][0]["msgs"][0];
@@ -438,7 +440,7 @@ mod tests {
             dg(7_000, "10.0.1.1:5060", "10.0.1.5:5060", &adj_a),
             dg(8_000, "10.0.1.5:5062", "10.0.1.9:5060", &adj_b),
         ];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         let v = json(&flows, &DecodeStats::default());
         assert_eq!(v["groups"].as_array().unwrap().len(), 4);
         let tok_ev = &v["groups"][0]["evidence"][0];
@@ -476,9 +478,14 @@ mod tests {
     fn string_form_parses_back() {
         let inv = sip_request("INVITE", "emit-rt", 1, "b1", "");
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         let s = serde_json::to_string(
-            &flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default()).unwrap(),
+            &flows_to_doc(
+                &flows,
+                &DecodeStats::default(),
+                &EnrichOptions::under(ToolReading::plain_rfc()),
+            )
+            .unwrap(),
         )
         .unwrap();
         let back: FlowsDoc = serde_json::from_str(&s).unwrap();

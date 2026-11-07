@@ -21,7 +21,7 @@ fn binary_info() -> Vec<u8> {
 fn a_pushed_datagram_is_recorded_byte_for_byte() {
     let wire = binary_info();
     assert!(std::str::from_utf8(&wire).is_err(), "the datagram is not UTF-8 by construction");
-    let rec = Recording::new();
+    let rec = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     rec.push("B", Dir::In, 1_000, wire.as_slice(), Some("s11"), None);
     let recorded = &rec.legs()["B"][0];
     assert_eq!(recorded.wire(), wire, "every byte survives: {:02x?}", recorded.wire());
@@ -38,7 +38,7 @@ fn a_pushed_datagram_is_recorded_byte_for_byte() {
 #[test]
 fn a_repeat_of_a_binary_datagram_resolves_to_the_first_copy() {
     let wire = binary_info();
-    let rec = Recording::new();
+    let rec = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     rec.push("A", Dir::Out, 0, wire.as_slice(), Some("s10"), None);
     rec.push_repeat("A", Dir::Out, 500_000, wire.as_slice(), Some("s10"), Some("retransmission"));
     let mut other = wire.clone();

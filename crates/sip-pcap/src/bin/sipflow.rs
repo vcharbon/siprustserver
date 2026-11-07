@@ -44,13 +44,13 @@ use std::path::PathBuf;
 use clap::Parser as ClapParser;
 use sip_message::header::HeaderName;
 use sip_message::SipMessage;
+use sip_message::ToolReading;
 use sip_pcap::doc::FlowsDoc;
 use sip_pcap::enrich::{enrich_str, EnrichOptions};
 use sip_pcap::flow::{
     build_flows, CallGroup, CorrelateStrategy, FlowConfig, FlowLeg, DEFAULT_DEDUP_WINDOW_US,
 };
 use sip_pcap::query::{neighbours_of, select_groups, summary_row, Projection, Query};
-use sip_pcap::reading::Reading;
 use sip_pcap::rfc::{Census, LocatedHit, SutSet};
 
 #[path = "sipflow/captures.rs"]
@@ -69,9 +69,9 @@ mod reparse;
 mod walk;
 
 /// The reading the file at `path` states, or every problem with it.
-fn stated_reading(path: &std::path::Path) -> Result<Reading, Vec<String>> {
+fn stated_reading(path: &std::path::Path) -> Result<ToolReading, Vec<String>> {
     let text = std::fs::read_to_string(path).map_err(|e| vec![e.to_string()])?;
-    Reading::stated(&text)
+    ToolReading::stated(&text)
 }
 
 /// Serialize an emitted document, exiting with the derivation error a
@@ -350,7 +350,7 @@ fn main() {
         return;
     }
     let reading = match &args.reading {
-        None => Reading::rfc(),
+        None => ToolReading::plain_rfc(),
         Some(path) => match stated_reading(path) {
             Ok(reading) => reading,
             Err(problems) => {

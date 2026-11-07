@@ -42,8 +42,14 @@ fn capture(name: &str) -> (PathBuf, PathBuf) {
             }
         })
         .collect();
-    let flows = build_flows(&datagrams, &FlowConfig::default());
-    let doc = flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default()).unwrap();
+    let flows =
+        build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
+    let doc = flows_to_doc(
+        &flows,
+        &DecodeStats::default(),
+        &EnrichOptions::under(sip_message::ToolReading::plain_rfc()),
+    )
+    .unwrap();
     let dir = std::env::temp_dir().join(format!("sipflow-get-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("capture.flows.json");

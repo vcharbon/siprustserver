@@ -23,7 +23,7 @@ fn ladder(entries: &[(Dir, String)]) -> Vec<RecordedMessage> {
 
 /// A leg's recorded ladder, each datagram under the step that claimed it.
 fn claimed_ladder(entries: &[(Dir, String, Option<&str>)]) -> Vec<RecordedMessage> {
-    let recording = Recording::new();
+    let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     recording.declare("A");
     for (at, (dir, raw, step)) in entries.iter().enumerate() {
         recording.push("A", *dir, at as u64, raw.clone(), *step, None);
@@ -33,7 +33,7 @@ fn claimed_ladder(entries: &[(Dir, String, Option<&str>)]) -> Vec<RecordedMessag
 
 /// One arriving datagram, projected as the gate projects it.
 fn arrival(raw: &str) -> Inbound {
-    let message = CustomParser::new().parse(raw.as_bytes()).expect("parses");
+    let message = sip_message::CustomParser::new().parse(raw.as_bytes()).expect("parses");
     Inbound::of(&message)
 }
 
@@ -127,7 +127,8 @@ fn opened<'a>(steps: &'a [CompiledStep], openers: &[Option<&'a str>]) -> Vec<Arm
 }
 
 fn decide<'a>(inbound: &Inbound, armed: &[Armed<'a>], leg: &[RecordedMessage]) -> Unmatched<'a> {
-    unmatched(inbound, armed, leg, false).expect("something is armed")
+    unmatched(&sip_message::CustomParser::new(), inbound, armed, leg, false)
+        .expect("something is armed")
 }
 
 fn ids(steps: &[String]) -> Vec<&str> {
@@ -186,8 +187,14 @@ fn a_reinvite_final_of_the_other_class_on_a_confirmed_dialog_goes_on() {
         (Dir::Out, sent("INVITE", 2)),
     ]);
     let steps = [expects("s9", 200, Some("INVITE"), false)];
-    let u =
-        unmatched(&arrival(&response(488, "2 INVITE")), &plain(&steps), &leg, true).expect("armed");
+    let u = unmatched(
+        &sip_message::CustomParser::new(),
+        &arrival(&response(488, "2 INVITE")),
+        &plain(&steps),
+        &leg,
+        true,
+    )
+    .expect("armed");
     assert_eq!(ids(&u.retired), ["s9"]);
     assert!(!u.ends);
 }
@@ -360,8 +367,14 @@ fn a_final_for_another_transaction_of_the_same_method_retires_nothing() {
         (Dir::Out, sent("INVITE", 2)),
     ]);
     let steps = [expects("s9", 200, Some("INVITE"), false)];
-    let u =
-        unmatched(&arrival(&response(486, "1 INVITE")), &plain(&steps), &leg, true).expect("armed");
+    let u = unmatched(
+        &sip_message::CustomParser::new(),
+        &arrival(&response(486, "1 INVITE")),
+        &plain(&steps),
+        &leg,
+        true,
+    )
+    .expect("armed");
     assert!(!u.own_transaction);
     assert!(u.retired.is_empty() && !u.ends);
 }
@@ -393,7 +406,14 @@ fn an_expect_naming_no_cseq_method_is_never_retired() {
 #[test]
 fn an_arrival_with_nothing_armed_decides_nothing() {
     let leg = ladder(&[(Dir::Out, INVITE.to_string())]);
-    assert!(unmatched(&arrival(&response(486, "1 INVITE")), &[], &leg, false).is_none());
+    assert!(unmatched(
+        &sip_message::CustomParser::new(),
+        &arrival(&response(486, "1 INVITE")),
+        &[],
+        &leg,
+        false
+    )
+    .is_none());
 }
 
 /// The leg's dialog up and a re-INVITE out: CSeq 1 answered and ACKed, CSeq 2
@@ -417,6 +437,7 @@ fn a_final_meeting_the_100_of_its_own_invite_transaction_omits_it() {
     let leg = reinvited();
     let steps = [expects("s13", 100, Some("INVITE"), false)];
     let u = unmatched(
+        &sip_message::CustomParser::new(),
         &arrival(&response(487, "2 INVITE")),
         &opened(&steps, &[Some("s12")]),
         &leg,
@@ -430,6 +451,7 @@ fn a_final_meeting_the_100_of_its_own_invite_transaction_omits_it() {
 
     // A 2xx stands in for it exactly as a reject does.
     let u = unmatched(
+        &sip_message::CustomParser::new(),
         &arrival(&response(200, "2 INVITE")),
         &opened(&steps, &[Some("s12")]),
         &leg,
@@ -448,6 +470,7 @@ fn a_final_after_a_ringing_provisional_omits_no_100() {
     leg.extend(claimed_ladder(&[(Dir::In, response(180, "2 INVITE"), None)]));
     let steps = [expects("s13", 100, Some("INVITE"), false)];
     let u = unmatched(
+        &sip_message::CustomParser::new(),
         &arrival(&response(200, "2 INVITE")),
         &opened(&steps, &[Some("s12")]),
         &leg,
@@ -464,7 +487,7 @@ fn a_final_after_a_ringing_provisional_omits_no_100() {
 /// method, not a request the leg received in between.
 #[test]
 fn an_answer_s_delay_is_measured_from_its_request_s_first_emission() {
-    let recording = Recording::new();
+    let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     recording.declare("A");
     for (dir, at_us, raw) in [
         (Dir::Out, 100_000, INVITE.to_string()),
@@ -476,8 +499,19 @@ fn an_answer_s_delay_is_measured_from_its_request_s_first_emission() {
     }
     let leg = recording.legs().remove("A").expect("the leg was recorded");
     let final_ = arrival(&response(487, "2 INVITE"));
-    assert_eq!(answered_after_ms(&leg, &final_, 1_037_000), Some(37));
-    assert_eq!(answered_after_ms(&leg, &arrival(&response(487, "9 INVITE")), 1_037_000), None);
+    assert_eq!(
+        answered_after_ms(&sip_message::CustomParser::new(), &leg, &final_, 1_037_000),
+        Some(37)
+    );
+    assert_eq!(
+        answered_after_ms(
+            &sip_message::CustomParser::new(),
+            &leg,
+            &arrival(&response(487, "9 INVITE")),
+            1_037_000
+        ),
+        None
+    );
 }
 
 /// A final for ANOTHER INVITE transaction omits nothing: the 100 the leg waits
@@ -487,6 +521,7 @@ fn a_final_for_another_invite_transaction_omits_no_100() {
     let leg = reinvited();
     let steps = [expects("s13", 100, Some("INVITE"), false)];
     let u = unmatched(
+        &sip_message::CustomParser::new(),
         &arrival(&response(487, "1 INVITE")),
         &opened(&steps, &[Some("s12")]),
         &leg,
@@ -506,6 +541,7 @@ fn a_ringing_provisional_ahead_of_the_100_omits_nothing() {
     let leg = reinvited();
     let steps = [expects("s13", 100, Some("INVITE"), false)];
     let u = unmatched(
+        &sip_message::CustomParser::new(),
         &arrival(&response(180, "2 INVITE")),
         &opened(&steps, &[Some("s12")]),
         &leg,
@@ -523,9 +559,14 @@ fn a_ringing_provisional_ahead_of_the_100_omits_nothing() {
 fn a_request_arriving_while_the_100_is_armed_omits_nothing() {
     let leg = reinvited();
     let steps = [expects("s13", 100, Some("INVITE"), false)];
-    let u =
-        unmatched(&arrival(&request("BYE", "3 BYE")), &opened(&steps, &[Some("s12")]), &leg, true)
-            .expect("armed");
+    let u = unmatched(
+        &sip_message::CustomParser::new(),
+        &arrival(&request("BYE", "3 BYE")),
+        &opened(&steps, &[Some("s12")]),
+        &leg,
+        true,
+    )
+    .expect("armed");
     assert!(!u.omitted);
     assert!(u.retired.is_empty() && !u.ends);
 }
@@ -542,9 +583,14 @@ fn a_final_meeting_a_100_on_a_non_invite_transaction_ends_as_today() {
         (Dir::Out, sent("BYE", 2), Some("s9")),
     ]);
     let steps = [expects("s10", 100, Some("BYE"), false)];
-    let u =
-        unmatched(&arrival(&response(200, "2 BYE")), &opened(&steps, &[Some("s9")]), &leg, true)
-            .expect("armed");
+    let u = unmatched(
+        &sip_message::CustomParser::new(),
+        &arrival(&response(200, "2 BYE")),
+        &opened(&steps, &[Some("s9")]),
+        &leg,
+        true,
+    )
+    .expect("armed");
     assert_eq!(ids(&u.retired), ["s10"]);
     assert!(!u.omitted);
     assert!(u.ends);
@@ -558,7 +604,14 @@ fn a_100_inside_a_block_is_never_omitted() {
     let steps = [expects("s13", 100, Some("INVITE"), false)];
     let armed: Vec<Armed<'_>> =
         steps.iter().map(|step| Armed { step, opener: Some("s12"), retirable: false }).collect();
-    let u = unmatched(&arrival(&response(487, "2 INVITE")), &armed, &leg, true).expect("armed");
+    let u = unmatched(
+        &sip_message::CustomParser::new(),
+        &arrival(&response(487, "2 INVITE")),
+        &armed,
+        &leg,
+        true,
+    )
+    .expect("armed");
     assert!(!u.omitted);
     assert!(u.retired.is_empty());
 }

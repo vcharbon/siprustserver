@@ -70,7 +70,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             return false;
         }
         let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
-        scripted_final::rejected(&ladder, inbound.cseq)
+        scripted_final::rejected(self.instance.recording().reader(), &ladder, inbound.cseq)
     }
 
     /// Whether `inbound` is an ACK to a non-2xx INVITE final this leg sent that
@@ -84,7 +84,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
         let steps = self.instance.plan().steps();
         let cursor = self.instance.cursor();
-        !scripted_final::scripts_reject_ack(&steps, leg, inbound.cseq, &ladder, |id| {
+        let recording = self.instance.recording();
+        let reader = recording.reader();
+        !scripted_final::scripts_reject_ack(reader, &steps, leg, inbound.cseq, &ladder, |id| {
             cursor.node_complete(id)
         })
     }
@@ -210,8 +212,11 @@ impl<'a, 'p> Runner<'a, 'p> {
         // read off the recording once the first is on it — the turn the generic
         // close takes, taken here.
         for _ in 0..2 {
-            let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
-            let Some(owed) = close::unscripted(&ladder, message) else { return };
+            let recording = self.instance.recording();
+            let ladder = recording.legs().remove(leg).unwrap_or_default();
+            let Some(owed) = close::unscripted(recording.reader(), &ladder, message) else {
+                return;
+            };
             // A CANCELled INVITE the flow still owes its own reject draws that
             // step at once, its dwell not waited on (RFC 3261 §9.2: any non-2xx
             // may answer it); the flow walks on from it as from any send.
@@ -262,7 +267,11 @@ impl<'a, 'p> Runner<'a, 'p> {
         let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
         let steps = self.instance.plan().steps();
         let cursor = self.instance.cursor();
-        scripted_final::pending_reject(&steps, leg, cseq, &ladder, |id| cursor.node_complete(id))
-            .cloned()
+        let recording = self.instance.recording();
+        let reader = recording.reader();
+        scripted_final::pending_reject(reader, &steps, leg, cseq, &ladder, |id| {
+            cursor.node_complete(id)
+        })
+        .cloned()
     }
 }

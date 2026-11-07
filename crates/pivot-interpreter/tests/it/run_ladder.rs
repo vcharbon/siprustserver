@@ -652,6 +652,7 @@ async fn replay_directed(
         base_dir,
         composer: &composer,
         events: None,
+        reader: std::sync::Arc::new(sip_message::CustomParser::built()),
     };
 
     let dir = bundle_dir(&case);

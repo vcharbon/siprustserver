@@ -31,7 +31,7 @@ async fn a_cancel_reaches_a_ringing_callee_past_the_default_reader() {
         B2buaSut::builder(Arc::new(engine)).tune(|config| config.parser_limits = larger())
     })
     .await;
-    s.bob.reads_under(larger());
+    s.bob.reads_with(sip_message::CustomParser::with_limits(larger()));
 
     let mut invite = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr);
     for n in 0..150 {

@@ -13,10 +13,12 @@ use super::Agent;
 use crate::absorption::Owed;
 
 impl Agent {
-    /// This UA reading the wire under `limits`: a scene whose traffic a
-    /// deployment's limits or exemptions admit states the same to its UA.
-    pub fn reads_under(&self, limits: sip_message::SipParserLimits) {
-        self.txn.read_under(limits);
+    /// This UA reading the wire with `reader`: a scene whose traffic a
+    /// deployment's limits or exemptions admit states the reading that admits
+    /// it (`CustomParser::ingress` for a deployment's, a tool reading for a
+    /// captured call replayed).
+    pub fn reads_with(&self, reader: impl sip_message::SipParser + Send + Sync + 'static) {
+        self.txn.read_with(std::sync::Arc::new(reader));
     }
 
     /// One datagram out, nothing fed but its record in the transaction layer

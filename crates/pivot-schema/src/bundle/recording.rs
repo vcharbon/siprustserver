@@ -18,7 +18,7 @@ use std::borrow::Cow;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use sip_message::payload::{BodyLayout, Payload};
-use sip_message::{CustomParser, SipParser as _};
+use sip_message::{CustomParser, SipParser};
 
 /// Which way a datagram crossed the leg's vantage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -62,9 +62,17 @@ pub struct RecordedMessage {
 }
 
 impl RecordedMessage {
-    /// A recorded line for `wire`, its body layout derived from the bytes.
-    pub fn new(seq: u64, dir: Dir, at_us: u64, step: Option<String>, wire: Vec<u8>) -> Self {
-        let body = Self::layout_of(&wire);
+    /// A recorded line for `wire`, its body layout derived from the bytes as
+    /// `reader` reads them: the reading the run's recording is made under.
+    pub fn new(
+        seq: u64,
+        dir: Dir,
+        at_us: u64,
+        step: Option<String>,
+        wire: Vec<u8>,
+        reader: &dyn SipParser,
+    ) -> Self {
+        let body = Self::layout_of(reader, &wire);
         RecordedMessage { seq, dir, at_us, step, wire, body, repeat_of: None, note: None }
     }
 
@@ -78,11 +86,11 @@ impl RecordedMessage {
         Payload::of_datagram(&self.wire)
     }
 
-    /// The layout of the body `wire` carries: the datagram is parsed once and
-    /// [`BodyLayout::of`] read off it; a datagram that does not parse, or
-    /// carries no body, has none.
-    pub fn layout_of(wire: &[u8]) -> Option<BodyLayout> {
-        CustomParser::built().parse(wire).ok().and_then(|parsed| BodyLayout::of(&parsed))
+    /// The layout of the body `wire` carries: the datagram is parsed once by
+    /// `reader` and [`BodyLayout::of`] read off it; a datagram that does not
+    /// parse, or carries no body, has none.
+    pub fn layout_of(reader: &dyn SipParser, wire: &[u8]) -> Option<BodyLayout> {
+        reader.parse(wire).ok().and_then(|parsed| BodyLayout::of(&parsed))
     }
 }
 
@@ -177,7 +185,9 @@ impl TryFrom<RecordedLine> for RecordedMessage {
                 ));
             }
         }
-        let body = body.or_else(|| RecordedMessage::layout_of(&wire));
+        // A line written with no layout is read as a message built rather
+        // than received: the line names no reading of its own.
+        let body = body.or_else(|| RecordedMessage::layout_of(&CustomParser::built(), &wire));
         Ok(RecordedMessage { seq, dir, at_us, step, wire, body, repeat_of, note })
     }
 }
@@ -228,7 +238,7 @@ mod tests {
             Dir::Out,
             0,
             Some("s1".into()),
-            b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\r\n".to_vec(),
+            b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\r\n".to_vec(), &sip_message::CustomParser::new(),
         );
         let text = serde_json::to_string(&claimed).unwrap();
         assert!(!text.contains('\n'), "one datagram is one JSON Lines line: {text}");

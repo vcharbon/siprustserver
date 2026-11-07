@@ -8,7 +8,6 @@
 //! nothing yet, so it is neither moot nor an answer to any CANCEL.
 
 use pivot_schema::bundle::{Dir, RecordedMessage};
-use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
 use crate::plan::{CompiledStep, Discriminator};
@@ -32,6 +31,7 @@ fn takes_invite(step: &CompiledStep) -> bool {
 /// leg's recording). `None` while that INVITE has not arrived, or where no
 /// step ahead of it takes one.
 pub fn answered_invite(
+    reader: &dyn SipParser,
     steps: &[&CompiledStep],
     at: usize,
     ladder: &[RecordedMessage],
@@ -41,7 +41,7 @@ pub fn answered_invite(
     ladder
         .iter()
         .filter(|m| m.dir == Dir::In && m.step.as_deref() == Some(took.id.as_str()))
-        .find_map(|m| match parse(m.wire())? {
+        .find_map(|m| match reader.parse(m.wire()).ok()? {
             SipMessage::Request(r) => Some(r.cseq().seq()),
             SipMessage::Response(_) => None,
         })
@@ -51,9 +51,14 @@ pub fn answered_invite(
 /// the fork whose To-tag is `fork_tag`, a final that fork sent. Each fork of a
 /// forked INVITE is its own UAS, so a later fork's own 2xx is a final of its
 /// own (RFC 3261 §13.2.2.4), never a second final of the first fork's.
-pub fn invite_answered(ladder: &[RecordedMessage], cseq: u32, fork_tag: Option<&str>) -> bool {
+pub fn invite_answered(
+    reader: &dyn SipParser,
+    ladder: &[RecordedMessage],
+    cseq: u32,
+    fork_tag: Option<&str>,
+) -> bool {
     ladder.iter().filter(|m| m.dir == Dir::Out).any(|m| {
-        matches!(parse(m.wire()), Some(SipMessage::Response(r))
+        matches!(reader.parse(m.wire()).ok(), Some(SipMessage::Response(r))
             if r.status() >= 200
                 && r.cseq().seq() == cseq
                 && *r.cseq().method() == Method::Invite
@@ -66,6 +71,7 @@ pub fn invite_answered(ladder: &[RecordedMessage], cseq: u32, fork_tag: Option<&
 /// rejects. `None` where none is pending or that final is a 2xx — a CANCELled
 /// INVITE is never answered 2xx (§9.2).
 pub fn pending_reject<'s>(
+    reader: &dyn SipParser,
     steps: &[&'s CompiledStep],
     leg: &str,
     cseq: u32,
@@ -76,7 +82,7 @@ pub fn pending_reject<'s>(
         s.leg == leg
             && is_final_to_invite(s)
             && !complete(&s.id)
-            && answered_invite(steps, *at, ladder) == Some(cseq)
+            && answered_invite(reader, steps, *at, ladder) == Some(cseq)
     })?;
     matches!(&step.discriminator, Discriminator::Response { status, .. } if *status >= 300)
         .then_some(step)
@@ -85,9 +91,9 @@ pub fn pending_reject<'s>(
 /// Whether `ladder`'s leg sent a non-2xx final to its INVITE CSeq `cseq`: the
 /// server transaction an ACK with that CSeq belongs to, hop by hop (RFC 3261
 /// §17.2.1).
-pub fn rejected(ladder: &[RecordedMessage], cseq: u32) -> bool {
+pub fn rejected(reader: &dyn SipParser, ladder: &[RecordedMessage], cseq: u32) -> bool {
     ladder.iter().filter(|m| m.dir == Dir::Out).any(|m| {
-        matches!(parse(m.wire()), Some(SipMessage::Response(r))
+        matches!(reader.parse(m.wire()).ok(), Some(SipMessage::Response(r))
             if r.status() >= 300
                 && r.cseq().seq() == cseq
                 && *r.cseq().method() == Method::Invite)
@@ -99,6 +105,7 @@ pub fn rejected(ladder: &[RecordedMessage], cseq: u32) -> bool {
 /// took that INVITE, before the next step taking one. An INVITE no step took
 /// has no scripted ACK.
 pub fn scripts_reject_ack(
+    reader: &dyn SipParser,
     steps: &[&CompiledStep],
     leg: &str,
     cseq: u32,
@@ -107,7 +114,7 @@ pub fn scripts_reject_ack(
 ) -> bool {
     let took = ladder.iter().filter(|m| m.dir == Dir::In).find_map(|m| {
         let step = m.step.as_deref()?;
-        match parse(m.wire())? {
+        match reader.parse(m.wire()).ok()? {
             SipMessage::Request(r) if *r.method() == Method::Invite && r.cseq().seq() == cseq => {
                 Some(step.to_string())
             }
@@ -144,10 +151,6 @@ pub fn scripts_final_ack(
         .filter(|s| s.leg == leg)
         .take_while(|s| !(s.is_send() && is_method(s, Method::Invite)))
         .any(|s| s.is_send() && !complete(&s.id) && is_method(s, Method::Ack))
-}
-
-fn parse(wire: &[u8]) -> Option<SipMessage> {
-    CustomParser::built().parse(wire).ok()
 }
 
 #[cfg(test)]
@@ -220,7 +223,7 @@ mod tests {
 
     /// Leg B's ladder: `(dir, raw, step)` in wire order.
     fn ladder(entries: &[(Dir, String, Option<&str>)]) -> Vec<RecordedMessage> {
-        let recording = Recording::new();
+        let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         recording.declare("B");
         for (at, (dir, raw, step)) in entries.iter().enumerate() {
             recording.push("B", *dir, at as u64, raw.clone(), *step, None);
@@ -242,9 +245,16 @@ mod tests {
             (Dir::In, invite(2, Some("b1")), Some("t2")),
         ]);
         let done = |id: &str| id != "r2";
-        assert_eq!(answered_invite(&steps, 3, &rec), Some(2));
-        assert!(pending_reject(&steps, "B", 1, &rec, done).is_none(), "r2 answers CSeq 2, not 1");
-        assert_eq!(pending_reject(&steps, "B", 2, &rec, done).map(|s| s.id.as_str()), Some("r2"));
+        assert_eq!(answered_invite(&sip_message::CustomParser::new(), &steps, 3, &rec), Some(2));
+        assert!(
+            pending_reject(&sip_message::CustomParser::new(), &steps, "B", 1, &rec, done).is_none(),
+            "r2 answers CSeq 2, not 1"
+        );
+        assert_eq!(
+            pending_reject(&sip_message::CustomParser::new(), &steps, "B", 2, &rec, done)
+                .map(|s| s.id.as_str()),
+            Some("r2")
+        );
     }
 
     /// A scripted final whose INVITE has not arrived answers nothing yet: it is
@@ -259,11 +269,16 @@ mod tests {
             (Dir::In, invite(1, None), Some("t1")),
             (Dir::Out, final_to(200, 1), Some("r1")),
         ]);
-        assert_eq!(answered_invite(&steps, 3, &rec), None, "t2's INVITE is still to come");
-        let moot = answered_invite(&steps, 3, &rec).is_some_and(|c| invite_answered(&rec, c, None));
+        assert_eq!(
+            answered_invite(&sip_message::CustomParser::new(), &steps, 3, &rec),
+            None,
+            "t2's INVITE is still to come"
+        );
+        let moot = answered_invite(&sip_message::CustomParser::new(), &steps, 3, &rec)
+            .is_some_and(|c| invite_answered(&sip_message::CustomParser::new(), &rec, c, None));
         assert!(!moot, "r2 answers nothing yet: it stays to be composed, loudly");
-        assert!(invite_answered(&rec, 1, None));
-        assert!(!invite_answered(&rec, 2, None));
+        assert!(invite_answered(&sip_message::CustomParser::new(), &rec, 1, None));
+        assert!(!invite_answered(&sip_message::CustomParser::new(), &rec, 2, None));
     }
 
     /// A fork's own final is told by its To-tag: the 2xx one fork sent leaves
@@ -274,9 +289,18 @@ mod tests {
             (Dir::In, invite(1, None), Some("t1")),
             (Dir::Out, final_to(200, 1), Some("r1")),
         ]);
-        assert!(invite_answered(&rec, 1, Some("b1")), "the fork tagged b1 answered");
-        assert!(!invite_answered(&rec, 1, Some("b2")), "the fork tagged b2 has not");
-        assert!(invite_answered(&rec, 1, None), "the leg as a whole has");
+        assert!(
+            invite_answered(&sip_message::CustomParser::new(), &rec, 1, Some("b1")),
+            "the fork tagged b1 answered"
+        );
+        assert!(
+            !invite_answered(&sip_message::CustomParser::new(), &rec, 1, Some("b2")),
+            "the fork tagged b2 has not"
+        );
+        assert!(
+            invite_answered(&sip_message::CustomParser::new(), &rec, 1, None),
+            "the leg as a whole has"
+        );
     }
 
     fn ack_expect(id: &str) -> String {
@@ -306,11 +330,30 @@ mod tests {
             (Dir::Out, final_to(487, 2), Some("r2")),
         ]);
         let pending = |id: &str| id != "a2";
-        assert!(rejected(&rec, 1) && rejected(&rec, 2));
-        assert!(!scripts_reject_ack(&steps, "B", 1, &rec, pending), "a2 is t2's, not t1's");
-        assert!(scripts_reject_ack(&steps, "B", 2, &rec, pending));
-        assert!(!scripts_reject_ack(&steps, "B", 2, &rec, |_| true), "a2 already took its ACK");
-        assert!(!scripts_reject_ack(&steps, "B", 3, &rec, pending), "no step took CSeq 3");
+        assert!(
+            rejected(&sip_message::CustomParser::new(), &rec, 1)
+                && rejected(&sip_message::CustomParser::new(), &rec, 2)
+        );
+        assert!(
+            !scripts_reject_ack(&sip_message::CustomParser::new(), &steps, "B", 1, &rec, pending),
+            "a2 is t2's, not t1's"
+        );
+        assert!(scripts_reject_ack(
+            &sip_message::CustomParser::new(),
+            &steps,
+            "B",
+            2,
+            &rec,
+            pending
+        ));
+        assert!(
+            !scripts_reject_ack(&sip_message::CustomParser::new(), &steps, "B", 2, &rec, |_| true),
+            "a2 already took its ACK"
+        );
+        assert!(
+            !scripts_reject_ack(&sip_message::CustomParser::new(), &steps, "B", 3, &rec, pending),
+            "no step took CSeq 3"
+        );
     }
 
     fn on_a(step: String) -> String {
@@ -360,6 +403,7 @@ mod tests {
         let plan = plan(&flow);
         let steps = plan.steps();
         let rec = ladder(&[(Dir::In, invite(1, None), Some("t1"))]);
-        assert!(pending_reject(&steps, "B", 1, &rec, |_| false).is_none());
+        assert!(pending_reject(&sip_message::CustomParser::new(), &steps, "B", 1, &rec, |_| false)
+            .is_none());
     }
 }

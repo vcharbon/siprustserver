@@ -99,7 +99,9 @@ const DEFAULT_ISOLATION_MS: u64 = 2_000;
 const T1_MS: u64 = 500;
 
 impl ProxyConfig {
-    /// The reader of the wire, whichever stage reads a datagram first.
+    /// The reader of the wire, whichever stage reads a datagram first: the
+    /// proxy's composition root, built once and handed to every stage.
+    #[expect(clippy::disallowed_methods, reason = "the proxy's composition root")]
     pub fn parser(&self) -> CustomParser {
         CustomParser::ingress(self.parser_limits.clone())
     }

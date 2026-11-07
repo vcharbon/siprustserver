@@ -20,6 +20,7 @@ fn the_pipeline_fixture_line_is_what_the_writer_writes() {
         read.at_us,
         read.step.clone(),
         read.wire().to_vec(),
+        &sip_message::CustomParser::new(),
     );
     rebuilt.repeat_of = read.repeat_of;
     rebuilt.note = read.note.clone();

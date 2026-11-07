@@ -39,7 +39,14 @@ mod tests {
     use crate::bundle::Dir;
 
     fn message(seq: u64, dir: Dir, at_us: u64, wire: &str) -> RecordedMessage {
-        RecordedMessage::new(seq, dir, at_us, None, wire.as_bytes().to_vec())
+        RecordedMessage::new(
+            seq,
+            dir,
+            at_us,
+            None,
+            wire.as_bytes().to_vec(),
+            &sip_message::CustomParser::new(),
+        )
     }
 
     const INVITE_A: &str = "INVITE sip:b SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: a\r\nCSeq: 1 INVITE\r\n\r\n";

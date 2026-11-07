@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn a_bundle_writes_every_file_the_record_kind_names() {
-        let recording = Recording::new();
+        let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         recording.push(
             "A",
             Dir::Out,
@@ -233,7 +233,7 @@ mod tests {
     fn a_run_that_unwinds_still_leaves_its_ladder_on_disk() {
         let dir = std::env::temp_dir().join(format!("pivot-unwind-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let recording = Recording::new();
+        let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         let outside = recording.clone();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _writer = armed(&dir, recording);
@@ -255,7 +255,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pivot-finish-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         {
-            let mut writer = armed(&dir, Recording::new());
+            let mut writer = armed(
+                &dir,
+                Recording::new(std::sync::Arc::new(sip_message::CustomParser::built())),
+            );
             writer.finish(
                 RunVerdict::ok("case", "upstream-fake"),
                 RunTiming { started_at_ms: 0, settled_at_ms: Some(740), settle_budget_ms: 32000 },

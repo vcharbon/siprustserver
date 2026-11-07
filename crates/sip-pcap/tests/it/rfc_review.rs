@@ -216,7 +216,10 @@ fn the_fixture_round_trips_through_the_encoder() {
     assert_eq!(datagrams.len(), 19);
     let (original, _) =
         sip_pcap::read_capture_files(&[fixtures().join("capture.pcap.gz")]).expect("fixture");
-    let flows = sip_pcap::flow::build_flows(&original, &sip_pcap::flow::FlowConfig::default());
+    let flows = sip_pcap::flow::build_flows(
+        &original,
+        &sip_pcap::flow::FlowConfig::standard(sip_message::ToolReading::plain_rfc()),
+    );
     let kept: Vec<(u64, String, Vec<u8>)> = flows
         .legs
         .iter()

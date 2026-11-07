@@ -8,27 +8,32 @@
 //! kept in step by hand. Nothing here reads state the document does not carry.
 
 use sip_message::header::HeaderName;
+use sip_message::{SipParser, ToolReading};
 
 use crate::callfacts;
 use crate::doc::{FlowsDoc, EMIT_SCHEMA_VERSION};
 use crate::msgfacts;
-use crate::reading::Reading;
 
 /// What the enrichment needs beyond the document itself.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct EnrichOptions {
     /// Headers `msgs[].headers` projects, by identity. Order is preserved into
     /// the document's `emit_headers`.
     pub headers: Vec<HeaderName>,
     /// How each message's bytes are read: the reading that extracted them.
-    pub reading: Reading,
+    pub reading: ToolReading,
 }
 
 impl EnrichOptions {
+    /// No header projected, the bytes read under `reading`.
+    pub fn under(reading: ToolReading) -> Self {
+        Self { headers: Vec::new(), reading }
+    }
+
     /// Resolve an allow-list given as wire names — casing and compact forms
     /// collapse, so `r` and `Refer-To` name the same header once. The bytes
     /// are read under `reading`.
-    pub fn with_headers<S: AsRef<str>>(names: &[S], reading: Reading) -> Self {
+    pub fn with_headers<S: AsRef<str>>(names: &[S], reading: ToolReading) -> Self {
         let mut headers: Vec<HeaderName> = Vec::new();
         for name in names {
             let name = HeaderName::from(name.as_ref().trim());
@@ -118,11 +123,12 @@ Content-Length: 0\r\n\r\n";
             dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", INVITE),
             dg(9_000, "10.0.0.2:5060", "10.0.0.1:5060", OK),
         ];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows =
+            build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
         crate::emit::flows_to_doc(
             &flows,
             &DecodeStats::default(),
-            &EnrichOptions::with_headers(&["X-Api-Call"], Reading::rfc()),
+            &EnrichOptions::with_headers(&["X-Api-Call"], ToolReading::plain_rfc()),
         )
         .expect("the model enriches")
     }
@@ -153,7 +159,7 @@ Content-Length: 0\r\n\r\n";
     /// back in step.
     #[test]
     fn re_enriching_a_serialized_document_is_idempotent() {
-        let opts = EnrichOptions::with_headers(&["X-Api-Call"], Reading::rfc());
+        let opts = EnrichOptions::with_headers(&["X-Api-Call"], ToolReading::plain_rfc());
         let once = serde_json::to_string_pretty(&doc()).unwrap();
         let twice = enrich_str(&once, &opts).unwrap();
         assert_eq!(once, twice);
@@ -175,7 +181,11 @@ Content-Length: 0\r\n\r\n";
             }
         }
         let back: FlowsDoc = serde_json::from_str(
-            &enrich_str(&value.to_string(), &EnrichOptions::default()).unwrap(),
+            &enrich_str(
+                &value.to_string(),
+                &EnrichOptions::under(sip_message::ToolReading::plain_rfc()),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(back.schema, EMIT_SCHEMA_VERSION);
@@ -187,7 +197,7 @@ Content-Length: 0\r\n\r\n";
 
     #[test]
     fn a_rewritten_document_keeps_its_mark_through_re_enrichment() {
-        let opts = EnrichOptions::with_headers(&["X-Api-Call"], Reading::rfc());
+        let opts = EnrichOptions::with_headers(&["X-Api-Call"], ToolReading::plain_rfc());
         let mut marked = doc();
         assert_eq!(marked.rewritten, None, "a document as read carries no mark");
         marked.rewritten = Some("anonymised".to_string());

@@ -74,7 +74,7 @@ fn the_floor_holds_an_unacked_final_inside_timer_h_and_expires_it_past() {
         Call-ID: call-a\r\n\
         CSeq: 2 ACK\r\n\
         Content-Length: 0\r\n\r\n";
-    let recording = Recording::new();
+    let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     recording.declare("B");
     recording.push("B", Dir::In, 1_000_000, INVITE, None, None);
     recording.push("B", Dir::Out, 1_400_000, TERMINATED, None, None);
@@ -127,7 +127,7 @@ fn the_floor_holds_a_sent_invite_until_its_final_and_bounds_calling_by_timer_b()
         invite: PendingInvite { cseq: 1, sent_at_us, proceeding: false },
     };
 
-    let recording = Recording::new();
+    let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     recording.declare("A");
     recording.push("A", Dir::Out, sent_at_us, INVITE, None, None);
     // A retransmission is the same transaction: it moves no clock.

@@ -19,6 +19,7 @@ pub mod custom;
 mod exemptions;
 mod first_ingress;
 mod stored;
+mod tool_reading;
 
 #[cfg(feature = "rvoip-oracle")]
 pub mod rvoip;
@@ -26,6 +27,7 @@ pub mod rvoip;
 pub use exemptions::{Exemption, Exemptions};
 pub use first_ingress::FirstIngressBound;
 pub use stored::read_stored;
+pub use tool_reading::ToolReading;
 
 /// The layer interface. Every parser implementation conforms to this.
 pub trait SipParser {

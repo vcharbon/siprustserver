@@ -26,7 +26,7 @@ const value = async <A, E>(use: (cli: SipflowCli.Interface) => Effect.Effect<A, 
 
 describe("flows", () => {
   it("decodes the document rather than handing back its text", async () => {
-    const doc = await value((cli) => cli.flows("capture.pcap.gz", ["P-Charging-Vector"]))
+    const doc = await value((cli) => cli.flows("capture.pcap.gz", ["P-Charging-Vector"], []))
     expect(doc.schema).toBe(5)
     expect(doc.legs[0].call_id).toBe("c1")
     expect(doc.legs[0].msgs[0].summary.kind).toBe("request")
@@ -35,17 +35,25 @@ describe("flows", () => {
   it("hands the emitter the allow-list the caller asked for, comma-joined", async () => {
     // The stub echoes the `--emit-headers` argv back as the document's own
     // `emit_headers`, so the decoded document IS the argv assertion.
-    const doc = await value((cli) => cli.flows("capture.pcap.gz", ["P-Charging-Vector", "X-Api-Call"]))
+    const doc = await value((cli) => cli.flows("capture.pcap.gz", ["P-Charging-Vector", "X-Api-Call"], []))
     expect(doc.emit_headers).toEqual(["P-Charging-Vector", "X-Api-Call"])
   })
 
   it("asks for no allow-list when the caller names no header", async () => {
-    const doc = await value((cli) => cli.flows("capture.pcap.gz", []))
+    const doc = await value((cli) => cli.flows("capture.pcap.gz", [], []))
     expect(doc.emit_headers).toEqual([])
   })
 
+  it("hands the extractor the caller's reading ahead of the capture", async () => {
+    const stated = await value((cli) => cli.flows("capture.pcap.gz", [], ["--reading", "stated.reading"]))
+    expect(stated.schema).toBe(5)
+    const exit = await exec((cli) => cli.flows("capture.pcap.gz", [], ["--reading", "unreadable.reading"]))
+    expect(exit._tag).toBe("Failure")
+    expect(JSON.stringify(exit)).toContain("unreadable.reading")
+  })
+
   it("fails when the capture is not there", async () => {
-    const exit = await exec((cli) => cli.flows("missing.pcap", []))
+    const exit = await exec((cli) => cli.flows("missing.pcap", [], []))
     expect(exit._tag).toBe("Failure")
     expect(JSON.stringify(exit)).toContain("Toolchain.CliFailed")
   })

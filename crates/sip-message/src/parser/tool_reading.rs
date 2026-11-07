@@ -1,8 +1,9 @@
-//! How a tool reads the messages a capture holds: its own exemptions and
-//! bounds, which may admit more than any deployment does (ADR-0053 §6). A
-//! reading is stated once, in a file `sipflow --reading` names, and refused
-//! whole at startup when any line of it does not read. With no file a tool
-//! reads the RFC: no exemption, the parser's default bounds.
+//! How a tool reads the messages it was handed (a capture's, a run's
+//! recording): its own exemptions and bounds, which may admit more than any
+//! deployment does (ADR-0053 §6). A reading is stated once, in the text of a
+//! file the tool names (`sipflow --reading`), and refused whole when any line
+//! of it does not read. A tool that states none reads
+//! [`ToolReading::plain_rfc`]: no exemption, the parser's default bounds.
 //!
 //! The file holds one `key = value` per line; `#` starts a comment, and a
 //! key appears at most once:
@@ -15,36 +16,27 @@
 //! max-datagram = 65535
 //! ```
 
-use sip_message::{
-    CustomParser, Exemptions, SipMessage, SipParseError, SipParser, SipParserLimits,
-};
+use super::custom::CustomParser;
+use super::{Exemptions, SipParser, SipParserLimits, DATAGRAM_BYTES};
+use crate::error::SipParseError;
+use crate::types::SipMessage;
 
-/// The largest datagram an IPv4 or IPv6 UDP packet carries, the default
-/// bound of a message's bytes.
-const DATAGRAM_BYTES: usize = 65_535;
-
-/// A tool's reading of captured messages.
+/// A tool's reading of the messages it is handed.
 #[derive(Debug, Clone)]
-pub struct Reading {
+pub struct ToolReading {
+    limits: SipParserLimits,
     parser: CustomParser,
     max_datagram: usize,
 }
 
-/// The RFC's reading, [`Reading::rfc`].
-impl Default for Reading {
-    fn default() -> Self {
-        Self::rfc()
-    }
-}
-
-impl Reading {
+impl ToolReading {
     /// The RFC's reading: no exemption, the parser's default bounds.
-    pub fn rfc() -> Self {
+    pub fn plain_rfc() -> Self {
         Self::of(SipParserLimits::DEFAULT, DATAGRAM_BYTES)
     }
 
     fn of(limits: SipParserLimits, max_datagram: usize) -> Self {
-        Self { parser: CustomParser::tool(limits), max_datagram }
+        Self { parser: CustomParser::tool(limits.clone()), limits, max_datagram }
     }
 
     /// The reading `text` states, or every line that does not read, one per
@@ -88,9 +80,26 @@ impl Reading {
         }
     }
 
-    /// `payload` as this reading reads it. A payload past
-    /// [`max_datagram`](Self::max_datagram) is refused before it is parsed.
-    pub fn parse(&self, payload: &[u8]) -> Result<SipMessage, SipParseError> {
+    /// The largest message, in bytes, this reading parses.
+    pub fn max_datagram(&self) -> usize {
+        self.max_datagram
+    }
+
+    /// The bounds and exemptions this reading parses under, for a party that
+    /// reads the wire itself (a test agent) to read as the tool does.
+    pub fn limits(&self) -> &SipParserLimits {
+        &self.limits
+    }
+}
+
+/// A payload past [`max_datagram`](ToolReading::max_datagram) is refused
+/// before it is parsed.
+impl SipParser for ToolReading {
+    fn name(&self) -> &str {
+        "tool-reading"
+    }
+
+    fn parse(&self, payload: &[u8]) -> Result<SipMessage, SipParseError> {
         if payload.len() > self.max_datagram {
             return Err(SipParseError::new(format!(
                 "datagram of {} bytes exceeds the reading's bound {}",
@@ -99,11 +108,6 @@ impl Reading {
             )));
         }
         self.parser.parse(payload)
-    }
-
-    /// The largest message, in bytes, this reading parses.
-    pub fn max_datagram(&self) -> usize {
-        self.max_datagram
     }
 }
 
@@ -131,9 +135,10 @@ Content-Length: 0\r\n\r\n";
     #[test]
     fn an_exemption_the_reading_states_is_read_and_the_rfc_reading_refuses_it() {
         let raw = INVITE_NO_MAX_FORWARDS.as_bytes();
-        assert!(Reading::rfc().parse(raw).is_err(), "§8.1.1: Max-Forwards is mandatory");
-        let stated = Reading::stated("exemptions = max-forwards:absent # the corpus holds it\n")
-            .expect("the reading reads");
+        assert!(ToolReading::plain_rfc().parse(raw).is_err(), "§8.1.1: Max-Forwards is mandatory");
+        let stated =
+            ToolReading::stated("exemptions = max-forwards:absent # the corpus holds it\n")
+                .expect("the reading reads");
         assert!(stated.parse(raw).is_ok());
     }
 
@@ -141,7 +146,7 @@ Content-Length: 0\r\n\r\n";
     fn each_size_bounds_its_reading() {
         let raw = INVITE_NO_MAX_FORWARDS.as_bytes();
         let open = "exemptions = max-forwards:absent\n";
-        let bounded = |line: &str| Reading::stated(&format!("{open}{line}\n")).expect("reads");
+        let bounded = |line: &str| ToolReading::stated(&format!("{open}{line}\n")).expect("reads");
         assert!(bounded("max-datagram = 64").parse(raw).is_err());
         assert!(bounded("max-uri-length = 8").parse(raw).is_err());
         assert!(bounded("max-header-length = 20").parse(raw).is_err());
@@ -152,7 +157,7 @@ Content-Length: 0\r\n\r\n";
 
     #[test]
     fn every_line_that_does_not_read_is_named_and_nothing_is_read() {
-        let problems = Reading::stated(
+        let problems = ToolReading::stated(
             "exemptions = not-an-exemption\nmax-datagram = 0\nmax-uri-length = big\n\
              max-header-lines\nmax-blank = 3\nmax-datagram = 9\n",
         )
@@ -169,6 +174,6 @@ Content-Length: 0\r\n\r\n";
 
     #[test]
     fn a_blank_exemption_value_is_refused() {
-        assert!(Reading::stated("exemptions =\n").is_err());
+        assert!(ToolReading::stated("exemptions =\n").is_err());
     }
 }

@@ -3,6 +3,7 @@
 //! owed an ACK for, and the INVITEs it sent and is owed a final for.
 
 use pivot_schema::bundle::RecordedMessage;
+use sip_message::SipParser;
 
 use super::view;
 
@@ -21,8 +22,8 @@ pub struct UnackedFinal {
 /// CSeq, read off its recorded ladder. A 2xx is not here: its ACK is the
 /// peer's own request (§13.2.2.4), not the transaction's closer. Nothing else
 /// the leg answers is owed an ACK, so a non-INVITE final never appears.
-pub fn unacked_finals(messages: &[RecordedMessage]) -> Vec<UnackedFinal> {
-    view(messages)
+pub fn unacked_finals(reader: &dyn SipParser, messages: &[RecordedMessage]) -> Vec<UnackedFinal> {
+    view(reader, messages)
         .sent_finals
         .into_iter()
         .map(|(cseq, (status, sent_at_us))| UnackedFinal { cseq, status, sent_at_us })
@@ -42,8 +43,8 @@ pub struct PendingInvite {
 
 /// The INVITEs one leg sent that are still awaiting their final, by CSeq,
 /// read off its recorded ladder. Any final ends the wait, a 2xx included.
-pub fn pending_invites(messages: &[RecordedMessage]) -> Vec<PendingInvite> {
-    view(messages)
+pub fn pending_invites(reader: &dyn SipParser, messages: &[RecordedMessage]) -> Vec<PendingInvite> {
+    view(reader, messages)
         .pending_invites
         .into_iter()
         .map(|(cseq, (sent_at_us, proceeding))| PendingInvite { cseq, sent_at_us, proceeding })

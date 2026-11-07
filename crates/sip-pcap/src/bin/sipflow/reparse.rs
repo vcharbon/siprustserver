@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+use sip_message::{SipParser, ToolReading};
 use sip_pcap::doc::{FlowsDoc, Summary};
 use sip_pcap::header_errors;
-use sip_pcap::reading::Reading;
 
 use crate::walk::{capture_of, expand_flows_documents};
 
@@ -21,7 +21,7 @@ use crate::walk::{capture_of, expand_flows_documents};
 ///
 /// A document that cannot be read is printed as one `error` line and counted,
 /// never skipped: the totals cover every document the walk found.
-pub(crate) fn run(inputs: &[PathBuf], jobs: usize, reading: &Reading) {
+pub(crate) fn run(inputs: &[PathBuf], jobs: usize, reading: &ToolReading) {
     let files = expand_flows_documents(inputs);
     if files.is_empty() {
         eprintln!("no *.flows.json found under {inputs:?}");
@@ -84,7 +84,7 @@ impl Totals {
 }
 
 fn sweep_document(
-    reading: &Reading,
+    reading: &ToolReading,
     document: &str,
     capture: &str,
     path: &std::path::Path,

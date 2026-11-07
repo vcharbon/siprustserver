@@ -1,9 +1,24 @@
 use super::*;
+use crate::close;
+use sip_message::CustomParser;
 
 mod messages;
 mod transactions;
 
 use messages::{reply, request, response, taken};
+
+/// The close's readers over a recording made under `CustomParser::built()`.
+fn unscripted(messages: &[RecordedMessage], trigger: &SipMessage) -> Option<Owed> {
+    close::unscripted(&CustomParser::built(), messages, trigger)
+}
+
+fn unacked_finals(messages: &[RecordedMessage]) -> Vec<UnackedFinal> {
+    close::unacked_finals(&CustomParser::built(), messages)
+}
+
+fn pending_invites(messages: &[RecordedMessage]) -> Vec<PendingInvite> {
+    close::pending_invites(&CustomParser::built(), messages)
+}
 
 const INVITE: &str = "INVITE sip:bob@127.0.0.1:5080 SIP/2.0\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-a\r\n\
@@ -53,7 +68,7 @@ fn answer_under(
 /// A ladder's entries: `(dir, raw)`, and whether the datagram is a byte-
 /// identical repeat of an earlier one the recording marks as such.
 fn record(entries: &[(Dir, String, bool)]) -> Recording {
-    let recording = Recording::new();
+    let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     recording.declare("A");
     for (at, (dir, raw, repeat)) in entries.iter().enumerate() {
         if *repeat {
@@ -78,14 +93,14 @@ fn ladder(entries: &[(Dir, String)]) -> Vec<RecordedMessage> {
 }
 
 fn message(raw: &str) -> SipMessage {
-    parse(raw.as_bytes()).expect("the fixture parses")
+    CustomParser::built().parse(raw.as_bytes()).expect("the fixture parses")
 }
 
 /// A BYE the leg refused 481 as naming no dialog it holds (RFC 3261
 /// §12.2.2) ended nothing: the dialog the leg opened still owes its BYE.
 #[test]
 fn a_bye_refused_as_naming_no_dialog_ends_nothing() {
-    let recording = Recording::new();
+    let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     recording.declare("A");
     let foreign_bye = request("BYE", "2 BYE").replace("tag=b1", "tag=b9");
     let refusal = reply(481, "2 BYE").replace("tag=b1", "tag=b9");

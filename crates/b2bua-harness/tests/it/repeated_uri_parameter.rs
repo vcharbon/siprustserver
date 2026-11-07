@@ -39,7 +39,7 @@ async fn scene(name: &str) -> B2buaScene {
     .await;
     // The responses the stack echoes her own From in reach her as she wrote it
     // (§8.2.6.2); she reads them as the deployment does.
-    s.alice.reads_under(naming());
+    s.alice.reads_with(sip_message::CustomParser::with_limits(naming()));
     s
 }
 

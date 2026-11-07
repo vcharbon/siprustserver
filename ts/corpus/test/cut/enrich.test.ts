@@ -51,7 +51,8 @@ const services = Layer.mergeAll(
     generator: Effect.die("unused"),
     measure: Effect.die("unused"),
     compileMs: Effect.succeed(0),
-    decides: Effect.die("unused")
+    decides: Effect.die("unused"),
+    reading: []
   }),
   NodeServices.layer
 )

@@ -44,8 +44,14 @@ fn document(pretty: bool) -> String {
         probe: 0,
     })
     .collect();
-    let flows = build_flows(&datagrams, &FlowConfig::default());
-    let doc = flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default()).unwrap();
+    let flows =
+        build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
+    let doc = flows_to_doc(
+        &flows,
+        &DecodeStats::default(),
+        &EnrichOptions::under(sip_message::ToolReading::plain_rfc()),
+    )
+    .unwrap();
     if pretty {
         serde_json::to_string_pretty(&doc).unwrap()
     } else {

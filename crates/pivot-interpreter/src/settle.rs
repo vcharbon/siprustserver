@@ -157,7 +157,7 @@ pub fn floor(recording: &Recording, now_us: u64) -> Floor {
     let timer_b_us = TIMER_B * 1000;
     let mut floor = Floor::default();
     for (leg, messages) in recording.legs() {
-        for owed in close::unacked_finals(&messages) {
+        for owed in close::unacked_finals(recording.reader(), &messages) {
             let sent_at_us = owed.sent_at_us;
             let awaited = AwaitedAck { leg: leg.clone(), owed };
             if now_us.saturating_sub(sent_at_us) < timer_h_us {
@@ -166,7 +166,7 @@ pub fn floor(recording: &Recording, now_us: u64) -> Floor {
                 floor.expired.push(awaited);
             }
         }
-        for invite in close::pending_invites(&messages) {
+        for invite in close::pending_invites(recording.reader(), &messages) {
             let calling_past_b =
                 !invite.proceeding && now_us.saturating_sub(invite.sent_at_us) >= timer_b_us;
             let awaited = AwaitedFinal { leg: leg.clone(), invite };

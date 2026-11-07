@@ -447,10 +447,10 @@ Content-Length: 0\r\n\r\n";
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     // Bob reads the shape as a deployment naming it does (ADR-0001, exemptions).
     let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).unwrap();
-    bob.reads_under(sip_message::SipParserLimits {
+    bob.reads_with(sip_message::CustomParser::ingress(sip_message::SipParserLimits {
         exemptions,
         ..sip_message::SipParserLimits::DEFAULT
-    });
+    }));
     let (sut, _) = h.bind_sut("sut", "127.0.0.1:5080").await;
     sut.send_to(OPTIONS.as_bytes(), bob.addr()).await.unwrap();
     bob.receive("OPTIONS").await.respond(200, "OK").await;

@@ -71,13 +71,14 @@ const anonymiser = (broken = false) =>
     sourceRefusal: () => Effect.die("unused")
   })
 
-const tools = (extractor = EXTRACTOR) =>
+const tools = (extractor = EXTRACTOR, reading: ReadonlyArray<string> = []) =>
   Tools.layerWith({
     ready: () => Effect.succeed(extractor),
     generator: Effect.die("unused"),
     measure: Effect.die("unused"),
     compileMs: Effect.succeed(0),
-    decides: Effect.die("unused")
+    decides: Effect.die("unused"),
+    reading
   })
 
 const artifacts = path.join(scratch, "store")
@@ -85,11 +86,18 @@ const artifacts = path.join(scratch, "store")
 const extract = (
   source: Source,
   extractor: string,
-  options: { readonly settled?: Extract.Settled; readonly tool?: string; readonly broken?: boolean } = {}
+  options: {
+    readonly settled?: Extract.Settled
+    readonly tool?: string
+    readonly broken?: boolean
+    readonly reading?: ReadonlyArray<string>
+  } = {}
 ) =>
   Effect.runPromise(
     Extract.extract(artifacts, source, extractor, options.tool ?? EXTRACTOR, undefined, options.settled).pipe(
-      Effect.provide(Layer.mergeAll(tools(options.tool), anonymiser(options.broken), NodeServices.layer))
+      Effect.provide(
+        Layer.mergeAll(tools(options.tool, options.reading), anonymiser(options.broken), NodeServices.layer)
+      )
     )
   )
 
@@ -315,5 +323,18 @@ describe("Extract.extract failure under a kept seed", () => {
     expect(done.broke).toContain("anonymiser failed")
     expect(done.capture).toBe("cap.anon3")
     expect(snapshot(dir)).toEqual(before)
+  })
+})
+
+describe("Extract.extract under the deployment's reading", () => {
+  /** A stand-in extractor whose raw document is the arguments it was given. */
+  const ARGV = tool("argv-extractor", "#!/bin/sh\nif [ \"$1\" = index ]; then : > \"$2.idx\"; exit 0; fi\nprintf '%s ' \"$@\"\n")
+
+  it("hands the extractor the reading ahead of the capture", async () => {
+    const read = { capture: "read.anon", pcaps: [rw("read.pcap", "x")] }
+    const done = await extract(read, "x5", { tool: ARGV, reading: ["--reading", "/the/stated.reading"] })
+    expect(done.broke).toBeUndefined()
+    const kept = fs.readFileSync(path.join(artifacts, "read.anon", "read.anon.flows.json"), "utf8")
+    expect(kept.startsWith(`--reading /the/stated.reading ${read.pcaps[0]} --contiguous`)).toBe(true)
   })
 })

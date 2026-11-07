@@ -353,7 +353,7 @@ pub struct B2buaConfig {
 impl B2buaConfig {
     /// The reader of the wire, whichever stage reads a datagram first.
     pub fn parser(&self) -> sip_message::CustomParser {
-        sip_message::CustomParser::ingress(self.front.reads_under(&self.parser_limits))
+        self.front.parser(&self.parser_limits)
     }
 
     /// The configured initial-INVITE transaction bound in ms — the value wired

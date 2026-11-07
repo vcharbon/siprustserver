@@ -233,7 +233,8 @@ mod tests {
     }
 
     fn one_leg(datagrams: Vec<Datagram>) -> (crate::flow::Flows, Vec<Txn>) {
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows =
+            build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
         let txns = transactions(&flows.legs[0]);
         (flows, txns)
     }

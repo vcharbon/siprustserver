@@ -125,7 +125,7 @@ fn correlate(v: &Value, path: &str) -> R<FlowConfig> {
     let mut cfg = FlowConfig {
         strategies: Vec::new(),
         dedup_window_us: DEFAULT_DEDUP_WINDOW_US,
-        reading: crate::reading::Reading::rfc(),
+        reading: sip_message::ToolReading::plain_rfc(),
     };
     let mut saw_strategies = false;
     for (k, val) in obj {
@@ -150,7 +150,7 @@ fn correlate(v: &Value, path: &str) -> R<FlowConfig> {
         }
     }
     if !saw_strategies {
-        cfg.strategies = FlowConfig::default().strategies;
+        cfg.strategies = FlowConfig::standard(sip_message::ToolReading::plain_rfc()).strategies;
     }
     Ok(cfg)
 }

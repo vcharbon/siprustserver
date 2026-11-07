@@ -28,7 +28,8 @@ const deciding = (root: string) =>
     generator: Effect.die("unused"),
     measure: Effect.die("unused"),
     compileMs: Effect.succeed(0),
-    decides: Effect.succeed({ root, extraction: ["extract.rs"], cut: [] })
+    decides: Effect.succeed({ root, extraction: ["extract.rs"], cut: [] }),
+    reading: []
   })
 
 const under = <A, E>(root: string, effect: Effect.Effect<A, E, Tools.Service | NodeServices.NodeServices>) =>
@@ -58,7 +59,8 @@ describe("Fingerprint.extractor", () => {
       generator: Effect.die("unused"),
       measure: Effect.die("unused"),
       compileMs: Effect.succeed(0),
-      decides: Effect.succeed({ root, extraction: ["a.rs", "b.rs", "c.rs"], cut: [] })
+      decides: Effect.succeed({ root, extraction: ["a.rs", "b.rs", "c.rs"], cut: [] }),
+      reading: []
     })
     const now = () => Effect.runPromise(Fingerprint.extractorNow.pipe(Effect.provide(Layer.merge(tools, counting))))
     try {

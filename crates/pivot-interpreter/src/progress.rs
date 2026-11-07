@@ -48,7 +48,6 @@
 //! another transaction ends nothing.
 
 use pivot_schema::bundle::{Dir, RecordedMessage};
-use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
 use crate::gate::{self, Inbound};
@@ -92,6 +91,7 @@ pub struct Unmatched<'a> {
 /// an INVITE 2xx had confirmed the leg's dialog BEFORE this arrival. `None`
 /// with nothing armed.
 pub fn unmatched<'a>(
+    reader: &dyn SipParser,
     inbound: &Inbound,
     armed: &[Armed<'a>],
     leg: &[RecordedMessage],
@@ -103,7 +103,8 @@ pub fn unmatched<'a>(
     let mut candidates: Vec<&Armed<'a>> = armed
         .iter()
         .filter(|a| {
-            inbound.status.is_some() && awaited(a, leg) == Some((method.clone(), inbound.cseq))
+            inbound.status.is_some()
+                && awaited(reader, a, leg) == Some((method.clone(), inbound.cseq))
         })
         .collect();
     candidates.sort_by_key(|a| a.step.order);
@@ -130,7 +131,7 @@ pub fn unmatched<'a>(
             retired: Vec::new(),
             released: Vec::new(),
             omitted: false,
-            ends: contradicts_every_required(inbound, &steps, leg),
+            ends: contradicts_every_required(reader, inbound, &steps, leg),
         });
     };
     let mut out = Unmatched {
@@ -158,13 +159,13 @@ pub fn unmatched<'a>(
         return Some(out);
     }
     if !charged.retirable {
-        out.ends = contradicts_every_required(inbound, &steps, leg);
+        out.ends = contradicts_every_required(reader, inbound, &steps, leg);
         return Some(out);
     }
     out.retired.push(charged.step.id.clone());
     out.omitted = named == 100
         && method == Method::Invite
-        && !provisional_received(leg, &method, inbound.cseq);
+        && !provisional_received(reader, leg, &method, inbound.cseq);
     let class_changed = method == Method::Invite && (named >= 300) != (status >= 300);
     out.ends = named < 200 || (class_changed && !confirmed);
     Some(out)
@@ -181,15 +182,19 @@ fn names(step: &CompiledStep) -> Option<u16> {
 /// The transaction an armed expect waits on — CSeq method and number (RFC 3261
 /// §17.1.3) — read off the leg's recording: the request sent under the step
 /// that opened it, else the leg's last send of the method.
-fn awaited(armed: &Armed<'_>, leg: &[RecordedMessage]) -> Option<(Method, u32)> {
+fn awaited(
+    reader: &dyn SipParser,
+    armed: &Armed<'_>,
+    leg: &[RecordedMessage],
+) -> Option<(Method, u32)> {
     let Discriminator::Response { cseq_method: Some(method), .. } = &armed.step.discriminator
     else {
         return None;
     };
     let method = Method::from_wire(method);
     let cseq = match armed.opener {
-        Some(opener) => sent_under(leg, opener),
-        None => last_sent(leg, &method),
+        Some(opener) => sent_under(reader, leg, opener),
+        None => last_sent(reader, leg, &method),
     }?;
     Some((method, cseq))
 }
@@ -199,29 +204,37 @@ fn awaited(armed: &Armed<'_>, leg: &[RecordedMessage]) -> Option<(Method, u32)> 
 /// `arrived_us`, in whole milliseconds. `None` where the leg's recording holds
 /// no such request.
 pub fn answered_after_ms(
+    reader: &dyn SipParser,
     leg: &[RecordedMessage],
     inbound: &Inbound,
     arrived_us: u64,
 ) -> Option<u64> {
     let method = Method::from_wire(&inbound.cseq_method);
-    let sent_us = leg.iter().filter(|recorded| recorded.dir == Dir::Out).find_map(|recorded| {
-        match CustomParser::built().parse(recorded.wire()).ok()? {
+    let sent_us =
+        leg.iter().filter(|recorded| recorded.dir == Dir::Out).find_map(|recorded| match reader
+            .parse(recorded.wire())
+            .ok()?
+        {
             SipMessage::Request(request)
                 if *request.method() == method && request.cseq().seq() == inbound.cseq =>
             {
                 Some(recorded.at_us)
             }
             _ => None,
-        }
-    })?;
+        })?;
     Some(arrived_us.saturating_sub(sent_us) / 1000)
 }
 
 /// Whether a provisional on the leg's `method` transaction numbered `cseq` has
 /// arrived: a server transaction that sent one did not answer at once.
-fn provisional_received(leg: &[RecordedMessage], method: &Method, cseq: u32) -> bool {
+fn provisional_received(
+    reader: &dyn SipParser,
+    leg: &[RecordedMessage],
+    method: &Method,
+    cseq: u32,
+) -> bool {
     leg.iter().filter(|recorded| recorded.dir == Dir::In).any(|recorded| {
-        matches!(CustomParser::built().parse(recorded.wire()).ok(),
+        matches!(reader.parse(recorded.wire()).ok(),
             Some(SipMessage::Response(response))
                 if response.status() < 200
                     && response.cseq().method() == method
@@ -230,10 +243,10 @@ fn provisional_received(leg: &[RecordedMessage], method: &Method, cseq: u32) -> 
 }
 
 /// The CSeq of the request this leg sent under `step`, where it is recorded.
-fn sent_under(leg: &[RecordedMessage], step: &str) -> Option<u32> {
+fn sent_under(reader: &dyn SipParser, leg: &[RecordedMessage], step: &str) -> Option<u32> {
     leg.iter()
         .filter(|recorded| recorded.dir == Dir::Out && recorded.step.as_deref() == Some(step))
-        .find_map(|recorded| match CustomParser::built().parse(recorded.wire()).ok()? {
+        .find_map(|recorded| match reader.parse(recorded.wire()).ok()? {
             SipMessage::Request(request) => Some(request.cseq().seq()),
             _ => None,
         })
@@ -242,6 +255,7 @@ fn sent_under(leg: &[RecordedMessage], step: &str) -> Option<u32> {
 /// Whether a final leaves EVERY required armed expect unsatisfiable: the
 /// all-or-none rule of a block, and of a leg where nothing was retired.
 fn contradicts_every_required(
+    reader: &dyn SipParser,
     inbound: &Inbound,
     armed: &[CompiledStep],
     leg: &[RecordedMessage],
@@ -257,7 +271,7 @@ fn contradicts_every_required(
     if required.peek().is_none() {
         return false;
     }
-    let sent = last_sent(leg, &Method::from_wire(&inbound.cseq_method));
+    let sent = last_sent(reader, leg, &Method::from_wire(&inbound.cseq_method));
     required.all(|step| contradicts(step, status, inbound, sent))
 }
 
@@ -287,11 +301,11 @@ fn contradicts(step: &CompiledStep, status: u16, inbound: &Inbound, sent: Option
 /// emission is what identifies the transaction the expect behind it waits on —
 /// and a re-INVITE's CSeq is how a final for the original is told from a final
 /// for the renegotiation.
-fn last_sent(leg: &[RecordedMessage], method: &Method) -> Option<u32> {
+fn last_sent(reader: &dyn SipParser, leg: &[RecordedMessage], method: &Method) -> Option<u32> {
     let want = method.clone();
     leg.iter()
         .filter(|recorded| recorded.dir == Dir::Out)
-        .filter_map(|recorded| match CustomParser::built().parse(recorded.wire()).ok()? {
+        .filter_map(|recorded| match reader.parse(recorded.wire()).ok()? {
             SipMessage::Request(request) if *request.method() == want => Some(request.cseq().seq()),
             _ => None,
         })

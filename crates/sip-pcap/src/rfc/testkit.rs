@@ -195,9 +195,14 @@ fn response_with(
 }
 
 pub(super) fn doc_of(datagrams: Vec<Datagram>) -> FlowsDoc {
-    let flows = build_flows(&datagrams, &FlowConfig::default());
-    crate::emit::flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default())
-        .expect("the model enriches")
+    let flows =
+        build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
+    crate::emit::flows_to_doc(
+        &flows,
+        &DecodeStats::default(),
+        &EnrichOptions::under(sip_message::ToolReading::plain_rfc()),
+    )
+    .expect("the model enriches")
 }
 
 /// `msg` carrying `body` as its session description, the head's

@@ -94,7 +94,10 @@ fn transaction_scope_is_what_makes_the_join() {
                                        {"final_status": {"ge": 400}}]}}
     }));
 
-    let decoy = build_flows(&update_ok_reinvite_rejected(), &FlowConfig::default());
+    let decoy = build_flows(
+        &update_ok_reinvite_rejected(),
+        &FlowConfig::standard(sip_message::ToolReading::plain_rfc()),
+    );
     assert_eq!(
         select_groups(&decoy, &flat).len(),
         1,
@@ -106,7 +109,10 @@ fn transaction_scope_is_what_makes_the_join() {
         "the rejected transaction is the re-INVITE, not the UPDATE"
     );
 
-    let real = build_flows(&update_rejected(), &FlowConfig::default());
+    let real = build_flows(
+        &update_rejected(),
+        &FlowConfig::standard(sip_message::ToolReading::plain_rfc()),
+    );
     assert_eq!(select_groups(&real, &flat).len(), 1);
     assert_eq!(select_groups(&real, &scoped).len(), 1, "the genuine case must still match");
 }
@@ -134,7 +140,8 @@ fn reinvite_answer_body_binds_to_its_own_transaction() {
             &resp(200, cid, 3, "INVITE", "d3", "a=sendrecv"),
         ),
     ];
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows =
+        build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
     let q = query(json!({
         "select": {"any_txn": {"all": [
             {"kind": "reinvite"},
@@ -161,7 +168,7 @@ fn reinvite_answer_body_binds_to_its_own_transaction() {
         "10.0.0.1:5060",
         &resp(200, cid, 3, "INVITE", "d3", "a=sendonly"),
     );
-    let flows = build_flows(&moved, &FlowConfig::default());
+    let flows = build_flows(&moved, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
     assert_eq!(select_groups(&flows, &q).len(), 1);
 }
 
@@ -179,14 +186,14 @@ fn latency_selects_a_slow_rejection() {
                                        {"final_status": {"ge": 400}},
                                        {"latency_us": {"ge": 2000000}}]}}
     }));
-    let flows = build_flows(&slow, &FlowConfig::default());
+    let flows = build_flows(&slow, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
     assert_eq!(select_groups(&flows, &q).len(), 1, "5s to a 486 is a slow rejection");
 
     let fast = vec![
         dg(1_000_000, "10.0.0.1:5060", "10.0.0.9:5060", &req("INVITE", cid, 1, "e1", "")),
         dg(1_100_000, "10.0.0.9:5060", "10.0.0.1:5060", &resp(486, cid, 1, "INVITE", "e1", "")),
     ];
-    let flows = build_flows(&fast, &FlowConfig::default());
+    let flows = build_flows(&fast, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
     assert_eq!(select_groups(&flows, &q).len(), 0, "100ms is not");
 }
 
@@ -200,7 +207,8 @@ fn no_final_response_is_distinguishable_from_no_invite() {
         dg(1_100_000, "10.0.0.9:5060", "10.0.0.1:5060", &resp(100, cid, 1, "INVITE", "f1", "")),
     ];
     let q = query(json!({"select": {"final_status": "none"}}));
-    let flows = build_flows(&timed_out, &FlowConfig::default());
+    let flows =
+        build_flows(&timed_out, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
     assert_eq!(select_groups(&flows, &q).len(), 1);
 
     let options_only = vec![dg(
@@ -209,7 +217,8 @@ fn no_final_response_is_distinguishable_from_no_invite() {
         "10.0.0.9:5060",
         &req("OPTIONS", "opt-1", 1, "g1", ""),
     )];
-    let flows = build_flows(&options_only, &FlowConfig::default());
+    let flows =
+        build_flows(&options_only, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
     assert_eq!(select_groups(&flows, &q).len(), 0, "a call that never was is not a timeout");
 }
 
@@ -217,7 +226,10 @@ fn no_final_response_is_distinguishable_from_no_invite() {
 /// `ruri_user` is host-insensitive so grouping by callee survives a rewrite.
 #[test]
 fn projection_yields_the_named_fields() {
-    let flows = build_flows(&update_rejected(), &FlowConfig::default());
+    let flows = build_flows(
+        &update_rejected(),
+        &FlowConfig::standard(sip_message::ToolReading::plain_rfc()),
+    );
     let row =
         summary_row(&flows, 0, &[KeyField::CallId, KeyField::RuriUser, KeyField::FinalStatus]);
     assert_eq!(row["call_id"], json!(["scope-2"]));
@@ -244,7 +256,8 @@ fn neighbours_expand_a_hit_by_the_named_key() {
             &resp(200, cid, 1, "INVITE", branch, ""),
         ));
     }
-    let flows = build_flows(&datagrams, &FlowConfig::default());
+    let flows =
+        build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
     let q = query(json!({
         "select": {"any_txn": {"all": [{"method": "UPDATE"}, {"final_status": {"ge": 400}}]}},
         "neighbours": {"key": ["ruri_user"], "window_us": 60000000}
@@ -281,7 +294,10 @@ fn malformed_queries_are_rejected_with_a_path() {
 /// legitimate (and common) screening query.
 #[test]
 fn a_query_without_a_predicate_selects_every_call() {
-    let flows = build_flows(&update_rejected(), &FlowConfig::default());
+    let flows = build_flows(
+        &update_rejected(),
+        &FlowConfig::standard(sip_message::ToolReading::plain_rfc()),
+    );
     let q = query(json!({"project": {"mode": "count"}}));
     assert_eq!(select_groups(&flows, &q).len(), flows.groups.len());
 }

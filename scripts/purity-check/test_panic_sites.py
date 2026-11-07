@@ -869,30 +869,56 @@ class RealPass(Case):
               "        impl CustomParser {\n"
               "            pub fn new() -> Self { CustomParser }\n"
               "            pub fn with_limits(_: u8) -> Self { CustomParser }\n"
+              "            pub fn ingress(_: u8) -> Self { CustomParser }\n"
               "            pub fn built() -> Self { CustomParser }\n"
               "        }\n    }\n}\n")
-
-    def test_a_parser_with_no_reading_role_is_a_site_outside_tests(self):
-        ws = Workspace()
-        self.addCleanup(ws.tmp.cleanup)
-        ws.crate("sip-message", lib=self.PARSER)
-        ws.crate("a", "shell", deps=("sip-message",), lib=(
-            "use sip_message::parser::custom::CustomParser;\n"
+    USES = ("use sip_message::parser::custom::CustomParser;\n"
             "pub fn anonymous() -> CustomParser {\n    CustomParser::new()\n}\n"
             "pub fn stated() -> CustomParser {\n    CustomParser::with_limits(1)\n}\n"
             "pub fn named() -> CustomParser {\n    CustomParser::built()\n}\n"
             "#[cfg(test)]\n"
             "mod tests {\n    #[test]\n"
-            "    fn t() { let _ = super::CustomParser::new(); }\n}\n"))
+            "    fn t() { let _ = super::CustomParser::new(); }\n}\n")
+
+    def parsers(self, tiered_lib, untiered_lib=None):
+        ws = Workspace()
+        self.addCleanup(ws.tmp.cleanup)
+        ws.crate("sip-message", lib=self.PARSER)
+        ws.crate("a", "shell", deps=("sip-message",), lib=tiered_lib)
+        if untiered_lib is not None:
+            ws.crate("b", deps=("sip-message",), lib=untiered_lib)
         with open(REAL_CLIPPY_TOML) as f:
             ws.write("clippy.toml", f.read())
         ws.write("panic-sites.allow", HEADER)
         ws.commit()
+        return ws
+
+    def test_a_parser_with_no_reading_role_is_a_site_outside_tests(self):
+        ws = self.parsers(self.USES + (
+            "pub fn wired() -> CustomParser {\n    CustomParser::ingress(1)\n}\n"
+            "#[expect(clippy::disallowed_methods, reason = \"the composition root\")]\n"
+            "pub fn root() -> CustomParser {\n    CustomParser::ingress(1)\n}\n"))
         rc, out = ws.run(SCRIPT, "--report")
         self.assertEqual(rc, 0, out)
-        self.assertIn("crates/a/src/lib.rs 2\n", out)
+        self.assertIn("crates/a/src/lib.rs 3\n", out)
         self.assertNotIn("does not refer to", out)
+        rc, out = ws.run(SCRIPT)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("(no reading role)", out)
+        self.assertIn("ADR-0053 §6", out)
 
+    def test_an_untiered_member_builds_no_parser_without_a_role_either(self):
+        ws = self.parsers("pub fn f() {}\n", self.USES)
+        rc, out = ws.run(SCRIPT)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("crates/b/src/lib.rs:3:", out)
+        self.assertIn("crates/b/src/lib.rs:6:", out)
+        self.assertNotIn("crates/b/src/lib.rs:9:", out)
+        self.assertIn("an untiered member builds a parser through its role too", out)
+        clean = self.parsers(ZERO + "pub fn f() {}\n", "pub fn g() -> sip_message::parser::custom::CustomParser "
+                             "{\n    sip_message::parser::custom::CustomParser::built()\n}\n")
+        rc, out = clean.run(SCRIPT)
+        self.assertEqual(rc, 0, out)
 
 if __name__ == "__main__":
     unittest.main()
