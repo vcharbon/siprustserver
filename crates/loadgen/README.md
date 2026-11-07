@@ -44,9 +44,9 @@ nothing external.
 
 ### 2. Host → real cluster — the `loadgen` binary
 
-Build the binary and point it at the front-proxy VIP. The mux endpoints bind on a
-host IP **reachable from the cluster pods** (the kind bridge gateway, *not*
-`127.0.0.1`), and `--route-pin-to-uas` selects the `api-call-pin` **egress
+Build the binary and point it at the front proxy's external VIP. The mux endpoints
+bind on a host IP **the proxy reaches on the callers' plane** (the external bridge's
+gateway, *not* `127.0.0.1`), and `--route-pin-to-uas` selects the `api-call-pin` **egress
 policy** (the same `EgressPolicy` the e2e framework's layouts declare): the
 INVITE carries an `X-Api-Call` destination pin so our B2BUA sends the callee leg
 back to the host `uas` socket:
