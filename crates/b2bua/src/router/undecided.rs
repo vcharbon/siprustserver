@@ -93,7 +93,7 @@ pub(super) async fn settle_undecided(
         answered = matches!(caller, off_wire::Caller::Answer),
         "undecided call settled"
     );
-    let ending = off_wire::Ending::Built { before: &before, result, turn };
+    let ending = off_wire::Ending::Built { before: &before, result, turn: Box::new(turn) };
     let label = &"the settle of an undecided call";
     off_wire::end(ctx, call_ref, ending, caller, now_ms, label).await;
 }

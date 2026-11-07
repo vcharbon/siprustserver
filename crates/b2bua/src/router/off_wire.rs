@@ -35,7 +35,7 @@ pub(super) enum Ending<'a> {
     /// answer what this node still holds open, their effects riding `body`.
     Met { before: &'a Call, body: Call, actions: Actions },
     /// A result a core fold built on `turn`, the turn's scope.
-    Built { before: &'a Call, result: HandlerResult, turn: TurnScope },
+    Built { before: &'a Call, result: HandlerResult, turn: Box<TurnScope> },
 }
 
 /// Rule actions run on an internal event of `topic`, read by `owners`.
@@ -112,7 +112,7 @@ fn landed(
             }
             (Cow::Borrowed(before), result, turn)
         }
-        Ending::Built { before, result, turn } => (Cow::Borrowed(before), result, turn),
+        Ending::Built { before, result, turn } => (Cow::Borrowed(before), result, *turn),
     };
     let unanswered = match caller {
         Caller::Answer => UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
