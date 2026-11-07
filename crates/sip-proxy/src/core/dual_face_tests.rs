@@ -672,7 +672,9 @@ fn past_the_bound(msg: &SipMessage) -> SipMessage {
 #[tokio::test]
 async fn a_new_request_past_the_bound_is_answered_on_the_external_face() {
     let fx = dual_face_core();
-    fx.core.handle_request_from(past_the_bound(&caller_invite("past-ext")), caller_src()).await;
+    fx.core
+        .handle_request(past_the_bound(&caller_invite("past-ext")), caller_src(), Face::External)
+        .await;
     let sent = fx.take_sent();
     let [(face, dst, bytes)] = sent.as_slice() else { panic!("one answer: {sent:?}") };
     assert_eq!((*face, *dst), ("ext", caller_src()));
@@ -685,7 +687,9 @@ async fn a_new_request_past_the_bound_is_answered_on_the_external_face() {
 async fn a_workers_request_past_the_bound_is_forwarded_on_the_internal_face() {
     let fx = dual_face_core();
     let worker: SocketAddr = format!("{W1}:5070").parse().expect("an address");
-    fx.core.handle_request_from(past_the_bound(&worker_bleg_invite("past-int")), worker).await;
+    fx.core
+        .handle_request(past_the_bound(&worker_bleg_invite("past-int")), worker, Face::Internal)
+        .await;
     let sent = fx.take_sent();
     let [(face, _, bytes)] = sent.as_slice() else { panic!("one forward: {sent:?}") };
     assert_eq!(*face, "ext");
