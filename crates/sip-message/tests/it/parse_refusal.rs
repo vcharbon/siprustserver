@@ -249,6 +249,28 @@ fn a_header_past_the_length_limit_leaves_no_partial() {
     assert!(err.partial().is_none(), "{err:?}");
 }
 
+/// ADR-0001's bounds: a header line and a Request-URI of 8,192 bytes read, one
+/// byte more is refused. A Contact URI that fits its line fits a Request-URI,
+/// so it can become the target of this stack's in-dialog request.
+#[test]
+fn a_line_and_a_request_uri_read_up_to_their_stated_bound() {
+    let limits = SipParserLimits::default();
+    assert_eq!((limits.max_header_length, limits.max_uri_length), (8192, 8192));
+
+    let padded = |len: usize| format!("X-Long: {}", "a".repeat(len - "X-Long: ".len()));
+    assert!(CustomParser::new().parse(&invite_with(&[&padded(8192)])).is_ok());
+    let err = CustomParser::new().parse(&invite_with(&[&padded(8193)])).expect_err("refused");
+    assert!(err.reason.contains("exceeds limit 8192"), "{}", err.reason);
+
+    let at = |len: usize| {
+        let target = format!("sip:{}@192.0.2.20", "b".repeat(len - "sip:@192.0.2.20".len()));
+        wire(&invite_lines(&format!("INVITE {target} SIP/2.0"), &[]))
+    };
+    assert!(CustomParser::new().parse(&at(8192)).is_ok());
+    let err = CustomParser::new().parse(&at(8193)).expect_err("refused");
+    assert!(err.reason.contains("exceeds limit 8192"), "{}", err.reason);
+}
+
 /// A header block past the line limit is refused before any header is read,
 /// with no partial: 12 000 legal one-letter headers in one datagram. A block
 /// at the limit parses.

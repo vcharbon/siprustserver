@@ -88,6 +88,31 @@ port, at its sent-by with no `rport`, and the IP stays the packet's source. Serv
 multicast SIP would reopen it, and would need a way to check the `maddr` against
 the group the request actually arrived on.
 
+## The bounds
+
+A bound stops the work one datagram can cost, and may refuse a valid message: a
+bound is a stated exception to the goal that every valid message parses. A
+message past one is refused with no partial (ADR-0054), so its sender hears
+nothing.
+
+- **A header line** is at most 8,192 bytes, `name + ": " + value`, unfolded and
+  trimmed (`max_header_length`).
+- **A Request-URI** is at most 8,192 bytes (`max_uri_length`), so a Contact URI
+  that fits its line can become the Request-URI of this stack's request.
+- **A header block** is at most 100 lines, its start line and fold continuations
+  included (`max_header_lines`).
+
+A process states its limits once, at startup, and every stage that reads its
+wire holds the one parser built from them: the front proxy's intake hook and
+core, the worker's ingress brake and transaction layer. A worker reads behind
+the front proxy, so its limits leave room for what one forward adds
+(`SipParserLimits::behind_proxy`): the Via and the double Record-Route the proxy
+pushes, and `received` and `rport` on the top Via. What a worker's own emission
+adds to a line at the bound is not covered: the proxy reads a worker's output
+under the same bounds as a peer's.
+
+A stored image is read under none of them (ADR-0053 §6).
+
 ## Considered and rejected
 
 - **Adopt rvoip-sip-core as the production parser + re-derive the gates.**

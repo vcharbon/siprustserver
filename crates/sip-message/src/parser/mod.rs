@@ -16,9 +16,14 @@ use crate::types::SipMessage;
 use std::borrow::Cow;
 
 pub mod custom;
+mod exemptions;
+mod stored;
 
 #[cfg(feature = "rvoip-oracle")]
 pub mod rvoip;
+
+pub use exemptions::{Exemption, Exemptions};
+pub use stored::read_stored;
 
 /// The layer interface. Every parser implementation conforms to this.
 pub trait SipParser {
@@ -55,13 +60,23 @@ pub struct SipParserLimits {
     /// When `true` (default) the parse holds wire bytes to the RFC 3261 §25.1
     /// grammar of every element it reads and to the gates of ADR-0001. Set
     /// `false` for a message the stack built or a harness or rule validator
-    /// reads (ADR-0053 §6). The header split's gates — numeric values, a
-    /// repeated Content-Length or Max-Forwards, control bytes, quoted-strings,
-    /// Digest credentials — hold in both.
+    /// reads (ADR-0053 §6).
     pub wire_grammar: bool,
+    /// When `true` (default) a value meets the gates a stack-built message and a
+    /// harness reading are held to as well: numeric values, a repeated
+    /// Max-Forwards, quoted-strings, Digest credentials, one tag on a From or
+    /// To, a To-tag on a response past 100. Only [`read_stored`] sets `false`:
+    /// a stored image met them on its way in, or holds what the stack stated. A
+    /// control byte and a Content-Length that does not frame the message are
+    /// refused in every reading.
+    pub value_gates: bool,
     /// How the bytes handed to `parse` were delimited, which decides the body
     /// of a message that states no `Content-Length` (RFC 3261 §18.3).
     pub framing: Framing,
+    /// The shapes a deployment accepts against the RFC. Held only by an ingress
+    /// parser and consulted only by its gates (ADR-0001): a stored read and a
+    /// harness reader carry none.
+    pub exemptions: Exemptions,
 }
 
 /// The transport framing of the bytes a parser is handed. Over a datagram the
@@ -88,17 +103,37 @@ const STANDARD_TRANSPORTS: &[Cow<'static, str>] = &[
     Cow::Borrowed("WSS"),
 ];
 
+/// The most header lines one forward through the front proxy adds to a request:
+/// its Via and a double Record-Route.
+const PROXY_HOP_LINES: usize = 3;
+
+/// The most bytes one forward through the front proxy adds to a line it keeps:
+/// `;received=<IPv6 address>;rport=<port>` on the top Via.
+const PROXY_HOP_LINE_BYTES: usize = 128;
+
 impl SipParserLimits {
-    /// The default bounds, built without allocating: what a stack-built
-    /// message is assembled under.
+    /// The default bounds (ADR-0001), built without allocating: what the edge
+    /// of the stack reads under and a stack-built message is assembled under.
     pub const DEFAULT: SipParserLimits = SipParserLimits {
-        max_header_length: 2048,
-        max_uri_length: 2048,
+        max_header_length: 8192,
+        max_uri_length: 8192,
         max_header_lines: 100,
         allowed_transports: Cow::Borrowed(STANDARD_TRANSPORTS),
         wire_grammar: true,
+        value_gates: true,
         framing: Framing::Datagram,
+        exemptions: Exemptions::NONE,
     };
+
+    /// These bounds for an element behind the front proxy: a request the proxy
+    /// read under them still reads here, its forward's additions included.
+    pub fn behind_proxy(self) -> Self {
+        Self {
+            max_header_length: self.max_header_length.saturating_add(PROXY_HOP_LINE_BYTES),
+            max_header_lines: self.max_header_lines.saturating_add(PROXY_HOP_LINES),
+            ..self
+        }
+    }
 }
 
 impl Default for SipParserLimits {

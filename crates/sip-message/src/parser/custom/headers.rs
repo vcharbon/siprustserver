@@ -283,7 +283,8 @@ fn parse_line(
         return Ok(Line::Refused { error, echoed });
     }
     if let Some(known) = known {
-        if let Some(error) = gate_refusal(&known, &name, &trimmed_value, singletons) {
+        let gates = limits.value_gates;
+        if let Some(error) = gate_refusal(&known, &name, &trimmed_value, singletons, gates) {
             return Ok(Line::Refused { error, echoed });
         }
     }
@@ -296,13 +297,18 @@ fn parse_line(
 /// The refusal the value of the known header `known` draws, if any: a
 /// repeated singleton, or a gate beyond the grammar (ADR-0001). A
 /// Content-Length or Max-Forwards that passes is recorded in `singletons`,
-/// which refuses a second one.
+/// which refuses a second one. With `gates` off only Content-Length is judged,
+/// which frames the message.
 fn gate_refusal(
     known: &HeaderName,
     name: &SipStr,
     value: &SipStr,
     singletons: &mut Singletons,
+    gates: bool,
 ) -> Option<SipParseError> {
+    if !gates && *known != HeaderName::ContentLength {
+        return None;
+    }
     let repeated = match known {
         HeaderName::ContentLength => singletons.content_length.is_some(),
         HeaderName::MaxForwards => singletons.max_forwards,

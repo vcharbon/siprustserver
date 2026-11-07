@@ -43,6 +43,7 @@ mod sdp_offer_answer_grammar;
 mod sdp_utils;
 mod serializer_content_length;
 mod sipfrag;
+mod stored_image;
 mod uri_equivalence;
 mod uri_grammar;
 mod via_lower_hops;

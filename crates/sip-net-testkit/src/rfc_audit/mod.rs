@@ -47,9 +47,16 @@ use crate::types::{all_ua_roles, UaRole};
 /// cookie) before a rule could ever see it — so the grammar rules would silently
 /// never fire. Auditing the recorded bytes requires parsing them leniently, the
 /// same way a permissive peer on the wire would, so the rule (not the parser)
-/// is what flags the violation.
+/// is what flags the violation. No length bound applies: a deployment's limits
+/// decide what it accepts, and what crossed the wire is judged whatever its size.
 pub(crate) fn lenient_parser() -> CustomParser {
-    CustomParser::with_limits(SipParserLimits { wire_grammar: false, ..Default::default() })
+    CustomParser::with_limits(SipParserLimits {
+        wire_grammar: false,
+        max_header_length: usize::MAX,
+        max_uri_length: usize::MAX,
+        max_header_lines: usize::MAX,
+        ..Default::default()
+    })
 }
 
 // Shared helpers.

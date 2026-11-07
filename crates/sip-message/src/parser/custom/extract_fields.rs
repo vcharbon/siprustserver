@@ -175,7 +175,7 @@ pub(super) fn extract_identity(
     if from.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty From tag parameter"));
     }
-    if count_tag_params(from_val) > 1 {
+    if limits.value_gates && count_tag_params(from_val) > 1 {
         return Err(SipParseError::new("Duplicate From tag parameter"));
     }
 
@@ -184,7 +184,7 @@ pub(super) fn extract_identity(
     if to.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty To tag parameter"));
     }
-    if count_tag_params(to_val) > 1 {
+    if limits.value_gates && count_tag_params(to_val) > 1 {
         return Err(SipParseError::new("Duplicate To tag parameter"));
     }
     if wire {
@@ -422,7 +422,7 @@ pub fn extract_response_fields(
     // the 1xx / 2xx that establish one): its Contact set never refuses it.
     let reading = if status >= 300 { ContactReading::Lenient } else { ContactReading::Strict };
     let common = extract_common_fields(idx, limits, mode, reading)?;
-    if status > 100 && common.to().tag().is_none() {
+    if limits.value_gates && status > 100 && common.to().tag().is_none() {
         return Err(SipParseError::new(format!(
             "Non-100 response (status={status}) missing mandatory To-tag"
         )));

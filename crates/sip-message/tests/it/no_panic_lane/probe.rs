@@ -88,6 +88,7 @@ fn parsers() -> Vec<(&'static str, CustomParser)> {
 /// One datagram through every message entry point.
 pub fn message(raw: &[u8], d: &mut Digest) {
     sniffs(raw, d);
+    d.note("stored", &sip_message::read_stored(raw).map(|_| ()));
     for (name, parser) in parsers() {
         let parsed = parser.parse(raw);
         d.note(name, &parsed.as_ref().map(|_| ()));
