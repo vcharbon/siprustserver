@@ -62,8 +62,8 @@ pub fn extract_optional_indexed(idx: &HeaderIndex) -> OptionalHeaders {
         diversion: parse_name_addr_list::<kind::Diversion>(&idx.diversion),
         history_info: parse_name_addr_list::<kind::HistoryInfo>(&idx.history_info),
         remote_party_id: parse_name_addr_list::<kind::RemotePartyId>(&idx.remote_party_id),
-        rack: parse_rack_header(idx.rack.first),
-        refer_to: parse_refer_to_header(idx.refer_to.first),
+        rack: parse_rack_header(idx.rack.value),
+        refer_to: parse_refer_to_header(idx.refer_to.value),
     }
 }
 

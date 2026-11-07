@@ -15,20 +15,16 @@ use crate::header_table::HeaderTable;
 use crate::sip_str::SipStr;
 use crate::types::SipHeader;
 
-/// A header RFC 3261 allows at most once. `first` is the value every reader
-/// uses; `count` is what the cardinality gates check.
+/// A single-valued header's one line: a second is
+/// [`repeated`](HeaderIndex::repeated), which every reading refuses.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Slot<'a> {
-    pub first: Option<&'a SipStr>,
-    pub count: usize,
+    pub value: Option<&'a SipStr>,
 }
 
 impl<'a> Slot<'a> {
     fn record(&mut self, value: &'a SipStr) {
-        self.count += 1;
-        if self.first.is_none() {
-            self.first = Some(value);
-        }
+        self.value.get_or_insert(value);
     }
 }
 
@@ -125,9 +121,9 @@ mod tests {
         ];
         let idx = HeaderIndex::of_lines(&headers);
         assert_eq!(idx.via.len(), 2, "compact Via files under Via");
-        assert_eq!(idx.to.first.map(|v| v.as_str()), Some("<sip:b@h>"));
-        assert_eq!(idx.from.count, 1);
-        assert_eq!(idx.call_id.first.map(|v| v.as_str()), Some("cid"));
+        assert_eq!(idx.to.value.map(|v| v.as_str()), Some("<sip:b@h>"));
+        assert!(idx.from.value.is_some());
+        assert_eq!(idx.call_id.value.map(|v| v.as_str()), Some("cid"));
         assert!(idx.contact.is_empty());
     }
 

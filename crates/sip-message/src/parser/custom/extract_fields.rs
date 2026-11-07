@@ -111,7 +111,7 @@ pub(super) fn extract_identity(
 
     let exemptions = &limits.exemptions;
     let from_val =
-        idx.from.first.ok_or_else(|| SipParseError::new("Missing mandatory From header"))?;
+        idx.from.value.ok_or_else(|| SipParseError::new("Missing mandatory From header"))?;
     let from = read_address(from_val, HeaderName::From, wire, exemptions)?;
     if from.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty From tag parameter"));
@@ -120,7 +120,7 @@ pub(super) fn extract_identity(
         return Err(SipParseError::new("Duplicate From tag parameter"));
     }
 
-    let to_val = idx.to.first.ok_or_else(|| SipParseError::new("Missing mandatory To header"))?;
+    let to_val = idx.to.value.ok_or_else(|| SipParseError::new("Missing mandatory To header"))?;
     let to = read_address(to_val, HeaderName::To, wire, exemptions)?;
     if to.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty To tag parameter"));
@@ -133,7 +133,7 @@ pub(super) fn extract_identity(
         tag_refusal(&to, "To")?;
     }
 
-    let call_id = match idx.call_id.first {
+    let call_id = match idx.call_id.value {
         Some(v) if !v.is_empty() => v.clone(),
         _ => return Err(SipParseError::new("Missing mandatory Call-ID header")),
     };
@@ -145,7 +145,7 @@ pub(super) fn extract_identity(
     }
 
     let cseq_val =
-        idx.cseq.first.ok_or_else(|| SipParseError::new("Missing mandatory CSeq header"))?;
+        idx.cseq.value.ok_or_else(|| SipParseError::new("Missing mandatory CSeq header"))?;
     let cseq = if wire {
         header::CSeq::parse(cseq_val)?
     } else {
@@ -304,12 +304,12 @@ pub fn extract_request_fields(
         return Err(SipParseError::new("Missing From tag (RFC 3261 §8.1.1.3)"));
     }
     if wire
-        && idx.max_forwards.count == 0
+        && idx.max_forwards.value.is_none()
         && !limits.exemptions.holds(&Exemption::MaxForwardsAbsent)
     {
         return Err(SipParseError::new("Missing mandatory Max-Forwards header (RFC 3261 §8.1.1)"));
     }
-    if let Some(refer_to) = idx.refer_to.first.filter(|_| wire) {
+    if let Some(refer_to) = idx.refer_to.value.filter(|_| wire) {
         if let Ok(target) = header::ReferTo::parse(refer_to) {
             uri_repeat_refusal(target.uri(), &HeaderName::ReferTo, &limits.exemptions)?;
         }
@@ -350,7 +350,7 @@ pub fn extract_request_fields(
     // CSeq method must match the request method, spelling for spelling
     // (RFC 3261 §7.1, §8.1.1.5).
     if let Some(method) = method {
-        if let Some(cseq_val) = idx.cseq.first {
+        if let Some(cseq_val) = idx.cseq.value {
             let trimmed = crate::whitespace::trim(cseq_val);
             let cseq_method = match trimmed.split_once([' ', '\t']) {
                 Some((_, method)) => crate::whitespace::trim(method),

@@ -106,9 +106,9 @@ pub(super) fn request_partial(
         method,
         identity,
         via_lines: idx.via.iter().map(|line| (*line).clone()).collect(),
-        from_line: idx.from.first?.clone(),
-        to_line: idx.to.first?.clone(),
-        call_id_line: idx.call_id.first?.clone(),
-        cseq_line: idx.cseq.first?.clone(),
+        from_line: idx.from.value?.clone(),
+        to_line: idx.to.value?.clone(),
+        call_id_line: idx.call_id.value?.clone(),
+        cseq_line: idx.cseq.value?.clone(),
     }))
 }
