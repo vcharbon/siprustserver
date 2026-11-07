@@ -53,7 +53,7 @@ fn settling_waits_on_the_flow_the_call_count_and_the_cdr_count() {
 /// the reasons name only what is held.
 #[test]
 fn the_floor_holds_an_unacked_final_inside_timer_h_and_expires_it_past() {
-    const INVITE: &str = "INVITE sip:b@127.0.0.1:5080 SIP/2.0\r\n\
+    const INVITE: &str = "INVITE sip:b@127.0.0.1:5080 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2\r\n\
         From: <sip:a@example.test>;tag=a1\r\n\
         To: <sip:b@example.test>;tag=b1\r\n\
@@ -67,7 +67,7 @@ fn the_floor_holds_an_unacked_final_inside_timer_h_and_expires_it_past() {
         Call-ID: call-a\r\n\
         CSeq: 2 INVITE\r\n\
         Content-Length: 0\r\n\r\n";
-    const ACK: &str = "ACK sip:b@127.0.0.1:5080 SIP/2.0\r\n\
+    const ACK: &str = "ACK sip:b@127.0.0.1:5080 SIP/2.0\r\nMax-Forwards: 70\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2\r\n\
         From: <sip:a@example.test>;tag=a1\r\n\
         To: <sip:b@example.test>;tag=b1\r\n\
@@ -104,7 +104,7 @@ fn the_floor_holds_an_unacked_final_inside_timer_h_and_expires_it_past() {
 fn the_floor_holds_a_sent_invite_until_its_final_and_bounds_calling_by_timer_b() {
     fn response(status: &str) -> String {
         format!(
-            "SIP/2.0 {status}\r\n\
+            "SIP/2.0 {status}\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1\r\n\
              From: <sip:a@example.test>;tag=a1\r\n\
              To: <sip:b@example.test>;tag=b1\r\n\
@@ -113,7 +113,7 @@ fn the_floor_holds_a_sent_invite_until_its_final_and_bounds_calling_by_timer_b()
              Content-Length: 0\r\n\r\n"
         )
     }
-    const INVITE: &str = "INVITE sip:b@127.0.0.1:5080 SIP/2.0\r\n\
+    const INVITE: &str = "INVITE sip:b@127.0.0.1:5080 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1\r\n\
         From: <sip:a@example.test>;tag=a1\r\n\
         To: <sip:b@example.test>\r\n\

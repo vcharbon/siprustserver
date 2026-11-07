@@ -85,6 +85,7 @@ fn offerless_invite(call_ref: &str, call_id: &str, branch: &str) -> SipRequest {
 
 /// A re-INVITE on the dialog `tag` names, through `route`.
 fn reinvite(call_ref: &str, call_id: &str, branch: &str, tag: &str, route: &str) -> SipRequest {
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     parse_request(&format!(
         "INVITE sip:bob@192.0.2.20:5060 SIP/2.0\n\
          Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={call_ref};lg=b-1\n\
@@ -101,6 +102,7 @@ fn reinvite(call_ref: &str, call_id: &str, branch: &str, tag: &str, route: &str)
 
 /// The ACK the TU sends for the 2xx `tag` gave the INVITE `cseq`.
 fn tu_ack(call_ref: &str, call_id: &str, cseq: u32, tag: &str) -> SipRequest {
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     parse_request(&format!(
         "ACK sip:bob@192.0.2.20:5060 SIP/2.0\n\
          Via: SIP/2.0/UDP 127.0.0.1:15071;branch=z9hG4bK-tu-ack-{tag};cr={call_ref};lg=b-1\n\

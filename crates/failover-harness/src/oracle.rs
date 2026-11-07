@@ -228,9 +228,9 @@ mod tests {
 
     use super::*;
 
-    const INVITE: &str = "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK1\r\nFrom: <sip:alice@127.0.0.1>;tag=ftag\r\nTo: <sip:bob@127.0.0.1>\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
-    const OK_200: &str = "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK1\r\nFrom: <sip:alice@127.0.0.1>;tag=ftag\r\nTo: <sip:bob@127.0.0.1>;tag=btag\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
-    const ACK: &str = "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK2\r\nFrom: <sip:alice@127.0.0.1>;tag=ftag\r\nTo: <sip:bob@127.0.0.1>;tag=btag\r\nCall-ID: c1\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n";
+    const INVITE: &str = "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK1\r\nFrom: <sip:alice@127.0.0.1>;tag=ftag\r\nTo: <sip:bob@127.0.0.1>\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+    const OK_200: &str = "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK1\r\nFrom: <sip:alice@127.0.0.1>;tag=ftag\r\nTo: <sip:bob@127.0.0.1>;tag=btag\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+    const ACK: &str = "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK2\r\nFrom: <sip:alice@127.0.0.1>;tag=ftag\r\nTo: <sip:bob@127.0.0.1>;tag=btag\r\nCall-ID: c1\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n";
 
     fn request(raw: &str) -> SipRequest {
         match CustomParser::new().parse(raw.as_bytes()).expect("fixture parses") {

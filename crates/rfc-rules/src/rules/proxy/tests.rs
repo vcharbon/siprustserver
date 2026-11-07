@@ -299,7 +299,7 @@ fn only_an_error_final_opens_the_occasion() {
 /// and Route row in the head the §16.4 rule reads.
 fn routed(at_us: u64, src: &str, dst: &str, branch: &str, request_uri: &str, route: &str) -> Msg {
     let head = format!(
-        "INVITE {request_uri} SIP/2.0\r\n\
+        "INVITE {request_uri} SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <sip:alice@h>;tag=at\r\n\
              To: <sip:bob@h>\r\n\
@@ -624,7 +624,7 @@ fn a_retransmitted_invite_reuses_the_occasion() {
 fn forwarded(route: &str) -> Msg {
     let row = if route.is_empty() { String::new() } else { format!("Route: {route}\r\n") };
     let head = format!(
-        "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+        "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-r\r\n\
              {row}\
              From: <sip:alice@127.0.0.1>;tag=at\r\n\
@@ -677,7 +677,7 @@ fn a_swapped_forward_paired_with_what_it_took_is_compliant() {
     };
     let sent = |request_uri: &str| {
         let head = format!(
-            "INVITE {request_uri} SIP/2.0\r\n\
+            "INVITE {request_uri} SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
                  Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-fwd\r\n\
                  Via: SIP/2.0/UDP 127.0.0.1:5050;branch=z9hG4bK-r\r\n\
                  Route: <sip:bob@127.0.0.1:5070>\r\n\
@@ -712,7 +712,7 @@ fn hop_msg(
     branches: &[&str],
     routes: &[&str],
 ) -> Msg {
-    let mut head = format!("INVITE {request_uri} SIP/2.0\r\n");
+    let mut head = format!("INVITE {request_uri} SIP/2.0\r\nMax-Forwards: 70\r\n");
     for (i, branch) in branches.iter().enumerate() {
         head += &format!("Via: SIP/2.0/UDP 127.0.0.1:{};branch={branch}\r\n", 6000 + i);
     }

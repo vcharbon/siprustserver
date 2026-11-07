@@ -71,7 +71,7 @@ fn compact_and_full_names_match_both_directions() {
         Vec::new(),
     );
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nSupported: replaces\r\nContent-Length: 0\r\n\r\n",
     );
@@ -84,7 +84,7 @@ CSeq: 1 INVITE\r\nSupported: replaces\r\nContent-Length: 0\r\n\r\n",
         Vec::new(),
     );
     let inbound2 = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nk: replaces\r\nContent-Length: 0\r\n\r\n",
     );
@@ -100,7 +100,7 @@ fn duplicate_row_count_mismatch_is_caught() {
         Vec::new(),
     );
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nX-Trace: a\r\nContent-Length: 0\r\n\r\n",
     );
@@ -123,7 +123,7 @@ fn body_drift_reports_first_offset() {
         b"hello world".to_vec(),
     );
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nhello WORLD",
     );
@@ -141,7 +141,7 @@ CSeq: 1 INVITE\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nhello WO
 fn bodiless_template_rejects_inbound_with_body() {
     let tmpl = MessageTemplate::response(200, "OK", vec![], Vec::new());
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nxyz",
     );
@@ -196,7 +196,7 @@ fn missing_content_length_is_tolerated() {
         Vec::new(),
     );
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nX-Note: n\r\n\r\n",
     );

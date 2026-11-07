@@ -228,8 +228,14 @@ async fn t5_url_encoded_cr_lg_round_trip_matches_decoded_callref() {
     // no-op.
     let stack = Stack::build(5, 64, 64).await;
     let decoded = "worker-0|UUID-1234@5.1.1.1|tag";
-    let encoded = "worker-0%7CUUID-1234%405.1.1.1%7Ctag"; // encodeURIComponent
-    let invite = invite_with_cr_lg(encoded, "callid-T5", "z9hG4bK-T5", "b-1");
+    // `invite_with_cr_lg` writes the call ref encoded on the Via, as
+    // production does: `worker-0%7CUUID-1234%405.1.1.1%7Ctag`.
+    let invite = invite_with_cr_lg(decoded, "callid-T5", "z9hG4bK-T5", "b-1");
+    assert!(invite
+        .top_via()
+        .param("cr")
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| !v.contains('|')));
 
     stack.txn.send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite).await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 1);

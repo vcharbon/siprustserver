@@ -3,7 +3,7 @@ use pivot_schema::bundle::Dir;
 use pivot_schema::violation::RfcRule;
 
 /// The callee's 200, as leg B put it on the wire.
-const ANSWER: &str = "SIP/2.0 200 OK\r\n\
+const ANSWER: &str = "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-b\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>;tag=b1\r\n\
@@ -12,7 +12,7 @@ const ANSWER: &str = "SIP/2.0 200 OK\r\n\
         Content-Length: 0\r\n\r\n";
 
 /// The platform's own ACK to it — the datagram no step of the document holds.
-const ACK: &str = "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+const ACK: &str = "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-c\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>;tag=b1\r\n\
@@ -32,7 +32,7 @@ const PROGRESS: &str = "SIP/2.0 183 Session Progress\r\n\
         Content-Length: 0\r\n\r\n";
 
 /// The platform's own PRACK to it — the datagram no step of the document holds.
-const PRACK: &str = "PRACK sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+const PRACK: &str = "PRACK sip:bob@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-d\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>;tag=b1\r\n\
@@ -91,7 +91,7 @@ const DECLARED_CANCEL: &str = r#""must_fail": [ { "failure": "unexpected-cancel"
 /// The platform's own CANCEL for the transaction the anchor's final ended —
 /// the datagram no step of the document holds. §9.1 names the INVITE by
 /// Call-ID and CSeq number, and its To carries no tag.
-const CANCEL: &str = "CANCEL sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+const CANCEL: &str = "CANCEL sip:bob@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-b\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>\r\n\

@@ -44,7 +44,7 @@ pub mod witness;
 
 pub use backlog::{drop_backlog_answers, send_backlog, BACKLOG_METHOD};
 pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
-pub use proxy_core::{spawn_proxy_core, spawn_proxy_core_with, ExternalProxyFace, ProxyCoreParts};
+pub use proxy_core::{spawn_proxy_core, spawn_proxy_reading, ExternalProxyFace, ProxyCoreParts};
 pub use router_pace::{Pace, RouterPace};
 pub use scene::{B2buaScene, ALICE_PORT, B2BUA_PORT, BOB_PORT};
 pub use settle::settle_until;

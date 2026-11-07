@@ -159,7 +159,8 @@ mod tests {
     #[test]
     fn a_compact_content_type_declares_the_description() {
         let sdp = b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_vec();
-        let msg = |ct: &str| Msg {
+        let msg = |ct: &str| {
+            Msg {
             at_us: 0,
             src: "a".into(),
             dst: "b".into(),
@@ -173,9 +174,10 @@ mod tests {
             from_tag: None,
             to_tag: None,
             head: Some(
-                format!("INVITE sip:b SIP/2.0\r\n{ct}: application/sdp\r\n\r\n").into_bytes(),
+                format!("INVITE sip:b SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n{ct}: application/sdp\r\n\r\n").into_bytes(),
             ),
             body: Some(sdp.clone()),
+        }
         };
         assert!(msg("Content-Type").sdp().is_some());
         assert!(msg("c").sdp().is_some(), "the compact form declares it too");

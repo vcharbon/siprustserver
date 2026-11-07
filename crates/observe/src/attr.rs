@@ -164,7 +164,7 @@ mod tests {
         assert!(!truncated);
     }
 
-    const INVITE: &[u8] = b"INVITE sip:bob@example.com SIP/2.0\r\nCall-ID: c1@h\r\n\r\nv=0\r\n";
+    const INVITE: &[u8] = b"INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c1@h\r\n\r\nv=0\r\n";
 
     /// The wire bytes a reader reconstructs from a shaped payload.
     fn reconstructed(shaped: &ShapedBody<'_>) -> Vec<u8> {

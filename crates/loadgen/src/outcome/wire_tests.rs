@@ -246,7 +246,7 @@ async fn a_challenged_invite_retried_restarts_the_setup() {
 async fn a_leg_keeps_what_its_in_dialog_requests_said() {
     let frag = "SIP/2.0 503 Service Unavailable\r\n";
     let notify = format!(
-        "NOTIFY sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:6000;branch=z9hG4bK-9\r\n\
+        "NOTIFY sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:6000;branch=z9hG4bK-9\r\n\
          Call-ID: b1\r\nFrom: <sip:a@h>;tag=f1\r\nTo: <sip:b@h>;tag=q1\r\nCSeq: 2 NOTIFY\r\n\
          Event: refer\r\nSubscription-State: terminated;reason=noresource\r\n\
          Content-Type: message/sipfrag;version=2.0\r\nContent-Length: {}\r\n\r\n{frag}",

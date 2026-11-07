@@ -250,7 +250,7 @@ Content-Length: 0\r\n\r\n"
         let mut config = B2buaConfig::default();
         config.front = crate::config::Front::single_face("10.0.0.9", 5060);
         let invite = parse(
-            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.244.1.5:5060;branch=z9hG4bKb;lg=b\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:svc@10.0.0.9:5060>;tag=svc\r\n\

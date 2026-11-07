@@ -76,7 +76,7 @@ mod tests {
     use sip_message::SipParser;
 
     fn invite() -> SipMessage {
-        let raw = b"INVITE sip:bob@10.0.0.3:5070 SIP/2.0\r\n\
+        let raw = b"INVITE sip:bob@10.0.0.3:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK1\r\n\
 From: <sip:alice@a>;tag=t1\r\n\
 To: <sip:bob@b>\r\n\

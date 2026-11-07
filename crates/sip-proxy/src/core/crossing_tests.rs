@@ -603,7 +603,7 @@ Content-Length: 0\r\n\r\n",
     let route = re_entry_route(&strategy, &of_the_call);
     let in_dialog = |method: &str, seq: &str| {
         parse_msg(&format!(
-            "{method} sip:b2bua@{EXT_VIP}:{EXT_PORT} SIP/2.0\r\n\
+            "{method} sip:b2bua@{EXT_VIP}:{EXT_PORT} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKre;rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:b2bua@example.com>;tag=w\r\n\
@@ -767,7 +767,7 @@ async fn a_re_entry_and_its_cancel_stay_internal_past_the_registry() {
     );
     for method in ["INVITE", "CANCEL"] {
         let msg = parse_msg(&format!(
-            "{method} sip:b2bua@{EXT_VIP}:{EXT_PORT} SIP/2.0\r\n\
+            "{method} sip:b2bua@{EXT_VIP}:{EXT_PORT} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKre-cancel;rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:b2bua@example.com>;tag=w\r\n\

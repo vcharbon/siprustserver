@@ -123,7 +123,7 @@ mod tests {
 
     fn final_(status: u16) -> SipResponse {
         let text = format!(
-            "SIP/2.0 {status} Whatever\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-i\r\n\
+            "SIP/2.0 {status} Whatever\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-i\r\n\
              From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>;tag=b\r\nCall-ID: c1\r\n\
              CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
         );
@@ -137,7 +137,7 @@ mod tests {
     /// answers a repeat of the 2xx alone.
     #[test]
     fn a_non_2xx_after_the_2xx_owes_no_ack() {
-        let ack = "ACK sip:b@x SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-k\r\n\
+        let ack = "ACK sip:b@x SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-k\r\n\
                    From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>;tag=b\r\nCall-ID: c1\r\n\
                    CSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n";
         let SipMessage::Request(ack) = message(ack) else { unreachable!() };
@@ -152,7 +152,7 @@ mod tests {
     /// 64·T1 after it left; past that the bytes go and the repeat is discarded.
     #[tokio::test(start_paused = true)]
     async fn the_cached_ack_is_its_sent_bytes_until_64_t1() {
-        let wire = "ACK sip:b@x SIP/2.0\r\nv: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-k\r\n\
+        let wire = "ACK sip:b@x SIP/2.0\r\nMax-Forwards: 70\r\nv: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-k\r\n\
                     f: <sip:a@x>;tag=a\r\nt: <sip:b@x>;tag=b\r\ni: c1\r\n\
                     CSeq:  1 ACK\r\nl: 0\r\n\r\n";
         let SipMessage::Request(ack) = message(wire) else { unreachable!() };

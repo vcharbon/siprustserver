@@ -212,7 +212,7 @@ mod tests {
     /// The datagrams the parser rejected come back as they were captured.
     #[test]
     fn rejected_datagrams_are_written_as_captured() {
-        let garbage = b"INVITE sip:x SIP/2.0\r\nGarbage\r\n\r\n".to_vec();
+        let garbage = b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nGarbage\r\n\r\n".to_vec();
         let mut rejected = dg(2_000, "10.0.0.1:5060", "10.0.0.2:5060");
         rejected.payload = garbage.clone();
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060"), rejected];
@@ -240,7 +240,7 @@ mod tests {
             Content-Length: 0\r\n\r\n"
             .to_vec();
         let mut refused = dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060");
-        refused.payload = b"INVITE sip:x SIP/2.0\r\nGarbage\r\n\r\n".to_vec();
+        refused.payload = b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nGarbage\r\n\r\n".to_vec();
         let mut kept = dg(2_000, "10.0.0.1:5060", "10.0.0.2:5060");
         kept.payload = refer.clone();
         let datagrams = vec![kept, refused];

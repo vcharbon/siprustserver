@@ -121,9 +121,10 @@ async fn the_orphan_bye_cseq_is_above_an_early_prack() {
     let branch = "z9hG4bK-P3";
     let invite = invite_with_cr_lg(call_ref, "callid-P3", branch, "b-1");
     stack.txn.send_request(invite, addr(PEER), TxnKind::Invite).await.unwrap();
+    let cr = sip_message::param_codec::encode_param(call_ref);
     let prack = parse_request(&format!(
         "PRACK sip:bob@192.0.2.20:5060 SIP/2.0\n\
-         Via: SIP/2.0/UDP 127.0.0.1:15071;branch=z9hG4bK-P3-prack;cr={call_ref};lg=b-1\n\
+         Via: SIP/2.0/UDP 127.0.0.1:15071;branch=z9hG4bK-P3-prack;cr={cr};lg=b-1\n\
          Max-Forwards: 70\n\
          From: <sip:b2bua@127.0.0.1:15071>;tag=b2bua-b-1\n\
          To: <sip:bob@192.0.2.20:5060>;tag=t3\n\

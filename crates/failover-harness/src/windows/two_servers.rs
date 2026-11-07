@@ -37,7 +37,7 @@ mod tests {
 
     fn bye(seq: u64, from: &str, cseq: u32) -> RecordedSipEntry {
         let raw = format!(
-            "BYE sip:alice@x SIP/2.0\r\nVia: SIP/2.0/UDP {from};branch=z9hG4bK-{seq}\r\n\
+            "BYE sip:alice@x SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP {from};branch=z9hG4bK-{seq}\r\n\
              From: <sip:b2bua@x>;tag=ours\r\nTo: <sip:alice@x>;tag=hers\r\nCall-ID: c1\r\n\
              CSeq: {cseq} BYE\r\nContent-Length: 0\r\n\r\n"
         );

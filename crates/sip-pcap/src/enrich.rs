@@ -93,7 +93,7 @@ mod tests {
         }
     }
 
-    const INVITE: &[u8] = b"INVITE sip:+1555123@h SIP/2.0\r\n\
+    const INVITE: &[u8] = b"INVITE sip:+1555123@h SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:001555900@h>;tag=f1\r\n\
@@ -104,7 +104,7 @@ X-Api-Call: call-9\r\n\
 Content-Type: application/sdp\r\n\
 Content-Length: 3\r\n\r\nv=0";
 
-    const OK: &[u8] = b"SIP/2.0 200 OK\r\n\
+    const OK: &[u8] = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
 From: <sip:001555900@h>;tag=f1\r\n\
 To: <sip:+1555123@h>;tag=t1\r\n\

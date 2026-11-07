@@ -282,7 +282,7 @@ fn peer_sends(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
     let body = if with_sdp { sdp("x 1 1 IN IP4 192.0.2.9", 1) } else { String::new() };
     let content_type = if with_sdp { "Content-Type: application/sdp\r\n" } else { "" };
     let raw = format!(
-        "{method} sip:b2bua@192.0.2.100 SIP/2.0\r\n\
+        "{method} sip:b2bua@192.0.2.100 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-{method}\r\n\
          From: <sip:a@192.0.2.1>;tag=a\r\nTo: <sip:b@192.0.2.100>;tag=b\r\n\
          Call-ID: c\r\nCSeq: 7 {method}\r\nMax-Forwards: 70\r\n\

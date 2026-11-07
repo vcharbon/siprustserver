@@ -245,6 +245,9 @@ pub const INCARNATION_MARK: &str = "k3x9";
 
 /// INVITE carrying Via `cr`/`lg` custom params (cancel-on-evict test).
 pub fn invite_with_cr_lg(call_ref: &str, call_id: &str, branch: &str, leg_id: &str) -> SipRequest {
+    // The Via parameter carries the call ref encoded as a token, as the stack's
+    // own Via does.
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     parse_request(&format!(
         "INVITE sip:bob@192.0.2.20:5060 SIP/2.0\n\
          Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={call_ref};lg={leg_id};ci={INCARNATION_MARK}\n\

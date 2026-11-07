@@ -107,7 +107,7 @@ mod tests {
         use sip_message::{CustomParser, SipMessage, SipParser};
         let header = rate_header.map(|v| format!("X-Trace-Sample: {v}\r\n")).unwrap_or_default();
         let raw = format!(
-            "INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+            "INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-trace\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:alice@example.com>;tag=a1\r\n\

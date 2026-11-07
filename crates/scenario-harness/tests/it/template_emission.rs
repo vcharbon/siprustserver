@@ -596,7 +596,7 @@ async fn respond_template_compact_supported_not_duplicated() {
 
     // A captured 200 with a compact Supported (`k`) + an SDP answer.
     let cap = format!(
-        "SIP/2.0 200 OK\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP 9.9.9.9:5060;branch=z9hG4bK-cap\r\n\
 From: <sip:a@ex>;tag=at\r\n\
 To: <sip:b@ex>;tag=bt\r\n\

@@ -387,7 +387,7 @@ fn a_self_originated_reinvite_in_flight_seeds_its_client_invite() {
 fn a_reinvite_seed_carries_the_ack_of_the_2xx_before_it() {
     let leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
     let mut call = call_with(LegState::Confirmed, leg);
-    let ack = b"ACK sip:bob@10.0.0.9 SIP/2.0\r\n\r\n".to_vec();
+    let ack = b"ACK sip:bob@10.0.0.9 SIP/2.0\r\nMax-Forwards: 70\r\n\r\n".to_vec();
     let retained = call::RetainedEmission::on_trigger(
         ack.clone(),
         ("10.0.0.9".to_string(), 5060),
@@ -496,7 +496,7 @@ fn an_unreadable_handle_is_skipped() {
 /// carries `branch`.
 fn retain_reinvite_2xx(leg: &mut Leg, branch: &str) {
     let ok = format!(
-        "SIP/2.0 200 OK\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
          Via: SIP/2.0/UDP 10.0.0.5:5080;branch={branch}\r\n\
          From: <sip:bob@10.0.0.2>;tag=btag\r\n\
          To: <sip:svc@10.0.0.9>;tag=svc\r\n\

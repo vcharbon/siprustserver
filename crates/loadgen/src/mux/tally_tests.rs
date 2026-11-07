@@ -4,7 +4,7 @@ use super::*;
 
 fn req(method: &str, cseq: u32) -> Vec<u8> {
     format!(
-        "{method} sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
+        "{method} sip:bob@192.0.2.2 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
          Call-ID: c1\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
     )
     .into_bytes()
@@ -13,7 +13,7 @@ fn req(method: &str, cseq: u32) -> Vec<u8> {
 fn resp_tagged(status: u16, method: &str, cseq: u32, rseq: Option<u32>, tag: &str) -> Vec<u8> {
     let rseq = rseq.map_or(String::new(), |r| format!("Require: 100rel\r\nRSeq: {r}\r\n"));
     format!(
-        "SIP/2.0 {status} Reason\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
+        "SIP/2.0 {status} Reason\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
          To: <sip:bob@192.0.2.2>;tag={tag}\r\nCall-ID: c1\r\nCSeq: {cseq} {method}\r\n{rseq}\
          Content-Length: 0\r\n\r\n"
     )

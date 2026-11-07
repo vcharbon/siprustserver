@@ -9,7 +9,7 @@ use pivot_schema::bundle::Dir;
 fn binary_info() -> Vec<u8> {
     let body: &[u8] = &[0x00, 0x01, 0x02, 0xff, 0xfe, 0x80, 0x00, 0x7f];
     let mut out = format!(
-        "INFO sip:b@h SIP/2.0\r\nCSeq: 2 INFO\r\nContent-Type: application/vnd.example.blob\r\nContent-Length: {}\r\n\r\n",
+        "INFO sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 2 INFO\r\nContent-Type: application/vnd.example.blob\r\nContent-Length: {}\r\n\r\n",
         body.len()
     )
     .into_bytes();

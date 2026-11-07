@@ -4,7 +4,7 @@ fn entry(from_lane: &str) -> RecordedSipEntry {
     RecordedSipEntry {
         from: "10.0.0.9:5070".parse().unwrap(),
         to: "10.0.0.1:5060".parse().unwrap(),
-        raw: b"OPTIONS sip:x@h SIP/2.0\r\n\r\n".to_vec(),
+        raw: b"OPTIONS sip:x@h SIP/2.0\r\nMax-Forwards: 70\r\n\r\n".to_vec(),
         sent_ms: 0,
         received_ms: Some(1),
         delivered: true,

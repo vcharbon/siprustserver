@@ -11,7 +11,7 @@ use crate::mux::{Key, RELEASE_HOLD};
 
 fn req(method: &str, cseq: u32, branch: &str) -> Vec<u8> {
     format!(
-        "{method} sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch={branch}\r\n\
+        "{method} sip:bob@192.0.2.2 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 192.0.2.1;branch={branch}\r\n\
          From: <sip:alice@192.0.2.1>;tag=a1\r\nTo: <sip:bob@192.0.2.2>;tag=b1\r\n\
          Call-ID: c1\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
     )
@@ -20,7 +20,7 @@ fn req(method: &str, cseq: u32, branch: &str) -> Vec<u8> {
 
 fn resp(status: u16, method: &str, cseq: u32, branch: &str) -> Vec<u8> {
     format!(
-        "SIP/2.0 {status} Reason\r\nVia: SIP/2.0/UDP 192.0.2.1;branch={branch}\r\n\
+        "SIP/2.0 {status} Reason\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 192.0.2.1;branch={branch}\r\n\
          From: <sip:alice@192.0.2.1>;tag=a1\r\nTo: <sip:bob@192.0.2.2>;tag=b1\r\n\
          Call-ID: c1\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
     )

@@ -5,7 +5,7 @@
 use call::RequestRecord;
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateError, GenerateRelayedResponseOpts};
-use sip_message::header::{HeaderName, HeaderValue, MediaType, Via};
+use sip_message::header::{HeaderName, MediaType, Via};
 use sip_message::{SipHeader, SipResponse, SipStr};
 
 /// The headers a response answering the relayed request `pending` states for
@@ -54,7 +54,11 @@ pub(super) fn stack_answer(
 /// correlation holds is text (the `call` crate has no sip-message dependency),
 /// so reading one back is a parse.
 pub(super) fn via_response_target(via: &str) -> Option<(String, u16)> {
-    let hop = Via::parse(&SipStr::owned(via)).ok()?;
+    let hop = Via::first_of_line(&SipStr::owned(via)).ok()?;
     let (host, port) = hop.response_target();
     Some((host.to_string(), port))
 }
+
+#[cfg(test)]
+#[path = "snapshot_answer_tests.rs"]
+mod tests;

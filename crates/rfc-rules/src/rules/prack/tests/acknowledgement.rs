@@ -28,7 +28,7 @@ fn a_fast_final_does_not_excuse_the_prack_whatever_the_observation() {
 /// (§15.1.2), so no PRACK is owed; the 487 that follows changes nothing.
 #[test]
 fn a_responders_bye_on_the_early_dialog_leaves_its_provisional_owed_nothing() {
-    let bye_head = "BYE sip:a@h SIP/2.0\r\nFrom: <sip:b@h>;tag=tb\r\nTo: <sip:a@h>;tag=fa\r\n\
+    let bye_head = "BYE sip:a@h SIP/2.0\r\nMax-Forwards: 70\r\nFrom: <sip:b@h>;tag=tb\r\nTo: <sip:a@h>;tag=fa\r\n\
                         CSeq: 1 BYE\r\nContent-Length: 0\r\n\r\n"
         .to_string();
     let mut bye = msg(
@@ -217,7 +217,7 @@ fn another_calls_invite_and_final_say_nothing_of_this_ones_prack() {
 /// The final, here a `487`.
 fn final_status(at_us: u64, status: u16, cseq: u32, to_tag: &str) -> Msg {
     let head = format!(
-        "SIP/2.0 {status} X\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
              CSeq: {cseq} INVITE\r\nContent-Length: 0\r\n\r\n"
     );
     msg(at_us, UAS, UAC, Kind::Response { status }, cseq, Some(to_tag), head)
@@ -226,7 +226,7 @@ fn final_status(at_us: u64, status: u16, cseq: u32, to_tag: &str) -> Msg {
 /// The UAC's CANCEL of its INVITE.
 fn cancel(at_us: u64, cseq: u32) -> Msg {
     let head = format!(
-        "CANCEL sip:bob@h SIP/2.0\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>\r\n\
+        "CANCEL sip:bob@h SIP/2.0\r\nMax-Forwards: 70\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>\r\n\
              CSeq: {cseq} CANCEL\r\nContent-Length: 0\r\n\r\n"
     );
     let mut m =

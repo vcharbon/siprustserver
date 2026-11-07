@@ -127,7 +127,7 @@ async fn relayed_non_2xx_final_is_never_hop_acked_and_the_upstream_ack_relays() 
     // b-leg INVITE carries it through the LB.
     let invite_ruri = "sip:+155501113301000@uas.example:6001;user=phone";
     let raw_invite = format!(
-        "INVITE {invite_ruri} SIP/2.0\r\n\
+        "INVITE {invite_ruri} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri;rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:worker@{UAC}>;tag=w1\r\n\

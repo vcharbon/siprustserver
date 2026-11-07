@@ -22,7 +22,7 @@ fn dg(ts_us: u64, src: &str, dst: &str, payload: &[u8]) -> Datagram {
 
 fn req(method: &str, call_id: &str, cseq: u32, branch: &str, to_tag: &str) -> Vec<u8> {
     format!(
-        "{method} sip:+15551234567@example.net SIP/2.0\r\n\
+        "{method} sip:+15551234567@example.net SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
          Max-Forwards: 70\r\n\
          From: <sip:+1555999@caller.example>;tag=f1\r\n\
@@ -36,7 +36,7 @@ fn req(method: &str, call_id: &str, cseq: u32, branch: &str, to_tag: &str) -> Ve
 
 fn resp(status: u16, call_id: &str, cseq: u32, method: &str, branch: &str, body: &str) -> Vec<u8> {
     format!(
-        "SIP/2.0 {status} X\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
          From: <sip:+1555999@caller.example>;tag=f1\r\n\
          To: <sip:+15551234567@example.net>;tag=t1\r\n\

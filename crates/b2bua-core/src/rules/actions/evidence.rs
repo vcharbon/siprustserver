@@ -6,7 +6,7 @@
 
 use call::helpers::{caller_dialog, record_invite_final, update_leg};
 use call::{Call, DialogState, Repeated, RetainedEmission};
-use sip_message::header::{HeaderValue, Via};
+use sip_message::header::Via;
 use sip_message::{HeaderName, Method, SipRequest, SipResponse, SipStr};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, OutboundBody, Provenance};
@@ -298,7 +298,8 @@ impl ActionExecutor<'_> {
         else {
             return;
         };
-        let via = relay.source_vias.first().and_then(|v| Via::parse(&SipStr::owned(v)).ok());
+        let via =
+            relay.source_vias.first().and_then(|v| Via::first_of_line(&SipStr::owned(v)).ok());
         if !via.as_ref().is_some_and(|via| acks_a_refusal(via, req)) {
             let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
             self.ack_leg(

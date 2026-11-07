@@ -144,7 +144,7 @@ mod tests {
         out
     }
 
-    const REFER: &[u8] = b"REFER sip:+1555123@h SIP/2.0\r\n\
+    const REFER: &[u8] = b"REFER sip:+1555123@h SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.2:5060;branch=z9hG4bK2;received=10.0.0.9\r\n\
 v: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
 Max-Forwards: 70\r\n\
@@ -230,7 +230,8 @@ l: 0\r\n\r\n";
     /// A `Replaces` header of its own is read as the dialog it replaces.
     #[test]
     fn a_replaces_header_names_the_replaced_dialog() {
-        let invite = b"INVITE sip:b@h SIP/2.0\r\n\
+        let invite =
+            b"INVITE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
 From: <sip:a@h>;tag=f1\r\n\
 To: <sip:b@h>\r\n\
@@ -260,7 +261,7 @@ Content-Disposition: signal;handling=optional\r\n\r\n\
 BIN\r\n\
 --bnd--\r\n";
         let raw = format!(
-            "INVITE sip:b@h SIP/2.0\r\n\
+            "INVITE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
 From: <sip:a@h>;tag=f1\r\n\
 To: <sip:b@h>\r\n\
@@ -303,7 +304,8 @@ Content-Length: {}\r\n\r\n{body}",
     /// A single-part body states its media type and length and no parts.
     #[test]
     fn a_single_part_body_states_its_media_type_and_no_parts() {
-        let raw = b"INVITE sip:b@h SIP/2.0\r\n\
+        let raw =
+            b"INVITE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
 From: <sip:a@h>;tag=f1\r\n\
 To: <sip:b@h>\r\n\

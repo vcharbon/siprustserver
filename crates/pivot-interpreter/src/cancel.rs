@@ -102,7 +102,7 @@ mod tests {
 
     fn request(method: &str, cseq: u32) -> String {
         format!(
-            "{method} sip:bob@127.0.0.1:5080 SIP/2.0\r\n\
+            "{method} sip:bob@127.0.0.1:5080 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-a\r\n\
              From: <sip:alice@example.test>;tag=a1\r\n\
              To: <sip:bob@example.test>\r\n\
@@ -114,7 +114,7 @@ mod tests {
 
     fn response(status: u16, cseq: u32, method: &str) -> String {
         format!(
-            "SIP/2.0 {status} Whatever\r\n\
+            "SIP/2.0 {status} Whatever\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-a\r\n\
              From: <sip:alice@example.test>;tag=a1\r\n\
              To: <sip:bob@example.test>;tag=b1\r\n\

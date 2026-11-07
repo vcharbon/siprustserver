@@ -188,6 +188,11 @@ fn worker_bound_200_routed(
     record_route: &str,
     extra_headers: &str,
 ) -> sip_message::types::SipResponse {
+    // A 2xx to INVITE names its remote target (RFC 3261 §12.1.1).
+    let contact = match cseq.ends_with("INVITE") && !extra_headers.contains("Contact:") {
+        true => format!("Contact: <sip:sipp@{UAC}:5060>\r\n"),
+        false => String::new(),
+    };
     let raw = format!(
         "SIP/2.0 200 OK\r\n\
 Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout;rport\r\n\
@@ -196,7 +201,7 @@ Via: SIP/2.0/UDP {W1_POD}:5060;branch=z9hG4bKka;received={SNAT_NODE};rport=63522
 To: <sip:sipp@{UAC}:5060>;tag=uactag\r\n\
 Call-ID: dlg-1@{UAC}\r\n\
 CSeq: {cseq}\r\n\
-{extra_headers}Content-Length: 0\r\n\r\n"
+{contact}{extra_headers}Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
         unreachable!()

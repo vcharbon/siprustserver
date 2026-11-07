@@ -150,7 +150,7 @@ fn a_final_the_stores_keep_is_copied_once() {
 fn a_resent_final_costs_its_one_shared_copy() {
     const N: usize = 32;
     let rt = runtime();
-    let ack = b"ACK sip:peer@127.0.0.1 SIP/2.0\r\nCall-ID: cid-alloc\r\nCSeq: 1 ACK\r\n\r\n";
+    let ack = b"ACK sip:peer@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: cid-alloc\r\nCSeq: 1 ACK\r\n\r\n";
     let send = sends(&rt, &rt.block_on(rig(1.0, false)), ack, N);
     let resent = sends(&rt, &rt.block_on(rig(1.0, true)), &busy(0), N);
     println!("{N} sends: {send:?}; {N} re-sent finals, watched: {resent:?}");

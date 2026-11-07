@@ -5,9 +5,11 @@ use sip_pcap::flow::{build_flows, FlowConfig};
 use sip_pcap::{Datagram, DecodeStats};
 
 fn message(head: &str, call_id: &str, cseq: &str) -> Vec<u8> {
+    // An INVITE and its responses name a remote target (RFC 3261 §8.1.1.8, §12.1.1).
+    let contact = if cseq.ends_with("INVITE") { "Contact: <sip:alice@10.0.0.1>\r\n" } else { "" };
     format!(
         "{head}\r\nVia: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{}\r\nMax-Forwards: 70\r\n\
-         From: <sip:alice@10.0.0.1>;tag=f1\r\nTo: <sip:bob@10.0.0.9>;tag=t1\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContent-Length: 0\r\n\r\n",
+         From: <sip:alice@10.0.0.1>;tag=f1\r\nTo: <sip:bob@10.0.0.9>;tag=t1\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\n{contact}Content-Length: 0\r\n\r\n",
         cseq.replace(' ', "")
     )
     .into_bytes()

@@ -292,7 +292,7 @@ fn invite(to_tag: bool, priority: Option<&str>) -> SipRequest {
     let to_tag = if to_tag { ";tag=b" } else { "" };
     let priority = priority.map(|p| format!("Resource-Priority: {p}\r\n")).unwrap_or_default();
     let raw = format!(
-        "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+        "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-c\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@caller.test>;tag=a\r\n\

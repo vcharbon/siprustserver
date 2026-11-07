@@ -39,7 +39,7 @@ fn req(
         None => format!("<{to}>"),
     };
     let head = format!(
-        "{method} {r_uri} SIP/2.0\r\n\
+        "{method} {r_uri} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <{from}>;tag=at\r\n\
              To: {to_hdr}\r\n\
@@ -89,7 +89,7 @@ fn rsp_tagged(
         None => format!("<{B_URI}>"),
     };
     let head = format!(
-        "SIP/2.0 {status} X\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <{A_URI}>;tag=at\r\n\
              To: {to_hdr}\r\n\
@@ -544,7 +544,7 @@ fn a_record_route_on_an_unplaceable_response_is_undecidable() {
 /// An in-dialog request alice sent bob, with a caller-chosen tag pair.
 fn in_dialog(at_us: u64, method: &str, branch: &str, cseq: u32, ft: &str, tt: &str) -> Msg {
     let head = format!(
-        "{method} {B_URI} SIP/2.0\r\n\
+        "{method} {B_URI} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <{A_URI}>;tag={ft}\r\n\
              To: <{B_URI}>;tag={tt}\r\n\
@@ -830,7 +830,7 @@ fn a_rejected_reinvite_keeps_the_confirmed_dialog() {
 /// establishing INVITE.
 fn from_bob(at_us: u64, method: &str, branch: &str, cseq: u32, ft: &str, tt: &str) -> Msg {
     let head = format!(
-        "{method} {A_URI} SIP/2.0\r\n\
+        "{method} {A_URI} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5070;branch={branch}\r\n\
              From: <{B_URI}>;tag={ft}\r\n\
              To: <{A_URI}>;tag={tt}\r\n\

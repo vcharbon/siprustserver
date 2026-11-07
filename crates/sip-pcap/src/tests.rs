@@ -151,7 +151,7 @@ fn write_tmp_gz(name: &str, bytes: &[u8]) -> std::path::PathBuf {
 
 #[test]
 fn decodes_a_plain_udp_datagram() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let pkt = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
     let file = write_tmp("plain", &pcap_raw_ip(&[(1_000_000, pkt)]));
     let (dgs, stats) = read_capture_files(&[&file]).unwrap();
@@ -213,7 +213,7 @@ fn stale_pending_reassembly_expires_on_capture_time() {
 /// through the Ethernet+VLAN link layer the archived corpus uses.
 #[test]
 fn decodes_a_pcapng_capture() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let frame = eth_vlan(&ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false));
     let file = write_tmp("ng", &pcapng_raw_ip(&[(1_638_412_000_000_000, frame)], 1, None));
     let (dgs, stats) = read_capture_files(&[&file]).unwrap();
@@ -228,7 +228,7 @@ fn decodes_a_pcapng_capture() {
 /// wall-clock instant expressed in ns / µs / ms / 2^-32 s decodes alike.
 #[test]
 fn pcapng_timestamp_resolution_is_honoured() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let frame = eth_vlan(&ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false));
     let secs = 1_638_412_000u64;
     let cases = [
@@ -253,7 +253,7 @@ fn pcapng_timestamp_resolution_is_honoured() {
 /// bytes gzipped decode identically, for both containers.
 #[test]
 fn gzipped_captures_decode_identically() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
     let classic = pcap_raw_ip(&[(1_000_000, ip.clone())]);
     let ng = pcapng_raw_ip(&[(1_000_000, eth_vlan(&ip))], 1, None);
@@ -274,7 +274,7 @@ fn gzipped_captures_decode_identically() {
 /// call — the format is per-file, never a mode the caller must declare.
 #[test]
 fn mixed_container_corpus_reads_in_one_call() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
     let a = write_tmp("mixa", &pcap_raw_ip(&[(1_000_000, ip.clone())]));
     let b = write_tmp_gz("mixb", &pcapng_raw_ip(&[(2_000_000, eth_vlan(&ip))], 1, None));
@@ -292,7 +292,7 @@ fn mixed_container_corpus_reads_in_one_call() {
 /// a file with no datagram says nothing about time.
 #[test]
 fn a_consecutive_set_reads_as_one_capture() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
     let a = write_tmp("seta", &pcap_raw_ip(&[(1_000_000, ip.clone()), (2_000_000, ip.clone())]));
     let empty = write_tmp("setempty", &pcap_raw_ip(&[]));
@@ -337,7 +337,7 @@ fn a_consecutive_set_reassembles_across_the_boundary() {
 /// captures of one wire.
 #[test]
 fn a_set_that_is_not_consecutive_is_refused() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
     let at = |name: &str, ts: &[u64]| {
         write_tmp(name, &pcap_raw_ip(&ts.iter().map(|&t| (t, ip.clone())).collect::<Vec<_>>()))
@@ -372,7 +372,7 @@ fn a_set_that_is_not_consecutive_is_refused() {
 /// Nothing else in the model can tell the two copies apart.
 #[test]
 fn each_pcapng_interface_is_its_own_probe() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let frame = eth_vlan(&ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false));
     // Probe 1's clock runs 8 s ahead of probe 0's — far outside any
     // capture-dedup window, and squarely on the INVITE retransmit ladder.
@@ -391,7 +391,7 @@ fn each_pcapng_interface_is_its_own_probe() {
 /// two observation points and never one.
 #[test]
 fn probes_are_numbered_across_every_file_read() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
     let a = write_tmp("pa", &pcap_raw_ip(&[(1_000_000, ip.clone())]));
     let b = write_tmp("pb", &pcapng_merged(2, &[(0, 2_000_000, eth_vlan(&ip))]));
@@ -405,7 +405,7 @@ fn probes_are_numbered_across_every_file_read() {
 /// an error: the datagrams before the cut are still returned.
 #[test]
 fn truncated_pcapng_tail_is_counted_not_fatal() {
-    let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+    let msg = b"OPTIONS sip:x SIP/2.0\r\nMax-Forwards: 70\r\n\r\n";
     let frame = eth_vlan(&ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false));
     let mut bytes = pcapng_raw_ip(&[(1_000_000, frame.clone()), (2_000_000, frame)], 1, None);
     bytes.truncate(bytes.len() - 40); // cut into the second EPB

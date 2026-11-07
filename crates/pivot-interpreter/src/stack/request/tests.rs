@@ -559,13 +559,13 @@ fn an_in_dialog_request_carries_the_body_and_media_type_the_step_states() {
     assert_eq!(header(&info, sip_message::HeaderName::ContentLength), "12");
 }
 
-/// `response` as a peer that stated no Contact would have sent it.
+/// `response` as a peer that stated no Contact would have sent it, read with no
+/// grammar held: ingress refuses such a 2xx (RFC 3261 §12.1.1).
 fn without_contact(response: &SipResponse) -> SipResponse {
-    use sip_message::parser::custom::CustomParser;
-    use sip_message::{SipMessage, SipParser};
+    use sip_message::SipMessage;
     let text = String::from_utf8(response.image().to_vec()).expect("text");
     let kept: Vec<&str> = text.split("\r\n").filter(|line| !line.starts_with("Contact:")).collect();
-    match CustomParser::new().parse(kept.join("\r\n").as_bytes()).expect("parses") {
+    match sip_message::read_stored(kept.join("\r\n").as_bytes()).expect("parses") {
         SipMessage::Response(r) => r,
         _ => panic!("a response"),
     }

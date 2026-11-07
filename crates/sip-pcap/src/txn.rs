@@ -203,7 +203,7 @@ mod tests {
 
     fn req(method: &str, cseq: u32, branch: &str, to_tag: &str, extra: &str) -> Vec<u8> {
         format!(
-            "{method} sip:bob@10.0.0.9 SIP/2.0\r\n\
+            "{method} sip:bob@10.0.0.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
@@ -218,7 +218,7 @@ mod tests {
 
     fn resp(status: u16, cseq: u32, method: &str, branch: &str, body: &str) -> Vec<u8> {
         format!(
-            "SIP/2.0 {status} X\r\n\
+            "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
              To: <sip:bob@10.0.0.9>;tag=t1\r\n\

@@ -228,7 +228,7 @@ mod tests {
             Dir::Out,
             0,
             Some("s1".into()),
-            b"INVITE sip:x SIP/2.0\r\n\r\n".to_vec(),
+            b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\r\n".to_vec(),
         );
         let text = serde_json::to_string(&claimed).unwrap();
         assert!(!text.contains('\n'), "one datagram is one JSON Lines line: {text}");

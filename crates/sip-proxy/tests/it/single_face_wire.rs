@@ -79,7 +79,12 @@ Content-Length: 0\r\n\r\n"
 }
 
 /// A response whose hops are `vias`, the first the proxy's.
+/// A 2xx to an INVITE names its remote target (RFC 3261 §12.1.1).
 fn response(status: &str, vias: [&str; 2], cseq: &str) -> String {
+    let contact = match status.starts_with('2') && cseq.ends_with("INVITE") {
+        true => "Contact: <sip:bob@198.51.100.20:5060>\r\n",
+        false => "",
+    };
     format!(
         "SIP/2.0 {status}\r\n\
 Via: SIP/2.0/UDP {};branch=z9hG4bKp\r\n\
@@ -88,7 +93,7 @@ From: <sip:alice@example.com>;tag=a\r\n\
 To: <sip:bob@example.com>;tag=b\r\n\
 Call-ID: wire@example.com\r\n\
 CSeq: {cseq}\r\n\
-Content-Length: 0\r\n\r\n",
+{contact}Content-Length: 0\r\n\r\n",
         vias[0],
         vias[1],
         vias[1].split(':').next().expect("a host"),

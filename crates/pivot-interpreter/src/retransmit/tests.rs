@@ -7,7 +7,8 @@ const fn ms(v: u64) -> Duration {
     Duration::from_millis(v)
 }
 
-const INVITE: &str = "INVITE sip:bob@10.0.0.2 SIP/2.0\r\n\
+const INVITE: &str =
+    "INVITE sip:bob@10.0.0.2 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
         Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1\r\n\
         From: <sip:alice@10.0.0.1>;tag=a1\r\n\
         To: <sip:bob@10.0.0.2>\r\n\
@@ -78,7 +79,7 @@ fn every_other_ladder_doubles_into_t2() {
 
 #[test]
 fn a_final_response_rides_the_capped_ladder() {
-    let ok = "SIP/2.0 200 OK\r\n\
+    let ok = "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
             Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1\r\n\
             From: <sip:alice@10.0.0.1>;tag=a1\r\n\
             To: <sip:bob@10.0.0.2>;tag=b1\r\n\
@@ -160,7 +161,7 @@ fn a_send_ladder_counts_only_what_the_document_declared() {
 /// nobody expected.
 #[test]
 fn an_undeclared_paced_expect_counts_its_rungs_and_is_held_to_the_rfc() {
-    let bye = b"BYE sip:b@h SIP/2.0\r\nCall-ID: c1\r\nCSeq: 7 BYE\r\n\r\n";
+    let bye = b"BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nCSeq: 7 BYE\r\n\r\n";
     let ok = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nCSeq: 7 BYE\r\n\r\n";
     let mut repeats = Repeats::new();
     repeats.claim("s4", "B", LadderSide::Expect, None, &[], bye, 0);
@@ -188,7 +189,7 @@ fn an_undeclared_paced_expect_counts_its_rungs_and_is_held_to_the_rfc() {
 /// sent it, so a rung already on the wire arrives just behind our answer.
 #[test]
 fn one_rung_that_raced_the_closer_is_the_boundary_and_a_later_one_is_not() {
-    let bye = b"BYE sip:b@h SIP/2.0\r\nCall-ID: c1\r\nCSeq: 7 BYE\r\n\r\n";
+    let bye = b"BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nCSeq: 7 BYE\r\n\r\n";
     let ok = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nCSeq: 7 BYE\r\n\r\n";
     let ladder = |arrival_us: u64| {
         let mut repeats = Repeats::new();
@@ -213,8 +214,8 @@ fn one_rung_that_raced_the_closer_is_the_boundary_and_a_later_one_is_not() {
 /// paired final's OWN repeats state the count, not the capture's.
 #[test]
 fn an_auto_ack_ladder_is_held_to_the_finals_own_repeats() {
-    let ok = b"SIP/2.0 200 OK\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c9\r\nCSeq: 4 INVITE\r\n\r\n";
-    let ack = b"ACK sip:b@h SIP/2.0\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c9\r\nCSeq: 4 ACK\r\n\r\n";
+    let ok = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c9\r\nCSeq: 4 INVITE\r\n\r\n";
+    let ack = b"ACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c9\r\nCSeq: 4 ACK\r\n\r\n";
     let drawn = |copies: u32| {
         let mut repeats = Repeats::new();
         repeats.claim("s1", "A", LadderSide::Expect, None, &[], ok, 0);
@@ -306,7 +307,7 @@ fn one_repeat_too_many_is_counted_and_reported_not_dropped() {
 /// document's count stays beside it as the evidence it is.
 #[test]
 fn an_expect_ladder_is_held_to_the_rfcs_rungs_not_the_documents_count() {
-    let bye = b"BYE sip:b@h SIP/2.0\r\nCSeq: 7 BYE\r\n\r\n";
+    let bye = b"BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 7 BYE\r\n\r\n";
     let ok = b"SIP/2.0 200 OK\r\nCSeq: 7 BYE\r\n\r\n";
     let mut repeats = Repeats::new();
     // s15 matched the original at 30 000 ms; the two rungs are the repeats.
@@ -339,7 +340,7 @@ fn an_expect_ladder_is_held_to_the_rfcs_rungs_not_the_documents_count() {
 /// the run got before it died.
 #[test]
 fn a_ladder_nothing_closed_is_owed_the_rungs_the_run_left_room_for() {
-    let bye = b"BYE sip:b@h SIP/2.0\r\nCSeq: 7 BYE\r\n\r\n";
+    let bye = b"BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 7 BYE\r\n\r\n";
     let mut repeats = Repeats::new();
     repeats.claim("s9", "B", LadderSide::Expect, Some(1), &[638], bye, 0);
     repeats.note("B", bye, 500_000);
@@ -358,8 +359,8 @@ fn a_ladder_nothing_closed_is_owed_the_rungs_the_run_left_room_for() {
 
 #[test]
 fn a_class_that_rides_no_timer_of_its_own_states_no_rung_count() {
-    let ack = b"ACK sip:b@h SIP/2.0\r\nCSeq: 7 ACK\r\n\r\n";
-    let bye = b"BYE sip:b@h SIP/2.0\r\nCSeq: 7 BYE\r\n\r\n";
+    let ack = b"ACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 7 ACK\r\n\r\n";
+    let bye = b"BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 7 BYE\r\n\r\n";
     let mut repeats = Repeats::new();
     repeats.claim("s9", "B", LadderSide::Expect, Some(1), &[], ack, 0);
     repeats.note("B", ack, 0);
@@ -386,7 +387,7 @@ fn a_reliable_provisionals_ladder_never_reaches_a_t2_ceiling() {
 
 #[test]
 fn the_rung_count_walks_the_class_ladder_and_stops_at_the_closer() {
-    let bye = "BYE sip:b@h SIP/2.0\r\nCSeq: 7 BYE\r\n\r\n";
+    let bye = "BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 7 BYE\r\n\r\n";
     let class = class_of(bye.as_bytes()).expect("a request has Timer E");
     assert_eq!(class, Class::NonInviteClient);
     let capped = Schedule::rfc(class);
@@ -401,7 +402,7 @@ fn the_rung_count_walks_the_class_ladder_and_stops_at_the_closer() {
     let measured = schedule_of(bye.as_bytes(), &[700]).expect("stated gaps pace it");
     assert_eq!(rungs_within(&measured, ms(1_508)), 2);
     // And a class that rides no timer counts none: `once`, not "by the RFC".
-    let ack = b"ACK sip:b@h SIP/2.0\r\nCSeq: 7 ACK\r\n\r\n";
+    let ack = b"ACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 7 ACK\r\n\r\n";
     assert_eq!(pacing_of(ack), Schedule::once());
     assert_eq!(rungs_within(&pacing_of(ack), ms(40_000)), 0);
 }
@@ -413,9 +414,10 @@ fn the_rung_count_walks_the_class_ladder_and_stops_at_the_closer() {
 fn a_reliable_provisional_closes_on_its_prack_not_on_the_ack() {
     let p183 = b"SIP/2.0 183 Session Progress\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
             CSeq: 1 INVITE\r\nRSeq: 625707\r\n\r\n";
-    let prack = b"PRACK sip:b@h SIP/2.0\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
+    let prack =
+        b"PRACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
             CSeq: 2 PRACK\r\nRAck: 625707 1 INVITE\r\n\r\n";
-    let ack = b"ACK sip:b@h SIP/2.0\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
+    let ack = b"ACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
             CSeq: 1 ACK\r\n\r\n";
     let mut repeats = Repeats::new();
     repeats.claim("s6", "A", LadderSide::Expect, Some(1), &[500], p183, 2_314_000);
@@ -435,7 +437,8 @@ fn a_reliable_provisional_closes_on_its_prack_not_on_the_ack() {
 fn a_prack_for_another_invite_closes_nothing() {
     let p183 = b"SIP/2.0 183 Session Progress\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
             CSeq: 1 INVITE\r\nRSeq: 7\r\n\r\n";
-    let elsewhere = b"PRACK sip:b@h SIP/2.0\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
+    let elsewhere =
+        b"PRACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
             CSeq: 9 PRACK\r\nRAck: 7 4 INVITE\r\n\r\n";
     let mut repeats = Repeats::new();
     repeats.claim("s6", "A", LadderSide::Expect, Some(1), &[], p183, 0);
@@ -448,7 +451,7 @@ fn a_prack_for_another_invite_closes_nothing() {
 /// stops it.
 #[test]
 fn a_provisional_does_not_close_a_non_invite_request() {
-    let bye = b"BYE sip:b@h SIP/2.0\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
+    let bye = b"BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
             CSeq: 77 BYE\r\n\r\n";
     let trying = b"SIP/2.0 100 Trying\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
             CSeq: 77 BYE\r\n\r\n";
@@ -470,7 +473,7 @@ fn a_provisional_does_not_close_a_non_invite_request() {
 /// provisional where a BYE's does not.
 #[test]
 fn any_response_closes_an_invite_request() {
-    let invite = b"INVITE sip:b@h SIP/2.0\r\nCall-ID: c1\r\nTo: <sip:b@h>\r\n\
+    let invite = b"INVITE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c1\r\nTo: <sip:b@h>\r\n\
             CSeq: 1 INVITE\r\n\r\n";
     let trying = b"SIP/2.0 100 Trying\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=t1\r\n\
             CSeq: 1 INVITE\r\n\r\n";
@@ -488,11 +491,13 @@ fn any_response_closes_an_invite_request() {
 /// dialog — same Call-ID, same CSeq, another To-tag — closes nothing (§6.5).
 #[test]
 fn another_early_dialogs_answer_closes_nothing() {
-    let ok = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=fork1\r\n\
+    let ok = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=fork1\r\n\
             CSeq: 1 INVITE\r\n\r\n";
-    let other_ack = b"ACK sip:b@h SIP/2.0\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=fork2\r\n\
+    let other_ack =
+        b"ACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=fork2\r\n\
             CSeq: 1 ACK\r\n\r\n";
-    let own_ack = b"ACK sip:b@h SIP/2.0\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=fork1\r\n\
+    let own_ack =
+        b"ACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nTo: <sip:b@h>;tag=fork1\r\n\
             CSeq: 1 ACK\r\n\r\n";
     let mut repeats = Repeats::new();
     repeats.claim("s20", "A", LadderSide::Expect, Some(1), &[], ok, 0);
@@ -508,7 +513,8 @@ fn another_early_dialogs_answer_closes_nothing() {
 #[test]
 fn a_non_invite_final_rides_no_ladder_of_its_own() {
     let to_bye = b"SIP/2.0 200 OK\r\nCSeq: 77 BYE\r\n\r\n";
-    let to_invite = b"SIP/2.0 200 OK\r\nCSeq: 1 INVITE\r\n\r\n";
+    let to_invite =
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCSeq: 1 INVITE\r\n\r\n";
     assert_eq!(class_of(to_bye), None, "§17.2.2 draws it from the request");
     assert_eq!(class_of(to_invite), Some(Class::Final2xx), "§13.3.1.4 paces an INVITE's 2xx");
 }
@@ -532,8 +538,8 @@ fn the_rung_count_stops_at_the_transaction_envelope() {
 
 #[test]
 fn only_the_laddered_transactions_own_answer_closes_it() {
-    let bye = b"BYE sip:b@h SIP/2.0\r\nCSeq: 4 BYE\r\n\r\n";
-    let other = b"SIP/2.0 200 OK\r\nCSeq: 4 INVITE\r\n\r\n";
+    let bye = b"BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 4 BYE\r\n\r\n";
+    let other = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCSeq: 4 INVITE\r\n\r\n";
     let mut repeats = Repeats::new();
     repeats.claim("s9", "B", LadderSide::Expect, Some(1), &[], bye, 0);
     repeats.note("B", bye, 500_000);
@@ -553,9 +559,10 @@ fn only_the_laddered_transactions_own_answer_closes_it() {
 /// INVITE closes the CANCEL's window, so no Timer E rung is owed past it.
 #[test]
 fn the_final_to_the_invite_a_cancel_names_closes_the_cancels_ladder() {
-    let cancel = b"CANCEL sip:b@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+    let cancel =
+        b"CANCEL sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
             To: <sip:b@h>\r\nCSeq: 1 CANCEL\r\n\r\n";
-    let answer = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+    let answer = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
             To: <sip:b@h>;tag=b1\r\nCSeq: 1 INVITE\r\n\r\n";
     let mut repeats = Repeats::new();
     // The system's CANCEL, never answered; our 200 to its INVITE 319 ms on.
@@ -574,11 +581,12 @@ fn the_final_to_the_invite_a_cancel_names_closes_the_cancels_ladder() {
 /// the window stay owed.
 #[test]
 fn the_emitters_bye_does_not_close_a_dialog_creating_2xx_ladder() {
-    let invite = b"INVITE sip:s@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+    let invite = b"INVITE sip:s@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
             To: <sip:s@h>\r\nCSeq: 1 INVITE\r\n\r\n";
-    let ok = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+    let ok = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
             To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
-    let bye = b"BYE sip:a@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:s@h>;tag=s1\r\n\
+    let bye =
+        b"BYE sip:a@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nFrom: <sip:s@h>;tag=s1\r\n\
             To: <sip:a@h>;tag=a1\r\nCSeq: 2 BYE\r\n\r\n";
     let mut repeats = Repeats::new();
     repeats.claim("s1", "A", LadderSide::Send, None, &[], invite, 0);
@@ -601,11 +609,12 @@ fn the_emitters_bye_does_not_close_a_dialog_creating_2xx_ladder() {
 /// exec claims a matched arrival, closes the 2xx's window.
 #[test]
 fn the_emitters_bye_on_the_dialog_closes_its_2xx_ladder() {
-    let ok = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+    let ok = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
             To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
-    let bye = b"BYE sip:b@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:s@h>;tag=s1\r\n\
+    let bye =
+        b"BYE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCall-ID: c1\r\nFrom: <sip:s@h>;tag=s1\r\n\
             To: <sip:b@h>;tag=b1\r\nCSeq: 2 BYE\r\n\r\n";
-    let reinvite = b"INVITE sip:s@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+    let reinvite = b"INVITE sip:s@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
             To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
     let mut repeats = Repeats::new();
     repeats.claim("s12", "B", LadderSide::Send, None, &[], reinvite, 900_000);

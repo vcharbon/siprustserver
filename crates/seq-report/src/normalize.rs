@@ -228,7 +228,7 @@ mod tests {
             from: from.into(),
             to: Some(to.into()),
             label: label.into(),
-            detail: Some("INVITE sip:bob SIP/2.0\r\nwire...".into()),
+            detail: Some("INVITE sip:bob SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nwire...".into()),
             conn: Some("call-id-xyz@10.0.0.9".into()),
             kind: RowKind::Sip { delivered: true },
         }

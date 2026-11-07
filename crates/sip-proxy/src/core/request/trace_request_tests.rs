@@ -147,7 +147,7 @@ Content-Length: 0\r\n\r\n"
 /// `branch` its top-Via branch (§17.1.1.3: same transaction).
 fn in_dialog(method: &str, call_id: &str, branch: &str, cseq: u32) -> SipMessage {
     let raw = format!(
-        "{method} sip:bob@{W1}:5060 SIP/2.0\r\n\
+        "{method} sip:bob@{W1}:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@{UAC}>;tag=alice1\r\n\
@@ -169,7 +169,7 @@ fn response(
     cseq: &str,
 ) -> sip_message::types::SipResponse {
     let raw = format!(
-        "SIP/2.0 {status}\r\n\
+        "SIP/2.0 {status}\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP {PROXY}:5060;branch={proxy_branch}\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch={uac_branch}\r\n\
 From: <sip:alice@{UAC}>;tag=alice1\r\n\

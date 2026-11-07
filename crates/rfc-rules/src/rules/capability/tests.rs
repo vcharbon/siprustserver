@@ -23,7 +23,7 @@ fn invite(at_us: u64, branch: &str, cseq: u32, to_tag: Option<&str>, extra: &str
         None => "<sip:bob@127.0.0.1>".to_string(),
     };
     let head = format!(
-        "INVITE sip:bob@127.0.0.1 SIP/2.0\r\n\
+        "INVITE sip:bob@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <sip:alice@127.0.0.1>;tag=at\r\n\
              To: {to}\r\n\
@@ -52,7 +52,7 @@ fn invite(at_us: u64, branch: &str, cseq: u32, to_tag: Option<&str>, extra: &str
 /// A 2xx bob sent alice, with a caller-chosen capability block.
 fn ok(at_us: u64, cseq: u32, extra: &str) -> Msg {
     let head = format!(
-        "SIP/2.0 200 OK\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-i\r\n\
              From: <sip:alice@127.0.0.1>;tag=at\r\n\
              To: <sip:bob@127.0.0.1>;tag=bt\r\n\
@@ -191,7 +191,7 @@ fn the_compact_supported_spelling_counts() {
 /// A request alice sent bob — the side bob's rejection obligations run on.
 fn taken(at_us: u64, method: &str, branch: &str, cseq: u32, extra: &str) -> Msg {
     let head = format!(
-        "{method} sip:bob@127.0.0.1 SIP/2.0\r\n\
+        "{method} sip:bob@127.0.0.1 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <sip:alice@127.0.0.1>;tag=at\r\n\
              To: <sip:bob@127.0.0.1>\r\n\
@@ -220,7 +220,7 @@ fn taken(at_us: u64, method: &str, branch: &str, cseq: u32, extra: &str) -> Msg 
 /// The response bob sent back on that transaction.
 fn answered(at_us: u64, status: u16, method: &str, branch: &str, cseq: u32, extra: &str) -> Msg {
     let head = format!(
-        "SIP/2.0 {status} Response\r\n\
+        "SIP/2.0 {status} Response\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <sip:alice@127.0.0.1>;tag=at\r\n\
              To: <sip:bob@127.0.0.1>;tag=bt\r\n\

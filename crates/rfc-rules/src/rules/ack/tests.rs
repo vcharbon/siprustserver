@@ -282,7 +282,7 @@ fn a_forwarding_hops_uncleared_2xx_is_marked_relayed() {
 /// head the two carries rules read.
 fn on_branch(at_us: u64, method: &str, branch: &str, extra: &str) -> Msg {
     let head = format!(
-        "{method} sip:bob@10.0.0.2 SIP/2.0\r\n\
+        "{method} sip:bob@10.0.0.2 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}\r\n\
              From: <sip:alice@h>;tag=fa\r\n\
              To: <sip:bob@h>\r\n\

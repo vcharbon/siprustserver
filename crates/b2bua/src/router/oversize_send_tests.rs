@@ -225,7 +225,7 @@ async fn a_b_leg_that_cannot_leave_draws_the_callers_final() {
     let (to, from, call_id) = (header(&ok, "To"), header(&ok, "From"), header(&ok, "Call-ID"));
     let in_dialog = |method: &str, seq: u32| {
         format!(
-            "{method} {target} SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{seq}\r\nMax-Forwards: 70\r\nFrom: {from}\r\nTo: {to}\r\nCall-ID: {call_id}\r\nCSeq: {seq} {method}\r\nContent-Length: 0\r\n\r\n"
+            "{method} {target} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{seq}\r\nMax-Forwards: 70\r\nFrom: {from}\r\nTo: {to}\r\nCall-ID: {call_id}\r\nCSeq: {seq} {method}\r\nContent-Length: 0\r\n\r\n"
         )
     };
     caller.send_to(in_dialog("ACK", 1).as_bytes(), node).await.unwrap();

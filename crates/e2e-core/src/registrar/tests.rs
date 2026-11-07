@@ -2,7 +2,8 @@ use super::*;
 use sip_message::SipStr;
 
 /// A REGISTER carrying `extra` on top of the mandatory headers, as the
-/// parser reads it.
+/// parser of a deployment naming `max-forwards:absent` reads it, so a request
+/// with no hop count reads too.
 fn parse_register(extra: &[(&str, &str)]) -> Result<SipMessage, sip_message::SipParseError> {
     let mut raw =
         "REGISTER sip:127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-t\r\n\
@@ -13,7 +14,9 @@ fn parse_register(extra: &[(&str, &str)]) -> Result<SipMessage, sip_message::Sip
         raw.push_str(&format!("{name}: {value}\r\n"));
     }
     raw.push_str("Content-Length: 0\r\n\r\n");
-    CustomParser::new().parse(raw.as_bytes())
+    let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).expect("named");
+    CustomParser::with_limits(sip_message::SipParserLimits { exemptions, ..Default::default() })
+        .parse(raw.as_bytes())
 }
 
 fn register(extra: &[(&str, &str)]) -> SipRequest {
@@ -39,7 +42,8 @@ fn max_forwards_zero_is_rejected() {
 
 #[test]
 fn max_forwards_absent_is_the_decremented_default() {
-    // A request missing the header is treated as the §8.1.1.6 default (70).
+    // A request missing the header, where a deployment names the shape, is
+    // treated as the §8.1.1.6 default (70).
     assert_eq!(hops(&register(&[])), Some(69));
 }
 

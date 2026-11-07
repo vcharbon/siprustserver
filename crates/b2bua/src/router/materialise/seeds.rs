@@ -45,7 +45,7 @@ use std::collections::HashSet;
 use b2bua_sdk::event::CallEvent;
 use call::{Call, Dialog, Leg, RequestRecord, RetainedEmission, SentRequest, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
-use sip_message::header::{HeaderValue, SentBy, Via};
+use sip_message::header::{SentBy, Via};
 use sip_message::{SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
 use sip_txn::{ServerTxnKey, TxnSeed};
 
@@ -402,7 +402,7 @@ pub(in crate::router) fn relayed_server_key(p: &RequestRecord) -> Option<ServerT
 /// The originator's top Via a pending relayed request was received with.
 pub(super) fn pending_via(p: &RequestRecord) -> Option<Via> {
     let top_via = p.source_vias.first()?;
-    Via::parse(&SipStr::owned(top_via)).ok()
+    Via::first_of_line(&SipStr::owned(top_via)).ok()
 }
 
 /// The client seed of the INVITE `sent`: the INVITE as it left, the wire

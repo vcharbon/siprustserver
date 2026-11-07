@@ -33,6 +33,7 @@ fn cr_lg_cancel(
     branch: &str,
     leg_id: &str,
 ) -> sip_message::SipRequest {
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     parse_request(&format!(
         "CANCEL sip:bob@192.0.2.20:5060 SIP/2.0\n\
          Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={call_ref};lg={leg_id}\n\

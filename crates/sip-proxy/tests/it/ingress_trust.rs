@@ -378,7 +378,7 @@ async fn an_outbound_marker_on_the_internal_face_is_worker_outbound_from_an_unli
 async fn a_response_on_the_external_face_whose_next_via_is_no_worker_is_dropped() {
     let lab = proxy_lab(true, true).await;
     let forged = format!(
-        "SIP/2.0 200 OK\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP {EXT_VIP}:{EXT_PORT};branch=z9hG4bKforged\r\n\
 Via: SIP/2.0/UDP {FAR}:5060;branch=z9hG4bKfar;rport=5060\r\n\
 From: <sip:caller@{FAR}>;tag=c1\r\n\
@@ -405,7 +405,7 @@ async fn a_forged_to_tag_invite_on_the_external_face_meets_the_gate() {
 async fn a_response_naming_a_worker_with_a_foreign_received_reflects_nothing() {
     let lab = proxy_lab(true, true).await;
     let forged = format!(
-        "SIP/2.0 200 OK\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP {EXT_VIP}:{EXT_PORT};branch=z9hG4bKforged\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKw1;rport=5060;received={FAR}\r\n\
 From: <sip:caller@{W1}>;tag=c1\r\n\

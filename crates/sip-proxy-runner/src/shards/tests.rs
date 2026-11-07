@@ -53,7 +53,7 @@ fn invite() -> Vec<u8> {
 /// A new call, `call` naming its branch, tag and Call-ID.
 fn invite_on(call: &str) -> Vec<u8> {
     format!(
-        "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+        "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP {CALLER};branch=z9hG4bK-{call}\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@127.0.0.1>;tag=t-{call}\r\n\

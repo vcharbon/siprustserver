@@ -349,7 +349,7 @@ Content-Length: 0\r\n\r\n"
     // callee), next Via = the worker → relays on the INT socket.
     // The external-face top Via must be accepted as "us" (§16.7.3).
     let raw = format!(
-        "SIP/2.0 200 OK\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP {EXT_VIP}:{EXT_PORT};branch=z9hG4bKout2\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKbleg1\r\n\
 From: <sip:service@{INT_VIP}:{INT_PORT}>;tag=svc\r\n\

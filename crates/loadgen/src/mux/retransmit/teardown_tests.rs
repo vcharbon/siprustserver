@@ -39,7 +39,7 @@ async fn received(peer: &dyn UdpEndpoint, window: TokioDuration) -> Vec<String> 
 
 fn request(method: &str, cseq: &str) -> Vec<u8> {
     format!(
-        "{method} sip:b@127.0.0.1:5070 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-c1\r\n\
+        "{method} sip:b@127.0.0.1:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-c1\r\n\
          Call-ID: tc1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>\r\nCSeq: {cseq}\r\n\r\n"
     )
     .into_bytes()
@@ -47,7 +47,7 @@ fn request(method: &str, cseq: &str) -> Vec<u8> {
 
 fn response(status: u16, cseq: &str, extra: &str) -> Vec<u8> {
     format!(
-        "SIP/2.0 {status} X\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-c1\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-c1\r\n\
          Call-ID: tc1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: {cseq}\r\n{extra}\r\n"
     )
     .into_bytes()
@@ -119,7 +119,7 @@ async fn an_invite_final_stops_its_reliable_provisional() {
 /// An ACK of an INVITE's final, on `branch`.
 fn ack(branch: &str) -> Vec<u8> {
     format!(
-        "ACK sip:b@127.0.0.1:5070 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch={branch}\r\n\
+        "ACK sip:b@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch={branch}\r\n\
          Call-ID: tc1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: 1 ACK\r\n\r\n"
     )
     .into_bytes()

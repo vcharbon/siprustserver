@@ -196,7 +196,7 @@ mod tests {
     fn invite(cseq: u32, to_tag: Option<&str>) -> String {
         let tag = to_tag.map(|t| format!(";tag={t}")).unwrap_or_default();
         format!(
-            "INVITE sip:bob@127.0.0.1:5080 SIP/2.0\r\n\
+            "INVITE sip:bob@127.0.0.1:5080 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
              From: <sip:alice@example.test>;tag=a1\r\n\
              To: <sip:bob@example.test>{tag}\r\n\
@@ -208,7 +208,7 @@ mod tests {
 
     fn final_to(status: u16, cseq: u32) -> String {
         format!(
-            "SIP/2.0 {status} Whatever\r\n\
+            "SIP/2.0 {status} Whatever\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
              From: <sip:alice@example.test>;tag=a1\r\n\
              To: <sip:bob@example.test>;tag=b1\r\n\

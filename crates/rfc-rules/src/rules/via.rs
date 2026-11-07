@@ -132,7 +132,7 @@ mod tests {
     /// An OPTIONS alice sent bob, with a caller-chosen top-Via parameter tail.
     fn ask(at_us: u64, branch: &str, via_tail: &str) -> Msg {
         let head = format!(
-            "OPTIONS sip:bob@127.0.0.1 SIP/2.0\r\n\
+            "OPTIONS sip:bob@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}{via_tail}\r\n\
              From: <sip:alice@127.0.0.1>;tag=at\r\n\
              To: <sip:bob@127.0.0.1>;tag=bt\r\n\

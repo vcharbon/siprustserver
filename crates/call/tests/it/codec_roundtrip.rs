@@ -364,7 +364,8 @@ fn the_retained_emitted_ack_round_trips() {
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "no ACK emitted yet on the b-leg dialog");
 
-    let datagram = b"ACK sip:bob@10.0.0.7 SIP/2.0\r\nCSeq: 8005 ACK\r\n\r\nanswer";
+    let datagram =
+        b"ACK sip:bob@10.0.0.7 SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 8005 ACK\r\n\r\nanswer";
     if let Some(x) = call.b_legs[0].dialogs.confirmed_mut().and_then(sent_exchange_mut) {
         x.emitted_ack = Some(RetainedEmission::on_trigger(
             datagram.to_vec(),

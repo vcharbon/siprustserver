@@ -166,7 +166,7 @@ mod tests {
     /// The caller's PRACK of the provisional numbered `rseq`.
     fn prack(rseq: u32) -> String {
         format!(
-            "PRACK sip:b2bua@x SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-p1\r\n\
+            "PRACK sip:b2bua@x SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-p1\r\n\
              From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>;tag=t1\r\nCall-ID: c1\r\nCSeq: 2 PRACK\r\n\
              RAck: {rseq} 1 INVITE\r\nContent-Length: 0\r\n\r\n"
         )

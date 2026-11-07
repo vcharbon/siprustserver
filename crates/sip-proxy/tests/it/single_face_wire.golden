@@ -59,6 +59,7 @@ From: <sip:alice@example.com>;tag=a
 To: <sip:bob@example.com>;tag=b
 Call-ID: wire@example.com
 CSeq: 1 INVITE
+Contact: <sip:bob@198.51.100.20:5060>
 Content-Length: 0
 
 === 6 a caller's BYE on the cookie

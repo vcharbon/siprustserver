@@ -253,11 +253,12 @@ impl ActionExecutor<'_> {
         }
         let tag = preferred.unwrap_or_else(|| crate::caller_tags::own(call));
         let Some(a_invite) = self.caller_invite(call) else { return tag };
-        let from = a_invite.from();
         let a_leg_id = call.a_leg.leg_id.clone();
+        // Ingress refuses an INVITE with no Contact (RFC 3261 §8.1.1.8), so the
+        // caller's target is always the one it named.
         let remote_target =
             contact_uri(a_invite.header::<header::Contact>(), &call.call_ref, &a_leg_id)
-                .unwrap_or_else(|| from.uri().to_string());
+                .unwrap_or_default();
         // §12.1.1: the a-leg is a UAS dialog — route set is the INVITE's
         // Record-Route entries in forward order, one entry per recorded route (a
         // comma-combined header — the proxy's double-record-route halves — is

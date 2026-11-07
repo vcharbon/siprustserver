@@ -6,7 +6,7 @@ use sip_message::{SipMessage, SipParser, SipResponse};
 
 fn response(status: u16, method: &str, branch: &str) -> SipResponse {
     let raw = format!(
-        "SIP/2.0 {status} OK\r\n\
+        "SIP/2.0 {status} OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
          Via: SIP/2.0/UDP 10.0.0.9:5060;branch={branch}\r\n\
          From: <sip:alice@example.com>;tag=alicetag\r\n\
          To: <sip:bob@example.com>;tag=bobtag\r\n\

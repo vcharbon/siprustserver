@@ -14,7 +14,7 @@ fn sip(raw: &str) -> CallEvent {
 /// `status` to an INVITE, as the layer hands it up.
 fn invite_response(status: u16) -> CallEvent {
     sip(&format!(
-        "SIP/2.0 {status} X\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\n\
                  Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-out\r\n\
                  From: <sip:a@127.0.0.1>;tag=a\r\nTo: <sip:b@10.0.0.2>;tag=b\r\n\
                  Call-ID: outcome@unit\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
@@ -30,7 +30,7 @@ fn request(method: &str, to_tag: bool) -> CallEvent {
 fn request_with(method: &str, to_tag: bool, extra: &str) -> CallEvent {
     let to_tag = if to_tag { ";tag=b" } else { "" };
     sip(&format!(
-        "{method} sip:b2bua@127.0.0.1 SIP/2.0\r\n\
+        "{method} sip:b2bua@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
                  Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-peer\r\n\
                  From: <sip:a@10.0.0.1>;tag=a\r\nTo: <sip:b@127.0.0.1>{to_tag}\r\n\
                  Call-ID: peer@unit\r\nCSeq: 2 {method}\r\n{extra}Content-Length: 0\r\n\r\n"

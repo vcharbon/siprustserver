@@ -6,7 +6,7 @@ use super::*;
 /// no provisional it draws may be reliable.
 fn update_on(at_us: u64, extra: &str) -> Msg {
     let head = format!(
-        "UPDATE sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP h;branch={UPDATE_BRANCH}\r\n\
+        "UPDATE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP h;branch={UPDATE_BRANCH}\r\n\
              From: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag=tb\r\nCSeq: 2 UPDATE\r\n{extra}\
              Content-Length: 0\r\n\r\n"
     );

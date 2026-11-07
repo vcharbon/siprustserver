@@ -110,8 +110,8 @@ mod tests {
     #[test]
     fn facts_are_grouped_per_call_in_order_one_line_each() {
         let events = vec![
-            fact("c1", "sip.in", 0, "from 127.0.0.1:5060", "INVITE sip:bob@h SIP/2.0\r\nVia: x"),
-            fact("c2", "sip.in", 5, "from 127.0.0.1:5061", "OPTIONS sip:h SIP/2.0\r\n"),
+            fact("c1", "sip.in", 0, "from 127.0.0.1:5060", "INVITE sip:bob@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: x"),
+            fact("c2", "sip.in", 5, "from 127.0.0.1:5061", "OPTIONS sip:h SIP/2.0\r\nMax-Forwards: 70\r\n"),
             fact("c1", "rule.fired", 1, "route-initial-invite", ""),
         ];
         let lines = render_call_traces(&events);

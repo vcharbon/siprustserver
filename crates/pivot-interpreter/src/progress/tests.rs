@@ -5,7 +5,7 @@ use crate::recording::Recording;
 use pivot_schema::flow::{Anchor, CheckMode, Delay};
 use pivot_schema::msg::MsgSpec;
 
-const INVITE: &str = "INVITE sip:bob@127.0.0.1:5080 SIP/2.0\r\n\
+const INVITE: &str = "INVITE sip:bob@127.0.0.1:5080 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-a\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>\r\n\
@@ -39,7 +39,7 @@ fn arrival(raw: &str) -> Inbound {
 
 fn response(status: u16, cseq: &str) -> String {
     format!(
-        "SIP/2.0 {status} Whatever\r\n\
+        "SIP/2.0 {status} Whatever\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-a\r\n\
              From: <sip:alice@example.test>;tag=a1\r\n\
              To: <sip:bob@example.test>;tag=b1\r\n\
@@ -51,7 +51,7 @@ fn response(status: u16, cseq: &str) -> String {
 
 fn request(method: &str, cseq: &str) -> String {
     format!(
-        "{method} sip:alice@127.0.0.1:5060 SIP/2.0\r\n\
+        "{method} sip:alice@127.0.0.1:5060 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-x\r\n\
              From: <sip:bob@example.test>;tag=b1\r\n\
              To: <sip:alice@example.test>;tag=a1\r\n\

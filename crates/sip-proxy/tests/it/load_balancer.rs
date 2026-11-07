@@ -52,7 +52,7 @@ fn request_with_rph(
     // A branch is a token (RFC 3261 §25.1): the Call-ID's `@` stays out of it.
     let branch = call_id.replace('@', ".");
     let raw = format!(
-        "{method} sip:bob@10.0.0.3:5070 SIP/2.0\r\n\
+        "{method} sip:bob@10.0.0.3:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{branch}\r\n\
 From: <sip:alice@a>;tag=fromtag\r\n\
 To: {to}\r\n\

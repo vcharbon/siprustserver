@@ -234,7 +234,7 @@ mod tests {
 
     fn sip_request(method: &str, call_id: &str, cseq: u32, branch: &str, extra: &str) -> Vec<u8> {
         format!(
-            "{method} sip:bob@10.0.0.9 SIP/2.0\r\n\
+            "{method} sip:bob@10.0.0.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
@@ -249,7 +249,7 @@ mod tests {
 
     fn sip_response(status: u16, reason: &str, call_id: &str, cseq: u32, branch: &str) -> Vec<u8> {
         format!(
-            "SIP/2.0 {status} {reason}\r\n\
+            "SIP/2.0 {status} {reason}\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
              To: <sip:bob@10.0.0.9>;tag=t1\r\n\
@@ -327,7 +327,7 @@ mod tests {
     fn binary_body_splits_into_head_and_body_b64() {
         let body: Vec<u8> = vec![0x30, 0x82, 0xff, 0x00, 0x9c, 0x01]; // ASN.1-ish
         let mut inv = format!(
-            "INVITE sip:bob@10.0.0.9 SIP/2.0\r\n\
+            "INVITE sip:bob@10.0.0.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKmsd\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
@@ -369,7 +369,7 @@ mod tests {
     fn a_tail_past_the_content_length_still_splits_the_arm_by_the_bytes() {
         let head = |len: usize| {
             format!(
-                "INVITE sip:bob@10.0.0.9 SIP/2.0\r\n\
+                "INVITE sip:bob@10.0.0.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
                  Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKtail\r\n\
                  Max-Forwards: 70\r\n\
                  From: <sip:alice@10.0.0.1>;tag=f1\r\n\

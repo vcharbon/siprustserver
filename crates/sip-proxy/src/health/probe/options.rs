@@ -4,6 +4,7 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
 use sip_message::header::{self, ParamValue, Uri, Via};
+use sip_message::param_codec::encode_param;
 use sip_message::{SipRequest, SipStr};
 
 use super::{probe_call_ref, HealthProbe};
@@ -41,9 +42,13 @@ impl HealthProbe {
                     Via::udp(SipStr::owned(&self.probe_host), self.probe_port)
                         .with_branch(SipStr::owned(branch))
                         .requesting_rport()
+                        // A `token` (RFC 3261 §25.1), which the reader of
+                        // `cr` decodes back to the call ref.
                         .with_param(
                             "cr",
-                            ParamValue::Token(SipStr::owned(&probe_call_ref(branch))),
+                            ParamValue::Token(SipStr::owned(&encode_param(&probe_call_ref(
+                                branch,
+                            )))),
                         ),
                 ),
                 contact: Some(header::Contact::from_uri(

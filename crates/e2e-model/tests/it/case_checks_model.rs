@@ -104,7 +104,8 @@ CSeq: 1 INVITE\r\n\
 Contact: <sip:sut@10.0.0.9:5080>\r\n\
 Content-Length: 0\r\n\r\n";
 
-const REFER_FROM_BOB: &str = "REFER sip:sut@10.0.0.9:5080 SIP/2.0\r\n\
+const REFER_FROM_BOB: &str =
+    "REFER sip:sut@10.0.0.9:5080 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.2:5070;branch=z9hG4bK-refer\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:bob@10.0.0.2>;tag=b1\r\n\

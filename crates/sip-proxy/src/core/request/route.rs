@@ -96,8 +96,10 @@ impl ProxyCore {
         // be forwarded. ACK is exempt: a proxy never answers an ACK (it
         // terminates a transaction; nothing upstream awaits a reply), so an ACK
         // with an unsupported Proxy-Require is silently dropped, never 420'd.
-        if let Some(Ok(required)) = req.header::<ProxyRequire>() {
-            if !required.is_empty() {
+        // A Proxy-Require that is no option-tag list (§25.1) names nothing this
+        // proxy could list as unsupported: 400.
+        match req.header::<ProxyRequire>() {
+            Some(Ok(required)) if !required.is_empty() => {
                 if method == Method::Ack {
                     self.metrics.record_reject("ack_proxy_require_unsupported");
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
@@ -114,6 +116,16 @@ impl ProxyCore {
                     )
                     .await;
             }
+            Some(Err(_)) => {
+                if method == Method::Ack {
+                    self.metrics.record_reject("ack_proxy_require_unreadable");
+                    return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+                }
+                return self
+                    .reply_reject(req, arrival, 400, "Bad Request", &[], "proxy_require_unreadable")
+                    .await;
+            }
+            _ => {}
         }
 
         // ── Non-2xx ACK hop decision (§17.1.1.3) ────────────────────────────

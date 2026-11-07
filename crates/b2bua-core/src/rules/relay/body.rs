@@ -75,7 +75,7 @@ mod tests {
 
     fn invite(content_type: &str, body: &[u8]) -> SipRequest {
         let head = format!(
-            "INVITE sip:bob@10.0.0.2 SIP/2.0\r\n\
+            "INVITE sip:bob@10.0.0.2 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1;branch=z9hG4bK1\r\n\
              From: <sip:alice@10.0.0.1>;tag=a\r\nTo: <sip:bob@10.0.0.2>\r\n\
              Call-ID: c\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\n\

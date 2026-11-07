@@ -16,7 +16,7 @@ const SDP_BODY: &[u8] = b"v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n";
 
 fn response(content_length: usize, body: &[u8]) -> SipResponse {
     let mut raw = format!(
-        "SIP/2.0 200 OK\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:alice@example.com>;tag=tagA\r\n\
 To: <sip:bob@example.com>;tag=tagB\r\n\

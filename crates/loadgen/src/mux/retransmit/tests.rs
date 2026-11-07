@@ -37,7 +37,7 @@ async fn recv_one(peer: &TokioUdp, window_ms: u64) -> Option<String> {
 
 fn update_req(branch: &str) -> Vec<u8> {
     format!(
-        "UPDATE sip:b@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+        "UPDATE sip:b@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: 2 UPDATE\r\n\r\n"
     )
     .into_bytes()
@@ -45,7 +45,7 @@ fn update_req(branch: &str) -> Vec<u8> {
 
 fn resp(status: u16, branch: &str, cseq: &str, extra: &str) -> Vec<u8> {
     format!(
-        "SIP/2.0 {status} X\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: {cseq}\r\n{extra}\r\n"
     )
     .into_bytes()
@@ -53,7 +53,7 @@ fn resp(status: u16, branch: &str, cseq: &str, extra: &str) -> Vec<u8> {
 
 fn prack_req(branch: &str, rack: &str) -> Vec<u8> {
     format!(
-        "PRACK sip:b@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch={branch}\r\n\
+        "PRACK sip:b@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch={branch}\r\n\
              Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: 2 PRACK\r\n\
              RAck: {rack}\r\n\r\n"
     )
@@ -138,7 +138,7 @@ async fn calltxns_retransmits_reliable_1xx_until_prack() {
 /// DISTINCT To-tags on one INVITE branch, RFC 3261 §12.1.2).
 fn resp_tag(status: u16, branch: &str, cseq: &str, to_tag: &str) -> Vec<u8> {
     format!(
-        "SIP/2.0 {status} X\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag={to_tag}\r\nCSeq: {cseq}\r\n\r\n"
     )
     .into_bytes()
@@ -192,7 +192,7 @@ async fn calltxns_distinct_fork_tags_are_not_deduped() {
 
 fn ack_req(branch: &str, cseq: u32) -> Vec<u8> {
     format!(
-        "ACK sip:b@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+        "ACK sip:b@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: {cseq} ACK\r\n\r\n"
     )
     .into_bytes()

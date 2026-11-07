@@ -33,7 +33,7 @@ fn invite(call_id: &str, to_tag: Option<&str>) -> SipMessage {
     let to = to_tag.map_or("<sip:bob@b>".to_string(), |t| format!("<sip:bob@b>;tag={t}"));
     let branch = call_id.replace('@', ".");
     let raw = format!(
-        "INVITE sip:bob@10.0.0.3:5070 SIP/2.0\r\n\
+        "INVITE sip:bob@10.0.0.3:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{branch}\r\n\
 From: <sip:alice@a>;tag=fromtag\r\n\
 To: {to}\r\n\

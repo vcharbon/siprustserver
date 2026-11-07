@@ -182,10 +182,12 @@ async fn a_request_at_the_line_bound_completes_its_call() {
     r.finish().await;
 }
 
-/// With no Max-Forwards of its own, the proxy adds one on top of its Via and
-/// its Record-Routes.
+/// A request with no Max-Forwards is refused at its first hop where no
+/// exemption names the shape (RFC 3261 §8.1.1, ADR-0001), however few lines it
+/// holds; under `max-forwards:absent` the proxy adds one on top of its Via and
+/// its Record-Routes (`sip-proxy` `first_ingress_bound`).
 #[tokio::test(start_paused = true)]
-async fn a_request_at_the_line_bound_with_no_max_forwards_completes_its_call() {
+async fn a_request_at_the_line_bound_with_no_max_forwards_is_answered_at_first_ingress() {
     fn no_max_forwards(head: &str) -> String {
         let line = head.lines().find(|l| l.starts_with("Max-Forwards:")).expect("the line");
         let without = head.replacen(&format!("{line}\r\n"), "", 1);
@@ -193,9 +195,9 @@ async fn a_request_at_the_line_bound_with_no_max_forwards_completes_its_call() {
     }
     let r = Rig::new("wire-bounds-lines-mf").await;
     r.h.allow_violation("max-forwards", "the caller under test omits Max-Forwards");
-    let invite = padded(&r, LINES_BOUND).wire_edit(no_max_forwards);
-    full_call(&r, invite).await;
-    r.finish().await;
+    let mut call = padded(&r, LINES_BOUND).wire_edit(no_max_forwards).send().await;
+    call.expect(400).await;
+    r.finish_with_no_call().await;
 }
 
 /// A top Via folding lower hops on its line at the bound: the proxy's stamp and

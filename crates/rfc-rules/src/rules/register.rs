@@ -211,7 +211,7 @@ mod tests {
     /// `extra` header rows appended.
     fn register(at_us: u64, branch: &str, contact: &str, extra: &str) -> Msg {
         let head = format!(
-            "REGISTER sip:h SIP/2.0\r\n\
+            "REGISTER sip:h SIP/2.0\r\nMax-Forwards: 70\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}\r\n\
              From: <sip:alice@h>;tag=at\r\n\
              To: <sip:alice@h>\r\n\

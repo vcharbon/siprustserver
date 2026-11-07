@@ -36,7 +36,7 @@ fn invite(call_id: &str, sut: SocketAddr) -> Vec<u8> {
 /// The SUT's final to that INVITE.
 fn final_response(status: &str, call_id: &str, cseq: u32) -> Vec<u8> {
     format!(
-        "SIP/2.0 {status}\r\nVia: SIP/2.0/UDP 127.0.0.1:46301;branch={BRANCH}\r\n\
+        "SIP/2.0 {status}\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 127.0.0.1:46301;branch={BRANCH}\r\n\
          Call-ID: {call_id}\r\nFrom: <sip:caller@h>;tag=c1\r\nTo: <sip:callee@h>;tag=u9\r\n\
          CSeq: {cseq} INVITE\r\nContent-Length: 0\r\n\r\n"
     )

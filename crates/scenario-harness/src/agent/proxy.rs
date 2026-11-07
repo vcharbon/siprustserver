@@ -175,9 +175,13 @@ mod tests {
              To: <sip:bob@127.0.0.1>\r\n\
              Call-ID: hops@127.0.0.1\r\n\
              CSeq: 1 INVITE\r\n\
+             Contact: <sip:alice@127.0.0.1:5060>\r\n\
              Content-Length: 0\r\n\r\n"
         );
-        match CustomParser::new().parse(raw.as_bytes()) {
+        // A request stating no count reads where a deployment names the shape.
+        let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).unwrap();
+        let limits = sip_message::SipParserLimits { exemptions, ..Default::default() };
+        match CustomParser::with_limits(limits).parse(raw.as_bytes()) {
             Ok(SipMessage::Request(r)) => r,
             other => panic!("not a request: {other:?}"),
         }
@@ -201,7 +205,11 @@ mod tests {
             "Route: <sip:next.invalid:5070;maddr=192.0.2.9;lr>\r\nContent-Length: 0",
         );
         for raw in [by_request_uri, by_route] {
-            let Ok(SipMessage::Request(req)) = CustomParser::new().parse(raw.as_bytes()) else {
+            let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).unwrap();
+            let limits = sip_message::SipParserLimits { exemptions, ..Default::default() };
+            let Ok(SipMessage::Request(req)) =
+                CustomParser::with_limits(limits).parse(raw.as_bytes())
+            else {
                 panic!("a request: {raw}");
             };
             assert_eq!(request_next_hop(&req), Some(hop), "{raw}");

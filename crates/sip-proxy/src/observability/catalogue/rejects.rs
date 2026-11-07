@@ -6,7 +6,7 @@ use crate::self_gate::ShedReason;
 
 /// Every locally decided reject: the routing path's own, the load
 /// balancer's selection failures, the self gate's.
-const REJECT_REASONS: [&str; 18] = [
+const REJECT_REASONS: [&str; 20] = [
     "drop_unforwardable",
     "no_target_dropped",
     "non_request",
@@ -17,6 +17,8 @@ const REJECT_REASONS: [&str; 18] = [
     "message_too_large",
     "ack_proxy_require_unsupported",
     "proxy_require_unsupported",
+    "ack_proxy_require_unreadable",
+    "proxy_require_unreadable",
     "malformed_request_uri",
     "unsupported_uri_scheme",
     "stickiness_decode_rejected",

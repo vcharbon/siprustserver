@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
+use sip_message::{CustomParser, Exemptions, SipMessage, SipParser, SipParserLimits, SipRequest};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
@@ -46,6 +46,11 @@ impl Drop for Rig {
 
 impl Rig {
     async fn new() -> Rig {
+        Self::reading(SipParserLimits::default()).await
+    }
+
+    /// A proxy whose parser reads under `limits`.
+    async fn reading(limits: SipParserLimits) -> Rig {
         let net = SimulatedSignalingNetwork::new(1);
         let bind = |at| net.bind_udp(BindUdpOpts::new(addr(at), 64));
         let endpoint = bind(PROXY).await.expect("bind the proxy");
@@ -67,6 +72,7 @@ impl Rig {
         )
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
+        .parser(CustomParser::with_limits(limits))
         .build(endpoint);
         Rig { task: tokio::spawn(core.run()), metrics, caller, worker }
     }
@@ -163,9 +169,13 @@ fn answered_400_at_first_ingress(rig: &Rig, forward: Option<Vec<u8>>) {
     assert_eq!(rig.metrics.parse_refusals_answered(), 1);
 }
 
+/// On a deployment naming `max-forwards:absent`, a request with no hop count at
+/// the line bound gains the proxy's Max-Forwards with its other lines (RFC 3261
+/// §16.6), and the next hop still reads it.
 #[tokio::test(start_paused = true)]
 async fn an_invite_at_the_line_bound_with_no_max_forwards_reads_at_the_next_hop() {
-    let rig = Rig::new().await;
+    let exemptions = Exemptions::read(Some("max-forwards:absent")).expect("named");
+    let rig = Rig::reading(SipParserLimits { exemptions, ..SipParserLimits::default() }).await;
     let request = invite(&plain_via(), PLAIN_TO, false, LINES_BOUND);
     assert_eq!(lines_of(request.as_bytes()), LINES_BOUND);
     let forward = rig.forward_of(&request).await.expect("the proxy forwards it");

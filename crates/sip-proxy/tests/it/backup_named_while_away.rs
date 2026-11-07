@@ -38,7 +38,7 @@ fn addr(t: (&str, u16)) -> ProxyAddr {
 fn invite(call_id: &str) -> SipMessage {
     let branch = call_id.replace('@', ".");
     let raw = format!(
-        "INVITE sip:bob@10.0.0.9:5070 SIP/2.0\r\n\
+        "INVITE sip:bob@10.0.0.9:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{branch}\r\n\
 From: <sip:alice@a>;tag=fromtag\r\n\
 To: <sip:bob@b>\r\n\

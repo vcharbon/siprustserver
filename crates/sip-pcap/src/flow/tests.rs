@@ -14,7 +14,7 @@ fn dg(ts_us: u64, src: &str, dst: &str, payload: &[u8]) -> Datagram {
 /// Minimal RFC-shaped message; `extra` lines are inserted before the body.
 fn sip_request(method: &str, call_id: &str, cseq: u32, branch: &str, extra: &str) -> Vec<u8> {
     format!(
-        "{method} sip:bob@10.0.0.9 SIP/2.0\r\n\
+        "{method} sip:bob@10.0.0.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
@@ -29,7 +29,7 @@ fn sip_request(method: &str, call_id: &str, cseq: u32, branch: &str, extra: &str
 
 fn sip_response(status: u16, reason: &str, call_id: &str, cseq: u32, branch: &str) -> Vec<u8> {
     format!(
-        "SIP/2.0 {status} {reason}\r\n\
+        "SIP/2.0 {status} {reason}\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
              To: <sip:bob@10.0.0.9>;tag=t1\r\n\
@@ -117,7 +117,7 @@ fn dgp(ts_us: u64, src: &str, dst: &str, payload: &[u8], probe: u32) -> Datagram
 /// A response to a non-INVITE transaction (`sip_response` answers an INVITE).
 fn sip_response_to(status: u16, call_id: &str, cseq: u32, method: &str, branch: &str) -> Vec<u8> {
     format!(
-        "SIP/2.0 {status} OK\r\n\
+        "SIP/2.0 {status} OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
              To: <sip:bob@10.0.0.9>;tag=t1\r\n\
@@ -449,7 +449,7 @@ fn a_chain_of_probes_lands_on_the_earliest_clock() {
 fn non_sip_and_parse_failures_are_counted_not_ingested() {
     let datagrams = vec![
         dg(1_000, "10.0.0.1:9000", "10.0.0.2:9000", &[0x80; 64]), // RTP-ish
-        dg(2_000, "10.0.0.1:5060", "10.0.0.2:5060", b"INVITE sip:x SIP/2.0\r\nGarbage\r\n\r\n"),
+        dg(2_000, "10.0.0.1:5060", "10.0.0.2:5060", b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nGarbage\r\n\r\n"),
     ];
     let flows = build_flows(&datagrams, &FlowConfig::default());
     assert_eq!(flows.stats.non_sip, 1);
@@ -533,7 +533,7 @@ fn invite_custom(
     extra: &str,
 ) -> Vec<u8> {
     format!(
-        "INVITE {ruri} SIP/2.0\r\n\
+        "INVITE {ruri} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              Max-Forwards: 70\r\n\
              From: {from};tag=f-{branch}\r\n\
