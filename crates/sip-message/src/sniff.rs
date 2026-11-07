@@ -8,11 +8,13 @@
 
 mod except;
 mod identity;
+mod reliability;
 mod uri_facts;
 mod via_hops;
 mod via_stamp;
 pub use except::{equal_except, header_row_spans, line_at, Except};
 pub use identity::{identity, Identity};
+pub use reliability::{rack_cseq, rack_rseq, require_has_100rel, rseq_of};
 use std::borrow::Cow;
 pub use uri_facts::UriFacts;
 pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};
@@ -195,36 +197,6 @@ fn cseq_line(raw: &[u8]) -> Option<String> {
     None
 }
 
-/// Whether a `Require` header lists the `100rel` option-tag (comma-folded,
-/// case-insensitive) — the reliable-provisional marker (RFC 3262 §3). `Require`
-/// has no compact form.
-pub fn require_has_100rel(raw: &[u8]) -> bool {
-    header_value(raw, "require")
-        .is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("100rel")))
-}
-
-/// The `RSeq` value of a reliable provisional (RFC 3262 §3), or `None`.
-pub fn rseq_of(raw: &[u8]) -> Option<u64> {
-    header_value(raw, "rseq")?.trim().parse().ok()
-}
-
-/// The RAck response-num (its FIRST token = the acknowledged 1xx's RSeq,
-/// RFC 3262 §7.2) of a PRACK, or `None`.
-pub fn rack_rseq(raw: &[u8]) -> Option<u64> {
-    header_value(raw, "rack")?.split_whitespace().next()?.parse().ok()
-}
-
-/// The RAck CSeq-num (its SECOND token = the sequence number of the INVITE the
-/// acknowledged provisional answered, RFC 3262 §7.2) of a PRACK, or `None`.
-///
-/// `RAck` names its target by three fields, and the response-num alone does
-/// not: two INVITEs on one dialog number their `RSeq` spaces independently, so
-/// a reader joining a PRACK to the provisional it acknowledges needs this one
-/// too.
-pub fn rack_cseq(raw: &[u8]) -> Option<u32> {
-    header_value(raw, "rack")?.split_whitespace().nth(1)?.parse().ok()
-}
-
 /// Selective intake-shed classifier: whether a raw datagram is a NEW-DIALOG,
 /// NON-EMERGENCY INVITE — the only class a depth-watermarked pre-ingress hook
 /// may drop under overload. Called per-datagram at the socket pump, zero
@@ -358,7 +330,7 @@ pub fn via_branches(raw: &[u8]) -> Vec<String> {
 
 /// Every row of `name`, resolving the RFC 3261 §7.3.3 compact spelling: a
 /// scanner asked for `Supported` also reads the `k` rows the wire may carry.
-fn header_rows_compact(raw: &[u8], name: &str) -> Vec<String> {
+pub(super) fn header_rows_compact(raw: &[u8], name: &str) -> Vec<String> {
     let s = as_str(raw);
     let mut out = Vec::new();
     for line in s.lines() {

@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaScene};
-use scenario_harness::WaiverScope;
 use sip_message::header::HeaderName;
 use sip_net_testkit::RecordedSipEntry;
 
@@ -33,15 +32,6 @@ fn sent(entries: &[RecordedSipEntry], from: SocketAddr, to: SocketAddr, head: &s
 #[tokio::test(start_paused = true)]
 async fn a_reliable_provisional_with_an_unreadable_require_is_dropped_until_the_callee_rejects() {
     let s = B2buaScene::new("unreadable-reliable-provisional").await;
-    s.h.waive(
-        WaiverScope::rule(
-            "unacked-reliable-provisional",
-            "bob's 183 states a Require that is no option-tag list (RFC 3261 §25.1), so it is \
-             no reliable provisional: ingress drops it, and no PRACK is owed — that drop is \
-             this test's subject",
-        )
-        .on_party("b2bua"),
-    );
     let mut call = s
         .alice
         .invite(&s.bob)

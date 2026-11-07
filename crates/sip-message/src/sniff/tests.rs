@@ -510,3 +510,14 @@ fn a_multibyte_character_before_the_cseq_line_is_read_past() {
     let raw = "INVITE sip:bob@192.0.2.20 SIP/2.0\r\nabcd\u{e9}\r\nCSeq: 7 INVITE\r\n\r\n";
     assert_eq!(cseq_number(raw.as_bytes()), Some(7));
 }
+
+#[test]
+fn a_require_lists_100rel_only_when_every_row_reads() {
+    let reliable = b"SIP/2.0 183 OK\r\nRequire: timer\r\nRequire: foo, 100REL\r\n\r\n";
+    assert!(require_has_100rel(reliable), "any row, case aside");
+    assert!(!require_has_100rel(b"SIP/2.0 183 OK\r\nRequire: timer\r\n\r\n"));
+    let unreadable = b"SIP/2.0 183 OK\r\nRequire: 100rel, x y\r\n\r\n";
+    assert!(!require_has_100rel(unreadable), "a row that does not read marks nothing");
+    let one_bad_row = b"SIP/2.0 183 OK\r\nRequire: 100rel\r\nRequire: x y\r\n\r\n";
+    assert!(!require_has_100rel(one_bad_row), "nor does a message holding one");
+}
