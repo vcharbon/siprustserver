@@ -288,8 +288,10 @@ Content-Length: 0\r\n\r\n",
     // proxy every entry: what an unheld ACK states after its own first hop.
     #[test]
     fn the_route_past_the_front_leaves_the_proxys_own_entries_out() {
-        let mut proxied = B2buaConfig::default();
-        proxied.front = crate::config::Front::single_face("10.0.0.9", 5060);
+        let proxied = B2buaConfig {
+            front: crate::config::Front::single_face("10.0.0.9", 5060),
+            ..B2buaConfig::default()
+        };
         let set = |entries: &[&str]| entries.iter().map(|e| e.to_string()).collect::<Vec<_>>();
         let double = set(&[
             "<sip:10.0.0.9:5060;outbound;lr>",
