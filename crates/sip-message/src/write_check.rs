@@ -15,6 +15,7 @@ use crate::char_class::is_token_char;
 use crate::control_bytes::{bare_control_byte, is_control, Escapes};
 use crate::header::HeaderName;
 use crate::parser::custom::headers::line_refusal;
+use crate::parser::{FirstIngressBound, SipParserLimits};
 
 /// Where a writer was asked to put text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,12 +84,26 @@ pub fn header_value(value: &str) -> Result<(), WriteRefusal> {
 
 /// One header line: [`header_name`], its value holding a quoted-pair only in
 /// a quoted-string or comment its header's grammar has, and nothing the
-/// ingress of a next hop refuses: the first-ingress length bound and the value
-/// gates of a known header (ADR-0001).
+/// ingress of a next hop refuses: a line past the datagram and a value a gate
+/// of its known header refuses (ADR-0001).
 pub fn header_line(name: &str, value: &str) -> Result<(), WriteRefusal> {
+    line_within(name, value, SipParserLimits::DEFAULT.max_header_length)
+}
+
+/// [`header_line`] on a new request (one with no To-tag), which its next hop
+/// reads at first ingress: the line held to `bound` too.
+pub fn new_request_line(
+    name: &str,
+    value: &str,
+    bound: &FirstIngressBound,
+) -> Result<(), WriteRefusal> {
+    line_within(name, value, bound.header_length)
+}
+
+fn line_within(name: &str, value: &str, max_length: usize) -> Result<(), WriteRefusal> {
     header_name(name)?;
     let reason = value_refusal(value, Escapes::of(HeaderName::known(name).as_ref()))
-        .or_else(|| Some(line_refusal(name, value)?.reason));
+        .or_else(|| Some(line_refusal(name, value, max_length)?.reason));
     match reason {
         Some(reason) => Err(refusal(Position::HeaderValue, format!("{name}: {reason}"))),
         None => Ok(()),
@@ -194,9 +209,15 @@ mod tests {
         ] {
             assert!(header_line(name, value).is_err(), "{name}: {value}");
         }
-        let long = "x".repeat(8192 - "X-Long: ".len());
-        assert!(header_line("X-Long", &long).is_ok(), "at the first-ingress bound");
-        assert!(header_line("X-Long", &format!("{long}x")).is_err(), "one past it");
+        let bound = FirstIngressBound::DEFAULT;
+        let long = "x".repeat(bound.header_length - "X-Long: ".len());
+        let past = format!("{long}x");
+        assert!(new_request_line("X-Long", &long, &bound).is_ok(), "at the first-ingress bound");
+        assert!(new_request_line("X-Long", &past, &bound).is_err(), "one past it");
+        assert!(header_line("X-Long", &past).is_ok(), "past first ingress, the datagram bounds");
+        let tight = FirstIngressBound { header_length: 64, ..bound };
+        assert!(new_request_line("X-Long", &"x".repeat(60), &tight).is_err(), "the bound stated");
+        assert!(header_line("X-Long", &"x".repeat(65_535)).is_err(), "past the datagram");
     }
 
     #[test]

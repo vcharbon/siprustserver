@@ -2,7 +2,8 @@
 //!
 //! [`sdp_media_equivalent`] returns true iff two descriptions steer media the
 //! same way, stream by stream: each `m=` line's tokens, and the connection
-//! address, bandwidths, direction and attributes the stream takes, a
+//! address's tokens, bandwidths, key, direction and attributes the stream
+//! takes, a
 //! session-level value applying to every stream that states none of its own
 //! (RFC 4566 §5). The origin, session name, timing and information lines,
 //! line endings and attribute order make no difference. Pure: no clocks, no
@@ -13,9 +14,11 @@ use crate::sdp_doc::{direction_of, parse_sdp_body, MediaLine, SdpDirection, SdpD
 /// What one stream of a description steers media with.
 #[derive(PartialEq, Eq)]
 struct Stream<'a> {
-    media: (&'a str, Option<i64>, &'a str, &'a [String]),
-    connection: Option<&'a str>,
+    media: (&'a str, Option<i64>, Option<i64>, &'a str, &'a [String]),
+    /// The connection address's tokens (RFC 4566 §5.7).
+    connection: Vec<&'a str>,
     bandwidths: Vec<&'a str>,
+    key: Option<&'a str>,
     direction: SdpDirection,
     /// Every attribute but the direction, sorted.
     attributes: Vec<&'a str>,
@@ -49,14 +52,12 @@ fn stream<'a>(doc: &'a SdpDoc, media: &'a MediaLine) -> Stream<'a> {
     let stated = if media.bandwidths.is_empty() { &doc.bandwidths } else { &media.bandwidths };
     let mut bandwidths: Vec<&str> = stated.iter().map(|b| crate::whitespace::trim_end(b)).collect();
     bandwidths.sort_unstable();
+    let connection = media.c_line.as_deref().or(doc.c_line.as_deref());
     Stream {
-        media: (&media.r#type, media.port, &media.transport, &media.formats),
-        connection: media
-            .c_line
-            .as_deref()
-            .or(doc.c_line.as_deref())
-            .map(crate::whitespace::trim_end),
+        media: (&media.r#type, media.port, media.port_count, &media.transport, &media.formats),
+        connection: connection.map(|c| crate::whitespace::split(c).collect()).unwrap_or_default(),
         bandwidths,
+        key: media.key.as_deref().or(doc.key.as_deref()).map(crate::whitespace::trim_end),
         direction,
         attributes,
     }
@@ -140,6 +141,24 @@ mod tests {
         let both = format!("{session}a=ptime:30\r\n");
         let media = format!("{}a=ptime:30\r\n", String::from_utf8_lossy(A));
         assert!(sdp_media_equivalent(both.as_bytes(), media.as_bytes()));
+    }
+
+    /// A changed key, port count or byte that is no UTF-8 changes the media;
+    /// spacing inside a connection line does not.
+    #[test]
+    fn tokens_and_octets_are_compared() {
+        let base = String::from_utf8_lossy(A).into_owned();
+        let k1 = format!("{base}k=clear:abc\r\n");
+        let k2 = format!("{base}k=clear:xyz\r\n");
+        assert!(!sdp_media_equivalent(k1.as_bytes(), k2.as_bytes()), "a changed k=");
+        let two = base.replace("m=audio 10000 ", "m=audio 10000/2 ");
+        let four = base.replace("m=audio 10000 ", "m=audio 10000/4 ");
+        assert!(!sdp_media_equivalent(two.as_bytes(), four.as_bytes()), "a port count");
+        let octet = |b: u8| [A, b"a=fmtp:8 x=", &[b], b"\r\n"].concat();
+        assert!(!sdp_media_equivalent(&octet(0xe9), &octet(0xff)), "two bytes that are no UTF-8");
+        assert!(sdp_media_equivalent(&octet(0xe9), &octet(0xe9)));
+        let spaced = base.replace("c=IN IP4 127.0.0.1", "c=IN IP4  127.0.0.1");
+        assert!(sdp_media_equivalent(A, spaced.as_bytes()), "a double space inside c=");
     }
 
     #[test]

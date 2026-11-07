@@ -395,16 +395,15 @@ fn gate_refusal(
 }
 
 /// Why the ingress of a next hop would refuse the line `name: value`, if it
-/// would, as it reads a party's new request: past the first-ingress length
-/// bound, or held by a value gate or the vouched reading of a known header
+/// would: longer than `max_length` (the line bound the message meets there),
+/// or held by a value gate or the vouched reading of a known header
 /// (ADR-0001). The check a writer runs on caller text (`write_check`); the
 /// control-byte rule is the writer's own.
-pub(crate) fn line_refusal(name: &str, value: &str) -> Option<SipParseError> {
-    let bound = crate::parser::FirstIngressBound::DEFAULT.header_length;
+pub(crate) fn line_refusal(name: &str, value: &str, max_length: usize) -> Option<SipParseError> {
     let length = name.len().saturating_add(2).saturating_add(value.len());
-    if length > bound {
+    if length > max_length {
         return Some(SipParseError::new(format!(
-            "Header \"{name}\" length {length} exceeds the first-ingress bound {bound}"
+            "Header \"{name}\" length {length} exceeds the bound {max_length}"
         )));
     }
     let known = HeaderName::known(name)?;

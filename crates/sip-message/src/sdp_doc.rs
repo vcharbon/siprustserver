@@ -27,6 +27,9 @@ pub struct MediaLine {
     /// The m-line's port. `None` where no digits read there; `Some(0)` is a
     /// stream REJECTED (RFC 3264 §6), which is a statement, not an absence.
     pub port: Option<i64>,
+    /// The `/<number of ports>` the port field states, where it states one
+    /// (RFC 4566 §5.14).
+    pub port_count: Option<i64>,
     /// Transport token (e.g. `RTP/AVP`, `RTP/SAVP`, `UDP/TLS/RTP/SAVPF`).
     pub transport: String,
     /// Format / payload-type tokens that follow `<port> <transport>`.
@@ -39,6 +42,9 @@ pub struct MediaLine {
     /// Every `b=` line inside this media block, without the leading `b=`;
     /// where there is none the session-level ones apply.
     pub bandwidths: Vec<String>,
+    /// The first `k=` line inside this media block, which overrides the
+    /// session-level one for this stream.
+    pub key: Option<String>,
     /// `a=ptime:<N>` read as a number, where the block carries one.
     pub ptime: Option<i64>,
 }
@@ -63,9 +69,12 @@ pub struct SdpDoc {
     /// Every session-level `a=` line, without the leading `a=`: the default of
     /// a media block stating none of the same name (RFC 4566 §5).
     pub attributes: Vec<String>,
+    /// The session-level `k=` line's value; a media block may override it.
+    pub key: Option<String>,
     /// The media blocks in document order.
     pub media: Vec<MediaLine>,
-    /// The decoded text, for byte-level comparisons.
+    /// The text, each byte that is no UTF-8 as the character standing for it
+    /// (`sdp_octets`), so two descriptions differing in such a byte differ.
     pub raw: String,
 }
 
@@ -89,24 +98,6 @@ impl SdpDirection {
             SdpDirection::Inactive => "inactive",
         }
     }
-}
-
-/// The `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <address>`
-/// line lifted into its six fields (RFC 4566 §5.2), plus the description's
-/// other lines so a consumer can ask whether anything BUT the origin changed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SdpOrigin {
-    pub username: String,
-    pub session_id: String,
-    pub session_version: u64,
-    pub nettype: String,
-    pub addrtype: String,
-    pub unicast_address: String,
-    /// The `o=` line as the wire spelled it, leading `o=` included.
-    pub raw_origin_line: String,
-    /// The description's lines with the `o=` line removed, newline-joined —
-    /// what an "everything but the origin changed" comparison reads.
-    pub body_excluding_origin: String,
 }
 
 /// Leading-digit integer read: an optional sign, then digits, stopping at the
@@ -151,11 +142,13 @@ fn typed_line(line: &str) -> Option<(u8, &str)> {
 struct MutableMedia {
     r#type: String,
     port: Option<i64>,
+    port_count: Option<i64>,
     transport: String,
     formats: Vec<String>,
     attributes: Vec<String>,
     c_line: Option<String>,
     bandwidths: Vec<String>,
+    key: Option<String>,
     ptime: Option<i64>,
 }
 
@@ -164,11 +157,13 @@ impl MutableMedia {
         MediaLine {
             r#type: self.r#type,
             port: self.port,
+            port_count: self.port_count,
             transport: self.transport,
             formats: self.formats,
             attributes: self.attributes,
             c_line: self.c_line,
             bandwidths: self.bandwidths,
+            key: self.key,
             ptime: self.ptime,
         }
     }
@@ -180,11 +175,13 @@ fn new_media(raw_m_line: &str) -> MutableMedia {
     MutableMedia {
         r#type: tokens.first().copied().unwrap_or("").to_string(),
         port: tokens.get(1).and_then(|p| leading_int(p)),
+        port_count: tokens.get(1).and_then(|p| leading_int(p.split_once('/')?.1)),
         transport: tokens.get(2).copied().unwrap_or("").to_string(),
         formats: tokens.iter().skip(3).map(|t| t.to_string()).collect(),
         attributes: Vec::new(),
         c_line: None,
         bandwidths: Vec::new(),
+        key: None,
         ptime: None,
     }
 }
@@ -206,7 +203,8 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
     if body.is_empty() {
         return None;
     }
-    let text = String::from_utf8_lossy(body).into_owned();
+    let text = crate::sdp_octets::decode(body)
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
     if !text.starts_with("v=") {
         return None;
     }
@@ -219,6 +217,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
     let mut session_c_line: Option<String> = None;
     let mut bandwidths: Vec<String> = Vec::new();
     let mut attributes: Vec<String> = Vec::new();
+    let mut session_key: Option<String> = None;
     let mut media: Vec<MutableMedia> = Vec::new();
 
     for line in lines {
@@ -240,6 +239,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
                 b'c' if session_c_line.is_none() => session_c_line = Some(value.to_string()),
                 b'b' => bandwidths.push(value.to_string()),
                 b'a' => attributes.push(value.to_string()),
+                b'k' if session_key.is_none() => session_key = Some(value.to_string()),
                 _ => {}
             }
             continue;
@@ -248,6 +248,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
         match key {
             b'c' if current.c_line.is_none() => current.c_line = Some(value.to_string()),
             b'b' => current.bandwidths.push(value.to_string()),
+            b'k' if current.key.is_none() => current.key = Some(value.to_string()),
             b'a' => {
                 current.attributes.push(value.to_string());
                 if current.ptime.is_none() {
@@ -268,6 +269,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
         c_line: session_c_line,
         bandwidths,
         attributes,
+        key: session_key,
         media: media.into_iter().map(MutableMedia::finished).collect(),
         raw: text,
     })
@@ -371,87 +373,6 @@ pub fn canonical_rtpmap(media_type: &str, encoding: &str) -> String {
     }
 }
 
-/// The `o=` line of a session description, or `None` where the body is not a
-/// `v=0` description (its first line is exactly `v=0`, RFC 4566 §5.1), states
-/// no `o=` line before its first `m=` (§5 fixes the order), or spells one other
-/// than the six fields of §5.2, one space apart, with a decimal sess-version.
-/// An `o=` line that is no UTF-8 text reads as none.
-pub fn parse_origin(body: &[u8]) -> Option<SdpOrigin> {
-    let lines: Vec<&[u8]> =
-        body.split(|&b| b == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l)).collect();
-    if lines.first().copied() != Some(&b"v=0"[..]) {
-        return None;
-    }
-    let (o_idx, o_line) = lines
-        .iter()
-        .enumerate()
-        .take_while(|(_, l)| !l.starts_with(b"m="))
-        .find(|(_, l)| l.starts_with(b"o="))?;
-    let o_line = std::str::from_utf8(o_line).ok()?;
-    let fields: Vec<&str> = o_line.get(2..)?.split(' ').collect();
-    let [username, session_id, version, nettype, addrtype, unicast_address] = fields.as_slice()
-    else {
-        return None;
-    };
-    if fields.iter().any(|f| f.is_empty()) || !version.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let session_version = version.parse::<u64>().ok()?;
-    let others = lines
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != o_idx)
-        .map(|(_, l)| String::from_utf8_lossy(l))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(SdpOrigin {
-        username: username.to_string(),
-        session_id: session_id.to_string(),
-        session_version,
-        nettype: nettype.to_string(),
-        addrtype: addrtype.to_string(),
-        unicast_address: unicast_address.to_string(),
-        raw_origin_line: o_line.to_string(),
-        body_excluding_origin: others,
-    })
-}
-
-#[deny(clippy::arithmetic_side_effects)]
-impl SdpOrigin {
-    /// The five-field identity `o=` states about the SESSION — everything but
-    /// the version, which is the revision counter (RFC 4566 §5.2). Two
-    /// descriptions of one session agree on all five.
-    pub fn identifies_same_session(&self, other: &SdpOrigin) -> bool {
-        self.username == other.username
-            && self.session_id == other.session_id
-            && self.nettype == other.nettype
-            && self.addrtype == other.addrtype
-            && self.unicast_address == other.unicast_address
-    }
-
-    /// The `o=` line's value — everything after `o=`; the whole line where it
-    /// does not open with `o=`.
-    pub fn value(&self) -> &str {
-        self.raw_origin_line.strip_prefix("o=").unwrap_or(&self.raw_origin_line)
-    }
-
-    /// The `o=` line a re-offer of THIS session states (RFC 3264 §8): the five
-    /// identity fields unchanged, the version one above this one. `None` where
-    /// the version is already the largest one this reader holds: no next
-    /// version can be stated, and a wrapped one would run backwards.
-    pub fn next_version_line(&self) -> Option<String> {
-        Some(format!(
-            "o={} {} {} {} {} {}",
-            self.username,
-            self.session_id,
-            self.session_version.checked_add(1)?,
-            self.nettype,
-            self.addrtype,
-            self.unicast_address
-        ))
-    }
-}
-
 /// A description cut at its `m=` lines, byte for byte: the session-level text,
 /// then each media section (its `m=` line and every line up to the next one),
 /// with line endings as written. The sections are in `parse_sdp_body`'s media
@@ -495,6 +416,10 @@ impl Section<'_> {
         line.strip_suffix('\r').unwrap_or(line).get(2..).unwrap_or_default()
     }
 }
+
+mod origin;
+
+pub use origin::{parse_origin, SdpOrigin};
 
 #[cfg(test)]
 mod tests;

@@ -33,12 +33,22 @@ pub struct StatedSession {
 
 impl StatedSession {
     /// The session `sdp` states, or `None` where it is not a session
-    /// description carrying a readable `o=` line.
+    /// description carrying a readable `o=` line, or states one with text a
+    /// rewrite cannot carry.
     pub fn of(sdp: &[u8]) -> Option<Self> {
         let origin = parse_origin(sdp)?;
-        let text = String::from_utf8_lossy(sdp);
-        let media = Sections::of(&text)?.media.iter().map(|s| s.value().to_string()).collect();
-        Some(Self { origin: origin.value().to_string(), media })
+        let text = sdp_octets::decode(sdp)?;
+        let media: Vec<String> =
+            Sections::of(&text)?.media.iter().map(|s| s.value().to_string()).collect();
+        let session = Self { origin: origin.value().to_string(), media };
+        (!session.holds_stand_in()).then_some(session)
+    }
+
+    /// Whether a value states a character a rewrite cannot insert
+    /// ([`sdp_octets::holds_stand_in`]).
+    fn holds_stand_in(&self) -> bool {
+        sdp_octets::holds_stand_in(&self.origin)
+            || self.media.iter().any(|m| sdp_octets::holds_stand_in(m))
     }
 }
 
@@ -69,6 +79,9 @@ pub struct Restated {
 /// stream-level `c=` where the description states no session-level one
 /// (RFC 4566 §5.7).
 pub fn restate_session(sdp: &[u8], stated: &StatedSession) -> Option<Restated> {
+    if stated.holds_stand_in() {
+        return None;
+    }
     let previous = parse_origin(format!("v=0\r\no={}\r\n", stated.origin).as_bytes())?;
     restate_under(sdp, stated, previous.next_version_line()?)
 }
@@ -78,6 +91,9 @@ pub fn restate_session(sdp: &[u8], stated: &StatedSession) -> Option<Restated> {
 /// retransmitted provisional, the final repeating it), which RFC 3264 §8 keeps
 /// at its version. `None` where either side has no readable `o=` line.
 pub fn restate_session_again(sdp: &[u8], stated: &StatedSession) -> Option<Restated> {
+    if stated.holds_stand_in() {
+        return None;
+    }
     parse_origin(format!("v=0\r\no={}\r\n", stated.origin).as_bytes())?;
     restate_under(sdp, stated, format!("o={}", stated.origin))
 }
@@ -207,6 +223,9 @@ pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
 /// its author already stated on the dialog, RFC 3264 §8), every other byte as
 /// written. `None` where `sdp` has no readable `o=` line.
 pub fn under_origin(sdp: &[u8], origin: &str) -> Option<Vec<u8>> {
+    if sdp_octets::holds_stand_in(origin) {
+        return None;
+    }
     let current = parse_origin(sdp)?;
     let text = sdp_octets::decode(sdp)?;
     Some(sdp_octets::encode(&text.replacen(&current.raw_origin_line, &format!("o={origin}"), 1)))
@@ -369,6 +388,28 @@ mod tests {
             "v=0\no=- 7 7 IN IP4 192.0.2.10\ns=-\nt=0 0"
         );
         assert_eq!(stamp_session(b"v=0\r\ns=-\r\n", 7), None, "no o= to stamp");
+    }
+
+    /// Text a rewrite inserts holding a character that stands for a byte in
+    /// a description's own text (`sdp_octets`) is no text it can write: the
+    /// description is left as written, and no line break of the stated text
+    /// reaches the wire.
+    #[test]
+    fn inserted_text_holding_a_stand_in_writes_nothing() {
+        let user =
+            "x\u{10FF0D}\u{10FF0A}c=IN\u{10FF20}IP4\u{10FF20}203.0.113.66\u{10FF0D}\u{10FF0A}a=y";
+        let stated = StatedSession {
+            origin: format!("{user} 7 7 IN IP4 192.0.2.10"),
+            media: vec!["audio 20000 RTP/AVP 8".into()],
+        };
+        assert_eq!(restate_session(NEW_AUTHOR, &stated), None);
+        assert_eq!(restate_session_again(NEW_AUTHOR, &stated), None);
+        assert_eq!(under_origin(NEW_AUTHOR, &format!("{user} 7 8 IN IP4 192.0.2.10")), None);
+        let in_media = StatedSession {
+            origin: "b2b 700 7 IN IP4 192.0.2.10".into(),
+            media: vec!["audio 20000 RTP/AVP 0".into(), "video\u{10FF0A}c=x 0 RTP/AVP 96".into()],
+        };
+        assert_eq!(restate_session(NEW_AUTHOR, &in_media), None);
     }
 
     /// RFC 3264 §6: the answer to the restated offer comes back to its author
