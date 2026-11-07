@@ -400,15 +400,17 @@ fn gate_refusal(
 /// (ADR-0001). The check a writer runs on caller text (`write_check`); the
 /// control-byte rule is the writer's own.
 pub(crate) fn line_refusal(name: &str, value: &str, max_length: usize) -> Option<SipParseError> {
-    let length = name.len().saturating_add(2).saturating_add(value.len());
-    if length > max_length {
+    let header_len = name.len().saturating_add(2).saturating_add(value.len());
+    if header_len > max_length {
+        let header = HeaderName::of(&SipStr::owned(name));
+        let shown = crate::error::reason_text::header(&header);
         return Some(SipParseError::new(format!(
-            "Header \"{name}\" length {length} exceeds the bound {max_length}"
+            "Header {shown} length {header_len} exceeds the bound {max_length}"
         )));
     }
     let known = HeaderName::known(name)?;
-    let (name, value) = (SipStr::owned(name), SipStr::owned(value));
-    gate_refusal(&known, &name, &value, &mut Singletons::default(), true)
+    let value = SipStr::owned(value);
+    gate_refusal(&known, &value, &mut Singletons::default(), true)
         .or_else(|| vouched_reading(&known, &value)?.err())
 }
 

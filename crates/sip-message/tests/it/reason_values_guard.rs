@@ -51,6 +51,7 @@ const ALLOWED: &[(&str, &str)] = &[
     ("raw_name.start", "an offset"),
     ("long.name.len() + 2 + long.value.len()", "a length"),
     ("limits.max_header_length", "a bound"),
+    ("max_length", "a bound"),
     ("limits.max_header_lines", "a bound"),
     ("self.header_lines", "a bound"),
     ("self.uri_length", "a bound"),
