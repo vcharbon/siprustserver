@@ -102,8 +102,8 @@ pub fn answer_from_own_agreeing(
     let agreed_media = agreed.and_then(parse_sdp_body).map(|d| d.media).unwrap_or_default();
     let offer_doc = parse_sdp_body(offer)?;
     let own_doc = parse_sdp_body(own)?;
-    let offer_text = String::from_utf8_lossy(offer);
-    let own_text = String::from_utf8_lossy(own);
+    let offer_text = crate::sdp_octets::decode(offer)?;
+    let own_text = crate::sdp_octets::decode(own)?;
     let offered = Sections::of(&offer_text)?;
     let owned = Sections::of(&own_text)?;
     if bundles(offered.session) || bundles(owned.session) {
@@ -175,7 +175,7 @@ pub fn answer_from_own_agreeing(
         let answer = Answered { stream, own: mine, kept: &kept, crypto, dir, inherited };
         answered_section(&mut out, owned.media.get(i)?.text, &answer, eol);
     }
-    Some(out.into_bytes())
+    Some(crate::sdp_octets::encode(&out))
 }
 
 /// The two answers a back-to-back UA composes for a re-offer inside an early
@@ -251,7 +251,7 @@ pub fn answer_direction(own: SdpDirection, offered: SdpDirection) -> SdpDirectio
 /// description.
 pub fn reject_offer(offer: &[u8], options: &BuildHeldSdpOptions) -> Option<Vec<u8>> {
     let doc = parse_sdp_body(offer)?;
-    let text = String::from_utf8_lossy(offer);
+    let text = crate::sdp_octets::decode(offer)?;
     let sections = Sections::of(&text)?;
     let address = sdp_origin_address(&options.local_ip);
     let addrtype = if address.contains(':') { "IP6" } else { "IP4" };
@@ -274,7 +274,7 @@ pub fn reject_offer(offer: &[u8], options: &BuildHeldSdpOptions) -> Option<Vec<u
         push_line(&mut out, &format!("m={value}"), "\r\n");
         push_line(&mut out, "a=inactive", "\r\n");
     }
-    Some(out.into_bytes())
+    Some(crate::sdp_octets::encode(&out))
 }
 
 /// One kept format: the number the offer gives it and the one `own` gives it.

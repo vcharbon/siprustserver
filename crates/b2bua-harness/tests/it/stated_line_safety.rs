@@ -139,3 +139,31 @@ async fn a_failover_reject_with_a_line_break_still_answers_the_caller() {
     let _report = s.finish().await;
     assert_eq!(counted, 2, "the phrase and the line: {defects:?}");
 }
+
+/// A stated value the next hop's ingress refuses, `Expires` holding no number
+/// (RFC 3261 §20.19), is skipped and counted like a line break: a response
+/// carrying it would be dropped there, and alice still hears her final.
+#[tokio::test(start_paused = true)]
+async fn a_stated_value_ingress_refuses_is_skipped_and_the_caller_hears_the_final() {
+    let mut stated = StatedHeaders::default();
+    stated.every_message.insert("Expires".into(), set(&["soon"]));
+    stated.every_message.insert("X-Kept".into(), set(&["fine"]));
+    let mut s = scene("stated-value-ingress-refuses", stated).await;
+
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
+    s.bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    assert_eq!(ok.raw(HeaderName::Expires).count(), 0, "the refused value left out");
+    assert_eq!(ok.raw(HeaderName::from("X-Kept")).collect::<Vec<_>>(), ["fine"]);
+    let mut dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+
+    let defects = s.b2bua.take_model_violations();
+    let counted = s.b2bua.metrics().model_defects_total(DEFECT);
+    let _report = s.finish().await;
+    assert!(counted >= 1, "the skip is counted: {defects:?}");
+}

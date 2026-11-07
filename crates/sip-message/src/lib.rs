@@ -65,6 +65,7 @@ pub mod sdp_answer;
 pub mod sdp_diff;
 pub mod sdp_doc;
 pub mod sdp_form;
+mod sdp_octets;
 pub mod sdp_session;
 pub mod sdp_text;
 pub mod serializer;

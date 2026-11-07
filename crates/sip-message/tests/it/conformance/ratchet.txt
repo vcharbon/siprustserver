@@ -1,13 +1,6 @@
 # Rows known to fail: the row's name, then the area of the stack that owns its fix.
 # The list only shrinks: a listed row that no longer fails fails the suite.
 
-sdp/8866-5-address-at-either-level offer-answer
-sdp/8866-5-origin-only-before-media offer-answer
-sdp/8866-5-session-address-moved offer-answer
-sdp/8866-5.1-version-with-a-leading-zero offer-answer
-sdp/8866-5.2-origin-of-seven-fields offer-answer
-sdp/8866-5.3-rewrite-keeps-non-utf8 offer-answer
-sdp/stated-value-ingress-refuses offer-answer
 sdp/8866-5-origin-after-media-refused audit
 sdp/8866-5-session-direction-inherited audit
 sdp/8866-5.14-media-port-count audit

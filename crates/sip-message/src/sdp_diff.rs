@@ -1,60 +1,76 @@
 //! Negotiated-media equivalence of two SDP bodies.
 //!
-//! [`sdp_media_equivalent`] returns true iff two bodies describe the same media
-//! session for the purpose of deciding whether a B2BUA must resync its peer.
-//! It compares only what steers media flow — the `m=` line tuples and the
-//! `c=`/`b=`/`a=`/`i=`/`k=` lines attached to each, attribute order-insensitive
-//! — and ignores session-level metadata (`o=` version, `s=`, `t=`, blank lines,
-//! line endings). Pure and allocation-bounded: hot-path safe.
+//! [`sdp_media_equivalent`] returns true iff two descriptions steer media the
+//! same way, stream by stream: each `m=` line's tokens, and the connection
+//! address, bandwidths, direction and attributes the stream takes, a
+//! session-level value applying to every stream that states none of its own
+//! (RFC 4566 §5). The origin, session name, timing and information lines,
+//! line endings and attribute order make no difference. Pure: no clocks, no
+//! I/O.
 
-use crate::sdp::split_lines;
+use crate::sdp_doc::{direction_of, parse_sdp_body, MediaLine, SdpDirection, SdpDoc};
 
-const MEDIA_LINE_PREFIX: &str = "m=";
-
-/// One `m=` line and the media-level lines attached to it.
-struct MediaBlock<'a> {
-    m_line: &'a str,
-    /// Sorted set of the block's c=/b=/a=/i=/k= lines.
+/// What one stream of a description steers media with.
+#[derive(PartialEq, Eq)]
+struct Stream<'a> {
+    media: (&'a str, Option<i64>, &'a str, &'a [String]),
+    connection: Option<&'a str>,
+    bandwidths: Vec<&'a str>,
+    direction: SdpDirection,
+    /// Every attribute but the direction, sorted.
     attributes: Vec<&'a str>,
 }
 
-/// Split into `m=`-rooted blocks. Lines before the first `m=` are session-level
-/// and carry no media steering, so they are dropped.
-fn media_blocks(text: &str) -> Vec<MediaBlock<'_>> {
-    let mut blocks: Vec<MediaBlock<'_>> = Vec::new();
-
-    for line in split_lines(text).into_iter().map(crate::whitespace::trim_end) {
-        if line.starts_with(MEDIA_LINE_PREFIX) {
-            blocks.push(MediaBlock { m_line: line, attributes: Vec::new() });
-        } else if let Some(block) = blocks.last_mut() {
-            if matches!(line.as_bytes().first(), Some(b'c' | b'b' | b'a' | b'i' | b'k')) {
-                block.attributes.push(line);
-            }
-        }
-    }
-
-    for block in &mut blocks {
-        block.attributes.sort_unstable();
-    }
-    blocks
+/// An attribute's name: its text up to the first `:` (RFC 4566 §5.13).
+fn attribute_name(attribute: &str) -> &str {
+    attribute.split_once(':').map_or(attribute, |(name, _)| name)
 }
 
-/// True iff `a` and `b` describe the same negotiated media session. Empty
-/// bodies are equivalent only to each other.
-pub fn sdp_media_equivalent(a: &[u8], b: &[u8]) -> bool {
-    if a.is_empty() || b.is_empty() {
-        return a.is_empty() && b.is_empty();
-    }
-    let text_a = String::from_utf8_lossy(a);
-    let text_b = String::from_utf8_lossy(b);
-    let blocks_a = media_blocks(&text_a);
-    let blocks_b = media_blocks(&text_b);
+/// `attributes` without their direction, each trimmed of trailing whitespace.
+fn undirected(attributes: &[String]) -> impl Iterator<Item = &str> {
+    attributes.iter().filter(|a| direction_of(a).is_none()).map(|a| crate::whitespace::trim_end(a))
+}
 
-    blocks_a.len() == blocks_b.len()
-        && blocks_a
-            .iter()
-            .zip(blocks_b.iter())
-            .all(|(x, y)| x.m_line == y.m_line && x.attributes == y.attributes)
+/// `media` as it steers media under the session-level values of `doc`.
+fn stream<'a>(doc: &'a SdpDoc, media: &'a MediaLine) -> Stream<'a> {
+    let direction = media
+        .attributes
+        .iter()
+        .chain(&doc.attributes)
+        .find_map(|a| direction_of(a))
+        .unwrap_or(SdpDirection::SendRecv);
+    let own: Vec<&str> = undirected(&media.attributes).collect();
+    let mut attributes = own.clone();
+    attributes.extend(
+        undirected(&doc.attributes)
+            .filter(|a| !own.iter().any(|o| attribute_name(o) == attribute_name(a))),
+    );
+    attributes.sort_unstable();
+    let stated = if media.bandwidths.is_empty() { &doc.bandwidths } else { &media.bandwidths };
+    let mut bandwidths: Vec<&str> = stated.iter().map(|b| crate::whitespace::trim_end(b)).collect();
+    bandwidths.sort_unstable();
+    Stream {
+        media: (&media.r#type, media.port, &media.transport, &media.formats),
+        connection: media
+            .c_line
+            .as_deref()
+            .or(doc.c_line.as_deref())
+            .map(crate::whitespace::trim_end),
+        bandwidths,
+        direction,
+        attributes,
+    }
+}
+
+/// True iff `a` and `b` describe the same negotiated media session. Bodies
+/// that are no session description are equivalent only when equal; empty
+/// bodies only to each other.
+pub fn sdp_media_equivalent(a: &[u8], b: &[u8]) -> bool {
+    let (Some(doc_a), Some(doc_b)) = (parse_sdp_body(a), parse_sdp_body(b)) else {
+        return a == b;
+    };
+    doc_a.media.len() == doc_b.media.len()
+        && doc_a.media.iter().zip(&doc_b.media).all(|(x, y)| stream(&doc_a, x) == stream(&doc_b, y))
 }
 
 #[cfg(test)]
@@ -91,6 +107,39 @@ mod tests {
     fn media_level_attribute_differs() {
         let held = b"v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=inactive\r\n";
         assert!(!sdp_media_equivalent(A, held));
+    }
+
+    /// RFC 4566 §5: a session-level value is every stream's default.
+    #[test]
+    fn a_moved_session_level_address_differs() {
+        let moved = String::from_utf8_lossy(A).replace("c=IN IP4 127.0.0.1", "c=IN IP4 192.0.2.7");
+        assert!(!sdp_media_equivalent(A, moved.as_bytes()));
+    }
+
+    #[test]
+    fn one_address_at_either_level_is_the_same() {
+        let media_level = b"v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\nc=IN IP4 127.0.0.1\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+        assert!(sdp_media_equivalent(A, media_level));
+    }
+
+    #[test]
+    fn a_session_level_direction_and_bandwidth_count() {
+        let base = String::from_utf8_lossy(A).replace("a=sendrecv\r\n", "");
+        let inactive = base.replace("t=0 0\r\n", "t=0 0\r\na=inactive\r\n");
+        assert!(sdp_media_equivalent(A, base.as_bytes()), "no direction is sendrecv");
+        assert!(!sdp_media_equivalent(base.as_bytes(), inactive.as_bytes()));
+        let low = base.replace("t=0 0\r\n", "b=AS:64\r\nt=0 0\r\n");
+        let high = base.replace("t=0 0\r\n", "b=AS:512\r\nt=0 0\r\n");
+        assert!(!sdp_media_equivalent(low.as_bytes(), high.as_bytes()));
+    }
+
+    /// A media-level value overrides the session-level one of the same name.
+    #[test]
+    fn a_media_level_attribute_overrides_the_session_one() {
+        let session = String::from_utf8_lossy(A).replace("t=0 0\r\n", "t=0 0\r\na=ptime:20\r\n");
+        let both = format!("{session}a=ptime:30\r\n");
+        let media = format!("{}a=ptime:30\r\n", String::from_utf8_lossy(A));
+        assert!(sdp_media_equivalent(both.as_bytes(), media.as_bytes()));
     }
 
     #[test]

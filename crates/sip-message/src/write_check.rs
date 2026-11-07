@@ -3,7 +3,8 @@
 //! control byte other than HTAB stands in a value only as a quoted-pair's
 //! escaped byte: text breaking either is refused, never written. Caller text
 //! carries no NUL at all, so no peer reading a value up to its first NUL
-//! reads another value than the one written. A caller holding text from
+//! reads another value than the one written. A header line is also held to
+//! what the next hop's ingress reads ([`header_line`]). A caller holding text from
 //! outside the stack checks it here and skips what is refused; a draft
 //! refuses to freeze with a line it could not write whole, whichever writer
 //! carried it ([`crate::draft::IncompleteDraft::Unwritable`]).
@@ -13,6 +14,7 @@ use std::fmt;
 use crate::char_class::is_token_char;
 use crate::control_bytes::{bare_control_byte, is_control, Escapes};
 use crate::header::HeaderName;
+use crate::parser::custom::headers::line_refusal;
 
 /// Where a writer was asked to put text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,11 +81,15 @@ pub fn header_value(value: &str) -> Result<(), WriteRefusal> {
         .map_or(Ok(()), |reason| Err(refusal(Position::HeaderValue, reason)))
 }
 
-/// One header line: [`header_name`], and its value holding a quoted-pair only
-/// in a quoted-string or comment its header's grammar has.
+/// One header line: [`header_name`], its value holding a quoted-pair only in
+/// a quoted-string or comment its header's grammar has, and nothing the
+/// ingress of a next hop refuses: the first-ingress length bound and the value
+/// gates of a known header (ADR-0001).
 pub fn header_line(name: &str, value: &str) -> Result<(), WriteRefusal> {
     header_name(name)?;
-    match value_refusal(value, Escapes::of(HeaderName::known(name).as_ref())) {
+    let reason = value_refusal(value, Escapes::of(HeaderName::known(name).as_ref()))
+        .or_else(|| Some(line_refusal(name, value)?.reason));
+    match reason {
         Some(reason) => Err(refusal(Position::HeaderValue, format!("{name}: {reason}"))),
         None => Ok(()),
     }
@@ -173,6 +179,24 @@ mod tests {
         assert!(header_line("X-Note", "\"a \\\x07 b\"").is_ok());
         assert!(header_line("Organization", "\"a \\\x07 b\"").is_err());
         assert!(header_line("Server", "\"a \\\x07 b\"").is_err());
+    }
+
+    /// A value the next hop's ingress refuses is no line a writer sends.
+    #[test]
+    fn a_line_ingress_refuses_is_refused() {
+        assert!(header_line("Expires", "3600").is_ok());
+        for (name, value) in [
+            ("Expires", "soon"),
+            ("Min-SE", "ninety"),
+            ("Content-Disposition", ""),
+            ("Event", "a b"),
+            ("Warning", "399 host \"open"),
+        ] {
+            assert!(header_line(name, value).is_err(), "{name}: {value}");
+        }
+        let long = "x".repeat(8192 - "X-Long: ".len());
+        assert!(header_line("X-Long", &long).is_ok(), "at the first-ingress bound");
+        assert!(header_line("X-Long", &format!("{long}x")).is_err(), "one past it");
     }
 
     #[test]

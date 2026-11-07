@@ -9,11 +9,14 @@
 //! the author's streams in the slot of the same media type where one is live.
 //! What the far party then describes comes back to the author in the author's
 //! own stream order, without the slots the author never described (§6: an
-//! answer carries exactly the offer's m-lines).
+//! answer carries exactly the offer's m-lines). Every byte a rewrite does not
+//! change leaves as written, text fields that are no UTF-8 included
+//! (`sdp_octets`).
 //!
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
 use crate::sdp_doc::{media_line, parse_origin, parse_sdp_body, MediaLine, Section, Sections};
+use crate::sdp_octets;
 use std::collections::VecDeque;
 
 use lookup_map::LookupMap;
@@ -81,7 +84,7 @@ pub fn restate_session_again(sdp: &[u8], stated: &StatedSession) -> Option<Resta
 
 fn restate_under(sdp: &[u8], stated: &StatedSession, next_origin: String) -> Option<Restated> {
     let current = parse_origin(sdp)?;
-    let text = String::from_utf8_lossy(sdp);
+    let text = sdp_octets::decode(sdp)?;
     let authored = Sections::of(&text)?;
     let described = parse_sdp_body(sdp).map(|d| d.media).unwrap_or_default();
     let stated_media: Vec<MediaLine> = stated.media.iter().map(|m| media_line(m)).collect();
@@ -132,7 +135,7 @@ fn restate_under(sdp: &[u8], stated: &StatedSession, next_origin: String) -> Opt
             }
         }
     }
-    let mut out = out.into_bytes();
+    let mut out = sdp_octets::encode(&out);
     if !text.ends_with('\n') && slots.last().is_some_and(Option::is_some) {
         drop_line_end(&mut out);
     }
@@ -168,7 +171,7 @@ fn first_free(queue: Option<&mut VecDeque<usize>>, slots: &[Option<u32>]) -> Opt
 /// taken out, and any other stream (live in a slot the author never described,
 /// or past the last slot) follows in order as a stream the far party adds.
 pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
-    let text = String::from_utf8_lossy(sdp);
+    let text = sdp_octets::decode(sdp)?;
     let described = Sections::of(&text)?;
     let ports: Vec<Option<i64>> =
         parse_sdp_body(sdp).map(|d| d.media.iter().map(|m| m.port).collect()).unwrap_or_default();
@@ -193,7 +196,7 @@ pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
     for s in &kept {
         out.push_str(&with_line_end(s.text, eol));
     }
-    let mut out = out.into_bytes();
+    let mut out = sdp_octets::encode(&out);
     if !text.ends_with('\n') {
         drop_line_end(&mut out);
     }
@@ -205,8 +208,8 @@ pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
 /// written. `None` where `sdp` has no readable `o=` line.
 pub fn under_origin(sdp: &[u8], origin: &str) -> Option<Vec<u8>> {
     let current = parse_origin(sdp)?;
-    let text = String::from_utf8_lossy(sdp);
-    Some(text.replacen(&current.raw_origin_line, &format!("o={origin}"), 1).into_bytes())
+    let text = sdp_octets::decode(sdp)?;
+    Some(sdp_octets::encode(&text.replacen(&current.raw_origin_line, &format!("o={origin}"), 1)))
 }
 
 /// `sdp` as the first description of a session this stack opens at `stamp`:
@@ -219,8 +222,8 @@ pub fn stamp_session(sdp: &[u8], stamp: u64) -> Option<Vec<u8>> {
         "o={} {stamp} {stamp} {} {} {}",
         origin.username, origin.nettype, origin.addrtype, origin.unicast_address
     );
-    let text = String::from_utf8_lossy(sdp);
-    Some(text.replacen(&origin.raw_origin_line, &stamped, 1).into_bytes())
+    let text = sdp_octets::decode(sdp)?;
+    Some(sdp_octets::encode(&text.replacen(&origin.raw_origin_line, &stamped, 1)))
 }
 
 /// A stated stream's `m=` value with its port set to 0 — the stream rejected
