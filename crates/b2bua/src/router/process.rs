@@ -31,7 +31,7 @@ use crate::setup_budget::SetupBudget;
 use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 
-/// The per-call handler body: check the call out, run the handler, interpret.
+/// The per-call handler body: check the call out, run the handler, commit.
 /// `matched_client_txn`: a response `event` carries answered a client
 /// transaction the transaction layer holds. `admitted` is a new call admitted
 /// at ingress: its hold, until its call is created (every other exit drops

@@ -1,7 +1,7 @@
-//! What the router sends behind a call's latest write for a turn that lands
-//! no record of its own: the caller's 100 after the creation write, the
-//! answer to a request it refused, the server transactions another copy
-//! answered. A rider reports no turn mark.
+//! What the router sends behind a call's latest write outside a handler
+//! turn's commit: the caller's 100 after the creation write, the answer to a
+//! request it refused, the server transactions another copy answered. A
+//! rider reports no turn mark.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

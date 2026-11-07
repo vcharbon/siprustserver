@@ -453,9 +453,9 @@ _Avoid_: "interpret" (the commit decides the persist and the end, it does not
 interpret effects one by one).
 
 **Rider**:
-What the router sends behind a call's latest write for a turn that lands no
-record of its own: the caller's 100 after the creation write, the answer to a
-request the router refused, the server transactions another copy answered.
+What the router sends behind a call's latest write outside a handler turn's
+commit: the caller's 100 after the creation write, the answer to a request the
+router refused, the server transactions another copy answered.
 It reports no turn mark.
 
 **Silent stream**:

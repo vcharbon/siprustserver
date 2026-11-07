@@ -111,5 +111,13 @@ fn a_cdr_is_written_here_by_a_turn_that_keeps_the_call() {
 fn a_deferring_copy_leaves_the_cdr_and_the_unrecorded_termination_to_its_primary() {
     assert!(!takes(CommitKind::DeferToPrimary, &Buffered::WriteCdr));
     assert!(!takes(CommitKind::DeferToPrimary, &Buffered::TerminationUnrecorded));
-    assert!(takes(CommitKind::DeleteBeforeSend, &Buffered::TerminationUnrecorded));
+    let kinds = [
+        CommitKind::Write,
+        CommitKind::Update,
+        CommitKind::DeleteBeforeSend,
+        CommitKind::DeleteAfterDrain,
+    ];
+    for kind in kinds {
+        assert!(takes(kind, &Buffered::TerminationUnrecorded), "{kind:?} counts it");
+    }
 }

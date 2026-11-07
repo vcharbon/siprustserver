@@ -34,7 +34,7 @@ pub(super) enum Turn {
     /// A final went on the wire and no call is here; the caller tears down
     /// the per-call ephemera this dispatch created (`ReleaseKind::Orphan`).
     Shed,
-    /// Admitted (or created-then-rejected): the handler result to interpret.
+    /// Admitted (or created-then-rejected): the handler result to commit.
     Result(Box<HandlerResult>),
 }
 

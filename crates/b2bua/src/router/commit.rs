@@ -52,6 +52,8 @@ enum CommitKind {
     /// A takeover copy's terminal while its primary lives (ADR-0020 X3): the
     /// body written back to the primary, which discharges it with its CDR;
     /// the wire the copy owes leaves from here, then the copy releases itself.
+    /// A primary that departs first leaves the body to the departure sweep,
+    /// one that neither returns nor departs to the reap.
     DeferToPrimary,
 }
 
@@ -195,8 +197,13 @@ pub(super) async fn commit_turn(
             Vec::new()
         };
         observe(ctx, &call, &effects.buffered, commit, now_ms).await;
-        let entry = TurnEntry::new(ctx, call_ref, call, now_ms, effects.outbound, mark);
-        push(ctx, call_ref, TurnEntry { ack, cancel, limiter_releases, ..entry }).await;
+        let entry = TurnEntry {
+            ack,
+            cancel,
+            limiter_releases,
+            ..TurnEntry::new(ctx, call_ref, call, now_ms, effects.outbound, mark)
+        };
+        push(ctx, call_ref, entry).await;
         ctx.outboxes.drained(call_ref).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
         return;
@@ -377,8 +384,11 @@ pub(super) async fn commit_cancel(
     let kind = TurnKind::on_request();
     reach(ctx, call_ref, TurnPoint::Logged, version, wrote, kind, None).await;
     let now_ms = ctx.clock.now_ms();
-    let entry = TurnEntry::new(ctx, call_ref, call, now_ms, Vec::new(), (version, wrote, kind));
-    push(ctx, call_ref, TurnEntry { cancel: Some(HeldCancel::of(invite)), ..entry }).await;
+    let entry = TurnEntry {
+        cancel: Some(HeldCancel::of(invite)),
+        ..TurnEntry::new(ctx, call_ref, call, now_ms, Vec::new(), (version, wrote, kind))
+    };
+    push(ctx, call_ref, entry).await;
 }
 
 /// Queue `entry` on `call_ref`'s outbox behind the call's latest write.
