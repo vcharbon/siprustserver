@@ -81,11 +81,55 @@ const KNOWN: u128 = {
 /// The one extension header on the list.
 const EXTENSION: &str = "P-Charging-Vector";
 
+/// Whether the table lists `header`, at compile time: the check a value
+/// type's cardinality meets.
+pub(crate) const fn is_listed(header: Listed) -> bool {
+    match header {
+        Listed::Known(id) => KNOWN & id.bit() != 0,
+        Listed::Extension(name) => name.eq_ignore_ascii_case(EXTENSION),
+    }
+}
+
 /// Whether the header `name` names, in any casing or form, is single-valued.
 pub fn is_single_valued(name: &HeaderName) -> bool {
     match name.key() {
         HeaderKey::Known(id) => KNOWN & id.bit() != 0,
         HeaderKey::Extension(wire) => wire.eq_ignore_ascii_case(EXTENSION),
+    }
+}
+
+/// The single-valued headers a walk over a message's lines has met, so a
+/// second line of one is caught whatever its form.
+#[derive(Debug, Default)]
+pub(crate) struct Met {
+    /// The known listed headers met, as [`HeaderId::bit`]s.
+    known: u128,
+    /// Whether the one listed extension header was met.
+    extension: bool,
+}
+
+impl Met {
+    /// Notes a line of `name`; whether one was met before, `false` for a
+    /// header that may repeat.
+    pub(crate) fn repeated(&mut self, name: &HeaderName) -> bool {
+        self.repeated_line(name.key().id(), name.as_wire_str())
+    }
+
+    /// [`repeated`](Self::repeated) for a line classified as `id`, its name
+    /// written `wire`.
+    pub(crate) fn repeated_line(&mut self, id: Option<HeaderId>, wire: &str) -> bool {
+        match id {
+            Some(id) if KNOWN & id.bit() != 0 => {
+                let met = self.known & id.bit() != 0;
+                self.known |= id.bit();
+                met
+            }
+            Some(_) => false,
+            None if wire.eq_ignore_ascii_case(EXTENSION) => {
+                std::mem::replace(&mut self.extension, true)
+            }
+            None => false,
+        }
     }
 }
 

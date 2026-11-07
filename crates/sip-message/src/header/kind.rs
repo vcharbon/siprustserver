@@ -2,19 +2,21 @@
 //! that make per-header policy a compile-time fact.
 //!
 //! A generic value type (`NameAddrHeader<K>`, `TokenListHeader<K>`, …) carries
-//! its identity, its comma-foldability and its API surface in `K`, so From and
-//! To are different types sharing one implementation, `tag()` exists only where
-//! a tag exists, and a credentials header can never be comma-split.
+//! its identity, its cardinality and its API surface in `K`, so From and To are
+//! different types sharing one implementation, `tag()` exists only where a tag
+//! exists, a credentials header can never be comma-split, and a single-valued
+//! header has no list accessor.
 //!
 //! Refer to these qualified (`kind::From`) — a glob import would shadow the
 //! prelude's `From` trait.
 
-use super::name::HeaderName;
+use super::cardinality::{held_to_the_table, lines, Cardinality};
+use super::name::{HeaderId, HeaderName};
 use super::name_addr::AddrForm;
 use super::params::ParamReading;
+use super::single_valued::Listed;
 pub use super::token_params::Leading;
 use super::uri::UriRole;
-use super::value::Folding;
 
 /// `2^31 - 1` — the ceiling RFC 3261 puts on the 32-bit signed counters.
 const INT_32_MAX: u32 = i32::MAX as u32;
@@ -22,8 +24,8 @@ const INT_32_MAX: u32 = i32::MAX as u32;
 /// A header's compile-time identity.
 pub trait HeaderKind: std::fmt::Debug + Clone + Copy + Send + Sync + 'static {
     fn name() -> HeaderName;
-    /// How the wire may lay out several values of this header.
-    const FOLDING: Folding;
+    /// How many lines of this header a message carries.
+    type Lines: Cardinality;
 }
 
 /// A header whose value is a name-addr.
@@ -60,8 +62,8 @@ pub trait NoParams: NameAddrKind {}
 /// A name-addr header carrying a dialog tag — From and To, and nothing else.
 pub trait TaggedKind: RichParams {}
 
-/// A header whose value is a set of tokens.
-pub trait TokenKind: HeaderKind {
+/// A header whose value is a set of tokens, one set per line.
+pub trait TokenKind: HeaderKind<Lines = lines::SetPerLine> {
     /// The grammar admits a value holding no token (RFC 3261 §25.1:
     /// `Supported` and `Allow` bracket their list).
     const MAY_BE_EMPTY: bool = false;
@@ -99,8 +101,10 @@ pub trait NumericKind: HeaderKind {
 /// parameters.
 pub trait CredentialsKind: HeaderKind {}
 
+/// Each kind's cardinality, checked at compile time against the table of
+/// single-valued headers.
 macro_rules! kinds {
-    ($($(#[$doc:meta])* $marker:ident => $name:ident, $folding:ident;)+) => {
+    ($($(#[$doc:meta])* $marker:ident => $name:ident, $lines:ident;)+) => {
         $(
             $(#[$doc])*
             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -108,8 +112,10 @@ macro_rules! kinds {
 
             impl HeaderKind for $marker {
                 fn name() -> HeaderName { HeaderName::$name }
-                const FOLDING: Folding = Folding::$folding;
+                type Lines = lines::$lines;
             }
+
+            held_to_the_table!(lines::$lines, Listed::Known(HeaderId::$name));
         )+
     };
 }

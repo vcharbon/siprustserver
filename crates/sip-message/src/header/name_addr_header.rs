@@ -17,7 +17,7 @@ use super::name_addr::{AddrGrammar, NameAddr};
 use super::params::{ParamValue, Params};
 use super::reading::Reading;
 use super::uri::Uri;
-use super::value::{read_line_into, Folding, HeaderValue};
+use super::value::{read_line_into, HeaderValue};
 use super::wire::Wire;
 
 /// An address-valued header. `K` carries the identity and the policy; the
@@ -136,12 +136,10 @@ impl<K: NameAddrKind> NameAddrHeader<K> {
 }
 
 impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
+    type Lines = K::Lines;
+
     fn header_name() -> HeaderName {
         K::name()
-    }
-
-    fn folding() -> Folding {
-        K::FOLDING
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
@@ -179,7 +177,7 @@ impl<K: NameAddrKind> std::fmt::Display for NameAddrHeader<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::{Contact, PAssertedIdentity, RouteEntry, To};
+    use crate::header::{Contact, Folding, PAssertedIdentity, RouteEntry, To};
 
     #[test]
     fn the_tag_api_reads_and_rewrites_in_place() {

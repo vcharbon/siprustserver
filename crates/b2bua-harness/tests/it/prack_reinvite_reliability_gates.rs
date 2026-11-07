@@ -36,7 +36,7 @@ const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127
 const BOB_RSEQ: u32 = 4711;
 
 fn requires_100rel(resp: &SipResponse) -> bool {
-    resp.header::<Require>().and_then(Result::ok).is_some_and(|r| r.contains("100rel"))
+    resp.token_set::<Require>().and_then(Result::ok).is_some_and(|r| r.contains("100rel"))
 }
 
 fn has_rseq(resp: &SipResponse) -> bool {
@@ -108,7 +108,7 @@ async fn a_provisional_to_a_reinvite_whose_originator_offered_no_100rel_leaves_u
     assert!(
         re_uas
             .request()
-            .header::<Supported>()
+            .token_set::<Supported>()
             .expect("a Supported")
             .expect("readable Supported")
             .contains("100rel"),

@@ -205,7 +205,7 @@ Content-Length: 0\r\n\r\n";
     };
     assert_eq!(resp.status(), 420, "unsupported Proxy-Require → 420 Bad Extension");
     let unsupported =
-        resp.header::<Unsupported>().expect("420 carries Unsupported").expect("reads");
+        resp.token_set::<Unsupported>().expect("420 carries Unsupported").expect("reads");
     assert!(
         unsupported.contains("bogus-extension-xyz"),
         "Unsupported header must list the offending option-tag, got {unsupported:?}"

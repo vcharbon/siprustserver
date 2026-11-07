@@ -20,7 +20,7 @@ use super::kind::CredentialsKind;
 use super::name::HeaderName;
 use super::params::{read_auth_params, ParamValue, Params};
 use super::scan::{skip_ws, sub, token_end};
-use super::value::{Folding, HeaderValue};
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// An authentication scheme and its parameters.
@@ -83,12 +83,10 @@ impl<K: CredentialsKind> Credentials<K> {
 }
 
 impl<K: CredentialsKind> HeaderValue for Credentials<K> {
+    type Lines = K::Lines;
+
     fn header_name() -> HeaderName {
         K::name()
-    }
-
-    fn folding() -> Folding {
-        K::FOLDING
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
@@ -152,7 +150,7 @@ impl<K: CredentialsKind> std::fmt::Display for Credentials<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::{Authorization, WwwAuthenticate};
+    use crate::header::{Authorization, Folding, WwwAuthenticate};
 
     #[test]
     fn a_challenge_reads_its_parameters() {

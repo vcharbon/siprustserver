@@ -446,7 +446,7 @@ const RELIABLE: &str = "100rel";
 /// Whether `invite` requires reliable provisionals (RFC 3262 §3).
 fn requires_100rel(invite: &SipRequest) -> bool {
     invite
-        .header::<sip_message::header::Require>()
+        .token_set::<sip_message::header::Require>()
         .and_then(Result::ok)
         .is_some_and(|required| required.contains(RELIABLE))
 }

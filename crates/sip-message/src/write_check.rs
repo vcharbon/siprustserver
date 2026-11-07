@@ -13,7 +13,7 @@ use std::fmt;
 
 use crate::char_class::is_token_char;
 use crate::control_bytes::{bare_control_byte, is_control, Escapes};
-use crate::header::HeaderName;
+use crate::header::{is_single_valued, HeaderName};
 use crate::parser::custom::headers::line_refusal;
 use crate::parser::{FirstIngressBound, SipParserLimits};
 
@@ -33,6 +33,8 @@ pub enum Position {
     QuotedText,
     /// A request or status line as rendered.
     StartLine,
+    /// The lines of one header: one, for a single-valued header.
+    HeaderLines,
 }
 
 impl fmt::Display for Position {
@@ -43,6 +45,7 @@ impl fmt::Display for Position {
             Position::ReasonPhrase => "reason phrase",
             Position::QuotedText => "quoted text",
             Position::StartLine => "start line",
+            Position::HeaderLines => "header lines",
         })
     }
 }
@@ -108,6 +111,25 @@ fn line_within(name: &str, value: &str, max_length: usize) -> Result<(), WriteRe
         Some(reason) => Err(refusal(Position::HeaderValue, format!("{name}: {reason}"))),
         None => Ok(()),
     }
+}
+
+/// Every line a writer states for one header: at most one of a single-valued
+/// header (`header::SINGLE_VALUED`, RFC 3261 §7.3.1), and each a
+/// [`header_line`], or a [`new_request_line`] under `first_ingress` on a new
+/// request.
+pub fn header_lines<S: AsRef<str>>(
+    name: &str,
+    values: &[S],
+    first_ingress: Option<&FirstIngressBound>,
+) -> Result<(), WriteRefusal> {
+    if values.len() > 1 && is_single_valued(&HeaderName::from(name)) {
+        let reason = format!("{name} is single-valued, {} lines stated", values.len());
+        return Err(refusal(Position::HeaderLines, reason));
+    }
+    values.iter().try_for_each(|value| match first_ingress {
+        Some(bound) => new_request_line(name, value.as_ref(), bound),
+        None => header_line(name, value.as_ref()),
+    })
 }
 
 /// A reason phrase: any text but a control byte other than HTAB.
@@ -225,6 +247,18 @@ mod tests {
         let e = header_line("X-A", "a\r\nb").expect_err("refused");
         assert_eq!(e.position, Position::HeaderValue);
         assert!(e.reason.starts_with("X-A: byte 0x0d at 1"), "{e}");
+    }
+
+    #[test]
+    fn a_single_valued_header_takes_one_line() {
+        assert!(header_lines("Subject", &["one"], None).is_ok());
+        assert!(header_lines("X-Note", &["one", "two"], None).is_ok());
+        let e = header_lines("s", &["one", "two"], None).expect_err("Subject twice");
+        assert_eq!(e.position, Position::HeaderLines);
+        assert!(header_lines("X-A", &["a", "b\r\n"], None).is_err());
+        let bound = FirstIngressBound { header_length: 8, ..FirstIngressBound::DEFAULT };
+        assert!(header_lines("X-A", &["a"], Some(&bound)).is_ok());
+        assert!(header_lines("X-A", &["a long value"], Some(&bound)).is_err());
     }
 
     #[test]

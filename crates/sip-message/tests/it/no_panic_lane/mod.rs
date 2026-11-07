@@ -34,6 +34,7 @@ mod probe;
 pub(crate) mod readable;
 mod regressions;
 pub(crate) mod seeds;
+pub(crate) mod typed_read;
 
 use probe::Digest;
 use seeds::Seed;

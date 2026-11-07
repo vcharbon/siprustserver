@@ -14,6 +14,7 @@
 mod edit;
 mod entry;
 mod list;
+mod read;
 mod render;
 mod seed;
 mod start;

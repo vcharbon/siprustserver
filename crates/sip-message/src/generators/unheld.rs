@@ -38,11 +38,11 @@ fn in_dialog_of(
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
     let draft = RequestDraft::new(method.clone(), uri)
         .push(hop)
-        .push(MaxForwards::DEFAULT)
+        .set(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
-        .push(CSeq::new(cseq, method));
+        .set(CSeq::new(cseq, method));
     Ok(with_routes(draft, &routes))
 }
 
@@ -68,7 +68,7 @@ pub fn generate_bye_for_unheld_2xx(
     hop: Via,
 ) -> Result<SipRequest, GenerateError> {
     let draft = in_dialog_of(final_response, Method::Bye, cseq, hop)?;
-    emit::request(draft.push(ContentLength::new(0)))
+    emit::request(draft.set(ContentLength::new(0)))
 }
 
 /// The ACK of a non-2xx final to an INVITE whose UAC holds no record of it
@@ -90,15 +90,15 @@ pub fn generate_ack_for_unheld_non_2xx(
     }
     let mut draft = RequestDraft::new(Method::Ack, request_uri)
         .push(via)
-        .push(MaxForwards::DEFAULT)
+        .set(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
-        .push(CSeq::new(final_response.cseq().seq(), Method::Ack));
+        .set(CSeq::new(final_response.cseq().seq(), Method::Ack));
     if !route.is_empty() {
         draft = draft.push_raw(HeaderName::Route, SipStr::owned(route));
     }
-    emit::request(draft.push(ContentLength::new(0)))
+    emit::request(draft.set(ContentLength::new(0)))
 }
 
 #[cfg(test)]

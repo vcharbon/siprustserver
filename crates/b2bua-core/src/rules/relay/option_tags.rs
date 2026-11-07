@@ -1,7 +1,7 @@
 //! The call's option-tag offer and withhold on the assembled headers of a leg
 //! it originates ([`super::build_b_leg`]).
 
-use sip_message::header::{self, HeaderName, HeaderValue, TokenListHeader};
+use sip_message::header::{self, HeaderName, HeaderValue, TokenListHeader, TokenSet};
 use sip_message::{SipHeader as MsgHeader, SipParseError, SipRequest, SipStr};
 
 /// Whether `req` offers `100rel` (RFC 3262 §3). Ingress refuses a `Require`
@@ -37,7 +37,7 @@ fn stated_set<K: header::kind::TokenKind>(
         .map(|h| TokenListHeader::<K>::parse(&h.value))
         .collect::<Result<Vec<_>, _>>();
     match lines {
-        Ok(lines) => Ok(TokenListHeader::combine(lines)),
+        Ok(lines) => Ok(TokenListHeader::union(lines)),
         Err(e) => {
             unreadable_option_tags(&name, &e);
             Err(())

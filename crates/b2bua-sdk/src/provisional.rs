@@ -21,7 +21,7 @@ pub fn originator_final_sent(call: &RuleCall) -> bool {
 /// response whose `Require` or `RSeq` does not read, so one here is a defect:
 /// logged, and read as no reliable provisional.
 pub fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
-    let requires = resp.header::<header::Require>()?.inspect_err(unreadable).ok()?;
+    let requires = resp.token_set::<header::Require>()?.inspect_err(unreadable).ok()?;
     if !requires.contains("100rel") {
         return None;
     }

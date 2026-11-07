@@ -101,26 +101,12 @@ pub(super) fn extract_identity(
 ) -> Result<Identity, SipParseError> {
     let wire = mode == ExtractMode::Wire;
 
-    // From/To/Call-ID/CSeq appear exactly once; only Via may repeat.
-    if idx.from.count > 1 {
-        return Err(SipParseError::new(
-            "Multiple From headers (RFC 3261 §8.1.1 — exactly one required)",
-        ));
-    }
-    if idx.to.count > 1 {
-        return Err(SipParseError::new(
-            "Multiple To headers (RFC 3261 §8.1.1 — exactly one required)",
-        ));
-    }
-    if idx.call_id.count > 1 {
-        return Err(SipParseError::new(
-            "Multiple Call-ID headers (RFC 3261 §8.1.1 — exactly one required)",
-        ));
-    }
-    if idx.cseq.count > 1 {
-        return Err(SipParseError::new(
-            "Multiple CSeq headers (RFC 3261 §8.1.1 — exactly one required)",
-        ));
+    // A single-valued header appears once (RFC 3261 §7.3.1): From, To,
+    // Call-ID and CSeq among them.
+    if let Some(name) = &idx.repeated {
+        return Err(SipParseError::new(format!(
+            "Multiple {name} headers (RFC 3261 §7.3.1 — one value)"
+        )));
     }
 
     let exemptions = &limits.exemptions;

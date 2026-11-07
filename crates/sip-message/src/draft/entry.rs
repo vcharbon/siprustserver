@@ -9,7 +9,7 @@
 use std::any::Any;
 
 use crate::error::SipParseError;
-use crate::header::{HeaderId, HeaderKey, HeaderName, HeaderValue, Wire};
+use crate::header::{HeaderId, HeaderKey, HeaderName, HeaderValue, SingleHeader, Wire};
 use crate::sip_str::SipStr;
 use crate::write_check::{self, WriteRefusal};
 
@@ -140,6 +140,16 @@ impl Entry {
             }
         }
         H::parse_line(&self.text())
+    }
+
+    /// The one value this line of a single-valued header carries.
+    pub(crate) fn read_one<H: SingleHeader>(&self) -> Result<H, SipParseError> {
+        if let Value::Typed(value) = &self.value {
+            if let Some(typed) = value.as_any().downcast_ref::<H>() {
+                return Ok(typed.clone());
+            }
+        }
+        H::parse(&self.text())
     }
 }
 

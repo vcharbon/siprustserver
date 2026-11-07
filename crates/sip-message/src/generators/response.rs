@@ -108,7 +108,7 @@ pub(super) fn echo_to(
     let tag = || to_tag.map(str::to_owned).unwrap_or_else(|| fallback_to_tag(call_id));
     match To::parse(&line) {
         Ok(to) if to.tag().is_some() => draft.push_raw(HeaderName::To, line),
-        Ok(to) => draft.push(to.with_tag(SipStr::owned(&tag()))),
+        Ok(to) => draft.set(to.with_tag(SipStr::owned(&tag()))),
         // A To the strict reader cannot read still leaves tagged, so the peer
         // rejects the address it sent rather than a tag this stack dropped.
         Err(_) => draft

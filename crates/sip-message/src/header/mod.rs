@@ -10,14 +10,17 @@
 //! A header's *value* is a [`HeaderValue`]: one type carrying both `parse` and
 //! `render`, so a value is its own builder and there is no second shape to keep
 //! aligned. The families are generic over a [`kind`] marker that declares the
-//! header's identity, its comma-foldability and its API surface — `tag()`
-//! exists only on From and To, parameters only where the grammar has them.
+//! header's identity, its cardinality and its API surface — `tag()` exists
+//! only on From and To, parameters only where the grammar has them. A
+//! single-valued header ([`SingleHeader`]) reads as at most one value, a list
+//! header ([`ListHeader`]) as its list.
 //!
 //! Refer to the value types qualified (`header::From`) — a glob import of this
 //! module would shadow the prelude's `From` trait.
 
 mod aliases;
 mod authority;
+mod cardinality;
 mod charging;
 mod class;
 mod credentials;
@@ -59,6 +62,7 @@ pub use aliases::{
     WwwAuthenticate,
 };
 pub use authority::{host_of, message_id_domain, network_host};
+pub use cardinality::{lines, Cardinality, ListHeader, Many, SingleHeader, TokenSet};
 pub use charging::ChargingVector;
 pub use class::HeaderClass;
 pub use credentials::Credentials;
@@ -82,6 +86,7 @@ pub use restatement::Restatement;
 pub use retry_after::retry_after_seconds;
 pub(crate) use scan::quoted_close;
 pub use sent_by::{SentBy, SentByRef};
+pub(crate) use single_valued::Met;
 pub use single_valued::{is_single_valued, Listed, SingleValued, SINGLE_VALUED};
 pub use token_list::TokenListHeader;
 pub use token_params::{parse_token_params, TokenParamsHeader};

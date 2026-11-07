@@ -112,6 +112,13 @@ default, consulted only by the ingress gate. A tool's reading names its own set
 exempted, and every typed reader reads it on every deployment.
 _Avoid_: "tolerance", "quirk mode".
 
+**Single-valued header** (RFC 3261 §7.3.1, ADR-0053 §7):
+A header a message carries on one line at most, compact forms counted, as
+`header::SINGLE_VALUED` states. It reads as `msg.header::<H>()`, an `Option` of
+its one value; every other header is a list, read as `msg.list::<H>()`. Every
+reading refuses a second line, and no draft freezes with one.
+_Avoid_: "the first value" of a single-valued header (there is no second).
+
 **Policy rejection** / **Buggy rejection**:
 The two classes a parser rejection of a grammar-valid input falls into.
 *Policy* = a documented strictness rule (the ABNF suite's policy patterns,

@@ -252,7 +252,7 @@ async fn a_failover_leg_without_a_description_withholds_100rel() {
     let mut uas = carol.receive("INVITE").await;
     let req = uas.request();
     assert_eq!(req.body().as_ref(), DATA, "the stated part alone: no description rides");
-    let supported = req.header::<Supported>().map(|s| s.expect("readable Supported"));
+    let supported = req.token_set::<Supported>().map(|s| s.expect("readable Supported"));
     assert!(!supported.is_some_and(|s| s.contains("100rel")), "100rel withheld");
 
     uas.respond(200, "OK").with_sdp(OFFER).await;

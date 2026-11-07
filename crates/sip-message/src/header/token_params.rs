@@ -13,7 +13,7 @@ use super::kind::TokenParamsKind;
 use super::name::HeaderName;
 use super::params::{read_params, ParamReading, ParamValue, Params};
 use super::scan::{byte_at, clamped, digits_end, scan_until, skip_ws, sub, token_end};
-use super::value::{Folding, HeaderValue};
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// A token followed by `;`-parameters.
@@ -187,12 +187,10 @@ fn read_token_params(
 }
 
 impl<K: TokenParamsKind> HeaderValue for TokenParamsHeader<K> {
+    type Lines = K::Lines;
+
     fn header_name() -> HeaderName {
         K::name()
-    }
-
-    fn folding() -> Folding {
-        K::FOLDING
     }
 
     const EMPTY_LINE_READS: bool = K::EMPTY_LINE_READS;

@@ -60,7 +60,7 @@ const B2: &str = "127.0.0.1:5092";
 const BOB_RSEQ: u32 = 4711;
 
 fn requires_100rel(resp: &SipResponse) -> bool {
-    resp.header::<Require>().and_then(Result::ok).is_some_and(|r| r.contains("100rel"))
+    resp.token_set::<Require>().and_then(Result::ok).is_some_and(|r| r.contains("100rel"))
 }
 
 /// A decision that MASKS the callee's first 18x behind a bare 180 (`drop-sdp`):

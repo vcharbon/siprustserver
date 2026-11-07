@@ -2,6 +2,7 @@
 //! the wire parser at its default limits, at first ingress, then the typed
 //! reader of the header.
 
+use crate::no_panic_lane::typed_read::{values, ReadLines};
 use sip_message::header::{self, HeaderName, HeaderValue};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParseError, SipParser, SipParserLimits};
@@ -189,15 +190,14 @@ fn lines_of(msg: &SipMessage, name: HeaderName) -> usize {
 
 /// `H`'s typed reader over an accepted message: its lines read under their
 /// canonical name, and every value reads.
-pub fn typed<H: HeaderValue>(msg: &SipMessage) -> Result<(), String> {
+pub fn typed<H: HeaderValue>(msg: &SipMessage) -> Result<(), String>
+where
+    H::Lines: ReadLines<H>,
+{
     if lines_of(msg, H::header_name()) == 0 {
         return Err(format!("no {} line under its canonical name", H::header_name()));
     }
-    msg.list::<H>().map(|_| ()).map_err(|e| e.reason)?;
-    match msg.header::<H>() {
-        Some(Err(e)) => Err(e.reason),
-        Some(Ok(_)) | None => Ok(()),
-    }
+    values::<H>(msg).map(|_| ()).map_err(|e| e.reason)
 }
 
 /// A header no typed reader serves: its lines read under their canonical name.

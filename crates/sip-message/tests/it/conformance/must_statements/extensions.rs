@@ -96,8 +96,8 @@ pub(super) fn rows() -> Vec<Row> {
             "rule-reason-off-grammar-parameter",
             head.clone().add("Reason: Q.850;cause=16;host=<sip:a.example.com>"),
             |msg| {
-                let reason =
-                    msg.header::<header::Reason>().ok_or("no value")?.map_err(|e| e.reason)?;
+                let reasons = msg.list::<header::Reason>().map_err(|e| e.reason)?;
+                let reason = reasons.first().ok_or("no value")?;
                 reason
                     .params()
                     .value("cause")

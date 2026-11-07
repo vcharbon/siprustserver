@@ -9,3 +9,5 @@ pub mod probe;
 mod readable;
 #[path = "../../../crates/sip-message/tests/it/no_panic_lane/seeds.rs"]
 pub mod seeds;
+#[path = "../../../crates/sip-message/tests/it/no_panic_lane/typed_read.rs"]
+mod typed_read;

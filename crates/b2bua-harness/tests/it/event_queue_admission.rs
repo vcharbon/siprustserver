@@ -52,7 +52,7 @@ async fn refused(s: &B2buaScene) {
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
     let resp = call.expect(503).await;
     assert!(resp.header::<RetryAfter>().is_some(), "the new-call 503 carries a Retry-After");
-    assert!(resp.header::<Reason>().is_none(), "the new-call 503 carries no Reason");
+    assert!(resp.first::<Reason>().is_none(), "the new-call 503 carries no Reason");
 }
 
 /// A new INVITE from alice, `emergency` or not, admitted, answered by bob and
@@ -167,7 +167,7 @@ async fn a_held_router_draws_the_refusal_past_the_queues_age_and_no_100() {
     let mut late = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
     let resp = late.expect(503).await;
     assert!(resp.header::<RetryAfter>().is_some(), "the new-call 503 carries a Retry-After");
-    assert!(resp.header::<Reason>().is_none(), "the new-call 503 carries no Reason");
+    assert!(resp.first::<Reason>().is_none(), "the new-call 503 carries no Reason");
     late.retransmit().await;
     s.h.advance(TRYING_BOUND_PASSED).await;
     assert_eq!(trying_sent_to(&s, s.alice.addr()), trying_before, "no 100 past the age");

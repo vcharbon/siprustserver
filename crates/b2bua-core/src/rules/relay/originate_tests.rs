@@ -48,7 +48,7 @@ Content-Length: 0\r\n\r\n",
 
     /// The b-leg INVITE's Contact.
     fn contact_of(req: &SipRequest) -> Contact {
-        req.header::<Contact>().expect("b-leg INVITE has a Contact").expect("a readable Contact")
+        req.first::<Contact>().expect("b-leg INVITE has a Contact").expect("a readable Contact")
     }
 
     // The b-leg INVITE's dialog identity is independent of the a-leg's: a fresh

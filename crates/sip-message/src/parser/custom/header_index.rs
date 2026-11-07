@@ -10,7 +10,7 @@
 //! indexing a message allocates only for the multi-valued headers it actually
 //! carries.
 
-use crate::header::HeaderId;
+use crate::header::{HeaderId, HeaderName, Met};
 use crate::header_table::HeaderTable;
 use crate::sip_str::SipStr;
 use crate::types::SipHeader;
@@ -51,6 +51,9 @@ pub struct HeaderIndex<'a> {
     pub rack: Slot<'a>,
     pub refer_to: Slot<'a>,
     pub max_forwards: Slot<'a>,
+    /// The first single-valued header (`header::SINGLE_VALUED`) met on a
+    /// second line.
+    pub repeated: Option<HeaderName>,
 }
 
 impl<'a> HeaderIndex<'a> {
@@ -69,7 +72,12 @@ impl<'a> HeaderIndex<'a> {
 
     fn file(lines: impl Iterator<Item = (Option<HeaderId>, &'a SipHeader)>) -> Self {
         let mut idx = Self::default();
+        let mut met = Met::default();
         for (id, header) in lines {
+            if idx.repeated.is_none() && met.repeated_line(id, header.name.as_str()) {
+                idx.repeated =
+                    Some(id.map_or_else(|| HeaderName::Other(header.name.clone()), HeaderId::name));
+            }
             let Some(id) = id else { continue };
             let value = &header.value;
             match id {
@@ -124,10 +132,19 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_single_valued_header_keeps_the_first_and_counts_both() {
-        let headers = vec![header("From", "<sip:a@h>"), header("From", "<sip:b@h>")];
+    fn a_repeated_single_valued_header_is_named_in_any_form() {
+        let headers = vec![header("From", "<sip:a@h>"), header("f", "<sip:b@h>")];
+        assert_eq!(HeaderIndex::of_lines(&headers).repeated, Some(HeaderName::From));
+        let headers = vec![
+            header("P-Charging-Vector", "icid-value=1"),
+            header("p-charging-vector", "icid-value=2"),
+        ];
         let idx = HeaderIndex::of_lines(&headers);
-        assert_eq!(idx.from.count, 2);
-        assert_eq!(idx.from.first.map(|v| v.as_str()), Some("<sip:a@h>"));
+        assert_eq!(
+            idx.repeated.map(|n| n.as_wire_str().to_owned()).as_deref(),
+            Some("p-charging-vector")
+        );
+        let headers = vec![header("Via", "SIP/2.0/UDP a"), header("Via", "SIP/2.0/UDP b")];
+        assert_eq!(HeaderIndex::of_lines(&headers).repeated, None);
     }
 }

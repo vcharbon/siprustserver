@@ -6,12 +6,14 @@
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::name::HeaderName;
+use super::cardinality::{held_to_the_table, lines};
+use super::name::{HeaderId, HeaderName};
 use super::params::{read_params, ParamReading, ParamValue, Params};
 use super::reading::Reading;
 use super::scan::{byte_at, scan_until, skip_ws, sub, sub_trimmed, token_end};
+use super::single_valued::Listed;
 use super::uri::{read_sent_by, HostPort};
-use super::value::{Folding, HeaderValue};
+use super::value::HeaderValue;
 use super::wire::Wire;
 use crate::ip_literal::{ip_host, same_host};
 use crate::parser::custom::structured_headers::top_level_comma_entries;
@@ -331,13 +333,13 @@ impl Via {
     }
 }
 
+held_to_the_table!(<Via as HeaderValue>::Lines, Listed::Known(HeaderId::Via));
+
 impl HeaderValue for Via {
+    type Lines = lines::Comma;
+
     fn header_name() -> HeaderName {
         HeaderName::Via
-    }
-
-    fn folding() -> Folding {
-        Folding::Comma
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {

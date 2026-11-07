@@ -54,7 +54,7 @@ async fn expect_refused(alice: &Agent, bob: &Agent, b2bua: &B2buaSut, emergency:
     let mut call = invite.send().await;
     let resp = call.expect(503).await;
     assert!(resp.header::<RetryAfter>().is_some(), "a capacity 503 carries Retry-After");
-    assert!(resp.header::<Reason>().is_none(), "a capacity 503 carries no Reason");
+    assert!(resp.first::<Reason>().is_none(), "a capacity 503 carries no Reason");
     assert!(resp.to().tag().is_some(), "non-100 final carries a To-tag (RFC §8.2.6.2)");
 }
 

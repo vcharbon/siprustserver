@@ -146,7 +146,7 @@ async fn a_repeat_of_a_stack_pracked_provisional_draws_no_second_prack() {
     assert!(
         re_uas
             .request()
-            .header::<Supported>()
+            .token_set::<Supported>()
             .expect("a Supported")
             .expect("readable Supported")
             .contains("100rel"),

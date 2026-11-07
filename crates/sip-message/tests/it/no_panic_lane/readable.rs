@@ -5,6 +5,7 @@
 //! A header whose row `readable/<header>` is on the conformance ratchet is left
 //! out of [`assert_readable`] until the row leaves the list.
 
+use super::typed_read::{values, ReadLines};
 use sip_message::header::{self, HeaderValue};
 use sip_message::{SipMessage, SipParseError};
 
@@ -16,8 +17,11 @@ fn on_the_ratchet(row: &str) -> bool {
 }
 
 /// The reason `H`'s typed reader refuses `msg`'s lines of it.
-fn refusal<H: HeaderValue>(msg: &SipMessage) -> Option<SipParseError> {
-    msg.list::<H>().err().or_else(|| msg.header::<H>().and_then(Result::err))
+fn refusal<H: HeaderValue>(msg: &SipMessage) -> Option<SipParseError>
+where
+    H::Lines: ReadLines<H>,
+{
+    values::<H>(msg).err()
 }
 
 /// A final of 300 or more establishes no dialog, so its Contact, Route and

@@ -222,6 +222,26 @@ whole on a line that does not read; with none stated a tool reads
 recording, and its parties read the wire, under the reading its lane states
 (the interpreter's `Lane::reader`); upstream's lanes state `built()`.
 
+### 7. Header cardinality
+
+A single-valued header (RFC 3261 §7.3.1: a header whose grammar is no comma
+list) stands on one line of a message, compact forms counted. The headers are
+the ones `sip_message::header::SINGLE_VALUED` states by hand, each row citing
+its grammar, errata applied. Every way a message is made holds it: each
+reading refuses a second line, `read_stored` included, as `hydrate_request`
+does; a draft does not freeze with one (`IncompleteDraft::Repeated`), and a
+header a routing decision states on two lines is skipped
+(`write_check::header_lines`).
+
+The cardinality is in the types. A value type declares its `Lines`
+(`header::lines::Single`, or the list layouts `Comma`, `Opaque`, `SetPerLine`),
+checked at compile time against the table, so a type and the gate never
+disagree. A single-valued header reads as `msg.header::<H>()`, its one value,
+and is written with `Draft::set`; a list header reads as `msg.list::<H>()`,
+`first::<H>()` for its first value, or `token_set::<H>()` for the one set its
+lines make, and is appended with `push` and `prepend`. Neither has the other's
+accessor.
+
 ## Considered and rejected
 
 - **Percent-encode raw UTF-8 on egress.** Rewriting a URI a peer sent changes

@@ -17,9 +17,10 @@ use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use super::cardinality::TokenSet;
 use super::kind::TokenKind;
 use super::name::HeaderName;
-use super::value::{Folding, HeaderValue};
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// Whether `s` is one RFC 3261 §25.1 `token`: at least one character, all of
@@ -115,12 +116,10 @@ impl<K: TokenKind> TokenListHeader<K> {
 }
 
 impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
+    type Lines = K::Lines;
+
     fn header_name() -> HeaderName {
         K::name()
-    }
-
-    fn folding() -> Folding {
-        K::FOLDING
     }
 
     /// Every entry is one token: an entry that is not, an empty entry, and an
@@ -153,12 +152,12 @@ impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
             out.str(token.as_str());
         }
     }
+}
 
-    const COMBINES: bool = true;
-
+impl<K: TokenKind> TokenSet for TokenListHeader<K> {
     /// Several lines of a set-like header are one set.
-    fn combine(values: Vec<Self>) -> Option<Self> {
-        let mut it = values.into_iter();
+    fn union(sets: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut it = sets.into_iter();
         let first = it.next()?;
         Some(first.extended(it.flat_map(|extra| extra.tokens)))
     }
@@ -190,7 +189,7 @@ mod tests {
             Supported::parse(&SipStr::owned("100rel")).unwrap(),
             Supported::parse(&SipStr::owned("timer, 100rel")).unwrap(),
         ];
-        let merged = Supported::combine(lines).unwrap();
+        let merged = Supported::union(lines).unwrap();
         assert_eq!(merged.to_wire(), "100rel, timer");
     }
 

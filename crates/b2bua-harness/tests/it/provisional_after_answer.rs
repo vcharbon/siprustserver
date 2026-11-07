@@ -271,7 +271,7 @@ async fn a_reliable_consult_provisional_is_acknowledged_by_the_stack() {
     assert!(
         carol_uas
             .request()
-            .header::<Supported>()
+            .token_set::<Supported>()
             .expect("a Supported")
             .expect("readable Supported")
             .contains("100rel"),
@@ -317,7 +317,7 @@ async fn the_fake_prack_mask_offers_a_consult_no_reliability_and_shows_nothing()
     assert!(
         !carol_uas
             .request()
-            .header::<Supported>()
+            .token_set::<Supported>()
             .is_some_and(|s| s.expect("readable Supported").contains("100rel")),
         "fake-prack offers no 100rel on a consult INVITE dialled after the answer",
     );

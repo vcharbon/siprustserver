@@ -218,8 +218,9 @@ fn applied(update: &HeaderUpdate, lines: Vec<String>) -> Vec<String> {
 /// `withheld` names what the message keeps as it is whatever is stated,
 /// `carried` reads the message's lines of a name, `thaw` opens its draft,
 /// `first_ingress` the bound of a new request. A name whose resolved lines
-/// the wire cannot carry whole keeps its carried lines, its refusal pushed
-/// onto `skipped`.
+/// the wire cannot carry whole, or that resolves to a second line of a
+/// single-valued header, keeps its carried lines, its refusal pushed onto
+/// `skipped`.
 fn restated<D: Draft>(
     sets: &[&SipHeaderUpdates],
     withheld: impl Fn(&str) -> bool,
@@ -250,11 +251,7 @@ fn restated<D: Draft>(
         if lines == start {
             continue;
         }
-        let check = |line: &String| match first_ingress {
-            Some(bound) => write_check::new_request_line(header.as_wire_str(), line, bound),
-            None => write_check::header_line(header.as_wire_str(), line),
-        };
-        match lines.iter().try_for_each(check) {
+        match write_check::header_lines(header.as_wire_str(), &lines, first_ingress) {
             Ok(()) => edits.push((header, lines)),
             Err(refusal) => skipped.push(refusal),
         }

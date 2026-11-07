@@ -6,12 +6,14 @@
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::name::HeaderName;
+use super::cardinality::{held_to_the_table, lines};
+use super::name::{HeaderId, HeaderName};
 use super::name_addr::{AddrForm, NameAddr};
 use super::params::{read_params, ParamReading, Params};
 use super::scan::{clamped, digits_end};
+use super::single_valued::Listed;
 use super::uri::{Uri, UriRole};
-use super::value::{Folding, HeaderValue};
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// One location reference (RFC 6442 §4.1): `locationValue = LAQUOT
@@ -33,13 +35,13 @@ impl Geolocation {
     }
 }
 
+held_to_the_table!(<Geolocation as HeaderValue>::Lines, Listed::Known(HeaderId::Geolocation));
+
 impl HeaderValue for Geolocation {
+    type Lines = lines::Comma;
+
     fn header_name() -> HeaderName {
         HeaderName::Geolocation
-    }
-
-    fn folding() -> Folding {
-        Folding::Comma
     }
 
     /// The URI between angle brackets, read by the one URI reader, then the
@@ -90,13 +92,16 @@ impl GeolocationError {
     }
 }
 
+held_to_the_table!(
+    <GeolocationError as HeaderValue>::Lines,
+    Listed::Known(HeaderId::GeolocationError)
+);
+
 impl HeaderValue for GeolocationError {
+    type Lines = lines::Single;
+
     fn header_name() -> HeaderName {
         HeaderName::GeolocationError
-    }
-
-    fn folding() -> Folding {
-        Folding::Single
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
@@ -138,13 +143,16 @@ impl GeolocationRouting {
     }
 }
 
+held_to_the_table!(
+    <GeolocationRouting as HeaderValue>::Lines,
+    Listed::Known(HeaderId::GeolocationRouting)
+);
+
 impl HeaderValue for GeolocationRouting {
+    type Lines = lines::Single;
+
     fn header_name() -> HeaderName {
         HeaderName::GeolocationRouting
-    }
-
-    fn folding() -> Folding {
-        Folding::Single
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {

@@ -4,10 +4,12 @@
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::name::HeaderName;
+use super::cardinality::{held_to_the_table, lines};
+use super::name::{HeaderId, HeaderName};
 use super::params::{read_params, ParamReading, ParamValue, Params};
 use super::scan::{byte_at, clamped, skip_ws, sub, token_end};
-use super::value::{Folding, HeaderValue};
+use super::single_valued::Listed;
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// A media type: its type and subtype, and its parameters.
@@ -102,13 +104,13 @@ fn read_essence(value: &SipStr) -> Result<(SipStr, usize, usize), String> {
     Ok((essence, type_end, end))
 }
 
+held_to_the_table!(<MediaType as HeaderValue>::Lines, Listed::Known(HeaderId::ContentType));
+
 impl HeaderValue for MediaType {
+    type Lines = lines::Single;
+
     fn header_name() -> HeaderName {
         HeaderName::ContentType
-    }
-
-    fn folding() -> Folding {
-        Folding::Single
     }
 
     /// `m-parameter = m-attribute EQUAL m-value`: a parameter with no value

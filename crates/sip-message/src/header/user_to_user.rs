@@ -9,10 +9,12 @@
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::name::HeaderName;
+use super::cardinality::{held_to_the_table, lines};
+use super::name::{HeaderId, HeaderName};
 use super::params::{read_params, ParamReading, ParamValue, Params};
 use super::scan::{byte_at, quoted_close, read_quoted, sub, token_end};
-use super::value::{Folding, HeaderValue};
+use super::single_valued::Listed;
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// One UUI data element and its parameters (`purpose`, `content`,
@@ -38,13 +40,13 @@ impl UserToUser {
     }
 }
 
+held_to_the_table!(<UserToUser as HeaderValue>::Lines, Listed::Known(HeaderId::UserToUser));
+
 impl HeaderValue for UserToUser {
+    type Lines = lines::Comma;
+
     fn header_name() -> HeaderName {
         HeaderName::UserToUser
-    }
-
-    fn folding() -> Folding {
-        Folding::Comma
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {

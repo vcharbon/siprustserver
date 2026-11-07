@@ -69,12 +69,12 @@ pub struct SipParserLimits {
     /// reads (ADR-0053 §6).
     pub wire_grammar: bool,
     /// When `true` (default) a value meets the gates a stack-built message and a
-    /// harness reading are held to as well: numeric values, a repeated
-    /// Max-Forwards, quoted-strings, Digest credentials, one tag on a From or
-    /// To, a To-tag on a response past 100. Only [`read_stored`] sets `false`:
-    /// a stored image met them on its way in, or holds what the stack stated. A
-    /// control byte and a Content-Length that does not frame the message are
-    /// refused in every reading.
+    /// harness reading are held to as well: numeric values, quoted-strings,
+    /// Digest credentials, one tag on a From or To, a To-tag on a response past
+    /// 100. Only [`read_stored`] sets `false`: a stored image met them on its
+    /// way in, or holds what the stack stated. A control byte, a Content-Length
+    /// that does not frame the message and a second line of a single-valued
+    /// header (`header::SINGLE_VALUED`) are refused in every reading.
     pub value_gates: bool,
     /// How the bytes handed to `parse` were delimited, which decides the body
     /// of a message that states no `Content-Length` (RFC 3261 §18.3).

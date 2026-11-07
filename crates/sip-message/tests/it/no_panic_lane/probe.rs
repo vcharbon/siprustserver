@@ -7,6 +7,7 @@
 
 use std::fmt::Debug;
 
+use super::typed_read::{values, ReadLines};
 use super::{echo, readable};
 use sip_message::generators::cancel::generate_cancel;
 use sip_message::generators::generate_invalid_request;
@@ -183,19 +184,19 @@ fn uri(u: &Uri, d: &mut Digest) {
     d.note("uri-same", &u.same_user_identity(u));
 }
 
-fn read<H: HeaderValue>(msg: &SipMessage, d: &mut Digest) {
-    let one = msg.header::<H>();
+fn read<H: HeaderValue>(msg: &SipMessage, d: &mut Digest)
+where
+    H::Lines: ReadLines<H>,
+{
     let label = H::header_name().to_string();
-    d.note(&label, &one);
-    if let Some(Ok(v)) = &one {
-        d.note(&label, &v.to_wire());
-    }
-    if let Ok(all) = msg.list::<H>() {
-        for v in &all {
-            d.note(&label, &v.to_wire());
+    match values::<H>(msg) {
+        Ok(all) => {
+            for v in &all {
+                d.note(&label, &v);
+                d.note(&label, &v.to_wire());
+            }
         }
-    } else {
-        d.note(&label, &"list refused");
+        Err(e) => d.note(&label, &e),
     }
 }
 
@@ -258,10 +259,8 @@ fn typed_reads(msg: &SipMessage, d: &mut Digest) {
         header::Via,
         header::ChargingVector,
     );
-    if let Ok(refer_to) = msg.list::<header::ReferTo>() {
-        for r in &refer_to {
-            uri(r.uri(), d);
-        }
+    if let Some(Ok(refer_to)) = msg.header::<header::ReferTo>() {
+        uri(refer_to.uri(), d);
     }
     if let Ok(pai) = msg.list::<header::PAssertedIdentity>() {
         for p in &pai {

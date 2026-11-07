@@ -6,7 +6,6 @@
 
 use call::helpers::{callee_dialog_mut, fronting_dialog, is_adopted};
 use call::{Call, CallModelState, DialogId, DialogState, LegDisposition};
-use sip_message::header;
 use sip_message::SipResponse;
 
 use crate::rules::relay;
@@ -74,8 +73,7 @@ impl ActionExecutor<'_> {
             .b_legs
             .iter()
             .any(|l| l.leg_id == leg_id && l.disposition() == LegDisposition::Cancelling);
-        let remote_target = contact_uri(resp.header::<header::Contact>(), &call.call_ref, leg_id)
-            .unwrap_or_default();
+        let remote_target = contact_uri(resp.contacts()).unwrap_or_default();
         let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
         if !winner.is_empty() {
             self.track_b_early_dialog(call, leg_id, resp, &winner);

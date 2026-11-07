@@ -47,7 +47,6 @@ fn a_value_ingress_would_refuse_reads() {
     for line in [
         "Expires: soon",
         "Session-Expires: soon",
-        "Max-Forwards: 70",
         "Require: 100rel, x y",
         "Authorization: Digest realm",
     ] {

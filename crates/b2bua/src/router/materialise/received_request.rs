@@ -25,7 +25,7 @@ pub(super) fn rebuild_received_request(record: &RequestRecord) -> Option<SipRequ
         .push_raw(HeaderName::To, SipStr::owned(&record.source_to))
         .push_raw(HeaderName::CallId, SipStr::owned(&record.source_call_id))
         .push_raw(HeaderName::CSeq, SipStr::owned(&cseq))
-        .push(MaxForwards::DEFAULT);
+        .set(MaxForwards::DEFAULT);
     if let Some(stamp) = &record.source_timestamp {
         draft = draft.push_raw(HeaderName::Timestamp, SipStr::owned(stamp));
     }

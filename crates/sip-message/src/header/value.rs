@@ -1,18 +1,21 @@
 //! [`HeaderValue`] — the one trait every structured header value implements.
 //!
 //! Parse and render sit on the same type, so a value is its own builder and
-//! there is no second shape to keep aligned. [`Folding`] states, per header,
-//! how several values of it may be laid out on the wire — the fact a
-//! comma-splitting reader needs and a string literal cannot carry.
+//! there is no second shape to keep aligned. Its [`Cardinality`] states, per
+//! header, whether a message carries one line of it or a list, and how a list
+//! lays its values out — the fact a comma-splitting reader needs and a string
+//! literal cannot carry.
 
 use crate::error::SipParseError;
 use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 
+use super::cardinality::Cardinality;
 use super::name::HeaderName;
 use super::wire::Wire;
 
-/// How the wire may lay out several values of one header.
+/// How the wire lays out the values of one header: the runtime echo of its
+/// [`Cardinality`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Folding {
     /// At most one value per message (From, To, CSeq, Call-ID, Max-Forwards).
@@ -33,11 +36,17 @@ pub enum Folding {
 
 /// A structured header value.
 pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
+    /// How many lines of this header a message carries, as a type
+    /// ([`Cardinality`]).
+    type Lines: Cardinality;
+
     /// The header this value belongs to.
     fn header_name() -> HeaderName;
 
     /// How the wire may lay out several of these.
-    fn folding() -> Folding;
+    fn folding() -> Folding {
+        <Self::Lines as Cardinality>::FOLDING
+    }
 
     /// Read one value — one comma-separated entry for a [`Folding::Comma`]
     /// header, the whole line otherwise.
@@ -70,29 +79,6 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
     /// folds every line of a header into one list allocates it once.
     fn parse_line_into(raw: &SipStr, out: &mut Vec<Self>) -> Result<(), SipParseError> {
         read_line_into(raw, out)
-    }
-
-    /// Whether [`combine`](Self::combine) reads every value: `true` for a type
-    /// that overrides it, which must say so here. A type that keeps the first
-    /// value and carries one value per line is read from its first line only.
-    const COMBINES: bool = false;
-
-    /// Whether a reader of the single logical value reads the first line that
-    /// carries this header and no other: the type keeps the first value
-    /// ([`COMBINES`](Self::COMBINES) is `false`) and a line carries one value
-    /// ([`Folding::Single`] or [`Folding::Opaque`]). A later line, malformed
-    /// or not, then takes no part in that value (RFC 3261 §7.3.1: such a
-    /// header appears once).
-    fn first_line_only() -> bool {
-        !Self::COMBINES && matches!(Self::folding(), Folding::Single | Folding::Opaque)
-    }
-
-    /// The single logical value a reader sees when the message carries several
-    /// lines of this header. Set-like headers union; everything else is the
-    /// first line. Ingress refuses a second line of a single-valued header
-    /// (`header::SINGLE_VALUED`), so only a stored image or a draft holds one.
-    fn combine(values: Vec<Self>) -> Option<Self> {
-        values.into_iter().next()
     }
 
     /// The wire form on its own — for logging and for the escape hatches that

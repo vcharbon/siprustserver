@@ -10,7 +10,7 @@
 use fuzz_lanes::on_lane_stack;
 use libfuzzer_sys::fuzz_target;
 use sip_message::header::{
-    Authorization, HeaderValue, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate,
+    Authorization, HeaderValue, ListHeader, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate,
 };
 use sip_message::parser::custom::CustomParser;
 use sip_message::{HeaderName, SipMessage, SipParser};
@@ -44,11 +44,11 @@ fn request<H: HeaderValue>(value: &str) -> Result<SipMessage, sip_message::SipPa
     CustomParser::new().parse(raw.as_bytes())
 }
 
-fn round_trip<H: HeaderValue>(line: &str) {
+fn round_trip<H: ListHeader>(line: &str) {
     let Ok(accepted) = request::<H>(line) else { return };
     let name = H::header_name();
     let vouched = matches!(name, HeaderName::Authorization | HeaderName::ProxyAuthorization);
-    let value = match accepted.header::<H>() {
+    let value = match accepted.first::<H>() {
         Some(Ok(value)) => value,
         Some(Err(e)) if vouched => {
             panic!("{name} {line:?} is accepted and does not read: {}", e.reason)
@@ -59,7 +59,7 @@ fn round_trip<H: HeaderValue>(line: &str) {
     let again = request::<H>(&wire).unwrap_or_else(|e| {
         panic!("{name} {line:?} renders as {wire:?}, which its request refuses: {}", e.reason)
     });
-    match again.header::<H>() {
+    match again.first::<H>() {
         Some(Ok(v)) => assert_eq!(v.to_wire(), wire, "{name} {line:?} renders to itself"),
         other => panic!("{name} {line:?} renders as {wire:?}, which reads as {other:?}"),
     }

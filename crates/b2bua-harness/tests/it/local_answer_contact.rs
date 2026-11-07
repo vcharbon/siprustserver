@@ -46,7 +46,7 @@ fn assert_stack_contact(resp: &SipResponse, leg: &str, b2bua: SocketAddr) {
 /// `resp` carries no Contact.
 fn assert_no_contact(resp: &SipResponse) {
     assert!(
-        resp.header::<Contact>().is_none(),
+        resp.first::<Contact>().is_none(),
         "no Contact on {} {}",
         resp.status(),
         resp.cseq().method()

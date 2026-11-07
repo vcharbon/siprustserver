@@ -5,9 +5,11 @@ use crate::error::SipParseError;
 use crate::method::Method;
 use crate::sip_str::SipStr;
 
-use super::name::HeaderName;
+use super::cardinality::{held_to_the_table, lines};
+use super::name::{HeaderId, HeaderName};
 use super::scan::parse_u32;
-use super::value::{Folding, HeaderValue};
+use super::single_valued::Listed;
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// The `N` LWS-separated fields of `value`, exactly `N` of them.
@@ -116,13 +118,13 @@ impl std::fmt::Display for CallId {
     }
 }
 
+held_to_the_table!(<CallId as HeaderValue>::Lines, Listed::Known(HeaderId::CallId));
+
 impl HeaderValue for CallId {
+    type Lines = lines::Single;
+
     fn header_name() -> HeaderName {
         HeaderName::CallId
-    }
-
-    fn folding() -> Folding {
-        Folding::Single
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
@@ -171,13 +173,13 @@ impl CSeq {
     }
 }
 
+held_to_the_table!(<CSeq as HeaderValue>::Lines, Listed::Known(HeaderId::CSeq));
+
 impl HeaderValue for CSeq {
+    type Lines = lines::Single;
+
     fn header_name() -> HeaderName {
         HeaderName::CSeq
-    }
-
-    fn folding() -> Folding {
-        Folding::Single
     }
 
     /// `CSeq = 1*DIGIT LWS Method` (RFC 3261 §25.1), the number a 32-bit
@@ -224,13 +226,13 @@ impl RAck {
     }
 }
 
+held_to_the_table!(<RAck as HeaderValue>::Lines, Listed::Known(HeaderId::RAck));
+
 impl HeaderValue for RAck {
+    type Lines = lines::Single;
+
     fn header_name() -> HeaderName {
         HeaderName::RAck
-    }
-
-    fn folding() -> Folding {
-        Folding::Single
     }
 
     /// `RAck = response-num LWS CSeq-num LWS Method` (RFC 3262 §7.2), both

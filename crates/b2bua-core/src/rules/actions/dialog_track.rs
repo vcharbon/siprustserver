@@ -7,8 +7,8 @@
 use call::helpers::{callee_dialog, caller_dialog, caller_dialog_mut, fronting_dialog};
 use call::{Call, Dialog, DialogState, EndingBy, LegState, PeerDialog};
 use sip_message::draft::HeaderList;
-use sip_message::header::{self, HeaderValue, RecordRouteEntry};
-use sip_message::SipParseError;
+use sip_message::header::{HeaderValue, RecordRouteEntry};
+use sip_message::{ContactSet, SipParseError};
 
 use crate::rules::relay;
 use b2bua_sdk::model::RuleContext;
@@ -61,7 +61,7 @@ impl ActionExecutor<'_> {
         if callee_dialog(leg, to_tag).is_some() {
             return;
         }
-        let contact = contact_uri(resp.header::<header::Contact>(), &call.call_ref, source_leg_id)
+        let contact = contact_uri(resp.contacts())
             .or_else(|| leg.invite_request_uri.clone())
             .unwrap_or_default();
         // §12.1.2: an EARLY dialog's route set is established from the reliable
@@ -258,9 +258,7 @@ impl ActionExecutor<'_> {
         let a_leg_id = call.a_leg.leg_id.clone();
         // Ingress refuses an INVITE with no readable Contact (RFC 3261
         // §8.1.1.8): a stored one without is a defect, and opens no dialog.
-        let Some(remote_target) =
-            contact_uri(a_invite.header::<header::Contact>(), &call.call_ref, &a_leg_id)
-        else {
+        let Some(remote_target) = contact_uri(a_invite.contacts()) else {
             let detail = "the caller's stored INVITE names no remote target".to_string();
             self.turn.notes.defect(crate::turn_notes::STORED_IMAGE_READS, detail, call);
             return tag;
@@ -423,26 +421,9 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
 }
 
 /// The dialog's remote target: the URI of the peer's Contact (RFC 3261
-/// §12.1.1/§12.1.2). `None` when the peer sent none; a Contact no reader
-/// accepts is named on stderr and leaves the dialog's current target in place
-/// rather than silently retargeting it at nothing.
-pub(super) fn contact_uri(
-    contact: Option<Result<header::Contact, SipParseError>>,
-    call_ref: &str,
-    leg_id: &str,
-) -> Option<String> {
-    match contact? {
-        Ok(c) => Some(c.uri().to_string()),
-        Err(err) => {
-            tracing::warn!(
-                %call_ref,
-                %leg_id,
-                error = %err,
-                "Contact does not read; keeping the dialog's current remote target"
-            );
-            None
-        }
-    }
+/// §12.1.1/§12.1.2), as the parse read it; `None` when the peer sent none.
+pub(super) fn contact_uri(contacts: &ContactSet) -> Option<String> {
+    contacts.as_slice().first().map(|c| c.uri().to_string())
 }
 
 /// The route set a UAC applies: the responder's recorded routes reversed

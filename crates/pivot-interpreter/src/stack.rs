@@ -391,7 +391,7 @@ pub(crate) fn via_target(request: &SipRequest) -> Option<SocketAddr> {
 /// reading is `sip-message`'s.
 pub(crate) fn reliably(response: &SipResponse) -> bool {
     response
-        .header::<header::Require>()
+        .token_set::<header::Require>()
         .and_then(Result::ok)
         .is_some_and(|tokens| tokens.contains("100rel"))
 }

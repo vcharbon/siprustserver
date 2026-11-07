@@ -73,7 +73,7 @@ fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
         req.to().tag().is_some(),
         "a re-INVITE names its dialog by the To-tag (RFC 3261 §14.1)"
     );
-    let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");
+    let contact = req.first::<Contact>().expect("a Contact").expect("readable Contact");
     assert_eq!(
         contact.uri().param("leg").and_then(ParamValue::as_str),
         Some(leg),

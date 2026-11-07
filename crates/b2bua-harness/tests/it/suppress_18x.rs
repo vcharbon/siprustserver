@@ -67,7 +67,7 @@ async fn basic() {
     // Bob receives the INVITE — 100rel must be stripped from Supported (drop-sdp).
     let mut uas = bob.receive("INVITE").await;
     assert!(
-        !has_token(uas.request().header::<Supported>(), "100rel"),
+        !has_token(uas.request().token_set::<Supported>(), "100rel"),
         "100rel stripped from bob's Supported",
     );
 
@@ -81,7 +81,7 @@ async fn basic() {
     // Alice sees a bare 180 — no body, no Require:100rel, no RSeq.
     let p180 = call.expect(180).await;
     assert!(p180.body().is_empty(), "bare 180 has no body");
-    assert!(!has_token(p180.header::<Require>(), "100rel"), "no Require:100rel on bare 180",);
+    assert!(!has_token(p180.token_set::<Require>(), "100rel"), "no Require:100rel on bare 180",);
     assert!(p180.header::<RSeq>().is_none(), "no RSeq on bare 180");
     let first_to_tag = p180.to().tag().expect("180 has a To-tag").to_string();
 
@@ -769,7 +769,7 @@ async fn a_stray_prack_is_answered_here_and_never_reaches_the_callee() {
     // belongs anywhere on this call: the one below is the only one on the wire.
     let mut uas = bob.receive("INVITE").await;
     assert!(
-        !has_token(uas.request().header::<Supported>(), "100rel"),
+        !has_token(uas.request().token_set::<Supported>(), "100rel"),
         "100rel stripped from bob's Supported",
     );
     uas.respond(180, "Ringing").await;

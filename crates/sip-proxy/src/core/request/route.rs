@@ -92,7 +92,7 @@ impl ProxyCore {
         // with an unsupported Proxy-Require is silently dropped, never 420'd.
         // Ingress refuses a Proxy-Require that is no option-tag list (§25.1),
         // so one here is a defect, logged and answered 400.
-        match req.header::<ProxyRequire>() {
+        match req.token_set::<ProxyRequire>() {
             Some(Ok(required)) if !required.is_empty() => {
                 if method == Method::Ack {
                     self.metrics.record_reject("ack_proxy_require_unsupported");

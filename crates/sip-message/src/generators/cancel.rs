@@ -35,15 +35,15 @@ pub fn generate_cancel(
 
     let mut draft = RequestDraft::new(Method::Cancel, invite.request_uri().clone())
         .push_raw(HeaderName::Via, echoed(HeaderName::Via, "the INVITE's Via")?)
-        .push(MaxForwards::DEFAULT)
+        .set(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From, "the INVITE's From")?)
         .push_raw(HeaderName::To, echoed(HeaderName::To, "the INVITE's To")?)
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId, "the INVITE's Call-ID")?)
-        .push(CSeq::new(invite.cseq().seq(), Method::Cancel));
+        .set(CSeq::new(invite.cseq().seq(), Method::Cancel));
     for route in invite.raw_text(HeaderName::Route) {
         draft = draft.push_raw(HeaderName::Route, route);
     }
     draft = emit::extra_headers(draft, extra_headers);
 
-    emit::request(draft.push(ContentLength::new(0)))
+    emit::request(draft.set(ContentLength::new(0)))
 }

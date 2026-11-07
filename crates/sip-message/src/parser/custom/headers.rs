@@ -3,8 +3,8 @@
 //! trimmed of SP and HTAB alone, then meets the grammar's control-byte rule
 //! (one only as the escaped byte of a quoted-pair, in a quoted-string or
 //! comment its header's grammar has) and the one-line rule of the
-//! single-valued headers (`header::SINGLE_VALUED`, compact forms counted),
-//! then the gates beyond the grammar (ADR-0001): the registry-driven strict
+//! single-valued headers (`header::SINGLE_VALUED`, compact forms counted, in
+//! every reading), then the gates beyond the grammar (ADR-0001): the registry-driven strict
 //! numeric values and the CVE-regression quoted-string / Digest checks.
 
 use super::compact_forms::expand_compact_form;
@@ -17,8 +17,8 @@ use crate::char_class::is_token_char;
 use crate::control_bytes::{bare_control_byte, is_control, Escapes};
 use crate::error::SipParseError;
 use crate::header::{
-    is_single_valued, quoted_close, read_params, Authorization, HeaderId, HeaderName,
-    HeaderValue as _, ParamReading,
+    quoted_close, read_params, Authorization, HeaderId, HeaderName, HeaderValue as _, Met,
+    ParamReading,
 };
 use crate::header_table::{HeaderTable, Ids};
 use crate::parser::SipParserLimits;
@@ -86,28 +86,7 @@ fn strict_numeric_value(value: &SipStr, rule: &NumericHeaderRule) -> Option<u64>
 #[derive(Default)]
 struct Singletons {
     content_length: Option<u64>,
-    /// The known single-valued headers met, as [`HeaderId::bit`]s.
-    known: u128,
-    /// Whether the one listed extension header was met.
-    extension: bool,
-}
-
-impl Singletons {
-    /// Notes a line of `name`; whether one was met before, `false` for a
-    /// header that may repeat.
-    fn repeated(&mut self, name: &HeaderName) -> bool {
-        if !is_single_valued(name) {
-            return false;
-        }
-        match name.key().id() {
-            Some(id) => {
-                let met = self.known & id.bit() != 0;
-                self.known |= id.bit();
-                met
-            }
-            None => std::mem::replace(&mut self.extension, true),
-        }
-    }
+    met: Met,
 }
 
 pub struct ParsedHeaders {
@@ -300,8 +279,7 @@ fn parse_line(
         ));
         return Ok(Line::Refused { error, echoed });
     }
-    let counted = limits.value_gates || header == HeaderName::ContentLength;
-    if counted && singletons.repeated(&header) {
+    if singletons.met.repeated(&header) {
         let error =
             SipParseError::new(format!("Multiple {shown} headers (RFC 3261 §7.3.1 — one value)"));
         return Ok(Line::Refused { error, echoed });

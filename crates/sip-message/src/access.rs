@@ -1,7 +1,7 @@
 //! The typed read surface of ADR-0025 on a frozen message.
 //!
 //! A reader asks the message for the value it wants — `msg.from().tag()`,
-//! `msg.top_via().branch()`, `msg.header::<Require>()` — instead of looking a
+//! `msg.top_via().branch()`, `msg.token_set::<Require>()` — instead of looking a
 //! header up by string and re-parsing it. The mandatory values are the ones the
 //! parser validated and stored, so they are infallible and borrowed; everything
 //! else reads the header line on demand and reports its own parse errors.
@@ -15,7 +15,7 @@ use bytes::Bytes;
 
 use crate::draft::{HeaderList, RequestDraft, ResponseDraft};
 use crate::error::SipParseError;
-use crate::header::{self, HeaderName, HeaderValue, Uri};
+use crate::header::{self, HeaderName, HeaderValue, ListHeader, SingleHeader, TokenSet, Uri};
 use crate::header_table::HeaderTable;
 use crate::method::Method;
 use crate::parser::custom::request_uri::request_uri_refusal;
@@ -37,7 +37,7 @@ fn raw_text_values(headers: &HeaderTable, name: HeaderName) -> impl Iterator<Ite
     headers.of(name).map(|h| h.value.clone())
 }
 
-fn values_of<H: HeaderValue>(core: &MessageCore) -> Result<Vec<H>, SipParseError> {
+fn values_of<H: ListHeader>(core: &MessageCore) -> Result<Vec<H>, SipParseError> {
     if let Some(read) = read_at_parse::<H>(core) {
         return Ok(read);
     }
@@ -79,23 +79,23 @@ fn recorded_routes(
     Ok(HeaderList::new(set))
 }
 
-/// The single logical value of `H`. A header read from its first line only
-/// ([`HeaderValue::first_line_only`]) is that line's value, whatever a later
-/// line of it holds, malformed or not; any other reads every line and
-/// [`combine`](HeaderValue::combine)s them.
-fn header_of<H: HeaderValue>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
-    if H::first_line_only() {
-        let name = H::header_name();
-        let first = core.headers.of(&name).next()?;
-        return match H::parse_line(&first.value) {
-            Err(e) => Some(Err(e)),
-            Ok(values) => H::combine(values).map(Ok),
-        };
-    }
+/// The value of the single-valued `H`, read from its one line: every way a
+/// message is made refuses a second line of a single-valued header.
+fn header_of<H: SingleHeader>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
+    let line = core.headers.of(H::header_name()).next()?;
+    Some(H::parse(&line.value))
+}
+
+/// The first value of the list header `H`, every line read.
+fn first_of<H: ListHeader>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
+    values_of::<H>(core).map(|values| values.into_iter().next()).transpose()
+}
+
+/// The one set the lines of `H` make, `None` when the message carries none.
+fn token_set_of<H: TokenSet>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
     match values_of::<H>(core) {
         Err(e) => Some(Err(e)),
-        Ok(values) if values.is_empty() => None,
-        Ok(values) => H::combine(values).map(Ok),
+        Ok(values) => H::union(values).map(Ok),
     }
 }
 
@@ -180,16 +180,29 @@ macro_rules! core_read_surface {
                 &self.core().image
             }
 
-            /// The single logical value of `H`, or `None` when the message
-            /// carries no such header.
-            pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
+            /// The value of the single-valued `H`, or `None` when the
+            /// message carries no such header.
+            pub fn header<H: SingleHeader>(&self) -> Option<Result<H, SipParseError>> {
                 header_of::<H>(self.core())
             }
 
-            /// Every value of `H`, flattening comma folds where the header's
-            /// grammar admits them.
-            pub fn list<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
+            /// Every value of the list header `H`, flattening comma folds
+            /// where the header's grammar admits them.
+            pub fn list<H: ListHeader>(&self) -> Result<Vec<H>, SipParseError> {
                 values_of::<H>(self.core())
+            }
+
+            /// The first value of the list header `H`, or `None` when the
+            /// message carries none. Every line is read, so one that does
+            /// not read is the error, as [`list`](Self::list) states it.
+            pub fn first<H: ListHeader>(&self) -> Option<Result<H, SipParseError>> {
+                first_of::<H>(self.core())
+            }
+
+            /// The one token set every line of `H` makes (RFC 3261 §7.3.1),
+            /// or `None` when the message carries no such header.
+            pub fn token_set<H: TokenSet>(&self) -> Option<Result<H, SipParseError>> {
+                token_set_of::<H>(self.core())
             }
 
             /// The unparsed values of one header, in wire order — the escape
@@ -328,12 +341,20 @@ impl SipMessage {
         }
     }
 
-    pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
+    pub fn header<H: SingleHeader>(&self) -> Option<Result<H, SipParseError>> {
         header_of::<H>(self.core())
     }
 
-    pub fn list<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
+    pub fn list<H: ListHeader>(&self) -> Result<Vec<H>, SipParseError> {
         values_of::<H>(self.core())
+    }
+
+    pub fn first<H: ListHeader>(&self) -> Option<Result<H, SipParseError>> {
+        first_of::<H>(self.core())
+    }
+
+    pub fn token_set<H: TokenSet>(&self) -> Option<Result<H, SipParseError>> {
+        token_set_of::<H>(self.core())
     }
 
     pub fn raw(&self, name: HeaderName) -> impl Iterator<Item = &str> {

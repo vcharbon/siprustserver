@@ -101,7 +101,7 @@ fn in_dialog(method: &str, line: &str) -> Template {
 
 /// The Privacy line reads as the three values `id`, `user`, `critical`.
 fn privacy_reads_three(msg: &SipMessage) -> Result<(), String> {
-    let privacy = msg.header::<header::Privacy>().ok_or("no value")?.map_err(|e| e.reason)?;
+    let privacy = msg.token_set::<header::Privacy>().ok_or("no value")?.map_err(|e| e.reason)?;
     let wire = sip_message::header::HeaderValue::to_wire(&privacy);
     let values: Vec<&str> = wire.split([';', ',']).map(str::trim).collect();
     (values == ["id", "user", "critical"]).then_some(()).ok_or(format!("read {wire}"))

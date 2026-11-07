@@ -52,6 +52,30 @@ fn a_statement_with_a_line_break_or_a_non_token_name_is_skipped() {
     assert_eq!(skipped.len(), 3, "{skipped:?}");
 }
 
+/// A single-valued header (RFC 3261 §7.3.1) stated on two lines is skipped
+/// and handed back, the line the message carried kept; a list header takes
+/// every line stated.
+#[test]
+fn a_single_valued_header_stated_twice_is_skipped() {
+    let set = map(&[
+        ("Subject", HeaderUpdate::Set(lines(&["one", "two"]))),
+        ("Organization", HeaderUpdate::Add(lines(&["a", "b"]))),
+        ("X-Note", HeaderUpdate::Set(lines(&["one", "two"]))),
+    ]);
+    let sets = [&set];
+    let mut skipped = Vec::new();
+    let carried_of = |name: HeaderName| -> Vec<String> {
+        if name.matches("Subject") {
+            lines(&["carried"])
+        } else {
+            Vec::new()
+        }
+    };
+    let edited = restated(&sets, |_| false, carried_of, Vec::new, None, &mut skipped);
+    assert_eq!(edited, Some(vec![("X-Note".to_string(), lines(&["one", "two"]))]));
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+}
+
 /// A draft recording the edits it receives, by name.
 impl Draft for Vec<(String, Vec<String>)> {
     fn remove_all(mut self, name: &HeaderName) -> Self {

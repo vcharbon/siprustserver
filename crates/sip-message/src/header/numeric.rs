@@ -11,7 +11,7 @@ use super::kind::NumericKind;
 use super::name::HeaderName;
 use super::params::{read_params, ParamReading};
 use super::scan::parse_u32;
-use super::value::{Folding, HeaderValue};
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// A `1*DIGIT` header value, always inside the range its kind states. Every
@@ -63,12 +63,10 @@ impl NumericHeader<super::kind::MaxForwards> {
 }
 
 impl<K: NumericKind> HeaderValue for NumericHeader<K> {
+    type Lines = K::Lines;
+
     fn header_name() -> HeaderName {
         K::name()
-    }
-
-    fn folding() -> Folding {
-        K::FOLDING
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {

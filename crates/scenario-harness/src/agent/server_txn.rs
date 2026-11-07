@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
 use sip_message::generators::StackDialog;
-use sip_message::header::{self, HeaderValue};
+use sip_message::header::HeaderValue;
 use sip_message::{SipMessage, SipRequest};
 use sip_template::Mismatch;
 
@@ -318,8 +318,9 @@ impl ServerTxn {
                 )
             });
         let remote_target = req
-            .header::<header::Contact>()
-            .and_then(Result::ok)
+            .contacts()
+            .as_slice()
+            .first()
             .map(|contact| contact.uri().to_string())
             .unwrap_or_else(|| req.from().uri().to_string());
         let dialog = StackDialog {
