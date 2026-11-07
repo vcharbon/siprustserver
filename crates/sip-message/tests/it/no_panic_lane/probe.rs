@@ -7,7 +7,7 @@
 
 use std::fmt::Debug;
 
-use super::echo;
+use super::{echo, readable};
 use sip_message::generators::cancel::generate_cancel;
 use sip_message::generators::generate_invalid_request;
 use sip_message::generators::response::{generate_response, retag_response, GenerateResponseOpts};
@@ -116,6 +116,9 @@ fn invalid_request(error: &sip_message::SipParseError, d: &mut Digest) {
 
 /// What a parsed message answers; `strict` where the wire grammar read it.
 fn parsed_message(msg: &SipMessage, strict: bool, d: &mut Digest) {
+    if strict {
+        readable::assert_readable(msg);
+    }
     d.note("message", msg);
     d.note("serialize", &sip_message::serialize(msg));
     d.note("summary", &sip_message::message_summary(msg));

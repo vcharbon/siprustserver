@@ -5,5 +5,7 @@
 mod echo;
 #[path = "../../../crates/sip-message/tests/it/no_panic_lane/probe.rs"]
 pub mod probe;
+#[path = "../../../crates/sip-message/tests/it/no_panic_lane/readable.rs"]
+mod readable;
 #[path = "../../../crates/sip-message/tests/it/no_panic_lane/seeds.rs"]
 pub mod seeds;

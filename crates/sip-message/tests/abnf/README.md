@@ -1,7 +1,8 @@
-# ABNF fuzz suite (Rust port)
+# Frozen ABNF corpus
 
-Port of `portsource/sipjsserver/scripts/abnf-fuzz`. Asserts the per-header
-parsers never reject a grammar-valid input and never silently misparse one.
+Port of `portsource/sipjsserver/scripts/abnf-fuzz`. The conformance suite
+(`tests/it/conformance/`) holds the RFC grammars and generates from them; this
+corpus is the vendored generation, kept as a fixed input.
 
 - **Grammars** (`grammars/*.abnf`) — vendored **verbatim** from the source
   suite (themselves from RFC 3261 §25.1 + extension RFCs, via
@@ -13,15 +14,14 @@ parsers never reject a grammar-valid input and never silently misparse one.
 - **Regeneration** (opt-in) — install [`abnfgen`](https://www.quut.com/abnfgen/),
   then `cargo run -p xtask -- abnf-regen [N]` (default N=1000/target).
 
-## Rejection classification (ported)
+## What a line's outcome means
 
-Each rejection is classified as in the source driver:
-- **accepted** — grammar-valid input the parser accepted.
-- **policy** — rejection matching a documented semantic rule (`POLICY_PATTERNS`)
-  (port out of range, leading-zero octet, missing Via magic cookie, …).
-  Expected; the grammar is intentionally looser than the parser here.
-- **buggy** — a rejection matching no known policy. A non-zero count is a
-  real parser bug (over-narrow stop set, wrong pivot, …).
-- **silentMisparse** — accepted but the parsed structure is obviously wrong.
+`tests/it/abnf_fuzz.rs` wraps each line in a whole message and reads it through
+the production parser, then its typed reader:
 
-A clean run has `buggy == 0` and `silentMisparse == 0` across all targets.
+- **accepted** — the line reads.
+- **stated** — the refusal is one a stated rule makes of a form the vendored
+  grammar admits (`conformance/stated.rs`).
+- **a row** — a refusal of a valid form, or a line that reads but loses an
+  obvious field, fails `frozen/<row>`. A row that fails sits on the conformance
+  ratchet (`conformance/ratchet.txt`).

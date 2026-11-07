@@ -31,6 +31,10 @@ compatibility rules admit, on purpose:
 - **IPv4 octets.** An octet of an IPv4 host in a URI or a Via sent-by is at
   most 255 and carries no leading zero (`1*3DIGIT` admits both): an octal
   reading of `010` names another host.
+- **Status codes.** A status code is 100 to 699. `extension-code = 3DIGIT` admits
+  `099` and `700`, but §7.2 has it that "SIP/2.0 allows six values for the first
+  digit", 1 to 6, and RFC 4475 §3.1.2.19 has an element drop a response "larger
+  than 699". A class no element defines has no final or provisional reading.
 - **One From tag.** A From with two `tag` parameters is refused (§8.1.1.3,
   §19.3).
 - **Readable credentials.** An Authorization or Proxy-Authorization whose

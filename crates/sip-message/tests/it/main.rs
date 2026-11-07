@@ -9,6 +9,7 @@ mod abnf_fuzz;
 mod ack_2xx_from_invite;
 mod ack_non_2xx_in_dialog;
 mod compliance_matrix;
+mod conformance;
 mod contact_set;
 mod dialog_contact;
 mod draft_round_trip;

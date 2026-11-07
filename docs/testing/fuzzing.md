@@ -66,6 +66,10 @@ What a run checks beside panics:
   code, and its audited exceptions are socket calls the simulated fabric never makes.
 - **Arithmetic overflow and debug assertions**: on, as in the lanes.
 - **Recursion driven by input**: each case runs on the lanes' small stack.
+- **Accepted means readable**: a message the strict parser accepted reads through the typed
+  reader of every header ingress vouches for (`no_panic_lane/readable.rs`). The lane, its
+  structured corpus and `message_roundtrip` carry it from one site. A header with a row
+  `readable/<header>` on the conformance ratchet is left out until the row leaves the list.
 
 With `--jobs J` the run forks J processes; a crash, timeout or OOM is kept under
 `fuzz/artifacts/<target>/` and the run goes on. cargo-fuzz builds the target; the fuzzer runs

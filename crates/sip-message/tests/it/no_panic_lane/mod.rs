@@ -31,6 +31,7 @@ use wire_mutations::{mutate, Mutation};
 
 mod echo;
 mod probe;
+pub(crate) mod readable;
 mod regressions;
 pub(crate) mod seeds;
 
