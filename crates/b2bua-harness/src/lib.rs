@@ -490,9 +490,8 @@ impl B2buaSutBuilder {
             node: None,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
-            // Production default is 300 s (5 min); the paused-clock keepalive
-            // tests advance in 30 s steps, so the harness baseline stays at 30 s.
-            // A scenario can still override via `tune`.
+            // Production default is 300 s; the paused-clock keepalive tests advance
+            // in 30 s steps, so the baseline is 30 s. A scenario overrides via `tune`.
             config.keepalive_interval_sec = 30;
             // Panic-ELU rung: off in the harness baseline. The live
             // sampler reads a paused-clock `Harness::advance` as a saturated loop
@@ -510,6 +509,7 @@ impl B2buaSutBuilder {
                 config,
                 counters.clone(),
                 core.refusals().clone(),
+                core.parser(),
             );
             assert!(slot.set(hook).is_ok(), "the brake is installed once");
             (counters, forced)

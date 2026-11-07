@@ -108,6 +108,7 @@ mod cdr_rabbitmq;
 mod check;
 mod drain_env;
 mod entropy;
+mod env_read;
 mod front_env;
 mod limiter_client;
 mod limiter_env;
@@ -130,6 +131,7 @@ pub use cdr_rabbitmq::{
     MAX_DRAINER_WAIT_MS, MAX_WAIT_MS, MAX_WINDOW,
 };
 pub use check::ConfigCheck;
+pub use env_read::{env_stated, stated, stated_list};
 pub use front_env::{addresses_from_lookup, WorkerAddresses};
 pub use null_cdr::NullCdrWriter;
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
@@ -144,23 +146,6 @@ const GAUGE_PERIOD: Duration = Duration::from_secs(5);
 /// Env var with a default when unset.
 pub fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-/// `value` trimmed, `None` when it is absent or blank: a knob set to nothing
-/// states nothing.
-pub fn stated(value: Option<String>) -> Option<String> {
-    value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
-}
-
-/// The comma-separated names `value` lists, `None` when it names none: a list
-/// of blanks states nothing, as a blank value does.
-pub fn stated_list(value: Option<String>) -> Option<Vec<String>> {
-    stated(value).map(|v| split_csv(&v)).filter(|names| !names.is_empty())
-}
-
-/// The env var `key` as [`stated`] reads it.
-pub fn env_stated(key: &str) -> Option<String> {
-    stated(env::var(key).ok())
 }
 
 /// The on/off env variable `key`: `1`/`true`/`yes`/`on` or
@@ -235,8 +220,12 @@ impl RunnerEnv {
             brake_config.memo_capacity(),
             &id_gen,
         );
-        let brake_hook =
-            build_ingress_brake_hook(brake_config, brake_counters.clone(), refusals.clone());
+        let brake_hook = build_ingress_brake_hook(
+            brake_config,
+            brake_counters.clone(),
+            refusals.clone(),
+            sip_message::CustomParser::with_limits(self.parser_limits.clone()),
+        );
 
         // Real, non-recording transport: a plain tokio UDP socket. Bind into an
         // `Arc` so the endpoint can be SHARED: the core takes ownership of one
@@ -347,6 +336,7 @@ impl RunnerEnv {
             cdr: self.cdr.clone(),
             capacity: self.capacity,
             event_queue_gate: self.event_queue_gate,
+            parser_limits: self.parser_limits.clone(),
             ..Default::default()
         };
         tracing::info!(service = name, capacity = ?config.capacity, "capacity ceilings");

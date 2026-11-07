@@ -15,8 +15,7 @@ use sip_message::generators::{
     GenerateOutOfDialogRequestOpts, InDialogMethod, OutOfDialogMethod, StackDialog,
 };
 use sip_message::header::{self, HeaderValue, NameAddr, Uri};
-use sip_message::parser::custom::CustomParser;
-use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
+use sip_message::{serialize, SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
 use sip_net::{UdpEndpoint, UdpPacket};
 
 use super::client_txn::{expect_response, request_label};
@@ -307,7 +306,7 @@ impl Agent {
         dst: SocketAddr,
     ) -> Result<(), StepError> {
         if self.dialogs.is_on() {
-            if let Ok(msg) = CustomParser::new().parse(wire) {
+            if let Ok(msg) = self.txn.read(wire) {
                 self.dialogs.note_sent(&msg);
             }
         }
@@ -391,8 +390,8 @@ impl Agent {
     }
 
     fn parse(&self, raw: &[u8]) -> Result<SipMessage, StepError> {
-        CustomParser::new()
-            .parse(raw)
+        self.txn
+            .read(raw)
             .map_err(|e| StepError::Unparseable { who: self.name.clone(), detail: e.to_string() })
     }
 

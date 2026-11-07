@@ -137,6 +137,8 @@ pub(crate) struct ProxyCoreParts {
     pub pulse: Arc<ShardPulse>,
     /// The proxy's first worker view, shared with its probe.
     pub first_view: Arc<FirstView>,
+    /// What reads a datagram no intake hook parsed: the process's one parser.
+    pub parser: CustomParser,
 }
 
 /// The stateless proxy.
@@ -205,7 +207,7 @@ impl ProxyCore {
             metrics: parts.metrics,
             self_gate: parts.self_gate,
             intake_age: parts.intake_age,
-            parser: CustomParser::default(),
+            parser: parts.parser,
             named,
             shard: parts.shard,
             pulse: parts.pulse,

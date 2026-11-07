@@ -6,18 +6,23 @@
 
 use std::net::SocketAddr;
 
-use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser, SipResponse};
+use sip_message::{SipMessage, SipResponse};
 
 use super::step::StepError;
 use super::Agent;
 use crate::absorption::Owed;
 
 impl Agent {
+    /// This UA reading the wire under `limits`: a scene whose traffic a
+    /// deployment's limits or exemptions admit states the same to its UA.
+    pub fn reads_under(&self, limits: sip_message::SipParserLimits) {
+        self.txn.read_under(limits);
+    }
+
     /// One datagram out, nothing fed but its record in the transaction layer
     /// ([`Absorption::note_sent`](crate::absorption::Absorption::note_sent)).
     pub(super) async fn send_bytes(&self, wire: &[u8], dst: SocketAddr) -> Result<(), StepError> {
-        if let Ok(msg) = CustomParser::new().parse(wire) {
+        if let Ok(msg) = self.txn.read(wire) {
             self.txn.note_sent(&msg, wire, dst, self.ep.queue_depth());
         }
         self.ep

@@ -17,7 +17,7 @@ fn src() -> SocketAddr {
 /// The hook at [`WATERMARK`], and the metrics it counts its drops in.
 fn shed_hook() -> (PreIngressHook, Arc<ProxyMetrics>) {
     let metrics = Arc::new(ProxyMetrics::new());
-    (intake_shed_hook(WATERMARK, metrics.clone()), metrics)
+    (intake_shed_hook(WATERMARK, metrics.clone(), CustomParser::new()), metrics)
 }
 
 /// The hook's verdict on `raw` arriving at queue depth `depth`.

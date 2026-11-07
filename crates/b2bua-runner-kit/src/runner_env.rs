@@ -9,6 +9,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
+use sip_message::{Exemptions, SipParserLimits};
 
 use crate::{
     addresses_from_lookup, capacity_env, drain_env, env_or, limiter_env, liveness_env, split_csv,
@@ -16,6 +17,14 @@ use crate::{
 };
 
 mod event_queue_env;
+
+/// The limits a worker reads the wire under ([`RunnerEnv::parser_limits`]), the
+/// exemptions as `stated`. `Err` names a name no exemption has.
+pub(crate) fn parser_limits(stated: Option<String>) -> Result<SipParserLimits, String> {
+    let exemptions = Exemptions::parse(stated.as_deref().unwrap_or_default())
+        .map_err(|problem| format!("SIP_EXEMPTIONS: {problem}"))?;
+    Ok(SipParserLimits { exemptions, ..SipParserLimits::DEFAULT }.behind_proxy())
+}
 
 /// Every generic runner knob, parsed once from env by [`RunnerEnv::from_env`].
 /// All fields are pub: tweak any of them between `from_env()` and
@@ -35,6 +44,11 @@ pub struct RunnerEnv {
     pub admin_addr: SocketAddr,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
+    /// What the process reads the wire under: the default limits with room for
+    /// the proxy's additions, and the exemptions `SIP_EXEMPTIONS` states
+    /// (comma-separated, default none; a name no exemption has refuses the
+    /// boot). [`bind`](Self::bind) makes the one parser of it.
+    pub parser_limits: SipParserLimits,
     /// `B2BUA_UDP_SNDBUF` — `SO_SNDBUF` requested on the signalling socket,
     /// bytes (default 4 MiB; empty = the kernel's `wmem_default`; clamped at
     /// `wmem_max`). See ADR-0033.
@@ -292,6 +306,7 @@ impl RunnerEnv {
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             admin_addr: admin_addr(lookup)?,
             queue_max: knob("B2BUA_QUEUE", "8192")?,
+            parser_limits: parser_limits(env::var("SIP_EXEMPTIONS").ok())?,
             udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF")?,
             udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF")?,
             cdr_queue: knob("B2BUA_CDR_QUEUE", "1024")?,

@@ -80,3 +80,46 @@ async fn bind_retry_fails_fast_on_a_non_in_use_error() {
     assert!(started.elapsed() < TEST_DEADLINE, "must not wait out the deadline");
     assert!(err.contains(&addr.to_string()) && err.contains("failed"), "{err}");
 }
+
+/// The limit the configuration states is the one the signalling socket's intake
+/// hook reads under: a well-formed OPTIONS past it is queued with its refusal.
+/// The default limits read the same datagram.
+#[tokio::test]
+async fn the_intake_hook_reads_under_the_limit_the_configuration_states() {
+    let lookup = |key: &str| match key {
+        "PROXY_LISTEN" => Some("127.0.0.1:0".to_string()),
+        "PROXY_METRICS" => Some("127.0.0.1:0".to_string()),
+        "PROXY_WORKERS" => Some("w0@10.0.0.1:5060".to_string()),
+        "PROXY_HMAC_KEY" => Some("0123456789abcdef0123456789abcdef".to_string()),
+        _ => None,
+    };
+    let options = b"OPTIONS sip:bob@192.0.2.30 SIP/2.0\r\n\
+        Via: SIP/2.0/UDP 192.0.2.20:5060;branch=z9hG4bK-limit\r\n\
+        Max-Forwards: 70\r\n\
+        From: <sip:alice@192.0.2.20>;tag=alice-tag\r\n\
+        To: <sip:bob@192.0.2.30>\r\n\
+        Call-ID: limit@192.0.2.20\r\n\
+        CSeq: 1 OPTIONS\r\n\
+        Content-Length: 0\r\n\r\n";
+    let read_under = |max_header_lines: usize| {
+        let mut cfg = ProxyConfig::from_lookup(&lookup, &|| None).expect("a valid boot");
+        cfg.parser_limits.max_header_lines = max_header_lines;
+        async move {
+            let metrics = Arc::new(ProxyMetrics::new());
+            let sockets = bind_sockets(&cfg, &Clock::system(), &metrics).await.expect("bound");
+            let shard = sockets.shards.into_iter().next().expect("one shard");
+            let to = shard.internal.local_addr();
+            let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("the peer");
+            peer.send_to(options, to).await.expect("sent");
+            let packet = tokio::time::timeout(Duration::from_millis(500), shard.internal.recv())
+                .await
+                .expect("in time")
+                .expect("the endpoint is open");
+            packet.parsed.expect("the hook parsed it")
+        }
+    };
+    let refused = read_under(3).await;
+    assert!(matches!(&*refused, Ok(Err(r)) if r.reason.contains("exceeds limit 3")), "{refused:?}");
+    let read = read_under(100).await;
+    assert!(matches!(&*read, Ok(Ok(_))), "{read:?}");
+}

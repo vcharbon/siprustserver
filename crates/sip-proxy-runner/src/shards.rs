@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_ids::SigningKey;
+use sip_message::CustomParser;
 use sip_net::UdpEndpoint;
 use sip_proxy::cancel_lru::CancelBranchLru;
 use sip_proxy::health::{DeadNotifier, FirstView, HealthProbe, HealthProbeConfig, WorkerReach};
@@ -47,6 +48,8 @@ pub struct SharedRouting {
     pub first_view: Arc<FirstView>,
     /// The last worker answer its health probe heard.
     pub reach: Arc<WorkerReach>,
+    /// The process's one parser, its intake hook's too.
+    pub parser: CustomParser,
 }
 
 impl SharedRouting {
@@ -69,6 +72,7 @@ impl SharedRouting {
         .traces(self.traces.clone())
         .pulse(self.pulse.clone())
         .first_view(self.first_view.clone())
+        .parser(self.parser.clone())
         .shard(shard)
     }
 

@@ -90,7 +90,7 @@ type OnBytes = Box<dyn Fn(&[u8], std::net::SocketAddr, usize) -> PreIngressActio
 fn brake_over(refusals: Refusals) -> (OnBytes, IngressBrakeCounters) {
     let counters = IngressBrakeCounters::new();
     let cfg = IngressBrakeConfig { queue_max: 5, threshold_pct: 40 };
-    let hook = build_ingress_brake_hook(cfg, counters.clone(), refusals);
+    let hook = build_ingress_brake_hook(cfg, counters.clone(), refusals, CustomParser::new());
     let on_bytes: OnBytes = Box::new(move |raw, src, depth| {
         hook(&mut Arrival::new(sip_message::Bytes::copy_from_slice(raw)), src, depth)
     });

@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use observe::{spawn_keeping_node, NodeScope};
-use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 use sip_net::UdpEndpoint;
 use sip_txn::TransactionLayer;
@@ -151,7 +150,7 @@ impl B2buaCore {
         } = deps;
         let node = NodeScope::current();
 
-        let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(CustomParser::new());
+        let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(config.parser());
         let refusals = refusals.unwrap_or_else(|| {
             Refusals::new(
                 config.retry_after_base_sec,

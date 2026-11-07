@@ -48,6 +48,9 @@
 //!   PROXY_METRICS    Prometheus HTTP listen ip:port, an IP literal
 //!                    (default 0.0.0.0:9090)
 //!   PROXY_QUEUE      inbound UDP queue depth, packets ≥ 1  (default 8192)
+//!   SIP_EXEMPTIONS   comma-separated shapes accepted against the RFC, read at
+//!                    ingress only (default none; a name no exemption has is
+//!                    refused)
 //!   PROXY_UDP_SNDBUF SO_SNDBUF requested on every signalling socket, bytes ≥ 1
 //!                    (default 4 MiB; empty = kernel wmem_default; the kernel
 //!                    clamps at wmem_max). Size it well above the neighbour
@@ -336,6 +339,7 @@ async fn run() -> Result<i32, String> {
         pulse: pulse.clone(),
         first_view: FirstView::pending(),
         reach: WorkerReach::unheard(),
+        parser: cfg.parser(),
     };
     // Health probe: OPTIONS to the pool from the first listing on, feeding the
     // band observer, and latching the first worker view the recv shards and

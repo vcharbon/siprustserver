@@ -83,7 +83,7 @@ pub async fn bind_sockets(
     // intake-shed hook — a blind tail-drop at the queue cap would otherwise
     // kill emergency and in-dialog traffic first-come-first-served.
     let watermark = intake_shed_watermark(queue_max, cfg.intake_shed_pct);
-    let intake_shed = intake_shed_hook(watermark, proxy_metrics.clone());
+    let intake_shed = intake_shed_hook(watermark, proxy_metrics.clone(), cfg.parser());
     let with_buffers = |mut opts: BindUdpOpts| {
         if let Some(bytes) = udp_sndbuf {
             opts = opts.with_send_buffer(bytes);

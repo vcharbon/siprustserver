@@ -4767,6 +4767,7 @@ dependencies = [
  "serde_json",
  "sip-clock",
  "sip-ids",
+ "sip-message",
  "sip-net",
  "sip-net-testkit",
  "sip-proxy",

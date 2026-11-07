@@ -34,6 +34,7 @@ jemalloc-stats = { path = "../jemalloc-stats" }
 # /debug/flamegraph pprof route — one module shared with the b2bua worker.
 probe-http = { path = "../probe-http" }
 sip-net = { path = "../sip-net" }
+sip-message = { path = "../sip-message" }
 # The external face check reads the kernel's neighbour table over a
 # NETLINK_ROUTE socket (safe socket2 calls, libc's constants).
 socket2 = { workspace = true }

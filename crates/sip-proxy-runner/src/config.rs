@@ -11,6 +11,7 @@ mod reader;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use sip_message::{CustomParser, Exemptions, SipParserLimits};
 use sip_proxy::cancel_lru::{calls_per_second, MemoBounds};
 use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
@@ -52,6 +53,9 @@ pub struct ProxyConfig {
     pub workers: WorkerSource,
     pub metrics: SocketAddr,
     pub queue_max: usize,
+    /// What the process reads the wire under: the defaults, with the exemptions
+    /// `SIP_EXEMPTIONS` states. [`parser`](Self::parser) is the one reader.
+    pub parser_limits: SipParserLimits,
     pub udp_sndbuf: Option<usize>,
     pub udp_rcvbuf: Option<usize>,
     pub shard_stall_ms: u64,
@@ -96,6 +100,11 @@ const DEFAULT_ISOLATION_MS: u64 = 2_000;
 const T1_MS: u64 = 500;
 
 impl ProxyConfig {
+    /// The reader of the wire, whichever stage reads a datagram first.
+    pub fn parser(&self) -> CustomParser {
+        CustomParser::with_limits(self.parser_limits.clone())
+    }
+
     /// Reads every boot variable through `get` (`None` = unset).
     /// `pod_namespace` reads the namespace of the pod the proxy runs in.
     /// `Err` holds every problem, one line each.
@@ -114,6 +123,7 @@ impl ProxyConfig {
             .bind_addr("PROXY_METRICS", SocketAddr::from(([0, 0, 0, 0], 9090)))
             .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 9090)));
         let queue_max = env.int_usize("PROXY_QUEUE", 8192, 1, u32::MAX);
+        let parser_limits = parser_limits(&mut env);
         let udp_sndbuf = socket_buffer(&mut env, "PROXY_UDP_SNDBUF");
         let udp_rcvbuf = socket_buffer(&mut env, "PROXY_UDP_RCVBUF");
         let shard_stall_ms = env.int("PROXY_SHARD_STALL_MS", 2000, 1, MAX_MS);
@@ -207,6 +217,7 @@ impl ProxyConfig {
             workers,
             metrics,
             queue_max,
+            parser_limits,
             udp_sndbuf,
             udp_rcvbuf,
             shard_stall_ms,
@@ -236,6 +247,16 @@ impl ProxyConfig {
 /// listens on `listen`: `key`, else the listen address. An unspecified listen
 /// address names no reachable host, so `key` is then required. A refused
 /// listen address (`None`) asks nothing more of `key`.
+/// The default limits with the exemptions `SIP_EXEMPTIONS` states.
+fn parser_limits(env: &mut EnvReader) -> SipParserLimits {
+    let stated = env.present("SIP_EXEMPTIONS").unwrap_or_default();
+    let exemptions = Exemptions::parse(&stated).unwrap_or_else(|problem| {
+        env.refuse(format!("SIP_EXEMPTIONS: {problem}"));
+        Exemptions::NONE
+    });
+    SipParserLimits { exemptions, ..SipParserLimits::DEFAULT }
+}
+
 fn advertise(env: &mut EnvReader, key: &str, listen: Option<SocketAddr>) -> ProxyAddr {
     let Some(listen) = listen else {
         return ProxyAddr::new("0.0.0.0", 0);

@@ -78,6 +78,7 @@ async fn setup(
         brake_config(),
         brake.clone(),
         Refusals::new(5, 0, 64, &IdGen::seeded(3)),
+        sip_message::CustomParser::new(),
     );
 
     let b2bua: Arc<dyn UdpEndpoint> = net

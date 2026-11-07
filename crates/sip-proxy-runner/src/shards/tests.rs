@@ -26,6 +26,7 @@ fn shared() -> SharedRouting {
     let clock = Clock::test_at(0);
     let id_gen = Arc::new(IdGen::seeded(7));
     SharedRouting {
+        parser: sip_message::CustomParser::new(),
         advertised: ProxyAddr::new("127.0.0.1", 5080),
         strategy: Arc::new(sip_proxy::ForwardAllStrategy::new(ProxyAddr::new("127.0.0.1", 5070))),
         registry: Arc::new(StaticWorkerRegistry::from_entries(vec![])),

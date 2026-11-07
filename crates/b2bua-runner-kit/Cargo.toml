@@ -24,6 +24,7 @@ metric-values = { path = "../metric-values" }
 jemalloc-stats = { path = "../jemalloc-stats" }
 b2bua = { path = "../b2bua" }
 call = { path = "../call" }
+sip-message = { path = "../sip-message" }
 # Real HTTP transport for the default call-limiter client (LIMITER_URL).
 http-net = { path = "../http-net", features = ["real"] }
 # The shared /metrics + /healthz + /ready probe server every runner exposes.
@@ -57,7 +58,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 b2bua = { path = "../b2bua", features = ["testkit"] }
 # The fixed-key turn a test call is built under.
 sip-ids = { path = "../sip-ids", features = ["testkit"] }
-sip-message = { path = "../sip-message" }
 # `dialled_leg`: the b-leg a live-call listing test adds to its call.
 call = { path = "../call", features = ["testkit"] }
 sip-net-testkit = { path = "../sip-net-testkit" }

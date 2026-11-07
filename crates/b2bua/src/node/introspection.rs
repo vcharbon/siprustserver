@@ -7,6 +7,11 @@ use std::sync::Arc;
 use super::B2buaCore;
 
 impl B2buaCore {
+    /// The process's one parser: what a hook on this worker's bind reads with.
+    pub fn parser(&self) -> sip_message::CustomParser {
+        self.ctx.config.parser()
+    }
+
     /// The router context, for the in-crate unit tests that drive one router
     /// seam directly (`router::materialise`) over a fully wired core.
     #[cfg(test)]

@@ -267,3 +267,19 @@ fn the_isolation_window_holds_a_probe_interval_and_its_first_retransmission() {
         "{errors:?}"
     );
 }
+
+#[test]
+fn no_exemption_is_stated_unless_a_boot_names_one() {
+    assert!(boot(&[]).expect("valid").parser_limits.exemptions.is_empty());
+}
+
+/// A name no exemption has refuses the boot, naming the variable: a typo never
+/// reads as a setting.
+#[test]
+fn an_exemption_no_name_matches_refuses_the_boot() {
+    let refused = boot(&[("SIP_EXEMPTIONS", "not-an-exemption")]).expect_err("refused");
+    assert!(
+        refused.iter().any(|e| e.contains("SIP_EXEMPTIONS") && e.contains("not-an-exemption")),
+        "{refused:?}"
+    );
+}

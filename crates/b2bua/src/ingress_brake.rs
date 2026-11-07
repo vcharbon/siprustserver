@@ -155,14 +155,16 @@ impl IngressBrakeCounters {
 /// The returned closure runs at arrival time for every datagram, with the live
 /// inbound-queue `depth`, and applies the classification in the module doc.
 /// `refusals` is the worker's one instance, whose memo the transaction layer
-/// holds too ([`sip_txn::TransactionConfig::invite_refusals`]).
+/// holds too ([`sip_txn::TransactionConfig::invite_refusals`]); `parser` is the
+/// process's one parser, so a datagram reads the same whether this hook or the
+/// transaction layer parses it.
 pub fn build_ingress_brake_hook(
     config: IngressBrakeConfig,
     counters: IngressBrakeCounters,
     refusals: Refusals,
+    parser: CustomParser,
 ) -> PreIngressHook {
     let threshold = config.threshold();
-    let parser = CustomParser::new();
     let memo = refusals.memo().clone();
     Arc::new(move |arrival: &mut Arrival, src: SocketAddr, depth: usize| {
         let above = depth >= threshold;
