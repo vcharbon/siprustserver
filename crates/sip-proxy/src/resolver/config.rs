@@ -38,7 +38,7 @@ impl ResolverConfig {
     /// the delay are clamped ≥ 1 ms so degenerate tiny TTLs still schedule
     /// (a refresh landing at/after expiry idle-stops harmlessly).
     pub(super) fn refresh_after_ms(&self) -> u64 {
-        let margin = (self.positive_ttl_ms / 4).min(5_000).max(1);
+        let margin = (self.positive_ttl_ms / 4).clamp(1, 5_000);
         self.positive_ttl_ms.saturating_sub(margin).max(1)
     }
 }

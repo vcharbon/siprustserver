@@ -374,7 +374,8 @@ impl BindError {
 pub enum SendErrorKind {
     /// `EMSGSIZE`: the datagram exceeds what this path accepts whole. On a
     /// socket pinned to fragment (ADR-0027) this means the message is over
-    /// [`MAX_UDP_PAYLOAD`], not merely over the path MTU.
+    /// the largest UDP payload ([`crate::max_udp_payload`]), not merely over
+    /// the path MTU.
     MessageTooLong,
     /// `ENETUNREACH` / `EHOSTUNREACH` / `ECONNREFUSED`: no route to the peer,
     /// or the peer's port answered with an ICMP rejection.
