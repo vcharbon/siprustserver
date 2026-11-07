@@ -255,6 +255,12 @@ impl ActionExecutor<'_> {
             res.request,
             dest,
         );
+        // A BYE is answered here already: its copy fails on its own timeout.
+        if method != InDialogMethod::Bye && super::unrelayed::too_large(&out_req, &dest) {
+            *call = unrelayed;
+            self.refuse_unrelayed(call, fx, ctx, Unrelayed::TooLarge);
+            return;
+        }
         let kind =
             if method == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
 

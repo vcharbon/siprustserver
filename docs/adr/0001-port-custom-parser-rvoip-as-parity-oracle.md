@@ -136,12 +136,19 @@ near a datagram none for its b-leg with the worker's Via and Contact, and a
 callee's 2xx with a long relayed line none on the caller's face. What cannot leave
 is a result, not a loss:
 
-- **A worker's request that would open a client transaction** fails at once,
-  before the socket, as a dead hop's does (`router::cannot_leave`, counted in
-  `b2bua_outbound_unsent_total{reason="too_long"}`). A b-leg INVITE reaches the
-  failure consult (`origin` `transaction_timeout`, `timeout_kind` `response`), so
-  another route may connect; an in-dialog request reaches its timeout rule, so a
-  BYE that cannot leave releases the call with its CDR at once.
+- **A worker's own request that would open a client transaction** fails at
+  once, before the socket, as a dead hop's does (`router::cannot_leave`, counted
+  in `b2bua_outbound_unsent_total{reason="too_long"}`). A b-leg INVITE reaches
+  the failure consult (`origin` `transaction_timeout`, `timeout_kind`
+  `response`), so another route may connect; an in-dialog request reaches its
+  timeout rule, so a BYE that cannot leave releases the call with its CDR at
+  once. A decision service answering the same unsendable route again is bounded
+  by its own retry budget and the setup timeout.
+- **A relayed in-dialog request whose copy cannot leave** is answered 513 at
+  once and the session stands: a re-INVITE leaves it unchanged (RFC 3261
+  §14.1), a non-INVITE draws no 408 (RFC 4320 §4.2), and the other party hears
+  nothing (`b2bua-harness`'s `relayed_request_too_large`). A relayed BYE, which
+  the worker answers itself, ends its leg as the worker's own BYE does.
 - **A response, an ACK, a CANCEL and a retained repeat** stay a counter: the
   socket refuses them (`b2bua_txn_send_errors_total`) and the transaction runs as
   if the message were lost. A 2xx that cannot reach the caller ends on its ladder
