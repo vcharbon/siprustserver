@@ -17,6 +17,7 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 sip-net = { path = "../sip-net" }
+sip-message = { path = "../sip-message" }
 sip-clock = { path = "../sip-clock" }
 rtp = { workspace = true }
 rtcp = { workspace = true }

@@ -114,9 +114,11 @@ fn ptime_is_a_non_zero_integer_or_real() {
     }
     assert_eq!(
         reason(&stream("1", "a=ptime:0\r\n")),
-        "a=ptime:0 is not a non-zero integer or real (RFC 8866 §6.4)"
+        "a=ptime value \"0\" is not a non-zero integer or real (RFC 8866 §6.4)"
     );
-    assert!(reason(&stream("1", "a=ptime:20.0\r\n")).contains("a=ptime:20.0 is not"));
+    assert!(reason(&stream("1", "a=ptime:20.0\r\n")).contains("value \"20.0\" is not"));
+    let spaced = reason(&stream("1", "a=ptime:20 \r\n"));
+    assert!(spaced.contains("value \"20 \" is not"), "the value is quoted as written: {spaced}");
 }
 
 /// RFC 8866 §5: the session-level lines precede the first `m=`, so an `o=`

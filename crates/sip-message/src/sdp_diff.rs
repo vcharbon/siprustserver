@@ -9,7 +9,9 @@
 //! line endings and attribute order make no difference. Pure: no clocks, no
 //! I/O.
 
-use crate::sdp_doc::{direction_of, parse_sdp_body, MediaLine, SdpDirection, SdpDoc};
+use crate::sdp_doc::{
+    direction_of, extract_direction, parse_sdp_body, MediaLine, SdpDirection, SdpDoc,
+};
 
 /// What one stream of a description steers media with.
 #[derive(PartialEq, Eq)]
@@ -36,12 +38,7 @@ fn undirected(attributes: &[String]) -> impl Iterator<Item = &str> {
 
 /// `media` as it steers media under the session-level values of `doc`.
 fn stream<'a>(doc: &'a SdpDoc, media: &'a MediaLine) -> Stream<'a> {
-    let direction = media
-        .attributes
-        .iter()
-        .chain(&doc.attributes)
-        .find_map(|a| direction_of(a))
-        .unwrap_or(SdpDirection::SendRecv);
+    let direction = extract_direction(doc, media);
     let own: Vec<&str> = undirected(&media.attributes).collect();
     let mut attributes = own.clone();
     attributes.extend(

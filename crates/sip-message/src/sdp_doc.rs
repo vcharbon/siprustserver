@@ -157,7 +157,7 @@ impl MutableMedia {
 /// A port field, `port ["/" integer]` (RFC 8866 §9: `port = 1*DIGIT`,
 /// `integer = POS-DIGIT *DIGIT`): the port and the number of ports it states,
 /// or `None` where the field is off that grammar.
-fn port_field(field: &str) -> Option<(i64, Option<i64>)> {
+pub(crate) fn port_field(field: &str) -> Option<(i64, Option<i64>)> {
     let (port, count) = match field.split_once('/') {
         Some((port, count)) => (port, Some(count)),
         None => (field, None),

@@ -207,7 +207,7 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
         for value in ptimes {
             if !crate::sdp_doc::is_non_zero_int_or_real(value) {
                 return Err(SdpValidationError::new(format!(
-                    "a=ptime:{value} is not a non-zero integer or real (RFC 8866 §6.4)"
+                    "a=ptime value {value:?} is not a non-zero integer or real (RFC 8866 §6.4)"
                 )));
             }
         }
@@ -442,15 +442,15 @@ fn rewrite_media_line(line: &str, port_of: &mut impl FnMut(u16) -> Option<u16>) 
         Some((port, rest)) => (port, Some(rest)),
         None => (tail, None),
     };
-    let (port, pair_count) = match port_field.split_once('/') {
-        Some((port, count)) => (port, Some(count)),
-        None => (port_field, None),
+    let Some((port, count)) = crate::sdp_doc::port_field(port_field) else {
+        return line.to_string();
     };
-    let Ok(port) = port.parse::<u16>() else { return line.to_string() };
+    let pair_count = port_field.split_once('/').map(|(_, count)| count);
+    let Ok(port) = u16::try_from(port) else { return line.to_string() };
     if port == 0 {
         return line.to_string();
     }
-    let pairs = pair_count.and_then(|count| count.parse::<u16>().ok()).unwrap_or(1);
+    let pairs = count.and_then(|count| u16::try_from(count).ok()).unwrap_or(1);
     let Some(booked) = port_of(pairs) else { return line.to_string() };
     let mut out = format!("m={kind} {booked}");
     if let Some(count) = pair_count {
