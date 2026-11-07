@@ -112,6 +112,22 @@ fn a_capture_with_nothing_set_aside_states_no_table() {
     assert!(!stats.contains_key("header_failed_by_reason"), "{stats:?}");
 }
 
+/// An INVITE whose multipart body under `boundary` holds a line starting with
+/// `--` and the boundary that is no delimiter (RFC 2046 §5.1.1).
+fn multipart_invite(call_id: &str, boundary: &str) -> String {
+    let body = format!(
+        "--{boundary}\r\nContent-Type: text/plain\r\n\r\nhello\r\n--{boundary}junk\r\n\
+         --{boundary}--\r\n"
+    );
+    invite(call_id, "<sip:alice@example.com>", CONTACT, "").replace(
+        "Content-Length: 0\r\n\r\n",
+        &format!(
+            "Content-Type: multipart/mixed;boundary={boundary}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
 /// Every key of `datagrams`' set-aside tables, refused and header-failed.
 fn keys_of(datagrams: &[Datagram]) -> Vec<String> {
     let flows = build_flows(datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
@@ -164,15 +180,18 @@ fn a_reason_key_holds_no_value_of_its_message() {
                 "Diversion: <sip:e@example.com>;secretparam=\"x\r\n",
             ),
         ),
+        dg(5_000, multipart_invite("c5", "secretbound-mcfakename")),
     ];
     let keys = keys_of(&datagrams);
     assert_eq!(
         keys.len(),
-        3,
-        "the two Contacts on one row, the Request-URI, the parameter: {keys:?}"
+        4,
+        "the two Contacts on one row, the Request-URI, the parameter, the boundary: {keys:?}"
     );
     for key in &keys {
-        for value in ["Fakey", "McFakename", "secret", "203", "113", "x-a", "x-b", "Subject"] {
+        for value in
+            ["Fakey", "McFakename", "secret", "mcfakename", "203", "113", "x-a", "x-b", "Subject"]
+        {
             assert!(!key.contains(value), "{value:?} in {key:?}");
         }
     }

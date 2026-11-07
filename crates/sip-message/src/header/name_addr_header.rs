@@ -148,7 +148,7 @@ impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
         let addr = NameAddr::read(raw, &Self::grammar(), Reading::Strict)?.addr;
         if K::NAMES_HOP && addr.uri().opaque_part().is_some() {
             return Err(SipParseError::new(format!(
-                "a {} URI names no hop: {:?}",
+                "a {:?} URI names no hop: {:?}",
                 addr.uri().scheme(),
                 raw.as_str()
             )));

@@ -35,17 +35,17 @@ pub(super) fn body_type_refusal(
     match media.param("boundary").and_then(ParamValue::as_str) {
         Some(boundary) if is_boundary(boundary) && frames_cleanly(body, boundary) => None,
         Some(boundary) if is_boundary(boundary) => Some(SipParseError::new(format!(
-            "Content-Type {} body holds a line starting with --{boundary} that is no \
-             delimiter (RFC 2046 §5.1.1)",
+            "Content-Type {:?} body holds a line starting with `--` and the boundary \
+             {boundary:?} that is no delimiter (RFC 2046 §5.1.1)",
             media.token()
         ))),
         Some(boundary) => Some(SipParseError::new(format!(
-            "Content-Type {} boundary {boundary:?} is not 1 to 70 bchars ending in no space \
+            "Content-Type {:?} boundary {boundary:?} is not 1 to 70 bchars ending in no space \
              (RFC 2046 §5.1.1)",
             media.token()
         ))),
         None => Some(SipParseError::new(format!(
-            "Content-Type {} states no boundary (RFC 2046 §5.1.1)",
+            "Content-Type {:?} states no boundary (RFC 2046 §5.1.1)",
             media.token()
         ))),
     }

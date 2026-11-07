@@ -6,6 +6,7 @@ use std::fmt;
 use crate::parser::custom::partial::RequestPartial;
 
 mod reason_key;
+pub(crate) mod reason_text;
 
 pub use reason_key::reason_key;
 

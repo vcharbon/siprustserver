@@ -3,6 +3,7 @@
 //! adds reads with room.
 
 use crate::error::SipParseError;
+use crate::header::HeaderName;
 use crate::types::SipHeader;
 
 /// What a party's new request, one with no To-tag, may hold at first ingress.
@@ -46,7 +47,7 @@ impl FirstIngressBound {
         let long = headers.find(|h| h.name.len() + 2 + h.value.len() > self.header_length)?;
         Some(SipParseError::new(format!(
             "Header {} length {} exceeds the first-ingress bound {}",
-            long.name,
+            crate::error::reason_text::header(&HeaderName::of(&long.name)),
             long.name.len() + 2 + long.value.len(),
             self.header_length
         )))

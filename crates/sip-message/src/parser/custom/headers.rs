@@ -272,9 +272,8 @@ fn parse_line(
         HeaderValue::Unfolded(v) => SipStr::owned(crate::whitespace::trim(&v)),
     };
 
-    // A refusal names the header by its canonical name, a token.
     let header = known.clone().unwrap_or_else(|| HeaderName::Other(name.clone()));
-    let shown = header.as_wire_str();
+    let shown = crate::error::reason_text::header(&header);
 
     // Bound per-header memory: name + ": " + value, post-unfold/trim.
     let header_len = name.len() + 2 + trimmed_value.len();
@@ -354,7 +353,7 @@ fn gate_refusal(
     if !gates && *known != HeaderName::ContentLength {
         return None;
     }
-    let name = known.as_wire_str();
+    let name = crate::error::reason_text::header(known);
 
     // Registry-driven paranoid digit-only pass.
     if let Some(rule) = numeric_header_rule(known) {
