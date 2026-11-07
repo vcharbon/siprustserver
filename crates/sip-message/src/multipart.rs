@@ -394,9 +394,10 @@ pub(crate) fn message_sdp_range(
 }
 
 /// Where `body` holds the session description of the message whose start
-/// line and header block `head` holds, read as a stored message's head is
-/// (lenient, every bound off) and then as [`message_sdp_range`] reads a
-/// parsed one; `None` where the head does not read or names none.
+/// line and header block `head` holds: the head read as a stored message's is
+/// (lenient, every bound off), then its first `Content-Type` and
+/// `Content-Disposition` as a parsed message's ([`sdp_range`]); `None` where
+/// the head does not read or names none.
 pub fn head_sdp_range(head: &[u8], body: &[u8]) -> Option<std::ops::Range<usize>> {
     if body.is_empty() {
         return None;

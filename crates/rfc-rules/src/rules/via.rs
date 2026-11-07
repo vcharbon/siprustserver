@@ -13,7 +13,7 @@
 //! in, and only the port the request left from discharges the duty.
 //!
 //! **`response-destination` needs no pairing**: the response carries the stamp
-//! its sender aims by ([`destination`]).
+//! its sender aims by ([`ResponseDestination`]).
 
 use std::collections::BTreeMap;
 

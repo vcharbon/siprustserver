@@ -78,7 +78,7 @@ crates/rfc-rules/src/rules/dialog.rs 688
 crates/rfc-rules/src/rules/dialog/tests.rs 967
 crates/rfc-rules/src/rules/proxy.rs 606
 crates/rfc-rules/src/rules/wellformed.rs 656
-crates/rfc-rules/src/verdict/evidence.rs 1722
+crates/rfc-rules/src/verdict/evidence.rs 1659
 crates/scenario-harness/src/actor/runner.rs 555
 crates/scenario-harness/src/actor/scenarios.rs 914
 crates/scenario-harness/src/actor/script.rs 532
@@ -90,7 +90,6 @@ crates/scenario-harness/src/agent/ua.rs 725
 crates/scenario-harness/tests/it/template_emission.rs 1012
 crates/seq-report/src/html.rs 1002
 crates/sip-message/src/generators/relay.rs 504
-crates/sip-message/src/sdp_answer.rs 506
 crates/sip-message/src/sniff.rs 567
 crates/sip-message/tests/it/generators.rs 1401
 crates/sip-net-testkit/src/contracts.rs 802
