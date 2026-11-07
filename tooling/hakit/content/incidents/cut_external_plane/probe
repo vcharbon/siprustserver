@@ -19,6 +19,7 @@ restarted="$(hk_state restarts)"
 if [ -n "$restarted" ]; then
   read -r pod before <<<"$restarted"
   now="$(hk_restarts "$pod")" || exit "$HK_NOT_YET"
+  [ -n "$now" ] || exit "$HK_NOT_YET"
   [ "$now" = "$before" ] || hk_die "$pod restarted a container (restarts $before, now '$now'): the table must come back with no restart"
 fi
 routes="$(hk_probe_routed_over_live)"

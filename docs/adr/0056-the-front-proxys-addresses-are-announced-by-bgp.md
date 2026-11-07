@@ -217,8 +217,10 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
     hops in the table: the kernel drops a gateway route when its interface goes and they return
     with it, with no pod restart. Each turn (`proxy.egressRoutes.periodSeconds`, 1 s) it reads the
     table and writes only on a difference, so no route or cached entry churns. A write failing three
-    turns in a row with the interface up and addressed exits it, so the pod reads not Ready and the
-    node withdraws by the slow path (§3). It is not the route guard: the guard is optional, its image
+    turns in a row with the interface up and addressed exits it. Its readiness probe reads the table
+    and passes while it holds a next hop, so a pod whose table is empty stays out of Ready across
+    the container's restarts: the node withdraws by the slow path (§3) and stays out until the routes
+    are in. It is not the route guard: the guard is optional, its image
     has no `ip`, and a stuck route call there would delay its refresh and falsely withdraw the
     node. The render requires next hops and a period below `routeGuard.holdMs`, so the table is
     filled before the guard lets the node out. A pod stop removes nothing, as for the VIPs on `lo`
@@ -297,9 +299,10 @@ Via.
 - A request a worker aims at a VIP its proxy node holds, the external VIP included, is delivered
   locally or not at all, and §11's chain refuses it: it fails at the socket, counted as a send
   failure, and its sender gives up at Timer B. A call looping back through the platform reaches
-  it through a hop on the external plane, as `dual_face` and the spiral scenarios state it.
-- Silencing a next hop now also cuts the node's egress to callers through it, as for any route
-  through that router (§10's chain of timers): the node's own traffic has no other way out.
+  it through a hop on the external plane, as `b2bua-harness`'s `spiral_through_the_front_proxy`
+  states it.
+- Silencing a next hop cuts the node's egress to callers through it (§10's chain of timers): the
+  node's own traffic has no other way out.
 - A next hop that answers ARP and forwards nothing reads alive to the face: its BFD session
   withdraws the routes through it on the routers, and the node's own egress keeps using it.
 - An interface whose operstate stays down longer than the flap (a driver or the kernel's link

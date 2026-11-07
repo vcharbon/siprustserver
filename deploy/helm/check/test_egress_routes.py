@@ -52,6 +52,18 @@ class Rendered(unittest.TestCase):
         self.assertEqual(env(c), {"EXTERNAL_INTERFACE": "eth1",
                                   "EXTERNAL_NEXT_HOPS": "192.168.60.1", "PERIOD": "1"})
 
+    def test_the_pod_is_not_ready_while_the_table_holds_no_next_hop(self) -> None:
+        probe = container(proxy(), "egress-routes")["readinessProbe"]
+        command = probe["exec"]["command"]
+        self.assertEqual(command[:2], ["/bin/sh", "-c"])
+        self.assertIn("ip -o route show table 5060 default", command[2])
+        for table, ready in ((UNREACHABLE, False), (UNREACHABLE + BOTH, True),
+                             ("default via 192.0.2.1 dev eth1 \n" + UNREACHABLE, True)):
+            read = subprocess.run(["sh", "-c", command[2].replace(
+                "ip -o route show table 5060 default", 'printf "%s" "$TABLE"')],
+                env={"PATH": os.environ["PATH"], "TABLE": table})
+            self.assertEqual(read.returncode == 0, ready, table)
+
     def test_empty_next_hops_refuse_the_render(self) -> None:
         err = render_error(SIPRUST, *KIND, "--set", "network.externalNextHops=null",
                            "--set", "proxy.announce.metallb.enabled=false",

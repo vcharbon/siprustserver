@@ -322,6 +322,9 @@ def test_cut_probe_waits_for_the_tables_next_hops_and_refuses_a_restart(tmp_path
     restarted = Rule(r"-n ns get pod p-1 --ignore-not-found", "0\n1\n0\n")
     sb.rules(link, table, restarted, PROXIES, *PLANES, *BOTH)
     failed(sb.run("probe"), "p-1 restarted a container")
+    gone = Rule(r"-n ns get pod p-1 --ignore-not-found", "")
+    sb.rules(link, table, gone, PROXIES, *PLANES, *BOTH)
+    assert sb.run("probe").returncode == 75, "no such pod is a read that says nothing yet"
 
 
 NEIGHBOUR = Rule(r"docker exec e2 ip -j neigh show to 192\.168\.60\.1 dev eth1$", '[{"dst":"192.168.60.1","lladdr":"02:00:00:00:00:01","state":["REACHABLE"]}]')

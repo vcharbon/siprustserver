@@ -141,9 +141,9 @@ fn route_uri(route: &str) -> Option<Uri> {
 }
 
 /// Egress-aware wire destination for a leg's in-dialog request, WITHOUT mutating
-/// a request: `apply_b_leg_egress`'s destination decision, used for observability attribution (the keepalive-failure peer metric), where
-/// we need the wire hop the unanswered OPTIONS used but must not synthesize a
-/// request to find it.
+/// a request: `apply_b_leg_egress`'s destination decision, used for observability
+/// attribution (the keepalive-failure peer metric), where we need the wire hop the
+/// unanswered OPTIONS used but must not synthesize a request to find it.
 pub fn leg_egress_dest(
     config: &B2buaConfig,
     leg_id: &str,

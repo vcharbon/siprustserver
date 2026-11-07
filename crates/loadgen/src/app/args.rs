@@ -67,7 +67,7 @@ pub struct Args {
     #[arg(long)]
     pub endpoint_config: Option<PathBuf>,
     /// Shorthand: the SUT address the INVITE routes through (front-proxy VIP).
-    #[arg(long, default_value = "172.20.255.250:5060")]
+    #[arg(long, default_value = "192.168.60.250:5060")]
     pub target: SocketAddr,
     /// Shorthand: local host IP to bind the mux endpoints on (reachable from the SUT).
     #[arg(long, default_value = "127.0.0.1")]

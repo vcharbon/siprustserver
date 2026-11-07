@@ -231,7 +231,8 @@ spec:
             {{- toYaml $g.resources | nindent 12 }}
         {{- end }}
         # The external next hops in the table of the external VIP's traffic
-        # (ADR-0056 §11). No readiness probe: exiting takes the pod out of Ready.
+        # (ADR-0056 §11). Ready while the table holds one: a pod whose table is
+        # empty stays out of Ready, across a restart of this container too.
         - name: egress-routes
           {{- include "siprust.netToolsImage" . | nindent 10 }}
           command: ["/bin/sh", "-c"]
@@ -242,6 +243,13 @@ spec:
             - { name: EXTERNAL_INTERFACE, value: {{ include "siprust.net" (dict "root" $ "key" "externalInterface") | quote }} }
             - { name: EXTERNAL_NEXT_HOPS, value: {{ join " " .Values.network.externalNextHops | quote }} }
             - { name: PERIOD, value: {{ int $p.egressRoutes.periodSeconds | toString | quote }} }
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "ip -o route show table 5060 default | grep -q ' via '"]
+            periodSeconds: {{ int $p.readinessProbe.periodSeconds }}
+            failureThreshold: 1
+            successThreshold: 1
+            timeoutSeconds: 1
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
