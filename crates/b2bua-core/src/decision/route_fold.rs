@@ -247,6 +247,30 @@ pub fn admitted(
     // Whether that INVITE carries an offer: the strategy's withhold and the
     // `fake-prack` delayed-offer fallback both read it.
     let offers_sdp = relay::mints_offer(a_invite, body_override.as_ref());
+    let withheld = capabilities::withheld_option_tags(&call, None, offers_sdp);
+    // A caller requiring `100rel` (RFC 3262 §3) where the call withholds it
+    // from the callee cannot be shown a reliable provisional: she is answered
+    // 420 naming it (RFC 3261 §8.2.2.3), and nobody is dialled.
+    if withheld.iter().any(|tag| tag.eq_ignore_ascii_case(RELIABLE)) && requires_100rel(a_invite) {
+        let unsupported: call::header_update::SipHeaderUpdates = [(
+            "Unsupported".to_string(),
+            call::header_update::HeaderUpdate::Set(vec![RELIABLE.to_string()]),
+        )]
+        .into_iter()
+        .collect();
+        return crate::initial_invite::reject_call(
+            call,
+            a_invite,
+            420,
+            None,
+            Some(&unsupported),
+            &[],
+            &config.minted_final_advertisement,
+            ids,
+            now_ms,
+            TerminationCause::Admission,
+        );
+    }
     // A decision field that does not read has no destination behind it: refuse
     // the route rather than originate toward a fabricated address. The
     // caller gets a final (ADR-0022's guarantee holds) and the CDR names the
@@ -267,7 +291,7 @@ pub fn admitted(
         &header_updates,
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
         crate::rules::charging::minting_arm(&call, leg_id, None),
-        &capabilities::withheld_option_tags(&call, None, offers_sdp),
+        &withheld,
         &capabilities::offered_option_tags(&call, None),
         None,
         call.a_leg.invite_final_sent().is_none(),
@@ -414,4 +438,15 @@ fn disable_fake_prack_on_a_delayed_offer(call: &mut Call, offers_sdp: bool) {
     if let Some(f) = call.features.as_mut() {
         f.relay_first_18x_to_180 = None;
     }
+}
+
+/// The option tag of reliable provisionals (RFC 3262).
+const RELIABLE: &str = "100rel";
+
+/// Whether `invite` requires reliable provisionals (RFC 3262 §3).
+fn requires_100rel(invite: &SipRequest) -> bool {
+    invite
+        .header::<sip_message::header::Require>()
+        .and_then(Result::ok)
+        .is_some_and(|required| required.contains(RELIABLE))
 }

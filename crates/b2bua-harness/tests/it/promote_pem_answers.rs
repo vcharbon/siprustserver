@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::{Harness, Inbound};
+use scenario_harness::{Harness, Inbound, WaiverScope};
 use sip_message::header::HeaderName;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -354,20 +354,42 @@ async fn a_delayed_offer_solicits_no_reliable_offer_from_the_callee() {
     assert!(!solicited, "no 100rel toward bob");
 }
 
-/// Alice requiring `100rel` changes nothing toward bob: the promotion shows
-/// her no provisional at all, so her requirement holds on her face (RFC 3262
-/// §3), and bob is answered with her media.
+/// Bob offers in a reliable 183 although the INVITE withheld `100rel`: the
+/// audit charges bob alone, the stack PRACKs his provisional, and the call
+/// ends with its BYE and its CDR.
 #[tokio::test(start_paused = true)]
-async fn a_delayed_offer_requiring_100rel_solicits_no_reliable_offer_either() {
-    let (solicited, answer) = delayed_offer_with_100rel(
-        "promote-pem-delayed-offer-require",
-        (5839, 5849, 5859),
-        "Require",
-    )
-    .await;
-    assert!(
-        answer.as_deref().is_some_and(|sdp| sdp.contains("m=audio 10000")),
-        "bob is answered with alice's media: {answer:?}"
+async fn a_callee_answering_reliably_unasked_is_charged_alone() {
+    let h = Harness::with_transit_delay("promote-pem-unsolicited-reliable-offer", 1);
+    h.waive(
+        WaiverScope::rule(
+            "reliable-needs-client-opt-in",
+            "bob sends a reliable 183 to an INVITE that offered no 100rel: the outcome is the subject",
+        )
+        .on_party("bob"),
     );
-    assert!(!solicited, "no 100rel toward bob");
+    let alice = h.agent("alice", "127.0.0.1:5860").await;
+    let bob = h.agent("bob", "127.0.0.1:5861").await;
+    let b2bua = b2bua_pem(&h, "127.0.0.1:5862", 5861).await;
+
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress")
+        .with_header("P-Early-Media", "sendrecv")
+        .with_sdp(EARLY)
+        .reliable(1)
+        .await;
+    call.expect(200).await;
+    let mut dialog = call.ack_with(Some(OFFER)).await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    uas.respond(200, "OK").with_sdp(EARLY).await;
+    bob.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.cdr_records().len() == 1).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
 }

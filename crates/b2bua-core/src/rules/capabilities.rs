@@ -224,7 +224,9 @@ pub fn offered_option_tags(call: &Call, kind: Option<LegKind>) -> Vec<String> {
 /// destination's session interval reaches nobody who would refresh it: that
 /// strategy withholds `timer` (RFC 4028 §7.1), and `100rel` where the INVITE
 /// carries no offer, so the destination's offer comes unreliably and again in
-/// its 2xx, whose ACK carries the originator's answer (RFC 3264 §4). The withhold outranks the
+/// its 2xx, whose ACK carries the originator's answer (RFC 3264 §4). An
+/// originator requiring `100rel` where it is withheld is answered 420 before
+/// any leg is dialled (RFC 3261 §8.2.2.3). The withhold outranks the
 /// offer, and it applies on EVERY mint of the call — the initial route and each leg a
 /// rule creates — so the call solicits the same reliability from each callee.
 /// A media leg's provisionals belong to the service that dialled it: nothing

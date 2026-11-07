@@ -191,3 +191,24 @@ fn a_2xx_answering_the_invites_offer_draws_a_bare_ack() {
         assert!(ack.body().is_empty(), "a bare ACK for {answer:?}");
     }
 }
+
+/// Bob's reliable 183 carried the offer his INVITE left out, absorbed by this
+/// stack rather than shown to the caller, and its PRACK answered it (RFC 3262
+/// §5): his 200 makes no offer, so his ACK is bare whatever answer is given.
+#[test]
+fn an_absorbed_reliable_offer_leaves_the_2xx_no_offer() {
+    let delayed = invite().thaw().without_body().freeze().expect("a delayed offer");
+    let mut call = dialled_with(&delayed);
+    let id = call::ProvisionalId {
+        leg: "b-1".into(),
+        responder_tag: "bobtag".into(),
+        invite_cseq: call::CSeq(1),
+        rseq: call::RSeq(1),
+    };
+    call::helpers::record_provisional(&mut call, id, true);
+    let event = bobs_200("application/sdp", SDP);
+    let confirm = RuleAction::ConfirmDialog { leg_id: "b-1".into() };
+    let result = on_b(&call, &event, &[confirm, answering(Some(ANSWER))]);
+    let ack = sent(&result, Method::Ack).pop().expect("an ACK");
+    assert!(ack.body().is_empty(), "the reliable 183 carried the offer: a bare ACK");
+}

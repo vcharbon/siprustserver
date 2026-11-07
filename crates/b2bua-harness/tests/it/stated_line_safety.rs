@@ -201,3 +201,43 @@ async fn a_long_stated_line_is_skipped_only_on_a_new_request() {
     assert_eq!((on_final, on_bye), (1, 1), "the final and the in-dialog BYE carry it");
     assert!(counted >= 1, "the skip on the INVITE is counted");
 }
+
+/// A decision's header past the first-ingress bound on the routed INVITE, a
+/// new request its next hop reads at first ingress (ADR-0001), is left off
+/// it and counted; the call goes on.
+#[tokio::test(start_paused = true)]
+async fn a_decision_header_past_the_first_ingress_bound_is_left_off_the_routed_invite() {
+    let long = "x".repeat(9_000);
+    let mut s = B2buaScene::with_b2bua("decision-header-past-first-ingress", move |bob_port| {
+        let long = long.clone();
+        let engine = ScriptedDecisionEngine::builder()
+            .fallback(move |_| {
+                let mut route = route_to("127.0.0.1", bob_port);
+                let mut headers = SipHeaderUpdates::new();
+                headers.insert("X-Long".into(), set(&[long.as_str()]));
+                route.update_headers = Some(headers);
+                NewCallResponse::Route(route)
+            })
+            .build();
+        B2buaSut::builder(Arc::new(engine))
+    })
+    .await;
+
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    let on_invite = uas.request().raw(HeaderName::from("X-Long")).count();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+
+    let defects = s.b2bua.take_model_violations();
+    let counted = s.b2bua.metrics().model_defects_total(DEFECT);
+    let _report = s.finish().await;
+    assert_eq!(on_invite, 0, "the routed INVITE leaves without it: {defects:?}");
+    assert!(counted >= 1, "the skip is counted");
+}
