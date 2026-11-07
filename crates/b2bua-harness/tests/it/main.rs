@@ -62,6 +62,7 @@ mod discarded_request_readmitted;
 mod duplicate_ack_absorbed;
 mod early_dialog_bye;
 mod early_fork_bye;
+mod early_session_body;
 mod ended_leg_txn_timeout;
 mod ending_dialog;
 mod event_queue_admission;
