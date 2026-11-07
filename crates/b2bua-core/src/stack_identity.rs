@@ -320,6 +320,20 @@ mod tests {
     }
 
     #[test]
+    fn an_altered_route_is_refused() {
+        let k = key(1);
+        let request = RequestFacts { route: "<sip:hop.example;lr>", ..facts("sip:bob@10.0.0.2") };
+        let o = StackIdentityOpts { request: Some((request, &k)), ..opts(false) };
+        let signed = build_call_via(&o, "z9hG4bKabc".to_string());
+        assert!(read_via_extension(&signed, "INVITE", Some(&k)).is_some());
+        let (mut ext, signature) = via_extension::read(&signed).expect("the extension");
+        ext.route = "<sip:elsewhere.example;lr>".to_string();
+        let altered =
+            signed.with_param(via_extension::PARAM, ext.param(&signature).expect("it fits"));
+        assert_eq!(read_via_extension(&altered, "INVITE", Some(&k)), None);
+    }
+
+    #[test]
     fn an_extension_is_trusted_under_the_signing_key_only() {
         let k = key(1);
         let o = StackIdentityOpts { request: Some((facts("sip:bob@10.0.0.2"), &k)), ..opts(false) };

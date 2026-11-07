@@ -132,6 +132,7 @@ async fn a_non_2xx_on_a_leg_the_held_call_lacks_is_acked_from_its_extension() {
     assert_eq!(acks[0].method().as_str(), "ACK");
     assert_eq!(acks[0].request_uri().text(), CALLEE_URI, "at the Request-URI the extension states");
     assert_eq!(acks[0].top_via().branch(), Some(BRANCH), "on the INVITE's branch");
+    assert!(proxy.try_recv().is_none(), "nothing reaches the socket the final came from");
 }
 
 /// What the router's step sends for each final that is owed nothing here.

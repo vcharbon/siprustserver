@@ -27,8 +27,10 @@
 //! its slot frees when the attempt already running returns. Of a name's
 //! addresses, the first the egress socket can reach is used (the socket of
 //! the face it leaves on; an unspecified IPv6 bind reaches both families),
-//! and kept for the cache lifetime. Only A/AAAA records are used: no
-//! NAPTR/SRV selection (RFC 3263 §4.1-4.2, ADR-0046).
+//! and kept for the cache lifetime. A name's answer may change between an INVITE
+//! and its ACK, costing the hop a repeated final to Timer H on a call that already
+//! failed. Only A/AAAA records are used: no NAPTR/SRV selection (RFC 3263 §4.1-4.2,
+//! ADR-0046).
 //!
 //! The cache is bounded and TTL'd in both directions:
 //! - a **positive TTL** so a restarted callee pod's new A record is picked up

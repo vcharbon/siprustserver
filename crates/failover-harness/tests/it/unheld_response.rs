@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use failover_harness::{
     assert_call_fully_over, assert_call_fully_released, total_cdrs_for, worker_ordinals,
-    FailoverHarness, WorkerHealth,
+    FailoverHarness, Instance, WorkerHealth,
 };
 use scenario_harness::callflow::ANSWER_SDP;
 use sip_message::generators::InDialogMethod;
@@ -160,4 +160,104 @@ async fn a_487_failed_over_is_acked_at_the_hop_its_invite_took() {
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
     assert_eq!(total_cdrs_for(&[&w_b1, &w_b2], &call_ref), 1, "the call has its one CDR");
+}
+
+/// The hop's sequence on a pair of proxy instances: the INVITE crosses A, its final
+/// crosses `final_via`, the backup's ACK crosses `ack_via`. Where the ACK's instance
+/// did not forward the INVITE or relay its final, only the route the via-extension
+/// kept places it (ADR-0055 §12).
+async fn acked_at_the_hop_across_instances(name: &str, final_via: Instance, ack_via: Instance) {
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let hop = fh.scripted_proxy("hop", HOP).await;
+    let pair = fh.spawn_proxy_pair(LB, &[("b1", addr(B1)), ("b2", addr(B2))]).await;
+    for sender in [ALICE, BOB, HOP, B1, B2] {
+        pair.assign(addr(sender), Instance::A);
+    }
+    let hop_at = ("127.0.0.1", 5075);
+    let lb_at = ("127.0.0.1", 5080);
+    let w_b1 = fh.spawn_worker("b1", "b1", B1, &["b2"], hop_at, lb_at).await;
+    let w_b2 = fh.spawn_worker("b2", "b2", B2, &["b1"], hop_at, lb_at).await;
+    fh.advance(SETTLE).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(pair.addr()).send().await;
+    hop.forward_request(addr(BOB)).await;
+    let mut uas = bob.receive("INVITE").await;
+    let (p_ord, b_ord) = worker_ordinals(uas.request());
+    uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    hop.forward_response(addr(LB)).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    hop.forward_request(addr(BOB)).await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = uas.dialog();
+    fh.advance(SETTLE).await;
+    let (backup, backup_at) = if p_ord == "b1" { (&w_b2, B2) } else { (&w_b1, B1) };
+    let call_ref = backup.scan_one_backed_up(&p_ord).await.expect("the replicated call");
+
+    fh.stall(&p_ord, &b_ord);
+    let mut round = dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
+    let forwarded = hop.forward_request(addr(BOB)).await;
+    let branch = forwarded.top_via().branch().expect("the hop's branch").to_string();
+    let mut at_bob = bob.receive("INVITE").await;
+    at_bob.respond(100, "Trying").await;
+    hop.forward_response(addr(LB)).await;
+    round.expect(100).await;
+    fh.advance(Duration::from_millis(300)).await;
+    pair.a.set_health(&p_ord, WorkerHealth::Dead);
+    pair.b.set_health(&p_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(200)).await;
+
+    let mut bye = bob_dialog.bye().await;
+    hop.forward_request(addr(LB)).await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    hop.forward_response(addr(BOB)).await;
+    bye.expect(200).await;
+    round.expect(487).await;
+    hop.forward_request_on_branch(addr(BOB), &branch).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    hop.forward_response(addr(LB)).await;
+    fh.advance(SETTLE).await;
+
+    pair.assign(addr(HOP), final_via);
+    pair.assign(addr(backup_at), ack_via);
+    at_bob.respond(487, "Request Terminated").await;
+    hop.forward_response(addr(LB)).await;
+    let ack = hop.forward_request_on_branch(addr(BOB), &branch).await;
+    assert_eq!(ack.method(), "ACK", "the hop takes the ACK of its own forward");
+    assert_eq!(ack.cseq().seq(), at_bob.request().cseq().seq());
+    bob.receive("ACK").await;
+
+    pair.a.set_health(&p_ord, WorkerHealth::Alive);
+    pair.b.set_health(&p_ord, WorkerHealth::Alive);
+    fh.resume(&p_ord, &b_ord);
+    fh.advance(SETTLE).await;
+    let drained = fh
+        .settle_terminal(async || {
+            w_b1.memory_clean()
+                && w_b2.memory_clean()
+                && !w_b1.holds_any_trace(&call_ref).await
+                && !w_b2.holds_any_trace(&call_ref).await
+        })
+        .await;
+    assert!(drained, "the call drains cleanly");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
+    assert_eq!(total_cdrs_for(&[&w_b1, &w_b2], &call_ref), 1, "the call has its one CDR");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_here_and_an_ack_on_the_other_instance_reach_the_hop() {
+    acked_at_the_hop_across_instances("unheld-487-hop-ab", Instance::A, Instance::B).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_and_an_ack_on_the_other_instance_reach_the_hop() {
+    acked_at_the_hop_across_instances("unheld-487-hop-bb", Instance::B, Instance::B).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_on_the_other_instance_and_an_ack_on_the_invites_reach_the_hop() {
+    acked_at_the_hop_across_instances("unheld-487-hop-ba", Instance::B, Instance::A).await;
 }

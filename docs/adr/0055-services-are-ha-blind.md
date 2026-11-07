@@ -911,7 +911,7 @@ it, can CANCEL it or ACK its non-2xx from the callee's response (§9.1,
 §17.1.1.3), and ACK and BYE its 2xx,
 with the answer an offer the 2xx makes is owed (§13.2.2.4, RFC 3264 §4). That ACK
 goes where the INVITE went (§17.1.1.2) on any proxy instance
-(`a_487_failed_over_is_acked_at_the_hop_its_invite_took`). A Route past the bound
+(`a_final_and_an_ack_on_the_other_instance_reach_the_hop` and its two siblings). A Route past the bound
 is left out and the rest still stated: the instance that forwarded the INVITE and
 relayed its final still places the ACK, any other sends it to the Request-URI and
 the hop repeats its final to Timer H

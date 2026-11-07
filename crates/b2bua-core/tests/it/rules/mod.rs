@@ -60,6 +60,7 @@ mod reaper_verdicts;
 mod route_set;
 mod sdp_body_author;
 mod service_timers;
+mod stated_route;
 mod stated_text_skips;
 mod subscription_record;
 mod teardown;

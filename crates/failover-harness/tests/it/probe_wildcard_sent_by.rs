@@ -1,6 +1,7 @@
-//! The proxy's health probe on a socket bound to the wildcard, as a runner binds
-//! it: what it states names no address, and a real worker's answer finds it by
-//! the `rport` it asks (RFC 3581 §4), so the worker reads alive.
+//! A real worker answers the proxy's health probe on a socket bound to the
+//! wildcard, stating `proxy.invalid`, and reads alive. The simulated source is the
+//! bound `0.0.0.0` itself, so this holds with or without the stated host and
+//! `rport`: `sip-proxy`'s `probe_sent_by` guards those.
 
 use std::net::SocketAddr;
 use std::time::Duration;

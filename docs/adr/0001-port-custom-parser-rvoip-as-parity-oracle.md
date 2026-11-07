@@ -68,7 +68,8 @@ the `maddr` condition of RFC 3581 §4.
   already holds what the response needs.
 
 A URI is different. Its host is already chosen by whoever wrote the URI, so its
-`maddr` adds no steering, and RFC 3261 §16.5 and RFC 3263 §4 make it the target.
+`maddr` adds no steering where the author of the host wrote it, and RFC 3261 §16.5
+and RFC 3263 §4 make it the target.
 A URI's `maddr` is honored, at the URI's own port, wherever a URI picks the next
 hop (`Uri::next_hop`): a remote target, a Route entry, a decided Request-URI, a
 relayed one. It stays on the Request-URI sent onward, and the stack never mints
@@ -78,11 +79,14 @@ naming itself by `maddr` as its own.
 An inbound Request-URI on a proxy's external face chooses no destination: there a
 sender is asking the proxy to take the request, and following what it wrote would
 make the proxy an open relay. The request reaches a worker, which decides what it
-sends onward.
+sends onward. A deployment whose decision service states the host of a request it
+reads hands that service no `maddr` of the caller's: neither honored nor passed on,
+so no copied parameter pairs the service's host with the caller's address.
 
 The Via rule matches ADR-0048: of a response's address the sender chooses only the
-port, at its sent-by with no `rport`, and the IP stays the packet's source. Serving multicast SIP would reopen it, and would need a way to check the `maddr`
-against the group the request actually arrived on.
+port, at its sent-by with no `rport`, and the IP stays the packet's source. Serving
+multicast SIP would reopen it, and would need a way to check the `maddr` against
+the group the request actually arrived on.
 
 ## Considered and rejected
 
