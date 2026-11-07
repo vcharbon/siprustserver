@@ -5,15 +5,24 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The areas of the stack a listed row waits on. `unowned` holds a row no area
-/// has taken yet.
-const OWNERS: &[&str] = &[
-    "one-reader",
-    "case-and-framing",
-    "multipart-and-media-type",
-    "offer-answer",
-    "audit",
-    "unowned",
+/// The areas of the stack a listed row waits on.
+const OWNERS: &[&str] =
+    &["one-reader", "case-and-framing", "multipart-and-media-type", "offer-answer", "audit"];
+
+/// Every family a test settles: a listed row of any other family answers to no
+/// test, and fails the suite.
+const FAMILIES: &[&str] = &[
+    "abnf",
+    "abnf-long",
+    "frozen",
+    "rfc",
+    "must",
+    "refuse",
+    "recase",
+    "body",
+    "sdp",
+    "exempt",
+    "readable",
 ];
 
 /// The list as written: `(row, owner)`, comments and blank lines left out.
@@ -42,13 +51,14 @@ impl Row {
 pub struct Failures(BTreeMap<String, (usize, String)>);
 
 impl Failures {
-    /// `input` of `target` failed `row` for `reason`.
+    /// `input` of `target` failed `row` for `reason`: the row is `<target>/<row>`,
+    /// so a refusal one target makes never hides another's.
     pub fn note(&mut self, row: &str, target: &str, input: &str, reason: &str) {
-        let entry = self.0.entry(row.to_string()).or_default();
+        let entry = self.0.entry(format!("{target}/{row}")).or_default();
         entry.0 += 1;
         if entry.1.is_empty() {
             let sample: String = input.chars().take(120).collect();
-            entry.1 = format!("{target}: {sample:?} -> {reason}");
+            entry.1 = format!("{sample:?} -> {reason}");
         }
     }
 
@@ -61,6 +71,7 @@ impl Failures {
 }
 
 fn listed(family: &str) -> BTreeSet<&'static str> {
+    assert!(FAMILIES.contains(&family), "{family} is no family of the suite");
     let prefix = format!("{family}/");
     entries().map(|(row, _)| row).filter(|row| row.starts_with(&prefix)).collect()
 }
@@ -106,25 +117,14 @@ pub fn settle_rows(family: &str, failures: &Failures) {
     hold(family, &failures.failing(family));
 }
 
-/// Holds a longer sweep of the values [`settle_rows`] already judged: its volume
-/// can only add rows, so it answers only for a row not listed.
-#[track_caller]
-pub fn settle_new_rows(family: &str, failures: &Failures) {
-    let report = unlisted(&failures.failing(family), &listed(family));
-    assert!(report.is_empty(), "{family}, against ratchet.txt:\n{}", report.join("\n"));
-}
-
-/// Whether the list holds `row`.
-pub fn lists(row: &str) -> bool {
-    entries().any(|(listed, _)| listed == row)
-}
-
 #[test]
 fn the_list_names_each_row_once_with_a_known_owner() {
     let mut owners: BTreeMap<&str, usize> = BTreeMap::new();
     let mut rows = BTreeSet::new();
     for (row, owner) in entries() {
         assert!(rows.insert(row), "{row} is listed twice");
+        let family = row.split('/').next().unwrap_or_default();
+        assert!(FAMILIES.contains(&family), "{row}: no test settles {family}");
         assert!(OWNERS.contains(&owner), "{row}: no owner named {owner}");
         *owners.entry(owner).or_default() += 1;
     }

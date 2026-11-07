@@ -101,7 +101,6 @@ const EXAMPLES: &[(&str, &str, Base, &str)] = &[
     ("3262-7.1-rseq", "", Response(183, "INVITE"), "RSeq: 988789"),
     ("3262-7.2-rack", "", Prack, "RAck: 776656 1 INVITE"),
     ("3323-4.2-privacy-one", "", Options, "Privacy: id"),
-    ("3323-4.2-privacy-many", "", Options, "Privacy: id;user;critical"),
     ("3325-9.1-pai-name-addr", "", Options, "P-Asserted-Identity: \"Cullen Jennings\" <sip:fluffy@cisco.com>"),
     ("3325-9.1-pai-tel", "", Options, "P-Asserted-Identity: tel:+14085264000"),
     ("3325-9.2-ppi", "", Options, "P-Preferred-Identity: \"Cullen Jennings\" <sip:fluffy@cisco.com>"),

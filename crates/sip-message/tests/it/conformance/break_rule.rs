@@ -29,8 +29,6 @@ struct Subject {
     uri: bool,
     /// Whether the header's grammar folds a list.
     list: bool,
-    /// Whether a second line of it is refused.
-    once: bool,
     /// Its token-only parameter, quoted: `branch` and `tag`, the two a stated rule
     /// makes a token. Any other parameter also reads as `generic-param`, whose
     /// `gen-value` admits a quoted-string, so its quoted form is valid.
@@ -98,12 +96,36 @@ const BASE: Subject = Subject {
     separator: ";",
     uri: false,
     list: false,
-    once: true,
     quoted: None,
     vouched: true,
     recased: None,
     read: |_| Ok(()),
 };
+
+/// The subjects a second line of is refused: the one list the repeat operators
+/// read. A list header takes several lines, and so do the credentials, which
+/// §7.3.1 names though their grammar has no list.
+const REFUSED_WHEN_REPEATED: &[&str] = &[
+    "from",
+    "to",
+    "call-id",
+    "cseq",
+    "max-forwards",
+    "content-length",
+    "expires",
+    "min-expires",
+    "session-expires",
+    "min-se",
+    "rseq",
+    "rack",
+    "content-type",
+    "content-disposition",
+    "event",
+    "refer-to",
+    "replaces",
+    "subscription-state",
+    "retry-after",
+];
 
 /// The headers ingress vouches for, and those the stack acts on.
 fn subjects() -> Vec<Subject> {
@@ -124,7 +146,6 @@ fn dialog_subjects() -> Vec<Subject> {
             echoed: true,
             param: Some(("branch", "z9hG4bK-sub", "z9hG4bK-two")),
             list: true,
-            once: false,
             quoted: Some("SIP/2.0/UDP 192.0.2.30:5060;branch=\"z9hG4bK-sub\""),
             recased: Some("sIp/2.0/uDp 192.0.2.30:5060;BRANCH=z9hG4bK-sub"),
             read: typed::<header::Via>,
@@ -183,7 +204,6 @@ fn dialog_subjects() -> Vec<Subject> {
             param: Some(("expires", "60", "120")),
             uri: true,
             list: true,
-            once: false,
             recased: Some("<SIP:carol@192.0.2.30:5060>;EXPIRES=60"),
             read: typed::<header::Contact>,
             ..BASE
@@ -196,7 +216,6 @@ fn dialog_subjects() -> Vec<Subject> {
             param: Some(("x", "1", "2")),
             uri: true,
             list: true,
-            once: false,
             recased: Some("<SIP:proxy.example.com;LR>;X=1"),
             read: typed::<header::RouteEntry>,
             ..BASE
@@ -209,7 +228,6 @@ fn dialog_subjects() -> Vec<Subject> {
             param: Some(("x", "1", "2")),
             uri: true,
             list: true,
-            once: false,
             recased: Some("<SIP:proxy.example.com;LR>;X=1"),
             read: typed::<header::RecordRouteEntry>,
             ..BASE
@@ -481,6 +499,13 @@ impl Subject {
         Row::new(format!("refuse/{operator}/{}", self.row), self.refused(raw))
     }
 
+    /// A row whose operator breaks the message, not a line: every line still
+    /// reads, so a request is answered (ADR-0054 §2) and a response is not.
+    fn message_row(&self, operator: &str, raw: &[u8]) -> Row {
+        let is_response = (self.base)().bytes().starts_with(b"SIP/2.0");
+        Row::new(format!("refuse/{operator}/{}", self.row), refused(raw, !is_response))
+    }
+
     fn at_mid(&self, inserted: &[u8]) -> Vec<u8> {
         let (before, after) = self.value.split_once('|').expect("a position in the value");
         [before.as_bytes(), inserted, after.as_bytes()].concat()
@@ -505,16 +530,27 @@ pub fn refused(raw: &[u8], answered: bool) -> Result<(), String> {
     }
 }
 
-/// One datagram an operator builds of a subject. `shape` marks an operator that
-/// breaks the message's shape, which ingress answers for whatever the header.
+/// What answers for an operator's datagram.
+#[derive(Clone, Copy)]
+enum Judge {
+    /// The value: ingress, or the typed reader of a header ingress does not
+    /// vouch for.
+    Value,
+    /// The header's lines: ingress, whatever the header.
+    Lines,
+    /// The message: ingress, every line still read.
+    Message,
+}
+
+/// One datagram an operator builds of a subject.
 struct Case {
     operator: String,
     raw: Vec<u8>,
-    shape: bool,
+    judge: Judge,
 }
 
 fn case(operator: &str, raw: Vec<u8>) -> Case {
-    Case { operator: operator.to_string(), raw, shape: false }
+    Case { operator: operator.to_string(), raw, judge: Judge::Value }
 }
 
 /// Every operator that applies to `subject`.
@@ -558,21 +594,21 @@ fn cases(subject: &Subject) -> Vec<Case> {
     all.push(Case {
         operator: "no-blank-line".to_string(),
         raw: last.bytes_without_blank_line(),
-        shape: true,
+        judge: Judge::Message,
     });
-    if subject.once {
+    if REFUSED_WHEN_REPEATED.contains(&subject.row) {
         let twice = subject.message(line.clone()).add(line.clone());
         all.push(Case {
             operator: "repeated-header-same".to_string(),
             raw: twice.bytes(),
-            shape: true,
+            judge: Judge::Lines,
         });
         let other = subject.line(other_value(subject).as_bytes());
         let twice = subject.message(line).add(other);
         all.push(Case {
             operator: "repeated-header-different".to_string(),
             raw: twice.bytes(),
-            shape: true,
+            judge: Judge::Lines,
         });
     }
     all
@@ -616,10 +652,10 @@ fn every_operator_breaks_its_rule() {
     let mut rows = Vec::new();
     for subject in subjects() {
         for case in cases(&subject) {
-            rows.push(if case.shape {
-                subject.strict_row(&case.operator, &case.raw)
-            } else {
-                subject.row(&case.operator, &case.raw)
+            rows.push(match case.judge {
+                Judge::Value => subject.row(&case.operator, &case.raw),
+                Judge::Lines => subject.strict_row(&case.operator, &case.raw),
+                Judge::Message => subject.message_row(&case.operator, &case.raw),
             });
         }
     }

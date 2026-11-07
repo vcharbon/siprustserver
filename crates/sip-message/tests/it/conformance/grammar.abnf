@@ -2,9 +2,11 @@
 ; §25.1 as written, then each extension RFC's own rules, each under its source.
 ; RFC 5234 syntax. A rule starts in column one; a continuation is indented.
 ;
-; A narrowing states its source on the line above it. Each one leaves out a
-; form the RFC text or a stated gate refuses, so a generated value is a valid
-; value; the refusal itself is a row of the suite's table of MUST statements.
+; A narrowing states its source on the line above it, and the row that holds the
+; refusal it leaves out. Each one leaves out a form the RFC text or a stated gate
+; refuses, so a generated value is a valid value. The Verified errata of RFC 3261
+; are applied, each where its rule is. The generator never repeats a parameter
+; name in one value (§7.3.1, §19.1.1): a repeat is a row of its own.
 
 ; --- RFC 5234 Appendix B.1 ---------------------------------------------------
 
@@ -24,13 +26,15 @@ reserved = ";" / "/" / "?" / ":" / "@" / "&" / "=" / "+" / "$" / ","
 unreserved = alphanum / mark
 mark = "-" / "_" / "." / "!" / "~" / "*" / "'" / "(" / ")"
 escaped = "%" HEXDIG HEXDIG
-LWS = [*WSP CRLF] 1*WSP
+; RFC 3261 erratum 7529 (Verified): no whitespace before the fold's CRLF.
+LWS = [CRLF] 1*WSP
 SWS = [LWS]
 HCOLON = *( SP / HTAB ) ":" SWS
 TEXT-UTF8-TRIM = 1*TEXT-UTF8char *(*LWS TEXT-UTF8char)
 TEXT-UTF8char = %x21-7E / UTF8-NONASCII
 ; ADR-0053 §3: the header block is RFC 3629 UTF-8. Its §4 well-formed sequences
-; replace the 5- and 6-byte forms and the surrogates of §25.1's rule.
+; replace the 5- and 6-byte forms and the surrogates of §25.1's rule
+; (must/adr-0053-3-*, must/rule-cesu8-pair-in-a-display-name).
 UTF8-NONASCII = %xC2-DF UTF8-CONT / %xE0 %xA0-BF UTF8-CONT
     / %xE1-EC 2UTF8-CONT / %xED %x80-9F UTF8-CONT / %xEE-EF 2UTF8-CONT
     / %xF0 %x90-BF 2UTF8-CONT / %xF1-F3 3UTF8-CONT / %xF4 %x80-8F 2UTF8-CONT
@@ -69,19 +73,23 @@ host = hostname / IPv4address / IPv6reference
 hostname = *(domainlabel ".") toplabel ["."]
 domainlabel = alphanum / alphanum *(alphanum / "-") alphanum
 toplabel = ALPHA / ALPHA *(alphanum / "-") alphanum
-; ADR-0001, IPv4 octets: at most 255, no leading zero.
+; ADR-0001, IPv4 octets: at most 255, no leading zero (must/adr-0001-octet-*).
 IPv4address = dec-octet "." dec-octet "." dec-octet "." dec-octet
 dec-octet = DIGIT / %x31-39 DIGIT / "1" 2DIGIT / "2" %x30-34 DIGIT / "25" %x30-35
 IPv6reference = "[" IPv6address "]"
-; RFC 5954 §4.1 replaces §25.1's IPv6address (ADR-0053 §2).
+; RFC 5954 §4.1 replaces §25.1's IPv6address (ADR-0053 §2,
+; must/5954-4.1-ipv6-of-nine-groups).
 IPv6address = 6(h16 ":") ls32 / "::" 5(h16 ":") ls32 / [h16] "::" 4(h16 ":") ls32
     / [*1(h16 ":") h16] "::" 3(h16 ":") ls32 / [*2(h16 ":") h16] "::" 2(h16 ":") ls32
     / [*3(h16 ":") h16] "::" h16 ":" ls32 / [*4(h16 ":") h16] "::" ls32
     / [*5(h16 ":") h16] "::" h16 / [*6(h16 ":") h16] "::"
 h16 = 1*4HEXDIG
 ls32 = h16 ":" h16 / IPv4address
-; ADR-0001, Ports: 1 to 65535.
-port = %x31-39 *3DIGIT / "1" 4DIGIT / "6553" %x30-35
+; ADR-0001, Ports: 1 to 65535 (must/adr-0001-via-port-past-the-range,
+; must/adr-0001-top-via-port-zero), leading zeros allowed by 1*DIGIT.
+port = *2"0" port-value
+port-value = %x31-39 *3DIGIT / %x31-35 4DIGIT / "6" %x30-34 3DIGIT / "65" %x30-34 2DIGIT
+    / "655" %x30-32 DIGIT / "6553" %x30-35
 uri-parameters = *(";" uri-parameter)
 uri-parameter = transport-param / user-param / method-param / ttl-param / maddr-param
     / lr-param / other-param
@@ -104,7 +112,8 @@ hname = 1*(hnv-unreserved / unreserved / escaped)
 hvalue = *(hnv-unreserved / unreserved / escaped)
 hnv-unreserved = "[" / "]" / "/" / "?" / ":" / "+" / "$"
 
-; §19.1.1 Table 1: a Request-URI carries no headers component.
+; §19.1.1 Table 1: a Request-URI carries no headers component
+; (must/adr-0053-2-request-uri-headers).
 Request-URI = ("sip:" / "sips:") [userinfo] hostport uri-parameters / absoluteURI
 absoluteURI = scheme ":" (hier-part / opaque-part)
 hier-part = (net-path / abs-path) ["?" query]
@@ -119,11 +128,12 @@ param = *pchar
 pchar = unreserved / escaped / ":" / "@" / "&" / "=" / "+" / "$" / ","
 scheme = ALPHA *(ALPHA / DIGIT / "+" / "-" / ".")
 authority = srvr / reg-name
-srvr = [[userinfo "@"] hostport]
+; RFC 3261 erratum 1051 (Verified): userinfo ends in its own "@".
+srvr = [[userinfo] hostport]
 reg-name = 1*(unreserved / escaped / "$" / "," / ";" / ":" / "@" / "&" / "=" / "+")
 query = *uric
 ; RFC 4475 §3.1.2.16: another version is 505, the element's answer to a message
-; the parser refuses.
+; the parser refuses (must/4475-3.1.2.16-version-unknown).
 SIP-Version = "SIP" "/" "2" "." "0"
 
 Request-Line = Method SP Request-URI SP SIP-Version
@@ -136,9 +146,11 @@ Status-Code = "100" / "180" / "181" / "182" / "183" / "200" / "300" / "301" / "3
     / "481" / "482" / "483" / "484" / "485" / "486" / "487" / "488" / "491" / "493"
     / "500" / "501" / "502" / "503" / "504" / "505" / "513" / "600" / "603" / "604"
     / "606" / extension-code
-; §7.2: "SIP/2.0 allows six values for the first digit" (ADR-0001, status codes).
+; §7.2: "SIP/2.0 allows six values for the first digit" (ADR-0001, status codes;
+; must/adr-0001-status-*).
 extension-code = %x31-36 2DIGIT
-; ADR-0053 §3: UTF8-CONT outside a UTF-8 sequence is no UTF-8.
+; ADR-0053 §3: UTF8-CONT outside a UTF-8 sequence is no UTF-8
+; (must/adr-0053-3-latin1-byte).
 Reason-Phrase = *(reserved / unreserved / escaped / UTF8-NONASCII / SP / HTAB)
 
 Accept = "Accept" HCOLON [accept-range *(COMMA accept-range)]
@@ -191,7 +203,7 @@ info = LAQUOT absoluteURI RAQUOT *(SEMI info-param)
 info-param = ("purpose" EQUAL ("icon" / "info" / "card" / token)) / generic-param
 Contact = ("Contact" / "m") HCOLON (STAR / (contact-param *(COMMA contact-param)))
 ; §20.10: unbracketed, a URI holds no comma, semicolon or question mark, and what
-; follows a semicolon is the header's.
+; follows a semicolon is the header's (exempt/bare-user-semicolon/refused-by-default).
 contact-param = (name-addr / bare-addr-spec) *(SEMI contact-params)
 name-addr = [display-name] LAQUOT addr-spec RAQUOT
 addr-spec = SIP-URI / SIPS-URI / absoluteURI
@@ -206,8 +218,15 @@ contact-params = c-p-q / c-p-expires / contact-extension
 c-p-q = "q" EQUAL qvalue
 c-p-expires = "expires" EQUAL delta-seconds
 contact-extension = generic-param
-; §20.19 bounds a delta-seconds Expires by 2^32-1.
-delta-seconds = 1*9DIGIT
+; §20.19 bounds a delta-seconds Expires by 2^32-1 (must/3261-20.19-expires-*).
+delta-seconds = uint32
+; 0 to 2^32-1, leading zeros allowed by 1*DIGIT.
+uint32 = *2"0" uint32-value
+uint32-value = 1*9DIGIT / ten-digit-uint32
+ten-digit-uint32 = %x31-33 9DIGIT / "4" %x30-31 8DIGIT / "42" %x30-38 7DIGIT
+    / "429" %x30-33 6DIGIT / "4294" %x30-38 5DIGIT / "42949" %x30-35 4DIGIT
+    / "429496" %x30-36 3DIGIT / "4294967" %x30-31 2DIGIT / "42949672" %x30-38 DIGIT
+    / "429496729" %x30-35
 Content-Disposition = "Content-Disposition" HCOLON disp-type *(SEMI disp-param)
 disp-type = "render" / "session" / "icon" / "alert" / disp-extension-token
 disp-param = handling-param / generic-param
@@ -225,7 +244,8 @@ Content-Type = ("Content-Type" / "c") HCOLON media-type
 media-type = m-type SLASH m-subtype *(SEMI m-parameter)
 m-type = discrete-type / composite-type
 discrete-type = "text" / "image" / "audio" / "video" / "application" / extension-token
-; A multipart body states a boundary and its framing: the multipart rows.
+; A multipart body states a boundary and its framing: the body rows
+; (body/multipart-*).
 composite-type = "message" / extension-token
 extension-token = ietf-token / x-token
 ietf-token = token
@@ -235,8 +255,8 @@ iana-token = token
 m-parameter = m-attribute EQUAL m-value
 m-attribute = token
 m-value = token / quoted-string
-; §8.1.1.5: a sequence number is less than 2^31.
-CSeq = "CSeq" HCOLON 1*9DIGIT LWS Method
+; §20.16: a sequence number is a 32-bit unsigned integer (must/3261-20.16-cseq-*).
+CSeq = "CSeq" HCOLON uint32 LWS Method
 Date = "Date" HCOLON SIP-date
 SIP-date = rfc1123-date
 rfc1123-date = wkday "," SP date1 SP time SP "GMT"
@@ -253,8 +273,9 @@ from-spec = (name-addr / bare-addr-spec) *(SEMI from-param)
 from-param = tag-param / generic-param
 tag-param = "tag" EQUAL token
 In-Reply-To = "In-Reply-To" HCOLON callid *(COMMA callid)
-; §20.22: 0 to 255.
-Max-Forwards = "Max-Forwards" HCOLON dec-octet
+; §20.22: 0 to 255 (must/3261-20.22-max-forwards-past-the-range), leading zeros
+; allowed by 1*DIGIT (RFC 4475 §3.1.1.1 writes 0068).
+Max-Forwards = "Max-Forwards" HCOLON *2"0" dec-octet
 MIME-Version = "MIME-Version" HCOLON 1*DIGIT "." 1*DIGIT
 Min-Expires = "Min-Expires" HCOLON delta-seconds
 Organization = "Organization" HCOLON [TEXT-UTF8-TRIM]
@@ -290,8 +311,9 @@ Retry-After = "Retry-After" HCOLON delta-seconds [comment] *(SEMI retry-param)
 retry-param = ("duration" EQUAL delta-seconds) / generic-param
 Route = "Route" HCOLON route-param *(COMMA route-param)
 route-param = hop-addr *(SEMI rr-param)
-; ADR-0053 §2: a route-family entry names a hop; a recorded route carries no
-; headers component, by the Request-URI's rule.
+; ADR-0053 §2: a route-family entry names a hop (must/rule-route-opaque-scheme).
+; §19.1.1 Table 1: a route's URI carries no headers component, and a recorded
+; route is held to it (must/adr-0053-2-record-route-headers).
 hop-addr = [display-name] LAQUOT ("sip:" / "sips:") [userinfo] hostport uri-parameters RAQUOT
 Server = "Server" HCOLON server-val *(LWS server-val)
 server-val = product / comment
@@ -318,12 +340,15 @@ protocol-name = "SIP" / token
 protocol-version = token
 transport = "UDP" / "TCP" / "TLS" / "SCTP" / other-transport
 sent-by = host [COLON port]
+; §25.1 comments it "0 to 255".
 ttl = dec-octet
 ; ADR-0001, the magic cookie and the transport allowlist: the Via an element
-; answers. A lower Via is the Via rule above.
+; answers holds one branch, the cookie and an identifier after it
+; (must/adr-0001-top-via-*). A lower Via is the Via rule above.
 Via-top = ("Via" / "v") HCOLON top-via-parm *(COMMA via-parm)
-top-via-parm = "SIP" SLASH "2.0" SLASH top-transport LWS sent-by SEMI "branch" EQUAL
-    %s"z9hG4bK" 1*alphanum *(SEMI via-params)
+top-via-parm = "SIP" SLASH "2.0" SLASH top-transport LWS sent-by *(SEMI top-via-other)
+    SEMI "branch" EQUAL %s"z9hG4bK" token *(SEMI top-via-other)
+top-via-other = via-ttl / via-maddr / via-received / via-extension
 top-transport = "UDP" / "TCP" / "TLS" / "SCTP" / "WS" / "WSS"
 Warning = "Warning" HCOLON warning-value *(COMMA warning-value)
 warning-value = warn-code SP warn-agent SP warn-text
@@ -335,20 +360,23 @@ WWW-Authenticate = "WWW-Authenticate" HCOLON challenge
 extension-header = extension-name HCOLON header-value
 ; The name of no header this suite gives a rule of its own.
 extension-name = "X-" token
-; ADR-0053 §3: UTF8-CONT outside a UTF-8 sequence is no UTF-8.
+; ADR-0053 §3: UTF8-CONT outside a UTF-8 sequence is no UTF-8
+; (must/adr-0053-3-latin1-byte).
 header-value = *(TEXT-UTF8char / LWS)
 
 ; --- RFC 3262 §10 ------------------------------------------------------------
 
 RAck = "RAck" HCOLON response-num LWS CSeq-num LWS Method
-; §7.1: 1 to 2^31-1.
-response-num = %x31-39 *8DIGIT
-CSeq-num = 1*9DIGIT
+; §7.1, §3: 1 to 2^32-1 (must/3262-7.1-rseq-*).
+response-num = *2"0" (%x31-39 *8DIGIT / ten-digit-uint32)
+CSeq-num = uint32
 RSeq = "RSeq" HCOLON response-num
 
 ; --- RFC 3323 §4.2 -----------------------------------------------------------
 
-Privacy = "Privacy" HCOLON priv-value *(";" priv-value)
+; Erratum 5184 (Verified) separates values with ",", the RFC as published with
+; ";": both read.
+Privacy = "Privacy" HCOLON priv-value *((";" / COMMA) priv-value)
 priv-value = "header" / "session" / "user" / "none" / "critical" / token
 
 ; --- RFC 3325 §9 -------------------------------------------------------------
@@ -425,7 +453,7 @@ em-param = "sendrecv" / "sendonly" / "recvonly" / "inactive" / "gated" / "suppor
 
 ; --- RFC 5626 §11.1 ----------------------------------------------------------
 
-Flow-Timer = "Flow-Timer" HCOLON 1*9DIGIT
+Flow-Timer = "Flow-Timer" HCOLON 1*DIGIT
 
 ; --- RFC 5806 §3 -------------------------------------------------------------
 

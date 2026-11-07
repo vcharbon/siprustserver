@@ -5,7 +5,7 @@
 //! stack's own rules name (`rule-*`).
 
 use sip_message::header;
-use sip_message::sipfrag;
+use sip_message::{sipfrag, SipMessage};
 
 use super::break_rule::refused;
 use super::message::{read, reads_every_header, typed, ReadCheck, Template};
@@ -70,6 +70,14 @@ fn holds(name: &str, template: Template, check: ReadCheck) -> Row {
 
 const NO_TAG_FROM: &str = "From: <sip:alice@example.com>";
 
+/// A line of Digest credentials of `name` in realm `realm`.
+fn credentials(name: &str, realm: &str) -> String {
+    format!(
+        "{name}: Digest username=\"a\", realm=\"{realm}\", nonce=\"n\", \
+         uri=\"sip:bob@example.com\", response=\"0123456789abcdef0123456789abcdef\""
+    )
+}
+
 /// RFC 3261 §7: the message's shape and its header fields.
 fn section_7() -> Vec<Row> {
     let mut rows = vec![
@@ -81,6 +89,8 @@ fn section_7() -> Vec<Row> {
             Some(200) => Ok(()),
             other => Err(format!("status {other:?}")),
         }),
+        // ADR-0054 decides the outcome over RFC 4475's SHOULD of a 505: a refused
+        // start line leaves no partial.
         dropped("4475-3.1.2.16-version-unknown", options().start_line("OPTIONS sip:bob@example.com SIP/7.0")),
         // ADR-0001, status codes: §7.2 gives six values for the first digit.
         accept("3261-7.2-status-lowest", response(100, "OPTIONS").start_line("SIP/2.0 100 Trying")),
@@ -93,6 +103,8 @@ fn section_7() -> Vec<Row> {
         accept("3261-7.3.1-no-space-after-colon", options().add("Subject:a")),
         accept("3261-7.3.1-fold-after-colon", options().add("Subject:\r\n a")),
         accept("3261-7.3.1-name-any-case", options().add("sUbJeCt: a")),
+        // §7.3.1's prose allows whitespace before the colon; HCOLON admits only
+        // SP and HTAB there, so a fold before it is refused.
         dropped("3261-7.3.1-fold-before-colon", options().with("from", "From\r\n : <sip:alice@example.com>;tag=a1")),
         accept("3261-7.3.1-route-on-two-lines", options().add("Route: <sip:a.example.com;lr>").add("Route: <sip:b.example.com;lr>")),
         accept("3261-7.3.1-route-on-one-line", options().add("Route: <sip:a.example.com;lr>, <sip:b.example.com;lr>")),
@@ -105,6 +117,27 @@ fn section_7() -> Vec<Row> {
         accept("3261-25.1-trailing-fold", options().with("from", "From: <sip:alice@example.com>;tag=a1\r\n ")),
         // §7.3.3: every compact form of §20 and the extension RFCs.
     ];
+    rows.extend([
+        // §7.3.1: the credentials and challenges take several lines, unlisted.
+        accept(
+            "3261-7.3.1-two-authorization-lines",
+            options()
+                .add(credentials("Authorization", "r1"))
+                .add(credentials("Authorization", "r2")),
+        ),
+        accept(
+            "3261-7.3.1-two-proxy-authorization-lines",
+            options()
+                .add(credentials("Proxy-Authorization", "r1"))
+                .add(credentials("Proxy-Authorization", "r2")),
+        ),
+        accept(
+            "3261-7.3.1-two-www-authenticate-lines",
+            response(401, "OPTIONS")
+                .add("WWW-Authenticate: Digest realm=\"a\", nonce=\"b\"")
+                .add("WWW-Authenticate: Digest realm=\"c\", nonce=\"d\""),
+        ),
+    ]);
     let compact: [(&str, &str, ReadCheck); 4] = [
         ("o", "refer", typed::<header::Event>),
         ("u", "refer", typed::<header::AllowEvents>),
@@ -206,20 +239,37 @@ fn section_8() -> Vec<Row> {
         dropped("3261-8.1.1-no-call-id", options().with("call-id", "X-Call-ID: a")),
         dropped("3261-8.1.1-no-cseq", options().with("cseq", "X-CSeq: a")),
         dropped("3261-8.1.1-no-via", options().with("via", "X-Via: a")),
+        // §8.1.1, ADR-0001: no RFC 2543 compatibility, so no fallback either.
         answered(
             "3261-8.1.1-no-max-forwards",
             options().with("max-forwards", "X-Max-Forwards: 70"),
         ),
         // §8.1.1.3: a From carries a tag.
-        dropped("3261-8.1.1.3-from-no-tag", options().with("from", NO_TAG_FROM)),
+        refused_any("3261-8.1.1.3-from-no-tag", options().with("from", NO_TAG_FROM)),
         // §8.1.1.5: the number's range, and the method the request line names.
         accept("3261-8.1.1.5-cseq-zero", options().with("cseq", "CSeq: 0 OPTIONS")),
-        accept("3261-8.1.1.5-cseq-highest", options().with("cseq", "CSeq: 2147483647 OPTIONS")),
+        // §20.16, RFC 4475 §3.1.2.4: any 32-bit unsigned value reads, in a dialog
+        // or out of one; §8.1.1.5's bound on a new request's first number is the
+        // sender's.
+        accept("3261-20.16-cseq-at-2-31", options().with("cseq", "CSeq: 2147483648 OPTIONS")),
+        accept("3261-20.16-cseq-highest", options().with("cseq", "CSeq: 4294967295 OPTIONS")),
         dropped(
-            "3261-8.1.1.5-cseq-past-the-range",
-            options().with("cseq", "CSeq: 2147483648 OPTIONS"),
+            "3261-20.16-cseq-past-the-range",
+            options().with("cseq", "CSeq: 4294967296 OPTIONS"),
         ),
+        // ADR-0054 decides the outcome over RFC 4475 §3.1.2.17's SHOULD of a 400:
+        // a CSeq naming another method echoes nothing a transaction matches.
         dropped("3261-8.1.1.5-cseq-other-method", options().with("cseq", "CSeq: 1 BYE")),
+        // The same range in a dialog.
+        accept("3261-20.16-cseq-in-dialog-at-2-31", in_dialog("BYE", "CSeq: 2147483648 BYE")),
+        accept("3261-20.16-cseq-in-dialog-highest", in_dialog("BYE", "CSeq: 4294967295 BYE")),
+        dropped(
+            "3261-20.16-cseq-in-dialog-past-the-range",
+            in_dialog("BYE", "CSeq: 4294967296 BYE"),
+        ),
+        // §20.19: Expires is a 32-bit unsigned integer.
+        accept("3261-20.19-expires-highest", options().add("Expires: 4294967295")),
+        answered("3261-20.19-expires-past-the-range", options().add("Expires: 4294967296")),
         // §20.22: Max-Forwards' range.
         accept("3261-20.22-max-forwards-zero", options().with("max-forwards", "Max-Forwards: 0")),
         accept(
@@ -346,6 +396,15 @@ fn section_8() -> Vec<Row> {
             "3261-12.1.1-2xx-invite-no-to-tag",
             response(200, "INVITE").with("to", "To: <sip:bob@example.com>"),
         ),
+        // No exemption: every response but a 100 carries a To-tag, whatever it ends.
+        dropped(
+            "3261-8.2.6.2-2xx-options-no-to-tag",
+            response(200, "OPTIONS").with("to", "To: <sip:bob@example.com>"),
+        ),
+        dropped(
+            "3261-8.2.6.2-2xx-cancel-no-to-tag",
+            response(200, "CANCEL").with("to", "To: <sip:bob@example.com>"),
+        ),
         accept(
             "3261-8.2.6.1-100-no-to-tag",
             response(100, "INVITE").with("to", "To: <sip:bob@example.com>"),
@@ -369,6 +428,29 @@ fn section_8() -> Vec<Row> {
             options().with("from", "From: sip:example.com;x=\"a@b\";tag=1"),
         ),
     ]
+}
+
+/// A request of `method` in a dialog, with `line` in place of its own.
+fn in_dialog(method: &str, line: &str) -> Template {
+    let slot = if line.starts_with("CSeq") { "cseq" } else { "in-dialog" };
+    request(method).with("to", "To: <sip:bob@example.com>;tag=b1").with(slot, line)
+}
+
+/// The Privacy line reads as the three values `id`, `user`, `critical`.
+fn privacy_reads_three(msg: &SipMessage) -> Result<(), String> {
+    let privacy = msg.header::<header::Privacy>().ok_or("no value")?.map_err(|e| e.reason)?;
+    let wire = sip_message::header::HeaderValue::to_wire(&privacy);
+    let values: Vec<&str> = wire.split([';', ',']).map(str::trim).collect();
+    (values == ["id", "user", "critical"]).then_some(()).ok_or(format!("read {wire}"))
+}
+
+/// The message is refused, answered or not.
+fn refused_any(name: &str, template: Template) -> Row {
+    let outcome = match read(&template.bytes()) {
+        Ok(_) => Err("accepted".to_string()),
+        Err(_) => Ok(()),
+    };
+    Row::new(format!("must/{name}"), outcome)
 }
 
 fn without_contact(method: &str) -> Template {
@@ -411,7 +493,18 @@ fn sections_18_to_25() -> Vec<Row> {
             head.clone().start_line("OPTIONS sip:bob@ SIP/2.0"),
         ),
         answered("rule-route-opaque-scheme", head.clone().add("Route: <urn:service:sos>")),
-        answered("adr-0053-2-route-tel", head.clone().add("Route: <tel:+15551234;lr>")),
+        // ADR-0053 §2: a tel URI's number stands as its host, so a route entry
+        // of one reads.
+        accept("adr-0053-2-route-tel", head.clone().add("Route: <tel:+15551234;lr>")),
+        answered(
+            "adr-0053-2-record-route-headers",
+            head.clone().add("Record-Route: <sip:a.example.com;lr?Subject=x>"),
+        ),
+        // RFC 5954 §4.1: an IPv6 address holds at most eight groups.
+        dropped(
+            "5954-4.1-ipv6-of-nine-groups",
+            head.clone().with("to", "To: <sip:bob@[1:2:3:4:5:6:7:8:9]>"),
+        ),
         // §25.1: bytes of a value.
         dropped("3261-25.1-bare-cr", head.clone().add("Subject: a\rb")),
         dropped("3261-25.1-bare-lf", head.clone().add("Subject: a\nb")),
@@ -420,7 +513,7 @@ fn sections_18_to_25() -> Vec<Row> {
         dropped("adr-0054-2-non-utf8-in-a-name", head.clone().add(b"Vi\xffa: x".to_vec())),
         accept(
             "4475-3.1.1.2-quoted-pair-control",
-            head.clone().add(b"X-Note: \"\\\x07\"".to_vec()),
+            head.clone().with("to", b"To: \"BEL:\\\x07\" <sip:bob@example.com>".to_vec()),
         ),
         answered(
             "3261-25.1-quoted-pair-where-no-quoted-string",
@@ -560,13 +653,30 @@ fn extensions() -> Vec<Row> {
         ),
         // RFC 3262 §7: the response number.
         accept("3262-7.1-rseq-lowest", response(183, "INVITE").add("RSeq: 1")),
-        accept("3262-7.1-rseq-highest", response(183, "INVITE").add("RSeq: 2147483647")),
+        accept("3262-7.1-rseq-highest", response(183, "INVITE").add("RSeq: 4294967295")),
         dropped("3262-7.1-rseq-zero", response(183, "INVITE").add("RSeq: 0")),
         dropped("3262-7.1-rseq-not-digits", response(183, "INVITE").add("RSeq: abc")),
-        dropped("3262-7.1-rseq-past-the-range", response(183, "INVITE").add("RSeq: 2147483648")),
+        dropped("3262-7.1-rseq-past-the-range", response(183, "INVITE").add("RSeq: 4294967296")),
+        // RFC 3262 §7.2: RAck's numbers have RSeq's and CSeq's ranges.
+        accept("3262-7.2-rack-highest", in_dialog("PRACK", "RAck: 4294967295 4294967295 INVITE")),
         // RFC 3323 §4.2: `;` separates; a comma does not.
-        accept("3323-4.2-privacy-semicolons", head.clone().add("Privacy: id;user")),
-        answered("3323-4.2-privacy-comma", head.clone().add("Privacy: id, user")),
+        // RFC 3323 §4.2 separates values with `;`, its erratum 5184 (Verified)
+        // with `,`: both read, and so does a line holding both.
+        holds(
+            "3323-4.2-privacy-semicolons",
+            head.clone().add("Privacy: id;user;critical"),
+            privacy_reads_three,
+        ),
+        holds(
+            "3323-4.2-privacy-commas",
+            head.clone().add("Privacy: id, user, critical"),
+            privacy_reads_three,
+        ),
+        holds(
+            "3323-4.2-privacy-both-separators",
+            head.clone().add("Privacy: id;user, critical"),
+            privacy_reads_three,
+        ),
         // RFC 3325 §9.1: no header parameters, and a bare URI keeps its own.
         unread(
             "3325-9.1-pai-header-parameter",

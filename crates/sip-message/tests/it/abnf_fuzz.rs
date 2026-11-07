@@ -10,8 +10,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use sip_message::header::{self, NameAddr};
-use sip_message::{SipMessage, SipStr};
+use sip_message::header;
+use sip_message::SipMessage;
 
 use super::conformance::message::{read, typed, Template};
 use super::conformance::ratchet::{settle_rows, Failures};
@@ -64,12 +64,8 @@ fn lost_user(target: &str, line: &str, msg: &SipMessage) -> bool {
         "sip-uri" => line.contains('@') && msg.to().uri().user().is_none(),
         "from" => {
             let inner = line.split_once('<').and_then(|(_, rest)| rest.split_once('>'));
-            let lost = |text: &str| {
-                text.contains('@')
-                    && NameAddr::parse(&SipStr::owned(line))
-                        .is_ok_and(|addr| !addr.uri().text().contains('@'))
-            };
-            inner.is_some_and(|(between, _)| lost(between))
+            let written = inner.is_some_and(|(between, _)| between.contains('@'));
+            written && !msg.from().uri().text().contains('@')
         }
         "request-line" => {
             let uri = line.split(' ').nth(1).unwrap_or_default();

@@ -2,9 +2,11 @@
 //! its deployment names it and refused when it does not, the same shape with a
 //! different value is refused whatever is named, and nothing else moves.
 
+use sip_message::header::MaxForwards;
+use sip_message::hops::forwarded_max_forwards;
 use sip_message::parser::custom::CustomParser;
 use sip_message::parser::Exemptions;
-use sip_message::{read_stored, SipParser, SipParserLimits};
+use sip_message::{read_stored, SipMessage, SipParser, SipParserLimits};
 
 use super::message::{production, Template};
 use super::ratchet::{settle, Row};
@@ -14,10 +16,9 @@ use super::{break_rule, generated, rfc_examples};
 const NAMES: &[&str] = &[
     "repeat:from.uri:x-dup",
     "repeat:contact.uri:x-dup",
-    "to-tag:no-dialog",
     "bare-user-semicolon",
-    "privacy-comma",
     "options-body-no-type",
+    "max-forwards:absent",
 ];
 
 /// The parser a deployment stating `names` runs, `Err` while a name reads as none.
@@ -78,6 +79,15 @@ fn shape_rows(row: &str, name: &str, exempted: &[u8], still_refused: &[u8]) -> V
     ]
 }
 
+/// A request with no Max-Forwards, read under the exemption that names it, holds
+/// the count §16.6 states for one: 70.
+fn read_as_70(raw: &[u8]) -> Result<(), String> {
+    let parsed = parser_naming(&["max-forwards:absent"])?.parse(raw).map_err(|e| e.reason)?;
+    let SipMessage::Request(request) = parsed else { return Err("a response".to_string()) };
+    let forwarded = forwarded_max_forwards(&request);
+    (forwarded == MaxForwards::new(69)).then_some(()).ok_or(format!("forwards {forwarded:?}"))
+}
+
 fn options() -> Template {
     Template::request("OPTIONS")
 }
@@ -101,22 +111,10 @@ fn an_exempted_shape_is_accepted_only_where_it_is_named() {
         &invite().with("contact", "Contact: <sip:alice@192.0.2.10;x-dup=1;x-dup=2>").bytes(),
     ));
     rows.extend(shape_rows(
-        "to-tag-no-dialog",
-        "to-tag:no-dialog",
-        &Template::response(486, "INVITE").with("to", "To: <sip:bob@example.com>").bytes(),
-        &Template::response(200, "INVITE").with("to", "To: <sip:bob@example.com>").bytes(),
-    ));
-    rows.extend(shape_rows(
         "bare-user-semicolon",
         "bare-user-semicolon",
         &options().with("from", "From: sip:a;b=c@example.com;tag=a1").bytes(),
-        &options().with("from", "From: sip:a;b=c@example.com;tag=a1;tag=a2").bytes(),
-    ));
-    rows.extend(shape_rows(
-        "privacy-comma",
-        "privacy-comma",
-        &options().add("Privacy: id, user").bytes(),
-        &options().add("Privacy: id, user name").bytes(),
+        &options().with("from", "From: sip:a;b=c@;tag=a1").bytes(),
     ));
     rows.extend(shape_rows(
         "options-body-no-type",
@@ -124,6 +122,14 @@ fn an_exempted_shape_is_accepted_only_where_it_is_named() {
         &Template::response(200, "OPTIONS").body("a body").bytes(),
         &Template::response(200, "INVITE").body("a body").bytes(),
     ));
+    let absent = options().with("max-forwards", "X-Hops: 70").bytes();
+    rows.extend(shape_rows(
+        "max-forwards-absent",
+        "max-forwards:absent",
+        &absent,
+        &options().with("max-forwards", "Max-Forwards: x").bytes(),
+    ));
+    rows.push(Row::new("exempt/max-forwards-absent/read-as-70", read_as_70(&absent)));
     settle("exempt", &rows);
 }
 

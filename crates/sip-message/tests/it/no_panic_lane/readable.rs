@@ -26,10 +26,15 @@ fn past_299(msg: &SipMessage) -> bool {
     matches!(msg, SipMessage::Response(r) if r.status() >= 300)
 }
 
-/// The Via lines the parse read eagerly and the typed reader's reading of them.
+/// The Via lines the parse read eagerly and the typed reader's reading of them:
+/// as many values, each the same.
 fn via_agreement(msg: &SipMessage) -> Option<String> {
     let typed = msg.list::<header::Via>().ok()?;
     let eager = msg.via().iter();
+    let count = msg.via().iter().count();
+    if count != typed.len() {
+        return Some(format!("eager {count} values, typed {}", typed.len()));
+    }
     let same = |a: &header::Via, b: &header::Via| {
         (a.host_port(), a.branch(), a.rport()) == (b.host_port(), b.branch(), b.rport())
     };

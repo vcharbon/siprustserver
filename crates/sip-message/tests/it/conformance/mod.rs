@@ -16,6 +16,7 @@ mod exemption_mode;
 pub(crate) mod generated;
 pub(crate) mod message;
 mod must_statements;
+mod parameters;
 pub(crate) mod ratchet;
 mod readable_rows;
 pub(crate) mod rfc_examples;

@@ -6,7 +6,8 @@ use sip_message::header;
 
 use super::abnf::{Grammar, Rng};
 use super::message::{raw, read, typed, ReadCheck, Template};
-use super::ratchet::{settle_new_rows, settle_rows, Failures};
+use super::parameters::{repeats_a_name, Layout};
+use super::ratchet::{settle_rows, Failures};
 use super::stated::failing_row;
 
 /// Values per target in the default lane, a test of well under a second.
@@ -246,6 +247,9 @@ fn wrap(target: &Target, generated: &[u8]) -> Vec<u8> {
             let method = text.split_ascii_whitespace().last().unwrap_or_default();
             base.start_line(format!("{method} sip:bob@example.com SIP/2.0")).with("cseq", generated)
         }
+        Place::Line("rack") => {
+            base.with("to", "To: <sip:bob@example.com>;tag=b1").with("rack", generated)
+        }
         Place::Line("cl") => {
             let digits = text.rsplit(':').next().unwrap_or_default().trim();
             let length: usize = digits.parse().unwrap_or(0);
@@ -265,6 +269,33 @@ fn wrap(target: &Target, generated: &[u8]) -> Vec<u8> {
     placed.bytes()
 }
 
+/// How `target`'s header lays out its parameters.
+fn layout(target: &Target) -> Layout {
+    let comma_separated = matches!(
+        target.row,
+        "authorization"
+            | "proxy-authorization"
+            | "www-authenticate"
+            | "proxy-authenticate"
+            | "authentication-info"
+    );
+    let comments = matches!(target.row, "retry-after" | "server" | "user-agent");
+    Layout { comma_separated, comments }
+}
+
+/// One value of `target`'s rule that names no parameter twice (§7.3.1,
+/// §19.1.1): a repeat is a row of its own, never a generated value.
+fn value(grammar: &Grammar, target: &Target, rng: &mut Rng) -> Vec<u8> {
+    let layout = layout(target);
+    for _ in 0..1000 {
+        let generated = grammar.generate(target.rule, rng);
+        if !repeats_a_name(&generated, layout) {
+            return generated;
+        }
+    }
+    panic!("{}: no value without a repeated parameter name", target.row)
+}
+
 /// `count` values of every target through the production path. A target whose
 /// values are mostly refused for a stated reason exercises nothing else, so it
 /// fails: its grammar is narrowed instead.
@@ -275,7 +306,7 @@ fn sweep(count: usize) -> Failures {
         let mut rng = Rng::named(target.row);
         let mut explained = 0;
         for _ in 0..count {
-            let generated = grammar.generate(target.rule, &mut rng);
+            let generated = value(&grammar, &target, &mut rng);
             let outcome = match read(&wrap(&target, &generated)) {
                 Ok(msg) => (target.read)(&msg),
                 Err(e) => Err(e.reason),
@@ -301,7 +332,7 @@ pub fn datagrams() -> Vec<Vec<u8>> {
     for target in targets() {
         let mut rng = Rng::named(target.row);
         for _ in 0..VALUES_PER_TARGET_UNDER_ANOTHER_PARSER {
-            all.push(wrap(&target, &grammar.generate(target.rule, &mut rng)));
+            all.push(wrap(&target, &value(&grammar, &target, &mut rng)));
         }
     }
     all
@@ -312,8 +343,10 @@ fn every_generated_value_reads() {
     settle_rows("abnf", &sweep(VALUES_PER_TARGET));
 }
 
+/// The long sweep holds its own listing, `abnf-long/`: a row only its volume
+/// reaches is listed there and leaves the default lane alone.
 #[test]
 #[ignore = "slow lane: real clock >= 1 s"]
 fn every_generated_value_of_a_long_sweep_reads() {
-    settle_new_rows("abnf", &sweep(VALUES_PER_TARGET_SLOW));
+    settle_rows("abnf-long", &sweep(VALUES_PER_TARGET_SLOW));
 }
