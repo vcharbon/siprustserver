@@ -71,6 +71,7 @@ pub fn violations(msg: &SipMessage) -> Vec<(&'static str, String)> {
     check("readable/authorization", refusal::<header::Authorization>(msg));
     check("readable/proxy-authorization", refusal::<header::ProxyAuthorization>(msg));
     check("readable/content-type", refusal::<header::MediaType>(msg));
+    check("readable/content-disposition", refusal::<header::ContentDisposition>(msg));
     if let Some(differ) = via_agreement(msg) {
         found.push(("readable/via-agrees", differ));
     }

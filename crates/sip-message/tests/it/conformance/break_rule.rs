@@ -326,7 +326,7 @@ fn acted_on_subjects() -> Vec<Subject> {
         },
         Subject {
             row: "content-disposition",
-            vouched: false,
+            vouched: true,
             name: "Content-Disposition",
             slot: "content-disposition",
             value: "session|;handling=optional",

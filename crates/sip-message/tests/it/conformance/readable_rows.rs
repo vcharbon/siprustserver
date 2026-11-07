@@ -26,6 +26,8 @@ fn shapes() -> Vec<(&'static str, Template)> {
         ("readable/proxy-authorization", proxy_digest("Digest realm=\"a\" nonce=\"b\"")),
         ("readable/proxy-authorization", proxy_digest("Digest realm=a b")),
         ("readable/content-type", options().add("Content-Type:")),
+        ("readable/content-disposition", options().add("Content-Disposition:")),
+        ("readable/content-disposition", options().add("Content-Disposition: session;;")),
         (
             "readable/via-agrees",
             options()

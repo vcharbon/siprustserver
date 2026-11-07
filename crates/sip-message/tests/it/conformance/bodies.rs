@@ -120,6 +120,9 @@ fn body_rows() -> Vec<Row> {
         answered("multipart-empty-boundary", invite("multipart/mixed;boundary=\"\"", &[], format!("--\r\n{part}\r\n----\r\n"))),
         answered("multipart-boundary-with-a-comma", invite("multipart/mixed;boundary=a,b", &[], format!("--a,b\r\n{part}\r\n--a,b--\r\n"))),
         answered("multipart-two-boundaries", invite("multipart/mixed;boundary=a;boundary=b", &[], format!("--a\r\n{part}\r\n--a--\r\n"))),
+        // RFC 3261 §20.11: the disposition decides whether a body is a session's.
+        Row::new("body/unreadable-disposition".to_string(), refused(&invite("application/sdp", &["Content-Disposition: session;;"], SDP).bytes(), true, Some("content-disposition"))),
+        Row::new("body/empty-disposition".to_string(), refused(&invite("application/sdp", &["Content-Disposition:"], SDP).bytes(), true, Some("content-disposition"))),
         answered("multipart-unquoted-non-token-boundary", invite("multipart/mixed;boundary=----=_Part_1", &[], format!("------=_Part_1\r\n{part}\r\n------=_Part_1--\r\n"))),
     ]
 }

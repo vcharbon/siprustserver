@@ -4,13 +4,14 @@
 
 use crate::error::SipParseError;
 use crate::header::{
-    Event, HeaderName, HeaderValue as _, MediaType, ProxyRequire, Require, Supported,
+    ContentDisposition, Event, HeaderName, HeaderValue as _, MediaType, ProxyRequire, Require,
+    Supported,
 };
 use crate::sip_str::SipStr;
 
 /// The reading of a line of `known` that ingress vouches for whole, held to
 /// on wire bytes, `None` when ingress reads no such header: the body's
-/// description (RFC 3261 §20.15), the option tags a peer requires or supports
+/// description and disposition (RFC 3261 §20.15, §20.11), the option tags a peer requires or supports
 /// (§20.29, §20.32, §20.37) and the event package (RFC 6665 §8.2.1).
 pub(super) fn vouched_reading(
     known: &HeaderName,
@@ -18,6 +19,7 @@ pub(super) fn vouched_reading(
 ) -> Option<Result<(), SipParseError>> {
     Some(match known {
         HeaderName::ContentType => MediaType::parse(value).map(drop),
+        HeaderName::ContentDisposition => ContentDisposition::parse(value).map(drop),
         HeaderName::Require => Require::parse(value).map(drop),
         HeaderName::ProxyRequire => ProxyRequire::parse(value).map(drop),
         HeaderName::Supported => Supported::parse(value).map(drop),
@@ -36,5 +38,6 @@ pub(super) fn is_vouched_value(name: &HeaderName) -> bool {
             | HeaderName::Route
             | HeaderName::RecordRoute
             | HeaderName::ContentType
+            | HeaderName::ContentDisposition
     )
 }

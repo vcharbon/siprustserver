@@ -83,10 +83,12 @@ compatibility rules admit, on purpose:
   (RFC 3262 §7.1).
 - **A body a reader can frame.** A message with a body states its Content-Type
   (§20.15), and a `multipart/…` one names one boundary of 1 to 70 `bchars`, the
-  last no space (RFC 2046 §5.1.1). A delimiter line ends in CRLF.
-- **Empty values.** A Via, Contact, Route, Record-Route or Content-Type line
-  holding no value, and an empty entry of a comma list, is refused: their
-  grammar needs one. `Supported:`, `Allow:`, `Accept:` and `Accept-Encoding:`
+  last no space (RFC 2046 §5.1.1). A delimiter line ends in CRLF. A
+  Content-Disposition reads whole (§20.11), since it decides whether a body is
+  a session description.
+- **Empty values.** A Via, Contact, Route, Record-Route, Content-Type or
+  Content-Disposition line holding no value, and an empty entry of a comma list,
+  is refused: their grammar needs one. `Supported:`, `Allow:`, `Accept:` and `Accept-Encoding:`
   stay legal.
 
 A gate refuses like any other rule: a refused request whose echoed fields read
