@@ -42,6 +42,28 @@ class InitStep(unittest.TestCase):
                         script.index("ip rule del priority 5060"))
 
 
+class TheDrop(unittest.TestCase):
+    """The drop is a setting; the table and its container are not."""
+
+    def test_it_is_off_by_default_and_on_by_its_value(self) -> None:
+        self.assertEqual(env(container(proxy(), "vip-loopback"))["EXTERNAL_EGRESS_DROP"], "off")
+        on = proxy("--set", "network.externalEgressDrop=true")
+        self.assertEqual(env(container(on, "vip-loopback"))["EXTERNAL_EGRESS_DROP"], "on")
+
+    def test_either_setting_keeps_the_table_and_its_container(self) -> None:
+        for args in ([], ["--set", "network.externalEgressDrop=true"]):
+            workload = proxy(*args)
+            script = script_of(container(workload, "vip-loopback"))
+            self.assertIn("ip route replace table 5060 unreachable default", script)
+            self.assertIn('ip rule add priority 5060 from "$EXTERNAL_VIP" lookup 5060', script)
+            container(workload, "egress-routes")
+
+    def test_off_removes_a_chain_an_earlier_pod_left(self) -> None:
+        script = script_of(container(proxy(), "vip-loopback"))
+        self.assertIn("iptables -D OUTPUT -j SIP-EXT-EGRESS", script)
+        self.assertIn("iptables -X SIP-EXT-EGRESS", script)
+
+
 class Rendered(unittest.TestCase):
     def test_the_container_has_net_admin_alone_on_the_network_tools_image(self) -> None:
         c = container(proxy(), "egress-routes")

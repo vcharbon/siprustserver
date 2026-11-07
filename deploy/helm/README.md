@@ -69,15 +69,20 @@ A pod stop removes nothing from its node, so the routes hold through a restart (
 After `helm uninstall`, on each node that ran a proxy, for the VIPs and the external VIP's routing:
 
 ```bash
-iptables -D OUTPUT -j SIP-EXT-EGRESS
-iptables -F SIP-EXT-EGRESS
-iptables -X SIP-EXT-EGRESS
 ip rule del priority 5060
 ip route flush table 5060
 ip addr del <internal VIP>/32 dev lo
 ip addr del <external VIP>/32 dev lo
 iptables -D OUTPUT -s <internal VIP>/32 -p icmp --icmp-type port-unreachable -j DROP
 iptables -D OUTPUT -s <external VIP>/32 -p icmp --icmp-type port-unreachable -j DROP
+```
+
+With `network.externalEgressDrop` on, also:
+
+```bash
+iptables -D OUTPUT -j SIP-EXT-EGRESS
+iptables -F SIP-EXT-EGRESS
+iptables -X SIP-EXT-EGRESS
 ```
 
 ## The VIPs' announcement

@@ -694,35 +694,35 @@ spec:
           runAsUser: 0
       - args:
         - "#!/bin/sh\n# The proxy pod's init container, on the node's network namespace\n\
-          # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTERNAL_INTERFACE,\n# UNRES_QLEN_BYTES,\
-          \ the NEIGH_* timers and ROUTE_GUARD from its env; the chart\n# never rewrites\
-          \ this text.\n#\n# Both VIPs go on lo before the proxy starts: the node\
-          \ owns them for good and\n# the routers reach them through the node's announcement\
-          \ (ADR-0056). Strict\n# ARP keeps lo's addresses off every neighbour table:\
-          \ the VIPs are routed,\n# never ARP-answered.\n#\n# A packet for a VIP that\
-          \ reaches the node while no proxy socket is bound\n# (the window before\
-          \ the node's route is withdrawn) would draw an ICMP port\n# unreachable,\
-          \ which a SIP UAC treats as a transport error (RFC 3261 \xA718.4)\n# instead\
-          \ of retransmitting into the peer's path: those are dropped.\n#\n# A next\
-          \ hop the kernel cannot resolve holds every datagram sent to it on the\n\
-          # neighbour's unresolved queue, charged to the sending socket, for the whole\n\
-          # ARP cycle (ADR-0033). The default bound equals a default socket send buffer;\n\
-          # UNRES_QLEN_BYTES bounds it per neighbour on every interface. net.core.wmem_max\n\
-          # is the host's and read-only here (the host preflight raises it).\n#\n\
-          # A next hop that dies with its carrier up reads FAILED only at the end\
-          \ of the\n# neighbour cycle: the NEIGH_* timers bound that cycle on every\
-          \ interface, and\n# fib_multipath_use_neigh makes multipath egress leave\
-          \ a next hop not resolved\n# (ADR-0056 \xA710). A host namespace's default\
-          \ entry reaches an interface created\n# later.\n#\n# Traffic from the external\
-          \ VIP leaves through the external interface and\n# nowhere else (ADR-0056\
-          \ \xA711). A rule sends it to a table of its own, whose\n# unreachable default\
-          \ stays while no next hop is installed there, so a miss never\n# falls through\
-          \ to the main table; the egress-routes container keeps the next\n# hops\
-          \ in it. The local table comes before any rule, so what stops local delivery\n\
-          # is the chain, which holds no address list and no exemption for lo: a datagram\n\
-          # from the external socket to the internal VIP would otherwise reach a socket\n\
-          # trusted by its face. None of this reads the interface, so a pod starting\
-          \ during\n# a cut comes up, and reads unfit.\n#\n# With ROUTE_GUARD=off,\
+          # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTERNAL_INTERFACE,\n# EXTERNAL_EGRESS_DROP,\
+          \ UNRES_QLEN_BYTES, the NEIGH_* timers and ROUTE_GUARD from\n# its env;\
+          \ the chart never rewrites this text.\n#\n# Both VIPs go on lo before the\
+          \ proxy starts: the node owns them for good and\n# the routers reach them\
+          \ through the node's announcement (ADR-0056). Strict\n# ARP keeps lo's addresses\
+          \ off every neighbour table: the VIPs are routed,\n# never ARP-answered.\n\
+          #\n# A packet for a VIP that reaches the node while no proxy socket is bound\n\
+          # (the window before the node's route is withdrawn) would draw an ICMP port\n\
+          # unreachable, which a SIP UAC treats as a transport error (RFC 3261 \xA7\
+          18.4)\n# instead of retransmitting into the peer's path: those are dropped.\n\
+          #\n# A next hop the kernel cannot resolve holds every datagram sent to it\
+          \ on the\n# neighbour's unresolved queue, charged to the sending socket,\
+          \ for the whole\n# ARP cycle (ADR-0033). The default bound equals a default\
+          \ socket send buffer;\n# UNRES_QLEN_BYTES bounds it per neighbour on every\
+          \ interface. net.core.wmem_max\n# is the host's and read-only here (the\
+          \ host preflight raises it).\n#\n# A next hop that dies with its carrier\
+          \ up reads FAILED only at the end of the\n# neighbour cycle: the NEIGH_*\
+          \ timers bound that cycle on every interface, and\n# fib_multipath_use_neigh\
+          \ makes multipath egress leave a next hop not resolved\n# (ADR-0056 \xA7\
+          10). A host namespace's default entry reaches an interface created\n# later.\n\
+          #\n# Traffic from the external VIP is routed through the external interface\n\
+          # (ADR-0056 \xA711). A rule sends it to a table of its own, whose unreachable\
+          \ default\n# stays while no next hop is installed there, so a miss never\
+          \ falls through to the\n# main table; the egress-routes container keeps\
+          \ the next hops in it. The local\n# table comes before any rule, so what\
+          \ stops local delivery is a chain, written with\n# EXTERNAL_EGRESS_DROP=on,\
+          \ which holds no address list and no exemption for lo; off,\n# a chain an\
+          \ earlier pod left is removed. None of this reads the interface, so a pod\n\
+          # starting during a cut comes up, and reads unfit.\n#\n# With ROUTE_GUARD=off,\
           \ a table an earlier route guard left on the node is\n# removed, so the\
           \ node's BFD and BGP pass; with it on, the pod's own guard\n# owns the table\
           \ (its init step left it withdrawing).\nset -e\nif [ \"$ROUTE_GUARD\" =\
@@ -747,17 +747,20 @@ spec:
           $(ip rule show priority 5060 | grep -Fv \"from $EXTERNAL_VIP lookup 5060\"\
           \ | head -n 1)\"\nwhile [ -n \"$stale\" ]; do\n  ip rule del priority 5060\
           \ ${stale#*:}\n  stale=\"$(ip rule show priority 5060 | grep -Fv \"from\
-          \ $EXTERNAL_VIP lookup 5060\" | head -n 1)\"\ndone\njump=\"\"\niptables\
-          \ -C OUTPUT -j SIP-EXT-EGRESS 2>/dev/null || jump=\"-I OUTPUT 1 -j SIP-EXT-EGRESS\"\
-          \niptables-restore --noflush <<RULES\n*filter\n:SIP-EXT-EGRESS - [0:0]\n\
-          -A SIP-EXT-EGRESS -s $EXTERNAL_VIP/32 ! -o $EXTERNAL_INTERFACE -j DROP\n\
-          $jump\nCOMMIT\nRULES\necho \"vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo\
-          \ + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES\
+          \ $EXTERNAL_VIP lookup 5060\" | head -n 1)\"\ndone\nif [ \"$EXTERNAL_EGRESS_DROP\"\
+          \ = on ]; then\n  jump=\"\"\n  iptables -C OUTPUT -j SIP-EXT-EGRESS 2>/dev/null\
+          \ || jump=\"-I OUTPUT 1 -j SIP-EXT-EGRESS\"\n  iptables-restore --noflush\
+          \ <<RULES\n*filter\n:SIP-EXT-EGRESS - [0:0]\n-A SIP-EXT-EGRESS -s $EXTERNAL_VIP/32\
+          \ ! -o $EXTERNAL_INTERFACE -j DROP\n$jump\nCOMMIT\nRULES\nelse\n  while\
+          \ iptables -D OUTPUT -j SIP-EXT-EGRESS 2>/dev/null; do :; done\n  iptables\
+          \ -F SIP-EXT-EGRESS 2>/dev/null || true\n  iptables -X SIP-EXT-EGRESS 2>/dev/null\
+          \ || true\nfi\necho \"vip-loopback: $PROXY_VIP $EXTERNAL_VIP on lo + strict\
+          \ ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES\
           \ base_reachable_time_ms=$NEIGH_BASE_REACHABLE_TIME_MS delay_first_probe_time=$NEIGH_DELAY_FIRST_PROBE_S\
           \ ucast_solicit=$NEIGH_UCAST_SOLICIT mcast_solicit=$NEIGH_MCAST_SOLICIT\
           \ retrans_time_ms=$NEIGH_RETRANS_TIME_MS + multipath off unresolved next\
-          \ hops + $EXTERNAL_VIP only through $EXTERNAL_INTERFACE + route guard $ROUTE_GUARD\
-          \ ready\"\n"
+          \ hops + $EXTERNAL_VIP routed through $EXTERNAL_INTERFACE, its drop $EXTERNAL_EGRESS_DROP\
+          \ + route guard $ROUTE_GUARD ready\"\n"
         command:
         - /bin/sh
         - -c
@@ -768,6 +771,8 @@ spec:
           value: 192.168.60.250
         - name: EXTERNAL_INTERFACE
           value: eth1
+        - name: EXTERNAL_EGRESS_DROP
+          value: 'off'
         - name: UNRES_QLEN_BYTES
           value: '16384'
         - name: NEIGH_BASE_REACHABLE_TIME_MS

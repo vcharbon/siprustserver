@@ -195,22 +195,26 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
     - The guard reports `route_guard_withdrawn`, `route_guard_withdrawals_total{cause}` and
       `route_guard_restores_total`, and logs one line per withdrawal and per return.
 
-11. **Traffic from the external VIP leaves only through the external interface.** The proxy
+11. **Traffic from the external VIP is routed only through the external interface.** The proxy
     crosses (ADR-0048 §10), so a request or a response a worker's peer named, whatever address it
-    holds, leaves from the external VIP, and the node holds that to the external plane in three
-    layers. Each layer's trust rule is ADR-0048's: nothing here reads a datagram's content.
+    holds, leaves from the external VIP, and the node keeps that on the external plane. Nothing here
+    reads a datagram's content.
     - **Policy routing.** `ip rule priority 5060 from <external VIP> lookup 5060`, in table 5060 an
       `unreachable` default at the highest metric and the external next hops
       (`network.externalNextHops`) below it, so a miss never falls through to the main table and a
       send with no next hop fails at once. The init step writes the rule, the `unreachable` route
       and the chain, none of which reads the interface, so a pod starting during a cut comes up, and
       reads unfit (§3).
-    - **A drop on the node.** An owned chain, `SIP-EXT-EGRESS`, swapped whole by
-      `iptables-restore --noflush`, jumped from `OUTPUT`: `-s <external VIP>/32 ! -o <external
-      interface> -j DROP`. No address list and no exemption for `lo`: the kernel consults the local
-      table before any rule, so a send from the external socket to the internal VIP would be
-      delivered locally to a socket trusted by its face, and this rule is what stops it. On a CNI
-      that does not enforce NetworkPolicy it is also what protects the workers.
+    - **A drop on the node, a recommended hardening** (`network.externalEgressDrop`, default off).
+      An owned chain, `SIP-EXT-EGRESS`, swapped whole by `iptables-restore --noflush`, jumped from
+      `OUTPUT`: `-s <external VIP>/32 ! -o <external interface> -j DROP`, with no address list and no
+      exemption for `lo`. The kernel consults the local table before any rule, so the routing above
+      does not cover a local address: this chain is what covers it. Running without it, a send from
+      the external socket to the internal VIP is delivered locally and reaches a socket trusted by
+      its face, and one to the external VIP re-enters on that face. It does not cover what the table
+      routes: a send from the external socket to a worker leaves through the external interface
+      either way, so the routers' isolation stops it, and where that is missing on a CNI that does
+      not enforce NetworkPolicy, nothing does.
     - **Plane isolation at the routers**, a deployment requirement (`deploy/README.md`).
 
     A container on the network tools image, `egress-routes`, with `NET_ADMIN` alone, keeps the next
@@ -296,9 +300,10 @@ Via.
 - A guard removed from a node (the pod gone, no successor) leaves its table withdrawing; a pod
   without the guard deletes it at start (`vip-loopback.sh`), or an operator does
   (`nft delete table inet route_guard`).
-- A worker target naming a VIP its proxy node holds, internal or external, is refused at the node:
-  the request leaves the external socket, §11's chain refuses it with no exemption, it fails at the
-  socket, counted as a send failure, and its sender gives up on its own timers. A call looping back through the platform reaches
+- A worker target naming a VIP its proxy node holds, internal or external, leaves the external
+  socket for a local address. With §11's chain on it is refused at the node with no exemption: the
+  send fails, counted as a send failure, and its sender gives up on its own timers. With it off it
+  is delivered locally and re-enters the platform as a new request. A call looping back through the platform reaches
   it through a hop on the external plane, as `b2bua-harness`'s `spiral_through_the_front_proxy`
   states it.
 - Silencing a next hop cuts the node's egress to callers through it (§10's chain of timers): the

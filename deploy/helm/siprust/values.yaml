@@ -51,6 +51,11 @@ network:
   # (PROXY_EXT_NEXT_HOPS). Equal to proxy.announce.metallb.peers.external when the
   # chart renders MetalLB's objects (refused at render otherwise).
   externalNextHops: []
+  # A recommended hardening (ADR-0056 §11): each proxy node drops what is sourced
+  # from the external VIP and leaves by any other interface, local delivery
+  # included. Off, a datagram from the external socket to the internal VIP reaches
+  # a socket trusted by its face. The routing of that traffic does not depend on it.
+  externalEgressDrop: false
   # The external plane's subnet (masq-exempt only).
   externalSubnet: ""
   # UDP port both VIPs listen on.

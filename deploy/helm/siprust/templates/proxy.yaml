@@ -132,6 +132,7 @@ spec:
             - { name: PROXY_VIP, value: {{ $vip | quote }} }
             - { name: EXTERNAL_VIP, value: {{ $extVip | quote }} }
             - { name: EXTERNAL_INTERFACE, value: {{ include "siprust.net" (dict "root" $ "key" "externalInterface") | quote }} }
+            - { name: EXTERNAL_EGRESS_DROP, value: {{ ternary "on" "off" .Values.network.externalEgressDrop | quote }} }
             - { name: UNRES_QLEN_BYTES, value: {{ int $p.unresQlenBytes | toString | quote }} }
             - { name: NEIGH_BASE_REACHABLE_TIME_MS, value: {{ int $p.neighbour.baseReachableTimeMs | toString | quote }} }
             - { name: NEIGH_DELAY_FIRST_PROBE_S, value: {{ int $p.neighbour.delayFirstProbeSeconds | toString | quote }} }

@@ -150,6 +150,10 @@ provides:
   a worker or the proxies' internal face. That covers the cluster's CIDRs and a router's own
   addresses on the internal plane, seen from the external side: the proxy's external socket sends
   to whatever address a peer's Contact names (ADR-0056 §11).
+- **Recommended hardening: `network.externalEgressDrop`.** Off by default. On, each proxy node
+  drops what is sourced from the external VIP and leaves by any other interface, local delivery
+  included, so a peer's Contact naming the internal VIP cannot reach the socket trusted by its face.
+  A target naming a VIP the node holds then fails its send (ADR-0056 §11).
 - **The external router carries the external VIP's traffic.** Everything a proxy node sends from
   the external VIP goes to a next hop, a caller on the node's own subnet included. The router
   forwards such a datagram back out the interface it arrived on, does not drop it on uRPF for its

@@ -182,6 +182,9 @@
         "externalInterface": {
           "type": "string"
         },
+        "externalEgressDrop": {
+          "type": "boolean"
+        },
         "externalNextHops": {
           "type": "array",
           "items": {

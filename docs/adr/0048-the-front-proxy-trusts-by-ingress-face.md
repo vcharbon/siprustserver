@@ -42,9 +42,8 @@ but used it only for a metric.
      node also drops every packet to `PROXY_VIP` that arrives on the external
      interface (`deploy/helm/siprust/files/masq-exempt.sh`, re-asserted with
      its other rules);
-   - a datagram the proxy sends from the external VIP stays off the internal
-     socket: nothing leaves that address but through the external interface,
-     local delivery included (ADR-0056 §11).
+   - a datagram the proxy sends from the external VIP reaches the internal socket
+     by local delivery unless the node's optional drop refuses it (ADR-0056 §11).
 2. **On the internal face a request is worker-outbound** when its direction
    entry carries `;outbound`, when its source is a registry worker, or when its
    top Via sent-by is one. The marker is what recognises a worker rebooted onto
@@ -158,9 +157,9 @@ but used it only for a metric.
   that dials the internal address bypasses every rule above.
 - A peer's Contact or Record-Route chooses the Request-URI or the next hop of a
   worker's request, and that request leaves on the external face whatever it names
-  (`crossing_tests::a_contact_naming_a_registry_worker_leaves_external`). The node's
-  rule of ADR-0056 §11 drops it there; on a CNI that does not enforce NetworkPolicy,
-  that rule is what protects the workers. Entries naming this proxy prove no recorded
+  (`crossing_tests::a_contact_naming_a_registry_worker_leaves_external`). The routers'
+  isolation stops it there (ADR-0056 §11); where that is missing on a CNI that does not
+  enforce NetworkPolicy, nothing does. Entries naming this proxy prove no recorded
   pass, only a cookie verifying for the call does
   (`crossing_tests::a_cookie_that_does_not_verify_for_the_call_proves_no_pass`). So a
   peer aims a worker's request onto the internal plane only with a cookie this proxy
