@@ -296,9 +296,9 @@ Via.
 - A guard removed from a node (the pod gone, no successor) leaves its table withdrawing; a pod
   without the guard deletes it at start (`vip-loopback.sh`), or an operator does
   (`nft delete table inet route_guard`).
-- A request a worker aims at a VIP its proxy node holds, the external VIP included, is delivered
-  locally or not at all, and §11's chain refuses it: it fails at the socket, counted as a send
-  failure, and its sender gives up at Timer B. A call looping back through the platform reaches
+- A worker target naming a VIP its proxy node holds, internal or external, is refused at the node:
+  the request leaves the external socket, §11's chain refuses it with no exemption, it fails at the
+  socket, counted as a send failure, and its sender gives up on its own timers. A call looping back through the platform reaches
   it through a hop on the external plane, as `b2bua-harness`'s `spiral_through_the_front_proxy`
   states it.
 - Silencing a next hop cuts the node's egress to callers through it (§10's chain of timers): the

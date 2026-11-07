@@ -16,7 +16,7 @@ use sip_message::{Method, SipMessage};
 use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
 use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry, Lifetime};
-use crate::headers::via_with_cookie;
+use crate::headers::{via_marking_same_face, via_with_cookie};
 use crate::observability::metrics::{
     Direction, Face, MessageResult, NoTargetDrop, RoutingDecisionKind,
 };
@@ -362,6 +362,11 @@ impl ProxyCore {
         let pushed = Via::udp(egress_adv.host.as_str(), egress_adv.port)
             .with_branch(our_branch.as_str())
             .requesting_rport();
+        let pushed = if self.egress.marks_the_hop(face, egress) {
+            via_marking_same_face(pushed)
+        } else {
+            pushed
+        };
         draft = draft.push_front(via_with_cookie(pushed, via_cookie.as_ref()));
 
         // Remember where the request's first copy went and both cookies, so a

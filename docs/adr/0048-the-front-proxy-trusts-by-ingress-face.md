@@ -99,7 +99,7 @@ but used it only for a metric.
    `wps.0` or `q735.0` arriving on the external face still bypasses the gate and
    the new-call caps. Such a request still goes to a worker, never to a host the
    sender names. The external plane is semi-trusted for this.
-10. **A dual-face proxy crosses, with two exceptions the registry decides.** The
+10. **A dual-face proxy crosses, with one exception the registry decides.** The
     egress face, and with it the socket and the advertise a message states, comes
     from the ingress face, the message and the registry through one pure function
     (`face::EgressPolicy`, single-face or crossing). No address plan enters: the
@@ -115,21 +115,25 @@ but used it only for a metric.
     | Request | arrived internal, any other target | external |
     | Response | arrived external | internal (D4: every destination is a worker) |
     | Response | arrived internal, the owner rule names a worker | internal |
-    | Response | arrived internal, its next Via's sent-by a registry worker | internal |
+    | Response | arrived internal, the proxy's own Via it pops carrying the marker | internal |
     | Response | arrived internal, otherwise | external |
     | Own final | any | the face its request arrived on (RFC 3581 §4) |
 
     Via states the egress face. In Record-Route the top entry states the egress
     face and the lower one the ingress face, so each party's later requests reach
     the face it talks to; the `;outbound` marker stays on the worker's half. The
-    sent-by decides the response row, not `received`: a translated worker's
-    `received` is a node address. The third row keeps a call that loops back
+    third row keeps a call that loops back
     through the platform on the workers' plane: its in-dialog request re-enters
     with two of this proxy's pairs back to back, the last pair's cookie verifying for
     the call, when no hop between the passes Record-Routes, and the workers admit SIP only from the internal VIP and the
-    proxy nodes. This rests on two assumptions of the deployment: everything dialled
-    through the proxy, a media resource function included, is on the external plane,
-    and no sender on the internal VIP but a worker needs a response relayed. Tests:
+    proxy nodes. A request on that row carries a `;same-face` flag on the Via the proxy pushes,
+    and a response arriving internal stays internal on that flag alone, read off the
+    Via it pops, which is this proxy's own and leaves with it. The flag travels with
+    the message, so either instance reads it and nothing is stored. No Via below it
+    decides a face: those are their senders' to write, and a phone behind a NAT whose
+    private sent-by equals a worker's address is answered from the face it reached.
+    This rests on one assumption of the deployment: everything dialled through the
+    proxy, a media resource function included, is on the external plane. Tests:
     `core::crossing_tests`, `face::tests`,
     `ingress_trust::an_own_final_to_a_translated_worker_leaves_the_face_it_arrived_on`,
     `ingress_trust::own_finals_to_a_sender_near_the_workers_leave_the_external_face`.
@@ -165,11 +169,6 @@ but used it only for a metric.
 - A worker's first hop is the front proxy whatever a callee's Record-Route says,
   the route set intact (`b2bua-core` `relay::egress`); standalone it follows its
   route set.
-- A sender on the internal face that no registry lists gets no relayed response:
-  it arrives internal, names no worker and leaves external
-  (`crossing_tests::a_response_for_a_sender_no_registry_holds_leaves_external`).
-  A worker rebooted onto an unlisted address loses such a response the way D4's
-  consequence above states, until it is listed.
 - The ACK of a non-2xx final a translated worker sent on a spiral goes to the node
   address the final came from, no registry worker, so it leaves external and misses;
   that worker repeats its final to Timer H, on a call that already failed

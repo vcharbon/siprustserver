@@ -95,6 +95,20 @@ fn stated(worker_via: &Via, name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The flag on a Via this proxy pushed on a request it forwarded internal to
+/// internal: the response comes back on it (`crate::face`).
+const SAME_FACE: &str = "same-face";
+
+/// `via` with the marker of a hop that stayed on one face.
+pub fn via_marking_same_face(via: Via) -> Via {
+    via.with_param(SAME_FACE, ParamValue::Flag)
+}
+
+/// Whether `via`, one of this proxy's own, carries that marker.
+pub fn via_marks_same_face(via: &Via) -> bool {
+    via.param(SAME_FACE).is_some()
+}
+
 /// `via` carrying `cookie`'s fields, if any, after its own params; a field
 /// named like a param `via` already carries is left out, never written over it.
 pub fn via_with_cookie(via: Via, cookie: Option<&RouteParams>) -> Via {

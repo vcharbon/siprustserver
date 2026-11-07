@@ -256,6 +256,7 @@ async fn a_re_entry_with_no_record_route_between_the_passes_stays_internal() {
     let (face, dst, bytes) = one_sent(&f);
     assert_eq!((face, dst), ("int", sa(W_ELSEWHERE, 5060)));
     assert!(top_via(&bytes).contains(&int_advertise()));
+    assert!(top_via(&bytes).contains(";same-face"), "{}", top_via(&bytes));
 
     let vias: String =
         header_lines(&bytes, "Via").iter().map(|v| format!("Via: {v}\r\n")).collect();
@@ -269,8 +270,12 @@ Content-Length: 0\r\n\r\n"
     ));
     let SipMessage::Response(resp) = answer else { panic!("a response") };
     f.core.handle_response(resp, sa(W_ELSEWHERE, 5060), Face::Internal).await;
-    let (face, dst, _) = one_sent(&f);
+    let (face, dst, relayed) = one_sent(&f);
     assert_eq!((face, dst), ("int", sa(W1, 5060)));
+    assert!(
+        !String::from_utf8_lossy(&relayed).contains("same-face"),
+        "the marker rides the proxy's own Via, popped before the response leaves"
+    );
 }
 
 /// A flow that moved reaches the other proxy, which holds no memo and picks the
@@ -287,6 +292,23 @@ async fn the_other_instance_picks_the_same_egress_with_no_memo() {
     assert_eq!((second.0, second.1), (first.0, first.1));
     let via = |bytes: &[u8]| top_via(bytes).split(';').next().unwrap().to_string();
     assert_eq!(via(&first.2), via(&second.2), "one sent-by at either instance");
+
+    // The response crosses back through the instance that did not forward it.
+    let vias: String =
+        header_lines(&first.2, "Via").iter().map(|v| format!("Via: {v}\r\n")).collect();
+    let SipMessage::Response(resp) = parse_msg(&format!(
+        "SIP/2.0 200 OK\r\n\
+{vias}From: <sip:b2bua@example.com>;tag=w\r\n\
+To: <sip:bob@example.com>;tag=b\r\n\
+Call-ID: crossing-bye@example.com\r\n\
+CSeq: 2 BYE\r\n\
+Content-Length: 0\r\n\r\n"
+    )) else {
+        panic!("a response")
+    };
+    other.core.handle_response(resp, sa(W_ELSEWHERE, 5060), Face::Internal).await;
+    let (face, dst, _) = one_sent(&other);
+    assert_eq!((face, dst), ("int", sa(W1, 5060)), "the marker holds at either instance");
 }
 
 #[tokio::test]
@@ -437,13 +459,13 @@ Content-Length: 0\r\n\r\n"
     assert_eq!((face, dst), ("int", sa(W1, 5060)));
 }
 
-/// The next Via's sent-by names the worker: its `received` is a node address
-/// no worker holds, and the response still stays on the internal plane.
+/// The marker on the proxy's own Via keeps the response internal: the next Via's
+/// `received` is a node address no worker holds.
 #[tokio::test]
-async fn a_response_to_a_translated_worker_leaves_internal() {
+async fn a_marked_response_to_a_translated_worker_leaves_internal() {
     let f = core_over_two_workers();
     let resp = response_with_vias(&format!(
-        "Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch=z9hG4bKp\r\n\
+        "Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch=z9hG4bKp;same-face\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKw;received={NODE};rport=40001\r\n"
     ));
     f.core.handle_response(resp, sa(W_ELSEWHERE, 5060), Face::Internal).await;
@@ -503,17 +525,21 @@ async fn an_own_final_leaves_the_internal_face_it_was_asked_on() {
 
 // ── The residuals ADR-0048 states ───────────────────────────────────────────
 
-/// A sender no registry lists is no worker the response row can name.
+/// A sender no registry lists, whose request stayed internal: the marker brings
+/// its response back the way it came.
 #[tokio::test]
-async fn a_response_for_a_sender_no_registry_holds_leaves_external() {
+async fn a_sender_no_registry_holds_gets_its_response_where_its_request_stayed() {
     let f = core_over_two_workers();
-    let resp = response_with_vias(&format!(
-        "Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch=z9hG4bKp\r\n\
-Via: SIP/2.0/UDP {UNLISTED}:5060;branch=z9hG4bKu\r\n"
-    ));
-    f.core.handle_response(resp, sa(W1, 5060), Face::Internal).await;
+    let route = format!("<sip:{INT_VIP}:{INT_PORT};target={W1}:5060;lr>");
+    let msg = bye(UNLISTED, &route, "sip:bob@example.com");
+    f.core.route_request(&msg, sa(UNLISTED, 5060), Face::Internal).await;
+    let (face, dst, bytes) = one_sent(&f);
+    assert_eq!((face, dst), ("int", sa(W1, 5060)));
+    let vias: String =
+        header_lines(&bytes, "Via").iter().map(|v| format!("Via: {v}\r\n")).collect();
+    f.core.handle_response(response_with_vias(&vias), sa(W1, 5060), Face::Internal).await;
     let (face, dst, _) = one_sent(&f);
-    assert_eq!((face, dst), ("ext", sa(UNLISTED, 5060)));
+    assert_eq!((face, dst), ("int", sa(UNLISTED, 5060)));
 }
 
 /// A spiral's in-dialog INVITE refused by a translated worker: the final comes
@@ -614,5 +640,35 @@ Content-Length: 0\r\n\r\n",
         f.core.route_request(&msg, sa(W1, 5060), Face::Internal).await;
         let (face, dst, _) = one_sent(&f);
         assert_eq!((face, dst), ("ext", sa("203.0.113.66", 5060)), "last entry: {last:?}");
+    }
+}
+
+/// A phone behind a NAT whose private sent-by happens to equal a worker's
+/// address: her replies leave the face her INVITE reached, whatever that Via
+/// names. Nothing she wrote keeps a response on the internal plane, a marker on
+/// her own Via included.
+#[tokio::test]
+async fn a_caller_whose_via_names_a_worker_is_answered_from_the_external_face() {
+    for own_via in ["", ";same-face"] {
+        let f = core_over_two_workers();
+        let invite = parse_msg(&format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W_ELSEWHERE}:5060;branch=z9hG4bKnat;rport{own_via}\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=a\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: crossing-nat@example.com\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@203.0.113.66:40000>\r\n\
+Content-Length: 0\r\n\r\n"
+        ));
+        let src = sa("203.0.113.66", 40000);
+        f.core.route_request(&invite, src, Face::External).await;
+        let (_, _, bytes) = one_sent(&f);
+        let vias: String =
+            header_lines(&bytes, "Via").iter().map(|v| format!("Via: {v}\r\n")).collect();
+        f.core.handle_response(response_with_vias(&vias), sa(W1, 5060), Face::Internal).await;
+        let (face, dst, _) = one_sent(&f);
+        assert_eq!((face, dst), ("ext", src), "the face her INVITE reached, her Via {own_via:?}");
     }
 }

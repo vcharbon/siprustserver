@@ -2,9 +2,12 @@
 //!
 //! A dual-face proxy bridges two planes, the workers' and the callers', with
 //! one UDP socket and one advertise per face. A message crosses: what arrives
-//! on one face leaves on the other. Two exceptions come from the registry, so a
-//! call looping back through the platform stays on the workers' plane, and an
-//! own final leaves from the face that received its request (RFC 3581 §4).
+//! on one face leaves on the other. A request bound for a registry worker that
+//! arrived internal and is no worker's own outbound request stays internal, so
+//! a call looping back through the platform stays on the workers' plane. The
+//! proxy marks the Via it pushes on such a request, and the response comes back
+//! on that marker. An own final leaves from the face that received its request
+//! (RFC 3581 §4).
 //!
 //! The inputs are the ingress face and what the message and the registry say,
 //! so any proxy instance picks the same egress with nothing stored: the choice
@@ -41,14 +44,21 @@ impl EgressPolicy {
         }
     }
 
-    /// The face a relayed response leaves on. `to_worker`: the owner rule names
-    /// a worker, or the response's next Via's sent-by is a registry worker.
-    /// That sent-by and not the `received` beside it: a translated worker's
-    /// `received` is a node address.
-    pub(crate) fn response(self, ingress: Face, to_worker: bool) -> Face {
+    /// Whether a request crossing from `ingress` to `egress` stayed on the
+    /// internal face, so the Via pushed on it carries the marker its response
+    /// comes back on.
+    pub(crate) fn marks_the_hop(self, ingress: Face, egress: Face) -> bool {
+        self == Self::Crossing && ingress == Face::Internal && egress == Face::Internal
+    }
+
+    /// The face a relayed response leaves on. `owner_named`: the owner rule names
+    /// a worker. `marked`: the proxy's own Via this response pops carries the
+    /// marker of [`marks_the_hop`](Self::marks_the_hop). A Via below it is its
+    /// sender's to write, so it decides nothing.
+    pub(crate) fn response(self, ingress: Face, owner_named: bool, marked: bool) -> Face {
         match (self, ingress) {
             (Self::SingleFace, _) | (Self::Crossing, Face::External) => Face::Internal,
-            (Self::Crossing, Face::Internal) if to_worker => Face::Internal,
+            (Self::Crossing, Face::Internal) if owner_named || marked => Face::Internal,
             (Self::Crossing, Face::Internal) => Face::External,
         }
     }
@@ -63,7 +73,8 @@ mod tests {
     fn a_single_face_proxy_stays_on_its_face() {
         for (outbound, loose, worker) in [(false, false, false), (true, true, true)] {
             assert_eq!(SingleFace.request(Internal, outbound, loose, || worker), Internal);
-            assert_eq!(SingleFace.response(Internal, worker), Internal);
+            assert_eq!(SingleFace.response(Internal, worker, worker), Internal);
+            assert!(!SingleFace.marks_the_hop(Internal, Internal));
         }
     }
 
@@ -92,10 +103,19 @@ mod tests {
     }
 
     #[test]
-    fn a_response_crosses_but_one_for_a_worker() {
-        assert_eq!(Crossing.response(External, false), Internal);
-        assert_eq!(Crossing.response(External, true), Internal);
-        assert_eq!(Crossing.response(Internal, true), Internal);
-        assert_eq!(Crossing.response(Internal, false), External);
+    fn a_response_crosses_but_one_the_owner_rule_or_the_marker_keeps() {
+        for (owner_named, marked) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(Crossing.response(External, owner_named, marked), Internal);
+        }
+        assert_eq!(Crossing.response(Internal, true, false), Internal);
+        assert_eq!(Crossing.response(Internal, false, true), Internal);
+        assert_eq!(Crossing.response(Internal, false, false), External);
+    }
+
+    #[test]
+    fn only_a_request_staying_internal_is_marked() {
+        assert!(Crossing.marks_the_hop(Internal, Internal));
+        assert!(!Crossing.marks_the_hop(Internal, External));
+        assert!(!Crossing.marks_the_hop(External, Internal));
     }
 }
