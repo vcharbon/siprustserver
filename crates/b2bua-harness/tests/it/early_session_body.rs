@@ -8,7 +8,7 @@
 //! written and moves no session state the stack restates later (RFC 3264 §8).
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::Harness;
+use scenario_harness::{Dialog, Harness};
 use sip_message::generators::InDialogMethod;
 use sip_message::HeaderName;
 
@@ -126,25 +126,48 @@ async fn an_early_session_answer_in_a_183_opens_no_session_for_the_caller() {
     let _report = h.finish().await;
 }
 
-/// On an established call a re-INVITE and an UPDATE whose only body is a bare
-/// early-session description reach the callee as written: the re-INVITE runs
-/// as a delayed offer, the UPDATE offers nothing.
-#[tokio::test(start_paused = true)]
-async fn an_in_dialog_early_session_body_rides_as_written() {
-    let h = Harness::new("b2bua-early-session-in-dialog");
-    let alice = h.agent("alice", "127.0.0.1:5473").await;
-    let bob = h.agent("bob", "127.0.0.1:5483").await;
+/// An established call: alice's dialog, bob's, and the SUT.
+async fn established(
+    h: &Harness,
+    ports: (u16, u16, u16),
+) -> (scenario_harness::Agent, scenario_harness::Agent, B2buaSut, Dialog, Dialog) {
+    let (a, b, s) = ports;
+    let alice = h.agent("alice", &format!("127.0.0.1:{a}")).await;
+    let bob = h.agent("bob", &format!("127.0.0.1:{b}")).await;
     let b2bua =
-        B2buaSut::route_all_to("127.0.0.1", 5483).start(&h, "b2bua", "127.0.0.1:5493").await;
-
+        B2buaSut::route_all_to("127.0.0.1", b).start(h, "b2bua", &format!("127.0.0.1:{s}")).await;
     let mut call = alice.invite(&bob).with_sdp(SESSION).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(200, "OK").with_sdp(SESSION_ANSWER).await;
     call.expect(200).await;
-    let mut dialog = call.ack().await;
-    let mut bob_dialog = uas.dialog();
+    let dialog = call.ack().await;
+    let bob_dialog = uas.dialog();
     bob.receive("ACK").await;
+    (alice, bob, b2bua, dialog, bob_dialog)
+}
 
+/// Bob hangs up, and the call is gone with its record.
+async fn bob_hangs_up(
+    h: Harness,
+    alice: &scenario_harness::Agent,
+    b2bua: B2buaSut,
+    mut bob_dialog: Dialog,
+) {
+    let mut bye = bob_dialog.bye().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "one call record");
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// On an established call an UPDATE whose only body is a bare early-session
+/// description reaches the callee as written and offers nothing.
+#[tokio::test(start_paused = true)]
+async fn an_update_early_session_body_rides_as_written() {
+    let h = Harness::new("b2bua-early-session-update");
+    let (alice, bob, b2bua, mut dialog, bob_dialog) = established(&h, (5473, 5483, 5493)).await;
     let mut update = dialog
         .send_request(InDialogMethod::Update)
         .with_body("application/sdp", LATE_EARLY.as_bytes().to_vec())
@@ -155,7 +178,15 @@ async fn an_in_dialog_early_session_body_rides_as_written() {
     assert_eq!(uas_update.request().body().as_ref(), LATE_EARLY.as_bytes(), "UPDATE as written");
     uas_update.respond(200, "OK").await;
     update.expect(200).await;
+    bob_hangs_up(h, &alice, b2bua, bob_dialog).await;
+}
 
+/// On an established call a re-INVITE whose only body is a bare early-session
+/// description reaches the callee as written and runs as a delayed offer.
+#[tokio::test(start_paused = true)]
+async fn a_reinvite_early_session_body_rides_as_written() {
+    let h = Harness::new("b2bua-early-session-reinvite");
+    let (alice, bob, b2bua, mut dialog, bob_dialog) = established(&h, (5474, 5484, 5494)).await;
     let mut reinvite = dialog
         .send_request(InDialogMethod::Invite)
         .with_body("application/sdp", LATE_EARLY.as_bytes().to_vec())
@@ -174,12 +205,5 @@ async fn an_in_dialog_early_session_body_rides_as_written() {
     dialog.ack(Some(REANSWER)).await;
     let ack = bob.receive("ACK").await;
     assert_eq!(ack.request().body().as_ref(), REANSWER.as_bytes(), "the caller's answer");
-
-    let mut bye = bob_dialog.bye().await;
-    alice.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-    settle_until(|| b2bua.is_reaped()).await;
-    assert_eq!(b2bua.cdr_records().len(), 1, "one call record");
-    b2bua.assert_fully_reaped();
-    let _report = h.finish().await;
+    bob_hangs_up(h, &alice, b2bua, bob_dialog).await;
 }

@@ -183,6 +183,9 @@ impl ActionExecutor<'_> {
             None
         };
         let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
+        let target_face = capabilities::Face::of_leg(target_leg);
+        let (extra_headers, advertised) =
+            relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
         let body = relay::continue_on_leg(
             call,
             target_leg,
@@ -190,7 +193,7 @@ impl ActionExecutor<'_> {
             relay::Author::Leg(ctx.source_leg_id),
             relay::Carried::of(req.method(), None, true),
             req.body().to_vec(),
-            req.sdp_range(),
+            relay::description_in(req.body(), content_type.as_ref(), &extra_headers),
             self.config.sdp_form.as_ref(),
         );
         let branch = self.turn.ids.new_branch();
@@ -200,9 +203,6 @@ impl ActionExecutor<'_> {
             return;
         };
         let gen_dialog = relay::to_gen_dialog(target, &target_dialog);
-        let target_face = capabilities::Face::of_leg(target_leg);
-        let (extra_headers, advertised) =
-            relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
