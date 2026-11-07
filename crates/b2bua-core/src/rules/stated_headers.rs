@@ -170,6 +170,7 @@ fn stamped_request(
     let bound = req.to().tag().is_none().then_some(first_ingress);
     restated(&sets, |_| false, |name| carried(req.raw(name)), || req.thaw(), bound, skipped)?
         .freeze()
+        .inspect_err(|e| unstamped(call, leg_id, e))
         .ok()
 }
 
@@ -199,7 +200,19 @@ fn stamped_response(
     let withheld = |name: &str| own_reason && HeaderName::Reason.matches(name);
     restated(&sets, withheld, |name| carried(resp.raw(name)), || resp.thaw(), None, skipped)?
         .freeze()
+        .inspect_err(|e| unstamped(call, leg_id, e))
         .ok()
+}
+
+/// A restated message that does not freeze leaves as it was, unstated: every
+/// line `restated` writes was checked, so the refusal is a defect, logged.
+fn unstamped(call: &Call, leg_id: &str, e: &sip_message::draft::IncompleteDraft) {
+    tracing::error!(
+        call_ref = %call.call_ref,
+        %leg_id,
+        error = %e,
+        "DEFECT: a restated message does not freeze; it leaves without the statements"
+    );
 }
 
 /// `lines` once `update` is applied: a set's lines, none for a removal, an

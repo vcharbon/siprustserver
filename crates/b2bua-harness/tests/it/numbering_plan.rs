@@ -188,7 +188,8 @@ async fn direct_reject_carries_reason_header() {
 
     let resp = call.expect(603).await;
     assert_eq!(resp.status(), 603);
-    let reason = resp.first::<Reason>().expect("a Reason").expect("readable Reason");
+    let reasons = resp.list::<Reason>().expect("readable Reason");
+    let reason = sip_message::header::reason_for(&reasons, "Q.850").expect("a Q.850 Reason");
     assert!(reason.is("Q.850"), "Reason protocol relayed: {}", reason.to_wire());
     assert_eq!(reason.param("cause").and_then(ParamValue::as_str), Some("21"));
     assert_eq!(reason.param("text").and_then(ParamValue::as_str), Some("call rejected"));

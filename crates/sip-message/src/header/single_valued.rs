@@ -5,12 +5,25 @@
 
 use super::id::HeaderKey;
 use super::name::{HeaderId, HeaderName};
+use crate::error::SipParseError;
+use crate::sip_str::SipStr;
 
-/// A listed header: a known one by id, an extension one by its name.
+/// A header named at compile time: a known one by id, an extension one by its
+/// name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Listed {
     Known(HeaderId),
     Extension(&'static str),
+}
+
+impl Listed {
+    /// The header this names.
+    pub fn name(self) -> HeaderName {
+        match self {
+            Listed::Known(id) => id.name(),
+            Listed::Extension(name) => HeaderName::Other(SipStr::from_static(name)),
+        }
+    }
 }
 
 /// One row of the list: the header and the grammar line that makes it single.
@@ -98,6 +111,24 @@ pub fn is_single_valued(name: &HeaderName) -> bool {
     }
 }
 
+/// The refusal of a second line of the single-valued header `name`.
+pub(crate) fn second_line(name: &HeaderName) -> SipParseError {
+    let shown = crate::error::reason_text::header(name);
+    SipParseError::new(format!("Multiple {shown} headers (RFC 3261 §7.3.1 — one value)"))
+}
+
+/// The first single-valued header `lines` carry on a second line, each line
+/// given as the header it was classified as and its name as written.
+pub(crate) fn first_repeated<'a>(
+    lines: impl IntoIterator<Item = (Option<HeaderId>, &'a str)>,
+) -> Option<HeaderName> {
+    let mut met = Met::default();
+    lines
+        .into_iter()
+        .find(|(id, wire)| met.repeated_line(*id, wire))
+        .map(|(id, wire)| id.map_or_else(|| HeaderName::Other(SipStr::owned(wire)), HeaderId::name))
+}
+
 /// The single-valued headers a walk over a message's lines has met, so a
 /// second line of one is caught whatever its form.
 #[derive(Debug, Default)]
@@ -141,11 +172,7 @@ mod tests {
     fn every_row_is_single_valued_and_nothing_else_is() {
         assert_eq!(SINGLE_VALUED.len(), 34);
         for row in SINGLE_VALUED {
-            let name = match row.header {
-                Listed::Known(id) => id.name(),
-                Listed::Extension(name) => HeaderName::from(name),
-            };
-            assert!(is_single_valued(&name), "{row:?}");
+            assert!(is_single_valued(&row.header.name()), "{row:?}");
         }
         let extensions = SINGLE_VALUED
             .iter()
@@ -154,6 +181,18 @@ mod tests {
         for name in ["Via", "Contact", "Route", "Require", "Allow", "Warning", "X-Note"] {
             assert!(!is_single_valued(&HeaderName::from(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn a_second_line_is_found_in_any_form() {
+        let line = |name: &'static str| (HeaderId::of(name), name);
+        let found = first_repeated([line("From"), line("Via"), line("f")]);
+        assert_eq!(found, Some(HeaderName::From));
+        let charging = [line("P-Charging-Vector"), line("p-charging-vector")];
+        let found = first_repeated(charging).map(|n| n.as_wire_str().to_owned());
+        assert_eq!(found.as_deref(), Some("p-charging-vector"));
+        assert_eq!(first_repeated([line("Via"), line("v"), line("X-A"), line("X-A")]), None);
+        assert!(second_line(&HeaderName::Expires).reason.starts_with("Multiple Expires headers"));
     }
 
     #[test]

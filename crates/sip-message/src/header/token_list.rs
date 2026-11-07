@@ -19,7 +19,7 @@ use crate::sip_str::SipStr;
 
 use super::cardinality::TokenSet;
 use super::kind::TokenKind;
-use super::name::HeaderName;
+use super::single_valued::Listed;
 use super::value::HeaderValue;
 use super::wire::Wire;
 
@@ -118,9 +118,7 @@ impl<K: TokenKind> TokenListHeader<K> {
 impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
     type Lines = K::Lines;
 
-    fn header_name() -> HeaderName {
-        K::name()
-    }
+    const HEADER: Listed = K::HEADER;
 
     /// Every entry is one token: an entry that is not, an empty entry, and an
     /// empty value where the grammar needs a token are refused (RFC 3261

@@ -62,7 +62,9 @@ pub use aliases::{
     WwwAuthenticate,
 };
 pub use authority::{host_of, message_id_domain, network_host};
-pub use cardinality::{lines, Cardinality, ListHeader, Many, SingleHeader, TokenSet};
+pub use cardinality::{
+    lines, Cardinality, ListHeader, Many, Sequence, SequenceHeader, SingleHeader, TokenSet,
+};
 pub use charging::ChargingVector;
 pub use class::HeaderClass;
 pub use credentials::Credentials;
@@ -86,7 +88,7 @@ pub use restatement::Restatement;
 pub use retry_after::retry_after_seconds;
 pub(crate) use scan::quoted_close;
 pub use sent_by::{SentBy, SentByRef};
-pub(crate) use single_valued::Met;
+pub(crate) use single_valued::{first_repeated, second_line, Met};
 pub use single_valued::{is_single_valued, Listed, SingleValued, SINGLE_VALUED};
 pub use token_list::TokenListHeader;
 pub use token_params::{parse_token_params, TokenParamsHeader};

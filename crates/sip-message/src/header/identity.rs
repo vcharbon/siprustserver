@@ -6,7 +6,7 @@ use crate::method::Method;
 use crate::sip_str::SipStr;
 
 use super::cardinality::{held_to_the_table, lines};
-use super::name::{HeaderId, HeaderName};
+use super::name::HeaderId;
 use super::scan::parse_u32;
 use super::single_valued::Listed;
 use super::value::HeaderValue;
@@ -118,14 +118,12 @@ impl std::fmt::Display for CallId {
     }
 }
 
-held_to_the_table!(<CallId as HeaderValue>::Lines, Listed::Known(HeaderId::CallId));
+held_to_the_table!(value CallId);
 
 impl HeaderValue for CallId {
     type Lines = lines::Single;
 
-    fn header_name() -> HeaderName {
-        HeaderName::CallId
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::CallId);
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let id = raw.trimmed();
@@ -173,14 +171,12 @@ impl CSeq {
     }
 }
 
-held_to_the_table!(<CSeq as HeaderValue>::Lines, Listed::Known(HeaderId::CSeq));
+held_to_the_table!(value CSeq);
 
 impl HeaderValue for CSeq {
     type Lines = lines::Single;
 
-    fn header_name() -> HeaderName {
-        HeaderName::CSeq
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::CSeq);
 
     /// `CSeq = 1*DIGIT LWS Method` (RFC 3261 §25.1), the number a 32-bit
     /// unsigned value (§20.16) — the grammar the parser's wire gate holds a
@@ -226,14 +222,12 @@ impl RAck {
     }
 }
 
-held_to_the_table!(<RAck as HeaderValue>::Lines, Listed::Known(HeaderId::RAck));
+held_to_the_table!(value RAck);
 
 impl HeaderValue for RAck {
     type Lines = lines::Single;
 
-    fn header_name() -> HeaderName {
-        HeaderName::RAck
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::RAck);
 
     /// `RAck = response-num LWS CSeq-num LWS Method` (RFC 3262 §7.2), both
     /// numbers 32-bit unsigned values, the response-num not 0.

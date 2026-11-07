@@ -101,14 +101,6 @@ pub(super) fn extract_identity(
 ) -> Result<Identity, SipParseError> {
     let wire = mode == ExtractMode::Wire;
 
-    // A single-valued header appears once (RFC 3261 §7.3.1): From, To,
-    // Call-ID and CSeq among them.
-    if let Some(name) = &idx.repeated {
-        return Err(SipParseError::new(format!(
-            "Multiple {name} headers (RFC 3261 §7.3.1 — one value)"
-        )));
-    }
-
     let exemptions = &limits.exemptions;
     let from_val =
         idx.from.value.ok_or_else(|| SipParseError::new("Missing mandatory From header"))?;

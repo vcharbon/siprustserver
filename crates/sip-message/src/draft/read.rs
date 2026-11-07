@@ -4,7 +4,7 @@
 use bytes::Bytes;
 
 use crate::error::SipParseError;
-use crate::header::{HeaderName, ListHeader, SingleHeader, TokenSet};
+use crate::header::{second_line, HeaderName, ListHeader, SingleHeader, TokenSet};
 use crate::sip_str::SipStr;
 
 use super::edit::Draft;
@@ -46,7 +46,7 @@ impl<S: StartKind> Draft<S> {
         let mut lines = self.entries.iter().filter(|e| e.is_key(&key));
         let entry = lines.next()?;
         if lines.next().is_some() {
-            return Some(Err(repeated(&name)));
+            return Some(Err(second_line(&name)));
         }
         Some(entry.read_one::<H>())
     }
@@ -63,9 +63,4 @@ impl<S: StartKind> Draft<S> {
     pub fn body_bytes(&self) -> &Bytes {
         &self.body
     }
-}
-
-/// The refusal of a second line of the single-valued header `name`.
-pub(super) fn repeated(name: &HeaderName) -> SipParseError {
-    SipParseError::new(format!("Multiple {name} headers (RFC 3261 §7.3.1 — one value)"))
 }

@@ -17,9 +17,9 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::kind::CredentialsKind;
-use super::name::HeaderName;
 use super::params::{read_auth_params, ParamValue, Params};
 use super::scan::{skip_ws, sub, token_end};
+use super::single_valued::Listed;
 use super::value::HeaderValue;
 use super::wire::Wire;
 
@@ -85,9 +85,7 @@ impl<K: CredentialsKind> Credentials<K> {
 impl<K: CredentialsKind> HeaderValue for Credentials<K> {
     type Lines = K::Lines;
 
-    fn header_name() -> HeaderName {
-        K::name()
-    }
+    const HEADER: Listed = K::HEADER;
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = without_lws(raw);

@@ -12,7 +12,8 @@ use bytes::Bytes;
 
 use crate::error::SipParseError;
 use crate::header::{
-    ContentLength, HeaderName, HeaderValue, ListHeader, MediaType, Met, SingleHeader, Via,
+    first_repeated, second_line, ContentLength, HeaderName, HeaderValue, ListHeader, MediaType,
+    SingleHeader, Via,
 };
 use crate::header_table::HeaderTable;
 use crate::sip_str::{SharedText, SipStr};
@@ -21,7 +22,6 @@ use crate::write_check::WriteRefusal;
 
 use super::entry::Entry;
 use super::list::HeaderList;
-use super::read::repeated;
 use super::render::{render, render_bytes};
 use super::start::StartKind;
 
@@ -137,8 +137,8 @@ impl<S: StartKind> Draft<S> {
     /// generator recipe lowers such a value onto.
     ///
     /// `freeze` still gates the mandatory headers and reads the ones the typed
-    /// core comes from, so a raw line in one of those, or one holding a CR or
-    /// LF, fails the freeze; a value
+    /// core comes from, so a raw line in one of those, one holding a CR or LF,
+    /// or a second line of a single-valued header, fails the freeze; a value
     /// that must go out invalid leaves through
     /// [`render_unchecked`](Self::render_unchecked). A line from outside the
     /// stack goes in through [`Entry::checked_raw`], which refuses it before
@@ -150,7 +150,10 @@ impl<S: StartKind> Draft<S> {
 
     /// Replace every line of this header with one carrying `value`, keeping the
     /// wire position the header already had; a header the draft does not
-    /// carry goes last. The one way to write a single-valued header.
+    /// carry goes last. A typed single-valued header is written this way, never
+    /// appended; a line [`push_raw`](Self::push_raw) or
+    /// [`push_entry`](Self::push_entry) adds beside one the draft carries makes
+    /// it refuse to freeze ([`IncompleteDraft::Repeated`]).
     pub fn set(mut self, value: impl HeaderValue) -> Self {
         let name = value.name();
         let key = name.key();
@@ -220,7 +223,7 @@ impl<S: StartKind> Draft<S> {
             return Ok(self);
         };
         if self.entries.iter().skip(at.saturating_add(1)).any(|e| e.is_key(&key)) {
-            return Err(repeated(&name));
+            return Err(second_line(&name));
         }
         let value = match self.entries.get(at) {
             Some(entry) => entry.read_one::<H>()?,
@@ -427,8 +430,7 @@ impl<S: StartKind> Draft<S> {
 
 /// The first single-valued header `entries` carry on a second line.
 fn repeated_single(entries: &[Entry]) -> Option<HeaderName> {
-    let mut met = Met::default();
-    entries.iter().map(Entry::name).find(|name| met.repeated(name)).cloned()
+    first_repeated(entries.iter().map(|e| (e.id(), e.name().as_wire_str())))
 }
 
 /// Puts `entry` at `at`, the lines from `at` on moving down one; past the end

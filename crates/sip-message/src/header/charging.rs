@@ -11,7 +11,6 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::cardinality::{held_to_the_table, lines};
-use super::name::HeaderName;
 use super::params::Params;
 use super::single_valued::Listed;
 use super::value::HeaderValue;
@@ -54,14 +53,12 @@ fn gen_value(out: &mut Wire, value: &str) {
     }
 }
 
-held_to_the_table!(<ChargingVector as HeaderValue>::Lines, Listed::Extension("P-Charging-Vector"));
+held_to_the_table!(value ChargingVector);
 
 impl HeaderValue for ChargingVector {
     type Lines = lines::Single;
 
-    fn header_name() -> HeaderName {
-        HeaderName::Other(SipStr::from_static("P-Charging-Vector"))
-    }
+    const HEADER: Listed = Listed::Extension("P-Charging-Vector");
 
     /// A value carrying no `icid-value` is not a charging vector: RFC 7315 §5.6
     /// makes the identifier the header's only mandatory parameter.

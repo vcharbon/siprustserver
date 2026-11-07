@@ -52,7 +52,7 @@ fn every_reading_refuses_a_second_line_of_a_single_valued_header() {
     let charging = "P-Charging-Vector: icid-value=1\r\np-charging-vector: icid-value=1\r\n";
     for (name, read) in readings() {
         let refused = read(&with(charging)).expect_err(name);
-        assert!(refused.starts_with("Multiple p-charging-vector"), "{name}: {refused}");
+        assert!(refused.starts_with("Multiple \"p-charging-vector\""), "{name}: {refused}");
     }
 }
 

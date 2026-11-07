@@ -40,9 +40,9 @@ async fn a_new_invite_at_the_queue_cap_draws_the_capacity_503() {
         let resp = shed.expect(503).await;
         assert!(resp.to().tag().is_some(), "a non-100 final carries a To-tag (RFC 3261 §8.2.6.2)");
         assert!(
-            resp.first::<Reason>().is_none(),
+            resp.list::<Reason>().expect("readable Reason").is_empty(),
             "the capacity 503 carries no Reason: {:?}",
-            resp.first::<Reason>()
+            resp.list::<Reason>()
         );
         let retry = resp.header::<RetryAfter>().expect("a Retry-After").expect("readable");
         let secs: u32 = retry.token().parse().expect("Retry-After is delta-seconds");

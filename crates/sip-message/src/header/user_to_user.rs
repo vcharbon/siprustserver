@@ -10,7 +10,7 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::cardinality::{held_to_the_table, lines};
-use super::name::{HeaderId, HeaderName};
+use super::name::HeaderId;
 use super::params::{read_params, ParamReading, ParamValue, Params};
 use super::scan::{byte_at, quoted_close, read_quoted, sub, token_end};
 use super::single_valued::Listed;
@@ -40,14 +40,12 @@ impl UserToUser {
     }
 }
 
-held_to_the_table!(<UserToUser as HeaderValue>::Lines, Listed::Known(HeaderId::UserToUser));
+held_to_the_table!(value UserToUser);
 
 impl HeaderValue for UserToUser {
     type Lines = lines::Comma;
 
-    fn header_name() -> HeaderName {
-        HeaderName::UserToUser
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::UserToUser);
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = raw.trimmed();

@@ -12,6 +12,7 @@ use crate::sip_str::SipStr;
 
 use super::cardinality::Cardinality;
 use super::name::HeaderName;
+use super::single_valued::Listed;
 use super::wire::Wire;
 
 /// How the wire lays out the values of one header: the runtime echo of its
@@ -40,8 +41,14 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
     /// ([`Cardinality`]).
     type Lines: Cardinality;
 
+    /// The header this value belongs to, which its cardinality is checked
+    /// against (`header::SINGLE_VALUED`).
+    const HEADER: Listed;
+
     /// The header this value belongs to.
-    fn header_name() -> HeaderName;
+    fn header_name() -> HeaderName {
+        Self::HEADER.name()
+    }
 
     /// How the wire may lay out several of these.
     fn folding() -> Folding {

@@ -8,9 +8,9 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::kind::NumericKind;
-use super::name::HeaderName;
 use super::params::{read_params, ParamReading};
 use super::scan::parse_u32;
+use super::single_valued::Listed;
 use super::value::HeaderValue;
 use super::wire::Wire;
 
@@ -65,9 +65,7 @@ impl NumericHeader<super::kind::MaxForwards> {
 impl<K: NumericKind> HeaderValue for NumericHeader<K> {
     type Lines = K::Lines;
 
-    fn header_name() -> HeaderName {
-        K::name()
-    }
+    const HEADER: Listed = K::HEADER;
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let name = K::name();

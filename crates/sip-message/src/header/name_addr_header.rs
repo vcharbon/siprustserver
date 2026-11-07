@@ -12,10 +12,10 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::kind::{NameAddrKind, NoParams, RichParams, TaggedKind};
-use super::name::HeaderName;
 use super::name_addr::{AddrGrammar, NameAddr};
 use super::params::{ParamValue, Params};
 use super::reading::Reading;
+use super::single_valued::Listed;
 use super::uri::Uri;
 use super::value::{read_line_into, HeaderValue};
 use super::wire::Wire;
@@ -138,9 +138,7 @@ impl<K: NameAddrKind> NameAddrHeader<K> {
 impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
     type Lines = K::Lines;
 
-    fn header_name() -> HeaderName {
-        K::name()
-    }
+    const HEADER: Listed = K::HEADER;
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let addr = NameAddr::read(raw, &Self::grammar(), Reading::Strict)?.addr;
@@ -177,7 +175,7 @@ impl<K: NameAddrKind> std::fmt::Display for NameAddrHeader<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::{Contact, Folding, PAssertedIdentity, RouteEntry, To};
+    use crate::header::{Contact, Folding, HeaderName, PAssertedIdentity, RouteEntry, To};
 
     #[test]
     fn the_tag_api_reads_and_rewrites_in_place() {

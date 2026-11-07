@@ -59,6 +59,10 @@ pub fn hydrate_request(
 ) -> Result<SipRequest, SipParseError> {
     let uri = SipStr::owned(uri);
     let headers = HeaderTable::new(headers);
+    let lines = headers.classified_lines().map(|(id, line)| (id, line.name.as_str()));
+    if let Some(name) = crate::header::first_repeated(lines) {
+        return Err(crate::header::second_line(&name));
+    }
     let idx = HeaderIndex::build(&headers);
     let eager = extract_request_fields(
         &idx,

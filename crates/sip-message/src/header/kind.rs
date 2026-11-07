@@ -23,7 +23,11 @@ const INT_32_MAX: u32 = i32::MAX as u32;
 
 /// A header's compile-time identity.
 pub trait HeaderKind: std::fmt::Debug + Clone + Copy + Send + Sync + 'static {
-    fn name() -> HeaderName;
+    /// The header this kind is.
+    const HEADER: Listed;
+    fn name() -> HeaderName {
+        Self::HEADER.name()
+    }
     /// How many lines of this header a message carries.
     type Lines: Cardinality;
 }
@@ -111,11 +115,11 @@ macro_rules! kinds {
             pub struct $marker;
 
             impl HeaderKind for $marker {
-                fn name() -> HeaderName { HeaderName::$name }
+                const HEADER: Listed = Listed::Known(HeaderId::$name);
                 type Lines = lines::$lines;
             }
 
-            held_to_the_table!(lines::$lines, Listed::Known(HeaderId::$name));
+            held_to_the_table!(kind $marker);
         )+
     };
 }

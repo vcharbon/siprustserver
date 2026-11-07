@@ -116,7 +116,8 @@ _Avoid_: "tolerance", "quirk mode".
 A header a message carries on one line at most, compact forms counted, as
 `header::SINGLE_VALUED` states. It reads as `msg.header::<H>()`, an `Option` of
 its one value; every other header is a list, read as `msg.list::<H>()`. Every
-reading refuses a second line, and no draft freezes with one.
+reading refuses a second line and no draft freezes with one; a service stating
+one on two lines has every line of it left out and the skip reported.
 _Avoid_: "the first value" of a single-valued header (there is no second).
 
 **Policy rejection** / **Buggy rejection**:

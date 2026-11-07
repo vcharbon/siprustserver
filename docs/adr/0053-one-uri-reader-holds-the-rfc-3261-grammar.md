@@ -227,20 +227,35 @@ recording, and its parties read the wire, under the reading its lane states
 A single-valued header (RFC 3261 §7.3.1: a header whose grammar is no comma
 list) stands on one line of a message, compact forms counted. The headers are
 the ones `sip_message::header::SINGLE_VALUED` states by hand, each row citing
-its grammar, errata applied. Every way a message is made holds it: each
-reading refuses a second line, `read_stored` included, as `hydrate_request`
-does; a draft does not freeze with one (`IncompleteDraft::Repeated`), and a
-header a routing decision states on two lines is skipped
-(`write_check::header_lines`).
+its grammar, errata applied.
 
-The cardinality is in the types. A value type declares its `Lines`
+Every way a message is made holds it. The header-block split refuses a second
+line in every reading, `read_stored` included; `hydrate_request` refuses one;
+a draft holding one does not freeze (`IncompleteDraft::Repeated`, checked once
+per `freeze`, `freeze_bytes` and relay refreeze), so a stack defect costs its
+message rather than reaching the wire.
+
+What a service states is text from outside the stack, and its repeat never
+costs the message. A single-valued header a service states on more than one
+line, names compared as the header they name (casing and compact forms
+counted: `Subject`, `subject` and `s` are one), is left out whole, as though
+not stated, and the skip is reported as stated text the wire cannot carry
+(`StatedTextSkipped`). `write_check::one_line_each` decides it, at
+every path a service states lines on: a route's header updates on the leg it
+dials, the lines of an authored final, of an in-dialog request a service
+originates and of a `DestroyLeg`'s CANCEL or BYE, and a decision's header
+statements restated on a built message (`write_check::header_lines`).
+
+The cardinality is in the types. A value type declares the header it is
+(`HeaderValue::HEADER`, from which `header_name` reads) and its `Lines`
 (`header::lines::Single`, or the list layouts `Comma`, `Opaque`, `SetPerLine`),
-checked at compile time against the table, so a type and the gate never
-disagree. A single-valued header reads as `msg.header::<H>()`, its one value,
-and is written with `Draft::set`; a list header reads as `msg.list::<H>()`,
-`first::<H>()` for its first value, or `token_set::<H>()` for the one set its
-lines make, and is appended with `push` and `prepend`. Neither has the other's
-accessor.
+held to the table by a compile-time assertion naming the type. A
+single-valued header reads as `msg.header::<H>()`, its one value, and is
+written with `Draft::set`; a list header reads as `msg.list::<H>()`. A list
+whose values stand in order (`Comma`, `Opaque`) also reads as `first::<H>()`,
+its first value from the lines up to it; a token set (`SetPerLine`) reads as
+`token_set::<H>()`, the one set its lines make. A list header is appended
+with `push` and `prepend`. No accessor exists for the other cardinality.
 
 ## Considered and rejected
 

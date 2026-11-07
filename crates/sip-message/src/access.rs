@@ -15,7 +15,9 @@ use bytes::Bytes;
 
 use crate::draft::{HeaderList, RequestDraft, ResponseDraft};
 use crate::error::SipParseError;
-use crate::header::{self, HeaderName, HeaderValue, ListHeader, SingleHeader, TokenSet, Uri};
+use crate::header::{
+    self, HeaderName, HeaderValue, ListHeader, SequenceHeader, SingleHeader, TokenSet, Uri,
+};
 use crate::header_table::HeaderTable;
 use crate::method::Method;
 use crate::parser::custom::request_uri::request_uri_refusal;
@@ -86,9 +88,22 @@ fn header_of<H: SingleHeader>(core: &MessageCore) -> Option<Result<H, SipParseEr
     Some(H::parse(&line.value))
 }
 
-/// The first value of the list header `H`, every line read.
-fn first_of<H: ListHeader>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
-    values_of::<H>(core).map(|values| values.into_iter().next()).transpose()
+/// The first value of `H`, read from the lines up to the one holding it.
+fn first_of<H: SequenceHeader>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
+    if let Some(read) = read_at_parse::<H>(core) {
+        return read.into_iter().next().map(Ok);
+    }
+    for line in core.headers.of(H::header_name()) {
+        match H::parse_line(&line.value) {
+            Err(e) => return Some(Err(e)),
+            Ok(values) => {
+                if let Some(first) = values.into_iter().next() {
+                    return Some(Ok(first));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The one set the lines of `H` make, `None` when the message carries none.
@@ -192,10 +207,11 @@ macro_rules! core_read_surface {
                 values_of::<H>(self.core())
             }
 
-            /// The first value of the list header `H`, or `None` when the
-            /// message carries none. Every line is read, so one that does
-            /// not read is the error, as [`list`](Self::list) states it.
-            pub fn first<H: ListHeader>(&self) -> Option<Result<H, SipParseError>> {
+            /// The first value of the list header `H` (one whose values stand
+            /// in order, not a token set), or `None` when the message carries
+            /// none. The lines up to the one holding it are read, and one of
+            /// them that does not read is the error; a later line is not read.
+            pub fn first<H: SequenceHeader>(&self) -> Option<Result<H, SipParseError>> {
                 first_of::<H>(self.core())
             }
 
@@ -349,7 +365,7 @@ impl SipMessage {
         values_of::<H>(self.core())
     }
 
-    pub fn first<H: ListHeader>(&self) -> Option<Result<H, SipParseError>> {
+    pub fn first<H: SequenceHeader>(&self) -> Option<Result<H, SipParseError>> {
         first_of::<H>(self.core())
     }
 

@@ -19,9 +19,10 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const EARLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const FINAL_DIFF: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
-/// The `cause` a request's Reason states.
+/// The `cause` a request's SIP Reason states (RFC 3326 §2).
 fn reason_cause(req: &sip_message::SipRequest) -> Option<String> {
-    let reason = req.first::<Reason>()?.expect("readable Reason");
+    let reasons = req.list::<Reason>().expect("readable Reason");
+    let reason = sip_message::header::reason_for(&reasons, "SIP")?;
     Some(reason.param("cause").and_then(ParamValue::as_str)?.to_string())
 }
 

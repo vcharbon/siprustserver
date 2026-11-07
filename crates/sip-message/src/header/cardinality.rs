@@ -28,12 +28,20 @@
 //!     .push(header::MaxForwards::new(70));
 //! ```
 //!
+//! ```compile_fail,E0277
+//! # use sip_message::{header, SipRequest};
+//! fn first_tag(msg: &SipRequest) {
+//!     let _ = msg.first::<header::Supported>(); // a token set has no first
+//! }
+//! ```
+//!
 //! ```
 //! # use sip_message::{header, Method, draft::RequestDraft, header::Uri, SipRequest};
 //! fn reads(msg: &SipRequest) {
 //!     let _ = msg.header::<header::From>();
 //!     let _ = msg.list::<header::Via>();
 //!     let _ = msg.token_set::<header::Supported>();
+//!     let _ = msg.first::<header::Reason>();
 //! }
 //! let _ = RequestDraft::new(Method::Options, Uri::sip("example.com"))
 //!     .set(header::MaxForwards::new(70))
@@ -100,6 +108,17 @@ impl Many for lines::Comma {}
 impl Many for lines::Opaque {}
 impl Many for lines::SetPerLine {}
 
+/// A list whose values stand in order, so its first one means something; a
+/// token set's lines are one set, with no first value.
+#[diagnostic::on_unimplemented(
+    message = "a token set has no first value: read it with `token_set`",
+    label = "a token set"
+)]
+pub trait Sequence: Many {}
+
+impl Sequence for lines::Comma {}
+impl Sequence for lines::Opaque {}
+
 /// A single-valued header: a message carries at most one line of it, read
 /// with `header`.
 pub trait SingleHeader: HeaderValue<Lines = lines::Single> {}
@@ -112,6 +131,11 @@ pub trait ListHeader: HeaderValue {}
 
 impl<H: HeaderValue> ListHeader for H where H::Lines: Many {}
 
+/// A list header whose values stand in order, its first read with `first`.
+pub trait SequenceHeader: ListHeader {}
+
+impl<H: HeaderValue> SequenceHeader for H where H::Lines: Sequence {}
+
 /// A list header whose lines are one token set, read whole with `token_set`.
 pub trait TokenSet: HeaderValue<Lines = lines::SetPerLine> {
     /// The one set the lines of a message make.
@@ -123,12 +147,40 @@ pub(crate) const fn agrees<L: Cardinality>(header: Listed) -> bool {
     matches!(L::FOLDING, Folding::Single) == is_listed(header)
 }
 
-/// The cardinality `$lines` declared for `$header`, held to the table at
-/// compile time: one that disagrees does not build, the two array lengths
-/// differing.
+/// A value type's or a kind's cardinality held to the table at compile time:
+/// one that disagrees does not build, the assertion naming it.
 macro_rules! held_to_the_table {
-    ($lines:ty, $header:expr) => {
-        const _: [(); 1] = [(); $crate::header::cardinality::agrees::<$lines>($header) as usize];
+    (value $ty:ty) => {
+        #[expect(
+            clippy::disallowed_macros,
+            reason = "evaluated at compile time, never at run time"
+        )]
+        const _: () = assert!(
+            $crate::header::cardinality::agrees::<<$ty as $crate::header::HeaderValue>::Lines>(
+                <$ty as $crate::header::HeaderValue>::HEADER
+            ),
+            concat!(
+                "the cardinality of ",
+                stringify!($ty),
+                " disagrees with header::SINGLE_VALUED"
+            )
+        );
+    };
+    (kind $ty:ty) => {
+        #[expect(
+            clippy::disallowed_macros,
+            reason = "evaluated at compile time, never at run time"
+        )]
+        const _: () = assert!(
+            $crate::header::cardinality::agrees::<<$ty as $crate::header::kind::HeaderKind>::Lines>(
+                <$ty as $crate::header::kind::HeaderKind>::HEADER
+            ),
+            concat!(
+                "the cardinality of kind ",
+                stringify!($ty),
+                " disagrees with header::SINGLE_VALUED"
+            )
+        );
     };
 }
 

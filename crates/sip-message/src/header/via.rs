@@ -7,7 +7,7 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::cardinality::{held_to_the_table, lines};
-use super::name::{HeaderId, HeaderName};
+use super::name::HeaderId;
 use super::params::{read_params, ParamReading, ParamValue, Params};
 use super::reading::Reading;
 use super::scan::{byte_at, scan_until, skip_ws, sub, sub_trimmed, token_end};
@@ -333,14 +333,12 @@ impl Via {
     }
 }
 
-held_to_the_table!(<Via as HeaderValue>::Lines, Listed::Known(HeaderId::Via));
+held_to_the_table!(value Via);
 
 impl HeaderValue for Via {
     type Lines = lines::Comma;
 
-    fn header_name() -> HeaderName {
-        HeaderName::Via
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::Via);
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         Self::read(raw, Reading::Strict)

@@ -10,9 +10,9 @@ use crate::sip_str::SipStr;
 
 use super::identity::is_call_id;
 use super::kind::TokenParamsKind;
-use super::name::HeaderName;
 use super::params::{read_params, ParamReading, ParamValue, Params};
 use super::scan::{byte_at, clamped, digits_end, scan_until, skip_ws, sub, token_end};
+use super::single_valued::Listed;
 use super::value::HeaderValue;
 use super::wire::Wire;
 
@@ -189,9 +189,7 @@ fn read_token_params(
 impl<K: TokenParamsKind> HeaderValue for TokenParamsHeader<K> {
     type Lines = K::Lines;
 
-    fn header_name() -> HeaderName {
-        K::name()
-    }
+    const HEADER: Listed = K::HEADER;
 
     const EMPTY_LINE_READS: bool = K::EMPTY_LINE_READS;
 

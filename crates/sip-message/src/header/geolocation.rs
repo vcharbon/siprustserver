@@ -7,7 +7,7 @@ use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
 use super::cardinality::{held_to_the_table, lines};
-use super::name::{HeaderId, HeaderName};
+use super::name::HeaderId;
 use super::name_addr::{AddrForm, NameAddr};
 use super::params::{read_params, ParamReading, Params};
 use super::scan::{clamped, digits_end};
@@ -35,14 +35,12 @@ impl Geolocation {
     }
 }
 
-held_to_the_table!(<Geolocation as HeaderValue>::Lines, Listed::Known(HeaderId::Geolocation));
+held_to_the_table!(value Geolocation);
 
 impl HeaderValue for Geolocation {
     type Lines = lines::Comma;
 
-    fn header_name() -> HeaderName {
-        HeaderName::Geolocation
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::Geolocation);
 
     /// The URI between angle brackets, read by the one URI reader, then the
     /// generic parameters: a display name or a bare URI is refused.
@@ -92,17 +90,12 @@ impl GeolocationError {
     }
 }
 
-held_to_the_table!(
-    <GeolocationError as HeaderValue>::Lines,
-    Listed::Known(HeaderId::GeolocationError)
-);
+held_to_the_table!(value GeolocationError);
 
 impl HeaderValue for GeolocationError {
     type Lines = lines::Single;
 
-    fn header_name() -> HeaderName {
-        HeaderName::GeolocationError
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::GeolocationError);
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = raw.trimmed();
@@ -143,17 +136,12 @@ impl GeolocationRouting {
     }
 }
 
-held_to_the_table!(
-    <GeolocationRouting as HeaderValue>::Lines,
-    Listed::Known(HeaderId::GeolocationRouting)
-);
+held_to_the_table!(value GeolocationRouting);
 
 impl HeaderValue for GeolocationRouting {
     type Lines = lines::Single;
 
-    fn header_name() -> HeaderName {
-        HeaderName::GeolocationRouting
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::GeolocationRouting);
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = raw.trimmed();

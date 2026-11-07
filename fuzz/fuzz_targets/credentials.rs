@@ -10,7 +10,8 @@
 use fuzz_lanes::on_lane_stack;
 use libfuzzer_sys::fuzz_target;
 use sip_message::header::{
-    Authorization, HeaderValue, ListHeader, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate,
+    Authorization, HeaderValue, ProxyAuthenticate, ProxyAuthorization, SequenceHeader,
+    WwwAuthenticate,
 };
 use sip_message::parser::custom::CustomParser;
 use sip_message::{HeaderName, SipMessage, SipParser};
@@ -44,7 +45,7 @@ fn request<H: HeaderValue>(value: &str) -> Result<SipMessage, sip_message::SipPa
     CustomParser::new().parse(raw.as_bytes())
 }
 
-fn round_trip<H: ListHeader>(line: &str) {
+fn round_trip<H: SequenceHeader>(line: &str) {
     let Ok(accepted) = request::<H>(line) else { return };
     let name = H::header_name();
     let vouched = matches!(name, HeaderName::Authorization | HeaderName::ProxyAuthorization);

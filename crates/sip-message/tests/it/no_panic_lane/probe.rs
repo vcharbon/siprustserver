@@ -7,7 +7,7 @@
 
 use std::fmt::Debug;
 
-use super::typed_read::{values, ReadLines};
+use super::typed_read::{own_reading, values, ReadLines};
 use super::{echo, readable};
 use sip_message::generators::cancel::generate_cancel;
 use sip_message::generators::generate_invalid_request;
@@ -189,6 +189,7 @@ where
     H::Lines: ReadLines<H>,
 {
     let label = H::header_name().to_string();
+    d.note(&label, &own_reading::<H>(msg));
     match values::<H>(msg) {
         Ok(all) => {
             for v in &all {

@@ -17,8 +17,8 @@ use crate::char_class::is_token_char;
 use crate::control_bytes::{bare_control_byte, is_control, Escapes};
 use crate::error::SipParseError;
 use crate::header::{
-    quoted_close, read_params, Authorization, HeaderId, HeaderName, HeaderValue as _, Met,
-    ParamReading,
+    quoted_close, read_params, second_line, Authorization, HeaderId, HeaderName, HeaderValue as _,
+    Met, ParamReading,
 };
 use crate::header_table::{HeaderTable, Ids};
 use crate::parser::SipParserLimits;
@@ -280,9 +280,7 @@ fn parse_line(
         return Ok(Line::Refused { error, echoed });
     }
     if singletons.met.repeated(&header) {
-        let error =
-            SipParseError::new(format!("Multiple {shown} headers (RFC 3261 §7.3.1 — one value)"));
-        return Ok(Line::Refused { error, echoed });
+        return Ok(Line::Refused { error: second_line(&header), echoed });
     }
     if let Some(known) = known {
         let gates = limits.value_gates;
