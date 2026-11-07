@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use sip_clock::Clock;
 use sip_message::header::{cause_key, retry_after_seconds, HeaderValue, SubscriptionState};
 use sip_message::sip_str::SipStr;
-use sip_message::sniff::{body, content_type_is, has_body, header_value, header_values, Identity};
+use sip_message::sniff::{body, header_value, header_values, session_description, Identity};
 
 use crate::mux::{Datagram, Dir, Side, WireTap};
 
@@ -216,7 +216,7 @@ impl CallWire {
 
 /// Whether `raw` carries a session description.
 fn has_sdp(raw: &[u8]) -> bool {
-    has_body(raw) && content_type_is(raw, "application/sdp")
+    session_description(raw).is_some()
 }
 
 /// Whether the request `id` is out of any dialog: its To has no tag.

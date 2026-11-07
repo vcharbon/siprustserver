@@ -88,13 +88,8 @@ fn by_rank(
     ordered.get(want.checked_sub(consumed)?).copied()
 }
 
-/// The two facts a [`BodyExpect`] answers to: the body's length, and whether its
-/// media type is a session description.
+/// The two facts a [`BodyExpect`] answers to: the body's length, and whether it
+/// carries a session description (`sdp()`).
 pub(super) fn body_facts(req: &SipRequest) -> (usize, bool) {
-    let is_sdp = !req.body().is_empty()
-        && req
-            .header::<sip_message::header::MediaType>()
-            .and_then(Result::ok)
-            .is_some_and(|media| media.token().to_ascii_lowercase().contains("sdp"));
-    (req.body().len(), is_sdp)
+    (req.body().len(), req.sdp().is_some())
 }

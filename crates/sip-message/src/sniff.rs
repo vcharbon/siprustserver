@@ -6,12 +6,14 @@
 //! Strict, allocation-free pre-parse *classifiers* (overload brake, dispatcher fast-path) live
 //! in [`crate::preparse`] and its sibling modules.
 
+mod description;
 mod except;
 mod identity;
 mod reliability;
 mod uri_facts;
 mod via_hops;
 mod via_stamp;
+pub use description::session_description;
 pub use except::{equal_except, header_row_spans, line_at, Except};
 pub use identity::{identity, Identity};
 pub use reliability::{rack_cseq, rack_rseq, require_has_100rel, rseq_of};
@@ -373,10 +375,8 @@ pub fn has_body(raw: &[u8]) -> bool {
     }
 }
 
-/// Whether the message's `Content-Type` (compact `c`) NAMES `media_type` — the
-/// read for a rule that judges a body only under the format it was declared as.
-/// Comparison is on the media type alone: the value's parameters
-/// (`;charset=…`, `;boundary=…`) neither hide it nor make another one match.
+/// Whether the message's `Content-Type` (compact `c`) NAMES `media_type`, its
+/// parameters aside: the read for a rule judging a body under its declared type.
 pub fn content_type_is(raw: &[u8], media_type: &str) -> bool {
     use crate::header::{HeaderValue, MediaType};
     header_rows_compact(raw, "Content-Type").iter().any(|row| {
