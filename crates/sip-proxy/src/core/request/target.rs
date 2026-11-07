@@ -92,11 +92,13 @@ impl ProxyCore {
             req.from().tag(),
             req.cseq().seq(),
         );
+        // An INVITE this hop answered itself is cancelled here (§9.2), its
+        // hop remembered or not: a 513 follows the forward attempt.
+        if let Some(answered) = self.cancel_refused(req, arrival).await {
+            self.metrics.record_cancel_lookup(CancelLookup::Hit);
+            return Err(answered);
+        }
         let Some(found) = self.cancel_lru.lookup(&key) else {
-            if let Some(answered) = self.cancel_refused(req, arrival).await {
-                self.metrics.record_cancel_lookup(CancelLookup::Hit);
-                return Err(answered);
-            }
             self.metrics.record_cancel_lookup(CancelLookup::Miss);
             if let Some(next) = &c.loose_route_next_hop {
                 return Ok(next.clone());

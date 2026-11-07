@@ -165,8 +165,7 @@ fn answer(invite: &str, tag: &str) -> String {
 /// Request-URI and the worker's Via and Contact does not: nothing reaches that
 /// callee, and the attempt fails at once into the failure consult, as a dead
 /// hop's does, with no timer elapsed. The consult's route fits and connects;
-/// the call ends on the caller's BYE, and is released with its CDR by its
-/// terminating timeout.
+/// the call ends on the caller's BYE and is released with its CDR.
 #[tokio::test(start_paused = true)]
 async fn a_b_leg_that_cannot_leave_draws_the_callers_final() {
     let consulted = Arc::new(Mutex::new(Vec::new()));

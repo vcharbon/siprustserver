@@ -50,9 +50,21 @@ impl ProxyCore {
     }
 
     /// A request whose forward the socket refused as past the largest UDP
-    /// payload: 513 (RFC 3261 §21.5.14), counted `message_too_large`.
+    /// payload: 513 (RFC 3261 §21.5.14), counted `message_too_large` once,
+    /// every later copy drawing the same 513 from
+    /// [`repeat_refusal`](Self::repeat_refusal) and its CANCEL a 200. An ACK is
+    /// dropped.
     pub(super) async fn reply_too_large(&self, req: &SipRequest, arrival: Arrival) -> RouteOutcome {
-        self.reply_reject(req, arrival, 513, "Message Too Large", &[], "message_too_large").await
+        if req.method() == Method::Ack {
+            self.metrics.record_reject("ack_not_answered");
+        } else {
+            let refused = self.refusals.refuse_too_large(req, arrival.src, self.now_ms());
+            if let Ok(resp) = refused {
+                self.send_own_final(req, arrival, &resp).await;
+            }
+            self.metrics.record_reject("message_too_large");
+        }
+        RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
 
     /// A Request-URI this hop cannot read: 400, counted `malformed_request_uri`.

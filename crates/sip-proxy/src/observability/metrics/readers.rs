@@ -36,6 +36,9 @@ impl ProxyMetrics {
     pub fn resolver_cache_size(&self) -> u64 {
         self.resolver_cache_size.load(Ordering::Relaxed)
     }
+    pub fn send_failures_total(&self) -> u64 {
+        self.send_failures.load(Ordering::Relaxed)
+    }
     pub fn reject_count(&self, reason: &str) -> u64 {
         self.rejects.get(&[reason])
     }

@@ -309,7 +309,10 @@ Via.
   send fails, counted as a send failure, and its sender gives up on its own timers. With it off it
   is delivered locally and the proxy answers it 482 Loop Detected, its source being the proxy's own
   address: the attempt fails at once and each reroute to that target costs one attempt
-  (`failover-harness`'s `dual_face::a_route_naming_the_proxy_*`). A call looping back through the
+  (`failover-harness`'s `dual_face::a_route_naming_the_proxy_*`). The guard compares the source
+  with each face's bound address and its IP-literal advertise only: a face bound to `0.0.0.0` whose
+  advertise is a name or a NAT address is not covered, and a loop through it runs until
+  Max-Forwards is spent (483). A call looping back through the
   platform reaches it through a hop on the external plane, as `b2bua-harness`'s
   `spiral_through_the_front_proxy` states it.
 - Silencing a next hop cuts the node's egress to callers through it (§10's chain of timers): the

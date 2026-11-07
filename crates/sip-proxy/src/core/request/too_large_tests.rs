@@ -36,22 +36,38 @@ fn filled(msg: &SipMessage) -> SipMessage {
     parse_msg(&filled)
 }
 
-/// The caller's INVITE draws a 513 on the external face, and so does its
-/// retransmission; nothing reaches the internal plane.
+/// The caller's INVITE draws a 513 on the external face, and nothing reaches
+/// the internal plane. Its retransmission draws the same 513 with no second
+/// forward, and its CANCEL a 200 from the proxy, the INVITE's UAS (RFC 3261
+/// §9.2).
 #[tokio::test]
 async fn an_invite_that_cannot_leave_with_the_hops_lines_is_answered_513_on_its_face() {
     let fx = dual_face_core();
     let invite = filled(&caller_invite("too-large"));
+    let mut answers = Vec::new();
     for copy in ["first", "retransmission"] {
         let outcome = fx.core.route_request(&invite, caller_src(), Face::External).await;
         assert_eq!(outcome.decision, RoutingDecisionKind::Reject, "{copy}");
         let sent = fx.take_sent();
         let [(face, dst, bytes)] = sent.as_slice() else { panic!("{copy}: one answer: {sent:?}") };
         assert_eq!((*face, *dst), ("ext", caller_src()), "{copy}");
-        let text = String::from_utf8_lossy(bytes);
+        let text = String::from_utf8_lossy(bytes).to_string();
         assert!(text.starts_with("SIP/2.0 513 Message Too Large\r\n"), "{copy}: {text}");
+        answers.push(text);
     }
-    assert_eq!(fx.metrics().reject_count("message_too_large"), 2);
+    assert_eq!(answers[0], answers[1], "every copy draws the same 513");
+    assert_eq!(fx.metrics().send_failures_total(), 1, "the copy is not forwarded again");
+    assert_eq!(fx.metrics().reject_count("message_too_large"), 1);
+
+    let cancel = String::from_utf8_lossy(caller_invite("too-large").image())
+        .replacen("INVITE sip:", "CANCEL sip:", 1)
+        .replacen("CSeq: 1 INVITE", "CSeq: 1 CANCEL", 1);
+    fx.core.route_request(&parse_msg(&cancel), caller_src(), Face::External).await;
+    let sent = fx.take_sent();
+    let [(face, dst, bytes)] = sent.as_slice() else { panic!("one answer: {sent:?}") };
+    assert_eq!((*face, *dst), ("ext", caller_src()));
+    let text = String::from_utf8_lossy(bytes);
+    assert!(text.starts_with("SIP/2.0 200 OK\r\n") && text.contains("CSeq: 1 CANCEL"), "{text}");
 }
 
 /// A worker's INVITE arriving on the internal face is answered there.

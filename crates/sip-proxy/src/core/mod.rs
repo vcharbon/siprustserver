@@ -268,7 +268,8 @@ impl ProxyCore {
 
     /// Whether `src` is one of this proxy's own addresses: a face's bind or its
     /// IP-literal advertise. A request from there was forwarded by this proxy
-    /// and came back to it.
+    /// and came back to it. A face bound to an unspecified address with a name
+    /// or NAT advertise names no source here (ADR-0056, "Residuals").
     pub(super) fn is_own_source(&self, src: SocketAddr) -> bool {
         let names = |endpoint: &Arc<dyn UdpEndpoint>, at: &ProxyAddr| {
             endpoint.local_addr() == src || at.to_socket_addr() == Some(src)

@@ -210,16 +210,12 @@ impl ProxyCore {
         };
 
         // ── A copy of a refused request (§8.2.7) ────────────────────────────
-        // It draws the refusal's 503 and is neither counted as a new call
+        // It draws the refusal's final and is neither counted as a new call
         // nor judged again: a gate or a cap that cleared since must not admit
-        // a transaction this hop already refused. A worker's request is never
-        // refused (it bypasses the gate and goes to its Request-URI), so it
-        // never looks.
-        if rtx_hit.is_none()
-            && !c.worker_outbound
-            && method != Method::Ack
-            && method != Method::Cancel
-        {
+        // a transaction this hop already refused, and a request too long to
+        // forward is not tried again. A copy of a 513 holds a retransmission
+        // memo too, and a worker's request may draw one, so both look.
+        if method != Method::Ack && method != Method::Cancel {
             if let Some(repeated) = self.repeat_refusal(req, arrival).await {
                 return repeated;
             }
