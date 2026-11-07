@@ -46,7 +46,7 @@ macro_rules! plain_counters {
 plain_counters! {
     UNEXPLAINED_ACKS = (
         "b2bua_unexplained_acks_total",
-        "ACKs of an INVITE the call record holds no final sent for, on a call no other owner served: ignored, the dialog untouched (a re-INVITE refused statelessly before it reached the call, or a live copy's write on its way)",
+        "ACKs the dialog gate dropped, the dialog untouched: each names an INVITE the call record holds no final sent for, on a call no other owner served. One increment is one such ACK, not a defect and not a lost write: a re-INVITE refused statelessly before it reached the call, a live copy's write on its way, a returned primary's lost round (the callee's repeat of its 2xx ends that call), or the caller's ACK of her first INVITE ahead of the answer's write",
     ) => unexplained_acks, bump_unexplained_ack, unexplained_acks_total;
     MESSAGE_CAP_LIFETIME_CROSSED = (
         "b2bua_message_cap_lifetime_crossed_total",

@@ -542,8 +542,9 @@ refused 503 without Retry-After, the decision never asked again.
 
 **Evidence** (ADR-0055 §4, `rules::evidence`): a message proving the call took a
 step its record never saw — a final above its dialog's sequence or at a number
-this side re-used, an ACK of an INVITE the record holds unanswered, a callee's
-BYE on an early dialog, a 2xx naming a leg the record lacks. It is owed what RFC
+this side re-used, an ACK of an INVITE the record holds unanswered on a call a
+takeover copy served (on any other the dialog gate drops and counts it), a
+callee's BYE on an early dialog, a 2xx naming a leg the record lacks. It is owed what RFC
 3261 requires and the call is ended over every dialog the record or the evidence
 names. _Avoid_: "lost round" (its INVITE-only predecessor).
 
@@ -1577,7 +1578,8 @@ How much a cell may deviate, measured from its run (ADR-0055 §11).
 **Guaranteed**: level `applied`, a kill of a cluster whose every call was
 backed and bootstrapped at every turn up to the strike, no outbox entry hitting
 the cap, no replication stream or replica tampered with: no row opens, the
-evidence rule ends no call. **Degraded**: level `applied`, any other case,
+evidence rule ends no call, but for a re-INVITE a proxy refuses after the kill,
+whose ACK the copy reads as evidence (ADR-0055 §11). **Degraded**: level `applied`, any other case,
 every row but the off-only ones. **Off**: level `off`, every row.
 _Avoid_: "transparent" for Guaranteed (the transparent matrix is ADR-0013's).
 

@@ -367,13 +367,16 @@ transparency is not the goal; the window is the transport delay.
 
 ### 4. Evidence the call record cannot explain: one rule, any method
 
-One rule, in `b2bua-core`, fires on any node. On a call one node served,
-triggers 3 and 6 and an early BYE of trigger 4 do not fire, and only a broken or
-forged peer can trigger the others. It is a stage of its own, read before every
-rule of the chain (user ruling): no service rule sees or pre-empts a message
-only a lost write explains, and whether another owner served the call reaches
-that stage, and the dialog gate in front of it for trigger 3, never a rule's
-context. On a single node it changes nothing. Its triggers are closed:
+One rule, in `b2bua-core`, fires on any node. On a call no failure touched the
+record is never behind the wire: triggers 3 and 6 and the early BYE of trigger 4
+do not fire, and only a broken or forged peer can trigger the others, ending the
+call. A node restarted behind what it sent reads as no other owner having served
+the call, and an honest peer's final can trigger 1 there
+(`reinvite_round_not_yet_replicated.rs`). It is a stage of its own, read before
+every rule of the chain (user ruling): no service rule sees or pre-empts a
+message only a lost write explains, and whether another owner served the call
+reaches that stage, and the dialog gate in front of it for trigger 3, never a
+rule's context. Its triggers are closed:
 
 1. a final in a dialog whose CSeq is strictly above the dialog's local sequence,
    any method;
@@ -387,8 +390,13 @@ context. On a single node it changes nothing. Its triggers are closed:
    it proves nothing: the final it answers may be a stateless refusal of a
    re-INVITE that never reached the call, which leaves the session unchanged
    (RFC 3261 §14.1, ADR-0054 §3), or the copy that answered is live and its
-   write is on its way. The dialog gate drops it, the dialog untouched, and
-   counts it (`b2bua_unexplained_acks_total`). On a served call the two cannot
+   write is on its way: once it arrives a copy of the 2xx draws her ACK again.
+   If it never does, at 64·T1 the copy BYEs both parties, or sheds the call to
+   the callee's own BYE (§13.3.1.4), whichever falls first, and the primary ends
+   the call on that BYE or at its next keepalive, one CDR written
+   (`reinvite_2xx_acked_while_the_copy_stalls.rs`). The dialog gate drops the
+   ACK, the dialog untouched, and counts it
+   (`b2bua_unexplained_acks_total`). On a served call the two cannot
    be told apart, so a re-INVITE the proxy refused, then its ACK, ends the call
    with a clean BYE (user ruling; `reinvite_refused_by_proxy.rs`). A primary
    returned behind what its previous run sent, no copy having written the call,
@@ -709,7 +717,9 @@ the re-anchor deadband of each other.
     surviving node's loses nothing); the test
     tampered with no replication stream or replica; the incident is a kill. The cell is perfect: no row of any kind opens,
     every party goal is met, the evidence rule (§4) ends no call, and the CDR
-    count is §5's.
+    count is §5's. A re-INVITE a proxy refuses after the kill can still end
+    the call through the copy, §4's trigger 3 and no shape of the sweep
+    (`on_the_copy_a_refused_reinvites_ack_ends_the_call_cleanly`).
   - **Degraded**: level `applied`, any other case: every row below opens.
   - **Off**: level `off`: Degraded's rows, and the off-only rows a user
     ruling adds.

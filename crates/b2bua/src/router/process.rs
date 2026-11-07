@@ -375,10 +375,11 @@ async fn resident_or_materialised(
 }
 
 /// Whether `event` is an ACK or a BYE request. An ACK reaching the router
-/// acknowledges a 2xx: the transaction layer absorbs the ACK of a non-2xx on
-/// the INVITE's own transaction (RFC 3261 §17.2.1). A BYE ends the dialog it
-/// names, early or confirmed (§15). After either, a provisional to the INVITE
-/// tells its sender nothing.
+/// proves its sender holds a final: a 2xx, or a refusal no transaction here
+/// holds, since the transaction layer absorbs the ACK of a non-2xx on the
+/// INVITE's own transaction (RFC 3261 §17.2.1). A BYE ends the dialog it names,
+/// early or confirmed (§15). After either, a provisional to the INVITE tells
+/// its sender nothing.
 fn answered(event: &CallEvent) -> bool {
     matches!(event, CallEvent::Sip { message, .. }
         if matches!(message.as_ref(), SipMessage::Request(r)

@@ -45,7 +45,7 @@ use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use crate::config::B2buaConfig;
 use crate::rules::actions::possibly_confirmed;
-use crate::rules::evidence::holds_no_final;
+use crate::rules::evidence::acks_unanswered_invite;
 use crate::rules::method_table::OnEnding;
 
 /// The gate's reading of a message.
@@ -106,7 +106,7 @@ pub fn verdict(
     let CallEvent::Sip { message, .. } = event else { return Verdict::Pass(Resolved::default()) };
     match message.as_ref() {
         SipMessage::Response(resp) => response_verdict(call, leg_id, resp, config),
-        SipMessage::Request(req) if acks_unanswered_invite(call, leg_id, req) && !copy_served() => {
+        SipMessage::Request(req) if acks_no_final_held(call, leg_id, req) && !copy_served() => {
             Verdict::UnexplainedAck
         }
         SipMessage::Request(req) => request_verdict(call, leg_id, req),
@@ -212,30 +212,19 @@ pub fn admission(dialog: Option<&Dialog>, method: &Method) -> Admission {
 /// Whether `ack`, an ACK on `leg_id` naming a dialog by its To-tag, names
 /// the caller's INVITE while the record holds no final sent for it.
 fn acks_unanswered_caller(call: &Call, leg_id: &str, ack: &SipRequest) -> bool {
-    *ack.method() == Method::Ack
-        && ack.to().tag().is_some()
-        && leg_id == call.a_leg.leg_id
-        && ack.cseq().seq() == call.a_leg_invite.cseq
-        && call.a_leg.invite_final_sent().is_none()
+    acks_unanswered_invite((&call.a_leg, call.a_leg_invite.cseq), leg_id, ack, || None)
 }
 
-/// Whether `ack`, an ACK on `leg_id` naming a dialog by its To-tag, names an
-/// INVITE on that leg for which the record holds no final sent: the caller's own,
-/// or a later one on the dialog it names (ADR-0055 §4's trigger 3).
-fn acks_unanswered_invite(call: &Call, leg_id: &str, ack: &SipRequest) -> bool {
-    if *ack.method() != Method::Ack || ack.to().tag().is_none() {
-        return false;
-    }
-    if leg_id == call.a_leg.leg_id && ack.cseq().seq() == call.a_leg_invite.cseq {
-        return acks_unanswered_caller(call, leg_id, ack);
-    }
-    let Some(leg) = call::helpers::find_leg(call, leg_id) else { return false };
-    let Some(dialog) = leg.dialogs.of_request(ack.to().tag(), ack.from().tag()) else {
-        return false;
-    };
-    let id = dialog.id();
-    let relayed_to = call::helpers::relay_peer_dialog(call, leg_id, Some(&id)).map(|(_, d)| d);
-    holds_no_final(dialog, relayed_to, i64::from(ack.cseq().seq()))
+/// Whether `ack` names an INVITE on `leg_id` for which the record holds no final
+/// sent, on the dialog it names (ADR-0055 §4's trigger 3).
+fn acks_no_final_held(call: &Call, leg_id: &str, ack: &SipRequest) -> bool {
+    acks_unanswered_invite((&call.a_leg, call.a_leg_invite.cseq), leg_id, ack, || {
+        let leg = call::helpers::find_leg(call, leg_id)?;
+        let dialog = leg.dialogs.of_request(ack.to().tag(), ack.from().tag())?;
+        let id = dialog.id();
+        let relayed_to = call::helpers::relay_peer_dialog(call, leg_id, Some(&id));
+        Some((dialog, relayed_to.map(|(_, d)| d)))
+    })
 }
 
 /// Whether `ack`, an ACK of the caller's INVITE, names a caller dialog held

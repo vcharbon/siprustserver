@@ -1,6 +1,7 @@
 //! Evidence the call record cannot explain (ADR-0055 §4): a message that
-//! proves the call took a step its record never saw. On a single node only a
-//! broken or forged peer sends one. The triggers are closed:
+//! proves the call took a step its record never saw. On a call no failure
+//! touched only a broken or forged peer sends one; a node restarted behind what
+//! it sent reads one from an honest peer. The triggers are closed:
 //!
 //! 1. a final in a dialog whose CSeq is above the dialog's local sequence,
 //!    any method, no request record answering it (`evidence-final`);
@@ -29,8 +30,9 @@
 //! which no transaction here absorbs (§17.1.1.2).
 
 use call::{
-    CallModelState, CdrEventType, Dialog, DialogState, Direction, LegState, TerminationCause,
+    CallModelState, CdrEventType, Dialog, DialogState, Direction, Leg, LegState, TerminationCause,
 };
+use sip_message::{Method, SipRequest};
 
 use b2bua_sdk::model::{
     LegEnd, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, CORE_LAYER,
@@ -155,29 +157,42 @@ fn reused_cseq(dialog: &call::Dialog, cseq: i64, branch: Option<&str>) -> bool {
     open_invite || dialog.requests.iter().any(|r| r.awaits_final() && other(r))
 }
 
-/// Trigger 3: an ACK naming a dialog by its To-tag and an INVITE of the leg
-/// it arrives on for which the record holds no final sent — the caller's
-/// INVITE unanswered, a re-INVITE the record never saw, or one it holds open
-/// (relayed and untaken).
+/// Trigger 3's rule, on what the dialog gate resolved.
 fn ack_of_unanswered_invite(ctx: &RuleContext) -> bool {
-    let (Some(req), Some(leg)) = (ctx.request(), ctx.source_leg()) else { return false };
-    let cseq = i64::from(req.cseq().seq());
-    let a_leg = ctx.call.a_leg();
-    if leg.leg_id == a_leg.leg_id && cseq == i64::from(ctx.call.a_leg_invite().cseq) {
-        return a_leg.invite_final_sent().is_none() && req.to().tag().is_some();
-    }
-    ctx.dialog().is_some_and(|dialog| holds_no_final(dialog, ctx.peer_dialog(), cseq))
+    let Some(req) = ctx.request() else { return false };
+    let caller = (ctx.call.a_leg(), ctx.call.a_leg_invite().cseq);
+    acks_unanswered_invite(caller, ctx.source_leg_id, req, || {
+        ctx.dialog().map(|dialog| (dialog, ctx.peer_dialog()))
+    })
 }
 
-/// Whether confirmed `dialog` holds no final sent for the INVITE of CSeq `cseq`
-/// its peer sent: above the last CSeq it knows, or relayed on `relayed_to`, the
-/// other leg's dialog, with no final settling it there.
-pub(crate) fn holds_no_final(dialog: &Dialog, relayed_to: Option<&Dialog>, cseq: i64) -> bool {
-    dialog.state == DialogState::Confirmed
-        && (dialog.peer_cseq.is_none_or(|last| cseq > last)
-            || relayed_to
-                .and_then(call::helpers::invite_relay)
-                .is_some_and(|r| r.inbound_cseq == cseq))
+/// Trigger 3: `ack` names a dialog by its To-tag and an INVITE of the leg it
+/// arrives on for which the record holds no final sent: the caller's INVITE
+/// unanswered (`caller`: her leg and that INVITE's CSeq), a re-INVITE the record
+/// never saw, or one it holds open (relayed and untaken). `named` gives the
+/// dialog the ACK names and the other leg's dialog it would be relayed on; with
+/// none given, only the caller's INVITE can answer true.
+pub(crate) fn acks_unanswered_invite<'d>(
+    caller: (&Leg, u32),
+    leg_id: &str,
+    ack: &SipRequest,
+    named: impl FnOnce() -> Option<(&'d Dialog, Option<&'d Dialog>)>,
+) -> bool {
+    if *ack.method() != Method::Ack || ack.to().tag().is_none() {
+        return false;
+    }
+    let (a_leg, caller_cseq) = caller;
+    if leg_id == a_leg.leg_id && ack.cseq().seq() == caller_cseq {
+        return a_leg.invite_final_sent().is_none();
+    }
+    let cseq = i64::from(ack.cseq().seq());
+    named().is_some_and(|(dialog, relayed_to)| {
+        dialog.state == DialogState::Confirmed
+            && (dialog.peer_cseq.is_none_or(|last| cseq > last)
+                || relayed_to
+                    .and_then(call::helpers::invite_relay)
+                    .is_some_and(|r| r.inbound_cseq == cseq))
+    })
 }
 
 /// Trigger 4, on a call another owner may have answered: a BYE from the

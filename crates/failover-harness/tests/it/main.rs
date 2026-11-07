@@ -87,6 +87,7 @@ mod reclaim_takes_the_copys_consult;
 mod reclaim_takes_the_copys_dialled_invite;
 mod reclaim_waits_for_a_routable_endpoint;
 mod reinvite_2xx_acked_through_the_primary;
+mod reinvite_2xx_acked_while_the_copy_stalls;
 mod reinvite_answer_failover;
 mod reinvite_refused_by_proxy;
 mod reinvite_round_gives_up_after_takeover;
