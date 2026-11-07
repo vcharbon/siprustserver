@@ -50,3 +50,29 @@ fn a_method_compares_by_its_spelling() {
     assert!(Method::Invite != "invite");
     assert!(Method::from_wire("invite") != "INVITE");
 }
+
+/// The SIP-Version is case-insensitive and is sent in upper case (§7.1): a
+/// request or response written `sip/2.0` reads, and its render, a relay's
+/// included, states `SIP/2.0`.
+#[test]
+fn a_version_in_any_case_reads_and_renders_in_upper_case() {
+    let lower = String::from_utf8(request("INVITE", "INVITE")).unwrap().replacen(
+        " SIP/2.0\r\n",
+        " sip/2.0\r\n",
+        1,
+    );
+    let msg = CustomParser::new().parse(lower.as_bytes()).expect("a lower-case version reads");
+    let wire = String::from_utf8(serialize(&msg)).unwrap();
+    assert!(wire.starts_with("INVITE sip:bob@example.com SIP/2.0\r\n"), "{wire}");
+
+    let response = "sIp/2.0 200 OK\r\n\
+         Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-case\r\n\
+         From: <sip:alice@example.com>;tag=a1\r\n\
+         To: <sip:bob@example.com>;tag=b1\r\n\
+         Call-ID: case-1@192.0.2.10\r\n\
+         CSeq: 1 OPTIONS\r\n\
+         Content-Length: 0\r\n\r\n";
+    let msg = CustomParser::new().parse(response.as_bytes()).expect("a mixed-case version reads");
+    assert!(matches!(&msg, SipMessage::Response(r) if r.status() == 200));
+    assert!(String::from_utf8(serialize(&msg)).unwrap().starts_with("SIP/2.0 200 OK\r\n"));
+}
