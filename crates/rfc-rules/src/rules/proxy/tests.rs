@@ -12,6 +12,8 @@ use super::{
     StrictRouteShuffleOnSend, PROXY_100_GRACE_US,
 };
 
+mod strict_route_maddr;
+
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 

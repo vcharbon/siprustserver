@@ -199,11 +199,7 @@ impl Obligation for MidDialogRoute {
                 .unwrap_or_default();
             let first_bad_hop = if loose {
                 (!sent.is_empty() && sent.len() == set.len())
-                    .then(|| {
-                        sent.iter()
-                            .zip(set.iter())
-                            .position(|(a, e)| (&a.host, a.port) != (&e.host, e.port))
-                    })
+                    .then(|| sent.iter().zip(set.iter()).position(|(a, e)| !a.same_address(e)))
                     .flatten()
             } else {
                 None
@@ -291,7 +287,7 @@ impl Obligation for MidDialogWireDestination {
                 out.push(finding(Decision::Undecidable("no wire destination at this vantage")));
                 continue;
             };
-            if sent_to == (target.host.as_str().to_string(), target.port) {
+            if sent_to == (target.next_hop_host.clone(), target.port) {
                 out.push(finding(Decision::Compliant));
                 continue;
             }
@@ -302,7 +298,7 @@ impl Obligation for MidDialogWireDestination {
                 method: req.method.to_string(),
                 sent_to: format!("{}:{}", sent_to.0, sent_to.1),
                 target_uri: target.uri,
-                target_host: target.host,
+                target_host: target.next_hop_host,
                 target_port: target.port,
                 from_route,
             })));
