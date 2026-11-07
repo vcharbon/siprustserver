@@ -63,6 +63,7 @@ pub use credentials::Credentials;
 pub use equivalence::{canonical_header_items, header_forms_equivalent};
 pub use geolocation::{Geolocation, GeolocationError, GeolocationRouting};
 pub use id::HeaderKey;
+pub(crate) use identity::is_call_id;
 pub use identity::{CSeq, CallId, RAck};
 pub use item_separator::ItemSeparator;
 pub use name::{HeaderId, HeaderName};

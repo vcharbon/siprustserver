@@ -1,6 +1,6 @@
 //! The scalar identity headers: [`CallId`], [`CSeq`] and [`RAck`].
 
-use crate::char_class::is_token_char;
+use crate::char_class::{is_token_char, is_word_char};
 use crate::error::SipParseError;
 use crate::method::Method;
 use crate::sip_str::SipStr;
@@ -48,6 +48,15 @@ fn method_token(field: &str, header: &str) -> Result<Method, SipParseError> {
         return Err(SipParseError::new(format!("{header} method is not a token: {field:?}")));
     }
     Ok(Method::from_wire(field))
+}
+
+/// `callid = word [ "@" word ]` (RFC 3261 §25.1).
+pub(crate) fn is_call_id(value: &str) -> bool {
+    let word = |w: &str| !w.is_empty() && w.bytes().all(is_word_char);
+    match value.split_once('@') {
+        Some((local, host)) => word(local) && word(host),
+        None => word(value),
+    }
 }
 
 /// The dialog's Call-ID — an opaque token compared byte-exactly.

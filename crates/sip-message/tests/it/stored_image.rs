@@ -48,11 +48,32 @@ fn a_value_ingress_would_refuse_reads() {
         "Expires: soon",
         "Session-Expires: soon",
         "Max-Forwards: 70",
-        "Subject: he said \"hi",
+        "Require: 100rel, x y",
         "Authorization: Digest realm",
     ] {
         only_the_stored_read_takes(&bye_with(line));
     }
+}
+
+/// A final of 300 or more names no dialog target, so ingress drops a Contact
+/// entry of one that does not read: the stored read drops the same, and a
+/// takeover sees the contacts the first reader saw.
+#[test]
+fn a_redirect_reads_back_the_contacts_ingress_read() {
+    let image = format!(
+        "SIP/2.0 302 Moved Temporarily\r\nVia: {VIA}\r\n\
+         From: <sip:alice@example.com>;tag=a1\r\nTo: <sip:bob@example.com>;tag=b1\r\n\
+         Call-ID: stored@192.0.2.10\r\nCSeq: 1 INVITE\r\n\
+         Contact: <sip:carol@192.0.2.30>, <sip:dave@>\r\nContent-Length: 0\r\n\r\n"
+    );
+    let contacts = |msg: SipMessage| match msg {
+        SipMessage::Response(r) => format!("{:?}", r.contacts()),
+        SipMessage::Request(_) => panic!("a response"),
+    };
+    let ingress = contacts(CustomParser::new().parse(image.as_bytes()).expect("ingress reads it"));
+    let stored = contacts(read_stored(image.as_bytes()).expect("it reads back"));
+    assert!(!ingress.contains("dave"), "ingress drops the entry that does not read: {ingress}");
+    assert_eq!(stored, ingress, "the stored read sees the contacts ingress saw");
 }
 
 #[test]

@@ -21,7 +21,7 @@ use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 pub(crate) mod compact_forms;
 pub mod contact_entries;
 mod dialog_contact;
-pub(crate) mod dialog_ids;
+mod dialog_ids;
 pub mod extract_fields;
 pub mod header_index;
 pub mod headers;
@@ -33,6 +33,7 @@ pub mod scanner;
 pub mod start_line;
 pub mod structured_headers;
 mod top_via;
+mod vouched;
 
 use extract_fields::{extract_request_fields, extract_response_fields, ExtractMode, RequestEager};
 use header_index::HeaderIndex;

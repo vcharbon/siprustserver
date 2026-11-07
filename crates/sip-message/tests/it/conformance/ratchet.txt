@@ -1,21 +1,12 @@
 # Rows known to fail: the row's name, then the area of the stack that owns its fix.
 # The list only shrinks: a listed row that no longer fails fails the suite.
 
-must/3261-12.1.1-2xx-invite-no-contact one-reader
-must/3261-8.1.1-no-max-forwards one-reader
-must/3261-8.1.1.8-invite-no-contact one-reader
-must/3515-2.1-2xx-refer-no-contact one-reader
-must/3515-2.1-refer-no-contact one-reader
-must/6665-8.1-2xx-subscribe-no-contact one-reader
-must/6665-8.1-notify-no-contact one-reader
-must/6665-8.1-subscribe-no-contact one-reader
 abnf-long/allow-events/compact-name case-and-framing
 abnf-long/event/compact-name case-and-framing
 abnf-long/refer-to/compact-name case-and-framing
 abnf-long/referred-by/compact-name case-and-framing
 abnf-long/request-line/version-case case-and-framing
 abnf-long/status-line/version-case case-and-framing
-abnf-long/subject/subject-quote case-and-framing
 abnf/allow-events/compact-name case-and-framing
 abnf/event/compact-name case-and-framing
 abnf/refer-to/compact-name case-and-framing
@@ -24,7 +15,6 @@ abnf/request-line/version-case case-and-framing
 abnf/status-line/version-case case-and-framing
 frozen/request-line/version-case case-and-framing
 must/3261-25.1-quoted-pair-where-no-quoted-string case-and-framing
-must/3261-25.1-subject-unbalanced-quote case-and-framing
 must/3261-7.1-sipfrag-version-lower case-and-framing
 must/3261-7.1-version-lower-request case-and-framing
 must/3261-7.1-version-lower-response case-and-framing

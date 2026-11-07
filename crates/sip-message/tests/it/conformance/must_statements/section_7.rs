@@ -144,6 +144,11 @@ pub(super) fn rows() -> Vec<Row> {
             "3261-25.1-subject-unbalanced-quote",
             options().add("Subject: The caller said \"hello"),
         ),
+        accept("3261-25.1-subject-inch-mark", options().add("Subject: a 5\" floppy")),
+        accept(
+            "3261-25.1-subject-backslash-before-a-fold",
+            options().add("Subject: C:\\\r\n and more"),
+        ),
     ]);
     rows
 }

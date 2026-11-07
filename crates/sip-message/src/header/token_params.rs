@@ -8,13 +8,13 @@ use std::marker::PhantomData;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use super::identity::is_call_id;
 use super::kind::TokenParamsKind;
 use super::name::HeaderName;
 use super::params::{read_params, ParamReading, ParamValue, Params};
 use super::scan::{byte_at, clamped, digits_end, scan_until, skip_ws, sub, token_end};
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
-use crate::parser::custom::dialog_ids::is_call_id;
 
 /// A token followed by `;`-parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]

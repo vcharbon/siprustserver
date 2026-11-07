@@ -12,13 +12,14 @@ use super::contact_entries::{
     contact_entry_spans, read_contact_entry, read_contact_entry_lenient, ContactEntry,
 };
 use super::dialog_contact::{can_establish_dialog, dialog_contact_refusal};
-use super::dialog_ids::{is_call_id, read_address, tag_count, tag_refusal, uri_repeat_refusal};
+use super::dialog_ids::{read_address, tag_count, tag_refusal, uri_repeat_refusal};
 use super::header_index::HeaderIndex;
 use super::request_uri::read_request_uri;
 use super::routes::read_routes;
 use super::structured_headers::{parse_cseq, top_level_comma_entries};
 use super::top_via;
 use crate::error::SipParseError;
+use crate::header::is_call_id;
 use crate::header::{self, HeaderName, HeaderValue, Reading, Uri};
 use crate::method::Method;
 use crate::parser::{Exemption, SipParserLimits};
@@ -219,7 +220,9 @@ pub(super) fn extract_identity(
 /// The message's Contact set, folded over comma-lists and repeated lines.
 /// `Contact: *` must stand alone, which is settled over every entry before any
 /// is parsed; `contact_reading` says whether a misplaced wildcard or an
-/// unreadable entry refuses the message or is dropped. An empty line or entry
+/// unreadable entry refuses the message or is dropped, on wire and stored bytes
+/// alike. A strict set read from stored bytes keeps an unreadable entry, read
+/// leniently. An empty line or entry
 /// is unreadable (RFC 3261 §25.1), and on wire bytes so is a URI with a
 /// parameter written twice that `limits` does not exempt.
 fn read_contacts(
@@ -259,11 +262,13 @@ fn read_contacts(
         match entry {
             ContactEntry::Wildcard => {}
             ContactEntry::Readable(contact) => contact_list.push(*contact),
+            // A lenient set drops the entry on wire and stored bytes alike, so
+            // both readers see one set.
+            ContactEntry::Unreadable { .. } if !strict => {}
             // The grammar holds on wire bytes only.
             ContactEntry::Unreadable { .. } if !wire => {
                 contact_list.push(read_contact_entry_lenient(span));
             }
-            ContactEntry::Unreadable { .. } if !strict => {}
             ContactEntry::Unreadable { reason } => {
                 return Err(SipParseError::new(format!("Strict Contact: {reason} (\"{span}\")")));
             }
@@ -298,6 +303,11 @@ pub fn extract_request_fields(
     // of itself: a URI that does not read is no request's target, whoever
     // built the request.
     let request_uri = read_request_uri(request_uri)?;
+    if let Some(param) = request_uri.repeated_params().next().filter(|_| wire) {
+        return Err(SipParseError::new(format!(
+            "Malformed Request-URI: URI parameter {param:?} written twice (RFC 3261 §19.1.1)"
+        )));
+    }
 
     // §8.1.1: a request states its originator's tag and its hop count.
     if wire && common.from().tag().is_none() {

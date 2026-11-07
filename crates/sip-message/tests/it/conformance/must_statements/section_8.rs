@@ -16,8 +16,9 @@ pub(super) fn rows() -> Vec<Row> {
         dropped_because("3261-8.1.1-no-cseq", "CSeq", options().with("cseq", "X-CSeq: a")),
         dropped_because("3261-8.1.1-no-via", "Via", options().with("via", "X-Via: a")),
         // §8.1.1, ADR-0001: no RFC 2543 compatibility, so no fallback either.
-        answered(
+        answered_because(
             "3261-8.1.1-no-max-forwards",
+            "Max-Forwards",
             options().with("max-forwards", "X-Max-Forwards: 70"),
         ),
         // §8.1.1.3: a From carries a tag.
@@ -125,13 +126,25 @@ pub(super) fn rows() -> Vec<Row> {
             options().with("via", "Via: SIP/2.0/UDP 192.0.2.10;branch=z9hG4bK-a garbage;rport"),
         ),
         // §8.1.1.8, §12.1: one Contact on what can establish a dialog.
-        answered("3261-8.1.1.8-invite-no-contact", without_contact("INVITE")),
-        answered("6665-8.1-subscribe-no-contact", without_contact("SUBSCRIBE")),
-        answered("6665-8.1-notify-no-contact", without_contact("NOTIFY")),
-        answered("3515-2.1-refer-no-contact", without_contact("REFER")),
-        dropped("3261-12.1.1-2xx-invite-no-contact", response_without_contact("INVITE")),
-        dropped("6665-8.1-2xx-subscribe-no-contact", response_without_contact("SUBSCRIBE")),
-        dropped("3515-2.1-2xx-refer-no-contact", response_without_contact("REFER")),
+        answered_because("3261-8.1.1.8-invite-no-contact", "Contact", without_contact("INVITE")),
+        answered_because("6665-8.1-subscribe-no-contact", "Contact", without_contact("SUBSCRIBE")),
+        answered_because("6665-8.1-notify-no-contact", "Contact", without_contact("NOTIFY")),
+        answered_because("3515-2.1-refer-no-contact", "Contact", without_contact("REFER")),
+        dropped_because(
+            "3261-12.1.1-2xx-invite-no-contact",
+            "Contact",
+            response_without_contact("INVITE"),
+        ),
+        dropped_because(
+            "6665-8.1-2xx-subscribe-no-contact",
+            "Contact",
+            response_without_contact("SUBSCRIBE"),
+        ),
+        dropped_because(
+            "3515-2.1-2xx-refer-no-contact",
+            "Contact",
+            response_without_contact("REFER"),
+        ),
         accept("6665-8.1-2xx-notify-no-contact", response(200, "NOTIFY")),
         accept("3261-13.2.1-1xx-no-contact", response(180, "INVITE")),
         answered(

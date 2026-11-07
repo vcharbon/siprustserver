@@ -13,8 +13,9 @@ use crate::header::HeaderName;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Exemption {
     /// `repeat:<header>.uri:<param>`: the URI of `header` written with the
-    /// parameter `param` twice, one value each time (RFC 3261 §19.1.1 allows
-    /// it once). A second value is refused whatever is named.
+    /// parameter `param` twice, the values equal as RFC 3261 §19.1.4 compares
+    /// them (§19.1.1 allows it once); the first copy is the one read and
+    /// written. A second value is refused whatever is named.
     RepeatedUriParam { header: HeaderName, param: String },
     /// `bare-user-semicolon`: a From or To written without brackets whose
     /// URI holds a `;` before its `@`, which RFC 3261 §20 brackets.
@@ -75,8 +76,8 @@ impl Exemptions {
         self.0.contains(exemption)
     }
 
-    /// Whether the set lets the URI of `header` carry `param` twice with one
-    /// value.
+    /// Whether the set lets the URI of `header` carry `param` twice with
+    /// equal values.
     pub fn repeats(&self, header: &HeaderName, param: &str) -> bool {
         self.0.iter().any(|e| {
             matches!(e, Exemption::RepeatedUriParam { header: h, param: p }

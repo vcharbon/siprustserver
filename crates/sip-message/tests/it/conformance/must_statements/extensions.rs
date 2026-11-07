@@ -23,26 +23,29 @@ pub(super) fn rows() -> Vec<Row> {
             "3261-22.4-credentials-empty-value",
             head.clone().add("Authorization: Digest realm="),
         ),
-        // RFC 3261 §25.1: an option tag is a token.
-        unread(
-            "3261-25.1-option-tag-space",
-            head.clone().add("Proxy-Require: foo bar"),
-            typed::<header::ProxyRequire>,
+        // RFC 3261 §25.1: an option tag is a token, and ingress reads every
+        // option-tag line: a request is answered 400, a response dropped.
+        answered("3261-25.1-option-tag-space", head.clone().add("Proxy-Require: foo bar")),
+        answered("3261-25.1-option-tag-quoted", head.clone().add("Proxy-Require: \"foo\"")),
+        answered("3261-25.1-option-tag-slash", head.clone().add("Require: 100rel, foo/bar")),
+        answered("3261-25.1-option-tag-empty-entry", head.clone().add("Require: 100rel,,timer")),
+        answered("3261-25.1-option-tag-empty-require", head.clone().add("Require:")),
+        answered("3261-25.1-option-tag-supported-space", head.clone().add("Supported: timer, x y")),
+        accept("3261-20.37-supported-empty", head.clone().add("Supported:")),
+        dropped(
+            "3262-3-reliable-provisional-option-tag-space",
+            response(183, "INVITE").with("rseq", "RSeq: 1").add("Require: 100rel, x y"),
         ),
-        unread(
-            "3261-25.1-option-tag-quoted",
-            head.clone().add("Proxy-Require: \"foo\""),
-            typed::<header::ProxyRequire>,
+        dropped(
+            "3261-25.1-option-tag-supported-in-a-response",
+            response(200, "OPTIONS").add("Supported: timer, x y"),
         ),
-        unread(
-            "3261-25.1-option-tag-slash",
-            head.clone().add("Require: 100rel, foo/bar"),
-            typed::<header::Require>,
-        ),
-        unread(
-            "3261-25.1-option-tag-empty-entry",
-            head.clone().add("Require: 100rel,,timer"),
-            typed::<header::Require>,
+        // RFC 6665 §8.2.1: `Event = event-type *( SEMI event-param )`.
+        answered("6665-8.2.1-event-not-a-token", request("SUBSCRIBE").with("event", "Event: a b")),
+        answered("6665-8.2.1-event-empty", request("SUBSCRIBE").with("event", "Event:")),
+        answered(
+            "6665-8.2.1-event-parameter-not-a-token",
+            request("SUBSCRIBE").with("event", "Event: refer;id=a b"),
         ),
         // RFC 3262 §7: the response number.
         accept("3262-7.1-rseq-lowest", response(183, "INVITE").with("rseq", "RSeq: 1")),

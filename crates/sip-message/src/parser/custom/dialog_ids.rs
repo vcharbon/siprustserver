@@ -1,7 +1,7 @@
 //! The readings of the values that name a dialog: the From / To address and
-//! its tag, and the Call-ID (RFC 3261 §25.1).
+//! its tag (RFC 3261 §25.1).
 
-use crate::char_class::{is_token_char, is_word_char};
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::header::{self, HeaderName, NameAddr, ParamValue, Reading, Uri};
 use crate::parser::{Exemption, Exemptions};
@@ -58,15 +58,6 @@ pub(super) fn tag_refusal(addr: &NameAddr, header: &str) -> Result<(), SipParseE
         None => Ok(()),
         Some(ParamValue::Token(t)) if t.bytes().all(is_token_char) => Ok(()),
         Some(_) => Err(SipParseError::new(format!("Strict {header}: the tag is not a token"))),
-    }
-}
-
-/// `callid = word [ "@" word ]`.
-pub(crate) fn is_call_id(value: &str) -> bool {
-    let word = |w: &str| !w.is_empty() && w.bytes().all(is_word_char);
-    match value.split_once('@') {
-        Some((local, host)) => word(local) && word(host),
-        None => word(value),
     }
 }
 

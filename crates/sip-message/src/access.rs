@@ -244,15 +244,12 @@ impl SipRequest {
 
     /// Whether this request offers reliable provisional responses (RFC 3262
     /// §3): `100rel` listed in `Require` (the UAS MUST then answer reliably) or
-    /// in `Supported` (it MAY). A line that does not read offers nothing.
-    pub fn offers_100rel(&self) -> bool {
-        let required = self
-            .list::<header::Require>()
-            .is_ok_and(|values| values.iter().any(|v| v.contains("100rel")));
-        let supported = self
-            .list::<header::Supported>()
-            .is_ok_and(|values| values.iter().any(|v| v.contains("100rel")));
-        required || supported
+    /// in `Supported` (it MAY). `Err` when a line of either does not read:
+    /// ingress refuses such a request, so an `Err` names one built past it.
+    pub fn offers_100rel(&self) -> Result<bool, SipParseError> {
+        let required = self.list::<header::Require>()?.iter().any(|v| v.contains("100rel"));
+        let supported = self.list::<header::Supported>()?.iter().any(|v| v.contains("100rel"));
+        Ok(required || supported)
     }
 }
 
@@ -377,20 +374,27 @@ CSeq: 1 INVITE\r\n\
 
     #[test]
     fn supported_or_require_listing_100rel_offers_it() {
-        assert!(request("Supported: timer, 100rel\r\n").offers_100rel());
-        assert!(request("Require: 100REL\r\n").offers_100rel(), "option tags are case-insensitive");
+        assert!(request("Supported: timer, 100rel\r\n").offers_100rel().expect("every line reads"));
         assert!(
-            request("Supported: timer\r\nSupported: 100rel\r\n").offers_100rel(),
+            request("Require: 100REL\r\n").offers_100rel().expect("every line reads"),
+            "option tags are case-insensitive"
+        );
+        assert!(
+            request("Supported: timer\r\nSupported: 100rel\r\n")
+                .offers_100rel()
+                .expect("every line reads"),
             "every line counts"
         );
     }
 
     #[test]
     fn a_request_listing_it_nowhere_offers_nothing() {
-        assert!(!request("").offers_100rel());
-        assert!(!request("Supported: timer, replaces\r\n").offers_100rel());
+        assert!(!request("").offers_100rel().expect("every line reads"));
+        assert!(!request("Supported: timer, replaces\r\n")
+            .offers_100rel()
+            .expect("every line reads"));
         assert!(
-            !request("Allow: PRACK\r\n").offers_100rel(),
+            !request("Allow: PRACK\r\n").offers_100rel().expect("every line reads"),
             "advertising the method is not offering the extension"
         );
     }

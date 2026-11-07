@@ -45,7 +45,6 @@ const FAILING: &[(&str, &str)] = &[
     ("under its canonical name", "compact-name"),
     ("URI has no scheme: \"*\"", "contact-star-typed"),
     ("Min-SE is not 1*DIGIT", "min-se-parameters"),
-    ("Unterminated quoted-string in", "subject-quote"),
     ("holds control byte", "control-byte-after-a-word-dquote"),
     ("Invalid CSeq numeric value", "cseq-past-2-31"),
     ("RSeq value", "rseq-past-2-31"),

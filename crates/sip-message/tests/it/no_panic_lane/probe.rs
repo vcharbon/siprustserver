@@ -351,7 +351,7 @@ fn body(msg: &SipMessage, d: &mut Digest) {
 }
 
 fn request(req: &SipRequest, strict: bool, d: &mut Digest) {
-    d.note("method", &(req.method(), req.version(), req.offers_100rel()));
+    d.note("method", &(req.method(), req.version(), req.offers_100rel().ok()));
     uri(req.request_uri(), d);
     d.note("trace-sample", &sip_message::trace_sample::trace_sample(req));
     d.note("emergency", &sip_message::emergency::is_emergency_request(req));

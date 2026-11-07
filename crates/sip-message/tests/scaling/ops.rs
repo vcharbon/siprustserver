@@ -93,7 +93,7 @@ fn turn_reads(request: &SipRequest) {
     black_box(request.has(&HeaderName::RSeq));
     black_box(request.header::<MaxForwards>());
     black_box(request.header::<header::Event>());
-    black_box(request.offers_100rel());
+    let _ = black_box(request.offers_100rel());
     let _ = black_box(request.record_route_set());
     let _ = black_box(request.route_set());
     black_box(request.header::<header::ReferTo>());

@@ -10,12 +10,12 @@ use super::compact_forms::expand_compact_form;
 use super::scanner::{
     is_wsp, strict_non_negative_decimal, trim_span, HeaderValue, Scanner, Span, COLON, CR, HTAB, LF,
 };
+use super::vouched::{is_vouched_value, vouched_reading};
 use crate::char_class::is_token_char;
 use crate::control_bytes::{bare_control_byte, has_comments, is_control};
 use crate::error::SipParseError;
 use crate::header::{
-    quoted_close, read_params, Authorization, HeaderId, HeaderName, HeaderValue as _, MediaType,
-    ParamReading,
+    quoted_close, read_params, Authorization, HeaderId, HeaderName, HeaderValue as _, ParamReading,
 };
 use crate::header_table::{HeaderTable, Ids};
 use crate::parser::SipParserLimits;
@@ -305,6 +305,12 @@ fn parse_line(
         if let Some(error) = gate_refusal(&known, &name, &trimmed_value, singletons, gates) {
             return Ok(Line::Refused { error, echoed });
         }
+        if let Some(Err(e)) =
+            vouched_reading(&known, &trimmed_value).filter(|_| limits.wire_grammar)
+        {
+            let error = SipParseError::new(format!("Malformed {name} header: {}", e.reason));
+            return Ok(Line::Refused { error, echoed });
+        }
     }
 
     kept.lines.push(SipHeader { name, value: trimmed_value });
@@ -378,13 +384,6 @@ fn gate_refusal(
         }
     }
 
-    // The body's description reads by its one reader: ingress vouches for it.
-    if *known == HeaderName::ContentType {
-        if let Err(e) = MediaType::parse(value) {
-            return Some(SipParseError::new(format!("Malformed {name} header: {}", e.reason)));
-        }
-    }
-
     // Credentials read whole by their one reader, whatever the scheme
     // (CVE-2023-28098, RFC 3261 §22.4).
     if is_authorization_header(known) {
@@ -398,19 +397,6 @@ fn gate_refusal(
     None
 }
 
-/// The vouched headers whose grammar needs a value: an empty line of one is
-/// refused here, where the readers of a comma list would read it as none.
-fn is_vouched_value(name: &HeaderName) -> bool {
-    matches!(
-        name,
-        HeaderName::Via
-            | HeaderName::Contact
-            | HeaderName::Route
-            | HeaderName::RecordRoute
-            | HeaderName::ContentType
-    )
-}
-
 /// Headers whose RFC 3261 grammar can carry a quoted-string.
 fn is_quoted_string_header(name: &HeaderName) -> bool {
     matches!(
@@ -420,7 +406,6 @@ fn is_quoted_string_header(name: &HeaderName) -> bool {
             | HeaderName::Contact
             | HeaderName::ReplyTo
             | HeaderName::ReferTo
-            | HeaderName::Subject
             | HeaderName::Authorization
             | HeaderName::ProxyAuthorization
             | HeaderName::WwwAuthenticate

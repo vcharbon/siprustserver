@@ -2,7 +2,7 @@
 //! its deployment names it and refused when it does not, the same shape with a
 //! different value is refused whatever is named, and nothing else moves.
 
-use sip_message::header::MaxForwards;
+use sip_message::header::{HeaderValue, MaxForwards};
 use sip_message::hops::forwarded_max_forwards;
 use sip_message::parser::custom::CustomParser;
 use sip_message::parser::Exemptions;
@@ -79,13 +79,23 @@ fn shape_rows(row: &str, name: &str, exempted: &[u8], still_refused: &[u8]) -> V
     ]
 }
 
-/// A request with no Max-Forwards, read under the exemption that names it, holds
-/// the count §16.6 states for one: 70.
+/// A From whose URI repeats `x-dup` with values equal as RFC 3261 §19.1.4
+/// compares them reads under `repeat:from.uri:x-dup`, and writes the first copy
+/// alone, `written` ending its URI.
+fn writes_the_first_copy(raw: &[u8], written: &str) -> Result<(), String> {
+    let parsed = parser_naming(&["repeat:from.uri:x-dup"])?.parse(raw).map_err(|e| e.reason)?;
+    let SipMessage::Request(request) = parsed else { return Err("a response".to_string()) };
+    let wire = request.from().to_wire();
+    wire.contains(written).then_some(()).ok_or(format!("writes {wire}"))
+}
+
+/// A request with no Max-Forwards, read under the exemption that names it, is
+/// passed on with the count §16.6 step 3 adds: 70.
 fn read_as_70(raw: &[u8]) -> Result<(), String> {
     let parsed = parser_naming(&["max-forwards:absent"])?.parse(raw).map_err(|e| e.reason)?;
     let SipMessage::Request(request) = parsed else { return Err("a response".to_string()) };
     let forwarded = forwarded_max_forwards(&request);
-    (forwarded == MaxForwards::new(69)).then_some(()).ok_or(format!("forwards {forwarded:?}"))
+    (forwarded == MaxForwards::DEFAULT).then_some(()).ok_or(format!("forwards {forwarded:?}"))
 }
 
 fn options() -> Template {
@@ -131,6 +141,15 @@ fn an_exempted_shape_is_accepted_only_where_it_is_named() {
         &options().with("max-forwards", "Max-Forwards: x").bytes(),
     ));
     rows.push(Row::new("exempt/max-forwards-absent/read-as-70", read_as_70(&absent)));
+    for (row, uri) in [
+        ("recased", "<sip:alice@example.com;x-dup=ordinary;x-dup=ORDINARY>"),
+        ("escaped", "<sip:alice@example.com;x-dup=ordinary;x-dup=%6Frdinary>"),
+    ] {
+        let raw = options().with("from", format!("From: {uri};tag=a1")).bytes();
+        rows.push(Row::new(format!("exempt/repeat-from-uri/{row}-copy-writes-the-first"), {
+            writes_the_first_copy(&raw, ";x-dup=ordinary>")
+        }));
+    }
     settle("exempt", &rows);
 }
 

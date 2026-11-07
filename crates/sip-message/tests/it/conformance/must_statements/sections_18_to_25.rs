@@ -35,7 +35,43 @@ pub(super) fn rows() -> Vec<Row> {
             "Request-URI",
             head.clone().start_line("OPTIONS sip:bob@ SIP/2.0"),
         ),
+        // §19.1.1: a URI parameter name appears once; no exemption names a
+        // Request-URI.
+        answered_because(
+            "3261-19.1.1-request-uri-parameter-twice-same",
+            "written twice",
+            head.clone().start_line("OPTIONS sip:bob@example.com;x=1;x=1 SIP/2.0"),
+        ),
+        answered_because(
+            "3261-19.1.1-request-uri-parameter-twice-recased",
+            "written twice",
+            head.clone()
+                .start_line("OPTIONS sip:bob@example.com;transport=udp;Transport=udp SIP/2.0"),
+        ),
+        answered_because(
+            "3261-19.1.1-request-uri-parameter-twice-different",
+            "Request-URI",
+            head.clone().start_line("OPTIONS sip:bob@example.com;x=1;x=2 SIP/2.0"),
+        ),
         answered("rule-route-opaque-scheme", head.clone().add("Route: <urn:service:sos>")),
+        // ADR-0053 §2: `transport`, `user` and `method` take a token, or a
+        // `paramchar` run as the `other-param` every parameter also is.
+        accept(
+            "adr-0053-2-user-parameter-paramchar",
+            options().with("from", "From: <sip:alice@example.com;user=a:b>;tag=a1"),
+        ),
+        accept(
+            "adr-0053-2-transport-parameter-paramchar",
+            options().with("from", "From: <sip:alice@example.com;transport=x/y>;tag=a1"),
+        ),
+        accept(
+            "adr-0053-2-method-parameter-token",
+            options().with("from", "From: <sip:alice@example.com;method=x`y>;tag=a1"),
+        ),
+        answered(
+            "adr-0053-2-user-parameter-neither",
+            request("INVITE").with("contact", "Contact: <sip:alice@192.0.2.10;user=a\"b>"),
+        ),
         // ADR-0053 §2: a URI parameter outside the `transport`, `user` and
         // `method` of §25.1 is an `other-param`, held to `paramchar`.
         answered(

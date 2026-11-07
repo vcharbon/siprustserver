@@ -4,7 +4,7 @@
 
 use sip_message::draft::RequestDraft;
 use sip_message::header::{self, CSeq, CallId, Expires, HeaderValue, MaxForwards, To, Uri, Via};
-use sip_message::{CustomParser, HeaderName, Method, SipMessage, SipParser};
+use sip_message::{read_stored, CustomParser, HeaderName, Method, SipMessage, SipParser};
 
 #[test]
 fn a_parsed_message_reads_a_single_header_from_its_first_line() {
@@ -19,7 +19,9 @@ Contact: <sip:alice@192.0.2.5>\r\n\
 Event: presence\r\n\
 Event: ;id=1\r\n\
 Content-Length: 0\r\n\r\n";
-    let SipMessage::Request(request) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
+    // Ingress refuses the malformed line; a stored image holding one reads.
+    assert!(CustomParser::new().parse(raw.as_bytes()).is_err(), "ingress reads every line");
+    let SipMessage::Request(request) = read_stored(raw.as_bytes()).unwrap() else {
         panic!("a request")
     };
     let event = request.header::<header::Event>().expect("carried").expect("the first line reads");

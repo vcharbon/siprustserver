@@ -1,7 +1,7 @@
 //! The parameters of a URI (RFC 3261 §25.1 `uri-parameters`, §19.1.1): each
 //! part held to its class, and a name once.
 
-use crate::char_class::is_token_char;
+use crate::char_class::{is_token_char, is_unreserved};
 use crate::sip_str::SipStr;
 
 use super::super::params::{ParamValue, Params};
@@ -11,12 +11,12 @@ use super::UriRole;
 
 /// The `uri-parameters` from byte `j` of a sip or sips URI (RFC 3261 §25.1),
 /// each `;name[=value]`, the parts held to their classes when `role` is given:
-/// a name to `paramchar`, a `transport`, `user` or `method` value to `token`
-/// (§25.1 gives each a token form), any other value to `paramchar`, and a
-/// `maddr` of a [`UriRole::Target`] to `host`. A name appears once
-/// (§19.1.1): a second copy of an identical value is collapsed into the first,
-/// one of another value refused. Yields the list, the collapsed copies and the
-/// position after the list, a `?` or the end.
+/// a name to `paramchar`, a value to `paramchar`, a `transport`, `user` or
+/// `method` value to `token` as well (§25.1 gives each a token form beside the
+/// `other-param` one), and a `maddr` of a [`UriRole::Target`] to `host`. A name
+/// appears once (§19.1.1): a second copy of a value equal as §19.1.4 compares
+/// is collapsed into the first, one of another value refused. Yields the list,
+/// the collapsed copies and the position after the list, a `?` or the end.
 pub(super) fn read_uri_params(
     value: &SipStr,
     mut j: usize,
@@ -39,9 +39,8 @@ pub(super) fn read_uri_params(
             j = scan_until(bytes, name_end + 1, b";?");
             let read = clamped(text, name_end + 1, j);
             if role.is_some() {
-                if TOKEN_VALUED.iter().any(|t| name.eq_ignore_ascii_case(t)) {
-                    token_refusal("uri-parameter value", read)?;
-                } else {
+                let token_valued = TOKEN_VALUED.iter().any(|t| name.eq_ignore_ascii_case(t));
+                if !(token_valued && is_token(read)) {
                     paramchar_refusal("uri-parameter value", read)?;
                 }
             }
@@ -61,7 +60,7 @@ pub(super) fn read_uri_params(
                 names.add(&params, &name);
                 params.push(name, param);
             }
-            Some(first) if params.iter().nth(first).is_some_and(|(_, v)| *v == param) => {
+            Some(first) if params.iter().nth(first).is_some_and(|(_, v)| same_value(v, &param)) => {
                 collapsed.names.push(name);
                 collapsed.segments.push(segment_at..j);
             }
@@ -116,12 +115,43 @@ impl NameIndex {
 const TOKEN_VALUED: &[&str] = &["transport", "user", "method"];
 
 /// `token`.
-fn token_refusal(what: &str, run: &str) -> Result<(), String> {
-    if run.is_empty() {
-        return Err(format!("empty {what}"));
+fn is_token(run: &str) -> bool {
+    !run.is_empty() && run.bytes().all(is_token_char)
+}
+
+/// Whether two values of one URI parameter are equal as RFC 3261 §19.1.4
+/// compares them: case aside, an escaped unreserved character equal to the
+/// character itself.
+fn same_value(a: &ParamValue, b: &ParamValue) -> bool {
+    match (a.as_str(), b.as_str()) {
+        (None, None) => true,
+        (Some(a), Some(b)) => unescaped(a).eq(unescaped(b)),
+        _ => false,
     }
-    match run.bytes().find(|&b| !is_token_char(b)) {
-        None => Ok(()),
-        Some(b) => Err(format!("{what}: byte 0x{b:02x} is no token character in {run:?}")),
-    }
+}
+
+/// The bytes of `run`, lower-cased, each `%HH` of an unreserved character
+/// read as that character (RFC 3261 §19.1.4, RFC 2396 §2.3).
+fn unescaped(run: &str) -> impl Iterator<Item = u8> + '_ {
+    let bytes = run.as_bytes();
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        let b = *bytes.get(i)?;
+        let decoded = (b == b'%')
+            .then(|| bytes.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            .filter(|&c| is_unreserved(c));
+        match decoded {
+            Some(c) => {
+                i += 3;
+                Some(c.to_ascii_lowercase())
+            }
+            None => {
+                i += 1;
+                Some(b.to_ascii_lowercase())
+            }
+        }
+    })
 }

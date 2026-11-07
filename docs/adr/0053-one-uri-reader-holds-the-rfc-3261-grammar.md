@@ -63,12 +63,17 @@ by construction. Every other reader of a URI goes through it.
   or `,`.
   A parameter name is `paramchar`, and so is the value of an `other-param`;
   §25.1 gives `transport`, `user` and `method` a `token` form
-  (`other-transport`, `other-user`, `Method`), so a token value reads there
-  (`transport=%`), and a `maddr` of a URI a request is sent to is a `host`.
+  (`other-transport`, `other-user`, `Method`) beside the `other-param` form
+  every parameter also has, so either reads there: a token (`transport=%`)
+  or a `paramchar` run (`user=a:b`, `transport=x/y`). A `maddr` of a URI a
+  request is sent to is a `host`.
   Other values are not checked against their parameter: `ttl=256` is an
   `other-param` by the grammar. A parameter name appears once (§19.1.1): a
-  second copy of an identical value reads as one copy, which the URI renders
-  (ADR-0001, one parameter of a name), and a second value refuses the URI.
+  second copy of a value equal as §19.1.4 compares (case aside, an escaped
+  unreserved character equal to itself) reads as one copy, the first, which
+  the URI renders (ADR-0001, one parameter of a name), and a second value
+  refuses the URI. Ingress refuses the collapsed copy too unless a deployment
+  exempts it; no exemption names a Request-URI.
 - **`tel`**: the number up to the first `;` or `?` as the host, then
   `;params?headers`, no RFC 3966 grammar. A route entry of one reads; a
   consumer that must route on it answers 416 Unsupported URI Scheme. **Every other scheme** (`urn`,
