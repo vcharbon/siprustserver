@@ -57,6 +57,13 @@ impl ProxyCore {
         self.registry.lookup_by_address(&addr).is_some().then_some(addr)
     }
 
+    /// Whether `req`, received from `src`, comes from a registry worker: by its
+    /// source, or by its top Via where that source is translated.
+    pub(super) fn sent_by_a_worker(&self, req: &SipRequest, src: SocketAddr) -> bool {
+        self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()
+            || self.worker_via_sent_by(req).is_some()
+    }
+
     /// Whether a Route / Record-Route URI names this proxy, on either face, by
     /// its authority or by its next hop: forwarding an entry whose `maddr`
     /// names this proxy would loop on Max-Forwards.

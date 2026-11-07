@@ -457,3 +457,30 @@ async fn after_release_a_forked_2xx_is_acked_and_byed_at_its_contact() {
     assert_eq!(reqs(&out, "ACK").len(), 1, "the fork's ACK reaches its Contact: {out:?}");
     assert_eq!(reqs(&out, "BYE").len(), 1, "so does its BYE");
 }
+
+/// A released call's INVITE is read back from the image the transaction keeps,
+/// under no limit: a layer holding the first-ingress bound still ACKs and BYEs a
+/// late 2xx to its own INVITE past that bound (RFC 3261 §13.2.2.4, §15.1).
+#[tokio::test(start_paused = true)]
+async fn a_late_2xx_to_an_own_invite_past_the_bound_is_acked_and_byed() {
+    let gated = sip_message::CustomParser::with_limits(sip_message::SipParserLimits {
+        at_first_ingress: true,
+        ..Default::default()
+    });
+    let mut stack = Stack::build_reading(5, 64, config(), gated).await;
+    let call_ref = format!("self|{}", "c".repeat(9_000));
+    let (call_id, branch) = ("callid-long", "z9hG4bK-long");
+    let invite = offerless_invite(&call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t3", &[], "")).await;
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    stack.txn.cancel_txns_for_call(&call_ref).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t3", &[], "")).await;
+    elapse_ms(20).await;
+    let out = stack.drain_peer();
+    assert!(!reqs(&out, "ACK").is_empty(), "the late 2xx draws its ACK: {out:?}");
+    assert!(!reqs(&out, "BYE").is_empty(), "and its BYE: {out:?}");
+}

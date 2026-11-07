@@ -251,6 +251,19 @@ async fn a_workers_request_past_the_bound_is_forwarded() {
     assert_eq!(rig.metrics.parse_refusals_answered(), 0, "and is not refused");
 }
 
+/// A worker whose source address is translated on its way to the proxy is named
+/// by its top Via's sent-by: its request reads with room too.
+#[tokio::test(start_paused = true)]
+async fn a_request_whose_top_via_names_a_worker_past_the_bound_is_forwarded() {
+    let rig = Rig::new().await;
+    let via = format!("SIP/2.0/UDP {WORKER};branch=z9hG4bK-translated");
+    let request = invite(&via, &to_of(LINE_BOUND + 40), true, 0);
+    rig.caller.send_to(request.as_bytes(), addr(PROXY)).await.expect("sent");
+    settle().await;
+    assert_eq!(rig.metrics.parse_refusals_answered(), 0, "the request is not refused");
+    assert!(rig.caller.try_recv().is_none(), "nothing answers it here");
+}
+
 /// A response is no request at first ingress, whatever its size.
 #[tokio::test(start_paused = true)]
 async fn a_response_past_the_bound_is_relayed() {

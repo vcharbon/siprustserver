@@ -29,13 +29,12 @@ use super::ActionExecutor;
 const GLARE_500_RETRY_AFTER: RetryAfterRange = RetryAfterRange { min_sec: 0, max_sec: 10 };
 
 impl ActionExecutor<'_> {
-    /// Answer the current request event in place with `status` (no relay) —
-    /// the response goes to the request's top-Via response target on the
-    /// source leg's server transaction, under the source face's Contact where
-    /// [`generators::response_states_own_contact`] states one (the 2xx to
-    /// UPDATE, the 202 to REFER). `extra_headers` ride the response as given; on a failure final to the
-    /// initial INVITE the deployment's minted-final advertisement fills a half
-    /// they leave unnamed.
+    /// Answer the current request event in place with `status`, no relay: to its
+    /// top-Via response target on the source leg's server transaction, under the
+    /// source face's Contact where [`generators::response_states_own_contact`]
+    /// states one (the 2xx to UPDATE, the 202 to REFER). `extra_headers` ride as
+    /// given; on a failure final to an initial INVITE the deployment's minted-final
+    /// advertisement fills a half they leave unnamed.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn respond(
         &mut self,
@@ -48,6 +47,7 @@ impl ActionExecutor<'_> {
         content_type: Option<&str>,
         mut extra_headers: Vec<SipHeader>,
     ) {
+        let (status, reason) = relay::writable_status("response", status, reason, fx);
         if let Some(req) = ctx.request() {
             if req.method() == Method::Invite
                 && req.to().tag().is_none()

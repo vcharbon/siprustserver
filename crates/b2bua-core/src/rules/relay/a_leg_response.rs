@@ -45,6 +45,8 @@ pub fn response_to_a_leg(
     // The call as it stands before the response records anything: one that
     // is not built leaves it so.
     let unsent = call.clone();
+    let (status, reason) =
+        super::stated_text::writable_status("response to the caller", status, reason, fx);
     if status >= 200 {
         if let Some(carried) = call.a_leg.invite_final_sent() {
             tracing::warn!(

@@ -77,12 +77,22 @@ impl Stack {
         b2bua_queue: usize,
         config: TransactionConfig,
     ) -> Stack {
+        Self::build_reading(transit_ms, b2bua_queue, config, CustomParser::new()).await
+    }
+
+    /// [`build_with_config`](Self::build_with_config) reading the wire with `parser`.
+    pub async fn build_reading(
+        transit_ms: u64,
+        b2bua_queue: usize,
+        config: TransactionConfig,
+        parser: CustomParser,
+    ) -> Stack {
         let net = SimulatedSignalingNetwork::new(transit_ms);
         let b2bua_ep =
             net.bind_udp(BindUdpOpts::new(addr(B2BUA), b2bua_queue)).await.expect("bind b2bua");
         let peer = net.bind_udp(BindUdpOpts::new(addr(PEER), 1024)).await.expect("bind peer");
 
-        let parser = Arc::new(CustomParser::new());
+        let parser = Arc::new(parser);
         // Deterministic ids (the `build` default seeds 0xC0FFEE) so any
         // tag/branch fabrication is stable.
         let (txn, events) = TransactionLayer::spawn(b2bua_ep, parser, config);

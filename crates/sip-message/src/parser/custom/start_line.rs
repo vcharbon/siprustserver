@@ -163,6 +163,11 @@ fn read_until_crlf(s: &mut Scanner) -> Span {
 /// The refusal a status code draws in any reading, built or received: RFC 3261
 /// §7.2 gives it six classes, 100 to 699.
 pub(crate) fn status_refusal(status: u16) -> Option<SipParseError> {
-    (!(100..=699).contains(&status))
+    (!is_status_code(status))
         .then(|| SipParseError::new(format!("Status code out of range: {status}")))
+}
+
+/// Whether a message can carry `status` (RFC 3261 §7.2: six classes).
+pub fn is_status_code(status: u16) -> bool {
+    (100..=699).contains(&status)
 }

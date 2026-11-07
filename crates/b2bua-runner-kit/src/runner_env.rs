@@ -18,6 +18,16 @@ use crate::{
 
 mod event_queue_env;
 
+/// The limits a worker reads the wire under ([`RunnerEnv::parser_limits`]), the
+/// exemptions as `SIP_EXEMPTIONS` states them through `lookup`.
+pub(crate) fn parser_limits(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<SipParserLimits, String> {
+    let exemptions = Exemptions::read(lookup("SIP_EXEMPTIONS").as_deref())
+        .map_err(|problem| format!("SIP_EXEMPTIONS {problem}"))?;
+    Ok(SipParserLimits { exemptions, ..SipParserLimits::DEFAULT })
+}
+
 /// Every generic runner knob, parsed once from env by [`RunnerEnv::from_env`].
 /// All fields are pub: tweak any of them between `from_env()` and
 /// [`bind`](RunnerEnv::bind) to override a single knob without re-implementing
@@ -298,11 +308,7 @@ impl RunnerEnv {
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             admin_addr: admin_addr(lookup)?,
             queue_max: knob("B2BUA_QUEUE", "8192")?,
-            parser_limits: SipParserLimits {
-                exemptions: Exemptions::read(env::var("SIP_EXEMPTIONS").ok().as_deref())
-                    .map_err(|problem| format!("SIP_EXEMPTIONS {problem}"))?,
-                ..SipParserLimits::DEFAULT
-            },
+            parser_limits: parser_limits(lookup)?,
             udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF")?,
             udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF")?,
             cdr_queue: knob("B2BUA_CDR_QUEUE", "1024")?,

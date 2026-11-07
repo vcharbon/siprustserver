@@ -57,6 +57,8 @@ mod peer_metrics;
 #[cfg(test)]
 mod possibly_confirmed_tests;
 pub(crate) use peer_metrics::outbound_proxy_target;
+#[cfg(test)]
+mod oversize_send_tests;
 mod process;
 #[cfg(test)]
 mod provisional_turn_tests;

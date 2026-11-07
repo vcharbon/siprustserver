@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 
 use sip_message::{SipParseError, SipRequest};
 
-use crate::addr::ProxyAddr;
 use crate::observability::metrics::Face;
 
 use super::super::ProxyCore;
@@ -24,12 +23,7 @@ impl ProxyCore {
         let refusal = self.parser.first_ingress_refusal(req)?;
         let from_a_party = match &self.external {
             Some(_) => face == Face::External,
-            None => {
-                let (host, port) = req.top_via().sent_by().pair();
-                let via = ProxyAddr::new(host, port);
-                self.registry.lookup_by_address(&ProxyAddr::from(src)).is_none()
-                    && self.registry.lookup_by_address(&via).is_none()
-            }
+            None => !self.sent_by_a_worker(req, src),
         };
         from_a_party.then_some(refusal)
     }

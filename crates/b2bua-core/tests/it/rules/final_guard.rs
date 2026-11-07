@@ -133,3 +133,54 @@ fn a_provisional_after_the_final_is_refused() {
     );
     assert!(refusals(&result).is_empty(), "a provisional is not a second final");
 }
+
+/// A rule's final with a status no reader takes leaves as this stack's internal
+/// error and is reported: the caller is answered, not left to her setup timer.
+#[test]
+fn a_status_no_message_can_carry_answers_500_and_is_reported() {
+    let call = test_call();
+    let result = execute_on(
+        &call,
+        &[RuleAction::RespondToALeg {
+            status: 700,
+            reason: "Past".into(),
+            header_updates: vec![],
+            contacts: vec![],
+        }],
+    );
+    assert_eq!(finals_to_a(&result), vec![500], "the caller is answered");
+    assert_eq!(result.call.a_leg.invite_final_sent(), Some(500));
+    assert!(
+        result.effects.buffered.iter().any(|e| matches!(
+            e,
+            BufferedObservabilityEffect::StatedTextSkipped { detail } if detail.contains("700")
+        )),
+        "and the status is reported: {:?}",
+        result.effects.buffered
+    );
+}
+
+/// The same of a rule's answer to the request in hand.
+#[test]
+fn a_status_no_message_can_carry_answers_the_request_500() {
+    let call = test_call();
+    let bye = in_dialog_request(sip_message::Method::Bye);
+    let event = CallEvent::sip(SipMessage::Request(bye), "10.0.0.2:5070".parse().unwrap());
+    let actions = [RuleAction::Respond {
+        status: 700,
+        reason: "Past".into(),
+        body: vec![],
+        content_type: None,
+    }];
+    let result = execute_from_b1(&call, &event, &actions);
+    let statuses: Vec<u16> = result
+        .effects
+        .outbound
+        .iter()
+        .filter_map(|e| match &e.body {
+            b2bua_core::effects::OutboundBody::Response(r) => Some(r.status()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(statuses, vec![500], "the request is answered");
+}

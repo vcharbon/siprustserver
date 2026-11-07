@@ -35,6 +35,24 @@ pub(crate) fn writable_lines(
     kept
 }
 
+/// `status` and `reason` when a message can carry that status, else this stack's
+/// internal error, the rule's defect reported on `fx` under `what`: the party is
+/// answered, not left to its timer.
+pub(crate) fn writable_status<'a>(
+    what: &str,
+    status: u16,
+    reason: &'a str,
+    fx: &mut HandlerEffects,
+) -> (u16, &'a str) {
+    if sip_message::is_status_code(status) {
+        return (status, reason);
+    }
+    fx.buffered.push(BufferedObservabilityEffect::StatedTextSkipped {
+        detail: format!("{what}: {status} is no status code"),
+    });
+    (500, default_reason(500))
+}
+
 /// `reason` when the wire carries it, else the default phrase of `status`,
 /// the refusal reported on `fx` under `what`.
 pub(crate) fn writable_reason(
