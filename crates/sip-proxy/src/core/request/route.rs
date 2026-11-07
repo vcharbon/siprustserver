@@ -60,7 +60,7 @@ impl ProxyCore {
         // ── §16.3 + Max-Forwards ────────────────────────────────────────────
         // The copy states the count less one, or 70 where the request states
         // none (§16.6 step 3).
-        if hops::hops_exhausted(&req) {
+        if hops::hops_exhausted(req) {
             // §16.3 check 2: an exhausted ACK is silently discarded, never
             // answered — a response to an ACK is a stray message (the ACK
             // terminates a transaction; nothing upstream awaits a reply to it).
@@ -72,7 +72,7 @@ impl ProxyCore {
                 .reply_reject(req, arrival, 483, "Too Many Hops", &[], "too_many_hops")
                 .await;
         }
-        let mf_next = hops::forwarded_max_forwards(&req);
+        let mf_next = hops::forwarded_max_forwards(req);
 
         // ── §16.3 check 4: loop detection ───────────────────────────────────
         // A request from one of this proxy's own addresses is one it forwarded

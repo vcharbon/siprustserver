@@ -56,8 +56,8 @@ fn a_value_ingress_would_refuse_reads() {
 }
 
 /// A final of 300 or more names no dialog target, so ingress drops a Contact
-/// entry of one that does not read: the stored read drops the same, and a
-/// takeover sees the contacts the first reader saw.
+/// entry of one that does not read: the stored read drops the same, so a read
+/// of the stored image sees the contacts the first read saw.
 #[test]
 fn a_redirect_reads_back_the_contacts_ingress_read() {
     let image = format!(
