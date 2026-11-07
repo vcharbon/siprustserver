@@ -42,7 +42,8 @@ pub(super) const CALLEE: &str = "192.168.60.20";
 /// One captured egress datagram: which FACE sent it, to where, the bytes.
 pub(super) type Sent = (&'static str, SocketAddr, Vec<u8>);
 
-/// A capturing endpoint labelled with its face.
+/// A capturing endpoint labelled with its face. A datagram past the largest
+/// UDP payload is refused, as a socket refuses it, and not captured.
 struct TapEndpoint {
     face: &'static str,
     addr: SocketAddr,
@@ -52,6 +53,12 @@ struct TapEndpoint {
 #[async_trait]
 impl UdpEndpoint for TapEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
+        if buf.len() > sip_net::MAX_UDP_PAYLOAD {
+            return Err(SendError {
+                message: format!("datagram of {} bytes", buf.len()),
+                kind: sip_net::SendErrorKind::MessageTooLong,
+            });
+        }
         self.sent.lock().unwrap().push((self.face, dst, buf.to_vec()));
         Ok(())
     }
@@ -149,7 +156,7 @@ pub(super) fn parse_msg(raw: &str) -> SipMessage {
     CustomParser::default().parse(raw.as_bytes()).unwrap()
 }
 
-fn caller_src() -> SocketAddr {
+pub(super) fn caller_src() -> SocketAddr {
     format!("{CALLER}:5060").parse().unwrap()
 }
 
@@ -168,7 +175,7 @@ pub(super) fn header_lines(bytes: &[u8], name: &str) -> Vec<String> {
 }
 
 /// An initial INVITE from the external caller toward the callee's AOR.
-fn caller_invite(call_id: &str) -> SipMessage {
+pub(super) fn caller_invite(call_id: &str) -> SipMessage {
     parse_msg(&format!(
         "INVITE sip:bob@{CALLEE}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {CALLER}:5060;branch=z9hG4bKcaller1;rport\r\n\
@@ -184,7 +191,7 @@ Content-Length: 0\r\n\r\n"
 
 /// A worker-originated b-leg INVITE toward the external callee (top Via = the
 /// worker's registry identity; the plain preloaded `;lr` Route the b2bua sends).
-fn worker_bleg_invite(call_id: &str) -> SipMessage {
+pub(super) fn worker_bleg_invite(call_id: &str) -> SipMessage {
     parse_msg(&format!(
         "INVITE sip:bob@{CALLEE}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKbleg1;rport\r\n\

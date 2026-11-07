@@ -49,6 +49,12 @@ impl ProxyCore {
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
 
+    /// A request whose forward the socket refused as past the largest UDP
+    /// payload: 513 (RFC 3261 §21.5.14), counted `message_too_large`.
+    pub(super) async fn reply_too_large(&self, req: &SipRequest, arrival: Arrival) -> RouteOutcome {
+        self.reply_reject(req, arrival, 513, "Message Too Large", &[], "message_too_large").await
+    }
+
     /// A Request-URI this hop cannot read: 400, counted `malformed_request_uri`.
     pub(super) async fn reply_malformed_uri(
         &self,

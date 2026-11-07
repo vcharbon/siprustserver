@@ -22,7 +22,8 @@
 //! Beyond the failover sweep: the two-faced proxy topology and the face each message crosses.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
@@ -497,4 +498,78 @@ async fn a_callers_record_route_at_the_proxy_keeps_the_workers_requests_to_her()
 
     assert_reaped(&fh, &b1).await;
     drop(proxy);
+}
+
+/// A route naming the proxy's internal face, reached from the external face by
+/// local delivery on the node.
+const VIP_ROUTE: &str = "sip:+0411@10.244.255.250:5080;user=phone";
+
+/// A route naming the proxy's own internal face: the worker's b-leg leaves the
+/// external face toward it and arrives back from the proxy's own address, so
+/// the proxy answers it 482 Loop Detected and no second call reaches the worker.
+/// The decision service grants `reroutes` reroutes to the call, each to the same
+/// route: each costs one attempt and one failure consult, and the caller gets the
+/// last 482, with the call's one CDR.
+async fn a_route_naming_the_proxy(reroutes: usize) {
+    let mut fh = FailoverHarness::new("dual-face-route-names-the-proxy", &["b1"]);
+    let consults = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let (counted, seen) = (consults.clone(), failures.clone());
+    let at_the_proxy = || {
+        let mut r = route_to("10.244.255.250", 5080);
+        r.new_ruri = Some(VIP_ROUTE.into());
+        r
+    };
+    let decision = ScriptedDecisionEngine::builder()
+        .fallback(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let mut r = at_the_proxy();
+            r.callback_context = Some("0".into());
+            NewCallResponse::Route(r)
+        })
+        .on_failure(move |req| {
+            seen.lock().unwrap().push(req.failure.status_code);
+            let done: usize =
+                req.callback_context.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
+            if done >= reroutes {
+                return CallTreatment::Relay { label: None };
+            }
+            let mut r = at_the_proxy();
+            r.callback_context = Some((done + 1).to_string());
+            CallTreatment::Route(r)
+        })
+        .build();
+    let (alice, bob, proxy, b1) = stand_up(&mut fh, Arc::new(decision)).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.ext_addr()).send().await;
+    call.expect(482).await;
+    // Her ACK reaches the proxy, which relays it to the worker.
+    fh.advance(Duration::from_millis(100)).await;
+    assert_reaped(&fh, &b1).await;
+
+    assert_eq!(consults.load(Ordering::SeqCst), 1, "one new-call consult");
+    assert_eq!(
+        *failures.lock().unwrap(),
+        vec![Some(482); reroutes + 1],
+        "each attempt fails once, on the proxy's 482"
+    );
+    assert_eq!(b1.metrics().creations_total(), 1, "no looped copy reaches the worker as a call");
+    assert_eq!(b1.cdr_records().len(), 1, "the call writes its one CDR");
+    let (ext, int): (SocketAddr, SocketAddr) =
+        (PROXY_EXT.parse().unwrap(), PROXY_INT.parse().unwrap());
+    let entries = fh.sip_entries();
+    let looped = entries.iter().filter(|e| e.opens_with("INVITE") && e.from == ext && e.to == int);
+    assert_eq!(looped.count(), reroutes + 1, "one pass back through the proxy per attempt");
+    fh.assert_full_rfc_clean("dual-face-route-names-the-proxy");
+    drop(proxy);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_route_naming_the_proxy_is_refused_482_at_once() {
+    a_route_naming_the_proxy(0).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_reroute_to_a_route_naming_the_proxy_costs_one_attempt() {
+    a_route_naming_the_proxy(1).await;
 }

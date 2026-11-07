@@ -76,6 +76,7 @@
 //! and never stores a negative entry — it just retries at the same cadence.
 
 mod cache;
+mod config;
 mod lookup;
 mod outcomes;
 
@@ -85,60 +86,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sip_clock::Clock;
-use sip_net::UdpEndpoint;
+use sip_net::{SendErrorKind, UdpEndpoint};
 
 use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
 use crate::poison::{locked, RESOLVER_IN_FLIGHT, RESOLVER_PINS, RESOLVER_REFRESHES};
 
 use cache::{CacheLookup, NameCache};
+pub use config::ResolverConfig;
 #[cfg(test)]
 use lookup::{resolution_candidates, resolve_first};
 pub use lookup::{HostResolver, SystemResolver};
 pub(crate) use outcomes::{outcome, refresh_outcome};
-
-/// Cache + concurrency policy for [`NamedForwarder`].
-#[derive(Debug, Clone, Copy)]
-pub struct ResolverConfig {
-    /// How long a successful resolution is served from cache.
-    pub positive_ttl_ms: u64,
-    /// How long a FAILED resolution short-circuits further lookups.
-    pub negative_ttl_ms: u64,
-    /// Cache size cap (names are wire-influenceable; see module doc).
-    pub max_entries: usize,
-    /// Max concurrent in-flight resolve tasks (each can park for the full
-    /// resolver timeout, so this also bounds spawned-task buildup).
-    pub max_in_flight: usize,
-    /// The bound on one name lookup (see the module doc).
-    pub lookup_timeout_ms: u64,
-    /// The most packets held on one name's in-flight resolve, the one that
-    /// started it included.
-    pub max_waiting_per_name: usize,
-}
-
-impl Default for ResolverConfig {
-    fn default() -> Self {
-        Self {
-            positive_ttl_ms: 60_000,
-            negative_ttl_ms: 5_000,
-            max_entries: 4096,
-            max_in_flight: 64,
-            lookup_timeout_ms: 2_000,
-            max_waiting_per_name: 32,
-        }
-    }
-}
-
-impl ResolverConfig {
-    /// When the proactive refresh fires, relative to a positive store:
-    /// `positive_ttl − margin`, margin = min(ttl/4, 5 s). Both the margin and
-    /// the delay are clamped ≥ 1 ms so degenerate tiny TTLs still schedule
-    /// (a refresh landing at/after expiry idle-stops harmlessly).
-    fn refresh_after_ms(&self) -> u64 {
-        let margin = (self.positive_ttl_ms / 4).min(5_000).max(1);
-        self.positive_ttl_ms.saturating_sub(margin).max(1)
-    }
-}
 
 struct Inner {
     endpoint: Arc<dyn UdpEndpoint>,
@@ -181,6 +140,13 @@ enum Join {
 }
 
 impl Inner {
+    /// Send `bytes` to `dst` now, counting a refusal and returning its kind.
+    async fn send_inline(&self, bytes: &[u8], dst: SocketAddr) -> Option<SendErrorKind> {
+        let refused = self.endpoint.send_to(bytes, dst).await.err()?;
+        self.metrics.record_send_failure();
+        Some(refused.kind)
+    }
+
     /// Join `bytes` (a packet for the name `key`, or a refresh with none) to
     /// that name's resolve: claim one when none runs and the in-flight cap
     /// allows, else wait on the running one within the per-name bound. A
@@ -460,16 +426,16 @@ impl NamedForwarder {
 
     /// Send `bytes` to a named target. Cache hits go out inline; a miss spawns
     /// a single-flight resolve-then-send task, or waits on the one running, so
-    /// the caller (the recv loop) never waits on DNS.
-    pub async fn send(&self, bytes: &[u8], target: &ProxyAddr) {
+    /// the caller (the recv loop) never waits on DNS. Every refusal is counted;
+    /// the kind of one the socket answered inline is returned, and a send the
+    /// resolve makes later returns `None`.
+    pub async fn send(&self, bytes: &[u8], target: &ProxyAddr) -> Option<SendErrorKind> {
         let inner = &self.0;
         let key = target.to_string();
         match inner.cache.lookup(&key) {
             CacheLookup::Hit(dst) => {
                 inner.metrics.record_named_send(outcome::CACHED);
-                if inner.endpoint.send_to(bytes, dst).await.is_err() {
-                    inner.metrics.record_send_failure();
-                }
+                return inner.send_inline(bytes, dst).await;
             }
             CacheLookup::NegativeHit => {
                 inner.metrics.record_named_send(outcome::DROPPED_NEGATIVE);
@@ -478,9 +444,7 @@ impl NamedForwarder {
                 Join::Waiting => {}
                 Join::Cached(dst) => {
                     inner.metrics.record_named_send(outcome::CACHED);
-                    if inner.endpoint.send_to(bytes, dst).await.is_err() {
-                        inner.metrics.record_send_failure();
-                    }
+                    return inner.send_inline(bytes, dst).await;
                 }
                 Join::Negative => inner.metrics.record_named_send(outcome::DROPPED_NEGATIVE),
                 Join::Refused => inner.metrics.record_named_send(outcome::DROPPED_IN_FLIGHT),
@@ -492,6 +456,7 @@ impl NamedForwarder {
                 }
             },
         }
+        None
     }
 }
 

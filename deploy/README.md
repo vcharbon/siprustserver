@@ -153,7 +153,8 @@ provides:
 - **Recommended hardening: `network.externalEgressDrop`.** Off by default. On, each proxy node
   drops what is sourced from the external VIP and leaves by any other interface, local delivery
   included, so a peer's Contact naming the internal VIP cannot reach the socket trusted by its face.
-  A target naming a VIP the node holds then fails its send (ADR-0056 §11).
+  A target naming a VIP the node holds then fails its send (ADR-0056 §11); off, the proxy answers
+  the request it gets back from its own address 482 Loop Detected.
 - **The external router carries the external VIP's traffic.** Everything a proxy node sends from
   the external VIP goes to a next hop, a caller on the node's own subnet included. The router
   forwards such a datagram back out the interface it arrived on, does not drop it on uRPF for its

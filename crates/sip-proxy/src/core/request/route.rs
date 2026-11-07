@@ -80,6 +80,15 @@ impl ProxyCore {
                 .await;
         };
 
+        // ── §16.3 check 4: loop detection ───────────────────────────────────
+        // A request from one of this proxy's own addresses is one it forwarded
+        // that came back to it: a target naming the proxy itself.
+        if self.is_own_source(src) {
+            return self
+                .reply_reject(req, arrival, 482, "Loop Detected", &[], "loop_detected")
+                .await;
+        }
+
         // ── §16.3 check 5: Proxy-Require ────────────────────────────────────
         // This proxy supports no proxy extensions, so any option-tag in
         // Proxy-Require is unsupported: reject with 420 (Bad Extension) and an
@@ -418,7 +427,10 @@ impl ProxyCore {
 
         // ── Freeze + forward ────────────────────────────────────────────────
         let Ok(bytes) = draft.freeze_bytes() else { return self.drop_unforwardable() };
-        self.send_to(&bytes, &target, egress).await;
+        let refused = self.send_to(&bytes, &target, egress).await;
+        if refused == Some(sip_net::SendErrorKind::MessageTooLong) {
+            return self.reply_too_large(req, arrival).await;
+        }
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
         self.trace_forward(call_id.as_str(), decision, &target, egress, stickiness, &bytes);
 

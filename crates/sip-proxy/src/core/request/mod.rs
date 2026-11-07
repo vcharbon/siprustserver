@@ -1,10 +1,11 @@
-//! Request path, RFC 3261 §16: preflight (Max-Forwards 483, Proxy-Require
-//! 420), the non-2xx ACK hop decision (relay on the INVITE's hop, or absorb the
+//! Request path, RFC 3261 §16: preflight (Max-Forwards 483, a request from this
+//! proxy's own address 482, Proxy-Require 420), the non-2xx ACK hop decision (relay on the INVITE's hop, or absorb the
 //! ACK to a self-generated final), top-Route strip + direction under the
 //! ingress face's trust (ADR-0048), self-gate (ELU/CPS) admission, target
 //! selection (CANCEL LRU → loose-route next hop → worker-outbound R-URI →
 //! cookie decode → select), received/rport stamping, Record-Route insertion,
-//! Via push, retransmission memos, serialize + forward.
+//! Via push, retransmission memos, serialize + forward, and a 513 for a forward
+//! the socket refused as too long.
 //!
 //! The routing ladder lives in [`route`], Route preprocessing in [`classify`],
 //! the gate in [`admission`], the target's steps in [`target`], the
@@ -37,6 +38,8 @@ mod own_final_ack_tests;
 #[cfg(test)]
 mod own_final_seam_tests;
 #[cfg(test)]
+mod own_source_tests;
+#[cfg(test)]
 mod reject_metric_tests;
 #[cfg(test)]
 mod retransmission_tests;
@@ -44,6 +47,8 @@ mod retransmission_tests;
 mod rfc_small_fix_tests;
 #[cfg(test)]
 mod stateless_branch_tests;
+#[cfg(test)]
+mod too_large_tests;
 #[cfg(test)]
 mod trace_request_tests;
 #[cfg(test)]

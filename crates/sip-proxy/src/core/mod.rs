@@ -266,6 +266,17 @@ impl ProxyCore {
         names(&self.advertised) || self.external.as_ref().is_some_and(|e| names(&e.advertised))
     }
 
+    /// Whether `src` is one of this proxy's own addresses: a face's bind or its
+    /// IP-literal advertise. A request from there was forwarded by this proxy
+    /// and came back to it.
+    pub(super) fn is_own_source(&self, src: SocketAddr) -> bool {
+        let names = |endpoint: &Arc<dyn UdpEndpoint>, at: &ProxyAddr| {
+            endpoint.local_addr() == src || at.to_socket_addr() == Some(src)
+        };
+        names(&self.endpoint, &self.advertised)
+            || self.external.as_ref().is_some_and(|e| names(&e.endpoint, &e.advertised))
+    }
+
     /// Pin + pre-resolve DNS-named forward targets (`PROXY_RESOLVER_PREWARM`)
     /// so their FIRST b-leg forward is a warm cache hit; pinned names are kept
     /// permanently warm by the resolver's proactive refresh. Runs off the
@@ -290,25 +301,27 @@ impl ProxyCore {
     /// literals) is sent inline; a DNS name — e.g. a `sipp-uas` pod FQDN in a
     /// worker-outbound b-leg R-URI — goes through the [`NamedForwarder`], which
     /// serves cache hits inline and resolves misses on a spawned task so the
-    /// recv loop NEVER waits on DNS (see [`crate::resolver`]).
-    async fn send_to(&self, bytes: &[u8], target: &ProxyAddr, face: Face) {
+    /// recv loop NEVER waits on DNS (see [`crate::resolver`]). Every refusal is
+    /// counted; the kind of one the socket answered inline is returned, `None`
+    /// when the datagram left or a resolve sends it later.
+    async fn send_to(
+        &self,
+        bytes: &[u8],
+        target: &ProxyAddr,
+        face: Face,
+    ) -> Option<sip_net::SendErrorKind> {
         self.metrics.record_face_egress(face);
-        if let Some(dst) = target.to_socket_addr() {
-            if let Err(e) = self.endpoint_of(face).send_to(bytes, dst).await {
-                self.metrics.record_send_failure();
-                // Per-peer attribution (sip_proxy_peer_failures_total{...,
-                // kind=…}): classify against the registry (a known worker is
-                // internal and always its own series, else external, under the cap), and name an
-                // oversize message as such rather than blaming the peer.
-                self.metrics.record_peer_failure(
-                    &dst,
-                    self.classify_peer(target),
-                    peer_failure_kind(&e),
-                );
-            }
-            return;
-        }
-        self.named_of(face).send(bytes, target).await;
+        let Some(dst) = target.to_socket_addr() else {
+            return self.named_of(face).send(bytes, target).await;
+        };
+        let e = self.endpoint_of(face).send_to(bytes, dst).await.err()?;
+        self.metrics.record_send_failure();
+        // Per-peer attribution (sip_proxy_peer_failures_total{..., kind=…}):
+        // classify against the registry (a known worker is internal and always
+        // its own series, else external, under the cap), and name an oversize
+        // message as such rather than blaming the peer.
+        self.metrics.record_peer_failure(&dst, self.classify_peer(target), peer_failure_kind(&e));
+        Some(e.kind)
     }
 
     /// Classify a forward target internal/external for the per-peer metric: a

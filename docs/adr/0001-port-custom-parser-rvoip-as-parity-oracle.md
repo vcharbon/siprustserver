@@ -129,17 +129,28 @@ ingress brake and transaction layer. A stored image is read under none of them
 (ADR-0053 §6).
 
 The band this leaves is the datagram. A message this stack builds can pass the
-largest UDP payload, 65,507 bytes, though each line it copied fit: a callee's 2xx
-whose Contact fills a datagram leaves no room for the ACK and BYE naming that
-target, a caller's INVITE near a datagram none for its b-leg with the worker's Via
-and Contact, and a callee's 2xx with a long relayed line none on the caller's face.
-The socket refuses the send, and the refusal is counted
-(`b2bua_txn_send_errors_total`); the transaction runs as if the message were lost,
-so its own timer ends it and the call is released with its CDR
-(`router::oversize_send_tests`). The party that message was for hears nothing of
-it. A b-leg that cannot leave draws the caller's final from the first-response
-timer; a 2xx that cannot reach the caller ends on its ladder, and she gives up on
-Timer B; a callee left without an ACK ends his side on his 2xx give-up.
+largest UDP payload of its destination's family, 65,507 bytes over IPv4 and 65,527
+over IPv6, though each line it copied fit: a callee's 2xx whose Contact fills a
+datagram leaves no room for the ACK and BYE naming that target, a caller's INVITE
+near a datagram none for its b-leg with the worker's Via and Contact, and a
+callee's 2xx with a long relayed line none on the caller's face. What cannot leave
+is a result, not a loss:
+
+- **A worker's request that would open a client transaction** fails at once,
+  before the socket, as a dead hop's does (`router::cannot_leave`, counted in
+  `b2bua_outbound_unsent_total{reason="too_long"}`). A b-leg INVITE reaches the
+  failure consult (`origin` `transaction_timeout`, `timeout_kind` `response`), so
+  another route may connect; an in-dialog request reaches its timeout rule, so a
+  BYE that cannot leave releases the call with its CDR at once.
+- **A response, an ACK, a CANCEL and a retained repeat** stay a counter: the
+  socket refuses them (`b2bua_txn_send_errors_total`) and the transaction runs as
+  if the message were lost. A 2xx that cannot reach the caller ends on its ladder
+  and she gives up on Timer B; a callee left without an ACK ends his side on his
+  2xx give-up (`router::oversize_send_tests`).
+- **The front proxy** answers 513 Message Too Large (RFC 3261 §21.5.14), on the
+  face it arrived on, to a request whose forward the socket refused as too long.
+  An ACK is dropped. A response it relays stays a counter, and so does a forward to
+  a name whose resolve sends it later, off the request's path.
 
 ## Considered and rejected
 

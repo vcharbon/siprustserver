@@ -214,7 +214,8 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       Running without it, a send from the external socket to the internal VIP is delivered locally
       and reaches a socket trusted by its face, one to the external VIP re-enters on that face, and
       any local UDP listener on the port a target names gets a datagram sourced from the external
-      VIP. It does not cover what the table
+      VIP. A request reaching the proxy from its own address is answered 482 Loop Detected (RFC 3261
+      §16.3). It does not cover what the table
       routes: a send from the external socket to a worker leaves through the external interface
       either way, so the routers' isolation stops it, then the workers' NetworkPolicy; on a CNI that
       does not enforce NetworkPolicy, the routers' isolation alone does.
@@ -306,9 +307,11 @@ Via.
 - A worker target naming a VIP its proxy node holds, internal or external, leaves the external
   socket for a local address. With §11's chain on it is refused at the node with no exemption: the
   send fails, counted as a send failure, and its sender gives up on its own timers. With it off it
-  is delivered locally and re-enters the platform as a new request. A call looping back through the platform reaches
-  it through a hop on the external plane, as `b2bua-harness`'s `spiral_through_the_front_proxy`
-  states it.
+  is delivered locally and the proxy answers it 482 Loop Detected, its source being the proxy's own
+  address: the attempt fails at once and each reroute to that target costs one attempt
+  (`failover-harness`'s `dual_face::a_route_naming_the_proxy_*`). A call looping back through the
+  platform reaches it through a hop on the external plane, as `b2bua-harness`'s
+  `spiral_through_the_front_proxy` states it.
 - Silencing a next hop cuts the node's egress to callers through it (§10's chain of timers): the
   node's own traffic has no other way out.
 - A next hop that answers ARP and forwards nothing reads alive to the face: its BFD session

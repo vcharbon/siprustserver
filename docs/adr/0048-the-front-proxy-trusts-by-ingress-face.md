@@ -43,7 +43,8 @@ but used it only for a metric.
      interface (`deploy/helm/siprust/files/masq-exempt.sh`, re-asserted with
      its other rules);
    - a datagram the proxy sends from the external VIP reaches the internal socket
-     by local delivery unless the node's optional drop refuses it (ADR-0056 §11).
+     by local delivery unless the node's optional drop refuses it (ADR-0056 §11);
+     a request arriving that way is answered 482 Loop Detected (RFC 3261 §16.3).
 2. **On the internal face a request is worker-outbound** when its direction
    entry carries `;outbound`, when its source is a registry worker, or when its
    top Via sent-by is one. The marker is what recognises a worker rebooted onto
