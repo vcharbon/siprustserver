@@ -129,12 +129,15 @@ pub fn validate_sdp_body(body: &[u8]) -> Result<(), SdpValidationError> {
 ///   - `o=` sess-id and sess-version are non-negative integers, read as opaque
 ///     digit strings — RFC 4566 §5.2 bounds neither below 64 bits, and the
 ///     recommended NTP timestamp is exactly that wide;
-///   - every `m=` block has a `c=` — its own or the session's — and a
-///     non-negative-integer port;
-///   - every `a=ptime:N` states `N > 0`.
+///   - the description opens with `v=` and states no session-level line after
+///     its first `m=` (RFC 8866 §5 fixes the order);
+///   - every `m=` block has a port field `port ["/" integer]` (RFC 8866 §5.14)
+///     and a `c=` — its own or the session's;
+///   - every media-level `a=ptime` states a `non-zero-int-or-real` (§6.4).
 ///
-/// An EMPTY body passes: it carries no description to reject. Content-Type is
-/// the caller's responsibility — invoke only for `application/sdp`.
+/// The document facts are [`crate::sdp_doc`]'s reading. An EMPTY body passes:
+/// it carries no description to reject. Content-Type is the caller's
+/// responsibility — invoke only for `application/sdp`.
 pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError> {
     if body.is_empty() {
         return Ok(());
@@ -180,58 +183,34 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
         }
     }
 
-    // Walk m= blocks: a session-level c= (before the first m=) satisfies the
-    // c=-presence requirement for every block; otherwise each block needs its
-    // own c= before the next m= boundary. Each m= line needs an integer port.
-    let mut session_level_c = false;
-    let mut in_media = false;
-    let mut current_media_has_c = false;
-    let mut current_media_name = String::new();
-    let missing_c = |name: &str| {
-        SdpValidationError::new(format!("m={name} block has no c= line and no session-level c="))
+    let Some(doc) = crate::sdp_doc::parse_sdp_body(body) else {
+        return Err(SdpValidationError::new("the description does not open with its v= line"));
     };
-    for line in &lines {
-        if let Some(m_val) = line.strip_prefix("m=") {
-            if in_media && !current_media_has_c && !session_level_c {
-                return Err(missing_c(&current_media_name));
-            }
-            let m_tokens = ws_tokens(m_val);
-            let [media_name, port_tok, _, ..] = m_tokens.as_slice() else {
-                return Err(SdpValidationError::new(format!(
-                    "m= line '{line}' has fewer than 3 tokens (expected: media port proto fmt...)"
-                )));
-            };
-            if port_tok.is_empty() || !port_tok.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(SdpValidationError::new(format!(
-                    "m= line port '{port_tok}' is not a non-negative integer"
-                )));
-            }
-            in_media = true;
-            current_media_has_c = false;
-            current_media_name = media_name.to_string();
-            continue;
-        }
-        if line.starts_with("c=") {
-            if in_media {
-                current_media_has_c = true;
-            } else {
-                session_level_c = true;
-            }
-        }
-        if let Some(raw) = line.strip_prefix("a=ptime:") {
-            // Digit string with a non-zero digit — positive without an integer
-            // width the value would have to fit.
-            let raw = crate::whitespace::trim(raw);
-            let positive_integer = !raw.is_empty()
-                && raw.bytes().all(|b| b.is_ascii_digit())
-                && raw.bytes().any(|b| b != b'0');
-            if !positive_integer {
-                return Err(SdpValidationError::new(format!("a=ptime:{raw} is not > 0")));
-            }
-        }
+    if let Some(line) = doc.misplaced.first() {
+        return Err(SdpValidationError::new(format!(
+            "'{line}' follows an m= line (RFC 8866 §5 places it in the session-level section)"
+        )));
     }
-    if in_media && !current_media_has_c && !session_level_c {
-        return Err(missing_c(&current_media_name));
+    for media in &doc.media {
+        let name = &media.r#type;
+        if media.port.is_none() {
+            return Err(SdpValidationError::new(format!(
+                "m={name} line states no port field <port>[/<number of ports>] (RFC 8866 §5.14)"
+            )));
+        }
+        if media.c_line.is_none() && doc.c_line.is_none() {
+            return Err(SdpValidationError::new(format!(
+                "m={name} block has no c= line and no session-level c="
+            )));
+        }
+        let ptimes = media.attributes.iter().filter_map(|a| crate::sdp_doc::ptime_value(a));
+        for value in ptimes {
+            if !crate::sdp_doc::is_non_zero_int_or_real(value) {
+                return Err(SdpValidationError::new(format!(
+                    "a=ptime:{value} is not a non-zero integer or real (RFC 8866 §6.4)"
+                )));
+            }
+        }
     }
     Ok(())
 }

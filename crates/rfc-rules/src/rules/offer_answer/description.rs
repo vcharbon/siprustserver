@@ -12,7 +12,8 @@ use super::doc::{stream_row, Doc};
 /// **RFC 3264 §5-6 / RFC 4566 §5 — a body sent as SDP satisfies the
 /// offer/answer grammar.** A real peer 488s a malformed description: no `v=0`
 /// session, two sessions in one body, an `o=` sess-id/version that is not a
-/// digit string, a stream with no `c=` or no port, a non-positive `a=ptime`.
+/// digit string, a session-level line after the first `m=`, a stream with no
+/// `c=` or no port field, an `a=ptime` that is no non-zero number.
 /// A test UA accepts the body and masks the defect, so the recording is where
 /// the offer's own grammar is checked at all.
 ///

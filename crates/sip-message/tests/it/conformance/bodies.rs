@@ -201,7 +201,7 @@ fn verdict(row: &str, holds: bool, what: &str) -> Row {
 fn description_rows() -> Vec<Row> {
     let session_direction = SDP.replace("t=0 0\r\n", "t=0 0\r\na=sendonly\r\n");
     let direction = parse_sdp_body(session_direction.as_bytes())
-        .and_then(|doc| doc.media.first().map(extract_direction));
+        .and_then(|doc| doc.media.first().map(|m| extract_direction(&doc, m)));
     let moved = edited("c=IN IP4 192.0.2.10", "c=IN IP4 192.0.2.99");
     let media_level = "v=0\r\no=- 1 1 IN IP4 192.0.2.10\r\ns=-\r\nt=0 0\r\n\
                        m=audio 49170 RTP/AVP 0\r\nc=IN IP4 192.0.2.10\r\n";

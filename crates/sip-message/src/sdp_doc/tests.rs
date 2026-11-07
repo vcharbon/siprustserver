@@ -26,7 +26,7 @@ fn single_audio_m_line_is_lifted() {
     assert_eq!(m.port, Some(49170));
     assert_eq!(m.transport, "RTP/AVP");
     assert_eq!(m.formats, vec!["0", "8", "96"]);
-    assert_eq!(m.ptime, Some(20));
+    assert_eq!(m.attributes.iter().find_map(|a| ptime_value(a)), Some("20"));
     assert_eq!(
         m.attributes,
         vec!["rtpmap:0 PCMU/8000", "rtpmap:96 opus/48000/2", "ptime:20", "sendrecv"]
@@ -34,7 +34,7 @@ fn single_audio_m_line_is_lifted() {
     // No media-level c= — the session-level one stands for this stream.
     assert_eq!(m.c_line, None);
 
-    assert_eq!(extract_direction(m), SdpDirection::SendRecv);
+    assert_eq!(extract_direction(&doc, m), SdpDirection::SendRecv);
     assert_eq!(
         extract_rtpmaps(m),
         vec![
@@ -64,14 +64,14 @@ a=recvonly\r\n";
     assert_eq!(audio.r#type, "audio");
     assert_eq!(audio.port, Some(5000));
     assert_eq!(audio.c_line.as_deref(), Some("IN IP4 192.0.2.1"));
-    assert_eq!(extract_direction(audio), SdpDirection::SendOnly);
+    assert_eq!(extract_direction(&doc, audio), SdpDirection::SendOnly);
 
     let video = &doc.media[1];
     assert_eq!(video.r#type, "video");
     assert_eq!(video.port, Some(5002));
     assert_eq!(video.formats, vec!["96"]);
     assert_eq!(video.c_line, None);
-    assert_eq!(extract_direction(video), SdpDirection::RecvOnly);
+    assert_eq!(extract_direction(&doc, video), SdpDirection::RecvOnly);
     assert_eq!(extract_rtpmaps(video), vec![("96".to_string(), "H264/90000".to_string())]);
 }
 
@@ -103,7 +103,7 @@ a=inactive\r\n";
     let doc = parse_sdp_body(body).expect("sdp");
     assert_eq!(doc.media.len(), 1);
     assert_eq!(doc.media[0].port, Some(0), "rejected stream carries port 0");
-    assert_eq!(extract_direction(&doc.media[0]), SdpDirection::Inactive);
+    assert_eq!(extract_direction(&doc, &doc.media[0]), SdpDirection::Inactive);
 }
 
 #[test]
@@ -118,6 +118,59 @@ fn unparseable_port_is_none_not_zero() {
     let body = b"v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio xyz RTP/AVP 0\r\n";
     let doc = parse_sdp_body(body).expect("sdp");
     assert_eq!(doc.media[0].port, None, "no digits read as no port, never as zero");
+}
+
+/// RFC 8866 §5.14: `<port>/<number of ports>`; a field off `port ["/"
+/// integer]` states no port at all, never its leading digits.
+#[test]
+fn a_port_field_reads_its_count_or_nothing() {
+    let doc = |field: &str| {
+        let body =
+            format!("v=0\r\no=- 0 0 IN IP4 h\r\ns=-\r\nt=0 0\r\nm=video {field} RTP/AVP 31\r\n");
+        let doc = parse_sdp_body(body.as_bytes()).expect("sdp");
+        (doc.media[0].port, doc.media[0].port_count)
+    };
+    assert_eq!(doc("49170/2"), (Some(49170), Some(2)));
+    assert_eq!(doc("0/2"), (Some(0), Some(2)));
+    assert_eq!(doc("49170"), (Some(49170), None));
+    for off in ["49170x", "-1", "+5", "49170/", "49170/0", "49170/02", "49170/x", "/2"] {
+        assert_eq!(doc(off), (None, None), "{off}");
+    }
+}
+
+/// RFC 4566 §5: a session-level attribute is the default of every stream, so
+/// a stream stating no direction has the session's (RFC 3264 §6.1).
+#[test]
+fn a_stream_inherits_the_session_direction() {
+    let body = b"v=0\r\no=- 0 0 IN IP4 h\r\ns=-\r\nc=IN IP4 h\r\nt=0 0\r\na=sendonly\r\n\
+m=audio 1 RTP/AVP 0\r\nm=video 2 RTP/AVP 31\r\na=recvonly\r\n";
+    let doc = parse_sdp_body(body).expect("sdp");
+    assert_eq!(extract_direction(&doc, &doc.media[0]), SdpDirection::SendOnly);
+    assert_eq!(extract_direction(&doc, &doc.media[1]), SdpDirection::RecvOnly, "its own wins");
+    assert_eq!(stated_direction(&doc.media[0].attributes), None, "the stream states none itself");
+}
+
+/// RFC 8866 §5 places `v= o= s= u= e= p= t= r= z=` before the first `m=`.
+#[test]
+fn a_session_level_line_after_media_is_misplaced() {
+    let body = b"v=0\r\no=- 0 0 IN IP4 h\r\ns=-\r\nt=0 0\r\nm=audio 1 RTP/AVP 0\r\n\
+i=title\r\no=- 2 2 IN IP4 h\r\nt=0 0\r\na=sendrecv\r\n";
+    let doc = parse_sdp_body(body).expect("sdp");
+    assert_eq!(doc.misplaced, vec!["o=- 2 2 IN IP4 h", "t=0 0"]);
+    assert_eq!(doc.origin.as_deref(), Some("- 0 0 IN IP4 h"), "the session's own is read");
+}
+
+/// RFC 8866 §9: `non-zero-int-or-real = integer / non-zero-real`.
+#[test]
+fn a_packet_time_is_a_non_zero_integer_or_real() {
+    for valid in ["20", "2.5", "0.5", "20.25", "10.05", "1"] {
+        assert!(is_non_zero_int_or_real(valid), "{valid}");
+    }
+    for off in ["0", "020", "20.0", "0.0", ".5", "2.", "-20", "20 ", "2e1", "", "x"] {
+        assert!(!is_non_zero_int_or_real(off), "{off:?}");
+    }
+    assert_eq!(ptime_value("ptime:2.5"), Some("2.5"));
+    assert_eq!(ptime_value("maxptime:40"), None);
 }
 
 #[test]

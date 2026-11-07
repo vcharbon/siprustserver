@@ -14,8 +14,8 @@
 //! deterministic: no clocks, no randomness, no I/O.
 
 use crate::sdp_doc::{
-    direction_of, extract_cryptos, extract_direction, extract_rtpmaps, parse_sdp_body, MediaLine,
-    SdpDirection, Sections,
+    direction_of, extract_cryptos, extract_direction, extract_rtpmaps, parse_sdp_body,
+    stated_direction, MediaLine, SdpDirection, Sections,
 };
 
 mod formats;
@@ -124,8 +124,7 @@ pub fn answer_from_own_agreeing(
             _ => push_line(&mut out, line, eol),
         }
     }
-    let own_session_dir = session_direction(owned.session);
-    let offer_session_dir = session_direction(offered.session);
+    let own_session_dir = stated_direction(&own_doc.attributes);
     let stub_c = own_doc
         .c_line
         .is_none()
@@ -173,9 +172,8 @@ pub fn answer_from_own_agreeing(
             continue;
         };
         let inherited = own_session_dir.unwrap_or(SdpDirection::SendRecv);
-        let own_dir = media_direction(mine).unwrap_or(inherited);
-        let offered_dir =
-            media_direction(stream).or(offer_session_dir).unwrap_or(SdpDirection::SendRecv);
+        let own_dir = stated_direction(&mine.attributes).unwrap_or(inherited);
+        let offered_dir = extract_direction(&offer_doc, stream);
         let dir = answer_direction(own_dir, offered_dir);
         let answer = Answered { stream, own: mine, kept: &kept, crypto, dir, inherited };
         answered_section(&mut out, owned.media.get(i)?.text, &answer, eol);
@@ -471,16 +469,6 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
     if !dir_written && answer.dir != answer.inherited {
         push_line(out, &format!("a={}", answer.dir.token()), eol);
     }
-}
-
-/// The direction a media block states for itself, if any.
-fn media_direction(media: &MediaLine) -> Option<SdpDirection> {
-    media.attributes.iter().any(|a| direction_of(a).is_some()).then(|| extract_direction(media))
-}
-
-/// The direction the session-level lines state, if any.
-fn session_direction(session: &str) -> Option<SdpDirection> {
-    lines(session).find_map(|l| l.strip_prefix("a=").and_then(direction_of))
 }
 
 /// An `m=` value with its port set to 0, every other token as written.

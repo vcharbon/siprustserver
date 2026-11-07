@@ -266,6 +266,40 @@ fn a_bare_answer_block_reads_as_sendrecv() {
     assert_eq!(answered_directions, &vec!["sendrecv".to_string()]);
 }
 
+/// RFC 4566 §5: a session-level direction is every stream's default, so an
+/// offer of `recvonly` answered by a session-level `sendonly` is the pairing
+/// §6.1 requires.
+#[test]
+fn a_session_level_answer_direction_meets_the_offer() {
+    let offer = OFFER_1AUDIO.replace("a=sendrecv", "a=recvonly");
+    let answer =
+        ANSWER_1AUDIO.replace("a=sendrecv\r\n", "").replace("t=0 0\r\n", "t=0 0\r\na=sendonly\r\n");
+    let out = run(&DirectionPairValid, &one_round(&offer, &answer));
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(matches!(out[0].decision, Decision::Compliant), "{:?}", out[0].decision);
+}
+
+/// A session-level `sendonly` offer answered `sendonly`: both ends would send
+/// and neither receive, whichever level states either direction.
+#[test]
+fn a_session_level_offer_direction_is_judged() {
+    let offer =
+        OFFER_1AUDIO.replace("a=sendrecv\r\n", "").replace("t=0 0\r\n", "t=0 0\r\na=sendonly\r\n");
+    let answer = ANSWER_1AUDIO.replace("a=sendrecv", "a=sendonly");
+    let f = violations(&DirectionPairValid, &one_round(&offer, &answer));
+    assert_eq!(f.len(), 1, "{f:?}");
+    let Decision::Violated(Evidence::DirectionPairInvalid {
+        offered_directions,
+        answered_directions,
+        ..
+    }) = &f[0].decision
+    else {
+        panic!("{:?}", f[0].decision);
+    };
+    assert_eq!(offered_directions, &vec!["sendonly".to_string()]);
+    assert_eq!(answered_directions, &vec!["sendonly".to_string()]);
+}
+
 // ---- rejected-stream-minimal-answer ---------------------------------
 
 #[test]

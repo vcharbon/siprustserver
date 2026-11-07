@@ -485,7 +485,7 @@ pub fn description(a: &[u8], b: &[u8], d: &mut Digest) {
     if let Some(doc) = parse_sdp_body(a) {
         d.note("doc", &doc);
         for m in &doc.media {
-            d.note("direction", &sip_message::extract_direction(m));
+            d.note("direction", &sip_message::extract_direction(&doc, m));
             d.note("rtpmaps", &sip_message::extract_rtpmaps(m));
             d.note("fmtps", &sip_message::extract_fmtps(m));
             d.note("cryptos", &sip_message::extract_cryptos(m));

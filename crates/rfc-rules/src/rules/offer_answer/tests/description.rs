@@ -7,7 +7,9 @@ use super::*;
 /// An INVITE alice sent, its body declared under `content_type`.
 fn declared(body: &str, content_type: &str) -> Msg {
     let mut m = req(1, ALICE, BOB, "INVITE", 1, None, Some(body));
-    m.head = Some(format!("Content-Type: {content_type}\r\n\r\n").into_bytes());
+    m.head = Some(
+        format!("INVITE sip:bob@host SIP/2.0\r\nContent-Type: {content_type}\r\n\r\n").into_bytes(),
+    );
     m
 }
 
@@ -57,6 +59,11 @@ fn every_grammar_failure_is_named_on_its_message() {
                  m=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
             "no c= line",
         ),
+        (
+            "v=0\r\no=alice 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n\
+                 m=audio 49170 RTP/AVP 0\r\no=alice 2 2 IN IP4 10.0.0.1\r\n",
+            "follows an m= line",
+        ),
     ];
     for (body, needle) in cases {
         let f = run(&SdpBodyParseable, &[declared(body, "application/sdp")]);
@@ -66,6 +73,17 @@ fn every_grammar_failure_is_named_on_its_message() {
         };
         assert!(sdp_failure.contains(needle), "{sdp_failure} lacks {needle}");
     }
+}
+
+/// RFC 8866 §5.14 and §6.4: a port field stating its number of ports and a
+/// decimal packet time are valid descriptions.
+#[test]
+fn a_port_count_and_a_decimal_ptime_are_compliant() {
+    let body = "v=0\r\no=alice 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n\
+                m=audio 49170 RTP/AVP 0\r\na=ptime:2.5\r\nm=video 49172/2 RTP/AVP 31\r\n";
+    let f = run(&SdpBodyParseable, &[declared(body, "application/sdp")]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
 }
 
 /// A body under another format is not this rule's to read, and neither is a

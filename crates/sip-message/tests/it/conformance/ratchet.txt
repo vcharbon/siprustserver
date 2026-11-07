@@ -1,7 +1,3 @@
 # Rows known to fail: the row's name, then the area of the stack that owns its fix.
 # The list only shrinks: a listed row that no longer fails fails the suite.
 
-sdp/8866-5-origin-after-media-refused audit
-sdp/8866-5-session-direction-inherited audit
-sdp/8866-5.14-media-port-count audit
-sdp/8866-6-ptime-decimal audit

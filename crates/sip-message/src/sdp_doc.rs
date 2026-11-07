@@ -19,16 +19,17 @@
 use lookup_map::LookupSet;
 
 /// One `m=`-rooted media description with its trailing media-level lines. The
-/// m-line shape is `m=<type> <port> <transport> <fmt> ...`.
+/// m-line shape is `m=<type> <port>[/<number of ports>] <transport> <fmt> ...`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaLine {
     /// Media type token (e.g. `audio`, `video`, `application`).
     pub r#type: String,
-    /// The m-line's port. `None` where no digits read there; `Some(0)` is a
-    /// stream REJECTED (RFC 3264 §6), which is a statement, not an absence.
+    /// The m-line's port. `None` where the port field is not `port ["/"
+    /// integer]` (RFC 8866 §9); `Some(0)` is a stream REJECTED (RFC 3264 §6),
+    /// which is a statement, not an absence.
     pub port: Option<i64>,
     /// The `/<number of ports>` the port field states, where it states one
-    /// (RFC 4566 §5.14).
+    /// (RFC 8866 §5.14).
     pub port_count: Option<i64>,
     /// Transport token (e.g. `RTP/AVP`, `RTP/SAVP`, `UDP/TLS/RTP/SAVPF`).
     pub transport: String,
@@ -45,8 +46,6 @@ pub struct MediaLine {
     /// The first `k=` line inside this media block, which overrides the
     /// session-level one for this stream.
     pub key: Option<String>,
-    /// `a=ptime:<N>` read as a number, where the block carries one.
-    pub ptime: Option<i64>,
 }
 
 /// A parsed session description: the session-level lines plus the media
@@ -73,12 +72,16 @@ pub struct SdpDoc {
     pub key: Option<String>,
     /// The media blocks in document order.
     pub media: Vec<MediaLine>,
+    /// Every line of a session-level type (`v= o= s= u= e= p= t= r= z=`) found
+    /// after the first `m=` line, as written: RFC 8866 §5 places each before
+    /// the media descriptions, so none is read into a field.
+    pub misplaced: Vec<String>,
     /// The text, each byte that is no UTF-8 as the character standing for it
     /// (`sdp_octets`), so two descriptions differing in such a byte differ.
     pub raw: String,
 }
 
-/// A media block's direction attribute (RFC 3264 §6.1). Absence IS
+/// A stream's direction attribute (RFC 3264 §6.1). Absence at both levels IS
 /// [`SdpDirection::SendRecv`] — the default the RFC states, not a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SdpDirection {
@@ -98,22 +101,6 @@ impl SdpDirection {
             SdpDirection::Inactive => "inactive",
         }
     }
-}
-
-/// Leading-digit integer read: an optional sign, then digits, stopping at the
-/// first byte that is not one. `None` where no digit follows the sign.
-fn leading_int(s: &str) -> Option<i64> {
-    let s = crate::whitespace::trim_start(s);
-    let (neg, unsigned) = match s.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, s.strip_prefix('+').unwrap_or(s)),
-    };
-    let digits = unsigned.get(..unsigned.bytes().take_while(u8::is_ascii_digit).count())?;
-    if digits.is_empty() {
-        return None;
-    }
-    let n: i64 = digits.parse().ok()?;
-    Some(if neg { -n } else { n })
 }
 
 /// Case-insensitive prefix strip; `prefix` is lowercase ASCII.
@@ -149,7 +136,6 @@ struct MutableMedia {
     c_line: Option<String>,
     bandwidths: Vec<String>,
     key: Option<String>,
-    ptime: Option<i64>,
 }
 
 impl MutableMedia {
@@ -164,25 +150,44 @@ impl MutableMedia {
             c_line: self.c_line,
             bandwidths: self.bandwidths,
             key: self.key,
-            ptime: self.ptime,
         }
     }
+}
+
+/// A port field, `port ["/" integer]` (RFC 8866 §9: `port = 1*DIGIT`,
+/// `integer = POS-DIGIT *DIGIT`): the port and the number of ports it states,
+/// or `None` where the field is off that grammar.
+fn port_field(field: &str) -> Option<(i64, Option<i64>)> {
+    let (port, count) = match field.split_once('/') {
+        Some((port, count)) => (port, Some(count)),
+        None => (field, None),
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(port) {
+        return None;
+    }
+    let count = match count {
+        Some(count) if digits(count) && !count.starts_with('0') => Some(count.parse().ok()?),
+        Some(_) => return None,
+        None => None,
+    };
+    Some((port.parse().ok()?, count))
 }
 
 /// Start a media block from an `m=` line's value (no leading `m=`).
 fn new_media(raw_m_line: &str) -> MutableMedia {
     let tokens: Vec<&str> = crate::whitespace::split(raw_m_line).collect();
+    let port = tokens.get(1).and_then(|field| port_field(field));
     MutableMedia {
         r#type: tokens.first().copied().unwrap_or("").to_string(),
-        port: tokens.get(1).and_then(|p| leading_int(p)),
-        port_count: tokens.get(1).and_then(|p| leading_int(p.split_once('/')?.1)),
+        port: port.map(|(port, _)| port),
+        port_count: port.and_then(|(_, count)| count),
         transport: tokens.get(2).copied().unwrap_or("").to_string(),
         formats: tokens.iter().skip(3).map(|t| t.to_string()).collect(),
         attributes: Vec::new(),
         c_line: None,
         bandwidths: Vec::new(),
         key: None,
-        ptime: None,
     }
 }
 
@@ -219,6 +224,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
     let mut attributes: Vec<String> = Vec::new();
     let mut session_key: Option<String> = None;
     let mut media: Vec<MutableMedia> = Vec::new();
+    let mut misplaced: Vec<String> = Vec::new();
 
     for line in lines {
         let Some((key, value)) = typed_line(line) else {
@@ -249,13 +255,9 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
             b'c' if current.c_line.is_none() => current.c_line = Some(value.to_string()),
             b'b' => current.bandwidths.push(value.to_string()),
             b'k' if current.key.is_none() => current.key = Some(value.to_string()),
-            b'a' => {
-                current.attributes.push(value.to_string());
-                if current.ptime.is_none() {
-                    if let Some(rest) = strip_prefix_ci(value, "ptime:") {
-                        current.ptime = leading_int(crate::whitespace::trim(rest));
-                    }
-                }
+            b'a' => current.attributes.push(value.to_string()),
+            b'v' | b'o' | b's' | b'u' | b'e' | b'p' | b't' | b'r' | b'z' => {
+                misplaced.push(line.to_string());
             }
             _ => {}
         }
@@ -271,6 +273,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
         attributes,
         key: session_key,
         media: media.into_iter().map(MutableMedia::finished).collect(),
+        misplaced,
         raw: text,
     })
 }
@@ -281,10 +284,42 @@ pub fn extract_format_list(m_line: &str) -> Vec<String> {
     crate::whitespace::split(m_line).skip(3).map(str::to_string).collect()
 }
 
-/// The block's direction attribute; absence is [`SdpDirection::SendRecv`]
-/// (RFC 3264 §6.1).
-pub fn extract_direction(media: &MediaLine) -> SdpDirection {
-    media.attributes.iter().find_map(|a| direction_of(a)).unwrap_or(SdpDirection::SendRecv)
+/// The direction stream `media` of `doc` has: its own direction attribute,
+/// else the session-level one, the default of every stream (RFC 4566 §5),
+/// else [`SdpDirection::SendRecv`] (RFC 3264 §5.1).
+pub fn extract_direction(doc: &SdpDoc, media: &MediaLine) -> SdpDirection {
+    stated_direction(&media.attributes)
+        .or_else(|| stated_direction(&doc.attributes))
+        .unwrap_or(SdpDirection::SendRecv)
+}
+
+/// The first direction attribute of `attributes` (values without `a=`), or
+/// `None` where they state none.
+pub fn stated_direction(attributes: &[String]) -> Option<SdpDirection> {
+    attributes.iter().find_map(|a| direction_of(a))
+}
+
+/// The value of an `a=ptime:` attribute (`attr` without its `a=`), or `None`
+/// where `attr` is another attribute. The name is case-significant (RFC 8866
+/// §5).
+pub fn ptime_value(attr: &str) -> Option<&str> {
+    attr.strip_prefix("ptime:")
+}
+
+/// Whether `value` is a `non-zero-int-or-real` (RFC 8866 §9), the grammar of a
+/// packet time: `integer` (`POS-DIGIT *DIGIT`), or `zero-based-integer "."
+/// *DIGIT POS-DIGIT`.
+pub fn is_non_zero_int_or_real(value: &str) -> bool {
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let integer = |s: &str| !s.is_empty() && digits(s) && !s.starts_with('0');
+    match value.split_once('.') {
+        None => integer(value),
+        Some((whole, fraction)) => {
+            (whole == "0" || integer(whole))
+                && digits(fraction)
+                && fraction.bytes().last().is_some_and(|b| b != b'0')
+        }
+    }
 }
 
 /// The direction an attribute value (without the leading `a=`) states, or
