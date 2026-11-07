@@ -196,7 +196,7 @@ impl ProxyCore {
         };
 
         // ── §16.4 Route preprocessing + direction (`classify`) ──────────────
-        let Some((mut draft, c)) = self.classify(req, src, face, req.thaw()) else {
+        let Some((mut draft, c)) = self.classify(msg, req, src, face, req.thaw()) else {
             return self.drop_unforwardable();
         };
 

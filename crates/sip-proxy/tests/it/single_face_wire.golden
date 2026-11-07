@@ -1,0 +1,124 @@
+=== 1 a caller's INVITE
+--- worker from 192.0.2.250:5060
+INVITE sip:bob@198.51.100.20:5060 SIP/2.0
+Via: SIP/2.0/UDP 192.0.2.250:5060;branch=z9hG4bK3b6b2d41a9953ee1;rport
+Record-Route: <sip:192.0.2.250:5060;outbound;lr>
+Record-Route: <sip:192.0.2.250:5060;target=10.0.0.8:5060;lr>
+Via: SIP/2.0/UDP 198.51.100.10:5060;branch=z9hG4bKwire;rport=5060;received=198.51.100.10
+Max-Forwards: 69
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>
+Call-ID: wire@example.com
+CSeq: 1 INVITE
+Contact: <sip:party@198.51.100.10:5060>
+Content-Length: 0
+
+=== 2 the worker's 180
+--- caller from 192.0.2.250:5060
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 198.51.100.10:5060;branch=z9hG4bKwire;rport=5060;received=198.51.100.10
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>;tag=b
+Call-ID: wire@example.com
+CSeq: 1 INVITE
+Content-Length: 0
+
+=== 3 the worker's INVITE
+--- callee from 192.0.2.250:5060
+INVITE sip:bob@198.51.100.20:5060 SIP/2.0
+Via: SIP/2.0/UDP 192.0.2.250:5060;branch=z9hG4bK0b4d85f0d8e917ef;rport
+Record-Route: <sip:192.0.2.250:5060;target=10.0.0.8:5060;lr>
+Record-Route: <sip:192.0.2.250:5060;outbound;lr>
+Via: SIP/2.0/UDP 10.0.0.8:5060;branch=z9hG4bKwire;rport=5060;received=10.0.0.8
+Max-Forwards: 69
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>
+Call-ID: wire@example.com
+CSeq: 1 INVITE
+Contact: <sip:party@10.0.0.8:5060>
+Content-Length: 0
+
+=== 4 its CANCEL
+--- callee from 192.0.2.250:5060
+CANCEL sip:bob@198.51.100.20:5060 SIP/2.0
+Via: SIP/2.0/UDP 192.0.2.250:5060;branch=z9hG4bK0b4d85f0d8e917ef;rport
+Via: SIP/2.0/UDP 10.0.0.8:5060;branch=z9hG4bKwire;rport=5060;received=10.0.0.8
+Max-Forwards: 69
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>
+Call-ID: wire@example.com
+CSeq: 1 CANCEL
+Contact: <sip:party@10.0.0.8:5060>
+Content-Length: 0
+
+=== 5 the callee's 200
+--- worker from 192.0.2.250:5060
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.0.0.8:5060;branch=z9hG4bKwire;rport=5060;received=10.0.0.8
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>;tag=b
+Call-ID: wire@example.com
+CSeq: 1 INVITE
+Content-Length: 0
+
+=== 6 a caller's BYE on the cookie
+--- worker from 192.0.2.250:5060
+BYE sip:b2bua@192.0.2.250:5060 SIP/2.0
+Via: SIP/2.0/UDP 192.0.2.250:5060;branch=z9hG4bK7b31dc21b7da8242;rport
+Via: SIP/2.0/UDP 198.51.100.10:5060;branch=z9hG4bKwire;rport=5060;received=198.51.100.10
+Max-Forwards: 69
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>;tag=b
+Call-ID: wire@example.com
+CSeq: 2 BYE
+Contact: <sip:party@198.51.100.10:5060>
+Content-Length: 0
+
+=== 7 the worker's keepalive
+--- caller from 192.0.2.250:5060
+OPTIONS sip:alice@198.51.100.10:5060 SIP/2.0
+Via: SIP/2.0/UDP 192.0.2.250:5060;branch=z9hG4bK7a3219c687baebbe;rport
+Via: SIP/2.0/UDP 10.0.0.8:5060;branch=z9hG4bKwire;rport=5060;received=10.0.0.8
+Max-Forwards: 69
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>;tag=b
+Call-ID: wire@example.com
+CSeq: 3 OPTIONS
+Contact: <sip:party@10.0.0.8:5060>
+Content-Length: 0
+
+=== 8 the worker's request past a loose hop
+--- hop from 192.0.2.250:5060
+INVITE sip:bob@198.51.100.20:5060 SIP/2.0
+Via: SIP/2.0/UDP 192.0.2.250:5060;branch=z9hG4bKcb36d752c749a18e;rport
+Via: SIP/2.0/UDP 10.0.0.8:5060;branch=z9hG4bKwire;rport=5060;received=10.0.0.8
+Max-Forwards: 69
+Route: <sip:198.51.100.30:5060;lr>
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>;tag=b
+Call-ID: wire@example.com
+CSeq: 4 INVITE
+Contact: <sip:party@10.0.0.8:5060>
+Content-Length: 0
+
+=== 9 a request out of hops: 483
+--- caller from 192.0.2.250:5060
+SIP/2.0 483 Too Many Hops
+Via: SIP/2.0/UDP 198.51.100.10:5060;branch=z9hG4bKwire;rport=5060;received=198.51.100.10
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>;tag=bb271ef346a0ac4f
+Call-ID: wire@example.com
+CSeq: 5 OPTIONS
+Content-Length: 0
+
+=== 10 a request the parser refuses: 400
+--- caller from 192.0.2.250:5060
+SIP/2.0 400 Invalid Request
+Via: SIP/2.0/UDP 198.51.100.10:5060;branch=z9hG4bKwire;rport=5060;received=198.51.100.10
+From: <sip:alice@example.com>;tag=a
+To: <sip:bob@example.com>;tag=bbea6670408ea2bd
+Call-ID: wire@example.com
+CSeq: 6 INVITE
+Warning: 399 192.0.2.250:5060 "Invalid Max-Forwards numeric value: ?abc?"
+Content-Length: 0
+

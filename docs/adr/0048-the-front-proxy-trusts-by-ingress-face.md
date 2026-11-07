@@ -125,8 +125,8 @@ but used it only for a metric.
     sent-by decides the response row, not `received`: a translated worker's
     `received` is a node address. The third row keeps a call that loops back
     through the platform on the workers' plane: its in-dialog request re-enters
-    with two of this proxy's pairs back to back when no hop between the passes
-    Record-Routes, and the workers admit SIP only from the internal VIP and the
+    with two of this proxy's pairs back to back, the last pair's cookie verifying for
+    the call, when no hop between the passes Record-Routes, and the workers admit SIP only from the internal VIP and the
     proxy nodes. This rests on two assumptions of the deployment: everything dialled
     through the proxy, a media resource function included, is on the external plane,
     and no sender on the internal VIP but a worker needs a response relayed. Tests:
@@ -154,10 +154,14 @@ but used it only for a metric.
   that dials the internal address bypasses every rule above.
 - A peer's Contact or Record-Route chooses the Request-URI or the next hop of a
   worker's request, and that request leaves on the external face whatever it names
-  (`crossing_tests::a_contact_naming_a_registry_worker_leaves_external`): no peer aims
-  a worker's request onto the internal plane through this proxy. The node's rule of
-  ADR-0056 §11 drops it there; on a CNI that does not enforce NetworkPolicy, that
-  rule is what protects the workers.
+  (`crossing_tests::a_contact_naming_a_registry_worker_leaves_external`). The node's
+  rule of ADR-0056 §11 drops it there; on a CNI that does not enforce NetworkPolicy,
+  that rule is what protects the workers. Entries naming this proxy prove no recorded
+  pass, only a cookie verifying for the call does
+  (`crossing_tests::a_cookie_that_does_not_verify_for_the_call_proves_no_pass`). So a
+  peer aims a worker's request onto the internal plane only with a cookie this proxy
+  signed for that Call-ID, one it holds from an earlier dialog of its own: the request
+  reaches the worker the cookie names, which holds no such dialog and answers 481.
 - A worker's first hop is the front proxy whatever a callee's Record-Route says,
   the route set intact (`b2bua-core` `relay::egress`); standalone it follows its
   route set.

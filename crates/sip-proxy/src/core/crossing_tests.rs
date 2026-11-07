@@ -8,21 +8,28 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use async_trait::async_trait;
 use sip_clock::Clock;
 use sip_message::SipMessage;
 use tokio::time::Instant;
 
 use super::dual_face_tests::{
-    dual_face_core, dual_face_core_over, header_lines, parse_msg, Fixture, EXT_PORT, EXT_VIP,
-    INT_PORT, INT_VIP, W1,
+    dual_face_core, dual_face_core_over, dual_face_core_routing, header_lines, parse_msg, Fixture,
+    EXT_PORT, EXT_VIP, INT_PORT, INT_VIP, W1,
 };
 use crate::addr::ProxyAddr;
+use crate::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use crate::observability::metrics::{Direction, Face};
 use crate::registry::simulated::SimulatedWorkerRegistry;
 use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::resolver::HostResolver;
+use crate::security::hmac::{HmacKey, StaticHmacKeyProvider};
+use crate::strategies::LoadBalancerStrategy;
+use crate::strategy::{RouteParams, RoutingStrategy};
+use crate::ProxyMetrics;
 
 /// A registry worker outside the prefix the other workers share.
 const W_ELSEWHERE: &str = "172.31.7.7";
@@ -48,6 +55,48 @@ fn two_workers() -> Arc<dyn WorkerRegistry> {
 
 fn core_over_two_workers() -> Fixture {
     dual_face_core_over(two_workers(), None)
+}
+
+/// A dual-face core over the two workers and the load balancer, whose cookies
+/// verify under one key at every instance, with that strategy.
+fn signed_core() -> (Fixture, Arc<LoadBalancerStrategy>) {
+    let clock = Clock::test_at(0);
+    let registry = two_workers();
+    let strategy = Arc::new(LoadBalancerStrategy::new(
+        registry.clone(),
+        Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap()),
+        Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),
+        Arc::new(ProxyMetrics::new()),
+        clock,
+    ));
+    (dual_face_core_routing(registry, strategy.clone(), None), strategy)
+}
+
+/// `params` as the fields of a Route URI.
+fn fields(params: &RouteParams) -> String {
+    let field = |(k, v): (&String, &String)| format!(";{k}={v}");
+    params.iter().map(field).collect()
+}
+
+/// The route set of W1 toward W_ELSEWHERE on `msg`'s call, which looped back
+/// through the platform with no Record-Routing hop between its passes: two of
+/// this proxy's pairs back to back, each cookie signed for the call.
+fn re_entry_route(strategy: &LoadBalancerStrategy, msg: &SipMessage) -> String {
+    let cookie = |worker: &str| {
+        fields(&strategy.encode_stickiness(&ProxyAddr::new(worker, 5060), msg).expect("a cookie"))
+    };
+    let (first, last) = (cookie(W1), cookie(W_ELSEWHERE));
+    format!(
+        "<sip:{INT_VIP}:{INT_PORT};outbound;lr>, <sip:{EXT_VIP}:{EXT_PORT}{first};lr>, \
+         <sip:{EXT_VIP}:{EXT_PORT}{last};lr>, <sip:{INT_VIP}:{INT_PORT}{last};outbound;lr>"
+    )
+}
+
+/// A BYE of the call `re_entry_route` states, from W1.
+fn re_entry_bye(strategy: &LoadBalancerStrategy) -> SipMessage {
+    let call = bye(W1, &worker_marker(), "sip:b2bua@example.com");
+    let route = re_entry_route(strategy, &call);
+    bye(W1, &route, &format!("sip:b2bua@{EXT_VIP}:{EXT_PORT}"))
 }
 
 fn int_advertise() -> String {
@@ -202,14 +251,8 @@ Content-Length: 0\r\n\r\n"
 /// comes back, both on the internal face.
 #[tokio::test]
 async fn a_re_entry_with_no_record_route_between_the_passes_stays_internal() {
-    let f = core_over_two_workers();
-    let route = format!(
-        "<sip:{INT_VIP}:{INT_PORT};outbound;lr>, <sip:{EXT_VIP}:{EXT_PORT};target={W1}:5060;lr>, \
-         <sip:{EXT_VIP}:{EXT_PORT};target={W_ELSEWHERE}:5060;lr>, \
-         <sip:{INT_VIP}:{INT_PORT};target={W_ELSEWHERE}:5060;outbound;lr>"
-    );
-    let msg = bye(W1, &route, &format!("sip:b2bua@{EXT_VIP}:{EXT_PORT}"));
-    f.core.route_request(&msg, sa(W1, 5060), Face::Internal).await;
+    let (f, strategy) = signed_core();
+    f.core.route_request(&re_entry_bye(&strategy), sa(W1, 5060), Face::Internal).await;
     let (face, dst, bytes) = one_sent(&f);
     assert_eq!((face, dst), ("int", sa(W_ELSEWHERE, 5060)));
     assert!(top_via(&bytes).contains(&int_advertise()));
@@ -234,13 +277,9 @@ Content-Length: 0\r\n\r\n"
 /// same egress and the same sent-by from the message alone.
 #[tokio::test]
 async fn the_other_instance_picks_the_same_egress_with_no_memo() {
-    let route = format!(
-        "<sip:{INT_VIP}:{INT_PORT};outbound;lr>, <sip:{EXT_VIP}:{EXT_PORT};target={W1}:5060;lr>, \
-         <sip:{EXT_VIP}:{EXT_PORT};target={W_ELSEWHERE}:5060;lr>, \
-         <sip:{INT_VIP}:{INT_PORT};target={W_ELSEWHERE}:5060;outbound;lr>"
-    );
-    let msg = bye(W1, &route, &format!("sip:b2bua@{EXT_VIP}:{EXT_PORT}"));
-    let (one, other) = (core_over_two_workers(), core_over_two_workers());
+    let (one, strategy) = signed_core();
+    let (other, _) = signed_core();
+    let msg = re_entry_bye(&strategy);
     one.core.route_request(&msg, sa(W1, 5060), Face::Internal).await;
     other.core.route_request(&msg, sa(W1, 5060), Face::Internal).await;
     let (first, second) = (one_sent(&one), one_sent(&other));
@@ -286,6 +325,35 @@ async fn a_name_target_and_its_resolved_address_are_one_face() {
     assert_eq!(face, "ext", "the socket of the sent-by the Via states");
 }
 
+struct CountingResolver(Arc<AtomicU32>);
+
+#[async_trait]
+impl HostResolver for CountingResolver {
+    async fn resolve(&self, _host: &str, port: u16, _deadline: Instant) -> Vec<SocketAddr> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        vec![sa(NEAR_HOST, port)]
+    }
+}
+
+/// A prewarmed name is a worker's dialled target, so it warms the face that
+/// request leaves on: the first send finds it, with no second lookup.
+#[tokio::test(start_paused = true)]
+async fn a_prewarmed_name_is_warm_on_the_face_its_request_leaves() {
+    let lookups = Arc::new(AtomicU32::new(0));
+    let resolver = Arc::new(CountingResolver(lookups.clone()));
+    let f = dual_face_core_over(two_workers(), Some(resolver));
+    f.core.prewarm_named_targets(vec![ProxyAddr::new("callee.example", 5060)]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(lookups.load(Ordering::SeqCst), 1, "the prewarm resolved it");
+
+    let uri = "sip:bob@callee.example:5060";
+    f.core.route_request(&bye(W1, &worker_marker(), uri), sa(W1, 5060), Face::Internal).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (face, dst, _) = one_sent(&f);
+    assert_eq!((face, dst), ("ext", sa(NEAR_HOST, 5060)));
+    assert_eq!(lookups.load(Ordering::SeqCst), 1, "no second lookup");
+}
+
 // ── Responses ───────────────────────────────────────────────────────────────
 
 fn response_with_vias(vias: &str) -> sip_message::types::SipResponse {
@@ -329,6 +397,44 @@ Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKw\r\n"
     f.core.handle_response(resp, sa(W1, 5060), Face::Internal).await;
     let (face, dst, _) = one_sent(&f);
     assert_eq!((face, dst), ("int", sa(W_ELSEWHERE, 5060)));
+}
+
+/// The owner rule's own answer for a worker holding its transaction, along its
+/// Via: the cookie this proxy put on its top Via names that worker.
+#[tokio::test]
+async fn a_response_on_a_cookie_for_the_worker_holding_it_leaves_internal() {
+    let (f, _) = signed_core();
+    let dial = parse_msg(&format!(
+        "INVITE sip:bob@{NEAR_HOST}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKw;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:b2bua@example.com>;tag=w\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: crossing-held@example.com\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:b2bua@{EXT_VIP}:{EXT_PORT}>\r\n\
+Route: <sip:{INT_VIP}:{INT_PORT};lr>\r\n\
+Content-Length: 0\r\n\r\n"
+    ));
+    f.core.route_request(&dial, sa(W1, 5060), Face::Internal).await;
+    let (face, _, bytes) = one_sent(&f);
+    assert_eq!(face, "ext");
+    let via = header_lines(&bytes, "Via");
+    assert!(via[0].contains("w_pri="), "the proxy's Via carries the cookie: {}", via[0]);
+    let vias: String = via.iter().map(|v| format!("Via: {v}\r\n")).collect();
+    let SipMessage::Response(resp) = parse_msg(&format!(
+        "SIP/2.0 180 Ringing\r\n\
+{vias}From: <sip:b2bua@example.com>;tag=w\r\n\
+To: <sip:bob@example.com>;tag=b\r\n\
+Call-ID: crossing-held@example.com\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+    )) else {
+        panic!("a response")
+    };
+    f.core.handle_response(resp, sa(NEAR_HOST, 5060), Face::Internal).await;
+    let (face, dst, _) = one_sent(&f);
+    assert_eq!((face, dst), ("int", sa(W1, 5060)));
 }
 
 /// The next Via's sent-by names the worker: its `received` is a node address
@@ -395,8 +501,8 @@ async fn an_own_final_leaves_the_internal_face_it_was_asked_on() {
     assert_eq!((face, dst), ("int", src));
 }
 
-/// The residuals ADR-0048 states.
-///
+// ── The residuals ADR-0048 states ───────────────────────────────────────────
+
 /// A sender no registry lists is no worker the response row can name.
 #[tokio::test]
 async fn a_response_for_a_sender_no_registry_holds_leaves_external() {
@@ -414,12 +520,18 @@ Via: SIP/2.0/UDP {UNLISTED}:5060;branch=z9hG4bKu\r\n"
 /// from a node address and its ACK follows it there, off the registry.
 #[tokio::test]
 async fn a_spirals_ack_to_a_translated_worker_leaves_external() {
-    let f = core_over_two_workers();
-    let route = format!(
-        "<sip:{INT_VIP}:{INT_PORT};outbound;lr>, <sip:{EXT_VIP}:{EXT_PORT};target={W1}:5060;lr>, \
-         <sip:{EXT_VIP}:{EXT_PORT};target={W_ELSEWHERE}:5060;lr>, \
-         <sip:{INT_VIP}:{INT_PORT};target={W_ELSEWHERE}:5060;outbound;lr>"
+    let (f, strategy) = signed_core();
+    let of_the_call = parse_msg(
+        "OPTIONS sip:b2bua@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.244.5.8:5060;branch=z9hG4bKcall\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:b2bua@example.com>;tag=w\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: crossing-ack@example.com\r\n\
+CSeq: 1 OPTIONS\r\n\
+Content-Length: 0\r\n\r\n",
     );
+    let route = re_entry_route(&strategy, &of_the_call);
     let in_dialog = |method: &str, seq: &str| {
         parse_msg(&format!(
             "{method} sip:b2bua@{EXT_VIP}:{EXT_PORT} SIP/2.0\r\n\
@@ -454,4 +566,53 @@ Content-Length: 0\r\n\r\n"
     f.core.route_request(&in_dialog("ACK", "2"), sa(W1, 5060), Face::Internal).await;
     let (face, dst, _) = one_sent(&f);
     assert_eq!((face, dst), ("ext", sa(NODE, 40001)));
+}
+
+/// A caller's Record-Route below the proxy's pair, two entries naming the proxy
+/// and no marker: the worker's route set toward her holds four own entries and
+/// no recorded pass. Its keepalive or BYE goes to her, on the external face.
+#[tokio::test]
+async fn a_callers_record_route_does_not_aim_a_worker_at_the_internal_plane() {
+    let f = core_over_two_workers();
+    let route = format!(
+        "<sip:{INT_VIP}:{INT_PORT};outbound;lr>, <sip:{EXT_VIP}:{EXT_PORT};lr>, \
+         <sip:{EXT_VIP}:{EXT_PORT};lr>, <sip:{INT_VIP}:{INT_PORT};lr>"
+    );
+    let msg = bye(W1, &route, "sip:mallory@203.0.113.66:5060");
+    f.core.route_request(&msg, sa(W1, 5060), Face::Internal).await;
+    let (face, dst, _) = one_sent(&f);
+    assert_eq!((face, dst), ("ext", sa("203.0.113.66", 5060)), "to her, on the external face");
+}
+
+/// The same over the load balancer, a cookie signed for another call among them:
+/// only one that verifies for this call is a recorded pass. No fresh selection
+/// runs and no worker hears it.
+#[tokio::test]
+async fn a_cookie_that_does_not_verify_for_the_call_proves_no_pass() {
+    let (f, strategy) = signed_core();
+    let elsewhere = parse_msg(
+        "OPTIONS sip:b2bua@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.244.5.8:5060;branch=z9hG4bKother\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:b2bua@example.com>;tag=w\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: another-call@example.com\r\n\
+CSeq: 1 OPTIONS\r\n\
+Content-Length: 0\r\n\r\n",
+    );
+    let replayed = fields(
+        &strategy
+            .encode_stickiness(&ProxyAddr::new(W_ELSEWHERE, 5060), &elsewhere)
+            .expect("cookie"),
+    );
+    for last in ["", replayed.as_str()] {
+        let route = format!(
+            "<sip:{INT_VIP}:{INT_PORT};outbound;lr>, <sip:{EXT_VIP}:{EXT_PORT};lr>, \
+             <sip:{EXT_VIP}:{EXT_PORT}{last};lr>, <sip:{INT_VIP}:{INT_PORT};lr>"
+        );
+        let msg = bye(W1, &route, "sip:mallory@203.0.113.66:5060");
+        f.core.route_request(&msg, sa(W1, 5060), Face::Internal).await;
+        let (face, dst, _) = one_sent(&f);
+        assert_eq!((face, dst), ("ext", sa("203.0.113.66", 5060)), "last entry: {last:?}");
+    }
 }

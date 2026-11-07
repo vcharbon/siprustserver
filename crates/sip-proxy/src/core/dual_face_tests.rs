@@ -101,10 +101,11 @@ pub(super) fn dual_face_core() -> Fixture {
     dual_face_core_over(reg, None)
 }
 
-/// A dual-face core over `reg`, forwarding every new dialog to `W1`, resolving
-/// names through `resolver` when one is given.
-pub(super) fn dual_face_core_over(
+/// A dual-face core over `reg` routing by `strategy`, resolving names through
+/// `resolver` when one is given.
+pub(super) fn dual_face_core_routing(
     reg: Arc<dyn WorkerRegistry>,
+    strategy: Arc<dyn RoutingStrategy>,
     resolver: Option<Arc<dyn HostResolver>>,
 ) -> Fixture {
     let sent: Arc<Mutex<Vec<Sent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -118,8 +119,6 @@ pub(super) fn dual_face_core_over(
         addr: format!("{EXT_VIP}:{EXT_PORT}").parse().unwrap(),
         sent: sent.clone(),
     };
-    let strategy: Arc<dyn RoutingStrategy> =
-        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let metrics = Arc::new(ProxyMetrics::new());
     let mut builder = ProxyCoreBuilder::for_test(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
         .clock(Clock::test_at(0))
@@ -133,6 +132,17 @@ pub(super) fn dual_face_core_over(
     }
     let core = builder.build(Box::new(int_ep));
     Fixture { core, sent, metrics }
+}
+
+/// A dual-face core over `reg`, forwarding every new dialog to `W1`, resolving
+/// names through `resolver` when one is given.
+pub(super) fn dual_face_core_over(
+    reg: Arc<dyn WorkerRegistry>,
+    resolver: Option<Arc<dyn HostResolver>>,
+) -> Fixture {
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+    dual_face_core_routing(reg, strategy, resolver)
 }
 
 pub(super) fn parse_msg(raw: &str) -> SipMessage {

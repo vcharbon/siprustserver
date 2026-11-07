@@ -34,5 +34,6 @@ mod rfc_proxy_compliance;
 mod select_failure_503;
 mod self_gate_admission;
 mod shard_e2e;
+mod single_face_wire;
 mod stateless_final_response_contract;
 mod transit_only;

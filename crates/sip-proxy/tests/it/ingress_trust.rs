@@ -477,3 +477,21 @@ async fn own_finals_to_a_sender_near_the_workers_leave_the_external_face() {
     let warning = header_lines(answer, "Warning");
     assert!(warning[0].contains(&format!("{EXT_VIP}:{EXT_PORT}")), "{warning:?}");
 }
+
+/// The internal face's own finals: a datagram the parser refuses, from a node
+/// address no worker holds, is answered from the internal VIP, whose Warning
+/// names it.
+#[tokio::test(start_paused = true)]
+async fn a_parse_refusal_on_the_internal_face_is_answered_from_it() {
+    let lab = proxy_lab(true, true).await;
+    let refused = request("INVITE", "internal-refused", &worker_via(), None, None)
+        .replace("Max-Forwards: 70", "Max-Forwards: abc");
+    lab.translated_worker.send_to(refused.as_bytes(), int_vip()).await.unwrap();
+    settle().await;
+    let answers = drain(&*lab.translated_worker);
+    let [(from, answer)] = answers.as_slice() else { panic!("one answer: {answers:?}") };
+    assert!(start_line(answer).starts_with("SIP/2.0 400"), "{}", start_line(answer));
+    assert_eq!(*from, int_vip());
+    let warning = header_lines(answer, "Warning");
+    assert!(warning[0].contains(&format!("{INT_VIP}:{INT_PORT}")), "{warning:?}");
+}

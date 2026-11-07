@@ -9,8 +9,10 @@
 //!
 //! - **Internal face**, and the one face of a single-face proxy: the request
 //!   is worker-outbound when its direction entry carries `;outbound`, when its
-//!   source is a registry worker, or when its top Via sent-by is one. A loose
-//!   Route past the proxy's own is its next hop.
+//!   source is a registry worker, or when its top Via sent-by is one, unless two
+//!   or more whole pairs lead its Route and the last one's cookie verifies for
+//!   the call: that request re-enters through a later pass. A loose Route past
+//!   the proxy's own is its next hop.
 //! - **External face**: none of these claims holds. Each one is ignored and
 //!   counted, every Route entry past the proxy's own is removed and counted,
 //!   and the request is routed as an inbound one, by its cookie or by a fresh
@@ -22,7 +24,7 @@ use std::net::SocketAddr;
 
 use sip_message::draft::RequestDraft;
 use sip_message::header::{RouteEntry, Uri};
-use sip_message::{HeaderName, SipRequest};
+use sip_message::{HeaderName, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::headers::{cookie_params, route_target};
@@ -81,14 +83,16 @@ impl ProxyCore {
         self.is_self_addr(target, port).then(|| uri.clone().without_own_maddr())
     }
 
-    /// Pop the proxy's own Route entries off `draft` and classify `req`,
-    /// received from `src` on `face`. `None`: the draft refused the pop.
+    /// Pop the proxy's own Route entries off `draft` and classify `req`, the
+    /// request `msg` holds, received from `src` on `face`. `None`: the draft
+    /// refused the pop.
     ///
     /// A route set the strict reader rejects is one this hop cannot act on:
     /// on the internal face it rides through as it arrived, on the external
     /// face it is removed.
     pub(super) fn classify(
         &self,
+        msg: &SipMessage,
         req: &SipRequest,
         src: SocketAddr,
         face: Face,
@@ -156,10 +160,14 @@ impl ProxyCore {
         } else {
             None
         };
-        // A run of two or more whole pairs whose last pair decodes is a request
-        // re-entering through a later pass: its worker Via is the earlier
-        // pass's origin and does not make it worker-outbound.
-        let spiral_reentry = self_routes > 2 && self_routes % 2 == 0 && cookie.is_some();
+        // A run of two or more whole pairs whose last pair carries a cookie that
+        // verifies for this call is a request re-entering through a later pass:
+        // its worker Via is the earlier pass's origin and does not make it
+        // worker-outbound. Entries naming this proxy prove no pass: a peer's
+        // Record-Route may state them.
+        let spiral_reentry = self_routes > 2
+            && self_routes % 2 == 0
+            && cookie.as_ref().is_some_and(|c| self.strategy.verified_cookie(c, msg).is_some());
         if !worker_outbound
             && !spiral_reentry
             && (self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()

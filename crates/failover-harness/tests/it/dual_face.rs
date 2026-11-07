@@ -462,3 +462,39 @@ async fn dual_face_takeover_moves_both_faces_together() {
     fh.assert_full_rfc_clean("dual-face-takeover");
     drop(proxy_b);
 }
+
+/// **A caller's Record-Route naming the proxy.** Alice records two entries of
+/// her own at the proxy's addresses, so the worker's route set toward her holds
+/// four entries naming the proxy and only the first two are its pair. The BYE
+/// the worker relays toward her reaches her and no worker, which would answer it
+/// with a stray 481.
+#[tokio::test(start_paused = true)]
+async fn a_callers_record_route_at_the_proxy_keeps_the_workers_requests_to_her() {
+    let mut fh = FailoverHarness::new("dual-face-caller-record-route", &["b1"]);
+    fh.allow_rfc_violation(
+        "no-record-route-from-ua",
+        "alice plays a caller recording entries at the proxy's addresses, the input of this test",
+    );
+    let (alice, bob, proxy, b1) = stand_up(&mut fh, route_all_to_bob()).await;
+    let recorded = format!("<sip:{PROXY_EXT};lr>, <sip:{PROXY_INT};lr>");
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Record-Route", &recorded)
+        .through(proxy.ext_addr())
+        .send()
+        .await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bob_dialog = bob_uas.dialog();
+    let mut bye = bob_dialog.bye().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    assert_reaped(&fh, &b1).await;
+    drop(proxy);
+}

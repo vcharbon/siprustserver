@@ -12,10 +12,13 @@ use sip_net_testkit::SimulatedSignalingNetwork;
 
 use crate::addr::ProxyAddr;
 use crate::core::{ExternalFaceParts, ProxyCoreBuilder};
+use crate::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use crate::observability::metrics::{Face, RoutingDecisionKind, UntrustedClaim};
 use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::{WorkerEntry, WorkerRegistry};
+use crate::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use crate::strategies::forward_all::ForwardAllStrategy;
+use crate::strategies::LoadBalancerStrategy;
 use crate::{ProxyMetrics, RoutingStrategy};
 
 // Worker w1 lives at its POD ip:5060 (what the registry holds and the worker
@@ -27,13 +30,20 @@ const PROXY_VIP: &str = "192.0.2.250";
 const EXT_VIP: &str = "198.51.100.250";
 
 async fn core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore {
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
+    core_routing(reg, strategy).await
+}
+
+async fn core_routing(
+    reg: Arc<dyn WorkerRegistry>,
+    strategy: Arc<dyn RoutingStrategy>,
+) -> crate::core::ProxyCore {
     let net = SimulatedSignalingNetwork::new(1);
     let ep = net
         .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
         .await
         .unwrap();
-    let strategy: Arc<dyn RoutingStrategy> =
-        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
     ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
         .clock(Clock::test_at(0))
         .metrics(Arc::new(ProxyMetrics::new()))
@@ -403,7 +413,11 @@ const THIRD_PARTY: &str = "10.244.9.1";
 /// recorded relaying it in to w2. The Request-URI is call 2's Contact at the
 /// pod that held it before a takeover.
 fn spiralled_reinvite(between: &str) -> SipMessage {
-    let raw = format!(
+    CustomParser::default().parse(spiralled_reinvite_text(between).as_bytes()).unwrap()
+}
+
+fn spiralled_reinvite_text(between: &str) -> String {
+    format!(
         "INVITE sip:b2bua@10.244.5.77:5060;leg=a SIP/2.0\r\n\
 Via: SIP/2.0/UDP {W1_POD}:5060;branch=z9hG4bKspiral;rport\r\n\
 Max-Forwards: 70\r\n\
@@ -418,8 +432,7 @@ Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Route: <sip:{PROXY_VIP}:5060;target={W2_POD}:5060;lr>\r\n\
 Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Content-Length: 0\r\n\r\n"
-    );
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    )
 }
 
 fn two_workers() -> Arc<dyn WorkerRegistry> {
@@ -430,14 +443,34 @@ fn two_workers() -> Arc<dyn WorkerRegistry> {
 }
 
 // Two passes back to back: the request leaves w1 through the first pair and
-// enters call 2 through the second, whose cookie decides. Read from the first
-// pair's `;outbound`, it would go to the Request-URI, a pod no longer serving.
+// enters call 2 through the second, whose cookie, signed for this call, decides.
+// Read from the first pair's `;outbound`, it would go to the Request-URI, a pod
+// no longer serving.
 #[tokio::test]
 async fn a_route_set_with_two_own_pairs_back_to_back_follows_the_last_pair() {
-    let core = core(two_workers()).await;
-    let outcome = core
-        .route_request_from(&spiralled_reinvite(""), format!("{W1_POD}:5060").parse().unwrap())
-        .await;
+    let registry = two_workers();
+    let strategy = Arc::new(LoadBalancerStrategy::new(
+        registry.clone(),
+        Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap()),
+        Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),
+        Arc::new(ProxyMetrics::new()),
+        Clock::test_at(0),
+    ));
+    let core = core_routing(registry, strategy.clone()).await;
+    let of_the_call = spiralled_reinvite("");
+    let cookie = |worker: &str| -> String {
+        strategy
+            .encode_stickiness(&ProxyAddr::new(worker, 5060), &of_the_call)
+            .expect("a cookie")
+            .iter()
+            .map(|(k, v)| format!(";{k}={v}"))
+            .collect()
+    };
+    let signed = spiralled_reinvite_text("")
+        .replace(&format!(";target={W1_POD}:5060"), &cookie(W1_POD))
+        .replace(&format!(";target={W2_POD}:5060"), &cookie(W2_POD));
+    let msg = CustomParser::default().parse(signed.as_bytes()).unwrap();
+    let outcome = core.route_request_from(&msg, format!("{W1_POD}:5060").parse().unwrap()).await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward);
     assert_eq!(outcome.target, Some(ProxyAddr::new(W2_POD, 5060)));
