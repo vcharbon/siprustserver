@@ -37,9 +37,9 @@ pub struct Request {
 pub struct Response {
     /// The `request` attribute: the command type answered, raw.
     pub request: Option<String>,
-    /// The `code` attribute where it is a status code of three digits (an
-    /// RFC 3261 status class, §10.2); `None` where it is absent or anything
-    /// else.
+    /// The `code` attribute where it is a three-digit status code of a class
+    /// MSCML uses (2xx, 4xx, 5xx, §10.2); `None` where it is absent or
+    /// anything else.
     pub code: Option<u16>,
     /// The `reason` attribute, raw.
     pub reason: Option<String>,
@@ -100,12 +100,20 @@ pub fn responses_in(content_type: Option<&str>, body: &[u8]) -> Vec<Response> {
         .collect()
 }
 
-/// `value` as a three-digit code, nothing else around it.
+/// `value` as a three-digit code of a class MSCML uses, nothing else around
+/// it: there are no 1xx, 3xx or 6xx codes in MSCML (RFC 5022 §10.2).
 fn three_digits(value: &str) -> Option<u16> {
-    if value.len() != 3 || !value.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+    match value.as_bytes() {
+        [b'2' | b'4' | b'5', b, c] if b.is_ascii_digit() && c.is_ascii_digit() => {
+            value.parse().ok()
+        }
+        _ => None,
     }
-    value.parse().ok()
+}
+
+/// XML white space (XML 1.0 `S`): SP, HTAB, CR and LF.
+fn is_xml_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\r' | '\n')
 }
 
 /// The `request` attribute of an MSCML body's `<response>` — the command type
@@ -215,9 +223,7 @@ impl<'a> Iterator for Tags<'a> {
             let close = rest.starts_with("</");
             let name_start = open + if close { 2 } else { 1 };
             let name_end = name_start
-                + xml
-                    .get(name_start..)?
-                    .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')?;
+                + xml.get(name_start..)?.find(|c: char| is_xml_space(c) || c == '/' || c == '>')?;
             // A `>` inside a quoted attribute value does not end the tag.
             let mut quote = None;
             let mut gt = None;
@@ -259,19 +265,23 @@ struct Attribute<'a> {
     quote: char,
 }
 
-/// The attribute `name` of `tag`, where it states one in well-formed shape.
+/// The attribute `name` of `tag`, where it states one in well-formed shape:
+/// XML white space before each attribute (XML 1.0 §3.1 `STag`), around `=`
+/// optional. The walk stops at the first attribute off that shape.
 fn attribute<'a>(xml: &'a str, tag: &Tag<'_>, name: &str) -> Option<Attribute<'a>> {
     let end = tag.attrs_end;
     let within = |from: usize| xml.get(from..end);
-    let lead_ws = |from: usize| within(from).map(|s| s.len() - s.trim_start().len());
+    let lead_ws =
+        |from: usize| within(from).map(|s| s.len() - s.trim_start_matches(is_xml_space).len());
     let mut at = tag.name_end;
     loop {
         let start = at;
-        at += lead_ws(at)?;
-        if at >= end {
+        let space = lead_ws(at)?;
+        at += space;
+        if at >= end || space == 0 {
             return None;
         }
-        let name_end = at + within(at)?.find(|c: char| c.is_ascii_whitespace() || c == '=')?;
+        let name_end = at + within(at)?.find(|c: char| is_xml_space(c) || c == '=')?;
         let attr_name = xml.get(at..name_end)?;
         at = name_end;
         at += lead_ws(at)?;

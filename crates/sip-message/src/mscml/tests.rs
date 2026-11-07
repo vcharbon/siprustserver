@@ -123,14 +123,48 @@ fn only_the_response_element_s_own_attributes_are_read() {
     assert_eq!(response(r#"<response request="play" code="200"/>"#), None, "no root");
 }
 
-/// A code is three digits and nothing else.
+/// A code is three digits of a class MSCML uses (2xx, 4xx, 5xx) and nothing
+/// else.
 #[test]
 fn a_code_off_three_digits_reads_as_none() {
-    for code in ["", "20", "2000", " 200", "200 ", "+20", "2x0", "２００"] {
+    for code in ["200", "299", "404", "599"] {
+        let body = wrap(&format!(r#"<response request="play" code="{code}"/>"#));
+        assert_eq!(response(&body).and_then(|r| r.code).map(|c| c.to_string()), Some(code.into()));
+    }
+    for code in [
+        "",
+        "20",
+        "2000",
+        " 200",
+        "200 ",
+        "+20",
+        "2x0",
+        "２００",
+        "099",
+        "100",
+        "302",
+        "600",
+        "999",
+    ] {
         let body = wrap(&format!(r#"<response request="play" code="{code}"/>"#));
         assert_eq!(response(&body).map(|r| r.code), Some(None), "{code:?}");
     }
     assert_eq!(response(&wrap(r#"<response request="play"/>"#)).map(|r| r.code), Some(None));
+}
+
+/// An attribute is led by XML white space (SP, HTAB, CR, LF): one glued to
+/// the value before it, or led by another space character, is not read, and
+/// neither is any attribute after it.
+#[test]
+fn an_attribute_needs_xml_space_before_it() {
+    let code = |inner: &str| response(&wrap(inner)).and_then(|r| r.code);
+    assert_eq!(code("<response\trequest=\"play\"\r\n code\t=\n\"200\"/>"), Some(200));
+    assert_eq!(code(r#"<response request="play"code="200"/>"#), None);
+    assert_eq!(code("<response request=\"play\"\u{a0}code=\"200\"/>"), None);
+    assert_eq!(code("<response request=\"play\"\u{c}code=\"200\"/>"), None);
+    assert_eq!(code("<response request=\"play\" \u{a0}code=\"200\"/>"), None);
+    let glued = response(&wrap(r#"<response request="play"code="200"/>"#));
+    assert_eq!(glued.and_then(|r| r.request).as_deref(), Some("play"));
 }
 
 /// The responses are read off a bare MSCML body and off each MSCML part,

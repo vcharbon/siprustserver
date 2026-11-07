@@ -331,6 +331,7 @@ fn body(msg: &SipMessage, d: &mut Digest) {
     let content_type = raw_text(msg, HeaderName::ContentType).into_iter().next();
     let ct = content_type.as_ref().map(|c| c.as_str());
     d.note("mscml", &mscml::requests_in(ct, body));
+    d.note("mscml-response", &mscml::responses_in(ct, body));
     d.note("sipfrag-status", &sipfrag::status(body));
     d.note("sipfrag-fields", &sipfrag::header_fields(body));
     d.note("entity-parts", &entity_parts(ct, &[], body));

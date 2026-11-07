@@ -106,6 +106,10 @@ fn multipart_body() -> String {
 
 const MSCML: &str = "<?xml version=\"1.0\"?><MediaServerControl version=\"1.0\"><request><play id=\"332985001\"><prompt><audio url=\"http://example.com/a.wav\"/></prompt></play></request></MediaServerControl>";
 
+/// A media server's report on a `play`, its attributes spaced around `=` and
+/// a `text` holding `>`.
+const MSCML_RESPONSE: &str = "<?xml version=\"1.0\"?>\r\n<MediaServerControl version=\"1.0\">\r\n  <response request = \"play\" id='332985001' text=\"a > b\" code=\"200\" reason=\"EOF\"/>\r\n</MediaServerControl>";
+
 fn synthetic() -> Vec<Seed> {
     let invite_headers = [
         VIA,
@@ -289,6 +293,14 @@ fn more_synthetic() -> Vec<(&'static str, Vec<u8>)> {
                 "INFO sip:ms@203.0.113.9 SIP/2.0",
                 &[VIA, "Max-Forwards: 70", FROM, TO_TAGGED, CALL_ID, "CSeq: 9 INFO", "Content-Type: application/mediaservercontrol+xml"],
                 MSCML,
+            ),
+        ),
+        (
+            "info-mscml-response",
+            message(
+                "INFO sip:as@203.0.113.9 SIP/2.0",
+                &[VIA, "Max-Forwards: 70", FROM, TO_TAGGED, CALL_ID, "CSeq: 10 INFO", "Content-Type: application/mediaservercontrol+xml"],
+                MSCML_RESPONSE,
             ),
         ),
         (
