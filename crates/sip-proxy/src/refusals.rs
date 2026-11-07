@@ -234,6 +234,13 @@ impl Refusals {
         answer(cancel, src, 200, "OK", to_tag, None).ok()
     }
 
+    /// Whether `ack` acknowledges a final this memo holds for its INVITE,
+    /// refused within 64·T1 of `now_ms`: the To-tag a refusal of an in-dialog
+    /// INVITE echoes is its dialog's, so only the memo tells (§17.1.1.3).
+    pub fn acknowledges_refusal(&self, ack: &SipRequest, now_ms: u64) -> bool {
+        self.remembered(ack, Method::Invite.as_str(), now_ms).is_some()
+    }
+
     /// The To-tag and answer of the remembered `method` refusal of `req`'s
     /// transaction.
     fn remembered(&self, req: &SipRequest, method: &str, now_ms: u64) -> Option<(String, Answer)> {

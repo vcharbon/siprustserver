@@ -70,6 +70,32 @@ async fn an_invite_that_cannot_leave_with_the_hops_lines_is_answered_513_on_its_
     assert!(text.starts_with("SIP/2.0 200 OK\r\n") && text.contains("CSeq: 1 CANCEL"), "{text}");
 }
 
+/// A caller's re-INVITE echoes its dialog's To-tag on the proxy's 513, and the
+/// ACK of that 513 ends at the proxy, its UAS (RFC 3261 §17.1.1.3).
+#[tokio::test]
+async fn the_ack_of_a_513_to_a_reinvite_goes_no_further() {
+    let fx = dual_face_core();
+    let tagged = String::from_utf8_lossy(caller_invite("too-large-re").image())
+        .replacen(
+            &format!("To: <sip:bob@{CALLEE}>"),
+            &format!("To: <sip:bob@{CALLEE}>;tag=bobtag"),
+            1,
+        )
+        .replacen("CSeq: 1 INVITE", "CSeq: 2 INVITE", 1);
+    let reinvite = filled(&parse_msg(&tagged));
+    fx.core.route_request(&reinvite, caller_src(), Face::External).await;
+    let sent = fx.take_sent();
+    let [(_, _, bytes)] = sent.as_slice() else { panic!("one answer: {sent:?}") };
+    let text = String::from_utf8_lossy(bytes);
+    assert!(text.starts_with("SIP/2.0 513 ") && text.contains(";tag=bobtag"), "{text}");
+
+    let ack =
+        tagged.replacen("INVITE sip:", "ACK sip:", 1).replacen("CSeq: 2 INVITE", "CSeq: 2 ACK", 1);
+    fx.core.route_request(&parse_msg(&ack), caller_src(), Face::External).await;
+    let sent = fx.take_sent();
+    assert!(sent.is_empty(), "the ACK of the 513 goes no further: {sent:?}");
+}
+
 /// A worker's INVITE arriving on the internal face is answered there.
 #[tokio::test]
 async fn a_workers_invite_that_cannot_leave_is_answered_513_on_the_internal_face() {

@@ -398,7 +398,11 @@ rule's context. Its triggers are closed:
    ACK, the dialog untouched, and counts it
    (`b2bua_unexplained_acks_total`). On a served call the two cannot
    be told apart, so a re-INVITE the proxy refused, then its ACK, ends the call
-   with a clean BYE (user ruling; `reinvite_refused_by_proxy.rs`). A primary
+   with a clean BYE (user ruling; `reinvite_refused_by_proxy.rs`). The ACK of a
+   final the proxy remembers (a 503 or a 513, for 64·T1) ends at that proxy and
+   reaches no worker; the residual stands for the finals it does not remember
+   (483, 482, 420, 416, 400) and for an ACK that reaches another proxy instance
+   or arrives after the memo forgot the refusal. A primary
    returned behind what its previous run sent, no copy having written the call,
    reads as a call no other owner served: a lost round's ACK is dropped there,
    and the callee's repeat of the 2xx that ACK never reached is the evidence,

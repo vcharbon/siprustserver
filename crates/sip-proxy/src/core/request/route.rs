@@ -151,11 +151,14 @@ impl ProxyCore {
         // proxy derived for that INVITE under the deployment's shared key
         // (`crate::security::own_final_tag`): the ACK terminates HERE, at any
         // proxy holding the key, and is never run through the strategy to hand
-        // a worker a stray ACK matching no transaction it ever created.
+        // a worker a stray ACK matching no transaction it ever created. A final
+        // to an in-dialog INVITE echoes the dialog's To-tag, so its ACK is
+        // recognised by the refusal memo holding that INVITE.
         let mut ack_hop: Option<CancelEntry> = None;
         if method == Method::Ack {
             if self.refusals.acknowledges_own_final(req)
                 || self.parse_refusals.acknowledges_own_final(req)
+                || self.refusals.acknowledges_refusal(req, self.now_ms())
             {
                 return RouteOutcome { decision: select, target: None };
             }
