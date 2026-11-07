@@ -36,8 +36,9 @@ compatibility rules admit, on purpose:
 - **Readable credentials.** An Authorization or Proxy-Authorization whose
   Digest credentials do not read is refused with its message (§22.4).
 - **A URI's `maddr`.** A URI a request is sent to or routed on (Request-URI,
-  Contact, Route, Record-Route, Refer-To) names a host in its `maddr`, or has
-  none: `other-param` admits a flag or a port, and neither has a target to read.
+  Contact, Route, Record-Route; Refer-To and Reply-To at their typed read) names
+  a host in its `maddr`, or has none: `other-param` admits a flag, a port or a
+  bracketed name, and none has a target to read.
 - **Numeric headers.** A header of the numeric registry carries a decimal value
   within its range, digits only, followed by nothing but the tail its grammar
   has: CSeq's method, a session timer's parameters.
@@ -79,8 +80,8 @@ sender is asking the proxy to take the request, and following what it wrote woul
 make the proxy an open relay. The request reaches a worker, which decides what it
 sends onward.
 
-The Via rule matches ADR-0048: a value the sender wrote never steers a response.
-Serving multicast SIP would reopen it, and would need a way to check the `maddr`
+The Via rule matches ADR-0048: of a response's address the sender chooses only the
+port, at its sent-by with no `rport`, and the IP stays the packet's source. Serving multicast SIP would reopen it, and would need a way to check the `maddr`
 against the group the request actually arrived on.
 
 ## Considered and rejected

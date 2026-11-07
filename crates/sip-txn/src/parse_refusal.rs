@@ -23,7 +23,7 @@ pub const PARSE_REFUSAL_PER_SEC: u32 = 100;
 /// The fate of a datagram the parser refused.
 #[derive(Debug)]
 pub enum ParseRefusal {
-    /// The 400 to send to the datagram's source.
+    /// The 400 to send to its stamped top Via's response target.
     Answer(Box<SipResponse>),
     /// A 400 could answer it, but the cap is spent: dropped.
     Capped,

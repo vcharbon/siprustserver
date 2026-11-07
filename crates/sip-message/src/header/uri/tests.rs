@@ -226,7 +226,6 @@ fn the_next_hop_is_the_maddr_at_the_uris_own_port() {
         ("sip:bob@name.example:5070;maddr=192.0.2.9", ("192.0.2.9", 5070)),
         ("sip:bob@name.example;MADDR=other.example;lr", ("other.example", 5060)),
         ("sip:bob@name.example;maddr=[2001:db8::9]", ("2001:db8::9", 5060)),
-        ("sip:bob@name.example;maddr=2001:db8::9", ("2001:db8::9", 5060)),
         ("sips:bob@name.example:5061;maddr=192.0.2.9", ("192.0.2.9", 5061)),
     ] {
         assert_eq!(uri(text).next_hop(), hop, "{text}");
@@ -254,6 +253,9 @@ fn a_maddr_that_names_no_host_refuses_a_target_uri() {
         "sip:bob@h.example;maddr=1.2.3.4:5060",
         "sip:bob@h.example;maddr=1.2.3.999",
         "sip:bob@h.example;maddr=[[2001:db8::9]]",
+        "sip:bob@h.example;maddr=[foo.example]",
+        "sip:bob@h.example;maddr=[1.2.3.4]",
+        "sip:bob@h.example;maddr=2001:db8::9",
         "sip:bob@h.example;maddr=[2001:db8::9",
         "sip:bob@h.example;maddr=a%20b",
         "sip:bob@h.example;MADDR",
@@ -261,6 +263,15 @@ fn a_maddr_that_names_no_host_refuses_a_target_uri() {
         assert!(Uri::parse(&SipStr::owned(bad)).is_err(), "{bad}");
         assert!(Uri::parse_as(&SipStr::owned(bad), UriRole::Identity).is_ok(), "{bad}");
     }
+}
+
+/// A repeat is the one reader's to refuse; until then the first is the one read,
+/// and past its own `maddr` a URI holds none.
+#[test]
+fn the_first_of_repeated_maddrs_is_read_and_all_go_together() {
+    let repeated = uri("sip:bob@h.example;maddr=192.0.2.9;maddr=192.0.2.8");
+    assert_eq!(repeated.next_hop(), ("192.0.2.9", 5060));
+    assert_eq!(repeated.without_own_maddr().to_string(), "sip:bob@h.example");
 }
 
 /// RFC 3261 §16.4: the `maddr` goes with any non-default port or transport.

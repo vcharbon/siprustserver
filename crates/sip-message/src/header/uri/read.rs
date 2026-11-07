@@ -103,8 +103,7 @@ fn read_sip(value: &SipStr, scheme: SipStr, i: usize, role: UriRole) -> Result<U
             let param = clamped(text, name_end + 1, value_end);
             paramchar_refusal("uri-parameter value", param)?;
             if role == UriRole::Target && name.eq_ignore_ascii_case(MADDR) {
-                host_refusal(unbracketed(param), role)
-                    .map_or(Ok(()), |r| Err(format!("maddr: {r}")))?;
+                maddr_refusal(param).map_or(Ok(()), |r| Err(format!("maddr: {r}")))?;
             }
             params.push(name, ParamValue::Token(sub(value, name_end + 1, value_end)));
             j = value_end;
@@ -252,6 +251,20 @@ pub(crate) fn read_sent_by(
         None | Some(b';' | b',') => Ok((host, port, j)),
         Some(b) => Err(format!("byte 0x{b:02x} after the sent-by")),
     }
+}
+
+/// Why `value` is no `maddr-param` host (RFC 3261 §25.1): a `hostname`, an
+/// `IPv4address` or an `IPv6reference`, which alone holds brackets and which an
+/// IPv6 address needs.
+fn maddr_refusal(value: &str) -> Option<String> {
+    let inner = unbracketed(value);
+    if inner.len() != value.len() {
+        return (!is_ipv6_address(inner)).then(|| format!("invalid IPv6 reference {value:?}"));
+    }
+    if value.contains(':') {
+        return Some(format!("{value:?} is no host"));
+    }
+    host_refusal(value, UriRole::Target)
 }
 
 /// `port = 1*DIGIT`, 1 to 65535: port 0 names no socket (ADR-0001).

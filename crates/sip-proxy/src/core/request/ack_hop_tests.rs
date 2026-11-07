@@ -3,10 +3,11 @@
 //! on the absence of a Route header. A b-leg INVITE behind an outbound
 //! proxy carries a preloaded Route, so its non-2xx ACK carries one too; a
 //! `route.is_none()` heuristic misroutes exactly that ACK.
-//! A matched ACK for a RELAYED final is relayed to the node the final arrived
-//! from, on the INVITE's outbound branch (the downstream server transaction
-//! must match it to stop retransmitting the final); a matched ACK for a
-//! final the proxy generated ITSELF is absorbed (the proxy is the UAS).
+//! A caller's matched ACK for a RELAYED final is relayed to the node the final
+//! arrived from, a worker's where its INVITE went, on the INVITE's outbound
+//! branch (the downstream server transaction must match it to stop retransmitting
+//! the final); a matched ACK for a final the proxy generated ITSELF is absorbed
+//! (the proxy is the UAS).
 
 use std::sync::Arc;
 

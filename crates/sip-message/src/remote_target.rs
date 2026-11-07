@@ -194,6 +194,20 @@ mod tests {
         );
     }
 
+    /// The first of repeated `maddr`s is the one read, and the one re-pointed.
+    #[test]
+    fn the_first_of_repeated_maddrs_follows_the_rewritten_host() {
+        let rewritten = rewrite_hostport(
+            "<sip:bob@name.example;maddr=203.0.113.9;maddr=203.0.113.8>",
+            "127.0.0.1",
+            5070,
+        );
+        let uri =
+            Uri::parse(&SipStr::owned(rewritten.trim_start_matches('<').trim_end_matches('>')))
+                .expect("a URI");
+        assert_eq!(uri.next_hop(), ("127.0.0.1", 5070), "{rewritten}");
+    }
+
     #[test]
     fn matching_ignores_a_maddr() {
         let a = parse_elements("<sip:bob@h;maddr=203.0.113.9;lr>");

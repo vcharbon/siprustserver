@@ -5,7 +5,7 @@
 //! the parser reads keep their character classes. Each refusal sits beside a
 //! well-formed counterpart that must keep parsing.
 
-use sip_message::header::{NameAddr, Uri, UriRole};
+use sip_message::header::{NameAddr, ReplyTo, Uri, UriRole};
 use sip_message::{CustomParser, SipMessage, SipParser, SipRequest, SipStr};
 
 /// An INVITE with one line replaced by `line` (matched on its header name, or the
@@ -507,8 +507,8 @@ fn a_malformed_date_never_refuses_the_message() {
     request(&invite("", "", "Date: Sat, 13 Nov 2010 23:29:00 GMT\r\n"));
 }
 
-/// A URI a target role reads holds a `maddr` naming a host or none, on every line
-/// that picks a next hop; a party's URI on From or To is never routed on.
+/// A URI a target role reads holds a `maddr` naming a host or none; a party's URI
+/// on From or To is never routed on.
 #[test]
 fn a_maddr_naming_no_host_refuses_the_lines_that_route() {
     for bad in [";maddr", ";maddr=1.2.3.4:5060", ";maddr=[::1"] {
@@ -517,6 +517,11 @@ fn a_maddr_naming_no_host_refuses_the_lines_that_route() {
         refused("Contact", &invite("Contact", &format!("Contact: <{target}>"), ""));
         refused("Route", &invite("", "", &format!("Route: <{target};lr>\r\n")));
         refused("Record-Route", &invite("", "", &format!("Record-Route: <{target};lr>\r\n")));
+        // Not gated at ingress: the typed read a consumer makes refuses them.
+        let unread =
+            request(&invite("", "", &format!("Refer-To: <{target}>\r\nReply-To: <{target}>\r\n")));
+        assert!(unread.optional().refer_to.is_err(), "Refer-To {bad}");
+        assert!(unread.header::<ReplyTo>().is_some_and(|r| r.is_err()), "Reply-To {bad}");
     }
     assert!(parse(&invite("From", "From: <sip:alice@example.com;maddr>;tag=a1", "")).is_ok());
     assert!(parse(&invite("Contact", "Contact: <sip:a@h.example;maddr=192.0.2.9>", "")).is_ok());
