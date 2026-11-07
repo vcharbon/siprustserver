@@ -91,7 +91,7 @@ impl ProxyCore {
         let start_ms = self.now_ms();
         let SipMessage::Request(req) = &msg else { return };
         if let Some(refusal) = self.first_ingress_refusal(req, src, face) {
-            self.refuse_unparsed(&refusal, src).await;
+            self.refuse_unparsed(&refusal, src, face).await;
             return;
         }
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
