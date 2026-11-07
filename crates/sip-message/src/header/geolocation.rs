@@ -4,12 +4,11 @@
 //! `Err` there only.
 
 use crate::error::SipParseError;
-use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 
 use super::name::HeaderName;
 use super::name_addr::{AddrForm, NameAddr};
-use super::params::{read_generic_params, Params};
+use super::params::{read_params, ParamReading, Params};
 use super::scan::{clamped, digits_end};
 use super::uri::{Uri, UriRole};
 use super::value::{Folding, HeaderValue};
@@ -55,15 +54,6 @@ impl HeaderValue for Geolocation {
             )));
         }
         Ok(Self { uri: addr.uri().clone(), params: addr.params().clone() })
-    }
-
-    /// Every location of one line; an empty entry between commas, or after
-    /// the last one, names none and is skipped.
-    fn parse_line_into(raw: &SipStr, out: &mut Vec<Self>) -> Result<(), SipParseError> {
-        for entry in top_level_comma_entries(raw.as_str()).filter(|entry| !entry.is_empty()) {
-            out.push(Self::parse(&raw.reslice(entry))?);
-        }
-        Ok(())
     }
 
     fn render(&self, out: &mut Wire) {
@@ -123,7 +113,8 @@ impl HeaderValue for GeolocationError {
                 value.as_str()
             ))
         })?;
-        let params = read_generic_params(&value, end)
+        let params = read_params(&value, end, ParamReading::Strict, None)
+            .map(|(params, _)| params)
             .map_err(|e| SipParseError::new(format!("Geolocation-Error: {}", e.reason)))?;
         Ok(Self { code, digits: value.reslice(digits), params })
     }

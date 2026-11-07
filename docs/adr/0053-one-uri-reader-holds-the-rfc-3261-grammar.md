@@ -61,10 +61,17 @@ by construction. Every other reader of a URI goes through it.
   written and read as `::` wherever an address is derived from the host. A port is 1 to 65535. The same host reader
   reads a Via sent-by, whose host or `]` is followed only by a port, LWS, `;`
   or `,`.
-  Parameter values are not checked against their parameter: `ttl=256` and
-  `transport=x` are `other-param`s by the grammar.
+  A parameter name is `paramchar`, and so is the value of an `other-param`;
+  §25.1 gives `transport`, `user` and `method` a `token` form
+  (`other-transport`, `other-user`, `Method`), so a token value reads there
+  (`transport=%`), and a `maddr` of a URI a request is sent to is a `host`.
+  Other values are not checked against their parameter: `ttl=256` is an
+  `other-param` by the grammar. A parameter name appears once (§19.1.1): a
+  second copy of an identical value reads as one copy, which the URI renders
+  (ADR-0001, one parameter of a name), and a second value refuses the URI.
 - **`tel`**: the number up to the first `;` or `?` as the host, then
-  `;params?headers`, no RFC 3966 grammar. **Every other scheme** (`urn`,
+  `;params?headers`, no RFC 3966 grammar. A route entry of one reads; a
+  consumer that must route on it answers 416 Unsupported URI Scheme. **Every other scheme** (`urn`,
   `http`, `cid` …) is opaque: its scheme-specific part is kept whole, and it
   names no user, host, port, parameter or header; a route-family entry of one
   names no hop and is refused. Both are held to every byte of the URI character
@@ -103,10 +110,24 @@ whole:
   one is followed by `<`;
 - no whitespace inside `<...>`, and a `<` is closed;
 - after `>` only `;`-parameters, each `token [ = token / host /
-  quoted-string ]`, then the end;
+  quoted-string ]` and each name once, then the end;
 - a bare addr-spec ends at the first `;`, carries no `,` or `?` (§20), and is
   refused in the route family (Route, Record-Route, Path, Service-Route),
-  whose `lr` a bare URI would give away.
+  whose `lr` a bare URI would give away;
+- a header whose grammar has no header parameters (P-Asserted-Identity and
+  P-Preferred-Identity, RFC 3325 §9.1) reads a bare value as one URI whole,
+  its `;`-parameters the URI's, and nothing after a `>`;
+- a bare From or To whose `;` comes before an `@` outside any quoted-string,
+  once the strict read fails, reads its URI up to that `@` and the next `;`:
+  every typed reader reads it, and the ingress gate refuses it unless the
+  deployment names `bare-user-semicolon` (ADR-0001, exemptions).
+
+Every header grammar is read by one reader: one quoted-string rule (a
+quoted-pair escapes one ASCII byte but CR and LF), one token scan, one
+parameter reader (`header/params.rs`), one Via reader (`Via::read`) and this
+name-addr reader. The parameter reader reads strictly, up to its first
+parameter off the grammar (a Reason's cause stays readable past it), or
+leniently.
 
 ### 5. Where it applies
 
@@ -129,10 +150,13 @@ parser validates" is the Date: a malformed Date never refuses the message
 ### 6. The lenient mode
 
 `SipParserLimits::wire_grammar = false` is the reading of a message built by
-the stack or read by a test harness. From, To and Contact keep their scanned
-parts there, and a URI the reader refuses is held opaque instead of refusing
-the message; a Via sent-by the reader refuses is held whole as the host, with
-no port, and renders as written. The Request-URI is read in every mode: a URI that does not read
+the stack or read by a test harness: a mode of the one reader of each grammar,
+not a second implementation. A value the strict reading takes reads the same
+way; one it refuses keeps its scanned parts: an open quote or `<` runs to the
+end, parameters read on past a byte off their grammar, a URI the reader refuses
+is held opaque instead of refusing the message, and a Via sent-by the reader
+refuses is held whole as the host, with no port, and renders as written. A
+final of 300 or more keeps its lenient Contact on wire bytes too (§5). The Request-URI is read in every mode: a URI that does not read
 is no request's target, whoever built the request.
 
 A stored image reads through `sip_message::read_stored`: this mode with every

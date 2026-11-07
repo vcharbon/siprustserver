@@ -20,8 +20,9 @@ use crate::error::SipParseError;
 use crate::ip_literal::ipv6_address;
 use crate::sip_str::SipStr;
 
-use super::super::params::{parse_semicolon_params, ParamValue, Params, URI_PARAMS};
+use super::super::params::Params;
 use super::super::scan::{byte_at, clamped, index_of, scan_until, skip_ws, sub, sub_lower};
+use super::params::{read_uri_params, Collapsed};
 use super::{HostPort, UriRole};
 
 /// The parts of one URI, cut from the text it was read from.
@@ -33,6 +34,8 @@ pub(super) struct UriParts {
     pub(super) headers: Vec<(SipStr, Option<SipStr>)>,
     /// The scheme-specific part of a URI of an opaque scheme, whole.
     pub(super) opaque: Option<SipStr>,
+    /// The second, identical parameter copies the read collapsed.
+    pub(super) repeated: Collapsed,
 }
 
 /// The URI parameter naming the address a target's requests go to.
@@ -90,32 +93,9 @@ fn read_sip(value: &SipStr, scheme: SipStr, i: usize, role: UriRole) -> Result<U
         }
         None => (None, i),
     };
-    let (authority, mut j) = read_hostport(value, host_at, role)?;
+    let (authority, j) = read_hostport(value, host_at, role)?;
 
-    let mut params = Params::new();
-    while byte_at(bytes, j) == Some(b';') {
-        let name_at = j + 1;
-        let name_end = scan_until(bytes, name_at, b"=;?");
-        paramchar_refusal("uri-parameter name", clamped(text, name_at, name_end))?;
-        let name = sub(value, name_at, name_end);
-        if byte_at(bytes, name_end) == Some(b'=') {
-            let value_end = scan_until(bytes, name_end + 1, b";?");
-            let param = clamped(text, name_end + 1, value_end);
-            paramchar_refusal("uri-parameter value", param)?;
-            if role == UriRole::Target && name.eq_ignore_ascii_case(MADDR) {
-                maddr_refusal(param).map_or(Ok(()), |r| Err(format!("maddr: {r}")))?;
-            }
-            params.push(name, ParamValue::Token(sub(value, name_end + 1, value_end)));
-            j = value_end;
-        } else {
-            if role == UriRole::Target && name.eq_ignore_ascii_case(MADDR) {
-                return Err("maddr names no host".to_string());
-            }
-            params.push(name, ParamValue::Flag);
-            j = name_end;
-        }
-    }
-
+    let (params, repeated, j) = read_uri_params(value, j, Some(role))?;
     let mut headers = Vec::new();
     if byte_at(bytes, j) == Some(b'?') {
         for pair in clamped(text, j + 1, bytes.len()).split('&') {
@@ -134,7 +114,7 @@ fn read_sip(value: &SipStr, scheme: SipStr, i: usize, role: UriRole) -> Result<U
             headers.push((value.reslice(name), Some(value.reslice(hvalue))));
         }
     }
-    Ok(UriParts { scheme, user, authority, params, headers, opaque: None })
+    Ok(UriParts { scheme, user, authority, params, headers, opaque: None, repeated })
 }
 
 /// `userinfo = ( user / telephone-subscriber ) [ ":" password ] "@"`, the `@`
@@ -154,7 +134,7 @@ fn userinfo_refusal(userinfo: &str) -> Option<String> {
 }
 
 /// `1*paramchar`.
-fn paramchar_refusal(what: &str, run: &str) -> Result<(), String> {
+pub(super) fn paramchar_refusal(what: &str, run: &str) -> Result<(), String> {
     if run.is_empty() {
         return Err(format!("empty {what}"));
     }
@@ -256,7 +236,7 @@ pub(crate) fn read_sent_by(
 /// Why `value` is no `maddr-param` host (RFC 3261 §25.1): a `hostname`, an
 /// `IPv4address` or an `IPv6reference`, which alone holds brackets and which an
 /// IPv6 address needs.
-fn maddr_refusal(value: &str) -> Option<String> {
+pub(super) fn maddr_refusal(value: &str) -> Option<String> {
     let inner = unbracketed(value);
     if inner.len() != value.len() {
         return (!is_ipv6_address(inner)).then(|| format!("invalid IPv6 reference {value:?}"));
@@ -283,7 +263,7 @@ fn port_value(port: &str) -> Result<u16, String> {
 
 /// Why `host` (an IPv6 reference without its brackets) is no
 /// `host = hostname / IPv4address / IPv6reference` in `role`, if it is not.
-pub(crate) fn host_refusal(host: &str, role: UriRole) -> Option<String> {
+fn host_refusal(host: &str, role: UriRole) -> Option<String> {
     if host.is_empty() {
         return Some("empty host".to_string());
     }
@@ -370,7 +350,8 @@ fn read_tel(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipPar
         return Err(fail(value, "empty tel number"));
     }
     let authority = HostPort::new(sub(value, i, number_end), None);
-    let (params, after_params) = parse_semicolon_params(value, number_end, &URI_PARAMS);
+    let (params, repeated, after_params) =
+        read_uri_params(value, number_end, None).map_err(|r| fail(value, &r))?;
     let mut headers = Vec::new();
     if byte_at(bytes, after_params) == Some(b'?') {
         for pair in clamped(text, after_params + 1, bytes.len()).split('&') {
@@ -380,7 +361,7 @@ fn read_tel(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, SipPar
             }
         }
     }
-    Ok(UriParts { scheme, user: None, authority, params, headers, opaque: None })
+    Ok(UriParts { scheme, user: None, authority, params, headers, opaque: None, repeated })
 }
 
 /// A URI of a scheme this stack does not take apart (`urn`, `http`, `cid` …):
@@ -402,5 +383,6 @@ fn read_opaque(value: &SipStr, scheme: SipStr, i: usize) -> Result<UriParts, Sip
         params: Params::new(),
         headers: Vec::new(),
         opaque: Some(sub(value, i, len)),
+        repeated: Collapsed::default(),
     })
 }

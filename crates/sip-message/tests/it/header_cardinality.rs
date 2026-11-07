@@ -213,8 +213,12 @@ fn a_failure_final_keeps_its_place_whatever_its_contacts() {
 
 // --- regression ---
 
+/// RFC 3261 §8.1.1.8: an INVITE names its dialog's remote target, so one with
+/// no Contact is refused and answered 400 rather than given an invented one.
 #[test]
-fn clean_and_contactless_invites_parse() {
+fn a_clean_invite_parses_and_a_contactless_one_is_answered_400() {
     assert!(accepts(CLEAN_INVITE), "clean single-everything INVITE");
-    assert!(accepts(CONTACTLESS_INVITE), "Contact-less INVITE (handler concern)");
+    let refusal = CustomParser::new().parse(CONTACTLESS_INVITE.as_bytes()).expect_err("refused");
+    assert!(refusal.reason.contains("no Contact"), "{}", refusal.reason);
+    assert!(refusal.partial().is_some(), "answered 400: {}", refusal.reason);
 }

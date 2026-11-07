@@ -13,10 +13,11 @@ use crate::sip_str::SipStr;
 
 use super::kind::{NameAddrKind, NoParams, RichParams, TaggedKind};
 use super::name::HeaderName;
-use super::name_addr::NameAddr;
+use super::name_addr::{AddrGrammar, NameAddr};
 use super::params::{ParamValue, Params};
+use super::reading::Reading;
 use super::uri::Uri;
-use super::value::{Folding, HeaderValue};
+use super::value::{read_line_into, Folding, HeaderValue};
 use super::wire::Wire;
 
 /// An address-valued header. `K` carries the identity and the policy; the
@@ -122,6 +123,18 @@ impl<K: TaggedKind> NameAddrHeader<K> {
     }
 }
 
+impl<K: NameAddrKind> NameAddrHeader<K> {
+    /// The grammar of this header's address value.
+    pub(crate) fn grammar() -> AddrGrammar {
+        AddrGrammar {
+            form: K::FORM,
+            role: K::ROLE,
+            header_params: K::HEADER_PARAMS,
+            bare_user_semicolon: K::BARE_USER_SEMICOLON,
+        }
+    }
+}
+
 impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
     fn header_name() -> HeaderName {
         K::name()
@@ -132,7 +145,7 @@ impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let addr = NameAddr::parse_as(raw, K::FORM, K::ROLE)?;
+        let addr = NameAddr::read(raw, &Self::grammar(), Reading::Strict)?.addr;
         if K::NAMES_HOP && addr.uri().opaque_part().is_some() {
             return Err(SipParseError::new(format!(
                 "a {} URI names no hop: {:?}",
@@ -141,6 +154,13 @@ impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
             )));
         }
         Ok(Self::new(addr))
+    }
+
+    fn parse_line_into(raw: &SipStr, out: &mut Vec<Self>) -> Result<(), SipParseError> {
+        if K::WILDCARD && raw.as_str().trim() == "*" {
+            return Ok(());
+        }
+        read_line_into(raw, out)
     }
 
     fn render(&self, out: &mut Wire) {

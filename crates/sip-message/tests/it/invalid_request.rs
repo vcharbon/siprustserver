@@ -12,7 +12,7 @@ const AGENT: &str = "192.0.2.1:5060";
 
 fn refusal(to: &str) -> SipParseError {
     let raw = format!(
-        "INVITE sip:bob@example.com SIP/2.0\r\n\
+        "INVITE sip:bob@example.com SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-refused;rport\r\n\
          v: SIP/2.0/UDP 192.0.2.20:5060;branch=z9hG4bK-lower\r\n\
          Max-Forwards: abc\r\n\

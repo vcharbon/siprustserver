@@ -32,8 +32,14 @@ Call-ID: lazy-test\r\n\
 CSeq: 3 REFER\r\n";
 
 fn build(start: &str, base: &str, optional: &str) -> SipMessage {
-    let raw =
-        format!("{start} sip:bob@example.com SIP/2.0\r\n{base}{optional}Content-Length: 0\r\n\r\n");
+    let contact = match start {
+        "INVITE" | "REFER" => "Contact: <sip:alice@10.0.0.1:5060>\r\n",
+        _ => "",
+    };
+    let raw = format!(
+        "{start} sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\n{base}{contact}{optional}\
+         Content-Length: 0\r\n\r\n"
+    );
     CustomParser::new().parse(raw.as_bytes()).expect("parse should succeed")
 }
 

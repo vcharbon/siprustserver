@@ -43,7 +43,7 @@ mod tests {
 
     fn invite(max_forwards_line: &str) -> SipRequest {
         let raw = format!(
-            "INVITE sip:bob@example.com SIP/2.0\r\n\
+            "INVITE sip:bob@example.com SIP/2.0\r\nContact: <sip:alice@192.0.2.5>\r\n\
 Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-a\r\n\
 From: <sip:alice@example.com>;tag=alice\r\n\
 To: <sip:bob@example.com>\r\n\
@@ -52,7 +52,10 @@ CSeq: 1 INVITE\r\n\
 {max_forwards_line}\
 Content-Length: 0\r\n\r\n"
         );
-        match CustomParser::default().parse(raw.as_bytes()).unwrap() {
+        // A request with no hop count reads only where a deployment names it.
+        let exemptions = crate::Exemptions::read(Some("max-forwards:absent")).unwrap();
+        let limits = crate::SipParserLimits { exemptions, ..Default::default() };
+        match CustomParser::with_limits(limits).parse(raw.as_bytes()).unwrap() {
             SipMessage::Request(req) => req,
             _ => panic!("request"),
         }

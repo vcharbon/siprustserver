@@ -89,6 +89,20 @@ declaration-merging + `SipHeaderRegistry.register`. Distinct from the raw
 `get_header(name) -> Vec<&str>` escape hatch, which serves unknown headers only.
 _Avoid_: "header registry" (there is no global mutable registry anymore).
 
+**Strict reading** / **Lenient reading** (ADR-0053 §6):
+The two readings of the one reader of each grammar. *Strict* holds wire bytes to
+RFC 3261 §25.1 whole and refuses anything else. *Lenient* is the reading of a
+message the stack built, stored or a harness reads (`wire_grammar = false`,
+`read_stored`): a value the strict reading takes reads the same way, and one it
+refuses keeps what can be read, never a refusal.
+_Avoid_: "relaxed parser", "second parser" (it is a mode, not an implementation).
+
+**Exemption** (ADR-0001, `SipParserLimits::exemptions`):
+A shape a deployment accepts against the RFC, named in `SIP_EXEMPTIONS`: empty by
+default, consulted only by the ingress gate. Only a shape with one reading can be
+exempted, and every typed reader reads it on every deployment.
+_Avoid_: "tolerance", "quirk mode".
+
 **Policy rejection** / **Buggy rejection**:
 The two classes a parser rejection of a grammar-valid input falls into.
 *Policy* = a documented strictness rule (the ABNF suite's policy patterns,

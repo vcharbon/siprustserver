@@ -6,17 +6,17 @@
 //! the two parameter sets (URI vs header) separately, host:port and `maddr`
 //! ignored.
 //!
-//! Structured parsing goes through the parser's name-addr scan and the one URI
-//! reader ([`Uri::parse`]). The address *rewrite* reads each element with the
+//! Structured parsing goes through the lenient reading of the one name-addr
+//! reader and the one URI reader ([`Uri::parse`]). The address *rewrite* reads each element with the
 //! strict name-addr reader and splices the re-rendered URI into the element,
 //! so the display name and header parameters keep their captured spelling and
 //! placement.
 
 use std::collections::BTreeMap;
 
-use crate::header::{AddrForm, HostPort, NameAddr, ParamValue, Uri, UriRole};
+use crate::header::{AddrForm, AddrGrammar, HostPort, NameAddr, ParamValue, Reading, Uri, UriRole};
 use crate::parser::custom::compact_forms::expanded_name;
-use crate::parser::custom::structured_headers::{parse_name_addr, split_top_level_commas};
+use crate::parser::custom::structured_headers::split_top_level_commas;
 use crate::sip_str::SipStr;
 
 /// Canonical, case-folded header name (compact forms expanded).
@@ -51,17 +51,25 @@ fn params_to_map(params: crate::header::Params) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The lenient name-addr reading of one element: what a captured or generated
+/// value states, never refused.
+fn read_element(elem: &str) -> NameAddr {
+    let grammar = AddrGrammar::of(AddrForm::NameAddrOrSpec, UriRole::Target);
+    let read = NameAddr::read(&SipStr::owned(elem.trim()), &grammar, Reading::Lenient);
+    read.map_or_else(|_| NameAddr::new(Uri::opaque(SipStr::EMPTY)), |read| read.addr)
+}
+
 fn parse_element(elem: &str) -> RtElement {
-    let na = parse_name_addr(&SipStr::owned(elem.trim()));
-    let (user, uri_params) = match Uri::parse(&na.uri) {
-        Ok(u) => {
-            let mut uri_params = params_to_map(u.params().clone());
+    let na = read_element(elem);
+    let (user, uri_params) = match na.uri().is_opaque() {
+        false => {
+            let mut uri_params = params_to_map(na.uri().params().clone());
             uri_params.remove("maddr");
-            (u.user().map(String::from), uri_params)
+            (na.uri().user().map(String::from), uri_params)
         }
-        Err(_) => (None, BTreeMap::new()),
+        true => (None, BTreeMap::new()),
     };
-    RtElement { user, uri_params, header_params: params_to_map(na.params) }
+    RtElement { user, uri_params, header_params: params_to_map(na.params().clone()) }
 }
 
 /// Parse the comma-separated elements of a remote-target header value.
@@ -73,9 +81,11 @@ pub fn parse_elements(value: &str) -> Vec<RtElement> {
 /// generated header so the captured value can be rewritten onto it.
 pub fn first_hostport(value: &str) -> Option<(String, u16)> {
     let first = split_top_level_commas(value).into_iter().next()?;
-    let na = parse_name_addr(&SipStr::owned(first.trim()));
-    let u = Uri::parse(&na.uri).ok()?;
-    let (host, port) = u.host_port();
+    let na = read_element(first);
+    if na.uri().is_opaque() || na.uri().opaque_part().is_some() {
+        return None;
+    }
+    let (host, port) = na.uri().host_port();
     Some((host.to_string(), port))
 }
 
@@ -194,11 +204,12 @@ mod tests {
         );
     }
 
-    /// The first of repeated `maddr`s is the one read, and the one re-pointed.
+    /// A `maddr` written twice with one value reads once, and is the one
+    /// re-pointed.
     #[test]
-    fn the_first_of_repeated_maddrs_follows_the_rewritten_host() {
+    fn a_maddr_written_twice_follows_the_rewritten_host() {
         let rewritten = rewrite_hostport(
-            "<sip:bob@name.example;maddr=203.0.113.9;maddr=203.0.113.8>",
+            "<sip:bob@name.example;maddr=203.0.113.9;maddr=203.0.113.9>",
             "127.0.0.1",
             5070,
         );

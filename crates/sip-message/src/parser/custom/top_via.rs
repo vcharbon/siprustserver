@@ -3,8 +3,8 @@
 //! transport §25.1 admits and with any port up to 65535 (ADR-0001 gates).
 
 use super::extract_fields::is_valid_port;
-use super::structured_headers::ParsedVia;
 use crate::error::SipParseError;
+use crate::header::Via;
 use crate::parser::SipParserLimits;
 
 /// RFC 3261 §8.1.1.7 — the top-Via branch starts with this magic cookie.
@@ -12,22 +12,22 @@ const VIA_BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
 
 /// Whether a Via port is out of range: beyond 65535 on any Via, 0 on the
 /// topmost one.
-pub(super) fn port_out_of_range(port: u64, top: bool) -> bool {
-    !is_valid_port(port) && (top || port != 0)
+pub(super) fn port_out_of_range(port: u16, top: bool) -> bool {
+    !is_valid_port(u64::from(port)) && (top || port != 0)
 }
 
 /// The refusal of a topmost Via whose branch lacks the magic cookie, or is
 /// the cookie alone: a branch is the cookie followed by the transaction's
 /// identifier (RFC 3261 §8.1.1.7; RFC 4475 §3.2.1).
-pub(super) fn cookie_refusal(v: &ParsedVia) -> Option<SipParseError> {
-    let shown = match &v.branch {
+pub(super) fn cookie_refusal(v: &Via) -> Option<SipParseError> {
+    let shown = match v.branch() {
         Some(b)
             if b.len() > VIA_BRANCH_MAGIC_COOKIE.len()
                 && b.starts_with(VIA_BRANCH_MAGIC_COOKIE) =>
         {
             return None
         }
-        Some(b) if b.as_str() == VIA_BRANCH_MAGIC_COOKIE => {
+        Some(b) if b == VIA_BRANCH_MAGIC_COOKIE => {
             return Some(SipParseError::new(
                 "Top Via branch is the magic cookie alone, no transaction identifier",
             ))
@@ -43,9 +43,9 @@ pub(super) fn cookie_refusal(v: &ParsedVia) -> Option<SipParseError> {
 /// The refusal of a topmost Via whose transport is not in the allowlist. The
 /// allowlist is case-insensitive; the probe mints no uppercased String (the
 /// set holds a handful of entries, linear is fine).
-pub(super) fn transport_refusal(v: &ParsedVia, limits: &SipParserLimits) -> Option<SipParseError> {
-    if limits.allowed_transports.iter().any(|t| t.eq_ignore_ascii_case(&v.transport)) {
+pub(super) fn transport_refusal(v: &Via, limits: &SipParserLimits) -> Option<SipParseError> {
+    if limits.allowed_transports.iter().any(|t| t.eq_ignore_ascii_case(v.transport())) {
         return None;
     }
-    Some(SipParseError::new(format!("Via transport \"{}\" not in allowed set", v.transport)))
+    Some(SipParseError::new(format!("Via transport \"{}\" not in allowed set", v.transport())))
 }

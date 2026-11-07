@@ -26,7 +26,7 @@ CSeq: 314159 INVITE\r\n\
 Contact: <sip:bob@pc33.example.com>\r\n\
 Content-Length: 0\r\n\r\n";
 
-const BYE: &[u8] = b"BYE sip:alice@pc33.example.com SIP/2.0\r\n\
+const BYE: &[u8] = b"BYE sip:alice@pc33.example.com SIP/2.0\r\nMax-Forwards: 70\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK2\r\n\
 From: Bob <sip:bob@example.com>;tag=as83kf\r\n\
 To: Alice <sip:alice@example.com>;tag=1928\r\n\
@@ -83,7 +83,7 @@ fn initial_invite_is_not_in_dialog() {
 
 #[test]
 fn rejects_top_via_missing_magic_cookie() {
-    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=nomagic\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>\r\n\
@@ -97,7 +97,7 @@ Content-Length: 0\r\n\r\n";
 #[test]
 fn rejects_ipv4_octet_with_leading_zero() {
     // Request-URI host 10.10.10.010 — octal-confusion vector.
-    let raw = b"INVITE sip:bob@10.10.10.010 SIP/2.0\r\n\
+    let raw = b"INVITE sip:bob@10.10.10.010 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>\r\n\
@@ -110,7 +110,7 @@ Content-Length: 0\r\n\r\n";
 
 #[test]
 fn rejects_cseq_method_mismatch() {
-    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>\r\n\
@@ -123,7 +123,7 @@ Content-Length: 0\r\n\r\n";
 
 #[test]
 fn rejects_non_100_response_missing_totag() {
-    let raw = b"SIP/2.0 200 OK\r\n\
+    let raw = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>\r\n\
@@ -138,7 +138,7 @@ Content-Length: 0\r\n\r\n";
 
 #[test]
 fn optional_headers_parsed_eagerly() {
-    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>\r\n\
@@ -158,7 +158,7 @@ Content-Length: 0\r\n\r\n";
 fn malformed_optional_header_is_non_fatal() {
     // Diversion URI `sip:@host` is malformed, but the message still parses
     // (pass-through tolerance); the error is the Diversion's own.
-    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
 To: <sip:bob@example.com>\r\n\
@@ -174,7 +174,7 @@ Content-Length: 0\r\n\r\n";
 #[test]
 fn rejects_invalid_numeric_header() {
     // Max-Forwards with a float — paranoid digit gate.
-    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+    let raw = b"INVITE sip:bob@example.com SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
 Max-Forwards: 70.5\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\

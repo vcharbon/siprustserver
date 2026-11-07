@@ -268,10 +268,33 @@ fn a_maddr_that_names_no_host_refuses_a_target_uri() {
 /// A repeat is the one reader's to refuse; until then the first is the one read,
 /// and past its own `maddr` a URI holds none.
 #[test]
-fn the_first_of_repeated_maddrs_is_read_and_all_go_together() {
-    let repeated = uri("sip:bob@h.example;maddr=192.0.2.9;maddr=192.0.2.8");
+fn a_maddr_written_twice_reads_once_and_two_maddrs_are_refused() {
+    let repeated = uri("sip:bob@h.example;maddr=192.0.2.9;maddr=192.0.2.9");
     assert_eq!(repeated.next_hop(), ("192.0.2.9", 5060));
     assert_eq!(repeated.without_own_maddr().to_string(), "sip:bob@h.example");
+    assert!(
+        Uri::parse(&SipStr::owned("sip:bob@h.example;maddr=192.0.2.9;maddr=192.0.2.8")).is_err()
+    );
+}
+
+/// RFC 3261 §19.1.1: a parameter written twice with one value reads as one
+/// copy, renders with one, and keeps every other byte as written.
+#[test]
+fn a_parameter_written_twice_renders_once() {
+    let read = uri("SIP:Bob@H.example;X-Dup=1;lr;x-dup=1;%41");
+    assert_eq!(read.to_string(), "SIP:Bob@H.example;X-Dup=1;lr;%41");
+    assert_eq!(read.repeated_params().collect::<Vec<_>>(), ["x-dup"]);
+    assert_eq!(uri("sip:a@h;lr").repeated_params().count(), 0);
+}
+
+/// §25.1 gives `transport`, `user` and `method` a token form, so a token value
+/// reads there; any other parameter's value is `paramchar`.
+#[test]
+fn a_token_value_reads_where_the_grammar_gives_one() {
+    for text in ["sip:a@h;transport=%", "sip:a@h;user=`x`", "sip:a@h;method=X'Y"] {
+        uri(text);
+    }
+    assert!(Uri::parse(&SipStr::owned("sip:a@h;x=a`b")).is_err());
 }
 
 /// RFC 3261 §16.4: the `maddr` goes with any non-default port or transport.

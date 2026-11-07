@@ -6,7 +6,7 @@ use sip_message::{serialize, CustomParser, Method, SipMessage, SipParser};
 
 fn request(method: &str, cseq_method: &str) -> Vec<u8> {
     format!(
-        "{method} sip:bob@example.com SIP/2.0\r\n\
+        "{method} sip:bob@example.com SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-case\r\n\
          Max-Forwards: 70\r\n\
          From: <sip:alice@example.com>;tag=a1\r\n\

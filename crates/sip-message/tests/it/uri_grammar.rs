@@ -484,7 +484,7 @@ fn a_branch_is_a_token() {
 
 #[test]
 fn a_cseq_method_is_a_token() {
-    let raw = "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-uri1\r\n\
+    let raw = "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-uri1\r\n\
                From: <sip:alice@example.com>;tag=a1\r\nTo: <sip:bob@example.com>;tag=b1\r\n\
                Call-ID: c1\r\nCSeq: 1 INVIT\u{cb}\r\nContent-Length: 0\r\n\r\n";
     refused("CSeq method", raw);

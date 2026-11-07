@@ -102,6 +102,11 @@ impl ContactSet {
     pub fn is_wildcard(&self) -> bool {
         matches!(self, ContactSet::Wildcard)
     }
+
+    /// Whether the message carries no Contact: no entry, and no wildcard.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, ContactSet::Contacts(cs) if cs.is_empty())
+    }
 }
 
 /// Optional structured headers, parsed **eagerly + non-fatally** (ADR-0003):

@@ -11,6 +11,8 @@
 
 use super::name::HeaderName;
 use super::name_addr::AddrForm;
+use super::params::ParamReading;
+pub use super::token_params::Leading;
 use super::uri::UriRole;
 use super::value::Folding;
 
@@ -33,6 +35,15 @@ pub trait NameAddrKind: HeaderKind {
     /// The address names a hop a request is sent to, so its URI must name a
     /// host: one of an opaque scheme is refused.
     const NAMES_HOP: bool = false;
+    /// The grammar has header parameters after the address. Without them a
+    /// bare value is one URI whole (RFC 3325 §9.1).
+    const HEADER_PARAMS: bool = true;
+    /// A bare value whose `;` comes before its `@` reads its URI up to that
+    /// `@` once the strict read failed (a From or To, RFC 3261 §20).
+    const BARE_USER_SEMICOLON: bool = false;
+    /// A line may be the `*` wildcard alone (RFC 3261 §20.10), which holds no
+    /// address: it reads as no value.
+    const WILDCARD: bool = false;
 }
 
 /// A name-addr header whose grammar admits header parameters. Absent on
@@ -49,11 +60,25 @@ pub trait NoParams: NameAddrKind {}
 /// A name-addr header carrying a dialog tag — From and To, and nothing else.
 pub trait TaggedKind: RichParams {}
 
-/// A header whose value is a set of option tags.
-pub trait TokenKind: HeaderKind {}
+/// A header whose value is a set of tokens.
+pub trait TokenKind: HeaderKind {
+    /// The grammar admits a value holding no token (RFC 3261 §25.1:
+    /// `Supported` and `Allow` bracket their list).
+    const MAY_BE_EMPTY: bool = false;
+}
 
-/// A header whose value is a leading token followed by `;`-parameters.
-pub trait TokenParamsKind: HeaderKind {}
+/// A header whose value is a leading part followed by `;`-parameters.
+pub trait TokenParamsKind: HeaderKind {
+    /// What leads the value.
+    const LEADING: Leading = Leading::Token;
+    /// How the parameters read: strictly, the whole value consumed, unless
+    /// the leading part means something whatever follows it.
+    const PARAMS: ParamReading = ParamReading::Strict;
+    /// The parameters the grammar requires.
+    const REQUIRED: &'static [&'static str] = &[];
+    /// The grammar admits an empty line (RFC 3261 §25.1 `Accept`).
+    const EMPTY_LINE_READS: bool = false;
+}
 
 /// A header whose value is a single number, bounded by the range its own
 /// registry entry states. The bounds are the same ones the header-block parser
@@ -63,6 +88,9 @@ pub trait NumericKind: HeaderKind {
     const MIN: u32 = 0;
     /// The largest value the grammar admits.
     const MAX: u32 = u32::MAX;
+    /// The grammar has `*( SEMI generic-param )` after the number (RFC 4028
+    /// §5 Min-SE); a reader holds them to it and keeps the number alone.
+    const PARAMS: bool = false;
 }
 
 /// A header whose value is an authentication scheme plus comma-separated
@@ -153,7 +181,11 @@ kinds! {
     ProxyAuthenticate => ProxyAuthenticate, Opaque;
 }
 
-capability! { NameAddrKind: Contact, ReferTo, ReplyTo }
+capability! { NameAddrKind: ReferTo, ReplyTo }
+
+impl NameAddrKind for Contact {
+    const WILDCARD: bool = true;
+}
 
 /// The headers whose address names a party and is never resolved.
 macro_rules! identity_kinds {
@@ -164,16 +196,31 @@ macro_rules! identity_kinds {
     };
 }
 
-identity_kinds!(
-    From,
-    To,
-    ReferredBy,
-    Diversion,
-    HistoryInfo,
-    RemotePartyId,
-    PAssertedIdentity,
-    PPreferredIdentity
-);
+identity_kinds!(ReferredBy, Diversion, HistoryInfo, RemotePartyId);
+
+/// The dialog's two parties: a bare value may hold a `;` before its `@`.
+macro_rules! party_kinds {
+    ($($marker:ident),+) => {
+        $(impl NameAddrKind for $marker {
+            const ROLE: UriRole = UriRole::Identity;
+            const BARE_USER_SEMICOLON: bool = true;
+        })+
+    };
+}
+
+party_kinds!(From, To);
+
+/// RFC 3325 §9.1: `name-addr / addr-spec` and no header parameters.
+macro_rules! asserted_kinds {
+    ($($marker:ident),+) => {
+        $(impl NameAddrKind for $marker {
+            const ROLE: UriRole = UriRole::Identity;
+            const HEADER_PARAMS: bool = false;
+        })+
+    };
+}
+
+asserted_kinds!(PAssertedIdentity, PPreferredIdentity);
 
 /// The route family: `route-param = name-addr *( SEMI rr-param )` (RFC 3261
 /// §20.30, §20.34; RFC 3327 §4; RFC 3608 §5).
@@ -197,11 +244,49 @@ capability! { NoParams: PAssertedIdentity, PPreferredIdentity }
 
 capability! { TaggedKind: From, To }
 
-capability! { TokenKind: Require, ProxyRequire, Supported, Unsupported, Allow, AllowEvents, Privacy }
+capability! { TokenKind: Require, ProxyRequire, Unsupported, AllowEvents, Privacy }
 
-capability! { TokenParamsKind:
-    Event, SubscriptionState, Accept, ContentType, ContentDisposition, SessionExpires, RetryAfter, Reason,
-    Replaces, ReferSub,
+impl TokenKind for Supported {
+    const MAY_BE_EMPTY: bool = true;
+}
+
+impl TokenKind for Allow {
+    const MAY_BE_EMPTY: bool = true;
+}
+
+capability! { TokenParamsKind: Event, SubscriptionState, ContentDisposition }
+
+impl TokenParamsKind for Accept {
+    const LEADING: Leading = Leading::MediaType;
+    const EMPTY_LINE_READS: bool = true;
+}
+
+impl TokenParamsKind for ContentType {
+    const LEADING: Leading = Leading::MediaType;
+}
+
+impl TokenParamsKind for SessionExpires {
+    const LEADING: Leading = Leading::DeltaSeconds;
+}
+
+impl TokenParamsKind for RetryAfter {
+    const LEADING: Leading = Leading::DeltaSecondsComment;
+}
+
+/// RFC 3326 §2: a cause reads whatever parameter follows it off the grammar.
+impl TokenParamsKind for Reason {
+    const PARAMS: ParamReading = ParamReading::UpToFirstBad;
+}
+
+/// RFC 3891 §6.1: the dialog's Call-ID, then exactly one of each tag.
+impl TokenParamsKind for Replaces {
+    const LEADING: Leading = Leading::CallId;
+    const REQUIRED: &'static [&'static str] = &["to-tag", "from-tag"];
+}
+
+/// RFC 4488 §3: `refer-sub-value = "true" / "false"`.
+impl TokenParamsKind for ReferSub {
+    const LEADING: Leading = Leading::OneOf(&["true", "false"]);
 }
 
 numeric_kinds! {
@@ -214,11 +299,18 @@ numeric_kinds! {
     Expires => 0, u32::MAX;
     /// RFC 3261 §20.23 — `delta-seconds`.
     MinExpires => 0, u32::MAX;
-    /// RFC 4028 §5 — `delta-seconds`. The 90-second floor that section states
-    /// is a session policy, not a grammar bound, so it is not gated here.
-    MinSe => 0, u32::MAX;
-    /// RFC 3262 §7.1 — `1` to `2^31 - 1`; zero is not a sequence number.
-    RSeq => 1, INT_32_MAX;
+
+    /// RFC 3262 §7.1 — `response-num`, `1` to `2^32 - 1`; zero is not a
+    /// sequence number. §3's `2^31 - 1` bounds the first value a sender
+    /// picks, not what a reader takes.
+    RSeq => 1, u32::MAX;
+}
+
+/// RFC 4028 §5 — `delta-seconds *( SEMI generic-param )`. The 90-second floor
+/// that section states is a session policy, not a grammar bound, so it is not
+/// gated here.
+impl NumericKind for MinSe {
+    const PARAMS: bool = true;
 }
 
 capability! { CredentialsKind:

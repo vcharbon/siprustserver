@@ -39,17 +39,45 @@ compatibility rules admit, on purpose:
   `099` and `700`, but §7.2 has it that "SIP/2.0 allows six values for the first
   digit", 1 to 6, and RFC 4475 §3.1.2.19 has an element drop a response "larger
   than 699". A class no element defines has no final or provisional reading.
-- **One From tag.** A From with two `tag` parameters is refused (§8.1.1.3,
-  §19.3).
-- **Readable credentials.** An Authorization or Proxy-Authorization whose
-  Digest credentials do not read is refused with its message (§22.4).
+- **One parameter of a name.** A parameter name appears once in a header value
+  (§7.3.1) and in a URI (§19.1.1), a From or To tag included. A URI written with
+  one parameter twice with one value reads as one copy, and the stack's own
+  output carries one copy; ingress refuses it unless an exemption names that
+  parameter of that header. A repeat with a different value is always refused.
+- **Readable credentials.** An Authorization or Proxy-Authorization that
+  `Credentials::parse` does not read is refused with its message, whatever its
+  scheme (§22.4).
+- **What a request states.** A request carries a From tag (§8.1.1.3) and a
+  Max-Forwards (§8.1.1); one that can open a dialog (INVITE, SUBSCRIBE, NOTIFY,
+  REFER) carries a Contact (§8.1.1.8), and so does a 2xx to INVITE, SUBSCRIBE or
+  REFER (§12.1.1, RFC 3515 §2.4.4). A 1xx may carry none, and so may a 2xx to a
+  NOTIFY. Every response but a 100 carries a To-tag (§8.2.6.2).
+- **Exemptions.** `SipParserLimits::exemptions` names each shape a deployment
+  accepts against the RFC: empty by default, each a stated setting read from
+  `SIP_EXEMPTIONS` on every tier, consulted only by the ingress gate. Only a
+  shape with one reading can be exempted, and every typed reader reads it on
+  every deployment, so a stored read and a takeover need no setting:
+  `repeat:<header>.uri:<param>` (a URI parameter written twice with one value,
+  on From, To, Contact, Route, Record-Route or Refer-To), `bare-user-semicolon`
+  (a bare From or To whose `;` comes before its `@`, which §20 brackets, read up
+  to an `@` outside any quoted-string once the strict read fails) and
+  `max-forwards:absent` (a request with no Max-Forwards, read as 70, §16.6). A
+  non-fatal identity header in an exempted shape reads as any other value of it
+  (ADR-0053 §5).
 - **A URI's `maddr`.** A URI a request is sent to or routed on (Request-URI,
   Contact, Route, Record-Route; Refer-To and Reply-To at their typed read) names
   a host in its `maddr`, or has none: `other-param` admits a flag, a port or a
   bracketed name, and none has a target to read.
 - **Numeric headers.** A header of the numeric registry carries a decimal value
   within its range, digits only, followed by nothing but the tail its grammar
-  has: CSeq's method, a session timer's parameters.
+  has: CSeq's method, a session timer's parameters read by the strict parameter
+  reader. CSeq reads 0 to 2^32-1 in or out of a dialog (§20.16; §8.1.1.5's bound
+  is the sender's first number), RSeq and RAck's response-num 1 to 2^32-1
+  (RFC 3262 §7.1).
+- **Empty values.** A Via, Contact, Route, Record-Route or Content-Type line
+  holding no value, and an empty entry of a comma list, is refused: their
+  grammar needs one. `Supported:`, `Allow:`, `Accept:` and `Accept-Encoding:`
+  stay legal.
 
 A gate refuses like any other rule: a refused request whose echoed fields read
 is answered 400 (ADR-0054).

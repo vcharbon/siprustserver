@@ -89,13 +89,13 @@ use Difference::*;
 const EXPECTED: &[Expected] = &[
     // The production parser's gates.
     gate("cve/cve_2023_28098", OnlyCustomRefuses, "RFC 3261 §22.4, §25.1 credentials")
-        .values(0xc16a9a4cde43c1fb),
+        .values(0xe53ed4c2ee46fe8a),
     gate("param-gaps/fromDuplicateTag", OnlyCustomRefuses, "RFC 3261 §8.1.1.3, §19.3")
-        .values(0xc65c90c33e9b74d9),
+        .values(0x7b0af89be024eb93),
     gate("param-gaps/requestUriPortOverflow", OnlyCustomRefuses, "RFC 3261 §19.1.1 port")
         .values(0xbd21100f3778e6f1),
     gate("param-gaps/viaPortOverflow", OnlyCustomRefuses, "RFC 3261 §20.42 sent-by")
-        .values(0x2688719069804f87),
+        .values(0x03cba649a9041dc3),
     gate("param-gaps/viaPortZero", OnlyCustomRefuses, "RFC 3261 §18.2.2, §20.42 sent-by")
         .values(0xa1d4db8865a6faa8),
     gate("rfc4475-valid/longValues", OnlyCustomRefuses, COOKIE).values(0x59d4b41e95b6aa85),
@@ -117,7 +117,7 @@ const EXPECTED: &[Expected] = &[
     rvoip("param-gaps/requestUriPortTrailingGarbage", OnlyCustomRefuses, "RFC 3261 §25.1")
         .values(0x679fd0f32d4672d3),
     rvoip("param-gaps/viaEmptyBranch", OnlyCustomRefuses, "RFC 3261 §25.1 via-branch")
-        .values(0x57f029553723be25),
+        .values(0x3797bf13636a3b65),
     rvoip("param-gaps/viaPortTrailingGarbage", OnlyCustomRefuses, "RFC 3261 §25.1 sent-by")
         .values(0xe7f8970a3c605f11),
     rvoip("rfc4475-invalid/angleBracketRequestUri", OnlyCustomRefuses, "RFC 4475 §3.1.2.7")
@@ -129,7 +129,7 @@ const EXPECTED: &[Expected] = &[
     rvoip("synthetic/utf8-raw-user", OnlyCustomRefuses, "RFC 3261 §25.1 user, escaped")
         .values(0xc658e4784a248ef3),
     rvoip("rfc4475-invalid/extraneousSeparators", OnlyCustomRefuses, "RFC 4475 §3.1.2.1")
-        .values(0x921cff418a09fd67),
+        .values(0x36ca3056d9d09393),
     rvoip("rfc4475-invalid/methodMismatch", OnlyCustomRefuses, "RFC 3261 §8.1.1.5")
         .values(0xf207efadaf6b4552),
     rvoip("rfc4475-invalid/multipleSPInRequestLine", OnlyCustomRefuses, "RFC 3261 §7.1")

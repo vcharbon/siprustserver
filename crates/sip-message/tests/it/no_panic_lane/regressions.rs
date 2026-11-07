@@ -82,13 +82,16 @@ fn an_unterminated_name_addr_is_refused_on_the_wire() {
 }
 
 /// A leniently read request whose `To` line no response can echo under a
-/// stack tag draws a refusal from the response generator, the same for a
-/// request whose `To` reads with no address at all.
+/// stack tag draws a refusal from the response generator. One whose `To`
+/// parameters break the grammar after its address is echoed under the stack
+/// tag, which the lenient reading reads past them.
 #[test]
 fn a_response_to_an_unechoable_to_is_refused() {
     let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
     let parser = CustomParser::with_limits(lenient);
-    for to in ["sipuser@example.com;tag=bd76ya", "sip:user@example.com;t<ag=bd76ya"] {
+    for (to, echoed) in
+        [("sipuser@example.com;tag=bd76ya", false), ("sip:user@example.com;t<ag=bd76ya", true)]
+    {
         let raw = format!(
             "BYE sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-1\r\n\
              From: <sip:alice@192.0.2.1>;tag=a1\r\nTo: {to}\r\nCall-ID: c1\r\nCSeq: 2 BYE\r\n\
@@ -99,7 +102,10 @@ fn a_response_to_an_unechoable_to_is_refused() {
         };
         let opts = GenerateResponseOpts { to_tag: Some("b2".into()), ..Default::default() };
         let answered = generate_response(&req, 180, "Ringing", &opts);
-        assert!(answered.is_err(), "{to:?} drew {answered:?}");
+        match echoed {
+            false => assert!(answered.is_err(), "{to:?} drew {answered:?}"),
+            true => assert_eq!(answered.expect("echoed").to().tag(), Some("b2"), "{to:?}"),
+        }
     }
 }
 

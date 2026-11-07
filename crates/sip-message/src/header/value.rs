@@ -51,6 +51,11 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
         Self::header_name()
     }
 
+    /// Whether a line holding no value reads as none: `false` where the
+    /// grammar needs one (RFC 3261 §25.1), which [`parse`](Self::parse) of
+    /// the empty value then refuses.
+    const EMPTY_LINE_READS: bool = false;
+
     /// Every value carried on one header line.
     fn parse_line(raw: &SipStr) -> Result<Vec<Self>, SipParseError> {
         // Sized for the one-value line the wire almost always carries: a value
@@ -64,15 +69,7 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
     /// [`parse_line`](Self::parse_line) appending to `out`, so a reader that
     /// folds every line of a header into one list allocates it once.
     fn parse_line_into(raw: &SipStr, out: &mut Vec<Self>) -> Result<(), SipParseError> {
-        match Self::folding() {
-            Folding::Comma => {
-                for entry in top_level_comma_entries(raw.as_str()) {
-                    out.push(Self::parse(&raw.reslice(entry))?);
-                }
-            }
-            Folding::Single | Folding::Opaque | Folding::SetPerLine => out.push(Self::parse(raw)?),
-        }
-        Ok(())
+        read_line_into(raw, out)
     }
 
     /// Whether [`combine`](Self::combine) reads every value: `true` for a type
@@ -104,6 +101,27 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
         self.render(&mut w);
         w.as_str().to_owned()
     }
+}
+
+/// [`HeaderValue::parse_line_into`] as the trait states it, for a type that
+/// reads one shape of line its own way and every other line this way.
+pub(crate) fn read_line_into<H: HeaderValue>(
+    raw: &SipStr,
+    out: &mut Vec<H>,
+) -> Result<(), SipParseError> {
+    match H::folding() {
+        Folding::Comma => {
+            let mut entries = top_level_comma_entries(raw.as_str()).peekable();
+            if entries.peek().is_none() && !H::EMPTY_LINE_READS {
+                out.push(H::parse(raw)?);
+            }
+            for entry in entries {
+                out.push(H::parse(&raw.reslice(entry))?);
+            }
+        }
+        Folding::Single | Folding::Opaque | Folding::SetPerLine => out.push(H::parse(raw)?),
+    }
+    Ok(())
 }
 
 #[cfg(test)]

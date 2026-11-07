@@ -269,7 +269,8 @@ Error-Info = "Error-Info" HCOLON error-uri *(COMMA error-uri)
 error-uri = LAQUOT absoluteURI RAQUOT *(SEMI generic-param)
 Expires = "Expires" HCOLON delta-seconds
 From = ("From" / "f") HCOLON from-spec
-from-spec = (name-addr / bare-addr-spec) *(SEMI from-param)
+; §8.1.1.3, ADR-0001: a request's From carries a tag (must/3261-8.1.1.3-from-no-tag).
+from-spec = (name-addr / bare-addr-spec) SEMI tag-param *(SEMI from-param)
 from-param = tag-param / generic-param
 tag-param = "tag" EQUAL token
 In-Reply-To = "In-Reply-To" HCOLON callid *(COMMA callid)
@@ -413,7 +414,8 @@ Refer-To = ("Refer-To" / "r") HCOLON (name-addr / bare-addr-spec) *(SEMI generic
 
 ; --- RFC 3891 §6.1 -----------------------------------------------------------
 
-Replaces = "Replaces" HCOLON callid *(SEMI replaces-param)
+; §6.1: exactly one to-tag and one from-tag (must/3891-6.1-replaces-no-tags).
+Replaces = "Replaces" HCOLON callid SEMI to-tag SEMI from-tag *(SEMI replaces-param)
 replaces-param = to-tag / from-tag / early-flag / generic-param
 to-tag = "to-tag" EQUAL token
 from-tag = "from-tag" EQUAL token

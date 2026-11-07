@@ -117,6 +117,13 @@ fn addr_renders_verbatim(input: &str) -> bool {
         && !input.contains(',')
         && !input.contains('"')
         && !input.bytes().any(|b| b == b' ' || b == b'\t')
+        && input.split_once('>').is_some_and(|(uri, _)| writes_each_parameter_once(&uri[1..]))
+}
+
+/// A URI that writes no parameter twice: one that does reads, and renders, one
+/// copy (RFC 3261 §19.1.1), which is no loss.
+fn writes_each_parameter_once(uri: &str) -> bool {
+    Uri::parse(&SipStr::owned(uri)).map_or(true, |u| u.repeated_params().next().is_none())
 }
 
 /// A Via the renderer reproduces exactly: one value per line, and no
@@ -150,13 +157,14 @@ fn uri_renders_verbatim(input: &str) -> bool {
 // --- name-addr family, driven by the ABNF corpus ---
 //
 // The corpus grammars draw a header parameter's name from the URI's
-// `paramchar`, where RFC 3261 §25.1 takes a token: the lines carrying such a
-// name are refused, and the floors stand below them.
+// `paramchar`, where RFC 3261 §25.1 takes a token, and write a parameter name
+// twice: the lines carrying either are refused, and the floors stand below
+// them.
 
 #[test]
 fn from_values_are_a_render_parse_fixpoint() {
-    assert_fixpoint::<header::From>("From", &corpus("from"), 780);
-    assert_no_loss::<header::From>("From", &corpus("from"), addr_renders_verbatim, 350);
+    assert_fixpoint::<header::From>("From", &corpus("from"), 720);
+    assert_no_loss::<header::From>("From", &corpus("from"), addr_renders_verbatim, 320);
 }
 
 #[test]
@@ -195,7 +203,7 @@ fn route_values_are_a_render_parse_fixpoint() {
 #[test]
 fn via_values_are_a_render_parse_fixpoint() {
     assert_fixpoint::<Via>("Via", &corpus("via"), 900);
-    assert_no_loss::<Via>("Via", &corpus("via"), via_renders_verbatim, 450);
+    assert_no_loss::<Via>("Via", &corpus("via"), via_renders_verbatim, 400);
 }
 
 #[test]
@@ -218,10 +226,13 @@ fn rack_values_are_a_render_parse_fixpoint() {
 fn uri_round_trip(input: &str) -> Option<bool> {
     let input = input.trim();
     let uri = Uri::parse(&SipStr::owned(input)).ok()?;
-    // An unedited URI goes back out as the bytes it came in as, so the
-    // fixpoint is driven through the field renderer — which is what an
-    // edited URI is written with.
-    assert_eq!(uri.to_string(), input, "URI: an unedited value was rewritten");
+    // An unedited URI goes back out as the bytes it came in as, a parameter it
+    // wrote twice once, so the fixpoint is driven through the field renderer —
+    // which is what an edited URI is written with.
+    let once = writes_each_parameter_once(input);
+    if once {
+        assert_eq!(uri.to_string(), input, "URI: an unedited value was rewritten");
+    }
     let rendered = uri.clone().normalized().to_string();
     let reparsed = Uri::parse(&SipStr::owned(&rendered))
         .unwrap_or_else(|e| panic!("URI: rendered {rendered:?} no longer parses ({})", e.reason));
@@ -229,7 +240,7 @@ fn uri_round_trip(input: &str) -> Option<bool> {
     // The fixpoint alone cannot see a part of the URI that both passes drop;
     // the field renderer's output must also be as long as what it was read
     // from.
-    if !uri_renders_verbatim(input) {
+    if !once || !uri_renders_verbatim(input) {
         return Some(false);
     }
     assert_eq!(
@@ -291,19 +302,22 @@ fn option_tag_sets_are_a_render_parse_fixpoint() {
 
 #[test]
 fn token_parameter_headers_are_a_render_parse_fixpoint() {
-    let inputs = owned(&[
+    let media = owned(&[
         "application/sdp",
         "multipart/mixed;boundary=unique-boundary-1",
+        "text/plain ; charset=\"utf-8\"",
+    ]);
+    assert_fixpoint::<TokenParamsHeader<header::kind::ContentType>>("Content-Type", &media, 3);
+    let tokens = owned(&[
         "presence;id=4567",
         "terminated;reason=noresource",
         "active;expires=600;retry-after=0",
         r#"SIP;cause=486;text="Busy Here""#,
     ]);
-    assert_fixpoint::<TokenParamsHeader<header::kind::ContentType>>("Content-Type", &inputs, 6);
     assert_fixpoint::<TokenParamsHeader<header::kind::SubscriptionState>>(
         "Subscription-State",
-        &inputs,
-        6,
+        &tokens,
+        4,
     );
 }
 

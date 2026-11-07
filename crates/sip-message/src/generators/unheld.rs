@@ -167,17 +167,21 @@ Content-Length: 0\r\n\r\n",
         assert_eq!(bye.request_uri().to_string(), "sip:bob@10.0.0.2:5070");
     }
 
+    /// Ingress refuses a 2xx to INVITE with no Contact (RFC 3261 §12.1.1); one
+    /// read with no grammar held still draws no ACK.
     #[test]
     fn a_2xx_without_a_contact_draws_nothing() {
-        let no_contact = response(
-            "SIP/2.0 200 OK\r\n\
+        let raw = "SIP/2.0 200 OK\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKinv\r\n\
 From: <sip:svc@10.0.0.9>;tag=ours\r\n\
 To: <sip:bob@10.0.0.2>;tag=bobs\r\n\
 Call-ID: c\r\n\
 CSeq: 1 INVITE\r\n\
-Content-Length: 0\r\n\r\n",
-        );
+Content-Length: 0\r\n\r\n";
+        assert!(CustomParser::new().parse(raw.as_bytes()).is_err());
+        let SipMessage::Response(no_contact) = crate::read_stored(raw.as_bytes()).unwrap() else {
+            panic!("a response")
+        };
         assert!(generate_ack_for_unheld_2xx(&no_contact, hop("z9hG4bKa"), None).is_err());
     }
 

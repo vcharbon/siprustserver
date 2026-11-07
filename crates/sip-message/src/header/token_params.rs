@@ -1,5 +1,7 @@
 //! [`TokenParamsHeader`] — the leading-token-plus-parameters family (Event,
-//! Subscription-State, Content-Type, Reason, Retry-After, Session-Expires).
+//! Subscription-State, Content-Type, Reason, Retry-After, Session-Expires,
+//! Replaces, Refer-Sub, Content-Disposition, Accept). Each kind states what
+//! leads its value ([`Leading`]) and how its parameters read.
 
 use std::marker::PhantomData;
 
@@ -8,10 +10,11 @@ use crate::sip_str::SipStr;
 
 use super::kind::TokenParamsKind;
 use super::name::HeaderName;
-use super::params::{parse_semicolon_params, ParamValue, Params, HEADER_PARAMS};
-use super::scan::index_of;
+use super::params::{read_params, ParamReading, ParamValue, Params};
+use super::scan::{byte_at, clamped, digits_end, scan_until, skip_ws, sub, token_end};
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
+use crate::parser::custom::dialog_ids::is_call_id;
 
 /// A token followed by `;`-parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,17 +59,121 @@ impl<K: TokenParamsKind> TokenParamsHeader<K> {
 
 /// Parse a `token *(;param)` value with NO named header type — the shape a
 /// number of extension headers share (RFC 7315 §5.4 `P-Access-Network-Info`
-/// among them). Yields the leading token and the parameter list; the grammar's
-/// LWS freedom (`SWS ";" SWS`) is absorbed by the parse, so two spellings of
-/// one value compare equal through the parts.
+/// among them). Yields the leading token and the parameter list, the whole
+/// value read; the grammar's LWS freedom (`SWS ";" SWS`) is absorbed by the
+/// parse, so two spellings of one value compare equal through the parts.
 pub fn parse_token_params(raw: &SipStr) -> Result<(SipStr, Params), SipParseError> {
-    let value = raw.trimmed();
-    let semi = index_of(value.as_bytes(), b';', 0).unwrap_or(value.len());
-    let token = super::scan::sub_trimmed(&value, 0, semi);
-    if token.is_empty() {
-        return Err(SipParseError::new(format!("no leading token: {:?}", value.as_str())));
+    read_token_params(raw, Leading::Token, ParamReading::Strict)
+        .map_err(|reason| SipParseError::new(format!("{reason}: {:?}", raw.as_str())))
+}
+
+/// What leads a value of this family (RFC 3261 §25.1 unless stated).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leading {
+    /// A `token`.
+    Token,
+    /// One of these tokens, case aside (RFC 4488 §3 `refer-sub-value`).
+    OneOf(&'static [&'static str]),
+    /// `callid = word [ "@" word ]` (RFC 3891 §6.1).
+    CallId,
+    /// `m-type SLASH m-subtype`, two tokens.
+    MediaType,
+    /// `delta-seconds = 1*DIGIT` (RFC 4028 §4).
+    DeltaSeconds,
+    /// `delta-seconds [ comment ]` (§20.33 `Retry-After`).
+    DeltaSecondsComment,
+}
+
+/// The leading part of `value` as `leading` reads it, and where the
+/// parameters start; `Err` names what it is not.
+fn read_leading(value: &SipStr, leading: Leading) -> Result<(SipStr, usize), String> {
+    let bytes = value.as_bytes();
+    let token = |end: usize| sub(value, 0, end);
+    match leading {
+        Leading::Token | Leading::OneOf(_) => {
+            let end = token_end(bytes, 0);
+            if end == 0 {
+                return Err("no leading token".to_string());
+            }
+            if let Leading::OneOf(values) = leading {
+                let read = clamped(value.as_str(), 0, end);
+                if !values.iter().any(|v| v.eq_ignore_ascii_case(read)) {
+                    return Err(format!("leading token is none of {values:?}"));
+                }
+            }
+            Ok((token(end), end))
+        }
+        Leading::CallId => {
+            let end = scan_until(bytes, 0, b"; \t");
+            if !is_call_id(clamped(value.as_str(), 0, end)) {
+                return Err("leading part is no word [\"@\" word] Call-ID".to_string());
+            }
+            Ok((token(end), end))
+        }
+        Leading::MediaType => {
+            let type_end = token_end(bytes, 0);
+            let slash = skip_ws(bytes, type_end);
+            let sub_at = skip_ws(bytes, slash + 1);
+            let end = token_end(bytes, sub_at);
+            if type_end == 0 || byte_at(bytes, slash) != Some(b'/') || end == sub_at {
+                return Err("leading part is no type/subtype".to_string());
+            }
+            Ok((token(end), end))
+        }
+        Leading::DeltaSeconds | Leading::DeltaSecondsComment => {
+            let end = digits_end(bytes, 0);
+            if end == 0 {
+                return Err("leading part is no delta-seconds".to_string());
+            }
+            if leading == Leading::DeltaSeconds {
+                return Ok((token(end), end));
+            }
+            let open = skip_ws(bytes, end);
+            if byte_at(bytes, open) != Some(b'(') {
+                return Ok((token(end), end));
+            }
+            let close = comment_close(bytes, open).ok_or("unterminated comment")?;
+            Ok((token(end), close))
+        }
     }
-    let (params, _) = parse_semicolon_params(&value, semi, &HEADER_PARAMS);
+}
+
+/// The position after the `)` closing the `comment` opened at byte `open`
+/// (RFC 3261 §25.1): `ctext`, `quoted-pair` and nested comments.
+fn comment_close(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    loop {
+        match byte_at(bytes, i)? {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            b'\\' => match byte_at(bytes, i + 1)? {
+                b'\r' | b'\n' => return None,
+                b if b.is_ascii() => i += 1,
+                _ => return None,
+            },
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// `leading *( SEMI generic-param )`, the whole of `raw` but its surrounding
+/// LWS; [`ParamReading::UpToFirstBad`] keeps the parameters before the first
+/// off its grammar and refuses only the leading part.
+fn read_token_params(
+    raw: &SipStr,
+    leading: Leading,
+    reading: ParamReading,
+) -> Result<(SipStr, Params), String> {
+    let value = raw.trimmed();
+    let (token, params_at) = read_leading(&value, leading)?;
+    let (params, _) = read_params(&value, params_at, reading, None).map_err(|e| e.reason)?;
     Ok((token, params))
 }
 
@@ -79,18 +186,17 @@ impl<K: TokenParamsKind> HeaderValue for TokenParamsHeader<K> {
         K::FOLDING
     }
 
+    const EMPTY_LINE_READS: bool = K::EMPTY_LINE_READS;
+
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let value = raw.trimmed();
-        let semi = index_of(value.as_bytes(), b';', 0).unwrap_or(value.len());
-        let token = super::scan::sub_trimmed(&value, 0, semi);
-        if token.is_empty() {
-            return Err(SipParseError::new(format!(
-                "{} has no leading token: {:?}",
-                K::name(),
-                value.as_str()
-            )));
+        let refused = |reason: &str| {
+            SipParseError::new(format!("{} {reason}: {:?}", K::name(), raw.as_str()))
+        };
+        let (token, params) =
+            read_token_params(raw, K::LEADING, K::PARAMS).map_err(|r| refused(&r))?;
+        if let Some(missing) = K::REQUIRED.iter().find(|name| !params.has(name)) {
+            return Err(refused(&format!("has no {missing} parameter")));
         }
-        let (params, _) = parse_semicolon_params(&value, semi, &HEADER_PARAMS);
         Ok(Self { token, params, kind: PhantomData })
     }
 

@@ -10,10 +10,6 @@ use super::scan::parse_u32;
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
 
-/// The largest sequence number: a CSeq-num is below 2^31 (RFC 3261 §8.1.1.5),
-/// and so is the RSeq a RAck's response-num echoes (RFC 3262 §7.1).
-const SEQUENCE_MAX: u32 = i32::MAX as u32;
-
 /// The `N` LWS-separated fields of `value`, exactly `N` of them.
 fn lws_fields<'a, const N: usize>(
     value: &'a str,
@@ -32,15 +28,16 @@ fn lws_fields<'a, const N: usize>(
     }
 }
 
-/// `1*DIGIT`, at most [`SEQUENCE_MAX`]: every byte an ASCII digit, nothing
-/// trimmed.
-fn sequence_number(field: &str, what: &str) -> Result<u32, SipParseError> {
+/// `1*DIGIT`, `min` to 2^32-1: every byte an ASCII digit, nothing trimmed.
+/// A CSeq-num reads any 32-bit value (RFC 3261 §20.16; §8.1.1.5's bound is the
+/// sender's first number), a response-num any but 0 (RFC 3262 §7.1).
+fn sequence_number(field: &str, what: &str, min: u32) -> Result<u32, SipParseError> {
     if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
         return Err(SipParseError::new(format!("{what} is not 1*DIGIT: {field:?}")));
     }
     let n = parse_u32(field, what)?;
-    if n > SEQUENCE_MAX {
-        return Err(SipParseError::new(format!("{what} is not below 2^31: {field:?}")));
+    if n < min {
+        return Err(SipParseError::new(format!("{what} is below {min}: {field:?}")));
     }
     Ok(n)
 }
@@ -171,12 +168,13 @@ impl HeaderValue for CSeq {
         Folding::Single
     }
 
-    /// `CSeq = 1*DIGIT LWS Method` (RFC 3261 §25.1), the number below 2^31 —
-    /// the grammar the parser's wire gate holds a CSeq to.
+    /// `CSeq = 1*DIGIT LWS Method` (RFC 3261 §25.1), the number a 32-bit
+    /// unsigned value (§20.16) — the grammar the parser's wire gate holds a
+    /// CSeq to.
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let [seq, method] = lws_fields(raw.as_str(), "CSeq")?;
         Ok(Self {
-            seq: sequence_number(seq, "CSeq sequence")?,
+            seq: sequence_number(seq, "CSeq sequence", 0)?,
             method: method_token(method, "CSeq")?,
         })
     }
@@ -224,12 +222,12 @@ impl HeaderValue for RAck {
     }
 
     /// `RAck = response-num LWS CSeq-num LWS Method` (RFC 3262 §7.2), both
-    /// numbers below 2^31.
+    /// numbers 32-bit unsigned values, the response-num not 0.
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let [rseq, seq, method] = lws_fields(raw.as_str(), "RAck")?;
         Ok(Self {
-            rseq: sequence_number(rseq, "RAck response-num")?,
-            seq: sequence_number(seq, "RAck CSeq-num")?,
+            rseq: sequence_number(rseq, "RAck response-num", 1)?,
+            seq: sequence_number(seq, "RAck CSeq-num", 0)?,
             method: method_token(method, "RAck")?,
         })
     }
@@ -286,7 +284,8 @@ mod tests {
             "776656 1 INVITE trailing",
             "776656 1 \"INVITE\"",
             "776656+1 1 INVITE",
-            "776656 2147483648 INVITE",
+            "776656 4294967296 INVITE",
+            "0 1 INVITE",
             "776656\u{a0} 1 INVITE",
             "776656 1\x0b INVITE",
         ] {
@@ -295,17 +294,18 @@ mod tests {
     }
 
     /// The typed CSeq reads by the grammar the parser's wire gate holds:
-    /// `1*DIGIT LWS Method`, the number below 2^31, the method a token.
+    /// `1*DIGIT LWS Method`, the number 32-bit (§20.16), the method a token.
     #[test]
     fn a_cseq_is_a_number_and_a_method_token_only() {
         let cseq = |s: &str| CSeq::parse(&SipStr::owned(s));
-        assert_eq!(cseq("2147483647\tBYE").expect("the largest").seq(), 2147483647);
+        assert_eq!(cseq("4294967295\tBYE").expect("the largest").seq(), 4294967295);
+        assert_eq!(cseq("2147483648 BYE").expect("past 2^31").seq(), 2147483648);
         for refused in [
             "1 OPTIONS trailing",
             "1 INVITE/extra",
             "1 \"INVITE\"",
             "1INVITE",
-            "2147483648 INVITE",
+            "4294967296 INVITE",
             "-1 INVITE",
             "1\x0b INVITE",
             "1\x0c INVITE",

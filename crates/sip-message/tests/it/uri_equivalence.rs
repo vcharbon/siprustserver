@@ -76,12 +76,15 @@ fn an_ip_literal_host_is_its_address() {
     assert!(!equivalent("sip:a@[::ffff:192.0.2.1]", "sip:a@192.0.2.1"));
 }
 
-/// A parameter repeated on one side compares by its first occurrence.
+/// A parameter written twice with one value reads once, so it compares as the
+/// URI written with one copy (§19.1.4); one of two values reads as no URI.
 #[test]
-fn a_repeated_parameter_compares_by_its_first_occurrence() {
-    let repeated = "sip:a@example.com;transport=tcp;transport=udp";
+fn a_parameter_written_twice_compares_as_one_copy() {
+    let repeated = "sip:a@example.com;transport=tcp;transport=tcp";
     assert!(equivalent(repeated, "sip:a@example.com;transport=tcp"));
     assert!(!equivalent(repeated, "sip:a@example.com;transport=udp"));
+    let two = Uri::parse(&SipStr::owned("sip:a@example.com;transport=tcp;transport=udp"));
+    assert!(two.is_err());
 }
 
 /// Escaped headers compare case-insensitively but for Call-ID (§20.8).

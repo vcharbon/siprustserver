@@ -86,7 +86,7 @@ CSeq: 1 INVITE\r\n\
 Contact: <sip:bob@10.0.0.2:5060>\r\n\
 Content-Length: 0\r\n\r\n";
 
-const COMPACT_FORM: &str = "INVITE sip:bob@example.com SIP/2.0\r\n\
+const COMPACT_FORM: &str = "INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\n\
 v: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-compact\r\n\
 f: <sip:alice@example.com>;tag=compact-tag\r\n\
 t: <sip:bob@example.com>\r\n\
@@ -95,7 +95,7 @@ CSeq: 1 INVITE\r\n\
 m: <sip:alice@10.0.0.1:5060>\r\n\
 l: 0\r\n\r\n";
 
-const MULTI_VIA: &str = "INVITE sip:bob@example.com SIP/2.0\r\n\
+const MULTI_VIA: &str = "INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP hop3.example.com;branch=z9hG4bK-hop3;cr=ref;lg=b-1\r\n\
 Via: SIP/2.0/UDP hop2.example.com;branch=z9hG4bK-hop2\r\n\
 Via: SIP/2.0/TCP hop1.example.com;branch=z9hG4bK-hop1\r\n\
@@ -109,7 +109,7 @@ Content-Length: 0\r\n\r\n";
 // with concat! so the significant leading SP survives (a `\`-newline string
 // continuation would strip it).
 const FOLDED_HEADERS: &str = concat!(
-    "INVITE sip:bob@example.com SIP/2.0\r\n",
+    "INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\n",
     "Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-fold\r\n",
     " ;cr=folded-ref;lg=a\r\n",
     "From: \"Long Display Name\"\r\n",
@@ -244,7 +244,7 @@ fn tag_injection_resistance() {
     ];
     for (from_line, expected) in cases {
         let raw = format!(
-            "INVITE sip:bob@example.com SIP/2.0\r\n\
+            "INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-inj\r\n\
 {from_line}\
 To: <sip:bob@example.com>\r\n\
@@ -252,6 +252,13 @@ Call-ID: injection@example.com\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
         );
+        // A request's From carries a tag (RFC 3261 §8.1.1.3): one hidden in the
+        // display name is none.
+        let Some(_) = expected else {
+            let refused = CustomParser::new().parse(raw.as_bytes()).expect_err("no From tag");
+            assert!(refused.reason.contains("Missing From tag"), "{}", refused.reason);
+            continue;
+        };
         let r = req(&raw);
         // Eager parsed field: quote-aware.
         assert_eq!(r.from().tag(), *expected, "parsed.from.tag for {from_line}");
@@ -268,7 +275,7 @@ Content-Length: 0\r\n\r\n"
 fn a_tag_inside_the_uri_is_not_a_duplicate_tag() {
     let request = |from: &str, to: &str| {
         format!(
-            "INVITE sip:bob@example.com SIP/2.0\r\n\
+            "INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-uritag\r\n\
 From: {from}\r\n\
 To: {to}\r\n\
@@ -287,7 +294,7 @@ Content-Length: 0\r\n\r\n"
 
     let twice = request("<sip:a@example.com;tag=URI>;tag=A;tag=B", "<sip:b@example.com>");
     let refused = CustomParser::new().parse(twice.as_bytes()).expect_err("two header tags");
-    assert!(refused.reason.contains("Duplicate From tag"), "{}", refused.reason);
+    assert!(refused.reason.contains("repeated parameter \"tag\""), "{}", refused.reason);
 }
 
 // --- eager parsed fields ---
@@ -363,7 +370,7 @@ fn parsed_fields_with_compact_and_folded() {
 
 #[test]
 fn semicolon_in_user_portion_is_accepted() {
-    let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
+    let raw = "INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-user-semi\r\n\
 From: \"toto\" <sip:+15551234567;titi=tat@foo.bar>;tag=from-tag-1\r\n\
 To: \"tutu\" <sip:+15551987654;npi=e164@bar.baz>\r\n\
@@ -385,7 +392,7 @@ fn refer_to_question_mark_in_userinfo_vs_embedded_headers() {
     let refer_value =
         "<sips:+1555?param=v@host.example;lr?Replaces=abc%40d%3Bfrom-tag%3D1%3Bto-tag%3D2>";
     let raw = format!(
-        "REFER sip:bob@example.com SIP/2.0\r\n\
+        "REFER sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-refer-q\r\n\
 From: <sip:alice@example.com>;tag=t1\r\n\
 To: <sip:bob@example.com>;tag=t2\r\n\

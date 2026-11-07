@@ -93,7 +93,7 @@ mod tests {
     /// it mints: the stamp still applies.
     fn request(via: &str) -> SipRequest {
         let raw = format!(
-            "OPTIONS sip:b@192.0.2.1 SIP/2.0\r\n\
+            "OPTIONS sip:b@192.0.2.1 SIP/2.0\r\nMax-Forwards: 70\r\n\
              Via: {via}\r\n\
              Via: SIP/2.0/UDP 198.51.100.9:5060;branch=z9hG4bK-lower\r\n\
              From: <sip:a@192.0.2.2>;tag=a\r\n\
@@ -200,7 +200,7 @@ mod tests {
     /// grammar lets through (ADR-0053 §6): the line cannot be rewritten.
     #[test]
     fn a_stamp_that_cannot_be_written_still_names_the_destination() {
-        let raw = "OPTIONS sip:b@192.0.2.1 SIP/2.0\r\n\
+        let raw = "OPTIONS sip:b@192.0.2.1 SIP/2.0\r\nMax-Forwards: 70\r\n\
                    Via: SIP/2.0/UDP 10.0.0.5:5060;branch=z9hG4bK-1;rport, garbage\r\n\
                    From: <sip:a@192.0.2.2>;tag=a\r\n\
                    To: <sip:b@192.0.2.1>\r\n\

@@ -194,7 +194,7 @@ mod tests {
     use crate::SipParser;
 
     fn notify() -> SipRequest {
-        let raw = "NOTIFY sip:as@127.0.0.1:5060 SIP/2.0\r\n\
+        let raw = "NOTIFY sip:as@127.0.0.1:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-n1\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@127.0.0.1:5070>;tag=a1\r\n\

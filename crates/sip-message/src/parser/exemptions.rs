@@ -5,15 +5,48 @@
 
 use std::borrow::Cow;
 
+use crate::char_class::is_paramchar;
+use crate::header::HeaderName;
+
 /// One shape a deployment may state. A name no variant holds refuses the boot:
 /// a typo never reads as a setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Exemption {}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Exemption {
+    /// `repeat:<header>.uri:<param>`: the URI of `header` written with the
+    /// parameter `param` twice, one value each time (RFC 3261 §19.1.1 allows
+    /// it once). A second value is refused whatever is named.
+    RepeatedUriParam { header: HeaderName, param: String },
+    /// `bare-user-semicolon`: a From or To written without brackets whose
+    /// URI holds a `;` before its `@`, which RFC 3261 §20 brackets.
+    BareUserSemicolon,
+    /// `max-forwards:absent`: a request with no Max-Forwards (§8.1.1), read
+    /// as 70 (§16.6).
+    MaxForwardsAbsent,
+}
+
+/// The headers whose URI a `repeat:<header>.uri:<param>` may name: those
+/// ingress reads an address of.
+const URI_HEADERS: &[HeaderName] = &[
+    HeaderName::From,
+    HeaderName::To,
+    HeaderName::Contact,
+    HeaderName::Route,
+    HeaderName::RecordRoute,
+    HeaderName::ReferTo,
+];
 
 impl Exemption {
     /// The exemption `name` states, `None` when no exemption has that name.
-    fn named(_name: &str) -> Option<Self> {
-        None
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            "bare-user-semicolon" => return Some(Self::BareUserSemicolon),
+            "max-forwards:absent" => return Some(Self::MaxForwardsAbsent),
+            _ => {}
+        }
+        let (header, param) = name.strip_prefix("repeat:")?.split_once(".uri:")?;
+        let header = HeaderName::known(header).filter(|h| URI_HEADERS.contains(h))?;
+        let token = !param.is_empty() && param.bytes().all(is_paramchar);
+        token.then(|| Self::RepeatedUriParam { header, param: param.to_ascii_lowercase() })
     }
 }
 
@@ -38,8 +71,17 @@ impl Exemptions {
     }
 
     /// Whether the set holds `exemption`.
-    pub fn holds(&self, exemption: Exemption) -> bool {
-        self.0.contains(&exemption)
+    pub fn holds(&self, exemption: &Exemption) -> bool {
+        self.0.contains(exemption)
+    }
+
+    /// Whether the set lets the URI of `header` carry `param` twice with one
+    /// value.
+    pub fn repeats(&self, header: &HeaderName, param: &str) -> bool {
+        self.0.iter().any(|e| {
+            matches!(e, Exemption::RepeatedUriParam { header: h, param: p }
+                if h == header && p.eq_ignore_ascii_case(param))
+        })
     }
 
     /// Whether the set holds nothing.
@@ -67,6 +109,29 @@ mod tests {
     fn a_blank_value_or_entry_is_refused() {
         for stated in ["", "  ", ",", " , "] {
             assert!(Exemptions::read(Some(stated)).is_err(), "{stated:?}");
+        }
+    }
+
+    #[test]
+    fn every_name_reads_as_its_exemption() {
+        let set = Exemptions::read(Some(
+            "repeat:from.uri:x-dup, repeat:Contact.uri:x-two,bare-user-semicolon,max-forwards:absent",
+        ))
+        .expect("each name reads");
+        assert!(set.repeats(&HeaderName::From, "X-DUP"));
+        assert!(set.repeats(&HeaderName::Contact, "x-two"));
+        assert!(!set.repeats(&HeaderName::To, "x-dup"));
+        assert!(set.holds(&Exemption::BareUserSemicolon));
+        assert!(set.holds(&Exemption::MaxForwardsAbsent));
+    }
+
+    /// A repeat names a header ingress reads an address of, and a parameter.
+    #[test]
+    fn a_repeat_of_no_address_header_or_no_parameter_is_refused() {
+        for stated in
+            ["repeat:via.uri:x", "repeat:from.uri:", "repeat:from:x", "repeat:from.uri:a b"]
+        {
+            assert!(Exemptions::read(Some(stated)).is_err(), "{stated}");
         }
     }
 

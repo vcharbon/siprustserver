@@ -361,7 +361,7 @@ mod offers_100rel_tests {
 
     fn request(extra: &str) -> crate::SipRequest {
         let raw = format!(
-            "INVITE sip:bob@example.com SIP/2.0\r\n\
+            "INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-a\r\n\
 From: <sip:alice@example.com>;tag=a1\r\n\
 To: <sip:bob@example.com>\r\n\

@@ -4,8 +4,8 @@
 //! Distinct from [`super::value::Folding`], which answers how several *values*
 //! of a header may share a line. A reader that wants the members of a set asks
 //! here and never spells a separator itself: the comma is the SIP default
-//! (RFC 3261 §7.3.1), and the RFC 3323 §4.2 priv-value list is the one family
-//! whose members are separated by `;`.
+//! (RFC 3261 §7.3.1), and the RFC 3323 priv-value list is the one family
+//! whose members are separated by `;` (§4.2) or `,` (erratum 5184).
 
 use crate::parser::custom::structured_headers::{top_level_entries, TopLevelEntries};
 
@@ -16,25 +16,25 @@ use super::name::HeaderName;
 pub enum ItemSeparator {
     /// RFC 3261 §7.3.1 — the SIP default.
     Comma,
-    /// RFC 3323 §4.2 — the priv-value list of `Privacy`.
-    Semicolon,
+    /// The priv-value list of `Privacy`: `;` as RFC 3323 §4.2 publishes it,
+    /// or `,` as its erratum 5184 (Verified) writes it.
+    PrivValue,
 }
 
 impl ItemSeparator {
-    /// The ASCII byte this separator is written as.
-    pub const fn byte(self) -> u8 {
+    /// The ASCII bytes that separate two items.
+    pub const fn bytes(self) -> &'static [u8] {
         match self {
-            ItemSeparator::Comma => b',',
-            ItemSeparator::Semicolon => b';',
+            ItemSeparator::Comma => b",",
+            ItemSeparator::PrivValue => b",;",
         }
     }
 
-    /// The wire text that rejoins items written with this separator.
+    /// The wire text that joins items this stack writes: a comma, which every
+    /// list this crate writes separates with (RFC 3323 erratum 5184 for the
+    /// priv-values).
     pub const fn joiner(self) -> &'static str {
-        match self {
-            ItemSeparator::Comma => ", ",
-            ItemSeparator::Semicolon => ";",
-        }
+        ", "
     }
 
     /// The items of `value`, trimmed and borrowed. A separator inside a
@@ -48,7 +48,7 @@ impl HeaderName {
     /// What separates the items of one value of this header.
     pub fn item_separator(&self) -> ItemSeparator {
         match self {
-            HeaderName::Privacy => ItemSeparator::Semicolon,
+            HeaderName::Privacy => ItemSeparator::PrivValue,
             _ => ItemSeparator::Comma,
         }
     }
@@ -122,11 +122,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn privacy_separates_its_priv_values_with_semicolons() {
-        assert_eq!(HeaderName::Privacy.item_separator(), ItemSeparator::Semicolon);
-        assert_eq!(HeaderName::item_separator_of("privacy"), ItemSeparator::Semicolon);
+    fn privacy_separates_its_priv_values_with_semicolons_or_commas() {
+        assert_eq!(HeaderName::Privacy.item_separator(), ItemSeparator::PrivValue);
+        assert_eq!(HeaderName::item_separator_of("privacy"), ItemSeparator::PrivValue);
         let items: Vec<&str> =
-            HeaderName::Privacy.item_separator().split("id;user; header").collect();
+            HeaderName::Privacy.item_separator().split("id;user, header").collect();
         assert_eq!(items, ["id", "user", "header"]);
     }
 
@@ -156,7 +156,7 @@ mod tests {
             ItemSeparator::Comma.split("399 gw \"refused, hard\", 399 gw2 \"ok\"").collect();
         assert_eq!(commas, ["399 gw \"refused, hard\"", "399 gw2 \"ok\""]);
 
-        let semis: Vec<&str> = ItemSeparator::Semicolon.split("id;critical=\"a;b\";user").collect();
+        let semis: Vec<&str> = ItemSeparator::PrivValue.split("id;critical=\"a;b\";user").collect();
         assert_eq!(semis, ["id", "critical=\"a;b\"", "user"]);
     }
 
@@ -165,7 +165,7 @@ mod tests {
         let commas: Vec<&str> = ItemSeparator::Comma.split("<sip:a@h;p=1,2>, <sip:b@h>").collect();
         assert_eq!(commas, ["<sip:a@h;p=1,2>", "<sip:b@h>"]);
 
-        let semis: Vec<&str> = ItemSeparator::Semicolon.split("<sip:a@h;p=1>;id").collect();
+        let semis: Vec<&str> = ItemSeparator::PrivValue.split("<sip:a@h;p=1>;id").collect();
         assert_eq!(semis, ["<sip:a@h;p=1>", "id"]);
     }
 }

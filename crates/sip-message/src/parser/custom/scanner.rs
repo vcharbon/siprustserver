@@ -133,11 +133,20 @@ pub fn trim_span(image: &str, range: Span) -> Option<Span> {
 pub struct Scanner<'a> {
     buf: &'a [u8],
     pos: usize,
+    /// The last value read folded a line that a `\` ended.
+    escaped_fold: bool,
 }
 
 impl<'a> Scanner<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self { buf, pos: 0, escaped_fold: false }
+    }
+
+    /// Whether the last [`read_header_value`](Self::read_header_value) folded
+    /// a line whose break a `\` escaped: no quoted-pair escapes a CR
+    /// (RFC 3261 §25.1), and the unfolded value can no longer tell.
+    pub fn escaped_fold(&self) -> bool {
+        self.escaped_fold
     }
 
     /// The cursor's offset into the buffer.
@@ -241,6 +250,7 @@ impl<'a> Scanner<'a> {
     /// constant stack: each line is copied once into the unfolded value,
     /// whatever the number of continuation lines.
     pub fn read_header_value(&mut self) -> Result<HeaderValue, SipParseError> {
+        self.escaped_fold = false;
         let mut line = self.pos;
         let mut unfolded: Option<String> = None;
         while !self.at_end() {
@@ -256,6 +266,10 @@ impl<'a> Scanner<'a> {
             }
             self.bump(1); // the fold's WSP: the fold becomes one SP
             let text = self.text(line..end)?;
+            // An odd run of `\` before the line break escapes the CR, which
+            // no quoted-pair may (RFC 3261 §25.1).
+            let escapes = text.bytes().rev().take_while(|&b| b == b'\\').count();
+            self.escaped_fold |= escapes % 2 == 1;
             let out = unfolded.get_or_insert_with(String::new);
             out.push_str(text);
             out.push(' ');

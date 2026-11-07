@@ -5,9 +5,9 @@
 //! malformed optional header does not reject the message).
 
 use super::header_index::HeaderIndex;
-use super::structured_headers::top_level_comma_entries;
 use crate::error::SipParseError;
-use crate::header::{AddrForm, HeaderName, HeaderValue, NameAddr, RAck, ReferTo, UriRole};
+use crate::header::kind::{self, NameAddrKind};
+use crate::header::{HeaderValue, NameAddr, NameAddrHeader, RAck, ReferTo};
 use crate::sip_str::SipStr;
 use crate::types::{OptionalHeaders, SipHeader};
 
@@ -15,31 +15,20 @@ use crate::types::{OptionalHeaders, SipHeader};
 // Optional header parsers (eager + non-fatal)
 // ---------------------------------------------------------------------------
 
-/// Parse a multi-value name-addr header (flattened across instances and
-/// comma-separated entries), each entry by the strict name-addr reader, its
-/// URI a [`UriRole::Identity`]. Any malformed entry → `Err`, and the header's
-/// entries are not used (ADR-0053). The list is reserved for one entry per
-/// line and holds no more room than its entries.
-fn parse_name_addr_list(
+/// Read a multi-value name-addr header (flattened across instances and
+/// comma-separated entries) by its own typed reader, so this reading and
+/// `list::<K>()` agree. Any malformed entry, an empty one included, → `Err`,
+/// and the header's entries are not used (ADR-0053). The list holds no more
+/// room than its entries.
+fn parse_name_addr_list<K: NameAddrKind>(
     values: &[&SipStr],
-    header_name: HeaderName,
 ) -> Result<Vec<NameAddr>, SipParseError> {
-    let mut out = Vec::with_capacity(values.len());
+    let mut read: Vec<NameAddrHeader<K>> = Vec::with_capacity(values.len());
     for v in values {
-        for entry in top_level_comma_entries(v.as_str()) {
-            if entry.is_empty() {
-                continue;
-            }
-            let entry = v.reslice(entry);
-            let addr = NameAddr::parse_as(&entry, AddrForm::NameAddrOrSpec, UriRole::Identity)
-                .map_err(|e| SipParseError::new(format!("Strict {header_name}: {}", e.reason)))?;
-            out.push(addr);
-        }
+        NameAddrHeader::<K>::parse_line_into(v, &mut read)
+            .map_err(|e| SipParseError::new(format!("Strict {}: {}", K::name(), e.reason)))?;
     }
-    if out.len() < out.capacity() {
-        out.shrink_to_fit();
-    }
-    Ok(out)
+    Ok(read.into_iter().map(NameAddrHeader::into_addr).collect())
 }
 
 fn parse_rack_header(value: Option<&SipStr>) -> Result<Option<RAck>, SipParseError> {
@@ -64,17 +53,15 @@ fn parse_refer_to_header(value: Option<&SipStr>) -> Result<Option<Box<ReferTo>>,
 /// values the one dispatch pass already located.
 pub fn extract_optional_indexed(idx: &HeaderIndex) -> OptionalHeaders {
     OptionalHeaders {
-        p_asserted_identity: parse_name_addr_list(
+        p_asserted_identity: parse_name_addr_list::<kind::PAssertedIdentity>(
             &idx.p_asserted_identity,
-            HeaderName::PAssertedIdentity,
         ),
-        p_preferred_identity: parse_name_addr_list(
+        p_preferred_identity: parse_name_addr_list::<kind::PPreferredIdentity>(
             &idx.p_preferred_identity,
-            HeaderName::PPreferredIdentity,
         ),
-        diversion: parse_name_addr_list(&idx.diversion, HeaderName::Diversion),
-        history_info: parse_name_addr_list(&idx.history_info, HeaderName::HistoryInfo),
-        remote_party_id: parse_name_addr_list(&idx.remote_party_id, HeaderName::RemotePartyId),
+        diversion: parse_name_addr_list::<kind::Diversion>(&idx.diversion),
+        history_info: parse_name_addr_list::<kind::HistoryInfo>(&idx.history_info),
+        remote_party_id: parse_name_addr_list::<kind::RemotePartyId>(&idx.remote_party_id),
         rack: parse_rack_header(idx.rack.first),
         refer_to: parse_refer_to_header(idx.refer_to.first),
     }

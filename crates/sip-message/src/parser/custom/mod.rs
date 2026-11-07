@@ -1,7 +1,9 @@
-//! Custom SIP parser — RFC 3261 compliant, zero-regex, state-machine based.
+//! Custom SIP parser — zero-regex, state-machine based. It holds wire bytes to
+//! the RFC 3261 §25.1 grammar through one reader per grammar, beside the gates
+//! and bounds ADR-0001 states and the exemptions a deployment names.
 //!
 //! Pipeline:
-//!   scanner -> start_line -> headers -> structured_headers -> extract_fields
+//!   scanner -> start_line -> headers -> extract_fields (the typed readers)
 //!
 //! Observationally pure: internal helpers may use early returns as control
 //! flow, but every escape is translated into `Err(SipParseError)` at this
@@ -19,7 +21,7 @@ use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 pub(crate) mod compact_forms;
 pub mod contact_entries;
 mod dialog_contact;
-mod dialog_ids;
+pub(crate) mod dialog_ids;
 pub mod extract_fields;
 pub mod header_index;
 pub mod headers;

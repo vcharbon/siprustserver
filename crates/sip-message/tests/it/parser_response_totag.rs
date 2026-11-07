@@ -19,6 +19,7 @@ From: <sip:alice@example.com>;tag=from-tag-1\r\n\
 To: <sip:bob@example.com>\r\n\
 Call-ID: notag-{status}@10.0.0.1\r\n\
 CSeq: 1 INVITE\r\n\
+Contact: <sip:bob@10.0.0.2:5060>\r\n\
 Content-Length: 0\r\n\r\n"
     )
 }
@@ -31,6 +32,7 @@ From: <sip:alice@example.com>;tag=from-tag-1\r\n\
 To: <sip:bob@example.com>;tag=to-tag-2\r\n\
 Call-ID: tag-{status}@10.0.0.1\r\n\
 CSeq: 1 INVITE\r\n\
+Contact: <sip:bob@10.0.0.2:5060>\r\n\
 Content-Length: 0\r\n\r\n"
     )
 }

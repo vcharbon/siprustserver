@@ -6,6 +6,7 @@
 //! to a slice lands on a char boundary. Indices may run past the end — the
 //! slicing helpers clamp.
 
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
@@ -92,21 +93,33 @@ pub(crate) fn read_quoted(base: &SipStr, mut i: usize) -> (SipStr, usize) {
     (finish_quoted(base, rebuilt, s, run_start, bytes.len()), i)
 }
 
-/// The position after the `"` closing the quoted string opened at byte
-/// `open`, a `\` escaping the byte after it; `None` when nothing closes it
-/// before a CR or LF, escaped or not (RFC 3261 §25.1: `qdtext` and
-/// `quoted-pair` exclude both).
+/// The position after the `"` closing the `quoted-string` opened at byte
+/// `open` (RFC 3261 §25.1): `qdtext` is SP, HTAB or any byte but a control,
+/// `"` and `\`; a `quoted-pair` escapes one ASCII byte but CR and LF. `None`
+/// when a byte breaks it or nothing closes it.
 pub(crate) fn quoted_close(s: &[u8], open: usize) -> Option<usize> {
     let mut i = open + 1;
     loop {
         match byte_at(s, i)? {
-            b'\r' | b'\n' => return None,
-            b'\\' if matches!(byte_at(s, i + 1), Some(b'\r' | b'\n')) => return None,
-            b'\\' => i += 2,
             b'"' => return Some(i + 1),
+            b'\\' => match byte_at(s, i + 1)? {
+                b'\r' | b'\n' => return None,
+                escaped if escaped.is_ascii() => i += 2,
+                _ => return None,
+            },
+            b'\t' => i += 1,
+            b if b < 0x20 || b == 0x7f => return None,
             _ => i += 1,
         }
     }
+}
+
+/// The end of the run of `token` characters (RFC 3261 §25.1) starting at `i`.
+pub(crate) fn token_end(s: &[u8], mut i: usize) -> usize {
+    while byte_at(s, i).is_some_and(is_token_char) {
+        i += 1;
+    }
+    i
 }
 
 fn finish_quoted(

@@ -10,11 +10,13 @@ use super::compact_forms::expand_compact_form;
 use super::scanner::{
     is_wsp, strict_non_negative_decimal, trim_span, HeaderValue, Scanner, Span, COLON, CR, HTAB, LF,
 };
-use super::structured_headers::split_top_level_commas;
 use crate::char_class::is_token_char;
-use crate::control_bytes::{bare_control_byte, has_comments};
+use crate::control_bytes::{bare_control_byte, has_comments, is_control};
 use crate::error::SipParseError;
-use crate::header::{HeaderId, HeaderName};
+use crate::header::{
+    quoted_close, read_params, Authorization, HeaderId, HeaderName, HeaderValue as _, MediaType,
+    ParamReading,
+};
 use crate::header_table::{HeaderTable, Ids};
 use crate::parser::SipParserLimits;
 use crate::sip_str::{SharedText, SipStr};
@@ -24,6 +26,7 @@ const UINT_32_MAX: u64 = (1u64 << 32) - 1;
 const INT_32_MAX: u64 = (1u64 << 31) - 1;
 
 struct NumericHeaderRule {
+    min: u64,
     max: u64,
     tail: NumericTail,
 }
@@ -42,27 +45,36 @@ enum NumericTail {
 /// decimal integer within a defined range (ADR-0001, numeric headers). `None`
 /// if not numeric.
 fn numeric_header_rule(name: &HeaderName) -> Option<NumericHeaderRule> {
-    let r = |max, tail| Some(NumericHeaderRule { max, tail });
+    let r = |min, max, tail| Some(NumericHeaderRule { min, max, tail });
     match name {
-        HeaderName::ContentLength => r(INT_32_MAX, NumericTail::None),
-        HeaderName::CSeq => r(INT_32_MAX, NumericTail::Method),
-        HeaderName::MaxForwards => r(255, NumericTail::None),
-        HeaderName::Expires | HeaderName::MinExpires => r(UINT_32_MAX, NumericTail::None),
-        HeaderName::SessionExpires | HeaderName::MinSe => r(UINT_32_MAX, NumericTail::Params),
+        HeaderName::ContentLength => r(0, INT_32_MAX, NumericTail::None),
+        // §20.16: any 32-bit value; §8.1.1.5's bound is the sender's.
+        HeaderName::CSeq => r(0, UINT_32_MAX, NumericTail::Method),
+        HeaderName::MaxForwards => r(0, 255, NumericTail::None),
+        HeaderName::Expires | HeaderName::MinExpires => r(0, UINT_32_MAX, NumericTail::None),
+        HeaderName::SessionExpires | HeaderName::MinSe => r(0, UINT_32_MAX, NumericTail::Params),
+        // RFC 3262 §7.1: `response-num`, 1 to 2^32-1.
+        HeaderName::RSeq => r(1, UINT_32_MAX, NumericTail::None),
         _ => None,
     }
 }
 
 /// The number a trimmed numeric value states, `None` unless its digits are
-/// followed by nothing but the tail its grammar has.
-fn strict_numeric_value(value: &str, rule: &NumericHeaderRule) -> Option<u64> {
+/// followed by nothing but the tail its grammar has: the strict parameter
+/// reading of a session timer's, the Method the CSeq reader reads.
+fn strict_numeric_value(value: &SipStr, rule: &NumericHeaderRule) -> Option<u64> {
+    let text = value.as_str();
     let digits = match rule.tail {
-        NumericTail::None => value,
+        NumericTail::None => text,
         // `SEMI = SWS ";" SWS`: whitespace may stand before the `;`.
-        NumericTail::Params => value.split_once(';').map_or(value, |(head, _)| head.trim_end()),
-        NumericTail::Method => value.split_once([' ', '\t']).map_or(value, |(head, _)| head),
+        NumericTail::Params => {
+            let at = text.find(';').unwrap_or(text.len());
+            read_params(value, at, ParamReading::Strict, None).ok()?;
+            text.get(..at)?.trim_end()
+        }
+        NumericTail::Method => text.split_once([' ', '\t']).map_or(text, |(head, _)| head),
     };
-    strict_non_negative_decimal(digits, rule.max)
+    strict_non_negative_decimal(digits, rule.max).filter(|&n| n >= rule.min)
 }
 
 /// The headers whose repeat the split refuses: Content-Length and
@@ -273,8 +285,14 @@ fn parse_line(
     }
 
     let echoed = known.as_ref().is_some_and(is_echoed);
+    if s.escaped_fold() && known.as_ref().is_some_and(is_quoted_string_header) {
+        let error = SipParseError::new(format!(
+            "Header \"{name}\" escapes a line fold with `\\` (RFC 3261 §25.1)"
+        ));
+        return Ok(Line::Refused { error, echoed });
+    }
     let comments = known.as_ref().is_some_and(has_comments);
-    if let Some(at) = bare_control_byte(trimmed_value.as_bytes(), comments) {
+    if let Some(at) = value_control_byte(trimmed_value.as_bytes(), known.as_ref(), comments) {
         let byte = trimmed_value.as_bytes().get(at).copied().unwrap_or_default();
         let error = SipParseError::new(format!(
             "Header \"{name}\" holds control byte 0x{byte:02x} outside a quoted-pair \
@@ -292,6 +310,20 @@ fn parse_line(
     kept.lines.push(SipHeader { name, value: trimmed_value });
     kept.ids.push(id);
     Ok(Line::Kept)
+}
+
+/// The offset of the first control byte of `value` that is no quoted-pair's
+/// escaped byte. A Replaces' call-id is `word`s, whose `"` opens no
+/// quoted-string (RFC 3891 §6.1), so the scan for one starts after it.
+fn value_control_byte(value: &[u8], known: Option<&HeaderName>, comments: bool) -> Option<usize> {
+    let lead = match known {
+        Some(HeaderName::Replaces) => value.iter().position(|&b| b == b';').unwrap_or(value.len()),
+        _ => 0,
+    };
+    let (word, rest) = value.split_at_checked(lead)?;
+    word.iter()
+        .position(|&b| is_control(b))
+        .or_else(|| bare_control_byte(rest, comments).map(|at| at + lead))
 }
 
 /// The refusal the value of the known header `known` draws, if any: a
@@ -333,18 +365,50 @@ fn gate_refusal(
         }
     }
 
-    // Reject unterminated quoted-strings on quoted-string-bearing headers
-    // (CVE-2023-27599).
-    if is_quoted_string_header(known) && has_unbalanced_quotes(value) {
-        return Some(SipParseError::new(format!("Unterminated quoted-string in {name} header")));
+    // A header whose grammar needs a value and which ingress vouches for.
+    if value.is_empty() && is_vouched_value(known) {
+        return Some(SipParseError::new(format!("Empty {name} header (RFC 3261 §25.1)")));
     }
 
-    // Digest credentials must be comma-separated name=value pairs
-    // (CVE-2023-28098).
-    if is_authorization_header(known) && !is_valid_digest_credentials(value) {
-        return Some(SipParseError::new(format!("Malformed Digest credentials in {name} header")));
+    // Quoted-strings held to the grammar on quoted-string-bearing headers
+    // (CVE-2023-27599).
+    if is_quoted_string_header(known) {
+        if let Some(why) = quoted_string_refusal(value.as_bytes()) {
+            return Some(SipParseError::new(format!("{why} quoted-string in {name} header")));
+        }
+    }
+
+    // The body's description reads by its one reader: ingress vouches for it.
+    if *known == HeaderName::ContentType {
+        if let Err(e) = MediaType::parse(value) {
+            return Some(SipParseError::new(format!("Malformed {name} header: {}", e.reason)));
+        }
+    }
+
+    // Credentials read whole by their one reader, whatever the scheme
+    // (CVE-2023-28098, RFC 3261 §22.4).
+    if is_authorization_header(known) {
+        if let Err(e) = Authorization::parse(value) {
+            return Some(SipParseError::new(format!(
+                "Malformed credentials in {name} header: {}",
+                e.reason
+            )));
+        }
     }
     None
+}
+
+/// The vouched headers whose grammar needs a value: an empty line of one is
+/// refused here, where the readers of a comma list would read it as none.
+fn is_vouched_value(name: &HeaderName) -> bool {
+    matches!(
+        name,
+        HeaderName::Via
+            | HeaderName::Contact
+            | HeaderName::Route
+            | HeaderName::RecordRoute
+            | HeaderName::ContentType
+    )
 }
 
 /// Headers whose RFC 3261 grammar can carry a quoted-string.
@@ -373,26 +437,25 @@ fn is_authorization_header(name: &HeaderName) -> bool {
     matches!(name, HeaderName::Authorization | HeaderName::ProxyAuthorization)
 }
 
-/// True iff `value` contains an unterminated quoted-string. Inside a quote,
-/// `\<any>` is an escape pair. Operates on bytes (the relevant delimiters are
-/// ASCII, never present in UTF-8 continuation bytes).
-fn has_unbalanced_quotes(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    let mut in_quote = false;
-    while let Some(c) = bytes.next() {
-        if in_quote {
-            if c == 0x5c {
-                bytes.next(); // escape pair — skip next
-                continue;
+/// Why a quoted-string of `value` breaks the grammar (RFC 3261 §25.1), if one
+/// does: none is closed, or a byte inside it is neither `qdtext` nor a
+/// `quoted-pair` of one ASCII byte.
+fn quoted_string_refusal(value: &[u8]) -> Option<&'static str> {
+    let mut i = 0;
+    while let Some(&b) = value.get(i) {
+        if b != b'"' {
+            i += 1;
+            continue;
+        }
+        match quoted_close(value, i) {
+            Some(after) => i = after,
+            None if value.get(i + 1..).is_some_and(|rest| rest.contains(&b'"')) => {
+                return Some("Malformed")
             }
-            if c == 0x22 {
-                in_quote = false;
-            }
-        } else if c == 0x22 {
-            in_quote = true;
+            None => return Some("Unterminated"),
         }
     }
-    in_quote
+    None
 }
 
 /// Read the header name until colon, rejecting only unambiguously-illegal
@@ -424,73 +487,4 @@ fn is_illegal_header_name_byte(b: u8) -> bool {
         return false;
     }
     b < 0x20 || b == 0x7f
-}
-
-/// Validate Authorization / Proxy-Authorization. Only `Digest` is grammar-
-/// checked; other schemes pass through. Digest must be 1+ comma-separated
-/// `name=value` pairs with a non-empty token name (RFC 3261 §22.4).
-fn is_valid_digest_credentials(value: &str) -> bool {
-    const SCHEME: &str = "digest";
-    // ASCII-case-insensitive prefix probe on the bytes — no lowercased copy of
-    // the whole (credential-length) value just to read the scheme token.
-    let is_digest_scheme = value
-        .as_bytes()
-        .get(..SCHEME.len())
-        .is_some_and(|p| p.eq_ignore_ascii_case(SCHEME.as_bytes()));
-    if !is_digest_scheme {
-        return true; // not Digest; skip
-    }
-    let after_scheme = value.as_bytes().get(SCHEME.len()).copied();
-    if let Some(b) = after_scheme {
-        if !is_wsp(b) {
-            return true; // e.g. "Digestion" — not the Digest scheme
-        }
-    }
-    // The scheme probe read ASCII bytes, so its end is a char boundary.
-    let Some(params) = value.get(SCHEME.len()..).map(str::trim_start) else {
-        return false;
-    };
-    if params.is_empty() {
-        return false;
-    }
-
-    for part in split_top_level_commas(params) {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            return false;
-        }
-        let Some(name) = name_before_unquoted_equals(trimmed) else {
-            return false;
-        };
-        let name = name.trim_end();
-        if name.is_empty() {
-            return false;
-        }
-        if !name.bytes().all(is_token_char) {
-            return false;
-        }
-    }
-    true
-}
-
-/// The text before the first `=` outside a quoted-string, or `None`.
-fn name_before_unquoted_equals(s: &str) -> Option<&str> {
-    let mut bytes = s.bytes().enumerate();
-    let mut in_quote = false;
-    while let Some((i, c)) = bytes.next() {
-        if in_quote {
-            if c == 0x5c {
-                bytes.next();
-                continue;
-            }
-            if c == 0x22 {
-                in_quote = false;
-            }
-        } else if c == 0x22 {
-            in_quote = true;
-        } else if c == 0x3d {
-            return s.get(..i);
-        }
-    }
-    None
 }

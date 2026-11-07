@@ -50,6 +50,7 @@ pub struct HeaderIndex<'a> {
     pub remote_party_id: Vec<&'a SipStr>,
     pub rack: Slot<'a>,
     pub refer_to: Slot<'a>,
+    pub max_forwards: Slot<'a>,
 }
 
 impl<'a> HeaderIndex<'a> {
@@ -87,6 +88,7 @@ impl<'a> HeaderIndex<'a> {
                 HeaderId::RemotePartyId => idx.remote_party_id.push(value),
                 HeaderId::RAck => idx.rack.record(value),
                 HeaderId::ReferTo => idx.refer_to.record(value),
+                HeaderId::MaxForwards => idx.max_forwards.record(value),
                 _ => {}
             }
         }
