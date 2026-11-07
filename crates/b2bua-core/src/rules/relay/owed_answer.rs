@@ -73,7 +73,7 @@ pub(crate) fn ack_answer_on_leg(
         author,
         Carried::InDialog,
         sdp.to_vec(),
-        Some(&super::sdp()),
+        Some(0..sdp.len()),
         policy,
     ))
 }

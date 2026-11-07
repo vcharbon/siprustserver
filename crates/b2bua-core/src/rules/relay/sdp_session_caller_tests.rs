@@ -36,7 +36,7 @@ fn to_caller(c: &mut Call, tag: &str, author: Author<'_>, carried: Carried, body
         author,
         carried,
         body.as_bytes().to_vec(),
-        Some(&ct()),
+        Some(0..body.len()),
         policy(SdpForm::AsWritten),
     );
     String::from_utf8(out).unwrap()

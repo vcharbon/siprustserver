@@ -80,7 +80,7 @@ impl ActionExecutor<'_> {
                 relay::Author::Stack,
                 relay::Carried::of(req.method(), Some(status), req.to().tag().is_some()),
                 body.to_vec(),
-                content_type.as_ref(),
+                relay::description_in(body, content_type.as_ref(), &extra_headers),
                 self.config.sdp_form.as_ref(),
             );
             relay::note_answered_here(call, ctx.source_leg_id, req);

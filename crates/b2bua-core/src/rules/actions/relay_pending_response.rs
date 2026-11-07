@@ -139,7 +139,7 @@ impl ActionExecutor<'_> {
                 relay::Author::Leg(source_leg_id),
                 relay::Carried::answering(&Method::from_wire(&r.cseq_method), status),
                 r.body.clone(),
-                r.content_type.as_ref(),
+                relay::description_in(&r.body, r.content_type.as_ref(), &transparent_headers),
                 self.config.sdp_form.as_ref(),
             ),
         };

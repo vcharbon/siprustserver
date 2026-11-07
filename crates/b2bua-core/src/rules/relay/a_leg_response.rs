@@ -77,6 +77,7 @@ pub fn response_to_a_leg(
     let dialog = to_tag
         .clone()
         .map(|our_tag| call::DialogId { our_tag, peer_tag: call.a_leg_invite.from_tag.clone() });
+    let description = super::description_in(&body, content_type.as_ref(), &extra_headers);
     let body = super::sdp_session::continue_on_leg(
         call,
         &a_leg,
@@ -84,7 +85,7 @@ pub fn response_to_a_leg(
         author,
         super::sdp_session::Carried::of(&Method::Invite, Some(status), false),
         body,
-        content_type.as_ref(),
+        description,
         // An opening description (the INVITE's own responses) consults no policy.
         &crate::config::AsWritten,
     );

@@ -2,9 +2,8 @@
 //! each named by the leg its author spoke on.
 
 use call::{Call, LegState};
-use sip_message::header::MediaType;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipMessage, SipParser, SipStr};
+use sip_message::{Method, SipMessage, SipParser};
 
 use super::{continue_on_leg, Author, Carried};
 use crate::config::{AsWritten, B2buaConfig, SdpCrossing, SdpForm, SdpFormPolicy};
@@ -55,10 +54,6 @@ fn sdp(origin: &str, port: u16) -> String {
     )
 }
 
-fn ct() -> MediaType {
-    MediaType::new(SipStr::from_static("application/sdp"))
-}
-
 /// What reaches leg `to` of `body` written by `author`, `carried` as stated.
 fn send(call: &mut Call, to: &str, author: Author<'_>, carried: Carried, body: &str) -> String {
     send_in(call, to, author, carried, body, SdpForm::AsWritten)
@@ -80,7 +75,7 @@ fn send_in(
         author,
         carried,
         body.as_bytes().to_vec(),
-        Some(&ct()),
+        Some(0..body.len()),
         policy(form),
     );
     String::from_utf8(out).unwrap()
@@ -91,7 +86,8 @@ fn send_in(
 fn in_f1(c: &mut Call, author: Author<'_>, carried: Carried, body: &str) -> String {
     let f1 = call::DialogId { our_tag: String::new(), peer_tag: "f1".into() };
     let body = body.as_bytes().to_vec();
-    let out = continue_on_leg(c, "b-1", Some(&f1), author, carried, body, Some(&ct()), &AsWritten);
+    let whole = Some(0..body.len());
+    let out = continue_on_leg(c, "b-1", Some(&f1), author, carried, body, whole, &AsWritten);
     String::from_utf8(out).unwrap()
 }
 
@@ -858,14 +854,15 @@ fn a_restatement_in_a_losing_fork_stays_the_calls() {
 fn the_calls_restatement_is_read_through_an_early_dialog() {
     let mut c = forked();
     let relay_in_f1 = |c: &mut Call, version: u32, form: SdpForm| {
+        let body = peer_sdp(&format!("alice 1 {version} IN IP4 192.0.2.1"), 10002).into_bytes();
         let out = continue_on_leg(
             c,
             "b-1",
             Some(&call::DialogId { our_tag: String::new(), peer_tag: "f1".into() }),
             Author::Leg("a"),
             Carried::answering(&Method::Update, 200),
-            peer_sdp(&format!("alice 1 {version} IN IP4 192.0.2.1"), 10002).into_bytes(),
-            Some(&ct()),
+            body.clone(),
+            Some(0..body.len()),
             policy(form),
         );
         String::from_utf8(out).unwrap()
@@ -896,7 +893,8 @@ fn the_policy_sees_each_in_dialog_crossing_as_it_stands() {
     let rec = Recording::default();
     let mut c = call();
     let cross = |c: &mut Call, author: Author<'_>, carried: Carried, body: String| {
-        continue_on_leg(c, "a", None, author, carried, body.into_bytes(), Some(&ct()), &rec);
+        let whole = Some(0..body.len());
+        continue_on_leg(c, "a", None, author, carried, body.into_bytes(), whole, &rec);
     };
     cross(&mut c, Author::Leg("b-1"), Carried::Opening, peer_sdp("bob 202 1 IN IP4 192.0.2.2", 1));
     cross(&mut c, Author::Leg("b-1"), Carried::InDialog, peer_sdp("bob 202 2 IN IP4 192.0.2.2", 2));

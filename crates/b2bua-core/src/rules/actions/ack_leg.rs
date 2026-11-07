@@ -53,6 +53,7 @@ impl ActionExecutor<'_> {
         let dialog = call::helpers::find_leg(call, leg_id)
             .and_then(|l| l.dialogs.established())
             .map(call::Dialog::id);
+        let description = relay::description_in(&body, content_type.as_ref(), &extra_headers);
         let body = relay::continue_on_leg(
             call,
             leg_id,
@@ -60,7 +61,7 @@ impl ActionExecutor<'_> {
             author,
             relay::Carried::InDialog,
             body,
-            content_type.as_ref(),
+            description,
             self.config.sdp_form.as_ref(),
         );
         let leg = if leg_id == call.a_leg.leg_id {

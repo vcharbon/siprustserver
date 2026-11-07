@@ -190,7 +190,7 @@ impl ActionExecutor<'_> {
             relay::Author::Leg(ctx.source_leg_id),
             relay::Carried::of(req.method(), None, true),
             req.body().to_vec(),
-            content_type.as_ref(),
+            req.sdp_range(),
             self.config.sdp_form.as_ref(),
         );
         let branch = self.turn.ids.new_branch();

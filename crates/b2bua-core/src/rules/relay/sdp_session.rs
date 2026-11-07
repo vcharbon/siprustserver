@@ -57,12 +57,11 @@ use sip_message::SdpOrigin;
 
 use crate::config::{SdpCrossing, SdpForm, SdpFormPolicy};
 use crate::effects::{OutboundBody, OutboundSipEffect};
-use sip_message::header::MediaType;
-use sip_message::multipart::sdp_range;
 use sip_message::{
     canonical_form, in_author_order, parse_origin, restate_session, restate_session_again, Method,
     SipRequest, StatedSession,
 };
+use std::ops::Range;
 
 /// Who wrote a description the stack sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,7 +132,9 @@ impl Carried {
     }
 }
 
-/// `body`, typed `content_type` and written by `author`, as it leaves on
+/// `body`, written by `author` and holding its session description at
+/// `description` (`None`: it holds none; [`description_in`](super::description_in)
+/// or the message's own `sdp_range` reads it), as it leaves on
 /// `leg_id` inside its dialog `dialog` (`None`: the leg's one dialog, or none
 /// yet) where it stands `carried`, with that dialog's session state updated to
 /// what it says. While `leg_id` is unconfirmed, each of its early dialogs
@@ -157,16 +158,16 @@ pub fn continue_on_leg(
     author: Author<'_>,
     carried: Carried,
     body: Vec<u8>,
-    content_type: Option<&MediaType>,
+    description: Option<Range<usize>>,
     policy: &dyn SdpFormPolicy,
 ) -> Vec<u8> {
     let call_restated = has_restated(call);
     let formed = Formed { policy, call_restated };
     let caller = call.a_leg.leg_id == leg_id;
     let Some(opening) = dialog.and_then(|id| enter_early_dialog(call, leg_id, caller, id)) else {
-        return continue_session(call, leg_id, author, carried, body, content_type, formed);
+        return continue_session(call, leg_id, author, carried, body, description, formed);
     };
-    let out = continue_session(call, leg_id, author, carried, body, content_type, formed);
+    let out = continue_session(call, leg_id, author, carried, body, description, formed);
     if let (Some(id), Some(leg)) = (dialog, leg_mut(call, leg_id)) {
         let exchanges_opened = leg.sdp_session.exchanges_opened;
         let own =
@@ -185,13 +186,13 @@ fn continue_session(
     author: Author<'_>,
     carried: Carried,
     body: Vec<u8>,
-    content_type: Option<&MediaType>,
+    description: Option<Range<usize>>,
     formed: Formed<'_>,
 ) -> Vec<u8> {
     if carried == Carried::Outside {
         return body;
     }
-    let Some(range) = content_type.and_then(|ct| sdp_range(ct, None, &body)) else {
+    let Some(range) = description else {
         return body;
     };
     let Some(sdp) = body.get(range.clone()) else {

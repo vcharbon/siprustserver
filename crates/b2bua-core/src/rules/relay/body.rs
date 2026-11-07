@@ -23,6 +23,22 @@ pub fn sdp() -> MediaType {
     MediaType::new(SipStr::from_static("application/sdp"))
 }
 
+/// Where `body`, typed `content_type` and leaving beside `lines`, holds its
+/// session description: [`sip_message::sdp_range`] under the
+/// `Content-Disposition` among `lines`, the one reading `sdp()` makes of the
+/// message the body leaves on.
+pub fn description_in(
+    body: &[u8],
+    content_type: Option<&MediaType>,
+    lines: &[SipHeader],
+) -> Option<std::ops::Range<usize>> {
+    let disposition = lines
+        .iter()
+        .find(|line| HeaderName::ContentDisposition.matches(&line.name))
+        .map(|line| line.value.as_str());
+    sip_message::sdp_range(content_type?, disposition, body)
+}
+
 /// True iff `req` carries a session description: a body typed
 /// `application/sdp`, or a `multipart/…` body framing one (RFC 5621 §3.1).
 /// What the offer/answer paths read to tell an offer from a delayed-offer

@@ -162,11 +162,17 @@ macro_rules! core_read_surface {
 
             /// The session description this message carries, bare under
             /// `application/sdp` or framed in a `multipart/…` body (RFC 5621
-            /// §3.1); `None` where it carries none. Located once, when the
-            /// message was parsed or built.
+            /// §3.1), as [`sdp_range`](crate::sdp_range) reads it; `None` where
+            /// it carries none. Located once, when the message was parsed or
+            /// built.
             pub fn sdp(&self) -> Option<&[u8]> {
+                self.body().get(self.sdp_range()?)
+            }
+
+            /// Where [`body`](Self::body) holds [`sdp`](Self::sdp).
+            pub fn sdp_range(&self) -> Option<std::ops::Range<usize>> {
                 let r = self.core().sdp.clone()?;
-                self.body().get(usize::try_from(r.start).ok()?..usize::try_from(r.end).ok()?)
+                Some(usize::try_from(r.start).ok()?..usize::try_from(r.end).ok()?)
             }
 
             /// The datagram this message is — received or rendered at freeze.
