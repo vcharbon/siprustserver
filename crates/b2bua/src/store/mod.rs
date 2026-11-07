@@ -523,10 +523,10 @@ impl CallState {
     }
 
     /// Drop a call from memory, and from the store when a replication store is
-    /// wired (its txns/queue are torn down by the router's `RemoveCall`
-    /// interpreter step, not here). The propagated delete states whether the
-    /// resident copy had answered the caller (ADR-0031 D3):
-    /// the last flush, compacted into the delete, no longer carries it. With no
+    /// wired (its txns/queue are torn down by the router's turn commit, not
+    /// here). The propagated delete states whether the resident copy had
+    /// answered the caller (ADR-0031 D3): the last flush, compacted into the
+    /// delete, does not carry it. With no
     /// resident copy the store is left alone: the delete would name no call, and
     /// what the store holds for the ref may be another one.
     pub fn remove(&self, call_ref: &str) {

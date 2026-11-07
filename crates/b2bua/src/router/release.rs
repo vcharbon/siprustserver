@@ -72,9 +72,10 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
             let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
             // Nothing answers a request of this call any more: its handler ran
             // and died (ADR-0020), or the answer rode an effect that will not
-            // come. This turn's own answers are already sent (`RemoveCall` is
-            // interpreted last), so what still has no final is forgotten and
-            // its retransmission meets the orphan path.
+            // come. This turn's own answers are already sent (the commit
+            // releases the call once its outbox drained), so what still has
+            // no final is forgotten and its retransmission meets the orphan
+            // path.
             let _ = ctx.txn.forget_unanswered_of_call(call_ref).await;
             answer_unanswered_invites(ctx, call_ref).await;
             // Release the per-call dispatch queue; its worker exits and bumps

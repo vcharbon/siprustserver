@@ -12,7 +12,7 @@
 //! - [`rules`] — the core's first-match, layer-ranked rule engine + invariant
 //!   enforcement, re-exported.
 //! - [`router`] — consumes the transaction-layer event stream, resolves the
-//!   `callRef`, runs the core's turn, interprets the typed [`effects`].
+//!   `callRef`, runs the core's turn, commits the typed [`effects`].
 //! - [`admission`] — the ordered ladder of rungs that may refuse a new
 //!   INVITE, and the one answer a refusal draws (ADR-0037).
 //! - [`lifecycle`] — the aggregated lifecycle-log vocabulary (ADR-0026).

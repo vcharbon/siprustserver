@@ -64,11 +64,14 @@ fn held_cancel_answers(trigger: &CallEvent) -> Option<HeldCancel> {
 /// Release what the layer holds for `event`'s turn when no turn's outbox
 /// entry took it: no write records it, so nothing is waited for.
 pub async fn release_untaken(ctx: &RouterCtx, event: &CallEvent) {
-    let (ack, cancel) = of(event);
+    let ack = match event {
+        CallEvent::Sip { message, .. } => held_ack_branch(message),
+        _ => None,
+    };
     if let Some(branch) = ack {
         let _ = ctx.txn.release_ack(&branch).await;
     }
-    if let Some(held) = cancel {
-        held.release(ctx).await;
+    if let Some(held) = held_cancel_answers(event) {
+        let _ = ctx.txn.release_cancel(&held.call_id, &held.from_tag, held.cseq).await;
     }
 }

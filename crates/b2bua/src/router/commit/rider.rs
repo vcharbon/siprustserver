@@ -3,6 +3,7 @@
 //! request it refused, the server transactions another copy answered. A
 //! rider reports no turn mark.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -47,8 +48,13 @@ impl Rider {
     }
 }
 
-/// Queue `rider` on `call_ref`'s outbox behind the call's latest write.
-pub async fn behind_the_write(ctx: &Arc<RouterCtx>, call_ref: &str, rider: Rider) {
+/// Queue `rider` on `call_ref`'s outbox behind the call's latest write, read
+/// as this is called; the returned push is awaited at once.
+pub fn behind_the_write<'a>(
+    ctx: &'a Arc<RouterCtx>,
+    call_ref: &'a str,
+    rider: Rider,
+) -> impl Future<Output = ()> + 'a {
     let wait = ctx.state.hold_target(call_ref);
-    ctx.outboxes.push(call_ref, wait, rider.into_effects(ctx.clone())).await;
+    ctx.outboxes.push(call_ref, wait, rider.into_effects(ctx.clone()))
 }
