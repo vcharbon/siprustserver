@@ -345,18 +345,18 @@ fn read_generic_param(
     let (value, end) = match byte_at(bytes, value_at) {
         Some(b'"') => {
             let end = quoted_close(bytes, value_at).ok_or_else(|| {
-                SipParseError::new(format!("unterminated quoted value of parameter {name}"))
+                SipParseError::new(format!("unterminated quoted value of parameter {name:?}"))
             })?;
             (ParamValue::Quoted(read_quoted(base, value_at).0), end)
         }
         Some(b'[') => {
             let close = index_of(bytes, b']', value_at).ok_or_else(|| {
-                SipParseError::new(format!("unclosed IPv6 reference in parameter {name}"))
+                SipParseError::new(format!("unclosed IPv6 reference in parameter {name:?}"))
             })?;
             let inner = clamped(text, value_at + 1, close);
             if ipv6_address(inner).is_none() {
                 return Err(SipParseError::new(format!(
-                    "parameter {name}: invalid IPv6 reference [{inner}]"
+                    "parameter {name:?}: invalid IPv6 reference {inner:?}"
                 )));
             }
             (ParamValue::Token(sub(base, value_at, close + 1)), close + 1)
@@ -368,13 +368,13 @@ fn read_generic_param(
             let end = if ipv6 { scan_until(bytes, value_at, b"; \t,") } else { end };
             if ipv6 && ipv6_address(clamped(text, value_at, end)).is_none() {
                 return Err(SipParseError::new(format!(
-                    "value of parameter {name} is not an IPv6address (RFC 5954 §4.1)"
+                    "value of parameter {name:?} is not an IPv6address (RFC 5954 §4.1)"
                 )));
             }
             if end == value_at {
                 let rest = clamped(text, value_at, scan_until(bytes, value_at, b"; \t,"));
                 return Err(SipParseError::new(format!(
-                    "value of parameter {name} is not a token, host or quoted-string{}",
+                    "value of parameter {name:?} is not a token, host or quoted-string{}",
                     crate::char_class::utf8_note(rest)
                 )));
             }
@@ -399,18 +399,18 @@ pub(crate) fn read_auth_params(base: &SipStr, mut i: usize) -> Result<Params, Si
         let name = sub(base, i, name_end);
         i = skip_ws(bytes, name_end);
         if byte_at(bytes, i) != Some(b'=') {
-            return Err(off(&format!("{name} has no value")));
+            return Err(off(&format!("{name:?} has no value")));
         }
         i = skip_ws(bytes, i + 1);
         let value = if byte_at(bytes, i) == Some(b'"') {
-            let close = quoted_close(bytes, i).ok_or_else(|| off(&format!("{name}'s quote")))?;
+            let close = quoted_close(bytes, i).ok_or_else(|| off(&format!("{name:?}'s quote")))?;
             let (text, _) = read_quoted(base, i);
             i = close;
             ParamValue::Quoted(text)
         } else {
             let value_end = token_end(bytes, i);
             if value_end == i {
-                return Err(off(&format!("{name}'s value is not a token")));
+                return Err(off(&format!("{name:?}'s value is not a token")));
             }
             let token = sub(base, i, value_end);
             i = value_end;

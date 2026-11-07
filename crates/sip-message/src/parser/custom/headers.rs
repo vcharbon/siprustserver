@@ -272,11 +272,15 @@ fn parse_line(
         HeaderValue::Unfolded(v) => SipStr::owned(crate::whitespace::trim(&v)),
     };
 
+    // A refusal names the header by its canonical name, a token.
+    let header = known.clone().unwrap_or_else(|| HeaderName::Other(name.clone()));
+    let shown = header.as_wire_str();
+
     // Bound per-header memory: name + ": " + value, post-unfold/trim.
     let header_len = name.len() + 2 + trimmed_value.len();
     if header_len > limits.max_header_length {
         return Err(SipParseError::new(format!(
-            "Header \"{name}\" length {header_len} exceeds limit {}",
+            "Header {shown} length {header_len} exceeds limit {}",
             limits.max_header_length
         )));
     }
@@ -284,7 +288,7 @@ fn parse_line(
     let echoed = known.as_ref().is_some_and(is_echoed);
     if s.escaped_fold() && known.as_ref().is_some_and(is_quoted_string_header) {
         let error = SipParseError::new(format!(
-            "Header \"{name}\" escapes a line fold with `\\` (RFC 3261 §25.1)"
+            "Header {shown} escapes a line fold with `\\` (RFC 3261 §25.1)"
         ));
         return Ok(Line::Refused { error, echoed });
     }
@@ -292,29 +296,26 @@ fn parse_line(
     if let Some(at) = value_control_byte(trimmed_value.as_bytes(), known.as_ref(), escapes) {
         let byte = trimmed_value.as_bytes().get(at).copied().unwrap_or_default();
         let error = SipParseError::new(format!(
-            "Header \"{name}\" holds control byte 0x{byte:02x} outside a quoted-pair \
+            "Header {shown} holds control byte 0x{byte:02x} outside a quoted-pair \
              (RFC 3261 §25.1)"
         ));
         return Ok(Line::Refused { error, echoed });
     }
-    let header = known.clone().unwrap_or_else(|| HeaderName::Other(name.clone()));
     let counted = limits.value_gates || header == HeaderName::ContentLength;
     if counted && singletons.repeated(&header) {
-        let error = SipParseError::new(format!(
-            "Multiple {} headers (RFC 3261 §7.3.1 — one value)",
-            header.as_wire_str()
-        ));
+        let error =
+            SipParseError::new(format!("Multiple {shown} headers (RFC 3261 §7.3.1 — one value)"));
         return Ok(Line::Refused { error, echoed });
     }
     if let Some(known) = known {
         let gates = limits.value_gates;
-        if let Some(error) = gate_refusal(&known, &name, &trimmed_value, singletons, gates) {
+        if let Some(error) = gate_refusal(&known, &trimmed_value, singletons, gates) {
             return Ok(Line::Refused { error, echoed });
         }
         if let Some(Err(e)) =
             vouched_reading(&known, &trimmed_value).filter(|_| limits.wire_grammar)
         {
-            let error = SipParseError::new(format!("Malformed {name} header: {}", e.reason));
+            let error = SipParseError::new(format!("Malformed {shown} header: {}", e.reason));
             return Ok(Line::Refused { error, echoed });
         }
     }
@@ -346,7 +347,6 @@ fn value_control_byte(value: &[u8], known: Option<&HeaderName>, escapes: Escapes
 /// the message.
 fn gate_refusal(
     known: &HeaderName,
-    name: &SipStr,
     value: &SipStr,
     singletons: &mut Singletons,
     gates: bool,
@@ -354,11 +354,15 @@ fn gate_refusal(
     if !gates && *known != HeaderName::ContentLength {
         return None;
     }
+    let name = known.as_wire_str();
 
     // Registry-driven paranoid digit-only pass.
     if let Some(rule) = numeric_header_rule(known) {
         let Some(parsed) = strict_numeric_value(value, &rule) else {
-            return Some(SipParseError::new(format!("Invalid {name} numeric value: \"{value}\"")));
+            return Some(SipParseError::new(format!(
+                "Invalid {name} numeric value: {:?}",
+                value.as_str()
+            )));
         };
         if *known == HeaderName::ContentLength {
             singletons.content_length = Some(parsed);

@@ -105,7 +105,7 @@ fn parse_request_line(
         return Err(SipParseError::new("Trailing whitespace in request line"));
     }
     if !is_sip_2_0(version_text) {
-        return Err(SipParseError::new(format!("Unsupported SIP version: \"{version_text}\"")));
+        return Err(SipParseError::new(format!("Unsupported SIP version: {version_text:?}")));
     }
 
     s.expect_crlf()?;
@@ -120,7 +120,7 @@ fn parse_status_line(
 ) -> Result<StatusLine, SipParseError> {
     let version_text = span_text(image, &version)?;
     if !is_sip_2_0(version_text) {
-        return Err(SipParseError::new(format!("Unsupported SIP version: \"{version_text}\"")));
+        return Err(SipParseError::new(format!("Unsupported SIP version: {version_text:?}")));
     }
 
     // Status-Code: exactly 3 digits.
@@ -130,7 +130,7 @@ fn parse_status_line(
         Ok(status) if status_str.len() == 3 && status_str.bytes().all(|b| b.is_ascii_digit()) => {
             status
         }
-        _ => return Err(SipParseError::new(format!("Invalid status code: \"{status_str}\""))),
+        _ => return Err(SipParseError::new(format!("Invalid status code: {status_str:?}"))),
     };
     if let Some(refusal) = status_refusal(status) {
         return Err(refusal);

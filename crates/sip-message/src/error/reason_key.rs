@@ -1,19 +1,28 @@
 //! The key a refusal reason is counted under: the reason with the values it
 //! quotes left out, so every message refused for one shape lands on one key.
 //!
-//! A reason states the broken rule in fixed words and quotes the values it
-//! read (`{:?}` or `"…"`, a list or an address in brackets). The key keeps the
-//! words, header and parameter names, byte values (`0x3b`) and RFC citations,
-//! and writes:
+//! The contract with the reason's writers: a reason states the broken rule in
+//! fixed words, names a header by its canonical name, and writes every value it
+//! read from the message through `{:?}`, a Rust debug string. The key keeps the
+//! words, header names, byte values (`0x3b`) and RFC citations, and writes:
 //!
-//! - a quoted string as `"…"`, its escapes honoured, an unclosed one to the end;
-//! - a bracketed span as `[…]`, quotes inside it honoured;
+//! - a quoted string as `"…"`;
+//! - a bracketed span as `[…]`, quotes inside it read as above;
 //! - a number standing alone (digits and dots, between separators) as `N`,
 //!   except the number after `RFC`: positions, lengths, ranges, counts, ports
 //!   and status codes vary with the message, the rule does not.
+//!
+//! It fails closed: a quoted span that is no debug string (an escape debug
+//! never writes, a raw control character, no closing quote, or a closing quote
+//! followed by a word character, the mark of a raw `"` inside a value) ends the
+//! key at `"…"`, so a writer breaking the contract loses its shape, never leaks
+//! the value.
 
 /// The words between which a standalone number is looked for.
 const SEPARATORS: &[char] = &[' ', '\t', '(', ')', ',', ':', ';', '=', '<', '>', '{', '}'];
+
+/// What may follow a debug string's closing quote in a reason.
+const AFTER_QUOTE: &[char] = &[' ', ')', ',', ':', ';', ']', '\'', '.'];
 
 /// The key `reason` is counted under (see the module doc).
 pub fn reason_key(reason: &str) -> String {
@@ -25,13 +34,17 @@ pub fn reason_key(reason: &str) -> String {
         match c {
             '"' => {
                 flush(&mut out, &mut word, &mut previous_word);
-                skip_quoted(&mut chars);
                 out.push_str("\"…\"");
+                if !skip_debug_string(&mut chars) {
+                    return out;
+                }
             }
             '[' => {
                 flush(&mut out, &mut word, &mut previous_word);
-                skip_bracketed(&mut chars);
                 out.push_str("[…]");
+                if !skip_bracketed(&mut chars) {
+                    return out;
+                }
             }
             c if SEPARATORS.contains(&c) => {
                 flush(&mut out, &mut word, &mut previous_word);
@@ -59,35 +72,66 @@ fn flush(out: &mut String, word: &mut String, previous_word: &mut String) {
     *previous_word = std::mem::take(word);
 }
 
-/// Consume a quoted string up to its closing quote, escapes honoured.
-fn skip_quoted(chars: &mut std::str::Chars<'_>) {
+/// Consume a debug string after its opening quote, up to its closing quote;
+/// `false` when what follows is no debug string (see the module doc).
+fn skip_debug_string(chars: &mut std::str::Chars<'_>) -> bool {
     while let Some(c) = chars.next() {
         match c {
-            '\\' => {
-                chars.next();
-            }
-            '"' => return,
+            '\\' => match chars.next() {
+                Some('\\' | '"' | '\'' | 'n' | 'r' | 't' | '0') => {}
+                Some('u') => {
+                    if !skip_unicode_escape(chars) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            },
+            '"' => return chars.clone().next().is_none_or(|next| AFTER_QUOTE.contains(&next)),
+            c if c.is_control() => return false,
             _ => {}
         }
     }
+    false
 }
 
-/// Consume a bracketed span up to its matching `]`, quotes inside honoured.
-fn skip_bracketed(chars: &mut std::str::Chars<'_>) {
+/// Consume the `{hex}` of a `\u{…}` escape; `false` when it is not one.
+fn skip_unicode_escape(chars: &mut std::str::Chars<'_>) -> bool {
+    if chars.next() != Some('{') {
+        return false;
+    }
+    let mut digits = 0usize;
+    for c in chars.by_ref() {
+        match c {
+            '}' => return (1..=6).contains(&digits),
+            c if c.is_ascii_hexdigit() => digits = digits.saturating_add(1),
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Consume a bracketed span up to its matching `]`, debug strings inside read
+/// as such; `false` when one of them is none or the span never closes.
+fn skip_bracketed(chars: &mut std::str::Chars<'_>) -> bool {
     let mut depth = 1usize;
     while let Some(c) = chars.next() {
         match c {
-            '"' => skip_quoted(chars),
-            '[' => depth += 1,
+            '"' => {
+                if !skip_debug_string(chars) {
+                    return false;
+                }
+            }
+            '[' => depth = depth.saturating_add(1),
             ']' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    return;
+                    return true;
                 }
             }
             _ => {}
         }
     }
+    false
 }
 
 #[cfg(test)]
@@ -146,6 +190,28 @@ mod tests {
             reason_key(r#"leading token is none of ["a]", "b"]"#),
             "leading token is none of […]"
         );
+    }
+
+    /// A value written between raw quotes holding a `"` of its own ends the
+    /// key at that value: nothing of it, nor anything after it, is kept.
+    #[test]
+    fn a_raw_quoted_value_holding_a_quote_ends_the_key() {
+        let reason = r#"Strict Contact: bad (""Fakey McFakename" <sip:fakey@192.0.2.5>") tail"#;
+        let key = reason_key(reason);
+        assert_eq!(key, r#"Strict Contact: bad ("…""#);
+        for leaked in ["Fakey", "McFakename", "fakey", "192"] {
+            assert!(!key.contains(leaked), "{key}");
+        }
+        assert_eq!(reason_key(r#"in "a"McFakename""#), r#"in "…""#);
+    }
+
+    #[test]
+    fn an_escape_or_byte_no_debug_string_holds_ends_the_key() {
+        assert_eq!(reason_key(r#"value "a\q McFakename" tail"#), r#"value "…""#);
+        assert_eq!(reason_key("value \"a\u{7}b\" tail"), r#"value "…""#);
+        assert_eq!(reason_key("value \"a\tb\" tail"), r#"value "…""#);
+        assert_eq!(reason_key(r#"value "a\u{e9}\tb" tail"#), r#"value "…" tail"#);
+        assert_eq!(reason_key(r#"value "a\u{zz}" tail"#), r#"value "…""#);
     }
 
     #[test]

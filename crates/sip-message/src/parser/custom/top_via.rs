@@ -26,10 +26,10 @@ pub(super) fn cookie_refusal(v: &Via) -> Option<SipParseError> {
             ))
         }
         None => "<no branch>".to_string(),
-        Some(b) => format!("\"{b}\""),
+        Some(b) => format!("{b:?}"),
     };
     Some(SipParseError::new(format!(
-        "Top Via branch missing magic cookie \"{BRANCH_MAGIC_COOKIE}\": {shown}"
+        "Top Via branch missing magic cookie {BRANCH_MAGIC_COOKIE}: {shown}"
     )))
 }
 
@@ -40,5 +40,5 @@ pub(super) fn transport_refusal(v: &Via, limits: &SipParserLimits) -> Option<Sip
     if limits.allowed_transports.iter().any(|t| t.eq_ignore_ascii_case(v.transport())) {
         return None;
     }
-    Some(SipParseError::new(format!("Via transport \"{}\" not in allowed set", v.transport())))
+    Some(SipParseError::new(format!("Via transport {:?} not in allowed set", v.transport())))
 }

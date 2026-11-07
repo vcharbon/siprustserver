@@ -414,7 +414,7 @@ fn line_holding(block: &[u8], at: usize) -> String {
     };
     let line = block.get(start..).unwrap_or_default();
     let end = memchr::memchr2(b':', b'\r', line).unwrap_or(line.len());
-    format!("the {} header", String::from_utf8_lossy(line.get(..end).unwrap_or_default()))
+    format!("the {:?} header", String::from_utf8_lossy(line.get(..end).unwrap_or_default()))
 }
 
 /// The character a well-formed surrogate pair at the head of `bytes` encodes,

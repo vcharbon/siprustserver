@@ -19,8 +19,9 @@ pub(super) fn dialog_contact_refusal(contacts: &ContactSet, what: &str) -> Optio
     let ContactSet::Contacts(contacts) = contacts else { return None };
     let other = contacts.iter().map(|c| c.uri()).find(|u| !u.is_sip_or_sips())?;
     Some(SipParseError::new(format!(
-        "{what} carries a Contact of scheme \"{}\": a dialog's remote target is a SIP or SIPS \
-         URI (RFC 3261 §8.1.1.8, §12.1.1): \"{other}\"",
-        other.scheme()
+        "{what} carries a Contact of scheme {:?}: a dialog's remote target is a SIP or SIPS \
+         URI (RFC 3261 §8.1.1.8, §12.1.1): {:?}",
+        other.scheme(),
+        other.to_string()
     )))
 }

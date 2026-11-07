@@ -111,3 +111,90 @@ fn a_capture_with_nothing_set_aside_states_no_table() {
     assert!(!stats.contains_key("parse_failed_by_reason"), "{stats:?}");
     assert!(!stats.contains_key("header_failed_by_reason"), "{stats:?}");
 }
+
+/// Every key of `datagrams`' set-aside tables, refused and header-failed.
+fn keys_of(datagrams: &[Datagram]) -> Vec<String> {
+    let flows = build_flows(datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
+    let stats = &flows.stats;
+    stats
+        .parse_failed_by_reason
+        .keys()
+        .chain(stats.header_failed_by_reason.keys())
+        .cloned()
+        .collect()
+}
+
+/// A key holds none of the values its message carried: a Contact's display
+/// name, one holding an escaped quote, a Request-URI, a parameter's name.
+#[test]
+fn a_reason_key_holds_no_value_of_its_message() {
+    let datagrams = vec![
+        dg(
+            1_000,
+            invite(
+                "c1",
+                "<sip:alice@example.com>",
+                "Contact: \"Fakey McFakename\" <sip:secretuser@203.0.113.5;x-a=1;x-a=2>\r\n",
+                "",
+            ),
+        ),
+        dg(
+            2_000,
+            invite(
+                "c2",
+                "<sip:alice@example.com>",
+                "Contact: \"Fakey \\\"Q\\\" McFakename\" <sip:secretuser@203.0.113.5;x-b=1;x-b=2>\r\n",
+                "",
+            ),
+        ),
+        dg(
+            3_000,
+            invite("c3", "<sip:alice@example.com>", CONTACT, "").replacen(
+                "INVITE sip:bob@example.com SIP/2.0",
+                "INVITE sip:secretuser@example.com?Subject=McFakename SIP/2.0",
+                1,
+            ),
+        ),
+        dg(
+            4_000,
+            invite(
+                "c4",
+                "<sip:alice@example.com>",
+                CONTACT,
+                "Diversion: <sip:e@example.com>;secretparam=\"x\r\n",
+            ),
+        ),
+    ];
+    let keys = keys_of(&datagrams);
+    assert_eq!(
+        keys.len(),
+        3,
+        "the two Contacts on one row, the Request-URI, the parameter: {keys:?}"
+    );
+    for key in &keys {
+        for value in ["Fakey", "McFakename", "secret", "203", "113", "x-a", "x-b", "Subject"] {
+            assert!(!key.contains(value), "{value:?} in {key:?}");
+        }
+    }
+}
+
+/// A header refused by a value gate is named by its canonical name, however
+/// its line spells it, so every spelling counts on one row.
+#[test]
+fn every_spelling_of_a_header_counts_on_one_row() {
+    let spellings = ["Content-Length", "content-length", "l"];
+    let datagrams: Vec<Datagram> = spellings
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let call_id = format!("s{i}");
+            let message = invite(&call_id, "<sip:alice@example.com>", CONTACT, "")
+                .replace("Content-Length: 0", &format!("{name}: 0x"));
+            dg(1_000 * (i as u64 + 1), message)
+        })
+        .collect();
+    let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
+    let rows: Vec<(&str, u64)> =
+        flows.stats.parse_failed_by_reason.iter().map(|(k, &n)| (k.as_str(), n)).collect();
+    assert_eq!(rows, [("Invalid Content-Length numeric value: \"…\"", 3)]);
+}

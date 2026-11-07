@@ -21,14 +21,18 @@ pub(crate) fn read_request_uri(text: &SipStr) -> Result<Uri, SipParseError> {
 /// cannot.
 pub(crate) fn request_uri_refusal(uri: &Uri) -> Result<(), SipParseError> {
     if uri.is_opaque() {
-        return Err(SipParseError::new(format!("Malformed Request-URI: \"{uri}\"")));
+        return Err(SipParseError::new(format!("Malformed Request-URI: {:?}", uri.to_string())));
     }
     if uri.opaque_part().is_none() && uri.host().is_empty() {
-        return Err(SipParseError::new(format!("Empty host in Request-URI: \"{uri}\"")));
+        return Err(SipParseError::new(format!(
+            "Empty host in Request-URI: {:?}",
+            uri.to_string()
+        )));
     }
     if uri.escaped_headers().next().is_some() {
         return Err(SipParseError::new(format!(
-            "Request-URI carries escaped headers (RFC 3261 §19.1.1): \"{uri}\""
+            "Request-URI carries escaped headers (RFC 3261 §19.1.1): {:?}",
+            uri.to_string()
         )));
     }
     Ok(())

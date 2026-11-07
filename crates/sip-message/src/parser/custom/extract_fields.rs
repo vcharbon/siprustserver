@@ -153,7 +153,7 @@ pub(super) fn extract_identity(
     };
     if wire && !is_call_id(&call_id) {
         return Err(SipParseError::new(format!(
-            "Call-ID is not word [\"@\" word] (RFC 3261 §25.1){}: \"{call_id}\"",
+            "Call-ID is not word [\"@\" word] (RFC 3261 §25.1){}: {call_id:?}",
             crate::char_class::utf8_note(&call_id)
         )));
     }
@@ -271,7 +271,10 @@ fn read_contacts(
                 contact_list.push(read_contact_entry_lenient(span));
             }
             ContactEntry::Unreadable { reason } => {
-                return Err(SipParseError::new(format!("Strict Contact: {reason} (\"{span}\")")));
+                return Err(SipParseError::new(format!(
+                    "Strict Contact: {reason} ({:?})",
+                    span.as_str()
+                )));
             }
         }
     }
@@ -371,7 +374,7 @@ pub fn extract_request_fields(
                 && Method::from_wire(cseq_method) != Method::from_wire(method)
             {
                 return Err(SipParseError::new(format!(
-                    "CSeq method \"{cseq_method}\" does not match request method \"{method}\""
+                    "CSeq method {cseq_method:?} does not match request method {method:?}"
                 )));
             }
         }

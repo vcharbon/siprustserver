@@ -160,7 +160,7 @@ fn read_host(
             return Err("empty IPv6 reference".to_string());
         }
         if !is_ipv6_address(inner) {
-            return Err(format!("invalid IPv6 reference [{inner}]"));
+            return Err(format!("invalid IPv6 reference {inner:?}"));
         }
         return Ok((sub(value, i + 1, close), close + 1));
     }
@@ -313,15 +313,13 @@ fn ipv4_refusal(host: &str) -> Option<String> {
     }
     for octet in host.split('.') {
         if octet.len() > 1 && octet.starts_with('0') {
-            return Some(format!(
-                "IPv4 octet \"{octet}\" has leading zero (octal-confusion vector)"
-            ));
+            return Some(format!("IPv4 octet {octet:?} has leading zero (octal-confusion vector)"));
         }
         if octet.len() > 3 {
-            return Some(format!("IPv4 octet \"{octet}\" exceeds 1*3DIGIT"));
+            return Some(format!("IPv4 octet {octet:?} exceeds 1*3DIGIT"));
         }
         if octet.parse::<u8>().is_err() {
-            return Some(format!("IPv4 octet {octet} out of range"));
+            return Some(format!("IPv4 octet {octet:?} out of range"));
         }
     }
     None

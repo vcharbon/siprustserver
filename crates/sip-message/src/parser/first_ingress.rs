@@ -45,7 +45,7 @@ impl FirstIngressBound {
         }
         let long = headers.find(|h| h.name.len() + 2 + h.value.len() > self.header_length)?;
         Some(SipParseError::new(format!(
-            "Header \"{}\" length {} exceeds the first-ingress bound {}",
+            "Header {} length {} exceeds the first-ingress bound {}",
             long.name,
             long.name.len() + 2 + long.value.len(),
             self.header_length
