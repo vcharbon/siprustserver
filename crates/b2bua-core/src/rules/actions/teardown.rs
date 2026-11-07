@@ -10,8 +10,7 @@ use call::helpers::{
 use call::{Call, Leg, LegKind, LegState, TerminationCause, TimerKey, TimerType};
 use sip_message::generators::{self, InviteClientTransactionHandle, RelaySituation};
 use sip_message::header::HeaderName;
-use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipHeader, SipMessage, SipParser};
+use sip_message::{Method, SipHeader};
 
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
@@ -288,9 +287,8 @@ impl ActionExecutor<'_> {
     ) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
         let handle = leg.dialled_sent()?;
-        let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.image) else {
-            return None;
-        };
+        let notes = &mut self.turn.notes;
+        let req = crate::stored_image::request_noted(&handle.image, call, "CANCEL", notes)?;
         let cancel = generators::generate_cancel(
             &InviteClientTransactionHandle { original_invite: req },
             relayed,

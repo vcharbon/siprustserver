@@ -63,6 +63,7 @@ pub mod rule_chain;
 pub mod rule_fixture;
 pub mod rules;
 pub mod stack_identity;
+pub(crate) mod stored_image;
 #[cfg(any(test, feature = "testkit"))]
 pub mod test_call;
 pub mod timer_arm;

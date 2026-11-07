@@ -7,7 +7,7 @@
 use call::{Call, Dialog, DialogId, Ladder, Leg, LegState, RequestRecord, Shown};
 use sip_message::header::{HeaderValue, MediaType};
 use sip_message::sip_str::SipStr;
-use sip_message::{HeaderName, SipMessage, SipParser};
+use sip_message::{HeaderName, SipMessage};
 
 /// The owner of the INVITE offer open on the sender's dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,9 +86,7 @@ fn dialled(call: &Call, leg: &Leg, callee_tag: &str) -> Option<OpenOffer> {
         return None;
     }
     let bytes = &leg.dialled_sent()?.image;
-    let SipMessage::Request(invite) =
-        sip_message::CustomParser::new().parse(bytes.as_slice()).ok()?
-    else {
+    let SipMessage::Request(invite) = sip_message::read_stored(bytes).ok()? else {
         return None;
     };
     invite.sdp()?;

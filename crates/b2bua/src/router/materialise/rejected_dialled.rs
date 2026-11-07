@@ -6,8 +6,7 @@
 //! §17.2.1).
 
 use call::{Call, Leg};
-use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
+use sip_message::{read_stored, SipMessage};
 use sip_txn::TxnSeed;
 
 /// One seed per leg of `call` whose dialling INVITE took a non-2xx final
@@ -26,7 +25,7 @@ fn seed(leg: &Leg, now_ms: i64) -> Option<TxnSeed> {
     let left = dialled.final_at_ms?.saturating_add(timer_d).saturating_sub(now_ms);
     let bound_ms = u64::try_from(left).ok().filter(|ms| *ms > 0)?;
     let sent = leg.dialled_sent()?;
-    let invite = match CustomParser::new().parse(&sent.image).ok()? {
+    let invite = match read_stored(&sent.image).ok()? {
         SipMessage::Request(r) => r,
         SipMessage::Response(_) => return None,
     };

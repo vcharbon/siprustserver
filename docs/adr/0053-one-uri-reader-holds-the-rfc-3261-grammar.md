@@ -135,6 +135,10 @@ the message; a Via sent-by the reader refuses is held whole as the host, with
 no port, and renders as written. The Request-URI is read in every mode: a URI that does not read
 is no request's target, whoever built the request.
 
+A stored image reads through `sip_message::read_stored`: this mode with every
+limit off and the value gates off, no setting, so a node reads what another
+stored whatever either states.
+
 ## Considered and rejected
 
 - **Percent-encode raw UTF-8 on egress.** Rewriting a URI a peer sent changes

@@ -413,6 +413,57 @@ async fn a_body_whose_caller_invite_does_not_rebuild_is_discharged_not_served() 
     assert_eq!(ctx.state.active_count(), 0);
 }
 
+/// A body holding a stored image that does not read is unrecoverable: a takeover
+/// discharges it, one CDR and counted, and nothing reaches the parties, since
+/// the record may be behind the wire. A body whose images all read is served.
+#[tokio::test(start_paused = true)]
+async fn a_body_holding_an_unreadable_image_is_discharged_with_nothing_sent() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let ctx = n.core.router_ctx();
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.expect("the caller");
+    let callee: std::net::SocketAddr = "192.0.2.77:5070".parse().expect("the callee");
+    let callee = net.bind_udp(BindUdpOpts::new(callee, 64)).await.expect("the callee");
+
+    let holding = |cid: &str, image: Vec<u8>| {
+        let mut call = call_in("w0", "w1", cid, CallModelState::Active, &n.clock);
+        let sent = call::SentRequest {
+            branch: format!("z9hG4bK-{cid}"),
+            image,
+            destination: call::HostPort { host: "192.0.2.77".into(), port: 5070 },
+        };
+        let mut leg = call::testkit::dialled_leg("b-1", "own");
+        leg.invite = Some(RequestRecord::dialled(1, Some(sent), call::OutboundInvite::new("t", 0)));
+        call::helpers::add_b_leg(&mut call, leg);
+        call
+    };
+    let damaged = holding("cid-damaged", b"\xffnot a message".to_vec());
+    let readable = invite("w0", "w1", "cid-readable").image().to_vec();
+    let sound = holding("cid-sound", readable);
+    put(&n.store, BAK, "w0", &damaged).await;
+    put(&n.store, BAK, "w0", &sound).await;
+
+    let disposition = {
+        let _guard = ctx.state.lock(&damaged.call_ref).await;
+        materialise(ctx, &damaged.call_ref, Origin::Takeover).await
+    };
+    assert!(matches!(disposition, Materialised::Refused(Reason::Unrecoverable)), "{disposition:?}");
+    sip_clock::testkit::settle().await;
+    assert!(ctx.state.peek(&damaged.call_ref).is_none(), "the body is not live");
+    assert_eq!(n.cdr.snapshot().len(), 1, "the discharge writes the call's CDR");
+    assert_eq!(n.metrics.unrecoverable_calls_total(), 1);
+    assert_eq!(n.metrics.timer_queue_len(), 0, "nothing is re-armed");
+    tokio::time::advance(std::time::Duration::from_millis(50)).await;
+    sip_clock::testkit::settle().await;
+    assert!(caller.try_recv().is_none(), "nothing reaches the caller");
+    assert!(callee.try_recv().is_none(), "nothing reaches the callee");
+
+    let _guard = ctx.state.lock(&sound.call_ref).await;
+    let live = served(materialise(ctx, &sound.call_ref, Origin::Takeover).await);
+    assert_eq!(live.call_ref, sound.call_ref, "a body whose images read is served");
+    assert_eq!(n.metrics.unrecoverable_calls_total(), 1);
+}
+
 /// Every reclaim miss is typed: a ref this node backs up, a ref with no body.
 #[tokio::test(start_paused = true)]
 async fn reclaim_misses_are_typed() {

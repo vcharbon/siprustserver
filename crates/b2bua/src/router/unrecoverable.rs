@@ -1,5 +1,6 @@
 //! An unrecoverable call (ADR-0052 §11): one whose record does not rebuild
-//! its caller's INVITE. It is discharged silently, as the reaper's second
+//! its caller's INVITE, or whose copy holds a stored image that does not read.
+//! It is discharged silently, as the reaper's second
 //! strike discharges a call (ADR-0020 X6): its legs are abandoned, its CDR and
 //! its limiter release go through the one enforcement path with nothing on the
 //! wire, the call is removed, and the discharge is counted. The request that
@@ -17,9 +18,10 @@ use super::RouterCtx;
 use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
 use crate::store::{Enveloped, MaterialiseOrigin};
 
-/// Whether the materialised `copy` rebuilds its caller's INVITE; one that does
-/// not is made resident under `origin` and discharged. The caller holds the
-/// per-call lock.
+/// Whether the materialised `copy` rebuilds its caller's INVITE and every image
+/// it holds reads back: its seeds form from them, and the record may be behind
+/// the wire, so a copy that fails either sends nothing. One that fails is made
+/// resident under `origin` and discharged. The caller holds the per-call lock.
 pub(super) async fn copy_recoverable(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -27,13 +29,27 @@ pub(super) async fn copy_recoverable(
     origin: MaterialiseOrigin,
     now_ms: i64,
 ) -> bool {
-    let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&copy.call.a_leg_invite) else {
+    let Err(err) = record_reads(&copy.call) else {
         return true;
     };
     if ctx.state.materialize_if_absent(copy.clone(), origin) {
         discharge(ctx, call_ref, copy.call.clone(), now_ms, &err).await;
     }
     false
+}
+
+/// Whether `call`'s record serves a copy of it: `Err` names the first part that
+/// does not read.
+pub(super) fn record_reads(call: &Call) -> Result<(), String> {
+    if let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite) {
+        return Err(format!("the caller's INVITE does not rebuild: {err}"));
+    }
+    for image in call::helpers::stored_images(call) {
+        if let Err(refusal) = sip_message::read_stored(image) {
+            return Err(format!("a stored image does not read: {}", refusal.reason));
+        }
+    }
+    Ok(())
 }
 
 /// The call whose turn on `event` met a record that does not rebuild its
@@ -67,7 +83,7 @@ async fn discharge(
     err: &impl std::fmt::Display,
 ) {
     ctx.metrics.bump_unrecoverable_call();
-    tracing::error!(%call_ref, error = %err, "the call's record does not rebuild its caller's INVITE: discharged");
+    tracing::error!(%call_ref, error = %err, "the call's record does not serve a copy: discharged");
     let before = call.clone();
     let discharged = finalize(crate::reaper::discharge_result(call, now_ms));
     let mut notes = crate::turn_notes::TurnNotes::default();

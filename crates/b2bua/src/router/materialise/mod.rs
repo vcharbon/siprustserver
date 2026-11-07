@@ -122,8 +122,8 @@ pub(super) enum Reason {
     Decode,
     /// A terminal body: refused on a takeover, discharged on a reclaim.
     Terminated,
-    /// A body that does not rebuild its caller's INVITE, discharged
-    /// (ADR-0052 §11).
+    /// A body that does not rebuild its caller's INVITE, or holds a stored
+    /// image that does not read, discharged (ADR-0052 §11).
     Unrecoverable,
 }
 

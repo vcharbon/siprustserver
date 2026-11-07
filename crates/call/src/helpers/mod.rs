@@ -62,6 +62,7 @@ pub mod request_records;
 pub mod resolved;
 pub mod sequence;
 pub mod services;
+pub mod stored_images;
 pub mod termination;
 pub mod timer;
 pub mod timer_scope;
@@ -131,6 +132,7 @@ pub use services::{
     set_call_ext, set_leg_ext, set_promote_pem, set_relay_first_18x_relayed, set_reroute,
     set_transfer, transfer_active, transfer_state,
 };
+pub use stored_images::stored_images;
 pub use termination::{record_termination, seal_termination_seq};
 pub use timer::{
     arm_timer, cap_keepalive_fire_at, disarm_timer, holds_timer, retire_timers,

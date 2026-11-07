@@ -98,3 +98,58 @@ async fn a_bye_to_a_call_whose_record_does_not_rebuild_its_invite_draws_481() {
     assert_eq!(defects.len(), 1, "{defects:#?}");
     assert!(defects[0].starts_with("model defect caller-invite-rebuilds"), "{defects:#?}");
 }
+
+/// **A stored image that does not read is a counted defect, and the turn goes
+/// on.** The caller CANCELs a ringing call whose dialled INVITE's image was
+/// damaged: no CANCEL can be built from it, so none leaves, the defect is
+/// counted under its name, and the call is not discharged by it: only the
+/// caller's INVITE makes a call unrecoverable.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_that_meets_an_unreadable_image_is_a_counted_defect() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let mut n = node_on(&net, "w0", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let callee = net.bind_udp(BindUdpOpts::new(SocketAddr::from(CALLEE), 64)).await.unwrap();
+    let node = SocketAddr::from(NODE_SIP_ADDR);
+    let ctx = n.core.router_ctx();
+
+    let offer = invite("w0", "w1", "damaged-image");
+    caller.send_to(offer.image(), node).await.unwrap();
+    let dialled = next_starting(callee.as_ref(), "INVITE ").await;
+    callee.send_to(ringing(&dialled, "bobtag").as_bytes(), node).await.unwrap();
+    next_starting(caller.as_ref(), "SIP/2.0 180").await;
+
+    let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+    let born = build_initial_call(&offer, src(), &config, &mut sip_ids::TurnIds::fixed(1), 0);
+    let call_ref = born.call_ref;
+    let mut call = ctx.state.peek(&call_ref).expect("the call is resident");
+    let record = call.b_legs[0].invite.as_mut().expect("the dialling INVITE's record");
+    record.sent.as_mut().expect("the INVITE as it left").image = b"\xffdamaged".to_vec();
+    ctx.state.update_quiet(call);
+
+    let via = header(offer_text(&offer), "Via").to_string();
+    let cancel = format!(
+        "CANCEL {} SIP/2.0\r\nVia: {via}\r\nMax-Forwards: 70\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 1 CANCEL\r\nContent-Length: 0\r\n\r\n",
+        offer.request_uri(),
+        header(offer_text(&offer), "From"),
+        header(offer_text(&offer), "To"),
+        header(offer_text(&offer), "Call-ID"),
+    );
+    caller.send_to(cancel.as_bytes(), node).await.unwrap();
+    next_starting(caller.as_ref(), "SIP/2.0 487").await;
+    sip_clock::testkit::settle().await;
+
+    assert_eq!(n.metrics.model_defects_total("stored-image-reads"), 1);
+    assert_eq!(n.metrics.unrecoverable_calls_total(), 0, "the call is not discharged");
+    while let Some(packet) = callee.try_recv() {
+        let text = String::from_utf8_lossy(&packet.raw).to_string();
+        assert!(!text.starts_with("CANCEL "), "no CANCEL is built from the damaged image");
+    }
+    let defects = n.take_violations();
+    assert!(defects[0].starts_with("model defect stored-image-reads"), "{defects:#?}");
+}
+
+/// `offer` as text.
+fn offer_text(offer: &sip_message::SipRequest) -> &str {
+    std::str::from_utf8(offer.image()).expect("text")
+}

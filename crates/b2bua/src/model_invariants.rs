@@ -74,12 +74,13 @@ pub const INVARIANTS: &[(&str, Check)] = &[
     ("no-timer-on-a-terminated-leg", no_timer_on_a_terminated_leg),
     ("no-timer-on-an-ended-attempt", no_timer_on_an_ended_attempt),
     ("no-timer-of-an-inactive-machine", no_timer_of_an_inactive_machine),
+    ("every-stored-image-reads", every_stored_image_reads),
 ];
 
 /// Every name a violation is counted under: each invariant of
 /// [`INVARIANTS`], then each defect a turn reports
 /// ([`crate::turn_notes::DEFECTS`]), in that order.
-pub const NAMES: [&str; 26] = [
+pub const NAMES: [&str; 28] = [
     "dialog-named-once",
     "one-confirmed-dialog-per-leg",
     "confirmed-a-leg-one-dialog",
@@ -96,6 +97,7 @@ pub const NAMES: [&str; 26] = [
     "no-timer-on-a-terminated-leg",
     "no-timer-on-an-ended-attempt",
     "no-timer-of-an-inactive-machine",
+    "every-stored-image-reads",
     crate::turn_notes::PRACK_HAS_A_LEG,
     crate::turn_notes::PRACK_HAS_A_DIALOG,
     crate::turn_notes::UNDECLARED_TRANSITION,
@@ -106,6 +108,7 @@ pub const NAMES: [&str; 26] = [
     crate::turn_notes::KEEPALIVE_WITHIN_CADENCE,
     crate::turn_notes::REQUEST_KEEPS_ITS_LEG,
     crate::turn_notes::STATED_TEXT_FITS,
+    crate::turn_notes::STORED_IMAGE_READS,
 ];
 
 /// Check every invariant on `turn`, reporting each one violated, named with
@@ -467,6 +470,10 @@ mod provisionals;
 use provisionals::{
     no_owed_prack_past_its_invite, no_unshown_owed_prack, shown_ladder_armed_while_repeating,
 };
+
+#[path = "model_invariants_stored.rs"]
+mod stored;
+use stored::every_stored_image_reads;
 
 #[path = "model_invariants_timers.rs"]
 mod timers;

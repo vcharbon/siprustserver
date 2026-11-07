@@ -46,9 +46,13 @@ pub const REQUEST_KEEPS_ITS_LEG: &str = "request-keeps-its-leg";
 /// was left out of the message
 /// ([`crate::effects::BufferedObservabilityEffect::StatedTextSkipped`]).
 pub const STATED_TEXT_FITS: &str = "stated-text-fits-its-position";
+/// A step read a stored image of the call back and it did not read: a stack
+/// defect or a damaged replication frame ([`sip_message::read_stored`]). The
+/// step does nothing; the call goes on.
+pub const STORED_IMAGE_READS: &str = "stored-image-reads";
 
 /// Every defect a turn reports, by name.
-pub const DEFECTS: [&str; 10] = [
+pub const DEFECTS: [&str; 11] = [
     PRACK_HAS_A_LEG,
     PRACK_HAS_A_DIALOG,
     UNDECLARED_TRANSITION,
@@ -59,6 +63,7 @@ pub const DEFECTS: [&str; 10] = [
     KEEPALIVE_WITHIN_CADENCE,
     REQUEST_KEEPS_ITS_LEG,
     STATED_TEXT_FITS,
+    STORED_IMAGE_READS,
 ];
 
 /// A defect a turn met mid-way: a step that found the record unable to carry

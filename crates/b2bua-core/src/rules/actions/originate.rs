@@ -133,7 +133,11 @@ impl ActionExecutor<'_> {
         let creating = if leg_id == call.a_leg.leg_id {
             self.caller_invite(call)
         } else {
-            relay::dialling_invite(leg)
+            let notes = &mut self.turn.notes;
+            let dialled = leg.dialled_sent();
+            dialled.and_then(|sent| {
+                crate::stored_image::request_noted(&sent.image, call, "re-INVITE", notes)
+            })
         };
         let outbound_cseq = dialog.our_cseq + 1;
         // The call as it stands before the re-INVITE records anything: one

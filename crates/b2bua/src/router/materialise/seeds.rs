@@ -46,8 +46,7 @@ use b2bua_sdk::event::CallEvent;
 use call::{Call, Dialog, Leg, RequestRecord, RetainedEmission, SentRequest, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::header::{HeaderValue, SentBy, Via};
-use sip_message::parser::custom::CustomParser;
-use sip_message::{SipHeader, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
+use sip_message::{read_stored, SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
 use sip_txn::{ServerTxnKey, TxnSeed};
 
 use super::received_request::rebuild_received_request;
@@ -196,7 +195,7 @@ fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Optio
 /// ahead of the wire (RFC 3261 §17.2.1).
 pub(in crate::router) fn rejected_seed(leg: &Leg) -> Option<TxnSeed> {
     let (bytes, (host, port)) = leg.invite_rejection()?.wire();
-    let response = match CustomParser::new().parse(bytes).ok()? {
+    let response = match read_stored(bytes).ok()? {
         SipMessage::Response(r) => r,
         SipMessage::Request(_) => return None,
     };
@@ -472,7 +471,7 @@ fn relayed_server_seed(call: &Call, leg: &Leg, pending: &RequestRecord) -> Optio
 
 /// A request re-parsed from the bytes a record keeps it as.
 fn parse_request(bytes: &[u8]) -> Option<SipRequest> {
-    match CustomParser::new().parse(bytes).ok()? {
+    match read_stored(bytes).ok()? {
         SipMessage::Request(r) => Some(r),
         SipMessage::Response(_) => None,
     }
@@ -485,7 +484,7 @@ fn parse_response(retained: &Unacked2xx) -> Option<SipResponse> {
 
 /// A retained response re-parsed from the datagram it left as.
 fn parse_emitted_response(emission: &RetainedEmission) -> Option<SipResponse> {
-    match CustomParser::new().parse(emission.wire().0).ok()? {
+    match read_stored(emission.wire().0).ok()? {
         SipMessage::Response(r) => Some(r),
         SipMessage::Request(_) => None,
     }

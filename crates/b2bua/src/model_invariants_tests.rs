@@ -520,3 +520,32 @@ fn a_violation_is_kept_and_counted_and_the_turn_goes_on() {
     assert!(first.contains("call_ref"), "the first since the mark carries the dump");
     assert_eq!(metrics.model_defects_total("confirmed-a-leg-one-dialog"), 1);
 }
+
+/// The oracle reads each image once, on the turn that stored it: a stack-built
+/// image that does not read is reported there and not again.
+#[test]
+fn an_image_a_turn_stored_that_does_not_read_is_reported_once() {
+    let call = dialled_leg_call(b"not a message".to_vec());
+    let empty = dialled_leg_call(Vec::new());
+    let stored = |before: Option<&Call>, after: &Call| {
+        every_stored_image_reads(&Turn { before, after, received: None, sent: &[] })
+    };
+    let refused = stored(Some(&empty), &call).expect_err("the new image does not read");
+    assert!(refused.contains("not a message"), "{refused}");
+    assert!(stored(Some(&call), &call).is_ok(), "the image the record already held is not read");
+}
+
+/// A call whose one b-leg dialled with `image`.
+fn dialled_leg_call(image: Vec<u8>) -> Call {
+    let mut call = self::call();
+    let sent = call::SentRequest {
+        branch: "z9hG4bK-stored".into(),
+        image,
+        destination: call::HostPort { host: "192.0.2.77".into(), port: 5070 },
+    };
+    let mut leg = call::testkit::dialled_leg("b-2", "own");
+    leg.invite =
+        Some(call::RequestRecord::dialled(1, Some(sent), call::OutboundInvite::new("t", 0)));
+    call::helpers::add_b_leg(&mut call, leg);
+    call
+}

@@ -264,8 +264,9 @@ Every entry that makes a body resident checks that its snapshot rebuilds:
   that fails, the caller is refused with a final built from the live INVITE
   still in hand, and no call is born (new-call refusal `unrecoverable`).
 - **At materialisation** (a takeover, a reclaim) a copy whose snapshot does
-  not rebuild is unrecoverable: the shell discharges it silently, as the
-  reaper's second strike does (ADR-0020 X6). Its legs are abandoned, its CDR
+  not rebuild, or holding a stored image that does not read
+  (`sip_message::read_stored`), is unrecoverable: the shell discharges it
+  silently, as the reaper's second strike does (ADR-0020 X6). Its legs are abandoned, its CDR
   and its limiter release go through the one enforcement path, the call is
   removed, and the discharge is counted (`b2bua_unrecoverable_calls_total`).
   Nothing is sent on the wire for the call: the enforcement skips the
@@ -273,8 +274,8 @@ Every entry that makes a body resident checks that its snapshot rebuilds:
   INVITE the snapshot could not give. The request that asked for the copy is
   answered as one for a vanished call.
 - **At a fold** the snapshot is written: a whole fold lands the other owner's
-  body, its snapshot with it. A fold whose body does not rebuild is refused
-  and counted (`b2bua_unrecoverable_meetings_total`); the live copy, which
+  body, its snapshot with it. A fold whose body does not rebuild, or holds a
+  stored image that does not read, is refused and counted (`b2bua_unrecoverable_meetings_total`); the live copy, which
   rebuilds, keeps serving, and the version the body names is still seen. A
   rounds fold keeps the live copy's snapshot.
 
@@ -282,7 +283,9 @@ Nothing else writes the snapshot, so a resident call rebuilds its caller's
 INVITE at every step that reads it. A step that fails all the same is a defect:
 the core notes it (`caller-invite-rebuilds`) and the step does nothing; the
 shell drops the turn's result, discharges the call as above, and answers the
-request that opened the turn as one for a vanished call.
+request that opened the turn as one for a vanished call. A stored image a step
+reads and cannot is a defect too (`stored-image-reads`): the step does nothing
+and the call goes on.
 
 ### 12. The panic set
 

@@ -10,6 +10,8 @@ use sip_message::header::{self, Uri};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 
+mod stored_image;
+
 const A_BRANCH: &str = "z9hG4bK-alice";
 const B_BRANCH: &str = "z9hG4bK-b1";
 const REINVITE_BRANCH: &str = "z9hG4bK-b1-reinvite";

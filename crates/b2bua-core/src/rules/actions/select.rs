@@ -4,8 +4,7 @@
 
 use call::{Call, Dialog, DialogId, Leg};
 use sip_message::generators::InDialogMethod;
-use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipMessage, SipParser};
+use sip_message::Method;
 
 use b2bua_sdk::model::RuleContext;
 
@@ -25,13 +24,10 @@ pub(super) fn find_pending_dialog(
 }
 
 /// The CSeq of the INVITE `leg`'s `dialog` last sent (RFC 3261 §13.2.2.4 /
-/// RFC 3262 §7.2), read off its image; `None` if absent or unparseable.
+/// RFC 3262 §7.2), read off its image; `None` if absent or unreadable.
 pub(super) fn invite_cseq_from_handle(leg: &Leg, dialog: &Dialog) -> Option<i64> {
     let sent = call::helpers::sent_invite_image(leg, dialog)?;
-    match CustomParser::new().parse(&sent.image).ok()? {
-        SipMessage::Request(r) => Some(r.cseq().seq() as i64),
-        _ => None,
-    }
+    crate::stored_image::request(&sent.image).map(|r| i64::from(r.cseq().seq()))
 }
 
 /// Resolve the relay target leg and the dialog of it the relay rides. Thin
