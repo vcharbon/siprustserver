@@ -49,14 +49,16 @@ pub(super) enum OwnerRoute {
 
 impl ProxyCore {
     /// The owner rule for `msg`, a response whose top Via is `ours` and whose
-    /// next Via's sent-by is `sent_by`.
+    /// next Via's sent-by is `sent_by`. With `for_a_worker` false the registry
+    /// names nothing: only a cookie on `ours` can name an owner.
     pub(super) async fn owner_route(
         &self,
         msg: &SipMessage,
         ours: &Via,
         sent_by: &ProxyAddr,
+        for_a_worker: bool,
     ) -> OwnerRoute {
-        let named = self.registry.lookup_by_address(sent_by);
+        let named = for_a_worker.then(|| self.registry.lookup_by_address(sent_by)).flatten();
         let dead = named.as_ref().filter(|n| n.health == WorkerHealth::Dead);
         let cookie = self
             .strategy

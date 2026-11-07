@@ -27,6 +27,7 @@ use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::resolver::HostResolver;
 use crate::security::hmac::{HmacKey, StaticHmacKeyProvider};
+use crate::strategies::forward_all::ForwardAllStrategy;
 use crate::strategies::LoadBalancerStrategy;
 use crate::strategy::{RouteParams, RoutingStrategy};
 use crate::ProxyMetrics;
@@ -406,19 +407,60 @@ Via: SIP/2.0/UDP {W_ELSEWHERE}:5060;branch=z9hG4bKw\r\n"
 
 #[tokio::test]
 async fn a_response_the_owner_rule_sends_elsewhere_leaves_internal() {
-    let registry = SimulatedWorkerRegistry::with_clock(
-        vec![WorkerEntry::alive("w1", ProxyAddr::new(W1, 5060))],
-        Clock::test_at(0),
-    );
-    registry.set_address("w1", ProxyAddr::new(W_ELSEWHERE, 5060));
-    let f = dual_face_core_over(Arc::new(registry), None);
+    let f = dual_face_core_over(w1_moved(), None);
     let resp = response_with_vias(&format!(
-        "Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch=z9hG4bKp\r\n\
+        "Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch=z9hG4bKp;same-face\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKw\r\n"
     ));
     f.core.handle_response(resp, sa(W1, 5060), Face::Internal).await;
     let (face, dst, _) = one_sent(&f);
     assert_eq!((face, dst), ("int", sa(W_ELSEWHERE, 5060)));
+}
+
+/// The pool after `w1` moved from `W1` to `W_ELSEWHERE`: the address it left
+/// reads as a departed worker, `Dead`, for its window.
+fn w1_moved() -> Arc<dyn WorkerRegistry> {
+    let registry = SimulatedWorkerRegistry::with_clock(
+        vec![WorkerEntry::alive("w1", ProxyAddr::new(W1, 5060))],
+        Clock::test_at(0),
+    );
+    registry.set_address("w1", ProxyAddr::new(W_ELSEWHERE, 5060));
+    Arc::new(registry)
+}
+
+/// A callee behind a NAT whose private sent-by equals an address a worker left
+/// answers a request that left external: her response arrives internal with no
+/// marker, so it belongs to no worker, whatever the registry says of that
+/// address, and goes back to her on the external face.
+#[tokio::test]
+async fn an_unmarked_response_naming_a_departed_worker_follows_its_via_external() {
+    let f = dual_face_core_over(w1_moved(), None);
+    let resp = response_with_vias(&format!(
+        "Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch=z9hG4bKp\r\n\
+Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKc;received=203.0.113.66;rport=40000\r\n"
+    ));
+    f.core.handle_response(resp, sa(W_ELSEWHERE, 5060), Face::Internal).await;
+    let (face, dst, _) = one_sent(&f);
+    assert_eq!((face, dst), ("ext", sa("203.0.113.66", 40000)), "to her, not to w1's new address");
+}
+
+/// The same with the address read `Dead` and nowhere to move: not dropped.
+#[tokio::test]
+async fn an_unmarked_response_naming_a_dead_worker_is_not_dropped() {
+    let registry = SimulatedWorkerRegistry::with_clock(
+        vec![WorkerEntry::alive("w1", ProxyAddr::new(W1, 5060))],
+        Clock::test_at(0),
+    );
+    registry.set_health("w1", crate::registry::WorkerHealth::Dead);
+    let f = dual_face_core_over(Arc::new(registry), None);
+    let resp = response_with_vias(&format!(
+        "Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch=z9hG4bKp\r\n\
+Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKc;received=203.0.113.66;rport=40000\r\n"
+    ));
+    f.core.handle_response(resp, sa(W_ELSEWHERE, 5060), Face::Internal).await;
+    let sent = f.take_sent();
+    assert_eq!(sent.len(), 1, "not dropped");
+    assert_eq!((sent[0].0, sent[0].1), ("ext", sa("203.0.113.66", 40000)));
 }
 
 /// The owner rule's own answer for a worker holding its transaction, along its
@@ -543,9 +585,10 @@ async fn a_sender_no_registry_holds_gets_its_response_where_its_request_stayed()
 }
 
 /// A spiral's in-dialog INVITE refused by a translated worker: the final comes
-/// from a node address and its ACK follows it there, off the registry.
+/// from a node address and its ACK follows it there, on the internal face its
+/// INVITE took: the ACK re-enters on the same verified cookie.
 #[tokio::test]
-async fn a_spirals_ack_to_a_translated_worker_leaves_external() {
+async fn a_spirals_ack_to_a_translated_worker_stays_internal() {
     let (f, strategy) = signed_core();
     let of_the_call = parse_msg(
         "OPTIONS sip:b2bua@example.com SIP/2.0\r\n\
@@ -591,7 +634,7 @@ Content-Length: 0\r\n\r\n"
 
     f.core.route_request(&in_dialog("ACK", "2"), sa(W1, 5060), Face::Internal).await;
     let (face, dst, _) = one_sent(&f);
-    assert_eq!((face, dst), ("ext", sa(NODE, 40001)));
+    assert_eq!((face, dst), ("int", sa(NODE, 40001)));
 }
 
 /// A caller's Record-Route below the proxy's pair, two entries naming the proxy
@@ -670,5 +713,73 @@ Content-Length: 0\r\n\r\n"
         f.core.handle_response(response_with_vias(&vias), sa(W1, 5060), Face::Internal).await;
         let (face, dst, _) = one_sent(&f);
         assert_eq!((face, dst), ("ext", src), "the face her INVITE reached, her Via {own_via:?}");
+    }
+}
+
+/// The load balancer's decisions over a pool that no longer lists the worker a
+/// cookie names: the cookie still verifies, and still places the request on the
+/// address it states.
+struct PlacedOnTheCookie(ForwardAllStrategy);
+
+#[async_trait]
+impl RoutingStrategy for PlacedOnTheCookie {
+    fn name(&self) -> &str {
+        "PlacedOnTheCookie"
+    }
+    async fn select_for_new_dialog(
+        &self,
+        msg: &SipMessage,
+        opts: crate::strategy::SelectOpts,
+    ) -> Result<ProxyAddr, crate::strategy::SelectError> {
+        self.0.select_for_new_dialog(msg, opts).await
+    }
+    async fn decode_stickiness(
+        &self,
+        params: &RouteParams,
+        msg: &SipMessage,
+    ) -> crate::strategy::DecodeResult {
+        self.0.decode_stickiness(params, msg).await
+    }
+    fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams> {
+        self.0.encode_stickiness(target, msg)
+    }
+    fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {
+        self.0.stickiness_primary(params)
+    }
+    fn verified_cookie(&self, params: &RouteParams, _msg: &SipMessage) -> Option<RouteParams> {
+        params.get("target").map(|t| RouteParams::from([("target".to_string(), t.clone())]))
+    }
+}
+
+/// A re-entry's INVITE and its CANCEL take one face whatever the registry did
+/// between them: a request on a recorded pass is bound for the worker its
+/// cookie names, so its Via states one sent-by (RFC 3261 §9.1, §17.2.3).
+#[tokio::test]
+async fn a_re_entry_and_its_cancel_stay_internal_past_the_registry() {
+    let left = "10.244.5.77";
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(PlacedOnTheCookie(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060))));
+    let f = dual_face_core_routing(two_workers(), strategy, None);
+    let route = format!(
+        "<sip:{INT_VIP}:{INT_PORT};outbound;lr>, <sip:{EXT_VIP}:{EXT_PORT};target={W1}:5060;lr>, \
+         <sip:{EXT_VIP}:{EXT_PORT};target={left}:5060;lr>, \
+         <sip:{INT_VIP}:{INT_PORT};target={left}:5060;outbound;lr>"
+    );
+    for method in ["INVITE", "CANCEL"] {
+        let msg = parse_msg(&format!(
+            "{method} sip:b2bua@{EXT_VIP}:{EXT_PORT} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W1}:5060;branch=z9hG4bKre-cancel;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:b2bua@example.com>;tag=w\r\n\
+To: <sip:bob@example.com>;tag=b\r\n\
+Call-ID: crossing-re-cancel@example.com\r\n\
+CSeq: 2 {method}\r\n\
+Route: {route}\r\n\
+Content-Length: 0\r\n\r\n"
+        ));
+        f.core.route_request(&msg, sa(W1, 5060), Face::Internal).await;
+        let (face, dst, bytes) = one_sent(&f);
+        assert_eq!((face, dst), ("int", sa(left, 5060)), "{method}");
+        assert!(top_via(&bytes).contains(&int_advertise()), "{method}: {}", top_via(&bytes));
     }
 }

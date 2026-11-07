@@ -51,6 +51,15 @@ impl EgressPolicy {
         self == Self::Crossing && ingress == Face::Internal && egress == Face::Internal
     }
 
+    /// Whether the registry may name what a response arriving on `ingress` is
+    /// for: on a crossing proxy, one that arrived external, or one whose own Via
+    /// carries the marker. An unmarked response arriving internal answers a
+    /// request that left external, which no worker sent, whatever address its
+    /// next Via states.
+    pub(crate) fn response_may_be_a_workers(self, ingress: Face, marked: bool) -> bool {
+        self == Self::SingleFace || ingress == Face::External || marked
+    }
+
     /// The face a relayed response leaves on. `owner_named`: the owner rule names
     /// a worker. `marked`: the proxy's own Via this response pops carries the
     /// marker of [`marks_the_hop`](Self::marks_the_hop). A Via below it is its
@@ -110,6 +119,14 @@ mod tests {
         assert_eq!(Crossing.response(Internal, true, false), Internal);
         assert_eq!(Crossing.response(Internal, false, true), Internal);
         assert_eq!(Crossing.response(Internal, false, false), External);
+    }
+
+    #[test]
+    fn an_unmarked_response_arriving_internal_is_no_workers() {
+        assert!(!Crossing.response_may_be_a_workers(Internal, false));
+        assert!(Crossing.response_may_be_a_workers(Internal, true));
+        assert!(Crossing.response_may_be_a_workers(External, false));
+        assert!(SingleFace.response_may_be_a_workers(Internal, false));
     }
 
     #[test]

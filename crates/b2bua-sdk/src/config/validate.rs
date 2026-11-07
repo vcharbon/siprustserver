@@ -21,6 +21,14 @@ impl B2buaConfig {
     }
 
     fn check(&self, out: &mut Vec<String>) {
+        if let Some((host, port)) = self.front.outbound_proxy() {
+            if host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_err() {
+                out.push(format!(
+                    "B2BUA_OUTBOUND_PROXY={host}:{port} is no IP literal: the transaction layer \
+                     sends what it builds itself there and resolves no name"
+                ));
+            }
+        }
         if let Some(r) = self.glare_retry_after {
             if r.min_sec > r.max_sec {
                 out.push(format!(

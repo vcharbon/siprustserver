@@ -312,7 +312,7 @@ impl ProxyCore {
         // The face it leaves on, whatever its target's address (`crate::face`).
         let egress =
             self.egress.request(face, c.worker_outbound, c.loose_route_next_hop.is_some(), || {
-                self.registry.lookup_by_address(&target).is_some()
+                c.reentry || self.registry.lookup_by_address(&target).is_some()
             });
 
         // ── §16.6 received/rport, Max-Forwards, Record-Route, Via ───────────

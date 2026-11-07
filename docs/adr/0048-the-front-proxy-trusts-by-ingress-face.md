@@ -110,7 +110,7 @@ but used it only for a metric.
     |---|---|---|
     | Request | arrived external | internal |
     | Request | arrived internal, worker-outbound or a loose hop | external, whatever the target |
-    | Request | arrived internal, neither, target a registry worker | internal |
+    | Request | arrived internal, neither, target a registry worker or re-entering on a verified cookie | internal |
     | Request | arrived internal, any other target | external |
     | Response | arrived external | internal (D4: every destination is a worker) |
     | Response | arrived internal, the owner rule names a worker | internal |
@@ -131,6 +131,13 @@ but used it only for a metric.
     the message, so either instance reads it and nothing is stored. No Via below it
     decides a face: those are their senders' to write, and a phone behind a NAT whose
     private sent-by equals a worker's address is answered from the face it reached.
+    A response arriving internal with no marker answers a request that left external, so the registry
+    names nothing for it: the owner rule's dead, moved and Record-Route-cookie branches apply only to a
+    response arriving external or marked
+    (`crossing_tests::an_unmarked_response_naming_a_departed_worker_follows_its_via_external`). A
+    re-entry's request, its CANCEL included, stays internal on its verified cookie whatever the registry
+    did since its INVITE
+    (`crossing_tests::a_re_entry_and_its_cancel_stay_internal_past_the_registry`).
     This rests on one assumption of the deployment: everything dialled through the
     proxy, a media resource function included, is on the external plane. Tests:
     `core::crossing_tests`, `face::tests`,
@@ -158,8 +165,8 @@ but used it only for a metric.
 - A peer's Contact or Record-Route chooses the Request-URI or the next hop of a
   worker's request, and that request leaves on the external face whatever it names
   (`crossing_tests::a_contact_naming_a_registry_worker_leaves_external`). The routers'
-  isolation stops it there (ADR-0056 §11); where that is missing on a CNI that does not
-  enforce NetworkPolicy, nothing does. Entries naming this proxy prove no recorded
+  isolation stops it, then the workers' NetworkPolicy (ADR-0056 §11); on a CNI that does
+  not enforce NetworkPolicy, the routers' isolation alone does. Entries naming this proxy prove no recorded
   pass, only a cookie verifying for the call does
   (`crossing_tests::a_cookie_that_does_not_verify_for_the_call_proves_no_pass`). So a
   peer aims a worker's request onto the internal plane only with a cookie this proxy
@@ -169,6 +176,5 @@ but used it only for a metric.
   the route set intact (`b2bua-core` `relay::egress`); standalone it follows its
   route set.
 - The ACK of a non-2xx final a translated worker sent on a spiral goes to the node
-  address the final came from, no registry worker, so it leaves external and misses;
-  that worker repeats its final to Timer H, on a call that already failed
-  (`crossing_tests::a_spirals_ack_to_a_translated_worker_leaves_external`).
+  address the final came from, on the internal face its INVITE took
+  (`crossing_tests::a_spirals_ack_to_a_translated_worker_stays_internal`).

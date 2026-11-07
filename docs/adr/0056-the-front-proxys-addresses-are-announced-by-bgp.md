@@ -209,12 +209,15 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       An owned chain, `SIP-EXT-EGRESS`, swapped whole by `iptables-restore --noflush`, jumped from
       `OUTPUT`: `-s <external VIP>/32 ! -o <external interface> -j DROP`, with no address list and no
       exemption for `lo`. The kernel consults the local table before any rule, so the routing above
-      does not cover a local address: this chain is what covers it. Running without it, a send from
-      the external socket to the internal VIP is delivered locally and reaches a socket trusted by
-      its face, and one to the external VIP re-enters on that face. It does not cover what the table
+      does not cover a local address: this chain is what covers it. It also refuses a send that falls
+      through to the main table when the policy rule is lost (measured: the send fails with EPERM).
+      Running without it, a send from the external socket to the internal VIP is delivered locally
+      and reaches a socket trusted by its face, one to the external VIP re-enters on that face, and
+      any local UDP listener on the port a target names gets a datagram sourced from the external
+      VIP. It does not cover what the table
       routes: a send from the external socket to a worker leaves through the external interface
-      either way, so the routers' isolation stops it, and where that is missing on a CNI that does
-      not enforce NetworkPolicy, nothing does.
+      either way, so the routers' isolation stops it, then the workers' NetworkPolicy; on a CNI that
+      does not enforce NetworkPolicy, the routers' isolation alone does.
     - **Plane isolation at the routers**, a deployment requirement (`deploy/README.md`).
 
     A container on the network tools image, `egress-routes`, with `NET_ADMIN` alone, keeps the next

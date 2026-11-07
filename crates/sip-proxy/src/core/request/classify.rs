@@ -48,6 +48,9 @@ pub(super) struct Classified {
     pub(super) loose_route_next_hop: Option<ProxyAddr>,
     /// The Request-URI as forwarded, when its `maddr` named this proxy.
     pub(super) request_uri_past_own_maddr: Option<Uri>,
+    /// The request re-enters through a later pass, internal face only: its
+    /// target is the worker a verified cookie names.
+    pub(super) reentry: bool,
 }
 
 impl ProxyCore {
@@ -146,6 +149,7 @@ impl ProxyCore {
                 via_worker: None,
                 loose_route_next_hop: None,
                 request_uri_past_own_maddr,
+                reentry: false,
             };
             return Some((draft, classified));
         }
@@ -188,6 +192,7 @@ impl ProxyCore {
             via_worker,
             loose_route_next_hop,
             request_uri_past_own_maddr,
+            reentry: spiral_reentry,
         };
         Some((draft, classified))
     }

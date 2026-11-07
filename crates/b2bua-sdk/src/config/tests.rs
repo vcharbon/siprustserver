@@ -363,3 +363,16 @@ fn the_event_queue_gate_relations_are_checked() {
     let at_the_bound = EventQueueGateConfig { refuse_depth: EVENT_QUEUE_CAPACITY, ..d };
     assert_eq!(with(at_the_bound).validate(), Ok(()), "the queue's bound is reachable");
 }
+
+/// The transaction layer resolves no name, so an outbound proxy it sends to
+/// must be an IP literal; a worker standing alone states none.
+#[test]
+fn an_outbound_proxy_is_an_ip_literal() {
+    let named =
+        B2buaConfig { front: Front::single_face("proxy.example", 5060), ..Default::default() };
+    let err = named.validate().expect_err("a named outbound proxy is refused");
+    assert!(err.contains("B2BUA_OUTBOUND_PROXY=proxy.example:5060"), "{err}");
+    let literal =
+        B2buaConfig { front: Front::single_face("192.0.2.9", 5060), ..Default::default() };
+    assert_eq!(literal.validate(), Ok(()));
+}
