@@ -70,7 +70,7 @@ crates/pivot-schema/src/lint/references.rs 505
 crates/pivot-schema/tests/it/lint.rs 2890
 crates/repl-net-testkit/src/simulated.rs 955
 crates/rfc-rules/src/rules/ack.rs 713
-crates/rfc-rules/src/rules/cancel.rs 648
+crates/rfc-rules/src/rules/cancel.rs 602
 crates/rfc-rules/src/rules/capability.rs 648
 crates/rfc-rules/src/rules/cseq.rs 626
 crates/rfc-rules/src/rules/cseq/tests.rs 874
