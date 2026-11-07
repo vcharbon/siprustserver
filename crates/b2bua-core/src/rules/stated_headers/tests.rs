@@ -24,7 +24,7 @@ fn edits(
             .flat_map(|(_, l)| lines(l))
             .collect()
     };
-    restated(&sets, |_| false, carried_of, Vec::new, &mut Vec::new())
+    restated(&sets, |_| false, carried_of, Vec::new, None, &mut Vec::new())
 }
 
 /// A statement the wire cannot carry whole is skipped and handed back; the
@@ -47,7 +47,7 @@ fn a_statement_with_a_line_break_or_a_non_token_name_is_skipped() {
             Vec::new()
         }
     };
-    let edited = restated(&sets, |_| false, carried_of, Vec::new, &mut skipped);
+    let edited = restated(&sets, |_| false, carried_of, Vec::new, None, &mut skipped);
     assert_eq!(edited, Some(vec![("X-C".to_string(), lines(&["kept"]))]));
     assert_eq!(skipped.len(), 3, "{skipped:?}");
 }
@@ -171,7 +171,7 @@ fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
         leg_id: Some("a".into()),
         provenance: Provenance::Authored,
     });
-    let result = stamp_outbound(HandlerResult { call, effects: fx });
+    let result = stamp_outbound(HandlerResult { call, effects: fx }, &FirstIngressBound::DEFAULT);
     let OutboundBody::Request(sent) = &result.effects.outbound[0].body else { unreachable!() };
     assert_eq!(sent.raw(HeaderName::from("X-Late")).collect::<Vec<_>>(), ["late"]);
     let Some(call::Ladder::Repeating(retained)) =
@@ -223,7 +223,7 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
     call.features = Some(features);
     let mut fx = HandlerEffects::new();
     fx.outbound.push(effect);
-    let result = stamp_outbound(HandlerResult { call, effects: fx });
+    let result = stamp_outbound(HandlerResult { call, effects: fx }, &FirstIngressBound::DEFAULT);
     let OutboundBody::Request(sent) = &result.effects.outbound[0].body else { unreachable!() };
     assert_eq!(sent.raw(HeaderName::from("X-Stamp")).collect::<Vec<_>>(), ["s"]);
     let leg = &result.call.b_legs[0];
@@ -279,7 +279,7 @@ fn an_ended_legs_own_set_stays_with_the_call() {
     call.features = Some(features);
     let mut fx = HandlerEffects::new();
     fx.outbound.push(effect);
-    let result = stamp_outbound(HandlerResult { call, effects: fx });
+    let result = stamp_outbound(HandlerResult { call, effects: fx }, &FirstIngressBound::DEFAULT);
     let OutboundBody::Request(sent) = &result.effects.outbound[0].body else { unreachable!() };
     assert_eq!(sent.raw(HeaderName::from("X-Own")).collect::<Vec<_>>(), ["leg"]);
     let left = result.call.features.unwrap().stated_headers.unwrap();
@@ -361,7 +361,10 @@ fn a_stated_reason_never_rides_a_5xx_the_stack_authors() {
             leg_id: Some("a".into()),
             provenance,
         });
-        let result = stamp_outbound(HandlerResult { call: call.clone(), effects: fx });
+        let result = stamp_outbound(
+            HandlerResult { call: call.clone(), effects: fx },
+            &FirstIngressBound::DEFAULT,
+        );
         let OutboundBody::Response(sent) = &result.effects.outbound[0].body else { unreachable!() };
         let case = format!("{status} {provenance:?} own {own:?}");
         assert_eq!(sent.raw(HeaderName::Reason).collect::<Vec<_>>(), expected, "{case}");

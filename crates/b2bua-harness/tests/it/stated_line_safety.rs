@@ -167,3 +167,37 @@ async fn a_stated_value_ingress_refuses_is_skipped_and_the_caller_hears_the_fina
     let _report = s.finish().await;
     assert!(counted >= 1, "the skip is counted: {defects:?}");
 }
+
+/// A stated line past the first-ingress bound (ADR-0001) is skipped only on
+/// a new request, which its next hop reads at first ingress: it rides the
+/// final to alice and the in-dialog BYE to bob, read up to the datagram.
+#[tokio::test(start_paused = true)]
+async fn a_long_stated_line_is_skipped_only_on_a_new_request() {
+    let long = "x".repeat(9_000);
+    let mut stated = StatedHeaders::default();
+    stated.every_message.insert("X-Long".into(), set(&[long.as_str()]));
+    let mut s = scene("stated-line-past-first-ingress", stated).await;
+
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    let on_invite = uas.request().raw(HeaderName::from("X-Long")).count();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    let on_final = ok.raw(HeaderName::from("X-Long")).count();
+    let mut dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    let mut bob_bye = s.bob.receive("BYE").await;
+    let on_bye = bob_bye.request().raw(HeaderName::from("X-Long")).count();
+    bob_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+
+    let defects = s.b2bua.take_model_violations();
+    let counted = s.b2bua.metrics().model_defects_total(DEFECT);
+    let _report = s.finish().await;
+    assert!(defects.iter().all(|d| d.contains("first") || d.contains("bound")), "{defects:?}");
+    assert_eq!(on_invite, 0, "the new request leaves without it");
+    assert_eq!((on_final, on_bye), (1, 1), "the final and the in-dialog BYE carry it");
+    assert!(counted >= 1, "the skip on the INVITE is counted");
+}

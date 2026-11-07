@@ -302,6 +302,7 @@ pub fn admitted(
         &mut leg,
         &mut effect,
         &adds.unwrap_or_default(),
+        &config.parser_limits.first_ingress,
     ));
     fx.buffered.extend(BufferedObservabilityEffect::skipped("routed INVITE", skipped));
 

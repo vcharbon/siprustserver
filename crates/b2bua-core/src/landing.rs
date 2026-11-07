@@ -36,7 +36,10 @@ pub fn land(result: HandlerResult, landing: &Landing<'_>, now_ms: i64) -> Handle
     let result = crate::limiter::call::arm_refresh(result, now_ms, landing.refresh_period);
     // Every message the turn sends takes the call's stated headers before the
     // ring records it or the wire sees it.
-    let result = crate::rules::stated_headers::stamp_outbound(result);
+    let result = crate::rules::stated_headers::stamp_outbound(
+        result,
+        &landing.config.parser_limits.first_ingress,
+    );
     // Every non-INVITE final the turn sends is on the record as it leaves, so
     // a copy of its request draws it again wherever the call is served.
     let result = crate::answered_finals::retain(result, now_ms);

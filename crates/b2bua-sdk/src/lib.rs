@@ -63,6 +63,7 @@ pub mod relayed_final;
 pub mod release_reason;
 mod request_record;
 pub mod rule_call;
+mod rule_context;
 mod rule_diagnostic;
 pub mod sdp_form;
 pub mod service;

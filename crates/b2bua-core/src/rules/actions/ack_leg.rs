@@ -166,6 +166,25 @@ impl ActionExecutor<'_> {
         self.ack_leg(call, fx, leg_id, body, Some(ct), own, Provenance::Authored, author);
     }
 
+    /// ACK `leg_id`'s confirmed dialog with `answer`, another leg's answer
+    /// ([`b2bua_sdk::model::RuleAction::AckLegAnswering`]): carried where the
+    /// dialog's 2xx made an offer its ACK owes the answer to, awaited where it
+    /// did and none is given yet, left out where it made none.
+    pub(super) fn ack_answering(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        answer: &Option<Body>,
+    ) {
+        let owed = call::helpers::find_leg(call, leg_id).and_then(relay::offer_owed_in_ack);
+        match (owed.is_some(), answer) {
+            (true, None) => {}
+            (true, Some(_)) => self.ack_authored(call, fx, leg_id, answer),
+            (false, _) => self.ack_authored(call, fx, leg_id, &None),
+        }
+    }
+
     /// ACK `leg_id`'s confirmed dialog on this stack's own account, bare
     /// (RFC 3261 §13.2.2.4): an offer of the dialog a reliable provisional
     /// carried is answered first, rejecting every stream, in the PRACK still
@@ -214,17 +233,21 @@ impl ActionExecutor<'_> {
     }
 
     /// Whether `ack`, the caller's ACK of her initial INVITE, answers an offer
-    /// made on her face alone: her INVITE made none, and the INVITE this stack
-    /// sent `target_leg` made its own, so that leg's ACK owes no answer (RFC
-    /// 3264 §4) and her description is no part of its round.
+    /// made on her face alone: her INVITE made none, and `target_leg`'s 2xx
+    /// made no offer its ACK answers (its INVITE carried the offer, or a
+    /// reliable provisional did, RFC 3262 §5), so her description is no part
+    /// of that leg's round (RFC 3264 §4).
     pub(super) fn answers_her_face_only(
         &mut self,
         call: &Call,
         target_leg: &str,
         ack: &sip_message::SipRequest,
     ) -> bool {
+        let owes_an_answer = call::helpers::find_leg(call, target_leg)
+            .and_then(|leg| leg.dialogs.established())
+            .is_some_and(|d| matches!(d.owed_answer, Some(call::OwedAnswer::InAck { .. })));
         ack.sdp().is_some()
-            && relay::owes_bare_ack(call, target_leg)
+            && !owes_an_answer
             && self
                 .caller_invite(call)
                 .is_some_and(|c| c.cseq().seq() == ack.cseq().seq() && c.sdp().is_none())

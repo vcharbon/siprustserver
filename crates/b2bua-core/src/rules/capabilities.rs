@@ -222,7 +222,9 @@ pub fn offered_option_tags(call: &Call, kind: Option<LegKind>) -> Vec<String> {
 /// twin of [`offered_option_tags_in`]. `promote-pem-to-200` answers the
 /// originator with a 200 of its own and absorbs the destination's, so the
 /// destination's session interval reaches nobody who would refresh it: that
-/// strategy withholds `timer` (RFC 4028 §7.1). The withhold outranks the
+/// strategy withholds `timer` (RFC 4028 §7.1), and `100rel` where the INVITE
+/// carries no offer, so the destination's offer comes unreliably and again in
+/// its 2xx, whose ACK carries the originator's answer (RFC 3264 §4). The withhold outranks the
 /// offer, and it applies on EVERY mint of the call — the initial route and each leg a
 /// rule creates — so the call solicits the same reliability from each callee.
 /// A media leg's provisionals belong to the service that dialled it: nothing
@@ -238,6 +240,7 @@ pub fn withheld_by_strategy_in(
             RelayFirst18xStrategy::DropSdp | RelayFirst18xStrategy::KeepSdp => &["100rel"],
             RelayFirst18xStrategy::FakePrack if !offers_sdp => &["100rel"],
             RelayFirst18xStrategy::FakePrack => &[],
+            RelayFirst18xStrategy::PromotePemTo200 if !offers_sdp => &["timer", "100rel"],
             RelayFirst18xStrategy::PromotePemTo200 => &["timer"],
         },
         None => &[],

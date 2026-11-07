@@ -283,3 +283,91 @@ async fn a_delayed_offer_answered_after_the_callees_200_reaches_him() {
         "bob's ACK carries alice's answer: {answer:?}"
     );
 }
+
+/// A delayed offer under the promotion, alice stating `100rel` as `header`.
+/// Returns whether bob's INVITE solicited a reliable provisional and the
+/// answer bob was given to his 183's offer: in his PRACK, else his ACK.
+async fn delayed_offer_with_100rel(
+    name: &str,
+    ports: (u16, u16, u16),
+    header: &str,
+) -> (bool, Option<String>) {
+    let h = Harness::with_transit_delay(name, 1);
+    let alice = h.agent("alice", &format!("127.0.0.1:{}", ports.0)).await;
+    let bob = h.agent("bob", &format!("127.0.0.1:{}", ports.1)).await;
+    let b2bua = b2bua_pem(&h, &format!("127.0.0.1:{}", ports.2), ports.1).await;
+
+    let mut call =
+        alice.invite(&bob).with_header(header, "100rel").through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    assert_eq!(uas.request().sdp(), None, "a delayed offer");
+    let solicited = [HeaderName::Supported, HeaderName::Require].into_iter().any(|name| {
+        uas.request().raw(name).any(|line| line.to_ascii_lowercase().contains("100rel"))
+    });
+    let progress = uas
+        .respond(183, "Session Progress")
+        .with_header("P-Early-Media", "sendrecv")
+        .with_sdp(EARLY);
+    if solicited {
+        progress.reliable(1).await;
+    } else {
+        progress.await;
+    }
+    let ok = call.expect(200).await;
+    assert_eq!(ok.sdp(), Some(EARLY.as_bytes()), "bob's offer, promoted");
+    let mut dialog = call.ack_with(Some(OFFER)).await;
+    let mut answered = None;
+    if solicited {
+        let mut prack = bob.receive("PRACK").await;
+        answered = prack.request().sdp().map(|sdp| String::from_utf8_lossy(sdp).into_owned());
+        prack.respond(200, "OK").await;
+    }
+    uas.respond(200, "OK").with_sdp(EARLY).await;
+    let ack = bob.receive("ACK").await;
+    let in_ack = ack.request().sdp().map(|sdp| String::from_utf8_lossy(sdp).into_owned());
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+    (solicited, answered.or(in_ack))
+}
+
+/// Alice's INVITE makes no offer, so the promotion solicits no reliable
+/// provisional from bob: his 183 offers unreliably, his 200 repeats the
+/// offer (RFC 3261 §13.2.1), and the ACK it draws carries alice's answer, so
+/// media flows both ways.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_offer_solicits_no_reliable_offer_from_the_callee() {
+    let (solicited, answer) = delayed_offer_with_100rel(
+        "promote-pem-delayed-offer-100rel",
+        (5838, 5848, 5858),
+        "Supported",
+    )
+    .await;
+    assert!(
+        answer.as_deref().is_some_and(|sdp| sdp.contains("m=audio 10000")),
+        "bob is answered with alice's media: {answer:?}"
+    );
+    assert!(!solicited, "no 100rel toward bob");
+}
+
+/// Alice requiring `100rel` changes nothing toward bob: the promotion shows
+/// her no provisional at all, so her requirement holds on her face (RFC 3262
+/// §3), and bob is answered with her media.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_offer_requiring_100rel_solicits_no_reliable_offer_either() {
+    let (solicited, answer) = delayed_offer_with_100rel(
+        "promote-pem-delayed-offer-require",
+        (5839, 5849, 5859),
+        "Require",
+    )
+    .await;
+    assert!(
+        answer.as_deref().is_some_and(|sdp| sdp.contains("m=audio 10000")),
+        "bob is answered with alice's media: {answer:?}"
+    );
+    assert!(!solicited, "no 100rel toward bob");
+}

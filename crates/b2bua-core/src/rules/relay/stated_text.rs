@@ -7,13 +7,27 @@
 
 use b2bua_sdk::reason_phrase::default_reason;
 use sip_message::write_check::{self, WriteRefusal};
-use sip_message::SipHeader as MsgHeader;
+use sip_message::{FirstIngressBound, SipHeader as MsgHeader};
 
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects};
 
 /// Whether the wire carries `line` whole; a refusal is pushed onto `skipped`.
 pub(crate) fn writable(line: &MsgHeader, skipped: &mut Vec<WriteRefusal>) -> bool {
-    match write_check::header_line(&line.name, &line.value) {
+    kept(write_check::header_line(&line.name, &line.value), skipped)
+}
+
+/// [`writable`] on a new request, which its next hop reads at first ingress
+/// under `bound`.
+pub(crate) fn writable_on_new_request(
+    line: &MsgHeader,
+    bound: &FirstIngressBound,
+    skipped: &mut Vec<WriteRefusal>,
+) -> bool {
+    kept(write_check::new_request_line(&line.name, &line.value, bound), skipped)
+}
+
+fn kept(checked: Result<(), WriteRefusal>, skipped: &mut Vec<WriteRefusal>) -> bool {
+    match checked {
         Ok(()) => true,
         Err(refusal) => {
             skipped.push(refusal);

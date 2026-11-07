@@ -194,22 +194,15 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 // Confirm b, ACK b locally (no end-to-end ACK; Alice already
                 // ACK'd the synthetic 200), merge a↔b. NO relay-to-peer.
                 actions.push(RuleAction::ConfirmDialog { leg_id: b.clone() });
-                // Where alice's INVITE made no offer, bob's 200 repeats his
-                // (RFC 3261 §13.2.1) and the ACK carries alice's answer (RFC
-                // 3264 §4): the one her ACK gave, else hers once it comes,
-                // relayed past the merge.
-                let offer_owed = resp.sdp().is_some()
-                    && ctx.caller_invite().is_some_and(|invite| invite.sdp().is_none());
-                match (offer_owed, &state.caller_answer) {
-                    (true, None) => {}
-                    (true, Some(answer)) => actions.push(RuleAction::AckLeg {
-                        leg_id: b.clone(),
-                        body: Some(Body::from_leg(answer.clone(), a.clone())),
-                    }),
-                    (false, _) => {
-                        actions.push(RuleAction::AckLeg { leg_id: b.clone(), body: None })
-                    }
-                }
+                // Bob's ACK answers his 200's offer, where it made one, with
+                // the answer alice's ACK gave (RFC 3264 §4).
+                actions.push(RuleAction::AckLegAnswering {
+                    leg_id: b.clone(),
+                    answer: state
+                        .caller_answer
+                        .clone()
+                        .map(|answer| Body::from_leg(answer, a.clone())),
+                });
                 actions.push(RuleAction::Merge { leg_a: a.clone(), leg_b: b.clone() });
                 for other in ctx.call.b_legs() {
                     if other.leg_id != b && other.state() != LegState::Terminated {

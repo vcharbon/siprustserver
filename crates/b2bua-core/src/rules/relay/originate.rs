@@ -21,7 +21,7 @@ use super::body::{description_in, media_type, override_content_type};
 use super::egress::apply_b_leg_egress;
 use super::identity::{allocate_leg_contact, dialling_via, stated_contact, CallMarks};
 use super::option_tags::{apply_offered_option_tags, apply_withheld_option_tags};
-use super::stated_text::writable;
+use super::stated_text::writable_on_new_request;
 use b2bua_sdk::model::Body;
 
 /// What an override's bytes are to the originator's body, the one place an
@@ -230,6 +230,8 @@ pub fn build_b_leg(
     skipped: &mut Vec<WriteRefusal>,
 ) -> Result<(Leg, OutboundSipEffect), UnreadableAddress> {
     let stamp = generators::timestamp_value(now_ms);
+    // The INVITE is a new request: its next hop reads it at first ingress.
+    let first_ingress = &config.parser_limits.first_ingress;
     let scope = if caller_invite_pending {
         relay_scope(a_leg_invite, body_override)
     } else {
@@ -271,7 +273,7 @@ pub fn build_b_leg(
         .filter_map(|(n, v)| {
             v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
         })
-        .filter(|h| writable(h, skipped))
+        .filter(|h| writable_on_new_request(h, first_ingress, skipped))
         .collect();
     // The entity headers the minted body states for itself; a name the decision
     // stated stands, and a structural name is the generator's.
@@ -282,7 +284,7 @@ pub fn build_b_leg(
         if HeaderName::class_of(&name) != HeaderClass::Structural
             && !decided.iter().any(|h| header.matches(&h.name))
             && !removed(header_updates, &header)
-            && writable(&line, skipped)
+            && writable_on_new_request(&line, first_ingress, skipped)
         {
             extra_headers.push(line);
         }
@@ -368,7 +370,7 @@ pub fn build_b_leg(
                 name: SipStr::owned(name.as_wire_str()),
                 value: SipStr::owned(&ChargingVector::new(icid, host).to_wire()),
             };
-            if writable(&line, skipped) {
+            if writable_on_new_request(&line, first_ingress, skipped) {
                 extra_headers.push(line);
             }
         }
