@@ -7,8 +7,9 @@
 //! message still leaves.
 
 use b2bua_sdk::reason_phrase::default_reason;
+use sip_message::header::{HeaderClass, HeaderName};
 use sip_message::write_check::{self, WriteRefusal};
-use sip_message::{FirstIngressBound, SipHeader as MsgHeader};
+use sip_message::{FirstIngressBound, SipHeader as MsgHeader, SipStr};
 
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects};
 
@@ -51,6 +52,52 @@ pub(crate) fn writable_lines(
     let kept = lines.into_iter().filter(|line| writable(line, &mut skipped)).collect();
     fx.buffered.extend(BufferedObservabilityEffect::skipped(what, skipped));
     kept
+}
+
+/// The non-structural `header_updates` *sets*. Removals and structural keys
+/// drop: the response generator owns the stack-owned set (ADR-0017 X2).
+pub(crate) fn set_lines(header_updates: &[(String, Option<String>)]) -> Vec<MsgHeader> {
+    header_updates
+        .iter()
+        .filter(|(name, _)| HeaderName::class_of(name) == HeaderClass::EndToEnd)
+        .filter_map(|(name, val)| {
+            let value = val.as_deref()?;
+            Some(MsgHeader { name: SipStr::owned(name), value: SipStr::owned(value) })
+        })
+        .collect()
+}
+
+/// What a service's `header_updates` state on a response this stack authors:
+/// the lines it sets ([`set_lines`]) less every line of a single-valued header
+/// set more than once, which is as though never stated (ADR-0053 §7).
+pub(crate) struct Statements<'a> {
+    updates: &'a [(String, Option<String>)],
+    pub(crate) lines: Vec<MsgHeader>,
+}
+
+impl<'a> Statements<'a> {
+    /// The statements of `updates`, a skip reported on `fx` under `what`.
+    pub(crate) fn of(
+        what: &str,
+        updates: &'a [(String, Option<String>)],
+        fx: &mut HandlerEffects,
+    ) -> Self {
+        let mut skipped = Vec::new();
+        let lines = write_check::one_line_each(set_lines(updates), &mut skipped);
+        fx.buffered.extend(BufferedObservabilityEffect::skipped(what, skipped));
+        Self { updates, lines }
+    }
+
+    /// Whether the header `name` names is the service's: a line kept, a
+    /// removal, or a name the generator owns.
+    pub(crate) fn states(&self, name: &str) -> bool {
+        let named = HeaderName::from(name);
+        let unwritten = |n: &str, v: &Option<String>| {
+            v.is_none() || HeaderName::class_of(n) != HeaderClass::EndToEnd
+        };
+        self.lines.iter().any(|h| named.matches(&h.name))
+            || self.updates.iter().any(|(n, v)| unwritten(n, v) && named.matches(n))
+    }
 }
 
 /// `status` and `reason` when a message can carry that status, else this stack's

@@ -242,14 +242,22 @@ counted: `Subject`, `subject` and `s` are one), is left out whole, as though
 not stated, and the skip is reported as stated text the wire cannot carry
 (`StatedTextSkipped`). `write_check::one_line_each` decides it, at
 every path a service states lines on: a route's header updates on the leg it
-dials, the lines of an authored final, of an in-dialog request a service
-originates and of a `DestroyLeg`'s CANCEL or BYE, and a decision's header
-statements restated on a built message (`write_check::header_lines`).
+dials, the lines of an authored final (the answer a service mints from a
+delivered final included), of an in-dialog request or re-INVITE a service
+originates, of a relayed response a transform stamps and of a `DestroyLeg`'s
+CANCEL or BYE, and a decision's header statements restated on a built message
+(`write_check::header_lines`). As though never stated means what it says: a
+line the message would carry with no statement, relayed or the stack's own,
+rides.
 
 The cardinality is in the types. A value type declares the header it is
 (`HeaderValue::HEADER`, from which `header_name` reads) and its `Lines`
-(`header::lines::Single`, or the list layouts `Comma`, `Opaque`, `SetPerLine`),
-held to the table by a compile-time assertion naming the type. A
+(`header::lines::Single`, or the list layouts `Comma`, `Opaque`, `SetPerLine`).
+Its impl must state `HELD`, which only `held_to_the_table!()` gives: its
+evaluation holds `Lines` to the table's statement of `HEADER`, and reading the
+header's name evaluates it, so a disagreeing impl does not build wherever the
+type is used (a `cargo check` does not evaluate it; a build does). A kind is
+checked where it is declared. A
 single-valued header reads as `msg.header::<H>()`, its one value, and is
 written with `Draft::set`; a list header reads as `msg.list::<H>()`. A list
 whose values stand in order (`Comma`, `Opaque`) also reads as `first::<H>()`,

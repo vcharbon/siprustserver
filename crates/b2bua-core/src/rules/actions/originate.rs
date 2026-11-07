@@ -152,13 +152,14 @@ impl ActionExecutor<'_> {
             return;
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
-        let mut extra: Vec<sip_message::SipHeader> = add_headers
+        let stated: Vec<sip_message::SipHeader> = add_headers
             .iter()
             .map(|e| sip_message::SipHeader {
                 name: sip_message::SipStr::owned(e.name().as_wire_str()),
                 value: e.text(),
             })
             .collect();
+        let mut extra = relay::writable_lines("re-INVITE to a leg", stated, fx);
         // RFC 7315 §5.6: the arm's vector for the leg, unless the action states one.
         let vector = sip_message::header::ChargingVector::header_name();
         if !extra.iter().any(|h| vector.matches(&h.name)) {

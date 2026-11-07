@@ -118,10 +118,9 @@ impl std::fmt::Display for CallId {
     }
 }
 
-held_to_the_table!(value CallId);
-
 impl HeaderValue for CallId {
     type Lines = lines::Single;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Known(HeaderId::CallId);
 
@@ -171,10 +170,9 @@ impl CSeq {
     }
 }
 
-held_to_the_table!(value CSeq);
-
 impl HeaderValue for CSeq {
     type Lines = lines::Single;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Known(HeaderId::CSeq);
 
@@ -222,10 +220,9 @@ impl RAck {
     }
 }
 
-held_to_the_table!(value RAck);
-
 impl HeaderValue for RAck {
     type Lines = lines::Single;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Known(HeaderId::RAck);
 

@@ -63,7 +63,7 @@ pub use aliases::{
 };
 pub use authority::{host_of, message_id_domain, network_host};
 pub use cardinality::{
-    lines, Cardinality, ListHeader, Many, Sequence, SequenceHeader, SingleHeader, TokenSet,
+    lines, Cardinality, Held, ListHeader, Many, Sequence, SequenceHeader, SingleHeader, TokenSet,
 };
 pub use charging::ChargingVector;
 pub use class::HeaderClass;

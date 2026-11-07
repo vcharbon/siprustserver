@@ -17,6 +17,7 @@ use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use super::cardinality::held_to_the_table;
 use super::cardinality::TokenSet;
 use super::kind::TokenKind;
 use super::single_valued::Listed;
@@ -117,6 +118,7 @@ impl<K: TokenKind> TokenListHeader<K> {
 
 impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
     type Lines = K::Lines;
+    held_to_the_table!();
 
     const HEADER: Listed = K::HEADER;
 

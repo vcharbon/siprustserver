@@ -104,10 +104,9 @@ fn read_essence(value: &SipStr) -> Result<(SipStr, usize, usize), String> {
     Ok((essence, type_end, end))
 }
 
-held_to_the_table!(value MediaType);
-
 impl HeaderValue for MediaType {
     type Lines = lines::Single;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Known(HeaderId::ContentType);
 

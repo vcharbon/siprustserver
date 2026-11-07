@@ -158,6 +158,24 @@ fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> 
     header_updates.iter().any(|(name, value)| value.is_none() && header.matches(name))
 }
 
+/// The lines `header_updates` set on the leg the stack dials: a structural
+/// name is the generator's, and every line of a single-valued header set on
+/// more than one line is left out, as though never stated, its refusal pushed
+/// onto `skipped` (ADR-0053 §7).
+pub(crate) fn decided_sets(
+    header_updates: &[(String, Option<String>)],
+    skipped: &mut Vec<WriteRefusal>,
+) -> Vec<MsgHeader> {
+    let set: Vec<MsgHeader> = header_updates
+        .iter()
+        .filter(|(n, _)| HeaderName::class_of(n) != HeaderClass::Structural)
+        .filter_map(|(n, v)| {
+            v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
+        })
+        .collect();
+    write_check::one_line_each(set, skipped)
+}
+
 /// The INVITE that dialled `leg`, as it left the stack (after every edit a
 /// route applied), re-parsed from the leg's dialling INVITE record. `None` on
 /// the originator's leg, which the stack did not dial.
@@ -268,14 +286,7 @@ pub fn build_b_leg(
     // decision could refill.
     // A set the wire cannot carry whole, or a single-valued header set on more
     // than one line (ADR-0053 §7), is skipped, as though never stated.
-    let set: Vec<MsgHeader> = header_updates
-        .iter()
-        .filter(|(n, _)| HeaderName::class_of(n) != HeaderClass::Structural)
-        .filter_map(|(n, v)| {
-            v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
-        })
-        .collect();
-    let mut extra_headers: Vec<MsgHeader> = write_check::one_line_each(set, skipped)
+    let mut extra_headers: Vec<MsgHeader> = decided_sets(header_updates, skipped)
         .into_iter()
         .filter(|h| writable_on_new_request(h, first_ingress, skipped))
         .collect();

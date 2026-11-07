@@ -40,10 +40,9 @@ impl UserToUser {
     }
 }
 
-held_to_the_table!(value UserToUser);
-
 impl HeaderValue for UserToUser {
     type Lines = lines::Comma;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Known(HeaderId::UserToUser);
 

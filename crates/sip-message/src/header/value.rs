@@ -10,7 +10,7 @@ use crate::error::SipParseError;
 use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 
-use super::cardinality::Cardinality;
+use super::cardinality::{Cardinality, Held};
 use super::name::HeaderName;
 use super::single_valued::Listed;
 use super::wire::Wire;
@@ -45,8 +45,14 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
     /// against (`header::SINGLE_VALUED`).
     const HEADER: Listed;
 
+    /// That `Lines` agrees with the table's statement of `HEADER`, which only
+    /// `held_to_the_table!()` in the impl states; reading the header's name
+    /// evaluates it, so a disagreeing impl does not build where it is used.
+    const HELD: Held;
+
     /// The header this value belongs to.
     fn header_name() -> HeaderName {
+        let _held: Held = Self::HELD;
         Self::HEADER.name()
     }
 

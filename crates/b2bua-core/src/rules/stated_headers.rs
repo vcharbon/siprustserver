@@ -170,7 +170,7 @@ fn stamped_request(
     let bound = req.to().tag().is_none().then_some(first_ingress);
     restated(&sets, |_| false, |name| carried(req.raw(name)), || req.thaw(), bound, skipped)?
         .freeze()
-        .inspect_err(|e| unstamped(call, leg_id, e))
+        .inspect_err(|e| unstamped(call, leg_id, e, skipped))
         .ok()
 }
 
@@ -200,19 +200,29 @@ fn stamped_response(
     let withheld = |name: &str| own_reason && HeaderName::Reason.matches(name);
     restated(&sets, withheld, |name| carried(resp.raw(name)), || resp.thaw(), None, skipped)?
         .freeze()
-        .inspect_err(|e| unstamped(call, leg_id, e))
+        .inspect_err(|e| unstamped(call, leg_id, e, skipped))
         .ok()
 }
 
 /// A restated message that does not freeze leaves as it was, unstated: every
-/// line `restated` writes was checked, so the refusal is a defect, logged.
-fn unstamped(call: &Call, leg_id: &str, e: &sip_message::draft::IncompleteDraft) {
+/// line `restated` writes was checked, so the refusal is a defect, logged and
+/// pushed onto `skipped`, where the turn counts it.
+fn unstamped(
+    call: &Call,
+    leg_id: &str,
+    e: &sip_message::draft::IncompleteDraft,
+    skipped: &mut Vec<WriteRefusal>,
+) {
     tracing::error!(
         call_ref = %call.call_ref,
         %leg_id,
         error = %e,
         "DEFECT: a restated message does not freeze; it leaves without the statements"
     );
+    skipped.push(WriteRefusal {
+        position: write_check::Position::HeaderLines,
+        reason: format!("the restated message does not freeze: {e}"),
+    });
 }
 
 /// `lines` once `update` is applied: a set's lines, none for a removal, an

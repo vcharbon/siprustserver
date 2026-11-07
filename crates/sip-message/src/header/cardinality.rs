@@ -147,24 +147,33 @@ pub(crate) const fn agrees<L: Cardinality>(header: Listed) -> bool {
     matches!(L::FOLDING, Folding::Single) == is_listed(header)
 }
 
-/// A value type's or a kind's cardinality held to the table at compile time:
-/// one that disagrees does not build, the assertion naming it.
+/// That a value type's cardinality agrees with the table: a value of it is
+/// made only by `Held::of`, which `held_to_the_table!` calls in the type's
+/// impl, so no impl can leave the check out.
+#[derive(Debug, Clone, Copy)]
+pub struct Held(());
+
+impl Held {
+    /// `L` held to the table's statement of `header`: an impl whose
+    /// cardinality disagrees does not build where the type is read or
+    /// written.
+    #[expect(clippy::disallowed_macros, reason = "evaluated at compile time, never at run time")]
+    pub(crate) const fn of<L: Cardinality>(header: Listed) -> Held {
+        assert!(agrees::<L>(header), "a header's cardinality disagrees with header::SINGLE_VALUED");
+        Held(())
+    }
+}
+
+/// A value type's or a kind's cardinality held to the table at compile time.
+/// Inside a value type's impl, `held_to_the_table!()` states its
+/// [`HeaderValue::HELD`]; a kind is checked where it is declared, the
+/// assertion naming it.
 macro_rules! held_to_the_table {
-    (value $ty:ty) => {
-        #[expect(
-            clippy::disallowed_macros,
-            reason = "evaluated at compile time, never at run time"
-        )]
-        const _: () = assert!(
-            $crate::header::cardinality::agrees::<<$ty as $crate::header::HeaderValue>::Lines>(
-                <$ty as $crate::header::HeaderValue>::HEADER
-            ),
-            concat!(
-                "the cardinality of ",
-                stringify!($ty),
-                " disagrees with header::SINGLE_VALUED"
-            )
-        );
+    () => {
+        const HELD: $crate::header::cardinality::Held =
+            $crate::header::cardinality::Held::of::<<Self as $crate::header::HeaderValue>::Lines>(
+                <Self as $crate::header::HeaderValue>::HEADER,
+            );
     };
     (kind $ty:ty) => {
         #[expect(

@@ -7,6 +7,7 @@ use std::marker::PhantomData;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use super::cardinality::held_to_the_table;
 use super::kind::NumericKind;
 use super::params::{read_params, ParamReading};
 use super::scan::parse_u32;
@@ -64,6 +65,7 @@ impl NumericHeader<super::kind::MaxForwards> {
 
 impl<K: NumericKind> HeaderValue for NumericHeader<K> {
     type Lines = K::Lines;
+    held_to_the_table!();
 
     const HEADER: Listed = K::HEADER;
 

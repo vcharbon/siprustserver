@@ -53,10 +53,9 @@ fn gen_value(out: &mut Wire, value: &str) {
     }
 }
 
-held_to_the_table!(value ChargingVector);
-
 impl HeaderValue for ChargingVector {
     type Lines = lines::Single;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Extension("P-Charging-Vector");
 

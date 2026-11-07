@@ -35,10 +35,9 @@ impl Geolocation {
     }
 }
 
-held_to_the_table!(value Geolocation);
-
 impl HeaderValue for Geolocation {
     type Lines = lines::Comma;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Known(HeaderId::Geolocation);
 
@@ -90,10 +89,9 @@ impl GeolocationError {
     }
 }
 
-held_to_the_table!(value GeolocationError);
-
 impl HeaderValue for GeolocationError {
     type Lines = lines::Single;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Known(HeaderId::GeolocationError);
 
@@ -136,10 +134,9 @@ impl GeolocationRouting {
     }
 }
 
-held_to_the_table!(value GeolocationRouting);
-
 impl HeaderValue for GeolocationRouting {
     type Lines = lines::Single;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Known(HeaderId::GeolocationRouting);
 

@@ -9,7 +9,7 @@ use call::helpers::Scope;
 use call::{Call, TimerKey, TimerType};
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateResponseOpts, RelayDirection, RelaySituation};
-use sip_message::header::{HeaderClass, HeaderName};
+use sip_message::header::HeaderName;
 use sip_message::{Method, SipHeader, SipStr};
 
 use crate::config::{B2buaConfig, RetryAfterRange};
@@ -241,7 +241,7 @@ impl ActionExecutor<'_> {
                         detail = %err.detail(),
                         "redirect refused"
                     );
-                    (500, err.to_string(), header_update_lines(header_updates), true)
+                    (500, err.to_string(), relay::set_lines(header_updates), true)
                 }
             };
         // A 3xx is a new instruction, not a relayed refusal: RFC 3261 §20.33
@@ -452,29 +452,19 @@ impl ActionExecutor<'_> {
         // §16.6: the delivered final's lines ride as received, except the names
         // the service's `header_updates` state — those are the service's, set
         // or removed, and a relayed line of the same name never competes.
-        let mut extra_headers: Vec<SipHeader> = relayed
-            .headers()
-            .iter()
-            .filter(|h| {
-                !header_updates.iter().any(|(n, _)| HeaderName::from(n.as_str()).matches(&h.name))
-            })
-            .cloned()
-            .collect();
+        let stated = relay::Statements::of("final to the caller", header_updates, fx);
+        let mut extra_headers: Vec<SipHeader> =
+            relayed.headers().iter().filter(|h| !stated.states(&h.name)).cloned().collect();
         // The advert (RFC 3261 §13.2.1): a DECLARED half stands, an undeclared
         // one states what the delivered final advertised, and none where
         // neither does — the ordinary relay's rule. A `header_updates` entry
         // naming a half owns it: a set value is kept verbatim, a removal keeps
-        // it absent (`header_update_lines` already dropped it).
+        // it absent (`relay::set_lines` already dropped it).
         let advert = capabilities::relaying(call, Face::Originator, &extra_headers);
-        let undecided: Vec<SipHeader> = descriptors
-            .iter()
-            .filter(|d| {
-                !header_updates.iter().any(|(n, _)| HeaderName::from(n.as_str()).matches(&d.name))
-            })
-            .cloned()
-            .collect();
+        let undecided: Vec<SipHeader> =
+            descriptors.iter().filter(|d| !stated.states(&d.name)).cloned().collect();
         relay::describe_body(&mut extra_headers, body, &undecided);
-        extra_headers.extend(header_update_lines(header_updates));
+        extra_headers.extend(stated.lines);
         let service_owned: Vec<Entry> =
             [HeaderName::Allow, HeaderName::Supported, HeaderName::Accept]
                 .into_iter()
@@ -536,29 +526,6 @@ impl ActionExecutor<'_> {
     }
 }
 
-/// Build the extra a-leg response headers for a decision-authored Reject/Redirect
-/// ([`b2bua_sdk::model::RuleAction::RespondToALeg`]): non-structural
-/// `header_updates` *sets* plus one `Contact: <uri>;q=…` per redirect target.
-/// Removals and structural keys drop — the response generator owns the
-/// stack-owned set (ADR-0017 X2), including the Contact a redirect authors from
-/// its typed target list.
-/// The non-structural `header_updates` *sets*. Removals and structural keys
-/// drop — the response generator owns the stack-owned set (ADR-0017 X2).
-fn header_update_lines(header_updates: &[(String, Option<String>)]) -> Vec<SipHeader> {
-    header_updates
-        .iter()
-        .filter_map(|(name, val)| {
-            let named = HeaderName::from(name.as_str());
-            match (val, named.class()) {
-                (Some(v), HeaderClass::EndToEnd) => {
-                    Some(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) })
-                }
-                _ => None,
-            }
-        })
-        .collect()
-}
-
 /// What the decision authored for the caller's final, as
 /// [`b2bua_sdk::model::RuleAction::RespondToALeg`] states it: the status line
 /// plus the two lists that own their own names.
@@ -604,7 +571,7 @@ fn build_a_leg_response_headers(
     header_updates: &[(String, Option<String>)],
     contacts: &[(String, Option<f32>)],
 ) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
-    let mut out = header_update_lines(header_updates);
+    let mut out = relay::set_lines(header_updates);
     for (uri, q) in contacts {
         out.push(relay::redirect_contact(uri, *q)?);
     }

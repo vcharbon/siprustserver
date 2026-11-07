@@ -11,6 +11,7 @@ use std::marker::PhantomData;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use super::cardinality::held_to_the_table;
 use super::kind::{NameAddrKind, NoParams, RichParams, TaggedKind};
 use super::name_addr::{AddrGrammar, NameAddr};
 use super::params::{ParamValue, Params};
@@ -137,6 +138,7 @@ impl<K: NameAddrKind> NameAddrHeader<K> {
 
 impl<K: NameAddrKind> HeaderValue for NameAddrHeader<K> {
     type Lines = K::Lines;
+    held_to_the_table!();
 
     const HEADER: Listed = K::HEADER;
 

@@ -105,22 +105,29 @@ impl<'a> Relaying<'a> {
     /// Passthrough headers minus any the transform suppresses (e.g.
     /// Require/RSeq on a bare-180 downgrade), plus any the transform stamps
     /// with replace semantics (Allow/Supported on the synthetic 200 / resync
-    /// re-INVITE, `promote18xPemTo200`).
-    pub(super) fn passthrough(&self, hs: Vec<SipHeader>) -> Vec<SipHeader> {
-        let add_headers = &self.transform.add_headers;
+    /// re-INVITE, `promote18xPemTo200`). A stamped line the wire cannot carry,
+    /// or a single-valued header stamped twice, is left out as though never
+    /// stated, the skip reported on `fx`.
+    pub(super) fn passthrough(
+        &self,
+        fx: &mut HandlerEffects,
+        hs: Vec<SipHeader>,
+    ) -> Vec<SipHeader> {
+        let stamped: Vec<SipHeader> = self
+            .transform
+            .add_headers
+            .iter()
+            .map(|e| SipHeader { name: SipStr::owned(e.name().as_wire_str()), value: e.text() })
+            .collect();
+        let stamped = relay::writable_lines("a relayed response's stamped lines", stamped, fx);
         let mut out: Vec<SipHeader> = hs
             .into_iter()
             .filter(|h| {
                 !self.transform.remove_headers.iter().any(|r| r.matches(&h.name))
-                    && !add_headers.iter().any(|e| e.name().matches(&h.name))
+                    && !stamped.iter().any(|s| HeaderName::from(s.name.as_str()).matches(&h.name))
             })
             .collect();
-        for entry in add_headers {
-            out.push(SipHeader {
-                name: SipStr::owned(entry.name().as_wire_str()),
-                value: entry.text(),
-            });
-        }
+        out.extend(stamped);
         out
     }
 }
@@ -198,19 +205,22 @@ impl ActionExecutor<'_> {
             call::helpers::note_shown(call, source_leg_id, to_tag);
             let Some(a_invite) = self.caller_invite(call) else { return };
             let contact = relay::leg_contact(call, &call.a_leg.leg_id);
-            let mut passthrough = r.passthrough(relay::relay_response_passthrough_headers(
-                resp,
-                self.config
-                    .relay_scope(
-                        RelayScope::response_carrying(r.source_body),
-                        RelaySituation::response(
-                            status,
-                            resp.cseq().method(),
-                            RelayDirection::TowardCaller,
-                        ),
-                    )
-                    .stamped(invite_timestamp(&call.a_leg_invite)),
-            ));
+            let mut passthrough = r.passthrough(
+                fx,
+                relay::relay_response_passthrough_headers(
+                    resp,
+                    self.config
+                        .relay_scope(
+                            RelayScope::response_carrying(r.source_body),
+                            RelaySituation::response(
+                                status,
+                                resp.cseq().method(),
+                                RelayDirection::TowardCaller,
+                            ),
+                        )
+                        .stamped(invite_timestamp(&call.a_leg_invite)),
+                ),
+            );
             relay::withhold_from_relayed_provisional(call, status, &mut passthrough);
             // A 2xx INVITE answer the B2BUA mints toward the caller advertises the
             // capability set of the originator face (RFC 3261 §13.2.1/§20.37):
@@ -282,19 +292,22 @@ impl ActionExecutor<'_> {
         // Reliable-provisional negotiation (Require/Supported) passes through
         // transparently so end-to-end PRACK keeps working (RFC 3262); the RSeq
         // it rides on is this transaction's own (`own_relayed_rseq`).
-        let mut passthrough = r.passthrough(relay::relay_response_passthrough_headers(
-            resp,
-            self.config
-                .relay_scope(
-                    RelayScope::response_carrying(r.source_body),
-                    RelaySituation::response(
-                        status,
-                        resp.cseq().method(),
-                        RelayDirection::TowardCaller,
-                    ),
-                )
-                .stamped(invite_timestamp(&call.a_leg_invite)),
-        ));
+        let mut passthrough = r.passthrough(
+            fx,
+            relay::relay_response_passthrough_headers(
+                resp,
+                self.config
+                    .relay_scope(
+                        RelayScope::response_carrying(r.source_body),
+                        RelaySituation::response(
+                            status,
+                            resp.cseq().method(),
+                            RelayDirection::TowardCaller,
+                        ),
+                    )
+                    .stamped(invite_timestamp(&call.a_leg_invite)),
+            ),
+        );
         // A compliant callee's provisional carries a To tag (RFC 3261 §8.2.6.2)
         // and takes the per-fork seam above, where the call's provisional
         // withhold applies; this seam relays finals and a tagless 1xx.

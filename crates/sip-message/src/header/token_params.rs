@@ -8,6 +8,7 @@ use std::marker::PhantomData;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use super::cardinality::held_to_the_table;
 use super::identity::is_call_id;
 use super::kind::TokenParamsKind;
 use super::params::{read_params, ParamReading, ParamValue, Params};
@@ -188,6 +189,7 @@ fn read_token_params(
 
 impl<K: TokenParamsKind> HeaderValue for TokenParamsHeader<K> {
     type Lines = K::Lines;
+    held_to_the_table!();
 
     const HEADER: Listed = K::HEADER;
 

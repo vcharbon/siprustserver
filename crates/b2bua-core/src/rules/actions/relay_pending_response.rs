@@ -58,19 +58,22 @@ impl ActionExecutor<'_> {
         let contact = relay::leg_contact(call, target_leg).filter(|_| {
             generators::response_states_own_contact(&Method::from_wire(&r.cseq_method), status)
         });
-        let mut transparent_headers = r.passthrough(relay::relay_response_passthrough_headers(
-            r.resp,
-            self.config
-                .relay_scope(
-                    RelayScope::response_carrying(r.source_body),
-                    RelaySituation::response(
-                        status,
-                        r.resp.cseq().method(),
-                        relay::toward_leg(target_leg),
-                    ),
-                )
-                .stamped(pending.source_timestamp.as_deref()),
-        ));
+        let mut transparent_headers = r.passthrough(
+            fx,
+            relay::relay_response_passthrough_headers(
+                r.resp,
+                self.config
+                    .relay_scope(
+                        RelayScope::response_carrying(r.source_body),
+                        RelaySituation::response(
+                            status,
+                            r.resp.cseq().method(),
+                            relay::toward_leg(target_leg),
+                        ),
+                    )
+                    .stamped(pending.source_timestamp.as_deref()),
+            ),
+        );
         // A 2xx answer to a B2BUA-relayed re-INVITE advertises this
         // face's capability set (RFC 3261 §13.2.1/§20.37) — the source
         // response's own, carried through, unless the call declares one;

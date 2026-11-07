@@ -333,10 +333,9 @@ impl Via {
     }
 }
 
-held_to_the_table!(value Via);
-
 impl HeaderValue for Via {
     type Lines = lines::Comma;
+    held_to_the_table!();
 
     const HEADER: Listed = Listed::Known(HeaderId::Via);
 

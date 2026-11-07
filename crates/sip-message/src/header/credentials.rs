@@ -16,6 +16,7 @@ use std::marker::PhantomData;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use super::cardinality::held_to_the_table;
 use super::kind::CredentialsKind;
 use super::params::{read_auth_params, ParamValue, Params};
 use super::scan::{skip_ws, sub, token_end};
@@ -84,6 +85,7 @@ impl<K: CredentialsKind> Credentials<K> {
 
 impl<K: CredentialsKind> HeaderValue for Credentials<K> {
     type Lines = K::Lines;
+    held_to_the_table!();
 
     const HEADER: Listed = K::HEADER;
 
