@@ -408,10 +408,10 @@ impl Inner {
     }
 }
 
-/// A socket bound to `local` can send to `dst`: the same family, or an
-/// unspecified IPv6 bind, which is dual-stack and takes both.
+/// A socket bound to `local` can send to `dst`: the same family, since an IPv6
+/// socket is IPv6-only ([`sip_net::RealSignalingNetwork`]).
 fn reaches(local: SocketAddr, dst: SocketAddr) -> bool {
-    local.is_ipv4() == dst.is_ipv4() || (local.is_ipv6() && local.ip().is_unspecified())
+    local.is_ipv4() == dst.is_ipv4()
 }
 
 /// The named-target send path (tiers 2–3 of the module doc). Cheap to clone.

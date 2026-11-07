@@ -40,13 +40,17 @@ use crate::types::{
 /// one port shard the recv path across N tasks; the kernel flow-hashes on the
 /// 4-tuple, so all datagrams from one src:port land on ONE socket and per-flow
 /// ordering (INVITE→CANCEL, retransmits) is preserved. `SO_SNDBUF` and
-/// `SO_RCVBUF` are requested from `opts` (`None` keeps the kernel default).
-/// Public so a test reads the options back off the very socket the bind path
+/// `SO_RCVBUF` are requested from `opts` (`None` keeps the kernel default). An
+/// IPv6 socket is `IPV6_V6ONLY`: no IPv4-mapped source reaches the stack, and
+/// it serves IPv6 alone. Public so a test reads the options back off the very socket the bind path
 /// produces.
 pub fn build_bound_socket(opts: &BindUdpOpts) -> std::io::Result<socket2::Socket> {
     let addr = opts.addr;
     let domain = socket2::Domain::for_address(addr);
     let raw = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    if addr.is_ipv6() {
+        raw.set_only_v6(true)?;
+    }
     if opts.reuse_port {
         raw.set_reuse_port(true)?;
     }

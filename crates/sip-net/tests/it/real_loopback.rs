@@ -224,6 +224,18 @@ fn every_bound_socket_pins_fragmentation_on_both_families() {
     }
 }
 
+/// An IPv6 socket serves IPv6 alone, the wildcard bind included: no IPv4-mapped
+/// source reaches the stack.
+#[test]
+fn an_ipv6_socket_is_ipv6_only() {
+    use sip_net::real::build_bound_socket;
+
+    for addr in ["[::]:0", "[::1]:0"] {
+        let socket = build_bound_socket(&loopback_at(addr)).expect("bound socket");
+        assert!(socket.only_v6().expect("readable IPV6_V6ONLY"), "{addr}");
+    }
+}
+
 /// A requested `SO_SNDBUF` reaches the socket. The kernel reports twice the
 /// request back (it doubles for its own overhead and clamps only at
 /// `net.core.wmem_max`, which no host sets below this request), a value the
