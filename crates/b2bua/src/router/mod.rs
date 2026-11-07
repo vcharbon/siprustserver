@@ -40,6 +40,7 @@ mod dead_verdict;
 mod departure;
 mod dialog_gate;
 mod dropped_on_delete;
+mod ended_body;
 #[cfg(test)]
 mod evidence_gate_tests;
 mod flush_turn;
@@ -51,6 +52,7 @@ mod initial_turn;
 pub(crate) mod late_prack;
 mod materialise;
 mod notes;
+mod off_wire;
 mod outbox;
 mod owed;
 mod owed_final;

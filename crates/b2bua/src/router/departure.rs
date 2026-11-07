@@ -49,11 +49,11 @@ use std::sync::Arc;
 
 use call::{Call, CallModelState};
 
+use super::ended_body;
 use super::materialise::{
     has_invite_to_serve, has_work_to_serve, materialise, names_request_in_flight, Materialised,
     Origin,
 };
-use super::reclaim::discharge_materialized_terminal;
 use super::restore_hygiene::reanchor;
 use super::undecided::{is_undecided, settle_undecided};
 use super::RouterCtx;
@@ -235,16 +235,16 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
     if peer_returned(ctx, call_ref, cause) {
         return Swept::PeerReturned;
     }
-    let Ok((copy, skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
-    let mut call = copy.call;
-    if finished(&call) {
+    let Ok((mut copy, skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
+    if finished(&copy.call) {
         return match cause {
             Cause::Departed => discharge_finished(ctx, call_ref).await,
             Cause::ReadDead { .. } => {
-                reanchor(&mut call, skew);
-                super::owed_final::deliver(ctx, call_ref, &call).await;
-                let read_dead = super::dead_verdict::primary_read_dead(ctx, call_ref);
-                if read_dead && super::owed_limiter_key::release(ctx, &call) {
+                reanchor(&mut copy.call, skew);
+                let still = super::dead_verdict::primary_read_dead(ctx, call_ref);
+                let owed = ended_body::Cause::ReadDead { still };
+                let paid = ended_body::pay(ctx, call_ref, owed, copy, ctx.clock.now_ms()).await;
+                if paid.released {
                     Swept::Released
                 } else {
                     Swept::Left
@@ -252,6 +252,7 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
             }
         };
     }
+    let call = copy.call;
     let ending = call.state == CallModelState::Terminating;
     let at_once = has_invite_to_serve(&call) || (ending && ending_work(&call));
     let awaited = call.state == CallModelState::Active && !call.awaited.is_empty();
@@ -339,9 +340,7 @@ async fn discharge_finished(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
         }
     };
     let now_ms = ctx.clock.now_ms();
-    let force_terminal = ended.call.state == CallModelState::Terminating;
-    super::owed_final::deliver(ctx, call_ref, &ended.call).await;
-    if discharge_materialized_terminal(ctx, call_ref, ended, now_ms, force_terminal).await {
+    if ended_body::pay(ctx, call_ref, ended_body::Cause::Departed, ended, now_ms).await.discharged {
         return Swept::Discharged;
     }
     Swept::Left

@@ -21,10 +21,11 @@
 
 use std::sync::Arc;
 
-use call::{Call, CallModelState, CdrEvent, CdrEventType, TerminationCause};
+use call::{Call, CallModelState};
 
 use super::cancel_in_consult::consult_writing_its_cancel;
 use super::commit::commit_turn;
+use super::off_wire;
 use super::RouterCtx;
 use crate::effects::HandlerResult;
 use crate::initial_consult::{handle_initial_invite, Consulted};
@@ -32,6 +33,7 @@ use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::ActionExecutor;
 use crate::setup_budget::SetupBudget;
+use crate::undecided::Settled;
 use b2bua_sdk::event::CallEvent;
 
 /// The topic of the re-ask notice, an internal event the router raises itself
@@ -75,61 +77,25 @@ pub(super) async fn settle_undecided(
         return;
     }
     let now_ms = ctx.clock.now_ms();
-    let turn = crate::turn_scope::TurnScope::of(ctx.id_gen.turn());
-    let mut turn = turn.with_faults(ctx.wire_faults.snapshot());
+    let mut turn = off_wire::scope(ctx);
     let before = call.clone();
-    let advertisement = &ctx.config.minted_final_advertisement;
     let answer = seeded > 0 && !call.setup_cancelled;
-    let caller =
-        answer.then(|| crate::rules::relay::caller_invite(&call, &mut turn.notes)).flatten();
-    let (handled, unanswered) = if let Some(a_invite) = caller.as_ref() {
-        let refused = crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            503,
-            Some("Service Unavailable".into()),
-            None,
-            &[],
-            advertisement,
-            &mut turn.ids,
-            now_ms,
-            TerminationCause::Admission,
-        );
-        (refused, UnansweredCaller::Answer(advertisement))
-    } else {
-        let (cause, by_leg) = if call.setup_cancelled {
-            (TerminationCause::RemoteCancel, Some(call.a_leg.leg_id.clone()))
-        } else {
-            (TerminationCause::Admission, None)
+    let advertisement = &ctx.config.minted_final_advertisement;
+    let (result, caller) =
+        match crate::undecided::settle(call, answer, advertisement, &mut turn, now_ms) {
+            Settled::Refused(result) => (result, off_wire::Caller::Answer),
+            Settled::Ended(result) => (result, off_wire::Caller::Leave),
         };
-        let mut ended = call;
-        // The caller's cancel, as the CANCEL's own turn records it.
-        if ended.setup_cancelled {
-            let event = CdrEvent {
-                event_type: CdrEventType::Cancel,
-                timestamp: now_ms,
-                leg_id: ended.a_leg.leg_id.clone(),
-                status_code: None,
-                reason: None,
-                decision_ordinal: 0,
-            };
-            call::helpers::add_cdr_event(&mut ended, event);
-        }
-        call::helpers::record_termination(&mut ended, now_ms, cause, by_leg);
-        ended.state = CallModelState::Terminated;
-        (HandlerResult::new(ended), UnansweredCaller::Leave)
-    };
     tracing::info!(
         node = observe::node(),
         call_ref,
         call_id = %before.a_leg.call_id,
-        answered = caller.is_some(),
+        answered = matches!(caller, off_wire::Caller::Answer),
         "undecided call settled"
     );
-    let notes = &mut turn.notes;
-    let result = enforce(&ctx.obligations, &before, finalize(handled), now_ms, unanswered, notes);
-    super::notes::drain(ctx, call_ref, &mut turn);
-    commit_turn(ctx, call_ref, result, now_ms, &"the settle of an undecided call", None).await;
+    let ending = off_wire::Ending::Built { before: &before, result };
+    let label = "the settle of an undecided call";
+    off_wire::end_in(ctx, call_ref, turn, ending, caller, now_ms, label).await;
 }
 
 /// The re-ask notice of `call`.

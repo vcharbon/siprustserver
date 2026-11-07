@@ -81,7 +81,7 @@ use call::{Call, CallModelState};
 use sip_message::{Method, SipMessage};
 use sip_txn::Reoffer;
 
-use super::reclaim::{discharge_materialized_terminal, format_pb};
+use super::reclaim::format_pb;
 use super::restore_hygiene::{
     forget_keepalive_probes, reanchor, sanitize_restored_timers, Smoothing,
 };
@@ -196,10 +196,9 @@ pub(super) async fn materialise_after(
         Origin::Reclaim | Origin::Park
             if matches!(call.state, CallModelState::Terminated | CallModelState::Terminating) =>
         {
-            let force_terminal = call.state == CallModelState::Terminating;
-            super::owed_final::deliver(ctx, call_ref, &call).await;
-            let terminal = Enveloped::new(call, topology);
-            discharge_materialized_terminal(ctx, call_ref, terminal, now_ms, force_terminal).await;
+            let ended = Enveloped::new(call, topology);
+            let cause = super::ended_body::Cause::Reclaim;
+            super::ended_body::pay(ctx, call_ref, cause, ended, now_ms).await;
             return Materialised::Refused(Reason::Terminated);
         }
         _ => {}
@@ -285,7 +284,7 @@ async fn serve(
     let timers = call
         .timers
         .iter()
-        .filter(|t| !(resend && super::resend::awaited_deadline(call, t.timer_type())))
+        .filter(|t| !(resend && crate::off_turn::resend::awaited_deadline(call, t.timer_type())))
         .cloned()
         .collect();
     ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;

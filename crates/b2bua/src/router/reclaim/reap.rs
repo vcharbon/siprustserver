@@ -1,10 +1,11 @@
 //! The periodic replica-store reap (ADR-0020 X3, ADR-0055 §5): expired bodies
 //! evicted, the limiter holds of a deferred terminal no primary came back for
 //! released with its CDR counted lost, and a call no node ended whose primary
-//! departed ended here with its CDR.
+//! departed ended here with its CDR ([`ended_body`]).
 
 use std::sync::Arc;
 
+use super::super::ended_body::{self, Cause};
 use super::super::RouterCtx;
 
 /// Periodic replica-store maintenance. A deferred terminal whose primary never came back to reclaim
@@ -36,7 +37,7 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
         }
         let guard = ctx.state.lock(&call_ref).await;
         if !ctx.state.contains(&call_ref) {
-            super::discharge_materialized_terminal(ctx, &call_ref, ghost, now_ms, true).await;
+            ended_body::pay(ctx, &call_ref, Cause::Ghost, ghost, now_ms).await;
         }
         drop(guard);
     }
@@ -46,7 +47,8 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
         // there is no writer to serialize against — and taking the lock would leak
         // a `locks` map entry (only `release_call`/`discard_orphan` clear it). The
         // decoded snapshot is all the limiter release needs.
-        super::super::owed_limiter_key::release(ctx, &terminal.call);
+        let call_ref = terminal.call.call_ref.clone();
+        ended_body::pay(ctx, &call_ref, Cause::Evicted, terminal, now_ms).await;
         ctx.metrics.bump_repl_terminal_lost();
     }
 }

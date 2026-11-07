@@ -12,10 +12,9 @@ use b2bua_sdk::event::CallEvent;
 use call::Call;
 use sip_ids::TurnIds;
 
-use super::commit::commit_turn;
+use super::off_wire;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
-use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
 use crate::store::{Enveloped, MaterialiseOrigin};
 
 /// Whether the materialised `copy` rebuilds its caller's INVITE and every image
@@ -83,12 +82,7 @@ async fn discharge(
 ) {
     ctx.metrics.bump_unrecoverable_call();
     tracing::error!(%call_ref, error = %err, "the call's record does not serve a copy: discharged");
-    let before = call.clone();
-    let discharged = finalize(crate::reaper::discharge_result(call, now_ms));
-    let mut notes = crate::turn_notes::TurnNotes::default();
-    let leave = UnansweredCaller::Leave;
-    let result = enforce(&ctx.obligations, &before, discharged, now_ms, leave, &mut notes);
-    super::notes::drain_notes(ctx, call_ref, notes);
-    commit_turn(ctx, call_ref, result, now_ms, &"the discharge of an unrecoverable call", None)
-        .await;
+    let ending = off_wire::Ending::Forced { before: &call };
+    let label = "the discharge of an unrecoverable call";
+    off_wire::end(ctx, call_ref, ending, off_wire::Caller::Leave, now_ms, label).await;
 }

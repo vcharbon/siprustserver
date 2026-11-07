@@ -13,6 +13,8 @@ use crate::effects::{FireAndForgetEffect, HandlerResult};
 use crate::limiter::report::LimiterAdmitResult;
 use b2bua_sdk::event::CallEvent;
 
+pub mod resend;
+
 /// The topic of an adaptation HTTP request's result.
 const SERVICE_HTTP_RESULT: &str = "service-http-result";
 
