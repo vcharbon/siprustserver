@@ -457,13 +457,10 @@ fn main() {
 
     let capture = capture_name(&files);
 
-    if let Some(query) = load_query(&args) {
+    if let Some(query) = load_query(&args, &cfg.reading) {
         // The query owns correlation when it says so: which strategies ran is
         // part of what a recorded query means, not ambient CLI state.
-        let cfg = match query.correlate.clone() {
-            Some(correlate) => FlowConfig { reading: cfg.reading, ..correlate },
-            None => cfg,
-        };
+        let cfg = query.correlate.clone().unwrap_or(cfg);
         let flows = build_flows(&datagrams, &cfg);
         let sut = sut_of(&args, &flows);
         let hits = run_query(&flows, &stats, &query, &opts, sut.as_ref());
@@ -758,7 +755,7 @@ fn print_review(
 
 /// Load `--query` / `--query-json`, exiting with the parse error's own path
 /// and reason — a mistyped predicate must never widen the match set silently.
-fn load_query(args: &Args) -> Option<Query> {
+fn load_query(args: &Args, reading: &ToolReading) -> Option<Query> {
     let text = match (&args.query, &args.query_json) {
         (Some(path), _) => match std::fs::read_to_string(path) {
             Ok(t) => t,
@@ -777,7 +774,7 @@ fn load_query(args: &Args) -> Option<Query> {
             std::process::exit(2);
         }
     };
-    match Query::from_json(&value) {
+    match Query::from_json(&value, reading) {
         Ok(q) => Some(q),
         Err(e) => {
             eprintln!("query rejected at {e}");

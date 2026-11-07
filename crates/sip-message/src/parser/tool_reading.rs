@@ -36,6 +36,7 @@ impl ToolReading {
         Self::of(SipParserLimits::DEFAULT, DATAGRAM_BYTES)
     }
 
+    #[expect(clippy::disallowed_methods, reason = "the one place a tool reading is built")]
     fn of(limits: SipParserLimits, max_datagram: usize) -> Self {
         Self { parser: CustomParser::tool(limits.clone()), limits, max_datagram }
     }

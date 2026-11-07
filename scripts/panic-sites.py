@@ -431,26 +431,40 @@ def over_budget(found, counts, allow):
         budget = allow.entries.get(rel, 0)
         if n > budget:
             listed = "" if rel in allow.entries else " (unlisted)"
-            bad.append(f"{rel} has {n} panic-class sites, budget {budget}{listed}")
+            role = sum(1 for f in found if f.file == rel and f.role)
+            classes = ", ".join(f"{k} {name}" for k, name in ((n - role, "panic-class"),
+                                                              (role, "reading-role")) if k)
+            bad.append(f"{rel} has {n} sites ({classes}), budget {budget}{listed}")
             if rel not in allow.entries:
-                bad.extend(f"  {f.file}:{f.line} {f.code}" + (" (no reading role)" if f.role else "")
+                bad.extend(f"  {f.file}:{f.line} {f.code}" + (" (reading role)" if f.role else "")
                            for f in found if f.file == rel)
     return bad
 
 
-def over_budget_hint(found, counts, allow):
-    """The hint over-budget files take: the reading-role one too when a site
-    among them builds a parser with no reading role."""
+def over_budget_sites(found, counts, allow):
+    """The sites of the files over their budget."""
     over = {rel for rel, n in counts.items() if n > allow.entries.get(rel, 0)}
-    if any(f.role and f.file in over for f in found):
-        return f"{GROW_HINT}\npanic-sites: {ROLE_HINT}"
-    return GROW_HINT
+    return [f for f in found if f.file in over]
 
 
-def in_hunks(found, touched):
+def hint_for(sites):
+    """The hint `sites` take: the panic one for a panic-class site, the
+    reading-role one for a parser built with no reading role."""
+    hints = []
+    if any(not f.role for f in sites):
+        hints.append(GROW_HINT)
+    if any(f.role for f in sites):
+        hints.append(ROLE_HINT)
+    return "\npanic-sites: ".join(hints) or GROW_HINT
+
+
+def touched_sites(found, touched):
     """The sites whose span holds a line the branch touches."""
-    return [f"new site in a touched hunk:\n{f.rendered.rstrip()}" for f in found
-            if f.lines() & touched.get(f.file, set())]
+    return [f for f in found if f.lines() & touched.get(f.file, set())]
+
+
+def in_hunks(sites):
+    return [f"new site in a touched hunk:\n{f.rendered.rstrip()}" for f in sites]
 
 
 def stale(counts, allow, crates):
@@ -607,9 +621,12 @@ def cmd_check(root, allow, base, crates, every, members, json_file, record, unti
     touched, moved_sites = carried(found, counts, base_list, touched, moved, moved_from)
     shown = revealed_of(root, base, found, moved_sites, moved)
     rc = 0 if ok else 1
-    rc = report(over_budget(found, counts, allow), over_budget_hint(found, counts, allow)) or rc
-    rc = report(roles, f"an untiered member builds a parser through its role too; {ROLE_HINT}") or rc
-    rc = report(in_hunks(found, touched), GROW_HINT) or rc
+    rc = report(over_budget(found, counts, allow),
+                hint_for(over_budget_sites(found, counts, allow))) or rc
+    rc = report(roles, f"an untiered member, test support included, builds its parser through "
+                       f"a reading role too: {ROLE_HINT}") or rc
+    hunk_sites = touched_sites(found, touched)
+    rc = report(in_hunks(hunk_sites), hint_for(hunk_sites)) or rc
     rc = report(against_base(allow, base_list, renamed, moved_sites, shown), BASE_HINT) or rc
     rc = report(lists_against_base(root, base, False), LIST_HINT) or rc
     rc = report(lint_attrs(root, crates)) or rc

@@ -18,7 +18,7 @@ use std::borrow::Cow;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use sip_message::payload::{BodyLayout, Payload};
-use sip_message::{CustomParser, SipParser};
+use sip_message::SipParser;
 
 /// Which way a datagram crossed the leg's vantage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -185,9 +185,12 @@ impl TryFrom<RecordedLine> for RecordedMessage {
                 ));
             }
         }
-        // A line written with no layout is read as a message built rather
-        // than received: the line names no reading of its own.
-        let body = body.or_else(|| RecordedMessage::layout_of(&CustomParser::built(), &wire));
+        // A line written with no layout has it derived from its bytes as a
+        // stored image reads (ADR-0053 §6): the line names no reading of its
+        // own, and the recording's is not known here.
+        let body = body.or_else(|| {
+            sip_message::read_stored(&wire).ok().and_then(|parsed| BodyLayout::of(&parsed))
+        });
         Ok(RecordedMessage { seq, dir, at_us, step, wire, body, repeat_of, note })
     }
 }

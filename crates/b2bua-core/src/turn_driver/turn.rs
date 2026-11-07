@@ -121,6 +121,7 @@ impl Turn {
     }
 
     /// The messages the turn sends on `leg`, a datagram read back.
+    #[expect(clippy::disallowed_methods, reason = "test support: reads what the stack built")]
     fn outbound_to<'a>(&'a self, leg: &'a str) -> impl Iterator<Item = SipMessage> + 'a {
         self.result
             .effects

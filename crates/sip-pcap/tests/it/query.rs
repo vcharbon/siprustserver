@@ -50,7 +50,7 @@ fn resp(status: u16, call_id: &str, cseq: u32, method: &str, branch: &str, body:
 }
 
 fn query(v: serde_json::Value) -> Query {
-    Query::from_json(&v).expect("query parses")
+    Query::from_json(&v, &sip_message::ToolReading::plain_rfc()).expect("query parses")
 }
 
 /// A call whose UPDATE was accepted but whose re-INVITE was rejected. Both a
@@ -283,7 +283,7 @@ fn malformed_queries_are_rejected_with_a_path() {
         (json!({"select": {"latency_us": {}}}), "at least one bound"),
     ];
     for (doc, want) in cases {
-        let err = Query::from_json(&doc).unwrap_err();
+        let err = Query::from_json(&doc, &sip_message::ToolReading::plain_rfc()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains(want), "expected {want:?} in {msg:?}");
         assert!(msg.starts_with('$'), "error must name its path: {msg}");

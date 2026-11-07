@@ -207,9 +207,12 @@ constructors on one type rather than a newtype each, because consumers depend
 on the `SipParser` seam and a test decorates the parser behind it; the role is
 decided where the parser is built. `CustomParser::new` and
 `CustomParser::with_limits` stay for tests. `clippy.toml` lists both, which
-the panic-sites pass refuses in every member's library and binary code, and
-lists `ingress`, which it refuses in a tiered crate outside a composition root
-marked `#[expect(clippy::disallowed_methods, reason = …)]` (ADR-0051 §2).
+the panic-sites pass refuses in every member's library and binary code. It
+lists `ingress`, `built`, `tool` and `ToolReading`'s constructors too, which it
+refuses in a tiered crate unless the site states why under
+`#[expect(clippy::disallowed_methods, reason = …)]`: the composition root for
+`ingress`, a read of what the stack built for `built`; a tool reading belongs
+to no production crate (ADR-0051 §2).
 
 A tool's reading may admit more than any deployment. `ToolReading` holds the
 exemptions and the bounds on a line, a Request-URI, a header block and a

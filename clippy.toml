@@ -133,11 +133,16 @@ disallowed-methods = [
   { path = "std::collections::HashSet::difference", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
   { path = "std::collections::HashSet::symmetric_difference", reason = "pure tier: iterates in hash-seed order; use `BTreeSet` or `IndexSet` where order reaches output" },
   # Reading roles (ADR-0053 §6): a parser names the reading it is for. The
-  # two test-support constructors count in every member, tiered or not; the
-  # ingress parser is built at a composition root alone, under `#[expect]`.
+  # two test-support constructors count in every member, tiered or not; in a
+  # tiered crate the ingress parser is built at a composition root alone, and
+  # every other reading under `#[expect]` where one belongs.
   { path = "sip_message::parser::custom::CustomParser::new", reason = "reading role, every crate: test support; build the parser through `built` or `tool`, or read a stored image with `read_stored`" },
   { path = "sip_message::parser::custom::CustomParser::with_limits", reason = "reading role, every crate: test support; build the parser through `built` or `tool`, or read a stored image with `read_stored`" },
   { path = "sip_message::parser::custom::CustomParser::ingress", reason = "reading role: a deployment's ingress parser is built at its composition root alone and injected" },
+  { path = "sip_message::parser::custom::CustomParser::built", reason = "reading role: a production stage reads the wire through the injected ingress parser; a site reading what the stack built states it under `#[expect]`" },
+  { path = "sip_message::parser::custom::CustomParser::tool", reason = "reading role: a tool's reading belongs to a tool, not to a production crate" },
+  { path = "sip_message::ToolReading::stated", reason = "reading role: a tool's reading belongs to a tool, not to a production crate" },
+  { path = "sip_message::ToolReading::plain_rfc", reason = "reading role: a tool's reading belongs to a tool, not to a production crate" },
 ]
 
 disallowed-types = [
