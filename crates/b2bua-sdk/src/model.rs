@@ -742,7 +742,7 @@ pub enum RuleAction {
         body: Vec<u8>,
     },
     /// Kick the async /call/refer authorization: push a `ReferAsyncHttp`
-    /// fire-and-forget effect carrying the request JSON. The router interpreter
+    /// fire-and-forget effect carrying the request JSON. The router's callout fold
     /// calls `decision.call_refer` then re-enters via a `refer-http-result`
     /// internal event.
     ReferAsyncHttp {
@@ -760,7 +760,7 @@ pub enum RuleAction {
     /// character string). The `correlation_id` is service-minted and echoed in
     /// the result `payload`, so a consuming rule's `Match::internal_event()
     /// .topic("service-http-result").filter(..)` disambiguates concurrent
-    /// in-flight requests. If no port is injected the interpreter still folds an
+    /// in-flight requests. If no port is injected the callout fold still folds an
     /// `outcome:"error"` result back. A result lost with the node that sent the
     /// request is folded back at the request's answer deadline wherever the
     /// call is served then, as `outcome:"error"` with `"error":"no_answer"`; a
@@ -791,7 +791,7 @@ pub enum RuleAction {
     },
     // ── b-leg failover (/call/failure) ───────────────────────────────────────
     /// Kick the async `/call/failure` decision: push a `FailureAsyncHttp`
-    /// fire-and-forget effect carrying the request JSON. The router interpreter
+    /// fire-and-forget effect carrying the request JSON. The router's callout fold
     /// calls `decision.call_failure` then re-enters via a `call-failure-result`
     /// internal event. The emitting rule restates the failure image with it
     /// ([`crate::failure_image::no_failure_image`] when no peer final failed).
@@ -802,7 +802,7 @@ pub enum RuleAction {
     /// Kick the async `call_release` consult for a **subscribed** internal
     /// release event (max-call-duration first): push a `ReleaseAsyncHttp`
     /// fire-and-forget effect carrying the event-scoped request JSON
-    /// (`callback_context`, `event`). The router interpreter attaches the
+    /// (`callback_context`, `event`). The router's callout fold attaches the
     /// call-scoped `CallSnapshot`, calls `decision.call_release`
     /// (deadline-bounded — a hung consult must never wedge the established
     /// call), then re-enters via a `call-release-result` internal event
