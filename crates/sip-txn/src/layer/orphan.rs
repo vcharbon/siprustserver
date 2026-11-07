@@ -65,8 +65,9 @@ impl Owner {
 
     /// The ACK of `resp` built from `invite`, the INVITE of the client txn at
     /// `branch`, on a fresh branch, answering the offer `resp` carries when one
-    /// is owed ([`owed_answer`]), with its next hop ([`next_hop`]); `None`,
-    /// logged, where its lines make no ACK or it names no address.
+    /// is owed ([`owed_answer`]), with where it goes
+    /// ([`first_hop_of`](Self::first_hop_of)); `None`, logged, where its lines
+    /// make no ACK or it names no address.
     fn orphan_ack(
         &self,
         branch: &str,
@@ -78,14 +79,15 @@ impl Owner {
         let ack = generate_ack_for_2xx_from_invite(invite, resp, &self.id_gen.new_branch(), answer)
             .inspect_err(|e| unbuilt(branch, "ACK", e))
             .ok()?;
-        let dest = next_hop(&ack).or_else(|| unaddressed(branch, "ACK"))?;
+        let dest = self.first_hop_of(&ack).or_else(|| unaddressed(branch, "ACK"))?;
         Some((ack.image().clone(), dest))
     }
 
     /// End with a BYE (§15.1.1) the dialog `resp`, a 2xx to `invite`, the
     /// orphaned initial INVITE at `branch`, created: numbered above every
-    /// request this layer sent on that dialog, sent to its next hop
-    /// ([`next_hop`]), on an orphaned non-INVITE transaction of its own. A 2xx
+    /// request this layer sent on that dialog, sent where
+    /// [`first_hop_of`](Self::first_hop_of) says, on an orphaned non-INVITE
+    /// transaction of its own. A 2xx
     /// to a re-INVITE belongs to a dialog its call ended.
     async fn bye_unheld_dialog(
         &mut self,
@@ -103,7 +105,7 @@ impl Owner {
             let bye = generate_bye_for_2xx_from_invite(orig, resp, cseq, &self.id_gen.new_branch())
                 .inspect_err(|e| unbuilt(branch, "BYE", e))
                 .ok()?;
-            let dest = next_hop(&bye).or_else(|| unaddressed(branch, "BYE"))?;
+            let dest = self.first_hop_of(&bye).or_else(|| unaddressed(branch, "BYE"))?;
             Some((bye, dest))
         });
         let Some((bye, dest)) = built else { return };
@@ -114,6 +116,13 @@ impl Owner {
             self.detach_from_call(TxnRef::Client(&bye_branch));
             self.metrics.orphaned_transactions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// Where `req`, a request the layer built itself, leaves for: the configured
+    /// first hop (a front proxy, whatever the peer's Contact and Record-Route
+    /// say), else its own next hop ([`next_hop`]).
+    fn first_hop_of(&self, req: &SipRequest) -> Option<SocketAddr> {
+        self.first_hop.or_else(|| next_hop(req))
     }
 
     /// Raise, on every INVITE client txn of `call_ref` that `req`, a request

@@ -373,3 +373,55 @@ async fn silent_callee_abandoned_via_lb__retarget__reaps_crossing_200_and_retarg
     assert_reaped(&fh, &b1).await;
     drop(proxy);
 }
+
+/// **A 2xx after the call is gone, from a callee writing its own Record-Route.**
+/// The caller's CANCEL ends the call and the callee answers its INVITE anyway,
+/// past the worker's safety bound, so the transaction closes its obligations
+/// alone (ADR-0034). The ACK and the BYE it builds leave for the proxy, which
+/// carries them to the hop the callee recorded (itself, here): the worker reaches
+/// no peer pod-direct.
+#[tokio::test(start_paused = true)]
+#[allow(non_snake_case)]
+async fn a_2xx_after_the_call_ended_via_lb__leaves_for_the_proxy_whatever_the_callee_recorded() {
+    let mut fh = FailoverHarness::new("orphan-first-hop-via-lb", &["b1"]);
+    let why = "bob plays a callee that records itself and answers past a CANCEL, this test's input";
+    fh.allow_rfc_violation("no-record-route-from-ua", why);
+    fh.allow_rfc_violation("no-200-after-cancel", why);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let proxy = fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap())]).await;
+    let b1 = spawn_b1(&mut fh, reject_decision(5070)).await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(b1.is_ready());
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    call.expect(100).await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    let mut cancel = call.cancel().await;
+    cancel.expect(200).await;
+    call.expect(487).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    // Past the worker's safety bound on a leg whose final never comes.
+    fh.advance(Duration::from_secs(40)).await;
+    assert_eq!(b1.active_calls(), 0, "the call ended; its transaction is orphaned");
+
+    bob_uas
+        .respond(200, "OK")
+        .with_header("Record-Route", &format!("<sip:{BOB};lr>"))
+        .with_sdp(ANSWER)
+        .await;
+    bob.receive_absorbing("ACK", &["INVITE"]).await;
+    bob.receive_absorbing("BYE", &["INVITE"]).await.respond(200, "OK").await;
+    fh.advance(Duration::from_millis(50)).await;
+
+    let b1_addr: std::net::SocketAddr = B1.parse().unwrap();
+    let proxy_addr: std::net::SocketAddr = PROXY.parse().unwrap();
+    for entry in fh.sip_entries().iter().filter(|e| e.from == b1_addr) {
+        assert_eq!(entry.to, proxy_addr, "b1 sent {} around the proxy", entry.start_line());
+    }
+    assert_reaped(&fh, &b1).await;
+    drop(proxy);
+}

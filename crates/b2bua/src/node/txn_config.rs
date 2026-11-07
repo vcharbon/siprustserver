@@ -77,6 +77,13 @@ pub(super) fn txn_config(
         stateless_options: true,
         // The router takes a probe ahead of the queued events (ADR-0050 §2).
         keepalive_lane: Some(KEEPALIVE_LANE),
+        // What the layer builds itself leaves for the front proxy, as every
+        // other request of a worker behind one does. Its address is an IP
+        // literal (the runner's `B2BUA_OUTBOUND_PROXY`).
+        first_hop: config
+            .front
+            .outbound_proxy()
+            .and_then(|(host, port)| sip_net::ip_socket_addr(host, *port)),
         // The worker's SIP identity names it in a Warning, never a wildcard
         // bind address.
         advertised: Some(hostport(&config.sip_local_ip, config.sip_local_port)),

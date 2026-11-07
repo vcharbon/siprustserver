@@ -110,6 +110,8 @@ pub(super) struct Owner {
     pub(super) cancel_bound_ms: u64,
     /// [`TransactionConfig::on_bound`](crate::TransactionConfig).
     pub(super) on_bound: Option<super::config::OnBound>,
+    /// [`TransactionConfig::first_hop`].
+    pub(super) first_hop: Option<SocketAddr>,
     /// The INVITE server transactions holding the answers to a CANCEL, by the
     /// INVITE's Call-ID, From-tag and CSeq number (`layer::held_cancel`).
     pub(super) held_cancels: HashMap<(String, String, u32), ServerTxnKey>,
@@ -174,6 +176,7 @@ impl Owner {
             ack_bound_ms: config.ack_bound_ms,
             cancel_bound_ms: config.cancel_bound_ms,
             on_bound: config.on_bound.clone(),
+            first_hop: config.first_hop,
             held_cancels: HashMap::new(),
             owed_sends: Vec::new(),
             recent_uas_tags: HashMap::new(),

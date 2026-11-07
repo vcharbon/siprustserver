@@ -4,7 +4,9 @@
 use crate::common;
 use call::TxnKind;
 use common::*;
-use sip_message::{SipMessage, SipRequest};
+use sip_message::header::HeaderName;
+use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
+use sip_net::SignalingNetwork;
 
 fn reqs(msgs: &[SipMessage], method: &str) -> Vec<SipRequest> {
     msgs.iter()
@@ -140,4 +142,52 @@ async fn the_orphan_bye_cseq_is_above_an_early_prack() {
     elapse_ms(20).await;
     let bye = reqs(&stack.drain_peer(), "BYE").pop().expect("bye");
     assert!(bye.cseq().seq() > 2, "BYE CSeq {} not above the PRACK's 2", bye.cseq().seq());
+}
+
+const FRONT: &str = "192.0.2.77:5060";
+
+/// A 2xx to an orphaned INVITE of an element behind a front proxy: the ACK and
+/// the BYE leave for the proxy, what the peer wrote choosing no first hop, and
+/// the Route they carry stays the dialog's (RFC 3261 §12.1.2).
+async fn an_orphans_obligations_behind_a_front_proxy(record_route: &str) -> Vec<SipMessage> {
+    let config = sip_txn::TransactionConfig { first_hop: Some(addr(FRONT)), ..common::config() };
+    let stack = Stack::build_with_config(5, 64, config).await;
+    let front = stack
+        .net
+        .bind_udp(sip_net::BindUdpOpts::new(addr(FRONT), 64))
+        .await
+        .expect("bind the front proxy");
+    let call_ref = "self|call-F1";
+    let branch = "z9hG4bK-F1";
+    let invite = invite_with_cr_lg(call_ref, "callid-F1", branch, "b-1");
+    stack.txn.send_request(invite, addr(FRONT), TxnKind::Invite).await.unwrap();
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    elapse_ms(20).await;
+    while front.try_recv().is_some() {}
+
+    let ok = String::from_utf8(ok_tagged("INVITE", 1, branch, "callid-F1", "fork-a"))
+        .expect("text")
+        .replace("Contact:", &format!("{record_route}Contact:"));
+    stack.inject(ok.as_bytes()).await;
+    elapse_ms(20).await;
+    assert!(stack.drain_peer().is_empty(), "nothing goes straight to the peer");
+    std::iter::from_fn(|| front.try_recv())
+        .map(|p| CustomParser::new().parse(&p.raw).expect("a message"))
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn behind_a_front_proxy_a_record_route_chooses_no_orphan_first_hop() {
+    let rr = format!("Record-Route: <sip:{FRONT};outbound;lr>, <sip:{PEER};lr>\r\n");
+    let out = an_orphans_obligations_behind_a_front_proxy(&rr).await;
+    assert_eq!((reqs(&out, "ACK").len(), reqs(&out, "BYE").len()), (1, 1), "{out:?}");
+    let routes: Vec<String> =
+        reqs(&out, "ACK")[0].raw(HeaderName::Route).map(|r| r.to_string()).collect();
+    assert_eq!(routes.join(", "), format!("<sip:{PEER};lr>, <sip:{FRONT};outbound;lr>"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn behind_a_front_proxy_a_contact_chooses_no_orphan_first_hop() {
+    let out = an_orphans_obligations_behind_a_front_proxy("").await;
+    assert_eq!((reqs(&out, "ACK").len(), reqs(&out, "BYE").len()), (1, 1), "{out:?}");
 }
