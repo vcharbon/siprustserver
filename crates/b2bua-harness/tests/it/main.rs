@@ -201,6 +201,7 @@ mod remote_target_user_parameters;
 mod reoffer_late_events_of_the_first_call;
 mod reoffer_on_an_ended_identity;
 mod repeated_2xx_before_caller_ack;
+mod repeated_uri_parameter;
 mod reroute_limiter_holds;
 mod reroute_rejection_tag;
 mod response_contact_scope;
