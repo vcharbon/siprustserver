@@ -81,6 +81,7 @@ mod outbound_invite_after_the_departure;
 mod prack_repeat_takeover;
 mod prack_takeover;
 mod probe_lost_with_the_primary;
+mod probe_wildcard_sent_by;
 mod read_dead_primary_taken_over;
 mod ready_waits_for_the_backup_bootstrap;
 mod reclaim_takes_the_copys_consult;

@@ -312,3 +312,23 @@ fn frozen_contact_override_is_byte_compared() {
         Err(Mismatch::Value { .. })
     ));
 }
+
+/// A capture holding a `maddr` replays whole: the emitted Contact sends its
+/// counterpart to the bound socket, and that message still matches the capture.
+#[test]
+fn a_captured_maddr_points_at_the_bound_socket_and_the_emission_matches() {
+    let captured = response_with_contact("<sip:bob@203.0.113.7:5060;maddr=203.0.113.9;x=1>");
+    let tmpl = MessageTemplate::from_message(&captured);
+    let generated = vec![sip_message::SipHeader::new("Contact", "<sip:b@192.0.2.10:5070>")];
+    let emitted =
+        crate::template::apply_remote_target_emits(&generated, &tmpl.remote_target_emits());
+    let value = emitted[0].value.to_string();
+    assert_eq!(value, "<sip:bob@192.0.2.10:5070;maddr=192.0.2.10;x=1>");
+
+    let inbound = response_with_contact(&value);
+    let SipMessage::Response(resp) = &inbound else { panic!("a response") };
+    let contact = resp.contacts();
+    let uri = contact.as_slice().first().expect("the Contact").uri();
+    assert_eq!(uri.next_hop(), ("192.0.2.10", 5070), "the counterpart reaches the socket");
+    assert_eq!(tmpl.match_inbound(&inbound, &MatchOpts::default()), Ok(()));
+}

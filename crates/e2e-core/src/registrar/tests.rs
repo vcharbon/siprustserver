@@ -84,3 +84,11 @@ fn wildcard_contact_carries_no_binding() {
     let r = register(&[("Contact", "*"), ("Expires", "0")]);
     assert_eq!(effective_expires(&r, None), 0);
 }
+
+/// A URI's `maddr` is the address it names (RFC 3263 §4), at its own port.
+#[test]
+fn a_uri_addr_reads_its_maddr() {
+    let uri = Uri::parse(&sip_message::SipStr::owned("sip:bob@name.invalid:5070;maddr=192.0.2.9"))
+        .expect("a URI");
+    assert_eq!(uri_addr(&uri), Some("192.0.2.9:5070".parse().unwrap()));
+}

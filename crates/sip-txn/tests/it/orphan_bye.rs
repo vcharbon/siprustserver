@@ -29,6 +29,31 @@ fn ok_tagged(cseq_method: &str, cseq: u32, branch: &str, call_id: &str, tag: &st
     .into_bytes()
 }
 
+/// A 2xx whose Contact names a `maddr`: the ACK and the BYE the layer owes go to it
+/// (RFC 3263 §4), the name in its host never read.
+#[tokio::test(start_paused = true)]
+async fn an_orphans_ack_and_bye_go_to_the_maddr_of_the_2xx_contact() {
+    let stack = Stack::build(5, 64, 64).await;
+    let call_ref = "self|call-P2";
+    let branch = "z9hG4bK-P2";
+    let invite = invite_with_cr_lg(call_ref, "callid-P2", branch, "b-1");
+    stack.txn.send_request(invite, addr(PEER), TxnKind::Invite).await.unwrap();
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    elapse_ms(20).await;
+    stack.drain_peer();
+
+    let peer = addr(PEER);
+    let contact = format!("<sip:bob@name.invalid:{};maddr={}>", peer.port(), peer.ip());
+    let ok = String::from_utf8(ok_tagged("INVITE", 1, branch, "callid-P2", "fork-a"))
+        .expect("text")
+        .replace(&format!("<sip:bob@{PEER}>"), &contact);
+    stack.inject(ok.as_bytes()).await;
+    elapse_ms(20).await;
+    let out = stack.drain_peer();
+    assert_eq!(reqs(&out, "ACK").len(), 1, "the ACK reaches the maddr: {out:?}");
+    assert_eq!(reqs(&out, "BYE").len(), 1, "the BYE reaches the maddr: {out:?}");
+}
+
 /// RFC 6026 §7.2: a second 2xx (another fork's To-tag) to an orphaned INVITE
 /// is the TU's: its own ACK and its own BYE.
 #[tokio::test(start_paused = true)]

@@ -34,6 +34,8 @@ mod memo_bound_tests;
 #[cfg(test)]
 mod own_final_ack_tests;
 #[cfg(test)]
+mod own_final_seam_tests;
+#[cfg(test)]
 mod reject_metric_tests;
 #[cfg(test)]
 mod retransmission_tests;

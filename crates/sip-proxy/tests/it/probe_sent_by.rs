@@ -99,6 +99,7 @@ fn assert_reachable_through_a_translation(req: SipRequest) {
     let text = String::from_utf8_lossy(req.image()).to_string();
     assert!(!text.contains("0.0.0.0"), "a wildcard is no address: {text}");
     assert!(req.has(&HeaderName::Contact), "{text}");
+    assert_eq!(req.top_via().host(), "proxy.invalid", "{text}");
     assert_eq!(req.top_via().rport(), Some(Rport::Requested), "{text}");
     assert_eq!(req.top_via().port(), Some(49152), "{text}");
     let answered = stamp_received(req, addr(TRANSLATED));
