@@ -52,6 +52,7 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method: "NOTIFY",
                     uri: &gen_dialog.remote_target,
+                    route: "",
                     offer: false,
                 }),
                 branch,
@@ -175,6 +176,7 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method: "INVITE",
                     uri: &gen_dialog.remote_target,
+                    route: &relay::route_past_front(self.config, &gen_dialog.route_set),
                     offer: !body.is_empty(),
                 }),
                 branch.clone(),
@@ -331,6 +333,11 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method,
                     uri: &gen_dialog.remote_target,
+                    route: &if m == InDialogMethod::Invite {
+                        relay::route_past_front(self.config, &gen_dialog.route_set)
+                    } else {
+                        String::new()
+                    },
                     offer: m == InDialogMethod::Invite && !body.is_empty(),
                 }),
                 branch,

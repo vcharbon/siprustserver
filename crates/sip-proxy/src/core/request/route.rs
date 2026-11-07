@@ -126,9 +126,10 @@ impl ProxyCore {
         // arrived from): a caller's ACK is RELAYED there, where §16.11 puts it
         // on the INVITE's outbound branch so the downstream server transaction
         // (§17.2.3) matches it and stops retransmitting the final (Timer G).
-        // A worker's ACK stays out of it: §17.1.1.2 sends it where its INVITE
-        // went, which its Route and Request-URI still name, whichever socket
-        // the callee answered from.
+        // A worker's ACK does not follow the final: §17.1.1.2 sends it where its
+        // INVITE went, whichever socket the far end answered from. That is the
+        // INVITE's entry where this instance holds one, else its Route and
+        // Request-URI.
         // This transaction-less proxy never synthesizes the hop ACK itself
         // (ADR-0022 X4; see `core/response`) — the upstream's ACK is the
         // only quench, end-to-end, which is what keeps a lossy caller hop
@@ -240,12 +241,16 @@ impl ProxyCore {
         // A caller's §17.1.1.3 ACK with no ACK hop (its final crossed another
         // instance): the INVITE's entry, which the ACK's branch keys, names
         // where the INVITE went, whatever Route or cookie the ACK copied from
-        // it. A worker's ACK repeats its INVITE's Route and Request-URI.
-        let placed_ack = if method == Method::Ack
-            && ack_hop.is_none()
-            && !c.worker_outbound
-            && c.loose_route_next_hop.is_none()
-        {
+        // it. A worker's ACK of a final relayed here: the same entry, where the
+        // ACK of an owner that holds no record of the INVITE may state less of
+        // its route. Any other worker's ACK repeats its INVITE's Route and
+        // Request-URI.
+        let looks_at_invite = if c.worker_outbound {
+            ack_hop.is_some()
+        } else {
+            ack_hop.is_none() && c.loose_route_next_hop.is_none()
+        };
+        let placed_ack = if method == Method::Ack && looks_at_invite {
             self.invite_hop(msg, req).await
         } else {
             None

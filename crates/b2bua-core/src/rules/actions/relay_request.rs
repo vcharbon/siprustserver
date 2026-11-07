@@ -211,6 +211,11 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method: req.method().as_str(),
                     uri: &gen_dialog.remote_target,
+                    route: &if *req.method() == Method::Invite {
+                        relay::route_past_front(self.config, &gen_dialog.route_set)
+                    } else {
+                        String::new()
+                    },
                     offer: *req.method() == Method::Invite && relay::carries_sdp(req),
                 }),
                 branch.clone(),

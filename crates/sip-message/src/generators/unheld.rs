@@ -75,24 +75,29 @@ pub fn generate_bye_for_unheld_2xx(
 /// (RFC 3261 §17.1.1.3): the INVITE's `request_uri`, the INVITE's top Via as
 /// the final echoes it (branch included), less what the next hop stamped on it
 /// (`received`, the `rport` value, §18.2.1, RFC 3581 §4), From, To and
-/// Call-ID echoing the final, its CSeq number with method ACK. No Route: the
-/// caller states the INVITE's route for the hop. No body.
+/// Call-ID echoing the final, its CSeq number with method ACK, the `route` the
+/// INVITE carried past its first hop, one header value, when not empty. The
+/// caller states that first hop. No body.
 pub fn generate_ack_for_unheld_non_2xx(
     final_response: &SipResponse,
     request_uri: Uri,
+    route: &str,
 ) -> Result<SipRequest, GenerateError> {
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
     let mut via = final_response.top_via().clone().without_param("received");
     if via.rport().is_some() {
         via = via.requesting_rport();
     }
-    let draft = RequestDraft::new(Method::Ack, request_uri)
+    let mut draft = RequestDraft::new(Method::Ack, request_uri)
         .push(via)
         .push(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
         .push(CSeq::new(final_response.cseq().seq(), Method::Ack));
+    if !route.is_empty() {
+        draft = draft.push_raw(HeaderName::Route, SipStr::owned(route));
+    }
     emit::request(draft.push(ContentLength::new(0)))
 }
 
@@ -188,7 +193,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n",
         );
         let uri = Uri::parse(&SipStr::from_static("sip:bob@10.0.0.2:5070")).expect("a URI");
-        let ack = generate_ack_for_unheld_non_2xx(&busy, uri).expect("an ACK");
+        let ack = generate_ack_for_unheld_non_2xx(&busy, uri, "").expect("an ACK");
         assert_eq!(ack.top_via().branch(), Some("z9hG4bKinv"));
         assert_eq!(ack.top_via().received(), None, "what the next hop stamped is left out");
         assert_eq!(

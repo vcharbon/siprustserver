@@ -97,7 +97,8 @@ async fn an_ack_of_the_unanswered_caller_invite_is_evidence_once_a_copy_served_t
 /// A 2xx to the INVITE of `leg`, its Via ours with the via-extension signed
 /// under `signing` when given.
 fn answer_on(call: &Call, leg: &str, signing: Option<&sip_ids::SigningKey>) -> SipMessage {
-    let facts = RequestFacts { method: "INVITE", uri: "sip:carol@10.0.0.3:5070", offer: true };
+    let facts =
+        RequestFacts { method: "INVITE", uri: "sip:carol@10.0.0.3:5070", route: "", offer: true };
     let via = build_call_via(
         &StackIdentityOpts {
             local_ip: "127.0.0.3",

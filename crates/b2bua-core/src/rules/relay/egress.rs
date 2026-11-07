@@ -38,7 +38,7 @@ pub fn apply_b_leg_egress(
     req: SipRequest,
     dest: (String, u16),
 ) -> (SipRequest, (String, u16)) {
-    // (1) Route set: send to the first route's host:port.
+    // (1) Route set: send to the first route's next hop.
     if let Some(first) = route_set.first() {
         if let Some(uri) = route_uri(first) {
             // The worker forwards the route set verbatim and stamps nothing:
@@ -86,6 +86,21 @@ pub fn apply_b_leg_egress(
             (req, (host, port))
         }
     }
+}
+
+/// What an in-dialog INVITE's `route_set` holds past the first hop, one header
+/// value: with a front proxy, the entries past its own that lead the set (the
+/// `;outbound` half and the half after it of its double Record-Route, or the plain
+/// route of [`outbound_proxy_route_set`]); with none, all of them. An owner that
+/// holds no record of the INVITE ACKs its final on it, the first hop being its own
+/// to state.
+pub fn route_past_front(config: &B2buaConfig, route_set: &[String]) -> String {
+    let own = match (config.front.outbound_proxy(), route_set.first().and_then(|r| route_uri(r))) {
+        (Some(_), Some(first)) if first.param("outbound").is_some() => 2,
+        (Some(proxy), Some(first)) if first.next_hop() == (proxy.0.as_str(), proxy.1) => 1,
+        _ => 0,
+    };
+    route_set.get(own..).unwrap_or_default().join(", ")
 }
 
 /// The plain loose `Route` naming the configured front proxy, with the wire
@@ -267,6 +282,30 @@ Content-Length: 0\r\n\r\n",
             leg_egress_dest(&B2buaConfig::default(), "b-1", &[route.to_string()], base),
             ("10.0.0.9".to_string(), 5060),
         );
+    }
+
+    // Past a double Record-Route, past a plain route at the proxy, and with no
+    // proxy every entry: what an unheld ACK states after its own first hop.
+    #[test]
+    fn the_route_past_the_front_leaves_the_proxys_own_entries_out() {
+        let mut proxied = B2buaConfig::default();
+        proxied.front = crate::config::Front::single_face("10.0.0.9", 5060);
+        let set = |entries: &[&str]| entries.iter().map(|e| e.to_string()).collect::<Vec<_>>();
+        let double = set(&[
+            "<sip:10.0.0.9:5060;outbound;lr>",
+            "<sip:192.0.2.1:5060;w_pri=b1;lr>",
+            "<sip:hop.example;lr>",
+            "<sip:next.example;lr>",
+        ]);
+        let past = "<sip:hop.example;lr>, <sip:next.example;lr>";
+        assert_eq!(route_past_front(&proxied, &double), past);
+        let plain = set(&["<sip:10.0.0.9:5060;lr>", "<sip:hop.example;lr>"]);
+        assert_eq!(route_past_front(&proxied, &plain), "<sip:hop.example;lr>");
+        assert_eq!(route_past_front(&proxied, &set(&["<sip:10.0.0.9:5060;outbound;lr>"])), "");
+        let foreign = set(&["<sip:hop.example;lr>"]);
+        assert_eq!(route_past_front(&proxied, &foreign), "<sip:hop.example;lr>");
+        assert_eq!(route_past_front(&B2buaConfig::default(), &foreign), "<sip:hop.example;lr>");
+        assert_eq!(route_past_front(&proxied, &[]), "");
     }
 
     // A route's `maddr` is its next hop (RFC 3263 §4), on both paths.

@@ -66,7 +66,8 @@ fn dialling(this: &str, primary: &str, backup: &str) -> (Option<String>, Option<
         is_emergency: false,
         owners: &owners,
     };
-    let facts = RequestFacts { method: "INVITE", uri: "sip:bob@192.0.2.1", offer: false };
+    let facts =
+        RequestFacts { method: "INVITE", uri: "sip:bob@192.0.2.1", route: "", offer: false };
     let via = dialling_via(&config, marks, "b-1", facts, "z9hG4bKdial".to_string());
     let param = |name: &str| via.param(name).and_then(ParamValue::as_str).map(str::to_string);
     (param("pri"), param("bak"))

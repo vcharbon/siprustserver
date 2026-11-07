@@ -84,7 +84,7 @@ fn final_on(
     signed: bool,
 ) -> SipMessage {
     let k = key();
-    let facts = RequestFacts { method: "INVITE", uri: CALLEE_URI, offer: true };
+    let facts = RequestFacts { method: "INVITE", uri: CALLEE_URI, route: "", offer: true };
     let via = build_call_via(
         &StackIdentityOpts {
             local_ip: sender.0,

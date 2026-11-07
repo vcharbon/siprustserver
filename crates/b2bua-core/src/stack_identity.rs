@@ -53,6 +53,9 @@ pub struct RequestFacts<'a> {
     pub method: &'a str,
     /// The request's Request-URI.
     pub uri: &'a str,
+    /// The request's Route past its first hop, one header value; empty for none
+    /// ([`crate::rules::relay::route_past_front`]).
+    pub route: &'a str,
     /// Whether the request carries a session offer (RFC 3264 §4).
     pub offer: bool,
 }
@@ -65,7 +68,8 @@ fn encoded(value: &str) -> ParamValue {
 /// Build the B2BUA Via for an outbound message (with `cr`/`lg`/`ci`/`rport`
 /// params, `pri` naming the call's primary when stated, `bak` naming the
 /// call's other owner or backup when it has one, and the signed `vx` when the
-/// request states its Request-URI and it fits).
+/// request states its Request-URI and it fits, the route left out when the
+/// route alone is what does not).
 pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
     let cr = encode_param(opts.call_ref);
     let mut via = Via::udp(SipStr::owned(opts.local_ip), opts.local_port)
@@ -84,11 +88,6 @@ pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
         via = via.with_param("bak", encoded(owner));
     }
     if let Some((facts, key)) = opts.request {
-        let ext = ViaExtension {
-            leg: opts.leg.to_string(),
-            request_uri: facts.uri.to_string(),
-            offer: facts.offer,
-        };
         let stated = Stated {
             call_ref: opts.call_ref,
             leg: opts.leg,
@@ -96,8 +95,16 @@ pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
             branch: &branch,
             method: facts.method,
         };
-        let signature = key.sign(&signed_parts(&stated, &ext));
-        if let Some(value) = ext.param(&signature) {
+        let signed = |route: &str| {
+            let ext = ViaExtension {
+                leg: opts.leg.to_string(),
+                request_uri: facts.uri.to_string(),
+                route: route.to_string(),
+                offer: facts.offer,
+            };
+            ext.param(&key.sign(&signed_parts(&stated, &ext)))
+        };
+        if let Some(value) = signed(facts.route).or_else(|| signed("")) {
             via = via.with_param(via_extension::PARAM, value);
         }
     }
@@ -161,8 +168,8 @@ struct Stated<'a> {
 
 /// What the via-extension's signature covers: the call, leg and incarnation
 /// the Via names, its branch, the request's method, and the extension's leg,
-/// Request-URI and offer flag.
-fn signed_parts<'a>(stated: &'a Stated, ext: &'a ViaExtension) -> [&'a [u8]; 8] {
+/// Request-URI, route and offer flag.
+fn signed_parts<'a>(stated: &'a Stated, ext: &'a ViaExtension) -> [&'a [u8]; 9] {
     [
         stated.call_ref.as_bytes(),
         stated.leg.as_bytes(),
@@ -171,6 +178,7 @@ fn signed_parts<'a>(stated: &'a Stated, ext: &'a ViaExtension) -> [&'a [u8]; 8] 
         stated.method.as_bytes(),
         ext.leg.as_bytes(),
         ext.request_uri.as_bytes(),
+        ext.route.as_bytes(),
         ext.offer_flag().as_bytes(),
     ]
 }
@@ -271,7 +279,7 @@ mod tests {
     }
 
     fn facts(uri: &str) -> RequestFacts<'_> {
-        RequestFacts { method: "INVITE", uri, offer: true }
+        RequestFacts { method: "INVITE", uri, route: "", offer: true }
     }
 
     fn key(byte: u8) -> SigningKey {
@@ -290,6 +298,25 @@ mod tests {
         assert_eq!(ext.leg, "b-1");
         assert_eq!(ext.request_uri, "sip:bob@10.0.0.2:5070");
         assert!(ext.offer);
+    }
+
+    #[test]
+    fn a_route_is_stated_and_signed_and_left_out_when_it_alone_does_not_fit() {
+        let k = key(1);
+        let with_route = |route: &str| {
+            let mut o = opts(false);
+            let request = RequestFacts { route, ..facts("sip:bob@10.0.0.2:5070") };
+            o.request = Some((request, &k));
+            build_call_via(&o, "z9hG4bK-r".to_string())
+        };
+        let via = with_route("<sip:hop.example;lr>");
+        let ext = read_via_extension(&via, "INVITE", Some(&k)).expect("a verified extension");
+        assert_eq!(ext.route, "<sip:hop.example;lr>");
+
+        let via = with_route(&format!("<sip:{}.example;lr>", "h".repeat(600)));
+        let ext = read_via_extension(&via, "INVITE", Some(&k)).expect("the rest still fits");
+        assert_eq!(ext.route, "");
+        assert_eq!(ext.request_uri, "sip:bob@10.0.0.2:5070");
     }
 
     #[test]

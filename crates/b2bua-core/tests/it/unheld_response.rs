@@ -2,8 +2,8 @@
 //! be (ADR-0055 §4) when its via-extension verifies (ADR-0055 §12): a 2xx
 //! ACKed and BYEd from its own headers, an offer it makes to an INVITE that
 //! carried none answered with every stream rejected; a non-2xx INVITE final
-//! ACKed hop by hop at the Request-URI the extension states; nothing for
-//! anything else.
+//! ACKed hop by hop where the INVITE went, on the Request-URI and the route the
+//! extension states; nothing for anything else.
 
 use b2bua_core::config::B2buaConfig;
 use b2bua_core::effects::{OutboundBody, OutboundSipEffect};
@@ -28,7 +28,7 @@ fn config() -> B2buaConfig {
 /// `signed`.
 fn our_via(offer: bool, signed: bool) -> String {
     let k = key();
-    let facts = RequestFacts { method: "INVITE", uri: "sip:bob@10.0.0.2:5070", offer };
+    let facts = RequestFacts { method: "INVITE", uri: "sip:bob@10.0.0.2:5070", route: "", offer };
     let via = build_call_via(
         &StackIdentityOpts {
             local_ip: "10.0.0.9",
@@ -145,4 +145,72 @@ fn the_ack_and_the_bye_of_a_2xx_carry_this_nodes_via() {
             assert_eq!(hop.param(mark), invite_hop.param(mark), "{method}: the call's {mark}");
         }
     }
+}
+
+const HOP: &str = "<sip:hop.example:5070;lr>";
+const PROXY: (&str, u16) = ("10.0.0.5", 5080);
+
+/// A 488 to an INVITE on `leg` whose Via stated `route`.
+fn refused(leg: &str, route: &str) -> SipResponse {
+    let k = key();
+    let facts = RequestFacts { method: "INVITE", uri: "sip:bob@10.0.0.2:5070", route, offer: true };
+    let via = build_call_via(
+        &StackIdentityOpts {
+            local_ip: "10.0.0.9",
+            local_port: 5060,
+            call_ref: "w0|c1@alice|atag",
+            leg,
+            incarnation_mark: "k3x9",
+            is_emergency: false,
+            backup: None,
+            primary: None,
+            request: Some((facts, &k)),
+        },
+        "z9hG4bKinvite".to_string(),
+    );
+    response(488, &via.to_wire(), "")
+}
+
+/// The Route rows of the one ACK `resp` draws, and where it goes.
+fn acked(config: &B2buaConfig, resp: &SipResponse) -> (Vec<String>, (String, u16)) {
+    let src = (PROXY.0.to_string(), PROXY.1);
+    let sent = answer_unheld_response(config, resp, src, &mut TurnIds::fixed(1), 0);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let [req] = requests(&sent).try_into().expect("one request");
+    assert_eq!(req.method(), "ACK");
+    let routes = req.raw(sip_message::HeaderName::Route).map(str::to_string).collect();
+    (routes, sent[0].destination.clone())
+}
+
+fn proxied() -> B2buaConfig {
+    B2buaConfig { front: b2bua_core::config::Front::single_face(PROXY.0, PROXY.1), ..config() }
+}
+
+/// §17.1.1.3: the INVITE's Route, past the plain first hop at the proxy.
+#[test]
+fn a_callee_legs_ack_states_the_kept_route_behind_the_proxy() {
+    let (routes, dest) = acked(&proxied(), &refused("b-1", HOP));
+    assert_eq!(routes.join(", "), format!("<sip:{}:{};lr>, {HOP}", PROXY.0, PROXY.1));
+    assert_eq!(dest, (PROXY.0.to_string(), PROXY.1));
+}
+
+/// The caller's leg takes no plain route: the kept route is all it states, at the
+/// proxy the final came from, which reads it as a worker's loose next hop.
+#[test]
+fn a_caller_legs_ack_states_the_kept_route_to_the_proxy() {
+    let (routes, dest) = acked(&proxied(), &refused("a", HOP));
+    assert_eq!(routes, [HOP]);
+    assert_eq!(dest, (PROXY.0.to_string(), PROXY.1));
+}
+
+/// With no front proxy the ACK goes where the INVITE went, not to the socket the
+/// final came from (§17.1.1.2).
+#[test]
+fn with_no_proxy_the_ack_goes_to_the_first_route_else_the_request_uri() {
+    let (routes, dest) = acked(&config(), &refused("b-1", HOP));
+    assert_eq!(routes, [HOP]);
+    assert_eq!(dest, ("hop.example".to_string(), 5070));
+    let (routes, dest) = acked(&config(), &refused("b-1", ""));
+    assert!(routes.is_empty());
+    assert_eq!(dest, ("10.0.0.2".to_string(), 5070));
 }

@@ -12,7 +12,7 @@ use super::scan::{scan_until, skip_ws, sub, sub_trimmed};
 use super::uri::{read_sent_by, HostPort};
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
-use crate::ip_literal::ip_host;
+use crate::ip_literal::{ip_host, same_host};
 
 /// The RFC 3261 §8.1.1.7 magic cookie every branch this stack emits starts
 /// with.
@@ -186,15 +186,10 @@ impl Via {
     /// host, the hop carries `rport` (even when they are equal), or the hop
     /// already carries a `received`; `rport` is the source port whenever the
     /// hop carries one. A value the sender wrote in either is never kept.
-    /// Two IP literals differ as addresses, an IPv4-mapped IPv6 address being
-    /// its IPv4 address; anything else as text.
+    /// Hosts differ as [`same_host`] tells them.
     pub fn stamped_from(mut self, source_host: &str, source_port: u16) -> Self {
         let rport_asked = self.params.get(RPORT.as_str()).is_some();
-        let same_host = match (ip_host(self.host()), ip_host(source_host)) {
-            (Some(sent_by), Some(source)) => sent_by.to_canonical() == source.to_canonical(),
-            _ => self.host() == source_host,
-        };
-        if rport_asked || self.received().is_some() || !same_host {
+        if rport_asked || self.received().is_some() || !same_host(self.host(), source_host) {
             self = self.with_received(SipStr::owned(source_host));
         }
         if rport_asked {

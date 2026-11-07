@@ -87,7 +87,7 @@ pub use sdp_session::{
 };
 
 // Wire routing for what those emit.
-pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};
+pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set, route_past_front};
 
 // Transparency + advertisement across the back-to-back UA.
 pub use advert::{stamp_advertisement, stamp_options_advertisement};

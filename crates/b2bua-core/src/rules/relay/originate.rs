@@ -386,6 +386,7 @@ pub fn build_b_leg(
             super::RequestFacts {
                 method: "INVITE",
                 uri: &request_uri.text(),
+                route: "",
                 offer: !body.is_empty(),
             },
             branch.clone(),

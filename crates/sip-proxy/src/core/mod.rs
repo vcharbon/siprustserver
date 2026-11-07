@@ -27,12 +27,15 @@ mod maddr_tests;
 mod owner_rule_tests;
 mod request;
 mod response;
+#[cfg(test)]
+mod worker_ack_tests;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use sip_clock::Clock;
+use sip_message::ip_literal::same_host;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::{parse_datagram, ParserPanicked, UdpEndpoint, UdpPacket};
@@ -285,15 +288,11 @@ impl ProxyCore {
     /// self-identity check for Route popping (§16.4), the response top-Via
     /// ownership check (§16.7.3), and Record-Route cookie recovery: in
     /// dual-face mode the proxy's Via/Record-Route entries legitimately carry
-    /// EITHER face's advertise.
+    /// EITHER face's advertise. Hosts compare as what they name
+    /// ([`same_host`]): another spelling of this proxy's address is this proxy.
     pub(super) fn is_self_addr(&self, host: &str, port: u16) -> bool {
-        if host == self.advertised.host && port == self.advertised.port {
-            return true;
-        }
-        match &self.external {
-            Some(ext) => host == ext.advertised.host && port == ext.advertised.port,
-            None => false,
-        }
+        let names = |at: &ProxyAddr| port == at.port && same_host(host, &at.host);
+        names(&self.advertised) || self.external.as_ref().is_some_and(|e| names(&e.advertised))
     }
 
     /// Pin + pre-resolve DNS-named forward targets (`PROXY_RESOLVER_PREWARM`)
@@ -352,8 +351,7 @@ impl ProxyCore {
         }
     }
 
-    /// Reply to the packet's source (egresses on the face the source lives on
-    /// — which is the face the packet arrived on).
+    /// Send an own final to `dst`, on the face `dst` lives on.
     async fn send_response(&self, bytes: &[u8], dst: SocketAddr) {
         self.metrics.record_face_egress(self.egress_face(dst));
         if let Err(e) = self.egress_endpoint(dst).send_to(bytes, dst).await {

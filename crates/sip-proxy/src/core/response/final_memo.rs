@@ -7,7 +7,8 @@
 //! A non-2xx final leaves its ACK hop, whether or not the INVITE crossed this
 //! instance: the node the final ARRIVED from, which after a failover is the
 //! survivor, not the INVITE's target. Only a caller's ACK follows it; a worker's
-//! ACK goes where its INVITE went (RFC 3261 §17.1.1.2). This transaction-less proxy (ADR-0022
+//! ACK goes where its INVITE went (RFC 3261 §17.1.1.2), the memo only telling a
+//! non-2xx ACK from a takeover's 2xx ACK. This transaction-less proxy (ADR-0022
 //! X4) synthesizes no §17.1.1.3 hop ACK: the UAS retransmits the final through
 //! this relay until the upstream's own ACK arrives, which the request path
 //! relays on this hop. The branch the sender's server transaction is keyed on

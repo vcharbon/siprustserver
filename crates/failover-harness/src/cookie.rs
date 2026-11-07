@@ -5,12 +5,13 @@
 
 use sip_message::types::SipRequest;
 
-/// One named field of the stickiness cookie on the topmost Record-Route entry.
-/// `None` when the request records no route, when no reader accepts the entry,
-/// or when the cookie omits the field.
+/// One named field of the stickiness cookie on the topmost Record-Route entry
+/// stating it, a hop past the proxy recording above it. `None` when the request
+/// records no route, when no reader accepts the entries, or when no cookie
+/// states the field.
 pub fn cookie_field(req: &SipRequest, name: &str) -> Option<String> {
     let recorded = req.record_route_set().ok()?;
-    let value = recorded.first()?.uri().param(name)?;
+    let value = recorded.iter().find_map(|entry| entry.uri().param(name).cloned())?;
     Some(value.as_str().unwrap_or_default().to_string())
 }
 

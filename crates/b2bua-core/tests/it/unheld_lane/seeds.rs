@@ -23,8 +23,12 @@ const OFFER: &str = "v=0\r\no=bob 7 7 IN IP4 192.0.2.30\r\ns=-\r\nc=IN IP4 192.0
 /// carried an offer, signed with the cluster key when `signed`.
 fn node_via(offer: bool, signed: bool) -> String {
     let k = key();
-    let facts =
-        RequestFacts { method: "INVITE", uri: "sip:bob@192.0.2.30:5060;transport=udp", offer };
+    let facts = RequestFacts {
+        method: "INVITE",
+        uri: "sip:bob@192.0.2.30:5060;transport=udp",
+        route: "",
+        offer,
+    };
     let opts = StackIdentityOpts {
         local_ip: "10.0.0.8",
         local_port: 5060,

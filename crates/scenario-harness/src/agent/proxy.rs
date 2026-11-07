@@ -41,6 +41,17 @@ impl Proxy {
         self.forward_request_altered(next, |req| req).await
     }
 
+    /// [`Self::forward_request`] on `branch`: the CANCEL or non-2xx ACK of an
+    /// INVITE this hop forwarded on it (RFC 3261 §9.1, §17.1.1.3).
+    pub async fn forward_request_on_branch(&self, next: SocketAddr, branch: &str) -> SipRequest {
+        let SipMessage::Request(req) = self.agent.recv().await else {
+            panic!("{} expected a request to forward", self.agent.name);
+        };
+        let forwarded = forwarded_request(&req, self.agent.addr, branch);
+        unwrap_step(self.agent.try_send_wire(forwarded.image(), next).await);
+        forwarded
+    }
+
     /// [`Self::forward_request`] with `alter` applied to the rewritten request
     /// before it leaves: how a test scripts a proxy that corrupts what it
     /// forwards.

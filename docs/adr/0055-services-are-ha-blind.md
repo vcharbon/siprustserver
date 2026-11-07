@@ -902,13 +902,20 @@ the re-anchor deadband of each other.
 ### 12. A request the worker originates names its leg
 
 The worker's own Via carries a via-extension (§20.42): the leg, the request's
-Request-URI and whether it carried a session offer, signed by the worker with
+Request-URI, on an in-dialog INVITE its Route past the first hop, and whether it
+carried a session offer, signed by the worker with
 the cluster key over the decoded `cr`, `lg` and `ci` of the Via, its branch and
 the request's method, bounded in size and encoded as a token, so any owner
 that holds no request record of a dialled INVITE, or no client transaction of
 it, can CANCEL it or ACK its non-2xx from the callee's response (§9.1,
 §17.1.1.3), and ACK and BYE its 2xx,
-with the answer an offer the 2xx makes is owed (§13.2.2.4, RFC 3264 §4). A
+with the answer an offer the 2xx makes is owed (§13.2.2.4, RFC 3264 §4). That ACK
+goes where the INVITE went (§17.1.1.2) on any proxy instance
+(`a_487_failed_over_is_acked_at_the_hop_its_invite_took`). A Route past the bound
+is left out and the rest still stated: the instance that forwarded the INVITE and
+relayed its final still places the ACK, any other sends it to the Request-URI and
+the hop repeats its final to Timer H
+(`an_ack_stating_no_hop_goes_to_its_request_uri_at_another_instance`). A
 response for a call no node holds draws nothing without an extension that
 verifies. An extension whose signature fails is ignored; a worker with no
 cluster key states none and trusts none, and a worker with replication on
