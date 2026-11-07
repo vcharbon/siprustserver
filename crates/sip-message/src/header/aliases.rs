@@ -44,8 +44,8 @@ pub type SubscriptionState = TokenParamsHeader<kind::SubscriptionState>;
 pub type ReferSub = TokenParamsHeader<kind::ReferSub>;
 /// One media range of an `Accept` line (RFC 3261 §20.1); a line carries several,
 /// comma-separated. Its leading `type/subtype` is kept as written, SWS around the
-/// slash included, unlike [`MediaType`](super::MediaType): no production code
-/// reads it.
+/// slash included, unlike [`MediaType`](super::MediaType): the capability relay
+/// restates a range as written and classifies none.
 pub type AcceptRange = TokenParamsHeader<kind::Accept>;
 pub type ContentDisposition = TokenParamsHeader<kind::ContentDisposition>;
 pub type SessionExpires = TokenParamsHeader<kind::SessionExpires>;
