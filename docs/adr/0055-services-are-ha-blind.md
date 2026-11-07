@@ -268,10 +268,10 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   final until it left. A node that meets that ended body with no live copy
   of the call (the backup at a departure or a confirmed dead verdict, the
   restarted primary at its reclaim, the primary at a backup's reverse flush)
-  cannot tell whether the final left: it
-  sends it again on a Completed transaction, within Timer H of the call's
-  end, which repeats it until her ACK (RFC 3261 §17.2.1). While its outbox drains, the call stays resident and takes no
-  turn, and neither the reaper nor the departure sweep acts on it; it is
+  cannot tell whether the final left: it sends it again on a Completed
+  transaction, within Timer H of the call's end, which repeats it until her
+  ACK (RFC 3261 §17.2.1). While its outbox drains, the call stays resident
+  and takes no turn, and neither the reaper nor the departure sweep acts on it; it is
   released once the outbox is empty. A takeover copy's terminal turn waits
   for its reverse-flushed write the same way. A stand-down, a self-release
   and a discharge by the backup send what the outbox still holds at once:
