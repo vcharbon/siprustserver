@@ -45,11 +45,10 @@ use crate::types::{all_ua_roles, UaRole};
 /// strict reading refuses a malformed message before a rule sees it (a `Via`
 /// branch lacking the magic cookie, say), and the grammar rules would never
 /// fire; read leniently, the rule, not the parser, flags the violation. A
-/// request a stack under test refused at ingress (a repeated single-valued
-/// header, an unreadable `Expires`) is read too: its CSeq and branch are what
-/// the refusal answers and what the dialog's next request follows. What crossed
-/// the wire is judged whatever its size: a deployment's bounds decide only what
-/// it accepts.
+/// request a stack under test refused at ingress for a value (an unreadable
+/// `Expires`) is read too: its CSeq and branch are what the refusal answers
+/// and what the dialog's next request follows. What crossed the wire is judged
+/// whatever its size: a deployment's bounds decide only what it accepts.
 pub(crate) fn lenient_parser() -> CustomParser {
     CustomParser::tool(SipParserLimits {
         wire_grammar: false,
