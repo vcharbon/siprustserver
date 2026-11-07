@@ -267,7 +267,8 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   write, and it logs the delete once they left, so the backup keeps the
   final until it left. A node that meets that ended body with no live copy
   of the call (the backup at a departure or a confirmed dead verdict, the
-  restarted primary at its reclaim) cannot tell whether the final left: it
+  restarted primary at its reclaim, the primary at a backup's reverse flush)
+  cannot tell whether the final left: it
   sends it again on a Completed transaction, within Timer H of the call's
   end, which repeats it until her ACK (RFC 3261 §17.2.1). While its outbox drains, the call stays resident and takes no
   turn, and neither the reaper nor the departure sweep acts on it; it is

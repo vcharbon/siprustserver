@@ -83,6 +83,6 @@ async fn discharge(
     ctx.metrics.bump_unrecoverable_call();
     tracing::error!(%call_ref, error = %err, "the call's record does not serve a copy: discharged");
     let ending = off_wire::Ending::Forced { before: &call };
-    let label = "the discharge of an unrecoverable call";
+    let label = &"the discharge of an unrecoverable call";
     off_wire::end(ctx, call_ref, ending, off_wire::Caller::Leave, now_ms, label).await;
 }

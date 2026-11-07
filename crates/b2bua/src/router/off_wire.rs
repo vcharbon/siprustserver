@@ -6,6 +6,7 @@
 //! its edge synthesised from itself.
 
 use std::borrow::Cow;
+use std::future::Future;
 use std::sync::Arc;
 
 use b2bua_sdk::event::CallEvent;
@@ -33,8 +34,8 @@ pub(super) enum Ending<'a> {
     /// The other owner's ended `body`, met here: actions run on the call
     /// answer what this node still holds open, their effects riding `body`.
     Met { before: &'a Call, body: Call, actions: Actions },
-    /// A result a core fold built on the turn's scope.
-    Built { before: &'a Call, result: HandlerResult },
+    /// A result a core fold built on `turn`, the turn's scope.
+    Built { before: &'a Call, result: HandlerResult, turn: TurnScope },
 }
 
 /// Rule actions run on an internal event of `topic`, read by `owners`.
@@ -59,45 +60,30 @@ pub(super) fn scope(ctx: &RouterCtx) -> TurnScope {
     TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot())
 }
 
-/// End `call_ref` off the wire at `now_ms`. `label` names what the turn
-/// handled, for a model-invariant violation. The caller holds the per-call
-/// lock.
-pub(super) async fn end(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
+/// End `call_ref` off the wire at `now_ms`: the ending lands at once, and
+/// the returned future commits it. `label` names what the turn handled, for a
+/// model-invariant violation. The caller holds the per-call lock.
+pub(super) fn end<'a>(
+    ctx: &'a Arc<RouterCtx>,
+    call_ref: &'a str,
     ending: Ending<'_>,
     caller: Caller,
     now_ms: i64,
-    label: &'static str,
-) {
-    let result = landed(ctx, call_ref, scope(ctx), ending, caller, now_ms);
-    commit_turn(ctx, call_ref, result, now_ms, &label, None).await;
+    label: &'static &'static str,
+) -> impl Future<Output = ()> + Send + 'a {
+    let result = landed(ctx, call_ref, ending, caller, now_ms);
+    commit_turn(ctx, call_ref, result, now_ms, label, None)
 }
 
-/// [`end`] on `turn`, which a core fold already used.
-pub(super) async fn end_in(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    turn: TurnScope,
-    ending: Ending<'_>,
-    caller: Caller,
-    now_ms: i64,
-    label: &'static str,
-) {
-    let result = landed(ctx, call_ref, turn, ending, caller, now_ms);
-    commit_turn(ctx, call_ref, result, now_ms, &label, None).await;
-}
-
-/// The result `ending` lands on `turn`, enforced and its notes drained.
+/// The result `ending` lands, enforced and its turn's notes drained.
 fn landed(
     ctx: &RouterCtx,
     call_ref: &str,
-    mut turn: TurnScope,
     ending: Ending<'_>,
     caller: Caller,
     now_ms: i64,
 ) -> HandlerResult {
-    let (before, result) = match ending {
+    let (before, result, mut turn) = match ending {
         Ending::Reached { body, forced } => {
             let mut before = body.clone();
             before.state = CallModelState::Active;
@@ -106,25 +92,27 @@ fn landed(
             } else {
                 HandlerResult::new(body)
             };
-            (Cow::Owned(before), result)
+            (Cow::Owned(before), result, scope(ctx))
         }
         Ending::Forced { before } => {
             let result = crate::reaper::discharge_result(before.clone(), now_ms);
-            (Cow::Borrowed(before), result)
+            (Cow::Borrowed(before), result, scope(ctx))
         }
         Ending::Actions { before, actions } => {
+            let mut turn = scope(ctx);
             let result = execute(ctx, call_ref, before, actions, &mut turn, now_ms);
-            (Cow::Borrowed(before), result)
+            (Cow::Borrowed(before), result, turn)
         }
         Ending::Met { before, body, actions } => {
+            let mut turn = scope(ctx);
             let mut result = HandlerResult::new(body);
             if !actions.list.is_empty() {
                 let answered = execute(ctx, call_ref, before, actions, &mut turn, now_ms).effects;
                 result.effects.extend(answered);
             }
-            (Cow::Borrowed(before), result)
+            (Cow::Borrowed(before), result, turn)
         }
-        Ending::Built { before, result } => (Cow::Borrowed(before), result),
+        Ending::Built { before, result, turn } => (Cow::Borrowed(before), result, turn),
     };
     let unanswered = match caller {
         Caller::Answer => UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),

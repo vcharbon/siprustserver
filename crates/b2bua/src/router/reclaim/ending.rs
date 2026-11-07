@@ -56,7 +56,7 @@ pub(super) async fn discharge_met_ending(
     };
     ctx.state.update_enveloped(Enveloped::new(before.clone(), topology));
     let ending = off_wire::Ending::Met { before, body, actions };
-    let label = "the discharge of the other copy's ending";
+    let label = &"the discharge of the other copy's ending";
     off_wire::end(ctx, call_ref, ending, off_wire::Caller::Leave, now_ms, label).await;
 }
 

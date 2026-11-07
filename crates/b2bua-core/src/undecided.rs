@@ -1,5 +1,5 @@
-//! The end of a call still waiting on its first routing decision that the
-//! node serving it from its record does not ask again (ADR-0047 D4, D6): its
+//! The end of a call served from its record, still waiting on its first
+//! routing decision, whose decision is not asked again (ADR-0047 D4, D6): its
 //! caller refused 503 when she waits on a transaction this node holds, else
 //! ended with nothing on the wire. A setup the caller CANCELed during its
 //! consult ends under her cancel, its CDR stating it as the CANCEL's own turn

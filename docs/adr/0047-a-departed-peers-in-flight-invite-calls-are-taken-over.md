@@ -15,8 +15,6 @@ undecided call on a departure only; the residual of a death the peers are not to
 Amended (2026-10-29): D2, the sweep also takes over a call with an in-dialog request in
 flight, and one that awaits the answer to a request sent off its turn, which the copy
 sends again (ADR-0039 decision 5).
-Amended (2026-11-07): D2, only an `Active` call is taken over for an awaited answer: a
-request is made for its answer, and an ending call needs none (ADR-0039 decision 5).
 Amended (2026-10-29): D1, a dead verdict acts once this node's replication stream from
 the peer is down; D2, the takeover half then takes every such call over at once; D4, an
 undecided call's decision is asked again, on a verdict too, and a copy written over by
@@ -30,6 +28,8 @@ and stops its sweep; the residuals of a death no proxy reads dead and of a verdi
 is spent.
 Amended (2026-11-05): D1, the probe keeps reading a worker after its flip, so a death after
 a refuted flip is a verdict; the residuals narrowed to a process that never answered.
+Amended (2026-11-07): D2, only an `Active` call is taken over for an awaited answer: a
+request is made for its answer, and an ending call needs none (ADR-0039 decision 5).
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),

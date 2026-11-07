@@ -1,5 +1,5 @@
-//! The requests a call awaits answers to, sent again from its record by the
-//! node that now serves it (ADR-0039, ADR-0055 §1): the turn that sends them
+//! The requests a call served from its record awaits answers to, sent again
+//! (ADR-0039, ADR-0055 §1): the turn that sends them
 //! retires the deadline its sender armed, and an admit the request carries is
 //! numbered above every change the call reserved before
 //! ([`call::CallLimiterState::renumber_consult`],

@@ -260,6 +260,6 @@ async fn end_cleanly(
     ];
     let actions = off_wire::Actions { topic: DIVERGED, list, owners };
     let ending = off_wire::Ending::Actions { before: call, actions };
-    let label = "the clean end of two diverged copies";
+    let label = &"the clean end of two diverged copies";
     off_wire::end(ctx, call_ref, ending, off_wire::Caller::Answer, now_ms, label).await;
 }

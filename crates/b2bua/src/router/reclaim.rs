@@ -12,7 +12,7 @@ use call::CallModelState;
 use super::off_wire;
 use super::restore_hygiene::reanchor;
 use super::RouterCtx;
-use crate::store::{role_of, CallTopology, Enveloped, MaterialiseOrigin, PartitionRole};
+use crate::store::{role_of, CallTopology, Enveloped, PartitionRole};
 
 mod bulk;
 mod diverged;
@@ -70,35 +70,10 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
         // A reverse-flushed deferral for a call we no longer hold live (the
         // reactive straggler equivalent of the reboot-reclaim terminal).
         None => {
-            if replica.call.state == CallModelState::Terminated {
-                let cause = super::ended_body::Cause::ReverseFlush;
-                super::ended_body::pay(ctx, call_ref, cause, replica, now_ms).await;
-            }
+            let cause = super::ended_body::Cause::ReverseFlush;
+            super::ended_body::pay(ctx, call_ref, cause, replica, now_ms).await;
         }
     }
-}
-
-/// Materialise a not-live ended body and discharge it off the wire
-/// ([`off_wire::Ending::Reached`]): a `Terminated` body as it is, the
-/// reconcile's and the reclaim's; a `forced` one with every leg forced
-/// terminal and a CDR appended, the departure's and the reap's of a body
-/// caught mid-teardown. Materialise-first so `backup_of` resolves and the
-/// propagated delete reaches the peer. The caller holds the per-call lock.
-/// No-op when already resident; returns whether it discharged the body.
-pub(super) async fn discharge_materialized_terminal(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    terminal: Enveloped,
-    now_ms: i64,
-    forced: bool,
-) -> bool {
-    if !ctx.state.materialize_if_absent(terminal.clone(), MaterialiseOrigin::Reclaim) {
-        return false;
-    }
-    let ending = off_wire::Ending::Reached { body: terminal.call, forced };
-    let label = "the discharge of a materialised terminal body";
-    off_wire::end(ctx, call_ref, ending, off_wire::Caller::Leave, now_ms, label).await;
-    true
 }
 
 /// A call's `(p,b)` version vector rendered for a lifecycle line (`-` when
@@ -206,7 +181,7 @@ pub(super) async fn meet_refused_flush(
 pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) {
     let Some(call) = ctx.state.peek(call_ref) else { return };
     let ending = off_wire::Ending::Forced { before: &call };
-    let label = "the reaper discharge";
+    let label = &"the reaper discharge";
     off_wire::end(ctx, call_ref, ending, off_wire::Caller::Answer, now_ms, label).await;
 }
 

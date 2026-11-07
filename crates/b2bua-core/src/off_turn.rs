@@ -2,8 +2,8 @@
 //! are awaited ([`call::OffTurnRequest`], ADR-0039, ADR-0055 §1): the landing
 //! pass writes each request the turn sends into the record it lands, so the
 //! write carries the request before the request leaves, and the answer, or
-//! its deadline's expiry, takes it off before the rules read the event. A
-//! node that serves an `Active` call from the record sends what is left again
+//! its deadline's expiry, takes it off before the rules read the event. An
+//! `Active` call served from its record sends what is left again
 //! ([`resend`]).
 
 use call::{Call, CallModelState, OffTurnRequest, TimerType};

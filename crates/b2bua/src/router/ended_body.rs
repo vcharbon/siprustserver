@@ -6,13 +6,15 @@
 //! request the body awaits an answer to is sent again: a request the B2BUA
 //! sends is made for its answer, and an ended or ending call needs none.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use call::{Call, CallModelState};
 
-use super::reclaim::discharge_materialized_terminal;
+use super::off_wire;
 use super::RouterCtx;
-use crate::store::Enveloped;
+use crate::store::{Enveloped, MaterialiseOrigin};
 
 /// Why this node met an ended body it holds no live copy of.
 #[derive(Clone, Copy, Debug)]
@@ -50,9 +52,11 @@ pub(super) struct Disposition {
 }
 
 /// What `body`, met for `cause`, is owed:
-/// - a departure, a reclaim and a reverse flush discharge it, forced when it
-///   is `Terminating`, after its owed final: the node that wrote the body
-///   may have died before the final left;
+/// - a departure and a reclaim discharge it, forced when it is
+///   `Terminating`, after its owed final: the node that wrote the body may
+///   have died before the final left;
+/// - a reverse flush does so for a `Terminated` body alone: the acting
+///   backup still serves one that is ending;
 /// - a dead verdict sends the owed final and, while the verdict holds, the
 ///   limiter release, and leaves the discharge to the departure;
 /// - a ghost is discharged forced, with no final: no node ended it, so its
@@ -65,7 +69,11 @@ pub(super) fn disposition(cause: Cause, body: &Call) -> Disposition {
         _ => Discharge::AsIs,
     };
     let (owed_final, limiter_release, discharge) = match cause {
-        Cause::Departed | Cause::Reclaim | Cause::ReverseFlush => (true, false, Some(as_found)),
+        Cause::Departed | Cause::Reclaim => (true, false, Some(as_found)),
+        Cause::ReverseFlush if body.state == CallModelState::Terminated => {
+            (true, false, Some(Discharge::AsIs))
+        }
+        Cause::ReverseFlush => (false, false, None),
         Cause::ReadDead { still } => (true, still, None),
         Cause::Ghost => (false, false, Some(Discharge::Forced)),
         Cause::Evicted => (false, true, None),
@@ -82,25 +90,47 @@ pub(super) struct Paid {
 
 /// Pay `body` of `call_ref` what it is owed for `cause` at `now_ms`
 /// ([`disposition`]): the owed final first, then the limiter release, then
-/// the discharge. A discharge needs the per-call lock held.
-pub(super) async fn pay(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
+/// the discharge. A discharge needs the per-call lock held. Boxed: a body
+/// met ended is rare, and the turns that may meet one stay small.
+pub(super) fn pay<'a>(
+    ctx: &'a Arc<RouterCtx>,
+    call_ref: &'a str,
     cause: Cause,
     body: Enveloped,
     now_ms: i64,
-) -> Paid {
-    let owed = disposition(cause, &body.call);
-    if owed.owed_final {
-        super::owed_final::deliver(ctx, call_ref, &body.call).await;
-    }
-    let released = owed.limiter_release && super::owed_limiter_key::release(ctx, &body.call);
-    let discharged = match owed.discharge {
-        Some(how) => {
-            let forced = how == Discharge::Forced;
-            discharge_materialized_terminal(ctx, call_ref, body, now_ms, forced).await
+) -> Pin<Box<dyn Future<Output = Paid> + Send + 'a>> {
+    Box::pin(async move {
+        let owed = disposition(cause, &body.call);
+        if owed.owed_final {
+            super::owed_final::deliver(ctx, call_ref, &body.call).await;
         }
-        None => false,
-    };
-    Paid { discharged, released }
+        let released = owed.limiter_release && super::owed_limiter_key::release(ctx, &body.call);
+        let discharge = owed.discharge.and_then(|how| discharge(ctx, call_ref, body, now_ms, how));
+        let discharged = discharge.is_some();
+        if let Some(commit) = discharge {
+            commit.await;
+        }
+        Paid { discharged, released }
+    })
 }
+
+/// The discharge of `body` off the wire ([`off_wire::Ending::Reached`]),
+/// materialised first so `backup_of` resolves and the propagated delete
+/// reaches the peer; `None` when the call is already resident.
+fn discharge<'a>(
+    ctx: &'a Arc<RouterCtx>,
+    call_ref: &'a str,
+    body: Enveloped,
+    now_ms: i64,
+    how: Discharge,
+) -> Option<impl Future<Output = ()> + Send + 'a> {
+    if !ctx.state.materialize_if_absent(body.clone(), MaterialiseOrigin::Reclaim) {
+        return None;
+    }
+    let ending = off_wire::Ending::Reached { body: body.call, forced: how == Discharge::Forced };
+    let label = &"the discharge of a body met ended";
+    Some(off_wire::end(ctx, call_ref, ending, off_wire::Caller::Leave, now_ms, label))
+}
+
+#[cfg(test)]
+mod tests;
