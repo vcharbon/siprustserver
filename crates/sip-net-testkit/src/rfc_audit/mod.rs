@@ -41,15 +41,19 @@ use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::types::{all_ua_roles, UaRole};
 
 /// The audit layer's reading of the recorded bytes: a tool's reading, lenient
-/// (`wire_grammar = false`, ADR-0053 §6) with every bound off. A strict reading
-/// refuses a malformed message before a rule sees it (a `Via` branch lacking
-/// the magic cookie, say), and the grammar rules would never fire; read
-/// leniently, the rule, not the parser, flags the violation. What crossed the
-/// wire is judged whatever its size: a deployment's bounds decide only what it
-/// accepts.
+/// (`wire_grammar = false`, ADR-0053 §6) with every bound and value gate off. A
+/// strict reading refuses a malformed message before a rule sees it (a `Via`
+/// branch lacking the magic cookie, say), and the grammar rules would never
+/// fire; read leniently, the rule, not the parser, flags the violation. A
+/// request a stack under test refused at ingress (a repeated single-valued
+/// header, an unreadable `Expires`) is read too: its CSeq and branch are what
+/// the refusal answers and what the dialog's next request follows. What crossed
+/// the wire is judged whatever its size: a deployment's bounds decide only what
+/// it accepts.
 pub(crate) fn lenient_parser() -> CustomParser {
     CustomParser::tool(SipParserLimits {
         wire_grammar: false,
+        value_gates: false,
         max_header_length: usize::MAX,
         max_uri_length: usize::MAX,
         max_header_lines: usize::MAX,

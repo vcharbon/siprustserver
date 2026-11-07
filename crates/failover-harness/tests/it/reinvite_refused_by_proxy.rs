@@ -19,17 +19,6 @@ use crate::call_terminate_on_backup::{
 };
 use crate::inflight_resend::{split_mut, REANSWER};
 
-/// What the audit makes of a request the strict parser refused: it never reads
-/// the INVITE, so the 400 and the ACK answer nothing it saw, and the next request
-/// seems to skip a CSeq. The findings are the audit's own; the gates that judge
-/// this path in full are the refusals it can read.
-const UNREADABLE_REQUEST_FINDINGS: [&str; 4] = [
-    "ack-cseq-matches-invite",
-    "cseq-in-dialog-order",
-    "response-cseq-matches-transaction",
-    "response-correlation",
-];
-
 /// Nothing further reaches either party, then the call ends by alice's BYE and
 /// leaves nothing behind.
 async fn the_call_stays_up_then_hangs_up(est: &mut Established) {
@@ -136,10 +125,6 @@ async fn a_reinvite_requiring_an_unknown_extension_leaves_the_call_up() {
 #[tokio::test(start_paused = true)]
 async fn a_parse_refused_reinvite_leaves_the_call_up() {
     let mut est = establish("reinvite-refused-400").await;
-    for rule in UNREADABLE_REQUEST_FINDINGS {
-        est.fh
-            .allow_rfc_violation(rule, "the audit cannot read a request the strict parser refused");
-    }
     refused_round(&mut est, Some(("Expires", "soon")), None, 400).await;
     the_call_stays_up_then_hangs_up(&mut est).await;
     ignored(&est, 1);

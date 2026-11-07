@@ -16,18 +16,6 @@ const ABOVE_THE_LAST: u32 = 1002;
 const BOB_ANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n";
 const OFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 
-/// What the audit makes of a request the strict parser refused, by the party it
-/// charges: it never reads the INVITE, so the worker's correct 400 and alice's ACK
-/// answer nothing it saw, and her next request seems to skip a CSeq. The findings
-/// are the audit's own; the gates that judge this path in full are the refusals it
-/// can read.
-const UNREADABLE_REQUEST_FINDINGS: [(&str, &str); 4] = [
-    ("ack-cseq-matches-invite", "alice"),
-    ("cseq-in-dialog-order", "alice"),
-    ("response-cseq-matches-transaction", "b2bua"),
-    ("response-correlation", "b2bua"),
-];
-
 fn named(msg: Option<SipMessage>) -> Option<(u32, String)> {
     msg.map(|m| (m.cseq().seq(), m.cseq().method().as_str().to_string()))
 }
@@ -73,12 +61,6 @@ async fn an_ack_above_the_last_cseq_with_no_invite_leaves_the_call_up() {
 #[tokio::test(start_paused = true)]
 async fn the_ack_of_the_workers_parse_refusal_of_a_reinvite_leaves_the_call_up() {
     let s = B2buaScene::new("worker-parse-refused-reinvite").await;
-    for (rule, party) in UNREADABLE_REQUEST_FINDINGS {
-        s.h.waive(
-            WaiverScope::rule(rule, "the audit cannot read a request the strict parser refused")
-                .on_party(party),
-        );
-    }
     let mut dialog = s.establish().await;
     let remote_tag = dialog.remote_tag().to_string();
     let mut round = dialog

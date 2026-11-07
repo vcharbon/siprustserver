@@ -82,6 +82,7 @@ mod going_away_gate;
 mod header_lines;
 mod held_request;
 mod in_dialog_identity;
+mod in_dialog_parse_refusal;
 mod in_dialog_request_uri_not_ours;
 mod info_body_relay;
 mod initial_admit_bound;
