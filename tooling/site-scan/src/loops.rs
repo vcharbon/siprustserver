@@ -4,9 +4,11 @@
 //! collection's `len()` (an immutable local bound to one of those is one too;
 //! a wide integer type's `MAX` is none), where it is iterated: in a `for`, as a
 //! method's receiver or as an iterator argument, itself or through the local
-//! it is bound to. A macro's own body is not read, nor the initializer of a
-//! `const` or `static` item or an inline `const` block: the compiler
-//! evaluates those, and its evaluation limit ends them.
+//! it is bound to. A macro's own body is not read. A `loop` or `while` the
+//! compiler evaluates, in the initializer of a `const` or `static` item or an
+//! inline `const` block, is none: its evaluation limit ends it. A closure,
+//! an `async` block or an item inside such an initializer runs as any other
+//! code and is read as such.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,6 +38,7 @@ pub fn sites(module: &Module, scope: &Scope) -> Vec<Site> {
         sites: Vec::new(),
         locals: BTreeSet::new(),
         ranges: BTreeMap::new(),
+        const_eval: false,
     };
     for item in &module.items {
         v.visit_item(item);
@@ -52,9 +55,18 @@ struct Loops<'a> {
     locals: BTreeSet<String>,
     /// The locals bound to a range whose end is not bounded, and its span.
     ranges: BTreeMap<String, proc_macro2::Span>,
+    /// Whether the code being read is evaluated by the compiler.
+    const_eval: bool,
 }
 
 impl Loops<'_> {
+    /// Reads with `const_eval` set to `on`, then restores it.
+    fn reading(&mut self, on: bool, read: impl FnOnce(&mut Self)) {
+        let outer = std::mem::replace(&mut self.const_eval, on);
+        read(self);
+        self.const_eval = outer;
+    }
+
     fn site(&mut self, span: proc_macro2::Span, message: &str) {
         self.sites.push(Site::at(self.file, span, Set::Loop, message.to_string()));
     }
@@ -148,19 +160,37 @@ impl<'ast> Visit<'ast> for Loops<'_> {
 
     fn visit_item(&mut self, item: &'ast Item) {
         if !test_only(crate::modules::attrs_of(item)) {
-            visit::visit_item(self, item);
+            self.reading(false, |v| visit::visit_item(v, item));
         }
     }
 
-    fn visit_item_const(&mut self, _: &'ast syn::ItemConst) {}
+    fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+        self.reading(true, |v| visit::visit_item_const(v, item));
+    }
 
-    fn visit_item_static(&mut self, _: &'ast syn::ItemStatic) {}
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        self.reading(true, |v| visit::visit_item_static(v, item));
+    }
 
-    fn visit_impl_item_const(&mut self, _: &'ast syn::ImplItemConst) {}
+    fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
+        self.reading(true, |v| visit::visit_impl_item_const(v, item));
+    }
 
-    fn visit_trait_item_const(&mut self, _: &'ast syn::TraitItemConst) {}
+    fn visit_trait_item_const(&mut self, item: &'ast syn::TraitItemConst) {
+        self.reading(true, |v| visit::visit_trait_item_const(v, item));
+    }
 
-    fn visit_expr_const(&mut self, _: &'ast syn::ExprConst) {}
+    fn visit_expr_const(&mut self, block: &'ast syn::ExprConst) {
+        self.reading(true, |v| visit::visit_expr_const(v, block));
+    }
+
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        self.reading(false, |v| visit::visit_expr_closure(v, closure));
+    }
+
+    fn visit_expr_async(&mut self, block: &'ast syn::ExprAsync) {
+        self.reading(false, |v| visit::visit_expr_async(v, block));
+    }
 
     fn visit_item_impl(&mut self, imp: &'ast ItemImpl) {
         let trait_ = imp.trait_.as_ref().and_then(|(_, path, _)| path.segments.last());
@@ -189,8 +219,8 @@ impl<'ast> Visit<'ast> for Loops<'_> {
 
     fn visit_expr(&mut self, expr: &'ast Expr) {
         match expr {
-            Expr::Loop(l) => self.site(l.loop_token.span, "`loop`"),
-            Expr::While(w) => self.site(w.while_token.span, "`while`"),
+            Expr::Loop(l) if !self.const_eval => self.site(l.loop_token.span, "`loop`"),
+            Expr::While(w) if !self.const_eval => self.site(w.while_token.span, "`while`"),
             Expr::ForLoop(f) => self.iterated(&f.expr),
             Expr::MethodCall(m) => {
                 if m.method == "cycle" && m.args.is_empty() {

@@ -59,6 +59,12 @@ fn a_loop_the_compiler_evaluates_is_no_site() {
 }
 
 #[test]
+fn runtime_code_inside_a_constant_is_read() {
+    let t = lib("static A: std::sync::LazyLock<u8> = std::sync::LazyLock::new(|| loop { break 1; });\nconst B: fn(&[u8]) -> usize = |s| { let mut i = 0; while s.get(i).is_some() { i += 1; } i };\nconst C: fn() -> u8 = { fn spin() -> u8 { loop {} } spin };\nconst D: () = { struct S; impl Iterator for S { type Item = u8; fn next(&mut self) -> Option<u8> { None } } };\nconst E: u8 = { let mut n = 0; while n < 3 { n += 1; } n };\n");
+    assert_eq!(t.lines(Set::Loop), vec![1, 2, 3, 4]);
+}
+
+#[test]
 fn a_for_over_a_collection_or_a_bounded_range_is_no_site() {
     let t = lib("const N: usize = 4;\nfn f(v: &[u8]) {\n    for _ in v {}\n    for _ in 0..N {}\n    for _ in 0..v.len() - 1 {}\n    for _ in 0..=u8::MAX {}\n    for _ in (0..v.len()).rev() {}\n    let _ = (0..v.len()).contains(&3);\n}\n");
     assert_eq!(t.lines(Set::Loop), Vec::<usize>::new());

@@ -499,8 +499,9 @@ fn the_head_ends_where_the_parser_s_scanner_ends_it() {
         b"INFO sip:b SIP/2.0\r\nContent-Length: 3\r\n\rv=0",
         b"INFO sip:b SIP/2.0\r\nContent-Length: 6\r\n\r\n\x00\xff\r\n\r\n",
     ] {
-        assert_eq!(head_end(raw), header_block(raw).end, "{raw:?}");
-        assert_eq!(body(raw), Some(&raw[header_block(raw).end..]), "{raw:?}");
+        let end = header_block(raw).expect("a header block").end;
+        assert_eq!(head_end(raw), end, "{raw:?}");
+        assert_eq!(body(raw), Some(&raw[end..]), "{raw:?}");
     }
     assert_eq!(body(b"INFO sip:b SIP/2.0\rContent-Length: 3\r"), None, "unterminated by CR");
 }

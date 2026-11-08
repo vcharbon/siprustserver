@@ -154,10 +154,12 @@ same allowlist as the panic set:
   excluded. A loop is a `for` over a finite collection or such a range, or the
   helper `bounds::bounded(max, …)`, which charges one unit per iteration and
   returns an error past `max`; the `bounds` crate holding it is outside the
-  set. The initializer of a `const` or `static` item and an inline `const`
-  block are outside it too: the compiler evaluates them, under its own
-  evaluation limit. With §2's caps, a turn's work is bounded. The shells'
-  event loops (`loop { select! }`) belong to no call and are not loop sites;
+  set. A `loop` or `while` the compiler evaluates, in the initializer of a
+  `const` or `static` item or an inline `const` block, is none: its
+  evaluation limit ends it; a closure, `async` block or item inside one runs
+  as other code does and is read as such. With §2's caps, a turn's work is
+  bounded. The shells' event loops (`loop { select! }`) belong to no call
+  and are not loop sites;
 - **recursion sites**, in every tiered crate: a cycle in a crate's call graph,
   direct or mutual, resolved by path: a path naming a function of the crate
   (`Trait::f` and `<T as Trait>::f` included), called or passed as a value,

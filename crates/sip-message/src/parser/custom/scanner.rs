@@ -77,7 +77,8 @@ impl BareBreak {
 /// Locate the blank line that ends the header block — the message's
 /// header/body split — and the first bare CR or LF before it. `end` is
 /// `raw.len()` when the datagram ends without a blank line, which a message's
-/// parse refuses (RFC 3261 §7) and a fragment's (RFC 3420 §2) accepts.
+/// parse refuses (RFC 3261 §7) and a fragment's (RFC 3420 §2) accepts. A scan
+/// that stalls ([`NoProgress`]) finds no block.
 ///
 /// A header line ends with CRLF and nowhere else; the parser refuses a block
 /// holding a bare CR or LF here, before any line of it is read, so no reader
@@ -89,7 +90,7 @@ impl BareBreak {
 /// alone becomes the decoded text image: a binary body can never be mangled by
 /// the decode, and the body is a slice of the original packet, not a copy. The
 /// line count rides along so the header list can be sized without a second scan.
-pub fn header_block(raw: &[u8]) -> HeaderBlock {
+pub fn header_block(raw: &[u8]) -> Result<HeaderBlock, NoProgress> {
     let mut s = Scanner::new(raw);
     let mut lines: usize = 0;
     let mut bare_break = None;
@@ -110,8 +111,7 @@ pub fn header_block(raw: &[u8]) -> HeaderBlock {
         lines = lines.saturating_add(1);
         Continue(())
     });
-    // A block whose end no walk finds has no blank line, which the parse refuses.
-    HeaderBlock { end: end.unwrap_or(raw.len()), lines, bare_break }
+    Ok(HeaderBlock { end: end?, lines, bare_break })
 }
 
 /// What one header line's value occupies in the image: the common case is a
@@ -412,7 +412,11 @@ mod tests {
             None => Break(None),
         });
         assert_eq!(colon, Ok(Some(3)));
-        let stuck: Result<(), _> = s.walk(|_| Continue(()));
-        assert_eq!(stuck, Err(NoProgress { at: 3 }));
+        let mut runs = 0;
+        let stuck: Result<(), _> = s.walk(|_| {
+            runs += 1;
+            Continue(())
+        });
+        assert_eq!((stuck, runs), (Err(NoProgress { at: 3 }), 1), "the first stalled step ends it");
     }
 }

@@ -202,6 +202,7 @@ fn from_messages(messages: &[Vec<u8>]) -> Corpus {
         if let Some(Ok(media_type)) = msg.header::<MediaType>() {
             if let Some(boundary) = media_type.params().value("boundary") {
                 add("multipart", multipart_input(boundary.as_bytes(), msg.body()));
+                add("no_progress", multipart_input(boundary.as_bytes(), msg.body()));
             }
         }
         for h in msg.headers() {

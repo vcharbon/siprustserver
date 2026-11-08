@@ -96,7 +96,7 @@ fn bounded_header_block(
     raw: &[u8],
     limits: &SipParserLimits,
 ) -> Result<scanner::HeaderBlock, SipParseError> {
-    let block = scanner::header_block(raw);
+    let block = scanner::header_block(raw)?;
     if block.lines > limits.max_header_lines {
         return Err(SipParseError::new(format!(
             "header block of {} lines exceeds limit {}",
@@ -194,7 +194,10 @@ impl CustomParser {
         if req.to().tag().is_some() {
             return None;
         }
-        let lines = scanner::header_block(req.image()).lines;
+        let lines = match scanner::header_block(req.image()) {
+            Ok(block) => block.lines,
+            Err(stall) => return Some(stall.into()),
+        };
         let uri_length = req.request_uri().text().len();
         self.limits.first_ingress.refusal(lines, uri_length, req.headers().iter())?;
         let at_first_ingress = SipParserLimits { at_first_ingress: true, ..self.limits.clone() };

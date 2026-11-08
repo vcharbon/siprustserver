@@ -20,7 +20,9 @@ use crate::parser::SipParserLimits;
 ///
 /// [`parse_headers`]: super::headers::parse_headers
 pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<String> {
-    let block = super::scanner::header_block(raw);
+    let Ok(block) = super::scanner::header_block(raw) else {
+        return Vec::new();
+    };
     if block.bare_break.is_some() {
         return Vec::new();
     }

@@ -100,8 +100,12 @@ mod tests {
 
     #[test]
     fn a_step_that_does_not_move_on_is_no_progress() {
-        let stuck: Result<(), _> = walk(b"abc", 1, ControlFlow::Continue);
-        assert_eq!(stuck, Err(NoProgress { at: 1 }));
+        let mut runs = 0;
+        let stuck: Result<(), _> = walk(b"abc", 1, |i| {
+            runs += 1;
+            ControlFlow::Continue(i)
+        });
+        assert_eq!((stuck, runs), (Err(NoProgress { at: 1 }), 1), "the first stalled step ends it");
     }
 
     #[test]
