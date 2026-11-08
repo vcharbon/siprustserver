@@ -11,10 +11,13 @@ mod call_lock;
 #[cfg(test)]
 mod call_lock_tests;
 mod call_store;
+mod census;
 pub mod containment;
 pub mod envelope;
 mod faults;
 mod flush_body;
+#[cfg(test)]
+mod gauges_tests;
 mod index;
 mod local_release;
 mod materialise;
@@ -51,7 +54,7 @@ pub use poison::{LOCKS, LOCK_RECOVERIES};
 pub use reconcile::Reconciled;
 pub use takeover::TakeoverProbe;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use call::{call_index_keys, Call, CallModelState, MsgpackCodec};
@@ -702,66 +705,32 @@ impl CallState {
         self.locked().touched.len()
     }
 
-    /// Push the store's map lengths into the memory-attribution gauges (one
-    /// brief lock). `calls.len()` is the TRUE live call-map size — compare to
-    /// `b2bua_active_calls` (creations - removals): a divergence is a store-side
-    /// leak the counter pair can't see. The sibling maps (`sip_index`,
-    /// `indexed`, `locks`, `takeover`) should track `calls`; one that grows
-    /// while it stays flat names the leaking map. Sampled periodically by the
-    /// runner — not on the hot path.
+    /// Push the store's map lengths into the memory-attribution gauges, and
+    /// the census of the calls they count (`census`). `calls.len()` is the
+    /// TRUE live call-map size — compare to `b2bua_active_calls` (creations -
+    /// removals): a divergence is a store-side leak the counter pair can't
+    /// see. The sibling maps (`sip_index`, `indexed`, `locks`, `takeover`)
+    /// should track `calls`; one that grows while it stays flat names the
+    /// leaking map. Sampled periodically by the runner — not on the hot path.
+    ///
+    /// The lock covers the lengths and one `Arc` clone per call; the census
+    /// walks that snapshot after it, so lengths and census describe one map.
     pub fn sample_store_gauges(&self) {
-        let inner = self.locked();
-        self.metrics.set_store_gauges(
-            inner.calls.len() as u64,
-            inner.sip_index.len() as u64,
-            inner.indexed.len() as u64,
-            inner.locks.len() as u64,
-            inner.takeover.len() as u64,
-            inner.touched.len() as u64,
-        );
-        // State-machine cursor census (ADR-0016): how many live calls
-        // rest at each (machine,state) cursor. Computed under the same brief lock
-        // so the distribution is consistent with the call-map size above, then
-        // pushed to the `b2bua_sm_cursors` gauge.
-        //
-        // Per-call Vec census (memory leak localisation): summed in the SAME pass
-        // — the count-gauges above bound the map sizes, these bound the bytes
-        // held INSIDE each call. The Vec whose sum/store_calls ratio climbs while
-        // every count is flat is the leak (a held OPTIONS-hold/re-INVITE dialog's
-        // per-event tail never pruned till terminal).
-        let mut census: BTreeMap<(String, String), u64> = BTreeMap::new();
-        let (
-            mut cdr,
-            mut pend,
-            mut pend_max,
-            mut dialogs,
-            mut rset,
-            mut timers,
-            mut tagmap,
-            mut blegs,
-        ) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
-        for call in inner.calls.values() {
-            for (machine, state) in &call.sm_cursors {
-                *census
-                    .entry((machine.as_str().to_string(), state.as_str().to_string()))
-                    .or_insert(0) += 1;
-            }
-            cdr += call.cdr_events.len() as u64;
-            timers += call.timers.len() as u64;
-            tagmap += call.a_leg.dialogs.iter().map(|d| d.fronts.len() as u64).sum::<u64>();
-            blegs += call.b_legs.len() as u64;
-            let mut call_pend = 0u64;
-            for leg in std::iter::once(&call.a_leg).chain(call.b_legs.iter()) {
-                dialogs += leg.dialogs.len() as u64;
-                for d in &leg.dialogs {
-                    rset += d.route_set.len() as u64;
-                    call_pend += d.requests.len() as u64;
-                }
-            }
-            pend += call_pend;
-            pend_max = pend_max.max(call_pend);
-        }
-        self.metrics.set_sm_cursor_census(census);
-        self.metrics.set_call_census(cdr, pend, pend_max, dialogs, rset, timers, tagmap, blegs);
+        let (lengths, calls) = {
+            let inner = self.locked();
+            let lengths = [
+                inner.calls.len(),
+                inner.sip_index.len(),
+                inner.indexed.len(),
+                inner.locks.len(),
+                inner.takeover.len(),
+                inner.touched.len(),
+            ]
+            .map(|n| n as u64);
+            (lengths, inner.calls.values().cloned().collect::<Vec<Arc<Call>>>())
+        };
+        let [calls_len, sip_index, indexed, locks, takeover, touched] = lengths;
+        self.metrics.set_store_gauges(calls_len, sip_index, indexed, locks, takeover, touched);
+        census::publish(&self.metrics, &calls);
     }
 }

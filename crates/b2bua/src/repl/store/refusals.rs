@@ -131,6 +131,10 @@ impl Unbacked {
     pub(super) fn len(&self) -> usize {
         self.0.len()
     }
+
+    pub(super) fn refs(&self) -> HashSet<String> {
+        self.0.clone()
+    }
 }
 
 #[cfg(test)]

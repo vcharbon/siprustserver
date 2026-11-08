@@ -6,7 +6,7 @@ use super::*;
 use crate::admission::{first_refusal, Class, Refused, RouterReadings};
 use crate::capacity::CapacityReading;
 use crate::new_calls::Refusal;
-use load_shed::{simulated, SimulatedLoadControl};
+use load_shed::{simulated, LoadSampler, SimulatedLoadControl};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -337,6 +337,60 @@ async fn prometheus_text_renders_the_rung_inputs() {
     assert!(txt.contains("b2bua_overload_elu_ewma 0.42"));
     assert!(txt.contains("# TYPE b2bua_overload_elu_ewma gauge"));
     assert!(txt.contains("b2bua_overload_gc_fraction 0"));
+}
+
+/// A [`LoadSampler`] whose `elu()` announces itself, then blocks until
+/// released, standing in for a sampler stuck in a slow `/proc` read.
+struct BlockingSampler {
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl LoadSampler for BlockingSampler {
+    fn elu(&self) -> f64 {
+        let _ = self.entered.send(());
+        let _ = self.release.lock().map(|rx| rx.recv());
+        0.5
+    }
+    fn gc_fraction(&self) -> f64 {
+        0.0
+    }
+}
+
+/// A sampler read in progress holds no lock a new call or an OPTIONS reply
+/// takes: the admission rungs and the header answer while `elu()` blocks,
+/// and the reading lands in the EWMA once it returns.
+#[test]
+fn a_blocked_sampler_read_holds_up_neither_admission_nor_the_header() {
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sampler = BlockingSampler { entered: entered_tx, release: release_rx.into() };
+    let sig = OverloadSignal::new(Arc::new(sampler));
+
+    let sampling = std::thread::spawn({
+        let sig = sig.clone();
+        move || sig.sample()
+    });
+    entered_rx.recv_timeout(Duration::from_secs(5)).expect("the sampler read started");
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn({
+        let sig = sig.clone();
+        move || {
+            let admitted = admit(&sig, false);
+            let header = sig.x_overload_header_value();
+            let _ = done_tx.send((admitted, header));
+        }
+    });
+    let answered = done_rx.recv_timeout(Duration::from_secs(1));
+    release_tx.send(()).expect("the sampler waits for its release");
+    sampling.join().expect("the sample completes");
+    reader.join().expect("the reader completes");
+
+    let (admitted, header) = answered.expect("admission and the header answer during the read");
+    assert_eq!(admitted, Ok(()));
+    assert_eq!(header, "v=1; elu=0.000; gc=0.000; adm=0");
+    assert!((sig.metrics().elu_ewma - 0.5).abs() < 1e-9, "the reading lands once it returns");
 }
 
 // --- test-local header helpers ---------------------------------------------

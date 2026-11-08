@@ -27,7 +27,6 @@
 //! Elements are structurally absent from the live map. The sweep adds no
 //! time-based input to HA reconciliation.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use call::helpers::record_termination;
@@ -40,10 +39,21 @@ use crate::metrics::B2buaMetrics;
 use crate::poison::{locked, REAPER_LEDGERS};
 use crate::store::{CallState, Reconciled};
 use b2bua_sdk::event::CallEvent;
+use ledger::{Ledger, Stamp};
+
+mod ledger;
 
 /// One of the reaper's ledgers ([`REAPER_LEDGERS`]).
 fn ledger<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     locked(m, REAPER_LEDGERS)
+}
+
+/// Remove from `m` the `judged` entries no write touched since they were
+/// listed; no lock is taken for nothing to remove.
+fn prune<V: Default>(m: &Mutex<Ledger<V>>, judged: Vec<(String, Stamp)>) {
+    if !judged.is_empty() {
+        ledger(m).prune(judged);
+    }
 }
 
 pub use crate::reaper_verdict::{
@@ -79,23 +89,23 @@ pub struct Reaper {
     idle_max_ms: i64,
     /// Panic/abort/trip strikes per call_ref (the X6 two-strike ladder).
     /// Pruned at the call's release, and against the live map each sweep.
-    strikes: Arc<Mutex<HashMap<String, u32>>>,
+    strikes: Arc<Mutex<Ledger<u32>>>,
     /// Stale-verdict attempts per call_ref (the abort/discharge escalation).
-    attempts: Arc<Mutex<HashMap<String, u32>>>,
+    attempts: Arc<Mutex<Ledger<u32>>>,
     /// Overflow-verdict attempts per call_ref, a ladder of their own so a call
     /// both stale and condemned climbs one rung per sweep on each.
-    condemned_attempts: Arc<Mutex<HashMap<String, u32>>>,
+    condemned_attempts: Arc<Mutex<Ledger<u32>>>,
     /// Calls whose in-flight body the overflow ladder aborted and whose
     /// `Aborted` report is still due: that report is no handler failure (the
     /// call's own overflow verdict is queued behind the body), so it strikes
     /// nothing.
-    overflow_aborts: Arc<Mutex<HashSet<String>>>,
+    overflow_aborts: Arc<Mutex<Ledger<()>>>,
     /// Calls that crossed their lifetime message cap and were sent their one
     /// verdict. Pruned against the live map each sweep.
-    capped: Arc<Mutex<HashSet<String>>>,
+    capped: Arc<Mutex<Ledger<()>>>,
     /// Calls whose dispatch overflow reached its ceiling: swept while Active.
     /// Pruned each sweep.
-    condemned: Arc<Mutex<HashSet<String>>>,
+    condemned: Arc<Mutex<Ledger<()>>>,
     reentry_tx: mpsc::UnboundedSender<CallEvent>,
     metrics: B2buaMetrics,
 }
@@ -117,12 +127,12 @@ impl Reaper {
                 .unwrap_or(1)
                 .saturating_mul(1000),
             idle_max_ms,
-            strikes: Arc::new(Mutex::new(HashMap::new())),
-            attempts: Arc::new(Mutex::new(HashMap::new())),
-            condemned: Arc::new(Mutex::new(HashSet::new())),
-            condemned_attempts: Arc::new(Mutex::new(HashMap::new())),
-            overflow_aborts: Arc::new(Mutex::new(HashSet::new())),
-            capped: Arc::new(Mutex::new(HashSet::new())),
+            strikes: Arc::default(),
+            attempts: Arc::default(),
+            condemned: Arc::default(),
+            condemned_attempts: Arc::default(),
+            overflow_aborts: Arc::default(),
+            capped: Arc::default(),
             reentry_tx,
             metrics,
         }
@@ -145,11 +155,11 @@ impl Reaper {
         }
         let strike = {
             let mut strikes = ledger(&self.strikes);
-            let struck = strikes.contains_key(call_ref);
+            let struck = strikes.contains(call_ref);
             if matches!(failure, HandlerFailure::Tripped(t) if !t.verdict) && struck {
                 return;
             }
-            let s = strikes.entry(call_ref.to_string()).or_insert(0);
+            let (s, _) = strikes.write(call_ref);
             *s += 1;
             *s
         };
@@ -177,7 +187,7 @@ impl Reaper {
     /// stale escalation (abort, discharge) until it is gone. Once per call,
     /// so a flood sends one verdict, not one per refused event.
     pub fn on_overflow_ceiling(&self, call_ref: &str) {
-        if self.enabled && ledger(&self.condemned).insert(call_ref.to_string()) {
+        if self.enabled && ledger(&self.condemned).write(call_ref).1 {
             self.send_verdict(call_ref, OUTCOME_OVERFLOW, serde_json::json!({}));
         }
     }
@@ -187,7 +197,7 @@ impl Reaper {
     /// admitted past every bound and the call's requests are refused from
     /// then on, so one is enough.
     pub fn on_lifetime_cap(&self, call_ref: &str) {
-        if ledger(&self.capped).insert(call_ref.to_string()) {
+        if ledger(&self.capped).write(call_ref).1 {
             self.send_verdict(call_ref, OUTCOME_MESSAGE_CAP, serde_json::json!({}));
         }
     }
@@ -247,13 +257,12 @@ impl Reaper {
         // A condemned call that left Active has its teardown under way, bounded
         // by `TerminatingTimeout`: it needs no further verdict. A takeover copy
         // is its self-release's (ADR-0020 X3).
-        let condemned: Vec<String> = {
-            let mut set = ledger(&self.condemned);
-            set.retain(|r| {
-                state.model_state(r) == Some(CallModelState::Active) && !state.is_takeover(r)
-            });
-            set.iter().cloned().collect()
-        };
+        let listed = ledger(&self.condemned).listed();
+        let (condemned, done): (Vec<_>, Vec<_>) = listed.into_iter().partition(|(r, _)| {
+            state.model_state(r) == Some(CallModelState::Active) && !state.is_takeover(r)
+        });
+        prune(&self.condemned, done);
+        let condemned: Vec<String> = condemned.into_iter().map(|(r, _)| r).collect();
         // Condemned calls keep a share of the budget however many are stale.
         let reserved = condemned.len().min(CONDEMNED_SHARE_PER_SWEEP);
         let mut budget = MAX_VERDICTS_PER_SWEEP;
@@ -277,13 +286,29 @@ impl Reaper {
                 (OUTCOME_OVERFLOW, serde_json::json!({}))
             });
         }
-        // Prune escalation state for calls no longer resident (normal
-        // termination, reap completed, self-release) — bounded by live calls.
-        ledger(&self.strikes).retain(|r, _| state.contains(r));
-        ledger(&self.attempts).retain(|r, _| state.contains(r));
-        ledger(&self.condemned_attempts).retain(|r, _| state.contains(r));
-        ledger(&self.overflow_aborts).retain(|r| state.contains(r));
-        ledger(&self.capped).retain(|r| state.contains(r));
+        self.prune_released(state, || ());
+    }
+
+    /// Prune the escalation state of calls no longer resident (normal
+    /// termination, reap completed, self-release) — bounded by live calls.
+    /// Each ledger is listed under its lock and judged against the call map
+    /// after it; `between` runs then, before the removals, which spare an
+    /// entry written since its listing (a call re-created on its callRef).
+    fn prune_released(&self, state: &CallState, between: impl FnOnce()) {
+        let gone = |listed: Vec<(String, Stamp)>| -> Vec<(String, Stamp)> {
+            listed.into_iter().filter(|(r, _)| !state.contains(r)).collect()
+        };
+        let strikes = gone(ledger(&self.strikes).listed());
+        let attempts = gone(ledger(&self.attempts).listed());
+        let condemned_attempts = gone(ledger(&self.condemned_attempts).listed());
+        let overflow_aborts = gone(ledger(&self.overflow_aborts).listed());
+        let capped = gone(ledger(&self.capped).listed());
+        between();
+        prune(&self.strikes, strikes);
+        prune(&self.attempts, attempts);
+        prune(&self.condemned_attempts, condemned_attempts);
+        prune(&self.overflow_aborts, overflow_aborts);
+        prune(&self.capped, capped);
     }
 
     /// One rung of `call_ref`'s escalation on `ladder`: the verdict `verdict`
@@ -295,7 +320,7 @@ impl Reaper {
     /// nothing.
     fn climb(
         &self,
-        ladder: &Mutex<HashMap<String, u32>>,
+        ladder: &Mutex<Ledger<u32>>,
         call_ref: &str,
         in_flight: &InFlight,
         overflow: bool,
@@ -303,7 +328,7 @@ impl Reaper {
     ) {
         let attempt = {
             let mut attempts = ledger(ladder);
-            let a = attempts.entry(call_ref.to_string()).or_insert(0);
+            let (a, _) = attempts.write(call_ref);
             *a += 1;
             *a
         };
@@ -313,7 +338,7 @@ impl Reaper {
         }
         if attempt > ESCALATE_ABORT_AFTER {
             if overflow {
-                ledger(&self.overflow_aborts).insert(call_ref.to_string());
+                ledger(&self.overflow_aborts).write(call_ref);
             }
             if !in_flight.abort(call_ref) && overflow {
                 ledger(&self.overflow_aborts).remove(call_ref);

@@ -250,3 +250,53 @@ fn trips_strike_once_until_the_verdict_s_own_turn_trips_and_release_forgets() {
     reaper.report("c1", trip(false));
     assert_eq!(outcomes(&mut rx), vec![OUTCOME_FATAL], "a released call's strikes are gone");
 }
+
+/// The call `flood{n}` of [`condemned_rig`], created again on its callRef.
+fn recreate(state: &CallState, n: usize) -> String {
+    let invite = test_support::invite("w0", "w1", &format!("flood{n}"));
+    let src = "10.0.0.9:5060".parse().unwrap();
+    let config = B2buaConfig::default();
+    state.create_placed(build_initial_call(&invite, src, &config, &mut TurnIds::fixed(1), 0))
+}
+
+/// A sweep prunes every ledger entry of a call released without the
+/// reaper's `forget`, and keeps the entries of the calls still resident.
+#[tokio::test]
+async fn a_sweep_prunes_the_ledgers_of_a_released_call() {
+    let (reaper, _rx, state, refs) = condemned_rig(2);
+    for r in &refs {
+        reaper.report(r, HandlerFailure::Panicked);
+        reaper.on_lifetime_cap(r);
+    }
+    state.remove(&refs[0]);
+    reaper.maybe_sweep(&state, &InFlight::default(), 0);
+    assert!(!ledger(&reaper.strikes).contains(&refs[0]));
+    assert!(!ledger(&reaper.capped).contains(&refs[0]));
+    assert!(ledger(&reaper.strikes).contains(&refs[1]));
+    assert!(ledger(&reaper.capped).contains(&refs[1]));
+}
+
+/// An entry written between a prune's listing and its removals stays: a
+/// strike of a call re-created on a released callRef, and a strike of a call
+/// that was not listed. An entry of the released call left as it was goes.
+#[tokio::test]
+async fn a_prune_keeps_the_entries_written_while_it_judged() {
+    let (reaper, mut rx, state, refs) = condemned_rig(2);
+    reaper.report(&refs[0], HandlerFailure::Panicked);
+    reaper.on_lifetime_cap(&refs[0]);
+    state.remove(&refs[0]);
+    state.remove(&refs[1]);
+    let _ = outcomes(&mut rx);
+
+    reaper.prune_released(&state, || {
+        assert_eq!(recreate(&state, 0), refs[0], "the takeover's copy takes the callRef again");
+        reaper.report(&refs[0], HandlerFailure::Panicked);
+        recreate(&state, 1);
+        reaper.report(&refs[1], HandlerFailure::Panicked);
+    });
+
+    assert!(ledger(&reaper.strikes).contains(&refs[0]), "the fresh strike of the copy");
+    assert!(ledger(&reaper.strikes).contains(&refs[1]), "a strike not listed");
+    assert!(!ledger(&reaper.capped).contains(&refs[0]), "the released call's mark");
+    assert_eq!(ledger(&reaper.strikes).len(), 2);
+}

@@ -202,13 +202,18 @@ impl CallStore for InMemoryCallStore {
         primary: &str,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         let prefix = format!("{}:{}:call:", role.as_str(), primary);
-        let inner = self.locked();
-        Ok(inner
-            .bodies
-            .iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(_, v)| v.to_vec())
-            .collect())
+        // The bodies are immutable: the lock covers one refcount each, and
+        // the copies are made after it.
+        let bodies: Vec<Arc<[u8]>> = {
+            let inner = self.locked();
+            inner
+                .bodies
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .map(|(_, v)| v.clone())
+                .collect()
+        };
+        Ok(bodies.iter().map(|v| v.to_vec()).collect())
     }
 }
 
@@ -311,5 +316,28 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(s.lens(), (0, 0), "1000 create→delete cycles leave no residue");
+    }
+
+    /// A scan returns the latest body of every call stored under its role
+    /// and primary, and none of another role's or primary's.
+    #[tokio::test]
+    async fn a_scan_returns_the_bodies_of_its_role_and_primary() {
+        let s = InMemoryCallStore::new();
+        let put = |role, primary: &'static str, call_ref: &'static str, body: &'static [u8]| {
+            s.store_body(role, primary, call_ref, Arc::from(body), &[]);
+        };
+        put(PartitionRole::Primary, "w0", "w0|a|t", b"a1");
+        put(PartitionRole::Primary, "w0", "w0|a|t", b"a2");
+        put(PartitionRole::Primary, "w0", "w0|b|t", b"b1");
+        put(PartitionRole::Backup, "w0", "w0|c|t", b"c1");
+        put(PartitionRole::Primary, "w01", "w01|d|t", b"d1");
+        put(PartitionRole::Primary, "w1", "w1|e|t", b"e1");
+
+        let mut scanned = s.scan_calls(PartitionRole::Primary, "w0").await.unwrap();
+        scanned.sort();
+        assert_eq!(scanned, [b"a2".to_vec(), b"b1".to_vec()]);
+        let backup = s.scan_calls(PartitionRole::Backup, "w0").await.unwrap();
+        assert_eq!(backup, [b"c1".to_vec()]);
+        assert!(s.scan_calls(PartitionRole::Backup, "w1").await.unwrap().is_empty());
     }
 }

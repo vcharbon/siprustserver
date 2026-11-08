@@ -2,6 +2,8 @@
 //! this node refused as a backup at its ceiling, and this node's own calls
 //! that have no backup for life.
 
+use std::collections::HashSet;
+
 use repl_net::frame::Partition;
 
 use super::ReplicatingCallStore;
@@ -74,6 +76,11 @@ impl ReplicatingCallStore {
     /// Whether this node's call `call_ref` has no backup.
     pub fn unbacked(&self, call_ref: &str) -> bool {
         locked(&self.refusals, REPLICA_REFUSALS).unbacked.contains(call_ref)
+    }
+
+    /// The callRefs of this node's calls with no backup, read under one lock.
+    pub fn unbacked_refs(&self) -> HashSet<String> {
+        locked(&self.refusals, REPLICA_REFUSALS).unbacked.refs()
     }
 
     /// This node's live calls with no backup.

@@ -500,7 +500,7 @@ impl B2buaMetrics {
         self.inner.clock_wall_divergence_ms.load(Ordering::Relaxed).cast_signed()
     }
 
-    /// Push the call-store map lengths (memory-attribution gauges). Sampled
+    /// Push the call-store map lengths (memory-attribution gauges), read
     /// periodically by the runner under the store's own lock. `calls` is the
     /// true live call-map size; the rest are its sibling indexes + per-call
     /// state. See the field docs for what a divergence localises.
@@ -521,12 +521,6 @@ impl B2buaMetrics {
         self.inner.store_touched.store(touched, Ordering::Relaxed);
     }
 
-    /// Push the per-call Vec census (summed across the live call map). Sampled
-    /// alongside `set_store_gauges` under the same store lock. The sum whose
-    /// ratio over `store_calls` climbs while the count-gauges stay flat names the
-    /// leaking per-call Vec (the bytes-inside-each-call leak the count-gauges
-    /// cannot see).
-    #[allow(clippy::too_many_arguments)]
     /// Push the inner CallStore map sizes (sampled in the runner's reap loop).
     pub fn set_store_map_sizes(&self, bodies: u64, idx_entries: u64, tombstones: u64) {
         self.inner.store_bodies.store(bodies, Ordering::Relaxed);
@@ -534,6 +528,12 @@ impl B2buaMetrics {
         self.inner.store_tombstones.store(tombstones, Ordering::Relaxed);
     }
 
+    /// Push the per-call Vec census, summed over the calls whose count
+    /// `set_store_gauges` publishes. The sum whose
+    /// ratio over `store_calls` climbs while the count-gauges stay flat names the
+    /// leaking per-call Vec (the bytes-inside-each-call leak the count-gauges
+    /// cannot see).
+    #[allow(clippy::too_many_arguments)]
     pub fn set_call_census(
         &self,
         cdr_events: u64,
@@ -557,7 +557,7 @@ impl B2buaMetrics {
 
     /// Replace the state-machine cursor census (ADR-0016) wholesale —
     /// `census` maps `(machine, state)` to the count of live calls resting there,
-    /// sampled from the call map under the store lock on the slow gauge cadence.
+    /// counted over a snapshot of the call map on the slow gauge cadence.
     /// Overwriting (rather than incrementing) means a cursor that drained to zero
     /// disappears from the next scrape instead of sticking at its last value.
     pub fn set_sm_cursor_census(&self, census: BTreeMap<(String, String), u64>) {

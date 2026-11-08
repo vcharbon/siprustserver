@@ -2,6 +2,8 @@
 //! without cloning a call: their `callRef`s, the active ones with their
 //! answer, and the replication topologies they name.
 
+use std::collections::HashSet;
+
 use call::CallModelState;
 
 use super::CallState;
@@ -40,47 +42,75 @@ impl CallState {
 
     /// Every resident call still `Active`, with the `(primary, backup)` its
     /// topology names, `None` for a call with no backup (ADR-0055 §3) or
-    /// naming no topology. Read under the call map's lock, each call's
-    /// backing read under it as [`live_topologies`](Self::live_topologies)
-    /// reads it; the caller weighs each holder after the lock.
+    /// naming no topology. The backing is read after the call map, as
+    /// [`live_topologies`](Self::live_topologies) reads it; the caller weighs
+    /// each holder after both.
     pub fn active_call_holders(&self) -> Vec<ActiveCall> {
-        let inner = self.locked();
-        inner
-            .calls
-            .iter()
-            .filter(|(_, call)| call.state == CallModelState::Active)
-            .map(|(call_ref, call)| {
-                let unbacked = self.repl_store().is_some_and(|repl| repl.unbacked(call_ref));
-                let owners = inner
-                    .topologies
-                    .get(call_ref)
-                    .filter(|_| !unbacked)
-                    .map(|t| (t.pri.clone(), t.bak.clone()));
-                ActiveCall {
+        self.active_call_holders_with(|| ())
+    }
+
+    /// [`active_call_holders`](Self::active_call_holders), running `between`
+    /// after the pass over the call map and before the backing read.
+    fn active_call_holders_with(&self, between: impl FnOnce()) -> Vec<ActiveCall> {
+        let mut holders: Vec<ActiveCall> = {
+            let inner = self.locked();
+            inner
+                .calls
+                .iter()
+                .filter(|(_, call)| call.state == CallModelState::Active)
+                .map(|(call_ref, call)| ActiveCall {
                     call_ref: call_ref.clone(),
                     incarnation: call.incarnation().to_string(),
-                    owners,
-                }
-            })
-            .collect()
+                    owners: inner.topologies.get(call_ref).map(|t| (t.pri.clone(), t.bak.clone())),
+                })
+                .collect()
+        };
+        between();
+        let unbacked = self.unbacked_refs();
+        for holder in holders.iter_mut().filter(|h| unbacked.contains(&h.call_ref)) {
+            holder.owners = None;
+        }
+        holders
     }
 
     /// The distinct `(primary, backup)` ordinal pairs the resident calls'
     /// topologies name; `None` when a resident call names no topology or has no
     /// backup (ADR-0055 §3): no peer can be holding it.
     pub fn live_topologies(&self) -> Option<Vec<(String, String)>> {
-        let inner = self.locked();
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        for call_ref in inner.calls.keys() {
-            if self.repl_store().is_some_and(|repl| repl.unbacked(call_ref)) {
-                return None;
+        self.live_topologies_with(|| ())
+    }
+
+    /// [`live_topologies`](Self::live_topologies), running `between` after the
+    /// pass over the call map and before the backing read.
+    fn live_topologies_with(&self, between: impl FnOnce()) -> Option<Vec<(String, String)>> {
+        let (refs, pairs) = {
+            let inner = self.locked();
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for call_ref in inner.calls.keys() {
+                let t = inner.topologies.get(call_ref)?;
+                if !pairs.iter().any(|(pri, bak)| *pri == t.pri && *bak == t.bak) {
+                    pairs.push((t.pri.clone(), t.bak.clone()));
+                }
             }
-            let t = inner.topologies.get(call_ref)?;
-            if !pairs.iter().any(|(pri, bak)| *pri == t.pri && *bak == t.bak) {
-                pairs.push((t.pri.clone(), t.bak.clone()));
-            }
+            let refs: Vec<String> = match self.repl_store() {
+                Some(_) => inner.calls.keys().cloned().collect(),
+                None => Vec::new(),
+            };
+            (refs, pairs)
+        };
+        between();
+        let unbacked = self.unbacked_refs();
+        if refs.iter().any(|call_ref| unbacked.contains(call_ref)) {
+            return None;
         }
         Some(pairs)
+    }
+
+    /// The calls with no backup, read after a pass over the call map: a new
+    /// call is marked unbacked before it enters the map, so every call the
+    /// pass saw already carries its mark (ADR-0055 §3).
+    fn unbacked_refs(&self) -> HashSet<String> {
+        self.repl_store().map(|repl| repl.unbacked_refs()).unwrap_or_default()
     }
 }
 
@@ -98,6 +128,7 @@ mod tests {
     use crate::config::B2buaConfig;
     use crate::initial_invite::build_initial_call;
     use crate::metrics::B2buaMetrics;
+    use crate::repl::ReplicatingCallStore;
 
     fn call(call_ref: &str) -> Call {
         let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
@@ -148,5 +179,72 @@ mod tests {
         create(&state, "a", Some(("w0", "w1")));
         create(&state, "b", None);
         assert_eq!(state.live_topologies(), None);
+    }
+
+    /// A replicated state holding the backed `Active` call `a` on `(w0, w1)`.
+    fn replicated() -> (CallState, Arc<ReplicatingCallStore>) {
+        let repl = Arc::new(ReplicatingCallStore::new(1, sip_clock::Clock::test_at(0)));
+        let state = state().with_replication(repl.clone());
+        create_active(&state, "a", ("w0", "w1"));
+        (state, repl)
+    }
+
+    /// Create the `Active` call `call_ref` placed on `(pri, bak)`.
+    fn create_active(state: &CallState, call_ref: &str, (pri, bak): (&str, &str)) {
+        let mut call = call(call_ref);
+        call.state = CallModelState::Active;
+        state.create(call, Some(CallTopology::new(pri, bak, 0, 0)));
+    }
+
+    /// The owners each listed holder names, by callRef.
+    fn owners(holders: &[ActiveCall]) -> Vec<(&str, Option<(&str, &str)>)> {
+        let mut owners: Vec<_> = holders
+            .iter()
+            .map(|h| {
+                let pair = h.owners.as_ref().map(|(p, b)| (p.as_str(), b.as_str()));
+                (h.call_ref.as_str(), pair)
+            })
+            .collect();
+        owners.sort();
+        owners
+    }
+
+    /// A call admitted unbacked while a listing runs, its mark written before
+    /// it enters the map, is never listed with a backup.
+    #[test]
+    fn a_call_admitted_during_a_listing_is_never_listed_backed() {
+        let admit = |state: &CallState, repl: &ReplicatingCallStore| {
+            repl.leave_unbacked("c");
+            create_active(state, "c", ("w0", "w2"));
+        };
+        let (state, repl) = replicated();
+        let holders = state.active_call_holders_with(|| admit(&state, &repl));
+        assert!(
+            owners(&holders).iter().all(|(r, pair)| *r != "c" || pair.is_none()),
+            "{:?}",
+            owners(&holders)
+        );
+
+        let (state, repl) = replicated();
+        let pairs = state.live_topologies_with(|| admit(&state, &repl));
+        assert!(
+            pairs.as_ref().is_none_or(|p| !p.contains(&("w0".into(), "w2".into()))),
+            "{pairs:?}"
+        );
+    }
+
+    /// A resident call whose backup is given up while a listing runs is
+    /// listed with no backup.
+    #[test]
+    fn a_call_left_unbacked_during_a_listing_is_listed_unbacked() {
+        let (state, repl) = replicated();
+        create_active(&state, "b", ("w0", "w2"));
+        let holders = state.active_call_holders_with(|| repl.leave_unbacked("b"));
+        assert_eq!(owners(&holders), [("a", Some(("w0", "w1"))), ("b", None)]);
+
+        let (state, repl) = replicated();
+        create_active(&state, "b", ("w0", "w2"));
+        assert_eq!(state.live_topologies_with(|| repl.leave_unbacked("b")), None);
+        assert_eq!(state.live_topologies(), None, "and on every listing after it");
     }
 }

@@ -55,11 +55,12 @@ pub(super) struct LiveLoadSampler {
 }
 
 /// A `(wall instant, summed worker busy time)` snapshot for the busy-ratio
-/// diff, with the last CPU budget read in full.
+/// diff, with the last CPU budget read in full and the ELU it gave.
 struct BusySnapshot {
     at: std::time::Instant,
     busy_total: std::time::Duration,
     budget: CpuBudget,
+    elu: f64,
 }
 
 impl LiveLoadSampler {
@@ -81,6 +82,7 @@ impl LiveLoadSampler {
                 at: std::time::Instant::now(),
                 busy_total,
                 budget: budget().unwrap_or(CpuBudget { quota: None, affinity: None }),
+                elu: 0.0,
             }),
         }
     }
@@ -115,17 +117,19 @@ impl LoadSampler for LiveLoadSampler {
 
         let mut prev = locked(&self.prev, OVERLOAD_SAMPLER);
         let wall = now.saturating_duration_since(prev.at).as_secs_f64();
-        // Busy clock is monotonic, but guard against a zero/negative wall window
-        // (two reads in the same instant) which would divide by ~0.
+        // An empty window measures nothing: two reads in the same instant, or
+        // a concurrent read that took `now` before this one and the lock
+        // after it. It repeats the last ELU rather than reading an idle loop.
         if wall <= 0.0 {
-            return 0.0;
+            return prev.elu;
         }
         let busy = busy_now.saturating_sub(prev.busy_total).as_secs_f64();
         prev.at = now;
         prev.busy_total = busy_now;
         // Busy fraction of the CPU the runtime may use over the interval.
         let capacity = self.refresh_budget(&mut prev.budget).capacity(workers);
-        clamp01(busy / (capacity * wall))
+        prev.elu = clamp01(busy / (capacity * wall));
+        prev.elu
     }
 
     fn gc_fraction(&self) -> f64 {
@@ -154,6 +158,21 @@ mod sampler_tests {
         VOID.store(true, Ordering::Relaxed);
         assert_eq!(s.refresh_budget(&mut last).capacity(1), 0.5);
         assert_eq!(last.quota, Some(0.5));
+    }
+
+    /// A read whose window is empty, as a concurrent read that locked first
+    /// leaves it, repeats the last ELU and moves no snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_empty_window_repeats_the_last_reading() {
+        let s = LiveLoadSampler::new();
+        let ahead = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        {
+            let mut prev = s.prev.lock().unwrap();
+            prev.at = ahead;
+            prev.elu = 0.4;
+        }
+        assert_eq!(s.elu(), 0.4);
+        assert_eq!(s.prev.lock().unwrap().at, ahead);
     }
 
     /// The live sampler reports a `0..=1` ELU and a structurally-`0` GC fraction.

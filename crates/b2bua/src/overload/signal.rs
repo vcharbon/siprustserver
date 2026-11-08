@@ -38,7 +38,6 @@ pub struct OverloadMetrics {
 }
 
 struct OverloadInner {
-    sampler: Arc<dyn LoadSampler>,
     elu_ewma: Ewma,
     gc_fraction_ewma: Ewma,
     /// The CPS token bucket, `None` when a bucket size of 0 turns the gate
@@ -69,6 +68,9 @@ impl OverloadInner {
 /// [`increment_non_emergency_admitted`](OverloadSignal::increment_non_emergency_admitted).
 #[derive(Clone)]
 pub struct OverloadSignal {
+    /// Read outside the EWMA lock: a sampler read may block on the CPU
+    /// budget's `/proc` and cgroup reads.
+    sampler: Arc<dyn LoadSampler>,
     inner: Arc<Mutex<OverloadInner>>,
     /// Lock-free `adm` counter — read on the header hot path without taking the
     /// EWMA lock. Monotonic.
@@ -85,8 +87,8 @@ impl OverloadSignal {
     /// `v=1; elu=0.000; gc=0.000; adm=0` until the sampler fires.
     pub fn new(sampler: Arc<dyn LoadSampler>) -> Self {
         Self {
+            sampler,
             inner: Arc::new(Mutex::new(OverloadInner {
-                sampler,
                 elu_ewma: Ewma::new(0.2),
                 gc_fraction_ewma: Ewma::new(0.2),
                 bucket: Some(TokenBucket::full(
@@ -110,12 +112,12 @@ impl OverloadSignal {
         Self::new(Arc::new(LiveLoadSampler::new()))
     }
 
-    /// One sampler tick: read the sampler and feed both EWMAs. Called by the
-    /// periodic task every [`SAMPLE_PERIOD`](OverloadSignal::SAMPLE_PERIOD).
+    /// One sampler tick: read the sampler, then feed both EWMAs under the
+    /// lock. Called by the periodic task every
+    /// [`SAMPLE_PERIOD`](OverloadSignal::SAMPLE_PERIOD).
     pub fn sample(&self) {
+        let (elu, gc) = (self.sampler.elu(), self.sampler.gc_fraction());
         let mut inner = locked(&self.inner, OVERLOAD_SIGNAL);
-        let elu = inner.sampler.elu();
-        let gc = inner.sampler.gc_fraction();
         inner.elu_ewma.observe(elu);
         inner.gc_fraction_ewma.observe(gc);
     }
