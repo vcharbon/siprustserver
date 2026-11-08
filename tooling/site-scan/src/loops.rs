@@ -60,11 +60,13 @@ struct Loops<'a> {
 }
 
 impl Loops<'_> {
-    /// Reads with `const_eval` set to `on`, then restores it.
+    /// Reads a scope of its own with `const_eval` set to `on`: after it, the
+    /// flag and the locals are the enclosing scope's again.
     fn reading(&mut self, on: bool, read: impl FnOnce(&mut Self)) {
-        let outer = std::mem::replace(&mut self.const_eval, on);
+        let outer = (self.const_eval, self.locals.clone(), self.ranges.clone());
+        self.const_eval = on;
         read(self);
-        self.const_eval = outer;
+        (self.const_eval, self.locals, self.ranges) = outer;
     }
 
     fn site(&mut self, span: proc_macro2::Span, message: &str) {
@@ -255,10 +257,19 @@ impl<'ast> Visit<'ast> for Loops<'_> {
         visit::visit_expr(self, expr);
     }
 
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        let on = self.const_eval;
+        self.reading(on, |v| visit::visit_block(v, block));
+    }
+
+    /// A macro's arguments are read as runtime code: its body may run them
+    /// in a closure.
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        for expr in macros::args(mac) {
-            self.visit_expr(&expr);
-        }
+        self.reading(false, |v| {
+            for expr in macros::args(mac) {
+                v.visit_expr(&expr);
+            }
+        });
     }
 }
 

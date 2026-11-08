@@ -65,6 +65,12 @@ fn runtime_code_inside_a_constant_is_read() {
 }
 
 #[test]
+fn a_binding_of_an_inner_scope_leaves_the_outer_ones_as_they_were() {
+    let t = lib("macro_rules! thunk { ($e:expr) => { || $e }; }\nconst F: fn() = thunk!(loop {});\nfn q(n: usize) { const K: u8 = { let n = 3; n }; for _ in 0..n {} }\nfn r(n: usize) { let r = 0..n; const K: u8 = { let r = 1; r }; for _ in r {} }\nfn h(n: usize) { let _ = || { let n = 4; n }; for _ in 0..n {} }\nfn i(n: usize) { { let n = 4; } for _ in 0..n {} }\nfn j(n: usize) { let r = 0..n; fn inner() {} for _ in r {} }\nfn k(n: usize) { let r = 0..n; let _c = |r: u8| r; for _ in r {} }\nfn ok(v: &[u8]) { let n = v.len(); { for _ in 0..n {} } }\n");
+    assert_eq!(t.lines(Set::Loop), vec![2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
 fn a_for_over_a_collection_or_a_bounded_range_is_no_site() {
     let t = lib("const N: usize = 4;\nfn f(v: &[u8]) {\n    for _ in v {}\n    for _ in 0..N {}\n    for _ in 0..v.len() - 1 {}\n    for _ in 0..=u8::MAX {}\n    for _ in (0..v.len()).rev() {}\n    let _ = (0..v.len()).contains(&3);\n}\n");
     assert_eq!(t.lines(Set::Loop), Vec::<usize>::new());
