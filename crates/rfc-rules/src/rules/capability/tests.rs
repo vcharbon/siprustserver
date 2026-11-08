@@ -251,7 +251,7 @@ fn answered(at_us: u64, status: u16, method: &str, branch: &str, cseq: u32, extr
 }
 
 fn run(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<Finding> {
-    rule.eval(&WireView { msgs, obs: &obs(msgs) })
+    crate::registry::judged_alone(rule, &WireView { msgs, obs: &obs(msgs) })
 }
 
 fn violations(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<Finding> {

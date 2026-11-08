@@ -86,7 +86,7 @@ fn obs(msgs: &[Msg]) -> Observation {
 }
 
 fn run(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<Finding> {
-    rule.eval(&WireView { msgs, obs: &obs(msgs) })
+    crate::registry::judged_alone(rule, &WireView { msgs, obs: &obs(msgs) })
 }
 
 /// The only occasion of the whole family is a message the endpoint EMITTED

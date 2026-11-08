@@ -41,3 +41,10 @@ describe("the set-aside tables", () => {
     expect(() => decodeCensusReportSync(report({ parse_failed_by_reason: { x: { messages: 1 } } }))).toThrow()
   })
 })
+
+describe("the legs judged on one message only", () => {
+  it("decode as a count, absent when none", () => {
+    expect(decodeCensusReportSync(report({ one_message_legs: 3 })).one_message_legs).toBe(3)
+    expect(decodeCensusReportSync(report()).one_message_legs).toBeUndefined()
+  })
+})

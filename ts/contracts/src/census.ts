@@ -238,6 +238,8 @@ export const CensusReport = Schema.Struct({
   captures: Schema.optionalKey(Schema.Array(Schema.String)),
   groups: Schema.Int,
   legs: Schema.Int,
+  /** The legs judged on one message only: their opening request was set aside. Absent when none. */
+  one_message_legs: Schema.optionalKey(Schema.Int),
   messages: Schema.Int,
   rules: Schema.Record(Schema.Literals(RFC_RULES), Schema.optionalKey(RuleTally)),
   /** The messages the documents' extraction refused, by refusal reason key. Absent when none. */

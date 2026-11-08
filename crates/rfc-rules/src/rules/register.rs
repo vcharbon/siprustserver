@@ -31,7 +31,7 @@ crate::registry::rules! {
     SerialRegister = "serial-register";
     /// RFC 3261 §10.2: a REGISTER carries no Route header — registration forms no route set.
     /// Charges the REGISTER's sender.
-    RegisterNoRouteSet = "register-no-route-set";
+    RegisterNoRouteSet = "register-no-route-set", one_message;
 }
 
 /// **RFC 3261 §10.2 — a REGISTER carries no Route header.** Registration
@@ -263,7 +263,7 @@ mod tests {
     }
 
     fn routeless(msgs: &[Msg]) -> Vec<Finding> {
-        RegisterNoRouteSet.eval(&WireView { msgs, obs: &obs(msgs) })
+        crate::registry::judged_alone(&RegisterNoRouteSet, &WireView { msgs, obs: &obs(msgs) })
     }
 
     fn serial(msgs: &[Msg]) -> Vec<Finding> {

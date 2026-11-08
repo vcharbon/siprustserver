@@ -49,6 +49,35 @@ mod tests {
         assert_eq!(registered, declared);
     }
 
+    /// The rules judging one message alone are the ones flagged so, read off
+    /// their bodies; the families' fixtures check each one with
+    /// `registry::judged_alone`.
+    #[test]
+    fn the_one_message_rules_are_the_flagged_ones() {
+        let flagged: Vec<&str> =
+            all_rules().filter(|r| r.one_message).map(|r| r.id.token()).collect();
+        assert_eq!(
+            flagged,
+            [
+                "branch-prefix",
+                "c0-port-non-zero",
+                "cancel-cseq-method",
+                "contact-presence",
+                "content-length",
+                "content-type",
+                "from-tag-presence",
+                "max-forwards",
+                "no-100rel-require-on-non-invite",
+                "no-contact-on-bye",
+                "no-record-route-from-ua",
+                "register-no-route-set",
+                "reliable-1xx-headers",
+                "sdp-body-parseable",
+                "to-tag-presence",
+            ]
+        );
+    }
+
     /// Every token round-trips, and no two rules share one.
     #[test]
     fn tokens_are_unique_and_parse_back() {

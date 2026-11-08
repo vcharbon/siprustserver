@@ -183,3 +183,37 @@ fn the_set_aside_tables_sum_across_documents() {
     assert!(summary.contains("  9 2 no Contact\n"), "{summary}");
     assert!(summary.contains("  3 2 Strict Diversion\n"), "{summary}");
 }
+
+/// A leg whose opening request was set aside is counted as judged on one
+/// message only, summed across documents and stated in the summary; a census
+/// with none states no key.
+#[test]
+fn legs_judged_on_one_message_are_counted() {
+    let marked = || {
+        let mut doc = doc_of(vec![dg(1_000, A, B, request("OPTIONS", 1, "s1", "fa", None))]);
+        doc.legs[0].opening_request_set_aside = true;
+        doc
+    };
+    let mut first = Census::new();
+    first.absorb("a.json", "cap-a", &marked());
+    let mut second = Census::new();
+    second.absorb("b.json", "cap-b", &marked());
+    second.absorb(
+        "c.json",
+        "cap-c",
+        &doc_of(vec![dg(1_000, A, B, request("OPTIONS", 1, "s2", "fa", None))]),
+    );
+    let bare = serde_json::to_value(&second).unwrap();
+    first.merge(second);
+
+    assert_eq!(first.one_message_legs, 2);
+    assert_eq!(serde_json::to_value(&first).unwrap()["one_message_legs"], 2);
+    assert!(
+        first.summary().contains("legs judged on one message only: 2\n"),
+        "{}",
+        first.summary()
+    );
+    assert_eq!(bare["one_message_legs"], 1);
+    let clean = serde_json::to_value(Census::new()).unwrap();
+    assert!(clean.get("one_message_legs").is_none());
+}

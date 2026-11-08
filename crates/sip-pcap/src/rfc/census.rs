@@ -84,6 +84,11 @@ pub struct Census {
     pub groups: u64,
     pub legs: u64,
     pub messages: u64,
+    /// The legs judged on one message only: their opening request was set
+    /// aside (`opening_request_set_aside`), so only the rules reading one
+    /// message alone ran there. Absent when none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub one_message_legs: u64,
     pub rules: BTreeMap<String, RuleTally>,
     /// The messages the documents' extraction refused, which no rule read, by
     /// refusal reason key (the documents' `parse_failed_by_reason`). Absent
@@ -153,6 +158,8 @@ impl Census {
         self.groups += doc.groups.len() as u64;
         self.legs += doc.legs.len() as u64;
         self.messages += doc.legs.iter().map(|l| l.msgs.len() as u64).sum::<u64>();
+        self.one_message_legs +=
+            doc.legs.iter().filter(|l| l.opening_request_set_aside).count() as u64;
         let stats = &doc.flow_stats;
         add_set_aside(&mut self.parse_failed_by_reason, &stats.parse_failed_by_reason, capture);
         add_set_aside(&mut self.header_failed_by_reason, &stats.header_failed_by_reason, capture);
@@ -200,6 +207,7 @@ impl Census {
         self.groups += other.groups;
         self.legs += other.legs;
         self.messages += other.messages;
+        self.one_message_legs += other.one_message_legs;
         for (token, tally) in other.rules {
             let mine = self.rules.entry(token).or_default();
             mine.hits += tally.hits;
@@ -271,6 +279,9 @@ impl Census {
             self.messages,
             self.failures.len()
         ));
+        if self.one_message_legs > 0 {
+            out.push_str(&format!("legs judged on one message only: {}\n", self.one_message_legs));
+        }
         for (token, tally) in &self.rules {
             if measured_only && tally.occasions == 0 {
                 continue;
@@ -312,6 +323,10 @@ impl Census {
         }
         out
     }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Add one document's `by_reason` counts, from `capture`, to `table`.

@@ -128,7 +128,7 @@ fn view(msgs: &[Msg]) -> (Observation, &[Msg]) {
 
 fn run(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<Finding> {
     let (obs, msgs) = view(msgs);
-    rule.eval(&WireView { msgs, obs: &obs })
+    crate::registry::judged_alone(rule, &WireView { msgs, obs: &obs })
 }
 
 fn violations(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<Finding> {

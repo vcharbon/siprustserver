@@ -203,3 +203,42 @@ impl<'de> Deserialize<'de> for RuleId {
         token.parse().map_err(|_| serde::de::Error::unknown_variant(&token, &TOKENS))
     }
 }
+
+/// The `one_message` contract, checked where a family's tests judge their
+/// fixtures: every finding of a `one_message` rule over the whole view is the
+/// one it states judging the message alone. Findings compare with their
+/// message index taken out, and a repeat is judged by no rule of the flag.
+#[cfg(test)]
+pub(crate) fn judged_alone(
+    body: &dyn Obligation,
+    wire: &crate::WireView<'_>,
+) -> Vec<crate::Finding> {
+    let whole = body.eval(wire);
+    let Some(first) = whole.first() else { return whole };
+    if !first.rule.rule().one_message {
+        return whole;
+    }
+    let keyed = |findings: &[crate::Finding], at: usize| -> Vec<String> {
+        findings
+            .iter()
+            .map(|f| {
+                format!("{:?}", crate::Finding { anchor: 0, ..f.clone() })
+                    .replace(&format!("_msg: {at},"), "_msg: #,")
+                    .replace(&format!("_msg: {at} "), "_msg: # ")
+            })
+            .collect()
+    };
+    let mut alone = Vec::new();
+    for (at, msg) in wire.msgs.iter().enumerate().filter(|(_, m)| !m.repeat) {
+        let view = crate::WireView { msgs: std::slice::from_ref(msg), obs: wire.obs };
+        alone.extend(keyed(&body.eval(&view), 0).into_iter().map(|f| (at, f)));
+    }
+    let mut seen: Vec<(usize, String)> = whole
+        .iter()
+        .flat_map(|f| keyed(std::slice::from_ref(f), f.anchor).into_iter().map(|k| (f.anchor, k)))
+        .collect();
+    seen.sort();
+    alone.sort();
+    assert_eq!(seen, alone, "{} judges more than one message", first.rule);
+    whole
+}

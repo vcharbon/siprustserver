@@ -141,9 +141,10 @@ pub struct LegJson {
     pub saw_180: bool,
     /// `"BYE"` | `"CANCEL"` — the first teardown request seen.
     pub terminated_by: Option<String>,
-    /// Extraction set aside a request of this Call-ID that opens a dialog or
-    /// transaction (no To-tag, neither ACK nor CANCEL), so the leg lacks it.
-    /// Absent when false.
+    /// Extraction refused a request of this Call-ID that opens a dialog or
+    /// transaction (no To-tag, neither ACK nor CANCEL), and no request of that
+    /// method without a To-tag was read on any hop of the leg: the leg lacks
+    /// its opening request. Absent when false.
     #[serde(default, skip_serializing_if = "is_false")]
     pub opening_request_set_aside: bool,
     /// Union over all token strategies, sorted and deduped; which strategy a

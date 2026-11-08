@@ -238,8 +238,8 @@ pub struct FlowLeg {
     pub final_status: Option<u16>,
     pub saw_180: bool,
     pub terminated_by: Option<Terminator>,
-    /// Extraction set aside a request of this Call-ID that opens a dialog or
-    /// transaction (no To-tag, neither ACK nor CANCEL): the leg lacks it.
+    /// Extraction refused an opening request (no To-tag, neither ACK nor CANCEL)
+    /// of this Call-ID and read no untagged request of its method on any hop.
     pub opening_request_set_aside: bool,
     /// Correlation token values seen on this leg, parallel to
     /// [`FlowConfig::strategies`] (always the empty set at a non-token

@@ -27,9 +27,9 @@ pub struct FlowStats {
     /// The `parse_failed` datagrams by the key of their refusal reason
     /// ([`reason_key`]).
     pub parse_failed_by_reason: BTreeMap<String, u64>,
-    /// The Call-ID of each `parse_failed` request that opens a dialog or
-    /// transaction: no To-tag, neither ACK nor CANCEL.
-    pub opening_requests_refused: BTreeSet<String>,
+    /// Per Call-ID, the methods of the `parse_failed` requests that open a
+    /// dialog or transaction: no To-tag, neither ACK nor CANCEL.
+    pub opening_requests_refused: BTreeMap<String, BTreeSet<String>>,
     /// Accepted messages carrying a non-fatal header reading that failed
     /// ([`header_errors`]): ingested like any other, and counted here.
     pub header_failed: u64,
@@ -63,7 +63,7 @@ impl FlowStats {
     /// Count datagram `at` of the input, `raw`, as refused by the parser for
     /// `error`. A refused request that opens a dialog or transaction (no
     /// To-tag, RFC 3261 §8.1.1.2; not an ACK or CANCEL, which belong to the
-    /// INVITE's) has its Call-ID kept, read off its identity lines.
+    /// INVITE's) has its Call-ID and method kept, read off its identity lines.
     pub(crate) fn note_refusal(&mut self, at: usize, error: &SipParseError, raw: &[u8]) {
         self.parse_failed += 1;
         self.parse_failed_at.push(at);
@@ -75,14 +75,24 @@ impl FlowStats {
         if let (true, None, Some(call_id)) =
             (opens, id.to_tag.filter(|t| !t.is_empty()), id.call_id)
         {
-            self.opening_requests_refused.insert(call_id.to_string());
+            let method = id.method.unwrap_or_default().to_string();
+            self.opening_requests_refused.entry(call_id.to_string()).or_default().insert(method);
         }
     }
 
-    /// Mark every leg whose Call-ID names a refused opening request.
+    /// Mark every leg that lacks an opening request extraction refused: one
+    /// of its Call-ID's refused opening methods has no copy the parser read
+    /// on any hop of the leg. A copy read on another hop, a fork's sibling or
+    /// an earlier attempt of the same method leaves the leg unmarked.
     pub(crate) fn mark_opening_requests_set_aside(&self, legs: &mut [FlowLeg]) {
         for leg in legs {
-            leg.opening_request_set_aside = self.opening_requests_refused.contains(&leg.call_id);
+            let Some(methods) = self.opening_requests_refused.get(&leg.call_id) else { continue };
+            leg.opening_request_set_aside = methods.iter().any(|method| {
+                !leg.msgs.iter().any(|m| {
+                    matches!(&m.parsed, SipMessage::Request(r)
+                        if r.method().as_str() == method && r.to().tag().is_none())
+                })
+            });
         }
     }
 
