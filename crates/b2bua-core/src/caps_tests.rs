@@ -174,8 +174,8 @@ fn a_stated_tree_past_the_walk_reads_as_past_every_cap() {
     use call::features::StatedHeaders;
 
     let tree = |sets: usize| {
-        let mut root = StatedHeaders::default();
-        root.legs = (1..sets).map(|n| (format!("b-{n}"), StatedHeaders::default())).collect();
+        let legs = (1..sets).map(|n| (format!("b-{n}"), StatedHeaders::default())).collect();
+        let root = StatedHeaders { legs, ..Default::default() };
         let mut call = call();
         let mut features = crate::decision::default_platform_features();
         features.stated_headers = Some(root);

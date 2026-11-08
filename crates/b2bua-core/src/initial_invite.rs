@@ -263,7 +263,7 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// here is reported the same way.
 #[allow(clippy::too_many_arguments)]
 pub fn reject_call(
-    mut call: Call,
+    call: Call,
     a_invite: &SipRequest,
     status: u16,
     reason: Option<String>,
@@ -273,16 +273,16 @@ pub fn reject_call(
     now_ms: i64,
     cause: TerminationCause,
 ) -> HandlerResult {
-    let mut skipped = Vec::new();
     let mut extra_headers = end_to_end_headers(update_headers);
     // A redirect whose target does not read cannot be authored: the caller dials
     // what a 3xx Contact names, so an invented one sends it at an address the
     // decision never stated. Answer the plain server error instead, with no
     // Contact.
-    let (status, reason, cause) = match contact_headers(contacts) {
+    match contact_headers(contacts) {
         Ok(headers) => {
             extra_headers.extend(headers);
-            (status, reason, cause)
+            let stated = Stated { update_headers, extra_headers, advertisement };
+            reject_with(call, a_invite, status, reason, stated, now_ms, cause)
         }
         Err(err) => {
             tracing::warn!(
@@ -290,9 +290,34 @@ pub fn reject_call(
                 detail = %err.detail(),
                 "redirect refused"
             );
-            (500, Some(err.to_string()), TerminationCause::Admission)
+            let stated = Stated { update_headers, extra_headers, advertisement };
+            let reason = Some(err.to_string());
+            reject_with(call, a_invite, 500, reason, stated, now_ms, TerminationCause::Admission)
         }
-    };
+    }
+}
+
+/// The headers a rejecting final carries: what the decision stated, the
+/// headers built from it, and the deployment's advertisement.
+struct Stated<'a> {
+    update_headers: Option<&'a SipHeaderUpdates>,
+    extra_headers: Vec<SipHeader>,
+    advertisement: &'a CapabilitySet,
+}
+
+/// The final `status` to the caller under `stated`, and the call ended
+/// ([`reject_call`]).
+fn reject_with(
+    mut call: Call,
+    a_invite: &SipRequest,
+    status: u16,
+    reason: Option<String>,
+    stated: Stated<'_>,
+    now_ms: i64,
+    cause: TerminationCause,
+) -> HandlerResult {
+    let Stated { update_headers, mut extra_headers, advertisement } = stated;
+    let mut skipped = Vec::new();
     let reason = reason.unwrap_or_else(|| default_reason(status).to_string());
     // A failure final refused in this element's own name carries the
     // deployment's advertisement, each half under the decision's statements.

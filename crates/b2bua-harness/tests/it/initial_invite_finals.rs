@@ -59,6 +59,7 @@ const FINALS: &[Row] = &[
     ("b2bua-core/src/initial_invite.rs", "503", InternalError),
     ("b2bua-core/src/initial_invite.rs", "500", RefusedAnswer),
     ("b2bua-core/src/initial_invite.rs", "status", Builder),
+    ("b2bua-core/src/initial_invite.rs", "status", Builder),
     // What the callee answered, relayed.
     ("b2bua-core/src/rules/actions/relay_response.rs", "status", Stated),
     ("b2bua-core/src/rules/actions/relay_response.rs", "status", Stated),
@@ -109,8 +110,12 @@ const FINALS: &[Row] = &[
 ];
 
 /// A call that builds a final, and which of its arguments states the status.
-const SITES: [(&str, usize); 3] =
-    [("reject_call(", 2), ("response_to_a_leg(", 3), ("generate_response(", 1)];
+const SITES: [(&str, usize); 4] = [
+    ("reject_call(", 2),
+    ("reject_with(", 2),
+    ("response_to_a_leg(", 3),
+    ("generate_response(", 1),
+];
 
 /// The struct a rule states a final with, by its `status` field.
 const RESPOND: &str = "RespondToALeg {";
