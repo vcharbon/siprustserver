@@ -127,6 +127,10 @@ fn without_contact(method: &str) -> Template {
     request(method).with("contact", "X-Contact: none")
 }
 
+fn in_dialog_without_contact(method: &str) -> Template {
+    without_contact(method).with("to", "To: <sip:bob@example.com>;tag=b1")
+}
+
 fn response_without_contact(method: &str) -> Template {
     response(200, method).with("contact", "X-Contact: none")
 }

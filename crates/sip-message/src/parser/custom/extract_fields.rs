@@ -307,10 +307,12 @@ pub fn extract_request_fields(
         }
     }
 
-    // Contact cardinality on dialog-creating requests.
+    // Contact cardinality on dialog-creating requests. A new request's missing
+    // Contact is refused where its dialog would be established, not here: one
+    // the element rejects first (a spent Max-Forwards, no route) needs none.
     if wire {
         if let Some(method) = method.filter(|m| can_establish_dialog(m)) {
-            if common.contacts().is_empty() {
+            if common.contacts().is_empty() && common.to().tag().is_some() {
                 return Err(SipParseError::new(format!(
                     "{method} has no Contact (RFC 3261 §8.1.1.8)"
                 )));

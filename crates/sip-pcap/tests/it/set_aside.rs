@@ -34,13 +34,18 @@ fn invite(call_id: &str, from: &str, contact: &str, extra: &str) -> String {
 }
 
 const CONTACT: &str = "Contact: <sip:alice@192.0.2.1>\r\n";
+const TWO_CONTACTS: &str = "Contact: <sip:alice@192.0.2.1>, <sip:alice@192.0.2.3>\r\n";
+const OTHER_TWO_CONTACTS: &str = "Contact: <sip:carol@192.0.2.4>, <sip:carol@192.0.2.5>\r\n";
+/// The key two Contacts on an INVITE are counted under.
+const TWO_CONTACTS_KEY: &str =
+    "INVITE must not contain multiple Contact headers (RFC 3261 §8.1.1.8 — found N)";
 
 #[test]
 fn two_refusal_shapes_give_two_rows_whatever_values_each_message_carries() {
     let datagrams = vec![
-        // No Contact, twice.
-        dg(1_000, invite("c1", "<sip:alice@example.com>", "", "")),
-        dg(2_000, invite("c2", "<sip:carol@example.net>", "", "")),
+        // Two Contacts, twice, each with its own addresses.
+        dg(1_000, invite("c1", "<sip:alice@example.com>", TWO_CONTACTS, "")),
+        dg(2_000, invite("c2", "<sip:carol@example.net>", OTHER_TWO_CONTACTS, "")),
         // A From URI parameter repeated with another value, twice, each with
         // its own parameter and values.
         dg(3_000, invite("c3", "<sip:alice@example.com;x-a=1;x-a=2>", CONTACT, "")),
@@ -72,7 +77,7 @@ fn two_refusal_shapes_give_two_rows_whatever_values_each_message_carries() {
     let refused: Vec<(&str, u64)> =
         flows.stats.parse_failed_by_reason.iter().map(|(k, &n)| (k.as_str(), n)).collect();
     assert_eq!(refused.len(), 2, "one row per shape: {refused:?}");
-    assert!(refused.contains(&("INVITE has no Contact (RFC 3261 §8.1.1.8)", 2)), "{refused:?}");
+    assert!(refused.contains(&(TWO_CONTACTS_KEY, 2)), "{refused:?}");
     let repeat = refused.iter().find(|(k, _)| k.contains("From")).expect("the repeat's row");
     assert_eq!(repeat.1, 2, "{refused:?}");
     assert!(!repeat.0.contains("x-a") && !repeat.0.contains("x-b"), "{refused:?}");
@@ -91,7 +96,7 @@ fn two_refusal_shapes_give_two_rows_whatever_values_each_message_carries() {
     .expect("model enriches");
     let json = serde_json::to_value(&doc).expect("document serializes");
     let stats = &json["flow_stats"];
-    assert_eq!(stats["parse_failed_by_reason"]["INVITE has no Contact (RFC 3261 §8.1.1.8)"], 2);
+    assert_eq!(stats["parse_failed_by_reason"][TWO_CONTACTS_KEY], 2);
     assert_eq!(stats["parse_failed_by_reason"].as_object().expect("a table").len(), 2);
     assert_eq!(stats["header_failed_by_reason"][header[0].0], 2);
 }

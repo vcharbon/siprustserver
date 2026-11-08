@@ -7,7 +7,9 @@ pub(super) const LIVE: &[Live] = &[
     Live::emitter(RuleId::MaxForwards, max_forwards),
     Live::emitter(RuleId::ContentLength, content_length),
     Live::emitter(RuleId::ContentType, content_type),
-    Live::emitter(RuleId::ContactPresence, contact_presence),
+    // A hop that forwards its upstream's INVITE relays the missing Contact the
+    // upstream wrote, which is flagged on the upstream lane.
+    Live::emitter(RuleId::ContactPresence, contact_presence).skip(Skip::RelayLanes),
     Live::emitter(RuleId::NoContactOnBye, no_contact_on_bye),
     Live::emitter(RuleId::ToTagPresence, to_tag_presence),
     Live::emitter(RuleId::FromTagPresence, from_tag_presence),

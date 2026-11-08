@@ -53,10 +53,16 @@ compatibility rules admit, on purpose:
   `Credentials::parse` does not read is refused with its message, whatever its
   scheme (§22.4).
 - **What a request states.** A request carries a From tag (§8.1.1.3) and a
-  Max-Forwards (§8.1.1); one that can open a dialog (INVITE, SUBSCRIBE, NOTIFY,
-  REFER) carries a Contact (§8.1.1.8), and so does a 2xx to INVITE, SUBSCRIBE or
-  REFER (§12.1.1, RFC 3515 §2.4.4). A 1xx may carry none, and so may a 2xx to a
-  NOTIFY. Every response but a 100 carries a To-tag (§8.2.6.2).
+  Max-Forwards (§8.1.1). One that can open a dialog (INVITE, SUBSCRIBE, NOTIFY,
+  REFER) carries a Contact (§8.1.1.8), the dialog's remote target, which is
+  required where the element would establish the dialog, not at ingress: a new
+  request with no Contact reads, and the element refuses it 400 before it
+  dials a leg or answers 2xx, after any refusal that comes first (a spent
+  Max-Forwards' 483, §16.3; no route). An in-dialog one with no Contact is
+  refused at ingress. A 2xx to INVITE, SUBSCRIBE or REFER carries a Contact
+  (§12.1.1, RFC 3515 §2.4.4), refused at ingress without one: that dialog is
+  being established. A 1xx may carry none, and so may a 2xx to a NOTIFY. Every
+  response but a 100 carries a To-tag (§8.2.6.2).
 - **Exemptions.** `SipParserLimits::exemptions` names each shape a deployment
   accepts against the RFC: empty by default, each a stated setting read from
   `SIP_EXEMPTIONS` on every tier, consulted only by the ingress gate. Only a

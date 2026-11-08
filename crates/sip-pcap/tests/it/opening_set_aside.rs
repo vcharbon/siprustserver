@@ -15,7 +15,7 @@ const ALICE: &str = "192.0.2.1:5060";
 const PROXY: &str = "192.0.2.3:5060";
 const BOB: &str = "192.0.2.2:5060";
 
-/// The INVITE's Contact; an INVITE without one is refused (RFC 3261 §8.1.1.8).
+/// The INVITE's Contact (RFC 3261 §8.1.1.8).
 const CONTACT: &str = "Contact: <sip:alice@192.0.2.1>\r\n";
 /// Bob's Contact, which his 2xx to an INVITE carries.
 const BOB_CONTACT: &str = "Contact: <sip:bob@192.0.2.2>\r\n";
@@ -115,7 +115,7 @@ fn marked(doc: &FlowsDoc) -> Vec<(&str, bool)> {
 
 #[test]
 fn a_leg_whose_invite_was_set_aside_opens_no_dialog_or_transaction_occasion() {
-    let doc = cancelled_call("");
+    let doc = cancelled_call(&format!("{CONTACT}{TWICE}"));
     assert_eq!(doc.flow_stats.parse_failed, 1, "the INVITE is refused");
     assert_eq!(marked(&doc), [("c1", true)], "the leg is marked");
     let json = serde_json::to_value(&doc).expect("document serializes");
@@ -174,7 +174,12 @@ fn a_refusal_on_another_call_id_marks_only_that_leg() {
         dg(1_000, ALICE, BOB, request("INVITE", "c1", "", "1 INVITE", CONTACT)),
         dg(2_000, BOB, ALICE, response("486 Busy Here", "c1", "t1", "1 INVITE")),
         dg(3_000, ALICE, BOB, request("ACK", "c1", "t1", "1 ACK", "")),
-        dg(4_000, ALICE, BOB, request("INVITE", "c2", "", "1 INVITE", "")),
+        dg(
+            4_000,
+            ALICE,
+            BOB,
+            request("INVITE", "c2", "", "1 INVITE", &format!("{CONTACT}{TWICE}")),
+        ),
         dg(5_000, BOB, ALICE, response("486 Busy Here", "c2", "t2", "1 INVITE")),
         dg(6_000, ALICE, BOB, request("ACK", "c2", "t2", "1 ACK", "")),
     ]);

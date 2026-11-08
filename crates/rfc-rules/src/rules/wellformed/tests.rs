@@ -303,6 +303,21 @@ fn an_invite_with_contact_is_compliant_and_one_without_is_violated() {
     );
 }
 
+/// A peer that answers an INVITE stating no Contact (a 483 to a spent hop
+/// count, a 400 for the missing Contact) owes none on its final: only the
+/// INVITE's sender is charged.
+#[test]
+fn contact_presence_charges_the_invite_sender_not_its_answerer() {
+    let invite = request("INVITE", "Max-Forwards: 0\r\nContent-Length: 0", b"");
+    for status in [483, 400] {
+        let mut answer = response(status, Some("b1"));
+        (answer.src, answer.dst) = (PEER.to_string(), UA.to_string());
+        let findings = run(&ContactPresence, &[invite.clone(), answer]);
+        assert_eq!(findings.len(), 1, "{status}: one occasion, the INVITE: {findings:?}");
+        assert_eq!(findings[0].emitter, UA, "{status}: the INVITE's sender is charged");
+    }
+}
+
 /// Only a dialog-ESTABLISHING method owes a Contact.
 #[test]
 fn a_bye_is_no_contact_presence_occasion() {

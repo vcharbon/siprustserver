@@ -213,12 +213,23 @@ fn a_failure_final_keeps_its_place_whatever_its_contacts() {
 
 // --- regression ---
 
-/// RFC 3261 §8.1.1.8: an INVITE names its dialog's remote target, so one with
-/// no Contact is refused and answered 400 rather than given an invented one.
+/// RFC 3261 §8.1.1.8: an INVITE names its dialog's remote target. A new one
+/// with no Contact reads, its dialog's element refusing it before it would
+/// establish the dialog; an in-dialog one is refused and answered 400 rather
+/// than given an invented target.
 #[test]
-fn a_clean_invite_parses_and_a_contactless_one_is_answered_400() {
+fn a_clean_invite_parses_and_a_contactless_one_is_answered_400_in_its_dialog() {
     assert!(accepts(CLEAN_INVITE), "clean single-everything INVITE");
-    let refusal = CustomParser::new().parse(CONTACTLESS_INVITE.as_bytes()).expect_err("refused");
+    assert!(accepts(CONTACTLESS_INVITE), "a new INVITE with no Contact reads");
+    let in_dialog = tagged_to(CONTACTLESS_INVITE);
+    let refusal = CustomParser::new().parse(in_dialog.as_bytes()).expect_err("refused");
     assert!(refusal.reason.contains("no Contact"), "{}", refusal.reason);
     assert!(refusal.partial().is_some(), "answered 400: {}", refusal.reason);
+}
+
+/// `raw` with a To-tag on its To line.
+fn tagged_to(raw: &str) -> String {
+    let at = raw.find("\r\nTo:").expect("a To line") + 2;
+    let end = at + raw[at..].find("\r\n").expect("a line end");
+    format!("{};tag=b1{}", &raw[..end], &raw[end..])
 }

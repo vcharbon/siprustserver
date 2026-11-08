@@ -79,6 +79,11 @@ names. There it answers an INVITE the call never saw, as the ACK of any final a
 hop gave that re-INVITE does: ADR-0055 §4's trigger 3 ignores it, and on a call
 a takeover copy served ends the call with a clean BYE.
 
+A missing Contact on a new request is no ingress refusal: the Contact is the
+remote target of a dialog the request may never open. The element that would
+establish the dialog answers it 400 there, so a refusal that comes first wins:
+a request at `Max-Forwards: 0` is answered 483 (§16.3) whatever it lacks.
+
 ### 4. What is never answered
 
 A response, an ACK, a request without a partial, a limit refusal, a header

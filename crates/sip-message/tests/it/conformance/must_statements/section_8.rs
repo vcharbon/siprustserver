@@ -125,11 +125,33 @@ pub(super) fn rows() -> Vec<Row> {
             "3261-25.1-via-junk-between-parameters",
             options().with("via", "Via: SIP/2.0/UDP 192.0.2.10;branch=z9hG4bK-a garbage;rport"),
         ),
-        // §8.1.1.8, §12.1: one Contact on what can establish a dialog.
-        answered_because("3261-8.1.1.8-invite-no-contact", "Contact", without_contact("INVITE")),
-        answered_because("6665-8.1-subscribe-no-contact", "Contact", without_contact("SUBSCRIBE")),
-        answered_because("6665-8.1-notify-no-contact", "Contact", without_contact("NOTIFY")),
-        answered_because("3515-2.1-refer-no-contact", "Contact", without_contact("REFER")),
+        // §8.1.1.8, §12.1: one Contact on what can establish a dialog. A new
+        // request's missing Contact is refused where its dialog would be
+        // established, after any refusal that comes first (ADR-0054 §2), so
+        // ingress reads it; an in-dialog one's is refused at ingress.
+        accept("3261-8.1.1.8-invite-no-contact-reads-at-ingress", without_contact("INVITE")),
+        accept("6665-8.1-subscribe-no-contact-reads-at-ingress", without_contact("SUBSCRIBE")),
+        accept("6665-8.1-notify-no-contact-reads-at-ingress", without_contact("NOTIFY")),
+        accept("3515-2.1-refer-no-contact-reads-at-ingress", without_contact("REFER")),
+        answered_because(
+            "3261-8.1.1.8-reinvite-no-contact",
+            "Contact",
+            in_dialog_without_contact("INVITE"),
+        ),
+        answered_because(
+            "3515-2.1-in-dialog-refer-no-contact",
+            "Contact",
+            in_dialog_without_contact("REFER"),
+        ),
+        // §16.3 step 3: a spent hop count is answered 483 whatever else the
+        // request lacks, so a liveness probe stating no Contact reads.
+        accept(
+            "3261-16.3-max-forwards-zero-probe-reads",
+            request("INVITE")
+                .start_line("INVITE sip:192.0.2.1:5060 SIP/2.0")
+                .with("max-forwards", "Max-Forwards: 0")
+                .with("contact", "X-Contact: none"),
+        ),
         dropped_because(
             "3261-12.1.1-2xx-invite-no-contact",
             "Contact",

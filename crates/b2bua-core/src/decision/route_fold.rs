@@ -84,6 +84,23 @@ pub fn up_to_admit(
             TerminationCause::Admission,
         )));
     }
+    // RFC 3261 §8.1.1.8, §12.1.1: the caller's Contact is the a-leg dialog's
+    // remote target, so a route that would establish that dialog with none is
+    // refused here, after every refusal that comes first (ADR-0054 §2).
+    if a_invite.contacts().is_empty() {
+        return Admitting::Final(Box::new(crate::initial_invite::reject_call(
+            call,
+            a_invite,
+            400,
+            Some("Bad Request - missing Contact".into()),
+            None,
+            &[],
+            &config.minted_final_advertisement,
+            ids,
+            now_ms,
+            TerminationCause::Admission,
+        )));
+    }
 
     // The call-lifetime latch: a failover route that does not restate the
     // withheld option tags cannot restore one — merged before its features
