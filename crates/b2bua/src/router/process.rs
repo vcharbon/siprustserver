@@ -22,7 +22,6 @@ use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
 use super::stray_cancel::reject_stray_cancel;
-use super::undecided::{is_undecided, settle_undecided_boxed};
 use super::unrecoverable::discharge_after_turn;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
@@ -368,8 +367,7 @@ async fn holds_a_record(ctx: &RouterCtx, call_ref: &str) -> bool {
         || ctx.state.peek_reclaimable(call_ref).await.is_ok()
 }
 
-/// The live call for an in-dialog event: resident (a parked one armed, an
-/// undecided one then settled as [`settle_undecided_boxed`] settles it), or
+/// The live call for an in-dialog event: resident (a parked one armed), or
 /// materialised as an acting-backup takeover (`bak:`), or — for a ref this
 /// node is primary for — as an on-demand reclaim (`pri:`), the in-dialog
 /// request that races the bulk sweep on a rebooted primary, written as every
@@ -381,19 +379,7 @@ async fn resident_or_materialised(
     call_ref: &str,
     answered: bool,
 ) -> Option<Call> {
-    let parked = ctx.state.is_parked(call_ref);
     let first = materialise_after(ctx, call_ref, Origin::Takeover, answered).await;
-    // A parked undecided call this event armed is asked its decision again,
-    // as every arming of one is (ADR-0047 D4); settled off the wire, it is
-    // gone for the event.
-    if let (true, Materialised::Served { call, seeded: Some(seeded) }) = (parked, &first) {
-        if is_undecided(call) {
-            settle_undecided_boxed(ctx, call_ref, call.clone(), *seeded).await;
-            if !ctx.state.contains(call_ref) {
-                return None;
-            }
-        }
-    }
     let disposition = match first {
         Materialised::Refused(Reason::NotBackupRole) => {
             let reclaimed = materialise(ctx, call_ref, Origin::Reclaim).await;

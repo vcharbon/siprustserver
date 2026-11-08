@@ -27,7 +27,7 @@ use super::turn::Turn;
 use super::txn_event::Arrival;
 use super::unroutable::Lookup;
 use super::RouterCtx;
-use crate::dispatch::{Discarded, DispatchClass, Outcome};
+use crate::dispatch::{Discard, Discarded, DispatchClass, Outcome};
 use crate::setup_budget::SetupBudget;
 use b2bua_sdk::event::CallEvent;
 
@@ -245,8 +245,10 @@ pub(super) async fn on_event(
         let Discarded { item, why, owed } = discarded;
         // A setup's CANCEL discarded behind its call's release reaches no
         // turn that would clear the mark it set above: it goes, unless an
-        // INVITE still waits under it or the call is resident.
-        if matches!(item.event, CallEvent::Cancelled { in_dialog: false, .. })
+        // INVITE still waits under it or the call is resident. One discarded
+        // for want of room leaves it to the CANCEL queued before it.
+        if matches!(why, Discard::Released(_))
+            && matches!(item.event, CallEvent::Cancelled { in_dialog: false, .. })
             && !ctx.state.contains(&call_ref)
         {
             ctx.state.retain_setup_cancelled(&call_ref, |cseq| ctx.unborn.holds(&call_ref, cseq));

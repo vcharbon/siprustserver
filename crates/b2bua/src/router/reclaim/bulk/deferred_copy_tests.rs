@@ -51,6 +51,15 @@ impl Scene {
     }
 
     async fn reclaimed(closed: bool, deferred: bool) -> Self {
+        Self::reclaimed_with(closed, deferred, |_| {}).await
+    }
+
+    /// [`reclaimed`](Self::reclaimed) on a node whose config `tune` sets.
+    async fn reclaimed_with(
+        closed: bool,
+        deferred: bool,
+        tune: impl FnOnce(&mut B2buaConfig),
+    ) -> Self {
         let net = SimulatedSignalingNetwork::new(1);
         let asked = Arc::new(AtomicUsize::new(0));
         let count = asked.clone();
@@ -60,7 +69,7 @@ impl Scene {
                 reject(486, "Busy Here")
             })
             .build();
-        let n = node_deciding(&net, "w0", Arc::new(busy), |_| {}, Vec::new()).await;
+        let n = node_deciding(&net, "w0", Arc::new(busy), tune, Vec::new()).await;
         let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
         if closed {
             n.membership.set_conditions("w0", false, false);
@@ -368,33 +377,22 @@ async fn a_copy_queued_before_the_gate_opens_is_judged_at_its_turn() {
     s.no_new_call(1).await;
 }
 
-/// A request naming a parked undecided call arms it on its own turn: the
-/// call's decision is asked again, as every arming of an undecided call asks
-/// it (ADR-0047 D4), and its caller is answered.
-#[tokio::test(start_paused = true)]
-async fn a_parked_undecided_call_armed_on_demand_is_asked_again() {
-    let s = Scene::parked().await;
-    let call_ref = sip_message::param_codec::encode_param(&s.call.call_ref);
-    let bye = format!(
-        "BYE sip:b2bua@127.0.0.2:5080;callRef={call_ref} SIP/2.0\r\n\
-         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-on-demand\r\n\
-         Max-Forwards: 70\r\n\
-         From: <sip:alice@example.com>;tag=alicetag\r\n\
-         To: <sip:bob@example.com>;tag=unknown\r\n\
-         Call-ID: {CID}@10.0.0.9\r\n\
-         CSeq: 2 BYE\r\n\
-         Content-Length: 0\r\n\r\n"
-    );
-    s.send(bye.as_bytes()).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!s.n.core.router_ctx().state.is_parked(&s.call.call_ref), "armed on demand");
-    assert_eq!(s.asked.load(Ordering::SeqCst), 1, "its decision asked again");
-
-    let finals = s.finals().await;
-    let invite = finals.iter().find(|f| f.contains("CSeq: 1 INVITE")).expect("the INVITE's final");
-    assert!(invite.starts_with("SIP/2.0 486"), "the decision answers the caller: {finals:?}");
-    s.send(&ack_of(invite)).await;
-    s.no_new_call(1).await;
+/// The caller's CANCEL of the deferred call's INVITE, taken in through
+/// ingress as the router loop takes it, amid that call's deferral.
+async fn cancel_taken_in(s: &Scene) {
+    let mut parks = crate::router::deferred_parks::DeferredParks::default();
+    parks.defer(s.call.clone());
+    let cancelled = b2bua_sdk::event::CallEvent::Cancelled {
+        call_id: s.call.a_leg.call_id.clone(),
+        from_tag: "alicetag".into(),
+        invite_cseq: Some(1),
+        in_dialog: false,
+        headers: Vec::new(),
+        to_tag: Some("t".into()),
+        at_ms: 0,
+    };
+    let ctx = s.n.core.router_ctx();
+    crate::router::ingress::on_event(ctx, cancelled, Default::default(), Some(&parks)).await;
 }
 
 /// The caller's CANCEL of a deferred call's INVITE reaches a queue its last
@@ -409,21 +407,29 @@ async fn a_cancel_discarded_behind_its_deferred_calls_release_leaves_no_mark() {
     // The call's queue, its park waiting on the lock, is released: the state
     // a gone call's last turn leaves until its worker takes the release.
     ctx.dispatcher.release(&r, RemovalClass::Orphan);
-    let mut parks = crate::router::deferred_parks::DeferredParks::default();
-    parks.defer(s.call.clone());
-    let cancelled = b2bua_sdk::event::CallEvent::Cancelled {
-        call_id: s.call.a_leg.call_id.clone(),
-        from_tag: "alicetag".into(),
-        invite_cseq: Some(1),
-        in_dialog: false,
-        headers: Vec::new(),
-        to_tag: Some("t".into()),
-        at_ms: 0,
-    };
-    crate::router::ingress::on_event(ctx, cancelled, Default::default(), Some(&parks)).await;
+    cancel_taken_in(&s).await;
     assert_eq!(ctx.state.setup_cancelled_count(), 0, "no mark outlives the discarded CANCEL");
 
     s.let_go().await;
     s.open();
+    s.no_new_call(0).await;
+}
+
+/// The caller's CANCELs of a deferred call's INVITE overflow its queue: the
+/// one discarded for want of room leaves the mark the queued one stands on,
+/// so the arming asks nothing of a caller who has her 487.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_discarded_for_want_of_room_keeps_the_mark() {
+    let mut s = Scene::reclaimed_with(true, true, |c| c.per_call_queue_depth = 1).await;
+    s.record_gone().await;
+    let ctx = s.n.core.router_ctx();
+    for _ in 0..3 {
+        cancel_taken_in(&s).await;
+    }
+    assert_eq!(ctx.state.setup_cancelled_count(), 1, "the queued CANCEL's mark stays");
+
+    s.let_go().await;
+    s.open();
+    assert_eq!(s.asked.load(Ordering::SeqCst), 0, "no decision is asked");
     s.no_new_call(0).await;
 }
