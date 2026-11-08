@@ -82,9 +82,10 @@ pub enum MultipartError {
     /// A multipart body with no parts frames nothing (RFC 2046 §5.1.1 requires
     /// at least one encapsulation).
     NoParts,
-    /// The caller stated a boundary that occurs inside a part's payload, so the
-    /// delimiter would split a part rather than separate two.
-    BoundaryInPayload { boundary: String },
+    /// The caller stated a boundary that occurs inside a part, its head or its
+    /// payload, so a line of the part could start like a delimiter that is
+    /// none, or the delimiter would split a part rather than separate two.
+    BoundaryInPart { boundary: String },
     /// A part's `Content-Type` or header line cannot be written whole.
     Unwritable(WriteRefusal),
 }
@@ -96,8 +97,8 @@ impl std::fmt::Display for MultipartError {
                 write!(f, "{content_type:?} is not a multipart media type")
             }
             MultipartError::NoParts => write!(f, "a multipart body states no parts"),
-            MultipartError::BoundaryInPayload { boundary } => {
-                write!(f, "the stated boundary {boundary:?} occurs inside a part's payload")
+            MultipartError::BoundaryInPart { boundary } => {
+                write!(f, "the stated boundary {boundary:?} occurs inside a part")
             }
             MultipartError::Unwritable(refusal) => write!(f, "a part line: {refusal}"),
         }
@@ -110,8 +111,8 @@ impl std::error::Error for MultipartError {}
 /// …).
 ///
 /// A container type that already names a `boundary` uses it, and is refused
-/// when a payload contains it; otherwise the boundary is derived from the parts
-/// and extended until no payload holds it.
+/// when a part (its head or its payload) contains it; otherwise the boundary is
+/// derived from the parts and extended until no part holds it.
 pub fn compose(container_type: &str, parts: &[MultipartPart]) -> Result<Composed, MultipartError> {
     let media = MediaType::parse(&SipStr::owned(container_type)).ok();
     if !media.as_ref().is_some_and(MediaType::is_multipart) {
@@ -129,8 +130,8 @@ pub fn compose(container_type: &str, parts: &[MultipartPart]) -> Result<Composed
         .and_then(|v| v.as_str().map(str::to_string));
     let boundary = match &stated {
         Some(boundary) => {
-            if parts.iter().any(|p| contains(&p.payload, boundary.as_bytes())) {
-                return Err(MultipartError::BoundaryInPayload { boundary: boundary.clone() });
+            if parts.iter().any(|p| holds(p, boundary)) {
+                return Err(MultipartError::BoundaryInPart { boundary: boundary.clone() });
             }
             boundary.clone()
         }
@@ -275,9 +276,9 @@ pub(crate) fn is_boundary(boundary: &str) -> bool {
         && bytes.last().is_some_and(|&b| bcharsnospace(b))
 }
 
-/// A boundary no payload contains, derived from the parts so the same parts
-/// always frame the same way. RFC 2046 §5.1.1's `bchars` set is respected: the
-/// derivation emits hex digits and `-` only.
+/// A boundary no part contains, its head or its payload, derived from the parts
+/// so the same parts always frame the same way. RFC 2046 §5.1.1's `bchars` set
+/// is respected: the derivation emits hex digits and `-` only.
 fn derive_boundary(parts: &[MultipartPart]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for part in parts {
@@ -287,10 +288,21 @@ fn derive_boundary(parts: &[MultipartPart]) -> String {
         }
     }
     let mut boundary = format!("boundary-{hash:016x}");
-    while parts.iter().any(|p| contains(&p.payload, boundary.as_bytes())) {
+    while parts.iter().any(|p| holds(p, &boundary)) {
         boundary.push('-');
     }
     boundary
+}
+
+/// Whether `boundary` occurs anywhere `part` is framed from: its type, a head
+/// line's name or value, its payload.
+fn holds(part: &MultipartPart, boundary: &str) -> bool {
+    let needle = boundary.as_bytes();
+    contains(part.content_type.as_bytes(), needle)
+        || part.headers.iter().any(|(name, value)| {
+            contains(name.as_bytes(), needle) || contains(value.as_bytes(), needle)
+        })
+        || contains(&part.payload, needle)
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

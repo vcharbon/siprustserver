@@ -120,8 +120,34 @@ fn a_derived_boundary_never_occurs_inside_a_payload() {
     assert!(!contains(&hostile.payload, used.as_bytes()));
 }
 
+/// A part's head is framed text too: a head line starting with `--` and the
+/// boundary would be a line no reader takes for a delimiter, so the derivation
+/// walks past a boundary any head line holds, a lifted description's head
+/// included.
+#[test]
+fn a_derived_boundary_never_occurs_inside_a_part_head() {
+    let seed = compose("multipart/mixed", &[sdp(), data()]).unwrap();
+    let boundary = seed.content_type.split("boundary=").nth(1).unwrap().to_string();
+    let hostile = data().with_header(format!("--{boundary}x"), "v");
+    let parts = [sdp(), hostile];
+    let composed = compose("multipart/mixed", &parts).unwrap();
+    let used = composed.content_type.split("boundary=").nth(1).unwrap();
+    assert!(framing::frames_cleanly(&composed.body, used), "{used} frames the composed body");
+    assert_eq!(entity_parts(Some(&composed.content_type), &[], &composed.body), parts);
+
+    let framed = frame("source", &[sdp().with_header(format!("--{boundary}x"), "v")]);
+    let attached = attach(Some("multipart/mixed;boundary=source"), &[], &framed, &[data()]);
+    let content_type = attached.content_type.expect("a body");
+    let used = content_type.split("boundary=").nth(1).unwrap();
+    assert!(framing::frames_cleanly(&attached.body, used), "{used} frames the attached body");
+    let lifted = entity_parts(Some(&content_type), &[], &attached.body);
+    assert_eq!(lifted.len(), 2, "{}", String::from_utf8_lossy(&attached.body));
+    assert_eq!(lifted[0].headers, [(format!("--{boundary}x"), "v".to_string())]);
+}
+
 /// A caller that states its own boundary keeps it — and is refused when a
-/// payload holds it, rather than framing a body nothing can split.
+/// part's payload or head holds it, rather than framing a body nothing can
+/// split.
 #[test]
 fn a_stated_boundary_is_honoured_and_a_colliding_one_is_refused() {
     let composed = compose("multipart/mixed;boundary=unique-boundary-1", &[sdp()]).unwrap();
@@ -130,7 +156,12 @@ fn a_stated_boundary_is_honoured_and_a_colliding_one_is_refused() {
     let hostile = MultipartPart::new("text/plain", b"x unique-boundary-1 x".to_vec());
     assert_eq!(
         compose("multipart/mixed;boundary=unique-boundary-1", &[hostile]),
-        Err(MultipartError::BoundaryInPayload { boundary: "unique-boundary-1".into() })
+        Err(MultipartError::BoundaryInPart { boundary: "unique-boundary-1".into() })
+    );
+    let in_head = sdp().with_header("--unique-boundary-1x", "v");
+    assert_eq!(
+        compose("multipart/mixed;boundary=unique-boundary-1", &[in_head]),
+        Err(MultipartError::BoundaryInPart { boundary: "unique-boundary-1".into() })
     );
 }
 
