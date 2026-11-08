@@ -21,7 +21,7 @@ fn sipflow(args: &[&str]) -> (String, String, bool) {
 
 /// A document whose second message carries a header name that is no token
 /// (RFC 3261 §25.1) is reported on that message alone, a third message whose
-/// Refer-To is a bare addr-spec holding `?` (§20) is reported on that header
+/// Refer-To opens a `<` it never closes (§25.1) is reported on that header
 /// alone, and the sweep counts the rest.
 #[test]
 fn a_refused_message_is_one_line_and_the_sweep_continues() {
@@ -39,8 +39,8 @@ fn a_refused_message_is_one_line_and_the_sweep_continues() {
     let refused = raw.replacen("\r\n", "\r\nX(Bad): 1\r\n", 1);
     doc["legs"][0]["msgs"][1]["raw"] = serde_json::Value::String(refused);
     let raw = doc["legs"][0]["msgs"][2]["raw"].as_str().expect("text payload").to_string();
-    let bare = "sip:bob@example.com?Subject=hi";
-    let unread = raw.replacen("\r\n", &format!("\r\nRefer-To: {bare}\r\n"), 1);
+    let unclosed = "<sip:bob@example.com";
+    let unread = raw.replacen("\r\n", &format!("\r\nRefer-To: {unclosed}\r\n"), 1);
     doc["legs"][0]["msgs"][2]["raw"] = serde_json::Value::String(unread);
 
     let dir = std::env::temp_dir()
@@ -60,7 +60,7 @@ fn a_refused_message_is_one_line_and_the_sweep_continues() {
     assert!(lines[0]["reason"].as_str().is_some_and(|r| r.contains("Header name")), "{}", lines[0]);
     assert_eq!((lines[1]["leg"].as_u64(), lines[1]["msg"].as_u64()), (Some(0), Some(2)));
     assert_eq!(lines[1]["header"], "Refer-To");
-    assert_eq!(lines[1]["values"], serde_json::json!([bare]));
+    assert_eq!(lines[1]["values"], serde_json::json!([unclosed]));
     assert!(err.contains(&format!("messages={total} refused=1")), "totals: {err}");
     assert!(err.contains("header-errors=1"), "totals: {err}");
 }
