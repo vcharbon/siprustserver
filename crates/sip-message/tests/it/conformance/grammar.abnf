@@ -126,7 +126,11 @@ path-segments = segment *("/" segment)
 segment = *pchar *(";" param)
 param = *pchar
 pchar = unreserved / escaped / ":" / "@" / "&" / "=" / "+" / "$" / ","
-scheme = ALPHA *(ALPHA / DIGIT / "+" / "-" / ".")
+; A scheme with a grammar of its own (sip and sips, RFC 3261 §19.1; tel, RFC 3966)
+; is written by that grammar: an absoluteURI names none of them. Any other scheme
+; holds a digit, "+", "-" or "." past its first letter, or is one spelled out.
+scheme = "urn" / "http" / "https" / "mailto" / "cid"
+       / ALPHA *(ALPHA / DIGIT) (DIGIT / "+" / "-" / ".") *(ALPHA / DIGIT / "+" / "-" / ".")
 authority = srvr / reg-name
 ; RFC 3261 erratum 1051 (Verified): userinfo ends in its own "@".
 srvr = [[userinfo] hostport]

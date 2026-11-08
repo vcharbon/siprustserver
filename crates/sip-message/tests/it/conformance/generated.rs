@@ -379,6 +379,19 @@ fn a_steered_value_reads() {
     }
 }
 
+/// An absoluteURI of the grammar never takes a scheme whose own grammar a
+/// reader holds it to (sip, sips, tel): such a value is that scheme's or none.
+#[test]
+fn an_absolute_uri_names_no_scheme_of_its_own_grammar() {
+    let grammar = grammar();
+    let mut rng = Rng::named("absoluteURI");
+    for _ in 0..2000 {
+        let uri = String::from_utf8(grammar.generate("absoluteURI", &mut rng)).expect("ASCII");
+        let scheme = uri.split(':').next().unwrap_or_default().to_ascii_lowercase();
+        assert!(!matches!(scheme.as_str(), "sip" | "sips" | "tel"), "{uri}");
+    }
+}
+
 #[test]
 fn every_generated_value_reads() {
     settle_rows("abnf", &sweep(VALUES_PER_TARGET));
