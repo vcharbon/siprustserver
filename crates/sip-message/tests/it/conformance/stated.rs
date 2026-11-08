@@ -35,6 +35,10 @@ const STATED: &[(&str, &str)] = &[
     // RFC 3261's IPv6 rule admits forms RFC 4291 does not; RFC 5954 §4.1
     // replaces it.
     ("is not an IPv6address", "RFC 5954 §4.1, as the URI host reader holds it"),
+    // A grammar folds a value onto as many lines as it likes; the bounds on a
+    // line, a Request-URI and a header block are stated exceptions.
+    ("exceeds the first-ingress bound", "ADR-0001: the bounds of a new request's first hop"),
+    ("exceeds limit", "ADR-0001: the parser's bounds"),
 ];
 
 /// The refusals of a valid form the stack still makes: the text of the refusal,
