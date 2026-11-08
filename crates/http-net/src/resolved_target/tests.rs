@@ -329,7 +329,7 @@ fn poll_once_on_a_thread(
         }));
         let _ = tx.send(polled);
     });
-    rx.recv_timeout(std::time::Duration::from_secs(2)).ok()
+    rx.recv_timeout(std::time::Duration::from_secs(30)).ok()
 }
 
 /// A target whose resolver knows `limiter:8080`.

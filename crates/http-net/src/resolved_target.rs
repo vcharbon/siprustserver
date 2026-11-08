@@ -113,7 +113,7 @@ impl Named {
 
     /// The addresses kept (a stale set starting its fresh lookup behind
     /// the caller), or the lookup in flight, started when none is and fewer
-    /// than [`MAX_STUCK`] are stuck.
+    /// than [`LookupSettings::max_stuck`] are stuck.
     fn address_or_lookup(self: &Arc<Self>) -> Found {
         let (found, started) = self.find_or_start();
         if let Some(started) = started {
@@ -123,8 +123,8 @@ impl Named {
     }
 
     /// [`address_or_lookup`](Self::address_or_lookup) under the lock; a
-    /// lookup it starts holds the slot and is spawned once the lock is
-    /// released, since dropping it takes the lock.
+    /// lookup it starts holds the slot, and the caller spawns it once the
+    /// lock is released, since dropping it takes the lock.
     fn find_or_start(self: &Arc<Self>) -> (Found, Option<PendingLookup>) {
         let mut state = self.lock();
         if let Some(addrs) = state.addrs.clone() {
@@ -267,6 +267,7 @@ impl ResolvedTarget {
     /// Waits for the lookup in flight, or starts one; a lookup is bounded,
     /// and a caller that gives up sooner leaves it to finish for the next. A
     /// name with addresses kept answers them at once, stale ones included.
+    /// A name target needs a tokio runtime context and panics without one.
     pub async fn resolve_all(&self) -> Option<Addresses> {
         let named = match &self.kind {
             Kind::Addr(addr) => return Some(Arc::from([*addr])),
@@ -296,7 +297,8 @@ impl ResolvedTarget {
     }
 
     /// Start a lookup when the name has no fresh address and none is in
-    /// flight, without waiting for it: it lands for the next request.
+    /// flight, without waiting for it: it lands for the next request. A name
+    /// target needs a tokio runtime context and panics without one.
     pub fn look_up(&self) {
         if let Kind::Name(named) = &self.kind {
             let _ = named.address_or_lookup();
