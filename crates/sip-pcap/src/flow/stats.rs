@@ -28,7 +28,7 @@ pub struct FlowStats {
     /// ([`reason_key`]).
     pub parse_failed_by_reason: BTreeMap<String, u64>,
     /// The Call-ID of each `parse_failed` request that opens a dialog or
-    /// transaction ([`FlowStats::note_refusal`]).
+    /// transaction: no To-tag, neither ACK nor CANCEL.
     pub opening_requests_refused: BTreeSet<String>,
     /// Accepted messages carrying a non-fatal header reading that failed
     /// ([`header_errors`]): ingested like any other, and counted here.
