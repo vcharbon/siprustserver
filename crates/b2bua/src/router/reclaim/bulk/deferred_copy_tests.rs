@@ -276,7 +276,9 @@ async fn a_copy_meeting_its_deferred_calls_release_is_answered_once() {
 }
 
 /// The caller CANCELs its INVITE while a copy is queued behind the park with
-/// the gate closed: the setup ends cancelled, its decision never asked.
+/// the gate closed: the setup ends cancelled, its decision never asked. A
+/// guard of the cancelled setup's turn, which ends the call with the cancel's
+/// cause on its own; the setup-CANCEL mark is proven by the open-gate case.
 #[tokio::test(start_paused = true)]
 async fn a_cancel_while_a_copy_waits_ends_the_setup_unasked() {
     cancelled_while_a_copy_waits(true).await;
@@ -351,7 +353,8 @@ async fn a_copy_queued_behind_a_closed_gate_for_a_call_gone_by_its_park_is_answe
 /// The gate opens after a copy queued behind the park: the arming queues
 /// behind the copy, which is judged at its turn, the call still parked, and
 /// answered merged; the arming then ends the call that caller left, with its
-/// CDR.
+/// CDR. A guard of the order the call's queue keeps: the copy and its arming
+/// cannot run the other way round.
 #[tokio::test(start_paused = true)]
 async fn a_copy_queued_before_the_gate_opens_is_judged_at_its_turn() {
     let mut s = Scene::deferred(true).await;
@@ -363,4 +366,64 @@ async fn a_copy_queued_before_the_gate_opens_is_judged_at_its_turn() {
     s.answered_once("SIP/2.0 482").await;
     assert_eq!(s.asked.load(Ordering::SeqCst), 0, "the merged caller's call asks nothing");
     s.no_new_call(1).await;
+}
+
+/// A request naming a parked undecided call arms it on its own turn: the
+/// call's decision is asked again, as every arming of an undecided call asks
+/// it (ADR-0047 D4), and its caller is answered.
+#[tokio::test(start_paused = true)]
+async fn a_parked_undecided_call_armed_on_demand_is_asked_again() {
+    let s = Scene::parked().await;
+    let call_ref = sip_message::param_codec::encode_param(&s.call.call_ref);
+    let bye = format!(
+        "BYE sip:b2bua@127.0.0.2:5080;callRef={call_ref} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-on-demand\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:alice@example.com>;tag=alicetag\r\n\
+         To: <sip:bob@example.com>;tag=unknown\r\n\
+         Call-ID: {CID}@10.0.0.9\r\n\
+         CSeq: 2 BYE\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    s.send(bye.as_bytes()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!s.n.core.router_ctx().state.is_parked(&s.call.call_ref), "armed on demand");
+    assert_eq!(s.asked.load(Ordering::SeqCst), 1, "its decision asked again");
+
+    let finals = s.finals().await;
+    let invite = finals.iter().find(|f| f.contains("CSeq: 1 INVITE")).expect("the INVITE's final");
+    assert!(invite.starts_with("SIP/2.0 486"), "the decision answers the caller: {finals:?}");
+    s.send(&ack_of(invite)).await;
+    s.no_new_call(1).await;
+}
+
+/// The caller's CANCEL of a deferred call's INVITE reaches a queue its last
+/// turn released, the call gone: the setup-CANCEL mark it set stays behind no
+/// turn that would clear it, so none is left.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_discarded_behind_its_deferred_calls_release_leaves_no_mark() {
+    let mut s = Scene::deferred(true).await;
+    s.record_gone().await;
+    let ctx = s.n.core.router_ctx();
+    let r = s.call.call_ref.clone();
+    // The call's queue, its park waiting on the lock, is released: the state
+    // a gone call's last turn leaves until its worker takes the release.
+    ctx.dispatcher.release(&r, RemovalClass::Orphan);
+    let mut parks = crate::router::deferred_parks::DeferredParks::default();
+    parks.defer(s.call.clone());
+    let cancelled = b2bua_sdk::event::CallEvent::Cancelled {
+        call_id: s.call.a_leg.call_id.clone(),
+        from_tag: "alicetag".into(),
+        invite_cseq: Some(1),
+        in_dialog: false,
+        headers: Vec::new(),
+        to_tag: Some("t".into()),
+        at_ms: 0,
+    };
+    crate::router::ingress::on_event(ctx, cancelled, Default::default(), Some(&parks)).await;
+    assert_eq!(ctx.state.setup_cancelled_count(), 0, "no mark outlives the discarded CANCEL");
+
+    s.let_go().await;
+    s.open();
+    s.no_new_call(0).await;
 }

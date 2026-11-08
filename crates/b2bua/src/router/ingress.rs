@@ -243,6 +243,14 @@ pub(super) async fn on_event(
     }
     if let Outcome::Discarded(discarded) = offer.outcome {
         let Discarded { item, why, owed } = discarded;
+        // A setup's CANCEL discarded behind its call's release reaches no
+        // turn that would clear the mark it set above: it goes, unless an
+        // INVITE still waits under it or the call is resident.
+        if matches!(item.event, CallEvent::Cancelled { in_dialog: false, .. })
+            && !ctx.state.contains(&call_ref)
+        {
+            ctx.state.retain_setup_cancelled(&call_ref, |cseq| ctx.unborn.holds(&call_ref, cseq));
+        }
         let admitted = item.unborn.is_some();
         OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
     }

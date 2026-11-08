@@ -20,6 +20,8 @@
 //! itself — applies nothing and stands down on that write. A re-ask past a
 //! per-call cap fails as the initial INVITE's turn does (ADR-0057 §4).
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use call::{Call, CallModelState};
@@ -64,6 +66,8 @@ pub(super) fn is_undecided(call: &Call) -> bool {
 /// decision is asked again on a turn of its own ([`reask_turn`]). A takeover
 /// copy defers its CDR to the call's primary, a reclaim writes it
 /// (ADR-0020 X3).
+///
+/// [`settle_undecided_boxed`] for a caller whose own future stays small.
 pub(super) async fn settle_undecided(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -105,6 +109,17 @@ pub(super) async fn settle_undecided(
     let ending = off_wire::Ending::Built { before: &before, result, turn: Box::new(turn) };
     let label = &"the settle of an undecided call";
     off_wire::end(ctx, call_ref, ending, caller, now_ms, label).await;
+}
+
+/// [`settle_undecided`], boxed: a call settled on another event's turn is
+/// rare, and that turn's future stays small.
+pub(super) fn settle_undecided_boxed<'a>(
+    ctx: &'a Arc<RouterCtx>,
+    call_ref: &'a str,
+    call: Call,
+    seeded: usize,
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    Box::pin(settle_undecided(ctx, call_ref, call, seeded))
 }
 
 /// The re-ask notice of `call`.
