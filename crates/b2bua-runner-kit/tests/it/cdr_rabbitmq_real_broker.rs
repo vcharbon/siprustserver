@@ -66,11 +66,14 @@ fn url() -> Option<String> {
 
 fn writer(url: String, queue: &str, declare: CdrQueueDeclare) -> (RabbitMqCdrWriter, B2buaMetrics) {
     let metrics = B2buaMetrics::new();
+    let uri = url.parse().expect("an AMQP URI");
+    let tls = amqp_connect::BrokerTls::for_uri(&uri).expect("the TLS its scheme asks for");
     let settings = RabbitMqCdrSettings {
         url,
         queue: queue.into(),
         declare,
         bounds: CdrDeliveryBounds::default(),
+        tls,
     };
     (RabbitMqCdrWriter::new(settings, Arc::new(Fixed), metrics.clone()), metrics)
 }

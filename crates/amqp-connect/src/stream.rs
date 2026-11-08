@@ -8,10 +8,12 @@ use std::os::fd::AsFd;
 use async_rs::traits::Reactor;
 use async_rs::{Runtime, Tokio};
 use lapin::{
-    tcp::{AsyncTcpStream, TLSConfig},
+    tcp::AsyncTcpStream,
     uri::{AMQPScheme, AMQPUri},
 };
 use tokio::time::{timeout_at, Instant};
+
+use crate::tls::BrokerTls;
 
 /// The stream the AMQP client's IO loop reads and writes.
 pub type BrokerStream = AsyncTcpStream<<Tokio as Reactor>::TcpStream>;
@@ -28,14 +30,26 @@ pub(crate) fn timed_out() -> io::Error {
 }
 
 /// Connects the stream of `uri`, trying each of the resolved `addrs` in turn
-/// until `deadline`; for `amqps`, the TLS handshake (SNI: the URI host) is
-/// done by `deadline` too. No address is tried once `deadline` passed. A
-/// failure or a dropped future leaves no socket open.
+/// until `deadline`; for `amqps`, the TLS handshake (SNI: the URI host) over
+/// `tls`'s connector is done by `deadline` too. No address is tried once
+/// `deadline` passed. A failure or a dropped future leaves no socket open; an
+/// `amqps` URI with a plain `tls` is refused before any connect.
 pub async fn connect_stream(
     uri: &AMQPUri,
+    tls: &BrokerTls,
     addrs: &[SocketAddr],
     deadline: Instant,
 ) -> io::Result<Connected> {
+    let connector = match (&uri.scheme, tls.connector()) {
+        (AMQPScheme::AMQP, _) => None,
+        (AMQPScheme::AMQPS, Some(connector)) => Some(connector),
+        (AMQPScheme::AMQPS, None) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "an amqps URI needs its TLS connector (BrokerTls::for_uri)",
+            ));
+        }
+    };
     let host = uri.authority.host.as_str();
     let runtime = Runtime::tokio_current();
     let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{host} resolves to nothing"));
@@ -60,9 +74,9 @@ pub async fn connect_stream(
     let tcp = connected.ok_or(last)?;
     let socket = StdTcpStream::from(tcp.get_ref().as_fd().try_clone_to_owned()?);
     let plain = AsyncTcpStream::Plain(tcp);
-    let stream = match uri.scheme {
-        AMQPScheme::AMQP => plain,
-        AMQPScheme::AMQPS => timeout_at(deadline, plain.into_tls(host, TLSConfig::default()))
+    let stream = match connector {
+        None => plain,
+        Some(connector) => timeout_at(deadline, plain.into_rustls(connector, host))
             .await
             .map_err(|_| timed_out())??,
     };

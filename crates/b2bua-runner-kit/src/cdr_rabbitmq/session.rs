@@ -137,7 +137,9 @@ impl Session {
             .await
             .map_err(OpenError::Resolve)?;
         let Connected { stream, socket: descriptor } =
-            connect_stream(&uri, &addrs, deadline).await.map_err(OpenError::Connect)?;
+            connect_stream(&uri, &settings.tls, &addrs, deadline)
+                .await
+                .map_err(OpenError::Connect)?;
         let socket = Arc::new(SocketKill::default());
         socket.arm(descriptor);
         let guard = KillOnDrop::new(socket.clone());

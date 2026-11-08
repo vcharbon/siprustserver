@@ -4,6 +4,8 @@
 
 use std::time::Duration;
 
+use amqp_connect::BrokerTls;
+
 /// How the writer declares its destination queue, `B2BUA_CDR_RABBITMQ_DECLARE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CdrQueueDeclare {
@@ -138,6 +140,9 @@ pub struct RabbitMqCdrSettings {
     /// The bounds of every broker wait, `B2BUA_CDR_RABBITMQ_WINDOW` and the
     /// `_*_TIMEOUT_MS` / `_BACKOFF*_MS` variables.
     pub bounds: CdrDeliveryBounds,
+    /// The TLS the URL's scheme asks for, its CA roots read when the
+    /// settings are read: every reconnect's handshake rides it.
+    pub tls: BrokerTls,
 }
 
 impl RabbitMqCdrSettings {
@@ -147,14 +152,18 @@ impl RabbitMqCdrSettings {
     /// padded, when `MAX_LEN`
     /// is not a non-negative integer, when `DECLARE` is neither `own` nor
     /// `existing` (blank = `own`), when the URL does not parse or states
-    /// `heartbeat=0` ([`amqp_connect::checked_uri`]), when `MAX_LEN` is set beside
-    /// `DECLARE=existing` (the broker owns the bound), or when a bound of
-    /// [`CdrDeliveryBounds`] is not a positive integer.
+    /// `heartbeat=0` ([`amqp_connect::checked_uri`]), when an `amqps` URL's
+    /// CA roots do not load ([`BrokerTls::for_uri`]), when `MAX_LEN` is set
+    /// beside `DECLARE=existing` (the broker owns the bound), or when a bound
+    /// of [`CdrDeliveryBounds`] is not a positive integer.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         let Some(url) = get("B2BUA_CDR_RABBITMQ_URL").filter(|u| !u.trim().is_empty()) else {
             return Ok(None);
         };
-        amqp_connect::checked_uri("B2BUA_CDR_RABBITMQ_URL", &url)?;
+        let uri = amqp_connect::checked_uri("B2BUA_CDR_RABBITMQ_URL", &url)?;
+        let tls = BrokerTls::for_uri(&uri).map_err(|e| {
+            format!("B2BUA_CDR_RABBITMQ_URL is amqps and the system's CA roots do not load: {e}")
+        })?;
         let queue = get("B2BUA_CDR_RABBITMQ_QUEUE").unwrap_or_else(|| "cdr".to_string());
         if queue.trim().is_empty() || queue.trim() != queue {
             return Err(format!(
@@ -198,7 +207,7 @@ impl RabbitMqCdrSettings {
             }
         };
         let bounds = CdrDeliveryBounds::from_lookup(&get)?;
-        Ok(Some(Self { url, queue, declare, bounds }))
+        Ok(Some(Self { url, queue, declare, bounds, tls }))
     }
 }
 
@@ -243,8 +252,20 @@ mod tests {
                 queue: "cdr".into(),
                 declare: OWN_DEFAULT,
                 bounds: CdrDeliveryBounds::default(),
+                tls: BrokerTls::PLAIN,
             }))
         );
+    }
+
+    #[test]
+    fn an_amqps_url_reads_its_tls_with_the_settings() {
+        let s = RabbitMqCdrSettings::from_lookup(lookup(&[(
+            "B2BUA_CDR_RABBITMQ_URL",
+            "amqps://guest:guest@rabbitmq:5671/%2f",
+        )]))
+        .expect("the system's CA roots load")
+        .expect("a sink");
+        assert_ne!(s.tls, BrokerTls::PLAIN, "the connector is built with the settings");
     }
 
     #[test]
