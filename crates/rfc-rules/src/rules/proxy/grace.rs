@@ -30,7 +30,7 @@ pub const PROXY_100_GRACE_US: u64 = 200_000;
 ///
 /// **Proxy-scoped by consumer policy.** §16.7 binds proxies — a UAS answering
 /// an INVITE is governed by §8.2.6. An INVITE the strict reading refuses
-/// ([`Msg::refused`]) is no occasion: the hop answers it 400 or drops it.
+/// ([`crate::Msg::refused`]) is no occasion: the hop answers it 400 or drops it.
 pub struct Proxy100WithinGrace;
 
 impl Obligation for Proxy100WithinGrace {

@@ -11,7 +11,7 @@ use super::message_facts::remote_tag_of;
 /// How long an OPEN observation must keep running past an in-dialog request
 /// before "the taker never answered it" reads as silence rather than
 /// truncation. One second — the §17.2 reasoning of
-/// [`super::capability::ANSWER_WINDOW_US`]; in a CLOSED observation it
+/// [`crate::rules::capability::ANSWER_WINDOW_US`]; in a CLOSED observation it
 /// collapses.
 pub const UNKNOWN_DIALOG_WINDOW_US: u64 = 1_000_000;
 
@@ -38,7 +38,7 @@ pub const UNKNOWN_DIALOG_WINDOW_US: u64 = 1_000_000;
 /// that final names no dialog. A dialog a 2xx accepted stays, and every other
 /// tagged answer shows its dialog. A request is judged once, at its first
 /// copy. A PRACK on the ended dialog is left to
-/// [`super::prack::Prack2xxOr481`], which judges it by the `RSeq` it names. A
+/// [`crate::rules::prack::Prack2xxOr481`], which judges it by the `RSeq` it names. A
 /// request the strict reading refuses ([`Msg::refused`]) owes its 400 instead
 /// and is no occasion.
 ///
