@@ -265,14 +265,9 @@ pub(super) enum InitialInvite {
     /// dial a second call.
     Foreign,
     /// A copy of the initial INVITE of this node's own call whose park a bulk
-    /// reclaim deferred, not resident yet ([`DeferredParks::copied`]).
+    /// reclaim deferred, until its deferred arming ran
+    /// ([`DeferredParks::copied`]).
     Deferred(Copied),
-}
-
-/// The deferred call a SIP `event` naming no `callRef` of ours resolves to
-/// ([`DeferredParks::find`]).
-pub(super) fn deferred_park(parks: &DeferredParks, event: &CallEvent) -> Option<IndexHit> {
-    parks.find(event_lookup(event)?)
 }
 
 /// **A copy of a replicated call's initial INVITE.** An INVITE with no To-tag,

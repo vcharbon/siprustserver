@@ -70,7 +70,8 @@ pub(in crate::router) use named_requests::names_request_in_flight;
 pub(in crate::router) use rejected_dialled::rejected_dialled_seeds;
 pub(in crate::router) use seed_images::unreadable_seed_image;
 pub(in crate::router) use seeds::{
-    names_server_branch, names_unanswered_caller_invite, rejected_seed, relayed_server_key,
+    caller_invite_key, names_server_branch, names_unanswered_caller_invite, rejected_seed,
+    relayed_server_key,
 };
 #[cfg(test)]
 mod tests;

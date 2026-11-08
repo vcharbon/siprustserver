@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use super::super::ended_body::{self, Cause};
 use super::super::RouterCtx;
+use crate::store::Enveloped;
 
 /// Periodic replica-store maintenance. A deferred terminal whose primary never came back to reclaim
 /// it (crashed for good, past the replica TTL = `reboot_budget`) must NOT be left
@@ -31,7 +32,8 @@ use super::super::RouterCtx;
 ///
 /// The pass shares its task with the call reaper's sweep, whose aborts free a
 /// hung turn, so it waits on no call's lock: a ghost whose lock a turn holds
-/// is ended on a turn of its own queue ([`super::deferred`]).
+/// is ended by a task of its own once that turn let the lock go
+/// ([`end_after_its_holder`]).
 pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
     let reaped = ctx.state.reap_replica(now_ms).await;
     for ghost in reaped.ghosts {
@@ -40,7 +42,7 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
             continue;
         }
         let Some(_guard) = ctx.state.try_lock(&call_ref) else {
-            super::deferred::offer_ghost(ctx, &ghost);
+            end_after_its_holder(ctx, ghost);
             continue;
         };
         if !ctx.state.contains(&call_ref) {
@@ -56,6 +58,24 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
         ended_body::pay(ctx, &call_ref, Cause::Evicted, terminal, now_ms).await;
         ctx.metrics.bump_repl_terminal_lost();
     }
+}
+
+/// End `ghost` on a task of its own, under its call's lock once the turn
+/// holding it let it go, unless a copy of the call is live here by then. The
+/// body was evicted, so this task is all that is left to end it; the
+/// dispatcher tracks it, so a crash of the node stops it with the call work it
+/// runs.
+fn end_after_its_holder(ctx: &Arc<RouterCtx>, ghost: Enveloped) {
+    let task_ctx = ctx.clone();
+    let task = observe::spawn_keeping_node(async move {
+        let ctx = &task_ctx;
+        let call_ref = ghost.call.call_ref.clone();
+        let _guard = ctx.state.lock(&call_ref).await;
+        if !ctx.state.contains(&call_ref) {
+            ended_body::pay(ctx, &call_ref, Cause::Ghost, ghost, ctx.clock.now_ms()).await;
+        }
+    });
+    ctx.dispatcher.track(task.abort_handle());
 }
 
 #[cfg(test)]

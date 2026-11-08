@@ -60,6 +60,13 @@ impl ReadmissionGate {
         self.deferred.extend(call_refs);
     }
 
+    /// The deferred arming of `call_ref` met the endpoint not reading ready
+    /// and left the call parked: it is armed with the next release.
+    pub(super) fn held_back(&mut self, call_ref: &str) {
+        self.deferred.insert(call_ref.to_string());
+        self.arming = true;
+    }
+
     /// `cmd` when it runs now: it reclaims nothing, or the gate is open and
     /// holds nothing older. Otherwise `cmd` is held.
     pub(super) fn admit(&mut self, cmd: ReplCommand) -> Option<ReplCommand> {

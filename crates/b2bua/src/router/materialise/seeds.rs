@@ -392,6 +392,11 @@ pub(in crate::router) fn names_unanswered_caller_invite(call: &Call, branch: &st
         if request.top_via().branch().is_some_and(|b| same_branch(b, branch)))
 }
 
+/// The server transaction of `call`'s caller's initial INVITE.
+pub(in crate::router) fn caller_invite_key(call: &Call) -> Option<ServerTxnKey> {
+    ServerTxnKey::of(&rebuild_a_leg_invite(&call.a_leg_invite).ok()?)
+}
+
 /// The INVITE server transaction the originator's request of the pending
 /// relayed re-INVITE `p` opened here: its top-Via branch and sent-by.
 pub(in crate::router) fn relayed_server_key(p: &RequestRecord) -> Option<ServerTxnKey> {

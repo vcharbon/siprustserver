@@ -123,7 +123,7 @@ async fn a_takeover_crossing_a_release_runs_after_it_with_its_watch_and_its_rese
     let lines = heard(caller.as_ref(), Duration::from_millis(500)).await;
     assert_eq!(lines, ["SIP/2.0 200 OK"], "the BYE is answered");
     let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|c| c.call_ref).collect();
-    assert_eq!(cdrs, [r.clone()], "the copy writes the call's one CDR");
+    assert_eq!(cdrs, std::slice::from_ref(&r), "the copy writes the call's one CDR");
     assert!(ctx.state.peek(&r).is_none(), "no live copy is left");
     assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
     assert!(!ctx.dispatcher.has_queue(&r), "no queue is left behind");

@@ -101,3 +101,43 @@ async fn an_unbound_lock_and_an_aborted_waiter_leave_no_entry() {
     drop(held);
     assert_eq!(state.lock_count(), 0, "neither the holder nor the aborted waiter left one");
 }
+
+/// Guards of one call dropped at once on several threads: the takers of a
+/// call never resident, and the failed attempts beside the release of a
+/// resident one, leave no entry once all are gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guards_dropped_at_once_on_several_threads_leave_no_entry() {
+    let state = state();
+    for round in 0..200 {
+        let takers: Vec<JoinHandle<()>> = (0..8)
+            .map(|_| {
+                let state = state.clone();
+                tokio::spawn(async move { drop(state.lock("never-resident").await) })
+            })
+            .collect();
+        for taker in takers {
+            taker.await.unwrap();
+        }
+        assert_eq!(state.lock_count(), 0, "round {round}: a call never resident");
+
+        let r = resident(&state, &format!("released-{round}"));
+        let attempts: Vec<JoinHandle<()>> = (0..8)
+            .map(|_| {
+                let (state, r) = (state.clone(), r.clone());
+                tokio::spawn(async move {
+                    for _ in 0..32 {
+                        drop(state.try_lock(&r));
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })
+            .collect();
+        let releasing = state.lock(&r).await;
+        state.drop_local(&r);
+        drop(releasing);
+        for attempt in attempts {
+            attempt.await.unwrap();
+        }
+        assert_eq!(state.lock_count(), 0, "round {round}: a call released beside failed attempts");
+    }
+}

@@ -1,4 +1,3 @@
-use call::IndexLookup;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -16,42 +15,31 @@ fn scanned(cid: &str) -> call::Call {
 }
 
 #[test]
-fn a_deferred_call_is_found_by_its_keys_and_its_invite_copies_until_its_arming_ran() {
+fn a_deferred_calls_invite_copies_are_held_until_its_arming_then_follow_it_until_it_ran() {
     let mut parks = DeferredParks::default();
     let call = scanned("deferred");
     parks.defer(call.clone());
 
-    let lookup = IndexLookup::Peer { call_id: &call.a_leg.call_id, tag: "alicetag" };
-    let found = parks.find(lookup).expect("found by the caller's dialog key");
-    assert_eq!(found.call_ref, call.call_ref);
     let copied = parks.copied(&invite("w0", "w1", "deferred")).expect("a copy of its INVITE");
     assert_eq!(copied.hit.call_ref, call.call_ref);
-    assert!(copied.unanswered && !copied.arm_queued);
+    assert!(!copied.arm_queued, "held while no arming is queued");
     let image = String::from_utf8_lossy(invite("w0", "w1", "deferred").image()).to_string();
     let other = image.replace("CSeq: 1 INVITE", "CSeq: 2 INVITE");
     let Ok(SipMessage::Request(other)) = CustomParser::new().parse(other.as_bytes()) else {
         panic!("the INVITE parses");
     };
     assert!(parks.copied(&other).is_none(), "another CSeq is no copy");
+    assert_eq!(parks.unarmed().count(), 1);
 
     let event = CallEvent::sip(SipMessage::Request(invite("w0", "w1", "deferred")), src());
     parks.hold(&call.call_ref, event);
-    assert_eq!(parks.arming(&call.call_ref, true).len(), 1, "the held copy is taken in again");
+    assert_eq!(parks.arming(&call.call_ref).len(), 1, "the held copy is taken in again");
     assert!(parks.copied(&invite("w0", "w1", "deferred")).expect("still deferred").arm_queued);
+    assert_eq!(parks.unarmed().count(), 0);
+
+    parks.held_back(&call.call_ref);
+    assert!(!parks.copied(&invite("w0", "w1", "deferred")).expect("deferred").arm_queued);
 
     parks.armed(&call.call_ref);
-    assert!(parks.find(lookup).is_none(), "its keys go with it");
-    assert!(parks.copied(&invite("w0", "w1", "deferred")).is_none());
-}
-
-#[test]
-fn a_call_whose_arming_was_discarded_is_no_longer_deferred() {
-    let mut parks = DeferredParks::default();
-    let call = scanned("discarded");
-    parks.defer(call.clone());
-    let event = CallEvent::sip(SipMessage::Request(invite("w0", "w1", "discarded")), src());
-    parks.hold(&call.call_ref, event);
-
-    assert_eq!(parks.arming(&call.call_ref, false).len(), 1, "what it held is taken in again");
-    assert!(parks.copied(&invite("w0", "w1", "discarded")).is_none());
+    assert!(parks.copied(&invite("w0", "w1", "deferred")).is_none(), "no longer deferred");
 }

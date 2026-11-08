@@ -87,6 +87,7 @@ pub(super) async fn stand_down_turn(
     let Some(copy) = ctx.state.peek_enveloped(call_ref) else {
         // Shed between the notice and its turn: this turn's queue is all that
         // is left of the call here.
+        drop(_guard);
         release_call(ctx, call_ref, ReleaseKind::Orphan).await;
         return;
     };

@@ -48,6 +48,7 @@ pub(super) async fn drop_turn(ctx: &Arc<RouterCtx>, call_ref: &str, payload: &se
     let Some(live) = ctx.state.peek(call_ref) else {
         // Released between the notice and its turn: this turn's queue is all
         // that is left of the call here.
+        drop(_guard);
         release_call(ctx, call_ref, ReleaseKind::Orphan).await;
         return;
     };

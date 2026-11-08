@@ -113,14 +113,15 @@ the one await with no timeout, no queue and no drop policy.
    reclaim defers a call whose lock a turn holds to that call's own queue
    (ADR-0010 X2). The stall threshold defaults to the larger of 10 s and that
    timeout plus 5 s, and boot refuses one not above it by 2 s. A bulk reclaim
-   beats the router's pulse per call. Under the `cpu_starve` chaos the 0.3 CPU quota is shared by every
-   runnable thread: with N runtime threads busy, a turn reads stalled only when
-   its own work needs more than 3/N CPU-seconds, and exits the worker only when
-   it needs more than 4.5/N (one SIP event, timer firing or sweep takes
-   milliseconds); a process frozen past the threshold wakes on one reading of a
-   turn it then finishes, which exits nothing. The pulse cannot see a loop that
-   is waiting yet never scheduled while input is queued for it: a starved
-   runtime reads as idle, and only the probe's own timeout catches it.
+   beats the router's pulse per call. Under the `cpu_starve` chaos the 0.3 CPU
+   quota is shared by every runnable thread: with N runtime threads busy, a
+   turn reads stalled only when its own work needs more than 3/N CPU-seconds,
+   and exits the worker only when it needs more than 4.5/N (one SIP event,
+   timer firing or sweep takes milliseconds); a process frozen past the
+   threshold wakes on one reading of a turn it then finishes, which exits
+   nothing. The pulse cannot see a loop that is waiting yet never scheduled
+   while input is queued for it: a starved runtime reads as idle, and only the
+   probe's own timeout catches it.
 
    A stalled router still draws the proxy's dead verdict, which its backup
    refutes on the heartbeats it still hears; the flip of its endpoint at the

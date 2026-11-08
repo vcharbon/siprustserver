@@ -389,8 +389,14 @@ pub async fn run(
         ctx.turn_probe.router_turn(&ctx.config.self_ordinal).await;
         match work {
             Work::Event(ev, arrival) => {
-                if let Some(call_ref) = reclaim::deferred::armed_notice_of(&ev) {
-                    parks.armed(call_ref);
+                if let Some((call_ref, ended)) = reclaim::deferred::arming_ended_of(&ev) {
+                    match ended {
+                        reclaim::deferred::ArmingEnded::Ran => parks.armed(call_ref),
+                        reclaim::deferred::ArmingEnded::Held => {
+                            parks.held_back(call_ref);
+                            readmission.held_back(call_ref);
+                        }
+                    }
                 } else {
                     ingress::on_event(&ctx, ev, arrival, Some(&mut parks)).await;
                 }
@@ -402,8 +408,9 @@ pub async fn run(
             }
             Work::Released(released) => {
                 if released.arm || !released.deferred.is_empty() {
-                    let arming = reclaim::arm_parked(&ctx, &released.deferred).await;
-                    take_in_again(&ctx, parks.arming_all(arming));
+                    let arming =
+                        reclaim::arm_parked(&ctx, &released.deferred, parks.unarmed()).await;
+                    take_in_again(&ctx, after_arming(&mut parks, arming));
                 }
                 for cmd in released.cmds {
                     on_repl_command(&ctx, cmd, &mut readmission, &mut parks).await
@@ -414,8 +421,23 @@ pub async fn run(
     }
 }
 
+/// What the deferred calls of an arming pass take in again, in order, given
+/// whether each one's arming was queued: the copies each held, then, for an
+/// arming its call's released queue discarded, the notice that it ran, so the
+/// copies are answered as a gone call's before the call stops being deferred.
+fn after_arming(parks: &mut DeferredParks, arming: Vec<(String, bool)>) -> Vec<CallEvent> {
+    let mut events = Vec::new();
+    for (call_ref, queued) in arming {
+        events.extend(parks.arming(&call_ref));
+        if !queued {
+            events.push(reclaim::deferred::arming_ran(&call_ref));
+        }
+    }
+    events
+}
+
 /// Take `events` in again on a later turn of the loop, in order, behind what
-/// this turn queued: copies a deferred call held until its arming was queued.
+/// this turn queued.
 fn take_in_again(ctx: &RouterCtx, events: Vec<CallEvent>) {
     for event in events {
         let _ = ctx.reentry_tx.send(event);
@@ -440,8 +462,8 @@ async fn on_repl_command(
                 readmission.defer([call_ref]);
             }
             if let Some(deferred) = readmission.arm_now() {
-                let arming = reclaim::arm_parked(ctx, &deferred).await;
-                take_in_again(ctx, parks.arming_all(arming));
+                let arming = reclaim::arm_parked(ctx, &deferred, parks.unarmed()).await;
+                take_in_again(ctx, after_arming(parks, arming));
             }
         }
         ReplCommand::ReclaimCall(call_ref) => flush_turn::offer_reconcile(ctx, call_ref).await,

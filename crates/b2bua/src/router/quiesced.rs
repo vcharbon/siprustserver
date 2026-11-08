@@ -54,6 +54,7 @@ pub(super) async fn self_release_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
         // Shed between the notice and its turn: this turn's queue is all that
         // is left of the call here.
         if !ctx.state.contains(call_ref) {
+            drop(_guard);
             release_call(ctx, call_ref, ReleaseKind::Orphan).await;
         }
         return;

@@ -45,7 +45,9 @@ pub(super) enum ReleaseKind {
     /// Orphan reject: the 481 path hydrated NO call — only the dispatch queue
     /// exists, the lock entry going with its last guard. **No** store mutation
     /// (a `remove` would reverse-propagate a spurious delete), **no**
-    /// timers/txns were armed.
+    /// timers/txns were armed. Its turn drops its guard first, so a step a
+    /// sweep queued behind the turn, on finding the lock held, runs before the
+    /// queue's release instead of being discarded behind it.
     Orphan,
 }
 
@@ -55,7 +57,7 @@ pub(super) enum ReleaseKind {
 /// released-at-call-end invariant lives in ONE place instead of per-path
 /// hand-maintained copies. The per-call lock entry goes with the last guard
 /// of the call once it left the live map (`store::CallGuard`): a turn
-/// waiting on it runs after the whole release.
+/// waiting on a release made under the lock runs after the whole release.
 pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: ReleaseKind) {
     // A traced call's root span closes here — the ONE place every release funnels
     // through — so the active-trace slot returns exactly when the call's runtime

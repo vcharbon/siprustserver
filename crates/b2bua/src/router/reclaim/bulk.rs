@@ -134,11 +134,14 @@ pub(super) fn smoothing(ctx: &RouterCtx, now_ms: i64, l_max: i64) -> Smoothing {
 /// The pass waits on no call's lock: a parked call whose lock a turn holds,
 /// and every call of `deferred` (the parks [`park_all`] deferred, which may
 /// not have run yet), is armed by a turn queued on its own queue, its
-/// smoothing read when that turn runs. Returns, for each call of `deferred`,
-/// whether its arming was queued: one discarded met a released queue.
-pub(in crate::router) async fn arm_parked(
+/// smoothing read when that turn runs. `L_max` spans the deferred calls not
+/// parked yet too, read on the bodies the park scanned (`unparked`). Returns,
+/// for each call of `deferred`, whether its arming was queued: one discarded
+/// met a released queue.
+pub(in crate::router) async fn arm_parked<'a>(
     ctx: &Arc<RouterCtx>,
     deferred: &[String],
+    unparked: impl IntoIterator<Item = &'a Call>,
 ) -> Vec<(String, bool)> {
     let start_ms = ctx.clock.now_ms();
     let beat = || ctx.router_pulse.turning();
@@ -150,7 +153,9 @@ pub(in crate::router) async fn arm_parked(
             ctx.state.peek(call_ref)
         })
         .collect();
-    let l_max = largest_keepalive_gap(&calls, start_ms, &beat);
+    let unparked = unparked.into_iter().filter(|c| !ctx.state.is_parked(&c.call_ref));
+    let l_max = largest_keepalive_gap(&calls, start_ms, &beat)
+        .max(largest_keepalive_gap(unparked, start_ms, &beat));
     let smoothing = smoothing(ctx, start_ms, l_max);
     let later: HashSet<&str> = deferred.iter().map(String::as_str).collect();
     let (mut armed, mut queued) = (0u64, 0u64);
@@ -254,5 +259,7 @@ pub(in crate::router) fn announce_reclaim(ctx: &Arc<RouterCtx>, call: Call) -> b
 
 #[cfg(test)]
 mod deferral_tests;
+#[cfg(test)]
+mod deferred_copy_tests;
 #[cfg(test)]
 mod tests;

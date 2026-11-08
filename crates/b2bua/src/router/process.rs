@@ -57,6 +57,7 @@ pub(super) async fn process(
     match reaper_verdict_gate(ctx, event, &call_ref, now_ms).await {
         Gate::Consumed => return false,
         Gate::Shed => {
+            drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return false;
         }
@@ -84,6 +85,7 @@ pub(super) async fn process(
             // no spurious reverse-propagated delete) so the worker exits and
             // `removals` balances `creations`.
             super::initial_turn::Turn::Shed => {
+                drop(_guard);
                 release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
                 return false;
             }
@@ -99,6 +101,7 @@ pub(super) async fn process(
         if !holds_a_record(ctx, &call_ref).await {
             super::callouts::release_admit_fold_call(&ctx.limiter, event);
         }
+        drop(_guard);
         release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
         return false;
     } else if let Some(answer) = RefreshAnswered::of(event) {
@@ -107,6 +110,7 @@ pub(super) async fn process(
         // takes no answer, and the dispatch's per-call ephemera go.
         let Some(call) = ctx.state.peek(&call_ref) else {
             ctx.metrics.limiter().count_refresh_discarded(crate::metrics::RefreshDiscard::CallGone);
+            drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return false;
         };
@@ -141,7 +145,10 @@ pub(super) async fn process(
             // creation would leak permanently (a mass-orphan failover turns
             // that into an `active_calls` ratchet that never drains). Release
             // through the one teardown executor (`ReleaseKind::Orphan` — no
-            // store mutation, so no spurious reverse-propagated delete).
+            // store mutation, so no spurious reverse-propagated delete). The
+            // guard goes first, so a step a sweep deferred behind this turn
+            // runs before the release.
+            drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return false;
         };
@@ -247,6 +254,7 @@ pub(super) async fn process(
     if unrecoverable {
         let ids = &mut turn.ids;
         if !discharge_after_turn(ctx, &call_ref, event, now_ms, ids).await {
+            drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
         }
         return false;

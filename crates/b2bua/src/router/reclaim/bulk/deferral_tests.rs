@@ -1,23 +1,19 @@
 //! The bulk reclaim never waits on a call's lock: a call whose lock a turn
 //! holds is parked on a turn of its own queue and armed by a turn queued
-//! behind it, while the router loop goes on serving. What reaches the
-//! deferred call meanwhile, its caller's INVITE retransmission and a request
-//! naming no `callRef` of ours, queues behind its park and is served by the
-//! reclaimed call.
+//! behind it, while the router loop goes on serving, and that arming runs
+//! only while the node's own endpoint reads ready. A request naming no
+//! `callRef` of ours reaching the deferred call meanwhile is found through
+//! the store's SIP index and queues behind its park (the copies of its
+//! INVITE: `deferred_copy_tests`).
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 
-use crate::config::B2buaConfig;
-use crate::decision::test_adapter::reject;
-use crate::decision::ScriptedDecisionEngine;
-use crate::initial_invite::build_initial_call;
 use crate::router::test_support::{
-    answered, caller_bye, heard, invite, node_deciding, node_on, put_body, src, Node, NODE_SIP_ADDR,
+    answered, caller_bye, heard, node_on, put_body, src, Node, NODE_SIP_ADDR,
 };
 use crate::router::ReplCommand;
 use crate::store::PartitionRole;
@@ -192,102 +188,33 @@ async fn a_request_naming_no_call_ref_of_a_deferred_call_is_served_by_the_reclai
     let lines = heard(caller.as_ref(), Duration::from_millis(500)).await;
     assert_eq!(lines, ["SIP/2.0 200 OK"], "the reclaimed call takes the BYE");
     let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|c| c.call_ref).collect();
-    assert_eq!(cdrs, [call.call_ref.clone()], "the call's one CDR");
+    assert_eq!(cdrs, std::slice::from_ref(&call.call_ref), "the call's one CDR");
     nothing_left(&n);
 }
 
-/// The responses `peer` receives within `within`, whole.
-async fn received(peer: &dyn UdpEndpoint, within: Duration) -> Vec<String> {
-    let mut texts = Vec::new();
-    let deadline = tokio::time::Instant::now() + within;
-    while let Ok(Some(p)) = tokio::time::timeout_at(deadline, peer.recv()).await {
-        texts.push(String::from_utf8_lossy(&p.raw).to_string());
-    }
-    texts
-}
-
-/// The caller's ACK of the non-2xx final `response` to `cid`'s INVITE: the
-/// INVITE's branch, the final's To (RFC 3261 §17.1.1.3).
-fn ack_of(cid: &str, response: &str) -> Vec<u8> {
-    let to = response.lines().find(|l| l.starts_with("To:")).expect("the final's To");
-    format!(
-        "ACK sip:bob@example.com SIP/2.0\r\n\
-         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{cid}\r\n\
-         Max-Forwards: 70\r\n\
-         From: <sip:alice@example.com>;tag=alicetag\r\n\
-         {to}\r\n\
-         Call-ID: {cid}@10.0.0.9\r\n\
-         CSeq: 1 ACK\r\n\
-         Content-Length: 0\r\n\r\n"
-    )
-    .into_bytes()
-}
-
+/// A readiness flap between the arming pass and the arming its call's turn
+/// runs: that turn finds the gate closed and leaves the call parked, to be
+/// armed once the endpoint reads ready again.
 #[tokio::test(start_paused = true)]
-async fn a_retransmission_of_a_deferred_calls_invite_is_served_by_the_reclaimed_call() {
-    retransmitted_to_a_deferred_call(false).await;
-}
-
-/// Behind a closed gate the retransmission waits for the arming, which seeds
-/// the INVITE's transaction and asks the undecided call's decision again.
-#[tokio::test(start_paused = true)]
-async fn a_retransmission_behind_a_closed_gate_waits_for_the_deferred_calls_arming() {
-    retransmitted_to_a_deferred_call(true).await;
-}
-
-/// The caller retransmits the INVITE of an undecided call of the node's own
-/// while its park is deferred, the node's endpoint reading ready or, when
-/// `closed`, not; the reclaimed call answers it.
-async fn retransmitted_to_a_deferred_call(closed: bool) {
+async fn a_queued_arming_meeting_a_closed_gate_waits_for_it_to_open() {
     let net = SimulatedSignalingNetwork::new(1);
-    let busy = ScriptedDecisionEngine::builder().fallback(|_| reject(486, "Busy Here")).build();
-    let n = node_deciding(&net, "w0", Arc::new(busy), |_| {}, Vec::new()).await;
+    let n = node_on(&net, "w0", |_| {}, Vec::new()).await;
     let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
     let ctx = n.core.router_ctx();
-    if closed {
-        n.membership.set_conditions("w0", false, false);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    // The caller's INVITE reached the node before it went down, undecided.
-    let cid = "retransmitted";
-    let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let mut ids = sip_ids::TurnIds::fixed(1);
-    let call = build_initial_call(&invite("w0", "w1", cid), src(), &config, &mut ids, 0);
-    put_body(&n.store, PRI, "w0", &call).await;
+    let call = stored(&n, "flap").await;
     let held = ctx.state.lock(&call.call_ref).await;
 
     send(&n, ReplCommand::ReclaimAll);
     sip_clock::testkit::settle().await;
-    let again = invite("w0", "w1", cid);
-    caller.send_to(again.image(), SocketAddr::from(NODE_SIP_ADDR)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_eq!(ctx.unborn.count(), 0, "the retransmission is admitted as no new call");
+    n.membership.set_conditions("w0", false, false);
+    tokio::time::sleep(Duration::from_millis(100)).await;
     drop(held);
-    if closed {
-        let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
-        assert!(lines.is_empty(), "nothing answers before the arming: {lines:?}");
-        assert!(ctx.state.is_parked(&call.call_ref), "parked, not armed");
-        n.membership.set_conditions("w0", true, false);
-    }
-
-    // The reclaimed call's decision answers the caller on the INVITE's
-    // transaction, which answers the retransmission with that final again
-    // (RFC 3261 §17.2.1).
-    let responses = received(caller.as_ref(), Duration::from_millis(500)).await;
-    let finals: Vec<&String> = responses.iter().filter(|r| !r.starts_with("SIP/2.0 1")).collect();
-    assert!(!finals.is_empty(), "a final reaches the caller: {responses:?}");
-    assert!(finals.iter().all(|f| *f == finals[0]), "one final, repeated: {finals:?}");
-    assert!(finals[0].starts_with("SIP/2.0 486"), "the reclaimed call's decision: {finals:?}");
-    caller.send_to(&ack_of(cid, finals[0]), SocketAddr::from(NODE_SIP_ADDR)).await.unwrap();
     sip_clock::testkit::settle().await;
-    let counts = crate::new_calls::NewCallCounts::compose(
-        ctx.metrics.new_calls(),
-        Default::default(),
-        Default::default(),
-    );
-    assert_eq!(counts.total(), 0, "the retransmission is no new call");
-    let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|c| c.call_ref).collect();
-    assert_eq!(cdrs, [call.call_ref.clone()], "the reclaimed call's one CDR");
-    tokio::time::sleep(Duration::from_secs(40)).await;
+    assert!(ctx.state.is_parked(&call.call_ref), "parked, not armed behind a closed gate");
+
+    n.membership.set_conditions("w0", true, false);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(armed(&n, &call.call_ref), "armed once the endpoint reads ready again");
+    hang_up(&n, caller.as_ref(), &call).await;
     nothing_left(&n);
 }
