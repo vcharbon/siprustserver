@@ -120,6 +120,7 @@ fn leg_json(leg: &FlowLeg) -> LegJson {
         final_status: leg.final_status,
         saw_180: leg.saw_180,
         terminated_by: leg.terminated_by.map(|t| t.as_str().to_string()),
+        opening_request_set_aside: leg.opening_request_set_aside,
         tokens: leg.tokens().iter().map(|t| (*t).to_string()).collect(),
         msgs: leg.msgs.iter().map(msg_json).collect(),
     }

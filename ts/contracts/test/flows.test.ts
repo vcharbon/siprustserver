@@ -241,6 +241,15 @@ describe("set-aside counts", () => {
   })
 })
 
+describe("a leg whose opening request was set aside", () => {
+  it("reads the mark, and its absence as none", () => {
+    const doc = wrap({ ...base, raw: "X" }) as { legs: Array<Record<string, unknown>> }
+    expect(decodeFlowsSync(doc).legs[0].opening_request_set_aside).toBeUndefined()
+    doc.legs[0] = { ...doc.legs[0], opening_request_set_aside: true }
+    expect(decodeFlowsSync(doc).legs[0].opening_request_set_aside).toBe(true)
+  })
+})
+
 describe("a leniently decoded document", () => {
   it("accepts a document carrying an unknown field rather than refusing it", () => {
     const grown: Record<string, unknown> = { ...(wrap({ ...base, raw: "X" }) as object) }

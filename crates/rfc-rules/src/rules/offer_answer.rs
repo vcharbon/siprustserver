@@ -119,10 +119,10 @@ crate::registry::rules! {
     PayloadTypeMappingStable = "payload-type-mapping-stable", relayable;
     /// RFC 3264 §5-6 / RFC 4566 §5: a body sent as `application/sdp` satisfies the offer/answer
     /// grammar. Charges the sender that minted it.
-    SdpBodyParseable = "sdp-body-parseable";
+    SdpBodyParseable = "sdp-body-parseable", one_message;
     /// RFC 3264 §6 / §8.4: a stream held at `c=0.0.0.0` is not ALSO rejected at port 0 — the two
     /// together state no disposition a peer can act on. Charges the sender.
-    C0PortNonZero = "c0-port-non-zero";
+    C0PortNonZero = "c0-port-non-zero", one_message;
 }
 
 #[cfg(test)]

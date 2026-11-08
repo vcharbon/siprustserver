@@ -95,6 +95,10 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// One failed non-fatal header reading of an ingested message
 /// ([`crate::flow::HeaderFailure`]): the message is `msg` of the leg whose
 /// Call-ID is `call_id`.
@@ -137,6 +141,11 @@ pub struct LegJson {
     pub saw_180: bool,
     /// `"BYE"` | `"CANCEL"` — the first teardown request seen.
     pub terminated_by: Option<String>,
+    /// Extraction set aside a request of this Call-ID that opens a dialog or
+    /// transaction (no To-tag, neither ACK nor CANCEL), so the leg lacks it.
+    /// Absent when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub opening_request_set_aside: bool,
     /// Union over all token strategies, sorted and deduped; which strategy a
     /// value came from is in the group evidence.
     pub tokens: Vec<String>,

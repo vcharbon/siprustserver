@@ -130,3 +130,24 @@ fn a_lattice_of_links_is_walked_once_per_directory() {
     assert_eq!(found.len(), 1, "the document once");
     assert_eq!(capture_of(&found[0]), "capture_5");
 }
+
+/// A store holding a capture under two generations yields only the current
+/// one's document: the census counts the capture once. A file named on the
+/// command line is read whatever its generation.
+#[test]
+fn a_superseded_generation_is_left_out_of_the_walk() {
+    let root = scratch("generations");
+    let superseded = capture_dir(&root.join("capture_6"));
+    let current = capture_dir(&root.join("capture_6.anon2"));
+    let first_anon = capture_dir(&root.join("capture_7.anon"));
+    let later = capture_dir(&root.join("capture_7.anon3"));
+    let alone = capture_dir(&root.join("capture_8.anon2"));
+
+    let walked = expand_flows_documents(std::slice::from_ref(&root));
+    let named = expand_flows_documents(&[root.clone(), superseded.clone()]);
+    std::fs::remove_dir_all(&root).ok();
+
+    assert_eq!(walked, vec![current.clone(), later.clone(), alone.clone()]);
+    assert!(!walked.contains(&first_anon), "generation 1 under `.anon` is superseded too");
+    assert_eq!(named, vec![superseded, current, later, alone], "a named file stays");
+}

@@ -249,9 +249,9 @@ struct Args {
     #[arg(long = "parse-failed-pcap")]
     parse_failed_pcap: Option<PathBuf>,
 
-    /// Run the RFC-violation census (`sip_pcap::rfc`) over ALREADY EMITTED
-    /// flows documents — files, or directories walked recursively for
-    /// `*.flows.json` — and print the report as JSON on stdout with its
+    /// Run the RFC-violation census (`sip_pcap::rfc`) over ALREADY EMITTED flows
+    /// documents — files, or directories walked for `*.flows.json`, each capture
+    /// at its current generation — and print the report as JSON on stdout, its
     /// summary on stderr. Reads no capture, and modifies no document.
     #[arg(
         long = "rfc-census",
@@ -266,7 +266,7 @@ struct Args {
     rfc_census_jobs: usize,
 
     /// Re-parse every message of ALREADY EMITTED flows documents — files, or
-    /// directories walked recursively for `*.flows.json` — and print one JSON
+    /// directories walked as `--rfc-census` walks them — and print one JSON
     /// line per message the parser refuses and per failed non-fatal header of
     /// an accepted one, with the totals on stderr. Reads no capture.
     #[arg(

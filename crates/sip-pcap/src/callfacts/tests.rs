@@ -104,6 +104,7 @@ fn leg(msgs: Vec<MsgJson>) -> LegJson {
         final_status: None,
         saw_180: false,
         terminated_by: None,
+        opening_request_set_aside: false,
         tokens: Vec::new(),
         msgs,
     }

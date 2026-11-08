@@ -47,40 +47,40 @@ use super::Obligation;
 crate::registry::rules! {
     /// RFC 3261 §8.1.1.7: a request's top Via carries a `branch` beginning with the magic cookie
     /// `z9hG4bK`. Charges the sender that minted it.
-    BranchPrefix = "branch-prefix";
+    BranchPrefix = "branch-prefix", one_message;
     /// RFC 3261 §8.1.1.6: a request carries a Max-Forwards in `0..=255`, and no higher than the
     /// recommended initial 70 — above it the count was minted, not decremented. Charges the sender.
-    MaxForwards = "max-forwards";
+    MaxForwards = "max-forwards", one_message;
     /// RFC 3261 §20.14: a message's Content-Length equals the byte count of the body it carried.
     /// Charges the sender that wrote both.
-    ContentLength = "content-length";
+    ContentLength = "content-length", one_message;
     /// RFC 3261 §7.4.1: a message carrying a body names its format in Content-Type. Charges the
     /// sender.
-    ContentType = "content-type";
+    ContentType = "content-type", one_message;
     /// RFC 3261 §8.1.1.8: a dialog-establishing request (INVITE, SUBSCRIBE) carries a Contact — the
     /// dialog's remote target. Charges the sender.
-    ContactPresence = "contact-presence";
+    ContactPresence = "contact-presence", one_message;
     /// RFC 3261 §15.1: a BYE carries no Contact — it ends the dialog, so target-refresh means
     /// nothing on it. Charges the sender.
-    NoContactOnBye = "no-contact-on-bye";
+    NoContactOnBye = "no-contact-on-bye", one_message;
     /// RFC 3261 §8.2.6.2: a UAS adds a To-tag to every response above 100, so the peer can
     /// dialog-match it. Charges the responding UAS.
-    ToTagPresence = "to-tag-presence";
+    ToTagPresence = "to-tag-presence", one_message;
     /// RFC 3261 §8.1.1.3: a UAC adds a From-tag to every request it sends, its half of the dialog
     /// identifier. Charges the sender.
-    FromTagPresence = "from-tag-presence";
+    FromTagPresence = "from-tag-presence", one_message;
     /// RFC 3261 §16.6: Record-Route is a PROXY mechanism, so a UA (a B2BUA included) inserts none.
     /// Charges the endpoint that inserted it.
-    NoRecordRouteFromUa = "no-record-route-from-ua";
+    NoRecordRouteFromUa = "no-record-route-from-ua", one_message;
     /// RFC 3262 §4: `Require: 100rel` rides an INVITE and nothing else — the reliable-provisional
     /// contract is the INVITE transaction's. Charges the sender that stamped it.
-    No100relRequireOnNonInvite = "no-100rel-require-on-non-invite";
+    No100relRequireOnNonInvite = "no-100rel-require-on-non-invite", one_message;
     /// RFC 3262 §3: a 100 (Trying) carries no reliability marker, and a reliable 1xx carries an
     /// `RSeq` in `1..=2^31-1`. Charges the responding UAS, which writes both rows.
-    Reliable1xxHeaders = "reliable-1xx-headers";
+    Reliable1xxHeaders = "reliable-1xx-headers", one_message;
     /// RFC 3261 §9.1: a CANCEL's CSeq method token is `CANCEL`, whatever request it cancels.
     /// Charges the sender.
-    CancelCseqMethod = "cancel-cseq-method";
+    CancelCseqMethod = "cancel-cseq-method", one_message;
 }
 
 /// The magic cookie every `branch` begins with (RFC 3261 §8.1.1.7), in any case.

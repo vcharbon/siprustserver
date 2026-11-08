@@ -1,11 +1,18 @@
 //! The census input walk: which flows documents a set of paths names, and the
 //! capture each one is counted under.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// Every flows document under `inputs`: a named file is taken as given, a
 /// directory is walked recursively for `*.flows.json`.
+///
+/// A walk reads each capture at its current generation. An artifact store
+/// keeps a capture re-anonymised under its next generation's name (`<stem>`
+/// or `<stem>.anon`, then `<stem>.anon2`, `.anon3`…) beside the ones before
+/// it, and the capture stands at the highest generation the store holds; a
+/// walked document of a lower generation is superseded and left out. A named
+/// file is read whatever its generation.
 ///
 /// The walk follows symlinks, to directories and to documents alike, so a
 /// corpus assembled from links is swept whole. It walks the real tree of every
@@ -19,11 +26,13 @@ use std::path::{Path, PathBuf};
 /// depend on the filesystem.
 pub(crate) fn expand_flows_documents(inputs: &[PathBuf]) -> Vec<PathBuf> {
     let mut walk = Walk::default();
+    let mut named = HashSet::new();
     for input in inputs {
         if input.is_dir() {
             walk.directory(input);
         } else {
             walk.document(input.clone());
+            named.insert(input.clone());
         }
     }
     while let Some(link) = walk.links.pop_front() {
@@ -34,8 +43,48 @@ pub(crate) fn expand_flows_documents(inputs: &[PathBuf]) -> Vec<PathBuf> {
             _ => {}
         }
     }
-    walk.found.sort();
-    walk.found
+    let mut found = standing(walk.found, &named);
+    found.sort();
+    found
+}
+
+/// `found` without the walked documents a higher generation of their capture
+/// supersedes; the `named` files all stay.
+fn standing(found: Vec<PathBuf>, named: &HashSet<PathBuf>) -> Vec<PathBuf> {
+    let captures: Vec<String> = found.iter().map(|d| capture_of(d)).collect();
+    let mut current: BTreeMap<&str, u32> = BTreeMap::new();
+    for capture in &captures {
+        let (stem, generation) = generation_of(capture);
+        let top = current.entry(stem).or_default();
+        *top = (*top).max(generation);
+    }
+    found
+        .into_iter()
+        .zip(&captures)
+        .filter(|(document, capture)| {
+            let (stem, generation) = generation_of(capture);
+            named.contains(document) || current.get(stem) == Some(&generation)
+        })
+        .map(|(document, _)| document)
+        .collect()
+}
+
+/// The stem a capture name's generations share, and the generation the name
+/// is: `<stem>.anon<n>` (`n` from 2, no leading zero) is generation `n`, and
+/// `<stem>.anon` and `<stem>` are generation 1.
+fn generation_of(capture: &str) -> (&str, u32) {
+    if let Some(at) = capture.rfind(".anon") {
+        let digits = &capture[at + ".anon".len()..];
+        if digits.is_empty() {
+            return (&capture[..at], 1);
+        }
+        if !digits.starts_with('0') && digits.bytes().all(|b| b.is_ascii_digit()) {
+            if let Ok(n @ 2..) = digits.parse::<u32>() {
+                return (&capture[..at], n);
+            }
+        }
+    }
+    (capture, 1)
 }
 
 /// The capture a document is counted under: the name of the directory the

@@ -5,7 +5,9 @@
 //! Observation policy lives here, not in the rules: the capture is an OPEN
 //! observation (`closed: false` — the recording span, not the harness, bounds
 //! the evidence), and every rule of the [`RfcRule::WIRE`] contract — all of
-//! them — is run.
+//! them — is run. On a leg whose opening request extraction set aside
+//! (`opening_request_set_aside`) only the rules that judge one message alone
+//! run: the others would judge a dialog or transaction without its request.
 
 use rfc_rules::{Decision, Kind, Msg, Observation, WireView};
 
@@ -22,7 +24,8 @@ pub(super) fn detect(at: &Site<'_>, out: &mut Scan, candidates: &[RfcRule]) {
     };
     let view = WireView { msgs: &msgs, obs: &obs };
     let _ = candidates;
-    for rule in rfc_rules::all_rules() {
+    let partial = at.leg.opening_request_set_aside;
+    for rule in rfc_rules::all_rules().filter(|rule| !partial || rule.one_message) {
         for f in rule.body.eval(&view) {
             out.count(f.rule, f.decided());
             if let Decision::Violated(evidence) = &f.decision {
@@ -116,6 +119,7 @@ mod tests {
             final_status: None,
             saw_180: false,
             terminated_by: None,
+            opening_request_set_aside: false,
             tokens: Vec::new(),
             msgs: vec![answer(0), answer(1_000_000), answer(REPEAT_ENVELOPE_US + 1)],
         };

@@ -278,6 +278,11 @@ export const Leg = Schema.Struct({
   saw_180: Schema.Boolean,
   /** `"BYE"` | `"CANCEL"` — the first teardown request seen. */
   terminated_by: nullable(Schema.String),
+  /**
+   * Extraction set aside a request of this Call-ID that opens a dialog or
+   * transaction (no To-tag, neither ACK nor CANCEL), so the leg lacks it. Absent when false.
+   */
+  opening_request_set_aside: Schema.optionalKey(Schema.Boolean),
   /** Union over all token strategies, sorted and deduped. */
   tokens: Schema.Array(Schema.String),
   /** Capture-time order across all hops. */
