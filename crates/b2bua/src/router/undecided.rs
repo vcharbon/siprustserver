@@ -206,8 +206,10 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
         match hold(&ctx.config.caps, &Gauge::of(&call), Checked::All, &mut turn, closed) {
             Ok(result) => result,
             Err(tripped) => {
+                // The record as it stands now, a cancel the consult wrote included.
+                let safepoint = ctx.state.peek(call_ref);
                 super::notes::drain_discarded(ctx, &mut turn);
-                super::tripped::fail_turn(ctx, call_ref, None, tripped, Some(call), now_ms).await;
+                super::tripped::fail_turn(ctx, call_ref, None, tripped, safepoint, now_ms).await;
                 return;
             }
         };

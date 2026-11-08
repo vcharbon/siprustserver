@@ -171,9 +171,10 @@ async fn the_default_caps_trip_no_valid_call() {
 }
 
 /// alice sends two INFOs at once on her answered call at the requests' cap
-/// of 0: both turns trip before the first trip's verdict runs (it queues
-/// behind the second INFO on the call's FIFO, which the two trips counted
-/// below prove). The second trip strikes nothing, so the verdict's teardown
+/// of 0: both turns trip before the first trip's verdict runs. The scenario
+/// depends on that order: both INFOs reach the call's FIFO in one instant,
+/// ahead of the verdict the first turn queues, and the two trips counted
+/// below prove it held. The second trip strikes nothing, so the verdict's teardown
 /// BYEs both legs: no discharge.
 #[tokio::test(start_paused = true)]
 async fn a_second_trip_behind_the_queued_verdict_strikes_nothing() {
