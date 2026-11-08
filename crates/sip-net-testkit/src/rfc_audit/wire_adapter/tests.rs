@@ -93,6 +93,7 @@ fn req(method: &str, branch: &str, cseq: u32, ttag: Option<&str>) -> Vec<u8> {
         Some(t) => format!("<{B}>;tag={t}"),
         None => format!("<{B}>"),
     };
+    let contact = contact_of(method);
     format!(
         "{method} {B} SIP/2.0\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
@@ -101,9 +102,18 @@ fn req(method: &str, branch: &str, cseq: u32, ttag: Option<&str>) -> Vec<u8> {
              Call-ID: cid-1@127.0.0.1\r\n\
              CSeq: {cseq} {method}\r\n\
              Max-Forwards: 70\r\n\
-             Content-Length: 0\r\n\r\n"
+             {contact}Content-Length: 0\r\n\r\n"
     )
     .into_bytes()
+}
+
+/// The Contact an INVITE states (RFC 3261 §8.1.1.8); every other method none.
+fn contact_of(method: &str) -> &'static str {
+    if method == "INVITE" {
+        "Contact: <sip:alice@127.0.0.1:5060>\r\n"
+    } else {
+        ""
+    }
 }
 
 fn resp(status: u16, cseq: u32, method: &str, ttag: &str, branch: &str) -> Vec<u8> {
@@ -142,6 +152,7 @@ fn b_leg_invite(branch: &str) -> Vec<u8> {
 /// A request carrying an explicit header block — the §9.1 Route rules read
 /// the bytes, so a builder that can vary them is what those tests need.
 fn req_with(method: &str, branch: &str, extra: &str) -> Vec<u8> {
+    let contact = contact_of(method);
     format!(
         "{method} {B} SIP/2.0\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5080;branch={branch}\r\n\
@@ -150,7 +161,7 @@ fn req_with(method: &str, branch: &str, extra: &str) -> Vec<u8> {
              Call-ID: cid-1@127.0.0.1\r\n\
              CSeq: 1 {method}\r\n\
              Max-Forwards: 70\r\n\
-             {extra}Content-Length: 0\r\n\r\n"
+             {contact}{extra}Content-Length: 0\r\n\r\n"
     )
     .into_bytes()
 }
