@@ -28,6 +28,7 @@ mod call_terminate_on_backup;
 mod caller_copy_takes_over;
 mod cancel_and_retransmission_follow_a_live_hop;
 mod cancel_answers_after_the_kill;
+mod cap_trip_on_a_takeover_copy;
 mod consult_answer_deadline;
 mod copys_dial_while_the_primary_is_misread;
 mod cordoned_worker;

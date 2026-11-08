@@ -128,8 +128,8 @@ enforcement path. The reaper's verdict turns run with the collection caps off
 teardown's own BYE record, CANCEL record, timer or CDR event, and the second
 strike's discharge would leave the parties connected. So does every turn on a
 call already terminating, for the same reason: the answers to its teardown and
-its `TerminatingTimeout` would trip, and the call would never end; its wait is
-bounded by that timeout. A verdict turn that fails
+its `TerminatingTimeout` would trip, and the call would never end. What a
+peer sends in that window is bounded by the message caps and that timeout. A verdict turn that fails
 for any other reason is the second strike: the discharge forces the call terminal
 with no rule run (ADR-0020 X6).
 
@@ -207,7 +207,8 @@ are what keep that input from existing.
 ### 7. Detection
 
 - `b2bua_cap_trips_total{cap, kind}`, and `b2bua_cap_near_total{cap}`, counted on
-  each crossing of half a cap;
+  each crossing of half a counted collection's cap by a turn that lands (a
+  service's ext value is measured once per turn and has no crossing);
 - a trip is logged through an `observe::WaveSet` per cap (ADR-0026), the call
   named in its per-call trace, so a decision service that trips every call does
   not make logging scale with traffic;

@@ -17,7 +17,8 @@
 //! decision it does not apply (ADR-0047 D6). One owner acts on the answer
 //! (ADR-0047 D7): a takeover copy whose call's primary wrote the call since
 //! the copy was made — a restarted primary's reclaim, which asks the decision
-//! itself — applies nothing and stands down on that write.
+//! itself — applies nothing and stands down on that write. A re-ask past a
+//! per-call cap fails as the initial INVITE's turn does (ADR-0057 §4).
 
 use std::sync::Arc;
 
@@ -27,6 +28,7 @@ use super::cancel_in_consult::consult_writing_its_cancel;
 use super::commit::commit_turn;
 use super::off_wire;
 use super::RouterCtx;
+use crate::caps::{hold, Checked, Gauge};
 use crate::effects::HandlerResult;
 use crate::initial_consult::{handle_initial_invite, Consulted};
 use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
@@ -195,11 +197,20 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
     let advertisement = UnansweredCaller::Answer(&ctx.config.minted_final_advertisement);
     let enforced =
         enforce(&ctx.obligations, &call, finalize(handled), now_ms, advertisement, &mut turn.notes);
-    let mut result = {
+    let closed = {
         let mut exec =
             ActionExecutor { config: &ctx.config, owners: &owners, turn: &mut turn, now_ms };
         close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)
     };
+    let mut result =
+        match hold(&ctx.config.caps, &Gauge::of(&call), Checked::All, &mut turn, closed) {
+            Ok(result) => result,
+            Err(tripped) => {
+                super::notes::drain_discarded(ctx, &mut turn);
+                super::tripped::fail_turn(ctx, call_ref, None, tripped, Some(call), now_ms).await;
+                return;
+            }
+        };
     // A decision another node may have asked.
     result.effects.reasked = !refused;
     super::notes::drain(ctx, call_ref, &mut turn);

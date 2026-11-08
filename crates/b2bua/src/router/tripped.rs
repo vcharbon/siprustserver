@@ -19,19 +19,18 @@ use super::RouterCtx;
 use crate::dispatch::HandlerFailure;
 use crate::effects::HandlerResult;
 
-/// Fail `call_ref`'s turn on `event`, which `tripped`. `safepoint` is the
-/// call before the event: the resident record, or the record an initial
-/// INVITE's turn wrote before its first fold. `answer`: the event is a
-/// request whose transaction the turn would have answered, so it is answered
-/// `500` here; the caller's initial INVITE is not, its final is the verdict's
-/// teardown's (ADR-0022). The caller holds the per-call lock.
+/// Fail `call_ref`'s turn, which `tripped`. `safepoint` is the call before
+/// the turn: the resident record, or the record an initial INVITE's turn
+/// wrote before its first fold. `in_hand` is the in-dialog event the turn
+/// handled: a request among them is answered `500` here. The caller's
+/// initial INVITE is none: its final is the verdict's teardown's (ADR-0022).
+/// The caller holds the per-call lock.
 pub(super) async fn fail_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    event: &CallEvent,
+    in_hand: Option<&CallEvent>,
     tripped: Tripped,
     safepoint: Option<Call>,
-    answer: bool,
     now_ms: i64,
 ) {
     let cap = tripped.cap;
@@ -51,7 +50,7 @@ pub(super) async fn fail_turn(
         let label = &"the safepoint of a turn past a per-call cap";
         commit_turn(ctx, call_ref, HandlerResult::new(call), now_ms, label, None).await;
     }
-    if answer {
+    if let Some(event) = in_hand {
         answer_500(ctx, call_ref, event).await;
     }
     ctx.reaper.report(call_ref, HandlerFailure::Tripped(tripped));
@@ -65,6 +64,6 @@ async fn answer_500(ctx: &Arc<RouterCtx>, call_ref: &str, event: &CallEvent) {
     if req.method() == Method::Ack {
         return;
     }
-    let Ok(resp) = super::responses::build_tripped_500(req) else { return };
+    let Ok(resp) = super::responses::build_bare_500(req) else { return };
     super::process::answer_after_the_write(ctx, call_ref, event, Some(Box::new(resp))).await;
 }

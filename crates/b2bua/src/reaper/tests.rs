@@ -225,3 +225,28 @@ async fn stale_calls_leave_condemned_calls_their_share_of_the_sweep() {
     assert_eq!(sent.len(), MAX_VERDICTS_PER_SWEEP);
     assert!(sent.iter().any(|o| o == OUTCOME_OVERFLOW), "the condemned call is swept");
 }
+
+/// A trip strikes a call not struck yet; a later turn's trip while its verdict
+/// is queued strikes nothing; the verdict's own trip is the second strike. The
+/// reaper acts with its sweep off, and forgets the call at its release
+/// (ADR-0057 §4).
+#[test]
+fn trips_strike_once_until_the_verdict_s_own_turn_trips_and_release_forgets() {
+    use b2bua_core::caps::Tripped;
+    use b2bua_sdk::config::Cap;
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let reaper = Reaper::new(false, 1, 3_600_000, tx, B2buaMetrics::new());
+    let trip = |verdict| HandlerFailure::Tripped(Tripped { cap: Cap::Requests, verdict });
+
+    reaper.report("c1", trip(false));
+    assert_eq!(outcomes(&mut rx), vec![OUTCOME_FATAL], "the first trip strikes, sweep off");
+    reaper.report("c1", trip(false));
+    assert!(outcomes(&mut rx).is_empty(), "a trip behind the queued verdict strikes nothing");
+    reaper.report("c1", trip(true));
+    assert_eq!(outcomes(&mut rx), vec![OUTCOME_DISCHARGE], "the verdict's own trip");
+
+    reaper.forget("c1");
+    reaper.report("c1", trip(false));
+    assert_eq!(outcomes(&mut rx), vec![OUTCOME_FATAL], "a released call's strikes are gone");
+}

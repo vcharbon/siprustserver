@@ -55,9 +55,10 @@ pub(super) enum Caller {
     Leave,
 }
 
-/// The scope of a turn the router builds itself.
+/// The scope of a turn the router builds itself to end a call: charged for
+/// no action, since it ends the call whatever it holds (ADR-0057 §3).
 pub(super) fn scope(ctx: &RouterCtx) -> TurnScope {
-    TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot())
+    TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot()).unfueled()
 }
 
 /// End `call_ref` off the wire at `now_ms`: the ending lands at once, and

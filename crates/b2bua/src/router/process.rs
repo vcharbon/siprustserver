@@ -247,7 +247,11 @@ pub(super) async fn process(
         }
     };
     let unrecoverable = turn.notes.unrecoverable();
-    super::notes::drain(ctx, &call_ref, &mut turn);
+    if result.is_ok() {
+        super::notes::drain(ctx, &call_ref, &mut turn);
+    } else {
+        super::notes::drain_discarded(ctx, &mut turn);
+    }
     if unrecoverable {
         let ids = &mut turn.ids;
         if !discharge_after_turn(ctx, &call_ref, event, now_ms, ids).await {
@@ -260,9 +264,8 @@ pub(super) async fn process(
         Ok(result) => result,
         Err(tripped) => {
             let safepoint = ctx.state.peek(&call_ref);
-            let answer = !res.initial_invite;
-            super::tripped::fail_turn(ctx, &call_ref, event, tripped, safepoint, answer, now_ms)
-                .await;
+            let in_hand = (!res.initial_invite).then_some(event);
+            super::tripped::fail_turn(ctx, &call_ref, in_hand, tripped, safepoint, now_ms).await;
             return false;
         }
     };

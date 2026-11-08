@@ -10,9 +10,7 @@ use call::Call;
 use sip_message::{Method, SipMessage, SipResponse};
 
 use super::resolve::Resolution;
-use super::responses::{
-    build_200, build_200_advertising, build_481, build_487, build_out_of_order_500,
-};
+use super::responses::{build_200, build_200_advertising, build_481, build_487, build_bare_500};
 use super::RouterCtx;
 use b2bua_core::dialog_gate::{verdict, Verdict};
 use b2bua_sdk::event::CallEvent;
@@ -56,7 +54,7 @@ pub(super) fn admit(ctx: &RouterCtx, call: &Call, event: &CallEvent, res: &Resol
         }
         Verdict::Absorbed(_) => build_200(req),
         Verdict::Terminated(_) => build_487(req),
-        Verdict::OutOfOrder => build_out_of_order_500(req),
+        Verdict::OutOfOrder => build_bare_500(req),
         Verdict::NoDialog
         | Verdict::Pass(_)
         | Verdict::Drop

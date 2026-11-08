@@ -14,14 +14,14 @@ use crate::calls::bridged;
 #[test]
 fn the_same_record_re_running_the_event_trips_the_same_way() {
     let driver = Driver::new().with_config(|c| c.caps.requests = 1);
-    let mut primary = bridged(&driver);
-    primary.step(Step::Sends("a", Method::Info));
-    let mut served = primary.clone();
+    let mut first = bridged(&driver);
+    first.step(Step::Sends("a", Method::Info));
+    let mut served = first.clone();
     served.copy_served(true);
-    let before = primary.call().clone();
+    let before = first.call().clone();
 
     let tripped = Tripped { cap: Cap::Requests, verdict: false };
-    for (who, session) in [("first owner", &mut primary), ("second owner", &mut served)] {
+    for (who, session) in [("first owner", &mut first), ("second owner", &mut served)] {
         let outcome = session.step(Step::Sends("a", Method::Info));
         assert!(
             matches!(outcome, Outcome::Tripped(t) if *t == tripped),

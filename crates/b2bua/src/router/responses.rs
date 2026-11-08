@@ -61,16 +61,11 @@ pub(super) fn build_481(
     generate_response(req, 481, "Call/Transaction Does Not Exist", &opts)
 }
 
-/// `500 Server Internal Error` to `req`, an in-dialog request whose CSeq is
-/// below the last one its dialog took: out of order (RFC 3261 §12.2.2).
-pub(super) fn build_out_of_order_500(req: &SipRequest) -> Result<SipResponse, GenerateError> {
-    generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default())
-}
-
 /// The bare `500 Server Internal Error` to `req`, an in-dialog request whose
-/// turn crossed a per-call cap and was discarded (ADR-0057 §4): nothing names
-/// the cap.
-pub(super) fn build_tripped_500(req: &SipRequest) -> Result<SipResponse, GenerateError> {
+/// CSeq is below the last one its dialog took (out of order, RFC 3261
+/// §12.2.2), or whose turn crossed a per-call cap and was discarded
+/// (ADR-0057 §4): nothing says why.
+pub(super) fn build_bare_500(req: &SipRequest) -> Result<SipResponse, GenerateError> {
     generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default())
 }
 

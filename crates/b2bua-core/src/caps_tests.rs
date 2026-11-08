@@ -125,5 +125,46 @@ fn growing_across_half_a_cap_is_noted() {
 fn a_service_value_is_measured_by_its_encoding() {
     let mut call = call();
     call::helpers::set_call_ext(&mut call, "svc", Some(serde_json::json!({ "k": "abcd" })));
-    assert_eq!(Gauge::of(&call).get(Cap::ExtBytes), r#"{"k":"abcd"}"#.len() as u64);
+    assert_eq!(ext_bytes(&call), r#"{"k":"abcd"}"#.len() as u64);
+    let caps = CallCaps { ext_bytes: 11, ..caps() };
+    let out = hold(&caps, &Gauge::of(&call), Checked::All, &mut turn(1), HandlerResult::new(call));
+    assert_eq!(out.unwrap_err().cap, Cap::ExtBytes, "a value past its cap trips");
+}
+
+#[test]
+fn a_turn_that_trips_notes_no_half_crossing() {
+    let mut start = call();
+    start.timers.clear();
+    add_cdr_events(&mut start, 1);
+    let mut after = start.clone();
+    add_cdr_events(&mut after, 1);
+    after.timers.push(call::TimerEntry {
+        key: call::TimerKey::call(call::TimerType::Keepalive),
+        generation: 1,
+        fire_at: 0,
+    });
+    let caps = CallCaps { timers: 0, ..caps() };
+    let mut scope = turn(1);
+    let out = hold(&caps, &Gauge::of(&start), Checked::All, &mut scope, HandlerResult::new(after));
+    assert_eq!(out.unwrap_err().cap, Cap::Timers);
+    assert!(scope.notes.caps_near().is_empty(), "a discarded turn crossed nothing");
+}
+
+#[test]
+fn every_nested_stated_set_counts_its_lines() {
+    use call::features::StatedHeaders;
+    use call::header_update::HeaderUpdate;
+
+    let lines = |n: usize| HeaderUpdate::Set(vec!["v".to_string(); n]);
+    let mut inner = StatedHeaders::default();
+    inner.every_message.insert("X-Deep".into(), lines(7));
+    let leg = StatedHeaders { reverts_to: Some(Box::new(inner)), ..Default::default() };
+    let mut root = StatedHeaders::default();
+    root.launched_invite.insert("X-Top".into(), lines(2));
+    root.legs.insert("b-1".into(), leg);
+    let mut call = call();
+    let mut features = crate::decision::default_platform_features();
+    features.stated_headers = Some(root);
+    call.features = Some(features);
+    assert_eq!(Gauge::of(&call).get(Cap::HeaderUpdates), 9, "2 at the top, 7 two sets down");
 }

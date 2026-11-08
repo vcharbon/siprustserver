@@ -8,17 +8,9 @@ const PEER_CAPS: [&str; 4] = ["legs", "requests", "cdr-events", "dialogs"];
 /// The caps only a defect reaches, in [`b2bua_sdk::config::Cap::ALL`] order.
 const DEFECT_CAPS: [&str; 5] =
     ["attempts", "timers", "header-updates", "ext-bytes", "actions-per-turn"];
-/// The collection caps, in [`b2bua_sdk::config::Cap::ALL`] order.
-const COLLECTION_CAPS: [&str; 8] = [
-    "legs",
-    "attempts",
-    "timers",
-    "requests",
-    "cdr-events",
-    "dialogs",
-    "header-updates",
-    "ext-bytes",
-];
+/// The counted collections' caps, in [`b2bua_sdk::config::Cap::ALL`] order.
+const COUNTED_CAPS: [&str; 7] =
+    ["legs", "attempts", "timers", "requests", "cdr-events", "dialogs", "header-updates"];
 
 pub const CAP_TRIPS: Family = Family::counter(
     "b2bua_cap_trips_total",
@@ -31,8 +23,8 @@ pub const CAP_TRIPS: Family = Family::counter(
 
 pub const CAP_NEAR: Family = Family::counter(
     "b2bua_cap_near_total",
-    Labels::Product(&[Dim::new("cap", &COLLECTION_CAPS)]),
-    "turns that grew a call's capped collection across half its cap (ADR-0057 §7), by cap; one increment per crossing, the turn lands",
+    Labels::Product(&[Dim::new("cap", &COUNTED_CAPS)]),
+    "turns that landed having grown a call's counted collection across half its cap (ADR-0057 §7), by cap; one increment per crossing. A service's ext value, measured once per turn, has none",
 );
 
 #[cfg(test)]
@@ -44,7 +36,8 @@ mod tests {
         let of = |kind| Cap::ALL.into_iter().filter(move |c| c.kind() == kind).map(Cap::label);
         assert!(of(CapKind::Peer).eq(super::PEER_CAPS));
         assert!(of(CapKind::Defect).eq(super::DEFECT_CAPS));
-        let collections = Cap::ALL.into_iter().filter(|c| *c != Cap::ActionsPerTurn);
-        assert!(collections.map(Cap::label).eq(super::COLLECTION_CAPS));
+        let counted =
+            Cap::ALL.into_iter().filter(|c| !matches!(c, Cap::ActionsPerTurn | Cap::ExtBytes));
+        assert!(counted.map(Cap::label).eq(super::COUNTED_CAPS));
     }
 }

@@ -18,7 +18,19 @@ pub(super) fn drain(ctx: &RouterCtx, call_ref: &str, turn: &mut TurnScope) {
     for _ in 0..notes.message_caps() {
         ctx.metrics.bump_message_cap_terminated();
     }
+    for cap in notes.caps_near() {
+        ctx.metrics.record_cap_near(*cap);
+    }
     for defect in notes.defects() {
+        crate::model_invariants::defect(&ctx.metrics, defect);
+    }
+}
+
+/// Drain what a turn past a per-call cap reported (ADR-0057 §4): its result
+/// is discarded, so only the defects it met stand; its trace facts and counts
+/// name what never happened.
+pub(super) fn drain_discarded(ctx: &RouterCtx, turn: &mut TurnScope) {
+    for defect in turn.notes.take().defects() {
         crate::model_invariants::defect(&ctx.metrics, defect);
     }
 }

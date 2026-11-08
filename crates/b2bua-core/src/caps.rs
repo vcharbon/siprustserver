@@ -3,12 +3,13 @@
 //! actions it returns counted against its fuel, and the [`Tripped`] result
 //! that replaces the turn's when either crosses its cap.
 //!
-//! A collection trips when the turn grew it past its cap: a call already past
-//! one, as a union merge may leave it, trips on its next growth. The
-//! collection caps are off on a reaper verdict's turn and on a call already
-//! going away, whose teardown would otherwise trip on its own BYE record,
-//! CANCEL record, timer or CDR event, and whose wait `TerminatingTimeout`
-//! bounds; the fuel is never off.
+//! A counted collection trips when the turn grew it past its cap: a call
+//! already past one, as a union merge may leave it, trips on its next growth.
+//! A service's ext value is measured once, as the turn ends, and trips past
+//! its cap whatever it was before. The collection caps are off on a reaper
+//! verdict's turn and on a call already going away, whose teardown would
+//! otherwise trip on its own BYE record, CANCEL record, timer or CDR event,
+//! and whose wait `TerminatingTimeout` bounds; the fuel is never off.
 
 use std::io;
 
@@ -58,7 +59,7 @@ impl Checked {
     }
 }
 
-/// The lengths of a call's capped collections.
+/// The lengths of a call's counted collections.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Gauge {
     legs: u64,
@@ -68,11 +69,11 @@ pub struct Gauge {
     cdr_events: u64,
     dialogs: u64,
     header_updates: u64,
-    ext_bytes: u64,
 }
 
-/// The collection caps, in the order a turn's result is checked against them.
-const COLLECTIONS: [Cap; 8] = [
+/// The counted collections' caps, in the order a turn's result is checked
+/// against them.
+const COUNTED: [Cap; 7] = [
     Cap::Legs,
     Cap::Attempts,
     Cap::Timers,
@@ -80,7 +81,6 @@ const COLLECTIONS: [Cap; 8] = [
     Cap::CdrEvents,
     Cap::Dialogs,
     Cap::HeaderUpdates,
-    Cap::ExtBytes,
 ];
 
 impl Gauge {
@@ -95,16 +95,11 @@ impl Gauge {
             cdr_events: len(call.cdr_events.len()),
             dialogs: legs().map(|l| len(l.dialogs.len())).max().unwrap_or(0),
             header_updates: header_updates(call),
-            ext_bytes: legs()
-                .map(|l| ext_bytes(l.ext.as_ref()))
-                .chain(std::iter::once(ext_bytes(call.ext.as_ref())))
-                .max()
-                .unwrap_or(0),
         }
     }
 
     /// The length the gauge reads for the collection `cap` bounds; `0` for
-    /// the fuel.
+    /// the ext value and the fuel, which it does not count.
     pub fn get(&self, cap: Cap) -> u64 {
         match cap {
             Cap::Legs => self.legs,
@@ -114,16 +109,15 @@ impl Gauge {
             Cap::CdrEvents => self.cdr_events,
             Cap::Dialogs => self.dialogs,
             Cap::HeaderUpdates => self.header_updates,
-            Cap::ExtBytes => self.ext_bytes,
-            Cap::ActionsPerTurn => 0,
+            Cap::ExtBytes | Cap::ActionsPerTurn => 0,
         }
     }
 }
 
 /// The turn that started at `start` and left `result`, held to `checked`
 /// under `caps`: `Err` when its fuel ran out or it grew a collection past its
-/// cap. Each collection the turn grew across half its cap is noted on
-/// `turn`.
+/// cap. A turn that lands has each collection it grew across half its cap
+/// noted on `turn`.
 pub fn hold(
     caps: &CallCaps,
     start: &Gauge,
@@ -140,23 +134,26 @@ pub fn hold(
     }
     let end = Gauge::of(&result.call);
     let granted = granted_ms(&result.call);
-    let mut tripped = None;
-    for cap in COLLECTIONS {
+    let mut near = Vec::new();
+    for cap in COUNTED {
         let (before, after, limit) = (start.get(cap), end.get(cap), caps.limit(cap, granted));
         if after <= before {
             continue;
         }
+        if after > limit {
+            return Err(Tripped { cap, verdict });
+        }
         if before <= limit / 2 && after > limit / 2 {
-            turn.notes.cap_near(cap);
-        }
-        if after > limit && tripped.is_none() {
-            tripped = Some(cap);
+            near.push(cap);
         }
     }
-    match tripped {
-        Some(cap) => Err(Tripped { cap, verdict }),
-        None => Ok(result),
+    if ext_bytes(&result.call) > caps.ext_bytes {
+        return Err(Tripped { cap: Cap::ExtBytes, verdict });
     }
+    for cap in near {
+        turn.notes.cap_near(cap);
+    }
+    Ok(result)
 }
 
 /// The call's granted maximum duration, in ms; `0` before a decision granted
@@ -175,24 +172,24 @@ fn requests_of(leg: &Leg) -> u64 {
     leg.dialogs.iter().map(|d| len(d.requests.len()) + len(d.queued.len())).sum()
 }
 
-/// The header lines the call states, a removal counting one: the call's
-/// stated set and the one it reverts to, each with its legs' own sets, and
-/// the policy header overrides.
+/// The header lines the call states, a removal counting one: every stated set
+/// it holds, each leg's own and each one a set reverts to, however nested,
+/// and the policy header overrides.
 fn header_updates(call: &Call) -> u64 {
     let policy = call.policy_update_headers.as_ref().map_or(0, |h| len(h.len()));
-    let Some(stated) = call.features.as_ref().and_then(|f| f.stated_headers.as_ref()) else {
+    let Some(root) = call.features.as_ref().and_then(|f| f.stated_headers.as_ref()) else {
         return policy;
     };
-    let mut total = policy + stated_with_legs(stated);
-    if let Some(reverts) = stated.reverts_to.as_deref() {
-        total += stated_with_legs(reverts);
+    // A worklist over the record's own tree of sets: each set is visited
+    // once, so the walk ends with the record.
+    let mut sets = vec![root];
+    let mut total = policy;
+    while let Some(set) = sets.pop() {
+        total = total.saturating_add(stated_lines(set));
+        sets.extend(set.legs.values());
+        sets.extend(set.reverts_to.as_deref());
     }
     total
-}
-
-/// The lines `set` states, and those of each leg's own set.
-fn stated_with_legs(set: &StatedHeaders) -> u64 {
-    stated_lines(set) + set.legs.values().map(stated_lines).sum::<u64>()
 }
 
 /// The lines one stated set states over its three scopes.
@@ -204,8 +201,18 @@ fn stated_lines(set: &StatedHeaders) -> u64 {
         .sum()
 }
 
-/// The longest JSON encoding of one service's value in `ext`.
-fn ext_bytes(ext: Option<&ExtMap>) -> u64 {
+/// The longest JSON encoding of one service's value in the call's ext or a
+/// leg's.
+pub fn ext_bytes(call: &Call) -> u64 {
+    let legs = std::iter::once(&call.a_leg).chain(call.b_legs.iter());
+    legs.map(|l| longest(l.ext.as_ref()))
+        .chain(std::iter::once(longest(call.ext.as_ref())))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The longest JSON encoding of one value in `ext`.
+fn longest(ext: Option<&ExtMap>) -> u64 {
     ext.map_or(0, |ext| ext.values().map(encoded_len).max().unwrap_or(0))
 }
 

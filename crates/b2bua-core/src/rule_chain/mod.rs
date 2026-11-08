@@ -64,8 +64,8 @@ pub fn rule_chain_turn(
     input: TurnInput<'_>,
     turn: &mut TurnScope,
 ) -> Result<HandlerResult, Tripped> {
-    let start = Gauge::of(&call);
     let checked = Checked::of(&call, input.event);
+    let start = if checked == Checked::All { Gauge::of(&call) } else { Gauge::default() };
     let result = chain_turn(fw, call, input, turn);
     crate::caps::hold(&fw.config.caps, &start, checked, turn, result)
 }

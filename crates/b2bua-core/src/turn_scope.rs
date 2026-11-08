@@ -31,6 +31,8 @@ pub struct TurnScope {
     actions: u64,
     /// The cap the turn crossed, once it crossed one.
     tripped: Option<Cap>,
+    /// The turn is charged for its actions.
+    fueled: bool,
 }
 
 impl TurnScope {
@@ -45,7 +47,15 @@ impl TurnScope {
             handled_by: None,
             actions: 0,
             tripped: None,
+            fueled: true,
         }
+    }
+
+    /// `self`, charged for no action: the router's own ending of a call,
+    /// whose actions it composed and which ends the call whatever it holds.
+    pub fn unfueled(mut self) -> Self {
+        self.fueled = false;
+        self
     }
 
     /// Charge `n` actions to the turn's fuel of `fuel`: `false`, the turn
@@ -54,6 +64,9 @@ impl TurnScope {
     pub fn charge(&mut self, n: usize, fuel: u64) -> bool {
         if self.tripped.is_some() {
             return false;
+        }
+        if !self.fueled {
+            return true;
         }
         self.actions = self.actions.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
         if self.actions > fuel {

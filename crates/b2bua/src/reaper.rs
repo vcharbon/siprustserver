@@ -135,15 +135,10 @@ impl Reaper {
     }
 
     /// A failed turn of `call_ref`, with the sweep on or off: strike 1 → a
-    /// `fatal-error` verdict through the normal rules; strike ≥ 2 (the rules
-    /// path itself failed) → `discharge`. Aborts count as strikes too — an
-    /// aborted body was hung, so its call needs the same resolution — except
-    /// one the overflow ladder asked for: its call's teardown is already
-    /// queued, and a strike would force the legs that teardown is ending on
-    /// the wire. A trip strikes a call not struck yet, its verdict naming the
-    /// cap; a trip of a later turn while that verdict is queued strikes
-    /// nothing, and only a verdict's own trip is the second strike
-    /// (ADR-0057 §4).
+    /// `fatal-error` verdict, strike ≥ 2 → `discharge` (ADR-0020 X6). An abort
+    /// the overflow ladder asked for strikes nothing; a trip strikes only a
+    /// call not struck yet, or the verdict's own turn, its verdict naming the
+    /// cap (ADR-0057 §4).
     pub fn report(&self, call_ref: &str, failure: HandlerFailure) {
         if failure == HandlerFailure::Aborted && ledger(&self.overflow_aborts).remove(call_ref) {
             return;

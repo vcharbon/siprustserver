@@ -97,8 +97,6 @@ const FINALS: &[Row] = &[
     ("b2bua/src/router/responses.rs", "481", OtherRequest),
     ("b2bua/src/router/responses.rs", "405", OtherRequest),
     ("b2bua/src/router/responses.rs", "500", OtherRequest),
-    // The in-dialog request of a turn past a per-call cap (ADR-0057 §4).
-    ("b2bua/src/router/responses.rs", "500", OtherRequest),
     ("b2bua/src/router/responses.rs", "status", OtherRequest),
     ("b2bua/src/router/store_fault_gate.rs", "500", OtherRequest),
     // A fold's stated code: the bare 503 of an unanswered consult and of a chain
