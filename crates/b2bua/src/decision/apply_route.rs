@@ -136,6 +136,10 @@ fn after(mut refused: HandlerEffects, mut result: HandlerResult) -> HandlerResul
 }
 
 /// What admitting one route came to.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the refusal is boxed to stay out of the initial turn's future; the result moves out at once"
+)]
 enum Applied {
     /// The b-leg dialled, or the call's final.
     Done(HandlerResult),
