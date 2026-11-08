@@ -45,7 +45,8 @@ pub fn identity(raw: &[u8]) -> Identity<'_> {
     if let Ok(start) = std::str::from_utf8(start) {
         let mut words = start.split_ascii_whitespace();
         let first = words.next();
-        if first == Some("SIP/2.0") {
+        // The SIP-Version compares ignoring case (RFC 3261 §7.1).
+        if first.is_some_and(|w| w.eq_ignore_ascii_case("SIP/2.0")) {
             id.status = words.next().and_then(|s| s.parse().ok());
         } else {
             id.method = first;

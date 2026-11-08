@@ -521,3 +521,12 @@ fn a_require_lists_100rel_only_when_every_row_reads() {
     let one_bad_row = b"SIP/2.0 183 OK\r\nRequire: 100rel\r\nRequire: x y\r\n\r\n";
     assert!(!require_has_100rel(one_bad_row), "nor does a message holding one");
 }
+
+/// A status line whose SIP-Version is written in another case is a response's
+/// (RFC 3261 §7.1), never a request whose method is the version.
+#[test]
+fn identity_reads_a_status_line_whatever_the_version_case() {
+    let id = identity(b"sip/2.0 180 Ringing\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\n\r\n");
+    assert_eq!((id.status, id.method), (Some(180), None));
+    assert_eq!(id.call_id, Some("c1"));
+}
