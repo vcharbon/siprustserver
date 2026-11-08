@@ -1,8 +1,10 @@
 //! The one reader of an address value, in both readings (ADR-0053 §4, §6).
 
+use std::ops::ControlFlow::{Break, Continue};
 use std::ops::Range;
 
 use crate::char_class::is_token_char;
+use crate::cursor::walk;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
@@ -167,15 +169,14 @@ pub(super) fn read_bare_user_semicolon(raw: &SipStr, grammar: &AddrGrammar) -> O
 
 /// The first `@` of `bytes` outside any quoted-string.
 fn unquoted_at(bytes: &[u8]) -> Option<usize> {
-    let mut i = 0;
-    while let Some(b) = byte_at(bytes, i) {
-        match b {
-            b'@' => return Some(i),
-            b'"' => i = quoted_close(bytes, i)?,
-            _ => i += 1,
-        }
-    }
-    None
+    walk(bytes, 0, |i| match byte_at(bytes, i) {
+        None => Break(None),
+        Some(b'@') => Break(Some(i)),
+        Some(b'"') => quoted_close(bytes, i).map_or(Break(None), Continue),
+        Some(_) => Continue(i + 1),
+    })
+    .ok()
+    .flatten()
 }
 
 pub(super) fn read_lenient(raw: &SipStr, grammar: &AddrGrammar) -> AddrRead {

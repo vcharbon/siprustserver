@@ -7,6 +7,8 @@
 //! every reading), then the gates beyond the grammar (ADR-0001): the registry-driven strict
 //! numeric values and the CVE-regression quoted-string / Digest checks.
 
+use std::ops::ControlFlow::{Break, Continue};
+
 use super::compact_forms::expand_compact_form;
 pub use super::name_forms::scan_header_name_forms;
 use super::scanner::{
@@ -15,6 +17,7 @@ use super::scanner::{
 use super::vouched::{is_vouched_value, vouched_reading};
 use crate::char_class::is_token_char;
 use crate::control_bytes::{bare_control_byte, is_control, Escapes};
+use crate::cursor::walk;
 use crate::error::SipParseError;
 use crate::header::{
     quoted_close, read_params, second_line, Authorization, HeaderId, HeaderName, HeaderValue as _,
@@ -154,18 +157,18 @@ pub fn parse_headers(
     let mut echoed_line_refused = false;
     let mut singletons = Singletons::default();
 
-    loop {
+    let split = s.walk(|s| {
         if s.at_end() {
             if blank_line == BlankLine::Required {
                 refusal.get_or_insert_with(|| {
                     SipParseError::new("header block ends with no blank line (RFC 3261 §7)")
                 });
             }
-            break;
+            return Break(Ok(()));
         }
         if s.at_end_of_headers() {
             s.consume_end_of_headers();
-            break;
+            return Break(Ok(()));
         }
         match parse_line(s, text, limits, &mut kept, &mut singletons) {
             Ok(Line::Kept) => {}
@@ -173,8 +176,12 @@ pub fn parse_headers(
                 echoed_line_refused |= echoed;
                 refusal.get_or_insert(error);
             }
-            Err(limit) => return Err(refusal.unwrap_or(limit)),
+            Err(limit) => return Break(Err(limit)),
         }
+        Continue(())
+    });
+    if let Err(stop) = split.map_err(SipParseError::from).and_then(|ended| ended) {
+        return Err(refusal.unwrap_or(stop));
     }
 
     Ok(ParsedHeaders {
@@ -419,21 +426,18 @@ fn is_authorization_header(name: &HeaderName) -> bool {
 /// does: none is closed, or a byte inside it is neither `qdtext` nor a
 /// `quoted-pair` of one ASCII byte.
 fn quoted_string_refusal(value: &[u8]) -> Option<&'static str> {
-    let mut i = 0;
-    while let Some(&b) = value.get(i) {
-        if b != b'"' {
-            i += 1;
-            continue;
-        }
-        match quoted_close(value, i) {
-            Some(after) => i = after,
+    let read = walk(value, 0, |i| match value.get(i) {
+        None => Break(None),
+        Some(&b) if b != b'"' => Continue(i + 1),
+        Some(_) => match quoted_close(value, i) {
+            Some(after) => Continue(after),
             None if value.get(i + 1..).is_some_and(|rest| rest.contains(&b'"')) => {
-                return Some("Malformed")
+                Break(Some("Malformed"))
             }
-            None => return Some("Unterminated"),
-        }
-    }
-    None
+            None => Break(Some("Unterminated")),
+        },
+    });
+    read.unwrap_or(Some("Malformed"))
 }
 
 /// Read the header name until colon, rejecting only unambiguously-illegal
@@ -441,20 +445,14 @@ fn quoted_string_refusal(value: &[u8]) -> Option<&'static str> {
 /// test while catching CVE-2023-27598. Trailing WSP before the colon is
 /// permitted (RFC 4475 §3.1.1.1).
 pub(super) fn read_header_name(s: &mut Scanner) -> Result<Span, SipParseError> {
-    let start = s.pos();
-    while let Some(b) = s.peek() {
-        if b == COLON || b == CR || b == LF || is_wsp(b) {
-            break;
-        }
-        if is_illegal_header_name_byte(b) {
-            return Err(SipParseError::new(format!(
-                "Illegal byte 0x{b:x} in header name at position {}",
-                s.pos()
-            )));
-        }
-        s.advance();
+    let ends_name = |b: u8| b == COLON || b == CR || b == LF || is_wsp(b);
+    let name = s.take_while(|b| !ends_name(b) && !is_illegal_header_name_byte(b));
+    if let Some(b) = s.peek().filter(|&b| !ends_name(b)) {
+        return Err(SipParseError::new(format!(
+            "Illegal byte 0x{b:x} in header name at position {}",
+            s.pos()
+        )));
     }
-    let name = start..s.pos();
     s.skip_wsp();
     Ok(name)
 }

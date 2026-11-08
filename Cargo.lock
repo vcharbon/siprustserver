@@ -4663,6 +4663,7 @@ version = "0.1.0"
 dependencies = [
  "alloc-counter",
  "base64 0.23.1",
+ "bounds",
  "bytes",
  "criterion",
  "flate2",

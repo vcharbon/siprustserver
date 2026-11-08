@@ -33,6 +33,8 @@ pub mod capture;
 pub mod char_class;
 mod checked;
 mod control_bytes;
+mod cursor;
+pub use cursor::NoProgress;
 pub mod draft;
 pub mod error;
 pub mod header;

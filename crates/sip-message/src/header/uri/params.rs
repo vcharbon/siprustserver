@@ -1,7 +1,10 @@
 //! The parameters of a URI (RFC 3261 §25.1 `uri-parameters`, §19.1.1): each
 //! part held to its class, and a name once.
 
+use std::ops::ControlFlow::{Break, Continue};
+
 use crate::char_class::{is_token_char, is_unreserved};
+use crate::cursor::{items, walk};
 use crate::sip_str::SipStr;
 
 use super::super::params::{ParamValue, Params};
@@ -19,15 +22,42 @@ use super::UriRole;
 /// the collapsed copies and the position after the list, a `?` or the end.
 pub(super) fn read_uri_params(
     value: &SipStr,
-    mut j: usize,
+    j: usize,
     role: Option<UriRole>,
 ) -> Result<(Params, Collapsed, usize), String> {
-    let bytes = value.as_bytes();
-    let text = value.as_str();
-    let mut params = Params::new();
-    let mut collapsed = Collapsed::default();
-    let mut names = NameIndex::default();
-    while byte_at(bytes, j) == Some(b';') {
+    let mut list = List::default();
+    let read = walk(value.as_bytes(), j, |j| match list.segment(value, j, role) {
+        Ok(Some(next)) => Continue(next),
+        Ok(None) => Break(Ok(j)),
+        Err(refusal) => Break(Err(refusal)),
+    });
+    let end = read.map_err(|stall| stall.to_string())??;
+    Ok((list.params, list.collapsed, end))
+}
+
+/// The parameters read so far.
+#[derive(Default)]
+struct List {
+    params: Params,
+    collapsed: Collapsed,
+    names: NameIndex,
+}
+
+impl List {
+    /// Reads the `;name[=value]` at byte `j`; the position after it, or `None`
+    /// when no `;` opens one there.
+    fn segment(
+        &mut self,
+        value: &SipStr,
+        mut j: usize,
+        role: Option<UriRole>,
+    ) -> Result<Option<usize>, String> {
+        let bytes = value.as_bytes();
+        let text = value.as_str();
+        let List { params, collapsed, names } = self;
+        if byte_at(bytes, j) != Some(b';') {
+            return Ok(None);
+        }
         let segment_at = j;
         let name_at = j + 1;
         let name_end = scan_until(bytes, name_at, b"=;?");
@@ -55,9 +85,9 @@ pub(super) fn read_uri_params(
             j = name_end;
             ParamValue::Flag
         };
-        match names.find(&params, &name) {
+        match names.find(params, &name) {
             None => {
-                names.add(&params, &name);
+                names.add(params, &name);
                 params.push(name, param);
             }
             Some(first) if params.iter().nth(first).is_some_and(|(_, v)| same_value(v, &param)) => {
@@ -70,8 +100,8 @@ pub(super) fn read_uri_params(
                 ))
             }
         }
+        Ok(Some(j))
     }
-    Ok((params, collapsed, j))
 }
 
 /// The second, identical copies a URI read collapsed: their names, and the
@@ -134,8 +164,7 @@ fn same_value(a: &ParamValue, b: &ParamValue) -> bool {
 /// read as that character (RFC 3261 §19.1.4, RFC 2396 §2.3).
 fn unescaped(run: &str) -> impl Iterator<Item = u8> + '_ {
     let bytes = run.as_bytes();
-    let mut i = 0;
-    std::iter::from_fn(move || {
+    items(bytes, move |i| {
         let b = *bytes.get(i)?;
         let decoded = (b == b'%')
             .then(|| bytes.get(i + 1..i + 3))
@@ -143,15 +172,9 @@ fn unescaped(run: &str) -> impl Iterator<Item = u8> + '_ {
             .and_then(|hex| std::str::from_utf8(hex).ok())
             .and_then(|hex| u8::from_str_radix(hex, 16).ok())
             .filter(|&c| is_unreserved(c));
-        match decoded {
-            Some(c) => {
-                i += 3;
-                Some(c.to_ascii_lowercase())
-            }
-            None => {
-                i += 1;
-                Some(b.to_ascii_lowercase())
-            }
-        }
+        Some(match decoded {
+            Some(c) => (c.to_ascii_lowercase(), i + 3),
+            None => (b.to_ascii_lowercase(), i + 1),
+        })
     })
 }

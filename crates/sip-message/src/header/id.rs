@@ -14,61 +14,30 @@ const LENGTHS: usize = 26;
 /// The most known names sharing one length.
 const BUCKET: usize = 8;
 
-/// The known ids by the length of their wire name.
-const BY_LENGTH: [[Option<HeaderId>; BUCKET]; LENGTHS] = [
-    bucket(0),
-    bucket(1),
-    bucket(2),
-    bucket(3),
-    bucket(4),
-    bucket(5),
-    bucket(6),
-    bucket(7),
-    bucket(8),
-    bucket(9),
-    bucket(10),
-    bucket(11),
-    bucket(12),
-    bucket(13),
-    bucket(14),
-    bucket(15),
-    bucket(16),
-    bucket(17),
-    bucket(18),
-    bucket(19),
-    bucket(20),
-    bucket(21),
-    bucket(22),
-    bucket(23),
-    bucket(24),
-    bucket(25),
-];
-
-/// The known ids whose wire name is `len` bytes long. Every known id finds its
+/// The known ids by the length of their wire name. Every known id finds its
 /// slot: the resolution test reads each one back.
-const fn bucket(len: usize) -> [Option<HeaderId>; BUCKET] {
-    let mut out = [None; BUCKET];
+const BY_LENGTH: [[Option<HeaderId>; BUCKET]; LENGTHS] = {
+    let mut out = [[None; BUCKET]; LENGTHS];
     let mut rest = HeaderId::ALL;
     while let [id, tail @ ..] = rest {
-        if id.wire().len() == len {
-            let mut slots: &mut [Option<HeaderId>] = &mut out;
-            loop {
-                match slots {
-                    [] => break,
-                    [slot, more @ ..] => {
-                        if slot.is_none() {
-                            *slot = Some(*id);
-                            break;
-                        }
-                        slots = more;
+        let (mut rows, mut len): (&mut [[Option<HeaderId>; BUCKET]], usize) = (&mut out, 0);
+        while let [row, more @ ..] = rows {
+            if len == id.wire().len() {
+                let mut slots: &mut [Option<HeaderId>] = row;
+                while let [slot, free @ ..] = slots {
+                    if slot.is_none() {
+                        *slot = Some(*id);
+                        break;
                     }
+                    slots = free;
                 }
             }
+            (rows, len) = (more, len + 1);
         }
         rest = tail;
     }
     out
-}
+};
 
 impl HeaderId {
     /// The known header `name` spells — any casing, long or compact form

@@ -22,6 +22,7 @@ side = "blind"
 
 [lints.rust]
 unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [lints.clippy]
 too_many_lines = "warn"

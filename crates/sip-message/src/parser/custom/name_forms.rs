@@ -2,6 +2,8 @@
 //! unexpanded: what a near-verbatim replay restates after the parser has
 //! canonicalized every `SipHeader.name`.
 
+use std::ops::ControlFlow::{Break, Continue};
+
 use super::headers::read_header_name;
 use super::scanner::{Scanner, COLON};
 use crate::parser::SipParserLimits;
@@ -34,26 +36,30 @@ pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<Strin
         return Vec::new();
     }
     let mut names: Vec<String> = Vec::new();
-    loop {
+    let read = s.walk(|s| {
         if s.at_end_of_headers() {
             s.consume_end_of_headers();
-            break;
+            return Break(true);
         }
         if s.at_end() {
-            break;
+            return Break(true);
         }
-        let raw_name = match read_header_name(&mut s) {
+        let raw_name = match read_header_name(s) {
             Ok(n) if !n.is_empty() => n,
-            _ => return Vec::new(),
+            _ => return Break(false),
         };
         if s.expect(COLON).is_err() {
-            return Vec::new();
+            return Break(false);
         }
         s.skip_lws();
         let (Ok(_), Some(name)) = (s.read_header_value(), image.get(raw_name)) else {
-            return Vec::new();
+            return Break(false);
         };
         names.push(name.to_string());
+        Continue(())
+    });
+    if read != Ok(true) {
+        return Vec::new();
     }
     names
 }

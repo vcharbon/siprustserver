@@ -257,7 +257,12 @@ impl<S: StartKind> Draft<S> {
         let name = H::header_name();
         let key = name.key();
         let mut at = 0;
-        while count > 0 {
+        // Each pass takes a line out, or drops the last values counted.
+        let lines = self.entries.len();
+        for _ in 0..lines {
+            if count == 0 {
+                break;
+            }
             let Some(found) = self.entries.iter().skip(at).position(|e| e.is_key(&key)) else {
                 break;
             };

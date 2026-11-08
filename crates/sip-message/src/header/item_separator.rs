@@ -7,7 +7,7 @@
 //! (RFC 3261 §7.3.1), and the RFC 3323 priv-value list is the one family
 //! whose members are separated by `;` (§4.2) or `,` (erratum 5184).
 
-use crate::parser::custom::structured_headers::{top_level_entries, TopLevelEntries};
+use crate::parser::custom::structured_headers::top_level_entries;
 
 use super::name::HeaderName;
 
@@ -39,7 +39,7 @@ impl ItemSeparator {
 
     /// The items of `value`, trimmed and borrowed. A separator inside a
     /// quoted-string or `<...>` is data, not a separator.
-    pub fn split(self, value: &str) -> TopLevelEntries<'_> {
+    pub fn split(self, value: &str) -> impl Iterator<Item = &str> {
         top_level_entries(value, self)
     }
 }

@@ -53,6 +53,12 @@ fn loop_and_while_are_sites() {
 }
 
 #[test]
+fn a_loop_the_compiler_evaluates_is_no_site() {
+    let t = lib("const A: u8 = { let mut n = 0; while n < 3 { n += 1; } n };\nstatic B: u8 = { let mut n = 0; loop { n += 1; if n > 2 { break n; } } };\nstruct S;\nimpl S { const C: u8 = { let mut n = 0; while n < 3 { n += 1; } n }; }\nconst fn d() -> u8 { let mut n = 0; while n < 3 { n += 1; } n }\nfn e() -> u8 { const { let mut n = 0; while n < 3 { n += 1; } n } }\n");
+    assert_eq!(t.lines(Set::Loop), vec![5]);
+}
+
+#[test]
 fn a_for_over_a_collection_or_a_bounded_range_is_no_site() {
     let t = lib("const N: usize = 4;\nfn f(v: &[u8]) {\n    for _ in v {}\n    for _ in 0..N {}\n    for _ in 0..v.len() - 1 {}\n    for _ in 0..=u8::MAX {}\n    for _ in (0..v.len()).rev() {}\n    let _ = (0..v.len()).contains(&3);\n}\n");
     assert_eq!(t.lines(Set::Loop), Vec::<usize>::new());

@@ -131,12 +131,12 @@ fn field(body: &[u8], name: Vec<u8>, raw: Range<usize>) -> Field {
     let span = start..(raw.end - trail).max(start);
     let unfolded: Vec<u8> = {
         let mut out = Vec::with_capacity(bytes.len());
-        let mut rest = bytes;
-        while let Some(i) = memchr::memmem::find(rest, b"\r\n") {
-            out.extend_from_slice(rest.get(..i).unwrap_or_default());
-            rest = rest.get(i + 2..).unwrap_or_default();
+        let mut from = 0;
+        for crlf in memchr::memmem::find_iter(bytes, b"\r\n") {
+            out.extend_from_slice(bytes.get(from..crlf).unwrap_or_default());
+            from = crlf + 2;
         }
-        out.extend_from_slice(rest);
+        out.extend_from_slice(bytes.get(from..).unwrap_or_default());
         out
     };
     let value = trim_bytes(&unfolded);

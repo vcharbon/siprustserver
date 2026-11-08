@@ -102,16 +102,18 @@ pub(crate) fn bare_control_byte(value: &[u8], escapes: Escapes) -> Option<usize>
         return value.iter().position(|&b| is_control(b));
     }
     let mut at = At::Plain;
-    let mut bytes = value.iter().copied().enumerate();
-    while let Some((i, b)) = bytes.next() {
+    let mut escaping = false;
+    for (i, &b) in value.iter().enumerate() {
+        if escaping {
+            escaping = false;
+            if b == b'\r' || b == b'\n' {
+                return Some(i);
+            }
+            continue;
+        }
         at = match at {
             At::Quoted | At::Comment(_) if b == b'\\' => {
-                match bytes.next() {
-                    Some((escaped_at, escaped)) if escaped == b'\r' || escaped == b'\n' => {
-                        return Some(escaped_at)
-                    }
-                    _ => {}
-                }
+                escaping = true;
                 at
             }
             _ if is_control(b) => return Some(i),

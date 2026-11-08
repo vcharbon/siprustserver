@@ -6,8 +6,12 @@
 //! wire spelling; every lookup is case-insensitive, which is what RFC 3261
 //! §7.3.1 actually specifies.
 
+use std::mem::take;
+use std::ops::ControlFlow::{Break, Continue};
+
 use smallvec::SmallVec;
 
+use crate::cursor::walk;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
@@ -218,47 +222,45 @@ pub(crate) fn read_params(
 ) -> Result<(Params, usize), SipParseError> {
     let bytes = base.as_bytes();
     let mut params = Params::new();
-    let mut i = i;
-    loop {
+    let read = walk(bytes, i, |i| {
         let at = skip_ws(bytes, i);
         match byte_at(bytes, at) {
-            None => return long_list_repeat(params, at, reading),
+            None => return Break(long_list_repeat(take(&mut params), at, reading)),
             Some(b';') => {}
             Some(_) => match reading {
                 ParamReading::Strict => {
-                    return Err(SipParseError::new(format!(
+                    return Break(Err(SipParseError::new(format!(
                         "unexpected {:?} where a `;` parameter or the end belongs",
                         clamped(base.as_str(), at, bytes.len())
-                    )))
+                    ))))
                 }
-                ParamReading::UpToFirstBad => return long_list_repeat(params, i, reading),
-                ParamReading::Lenient => {
-                    i = scan_until(bytes, at, b";");
-                    continue;
+                ParamReading::UpToFirstBad => {
+                    return Break(long_list_repeat(take(&mut params), i, reading))
                 }
+                ParamReading::Lenient => return Continue(scan_until(bytes, at, b";")),
             },
         }
         if reading == ParamReading::Lenient {
-            i = read_one_lenient(base, skip_ws(bytes, at + 1), &mut params);
-            continue;
+            return Continue(read_one_lenient(base, skip_ws(bytes, at + 1), &mut params));
         }
         match read_generic_param(base, skip_ws(bytes, at + 1), ipv6_valued) {
             // A short list is checked as it is read, a long one once at its
             // end, so a list of thousands of parameters stays linear.
             Ok((name, _, _)) if params.len() < SHORT_LIST && params.has(name.as_str()) => {
                 if reading == ParamReading::Strict {
-                    return Err(repeated(name.as_str()));
+                    return Break(Err(repeated(name.as_str())));
                 }
-                return Ok((params, i));
+                Break(Ok((take(&mut params), i)))
             }
             Ok((name, value, end)) => {
                 params.push(name, value);
-                i = end;
+                Continue(end)
             }
-            Err(refusal) if reading == ParamReading::Strict => return Err(refusal),
-            Err(_) => return long_list_repeat(params, i, reading),
+            Err(refusal) if reading == ParamReading::Strict => Break(Err(refusal)),
+            Err(_) => Break(long_list_repeat(take(&mut params), i, reading)),
         }
-    }
+    });
+    read?
 }
 
 /// The end of [`read_params`] for a list longer than [`SHORT_LIST`], whose
@@ -387,46 +389,45 @@ fn read_generic_param(
 /// `auth-param *( COMMA auth-param )` from byte `i` to the end of `base`
 /// (RFC 3261 §25.1): `auth-param = token EQUAL ( token / quoted-string )`,
 /// each name once (§7.3.1), refused at the first byte off the grammar.
-pub(crate) fn read_auth_params(base: &SipStr, mut i: usize) -> Result<Params, SipParseError> {
+pub(crate) fn read_auth_params(base: &SipStr, i: usize) -> Result<Params, SipParseError> {
     let bytes = base.as_bytes();
     let off = |what: &str| SipParseError::new(format!("a malformed auth-param: {what}"));
     let mut params = Params::new();
-    loop {
+    let read = walk(bytes, i, |i| {
         let name_end = token_end(bytes, i);
         if name_end == i {
-            return Err(off("no parameter name"));
+            return Break(Err(off("no parameter name")));
         }
         let name = sub(base, i, name_end);
-        i = skip_ws(bytes, name_end);
+        let i = skip_ws(bytes, name_end);
         if byte_at(bytes, i) != Some(b'=') {
-            return Err(off(&format!("{name:?} has no value")));
+            return Break(Err(off(&format!("{name:?} has no value"))));
         }
-        i = skip_ws(bytes, i + 1);
-        let value = if byte_at(bytes, i) == Some(b'"') {
-            let close = quoted_close(bytes, i).ok_or_else(|| off(&format!("{name:?}'s quote")))?;
-            let (text, _) = read_quoted(base, i);
-            i = close;
-            ParamValue::Quoted(text)
+        let i = skip_ws(bytes, i + 1);
+        let (value, i) = if byte_at(bytes, i) == Some(b'"') {
+            let Some(close) = quoted_close(bytes, i) else {
+                return Break(Err(off(&format!("{name:?}'s quote"))));
+            };
+            (ParamValue::Quoted(read_quoted(base, i).0), close)
         } else {
             let value_end = token_end(bytes, i);
             if value_end == i {
-                return Err(off(&format!("{name:?}'s value is not a token")));
+                return Break(Err(off(&format!("{name:?}'s value is not a token"))));
             }
-            let token = sub(base, i, value_end);
-            i = value_end;
-            ParamValue::Token(token)
+            (ParamValue::Token(sub(base, i, value_end)), value_end)
         };
         if params.len() < SHORT_LIST && params.has(name.as_str()) {
-            return Err(repeated(name.as_str()));
+            return Break(Err(repeated(name.as_str())));
         }
         params.push(name, value);
-        i = skip_ws(bytes, i);
+        let i = skip_ws(bytes, i);
         match byte_at(bytes, i) {
-            None => return long_list_repeat(params, i, ParamReading::Strict).map(|(p, _)| p),
-            Some(b',') => i = skip_ws(bytes, i + 1),
-            Some(_) => return Err(off("no comma between parameters")),
+            None => Break(long_list_repeat(take(&mut params), i, ParamReading::Strict)),
+            Some(b',') => Continue(skip_ws(bytes, i + 1)),
+            Some(_) => Break(Err(off("no comma between parameters"))),
         }
-    }
+    });
+    read?.map(|(params, _)| params)
 }
 
 /// Read one `name[=value]` at byte `i` the way [`ParamReading::Lenient`]

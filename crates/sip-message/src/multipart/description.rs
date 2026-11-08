@@ -13,6 +13,8 @@
 
 use std::ops::Range;
 
+use bounds::Depth;
+
 use crate::header::{ContentDisposition, HeaderValue, MediaType, ParamValue};
 use crate::sip_str::SipStr;
 
@@ -23,6 +25,11 @@ use super::framing::framed_parts;
 /// input states the depth, so the search stops: past this level a body holds
 /// no description.
 pub(super) const MAX_DEPTH: usize = 4;
+
+/// The depth a search of a message's body starts at.
+pub(super) fn top() -> Depth {
+    Depth::new(MAX_DEPTH)
+}
 
 /// A session description found in a body: its range, the head of the part
 /// framing it (`None` when the body is the description), and which part of
@@ -43,12 +50,12 @@ fn is_session(disposition: Option<&str>) -> bool {
 }
 
 /// The description `body`, typed `content_type` and disposed `disposition`,
-/// holds at multipart level `depth`.
+/// holds at multipart depth `depth`.
 pub(super) fn find(
     content_type: &MediaType,
     disposition: Option<&str>,
     body: &[u8],
-    depth: usize,
+    depth: &Depth,
 ) -> Option<Found> {
     if body.is_empty() {
         return None;
@@ -57,9 +64,10 @@ pub(super) fn find(
         let whole = Found { range: 0..body.len(), part: None, index: 0 };
         return is_session(disposition).then_some(whole);
     }
-    if !content_type.is_multipart() || depth > MAX_DEPTH {
+    if !content_type.is_multipart() {
         return None;
     }
+    let inner = depth.descend().ok()?;
     let boundary = content_type.param("boundary").and_then(ParamValue::as_str)?;
     let parts = framed_parts(body, boundary).into_iter().enumerate();
     let mut found = parts.filter_map(|(index, part)| {
@@ -67,7 +75,7 @@ pub(super) fn find(
         let part_type = MediaType::parse(&SipStr::owned(part_type)).ok()?;
         let content = body.get(part.offset..part.offset + part.len)?;
         let disposition = part.head.single("content-disposition").ok()?;
-        let inner = find(&part_type, disposition, content, depth + 1)?;
+        let inner = find(&part_type, disposition, content, &inner)?;
         let range = part.offset + inner.range.start..part.offset + inner.range.end;
         Some(Found { range, part: inner.part.or(Some(part.head)), index })
     });

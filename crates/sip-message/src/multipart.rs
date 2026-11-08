@@ -187,7 +187,7 @@ fn find_description(
         .iter()
         .find(|(name, _)| whitespace::trim(name).eq_ignore_ascii_case("Content-Disposition"))
         .map(|(_, value)| value.as_str());
-    description::find(&media, disposition, body, 1)
+    description::find(&media, disposition, body, &description::top())
 }
 
 /// Which of the [`entity_parts`] of a message body holds the session
@@ -288,21 +288,27 @@ fn derive_boundary(parts: &[MultipartPart]) -> String {
         }
     }
     let mut boundary = format!("boundary-{hash:016x}");
-    while parts.iter().any(|p| holds(p, &boundary)) {
+    // A boundary longer than every field is held by none.
+    let longest = parts.iter().flat_map(fields).max_by_key(|field| field.len()).unwrap_or_default();
+    for _ in 0..=longest.len() {
+        if !parts.iter().any(|p| holds(p, &boundary)) {
+            break;
+        }
         boundary.push('-');
     }
     boundary
 }
 
-/// Whether `boundary` occurs anywhere `part` is framed from: its type, a head
-/// line's name or value, its payload.
+/// What `part` is framed from: its type, each head line's name and value, its
+/// payload.
+fn fields(part: &MultipartPart) -> impl Iterator<Item = &[u8]> {
+    let head = part.headers.iter().flat_map(|(name, value)| [name.as_bytes(), value.as_bytes()]);
+    std::iter::once(part.content_type.as_bytes()).chain(head).chain([part.payload.as_ref()])
+}
+
+/// Whether `boundary` occurs anywhere `part` is framed from.
 fn holds(part: &MultipartPart, boundary: &str) -> bool {
-    let needle = boundary.as_bytes();
-    contains(part.content_type.as_bytes(), needle)
-        || part.headers.iter().any(|(name, value)| {
-            contains(name.as_bytes(), needle) || contains(value.as_bytes(), needle)
-        })
-        || contains(&part.payload, needle)
+    fields(part).any(|field| contains(field, boundary.as_bytes()))
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -386,7 +392,7 @@ pub fn sdp_range(
     disposition: Option<&str>,
     body: &[u8],
 ) -> Option<std::ops::Range<usize>> {
-    description::find(content_type, disposition, body, 1).map(|found| found.range)
+    description::find(content_type, disposition, body, &description::top()).map(|found| found.range)
 }
 
 /// Where the body of the message `headers` head holds its session

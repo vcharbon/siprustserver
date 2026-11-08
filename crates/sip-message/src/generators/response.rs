@@ -70,14 +70,17 @@ pub(super) fn echo_via(
         return draft.push_raw(HeaderName::Via, line);
     };
     let text = line.as_str();
-    let mut entries = top_level_comma_entries(text);
-    let Some(first) = entries.next() else {
+    let (first, second) = {
+        let mut entries = top_level_comma_entries(text);
+        (entries.next(), entries.next())
+    };
+    let Some(first) = first else {
         return draft.push_raw(HeaderName::Via, line);
     };
     let Ok(hop) = Via::parse(&line.reslice(first)) else {
         return draft.push_raw(HeaderName::Via, line);
     };
-    let rest = entries.next().and_then(|second| {
+    let rest = second.and_then(|second| {
         let start = (second.as_ptr() as usize).checked_sub(text.as_ptr() as usize)?;
         text.get(start..)
     });

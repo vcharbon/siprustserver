@@ -5,6 +5,8 @@
 //! quoted-string, a comment, a reason phrase and TEXT-UTF8; no reader of a
 //! URI, token or word ever admits a byte of 0x80 or above.
 
+use std::ops::ControlFlow;
+
 /// `alphanum = ALPHA / DIGIT`.
 pub fn is_alphanum(b: u8) -> bool {
     b.is_ascii_alphanumeric()
@@ -123,23 +125,20 @@ pub fn is_run_of(text: &str, class: fn(u8) -> bool, escapes: bool) -> bool {
 /// every byte belongs.
 pub fn run_refusal(text: &str, class: fn(u8) -> bool, escapes: bool) -> Option<String> {
     let bytes = text.as_bytes();
-    let mut rest = bytes;
-    while let Some((&b, tail)) = rest.split_first() {
-        if escapes && b == b'%' {
-            match tail {
-                [h, l, more @ ..] if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
-                    rest = more;
-                    continue;
-                }
-                _ => return Some(format!("malformed escape in {text:?}")),
-            }
+    let read = crate::cursor::walk(bytes, 0, |i| match bytes.get(i..) {
+        Some(&[b'%', h, l, ..]) if escapes && h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
+            ControlFlow::Continue(i + 3)
         }
-        if !class(b) {
-            return Some(format!("byte 0x{b:02x} not allowed in {text:?}"));
+        Some(&[b'%', ..]) if escapes => {
+            ControlFlow::Break(Some(format!("malformed escape in {text:?}")))
         }
-        rest = tail;
-    }
-    None
+        Some(&[b, ..]) if !class(b) => {
+            ControlFlow::Break(Some(format!("byte 0x{b:02x} not allowed in {text:?}")))
+        }
+        Some(&[_, ..]) => ControlFlow::Continue(i + 1),
+        _ => ControlFlow::Break(None),
+    });
+    read.unwrap_or_else(|stall| Some(stall.to_string()))
 }
 
 #[cfg(test)]

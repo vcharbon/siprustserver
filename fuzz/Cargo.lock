@@ -1191,6 +1191,7 @@ name = "sip-message"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bounds",
  "bytes",
  "lookup-map",
  "memchr",

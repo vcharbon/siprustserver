@@ -169,10 +169,11 @@ fn lane_seeds() -> Corpus {
 }
 
 /// Raw SIP messages in the layout of each target that takes one: the
-/// message itself, an INVITE as the caller's under the plain decision, its
-/// SDP beside the lane's offer and answer, its multipart body under its
-/// boundary, its authentication lines, and the datagram the proxy receives
-/// (a request from the caller, a response from the worker).
+/// message itself (`no_progress` also reads its lines one by one), an INVITE
+/// as the caller's under the plain decision, its SDP beside the lane's offer
+/// and answer, its multipart body under its boundary, its authentication
+/// lines, and the datagram the proxy receives (a request from the caller, a
+/// response from the worker).
 fn from_messages(messages: &[Vec<u8>]) -> Corpus {
     let mut corpus = Corpus::new();
     let mut add = |target, input| corpus.entry(target).or_default().push(input);
@@ -182,6 +183,7 @@ fn from_messages(messages: &[Vec<u8>]) -> Corpus {
     let parser = CustomParser::new();
     for raw in messages {
         add("message_roundtrip", raw.clone());
+        add("no_progress", raw.clone());
         let Ok(msg) = parser.parse(raw) else { continue };
         if drive::invite_of(raw).is_some() {
             add("initial_invite", invite_input(0, 0, raw));

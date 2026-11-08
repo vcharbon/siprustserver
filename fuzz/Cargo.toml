@@ -112,6 +112,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "no_progress"
+path = "fuzz_targets/no_progress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "multipart"
 path = "fuzz_targets/multipart.rs"
 test = false

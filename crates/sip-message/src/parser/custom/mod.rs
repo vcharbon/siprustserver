@@ -9,6 +9,8 @@
 //! flow, but every escape is translated into `Err(SipParseError)` at this
 //! entry point. No panic ever crosses the boundary.
 
+use std::ops::ControlFlow;
+
 use bytes::Bytes;
 
 use crate::draft::{RequestLine, StatusLine, SIP_VERSION};
@@ -373,8 +375,8 @@ pub(crate) fn decode_image(header_block: &[u8]) -> (SharedText, Option<SipParseE
     }
     let mut image = String::with_capacity(header_block.len());
     let mut refusal = None;
-    let mut rest = header_block;
-    while !rest.is_empty() {
+    let decoded = crate::cursor::walk(header_block, 0, |from| {
+        let rest = header_block.get(from..).unwrap_or_default();
         let (valid, after) = match std::str::from_utf8(rest) {
             Ok(text) => (text, &[][..]),
             Err(e) => {
@@ -384,12 +386,11 @@ pub(crate) fn decode_image(header_block: &[u8]) -> (SharedText, Option<SipParseE
         };
         image.push_str(valid);
         if after.is_empty() {
-            break;
+            return ControlFlow::Break(());
         }
         if let Some((character, tail)) = surrogate_pair(after) {
             image.push(character);
-            rest = tail;
-            continue;
+            return ControlFlow::Continue(header_block.len() - tail.len());
         }
         let at = header_block.len() - after.len();
         refusal.get_or_insert_with(|| {
@@ -402,9 +403,13 @@ pub(crate) fn decode_image(header_block: &[u8]) -> (SharedText, Option<SipParseE
             .err()
             .and_then(|e| e.error_len())
             .unwrap_or(after.len())
-            .max(1);
-        image.extend(std::iter::repeat_n('\r', bad.min(after.len())));
-        rest = after.get(bad..).unwrap_or_default();
+            .max(1)
+            .min(after.len());
+        image.extend(std::iter::repeat_n('\r', bad));
+        ControlFlow::Continue(at + bad)
+    });
+    if let Err(stall) = decoded {
+        refusal.get_or_insert(stall.into());
     }
     (SharedText::from(image), refusal)
 }

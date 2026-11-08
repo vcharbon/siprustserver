@@ -262,6 +262,8 @@ opt-level = 1
 # (tokio, jemalloc, …) use unsafe freely and are unaffected.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# `fuzzing`: set by cargo-fuzz on the fuzz workspace's builds (docs/testing/fuzzing.md).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 # Function-size ceiling (threshold in clippy.toml, 200 lines initially): a
 # function past it is presumed to be several concepts and wants extraction.

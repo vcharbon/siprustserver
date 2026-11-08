@@ -33,10 +33,10 @@ pub fn header_row_spans(raw: &[u8], name: &str) -> Vec<Range<usize>> {
     let name = expanded_name(name);
     let mut spans: Vec<Range<usize>> = Vec::new();
     let mut in_named_row = false;
-    let mut pos = raw.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| p + 1);
-    while let Some(rest) = raw.get(pos..).filter(|rest| !rest.is_empty()) {
-        let next = rest.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| pos + p + 1);
-        let line = raw.get(pos..next).unwrap_or_default();
+    let mut rows = raw.split_inclusive(|&b| b == b'\n');
+    let mut pos = rows.next().map_or(0, <[u8]>::len);
+    for line in rows {
+        let next = pos + line.len();
         let content = line.strip_suffix(b"\n").unwrap_or(line);
         let content = content.strip_suffix(b"\r").unwrap_or(content);
         if content.is_empty() {

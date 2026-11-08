@@ -18,6 +18,7 @@ pub use except::{equal_except, header_row_spans, line_at, Except};
 pub use identity::{identity, Identity};
 pub use reliability::{rack_cseq, rack_rseq, require_has_100rel, rseq_of};
 use std::borrow::Cow;
+use std::ops::ControlFlow;
 pub use uri_facts::UriFacts;
 pub use via_hops::{bottom_via, top_via, via_rport, OriginVia, ViaRport};
 pub use via_stamp::relay_stamp_spans;
@@ -403,15 +404,11 @@ pub fn body(raw: &[u8]) -> Option<&[u8]> {
 /// ends the head at the same byte and then refuses it.
 pub fn head_end(raw: &[u8]) -> Option<usize> {
     let at = |i: usize| raw.get(i).copied();
-    let mut i = 0;
-    loop {
-        if i >= raw.len() {
-            return None;
-        }
-        let line_start = i;
-        while at(i).is_some_and(|b| b != b'\r' && b != b'\n') {
-            i += 1;
-        }
+    let end = crate::cursor::walk(raw, 0, |line_start| {
+        let Some(rest) = raw.get(line_start..).filter(|rest| !rest.is_empty()) else {
+            return ControlFlow::Break(None);
+        };
+        let mut i = line_start + rest.iter().take_while(|&&b| b != b'\r' && b != b'\n').count();
         let empty = i == line_start;
         if at(i) == Some(b'\r') {
             i += 1;
@@ -420,12 +417,12 @@ pub fn head_end(raw: &[u8]) -> Option<usize> {
             i += 1;
         }
         if empty {
-            return Some(i);
+            ControlFlow::Break(Some(i))
+        } else {
+            ControlFlow::Continue(i)
         }
-        if i == line_start {
-            return None;
-        }
-    }
+    });
+    end.ok().flatten()
 }
 
 /// The option tags a set-like header lists (`Require`, `Supported`,
@@ -532,10 +529,9 @@ pub fn route_rows(raw: &[u8], name: &str) -> Vec<RouteRow> {
     use crate::header::{HeaderValue, RouteEntry};
     let mut out = Vec::new();
     let mut pos = 0;
-    while let Some(rest) = raw.get(pos..).filter(|rest| !rest.is_empty()) {
-        let line_end = rest.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| pos + p);
-        let next = (line_end + 1).min(raw.len());
-        let Some(line) = raw.get(pos..line_end).map(as_str) else { break };
+    for row in raw.split_inclusive(|&b| b == b'\n') {
+        let next = pos + row.len();
+        let line = as_str(row.strip_suffix(b"\n").unwrap_or(row));
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
             break; // end of headers

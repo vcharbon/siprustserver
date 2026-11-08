@@ -4,7 +4,9 @@
 //! leads its value ([`Leading`]) and how its parameters read.
 
 use std::marker::PhantomData;
+use std::ops::ControlFlow::{Break, Continue};
 
+use crate::cursor::walk;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
@@ -152,25 +154,28 @@ fn read_leading(value: &SipStr, leading: Leading) -> Result<(SipStr, usize), Str
 /// (RFC 3261 §25.1): `ctext`, `quoted-pair` and nested comments.
 fn comment_close(bytes: &[u8], open: usize) -> Option<usize> {
     let mut depth = 0usize;
-    let mut i = open;
-    loop {
-        match byte_at(bytes, i)? {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i + 1);
-                }
-            }
-            b'\\' => match byte_at(bytes, i + 1)? {
-                b'\r' | b'\n' => return None,
-                b if b.is_ascii() => i += 1,
-                _ => return None,
-            },
-            _ => {}
+    walk(bytes, open, |i| match byte_at(bytes, i) {
+        None => Break(None),
+        Some(b'(') => {
+            depth += 1;
+            Continue(i + 1)
         }
-        i += 1;
-    }
+        Some(b')') => {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                Break(Some(i + 1))
+            } else {
+                Continue(i + 1)
+            }
+        }
+        Some(b'\\') => match byte_at(bytes, i + 1) {
+            Some(b) if b.is_ascii() && b != b'\r' && b != b'\n' => Continue(i + 2),
+            _ => Break(None),
+        },
+        Some(_) => Continue(i + 1),
+    })
+    .ok()
+    .flatten()
 }
 
 /// `leading *( SEMI generic-param )`, the whole of `raw` but its surrounding

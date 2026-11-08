@@ -42,6 +42,8 @@ memchr.workspace = true
 # exports.
 base64.workspace = true
 schemars.workspace = true
+# The depth guard of a recursion (ADR-0057 §5).
+bounds = { path = "../bounds" }
 # Hash lookups with no iteration in hash-seed order (ADR-0051 §1).
 lookup-map = { path = "../lookup-map" }
 

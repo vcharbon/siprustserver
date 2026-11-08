@@ -8,6 +8,9 @@
 //! the rest are infallible.
 #![deny(clippy::arithmetic_side_effects)]
 
+use std::ops::ControlFlow::{self, Break, Continue};
+
+use crate::cursor::{stalled, NoProgress};
 use crate::error::SipParseError;
 
 // ASCII byte constants.
@@ -90,9 +93,9 @@ pub fn header_block(raw: &[u8]) -> HeaderBlock {
     let mut s = Scanner::new(raw);
     let mut lines: usize = 0;
     let mut bare_break = None;
-    loop {
+    let end = s.walk(|s| {
         if s.at_end() {
-            return HeaderBlock { end: raw.len(), lines, bare_break };
+            return Break(raw.len());
         }
         let line = s.take_until_either(CR, LF);
         let at = s.pos();
@@ -102,10 +105,13 @@ pub fn header_block(raw: &[u8]) -> HeaderBlock {
             bare_break = Some(BareBreak { at, byte: if cr { CR } else { LF } });
         }
         if line.is_empty() {
-            return HeaderBlock { end: s.pos(), lines, bare_break };
+            return Break(s.pos());
         }
         lines = lines.saturating_add(1);
-    }
+        Continue(())
+    });
+    // A block whose end no walk finds has no blank line, which the parse refuses.
+    HeaderBlock { end: end.unwrap_or(raw.len()), lines, bare_break }
 }
 
 /// What one header line's value occupies in the image: the common case is a
@@ -160,6 +166,25 @@ impl<'a> Scanner<'a> {
         self.pos >= self.buf.len()
     }
 
+    /// Runs `step` until it breaks, the bounded cursor of ADR-0057 §5: at most
+    /// `len + 1` runs, each moving the cursor on at least one byte. A run that
+    /// breaks may leave it where it was; one that continues without moving it,
+    /// or a walk still going past `len + 1` runs, ends with [`NoProgress`].
+    pub fn walk<T>(
+        &mut self,
+        mut step: impl FnMut(&mut Self) -> ControlFlow<T>,
+    ) -> Result<T, NoProgress> {
+        for _ in 0..=self.buf.len() {
+            let before = self.pos;
+            match step(self) {
+                Break(value) => return Ok(value),
+                Continue(()) if self.pos > before => {}
+                Continue(()) => return Err(stalled(before)),
+            }
+        }
+        Err(stalled(self.pos))
+    }
+
     /// Moves the cursor `n` bytes on, stopping at the end of the buffer.
     fn bump(&mut self, n: usize) {
         self.pos = self.pos.saturating_add(n).min(self.buf.len());
@@ -197,9 +222,8 @@ impl<'a> Scanner<'a> {
     /// Consumes bytes while `keep` holds for them; the span read.
     pub fn take_while(&mut self, mut keep: impl FnMut(u8) -> bool) -> Span {
         let start = self.pos;
-        while self.peek().is_some_and(&mut keep) {
-            self.bump(1);
-        }
+        let rest = self.buf.get(start..).unwrap_or_default();
+        self.bump(rest.iter().take_while(|&&b| keep(b)).count());
         start..self.pos
     }
 
@@ -227,15 +251,19 @@ impl<'a> Scanner<'a> {
 
     /// Skip LWS: SP/HTAB and header-folding (CRLF followed by SP/HTAB).
     pub fn skip_lws(&mut self) {
-        loop {
-            match self.peek() {
-                Some(b) if is_wsp(b) => self.bump(1),
-                Some(CR) if self.peek_at(1) == Some(LF) && self.peek_at(2).is_some_and(is_wsp) => {
-                    self.bump(3); // CR LF WSP
-                }
-                _ => break,
+        let skipped = self.walk(|s| match s.peek() {
+            Some(b) if is_wsp(b) => {
+                s.bump(1);
+                Continue(())
             }
-        }
+            Some(CR) if s.peek_at(1) == Some(LF) && s.peek_at(2).is_some_and(is_wsp) => {
+                s.bump(3); // CR LF WSP
+                Continue(())
+            }
+            _ => Break(()),
+        });
+        // A stalled skip stops where it stalled, as at any other byte.
+        skipped.unwrap_or(());
     }
 
     /// Whether a line ends at the cursor: CRLF, the only line end (RFC 3261
@@ -254,30 +282,37 @@ impl<'a> Scanner<'a> {
         self.escaped_fold = false;
         let mut line = self.pos;
         let mut unfolded: Option<String> = None;
-        while !self.at_end() {
-            self.take_until(CR);
-            if !self.at_crlf() {
-                self.bump(1);
-                continue;
+        let read = self.walk(|s| {
+            if s.at_end() {
+                // EOF without CRLF — the line runs to the end of the image.
+                return Break(s.finish_value(line..s.pos, unfolded.take()));
             }
-            let end = self.pos;
-            self.bump(2);
-            if !self.peek().is_some_and(is_wsp) {
-                return self.finish_value(line..end, unfolded);
+            s.take_until(CR);
+            if !s.at_crlf() {
+                s.bump(1);
+                return Continue(());
             }
-            self.bump(1); // the fold's WSP: the fold becomes one SP
-            let text = self.text(line..end)?;
+            let end = s.pos;
+            s.bump(2);
+            if !s.peek().is_some_and(is_wsp) {
+                return Break(s.finish_value(line..end, unfolded.take()));
+            }
+            s.bump(1); // the fold's WSP: the fold becomes one SP
+            let text = match s.text(line..end) {
+                Ok(text) => text,
+                Err(refusal) => return Break(Err(refusal)),
+            };
             // An odd run of `\` before the line break escapes the CR, which
             // no quoted-pair may (RFC 3261 §25.1).
             let escapes = text.bytes().rev().take_while(|&b| b == b'\\').count();
-            self.escaped_fold |= escapes % 2 == 1;
+            s.escaped_fold |= escapes % 2 == 1;
             let out = unfolded.get_or_insert_with(String::new);
             out.push_str(text);
             out.push(' ');
-            line = self.pos;
-        }
-        // EOF without CRLF — the line runs to the end of the image.
-        self.finish_value(line..self.pos, unfolded)
+            line = s.pos;
+            Continue(())
+        });
+        read?
     }
 
     /// The text of a span this scanner read: a run of whole lines of the
@@ -361,4 +396,23 @@ pub fn strict_non_negative_decimal(s: &str, max: u64) -> Option<u64> {
         }
     }
     Some(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Break, Continue, Scanner};
+    use crate::cursor::NoProgress;
+
+    #[test]
+    fn a_walk_breaks_with_its_value_and_refuses_a_step_that_stays() {
+        let mut s = Scanner::new(b"ab:c");
+        let colon = s.walk(|s| match s.advance() {
+            Some(b':') => Break(Some(s.pos())),
+            Some(_) => Continue(()),
+            None => Break(None),
+        });
+        assert_eq!(colon, Ok(Some(3)));
+        let stuck: Result<(), _> = s.walk(|_| Continue(()));
+        assert_eq!(stuck, Err(NoProgress { at: 3 }));
+    }
 }

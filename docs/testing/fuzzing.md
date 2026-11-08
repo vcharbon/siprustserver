@@ -33,6 +33,7 @@ Ordered by what a panic costs (ADR-0051 §5): `just fuzz-list` prints them in th
 | `call_snapshot` | the call body decode; a decoded call writes back to itself | restarts the replication task |
 | `message_roundtrip` | every entry point of the message lane's probe, and parse → render → parse: the rendering reads back to itself and passes the write check | drops one datagram (contained) |
 | `must_accept` | a value of one header's grammar or of a start line (the conformance suite's generator), its derivation steered by the input, in a whole message: the production path and the typed reader read it, unless a stated rule refuses that form | drops one datagram; a failure is a false refusal |
+| `no_progress` | the input through the message lane's probe, each of its lines as a header line of a request through the probe again, and each line through the text readers (list splits, escapes, reason keys, MSCML, multipart framing): no reader's step stalls | drops one datagram; a failure is a reader that would have spun |
 | `multipart` | a multipart body under its boundary: each part starts after a CRLF-ended delimiter line and ends at the next one's CRLF, no content holds a delimiter, nothing is read past the close, and the parts composed again read back as themselves | drops one datagram |
 | `credentials` | each line as each header of the authentication family; an accepted Authorization or Proxy-Authorization reads, and the rendering reads back to itself and passes the write check | drops one datagram |
 
@@ -67,6 +68,10 @@ What a run checks beside panics:
   code, and its audited exceptions are socket calls the simulated fabric never makes.
 - **Arithmetic overflow and debug assertions**: on, as in the lanes.
 - **Recursion driven by input**: each case runs on the lanes' small stack.
+- **A reader that stalls**: a loop of `sip-message` over its input runs on the bounded cursor
+  (ADR-0057 §5), whose step that moves no byte on is a recoverable error in a release build
+  and a panic under `cfg(fuzzing)`, which cargo-fuzz sets: every target reports one, and
+  `no_progress` aims at it.
 - **Accepted means readable**: a message the strict parser accepted reads through the typed
   reader of every header ingress vouches for (`no_panic_lane/readable.rs`), and so does one a
   parser stating every generic exemption accepted. The lane, its structured corpus and

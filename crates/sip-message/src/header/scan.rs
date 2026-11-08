@@ -6,7 +6,10 @@
 //! to a slice lands on a char boundary. Indices may run past the end — the
 //! slicing helpers clamp.
 
+use std::ops::ControlFlow::{Break, Continue};
+
 use crate::char_class::is_token_char;
+use crate::cursor::walk;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
@@ -15,11 +18,13 @@ pub(crate) fn byte_at(s: &[u8], i: usize) -> Option<u8> {
     s.get(i).copied()
 }
 
-pub(crate) fn skip_ws(s: &[u8], mut i: usize) -> usize {
-    while matches!(byte_at(s, i), Some(b' ' | b'\t')) {
-        i += 1;
-    }
-    i
+pub(crate) fn skip_ws(s: &[u8], i: usize) -> usize {
+    i + run(s, i, |b| matches!(b, b' ' | b'\t'))
+}
+
+/// How many bytes from `i` on are of `class`.
+fn run(s: &[u8], i: usize, class: impl Fn(u8) -> bool) -> usize {
+    s.get(i..).map_or(0, |rest| rest.iter().take_while(|&&b| class(b)).count())
 }
 
 pub(crate) fn index_of(s: &[u8], needle: u8, from: usize) -> Option<usize> {
@@ -68,29 +73,30 @@ pub(crate) fn sub_lower(base: &SipStr, a: usize, b: usize) -> SipStr {
 /// Read a quoted string whose opening `"` sits at byte `i`. Yields the
 /// UNESCAPED text and the position after the closing `"`. An escape-free run —
 /// the common case — comes back as a span; only a `\` forces an owned copy.
-pub(crate) fn read_quoted(base: &SipStr, mut i: usize) -> (SipStr, usize) {
+pub(crate) fn read_quoted(base: &SipStr, open: usize) -> (SipStr, usize) {
     let s = base.as_str();
     let bytes = s.as_bytes();
-    i += 1;
     let mut rebuilt: Option<String> = None;
-    let mut run_start = i;
-    while let Some(c) = byte_at(bytes, i) {
+    let mut run_start = open + 1;
+    let read = walk(bytes, open + 1, |i| {
+        let Some(c) = byte_at(bytes, i) else {
+            return Break((finish_quoted(base, rebuilt.take(), s, run_start, bytes.len()), i));
+        };
         let escaped =
             if c == b'\\' { s.get(i + 1..).and_then(|rest| rest.chars().next()) } else { None };
         if let Some(esc) = escaped {
             let out = rebuilt.get_or_insert_with(String::new);
             out.push_str(clamped(s, run_start, i));
             out.push(esc);
-            i += 1 + esc.len_utf8();
-            run_start = i;
-            continue;
+            run_start = i + 1 + esc.len_utf8();
+            return Continue(run_start);
         }
         if c == b'"' {
-            return (finish_quoted(base, rebuilt, s, run_start, i), i + 1);
+            return Break((finish_quoted(base, rebuilt.take(), s, run_start, i), i + 1));
         }
-        i += 1;
-    }
-    (finish_quoted(base, rebuilt, s, run_start, bytes.len()), i)
+        Continue(i + 1)
+    });
+    read.unwrap_or_else(|stall| (SipStr::EMPTY, stall.at))
 }
 
 /// The position after the `"` closing the `quoted-string` opened at byte
@@ -98,28 +104,26 @@ pub(crate) fn read_quoted(base: &SipStr, mut i: usize) -> (SipStr, usize) {
 /// `"` and `\`; a `quoted-pair` escapes one ASCII byte but CR and LF. `None`
 /// when a byte breaks it or nothing closes it.
 pub(crate) fn quoted_close(s: &[u8], open: usize) -> Option<usize> {
-    let mut i = open + 1;
-    loop {
-        match byte_at(s, i)? {
-            b'"' => return Some(i + 1),
-            b'\\' => match byte_at(s, i + 1)? {
-                b'\r' | b'\n' => return None,
-                escaped if escaped.is_ascii() => i += 2,
-                _ => return None,
-            },
-            b'\t' => i += 1,
-            b if b < 0x20 || b == 0x7f => return None,
-            _ => i += 1,
-        }
-    }
+    walk(s, open + 1, |i| match byte_at(s, i) {
+        None => Break(None),
+        Some(b'"') => Break(Some(i + 1)),
+        Some(b'\\') => match byte_at(s, i + 1) {
+            Some(escaped) if escaped.is_ascii() && escaped != b'\r' && escaped != b'\n' => {
+                Continue(i + 2)
+            }
+            _ => Break(None),
+        },
+        Some(b'\t') => Continue(i + 1),
+        Some(b) if b < 0x20 || b == 0x7f => Break(None),
+        Some(_) => Continue(i + 1),
+    })
+    .ok()
+    .flatten()
 }
 
 /// The end of the run of `token` characters (RFC 3261 §25.1) starting at `i`.
-pub(crate) fn token_end(s: &[u8], mut i: usize) -> usize {
-    while byte_at(s, i).is_some_and(is_token_char) {
-        i += 1;
-    }
-    i
+pub(crate) fn token_end(s: &[u8], i: usize) -> usize {
+    i + run(s, i, is_token_char)
 }
 
 fn finish_quoted(
@@ -139,11 +143,8 @@ fn finish_quoted(
 }
 
 /// The end of the ASCII digit run starting at `i`.
-pub(crate) fn digits_end(s: &[u8], mut i: usize) -> usize {
-    while byte_at(s, i).is_some_and(|b| b.is_ascii_digit()) {
-        i += 1;
-    }
-    i
+pub(crate) fn digits_end(s: &[u8], i: usize) -> usize {
+    i + run(s, i, |b| b.is_ascii_digit())
 }
 
 /// A `1*DIGIT` field within the `u32` range. Empty, non-numeric or overflowing

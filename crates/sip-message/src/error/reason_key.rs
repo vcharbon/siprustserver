@@ -30,7 +30,9 @@ pub fn reason_key(reason: &str) -> String {
     let mut word = String::new();
     let mut previous_word = String::new();
     let mut chars = reason.chars();
-    while let Some(c) = chars.next() {
+    // Each step takes one character: at most `len + 1` (ADR-0057 §5).
+    for _ in 0..=reason.len() {
+        let Some(c) = chars.next() else { break };
         match c {
             '"' => {
                 flush(&mut out, &mut word, &mut previous_word);
@@ -75,7 +77,9 @@ fn flush(out: &mut String, word: &mut String, previous_word: &mut String) {
 /// Consume a debug string after its opening quote, up to its closing quote;
 /// `false` when what follows is no debug string (see the module doc).
 fn skip_debug_string(chars: &mut std::str::Chars<'_>) -> bool {
-    while let Some(c) = chars.next() {
+    let left = chars.as_str().len();
+    for _ in 0..=left {
+        let Some(c) = chars.next() else { break };
         match c {
             '\\' => match chars.next() {
                 Some('\\' | '"' | '\'' | 'n' | 'r' | 't' | '0') => {}
@@ -114,7 +118,9 @@ fn skip_unicode_escape(chars: &mut std::str::Chars<'_>) -> bool {
 /// as such; `false` when one of them is none or the span never closes.
 fn skip_bracketed(chars: &mut std::str::Chars<'_>) -> bool {
     let mut depth = 1usize;
-    while let Some(c) = chars.next() {
+    let left = chars.as_str().len();
+    for _ in 0..=left {
+        let Some(c) = chars.next() else { break };
         match c {
             '"' => {
                 if !skip_debug_string(chars) {

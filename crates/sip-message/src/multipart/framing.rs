@@ -8,7 +8,10 @@
 //! stops at the close delimiter, and a body that never closes keeps its last
 //! part, up to the body's end.
 
+use std::ops::ControlFlow::{Break, Continue};
+
 use super::entity::PartHead;
+use crate::cursor::{walk, NoProgress};
 
 /// One part of a framed body as [`framed_parts`] finds it: its head read, and
 /// where its content lies.
@@ -71,35 +74,32 @@ fn next_delimiter(
     from: usize,
     crlf_from: usize,
 ) -> Option<(usize, Delimiter)> {
-    let mut search = from;
-    loop {
-        let at = search + memchr::memmem::find(body.get(search..)?, dash_boundary)?;
+    let found = walk(body, from, |search| {
+        let next = body.get(search..).and_then(|rest| memchr::memmem::find(rest, dash_boundary));
+        let Some(at) = next.map(|offset| search + offset) else { return Break(None) };
         let starts_a_line =
             at == 0 || (at >= crlf_from + 2 && body.get(at - 2..at) == Some(b"\r\n".as_slice()));
-        if starts_a_line {
-            if let Some(delimiter) = delimiter_at(body, at, dash_boundary.len()) {
-                return Some((at, delimiter));
-            }
+        match delimiter_at(body, at, dash_boundary.len()).filter(|_| starts_a_line) {
+            Some(delimiter) => Break(Some((at, delimiter))),
+            None => Continue(at + 1),
         }
-        search = at + 1;
-    }
+    });
+    found.ok().flatten()
 }
 
 /// The delimiters of `body` under `boundary`: where each line starts, the
 /// close delimiter last when the body has one.
-fn delimiters(body: &[u8], dash_boundary: &[u8]) -> Vec<(usize, Delimiter)> {
+fn delimiters(body: &[u8], dash_boundary: &[u8]) -> Result<Vec<(usize, Delimiter)>, NoProgress> {
     let mut out = Vec::new();
-    let Some(first) = next_delimiter(body, dash_boundary, 0, 0) else {
-        return out;
-    };
-    out.push(first);
-    let mut delimiter = first.1;
-    while let Delimiter::Open { next: start } = delimiter {
-        let Some(found) = next_delimiter(body, dash_boundary, start, start) else { break };
+    walk(body, 0, |from| {
+        let Some(found) = next_delimiter(body, dash_boundary, from, from) else { return Break(()) };
         out.push(found);
-        delimiter = found.1;
-    }
-    out
+        match found.1 {
+            Delimiter::Open { next } => Continue(next),
+            Delimiter::Close => Break(()),
+        }
+    })?;
+    Ok(out)
 }
 
 /// The byte range of every part's block: from the end of its delimiter line
@@ -109,7 +109,7 @@ fn blocks(body: &[u8], boundary: &[u8]) -> Vec<std::ops::Range<usize>> {
         return Vec::new();
     }
     let dash_boundary = [b"--".as_slice(), boundary].concat();
-    let found = delimiters(body, &dash_boundary);
+    let Ok(found) = delimiters(body, &dash_boundary) else { return Vec::new() };
     let starts = found.iter().filter_map(|(_, d)| match d {
         Delimiter::Open { next } => Some(*next),
         Delimiter::Close => None,
@@ -133,7 +133,7 @@ pub(crate) fn frames_cleanly(body: &[u8], boundary: &str) -> bool {
 /// one to `steps`.
 fn frames_cleanly_counting(body: &[u8], boundary: &str, steps: &mut usize) -> bool {
     let dash_boundary = [b"--".as_slice(), boundary.as_bytes()].concat();
-    let found = delimiters(body, &dash_boundary);
+    let Ok(found) = delimiters(body, &dash_boundary) else { return false };
     if found.first().is_some_and(|(_, d)| *d == Delimiter::Close) {
         return false;
     }
@@ -142,16 +142,17 @@ fn frames_cleanly_counting(body: &[u8], boundary: &str, steps: &mut usize) -> bo
     let line_starts = std::iter::once(0)
         .chain(memchr::memmem::find_iter(body, b"\r\n").map(|at| at + 2))
         .take_while(|&at| at <= close);
-    let mut known = found.iter().map(|(at, _)| *at).peekable();
+    let mut known = 0;
     for at in line_starts {
         *steps += 1;
         if !body.get(at..).is_some_and(|rest| rest.starts_with(&dash_boundary)) {
             continue;
         }
-        while known.next_if(|&line| line < at).is_some() {
-            *steps += 1;
-        }
-        if known.peek() != Some(&at) {
+        let ahead = found.get(known..).unwrap_or_default();
+        let passed = ahead.iter().take_while(|(line, _)| *line < at).count();
+        *steps += passed;
+        known += passed;
+        if found.get(known).map(|(line, _)| *line) != Some(at) {
             return false;
         }
     }

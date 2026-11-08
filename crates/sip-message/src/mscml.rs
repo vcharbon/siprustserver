@@ -12,6 +12,9 @@
 //! and processing instructions, and reads attribute values in either XML
 //! quote, raw (entities are not expanded).
 
+use std::ops::ControlFlow::{Break, Continue};
+
+use crate::cursor::{items, walk};
 use crate::header::{HeaderValue, MediaType};
 use crate::multipart::entity_parts;
 use crate::sip_str::SipStr;
@@ -54,7 +57,7 @@ pub fn is_mscml(content_type: &str) -> bool {
 /// The request an MSCML body holds, or `None` where its root holds no
 /// `<request>` with a command element.
 pub fn request(xml: &str) -> Option<Request> {
-    let mut tags = Tags::new(xml);
+    let mut tags = tags(xml);
     let wrapper = body_element(&mut tags)?;
     if wrapper.name != "request" || wrapper.empty {
         return None;
@@ -168,11 +171,11 @@ fn quote_for(value: &str, preferred: char) -> char {
 
 /// The root's `<response>` element, where the body holds one.
 fn response_element(xml: &str) -> Option<Tag<'_>> {
-    body_element(&mut Tags::new(xml)).filter(|tag| tag.name == "response")
+    body_element(&mut tags(xml)).filter(|tag| tag.name == "response")
 }
 
 /// The element the `<MediaServerControl>` root holds — its first child.
-fn body_element<'a>(tags: &mut Tags<'a>) -> Option<Tag<'a>> {
+fn body_element<'a>(tags: &mut impl Iterator<Item = Tag<'a>>) -> Option<Tag<'a>> {
     tags.next().filter(|tag| tag.name == ROOT && !tag.close && !tag.empty)?;
     tags.next().filter(|tag| !tag.close)
 }
@@ -194,63 +197,63 @@ struct Tag<'a> {
 /// The element tags of a body in document order; the XML declaration,
 /// processing instructions, comments, CDATA sections and a DOCTYPE are
 /// skipped, and so is character data.
-struct Tags<'a> {
-    xml: &'a str,
-    at: usize,
+fn tags(xml: &str) -> impl Iterator<Item = Tag<'_>> {
+    items(xml.as_bytes(), move |at| tag_from(xml, at))
 }
 
-impl<'a> Tags<'a> {
-    fn new(xml: &'a str) -> Self {
-        Tags { xml, at: 0 }
-    }
+/// The first element tag of `xml` at or after byte `from`, and the position
+/// after it.
+fn tag_from(xml: &str, from: usize) -> Option<(Tag<'_>, usize)> {
+    let read = walk(xml.as_bytes(), from, |at| {
+        let Some(open) = xml.get(at..).and_then(|rest| rest.find('<')).map(|p| at + p) else {
+            return Break(None);
+        };
+        let rest = xml.get(open..).unwrap_or_default();
+        let skip = [("<?", "?>"), ("<!--", "-->"), ("<![CDATA[", "]]>"), ("<!", ">")]
+            .into_iter()
+            .find_map(|(lead, end)| Some((lead, end, rest.strip_prefix(lead)?)));
+        match skip {
+            Some((lead, end, inner)) => match inner.find(end) {
+                Some(p) => Continue(open + lead.len() + p + end.len()),
+                None => Break(None),
+            },
+            None => Break(element_tag(xml, open)),
+        }
+    });
+    read.ok().flatten()
 }
 
-impl<'a> Iterator for Tags<'a> {
-    type Item = Tag<'a>;
-
-    fn next(&mut self) -> Option<Tag<'a>> {
-        let xml = self.xml;
-        loop {
-            let open = self.at + xml.get(self.at..)?.find('<')?;
-            let rest = xml.get(open..)?;
-            let skip = [("<?", "?>"), ("<!--", "-->"), ("<![CDATA[", "]]>"), ("<!", ">")]
-                .into_iter()
-                .find_map(|(lead, end)| Some((lead, end, rest.strip_prefix(lead)?)));
-            if let Some((lead, end, inner)) = skip {
-                self.at = open + lead.len() + inner.find(end)? + end.len();
-                continue;
+/// The element tag whose `<` sits at byte `open`, and the position after it.
+fn element_tag(xml: &str, open: usize) -> Option<(Tag<'_>, usize)> {
+    let close = xml.get(open..)?.starts_with("</");
+    let name_start = open + if close { 2 } else { 1 };
+    let name_end = name_start
+        + xml.get(name_start..)?.find(|c: char| is_xml_space(c) || c == '/' || c == '>')?;
+    // A `>` inside a quoted attribute value does not end the tag.
+    let mut quote = None;
+    let mut gt = None;
+    for (offset, c) in xml.get(name_end..)?.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '>') => {
+                gt = Some(name_end + offset);
+                break;
             }
-            let close = rest.starts_with("</");
-            let name_start = open + if close { 2 } else { 1 };
-            let name_end = name_start
-                + xml.get(name_start..)?.find(|c: char| is_xml_space(c) || c == '/' || c == '>')?;
-            // A `>` inside a quoted attribute value does not end the tag.
-            let mut quote = None;
-            let mut gt = None;
-            for (offset, c) in xml.get(name_end..)?.char_indices() {
-                match (quote, c) {
-                    (Some(q), c) if c == q => quote = None,
-                    (Some(_), _) => {}
-                    (None, '"' | '\'') => quote = Some(c),
-                    (None, '>') => {
-                        gt = Some(name_end + offset);
-                        break;
-                    }
-                    (None, _) => {}
-                }
-            }
-            let gt = gt?;
-            let empty = !close && xml.get(..gt)?.ends_with('/');
-            self.at = gt + 1;
-            return Some(Tag {
-                name: xml.get(name_start..name_end)?,
-                name_end,
-                attrs_end: if empty { gt.checked_sub(1)? } else { gt },
-                close,
-                empty,
-            });
+            (None, _) => {}
         }
     }
+    let gt = gt?;
+    let empty = !close && xml.get(..gt)?.ends_with('/');
+    let tag = Tag {
+        name: xml.get(name_start..name_end)?,
+        name_end,
+        attrs_end: if empty { gt.checked_sub(1)? } else { gt },
+        close,
+        empty,
+    };
+    Some((tag, gt + 1))
 }
 
 /// One attribute of a tag, located in the body.
@@ -269,41 +272,40 @@ struct Attribute<'a> {
 /// XML white space before each attribute (XML 1.0 §3.1 `STag`), around `=`
 /// optional. The walk stops at the first attribute off that shape.
 fn attribute<'a>(xml: &'a str, tag: &Tag<'_>, name: &str) -> Option<Attribute<'a>> {
-    let end = tag.attrs_end;
+    let read =
+        walk(xml.as_bytes(), tag.name_end, |at| match attribute_at(xml, tag.attrs_end, at) {
+            None => Break(None),
+            Some((attr_name, attr)) if attr_name == name => Break(Some(attr)),
+            Some((_, attr)) => Continue(attr.value_end + 1),
+        });
+    read.ok().flatten()
+}
+
+/// The attribute whose leading white space starts at byte `start` of a tag
+/// whose attributes end at `end`, and its name.
+fn attribute_at(xml: &str, end: usize, start: usize) -> Option<(&str, Attribute<'_>)> {
     let within = |from: usize| xml.get(from..end);
     let lead_ws =
         |from: usize| within(from).map(|s| s.len() - s.trim_start_matches(is_xml_space).len());
-    let mut at = tag.name_end;
-    loop {
-        let start = at;
-        let space = lead_ws(at)?;
-        at += space;
-        if at >= end || space == 0 {
-            return None;
-        }
-        let name_end = at + within(at)?.find(|c: char| is_xml_space(c) || c == '=')?;
-        let attr_name = xml.get(at..name_end)?;
-        at = name_end;
-        at += lead_ws(at)?;
-        if !within(at)?.starts_with('=') {
-            return None;
-        }
-        at += 1;
-        at += lead_ws(at)?;
-        let quote = within(at)?.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-        let value_start = at + 1;
-        let value_end = value_start + within(value_start)?.find(quote)?;
-        at = value_end + 1;
-        if attr_name == name {
-            return Some(Attribute {
-                start,
-                value: xml.get(value_start..value_end)?,
-                value_start,
-                value_end,
-                quote,
-            });
-        }
+    let space = lead_ws(start)?;
+    let mut at = start + space;
+    if at >= end || space == 0 {
+        return None;
     }
+    let name_end = at + within(at)?.find(|c: char| is_xml_space(c) || c == '=')?;
+    let attr_name = xml.get(at..name_end)?;
+    at = name_end;
+    at += lead_ws(at)?;
+    if !within(at)?.starts_with('=') {
+        return None;
+    }
+    at += 1;
+    at += lead_ws(at)?;
+    let quote = within(at)?.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let value_start = at + 1;
+    let value_end = value_start + within(value_start)?.find(quote)?;
+    let value = xml.get(value_start..value_end)?;
+    Some((attr_name, Attribute { start, value, value_start, value_end, quote }))
 }
 
 #[cfg(test)]

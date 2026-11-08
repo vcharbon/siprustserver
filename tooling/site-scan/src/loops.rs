@@ -4,7 +4,9 @@
 //! collection's `len()` (an immutable local bound to one of those is one too;
 //! a wide integer type's `MAX` is none), where it is iterated: in a `for`, as a
 //! method's receiver or as an iterator argument, itself or through the local
-//! it is bound to. A macro's own body is not read.
+//! it is bound to. A macro's own body is not read, nor the initializer of a
+//! `const` or `static` item or an inline `const` block: the compiler
+//! evaluates those, and its evaluation limit ends them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -149,6 +151,16 @@ impl<'ast> Visit<'ast> for Loops<'_> {
             visit::visit_item(self, item);
         }
     }
+
+    fn visit_item_const(&mut self, _: &'ast syn::ItemConst) {}
+
+    fn visit_item_static(&mut self, _: &'ast syn::ItemStatic) {}
+
+    fn visit_impl_item_const(&mut self, _: &'ast syn::ImplItemConst) {}
+
+    fn visit_trait_item_const(&mut self, _: &'ast syn::TraitItemConst) {}
+
+    fn visit_expr_const(&mut self, _: &'ast syn::ExprConst) {}
 
     fn visit_item_impl(&mut self, imp: &'ast ItemImpl) {
         let trait_ = imp.trait_.as_ref().and_then(|(_, path, _)| path.segments.last());

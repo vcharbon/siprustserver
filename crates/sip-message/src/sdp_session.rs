@@ -171,13 +171,9 @@ fn drop_line_end(out: &mut Vec<u8>) {
 /// The first slot of `queue` still free, the taken ones ahead of it dropped.
 fn first_free(queue: Option<&mut VecDeque<usize>>, slots: &[Option<u32>]) -> Option<usize> {
     let queue = queue?;
-    while let Some(&i) = queue.front() {
-        if slots.get(i) == Some(&None) {
-            return Some(i);
-        }
-        queue.pop_front();
-    }
-    None
+    let taken = queue.iter().take_while(|&&i| slots.get(i) != Some(&None)).count();
+    queue.drain(..taken);
+    queue.front().copied()
 }
 
 /// `sdp`, described by the far party of a dialog whose last restatement
