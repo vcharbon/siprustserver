@@ -90,6 +90,15 @@ fn elapsed_past_the_last_doubling_adds_the_steady_wait_per_rung() {
     assert!(far > Duration::from_secs(1 << 40), "{far:?}");
 }
 
+/// A ladder restored on the last rung a `u32` counts has no rung after it.
+#[test]
+fn a_ladder_restored_on_the_last_rung_advances_no_further() {
+    let rfc = Schedule::rfc(Class::InviteClient).with_give_up(Duration::MAX);
+    let mut ladder = Ladder::at_rung(rfc, u32::MAX);
+    assert_eq!(ladder.advance(), None);
+    assert_eq!(ladder.rung(), u32::MAX);
+}
+
 /// A restored record keeps a rung index alone; the ladder it rebuilds is the one
 /// that was running.
 #[test]
@@ -247,6 +256,22 @@ mod authored {
         // are "sent once" and "an authored ladder with no gaps".
         assert_ne!(s, Schedule::rfc(Class::InviteClient));
         assert_ne!(s, Schedule::exact(&[], None));
+    }
+
+    #[test]
+    fn an_exact_schedule_s_elapsed_is_its_gaps_then_its_last_per_rung() {
+        let s = Schedule::exact(&[m(479), m(2100), m(300)], Some(m(60_000)));
+        let walked = |n: u32| (1..=n).filter_map(|k| s.interval(k)).sum::<Duration>();
+        for n in [0, 1, 3, 4, 10] {
+            assert_eq!(s.elapsed_at(n), walked(n), "rung {n}");
+        }
+        assert_eq!(Schedule::exact(&[], None).elapsed_at(5), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_ladder_restored_past_the_longest_duration_advances_no_further() {
+        let s = Schedule::exact(&[Duration::MAX], Some(Duration::MAX));
+        assert_eq!(Ladder::at_rung(s, 2).advance(), None);
     }
 
     #[test]

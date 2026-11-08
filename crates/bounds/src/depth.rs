@@ -29,7 +29,7 @@ impl fmt::Display for TooDeep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TooDeep::Depth { max } => write!(f, "nested past {max} levels"),
-            TooDeep::Stack { left } => write!(f, "{left} bytes of stack left"),
+            TooDeep::Stack { left } => write!(f, "with {left} bytes of stack left"),
         }
     }
 }

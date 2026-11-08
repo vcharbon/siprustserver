@@ -1,7 +1,7 @@
-//! The recursion sites of a call graph (ADR-0057 §5): each strongly
-//! connected component holding a cycle, direct or mutual, none of whose
-//! functions takes a depth guard. A site sits on its first function by file
-//! and line.
+//! The recursion sites of a call graph (ADR-0057 §5): a cycle, direct or
+//! mutual, through no function that takes a depth guard. Each strongly
+//! connected component of the graph without the guarded functions that
+//! holds a cycle is one site, on its first function by file and line.
 
 use std::collections::BTreeMap;
 
@@ -11,19 +11,19 @@ use crate::site::{Set, Site};
 
 /// The unguarded cycles of `nodes`.
 pub fn sites(nodes: &BTreeMap<FnKey, Node>) -> Vec<Site> {
-    components(nodes)
+    let unguarded: BTreeMap<&FnKey, &Node> = nodes.iter().filter(|(_, n)| !n.guarded).collect();
+    components(&unguarded)
         .into_iter()
         .filter(|c| match c.as_slice() {
-            [one] => nodes.get(one).is_some_and(|n| n.calls.contains(one)),
+            [one] => unguarded.get(one).is_some_and(|n| n.calls.contains(*one)),
             _ => true,
         })
-        .filter(|c| !c.iter().any(|k| nodes.get(k).is_some_and(|n| n.guarded)))
         .filter_map(|c| {
-            let mut names: Vec<String> = c.iter().map(name).collect();
+            let mut names: Vec<String> = c.iter().map(|k| name(k)).collect();
             names.sort();
             let first = c
                 .iter()
-                .filter_map(|k| nodes.get(k))
+                .filter_map(|k| unguarded.get(k))
                 .min_by_key(|n| (n.file.clone(), n.span.start().line, n.span.start().column))?;
             let message = format!("recursion with no depth guard: {}", names.join(" -> "));
             Some(Site::at(&first.file, first.span, Set::Recursion, message))
@@ -38,7 +38,7 @@ fn name(key: &FnKey) -> String {
         FnKey::Method((m, t), via, f) => {
             let mut p = m.clone();
             p.push(match via {
-                Some(tr) => format!("<{t} as {tr}>"),
+                Some((_, tr)) => format!("<{t} as {tr}>"),
                 None => t.clone(),
             });
             (p, f.clone())
@@ -48,9 +48,10 @@ fn name(key: &FnKey) -> String {
     parts.join("::")
 }
 
-/// The strongly connected components of `nodes` (Tarjan's, iterative).
-fn components(nodes: &BTreeMap<FnKey, Node>) -> Vec<Vec<FnKey>> {
-    let keys: Vec<&FnKey> = nodes.keys().collect();
+/// The strongly connected components of `nodes` (Tarjan's, iterative), an
+/// edge to a function outside `nodes` left out.
+fn components<'a>(nodes: &BTreeMap<&'a FnKey, &Node>) -> Vec<Vec<&'a FnKey>> {
+    let keys: Vec<&FnKey> = nodes.keys().copied().collect();
     let index_of: BTreeMap<&FnKey, usize> = keys.iter().enumerate().map(|(i, k)| (*k, i)).collect();
     let edges: Vec<Vec<usize>> = keys
         .iter()
@@ -97,7 +98,7 @@ fn components(nodes: &BTreeMap<FnKey, Node>) -> Vec<Vec<FnKey>> {
                 let mut comp = Vec::new();
                 while let Some(w) = stack.pop() {
                     on_stack[w] = false;
-                    comp.push(keys[w].clone());
+                    comp.push(keys[w]);
                     if w == v {
                         break;
                     }

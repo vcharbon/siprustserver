@@ -6,8 +6,9 @@ crate that depends on `b2bua-sdk` and not on `b2bua-core`, as the B2BUA's own
 crates do), `bounds` aside: its `bounded` is the loop the set relies on.
 Recursion sites count in every tiered crate. The scanner prints one JSON
 line per site, `reason` `site-scan`, with the span fields of
-a clippy span; the pass records them after clippy's lines, and `--json`
-reads both back.
+a clippy span, and closes a complete scan with a `site-scan-done` line; the
+pass records them after clippy's lines, and `--json` reads both back, a
+record with no closing line refused.
 """
 import json
 import os
@@ -16,7 +17,7 @@ import subprocess
 from panic_sites_lints import SITE_SETS
 
 SDK, CORE, BOUNDS = "b2bua-sdk", "b2bua-core", "bounds"
-REASON = "site-scan"
+REASON, DONE = "site-scan", "site-scan-done"
 MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tooling", "site-scan",
                         "Cargo.toml")
 LOOP, RECURSION = (f"site::{s}" for s in SITE_SETS)
@@ -34,9 +35,15 @@ def run(root, crates):
     `root`."""
     request = {"root": root, "crates": [
         {"name": c.name, "roots": c.roots, "sets": sets_of(c)} for c in crates]}
-    out = subprocess.run(["cargo", "run", "--quiet", "--manifest-path", MANIFEST],
+    out = subprocess.run(["cargo", "run", "--quiet", "--locked", "--manifest-path", MANIFEST],
                          input=json.dumps(request), cwd=root, capture_output=True, text=True)
     return out.returncode, out.stdout, out.stderr
+
+
+def complete(text):
+    """Whether `text` holds a complete scan's closing line."""
+    return any(raw.startswith("{") and json.loads(raw).get("reason") == DONE
+               for raw in text.splitlines())
 
 
 def sites_of(text, crates):

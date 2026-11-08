@@ -1,7 +1,7 @@
 //! The limiter refused a route on the call's own turn: the `/call/failure`
-//! consult it raises, awaited, and the treatment that answers it applied
-//! ([`failover_fold`]) — a failover route applied as the route was, or the
-//! call's final.
+//! consult it raises, awaited, and the treatment that answers it
+//! ([`failover_fold`]) — a failover route, which `apply_route` applies as it
+//! applied the refused one, or the call's final.
 
 use call::Call;
 use sip_clock::Clock;
@@ -10,7 +10,6 @@ use sip_message::SipRequest;
 use crate::config::B2buaConfig;
 use crate::decision::failover_fold::{self, Consult, Failover};
 use crate::decision::{CallTreatment, DeadlineDecisionEngine};
-
 use crate::setup_budget::SetupBudget;
 
 /// The limiter refused this route: consult `/call/failure` for a failover

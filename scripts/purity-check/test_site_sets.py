@@ -15,7 +15,8 @@ from workspace import SCRIPTS, Workspace
 
 BASE_LINTS = ('DENIED = ()\nPURE_DENIED = ()\n'
               'LISTS = ("disallowed_macros", "disallowed_methods", "disallowed_types")\n')
-SETS_LINTS = BASE_LINTS + 'SITE_SETS = ("loop", "recursion")\n'
+SETS_LINTS = BASE_LINTS + 'SITE_SETS = ("loop", "recursion")\nSITE_RULES = 1\n'
+OLD_RULES_LINTS = BASE_LINTS + 'SITE_SETS = ("loop", "recursion")\nSITE_RULES = 0\n'
 
 
 def site(crate, set_, file, line, message="`while`"):
@@ -74,6 +75,16 @@ class Sets(Case):
         self.assertIn("crates/svc/src/lib.rs has 1 sites (1 loop)", out)
         self.assertNotIn("crates/b2bua/src/lib.rs", out)
 
+    def test_a_record_with_no_complete_scan_is_refused(self):
+        ws = self.workspace(HEADER + "crates/a/src/lib.rs 1\n", crates=(("a", "pure"),))
+        ws.write("crates/a/src/lib.rs", ZERO_PURE + LIB)
+        ws.write("pass.json", site("a", "loop", "crates/a/src/lib.rs", 3) + "\n")
+        ws.commit()
+        rc, out = ws.run(SCRIPT, "--update", "--json", os.path.join(ws.root, "pass.json"))
+        self.assertEqual(rc, 1)
+        self.assertIn("holds no complete site scan", out)
+        self.assertEqual(ws.read("panic-sites.allow"), HEADER + "crates/a/src/lib.rs 1\n")
+
     def test_the_bounds_crate_is_outside_the_loop_set(self):
         ws = self.workspace(crates=(("bounds", "pure"),))
         ws.write("crates/bounds/src/lib.rs", ZERO_PURE + LIB)
@@ -98,6 +109,12 @@ class Revealed(Case):
         self.assertEqual(ws.read("panic-sites.allow"), HEADER + "crates/a/src/lib.rs 2\n")
         rc, out = self.check(ws, sites)
         self.assertEqual(rc, 0, out)
+
+    def test_a_base_on_older_scanner_rules_reveals_their_sites(self):
+        ws, sites = self.sites(OLD_RULES_LINTS)
+        rc, out = self.check(ws, sites, "--update")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(ws.read("panic-sites.allow"), HEADER + "crates/a/src/lib.rs 2\n")
 
     def test_a_base_counting_the_site_sets_lets_no_new_site_in(self):
         ws, sites = self.sites(SETS_LINTS)

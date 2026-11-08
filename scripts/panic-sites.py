@@ -37,8 +37,8 @@ Beside the pass, the syntax scanner tooling/site-scan counts two site sets
 built on the SDK (`loop`, `while`, a hand-written `Iterator::next`, an
 infinite iterator's constructor, an iterated range whose end is neither a
 constant nor a `len()`), and the recursion sites of every tiered crate (a
-call-graph cycle resolved by path, none of whose functions takes a
-`bounds::Depth` and calls `descend`). Their sites count in the same
+call-graph cycle resolved by path through no function that takes a
+`bounds::Depth` and calls `descend` on it). Their sites count in the same
 allowlist, as `site::loop` and `site::recursion`; no attribute exempts one.
 
 The allowlist (`panic-sites.allow` at the root of DIR's repository) holds
@@ -603,6 +603,8 @@ def run_pass(root, crates, members, json_file, record=None, untiered=()):
                 f.write(text)
     found, errors = findings_of(text, crates)
     found = expected(root, found) + scanned_of(text, crates)
+    if json_file and not scan.complete(text):
+        scan_errors.append(f"{json_file} holds no complete site scan (no `{scan.DONE}` line)")
     errors += scan_errors
     roles = unnamed_roles(text, untiered)
     denied = [f for f in found if f.level == "error"]

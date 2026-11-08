@@ -146,26 +146,31 @@ syntax (`tooling/site-scan`, stable toolchain; clippy counts neither) in the
 same allowlist as the panic set:
 
 - **loop sites**, in the pure tier and in services built on the SDK: `loop`,
-  `while`, each `Iterator::next` written by hand, the constructors of infinite
-  iterators (`iter::repeat`, `repeat_with`, `successors`, `from_fn`, `cycle`),
-  and a range (or `iter::repeat_n`) whose end is neither a constant nor a
-  collection's `len()`, an immutable local bound to one of those included. A
-  loop is a `for` over a finite collection or such a range, or the helper
-  `bounds::bounded(max, …)`, which charges one unit per iteration and returns
-  an error past `max`; the `bounds` crate holding it is outside the set. With
-  §2's caps, a turn's work is bounded. The shells' event loops
+  `while`, each `Iterator::next` or `next_back` written by hand, the
+  constructors of infinite iterators (`iter::repeat`, `repeat_with`,
+  `successors`, `from_fn`, `cycle`), and an iterated range (or `iter::repeat_n`)
+  whose end is neither a constant nor a collection's `len()`, an immutable
+  local bound to one of those included and a wide integer type's `MAX`
+  excluded. A loop is a `for` over a finite collection or such a range, or the
+  helper `bounds::bounded(max, …)`, which charges one unit per iteration and
+  returns an error past `max`; the `bounds` crate holding it is outside the
+  set. With §2's caps, a turn's work is bounded. The shells' event loops
   (`loop { select! }`) belong to no call and are not loop sites;
 - **recursion sites**, in every tiered crate: a cycle in a crate's call graph,
-  direct or mutual, resolved by path: a path naming a function of the crate,
-  called or passed as a value, and a method called on `self` are its edges. A
-  recursion is allowed only behind a depth guard, `bounds::Depth`, which returns
-  an error past its maximum depth or when `stacker::remaining_stack()` falls
-  below a margin: a function on the cycle takes one and calls `descend`. Each
-  guarded site has a test at its maximum depth. The rule chain runs one rule
-  per event and no rule calls the chain, so `dyn` rule dispatch carries no
-  recursion; other calls through `dyn`, function pointers, a method called on
-  another receiver, a macro's own body and drop glue are outside the scanner
-  and inside review.
+  direct or mutual, resolved by path: a path naming a function of the crate
+  (`Trait::f` and `<T as Trait>::f` included), called or passed as a value,
+  and a method called on `self` are its edges, a call through a trait reaching
+  its default and every implementor's own. A recursion is allowed only behind
+  a depth guard, `bounds::Depth`, which returns an error past its maximum
+  depth or when `stacker::remaining_stack()` falls below a margin: a function
+  on each cycle takes one and calls `descend` on it. Each guarded site has a
+  test at its maximum depth. The rule chain runs one rule per event and no
+  rule calls the chain, so `dyn` rule dispatch carries no recursion; other
+  calls through `dyn`, function pointers, a method called on another receiver
+  and drop glue are outside the scanner and inside review.
+
+A macro's own body is outside the scanner for both sets; its arguments are
+read where they parse as expressions.
 
 In `sip-message`, a loop over the input is a `for` over an iterator of it, or
 the bounded cursor: at most `len + 1` iterations, each consuming at least one

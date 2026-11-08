@@ -25,6 +25,8 @@ ZERO_PURE = ("#![cfg_attr(not(test), deny(clippy::cast_possible_truncation,"
              " clippy::string_slice, clippy::todo, clippy::unimplemented, clippy::unreachable,"
              " clippy::unwrap_used))]\n")
 HEADER = "# budget\n"
+# The line closing a complete site scan (panic_sites_scan).
+SCAN_DONE = '{"reason": "site-scan-done"}'
 LIB = "pub fn f() {}\n" * 20
 
 
@@ -39,7 +41,7 @@ class Case(unittest.TestCase):
         return ws
 
     def check(self, ws, records, *flags):
-        ws.write("pass.json", "\n".join(records) + "\n")
+        ws.write("pass.json", "\n".join(list(records) + [SCAN_DONE]) + "\n")
         ws.git("add", "pass.json")
         return ws.run(SCRIPT, "--json", os.path.join(ws.root, "pass.json"), *flags)
 

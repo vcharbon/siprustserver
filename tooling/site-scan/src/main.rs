@@ -11,8 +11,9 @@
 //!
 //! Each site is one JSON line on stdout: `reason` `site-scan`, `crate`, `set`,
 //! `file_name`, `line_start`, `line_end`, `column_start`, `column_end` and
-//! `message`. A file that cannot be read or parsed is named on stderr and
-//! the exit code is 1; a malformed request exits 2.
+//! `message`; a last line `{"reason": "site-scan-done"}` closes a scan that
+//! read every file. A file that cannot be read or parsed is named on stderr
+//! and the exit code is 1; a malformed request exits 2.
 
 mod cfg;
 mod cycles;
@@ -31,6 +32,9 @@ use std::process::ExitCode;
 use serde_json::Value;
 
 use crate::scope::Scope;
+
+/// The `reason` of the line closing a complete scan.
+const DONE: &str = "site-scan-done";
 use crate::site::{Set, Site};
 
 fn main() -> ExitCode {
@@ -79,11 +83,13 @@ fn main() -> ExitCode {
     for p in &problems {
         eprintln!("site-scan: {p}");
     }
-    if problems.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
+    if !problems.is_empty() {
+        return ExitCode::from(1);
     }
+    if writeln!(out, "{}", serde_json::json!({"reason": DONE})).is_err() {
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
 }
 
 /// The sites of the targets rooted at `roots`, in `sets`.

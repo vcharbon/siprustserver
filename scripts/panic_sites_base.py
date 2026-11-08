@@ -1,8 +1,9 @@
 """What the base counted, so a site a tightened rule reveals is told from one
 the branch wrote (ADR-0051 §3).
 
-A site is revealed when the base did not count its lint or its site set
-(read from the base's `scripts/panic_sites_lints.py`), or when its message names a list
+A site is revealed when the base did not count its lint or its site set, or
+counted the set under other scanner rules (`SITE_RULES`, all read from the
+base's `scripts/panic_sites_lints.py`), or when its message names a list
 entry of the root clippy.toml that the base did not hold, or held for the
 pure tier only while the site's crate is a shell crate. A base whose lints
 module or clippy.toml cannot be read reveals nothing.
@@ -12,6 +13,7 @@ import os
 import re
 import subprocess
 
+from panic_sites_lints import SITE_RULES
 from panic_sites_lists import PURE_ONLY, entries as list_entries
 
 LINTS_PATH = "scripts/panic_sites_lints.py"
@@ -62,7 +64,8 @@ def counted_lints(text):
     both = tuple(values.get("DENIED", ())) + tuple(values.get("LISTS", ()))
     sets = {f"site::{s}" for s in values.get("SITE_SETS", ())}
     return ({f"clippy::{lint}" for lint in both} | sets,
-            {f"clippy::{lint}" for lint in values.get("PURE_DENIED", ())})
+            {f"clippy::{lint}" for lint in values.get("PURE_DENIED", ())},
+            values.get("SITE_RULES"))
 
 
 class Base:
@@ -93,8 +96,10 @@ class Base:
         """Whether the base counted a site of `code` (a lint, or `site::<set>`)
         saying `message` in a crate of `tier`."""
         if self.lints is not None:
-            both, pure = self.lints
+            both, pure, rules = self.lints
             if code not in both and not (tier == "pure" and code in pure):
+                return False
+            if code.startswith("site::") and rules != SITE_RULES:
                 return False
         key = LIST_KEYS.get(code)
         named = NAMED.search(message) if key else None
@@ -109,9 +114,11 @@ class Base:
     def tightened(self, now_lints):
         """Whether the current rules count anything the base did not."""
         if self.lints is not None and now_lints is not None:
-            for now, then in zip(now_lints, self.lints):
+            for now, then in zip(now_lints, self.lints[:2]):
                 if now - then:
                     return True
+            if self.lints[2] != SITE_RULES:
+                return True
         if self.lists is None or self.now_lists is None:
             return False
         return any(entry not in self.lists or (

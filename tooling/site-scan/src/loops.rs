@@ -1,9 +1,12 @@
 //! The loop sites of a module (ADR-0057 §5): `loop`, `while`, a hand-written
-//! `Iterator::next`, an infinite iterator's constructor, and an iterated range
-//! or `iter::repeat_n` whose end is neither a constant nor a collection's
-//! `len()` (an immutable local bound to one of those is one too).
+//! `Iterator::next` or `next_back`, an infinite iterator's constructor, and a
+//! range or `iter::repeat_n` whose end is neither a constant nor a
+//! collection's `len()` (an immutable local bound to one of those is one too;
+//! a wide integer type's `MAX` is none), where it is iterated: in a `for`, as a
+//! method's receiver or as an iterator argument, itself or through the local
+//! it is bound to. A macro's own body is not read.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -17,11 +20,21 @@ use crate::site::{Set, Site};
 
 const INFINITE: [&str; 4] = ["repeat", "repeat_with", "successors", "from_fn"];
 /// Range methods that read the range without iterating it.
-const READS: [&str; 6] = ["contains", "is_empty", "start", "end", "clone", "into_inner"];
+const READS: [&str; 7] = ["contains", "is_empty", "start", "end", "clone", "into_inner", "len"];
+/// Methods that take an iterator argument and iterate it.
+const TAKES_ITER: [&str; 3] = ["extend", "chain", "eq"];
+/// The integer types whose `MAX` no loop reaches.
+const WIDE: [&str; 8] = ["u32", "u64", "u128", "usize", "i32", "i64", "i128", "isize"];
 
 /// The loop sites of `module`, whose names `scope` holds.
 pub fn sites(module: &Module, scope: &Scope) -> Vec<Site> {
-    let mut v = Loops { file: &module.file, scope, sites: Vec::new(), locals: BTreeSet::new() };
+    let mut v = Loops {
+        file: &module.file,
+        scope,
+        sites: Vec::new(),
+        locals: BTreeSet::new(),
+        ranges: BTreeMap::new(),
+    };
     for item in &module.items {
         v.visit_item(item);
     }
@@ -35,6 +48,8 @@ struct Loops<'a> {
     /// The immutable locals of the function being read bound to a bounded
     /// end.
     locals: BTreeSet<String>,
+    /// The locals bound to a range whose end is not bounded, and its span.
+    ranges: BTreeMap<String, proc_macro2::Span>,
 }
 
 impl Loops<'_> {
@@ -42,13 +57,34 @@ impl Loops<'_> {
         self.sites.push(Site::at(self.file, span, Set::Loop, message.to_string()));
     }
 
-    fn range(&mut self, range: &ExprRange) {
-        let bounded = match (&range.end, &range.limits) {
+    fn bounded_range(&self, range: &ExprRange) -> bool {
+        match (&range.end, &range.limits) {
             (Some(end), _) => bounded(end, &self.locals),
             (None, RangeLimits::HalfOpen(_)) => false,
             (None, RangeLimits::Closed(_)) => true,
-        };
-        if !bounded {
+        }
+    }
+
+    /// `expr` iterated: a site when it is, or names, an unbounded range.
+    fn iterated(&mut self, expr: &Expr) {
+        match peel(expr) {
+            Expr::Range(r) => self.range(r),
+            Expr::Path(p) => {
+                let held =
+                    p.path.get_ident().and_then(|i| self.ranges.get(&i.to_string()).copied());
+                if let Some(span) = held {
+                    self.site(
+                        span,
+                        "a range iterated whose end is neither a constant nor a `len()`",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn range(&mut self, range: &ExprRange) {
+        if !self.bounded_range(range) {
             self.site(
                 range.span(),
                 "a range iterated whose end is neither a constant nor a `len()`",
@@ -62,6 +98,10 @@ impl Loops<'_> {
         if let Some(first) = segs.first() {
             if let Some(full) = self.scope.uses.get(first) {
                 segs.splice(0..1, full.iter().cloned());
+            } else if segs.len() == 1
+                && self.scope.globs.iter().any(|g| g.last().is_some_and(|l| l == "iter"))
+            {
+                segs.insert(0, "iter".to_string());
             }
         }
         match segs.as_slice() {
@@ -74,10 +114,25 @@ impl Loops<'_> {
 impl<'ast> Visit<'ast> for Loops<'_> {
     fn visit_signature(&mut self, sig: &'ast syn::Signature) {
         self.locals.clear();
+        self.ranges.clear();
         visit::visit_signature(self, sig);
     }
 
+    fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+        self.locals.remove(&p.ident.to_string());
+        self.ranges.remove(&p.ident.to_string());
+        visit::visit_pat_ident(self, p);
+    }
+
     fn visit_local(&mut self, local: &'ast syn::Local) {
+        visit::visit_local(self, local);
+        let held = match (&local.pat, local.init.as_ref().map(|i| peel(&i.expr))) {
+            (syn::Pat::Ident(p), Some(Expr::Range(r))) if !self.bounded_range(r) => Some((p, r)),
+            _ => None,
+        };
+        if let Some((p, r)) = held {
+            self.ranges.insert(p.ident.to_string(), r.span());
+        }
         if let syn::Pat::Ident(p) = &local.pat {
             let name = p.ident.to_string();
             let init = local.init.as_ref().filter(|i| i.diverge.is_none());
@@ -87,7 +142,6 @@ impl<'ast> Visit<'ast> for Loops<'_> {
                 self.locals.remove(&name);
             }
         }
-        visit::visit_local(self, local);
     }
 
     fn visit_item(&mut self, item: &'ast Item) {
@@ -97,11 +151,9 @@ impl<'ast> Visit<'ast> for Loops<'_> {
     }
 
     fn visit_item_impl(&mut self, imp: &'ast ItemImpl) {
-        let iterator = imp
-            .trait_
-            .as_ref()
-            .and_then(|(_, path, _)| path.segments.last())
-            .is_some_and(|s| s.ident == "Iterator");
+        let trait_ = imp.trait_.as_ref().and_then(|(_, path, _)| path.segments.last());
+        let iterator = trait_.is_some_and(|s| s.ident == "Iterator");
+        let double_ended = trait_.is_some_and(|s| s.ident == "DoubleEndedIterator");
         for item in &imp.items {
             if let ImplItem::Fn(f) = item {
                 if test_only(&f.attrs) {
@@ -109,6 +161,12 @@ impl<'ast> Visit<'ast> for Loops<'_> {
                 }
                 if iterator && f.sig.ident == "next" {
                     self.site(f.sig.ident.span(), "`Iterator::next` written by hand");
+                }
+                if double_ended && f.sig.ident == "next_back" {
+                    self.site(
+                        f.sig.ident.span(),
+                        "`DoubleEndedIterator::next_back` written by hand",
+                    );
                 }
                 self.visit_impl_item_fn(f);
             } else {
@@ -121,19 +179,18 @@ impl<'ast> Visit<'ast> for Loops<'_> {
         match expr {
             Expr::Loop(l) => self.site(l.loop_token.span, "`loop`"),
             Expr::While(w) => self.site(w.while_token.span, "`while`"),
-            Expr::ForLoop(f) => {
-                if let Expr::Range(r) = peel(&f.expr) {
-                    self.range(r);
-                }
-            }
+            Expr::ForLoop(f) => self.iterated(&f.expr),
             Expr::MethodCall(m) => {
                 if m.method == "cycle" && m.args.is_empty() {
                     self.site(m.method.span(), "`cycle()`, an infinite iterator");
                 }
-                if let Expr::Range(r) = peel(&m.receiver) {
-                    if !READS.contains(&m.method.to_string().as_str()) {
-                        self.range(r);
-                    }
+                let method = m.method.to_string();
+                let capped = method == "take" && m.args.iter().all(|a| bounded(a, &self.locals));
+                if !READS.contains(&method.as_str()) && !capped && method != "zip" {
+                    self.iterated(&m.receiver);
+                }
+                if TAKES_ITER.contains(&method.as_str()) {
+                    m.args.iter().for_each(|arg| self.iterated(arg));
                 }
             }
             Expr::Call(c) => {
@@ -181,6 +238,7 @@ fn bounded(end: &Expr, locals: &BTreeSet<String>) -> bool {
     let b = |e: &Expr| bounded(e, locals);
     match peel(end) {
         Expr::Lit(_) => true,
+        Expr::Path(p) if integer_max(&p.path) => false,
         Expr::Path(p) => p.path.segments.last().is_some_and(|s| {
             let name = s.ident.to_string();
             let constant = name.chars().any(|c| c.is_ascii_uppercase())
@@ -202,4 +260,10 @@ fn bounded(end: &Expr, locals: &BTreeSet<String>) -> bool {
         },
         _ => false,
     }
+}
+
+/// Whether `path` is a wide integer type's `MAX`: a constant no loop reaches.
+fn integer_max(path: &syn::Path) -> bool {
+    let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    matches!(segs.as_slice(), [.., ty, max] if max == "MAX" && WIDE.contains(&ty.as_str()))
 }

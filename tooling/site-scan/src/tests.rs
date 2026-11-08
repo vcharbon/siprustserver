@@ -171,3 +171,68 @@ fn repeat_n_to_a_variable_count_is_a_site() {
     let t = lib("use std::iter;\nfn f(v: &[u8], n: usize) {\n    for _ in iter::repeat_n(0, n) {}\n    for _ in iter::repeat_n(0, v.len()) {}\n    for _ in std::iter::repeat_n(0, 4) {}\n}\n");
     assert_eq!(t.lines(Set::Loop), vec![3]);
 }
+
+#[test]
+fn a_guard_covers_the_cycles_through_its_function_alone() {
+    let t = lib("use bounds::Depth;\nfn g1(d: &Depth) { let d = d.descend().unwrap(); g2(&d) }\nfn g2(d: &Depth) { g2(d); g1(d) }\nstruct Tree;\nimpl Tree { fn descend(&self) {} }\nfn h(d: &Depth, t: &Tree) { t.descend(); h(d, t) }\n");
+    assert_eq!(t.lines(Set::Recursion), vec![3, 6]);
+}
+
+#[test]
+fn a_default_method_and_its_override_are_one_cycle() {
+    let t = lib("trait T {\n    fn a(&self, n: u8) -> u8 { if n == 0 { 0 } else { self.b(n - 1) } }\n    fn b(&self, n: u8) -> u8;\n}\nstruct X;\nimpl T for X {\n    fn b(&self, n: u8) -> u8 { self.a(n) }\n}\n");
+    assert_eq!(t.lines(Set::Recursion), vec![2]);
+}
+
+#[test]
+fn a_trait_path_and_a_qualified_self_reach_the_impl() {
+    let t = lib("trait Walk { fn walk(&self, n: u8); }\nstruct Node;\nstruct Leaf;\nimpl Walk for Node {\n    fn walk(&self, n: u8) { Walk::walk(self, n - 1) }\n}\nimpl Walk for Leaf {\n    fn walk(&self, n: u8) { <Self as Walk>::walk(self, n - 1) }\n}\n");
+    assert_eq!(t.lines(Set::Recursion), vec![5, 8]);
+}
+
+#[test]
+fn nested_functions_of_one_name_are_apart() {
+    let t = lib("fn go() {}\nfn a() {\n    fn go(n: u8) { go(n - 1) }\n    go(3);\n}\nfn b() {\n    fn go(n: u8) -> u8 { n }\n    go(3);\n}\n");
+    let sites = t.sites(Set::Recursion);
+    assert_eq!(sites.len(), 1, "{sites:?}");
+    assert_eq!(sites[0].1, 3);
+}
+
+#[test]
+fn a_module_and_a_function_of_one_name_are_apart() {
+    let t = Tree::new(&[
+        ("src/lib.rs", "mod other;\nfn other() { other::f(3) }\n"),
+        ("src/other.rs", "pub fn f(n: u8) { if n > 0 { super::other() } }\n"),
+    ]);
+    assert_eq!(t.lines(Set::Recursion), vec![2]);
+}
+
+#[test]
+fn a_binding_shadows_a_function_only_where_it_is_in_scope() {
+    let t = lib("fn walkit(n: u8) -> u8 {\n    if n > 0 { return walkit(n - 1); }\n    let walkit = 3;\n    walkit\n}\nfn q(n: u8) -> u8 {\n    let f = |q: u8| q;\n    if n > 0 { q(n - 1) } else { f(n) }\n}\n");
+    assert_eq!(t.lines(Set::Recursion), vec![1, 6]);
+}
+
+#[test]
+fn renamed_self_imports_and_deref_receivers_resolve() {
+    let t = lib("mod k { pub fn h(n: u8) { if n > 0 { crate::g(n) } } }\nuse self::k::{self as kk};\nfn g(n: u8) { kk::h(n - 1) }\nstruct S;\nimpl S { fn r(&self) { (*self).r() } }\n");
+    assert_eq!(t.lines(Set::Recursion), vec![1, 5]);
+}
+
+#[test]
+fn macro_arguments_are_read_piece_by_piece() {
+    let t = lib("fn m(n: u8) -> bool { matches!(n, x if x > 0 && m(x - 1)) }\nfn t(n: u8) -> u8 { log!(target: \"x\", \"{}\", t(n)); n }\n");
+    assert_eq!(t.lines(Set::Recursion), vec![1, 2]);
+}
+
+#[test]
+fn ranges_to_a_type_s_max_held_or_passed_are_sites() {
+    let t = lib("use std::iter::*;\nstruct R;\nimpl DoubleEndedIterator for R { fn next_back(&mut self) -> Option<u8> { None } }\nfn f(v: &mut Vec<usize>, n: usize, m: Option<usize>) {\n    for _ in 0..u64::MAX {}\n    let r = 0..n;\n    for _ in r {}\n    v.extend(0..n);\n    let _ = repeat(1);\n    let k = v.len();\n    if let Some(k) = m { for _ in 0..k {} }\n    let _ = (0..).zip(v.iter());\n    let _: Vec<usize> = (0..n).take(4).collect();\n    let _ = (0..n).len();\n    let span = 1..n;\n    let _ = (k, span, v.iter().zip(0u32..));\n}\n");
+    assert_eq!(t.lines(Set::Loop), vec![3, 5, 6, 8, 9, 11]);
+}
+
+#[test]
+fn a_method_called_through_a_double_deref_of_self_is_no_edge() {
+    let t = lib("trait E { fn send(&self); }\nimpl E for std::sync::Arc<dyn E> { fn send(&self) { (**self).send() } }\n");
+    assert_eq!(t.lines(Set::Recursion), Vec::<usize>::new());
+}

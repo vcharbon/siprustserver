@@ -324,10 +324,11 @@ impl Ladder {
 
     /// Step to the next rung and return the wait before it, or `None` when that
     /// rung would land at or past the give-up — the ladder is over and whatever
-    /// the give-up owes takes it from there.
+    /// the give-up owes takes it from there. A ladder restored on the last rung
+    /// a `u32` counts, or past the longest `Duration`, is over too.
     pub fn advance(&mut self) -> Option<Duration> {
-        let next = self.schedule.interval(self.rung + 1)?;
-        let landing = self.elapsed + next;
+        let next = self.schedule.interval(self.rung.checked_add(1)?)?;
+        let landing = self.elapsed.checked_add(next)?;
         if landing >= self.schedule.give_up {
             return None;
         }
