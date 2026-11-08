@@ -23,7 +23,7 @@ use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
 use super::stray_cancel::reject_stray_cancel;
 use super::unrecoverable::discharge_after_turn;
-use super::unroutable::{answer_gone_copy, answer_vanished};
+use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
 use crate::rule_chain::{enforced, fired, rule_chain_turn, TurnInput};
@@ -73,6 +73,17 @@ pub(super) async fn process(
             },
             _ => return false,
         };
+        if res.deferred_copy {
+            match super::deferred_copy::judge(ctx, &call_ref, &req, src, event, &mut turn).await {
+                super::deferred_copy::Judged::Parked => {}
+                super::deferred_copy::Judged::Absorbed => return false,
+                super::deferred_copy::Judged::Gone => {
+                    drop(_guard);
+                    release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
+                    return false;
+                }
+            }
+        }
         let initial = super::initial_turn::initial_invite_turn(
             ctx, &call_ref, &req, src, datagram, now_ms, admitted, &mut turn,
         );
@@ -133,11 +144,7 @@ pub(super) async fn process(
             return false;
         }
         let Some(call) = resident_or_materialised(ctx, &call_ref, answered(event)).await else {
-            if res.deferred_copy {
-                answer_gone_copy(ctx, event, turn.ids.new_tag()).await;
-            } else {
-                answer_vanished(ctx, event, &mut turn.ids).await;
-            }
+            answer_vanished(ctx, event, &mut turn.ids).await;
             // An admit report for a vanished call (a route fold, a service's
             // admit result): no call is left to own the set its admit may
             // have counted.

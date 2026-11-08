@@ -37,6 +37,7 @@ mod cancel_in_consult;
 mod cannot_leave;
 mod commit;
 mod dead_verdict;
+mod deferred_copy;
 mod deferred_parks;
 mod departure;
 mod dialog_gate;

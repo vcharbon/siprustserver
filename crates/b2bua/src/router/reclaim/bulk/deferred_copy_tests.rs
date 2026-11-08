@@ -1,10 +1,11 @@
 //! The caller's copies of the initial INVITE of an undecided call whose bulk
-//! park was deferred because a turn held its lock. A copy queues behind the
-//! call's arming, held while none is queued, and keeps the transaction the
-//! layer opened for it until that arming rebuilds the INVITE's own: the
-//! reclaimed call answers it. Whatever becomes of the call meanwhile, the
-//! caller's INVITE is answered once, its retransmissions meet that answer, and
-//! no copy is admitted as a new call (ADR-0022).
+//! park was deferred because a turn held its lock. A copy queues on the
+//! call's queue, keeping the transaction the layer opened for it, and is
+//! judged at its turn as a parked call's copy is: merged while the call is
+//! parked, absorbed by the INVITE's rebuilt transaction once the call is
+//! armed, the bare 503 once the call is gone. It never arms the call. The
+//! caller's INVITE is answered once, its retransmissions meet that answer,
+//! and no copy is admitted as a new call (ADR-0022).
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -146,6 +147,16 @@ impl Scene {
         assert_eq!(self.n.metrics.timer_live(), 0, "no timer is left behind");
     }
 
+    /// The call's one CDR states the caller's CANCEL: its cause and its event.
+    fn cancel_cdr(&self) {
+        let cdrs = self.n.cdr.snapshot();
+        let cdr = cdrs.iter().find(|c| c.call_ref == self.call.call_ref).expect("the call's CDR");
+        let cause = cdr.termination.as_ref().map(|t| t.cause);
+        assert_eq!(cause, Some(call::TerminationCause::RemoteCancel), "ended by the CANCEL");
+        let cancel = cdr.events.iter().any(|e| e.event_type == call::CdrEventType::Cancel);
+        assert!(cancel, "its CANCEL recorded: {:?}", cdr.events);
+    }
+
     /// The call's record is gone from the store: it ended under the holding
     /// turn, or its TTL ran out.
     async fn record_gone(&self) {
@@ -264,8 +275,8 @@ async fn a_copy_meeting_its_deferred_calls_release_is_answered_once() {
     s.no_new_call(0).await;
 }
 
-/// The caller CANCELs its INVITE while a copy waits for the arming behind a
-/// closed gate: the setup ends cancelled, its decision never asked.
+/// The caller CANCELs its INVITE while a copy is queued behind the park with
+/// the gate closed: the setup ends cancelled, its decision never asked.
 #[tokio::test(start_paused = true)]
 async fn a_cancel_while_a_copy_waits_ends_the_setup_unasked() {
     cancelled_while_a_copy_waits(true).await;
@@ -279,8 +290,8 @@ async fn a_cancel_while_a_copy_is_queued_behind_the_arming_ends_the_setup_unaske
     cancelled_while_a_copy_waits(false).await;
 }
 
-/// The caller CANCELs its INVITE while a copy waits behind the deferred call,
-/// held for the arming (`closed`) or queued behind it.
+/// The caller CANCELs its INVITE while a copy waits on the deferred call's
+/// queue, behind its park with the gate `closed`, else behind its arming.
 async fn cancelled_while_a_copy_waits(closed: bool) {
     let mut s = Scene::deferred(closed).await;
     s.retransmit().await;
@@ -297,5 +308,59 @@ async fn cancelled_while_a_copy_waits(closed: bool) {
     assert!(invite_finals.iter().all(|f| f.starts_with("SIP/2.0 487")), "487 alone: {finals:?}");
     s.send(&ack_of(invite_finals[0])).await;
     assert_eq!(s.asked.load(Ordering::SeqCst), 0, "no decision is asked");
+    s.cancel_cdr();
+    s.no_new_call(1).await;
+}
+
+/// Before the gate opens, the arming it holds back queued: a copy behind it
+/// finds the call still parked at its turn and is answered merged, arming
+/// nothing; the arming, once released, ends the undecided call whose caller
+/// took that final.
+#[tokio::test(start_paused = true)]
+async fn a_copy_behind_an_arming_the_gate_holds_back_never_arms_the_call() {
+    let mut s = Scene::deferred(false).await;
+    s.n.membership.set_conditions("w0", false, false);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    s.retransmit().await;
+    s.let_go().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(s.n.core.router_ctx().state.is_parked(&s.call.call_ref), "not armed by the copy");
+
+    s.answered_once("SIP/2.0 482").await;
+    s.open();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(s.asked.load(Ordering::SeqCst), 0, "the merged caller's call asks nothing");
+    s.no_new_call(1).await;
+}
+
+/// The record went while a copy waited behind the park with the gate closed:
+/// the copy draws the bare 503 of a caller never answered.
+#[tokio::test(start_paused = true)]
+async fn a_copy_queued_behind_a_closed_gate_for_a_call_gone_by_its_park_is_answered_once() {
+    let mut s = Scene::deferred(true).await;
+    s.retransmit().await;
+    s.record_gone().await;
+    s.let_go().await;
+
+    s.answered_once("SIP/2.0 503 Service Unavailable").await;
+    s.open();
+    assert_eq!(s.asked.load(Ordering::SeqCst), 0, "no decision is asked");
+    s.no_new_call(0).await;
+}
+
+/// The gate opens after a copy queued behind the park: the arming queues
+/// behind the copy, which is judged at its turn, the call still parked, and
+/// answered merged; the arming then ends the call that caller left, with its
+/// CDR.
+#[tokio::test(start_paused = true)]
+async fn a_copy_queued_before_the_gate_opens_is_judged_at_its_turn() {
+    let mut s = Scene::deferred(true).await;
+    s.retransmit().await;
+    s.open();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    s.let_go().await;
+
+    s.answered_once("SIP/2.0 482").await;
+    assert_eq!(s.asked.load(Ordering::SeqCst), 0, "the merged caller's call asks nothing");
     s.no_new_call(1).await;
 }

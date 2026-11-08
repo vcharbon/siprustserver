@@ -6,7 +6,7 @@ use call::{Call, Direction, IndexHit, IndexLookup, KeyKind};
 use sip_message::header::{ParamValue, Via};
 use sip_message::{Method, SipMessage};
 
-use super::deferred_parks::{Copied, DeferredParks};
+use super::deferred_parks::DeferredParks;
 use super::materialise::{names_server_branch, names_unanswered_caller_invite};
 use super::topology_cookie::foreign_primary;
 use super::undecided::is_undecided;
@@ -32,20 +32,12 @@ pub(super) struct Resolution {
     /// owns the key.
     pub(super) indexed: Option<KeyKind>,
     /// A copy of the caller's initial INVITE of this node's own call whose
-    /// park a bulk reclaim deferred ([`copy_of_deferred`](Self::copy_of_deferred)).
+    /// park a bulk reclaim deferred ([`InitialInvite::Deferred`]), judged at
+    /// its turn (`super::deferred_copy`).
     pub(super) deferred_copy: bool,
 }
 
 impl Resolution {
-    /// Take the deferred call an initial INVITE is a copy of
-    /// ([`DeferredParks::copied`]): the INVITE is that call's, on the
-    /// transaction it kept, which answers it the bare 503 when the call is
-    /// gone by its turn, the final it never had.
-    pub(super) fn copy_of_deferred(&mut self, hit: IndexHit, event: &CallEvent) {
-        self.copy_of(hit, event);
-        self.deferred_copy = true;
-    }
-
     /// Take the call an index lookup found for an event that states no
     /// `callRef`; an event that states no leg either is bound to the leg
     /// owning the matched key once the call is in hand.
@@ -286,8 +278,8 @@ pub(super) enum InitialInvite {
     Foreign,
     /// A copy of the initial INVITE of this node's own call whose park a bulk
     /// reclaim deferred, until its deferred arming ran
-    /// ([`DeferredParks::copied`]).
-    Deferred(Copied),
+    /// ([`DeferredParks::copies`]).
+    Deferred,
 }
 
 /// **A copy of a replicated call's initial INVITE.** An INVITE with no To-tag,
@@ -319,8 +311,8 @@ pub(super) async fn initial_invite_copy(
     if !ctx.state.replicates() || ctx.unborn.holds(derived, cseq) {
         return InitialInvite::Own;
     }
-    if let Some(copied) = parks.and_then(|parks| parks.copied(req)) {
-        return InitialInvite::Deferred(copied);
+    if parks.is_some_and(|parks| parks.copies(req)) {
+        return InitialInvite::Deferred;
     }
     if ctx.state.contains(derived) {
         return InitialInvite::Own;

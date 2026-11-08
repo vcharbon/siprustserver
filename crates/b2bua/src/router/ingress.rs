@@ -130,11 +130,8 @@ pub(super) async fn on_event(
     // that primary and gets no final, its transaction relinquished with
     // nothing sent — never a second call.
     // A copy of the INVITE of a call whose park a bulk reclaim deferred is
-    // that call's. Once the call's arming is queued, the copy keeps its
-    // transaction and queues behind it: the arming rebuilds the INVITE's own
-    // in its place. Before, the copy queues behind the park, unjudged, and is
-    // answered as a parked call answers one: merged.
-    let mut merged = false;
+    // that call's: it queues on the call's queue, unjudged, keeping its
+    // transaction, and is judged at its turn (`deferred_copy`).
     match initial_invite_copy(ctx, &event, &res, parks).await {
         InitialInvite::Own => {}
         InitialInvite::CopyOf { hit, unanswered } => {
@@ -143,10 +140,7 @@ pub(super) async fn on_event(
             }
             res.copy_of(hit, &event);
         }
-        InitialInvite::Deferred(copied) if copied.arm_queued => {
-            res.copy_of_deferred(copied.hit, &event);
-        }
-        InitialInvite::Deferred(_) => merged = true,
+        InitialInvite::Deferred => res.deferred_copy = true,
         InitialInvite::Foreign => {
             ctx.metrics.bump_foreign_invite_copy_dropped();
             relinquish_arrival(ctx, &event).await;
@@ -191,12 +185,14 @@ pub(super) async fn on_event(
     // The mark names the cancelled INVITE's CSeq: only that INVITE's turn
     // reads it. An in-dialog CANCEL targets one re-INVITE transaction, never
     // the call setup, and is not marked. Gated on that INVITE being here —
-    // admitted and waiting for its turn, or the live call's own during its
-    // decision round trip — so the setup window always marks, while the CANCEL
+    // admitted and waiting for its turn, the live call's own during its
+    // decision round trip, or that of a call whose bulk park was deferred,
+    // whose arming settles it — so the setup window always marks, while the CANCEL
     // of an INVITE refused or discarded, or one reaching a queue whose call
     // was released, marks nothing no release would clear.
     if let CallEvent::Cancelled { in_dialog: false, invite_cseq: Some(cseq), .. } = &event {
-        if admit::invite_here(ctx, &call_ref, *cseq) {
+        let deferred = parks.is_some_and(|parks| parks.invite_here(&call_ref, *cseq));
+        if deferred || admit::invite_here(ctx, &call_ref, *cseq) {
             ctx.state.mark_setup_cancelled(&call_ref, *cseq);
         }
     }
@@ -216,7 +212,7 @@ pub(super) async fn on_event(
     if class.is_new_call() {
         if let CallEvent::Sip { message, src, .. } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
-                if !merged && !admit::is_copy(ctx, &call_ref, req) {
+                if !res.deferred_copy && !admit::is_copy(ctx, &call_ref, req) {
                     match admit::admit(ctx, &call_ref, req, *src, class).await {
                         Some(hold) => unborn = Some(hold),
                         None => return,
@@ -247,12 +243,6 @@ pub(super) async fn on_event(
     }
     if let Outcome::Discarded(discarded) = offer.outcome {
         let Discarded { item, why, owed } = discarded;
-        if item.res.deferred_copy {
-            // The copy's call ended and released its queue: the copy is owed
-            // the final its caller never had, on the transaction it kept.
-            super::unroutable::answer_gone_copy(ctx, &item.event, ctx.id_gen.new_tag()).await;
-            return;
-        }
         let admitted = item.unborn.is_some();
         OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
     }

@@ -193,32 +193,98 @@ async fn a_request_naming_no_call_ref_of_a_deferred_call_is_served_by_the_reclai
     nothing_left(&n);
 }
 
-/// An arming queued for a parked call whose lock a turn held is aborted
-/// before it armed the call: the reaper's verdict on the aborted turn reaches
-/// the call, which no turn leaves parked.
+/// The deferred arming of a call whose park was deferred is aborted while it
+/// waits on the call's lock, before it armed the call: the reaper's verdict
+/// on the aborted turn reaches the call, which no turn leaves parked, and the
+/// call still ends whole.
 #[tokio::test(start_paused = true)]
 async fn an_arming_aborted_before_it_armed_leaves_no_call_parked() {
     let net = SimulatedSignalingNetwork::new(1);
     let n = node_on(&net, "w0", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
     let ctx = n.core.router_ctx();
     n.membership.set_conditions("w0", false, false);
     tokio::time::sleep(Duration::from_millis(100)).await;
     let call = stored(&n, "aborted-arming").await;
+    let held = ctx.state.lock(&call.call_ref).await;
     send(&n, ReplCommand::ReclaimAll);
     sip_clock::testkit::settle().await;
-    assert!(ctx.state.is_parked(&call.call_ref), "parked at once, its arming held");
+    drop(held);
+    sip_clock::testkit::settle().await;
+    assert!(ctx.state.is_parked(&call.call_ref), "its deferred park ran, its arming held");
 
     let held = ctx.state.lock(&call.call_ref).await;
     n.membership.set_conditions("w0", true, false);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         ctx.dispatcher.in_flight().abort(&call.call_ref),
-        "the queued arming waits on the lock"
+        "the deferred arming waits on the lock"
     );
     sip_clock::testkit::settle().await;
     drop(held);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!ctx.state.is_parked(&call.call_ref), "no call is left parked");
+
+    // The verdict ends the call: its BYE reaches the caller, who answers it.
+    let bye = caller.recv().await.expect("the call's BYE");
+    let bye = String::from_utf8_lossy(&bye.raw).to_string();
+    assert!(bye.starts_with("BYE "), "the verdict's BYE: {bye}");
+    caller.send_to(&ok_to(&bye), SocketAddr::from(NODE_SIP_ADDR)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let cdrs = n.cdr.snapshot().into_iter().filter(|c| c.call_ref == call.call_ref).count();
+    assert_eq!(cdrs, 1, "the call's one CDR");
+    nothing_left(&n);
+}
+
+/// An arming's turn dropped before its first poll, its body never run,
+/// reports the call left parked: the gate arms it again.
+#[tokio::test(start_paused = true)]
+async fn an_arming_dropped_before_its_first_poll_is_armed_again() {
+    use crate::dispatch::{DispatchClass, Runnable};
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w0", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let call = stored(&n, "unpolled-arming").await;
+    send(&n, ReplCommand::ReclaimAll);
+    sip_clock::testkit::settle().await;
+    assert!(armed(&n, &call.call_ref), "parked, then armed at once");
+    // Surgery: the call parked again, as a deferred park leaves it.
+    ctx.state.park(&call.call_ref);
+
+    let event = b2bua_sdk::event::CallEvent::InternalEvent {
+        call_ref: call.call_ref.clone(),
+        topic: "deferred-reclaim".into(),
+        outcome: "arm".into(),
+        payload: serde_json::json!(0),
+        body: Vec::new(),
+        incarnation: None,
+    };
+    let res = crate::router::resolve::resolve(ctx, &event);
+    let turn = crate::router::turn::Turn {
+        ctx: ctx.clone(),
+        event,
+        matched_client_txn: false,
+        res,
+        class: DispatchClass::Internal,
+        unborn: None,
+        budget: crate::setup_budget::SetupBudget::NONE,
+    };
+    drop(turn.into_body());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(armed(&n, &call.call_ref), "armed by the arming queued again");
+    hang_up(&n, caller.as_ref(), &call).await;
+    nothing_left(&n);
+}
+
+/// The 200 OK to the request `raw`, its dialog and transaction lines echoed
+/// (RFC 3261 §8.2.6.2).
+fn ok_to(raw: &str) -> Vec<u8> {
+    let echoed: Vec<&str> = raw
+        .lines()
+        .filter(|l| ["Via:", "From:", "To:", "Call-ID:", "CSeq:"].iter().any(|h| l.starts_with(h)))
+        .collect();
+    format!("SIP/2.0 200 OK\r\n{}\r\nContent-Length: 0\r\n\r\n", echoed.join("\r\n")).into_bytes()
 }
 
 /// A readiness flap between the arming pass and the arming its call's turn

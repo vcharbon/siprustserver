@@ -1,18 +1,15 @@
 //! The calls a bulk reclaim parked on a turn of their own because a turn held
-//! their lock, as ingress sees them until their deferred arming ran: a copy
-//! of such a call's initial INVITE is the call's. Once the arming is queued,
-//! the copy keeps the transaction the layer opened for it and queues behind
-//! the arming, which rebuilds the INVITE's own transaction in its place and
-//! asks an undecided call's decision again; the copy's re-offer meets that
-//! transaction, and a call gone by then answers the copy on the transaction
-//! it kept. Before, the copy queues behind the park, unjudged, and is
-//! answered as a parked call answers one. A request naming no `callRef` of
-//! ours finds the call through the store's SIP index, which the bodies the
+//! their lock, as ingress sees them until their deferred arming ran. A copy of
+//! such a call's initial INVITE is the call's: it queues on the call's queue,
+//! unjudged, keeping the transaction the layer opened for it, and is judged at
+//! its turn (`super::deferred_copy`). A CANCEL of that INVITE marks its setup
+//! cancelled, as one of a resident call's does. A request naming no `callRef`
+//! of ours finds the call through the store's SIP index, which the bodies the
 //! reclaim reads carry.
 
 use std::collections::HashMap;
 
-use call::{Call, IndexHit, IndexLookup};
+use call::{Call, IndexLookup};
 use sip_message::SipRequest;
 
 use super::materialise::names_server_branch;
@@ -32,13 +29,6 @@ pub(super) struct DeferredParks {
     calls: HashMap<String, Deferred>,
     /// The SIP index keys of the scanned bodies → their callRef.
     index: HashMap<String, String>,
-}
-
-/// What a deferred call is to an initial INVITE that copies its own.
-pub(super) struct Copied {
-    pub(super) hit: IndexHit,
-    /// The call's arming is queued: the copy queues behind it.
-    pub(super) arm_queued: bool,
 }
 
 impl DeferredParks {
@@ -86,22 +76,28 @@ impl DeferredParks {
         self.calls.values().filter(|deferred| !deferred.arm_queued).map(|deferred| &deferred.call)
     }
 
-    /// The deferred call whose initial INVITE `req` copies: its INVITE CSeq,
-    /// and its top-Via branch naming the call's own server transaction.
-    pub(super) fn copied(&self, req: &SipRequest) -> Option<Copied> {
+    /// Whether `req` copies the initial INVITE of a deferred call: its INVITE
+    /// CSeq, and its top-Via branch naming the call's own server transaction.
+    pub(super) fn copies(&self, req: &SipRequest) -> bool {
         if self.calls.is_empty() {
-            return None;
+            return false;
         }
         let call_id = req.call_id().as_str();
         let from_tag = req.from().tag().unwrap_or("");
         let lookup = IndexLookup::Invite { call_id, from_tag };
-        let hit = resolve_in(&self.index, &lookup, &mut lookup.key_buffer())?;
-        let deferred = self.calls.get(&hit.call_ref)?;
+        let Some(hit) = resolve_in(&self.index, &lookup, &mut lookup.key_buffer()) else {
+            return false;
+        };
+        let Some(deferred) = self.calls.get(&hit.call_ref) else { return false };
         let branch = req.top_via().branch().unwrap_or_default();
         let call = &deferred.call;
-        let copies =
-            call.a_leg_invite.cseq == req.cseq().seq() && names_server_branch(call, branch);
-        copies.then_some(Copied { hit, arm_queued: deferred.arm_queued })
+        call.a_leg_invite.cseq == req.cseq().seq() && names_server_branch(call, branch)
+    }
+
+    /// Whether `cseq` is the CSeq of the initial INVITE of the deferred
+    /// `call_ref`.
+    pub(super) fn invite_here(&self, call_ref: &str, cseq: u32) -> bool {
+        self.calls.get(call_ref).is_some_and(|deferred| deferred.call.a_leg_invite.cseq == cseq)
     }
 }
 

@@ -41,6 +41,7 @@ impl Runnable for Turn {
 
     fn into_body(self) -> DispatchBody {
         let unpolled = UnpolledForget::arm(&self.ctx.txn, &self.event, self.class);
+        let arming = super::reclaim::deferred::arming_report(&self.ctx, &self.event);
         Box::pin(async move {
             unpolled.disarm();
             if let Some(call_ref) = super::quiesced::notice_of(&self.event) {
@@ -60,7 +61,7 @@ impl Runnable for Turn {
                 return;
             }
             if super::reclaim::deferred::is_notice(&self.event) {
-                super::reclaim::deferred::deferred_turn(&self.ctx, &self.event).await;
+                super::reclaim::deferred::deferred_turn(&self.ctx, &self.event, arming).await;
                 return;
             }
             match (&self.event, self.res.call_ref.as_deref()) {

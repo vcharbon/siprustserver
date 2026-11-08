@@ -58,16 +58,23 @@ pub(super) fn is_undecided(call: &Call) -> bool {
 /// caller's INVITE, so none seeded means another transaction here already
 /// holds its branch — the caller's retransmission placed as a call of its own
 /// — and an answer would reach that call's caller: the call then ends with
-/// nothing on the wire, as does a setup the caller CANCELed. Otherwise its
+/// nothing on the wire, as does a setup the caller CANCELed, the call's own
+/// record or its setup-CANCEL mark saying so, with the cancel's cause and
+/// event. Otherwise its
 /// decision is asked again on a turn of its own ([`reask_turn`]). A takeover
 /// copy defers its CDR to the call's primary, a reclaim writes it
 /// (ADR-0020 X3).
 pub(super) async fn settle_undecided(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    call: Call,
+    mut call: Call,
     seeded: usize,
 ) {
+    // A CANCEL the layer took for the INVITE before the call was resident
+    // marked its setup: the call ends cancelled.
+    if ctx.state.is_setup_cancelled(call_ref, call.a_leg_invite.cseq) {
+        call.setup_cancelled = true;
+    }
     if seeded > 0 && !call.setup_cancelled && !ctx.readiness.left_the_slice() {
         tracing::info!(
             node = observe::node(),

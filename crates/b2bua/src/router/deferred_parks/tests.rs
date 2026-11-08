@@ -19,24 +19,22 @@ fn a_deferred_calls_invite_copies_are_its_own_until_its_arming_ran() {
     let call = scanned("deferred");
     parks.defer(call.clone());
 
-    let copied = parks.copied(&invite("w0", "w1", "deferred")).expect("a copy of its INVITE");
-    assert_eq!(copied.hit.call_ref, call.call_ref);
-    assert!(!copied.arm_queued, "held while no arming is queued");
+    assert!(parks.copies(&invite("w0", "w1", "deferred")), "a copy of its INVITE");
+    assert!(parks.invite_here(&call.call_ref, 1), "its INVITE's CSeq");
     let image = String::from_utf8_lossy(invite("w0", "w1", "deferred").image()).to_string();
     let other = image.replace("CSeq: 1 INVITE", "CSeq: 2 INVITE");
     let Ok(SipMessage::Request(other)) = CustomParser::new().parse(other.as_bytes()) else {
         panic!("the INVITE parses");
     };
-    assert!(parks.copied(&other).is_none(), "another CSeq is no copy");
+    assert!(!parks.copies(&other), "another CSeq is no copy");
+    assert!(!parks.invite_here(&call.call_ref, 2));
     assert_eq!(parks.unarmed().count(), 1);
 
     parks.arming(&call.call_ref);
-    assert!(parks.copied(&invite("w0", "w1", "deferred")).expect("still deferred").arm_queued);
-    assert_eq!(parks.unarmed().count(), 0);
-
+    assert_eq!(parks.unarmed().count(), 0, "its arming is queued");
     parks.held_back(&call.call_ref);
-    assert!(!parks.copied(&invite("w0", "w1", "deferred")).expect("deferred").arm_queued);
+    assert_eq!(parks.unarmed().count(), 1, "held back, it waits for the next");
 
     parks.armed(&call.call_ref);
-    assert!(parks.copied(&invite("w0", "w1", "deferred")).is_none(), "no longer deferred");
+    assert!(!parks.copies(&invite("w0", "w1", "deferred")), "no longer deferred");
 }

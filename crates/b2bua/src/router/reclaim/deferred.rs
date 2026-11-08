@@ -3,12 +3,15 @@
 //! the arming of a deferred park. Each runs under the call's lock as the pass
 //! would have, behind what the call's queue already holds (ADR-0010 X2). A
 //! deferred arming tells the router loop how it ended ([`arming_ended_of`]):
-//! it ran, or it met the node's own endpoint not reading ready and left the
-//! call parked, to be armed with the gate's next release (ADR-0055 §8).
+//! it ran, or it left the call parked — the node's own endpoint not reading
+//! ready, or its body dropped before it armed the call — for the gate's next
+//! release to arm (ADR-0055 §8).
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+
+use tokio::sync::mpsc;
 
 use super::super::materialise::{arm, caller_invite_key, materialise, Materialised, Origin};
 use super::super::release::{release_call, ReleaseKind};
@@ -88,11 +91,13 @@ pub(in crate::router) fn arming_ended_of(event: &CallEvent) -> Option<(&str, Arm
     }
 }
 
-/// The turn of a deferred step's notice `event`. Boxed: a deferred step is
-/// rare, and the turn body that runs every event stays small.
+/// The turn of a deferred step's notice `event`, an arming's with its
+/// `report` ([`arming_report`]). Boxed: a deferred step is rare, and the turn
+/// body that runs every event stays small.
 pub(in crate::router) fn deferred_turn<'a>(
     ctx: &'a Arc<RouterCtx>,
     event: &'a CallEvent,
+    report: Option<ArmingReport>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
         let CallEvent::InternalEvent { call_ref, topic, outcome, payload, .. } = event else {
@@ -101,9 +106,11 @@ pub(in crate::router) fn deferred_turn<'a>(
         if topic != TOPIC {
             return;
         }
-        match outcome.as_str() {
-            PARK => park_turn(ctx, call_ref).await,
-            ARM => arm_turn(ctx, call_ref, payload.as_i64().unwrap_or_default()).await,
+        match (outcome.as_str(), report) {
+            (PARK, _) => park_turn(ctx, call_ref).await,
+            (ARM, Some(report)) => {
+                arm_turn(ctx, call_ref, payload.as_i64().unwrap_or_default(), report).await
+            }
             _ => {}
         }
     })
@@ -128,14 +135,13 @@ async fn park_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
 /// no CANCEL, it gives way, with nothing sent, to the one the arming
 /// rebuilds, and the copy, queued behind, meets the rebuilt one. One that
 /// took a CANCEL keeps its key and the 487 it holds; the arming seeds nothing
-/// in its place, and the undecided call ends asking nothing.
-async fn arm_turn(ctx: &Arc<RouterCtx>, call_ref: &str, l_max: i64) {
-    let mut ended = ArmingRan { ctx, call_ref, ended: ArmingEnded::Ran };
+/// in its place, and the undecided call ends asking nothing. `report` reads
+/// the call left parked until the arming ran.
+async fn arm_turn(ctx: &Arc<RouterCtx>, call_ref: &str, l_max: i64, mut report: ArmingReport) {
     {
         let _guard = ctx.state.lock(call_ref).await;
         let ready = ctx.readiness.own_endpoint_ready().is_none_or(|ready| *ready.borrow());
         if !ready {
-            ended.ended = ArmingEnded::Held;
             return;
         }
         if ctx.state.is_parked(call_ref) {
@@ -144,7 +150,9 @@ async fn arm_turn(ctx: &Arc<RouterCtx>, call_ref: &str, l_max: i64) {
             }
         }
         let smoothing = smoothing(ctx, ctx.clock.now_ms(), l_max);
-        if let Some((call, seeded)) = arm(ctx, call_ref, Some(smoothing)).await {
+        let armed = arm(ctx, call_ref, Some(smoothing)).await;
+        report.ended = ArmingEnded::Ran;
+        if let Some((call, seeded)) = armed {
             if let Some(seeded) = seeded.filter(|_| is_undecided(&call)) {
                 settle_undecided(ctx, call_ref, call, seeded).await;
             }
@@ -164,19 +172,32 @@ async fn release_if_left(ctx: &Arc<RouterCtx>, call_ref: &str) {
 
 /// Tells the router loop how the deferred arming of `call_ref` ended, however
 /// its turn ends.
-struct ArmingRan<'a> {
-    ctx: &'a RouterCtx,
-    call_ref: &'a str,
+/// Built with the arming's turn body, before its first poll: a body dropped
+/// before it armed the call, run or not, reports the call left parked, so the
+/// gate arms it again.
+pub(in crate::router) struct ArmingReport {
+    reentry: mpsc::UnboundedSender<CallEvent>,
+    call_ref: String,
     ended: ArmingEnded,
 }
 
-impl Drop for ArmingRan<'_> {
+/// The report of the arming `event` notices, `None` for any other event.
+pub(in crate::router) fn arming_report(ctx: &RouterCtx, event: &CallEvent) -> Option<ArmingReport> {
+    let CallEvent::InternalEvent { call_ref, topic, outcome, .. } = event else { return None };
+    (topic == TOPIC && outcome == ARM).then(|| ArmingReport {
+        reentry: ctx.reentry_tx.clone(),
+        call_ref: call_ref.clone(),
+        ended: ArmingEnded::Held,
+    })
+}
+
+impl Drop for ArmingReport {
     fn drop(&mut self) {
         let outcome = match self.ended {
             ArmingEnded::Ran => RAN,
             ArmingEnded::Held => HELD,
         };
-        let notice = notice(self.call_ref, ARMING_ENDED, outcome, serde_json::Value::Null);
-        let _ = self.ctx.reentry_tx.send(notice);
+        let notice = notice(&self.call_ref, ARMING_ENDED, outcome, serde_json::Value::Null);
+        let _ = self.reentry.send(notice);
     }
 }
