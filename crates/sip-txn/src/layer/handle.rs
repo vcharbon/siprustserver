@@ -246,6 +246,10 @@ impl TransactionLayer {
     /// [`TransactionLayerClosed`] instead of panicking when the owner task is gone
     /// (endpoint closed, or `abort_owner`) — the single funnel-and-error site for
     /// every public method.
+    ///
+    /// It completes within one owner turn: the owner awaits only sends that
+    /// never suspend (ADR-0033 §5), and an owner stalled on a turn exits the
+    /// worker (§4).
     async fn roundtrip<R>(
         &self,
         build: impl FnOnce(oneshot::Sender<R>) -> Command,

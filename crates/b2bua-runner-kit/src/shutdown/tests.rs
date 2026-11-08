@@ -91,15 +91,20 @@ async fn sigterm_and_interrupt_are_stops() {
     assert_eq!(interrupt, Stop::Interrupt);
 }
 
-/// An endpoint whose input ends when the test closes it.
+/// An endpoint whose input ends when the test closes it, and whose sends
+/// never complete once the test parks them.
 struct Closable {
     inner: Box<dyn UdpEndpoint>,
     closed: watch::Receiver<bool>,
+    parked: Arc<AtomicBool>,
 }
 
 #[async_trait]
 impl UdpEndpoint for Closable {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
+        if self.parked.load(Ordering::Relaxed) {
+            return pending().await;
+        }
         self.inner.send_to(buf, dst).await
     }
     async fn recv(&self) -> Option<UdpPacket> {
@@ -126,12 +131,13 @@ impl UdpEndpoint for Closable {
     }
 }
 
-/// A wired worker `w0` seeing itself routable, the lever that closes its SIP
-/// endpoint, the membership it reads, a caller on its fabric, and a callee
-/// that never answers.
+/// A wired worker `w0` seeing itself routable, the levers that close its SIP
+/// endpoint and park its sends, the membership it reads, a caller on its
+/// fabric, and a callee that never answers.
 struct Worker {
     core: B2buaCore,
     close: watch::Sender<bool>,
+    parked: Arc<AtomicBool>,
     membership: Arc<SimulatedMembership>,
     caller: Box<dyn UdpEndpoint>,
     _callee: Box<dyn UdpEndpoint>,
@@ -265,10 +271,12 @@ async fn worker_on(
         compose: Default::default(),
         capacity: None,
     };
-    let core = B2buaCore::spawn(Box::new(Closable { inner, closed }), deps);
+    let parked = Arc::new(AtomicBool::new(false));
+    let endpoint = Closable { inner, closed, parked: parked.clone() };
+    let core = B2buaCore::spawn(Box::new(endpoint), deps);
     membership.add(Peer::new("w0", "w0").with_identity(OWN_IDENTITY));
     tokio::time::sleep(Duration::from_millis(100)).await;
-    Worker { core, close, membership, caller, _callee }
+    Worker { core, close, parked, membership, caller, _callee }
 }
 
 /// The worker identity of the test's worker.
@@ -286,6 +294,12 @@ impl Worker {
 
     fn close_sip(&self) {
         self.close.send_replace(true);
+    }
+
+    /// From now on a send never completes: the transaction owner's next send
+    /// keeps it on that turn.
+    fn park_sends(&self) {
+        self.parked.store(true, Ordering::Relaxed);
     }
 
     /// A call still being set up: its callee never answers.
@@ -344,6 +358,29 @@ async fn a_router_that_stays_stalled_exits_non_zero_at_its_threshold() {
     assert!(waited <= LOOP_EXIT + WITHIN_TWO_POLLS, "within two polls of it: {waited:?}");
     assert_eq!(w.flushes(ReleaseFlushOutcome::Empty), 1, "the release flush ran");
     assert!(w.core.readiness().is_draining(), "it reads draining on its way out");
+}
+
+/// A transaction owner that stays on one send ends the process at the exit
+/// threshold, as a stalled router does: what a call turn awaits of the owner
+/// is bounded by the worker's exit.
+#[tokio::test(start_paused = true)]
+async fn an_owner_that_stays_stalled_exits_non_zero_at_its_threshold() {
+    let w = worker().await;
+    w.park_sends();
+    let start = tokio::time::Instant::now();
+    w.ringing_call().await;
+    let code = tokio::time::timeout(
+        LOOP_EXIT * 2,
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending()),
+    )
+    .await
+    .expect("the owner's stall stops the worker");
+    assert_eq!(code, ExitCode::FAILURE);
+    let waited = start.elapsed();
+    assert!(waited > LOOP_EXIT, "not before it: {waited:?}");
+    assert!(waited <= LOOP_EXIT + WITHIN_TWO_POLLS, "within two polls of it: {waited:?}");
+    assert_eq!(w.core.loops().stalled(LOOP_EXIT), ["txn_owner"], "the owner, not the router");
+    assert_eq!(w.flushes(ReleaseFlushOutcome::Empty), 1, "the release flush ran");
 }
 
 /// A turn under the exit threshold, however many follow it, stops nothing.
