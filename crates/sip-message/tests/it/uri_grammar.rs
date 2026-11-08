@@ -236,7 +236,8 @@ fn a_request_line_method_is_a_token() {
 }
 
 /// An identity header the grammar refuses is a non-fatal `Err`: the message
-/// parses, and the entry is not used.
+/// parses, and the entry is not used. A bare Refer-To whose `?` starts its
+/// URI's headers is valid (RFC 3515 §2.1 admits `addr-spec`) and reads.
 #[test]
 fn an_identity_header_the_grammar_refuses_is_stored_as_an_error() {
     let raw = invite(
@@ -247,7 +248,7 @@ fn an_identity_header_the_grammar_refuses_is_stored_as_an_error() {
          Diversion: <sip: +33612345678@example.com>;reason=unconditional\r\n",
     );
     let r = request(&raw);
-    assert!(r.optional().refer_to.is_err(), "bare addr-spec with ?headers");
+    assert!(r.optional().refer_to.is_ok(), "a bare addr-spec with ?headers reads");
     assert!(r.optional().history_info.is_err(), "raw `;` in an escaped header");
     assert!(r.optional().diversion.is_err(), "a space inside <...>");
 }

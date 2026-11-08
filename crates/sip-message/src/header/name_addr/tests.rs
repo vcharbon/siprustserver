@@ -158,3 +158,28 @@ fn a_stated_target_reads_bare_or_bracketed() {
     assert_eq!(bracketed.params().value("q"), Some("0.5"));
     assert!(NameAddr::parse_uri_or_name_addr(&SipStr::owned("<sip:a@h")).is_err());
 }
+
+/// RFC 3261 §20 brackets a URI holding `,`, `?` or `;` in Contact, From and To.
+/// Elsewhere a bare addr-spec reads a `?` as the start of its URI's headers;
+/// a `,` is its own only in a single-valued header (RFC 3515 §2.1, RFC 3892
+/// §3), and a `;` after it starts the header parameters wherever it stands.
+#[test]
+fn a_bare_addr_spec_holds_what_its_header_leaves_unbracketed() {
+    use crate::header::{Contact, Diversion, From, HeaderValue, ReferTo, ReferredBy, To};
+    let bare = "sip:carol@192.0.2.9?Subject=hi%20there;x=1";
+    let refer = ReferTo::parse(&SipStr::owned(bare)).expect("a bare Refer-To with headers");
+    assert_eq!(refer.uri().escaped_header("Subject").as_deref(), Some("hi there"));
+    assert_eq!(refer.params().value("x"), Some("1"), "a `;` after it is the header's");
+    assert!(refer.uri().params().value("x").is_none());
+    let comma = "sip:carol,ext@192.0.2.9";
+    assert!(ReferTo::parse(&SipStr::owned(comma)).is_ok(), "single-valued: the `,` is the URI's");
+    assert!(ReferredBy::parse(&SipStr::owned(bare)).is_ok());
+    assert!(Diversion::parse(&SipStr::owned(bare)).is_ok(), "a list header reads the `?`");
+    assert!(Diversion::parse(&SipStr::owned(comma)).is_err(), "a list header's `,` separates");
+    for refused in [bare, comma] {
+        let raw = SipStr::owned(refused);
+        assert!(From::parse(&raw).is_err(), "From: {refused}");
+        assert!(To::parse(&raw).is_err(), "To: {refused}");
+        assert!(Contact::parse(&raw).is_err(), "Contact: {refused}");
+    }
+}

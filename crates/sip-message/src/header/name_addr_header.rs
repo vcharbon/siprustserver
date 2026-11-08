@@ -132,6 +132,7 @@ impl<K: NameAddrKind> NameAddrHeader<K> {
             role: K::ROLE,
             header_params: K::HEADER_PARAMS,
             bare_user_semicolon: K::BARE_USER_SEMICOLON,
+            bare: K::BARE,
         }
     }
 }

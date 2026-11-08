@@ -11,7 +11,7 @@ use super::super::scan::{
     byte_at, clamped, index_of, quoted_close, read_quoted, skip_ws, sub, sub_trimmed,
 };
 use super::super::uri::{Uri, UriRole};
-use super::{AddrForm, NameAddr};
+use super::{AddrForm, BareAddrSpec, NameAddr};
 
 /// The grammar of one header's address value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,12 +26,20 @@ pub(crate) struct AddrGrammar {
     /// failed: a shape the ABNF admits and RFC 3261 §20 brackets. The ingress
     /// gate refuses it unless a deployment names it (ADR-0001, exemptions).
     pub(crate) bare_user_semicolon: bool,
+    /// What a bare addr-spec may hold beside header parameters.
+    pub(crate) bare: BareAddrSpec,
 }
 
 impl AddrGrammar {
-    /// `form` in `role`, with header parameters.
+    /// `form` in `role`, with header parameters, a bare value held to §20.
     pub(crate) const fn of(form: AddrForm, role: UriRole) -> Self {
-        Self { form, role, header_params: true, bare_user_semicolon: false }
+        Self {
+            form,
+            role,
+            header_params: true,
+            bare_user_semicolon: false,
+            bare: BareAddrSpec::Bracketed,
+        }
     }
 }
 
@@ -123,7 +131,12 @@ fn bare_uri_span(
         )));
     }
     let spec = clamped(value.as_str(), 0, semi);
-    if grammar.header_params && spec.contains([',', '?']) {
+    let bracketed: &[char] = match grammar.bare {
+        BareAddrSpec::Bracketed => &[',', '?'],
+        BareAddrSpec::UriHeaders => &[','],
+        BareAddrSpec::UriHeadersAndComma => &[],
+    };
+    if grammar.header_params && spec.contains(bracketed) {
         return Err(SipParseError::new(format!(
             "bare addr-spec with `,` or `?`; name-addr \"<uri>\" form required (RFC 3261 §20): {:?}",
             crate::whitespace::trim_end(spec)

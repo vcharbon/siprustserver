@@ -12,7 +12,7 @@
 
 use super::cardinality::{held_to_the_table, lines, Cardinality};
 use super::name::{HeaderId, HeaderName};
-use super::name_addr::AddrForm;
+use super::name_addr::{AddrForm, BareAddrSpec};
 use super::params::ParamReading;
 use super::single_valued::Listed;
 pub use super::token_params::Leading;
@@ -47,6 +47,9 @@ pub trait NameAddrKind: HeaderKind {
     /// A bare value whose `;` comes before its `@` reads its URI up to that
     /// `@` once the strict read failed (a From or To, RFC 3261 §20).
     const BARE_USER_SEMICOLON: bool = false;
+    /// What a bare addr-spec may hold beside header parameters: a list
+    /// header's reads a `?` as the URI's headers.
+    const BARE: BareAddrSpec = BareAddrSpec::UriHeaders;
     /// A line may be the `*` wildcard alone (RFC 3261 §20.10), which holds no
     /// address: it reads as no value.
     const WILDCARD: bool = false;
@@ -192,10 +195,20 @@ kinds! {
     ProxyAuthenticate => ProxyAuthenticate, Opaque;
 }
 
-capability! { NameAddrKind: ReferTo, ReplyTo }
+/// RFC 3515 §2.1, RFC 3261 §20.31: one `name-addr / addr-spec` a line.
+macro_rules! single_kinds {
+    ($($marker:ident),+) => {
+        $(impl NameAddrKind for $marker {
+            const BARE: BareAddrSpec = BareAddrSpec::UriHeadersAndComma;
+        })+
+    };
+}
+
+single_kinds!(ReferTo, ReplyTo);
 
 impl NameAddrKind for Contact {
     const WILDCARD: bool = true;
+    const BARE: BareAddrSpec = BareAddrSpec::Bracketed;
 }
 
 /// The headers whose address names a party and is never resolved.
@@ -207,7 +220,13 @@ macro_rules! identity_kinds {
     };
 }
 
-identity_kinds!(ReferredBy, Diversion, HistoryInfo, RemotePartyId);
+identity_kinds!(Diversion, HistoryInfo, RemotePartyId);
+
+/// RFC 3892 §3: one `name-addr / addr-spec`, a party's identity.
+impl NameAddrKind for ReferredBy {
+    const ROLE: UriRole = UriRole::Identity;
+    const BARE: BareAddrSpec = BareAddrSpec::UriHeadersAndComma;
+}
 
 /// The dialog's two parties: a bare value may hold a `;` before its `@`.
 macro_rules! party_kinds {
@@ -215,6 +234,7 @@ macro_rules! party_kinds {
         $(impl NameAddrKind for $marker {
             const ROLE: UriRole = UriRole::Identity;
             const BARE_USER_SEMICOLON: bool = true;
+            const BARE: BareAddrSpec = BareAddrSpec::Bracketed;
         })+
     };
 }

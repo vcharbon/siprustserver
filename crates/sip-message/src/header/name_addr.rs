@@ -100,7 +100,8 @@ impl NameAddr {
     /// the one URI reader in `role` with no whitespace inside the brackets,
     /// then the header parameters and nothing else. A bare addr-spec ends at
     /// the first `;`, every parameter after it is the header's, and it carries
-    /// no `,` or `?` (§20); [`AddrForm::NameAddrOnly`] refuses it.
+    /// no `,` or `?` ([`BareAddrSpec::Bracketed`], §20);
+    /// [`AddrForm::NameAddrOnly`] refuses it.
     pub fn parse_as(raw: &SipStr, form: AddrForm, role: UriRole) -> Result<Self, SipParseError> {
         Self::read(raw, &AddrGrammar::of(form, role), Reading::Strict).map(|read| read.addr)
     }
@@ -220,6 +221,20 @@ pub enum AddrForm {
     /// Service-Route), whose parameters a bare URI would swallow, and the
     /// bracketed RFC 6442 Geolocation value.
     NameAddrOnly,
+}
+
+/// What a bare `addr-spec` may hold that RFC 3261 §20 brackets elsewhere. A
+/// `;` after a bare addr-spec always starts the header parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareAddrSpec {
+    /// Contact, From and To (§20): a URI holding a `,` or `?` is bracketed.
+    Bracketed,
+    /// A list header: a `?` starts the URI's headers, and a `,` separates
+    /// entries, so an entry holds none.
+    UriHeaders,
+    /// A single-valued header: a `?` starts the URI's headers, and a `,` is
+    /// the URI's own (RFC 3515 §2.1 admits `addr-spec`).
+    UriHeadersAndComma,
 }
 
 #[cfg(test)]

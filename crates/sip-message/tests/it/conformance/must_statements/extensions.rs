@@ -117,6 +117,41 @@ pub(super) fn rows() -> Vec<Row> {
                 .with("refer-to", "Refer-To: <sip:carol@example.com>, <sip:dave@example.com>"),
             typed::<header::ReferTo>,
         ),
+        // RFC 3515 §2.1 and RFC 3892 §3 admit a bare `addr-spec`; RFC 3261 §20
+        // brackets a `,` or `?` in Contact, From and To only. A `?` starts the
+        // URI's headers, a `;` after the URI the header's parameters.
+        holds(
+            "3515-2.1-refer-to-bare-uri-headers",
+            request("REFER").with("refer-to", "Refer-To: sip:carol@192.0.2.9?Subject=hi;x=1"),
+            |msg| {
+                let refer = msg.header::<header::ReferTo>().ok_or("no value")?;
+                let refer = refer.map_err(|e| e.reason)?;
+                let subject = refer.uri().escaped_header("Subject");
+                let x = refer.params().value("x");
+                (subject.as_deref() == Some("hi") && x == Some("1"))
+                    .then_some(())
+                    .ok_or(format!("Subject {subject:?}, x {x:?}"))
+            },
+        ),
+        holds(
+            "3892-3-referred-by-bare-comma-in-the-user",
+            request("REFER").add("Referred-By: sip:carol,ext@192.0.2.9"),
+            typed::<header::ReferredBy>,
+        ),
+        holds(
+            "3261-20-diversion-bare-uri-headers",
+            head.clone().add("Diversion: sip:carol@192.0.2.9?Subject=hi;reason=unconditional"),
+            typed::<header::Diversion>,
+        ),
+        unread(
+            "3261-20-diversion-bare-comma-separates",
+            head.clone().add("Diversion: sip:carol,ext@192.0.2.9;reason=unconditional"),
+            typed::<header::Diversion>,
+        ),
+        dropped(
+            "3261-20-from-bare-question-mark",
+            head.clone().with("from", "From: sip:alice@example.com?Subject=hi;tag=a1"),
+        ),
         // RFC 3891 §6.1: exactly one to-tag and one from-tag, after one callid.
         unread(
             "3891-6.1-replaces-no-tags",

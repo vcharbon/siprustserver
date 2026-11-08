@@ -135,9 +135,13 @@ whole:
 - no whitespace inside `<...>`, and a `<` is closed;
 - after `>` only `;`-parameters, each `token [ = token / host /
   quoted-string ]` and each name once, then the end;
-- a bare addr-spec ends at the first `;`, carries no `,` or `?` (§20), and is
-  refused in the route family (Route, Record-Route, Path, Service-Route),
-  whose `lr` a bare URI would give away;
+- a bare addr-spec ends at the first `;`, and is refused in the route family
+  (Route, Record-Route, Path, Service-Route), whose `lr` a bare URI would give
+  away. In Contact, From and To it carries no `,` or `?` (§20 brackets them
+  there). In any other header a `?` starts its URI's headers, and a `,` is
+  its own only in a single-valued one (Refer-To, Referred-By, Reply-To): a
+  list header's `,` separates entries. RFC 3515 erratum 4652, which would
+  bracket Refer-To too, is Held for Document Update, not Verified;
 - a header whose grammar has no header parameters (P-Asserted-Identity and
   P-Preferred-Identity, RFC 3325 §9.1) reads a bare value as one URI whole,
   its `;`-parameters the URI's, and nothing after a `>`;

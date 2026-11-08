@@ -77,7 +77,7 @@ pub use item_separator::ItemSeparator;
 pub use media_type::MediaType;
 pub use name::{HeaderId, HeaderName};
 pub(crate) use name_addr::AddrGrammar;
-pub use name_addr::{AddrForm, NameAddr};
+pub use name_addr::{AddrForm, BareAddrSpec, NameAddr};
 pub use name_addr_header::NameAddrHeader;
 pub use numeric::NumericHeader;
 pub(crate) use params::read_params;
