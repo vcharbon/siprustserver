@@ -398,7 +398,7 @@ pub async fn run(
                         }
                     }
                 } else {
-                    ingress::on_event(&ctx, ev, arrival, Some(&mut parks)).await;
+                    ingress::on_event(&ctx, ev, arrival, Some(&parks)).await;
                 }
             }
             Work::Repl(cmd) => {
@@ -410,7 +410,7 @@ pub async fn run(
                 if released.arm || !released.deferred.is_empty() {
                     let arming =
                         reclaim::arm_parked(&ctx, &released.deferred, parks.unarmed()).await;
-                    take_in_again(&ctx, after_arming(&mut parks, arming));
+                    after_arming(&mut parks, arming);
                 }
                 for cmd in released.cmds {
                     on_repl_command(&ctx, cmd, &mut readmission, &mut parks).await
@@ -421,26 +421,16 @@ pub async fn run(
     }
 }
 
-/// What the deferred calls of an arming pass take in again, in order, given
-/// whether each one's arming was queued: the copies each held, then, for an
-/// arming its call's released queue discarded, the notice that it ran, so the
-/// copies are answered as a gone call's before the call stops being deferred.
-fn after_arming(parks: &mut DeferredParks, arming: Vec<(String, bool)>) -> Vec<CallEvent> {
-    let mut events = Vec::new();
+/// Note how an arming pass left each deferred call: its arming queued, or
+/// discarded by the call's released queue, the call ended and no longer
+/// deferred.
+fn after_arming(parks: &mut DeferredParks, arming: Vec<(String, bool)>) {
     for (call_ref, queued) in arming {
-        events.extend(parks.arming(&call_ref));
-        if !queued {
-            events.push(reclaim::deferred::arming_ran(&call_ref));
+        if queued {
+            parks.arming(&call_ref);
+        } else {
+            parks.armed(&call_ref);
         }
-    }
-    events
-}
-
-/// Take `events` in again on a later turn of the loop, in order, behind what
-/// this turn queued.
-fn take_in_again(ctx: &RouterCtx, events: Vec<CallEvent>) {
-    for event in events {
-        let _ = ctx.reentry_tx.send(event);
     }
 }
 
@@ -463,7 +453,7 @@ async fn on_repl_command(
             }
             if let Some(deferred) = readmission.arm_now() {
                 let arming = reclaim::arm_parked(ctx, &deferred, parks.unarmed()).await;
-                take_in_again(ctx, after_arming(parks, arming));
+                after_arming(parks, arming);
             }
         }
         ReplCommand::ReclaimCall(call_ref) => flush_turn::offer_reconcile(ctx, call_ref).await,

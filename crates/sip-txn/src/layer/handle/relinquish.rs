@@ -45,6 +45,18 @@ impl TransactionLayer {
         self.roundtrip(|reply| Command::RelinquishServer { key, reply }).await
     }
 
+    /// Relinquish the server transaction `key` while it has sent no final
+    /// and holds no answers to a CANCEL: it is deleted with its timers,
+    /// nothing sent, so a transaction seeded for its request takes its place.
+    /// One that sent a final, or took a CANCEL, keeps serving its request and
+    /// owes what it holds. Returns whether it went. Idempotent.
+    pub async fn relinquish_unanswered_server(
+        &self,
+        key: ServerTxnKey,
+    ) -> Result<bool, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::RelinquishUnansweredServer { key, reply }).await
+    }
+
     /// Relinquish the one client transaction on `branch` to the node that took
     /// its request's final: it is deleted with its timers, nothing sent but
     /// the held ACK of a non-2xx final it took. A response on that branch

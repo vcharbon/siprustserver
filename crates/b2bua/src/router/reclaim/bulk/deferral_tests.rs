@@ -187,9 +187,38 @@ async fn a_request_naming_no_call_ref_of_a_deferred_call_is_served_by_the_reclai
     drop(held);
     let lines = heard(caller.as_ref(), Duration::from_millis(500)).await;
     assert_eq!(lines, ["SIP/2.0 200 OK"], "the reclaimed call takes the BYE");
+    assert_eq!(n.metrics.repl_takeover_resolved_total(), 0, "a call of its own is no takeover");
     let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|c| c.call_ref).collect();
     assert_eq!(cdrs, std::slice::from_ref(&call.call_ref), "the call's one CDR");
     nothing_left(&n);
+}
+
+/// An arming queued for a parked call whose lock a turn held is aborted
+/// before it armed the call: the reaper's verdict on the aborted turn reaches
+/// the call, which no turn leaves parked.
+#[tokio::test(start_paused = true)]
+async fn an_arming_aborted_before_it_armed_leaves_no_call_parked() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w0", |_| {}, Vec::new()).await;
+    let ctx = n.core.router_ctx();
+    n.membership.set_conditions("w0", false, false);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let call = stored(&n, "aborted-arming").await;
+    send(&n, ReplCommand::ReclaimAll);
+    sip_clock::testkit::settle().await;
+    assert!(ctx.state.is_parked(&call.call_ref), "parked at once, its arming held");
+
+    let held = ctx.state.lock(&call.call_ref).await;
+    n.membership.set_conditions("w0", true, false);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        ctx.dispatcher.in_flight().abort(&call.call_ref),
+        "the queued arming waits on the lock"
+    );
+    sip_clock::testkit::settle().await;
+    drop(held);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!ctx.state.is_parked(&call.call_ref), "no call is left parked");
 }
 
 /// A readiness flap between the arming pass and the arming its call's turn

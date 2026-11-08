@@ -162,8 +162,10 @@ impl B2buaCore {
     /// materialised") that the bulk-`ReclaimAll` race only produces under
     /// timing: the failover tests use it to pin the on-demand reclaim read-path.
     /// Test/observability only — production teardown goes through the router's
-    /// `release_call`.
+    /// `release_call`. Taken under the call's lock when free, so the lock entry
+    /// goes with the guard; a holder's guard takes it otherwise.
     pub fn drop_live_copy(&self, call_ref: &str) -> bool {
+        let _guard = self.ctx.state.try_lock(call_ref);
         self.ctx.state.drop_local(call_ref)
     }
 }

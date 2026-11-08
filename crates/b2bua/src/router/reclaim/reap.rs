@@ -62,12 +62,16 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
 
 /// End `ghost` on a task of its own, under its call's lock once the turn
 /// holding it let it go, unless a copy of the call is live here by then. The
-/// body was evicted, so this task is all that is left to end it; the
-/// dispatcher tracks it, so a crash of the node stops it with the call work it
-/// runs.
+/// body was evicted, so this task is all that is left to end it. The
+/// dispatcher tracks it before it starts, so a crash of the node stops it with
+/// the call work it runs, however close the crash.
 fn end_after_its_holder(ctx: &Arc<RouterCtx>, ghost: Enveloped) {
     let task_ctx = ctx.clone();
+    let (tracked, start) = tokio::sync::oneshot::channel::<()>();
     let task = observe::spawn_keeping_node(async move {
+        if start.await.is_err() {
+            return;
+        }
         let ctx = &task_ctx;
         let call_ref = ghost.call.call_ref.clone();
         let _guard = ctx.state.lock(&call_ref).await;
@@ -76,6 +80,7 @@ fn end_after_its_holder(ctx: &Arc<RouterCtx>, ghost: Enveloped) {
         }
     });
     ctx.dispatcher.track(task.abort_handle());
+    let _ = tracked.send(());
 }
 
 #[cfg(test)]

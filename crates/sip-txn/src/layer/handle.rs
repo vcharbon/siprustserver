@@ -81,6 +81,12 @@ pub(super) enum Command {
         key: ServerTxnKey,
         reply: oneshot::Sender<bool>,
     },
+    /// Delete the server transaction `key` with nothing sent while it has
+    /// sent no final and holds no CANCEL's answers; replies whether it went.
+    RelinquishUnansweredServer {
+        key: ServerTxnKey,
+        reply: oneshot::Sender<bool>,
+    },
     /// Count the transactions (any role/state) still attributed to `call_ref`.
     /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after
     /// serving a takeover event: when it reaches **0** the backup's served

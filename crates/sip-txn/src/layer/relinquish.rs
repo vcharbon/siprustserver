@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 
 use super::key::ServerTxnKey;
 use super::owner::Owner;
-use super::txn::TxnRef;
+use super::txn::{TxnRef, TxnState};
 
 impl Owner {
     /// Delete every client and server transaction attributed to `call_ref`,
@@ -64,6 +64,19 @@ impl Owner {
     pub(super) fn relinquish_server(&mut self, key: &ServerTxnKey, reply: oneshot::Sender<bool>) {
         self.waive_held_final(key);
         let _ = reply.send(self.delete_txn(TxnRef::Server(key.id())));
+    }
+
+    /// Delete the one server transaction `key` while it has sent no final
+    /// and holds no CANCEL's answers, owing nothing. Replies whether it went.
+    pub(super) fn relinquish_unanswered_server(
+        &mut self,
+        key: &ServerTxnKey,
+        reply: oneshot::Sender<bool>,
+    ) {
+        let unanswered = self.server(key.id()).is_some_and(|t| {
+            matches!(t.state, TxnState::Trying | TxnState::Proceeding) && t.unsent_cancel.is_none()
+        });
+        let _ = reply.send(unanswered && self.delete_txn(TxnRef::Server(key.id())));
     }
 }
 

@@ -213,6 +213,28 @@ pub(super) fn build_unborn_500(
     )
 }
 
+/// The bare **503 Service Unavailable** for an initial INVITE whose call is
+/// gone before the final it was owed (ADR-0022 X2/X3): the failure an
+/// upstream element reroutes on. Sent through the INVITE server transaction,
+/// the To-tag `minted` (RFC 3261 §8.2.6.2), no Retry-After, no Reason; the
+/// deployment's `advertisement` for a minted final rides.
+pub(super) fn build_unborn_503(
+    req: &sip_message::SipRequest,
+    minted: String,
+    advertisement: &CapabilitySet,
+) -> Result<SipResponse, GenerateError> {
+    generate_response(
+        req,
+        503,
+        "Service Unavailable",
+        &GenerateResponseOpts {
+            to_tag: Some(minted),
+            extra_headers: minted_final_lines(advertisement),
+            ..Default::default()
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -46,14 +46,14 @@ pub(super) fn queue_notice(ctx: &Arc<RouterCtx>, event: CallEvent) -> bool {
 }
 
 /// Take `event` in, with what the transaction layer states of it, amid the
-/// parks a bulk reclaim deferred, `parks`: a message for one of those calls
-/// queues behind its park ([`DeferredParks`]). An event the router raises
+/// parks a bulk reclaim deferred, `parks`: a copy of one of those calls'
+/// INVITE is that call's ([`DeferredParks`]). An event the router raises
 /// itself names its call and passes none.
 pub(super) async fn on_event(
     ctx: &Arc<RouterCtx>,
     event: CallEvent,
     arrival: Arrival,
-    parks: Option<&mut DeferredParks>,
+    parks: Option<&DeferredParks>,
 ) {
     let Arrival { matched_client_txn, opened_at } = arrival;
     // Per-method / per-(method,code) data-path counters. Every inbound SIP
@@ -130,10 +130,12 @@ pub(super) async fn on_event(
     // that primary and gets no final, its transaction relinquished with
     // nothing sent — never a second call.
     // A copy of the INVITE of a call whose park a bulk reclaim deferred is
-    // that call's: it keeps its transaction and queues behind the call's
-    // arming, which rebuilds the INVITE's own in its place, and waits for
-    // that arming while none is queued.
-    match initial_invite_copy(ctx, &event, &res, parks.as_deref()).await {
+    // that call's. Once the call's arming is queued, the copy keeps its
+    // transaction and queues behind it: the arming rebuilds the INVITE's own
+    // in its place. Before, the copy queues behind the park, unjudged, and is
+    // answered as a parked call answers one: merged.
+    let mut merged = false;
+    match initial_invite_copy(ctx, &event, &res, parks).await {
         InitialInvite::Own => {}
         InitialInvite::CopyOf { hit, unanswered } => {
             if unanswered {
@@ -141,15 +143,10 @@ pub(super) async fn on_event(
             }
             res.copy_of(hit, &event);
         }
-        InitialInvite::Deferred(copied) => {
-            if !copied.arm_queued {
-                if let Some(parks) = parks {
-                    parks.hold(&copied.hit.call_ref, event);
-                }
-                return;
-            }
-            res.copy_of(copied.hit, &event);
+        InitialInvite::Deferred(copied) if copied.arm_queued => {
+            res.copy_of_deferred(copied.hit, &event);
         }
+        InitialInvite::Deferred(_) => merged = true,
         InitialInvite::Foreign => {
             ctx.metrics.bump_foreign_invite_copy_dropped();
             relinquish_arrival(ctx, &event).await;
@@ -219,7 +216,7 @@ pub(super) async fn on_event(
     if class.is_new_call() {
         if let CallEvent::Sip { message, src, .. } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
-                if !admit::is_copy(ctx, &call_ref, req) {
+                if !merged && !admit::is_copy(ctx, &call_ref, req) {
                     match admit::admit(ctx, &call_ref, req, *src, class).await {
                         Some(hold) => unborn = Some(hold),
                         None => return,
@@ -250,6 +247,12 @@ pub(super) async fn on_event(
     }
     if let Outcome::Discarded(discarded) = offer.outcome {
         let Discarded { item, why, owed } = discarded;
+        if item.res.deferred_copy {
+            // The copy's call ended and released its queue: the copy is owed
+            // the final its caller never had, on the transaction it kept.
+            super::unroutable::answer_gone_copy(ctx, &item.event, ctx.id_gen.new_tag()).await;
+            return;
+        }
         let admitted = item.unborn.is_some();
         OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
     }

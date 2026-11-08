@@ -94,6 +94,8 @@ const FINALS: &[Row] = &[
     ("b2bua/src/router/responses.rs", "482", Rfc3261),
     ("b2bua/src/router/responses.rs", "500", InternalError),
     ("b2bua/src/router/responses.rs", "500", InternalError),
+    // A copy of a deferred call's INVITE whose call is gone by its turn.
+    ("b2bua/src/router/responses.rs", "503", InternalError),
     ("b2bua/src/router/responses.rs", "487", OtherRequest),
     ("b2bua/src/router/responses.rs", "481", OtherRequest),
     ("b2bua/src/router/responses.rs", "405", OtherRequest),

@@ -24,7 +24,7 @@ use sip_ids::TurnIds;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use super::reply_to::reply_to;
-use super::responses::{build_405, build_481};
+use super::responses::{build_405, build_481, build_unborn_503};
 use super::store_fault_gate::refuse_on_store_fault;
 use super::RouterCtx;
 use crate::store::StoreFaultPoint;
@@ -99,6 +99,20 @@ pub(super) async fn on_unroutable(ctx: &RouterCtx, event: &CallEvent, lookup: Lo
                 String::new(),
             );
         }
+    }
+}
+
+/// A copy of the caller's initial INVITE of a call whose bulk park was
+/// deferred, the call gone by the copy's turn, draws the bare 503 of a caller
+/// never answered (ADR-0022 X2/X3) on the transaction the copy kept, its
+/// To-tag `minted`: a request with no To-tag is in no dialog (RFC 3261
+/// §12.2.2).
+pub(super) async fn answer_gone_copy(ctx: &RouterCtx, event: &CallEvent, minted: String) {
+    let CallEvent::Sip { message, src, .. } = event else { return };
+    let SipMessage::Request(req) = message.as_ref() else { return };
+    let advertisement = &ctx.config.minted_final_advertisement;
+    if let Ok(answer) = build_unborn_503(req, minted, advertisement) {
+        let _ = ctx.txn.send_response(answer, reply_to(req, *src)).await;
     }
 }
 

@@ -54,13 +54,6 @@ pub(in crate::router) fn offer_arm(ctx: &Arc<RouterCtx>, call_ref: &str, l_max: 
     queue(ctx, notice(call_ref, TOPIC, ARM, serde_json::json!(l_max)))
 }
 
-/// The re-entry notice that the deferred arming of `call_ref` ran: sent by
-/// the arming's turn, and by the router loop for an arming its call's queue
-/// discarded.
-pub(in crate::router) fn arming_ran(call_ref: &str) -> CallEvent {
-    notice(call_ref, ARMING_ENDED, RAN, serde_json::Value::Null)
-}
-
 fn queue(ctx: &Arc<RouterCtx>, event: CallEvent) -> bool {
     super::super::ingress::queue_notice(ctx, event)
 }
@@ -131,9 +124,11 @@ async fn park_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
 /// instant, as the arming pass takes it (`bulk::arm_parked`), while the node's
 /// own endpoint reads ready; otherwise the call is left parked. A copy of the
 /// caller's INVITE that reached the call meanwhile kept the transaction the
-/// layer opened for it: that transaction gives way, with nothing sent, to the
-/// one the arming rebuilds, and the copy, queued behind, meets the rebuilt
-/// one.
+/// layer opened for it: while that transaction has sent no final and taken
+/// no CANCEL, it gives way, with nothing sent, to the one the arming
+/// rebuilds, and the copy, queued behind, meets the rebuilt one. One that
+/// took a CANCEL keeps its key and the 487 it holds; the arming seeds nothing
+/// in its place, and the undecided call ends asking nothing.
 async fn arm_turn(ctx: &Arc<RouterCtx>, call_ref: &str, l_max: i64) {
     let mut ended = ArmingRan { ctx, call_ref, ended: ArmingEnded::Ran };
     {
@@ -145,7 +140,7 @@ async fn arm_turn(ctx: &Arc<RouterCtx>, call_ref: &str, l_max: i64) {
         }
         if ctx.state.is_parked(call_ref) {
             if let Some(key) = ctx.state.peek(call_ref).as_ref().and_then(caller_invite_key) {
-                let _ = ctx.txn.relinquish_server(key).await;
+                let _ = ctx.txn.relinquish_unanswered_server(key).await;
             }
         }
         let smoothing = smoothing(ctx, ctx.clock.now_ms(), l_max);

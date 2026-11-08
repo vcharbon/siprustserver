@@ -31,9 +31,21 @@ pub(super) struct Resolution {
     /// until [`bind_indexed_leg`](Self::bind_indexed_leg) names the leg that
     /// owns the key.
     pub(super) indexed: Option<KeyKind>,
+    /// A copy of the caller's initial INVITE of this node's own call whose
+    /// park a bulk reclaim deferred ([`copy_of_deferred`](Self::copy_of_deferred)).
+    pub(super) deferred_copy: bool,
 }
 
 impl Resolution {
+    /// Take the deferred call an initial INVITE is a copy of
+    /// ([`DeferredParks::copied`]): the INVITE is that call's, on the
+    /// transaction it kept, which answers it the bare 503 when the call is
+    /// gone by its turn, the final it never had.
+    pub(super) fn copy_of_deferred(&mut self, hit: IndexHit, event: &CallEvent) {
+        self.copy_of(hit, event);
+        self.deferred_copy = true;
+    }
+
     /// Take the call an index lookup found for an event that states no
     /// `callRef`; an event that states no leg either is bound to the leg
     /// owning the matched key once the call is in hand.
@@ -110,6 +122,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                         initial_invite: true,
                         incarnation: None,
                         indexed: None,
+                        deferred_copy: false,
                     };
                 }
                 // In-dialog request: read our cr/lg from the Request-URI params.
@@ -126,6 +139,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                     initial_invite: false,
                     incarnation: None,
                     indexed: None,
+                    deferred_copy: false,
                 };
                 if let Some(leg) = request_leg(req) {
                     res.direction = leg_direction(&leg);
@@ -157,6 +171,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                     initial_invite: false,
                     incarnation: None,
                     indexed: None,
+                    deferred_copy: false,
                 };
                 if res.call_ref.is_none() {
                     if let Some(hit) = ctx.state.resolve_from_sip_key_sync(response_lookup(resp)) {
@@ -187,6 +202,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 initial_invite: false,
                 incarnation: None,
                 indexed: None,
+                deferred_copy: false,
             }
         }
         CallEvent::Timeout { call_ref, leg_id, .. } => {
@@ -198,6 +214,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 initial_invite: false,
                 incarnation: None,
                 indexed: None,
+                deferred_copy: false,
             }
         }
         CallEvent::Timer { call_ref, key, .. } => {
@@ -209,6 +226,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 initial_invite: false,
                 incarnation: None,
                 indexed: None,
+                deferred_copy: false,
             }
         }
         CallEvent::InternalEvent { call_ref, .. } => Resolution {
@@ -218,6 +236,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             initial_invite: false,
             incarnation: None,
             indexed: None,
+            deferred_copy: false,
         },
         // A lifecycle event is delivered, never dispatched: it names no call.
         CallEvent::Lifecycle(_) => Resolution {
@@ -227,6 +246,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             initial_invite: false,
             incarnation: None,
             indexed: None,
+            deferred_copy: false,
         },
     }
 }

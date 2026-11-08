@@ -57,6 +57,7 @@ fn resolution(call: &Call, leg: &str) -> Resolution {
         initial_invite: false,
         incarnation: None,
         indexed: None,
+        deferred_copy: false,
     }
 }
 

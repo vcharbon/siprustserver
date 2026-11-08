@@ -1,12 +1,14 @@
 //! The calls a bulk reclaim parked on a turn of their own because a turn held
-//! their lock, as ingress sees them until their deferred arming ran. A copy
-//! of such a call's initial INVITE keeps the transaction the layer opened for
-//! it and waits until the arming is queued, then queues behind it: the
-//! arming rebuilds the INVITE's own transaction in its place and asks an
-//! undecided call's decision again, and the copy's re-offer meets that
-//! transaction; a call gone by then answers the copy on the transaction it
-//! kept. A request naming no `callRef` of ours finds the call through the
-//! store's SIP index, which the bodies the reclaim reads carry.
+//! their lock, as ingress sees them until their deferred arming ran: a copy
+//! of such a call's initial INVITE is the call's. Once the arming is queued,
+//! the copy keeps the transaction the layer opened for it and queues behind
+//! the arming, which rebuilds the INVITE's own transaction in its place and
+//! asks an undecided call's decision again; the copy's re-offer meets that
+//! transaction, and a call gone by then answers the copy on the transaction
+//! it kept. Before, the copy queues behind the park, unjudged, and is
+//! answered as a parked call answers one. A request naming no `callRef` of
+//! ours finds the call through the store's SIP index, which the bodies the
+//! reclaim reads carry.
 
 use std::collections::HashMap;
 
@@ -15,16 +17,13 @@ use sip_message::SipRequest;
 
 use super::materialise::names_server_branch;
 use crate::store::resolve_in;
-use b2bua_sdk::event::CallEvent;
 
 /// One deferred call.
 struct Deferred {
     /// The body the bulk reclaim scanned.
     call: Call,
-    /// The call's arming is queued behind its park, or met a released queue.
+    /// The call's arming is queued behind its park.
     arm_queued: bool,
-    /// The copies of its initial INVITE that wait for the arming to be queued.
-    held: Vec<CallEvent>,
 }
 
 /// The router loop's deferred calls ([module doc](self)).
@@ -44,7 +43,7 @@ pub(super) struct Copied {
 
 impl DeferredParks {
     /// The call the bulk reclaim scanned as `call` waits for its deferred
-    /// park; a call already deferred keeps what it holds.
+    /// park; a call already deferred stays as it is.
     pub(super) fn defer(&mut self, call: Call) {
         if self.calls.contains_key(&call.call_ref) {
             return;
@@ -53,15 +52,14 @@ impl DeferredParks {
             self.index.insert(key, call.call_ref.clone());
         }
         let call_ref = call.call_ref.clone();
-        self.calls.insert(call_ref, Deferred { call, arm_queued: false, held: Vec::new() });
+        self.calls.insert(call_ref, Deferred { call, arm_queued: false });
     }
 
-    /// The arming of `call_ref` is queued, or met its released queue: the
-    /// copies its INVITE held, to take in again behind it.
-    pub(super) fn arming(&mut self, call_ref: &str) -> Vec<CallEvent> {
-        let Some(deferred) = self.calls.get_mut(call_ref) else { return Vec::new() };
-        deferred.arm_queued = true;
-        std::mem::take(&mut deferred.held)
+    /// The arming of `call_ref` is queued behind its park.
+    pub(super) fn arming(&mut self, call_ref: &str) {
+        if let Some(deferred) = self.calls.get_mut(call_ref) {
+            deferred.arm_queued = true;
+        }
     }
 
     /// The deferred arming of `call_ref` met the node's endpoint not reading
@@ -72,21 +70,14 @@ impl DeferredParks {
         }
     }
 
-    /// The deferred arming of `call_ref` ran: the call is resident, or gone.
+    /// The deferred arming of `call_ref` ran, or met the call's released
+    /// queue: the call is resident, or gone.
     pub(super) fn armed(&mut self, call_ref: &str) {
         let Some(deferred) = self.calls.remove(call_ref) else { return };
         for key in call::call_index_keys(&deferred.call) {
             if self.index.get(&key).is_some_and(|owner| owner == call_ref) {
                 self.index.remove(&key);
             }
-        }
-    }
-
-    /// Hold `event`, a copy of the initial INVITE of the deferred `call_ref`
-    /// whose arming is not queued yet.
-    pub(super) fn hold(&mut self, call_ref: &str, event: CallEvent) {
-        if let Some(deferred) = self.calls.get_mut(call_ref) {
-            deferred.held.push(event);
         }
     }
 

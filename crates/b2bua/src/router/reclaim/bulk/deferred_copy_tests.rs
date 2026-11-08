@@ -40,6 +40,16 @@ struct Scene {
 
 impl Scene {
     async fn deferred(closed: bool) -> Self {
+        Self::reclaimed(closed, true).await
+    }
+
+    /// The same node, its reclaim having parked the call at once, no turn
+    /// holding its lock, behind a closed gate.
+    async fn parked() -> Self {
+        Self::reclaimed(true, false).await
+    }
+
+    async fn reclaimed(closed: bool, deferred: bool) -> Self {
         let net = SimulatedSignalingNetwork::new(1);
         let asked = Arc::new(AtomicUsize::new(0));
         let count = asked.clone();
@@ -59,7 +69,10 @@ impl Scene {
         let mut ids = sip_ids::TurnIds::fixed(1);
         let call = build_initial_call(&invite("w0", "w1", CID), src(), &config, &mut ids, 0);
         put_body(&n.store, PRI, "w0", &call).await;
-        let held = Some(n.core.router_ctx().state.lock(&call.call_ref).await);
+        let held = match deferred {
+            true => Some(n.core.router_ctx().state.lock(&call.call_ref).await),
+            false => None,
+        };
         n.core.fail_back_sender().expect("a wired node").send(ReplCommand::ReclaimAll).unwrap();
         sip_clock::testkit::settle().await;
         Self { n, caller, call, held, asked }
@@ -187,62 +200,89 @@ async fn a_retransmission_of_a_deferred_calls_invite_is_served_by_the_reclaimed_
     s.no_new_call(1).await;
 }
 
-/// Behind a closed gate the retransmissions wait for the arming, which seeds
-/// the INVITE's transaction and asks the undecided call's decision again.
+/// A parked call behind a closed gate, its park not deferred, answers its
+/// caller's INVITE retransmission merged, at once (RFC 3261 §8.2.2.2): the
+/// outcome a deferred call's copy gets behind a closed gate too.
 #[tokio::test(start_paused = true)]
-async fn retransmissions_behind_a_closed_gate_wait_for_the_deferred_calls_arming() {
-    let mut s = Scene::deferred(true).await;
-    s.retransmit().await;
-    s.retransmit().await;
-    s.let_go().await;
-    assert!(s.finals().await.is_empty(), "no final before the arming");
+async fn a_retransmission_to_a_parked_call_behind_a_closed_gate_is_answered_merged() {
+    let s = Scene::parked().await;
     assert!(s.n.core.router_ctx().state.is_parked(&s.call.call_ref), "parked, not armed");
 
+    s.retransmit().await;
+    s.answered_once("SIP/2.0 482").await;
     s.open();
-    s.answered_once("SIP/2.0 486").await;
-    assert_eq!(s.asked.load(Ordering::SeqCst), 1, "the decision asked again once");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(s.asked.load(Ordering::SeqCst), 0, "the merged caller's call asks nothing");
     s.no_new_call(1).await;
 }
 
-/// The record went while a copy waited for the arming: the park finds no
-/// call, and the copy is answered as one of a call that is gone.
+/// Behind a closed gate a copy queues behind the deferred park, unjudged,
+/// and is answered merged once the park ran, as a parked call answers it:
+/// a final within the turn of the lock's holder, never held for the gate.
 #[tokio::test(start_paused = true)]
-async fn a_copy_held_for_a_call_gone_by_its_park_is_answered_once() {
+async fn retransmissions_behind_a_closed_gate_are_answered_as_the_parked_call_answers_them() {
     let mut s = Scene::deferred(true).await;
+    s.retransmit().await;
+    s.retransmit().await;
+    s.let_go().await;
+    assert!(s.n.core.router_ctx().state.is_parked(&s.call.call_ref), "parked, not armed");
+
+    s.answered_once("SIP/2.0 482").await;
+    s.open();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(s.asked.load(Ordering::SeqCst), 0, "the merged caller's call asks nothing");
+    s.no_new_call(1).await;
+}
+
+/// The record went while a copy waited behind the arming: the park finds no
+/// call, and the copy draws the bare 503 of a caller never answered.
+#[tokio::test(start_paused = true)]
+async fn a_copy_queued_for_a_call_gone_by_its_park_is_answered_once() {
+    let mut s = Scene::deferred(false).await;
     s.retransmit().await;
     s.record_gone().await;
     s.let_go().await;
-    s.open();
 
-    s.answered_once("SIP/2.0 481").await;
+    s.answered_once("SIP/2.0 503 Service Unavailable").await;
     assert_eq!(s.asked.load(Ordering::SeqCst), 0, "no decision is asked");
     s.no_new_call(0).await;
 }
 
-/// The holding turn ended the call and queued its release: the arming meets
-/// the released queue, and the copy it held is answered as one of a call
-/// that ended.
+/// The holding turn ended the call and queued its release: a copy offered
+/// to the released queue draws the bare 503 of a caller never answered.
 #[tokio::test(start_paused = true)]
-async fn a_copy_held_for_a_call_whose_arming_meets_its_release_is_answered_once() {
-    let mut s = Scene::deferred(true).await;
-    s.retransmit().await;
+async fn a_copy_meeting_its_deferred_calls_release_is_answered_once() {
+    let mut s = Scene::deferred(false).await;
     s.record_gone().await;
     let r = s.call.call_ref.clone();
     s.n.core.router_ctx().dispatcher.release(&r, RemovalClass::Terminated);
-    s.open();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    s.retransmit().await;
     s.let_go().await;
 
-    s.answered_once("SIP/2.0 481").await;
+    s.answered_once("SIP/2.0 503 Service Unavailable").await;
     assert_eq!(s.asked.load(Ordering::SeqCst), 0, "no decision is asked");
     s.no_new_call(0).await;
 }
 
-/// The caller CANCELs its INVITE while a copy waits for the arming: the
-/// setup ends cancelled, its decision never asked.
+/// The caller CANCELs its INVITE while a copy waits for the arming behind a
+/// closed gate: the setup ends cancelled, its decision never asked.
 #[tokio::test(start_paused = true)]
 async fn a_cancel_while_a_copy_waits_ends_the_setup_unasked() {
-    let mut s = Scene::deferred(true).await;
+    cancelled_while_a_copy_waits(true).await;
+}
+
+/// The caller CANCELs its INVITE while a copy is queued behind the arming
+/// with the gate open: the 487 its transaction holds still leaves, and the
+/// arming asks no decision for the cancelled setup.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_while_a_copy_is_queued_behind_the_arming_ends_the_setup_unasked() {
+    cancelled_while_a_copy_waits(false).await;
+}
+
+/// The caller CANCELs its INVITE while a copy waits behind the deferred call,
+/// held for the arming (`closed`) or queued behind it.
+async fn cancelled_while_a_copy_waits(closed: bool) {
+    let mut s = Scene::deferred(closed).await;
     s.retransmit().await;
     s.send(&cancel()).await;
     s.let_go().await;

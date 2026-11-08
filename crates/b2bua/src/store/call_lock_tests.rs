@@ -104,7 +104,9 @@ async fn an_unbound_lock_and_an_aborted_waiter_leave_no_entry() {
 
 /// Guards of one call dropped at once on several threads: the takers of a
 /// call never resident, and the failed attempts beside the release of a
-/// resident one, leave no entry once all are gone.
+/// resident one, leave no entry once all are gone. A smoke test of the
+/// drop's cross-thread check under real scheduling, not a proof of its
+/// fence: interleavings it never meets it does not rule out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guards_dropped_at_once_on_several_threads_leave_no_entry() {
     let state = state();
