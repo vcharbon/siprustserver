@@ -10,13 +10,21 @@
 //! proxy's own refusals (its self-gate closed, no worker alive), an owner
 //! that is down, the dual-face edge, names that resolve to nothing, and the
 //! health probe reading the workers' OPTIONS answers.
+//!
+//! Every datagram the proxy sends is recorded with where it went, delivered to
+//! a peer or to an address no one listens on; a response sent anywhere but the
+//! address its top Via names fails the case (RFC 3261 §18.2.2). A response
+//! delivered to a worker is routed by the owner its cookie names, not by its
+//! Via (ADR-0055 §8), and is left to the lanes that read the owner rule.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use sip_clock::Clock;
+use sip_message::ip_literal::ip_host;
+use sip_message::{SipMessage, SipParser, SipParserLimits};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
@@ -75,6 +83,8 @@ pub enum Failure {
     ParserPanicked,
     /// The health probe's loop ended: a panic reading a worker's answer.
     ProbeEnded,
+    /// A response went somewhere other than the address its top Via names.
+    WrongDestination,
 }
 
 /// What the rig runs beside the plain proxy.
@@ -158,7 +168,10 @@ pub struct Rig {
     /// The health probe's loop, in the probed variant.
     pub probe: Option<JoinHandle<()>>,
     variant: Variant,
+    net: SimulatedSignalingNetwork,
     peers: [Box<dyn UdpEndpoint>; 4],
+    /// Every datagram the proxy sent and where it went, as far as recorded.
+    sent: Mutex<Vec<(SocketAddr, Vec<u8>)>>,
 }
 
 fn worker(id: &str, at: (&str, u16), health: WorkerHealth) -> WorkerEntry {
@@ -239,7 +252,16 @@ impl Rig {
             }
             _ => None,
         };
-        Rig { task: tokio::spawn(core.run()), metrics, observer, probe, variant, peers }
+        Rig {
+            task: tokio::spawn(core.run()),
+            metrics,
+            observer,
+            probe,
+            variant,
+            net,
+            peers,
+            sent: Mutex::new(Vec::new()),
+        }
     }
 
     /// Where `from` reaches the proxy: a worker its internal face where it has
@@ -273,14 +295,42 @@ impl Rig {
         tokio::time::sleep(GAP).await;
     }
 
-    /// Run the clock past the proxy's sweeps and its resolver's timeout.
+    /// Run the clock past the proxy's sweeps and its resolver's timeout, then
+    /// record what the peers were sent and what reached no one.
     pub async fn run_past_sweeps(&self) {
         tokio::time::sleep(RUN_PAST_SWEEPS).await;
+        for peer in [Peer::Caller, Peer::WorkerA, Peer::WorkerB, Peer::Callee] {
+            self.drain(peer);
+        }
+        let lost = self.net.drain_undeliverable().await;
+        let mut sent = self.sent.lock().expect("the send record");
+        sent.extend(lost.into_iter().map(|p| (p.dst, p.raw)));
     }
 
     /// Every datagram `peer` has received, in order.
     pub fn drain(&self, peer: Peer) -> Vec<Vec<u8>> {
-        std::iter::from_fn(|| self.peer(peer).try_recv()).map(|p| p.raw.to_vec()).collect()
+        let endpoint = self.peer(peer);
+        let received: Vec<Vec<u8>> =
+            std::iter::from_fn(|| endpoint.try_recv()).map(|p| p.raw.to_vec()).collect();
+        let at = endpoint.local_addr();
+        let mut sent = self.sent.lock().expect("the send record");
+        sent.extend(received.iter().map(|raw| (at, raw.clone())));
+        received
+    }
+
+    /// The first response recorded as sent somewhere other than its top Via's
+    /// target, those delivered to a worker aside.
+    fn misdirected(&self) -> Option<(SocketAddr, SocketAddr)> {
+        let workers = [addr(WORKER_A), addr(WORKER_B)];
+        let sent = self.sent.lock().expect("the send record");
+        sent.iter().find_map(|(to, raw)| {
+            let to = canonical(*to);
+            if workers.contains(&to) {
+                return None;
+            }
+            let target = response_target(raw)?;
+            (target != to).then_some((to, target))
+        })
     }
 
     /// The failure the case ended in, if any.
@@ -291,10 +341,35 @@ impl Rig {
             Some(Failure::ProbeEnded)
         } else if self.metrics.parse_panics() > 0 {
             Some(Failure::ParserPanicked)
+        } else if self.misdirected().is_some() {
+            Some(Failure::WrongDestination)
         } else {
             None
         }
     }
+}
+
+fn canonical(addr: SocketAddr) -> SocketAddr {
+    SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
+/// Where a response over UDP goes by its own top Via: `received` and an
+/// observed `rport` over the sent-by. `None` for a request, a datagram no
+/// reading accepts, another transport, or a sent-by name (RFC 3263 §5
+/// resolves it).
+fn response_target(raw: &[u8]) -> Option<SocketAddr> {
+    let limits = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
+    let SipMessage::Response(response) =
+        sip_message::CustomParser::with_limits(limits).parse(raw).ok()?
+    else {
+        return None;
+    };
+    let via = response.via().first();
+    if !via.transport().eq_ignore_ascii_case("UDP") {
+        return None;
+    }
+    let (host, port) = via.response_target();
+    Some(canonical(SocketAddr::new(ip_host(host)?, port)))
 }
 
 /// What a case did: its failure, and how much of the proxy it reached.

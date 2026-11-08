@@ -4,12 +4,19 @@
 //! allocation cap every target runs under; and the lane's small stack.
 
 pub mod alloc_cap;
+pub mod conformance_lane;
 pub mod frame_lane;
 pub mod input;
 pub mod message_lane;
 pub mod proxy_lane;
 pub mod turn_lane;
 pub mod unheld_lane;
+
+/// The test tree's path to the message lane's typed reads, which the
+/// conformance suite's files name.
+mod no_panic_lane {
+    pub(crate) use crate::message_lane::typed_read;
+}
 
 #[global_allocator]
 static ALLOC: alloc_cap::CappedAlloc = alloc_cap::CappedAlloc;

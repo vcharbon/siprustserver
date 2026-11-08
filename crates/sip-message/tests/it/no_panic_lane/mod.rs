@@ -29,6 +29,7 @@ use proptest::test_runner::TestRunner;
 use wire_mutations::lane::{on_lane_stack, LANE_STACK};
 use wire_mutations::{mutate, Mutation};
 
+mod break_rule;
 mod echo;
 mod probe;
 pub(crate) mod readable;

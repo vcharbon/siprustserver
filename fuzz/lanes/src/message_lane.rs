@@ -1,6 +1,8 @@
 //! The message layer's no-panic lane: every entry point that takes bytes
 //! ([`probe`]) and its synthetic seeds ([`seeds`]).
 
+#[path = "../../../crates/sip-message/tests/it/no_panic_lane/break_rule.rs"]
+mod break_rule;
 #[path = "../../../crates/sip-message/tests/it/no_panic_lane/echo.rs"]
 mod echo;
 #[path = "../../../crates/sip-message/tests/it/no_panic_lane/probe.rs"]
@@ -10,4 +12,4 @@ mod readable;
 #[path = "../../../crates/sip-message/tests/it/no_panic_lane/seeds.rs"]
 pub mod seeds;
 #[path = "../../../crates/sip-message/tests/it/no_panic_lane/typed_read.rs"]
-mod typed_read;
+pub(crate) mod typed_read;

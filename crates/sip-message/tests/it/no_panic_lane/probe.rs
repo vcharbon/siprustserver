@@ -8,7 +8,7 @@
 use std::fmt::Debug;
 
 use super::typed_read::{own_reading, values, ReadLines};
-use super::{echo, readable};
+use super::{break_rule, echo, readable};
 use sip_message::generators::cancel::generate_cancel;
 use sip_message::generators::generate_invalid_request;
 use sip_message::generators::response::{generate_response, retag_response, GenerateResponseOpts};
@@ -83,6 +83,7 @@ fn parsers() -> Vec<(&'static str, CustomParser)> {
         ("lenient", CustomParser::with_limits(lenient)),
         ("stream", CustomParser::with_limits(stream)),
         ("tight", CustomParser::with_limits(tight)),
+        ("exempting", break_rule::exempting()),
     ]
 }
 
@@ -100,9 +101,23 @@ pub fn message(raw: &[u8], d: &mut Digest) {
             d.note("shared", &parser.parse_shared(Bytes::copy_from_slice(raw)));
             d.note("header-fields", &parser.parse_header_fields(raw));
         }
-        // The stream and tight sets accept a subset of what these two accept.
-        if let (Ok(msg), "default" | "lenient") = (parsed, name) {
-            parsed_message(&msg, name == "default", d);
+        let Ok(msg) = parsed else { continue };
+        match name {
+            "default" => {
+                parsed_message(&msg, true, d);
+                break_rule::assert_refused(&msg, &parser, name);
+            }
+            "lenient" => parsed_message(&msg, false, d),
+            // An exempted shape reads through every typed reader, and only
+            // the shapes its set names are lifted.
+            "exempting" => {
+                readable::assert_readable(&msg);
+                break_rule::assert_refused(&msg, &parser, name);
+                break_rule::assert_exempted_repeat(&msg, &parser, &CustomParser::new());
+            }
+            // The stream and tight sets accept a subset of what the default
+            // set accepts.
+            _ => {}
         }
     }
 }

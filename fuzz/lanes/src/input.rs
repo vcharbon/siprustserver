@@ -92,3 +92,13 @@ pub fn multipart_case(data: &[u8]) -> (&[u8], &[u8]) {
 pub fn multipart_input(boundary: &[u8], body: &[u8]) -> Vec<u8> {
     [boundary, b"\n", body].concat()
 }
+
+/// A must-accept case: byte 0 the grammar target, the rest the choices that
+/// steer its derivation.
+pub fn grammar_case(data: &[u8]) -> (u8, &[u8]) {
+    proxy_case(data)
+}
+
+pub fn grammar_input(target: u8, steer: &[u8]) -> Vec<u8> {
+    proxy_input(target, steer)
+}

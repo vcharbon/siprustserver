@@ -105,6 +105,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "must_accept"
+path = "fuzz_targets/must_accept.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "multipart"
 path = "fuzz_targets/multipart.rs"
 test = false

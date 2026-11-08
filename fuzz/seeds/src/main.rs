@@ -15,9 +15,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use fuzz_lanes::conformance_lane::generated;
 use fuzz_lanes::frame_lane::seeds as frame_seeds;
 use fuzz_lanes::input::{
-    invite_input, multipart_input, pair_input, probe_input, proxy_input, turn_input, variant_input,
+    grammar_input, invite_input, multipart_input, pair_input, probe_input, proxy_input, turn_input,
+    variant_input,
 };
 use fuzz_lanes::message_lane::seeds as message_seeds;
 use fuzz_lanes::proxy_lane::probe;
@@ -156,6 +158,12 @@ fn lane_seeds() -> Corpus {
     }
     for line in DIGEST {
         add(&mut corpus, "credentials", line.as_bytes().to_vec());
+    }
+    for target in 0..generated::target_count() {
+        let Ok(target) = u8::try_from(target) else { continue };
+        for steer in [&[][..], &[0; 32], &[255; 32]] {
+            add(&mut corpus, "must_accept", grammar_input(target, steer));
+        }
     }
     corpus
 }

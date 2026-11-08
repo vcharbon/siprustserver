@@ -19,7 +19,9 @@ const VALUES_PER_TARGET_UNDER_ANOTHER_PARSER: usize = 30;
 /// Values per target in the slow lane.
 const VALUES_PER_TARGET_SLOW: usize = 5000;
 
-fn grammar() -> Grammar {
+/// The suite's grammar: RFC 3261 §25.1 and the extensions' grammars, errata
+/// applied.
+pub fn grammar() -> Grammar {
     Grammar::parse(include_str!("grammar.abnf"))
 }
 
@@ -325,6 +327,31 @@ fn sweep(count: usize) -> Failures {
     failures
 }
 
+/// One value of the target `pick` names, its choices steered by `steer`, in a
+/// whole message: the production path reads it and its typed reader reads its
+/// line, unless a stated rule refuses the form ([`failing_row`] is `None`).
+pub fn must_accept(grammar: &Grammar, pick: u8, steer: &[u8]) -> Result<(), String> {
+    let all = targets();
+    let target = &all[usize::from(pick) % all.len()];
+    let generated = value(grammar, target, &mut Rng::steered(target.row, steer));
+    let outcome = match read(&wrap(target, &generated)) {
+        Ok(msg) => (target.read)(&msg),
+        Err(e) => Err(e.reason),
+    };
+    match outcome {
+        Err(reason) if failing_row(&reason).is_some() => {
+            let input = String::from_utf8_lossy(&generated);
+            Err(format!("{}: {input:?} does not read: {reason}", target.row))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// How many targets [`must_accept`] picks among.
+pub fn target_count() -> usize {
+    targets().len()
+}
+
 /// A few values of every target: a sweep under another parser.
 pub fn datagrams() -> Vec<Vec<u8>> {
     let grammar = grammar();
@@ -336,6 +363,20 @@ pub fn datagrams() -> Vec<Vec<u8>> {
         }
     }
     all
+}
+
+/// The must-accept property a fuzzer drives, over steering bytes that take the
+/// first alternative, the last, and a spread of both.
+#[test]
+fn a_steered_value_reads() {
+    let grammar = grammar();
+    let steers: [Vec<u8>; 3] = [vec![0; 64], vec![255; 64], (0..=255).collect()];
+    for pick in 0..target_count() {
+        let pick = u8::try_from(pick).expect("fewer than 256 targets");
+        for steer in &steers {
+            must_accept(&grammar, pick, steer).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
 }
 
 #[test]

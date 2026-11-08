@@ -21,11 +21,17 @@ enum Node {
 }
 
 /// A seeded generator of small numbers: one sequence per seed, on any platform.
-pub struct Rng(u64);
+/// A steered one takes its choices from given bytes first, so a fuzzer that
+/// mutates the bytes walks the grammar's derivations, each one valid.
+pub struct Rng {
+    state: u64,
+    steer: Vec<u8>,
+    at: usize,
+}
 
 impl Rng {
     pub fn new(seed: u64) -> Self {
-        Self(seed | 1)
+        Self { state: seed | 1, steer: Vec::new(), at: 0 }
     }
 
     /// A seed named by `text`.
@@ -37,15 +43,36 @@ impl Rng {
         Self::new(hash)
     }
 
+    /// The generator named by `text` whose first choices `steer` makes: a
+    /// byte per choice of up to 256 outcomes, two per larger one.
+    pub fn steered(text: &str, steer: &[u8]) -> Self {
+        Self { steer: steer.to_vec(), ..Self::named(text) }
+    }
+
     fn next(&mut self) -> u64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        self.state ^= self.state >> 12;
+        self.state ^= self.state << 25;
+        self.state ^= self.state >> 27;
+        self.state.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    }
+
+    /// The next steering byte, `None` once they are spent.
+    fn steering(&mut self) -> Option<u64> {
+        let byte = self.steer.get(self.at)?;
+        self.at += 1;
+        Some(u64::from(*byte))
+    }
+
+    fn choice(&mut self, n: usize) -> u64 {
+        let steered = match self.steering() {
+            Some(low) if n > 256 => self.steering().map(|high| high << 8 | low),
+            steered => steered,
+        };
+        steered.unwrap_or_else(|| self.next())
     }
 
     pub fn below(&mut self, n: usize) -> usize {
-        usize::try_from(self.next() % n as u64).expect("a small bound")
+        usize::try_from(self.choice(n) % n as u64).expect("a small bound")
     }
 }
 
