@@ -29,6 +29,7 @@ pub mod arrival;
 pub mod fragmentation;
 pub mod net;
 pub mod parse_guard;
+pub mod poison;
 pub mod pre_ingress;
 pub mod queue;
 pub mod real;

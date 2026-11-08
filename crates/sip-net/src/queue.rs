@@ -14,7 +14,7 @@
 //! queue.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use tokio::sync::Notify;
 
@@ -52,9 +52,8 @@ impl PacketQueue {
     /// The queue state, recovered from a poisoned lock: every critical
     /// section leaves `Inner` whole, and [`close`](Self::close) runs from a
     /// `Drop`, where a panic aborts.
-    #[expect(clippy::disallowed_methods, reason = "the queue's poison-recovering lock helper")]
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::poison::locked(&self.inner)
     }
 
     /// Install the delivery tap. First installer wins (the recording decorator

@@ -28,6 +28,7 @@ too_many_lines = "warn"
 disallowed_macros = "allow"
 disallowed_methods = "allow"
 disallowed_types = "allow"
+await_holding_lock = "deny"
 
 [dependencies]
 tokio = { workspace = true }
@@ -36,6 +37,8 @@ thiserror = { workspace = true }
 socket2 = { workspace = true }
 libc = { workspace = true }
 sip-clock = { path = "../sip-clock" }
+# The packet queue's lock, recovered and counted when a panic poisons it.
+lock-poison = { path = "../lock-poison" }
 # The IP-literal readers the socket addresses are built with (re-exported);
 # the loopback tests parse what they received.
 sip-message = { path = "../sip-message" }

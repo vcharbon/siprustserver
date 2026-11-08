@@ -17,6 +17,7 @@
 mod fault_log;
 mod mode;
 mod pending;
+pub mod poison;
 mod real_side;
 
 pub use fault_log::{EnvFault, FaultLog};

@@ -270,8 +270,12 @@ unsafe_code = "forbid"
 # The disallowed lists of clippy.toml are the panic and purity rules of
 # ADR-0051; scripts/panic-sites.py runs them over the tiered crates, so every
 # other clippy run, test code included, holds them at `allow`.
+#
+# A std lock guard held across an `.await` blocks its worker thread on any
+# contender, a deadlock on a current-thread runtime: denied everywhere.
 [workspace.lints.clippy]
 too_many_lines = "warn"
 disallowed_macros = "allow"
 disallowed_methods = "allow"
 disallowed_types = "allow"
+await_holding_lock = "deny"

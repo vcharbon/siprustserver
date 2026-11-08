@@ -207,7 +207,7 @@ async fn subscribed_release_consults_engine_then_tears_down() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
-    let reqs = captured.lock().unwrap();
+    let reqs = captured.lock().unwrap().clone();
     assert_eq!(reqs.len(), 1, "exactly one release consult");
     let req = &reqs[0];
     assert_eq!(req.event, ReleaseEventKind::MaxCallDuration, "correct event kind");

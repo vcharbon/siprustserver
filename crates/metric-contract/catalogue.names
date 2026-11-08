@@ -389,6 +389,7 @@ call-limiter-runner limiter_holds gauge fixed {}
 call-limiter-runner limiter_fences gauge fixed {}
 call-limiter-runner limiter_change_markers gauge fixed {}
 call-limiter-runner limiter_admission_max gauge fixed {}
+call-limiter-runner limiter_poisoned_lock_recoveries_total counter fixed {lock}
 call-limiter-runner log_lines_dropped_total counter fixed {}
 call-limiter-runner trace_dropped_no_exporter_total counter fixed {}
 call-limiter-runner trace_denied_rate_total counter fixed {}

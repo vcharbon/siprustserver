@@ -1,6 +1,29 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
+
+/// A panic under the store's lock stops no later admit: the state is taken as
+/// it stood, and the recovery counted once.
+#[test]
+fn a_poisoned_store_recovers_and_counts_the_recovery() {
+    let store = Arc::new(CallStore::new(LimiterConfig { lease_sec: 10 }, Clock::test_at(0)));
+    let entries = [AdmitEntry { id: "trunk".into(), limit: 2 }];
+    assert_eq!(store.admit("first", 1, &entries, false), AdmitResult::Admitted);
+    let before = crate::poison::RECOVERIES.count("store");
+    let held = store.clone();
+    let poisoner = std::thread::spawn(move || {
+        let _guard = held.inner.lock();
+        panic!("a panic under the store's lock");
+    });
+    assert!(poisoner.join().is_err());
+    assert!(store.inner.is_poisoned());
+
+    assert_eq!(store.admit("second", 1, &entries, false), AdmitResult::Admitted);
+    assert_eq!(store.held("trunk"), 2, "the state as it stood, the new admit on it");
+    assert!(!store.inner.is_poisoned(), "the poison is cleared");
+    assert_eq!(crate::poison::RECOVERIES.count("store"), before + 1, "counted once");
+}
 
 #[tokio::test(start_paused = true)]
 async fn a_set_refreshed_many_times_keeps_one_pending_deadline() {

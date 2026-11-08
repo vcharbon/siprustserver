@@ -2,7 +2,9 @@
 //! verdict about the system under test.
 
 use std::fmt;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
+
+use crate::poison::locked;
 use std::time::Duration;
 
 /// One environment fault.
@@ -37,11 +39,11 @@ pub struct FaultLog(Mutex<Vec<EnvFault>>);
 impl FaultLog {
     /// Record `fault`.
     pub fn record(&self, fault: EnvFault) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).push(fault);
+        locked(&self.0).push(fault);
     }
 
     /// Every fault so far.
     pub fn faults(&self) -> Vec<EnvFault> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        locked(&self.0).clone()
     }
 }

@@ -19,6 +19,8 @@ workspace = true
 # The HTTP API's DTOs and lease bounds the server answers with.
 call-limiter-wire = { path = "../call-limiter-wire" }
 metric-catalogue = { path = "../metric-catalogue" }
+# The store's lock, recovered and counted when a panic poisons it.
+lock-poison = { path = "../lock-poison" }
 # The process counters (`/metrics` appends them) — default features, so no
 # OpenTelemetry tree here.
 observe = { path = "../observe", default-features = false }

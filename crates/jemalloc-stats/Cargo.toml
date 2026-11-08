@@ -27,6 +27,7 @@ too_many_lines = "warn"
 disallowed_macros = "allow"
 disallowed_methods = "allow"
 disallowed_types = "allow"
+await_holding_lock = "deny"
 
 # jemalloc has no MSVC target; on msvc this crate compiles to no-op stubs so the
 # `#[cfg(not(target_env = \"msvc\"))]` callers do not need a second cfg arm.

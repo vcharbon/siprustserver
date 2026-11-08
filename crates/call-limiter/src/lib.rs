@@ -18,6 +18,7 @@
 
 mod catalogue;
 mod metrics;
+pub mod poison;
 mod server;
 mod store;
 
