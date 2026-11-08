@@ -127,7 +127,7 @@ fn bounded(
 }
 
 /// The RabbitMQ CDR sink's env grammar, the one statement of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RabbitMqCdrSettings {
     /// AMQP URI (`amqp://user:pass@host:5672/vhost`), `B2BUA_CDR_RABBITMQ_URL`.
     /// The URI's own `connection_timeout` is not read: `connect_timeout`
@@ -232,11 +232,9 @@ mod tests {
 
     #[test]
     fn unset_or_blank_url_selects_no_sink() {
-        assert_eq!(RabbitMqCdrSettings::from_lookup(lookup(&[])), Ok(None));
-        assert_eq!(
-            RabbitMqCdrSettings::from_lookup(lookup(&[("B2BUA_CDR_RABBITMQ_URL", "  ")])),
-            Ok(None)
-        );
+        assert!(matches!(RabbitMqCdrSettings::from_lookup(lookup(&[])), Ok(None)));
+        let blank = lookup(&[("B2BUA_CDR_RABBITMQ_URL", "  ")]);
+        assert!(matches!(RabbitMqCdrSettings::from_lookup(blank), Ok(None)));
     }
 
     #[test]
@@ -244,28 +242,45 @@ mod tests {
         let s = RabbitMqCdrSettings::from_lookup(lookup(&[(
             "B2BUA_CDR_RABBITMQ_URL",
             "amqp://guest:guest@rabbitmq:5672/%2f",
-        )]));
+        )]))
+        .expect("ok")
+        .expect("some");
         assert_eq!(
-            s,
-            Ok(Some(RabbitMqCdrSettings {
-                url: "amqp://guest:guest@rabbitmq:5672/%2f".into(),
-                queue: "cdr".into(),
-                declare: OWN_DEFAULT,
-                bounds: CdrDeliveryBounds::default(),
-                tls: BrokerTls::PLAIN,
-            }))
+            (s.url.as_str(), s.queue.as_str(), s.declare, s.bounds),
+            (
+                "amqp://guest:guest@rabbitmq:5672/%2f",
+                "cdr",
+                OWN_DEFAULT,
+                CdrDeliveryBounds::default()
+            )
         );
+        assert!(!s.tls.is_tls(), "an amqp URL runs no TLS");
     }
 
+    /// The CA roots are the fixture CA (trusted nowhere) alone while the
+    /// settings are read, `SSL_CERT_FILE` and `SSL_CERT_DIR` restored after:
+    /// the test needs no CA store of the host. It runs in a process of its own
+    /// (nextest), before any thread.
     #[test]
     fn an_amqps_url_reads_its_tls_with_the_settings() {
-        let s = RabbitMqCdrSettings::from_lookup(lookup(&[(
+        const TEST_CA: &str =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../amqp-connect/tests/fixtures/test-ca.pem");
+        const VARS: [&str; 2] = ["SSL_CERT_FILE", "SSL_CERT_DIR"];
+        let before = VARS.map(std::env::var_os);
+        std::env::set_var("SSL_CERT_FILE", TEST_CA);
+        std::env::remove_var("SSL_CERT_DIR");
+        let read = RabbitMqCdrSettings::from_lookup(lookup(&[(
             "B2BUA_CDR_RABBITMQ_URL",
             "amqps://guest:guest@rabbitmq:5671/%2f",
-        )]))
-        .expect("the system's CA roots load")
-        .expect("a sink");
-        assert_ne!(s.tls, BrokerTls::PLAIN, "the connector is built with the settings");
+        )]));
+        for (var, value) in VARS.iter().zip(before) {
+            match value {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+        let s = read.expect("the fixture CA loads").expect("a sink");
+        assert!(s.tls.is_tls(), "the connector is built with the settings");
     }
 
     #[test]
@@ -447,9 +462,11 @@ mod tests {
             assert!(e.contains("B2BUA_CDR_RABBITMQ_URL"), "{v:?}: {e}");
         }
         assert!(with_url(&[("B2BUA_CDR_QUEUE", "8")]).expect("ok").is_some());
-        assert_eq!(
-            RabbitMqCdrSettings::from_lookup(lookup(&[("B2BUA_CDR_QUEUE", "0")])),
-            Ok(None),
+        assert!(
+            matches!(
+                RabbitMqCdrSettings::from_lookup(lookup(&[("B2BUA_CDR_QUEUE", "0")])),
+                Ok(None)
+            ),
             "without a broker a passthrough blocks on nothing"
         );
     }

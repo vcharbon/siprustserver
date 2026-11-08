@@ -29,18 +29,13 @@ impl BrokerTls {
         }
     }
 
+    /// Whether a stream over it runs TLS.
+    pub fn is_tls(&self) -> bool {
+        self.0.is_some()
+    }
+
     /// The connector of an `amqps` stream; `None` for a plain one.
     pub(crate) fn connector(&self) -> Option<&RustlsConnector> {
         self.0.as_ref()
     }
 }
-
-/// Two are equal when both are plain or both run TLS: every connector is
-/// built over the same system roots.
-impl PartialEq for BrokerTls {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.is_some() == other.0.is_some()
-    }
-}
-
-impl Eq for BrokerTls {}

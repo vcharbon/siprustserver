@@ -65,9 +65,8 @@ worker reporting itself healthy.
    in-flight requests and closes its connections when the last of them drops
    it.
 6. **Budgets**: one attempt has its own budget, inside a total. The total is
-   the caller's (the decision deadline, `call_control_timeout_ms`), or the
-   ceiling when the caller has none (`BackendClient::budgets` with a total
-   `<= 0`). A consult on a setup's turn is cut earlier when what is left of the
+   the caller's (the decision deadline, `call_control_timeout_ms`); every
+   attempt is capped by the ceiling. A consult on a setup's turn is cut earlier when what is left of the
    setup budget is shorter (ADR-0022 X1): the time the turn waited comes off its
    last attempt.
 7. **Retry rule** (`BackendClient::send_with_retry`): one retry, on the same

@@ -3,9 +3,9 @@
 
 use std::fmt;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::poison::locked;
-use std::time::Duration;
 
 /// One environment fault.
 #[derive(Clone, Debug, PartialEq, Eq)]

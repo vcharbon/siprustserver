@@ -238,20 +238,6 @@ async fn a_silent_backend_fails_at_the_total() {
     assert_eq!(rig.transport.sent(), 2);
 }
 
-/// An unbounded caller (`total_ms <= 0`) is bounded by the 5 s ceiling.
-#[tokio::test(start_paused = true)]
-async fn an_unbounded_caller_is_bounded_by_the_ceiling() {
-    let rig = Rig::new("retry-ceiling:8080", ClientSettings::default()).await;
-    rig.behave(Behaviour::Silent);
-    let budgets = rig.client.budgets(Duration::from_secs(60), 0);
-    assert_eq!(budgets, Budgets { attempt: Duration::from_secs(60), total: TOTAL });
-    let start = Instant::now();
-    let outcome = rig.client.send_with_retry(HttpRequest::get("/"), budgets).await;
-    assert_eq!(outcome, Err(AttemptError::Timeout));
-    assert_eq!(start.elapsed(), TOTAL, "one attempt, cut at the ceiling");
-    assert_eq!(rig.transport.sent(), 1, "no time left for a retry");
-}
-
 /// A retry is sent only when the total leaves room for a whole attempt: a
 /// silent first attempt of 2.5 s inside a 2.6 s total is not retried.
 #[tokio::test(start_paused = true)]

@@ -39,6 +39,8 @@ libc = { workspace = true }
 sip-clock = { path = "../sip-clock" }
 # The packet queue's lock, recovered and counted when a panic poisons it.
 lock-poison = { path = "../lock-poison" }
+# The family its lock recoveries are rendered under.
+metric-catalogue = { path = "../metric-catalogue" }
 # The IP-literal readers the socket addresses are built with (re-exported);
 # the loopback tests parse what they received.
 sip-message = { path = "../sip-message" }

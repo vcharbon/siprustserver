@@ -18,6 +18,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
         BRANCH_MEMO,
         sip_proxy::supervise::FAMILIES,
         metric_values::poison::FAMILIES,
+        sip_net::poison::FAMILIES,
         observe::counters::FAMILIES,
         jemalloc_stats::catalogue::FAMILIES,
     ],
@@ -25,7 +26,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
 
 /// The `/metrics` body: the data path, the self gate (`None` for the
 /// always-admit gate), the branch memo `memo` read at this scrape, the
-/// restarted tasks, the metric rows' lock
+/// restarted tasks, the metric rows' and the UDP endpoint's lock
 /// recoveries, the dropped log lines and
 /// trace-admission denials (ADR-0026), then `allocator`.
 pub fn body(
@@ -39,6 +40,7 @@ pub fn body(
     t.push_str(&memo.prometheus_text());
     t.push_str(&sip_proxy::supervise::prometheus_text());
     t.push_str(&metric_values::poison::prometheus_text());
+    t.push_str(&sip_net::poison::prometheus_text());
     t.push_str(&observe::counters::prometheus_text());
     t.push_str(&allocator());
     t

@@ -1207,6 +1207,7 @@ dependencies = [
  "async-trait",
  "libc",
  "lock-poison",
+ "metric-catalogue",
  "sip-clock",
  "sip-message",
  "socket2",
