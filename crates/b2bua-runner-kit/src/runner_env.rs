@@ -118,7 +118,7 @@ pub struct RunnerEnv {
     pub invite_first_response_timeout_sec: i64,
     /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — the setup budget from an initial
     /// INVITE's receipt to its final, an off-turn consult's deadline per round
-    /// trip (default 5000; <= 0 disables — ADR-0022 X1).
+    /// trip (default 5000; <= 0 is refused at startup — ADR-0022 X1).
     pub call_control_timeout_ms: i64,
     /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
     /// §13.3.1.4, 64·T1 = 32 s; <= 0 tears nothing down — the ladder itself
@@ -300,9 +300,11 @@ impl RunnerEnv {
         let invalid = |e: String| format!("invalid B2BUA config: {e}");
         let cdr = cdr_ring_from_lookup(lookup)?;
         let limiter = limiter_env::limiter_from_lookup(lookup).map_err(invalid)?;
-        let call_control_timeout_ms: i64 = knob("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")?;
-        let call_control =
-            Duration::from_millis(u64::try_from(call_control_timeout_ms).unwrap_or(0));
+        let call_control_timeout_ms: i64 = knob(
+            "B2BUA_CALL_CONTROL_TIMEOUT_MS",
+            &B2buaConfig::DEFAULT_CALL_CONTROL_TIMEOUT_MS.to_string(),
+        )?;
+        let call_control = B2buaConfig::call_control_timeout_of(call_control_timeout_ms);
         let loop_stall =
             liveness_env::loop_stall_from_lookup(lookup, call_control).map_err(invalid)?;
         let addresses = addresses_from_lookup(lookup)?;

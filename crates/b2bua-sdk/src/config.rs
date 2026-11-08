@@ -274,10 +274,11 @@ pub struct B2buaConfig {
     /// `b2bua::setup_budget`). Off the turn: the bound on one round trip of a
     /// consult (`DeadlineDecisionEngine`; `call_refer` has the refer timers
     /// instead). The core owns this as ONE knob, not each adapter, so a
-    /// third-party adapter cannot forget it. Default **5000**. `<= 0` disables
-    /// both (escape hatch for tests that need a genuinely wedged decision await
-    /// — the reaper ladder still cleans up, see `reaper.rs`). Overridable via
-    /// `B2BUA_CALL_CONTROL_TIMEOUT_MS`.
+    /// third-party adapter cannot forget it. Default **5000**. `<= 0` is NOT
+    /// allowed: [`validate`](Self::validate) refuses it, and a harness config
+    /// that writes it anyway gets the default
+    /// ([`call_control_timeout`](Self::call_control_timeout), the one reader).
+    /// Overridable via `B2BUA_CALL_CONTROL_TIMEOUT_MS`.
     pub call_control_timeout_ms: i64,
     /// **Opt-in transparent header relay.** Header names whose *value* is copied
     /// verbatim from the a-leg INVITE onto every originated b-leg INVITE (the
@@ -429,6 +430,21 @@ impl B2buaConfig {
             Self::DEFAULT_ACK_TIMEOUT_SEC
         };
         u64::try_from(sec).unwrap_or(Self::DEFAULT_ACK_TIMEOUT_SEC as u64).saturating_mul(1000)
+    }
+
+    /// The setup budget and the decision deadline
+    /// ([`call_control_timeout_ms`](Self::call_control_timeout_ms)), never
+    /// zero: a non-positive value reads the 5 s default, so no consult runs
+    /// unbounded.
+    pub fn call_control_timeout(&self) -> std::time::Duration {
+        Self::call_control_timeout_of(self.call_control_timeout_ms)
+    }
+
+    /// [`call_control_timeout`](Self::call_control_timeout) of a stated `ms`,
+    /// for a reader that runs before the configuration holds it.
+    pub fn call_control_timeout_of(ms: i64) -> std::time::Duration {
+        let ms = if ms > 0 { ms } else { Self::DEFAULT_CALL_CONTROL_TIMEOUT_MS };
+        std::time::Duration::from_millis(ms.unsigned_abs())
     }
 
     /// Clamp a route-supplied `NoAnswer` deadline, as ms after the leg's

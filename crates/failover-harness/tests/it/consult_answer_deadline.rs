@@ -365,7 +365,7 @@ async fn failure_cell(name: &str, recovery: Recovery) {
     let asked_at = consults_sent(&mut c, 1).await;
     let call_ref = served_call(&mut c, &primary);
     crash(&mut c, &primary).await;
-    let budget = failure_budget(CONSULT_BUDGET, ADMIT_BUDGET).expect("a bounded consult");
+    let budget = failure_budget(CONSULT_BUDGET, ADMIT_BUDGET);
     let lost_deadline = window(asked_at, budget + MARGIN);
     match recovery {
         Recovery::Reclaim => reboot_and_reclaim(&mut c, &primary).await,
@@ -431,7 +431,7 @@ async fn release_cell(name: &str, recovery: Recovery) {
         Recovery::Takeover => take_over(&mut c, &mut call).await,
     }
     let served_at = c.fh.now_ms();
-    let budget = release_budget(CONSULT_BUDGET, ADMIT_BUDGET).expect("a bounded consult");
+    let budget = release_budget(CONSULT_BUDGET, ADMIT_BUDGET);
     let deadline = asked_at + (budget + MARGIN).as_millis() as i64;
     let resent_at = consults_sent(&mut c, 2).await;
     assert!(

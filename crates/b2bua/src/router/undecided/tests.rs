@@ -86,8 +86,9 @@ async fn a_reask_past_its_budget_refuses_the_caller_unasked() {
     ctx.state.create(call, None);
 
     let started = tokio::time::Instant::now();
-    tokio::time::advance(std::time::Duration::from_millis(100)).await;
-    super::reask_turn(&ctx, &call_ref, SetupBudget::from_receipt(started, 100)).await;
+    let length = std::time::Duration::from_millis(100);
+    tokio::time::advance(length).await;
+    super::reask_turn(&ctx, &call_ref, SetupBudget::from_receipt(started, length)).await;
 
     assert!(!ctx.state.contains(&call_ref), "the refused call ended");
     let records = node.cdr.snapshot();
@@ -113,7 +114,8 @@ async fn a_reask_past_a_cap_trips_and_dials_nothing() {
     let call_ref = call.call_ref.clone();
     ctx.state.create(call, None);
 
-    let budget = SetupBudget::from_receipt(tokio::time::Instant::now(), 5_000);
+    let length = std::time::Duration::from_millis(5_000);
+    let budget = SetupBudget::from_receipt(tokio::time::Instant::now(), length);
     super::reask_turn(&ctx, &call_ref, budget).await;
     assert_eq!(ctx.metrics.cap_trips_of(Cap::Legs), 1, "the re-ask's route tripped");
     let resident = ctx.state.peek(&call_ref).expect("the safepoint stays resident");

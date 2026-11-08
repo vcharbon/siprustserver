@@ -432,8 +432,8 @@ pub(super) fn landing(config: &B2buaConfig) -> Landing<'_> {
         budgets: AnswerBudgets {
             http: Duration::from_secs(5),
             admit: Duration::from_secs(1),
-            failure: Some(Duration::from_secs(5)),
-            release: Some(Duration::from_secs(5)),
+            failure: Duration::from_secs(5),
+            release: Duration::from_secs(5),
         },
         refresh_period: Duration::from_secs(60),
     }

@@ -49,33 +49,27 @@ pub const FAILURE_CHAIN: u32 = crate::decision::MAX_LIMITER_FAILOVER + 1;
 /// The budget a `/call/failure` consult is answered in, `decision` being the
 /// decision engine's per-consult deadline and `admit` the limiter's admit
 /// budget: each consult of the chain, then its route's admit (bounded just
-/// past the admit budget). `None` when the decision deadline is off
-/// (`decision` zero): the consult is unbounded and has no deadline.
-pub fn failure_budget(decision: Duration, admit: Duration) -> Option<Duration> {
-    (!decision.is_zero()).then(|| (decision + admit + ADMIT_SLACK) * FAILURE_CHAIN)
+/// past the admit budget).
+pub fn failure_budget(decision: Duration, admit: Duration) -> Duration {
+    (decision + admit + ADMIT_SLACK) * FAILURE_CHAIN
 }
 
 /// The budget a release event's consult is answered in: the consult, then
 /// the admit of the route it may answer (bounded just past the admit
-/// budget). `None` when the decision deadline is off (`decision` zero).
-pub fn release_budget(decision: Duration, admit: Duration) -> Option<Duration> {
-    (!decision.is_zero()).then(|| decision + admit + ADMIT_SLACK)
+/// budget).
+pub fn release_budget(decision: Duration, admit: Duration) -> Duration {
+    decision + admit + ADMIT_SLACK
 }
 
 /// [`release_budget`] under `config`'s decision deadline.
-pub fn release_budget_under(config: &B2buaConfig, admit: Duration) -> Option<Duration> {
-    release_budget(decision_deadline(config), admit)
-}
-
-/// `config`'s decision deadline, zero when not positive.
-fn decision_deadline(config: &B2buaConfig) -> Duration {
-    Duration::from_millis(u64::try_from(config.call_control_timeout_ms).unwrap_or(0))
+pub fn release_budget_under(config: &B2buaConfig, admit: Duration) -> Duration {
+    release_budget(config.call_control_timeout(), admit)
 }
 
 /// [`failure_budget`] under `config`'s decision deadline
-/// (`call_control_timeout_ms`, off when not positive).
-pub fn failure_budget_under(config: &B2buaConfig, admit: Duration) -> Option<Duration> {
-    failure_budget(decision_deadline(config), admit)
+/// ([`B2buaConfig::call_control_timeout`]).
+pub fn failure_budget_under(config: &B2buaConfig, admit: Duration) -> Duration {
+    failure_budget(config.call_control_timeout(), admit)
 }
 
 /// The payload key a `/call/failure` fold states the deadline it answers
@@ -100,12 +94,10 @@ pub struct AnswerBudgets {
     pub http: Duration,
     /// An admit's budget.
     pub admit: Duration,
-    /// A `/call/failure` consult's chain ([`failure_budget`]); `None` when
-    /// the consult is unbounded.
-    pub failure: Option<Duration>,
-    /// A release event's consult ([`release_budget`]); `None` when the
-    /// consult is unbounded.
-    pub release: Option<Duration>,
+    /// A `/call/failure` consult's chain ([`failure_budget`]).
+    pub failure: Duration,
+    /// A release event's consult ([`release_budget`]).
+    pub release: Duration,
 }
 
 /// `result` with the deadline of every request its turn sends off the call's
@@ -122,10 +114,10 @@ pub fn arm(mut result: HandlerResult, budgets: &AnswerBudgets, now_ms: i64) -> H
     for fx in &mut result.effects.fire_and_forget {
         match fx {
             FireAndForgetEffect::FailureAsyncHttp { limiter, deadline, .. } => {
-                *deadline = budgets.failure.map(|_| limiter.first_change);
+                *deadline = Some(limiter.first_change);
             }
             FireAndForgetEffect::ReleaseAsyncHttp { limiter, deadline, .. } => {
-                *deadline = budgets.release.map(|_| limiter.first_change);
+                *deadline = Some(limiter.first_change);
             }
             _ => {}
         }
@@ -159,14 +151,15 @@ fn deadline_of(fx: &FireAndForgetEffect, budgets: &AnswerBudgets) -> Option<(Tim
             budgets.admit,
         )),
         FireAndForgetEffect::FailureAsyncHttp { request, limiter, .. } => {
-            budgets.failure.map(|budget| {
-                let unanswered = crate::failure_unavailable::payload(request);
-                (TimerType::FailureAnswer { change: limiter.first_change, unanswered }, budget)
-            })
+            let unanswered = crate::failure_unavailable::payload(request);
+            Some((
+                TimerType::FailureAnswer { change: limiter.first_change, unanswered },
+                budgets.failure,
+            ))
         }
-        FireAndForgetEffect::ReleaseAsyncHttp { limiter, .. } => budgets
-            .release
-            .map(|budget| (TimerType::ReleaseAnswer { change: limiter.first_change }, budget)),
+        FireAndForgetEffect::ReleaseAsyncHttp { limiter, .. } => {
+            Some((TimerType::ReleaseAnswer { change: limiter.first_change }, budgets.release))
+        }
         FireAndForgetEffect::Reenter(event) => {
             answered(event).map(|timer_type| (timer_type, Duration::ZERO))
         }

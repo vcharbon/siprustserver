@@ -68,9 +68,7 @@ deadline.
    deadline. The expiry is the fold an unanswered consult resolves to:
    `terminate`, stack-authored, relaying the failed final the consult's seed
    stated (or letting a timeout stand) and ending the call. A late fold's
-   admit report is still applied (2.). With the decision deadline off
-   (`call_control_timeout_ms <= 0`) the consult is unbounded: no deadline is
-   armed and its fold names none. The turn that arms the deadline names it on
+   admit report is still applied (2.). The turn that arms the deadline names it on
    the consult it sends, so the fold states exactly the deadline armed.
 
 5. **A node serving an `Active` call from its record sends every awaited
@@ -119,9 +117,7 @@ second request while the first is awaited merges their deadlines.
   teardown). After a node loss, or an answer past its deadline, the decision
   layer may see the same release event twice; one answer applies — a fold no
   consult awaits writes no decision mark and moves no route onto the call,
-  its admit report applied as an admit. With the decision deadline off
-  (`call_control_timeout_ms` 0) the consult has no deadline: only a
-  materialisation sends it again (decision 5).
+  its admit report applied as an admit.
 - The core's REFER authorization needs no deadline; something already in the
   call's replicated timer list bounds it:
   - a REFER's authorization (`ReferAsyncHttp`): a node serving the call from

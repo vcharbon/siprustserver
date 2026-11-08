@@ -191,11 +191,11 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, arrival: Ar
         }
     }
     let admitted = unborn.is_some();
-    let budget_ms = ctx.config.call_control_timeout_ms;
+    let length = ctx.config.call_control_timeout();
     let budget = if class.is_new_call() {
-        SetupBudget::from_receipt(opened_at.unwrap_or_else(Instant::now), budget_ms)
+        SetupBudget::from_receipt(opened_at.unwrap_or_else(Instant::now), length)
     } else if super::undecided::notice_of(&event).is_some() {
-        SetupBudget::from_receipt(Instant::now(), budget_ms)
+        SetupBudget::from_receipt(Instant::now(), length)
     } else {
         SetupBudget::NONE
     };

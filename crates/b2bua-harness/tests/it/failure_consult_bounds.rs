@@ -3,9 +3,7 @@
 //!
 //! - the failover route's admit is answered just past the limiter's admit
 //!   budget whatever the limiter does, so a stalled limiter delays the
-//!   failover by that much and no more — well before the deadline;
-//! - with the decision deadline off the consult has no deadline, and its
-//!   fold still reaches the rules: the failover leg is dialled.
+//!   failover by that much and no more — well before the deadline.
 //!
 //! Each call is a full, RFC-valid call answered by the failover target and
 //! hung up by the caller, with one CDR and every leg reaped.
@@ -103,21 +101,4 @@ async fn finish_answered(
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
     let _ = h.finish().await;
-}
-
-/// With the decision deadline off, the consult has no answer deadline: its
-/// fold names none and reaches the rules — carol is dialled.
-#[tokio::test(start_paused = true)]
-async fn an_unbounded_failure_consult_s_fold_reaches_the_rules() {
-    let h = Harness::new("failure-consult-unbounded");
-    let alice = h.agent("alice", "127.0.0.1:5060").await;
-    let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let carol = h.agent("carol", "127.0.0.1:5071").await;
-    let b2bua = B2buaSut::builder(failing_over())
-        .tune(|c| c.call_control_timeout_ms = 0)
-        .start(&h, "b2bua", "127.0.0.1:5080")
-        .await;
-    let (call, _) = bob_refuses(&alice, &bob, &b2bua).await;
-    carol.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
-    finish_answered(h, call, &carol, &b2bua).await;
 }

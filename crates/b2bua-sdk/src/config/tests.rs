@@ -233,6 +233,26 @@ fn nonpositive_ack_deadline_falls_back_to_the_default_ms() {
 }
 
 #[test]
+fn nonpositive_call_control_timeout_is_rejected() {
+    for bad in [0, -1] {
+        let c = B2buaConfig { call_control_timeout_ms: bad, ..Default::default() };
+        let e = c.validate().expect_err("a non-positive setup budget must be rejected");
+        assert!(e.contains("B2BUA_CALL_CONTROL_TIMEOUT_MS"), "msg was: {e}");
+    }
+    assert!(B2buaConfig { call_control_timeout_ms: 1, ..Default::default() }.validate().is_ok());
+}
+
+#[test]
+fn nonpositive_call_control_timeout_reads_the_default() {
+    for bad in [0, -1] {
+        let c = B2buaConfig { call_control_timeout_ms: bad, ..Default::default() };
+        assert_eq!(c.call_control_timeout(), std::time::Duration::from_millis(5_000));
+    }
+    let c = B2buaConfig { call_control_timeout_ms: 12_000, ..Default::default() };
+    assert_eq!(c.call_control_timeout(), std::time::Duration::from_millis(12_000));
+}
+
+#[test]
 fn nonpositive_txn_bound_falls_back_to_the_default_ms() {
     // 0 is NOT "disabled" for the transaction bound (validate refuses it at
     // boot); a harness config that writes it anyway gets the 158 s default,

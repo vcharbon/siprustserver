@@ -83,8 +83,7 @@ impl ConfigCheck {
         self.take(config.validate());
         self.take(crate::runner_env::caps_env::check_caps(&config.caps));
         self.take(validate_ingress_brake_pct(env.udp_ingress_brake_pct));
-        let call_control =
-            std::time::Duration::from_millis(config.call_control_timeout_ms.unsigned_abs());
+        let call_control = config.call_control_timeout();
         self.take(liveness_env::check_loop_stall(env.loop_stall, call_control));
         self.take(liveness_env::check_loop_exit(env.loop_exit, env.loop_stall, call_control));
         self.require(env.drain.floor <= env.drain.grace, || {

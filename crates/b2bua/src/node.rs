@@ -328,9 +328,9 @@ impl B2buaCore {
         // a hung adapter cannot wedge a per-call worker past
         // `call_control_timeout_ms` — the caller heard the auto-100 and must get
         // its final. Wrapped HERE, after the `tune` seam finalized the config, so
-        // no injection path bypasses it. `<= 0` disables (reaper-wedge escape).
+        // no injection path bypasses it.
         let decision =
-            crate::decision::DeadlineDecisionEngine::wrap(decision, config.call_control_timeout_ms);
+            crate::decision::DeadlineDecisionEngine::wrap(decision, config.call_control_timeout());
         // The worker's handle on its call limiter: the lease, the release
         // queue, the refresh batch and the bounded, breaker-guarded admit
         // path. Their tasks join the node's, aborted with them.

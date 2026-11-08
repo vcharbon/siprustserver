@@ -23,9 +23,9 @@ use crate::setup_budget::SetupBudget;
 
 /// The one bound on a decision round trip (ADR-0022 X1): the core wraps
 /// whatever engine the host injects (`B2buaCore::spawn_with_overload`), so the
-/// bound holds however an adapter is written. `call_control_timeout_ms` long;
-/// not positive, nothing is bounded (the escape hatch the reaper's wedge tests
-/// use to exercise the abort ladder).
+/// bound holds however an adapter is written,
+/// [`call_control_timeout`](crate::config::B2buaConfig::call_control_timeout)
+/// long: no round trip runs unbounded.
 ///
 /// A consult on a setup's turn is bounded by what is left of the setup's budget
 /// ([`new_call_within`](Self::new_call_within),
@@ -43,7 +43,7 @@ use crate::setup_budget::SetupBudget;
 /// consult, the local teardown.
 pub struct DeadlineDecisionEngine {
     inner: std::sync::Arc<dyn CallDecisionEngine>,
-    deadline: Option<Duration>,
+    deadline: Duration,
     /// Deadline-breach aggregation keyed by decision method (ADR-0026): an
     /// unreachable backend is ONE episode per method — rising edge, ~5 s
     /// summaries, falling-edge totals — ended once answers have landed inside
@@ -52,13 +52,11 @@ pub struct DeadlineDecisionEngine {
 }
 
 impl DeadlineDecisionEngine {
-    /// Wrap `inner` with `timeout_ms` (`B2buaConfig::call_control_timeout_ms`).
+    /// Wrap `inner` with `deadline` (`B2buaConfig::call_control_timeout`).
     pub fn wrap(
         inner: std::sync::Arc<dyn CallDecisionEngine>,
-        timeout_ms: i64,
+        deadline: Duration,
     ) -> std::sync::Arc<Self> {
-        let deadline =
-            u64::try_from(timeout_ms).ok().filter(|ms| *ms > 0).map(Duration::from_millis);
         let breaches = crate::lifecycle::backend_waves("decision-engine");
         std::sync::Arc::new(Self { inner, deadline, breaches })
     }
@@ -69,7 +67,7 @@ impl DeadlineDecisionEngine {
         req: NewCallRequest,
         budget: SetupBudget,
     ) -> Result<NewCallResponse, CallDecisionError> {
-        self.bounded("/call/new", budget.remaining(), self.inner.new_call(req)).await
+        self.bounded("/call/new", self.within(budget), self.inner.new_call(req)).await
     }
 
     /// The limiter-refusal failure consult under what is left of `budget`.
@@ -78,18 +76,22 @@ impl DeadlineDecisionEngine {
         req: CallFailureRequest,
         budget: SetupBudget,
     ) -> Result<CallFailureResponse, CallDecisionError> {
-        self.bounded("/call/failure", budget.remaining(), self.inner.call_failure(req)).await
+        self.bounded("/call/failure", self.within(budget), self.inner.call_failure(req)).await
     }
 
-    /// Run `ask` up to `bound`, none when `None`: nothing is asked of a bound
-    /// already spent.
+    /// What is left of `budget`; the whole deadline for a turn that is no
+    /// setup ([`SetupBudget::NONE`]).
+    fn within(&self, budget: SetupBudget) -> Duration {
+        budget.remaining().unwrap_or(self.deadline)
+    }
+
+    /// Run `ask` up to `bound`: nothing is asked of a bound already spent.
     async fn bounded<T>(
         &self,
         method: &'static str,
-        bound: Option<Duration>,
+        bound: Duration,
         ask: impl Future<Output = Result<T, CallDecisionError>>,
     ) -> Result<T, CallDecisionError> {
-        let Some(bound) = bound else { return ask.await };
         if bound.is_zero() {
             return Err(expired(method, bound));
         }

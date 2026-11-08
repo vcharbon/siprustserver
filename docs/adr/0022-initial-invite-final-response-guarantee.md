@@ -55,7 +55,7 @@ deliberately transaction-less and cannot produce "100-then-silence".
 
 The bound is enforced in the **core**, not in the adapter, so it holds
 *structurally* no matter how the injected `CallDecisionEngine` is written.
-`b2bua::decision::DeadlineDecisionEngine::wrap(engine, call_control_timeout_ms)`
+`b2bua::decision::DeadlineDecisionEngine::wrap(engine, config.call_control_timeout())`
 wraps whatever engine the host injects, at `B2buaCore::spawn_with_overload`,
 *after* the harness `tune` seam has finalized the config — so no injection path
 (tests included) can bypass it. Each wrapped call rides `tokio::time::timeout`
@@ -65,9 +65,10 @@ response. The expired inner future is dropped — for an HTTP adapter that cance
 the in-flight request, exactly like the TS `Effect.timeoutOrElse`.
 
 Config: `call_control_timeout_ms`, default **5000** (TS `CALL_CONTROL_*_TIMEOUT_MS`
-parity), env `B2BUA_CALL_CONTROL_TIMEOUT_MS`; `<= 0` disables (the escape hatch
-the reaper wedge test uses to exercise the abort-escalation ladder against a
-*genuinely* wedged await).
+parity), env `B2BUA_CALL_CONTROL_TIMEOUT_MS`. It is a deadline, never a switch:
+`B2buaConfig::validate` refuses `<= 0` at startup, and the one reader,
+`B2buaConfig::call_control_timeout`, gives a harness config that writes it anyway
+the default. No consult runs unbounded while it holds its call's lock.
 
 **Scope — `new_call` + `call_failure`, deliberately NOT `call_refer`.** These two
 are the decision calls that can block a caller waiting behind the INVITE's
@@ -110,8 +111,7 @@ The final leaves through the call's outbox, so under the `applied` sync level it
 leave up to the sync cap after the deadline (ADR-0055 §3). A re-ask after a takeover
 (ADR-0047 D4) gets a fresh budget from its notice: its caller's first one died with the
 node that spent it. The `/call/failure` consult after a b-leg's failure runs off the turn
-and keeps one deadline per round trip under its answer deadline (ADR-0039). With
-`call_control_timeout_ms <= 0` there is no budget, as there is no deadline.
+and keeps one deadline per round trip under its answer deadline (ADR-0039).
 
 The bound assumes the message leaves the receive buffer inside the budget. One that
 waits there has no transaction and drew no 100, so its caller is still retransmitting

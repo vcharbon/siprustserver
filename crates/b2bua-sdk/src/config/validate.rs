@@ -180,6 +180,16 @@ impl B2buaConfig {
                 Self::DEFAULT_ACK_TIMEOUT_SEC
             ));
         }
+        // The setup budget is a deadline, never a switch: an unbounded consult
+        // holds its call's lock and its caller past the 100 for good.
+        if self.call_control_timeout_ms <= 0 {
+            out.push(format!(
+                "B2BUA_CALL_CONTROL_TIMEOUT_MS={} is not a positive deadline: every consult and \
+                 every setup is bounded, the knob only says how many milliseconds (default {})",
+                self.call_control_timeout_ms,
+                Self::DEFAULT_CALL_CONTROL_TIMEOUT_MS
+            ));
+        }
         // An enabled bucket (size > 0) with no refill drains once and 503s
         // every new INVITE after the first burst.
         if self.cps_bucket_size > 0 && self.cps_bucket_rate == 0 {
