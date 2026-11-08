@@ -87,7 +87,8 @@ the crate carries `#![cfg_attr(not(test), deny(…))]` with the eleven lints at 
 (a pure crate adds `iter_over_hash_type`, which the pass counts in pure crates only),
 which exempts all test code; the disallowed lists stay with the pass for every tiered crate,
 since one list holds both tiers' entries, and a crate whose remaining sites are all of the
-lists keeps its attribute.
+lists keeps its attribute. The same allowlist counts the loop and recursion sites of ADR-0057 §5,
+which no attribute states.
 
 ### 4. Abort-class failures
 

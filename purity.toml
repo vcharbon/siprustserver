@@ -43,6 +43,8 @@ pure-deps = [
   "hmac",
   "hybrid-array",
   "itoa",
+  # `stacker`'s read of the running thread's stack bounds.
+  "libc",
   # `tracing`'s fallback to the `log` facade where the workspace turns it on:
   # a log line cannot change an outcome.
   "log",
@@ -52,6 +54,8 @@ pure-deps = [
   # (ADR-0052 §10).
   "once_cell",
   "pin-project-lite",
+  # `stacker`'s read of the stack pointer.
+  "psm",
   "ref-cast",
   "rmp",
   "rmp-serde",
@@ -62,6 +66,10 @@ pure-deps = [
   "serde_json",
   "sha2",
   "smallvec",
+  # The stack left on the running thread, read by a depth guard (`bounds`,
+  # ADR-0057 §5): it turns a recursion that would overflow into an error, the
+  # only outcome it changes.
+  "stacker",
   "thiserror",
   # The decision core's warnings go to whatever subscriber the shell
   # installed; none reaches the core's output (ADR-0052 §10).

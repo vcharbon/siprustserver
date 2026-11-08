@@ -40,7 +40,6 @@ pub fn settle(
             None,
             &[],
             advertisement,
-            &mut turn.ids,
             now_ms,
             TerminationCause::Admission,
         ));

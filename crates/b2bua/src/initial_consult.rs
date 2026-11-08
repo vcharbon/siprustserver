@@ -96,8 +96,7 @@ pub async fn handle_initial_invite(
     }
     trace::intake::record_new_call(&call, request_json, &response, sent_at_ms, received_at_ms);
 
-    let (result, routed) = match treatment(call, response, a_invite, config, &mut turn.ids, now_ms)
-    {
+    let (result, routed) = match treatment(call, response, a_invite, config, now_ms) {
         Initial::Route { call, route } => {
             let result = apply_route(
                 *call,
@@ -111,7 +110,6 @@ pub async fn handle_initial_invite(
                 &mut turn.ids,
                 clock,
                 now_ms,
-                0,
                 budget,
             )
             .await;

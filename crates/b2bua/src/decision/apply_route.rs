@@ -9,9 +9,10 @@ use sip_ids::TurnIds;
 use sip_message::SipRequest;
 
 use crate::config::B2buaConfig;
+use crate::decision::failover_fold::Failover;
 use crate::decision::route_fold::{self, Admitting};
 use crate::decision::DeadlineDecisionEngine;
-use crate::effects::HandlerResult;
+use crate::effects::{HandlerEffects, HandlerResult};
 use crate::limiter::{LimiterEntry, LimiterWorker};
 use crate::metrics::AdmitSite;
 use crate::owners::Owners;
@@ -24,15 +25,17 @@ pub use super::route_fold::MAX_LIMITER_FAILOVER;
 /// Apply a route decision to `call` (which already carries the a-leg), creating
 /// the first b-leg + its outbound INVITE under the attempt the route opens (a
 /// route admission refuses is an attempt that ends `Refused`; a route whose
-/// dial a service defers opens none here). `depth` tracks chained limiter-reject
-/// failovers (start at 0); `invite_wire` is the a-leg INVITE's datagram, which a
-/// late trace activation backfills from. `now_ms` is the turn's timestamp (every
-/// CDR entry and timer deadline below reads it); `clock` measures the failover
-/// round trip and the instant the b-leg's INVITE leaves, after the admission
-/// the turn waited on (`OutboundInvite::sent_at_ms`). The consult that answered
-/// `route` already honoured its trace force-enable. A route `budget` ran out on
-/// dials nothing: it ends as refused, the call answered as for an unavailable
-/// decision, its record owing the release of an admit that left.
+/// dial a service defers opens none here). A route the limiter refuses raises
+/// the limiter-reject failover consult, and the failover route it answers is
+/// applied the same way, each one hop deeper; `invite_wire` is the a-leg
+/// INVITE's datagram, which a late trace activation backfills from. `now_ms`
+/// is the turn's timestamp (every CDR entry and timer deadline below reads
+/// it); `clock` measures the failover round trip and the instant the b-leg's
+/// INVITE leaves, after the admission the turn waited on
+/// (`OutboundInvite::sent_at_ms`). The consult that answered `route` already
+/// honoured its trace force-enable. A route `budget` ran out on dials nothing:
+/// it ends as refused, the call answered as for an unavailable decision, its
+/// record owing the release of an admit that left.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_route(
     call: Call,
@@ -46,48 +49,98 @@ pub async fn apply_route(
     ids: &mut TurnIds,
     clock: &Clock,
     now_ms: i64,
-    depth: u32,
     budget: SetupBudget,
 ) -> HandlerResult {
-    let mut admitting =
-        match route_fold::up_to_admit(call, route, a_invite, config, ids, now_ms, depth) {
-            Admitting::Final(result) => return *result,
-            Admitting::Admit(admitting) => admitting,
+    let (mut call, mut route, mut depth) = (call, route, 0);
+    let mut refused = HandlerEffects::new();
+    // Each pass is one more chained failover; past MAX_LIMITER_FAILOVER hops
+    // the failover consult answers the call's final instead of a route.
+    loop {
+        let applied = apply_one(
+            call, route, a_invite, config, limiter, owners, ids, clock, now_ms, depth, budget,
+        )
+        .await;
+        let (refused_call, limiter_id) = match applied {
+            Applied::Done(result) => return after(refused, result),
+            Applied::Refused { call, limiter_id, effects } => {
+                refused.extend(effects);
+                (call, limiter_id)
+            }
         };
-    let stated = admitting.route.call_limiter.clone();
-    let refusal = admit_route(&mut admitting.call, stated, limiter, now_ms, budget).await;
-    if budget.spent() {
-        let (call, mut fx) = route_fold::refused(*admitting);
-        let mut result = super::failover_fold::unavailable(call, a_invite, config, ids, now_ms);
-        fx.extend(std::mem::take(&mut result.effects));
-        result.effects = fx;
-        return result;
-    }
-    if let Some(limiter_id) = refusal {
-        let (call, mut fx) = route_fold::refused(*admitting);
-        let mut result = Box::pin(super::limiter_failover::limiter_reject_failover(
-            call,
+        let failover = super::limiter_failover::limiter_reject_failover(
+            refused_call,
             limiter_id,
             a_invite,
             invite_wire,
             decision,
-            limiter,
             config,
-            owners,
-            ids,
             clock,
             now_ms,
             depth,
             budget,
-        ))
+        )
         .await;
-        fx.extend(std::mem::take(&mut result.effects));
-        result.effects = fx;
-        return result;
+        match failover {
+            Failover::Final(result) => return after(refused, *result),
+            Failover::Route { call: next_call, route: next_route } => {
+                (call, route, depth) = (*next_call, *next_route, depth + 1);
+            }
+        }
+    }
+}
+
+/// `result` with the effects of the routes refused before it in front of its
+/// own.
+fn after(mut refused: HandlerEffects, mut result: HandlerResult) -> HandlerResult {
+    refused.extend(std::mem::take(&mut result.effects));
+    result.effects = refused;
+    result
+}
+
+/// What applying one route came to.
+enum Applied {
+    /// The b-leg dialled, or the call's final.
+    Done(HandlerResult),
+    /// The limiter `limiter_id` refused the route: `call` holds the refused
+    /// attempt, `effects` what the route's folds produced.
+    Refused { call: Call, limiter_id: String, effects: HandlerEffects },
+}
+
+/// One route of the chain, `depth` failovers deep: its folds up to its admit,
+/// the admit, then the b-leg dialled or the refusal.
+#[allow(clippy::too_many_arguments)]
+async fn apply_one(
+    call: Call,
+    route: RouteDecision,
+    a_invite: &SipRequest,
+    config: &B2buaConfig,
+    limiter: &LimiterWorker,
+    owners: &Owners,
+    ids: &mut TurnIds,
+    clock: &Clock,
+    now_ms: i64,
+    depth: u32,
+    budget: SetupBudget,
+) -> Applied {
+    let mut admitting = match route_fold::up_to_admit(call, route, a_invite, config, now_ms, depth)
+    {
+        Admitting::Final(result) => return Applied::Done(*result),
+        Admitting::Admit(admitting) => admitting,
+    };
+    let stated = admitting.route.call_limiter.clone();
+    let refusal = admit_route(&mut admitting.call, stated, limiter, now_ms, budget).await;
+    if budget.spent() {
+        let (call, fx) = route_fold::refused(*admitting);
+        let result = super::failover_fold::unavailable(call, a_invite, config, now_ms);
+        return Applied::Done(after(fx, result));
+    }
+    if let Some(limiter_id) = refusal {
+        let (call, effects) = route_fold::refused(*admitting);
+        return Applied::Refused { call, limiter_id, effects };
     }
     // The INVITE leaves now, after the admission this turn awaited.
     let sent_ms = clock.now_ms();
-    route_fold::admitted(*admitting, a_invite, config, owners, ids, now_ms, sent_ms)
+    Applied::Done(route_fold::admitted(*admitting, a_invite, config, owners, ids, now_ms, sent_ms))
 }
 
 /// Admission control: one admit of the route's whole limiter set, as

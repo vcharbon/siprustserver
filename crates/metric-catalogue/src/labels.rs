@@ -126,26 +126,22 @@ impl Labels {
     /// Visit every series, in exposition order.
     pub fn for_each_series(&self, mut f: impl FnMut(&Series<'_>)) {
         for (block, dims) in self.blocks().into_iter().enumerate() {
-            if dims.iter().any(|d| d.values.is_empty()) {
-                continue;
+            // Every value index of every dimension, the last varying fastest.
+            let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+            for d in dims {
+                rows = rows
+                    .into_iter()
+                    .flat_map(|row| {
+                        (0..d.values.len()).map(move |i| {
+                            let mut next = row.clone();
+                            next.push(i);
+                            next
+                        })
+                    })
+                    .collect();
             }
-            let mut at = vec![0usize; dims.len()];
-            loop {
-                f(&Series { block, dims, at: &at });
-                // Odometer step: the last dimension varies fastest; a carry
-                // out of the first ends the block.
-                let mut carried = true;
-                for (i, d) in at.iter_mut().zip(dims).rev() {
-                    *i += 1;
-                    if *i < d.values.len() {
-                        carried = false;
-                        break;
-                    }
-                    *i = 0;
-                }
-                if carried {
-                    break;
-                }
+            for at in &rows {
+                f(&Series { block, dims, at });
             }
         }
     }

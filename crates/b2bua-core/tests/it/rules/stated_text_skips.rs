@@ -70,7 +70,6 @@ fn the_stacks_reject_falls_back_to_the_default_phrase() {
         None,
         &[],
         &sip_message::generators::CapabilitySet::default(),
-        &mut scope(3).ids,
         0,
         call::TerminationCause::Admission,
     );

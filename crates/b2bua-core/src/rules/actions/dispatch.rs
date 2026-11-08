@@ -28,38 +28,52 @@ impl ActionExecutor<'_> {
         call: &mut Call,
         fx: &mut HandlerEffects,
     ) -> ControlFlow<()> {
-        match action {
-            RuleAction::CreateLeg {
-                destination,
-                new_ruri,
-                new_from,
-                new_to,
-                callback_context,
-                body_override,
-                header_updates,
-                header_adds,
-                kind,
-                attempt,
-            } => self.create_leg(
-                call,
-                fx,
-                ctx,
-                destination,
-                new_ruri.as_deref(),
-                new_from.as_deref(),
-                new_to.as_deref(),
-                callback_context.as_deref(),
-                body_override.as_ref(),
-                header_updates,
-                header_adds,
-                *kind,
-                attempt.as_ref(),
-            ),
-            _ => {
-                self.apply(action, ctx, call, fx);
-                ControlFlow::Continue(())
-            }
+        if matches!(action, RuleAction::CreateLeg { .. }) {
+            return self.create_leg_of(action, ctx, call, fx);
         }
+        self.apply(action, ctx, call, fx);
+        ControlFlow::Continue(())
+    }
+
+    /// Dial the leg a `CreateLeg` states; `Break` when the leg is refused.
+    /// Any other action does nothing.
+    fn create_leg_of(
+        &mut self,
+        action: &RuleAction,
+        ctx: &RuleContext,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+    ) -> ControlFlow<()> {
+        let RuleAction::CreateLeg {
+            destination,
+            new_ruri,
+            new_from,
+            new_to,
+            callback_context,
+            body_override,
+            header_updates,
+            header_adds,
+            kind,
+            attempt,
+        } = action
+        else {
+            return ControlFlow::Continue(());
+        };
+        self.create_leg(
+            call,
+            fx,
+            ctx,
+            destination,
+            new_ruri.as_deref(),
+            new_from.as_deref(),
+            new_to.as_deref(),
+            callback_context.as_deref(),
+            body_override.as_ref(),
+            header_updates,
+            header_adds,
+            *kind,
+            attempt.as_ref(),
+        )
     }
 
     pub(super) fn apply(
@@ -72,7 +86,7 @@ impl ActionExecutor<'_> {
         match action {
             // A leg the stepping refuses ends the list only when stepped.
             RuleAction::CreateLeg { .. } => {
-                let _ = self.step(action, ctx, call, fx);
+                let _ = self.create_leg_of(action, ctx, call, fx);
             }
             RuleAction::RelayToPeer { transform } => match resolve_peer(call, ctx) {
                 RelayPeer::Leg { leg_id, dialog } => {

@@ -148,8 +148,7 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
     let wire = caller.image().to_vec();
     let refused = budget.spent();
     let (handled, recorded) = if refused {
-        let ids = &mut turn.ids;
-        (super::initial_turn::refused_unavailable(ctx, call.clone(), &caller, now_ms, ids), false)
+        (super::initial_turn::refused_unavailable(ctx, call.clone(), &caller, now_ms), false)
     } else {
         let consult = handle_initial_invite(
             call.clone(),
@@ -179,10 +178,7 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
         }
     };
     let handled = if !recorded && ctx.readiness.left_the_slice() {
-        let ids = &mut turn.ids;
-        super::initial_turn::refused_after_leaving_the_slice(
-            ctx, &call, &caller, handled, now_ms, ids,
-        )
+        super::initial_turn::refused_after_leaving_the_slice(ctx, &call, &caller, handled, now_ms)
     } else {
         handled
     };

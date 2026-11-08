@@ -1,0 +1,20 @@
+[package]
+name = "bounds"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A loop and a recursion bounded by construction (ADR-0057 §5): `bounded`, a loop charged one unit per iteration that ends with an error past its maximum, and `Depth`, the guard a recursion descends through, refused past its maximum depth or when the thread's stack runs low."
+
+[package.metadata.purity]
+tier = "pure"
+
+[package.metadata.ha]
+side = "blind"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The stack left on the running thread, read by a depth guard's descent.
+stacker = { workspace = true }

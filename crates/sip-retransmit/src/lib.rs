@@ -232,9 +232,33 @@ impl Schedule {
     }
 
     /// The elapsed time at rung `n`: the sum of every wait up to and including
-    /// it.
+    /// it, saturating. Its cost does not grow with `n`: past the rungs whose
+    /// waits differ, every wait is the last one.
     pub fn elapsed_at(&self, n: u32) -> Duration {
-        (1..=n).filter_map(|k| self.interval(k)).sum()
+        match &self.pacing {
+            Pacing::Rfc(class) => {
+                let varying = n.min(MAX_DOUBLINGS + 1);
+                let head = (1..=varying)
+                    .map(|k| class.interval(k))
+                    .fold(Duration::ZERO, Duration::saturating_add);
+                let steady = class.interval(MAX_DOUBLINGS + 1);
+                head.saturating_add(steady.saturating_mul(n - varying))
+            }
+            #[cfg(feature = "authored")]
+            Pacing::Exact(gaps) => {
+                let stated = usize::try_from(n).unwrap_or(usize::MAX);
+                let head = gaps
+                    .iter()
+                    .take(stated)
+                    .copied()
+                    .fold(Duration::ZERO, Duration::saturating_add);
+                let past = n.saturating_sub(u32::try_from(gaps.len()).unwrap_or(u32::MAX));
+                let last = gaps.last().copied().unwrap_or_default();
+                head.saturating_add(last.saturating_mul(past))
+            }
+            #[cfg(feature = "authored")]
+            Pacing::Once => Duration::ZERO,
+        }
     }
 }
 

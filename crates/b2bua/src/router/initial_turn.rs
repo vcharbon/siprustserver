@@ -5,7 +5,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{Call, TerminationCause};
-use sip_ids::TurnIds;
 use sip_message::SipRequest;
 
 use super::admit::UnbornCall;
@@ -206,7 +205,7 @@ pub(super) async fn initial_invite_turn(
     let mut handled = if cancelled {
         cancelled_setup(call.clone(), &caller, datagram, now_ms)
     } else if cordoned || spent {
-        refused_unavailable(ctx, call.clone(), &caller, now_ms, &mut turn.ids)
+        refused_unavailable(ctx, call.clone(), &caller, now_ms)
     } else if call.a_leg_invite.from_tag.is_empty() {
         crate::initial_invite::reject_call(
             call.clone(),
@@ -216,7 +215,6 @@ pub(super) async fn initial_invite_turn(
             None,
             &[],
             &ctx.config.minted_final_advertisement,
-            &mut turn.ids,
             now_ms,
             TerminationCause::Admission,
         )
@@ -279,8 +277,7 @@ pub(super) async fn initial_invite_turn(
         // flight, so the decision is not applied: the callee is never dialled
         // for a call its backups took over (ADR-0047). The caller is refused
         // here whether or not a backup answered it too.
-        let ids = &mut turn.ids;
-        handled = refused_after_leaving_the_slice(ctx, &call, &caller, handled, now_ms, ids);
+        handled = refused_after_leaving_the_slice(ctx, &call, &caller, handled, now_ms);
     }
     let enforced = crate::rules::invariants::enforce(
         &ctx.obligations,
@@ -306,9 +303,8 @@ pub(super) fn refused_after_leaving_the_slice(
     caller: &SipRequest,
     handled: HandlerResult,
     now_ms: i64,
-    ids: &mut TurnIds,
 ) -> HandlerResult {
-    refused_unavailable(ctx, discarded_turn(pre, handled.call), caller, now_ms, ids)
+    refused_unavailable(ctx, discarded_turn(pre, handled.call), caller, now_ms)
 }
 
 /// `call`, whose caller's INVITE is `caller`, refused 503 with no
@@ -319,7 +315,6 @@ pub(super) fn refused_unavailable(
     call: Call,
     caller: &SipRequest,
     now_ms: i64,
-    ids: &mut TurnIds,
 ) -> HandlerResult {
     crate::initial_invite::reject_call(
         call,
@@ -329,7 +324,6 @@ pub(super) fn refused_unavailable(
         None,
         &[],
         &ctx.config.minted_final_advertisement,
-        ids,
         now_ms,
         TerminationCause::Admission,
     )

@@ -1,8 +1,8 @@
 """What the base counted, so a site a tightened rule reveals is told from one
 the branch wrote (ADR-0051 §3).
 
-A site is revealed when the base did not count its lint (read from the
-base's `scripts/panic_sites_lints.py`), or when its message names a list
+A site is revealed when the base did not count its lint or its site set
+(read from the base's `scripts/panic_sites_lints.py`), or when its message names a list
 entry of the root clippy.toml that the base did not hold, or held for the
 pure tier only while the site's crate is a shell crate. A base whose lints
 module or clippy.toml cannot be read reveals nothing.
@@ -60,7 +60,8 @@ def counted_lints(text):
             except ValueError:
                 continue
     both = tuple(values.get("DENIED", ())) + tuple(values.get("LISTS", ()))
-    return ({f"clippy::{lint}" for lint in both},
+    sets = {f"site::{s}" for s in values.get("SITE_SETS", ())}
+    return ({f"clippy::{lint}" for lint in both} | sets,
             {f"clippy::{lint}" for lint in values.get("PURE_DENIED", ())})
 
 
@@ -89,8 +90,8 @@ class Base:
         return cls(lints, lists, now)
 
     def counted(self, code, message, tier):
-        """Whether the base counted a site of `code` saying `message` in a
-        crate of `tier`."""
+        """Whether the base counted a site of `code` (a lint, or `site::<set>`)
+        saying `message` in a crate of `tier`."""
         if self.lints is not None:
             both, pure = self.lints
             if code not in both and not (tier == "pure" and code in pure):

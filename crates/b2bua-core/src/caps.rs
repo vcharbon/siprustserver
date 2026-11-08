@@ -12,6 +12,7 @@
 //! and whose wait `TerminatingTimeout` bounds; the fuel is never off.
 
 use std::io;
+use std::ops::ControlFlow;
 
 use b2bua_sdk::config::{CallCaps, Cap};
 use b2bua_sdk::event::CallEvent;
@@ -180,17 +181,25 @@ fn header_updates(call: &Call) -> u64 {
     let Some(root) = call.features.as_ref().and_then(|f| f.stated_headers.as_ref()) else {
         return policy;
     };
-    // A worklist over the record's own tree of sets: each set is visited
-    // once, so the walk ends with the record.
-    let mut sets = vec![root];
-    let mut total = policy;
-    while let Some(set) = sets.pop() {
+    // A worklist over the record's own tree of sets, each visited once, then
+    // the run that finds it empty; a tree past STATED_SETS_MAX reads as past
+    // every cap.
+    let (mut sets, mut total) = (vec![root], policy);
+    let walked = bounds::bounded(STATED_SETS_MAX + 1, || {
+        let Some(set) = sets.pop() else {
+            return ControlFlow::Break(());
+        };
         total = total.saturating_add(stated_lines(set));
         sets.extend(set.legs.values());
         sets.extend(set.reverts_to.as_deref());
-    }
-    total
+        ControlFlow::Continue(())
+    });
+    walked.map_or(u64::MAX, |()| total)
 }
+
+/// The stated sets the header-updates gauge walks at most: far past a call
+/// at its leg cap, each leg holding a set and the one it reverts to.
+const STATED_SETS_MAX: usize = 1 << 16;
 
 /// The lines one stated set states over its three scopes.
 fn stated_lines(set: &StatedHeaders) -> u64 {

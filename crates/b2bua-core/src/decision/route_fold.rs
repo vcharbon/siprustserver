@@ -61,7 +61,6 @@ pub fn up_to_admit(
     mut route: RouteDecision,
     a_invite: &SipRequest,
     config: &B2buaConfig,
-    ids: &mut TurnIds,
     now_ms: i64,
     depth: u32,
 ) -> Admitting {
@@ -79,7 +78,6 @@ pub fn up_to_admit(
             None,
             &[],
             &config.minted_final_advertisement,
-            ids,
             now_ms,
             TerminationCause::Admission,
         )));
@@ -96,7 +94,6 @@ pub fn up_to_admit(
             None,
             &[],
             &config.minted_final_advertisement,
-            ids,
             now_ms,
             TerminationCause::Admission,
         )));
@@ -146,7 +143,6 @@ pub fn up_to_admit(
             None,
             &[],
             &config.minted_final_advertisement,
-            ids,
             now_ms,
             TerminationCause::Admission,
         )));
@@ -283,7 +279,6 @@ pub fn admitted(
             Some(&unsupported),
             &[],
             &config.minted_final_advertisement,
-            ids,
             now_ms,
             TerminationCause::Admission,
         );
@@ -330,7 +325,6 @@ pub fn admitted(
                 None,
                 &[],
                 &config.minted_final_advertisement,
-                ids,
                 now_ms,
                 TerminationCause::Admission,
             );

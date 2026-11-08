@@ -75,6 +75,21 @@ fn elapsed_is_the_sum_of_the_rungs_before_it() {
     // The cadence ADR-0007 X1 states: sends at +500 / +1500 / +3500 ms.
 }
 
+/// A rung index read from a replicated record is any `u32`: the elapsed total
+/// it rebuilds is the sum of the rungs, reached without walking them.
+#[test]
+fn elapsed_past_the_last_doubling_adds_the_steady_wait_per_rung() {
+    for class in Class::ALL {
+        let s = Schedule::rfc(class);
+        let walked = |n: u32| (1..=n).filter_map(|k| s.interval(k)).sum::<Duration>();
+        for n in [0, 1, 20, 21, 22, 40] {
+            assert_eq!(s.elapsed_at(n), walked(n), "{class:?} rung {n}");
+        }
+    }
+    let far = Schedule::rfc(Class::InviteClient).elapsed_at(u32::MAX);
+    assert!(far > Duration::from_secs(1 << 40), "{far:?}");
+}
+
 /// A restored record keeps a rung index alone; the ladder it rebuilds is the one
 /// that was running.
 #[test]

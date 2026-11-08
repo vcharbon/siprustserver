@@ -58,7 +58,8 @@ impl Family {
         }
         let mut end = at + 2;
         let mut series: Vec<Pairs> = Vec::new();
-        while end < lines.len() {
+        // Each series takes a line at least: the exposition's length bounds them.
+        for _ in 0..lines.len() {
             match self.series_at(&lines, end) {
                 Ok(Some((pairs, next))) => {
                     series.push(pairs);
@@ -145,17 +146,21 @@ impl Family {
             _ => return Err(format!("line {i} {line:?} does not open a series with a bucket")),
         };
         let mut j = i;
-        loop {
-            match lines.get(j).and_then(|l| self.sample(l)) {
+        let mut closed = false;
+        for line in lines.iter().skip(i) {
+            match self.sample(line) {
                 Some(("_bucket", p)) if before_le(&p).unwrap_or_default() == labels => {
-                    let last = le(&p).as_deref() == Some("+Inf");
+                    closed = le(&p).as_deref() == Some("+Inf");
                     j += 1;
-                    if last {
+                    if closed {
                         break;
                     }
                 }
-                _ => return Err(format!("series {labels:?} has no +Inf bucket")),
+                _ => break,
             }
+        }
+        if !closed {
+            return Err(format!("series {labels:?} has no +Inf bucket"));
         }
         for suffix in ["_sum", "_count"] {
             match lines.get(j).and_then(|l| self.sample(l)) {
@@ -172,38 +177,46 @@ fn sample_of(rest: &str) -> Option<Pairs> {
     if rest.starts_with(' ') {
         return Some(Vec::new());
     }
-    let mut chars = rest.strip_prefix('{')?.chars();
-    let mut pairs = Vec::new();
-    loop {
-        let mut label = String::new();
-        loop {
-            match chars.next()? {
-                '}' if label.is_empty() && pairs.is_empty() => return Some(pairs),
-                '=' => break,
-                c => label.push(c),
-            }
-        }
-        if chars.next()? != '"' {
-            return None;
-        }
-        let mut value = String::new();
-        loop {
-            match chars.next()? {
-                '"' => break,
-                '\\' => match chars.next()? {
-                    'n' => value.push('\n'),
-                    c => value.push(c),
-                },
-                c => value.push(c),
-            }
-        }
-        pairs.push((label, value));
-        match chars.next()? {
-            ',' => continue,
-            '}' => return chars.next().filter(|&c| c == ' ').map(|_| pairs),
-            _ => return None,
-        }
+    /// Where the reading of `{name="value",…} ` stands.
+    enum At {
+        Label,
+        Open,
+        Value,
+        Escape,
+        Next,
+        Close,
     }
+    let mut at = At::Label;
+    let (mut pairs, mut label, mut value) = (Vec::new(), String::new(), String::new());
+    for c in rest.strip_prefix('{')?.chars() {
+        at = match (at, c) {
+            (At::Label, '}') if label.is_empty() && pairs.is_empty() => return Some(pairs),
+            (At::Label, '=') => At::Open,
+            (At::Label, c) => {
+                label.push(c);
+                At::Label
+            }
+            (At::Open, '"') => At::Value,
+            (At::Value, '"') => {
+                pairs.push((std::mem::take(&mut label), std::mem::take(&mut value)));
+                At::Next
+            }
+            (At::Value, '\\') => At::Escape,
+            (At::Value, c) => {
+                value.push(c);
+                At::Value
+            }
+            (At::Escape, c) => {
+                value.push(if c == 'n' { '\n' } else { c });
+                At::Value
+            }
+            (At::Next, ',') => At::Label,
+            (At::Next, '}') => At::Close,
+            (At::Close, ' ') => return Some(pairs),
+            (At::Open | At::Next | At::Close, _) => return None,
+        };
+    }
+    None
 }
 
 #[cfg(test)]

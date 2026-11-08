@@ -535,6 +535,7 @@ version = "0.1.0"
 dependencies = [
  "b2bua-core",
  "b2bua-sdk",
+ "bounds",
  "call",
  "lookup-map",
  "proptest",
@@ -796,6 +797,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "bounds"
+version = "0.1.0"
+dependencies = [
+ "stacker",
 ]
 
 [[package]]

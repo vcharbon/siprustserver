@@ -273,7 +273,12 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         id: &DialogId,
     ) {
-        loop {
+        let Some(queued) = dialog_of(call, leg_id, id).map(|d| d.queued.as_slice()) else {
+            return;
+        };
+        // Each pass takes one request off the queue: its length bounds them.
+        let passes = queued.len();
+        for _ in 0..passes {
             let Some(d) = dialog_of(call, leg_id, id) else { return };
             let in_flight = d.notify_wait_ends_at_ms().is_some_and(|end| self.now_ms < end);
             if d.queued_behind(Behind::OwnNotify).next().is_none() || in_flight {

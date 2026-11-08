@@ -1,12 +1,13 @@
 # Panic-sites budget (scripts/panic-sites.py, `just panic-sites`, ADR-0051):
 # the panic-class sites per file of the tiered crates, counted by one clippy
 # pass with the panic set as `-W` flags over the workspace's lib and bin
-# targets. Each entry is a file that had sites when it was listed, with their
-# count: it goes down, and up only by sites moved into its file or revealed by
-# a rule the base did not count. An unlisted file has none. `just panic-sites-update` lowers an entry,
-# removes it at zero, and raises or adds one by those moved and revealed sites.
-# A crate with no entry carries the zero attribute at its roots
-# (`just panic-sites` names it).
+# targets, and their loop and recursion sites, counted by tooling/site-scan
+# (ADR-0057 §5). Each entry is a file that had sites when it was listed, with
+# their count: it goes down, and up only by sites moved into its file or
+# revealed by a rule the base did not count. An unlisted file has none.
+# `just panic-sites-update` lowers an entry, removes it at zero, and raises or
+# adds one by those moved and revealed sites. A crate with no panic-class site
+# carries the zero attribute at its roots (`just panic-sites` names it).
 
 crates/call-limiter-runner/src/main.rs 5
 crates/call-limiter/src/metrics.rs 4
@@ -17,3 +18,31 @@ crates/load-shed/src/sampler.rs 5
 crates/load-shed/src/token_bucket.rs 2
 crates/metric-values/src/fixed.rs 6
 crates/metric-values/src/open.rs 7
+crates/sip-message/src/char_class.rs 1
+crates/sip-message/src/control_bytes.rs 1
+crates/sip-message/src/draft/edit.rs 1
+crates/sip-message/src/error/reason_key.rs 3
+crates/sip-message/src/header/id.rs 2
+crates/sip-message/src/header/name_addr/read.rs 1
+crates/sip-message/src/header/params.rs 2
+crates/sip-message/src/header/scan.rs 5
+crates/sip-message/src/header/single_valued.rs 1
+crates/sip-message/src/header/token_params.rs 1
+crates/sip-message/src/header/uri/equivalent.rs 1
+crates/sip-message/src/header/uri/params.rs 2
+crates/sip-message/src/mscml.rs 3
+crates/sip-message/src/multipart.rs 1
+crates/sip-message/src/multipart/description.rs 1
+crates/sip-message/src/multipart/entity.rs 1
+crates/sip-message/src/multipart/framing.rs 3
+crates/sip-message/src/param_codec.rs 1
+crates/sip-message/src/parser/custom/headers.rs 3
+crates/sip-message/src/parser/custom/mod.rs 1
+crates/sip-message/src/parser/custom/name_forms.rs 1
+crates/sip-message/src/parser/custom/scanner.rs 4
+crates/sip-message/src/parser/custom/structured_headers.rs 3
+crates/sip-message/src/sdp_session.rs 1
+crates/sip-message/src/site.rs 1
+crates/sip-message/src/sniff.rs 3
+crates/sip-message/src/sniff/except.rs 1
+crates/sip-message/src/sniff/via_stamp.rs 1

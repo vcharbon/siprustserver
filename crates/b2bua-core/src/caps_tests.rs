@@ -168,3 +168,20 @@ fn every_nested_stated_set_counts_its_lines() {
     call.features = Some(features);
     assert_eq!(Gauge::of(&call).get(Cap::HeaderUpdates), 9, "2 at the top, 7 two sets down");
 }
+
+#[test]
+fn a_stated_tree_past_the_walk_reads_as_past_every_cap() {
+    use call::features::StatedHeaders;
+
+    let tree = |sets: usize| {
+        let mut root = StatedHeaders::default();
+        root.legs = (1..sets).map(|n| (format!("b-{n}"), StatedHeaders::default())).collect();
+        let mut call = call();
+        let mut features = crate::decision::default_platform_features();
+        features.stated_headers = Some(root);
+        call.features = Some(features);
+        Gauge::of(&call).get(Cap::HeaderUpdates)
+    };
+    assert_eq!(tree(STATED_SETS_MAX), 0, "the walk's maximum, every set empty");
+    assert_eq!(tree(STATED_SETS_MAX + 1), u64::MAX);
+}
