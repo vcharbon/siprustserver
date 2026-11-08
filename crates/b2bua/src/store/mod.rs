@@ -36,6 +36,8 @@ mod setup_cancel_tests;
 #[cfg(test)]
 mod spiral_index_tests;
 mod takeover;
+#[cfg(test)]
+mod test_support;
 pub use reap::ReapedBodies;
 #[cfg(test)]
 mod unwired_tests;
@@ -711,10 +713,8 @@ impl CallState {
     /// removals): a divergence is a store-side leak the counter pair can't
     /// see. The sibling maps (`sip_index`, `indexed`, `locks`, `takeover`)
     /// should track `calls`; one that grows while it stays flat names the
-    /// leaking map. Sampled periodically by the runner — not on the hot path.
-    ///
-    /// The lock covers the lengths and one `Arc` clone per call; the census
-    /// walks that snapshot after it, so lengths and census describe one map.
+    /// leaking map. Sampled periodically by the runner. The lock covers the
+    /// lengths and one `Arc` per call; the census walks them after it.
     pub fn sample_store_gauges(&self) {
         let (lengths, calls) = {
             let inner = self.locked();

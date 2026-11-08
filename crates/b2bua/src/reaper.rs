@@ -48,6 +48,12 @@ fn ledger<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     locked(m, REAPER_LEDGERS)
 }
 
+/// The entries of `m` with their stamps; its lock is released on return, so
+/// judging them takes no other lock under it.
+fn listing<V: Default>(m: &Mutex<Ledger<V>>) -> Vec<(String, Stamp)> {
+    ledger(m).listed()
+}
+
 /// Remove from `m` the `judged` entries no write touched since they were
 /// listed; no lock is taken for nothing to remove.
 fn prune<V: Default>(m: &Mutex<Ledger<V>>, judged: Vec<(String, Stamp)>) {
@@ -254,15 +260,7 @@ impl Reaper {
     /// ones; prune dead escalation state. Sync + lock-light.
     fn sweep_once(&self, state: &CallState, in_flight: &InFlight, now_ms: i64) {
         self.metrics.bump_reaper_sweep();
-        // A condemned call that left Active has its teardown under way, bounded
-        // by `TerminatingTimeout`: it needs no further verdict. A takeover copy
-        // is its self-release's (ADR-0020 X3).
-        let listed = ledger(&self.condemned).listed();
-        let (condemned, done): (Vec<_>, Vec<_>) = listed.into_iter().partition(|(r, _)| {
-            state.model_state(r) == Some(CallModelState::Active) && !state.is_takeover(r)
-        });
-        prune(&self.condemned, done);
-        let condemned: Vec<String> = condemned.into_iter().map(|(r, _)| r).collect();
+        let condemned = self.condemned_to_sweep(state, || ());
         // Condemned calls keep a share of the budget however many are stale.
         let reserved = condemned.len().min(CONDEMNED_SHARE_PER_SWEEP);
         let mut budget = MAX_VERDICTS_PER_SWEEP;
@@ -289,20 +287,37 @@ impl Reaper {
         self.prune_released(state, || ());
     }
 
+    /// The condemned calls still to sweep: those `Active` and no takeover
+    /// copy. A condemned call that left Active has its teardown under way,
+    /// bounded by `TerminatingTimeout`: it needs no further verdict, and its
+    /// entry goes. A takeover copy is its self-release's (ADR-0020 X3). The
+    /// ledger is listed and judged as [`prune_released`](Self::prune_released)
+    /// does, `between` running before the removals.
+    fn condemned_to_sweep(&self, state: &CallState, between: impl FnOnce()) -> Vec<String> {
+        let listed = listing(&self.condemned);
+        let (live, done): (Vec<_>, Vec<_>) = listed.into_iter().partition(|(r, _)| {
+            state.model_state(r) == Some(CallModelState::Active) && !state.is_takeover(r)
+        });
+        between();
+        prune(&self.condemned, done);
+        live.into_iter().map(|(r, _)| r).collect()
+    }
+
     /// Prune the escalation state of calls no longer resident (normal
     /// termination, reap completed, self-release) — bounded by live calls.
     /// Each ledger is listed under its lock and judged against the call map
-    /// after it; `between` runs then, before the removals, which spare an
-    /// entry written since its listing (a call re-created on its callRef).
+    /// after it, no ledger held; `between` runs then, before the removals,
+    /// which spare an entry written since its listing (a call re-created on
+    /// its callRef).
     fn prune_released(&self, state: &CallState, between: impl FnOnce()) {
         let gone = |listed: Vec<(String, Stamp)>| -> Vec<(String, Stamp)> {
             listed.into_iter().filter(|(r, _)| !state.contains(r)).collect()
         };
-        let strikes = gone(ledger(&self.strikes).listed());
-        let attempts = gone(ledger(&self.attempts).listed());
-        let condemned_attempts = gone(ledger(&self.condemned_attempts).listed());
-        let overflow_aborts = gone(ledger(&self.overflow_aborts).listed());
-        let capped = gone(ledger(&self.capped).listed());
+        let strikes = gone(listing(&self.strikes));
+        let attempts = gone(listing(&self.attempts));
+        let condemned_attempts = gone(listing(&self.condemned_attempts));
+        let overflow_aborts = gone(listing(&self.overflow_aborts));
+        let capped = gone(listing(&self.capped));
         between();
         prune(&self.strikes, strikes);
         prune(&self.attempts, attempts);

@@ -251,6 +251,45 @@ fn trips_strike_once_until_the_verdict_s_own_turn_trips_and_release_forgets() {
     assert_eq!(outcomes(&mut rx), vec![OUTCOME_FATAL], "a released call's strikes are gone");
 }
 
+/// A prune waiting on the call map holds no ledger: a failure report or a
+/// verdict reads the ledger meanwhile.
+#[test]
+fn a_prune_waiting_on_the_call_map_holds_no_ledger() {
+    let (reaper, _rx, state, refs) = condemned_rig(1);
+    reaper.report(&refs[0], HandlerFailure::Panicked);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn({
+        let state = state.clone();
+        move || {
+            state.holding_call_map(|| {
+                let _ = held_tx.send(());
+                let _ = release_rx.recv();
+            })
+        }
+    });
+    held_rx.recv().expect("the call map is held");
+    let pruning = std::thread::spawn({
+        let (reaper, state) = (reaper.clone(), state.clone());
+        move || reaper.prune_released(&state, || ())
+    });
+    // The prune reaches its wait on the call map.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn({
+        let (reaper, call_ref) = (reaper.clone(), refs[0].clone());
+        move || {
+            let _ = read_tx.send(ledger(&reaper.strikes).contains(&call_ref));
+        }
+    });
+    let read = read_rx.recv_timeout(std::time::Duration::from_secs(1));
+    release_tx.send(()).expect("the holder waits for its release");
+    for thread in [holder, pruning, reader] {
+        thread.join().expect("the thread completes");
+    }
+    assert_eq!(read, Ok(true), "the strikes ledger answers while the prune waits");
+}
+
 /// The call `flood{n}` of [`condemned_rig`], created again on its callRef.
 fn recreate(state: &CallState, n: usize) -> String {
     let invite = test_support::invite("w0", "w1", &format!("flood{n}"));
@@ -276,13 +315,17 @@ async fn a_sweep_prunes_the_ledgers_of_a_released_call() {
     assert!(ledger(&reaper.capped).contains(&refs[1]));
 }
 
-/// An entry written between a prune's listing and its removals stays: a
-/// strike of a call re-created on a released callRef, and a strike of a call
-/// that was not listed. An entry of the released call left as it was goes.
+/// An entry written between a prune's listing and its removals stays: the
+/// strike of a call re-created on a released callRef, counted on from the
+/// released call's strike, so its first failure is a discharge. An entry
+/// judged gone and not written since goes, even once its callRef is resident
+/// again: it was the released call's.
 #[tokio::test]
 async fn a_prune_keeps_the_entries_written_while_it_judged() {
     let (reaper, mut rx, state, refs) = condemned_rig(2);
-    reaper.report(&refs[0], HandlerFailure::Panicked);
+    for r in &refs {
+        reaper.report(r, HandlerFailure::Panicked);
+    }
     reaper.on_lifetime_cap(&refs[0]);
     state.remove(&refs[0]);
     state.remove(&refs[1]);
@@ -291,12 +334,35 @@ async fn a_prune_keeps_the_entries_written_while_it_judged() {
     reaper.prune_released(&state, || {
         assert_eq!(recreate(&state, 0), refs[0], "the takeover's copy takes the callRef again");
         reaper.report(&refs[0], HandlerFailure::Panicked);
-        recreate(&state, 1);
-        reaper.report(&refs[1], HandlerFailure::Panicked);
+        assert_eq!(recreate(&state, 1), refs[1]);
     });
 
+    assert_eq!(outcomes(&mut rx), vec![OUTCOME_DISCHARGE], "the copy's failure is strike 2");
     assert!(ledger(&reaper.strikes).contains(&refs[0]), "the fresh strike of the copy");
-    assert!(ledger(&reaper.strikes).contains(&refs[1]), "a strike not listed");
+    assert!(!ledger(&reaper.strikes).contains(&refs[1]), "the released call's strike");
     assert!(!ledger(&reaper.capped).contains(&refs[0]), "the released call's mark");
-    assert_eq!(ledger(&reaper.strikes).len(), 2);
+    assert_eq!(ledger(&reaper.strikes).len(), 1);
+}
+
+/// A condemnation repeated between the listing and the removals keeps a
+/// call that left Active condemned; one left as it was goes; a condemned
+/// call still Active is swept.
+#[tokio::test]
+async fn a_condemnation_written_while_judged_stays() {
+    let (reaper, mut rx, state, refs) = condemned_rig(3);
+    for r in &refs {
+        reaper.on_overflow_ceiling(r);
+    }
+    let _ = outcomes(&mut rx);
+    for r in &refs[1..] {
+        let mut call = state.peek(r).unwrap();
+        call.state = CallModelState::Terminating;
+        state.update(call);
+    }
+    let swept = reaper.condemned_to_sweep(&state, || reaper.on_overflow_ceiling(&refs[1]));
+    assert_eq!(swept, [refs[0].clone()]);
+    assert!(outcomes(&mut rx).is_empty(), "a repeated condemnation sends nothing");
+    assert!(ledger(&reaper.condemned).contains(&refs[0]));
+    assert!(ledger(&reaper.condemned).contains(&refs[1]), "condemned again while judged");
+    assert!(!ledger(&reaper.condemned).contains(&refs[2]), "its teardown is under way");
 }

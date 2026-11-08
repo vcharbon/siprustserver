@@ -3,8 +3,9 @@
 //! answer, and the replication topologies they name.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use call::CallModelState;
+use call::{Call, CallModelState};
 
 use super::CallState;
 
@@ -83,7 +84,7 @@ impl CallState {
     /// [`live_topologies`](Self::live_topologies), running `between` after the
     /// pass over the call map and before the backing read.
     fn live_topologies_with(&self, between: impl FnOnce()) -> Option<Vec<(String, String)>> {
-        let (refs, pairs) = {
+        let (calls, pairs) = {
             let inner = self.locked();
             let mut pairs: Vec<(String, String)> = Vec::new();
             for call_ref in inner.calls.keys() {
@@ -92,15 +93,15 @@ impl CallState {
                     pairs.push((t.pri.clone(), t.bak.clone()));
                 }
             }
-            let refs: Vec<String> = match self.repl_store() {
-                Some(_) => inner.calls.keys().cloned().collect(),
+            let calls: Vec<Arc<Call>> = match self.repl_store() {
+                Some(_) => inner.calls.values().cloned().collect(),
                 None => Vec::new(),
             };
-            (refs, pairs)
+            (calls, pairs)
         };
         between();
         let unbacked = self.unbacked_refs();
-        if refs.iter().any(|call_ref| unbacked.contains(call_ref)) {
+        if calls.iter().any(|call| unbacked.contains(&call.call_ref)) {
             return None;
         }
         Some(pairs)
@@ -209,8 +210,10 @@ mod tests {
         owners
     }
 
-    /// A call admitted unbacked while a listing runs, its mark written before
-    /// it enters the map, is never listed with a backup.
+    /// A call admitted unbacked after a listing's pass, its mark written
+    /// before it enters the map, is not listed: the pass never saw it, and the
+    /// next listing sees it with its mark. Red only against a backing read
+    /// before the pass, which would list it backed.
     #[test]
     fn a_call_admitted_during_a_listing_is_never_listed_backed() {
         let admit = |state: &CallState, repl: &ReplicatingCallStore| {
@@ -219,22 +222,17 @@ mod tests {
         };
         let (state, repl) = replicated();
         let holders = state.active_call_holders_with(|| admit(&state, &repl));
-        assert!(
-            owners(&holders).iter().all(|(r, pair)| *r != "c" || pair.is_none()),
-            "{:?}",
-            owners(&holders)
-        );
+        assert_eq!(owners(&holders), [("a", Some(("w0", "w1")))], "c is not listed");
 
         let (state, repl) = replicated();
         let pairs = state.live_topologies_with(|| admit(&state, &repl));
-        assert!(
-            pairs.as_ref().is_none_or(|p| !p.contains(&("w0".into(), "w2".into()))),
-            "{pairs:?}"
-        );
+        assert_eq!(pairs, Some(vec![("w0".into(), "w1".into())]), "c is not listed");
+        assert_eq!(state.live_topologies(), None, "the next listing sees c unbacked");
     }
 
-    /// A resident call whose backup is given up while a listing runs is
-    /// listed with no backup.
+    /// A resident call whose backup is given up between a listing's pass and
+    /// its backing read is listed with no backup. The ordering's own red
+    /// test: a backing read before the pass lists it backed.
     #[test]
     fn a_call_left_unbacked_during_a_listing_is_listed_unbacked() {
         let (state, repl) = replicated();
