@@ -104,6 +104,18 @@ pub async fn node_deciding(
     tune: impl FnOnce(&mut B2buaConfig),
     services: Vec<crate::rules::ServiceDef>,
 ) -> Node {
+    node_probed(net, ordinal, decision, tune, services, Default::default()).await
+}
+
+/// [`node_deciding`] reporting its turns to `turn_probe`.
+pub async fn node_probed(
+    net: &SimulatedSignalingNetwork,
+    ordinal: &str,
+    decision: Arc<dyn CallDecisionEngine>,
+    tune: impl FnOnce(&mut B2buaConfig),
+    services: Vec<crate::rules::ServiceDef>,
+    turn_probe: crate::turn_probe::TurnProbes,
+) -> Node {
     let clock = Clock::test_at(0);
     let sip_addr = SocketAddr::from(NODE_SIP_ADDR);
     let endpoint = net
@@ -152,7 +164,7 @@ pub async fn node_deciding(
         store: Arc::new(InMemoryCallStore::new()),
         store_faults: Default::default(),
         wire_faults: Default::default(),
-        turn_probe: Default::default(),
+        turn_probe,
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
         refusals: None,
@@ -175,3 +187,71 @@ pub async fn node_deciding(
 }
 
 pub use crate::test_call::{invite, src, turn};
+
+/// An answered call `pri` owns and `bak` backs up, as its INVITE's turn and
+/// the caller's ACK left it: the caller's dialog confirmed under the
+/// INVITE's tags, nothing in flight.
+pub fn answered(pri: &str, bak: &str, cid: &str) -> call::Call {
+    let config = B2buaConfig { self_ordinal: pri.into(), ..Default::default() };
+    let mut ids = sip_ids::TurnIds::fixed(1);
+    let mut call = crate::initial_invite::build_initial_call(
+        &invite(pri, bak, cid),
+        src(),
+        &config,
+        &mut ids,
+        0,
+    );
+    *call.a_leg.invite_final_sent_mut() = Some(200);
+    call.a_leg.own_tag = Some("b2b-tag".into());
+    call::testkit::stage_leg(&mut call.a_leg, call::LegState::Confirmed);
+    let dialog = call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    dialog.peer_tag = "alicetag".into();
+    dialog.peer_cseq = Some(1);
+    dialog.remote_target = "sip:alice@10.0.0.9:5060".into();
+    call
+}
+
+/// The caller's BYE of `call`'s dialog ([`answered`]), naming no `callRef`
+/// of ours.
+pub fn caller_bye(call: &call::Call) -> Vec<u8> {
+    format!(
+        "BYE sip:b2bua@127.0.0.2:5080 SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-bye.{}\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:alice@example.com>;tag=alicetag\r\n\
+         To: <sip:bob@example.com>;tag=b2b-tag\r\n\
+         Call-ID: {}\r\n\
+         CSeq: 2 BYE\r\n\
+         Content-Length: 0\r\n\r\n",
+        call.a_leg.call_id.replace('@', "."),
+        call.a_leg.call_id
+    )
+    .into_bytes()
+}
+
+/// Put `call`, placed as its INVITE placed it, into the `role` partition of
+/// `primary` in `store`, indexed under its keys.
+pub async fn put_body(
+    store: &ReplicatingCallStore,
+    role: crate::store::PartitionRole,
+    primary: &str,
+    call: &call::Call,
+) {
+    use crate::store::CallStore;
+    let body = crate::store::envelope::placed_body(call).expect("a placed body");
+    let keys = call::call_index_keys(call);
+    let opts = crate::store::PutOpts::default();
+    let put = store.put_call(role, primary, &call.call_ref, body, &keys, 600_000, 1, 0, &opts);
+    put.await.expect("the body is stored");
+}
+
+/// The status lines `peer` receives within `within`.
+pub async fn heard(peer: &dyn sip_net::UdpEndpoint, within: std::time::Duration) -> Vec<String> {
+    let mut lines = Vec::new();
+    let deadline = tokio::time::Instant::now() + within;
+    while let Ok(Some(p)) = tokio::time::timeout_at(deadline, peer.recv()).await {
+        let text = String::from_utf8_lossy(&p.raw).to_string();
+        lines.push(text.lines().next().unwrap_or_default().to_string());
+    }
+    lines
+}

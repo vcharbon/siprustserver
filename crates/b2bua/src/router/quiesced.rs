@@ -49,12 +49,11 @@ pub(super) fn notice_of(event: &CallEvent) -> Option<&str> {
 /// re-insert it after `drop_local`. `release_call` takes no per-call lock
 /// itself, so holding the guard across it is deadlock-free.
 pub(super) async fn self_release_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     if !ctx.state.is_takeover(call_ref) {
-        // Shed between the notice and its turn: what this turn's queue and
-        // lock entry are is all that is left of the call here.
+        // Shed between the notice and its turn: this turn's queue is all that
+        // is left of the call here.
         if !ctx.state.contains(call_ref) {
-            drop(guard);
             release_call(ctx, call_ref, ReleaseKind::Orphan).await;
         }
         return;

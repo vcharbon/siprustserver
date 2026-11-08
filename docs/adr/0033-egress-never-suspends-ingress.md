@@ -108,12 +108,12 @@ the one await with no timeout, no queue and no drop policy.
    livenessProbe's 30 to 40 s, which stays the backstop for a runtime wedged
    whole, whose watch never polls. A stall during a drain exits the same way;
    a drain whose grace ends first returns by its own bound, which reads nothing
-   of the router. A worker's bulk reclaim is the turn that still needs a call's
-   lock on the router loop, and that lock's holder may hold it across its
-   decision round trip (`B2BUA_CALL_CONTROL_TIMEOUT_MS`), so the stall
-   threshold defaults to the larger of 10 s and that timeout plus 5 s, and boot
-   refuses one not above it by 2 s. A bulk reclaim beats the router's pulse per
-   call. Under the `cpu_starve` chaos the 0.3 CPU quota is shared by every
+   of the router. No router turn waits on a call's lock, whose holder may hold
+   it across its decision round trip (`B2BUA_CALL_CONTROL_TIMEOUT_MS`): a bulk
+   reclaim defers a call whose lock a turn holds to that call's own queue
+   (ADR-0010 X2). The stall threshold defaults to the larger of 10 s and that
+   timeout plus 5 s, and boot refuses one not above it by 2 s. A bulk reclaim
+   beats the router's pulse per call. Under the `cpu_starve` chaos the 0.3 CPU quota is shared by every
    runnable thread: with N runtime threads busy, a turn reads stalled only when
    its own work needs more than 3/N CPU-seconds, and exits the worker only when
    it needs more than 4.5/N (one SIP event, timer firing or sweep takes

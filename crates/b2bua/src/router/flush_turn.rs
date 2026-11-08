@@ -6,8 +6,8 @@
 //! flush is served first (ADR-0010 X2).
 //!
 //! A turn that leaves no call live here and nothing queued behind it releases
-//! the queue and the lock entry. With an item behind it the queue stays: that
-//! item may make the call live, and its own turn releases what it leaves.
+//! the queue. With an item behind it the queue stays: that item may make the
+//! call live, and its own turn releases what it leaves.
 
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ const REFUSED_FORWARD: &str = "refused-forward";
 /// Queue the reconcile of the reverse flush of `call_ref` the store took.
 pub(super) async fn offer_reconcile(ctx: &Arc<RouterCtx>, call_ref: String) {
     let event = notice(call_ref, RECONCILE, 0, Vec::new());
-    super::ingress::on_event(ctx, event, Default::default()).await;
+    super::ingress::on_event(ctx, event, Default::default(), None).await;
 }
 
 /// Queue the meeting of the refused flush `body` of `call_ref`, flushed at
@@ -52,7 +52,7 @@ pub(super) async fn offer_refused(
         FlushDirection::Forward => REFUSED_FORWARD,
     };
     let event = notice(call_ref, outcome, origin_now_ms, body.to_vec());
-    super::ingress::on_event(ctx, event, Default::default()).await;
+    super::ingress::on_event(ctx, event, Default::default(), None).await;
 }
 
 fn notice(call_ref: String, outcome: &str, origin_now_ms: i64, body: Vec<u8>) -> CallEvent {

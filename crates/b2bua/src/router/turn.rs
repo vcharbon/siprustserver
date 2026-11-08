@@ -59,6 +59,10 @@ impl Runnable for Turn {
                 super::flush_turn::flush_turn(&self.ctx, &self.event).await;
                 return;
             }
+            if super::reclaim::deferred::is_notice(&self.event) {
+                super::reclaim::deferred::deferred_turn(&self.ctx, &self.event).await;
+                return;
+            }
             match (&self.event, self.res.call_ref.as_deref()) {
                 (CallEvent::InternalEvent { call_ref, topic, outcome, payload, body, .. }, _)
                     if topic == super::stand_down::TOPIC =>
@@ -163,9 +167,7 @@ mod tests {
     /// A node holding call `c`'s lock, and the `Turn` of a peer BYE whose
     /// server transaction is still `Trying`: the router's own turn of it
     /// waits on the lock the test holds.
-    async fn held_bye(
-        branch: &str,
-    ) -> (Node, Box<dyn UdpEndpoint>, tokio::sync::OwnedMutexGuard<()>, Turn) {
+    async fn held_bye(branch: &str) -> (Node, Box<dyn UdpEndpoint>, crate::store::CallGuard, Turn) {
         let net = SimulatedSignalingNetwork::new(1);
         let node = node_on(&net, "w0", |_| {}, Vec::new()).await;
         let peer = net.bind_udp(BindUdpOpts::new(PEER.parse().unwrap(), 64)).await.unwrap();

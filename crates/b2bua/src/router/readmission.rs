@@ -13,6 +13,12 @@
 //! snapshot may still show the process it replaces ready, and a readiness
 //! flap closes it again. A membership that does not show the node itself
 //! holds nothing.
+//!
+//! The calls a bulk reclaim parked on turns of their own (`reclaim::deferred`)
+//! are armed with the rest, each by a turn queued behind its park: the gate
+//! keeps them with the arming, across every bulk pass until it is released.
+
+use std::collections::BTreeSet;
 
 use tokio::sync::watch;
 
@@ -26,6 +32,8 @@ pub(super) struct ReadmissionGate {
     ready: Option<watch::Receiver<bool>>,
     /// Whether parked calls wait to be armed.
     arming: bool,
+    /// The calls whose park a bulk reclaim deferred, to arm with the rest.
+    deferred: BTreeSet<String>,
     held: Vec<ReplCommand>,
 }
 
@@ -33,6 +41,8 @@ pub(super) struct ReadmissionGate {
 pub(super) struct Released {
     /// Arm the parked calls, before any command runs.
     pub(super) arm: bool,
+    /// The deferred parks to arm with them ([`ReadmissionGate::defer`]).
+    pub(super) deferred: Vec<String>,
     /// The held commands, in arrival order.
     pub(super) cmds: Vec<ReplCommand>,
 }
@@ -41,7 +51,13 @@ impl ReadmissionGate {
     /// A gate over `ready`, the node's own endpoint as its membership shows
     /// it; `None` opens it for good.
     pub(super) fn new(ready: Option<watch::Receiver<bool>>) -> Self {
-        Self { ready, arming: false, held: Vec::new() }
+        Self { ready, arming: false, deferred: BTreeSet::new(), held: Vec::new() }
+    }
+
+    /// A bulk reclaim parked `call_refs` on turns of their own: each is armed
+    /// with the next arming, by a turn queued behind its park.
+    pub(super) fn defer(&mut self, call_refs: impl IntoIterator<Item = String>) {
+        self.deferred.extend(call_refs);
     }
 
     /// `cmd` when it runs now: it reclaims nothing, or the gate is open and
@@ -56,15 +72,15 @@ impl ReadmissionGate {
         None
     }
 
-    /// Whether the calls a bulk reclaim just parked are armed now: the gate is
-    /// open and holds nothing. Otherwise their arming is held, and released
-    /// ahead of every held command.
-    pub(super) fn arm_now(&mut self) -> bool {
+    /// The deferred parks to arm now with the calls a bulk reclaim just
+    /// parked, when the gate is open and holds nothing. Otherwise their
+    /// arming is held, and released ahead of every held command.
+    pub(super) fn arm_now(&mut self) -> Option<Vec<String>> {
         if self.holds_nothing() && self.is_open() {
-            return true;
+            return Some(std::mem::take(&mut self.deferred).into_iter().collect());
         }
         self.arming = true;
-        false
+        None
     }
 
     /// What the gate held, once the endpoint reads ready; pending while the
@@ -85,7 +101,11 @@ impl ReadmissionGate {
             held = self.held.len(),
             "own endpoint reads ready; held reclaim released"
         );
-        Released { arm: std::mem::take(&mut self.arming), cmds: std::mem::take(&mut self.held) }
+        Released {
+            arm: std::mem::take(&mut self.arming),
+            deferred: std::mem::take(&mut self.deferred).into_iter().collect(),
+            cmds: std::mem::take(&mut self.held),
+        }
     }
 
     fn holds_nothing(&self) -> bool {

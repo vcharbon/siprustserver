@@ -259,14 +259,8 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
     if !at_once && !names_request_in_flight(&call) && !awaited {
         return Swept::Left;
     }
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     if peer_returned(ctx, call_ref, cause) {
-        // The lock entry this pass made is the only trace of a call not live
-        // here, and no release will clear it. The guard goes first.
-        if !ctx.state.contains(call_ref) {
-            drop(guard);
-            ctx.state.discard_orphan(call_ref);
-        }
         return Swept::PeerReturned;
     }
     match materialise(ctx, call_ref, Origin::Takeover).await {
@@ -281,13 +275,8 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
             }
             _ => Swept::Taken,
         },
-        Materialised::Resident(_) | Materialised::Parked(_) => Swept::Left,
-        // Gone from the partition since it was read: the lock entry this pass
-        // made is the only trace, and no release will clear it. The guard
-        // goes first, as it is held on that entry.
-        Materialised::Refused(_) => {
-            drop(guard);
-            ctx.state.discard_orphan(call_ref);
+        // Live here already, or gone from the partition since it was read.
+        Materialised::Resident(_) | Materialised::Parked(_) | Materialised::Refused(_) => {
             Swept::Left
         }
     }
@@ -325,19 +314,13 @@ fn ending_work(call: &Call) -> bool {
 /// lock, which the call's own turns take: one of them may have deleted it
 /// since the sweep's read. An ending body's legs are forced terminal.
 async fn discharge_finished(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     let ended = match ctx.state.peek_replica(call_ref).await {
         Ok((mut ended, skew)) if finished(&ended.call) => {
             reanchor(&mut ended.call, skew);
             ended
         }
-        _ if ctx.state.contains(call_ref) => return Swept::Left,
-        Ok(_) => return Swept::Left,
-        Err(_) => {
-            drop(guard);
-            ctx.state.discard_orphan(call_ref);
-            return Swept::Left;
-        }
+        _ => return Swept::Left,
     };
     let now_ms = ctx.clock.now_ms();
     if ended_body::pay(ctx, call_ref, ended_body::Cause::Departed, ended, now_ms).await.discharged {
@@ -346,5 +329,7 @@ async fn discharge_finished(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
     Swept::Left
 }
 
+#[cfg(test)]
+mod crossing_tests;
 #[cfg(test)]
 mod tests;

@@ -42,7 +42,7 @@ pub(super) async fn offer(ctx: &Arc<RouterCtx>, call_ref: String, write: Primary
     if !ctx.state.is_takeover(&call_ref) {
         return;
     }
-    super::ingress::on_event(ctx, notice(call_ref, write), Default::default()).await;
+    super::ingress::on_event(ctx, notice(call_ref, write), Default::default(), None).await;
 }
 
 /// Queue the stand-down notice of the takeover copy of `call_ref` a sweep just
@@ -83,11 +83,10 @@ pub(super) async fn stand_down_turn(
     payload: &serde_json::Value,
     body: &[u8],
 ) {
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     let Some(copy) = ctx.state.peek_enveloped(call_ref) else {
-        // Shed between the notice and its turn: what this turn's queue and
-        // lock entry are is all that is left of the call here.
-        drop(guard);
+        // Shed between the notice and its turn: this turn's queue is all that
+        // is left of the call here.
         release_call(ctx, call_ref, ReleaseKind::Orphan).await;
         return;
     };

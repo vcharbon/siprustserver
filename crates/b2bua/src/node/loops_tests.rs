@@ -1,20 +1,26 @@
 //! The core's two loops, the transaction owner and the router: an idle core
 //! never reads stalled, a minute idle against a 5 s threshold; a router turn
-//! parked on one call reads stalled; a bulk reclaim making progress call by
-//! call does not; a crashed core's loops read ended within one supervision
-//! poll.
+//! held past the threshold reads stalled; a bulk reclaim meeting held call
+//! locks does not, since it waits on none; a crashed core's loops read ended
+//! within one supervision poll.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sip_ids::TurnIds;
+use sip_net_testkit::SimulatedSignalingNetwork;
+use tokio::sync::watch;
 
 use super::unwired_tests::unwired_core;
 use crate::config::B2buaConfig;
+use crate::decision::ScriptedDecisionEngine;
 use crate::initial_invite::build_initial_call;
 use crate::loops::{LoopOut, ENDED_POLL};
-use crate::router::test_support::{invite, node, src, Node};
+use crate::router::test_support::{invite, node, node_probed, src, Node};
 use crate::router::ReplCommand;
 use crate::store::{CallStore, PartitionRole, PutOpts};
+use crate::turn_probe::{Hold, TurnMark, TurnProbe, TurnProbes};
 
 const THRESHOLD: Duration = Duration::from_secs(5);
 
@@ -63,54 +69,74 @@ fn send(n: &Node, cmd: ReplCommand) {
     n.core._repl_tx.as_ref().expect("a wired node").send(cmd).unwrap();
 }
 
-/// A router turn waiting on one call's lock past the threshold reads stalled,
-/// and turns again once the lock is free. The bulk reclaim is the turn that
-/// still takes a call's lock on the loop.
+/// Holds the router loop's next turn once armed, until the test lets it go.
+struct HoldTurn {
+    armed: AtomicBool,
+    go: watch::Receiver<bool>,
+}
+
+impl TurnProbe for HoldTurn {
+    fn reached(&self, _mark: &TurnMark<'_>) -> Option<Hold> {
+        None
+    }
+
+    fn router_turn(&self, _node: &str) -> Option<Hold> {
+        if !self.armed.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        let mut go = self.go.clone();
+        Some(Box::pin(async move {
+            let _ = go.wait_for(|go| *go).await;
+        }))
+    }
+}
+
+/// A router turn held past the threshold reads stalled, and turns again once
+/// it is let go.
 #[tokio::test(start_paused = true)]
-async fn a_router_parked_on_one_event_reads_stalled() {
-    let n = node("w0").await;
-    let call_ref = seeded(&n, "parked").await;
-    let held = n.core.ctx.state.lock(&call_ref).await;
+async fn a_router_turn_held_past_the_threshold_reads_stalled() {
+    let (go, held) = watch::channel(false);
+    let hold = Arc::new(HoldTurn { armed: AtomicBool::new(false), go: held });
+    let net = SimulatedSignalingNetwork::new(1);
+    let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.2", 9));
+    let probes = TurnProbes::new(hold.clone());
+    let n = node_probed(&net, "w0", decision, |_| {}, Vec::new(), probes).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    hold.armed.store(true, Ordering::SeqCst);
     send(&n, ReplCommand::ReclaimAll);
     tokio::time::sleep(THRESHOLD).await;
     assert!(n.core.loops().stalled(THRESHOLD).is_empty(), "at the threshold, not past it");
     tokio::time::sleep(Duration::from_millis(1)).await;
     assert_eq!(n.core.loops().stalled(THRESHOLD), ["router"]);
-    drop(held);
+    go.send(true).unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(n.core.loops().stalled(THRESHOLD).is_empty(), "the turn ended");
 }
 
-/// A bulk reclaim is one router turn over many calls: each call waiting under
-/// the threshold keeps the router turning, however long the whole turn runs.
+/// A bulk reclaim waits on no call's lock: calls whose locks turns hold well
+/// past the threshold leave the router turning, and are reclaimed on turns of
+/// their own once their locks are free.
 #[tokio::test(start_paused = true)]
-async fn a_bulk_reclaim_of_calls_each_under_the_threshold_never_reads_stalled() {
+async fn a_bulk_reclaim_meeting_held_call_locks_never_reads_stalled() {
     let n = node("w0").await;
+    let mut refs = Vec::new();
     for i in 0..3 {
-        seeded(&n, &format!("bulk-{i}")).await;
+        refs.push(seeded(&n, &format!("bulk-{i}")).await);
     }
-    let order: Vec<String> = n
-        .core
-        .ctx
-        .state
-        .scan_partition(PartitionRole::Primary, "w0", &|| {})
-        .await
-        .into_iter()
-        .map(|(copy, _)| copy.call.call_ref)
-        .collect();
     let mut held = Vec::new();
-    for call_ref in &order {
+    for call_ref in &refs {
         held.push(n.core.ctx.state.lock(call_ref).await);
     }
     send(&n, ReplCommand::ReclaimAll);
-    // The reclaim takes the calls in scan order: each lock is let go 3 s on.
-    for guard in held {
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            assert!(n.core.loops().stalled(THRESHOLD).is_empty(), "the reclaim makes progress");
-        }
-        drop(guard);
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(n.core.loops().stalled(THRESHOLD).is_empty(), "the router waits on no lock");
     }
+    drop(held);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(n.metrics.repl_reclaim_materialized(), 3, "every call reclaimed");
+    assert_eq!(n.metrics.repl_reclaimed_total(), 3, "every call reclaimed");
+    for call_ref in &refs {
+        assert!(n.core.ctx.state.contains(call_ref), "reclaimed: {call_ref}");
+        assert!(!n.core.ctx.state.is_parked(call_ref), "and armed: {call_ref}");
+    }
 }

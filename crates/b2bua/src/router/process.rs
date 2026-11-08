@@ -57,7 +57,6 @@ pub(super) async fn process(
     match reaper_verdict_gate(ctx, event, &call_ref, now_ms).await {
         Gate::Consumed => return false,
         Gate::Shed => {
-            drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return false;
         }
@@ -79,13 +78,12 @@ pub(super) async fn process(
         match initial.await {
             super::initial_turn::Turn::Consumed => return false,
             // A final went on the wire with no call here, but this dispatch created a
-            // per-call queue (one `bump_creation`) + lock entry for a brand-new
-            // call_ref and nothing will ever emit `RemoveCall`. Release through
-            // the one teardown executor (`ReleaseKind::Orphan`: no store
-            // mutation, so no spurious reverse-propagated delete) so the worker
-            // exits and `removals` balances `creations`. Drop our guard first.
+            // per-call queue (one `bump_creation`) for a brand-new call_ref and
+            // nothing will ever emit `RemoveCall`. Release through the one
+            // teardown executor (`ReleaseKind::Orphan`: no store mutation, so
+            // no spurious reverse-propagated delete) so the worker exits and
+            // `removals` balances `creations`.
             super::initial_turn::Turn::Shed => {
-                drop(_guard);
                 release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
                 return false;
             }
@@ -101,7 +99,6 @@ pub(super) async fn process(
         if !holds_a_record(ctx, &call_ref).await {
             super::callouts::release_admit_fold_call(&ctx.limiter, event);
         }
-        drop(_guard);
         release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
         return false;
     } else if let Some(answer) = RefreshAnswered::of(event) {
@@ -110,7 +107,6 @@ pub(super) async fn process(
         // takes no answer, and the dispatch's per-call ephemera go.
         let Some(call) = ctx.state.peek(&call_ref) else {
             ctx.metrics.limiter().count_refresh_discarded(crate::metrics::RefreshDiscard::CallGone);
-            drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return false;
         };
@@ -139,17 +135,13 @@ pub(super) async fn process(
             // have counted.
             super::callouts::release_admit_fold_call(&ctx.limiter, event);
             // This event was dispatched into a fresh per-call queue (one
-            // `bump_creation`) and took the per-call lock, but resolved to NO
-            // live call — nothing will ever emit `RemoveCall`, and a per-call
-            // dispatch worker exits ONLY on poison, so the queue, its idle
-            // task, the unmatched creation, and the lock entry would all leak
-            // permanently (a mass-orphan failover turns that into an
-            // `active_calls`/`store_locks` ratchet that never drains). Release
+            // `bump_creation`), but resolved to NO live call — nothing will
+            // ever emit `RemoveCall`, and a per-call dispatch worker exits ONLY
+            // on poison, so the queue, its idle task and the unmatched
+            // creation would leak permanently (a mass-orphan failover turns
+            // that into an `active_calls` ratchet that never drains). Release
             // through the one teardown executor (`ReleaseKind::Orphan` — no
-            // store mutation, so no spurious reverse-propagated delete). Drop
-            // our guard first so the poisoned worker never contends on this
-            // call_ref's (now removed) lock.
-            drop(_guard);
+            // store mutation, so no spurious reverse-propagated delete).
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return false;
         };
@@ -255,7 +247,6 @@ pub(super) async fn process(
     if unrecoverable {
         let ids = &mut turn.ids;
         if !discharge_after_turn(ctx, &call_ref, event, now_ms, ids).await {
-            drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
         }
         return false;
@@ -311,8 +302,8 @@ async fn reaper_verdict_gate(
             if !crate::reaper::verdict_confirmed(outcome, watermark, current) {
                 if current.is_none() && !ctx.state.contains(call_ref) {
                     // The call is gone — but this verdict's dispatch may have
-                    // spun up a fresh per-call queue (+ lock entry). Tear the
-                    // ephemera down via the orphan path so nothing ratchets.
+                    // spun up a fresh per-call queue. Tear it down via the
+                    // orphan path so nothing ratchets.
                     return Gate::Shed;
                 }
                 return Gate::Consumed;

@@ -1,6 +1,8 @@
 //! The pre-dispatch pipeline: every event enters here once. Data-path metrics,
 //! per-peer timeout attribution, the out-of-dialog OPTIONS health responder,
-//! resolution (an event resolving to no call goes to [`super::unroutable`]), a
+//! resolution (a call whose park a bulk reclaim deferred included,
+//! [`DeferredParks`]; an event resolving to no call goes to
+//! [`super::unroutable`]), a
 //! new INVITE's router rungs of the admission ladder ([`super::admit`]), then
 //! the offer of the event's [`Turn`] to its call's queue under its dispatch
 //! class ([`crate::dispatch::class`]). The router acts on the offer: an
@@ -16,9 +18,12 @@ use sip_message::SipMessage;
 use tokio::time::Instant;
 
 use super::admit;
+use super::deferred_parks::DeferredParks;
 use super::owed::OwedAnswer;
 use super::peer_metrics::classify_b2bua_peer;
-use super::resolve::{initial_invite_copy, replica_takeover, resolve, InitialInvite};
+use super::resolve::{
+    deferred_park, initial_invite_copy, replica_takeover, resolve, InitialInvite,
+};
 use super::responses::build_options_health_response;
 use super::turn::Turn;
 use super::txn_event::Arrival;
@@ -28,8 +33,28 @@ use crate::dispatch::{Discarded, DispatchClass, Outcome};
 use crate::setup_budget::SetupBudget;
 use b2bua_sdk::event::CallEvent;
 
-/// Take `event` in, with what the transaction layer states of it.
-pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, arrival: Arrival) {
+/// Queue `event`, a notice the router raises itself for the call it names,
+/// on that call's queue, never awaiting; whether it was queued. A notice
+/// discarded behind its call's release owes nothing.
+pub(super) fn queue_notice(ctx: &Arc<RouterCtx>, event: CallEvent) -> bool {
+    let res = resolve(ctx, &event);
+    let Some(call_ref) = res.call_ref.clone() else { return false };
+    let class = DispatchClass::Internal;
+    let (matched_client_txn, unborn, budget) = (false, None, SetupBudget::NONE);
+    let turn = Turn { ctx: ctx.clone(), event, matched_client_txn, res, class, unborn, budget };
+    matches!(ctx.dispatcher.offer(&call_ref, turn, class).outcome, Outcome::Queued)
+}
+
+/// Take `event` in, with what the transaction layer states of it, amid the
+/// parks a bulk reclaim deferred, `parks`: a message for one of those calls
+/// queues behind its park ([`DeferredParks`]). An event the router raises
+/// itself names its call and passes none.
+pub(super) async fn on_event(
+    ctx: &Arc<RouterCtx>,
+    event: CallEvent,
+    arrival: Arrival,
+    mut parks: Option<&mut DeferredParks>,
+) {
     let Arrival { matched_client_txn, opened_at } = arrival;
     // Per-method / per-(method,code) data-path counters. Every inbound SIP
     // message lands here once, so this is the single chokepoint to meter them.
@@ -104,7 +129,10 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, arrival: Ar
     // placed here as another primary's backup and copying none belongs to
     // that primary and gets no final, its transaction relinquished with
     // nothing sent — never a second call.
-    match initial_invite_copy(ctx, &event, &res).await {
+    // A copy of the INVITE of a call whose park a bulk reclaim deferred is
+    // that call's: it queues behind its arming, which rebuilds the INVITE's
+    // transaction, and waits for that arming while none is queued.
+    match initial_invite_copy(ctx, &event, &res, parks.as_deref()).await {
         InitialInvite::Own => {}
         InitialInvite::CopyOf { hit, unanswered } => {
             if unanswered {
@@ -112,10 +140,29 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, arrival: Ar
             }
             res.copy_of(hit, &event);
         }
+        InitialInvite::Deferred(copied) => {
+            if copied.unanswered {
+                relinquish_arrival(ctx, &event).await;
+            }
+            if !copied.arm_queued {
+                if let Some(parks) = parks.as_deref_mut() {
+                    parks.hold(&copied.hit.call_ref, event);
+                }
+                return;
+            }
+            res.copy_of(copied.hit, &event);
+        }
         InitialInvite::Foreign => {
             ctx.metrics.bump_foreign_invite_copy_dropped();
             relinquish_arrival(ctx, &event).await;
             return;
+        }
+    }
+    if res.call_ref.is_none() {
+        // A call whose park a bulk reclaim deferred, not resident yet, is
+        // found from the body the reclaim scanned.
+        if let Some(hit) = parks.as_deref().and_then(|parks| deferred_park(parks, &event)) {
+            res.found_by_index(hit, &event);
         }
     }
     if res.call_ref.is_none() {

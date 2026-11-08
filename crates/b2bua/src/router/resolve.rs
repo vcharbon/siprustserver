@@ -6,6 +6,7 @@ use call::{Call, Direction, IndexHit, IndexLookup, KeyKind};
 use sip_message::header::{ParamValue, Via};
 use sip_message::{Method, SipMessage};
 
+use super::deferred_parks::{Copied, DeferredParks};
 use super::materialise::{names_server_branch, names_unanswered_caller_invite};
 use super::topology_cookie::foreign_primary;
 use super::undecided::is_undecided;
@@ -263,6 +264,15 @@ pub(super) enum InitialInvite {
     /// node holds: the primary owns its transaction, and placing it would
     /// dial a second call.
     Foreign,
+    /// A copy of the initial INVITE of this node's own call whose park a bulk
+    /// reclaim deferred, not resident yet ([`DeferredParks::copied`]).
+    Deferred(Copied),
+}
+
+/// The deferred call a SIP `event` naming no `callRef` of ours resolves to
+/// ([`DeferredParks::find`]).
+pub(super) fn deferred_park(parks: &DeferredParks, event: &CallEvent) -> Option<IndexHit> {
+    parks.find(event_lookup(event)?)
 }
 
 /// **A copy of a replicated call's initial INVITE.** An INVITE with no To-tag,
@@ -276,11 +286,14 @@ pub(super) enum InitialInvite {
 /// of a decided call serves it. Failing that, an INVITE whose cookie names
 /// another primary is that primary's (the proxy re-placed its
 /// retransmission): foreign. Any other is this node's own, as is every
-/// INVITE of a node that does not replicate: it backs up no primary.
+/// INVITE of a node that does not replicate: it backs up no primary. Before
+/// the replicated calls, one copying the INVITE of a call of `parks`, the
+/// parks a bulk reclaim deferred, is that call's.
 pub(super) async fn initial_invite_copy(
     ctx: &RouterCtx,
     event: &CallEvent,
     res: &Resolution,
+    parks: Option<&DeferredParks>,
 ) -> InitialInvite {
     let (true, Some(derived)) = (res.initial_invite, res.call_ref.as_deref()) else {
         return InitialInvite::Own;
@@ -288,7 +301,13 @@ pub(super) async fn initial_invite_copy(
     let CallEvent::Sip { message, .. } = event else { return InitialInvite::Own };
     let SipMessage::Request(req) = message.as_ref() else { return InitialInvite::Own };
     let cseq = req.cseq().seq();
-    if !ctx.state.replicates() || ctx.unborn.holds(derived, cseq) || ctx.state.contains(derived) {
+    if !ctx.state.replicates() || ctx.unborn.holds(derived, cseq) {
+        return InitialInvite::Own;
+    }
+    if let Some(copied) = parks.and_then(|parks| parks.copied(req)) {
+        return InitialInvite::Deferred(copied);
+    }
+    if ctx.state.contains(derived) {
         return InitialInvite::Own;
     }
     if let Some((hit, unanswered)) = replicated_call_copied(ctx, req).await {

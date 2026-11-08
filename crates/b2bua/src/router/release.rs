@@ -42,17 +42,20 @@ pub(super) enum ReleaseKind {
     /// local-only as a stand-down is, with nothing sent and no CDR: the
     /// backup's discharge is the call's only one.
     DischargedByBackup,
-    /// Orphan reject: the 481 path hydrated NO call — only the lock entry and
-    /// the dispatch queue exist. **No** store mutation (a `remove` would
-    /// reverse-propagate a spurious delete), **no** timers/txns were armed.
+    /// Orphan reject: the 481 path hydrated NO call — only the dispatch queue
+    /// exists, the lock entry going with its last guard. **No** store mutation
+    /// (a `remove` would reverse-propagate a spurious delete), **no**
+    /// timers/txns were armed.
     Orphan,
 }
 
 /// The single per-call teardown executor (see [`ReleaseKind`]). Owns the full
-/// release checklist — map/index entry, per-call lock,
-/// takeover mark, timers (physical `try_remove`, CLAUDE.md), transactions, and
-/// the dispatch queue — so the released-at-call-end invariant lives in ONE
-/// place instead of per-path hand-maintained copies.
+/// release checklist — map/index entry, takeover mark, timers (physical
+/// `try_remove`, CLAUDE.md), transactions, and the dispatch queue — so the
+/// released-at-call-end invariant lives in ONE place instead of per-path
+/// hand-maintained copies. The per-call lock entry goes with the last guard
+/// of the call once it left the live map (`store::CallGuard`): a turn
+/// waiting on it runs after the whole release.
 pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: ReleaseKind) {
     // A traced call's root span closes here — the ONE place every release funnels
     // through — so the active-trace slot returns exactly when the call's runtime
@@ -67,6 +70,7 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
     match kind {
         ReleaseKind::Terminated => {
             ctx.state.drop_local(call_ref);
+            left_the_map(ctx, call_ref).await;
             // Idempotent with an explicit `CancelAllTimers` effect, but not
             // dependent on every rule remembering to emit one: a terminated call
             // frees EVERY timer slot it owns now, not at its deadline.
@@ -88,6 +92,7 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
         }
         ReleaseKind::SelfRelease { ended } => {
             if ctx.state.drop_local(call_ref) {
+                left_the_map(ctx, call_ref).await;
                 ctx.timers.cancel_all(call_ref.to_string()).await;
                 if !ended {
                     // The call lives on at its primary, which holds every
@@ -109,6 +114,7 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
         }
         ReleaseKind::StandDown => {
             if ctx.state.drop_local(call_ref) {
+                left_the_map(ctx, call_ref).await;
                 ctx.timers.cancel_all(call_ref.to_string()).await;
                 let _ = ctx.txn.relinquish_call(call_ref).await;
                 ctx.dispatcher.release(call_ref, RemovalClass::StandDown);
@@ -120,13 +126,13 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
         }
         ReleaseKind::DischargedByBackup => {
             if ctx.state.drop_local(call_ref) {
+                left_the_map(ctx, call_ref).await;
                 ctx.timers.cancel_all(call_ref.to_string()).await;
                 let _ = ctx.txn.relinquish_call(call_ref).await;
                 ctx.dispatcher.release(call_ref, RemovalClass::StandDown);
             }
         }
         ReleaseKind::Orphan => {
-            ctx.state.discard_orphan(call_ref);
             ctx.dispatcher.release(call_ref, RemovalClass::Orphan);
         }
     }
@@ -134,6 +140,12 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
     // for an INVITE admitted and still waiting for its turn behind this
     // release.
     ctx.state.retain_setup_cancelled(call_ref, |cseq| ctx.unborn.holds(call_ref, cseq));
+}
+
+/// The release of `call_ref` dropped it from the live map; its timers,
+/// transactions and queue go next.
+async fn left_the_map(ctx: &RouterCtx, call_ref: &str) {
+    ctx.turn_probe.release_step(&ctx.config.self_ordinal, call_ref).await;
 }
 
 /// Answer 481 every in-dialog INVITE of the ended call `call_ref` that has no
@@ -147,3 +159,6 @@ async fn answer_unanswered_invites(ctx: &RouterCtx, call_ref: &str) {
         .answer_unanswered_invites_of_call(call_ref, 481, "Call/Transaction Does Not Exist")
         .await;
 }
+
+#[cfg(test)]
+mod tests;

@@ -28,6 +28,10 @@ use super::super::RouterCtx;
 /// wire, its legs forced terminal and its CDR written, the call's only one
 /// (ADR-0055 §5). A ghost of a primary still a member is evicted silently:
 /// that primary holds the call.
+///
+/// The pass shares its task with the call reaper's sweep, whose aborts free a
+/// hung turn, so it waits on no call's lock: a ghost whose lock a turn holds
+/// is ended on a turn of its own queue ([`super::deferred`]).
 pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
     let reaped = ctx.state.reap_replica(now_ms).await;
     for ghost in reaped.ghosts {
@@ -35,20 +39,24 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
         if !super::super::departure::primary_departed(ctx, &call_ref) {
             continue;
         }
-        let guard = ctx.state.lock(&call_ref).await;
+        let Some(_guard) = ctx.state.try_lock(&call_ref) else {
+            super::deferred::offer_ghost(ctx, &ghost);
+            continue;
+        };
         if !ctx.state.contains(&call_ref) {
             ended_body::pay(ctx, &call_ref, Cause::Ghost, ghost, now_ms).await;
         }
-        drop(guard);
     }
     for terminal in reaped.deferred_terminals {
         // No per-call lock: the body is already evicted and this node does not
         // serve the call live (a takeover copy self-released at its terminal), so
-        // there is no writer to serialize against — and taking the lock would leak
-        // a `locks` map entry (only `release_call`/`discard_orphan` clear it). The
-        // decoded snapshot is all the limiter release needs.
+        // there is no writer to serialize against. The decoded snapshot is all
+        // the limiter release needs.
         let call_ref = terminal.call.call_ref.clone();
         ended_body::pay(ctx, &call_ref, Cause::Evicted, terminal, now_ms).await;
         ctx.metrics.bump_repl_terminal_lost();
     }
 }
+
+#[cfg(test)]
+mod tests;

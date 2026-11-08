@@ -37,6 +37,7 @@ mod cancel_in_consult;
 mod cannot_leave;
 mod commit;
 mod dead_verdict;
+mod deferred_parks;
 mod departure;
 mod dialog_gate;
 mod dropped_on_delete;
@@ -103,6 +104,7 @@ mod unrecoverable;
 mod unrecoverable_tests;
 mod unroutable;
 
+use deferred_parks::DeferredParks;
 pub(crate) use outbox::Outboxes;
 use readmission::ReadmissionGate;
 pub(crate) use reclaim::reap_expired_replicas;
@@ -371,6 +373,7 @@ pub async fn run(
     repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
 ) {
     let mut readmission = ReadmissionGate::new(ctx.readiness.own_endpoint_ready());
+    let mut parks = DeferredParks::default();
     let pulse = ctx.router_pulse.clone();
     let mut inbox = inbox::Inbox::new(txn_rx, timer_rx, reentry_rx, repl_rx);
     loop {
@@ -385,18 +388,25 @@ pub async fn run(
         pulse.turning();
         ctx.turn_probe.router_turn(&ctx.config.self_ordinal).await;
         match work {
-            Work::Event(ev, arrival) => ingress::on_event(&ctx, ev, arrival).await,
+            Work::Event(ev, arrival) => {
+                if let Some(call_ref) = reclaim::deferred::armed_notice_of(&ev) {
+                    parks.armed(call_ref);
+                } else {
+                    ingress::on_event(&ctx, ev, arrival, Some(&mut parks)).await;
+                }
+            }
             Work::Repl(cmd) => {
                 if let Some(cmd) = readmission.admit(cmd) {
-                    on_repl_command(&ctx, cmd, &mut readmission).await
+                    on_repl_command(&ctx, cmd, &mut readmission, &mut parks).await
                 }
             }
             Work::Released(released) => {
-                if released.arm {
-                    reclaim::arm_parked(&ctx).await;
+                if released.arm || !released.deferred.is_empty() {
+                    let arming = reclaim::arm_parked(&ctx, &released.deferred).await;
+                    take_in_again(&ctx, parks.arming_all(arming));
                 }
                 for cmd in released.cmds {
-                    on_repl_command(&ctx, cmd, &mut readmission).await
+                    on_repl_command(&ctx, cmd, &mut readmission, &mut parks).await
                 }
             }
         }
@@ -404,18 +414,34 @@ pub async fn run(
     }
 }
 
+/// Take `events` in again on a later turn of the loop, in order, behind what
+/// this turn queued: copies a deferred call held until its arming was queued.
+fn take_in_again(ctx: &RouterCtx, events: Vec<CallEvent>) {
+    for event in events {
+        let _ = ctx.reentry_tx.send(event);
+    }
+}
+
 /// Interpret a replication-driven [`ReplCommand`] (ADR-0011 X11 / ADR-0014);
-/// the bulk reclaim's arming waits on `readmission`.
+/// the bulk reclaim's arming waits on `readmission`, and ingress serves the
+/// parks it deferred from `parks`.
 async fn on_repl_command(
     ctx: &Arc<RouterCtx>,
     cmd: ReplCommand,
     readmission: &mut ReadmissionGate,
+    parks: &mut DeferredParks,
 ) {
     match cmd {
         ReplCommand::ReclaimAll => {
-            reclaim::park_all(ctx).await;
-            if readmission.arm_now() {
-                reclaim::arm_parked(ctx).await;
+            for reclaim::Deferral { call_ref, scanned } in reclaim::park_all(ctx).await {
+                if let Some(call) = scanned {
+                    parks.defer(call);
+                }
+                readmission.defer([call_ref]);
+            }
+            if let Some(deferred) = readmission.arm_now() {
+                let arming = reclaim::arm_parked(ctx, &deferred).await;
+                take_in_again(ctx, parks.arming_all(arming));
             }
         }
         ReplCommand::ReclaimCall(call_ref) => flush_turn::offer_reconcile(ctx, call_ref).await,

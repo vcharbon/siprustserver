@@ -3,7 +3,8 @@
 //! discharge of deferred terminals; the bulk reboot reclaim and the straggler
 //! reclaim live in `bulk`, how two copies of a call meet in `meeting` and how
 //! two diverged copies end in `diverged` (ADR-0055 §7), the periodic
-//! replica-store reap in `reap`.
+//! replica-store reap in `reap`, and the steps those sweeps defer to a turn
+//! of the call's own queue rather than wait on its lock in `deferred`.
 
 use std::sync::Arc;
 
@@ -15,12 +16,13 @@ use super::RouterCtx;
 use crate::store::{role_of, CallTopology, Enveloped, PartitionRole};
 
 mod bulk;
+pub(super) mod deferred;
 mod diverged;
 mod ending;
 mod meeting;
 mod reap;
 use bulk::reclaim_into_live;
-pub(super) use bulk::{announce_reclaim, arm_parked, park_all};
+pub(super) use bulk::{announce_reclaim, arm_parked, park_all, Deferral};
 pub(super) use meeting::meet_live;
 pub(crate) use reap::reap_expired_replicas;
 
@@ -48,14 +50,10 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
         reclaim_into_live(ctx, call_ref).await;
         return;
     }
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     // Read again under the lock: a turn that held it may have ended the call
     // and deleted the body, its CDR written; the body read before is stale.
     let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
-        if !ctx.state.contains(call_ref) {
-            drop(guard);
-            ctx.state.discard_orphan(call_ref);
-        }
         return;
     };
     reanchor(&mut replica.call, skew_offset_ms);
@@ -147,21 +145,15 @@ pub(super) async fn meet_refused_flush(
     let Some(mut replica) = ctx.state.decode_body(body) else {
         return;
     };
-    // No live copy ⇒ nothing to meet — tested BEFORE the per-call lock,
-    // because locking a call this node does not serve inserts a `locks` entry
-    // only a release clears, and an Element with no live copy is the common
-    // case.
+    // No live copy ⇒ nothing to meet, and an Element with no live copy is the
+    // common case: it takes no lock.
     if !ctx.state.contains(call_ref) {
         return;
     }
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     let now_ms = ctx.clock.now_ms();
+    // The call may have been released between the peek and the lock.
     let Some(live) = ctx.state.peek_enveloped(call_ref) else {
-        // The call was released between the peek and the lock. Drop the guard
-        // FIRST: `discard_orphan` removes the very `locks` entry this guard is
-        // held on, and a live guard would re-strand it.
-        drop(guard);
-        ctx.state.discard_orphan(call_ref);
         return;
     };
     // Another call on the ref (the one the live call retried, or one a

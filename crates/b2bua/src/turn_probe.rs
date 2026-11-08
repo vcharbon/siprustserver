@@ -143,6 +143,13 @@ pub trait TurnProbe: Send + Sync {
     fn sweep_step(&self, _node: &str) -> Option<Hold> {
         None
     }
+
+    /// Called by the release of `call_ref` on `node` once the call left the
+    /// live map and before its timers, transactions and queue are torn down;
+    /// `Some` holds the release there.
+    fn release_step(&self, _node: &str, _call_ref: &str) -> Option<Hold> {
+        None
+    }
 }
 
 /// The handle a worker carries: no probe by default.
@@ -186,6 +193,17 @@ impl TurnProbes {
             return;
         };
         if let Some(hold) = probe.sweep_step(node) {
+            hold.await;
+        }
+    }
+
+    /// Report that the release of `call_ref` on `node` dropped the call from
+    /// the live map and wait out the hold, if any.
+    pub(crate) async fn release_step(&self, node: &str, call_ref: &str) {
+        let Some(probe) = &self.0 else {
+            return;
+        };
+        if let Some(hold) = probe.release_step(node, call_ref) {
             hold.await;
         }
     }

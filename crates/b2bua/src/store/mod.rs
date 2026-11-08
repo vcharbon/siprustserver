@@ -7,6 +7,9 @@
 //! `sip_index`; the store's `get_index` is the fallback.
 
 mod backup;
+mod call_lock;
+#[cfg(test)]
+mod call_lock_tests;
 mod call_store;
 pub mod containment;
 pub mod envelope;
@@ -35,11 +38,13 @@ pub use reap::ReapedBodies;
 mod unwired_tests;
 
 pub use backup::HoldTarget;
+pub use call_lock::CallGuard;
 pub use call_store::{
     partition_of, role_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
 };
 pub use envelope::{CallTopology, Enveloped};
 pub use faults::{FaultInjectingCallStore, StoreFaultPoint, StoreFaults};
+pub(crate) use index::resolve_in;
 pub use memory::InMemoryCallStore;
 pub(crate) use poison::*;
 pub use poison::{LOCKS, LOCK_RECOVERIES};
@@ -96,8 +101,9 @@ struct Inner {
     sip_index: HashMap<String, String>,
     /// The index keys each call currently owns (for clean re-index on update).
     indexed: HashMap<String, Vec<String>>,
-    /// Per-callRef serialization lock (the second FIFO layer over the dispatcher).
-    locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-callRef serialization lock (the second FIFO layer over the
+    /// dispatcher, [`call_lock`]).
+    locks: HashMap<String, Arc<call_lock::LockEntry>>,
     /// **Live acting-backup takeover copies** (ADR-0011 X11 / ADR-0014): the set
     /// of call_refs this node currently serves as a *reactive* takeover after a
     /// primary failed over to it. Membership only — the router reads it
@@ -304,6 +310,7 @@ impl CallState {
         inner.restate_uncounted(was, is);
         self.publish_uncounted(&inner);
         let replaced = inner.calls.insert(call_ref.clone(), Arc::new(call));
+        inner.keep_lock(&call_ref);
         drop(inner);
         drop(replaced);
         call_ref
@@ -684,29 +691,8 @@ impl CallState {
         );
     }
 
-    /// Acquire the per-callRef serialization lock (held across a handler run).
-    pub async fn lock(&self, call_ref: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
-            let mut inner = self.locked();
-            inner
-                .locks
-                .entry(call_ref.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        lock.lock_owned().await
-    }
-
     pub fn active_count(&self) -> usize {
         self.locked().calls.len()
-    }
-
-    /// The number of live per-call serialization locks. Should track
-    /// [`active_count`](Self::active_count); a gap is a **lock leak** — the
-    /// orphan-reject path that forgot to [`discard_orphan`](Self::discard_orphan)
-    /// (the `b2bua_store_locks` − `b2bua_store_calls` gap). Test/observability.
-    pub fn lock_count(&self) -> usize {
-        self.locked().locks.len()
     }
 
     /// The number of last-touched ledger entries. Mirrors `calls` by
