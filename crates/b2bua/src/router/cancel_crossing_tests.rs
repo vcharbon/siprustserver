@@ -93,7 +93,8 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         owners: Default::default(),
     };
     let fw = node.core.router_ctx().framework();
-    let result = rule_chain_turn(&fw, call, input, &mut super::test_support::turn(1));
+    let result = rule_chain_turn(&fw, call, input, &mut super::test_support::turn(1))
+        .expect("the turn crosses no cap");
 
     let requests_to = |leg: &str| -> Vec<String> {
         result

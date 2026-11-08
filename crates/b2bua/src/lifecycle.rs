@@ -96,6 +96,46 @@ pub struct Unsent {
     pub request_uri: Option<String>,
 }
 
+/// The latest call a cap's trip wave names (ADR-0057 §7).
+#[derive(Clone, Debug)]
+pub struct CapTrip {
+    pub call_ref: String,
+    pub kind: b2bua_sdk::config::CapKind,
+}
+
+/// Turns that crossed a per-call cap (ADR-0057 §7), keyed by the cap and
+/// counted as `trips`: a decision service that trips every call prints one
+/// episode, naming its latest call, not a line per call. A defect cap's
+/// episode logs at warn, a peer cap's at info.
+pub fn cap_trip_waves() -> Arc<WaveSet<CapTrip>> {
+    WaveSet::with_payload(|cap: &str, r: &WaveReport, t: &CapTrip| {
+        const TRIPPED: &str = "per-call cap tripped";
+        let (call_ref, kind) = (&t.call_ref, t.kind.label());
+        match t.kind {
+            b2bua_sdk::config::CapKind::Defect => tracing::warn!(
+                node = observe::node(),
+                cap,
+                kind,
+                %call_ref,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "{TRIPPED}"
+            ),
+            b2bua_sdk::config::CapKind::Peer => tracing::info!(
+                node = observe::node(),
+                cap,
+                kind,
+                %call_ref,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "{TRIPPED}"
+            ),
+        }
+    })
+}
+
 /// Outbound messages that could not leave (`router::cannot_leave`), keyed by
 /// their next hop and counted by kind (`request`, `response`, `datagram`), at
 /// warn: a flood toward one target prints its rising edge, a summary every few

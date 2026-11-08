@@ -104,7 +104,7 @@ fn acks_sent(sender: (&str, u16), matched_client_txn: bool) -> Vec<String> {
         now_ms: 1_000,
         owners: Default::default(),
     };
-    let result = rule_chain_turn(&fw, call, input, &mut turn(1));
+    let result = rule_chain_turn(&fw, call, input, &mut turn(1)).expect("the turn crosses no cap");
     result
         .effects
         .outbound

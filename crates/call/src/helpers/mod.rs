@@ -135,7 +135,7 @@ pub use services::{
 pub use stored_images::stored_images;
 pub use termination::{record_termination, seal_termination_seq};
 pub use timer::{
-    arm_timer, cap_keepalive_fire_at, disarm_timer, holds_timer, retire_timers,
+    arm_timer, cap_keepalive_fire_at, disarm_timer, holds_timer, keepalive_fire_at, retire_timers,
     TERMINATING_TIMEOUT_MS,
 };
 pub use timer_scope::{scope_ended, setup_over};

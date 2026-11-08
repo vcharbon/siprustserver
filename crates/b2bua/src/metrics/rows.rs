@@ -21,6 +21,10 @@ pub(super) struct Rows {
     pub(super) repeat_give_ups: FixedCounts,
     // Model invariants broken and defects met, by name (ADR-0052 §8).
     pub(super) model_defects: FixedCounts,
+    // Turns that crossed a per-call cap, by cap and kind; turns that grew a
+    // capped collection across its half, by cap (ADR-0057 §7).
+    pub(super) cap_trips: FixedCounts,
+    pub(super) cap_near: FixedCounts,
     // Outbound messages that could not leave (`router::cannot_leave`), by
     // reason and kind.
     pub(super) outbound_unsent: FixedCounts,
@@ -63,6 +67,8 @@ impl Default for Rows {
             retransmits: OpenRows::new(&w::RETRANSMITS),
             repeat_give_ups: FixedCounts::new(&w::REPEAT_GIVE_UPS),
             model_defects: FixedCounts::new(&w::MODEL_DEFECTS),
+            cap_trips: FixedCounts::new(&super::catalogue::caps::CAP_TRIPS),
+            cap_near: FixedCounts::new(&super::catalogue::caps::CAP_NEAR),
             outbound_unsent: FixedCounts::new(&d::OUTBOUND_UNSENT),
             unroutable_dropped: FixedCounts::new(&d::UNROUTABLE_DROPPED),
             unroutable_refused: OpenRows::new(&d::UNROUTABLE_REFUSED),

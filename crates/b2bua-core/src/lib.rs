@@ -18,7 +18,9 @@
 //! - [`effects`] — the effect vocabulary a turn returns;
 //! - [`unheld_response`] — the answer to a response for a call no node holds;
 //! - [`turn_scope`], [`turn_notes`], [`wire_fault_set`], [`owners`] — a turn's
-//!   inputs and what it reports.
+//!   inputs and what it reports;
+//! - [`caps`] — the per-call caps a turn is held to, and the trip that
+//!   replaces its result (ADR-0057).
 #![cfg_attr(
     not(test),
     deny(
@@ -41,6 +43,7 @@ pub mod answer_deadline;
 pub mod answered_finals;
 pub mod attempts;
 pub use b2bua_sdk::caller_tags;
+pub mod caps;
 pub mod config;
 pub mod decision;
 pub mod decision_log;

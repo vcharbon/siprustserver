@@ -89,6 +89,7 @@ pub(crate) mod test_support;
 pub(crate) mod topology_cookie;
 #[cfg(test)]
 mod topology_cookie_tests;
+mod tripped;
 mod turn;
 mod turn_label;
 mod turn_mark;
@@ -223,6 +224,8 @@ pub struct RouterCtx {
     /// (ADR-0026): a node coming back meets every call it shares in one
     /// episode, not one line per call.
     pub meeting_waves: Arc<observe::WaveSet>,
+    /// Turns that crossed a per-call cap, by cap (ADR-0057 §7).
+    pub cap_trip_waves: Arc<observe::WaveSet<crate::lifecycle::CapTrip>>,
     /// The configured outbound proxy, its name looked up off the router task
     /// (per-peer failure attribution reads only its kept addresses).
     pub outbound_proxy: Option<Arc<http_net::ResolvedTarget>>,

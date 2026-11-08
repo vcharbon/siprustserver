@@ -3,6 +3,8 @@
 //! a call whose legs are alive — condemned for its overflow or its message
 //! cap, or whose handler panicked — is torn down on the wire while Active.
 
+use b2bua_sdk::config::Cap;
+use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{LegEnd, RuleAction, RuleContext, RuleHandleResult};
 use call::{CallModelState, CdrEventType, TerminationCause};
 
@@ -25,16 +27,24 @@ pub(super) fn reap_message_cap(ctx: &RuleContext) -> Option<RuleHandleResult> {
     }
 }
 
-/// The `reaper-fatal-error` body: a handler of the call panicked, its legs
-/// are alive. An Active call's live legs are torn down on the wire
-/// ([`teardown_on_the_wire`]); a terminating call's peers were already sent
-/// their teardown, so it is forced terminal now.
+/// The `reaper-fatal-error` body: a turn of the call panicked, hung or
+/// crossed a per-call cap (ADR-0057 §4), its legs are alive. An Active call's
+/// live legs are torn down on the wire ([`teardown_on_the_wire`]); a
+/// terminating call's peers were already sent their teardown, so it is
+/// forced terminal now. The CDR names the cap a trip crossed, which never
+/// reaches the wire.
 pub(super) fn reap_handler_panic(ctx: &RuleContext) -> Option<RuleHandleResult> {
-    const REASON: &str = "handler-panic";
+    let reason = tripped_cap(ctx).map_or("handler-panic", Cap::cdr_reason);
     match ctx.call.state() {
-        CallModelState::Active => teardown_on_the_wire(ctx, REASON, TerminationCause::Supervisor),
-        _ => force_terminal(ctx, REASON, TerminationCause::Supervisor),
+        CallModelState::Active => teardown_on_the_wire(ctx, reason, TerminationCause::Supervisor),
+        _ => force_terminal(ctx, reason, TerminationCause::Supervisor),
     }
+}
+
+/// The cap a verdict's tripped turn crossed, from its payload.
+fn tripped_cap(ctx: &RuleContext) -> Option<Cap> {
+    let CallEvent::InternalEvent { payload, .. } = ctx.event else { return None };
+    payload.get("cap").and_then(|c| c.as_str()).and_then(Cap::of_label)
 }
 
 /// The `reaper-stale` body, for a call found dead: force every

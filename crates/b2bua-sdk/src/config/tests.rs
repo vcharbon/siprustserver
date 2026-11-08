@@ -267,16 +267,6 @@ fn an_emergency_ceiling_below_the_normal_one_is_refused() {
 }
 
 #[test]
-fn with_the_reaper_off_the_lifetime_message_cap_is_not_checked() {
-    let c = B2buaConfig {
-        reaper_enabled: false,
-        max_messages_per_call_lifetime: 0,
-        ..Default::default()
-    };
-    assert!(c.validate().is_ok(), "the cap is not installed without the reaper");
-}
-
-#[test]
 fn a_lifetime_message_cap_of_zero_is_refused() {
     let c = B2buaConfig { max_messages_per_call_lifetime: 0, ..Default::default() };
     let err = c.validate().unwrap_err();

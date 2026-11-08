@@ -80,7 +80,7 @@ pub const INVARIANTS: &[(&str, Check)] = &[
 /// Every name a violation is counted under: each invariant of
 /// [`INVARIANTS`], then each defect a turn reports
 /// ([`crate::turn_notes::DEFECTS`]), in that order.
-pub const NAMES: [&str; 28] = [
+pub const NAMES: [&str; 29] = [
     "dialog-named-once",
     "one-confirmed-dialog-per-leg",
     "confirmed-a-leg-one-dialog",
@@ -109,6 +109,7 @@ pub const NAMES: [&str; 28] = [
     crate::turn_notes::REQUEST_KEEPS_ITS_LEG,
     crate::turn_notes::STATED_TEXT_FITS,
     crate::turn_notes::STORED_IMAGE_READS,
+    crate::turn_notes::FRAMEWORK_TIMER,
 ];
 
 /// Check every invariant on `turn`, reporting each one violated, named with

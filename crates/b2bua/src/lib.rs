@@ -77,7 +77,7 @@ pub mod wire_faults;
 #[cfg(test)]
 pub(crate) mod test_call;
 pub use ::b2bua_core::{
-    answer_deadline, attempts, config, decision_log, destination_allowlist, effects,
+    answer_deadline, attempts, caps, config, decision_log, destination_allowlist, effects,
     failure_terminate, failure_unavailable, initial_invite, landing, message_ring, obligations,
     off_turn, owners, reaper_verdict, ring_deadline, rule_chain, rules, stack_identity, timer_arm,
     turn_notes, turn_scope, undecided, wire_fault_set,

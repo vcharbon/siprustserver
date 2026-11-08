@@ -78,7 +78,7 @@ impl B2buaConfig {
                     .to_string(),
             );
         }
-        if self.reaper_enabled && self.max_messages_per_call_lifetime == 0 {
+        if self.max_messages_per_call_lifetime == 0 {
             out.push(
                 "B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME=0: the per-call work bound has no off; \
                  set it far above any healthy call"

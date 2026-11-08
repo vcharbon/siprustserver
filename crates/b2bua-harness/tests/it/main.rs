@@ -142,6 +142,7 @@ mod own_request_timeout_rule;
 mod own_timer_past_bounds;
 mod peer_cseq_across_confirmation;
 mod peer_dialog_ending;
+mod per_call_caps;
 mod prack;
 mod prack_481_keeps_the_call;
 mod prack_crossing_invite_final;

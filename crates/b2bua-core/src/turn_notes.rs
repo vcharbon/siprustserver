@@ -2,6 +2,7 @@
 //! the trace facts of a sampled call, the counts it owes the metrics, and the
 //! defects it met. The shell drains them as the turn's core call returns.
 
+use b2bua_sdk::config::Cap;
 use call::Call;
 
 /// Whether this call is traced. The ONE guard every trace fact and emission
@@ -51,8 +52,12 @@ pub const STATED_TEXT_FITS: &str = "stated-text-fits-its-position";
 /// step does nothing; the call goes on.
 pub const STORED_IMAGE_READS: &str = "stored-image-reads";
 
+/// A rule armed a timer type only the framework arms (`Rung`,
+/// `NotifyAnswerCap`, `HeldAnswer`); the arm is dropped (ADR-0057 §1).
+pub const FRAMEWORK_TIMER: &str = "framework-arms-its-own-timers";
+
 /// Every defect a turn reports, by name.
-pub const DEFECTS: [&str; 11] = [
+pub const DEFECTS: [&str; 12] = [
     PRACK_HAS_A_LEG,
     PRACK_HAS_A_DIALOG,
     UNDECLARED_TRANSITION,
@@ -64,6 +69,7 @@ pub const DEFECTS: [&str; 11] = [
     REQUEST_KEEPS_ITS_LEG,
     STATED_TEXT_FITS,
     STORED_IMAGE_READS,
+    FRAMEWORK_TIMER,
 ];
 
 /// A defect a turn met mid-way: a step that found the record unable to carry
@@ -82,6 +88,7 @@ pub struct TurnNotes {
     trace: Vec<TraceFact>,
     repeat_give_ups: Vec<&'static str>,
     message_caps: u32,
+    caps_near: Vec<Cap>,
     defects: Vec<Defect>,
 }
 
@@ -110,6 +117,11 @@ impl TurnNotes {
         self.message_caps = self.message_caps.saturating_add(1);
     }
 
+    /// The turn grew the collection `cap` bounds across half its cap.
+    pub fn cap_near(&mut self, cap: Cap) {
+        self.caps_near.push(cap);
+    }
+
     /// The defect `name`, with `detail`, met on `call`.
     pub fn defect(&mut self, name: &'static str, detail: String, call: &Call) {
         self.defects.push(Defect { name, detail, call: Box::new(call.clone()) });
@@ -133,6 +145,11 @@ impl TurnNotes {
     /// How many runaway calls the message cap tore down.
     pub fn message_caps(&self) -> u32 {
         self.message_caps
+    }
+
+    /// The caps whose half the turn crossed, one per crossing.
+    pub fn caps_near(&self) -> &[Cap] {
+        &self.caps_near
     }
 
     /// The defects, in the order the turn met them.

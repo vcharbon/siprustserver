@@ -16,6 +16,7 @@ use crate::{
     stated, stated_list, ReplicationSettings, WorkerAddresses,
 };
 
+pub(crate) mod caps_env;
 mod event_queue_env;
 
 /// The limits a worker reads the wire under ([`RunnerEnv::parser_limits`]), the
@@ -196,6 +197,9 @@ pub struct RunnerEnv {
     /// The memory ceilings (ADR-0037), every one off unless stated; the
     /// grammar is in `capacity_env`.
     pub capacity: CapacityConfig,
+    /// The per-call caps (ADR-0057), each at its upstream default unless
+    /// stated; the grammar and the boot checks are in `caps_env`.
+    pub caps: b2bua::config::CallCaps,
     /// How long one turn of the transaction owner or router may run before
     /// the loop reads stalled; the grammar, its default and the boot check
     /// against the call-control timeout in `liveness_env`.
@@ -376,6 +380,7 @@ impl RunnerEnv {
             limiter_backend: limiter.backend,
             drain: drain_env::drain_from_lookup(lookup).map_err(invalid)?,
             capacity: capacity_env::capacity_from_lookup(lookup).map_err(invalid)?,
+            caps: caps_env::caps_from_lookup(lookup).map_err(invalid)?,
             loop_stall,
             loop_exit: liveness_env::loop_exit_from_lookup(lookup, loop_stall).map_err(invalid)?,
             event_queue_gate: event_queue_env::event_queue_gate_from_lookup(lookup)

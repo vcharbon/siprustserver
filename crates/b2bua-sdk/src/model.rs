@@ -580,10 +580,10 @@ pub enum RuleAction {
     /// Arm (or re-arm, replacing the key's instance) a per-call timer; a
     /// service arms its own watchdog under a [`TimerType::Service`] key.
     ///
-    /// A [`TimerType::Keepalive`] is held to one `keepalive_interval_sec`
-    /// (`call::helpers::cap_keepalive_fire_at`): a larger `delay` trips a debug
-    /// assertion and is clamped in release. Every other timer type keeps its
-    /// full `delay`.
+    /// A [`TimerType::Keepalive`] is armed exactly one `keepalive_interval_sec`
+    /// out (`call::helpers::keepalive_fire_at`), a larger `delay` noted as a
+    /// defect; an arm of the framework's `Rung`, `NotifyAnswerCap` or
+    /// `HeldAnswer` is dropped as one. Every other type keeps its `delay`.
     ScheduleTimer {
         key: TimerKey,
         delay: TimerDelay,

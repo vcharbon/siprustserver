@@ -60,6 +60,7 @@ mod provisionals;
 mod reaper_verdicts;
 mod route_set;
 mod sdp_body_author;
+mod service_http_timeout;
 mod service_timers;
 mod stated_route;
 mod stated_text_skips;

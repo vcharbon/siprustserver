@@ -81,6 +81,7 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         owners: Default::default(),
     };
     rule_chain_turn(&node.core.router_ctx().framework(), call, input, &mut scope)
+        .expect("the turn crosses no cap")
 }
 
 /// The PRACKs `result` sends toward `b-1`, as their `RAck`.

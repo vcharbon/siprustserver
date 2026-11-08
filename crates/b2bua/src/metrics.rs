@@ -592,8 +592,7 @@ impl B2buaMetrics {
         rows.unroutable_dropped.render(&mut s);
         rows.unroutable_refused.render(&mut s);
         rows.unroutable_internal.render(&mut s);
-        rows.repeat_give_ups.render(&mut s);
-        rows.model_defects.render(&mut s);
+        self.render_turn_counts(&mut s);
         rows.repl_quiet_turns.render(&mut s);
         rows.repl_applied.render(&mut s);
         rows.repl_noops_sent.render(&mut s);

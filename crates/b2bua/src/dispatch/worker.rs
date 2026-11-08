@@ -45,13 +45,15 @@ impl Runnable for DispatchBody {
     }
 }
 
-/// Why a handler body died (ADR-0020 X6). `Panicked` = the spawned body's
-/// `JoinError::is_panic()`; `Aborted` = the call reaper's escalation cancelled
-/// a hung body via [`InFlight::abort`].
+/// Why a handler body's turn failed (ADR-0020 X6). `Panicked` = the spawned
+/// body's `JoinError::is_panic()`; `Aborted` = the call reaper's escalation
+/// cancelled a hung body via [`InFlight::abort`]; `Tripped` = the turn crossed
+/// a per-call cap and was discarded, reported by the router (ADR-0057 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerFailure {
     Panicked,
     Aborted,
+    Tripped(b2bua_core::caps::Tripped),
 }
 
 /// Notified from the per-call worker when a handler body failed — after the

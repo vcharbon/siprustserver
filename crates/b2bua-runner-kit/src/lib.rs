@@ -289,7 +289,6 @@ impl RunnerEnv {
                 "standalone: b-leg goes straight to the callee, every Contact names the worker"
             ),
         }
-
         let identity = entropy::worker_identity(name, self.identity.clone(), &id_gen);
         let config = B2buaConfig {
             self_ordinal: self.ordinal.clone(),
@@ -324,6 +323,7 @@ impl RunnerEnv {
             privacy_service: self.privacy_service,
             cdr: self.cdr.clone(),
             capacity: self.capacity,
+            caps: self.caps,
             event_queue_gate: self.event_queue_gate,
             parser_limits: self.parser_limits.clone(),
             ..Default::default()

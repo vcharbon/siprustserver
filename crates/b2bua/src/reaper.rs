@@ -5,6 +5,8 @@
 //! Failure classes covered (in-process only; hard-crash windows are out of
 //! scope — HA reclaim owns post-crash recovery):
 //! - **handler panic** — the dispatcher's failure hook reports it;
+//! - **a turn past a per-call cap** (ADR-0057 §4) — the router reports it as a
+//!   panic is reported;
 //! - **dropped event** (a queue-full BYE) / **lost timer** (incl. a lost
 //!   `TerminatingTimeout`) / **wedged Terminating** — the **last-touched
 //!   stamp** freezes and the sweep notices.
@@ -70,11 +72,13 @@ const ESCALATE_DISCHARGE_AFTER: u32 = 4;
 /// assessment from the snapshot.
 #[derive(Clone)]
 pub struct Reaper {
+    /// The sweep runs. Failure reports and the lifetime cap's verdict act
+    /// either way.
     enabled: bool,
     sweep_interval_ms: u64,
     idle_max_ms: i64,
-    /// Panic/abort strikes per call_ref (the X6 two-strike ladder). Pruned
-    /// against the live map each sweep so it cannot ratchet.
+    /// Panic/abort/trip strikes per call_ref (the X6 two-strike ladder).
+    /// Pruned at the call's release, and against the live map each sweep.
     strikes: Arc<Mutex<HashMap<String, u32>>>,
     /// Stale-verdict attempts per call_ref (the abort/discharge escalation).
     attempts: Arc<Mutex<HashMap<String, u32>>>,
@@ -124,31 +128,53 @@ impl Reaper {
         }
     }
 
-    /// The dispatcher-facing failure hook (X6): strike 1 → a `fatal-error`
-    /// verdict through the normal rules; strike ≥ 2 (the rules path itself
-    /// failed) → `discharge`. Aborts count as strikes too — an aborted body
-    /// was hung, so its call needs the same resolution — except one the
-    /// overflow ladder asked for: its call's teardown is already queued, and a
-    /// strike would force the legs that teardown is ending on the wire.
+    /// The dispatcher-facing failure hook (X6): [`report`](Self::report).
     pub fn failure_hook(&self) -> crate::dispatch::FailureHook {
         let this = self.clone();
-        Arc::new(move |call_ref: &str, failure: HandlerFailure| {
-            if !this.enabled {
+        Arc::new(move |call_ref: &str, failure: HandlerFailure| this.report(call_ref, failure))
+    }
+
+    /// A failed turn of `call_ref`, with the sweep on or off: strike 1 → a
+    /// `fatal-error` verdict through the normal rules; strike ≥ 2 (the rules
+    /// path itself failed) → `discharge`. Aborts count as strikes too — an
+    /// aborted body was hung, so its call needs the same resolution — except
+    /// one the overflow ladder asked for: its call's teardown is already
+    /// queued, and a strike would force the legs that teardown is ending on
+    /// the wire. A trip strikes a call not struck yet, its verdict naming the
+    /// cap; a trip of a later turn while that verdict is queued strikes
+    /// nothing, and only a verdict's own trip is the second strike
+    /// (ADR-0057 §4).
+    pub fn report(&self, call_ref: &str, failure: HandlerFailure) {
+        if failure == HandlerFailure::Aborted && ledger(&self.overflow_aborts).remove(call_ref) {
+            return;
+        }
+        let strike = {
+            let mut strikes = ledger(&self.strikes);
+            let struck = strikes.contains_key(call_ref);
+            if matches!(failure, HandlerFailure::Tripped(t) if !t.verdict) && struck {
                 return;
             }
-            if failure == HandlerFailure::Aborted && ledger(&this.overflow_aborts).remove(call_ref)
-            {
-                return;
+            let s = strikes.entry(call_ref.to_string()).or_insert(0);
+            *s += 1;
+            *s
+        };
+        let outcome = if strike == 1 { OUTCOME_FATAL } else { OUTCOME_DISCHARGE };
+        let payload = match failure {
+            HandlerFailure::Tripped(t) => {
+                serde_json::json!({ "strike": strike, "cap": t.cap.label() })
             }
-            let strike = {
-                let mut strikes = ledger(&this.strikes);
-                let s = strikes.entry(call_ref.to_string()).or_insert(0);
-                *s += 1;
-                *s
-            };
-            let outcome = if strike == 1 { OUTCOME_FATAL } else { OUTCOME_DISCHARGE };
-            this.send_verdict(call_ref, outcome, serde_json::json!({ "strike": strike }));
-        })
+            HandlerFailure::Panicked | HandlerFailure::Aborted => {
+                serde_json::json!({ "strike": strike })
+            }
+        };
+        self.send_verdict(call_ref, outcome, payload);
+    }
+
+    /// Forget what the reaper holds of `call_ref`, released from this node:
+    /// its strikes and its lifetime-cap mark.
+    pub fn forget(&self, call_ref: &str) {
+        ledger(&self.strikes).remove(call_ref);
+        ledger(&self.capped).remove(call_ref);
     }
 
     /// Hears a call whose dispatch overflow reached its ceiling: it is
@@ -162,10 +188,11 @@ impl Reaper {
     }
 
     /// Hears a call that crossed its lifetime message cap: one
-    /// `message-cap` verdict. The verdict is admitted past every bound and
-    /// the call's requests are refused from then on, so one is enough.
+    /// `message-cap` verdict, with the sweep on or off. The verdict is
+    /// admitted past every bound and the call's requests are refused from
+    /// then on, so one is enough.
     pub fn on_lifetime_cap(&self, call_ref: &str) {
-        if self.enabled && ledger(&self.capped).insert(call_ref.to_string()) {
+        if ledger(&self.capped).insert(call_ref.to_string()) {
             self.send_verdict(call_ref, OUTCOME_MESSAGE_CAP, serde_json::json!({}));
         }
     }

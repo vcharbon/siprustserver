@@ -6,6 +6,7 @@ use crate::sdp_form::{AsWritten, SdpFormPolicy};
 use crate::service_params::ServiceParams;
 
 mod bounds;
+mod call_caps;
 mod capacity;
 mod cdr;
 mod defaults;
@@ -13,6 +14,7 @@ mod event_queue_gate;
 mod front;
 mod retry_after;
 mod validate;
+pub use call_caps::{AgeCap, CallCaps, Cap, CapKind};
 pub use capacity::{CapacityConfig, Ceilings};
 pub use cdr::CdrConfig;
 pub use event_queue_gate::{EventQueueGateConfig, GateBound, GateViolation, EVENT_QUEUE_CAPACITY};
@@ -70,9 +72,8 @@ pub struct B2buaConfig {
     /// queue bound, so a stuck handler or a full queue hides none — the call
     /// ends (ADR-0020). The node's own timers and internal events do not
     /// count. A healthy call stays far below it: a 24 h call with 300 s
-    /// keepalives and session refreshes offers a few thousand. Enforced, and
-    /// checked (never 0), only with the reaper on, whose verdict ends the
-    /// call.
+    /// keepalives and session refreshes offers a few thousand. Enforced and
+    /// checked (never 0) with the reaper's sweep on or off.
     ///
     /// A call held just under `max_messages_per_call` per keepalive window
     /// reaches it after `lifetime / max_messages_per_call × keepalive
@@ -123,9 +124,10 @@ pub struct B2buaConfig {
     pub limiter_refresh_batch_ms: u64,
     /// Most keys one limiter refresh request carries. Default 1000.
     pub limiter_refresh_batch_max: usize,
-    /// **Call reaper** master switch (ADR-0020 X1). ON by default; `false` is a
+    /// **Call reaper sweep** switch (ADR-0020 X1). ON by default; `false` is a
     /// debugging escape hatch only — the in-process "released exactly once, one
-    /// CDR" promise does not hold without it.
+    /// CDR" promise does not hold without it. Failure reports, trips and the
+    /// lifetime cap's verdict act either way (ADR-0057 §4).
     pub reaper_enabled: bool,
     /// Check the call model's invariants at the end of every turn, before
     /// the record lands, and panic with the call's dump on a violation
@@ -348,9 +350,18 @@ pub struct B2buaConfig {
     /// here, one value per type; their rules read them through `ctx.config`.
     /// Empty by default.
     pub service_params: ServiceParams,
+    /// **Per-call caps** (ADR-0057): what one call's record may hold and what
+    /// one turn may do; a crossing fails the turn. The upstream defaults are
+    /// [`CallCaps::DEFAULT`].
+    pub caps: CallCaps,
 }
 
 impl B2buaConfig {
+    /// The longest a service's HTTP request runs ([`CallCaps::service_http_timeout_ms`]).
+    pub fn service_http_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.caps.service_http_timeout_ms)
+    }
+
     /// The reader of the wire, whichever stage reads a datagram first.
     pub fn parser(&self) -> sip_message::CustomParser {
         self.front.parser(&self.parser_limits)

@@ -16,6 +16,7 @@ use super::responses::{build_merged_482, build_retry_later_500, build_unborn_500
 use super::topology_cookie::topology_from_cookie;
 use super::RouterCtx;
 use crate::admission::{class_of, Class};
+use crate::caps::{Checked, Gauge, Tripped};
 use crate::effects::{HandlerEffects, HandlerResult};
 use crate::initial_consult::{cancelled_setup, handle_initial_invite, Consulted};
 use crate::initial_invite::build_initial_call;
@@ -36,6 +37,9 @@ pub(super) enum Turn {
     Shed,
     /// Admitted (or created-then-rejected): the handler result to commit.
     Result(Box<HandlerResult>),
+    /// The turn crossed a per-call cap: its result is discarded and the call
+    /// fails from the record its creation wrote (ADR-0057 §4).
+    Tripped(Tripped),
 }
 
 /// The initial-INVITE turn: the admission ladder's router rungs admitted it
@@ -287,7 +291,11 @@ pub(super) async fn initial_invite_turn(
         &mut turn.notes,
     );
     let mut exec = ActionExecutor { config: &ctx.config, owners: &owners, turn, now_ms };
-    Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)))
+    let closed = close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec);
+    match crate::caps::hold(&ctx.config.caps, &Gauge::of(&call), Checked::All, turn, closed) {
+        Ok(result) => Turn::Result(Box::new(result)),
+        Err(tripped) => Turn::Tripped(tripped),
+    }
 }
 
 /// [`refused_unavailable`] from the pre-handler call ([`discarded_turn`]), so

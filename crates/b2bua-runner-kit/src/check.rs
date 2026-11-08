@@ -81,6 +81,7 @@ impl ConfigCheck {
     pub(crate) fn generic(&mut self, env: &RunnerEnv, deps: &B2buaDeps) {
         let config = &deps.config;
         self.take(config.validate());
+        self.take(crate::runner_env::caps_env::check_caps(&config.caps));
         self.take(validate_ingress_brake_pct(env.udp_ingress_brake_pct));
         let call_control =
             std::time::Duration::from_millis(config.call_control_timeout_ms.unsigned_abs());

@@ -58,6 +58,8 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
     // through — so the active-trace slot returns exactly when the call's runtime
     // state does (ADR-0026). Idempotent, and a no-op for an unsampled call.
     crate::trace::traces().close(call_ref);
+    // The reaper's strikes of the call end with it, sweep or no sweep.
+    ctx.reaper.forget(call_ref);
     // What the call's outbox still holds leaves before the call's teardown:
     // a terminal turn drained it, and on every other release the copy's write
     // records it (ADR-0055 §3).

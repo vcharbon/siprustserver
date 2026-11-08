@@ -126,7 +126,10 @@ release and the delete, the backup's copy included, run through the one
 enforcement path. The reaper's verdict turns run with the collection caps off
 (the fuel stays): a safepoint at a cap would otherwise trip again on the
 teardown's own BYE record, CANCEL record, timer or CDR event, and the second
-strike's discharge would leave the parties connected. A verdict turn that fails
+strike's discharge would leave the parties connected. So does every turn on a
+call already terminating, for the same reason: the answers to its teardown and
+its `TerminatingTimeout` would trip, and the call would never end; its wait is
+bounded by that timeout. A verdict turn that fails
 for any other reason is the second strike: the discharge forces the call terminal
 with no rule run (ADR-0020 X6).
 

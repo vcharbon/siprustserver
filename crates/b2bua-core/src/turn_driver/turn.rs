@@ -30,6 +30,9 @@ pub enum Outcome {
     Unparsed,
     /// The call gives the step nothing to say, or ended before it.
     Nothing,
+    /// The turn crossed a per-call cap (ADR-0057): its result is discarded
+    /// and the record stays as the turn found it.
+    Tripped(crate::caps::Tripped),
     /// The clock moved on.
     Advanced,
 }

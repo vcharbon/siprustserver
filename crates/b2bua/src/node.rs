@@ -303,13 +303,8 @@ impl B2buaCore {
         )
         .with_new_call_bounds(config.new_call_permits(), config.new_call_queue_headroom())
         .with_failure_hook(reaper.failure_hook());
-        // Only the reaper's verdict ends a capped call: without the reaper the
-        // cap would refuse the call's traffic and nothing would end it.
-        let dispatcher = if config.reaper_enabled {
-            dispatcher.with_lifetime_cap(config.max_messages_per_call_lifetime)
-        } else {
-            dispatcher
-        };
+        // The reaper's verdict ends a capped call, with its sweep on or off.
+        let dispatcher = dispatcher.with_lifetime_cap(config.max_messages_per_call_lifetime);
         let outboxes = router::Outboxes::new(wired, metrics.clone(), dispatcher.in_flight());
         // Compose the registered services' state-gated rules above the core
         // defaults (ADR-0016). With an empty `services` this is exactly
@@ -346,6 +341,7 @@ impl B2buaCore {
             reentry_tx.clone(),
         );
         tasks.extend(limiter_tasks);
+        let http_cap = config.service_http_timeout();
         let ctx = Arc::new(RouterCtx {
             outbound_proxy: crate::router::outbound_proxy_target(&config),
             relay_owner: call::RelayOwner::new(config.self_ordinal.clone(), identity),
@@ -381,14 +377,16 @@ impl B2buaCore {
             unborn: Default::default(),
             keepalive_waves: crate::lifecycle::keepalive_timeout_waves(),
             meeting_waves: crate::lifecycle::meeting_waves(),
+            cap_trip_waves: crate::lifecycle::cap_trip_waves(),
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             late_pracks: Default::default(),
             dead_verdicts: Default::default(),
             verdict_bounds,
             outboxes: Arc::new(outboxes),
             reentry_tx,
-            // Arc-shared into every per-call `ctx.clone()`, like `decision`.
-            adaptation_http: adaptation_http.map(Arc::new),
+            // Arc-shared into every per-call `ctx.clone()`, like `decision`;
+            // its default no longer than the service HTTP cap (ADR-0057 §2).
+            adaptation_http: adaptation_http.map(|p| Arc::new(p.capped(http_cap))),
         });
 
         let run = router::run(ctx.clone(), txn_rx, timer_rx, reentry_rx, repl_rx);

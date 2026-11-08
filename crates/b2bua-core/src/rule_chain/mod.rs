@@ -15,6 +15,7 @@ use call::{Call, CallModelState, Direction, Obligation, TimerType};
 use sip_message::{Method, SipMessage};
 
 use crate::answer_deadline::Screened;
+use crate::caps::{Checked, Gauge, Tripped};
 use crate::config::B2buaConfig;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
 use crate::obligations::ObligationSet;
@@ -54,7 +55,22 @@ pub struct TurnInput<'a> {
     pub owners: Owners,
 }
 
-/// Run the synchronous rule chain for one in-dialog event, with the
+/// Run the synchronous rule chain for one in-dialog event, held to the
+/// per-call caps (ADR-0057): `Err` when the turn crossed one, its result
+/// discarded ([`crate::caps::hold`]).
+pub fn rule_chain_turn(
+    fw: &Framework<'_>,
+    call: Call,
+    input: TurnInput<'_>,
+    turn: &mut TurnScope,
+) -> Result<HandlerResult, Tripped> {
+    let start = Gauge::of(&call);
+    let checked = Checked::of(&call, input.event);
+    let result = chain_turn(fw, call, input, turn);
+    crate::caps::hold(&fw.config.caps, &start, checked, turn, result)
+}
+
+/// The rule chain's turn for one in-dialog event, with the
 /// MAX_MESSAGES_PER_CALL cap-defense wrapped around it.
 ///
 /// The count opens at 1 on the initial INVITE (`initial_invite`) and every
@@ -72,7 +88,7 @@ pub struct TurnInput<'a> {
 /// capture `cap_exceeded` BEFORE the handler runs, terminate AFTER, so the
 /// in-flight event (e.g. relaying this re-INVITE's response) is still serviced
 /// before teardown; a turn that trips the cap is the teardown, never quiet.
-pub fn rule_chain_turn(
+fn chain_turn(
     fw: &Framework<'_>,
     mut call: Call,
     input: TurnInput<'_>,

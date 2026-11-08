@@ -67,6 +67,13 @@ pub(super) fn build_out_of_order_500(req: &SipRequest) -> Result<SipResponse, Ge
     generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default())
 }
 
+/// The bare `500 Server Internal Error` to `req`, an in-dialog request whose
+/// turn crossed a per-call cap and was discarded (ADR-0057 §4): nothing names
+/// the cap.
+pub(super) fn build_tripped_500(req: &SipRequest) -> Result<SipResponse, GenerateError> {
+    generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default())
+}
+
 /// `500 Server Internal Error` to `req` with `Retry-After: retry_after_sec`,
 /// floored at 1 s: a request this node took but could not process now, which
 /// the UAC may retry (RFC 3261 §14.2 for a re-INVITE, §21.5.1). `to_tag` is

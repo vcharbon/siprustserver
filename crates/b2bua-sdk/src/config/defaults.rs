@@ -71,6 +71,7 @@ impl Default for B2buaConfig {
             capacity: CapacityConfig::default(),
             event_queue_gate: EventQueueGateConfig::default(),
             service_params: ServiceParams::default(),
+            caps: CallCaps::DEFAULT,
         }
     }
 }

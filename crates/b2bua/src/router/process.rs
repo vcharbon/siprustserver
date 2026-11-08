@@ -89,7 +89,8 @@ pub(super) async fn process(
                 release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
                 return false;
             }
-            super::initial_turn::Turn::Result(r) => *r,
+            super::initial_turn::Turn::Result(r) => Ok(*r),
+            super::initial_turn::Turn::Tripped(tripped) => Err(tripped),
         }
     } else if crate::off_turn::is_answer(event) && !ctx.state.contains(&call_ref) {
         // The answer to a request this node sent while it held the call: a
@@ -119,7 +120,7 @@ pub(super) async fn process(
         else {
             return false;
         };
-        enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes)
+        Ok(enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes))
     } else {
         if of_another_incarnation(ctx, event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
@@ -230,7 +231,7 @@ pub(super) async fn process(
             let limiter = &ctx.limiter;
             let res =
                 crate::limiter::refresh_turn::on_refresh_due(limiter, call, &call_ref, now_ms);
-            enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes)
+            Ok(enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes))
         } else {
             let input = TurnInput {
                 event,
@@ -255,6 +256,16 @@ pub(super) async fn process(
         }
         return false;
     }
+    let result = match result {
+        Ok(result) => result,
+        Err(tripped) => {
+            let safepoint = ctx.state.peek(&call_ref);
+            let answer = !res.initial_invite;
+            super::tripped::fail_turn(ctx, &call_ref, event, tripped, safepoint, answer, now_ms)
+                .await;
+            return false;
+        }
+    };
 
     if probe_failed {
         record_keepalive_failure_peer(ctx, &res.source_leg_id, &result.call);
@@ -426,7 +437,7 @@ fn record_refusal(
 
 /// Send `answer`, the router's answer to `event`'s request, behind the write
 /// that recorded it.
-async fn answer_after_the_write(
+pub(super) async fn answer_after_the_write(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     event: &CallEvent,

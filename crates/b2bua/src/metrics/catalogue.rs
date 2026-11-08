@@ -7,6 +7,7 @@
 //! `/metrics` order.
 
 pub mod capacity;
+pub mod caps;
 pub mod limiter;
 pub mod plain;
 pub mod readiness;
@@ -158,6 +159,8 @@ const WORKER_REST: &[Family] = &[
     wire_drops::UNROUTABLE_INTERNAL_OVERFLOW,
     worker::REPEAT_GIVE_UPS,
     worker::MODEL_DEFECTS,
+    caps::CAP_TRIPS,
+    caps::CAP_NEAR,
     worker::REPL_QUIET_TURNS,
     worker::REPL_APPLIED,
     worker::REPL_NOOPS_SENT,
