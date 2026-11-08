@@ -115,43 +115,71 @@ impl Named {
     /// the caller), or the lookup in flight, started when none is and fewer
     /// than [`MAX_STUCK`] are stuck.
     fn address_or_lookup(self: &Arc<Self>) -> Found {
+        let (found, started) = self.find_or_start();
+        if let Some(started) = started {
+            started.spawn();
+        }
+        found
+    }
+
+    /// [`address_or_lookup`](Self::address_or_lookup) under the lock; a
+    /// lookup it starts holds the slot and is spawned once the lock is
+    /// released, since dropping it takes the lock.
+    fn find_or_start(self: &Arc<Self>) -> (Found, Option<PendingLookup>) {
         let mut state = self.lock();
         if let Some(addrs) = state.addrs.clone() {
+            let mut started = None;
             if state.stale && state.lookup.is_none() {
                 if state.stuck >= self.lookup.max_stuck {
                     state.stale = false;
                 } else {
-                    let _ = self.start(&mut state);
+                    started = Some(self.start(&mut state).1);
                 }
             }
-            return Found::Kept(addrs);
+            return (Found::Kept(addrs), started);
         }
         if let Some(waiting) = state.lookup.as_ref() {
-            return Found::Wait(waiting.clone());
+            return (Found::Wait(waiting.clone()), None);
         }
         if state.stuck >= self.lookup.max_stuck {
-            return Found::Refused;
+            return (Found::Refused, None);
         }
-        Found::Wait(self.start(&mut state))
+        let (waiting, started) = self.start(&mut state);
+        (Found::Wait(waiting), Some(started))
     }
 
-    /// Start a lookup, its answer landing for every request after it.
-    fn start(self: &Arc<Self>, state: &mut NameState) -> watch::Receiver<Answer> {
+    /// Take the slot for a lookup, its answer landing for every request
+    /// after it.
+    fn start(self: &Arc<Self>, state: &mut NameState) -> (watch::Receiver<Answer>, PendingLookup) {
         let (tx, rx) = watch::channel(None);
         state.lookup = Some(rx.clone());
-        let done = LookupDone(self.clone());
+        (rx, PendingLookup { done: LookupDone(self.clone()), tx })
+    }
+}
+
+/// A lookup holding the slot, not spawned yet. Dropped unspawned, or its
+/// task dropped unpolled, it frees the slot and its waiters get no address.
+struct PendingLookup {
+    done: LookupDone,
+    tx: watch::Sender<Answer>,
+}
+
+impl PendingLookup {
+    /// Run the lookup on its own task; the caller holds no lock.
+    fn spawn(self) {
+        let Self { done, tx } = self;
         tokio::spawn(async move {
             let found = done.run().await;
             done.land(found.clone());
             drop(done);
             let _ = tx.send(Some(found));
         });
-        rx
     }
 }
 
 /// The lookup in flight. Landing keeps the addresses it found; ending, a
-/// panicking one included, frees the slot so the next request starts another.
+/// panicking one or one dropped unpolled included, frees the slot so the
+/// next request starts another.
 struct LookupDone(Arc<Named>);
 
 impl LookupDone {
