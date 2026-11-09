@@ -55,10 +55,10 @@ impl B2buaMetrics {
     /// `per_hour` (`b2bua_cap_peak_per_hour{cap}`); a `0` reads nothing.
     pub fn record_cap_reading(&self, cap: Cap, value: u64, per_hour: u64) {
         if value > 0 {
-            self.inner.rows.cap_peak.raise(&[cap.label()], value);
+            self.inner.rows.cap_peak.raise_at(cap.index(), value);
         }
-        if per_hour > 0 {
-            self.inner.rows.cap_peak_per_hour.raise(&[cap.label()], per_hour);
+        if let (true, Some(at)) = (per_hour > 0, cap.aged_index()) {
+            self.inner.rows.cap_peak_per_hour.raise_at(at, per_hour);
         }
     }
 

@@ -60,6 +60,21 @@ impl FixedCounts {
         }
     }
 
+    /// [`raise`](Self::raise) the label set at `at` in the family's
+    /// declaration order (a product's last dimension varying fastest); a
+    /// position past the family's sets is a caller's bug: refused in a debug
+    /// build, not counted. No key is built: for a caller on a hot path.
+    pub fn raise_at(&self, at: usize, n: u64) {
+        match self.counts.get(at) {
+            Some(slot) => {
+                if slot.load(Ordering::Relaxed) < n {
+                    slot.fetch_max(n, Ordering::Relaxed);
+                }
+            }
+            None => debug_assert!(false, "{} declares no set at {at}", self.family.name),
+        }
+    }
+
     /// The count of the label set `values`, 0 when it is not declared.
     pub fn get(&self, values: &[&str]) -> u64 {
         with_key(values, |k| self.slots.get(k).copied())
@@ -109,6 +124,9 @@ mod tests {
         assert_eq!(c.get(&["a"]), 5);
         c.raise(&["a"], 9);
         assert_eq!(c.get(&["a"]), 9);
+        c.raise_at(1, 4);
+        c.raise_at(1, 2);
+        assert_eq!(c.get(&["b"]), 4, "the second declared set");
     }
 
     #[test]

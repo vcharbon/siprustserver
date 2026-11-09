@@ -228,3 +228,21 @@ fn a_fuel_only_turn_reads_its_actions_alone_and_a_tripped_turn_nothing() {
     assert!(out.is_err());
     assert!(scope.notes.cap_readings().iter().all(|(_, v, h)| v == 0 && h == 0));
 }
+
+#[test]
+fn an_aged_reading_is_per_started_hour_and_the_ext_value_is_read() {
+    let start = call();
+    let mut after = start.clone();
+    let mut features = crate::decision::default_platform_features();
+    features.platform.max_duration_ms = 2 * 3_600_000 + 1;
+    after.features = Some(features);
+    add_cdr_events(&mut after, 7);
+    call::helpers::set_call_ext(&mut after, "svc", Some(serde_json::json!({ "k": "abcd" })));
+    let caps = CallCaps { cdr_events: AgeCap { base: 20, per_hour: 1 }, ..caps() };
+    let mut scope = turn(1);
+    let out = hold(&caps, &Gauge::of(&start), Checked::All, &mut scope, HandlerResult::new(after));
+    assert!(out.is_ok());
+    assert_eq!(reading(&scope, Cap::CdrEvents), (7, 3), "3 started hours: 7 / 3, rounded up");
+    assert_eq!(reading(&scope, Cap::Legs), (0, 0), "no leg dialled");
+    assert_eq!(reading(&scope, Cap::ExtBytes), (r#"{"k":"abcd"}"#.len() as u64, 0));
+}

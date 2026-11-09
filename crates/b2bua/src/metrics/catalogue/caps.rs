@@ -21,7 +21,7 @@ const ALL_CAPS: [&str; 9] = [
     "ext-bytes",
     "actions-per-turn",
 ];
-/// The caps on what grows with a call's age, in [`b2bua_sdk::config::Cap::ALL`] order.
+/// The caps on what grows with a call's age, in [`b2bua_sdk::config::Cap::AGED`] order.
 const AGED_CAPS: [&str; 3] = ["legs", "attempts", "cdr-events"];
 /// The counted collections' caps, in [`b2bua_sdk::config::Cap::ALL`] order.
 const COUNTED_CAPS: [&str; 7] =
@@ -45,13 +45,13 @@ pub const CAP_NEAR: Family = Family::counter(
 pub const CAP_PEAK: Family = Family::gauge(
     "b2bua_cap_peak",
     Labels::Product(&[Dim::new("cap", &ALL_CAPS)]),
-    "the largest reading of each per-call cap a landed turn left since the process started (ADR-0057 §9), by cap: a collection's length, a service's encoded ext value in bytes, or the actions one turn returned. A tripped turn reads nothing. Each cap's default is set at ten times the largest reading over valid traffic",
+    "the largest reading of each per-call cap since the process started (ADR-0057 §9), by cap: what a turn held to its caps left its call holding (a collection's length, a service's encoded ext value in bytes) and the actions it returned. A tripped turn reads nothing, nor does the router's own ending of a call. A cap on what a call holds at once defaults to ten times the largest reading over valid traffic; the fuel is checked against the heaviest turns; a cap on what grows with a call's age is a base and a rate (b2bua_cap_peak_per_hour)",
 );
 
 pub const CAP_PEAK_PER_HOUR: Family = Family::gauge(
     "b2bua_cap_peak_per_hour",
     Labels::Product(&[Dim::new("cap", &AGED_CAPS)]),
-    "the largest reading of each cap on what grows with a call's age, per started hour of the call's granted duration, since the process started (ADR-0057 §9), by cap; read once a duration is granted. Sets the cap's `_PER_HOUR` rate",
+    "the largest reading of each cap on what grows with a call's age, per started hour of the call's granted duration, since the process started (ADR-0057 §9), by cap; read once a duration is granted. A call granted an hour or less reads its whole length here. Sets the cap's `_PER_HOUR` rate",
 );
 
 #[cfg(test)]
@@ -67,7 +67,6 @@ mod tests {
             Cap::ALL.into_iter().filter(|c| !matches!(c, Cap::ActionsPerTurn | Cap::ExtBytes));
         assert!(counted.map(Cap::label).eq(super::COUNTED_CAPS));
         assert!(Cap::ALL.into_iter().map(Cap::label).eq(super::ALL_CAPS));
-        let aged = [Cap::Legs, Cap::Attempts, Cap::CdrEvents];
-        assert!(aged.into_iter().map(Cap::label).eq(super::AGED_CAPS));
+        assert!(Cap::AGED.into_iter().map(Cap::label).eq(super::AGED_CAPS));
     }
 }

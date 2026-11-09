@@ -106,8 +106,7 @@ pub struct CapReadings {
 impl CapReadings {
     /// Raise `cap`'s slot of `slots` to `value`.
     fn raise(slots: &mut [u64; Cap::ALL.len()], cap: Cap, value: u64) {
-        let at = Cap::ALL.iter().position(|c| *c == cap);
-        if let Some(slot) = at.and_then(|at| slots.get_mut(at)) {
+        if let Some(slot) = slots.get_mut(cap.index()) {
             *slot = (*slot).max(value);
         }
     }

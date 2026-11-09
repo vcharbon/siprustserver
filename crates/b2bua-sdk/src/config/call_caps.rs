@@ -88,6 +88,25 @@ impl Cap {
         }
     }
 
+    /// The caps on what grows with a call's age, in [`Cap::ALL`] order.
+    pub const AGED: [Cap; 3] = [Cap::Legs, Cap::Attempts, Cap::CdrEvents];
+
+    /// The cap's position in [`Cap::ALL`].
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The cap's position in [`Cap::AGED`]; `None` for a cap on what a call
+    /// holds at once.
+    pub const fn aged_index(self) -> Option<usize> {
+        match self {
+            Cap::Legs => Some(0),
+            Cap::Attempts => Some(1),
+            Cap::CdrEvents => Some(2),
+            _ => None,
+        }
+    }
+
     /// The cap named `label`.
     pub fn of_label(label: &str) -> Option<Cap> {
         Cap::ALL.into_iter().find(|c| c.label() == label)
@@ -245,6 +264,18 @@ mod tests {
         assert_eq!(cap.at(3_600_000), 14);
         assert_eq!(cap.at(3_600_001), 18);
         assert_eq!(cap.at(-5), 10, "a negative grant reads as none");
+    }
+
+    #[test]
+    fn every_cap_knows_its_positions() {
+        for (at, cap) in Cap::ALL.into_iter().enumerate() {
+            assert_eq!(cap.index(), at);
+        }
+        for (at, cap) in Cap::AGED.into_iter().enumerate() {
+            assert_eq!(cap.aged_index(), Some(at));
+        }
+        let aged = Cap::ALL.into_iter().filter(|c| c.aged_index().is_some()).count();
+        assert_eq!(aged, Cap::AGED.len());
     }
 
     #[test]

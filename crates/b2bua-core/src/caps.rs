@@ -115,9 +115,6 @@ impl Gauge {
     }
 }
 
-/// The caps on what grows with a call's age.
-const AGED: [Cap; 3] = [Cap::Legs, Cap::Attempts, Cap::CdrEvents];
-
 /// The turn that started at `start` and left `result`, held to `checked`
 /// under `caps`: `Err` when its fuel ran out or it grew a collection past its
 /// cap. A turn that lands has each collection it grew across half its cap
@@ -182,7 +179,7 @@ fn read(
     notes.cap_reading(Cap::ExtBytes, ext);
     let hours = AgeCap::started_hours(granted);
     if hours > 0 {
-        for cap in AGED {
+        for cap in Cap::AGED {
             notes.cap_reading_per_hour(cap, end.get(cap).div_ceil(hours));
         }
     }
