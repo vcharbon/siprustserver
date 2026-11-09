@@ -36,9 +36,9 @@ pub(crate) fn stuck_exit_bound(bounds: DrainBounds) -> Duration {
 }
 
 /// A poll stuck on the CPU (the watchdog logged it): Draining, the call the
-/// stuck task serves discharged within the release flush bound, the queued
-/// limiter releases flushed, the CDR sink closed, and the exit with the
-/// watchdog's code.
+/// stuck task serves discharged within the release flush bound unless
+/// [`leaves_the_call`] says why not, the queued limiter releases flushed, the
+/// CDR sink closed, and the exit with the watchdog's code.
 pub(crate) async fn stuck_exit(
     core: &B2buaCore,
     name: &str,
@@ -46,7 +46,9 @@ pub(crate) async fn stuck_exit(
     stuck: Stuck,
 ) -> ExitCode {
     core.begin_draining();
-    if let (Some(call_ref), Some(task)) = (&stuck.call_ref, stuck.task) {
+    if let (Some(call_ref), Some(reason)) = (&stuck.call_ref, leaves_the_call(core)) {
+        tracing::error!(service = name, %call_ref, reason, "the call a stuck poll holds: left to the takeover");
+    } else if let (Some(call_ref), Some(task)) = (&stuck.call_ref, stuck.task) {
         let discharge = core.discharge_stuck(call_ref, task, bounds.release_flush).await;
         tracing::error!(
             service = name,
@@ -66,6 +68,17 @@ pub(crate) async fn stuck_exit(
     );
     close_cdr(core, name, bounds.cdr_flush).await;
     ExitCode::from(poll_watchdog::EXIT_CODE)
+}
+
+/// Why the stuck exit leaves its call to the takeover rather than discharge
+/// it: a superseded worker authors nothing, and once the CDR sink's close has
+/// begun the discharge's CDR could be dropped while its delete still reaches
+/// the backup. `None` when it discharges.
+pub(crate) fn leaves_the_call(core: &B2buaCore) -> Option<&'static str> {
+    if core.is_superseded() {
+        return Some("superseded");
+    }
+    core.cdr().closing().then_some("the CDR sink is closing")
 }
 
 #[cfg(test)]

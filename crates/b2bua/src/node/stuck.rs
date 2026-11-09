@@ -20,9 +20,12 @@ pub enum StuckDischarge {
     NotEnded,
     /// Discharged; no peer holds a copy of it.
     Unbacked,
-    /// Discharged, and the peer holding its copy applied the delete.
+    /// Discharged, and the peer holding its copy applied the call's last
+    /// change toward it (the delete of a call this worker is primary for, the
+    /// terminated body a takeover copy writes back), or the call's entry left
+    /// the log toward it.
     BackupApplied,
-    /// Discharged; the peer holding its copy had not applied the delete by
+    /// Discharged; the peer holding its copy had not applied that change by
     /// the bound, or its flow went down first.
     BackupBehind,
     /// The discharge did not land within the bound.
@@ -84,7 +87,6 @@ impl B2buaCore {
             return StuckDischarge::Unbacked;
         };
         let log = repl.changelog();
-        // The delete's entry leaves the log once the peer reported applying it.
         let Some(at) = log.position_of(&peer, partition, call_ref) else {
             return StuckDischarge::BackupApplied;
         };

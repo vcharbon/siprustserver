@@ -167,6 +167,15 @@ impl CdrWriter for BufferedCdrWriter {
         self.drainer.clone()
     }
 
+    /// Closing once a close stated its deadline, or as the inner sink when
+    /// unbuffered.
+    fn closing(&self) -> bool {
+        match self.tx {
+            None => self.inner.closing(),
+            Some(_) => self.close_by.borrow().is_some(),
+        }
+    }
+
     /// The first close waits for the drainer, which ends at its deadline; a
     /// later one waits for that within its own deadline.
     async fn close(&self, deadline: Instant) {

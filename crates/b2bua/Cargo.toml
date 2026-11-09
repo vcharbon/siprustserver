@@ -22,9 +22,6 @@ workspace = true
 testkit = []
 
 [dependencies]
-# The task id the stuck-poll fence holds, read by every turn commit without a
-# lock: `tokio::task::Id` is eight bytes, so its cell is one atomic word.
-crossbeam-utils = "0.8"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }

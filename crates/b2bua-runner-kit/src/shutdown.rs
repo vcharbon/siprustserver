@@ -23,7 +23,7 @@
 //!   holds (`runtime`), so the wedge cannot hold the exit (ADR-0033 §4).
 //! - **A poll stuck on the CPU** past `B2BUA_STUCK_POLL_CPU_MS`, before any
 //!   other stop or while another stop's exit runs (ADR-0057 §6): the stuck
-//!   exit of [`crate::stuck`] takes over, and the process exits with the
+//!   exit of [`stuck`] takes over, and the process exits with the
 //!   watchdog's code.
 //!
 //! Every exit then closes the CDR sink within `B2BUA_DRAIN_CDR_FLUSH_MS`, which

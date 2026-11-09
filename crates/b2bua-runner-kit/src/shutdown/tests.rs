@@ -712,3 +712,52 @@ async fn a_stuck_exit_whose_turn_is_over_drains_and_exits_with_the_watchdog_code
     assert_eq!(w.core.active_calls(), 1, "no stuck turn holds the call: it is left to HA");
     assert_eq!(w.flushes(ReleaseFlushOutcome::Empty), 1, "the release flush ran");
 }
+
+/// A poll read stuck while a SIGTERM drain waits on its live call cuts the
+/// drain short for the stuck exit and its code.
+#[tokio::test(start_paused = true)]
+async fn a_poll_read_stuck_mid_drain_takes_the_stuck_exit() {
+    let w = worker().await;
+    w.ringing_call().await;
+    let watchdog = Watchdog::new();
+    let long_grace = DrainBounds { grace: Duration::from_secs(60), ..BOUNDS };
+    let start = tokio::time::Instant::now();
+    let serve =
+        serve_until_stop(&w.core, "test", long_grace, LOOP_EXIT, &watchdog, pending(), ready(()));
+    let publish = async {
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(w.core.readiness().is_draining(), "the drain is under way");
+        watchdog.publish(stuck_on(None));
+        pending::<()>().await;
+    };
+    let code = tokio::select! {
+        code = serve => code,
+        _ = publish => unreachable!(),
+    };
+    assert_eq!(code, ExitCode::from(poll_watchdog::EXIT_CODE));
+    assert!(start.elapsed() < long_grace.grace, "cut short: {:?}", start.elapsed());
+}
+
+/// Once the CDR sink's close has begun, the stuck exit leaves its call to
+/// the takeover: a discharge's CDR could be dropped while its delete reaches
+/// the backup.
+#[tokio::test(start_paused = true)]
+async fn a_stuck_exit_leaves_its_call_once_the_cdr_sink_closes() {
+    let (w, _sink) = worker_with_slow_sink(Duration::from_millis(1)).await;
+    assert_eq!(stuck::leaves_the_call(&w.core), None);
+    w.core.cdr().close(tokio::time::Instant::now() + Duration::from_secs(1)).await;
+    assert_eq!(stuck::leaves_the_call(&w.core), Some("the CDR sink is closing"));
+}
+
+/// A superseded worker authors nothing: its stuck exit leaves the call.
+#[tokio::test(start_paused = true)]
+async fn a_superseded_worker_leaves_its_stuck_call() {
+    let w = worker().await;
+    w.supersede();
+    let mut waited = Duration::ZERO;
+    while !w.core.is_superseded() && waited < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        waited += Duration::from_millis(10);
+    }
+    assert_eq!(stuck::leaves_the_call(&w.core), Some("superseded"));
+}

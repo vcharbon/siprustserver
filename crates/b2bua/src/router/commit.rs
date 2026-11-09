@@ -4,8 +4,8 @@
 //! the turn sends on the call's outbox behind the write that records it, and
 //! ends the call once that outbox drained, as its [`CommitKind`] states. Only
 //! the commit pushes on a call's outbox and reports a turn's marks. A turn on
-//! the body a poll watchdog read stuck lands nothing from the step it reaches
-//! after its call's discharge (ADR-0057 §6).
+//! the body a poll watchdog read stuck, fenced off before its call's
+//! discharge, stops at the next of the commit's fence checks (ADR-0057 §6).
 
 mod held;
 mod rider;
@@ -281,6 +281,9 @@ pub(super) async fn commit_turn(
     // stays resident and takes no turn until then.
     if commit.removes() {
         ctx.outboxes.drained(call_ref).await;
+        if fenced(ctx, call_ref) {
+            return;
+        }
         if commit == CommitKind::DeleteAfterDrain {
             ctx.state.log_delete(call_ref);
         }
@@ -318,6 +321,9 @@ async fn persist(
         CommitKind::DeleteAfterDrain => {
             if cdr {
                 ctx.cdr.write(call, now_ms).await;
+            }
+            if fenced(ctx, call_ref) {
+                return false;
             }
             ctx.state.write(Arc::clone(call))
         }
@@ -415,8 +421,8 @@ pub(super) async fn commit_cancel(
 }
 
 /// Whether this turn runs on the body a poll watchdog read stuck, whose call
-/// the exit discharged without it: it lands nothing more.
-fn fenced(ctx: &RouterCtx, call_ref: &str) -> bool {
+/// the exit discharges without it: it stops here.
+pub(super) fn fenced(ctx: &RouterCtx, call_ref: &str) -> bool {
     let fenced = ctx.dispatcher.fenced_here();
     if fenced {
         tracing::warn!(%call_ref, "a turn read stuck went on after its call's discharge: dropped");

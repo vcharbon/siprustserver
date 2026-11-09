@@ -213,8 +213,12 @@ leaves through the worker's shutdown path; the watchdog thread arms a hard
 `std::process::exit` past the shutdown's flush bounds plus one second, so the
 exit completes even when the only worker is the stuck one. The discharge first
 fences the stuck body off: a turn of it that goes on, slow rather than stuck,
-lands nothing from its next commit step on; a body that is no longer the
-call's in-flight one ended its turn, and its call is left to the takeover. The
+stops at its next fence check (before its write, its CDR, its sends and its
+release), and the call's worker runs no further item of it; a body that is no
+longer the call's in-flight one ended its turn, and its call is left to the
+takeover, as it is once the CDR sink's close has begun or the node is
+superseded. The discharge owes the release of the call's limiter key whatever
+the record says: the stuck turn may have sent an admit. The
 runtime's workers keep no LIFO slot: a task the stuck poll woke last would wait
 there, unstolen, and the discharge's write would never reach the backup. The
 cost is the slot's shortcut: a task one task wakes runs after those already

@@ -60,6 +60,9 @@ const CHILD_BUDGET: Duration = Duration::from_secs(15);
 const BACKUP_GONE: &str = "backup copy gone";
 /// The topic of the internal event whose turn spins.
 const SPIN_TOPIC: &str = "spin";
+/// The topic of the internal event queued behind it, whose turn rejects the
+/// caller.
+const REJECT_TOPIC: &str = "reject";
 
 const W0_SIP: SocketAddr = addr([127, 0, 0, 2], 5080);
 const W1_SIP: SocketAddr = addr([127, 0, 0, 4], 5080);
@@ -171,11 +174,12 @@ fn a_call_turn_spinning_on_the_only_worker_ends_the_process_at_the_hard_bound() 
 }
 
 /// A turn slow but finite: read stuck, its call discharged, then it leaves
-/// the CPU with a rejection and a teardown. It lands nothing: the call has
-/// one CDR, the discharge's, and the caller hears nothing of it.
+/// the CPU with a rejection and a teardown, an event that rejects the caller
+/// queued behind it. Neither lands: the call has one CDR, the discharge's,
+/// and the caller hears nothing.
 #[test]
 fn a_slow_turn_that_resumes_after_the_discharge_lands_nothing() {
-    let out = run_child(Spin::ThenReject, 4, None);
+    let out = run_child(Spin::ThenReject, 4, Some(Duration::from_secs(12)));
     let all = text(&out);
     assert_eq!(out.status.code(), Some(i32::from(poll_watchdog::EXIT_CODE)), "{all}");
     assert!(all.contains("discharge=\"backup_applied\""), "the discharge's outcome: {all}");
@@ -205,19 +209,17 @@ fn child() {
             watchdog.exit_after(Duration::from_millis(ms));
         }
         tokio::spawn(report_backup_gone(pair.w1_store.clone(), call_ref.clone()));
-        pair.w0.post_event(CallEvent::InternalEvent {
-            call_ref: call_ref.clone(),
-            topic: SPIN_TOPIC.into(),
-            outcome: String::new(),
-            payload: serde_json::Value::Null,
-            body: Vec::new(),
-            incarnation: None,
-        });
+        pair.post(&call_ref, SPIN_TOPIC);
+        if spin == Spin::ThenReject {
+            pair.post(&call_ref, REJECT_TOPIC);
+        }
         let (bounds, exit) = (CHILD_BOUNDS, Duration::from_secs(30));
         let code =
             serve_until_stop(&pair.w0, "child", bounds, exit, watchdog, pending(), pending()).await;
         if spin == Spin::ThenReject {
-            pair.until("the spinning turn returned", |_| RETURNED.load(Ordering::SeqCst)).await;
+            let returned = |_: &Pair| RETURNED.load(Ordering::SeqCst);
+            pair.until_within(Duration::from_secs(10), "the spinning turn returned", returned)
+                .await;
             println!("the spinning turn returned");
         }
         // What the turn would send and the backup's report ride a few more
@@ -257,19 +259,22 @@ async fn report_backup_gone(store: Arc<ReplicatingCallStore>, call_ref: String) 
 /// The service whose rule spins on [`SPIN_TOPIC`] as the child's [`Spin`]
 /// says.
 fn spin_service() -> ServiceDef {
-    fn rules() -> Vec<RuleDefinition> {
-        vec![RuleDefinition {
-            id: "spin",
+    fn rule(id: &'static str, topic: &'static str, handle: Handle) -> RuleDefinition {
+        RuleDefinition {
+            id,
             layer: SERVICE_LAYER,
             overrides: &[],
-            matcher: Match::internal_event().topic(SPIN_TOPIC),
-            handle: spin,
+            matcher: Match::internal_event().topic(topic),
+            handle,
             machine: None,
             active_states: &[],
             transitions: &[],
             effects: &[],
             teardown: false,
-        }]
+        }
+    }
+    fn rules() -> Vec<RuleDefinition> {
+        vec![rule("spin", SPIN_TOPIC, spin), rule("reject", REJECT_TOPIC, |_| Some(reject()))]
     }
     fn init(_call: &RuleCall) -> Option<ServiceSeed> {
         None
@@ -277,8 +282,10 @@ fn spin_service() -> ServiceDef {
     ServiceDef { id: "spin", init, rules }
 }
 
+type Handle = fn(&RuleContext) -> Option<RuleHandleResult>;
+
 /// The spinning rule: for ever, or until its thread spent three thresholds
-/// of CPU, then a 480 to the caller and the call's end.
+/// of CPU, then [`reject`].
 fn spin(_ctx: &RuleContext) -> Option<RuleHandleResult> {
     let tid = poll_watchdog::schedstat::own_tid().expect("this thread's id");
     let cpu = || poll_watchdog::schedstat::cpu(tid).expect("this thread's CPU time");
@@ -287,7 +294,12 @@ fn spin(_ctx: &RuleContext) -> Option<RuleHandleResult> {
         std::hint::spin_loop();
     }
     RETURNED.store(true, Ordering::SeqCst);
-    Some(RuleHandleResult::new(vec![
+    Some(reject())
+}
+
+/// A 480 to the caller and the call's end.
+fn reject() -> RuleHandleResult {
+    RuleHandleResult::new(vec![
         RuleAction::RespondToALeg {
             status: 480,
             reason: "Temporarily Unavailable".into(),
@@ -299,7 +311,7 @@ fn spin(_ctx: &RuleContext) -> Option<RuleHandleResult> {
             cause: call::TerminationCause::Timeout(call::TimeoutKind::Setup),
             by_leg: None,
         },
-    ]))
+    ])
 }
 
 struct Pair {
@@ -366,8 +378,24 @@ impl Pair {
         call_ref
     }
 
+    /// Post an internal event of `topic` to `call_ref` on `w0`.
+    fn post(&self, call_ref: &str, topic: &str) {
+        self.w0.post_event(CallEvent::InternalEvent {
+            call_ref: call_ref.to_string(),
+            topic: topic.into(),
+            outcome: String::new(),
+            payload: serde_json::Value::Null,
+            body: Vec::new(),
+            incarnation: None,
+        });
+    }
+
     async fn until(&self, what: &str, done: impl Fn(&Pair) -> bool) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        self.until_within(Duration::from_secs(3), what, done).await;
+    }
+
+    async fn until_within(&self, within: Duration, what: &str, done: impl Fn(&Pair) -> bool) {
+        let deadline = tokio::time::Instant::now() + within;
         while !done(self) {
             assert!(tokio::time::Instant::now() < deadline, "never: {what}");
             tokio::time::sleep(Duration::from_millis(5)).await;

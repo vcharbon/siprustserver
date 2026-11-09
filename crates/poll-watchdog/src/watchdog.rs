@@ -151,6 +151,23 @@ impl Watchdog {
         self.shared.exit_after_ms.store(ms, Ordering::Relaxed);
     }
 
+    /// The bound [`exit_after`](Self::exit_after) set.
+    pub fn exit_bound(&self) -> Duration {
+        Duration::from_millis(self.shared.exit_after_ms.load(Ordering::Relaxed))
+    }
+
+    /// Whether a host named the calls tasks serve.
+    pub fn names_calls(&self) -> bool {
+        self.shared.call_of.get().is_some()
+    }
+
+    /// Publish `stuck` to [`stuck`](Self::stuck) as the watchdog thread does,
+    /// without the report or the exit.
+    #[cfg(feature = "testkit")]
+    pub fn publish(&self, stuck: Stuck) {
+        self.shared.stuck.send_replace(Some(stuck));
+    }
+
     /// Resolves with the first poll read stuck; never when none is.
     pub async fn stuck(&self) -> Stuck {
         let mut rx = self.shared.stuck.subscribe();

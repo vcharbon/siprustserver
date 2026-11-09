@@ -12,9 +12,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use crossbeam_utils::atomic::AtomicCell;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
@@ -72,7 +71,7 @@ pub struct InFlight {
     bodies: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
     beside: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
     halted: Arc<AtomicBool>,
-    fenced: Arc<AtomicCell<Option<tokio::task::Id>>>,
+    fenced: Arc<OnceLock<tokio::task::Id>>,
 }
 
 impl InFlight {
@@ -104,14 +103,21 @@ impl InFlight {
     }
 
     /// Fence off `task`, a body a poll watchdog read stuck: from now on a
-    /// turn commit running on it lands nothing ([`fenced_here`](Self::fenced_here)).
+    /// turn running on it lands nothing ([`fenced_here`](Self::fenced_here)),
+    /// and its call's worker runs no further item of the call. The first
+    /// fence holds: the process exits on it.
     pub fn fence(&self, task: tokio::task::Id) {
-        self.fenced.store(Some(task));
+        let _ = self.fenced.set(task);
+    }
+
+    /// Whether `task` is the fenced-off body.
+    pub fn is_fenced(&self, task: tokio::task::Id) -> bool {
+        self.fenced.get() == Some(&task)
     }
 
     /// Whether the calling task is the fenced-off body.
     pub fn fenced_here(&self) -> bool {
-        self.fenced.load().is_some_and(|fenced| tokio::task::try_id() == Some(fenced))
+        tokio::task::try_id().is_some_and(|task| self.is_fenced(task))
     }
 
     /// Abort every body in flight and every task beside them, and run no item
@@ -265,6 +271,9 @@ pub(super) struct WorkerCtx<T> {
 /// Run `slot`'s items for `call_ref` in order until a release with nothing
 /// behind it.
 pub(super) async fn run<T: Runnable>(call_ref: String, slot: Arc<Slot<T>>, ctx: WorkerCtx<T>) {
+    // A fenced-off body ended: its call was discharged without it, and no
+    // further item of the call runs here (ADR-0057 §6).
+    let mut fenced = false;
     loop {
         let next = locked(&slot.queue, DISPATCH_QUEUE).pop(&ctx.metrics);
         match next {
@@ -291,14 +300,17 @@ pub(super) async fn run<T: Runnable>(call_ref: String, slot: Arc<Slot<T>>, ctx: 
                 ctx.metrics.bump_creation();
             }
             Some(Popped::Item(_, _)) if ctx.in_flight.halted() => return,
+            Some(Popped::Item(_, _)) if fenced => {}
             Some(Popped::Item(item, class)) => {
                 let due = item.due_by();
                 let held = ctx.permits.acquire_by(class.row().pool, due, &ctx.metrics).await;
                 let held_from = Instant::now();
                 let task = observe::spawn_keeping_node(item.into_body());
+                let body = task.id();
                 ctx.in_flight.insert(&call_ref, task.abort_handle());
                 let outcome = task.await;
                 ctx.in_flight.remove(&call_ref);
+                fenced = ctx.in_flight.is_fenced(body);
                 // The worker survives a failed body and reports it (ADR-0020
                 // X6): a swallowed failure would leak the call.
                 let failure = match outcome {

@@ -50,6 +50,10 @@ async fn worker(
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 9));
     let deps = base.deps(decision, None).await;
     let core = base.spawn(deps, Vec::new(), ConfigCheck::new()).expect("spawned");
+    // The spawn put the core under the process's poll watchdog (ADR-0057 §6).
+    let watchdog = poll_watchdog::Watchdog::process();
+    assert!(watchdog.names_calls(), "a stuck task names its call");
+    assert!(watchdog.exit_bound() > base.env.drain.release_flush * 2 + base.env.drain.cdr_flush);
     (base, core)
 }
 

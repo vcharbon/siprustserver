@@ -499,7 +499,6 @@ dependencies = [
  "call",
  "call-limiter",
  "call-limiter-wire",
- "crossbeam-utils",
  "http-net",
  "http-net-testkit",
  "load-shed",

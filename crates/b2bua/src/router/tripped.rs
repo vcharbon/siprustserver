@@ -33,6 +33,9 @@ pub(super) async fn fail_turn(
     safepoint: Option<Call>,
     now_ms: i64,
 ) {
+    if super::commit::fenced(ctx, call_ref) {
+        return;
+    }
     let cap = tripped.cap;
     ctx.metrics.record_cap_trip(cap);
     let trip = crate::lifecycle::CapTrip { call_ref: call_ref.to_string(), kind: cap.kind() };

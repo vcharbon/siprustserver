@@ -15,6 +15,11 @@ side = "blind"
 [lints]
 workspace = true
 
+[features]
+# `Watchdog::publish`: a host's tests drive its stuck exit without ending
+# the process.
+testkit = []
+
 [dependencies]
 lock-poison = { path = "../lock-poison" }
 metric-catalogue = { path = "../metric-catalogue" }

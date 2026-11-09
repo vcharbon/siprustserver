@@ -179,6 +179,9 @@ pub(super) async fn initial_invite_turn(
     // (ADR-0055 §3).
     let topology = topology_from_cookie(req, &ctx.config.self_ordinal, call_ref);
     let owners = crate::store::envelope::owners(&ctx.relay_owner, topology.as_ref());
+    if super::commit::fenced(ctx, call_ref) {
+        return Turn::Consumed;
+    }
     let backed = ctx.state.admit_backup(call_ref, topology.as_ref());
     ctx.state.create(call.clone(), topology);
     // The caller's 100 follows the call's creation write through the call's
