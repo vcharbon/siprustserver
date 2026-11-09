@@ -523,3 +523,24 @@ async fn a_halt_aborts_the_body_in_flight_and_runs_nothing_after() {
     settle().await;
     assert!(order.lock().unwrap().is_empty(), "nothing runs after the halt");
 }
+
+/// A body fenced off as stuck that goes on and ends leaves its call's worker
+/// running no further item of the call: the call was discharged without it.
+/// The worker still takes the call's release, and another call runs as ever.
+#[tokio::test]
+async fn after_a_fenced_body_ends_its_call_runs_no_further_item() {
+    let d = Dispatcher::new(4, 8, 1024, B2buaMetrics::new());
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let gate = park(&d, "c").await;
+    let in_flight = d.in_flight();
+    let stuck = in_flight.body_of("c").expect("the parked body is in flight");
+    in_flight.fence(stuck);
+    let _ = d.offer("c", record(&order, "behind"), DispatchClass::OtherRequest);
+    gate.notify_one();
+    settle().await;
+    let _ = d.offer("o", record(&order, "other"), DispatchClass::OtherRequest);
+    d.release("c", RemovalClass::Terminated);
+    d.release("o", RemovalClass::Terminated);
+    drained(&d).await;
+    assert_eq!(*order.lock().unwrap(), vec!["other"], "the item behind the fenced body never ran");
+}
