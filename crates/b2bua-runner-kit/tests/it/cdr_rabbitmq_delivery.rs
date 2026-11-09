@@ -345,7 +345,8 @@ async fn the_window_pipelines_confirms_past_one_per_round_trip() {
 }
 
 /// Every record ends in exactly one of written or dropped, whatever the broker
-/// answers and however the connection ends.
+/// answers and however the connection ends. The replies are scripted per
+/// publish, so the broker reading late answers each as scripted.
 #[tokio::test]
 async fn every_record_ends_written_or_dropped_exactly_once() {
     let broker = FakeBroker::start(Reply::Ack).await;
@@ -364,8 +365,8 @@ async fn every_record_ends_written_or_dropped_exactly_once() {
     ];
     let mut n = 0u64;
     for round in 0..5 {
-        for r in script {
-            broker.reply(r);
+        broker.script(script);
+        for _ in script {
             w.write(&call, 2_000).await;
             n += 1;
         }

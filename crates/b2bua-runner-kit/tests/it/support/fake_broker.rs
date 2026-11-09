@@ -1,9 +1,10 @@
 //! A scripted AMQP 0-9-1 broker on a loopback port: enough of the protocol
 //! for one publisher (handshake, channel, `confirm.select`, queue declare,
-//! `basic.publish`), each publish answered as the current [`Reply`] says, and
-//! the fault modes a real broker shows (a stalled handshake, flow control, a
+//! `basic.publish`), each publish answered by the next scripted [`Reply`], else
+//! the current one, and the fault modes a real broker shows (a stalled handshake, flow control, a
 //! socket that stops being read).
 
+use std::collections::VecDeque;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -61,10 +62,23 @@ pub struct Counters {
     pub published: AtomicUsize,
 }
 
+/// The replies publishes take: the script's head while one is queued, the
+/// current reply otherwise.
+struct Replies {
+    current: Reply,
+    script: VecDeque<Reply>,
+}
+
+impl Replies {
+    fn next(&mut self) -> Reply {
+        self.script.pop_front().unwrap_or(self.current)
+    }
+}
+
 pub struct FakeBroker {
     pub addr: SocketAddr,
     pub counters: Arc<Counters>,
-    reply: Arc<Mutex<Reply>>,
+    reply: Arc<Mutex<Replies>>,
     admit: Arc<Mutex<Admit>>,
 }
 
@@ -73,7 +87,7 @@ impl FakeBroker {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let counters = Arc::new(Counters::default());
-        let reply = Arc::new(Mutex::new(reply));
+        let reply = Arc::new(Mutex::new(Replies { current: reply, script: VecDeque::new() }));
         let admit = Arc::new(Mutex::new(Admit::Serve));
         let (c, r, a) = (counters.clone(), reply.clone(), admit.clone());
         tokio::spawn(async move {
@@ -90,8 +104,15 @@ impl FakeBroker {
         format!("amqp://guest:guest@{}/%2f", self.addr)
     }
 
+    /// Sets the reply of every publish no script entry answers.
     pub fn reply(&self, reply: Reply) {
-        *self.reply.lock().unwrap() = reply;
+        self.reply.lock().unwrap().current = reply;
+    }
+
+    /// Queues `replies` for the next publishes the broker reads, one each in
+    /// order, whenever they arrive.
+    pub fn script(&self, replies: impl IntoIterator<Item = Reply>) {
+        self.reply.lock().unwrap().script.extend(replies);
     }
 
     pub fn admit(&self, admit: Admit) {
@@ -127,7 +148,12 @@ async fn drain_until_end(mut rd: tokio::net::tcp::OwnedReadHalf, counters: &Coun
     counters.ended_by_client.fetch_add(1, Ordering::SeqCst);
 }
 
-async fn serve(socket: TcpStream, admit: Admit, counters: Arc<Counters>, reply: Arc<Mutex<Reply>>) {
+async fn serve(
+    socket: TcpStream,
+    admit: Admit,
+    counters: Arc<Counters>,
+    reply: Arc<Mutex<Replies>>,
+) {
     let (mut rd, mut wr) = socket.into_split();
     if admit == Admit::StallHandshake {
         drain_until_end(rd, &counters).await;
@@ -266,7 +292,7 @@ async fn serve(socket: TcpStream, admit: Admit, counters: Arc<Counters>, reply: 
                 let now = if admit == Admit::ServeBlocked {
                     Reply::Silent
                 } else {
-                    *reply.lock().unwrap()
+                    reply.lock().unwrap().next()
                 };
                 match answer(now, ch, tag, &rk, &out) {
                     Flow::Continue => {}
