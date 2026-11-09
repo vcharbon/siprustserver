@@ -266,19 +266,25 @@ The upstream defaults are constants stated with their derivation from the
 scenario catalogue's heaviest shapes; a deployment sets its own from measurement
 (§9).
 
-### 9. Defaults are a measured maximum times ten
+### 9. Defaults are a measured maximum times a factor set by what the cap costs
 
-A cap on what a call holds at once (timers, requests, dialogs, header updates,
-ext bytes) defaults to ten times the largest value measured over the replay
-corpus and a soak: the maximum over valid calls, never the average. The fuel's
-default is checked against the turns that reach it: the initial turn's longest
-failover chain with every service's start, and the teardown of a call at its leg
-cap. A cap on what grows with a call's age (legs, attempts, CDR events) is a base
+Each default is the largest value measured over the replay corpus and a soak
+(the maximum over valid calls, never the average) times a factor that follows
+what reaching the cap costs the node:
+
+| Caps | Factor | Why |
+|---|---|---|
+| the fuel | 5 000 and more | an action costs CPU only, and the CPU has orders of magnitude of room; at least the teardown of a call at its leg cap |
+| attempts | 1 000 | an attempt record holds tens of bytes |
+| legs | 100 | a route count, and the record's heaviest entry: kilobytes each |
+| timers, requests, dialogs, CDR events, header updates, ext bytes | 20 | memory a call holds: past twenty times, a few runaway calls weigh on the node |
+
+A cap on what grows with a call's age (legs, attempts, CDR events) is a base
 plus a rate per hour of the call's granted maximum duration, read from the call,
-each ten times the largest measured, since captures truncate long calls. The
-measurement also checks the sizing formula's memory per call with every call at
-its caps; past that, admission (ADR-0037) refuses new calls before the node grows
-further.
+each its factor times the largest measured, since captures truncate long calls.
+The measurement also states the memory one call holds with every cap reached at
+once; past what the sizing formula counts, admission (ADR-0037) refuses new
+calls before the node grows further.
 
 ## Consequences
 

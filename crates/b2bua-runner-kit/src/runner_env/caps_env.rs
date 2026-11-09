@@ -121,13 +121,13 @@ mod caps_env_tests {
     fn a_zero_cap_and_too_few_attempts_are_refused() {
         let caps = caps_from_lookup(lookup(&[
             ("B2BUA_CAP_TIMERS", "0"),
-            ("B2BUA_CAP_LEGS", "200"),
+            ("B2BUA_CAP_LEGS", "3000"),
             ("B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS", "30000"),
         ]))
         .expect("every value parses");
         let err = check_caps(&caps).unwrap_err();
         assert!(err.contains("B2BUA_CAP_TIMERS=0"), "{err}");
-        assert!(err.contains("B2BUA_CAP_ATTEMPTS=720 < B2BUA_CAP_LEGS=200"), "{err}");
+        assert!(err.contains("B2BUA_CAP_ATTEMPTS=12000 < B2BUA_CAP_LEGS=3000"), "{err}");
         assert!(err.contains("B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS=30000 > 26000"), "{err}");
     }
 
