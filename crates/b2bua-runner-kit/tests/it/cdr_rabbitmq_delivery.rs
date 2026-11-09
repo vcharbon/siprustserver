@@ -345,12 +345,17 @@ async fn the_window_pipelines_confirms_past_one_per_round_trip() {
 }
 
 /// Every record ends in exactly one of written or dropped, whatever the broker
-/// answers and however the connection ends. The replies are scripted per
-/// publish, so the broker reading late answers each as scripted.
+/// answers and however the connection ends. Each publish the broker reads
+/// takes the next scripted reply.
 #[tokio::test]
 async fn every_record_ends_written_or_dropped_exactly_once() {
     let broker = FakeBroker::start(Reply::Ack).await;
-    let quick = CdrDeliveryBounds { backoff_min: 20 * MS, backoff_max: 40 * MS, ..bounds() };
+    let quick = CdrDeliveryBounds {
+        confirm_timeout: 200 * MS,
+        backoff_min: 20 * MS,
+        backoff_max: 40 * MS,
+        ..bounds()
+    };
     let (w, m) = writer_to(broker.url(), quick, 64);
     let call = a_call();
     let script = [
@@ -376,10 +381,12 @@ async fn every_record_ends_written_or_dropped_exactly_once() {
     while m.cdr_written_total() + m.cdr_dropped_total() < n && Instant::now() < give_up {
         tokio::time::sleep(5 * MS).await;
     }
-    tokio::time::sleep(700 * MS).await;
+    tokio::time::sleep(250 * MS).await;
     let (written, dropped) = counts(&m);
     assert_eq!(written + dropped, n, "written {written} + dropped {dropped} != {n} records");
-    assert!(written > 0 && dropped > 0);
+    let read = broker.count(|c| &c.published);
+    assert!(read >= 2, "the broker read {read} publishes: the script's Ack and Nack need two");
+    assert!(written > 0 && dropped > 0, "written {written}, dropped {dropped}");
 }
 
 #[tokio::test]

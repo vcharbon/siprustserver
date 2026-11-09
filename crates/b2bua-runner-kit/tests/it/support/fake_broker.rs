@@ -1,8 +1,8 @@
 //! A scripted AMQP 0-9-1 broker on a loopback port: enough of the protocol
 //! for one publisher (handshake, channel, `confirm.select`, queue declare,
-//! `basic.publish`), each publish answered by the next scripted [`Reply`], else
-//! the current one, and the fault modes a real broker shows (a stalled handshake, flow control, a
-//! socket that stops being read).
+//! `basic.publish`), each publish answered by the next scripted [`Reply`],
+//! else the current one, and the fault modes a real broker shows (a stalled
+//! handshake, flow control, a socket that stops being read).
 
 use std::collections::VecDeque;
 use std::io::Cursor;
