@@ -21,6 +21,12 @@
 //!   drain: the same exit. The flush and the CDR close run on their own tasks
 //!   and their own bounds, and the runtime lets go of a thread the wedged loop
 //!   holds (`runtime`), so the wedge cannot hold the exit (ADR-0033 §4).
+//! - **A poll stuck on the CPU** past `B2BUA_STUCK_POLL_CPU_MS`, before or
+//!   during a drain (ADR-0057 §6): Draining, the call the stuck task serves
+//!   discharged off the wire within the release flush bound, its parties left
+//!   connected, then the same flush and the exit with the watchdog's code.
+//!   The watchdog thread ends the process past these bounds plus one second,
+//!   even when the stuck thread is the runtime's only worker.
 //!
 //! Every exit then closes the CDR sink within `B2BUA_DRAIN_CDR_FLUSH_MS`, which
 //! no signal cuts short: the records of the calls that ended are delivered or
@@ -36,13 +42,15 @@ use std::time::Duration;
 use b2bua::drain::{DrainBounds, DrainExit};
 use b2bua::loops::LoopOut;
 use b2bua::B2buaCore;
+use poll_watchdog::{Stuck, Watchdog};
 use sip_clock::wall::millis_u64;
 
 use crate::RunnerBase;
 
 /// What ended the worker's service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Stop {
+    Stuck(Stuck),
     Superseded,
     Interrupt,
     Terminate,
@@ -50,9 +58,11 @@ pub(crate) enum Stop {
     Loop(LoopOut),
 }
 
-/// The first of the stops to happen. A supersession wins a tie, since its
-/// fence ends the loops; a loop gone wins over the signals.
+/// The first of the stops to happen. A stuck poll wins a tie, since the
+/// process ends whatever else happens; a supersession wins over the rest,
+/// since its fence ends the loops; a loop gone wins over the signals.
 pub(crate) async fn next_stop(
+    stuck: impl Future<Output = Stuck>,
     superseded: impl Future<Output = ()>,
     interrupt: impl Future<Output = ()>,
     terminate: impl Future<Output = ()>,
@@ -61,6 +71,7 @@ pub(crate) async fn next_stop(
 ) -> Stop {
     tokio::select! {
         biased;
+        stuck = stuck => Stop::Stuck(stuck),
         _ = superseded => Stop::Superseded,
         out = loop_out => Stop::Loop(out),
         _ = interrupt => Stop::Interrupt,
@@ -78,28 +89,50 @@ impl RunnerBase {
         };
         let terminate = wait_sigterm(&self.name);
         let exit = self.env.loop_exit;
-        serve_until_stop(core, &self.name, self.env.drain, exit, interrupt, terminate).await
+        let (bounds, watchdog) = (self.env.drain, Watchdog::process());
+        serve_until_stop(core, &self.name, bounds, exit, watchdog, interrupt, terminate).await
     }
 }
 
+/// Point `watchdog` at `core`: a stuck task names the call it serves, and the
+/// process ends past the stuck exit's bounds plus one second.
+pub(crate) fn watchdog_serves(watchdog: &Watchdog, core: &B2buaCore, bounds: DrainBounds) {
+    watchdog.call_of(Arc::new(core.call_of_task()));
+    watchdog.exit_after(stuck_exit_bound(bounds));
+}
+
+/// How long the stuck exit may take before the watchdog ends the process:
+/// the discharge and the limiter release flush, each within the release
+/// flush bound, the CDR close within its own, and one second.
+pub(crate) fn stuck_exit_bound(bounds: DrainBounds) -> Duration {
+    bounds.release_flush * 2 + bounds.cdr_flush + Duration::from_secs(1)
+}
+
 /// Serve `core` until `interrupt`, `terminate`, its own withdrawal, its
-/// supersession, a loop task ending or a loop stalled past `loop_exit`, act on
-/// it under `bounds`, and return the exit code.
+/// supersession, a loop task ending, a loop stalled past `loop_exit` or a
+/// poll `watchdog` reads stuck, act on it under `bounds`, and return the exit
+/// code.
 pub(crate) async fn serve_until_stop(
     core: &B2buaCore,
     name: &str,
     bounds: DrainBounds,
     loop_exit: Duration,
+    watchdog: &Watchdog,
     interrupt: impl Future<Output = ()>,
     terminate: impl Future<Output = ()>,
 ) -> ExitCode {
     let loops = core.loops().clone();
     let gone = loops.wait_out(loop_exit);
-    let stop = next_stop(core.superseded(), interrupt, terminate, core.withdrawn(), gone).await;
+    let stuck = watchdog.stuck();
+    let withdrawn = core.withdrawn();
+    let stop = next_stop(stuck, core.superseded(), interrupt, terminate, withdrawn, gone).await;
     match stop {
+        Stop::Stuck(stuck) => stuck_exit(core, name, bounds, stuck).await,
         Stop::Superseded => superseded(core, name, bounds).await,
         Stop::Interrupt => interrupted(core, name, bounds).await,
-        Stop::Terminate | Stop::Withdrawn => drained(core, name, bounds, loop_exit, stop).await,
+        Stop::Terminate | Stop::Withdrawn => {
+            drained(core, name, bounds, loop_exit, watchdog, stop).await
+        }
         Stop::Loop(out) => loop_gone(core, name, bounds, out).await,
     }
 }
@@ -121,14 +154,16 @@ async fn interrupted(core: &B2buaCore, name: &str, bounds: DrainBounds) -> ExitC
     ExitCode::SUCCESS
 }
 
-/// SIGTERM or the worker's own withdrawal: the D2 drain, the loops still
-/// watched — one ending or staying stalled mid-drain cuts it short and exits
-/// non-zero. The exit reason and the residual are logged, never silently cut.
+/// SIGTERM or the worker's own withdrawal: the D2 drain, the loops and the
+/// polls still watched — a loop ending or staying stalled, or a poll stuck,
+/// mid-drain cuts it short and exits non-zero. The exit reason and the
+/// residual are logged, never silently cut.
 async fn drained(
     core: &B2buaCore,
     name: &str,
     bounds: DrainBounds,
     loop_exit: Duration,
+    watchdog: &Watchdog,
     stop: Stop,
 ) -> ExitCode {
     let cause = match stop {
@@ -147,6 +182,7 @@ async fn drained(
     let out = tokio::select! {
         out = core.drain(bounds) => out,
         out = loops.wait_out(loop_exit) => return loop_gone(core, name, bounds, out).await,
+        stuck = watchdog.stuck() => return stuck_exit(core, name, bounds, stuck).await,
     };
     let (reason, residual) = (out.exit.label(), out.residual);
     match out.exit {
@@ -207,6 +243,34 @@ async fn loop_gone(core: &B2buaCore, name: &str, bounds: DrainBounds, out: LoopO
     ExitCode::FAILURE
 }
 
+/// A poll stuck on the CPU (ADR-0057 §6; the watchdog logged it): Draining,
+/// the call the stuck task serves discharged within the release flush bound,
+/// the queued limiter releases flushed, the CDR sink closed, and the exit with
+/// the watchdog's code.
+async fn stuck_exit(core: &B2buaCore, name: &str, bounds: DrainBounds, stuck: Stuck) -> ExitCode {
+    core.begin_draining();
+    if let Some(call_ref) = &stuck.call_ref {
+        let discharge = core.discharge_stuck(call_ref, bounds.release_flush).await;
+        tracing::error!(
+            service = name,
+            %call_ref,
+            discharge = discharge.label(),
+            "the call a stuck poll holds: discharge ended"
+        );
+    }
+    let flush = core.limiter().flush(bounds.release_flush).await;
+    core.metrics().limiter().count_release_flush(&flush);
+    tracing::error!(
+        service = name,
+        releases_queued = flush.queued,
+        releases_given_up = flush.given_up,
+        exit_code = poll_watchdog::EXIT_CODE,
+        "a poll is stuck on the CPU: exiting"
+    );
+    close_cdr(core, name, bounds.cdr_flush).await;
+    ExitCode::from(poll_watchdog::EXIT_CODE)
+}
+
 /// Close the CDR sink within `bound` and log what the close delivered and
 /// dropped.
 async fn close_cdr(core: &B2buaCore, name: &str, bound: Duration) {
@@ -245,5 +309,7 @@ async fn wait_sigterm(_name: &str) {
     std::future::pending::<()>().await;
 }
 
+#[cfg(test)]
+mod stuck_child_tests;
 #[cfg(test)]
 mod tests;

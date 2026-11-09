@@ -18,6 +18,7 @@ use crate::{
 
 pub(crate) mod caps_env;
 mod event_queue_env;
+mod watchdog_env;
 
 /// The limits a worker reads the wire under ([`RunnerEnv::parser_limits`]), the
 /// exemptions as `SIP_EXEMPTIONS` states them through `lookup`.
@@ -207,6 +208,10 @@ pub struct RunnerEnv {
     /// How long one such turn may run before the worker exits non-zero; the
     /// grammar, its default and the boot check in `liveness_env`.
     pub loop_exit: Duration,
+    /// The CPU one poll may spend on one runtime thread before the worker
+    /// discharges the call it serves and exits (ADR-0057 §6); the grammar in
+    /// `watchdog_env`.
+    pub stuck_poll_cpu: Duration,
     /// The event-queue gate's bounds (ADR-0050 §9), the grammar, defaults
     /// and boot checks in `runner_env::event_queue_env`.
     pub event_queue_gate: b2bua::config::EventQueueGateConfig,
@@ -385,6 +390,7 @@ impl RunnerEnv {
             caps: caps_env::caps_from_lookup(lookup).map_err(invalid)?,
             loop_stall,
             loop_exit: liveness_env::loop_exit_from_lookup(lookup, loop_stall).map_err(invalid)?,
+            stuck_poll_cpu: watchdog_env::stuck_poll_cpu_from_lookup(lookup).map_err(invalid)?,
             event_queue_gate: event_queue_env::event_queue_gate_from_lookup(lookup)
                 .map_err(invalid)?,
             replication: ReplicationSettings::from_lookup(lookup).map_err(invalid)?,

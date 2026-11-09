@@ -88,6 +88,13 @@ impl InFlight {
         }
     }
 
+    /// The call whose in-flight body is the task `task`, if any: the call a
+    /// stuck poll holds (ADR-0057 §6).
+    pub fn call_of(&self, task: tokio::task::Id) -> Option<String> {
+        let bodies = locked(&self.bodies, DISPATCH_BODIES);
+        bodies.iter().find(|(_, body)| body.id() == task).map(|(call_ref, _)| call_ref.clone())
+    }
+
     /// Abort every body in flight and every task beside them, and run no item
     /// after: the node crashed.
     pub fn halt(&self) {

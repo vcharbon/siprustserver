@@ -13,6 +13,7 @@ members = [
     "crates/sip-clock",
     "crates/lock-poison",
     "crates/task-restart",
+    "crates/poll-watchdog",
     "crates/sip-retransmit",
     "crates/load-shed",
     "crates/metric-catalogue",

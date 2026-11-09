@@ -82,6 +82,9 @@ pub struct ProxyConfig {
     pub resolver: ResolverConfig,
     pub prewarm: Vec<ProxyAddr>,
     pub drain_grace: Duration,
+    /// The CPU one poll may spend on one runtime thread before the proxy
+    /// exits (`PROXY_STUCK_POLL_CPU_MS`, ADR-0057 §6).
+    pub stuck_poll_cpu: Duration,
     /// The external face `/readyz` requires usable; `None` checks none.
     pub external_face_check: Option<FaceCheck>,
     /// How often the external face is read (`PROXY_EXT_FACE_CHECK_MS`).
@@ -152,6 +155,8 @@ impl ProxyConfig {
         let resolver = resolver(&mut env);
         let prewarm = prewarm(&mut env);
         let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 8_800, 1, MAX_MS));
+        let stuck_poll_cpu =
+            Duration::from_millis(env.int("PROXY_STUCK_POLL_CPU_MS", 10_000, 100, 600_000));
         let external_face_check = external_face_check(&mut env);
         let external_face_period =
             Duration::from_millis(env.int("PROXY_EXT_FACE_CHECK_MS", 500, 10, 60_000));
@@ -238,6 +243,7 @@ impl ProxyConfig {
             resolver,
             prewarm,
             drain_grace,
+            stuck_poll_cpu,
             external_face_check,
             external_face_period,
         })

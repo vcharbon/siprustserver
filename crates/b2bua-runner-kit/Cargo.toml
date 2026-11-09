@@ -19,6 +19,8 @@ workspace = true
 # The cluster key a worker signs its via-extension with (`B2BUA_CLUSTER_KEY`).
 sip-ids = { path = "../sip-ids" }
 lock-poison = { path = "../lock-poison" }
+# The poll watchdog the runtime is built with (ADR-0057 §6).
+poll-watchdog = { path = "../poll-watchdog" }
 metric-catalogue = { path = "../metric-catalogue" }
 metric-values = { path = "../metric-values" }
 jemalloc-stats = { path = "../jemalloc-stats" }

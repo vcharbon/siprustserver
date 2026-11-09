@@ -191,7 +191,8 @@ hooks, under `tokio_unstable`), through a thread-local: only threads that run
 polls register, so blocking-pool threads, which tokio also starts its workers
 from, never do. Each registered thread keeps a sequence number in its slot, odd
 inside a poll and even between polls, and its thread id. A watchdog std thread
-reads the slots once a second, and each registered thread's CPU time
+reads the slots once a second (twice per threshold below two seconds), and each
+registered thread's CPU time
 (`/proc/self/task/<tid>/schedstat`). A poll is **stuck** when its slot stayed odd
 on the same sequence number while its thread spent more than
 `B2BUA_STUCK_POLL_CPU_MS` (default 10 000) of CPU. A thread that is throttled,
@@ -210,10 +211,12 @@ not re-run by the backup's takeover or by the node's own reclaim after its
 restart. The parties of that one call are left connected. The process then
 leaves through the worker's shutdown path; the watchdog thread arms a hard
 `std::process::exit` past the shutdown's flush bounds plus one second, so the
-exit completes even when the only worker is the stuck one. HA takes the node's
+exit completes even when the only worker is the stuck one. The runtime's workers
+keep no LIFO slot: a task the stuck poll woke last would wait there, unstolen,
+and the discharge's write would never reach the backup. HA takes the node's
 other calls over (ADR-0047). The front proxy's runner carries the same watchdog
-and hard exit; it holds no call, and its traffic moves off it as its route is
-withdrawn (ADR-0056).
+and hard exit (`PROXY_STUCK_POLL_CPU_MS`); it holds no call, and its traffic
+moves off it as its route is withdrawn (ADR-0056).
 
 A spin that escapes §5 thus costs one node per delivery of the input that causes
 it, and the discharge keeps the record from delivering it again; §5 and fuzzing

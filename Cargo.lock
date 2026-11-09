@@ -630,6 +630,7 @@ dependencies = [
  "metric-catalogue",
  "metric-values",
  "observe",
+ "poll-watchdog",
  "probe-http",
  "repl-net",
  "repl-net-testkit",
@@ -3577,6 +3578,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "poll-watchdog"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-utils",
+ "lock-poison",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4777,6 +4788,7 @@ dependencies = [
  "metric-catalogue",
  "metric-values",
  "observe",
+ "poll-watchdog",
  "probe-http",
  "rustls",
  "serde_json",

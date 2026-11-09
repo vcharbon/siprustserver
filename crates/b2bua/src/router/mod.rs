@@ -86,6 +86,7 @@ mod route_payload;
 mod stand_down;
 mod store_fault_gate;
 mod stray_cancel;
+mod stuck;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod topology_cookie;
@@ -109,6 +110,7 @@ use deferred_parks::DeferredParks;
 pub(crate) use outbox::Outboxes;
 use readmission::ReadmissionGate;
 pub(crate) use reclaim::reap_expired_replicas;
+pub(crate) use stuck::discharge_stuck;
 // Consumed by the S7 readiness tests (`repl::s7_tests`) only.
 #[cfg(test)]
 pub(crate) use responses::build_options_health_response;
