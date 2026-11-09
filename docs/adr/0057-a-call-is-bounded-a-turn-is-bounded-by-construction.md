@@ -211,9 +211,14 @@ not re-run by the backup's takeover or by the node's own reclaim after its
 restart. The parties of that one call are left connected. The process then
 leaves through the worker's shutdown path; the watchdog thread arms a hard
 `std::process::exit` past the shutdown's flush bounds plus one second, so the
-exit completes even when the only worker is the stuck one. The runtime's workers
-keep no LIFO slot: a task the stuck poll woke last would wait there, unstolen,
-and the discharge's write would never reach the backup. HA takes the node's
+exit completes even when the only worker is the stuck one. The discharge first
+fences the stuck body off: a turn of it that goes on, slow rather than stuck,
+lands nothing from its next commit step on; a body that is no longer the
+call's in-flight one ended its turn, and its call is left to the takeover. The
+runtime's workers keep no LIFO slot: a task the stuck poll woke last would wait
+there, unstolen, and the discharge's write would never reach the backup. The
+cost is the slot's shortcut: a task one task wakes runs after those already
+queued on that worker. HA takes the node's
 other calls over (ADR-0047). The front proxy's runner carries the same watchdog
 and hard exit (`PROXY_STUCK_POLL_CPU_MS`); it holds no call, and its traffic
 moves off it as its route is withdrawn (ADR-0056).

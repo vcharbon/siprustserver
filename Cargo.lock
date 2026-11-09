@@ -499,6 +499,7 @@ dependencies = [
  "call",
  "call-limiter",
  "call-limiter-wire",
+ "crossbeam-utils",
  "http-net",
  "http-net-testkit",
  "load-shed",
@@ -3583,6 +3584,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-utils",
  "lock-poison",
+ "metric-catalogue",
  "tokio",
  "tracing",
 ]

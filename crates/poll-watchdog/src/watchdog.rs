@@ -60,7 +60,8 @@ struct Shared {
     stuck: watch::Sender<Option<Stuck>>,
 }
 
-/// The slot the calling thread registered with a watchdog.
+/// The slot the calling thread registered with a watchdog, `None` in the
+/// cell when its id did not read.
 struct Registered {
     owner: u64,
     slot: Arc<Slot>,
@@ -73,7 +74,7 @@ impl Drop for Registered {
 }
 
 thread_local! {
-    static REGISTERED: OnceCell<Registered> = const { OnceCell::new() };
+    static REGISTERED: OnceCell<Option<Registered>> = const { OnceCell::new() };
 }
 
 static PROCESS: OnceLock<Watchdog> = OnceLock::new();
@@ -109,8 +110,8 @@ impl Watchdog {
     }
 
     /// Install the poll hooks on `builder`: a thread registers on its first
-    /// poll, so a thread that never polls a task, a blocking-pool thread
-    /// among them, never does.
+    /// task poll, so a thread that never polls a task, as a blocking-pool
+    /// thread running blocking code, never does.
     pub fn install<'b>(&self, builder: &'b mut Builder) -> &'b mut Builder {
         let before = self.clone();
         builder
@@ -170,21 +171,19 @@ impl Watchdog {
     }
 
     /// The calling thread starts a poll of `task`, registering on its first.
+    /// A thread whose locals are being torn down goes unwatched.
     fn entering(&self, task: Id) {
-        REGISTERED.with(|cell| {
-            if cell.get().is_none() {
-                if let Some(slot) = self.register() {
-                    let _ = cell.set(Registered { owner: self.shared.id, slot });
-                }
-            }
-            if let Some(registered) = cell.get().filter(|r| r.owner == self.shared.id) {
+        let _ = REGISTERED.try_with(|cell| {
+            let registered = cell.get_or_init(|| self.register());
+            if let Some(registered) = registered.as_ref().filter(|r| r.owner == self.shared.id) {
                 registered.slot.enter(task);
             }
         });
     }
 
-    /// A slot for the calling thread, `None` when its id cannot be read.
-    fn register(&self) -> Option<Arc<Slot>> {
+    /// A slot for the calling thread; `None`, once per thread, when its id
+    /// cannot be read.
+    fn register(&self) -> Option<Registered> {
         let tid = match schedstat::own_tid() {
             Ok(tid) => tid,
             Err(e) => {
@@ -195,14 +194,14 @@ impl Watchdog {
         let serial = self.shared.next_serial.fetch_add(1, Ordering::Relaxed);
         let slot = Arc::new(Slot::new(serial, tid));
         locked(&self.shared.slots, SLOTS).push(slot.clone());
-        Some(slot)
+        Some(Registered { owner: self.shared.id, slot })
     }
 }
 
 /// The calling thread's poll returned.
 fn leaving() {
-    REGISTERED.with(|cell| {
-        if let Some(registered) = cell.get() {
+    let _ = REGISTERED.try_with(|cell| {
+        if let Some(registered) = cell.get().and_then(Option::as_ref) {
             registered.slot.leave();
         }
     });
@@ -251,9 +250,13 @@ fn read(slot: &Slot) -> Option<Reading> {
     Some(Reading { seq, cpu })
 }
 
-/// Report the stuck poll, publish it, and end the process once the host's
-/// exit bound has passed.
+/// Arm the exit, then report the stuck poll and publish it. The exit runs on
+/// a thread of its own, so nothing the report waits on holds it.
 fn exit_stuck(shared: &Shared, slot: &Slot, seq: u64, spent: Duration) -> ! {
+    let exit_after_ms = shared.exit_after_ms.load(Ordering::Relaxed);
+    let armed = std::thread::Builder::new()
+        .name("poll-watchdog-exit".into())
+        .spawn(move || hard_exit(exit_after_ms));
     let task = slot.task_at(seq);
     let call_ref = task.and_then(|task| shared.call_of.get().and_then(|call_of| call_of(task)));
     let cpu_ms = u64::try_from(spent.as_millis()).unwrap_or(u64::MAX);
@@ -265,9 +268,21 @@ fn exit_stuck(shared: &Shared, slot: &Slot, seq: u64, spent: Duration) -> ! {
         "a poll is stuck on the CPU: exiting"
     );
     shared.stuck.send_replace(Some(Stuck { task, thread: slot.tid, cpu: spent, call_ref }));
-    let exit_after_ms = shared.exit_after_ms.load(Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(exit_after_ms));
-    eprintln!("poll watchdog: the process did not exit within {exit_after_ms} ms of a stuck poll: exiting now");
+    match armed {
+        Ok(exit) => {
+            let _ = exit.join();
+            std::process::exit(i32::from(EXIT_CODE))
+        }
+        Err(_) => hard_exit(exit_after_ms),
+    }
+}
+
+/// End the process with [`EXIT_CODE`] once `after_ms` passed.
+fn hard_exit(after_ms: u64) -> ! {
+    std::thread::sleep(Duration::from_millis(after_ms));
+    eprintln!(
+        "poll watchdog: the process did not exit within {after_ms} ms of a stuck poll: exiting now"
+    );
     std::process::exit(i32::from(EXIT_CODE))
 }
 

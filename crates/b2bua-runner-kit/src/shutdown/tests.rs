@@ -693,42 +693,22 @@ async fn an_interrupt_and_an_ended_loop_exit_once_the_queued_cdrs_are_written() 
     assert_eq!(sink.written.snapshot().len(), 4, "loop ended");
 }
 
-/// The exit of a poll stuck in a call's turn: Draining, the call discharged
-/// with nothing on the wire and its CDR written, the releases flushed, and
-/// the watchdog's code.
+/// The exit of a poll read stuck whose task no longer runs a turn of the
+/// call it named: Draining, nothing discharged, the releases flushed, and the
+/// watchdog's code.
 #[tokio::test(start_paused = true)]
-async fn a_stuck_exit_discharges_the_call_it_holds_and_exits_with_the_watchdog_code() {
-    let cdrs = InMemoryCdrWriter::new();
-    let sink = cdrs.clone();
-    let w = worker_with_cdr(move |_| Arc::new(sink)).await;
+async fn a_stuck_exit_whose_turn_is_over_drains_and_exits_with_the_watchdog_code() {
+    let w = worker().await;
     w.ringing_call().await;
     let calls = (w.core.live_calls_probe())().expect("the live calls read");
     let call_ref = calls.first().expect("the ringing call").call_ref.clone();
-    while w.caller.try_recv().is_some() {}
-    let code = stuck_exit(&w.core, "test", BOUNDS, stuck_on(Some(call_ref.clone()))).await;
+    let task = tokio::spawn(async {});
+    let mut stuck = stuck_on(Some(call_ref));
+    stuck.task = Some(task.id());
+    task.await.expect("the task ran");
+    let code = stuck_exit(&w.core, "test", BOUNDS, stuck).await;
     assert_eq!(code, ExitCode::from(poll_watchdog::EXIT_CODE));
     assert!(w.core.readiness().is_draining(), "the worker steers new calls away");
-    assert_eq!(w.core.active_calls(), 0, "the call is discharged");
-    let written = cdrs.snapshot();
-    assert_eq!(written.len(), 1, "one CDR for the discharged call");
-    assert_eq!(written.first().map(|r| r.call_ref.as_str()), Some(call_ref.as_str()));
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(w.caller.try_recv().is_none(), "the caller is left as she stood: nothing on the wire");
-    assert_eq!(w.flushes(ReleaseFlushOutcome::GivenUp), 0, "the release flush ran to its end");
-}
-
-/// A stuck poll serving no call exits with the watchdog's code all the same.
-#[tokio::test(start_paused = true)]
-async fn a_stuck_exit_serving_no_call_exits_with_the_watchdog_code() {
-    let w = worker().await;
-    w.ringing_call().await;
-    let code = stuck_exit(&w.core, "test", BOUNDS, stuck_on(None)).await;
-    assert_eq!(code, ExitCode::from(poll_watchdog::EXIT_CODE));
-    assert_eq!(w.core.active_calls(), 1, "no call named: none discharged");
-}
-
-#[test]
-fn the_hard_exit_waits_out_every_bound_of_the_stuck_exit_and_one_second() {
-    let bound = stuck_exit_bound(BOUNDS);
-    assert_eq!(bound, BOUNDS.release_flush * 2 + BOUNDS.cdr_flush + Duration::from_secs(1));
+    assert_eq!(w.core.active_calls(), 1, "no stuck turn holds the call: it is left to HA");
+    assert_eq!(w.flushes(ReleaseFlushOutcome::Empty), 1, "the release flush ran");
 }

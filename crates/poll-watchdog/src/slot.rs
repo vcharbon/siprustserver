@@ -29,18 +29,23 @@ impl Slot {
     }
 
     /// The thread starts polling `task`: the task is stored before the
-    /// sequence number turns odd.
+    /// sequence number turns odd. Only the slot's thread writes it.
     pub(crate) fn enter(&self, task: Id) {
         self.task.store(Some(task));
-        self.seq.fetch_add(1, Ordering::Release);
+        self.step();
     }
 
     /// The thread's poll returned: the sequence number turns even. A slot
-    /// already even (the thread got its slot inside a poll) stays as it is.
+    /// already even stays as it is.
     pub(crate) fn leave(&self) {
         if !self.seq.load(Ordering::Relaxed).is_multiple_of(2) {
-            self.seq.fetch_add(1, Ordering::Release);
+            self.step();
         }
+    }
+
+    fn step(&self) {
+        let next = self.seq.load(Ordering::Relaxed).wrapping_add(1);
+        self.seq.store(next, Ordering::Release);
     }
 
     pub(crate) fn seq(&self) -> u64 {

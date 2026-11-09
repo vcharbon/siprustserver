@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 lock-poison = { path = "../lock-poison" }
+metric-catalogue = { path = "../metric-catalogue" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 # The task a thread polls, shared with the watchdog thread without a lock:

@@ -24,13 +24,15 @@ impl RunnerBase {
     ) -> Result<Arc<B2buaCore>, String> {
         check.generic(&self.env, &deps);
         check.into_result()?;
-        let watchdog = poll_watchdog::Watchdog::process();
-        watchdog
-            .start(self.env.stuck_poll_cpu)
-            .map_err(|e| format!("the poll watchdog cannot read a thread's CPU time: {e}"))?;
         let endpoint = Box::new(self.endpoint.clone());
         let core = Arc::new(B2buaCore::spawn_with_services(endpoint, deps, services));
-        crate::shutdown::watchdog_serves(watchdog, &core, self.env.drain);
+        let watchdog = poll_watchdog::Watchdog::process();
+        crate::shutdown::stuck::watch_core(
+            watchdog,
+            &core,
+            self.env.stuck_poll_cpu,
+            self.env.drain,
+        )?;
         Ok(core)
     }
 }

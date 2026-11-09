@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crossbeam_utils::atomic::AtomicCell;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
@@ -64,13 +65,14 @@ pub enum HandlerFailure {
 pub type FailureHook = Arc<dyn Fn(&str, HandlerFailure) + Send + Sync>;
 
 /// The handler body each call has in flight (FIFO: at most one), by call,
-/// the tasks doing call work beside them, and whether the dispatcher halted.
-/// Clone-cheap.
+/// the tasks doing call work beside them, whether the dispatcher halted, and
+/// the body a poll watchdog read stuck. Clone-cheap.
 #[derive(Clone, Default)]
 pub struct InFlight {
     bodies: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
     beside: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
     halted: Arc<AtomicBool>,
+    fenced: Arc<AtomicCell<Option<tokio::task::Id>>>,
 }
 
 impl InFlight {
@@ -89,10 +91,27 @@ impl InFlight {
     }
 
     /// The call whose in-flight body is the task `task`, if any: the call a
-    /// stuck poll holds (ADR-0057 §6).
+    /// stuck poll holds (ADR-0057 §6). One walk of the bodies, at the stuck
+    /// poll only.
     pub fn call_of(&self, task: tokio::task::Id) -> Option<String> {
         let bodies = locked(&self.bodies, DISPATCH_BODIES);
         bodies.iter().find(|(_, body)| body.id() == task).map(|(call_ref, _)| call_ref.clone())
+    }
+
+    /// The task of `call_ref`'s in-flight body, if any.
+    pub fn body_of(&self, call_ref: &str) -> Option<tokio::task::Id> {
+        locked(&self.bodies, DISPATCH_BODIES).get(call_ref).map(tokio::task::AbortHandle::id)
+    }
+
+    /// Fence off `task`, a body a poll watchdog read stuck: from now on a
+    /// turn commit running on it lands nothing ([`fenced_here`](Self::fenced_here)).
+    pub fn fence(&self, task: tokio::task::Id) {
+        self.fenced.store(Some(task));
+    }
+
+    /// Whether the calling task is the fenced-off body.
+    pub fn fenced_here(&self) -> bool {
+        self.fenced.load().is_some_and(|fenced| tokio::task::try_id() == Some(fenced))
     }
 
     /// Abort every body in flight and every task beside them, and run no item
