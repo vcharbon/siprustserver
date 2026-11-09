@@ -180,10 +180,10 @@ fn a_stated_tree_past_the_walk_reads_as_past_every_cap() {
         let mut features = crate::decision::default_platform_features();
         features.stated_headers = Some(root);
         call.features = Some(features);
-        Gauge::of(&call).get(Cap::HeaderUpdates)
+        header_updates(&call, 64)
     };
-    assert_eq!(tree(STATED_SETS_MAX), 0, "the walk's maximum, every set empty");
-    assert_eq!(tree(STATED_SETS_MAX + 1), u64::MAX);
+    assert_eq!(tree(64), 0, "the walk's maximum, every set empty");
+    assert_eq!(tree(65), u64::MAX);
 }
 
 fn reading(scope: &TurnScope, cap: Cap) -> (u64, u64) {

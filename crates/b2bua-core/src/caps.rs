@@ -95,7 +95,7 @@ impl Gauge {
             requests: legs().map(requests_of).sum::<u64>() + len(call.awaited.len()),
             cdr_events: len(call.cdr_events.len()),
             dialogs: legs().map(|l| len(l.dialogs.len())).max().unwrap_or(0),
-            header_updates: header_updates(call),
+            header_updates: header_updates(call, STATED_SETS_MAX),
         }
     }
 
@@ -203,17 +203,17 @@ fn requests_of(leg: &Leg) -> u64 {
 
 /// The header lines the call states, a removal counting one: every stated set
 /// it holds, each leg's own and each one a set reverts to, however nested,
-/// and the policy header overrides.
-fn header_updates(call: &Call) -> u64 {
+/// and the policy header overrides; `u64::MAX`, past every cap, for a tree of
+/// more than `max_sets` sets.
+fn header_updates(call: &Call, max_sets: usize) -> u64 {
     let policy = call.policy_update_headers.as_ref().map_or(0, |h| len(h.len()));
     let Some(root) = call.features.as_ref().and_then(|f| f.stated_headers.as_ref()) else {
         return policy;
     };
     // A worklist over the record's own tree of sets, each visited once, then
-    // the run that finds it empty; a tree past STATED_SETS_MAX reads as past
-    // every cap.
+    // the run that finds it empty.
     let (mut sets, mut total) = (vec![root], policy);
-    let walked = bounds::bounded(STATED_SETS_MAX + 1, || {
+    let walked = bounds::bounded(max_sets.saturating_add(1), || {
         let Some(set) = sets.pop() else {
             return ControlFlow::Break(());
         };
@@ -225,9 +225,10 @@ fn header_updates(call: &Call) -> u64 {
     walked.map_or(u64::MAX, |()| total)
 }
 
-/// The stated sets the header-updates gauge walks at most: far past a call
-/// at its leg cap, each leg holding a set and the one it reverts to.
-const STATED_SETS_MAX: usize = 1 << 16;
+/// The stated sets the header-updates gauge walks at most: past a call at the
+/// default leg cap on the longest grant a decision can state (`i32::MAX` ms,
+/// 597 started hours), each leg holding a set and the one it reverts to.
+const STATED_SETS_MAX: usize = 1 << 20;
 
 /// The lines one stated set states over its three scopes.
 fn stated_lines(set: &StatedHeaders) -> u64 {

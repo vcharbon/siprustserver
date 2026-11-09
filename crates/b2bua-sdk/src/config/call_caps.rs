@@ -225,8 +225,8 @@ impl CallCaps {
         // × 20. A service's state stays near 6 KiB.
         ext_bytes: 122_880,
         // × 500 of about 200 actions, the initial turn's longest failover
-        // chain with every service's start; far above the teardown of a
-        // call at its leg cap, one action per unresolved leg and two more.
+        // chain with every service's start; above the teardown of a call at
+        // its base leg cap, one action per unresolved leg and two more.
         actions_per_turn: 100_000,
         // A held request's answer deadline (Timer F less T2, 28 s) less the
         // 2 s answer margin (ADR-0039): the longest a service's answer can

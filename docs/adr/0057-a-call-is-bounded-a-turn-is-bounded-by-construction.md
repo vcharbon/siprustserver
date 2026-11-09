@@ -260,7 +260,11 @@ settings' documentation, on by default. Startup refuses:
 - `B2BUA_CAP_ATTEMPTS` below `B2BUA_CAP_LEGS × (MAX_LIMITER_FAILOVER + 1)`, since
   every leg may follow refused admissions;
 - `B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS` above the service answer deadline less its
-  margin.
+  margin;
+- `B2BUA_CAP_ACTIONS_PER_TURN` at or below `B2BUA_CAP_LEGS` (its base) plus the
+  teardown's two further actions: a call at its leg cap before any grant could
+  not be torn down. A teardown takes one action per unresolved leg, far fewer
+  than the legs a granted call may have dialled.
 
 The upstream defaults are constants stated with their derivation from the
 scenario catalogue's heaviest shapes; a deployment sets its own from measurement
@@ -274,7 +278,7 @@ what reaching the cap costs the node:
 
 | Caps | Factor | Why |
 |---|---|---|
-| the fuel | 5 000 and more | an action costs CPU only, and the CPU has orders of magnitude of room; at least the teardown of a call at its leg cap |
+| the fuel | 500 and more | an action costs CPU and the turn's transient effects, and the CPU has orders of magnitude of room; above the teardown of a call at its base leg cap |
 | attempts | 1 000 | an attempt record holds tens of bytes |
 | legs | 100 | a route count, and the record's heaviest entry: kilobytes each |
 | timers, requests, dialogs, CDR events, header updates, ext bytes | 20 | memory a call holds: past twenty times, a few runaway calls weigh on the node |

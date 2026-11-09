@@ -45,7 +45,7 @@ pub const CAP_NEAR: Family = Family::counter(
 pub const CAP_PEAK: Family = Family::gauge(
     "b2bua_cap_peak",
     Labels::Product(&[Dim::new("cap", &ALL_CAPS)]),
-    "the largest reading of each per-call cap since the process started (ADR-0057 §9), by cap: what a turn held to its caps left its call holding (a collection's length, a service's encoded ext value in bytes) and the actions it returned. A tripped turn reads nothing, nor does the router's own ending of a call. Each default is the largest reading over valid traffic times a factor set by what the cap costs: 20 for what a call holds at once, 100 for legs, 1000 for attempts, thousands for the fuel; a cap on what grows with a call's age is a base and a rate (b2bua_cap_peak_per_hour)",
+    "the largest reading of each per-call cap since the process started (ADR-0057 §9), by cap: what a turn held to its caps left its call holding (a collection's length, a service's encoded ext value in bytes) and the actions it returned. A tripped turn reads nothing, nor does the router's own ending of a call. Each default is the largest reading over valid traffic times a factor set by what the cap costs: 20 for what a call holds at once, 100 for legs, 1000 for attempts, hundreds and more for the fuel; a cap on what grows with a call's age is a base and a rate (b2bua_cap_peak_per_hour)",
 );
 
 pub const CAP_PEAK_PER_HOUR: Family = Family::gauge(
