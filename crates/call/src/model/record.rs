@@ -222,6 +222,11 @@ pub struct Call {
     /// sending order: what a node serving the call sends again.
     #[serde(default)]
     pub awaited: Vec<super::off_turn::OffTurnRequest>,
+    /// The timers a rule snoozed since each was last armed fresh, one entry
+    /// per key ([`crate::helpers::snooze_timer`] counts, [`crate::helpers::arm_timer`]
+    /// drops): what bounds how long a rule puts a deadline off.
+    #[serde(default)]
+    pub snoozes: Vec<super::timer::Snoozed>,
 }
 
 impl Call {

@@ -62,6 +62,7 @@ mod route_set;
 mod sdp_body_author;
 mod service_http_timeout;
 mod service_timers;
+mod snooze;
 mod stated_route;
 mod stated_text_skips;
 mod subscription_record;

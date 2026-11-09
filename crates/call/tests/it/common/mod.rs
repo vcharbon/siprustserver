@@ -346,6 +346,7 @@ pub fn representative_call() -> Call {
         leg_space: call::LegSpace::Creator,
         answered: Vec::new(),
         awaited: Vec::new(),
+        snoozes: Vec::new(),
     }
 }
 
@@ -731,6 +732,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             leg_space: call::LegSpace::Creator,
             answered: Vec::new(),
             awaited: Vec::new(),
+            snoozes: Vec::new(),
         },
     )
 }

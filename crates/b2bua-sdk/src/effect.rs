@@ -144,6 +144,7 @@ impl RuleAction {
             | RuleAction::Split { .. } => EffectKind::CallLifecycleCommand,
             // Guard timers.
             RuleAction::ScheduleTimer { .. }
+            | RuleAction::SnoozeTimer { .. }
             | RuleAction::CancelTimer { .. }
             | RuleAction::CancelAllTimers => EffectKind::GuardTimer,
             // Cursor moves — the transition itself / machine deactivation.

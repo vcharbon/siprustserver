@@ -55,6 +55,7 @@ pub mod header_update;
 pub mod in_dialog_relay;
 pub mod leg_end;
 pub mod lifecycle;
+mod matcher;
 pub mod model;
 pub mod open_offer;
 pub mod provisional;

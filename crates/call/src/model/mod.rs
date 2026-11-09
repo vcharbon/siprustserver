@@ -122,4 +122,4 @@ pub use services::{
 pub use sm::{MachineId, StateLabel};
 pub use subscription::{NotifyInFlight, Subscription, SubscriptionState};
 pub use termination::{Termination, TerminationCause, TimeoutKind};
-pub use timer::{TimerEntry, TimerKey, TimerScope, TimerScopeKind, TimerType};
+pub use timer::{Snoozed, TimerEntry, TimerKey, TimerScope, TimerScopeKind, TimerType};

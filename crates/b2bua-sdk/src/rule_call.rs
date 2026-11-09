@@ -222,6 +222,18 @@ impl<'a> RuleCall<'a> {
     pub fn reroute_active(&self) -> bool {
         self.0.reroute.is_some()
     }
+    /// Whether a release event's consult (`ReleaseAsyncHttp`) awaits its
+    /// answer: the event fired and its treatment is not decided yet.
+    pub fn release_awaited(&self) -> bool {
+        self.0.awaited.iter().any(|r| matches!(r, call::OffTurnRequest::Release { .. }))
+    }
+
+    // ── timers ───────────────────────────────────────────────────────────
+    /// How many times `key` was snoozed since it was last armed fresh
+    /// (`RuleAction::SnoozeTimer`).
+    pub fn snoozes(&self, key: &call::TimerKey) -> u32 {
+        call::helpers::snoozes(self.0, key)
+    }
 
     // ── bookkeeping (read-only; written via `AddCdrEvent`) ───────────────
     pub fn cdr_events(&self) -> &'a [CdrEvent] {

@@ -297,6 +297,14 @@ _Avoid_: "reason" for the cause (the free-text `reason` is a label the rules
 pass, an RFC 3326 value at most — the cause is typed); "snapshot" for the cut
 (the ring is whole; the cut is a `seq`).
 
+**Snooze** (`RuleAction::Snooze`):
+A timer fire that a rule puts off by one short step instead of acting on, so the
+same timer fires again. The call's timer ledger counts the snoozes of a key, and
+arming the key fresh resets the count, so the rule can bound how long it puts off
+a deadline.
+_Avoid_: "defer" (the ACK an offer is deferred to, the copy that defers to its
+primary); "hold" (call hold, limiter holds); "retry" (a request sent again).
+
 **Admission ladder** (ADR-0037, `b2bua::admission`):
 The ordered **rungs** that may refuse a new INVITE: the ingress brake, the
 transaction layer's backlog, capacity, the shed at the per-call queue cap,

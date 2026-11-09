@@ -150,6 +150,7 @@ pub fn build_initial_call(
         leg_space: call::LegSpace::Creator,
         answered: Vec::new(),
         awaited: Vec::new(),
+        snoozes: Vec::new(),
     }
 }
 

@@ -382,6 +382,15 @@ pub struct TimerEntry {
     pub fire_at: i64,
 }
 
+/// How many times in a row a rule snoozed the timer `key` (CONTEXT.md
+/// "Snooze"): its fires put off by one step each. Arming the key fresh drops
+/// the count.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snoozed {
+    pub key: TimerKey,
+    pub count: u32,
+}
+
 impl TimerEntry {
     /// The timer's type.
     pub fn timer_type(&self) -> &TimerType {

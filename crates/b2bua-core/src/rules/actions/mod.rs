@@ -148,6 +148,13 @@ impl ActionExecutor<'_> {
         crate::timer_arm::arm(call, fx, key, fire_at);
     }
 
+    /// Snooze the per-call timer `key`: re-arm it `delay_ms` out as
+    /// [`Self::schedule`] does, one more snooze counted on the ledger.
+    fn snooze(&mut self, call: &mut Call, fx: &mut HandlerEffects, key: TimerKey, delay_ms: i64) {
+        let fire_at = self.capped_fire_at(call, &key.timer_type, self.now_ms + delay_ms);
+        crate::timer_arm::snooze(call, fx, key, fire_at);
+    }
+
     /// The caller's INVITE, rebuilt from `call`'s record for the step that
     /// reads it ([`crate::rules::relay::caller_invite`]).
     fn caller_invite(&mut self, call: &Call) -> Option<sip_message::SipRequest> {

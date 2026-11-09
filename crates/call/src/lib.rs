@@ -98,8 +98,8 @@ pub use model::{millis_i64, millis_u64, Deadline};
 pub use model::{Attempt, AttemptCause, AttemptId, AttemptOutcome};
 pub use model::{
     CdrEvent, CdrEventType, DecisionKind, DecisionMark, MessageDirection, MessageEntry,
-    MessageRing, Termination, TerminationCause, TimeoutKind, TimerEntry, TimerKey, TimerScope,
-    TimerScopeKind, TimerType,
+    MessageRing, Snoozed, Termination, TerminationCause, TimeoutKind, TimerEntry, TimerKey,
+    TimerScope, TimerScopeKind, TimerType,
 };
 // Per-service slices + state-machine identifiers (ADR-0016).
 pub use model::{

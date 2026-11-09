@@ -159,6 +159,7 @@ impl ActionExecutor<'_> {
             | RuleAction::Split { .. }
             | RuleAction::ResolveCancelledReinvite { .. }
             | RuleAction::ScheduleTimer { .. }
+            | RuleAction::SnoozeTimer { .. }
             | RuleAction::CancelTimer { .. }
             | RuleAction::CancelAllTimers
             | RuleAction::AddCdrEvent { .. }

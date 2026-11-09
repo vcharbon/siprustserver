@@ -207,7 +207,9 @@ fn admitted(
                 RuleAction::SetState { machine: m, .. } | RuleAction::ClearState { machine: m } => {
                     m == machine
                 }
-                RuleAction::ScheduleTimer { key, .. } | RuleAction::CancelTimer { key } => {
+                RuleAction::ScheduleTimer { key, .. }
+                | RuleAction::SnoozeTimer { key, .. }
+                | RuleAction::CancelTimer { key } => {
                     matches!(&key.timer_type, TimerType::Service { service_id, .. } if service_id == machine)
                 }
                 _ => false,
