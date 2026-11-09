@@ -6,4 +6,8 @@ ignore = [
     # paste (unmaintained): a proc-macro of tikv-jemalloc-ctl 0.7 (jemalloc-stats), run at
     # build time only, no code of it in a binary.
     "RUSTSEC-2024-0436",
+    # pin-utils (unmaintained): nix 0.26's default `aio` feature, turned on by webrtc-util,
+    # which only the media crate's webrtc-rs framing witness links; media is test tooling,
+    # in no runner binary.
+    "RUSTSEC-2026-0441",
 ]
