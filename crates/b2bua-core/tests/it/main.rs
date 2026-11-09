@@ -6,6 +6,7 @@
 
 mod caller_tags;
 mod calls;
+mod caps_trip;
 mod ended_dialog_2xx_rules;
 mod evidence_rules;
 mod evidence_triggers;

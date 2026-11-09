@@ -5,6 +5,9 @@ Amended (2026-10-23): X3, the CDR is written at least once with a key and a disc
 marker (ADR-0055 §5).
 Amended (2026-10-31): X3, a copy whose primary reads dead at a verdict releases the
 limiter key and still defers the CDR (ADR-0047 D8).
+Amended (2026-11-08): X6, a turn past a per-call cap is a strike; the failure hook acts
+with the sweep on or off; the verdict turns run with the collection caps off; strikes are
+pruned at the call's release (ADR-0057 §4).
 
 ## Context
 
@@ -182,6 +185,12 @@ the normal funnel. A lockless hard-reap was considered and rejected (the only
 design that acted without the per-call lock). Exactly-once is carried by
 peek-under-lock plus `enforce`'s `became_terminated` edge — never by reaper
 bookkeeping, which is prunable node-local state.
+
+A turn past a per-call cap is reported through the same hook (ADR-0057 §4): it
+strikes a call not struck yet, its `fatal-error` verdict naming the cap; a later
+turn's trip while that verdict is queued strikes nothing, and a verdict turn's
+own trip is the second strike. The hook acts whether or not the sweep runs, and
+a call's strikes are pruned at its release.
 
 ## Decision X7 — the obligation vocabulary: the Call is the ledger
 

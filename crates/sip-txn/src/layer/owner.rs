@@ -22,6 +22,7 @@ use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
 use super::call_txns::CallTxns;
+use super::client_key::ClientMap;
 use super::event_age::EventAges;
 use super::handle::TransactionConfig;
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
@@ -38,7 +39,7 @@ pub(super) struct Owner {
     /// footprint after a drain scale with the live count only through 32-byte
     /// buckets, and a txn's own memory goes back to the allocator when it is
     /// deleted.
-    pub(super) clients: HashMap<String, Box<Transaction>>,
+    pub(super) clients: ClientMap<Box<Transaction>>,
     /// The server transactions, by the §17.2.3 identity of the request that
     /// opened them: top-Via branch, sent-by and method ([`ServerTxnKey`],
     /// looked up by a [`ServerTxnId`] borrowed from the message). Only a
@@ -110,6 +111,8 @@ pub(super) struct Owner {
     pub(super) cancel_bound_ms: u64,
     /// [`TransactionConfig::on_bound`](crate::TransactionConfig).
     pub(super) on_bound: Option<super::config::OnBound>,
+    /// [`TransactionConfig::first_hop`].
+    pub(super) first_hop: Option<SocketAddr>,
     /// The INVITE server transactions holding the answers to a CANCEL, by the
     /// INVITE's Call-ID, From-tag and CSeq number (`layer::held_cancel`).
     pub(super) held_cancels: HashMap<(String, String, u32), ServerTxnKey>,
@@ -150,7 +153,7 @@ impl Owner {
             );
         }
         Self {
-            clients: HashMap::new(),
+            clients: ClientMap::new(),
             servers: HashMap::new(),
             timers: DelayQueue::new(),
             parser,
@@ -174,6 +177,7 @@ impl Owner {
             ack_bound_ms: config.ack_bound_ms,
             cancel_bound_ms: config.cancel_bound_ms,
             on_bound: config.on_bound.clone(),
+            first_hop: config.first_hop,
             held_cancels: HashMap::new(),
             owed_sends: Vec::new(),
             recent_uas_tags: HashMap::new(),
@@ -459,7 +463,7 @@ impl Owner {
     pub(super) fn sweep(&mut self) {
         self.reap_overdue();
         self.forget_expired_uas_tags();
-        shrink_idle(&mut self.clients);
+        self.clients.shrink_idle();
         shrink_idle(&mut self.servers);
         shrink_idle(&mut self.txn_index);
         // `shrink_to_fit` only trims the slab's free tail and never moves an

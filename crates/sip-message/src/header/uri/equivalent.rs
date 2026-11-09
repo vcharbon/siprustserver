@@ -1,6 +1,7 @@
 //! URI equivalence: RFC 3261 §19.1.4 for SIP and SIPS URIs.
 
 use crate::char_class::is_reserved;
+use crate::cursor::items;
 use crate::ip_literal::ip_host;
 use crate::sip_str::SipStr;
 
@@ -63,22 +64,18 @@ type Unit = (u8, bool);
 /// `text` as units: an escape of a byte outside `reserved` is that byte.
 fn units(text: &str) -> Vec<Unit> {
     let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut rest = bytes;
-    while let Some((&b, tail)) = rest.split_first() {
-        if b == b'%' {
-            if let [h, l, more @ ..] = tail {
-                if let Some(byte) = hex_byte(*h, *l) {
-                    out.push((byte, is_reserved(byte)));
-                    rest = more;
-                    continue;
-                }
-            }
-        }
-        out.push((b, false));
-        rest = tail;
-    }
-    out
+    items(bytes, |i| {
+        let b = *bytes.get(i)?;
+        let escaped = match bytes.get(i + 1..i + 3) {
+            Some(&[h, l]) if b == b'%' => hex_byte(h, l),
+            _ => None,
+        };
+        Some(match escaped {
+            Some(byte) => ((byte, is_reserved(byte)), i + 3),
+            None => ((b, false), i + 1),
+        })
+    })
+    .collect()
 }
 
 fn hex_byte(h: u8, l: u8) -> Option<u8> {

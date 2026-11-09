@@ -80,6 +80,7 @@ impl HealthSampler {
         }
         m.set_worker_health_counts(alive, unknown, dead);
         m.set_worker_acceptance_counts(accepting, alive - accepting);
+        m.set_routing_on_answers(self.registry.routes_on_answers());
         match self.discovery.as_ref().map(|watch| watch.watch_health()) {
             // An informer whose task ended watches nothing, as one with no client.
             Some(h) => m.set_discovery(h.client_failing || h.ended, h.broken_since_unix_ms),

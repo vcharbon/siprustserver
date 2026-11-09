@@ -70,7 +70,6 @@ fn the_stacks_reject_falls_back_to_the_default_phrase() {
         None,
         &[],
         &sip_message::generators::CapabilitySet::default(),
-        &mut scope(3).ids,
         0,
         call::TerminationCause::Admission,
     );
@@ -108,5 +107,28 @@ fn a_service_reported_skip_is_counted() {
         &test_call(),
         &[RuleAction::ReportStatedTextSkipped { detail: "INFO part line".into() }],
     );
+    assert_eq!(skips(&result), 1);
+}
+
+/// A re-INVITE whose stamped lines state a single-valued header twice still
+/// leaves, without that header, the skip reported (ADR-0053 §7).
+#[test]
+fn a_reinvite_stamping_a_single_valued_header_twice_leaves_without_it() {
+    let result = execute_on(
+        &bridged(),
+        &[RuleAction::SendReinvite {
+            leg_id: "b-1".into(),
+            body: None,
+            add_headers: vec![
+                sip_message::draft::Entry::raw(HeaderName::Subject, SipStr::owned("one")),
+                sip_message::draft::Entry::raw(HeaderName::from("s"), SipStr::owned("two")),
+                sip_message::draft::Entry::raw(HeaderName::from("X-Kept"), SipStr::owned("fine")),
+            ],
+        }],
+    );
+    let reinvite = sent_request(&result, "b-1");
+    assert_eq!(reinvite.method(), "INVITE");
+    assert!(values(&reinvite, "Subject").is_empty());
+    assert_eq!(values(&reinvite, "X-Kept"), ["fine"]);
     assert_eq!(skips(&result), 1);
 }

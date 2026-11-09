@@ -97,6 +97,9 @@ impl ActionExecutor<'_> {
             let (body, content_type, author) = match self.answer_owed(call, target_leg, req) {
                 Some((answer, true)) => (answer, Some(relay::sdp()), caller),
                 Some((answer, false)) => (answer, Some(relay::sdp()), relay::Author::Stack),
+                None if self.answers_her_face_only(call, target_leg, req) => {
+                    (Vec::new(), None, caller)
+                }
                 None => (req.body().to_vec(), content_type, caller),
             };
             self.ack_leg(
@@ -183,6 +186,9 @@ impl ActionExecutor<'_> {
             None
         };
         let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
+        let target_face = capabilities::Face::of_leg(target_leg);
+        let (extra_headers, advertised) =
+            relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
         let body = relay::continue_on_leg(
             call,
             target_leg,
@@ -190,7 +196,7 @@ impl ActionExecutor<'_> {
             relay::Author::Leg(ctx.source_leg_id),
             relay::Carried::of(req.method(), None, true),
             req.body().to_vec(),
-            content_type.as_ref(),
+            relay::description_in(req.body(), content_type.as_ref(), &extra_headers),
             self.config.sdp_form.as_ref(),
         );
         let branch = self.turn.ids.new_branch();
@@ -200,9 +206,6 @@ impl ActionExecutor<'_> {
             return;
         };
         let gen_dialog = relay::to_gen_dialog(target, &target_dialog);
-        let target_face = capabilities::Face::of_leg(target_leg);
-        let (extra_headers, advertised) =
-            relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
@@ -211,6 +214,11 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method: req.method().as_str(),
                     uri: &gen_dialog.remote_target,
+                    route: &if *req.method() == Method::Invite {
+                        relay::route_past_front(self.config, &gen_dialog.route_set)
+                    } else {
+                        String::new()
+                    },
                     offer: *req.method() == Method::Invite && relay::carries_sdp(req),
                 }),
                 branch.clone(),
@@ -250,6 +258,12 @@ impl ActionExecutor<'_> {
             res.request,
             dest,
         );
+        // A BYE is answered here already: its copy fails on its own timeout.
+        if method != InDialogMethod::Bye && super::unrelayed::too_large(&out_req, &dest) {
+            *call = unrelayed;
+            self.refuse_unrelayed(call, fx, ctx, Unrelayed::TooLarge);
+            return;
+        }
         let kind =
             if method == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
 
@@ -268,7 +282,7 @@ impl ActionExecutor<'_> {
                 source_call_id: req.call_id().as_str().to_string(),
                 source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
                 source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
-                offered_100rel: req.offers_100rel(),
+                offered_100rel: relay::offers_100rel(req),
                 offered: relay::carries_sdp(req),
                 source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
                 relayed_by: self.owners.this.clone(),

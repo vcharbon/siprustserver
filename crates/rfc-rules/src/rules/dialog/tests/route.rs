@@ -209,3 +209,28 @@ fn an_empty_route_set_and_the_hop_by_hop_methods_open_no_occasion() {
     ];
     assert!(eval(&MidDialogRoute, &acked).is_empty());
 }
+
+/// A route's authority and its `maddr` are two facts, and each is owed: a
+/// reproduced `maddr` on another authority is another entry, and so is another
+/// `maddr` on the same authority.
+#[test]
+fn a_route_entry_differing_in_its_authority_or_maddr_is_violated() {
+    let judged = |sent: &str| {
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(
+                2_000,
+                200,
+                1,
+                "INVITE",
+                "z9hG4bK-i",
+                "Record-Route: <sip:a.example;maddr=192.0.2.9;lr>\r\n",
+            ),
+            req(3_000, ALICE, BOB, "BYE", B_URI, "z9hG4bK-b", 2, A_URI, B_URI, Some("bt"), sent),
+        ];
+        hits(&MidDialogRoute, &msgs).len()
+    };
+    assert_eq!(judged("Route: <sip:a.example;maddr=192.0.2.9;lr>\r\n"), 0);
+    assert_eq!(judged("Route: <sip:b.example;maddr=192.0.2.9;lr>\r\n"), 1, "another authority");
+    assert_eq!(judged("Route: <sip:a.example;maddr=192.0.2.8;lr>\r\n"), 1, "another maddr");
+}

@@ -55,6 +55,7 @@ impl CallState {
             inner.restate_uncounted(false, call.limiter.runs_uncounted());
             self.publish_uncounted(&inner);
             inner.calls.insert(call_ref.clone(), Arc::new(call));
+            inner.keep_lock(&call_ref);
         }
         if origin == MaterialiseOrigin::Reclaim {
             if let (Some(repl), Some(backup)) = (self.repl_store(), backup) {

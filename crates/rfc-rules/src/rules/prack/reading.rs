@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use sip_message::header::{HeaderValue, RAck, Supported};
 use sip_message::{sniff, SipStr};
 
+use crate::rules::branch::BranchName;
+
 use crate::wire::{Kind, Msg};
 
 use super::records::{
@@ -113,8 +115,9 @@ impl<'a> Reading<'a> {
         let head = msg.head.as_deref();
         let call = msg.call_id.as_str();
         if let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) {
-            self.served.entry(TxnKey { uas: msg.dst.as_str(), call_id: call, branch }).or_insert(
-                Served {
+            self.served
+                .entry(TxnKey { uas: msg.dst.as_str(), call_id: call, branch: BranchName(branch) })
+                .or_insert(Served {
                     msg: mi,
                     ts_us: msg.at_us,
                     method: method.as_str(),
@@ -127,8 +130,7 @@ impl<'a> Reading<'a> {
                         cseq,
                         on_invite: method == "INVITE",
                     }),
-                },
-            );
+                });
         }
         if method.eq_ignore_ascii_case("PRACK") {
             if let Some((rseq, cseq)) = head.and_then(rack_of) {
@@ -250,7 +252,11 @@ impl<'a> Reading<'a> {
                 let status = *status;
                 if let Some(branch) = branch {
                     self.answers
-                        .entry(TxnKey { uas: msg.src.as_str(), call_id: call, branch })
+                        .entry(TxnKey {
+                            uas: msg.src.as_str(),
+                            call_id: call,
+                            branch: BranchName(branch),
+                        })
                         .or_default()
                         .push(Answer {
                             msg: mi,

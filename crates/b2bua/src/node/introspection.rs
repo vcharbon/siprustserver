@@ -7,6 +7,11 @@ use std::sync::Arc;
 use super::B2buaCore;
 
 impl B2buaCore {
+    /// The process's one parser: what a hook on this worker's bind reads with.
+    pub fn parser(&self) -> sip_message::CustomParser {
+        self.ctx.config.parser()
+    }
+
     /// The router context, for the in-crate unit tests that drive one router
     /// seam directly (`router::materialise`) over a fully wired core.
     #[cfg(test)]
@@ -54,12 +59,16 @@ impl B2buaCore {
         self.ctx.state.active_count()
     }
 
-    /// [`active_calls`](Self::active_calls) as an OWNED probe — the live-call
-    /// input of [`drain_probe`](Self::drain_probe), handed out on its own for a
-    /// caller that watches quiescence alone. Read-only.
+    /// [`active_calls`](Self::active_calls) and the new calls admitted and not
+    /// born yet, whose callers are owed a final, as an OWNED probe: the input
+    /// of [`drain_probe`](Self::drain_probe) that says the node holds nothing,
+    /// handed out on its own for a caller that watches quiescence alone.
+    /// Read-only.
     pub fn active_calls_probe(&self) -> Arc<dyn Fn() -> usize + Send + Sync> {
         let ctx = self.ctx.clone();
-        Arc::new(move || ctx.state.active_count())
+        Arc::new(move || {
+            ctx.state.active_count() + usize::try_from(ctx.unborn.count()).unwrap_or(usize::MAX)
+        })
     }
 
     /// Does this worker currently **serve** `call_ref` (hold it live in its call
@@ -153,8 +162,10 @@ impl B2buaCore {
     /// materialised") that the bulk-`ReclaimAll` race only produces under
     /// timing: the failover tests use it to pin the on-demand reclaim read-path.
     /// Test/observability only — production teardown goes through the router's
-    /// `release_call`.
+    /// `release_call`. Taken under the call's lock when free, so the lock entry
+    /// goes with the guard; a holder's guard takes it otherwise.
     pub fn drop_live_copy(&self, call_ref: &str) -> bool {
+        let _guard = self.ctx.state.try_lock(call_ref);
         self.ctx.state.drop_local(call_ref)
     }
 }

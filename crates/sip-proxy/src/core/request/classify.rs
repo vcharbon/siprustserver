@@ -9,18 +9,22 @@
 //!
 //! - **Internal face**, and the one face of a single-face proxy: the request
 //!   is worker-outbound when its direction entry carries `;outbound`, when its
-//!   source is a registry worker, or when its top Via sent-by is one. A loose
-//!   Route past the proxy's own is its next hop.
+//!   source is a registry worker, or when its top Via sent-by is one, unless two
+//!   or more whole pairs lead its Route and the last one's cookie verifies for
+//!   the call: that request re-enters through a later pass. A loose Route past
+//!   the proxy's own is its next hop.
 //! - **External face**: none of these claims holds. Each one is ignored and
 //!   counted, every Route entry past the proxy's own is removed and counted,
 //!   and the request is routed as an inbound one, by its cookie or by a fresh
 //!   selection.
+//!
+//! On either face, a Request-URI whose `maddr` names this proxy loses it.
 
 use std::net::SocketAddr;
 
 use sip_message::draft::RequestDraft;
 use sip_message::header::{RouteEntry, Uri};
-use sip_message::{HeaderName, SipRequest};
+use sip_message::{HeaderName, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::headers::{cookie_params, route_target};
@@ -42,6 +46,11 @@ pub(super) struct Classified {
     pub(super) via_worker: Option<ProxyAddr>,
     /// The loose Route past the proxy's own, internal face only.
     pub(super) loose_route_next_hop: Option<ProxyAddr>,
+    /// The Request-URI as forwarded, when its `maddr` named this proxy.
+    pub(super) request_uri_past_own_maddr: Option<Uri>,
+    /// The request re-enters through a later pass, internal face only: its
+    /// target is the worker a verified cookie names.
+    pub(super) reentry: bool,
 }
 
 impl ProxyCore {
@@ -53,20 +62,40 @@ impl ProxyCore {
         self.registry.lookup_by_address(&addr).is_some().then_some(addr)
     }
 
-    /// Whether a Route / Record-Route URI names this proxy, on either face.
-    fn is_self_route(&self, uri: &Uri) -> bool {
-        let (host, port) = uri.host_port();
-        self.is_self_addr(host, port)
+    /// Whether `req`, received from `src`, comes from a registry worker: by its
+    /// source, or by its top Via where that source is translated.
+    pub(super) fn sent_by_a_worker(&self, req: &SipRequest, src: SocketAddr) -> bool {
+        self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()
+            || self.worker_via_sent_by(req).is_some()
     }
 
-    /// Pop the proxy's own Route entries off `draft` and classify `req`,
-    /// received from `src` on `face`. `None`: the draft refused the pop.
+    /// Whether a Route / Record-Route URI names this proxy, on either face, by
+    /// its authority or by its next hop: forwarding an entry whose `maddr`
+    /// names this proxy would loop on Max-Forwards.
+    fn is_self_route(&self, uri: &Uri) -> bool {
+        let (host, port) = uri.host_port();
+        let (target, target_port) = uri.next_hop();
+        self.is_self_addr(host, port) || self.is_self_addr(target, target_port)
+    }
+
+    /// `uri`, a Request-URI, without its `maddr` when that names this proxy at
+    /// the URI's port (RFC 3261 §16.4); `None` when it does not.
+    fn past_own_maddr(&self, uri: &Uri) -> Option<Uri> {
+        uri.maddr()?;
+        let (target, port) = uri.next_hop();
+        self.is_self_addr(target, port).then(|| uri.clone().without_own_maddr())
+    }
+
+    /// Pop the proxy's own Route entries off `draft` and classify `req`, the
+    /// request `msg` holds, received from `src` on `face`. `None`: the draft
+    /// refused the pop.
     ///
     /// A route set the strict reader rejects is one this hop cannot act on:
     /// on the internal face it rides through as it arrived, on the external
     /// face it is removed.
     pub(super) fn classify(
         &self,
+        msg: &SipMessage,
         req: &SipRequest,
         src: SocketAddr,
         face: Face,
@@ -93,10 +122,12 @@ impl ProxyCore {
                 worker_outbound = true;
             }
         }
-        for _ in 0..self_routes {
-            // §7.3.1: a UA may fold its whole route set into one comma-combined
-            // header, so the pop drops one ENTRY, never the line.
-            draft = draft.pop_top::<RouteEntry>().ok()?;
+        // §7.3.1: a UA may fold its whole route set into one comma-combined
+        // header, so the pop drops ENTRIES, never the line.
+        draft = draft.pop_top_values::<RouteEntry>(self_routes).ok()?;
+        let request_uri_past_own_maddr = self.past_own_maddr(req.request_uri());
+        if let Some(uri) = &request_uri_past_own_maddr {
+            draft = draft.with_uri(uri.clone());
         }
 
         if external {
@@ -117,6 +148,8 @@ impl ProxyCore {
                 worker_outbound: false,
                 via_worker: None,
                 loose_route_next_hop: None,
+                request_uri_past_own_maddr,
+                reentry: false,
             };
             return Some((draft, classified));
         }
@@ -131,10 +164,14 @@ impl ProxyCore {
         } else {
             None
         };
-        // A run of two or more whole pairs whose last pair decodes is a request
-        // re-entering through a later pass: its worker Via is the earlier
-        // pass's origin and does not make it worker-outbound.
-        let spiral_reentry = self_routes > 2 && self_routes % 2 == 0 && cookie.is_some();
+        // A run of two or more whole pairs whose last pair carries a cookie that
+        // verifies for this call is a request re-entering through a later pass:
+        // its worker Via is the earlier pass's origin and does not make it
+        // worker-outbound. Entries naming this proxy prove no pass: a peer's
+        // Record-Route may state them.
+        let spiral_reentry = self_routes > 2
+            && self_routes % 2 == 0
+            && cookie.as_ref().is_some_and(|c| self.strategy.verified_cookie(c, msg).is_some());
         if !worker_outbound
             && !spiral_reentry
             && (self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()
@@ -154,6 +191,8 @@ impl ProxyCore {
             worker_outbound,
             via_worker,
             loose_route_next_hop,
+            request_uri_past_own_maddr,
+            reentry: spiral_reentry,
         };
         Some((draft, classified))
     }

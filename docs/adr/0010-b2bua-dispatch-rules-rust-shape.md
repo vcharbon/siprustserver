@@ -40,7 +40,13 @@ bound. Rationale: a slow handler on one call must not block other calls — the
 single actor (the txn-layer choice) would stall every call, which is exactly
 what `PerCallDispatcher` exists to prevent. `CallState` adds a per-`callRef`
 lock as a second serialization layer (uncontended under the dispatcher; it
-guards out-of-band callers like a future orphan sweep).
+orders the out-of-band callers, the departure sweep and the reclaim and reap
+passes, against the call's turns). One mutex stands per `callRef` while any
+task holds or waits on it; the last guard of a call no longer resident removes
+its entry, so a release under the lock is never crossed by a second mutex. A
+pass running on the router loop or on the reaper's task never waits on the
+lock: it takes it only when free and otherwise queues the step as a turn of the
+call's own queue.
 
 Each event class's room, lifetime-cap counting and owed answer: one row of the dispatch table, [`dispatch/class.rs`](../../crates/b2bua/src/dispatch/class.rs).
 

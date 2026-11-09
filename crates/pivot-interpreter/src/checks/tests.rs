@@ -306,7 +306,7 @@ fn the_uri_selectors_read_off_a_parsed_message() {
         Inbound::of(&CustomParser::new().parse(raw.as_bytes()).expect("the message parses"))
     };
     let request = parse(
-        "INVITE sip:+15550100@192.0.2.7:5060;user=phone SIP/2.0\r\n\
+        "INVITE sip:+15550100@192.0.2.7:5060;user=phone SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-1\r\n\
          From: \"Alice\" <sip:+15550199@example.com;user=phone>;tag=a1\r\n\
          To: <sip:+15550100@example.net;user=phone>\r\n\

@@ -67,7 +67,7 @@ pub struct Args {
     #[arg(long)]
     pub endpoint_config: Option<PathBuf>,
     /// Shorthand: the SUT address the INVITE routes through (front-proxy VIP).
-    #[arg(long, default_value = "172.20.255.250:5060")]
+    #[arg(long, default_value = "192.168.60.250:5060")]
     pub target: SocketAddr,
     /// Shorthand: local host IP to bind the mux endpoints on (reachable from the SUT).
     #[arg(long, default_value = "127.0.0.1")]
@@ -125,6 +125,10 @@ pub struct Args {
     /// Shorthand: per-recv wall-clock timeout (ms).
     #[arg(long, default_value_t = 5000)]
     pub recv_timeout_ms: u64,
+    /// How long a call waits on one step, the caller's wait for its INVITE's
+    /// final among them (ms). Unset: each plan's ceiling, else 32 s.
+    #[arg(long)]
+    pub final_wait_ms: Option<u64>,
     /// Max stored callflow samples per (scenario, result-class); the first N
     /// calls of each scenario record their flow.
     #[arg(long, default_value_t = 10)]

@@ -1,10 +1,11 @@
-//! Request path, RFC 3261 §16: preflight (Max-Forwards 483, Proxy-Require
-//! 420), the non-2xx ACK hop decision (relay on the INVITE's hop, or absorb the
+//! Request path, RFC 3261 §16: preflight (Max-Forwards 483, a request from this
+//! proxy's own address 482, Proxy-Require 420), the non-2xx ACK hop decision (relay on the INVITE's hop, or absorb the
 //! ACK to a self-generated final), top-Route strip + direction under the
 //! ingress face's trust (ADR-0048), self-gate (ELU/CPS) admission, target
 //! selection (CANCEL LRU → loose-route next hop → worker-outbound R-URI →
 //! cookie decode → select), received/rport stamping, Record-Route insertion,
-//! Via push, retransmission memos, serialize + forward.
+//! Via push, retransmission memos, serialize + forward, and a 513 for a forward
+//! the socket refused as too long.
 //!
 //! The routing ladder lives in [`route`], Route preprocessing in [`classify`],
 //! the gate in [`admission`], the target's steps in [`target`], the
@@ -15,6 +16,7 @@
 
 mod admission;
 mod classify;
+mod first_ingress;
 mod parse_refusal;
 mod record_route;
 mod reply;
@@ -34,6 +36,10 @@ mod memo_bound_tests;
 #[cfg(test)]
 mod own_final_ack_tests;
 #[cfg(test)]
+mod own_final_seam_tests;
+#[cfg(test)]
+mod own_source_tests;
+#[cfg(test)]
 mod reject_metric_tests;
 #[cfg(test)]
 mod retransmission_tests;
@@ -41,6 +47,8 @@ mod retransmission_tests;
 mod rfc_small_fix_tests;
 #[cfg(test)]
 mod stateless_branch_tests;
+#[cfg(test)]
+mod too_large_tests;
 #[cfg(test)]
 mod trace_request_tests;
 #[cfg(test)]
@@ -55,6 +63,14 @@ use crate::observability::metrics::{Direction, Face, MessageResult, RoutingDecis
 use crate::trace::emit;
 
 use super::ProxyCore;
+
+/// How a request reached this proxy: its datagram's source and the face it
+/// arrived on. An own final to it leaves on that face.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::core) struct Arrival {
+    pub(in crate::core) src: SocketAddr,
+    pub(in crate::core) face: Face,
+}
 
 /// Outcome of routing a request — what to meter after the work is done.
 pub(super) struct RouteOutcome {
@@ -79,6 +95,10 @@ impl ProxyCore {
     pub(super) async fn handle_request(&self, msg: SipMessage, src: SocketAddr, face: Face) {
         let start_ms = self.now_ms();
         let SipMessage::Request(req) = &msg else { return };
+        if let Some(refusal) = self.first_ingress_refusal(req, src, face) {
+            self.refuse_unparsed(&refusal, src, face).await;
+            return;
+        }
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         // A known method is its upper-case spelling (RFC 3261 §7.1); any
         // other token is an extension method on its own row under the
@@ -124,11 +144,12 @@ impl ProxyCore {
         self.metrics.record_routing_decision(outcome.decision);
     }
 
-    /// A test's `handle_request`: the request arrives on the face of its
-    /// source's plane, as a deployed network delivers it.
+    /// A test's `handle_request` on a single-face proxy, where every request
+    /// arrives on the internal face. A dual-face test names the face itself.
     #[cfg(test)]
     pub(in crate::core) async fn handle_request_from(&self, msg: SipMessage, src: SocketAddr) {
-        self.handle_request(msg, src, self.egress_face(src)).await
+        assert!(self.external.is_none(), "a dual-face test names the request's face");
+        self.handle_request(msg, src, Face::Internal).await
     }
 
     /// A test's `route_request`, as [`Self::handle_request_from`].
@@ -138,6 +159,7 @@ impl ProxyCore {
         msg: &SipMessage,
         src: SocketAddr,
     ) -> RouteOutcome {
-        self.route_request(msg, src, self.egress_face(src)).await
+        assert!(self.external.is_none(), "a dual-face test names the request's face");
+        self.route_request(msg, src, Face::Internal).await
     }
 }

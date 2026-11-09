@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use sip_proxy::registry::WorkerHealth;
+use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use sip_proxy::ProxyAddr;
 use topology::Peer;
 
@@ -60,9 +60,11 @@ impl FailoverHarness {
 
     /// **Flap `ordinal` not ready at the same address** — the restarted-in-place
     /// shape (ADR-0031 case 4): a readiness probe fails, the endpoint reads
-    /// `ready=false, terminating=false` and stays in the slice. The proxy departs
-    /// the ordinal and tombstones its address; every other live worker keeps
-    /// pulling it (D1). The process is untouched.
+    /// `ready=false, terminating=false` and stays in the slice. While another
+    /// member reads ready the proxy departs the ordinal and tombstones its address,
+    /// and tells a worker it read `Alive` dead (ADR-0050 §3); with none ready it
+    /// routes on the probe's answers (§11). Every other live worker keeps pulling
+    /// it (D1). The process is untouched.
     pub fn flap_not_ready(&mut self, ordinal: &str) {
         self.mark(
             ordinal,
@@ -76,9 +78,9 @@ impl FailoverHarness {
 
     /// **Flap `ordinal` ready again** — the counterpart of
     /// [`flap_not_ready`](Self::flap_not_ready): the endpoint reads `ready=true`
-    /// at the same address. The proxy publishes it as a fresh `Unknown` endpoint
-    /// (nothing has probed it yet); every other live worker's link is a plain
-    /// active peer again, with no puller respawn (ADR-0031 D1).
+    /// at the same address. The proxy routes it on the health it holds (`Unknown`
+    /// when no probe answered since its flip); every other live worker's link is a
+    /// plain active peer again, with no puller respawn (ADR-0031 D1).
     pub fn flap_ready(&mut self, ordinal: &str) {
         self.mark(ordinal, None, "flap_ready", "endpoint ready again at the same address");
         self.views.record("orchestrator", ordinal, Belief::Admitted, "flap_ready");
@@ -86,14 +88,14 @@ impl FailoverHarness {
     }
 
     /// Drive one endpoint-condition change into the proxy's registry and every
-    /// live peer's membership, recording what each observer is expected to hold:
-    /// the proxy departs a not-ready member and publishes a ready one `Unknown`;
-    /// a peer keeps a not-ready member and treats a ready one as plain active.
+    /// live peer's membership, recording what each observer holds: the proxy,
+    /// the ordinal if it still routes it, on its health; a peer keeps a not-ready
+    /// member and treats a ready one as plain active.
     fn set_member_ready(&mut self, ordinal: &str, ready: bool, terminating: bool, signal: &str) {
         if let Some(registry) = self.views.proxy_registry() {
-            registry.set_ready(ordinal, ready);
+            registry.set_conditions(ordinal, ready, terminating);
             let belief =
-                if ready { Belief::Registered(WorkerHealth::Unknown) } else { Belief::Absent };
+                registry.resolve(ordinal).map_or(Belief::Absent, |w| Belief::Registered(w.health));
             self.views.record("proxy", ordinal, belief, signal);
         }
         let belief = if ready { Belief::PeerActive } else { Belief::PeerKept };
@@ -103,9 +105,17 @@ impl FailoverHarness {
         }
         // The informer shows a worker its own endpoint too: a condition flip
         // reaches the member itself, which is how it observes its own
-        // withdrawal (ADR-0031 D6).
+        // withdrawal (ADR-0031 D6). An incarnation restarted while its endpoint
+        // read not ready still lists its predecessor: the flip lists the
+        // endpoint under the newest incarnation, as the slice binds it.
+        let member = Peer { ready, terminating, ..self.bound_member(ordinal) };
         for (_, membership) in self.views.live_incarnations_of(ordinal) {
-            membership.set_conditions(ordinal, ready, terminating);
+            match membership.resolve(ordinal) {
+                Some(listed) if listed.identity == member.identity => {
+                    membership.set_conditions(ordinal, ready, terminating)
+                }
+                _ => membership.add(member.clone()),
+            }
         }
     }
 

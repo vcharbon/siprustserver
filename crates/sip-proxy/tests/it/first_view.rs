@@ -13,6 +13,7 @@ use scenario_harness::{Harness, ServerTxn};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts, InDialogMethod};
 use sip_message::parser::custom::CustomParser;
+use sip_message::received::observed_source;
 use sip_message::types::SipHeader;
 use sip_message::worker_report::{incarnation_value, Readiness, X_INCARNATION, X_READINESS};
 use sip_message::{serialize, SipMessage, SipParser};
@@ -74,11 +75,17 @@ async fn spawn_proxy(
     ));
     let (ep, sock) = h.bind_sut(lane, PROXY).await;
     let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
-        .clock(Clock::test_at(0))
-        .metrics(metrics.clone())
-        .first_view(view)
-        .build(ep);
+    let core = ProxyCoreBuilder::new(
+        ProxyAddr::from(sock),
+        strategy,
+        registry,
+        id_gen,
+        sip_message::CustomParser::new(),
+    )
+    .clock(Clock::test_at(0))
+    .metrics(metrics.clone())
+    .first_view(view)
+    .build(ep);
     common::ProxySut::from_task(sock, metrics, tokio::spawn(core.run()))
 }
 
@@ -93,6 +100,7 @@ async fn spawn_probe(
     let (probe_ep, _) = h.bind_sut("probe", "127.0.0.1:5099").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry,
         control,
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),
@@ -209,6 +217,7 @@ fn spawn_responder(ep: Box<dyn UdpEndpoint>, worker: Arc<Responder>) {
                 ])
                 .collect();
             let opts = GenerateResponseOpts {
+                incoming_source: Some(observed_source(pkt.src)),
                 to_tag: Some("uas".into()),
                 extra_headers: extra,
                 ..Default::default()

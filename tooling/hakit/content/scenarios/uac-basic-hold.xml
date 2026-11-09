@@ -9,7 +9,8 @@
 
  -inf: field0 the R-URI user, field1..4 one header line each (from the
     treatment catalog).
- -key: run, stream, shape (labels); setup_ms (no final by then: `timeout`);
+ -key: run, stream, shape (labels); setup_ms (no response by then: `timeout`);
+    final_ms (a provisional, 100 included, and no final by then: `timeout`);
     hold_ms; reinvites (the caller's, splitting the hold evenly);
     far_end_bye (`cut`, or `release`: the far end's BYE is the planned
     end); abuse (`none`; `ghost`: silent until the far end's BYE or hold_ms,
@@ -24,7 +25,7 @@
  hakit-key: flood_gap_ms=200
 
  Endings: `answered` (2xx, then BYE answered); `rejected` (non-2xx, ACKed,
- Reason protocol lowercased); `timeout` (no final by setup_ms: CANCEL after a
+ Reason protocol lowercased); `timeout` (no final by its bound: CANCEL after a
  provisional, else Timer B; a late 2xx ACKed and torn down); `cut` (BYE from
  the far end, 481 to the BYE or to a re-INVITE, 408 or no final to a
  re-INVITE, a far re-INVITE never ACKed); `stranded` (no final to the BYE in
@@ -51,11 +52,14 @@
    <assign assign_to="em_acc" value="0"/>
    <assign assign_to="fp_flag" value="0"/>
    <assign assign_to="fp_ms" value="0"/>
+   <assign assign_to="try_flag" value="0"/>
    <assign assign_to="cs" value="1"/>
    <assignstr assign_to="cs_raw" value="1"/>
    <ereg regexp="^[0-9]+" search_in="var" variable="cs_raw" assign_to="cs_n"/>
    <assignstr assign_to="setup_str" value="[setup_ms]"/>
    <todouble assign_to="setup_ms" variable="setup_str"/>
+   <assignstr assign_to="final_str" value="[final_ms]"/>
+   <todouble assign_to="final_ms" variable="final_str"/>
    <assignstr assign_to="hold_str" value="[hold_ms]"/>
    <todouble assign_to="hold_ms" variable="hold_str"/>
    <assignstr assign_to="ri_str" value="[reinvites]"/>
@@ -120,17 +124,20 @@ a=rtpmap:0 PCMU/8000
 
  <nop/>
  <label id="tick"/>
- <nop test="setup_over" next="setup_timeout">
+ <nop test="final_over" next="setup_timeout">
   <action>
    <assignstr assign_to="el_s_t" value="[clock_tick]"/>
    <todouble assign_to="el_s" variable="el_s_t"/>
    <add assign_to="el_s" variable="t_off"/>
    <subtract assign_to="el_s" variable="t_start"/>
    <test assign_to="setup_over" variable="el_s" compare="greater_than_equal" variable2="setup_ms"/>
+   <test assign_to="final_over" variable="el_s" compare="greater_than_equal" variable2="final_ms"/>
   </action>
  </nop>
+ <nop test="fp_seen" next="wait"/>
+ <nop test="setup_over" next="setup_timeout"/>
  <label id="wait"/>
- <recv response="100" optional="true" timeout="1000" ontimeout="tick" next="tick"/>
+ <recv response="100" optional="true" timeout="1000" ontimeout="tick" next="try_main"/>
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="tick">
   <action>
    <assignstr assign_to="now_t" value="[clock_tick]"/>
@@ -163,6 +170,19 @@ a=rtpmap:0 PCMU/8000
    <ereg regexp="^([0-9]+|null)" search_in="var" variable="ra_t" assign_to="ra_m,r_ra"/>
   </action>
  </recv>
+
+ <nop/>
+ <label id="try_main"/>
+ <nop condexec="try_flag" condexec_inverse="true">
+  <action>
+   <assignstr assign_to="now_t" value="[clock_tick]"/>
+   <todouble assign_to="try_ms" variable="now_t"/>
+   <add assign_to="try_ms" variable="t_off"/>
+   <assign assign_to="try_flag" value="1"/>
+   <test assign_to="fp_seen" variable="try_flag" compare="equal" value="1"/>
+  </action>
+ </nop>
+ <nop next="tick"/>
 
  <nop/>
  <label id="got_reject"/>
@@ -239,7 +259,8 @@ Content-Length: 0
   </action>
  </nop>
  <nop test="fp_seen" next="cancel"/>
- <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" timeout="1000" ontimeout="late_tick" next="cancel">
+ <recv response="100" optional="true" timeout="1000" ontimeout="late_tick" next="try_late"/>
+ <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" next="cancel">
   <action>
    <assignstr assign_to="now_t" value="[clock_tick]"/>
    <todouble assign_to="now_s" variable="now_t"/>
@@ -255,6 +276,17 @@ Content-Length: 0
  </recv>
  <recv response="^2[0-9][0-9]$" regexp_match="true" optional="true" rrs="true" next="answer_ack"/>
  <recv response="^[3-6][0-9][0-9]$" regexp_match="true" next="late_final"/>
+
+ <nop/>
+ <label id="try_late"/>
+ <nop next="cancel">
+  <action>
+   <assignstr assign_to="now_t" value="[clock_tick]"/>
+   <todouble assign_to="try_ms" variable="now_t"/>
+   <add assign_to="try_ms" variable="t_off"/>
+   <assign assign_to="try_flag" value="1"/>
+  </action>
+ </nop>
 
  <nop/>
  <label id="setup_abort"/>
@@ -1410,7 +1442,7 @@ Content-Length: 0
    <ereg regexp="^[A-Z]+" search_in="msg" assign_to="ux_req"/>
   </action>
  </recv>
- <recv response="100" optional="true" counter="2" next="unexp_resume"/>
+ <recv response="100" optional="true" counter="2" next="ux_try"/>
  <recv response="^1[0-9][0-9]$" regexp_match="true" optional="true" counter="2" next="ux_1xx">
   <action>
    <ereg regexp="SIP/2\.0 ([0-9]+)" search_in="msg" assign_to="ux_all,ux_code"/>
@@ -1454,6 +1486,20 @@ Content-Length: 0
    <ereg regexp="branch=([^;,[:space:]]+)" search_in="hdr" header="Via:" assign_to="ux_br_all,ux_branch"/>
   </action>
  </recv>
+
+ <nop/>
+ <label id="ux_try"/>
+ <nop test="answered" next="unexp_resume"/>
+ <nop condexec="try_flag" condexec_inverse="true">
+  <action>
+   <assignstr assign_to="now_t" value="[clock_tick]"/>
+   <todouble assign_to="try_ms" variable="now_t"/>
+   <add assign_to="try_ms" variable="t_off"/>
+   <assign assign_to="try_flag" value="1"/>
+   <test assign_to="fp_seen" variable="try_flag" compare="equal" value="1"/>
+  </action>
+ </nop>
+ <nop next="unexp_resume"/>
 
  <nop/>
  <label id="ux_1xx"/>
@@ -1779,12 +1825,18 @@ Content-Length: 0
    <assign assign_to="writing" value="1"/>
    <assignstr assign_to="r_phase" value="invited"/>
    <assignstr assign_to="r_fp" value="null"/>
+   <assignstr assign_to="r_try" value="null"/>
   </action>
  </nop>
- <nop condexec="fp_seen">
+ <nop condexec="fp_flag">
   <action>
    <assignstr assign_to="r_phase" value="provisional"/>
    <assignstr assign_to="r_fp" value="[$fp_ms]"/>
+  </action>
+ </nop>
+ <nop condexec="try_flag">
+  <action>
+   <assignstr assign_to="r_try" value="[$try_ms]"/>
   </action>
  </nop>
  <nop condexec="answered">
@@ -1803,7 +1855,7 @@ Content-Length: 0
    <todouble assign_to="now_s" variable="now_t"/>
    <add assign_to="now_s" variable="t_off"/>
    <test assign_to="r_em" variable="em_acc" compare="greater_than" value="0"/>
-   <log message="{&quot;schema&quot;:&quot;call-outcome.v1&quot;,&quot;run&quot;:&quot;[run]&quot;,&quot;source&quot;:&quot;sipp&quot;,&quot;stream&quot;:&quot;[stream]&quot;,&quot;shape&quot;:&quot;[shape]&quot;,&quot;call_id&quot;:&quot;[call_id]&quot;,&quot;started_at_ms&quot;:[$t_start],&quot;first_provisional_at_ms&quot;:[$r_fp],&quot;setup_ended_at_ms&quot;:[$r_se],&quot;answered_at_ms&quot;:[$r_ans],&quot;ended_at_ms&quot;:[$now_s],&quot;phase_reached&quot;:&quot;[$r_phase]&quot;,&quot;early_media&quot;:[$r_em],&quot;final_code&quot;:[$r_code],&quot;reason&quot;:[$r_reason],&quot;retry_after_s&quot;:[$r_ra],&quot;ending&quot;:&quot;[$r_ending]&quot;,&quot;failures&quot;:\x5B[$r_fail]\x5D,&quot;producer_verdict&quot;:&quot;[$r_verdict]&quot;}"/>
+   <log message="{&quot;schema&quot;:&quot;call-outcome.v1&quot;,&quot;run&quot;:&quot;[run]&quot;,&quot;source&quot;:&quot;sipp&quot;,&quot;stream&quot;:&quot;[stream]&quot;,&quot;shape&quot;:&quot;[shape]&quot;,&quot;call_id&quot;:&quot;[call_id]&quot;,&quot;started_at_ms&quot;:[$t_start],&quot;first_provisional_at_ms&quot;:[$r_fp],&quot;trying_at_ms&quot;:[$r_try],&quot;setup_ended_at_ms&quot;:[$r_se],&quot;answered_at_ms&quot;:[$r_ans],&quot;ended_at_ms&quot;:[$now_s],&quot;phase_reached&quot;:&quot;[$r_phase]&quot;,&quot;early_media&quot;:[$r_em],&quot;final_code&quot;:[$r_code],&quot;reason&quot;:[$r_reason],&quot;retry_after_s&quot;:[$r_ra],&quot;ending&quot;:&quot;[$r_ending]&quot;,&quot;failures&quot;:\x5B[$r_fail]\x5D,&quot;producer_verdict&quot;:&quot;[$r_verdict]&quot;}"/>
   </action>
  </nop>
 

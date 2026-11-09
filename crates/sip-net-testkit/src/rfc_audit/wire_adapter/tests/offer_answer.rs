@@ -498,17 +498,22 @@ c=IN IP4 10.0.0.2\r\n\
 t=0 0\r\n\
 m=audio 60788 RTP/AVP 8\r\n";
 
+/// `raw` with its top Via naming the SUT, the hop that sent its request.
+fn via_sut(raw: Vec<u8>) -> Vec<u8> {
+    String::from_utf8_lossy(&raw).replacen("UDP 127.0.0.1:5060;", "UDP 127.0.0.1:5080;", 1).into()
+}
+
 /// The SUT is no recorded bind: only the callee's lane holds the call. The
 /// SUT's INVITE carries `offer`, then a bodyless re-INVITE draws the callee's
 /// offer, which the SUT's ACK answers with `ack_answer`.
 fn callee_lane_only(offer: &str, ack_answer: &str) -> Vec<Stamped<SignalingNetworkEvent>> {
     vec![
-        recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(offer)), SUT, 0),
-        sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_ANSWER)), SUT, 1),
-        recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), SUT, 2),
-        recv(BOB, req_sdp("INVITE", "z9hG4bK-i2", 2, Some("bt"), None), SUT, 3),
-        sent(BOB, resp_sdp(200, 2, "INVITE", "z9hG4bK-i2", Some(CALLEE_REOFFER)), SUT, 4),
-        recv(BOB, req_sdp("ACK", "z9hG4bK-a2", 2, Some("bt"), Some(ack_answer)), SUT, 5),
+        recv(BOB, via_sut(req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(offer))), SUT, 0),
+        sent(BOB, via_sut(resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_ANSWER))), SUT, 1),
+        recv(BOB, via_sut(req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None)), SUT, 2),
+        recv(BOB, via_sut(req_sdp("INVITE", "z9hG4bK-i2", 2, Some("bt"), None)), SUT, 3),
+        sent(BOB, via_sut(resp_sdp(200, 2, "INVITE", "z9hG4bK-i2", Some(CALLEE_REOFFER))), SUT, 4),
+        recv(BOB, via_sut(req_sdp("ACK", "z9hG4bK-a2", 2, Some("bt"), Some(ack_answer))), SUT, 5),
     ]
 }
 

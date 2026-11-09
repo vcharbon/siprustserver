@@ -79,6 +79,7 @@ fn writer_to(
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 100_000 },
         bounds,
+        tls: amqp_connect::BrokerTls::PLAIN,
     };
     (RabbitMqCdrWriter::new(settings, Arc::new(Sized(size)), metrics.clone()), metrics)
 }

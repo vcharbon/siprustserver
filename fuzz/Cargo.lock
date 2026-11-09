@@ -83,6 +83,7 @@ name = "b2bua-core"
 version = "0.1.0"
 dependencies = [
  "b2bua-sdk",
+ "bounds",
  "call",
  "lookup-map",
  "serde",
@@ -135,6 +136,8 @@ dependencies = [
  "serde_json",
  "sip-ids",
  "sip-message",
+ "sip-retransmit",
+ "tracing",
 ]
 
 [[package]]
@@ -202,6 +205,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bounds"
+version = "0.1.0"
+dependencies = [
+ "stacker",
+]
+
+[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -226,6 +236,7 @@ dependencies = [
  "async-trait",
  "call-limiter-wire",
  "http-net",
+ "lock-poison",
  "metric-catalogue",
  "observe",
  "serde",
@@ -281,6 +292,14 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "rand_core",
+]
+
+[[package]]
+name = "clock-bridge"
+version = "0.1.0"
+dependencies = [
+ "lock-poison",
+ "tokio",
 ]
 
 [[package]]
@@ -550,6 +569,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "clock-bridge",
  "http-net",
  "layer-harness",
  "serde",
@@ -804,6 +824,15 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "psm"
+version = "0.1.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "200b9ff220857e53e184257720a14553b2f4aa02577d2ed9842d45d4b9654810"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -1162,6 +1191,7 @@ name = "sip-message"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bounds",
  "bytes",
  "lookup-map",
  "memchr",
@@ -1177,6 +1207,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "libc",
+ "lock-poison",
+ "metric-catalogue",
  "sip-clock",
  "sip-message",
  "socket2",
@@ -1216,6 +1248,7 @@ dependencies = [
  "sha1",
  "sha2",
  "sip-clock",
+ "sip-ids",
  "sip-message",
  "sip-net",
  "sip-txn",
@@ -1293,6 +1326,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
+ "windows-sys",
+]
+
+[[package]]
+name = "stacker"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "707f49d46706bacf8a2b00d51dace3f9de527c13eec3778f570c411f89e69967"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "psm",
  "windows-sys",
 ]
 

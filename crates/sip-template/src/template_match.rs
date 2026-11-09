@@ -14,10 +14,10 @@
 //!     (`Via`/`From`/`To`/`Call-ID`/`CSeq`) — a legal missing `Content-Length`
 //!     (RFC 3261 §20.14) does not fail.
 //!   - **remote-target** (`Contact`/`Route`/`Record-Route`): the routing-critical
-//!     part is host:port ONLY. Per element, the user part is compared byte-wise
-//!     and the URI params and header params are compared SEPARATELY (each
-//!     order-insensitive, modulo [`MatchOpts::ignore_params`]); host:port is
-//!     ignored. This mirrors emission ([`sip_message::remote_target`]), so a
+//!     part is host:port and `maddr`. Per element, the user part is compared
+//!     byte-wise and the URI params and header params are compared SEPARATELY
+//!     (each order-insensitive, modulo [`MatchOpts::ignore_params`]); host:port
+//!     and `maddr` are ignored. This mirrors emission ([`sip_message::remote_target`]), so a
 //!     param'd/user'd Contact round-trips.
 //!
 //! Header NAME comparison is canonical (a captured compact `k:` matches an
@@ -162,7 +162,7 @@ fn diff_params(
 }
 
 /// Compare one remote-target row (user part + URI/header params per element,
-/// host:port ignored).
+/// host:port and `maddr` ignored).
 fn compare_remote_target(
     name: &str,
     row: usize,

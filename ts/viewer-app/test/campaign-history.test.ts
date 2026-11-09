@@ -17,10 +17,11 @@ const result = (caseId: string, outcome: CampaignResult["outcome"], keys: Readon
   checks: keys.map((key) => ({ anchor: "B1 INVITE", field: key, expected: "x", seen: "y", said: null, side: "sut" }))
 })
 
-const UNGROUPED = { title: null, description: null, groups: [], links: [], source: null }
+const UNGROUPED = { title: null, description: null, groups: [], tags: [], links: [], source: null }
 
 const VIEW: Campaign = {
   capture: "campaign",
+  title: null,
   env: null,
   envs: [],
   launch: null,
@@ -41,6 +42,7 @@ const VIEW: Campaign = {
     labels: [{ name: "seed", value: id === 3 ? "s2" : "s1" }, { name: "sut", value: "c1" }],
     checked: {},
     scope: null,
+    selection: null,
     lanes: [
       {
         lane: "lane-x",
@@ -49,13 +51,14 @@ const VIEW: Campaign = {
         status: "done",
         detail: null,
         skipped: 0,
+        excluded: [],
         results: id === 3
           ? [result("fam-a/one", "failure", ["pai.uri"]), result("fam-a/two", "pass"), result("fam-b/three", "pass")]
           : id === 2
           ? [result("fam-a/one", "failure", ["pai.uri", "to.uri"]), result("fam-a/two", "error"), result("fam-b/three", "pass")]
           : [result("fam-a/one", "pass"), result("fam-a/two", "pass")]
       },
-      { lane: "lane-y", runId: id * 10 + 1, session: `run${id * 10 + 1}`, status: "done", detail: null, skipped: 0, results: [result("fam-a/one", "pass")] }
+      { lane: "lane-y", runId: id * 10 + 1, session: `run${id * 10 + 1}`, status: "done", detail: null, skipped: 0, excluded: [], results: [result("fam-a/one", "pass")] }
     ]
   }))
 }

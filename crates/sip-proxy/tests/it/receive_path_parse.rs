@@ -11,7 +11,7 @@ use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{CustomParser, SipMessage, SipParser, SipParserLimits};
 use sip_net::UdpEndpoint;
-use sip_net::{Arrival, BindUdpOpts, PreIngressAction, PreIngressHook, SignalingNetwork};
+use sip_net::{BindUdpOpts, PreIngressHook, SignalingNetwork};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_proxy::intake_shed::intake_shed_hook;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
@@ -37,14 +37,21 @@ struct Rig {
 }
 
 impl Rig {
-    /// A proxy whose socket runs `hook`, built over `metrics`.
-    async fn new(metrics: Arc<ProxyMetrics>, hook: PreIngressHook) -> Rig {
+    /// A proxy whose socket runs `hook`, its core holding `parser`, built over
+    /// `metrics`.
+    async fn new(
+        metrics: Arc<ProxyMetrics>,
+        hook: Option<PreIngressHook>,
+        parser: CustomParser,
+    ) -> Rig {
         let net = SimulatedSignalingNetwork::new(1);
         let bind = |at| net.bind_udp(BindUdpOpts::new(addr(at), QUEUE_MAX));
-        let endpoint = net
-            .bind_udp(BindUdpOpts::new(addr(PROXY), QUEUE_MAX).with_pre_ingress(hook))
-            .await
-            .expect("bind the proxy");
+        let opts = BindUdpOpts::new(addr(PROXY), QUEUE_MAX);
+        let opts = match hook {
+            Some(hook) => opts.with_pre_ingress(hook),
+            None => opts,
+        };
+        let endpoint = net.bind_udp(opts).await.expect("bind the proxy");
         let caller = bind(CALLER).await.expect("bind the caller");
         let worker = bind(WORKER).await.expect("bind the worker");
         let strategy: Arc<dyn RoutingStrategy> =
@@ -56,6 +63,7 @@ impl Rig {
             strategy,
             registry,
             Arc::new(IdGen::seeded(0x645)),
+            parser,
         )
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
@@ -112,7 +120,8 @@ Content-Length: 0\r\n\r\n";
 #[tokio::test(start_paused = true)]
 async fn the_core_routes_and_answers_the_parse_the_production_hook_queued() {
     let metrics = Arc::new(ProxyMetrics::new());
-    let rig = Rig::new(metrics.clone(), intake_shed_hook(QUEUE_MAX, metrics)).await;
+    let hook = intake_shed_hook(QUEUE_MAX, metrics.clone(), CustomParser::new());
+    let rig = Rig::new(metrics, Some(hook), CustomParser::new()).await;
 
     rig.caller.send_to(&options("routed"), addr(PROXY)).await.expect("sent");
     rig.settle().await;
@@ -147,24 +156,36 @@ async fn the_core_routes_and_answers_the_parse_the_production_hook_queued() {
     assert_eq!(rig.metrics.parse_refusals_answered(), 1);
 }
 
-/// The core acts on the queued parse, not on one of its own: a hook whose
-/// parser refuses every datagram past three header lines queues a
-/// well-formed OPTIONS with that refusal (no partial), and the core drops it
-/// unanswered where its own parse would have routed it.
+/// The limit a process states is the one its datagrams read under, whichever
+/// stage parses them: the production hook below its watermark and the core with
+/// no hook refuse the same well-formed OPTIONS past three header lines with no
+/// partial, drop it unanswered, and count one parse error. The default limits
+/// route the same datagram.
 #[tokio::test(start_paused = true)]
-async fn the_core_acts_on_the_queued_parse_not_its_own() {
-    let strict =
-        CustomParser::with_limits(SipParserLimits { max_header_lines: 3, ..Default::default() });
-    let hook: PreIngressHook = Arc::new(move |arrival: &mut Arrival, _src, _depth| {
-        arrival.parse(&strict);
-        PreIngressAction::Accept
-    });
-    let rig = Rig::new(Arc::new(ProxyMetrics::new()), hook).await;
+async fn the_limit_the_process_states_is_read_at_every_stage() {
+    let strict = || {
+        CustomParser::with_limits(SipParserLimits {
+            max_header_lines: 3,
+            ..SipParserLimits::DEFAULT
+        })
+    };
+    let with_hook = {
+        let metrics = Arc::new(ProxyMetrics::new());
+        let hook = intake_shed_hook(QUEUE_MAX, metrics.clone(), strict());
+        Rig::new(metrics, Some(hook), strict()).await
+    };
+    let no_hook = Rig::new(Arc::new(ProxyMetrics::new()), None, strict()).await;
 
-    rig.caller.send_to(&options("strict"), addr(PROXY)).await.expect("sent");
-    rig.settle().await;
+    for rig in [&with_hook, &no_hook] {
+        rig.caller.send_to(&options("strict"), addr(PROXY)).await.expect("sent");
+        rig.settle().await;
+        assert!(Rig::received(rig.worker.as_ref()).is_empty(), "nothing forwarded");
+        assert!(Rig::received(rig.caller.as_ref()).is_empty(), "nothing answered");
+        assert_eq!(rig.metrics.parse_errors(), 1, "the refusal is the one counted");
+    }
 
-    assert!(Rig::received(rig.worker.as_ref()).is_empty(), "nothing forwarded");
-    assert!(Rig::received(rig.caller.as_ref()).is_empty(), "nothing answered");
-    assert_eq!(rig.metrics.parse_errors(), 1, "the queued refusal is the one counted");
+    let default = Rig::new(Arc::new(ProxyMetrics::new()), None, CustomParser::new()).await;
+    default.caller.send_to(&options("default"), addr(PROXY)).await.expect("sent");
+    default.settle().await;
+    assert_eq!(Rig::received(default.worker.as_ref()).len(), 1, "the default limits route it");
 }

@@ -17,12 +17,14 @@ side = "aware"
 
 [lints.rust]
 unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [lints.clippy]
 too_many_lines = "warn"
 disallowed_macros = "allow"
 disallowed_methods = "allow"
 disallowed_types = "allow"
+await_holding_lock = "deny"
 
 [dependencies]
 libc = { workspace = true }

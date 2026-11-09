@@ -1,293 +1,118 @@
-//! ABNF fuzz suite — replay the frozen corpus against the per-header parsers.
-//! Port of `scripts/abnf-fuzz-driver.ts` + `run-suite.sh`.
+//! The frozen ABNF corpus through the production path. Each line of the vendored
+//! grammars' corpus (`tests/abnf/corpus/<target>.txt`) is wrapped in a whole
+//! message, read by the wire parser, then by its typed reader. A refusal maps to
+//! a stated rule or fails a conformance row (`conformance::stated`); a value that
+//! reads but drops an obvious field fails `frozen/silent-misparse`.
 //!
-//! The contract: for grammar-valid input the parsers must never *buggily*
-//! reject (a rejection that matches no documented policy, [`POLICY_PATTERNS`]) and never
-//! *silently misparse* (accept but drop an obvious field). A clean run has
-//! `buggy == 0` and `silentMisparse == 0` across every target.
-//!
-//! The corpus (`tests/abnf/corpus/<target>.txt`) is committed and frozen —
-//! regenerate it with `cargo run -p xtask -- abnf-regen [N]` (needs `abnfgen`).
-//! When a target's corpus file is absent or empty (e.g. a fresh checkout that
-//! hasn't run the generator) this test SKIPS that target with a logged note
-//! rather than passing silently — there is no hidden "0 inputs == green".
+//! The corpus is committed and frozen: `cargo run -p xtask -- abnf-regen [N]`
+//! regenerates it (needs `abnfgen`). A target with no corpus file fails the test.
 
 use std::fs;
 use std::path::PathBuf;
 
-use sip_message::header::{Contact, HeaderValue, NameAddr, RAck, ReferTo, Uri, Via};
-use sip_message::parser::custom::structured_headers::{parse_cseq, split_top_level_commas};
-use sip_message::{CustomParser, SipMessage, SipParser, SipStr};
+use sip_message::header;
+use sip_message::SipMessage;
 
-/// Rejection reasons reflecting documented semantic constraints (RFC limits
-/// beyond pure ABNF) rather than parser bugs — abnfgen happily emits port=88161
-/// or degenerate empty-hostport URIs the parser correctly rejects.
-const POLICY_PATTERNS: &[&str] = &[
-    "port out of range",
-    "non-digit in port",
-    "empty port",
-    "empty host",
-    "unclosed IPv6 reference",
-    "empty IPv6 reference",
-    // RFC 3261 §19.1.1 Table 1: the grammar's Request-URI admits `?headers`,
-    // the table forbids them there.
-    "Request-URI carries escaped headers",
-    // The vendored grammars draw a header parameter's name from the URI's
-    // `paramchar`; RFC 3261 §25.1 `generic-param = token [ EQUAL gen-value ]`.
-    "parameter name is not a token",
-];
-
-fn is_policy(reason: &str) -> bool {
-    POLICY_PATTERNS.iter().any(|p| reason.contains(p))
-}
-
-#[derive(Default)]
-struct Stat {
-    total: usize,
-    accepted: usize,
-    policy: usize,
-    buggy: usize,
-    silent: usize,
-    buggy_samples: Vec<(String, String)>,
-    silent_samples: Vec<String>,
-}
-
-impl Stat {
-    fn reject(&mut self, input: &str, reason: String) {
-        if is_policy(&reason) {
-            self.policy += 1;
-        } else {
-            self.buggy += 1;
-            if self.buggy_samples.len() < 12 {
-                self.buggy_samples.push((input.to_string(), reason));
-            }
-        }
-    }
-    fn silent(&mut self, input: &str) {
-        self.silent += 1;
-        if self.silent_samples.len() < 12 {
-            self.silent_samples.push(input.to_string());
-        }
-    }
-}
-
-// --- per-target fuzz functions (ported from the driver) ---
-
-fn fuzz_sip_uri(line: &str, s: &mut Stat) {
-    let uri = match Uri::parse(&SipStr::owned(line)) {
-        Ok(uri) => uri,
-        Err(e) => return s.reject(line, e.reason),
-    };
-    s.accepted += 1;
-    if line.contains('@') && uri.user().is_none() {
-        s.silent(line);
-    }
-}
-
-fn fuzz_name_addr(line: &str, s: &mut Stat) {
-    let addr = match NameAddr::parse(&SipStr::owned(line)) {
-        Ok(addr) => addr,
-        Err(e) => return s.reject(line, e.reason),
-    };
-    s.accepted += 1;
-    // Silent-misparse heuristic: an `@` inside `<...>` must survive into the URI.
-    if let Some(lt) = line.find('<') {
-        if let Some(gt_rel) = line[lt + 1..].find('>') {
-            let between = &line[lt + 1..lt + 1 + gt_rel];
-            if between.contains('@') && !addr.uri().text().contains('@') {
-                s.silent(line);
-            }
-        }
-    }
-}
-
-fn fuzz_pai_entry(entry: &str, s: &mut Stat) {
-    match NameAddr::parse(&SipStr::owned(entry)) {
-        Ok(_) => s.accepted += 1,
-        Err(e) => s.reject(entry, e.reason),
-    }
-}
-
-fn fuzz_contact(line: &str, s: &mut Stat) {
-    if line.trim() == "*" {
-        s.accepted += 1;
-        return;
-    }
-    for entry in split_top_level_commas(line) {
-        if let Err(e) = Contact::parse(&SipStr::owned(entry)) {
-            return s.reject(entry, e.reason);
-        }
-    }
-    s.accepted += 1;
-}
-
-fn fuzz_via(line: &str, s: &mut Stat) {
-    for entry in split_top_level_commas(line) {
-        if entry.is_empty() {
-            continue;
-        }
-        let parsed = match Via::parse(&SipStr::owned(entry)) {
-            Ok(parsed) => parsed,
-            Err(e) => return s.reject(entry, e.reason),
-        };
-        if parsed.port() == Some(0) {
-            s.reject(entry, "port out of range (0)".to_string());
-            return;
-        }
-    }
-    s.accepted += 1;
-}
-
-fn fuzz_cseq(line: &str, s: &mut Stat) {
-    let parsed = parse_cseq(&SipStr::owned(line));
-    if parsed.method.is_empty() {
-        s.reject(line, "empty method".to_string());
-        return;
-    }
-    s.accepted += 1;
-}
-
-fn fuzz_rack(line: &str, s: &mut Stat) {
-    if let Err(e) = RAck::parse(&SipStr::owned(line)) {
-        s.reject(line, e.reason);
-        return;
-    }
-    s.accepted += 1;
-}
-
-fn fuzz_refer_to(line: &str, s: &mut Stat) {
-    match ReferTo::parse(&SipStr::owned(line)) {
-        Ok(_) => s.accepted += 1,
-        Err(e) => s.reject(line, e.reason),
-    }
-}
-
-/// The request line read as the start of a whole request, so the Request-URI
-/// meets every check a peer's request does.
-fn fuzz_request_line(line: &str, s: &mut Stat) {
-    // "METHOD SP REQUEST-URI SP SIP-Version" — SIP-Version case-insensitive.
-    let parts: Vec<&str> = line.split(' ').collect();
-    let shape_ok = parts.len() == 3
-        && !parts[0].is_empty()
-        && parts[0].chars().all(is_method_char)
-        && parts[2].eq_ignore_ascii_case("SIP/2.0");
-    if !shape_ok {
-        s.reject(line, "request-line shape check failed".to_string());
-        return;
-    }
-    let (method, req_uri) = (parts[0], parts[1]);
-    let raw = format!(
-        "{method} {req_uri} SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-abnf\r\n\
-         From: <sip:a@example.com>;tag=1\r\nTo: <sip:b@example.com>\r\nCall-ID: abnf\r\n\
-         CSeq: 1 {method}\r\nContent-Length: 0\r\n\r\n"
-    );
-    let request = match CustomParser::new().parse(raw.as_bytes()) {
-        Ok(SipMessage::Request(r)) => r,
-        Ok(SipMessage::Response(_)) => return s.reject(line, "read as a response".to_string()),
-        Err(e) => return s.reject(line, e.reason),
-    };
-    s.accepted += 1;
-    if req_uri.contains('@') && request.request_uri().user().is_none() {
-        s.silent(line);
-    }
-}
-
-fn is_method_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "!%*_+`'~.-".contains(c)
-}
-
-fn dispatch(target: &str, line: &str, s: &mut Stat) {
-    match target {
-        "sip-uri" => fuzz_sip_uri(line, s),
-        "from" => fuzz_name_addr(line, s),
-        "pai" => {
-            for entry in split_top_level_commas(line) {
-                if !entry.is_empty() {
-                    fuzz_pai_entry(entry, s);
-                }
-            }
-        }
-        "contact" => fuzz_contact(line, s),
-        "via" => fuzz_via(line, s),
-        "cseq" => fuzz_cseq(line, s),
-        "rack" => fuzz_rack(line, s),
-        "refer-to" => fuzz_refer_to(line, s),
-        "request-line" => fuzz_request_line(line, s),
-        other => panic!("unknown abnf target: {other}"),
-    }
-}
+use super::conformance::message::{read, typed, Template};
+use super::conformance::ratchet::{settle_rows, Failures};
+use super::conformance::stated::failing_row;
 
 const TARGETS: &[&str] =
     &["sip-uri", "from", "pai", "contact", "via", "cseq", "rack", "refer-to", "request-line"];
 
-fn corpus_path(target: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("tests/abnf/corpus");
-    p.push(format!("{target}.txt"));
-    p
+/// The whole message `line` of `target` is read in.
+fn wrap(target: &str, line: &str) -> Vec<u8> {
+    let options = Template::request("OPTIONS");
+    match target {
+        "sip-uri" => options.with("to", format!("To: <{line}>")),
+        "from" => options.with("from", format!("From: {line}")),
+        "pai" => options.with("pai", format!("P-Asserted-Identity: {line}")),
+        "contact" => Template::request("REGISTER").with("contact", format!("Contact: {line}")),
+        "via" => options.with("lower-via", format!("Via: {line}")),
+        "cseq" => {
+            let method = line.split_ascii_whitespace().last().unwrap_or_default();
+            Template::request(method).with("cseq", format!("CSeq: {line}"))
+        }
+        "rack" => Template::request("PRACK").with("rack", format!("RAck: {line}")),
+        "refer-to" => Template::request("REFER").with("refer-to", format!("Refer-To: {line}")),
+        "request-line" => {
+            let method = line.split(' ').next().unwrap_or_default();
+            options.with("cseq", format!("CSeq: 1 {method}")).start_line(line)
+        }
+        other => panic!("unknown abnf target: {other}"),
+    }
+    .bytes()
+}
+
+fn typed_read(target: &str, msg: &SipMessage) -> Result<(), String> {
+    match target {
+        "sip-uri" => typed::<header::To>(msg),
+        "from" => typed::<header::From>(msg),
+        "pai" => typed::<header::PAssertedIdentity>(msg),
+        "contact" => typed::<header::Contact>(msg),
+        "via" => typed::<header::Via>(msg),
+        "cseq" => typed::<header::CSeq>(msg),
+        "rack" => typed::<header::RAck>(msg),
+        "refer-to" => typed::<header::ReferTo>(msg),
+        _ => Ok(()),
+    }
+}
+
+/// An `@` inside the URI of `line` that the reading lost.
+fn lost_user(target: &str, line: &str, msg: &SipMessage) -> bool {
+    match target {
+        "sip-uri" => line.contains('@') && msg.to().uri().user().is_none(),
+        "from" => {
+            let inner = line.split_once('<').and_then(|(_, rest)| rest.split_once('>'));
+            let written = inner.is_some_and(|(between, _)| between.contains('@'));
+            written && !msg.from().uri().text().contains('@')
+        }
+        "request-line" => {
+            let uri = line.split(' ').nth(1).unwrap_or_default();
+            let user = |m: &SipMessage| match m {
+                SipMessage::Request(r) => r.request_uri().user().is_none(),
+                SipMessage::Response(_) => true,
+            };
+            uri.contains('@') && user(msg)
+        }
+        _ => false,
+    }
+}
+
+fn corpus(target: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/abnf/corpus")
+        .join(format!("{target}.txt"));
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("corpus of {target}: {e}"))
 }
 
 #[test]
-fn abnf_corpus_never_buggily_rejects_or_misparses() {
-    let mut ran_any = false;
-    let mut failures: Vec<String> = Vec::new();
-    let mut skipped: Vec<&str> = Vec::new();
-
+fn the_frozen_corpus_reads_through_the_production_path() {
+    let mut failures = Failures::default();
     for &target in TARGETS {
-        let path = corpus_path(target);
-        let contents = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => {
-                skipped.push(target);
-                continue;
-            }
-        };
-        let lines: Vec<&str> = contents.split('\n').filter(|l| !l.is_empty()).collect();
-        if lines.is_empty() {
-            skipped.push(target);
-            continue;
-        }
-
-        ran_any = true;
-        let mut s = Stat { total: lines.len(), ..Default::default() };
+        let text = corpus(target);
+        let lines: Vec<&str> = text.split('\n').filter(|l| !l.is_empty()).collect();
+        assert!(!lines.is_empty(), "{target}: an empty corpus proves nothing");
+        let mut accepted = 0;
         for line in &lines {
-            dispatch(target, line, &mut s);
-        }
-
-        eprintln!(
-            "abnf[{target:<13}] total={:<5} accepted={:<5} policy={:<4} buggy={:<3} silentMisparse={}",
-            s.total, s.accepted, s.policy, s.buggy, s.silent
-        );
-
-        if s.buggy > 0 || s.silent > 0 {
-            let mut msg = format!(
-                "target {target}: buggy={} silentMisparse={} (both must be 0)",
-                s.buggy, s.silent
-            );
-            for (input, reason) in s.buggy_samples.iter().take(5) {
-                msg.push_str(&format!("\n    BUGGY  {input:?} -> {reason}"));
+            let outcome = match read(&wrap(target, line)) {
+                Ok(msg) if lost_user(target, line, &msg) => Err("silent-misparse".to_string()),
+                Ok(msg) => typed_read(target, &msg),
+                Err(e) => Err(e.reason),
+            };
+            match outcome {
+                Ok(()) => accepted += 1,
+                Err(reason) if reason == "silent-misparse" => {
+                    failures.note("silent-misparse", target, line, &reason);
+                }
+                Err(reason) => {
+                    if let Some(row) = failing_row(&reason) {
+                        failures.note(row, target, line, &reason);
+                    }
+                }
             }
-            for input in s.silent_samples.iter().take(5) {
-                msg.push_str(&format!("\n    SILENT {input:?}"));
-            }
-            failures.push(msg);
         }
+        eprintln!("frozen[{target:<13}] total={:<5} accepted={accepted}", lines.len());
     }
-
-    if !skipped.is_empty() {
-        eprintln!(
-            "abnf_fuzz: SKIPPED targets with no committed corpus: {}.\n\
-             Generate it with `cargo run -p xtask -- abnf-regen` (needs abnfgen).",
-            skipped.join(", ")
-        );
-    }
-
-    assert!(failures.is_empty(), "ABNF fuzz failures:\n{}", failures.join("\n"));
-
-    if !ran_any {
-        eprintln!(
-            "abnf_fuzz: no corpus present — every target skipped. This is expected on a \
-             fresh checkout; run `cargo run -p xtask -- abnf-regen` to populate the corpus."
-        );
-    }
+    settle_rows("frozen", &failures);
 }

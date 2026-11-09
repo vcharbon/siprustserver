@@ -24,9 +24,12 @@ use crate::observability::ProxyMetrics;
 ///
 /// In-dialog traffic, responses, other methods, emergency INVITEs and
 /// answerable refusals (the core answers them with its capped 400) are
-/// always queued.
-pub fn intake_shed_hook(watermark: usize, metrics: Arc<ProxyMetrics>) -> PreIngressHook {
-    let parser = CustomParser::new();
+/// always queued. `parser` is the process's one parser, the core's too.
+pub fn intake_shed_hook(
+    watermark: usize,
+    metrics: Arc<ProxyMetrics>,
+    parser: CustomParser,
+) -> PreIngressHook {
     Arc::new(move |arrival, _src, depth| {
         let parsed = arrival.parse(&parser);
         if depth < watermark {

@@ -34,7 +34,8 @@ export const host = (tree: string) =>
       generator: Effect.succeed({ argv: ["false"], cwd: tree }),
       measure: Effect.die("unused"),
       compileMs: Effect.succeed(0),
-      decides: Effect.succeed({ root: tree, extraction: [], cut: [] })
+      decides: Effect.succeed({ root: tree, extraction: [], cut: [] }),
+      reading: []
     }),
     Boxing.layer,
     CaseLayout.layer,

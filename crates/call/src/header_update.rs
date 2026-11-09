@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
@@ -111,25 +112,19 @@ impl<'de> Deserialize<'de> for HeaderUpdate {
             fn visit_string<E: de::Error>(self, v: String) -> Result<HeaderUpdate, E> {
                 Ok(HeaderUpdate::Set(vec![v]))
             }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<HeaderUpdate, A::Error> {
-                let mut lines = Vec::new();
-                while let Some(l) = seq.next_element::<String>()? {
-                    lines.push(l);
-                }
-                Ok(HeaderUpdate::Set(lines))
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<HeaderUpdate, A::Error> {
+                Vec::deserialize(SeqAccessDeserializer::new(seq)).map(HeaderUpdate::Set)
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<HeaderUpdate, A::Error> {
-                let mut lines = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    if key != "add" {
-                        return Err(de::Error::unknown_field(&key, &["add"]));
-                    }
-                    lines = Some(match map.next_value::<HeaderUpdate>()? {
-                        HeaderUpdate::Set(lines) => lines,
-                        _ => return Err(de::Error::custom("`add` states lines")),
-                    });
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<HeaderUpdate, A::Error> {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Add {
+                    add: HeaderUpdate,
                 }
-                lines.map(HeaderUpdate::Add).ok_or_else(|| de::Error::missing_field("add"))
+                match Add::deserialize(MapAccessDeserializer::new(map))?.add {
+                    HeaderUpdate::Set(lines) => Ok(HeaderUpdate::Add(lines)),
+                    _ => Err(de::Error::custom("`add` states lines")),
+                }
             }
         }
         d.deserialize_any(V)
@@ -162,6 +157,8 @@ mod tests {
         assert_eq!(m["E"], HeaderUpdate::Add(vec!["r".into()]));
         assert!(serde_json::from_str::<HeaderUpdate>(r#"{"set": ["x"]}"#).is_err());
         assert!(serde_json::from_str::<HeaderUpdate>(r#"{"add": null}"#).is_err());
+        assert!(serde_json::from_str::<HeaderUpdate>("{}").is_err());
+        assert!(serde_json::from_str::<HeaderUpdate>(r#"{"add": "a", "add": "b"}"#).is_err());
     }
 
     #[test]

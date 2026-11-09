@@ -5,7 +5,9 @@
 //! received/rport — are sip-message draft vocabulary (ADR-0025). What rides the
 //! proxy's OWN Record-Route is policy, and policy is what lives here.
 
+use sip_message::char_class::{is_run_of, is_token_char};
 use sip_message::header::{ParamValue, RecordRouteEntry, Uri, Via};
+use sip_message::sip_str::SipStr;
 
 use crate::addr::ProxyAddr;
 use crate::strategy::{RouteParams, StatedOwners};
@@ -95,20 +97,47 @@ fn stated(worker_via: &Via, name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The flag on a Via this proxy pushed on a request it forwarded internal to
+/// internal: the response comes back on it (`crate::face`).
+const SAME_FACE: &str = "same-face";
+
+/// `via` with the marker of a hop that stayed on one face.
+pub fn via_marking_same_face(via: Via) -> Via {
+    via.with_param(SAME_FACE, ParamValue::Flag)
+}
+
+/// Whether `via`, one of this proxy's own, carries that marker.
+pub fn via_marks_same_face(via: &Via) -> bool {
+    via.param(SAME_FACE).is_some()
+}
+
 /// `via` carrying `cookie`'s fields, if any, after its own params; a field
 /// named like a param `via` already carries is left out, never written over it.
+/// A value that is no token is written as a quoted-string: a URI parameter's
+/// `paramchar` is wider than a Via `gen-value` holds (RFC 3261 §25.1).
 pub fn via_with_cookie(via: Via, cookie: Option<&RouteParams>) -> Via {
     cookie.into_iter().flatten().fold(via, |via, (name, value)| match via.param(name) {
         Some(_) => via,
-        None => via.with_param(name.as_str(), ParamValue::text(value.as_str())),
+        None => via.with_param(name.as_str(), via_value(value)),
     })
 }
 
-/// The transport destination a Route / Record-Route entry names. The port
-/// defaults to 5060 (RFC 3261 §19.1.2); an out-of-range one never reaches here,
-/// because a URI that states it does not parse.
+/// A cookie field's value as a Via `gen-value`: the token as written, any
+/// other text quoted.
+fn via_value(value: &str) -> ParamValue {
+    if is_run_of(value, is_token_char, false) {
+        ParamValue::Token(SipStr::owned(value))
+    } else {
+        ParamValue::Quoted(SipStr::owned(value))
+    }
+}
+
+/// The transport destination a Route / Record-Route entry names, its `maddr`
+/// where it has one ([`Uri::next_hop`]). The port defaults to 5060 (RFC 3261
+/// §19.1.2); an out-of-range one never reaches here, because a URI that states
+/// it does not parse.
 pub fn route_target(uri: &Uri) -> ProxyAddr {
-    let (host, port) = uri.host_port();
+    let (host, port) = uri.next_hop();
     ProxyAddr::new(host, port)
 }
 
@@ -166,6 +195,20 @@ mod tests {
         let stamped = via_with_cookie(via, Some(&cookie));
         assert_eq!(stamped.branch(), Some("z9hG4bKours"));
         assert_eq!(via_cookie_params(&stamped).get("w_pri").map(String::as_str), Some("b2b-1"));
+    }
+
+    /// A key id is any run of URI-parameter characters; on the Via, a value
+    /// that is no token is quoted, and reads back as written.
+    #[test]
+    fn a_cookie_value_that_is_no_token_is_quoted_on_the_via() {
+        let via = Via::udp("10.0.0.1", 5060).with_branch("z9hG4bKours");
+        let mut cookie = cookie();
+        cookie.insert("kid".to_string(), "k-1_2.v[3]:$".to_string());
+        let wire = via_with_cookie(via, Some(&cookie)).to_wire();
+        assert!(wire.contains(";kid=\"k-1_2.v[3]:$\""), "{wire}");
+        assert!(wire.contains(";w_pri=b2b-1"), "a token stays as written: {wire}");
+        let read = <Via as HeaderValue>::parse(&SipStr::owned(&wire)).expect("the Via reads");
+        assert_eq!(via_cookie_params(&read).get("kid").map(String::as_str), Some("k-1_2.v[3]:$"));
     }
 
     #[test]

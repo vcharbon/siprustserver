@@ -1,146 +1,138 @@
-//! Dual-face (multi-homed edge proxy) plane classification — RFC 3261 §16.
+//! Which face a message leaves on (ADR-0048, ADR-0056).
 //!
-//! The deployment splits into two network planes: an **internal** plane
-//! (proxy ↔ b2bua workers; pod/node CIDRs; the internal VIP) and an
-//! **external** plane (where every caller lives, with the external VIP).
-//! Both VIPs are announced by the proxy's node (ADR-0056). The proxy is the
-//! ONLY component bridging the two —
-//! it binds one UDP socket per face and picks the egress socket (and the
-//! advertise stamped on Via / Record-Route) **by destination IP**: an address
-//! inside any configured internal CIDR egresses on the internal face,
-//! everything else on the external face. Trust goes by the face a datagram
-//! arrives on, never by its source address (ADR-0048).
+//! A dual-face proxy bridges two planes, the workers' and the callers', with
+//! one UDP socket and one advertise per face. A message crosses: what arrives
+//! on one face leaves on the other. A request bound for a registry worker that
+//! arrived internal and is no worker's own outbound request stays internal, so
+//! a call looping back through the platform stays on the workers' plane. The
+//! proxy marks the Via it pushes on such a request, and the response comes back
+//! on that marker. An own final leaves from the face that received its request
+//! (RFC 3581 §4).
 //!
-//! [`FaceCidrs`] is that classifier: the parsed `PROXY_FACE_INT_CIDRS`
-//! comma-separated IPv4 CIDR list. It is deliberately IPv4-only (the cluster
-//! planes are IPv4; an IPv6 destination classifies external) and fail-fast:
-//! an empty or unparseable list is a boot refusal, never a silent
-//! default-to-external (which would leak worker traffic onto the caller
-//! plane).
+//! The inputs are the ingress face and what the message and the registry say,
+//! so any proxy instance picks the same egress with nothing stored: the choice
+//! survives a flow move and a takeover, and a request's copies, its CANCEL and
+//! its ACK state one sent-by (RFC 3261 §17.2.3).
 
-use std::net::{IpAddr, Ipv4Addr};
+use crate::observability::metrics::Face;
 
-/// One `a.b.c.d/len` IPv4 CIDR.
+/// The face-picking policy. Only a dual-face proxy crosses; on a single-face
+/// proxy every message stays on its one face.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ipv4Cidr {
-    net: Ipv4Addr,
-    prefix: u8,
+pub(crate) enum EgressPolicy {
+    SingleFace,
+    Crossing,
 }
 
-impl Ipv4Cidr {
-    /// Parse `"10.244.0.0/16"`. Rejects a missing/out-of-range prefix or a
-    /// non-IPv4 network. Host bits below the prefix are masked off (so
-    /// `10.244.1.2/16` classifies like `10.244.0.0/16`).
-    pub fn parse(s: &str) -> Result<Self, String> {
-        let (net, prefix) = s
-            .split_once('/')
-            .ok_or_else(|| format!("CIDR {s:?} missing '/prefix' (want e.g. 10.244.0.0/16)"))?;
-        let net: Ipv4Addr = net
-            .trim()
-            .parse()
-            .map_err(|e| format!("CIDR {s:?} has an unparseable IPv4 network: {e}"))?;
-        let prefix: u8 = prefix
-            .trim()
-            .parse()
-            .map_err(|e| format!("CIDR {s:?} has an unparseable prefix: {e}"))?;
-        if prefix > 32 {
-            return Err(format!("CIDR {s:?} prefix {prefix} out of range 0..=32"));
-        }
-        Ok(Self { net: Ipv4Addr::from(u32::from(net) & Self::mask(prefix)), prefix })
-    }
-
-    fn mask(prefix: u8) -> u32 {
-        if prefix == 0 {
-            0
-        } else {
-            u32::MAX << (32 - prefix)
+impl EgressPolicy {
+    /// The face a forwarded request leaves on. `target_is_worker` is asked only
+    /// of a request arriving internal that is neither `worker_outbound` nor a
+    /// `loose` hop, the one row that reads the registry: such a request bound
+    /// for a worker re-enters the platform.
+    pub(crate) fn request(
+        self,
+        ingress: Face,
+        worker_outbound: bool,
+        loose: bool,
+        target_is_worker: impl FnOnce() -> bool,
+    ) -> Face {
+        match (self, ingress) {
+            (Self::SingleFace, _) | (Self::Crossing, Face::External) => Face::Internal,
+            (Self::Crossing, Face::Internal) if worker_outbound || loose => Face::External,
+            (Self::Crossing, Face::Internal) if target_is_worker() => Face::Internal,
+            (Self::Crossing, Face::Internal) => Face::External,
         }
     }
 
-    /// Is `ip` inside this CIDR?
-    pub fn contains(&self, ip: Ipv4Addr) -> bool {
-        (u32::from(ip) & Self::mask(self.prefix)) == u32::from(self.net)
-    }
-}
-
-/// The internal-plane classifier: the parsed `PROXY_FACE_INT_CIDRS` list.
-/// Destination IP ∈ any listed CIDR → internal face; else → external face.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FaceCidrs {
-    cidrs: Vec<Ipv4Cidr>,
-}
-
-impl FaceCidrs {
-    /// Parse a comma-separated CIDR list (`"10.244.0.0/16,172.20.0.0/16"`).
-    /// An empty list or any unparseable entry is an `Err` — dual-face mode
-    /// must fail fast at boot rather than mis-plane traffic.
-    pub fn parse(list: &str) -> Result<Self, String> {
-        let cidrs: Vec<Ipv4Cidr> = list
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(Ipv4Cidr::parse)
-            .collect::<Result<_, _>>()?;
-        if cidrs.is_empty() {
-            return Err("internal-face CIDR list is empty — dual-face mode needs at least one \
-                 internal CIDR (e.g. PROXY_FACE_INT_CIDRS=10.244.0.0/16,172.20.0.0/16)"
-                .to_string());
-        }
-        Ok(Self { cidrs })
+    /// Whether a request crossing from `ingress` to `egress` stayed on the
+    /// internal face, so the Via pushed on it carries the marker its response
+    /// comes back on.
+    pub(crate) fn marks_the_hop(self, ingress: Face, egress: Face) -> bool {
+        self == Self::Crossing && ingress == Face::Internal && egress == Face::Internal
     }
 
-    /// Is `ip` on the internal plane? IPv6 never matches (the cluster planes
-    /// are IPv4) — an IPv6 destination classifies external.
-    pub fn contains_ip(&self, ip: IpAddr) -> bool {
-        match ip {
-            IpAddr::V4(v4) => self.cidrs.iter().any(|c| c.contains(v4)),
-            IpAddr::V6(_) => false,
+    /// Whether the registry may name what a response arriving on `ingress` is
+    /// for: on a crossing proxy, one that arrived external, or one whose own Via
+    /// carries the marker. An unmarked response arriving internal answers a
+    /// request that left external, which no worker sent, whatever address its
+    /// next Via states.
+    pub(crate) fn response_may_be_a_workers(self, ingress: Face, marked: bool) -> bool {
+        self == Self::SingleFace || ingress == Face::External || marked
+    }
+
+    /// The face a relayed response leaves on. `owner_named`: the owner rule names
+    /// a worker. `marked`: the proxy's own Via this response pops carries the
+    /// marker of [`marks_the_hop`](Self::marks_the_hop). A Via below it is its
+    /// sender's to write, so it decides nothing.
+    pub(crate) fn response(self, ingress: Face, owner_named: bool, marked: bool) -> Face {
+        match (self, ingress) {
+            (Self::SingleFace, _) | (Self::Crossing, Face::External) => Face::Internal,
+            (Self::Crossing, Face::Internal) if owner_named || marked => Face::Internal,
+            (Self::Crossing, Face::Internal) => Face::External,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::EgressPolicy::{Crossing, SingleFace};
+    use crate::observability::metrics::Face::{External, Internal};
 
     #[test]
-    fn parses_and_classifies() {
-        let f = FaceCidrs::parse("10.244.0.0/16, 192.0.2.0/24").unwrap();
-        assert!(f.contains_ip("10.244.3.7".parse().unwrap()));
-        assert!(f.contains_ip("192.0.2.250".parse().unwrap()));
-        assert!(!f.contains_ip("192.168.60.10".parse().unwrap()));
-        assert!(!f.contains_ip("10.245.0.1".parse().unwrap()));
+    fn a_single_face_proxy_stays_on_its_face() {
+        for (outbound, loose, worker) in [(false, false, false), (true, true, true)] {
+            assert_eq!(SingleFace.request(Internal, outbound, loose, || worker), Internal);
+            assert_eq!(SingleFace.response(Internal, worker, worker), Internal);
+            assert!(!SingleFace.marks_the_hop(Internal, Internal));
+        }
     }
 
     #[test]
-    fn masks_host_bits() {
-        let c = Ipv4Cidr::parse("10.244.9.9/16").unwrap();
-        assert!(c.contains("10.244.0.1".parse().unwrap()));
-        assert!(!c.contains("10.243.0.1".parse().unwrap()));
+    fn a_request_crosses_but_a_re_entry() {
+        let table = [
+            (External, false, false, false, Internal),
+            (External, true, true, true, Internal),
+            (Internal, true, false, true, External),
+            (Internal, false, true, true, External),
+            (Internal, false, false, true, Internal),
+            (Internal, false, false, false, External),
+        ];
+        for (ingress, outbound, loose, worker, egress) in table {
+            assert_eq!(Crossing.request(ingress, outbound, loose, || worker), egress);
+        }
     }
 
     #[test]
-    fn prefix_edges() {
-        let all = Ipv4Cidr::parse("0.0.0.0/0").unwrap();
-        assert!(all.contains("203.0.113.9".parse().unwrap()));
-        let one = Ipv4Cidr::parse("10.0.0.1/32").unwrap();
-        assert!(one.contains("10.0.0.1".parse().unwrap()));
-        assert!(!one.contains("10.0.0.2".parse().unwrap()));
+    fn the_registry_is_read_only_for_the_row_that_needs_it() {
+        let unread = || -> bool { panic!("the registry is not read on this row") };
+        assert_eq!(Crossing.request(External, false, false, unread), Internal);
+        assert_eq!(Crossing.request(Internal, true, false, unread), External);
+        assert_eq!(Crossing.request(Internal, false, true, unread), External);
+        assert_eq!(SingleFace.request(Internal, false, false, unread), Internal);
     }
 
     #[test]
-    fn rejects_garbage() {
-        assert!(Ipv4Cidr::parse("10.0.0.0").is_err(), "missing prefix");
-        assert!(Ipv4Cidr::parse("10.0.0.0/33").is_err(), "prefix out of range");
-        assert!(Ipv4Cidr::parse("nope/8").is_err(), "bad network");
-        assert!(Ipv4Cidr::parse("::1/64").is_err(), "IPv6 network rejected");
-        assert!(FaceCidrs::parse("").is_err(), "empty list rejected");
-        assert!(FaceCidrs::parse("10.0.0.0/8,bogus").is_err(), "one bad entry poisons the list");
+    fn a_response_crosses_but_one_the_owner_rule_or_the_marker_keeps() {
+        for (owner_named, marked) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(Crossing.response(External, owner_named, marked), Internal);
+        }
+        assert_eq!(Crossing.response(Internal, true, false), Internal);
+        assert_eq!(Crossing.response(Internal, false, true), Internal);
+        assert_eq!(Crossing.response(Internal, false, false), External);
     }
 
     #[test]
-    fn ipv6_destination_is_external() {
-        let f = FaceCidrs::parse("10.0.0.0/8").unwrap();
-        assert!(!f.contains_ip("::1".parse().unwrap()));
+    fn an_unmarked_response_arriving_internal_is_no_workers() {
+        assert!(!Crossing.response_may_be_a_workers(Internal, false));
+        assert!(Crossing.response_may_be_a_workers(Internal, true));
+        assert!(Crossing.response_may_be_a_workers(External, false));
+        assert!(SingleFace.response_may_be_a_workers(Internal, false));
+    }
+
+    #[test]
+    fn only_a_request_staying_internal_is_marked() {
+        assert!(Crossing.marks_the_hop(Internal, Internal));
+        assert!(!Crossing.marks_the_hop(Internal, External));
+        assert!(!Crossing.marks_the_hop(External, Internal));
     }
 }

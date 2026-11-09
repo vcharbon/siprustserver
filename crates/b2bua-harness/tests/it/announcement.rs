@@ -90,11 +90,10 @@ async fn announcement_happy_path() {
     play.respond(200, "OK").await;
 
     // The MRF reports the clip finished (MSCML <response code="200">).
-    let done_body = String::from_utf8(announcement::mscml::build_response(200)).unwrap();
+    let done_body = announcement::mscml::build_response(200);
     let mut done = mrf_dialog
         .send_request(InDialogMethod::Info)
-        .with_header("Content-Type", "application/mediaservercontrol+xml")
-        .with_sdp(&done_body)
+        .with_body(announcement::mscml::CONTENT_TYPE, done_body)
         .send()
         .await;
     done.expect(200).await;
@@ -162,11 +161,10 @@ async fn a_caller_request_on_the_media_early_dialog_reaches_the_destination() {
     let pem = call.expect(183).await;
     let early_media = pem.to().tag().expect("the 183 names an early dialog").to_string();
     mrf.receive("INFO").await.respond(200, "OK").await;
-    let done_body = String::from_utf8(announcement::mscml::build_response(200)).unwrap();
+    let done_body = announcement::mscml::build_response(200);
     let mut done = mrf_dialog
         .send_request(InDialogMethod::Info)
-        .with_header("Content-Type", "application/mediaservercontrol+xml")
-        .with_sdp(&done_body)
+        .with_body(announcement::mscml::CONTENT_TYPE, done_body)
         .send()
         .await;
     done.expect(200).await;
@@ -251,11 +249,10 @@ async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
 
     // The MRF reports the clip FAILED (MSCML <response code="480"> — a
     // max-duration/no-answer abort). The service rejects the caller.
-    let fail_body = String::from_utf8(announcement::mscml::build_response(480)).unwrap();
+    let fail_body = announcement::mscml::build_response(480);
     let mut failed_info = mrf_dialog
         .send_request(InDialogMethod::Info)
-        .with_header("Content-Type", "application/mediaservercontrol+xml")
-        .with_sdp(&fail_body)
+        .with_body(announcement::mscml::CONTENT_TYPE, fail_body)
         .send()
         .await;
     failed_info.expect(200).await; // the INFO is answered
@@ -315,11 +312,10 @@ async fn crossing_bye_after_reject_gets_200_and_no_second_final_to_caller() {
 
     // The MRF reports the clip FAILED → the service rejects the caller with a
     // 480 on its early dialog and begins termination (BYE toward the media leg).
-    let fail_body = String::from_utf8(announcement::mscml::build_response(480)).unwrap();
+    let fail_body = announcement::mscml::build_response(480);
     let mut failed_info = mrf_dialog
         .send_request(InDialogMethod::Info)
-        .with_header("Content-Type", "application/mediaservercontrol+xml")
-        .with_sdp(&fail_body)
+        .with_body(announcement::mscml::CONTENT_TYPE, fail_body)
         .send()
         .await;
     failed_info.expect(200).await;

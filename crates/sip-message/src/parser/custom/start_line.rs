@@ -54,7 +54,10 @@ pub fn parse_start_line(
         return Err(SipParseError::new("Multiple SP in start line"));
     }
 
-    if span_text(image, &first_token)?.starts_with("SIP/") {
+    // A status line opens with the SIP-Version, case-insensitive (§7.1); no
+    // method holds the `/`, which is no token character.
+    let first = span_text(image, &first_token)?;
+    if first.get(..4).is_some_and(|lead| lead.eq_ignore_ascii_case("SIP/")) {
         parse_status_line(s, image, first_token).map(StartLine::Status)
     } else {
         parse_request_line(s, image, first_token, limits).map(StartLine::Request)
@@ -98,11 +101,11 @@ fn parse_request_line(
     // SIP-Version: rest until CRLF, no trailing whitespace (3.1.2.10).
     let version = read_until_crlf(s);
     let version_text = span_text(image, &version)?;
-    if version_text != version_text.trim_end() {
+    if version_text != crate::whitespace::trim_end(version_text) {
         return Err(SipParseError::new("Trailing whitespace in request line"));
     }
-    if version_text != "SIP/2.0" {
-        return Err(SipParseError::new(format!("Unsupported SIP version: \"{version_text}\"")));
+    if !is_sip_2_0(version_text) {
+        return Err(SipParseError::new(format!("Unsupported SIP version: {version_text:?}")));
     }
 
     s.expect_crlf()?;
@@ -116,8 +119,8 @@ fn parse_status_line(
     version: Span,
 ) -> Result<StatusLine, SipParseError> {
     let version_text = span_text(image, &version)?;
-    if version_text != "SIP/2.0" {
-        return Err(SipParseError::new(format!("Unsupported SIP version: \"{version_text}\"")));
+    if !is_sip_2_0(version_text) {
+        return Err(SipParseError::new(format!("Unsupported SIP version: {version_text:?}")));
     }
 
     // Status-Code: exactly 3 digits.
@@ -127,10 +130,10 @@ fn parse_status_line(
         Ok(status) if status_str.len() == 3 && status_str.bytes().all(|b| b.is_ascii_digit()) => {
             status
         }
-        _ => return Err(SipParseError::new(format!("Invalid status code: \"{status_str}\""))),
+        _ => return Err(SipParseError::new(format!("Invalid status code: {status_str:?}"))),
     };
-    if !(100..=699).contains(&status) {
-        return Err(SipParseError::new(format!("Status code out of range: {status}")));
+    if let Some(refusal) = status_refusal(status) {
+        return Err(refusal);
     }
 
     // SP before reason phrase, but the reason may be empty (3.1.1.13) so the
@@ -149,6 +152,11 @@ fn parse_status_line(
     Ok(StatusLine { version, status, reason })
 }
 
+/// Whether `version` is SIP/2.0, compared ignoring ASCII case (RFC 3261 §7.1).
+pub(crate) fn is_sip_2_0(version: &str) -> bool {
+    version.eq_ignore_ascii_case(crate::draft::SIP_VERSION)
+}
+
 /// Read bytes up to SP, or up to the line end (an empty reason phrase),
 /// without consuming the delimiter.
 fn read_until_sp(s: &mut Scanner) -> Span {
@@ -158,4 +166,16 @@ fn read_until_sp(s: &mut Scanner) -> Span {
 /// Read bytes up to the line's CRLF, without consuming it.
 fn read_until_crlf(s: &mut Scanner) -> Span {
     s.take_while(|b| b != CR && b != LF)
+}
+
+/// The refusal a status code draws in any reading, built or received: RFC 3261
+/// §7.2 gives it six classes, 100 to 699.
+pub(crate) fn status_refusal(status: u16) -> Option<SipParseError> {
+    (!is_status_code(status))
+        .then(|| SipParseError::new(format!("Status code out of range: {status}")))
+}
+
+/// Whether a message can carry `status` (RFC 3261 §7.2: six classes).
+pub fn is_status_code(status: u16) -> bool {
+    (100..=699).contains(&status)
 }

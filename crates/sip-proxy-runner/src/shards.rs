@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_ids::SigningKey;
+use sip_message::CustomParser;
 use sip_net::UdpEndpoint;
 use sip_proxy::cancel_lru::CancelBranchLru;
 use sip_proxy::health::{DeadNotifier, FirstView, HealthProbe, HealthProbeConfig, WorkerReach};
@@ -47,6 +48,8 @@ pub struct SharedRouting {
     pub first_view: Arc<FirstView>,
     /// The last worker answer its health probe heard.
     pub reach: Arc<WorkerReach>,
+    /// The process's one parser, its intake hook's too.
+    pub parser: CustomParser,
 }
 
 impl SharedRouting {
@@ -57,6 +60,7 @@ impl SharedRouting {
             self.strategy.clone(),
             self.registry.clone(),
             self.id_gen.clone(),
+            self.parser.clone(),
         )
         .clock(self.clock.clone())
         .metrics(self.metrics.clone())
@@ -86,6 +90,7 @@ impl SharedRouting {
     ) -> HealthProbe {
         HealthProbe::new(
             endpoint,
+            self.parser.clone(),
             self.registry.clone(),
             control,
             observer,
@@ -108,9 +113,10 @@ impl SharedRouting {
         notice: Box<dyn UdpEndpoint>,
         key: Option<SigningKey>,
     ) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let (registry, clock, id_gen) =
-            (self.registry.clone(), self.clock.clone(), self.id_gen.clone());
-        let notifier = key.map(|key| DeadNotifier::new(notice, registry, key, clock, id_gen));
+        let (parser, registry, clock, id_gen) =
+            (self.parser.clone(), self.registry.clone(), self.clock.clone(), self.id_gen.clone());
+        let notifier =
+            key.map(|key| DeadNotifier::new(notice, parser, registry, key, clock, id_gen));
         if notifier.is_none() {
             tracing::warn!("PROXY_CLUSTER_KEY unset: no dead verdict is told to the workers");
         }

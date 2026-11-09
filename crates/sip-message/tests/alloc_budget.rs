@@ -86,7 +86,7 @@ const BUDGETS: &[Budget] = &[
 /// grammar, past the header-line limit.
 fn crowded_invite() -> sip_message::Bytes {
     let mut wire = String::from(
-        "INVITE sip:bob@example.com SIP/2.0\r\n\
+        "INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-crowd\r\n",
     );
     for _ in 0..12_000 {

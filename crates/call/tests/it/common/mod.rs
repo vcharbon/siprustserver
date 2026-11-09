@@ -113,14 +113,14 @@ pub fn paced_emission(
 
 /// The initial-INVITE 2xx the representative call answered the caller with,
 /// three rungs into its §13.3.1.4 ladder (RFC 3261), her ACK outstanding.
-pub const ANSWERED_2XX: &[u8] = b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-123;rport=5060\r\n\
+pub const ANSWERED_2XX: &[u8] = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-123;rport=5060\r\n\
 From: <sip:alice@example.com>;tag=alice-from-tag-001\r\nTo: <sip:bob@example.com>;tag=b2bua-to-tag-aleg-9876\r\n\
 Call-ID: call-id-deadbeef@example.com\r\nCSeq: 1 INVITE\r\nP-Charging-Vector: icid-value=icid-9f2c\r\n\
 Content-Length: 0\r\n\r\n";
 
 /// The ACK the representative call emitted toward the callee, retained for
 /// the §13.2.2.4 re-ACK.
-pub const EMITTED_ACK: &[u8] = b"ACK sip:bob@192.0.2.20:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-ack-1f45\r\n\
+pub const EMITTED_ACK: &[u8] = b"ACK sip:bob@192.0.2.20:5060 SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-ack-1f45\r\n\
 CSeq: 8005 ACK\r\nContent-Length: 0\r\n\r\n";
 
 /// A realistic confirmed 2-leg call — mirrors `representativeCall` in fixture.ts.

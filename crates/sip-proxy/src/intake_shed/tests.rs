@@ -17,7 +17,7 @@ fn src() -> SocketAddr {
 /// The hook at [`WATERMARK`], and the metrics it counts its drops in.
 fn shed_hook() -> (PreIngressHook, Arc<ProxyMetrics>) {
     let metrics = Arc::new(ProxyMetrics::new());
-    (intake_shed_hook(WATERMARK, metrics.clone()), metrics)
+    (intake_shed_hook(WATERMARK, metrics.clone(), CustomParser::new()), metrics)
 }
 
 /// The hook's verdict on `raw` arriving at queue depth `depth`.
@@ -28,7 +28,7 @@ fn judge(hook: &PreIngressHook, raw: &[u8], depth: usize) -> PreIngressAction {
 /// A new INVITE whose To header line is `to`.
 fn invite_with_to(to: &str) -> Vec<u8> {
     format!(
-        "INVITE sip:bob@192.0.2.20:5070 SIP/2.0\r\n\
+        "INVITE sip:bob@192.0.2.20:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-shape\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@example.com>;tag=a1\r\n\
@@ -38,32 +38,32 @@ Call-ID: shape@192.0.2.10\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
     .into_bytes()
 }
 
-const NEW_INVITE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+const NEW_INVITE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-shed\r\n\
 From: <sip:alice@example.com>;tag=a1\r\n\
 To: <sip:bob@example.com>\r\n\
 Call-ID: shed@10.0.0.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
 
-const IN_DIALOG_INVITE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+const IN_DIALOG_INVITE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-re\r\n\
 From: <sip:alice@example.com>;tag=a1\r\n\
 To: <sip:bob@example.com>;tag=b2\r\n\
 Call-ID: shed@10.0.0.1\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n";
 
-const EMERGENCY_INVITE: &[u8] = b"INVITE sip:911@10.0.0.2:5070 SIP/2.0\r\n\
+const EMERGENCY_INVITE: &[u8] = b"INVITE sip:911@10.0.0.2:5070 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-em\r\n\
 From: <sip:alice@example.com>;tag=a1\r\n\
 To: <sip:911@example.com>\r\n\
 Resource-Priority: esnet.0\r\n\
 Call-ID: em@10.0.0.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
 
-const BYE: &[u8] = b"BYE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+const BYE: &[u8] = b"BYE sip:bob@10.0.0.2:5070 SIP/2.0\r\nMax-Forwards: 70\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-bye\r\n\
 From: <sip:alice@example.com>;tag=a1\r\n\
 To: <sip:bob@example.com>;tag=b2\r\n\
 Call-ID: shed@10.0.0.1\r\nCSeq: 3 BYE\r\nContent-Length: 0\r\n\r\n";
 
-const OK_200: &[u8] = b"SIP/2.0 200 OK\r\n\
+const OK_200: &[u8] = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-shed\r\n\
 From: <sip:alice@example.com>;tag=a1\r\n\
 To: <sip:bob@example.com>;tag=b2\r\n\
@@ -74,7 +74,8 @@ const GARBAGE: &[u8] = b"\x00 not SIP";
 
 /// A new INVITE the parser refuses on a gate (a non-numeric Expires) with
 /// every field a 400 echoes intact.
-const ANSWERABLE: &[u8] = b"INVITE sip:bob@192.0.2.20:5070 SIP/2.0\r\n\
+const ANSWERABLE: &[u8] =
+    b"INVITE sip:bob@192.0.2.20:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-answerable\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@example.com>;tag=a1\r\n\

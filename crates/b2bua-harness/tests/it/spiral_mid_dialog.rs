@@ -361,7 +361,10 @@ async fn reliable_provisional(name: &str, record_route: RecordRoute) {
     uas.respond(183, "Session Progress").reliable(BOB_RSEQ).with_sdp(ANSWER_SDP).await;
     let p183 = call.expect(183).await;
     assert!(
-        p183.header::<Require>().expect("a Require").expect("readable Require").contains("100rel"),
+        p183.token_set::<Require>()
+            .expect("a Require")
+            .expect("readable Require")
+            .contains("100rel"),
         "the provisional reaches alice reliable",
     );
     let mut prack = call.try_prack(&p183).await.expect("alice PRACKs the reliable 183");

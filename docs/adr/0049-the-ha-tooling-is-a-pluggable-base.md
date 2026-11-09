@@ -203,6 +203,7 @@ tolerated (§3).
     | `kill_worker` | fault | crash one worker: SIGKILL its processes from the node, proven dead; the kubelet restarts it | `kill_worker` |
     | `kill_worker_graceful` | fault | delete one worker pod with its grace period | `kill_worker` with `KILL_GRACE` |
     | `kill_worker_held` | fault | crash one worker and keep it absent for `duration_s` (the nodes it may run on tainted NoSchedule), then let it start once | (new) |
+    | `kill_worker_loop` | fault | crash one worker and each restart of it, `kill_after_s` after it runs, until the kubelet's backoff kept it away `away_s` | (new) |
     | `kill_proxy` | fault | crash one front proxy; time its node's withdrawal from the VIPs' routes | `kill_proxy` |
     | `proxy_rollout` | fault | a rollout restart of the proxies, each drained past its node's withdrawal; time the drain-to-withdrawal | (new) |
     | `speaker_restart` | fault | restart the BGP speakers of one proxy's node | (new) |
@@ -223,6 +224,7 @@ tolerated (§3).
     | `io_stall` | fault | delay the file operations of one pod's volume for `duration_s` (Chaos Mesh) | (new) |
     | `clock_skew` | fault | shift one pod's wall clock for `duration_s` (Chaos Mesh) | (new) |
     | `cut_external_plane` | fault | disconnect one proxy's node from the callers' network; time its withdrawal from both VIPs' routes | `cut_external_plane` |
+    | `next_hop_dead` | fault | silence a next hop of one or both proxy nodes with the carrier up, below IP and ARP; time the withdrawal and the proxy's unfit reading; the node returns with nothing sent from outside | (new) |
     | `spike` | load | a burst stream, drained at heal | `peak` |
     | `abuse` | load | a stream of an abuse scenario, drained at heal | `abuse_up`, `abuse_down` |
     | `orphan` | load | a stream abandoned mid-call at heal (`stop: abandon`) | `orphan_kill` |
@@ -254,6 +256,8 @@ made. A run profile joins the two.
    | class | from the record | instant | budget |
    |---|---|---|---|
    | `setup_failed` | the call ended before answer some other way than its shape expects: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0), where the shape expects `answered` or the setup drew no final at all. Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms`; one outside every window belongs to the first window open while it was pending (§3.5) | per key |
+   | `silent_after_provisional` | `ending: timeout`, no final, and a provisional heard by the give-up, 100 Trying included (`trying_at_ms`, `first_provisional_at_ms`): past it the caller sends nothing more (RFC 3261 §17.1.1.2), so only its own timer ends the wait. A profile states `final_wait_s` past every bound the system under test keeps on a caller, so a call served late is not one | the give-up; it belongs to the first window open while it was pending (§3.5) | 0, never budgeted: a budget has no place for it |
+   | `final_late` | a final more than the stream's `setup_deadline_s` after the first provisional heard, 100 Trying included: `setup_slow` stops at that provisional, and a `final_wait_s` past the deadline leaves this wait otherwise unread. Not a caller's own CANCEL's final | the final; it belongs to the first window open while it was pending (§3.5) | count; a budget allows it by name |
    | `unexpected_ending` | any other caller ending not in `expected` (a final with another code where only a reject is expected, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms`; a leg of an answered call at `ended_at_ms`, when it is known missing; a consult's contract refusal (§3.2) at the refusal | per key before answer; 0 after answer but a consult's contract refusal |
    | `setup_slow` | from `started_at_ms` to `first_provisional_at_ms` (to `setup_ended_at_ms` when no provisional came) above the threshold; ring time never counts; a setup that drew no response at all takes none (it is a `setup_failed`) | that instant | count |
    | `dialog_request_failed` | each `failures` entry of kind `dialog_request` | its `at_ms` | 0 |
@@ -361,8 +365,10 @@ made. A run profile joins the two.
 7. **Timing bounds.** `settle_s` is at least the longest `setup_deadline_s`
    of the streams plus 1 s (the tick at which a generator checks its
    deadline), so a call stranded at the fault reaches its deadline inside
-   the window; `drain_s` is at least max(`setup_deadline_s`,
-   `ring_s` + `hold_s`) of every stream. The runner refuses a profile that
+   the window; a caller who heard a provisional waits `final_wait_s`, past
+   that tail, and belongs to the first window open while it was pending (§3.5);
+   `drain_s` is at least the longest a call of every stream can take, its
+   give-up included. The runner refuses a profile that
    breaks either. The dry-run checks that no two windows overlap using each
    event's `expected_s` (default `duration_s` + 60) plus `settle_s`; with the
    defaults (`settle_s` 60) a kill every 3 minutes passes. A window of the
@@ -547,11 +553,13 @@ made. A run profile joins the two.
    `call-outcome.v1` record (`tooling/hakit/schemas/call-outcome.v1.schema.json`)
    when it is done with a call, on every exit path: success, failure,
    timeout, abort. The record states the caller's facts (`started_at_ms`,
-   `first_provisional_at_ms`, `setup_ended_at_ms`, `answered_at_ms`,
-   `ended_at_ms`, `phase_reached`, `final_code`, `reason`,
+   `first_provisional_at_ms`, `trying_at_ms`, `setup_ended_at_ms`,
+   `answered_at_ms`, `ended_at_ms`, `phase_reached`, `final_code`, `reason`,
    `retry_after_s`, `ending`, `early_media`, `failures`, `legs`) and never a
    judgement. The first provisional is the first past 100 Trying, which is
-   the next hop's own acknowledgement (RFC 3261 §8.2.6.1); `retry_after_s` is
+   the next hop's own acknowledgement (RFC 3261 §8.2.6.1), so it measures the
+   setup; `trying_at_ms` is that 100, which is what stops the caller's
+   retransmissions; `retry_after_s` is
    the delta-seconds of the final's Retry-After, absent without one. The generator's
    own class goes in `producer_verdict`, which the classifier does not read,
    so a generator cannot excuse a call.
@@ -618,7 +626,7 @@ made. A run profile joins the two.
 
    A scenario's variants are `-key` parameters. It declares the default of
    each key it reads beyond the runner's own (`run`, `stream`, `shape`,
-   `hold_ms`, `setup_ms`) in its header comment, one line
+   `hold_ms`, `setup_ms`, `final_ms`) in its header comment, one line
    `hakit-key: <name>=<value>` each; the
    runner passes the defaults under the stream's `params`, and refuses a
    profile whose stream leaves a key the scenario reads unset. The base has

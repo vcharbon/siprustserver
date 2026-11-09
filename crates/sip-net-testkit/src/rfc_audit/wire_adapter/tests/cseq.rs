@@ -20,6 +20,25 @@ fn a_cseq_reuse_is_reported_on_the_lane_that_took_it() {
     assert_eq!(out[0].2, Some(2), "offending points at the reusing BYE");
 }
 
+/// A request no reading accepts (a single-valued header stated twice) still
+/// moves its dialog's CSeq: the next request follows it (RFC 3261 §12.2.1.1),
+/// and a byte-identical copy of it is its repeat.
+#[test]
+fn a_request_no_reading_accepts_still_moves_the_dialog_cseq() {
+    let refused = String::from_utf8(req("INFO", "z9hG4bK-n", 2, Some("bt")))
+        .expect("text")
+        .replace("Content-Length:", "Subject: a\r\nSubject: b\r\nContent-Length:")
+        .into_bytes();
+    let evs = vec![
+        recv(SUT, req("OPTIONS", "z9hG4bK-o", 1, Some("bt")), ALICE, 0),
+        recv(SUT, refused.clone(), ALICE, 1),
+        recv(SUT, refused, ALICE, 2),
+        recv(SUT, req("BYE", "z9hG4bK-b", 3, Some("bt")), ALICE, 3),
+    ];
+    let out = live(RuleId::CseqInDialogOrder).check_positioned(&evs);
+    assert!(out.is_empty(), "{out:?}");
+}
+
 /// A fully recorded fabric carries every datagram twice — the sender's
 /// `SendCalled` and the taker's `RecvItem`. The taker vantage reports it
 /// ONCE: the sender's own view judges the same stream but is not its taker.

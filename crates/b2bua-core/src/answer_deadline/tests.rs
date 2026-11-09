@@ -5,8 +5,8 @@ use super::*;
 const BUDGETS: AnswerBudgets = AnswerBudgets {
     http: Duration::from_secs(3),
     admit: Duration::from_millis(150),
-    failure: Some(Duration::from_secs(40)),
-    release: Some(Duration::from_secs(8)),
+    failure: Duration::from_secs(40),
+    release: Duration::from_secs(8),
 };
 const NOW: i64 = 10_000;
 
@@ -277,12 +277,8 @@ fn failure_deadline(change: u64) -> TimerType {
 #[test]
 fn a_failure_consult_is_answered_by_its_whole_chain() {
     let (decision, admit) = (Duration::from_secs(5), Duration::from_millis(150));
-    assert_eq!(
-        failure_budget(decision, admit),
-        Some((decision + admit + ADMIT_SLACK) * FAILURE_CHAIN)
-    );
+    assert_eq!(failure_budget(decision, admit), (decision + admit + ADMIT_SLACK) * FAILURE_CHAIN);
     assert_eq!(FAILURE_CHAIN, 6, "the first consult and five re-consults");
-    assert_eq!(failure_budget(Duration::ZERO, admit), None, "an unbounded consult");
 }
 
 #[test]
@@ -306,14 +302,6 @@ fn named(result: &HandlerResult) -> Option<u64> {
 fn a_failure_consult_names_the_deadline_armed_for_it() {
     let result = arm(sending(call(), vec![failure_consult(4)]), &BUDGETS, NOW);
     assert_eq!(named(&result), Some(4));
-}
-
-#[test]
-fn an_unbounded_failure_consult_arms_no_deadline() {
-    let budgets = AnswerBudgets { failure: None, ..BUDGETS };
-    let result = arm(sending(call(), vec![failure_consult(4)]), &budgets, NOW);
-    assert!(result.call.timers.is_empty() && result.effects.critical.is_empty());
-    assert_eq!(named(&result), None, "its fold names no deadline");
 }
 
 #[test]
@@ -409,8 +397,7 @@ fn release_fold(change: Option<u64>) -> CallEvent {
 #[test]
 fn a_release_consult_is_answered_by_its_decision_and_its_route_s_admit() {
     let (decision, admit) = (Duration::from_secs(5), Duration::from_millis(2_650));
-    assert_eq!(release_budget(decision, admit), Some(decision + admit + ADMIT_SLACK));
-    assert_eq!(release_budget(Duration::ZERO, admit), None, "an unbounded consult");
+    assert_eq!(release_budget(decision, admit), decision + admit + ADMIT_SLACK);
 }
 
 #[test]

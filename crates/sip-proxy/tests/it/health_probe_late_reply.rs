@@ -49,6 +49,7 @@ use sip_message::generators::{
 };
 use sip_message::header::{self, Uri, Via};
 use sip_message::parser::custom::CustomParser;
+use sip_message::received::observed_source;
 use sip_message::types::SipHeader;
 use sip_message::{serialize, SipMessage, SipParser, SipStr};
 use sip_net::UdpEndpoint;
@@ -118,6 +119,7 @@ fn spawn_late_responder(
             // carries the same branch the probe is waiting on: it correlates
             // even though it is deliberately late.
             let opts = GenerateResponseOpts {
+                incoming_source: Some(observed_source(pkt.src)),
                 to_tag: Some("probe-uas".into()),
                 extra_headers: crate::common::options_capabilities()
                     .into_iter()
@@ -181,6 +183,7 @@ fn spawn_capture_responder(ep: Box<dyn UdpEndpoint>) -> (tokio::task::JoinHandle
                         continue;
                     }
                     let opts = GenerateResponseOpts {
+                        incoming_source: Some(observed_source(pkt.src)),
                         to_tag: Some("probe-uas".into()),
                         extra_headers: crate::common::options_capabilities(),
                         ..Default::default()
@@ -218,6 +221,7 @@ async fn spawn_probe(
     let (probe_ep, _probe_sock) = h.bind_sut("probe", probe_addr).await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry,
         control,
         observer,

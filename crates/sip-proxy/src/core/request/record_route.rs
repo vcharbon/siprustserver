@@ -1,6 +1,7 @@
 //! Double-Record-Route insertion — in-dialog DIRECTION is intrinsic to the
 //! proxy's own self-issued RR pair (stickiness-cookie half + `;outbound`
-//! half), each half stamped with the advertise of the face that will use it.
+//! half), the top entry stamped with the egress face's advertise and the lower
+//! one with the ingress face's.
 //! Route *popping* / direction *reading* does NOT live here — see
 //! [`route`](super::route).
 
@@ -11,6 +12,7 @@ use sip_message::{SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::headers::{record_route, record_route_flagged, stated_owners};
+use crate::observability::metrics::Face;
 use crate::strategy::RouteParams;
 
 use super::super::{is_dialog_creating, ProxyCore};
@@ -23,7 +25,8 @@ impl ProxyCore {
     /// the established route set. Returns the draft and the stickiness cookie
     /// the inserted RR carries (`None` when nothing was inserted or the
     /// strategy has no per-dialog stickiness). `repeated` is the cookie the
-    /// first copy of a retransmitted request carried: it is used again.
+    /// first copy of a retransmitted request carried: it is used again. `faces`
+    /// is the request's ingress and egress face.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn insert_double_record_route(
         &self,
@@ -35,6 +38,7 @@ impl ProxyCore {
         is_worker_outbound: bool,
         via_worker_addr: &Option<ProxyAddr>,
         repeated: Option<&RouteParams>,
+        faces: (Face, Face),
     ) -> (RequestDraft, Option<RouteParams>) {
         let method = req.method().as_str();
         let is_initial_dialog_req = req.to().tag().map(str::is_empty).unwrap_or(true);
@@ -79,32 +83,18 @@ impl ProxyCore {
                 self.strategy.encode_stickiness(&cookie_addr, msg)
             }
         });
-        // Dual-face (§16.6/§16.7 multi-homed): stamp each half of the
-        // double-RR with the advertise of the face facing the party that
-        // will USE it —
-        //   • cookie RR   → the EXTERNAL party's face (the caller for an
-        //     inbound dialog-forming request = the source's face; the
-        //     callee for a worker-outbound one = the target's face), so
-        //     that party's in-dialog requests reach the proxy on the face
-        //     it lives on;
-        //   • outbound RR → the WORKER party's face (the forward target
-        //     for inbound; the originating worker for worker-outbound) —
-        //     the internal plane in the deployed topology.
-        // The §12.1.1/§12.1.2 route-set rules then put the correct face on
-        // top of each party's route set on their own. When both resolve to
-        // the SAME face (single-face mode, intra-face forwarding) this is
-        // byte-identical to the single-advertise double-RR.
-        let external_party_adv = if is_worker_outbound {
-            self.egress_advertised(target)
-        } else {
-            self.advertised_for_ip(src.ip())
-        };
-        let worker_party_adv = if is_worker_outbound {
-            self.egress_advertised(&cookie_addr)
-        } else {
-            self.egress_advertised(target)
-        };
-        let cross_face = external_party_adv != worker_party_adv;
+        // Dual-face (§16.6/§16.7 multi-homed): the §12.1.1/§12.1.2 route-set
+        // rules put the top entry first for the party this request goes to and
+        // the lower entry first for the party it came from, so each party's
+        // requests reach the proxy on the face that party talks to: the top
+        // entry states the egress face, the lower one the ingress face. The
+        // marker stays on the worker's half. When both are one face (single-face
+        // mode) this is byte-identical to the single-advertise double-RR.
+        let (ingress, egress) = faces;
+        let (ingress_adv, egress_adv) = (self.advertised_of(ingress), self.advertised_of(egress));
+        let (external_party_adv, worker_party_adv) =
+            if is_worker_outbound { (egress_adv, ingress_adv) } else { (ingress_adv, egress_adv) };
+        let cross_face = ingress_adv != egress_adv;
         let cookie_rr = match &stickiness {
             Some(params) => record_route(external_party_adv, params.iter()),
             None => record_route(external_party_adv, std::iter::empty()),

@@ -1,5 +1,6 @@
 //! [`TransactionConfig`]: the transaction layer's tunables.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::rng::IdGen;
@@ -77,8 +78,8 @@ pub struct TransactionConfig {
     /// and an initial INVITE this layer admits is held there while its
     /// transaction lives. `None` — the default — shares nothing.
     pub invite_refusals: Option<InviteRefusals>,
-    /// The consumer's switch on new calls ([`NewCallGate`]), read as each new
-    /// INVITE arrives; it refuses through
+    /// The consumer's switch on new calls and the age of its queue
+    /// ([`NewCallGate`]), read as each new INVITE arrives; it refuses through
     /// [`invite_refusals`](Self::invite_refusals), which it requires. `None`
     /// — the default — reads none.
     pub new_call_gate: Option<NewCallGate>,
@@ -95,6 +96,10 @@ pub struct TransactionConfig {
     /// newest and counts it; the prober repeats. `None` — the default — runs
     /// no lane: every OPTIONS rides the event queue.
     pub keepalive_lane: Option<usize>,
+    /// The address every request the layer builds itself leaves for, whatever
+    /// its Route or Request-URI says: the front proxy's, for an element behind
+    /// one. `None`, the default: such a request goes to its own next hop.
+    pub first_hop: Option<SocketAddr>,
     /// The `hostport` this element is advertised as, which names it as the
     /// warn-agent of the 400 answering a refused request (RFC 3261 §20.43).
     /// `None` — the default — names it by the address the 400 leaves from.
@@ -114,7 +119,7 @@ impl TransactionConfig {
     /// The defaults, identifiers drawn from `id_gen`: a 256-datagram receive
     /// queue, the RFC 3261 INVITE bounds and first-provisional bound, strict To-tag binding, no deferred
     /// bound, no shared refusals, no new-call gate, a transaction per OPTIONS, no keepalive
-    /// lane, no advertised address.
+    /// lane, no first hop, no advertised address.
     pub fn new(id_gen: Arc<IdGen>) -> Self {
         Self {
             udp_queue_max: 256,
@@ -131,6 +136,7 @@ impl TransactionConfig {
             new_call_gate: None,
             stateless_options: false,
             keepalive_lane: None,
+            first_hop: None,
             advertised: None,
         }
     }

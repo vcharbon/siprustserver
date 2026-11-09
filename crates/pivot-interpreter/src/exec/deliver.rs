@@ -137,7 +137,13 @@ impl<'a, 'p> Runner<'a, 'p> {
             };
             let late_cancel = |step: &CompiledStep| {
                 let opener = self.instance.cursor().opening_send(&step.id);
-                cancel::answers_late_cancel(step, &inbound, &ladder, opener)
+                cancel::answers_late_cancel(
+                    self.instance.recording().reader(),
+                    step,
+                    &inbound,
+                    &ladder,
+                    opener,
+                )
             };
             let gates = |step: &CompiledStep| {
                 gate::discriminates(step, &inbound).matches() || late_cancel(step)
@@ -269,7 +275,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         confirmed_before: bool,
         seq: Option<u64>,
     ) -> Charged {
-        let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
+        let recording = self.instance.recording();
+        let ladder = recording.legs().remove(leg).unwrap_or_default();
         let (closest, own_transaction, retired, released, omitted, ends) = {
             let cursor = self.instance.cursor();
             let items = &self.instance.plan().program().items;
@@ -281,7 +288,8 @@ impl<'a, 'p> Runner<'a, 'p> {
                     retirable: items[step.loc.item].kind == ItemKind::Message,
                 })
                 .collect();
-            let unmatched = progress::unmatched(inbound, &armed, &ladder, confirmed_before)
+            let reader = recording.reader();
+            let unmatched = progress::unmatched(reader, inbound, &armed, &ladder, confirmed_before)
                 .expect("the leg has an armed expect");
             (
                 unmatched.charged.clone(),

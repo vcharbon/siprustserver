@@ -94,9 +94,8 @@ pub struct RouteFacts<'a> {
     pub decision: RoutingDecisionKind,
     /// The hop the request was forwarded to.
     pub target: &'a ProxyAddr,
-    /// The face it egresses on; `None` for a DNS-named target, whose face is
-    /// only known once resolved.
-    pub face: Option<Face>,
+    /// The face it egresses on.
+    pub face: Face,
     /// `hit` / `backup` / `miss` when the stickiness cookie was consulted,
     /// `None` when the decision never looked at one.
     pub stickiness: Option<&'static str>,
@@ -108,7 +107,7 @@ impl RouteFacts<'_> {
             "{} target={} face={} stickiness={}",
             self.decision.as_str(),
             self.target,
-            self.face.map(Face::as_str).unwrap_or("unresolved"),
+            self.face.as_str(),
             self.stickiness.unwrap_or("n/a"),
         )
     }
@@ -119,7 +118,7 @@ mod tests {
     use super::*;
     use observe::{activation_bucket, RateDraw, SampleAdmission};
 
-    const WIRE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\r\n";
+    const WIRE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\r\n";
 
     fn traces(exporter: bool) -> ProxyTraces {
         ProxyTraces::new(
@@ -136,7 +135,7 @@ mod tests {
         RouteFacts {
             decision: RoutingDecisionKind::DecodeForward,
             target,
-            face: Some(Face::Internal),
+            face: Face::Internal,
             stickiness: Some("hit"),
         }
     }

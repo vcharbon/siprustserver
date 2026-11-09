@@ -11,7 +11,7 @@ use sip_message::{
     ContactSet, CustomParser, InDialogRequest, SipMessage, SipParser, SipResponseTagged,
 };
 
-const BYE: &[u8] = b"BYE sip:alice@pc33.example.com SIP/2.0\r\n\
+const BYE: &[u8] = b"BYE sip:alice@pc33.example.com SIP/2.0\r\nMax-Forwards: 70\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK2\r\n\
 From: Bob <sip:bob@example.com>;tag=as83kf\r\n\
 To: Alice <sip:alice@example.com>;tag=1928\r\n\
@@ -19,7 +19,7 @@ Call-ID: a84b4c76e66710@pc33.example.com\r\n\
 CSeq: 1 BYE\r\n\
 Content-Length: 0\r\n\r\n";
 
-const OK_200: &[u8] = b"SIP/2.0 200 OK\r\n\
+const OK_200: &[u8] = b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
 From: Alice <sip:alice@example.com>;tag=1928\r\n\
 To: Bob <sip:bob@example.com>;tag=as83kf\r\n\

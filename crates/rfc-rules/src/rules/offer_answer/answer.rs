@@ -211,8 +211,9 @@ fn answer_valid_for_offer(offer: SdpDirection, answer: SdpDirection) -> bool {
 /// admits.** The pair states who sends: an answer of `sendonly` to `sendonly`
 /// leaves both ends transmitting and neither receiving, and an answer of
 /// anything but `inactive` to `inactive` claims a stream the offerer disabled.
-/// An `m=` block carrying no direction attribute states `sendrecv`, the default
-/// §6.1 defines — an absence, never an unknown.
+/// A stream's direction is its own attribute, else the session-level one
+/// (RFC 4566 §5), else `sendrecv`, the default §6.1 defines — an absence,
+/// never an unknown.
 ///
 /// Charges the ANSWERER, over the positions both descriptions hold. One finding
 /// per answer, naming every mis-paired position.
@@ -228,7 +229,8 @@ impl Obligation for DirectionPairValid {
             let mut offered_directions = Vec::new();
             let mut answered_directions = Vec::new();
             for (i, (o, n)) in offer.doc.media.iter().zip(answer.doc.media.iter()).enumerate() {
-                let (od, nd) = (sdp_doc::extract_direction(o), sdp_doc::extract_direction(n));
+                let od = sdp_doc::extract_direction(&offer.doc, o);
+                let nd = sdp_doc::extract_direction(&answer.doc, n);
                 if answer_valid_for_offer(od, nd) {
                     continue;
                 }

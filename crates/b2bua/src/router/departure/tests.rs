@@ -113,7 +113,7 @@ async fn a_dead_verdict_asks_an_undecided_calls_decision_again_and_leaves_an_end
         put(&n.store, call).await;
     }
 
-    assert!(take_over_read_dead(ctx, "w0"), "this node backs calls of w0");
+    assert!(take_over_read_dead(ctx, "w0", None), "this node backs calls of w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
     assert!(lines.is_empty(), "nothing reaches the caller: {lines:?}");
@@ -122,7 +122,7 @@ async fn a_dead_verdict_asks_an_undecided_calls_decision_again_and_leaves_an_end
     assert!(!copy.b_legs.is_empty(), "its decision was asked again and the callee dialled");
     assert!(n.cdr.snapshot().is_empty(), "nothing discharged");
     assert_eq!(element(&n.store, &ended.call_ref).await.state, CallModelState::Terminated);
-    assert!(!take_over_read_dead(ctx, "w9"), "no call of w9 is backed here");
+    assert!(!take_over_read_dead(ctx, "w9", None), "no call of w9 is backed here");
 }
 
 /// A call whose ending the departed peer finished with its last write lost:

@@ -41,8 +41,8 @@ fn uncharged(call: &Call, kind: Option<LegKind>) -> bool {
 
 /// The media leg's INVITE `effect` mints on `leg` with no `P-Charging-Vector`
 /// where the deployment leaves media legs uncharged and the decision's
-/// `header_updates` state none for it; the leg's handles hold the INVITE as it
-/// leaves.
+/// `header_updates` state none for it, a set the INVITE left out counting as
+/// none; the leg's handles hold the INVITE as it leaves.
 pub fn uncharge_media_leg(
     call: &Call,
     kind: Option<LegKind>,
@@ -51,7 +51,12 @@ pub fn uncharge_media_leg(
     effect: &mut crate::effects::OutboundSipEffect,
 ) {
     let name = ChargingVector::header_name();
-    if !uncharged(call, kind) || header_updates.iter().any(|(n, _)| name.matches(n)) {
+    let removed = header_updates.iter().any(|(n, v)| v.is_none() && name.matches(n));
+    let kept = crate::rules::relay::decided_sets(header_updates, &mut Vec::new());
+    let stated = kept.iter().any(|h| {
+        name.matches(&h.name) && sip_message::write_check::header_line(&h.name, &h.value).is_ok()
+    });
+    if !uncharged(call, kind) || removed || stated {
         return;
     }
     if let crate::effects::OutboundBody::Request(req) = &mut effect.body {

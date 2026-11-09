@@ -92,7 +92,20 @@ def rejected(call_id: str, started: float, code: int, reason: str, stream: str =
 
 
 def timed_out(call_id: str, started: float, deadline_ms: float = 32_000) -> Json:
-    return record(call_id, started, "timeout", answered=None, setup=deadline_ms, code=None, reason="timeout", ended=deadline_ms)
+    """A setup that drew no response at all by its deadline."""
+    return record(
+        call_id, started, "timeout", provisional=None, answered=None, setup=deadline_ms, code=None, reason="timeout", ended=deadline_ms
+    )
+
+
+def silent_after(call_id: str, started: float, *, trying: float | None = 20, provisional: float | None = None, deadline_ms: float = 250_000) -> Json:
+    """A setup that drew a 100 Trying (`trying`) or a later provisional, then no
+    final by the generator's give-up; `trying` and `provisional` are offsets in ms."""
+    r = record(
+        call_id, started, "timeout", provisional=provisional, answered=None, setup=deadline_ms, code=None, reason="timeout", ended=deadline_ms
+    )
+    r["trying_at_ms"] = None if trying is None else started + trying
+    return r
 
 
 def paced(prefix: str, from_ms: float, to_ms: float, cps: float, **kw: object) -> list[Json]:

@@ -75,7 +75,8 @@ const tools = Tools.layerWith({
   generator: Effect.die("unused"),
   measure: Effect.die("unused"),
   compileMs: Effect.succeed(0),
-  decides: Effect.die("unused")
+  decides: Effect.die("unused"),
+  reading: []
 })
 
 /** Cell services the fake driver never reaches for, built so the phase can provide them. */

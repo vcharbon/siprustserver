@@ -590,7 +590,7 @@ fn received(requests: &[&str]) -> MscmlRequests {
     for (cseq, inner) in requests.iter().enumerate() {
         let body = mscml_body(inner);
         let raw = format!(
-            "INFO sip:ms@127.0.0.1:5070 SIP/2.0\r\n\
+            "INFO sip:ms@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\n\
                  Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-{cseq}\r\n\
                  From: <sip:as@example.invalid>;tag=a1\r\n\
                  To: <sip:ms@example.invalid>;tag=b1\r\n\

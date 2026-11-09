@@ -1,5 +1,7 @@
-//! Compact header form expansion: the forms of RFC 3261 §7.3.3, and
-//! Session-Expires's `x` (RFC 4028 §4).
+//! Compact header form expansion: the forms of RFC 3261 §7.3.3, Event's `o`
+//! and Allow-Events' `u` (RFC 6665 §8.2.1), Refer-To's `r` (RFC 3515 §2.1),
+//! Referred-By's `b` (RFC 3892 §3) and Session-Expires's `x` (RFC 4028 §4).
+//! This table is the one every reader of a header name consults.
 
 use super::scanner::Span;
 use crate::sip_str::{SharedText, SipStr};
@@ -28,30 +30,28 @@ pub fn compact_form_canonical(name: &str) -> Option<&'static str> {
     canonical_of(name)
 }
 
-/// The canonical long form of a single-character compact name. A non-ASCII
-/// char whose lowercase is a single char folds the same way the wire form did.
+/// The canonical long form of a single-character compact name, its letter
+/// compared ignoring ASCII case.
 fn canonical_of(name: &str) -> Option<&'static str> {
-    let mut it = name.chars();
-    let (Some(c), None) = (it.next(), it.next()) else {
+    let [letter] = name.as_bytes() else {
         return None;
     };
-    let mut lower_it = c.to_lowercase();
-    let lower = match (lower_it.next(), lower_it.next()) {
-        (Some(l), None) => l,
-        _ => c,
-    };
-    match lower {
-        'i' => Some("Call-ID"),
-        'm' => Some("Contact"),
-        'e' => Some("Content-Encoding"),
-        'l' => Some("Content-Length"),
-        'c' => Some("Content-Type"),
-        'f' => Some("From"),
-        's' => Some("Subject"),
-        'k' => Some("Supported"),
-        't' => Some("To"),
-        'v' => Some("Via"),
-        'x' => Some("Session-Expires"),
+    match letter.to_ascii_lowercase() {
+        b'b' => Some("Referred-By"),
+        b'c' => Some("Content-Type"),
+        b'e' => Some("Content-Encoding"),
+        b'f' => Some("From"),
+        b'i' => Some("Call-ID"),
+        b'k' => Some("Supported"),
+        b'l' => Some("Content-Length"),
+        b'm' => Some("Contact"),
+        b'o' => Some("Event"),
+        b'r' => Some("Refer-To"),
+        b's' => Some("Subject"),
+        b't' => Some("To"),
+        b'u' => Some("Allow-Events"),
+        b'v' => Some("Via"),
+        b'x' => Some("Session-Expires"),
         _ => None,
     }
 }

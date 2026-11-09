@@ -5,6 +5,8 @@
 //! Failure classes covered (in-process only; hard-crash windows are out of
 //! scope — HA reclaim owns post-crash recovery):
 //! - **handler panic** — the dispatcher's failure hook reports it;
+//! - **a turn past a per-call cap** (ADR-0057 §4) — the router reports it as a
+//!   panic is reported;
 //! - **dropped event** (a queue-full BYE) / **lost timer** (incl. a lost
 //!   `TerminatingTimeout`) / **wedged Terminating** — the **last-touched
 //!   stamp** freezes and the sweep notices.
@@ -15,7 +17,7 @@
 //! four CORE_LAYER rules (`reaper-stale`, `reaper-fatal-error`,
 //! `reaper-overflow`, `reaper-message-cap`). Only the
 //! strike-2 **discharge** bypasses the *rules* stage (rules are the thing that
-//! failed); it still runs `finalize → enforce → process_result` — the
+//! failed); it still runs `finalize → enforce → commit_turn` — the
 //! [`ObligationSet`](crate::obligations::ObligationSet) derivation, the CDR,
 //! and the propagated delete all ride the one funnel.
 //!
@@ -25,7 +27,6 @@
 //! Elements are structurally absent from the live map. The sweep adds no
 //! time-based input to HA reconciliation.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use call::helpers::record_termination;
@@ -38,10 +39,27 @@ use crate::metrics::B2buaMetrics;
 use crate::poison::{locked, REAPER_LEDGERS};
 use crate::store::{CallState, Reconciled};
 use b2bua_sdk::event::CallEvent;
+use ledger::{Ledger, Stamp};
+
+mod ledger;
 
 /// One of the reaper's ledgers ([`REAPER_LEDGERS`]).
 fn ledger<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     locked(m, REAPER_LEDGERS)
+}
+
+/// The entries of `m` with their stamps; its lock is released on return, so
+/// judging them takes no other lock under it.
+fn listing<V: Default>(m: &Mutex<Ledger<V>>) -> Vec<(String, Stamp)> {
+    ledger(m).listed()
+}
+
+/// Remove from `m` the `judged` entries no write touched since they were
+/// listed; no lock is taken for nothing to remove.
+fn prune<V: Default>(m: &Mutex<Ledger<V>>, judged: Vec<(String, Stamp)>) {
+    if !judged.is_empty() {
+        ledger(m).prune(judged);
+    }
 }
 
 pub use crate::reaper_verdict::{
@@ -70,28 +88,30 @@ const ESCALATE_DISCHARGE_AFTER: u32 = 4;
 /// assessment from the snapshot.
 #[derive(Clone)]
 pub struct Reaper {
+    /// The sweep runs. Failure reports and the lifetime cap's verdict act
+    /// either way.
     enabled: bool,
     sweep_interval_ms: u64,
     idle_max_ms: i64,
-    /// Panic/abort strikes per call_ref (the X6 two-strike ladder). Pruned
-    /// against the live map each sweep so it cannot ratchet.
-    strikes: Arc<Mutex<HashMap<String, u32>>>,
+    /// Panic/abort/trip strikes per call_ref (the X6 two-strike ladder).
+    /// Pruned at the call's release, and against the live map each sweep.
+    strikes: Arc<Mutex<Ledger<u32>>>,
     /// Stale-verdict attempts per call_ref (the abort/discharge escalation).
-    attempts: Arc<Mutex<HashMap<String, u32>>>,
+    attempts: Arc<Mutex<Ledger<u32>>>,
     /// Overflow-verdict attempts per call_ref, a ladder of their own so a call
     /// both stale and condemned climbs one rung per sweep on each.
-    condemned_attempts: Arc<Mutex<HashMap<String, u32>>>,
+    condemned_attempts: Arc<Mutex<Ledger<u32>>>,
     /// Calls whose in-flight body the overflow ladder aborted and whose
     /// `Aborted` report is still due: that report is no handler failure (the
     /// call's own overflow verdict is queued behind the body), so it strikes
     /// nothing.
-    overflow_aborts: Arc<Mutex<HashSet<String>>>,
+    overflow_aborts: Arc<Mutex<Ledger<()>>>,
     /// Calls that crossed their lifetime message cap and were sent their one
     /// verdict. Pruned against the live map each sweep.
-    capped: Arc<Mutex<HashSet<String>>>,
+    capped: Arc<Mutex<Ledger<()>>>,
     /// Calls whose dispatch overflow reached its ceiling: swept while Active.
     /// Pruned each sweep.
-    condemned: Arc<Mutex<HashSet<String>>>,
+    condemned: Arc<Mutex<Ledger<()>>>,
     reentry_tx: mpsc::UnboundedSender<CallEvent>,
     metrics: B2buaMetrics,
 }
@@ -113,42 +133,59 @@ impl Reaper {
                 .unwrap_or(1)
                 .saturating_mul(1000),
             idle_max_ms,
-            strikes: Arc::new(Mutex::new(HashMap::new())),
-            attempts: Arc::new(Mutex::new(HashMap::new())),
-            condemned: Arc::new(Mutex::new(HashSet::new())),
-            condemned_attempts: Arc::new(Mutex::new(HashMap::new())),
-            overflow_aborts: Arc::new(Mutex::new(HashSet::new())),
-            capped: Arc::new(Mutex::new(HashSet::new())),
+            strikes: Arc::default(),
+            attempts: Arc::default(),
+            condemned: Arc::default(),
+            condemned_attempts: Arc::default(),
+            overflow_aborts: Arc::default(),
+            capped: Arc::default(),
             reentry_tx,
             metrics,
         }
     }
 
-    /// The dispatcher-facing failure hook (X6): strike 1 → a `fatal-error`
-    /// verdict through the normal rules; strike ≥ 2 (the rules path itself
-    /// failed) → `discharge`. Aborts count as strikes too — an aborted body
-    /// was hung, so its call needs the same resolution — except one the
-    /// overflow ladder asked for: its call's teardown is already queued, and a
-    /// strike would force the legs that teardown is ending on the wire.
+    /// The dispatcher-facing failure hook (X6): [`report`](Self::report).
     pub fn failure_hook(&self) -> crate::dispatch::FailureHook {
         let this = self.clone();
-        Arc::new(move |call_ref: &str, failure: HandlerFailure| {
-            if !this.enabled {
+        Arc::new(move |call_ref: &str, failure: HandlerFailure| this.report(call_ref, failure))
+    }
+
+    /// A failed turn of `call_ref`, with the sweep on or off: strike 1 → a
+    /// `fatal-error` verdict, strike ≥ 2 → `discharge` (ADR-0020 X6). An abort
+    /// the overflow ladder asked for strikes nothing; a trip strikes only a
+    /// call not struck yet, or the verdict's own turn, its verdict naming the
+    /// cap (ADR-0057 §4).
+    pub fn report(&self, call_ref: &str, failure: HandlerFailure) {
+        if failure == HandlerFailure::Aborted && ledger(&self.overflow_aborts).remove(call_ref) {
+            return;
+        }
+        let strike = {
+            let mut strikes = ledger(&self.strikes);
+            let struck = strikes.contains(call_ref);
+            if matches!(failure, HandlerFailure::Tripped(t) if !t.verdict) && struck {
                 return;
             }
-            if failure == HandlerFailure::Aborted && ledger(&this.overflow_aborts).remove(call_ref)
-            {
-                return;
+            let (s, _) = strikes.write(call_ref);
+            *s += 1;
+            *s
+        };
+        let outcome = if strike == 1 { OUTCOME_FATAL } else { OUTCOME_DISCHARGE };
+        let payload = match failure {
+            HandlerFailure::Tripped(t) => {
+                serde_json::json!({ "strike": strike, "cap": t.cap.label() })
             }
-            let strike = {
-                let mut strikes = ledger(&this.strikes);
-                let s = strikes.entry(call_ref.to_string()).or_insert(0);
-                *s += 1;
-                *s
-            };
-            let outcome = if strike == 1 { OUTCOME_FATAL } else { OUTCOME_DISCHARGE };
-            this.send_verdict(call_ref, outcome, serde_json::json!({ "strike": strike }));
-        })
+            HandlerFailure::Panicked | HandlerFailure::Aborted => {
+                serde_json::json!({ "strike": strike })
+            }
+        };
+        self.send_verdict(call_ref, outcome, payload);
+    }
+
+    /// Forget what the reaper holds of `call_ref`, released from this node:
+    /// its strikes and its lifetime-cap mark.
+    pub fn forget(&self, call_ref: &str) {
+        ledger(&self.strikes).remove(call_ref);
+        ledger(&self.capped).remove(call_ref);
     }
 
     /// Hears a call whose dispatch overflow reached its ceiling: it is
@@ -156,16 +193,17 @@ impl Reaper {
     /// stale escalation (abort, discharge) until it is gone. Once per call,
     /// so a flood sends one verdict, not one per refused event.
     pub fn on_overflow_ceiling(&self, call_ref: &str) {
-        if self.enabled && ledger(&self.condemned).insert(call_ref.to_string()) {
+        if self.enabled && ledger(&self.condemned).write(call_ref).1 {
             self.send_verdict(call_ref, OUTCOME_OVERFLOW, serde_json::json!({}));
         }
     }
 
     /// Hears a call that crossed its lifetime message cap: one
-    /// `message-cap` verdict. The verdict is admitted past every bound and
-    /// the call's requests are refused from then on, so one is enough.
+    /// `message-cap` verdict, with the sweep on or off. The verdict is
+    /// admitted past every bound and the call's requests are refused from
+    /// then on, so one is enough.
     pub fn on_lifetime_cap(&self, call_ref: &str) {
-        if self.enabled && ledger(&self.capped).insert(call_ref.to_string()) {
+        if ledger(&self.capped).write(call_ref).1 {
             self.send_verdict(call_ref, OUTCOME_MESSAGE_CAP, serde_json::json!({}));
         }
     }
@@ -222,16 +260,7 @@ impl Reaper {
     /// ones; prune dead escalation state. Sync + lock-light.
     fn sweep_once(&self, state: &CallState, in_flight: &InFlight, now_ms: i64) {
         self.metrics.bump_reaper_sweep();
-        // A condemned call that left Active has its teardown under way, bounded
-        // by `TerminatingTimeout`: it needs no further verdict. A takeover copy
-        // is its self-release's (ADR-0020 X3).
-        let condemned: Vec<String> = {
-            let mut set = ledger(&self.condemned);
-            set.retain(|r| {
-                state.model_state(r) == Some(CallModelState::Active) && !state.is_takeover(r)
-            });
-            set.iter().cloned().collect()
-        };
+        let condemned = self.condemned_to_sweep(state, || ());
         // Condemned calls keep a share of the budget however many are stale.
         let reserved = condemned.len().min(CONDEMNED_SHARE_PER_SWEEP);
         let mut budget = MAX_VERDICTS_PER_SWEEP;
@@ -255,13 +284,46 @@ impl Reaper {
                 (OUTCOME_OVERFLOW, serde_json::json!({}))
             });
         }
-        // Prune escalation state for calls no longer resident (normal
-        // termination, reap completed, self-release) — bounded by live calls.
-        ledger(&self.strikes).retain(|r, _| state.contains(r));
-        ledger(&self.attempts).retain(|r, _| state.contains(r));
-        ledger(&self.condemned_attempts).retain(|r, _| state.contains(r));
-        ledger(&self.overflow_aborts).retain(|r| state.contains(r));
-        ledger(&self.capped).retain(|r| state.contains(r));
+        self.prune_released(state, || ());
+    }
+
+    /// The condemned calls still to sweep: those `Active` and no takeover
+    /// copy. A condemned call that left Active has its teardown under way,
+    /// bounded by `TerminatingTimeout`: it needs no further verdict, and its
+    /// entry goes. A takeover copy is its self-release's (ADR-0020 X3). The
+    /// ledger is listed and judged as [`prune_released`](Self::prune_released)
+    /// does, `between` running before the removals.
+    fn condemned_to_sweep(&self, state: &CallState, between: impl FnOnce()) -> Vec<String> {
+        let listed = listing(&self.condemned);
+        let (live, done): (Vec<_>, Vec<_>) = listed.into_iter().partition(|(r, _)| {
+            state.model_state(r) == Some(CallModelState::Active) && !state.is_takeover(r)
+        });
+        between();
+        prune(&self.condemned, done);
+        live.into_iter().map(|(r, _)| r).collect()
+    }
+
+    /// Prune the escalation state of calls no longer resident (normal
+    /// termination, reap completed, self-release) — bounded by live calls.
+    /// Each ledger is listed under its lock and judged against the call map
+    /// after it, no ledger held; `between` runs then, before the removals,
+    /// which spare an entry written since its listing (a call re-created on
+    /// its callRef).
+    fn prune_released(&self, state: &CallState, between: impl FnOnce()) {
+        let gone = |listed: Vec<(String, Stamp)>| -> Vec<(String, Stamp)> {
+            listed.into_iter().filter(|(r, _)| !state.contains(r)).collect()
+        };
+        let strikes = gone(listing(&self.strikes));
+        let attempts = gone(listing(&self.attempts));
+        let condemned_attempts = gone(listing(&self.condemned_attempts));
+        let overflow_aborts = gone(listing(&self.overflow_aborts));
+        let capped = gone(listing(&self.capped));
+        between();
+        prune(&self.strikes, strikes);
+        prune(&self.attempts, attempts);
+        prune(&self.condemned_attempts, condemned_attempts);
+        prune(&self.overflow_aborts, overflow_aborts);
+        prune(&self.capped, capped);
     }
 
     /// One rung of `call_ref`'s escalation on `ladder`: the verdict `verdict`
@@ -273,7 +335,7 @@ impl Reaper {
     /// nothing.
     fn climb(
         &self,
-        ladder: &Mutex<HashMap<String, u32>>,
+        ladder: &Mutex<Ledger<u32>>,
         call_ref: &str,
         in_flight: &InFlight,
         overflow: bool,
@@ -281,7 +343,7 @@ impl Reaper {
     ) {
         let attempt = {
             let mut attempts = ledger(ladder);
-            let a = attempts.entry(call_ref.to_string()).or_insert(0);
+            let (a, _) = attempts.write(call_ref);
             *a += 1;
             *a
         };
@@ -291,7 +353,7 @@ impl Reaper {
         }
         if attempt > ESCALATE_ABORT_AFTER {
             if overflow {
-                ledger(&self.overflow_aborts).insert(call_ref.to_string());
+                ledger(&self.overflow_aborts).write(call_ref);
             }
             if !in_flight.abort(call_ref) && overflow {
                 ledger(&self.overflow_aborts).remove(call_ref);
@@ -338,7 +400,7 @@ pub fn verdict_confirmed(outcome: &str, watermark: Option<i64>, current: Option<
 /// reason-carrying `CdrEvent` is appended, the termination record names the
 /// supervisor where nothing ended the call before, `state = Terminated` — and return
 /// it with EMPTY effects: the caller runs the ordinary
-/// `finalize → enforce → process_result`, so the CDR write, the limiter
+/// `finalize → enforce → commit_turn`, so the CDR write, the limiter
 /// release (owed by a counted call, derived by the `ObligationSet`), and the
 /// final `RemoveCall → release_call(Terminated)` all come from the ONE
 /// enforcement path. Pure, panic-free by construction (no rule code, no SDP,

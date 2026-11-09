@@ -15,20 +15,16 @@ use crate::header_table::HeaderTable;
 use crate::sip_str::SipStr;
 use crate::types::SipHeader;
 
-/// A header RFC 3261 allows at most once. `first` is the value every reader
-/// uses; `count` is what the cardinality gates check.
+/// A single-valued header's one line: every way a message is made refuses a
+/// second.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Slot<'a> {
-    pub first: Option<&'a SipStr>,
-    pub count: usize,
+    pub value: Option<&'a SipStr>,
 }
 
 impl<'a> Slot<'a> {
     fn record(&mut self, value: &'a SipStr) {
-        self.count += 1;
-        if self.first.is_none() {
-            self.first = Some(value);
-        }
+        self.value.get_or_insert(value);
     }
 }
 
@@ -50,6 +46,7 @@ pub struct HeaderIndex<'a> {
     pub remote_party_id: Vec<&'a SipStr>,
     pub rack: Slot<'a>,
     pub refer_to: Slot<'a>,
+    pub max_forwards: Slot<'a>,
 }
 
 impl<'a> HeaderIndex<'a> {
@@ -87,6 +84,7 @@ impl<'a> HeaderIndex<'a> {
                 HeaderId::RemotePartyId => idx.remote_party_id.push(value),
                 HeaderId::RAck => idx.rack.record(value),
                 HeaderId::ReferTo => idx.refer_to.record(value),
+                HeaderId::MaxForwards => idx.max_forwards.record(value),
                 _ => {}
             }
         }
@@ -115,17 +113,9 @@ mod tests {
         ];
         let idx = HeaderIndex::of_lines(&headers);
         assert_eq!(idx.via.len(), 2, "compact Via files under Via");
-        assert_eq!(idx.to.first.map(|v| v.as_str()), Some("<sip:b@h>"));
-        assert_eq!(idx.from.count, 1);
-        assert_eq!(idx.call_id.first.map(|v| v.as_str()), Some("cid"));
+        assert_eq!(idx.to.value.map(|v| v.as_str()), Some("<sip:b@h>"));
+        assert!(idx.from.value.is_some());
+        assert_eq!(idx.call_id.value.map(|v| v.as_str()), Some("cid"));
         assert!(idx.contact.is_empty());
-    }
-
-    #[test]
-    fn a_repeated_single_valued_header_keeps_the_first_and_counts_both() {
-        let headers = vec![header("From", "<sip:a@h>"), header("From", "<sip:b@h>")];
-        let idx = HeaderIndex::of_lines(&headers);
-        assert_eq!(idx.from.count, 2);
-        assert_eq!(idx.from.first.map(|v| v.as_str()), Some("<sip:a@h>"));
     }
 }

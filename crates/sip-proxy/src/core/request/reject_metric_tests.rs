@@ -79,7 +79,7 @@ CSeq: 1 INVITE\r\n\
 Contact: <sip:alice@{UAC}:5060>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 // SelectError::NoTarget → 503 with Reason text "no_target_available"; the
@@ -132,7 +132,7 @@ Call-ID: rej-2@test\r\n\
 CSeq: 2 BYE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let req = CustomParser::default().parse(raw.as_bytes()).unwrap();
+    let req = CustomParser::new().parse(raw.as_bytes()).unwrap();
     let outcome = core.route_request_from(&req, format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.reject_count("too_many_hops"), 1);
@@ -177,7 +177,7 @@ Call-ID: ack-1@test\r\n\
 CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 // RFC 3261 §17.1.1.3/§17.2.1: an ACK is never answered. With no worker to

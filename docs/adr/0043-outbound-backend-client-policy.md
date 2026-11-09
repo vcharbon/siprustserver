@@ -2,7 +2,8 @@
 
 **Status:** accepted (2026-10-11). Amended (2026-10-16): §11, the open breaker reports
 `new=refuse; cause=backend` on an OPTIONS `200`; §12, in-dialog routing reads liveness only
-(ADR-0050).
+(ADR-0050). Amended (2026-11-04): §6 and §10, a consult on a setup's turn runs under what is left of
+the setup budget (ADR-0022 X1).
 
 **Owner:** `crates/http-net/src/backend/` (the backend client, its breaker,
 probe, rotation, in-flight slots, retry rule and env grammar),
@@ -64,9 +65,10 @@ worker reporting itself healthy.
    in-flight requests and closes its connections when the last of them drops
    it.
 6. **Budgets**: one attempt has its own budget, inside a total. The total is
-   the caller's (the decision deadline, `call_control_timeout_ms`), or the
-   ceiling when the caller has none (`BackendClient::budgets` with a total
-   `<= 0`).
+   the caller's (the decision deadline, `call_control_timeout_ms`); every
+   attempt is capped by the ceiling. A consult on a setup's turn is cut earlier when what is left of the
+   setup budget is shorter (ADR-0022 X1): the time the turn waited comes off its
+   last attempt.
 7. **Retry rule** (`BackendClient::send_with_retry`): one retry, on the same
    client, after a connection-level failure (refused, unreachable, connect
    timeout, reset, EOF, broken pipe) or a request timeout, when the total
@@ -102,9 +104,12 @@ worker reporting itself healthy.
     (`CallDecisionError::Unavailable`, the `DeadlineDecisionEngine` expiry
     included), the `/call/failure` consult (`failure_unavailable`: an engine
     error or the answer's deadline, after a b-leg final or after a limiter
-    refusal alike; none of the failed peer's relayed headers), and the REFER
-    NOTIFY sipfrag (`SIP/2.0 503`, as if the transfer target had answered
-    503). It is no decision: it marks nothing in the decision log.
+    refusal alike; none of the failed peer's relayed headers), a setup whose
+    budget ran out, before its turn ran or anywhere in its failover chain
+    (ADR-0022 X1), a limiter refusal with no way to fail over (ADR-0022 X3),
+    and the REFER NOTIFY sipfrag (`SIP/2.0 503`, as if the
+    transfer target had answered 503). It is no decision: it marks nothing in
+    the decision log.
 11. **Backend gate on the OPTIONS self-health only**
     (`Readiness::gate_options_on`): while a gating backend's breaker is open,
     a `Ready` node answers OPTIONS `503` not-ready, and `200` again once it

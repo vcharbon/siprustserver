@@ -125,13 +125,28 @@
             }
           },
           "impacts": {
-            "description": "The budgetable classes charged to this window.",
+            "description": "The budgetable classes charged to this window, and `silent_after_provisional`, which every budget allows 0.",
             "type": "array",
             "items": { "$ref": "#/$defs/impact" }
           },
           "findings": {
             "description": "The number of impacts above their allowance in this window.",
             "type": "integer"
+          },
+          "metrics": {
+            "description": "The series the profile's `report_metrics` name, read over this window per pod: a reading that takes no budget and changes no status. `error` in place of `pods` when the read failed.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["metric", "read"],
+              "properties": {
+                "metric": { "type": "string" },
+                "read": { "enum": ["increase", "max"] },
+                "pods": { "type": "object", "additionalProperties": { "type": "number" } },
+                "error": { "type": "string" }
+              }
+            }
           }
         }
       }
@@ -265,14 +280,14 @@
         "calls": { "type": "integer" },
         "answered": { "description": "Calls that ended answered, their shape expecting it.", "type": "integer" },
         "causes": {
-          "description": "One entry per cause and detail (ending and final code). `expected`: an ending of the shape other than answered; `overload`: a 503 with Retry-After; `dependency_fault`: a 503 without Retry-After whose setup overlaps a window whose budget allows a 503 without Retry-After; `setup_timeout`; `cut`: cut, stranded, or failed after its answer; `other`: any other ending or code, a call the generator failed (`generator`) and a 503 without Retry-After in a window that does not allow one among them. Each call is in exactly one.",
+          "description": "One entry per cause and detail (ending and final code). `expected`: an ending of the shape other than answered; `overload`: a 503 with Retry-After; `dependency_fault`: a 503 without Retry-After whose setup overlaps a window whose budget allows a 503 without Retry-After; `silent_after_provisional`: the generator gave up after a provisional with no final; `setup_timeout`: it gave up with no response heard; `cut`: cut, stranded, or failed after its answer; `other`: any other ending or code, a call the generator failed (`generator`) and a 503 without Retry-After in a window that does not allow one among them. Each call is in exactly one.",
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["cause", "detail", "count", "where"],
             "properties": {
-              "cause": { "enum": ["expected", "overload", "dependency_fault", "setup_timeout", "cut", "other"] },
+              "cause": { "enum": ["expected", "overload", "dependency_fault", "silent_after_provisional", "setup_timeout", "cut", "other"] },
               "detail": { "type": "string" },
               "count": { "type": "integer" },
               "where": {

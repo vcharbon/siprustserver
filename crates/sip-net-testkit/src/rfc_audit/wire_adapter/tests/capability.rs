@@ -132,3 +132,42 @@ fn a_bare_options_200_gates_at_its_sender() {
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("Allow/Supported/Accept"), "{}", out[0].1);
 }
+
+/// The strict reading refuses each of these requests, so the stack's 400 is
+/// the answer they are owed: neither an unknown method, nor an unsupported
+/// `Require`, nor both on a value-gated request, draws a 405 or a 420 demand.
+#[test]
+fn a_refused_request_answered_400_owes_no_other_rejection() {
+    let with = |method: &str, branch: &str, extra: &str| {
+        String::from_utf8(req(method, branch, 1, None))
+            .expect("text")
+            .replace("Content-Length:", &format!("{extra}Content-Length:"))
+            .into_bytes()
+    };
+    let twice = "Subject: a\r\nSubject: b\r\n";
+    let cases = [
+        with("INVITE", "z9hG4bK-p1", &format!("Require: foo\r\n{twice}")),
+        with("FOO", "z9hG4bK-q2", twice),
+        with("OPTIONS", "z9hG4bK-q5", &format!("Require: foo\r\n{twice}")),
+        with("INVITE", "z9hG4bK-q3", "Require: foo\r\nExpires: soon\r\n"),
+    ];
+    for refused in cases {
+        let text = String::from_utf8_lossy(&refused).into_owned();
+        let method = text.split(' ').next().unwrap_or_default().to_string();
+        let branch = text.split("branch=").nth(1).and_then(|b| b.split("\r\n").next());
+        let branch = branch.unwrap_or_default().to_string();
+        let evs = vec![
+            bind_roles(SUT, HashSet::from([UaRole::Uac, UaRole::Uas]), 0),
+            recv(SUT, refused, ALICE, 1),
+            sent(SUT, resp(400, 1, &method, "sut", &branch), ALICE, 2),
+        ];
+        let found: Vec<RfcFinding> = evaluate_rfc_findings(&evs)
+            .into_iter()
+            .filter(|f| {
+                f.rule == RuleId::UnsupportedExtension420.token()
+                    || f.rule == RuleId::UnsupportedMethod405Allow.token()
+            })
+            .collect();
+        assert!(found.is_empty(), "{method} {branch}: {found:?}");
+    }
+}

@@ -51,11 +51,11 @@ pub fn generate_out_of_dialog_request(
 
     let draft = RequestDraft::new(verb.clone(), uri)
         .push(hop)
-        .push(MaxForwards::new(opts.max_forwards.unwrap_or(emit::DEFAULT_MAX_FORWARDS)))
-        .push(from)
-        .push(to)
-        .push(CallId::new(SipStr::owned(&opts.call_id)))
-        .push(CSeq::new(opts.cseq, verb))
+        .set(MaxForwards::new(opts.max_forwards.unwrap_or(emit::DEFAULT_MAX_FORWARDS)))
+        .set(from)
+        .set(to)
+        .set(CallId::new(SipStr::owned(&opts.call_id)))
+        .set(CSeq::new(opts.cseq, verb))
         .push(contact);
 
     let draft = emit::extra_headers(draft, &opts.extra_headers);

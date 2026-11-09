@@ -26,8 +26,11 @@ use sip_message::sniff;
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
-use super::branch::BranchReading;
+use super::branch::{BranchName, BranchReading};
 use super::Obligation;
+
+mod keys;
+use keys::{TxnKey, UacKey};
 
 crate::registry::rules! {
     /// RFC 3261 §9.2: a UAS that has taken a CANCEL for an INVITE answers that INVITE 487, never
@@ -196,31 +199,6 @@ impl<'a> Reading<'a> {
                 relayed,
             });
         }
-    }
-}
-
-/// One INVITE transaction as ONE endpoint saw it: the call it rides, the
-/// top-Via branch that names it, and which endpoint is its UAS side. Spelled
-/// out as a struct so the three parts can never swap places.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct TxnKey<'a> {
-    /// The endpoint judged: the UAS that TOOK the INVITE and emits its answers.
-    emitter: &'a str,
-    call_id: &'a str,
-    branch: &'a str,
-}
-
-impl<'a> TxnKey<'a> {
-    /// The transaction `msg`'s RECIPIENT is the UAS side of — an INVITE or its
-    /// CANCEL arriving on `branch`.
-    fn taken_by(msg: &'a Msg, branch: &'a str) -> Self {
-        TxnKey { emitter: msg.dst.as_str(), call_id: msg.call_id.as_str(), branch }
-    }
-
-    /// The transaction `msg`'s SENDER is the UAS side of — a response going out
-    /// on `branch`.
-    fn emitted_by(msg: &'a Msg, branch: &'a str) -> Self {
-        TxnKey { emitter: msg.src.as_str(), call_id: msg.call_id.as_str(), branch }
     }
 }
 
@@ -500,30 +478,6 @@ fn completed(
     })
 }
 
-/// One INVITE transaction as ONE endpoint DROVE it: the call it rides, the
-/// top-Via branch that names it, and which endpoint is its UAC side. The mirror
-/// of [`TxnKey`], which names the same transaction by its UAS.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct UacKey<'a> {
-    /// The endpoint judged: the UAC that SENT the INVITE and its CANCEL.
-    emitter: &'a str,
-    call_id: &'a str,
-    branch: &'a str,
-}
-
-impl<'a> UacKey<'a> {
-    /// The transaction `msg`'s SENDER drives — a request going out on `branch`.
-    fn sent_by(msg: &'a Msg, branch: &'a str) -> Self {
-        UacKey { emitter: msg.src.as_str(), call_id: msg.call_id.as_str(), branch }
-    }
-
-    /// The transaction `msg`'s RECIPIENT drives — a response coming back on
-    /// `branch`.
-    fn taken_by(msg: &'a Msg, branch: &'a str) -> Self {
-        UacKey { emitter: msg.dst.as_str(), call_id: msg.call_id.as_str(), branch }
-    }
-}
-
 /// What one endpoint did on one branch as UAC, in view order: the INVITEs it
 /// sent, the finals it took, and the ACKs and CANCELs it sent there.
 #[derive(Debug, Default)]
@@ -587,7 +541,7 @@ struct SentAck<'a> {
 impl<'a> UacReading<'a> {
     fn sent_invite_on(&self, emitter: &str, call_id: &str, branch: &str) -> bool {
         self.txns
-            .get(&UacKey { emitter, call_id, branch })
+            .get(&UacKey { emitter, call_id, branch: BranchName(branch) })
             .is_some_and(|txn| !txn.invites.is_empty())
     }
 

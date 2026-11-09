@@ -82,22 +82,22 @@ fn turn_reads(request: &SipRequest) {
     black_box(request.header::<MediaType>());
     black_box(request.raw(HeaderName::ContentType).count());
     black_box(request.header::<header::RAck>());
-    black_box(request.header::<header::Reason>());
+    let _ = black_box(request.list::<header::Reason>());
     black_box(request.raw(HeaderName::To).count());
     black_box(request.raw(HeaderName::RetryAfter).count());
     black_box(request.raw(HeaderName::PEarlyMedia).count());
     black_box(request.raw(HeaderName::Via).count());
     black_box(request.raw(HeaderName::UserToUser).count());
-    black_box(request.header::<Contact>());
-    black_box(request.header::<header::Require>());
+    let _ = black_box(request.list::<Contact>());
+    black_box(request.token_set::<header::Require>());
     black_box(request.has(&HeaderName::RSeq));
     black_box(request.header::<MaxForwards>());
     black_box(request.header::<header::Event>());
-    black_box(request.offers_100rel());
+    let _ = black_box(request.offers_100rel());
     let _ = black_box(request.record_route_set());
     let _ = black_box(request.route_set());
     black_box(request.header::<header::ReferTo>());
-    black_box(request.header::<header::Supported>());
+    black_box(request.token_set::<header::Supported>());
     black_box(request.has(&HeaderName::PAssertedIdentity));
     black_box(request.raw_text(HeaderName::Allow).count());
     black_box(request.header::<header::SessionExpires>());
@@ -177,10 +177,7 @@ fn hop_popping(shape: Shape) -> Op {
     let request = wire::request(&wire::invite(&shape));
     Box::new(move || {
         let own = request.route_set().expect("the routes read").len();
-        let mut draft = request.thaw();
-        for _ in 0..own {
-            draft = draft.pop_top::<RouteEntry>().expect("an own Route reads");
-        }
+        let draft = request.thaw().pop_top_values::<RouteEntry>(own).expect("own Routes read");
         black_box(draft.freeze_bytes().expect("a thawed draft is complete"));
     })
 }
@@ -259,11 +256,11 @@ pub fn build_typed(n: usize) -> Op {
     Box::new(move || {
         let mut draft = RequestDraft::new(Method::Invite, uri.clone())
             .push(via.clone())
-            .push(MaxForwards::new(70))
-            .push(from.clone())
-            .push(to.clone())
-            .push(call_id.clone())
-            .push(CSeq::new(314159, Method::Invite));
+            .set(MaxForwards::new(70))
+            .set(from.clone())
+            .set(to.clone())
+            .set(call_id.clone())
+            .set(CSeq::new(314159, Method::Invite));
         for _ in 0..n {
             draft = draft.push(record_route.clone());
         }
@@ -285,18 +282,6 @@ pub fn clone_request_lines(n: usize) -> Op {
     let request = wire::request(&wire::invite(&Shape::lines(n)));
     Box::new(move || {
         black_box(request.clone());
-    })
-}
-
-/// One read of a single-valued header the request repeats on `n` lines.
-pub fn read_single_repeated(n: usize) -> Op {
-    let wire = wire::invite(&Shape::lines(0));
-    let text = String::from_utf8(wire.to_vec()).expect("ascii");
-    let lines = "Expires: 3600\r\n".repeat(n.max(1));
-    let text = text.replacen("Max-Forwards: 70\r\n", &format!("Max-Forwards: 70\r\n{lines}"), 1);
-    let request = wire::request(&Bytes::from(text.into_bytes()));
-    Box::new(move || {
-        black_box(request.header::<header::Expires>());
     })
 }
 

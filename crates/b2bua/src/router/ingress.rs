@@ -1,31 +1,61 @@
 //! The pre-dispatch pipeline: every event enters here once. Data-path metrics,
 //! per-peer timeout attribution, the out-of-dialog OPTIONS health responder,
-//! resolution (an event resolving to no call goes to [`super::unroutable`]), a
+//! resolution (a copy of the INVITE of a call whose park a bulk reclaim
+//! deferred included, [`DeferredParks`]; an event resolving to no call goes
+//! to [`super::unroutable`]), a
 //! new INVITE's router rungs of the admission ladder ([`super::admit`]), then
 //! the offer of the event's [`Turn`] to its call's queue under its dispatch
 //! class ([`crate::dispatch::class`]). The router acts on the offer: an
 //! admitted new INVITE spends its CPS token once its turn is queued, the reaper
 //! hears a call past its lifetime cap or at its overflow ceiling, and a
-//! discarded request is paid what it is owed ([`super::owed`]).
+//! discarded request is paid what it is owed ([`super::owed`]). A new INVITE's
+//! turn, a copy's included, carries the setup budget from its own receipt, a
+//! re-ask's a fresh one ([`SetupBudget`]).
 
 use std::sync::Arc;
 
 use sip_message::SipMessage;
+use tokio::time::Instant;
 
 use super::admit;
+use super::deferred_parks::DeferredParks;
 use super::owed::OwedAnswer;
 use super::peer_metrics::classify_b2bua_peer;
 use super::resolve::{initial_invite_copy, replica_takeover, resolve, InitialInvite};
 use super::responses::build_options_health_response;
 use super::turn::Turn;
+use super::txn_event::Arrival;
 use super::unroutable::Lookup;
 use super::RouterCtx;
-use crate::dispatch::{Discarded, DispatchClass, Outcome};
+use crate::dispatch::{Discard, Discarded, DispatchClass, Outcome};
+use crate::setup_budget::SetupBudget;
 use b2bua_sdk::event::CallEvent;
 
-/// Take `event` in; `matched_client_txn`: a response it carries answered a
-/// client transaction the transaction layer holds.
-pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_client_txn: bool) {
+/// Queue `event`, a notice the router raises itself for the call it names,
+/// on that call's queue, never awaiting; whether it was queued. A queue is
+/// released under its call's lock only by the turn that ended the call or
+/// let a copy of it go, so a notice discarded behind that release owes
+/// nothing.
+pub(super) fn queue_notice(ctx: &Arc<RouterCtx>, event: CallEvent) -> bool {
+    let res = resolve(ctx, &event);
+    let Some(call_ref) = res.call_ref.clone() else { return false };
+    let class = DispatchClass::Internal;
+    let (matched_client_txn, unborn, budget) = (false, None, SetupBudget::NONE);
+    let turn = Turn { ctx: ctx.clone(), event, matched_client_txn, res, class, unborn, budget };
+    matches!(ctx.dispatcher.offer(&call_ref, turn, class).outcome, Outcome::Queued)
+}
+
+/// Take `event` in, with what the transaction layer states of it, amid the
+/// parks a bulk reclaim deferred, `parks`: a copy of one of those calls'
+/// INVITE is that call's ([`DeferredParks`]). An event the router raises
+/// itself names its call and passes none.
+pub(super) async fn on_event(
+    ctx: &Arc<RouterCtx>,
+    event: CallEvent,
+    arrival: Arrival,
+    parks: Option<&DeferredParks>,
+) {
+    let Arrival { matched_client_txn, opened_at } = arrival;
     // Per-method / per-(method,code) data-path counters. Every inbound SIP
     // message lands here once, so this is the single chokepoint to meter them.
     if let CallEvent::Sip { message, .. } = &event {
@@ -97,9 +127,12 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
     // absorbed by the transaction the record rebuilds, which for the caller's
     // unanswered INVITE replaces the one the layer opened for the copy. One
     // placed here as another primary's backup and copying none belongs to
-    // that primary and gets no final (its 100 Trying went out on receipt),
-    // its transaction relinquished — never a second call.
-    match initial_invite_copy(ctx, &event, &res).await {
+    // that primary and gets no final, its transaction relinquished with
+    // nothing sent — never a second call.
+    // A copy of the INVITE of a call whose park a bulk reclaim deferred is
+    // that call's: it queues on the call's queue, unjudged, keeping its
+    // transaction, and is judged at its turn (`deferred_copy`).
+    match initial_invite_copy(ctx, &event, &res, parks).await {
         InitialInvite::Own => {}
         InitialInvite::CopyOf { hit, unanswered } => {
             if unanswered {
@@ -107,6 +140,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
             }
             res.copy_of(hit, &event);
         }
+        InitialInvite::Deferred => res.deferred_copy = true,
         InitialInvite::Foreign => {
             ctx.metrics.bump_foreign_invite_copy_dropped();
             relinquish_arrival(ctx, &event).await;
@@ -151,12 +185,14 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
     // The mark names the cancelled INVITE's CSeq: only that INVITE's turn
     // reads it. An in-dialog CANCEL targets one re-INVITE transaction, never
     // the call setup, and is not marked. Gated on that INVITE being here —
-    // admitted and waiting for its turn, or the live call's own during its
-    // decision round trip — so the setup window always marks, while the CANCEL
+    // admitted and waiting for its turn, the live call's own during its
+    // decision round trip, or that of a call whose bulk park was deferred,
+    // whose arming settles it — so the setup window always marks, while the CANCEL
     // of an INVITE refused or discarded, or one reaching a queue whose call
     // was released, marks nothing no release would clear.
     if let CallEvent::Cancelled { in_dialog: false, invite_cseq: Some(cseq), .. } = &event {
-        if admit::invite_here(ctx, &call_ref, *cseq) {
+        let deferred = parks.is_some_and(|parks| parks.invite_here(&call_ref, *cseq));
+        if deferred || admit::invite_here(ctx, &call_ref, *cseq) {
             ctx.state.mark_setup_cancelled(&call_ref, *cseq);
         }
     }
@@ -176,7 +212,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
     if class.is_new_call() {
         if let CallEvent::Sip { message, src, .. } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
-                if !admit::is_copy(ctx, &call_ref, req) {
+                if !res.deferred_copy && !admit::is_copy(ctx, &call_ref, req) {
                     match admit::admit(ctx, &call_ref, req, *src, class).await {
                         Some(hold) => unborn = Some(hold),
                         None => return,
@@ -186,7 +222,15 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
         }
     }
     let admitted = unborn.is_some();
-    let turn = Turn { ctx: ctx.clone(), event, matched_client_txn, res, class, unborn };
+    let length = ctx.config.call_control_timeout();
+    let budget = if class.is_new_call() {
+        SetupBudget::from_receipt(opened_at.unwrap_or_else(Instant::now), length)
+    } else if super::undecided::notice_of(&event).is_some() {
+        SetupBudget::from_receipt(Instant::now(), length)
+    } else {
+        SetupBudget::NONE
+    };
+    let turn = Turn { ctx: ctx.clone(), event, matched_client_txn, res, class, unborn, budget };
     let offer = ctx.dispatcher.offer(&call_ref, turn, class);
     if admitted && matches!(offer.outcome, Outcome::Queued) {
         admit::queued(ctx);
@@ -199,6 +243,16 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
     }
     if let Outcome::Discarded(discarded) = offer.outcome {
         let Discarded { item, why, owed } = discarded;
+        // A setup's CANCEL discarded behind its call's release reaches no
+        // turn that would clear the mark it set above: it goes, unless an
+        // INVITE still waits under it or the call is resident. One discarded
+        // for want of room leaves it to the CANCEL queued before it.
+        if matches!(why, Discard::Released(_))
+            && matches!(item.event, CallEvent::Cancelled { in_dialog: false, .. })
+            && !ctx.state.contains(&call_ref)
+        {
+            ctx.state.retain_setup_cancelled(&call_ref, |cseq| ctx.unborn.holds(&call_ref, cseq));
+        }
         let admitted = item.unborn.is_some();
         OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
     }

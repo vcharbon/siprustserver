@@ -70,7 +70,7 @@ async fn basic() {
     // fake-prack KEEPS Supported:100rel toward bob (so he goes reliable).
     let mut uas = bob.receive("INVITE").await;
     assert!(
-        has_token(uas.request().header::<Supported>(), "100rel"),
+        has_token(uas.request().token_set::<Supported>(), "100rel"),
         "100rel kept in bob's Supported",
     );
 
@@ -84,7 +84,7 @@ async fn basic() {
     // Alice sees a bare 180.
     let p180 = call.expect(180).await;
     assert!(p180.body().is_empty(), "bare 180, no body");
-    assert!(!has_token(p180.header::<Require>(), "100rel"));
+    assert!(!has_token(p180.token_set::<Require>(), "100rel"));
     assert!(p180.header::<RSeq>().is_none());
 
     // B2BUA originates the PRACK toward bob.
@@ -124,7 +124,7 @@ async fn offers_100rel_where_the_originator_advertised_nothing() {
 
     let mut uas = bob.receive("INVITE").await;
     assert!(
-        has_token(uas.request().header::<Supported>(), "100rel"),
+        has_token(uas.request().token_set::<Supported>(), "100rel"),
         "100rel offered to bob on the stack's own behalf",
     );
 
@@ -136,7 +136,7 @@ async fn offers_100rel_where_the_originator_advertised_nothing() {
 
     let p180 = call.expect(180).await;
     assert!(p180.body().is_empty(), "bare 180, no body");
-    assert!(!has_token(p180.header::<Require>(), "100rel"));
+    assert!(!has_token(p180.token_set::<Require>(), "100rel"));
     assert!(p180.header::<RSeq>().is_none());
 
     let mut prack = bob.receive("PRACK").await;
@@ -292,7 +292,7 @@ async fn no_policy_control() {
         .await;
     let p183 = call.expect(183).await;
     assert!(
-        has_token(p183.header::<Require>(), "100rel"),
+        has_token(p183.token_set::<Require>(), "100rel"),
         "Require:100rel relayed verbatim (default path)",
     );
 
@@ -334,7 +334,7 @@ async fn delayed_offer_fallback() {
     // Outbound INVITE to bob must have Supported:100rel stripped.
     let mut uas = bob.receive("INVITE").await;
     assert!(
-        !has_token(uas.request().header::<Supported>(), "100rel"),
+        !has_token(uas.request().token_set::<Supported>(), "100rel"),
         "100rel stripped on the delayed-offer fallback",
     );
 
@@ -450,7 +450,7 @@ async fn update_answer_reads_the_offer_framed_in_a_multipart_invite() {
         .await;
     let mut uas = bob.receive("INVITE").await;
     assert!(
-        has_token(uas.request().header::<Supported>(), "100rel"),
+        has_token(uas.request().token_set::<Supported>(), "100rel"),
         "a framed offer is an offer: fake-prack stays armed and solicits 100rel"
     );
     assert_eq!(uas.request().body().as_ref(), offer.body.as_slice(), "the body rides verbatim");
@@ -625,13 +625,13 @@ async fn a_reroute_leg_is_offered_reliability_the_caller_never_offered() {
 
     let mut call = alice.invite(&bob1).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas1 = bob1.receive("INVITE").await;
-    assert!(has_token(uas1.request().header::<Supported>(), "100rel"), "100rel offered to bob1");
+    assert!(has_token(uas1.request().token_set::<Supported>(), "100rel"), "100rel offered to bob1");
     uas1.respond(503, "Service Unavailable").await;
     bob1.receive("ACK").await;
 
     let mut uas2 = bob2.receive("INVITE").await;
     assert!(
-        has_token(uas2.request().header::<Supported>(), "100rel"),
+        has_token(uas2.request().token_set::<Supported>(), "100rel"),
         "the reroute leg is offered 100rel on the stack's own behalf",
     );
     uas2.respond(200, "OK").with_sdp(ANSWER).await;
@@ -696,7 +696,7 @@ async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mas
 
     // bob1 is offered `100rel`, rings unreliably, then rejects.
     let mut uas1 = bob1.receive("INVITE").await;
-    assert!(has_token(uas1.request().header::<Supported>(), "100rel"), "100rel offered to bob1");
+    assert!(has_token(uas1.request().token_set::<Supported>(), "100rel"), "100rel offered to bob1");
     uas1.respond(180, "Ringing").await;
     let p180 = call.expect(180).await;
     let first_to_tag = p180.to().tag().expect("180 has a To-tag").to_string();
@@ -707,7 +707,7 @@ async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mas
     let mut uas2 = bob2.receive("INVITE").await;
     assert!(uas2.request().body().is_empty(), "the failover INVITE carries no body");
     assert!(
-        !has_token(uas2.request().header::<Supported>(), "100rel"),
+        !has_token(uas2.request().token_set::<Supported>(), "100rel"),
         "100rel withheld from a leg minted without an offer",
     );
     uas2.respond(180, "Ringing").await;
@@ -766,7 +766,7 @@ async fn a_transfer_target_is_offered_no_reliability_of_the_stacks_own() {
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
     assert!(
-        has_token(bob_uas.request().header::<Supported>(), "100rel"),
+        has_token(bob_uas.request().token_set::<Supported>(), "100rel"),
         "the dialled leg is offered 100rel while the originator's INVITE awaits its final",
     );
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -790,7 +790,7 @@ async fn a_transfer_target_is_offered_no_reliability_of_the_stacks_own() {
 
     let mut charlie_uas = charlie.receive("INVITE").await;
     assert!(
-        !has_token(charlie_uas.request().header::<Supported>(), "100rel"),
+        !has_token(charlie_uas.request().token_set::<Supported>(), "100rel"),
         "the transfer target is offered no 100rel of the stack's own: {:?}",
         charlie_uas.request()
     );

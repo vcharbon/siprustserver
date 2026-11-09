@@ -40,16 +40,24 @@ use sip_message::SipParserLimits;
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::types::{all_ua_roles, UaRole};
 
-/// The **lenient** parser the audit layer uses (port of the TS
-/// `createCustomParser({ wireGrammar: false })`). The default [`CustomParser`]
-/// runs the strict wire-grammar gates (`wire_grammar = true`), which *reject*
-/// a malformed-but-on-the-wire message (e.g. a `Via` branch lacking the magic
-/// cookie) before a rule could ever see it — so the grammar rules would silently
-/// never fire. Auditing the recorded bytes requires parsing them leniently, the
-/// same way a permissive peer on the wire would, so the rule (not the parser)
-/// is what flags the violation.
+/// The audit layer's reading of the recorded bytes: a tool's reading, lenient
+/// (`wire_grammar = false`, ADR-0053 §6) with every bound and value gate off. A
+/// strict reading refuses a malformed message before a rule sees it (a `Via`
+/// branch lacking the magic cookie, say), and the grammar rules would never
+/// fire; read leniently, the rule, not the parser, flags the violation. A
+/// request a stack under test refused at ingress for a value (an unreadable
+/// `Expires`) is read too: its CSeq and branch are what the refusal answers
+/// and what the dialog's next request follows. What crossed the wire is judged
+/// whatever its size: a deployment's bounds decide only what it accepts.
 pub(crate) fn lenient_parser() -> CustomParser {
-    CustomParser::with_limits(SipParserLimits { wire_grammar: false, ..Default::default() })
+    CustomParser::tool(SipParserLimits {
+        wire_grammar: false,
+        value_gates: false,
+        max_header_length: usize::MAX,
+        max_uri_length: usize::MAX,
+        max_header_lines: usize::MAX,
+        ..SipParserLimits::DEFAULT
+    })
 }
 
 // Shared helpers.

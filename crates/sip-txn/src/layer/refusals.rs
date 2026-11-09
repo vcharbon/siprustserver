@@ -201,7 +201,7 @@ impl InviteRefusals {
     /// transaction rebuilt from a record, which no judgement admitted. The
     /// call exists on this node, so any refusal of that identity is cleared.
     pub(super) fn hold(&self, branch: &str, call_id: &str, from_tag: &str) {
-        let key = self.shared.hasher.hash_one((branch, call_id, from_tag));
+        let key = self.identity(branch, call_id, from_tag);
         let mut memo = self.lock();
         memo.refused.remove(&key);
         memo.hold(key);
@@ -212,7 +212,7 @@ impl InviteRefusals {
     /// taken by [`admit`](Self::admit) or [`hold`](Self::hold) for a
     /// transaction now leaving.
     pub(super) fn release(&self, branch: &str, call_id: &str, from_tag: &str) {
-        let key = self.shared.hasher.hash_one((branch, call_id, from_tag));
+        let key = self.identity(branch, call_id, from_tag);
         let mut memo = self.lock();
         if let Some(n) = memo.held.get_mut(&key) {
             *n -= 1;
@@ -225,11 +225,22 @@ impl InviteRefusals {
     /// The key of `req`'s transaction identity. An ACK to a non-2xx final
     /// shares its INVITE's branch, Call-ID and From-tag (RFC 3261 §17.1.1.3).
     fn key(&self, req: &SipRequest) -> u64 {
-        self.shared.hasher.hash_one((
+        self.identity(
             req.top_via().branch().unwrap_or_default(),
             req.call_id().as_str(),
             req.from().tag().unwrap_or_default(),
-        ))
+        )
+    }
+
+    /// The memo's key of (`branch`, `call_id`, `from_tag`), the branch hashed
+    /// ignoring ASCII case as it compares (RFC 3261 §7.3.1).
+    fn identity(&self, branch: &str, call_id: &str, from_tag: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut state = self.shared.hasher.build_hasher();
+        sip_message::header::hash_branch(branch, &mut state);
+        call_id.hash(&mut state);
+        from_tag.hash(&mut state);
+        state.finish()
     }
 
     fn lock(&self) -> MutexGuard<'_, Memo> {
@@ -250,7 +261,7 @@ mod tests {
     fn invite(branch: &str, to_tag: Option<&str>) -> SipRequest {
         let to = to_tag.map(|t| format!(";tag={t}")).unwrap_or_default();
         let raw = format!(
-            "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+            "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@caller.test>;tag=alice-tag\r\n\

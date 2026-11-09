@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::readmission::ReadmissionGate;
+use super::txn_event::Arrival;
 use super::{txn_event, ReplCommand, RouterCtx, Work};
 
 /// How often an idle loop reads a refusing event-queue gate again.
@@ -169,17 +170,17 @@ async fn next_other(
                 if let Some(gate) = ctx.readiness.queue_gate() {
                     gate.read();
                 }
-                let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
-                Next::Work(Work::Event(ev, matched_client_txn))
+                let (ev, arrival) = txn_event::call_event(ev, ctx.clock.now_ms());
+                Next::Work(Work::Event(ev, arrival))
             }
             None => Next::TxnClosed,
         },
         ev = timer_rx.recv(), if timers_open => match ev {
-            Some(ev) => Next::Work(Work::Event(ev, false)),
+            Some(ev) => Next::Work(Work::Event(ev, Arrival::default())),
             None => Next::TimersClosed,
         },
         ev = reentry_rx.recv(), if reentry_open => match ev {
-            Some(ev) => Next::Work(Work::Event(ev, false)),
+            Some(ev) => Next::Work(Work::Event(ev, Arrival::default())),
             None => Next::ReentryClosed,
         },
         cmd = next_fail_back(repl_rx) => match cmd {

@@ -1,0 +1,563 @@
+; The grammar of every SIP element the conformance suite generates: RFC 3261
+; §25.1 as written, then each extension RFC's own rules, each under its source.
+; RFC 5234 syntax. A rule starts in column one; a continuation is indented.
+;
+; A narrowing states its source on the line above it, and the row that holds the
+; refusal it leaves out. Each one leaves out a form the RFC text or a stated gate
+; refuses, so a generated value is a valid value. The Verified errata of RFC 3261
+; are applied, each where its rule is. The generator never repeats a parameter
+; name in one value (§7.3.1, §19.1.1): a repeat is a row of its own.
+
+; --- RFC 5234 Appendix B.1 ---------------------------------------------------
+
+ALPHA = %x41-5A / %x61-7A
+DIGIT = %x30-39
+HEXDIG = DIGIT / "A" / "B" / "C" / "D" / "E" / "F"
+DQUOTE = %x22
+SP = %x20
+HTAB = %x09
+WSP = SP / HTAB
+CRLF = %x0D.0A
+
+; --- RFC 3261 §25.1 ----------------------------------------------------------
+
+alphanum = ALPHA / DIGIT
+reserved = ";" / "/" / "?" / ":" / "@" / "&" / "=" / "+" / "$" / ","
+unreserved = alphanum / mark
+mark = "-" / "_" / "." / "!" / "~" / "*" / "'" / "(" / ")"
+escaped = "%" HEXDIG HEXDIG
+; RFC 3261 erratum 7529 (Verified): no whitespace before the fold's CRLF.
+LWS = [CRLF] 1*WSP
+SWS = [LWS]
+HCOLON = *( SP / HTAB ) ":" SWS
+TEXT-UTF8-TRIM = 1*TEXT-UTF8char *(*LWS TEXT-UTF8char)
+TEXT-UTF8char = %x21-7E / UTF8-NONASCII
+; ADR-0053 §3: the header block is RFC 3629 UTF-8. Its §4 well-formed sequences
+; replace the 5- and 6-byte forms and the surrogates of §25.1's rule
+; (must/adr-0053-3-*, must/rule-cesu8-pair-in-a-display-name).
+UTF8-NONASCII = %xC2-DF UTF8-CONT / %xE0 %xA0-BF UTF8-CONT
+    / %xE1-EC 2UTF8-CONT / %xED %x80-9F UTF8-CONT / %xEE-EF 2UTF8-CONT
+    / %xF0 %x90-BF 2UTF8-CONT / %xF1-F3 3UTF8-CONT / %xF4 %x80-8F 2UTF8-CONT
+UTF8-CONT = %x80-BF
+LHEX = DIGIT / %x61-66
+token = 1*(alphanum / "-" / "." / "!" / "%" / "*" / "_" / "+" / "`" / "'" / "~")
+word = 1*(alphanum / "-" / "." / "!" / "%" / "*" / "_" / "+" / "`" / "'" / "~"
+    / "(" / ")" / "<" / ">" / ":" / "\" / DQUOTE / "/" / "[" / "]" / "?" / "{" / "}")
+STAR = SWS "*" SWS
+SLASH = SWS "/" SWS
+EQUAL = SWS "=" SWS
+LPAREN = SWS "(" SWS
+RPAREN = SWS ")" SWS
+RAQUOT = ">" SWS
+LAQUOT = SWS "<"
+COMMA = SWS "," SWS
+SEMI = SWS ";" SWS
+COLON = SWS ":" SWS
+LDQUOT = SWS DQUOTE
+RDQUOT = DQUOTE SWS
+comment = LPAREN *(ctext / quoted-pair / comment) RPAREN
+ctext = %x21-27 / %x2A-5B / %x5D-7E / UTF8-NONASCII / LWS
+quoted-string = SWS DQUOTE *(qdtext / quoted-pair) DQUOTE
+qdtext = LWS / %x21 / %x23-5B / %x5D-7E / UTF8-NONASCII
+quoted-pair = "\" (%x00-09 / %x0B-0C / %x0E-7F)
+
+SIP-URI = "sip:" [userinfo] hostport uri-parameters [headers]
+SIPS-URI = "sips:" [userinfo] hostport uri-parameters [headers]
+; §25.1's note: what telephone-subscriber holds beyond user is escaped there.
+userinfo = user [":" password] "@"
+user = 1*(unreserved / escaped / user-unreserved)
+user-unreserved = "&" / "=" / "+" / "$" / "," / ";" / "?" / "/"
+password = *(unreserved / escaped / "&" / "=" / "+" / "$" / ",")
+hostport = host [":" port]
+host = hostname / IPv4address / IPv6reference
+hostname = *(domainlabel ".") toplabel ["."]
+domainlabel = alphanum / alphanum *(alphanum / "-") alphanum
+toplabel = ALPHA / ALPHA *(alphanum / "-") alphanum
+; ADR-0001, IPv4 octets: at most 255, no leading zero (must/adr-0001-octet-*).
+IPv4address = dec-octet "." dec-octet "." dec-octet "." dec-octet
+dec-octet = DIGIT / %x31-39 DIGIT / "1" 2DIGIT / "2" %x30-34 DIGIT / "25" %x30-35
+IPv6reference = "[" IPv6address "]"
+; RFC 5954 §4.1 replaces §25.1's IPv6address (ADR-0053 §2,
+; must/5954-4.1-ipv6-of-nine-groups).
+IPv6address = 6(h16 ":") ls32 / "::" 5(h16 ":") ls32 / [h16] "::" 4(h16 ":") ls32
+    / [*1(h16 ":") h16] "::" 3(h16 ":") ls32 / [*2(h16 ":") h16] "::" 2(h16 ":") ls32
+    / [*3(h16 ":") h16] "::" h16 ":" ls32 / [*4(h16 ":") h16] "::" ls32
+    / [*5(h16 ":") h16] "::" h16 / [*6(h16 ":") h16] "::"
+h16 = 1*4HEXDIG
+ls32 = h16 ":" h16 / IPv4address
+; ADR-0001, Ports: 1 to 65535 (must/adr-0001-via-port-past-the-range,
+; must/adr-0001-top-via-port-zero), leading zeros allowed by 1*DIGIT.
+port = *2"0" port-value
+port-value = %x31-39 *3DIGIT / %x31-35 4DIGIT / "6" %x30-34 3DIGIT / "65" %x30-34 2DIGIT
+    / "655" %x30-32 DIGIT / "6553" %x30-35
+uri-parameters = *(";" uri-parameter)
+uri-parameter = transport-param / user-param / method-param / ttl-param / maddr-param
+    / lr-param / other-param
+transport-param = "transport=" ("udp" / "tcp" / "sctp" / "tls" / other-transport)
+other-transport = token
+user-param = "user=" ("phone" / "ip" / other-user)
+other-user = token
+method-param = "method=" Method
+ttl-param = "ttl=" ttl
+maddr-param = "maddr=" host
+lr-param = "lr"
+other-param = pname ["=" pvalue]
+pname = 1*paramchar
+pvalue = 1*paramchar
+paramchar = param-unreserved / unreserved / escaped
+param-unreserved = "[" / "]" / "/" / ":" / "&" / "+" / "$"
+headers = "?" header *("&" header)
+header = hname "=" hvalue
+hname = 1*(hnv-unreserved / unreserved / escaped)
+hvalue = *(hnv-unreserved / unreserved / escaped)
+hnv-unreserved = "[" / "]" / "/" / "?" / ":" / "+" / "$"
+
+; §19.1.1 Table 1: a Request-URI carries no headers component
+; (must/adr-0053-2-request-uri-headers).
+Request-URI = ("sip:" / "sips:") [userinfo] hostport uri-parameters / absoluteURI
+absoluteURI = scheme ":" (hier-part / opaque-part)
+hier-part = (net-path / abs-path) ["?" query]
+net-path = "//" authority [abs-path]
+abs-path = "/" path-segments
+opaque-part = uric-no-slash *uric
+uric = reserved / unreserved / escaped
+uric-no-slash = unreserved / escaped / ";" / "?" / ":" / "@" / "&" / "=" / "+" / "$" / ","
+path-segments = segment *("/" segment)
+segment = *pchar *(";" param)
+param = *pchar
+pchar = unreserved / escaped / ":" / "@" / "&" / "=" / "+" / "$" / ","
+; A scheme with a grammar of its own (sip and sips, RFC 3261 §19.1; tel, RFC 3966)
+; is written by that grammar: an absoluteURI names none of them. Any other scheme
+; holds a digit, "+", "-" or "." past its first letter, or is one spelled out.
+scheme = "urn" / "http" / "https" / "mailto" / "cid"
+       / ALPHA *(ALPHA / DIGIT) (DIGIT / "+" / "-" / ".") *(ALPHA / DIGIT / "+" / "-" / ".")
+authority = srvr / reg-name
+; RFC 3261 erratum 1051 (Verified): userinfo ends in its own "@".
+srvr = [[userinfo] hostport]
+reg-name = 1*(unreserved / escaped / "$" / "," / ";" / ":" / "@" / "&" / "=" / "+")
+query = *uric
+; RFC 4475 §3.1.2.16: another version is 505, the element's answer to a message
+; the parser refuses (must/4475-3.1.2.16-version-unknown).
+SIP-Version = "SIP" "/" "2" "." "0"
+
+Request-Line = Method SP Request-URI SP SIP-Version
+Status-Line = SIP-Version SP Status-Code SP Reason-Phrase
+Method = "INVITE" / "ACK" / "OPTIONS" / "BYE" / "CANCEL" / "REGISTER" / extension-method
+extension-method = token
+Status-Code = "100" / "180" / "181" / "182" / "183" / "200" / "300" / "301" / "302"
+    / "305" / "380" / "400" / "401" / "402" / "403" / "404" / "405" / "406" / "407"
+    / "408" / "410" / "413" / "414" / "415" / "416" / "420" / "421" / "423" / "480"
+    / "481" / "482" / "483" / "484" / "485" / "486" / "487" / "488" / "491" / "493"
+    / "500" / "501" / "502" / "503" / "504" / "505" / "513" / "600" / "603" / "604"
+    / "606" / extension-code
+; §7.2: "SIP/2.0 allows six values for the first digit" (ADR-0001, status codes;
+; must/adr-0001-status-*).
+extension-code = %x31-36 2DIGIT
+; ADR-0053 §3: UTF8-CONT outside a UTF-8 sequence is no UTF-8
+; (must/adr-0053-3-latin1-byte).
+Reason-Phrase = *(reserved / unreserved / escaped / UTF8-NONASCII / SP / HTAB)
+
+Accept = "Accept" HCOLON [accept-range *(COMMA accept-range)]
+accept-range = media-range *(SEMI accept-param)
+media-range = ("*/*" / (m-type SLASH "*") / (m-type SLASH m-subtype)) *(SEMI m-parameter)
+accept-param = ("q" EQUAL qvalue) / generic-param
+qvalue = ("0" ["." 0*3DIGIT]) / ("1" ["." 0*3("0")])
+generic-param = token [EQUAL gen-value]
+gen-value = token / host / quoted-string
+Accept-Encoding = "Accept-Encoding" HCOLON [encoding *(COMMA encoding)]
+encoding = codings *(SEMI accept-param)
+codings = content-coding / "*"
+content-coding = token
+Accept-Language = "Accept-Language" HCOLON [language *(COMMA language)]
+language = language-range *(SEMI accept-param)
+language-range = (1*8ALPHA *("-" 1*8ALPHA)) / "*"
+Alert-Info = "Alert-Info" HCOLON alert-param *(COMMA alert-param)
+alert-param = LAQUOT absoluteURI RAQUOT *(SEMI generic-param)
+Allow = "Allow" HCOLON [Method *(COMMA Method)]
+Authorization = "Authorization" HCOLON credentials
+credentials = ("Digest" LWS digest-response) / other-response
+digest-response = dig-resp *(COMMA dig-resp)
+dig-resp = username / realm / nonce / digest-uri / dresponse / algorithm / cnonce / opaque
+    / message-qop / nonce-count / auth-param
+username = "username" EQUAL username-value
+username-value = quoted-string
+; §25.1 spells the value `rquest-uri` and defers it to HTTP/1.1's Request-URI.
+digest-uri = "uri" EQUAL LDQUOT digest-uri-value RDQUOT
+digest-uri-value = Request-URI
+message-qop = "qop" EQUAL qop-value
+cnonce = "cnonce" EQUAL cnonce-value
+cnonce-value = nonce-value
+nonce-count = "nc" EQUAL nc-value
+nc-value = 8LHEX
+dresponse = "response" EQUAL request-digest
+request-digest = LDQUOT 32LHEX RDQUOT
+auth-param = auth-param-name EQUAL (token / quoted-string)
+auth-param-name = token
+other-response = auth-scheme LWS auth-param *(COMMA auth-param)
+auth-scheme = token
+Authentication-Info = "Authentication-Info" HCOLON ainfo *(COMMA ainfo)
+ainfo = nextnonce / message-qop / response-auth / cnonce / nonce-count
+nextnonce = "nextnonce" EQUAL nonce-value
+response-auth = "rspauth" EQUAL response-digest
+response-digest = LDQUOT *LHEX RDQUOT
+Call-ID = ("Call-ID" / "i") HCOLON callid
+callid = word ["@" word]
+Call-Info = "Call-Info" HCOLON info *(COMMA info)
+info = LAQUOT absoluteURI RAQUOT *(SEMI info-param)
+info-param = ("purpose" EQUAL ("icon" / "info" / "card" / token)) / generic-param
+Contact = ("Contact" / "m") HCOLON (STAR / (contact-param *(COMMA contact-param)))
+; §20.10: unbracketed, a URI holds no comma, semicolon or question mark, and what
+; follows a semicolon is the header's (exempt/bare-user-semicolon/refused-by-default).
+contact-param = (name-addr / bare-addr-spec) *(SEMI contact-params)
+name-addr = [display-name] LAQUOT addr-spec RAQUOT
+addr-spec = SIP-URI / SIPS-URI / absoluteURI
+bare-addr-spec = ("sip:" / "sips:") [bare-userinfo] hostport / bare-absolute-uri
+bare-userinfo = bare-user [":" bare-password] "@"
+bare-user = 1*(unreserved / escaped / "&" / "=" / "+" / "$" / "/")
+bare-password = *(unreserved / escaped / "&" / "=" / "+" / "$")
+bare-absolute-uri = scheme ":" uric-no-separator *uric-no-separator
+uric-no-separator = unreserved / escaped / "/" / ":" / "@" / "&" / "=" / "+" / "$"
+display-name = *(token LWS) / quoted-string
+contact-params = c-p-q / c-p-expires / contact-extension
+c-p-q = "q" EQUAL qvalue
+c-p-expires = "expires" EQUAL delta-seconds
+contact-extension = generic-param
+; §20.19 bounds a delta-seconds Expires by 2^32-1 (must/3261-20.19-expires-*).
+delta-seconds = uint32
+; 0 to 2^32-1, leading zeros allowed by 1*DIGIT.
+uint32 = *2"0" uint32-value
+uint32-value = 1*9DIGIT / ten-digit-uint32
+ten-digit-uint32 = %x31-33 9DIGIT / "4" %x30-31 8DIGIT / "42" %x30-38 7DIGIT
+    / "429" %x30-33 6DIGIT / "4294" %x30-38 5DIGIT / "42949" %x30-35 4DIGIT
+    / "429496" %x30-36 3DIGIT / "4294967" %x30-31 2DIGIT / "42949672" %x30-38 DIGIT
+    / "429496729" %x30-35
+Content-Disposition = "Content-Disposition" HCOLON disp-type *(SEMI disp-param)
+disp-type = "render" / "session" / "icon" / "alert" / disp-extension-token
+disp-param = handling-param / generic-param
+handling-param = "handling" EQUAL ("optional" / "required" / other-handling)
+other-handling = token
+disp-extension-token = token
+Content-Encoding = ("Content-Encoding" / "e") HCOLON content-coding *(COMMA content-coding)
+Content-Language = "Content-Language" HCOLON language-tag *(COMMA language-tag)
+language-tag = primary-tag *("-" subtag)
+primary-tag = 1*8ALPHA
+subtag = 1*8ALPHA
+; The suite frames a body of the length this value states.
+Content-Length = ("Content-Length" / "l") HCOLON 1*3DIGIT
+Content-Type = ("Content-Type" / "c") HCOLON media-type
+media-type = m-type SLASH m-subtype *(SEMI m-parameter)
+m-type = discrete-type / composite-type
+discrete-type = "text" / "image" / "audio" / "video" / "application" / extension-token
+; A multipart body states a boundary and its framing: the body rows
+; (body/multipart-*).
+composite-type = "message" / extension-token
+extension-token = ietf-token / x-token
+ietf-token = token
+x-token = "x-" token
+m-subtype = extension-token / iana-token
+iana-token = token
+m-parameter = m-attribute EQUAL m-value
+m-attribute = token
+m-value = token / quoted-string
+; §20.16: a sequence number is a 32-bit unsigned integer (must/3261-20.16-cseq-*).
+CSeq = "CSeq" HCOLON uint32 LWS Method
+Date = "Date" HCOLON SIP-date
+SIP-date = rfc1123-date
+rfc1123-date = wkday "," SP date1 SP time SP "GMT"
+date1 = 2DIGIT SP month SP 4DIGIT
+time = 2DIGIT ":" 2DIGIT ":" 2DIGIT
+wkday = "Mon" / "Tue" / "Wed" / "Thu" / "Fri" / "Sat" / "Sun"
+month = "Jan" / "Feb" / "Mar" / "Apr" / "May" / "Jun" / "Jul" / "Aug" / "Sep" / "Oct"
+    / "Nov" / "Dec"
+Error-Info = "Error-Info" HCOLON error-uri *(COMMA error-uri)
+error-uri = LAQUOT absoluteURI RAQUOT *(SEMI generic-param)
+Expires = "Expires" HCOLON delta-seconds
+From = ("From" / "f") HCOLON from-spec
+; §8.1.1.3, ADR-0001: a request's From carries a tag (must/3261-8.1.1.3-from-no-tag).
+from-spec = (name-addr / bare-addr-spec) SEMI tag-param *(SEMI from-param)
+from-param = tag-param / generic-param
+tag-param = "tag" EQUAL token
+In-Reply-To = "In-Reply-To" HCOLON callid *(COMMA callid)
+; §20.22: 0 to 255 (must/3261-20.22-max-forwards-past-the-range), leading zeros
+; allowed by 1*DIGIT (RFC 4475 §3.1.1.1 writes 0068).
+Max-Forwards = "Max-Forwards" HCOLON *2"0" dec-octet
+MIME-Version = "MIME-Version" HCOLON 1*DIGIT "." 1*DIGIT
+Min-Expires = "Min-Expires" HCOLON delta-seconds
+Organization = "Organization" HCOLON [TEXT-UTF8-TRIM]
+Priority = "Priority" HCOLON priority-value
+priority-value = "emergency" / "urgent" / "normal" / "non-urgent" / other-priority
+other-priority = token
+Proxy-Authenticate = "Proxy-Authenticate" HCOLON challenge
+challenge = ("Digest" LWS digest-cln *(COMMA digest-cln)) / other-challenge
+other-challenge = auth-scheme LWS auth-param *(COMMA auth-param)
+digest-cln = realm / domain / nonce / opaque / stale / algorithm / qop-options / auth-param
+realm = "realm" EQUAL realm-value
+realm-value = quoted-string
+domain = "domain" EQUAL LDQUOT URI *(1*SP URI) RDQUOT
+URI = absoluteURI / abs-path
+nonce = "nonce" EQUAL nonce-value
+nonce-value = quoted-string
+opaque = "opaque" EQUAL quoted-string
+stale = "stale" EQUAL ("true" / "false")
+algorithm = "algorithm" EQUAL ("MD5" / "MD5-sess" / token)
+qop-options = "qop" EQUAL LDQUOT qop-value *("," qop-value) RDQUOT
+qop-value = "auth" / "auth-int" / token
+Proxy-Authorization = "Proxy-Authorization" HCOLON credentials
+Proxy-Require = "Proxy-Require" HCOLON option-tag *(COMMA option-tag)
+option-tag = token
+Record-Route = "Record-Route" HCOLON rec-route *(COMMA rec-route)
+rec-route = hop-addr *(SEMI rr-param)
+rr-param = generic-param
+Reply-To = "Reply-To" HCOLON rplyto-spec
+rplyto-spec = (name-addr / bare-addr-spec) *(SEMI rplyto-param)
+rplyto-param = generic-param
+Require = "Require" HCOLON option-tag *(COMMA option-tag)
+Retry-After = "Retry-After" HCOLON delta-seconds [comment] *(SEMI retry-param)
+retry-param = ("duration" EQUAL delta-seconds) / generic-param
+Route = "Route" HCOLON route-param *(COMMA route-param)
+; ADR-0053 §2: a tel URI's number stands as its host, so a Route entry of one reads
+; (must/adr-0053-2-route-tel).
+route-param = (hop-addr / tel-hop-addr) *(SEMI rr-param)
+tel-hop-addr = [display-name] LAQUOT "tel:" ["+"] 1*(DIGIT / "-" / "." / "(" / ")")
+    *(";" pname ["=" pvalue]) RAQUOT
+; ADR-0053 §2: a route-family entry names a hop (must/rule-route-opaque-scheme).
+; §19.1.1 Table 1: a route's URI carries no headers component, and a recorded
+; route is held to it (must/adr-0053-2-record-route-headers).
+hop-addr = [display-name] LAQUOT ("sip:" / "sips:") [userinfo] hostport uri-parameters RAQUOT
+Server = "Server" HCOLON server-val *(LWS server-val)
+server-val = product / comment
+product = token [SLASH product-version]
+product-version = token
+Subject = ("Subject" / "s") HCOLON [TEXT-UTF8-TRIM]
+Supported = ("Supported" / "k") HCOLON [option-tag *(COMMA option-tag)]
+Timestamp = "Timestamp" HCOLON 1*DIGIT ["." *DIGIT] [LWS delay]
+delay = *DIGIT ["." *DIGIT]
+To = ("To" / "t") HCOLON (name-addr / bare-addr-spec) *(SEMI to-param)
+to-param = tag-param / generic-param
+Unsupported = "Unsupported" HCOLON option-tag *(COMMA option-tag)
+User-Agent = "User-Agent" HCOLON server-val *(LWS server-val)
+Via = ("Via" / "v") HCOLON via-parm *(COMMA via-parm)
+via-parm = sent-protocol LWS sent-by *(SEMI via-params)
+via-params = via-ttl / via-maddr / via-received / via-branch / via-extension
+via-ttl = "ttl" EQUAL ttl
+via-maddr = "maddr" EQUAL host
+via-received = "received" EQUAL (IPv4address / IPv6address)
+via-branch = "branch" EQUAL token
+via-extension = generic-param
+sent-protocol = protocol-name SLASH protocol-version SLASH transport
+protocol-name = "SIP" / token
+protocol-version = token
+transport = "UDP" / "TCP" / "TLS" / "SCTP" / other-transport
+sent-by = host [COLON port]
+; §25.1: 1*3DIGIT, commented "0 to 255".
+ttl = dec-octet / "0" DIGIT / "0" %x31-39 DIGIT / "00" DIGIT
+; ADR-0001, the magic cookie and the transport allowlist: the Via an element
+; answers holds one branch, the cookie and an identifier after it
+; (must/adr-0001-top-via-*). A lower Via is the Via rule above.
+Via-top = ("Via" / "v") HCOLON top-via-parm *(COMMA via-parm)
+top-via-parm = "SIP" SLASH "2.0" SLASH top-transport LWS sent-by *(SEMI top-via-other)
+    SEMI "branch" EQUAL %s"z9hG4bK" token *(SEMI top-via-other)
+top-via-other = via-ttl / via-maddr / via-received / via-extension
+top-transport = "UDP" / "TCP" / "TLS" / "SCTP" / "WS" / "WSS"
+Warning = "Warning" HCOLON warning-value *(COMMA warning-value)
+warning-value = warn-code SP warn-agent SP warn-text
+warn-code = 3DIGIT
+warn-agent = hostport / pseudonym
+warn-text = quoted-string
+pseudonym = token
+WWW-Authenticate = "WWW-Authenticate" HCOLON challenge
+extension-header = extension-name HCOLON header-value
+; The name of no header this suite gives a rule of its own.
+extension-name = "X-" token
+; ADR-0053 §3: UTF8-CONT outside a UTF-8 sequence is no UTF-8
+; (must/adr-0053-3-latin1-byte).
+header-value = *(TEXT-UTF8char / LWS)
+
+; --- RFC 3262 §10 ------------------------------------------------------------
+
+RAck = "RAck" HCOLON response-num LWS CSeq-num LWS Method
+; §7.1, §3: 1 to 2^32-1 (must/3262-7.1-rseq-*).
+response-num = *2"0" (%x31-39 *8DIGIT / ten-digit-uint32)
+CSeq-num = uint32
+RSeq = "RSeq" HCOLON response-num
+
+; --- RFC 3323 §4.2 -----------------------------------------------------------
+
+; Erratum 5184 (Verified) separates values with ",", the RFC as published with
+; ";": both read.
+Privacy = "Privacy" HCOLON priv-value *((";" / COMMA) priv-value)
+priv-value = "header" / "session" / "user" / "none" / "critical" / token
+
+; --- RFC 3325 §9 -------------------------------------------------------------
+
+P-Asserted-Identity = "P-Asserted-Identity" HCOLON PAssertedID-value *(COMMA PAssertedID-value)
+PAssertedID-value = name-addr / bare-addr-spec
+P-Preferred-Identity = "P-Preferred-Identity" HCOLON PAssertedID-value *(COMMA PAssertedID-value)
+
+; --- RFC 3326 §2 -------------------------------------------------------------
+
+Reason = "Reason" HCOLON reason-value *(COMMA reason-value)
+reason-value = protocol *(SEMI reason-params)
+protocol = "SIP" / "Q.850" / token
+reason-params = protocol-cause / reason-text / reason-extension
+protocol-cause = "cause" EQUAL cause
+cause = 1*DIGIT
+reason-text = "text" EQUAL quoted-string
+reason-extension = generic-param
+
+; --- RFC 3327 §4, RFC 3608 §6.1 ----------------------------------------------
+
+Path = "Path" HCOLON path-value *(COMMA path-value)
+path-value = hop-addr *(SEMI rr-param)
+Service-Route = "Service-Route" HCOLON sr-value *(COMMA sr-value)
+sr-value = hop-addr *(SEMI rr-param)
+
+; --- RFC 3515 §2.1 -----------------------------------------------------------
+
+Refer-To = ("Refer-To" / "r") HCOLON (name-addr / bare-addr-spec) *(SEMI generic-param)
+
+; --- RFC 3891 §6.1 -----------------------------------------------------------
+
+; §6.1: exactly one to-tag and one from-tag (must/3891-6.1-replaces-no-tags).
+Replaces = "Replaces" HCOLON callid SEMI to-tag SEMI from-tag *(SEMI replaces-param)
+replaces-param = to-tag / from-tag / early-flag / generic-param
+to-tag = "to-tag" EQUAL token
+from-tag = "from-tag" EQUAL token
+early-flag = "early-only"
+
+; --- RFC 3892 §3 -------------------------------------------------------------
+
+Referred-By = ("Referred-By" / "b") HCOLON referrer-uri
+    *(SEMI (referredby-id-param / generic-param))
+referrer-uri = name-addr / bare-addr-spec
+referredby-id-param = "cid" EQUAL sip-clean-msg-id
+sip-clean-msg-id = LDQUOT dot-atom "@" (dot-atom / host) RDQUOT
+dot-atom = atom *("." atom)
+atom = 1*(alphanum / "-" / "!" / "%" / "*" / "_" / "+" / "'" / "`" / "~")
+
+; --- RFC 4028 §4, §5 ---------------------------------------------------------
+
+Session-Expires = ("Session-Expires" / "x") HCOLON delta-seconds *(SEMI se-params)
+se-params = refresher-param / generic-param
+refresher-param = "refresher" EQUAL ("uas" / "uac")
+Min-SE = "Min-SE" HCOLON delta-seconds *(SEMI generic-param)
+
+; --- RFC 4412 §3.1 -----------------------------------------------------------
+
+Resource-Priority = "Resource-Priority" HCOLON r-value *(COMMA r-value)
+r-value = namespace "." r-priority
+namespace = token-nodot
+r-priority = token-nodot
+token-nodot = 1*(alphanum / "-" / "!" / "%" / "*" / "_" / "+" / "`" / "'" / "~")
+
+; --- RFC 4488 §3 -------------------------------------------------------------
+
+Refer-Sub = "Refer-Sub" HCOLON refer-sub-value *(SEMI exten)
+refer-sub-value = "true" / "false"
+exten = generic-param
+
+; --- RFC 5009 §9 -------------------------------------------------------------
+
+P-Early-Media = "P-Early-Media" HCOLON [em-param *(COMMA em-param)]
+em-param = "sendrecv" / "sendonly" / "recvonly" / "inactive" / "gated" / "supported" / token
+
+; --- RFC 5626 §11.1 ----------------------------------------------------------
+
+Flow-Timer = "Flow-Timer" HCOLON 1*DIGIT
+
+; --- RFC 5806 §3 -------------------------------------------------------------
+
+Diversion = "Diversion" HCOLON diversion-value *(COMMA diversion-value)
+diversion-value = name-addr *(SEMI diversion-params)
+diversion-params = diversion-reason / diversion-counter / diversion-limit / diversion-privacy
+    / diversion-screen / diversion-extension
+diversion-reason = "reason" "=" ("unknown" / "user-busy" / "no-answer" / "unavailable"
+    / "unconditional" / "time-of-day" / "do-not-disturb" / "deflection" / "follow-me"
+    / "out-of-service" / "away" / token / quoted-string)
+diversion-counter = "counter" "=" 1*2DIGIT
+diversion-limit = "limit" "=" 1*2DIGIT
+diversion-privacy = "privacy" "=" ("full" / "name" / "uri" / "off" / token / quoted-string)
+diversion-screen = "screen" "=" ("yes" / "no" / token / quoted-string)
+diversion-extension = token ["=" (token / quoted-string)]
+
+; --- Remote-Party-ID, which no RFC defines --------------------------------------
+
+Remote-Party-ID = "Remote-Party-ID" HCOLON rpid-value *(COMMA rpid-value)
+rpid-value = name-addr *(SEMI generic-param)
+
+; --- RFC 6442 §4 -------------------------------------------------------------
+
+Geolocation = "Geolocation" HCOLON locationValue *(COMMA locationValue)
+locationValue = LAQUOT locationURI RAQUOT *(SEMI geoloc-param)
+locationURI = SIP-URI / SIPS-URI / absoluteURI
+geoloc-param = generic-param
+Geolocation-Routing = "Geolocation-Routing" HCOLON georouting-value
+georouting-value = "yes" / "no" / token
+Geolocation-Error = "Geolocation-Error" HCOLON locationErrorValue
+locationErrorValue = location-error-code *(SEMI location-error-params)
+location-error-code = 1*3DIGIT
+location-error-params = location-error-code-text / generic-param
+location-error-code-text = "code" EQUAL quoted-string
+
+; --- RFC 6665 §8.4 -----------------------------------------------------------
+
+Event = ("Event" / "o") HCOLON event-type *(SEMI event-param)
+event-type = event-package *("." event-template)
+event-package = token-nodot
+event-template = token-nodot
+event-param = generic-param / ("id" EQUAL token)
+Allow-Events = ("Allow-Events" / "u") HCOLON event-type *(COMMA event-type)
+Subscription-State = "Subscription-State" HCOLON substate-value *(SEMI subexp-params)
+substate-value = "active" / "pending" / "terminated" / extension-substate
+extension-substate = token
+subexp-params = ("reason" EQUAL event-reason-value) / ("expires" EQUAL delta-seconds)
+    / ("retry-after" EQUAL delta-seconds) / generic-param
+event-reason-value = "deactivated" / "probation" / "rejected" / "timeout" / "giveup"
+    / "noresource" / "invariant" / event-reason-extension
+event-reason-extension = token
+
+; --- RFC 7044 §5.1 -----------------------------------------------------------
+
+History-Info = "History-Info" HCOLON hi-entry *(COMMA hi-entry)
+hi-entry = name-addr *(SEMI hi-param)
+hi-param = hi-index / hi-target-param / hi-extension
+hi-index = "index" EQUAL index-val
+index-val = number *("." number)
+number = [%x31-39 *DIGIT] DIGIT
+hi-target-param = rc-param / mp-param / np-param
+rc-param = "rc" EQUAL index-val
+mp-param = "mp" EQUAL index-val
+np-param = "np" EQUAL index-val
+hi-extension = generic-param
+
+; --- RFC 7315 §5.4, §5.6 -----------------------------------------------------
+
+P-Access-Network-Info = "P-Access-Network-Info" HCOLON access-net-spec *(COMMA access-net-spec)
+access-net-spec = access-type *(SEMI access-info)
+access-type = "IEEE-802.11" / "IEEE-802.3" / "3GPP-GERAN" / "3GPP-UTRAN-FDD" / "ADSL" / "GSTN"
+    / "DVB-RCS2" / token
+access-info = access-info-token / np / local-time-zone / extension-access-info
+access-info-token = ("cgi-3gpp" / "utran-cell-id-3gpp" / "i-wlan-node-id" / "dsl-location"
+    / "gstn-location") EQUAL (token / quoted-string)
+np = "network-provided"
+local-time-zone = "local-time-zone" EQUAL quoted-string
+extension-access-info = gen-value
+P-Charging-Vector = "P-Charging-Vector" HCOLON icid-value *(SEMI charge-params)
+charge-params = icid-gen-addr / orig-ioi / term-ioi / generic-param
+icid-value = "icid-value" EQUAL gen-value
+icid-gen-addr = "icid-generated-at" EQUAL host
+orig-ioi = "orig-ioi" EQUAL gen-value
+term-ioi = "term-ioi" EQUAL gen-value
+
+; --- RFC 7433 §4.1 -----------------------------------------------------------
+
+User-to-User = "User-to-User" HCOLON uui-value *(COMMA uui-value)
+uui-value = uui-data *(SEMI uui-param)
+uui-data = token / quoted-string
+uui-param = pkg-param / cont-param / enc-param / generic-param
+pkg-param = "purpose" EQUAL pkg-param-value
+pkg-param-value = token
+cont-param = "content" EQUAL cont-param-value
+cont-param-value = token
+enc-param = "encoding" EQUAL enc-param-value
+enc-param-value = token / "hex"

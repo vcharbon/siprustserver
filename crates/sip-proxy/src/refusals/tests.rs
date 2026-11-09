@@ -128,6 +128,22 @@ fn the_cancel_of_a_refused_invite_draws_200_with_its_final_s_tag() {
     assert!(r.cancel(&cancel("z9hG4bK-b"), SRC, 0).is_none(), "an INVITE never refused");
 }
 
+/// A request too long to forward draws a tagged 513 with no `Retry-After`;
+/// every copy draws the same one, and its CANCEL a 200 with its tag.
+#[test]
+fn a_513_is_remembered_as_a_503_is() {
+    let r = Refusals::new(&IdGen::seeded(1), 0);
+    let first = refusal_wire(r.refuse_too_large(&invite("z9hG4bK-a"), SRC, 0));
+    assert!(first.starts_with("SIP/2.0 513 Message Too Large\r\n"), "{first}");
+    assert!(!first.contains("Retry-After"), "{first}");
+    let copy = wire(r.repeat(&invite("z9hG4bK-a"), SRC, 10).expect("a remembered 513"));
+    assert_eq!(copy, first);
+    let ok = wire(r.cancel(&cancel("z9hG4bK-a"), SRC, 10).expect("a refused INVITE"));
+    let to = |w: &str| w.lines().find(|l| l.starts_with("To:")).map(str::to_owned);
+    assert!(ok.starts_with("SIP/2.0 200 OK\r\n"), "{ok}");
+    assert_eq!(to(&ok), to(&first));
+}
+
 /// A CANCEL refused for want of a target is answered but never remembered.
 #[test]
 fn a_refused_cancel_is_never_remembered() {

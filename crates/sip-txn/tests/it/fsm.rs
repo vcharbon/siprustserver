@@ -1269,7 +1269,7 @@ async fn retransmitted_invite_replays_the_cached_100() {
 fn inbound_with_callref(method: &str, branch: &str, call_id: &str, call_ref: &str) -> Vec<u8> {
     let call_ref = sip_message::param_codec::encode_param(call_ref);
     format!(
-        "{method} sip:b2bua@127.0.0.1:5070;callref={call_ref} SIP/2.0\r\n\
+        "{method} sip:b2bua@127.0.0.1:5070;callref={call_ref} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
          Max-Forwards: 70\r\n\
          From: <sip:caller@10.0.0.1:5555>;tag=caller-tag\r\n\

@@ -55,7 +55,8 @@ class GuardContainer(unittest.TestCase):
                           "route-guard")
         self.assertEqual(env(guard)["ROUTE_GUARD_PEERS"], "10.1.1.1,10.1.1.2")
         off = proxy("--set", "proxy.routeGuard.enabled=false")
-        self.assertEqual([c["name"] for c in pod_spec(off)["containers"]], ["sip-front-proxy"])
+        self.assertEqual([c["name"] for c in pod_spec(off)["containers"]],
+                         ["sip-front-proxy", "egress-routes"])
         self.assertNotIn("prometheus.io/sidecar-port",
                          off["spec"]["template"]["metadata"]["annotations"])
 
@@ -83,6 +84,33 @@ class GuardRelations(unittest.TestCase):
         err = render_error(SIPRUST, *KIND, "--set", "proxy.routeGuard.deadMs=2600")
         self.assertIn("proxy.routeGuard.deadMs=2600", err)
         self.assertIn("a hung or dead proxy", err)
+
+    def test_a_lost_link_counts_two_face_readings(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set-string", "proxy.env.PROXY_EXT_FACE_CHECK_MS=1151")
+        for name in ("2 × proxy PROXY_EXT_FACE_CHECK_MS=1151", "withdrawWithinMs=3400",
+                     "whose external link is lost"):
+            self.assertIn(name, err)
+        render(SIPRUST, *KIND, "--set-string", "proxy.env.PROXY_EXT_FACE_CHECK_MS=1150")
+
+    def test_a_dead_next_hop_is_read_inside_a_transactions_lifetime(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=16601")
+        for name in ("baseReachableTimeMs=16601", "delayFirstProbeSeconds=1", "ucastSolicit=12",
+                     "retransTimeMs=250", "the next packet 1000 ms",
+                     "2 × proxy PROXY_EXT_FACE_CHECK_MS=500", "32000 ms"):
+            self.assertIn(name, err)
+        render(SIPRUST, *KIND, "--set", "proxy.neighbour.baseReachableTimeMs=16600")
+
+    def test_a_dead_next_hop_is_bounded_with_the_guard_off_too(self) -> None:
+        off = ("--set", "proxy.routeGuard.enabled=false")
+        self.assertIn("32000 ms", render_error(SIPRUST, *KIND, *off,
+                                               "--set", "proxy.neighbour.baseReachableTimeMs=17334"))
+        render(SIPRUST, *KIND, *off, "--set", "proxy.neighbour.baseReachableTimeMs=17333")
+
+    def test_an_arp_retry_fits_half_a_face_reading(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.neighbour.retransTimeMs=251")
+        for name in ("retransTimeMs=251", "PROXY_EXT_FACE_CHECK_MS=500", "two readings"):
+            self.assertIn(name, err)
+        render(SIPRUST, *KIND, "--set", "proxy.neighbour.retransTimeMs=250")
 
     def test_a_rollout_waits_for_the_let_out_nodes_sessions(self) -> None:
         err = render_error(SIPRUST, *KIND, "--set", "proxy.announce.metallb.connectTimeSeconds=7")

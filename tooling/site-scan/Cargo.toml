@@ -1,0 +1,19 @@
+# The loop and recursion scanner of the panic-sites ratchet (ADR-0057 §5):
+# scripts/panic-sites.py runs it beside its clippy pass. Its own workspace, so
+# `proc-macro2/span-locations`, which it needs for line numbers, never reaches
+# the main workspace's proc macros and their dependents.
+[package]
+name = "site-scan"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Counts the loop and recursion sites of a crate's syntax: loops that are not a `for` over a finite collection, and call-graph cycles without a depth guard."
+
+[workspace]
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+serde_json = "1"
+syn = { version = "2", default-features = false, features = ["full", "parsing", "visit", "printing"] }

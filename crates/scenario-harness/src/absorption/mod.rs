@@ -46,12 +46,13 @@ mod unanswered;
 mod wire_log;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use sip_net_testkit::repeat::{repeat_belongs_to_tu, RepeatTables};
 
 use std::net::SocketAddr;
 
-use sip_message::{SipMessage, SipRequest, SipResponse};
+use sip_message::{CustomParser, SipMessage, SipParseError, SipParser, SipRequest, SipResponse};
 
 pub use two_xx_ack::{ack_key_of_ack, ack_key_of_final, AckKey};
 pub(crate) use two_xx_ack::{Owed, TwoXxAcks};
@@ -108,6 +109,10 @@ impl Sighting {
 /// Shared across clones of one UA (one transaction table per endpoint), and
 /// held directly by a driver that IS the stack (the pivot interpreter).
 pub struct Absorption {
+    /// What the endpoint reads the wire with: a message built by the stack
+    /// under test, read strictly so its defect surfaces, unless its scene
+    /// states another reading.
+    reader: Mutex<Arc<dyn SipParser + Send + Sync>>,
     /// Whether the §17.2 dedup applies. Off in the load lane, where
     /// `loadgen::mux` dedups ahead of the agent, and on an agent a test dropped
     /// to the raw wire surface. Hop-ACK ownership is independent of it.
@@ -153,9 +158,21 @@ pub struct Absorption {
 }
 
 impl Absorption {
+    /// `raw` as this endpoint reads it.
+    pub(crate) fn read(&self, raw: &[u8]) -> Result<SipMessage, SipParseError> {
+        let reader = self.reader.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        reader.parse(raw)
+    }
+
+    /// Read the wire with `reader` from now on.
+    pub(crate) fn read_with(&self, reader: Arc<dyn SipParser + Send + Sync>) {
+        *self.reader.lock().unwrap_or_else(PoisonError::into_inner) = reader;
+    }
+
     /// The functional default: dedup on, both views recorded.
     pub fn transaction_view() -> Self {
         Absorption {
+            reader: Mutex::new(Arc::new(CustomParser::built())),
             dedup: AtomicBool::new(true),
             logging: true,
             tables: RepeatTables::default(),
@@ -178,6 +195,7 @@ impl Absorption {
     /// The load-lane default: no dedup (the mux owns it) and no log.
     pub fn raw_wire() -> Self {
         Absorption {
+            reader: Mutex::new(Arc::new(CustomParser::built())),
             dedup: AtomicBool::new(false),
             logging: false,
             tables: RepeatTables::default(),

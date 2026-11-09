@@ -5,7 +5,7 @@ use std::io::{self, Read};
 use std::net::{Shutdown, SocketAddr, TcpListener};
 use std::time::Duration;
 
-use amqp_connect::{connect_stream, connect_uri};
+use amqp_connect::{connect_stream, connect_uri, BrokerTls};
 use lapin::uri::AMQPUri;
 use tokio::time::Instant;
 
@@ -18,7 +18,7 @@ async fn a_passed_deadline_connects_nothing() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let past = Instant::now() - Duration::from_millis(1);
-    let err = connect_stream(&uri_of(addr), &[addr], past).await.err();
+    let err = connect_stream(&uri_of(addr), &BrokerTls::PLAIN, &[addr], past).await.err();
     assert_eq!(err.map(|e| e.kind()), Some(io::ErrorKind::TimedOut));
     listener.set_nonblocking(true).unwrap();
     assert!(listener.accept().is_err(), "no connection may be attempted past the deadline");
@@ -30,7 +30,7 @@ async fn a_refused_connect_is_an_error() {
     let addr = closed.local_addr().unwrap();
     drop(closed);
     let deadline = Instant::now() + Duration::from_secs(5);
-    let err = connect_stream(&uri_of(addr), &[addr], deadline).await.err();
+    let err = connect_stream(&uri_of(addr), &BrokerTls::PLAIN, &[addr], deadline).await.err();
     assert_eq!(err.map(|e| e.kind()), Some(io::ErrorKind::ConnectionRefused));
 }
 
@@ -39,7 +39,8 @@ async fn shutting_the_descriptor_down_ends_the_stream() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    let connected = connect_stream(&uri_of(addr), &[addr], deadline).await.unwrap();
+    let tls = BrokerTls::PLAIN;
+    let connected = connect_stream(&uri_of(addr), &tls, &[addr], deadline).await.unwrap();
     let (mut peer, _) = listener.accept().unwrap();
     connected.socket.shutdown(Shutdown::Both).unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -53,7 +54,7 @@ async fn a_uri_connects_to_its_resolved_host() {
     let port = listener.local_addr().unwrap().port();
     let uri: AMQPUri = format!("amqp://g:g@localhost:{port}/%2f").parse().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    let connected = connect_uri(&uri, deadline).await.unwrap();
+    let connected = connect_uri(&uri, &BrokerTls::PLAIN, deadline).await.unwrap();
     assert!(listener.accept().is_ok());
     drop(connected);
 }

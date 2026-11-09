@@ -299,6 +299,14 @@ struct SimEndpoint {
 #[async_trait]
 impl UdpEndpoint for SimEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
+        // Past the largest payload of its family a real socket refuses the send.
+        let max = sip_net::max_udp_payload(dst);
+        if buf.len() > max {
+            return Err(SendError {
+                message: format!("datagram of {} bytes exceeds {max}", buf.len()),
+                kind: sip_net::SendErrorKind::MessageTooLong,
+            });
+        }
         if let Some(fault) = &self.shared.send_fault {
             if let Some(reason) = fault(self.addr, dst) {
                 return Err(SendError::stated(reason));

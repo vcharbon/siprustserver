@@ -39,10 +39,10 @@ pub fn generate_bye_for_2xx_from_invite(
 
     let draft = RequestDraft::new(Method::Bye, uri)
         .push(hop)
-        .push(MaxForwards::DEFAULT)
+        .set(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(original_invite.raw_text(HeaderName::From).next()))
         .push_raw(HeaderName::To, echoed(final_response.raw_text(HeaderName::To).next()))
         .push_raw(HeaderName::CallId, echoed(original_invite.raw_text(HeaderName::CallId).next()))
-        .push(CSeq::new(cseq, Method::Bye));
-    emit::request(with_routes(draft, &routes).push(ContentLength::new(0)))
+        .set(CSeq::new(cseq, Method::Bye));
+    emit::request(with_routes(draft, &routes).set(ContentLength::new(0)))
 }

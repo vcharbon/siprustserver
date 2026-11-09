@@ -59,12 +59,18 @@
 //! mark and no watch. A call never imported into `pri:{self}` (its only copy is
 //! the peer's `bak:{self}`) is a genuine miss here.
 
+mod met_seeds;
+mod named_requests;
 mod received_request;
 mod rejected_dialled;
+mod seed_images;
 mod seeds;
+pub(in crate::router) use met_seeds::{answered_invite_seeds, dialled_invite_seeds};
+pub(in crate::router) use named_requests::names_request_in_flight;
 pub(in crate::router) use rejected_dialled::rejected_dialled_seeds;
+pub(in crate::router) use seed_images::unreadable_seed_image;
 pub(in crate::router) use seeds::{
-    names_request_in_flight, names_server_branch, names_unanswered_caller_invite, rejected_seed,
+    caller_invite_key, names_server_branch, names_unanswered_caller_invite, rejected_seed,
     relayed_server_key,
 };
 #[cfg(test)]
@@ -76,7 +82,7 @@ use call::{Call, CallModelState};
 use sip_message::{Method, SipMessage};
 use sip_txn::Reoffer;
 
-use super::reclaim::{discharge_materialized_terminal, format_pb};
+use super::reclaim::format_pb;
 use super::restore_hygiene::{
     forget_keepalive_probes, reanchor, sanitize_restored_timers, Smoothing,
 };
@@ -122,8 +128,8 @@ pub(super) enum Reason {
     Decode,
     /// A terminal body: refused on a takeover, discharged on a reclaim.
     Terminated,
-    /// A body that does not rebuild its caller's INVITE, discharged
-    /// (ADR-0052 §11).
+    /// A body that does not rebuild its caller's INVITE, or holds an image a
+    /// seed names that does not read, discharged (ADR-0052 §11).
     Unrecoverable,
 }
 
@@ -191,10 +197,9 @@ pub(super) async fn materialise_after(
         Origin::Reclaim | Origin::Park
             if matches!(call.state, CallModelState::Terminated | CallModelState::Terminating) =>
         {
-            let force_terminal = call.state == CallModelState::Terminating;
-            super::owed_final::deliver(ctx, call_ref, &call).await;
-            let terminal = Enveloped::new(call, topology);
-            discharge_materialized_terminal(ctx, call_ref, terminal, now_ms, force_terminal).await;
+            let ended = Enveloped::new(call, topology);
+            let cause = super::ended_body::Cause::Reclaim;
+            super::ended_body::pay(ctx, call_ref, cause, ended, now_ms).await;
             return Materialised::Refused(Reason::Terminated);
         }
         _ => {}
@@ -280,7 +285,7 @@ async fn serve(
     let timers = call
         .timers
         .iter()
-        .filter(|t| !(resend && super::resend::awaited_deadline(call, t.timer_type())))
+        .filter(|t| !(resend && crate::off_turn::resend::awaited_deadline(call, t.timer_type())))
         .cloned()
         .collect();
     ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
@@ -370,17 +375,22 @@ pub(super) async fn reoffer_trigger(
         SipMessage::Request(req) if req.method() == Method::Ack => false,
         SipMessage::Request(req) => {
             let branch = req.top_via().branch().unwrap_or_default();
-            match seeds::received_record(&call, branch) {
+            match named_requests::received_record(&call, branch) {
                 None => {
                     let now_ms = ctx.clock.now_ms();
-                    seeds::names_answered_branch(&call, branch, req.method().as_str(), now_ms)
+                    named_requests::names_answered_branch(
+                        &call,
+                        branch,
+                        req.method().as_str(),
+                        now_ms,
+                    )
                 }
                 Some(record) => match record.branch() {
                     // A relay whose client transaction is another node's:
                     // its final follows that relay's Via there, so its
                     // originator's copy supersedes it and is relayed afresh.
                     Some(sent) if !ctx.txn.holds_client(sent).await.unwrap_or(false) => {
-                        let call = seeds::drop_superseded(call, branch);
+                        let call = named_requests::drop_superseded(call, branch);
                         return Offered::Turn(Box::new(call));
                     }
                     _ => true,
@@ -403,59 +413,6 @@ pub(super) enum Offered {
     Matched,
     /// The turn runs on the call, a relay the datagram supersedes dropped.
     Turn(Box<Call>),
-}
-
-/// The seeds a meeting with the other copy hands the layer: the INVITE server
-/// transactions answered 2xx whose ACK the met record still awaits, in RFC
-/// 6026 Accepted with the 2xx it retains. They are the only transactions of
-/// another node's rounds this node can serve while that node lives: a copy of
-/// the INVITE reaches whichever node the proxy reads alive, and the 2xx that
-/// answers it is in the record; the rest of a round runs where its Via sends
-/// the target's responses, the node that relayed it.
-pub(in crate::router) fn answered_invite_seeds(call: &Call) -> Vec<sip_txn::TxnSeed> {
-    // No instant moves an INVITE seed: the latest one is read.
-    seeds::seeds_for(call, i64::MAX)
-        .into_iter()
-        .filter(|s| matches!(s, sip_txn::TxnSeed::ServerAccepted { .. }))
-        .collect()
-}
-
-/// The seeds the call's primary hands the layer when it takes its backup's
-/// copy at a meeting, for the legs that copy dialled and `live`, the
-/// primary's own copy until the meeting, does not: each leg's dialling INVITE
-/// another node sent that has no final, as a client INVITE. A leg's cookie
-/// names the call's primary, so the INVITE's responses reach it (ADR-0055
-/// §8), and it takes the INVITE's client transaction over from the record
-/// (ADR-0047 D7).
-pub(in crate::router) fn dialled_invite_seeds(
-    call: &Call,
-    live: &Call,
-    this: &call::RelayOwner,
-) -> Vec<sip_txn::TxnSeed> {
-    let branches: Vec<&str> = call
-        .b_legs
-        .iter()
-        .filter(|leg| leg.invite.as_ref().is_some_and(|r| r.relayed_by != *this))
-        .filter(|leg| leg.outbound_invite().is_some_and(|i| i.final_received.is_none()))
-        .filter_map(|leg| leg.dialled_sent())
-        .map(|sent| sent.branch.as_str())
-        .filter(|branch| !dials_on(live, branch))
-        .collect();
-    // No instant moves an INVITE seed: the latest one is read.
-    seeds::seeds_for(call, i64::MAX)
-        .into_iter()
-        .filter(|s| match s {
-            sip_txn::TxnSeed::ClientInvite { invite, .. } => {
-                invite.top_via().branch().is_some_and(|b| branches.contains(&b))
-            }
-            _ => false,
-        })
-        .collect()
-}
-
-/// Whether `call` holds a leg whose dialling INVITE left on `branch`.
-fn dials_on(call: &Call, branch: &str) -> bool {
-    call.b_legs.iter().filter_map(|leg| leg.dialled_sent()).any(|sent| sent.branch == branch)
 }
 
 /// Whether `call` names an INVITE transaction a live copy must serve — one a

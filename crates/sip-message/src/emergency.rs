@@ -17,9 +17,11 @@ pub(crate) const EMERGENCY_RPH_TOKENS: [&str; 3] = ["esnet.0", "wps.0", "q735.0"
 /// emergency tokens.
 pub fn is_emergency_request(req: &SipRequest) -> bool {
     req.raw(HeaderName::ResourcePriority).any(|value| {
-        value
-            .split(',')
-            .any(|rv| EMERGENCY_RPH_TOKENS.iter().any(|tok| rv.trim().eq_ignore_ascii_case(tok)))
+        value.split(',').any(|rv| {
+            EMERGENCY_RPH_TOKENS
+                .iter()
+                .any(|tok| crate::whitespace::trim(rv).eq_ignore_ascii_case(tok))
+        })
     })
 }
 
@@ -42,7 +44,7 @@ mod parsed_tests {
             _ => String::new(),
         };
         let raw = format!(
-            "INVITE sip:bob@example.com SIP/2.0\r\n\
+            "INVITE sip:bob@example.com SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-emerg\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@example.com>;tag=emerg-from\r\n\
@@ -111,7 +113,7 @@ Content-Length: 0\r\n\r\n"
     fn every_resource_priority_header_is_checked() {
         // Two Resource-Priority headers; only the second carries an emergency
         // r-value — the request is still emergency.
-        let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
+        let raw = "INVITE sip:bob@example.com SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-emerg2\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@example.com>;tag=emerg-from\r\n\

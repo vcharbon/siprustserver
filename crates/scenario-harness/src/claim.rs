@@ -80,7 +80,7 @@ mod tests {
 
     fn invite(ruri: &str, extra: &str) -> Vec<u8> {
         format!(
-            "INVITE {ruri} SIP/2.0\r\nCall-ID: c1@h\r\n{extra}To: <{ruri}>\r\n\
+            "INVITE {ruri} SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c1@h\r\n{extra}To: <{ruri}>\r\n\
              From: <sip:a@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n"
         )
         .into_bytes()

@@ -15,6 +15,7 @@ const UAS: &str = "10.0.0.2:5060";
 /// A response the UAS sent, its bytes given in full.
 fn rsp(at_us: u64, status: u16, method: &str, to_tag: &str, raw: &str) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: UAS.to_string(),
         dst: UAC.to_string(),
@@ -35,6 +36,7 @@ fn rsp(at_us: u64, status: u16, method: &str, to_tag: &str, raw: &str) -> Msg {
 /// A request the UAC sent, its bytes given in full.
 fn req(at_us: u64, method: &str, branch: &str, raw: &str) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: UAC.to_string(),
         dst: UAS.to_string(),
@@ -259,7 +261,7 @@ fn an_unreliable_provisional_is_never_an_occasion() {
 
 fn invite(branch: &str, max_forwards: u8) -> String {
     format!(
-        "INVITE sip:b@h SIP/2.0\r\n\
+        "INVITE sip:b@h SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}\r\n\
              From: <sip:a@h>;tag=fa\r\n\
              To: <sip:b@h>\r\n\
@@ -303,7 +305,7 @@ fn a_request_under_a_new_branch_is_a_new_transaction() {
 
 fn ack(branch: &str, extra: &str) -> String {
     format!(
-        "ACK sip:b@h SIP/2.0\r\n\
+        "ACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}\r\n\
              From: <sip:a@h>;tag=fa\r\n\
              To: <sip:b@h>;tag=tb\r\n\
@@ -491,7 +493,7 @@ const WORKER: &str = "10.0.0.2:5091";
 /// `rows` (its Record-Route stamps), then the caller's rows.
 fn forwarded_invite(rows: &[&str]) -> String {
     format!(
-        "INVITE sip:b@10.0.0.2:5091 SIP/2.0\r\n\
+        "INVITE sip:b@10.0.0.2:5091 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.9:5080;branch=z9hG4bK-p1;rport\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1;received=10.0.0.1;rport=5060\r\n\
              {}\r\n\

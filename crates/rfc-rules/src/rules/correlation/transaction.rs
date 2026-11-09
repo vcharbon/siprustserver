@@ -82,10 +82,12 @@ impl Obligation for ResponseEchoesRequestVia {
                 out.push(finding(Decision::Undecidable("no header block at this vantage")));
                 continue;
             };
-            let matched = msg
-                .via_branch
-                .as_deref()
-                .and_then(|b| candidates.iter().rev().find(|r| r.branch.as_deref() == Some(b)));
+            let matched = msg.via_branch.as_deref().and_then(|b| {
+                candidates
+                    .iter()
+                    .rev()
+                    .find(|r| crate::rules::branch::same_branch(r.branch.as_deref(), Some(b)))
+            });
             // A branch-carrying response matching no same-key request is
             // unmatchable at the taker's transaction layer — but only where the
             // taker minted a branch at all, since a branchless legacy request

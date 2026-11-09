@@ -57,7 +57,7 @@ fn repeated_header_lines_and_contacts_survive_in_wire_order() {
 fn a_binary_body_reaches_the_decision_byte_for_byte() {
     let body: &[u8] = &[0x77, 0x83, 0xFF, 0x00, 0x0A];
     let head = format!(
-        "INVITE sip:bob@example.com SIP/2.0\r\n\
+        "INVITE sip:bob@example.com SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKbin\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:alice@example.com>;tag=1\r\n\
@@ -82,7 +82,7 @@ fn a_binary_body_reaches_the_decision_byte_for_byte() {
 #[test]
 fn build_request_keeps_wire_order_across_spellings() {
     let invite = parse(
-        "INVITE sip:bob@example.com SIP/2.0\r\n\
+        "INVITE sip:bob@example.com SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKx\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:alice@example.com>;tag=1\r\n\

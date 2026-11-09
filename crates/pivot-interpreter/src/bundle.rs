@@ -175,9 +175,23 @@ mod tests {
 
     #[test]
     fn a_bundle_writes_every_file_the_record_kind_names() {
-        let recording = Recording::new();
-        recording.push("A", Dir::Out, 0, "INVITE sip:x SIP/2.0\r\n\r\n", Some("s1"), None);
-        recording.push("B", Dir::In, 10, "INVITE sip:x SIP/2.0\r\n\r\n", Some("s3"), None);
+        let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
+        recording.push(
+            "A",
+            Dir::Out,
+            0,
+            "INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\r\n",
+            Some("s1"),
+            None,
+        );
+        recording.push(
+            "B",
+            Dir::In,
+            10,
+            "INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\r\n",
+            Some("s3"),
+            None,
+        );
         let bundle = RunBundle {
             document: "{\n  \"pivot_version\": 3\n}\n".into(),
             config: RunConfig::new("upstream-fake", ClockMode::Virtual, "127.0.0.1:5080"),
@@ -219,11 +233,11 @@ mod tests {
     fn a_run_that_unwinds_still_leaves_its_ladder_on_disk() {
         let dir = std::env::temp_dir().join(format!("pivot-unwind-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let recording = Recording::new();
+        let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         let outside = recording.clone();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _writer = armed(&dir, recording);
-            outside.push("A", Dir::Out, 0, "INVITE sip:x SIP/2.0\r\n\r\n", Some("s1"), None);
+            outside.push("A", Dir::Out, 0, "INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\r\n", Some("s1"), None);
             panic!("the run body fails mid-flow");
         }));
         assert!(panicked.is_err(), "the panic still propagates");
@@ -241,7 +255,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pivot-finish-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         {
-            let mut writer = armed(&dir, Recording::new());
+            let mut writer = armed(
+                &dir,
+                Recording::new(std::sync::Arc::new(sip_message::CustomParser::built())),
+            );
             writer.finish(
                 RunVerdict::ok("case", "upstream-fake"),
                 RunTiming { started_at_ms: 0, settled_at_ms: Some(740), settle_budget_ms: 32000 },

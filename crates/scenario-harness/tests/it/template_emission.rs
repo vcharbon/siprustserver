@@ -350,16 +350,19 @@ async fn template_frozen_non_sdp_content_type_emits_exactly_one() {
 }
 
 /// A captured body with NO Content-Type replays with NO Content-Type — the
-/// generator's `application/sdp` default is suppressed. Faithfully replaying the
-/// (RFC 3261 §7.4.1 non-compliant) capture is the point, so the peer-side audit
-/// rule is waived for alice — the SUT is never in this SUT-less path.
+/// generator's `application/sdp` default is suppressed. The capture breaks
+/// RFC 3261 §20.15, so bob's reading refuses the INVITE for that reason alone,
+/// which a default type would have hidden; alice's INVITE then ends unanswered
+/// at Timer B (§17.1.1.2). Faithfully replaying the non-compliant capture is
+/// the point, so the peer-side audit rule is waived for alice — the SUT is never
+/// in this SUT-less path.
 #[tokio::test(start_paused = true)]
 async fn template_body_without_content_type_emits_no_content_type() {
     let h = Harness::new("template-no-ct").describe(
         "A template body with no Content-Type replays with no Content-Type: the \
          generator's application/sdp default is suppressed (captured-message fidelity)",
     );
-    // The captured message is intentionally §7.4.1 non-compliant; alice is the
+    // The captured message is intentionally §20.15 non-compliant; alice is the
     // simulated peer replaying it (not a SUT), so the rule is sanctioned-waived.
     h.allow_violation(
         "content-type",
@@ -373,22 +376,15 @@ async fn template_body_without_content_type_emits_no_content_type() {
         vec![TemplateHeader::frozen("Subject", "no-ct")],
         b"opaque-bytes-no-ct".to_vec(),
     );
-    let mut call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
+    let _call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
 
-    let mut uas = bob.receive("INVITE").await;
-    let req = uas.request().clone();
+    let refused = bob.try_receive("INVITE").await.err().expect("bob refuses the INVITE");
     assert!(
-        values_of(req.headers(), "Content-Type").is_empty(),
-        "no Content-Type invented (got {:?})",
-        values_of(req.headers(), "Content-Type"),
+        refused.to_string().contains("no Content-Type"),
+        "refused for its untyped body alone, so no Content-Type was invented: {refused}"
     );
-    assert_eq!(&req.body()[..], b"opaque-bytes-no-ct", "body carried verbatim");
 
-    // Reject so the call terminates cleanly (no offer/answer to complete).
-    uas.respond(488, "Not Acceptable Here").await;
-    call.expect(488).await; // auto-ACKs the non-2xx final (§17.1.1.3)
-    uas.expect_ack().await; // ensure the hop ACK is recorded before the gate
-
+    h.advance(std::time::Duration::from_secs(33)).await;
     h.finish().await;
 }
 
@@ -596,7 +592,7 @@ async fn respond_template_compact_supported_not_duplicated() {
 
     // A captured 200 with a compact Supported (`k`) + an SDP answer.
     let cap = format!(
-        "SIP/2.0 200 OK\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP 9.9.9.9:5060;branch=z9hG4bK-cap\r\n\
 From: <sip:a@ex>;tag=at\r\n\
 To: <sip:b@ex>;tag=bt\r\n\

@@ -70,6 +70,7 @@ import { VerdictPane } from "../components/VerdictPane.tsx"
 import { findingsByStep, marksOnLadder } from "../findings.ts"
 import { caseIdOf, cellPassed, studyCells } from "../study-cells.ts"
 import { useCommands } from "../commands.ts"
+import { useCopy } from "../use-copy.ts"
 import { launchRef } from "../launch.ts"
 import { cellDocument, cellOpening, NO_OPENING, openingOfExclusions, type CaptureOpening } from "../opening.ts"
 import { href, setQuery, useQuery } from "../router.ts"
@@ -93,7 +94,7 @@ const cellState = (cell: TriageStudyCell): { label: string; tone: string } => {
 const CopyRef = (
   { capture, lane, caseId }: { capture: string; lane: string | undefined; caseId: string | undefined }
 ): JSX.Element | null => {
-  const [copied, setCopied] = useState(false)
+  const copy = useCopy()
   const command = useCommands().triage
   if (command === undefined) return null
   const ref = launchRef(command, capture, lane, caseId)
@@ -102,14 +103,9 @@ const CopyRef = (
       type="button"
       className="copy-ref"
       title={`copy "${ref}"`}
-      onClick={() => {
-        void navigator.clipboard.writeText(ref).then(() => {
-          setCopied(true)
-          window.setTimeout(() => setCopied(false), 1200)
-        })
-      }}
+      onClick={() => copy.copy(ref)}
     >
-      {copied ? "copied" : "copy ref"}
+      {copy.label("copy ref")}
     </button>
   )
 }

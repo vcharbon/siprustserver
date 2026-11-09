@@ -71,7 +71,7 @@ fn compact_and_full_names_match_both_directions() {
         Vec::new(),
     );
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nSupported: replaces\r\nContent-Length: 0\r\n\r\n",
     );
@@ -84,7 +84,7 @@ CSeq: 1 INVITE\r\nSupported: replaces\r\nContent-Length: 0\r\n\r\n",
         Vec::new(),
     );
     let inbound2 = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nk: replaces\r\nContent-Length: 0\r\n\r\n",
     );
@@ -100,7 +100,7 @@ fn duplicate_row_count_mismatch_is_caught() {
         Vec::new(),
     );
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nX-Trace: a\r\nContent-Length: 0\r\n\r\n",
     );
@@ -123,7 +123,7 @@ fn body_drift_reports_first_offset() {
         b"hello world".to_vec(),
     );
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nhello WORLD",
     );
@@ -141,7 +141,7 @@ CSeq: 1 INVITE\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nhello WO
 fn bodiless_template_rejects_inbound_with_body() {
     let tmpl = MessageTemplate::response(200, "OK", vec![], Vec::new());
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nxyz",
     );
@@ -196,7 +196,7 @@ fn missing_content_length_is_tolerated() {
         Vec::new(),
     );
     let inbound = parse(
-        b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+        b"SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\
 CSeq: 1 INVITE\r\nX-Note: n\r\n\r\n",
     );
@@ -232,6 +232,18 @@ fn remote_target_hostport_ignored_but_user_compared() {
         }
         other => panic!("expected a UserPart mismatch, got {other:?}"),
     }
+}
+
+/// `maddr` is part of the address: emission re-points it, matching ignores it.
+#[test]
+fn remote_target_maddr_ignored_like_the_host() {
+    let tmpl = MessageTemplate::from_message(&response_with_contact(
+        "<sip:bob@203.0.113.7:5060;maddr=203.0.113.9;x=1>",
+    ));
+    let inbound = response_with_contact("<sip:bob@127.0.0.1:5070;maddr=127.0.0.1;x=1>");
+    assert_eq!(tmpl.match_inbound(&inbound, &MatchOpts::default()), Ok(()));
+    let without = response_with_contact("<sip:bob@127.0.0.1:5070;x=1>");
+    assert_eq!(tmpl.match_inbound(&without, &MatchOpts::default()), Ok(()));
 }
 
 #[test]
@@ -299,4 +311,24 @@ fn frozen_contact_override_is_byte_compared() {
         tmpl.match_inbound(&diff, &MatchOpts::default()),
         Err(Mismatch::Value { .. })
     ));
+}
+
+/// A capture holding a `maddr` replays whole: the emitted Contact sends its
+/// counterpart to the bound socket, and that message still matches the capture.
+#[test]
+fn a_captured_maddr_points_at_the_bound_socket_and_the_emission_matches() {
+    let captured = response_with_contact("<sip:bob@203.0.113.7:5060;maddr=203.0.113.9;x=1>");
+    let tmpl = MessageTemplate::from_message(&captured);
+    let generated = vec![sip_message::SipHeader::new("Contact", "<sip:b@192.0.2.10:5070>")];
+    let emitted =
+        crate::template::apply_remote_target_emits(&generated, &tmpl.remote_target_emits());
+    let value = emitted[0].value.to_string();
+    assert_eq!(value, "<sip:bob@192.0.2.10:5070;maddr=192.0.2.10;x=1>");
+
+    let inbound = response_with_contact(&value);
+    let SipMessage::Response(resp) = &inbound else { panic!("a response") };
+    let contact = resp.contacts();
+    let uri = contact.as_slice().first().expect("the Contact").uri();
+    assert_eq!(uri.next_hop(), ("192.0.2.10", 5070), "the counterpart reaches the socket");
+    assert_eq!(tmpl.match_inbound(&inbound, &MatchOpts::default()), Ok(()));
 }

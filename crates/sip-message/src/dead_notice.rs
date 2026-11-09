@@ -68,14 +68,14 @@ impl DeadNotice {
             return None;
         }
         let mut parts = value.split(';');
-        let ordinal = parts.next()?.trim();
+        let ordinal = crate::whitespace::trim(parts.next()?);
         if !is_ordinal(ordinal) {
             return None;
         }
         let (mut at_ms, mut signature) = (None, None);
         for param in parts {
             let Some((name, val)) = param.split_once('=') else { continue };
-            let (name, val) = (name.trim(), val.trim());
+            let (name, val) = (crate::whitespace::trim(name), crate::whitespace::trim(val));
             if name.eq_ignore_ascii_case("at") {
                 at_ms = val.parse::<i64>().ok();
             } else if name.eq_ignore_ascii_case("sig") {

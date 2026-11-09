@@ -45,11 +45,6 @@ const INVITE: Dim = Dim::new("method", &["INVITE"]);
 /// A peer: no value declared; each one observed gets its own series.
 pub const PEER: Dim = Dim::new("peer", &[]);
 
-/// What an unroutable message that drew no answer was: an ACK, or a
-/// response by status class.
-pub const UNROUTABLE_KIND: Dim =
-    Dim::new("kind", &["ACK", "1xx", "2xx", "3xx", "4xx", "5xx", "6xx"]);
-
 const OBLIGATION_VALUES: [&str; 2] = label_values!(ObligationKind::ALL, ObligationKind::label);
 /// A dialog-level ladder's obligation, indexed like [`ObligationKind::ALL`].
 pub const OBLIGATION: Dim = Dim::new("obligation", &OBLIGATION_VALUES);
@@ -135,36 +130,6 @@ pub const RETRANSMITS: Family = Family::counter(
     ]),
     "repeats of a retained emission that left this worker, by what paced them (ladder: the sip_retransmit class of a dialog-level ladder, or trigger for a re-send the peer provoked), the CSeq method, and the status for a response (no code label on a request); a climb names a deaf peer or a lossy path",
 ).semi_open();
-
-pub const OUTBOUND_UNADDRESSABLE: Family = Family::counter(
-    "b2bua_outbound_unaddressable_total",
-    Labels::Product(&[Dim::new("kind", &["request", "response", "datagram"])]),
-    "outbound SIP messages left unsent because their next hop is not an IP literal (the worker resolves no name), by kind; a request that opens a client transaction fails its call's attempt as a transport failure",
-);
-
-pub const UNROUTABLE_DROPPED: Family = Family::counter(
-    "b2bua_unroutable_dropped_total",
-    Labels::Product(&[UNROUTABLE_KIND]),
-    "wire messages that resolved to no call and drew no answer, by kind (ACK, or a response's status class); nothing a peer waits on",
-);
-
-pub const UNROUTABLE_REFUSED: Family = Family::counter(
-    "b2bua_unroutable_refused_total",
-    Labels::Product(&[ANSWERED_METHOD, Dim::new("code", &["481"])]),
-    "wire requests that resolved to no call, answered on no call's behalf (481 RFC 3261 §12.2.2/§15.1.2/§9.2, 405 §8.2.1) by method and code; a stray CANCEL's 481 is stateless, so each repeat of it counts again",
-).capped(&UNROUTABLE_REFUSED_OVERFLOW, &["method"]);
-
-pub const UNROUTABLE_INTERNAL: Family = Family::counter(
-    "b2bua_unroutable_internal_total",
-    Labels::Union(&[
-        &[Dim::new("event", &["timeout"]), ANSWERED_METHOD],
-        &[
-            Dim::new("event", &["timeout", "timer", "cancelled", "internal-event"]),
-            Dim::new("method", &[""]),
-        ],
-    ]),
-    "this node's own events that resolved to no call, by event and method (timeout: a client transaction released from its call reached Timer B/F); no wire message and no peer waiting",
-).capped(&UNROUTABLE_INTERNAL_OVERFLOW, &["method"]);
 
 pub const REPEAT_GIVE_UPS: Family = Family::counter(
     "b2bua_repeat_give_ups_total",
@@ -479,18 +444,6 @@ pub const REQUESTS_OUT_OVERFLOW: Family = Family::counter(
     "b2bua_requests_out_overflow_total",
     Labels::None,
     "observations of b2bua_requests_out_total past its cap, each counted on its series whose method reads _overflow",
-);
-
-pub const UNROUTABLE_REFUSED_OVERFLOW: Family = Family::counter(
-    "b2bua_unroutable_refused_overflow_total",
-    Labels::None,
-    "observations of b2bua_unroutable_refused_total past its cap, each counted on its series whose method reads _overflow",
-);
-
-pub const UNROUTABLE_INTERNAL_OVERFLOW: Family = Family::counter(
-    "b2bua_unroutable_internal_overflow_total",
-    Labels::None,
-    "observations of b2bua_unroutable_internal_total past its cap, each counted on its series whose method reads _overflow",
 );
 
 pub const PEER_FAILURES_OVERFLOW: Family = Family::counter(

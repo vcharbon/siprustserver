@@ -10,6 +10,9 @@
 //! never judged again, so one transaction is never both refused and admitted.
 //! Every answer records the source of the request it answers on its topmost
 //! Via (RFC 3261 §18.2.1, RFC 3581 §4).
+//! A request whose forward the socket refused as past the largest UDP payload
+//! draws a 513 Message Too Large (§21.5.14), remembered the same way, so a copy
+//! is answered without another forward.
 //! A copy arriving after the window, or after the memo forgot it past its
 //! capacity, is judged afresh. A CANCEL is never remembered: the CANCEL of a
 //! remembered INVITE refusal is answered 200 here, the proxy being the UAS of
@@ -57,12 +60,38 @@ pub struct Refusals {
     remembered: AtomicUsize,
 }
 
-/// One refusal: when it was made, the `Retry-After` its 503 carried and the
-/// To-tag it was answered with.
+/// One refusal: when it was made, the final it drew and the To-tag it was
+/// answered with.
 struct Refused {
     at_ms: u64,
-    retry_after_sec: u32,
+    answer: Answer,
     to_tag: Box<str>,
+}
+
+/// The final a remembered refusal draws.
+#[derive(Clone, Copy)]
+enum Answer {
+    /// A 503 with the `Retry-After` it carried.
+    Unavailable { retry_after_sec: u32 },
+    /// A 513: the request cannot be forwarded in one datagram.
+    TooLarge,
+}
+
+impl Answer {
+    /// The final `req`, received from `src`, draws, with `to_tag`.
+    fn to(
+        self,
+        req: &SipRequest,
+        src: SocketAddr,
+        to_tag: String,
+    ) -> Result<SipResponse, GenerateError> {
+        match self {
+            Answer::Unavailable { retry_after_sec } => {
+                answer(req, src, 503, "Service Unavailable", to_tag, Some(retry_after_sec))
+            }
+            Answer::TooLarge => answer(req, src, 513, "Message Too Large", to_tag, None),
+        }
+    }
 }
 
 /// One stripe's refused requests (keyed hashes of the received transaction,
@@ -151,25 +180,50 @@ impl Refusals {
     ) -> Result<SipResponse, GenerateError> {
         let (to_tag, roll) = self.tagger.for_request(req);
         let retry_after_sec = retry_after::jittered(retry_after_sec, self.jitter_sec, || roll);
+        self.remember(req, src, now_ms, Answer::Unavailable { retry_after_sec }, to_tag)
+    }
+
+    /// Refuse `req`, received from `src`, at `now_ms`, whose forward the socket
+    /// refused as past the largest UDP payload: its 513, remembered as
+    /// [`refuse`](Self::refuse) remembers a 503.
+    pub fn refuse_too_large(
+        &self,
+        req: &SipRequest,
+        src: SocketAddr,
+        now_ms: u64,
+    ) -> Result<SipResponse, GenerateError> {
+        let to_tag = self.to_tag(req);
+        self.remember(req, src, now_ms, Answer::TooLarge, to_tag)
+    }
+
+    /// Remember `req`'s refusal at `now_ms` as drawing `answer` with `to_tag`,
+    /// unless it is a CANCEL, and build that answer to `src`.
+    fn remember(
+        &self,
+        req: &SipRequest,
+        src: SocketAddr,
+        now_ms: u64,
+        answer: Answer,
+        to_tag: String,
+    ) -> Result<SipResponse, GenerateError> {
         if req.method() != Method::Cancel {
             let key = self.key(req, req.method().as_str());
-            let refused =
-                Refused { at_ms: now_ms, retry_after_sec, to_tag: to_tag.as_str().into() };
+            let refused = Refused { at_ms: now_ms, answer, to_tag: to_tag.as_str().into() };
             let mut memo = self.lock(key);
             let added = usize::from(memo.refused.insert(key, refused).is_none());
             memo.order.push_back((now_ms, key));
             let forgotten = memo.expire(now_ms);
             self.count(added, forgotten);
         }
-        answer(req, src, 503, "Service Unavailable", to_tag, Some(retry_after_sec))
+        answer.to(req, src, to_tag)
     }
 
-    /// The 503 an earlier copy of `req` drew, answering `req` received from
+    /// The final an earlier copy of `req` drew, answering `req` received from
     /// `src`, when `req` is a copy of a request refused within 64·T1 of
     /// `now_ms` whose lines a response can echo.
     pub fn repeat(&self, req: &SipRequest, src: SocketAddr, now_ms: u64) -> Option<SipResponse> {
-        let refused = self.remembered(req, req.method().as_str(), now_ms)?;
-        answer(req, src, 503, "Service Unavailable", refused.0, Some(refused.1)).ok()
+        let (to_tag, answer) = self.remembered(req, req.method().as_str(), now_ms)?;
+        answer.to(req, src, to_tag).ok()
     }
 
     /// The 200 answering `cancel`, received from `src`, when it cancels an
@@ -180,9 +234,16 @@ impl Refusals {
         answer(cancel, src, 200, "OK", to_tag, None).ok()
     }
 
-    /// The To-tag and `Retry-After` of the remembered `method` refusal of
-    /// `req`'s transaction.
-    fn remembered(&self, req: &SipRequest, method: &str, now_ms: u64) -> Option<(String, u32)> {
+    /// Whether `ack` acknowledges a final this memo holds for its INVITE,
+    /// refused within 64·T1 of `now_ms`: the To-tag a refusal of an in-dialog
+    /// INVITE echoes is its dialog's, so only the memo tells (§17.1.1.3).
+    pub fn acknowledges_refusal(&self, ack: &SipRequest, now_ms: u64) -> bool {
+        self.remembered(ack, Method::Invite.as_str(), now_ms).is_some()
+    }
+
+    /// The To-tag and answer of the remembered `method` refusal of `req`'s
+    /// transaction.
+    fn remembered(&self, req: &SipRequest, method: &str, now_ms: u64) -> Option<(String, Answer)> {
         if self.remembered.load(Ordering::Relaxed) == 0 {
             return None;
         }
@@ -191,7 +252,7 @@ impl Refusals {
         let forgotten = memo.expire(now_ms);
         self.count(0, forgotten);
         let refused = memo.refused.get(&key)?;
-        Some((refused.to_tag.to_string(), refused.retry_after_sec))
+        Some((refused.to_tag.to_string(), refused.answer))
     }
 
     /// The received transaction of `req` as a `method` request, keyed as the

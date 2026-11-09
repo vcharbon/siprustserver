@@ -3,7 +3,7 @@
 //! the same answer (RFC 3261 §8.2.7).
 
 use sip_ids::SigningKey;
-use sip_message::header::{CSeq, CallId, From, Via};
+use sip_message::header::{folded_branch, CSeq, CallId, From, Via};
 use sip_message::{Method, RequestPartial, SipRequest};
 
 use crate::rng::IdGen;
@@ -62,11 +62,15 @@ impl StatelessTagger {
         ack.to().tag() == Some(tag.as_str())
     }
 
+    /// The branch signs folded to lower case: one re-cased in transit is the
+    /// same branch (RFC 3261 §7.3.1), so it derives the same tag.
     fn derive(&self, call_id: &CallId, from: &From, top_via: &Via, cseq: &CSeq) -> (String, u64) {
+        let mut room = [0u8; 64];
+        let branch = folded_branch(top_via.branch().unwrap_or(""), &mut room);
         let signature = self.key.sign(&[
             call_id.as_str().as_bytes(),
             from.tag().unwrap_or("").as_bytes(),
-            top_via.branch().unwrap_or("").as_bytes(),
+            &branch,
             &cseq.seq().to_le_bytes(),
             cseq.method().as_str().as_bytes(),
         ]);

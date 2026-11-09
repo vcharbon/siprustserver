@@ -33,17 +33,17 @@ impl Subscription {
     /// The subscription `event` and `id` name, before any NOTIFY of it.
     pub fn new(event: &str, id: Option<&str>) -> Self {
         Subscription {
-            event: event.to_ascii_lowercase(),
+            event: event.to_string(),
             id: id.map(str::to_string),
             state: SubscriptionState::Pending,
             notify: None,
         }
     }
 
-    /// Whether `event` and `id` name this subscription: the package matched
-    /// without case, the `id` exactly (RFC 6665 §8.2.1, §4.5).
+    /// Whether `event` and `id` name this subscription: the package and the
+    /// `id` compared byte by byte (RFC 6665 §8.2.1, §4.5).
     pub fn is_named(&self, event: &str, id: Option<&str>) -> bool {
-        self.event.eq_ignore_ascii_case(event) && self.id.as_deref() == id
+        self.event == event && self.id.as_deref() == id
     }
 
     pub fn is_terminated(&self) -> bool {

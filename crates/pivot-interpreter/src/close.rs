@@ -25,7 +25,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pivot_schema::bundle::{CloseOwed, Dir, RecordedMessage};
-use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser, SipRequest, SipResponse};
 
 use crate::recording::Recording;
@@ -112,7 +111,8 @@ impl std::fmt::Display for Owed {
 
 /// What every leg the run recorded still owes.
 pub fn obligations(recording: &Recording) -> BTreeMap<String, Owed> {
-    recording.legs().iter().map(|(leg, messages)| (leg.clone(), owed(messages))).collect()
+    let reader = recording.reader();
+    recording.legs().iter().map(|(leg, messages)| (leg.clone(), owed(reader, messages))).collect()
 }
 
 /// The recording note on a request a leg refused as naming no dialog it holds
@@ -210,8 +210,8 @@ type Transaction = (u32, Option<String>);
 type Reliable = (Option<String>, u32, u32);
 
 /// What one leg owes, read off its recorded ladder.
-fn owed(messages: &[RecordedMessage]) -> Owed {
-    let view = view(messages);
+fn owed(reader: &dyn SipParser, messages: &[RecordedMessage]) -> Owed {
+    let view = view(reader, messages);
 
     // A request the peer is still waiting on comes first: an unanswered server
     // transaction retransmits, and every other obligation is behind it.
@@ -366,8 +366,12 @@ impl LegView {
 /// One act per call, off the same ladder the generic close reads — so the
 /// CANCEL pair and the BYE pair are two calls each, the second made once the
 /// first is on the recording.
-pub fn unscripted(messages: &[RecordedMessage], trigger: &SipMessage) -> Option<Owed> {
-    let view = view(messages);
+pub fn unscripted(
+    reader: &dyn SipParser,
+    messages: &[RecordedMessage],
+    trigger: &SipMessage,
+) -> Option<Owed> {
+    let view = view(reader, messages);
     match trigger {
         // RFC 3261 §15.1.2: a BYE on a dialog this leg holds — established,
         // or early (§15 lets a BYE end one) — is answered 200; one matching
@@ -429,8 +433,8 @@ pub fn unscripted(messages: &[RecordedMessage], trigger: &SipMessage) -> Option<
 /// Whether a BYE this leg would send now names a dialog it already ended by
 /// answering the peer's BYE 2xx (RFC 3261 §15.1.2): the dialog is gone, so the
 /// BYE would draw a 481 and end nothing.
-pub fn bye_moot(messages: &[RecordedMessage]) -> bool {
-    let view = view(messages);
+pub fn bye_moot(reader: &dyn SipParser, messages: &[RecordedMessage]) -> bool {
+    let view = view(reader, messages);
     view.held_dialog.is_none() && view.last_held.is_some() && view.ended.contains(&view.last_held)
 }
 
@@ -450,7 +454,7 @@ fn answer_status(method: &Method, cancelled: bool) -> Option<u16> {
 }
 
 /// One leg's state, folded over its ladder in wire order.
-fn view(messages: &[RecordedMessage]) -> LegView {
+fn view(reader: &dyn SipParser, messages: &[RecordedMessage]) -> LegView {
     let mut view = LegView::default();
     for recorded in messages {
         // A byte-identical repeat is the same transaction retransmitting, not a
@@ -464,7 +468,7 @@ fn view(messages: &[RecordedMessage]) -> LegView {
         if matches!(recorded.note.as_deref(), Some(FOREIGN_DIALOG | FOREIGN_DIALOG_481)) {
             continue;
         }
-        let Some(message) = parse(recorded.wire()) else { continue };
+        let Some(message) = reader.parse(recorded.wire()).ok() else { continue };
         match (recorded.dir, message) {
             (Dir::Out, SipMessage::Request(request)) => {
                 let cseq = request.cseq().seq();
@@ -626,10 +630,6 @@ fn view(messages: &[RecordedMessage]) -> LegView {
         }
     }
     view
-}
-
-fn parse(wire: &[u8]) -> Option<SipMessage> {
-    CustomParser::new().parse(wire).ok()
 }
 
 /// The server transaction a taken request opens, as the dialog names it.

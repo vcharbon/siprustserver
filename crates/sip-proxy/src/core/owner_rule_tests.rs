@@ -114,7 +114,7 @@ fn fixture() -> Fixture {
 }
 
 fn parse(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 fn at(pod: &str) -> SocketAddr {
@@ -159,7 +159,7 @@ fn stating(
         stated.push_str(&format!(";bak={bak}"));
     }
     format!(
-        "{method} sip:bob@{UAS}:5060 SIP/2.0\r\n\
+        "{method} sip:bob@{UAS}:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP {pod}:5060;branch={branch};rport{stated}\r\n\
 {route}Max-Forwards: 70\r\n\
 From: <sip:b2bua@{pod}>;tag=w\r\n\
@@ -216,7 +216,7 @@ fn answer(f: &Fixture, fwd: &[u8], status: &str, method: &str, seq: &str) -> Sip
         .map(|l| format!("{l}\r\n"))
         .collect();
     let SipMessage::Response(resp) = parse(&format!(
-        "SIP/2.0 {status}\r\n\
+        "SIP/2.0 {status}\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 {vias}From: <sip:b2bua@{W1_POD}>;tag=w\r\n\
 To: <sip:bob@{UAS}>;tag=b\r\n\
 Call-ID: {}\r\n\

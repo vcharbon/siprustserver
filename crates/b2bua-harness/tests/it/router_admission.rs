@@ -54,7 +54,7 @@ async fn cps_bucket_empty_503s_a_new_invite_before_any_call_state() {
     // To-tag (this codebase tags every non-100 final); the rejecting INVITE
     // server txn absorbs the ACK, and no call state exists.
     let resp = call.expect(503).await;
-    assert!(resp.header::<Reason>().is_none(), "a new-call 503 carries no Reason");
+    assert!(resp.first::<Reason>().is_none(), "a new-call 503 carries no Reason");
     assert!(resp.header::<RetryAfter>().is_some(), "overload 503 must carry a Retry-After hint");
     assert!(resp.to().tag().is_some(), "non-100 final carries a To-tag (RFC §8.2.6.2)");
 

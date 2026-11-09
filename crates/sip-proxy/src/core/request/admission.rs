@@ -10,8 +10,6 @@
 //! meets the gate and the strategy's new-call caps, and is never refused for
 //! its To-tag alone.
 
-use std::net::SocketAddr;
-
 use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::observability::metrics::Face;
@@ -20,7 +18,7 @@ use crate::strategy::RouteParams;
 use crate::trace::emit;
 
 use super::super::ProxyCore;
-use super::RouteOutcome;
+use super::{Arrival, RouteOutcome};
 
 impl ProxyCore {
     /// The To-tag rule: `msg`, received on `face` and routed by `cookie` (if
@@ -44,7 +42,7 @@ impl ProxyCore {
     pub(super) async fn admit_new_call(
         &self,
         req: &SipRequest,
-        src: SocketAddr,
+        arrival: Arrival,
         is_emergency: bool,
     ) -> Result<(), RouteOutcome> {
         if is_emergency {
@@ -60,6 +58,6 @@ impl ProxyCore {
         // emission site (the datagram it synthesizes).
         emit::shed(&self.traces, req.call_id().as_str(), self.trace_ms(), reason);
         // A closed set: the gate's `ShedReason` labels.
-        Err(self.refuse_new(req, src, retry_after_sec, reason).await)
+        Err(self.refuse_new(req, arrival, retry_after_sec, reason).await)
     }
 }

@@ -15,9 +15,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use fuzz_lanes::conformance_lane::generated;
 use fuzz_lanes::frame_lane::seeds as frame_seeds;
 use fuzz_lanes::input::{
-    invite_input, multipart_input, pair_input, probe_input, proxy_input, turn_input, variant_input,
+    grammar_input, invite_input, multipart_input, pair_input, probe_input, proxy_input, turn_input,
+    variant_input,
 };
 use fuzz_lanes::message_lane::seeds as message_seeds;
 use fuzz_lanes::proxy_lane::probe;
@@ -157,14 +159,21 @@ fn lane_seeds() -> Corpus {
     for line in DIGEST {
         add(&mut corpus, "credentials", line.as_bytes().to_vec());
     }
+    for target in 0..generated::target_count() {
+        let Ok(target) = u8::try_from(target) else { continue };
+        for steer in [&[][..], &[0; 32], &[255; 32]] {
+            add(&mut corpus, "must_accept", grammar_input(target, steer));
+        }
+    }
     corpus
 }
 
 /// Raw SIP messages in the layout of each target that takes one: the
-/// message itself, an INVITE as the caller's under the plain decision, its
-/// SDP beside the lane's offer and answer, its multipart body under its
-/// boundary, its authentication lines, and the datagram the proxy receives
-/// (a request from the caller, a response from the worker).
+/// message itself (`no_progress` also reads its lines one by one), an INVITE
+/// as the caller's under the plain decision, its SDP beside the lane's offer
+/// and answer, its multipart body under its boundary, its authentication
+/// lines, and the datagram the proxy receives (a request from the caller, a
+/// response from the worker).
 fn from_messages(messages: &[Vec<u8>]) -> Corpus {
     let mut corpus = Corpus::new();
     let mut add = |target, input| corpus.entry(target).or_default().push(input);
@@ -174,6 +183,7 @@ fn from_messages(messages: &[Vec<u8>]) -> Corpus {
     let parser = CustomParser::new();
     for raw in messages {
         add("message_roundtrip", raw.clone());
+        add("no_progress", raw.clone());
         let Ok(msg) = parser.parse(raw) else { continue };
         if drive::invite_of(raw).is_some() {
             add("initial_invite", invite_input(0, 0, raw));
@@ -192,6 +202,7 @@ fn from_messages(messages: &[Vec<u8>]) -> Corpus {
         if let Some(Ok(media_type)) = msg.header::<MediaType>() {
             if let Some(boundary) = media_type.params().value("boundary") {
                 add("multipart", multipart_input(boundary.as_bytes(), msg.body()));
+                add("no_progress", multipart_input(boundary.as_bytes(), msg.body()));
             }
         }
         for h in msg.headers() {

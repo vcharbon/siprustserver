@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, WireView};
 
+use super::super::branch::BranchName;
 use super::super::Obligation;
 use super::{branch_msg, OrderedKey, Origins, TxnKey};
 
@@ -84,7 +85,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                             let txn = TxnKey {
                                 endpoint: sender,
                                 call_id: msg.call_id.as_str(),
-                                branch: b,
+                                branch: BranchName(b),
                             };
                             let confirms = branch_cseq.get(&txn) == Some(&msg.cseq);
                             if confirms {
@@ -99,7 +100,11 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                         continue;
                     };
                     let sender = msg.src.as_str();
-                    let txn = TxnKey { endpoint: sender, call_id: msg.call_id.as_str(), branch };
+                    let txn = TxnKey {
+                        endpoint: sender,
+                        call_id: msg.call_id.as_str(),
+                        branch: BranchName(branch),
+                    };
                     let from_tag = msg.from_tag.as_deref().unwrap_or_default();
                     let to_tag = msg.to_tag.as_deref().unwrap_or_default();
                     let in_dialog = !from_tag.is_empty() && !to_tag.is_empty();
@@ -138,7 +143,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                                 let prior_txn = TxnKey {
                                     endpoint: sender,
                                     call_id: msg.call_id.as_str(),
-                                    branch: prior_branch,
+                                    branch: BranchName(prior_branch),
                                 };
                                 out.push(finding(Decision::Violated(
                                     Evidence::OverlappingReInvite {
@@ -167,7 +172,11 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                     };
                     let to_tag = msg.to_tag.as_deref().unwrap_or_default();
                     let uac = msg.dst.as_str();
-                    let txn = TxnKey { endpoint: uac, call_id: msg.call_id.as_str(), branch };
+                    let txn = TxnKey {
+                        endpoint: uac,
+                        call_id: msg.call_id.as_str(),
+                        branch: BranchName(branch),
+                    };
                     // Only the dialog-creating INVITE, still open on its
                     // From-only key, gains an early dialog.
                     let Some(parked) = dialog_of.get(&txn).copied() else { continue };
@@ -188,7 +197,11 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                     // The transaction belongs to the endpoint that TOOK the
                     // response — the UAC side of the branch.
                     let uac = msg.dst.as_str();
-                    let txn = TxnKey { endpoint: uac, call_id: msg.call_id.as_str(), branch };
+                    let txn = TxnKey {
+                        endpoint: uac,
+                        call_id: msg.call_id.as_str(),
+                        branch: BranchName(branch),
+                    };
                     let Some(dialog) = dialog_of.get(&txn).copied() else {
                         // A 2xx to an INVITE this capture never saw sent: the
                         // capture lost that hop's traffic, and the dialog it
@@ -205,7 +218,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                                     && early.remove(&named)
                                 {
                                     if let Some(in_flight) = in_progress.get_mut(&named) {
-                                        in_flight.remove(earlier.branch);
+                                        in_flight.remove(earlier.branch.0);
                                     }
                                 }
                             }

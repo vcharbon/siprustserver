@@ -19,19 +19,19 @@ pub fn site_at(raw: &[u8], at: usize) -> Site {
     if at >= head_end {
         return Site::Body;
     }
-    let line_start =
-        |end: usize| raw.iter().take(end).rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
-    let mut start = line_start(at.min(raw.len()));
-    while start > 0 && matches!(raw.get(start), Some(b' ' | b'\t')) {
-        start = line_start(start - 1);
-    }
+    // The row holding `at` starts at the last line start up to it that is the
+    // first line's or opens no continuation line.
+    let upto = raw.get(..at.min(raw.len())).unwrap_or_default();
+    let mut line_starts = std::iter::once(0).chain(memchr::memchr_iter(b'\n', upto).map(|p| p + 1));
+    let start =
+        line_starts.rfind(|&s| s == 0 || !matches!(raw.get(s), Some(b' ' | b'\t'))).unwrap_or(0);
     if start == 0 {
         return Site::StartLine;
     }
     // A line with no colon names no header: the empty name.
     let line = raw.get(start..).unwrap_or_default();
     let name = line.iter().position(|&b| b == b':').and_then(|c| line.get(..c)).unwrap_or_default();
-    Site::Header(String::from_utf8_lossy(name).trim().to_string())
+    Site::Header(crate::whitespace::trim(&String::from_utf8_lossy(name)).to_string())
 }
 
 #[cfg(test)]

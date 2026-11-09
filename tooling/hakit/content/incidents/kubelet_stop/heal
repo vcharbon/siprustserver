@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Start every stopped kubelet, then prove each runs. Idempotent. Facts: per node
+# whether the API server had marked it not ready, null when that could not be
+# read. A stop of at least not_ready_within_s that left a node reading Ready had no
+# effect, and fails the step once every kubelet runs again.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+nodes="$(hk_state nodes)"
+stopped_at="$(hk_state stopped_at_ms)"
+held_ms=$(( $(hk_now_ms) - ${stopped_at:-$(hk_now_ms)} ))
+facts="{}"
+no_effect=""
+while read -r n; do
+  [ -n "$n" ] || continue
+  ready="$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" || ready=""
+  case "$ready" in
+    "") seen=null ;;
+    True) seen=false ;;
+    *) seen=true ;;
+  esac
+  if [ "$seen" = false ] && [ "$held_ms" -ge $(( HAKIT_PARAM_NOT_READY_WITHIN_S * 1000 )) ]; then
+    no_effect="$no_effect $n"
+  fi
+  docker exec "$n" systemctl start kubelet
+  facts="$(jq -c --arg n "$n" --argjson s "$seen" '. + {($n): {not_ready_seen: $s}}' <<<"$facts")"
+done <<<"$nodes"
+while read -r n; do
+  [ -n "$n" ] || continue
+  docker exec "$n" systemctl is-active --quiet kubelet || hk_die "the kubelet of $n does not run"
+done <<<"$nodes"
+[ -z "$no_effect" ] || hk_die "still read Ready ${held_ms} ms after the stop, no effect:$no_effect"
+jq -cn --argjson f "$facts" --argjson at "$(hk_now_ms)" '{nodes: $f, started_at_ms: $at}'

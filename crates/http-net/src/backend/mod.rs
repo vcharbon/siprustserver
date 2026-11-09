@@ -193,16 +193,6 @@ impl BackendClient {
         self.inner.slots.free()
     }
 
-    /// The budgets of a retried request: `attempt` per attempt, inside
-    /// `total_ms`, or inside the settings' ceiling when `total_ms <= 0`.
-    pub fn budgets(&self, attempt: Duration, total_ms: i64) -> Budgets {
-        let total = u64::try_from(total_ms)
-            .ok()
-            .filter(|ms| *ms > 0)
-            .map_or(self.inner.ceiling, Duration::from_millis);
-        Budgets { attempt, total }
-    }
-
     /// One attempt of `req` under `budget` (capped by the ceiling), on the
     /// client taking new requests.
     pub async fn attempt(

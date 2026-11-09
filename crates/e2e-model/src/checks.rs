@@ -171,7 +171,7 @@ fn resolve<'e>(
             block.on
         ));
     };
-    let parser = CustomParser::new();
+    let parser = CustomParser::built();
     for e in entries {
         let addr_hit = if tag.sent { e.from == tag.agent_addr } else { e.to == tag.agent_addr };
         if !e.delivered || !addr_hit {

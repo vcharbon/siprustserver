@@ -318,6 +318,13 @@ impl CallLimiterState {
         self.release_owed |= other.release_owed;
     }
 
+    /// The call owes the release of its key whatever it sent: a discarded
+    /// turn of it may have sent an admit (ADR-0057 §4). Releasing a key the
+    /// limiter holds nothing for frees nothing.
+    pub fn owe_release(&mut self) {
+        self.release_owed = true;
+    }
+
     /// The call's turn dispatches a consult whose answer may admit a route:
     /// the call owes its release from this turn, and `n` change numbers are
     /// reserved, one per admit the consult may send (a failure consult's

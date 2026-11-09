@@ -1,12 +1,15 @@
 //! `promote18xPemTo200` — SERVICE_LAYER early-media service.
 //!
 //! Activated by `features.relay_first_18x_to_180` strategy `promote-pem-to-200`.
-//! Promotes Bob's first `183 Session Progress + SDP + P-Early-Media` (RFC 5009)
-//! into a synthetic 200 OK toward Alice; opens a promotion window during which
+//! Promotes Bob's first `183 Session Progress` holding a session description
+//! (`sdp()`) and stating `P-Early-Media` (RFC 5009, whatever its value) into a
+//! synthetic 200 OK toward Alice; opens a promotion window during which
 //! Alice's in-dialog requests are gated; on Bob's real 200 it confirms silently
-//! and, if Bob's SDP differs from the promoted SDP (`sdp_media_equivalent`),
-//! resyncs Alice with a B2BUA-originated re-INVITE. The per-call state lives on
-//! the typed `Call.promote_pem` slice.
+//! and, if the 200 holds a description that steers media otherwise than the
+//! promoted one (`sdp_media_equivalent`), resyncs Alice with a
+//! B2BUA-originated re-INVITE. A 200 holding none changes nothing: the 183
+//! carried the answer (RFC 3262 §5). The per-call state lives on the typed
+//! `Call.promote_pem` slice.
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::{
@@ -94,7 +97,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         return false;
                     }
                     match ctx.response() {
-                        Some(r) => !r.body().is_empty() && has_p_early_media(r),
+                        Some(r) => r.sdp().is_some() && has_p_early_media(r),
                         None => false,
                     }
                 },
@@ -102,7 +105,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let resp = ctx.response()?;
                 let leg = ctx.source_leg_id.to_string();
-                let promoted_sdp = resp.body().clone();
+                let promoted_sdp = resp.sdp().unwrap_or_default();
 
                 // 183 → 200 OK on the wire toward Alice: drop Require/RSeq and
                 // the RFC 5009 early-media authorization (the promoted answer is
@@ -141,6 +144,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         promoted_sdp: promoted_sdp.to_vec(),
                         window_open: true,
                         resync_reinvite_cseq: None,
+                        caller_answer: None,
                     }),
                 });
                 ok(actions)
@@ -179,7 +183,6 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let resp = ctx.response()?;
                 let b = ctx.source_leg_id.to_string();
                 let a = ctx.call.a_leg().leg_id.clone();
-                let final_sdp = resp.body().clone();
                 let state = ctx.call.promote_pem_state().cloned().unwrap_or_default();
                 let promoted_sdp = state.promoted_sdp.clone();
 
@@ -191,7 +194,15 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 // Confirm b, ACK b locally (no end-to-end ACK; Alice already
                 // ACK'd the synthetic 200), merge a↔b. NO relay-to-peer.
                 actions.push(RuleAction::ConfirmDialog { leg_id: b.clone() });
-                actions.push(RuleAction::AckLeg { leg_id: b.clone(), body: None });
+                // Bob's ACK answers his 200's offer, where it made one, with
+                // the answer alice's ACK gave (RFC 3264 §4).
+                actions.push(RuleAction::AckLegAnswering {
+                    leg_id: b.clone(),
+                    answer: state
+                        .caller_answer
+                        .clone()
+                        .map(|answer| Body::from_leg(answer, a.clone())),
+                });
                 actions.push(RuleAction::Merge { leg_a: a.clone(), leg_b: b.clone() });
                 for other in ctx.call.b_legs() {
                     if other.leg_id != b && other.state() != LegState::Terminated {
@@ -218,9 +229,11 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     reason: None,
                 });
 
-                // SDP diff. Equal → silent bridge, window closes. Different →
-                // resync re-INVITE on the a-leg with b's SDP.
-                if sdp_media_equivalent(&promoted_sdp, &final_sdp) {
+                // No description, or one steering media as the promoted one
+                // → silent bridge, window closes. Otherwise → resync re-INVITE
+                // on the a-leg offering b's body.
+                if resp.sdp().is_none_or(|final_sdp| sdp_media_equivalent(&promoted_sdp, final_sdp))
+                {
                     actions.push(RuleAction::SetPromotePem { state: None });
                     return ok(actions);
                 }
@@ -231,7 +244,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::SendReinvite {
                     leg_id: a,
                     body: Some(
-                        Body::from_leg(final_sdp.to_vec(), ctx.source_leg_id.to_string())
+                        Body::from_leg(resp.body().to_vec(), ctx.source_leg_id.to_string())
                             .described_by(resp.headers()),
                     ),
                     add_headers: a_facing_advert(ctx.call.features(), resp.headers()),
@@ -333,13 +346,28 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             Match::request().method("ACK").direction(Direction::FromA).filter(|ctx| {
                 promote_pem_active(ctx) && promoted(ctx) && ctx.call.active_peer().is_none()
             }),
-            |_ctx| {
-                ok(vec![RuleAction::AddCdrEvent {
+            |ctx| {
+                let mut actions = vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
                     leg_id: "a".to_string(),
                     status_code: Some(0),
                     reason: Some("promote-pem-to-200:ack-absorbed".to_string()),
-                }])
+                }];
+                // Her INVITE made no offer: the description her ACK carries
+                // answers the one promoted, and waits for bob's 200.
+                let answered = ctx
+                    .request()
+                    .and_then(|ack| ack.sdp())
+                    .filter(|_| ctx.caller_invite().is_some_and(|invite| invite.sdp().is_none()));
+                if let (Some(answer), Some(state)) = (answered, ctx.call.promote_pem_state()) {
+                    actions.push(RuleAction::SetPromotePem {
+                        state: Some(PromotePemState {
+                            caller_answer: Some(answer.to_vec()),
+                            ..state.clone()
+                        }),
+                    });
+                }
+                ok(actions)
             },
         ),
         // ── Rule 8: B fails post-promote → BYE A with Reason ─────────────────

@@ -184,7 +184,7 @@ fn failover_reject() -> RuleDefinition {
             if !service_ext.is_empty() {
                 actions.push(RuleAction::MergeCallExt { ext: service_ext });
             }
-            // The limiter chain's terminal 486 and the engine's stated
+            // The limiter chain's terminal 503 and the engine's stated
             // refusal are the stack's own finals, not decisions.
             let stack_authored = crate::decision_log::stack_authored(payload);
             let cause = if stack_authored {

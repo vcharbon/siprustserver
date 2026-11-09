@@ -89,7 +89,7 @@ async fn prack_update_forking_answer_on_second_fork() {
         .await;
     let p1 = call.expect(183).await;
     assert!(
-        p1.header::<Require>().expect("a Require").expect("readable Require").contains("100rel"),
+        p1.token_set::<Require>().expect("a Require").expect("readable Require").contains("100rel"),
         "fork1 Require:100rel relayed to alice",
     );
     let fork1_atag = p1.to().tag().expect("fork1 a-facing tag").to_string();

@@ -3,16 +3,18 @@
 
 use std::ops::Range;
 
-use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::params::{read_generic_params, ParamValue, Params};
-use super::scan::{
-    byte_at, clamped, index_of, quoted_close, read_quoted, skip_ws, sub, sub_trimmed,
-};
+use super::params::{ParamValue, Params};
+use super::reading::Reading;
+
+mod read;
+use super::scan::{byte_at, index_of, read_quoted, skip_ws, sub_trimmed};
 use super::uri::{Uri, UriRole};
 use super::wire::Wire;
+use read::{read_bare_user_semicolon, read_lenient, read_strict};
+pub(crate) use read::{AddrGrammar, AddrRead};
 
 /// An address with an optional display name and header parameters. The URI is
 /// grammar-mandatory, so it is not optional here either.
@@ -26,11 +28,6 @@ pub struct NameAddr {
 impl NameAddr {
     pub fn new(uri: Uri) -> Self {
         Self { display: None, uri, params: Params::new() }
-    }
-
-    /// Assemble from already-scanned parts — the parser's seam.
-    pub(crate) fn from_parts(display: Option<SipStr>, uri: Uri, params: Params) -> Self {
-        Self { display, uri, params }
     }
 
     pub fn uri(&self) -> &Uri {
@@ -103,9 +100,10 @@ impl NameAddr {
     /// the one URI reader in `role` with no whitespace inside the brackets,
     /// then the header parameters and nothing else. A bare addr-spec ends at
     /// the first `;`, every parameter after it is the header's, and it carries
-    /// no `,` or `?` (§20); [`AddrForm::NameAddrOnly`] refuses it.
+    /// no `,` or `?` ([`BareAddrSpec::Bracketed`], §20);
+    /// [`AddrForm::NameAddrOnly`] refuses it.
     pub fn parse_as(raw: &SipStr, form: AddrForm, role: UriRole) -> Result<Self, SipParseError> {
-        Self::parse_spanned(raw, form, role).map(|(addr, _)| addr)
+        Self::read(raw, &AddrGrammar::of(form, role), Reading::Strict).map(|read| read.addr)
     }
 
     /// [`parse_as`](Self::parse_as), with the byte range of `raw` the URI's
@@ -116,58 +114,34 @@ impl NameAddr {
         form: AddrForm,
         role: UriRole,
     ) -> Result<(Self, Range<usize>), SipParseError> {
-        let lead = raw.as_str().len() - raw.as_str().trim_start().len();
-        let value = raw.trimmed();
-        let bytes = value.as_bytes();
-        let (display, open) = match byte_at(bytes, 0) {
-            Some(b'"') => {
-                let after = quoted_close(bytes, 0).ok_or_else(|| {
-                    SipParseError::new(format!(
-                        "unterminated quoted display name: {:?}",
-                        raw.as_str()
-                    ))
-                })?;
-                (Some(read_quoted(&value, 0).0), Some(skip_ws(bytes, after)))
+        Self::read(raw, &AddrGrammar::of(form, role), Reading::Strict)
+            .map(|read| (read.addr, read.uri_span))
+    }
+
+    /// The one reader of an address value, in `grammar`. [`Reading::Strict`]
+    /// is [`parse_as`](Self::parse_as), with the grammar's two variations: no
+    /// header parameters, where a bare value is one URI whole; and the
+    /// [`AddrGrammar::bare_user_semicolon`] reading, tried only when the
+    /// strict read of a bare value fails. [`Reading::Lenient`] reads a value
+    /// the strict reading takes the same way, and never refuses one it does
+    /// not: an open quote or `<` runs to the end, the parameters read on past
+    /// a byte off their grammar, and a URI the URI reader refuses is held
+    /// [`Uri::opaque`].
+    pub(crate) fn read(
+        raw: &SipStr,
+        grammar: &AddrGrammar,
+        reading: Reading,
+    ) -> Result<AddrRead, SipParseError> {
+        let strict = match read_strict(raw, grammar) {
+            Err(refusal) if grammar.bare_user_semicolon => {
+                read_bare_user_semicolon(raw, grammar).ok_or(refusal)
             }
-            _ => {
-                let run = display_run_end(bytes);
-                let display = sub_trimmed(&value, 0, run);
-                let open = (byte_at(bytes, run) == Some(b'<')).then_some(run);
-                (open.filter(|_| !display.is_empty()).map(|_| display), open)
-            }
+            read => read,
         };
-        let (uri_span, params_at) = match open {
-            Some(open) => angle_uri(&value, open)?,
-            None => {
-                let semi = index_of(bytes, b';', 0).unwrap_or(bytes.len());
-                // No URI byte is a `<`: one before the first `;` opens a
-                // name-addr whose display name is neither tokens nor quoted.
-                if index_of(bytes, b'<', 0).is_some_and(|lt| lt < semi) {
-                    return Err(SipParseError::new(format!(
-                        "display name is neither tokens nor a quoted-string: {:?}",
-                        value.as_str()
-                    )));
-                }
-                if form == AddrForm::NameAddrOnly {
-                    return Err(SipParseError::new(format!(
-                        "a bare addr-spec where the grammar requires <uri>: {:?}",
-                        value.as_str()
-                    )));
-                }
-                let spec = clamped(value.as_str(), 0, semi);
-                if spec.contains([',', '?']) {
-                    return Err(SipParseError::new(format!(
-                        "bare addr-spec with `,` or `?`; name-addr \"<uri>\" form required (RFC 3261 §20): {:?}",
-                        spec.trim_end()
-                    )));
-                }
-                (0..spec.trim_end().len(), semi)
-            }
-        };
-        let uri = Uri::read_exact(&sub(&value, uri_span.start, uri_span.end), role)?;
-        let params = read_generic_params(&value, params_at)?;
-        let span = lead + uri_span.start..lead + uri_span.end;
-        Ok((Self { display, uri, params }, span))
+        match reading {
+            Reading::Strict => strict,
+            Reading::Lenient => Ok(strict.unwrap_or_else(|_| read_lenient(raw, grammar))),
+        }
     }
 
     /// Read an identity a caller states as text, its URI a [`UriRole::Identity`]:
@@ -249,169 +223,19 @@ pub enum AddrForm {
     NameAddrOnly,
 }
 
-/// The end of the leading run of token characters and LWS — the extent an
-/// unquoted display name may take before its `<`.
-fn display_run_end(bytes: &[u8]) -> usize {
-    bytes
-        .iter()
-        .position(|&b| !(is_token_char(b) || b == b' ' || b == b'\t'))
-        .unwrap_or(bytes.len())
-}
-
-/// The byte range of the URI inside `<...>` opening at byte `open`, untrimmed,
-/// plus the position of the header parameters that follow it.
-fn angle_uri(value: &SipStr, open: usize) -> Result<(Range<usize>, usize), SipParseError> {
-    let bytes = value.as_bytes();
-    if byte_at(bytes, open) != Some(b'<') {
-        return Err(SipParseError::new(format!(
-            "name-addr display name is not followed by <uri>: {:?}",
-            value.as_str()
-        )));
-    }
-    match index_of(bytes, b'>', open + 1) {
-        Some(close) => {
-            let inner = clamped(value.as_str(), open + 1, close);
-            if inner != inner.trim_matches([' ', '\t']) {
-                return Err(SipParseError::new(format!(
-                    "LWS inside \"<...>\" addr-spec: {:?}",
-                    value.as_str()
-                )));
-            }
-            Ok((open + 1..close, close + 1))
-        }
-        None => {
-            Err(SipParseError::new(format!("name-addr has no closing `>`: {:?}", value.as_str())))
-        }
-    }
+/// What a bare `addr-spec` may hold that RFC 3261 §20 brackets elsewhere. A
+/// `;` after a bare addr-spec always starts the header parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareAddrSpec {
+    /// Contact, From and To (§20): a URI holding a `,` or `?` is bracketed.
+    Bracketed,
+    /// A list header: a `?` starts the URI's headers, and a `,` separates
+    /// entries, so an entry holds none.
+    UriHeaders,
+    /// A single-valued header: a `?` starts the URI's headers, and a `,` is
+    /// the URI's own (RFC 3515 §2.1 admits `addr-spec`).
+    UriHeadersAndComma,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(s: &str) -> NameAddr {
-        NameAddr::parse(&SipStr::owned(s)).unwrap_or_else(|e| panic!("{s}: {}", e.reason))
-    }
-
-    fn rendered(s: &str) -> String {
-        let mut w = Wire::new();
-        parse(s).render(&mut w);
-        w.as_str().to_owned()
-    }
-
-    #[test]
-    fn a_quoted_display_name_is_unescaped_and_requoted() {
-        let n = parse(r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#);
-        assert_eq!(n.display(), Some(r#"Alice "A""#));
-        assert_eq!(n.params().value("tag"), Some("1928"));
-        assert_eq!(
-            rendered(r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#),
-            r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#
-        );
-    }
-
-    /// The written form keeps the quotes and the escapes the value carried; an
-    /// unquoted name is its own bytes, and a bare addr-spec states none.
-    #[test]
-    fn the_display_name_as_written_keeps_its_quoting() {
-        let written = |s: &str| {
-            NameAddr::display_as_written(&SipStr::owned(s)).map(|d| d.as_str().to_owned())
-        };
-        assert_eq!(
-            written(r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#).as_deref(),
-            Some(r#""Alice \"A\"""#)
-        );
-        assert_eq!(written("Bob <sip:bob@biloxi.com>").as_deref(), Some("Bob"));
-        assert_eq!(written("  Bob  <sip:bob@biloxi.com>").as_deref(), Some("Bob"));
-        assert_eq!(written("<sip:bob@biloxi.com>"), None);
-        assert_eq!(written("sip:bob@biloxi.com;tag=9"), None);
-        assert_eq!(written(""), None);
-    }
-
-    #[test]
-    fn an_unquoted_display_name_is_kept() {
-        assert_eq!(parse("Bob <sip:bob@biloxi.com>").display(), Some("Bob"));
-    }
-
-    /// `parse_identity` keeps a bare value's tail on the URI; bracketed text reads
-    /// as `parse` does.
-    #[test]
-    fn an_identity_reads_a_bare_tail_as_uri_parameters() {
-        let bare =
-            NameAddr::parse_identity(&SipStr::from_static("sip:a@h;user=phone;tag=x")).unwrap();
-        assert_eq!(bare.uri().params().value("user"), Some("phone"));
-        assert_eq!(bare.uri().params().value("tag"), Some("x"));
-        assert!(bare.params().is_empty());
-        let bracketed =
-            NameAddr::parse_identity(&SipStr::from_static("\"B\" <sip:a@h;user=phone>;tag=x"))
-                .unwrap();
-        assert_eq!(bracketed.display(), Some("B"));
-        assert_eq!(bracketed.uri().params().value("user"), Some("phone"));
-        assert_eq!(bracketed.params().value("tag"), Some("x"));
-    }
-
-    /// An untagged identity drops a stated tag, bare or bracketed, and refuses
-    /// one hidden in the userinfo or a URI header.
-    #[test]
-    fn an_untagged_identity_drops_its_tag_and_refuses_a_hidden_one() {
-        let read = |raw: &'static str| NameAddr::parse_untagged_identity(&SipStr::from_static(raw));
-        let bare = read("sip:a@h;user=phone;tag=x").unwrap();
-        assert_eq!(bare.uri().params().value("tag"), None);
-        assert_eq!(bare.uri().params().value("user"), Some("phone"));
-        let bracketed = read("\"B\" <sip:a@h;user=phone>;tag=x").unwrap();
-        assert_eq!(bracketed.params().value("tag"), None);
-        assert_eq!(bracketed.display(), Some("B"));
-        assert!(read("<sip:a;tag=x@h>").is_err());
-        assert!(read("<sip:a@h?X=tag=x>").is_err());
-        assert!(read("<sip:a@h").is_err());
-    }
-
-    #[test]
-    fn an_addr_spec_takes_its_parameters_as_header_parameters() {
-        let n = parse("sip:alice@atlanta.com;tag=99");
-        assert_eq!(n.uri().host(), "atlanta.com");
-        assert!(n.uri().params().is_empty());
-        assert_eq!(n.params().value("tag"), Some("99"));
-        assert_eq!(rendered("sip:alice@atlanta.com;tag=99"), "<sip:alice@atlanta.com>;tag=99");
-    }
-
-    #[test]
-    fn a_bracketed_uri_keeps_its_own_parameters() {
-        let n = parse("<sip:p.example;lr>;tag=7");
-        assert!(n.uri().is_loose_route());
-        assert_eq!(n.params().value("tag"), Some("7"));
-    }
-
-    #[test]
-    fn an_unclosed_angle_bracket_is_an_error() {
-        assert!(NameAddr::parse(&SipStr::owned("<sip:a@h")).is_err());
-    }
-
-    // RFC 3261 §20: a URI holding a `;` is bracketed in a header; inside the
-    // brackets it reads whole, and a bare addr-spec ends at its first `;`.
-    #[test]
-    fn a_bracketed_address_keeps_a_semicolon_user_part_a_bare_one_does_not() {
-        let target = "sip:+33612345678;foo=bar@192.0.2.10:5070";
-        let bracketed = parse(&format!("<{target}>;expires=60"));
-        assert_eq!(bracketed.uri().to_string(), target);
-        assert_eq!(bracketed.uri().host_port(), ("192.0.2.10", 5070));
-        let bare = NameAddr::parse(&SipStr::owned(target));
-        assert!(bare.map_or(true, |addr| addr.uri().to_string() != target));
-    }
-
-    /// A target stated outside a header line reads whole when it is a URI and
-    /// as a name-addr otherwise.
-    #[test]
-    fn a_stated_target_reads_bare_or_bracketed() {
-        let target = "sip:+33612345678;foo=bar@192.0.2.10:5070;user=phone";
-        let read = |s: &str| NameAddr::parse_uri_or_name_addr(&SipStr::owned(s)).unwrap();
-        let bare = read(target);
-        assert_eq!(bare.uri().to_string(), target);
-        assert!(bare.params().is_empty());
-        let bracketed = read(&format!("\"Bob\" <{target}>;q=0.5"));
-        assert_eq!(bracketed.uri().to_string(), target);
-        assert_eq!(bracketed.display(), Some("Bob"));
-        assert_eq!(bracketed.params().value("q"), Some("0.5"));
-        assert!(NameAddr::parse_uri_or_name_addr(&SipStr::owned("<sip:a@h")).is_err());
-    }
-}
+mod tests;

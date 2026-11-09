@@ -31,7 +31,8 @@
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
 //! outbound response is held to) · `seed` (ADR-0014 seeding + re-offer) ·
 //! `relinquish` (a call's transactions deleted for another node to serve) ·
-//! `new_call_gate` (a consumer's switch on new calls, read at receipt) ·
+//! `new_call_gate` (a consumer's switch on new calls and its queue's age, read
+//! at receipt) ·
 //! `events` (output-queue discipline) · `event_receiver` (the consumer's end
 //! of the event queue and the keepalive lane) · `event_age` (the age of the
 //! oldest event waiting in the queue) · `backlog` (new-call admission against
@@ -47,6 +48,7 @@ mod bound_report;
 mod call_txns;
 mod client;
 mod client_give_up;
+mod client_key;
 mod commands;
 mod config;
 mod event_age;

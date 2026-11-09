@@ -80,7 +80,7 @@ fn assert_every_site_is_free(traces: &ProxyTraces, regime: &str) {
     let facts = || RouteFacts {
         decision: RoutingDecisionKind::SelectNew,
         target: &target,
-        face: Some(Face::Internal),
+        face: Face::Internal,
         stickiness: None,
     };
     let t = || std::hint::black_box(traces);

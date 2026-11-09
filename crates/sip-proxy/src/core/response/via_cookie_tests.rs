@@ -106,7 +106,7 @@ fn fixture() -> Fixture {
 }
 
 fn parse(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 fn w1() -> SocketAddr {
@@ -127,7 +127,7 @@ fn cookie_text(cookie: &RouteParams) -> String {
 /// the call's backup.
 fn request(method: &str, branch: &str, route: &str, to_tag: &str, cseq: &str) -> String {
     format!(
-        "{method} sip:bob@{UAS}:5060 SIP/2.0\r\n\
+        "{method} sip:bob@{UAS}:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP {W1_POD}:5060;branch={branch};rport;bak=w2\r\n\
 {route}Max-Forwards: 70\r\n\
 From: <sip:b2bua@{W1_POD}>;tag=w\r\n\
@@ -171,7 +171,7 @@ fn answer(fwd: &[u8], status: &str, to_tag: &str, cseq: &str) -> SipResponse {
         .map(|l| format!("{l}\r\n"))
         .collect();
     let SipMessage::Response(resp) = parse(&format!(
-        "SIP/2.0 {status}\r\n\
+        "SIP/2.0 {status}\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 {vias}From: <sip:b2bua@{W1_POD}>;tag=w\r\n\
 To: <sip:bob@{UAS}>{to_tag}\r\n\
 Call-ID: {CALL_ID}\r\n\

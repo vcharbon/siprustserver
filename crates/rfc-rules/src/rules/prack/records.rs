@@ -1,5 +1,7 @@
 //! The rows the family's reading collects, one per wire fact.
 
+use crate::rules::branch::BranchName;
+
 /// One 100rel obligation: the endpoint that owes the PRACK, the transaction
 /// and the early dialog it rides, and the `RSeq` the PRACK's RAck must name.
 /// Spelled out as a struct so the four parts can never swap places.
@@ -25,7 +27,7 @@ pub(super) struct TxnKey<'a> {
     /// The endpoint judged: the UAS side, which takes the request and answers.
     pub(super) uas: &'a str,
     pub(super) call_id: &'a str,
-    pub(super) branch: &'a str,
+    pub(super) branch: BranchName<'a>,
 }
 
 /// One request an endpoint TOOK on a server transaction.

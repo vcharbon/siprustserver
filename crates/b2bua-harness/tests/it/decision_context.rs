@@ -96,7 +96,7 @@ async fn failure_request_carries_snapshot_and_failed_response_headers() {
     call.expect(486).await;
     settle_until(|| !captured.lock().unwrap().is_empty()).await;
 
-    let reqs = captured.lock().unwrap();
+    let reqs = captured.lock().unwrap().clone();
     assert_eq!(reqs.len(), 1, "one failure consult");
     let req = &reqs[0];
 
@@ -218,7 +218,7 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     let _cancel = carol.receive("CANCEL").await;
     let _ = &carol_uas; // its retained INVITE server txn sends no final (dead air)
 
-    let reqs = captured.lock().unwrap();
+    let reqs = captured.lock().unwrap().clone();
     assert_eq!(reqs.len(), 1, "one failure consult");
     assert_eq!(reqs[0].failure.origin, "transaction_timeout");
     assert_eq!(
@@ -595,13 +595,12 @@ async fn failover_route_limiter_reject_reconsults_with_call_limiter_origin() {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    let reqs = captured.lock().unwrap();
+    let reqs = captured.lock().unwrap().clone();
     assert_eq!(reqs.len(), 2, "external failure, then the limiter-reject re-consult");
     assert_eq!(reqs[0].failure.origin, "external");
     assert_eq!(reqs[1].failure.origin, "call_limiter");
     assert_eq!(reqs[1].failure.limiter_id.as_deref(), Some("trunk-full"));
     assert_eq!(reqs[1].callback_context.as_deref(), Some("ctx-chain-2"));
-    drop(reqs);
     assert_eq!(store.stats().current_total, 0, "the rejected trunk holds nothing");
 
     hangup(&mut dialog, &bob).await;

@@ -6,7 +6,8 @@ use super::*;
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 
-const INVITE: &str = "INVITE sip:bob@10.0.0.2 SIP/2.0\r\n\
+const INVITE: &str =
+    "INVITE sip:bob@10.0.0.2 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
     Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1\r\n\
     From: <sip:alice@10.0.0.1>;tag=a1\r\n\
     To: <sip:bob@10.0.0.2>\r\n\
@@ -14,7 +15,7 @@ const INVITE: &str = "INVITE sip:bob@10.0.0.2 SIP/2.0\r\n\
     CSeq: 1 INVITE\r\n\
     Content-Length: 0\r\n\r\n";
 
-const OK: &str = "SIP/2.0 200 OK\r\n\
+const OK: &str = "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
     Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1\r\n\
     From: <sip:alice@10.0.0.1>;tag=a1\r\n\
     To: <sip:bob@10.0.0.2>;tag=b1\r\n\
@@ -30,7 +31,7 @@ const BUSY: &str = "SIP/2.0 486 Busy Here\r\n\
     CSeq: 1 INVITE\r\n\
     Content-Length: 0\r\n\r\n";
 
-const HOP_ACK: &str = "ACK sip:bob@10.0.0.2 SIP/2.0\r\n\
+const HOP_ACK: &str = "ACK sip:bob@10.0.0.2 SIP/2.0\r\nMax-Forwards: 70\r\n\
     Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1\r\n\
     From: <sip:alice@10.0.0.1>;tag=a1\r\n\
     To: <sip:bob@10.0.0.2>;tag=b1\r\n\
@@ -250,7 +251,7 @@ fn a_merged_invite_is_answered_482() {
     assert_eq!(sight(&a, &next).owner, Owner::Tu, "a new CSeq is a new request");
 }
 
-const INFO: &str = "INFO sip:bob@10.0.0.2 SIP/2.0\r\n\
+const INFO: &str = "INFO sip:bob@10.0.0.2 SIP/2.0\r\nMax-Forwards: 70\r\n\
     Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-2;rport=5060\r\n\
     From: <sip:alice@10.0.0.1>;tag=a1\r\n\
     To: <sip:bob@10.0.0.2>;tag=b1\r\n\

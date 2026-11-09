@@ -177,11 +177,11 @@ impl SipStr {
         self.subspan(start - origin, sub.len())
     }
 
-    /// This field with surrounding ASCII/Unicode whitespace removed, still
-    /// sharing the image (no copy).
+    /// This field without the SP and HTAB at its edges, still sharing the
+    /// image (no copy). No other byte is trimmed (`crate::whitespace`).
     pub fn trimmed(&self) -> SipStr {
         let s = self.as_str();
-        let trimmed = s.trim();
+        let trimmed = crate::whitespace::trim(s);
         if trimmed.len() == s.len() {
             return self.clone();
         }

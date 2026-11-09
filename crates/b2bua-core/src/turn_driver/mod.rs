@@ -374,21 +374,18 @@ impl<'d> Session<'d> {
         if steps::is_cancel(&event) {
             return Outcome::StrayCancel;
         }
-        let turn = self.turn(event, &leg, resolved, turn);
-        self.call = turn.result.call.clone();
-        self.peers.heard(&turn.result);
-        self.txns.sent(&turn.result);
-        Outcome::Turned(Box::new(turn))
+        self.turn(event, &leg, resolved, turn)
     }
 
-    /// The turn `event` arriving on `leg` takes, resolved as `resolved`.
+    /// The turn `event` arriving on `leg` takes, resolved as `resolved`,
+    /// landed on the session; a turn past a per-call cap lands nothing.
     fn turn(
-        &self,
+        &mut self,
         event: CallEvent,
         leg: &str,
         resolved: call::helpers::Resolved,
         mut scope: TurnScope,
-    ) -> Turn {
+    ) -> Outcome {
         let driver = self.driver;
         let fw = Framework {
             config: &driver.config,
@@ -408,12 +405,15 @@ impl<'d> Session<'d> {
             now_ms: self.now,
             owners: self.owners.clone(),
         };
-        let result = land(
-            rule_chain_turn(&fw, gated, input, &mut scope),
-            &landing(&driver.config),
-            self.now,
-        );
-        Turn { result, rule: scope.handled_by, notes: scope.notes, resolved }
+        let result = match rule_chain_turn(&fw, gated, input, &mut scope) {
+            Ok(result) => land(result, &landing(&driver.config), self.now),
+            Err(tripped) => return Outcome::Tripped(tripped),
+        };
+        let turn = Turn { result, rule: scope.handled_by, notes: scope.notes, resolved };
+        self.call = turn.result.call.clone();
+        self.peers.heard(&turn.result);
+        self.txns.sent(&turn.result);
+        Outcome::Turned(Box::new(turn))
     }
 }
 
@@ -432,8 +432,8 @@ pub(super) fn landing(config: &B2buaConfig) -> Landing<'_> {
         budgets: AnswerBudgets {
             http: Duration::from_secs(5),
             admit: Duration::from_secs(1),
-            failure: Some(Duration::from_secs(5)),
-            release: Some(Duration::from_secs(5)),
+            failure: Duration::from_secs(5),
+            release: Duration::from_secs(5),
         },
         refresh_period: Duration::from_secs(60),
     }

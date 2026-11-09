@@ -105,6 +105,7 @@ fn writer_to(addr: SocketAddr, metrics: &B2buaMetrics) -> RabbitMqCdrWriter {
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 0 },
         bounds,
+        tls: amqp_connect::BrokerTls::PLAIN,
     };
     RabbitMqCdrWriter::new(settings, Arc::new(Fixed), metrics.clone())
 }

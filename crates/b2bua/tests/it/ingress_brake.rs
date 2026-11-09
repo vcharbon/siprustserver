@@ -111,6 +111,7 @@ async fn setup() -> (
         brake_config(),
         counters.clone(),
         Refusals::new(5, 0, 64, &IdGen::seeded(11)),
+        sip_message::CustomParser::new(),
     );
 
     let b2bua = net

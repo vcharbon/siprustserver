@@ -12,11 +12,15 @@ use super::{
     StrictRouteShuffleOnSend, PROXY_100_GRACE_US,
 };
 
+mod grace;
+mod strict_route_maddr;
+
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 
 fn invite(at_us: u64, cseq: u32) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: ALICE.to_string(),
         dst: BOB.to_string(),
@@ -36,6 +40,7 @@ fn invite(at_us: u64, cseq: u32) -> Msg {
 
 fn trying(at_us: u64, cseq: u32) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: BOB.to_string(),
         dst: ALICE.to_string(),
@@ -169,6 +174,7 @@ const PROXY: &str = "127.0.0.1:5080";
 /// A request into the proxy, or out of it, on a caller-chosen branch.
 fn hop_request(at_us: u64, src: &str, dst: &str, branch: &str, cseq: u32) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),
@@ -188,6 +194,7 @@ fn hop_request(at_us: u64, src: &str, dst: &str, branch: &str, cseq: u32) -> Msg
 
 fn hop_response(at_us: u64, src: &str, dst: &str, status: u16, branch: &str, cseq: u32) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),
@@ -229,6 +236,16 @@ fn a_404_without_forwarding_is_compliant() {
     assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
     assert_eq!(f[0].emitter, PROXY, "the proxy that resolved nothing is charged");
     assert_eq!(f[0].taker, ALICE);
+}
+
+/// A request the strict reading refuses is answered 400 with no target
+/// looked for: it is no §16.3 occasion.
+#[test]
+fn a_refused_request_owes_no_404() {
+    let mut refused = hop_request(1_000, ALICE, PROXY, "z9hG4bK-in", 1);
+    refused.refused = true;
+    let msgs = [refused, hop_response(2_000, PROXY, ALICE, 400, "z9hG4bK-in", 1)];
+    assert!(charged_to(PROXY, &msgs).is_empty());
 }
 
 /// Any other error final names an outcome that did not happen.
@@ -297,7 +314,7 @@ fn only_an_error_final_opens_the_occasion() {
 /// and Route row in the head the §16.4 rule reads.
 fn routed(at_us: u64, src: &str, dst: &str, branch: &str, request_uri: &str, route: &str) -> Msg {
     let head = format!(
-        "INVITE {request_uri} SIP/2.0\r\n\
+        "INVITE {request_uri} SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <sip:alice@h>;tag=at\r\n\
              To: <sip:bob@h>\r\n\
@@ -515,106 +532,6 @@ fn a_request_without_header_bytes_is_no_occasion() {
     assert!(strict(&msgs).is_empty(), "{:?}", strict(&msgs));
 }
 
-// ── Proxy100WithinGrace (RFC 3261 §16.7) ────────────────────────────────
-
-/// A final bob sent on the INVITE's own transaction.
-fn answered(at_us: u64, status: u16) -> Msg {
-    Msg {
-        at_us,
-        src: BOB.to_string(),
-        dst: ALICE.to_string(),
-        hop: 0,
-        repeat: false,
-        kind: Kind::Response { status },
-        call_id: "c1".to_string(),
-        cseq: 1,
-        cseq_method: "INVITE".to_string(),
-        from_tag: Some("at".to_string()),
-        to_tag: Some("bt".to_string()),
-        via_branch: Some("z9hG4bK-i".to_string()),
-        head: None,
-        body: None,
-    }
-}
-
-fn grace(msgs: &[Msg]) -> Vec<Finding> {
-    Proxy100WithinGrace.eval(&WireView { msgs, obs: &obs(msgs) })
-}
-
-/// The 100 went out: the obligation is met, and the endpoint charged is the
-/// one that TOOK the INVITE.
-#[test]
-fn a_trying_on_the_transaction_is_compliant() {
-    let f = grace(&[invite(1_000, 1), trying(2_000, 1)]);
-    assert_eq!(f.len(), 1, "one occasion, the INVITE taken: {f:?}");
-    assert_eq!(f[0].rule, RuleId::Proxy100WithinGrace);
-    assert_eq!(f[0].emitter, BOB, "the hop that took the INVITE is charged");
-    assert_eq!(f[0].taker, ALICE);
-    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-}
-
-/// §16.7 wants the 100 only where the answer is slow: a hop that rejected
-/// inside the grace owes nobody a Trying.
-#[test]
-fn a_final_inside_the_grace_discharges_it() {
-    let f = grace(&[invite(1_000, 1), answered(1_000 + PROXY_100_GRACE_US, 486)]);
-    assert_eq!(f.len(), 1, "{f:?}");
-    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-}
-
-/// Past the grace with no 100, the finding names the Δ actually observed.
-#[test]
-fn a_final_past_the_grace_is_violated_with_its_delta() {
-    let late = 1_000 + PROXY_100_GRACE_US + 1;
-    let f = grace(&[invite(1_000, 1), answered(late, 486)]);
-    assert_eq!(f.len(), 1, "{f:?}");
-    let Decision::Violated(Evidence::TryingNotSentInGrace {
-        first_final_after_us,
-        grace_us,
-        branch,
-        ..
-    }) = &f[0].decision
-    else {
-        panic!("{:?}", f[0].decision)
-    };
-    assert_eq!(*first_final_after_us, Some(PROXY_100_GRACE_US + 1));
-    assert_eq!(*grace_us, PROXY_100_GRACE_US);
-    assert_eq!(branch.as_str(), "z9hG4bK-i");
-}
-
-/// Nothing went out at all — and a CLOSED observation says so.
-#[test]
-fn silence_on_a_closed_observation_is_violated() {
-    let f = grace(&[invite(1_000, 1)]);
-    assert_eq!(f.len(), 1, "{f:?}");
-    let Decision::Violated(Evidence::TryingNotSentInGrace { first_final_after_us, .. }) =
-        &f[0].decision
-    else {
-        panic!("{:?}", f[0].decision)
-    };
-    assert_eq!(*first_final_after_us, None, "no response was sent");
-}
-
-/// An OPEN observation that stopped inside the grace shows truncation, not
-/// a hop holding its tongue.
-#[test]
-fn silence_inside_the_grace_of_an_open_observation_is_undecidable() {
-    let msgs = [invite(1_000, 1)];
-    let open = Observation { last_us: 1_100, closed: false, ..Observation::default() };
-    let f = Proxy100WithinGrace.eval(&WireView { msgs: &msgs, obs: &open });
-    assert_eq!(f.len(), 1, "{f:?}");
-    assert!(!f[0].decided(), "{:?}", f[0].decision);
-}
-
-/// A retransmitted INVITE is the same transaction: the 100 the hop already
-/// sent still discharges it, and it stays ONE occasion.
-#[test]
-fn a_retransmitted_invite_reuses_the_occasion() {
-    let f = grace(&[invite(1_000, 1), trying(2_000, 1), invite(3_000, 1)]);
-    assert_eq!(f.len(), 1, "{f:?}");
-    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-}
-
 // ---- strict-route-shuffle-on-send -----------------------------------
 
 /// A request the hop forwarded, stating `route` at the top of its Route set
@@ -622,7 +539,7 @@ fn a_retransmitted_invite_reuses_the_occasion() {
 fn forwarded(route: &str) -> Msg {
     let row = if route.is_empty() { String::new() } else { format!("Route: {route}\r\n") };
     let head = format!(
-        "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+        "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-r\r\n\
              {row}\
              From: <sip:alice@127.0.0.1>;tag=at\r\n\
@@ -675,7 +592,7 @@ fn a_swapped_forward_paired_with_what_it_took_is_compliant() {
     };
     let sent = |request_uri: &str| {
         let head = format!(
-            "INVITE {request_uri} SIP/2.0\r\n\
+            "INVITE {request_uri} SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
                  Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-fwd\r\n\
                  Via: SIP/2.0/UDP 127.0.0.1:5050;branch=z9hG4bK-r\r\n\
                  Route: <sip:bob@127.0.0.1:5070>\r\n\
@@ -710,7 +627,7 @@ fn hop_msg(
     branches: &[&str],
     routes: &[&str],
 ) -> Msg {
-    let mut head = format!("INVITE {request_uri} SIP/2.0\r\n");
+    let mut head = format!("INVITE {request_uri} SIP/2.0\r\nMax-Forwards: 70\r\n");
     for (i, branch) in branches.iter().enumerate() {
         head += &format!("Via: SIP/2.0/UDP 127.0.0.1:{};branch={branch}\r\n", 6000 + i);
     }

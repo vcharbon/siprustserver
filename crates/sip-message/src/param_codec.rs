@@ -22,20 +22,15 @@ pub fn encode_param(s: &str) -> String {
 /// Inverse of [`encode_param`]; invalid/truncated escapes pass through verbatim.
 pub fn decode_param(s: &str) -> String {
     let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
     let hex_at = |k: usize| bytes.get(k).copied().and_then(hex_val);
-    let mut i = 0;
-    while let Some(&b) = bytes.get(i) {
-        if b == b'%' {
-            if let (Some(hi), Some(lo)) = (hex_at(i + 1), hex_at(i + 2)) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b);
-        i += 1;
-    }
+    let out: Vec<u8> = crate::cursor::items(bytes, |i| {
+        let b = *bytes.get(i)?;
+        Some(match (b, hex_at(i + 1), hex_at(i + 2)) {
+            (b'%', Some(hi), Some(lo)) => ((hi << 4) | lo, i + 3),
+            _ => (b, i + 1),
+        })
+    })
+    .collect();
     String::from_utf8_lossy(&out).into_owned()
 }
 

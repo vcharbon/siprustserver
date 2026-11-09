@@ -2,7 +2,8 @@ use super::*;
 use sip_message::SipStr;
 
 /// A REGISTER carrying `extra` on top of the mandatory headers, as the
-/// parser reads it.
+/// parser of a deployment naming `max-forwards:absent` reads it, so a request
+/// with no hop count reads too.
 fn parse_register(extra: &[(&str, &str)]) -> Result<SipMessage, sip_message::SipParseError> {
     let mut raw =
         "REGISTER sip:127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-t\r\n\
@@ -13,7 +14,12 @@ fn parse_register(extra: &[(&str, &str)]) -> Result<SipMessage, sip_message::Sip
         raw.push_str(&format!("{name}: {value}\r\n"));
     }
     raw.push_str("Content-Length: 0\r\n\r\n");
-    CustomParser::new().parse(raw.as_bytes())
+    let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).expect("named");
+    CustomParser::with_limits(sip_message::SipParserLimits {
+        exemptions,
+        ..sip_message::SipParserLimits::DEFAULT
+    })
+    .parse(raw.as_bytes())
 }
 
 fn register(extra: &[(&str, &str)]) -> SipRequest {
@@ -38,9 +44,10 @@ fn max_forwards_zero_is_rejected() {
 }
 
 #[test]
-fn max_forwards_absent_is_the_decremented_default() {
-    // A request missing the header is treated as the §8.1.1.6 default (70).
-    assert_eq!(hops(&register(&[])), Some(69));
+fn max_forwards_absent_is_stated_as_70() {
+    // A request missing the header, where a deployment names the shape, gains
+    // a count of 70 (§16.6 step 3).
+    assert_eq!(hops(&register(&[])), Some(70), "RFC 3261 §16.6 step 3");
 }
 
 /// A hop count no reader accepts never reaches the forwarding path: the
@@ -83,4 +90,12 @@ fn wildcard_contact_carries_no_binding() {
     assert!(Contact::parse(&SipStr::owned("*")).is_err());
     let r = register(&[("Contact", "*"), ("Expires", "0")]);
     assert_eq!(effective_expires(&r, None), 0);
+}
+
+/// A URI's `maddr` is the address it names (RFC 3263 §4), at its own port.
+#[test]
+fn a_uri_addr_reads_its_maddr() {
+    let uri = Uri::parse(&sip_message::SipStr::owned("sip:bob@name.invalid:5070;maddr=192.0.2.9"))
+        .expect("a URI");
+    assert_eq!(uri_addr(&uri), Some("192.0.2.9:5070".parse().unwrap()));
 }

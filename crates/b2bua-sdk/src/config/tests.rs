@@ -233,6 +233,26 @@ fn nonpositive_ack_deadline_falls_back_to_the_default_ms() {
 }
 
 #[test]
+fn nonpositive_call_control_timeout_is_rejected() {
+    for bad in [0, -1] {
+        let c = B2buaConfig { call_control_timeout_ms: bad, ..Default::default() };
+        let e = c.validate().expect_err("a non-positive setup budget must be rejected");
+        assert!(e.contains("B2BUA_CALL_CONTROL_TIMEOUT_MS"), "msg was: {e}");
+    }
+    assert!(B2buaConfig { call_control_timeout_ms: 1, ..Default::default() }.validate().is_ok());
+}
+
+#[test]
+fn nonpositive_call_control_timeout_reads_the_default() {
+    for bad in [0, -1] {
+        let c = B2buaConfig { call_control_timeout_ms: bad, ..Default::default() };
+        assert_eq!(c.call_control_timeout(), std::time::Duration::from_millis(5_000));
+    }
+    let c = B2buaConfig { call_control_timeout_ms: 12_000, ..Default::default() };
+    assert_eq!(c.call_control_timeout(), std::time::Duration::from_millis(12_000));
+}
+
+#[test]
 fn nonpositive_txn_bound_falls_back_to_the_default_ms() {
     // 0 is NOT "disabled" for the transaction bound (validate refuses it at
     // boot); a harness config that writes it anyway gets the 158 s default,
@@ -264,16 +284,6 @@ fn an_emergency_ceiling_below_the_normal_one_is_refused() {
     });
     let err = c.validate().unwrap_err();
     assert!(err.contains("B2BUA_MAX_CALLS_EMERGENCY"), "{err}");
-}
-
-#[test]
-fn with_the_reaper_off_the_lifetime_message_cap_is_not_checked() {
-    let c = B2buaConfig {
-        reaper_enabled: false,
-        max_messages_per_call_lifetime: 0,
-        ..Default::default()
-    };
-    assert!(c.validate().is_ok(), "the cap is not installed without the reaper");
 }
 
 #[test]
@@ -362,4 +372,17 @@ fn the_event_queue_gate_relations_are_checked() {
     );
     let at_the_bound = EventQueueGateConfig { refuse_depth: EVENT_QUEUE_CAPACITY, ..d };
     assert_eq!(with(at_the_bound).validate(), Ok(()), "the queue's bound is reachable");
+}
+
+/// The transaction layer resolves no name, so an outbound proxy it sends to
+/// must be an IP literal; a worker standing alone states none.
+#[test]
+fn an_outbound_proxy_is_an_ip_literal() {
+    let named =
+        B2buaConfig { front: Front::single_face("proxy.example", 5060), ..Default::default() };
+    let err = named.validate().expect_err("a named outbound proxy is refused");
+    assert!(err.contains("B2BUA_OUTBOUND_PROXY=proxy.example:5060"), "{err}");
+    let literal =
+        B2buaConfig { front: Front::single_face("192.0.2.9", 5060), ..Default::default() };
+    assert_eq!(literal.validate(), Ok(()));
 }

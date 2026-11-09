@@ -231,6 +231,17 @@ fn remote_target_emit_rewrites_the_address_not_the_quoted_display_name() {
     assert_eq!(out[0].value, "\"Alice <sip:evil@example.com>\" <sip:real@192.0.2.10:5070>");
 }
 
+/// A captured `maddr` overrides the host: left alone, a replayed peer's Contact
+/// would send the SUT to the captured address instead of the bound socket.
+#[test]
+fn remote_target_emit_points_a_captured_maddr_at_the_bound_socket() {
+    let headers = vec![SipHeader::new("Contact", "<sip:uac@192.0.2.10:5070>")];
+    let emits =
+        vec![("contact".to_string(), "<sip:real@name.example;maddr=203.0.113.9;x=1>".to_string())];
+    let out = apply_remote_target_emits(&headers, &emits);
+    assert_eq!(out[0].value, "<sip:real@192.0.2.10:5070;maddr=192.0.2.10;x=1>");
+}
+
 #[test]
 fn response_template_carries_status_and_reason() {
     let tmpl = MessageTemplate::response(

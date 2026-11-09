@@ -6,22 +6,22 @@
 //! challenge in half.
 //!
 //! A value reads as RFC 3261 §25.1 writes it: an `auth-scheme` token, then
-//! `auth-param`s (`token EQUAL ( token / quoted-string )`, comma-separated)
-//! or one RFC 7235 §2.1 `token68`, kept as a single flag. Anything else is
-//! refused, so a value read renders to text that reads back as itself.
+//! `auth-param`s (`token EQUAL ( token / quoted-string )`, comma-separated,
+//! each name once) or, for a scheme other than Digest, one RFC 7235 §2.1
+//! `token68`, kept as a single flag. Anything else is refused, so a value
+//! read renders to text that reads back as itself.
 
 use std::marker::PhantomData;
 
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use crate::char_class::is_token_char;
-
+use super::cardinality::held_to_the_table;
 use super::kind::CredentialsKind;
-use super::name::HeaderName;
-use super::params::{ParamValue, Params};
-use super::scan::{byte_at, read_quoted, skip_ws, sub};
-use super::value::{Folding, HeaderValue};
+use super::params::{read_auth_params, ParamValue, Params};
+use super::scan::{skip_ws, sub, token_end};
+use super::single_valued::Listed;
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// An authentication scheme and its parameters.
@@ -84,13 +84,10 @@ impl<K: CredentialsKind> Credentials<K> {
 }
 
 impl<K: CredentialsKind> HeaderValue for Credentials<K> {
-    fn header_name() -> HeaderName {
-        K::name()
-    }
+    type Lines = K::Lines;
+    held_to_the_table!();
 
-    fn folding() -> Folding {
-        K::FOLDING
-    }
+    const HEADER: Listed = K::HEADER;
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = without_lws(raw);
@@ -107,12 +104,14 @@ impl<K: CredentialsKind> HeaderValue for Credentials<K> {
             Params::new()
         } else if rest == scheme_end {
             return Err(refused("has no space after its auth-scheme"));
-        } else if bytes.split_at_checked(rest).is_some_and(|(_, tail)| is_token68(tail)) {
+        } else if !scheme.eq_ignore_ascii_case("Digest")
+            && bytes.split_at_checked(rest).is_some_and(|(_, tail)| is_token68(tail))
+        {
             let mut one = Params::new();
             one.push(sub(&value, rest, bytes.len()), ParamValue::Flag);
             one
         } else {
-            auth_params(&value, rest).ok_or_else(|| refused("has a malformed auth-param"))?
+            read_auth_params(&value, rest).map_err(|e| refused(&format!("has {}", e.reason)))?
         };
         Ok(Self { scheme, params, kind: PhantomData })
     }
@@ -134,76 +133,12 @@ fn without_lws(raw: &SipStr) -> SipStr {
     sub(raw, start, bytes.len().saturating_sub(trailing).max(start))
 }
 
-/// The end of the token starting at byte `i`: `i` itself when none does.
-fn token_end(bytes: &[u8], i: usize) -> usize {
-    i + bytes.iter().skip(i).take_while(|&&b| is_token_char(b)).count()
-}
-
 /// `token68 = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`
 /// (RFC 7235 §2.1), the whole of `rest`.
 fn is_token68(rest: &[u8]) -> bool {
     let body = rest.iter().take_while(|&&b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b));
     let body = body.count();
     body > 0 && rest.iter().skip(body).all(|&b| b == b'=')
-}
-
-/// The position after the `"` closing the `quoted-string` opened at byte
-/// `open` (RFC 3261 §25.1): `qdtext` is HTAB, SP or any byte but a control,
-/// `"` and `\`; a `quoted-pair` escapes one ASCII byte but CR and LF. `None`
-/// when a byte breaks it or nothing closes it.
-fn quoted_end(bytes: &[u8], open: usize) -> Option<usize> {
-    let mut i = open + 1;
-    loop {
-        match byte_at(bytes, i)? {
-            b'"' => return Some(i + 1),
-            b'\\' => match byte_at(bytes, i + 1)? {
-                b'\r' | b'\n' => return None,
-                escaped if escaped.is_ascii() => i += 2,
-                _ => return None,
-            },
-            b'\t' => i += 1,
-            b if b < 0x20 || b == 0x7f => return None,
-            _ => i += 1,
-        }
-    }
-}
-
-/// The `auth-param`s from byte `i` to the end of `base`, comma-separated
-/// with optional whitespace; `None` at the first byte off the grammar.
-fn auth_params(base: &SipStr, mut i: usize) -> Option<Params> {
-    let bytes = base.as_bytes();
-    let mut params = Params::new();
-    loop {
-        let name_end = token_end(bytes, i);
-        if name_end == i {
-            return None;
-        }
-        let name = sub(base, i, name_end);
-        i = skip_ws(bytes, name_end);
-        if byte_at(bytes, i) != Some(b'=') {
-            return None;
-        }
-        i = skip_ws(bytes, i + 1);
-        if byte_at(bytes, i) == Some(b'"') {
-            let close = quoted_end(bytes, i)?;
-            let (text, _) = read_quoted(base, i);
-            params.push(name, ParamValue::Quoted(text));
-            i = close;
-        } else {
-            let value_end = token_end(bytes, i);
-            if value_end == i {
-                return None;
-            }
-            params.push(name, ParamValue::Token(sub(base, i, value_end)));
-            i = value_end;
-        }
-        i = skip_ws(bytes, i);
-        match byte_at(bytes, i) {
-            None => return Some(params),
-            Some(b',') => i = skip_ws(bytes, i + 1),
-            Some(_) => return None,
-        }
-    }
 }
 
 impl<K: CredentialsKind> std::fmt::Display for Credentials<K> {
@@ -215,7 +150,7 @@ impl<K: CredentialsKind> std::fmt::Display for Credentials<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::{Authorization, WwwAuthenticate};
+    use crate::header::{Authorization, Folding, WwwAuthenticate};
 
     #[test]
     fn a_challenge_reads_its_parameters() {

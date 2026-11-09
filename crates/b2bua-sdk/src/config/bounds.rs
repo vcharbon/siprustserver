@@ -43,4 +43,7 @@ impl B2buaConfig {
     /// Default [`ack_timeout_sec`](Self::ack_timeout_sec) (s): RFC 3261
     /// §13.3.1.4's `64·T1`, Timer L.
     pub const DEFAULT_ACK_TIMEOUT_SEC: i64 = 32;
+    /// Default [`call_control_timeout_ms`](Self::call_control_timeout_ms)
+    /// (ms).
+    pub const DEFAULT_CALL_CONTROL_TIMEOUT_MS: i64 = 5_000;
 }

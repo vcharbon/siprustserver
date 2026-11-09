@@ -1,12 +1,12 @@
 //! The via-extension a B2BUA puts on its own Via (RFC 3261 §20.42 allows a
 //! `via-extension`): the leg a request belongs to, the request's
-//! Request-URI and whether it carried a session offer, with the signature the
-//! sender made of them. A response carries the Via back, so a node that holds
-//! no record of the request can still CANCEL it (§9.1), ACK its non-2xx
-//! (§17.1.1.3), or ACK its 2xx with the answer an offer in the 2xx is owed
-//! (§13.2.2.4, RFC 3264 §4).
+//! Request-URI, the Route past its first hop and whether it carried a session
+//! offer, with the signature the sender made of them. A response carries the Via
+//! back, so a node that holds no record of the request can still CANCEL it
+//! (§9.1), ACK its non-2xx where the request went (§17.1.1.2, §17.1.1.3), or ACK
+//! its 2xx with the answer an offer in the 2xx is owed (§13.2.2.4, RFC 3264 §4).
 //!
-//! The value is one `token` (§25.1): the leg and the Request-URI
+//! The value is one `token` (§25.1): the leg, the Request-URI and the route
 //! base64url-encoded without padding, the offer flag (`o` or `n`) and the
 //! signature base64url-encoded, joined by `.`. It is bounded by [`MAX_LEN`]: a
 //! request whose fields would not fit carries none. This module only reads and
@@ -32,6 +32,9 @@ pub struct ViaExtension {
     pub leg: String,
     /// The request's Request-URI, as sent.
     pub request_uri: String,
+    /// The request's Route past its first hop, as one header value; empty for
+    /// none.
+    pub route: String,
     /// Whether the request carried a session offer (RFC 3264 §4).
     pub offer: bool,
 }
@@ -44,6 +47,7 @@ impl ViaExtension {
         let value = [
             engine.encode(self.leg.as_bytes()),
             engine.encode(self.request_uri.as_bytes()),
+            engine.encode(self.route.as_bytes()),
             self.offer_flag().to_string(),
             engine.encode(signature),
         ]
@@ -61,7 +65,7 @@ impl ViaExtension {
     }
 
     /// The extension a parameter value states and the signature it carries,
-    /// unverified; `None` for a value that is not two base64url fields of
+    /// unverified; `None` for a value that is not three base64url fields of
     /// UTF-8 text, an offer flag and a signature, or exceeds [`MAX_LEN`].
     pub fn decode(value: &str) -> Option<(ViaExtension, Vec<u8>)> {
         if value.len() > MAX_LEN {
@@ -71,6 +75,7 @@ impl ViaExtension {
         let mut fields = value.split(SEPARATOR);
         let leg = String::from_utf8(engine.decode(fields.next()?).ok()?).ok()?;
         let request_uri = String::from_utf8(engine.decode(fields.next()?).ok()?).ok()?;
+        let route = String::from_utf8(engine.decode(fields.next()?).ok()?).ok()?;
         let offer = match fields.next()? {
             "o" => true,
             "n" => false,
@@ -80,7 +85,7 @@ impl ViaExtension {
         if fields.next().is_some() || leg.is_empty() || request_uri.is_empty() {
             return None;
         }
-        Some((ViaExtension { leg, request_uri, offer }, signature))
+        Some((ViaExtension { leg, request_uri, route, offer }, signature))
     }
 
     /// The Via parameter carrying the extension and `signature`, `None` when
@@ -104,6 +109,7 @@ mod tests {
         ViaExtension {
             leg: "b-1".into(),
             request_uri: "sip:bob@127.0.0.1:5070;transport=udp".into(),
+            route: "<sip:hop.example;lr>".into(),
             offer: true,
         }
     }
@@ -125,6 +131,7 @@ mod tests {
         let long = ViaExtension {
             leg: "b-1".into(),
             request_uri: format!("sip:{}@h", "x".repeat(600)),
+            route: String::new(),
             offer: false,
         };
         assert_eq!(long.encode(&[0u8; 16]), None);
@@ -132,8 +139,17 @@ mod tests {
 
     #[test]
     fn a_malformed_value_reads_as_none() {
-        for value in ["", "a", "YQ.YQ.YQ", "YQ.YQ.x.YQ", "YQ.YQ.o.YQ.YQ", "!!.YQ.o.YQ", ".YQ.n.YQ"]
-        {
+        for value in [
+            "",
+            "a",
+            "YQ.YQ.YQ",
+            "YQ.YQ.x.YQ",
+            "YQ.YQ.YQ.x.YQ",
+            "YQ.YQ.YQ.o.YQ.YQ",
+            "!!.YQ.YQ.o.YQ",
+            ".YQ.YQ.n.YQ",
+            "YQ..YQ.n.YQ",
+        ] {
             assert_eq!(ViaExtension::decode(value), None, "{value}");
         }
     }

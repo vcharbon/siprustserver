@@ -5,7 +5,6 @@
 
 use call::helpers::mark_decision;
 use call::{Call, DecisionKind, TerminationCause};
-use sip_ids::TurnIds;
 use sip_message::SipRequest;
 
 use crate::config::B2buaConfig;
@@ -24,32 +23,20 @@ pub enum Consult {
 }
 
 /// The limiter refused this route: consult `/call/failure` for a failover
-/// treatment, or answer `486 Busy Here` when the call has no callback context
-/// to fail over with — or has already burned [`MAX_LIMITER_FAILOVER`] hops,
-/// so a plan that keeps returning limited destinations terminates instead of
-/// looping.
-pub fn consult_or_busy(
+/// treatment, or answer the bare 503 of an unavailable decision
+/// ([`unavailable`]) when the call has no callback context to fail over with,
+/// or has already burned [`MAX_LIMITER_FAILOVER`] hops, so a plan that keeps
+/// returning limited destinations terminates instead of looping.
+pub fn consult_or_unavailable(
     call: Call,
     limiter_id: &str,
     a_invite: &SipRequest,
     config: &B2buaConfig,
-    ids: &mut TurnIds,
     now_ms: i64,
     depth: u32,
 ) -> Consult {
     if call.callback_context.is_none() || depth >= MAX_LIMITER_FAILOVER {
-        return Consult::Final(Box::new(crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            486,
-            Some("Busy Here".into()),
-            None,
-            &[],
-            &config.minted_final_advertisement,
-            ids,
-            now_ms,
-            TerminationCause::Admission,
-        )));
+        return Consult::Final(Box::new(unavailable(call, a_invite, config, now_ms)));
     }
     let request = Box::new(limiter_failure_request(&call, limiter_id));
     Consult::Raise { call: Box::new(call), request }
@@ -87,7 +74,6 @@ pub fn treatment(
     response: Result<CallTreatment, CallDecisionError>,
     a_invite: &SipRequest,
     config: &B2buaConfig,
-    ids: &mut TurnIds,
     now_ms: i64,
 ) -> Failover {
     let advertisement = &config.minted_final_advertisement;
@@ -103,7 +89,6 @@ pub fn treatment(
             None,
             a_invite,
             advertisement,
-            ids,
             now_ms,
         ),
         Ok(CallTreatment::Redirect(rd)) => super::apply_reject::apply_redirect(
@@ -113,7 +98,6 @@ pub fn treatment(
             None,
             a_invite,
             advertisement,
-            ids,
             now_ms,
         ),
         // Relay with no captured failure (a limiter reject is pre-leg) → 480
@@ -128,7 +112,6 @@ pub fn treatment(
                 None,
                 &[],
                 advertisement,
-                ids,
                 now_ms,
                 TerminationCause::DecisionReject,
             )
@@ -143,22 +126,31 @@ pub fn treatment(
                 update_headers.as_ref(),
                 a_invite,
                 advertisement,
-                ids,
                 now_ms,
             )
         }
-        Err(CallDecisionError::Unavailable(_)) => crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            503,
-            None,
-            None,
-            &[],
-            advertisement,
-            ids,
-            now_ms,
-            TerminationCause::Admission,
-        ),
+        Err(CallDecisionError::Unavailable(_)) => unavailable(call, a_invite, config, now_ms),
     };
     Failover::Final(Box::new(result))
+}
+
+/// The call's final when no decision can answer: the stack's own bare 503
+/// (ADR-0043), no decision and no mark.
+pub fn unavailable(
+    call: Call,
+    a_invite: &SipRequest,
+    config: &B2buaConfig,
+    now_ms: i64,
+) -> HandlerResult {
+    crate::initial_invite::reject_call(
+        call,
+        a_invite,
+        503,
+        None,
+        None,
+        &[],
+        &config.minted_final_advertisement,
+        now_ms,
+        TerminationCause::Admission,
+    )
 }

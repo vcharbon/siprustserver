@@ -27,6 +27,7 @@ use sip_message::types::SipResponse;
 use sip_message::{Method, SipMessage};
 
 use crate::addr::ProxyAddr;
+use crate::headers::via_marks_same_face;
 use crate::observability::metrics::{Direction, Face, MessageResult, UntrustedClaim};
 use crate::trace::emit;
 
@@ -91,28 +92,33 @@ impl ProxyCore {
         // advertised registry address, SNAT-immune, never the received/rport
         // send target, which behind address translation is a node IP and an
         // ephemeral port; a response for a departed address, whatever its
-        // method, re-arms that address's window.
+        // method, re-arms that address's window. On a crossing proxy only a
+        // response that may be a worker's reads the registry (`crate::face`).
         let (sent_by_host, sent_by_port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
-        self.registry.rearm_departed(&sent_by);
+        let marked = via_marks_same_face(ours);
+        let for_a_worker = self.egress.response_may_be_a_workers(face, marked);
+        if for_a_worker {
+            self.registry.rearm_departed(&sent_by);
+        }
 
         // ── The owner rule (ADR-0055 §8) ────────────────────────────────────
         let msg = SipMessage::Response(resp);
-        let route = self.owner_route(&msg, ours, &sent_by).await;
+        let route = self.owner_route(&msg, ours, &sent_by, for_a_worker).await;
         let SipMessage::Response(resp) = msg else { return };
-        let (host, port) = match (route, face) {
-            (OwnerRoute::To(target), _) => (target.host, target.port),
+        let (host, port, owner_named) = match (route, face) {
+            (OwnerRoute::To(target), _) => (target.host, target.port, true),
             (OwnerRoute::Nowhere, _) => {
                 self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
                 return;
             }
             // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
-            (OwnerRoute::Via, Face::Internal) => {
+            (OwnerRoute::Via { owner_named }, Face::Internal) => {
                 let (host, port) = next.response_target();
-                (host.to_string(), port)
+                (host.to_string(), port, owner_named)
             }
-            (OwnerRoute::Via, Face::External) => match self.external_response_target(next) {
-                Some(target) => (target.host, target.port),
+            (OwnerRoute::Via { .. }, Face::External) => match self.external_response_target(next) {
+                Some(target) => (target.host, target.port, true),
                 None => {
                     self.metrics.record_external_untrusted(UntrustedClaim::ResponseNotToWorker);
                     self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
@@ -133,7 +139,8 @@ impl ProxyCore {
             return;
         };
         let next_hop = ProxyAddr::new(host, port);
-        self.send_to(&bytes, &next_hop).await;
+        let egress = self.egress.response(face, owner_named, marked);
+        let _ = self.send_to(&bytes, &next_hop, egress).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
         if let Some(call_id) = &traced {
             emit::relayed(&self.traces, call_id, at_ms, &next_hop, &bytes);

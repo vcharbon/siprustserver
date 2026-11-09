@@ -77,7 +77,8 @@ export const enrich = (
     if (!(yield* fs.exists(source))) return broke(`no flows doc at ${source}`)
     // Straight to the file: the document of a big capture is hundreds of
     // megabytes, which no parent can hold as one buffer.
-    const why = yield* IntoFile.run(extractor, ["--enrich", source], yield* flowsOf(work))
+    const reading = yield* Tools.reading
+    const why = yield* IntoFile.run(extractor, [...reading, "--enrich", source], yield* flowsOf(work))
     if (why !== undefined) return broke(`sipflow --enrich failed: ${why}`)
     return undefined
   }).pipe(

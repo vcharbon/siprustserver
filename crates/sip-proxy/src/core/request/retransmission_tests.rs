@@ -128,7 +128,7 @@ async fn fixture(targets: &[ProxyAddr]) -> Fixture {
 }
 
 fn parse_req(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 fn invite(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> SipMessage {
@@ -340,7 +340,7 @@ Call-ID: latefinal-1@test\r\n\
 CSeq: 9 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("expected response")
     };
     f.core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;

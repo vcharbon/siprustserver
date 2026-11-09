@@ -255,6 +255,29 @@ async fn the_backups_ending_is_discharged_and_its_teardown_awaited() {
     assert_eq!(n.cdr.snapshot().len(), 1, "one record");
 }
 
+/// **A copy holding an image its seeds name that does not read is never taken**
+/// (ADR-0052 §11): the live copy keeps serving, and the refusal is counted.
+#[tokio::test(start_paused = true)]
+async fn a_copy_holding_an_unreadable_seed_image_is_never_taken() {
+    let n = node("w0").await;
+    let live = unanswered(4, 1, CallModelState::Active);
+    let mut copy = answered(4, 2, CallModelState::Active);
+    let sent = call::SentRequest {
+        branch: "z9hG4bK-damaged".into(),
+        image: b"\xffdamaged".to_vec(),
+        destination: call::HostPort { host: "192.0.2.77".into(), port: 5070 },
+    };
+    let mut leg = call::testkit::dialled_leg("b-damaged", "own");
+    leg.invite =
+        Some(call::RequestRecord::dialled(1, Some(sent), call::OutboundInvite::new("t", 0)));
+    call::helpers::add_b_leg(&mut copy.call, leg);
+    meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
+
+    let after = n.core.router_ctx().state.peek(&live.call.call_ref).expect("the live copy serves");
+    assert!(after.b_legs.iter().all(|l| l.leg_id != "b-damaged"), "nothing of the copy landed");
+    assert_eq!(n.metrics.unrecoverable_meetings_total(), 1);
+}
+
 /// **A copy that does not rebuild the caller's INVITE is never taken**
 /// (ADR-0052 §11): the live copy, which does, keeps serving the call at its
 /// own vector, and the refusal is counted.
@@ -732,3 +755,5 @@ async fn the_end_over_a_cancelled_copy_ends_the_early_dialogs_the_record_holds()
 }
 
 mod dials;
+mod flush_turn;
+mod owed_final;

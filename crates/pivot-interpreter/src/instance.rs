@@ -48,7 +48,11 @@ impl<'p> Instance<'p> {
     /// the document holds.
     #[cfg(test)]
     pub fn new(plan: &'p Plan, config: RunConfig) -> Self {
-        Instance::with_recording(plan, config, Recording::new())
+        Instance::with_recording(
+            plan,
+            config,
+            Recording::new(std::sync::Arc::new(sip_message::CustomParser::built())),
+        )
     }
 
     /// An instance recording into a handle the CALLER already holds — the

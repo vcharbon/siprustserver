@@ -1,4 +1,5 @@
-"""The lints the panic-sites ratchet counts (ADR-0051 §2)."""
+"""The lints the panic-sites ratchet counts (ADR-0051 §2), and the site sets
+its syntax scanner counts (ADR-0057 §5)."""
 
 DENIED = ("indexing_slicing", "string_slice", "unwrap_used", "expect_used", "panic",
           "unreachable", "todo", "unimplemented", "cast_possible_truncation",
@@ -9,6 +10,12 @@ PURE_DENIED = ("iter_over_hash_type",)
 LISTS = ("disallowed_macros", "disallowed_methods", "disallowed_types")
 COUNTED = tuple(f"clippy::{lint}" for lint in DENIED + PURE_DENIED + LISTS)
 PURE_COUNTED = tuple(f"clippy::{lint}" for lint in PURE_DENIED)
+# Counted by tooling/site-scan, not by clippy (panic_sites_scan).
+SITE_SETS = ("loop", "recursion")
+SITES = tuple(f"site::{s}" for s in SITE_SETS)
+# The scanner's rules: raised with every change that counts sites the last
+# version did not, so the base reveals them.
+SITE_RULES = 1
 # The lint groups that hold a counted lint, and rustc's `warnings`.
 HIDING_GROUPS = ("warnings", "clippy::all", "clippy::style", "clippy::pedantic",
                  "clippy::restriction")

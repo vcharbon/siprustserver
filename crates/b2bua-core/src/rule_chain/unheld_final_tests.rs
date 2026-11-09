@@ -60,7 +60,7 @@ fn call_with_an_ended_dial() -> Call {
 /// via-extension signed under the cluster key.
 fn refused(call: &Call, sender: (&str, u16)) -> CallEvent {
     let k = key();
-    let facts = RequestFacts { method: "INVITE", uri: CALLEE_URI, offer: true };
+    let facts = RequestFacts { method: "INVITE", uri: CALLEE_URI, route: "", offer: true };
     let via = build_call_via(
         &StackIdentityOpts {
             local_ip: sender.0,
@@ -104,7 +104,7 @@ fn acks_sent(sender: (&str, u16), matched_client_txn: bool) -> Vec<String> {
         now_ms: 1_000,
         owners: Default::default(),
     };
-    let result = rule_chain_turn(&fw, call, input, &mut turn(1));
+    let result = rule_chain_turn(&fw, call, input, &mut turn(1)).expect("the turn crosses no cap");
     result
         .effects
         .outbound

@@ -81,15 +81,55 @@ fn every_stream_needs_an_address_and_a_port() {
 
     let bad_port = b"v=0\r\no=alice 1 1 IN IP4 h\r\ns=-\r\nc=IN IP4 h\r\nt=0 0\r\n\
                      m=audio -1 RTP/AVP 0\r\n";
-    assert!(reason(bad_port).contains("port '-1' is not a non-negative integer"));
+    assert!(reason(bad_port).contains("m=audio line states no port field"), "{}", reason(bad_port));
 }
 
-/// A packetisation interval is a duration, so zero and below state nothing.
+/// A description with one audio stream and the caller's `m=` port field and
+/// trailing media-level lines.
+fn stream(port_field: &str, media_lines: &str) -> Vec<u8> {
+    format!(
+        "v=0\r\no=alice 1 1 IN IP4 h\r\ns=-\r\nc=IN IP4 h\r\nt=0 0\r\n\
+         m=video {port_field} RTP/AVP 31\r\n{media_lines}"
+    )
+    .into_bytes()
+}
+
+/// RFC 8866 §5.14: `<port>/<number of ports>` states consecutive port pairs,
+/// a rejected stream included.
 #[test]
-fn ptime_is_positive() {
-    let zero = b"v=0\r\no=alice 1 1 IN IP4 h\r\ns=-\r\nc=IN IP4 h\r\nt=0 0\r\n\
-                 m=audio 1 RTP/AVP 0\r\na=ptime:0\r\n";
-    assert_eq!(reason(zero), "a=ptime:0 is not > 0");
+fn a_port_field_may_state_a_number_of_ports() {
+    assert!(validate_offer_answer_body(&stream("49170/2", "")).is_ok());
+    assert!(validate_offer_answer_body(&stream("0/2", "")).is_ok());
+    for off in ["49170/0", "49170/x", "49170/", "49170x"] {
+        assert!(reason(&stream(off, "")).contains("states no port field"), "{off}");
+    }
+}
+
+/// RFC 8866 §6.4: a packet time is a `non-zero-int-or-real`, so a decimal
+/// one is legal and zero is not.
+#[test]
+fn ptime_is_a_non_zero_integer_or_real() {
+    for valid in ["a=ptime:20\r\n", "a=ptime:2.5\r\n", "a=ptime:0.5\r\n"] {
+        assert!(validate_offer_answer_body(&stream("1", valid)).is_ok(), "{valid}");
+    }
+    assert_eq!(
+        reason(&stream("1", "a=ptime:0\r\n")),
+        "a=ptime value \"0\" is not a non-zero integer or real (RFC 8866 §6.4)"
+    );
+    assert!(reason(&stream("1", "a=ptime:20.0\r\n")).contains("value \"20.0\" is not"));
+    let spaced = reason(&stream("1", "a=ptime:20 \r\n"));
+    assert!(spaced.contains("value \"20 \" is not"), "the value is quoted as written: {spaced}");
+}
+
+/// RFC 8866 §5: the session-level lines precede the first `m=`, so an `o=`
+/// or a `t=` inside a media description is out of order.
+#[test]
+fn a_session_level_line_after_media_is_refused() {
+    let late_origin = stream("1", "o=alice 2 2 IN IP4 h\r\n");
+    assert!(reason(&late_origin).contains("'o=alice 2 2 IN IP4 h' follows an m= line"));
+    let late_time = stream("1", "t=0 0\r\n");
+    assert!(reason(&late_time).contains("'t=0 0' follows an m= line"));
+    assert!(validate_offer_answer_body(&stream("1", "i=title\r\nb=AS:64\r\n")).is_ok());
 }
 
 /// The §8.4 hold idiom, in both address families and with the trailing

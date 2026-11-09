@@ -19,9 +19,10 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const EARLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const FINAL_DIFF: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
-/// The `cause` a request's Reason states.
+/// The `cause` a request's SIP Reason states (RFC 3326 §2).
 fn reason_cause(req: &sip_message::SipRequest) -> Option<String> {
-    let reason = req.header::<Reason>()?.expect("readable Reason");
+    let reasons = req.list::<Reason>().expect("readable Reason");
+    let reason = sip_message::header::reason_for(&reasons, "SIP")?;
     Some(reason.param("cause").and_then(ParamValue::as_str)?.to_string())
 }
 
@@ -68,11 +69,11 @@ async fn promote_pem_happy_no_resync() {
     assert!(!ok.body().is_empty(), "synthetic 200 carries bob's early SDP");
     assert_eq!(ok.body(), EARLY.as_bytes(), "early SDP relayed verbatim");
     assert!(ok.raw(HeaderName::PEarlyMedia).next().is_none(), "P-Early-Media stripped");
-    let allow = ok.header::<Allow>().expect("an Allow").expect("readable Allow");
+    let allow = ok.token_set::<Allow>().expect("an Allow").expect("readable Allow");
     assert_eq!(allow.to_wire(), "INVITE, ACK, BYE, CANCEL", "bob's Allow relayed verbatim");
-    assert!(!has_token(ok.header::<Supported>(), "100rel"), "no 100rel");
-    assert!(!has_token(ok.header::<Supported>(), "timer"), "no timer");
-    assert!(has_token(ok.header::<Supported>(), "replaces"), "bob's other tag relayed");
+    assert!(!has_token(ok.token_set::<Supported>(), "100rel"), "no 100rel");
+    assert!(!has_token(ok.token_set::<Supported>(), "timer"), "no timer");
+    assert!(has_token(ok.token_set::<Supported>(), "replaces"), "bob's other tag relayed");
 
     // Alice ACKs — absorbed locally; bob receives nothing yet.
     let mut dialog = call.ack().await;
@@ -168,9 +169,9 @@ async fn resync_sdp_changed() {
         String::from_utf8_lossy(req.body()).contains("m=audio 30000"),
         "resync re-INVITE carries bob's new SDP",
     );
-    let allow = req.header::<Allow>().expect("an Allow").expect("readable Allow");
+    let allow = req.token_set::<Allow>().expect("an Allow").expect("readable Allow");
     assert!(allow.contains("INVITE"), "Allow on resync re-INVITE, got {}", allow.to_wire());
-    assert!(req.header::<Supported>().is_some(), "Supported on resync re-INVITE");
+    assert!(req.token_set::<Supported>().is_some(), "Supported on resync re-INVITE");
 
     resync.respond(200, "OK").with_sdp(OFFER).await;
     // B2BUA's ACK to alice's 200 closes the window.

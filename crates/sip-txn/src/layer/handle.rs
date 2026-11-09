@@ -81,6 +81,12 @@ pub(super) enum Command {
         key: ServerTxnKey,
         reply: oneshot::Sender<bool>,
     },
+    /// Delete the server transaction `key` with nothing sent while it has
+    /// sent no final and holds no CANCEL's answers; replies whether it went.
+    RelinquishUnansweredServer {
+        key: ServerTxnKey,
+        reply: oneshot::Sender<bool>,
+    },
     /// Count the transactions (any role/state) still attributed to `call_ref`.
     /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after
     /// serving a takeover event: when it reaches **0** the backup's served
@@ -246,6 +252,10 @@ impl TransactionLayer {
     /// [`TransactionLayerClosed`] instead of panicking when the owner task is gone
     /// (endpoint closed, or `abort_owner`) — the single funnel-and-error site for
     /// every public method.
+    ///
+    /// It completes within the owner turns queued ahead of it and its own: the
+    /// owner awaits only sends that never suspend (ADR-0033 §5), and an owner
+    /// stalled on a turn exits the worker (§4).
     async fn roundtrip<R>(
         &self,
         build: impl FnOnce(oneshot::Sender<R>) -> Command,

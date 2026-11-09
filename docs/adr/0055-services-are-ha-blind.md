@@ -1,6 +1,8 @@
 # Services are HA-blind
 
 **Status:** proposed (2026-10-23)
+Amended (2026-11-07): §1, an off-turn request is made for its answer, never
+for its effect at the service; an ending call sends none again.
 
 **Amends:** ADR-0011 X5 (fencing by identity, §6), ADR-0014 (the replication
 write path, the confirm-race trade-off, the INVITE-only seeds, §2–§4), ADR-0016
@@ -87,11 +89,14 @@ What a service may rely on, and all it must know:
 
 - every per-call fact lives in the call record (`ext`, a typed slice, the
   ledger);
-- an off-turn request is delivered at least once: the backend may receive it
-  more than once — a node serving the call from its record sends every
-  request the call awaits again (ADR-0039 decision 5) — and its answer may
-  come back as "no answer" at the deadline though the backend acted
-  (ADR-0039); only the first answer the call awaits reaches the service. No
+- an off-turn request is made for its answer alone: its side effects at the
+  backend, and any load balancing or rate limiting done over HTTP, are no
+  concern. The backend may receive it more than once — a node serving an
+  `Active` call from its record sends every request the call awaits again
+  (ADR-0039 decision 5) — or, for an ending call whose sender was lost, not
+  at all; its answer may come back as "no answer" at the deadline though the
+  backend acted (ADR-0039); only the first answer the call awaits reaches
+  the service. No
   idempotency key rides the request while no backend reads one;
 - a call may end cleanly at any instant (§4);
 - it keeps durations or timers in its own state, never absolute times (§9
@@ -125,8 +130,8 @@ triggers, each with its caller, kept as one list in the settle module's doc
 (`crates/b2bua-core/src/rules/actions/settle.rs`). A Confirmed leg BYEd at
 termination is not settled there: its relays wait for their real finals.
 Discharge, reclaim and takeover never call the entry (ADR-0022 X5). What a
-record owes the wire at a takeover or a reclaim (a retained final, an awaited
-request sent again, an undecided call's answer) is sent from the record as it
+record owes the wire at a takeover or a reclaim (a retained final, an `Active`
+call's awaited request sent again for its answer, an undecided call's answer) is sent from the record as it
 stands, not settled.
 
 What differs by method is split three ways, none of which knows HA. The method
@@ -262,10 +267,11 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   write, and it logs the delete once they left, so the backup keeps the
   final until it left. A node that meets that ended body with no live copy
   of the call (the backup at a departure or a confirmed dead verdict, the
-  restarted primary at its reclaim) cannot tell whether the final left: it
-  sends it again on a Completed transaction, within Timer H of the call's
-  end, which repeats it until her ACK (RFC 3261 §17.2.1). While its outbox drains, the call stays resident and takes no
-  turn, and neither the reaper nor the departure sweep acts on it; it is
+  restarted primary at its reclaim, the primary at a backup's reverse flush)
+  cannot tell whether the final left: it sends it again on a Completed
+  transaction, within Timer H of the call's end, which repeats it until her
+  ACK (RFC 3261 §17.2.1). While its outbox drains, the call stays resident
+  and takes no turn, and neither the reaper nor the departure sweep acts on it; it is
   released once the outbox is empty. A takeover copy's terminal turn waits
   for its reverse-flushed write the same way. A stand-down, a self-release
   and a discharge by the backup send what the outbox still holds at once:
@@ -367,12 +373,16 @@ transparency is not the goal; the window is the transport delay.
 
 ### 4. Evidence the call record cannot explain: one rule, any method
 
-One rule, in `b2bua-core`, fires on any node; on a single node only a broken or
-forged peer can trigger it. It is a stage of its own, read before every rule of
-the chain (user ruling): no service rule sees or pre-empts a message only a lost
-write explains, and whether another owner served the call reaches that stage
-alone, never a rule's context. On a single node it changes nothing. Its triggers
-are closed:
+One rule, in `b2bua-core`, fires on any node. On a call no failure touched the
+record is never behind the wire: triggers 3 and 6 and the early BYE of trigger 4
+do not fire, and only a broken or forged peer can trigger the others, ending the
+call. A node restarted behind what it sent reads as no other owner having served
+the call, and an honest peer's final can trigger 1 there
+(`reinvite_round_not_yet_replicated.rs`). It is a stage of its own, read before
+every rule of the chain (user ruling): no service rule sees or pre-empts a
+message only a lost write explains, and whether another owner served the call
+reaches that stage, and the dialog gate in front of it for trigger 3, never a
+rule's context. Its triggers are closed:
 
 1. a final in a dialog whose CSeq is strictly above the dialog's local sequence,
    any method;
@@ -381,10 +391,28 @@ are closed:
    another branch (the copy re-used a sequence number the dead owner had sent,
    and this final answers the dead owner's request);
 3. an ACK naming a dialog by its To-tag and an INVITE on a leg for which the
-   call record holds no final sent; the caller's own INVITE counts only on a
-   call a takeover copy served (this node is the copy, or the record holds a
-   write a copy made): otherwise the copy that answered her is live and its
-   write is on its way;
+   call record holds no final sent, only on a call a takeover copy served (this
+   node is the copy, or the record holds a write a copy made). On any other call
+   it proves nothing: the final it answers may be a stateless refusal of a
+   re-INVITE that never reached the call, which leaves the session unchanged
+   (RFC 3261 §14.1, ADR-0054 §3), or the copy that answered is live and its
+   write is on its way: once it arrives a copy of the 2xx draws her ACK again.
+   If it never does, at 64·T1 the copy BYEs both parties, or sheds the call to
+   the callee's own BYE (§13.3.1.4), whichever falls first, and the primary ends
+   the call on that BYE or at its next keepalive, one CDR written
+   (`reinvite_2xx_acked_while_the_copy_stalls.rs`). The dialog gate drops the
+   ACK, the dialog untouched, and counts it
+   (`b2bua_unexplained_acks_total`). On a served call the two cannot
+   be told apart, so a re-INVITE the proxy refused, then its ACK, ends the call
+   with a clean BYE (user ruling; `reinvite_refused_by_proxy.rs`). The ACK of a
+   final the proxy remembers (a 503 or a 513, for 64·T1) ends at that proxy and
+   reaches no worker; the residual stands for the finals it does not remember
+   (483, 482, 420, 416, 400) and for an ACK that reaches another proxy instance
+   or arrives after the memo forgot the refusal. A primary
+   returned behind what its previous run sent, no copy having written the call,
+   reads as a call no other owner served: a lost round's ACK is dropped there,
+   and the callee's repeat of the 2xx that ACK never reached is the evidence,
+   trigger 1 (`reinvite_round_not_yet_replicated.rs`);
 4. a BYE from the callee on a dialog the call record holds as early (RFC 3261
    §15 forbids it before a 2xx); on a call one node served it is a broken
    callee, whose caller holds no 2xx, and the default `relay-bye` ends the call
@@ -431,7 +459,7 @@ call record or the evidence names:
 Every effect outside SIP is keyed per call: a limiter admit is keyed and expires
 by lease unless an owner refreshes it (ADR-0040), and a consult whose route
 fold the record never applied counts as one that may have sent its admit; an
-off-turn request is delivered at least once (§1); the CDR is written by
+off-turn request is made for its answer alone (§1); the CDR is written by
 whoever ends the call (§5).
 
 ### 5. The CDR: whoever ends the call writes it
@@ -590,9 +618,11 @@ and a 2xx it takes from the copy goes on along the copy's §13.3.1.4 ladder,
 never sent again at once (`reclaim_takes_the_copys_dialled_invite.rs`). The worker arms the parked calls —
 their timers, their transactions, the re-ask of an undecided call — only
 while its own endpoint reads ready in the slice the proxy routes from. While
-it does not, the proxy holds no address for it, so the response to a request
-it sends goes to the call's other owner, which reads it as evidence (§4) and
-ends the call. The evidence rule stays as it is, every method alike
+it does not and another worker does, the proxy routes nothing to it, so the
+response to a request it sends goes to the call's other owner, which reads it as
+evidence (§4) and ends the call. With no worker ready the proxy routes on the
+workers' answers (ADR-0050 §11), and the worker, which cannot tell the two apart,
+holds its calls all the same. The evidence rule stays as it is, every method alike
 (`reclaim_waits_for_a_routable_endpoint.rs`,
 `swept_call_answered_once_routable.rs`). The worker and the proxy read the
 slice through informers of their own, so the two can see the endpoint ready a
@@ -657,8 +687,8 @@ the re-anchor deadband of each other.
     leave two (the dead primary's and the survivor's, §5), never none;
   - primary killed unannounced (ADR-0031 case 3): the proxy's probe reads it
     dead 2 s later and tells the backup, which takes over the calls with work
-    in flight, an awaited outside answer and an undecided call's decision
-    included (ADR-0039 decision 5, ADR-0047 D4); its endpoint reads not ready
+    in flight, an `Active` call's awaited outside answer and an undecided
+    call's decision included (ADR-0039 decision 5, ADR-0047 D4); its endpoint reads not ready
     but stays in the slice 40 s later, and leaves it when the evicted pod is
     force-deleted 5 min later, when the backup settles and discharges what is
     left; judged as a kill of the primary;
@@ -697,7 +727,9 @@ the re-anchor deadband of each other.
     surviving node's loses nothing); the test
     tampered with no replication stream or replica; the incident is a kill. The cell is perfect: no row of any kind opens,
     every party goal is met, the evidence rule (§4) ends no call, and the CDR
-    count is §5's.
+    count is §5's. A re-INVITE a proxy refuses after the kill can still end
+    the call through the copy, §4's trigger 3 and no shape of the sweep
+    (`on_the_copy_a_refused_reinvites_ack_ends_the_call_cleanly`).
   - **Degraded**: level `applied`, any other case: every row below opens.
   - **Off**: level `off`: Degraded's rows, and the off-only rows a user
     ruling adds.
@@ -880,13 +912,20 @@ the re-anchor deadband of each other.
 ### 12. A request the worker originates names its leg
 
 The worker's own Via carries a via-extension (§20.42): the leg, the request's
-Request-URI and whether it carried a session offer, signed by the worker with
+Request-URI, on an in-dialog INVITE its Route past the first hop, and whether it
+carried a session offer, signed by the worker with
 the cluster key over the decoded `cr`, `lg` and `ci` of the Via, its branch and
 the request's method, bounded in size and encoded as a token, so any owner
 that holds no request record of a dialled INVITE, or no client transaction of
 it, can CANCEL it or ACK its non-2xx from the callee's response (§9.1,
 §17.1.1.3), and ACK and BYE its 2xx,
-with the answer an offer the 2xx makes is owed (§13.2.2.4, RFC 3264 §4). A
+with the answer an offer the 2xx makes is owed (§13.2.2.4, RFC 3264 §4). That ACK
+goes where the INVITE went (§17.1.1.2) on any proxy instance
+(`a_final_and_an_ack_on_the_other_instance_reach_the_hop` and its two siblings). A Route past the bound
+is left out and the rest still stated: the instance that forwarded the INVITE and
+relayed its final still places the ACK, any other sends it to the Request-URI and
+the hop repeats its final to Timer H
+(`an_ack_stating_no_hop_goes_to_its_request_uri_at_another_instance`). A
 response for a call no node holds draws nothing without an extension that
 verifies. An extension whose signature fails is ignored; a worker with no
 cluster key states none and trusts none, and a worker with replication on

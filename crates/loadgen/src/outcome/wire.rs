@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use sip_clock::Clock;
 use sip_message::header::{cause_key, retry_after_seconds, HeaderValue, SubscriptionState};
 use sip_message::sip_str::SipStr;
-use sip_message::sniff::{body, content_type_is, has_body, header_value, header_values, Identity};
+use sip_message::sniff::{body, header_value, header_values, session_description, Identity};
 
 use crate::mux::{Datagram, Dir, Side, WireTap};
 
@@ -84,6 +84,8 @@ pub struct WireFacts {
     pub call_id: Option<String>,
     pub(crate) invite_cseq: Option<u32>,
     pub started_at_ms: Option<i64>,
+    /// The first 100 Trying to the INVITE.
+    pub trying_at_ms: Option<i64>,
     pub first_provisional_at_ms: Option<i64>,
     pub setup_ended_at_ms: Option<i64>,
     pub answered_at_ms: Option<i64>,
@@ -214,7 +216,7 @@ impl CallWire {
 
 /// Whether `raw` carries a session description.
 fn has_sdp(raw: &[u8]) -> bool {
-    has_body(raw) && content_type_is(raw, "application/sdp")
+    session_description(raw).is_some()
 }
 
 /// Whether the request `id` is out of any dialog: its To has no tag.
@@ -291,6 +293,7 @@ impl WireFacts {
     /// Forget the previous attempt's setup facts; the call's start stays.
     fn restart_setup(&mut self, cseq: u32) {
         self.invite_cseq = Some(cseq);
+        self.trying_at_ms = None;
         self.first_provisional_at_ms = None;
         self.setup_ended_at_ms = None;
         self.answered_at_ms = None;
@@ -310,6 +313,8 @@ impl WireFacts {
             if code > 100 {
                 self.first_provisional_at_ms.get_or_insert(now);
                 self.early_media |= has_sdp(raw);
+            } else {
+                self.trying_at_ms.get_or_insert(now);
             }
             return;
         }

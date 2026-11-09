@@ -14,16 +14,19 @@ pub(super) fn render(s: &mut String) {
     TASK_RESTARTS.render(s, |series| crate::supervise::RESTARTS.count_at(series.at(0)));
 }
 
-/// The poisoned locks this process recovered (the store's, the worker's and
-/// the metric rows') and the supervised tasks it restarted, all counted.
+/// The poisoned locks this process recovered (the store's, the worker's, the
+/// metric rows' and the UDP endpoint's) and the supervised tasks it
+/// restarted, all counted.
 pub fn shell_faults() -> u64 {
     let store = crate::store::LOCKS.len();
     let worker = crate::poison::LOCKS.len();
     let rows = metric_values::poison::LOCKS.len();
+    let net = sip_net::poison::LOCKS.len();
     let tasks = crate::supervise::TASKS.len();
     (0..store).map(|at| crate::store::LOCK_RECOVERIES.count_at(at)).sum::<u64>()
         + (0..worker).map(|at| crate::poison::RECOVERIES.count_at(at)).sum::<u64>()
         + (0..rows).map(|at| metric_values::poison::RECOVERIES.count_at(at)).sum::<u64>()
+        + (0..net).map(|at| sip_net::poison::RECOVERIES.count_at(at)).sum::<u64>()
         + (0..tasks).map(|at| crate::supervise::RESTARTS.count_at(at)).sum::<u64>()
 }
 

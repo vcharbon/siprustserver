@@ -313,6 +313,65 @@ async fn a_new_call_also_holds_a_shared_permit() {
     drained(&d).await;
 }
 
+/// An item with an instant it is due by.
+struct Due {
+    by: Option<tokio::time::Instant>,
+    body: DispatchBody,
+}
+
+impl Runnable for Due {
+    fn into_body(self) -> DispatchBody {
+        self.body
+    }
+    fn due_by(&self) -> Option<tokio::time::Instant> {
+        self.by
+    }
+}
+
+/// An item due before its permits come stops waiting at that instant and runs
+/// holding none. The new-call permit it had taken while it waited for a shared
+/// one is handed back: the new call behind it takes it, and runs on the shared
+/// permit once that is freed.
+#[tokio::test(start_paused = true)]
+async fn an_item_due_before_its_permits_come_runs_holding_none() {
+    let d = PerCallDispatcher::<Due>::new(1, 8, 1024, B2buaMetrics::new());
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let (gate, started) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let (g, st) = (gate.clone(), started.clone());
+    let parked: DispatchBody = Box::pin(async move {
+        st.notify_one();
+        g.notified().await;
+    });
+    let _ = d.offer("a", Due { by: None, body: parked }, DispatchClass::OtherRequest);
+    started.notified().await;
+
+    let due = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    let body = record(&order, "due");
+    let _ = d.offer("n", Due { by: Some(due), body }, DispatchClass::InitialInvite);
+    let body = record(&order, "waits");
+    let _ = d.offer("w", Due { by: None, body }, DispatchClass::InitialInvite);
+    settle().await;
+    assert!(order.lock().unwrap().is_empty(), "the one shared permit is held");
+
+    tokio::time::sleep_until(due).await;
+    settle().await;
+    assert_eq!(*order.lock().unwrap(), vec!["due"], "due now, it runs with no permit");
+
+    gate.notify_one();
+    settle().await;
+    assert_eq!(*order.lock().unwrap(), vec!["due", "waits"], "the freed permit was left to it");
+    for call in ["a", "n", "w"] {
+        d.release(call, RemovalClass::Terminated);
+    }
+    for _ in 0..1000 {
+        if d.queue_count() == 0 {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("the queues never drained");
+}
+
 /// A normal new INVITE opens a queue only below the cap less the new-call
 /// headroom; an emergency INVITE and an in-dialog request open one up to the
 /// cap, and past it only events past bounds do.

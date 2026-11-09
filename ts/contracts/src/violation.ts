@@ -93,6 +93,7 @@ export const RFC_RULES = [
   "require-reliable-1xx-on-require",
   "response-correlation",
   "response-cseq-matches-transaction",
+  "response-destination",
   "response-echoes-request-via",
   "rport-echo",
   "rung-byte-identical",

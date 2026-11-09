@@ -25,19 +25,19 @@ pub(crate) fn invite_carried_offer(call: &Call, leg_id: &str, invite_cseq: i64) 
         .is_none_or(|r| r.sdp().is_some())
 }
 
-/// Whether a reliable provisional shown on the responder `tag`'s dialog of
-/// `leg_id` carried the offer of the INVITE `invite_cseq` (RFC 3264 §4): that
-/// dialog's offer/answer exchange rides the provisional and its PRACK, so the
-/// 2xx's description is no offer.
+/// Whether a reliable provisional on the responder `tag`'s dialog of `leg_id`
+/// carried the offer of the INVITE `invite_cseq` (RFC 3264 §4), shown to the
+/// caller or absorbed: that dialog's offer/answer exchange rides the
+/// provisional and its PRACK (RFC 3262 §5), so the 2xx's description is no
+/// offer.
 pub(crate) fn offered_reliably(call: &Call, leg_id: &str, tag: &str, invite_cseq: i64) -> bool {
-    let shown_with_sdp = call.provisionals.iter().any(|p| {
+    let with_sdp = call.provisionals.iter().any(|p| {
         p.id.leg == leg_id
             && p.id.responder_tag == tag
             && p.id.invite_cseq.as_i64() == invite_cseq
-            && p.shown.is_some()
             && p.responder_sdp
     });
-    shown_with_sdp && !invite_carried_offer(call, leg_id, invite_cseq)
+    with_sdp && !invite_carried_offer(call, leg_id, invite_cseq)
 }
 
 /// Whether `leg_id`'s confirmed dialog left a provisional's offer to the ACK
@@ -73,7 +73,7 @@ pub(crate) fn ack_answer_on_leg(
         author,
         Carried::InDialog,
         sdp.to_vec(),
-        Some(&super::sdp()),
+        Some(0..sdp.len()),
         policy,
     ))
 }

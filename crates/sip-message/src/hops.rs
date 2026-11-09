@@ -9,10 +9,10 @@
 use crate::header::MaxForwards;
 use crate::types::SipRequest;
 
-/// The count a request the stack passes on STATES: the received count less one,
-/// or — where the request states none a reader accepts —
-/// [`MaxForwards::DEFAULT`] less one, this stack's convention for a sender that
-/// omitted the header (RFC 3261 §16.6 step 3 asks only that a count be stated).
+/// The count a request the stack passes on STATES: the received count less
+/// one, or [`MaxForwards::DEFAULT`] where the request states none (RFC 3261
+/// §16.6 step 3: the copy gains a Max-Forwards of 70). Ingress refuses a count
+/// that does not read, and one built past it reads as none.
 ///
 /// A spent count states 0 rather than wrapping or refilling: a request whose
 /// budget is gone never regains one at a mint, so the next hop stops it even
@@ -21,11 +21,10 @@ use crate::types::SipRequest;
 /// Several `Max-Forwards` lines read first-wins, as [`hops_exhausted`] does, so
 /// the gate and the mint can never disagree about the same message.
 pub fn forwarded_max_forwards(req: &SipRequest) -> MaxForwards {
-    let received = match req.header::<MaxForwards>() {
-        Some(Ok(hops)) => hops,
+    match req.header::<MaxForwards>() {
+        Some(Ok(hops)) => hops.decremented().unwrap_or(MaxForwards::new(0)),
         _ => MaxForwards::DEFAULT,
-    };
-    received.decremented().unwrap_or(MaxForwards::new(0))
+    }
 }
 
 /// True iff `req` arrived with a spent hop count: it may not be passed on, and
@@ -43,7 +42,7 @@ mod tests {
 
     fn invite(max_forwards_line: &str) -> SipRequest {
         let raw = format!(
-            "INVITE sip:bob@example.com SIP/2.0\r\n\
+            "INVITE sip:bob@example.com SIP/2.0\r\nContact: <sip:alice@192.0.2.5>\r\n\
 Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-a\r\n\
 From: <sip:alice@example.com>;tag=alice\r\n\
 To: <sip:bob@example.com>\r\n\
@@ -52,7 +51,10 @@ CSeq: 1 INVITE\r\n\
 {max_forwards_line}\
 Content-Length: 0\r\n\r\n"
         );
-        match CustomParser::default().parse(raw.as_bytes()).unwrap() {
+        // A request with no hop count reads only where a deployment names it.
+        let exemptions = crate::Exemptions::read(Some("max-forwards:absent")).unwrap();
+        let limits = crate::SipParserLimits { exemptions, ..crate::SipParserLimits::DEFAULT };
+        match CustomParser::with_limits(limits).parse(raw.as_bytes()).unwrap() {
             SipMessage::Request(req) => req,
             _ => panic!("request"),
         }
@@ -66,8 +68,8 @@ Content-Length: 0\r\n\r\n"
     }
 
     #[test]
-    fn an_absent_count_takes_the_default_one_lower() {
-        assert_eq!(forwarded_max_forwards(&invite("")).value(), 69);
+    fn an_absent_count_is_stated_as_the_default() {
+        assert_eq!(forwarded_max_forwards(&invite("")).value(), 70, "RFC 3261 §16.6 step 3");
         assert!(!hops_exhausted(&invite("")));
     }
 

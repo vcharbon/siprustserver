@@ -10,8 +10,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser, SipRequest};
+use sip_message::{SipMessage, SipRequest};
 
 use super::addressing::top_via_addr;
 use super::server_txn::ServerTxn;
@@ -73,7 +72,7 @@ impl Agent {
                 Ok(Some(pkt)) => pkt,
                 _ => return, // timed out or queue closed
             };
-            let Ok(msg) = CustomParser::new().parse(&pkt.raw) else {
+            let Ok(msg) = self.txn.read(&pkt.raw) else {
                 continue; // unparseable noise: nothing to answer
             };
             self.dialogs.sight(&msg);
@@ -118,8 +117,9 @@ impl Agent {
                 Ok(Some(pkt)) => pkt,
                 _ => return answered, // window elapsed or queue closed
             };
-            let msg = CustomParser::new()
-                .parse(&pkt.raw)
+            let msg = self
+                .txn
+                .read(&pkt.raw)
                 .unwrap_or_else(|e| panic!("{} drained an unparseable datagram: {e}", self.name));
             self.dialogs.sight(&msg);
             let r = match msg {

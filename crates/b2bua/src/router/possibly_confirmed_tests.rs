@@ -82,7 +82,7 @@ fn turn_on(
         owners,
     };
     let fw = node.core.router_ctx().framework();
-    rule_chain_turn(&fw, call, input, &mut turn(1))
+    rule_chain_turn(&fw, call, input, &mut turn(1)).expect("the turn crosses no cap")
 }
 
 /// The callee's BYE on a call `ordinal` serves.

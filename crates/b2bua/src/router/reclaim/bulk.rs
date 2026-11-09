@@ -1,16 +1,19 @@
 //! The bulk reboot reclaim and the one-call straggler reclaim: this node
 //! re-serving its own `pri:{self}` partition (ADR-0011 X11 / ADR-0014).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use call::{Call, TimerType};
+use call::{Call, CallModelState, TimerType};
 
 use super::super::materialise::{
     arm, has_invite_to_serve, materialise, Materialised, Origin, Reason,
 };
-use super::super::restore_hygiene::Smoothing;
+use super::super::restore_hygiene::{reanchor, Smoothing};
 use super::super::undecided::{is_undecided, settle_undecided};
+use super::super::unrecoverable::record_reads;
 use super::super::RouterCtx;
+use super::deferred;
 use crate::store::PartitionRole;
 
 /// **Bulk reclaim, first pass** (ADR-0014, ADR-0055 §8): make every
@@ -25,7 +28,13 @@ use crate::store::PartitionRole;
 /// parked calls are armed once it does ([`arm_parked`]). Each body is read
 /// through the TTL-gated reclaim read, so a body whose TTL ran out is dead and
 /// is never re-served: it counts in `scanned` and not in `materialized`.
-pub(in crate::router) async fn park_all(ctx: &Arc<RouterCtx>) {
+///
+/// The pass waits on no call's lock: a call whose lock a turn holds, and every
+/// ended or unrecoverable body, whose discharge waits on its write's
+/// replication, is parked on a turn of its own queue ([`deferred`]) and
+/// returned, to be armed only by a turn queued behind that park. Those calls
+/// count in neither `materialized` nor `announced`.
+pub(in crate::router) async fn park_all(ctx: &Arc<RouterCtx>) -> Vec<Deferral> {
     let start_ms = ctx.clock.now_ms();
     let active_before = ctx.state.active_count() as u64;
     let own = &ctx.config.self_ordinal;
@@ -37,10 +46,19 @@ pub(in crate::router) async fn park_all(ctx: &Arc<RouterCtx>) {
     let scanned = calls.len() as u64;
     let mut materialized = 0u64;
     let mut announced = 0u64;
-    for (copy, _skew) in calls {
+    let mut deferrals = Vec::new();
+    for (mut copy, skew) in calls {
         beat();
-        let call_ref = &copy.call.call_ref;
-        let _guard = ctx.state.lock(call_ref).await;
+        let call_ref = copy.call.call_ref.clone();
+        reanchor(&mut copy.call, skew);
+        let ends = ends_on_its_turn(&copy.call, ctx.clock.now_ms());
+        let Some(_guard) = (!ends).then(|| ctx.state.try_lock(&call_ref)).flatten() else {
+            if deferred::offer_park(ctx, &call_ref) {
+                deferrals.push(Deferral { scanned: (!ends).then_some(copy.call), call_ref });
+            }
+            continue;
+        };
+        let call_ref = &call_ref;
         match materialise(ctx, call_ref, Origin::Park).await {
             Materialised::Parked(call) => {
                 materialized += 1;
@@ -62,10 +80,38 @@ pub(in crate::router) async fn park_all(ctx: &Arc<RouterCtx>) {
         scanned,
         materialized,
         announced,
+        deferred = deferrals.len(),
         active_after,
         duration_ms,
         "reboot reclaim"
     );
+    deferrals
+}
+
+/// A call the bulk park deferred to a turn of its own queue.
+pub(in crate::router) struct Deferral {
+    pub(in crate::router) call_ref: String,
+    /// The body the pass scanned, for a call deferred because a turn held its
+    /// lock; `None` for an ended or unrecoverable body.
+    pub(in crate::router) scanned: Option<Call>,
+}
+
+/// Whether the scanned `call` ends on its park: ended or ending, or a record
+/// that does not serve a copy at `now_ms` ([`record_reads`]).
+fn ends_on_its_turn(call: &Call, now_ms: i64) -> bool {
+    matches!(call.state, CallModelState::Terminating | CallModelState::Terminated)
+        || record_reads(call, now_ms).is_err()
+}
+
+/// The keepalive smoothing of a bulk cohort whose largest past-due gap is
+/// `l_max` ms, read at `now_ms`.
+pub(super) fn smoothing(ctx: &RouterCtx, now_ms: i64, l_max: i64) -> Smoothing {
+    Smoothing {
+        now_ms,
+        l_max,
+        speedup: ctx.replica.keepalive_catchup_speedup.max(1),
+        cap_ms: ctx.replica.max_catchup_window_sec.map(|s| s * 1000),
+    }
 }
 
 /// **Bulk reclaim, second pass**: arm every parked call once the node's own
@@ -84,36 +130,60 @@ pub(in crate::router) async fn park_all(ctx: &Arc<RouterCtx>) {
 /// only** — `(p,b)` reconciliation makes any incidental keepalive overlap
 /// non-corrupting, so there is no settle/handback floor. `fire_at` is pre-computed
 /// here, in the reclaim handler — never inside the timer driver (CLAUDE.md).
-pub(in crate::router) async fn arm_parked(ctx: &Arc<RouterCtx>) {
+///
+/// The pass waits on no call's lock: a parked call whose lock a turn holds,
+/// and every call of `deferred` (the parks [`park_all`] deferred, which may
+/// not have run yet), is armed by a turn queued on its own queue, its
+/// smoothing read when that turn runs. `L_max` spans the deferred calls not
+/// parked yet too, read on the bodies the park scanned (`unparked`). Returns,
+/// for each call of `deferred`, whether its arming was queued: one discarded
+/// met a released queue.
+pub(in crate::router) async fn arm_parked<'a>(
+    ctx: &Arc<RouterCtx>,
+    deferred: &[String],
+    unparked: impl IntoIterator<Item = &'a Call>,
+) -> Vec<(String, bool)> {
     let start_ms = ctx.clock.now_ms();
     let beat = || ctx.router_pulse.turning();
     let parked = ctx.state.parked();
-    let calls: Vec<Call> = parked.iter().filter_map(|call_ref| ctx.state.peek(call_ref)).collect();
-    let l_max = largest_keepalive_gap(&calls, start_ms, &beat);
-    let smoothing = Smoothing {
-        now_ms: start_ms,
-        l_max,
-        speedup: ctx.replica.keepalive_catchup_speedup.max(1),
-        cap_ms: ctx.replica.max_catchup_window_sec.map(|s| s * 1000),
-    };
-    let mut armed = 0u64;
-    for call_ref in &parked {
+    let calls: Vec<Call> = parked
+        .iter()
+        .filter_map(|call_ref| {
+            beat();
+            ctx.state.peek(call_ref)
+        })
+        .collect();
+    let unparked = unparked.into_iter().filter(|c| !ctx.state.is_parked(&c.call_ref));
+    let l_max = largest_keepalive_gap(&calls, start_ms, &beat)
+        .max(largest_keepalive_gap(unparked, start_ms, &beat));
+    let smoothing = smoothing(ctx, start_ms, l_max);
+    let later: HashSet<&str> = deferred.iter().map(String::as_str).collect();
+    let (mut armed, mut queued) = (0u64, 0u64);
+    for call_ref in parked.iter().filter(|r| !later.contains(r.as_str())) {
         beat();
-        let _guard = ctx.state.lock(call_ref).await;
+        let Some(_guard) = ctx.state.try_lock(call_ref) else {
+            queued += u64::from(deferred::offer_arm(ctx, call_ref, l_max));
+            continue;
+        };
         let Some((call, seeded)) = arm(ctx, call_ref, Some(smoothing)).await else { continue };
         armed += 1;
         if let Some(seeded) = seeded.filter(|_| is_undecided(&call)) {
             settle_undecided(ctx, call_ref, call, seeded).await;
         }
     }
+    let arming: Vec<(String, bool)> =
+        deferred.iter().map(|r| (r.clone(), deferred::offer_arm(ctx, r, l_max))).collect();
+    queued += arming.iter().filter(|(_, q)| *q).count() as u64;
     let duration_ms = ctx.clock.now_ms() - start_ms;
     tracing::info!(
         node = observe::node(),
         armed,
+        queued,
         l_max_ms = l_max,
         duration_ms,
         "reclaimed calls armed"
     );
+    arming
 }
 
 /// `L_max`: the largest past-due keepalive gap across `calls`, read on
@@ -187,5 +257,9 @@ pub(in crate::router) fn announce_reclaim(ctx: &Arc<RouterCtx>, call: Call) -> b
     written
 }
 
+#[cfg(test)]
+mod deferral_tests;
+#[cfg(test)]
+mod deferred_copy_tests;
 #[cfg(test)]
 mod tests;

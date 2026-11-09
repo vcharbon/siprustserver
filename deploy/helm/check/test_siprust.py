@@ -61,6 +61,26 @@ class ShellScripts(unittest.TestCase):
                      "Deployment", "sip-front-proxy")
         self.assertEqual(env(container(proxy, "vip-loopback"))["UNRES_QLEN_BYTES"], "8192")
 
+    def test_vip_loopback_tightens_every_neighbour_table_and_steers_multipath_off_a_dead_hop(self) -> None:
+        proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
+        self.check_script(proxy, "vip-loopback", "vip-loopback.sh")
+        c = container(proxy, "vip-loopback")
+        script = script_of(c)
+        for sysctl, var in (("base_reachable_time_ms", "NEIGH_BASE_REACHABLE_TIME_MS"),
+                            ("delay_first_probe_time", "NEIGH_DELAY_FIRST_PROBE_S"),
+                            ("ucast_solicit", "NEIGH_UCAST_SOLICIT"),
+                            ("mcast_solicit", "NEIGH_MCAST_SOLICIT"),
+                            ("retrans_time_ms", "NEIGH_RETRANS_TIME_MS")):
+            self.assertIn(f'neigh_set {sysctl} "${var}"', script)
+        self.assertIn("echo 1 > /proc/sys/net/ipv4/fib_multipath_use_neigh", script)
+        self.assertEqual(
+            {v: env(c)[v] for v in ("NEIGH_BASE_REACHABLE_TIME_MS", "NEIGH_DELAY_FIRST_PROBE_S",
+                                    "NEIGH_UCAST_SOLICIT", "NEIGH_MCAST_SOLICIT",
+                                    "NEIGH_RETRANS_TIME_MS")},
+            {"NEIGH_BASE_REACHABLE_TIME_MS": "4000", "NEIGH_DELAY_FIRST_PROBE_S": "1",
+             "NEIGH_UCAST_SOLICIT": "12", "NEIGH_MCAST_SOLICIT": "12",
+             "NEIGH_RETRANS_TIME_MS": "250"})
+
     def test_masq_exempt_reads_only_what_it_is_given(self) -> None:
         ds = find(render(SIPRUST, *KIND), "DaemonSet", "masq-exempt")
         self.check_script(ds, "masq-exempt", "masq-exempt.sh")
@@ -97,7 +117,6 @@ class Network(unittest.TestCase):
         e = env(container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy"))
         self.assertEqual(e["PROXY_LISTEN"], "172.20.255.250:5070")
         self.assertEqual(e["PROXY_ADVERTISE_EXT"], "192.168.60.250:5070")
-        self.assertEqual(e["PROXY_FACE_INT_CIDRS"], "10.244.0.0/16,172.20.0.0/17")
         self.assertEqual((e["PROXY_EXT_INTERFACE"], e["PROXY_EXT_NEXT_HOPS"]),
                          ("eth1", "192.168.60.1"))
 
@@ -125,7 +144,7 @@ class Network(unittest.TestCase):
                          ("/readyz", 1, 2, 1))
         self.assertEqual(proxy["spec"]["minReadySeconds"], 10)
         self.assertEqual([c["name"] for c in pod_spec(proxy)["containers"]],
-                         ["sip-front-proxy", "route-guard"])
+                         ["sip-front-proxy", "route-guard", "egress-routes"])
 
     def test_no_worker_shares_a_proxy_node(self) -> None:
         proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
@@ -386,7 +405,7 @@ class GenericDefaults(unittest.TestCase):
 
     NETWORK = ["--set", "network.proxyVip=10.0.255.250",
                "--set", "network.externalVip=203.0.113.250", "--set", "network.externalInterface=ens4",
-               "--set", "network.internalCidrs=10.0.0.0/16",
+               "--set", "network.externalNextHops={203.0.113.1}",
                "--set", "worker.networkPolicy.proxyNodeCidrs={10.0.0.0/24}",
                "--set", "proxy.hmac.existingSecret=edge-cookie",
                "--set", "proxy.nodeSelector.sip-role=edge",
@@ -401,8 +420,8 @@ class GenericDefaults(unittest.TestCase):
                          "B2BUA_CDR_RABBITMQ_MAX_LEN", "OTEL_EXPORTER_OTLP_ENDPOINT",
                          "SIP_TRACE_HEADER"},
         "sip-front-proxy": {"PROXY_LISTEN", "PROXY_ADVERTISE", "PROXY_LISTEN_EXT",
-                            "PROXY_ADVERTISE_EXT", "PROXY_FACE_INT_CIDRS", "PROXY_METRICS",
-                            "PROXY_EXT_INTERFACE",
+                            "PROXY_ADVERTISE_EXT", "PROXY_METRICS",
+                            "PROXY_EXT_INTERFACE", "PROXY_EXT_NEXT_HOPS",
                             "PROXY_WORKER_SERVICE", "PROXY_WORKER_PORT",
                             "OTEL_EXPORTER_OTLP_ENDPOINT", "SIP_TRACE_HEADER"},
         "call-limiter": {"LIMITER_LISTEN"},

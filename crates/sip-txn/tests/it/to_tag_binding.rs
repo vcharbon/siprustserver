@@ -29,7 +29,7 @@ fn tu_response(
         None => "<sip:peer@10.0.0.1:5555>".to_string(),
     };
     format!(
-        "SIP/2.0 {status} Reason\r\n\
+        "SIP/2.0 {status} Reason\r\nContact: <sip:fixture@192.0.2.98>\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
          From: <sip:caller@10.0.0.1:5555>;tag=caller-tag\r\n\
          To: {to}\r\n\

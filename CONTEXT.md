@@ -89,6 +89,37 @@ declaration-merging + `SipHeaderRegistry.register`. Distinct from the raw
 `get_header(name) -> Vec<&str>` escape hatch, which serves unknown headers only.
 _Avoid_: "header registry" (there is no global mutable registry anymore).
 
+**Strict reading** / **Lenient reading** (ADR-0053 §6):
+The two readings of the one reader of each grammar. *Strict* holds wire bytes to
+RFC 3261 §25.1 whole and refuses anything else. *Lenient* is the reading of a
+stored image, of a message the stack assembles from its own parts, and of a
+recorded exchange an audit judges (`wire_grammar = false`, `read_stored`): a
+value the strict reading takes reads the same way, and one it refuses keeps
+what can be read, never a refusal.
+_Avoid_: "relaxed parser", "second parser" (it is a mode, not an implementation).
+
+**Reading role** (ADR-0053 §6):
+What a parser is built to read, named by its constructor: a deployment's
+`ingress`, a message `built` rather than received, a `tool`'s reading of
+captured traffic, `read_stored`. Production code builds a parser only through a
+role; `CustomParser::new` and `with_limits` are test support.
+_Avoid_: "default parser" (no reading is the default one).
+
+**Exemption** (ADR-0001, `SipParserLimits::exemptions`):
+A shape a deployment accepts against the RFC, named in `SIP_EXEMPTIONS`: empty by
+default, consulted only by the ingress gate. A tool's reading names its own set
+(`sipflow --reading`). Only a shape with one reading can be
+exempted, and every typed reader reads it on every deployment.
+_Avoid_: "tolerance", "quirk mode".
+
+**Single-valued header** (RFC 3261 §7.3.1, ADR-0053 §7):
+A header a message carries on one line at most, compact forms counted, as
+`header::SINGLE_VALUED` states. It reads as `msg.header::<H>()`, an `Option` of
+its one value; every other header is a list, read as `msg.list::<H>()`. Every
+reading refuses a second line and no draft freezes with one; a service stating
+one on two lines has every line of it left out and the skip reported.
+_Avoid_: "the first value" of a single-valued header (there is no second).
+
 **Policy rejection** / **Buggy rejection**:
 The two classes a parser rejection of a grammar-valid input falls into.
 *Policy* = a documented strictness rule (the ABNF suite's policy patterns,
@@ -426,6 +457,24 @@ that ends a call waits for its delete, the call resident until then (ADR-0055
 _Avoid_: "sync replication" (no entry waits past the cap), "hold" (every
 effect goes through the outbox).
 
+**Turn commit**:
+The one tail of a call's turn (`router/commit.rs`): it persists the landed
+record, reports the turn logged, takes in the turn what never leaves the node,
+queues what the turn sends on the call's outbox behind the write that records
+it, and ends the call once that outbox drained. How a turn persists and ends is
+one **commit kind**: quiet, update, write, delete before send, delete after
+drain, or defer to the primary (a takeover copy's terminal while its primary
+lives). Only the commit module pushes on a call's outbox and reports a turn's
+`Logged` and `Left` marks (ADR-0055 §3).
+_Avoid_: "interpret" (the commit decides the persist and the end, it does not
+interpret effects one by one).
+
+**Rider**:
+What the router sends behind a call's latest write outside a handler turn's
+commit: the caller's 100 after the creation write, the answer to a request the
+router refused, the server transactions another copy answered.
+It reports no turn mark.
+
 **Silent stream**:
 A replication stream that has delivered nothing for the idle bound (15 s; a
 served stream carries a `Noop` at least every 5 s). The puller leaves it and
@@ -542,8 +591,9 @@ refused 503 without Retry-After, the decision never asked again.
 
 **Evidence** (ADR-0055 §4, `rules::evidence`): a message proving the call took a
 step its record never saw — a final above its dialog's sequence or at a number
-this side re-used, an ACK of an INVITE the record holds unanswered, a callee's
-BYE on an early dialog, a 2xx naming a leg the record lacks. It is owed what RFC
+this side re-used, an ACK of an INVITE the record holds unanswered on a call a
+takeover copy served (on any other the dialog gate drops and counts it), a
+callee's BYE on an early dialog, a 2xx naming a leg the record lacks. It is owed what RFC
 3261 requires and the call is ended over every dialog the record or the evidence
 names. _Avoid_: "lost round" (its INVITE-only predecessor).
 
@@ -1512,6 +1562,14 @@ A replicated body is the envelope, then the call body. The core reads none of it
 the shell hands each turn the call's **owners** as a plain input
 (`b2bua_core::owners::Owners`).
 
+**Off-turn request**:
+An HTTP request a call sends off its turn and awaits the answer of (ADR-0039):
+a release or failure consult, a REFER authorization, a service's request, a
+limiter admit. It is made for its answer alone: its side effects at the
+service, and load balancing or rate limiting over HTTP, are no concern. A node
+serving an `Active` call from its record sends it again; an ending call needs
+no answer and sends none again.
+
 ## Failover sweep vocabulary
 
 The in-process proof of HA-blind services
@@ -1577,7 +1635,8 @@ How much a cell may deviate, measured from its run (ADR-0055 §11).
 **Guaranteed**: level `applied`, a kill of a cluster whose every call was
 backed and bootstrapped at every turn up to the strike, no outbox entry hitting
 the cap, no replication stream or replica tampered with: no row opens, the
-evidence rule ends no call. **Degraded**: level `applied`, any other case,
+evidence rule ends no call, but for a re-INVITE a proxy refuses after the kill,
+whose ACK the copy reads as evidence (ADR-0055 §11). **Degraded**: level `applied`, any other case,
 every row but the off-only ones. **Off**: level `off`, every row.
 _Avoid_: "transparent" for Guaranteed (the transparent matrix is ADR-0013's).
 

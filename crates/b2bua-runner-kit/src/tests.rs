@@ -133,3 +133,20 @@ fn the_admin_address_defaults_to_loopback_and_refuses_any_other() {
         assert!(e.contains("B2BUA_ADMIN"), "{refused}: {e}");
     }
 }
+
+#[test]
+fn a_worker_states_no_exemption_unless_the_variable_names_one() {
+    let limits = crate::runner_env::parser_limits(|_| None).expect("unset states nothing");
+    assert_eq!(limits, sip_message::SipParserLimits::DEFAULT);
+}
+
+/// A blank value or a name no exemption has refuses the boot, naming the
+/// variable, as on the proxy.
+#[test]
+fn an_exemption_variable_naming_nothing_known_refuses_the_boot() {
+    for stated in ["", " , ", "not-an-exemption"] {
+        let lookup = |key: &str| (key == "SIP_EXEMPTIONS").then(|| stated.to_string());
+        let refused = crate::runner_env::parser_limits(lookup).expect_err("refused");
+        assert!(refused.contains("SIP_EXEMPTIONS"), "{stated:?}: {refused}");
+    }
+}

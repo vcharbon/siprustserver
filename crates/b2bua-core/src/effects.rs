@@ -1,6 +1,6 @@
 //! The typed side-effect vocabulary a handler returns — port of
 //! `SipRouter.ts` `HandlerEffects` / `HandlerResult`. The router's
-//! `process_result` interpreter runs the five categories in a fixed order with
+//! turn commit (`commit_turn`) runs the five categories in a fixed order with
 //! different safety wraps (see ADR-0003 in the source / ADR-0010 here).
 
 use call::TxnKind;
@@ -184,8 +184,7 @@ pub enum FireAndForgetEffect {
     /// the block the dispatching turn reserved; `limiter.may_hold` states
     /// whether the limiter may hold a set for the call before the consult.
     /// `deadline` names the answer deadline the sending turn armed
-    /// (ADR-0039), which the fold states; `None` until armed, and for a
-    /// consult with no deadline.
+    /// (ADR-0039), which the fold states; `None` until armed.
     FailureAsyncHttp {
         call_ref: String,
         request: serde_json::Value,
@@ -204,7 +203,7 @@ pub enum FireAndForgetEffect {
         /// limiter may hold a set for the call before the consult.
         limiter: call::ConsultAdmits,
         /// The change number the consult's answer deadline is armed under
-        /// (`answer_deadline::arm`); `None` for an unbounded consult.
+        /// (`answer_deadline::arm`); `None` until armed.
         deadline: Option<u64>,
     },
     /// Replace the call's admission set on the call limiter with `entries`

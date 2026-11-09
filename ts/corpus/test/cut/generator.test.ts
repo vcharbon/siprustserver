@@ -29,7 +29,8 @@ const tools = Tools.layerWith({
   generator: Effect.succeed({ argv: [script, "--from-the-deployment"], cwd: dir }),
   measure: Effect.die("unused"),
   compileMs: Effect.succeed(0),
-  decides: Effect.die("unused")
+  decides: Effect.die("unused"),
+  reading: []
 })
 
 /** A box that says it boxed: the command runs under `env BOXED=<cap>`. */

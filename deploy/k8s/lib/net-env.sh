@@ -78,16 +78,9 @@ SIPEXT_EDGE1_IP="${SIPEXT_EDGE1_IP:-${_sipext_prefix}.11}"
 SIPEXT_EDGE2_IP="${SIPEXT_EDGE2_IP:-${_sipext_prefix}.12}"
 SIPEXT_UAS_IP="${SIPEXT_UAS_IP:-${_sipext_prefix}.21}"
 
-# Egress face-picker for the dual-face proxy: destinations inside these CIDRs
-# leave on the INTERNAL face (source = PROXY_VIP); everything else leaves on
-# the EXTERNAL face (source = SIPEXT_VIP). Pod CIDR + the internal kind subnet.
-POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
-PROXY_FACE_INT_CIDRS="${PROXY_FACE_INT_CIDRS:-${POD_CIDR},${SIP_SUBNET}}"
-
 export SIP_SUBNET SIP_GATEWAY PROXY_VIP SIP_PORT
 export SIPEXT_SUBNET SIPEXT_GATEWAY SIPEXT_VIP SIPEXT_IF SIPEXT_NET
 export SIPEXT_EDGE1_IP SIPEXT_EDGE2_IP SIPEXT_UAS_IP
-export POD_CIDR PROXY_FACE_INT_CIDRS
 
 # Generator stream IP plan: every stream the HA tooling runs as a docker
 # container on the sipext bridge gets ONE deterministic IP at

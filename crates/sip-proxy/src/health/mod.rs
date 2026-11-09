@@ -7,6 +7,7 @@ pub mod dead_notice;
 pub mod first_view;
 pub mod probe;
 pub mod reach;
+mod stated_host;
 
 pub use dead_notice::DeadNotifier;
 pub use first_view::FirstView;

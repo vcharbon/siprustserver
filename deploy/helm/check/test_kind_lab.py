@@ -39,9 +39,9 @@ class NetEnvAgreement(unittest.TestCase):
         n = values["network"]
         self.assertEqual(
             (n["proxyVip"], n["externalVip"], n["externalInterface"], n["externalNextHops"],
-             n["externalSubnet"], str(n["sipPort"]), n["internalCidrs"]),
+             n["externalSubnet"], str(n["sipPort"])),
             (net["PROXY_VIP"], net["SIPEXT_VIP"], net["SIPEXT_IF"], [net["SIPEXT_GATEWAY"]],
-             net["SIPEXT_SUBNET"], net["SIP_PORT"], net["PROXY_FACE_INT_CIDRS"]))
+             net["SIPEXT_SUBNET"], net["SIP_PORT"]))
         m = values["proxy"]["announce"]["metallb"]
         self.assertEqual(str(m["myASN"]), net["PROXY_NODE_ASN"])
         self.assertEqual(

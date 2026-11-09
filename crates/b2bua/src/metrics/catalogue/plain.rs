@@ -44,6 +44,10 @@ macro_rules! plain_counters {
 }
 
 plain_counters! {
+    UNEXPLAINED_ACKS = (
+        "b2bua_unexplained_acks_total",
+        "ACKs the dialog gate dropped, the dialog untouched: each names an INVITE the call record holds no final sent for, on a call no other owner served. One increment is one such ACK, not a defect and not a lost write: a re-INVITE refused statelessly before it reached the call, a live copy's write on its way, a returned primary's lost round (the callee's repeat of its 2xx ends that call), or the caller's ACK of her first INVITE ahead of the answer's write",
+    ) => unexplained_acks, bump_unexplained_ack, unexplained_acks_total;
     MESSAGE_CAP_LIFETIME_CROSSED = (
         "b2bua_message_cap_lifetime_crossed_total",
         "calls that crossed max_messages_per_call_lifetime: more events offered over the call's life than any healthy call sees, counted at dispatch until the call's release is queued; each is sent one verdict that ends it",
@@ -153,7 +157,7 @@ plain_counters! {
     // with no final rather than placed as a second call.
     FOREIGN_INVITE_COPY_DROPPED = (
         "b2bua_foreign_invite_copies_dropped_total",
-        "initial INVITEs whose stickiness cookie names another worker as primary and that copy no replica this node holds, dropped with no final (the transaction layer's 100 Trying went out on receipt; the transaction is then relinquished): the primary owns the transaction, so placing them would dial a second call",
+        "initial INVITEs whose stickiness cookie names another worker as primary and that copy no replica this node holds, dropped with no final, their transaction relinquished with nothing sent, ahead of the 100 Trying's 200 ms bound unless the router lags that long: the primary owns the transaction, so placing them would dial a second call",
     ) => foreign_invite_copy_dropped, bump_foreign_invite_copy_dropped, foreign_invite_copies_dropped_total;
     // Another incarnation's event: a timer fire, transaction timeout,
     // callout result or late message of an earlier call on the same
@@ -220,7 +224,7 @@ plain_counters! {
     ) => dead_verdicts_taken, bump_dead_verdict_taken, dead_verdicts_taken_total;
     DEAD_VERDICTS_UNCONFIRMED = (
         "b2bua_dead_verdicts_unconfirmed_total",
-        "taken dead verdicts this node's Backup flow from that worker spoke against, a frame of the incarnation it streamed at the verdict arriving after it, on the open stream or on the one connect a down stream makes at once, or the stream open past its silence bound: the proxy misread a live worker, and nothing was taken over; one per pending wait (ADR-0047 D1)",
+        "taken dead verdicts this node's Backup flow from that worker spoke against, a frame of the incarnation it streamed at the verdict or a write of another generation arriving after it, on the open stream or on the one connect a down stream makes at once, or the stream open past its silence bound: the proxy misread a live worker, or a restarted one holds its calls again, and nothing was taken over; one per pending wait (ADR-0047 D1)",
     ) => dead_verdicts_unconfirmed, bump_dead_verdict_unconfirmed, dead_verdicts_unconfirmed_total;
     STORE_RECONCILED_ORPHAN_STAMPS = (
         "b2bua_store_reconciled_orphan_stamps_total",

@@ -57,6 +57,7 @@ fn resolution(call: &Call, leg: &str) -> Resolution {
         initial_invite: false,
         incarnation: None,
         indexed: None,
+        deferred_copy: false,
     }
 }
 
@@ -86,16 +87,19 @@ async fn an_ack_of_the_unanswered_caller_invite_is_evidence_once_a_copy_served_t
         "no copy served the call: the copy that answered her is live and writing, {}",
         kind(&gate)
     );
+    assert_eq!(ctx.metrics.unexplained_acks_total(), 1, "the ACK it ignored is counted");
 
     let served = unanswered_call(ctx, 1);
     let gate = admit(ctx, &served, &ack, &resolution(&served, "a"));
     assert!(matches!(gate, Gate::Pass(_)), "a copy's write taken here: evidence, {}", kind(&gate));
+    assert_eq!(ctx.metrics.unexplained_acks_total(), 1, "evidence is not counted as ignored");
 }
 
 /// A 2xx to the INVITE of `leg`, its Via ours with the via-extension signed
 /// under `signing` when given.
 fn answer_on(call: &Call, leg: &str, signing: Option<&sip_ids::SigningKey>) -> SipMessage {
-    let facts = RequestFacts { method: "INVITE", uri: "sip:carol@10.0.0.3:5070", offer: true };
+    let facts =
+        RequestFacts { method: "INVITE", uri: "sip:carol@10.0.0.3:5070", route: "", offer: true };
     let via = build_call_via(
         &StackIdentityOpts {
             local_ip: "127.0.0.3",

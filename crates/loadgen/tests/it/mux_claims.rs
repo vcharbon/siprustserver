@@ -25,7 +25,7 @@ fn addr(p: u16) -> SocketAddr {
 /// correlation header, and optional extra header lines (e.g. `Replaces`).
 fn invite(ruri: &str, call_id: &str, token: &str, extra: &str) -> Vec<u8> {
     format!(
-        "INVITE {ruri} SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:9\r\nCall-ID: {call_id}\r\n\
+        "INVITE {ruri} SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:9\r\nCall-ID: {call_id}\r\n\
          X-Loadgen-Id: {token}\r\n{extra}To: <{ruri}>\r\nFrom: <sip:sut@h>;tag=s1\r\n\
          CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
     )
@@ -36,7 +36,7 @@ fn invite(ruri: &str, call_id: &str, token: &str, extra: &str) -> Vec<u8> {
 /// the known-Call-ID tier must carry it alone).
 fn in_dialog(method: &str, call_id: &str) -> Vec<u8> {
     format!(
-        "{method} sip:leg@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:9\r\n\
+        "{method} sip:leg@127.0.0.1 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:9\r\n\
          Call-ID: {call_id}\r\nTo: <sip:leg@h>;tag=l1\r\nFrom: <sip:sut@h>;tag=s1\r\n\
          CSeq: 2 {method}\r\nContent-Length: 0\r\n\r\n"
     )
@@ -273,7 +273,7 @@ async fn unclaimed_invites_and_unfired_claims_are_counted_not_misdelivered() {
     // scenario did not declare), while a token-less INVITE stays a true orphan.
     sut.send_to(&invite("sip:999@127.0.0.1", "cid-u1", "lgcase4", ""), uas).await.unwrap();
     sut.send_to(
-        b"INVITE sip:9005400@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:9\r\n\
+        b"INVITE sip:9005400@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:9\r\n\
           Call-ID: cid-nohdr\r\nTo: <sip:9005400@h>\r\nFrom: <sip:sut@h>;tag=s1\r\n\
           CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n",
         uas,

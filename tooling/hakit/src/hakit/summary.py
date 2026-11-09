@@ -86,7 +86,8 @@ CAUSE_COLUMNS = (
     ("expected", "expected ending"),
     ("dependency_fault", "dependency fault (503)"),
     ("overload", "overload (503 + Retry-After)"),
-    ("setup_timeout", "setup timeout"),
+    ("silent_after_provisional", "a provisional, then no final"),
+    ("setup_timeout", "no response, then the give-up"),
     ("cut", "cut / not released"),
     ("other", "other"),
 )
@@ -124,7 +125,7 @@ def _where(name: str, t: Json) -> list[str]:
     """One line per name: each cause and detail with its count by where."""
     parts: list[str] = []
     for c in jv.objs(t, "causes"):
-        detail = "" if c["cause"] == "setup_timeout" else f" {c['detail']}"
+        detail = "" if c["cause"] in ("setup_timeout", "silent_after_provisional") else f" {c['detail']}"
         parts.append(f"{CAUSE_NAMES[str(c['cause'])]}{detail}: {c['count']} ({_places(c)})")
     return [f"- {name}: {'; '.join(parts)}"] if parts else []
 
@@ -146,11 +147,16 @@ def _unanswered(v: Json) -> list[str]:
 def priority_verdict(group: Json | None) -> str:
     if group is None or not jv.strings(group, "streams"):
         return "No `run` stream places priority calls."
-    said = {"overload": "refused for overload", "setup_timeout": "timed out", "cut": "cut or never released"}
+    said = {
+        "overload": "refused for overload",
+        "silent_after_provisional": "left with a provisional and no final",
+        "setup_timeout": "timed out",
+        "cut": "cut or never released",
+    }
     other = [c for c in jv.objs(group, "causes") if c["cause"] == "other"]
     n_other = sum(int(jv.number(c, "count")) for c in other)
     if not any(_cause_count(group, c) for c in said) and not n_other:
-        return "No priority call was refused for overload, timed out, cut or ended otherwise."
+        return "No priority call was refused for overload, left with a provisional and no final, timed out, cut or ended otherwise."
     parts: list[str] = []
     for cause, what in said.items():
         rows = [c for c in jv.objs(group, "causes") if c["cause"] == cause]
@@ -195,8 +201,17 @@ def _window(w: Json, dialog: dict[str, int]) -> list[str]:
     rows = jv.objs(w, "impacts")
     out += [_impact(r) for r in rows] or ["- no impact"]
     out += [f"- in-dialog {k}: {n} (this window a candidate) — FINDING" for k, n in sorted(dialog.items())]
+    out += [_metric(m) for m in jv.objs(w, "metrics")]
     out.append("")
     return out
+
+
+def _metric(m: Json) -> str:
+    if "pods" not in m:
+        return f"- read `{m['metric']}` ({m['read']}): {m.get('error')}"
+    pods = jv.obj(m, "pods")
+    read = ", ".join(f"{p} {float(str(v)):g}" for p, v in sorted(pods.items())) or "no series"
+    return f"- read `{m['metric']}` ({m['read']}): {read}"
 
 
 def render(v: Json) -> str:

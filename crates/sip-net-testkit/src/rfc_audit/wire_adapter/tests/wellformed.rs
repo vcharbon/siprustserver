@@ -91,3 +91,34 @@ fn the_record_route_rule_is_narrowed_to_declared_proxies() {
     assert!(as_proxy[0].detail.contains("MUST NOT use Record-Route"), "{}", as_proxy[0].detail);
     assert!(named(HashSet::from([UaRole::Uas])).is_empty(), "a plain UAS lane is not judged");
 }
+
+/// An INVITE with no Contact (RFC 3261 §8.1.1.8) is charged to the lane that
+/// wrote it; a hop that forwards its upstream's (a relay lane) is not judged,
+/// whatever it answers.
+#[test]
+fn a_missing_contact_is_charged_to_its_author_not_a_forwarding_hop() {
+    let contactless = || {
+        format!(
+            "INVITE {B} SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-nc\r\n\
+             From: <{A}>;tag=at\r\n\
+             To: <{B}>\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: 1 INVITE\r\n\
+             Max-Forwards: 0\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    };
+    let authored = live(RuleId::ContactPresence).check(&[sent(ALICE, contactless(), SUT, 0)]);
+    assert_eq!(authored.len(), 1, "{authored:?}");
+    assert_eq!(authored[0].0, ALICE, "the author is charged");
+
+    let relayed = vec![
+        recv(SUT, contactless(), ALICE, 0),
+        sent(SUT, contactless(), BOB, 1),
+        sent(SUT, resp(483, 1, "INVITE", "bt", "z9hG4bK-nc"), ALICE, 2),
+    ];
+    let out = live(RuleId::ContactPresence).check(&relayed);
+    assert!(out.iter().all(|f| f.0 != SUT), "a forwarding hop is not charged: {out:?}");
+}

@@ -108,6 +108,7 @@ mod cdr_rabbitmq;
 mod check;
 mod drain_env;
 mod entropy;
+mod env_read;
 mod front_env;
 mod limiter_client;
 mod limiter_env;
@@ -130,6 +131,7 @@ pub use cdr_rabbitmq::{
     MAX_DRAINER_WAIT_MS, MAX_WAIT_MS, MAX_WINDOW,
 };
 pub use check::ConfigCheck;
+pub use env_read::{env_stated, split_host_port, stated, stated_list};
 pub use front_env::{addresses_from_lookup, WorkerAddresses};
 pub use null_cdr::NullCdrWriter;
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
@@ -144,23 +146,6 @@ const GAUGE_PERIOD: Duration = Duration::from_secs(5);
 /// Env var with a default when unset.
 pub fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-/// `value` trimmed, `None` when it is absent or blank: a knob set to nothing
-/// states nothing.
-pub fn stated(value: Option<String>) -> Option<String> {
-    value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
-}
-
-/// The comma-separated names `value` lists, `None` when it names none: a list
-/// of blanks states nothing, as a blank value does.
-pub fn stated_list(value: Option<String>) -> Option<Vec<String>> {
-    stated(value).map(|v| split_csv(&v)).filter(|names| !names.is_empty())
-}
-
-/// The env var `key` as [`stated`] reads it.
-pub fn env_stated(key: &str) -> Option<String> {
-    stated(env::var(key).ok())
 }
 
 /// The on/off env variable `key`: `1`/`true`/`yes`/`on` or
@@ -178,17 +163,6 @@ pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
         .map_err(|e| format!("cannot resolve {addr:?}: {e}"))?
         .next()
         .ok_or_else(|| format!("no address resolved from {addr:?}"))
-}
-
-/// Split a `host:port` into its parts WITHOUT DNS resolution (the host may be a
-/// service name resolved per-call downstream). Port defaults to 5060 if absent
-/// or unparseable. Used for a b-leg callee default (`B2BUA_DEST`-style knobs) —
-/// resolving at boot would pin every call to one startup-resolved pod.
-pub fn split_host_port(s: &str) -> (String, u16) {
-    match s.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(5060)),
-        None => (s.to_string(), 5060),
-    }
 }
 
 impl RunnerEnv {
@@ -235,8 +209,12 @@ impl RunnerEnv {
             brake_config.memo_capacity(),
             &id_gen,
         );
-        let brake_hook =
-            build_ingress_brake_hook(brake_config, brake_counters.clone(), refusals.clone());
+        let brake_hook = build_ingress_brake_hook(
+            brake_config,
+            brake_counters.clone(),
+            refusals.clone(),
+            self.addresses.front.parser(&self.parser_limits),
+        );
 
         // Real, non-recording transport: a plain tokio UDP socket. Bind into an
         // `Arc` so the endpoint can be SHARED: the core takes ownership of one
@@ -311,7 +289,6 @@ impl RunnerEnv {
                 "standalone: b-leg goes straight to the callee, every Contact names the worker"
             ),
         }
-
         let identity = entropy::worker_identity(name, self.identity.clone(), &id_gen);
         let config = B2buaConfig {
             self_ordinal: self.ordinal.clone(),
@@ -346,7 +323,9 @@ impl RunnerEnv {
             privacy_service: self.privacy_service,
             cdr: self.cdr.clone(),
             capacity: self.capacity,
+            caps: self.caps,
             event_queue_gate: self.event_queue_gate,
+            parser_limits: self.parser_limits.clone(),
             ..Default::default()
         };
         tracing::info!(service = name, capacity = ?config.capacity, "capacity ceilings");

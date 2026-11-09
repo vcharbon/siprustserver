@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use sip_message::SipMessage;
 use sip_txn::TransactionLayer;
+use tokio::time::Instant;
 
 use super::admit::UnbornCall;
 use super::owed::TxnKey;
@@ -15,6 +16,7 @@ use super::process::process;
 use super::resolve::Resolution;
 use super::RouterCtx;
 use crate::dispatch::{DispatchBody, DispatchClass, Owed, Runnable};
+use crate::setup_budget::SetupBudget;
 use b2bua_sdk::event::CallEvent;
 
 pub(crate) struct Turn {
@@ -27,11 +29,19 @@ pub(crate) struct Turn {
     pub(super) class: DispatchClass,
     /// A new call admitted at ingress, counted until its turn creates it.
     pub(super) unborn: Option<UnbornCall>,
+    /// A setup turn's budget, which ends its wait for its permits; a turn that
+    /// is no setup carries [`SetupBudget::NONE`].
+    pub(super) budget: SetupBudget,
 }
 
 impl Runnable for Turn {
+    fn due_by(&self) -> Option<Instant> {
+        self.budget.due()
+    }
+
     fn into_body(self) -> DispatchBody {
         let unpolled = UnpolledForget::arm(&self.ctx.txn, &self.event, self.class);
+        let arming = super::reclaim::deferred::arming_report(&self.ctx, &self.event);
         Box::pin(async move {
             unpolled.disarm();
             if let Some(call_ref) = super::quiesced::notice_of(&self.event) {
@@ -43,7 +53,15 @@ impl Runnable for Turn {
                 return;
             }
             if let Some(call_ref) = super::undecided::notice_of(&self.event) {
-                super::undecided::reask_turn(&self.ctx, call_ref).await;
+                super::undecided::reask_turn(&self.ctx, call_ref, self.budget).await;
+                return;
+            }
+            if super::flush_turn::is_notice(&self.event) {
+                super::flush_turn::flush_turn(&self.ctx, &self.event).await;
+                return;
+            }
+            if super::reclaim::deferred::is_notice(&self.event) {
+                super::reclaim::deferred::deferred_turn(&self.ctx, &self.event, arming).await;
                 return;
             }
             match (&self.event, self.res.call_ref.as_deref()) {
@@ -68,8 +86,9 @@ impl Runnable for Turn {
                 _ => {}
             }
             let matched = self.matched_client_txn;
-            if !process(&self.ctx, &self.event, matched, self.res, self.unborn).await {
-                super::interpret::release_untaken(&self.ctx, &self.event).await;
+            let admitted = self.unborn.map(|unborn| (unborn, self.budget));
+            if !process(&self.ctx, &self.event, matched, self.res, admitted).await {
+                super::commit::release_untaken(&self.ctx, &self.event).await;
             }
         })
     }
@@ -149,9 +168,7 @@ mod tests {
     /// A node holding call `c`'s lock, and the `Turn` of a peer BYE whose
     /// server transaction is still `Trying`: the router's own turn of it
     /// waits on the lock the test holds.
-    async fn held_bye(
-        branch: &str,
-    ) -> (Node, Box<dyn UdpEndpoint>, tokio::sync::OwnedMutexGuard<()>, Turn) {
+    async fn held_bye(branch: &str) -> (Node, Box<dyn UdpEndpoint>, crate::store::CallGuard, Turn) {
         let net = SimulatedSignalingNetwork::new(1);
         let node = node_on(&net, "w0", |_| {}, Vec::new()).await;
         let peer = net.bind_udp(BindUdpOpts::new(PEER.parse().unwrap(), 64)).await.unwrap();
@@ -164,7 +181,9 @@ mod tests {
         let class = DispatchClass::of(&event, false).expect("a classed event");
         let res = resolve(&ctx, &event);
         assert_eq!(res.call_ref.as_deref(), Some("c"));
-        (node, peer, held, Turn { ctx, event, matched_client_txn: false, res, class, unborn: None })
+        let budget = SetupBudget::NONE;
+        let turn = Turn { ctx, event, matched_client_txn: false, res, class, unborn: None, budget };
+        (node, peer, held, turn)
     }
 
     /// A production turn of a BYE aborted before its first poll never ran:
@@ -261,8 +280,15 @@ mod tests {
         let event = CallEvent::sip(CustomParser::new().parse(&raw).unwrap(), PEER.parse().unwrap());
         let class = DispatchClass::of(&event, false).expect("a classed event");
         let res = resolve(&ctx, &event);
-        let turn =
-            Turn { ctx: ctx.clone(), event, matched_client_txn: false, res, class, unborn: None };
+        let turn = Turn {
+            ctx: ctx.clone(),
+            event,
+            matched_client_txn: false,
+            res,
+            class,
+            unborn: None,
+            budget: SetupBudget::NONE,
+        };
         turn.into_body().await;
         assert_eq!(ctx.state.active_count(), 0, "no call is born");
         let counts = crate::new_calls::NewCallCounts::compose(

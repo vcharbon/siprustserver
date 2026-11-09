@@ -1,19 +1,19 @@
 //! The re-parse sweep: every message of already emitted flows documents put
-//! through today's parser, each refusal reported and the sweep continued.
+//! through today's parser under the stated reading, each refusal reported
+//! and the sweep continued.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use sip_message::parser::SipParser;
-use sip_message::CustomParser;
+use sip_message::{SipParser, ToolReading};
 use sip_pcap::doc::{FlowsDoc, Summary};
 use sip_pcap::header_errors;
 
 use crate::walk::{capture_of, expand_flows_documents};
 
-/// Re-parse every message under `inputs` and print one JSON line per message
+/// Re-parse every message under `inputs` under `reading` and print one JSON line per message
 /// the parser refuses (its document, capture, position, start-line facts,
 /// reason and head), and one per non-fatal header reading of an accepted
 /// message that failed ([`header_errors::of`], the line carrying `header` and
@@ -21,7 +21,7 @@ use crate::walk::{capture_of, expand_flows_documents};
 ///
 /// A document that cannot be read is printed as one `error` line and counted,
 /// never skipped: the totals cover every document the walk found.
-pub(crate) fn run(inputs: &[PathBuf], jobs: usize) {
+pub(crate) fn run(inputs: &[PathBuf], jobs: usize, reading: &ToolReading) {
     let files = expand_flows_documents(inputs);
     if files.is_empty() {
         eprintln!("no *.flows.json found under {inputs:?}");
@@ -37,11 +37,10 @@ pub(crate) fn run(inputs: &[PathBuf], jobs: usize) {
         for _ in 0..workers {
             let (next, totals, out, files) = (&next, &totals, &out, &files);
             scope.spawn(move || {
-                let parser = CustomParser::new();
                 while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
                     let document = path.display().to_string();
                     let capture = capture_of(path);
-                    let (lines, counted) = sweep_document(&parser, &document, &capture, path);
+                    let (lines, counted) = sweep_document(reading, &document, &capture, path);
                     let mut stdout = out.lock().unwrap_or_else(|e| e.into_inner());
                     for line in &lines {
                         let _ = writeln!(stdout, "{line}");
@@ -85,7 +84,7 @@ impl Totals {
 }
 
 fn sweep_document(
-    parser: &CustomParser,
+    reading: &ToolReading,
     document: &str,
     capture: &str,
     path: &std::path::Path,
@@ -115,7 +114,7 @@ fn sweep_document(
                 }
             };
             let reason = match msg.payload.bytes() {
-                Ok(raw) => match parser.parse(&raw) {
+                Ok(raw) => match reading.parse(&raw) {
                     Ok(parsed) => {
                         let errors = header_errors::of(&parsed);
                         counted.header_errors += errors.len();

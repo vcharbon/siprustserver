@@ -37,14 +37,17 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
 
-use sip_message::header::{HeaderName, Params, Uri};
-use sip_message::parser::SipParser;
-use sip_message::{CustomParser, Method, SipMessage};
+use sip_message::header::Uri;
+use sip_message::{Method, SipMessage, SipParser, ToolReading};
 
 use crate::align::{align_probes, rides_no_timer};
 use crate::Datagram;
 
+mod ingest;
+mod sift;
 mod stats;
+use ingest::ingest;
+use sift::{hash_datagram, looks_like_sip};
 pub use stats::{FlowStats, HeaderFailure};
 
 /// Leg index into [`Flows::legs`].
@@ -97,6 +100,8 @@ pub struct FlowConfig {
     /// Also the tolerance of the probe alignment ([`crate::align`]) that puts
     /// a merged capture's probes on one clock first.
     pub dedup_window_us: u64,
+    /// How each captured message is read.
+    pub reading: ToolReading,
 }
 
 /// Default pairing window for the strategies that bound one: two legs of one
@@ -107,8 +112,9 @@ pub const DEFAULT_PAIR_WINDOW_US: u64 = 5_000_000;
 /// (Timer T1) away, so anything closer is the capture stack, not the wire.
 pub const DEFAULT_DEDUP_WINDOW_US: u64 = 200_000;
 
-impl Default for FlowConfig {
-    fn default() -> Self {
+impl FlowConfig {
+    /// The standard correlation pipeline, each message read under `reading`.
+    pub fn standard(reading: ToolReading) -> Self {
         Self {
             strategies: vec![
                 CorrelateStrategy::HeaderToken {
@@ -126,6 +132,7 @@ impl Default for FlowConfig {
                 CorrelateStrategy::IdentityAdjacency { window_us: DEFAULT_PAIR_WINDOW_US },
             ],
             dedup_window_us: DEFAULT_DEDUP_WINDOW_US,
+            reading,
         }
     }
 }
@@ -231,6 +238,9 @@ pub struct FlowLeg {
     pub final_status: Option<u16>,
     pub saw_180: bool,
     pub terminated_by: Option<Terminator>,
+    /// Extraction refused an opening request (no To-tag, neither ACK nor CANCEL)
+    /// of this Call-ID and read no untagged request of its method on any hop.
+    pub opening_request_set_aside: bool,
     /// Correlation token values seen on this leg, parallel to
     /// [`FlowConfig::strategies`] (always the empty set at a non-token
     /// strategy's index).
@@ -351,11 +361,11 @@ pub struct Flows {
 /// regardless of input order — the order of the ALIGNED timestamps, which
 /// is also what every [`FlowMsg::ts_us`] carries.
 pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
-    let parser = CustomParser::new();
+    let reading = &cfg.reading;
     let keys: Vec<Option<u64>> =
         datagrams.iter().map(|d| looks_like_sip(&d.payload).then(|| hash_datagram(d))).collect();
     let (ts, aligned_probes) = align_probes(datagrams, &keys, cfg.dedup_window_us, |i| {
-        parser.parse(&datagrams[i].payload).is_ok_and(|m| rides_no_timer(&m))
+        reading.parse(&datagrams[i].payload).is_ok_and(|m| rides_no_timer(&m))
     });
     let mut order: Vec<usize> = (0..datagrams.len()).collect();
     order.sort_by_key(|&i| ts[i]);
@@ -379,11 +389,10 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
         }
         dedup.insert(key, ts[i]);
 
-        let msg = match parser.parse(&d.payload) {
+        let msg = match reading.parse(&d.payload) {
             Ok(m) => m,
-            Err(_) => {
-                stats.parse_failed += 1;
-                stats.parse_failed_at.push(i);
+            Err(error) => {
+                stats.note_refusal(i, &error, &d.payload);
                 continue;
             }
         };
@@ -401,6 +410,7 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
                 final_status: None,
                 saw_180: false,
                 terminated_by: None,
+                opening_request_set_aside: false,
                 tokens_by_strategy: vec![BTreeSet::new(); cfg.strategies.len()],
             });
             legs.len() - 1
@@ -409,113 +419,9 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
         ingest(&mut legs[idx], ts[i], d.src, d.dst, msg, d.probe, &cfg.strategies);
     }
 
+    stats.mark_opening_requests_set_aside(&mut legs);
     let groups = correlate(&legs, cfg);
     Flows { legs, groups, stats }
-}
-
-/// Cheap pre-filter so RTP/STUN/DNS on captured ports never reaches the parser.
-fn looks_like_sip(payload: &[u8]) -> bool {
-    if payload.len() < 16 {
-        return false;
-    }
-    let head = &payload[..payload.len().min(256)];
-    (head.starts_with(b"SIP/2.0 ") || head.windows(9).any(|w| w == b" SIP/2.0\r"))
-        && payload[0].is_ascii_uppercase()
-}
-
-fn hash_datagram(d: &Datagram) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    d.src.hash(&mut h);
-    d.dst.hash(&mut h);
-    d.payload.hash(&mut h);
-    h.finish()
-}
-
-fn ingest(
-    leg: &mut FlowLeg,
-    ts_us: u64,
-    src: SocketAddr,
-    dst: SocketAddr,
-    msg: SipMessage,
-    probe: u32,
-    strategies: &[CorrelateStrategy],
-) {
-    for (si, strat) in strategies.iter().enumerate() {
-        match strat {
-            CorrelateStrategy::HeaderToken { headers } => {
-                for name in headers {
-                    for v in msg.raw(HeaderName::from(name.as_str())) {
-                        let v = v.trim();
-                        if !v.is_empty() {
-                            leg.tokens_by_strategy[si].insert(v.to_string());
-                        }
-                    }
-                }
-            }
-            CorrelateStrategy::HeaderParam { header, param } => {
-                for v in msg.raw_text(HeaderName::from(header.as_str())) {
-                    let params = Params::parse_list(&v);
-                    if let Some(t) = params.value(param).filter(|t| !t.is_empty()) {
-                        leg.tokens_by_strategy[si].insert(t.to_string());
-                    }
-                }
-            }
-            CorrelateStrategy::DerivedCallId { .. }
-            | CorrelateStrategy::IdentityAdjacency { .. } => {}
-        }
-    }
-    match &msg {
-        SipMessage::Request(r) => {
-            if r.method() == Method::Invite && leg.invite.is_none() {
-                leg.invite = Some(InviteSummary {
-                    ruri: r.request_uri().clone(),
-                    from_uri: r.from().uri().clone(),
-                    to_uri: r.to().uri().clone(),
-                    cseq: r.cseq().seq(),
-                });
-            }
-            if r.method() == Method::Bye && leg.terminated_by.is_none() {
-                leg.terminated_by = Some(Terminator::Bye);
-            }
-            if r.method() == Method::Cancel && leg.terminated_by.is_none() {
-                leg.terminated_by = Some(Terminator::Cancel);
-            }
-        }
-        SipMessage::Response(r) => {
-            if r.cseq().method() == Method::Invite {
-                if r.status() == 180 {
-                    leg.saw_180 = true;
-                }
-                let initial = leg.invite.as_ref().map(|inv| inv.cseq);
-                if r.status() >= 200
-                    && leg.final_status.is_none()
-                    && (initial.is_none() || initial == Some(r.cseq().seq()))
-                {
-                    leg.final_status = Some(r.status());
-                }
-            }
-        }
-    }
-    // Retransmission tag: the SAME DATAGRAM already seen in this direction on
-    // this leg, inside the transaction envelope. The EARLIEST match anchors it,
-    // because 64·T1 runs from the first emission — see [`crate::callfacts`],
-    // which decides the same relation for the emitted document and must not be
-    // able to disagree with this one.
-    let retx = leg
-        .msgs
-        .iter()
-        .find(|m| m.src == src && m.dst == dst && m.parsed.image() == msg.image())
-        .is_some_and(|m| ts_us.saturating_sub(m.ts_us) <= crate::callfacts::REPEAT_ENVELOPE_US);
-    let pair = Hop::normalized(src, dst);
-    let hop = match leg.hops.iter().position(|h| *h == pair) {
-        Some(h) => h,
-        None => {
-            leg.hops.push(pair);
-            leg.hops.len() - 1
-        }
-    };
-    leg.msgs.push(FlowMsg { ts_us, src, dst, parsed: msg, hop, retx, probe });
 }
 
 fn find(parent: &mut [usize], mut x: usize) -> usize {

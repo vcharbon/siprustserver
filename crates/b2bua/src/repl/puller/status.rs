@@ -39,6 +39,9 @@ pub struct PullerStatus {
     /// The peer's incarnation generation on the last frame that carries a
     /// position (`Data`, `Noop`); `None` before the first.
     pub last_frame_gen: Option<u64>,
+    /// The peer's incarnation generation on the last `Data` frame; `None`
+    /// before the first.
+    pub last_write_gen: Option<u64>,
 }
 
 impl PullerStatus {
@@ -47,6 +50,9 @@ impl PullerStatus {
         self.last_frame_at = Some(tokio::time::Instant::now());
         if let Frame::Data { at, .. } | Frame::Noop { at } = frame {
             self.last_frame_gen = Some(at.gen);
+        }
+        if let Frame::Data { at, .. } = frame {
+            self.last_write_gen = Some(at.gen);
         }
     }
 }

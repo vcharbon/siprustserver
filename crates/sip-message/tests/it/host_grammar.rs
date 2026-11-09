@@ -179,7 +179,7 @@ fn a_received_is_stamped_on_an_address_difference_only() {
 fn a_lenient_reading_holds_a_refused_sent_by_whole() {
     let lenient = CustomParser::with_limits(SipParserLimits {
         wire_grammar: false,
-        ..SipParserLimits::default()
+        ..SipParserLimits::DEFAULT
     });
     for sent_by in [
         "[2001:db8::00001]",
@@ -280,14 +280,15 @@ fn an_https_location_with_an_ipv6_authority_reads() {
     assert_eq!(network_host(&list[0].uri().text()), Some("[2001:db8::1]"));
 }
 
+/// RFC 6442 §4.1: `locationValue *(COMMA locationValue)`, so an empty entry
+/// reads as no list.
 #[test]
-fn an_empty_location_entry_is_skipped() {
-    for (line, count) in [
-        ("Geolocation: <cid:a@example.com>, , <cid:c@example.com>\r\n", 2),
-        ("Geolocation: <cid:a@example.com>,\r\n", 1),
+fn an_empty_location_entry_is_refused_on_read() {
+    for line in [
+        "Geolocation: <cid:a@example.com>, , <cid:c@example.com>\r\n",
+        "Geolocation: <cid:a@example.com>,\r\n",
     ] {
-        let list = located(line).list::<Geolocation>().unwrap_or_else(|e| panic!("{}", e.reason));
-        assert_eq!(list.len(), count, "{line:?}");
+        assert!(located(line).list::<Geolocation>().is_err(), "{line:?}");
     }
 }
 

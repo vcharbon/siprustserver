@@ -97,6 +97,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
             CHANGE_MARKERS,
             ADMISSION_MAX,
         ],
+        crate::poison::FAMILIES,
         observe::counters::FAMILIES,
     ],
 };

@@ -14,6 +14,7 @@ use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::parser::custom::CustomParser;
+use sip_message::received::observed_source;
 use sip_message::types::SipHeader;
 use sip_message::worker_report::{incarnation_value, Readiness, X_INCARNATION, X_READINESS};
 use sip_message::{serialize, SipMessage, SipParser};
@@ -88,6 +89,7 @@ fn spawn_responder(
                 Mode::NotReady => (503, "Service Unavailable", vec![incarnation.clone()]),
             };
             let opts = GenerateResponseOpts {
+                incoming_source: Some(observed_source(pkt.src)),
                 to_tag: Some("uas".into()),
                 extra_headers: extra,
                 ..Default::default()
@@ -123,6 +125,7 @@ async fn probed(name: &str, mode: Mode) -> Probed {
     let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         registry.control(),
         observer.clone(),
@@ -228,6 +231,7 @@ async fn a_restart_answered_200_is_read_alive_in_one_write() {
     let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         control,
         observer,
@@ -274,6 +278,7 @@ async fn the_stale_sweep_floors_a_silent_worker_and_never_a_refusing_one() {
     let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         registry.control(),
         observer.clone(),
@@ -362,6 +367,7 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
                 continue; // first transmission lost
             }
             let opts = GenerateResponseOpts {
+                incoming_source: Some(observed_source(pkt.src)),
                 to_tag: Some("uas".into()),
                 extra_headers: crate::common::options_capabilities(),
                 ..Default::default()
@@ -386,6 +392,7 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
     let (probe_ep, _probe_sock) = h.bind_sut("probe-rtx", "127.0.0.1:5098").await;
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         control,
         observer,

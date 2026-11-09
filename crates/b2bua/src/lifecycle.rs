@@ -84,29 +84,73 @@ pub fn backend_waves(backend: &'static str) -> Arc<WaveSet> {
     })
 }
 
-/// The latest outbound message an unsent episode holds: its call, its label
-/// and, for a request, its Request-URI.
+/// The latest outbound message an unsent episode holds: its call, its label,
+/// why it could not leave and, for a request, its Request-URI.
 #[derive(Debug, Clone)]
 pub struct Unsent {
     pub call_ref: String,
     pub label: String,
+    /// `unaddressable` (no IP-literal next hop) or `too_long` (past the
+    /// largest UDP payload).
+    pub reason: &'static str,
     pub request_uri: Option<String>,
 }
 
-/// Outbound messages left unsent for a next hop that is not an IP literal
-/// (`router::unaddressable`), keyed by that hop and counted by kind
-/// (`request`, `response`, `datagram`), at warn: a flood toward one target
-/// prints its rising edge, a summary every few seconds and its total.
+/// The latest call a cap's trip wave names (ADR-0057 §7).
+#[derive(Clone, Debug)]
+pub struct CapTrip {
+    pub call_ref: String,
+    pub kind: b2bua_sdk::config::CapKind,
+}
+
+/// Turns that crossed a per-call cap (ADR-0057 §7), keyed by the cap and
+/// counted as `trips`: a decision service that trips every call prints one
+/// episode, naming its latest call, not a line per call. A defect cap's
+/// episode logs at warn, a peer cap's at info.
+pub fn cap_trip_waves() -> Arc<WaveSet<CapTrip>> {
+    WaveSet::with_payload(|cap: &str, r: &WaveReport, t: &CapTrip| {
+        const TRIPPED: &str = "per-call cap tripped";
+        let (call_ref, kind) = (&t.call_ref, t.kind.label());
+        match t.kind {
+            b2bua_sdk::config::CapKind::Defect => tracing::warn!(
+                node = observe::node(),
+                cap,
+                kind,
+                %call_ref,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "{TRIPPED}"
+            ),
+            b2bua_sdk::config::CapKind::Peer => tracing::info!(
+                node = observe::node(),
+                cap,
+                kind,
+                %call_ref,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "{TRIPPED}"
+            ),
+        }
+    })
+}
+
+/// Outbound messages that could not leave (`router::cannot_leave`), keyed by
+/// their next hop and counted by kind (`request`, `response`, `datagram`), at
+/// warn: a flood toward one target prints its rising edge, a summary every few
+/// seconds and its total.
 pub fn unsent_waves() -> Arc<WaveSet<Unsent>> {
     WaveSet::with_payload(|hop: &str, r: &WaveReport, u: &Unsent| {
-        const UNSENT: &str = "outbound message not sent: its next hop is not an IP literal";
-        let (call_ref, label) = (&u.call_ref, &u.label);
+        const UNSENT: &str = "outbound message not sent";
+        let (call_ref, label, reason) = (&u.call_ref, &u.label, u.reason);
         match &u.request_uri {
             Some(request_uri) => tracing::warn!(
                 node = observe::node(),
                 hop,
                 %call_ref,
                 %label,
+                reason,
                 %request_uri,
                 edge = %r.edge,
                 elapsed_ms = r.elapsed_ms,
@@ -118,6 +162,7 @@ pub fn unsent_waves() -> Arc<WaveSet<Unsent>> {
                 hop,
                 %call_ref,
                 %label,
+                reason,
                 edge = %r.edge,
                 elapsed_ms = r.elapsed_ms,
                 totals = %r.tally,
@@ -223,6 +268,7 @@ mod tests {
         let unsent = |request_uri: Option<&str>| Unsent {
             call_ref: "c".into(),
             label: "BYE → a".into(),
+            reason: "unaddressable",
             request_uri: request_uri.map(str::to_string),
         };
         for _ in 0..2_000 {

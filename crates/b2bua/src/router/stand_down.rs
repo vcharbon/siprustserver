@@ -42,19 +42,35 @@ pub(super) async fn offer(ctx: &Arc<RouterCtx>, call_ref: String, write: Primary
     if !ctx.state.is_takeover(&call_ref) {
         return;
     }
+    super::ingress::on_event(ctx, notice(call_ref, write), Default::default(), None).await;
+}
+
+/// Queue the stand-down notice of the takeover copy of `call_ref` a sweep just
+/// made, carrying the Element the store holds now, as a write of its primary: one
+/// applied while the copy was being made found no takeover mark, and rode up to
+/// nothing. An Element gone is the primary's delete.
+pub(super) async fn offer_the_element(ctx: &RouterCtx, call_ref: &str) {
+    let write = match ctx.state.replica_body(call_ref).await {
+        Some(body) => PrimaryWrite::Put(body),
+        None => PrimaryWrite::Delete(None),
+    };
+    let _ = ctx.reentry_tx.send(notice(call_ref.to_string(), write));
+}
+
+/// The stand-down notice of `call_ref` carrying `write`.
+fn notice(call_ref: String, write: PrimaryWrite) -> CallEvent {
     let (outcome, payload, body) = match write {
         PrimaryWrite::Put(body) => (PUT, serde_json::Value::Null, body.to_vec()),
         PrimaryWrite::Delete(incarnation) => (DELETE, serde_json::json!(incarnation), Vec::new()),
     };
-    let event = CallEvent::InternalEvent {
+    CallEvent::InternalEvent {
         call_ref,
         topic: TOPIC.to_string(),
         outcome: outcome.to_string(),
         payload,
         body,
         incarnation: None,
-    };
-    super::ingress::on_event(ctx, event, false).await;
+    }
 }
 
 /// The stand-down turn of `call_ref` on the notice `outcome` / `payload` /
@@ -67,11 +83,11 @@ pub(super) async fn stand_down_turn(
     payload: &serde_json::Value,
     body: &[u8],
 ) {
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     let Some(copy) = ctx.state.peek_enveloped(call_ref) else {
-        // Shed between the notice and its turn: what this turn's queue and
-        // lock entry are is all that is left of the call here.
-        drop(guard);
+        // Shed between the notice and its turn: this turn's queue is all that
+        // is left of the call here.
+        drop(_guard);
         release_call(ctx, call_ref, ReleaseKind::Orphan).await;
         return;
     };

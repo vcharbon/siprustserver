@@ -27,7 +27,8 @@ fn invite_3262(branch: &str, extra: &str, to_tag: Option<&str>, sdp: bool) -> Ve
              To: {to}\r\n\
              Call-ID: cid-1@127.0.0.1\r\n\
              CSeq: 1 INVITE\r\n\
-             Max-Forwards: 70\r\n{extra}{}\r\n{}",
+             Max-Forwards: 70\r\n\
+             Contact: <sip:alice@127.0.0.1:5060>\r\n{extra}{}\r\n{}",
         body_rows(sdp),
         body(sdp),
     )

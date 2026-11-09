@@ -358,7 +358,8 @@ mod tests {
             },
         ];
 
-        let raw = "INVITE sip:x@h SIP/2.0\r\n\
+        let raw =
+            "INVITE sip:x@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKt1\r\n\
              Call-ID: cid-1@h\r\n\
              From: <sip:a@h>;tag=1\r\nTo: <sip:x@h>\r\nCSeq: 1 INVITE\r\n\
@@ -394,7 +395,7 @@ mod tests {
         let entries = vec![entry(
             "10.0.0.1:5060",
             "10.0.0.2:5060",
-            "INVITE sip:bob@x SIP/2.0\r\n",
+            "INVITE sip:bob@x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n",
             1_782_802_100_000,
             1,
         )];

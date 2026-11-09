@@ -134,11 +134,10 @@ pub fn hop_minimal(req: &SipRequest) -> Bytes {
 pub fn hop_rewrite_set(req: &SipRequest) -> Bytes {
     let routes: Vec<RouteEntry> = req.list::<RouteEntry>().unwrap_or_default();
     let ours = routes.iter().take_while(|r| r.uri().host() == PROXY_HOST).count();
-    let mut draft = req.thaw();
-    for _ in 0..ours {
-        draft = draft.pop_top::<RouteEntry>().expect("our own Route entries read");
-    }
-    draft = draft
+    let mut draft = req
+        .thaw()
+        .pop_top_values::<RouteEntry>(ours)
+        .expect("our own Route entries read")
         .update_top::<Via>(|via| via.stamped_from("192.0.2.10", 33000))
         .expect("the top Via reads");
     draft = draft.set(MaxForwards::new(69));
@@ -213,11 +212,11 @@ impl BlankInvite {
     pub fn build(&self) -> SipRequest {
         RequestDraft::new(Method::Invite, self.uri.clone())
             .push(self.via.clone())
-            .push(MaxForwards::new(70))
-            .push(self.from.clone())
-            .push(self.to.clone())
-            .push(self.call_id.clone())
-            .push(self.cseq.clone())
+            .set(MaxForwards::new(70))
+            .set(self.from.clone())
+            .set(self.to.clone())
+            .set(self.call_id.clone())
+            .set(self.cseq.clone())
             .push(self.contact.clone())
             .body(self.body.clone(), self.content_type.clone())
             .freeze()

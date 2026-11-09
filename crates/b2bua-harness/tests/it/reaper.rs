@@ -406,12 +406,12 @@ async fn wedged_setup_is_aborted_and_reaped() {
         .tune(|c| {
             c.reaper_idle_max_sec = 60;
             c.reaper_sweep_interval_sec = 30;
-            // Disable the ADR-0022 decision deadline: this test exercises the
-            // reaper's abort-escalation ladder, which needs a GENUINELY wedged
-            // decision await (with the deadline on, NeverDecide would simply
-            // 503 at 5 s and the ladder would never engage — that fast path is
+            // A decision deadline past the ladder: this test exercises the
+            // reaper's abort-escalation ladder, which needs a decision await
+            // still wedged at its 150 s sweep (at 5 s NeverDecide would simply
+            // 503 and the ladder would never engage — that fast path is
             // `decision_deadline.rs`'s subject).
-            c.call_control_timeout_ms = 0;
+            c.call_control_timeout_ms = 3_600_000;
         })
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;

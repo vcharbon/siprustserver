@@ -14,6 +14,8 @@ workspace = true
 
 [dependencies]
 tokio = { workspace = true }
+# The fault log's lock, recovered and counted when a panic poisons it.
+lock-poison = { path = "../lock-poison" }
 
 [dev-dependencies]
 # `start_paused` lives behind tokio's test-util feature.

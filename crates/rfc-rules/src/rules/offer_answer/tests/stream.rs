@@ -17,7 +17,7 @@ fn callee_side(msg: Msg, tag: &str) -> Msg {
 /// A reliable provisional (RFC 3262 §3) to the INVITE on dialog `to_tag`.
 fn reliable_183(at_us: u64, to_tag: &str, body: &str) -> Msg {
     Msg {
-        head: Some(head("Require: 100rel\r\nRSeq: 1\r\n", Some(body))),
+        head: Some(head(&status_line(183), "Require: 100rel\r\nRSeq: 1\r\n", Some(body))),
         ..resp_fork(at_us, 183, 1, to_tag, Some(body))
     }
 }

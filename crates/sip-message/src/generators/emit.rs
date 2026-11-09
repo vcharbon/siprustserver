@@ -85,8 +85,8 @@ pub(super) fn framed<S: StartKind>(
     if !body.is_empty() && !draft.has(&HeaderName::ContentType) {
         let media = content_type
             .unwrap_or_else(|| MediaType::new(SipStr::from_static(DEFAULT_CONTENT_TYPE)));
-        draft = draft.push(media);
+        draft = draft.set(media);
     }
     // A body past `u32` is refused at the freeze, which restates the length.
-    draft.push(ContentLength::new(u32::try_from(body.len()).unwrap_or(u32::MAX))).with_body(body)
+    draft.set(ContentLength::new(u32::try_from(body.len()).unwrap_or(u32::MAX))).with_body(body)
 }

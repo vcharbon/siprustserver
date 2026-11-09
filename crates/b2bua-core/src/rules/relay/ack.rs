@@ -159,9 +159,5 @@ pub(crate) fn acked_invite(leg: &Leg, dialog: &Dialog) -> Option<sip_message::Si
 
 /// A request re-parsed from the bytes a record keeps it as.
 pub(super) fn parse_request(bytes: &[u8]) -> Option<sip_message::SipRequest> {
-    use sip_message::SipParser;
-    match sip_message::parser::custom::CustomParser::new().parse(bytes).ok()? {
-        sip_message::SipMessage::Request(r) => Some(r),
-        _ => None,
-    }
+    crate::stored_image::request(bytes)
 }

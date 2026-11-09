@@ -3,7 +3,8 @@
 //! control byte other than HTAB stands in a value only as a quoted-pair's
 //! escaped byte: text breaking either is refused, never written. Caller text
 //! carries no NUL at all, so no peer reading a value up to its first NUL
-//! reads another value than the one written. A caller holding text from
+//! reads another value than the one written. A header line is also held to
+//! what the next hop's ingress reads ([`header_line`]). A caller holding text from
 //! outside the stack checks it here and skips what is refused; a draft
 //! refuses to freeze with a line it could not write whole, whichever writer
 //! carried it ([`crate::draft::IncompleteDraft::Unwritable`]).
@@ -11,8 +12,11 @@
 use std::fmt;
 
 use crate::char_class::is_token_char;
-use crate::control_bytes::{bare_control_byte, has_comments, is_control};
-use crate::header::HeaderName;
+use crate::control_bytes::{bare_control_byte, is_control, Escapes};
+use crate::header::{is_single_valued, HeaderName};
+use crate::parser::custom::headers::line_refusal;
+use crate::parser::{FirstIngressBound, SipParserLimits};
+use crate::types::SipHeader;
 
 /// Where a writer was asked to put text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +34,8 @@ pub enum Position {
     QuotedText,
     /// A request or status line as rendered.
     StartLine,
+    /// The lines of one header: one, for a single-valued header.
+    HeaderLines,
 }
 
 impl fmt::Display for Position {
@@ -40,6 +46,7 @@ impl fmt::Display for Position {
             Position::ReasonPhrase => "reason phrase",
             Position::QuotedText => "quoted text",
             Position::StartLine => "start line",
+            Position::HeaderLines => "header lines",
         })
     }
 }
@@ -75,18 +82,91 @@ pub fn header_name(name: &str) -> Result<(), WriteRefusal> {
 /// A header value: no NUL, and no other control byte but HTAB outside a
 /// quoted-pair of a quoted-string.
 pub fn header_value(value: &str) -> Result<(), WriteRefusal> {
-    value_refusal(value, false).map_or(Ok(()), |reason| Err(refusal(Position::HeaderValue, reason)))
+    value_refusal(value, Escapes::of(None))
+        .map_or(Ok(()), |reason| Err(refusal(Position::HeaderValue, reason)))
 }
 
-/// One header line: [`header_name`] and [`header_value`], a comment of a
-/// header whose grammar has one carrying quoted-pairs too.
+/// One header line: [`header_name`], its value holding a quoted-pair only in
+/// a quoted-string or comment its header's grammar has, and nothing the
+/// ingress of a next hop refuses: a line past the datagram and a value a gate
+/// of its known header refuses (ADR-0001).
 pub fn header_line(name: &str, value: &str) -> Result<(), WriteRefusal> {
+    line_within(name, value, SipParserLimits::DEFAULT.max_header_length)
+}
+
+/// [`header_line`] on a new request (one with no To-tag), which its next hop
+/// reads at first ingress: the line held to `bound` too.
+pub fn new_request_line(
+    name: &str,
+    value: &str,
+    bound: &FirstIngressBound,
+) -> Result<(), WriteRefusal> {
+    line_within(name, value, bound.header_length)
+}
+
+fn line_within(name: &str, value: &str, max_length: usize) -> Result<(), WriteRefusal> {
     header_name(name)?;
-    let comments = HeaderName::known(name).is_some_and(|known| has_comments(&known));
-    match value_refusal(value, comments) {
+    let reason = value_refusal(value, Escapes::of(HeaderName::known(name).as_ref()))
+        .or_else(|| Some(line_refusal(name, value, max_length)?.reason));
+    match reason {
         Some(reason) => Err(refusal(Position::HeaderValue, format!("{name}: {reason}"))),
         None => Ok(()),
     }
+}
+
+/// Every line a writer states for one header: at most one of a single-valued
+/// header ([`repeated_single`]), and each a [`header_line`], or a
+/// [`new_request_line`] under `first_ingress` on a new request.
+pub fn header_lines<S: AsRef<str>>(
+    name: &str,
+    values: &[S],
+    first_ingress: Option<&FirstIngressBound>,
+) -> Result<(), WriteRefusal> {
+    if let Some(refused) = repeated_single(name, values.len()) {
+        return Err(refused);
+    }
+    values.iter().try_for_each(|value| match first_ingress {
+        Some(bound) => new_request_line(name, value.as_ref(), bound),
+        None => header_line(name, value.as_ref()),
+    })
+}
+
+/// The refusal of `count` lines stated for the header `name` names when it is
+/// single-valued (`header::SINGLE_VALUED`, RFC 3261 §7.3.1): a writer leaves
+/// every one of them out, as though none was stated (ADR-0053 §7).
+pub fn repeated_single(name: &str, count: usize) -> Option<WriteRefusal> {
+    (count > 1 && is_single_valued(&HeaderName::from(name))).then(|| {
+        refusal(Position::HeaderLines, format!("{name} is single-valued, {count} lines stated"))
+    })
+}
+
+/// `lines` without every line of a single-valued header they state more than
+/// once, names compared as the header they name (casing and compact forms
+/// counted), each such header's refusal pushed onto `skipped`
+/// ([`repeated_single`]).
+pub fn one_line_each(lines: Vec<SipHeader>, skipped: &mut Vec<WriteRefusal>) -> Vec<SipHeader> {
+    let mut stated: Vec<(HeaderName, usize)> = Vec::new();
+    for line in &lines {
+        let name = HeaderName::from(line.name.as_str());
+        if !is_single_valued(&name) {
+            continue;
+        }
+        match stated.iter_mut().find(|(seen, _)| seen.matches(&line.name)) {
+            Some((_, count)) => *count += 1,
+            None => stated.push((name, 1)),
+        }
+    }
+    let mut refused: Vec<HeaderName> = Vec::new();
+    for (name, count) in stated {
+        if let Some(refusal) = repeated_single(name.as_wire_str(), count) {
+            skipped.push(refusal);
+            refused.push(name);
+        }
+    }
+    if refused.is_empty() {
+        return lines;
+    }
+    lines.into_iter().filter(|line| !refused.iter().any(|name| name.matches(&line.name))).collect()
 }
 
 /// A reason phrase: any text but a control byte other than HTAB.
@@ -108,19 +188,19 @@ pub fn quoted_text(text: &str) -> Result<(), WriteRefusal> {
 
 /// Why caller text cannot be a header value: a NUL, or a control byte outside
 /// a quoted-pair.
-fn value_refusal(value: &str, comments: bool) -> Option<String> {
+fn value_refusal(value: &str, escapes: Escapes) -> Option<String> {
     let at = value
         .bytes()
         .position(|b| b == 0)
-        .or_else(|| bare_control_byte(value.as_bytes(), comments))?;
+        .or_else(|| bare_control_byte(value.as_bytes(), escapes))?;
     Some(byte_reason(value, at))
 }
 
 /// Why a rendered header value cannot be written: a control byte outside a
 /// quoted-pair, CR and LF included. The check a freeze runs on every header
 /// line it renders, relayed ones too: a quoted-pair a peer sent passes.
-pub(crate) fn rendered_value(text: &[u8], comments: bool) -> Option<String> {
-    let at = bare_control_byte(text, comments)?;
+pub(crate) fn rendered_value(text: &[u8], escapes: Escapes) -> Option<String> {
+    let at = bare_control_byte(text, escapes)?;
     Some(byte_reason(&String::from_utf8_lossy(text), at))
 }
 
@@ -143,6 +223,7 @@ fn byte_reason(text: &str, at: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sip_str::SipStr;
 
     #[test]
     fn a_header_name_is_a_token() {
@@ -169,6 +250,37 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_pair_stands_only_where_the_header_quotes() {
+        assert!(header_line("X-Note", "\"a \\\x07 b\"").is_ok());
+        assert!(header_line("Organization", "\"a \\\x07 b\"").is_err());
+        assert!(header_line("Server", "\"a \\\x07 b\"").is_err());
+    }
+
+    /// A value the next hop's ingress refuses is no line a writer sends.
+    #[test]
+    fn a_line_ingress_refuses_is_refused() {
+        assert!(header_line("Expires", "3600").is_ok());
+        for (name, value) in [
+            ("Expires", "soon"),
+            ("Min-SE", "ninety"),
+            ("Content-Disposition", ""),
+            ("Event", "a b"),
+            ("Warning", "399 host \"open"),
+        ] {
+            assert!(header_line(name, value).is_err(), "{name}: {value}");
+        }
+        let bound = FirstIngressBound::DEFAULT;
+        let long = "x".repeat(bound.header_length - "X-Long: ".len());
+        let past = format!("{long}x");
+        assert!(new_request_line("X-Long", &long, &bound).is_ok(), "at the first-ingress bound");
+        assert!(new_request_line("X-Long", &past, &bound).is_err(), "one past it");
+        assert!(header_line("X-Long", &past).is_ok(), "past first ingress, the datagram bounds");
+        let tight = FirstIngressBound { header_length: 64, ..bound };
+        assert!(new_request_line("X-Long", &"x".repeat(60), &tight).is_err(), "the bound stated");
+        assert!(header_line("X-Long", &"x".repeat(65_535)).is_err(), "past the datagram");
+    }
+
+    #[test]
     fn a_line_refusal_names_the_header() {
         let e = header_line("X-A", "a\r\nb").expect_err("refused");
         assert_eq!(e.position, Position::HeaderValue);
@@ -176,12 +288,47 @@ mod tests {
     }
 
     #[test]
+    fn a_single_valued_header_takes_one_line() {
+        assert!(header_lines("Subject", &["one"], None).is_ok());
+        assert!(header_lines("X-Note", &["one", "two"], None).is_ok());
+        let e = header_lines("s", &["one", "two"], None).expect_err("Subject twice");
+        assert_eq!(e.position, Position::HeaderLines);
+        assert!(header_lines("X-A", &["a", "b\r\n"], None).is_err());
+        let bound = FirstIngressBound { header_length: 8, ..FirstIngressBound::DEFAULT };
+        assert!(header_lines("X-A", &["a"], Some(&bound)).is_ok());
+        assert!(header_lines("X-A", &["a long value"], Some(&bound)).is_err());
+    }
+
+    #[test]
+    fn every_line_of_a_single_valued_header_stated_twice_is_left_out() {
+        let line = |n: &str, v: &str| SipHeader::new(SipStr::owned(n), SipStr::owned(v));
+        let lines = vec![
+            line("Subject", "one"),
+            line("X-Note", "a"),
+            line("s", "two"),
+            line("X-Note", "b"),
+            line("subject", "three"),
+            line("Expires", "60"),
+        ];
+        let mut skipped = Vec::new();
+        let kept = one_line_each(lines, &mut skipped);
+        let names: Vec<&str> = kept.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["X-Note", "X-Note", "Expires"]);
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert_eq!(skipped[0].position, Position::HeaderLines);
+        assert!(skipped[0].reason.contains("3 lines"), "{}", skipped[0]);
+    }
+
+    #[test]
     fn a_freeze_finds_every_bare_control_byte() {
         for bad in [&b"a\0b"[..], b"a\rb", b"a\nb", b"a\x07b", b"\"a\\\r\""] {
-            assert!(rendered_value(bad, false).is_some(), "{bad:?}");
+            assert!(rendered_value(bad, Escapes::of(None)).is_some(), "{bad:?}");
             assert!(rendered_start_line(bad).is_some(), "{bad:?}");
         }
-        assert!(rendered_value(b"\"a\\\0b\"", false).is_none(), "a quoted-pair a peer sent");
+        assert!(
+            rendered_value(b"\"a\\\0b\"", Escapes::of(None)).is_none(),
+            "a quoted-pair a peer sent"
+        );
         assert!(rendered_start_line(b"SIP/2.0 200 O\tK").is_none());
     }
 }

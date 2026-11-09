@@ -6,16 +6,21 @@
 //! Strict, allocation-free pre-parse *classifiers* (overload brake, dispatcher fast-path) live
 //! in [`crate::preparse`] and its sibling modules.
 
+mod description;
 mod except;
 mod identity;
+mod reliability;
 mod uri_facts;
 mod via_hops;
 mod via_stamp;
+pub use description::session_description;
 pub use except::{equal_except, header_row_spans, line_at, Except};
 pub use identity::{identity, Identity};
+pub use reliability::{rack_cseq, rack_rseq, require_has_100rel, rseq_of};
 use std::borrow::Cow;
+use std::ops::ControlFlow;
 pub use uri_facts::UriFacts;
-pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};
+pub use via_hops::{bottom_via, top_via, via_rport, OriginVia, ViaRport};
 pub use via_stamp::relay_stamp_spans;
 
 use crate::char_class::is_token_char;
@@ -195,36 +200,6 @@ fn cseq_line(raw: &[u8]) -> Option<String> {
     None
 }
 
-/// Whether a `Require` header lists the `100rel` option-tag (comma-folded,
-/// case-insensitive) — the reliable-provisional marker (RFC 3262 §3). `Require`
-/// has no compact form.
-pub fn require_has_100rel(raw: &[u8]) -> bool {
-    header_value(raw, "require")
-        .is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("100rel")))
-}
-
-/// The `RSeq` value of a reliable provisional (RFC 3262 §3), or `None`.
-pub fn rseq_of(raw: &[u8]) -> Option<u64> {
-    header_value(raw, "rseq")?.trim().parse().ok()
-}
-
-/// The RAck response-num (its FIRST token = the acknowledged 1xx's RSeq,
-/// RFC 3262 §7.2) of a PRACK, or `None`.
-pub fn rack_rseq(raw: &[u8]) -> Option<u64> {
-    header_value(raw, "rack")?.split_whitespace().next()?.parse().ok()
-}
-
-/// The RAck CSeq-num (its SECOND token = the sequence number of the INVITE the
-/// acknowledged provisional answered, RFC 3262 §7.2) of a PRACK, or `None`.
-///
-/// `RAck` names its target by three fields, and the response-num alone does
-/// not: two INVITEs on one dialog number their `RSeq` spaces independently, so
-/// a reader joining a PRACK to the provisional it acknowledges needs this one
-/// too.
-pub fn rack_cseq(raw: &[u8]) -> Option<u32> {
-    header_value(raw, "rack")?.split_whitespace().nth(1)?.parse().ok()
-}
-
 /// Selective intake-shed classifier: whether a raw datagram is a NEW-DIALOG,
 /// NON-EMERGENCY INVITE — the only class a depth-watermarked pre-ingress hook
 /// may drop under overload. Called per-datagram at the socket pump, zero
@@ -358,7 +333,7 @@ pub fn via_branches(raw: &[u8]) -> Vec<String> {
 
 /// Every row of `name`, resolving the RFC 3261 §7.3.3 compact spelling: a
 /// scanner asked for `Supported` also reads the `k` rows the wire may carry.
-fn header_rows_compact(raw: &[u8], name: &str) -> Vec<String> {
+pub(super) fn header_rows_compact(raw: &[u8], name: &str) -> Vec<String> {
     let s = as_str(raw);
     let mut out = Vec::new();
     for line in s.lines() {
@@ -401,10 +376,8 @@ pub fn has_body(raw: &[u8]) -> bool {
     }
 }
 
-/// Whether the message's `Content-Type` (compact `c`) NAMES `media_type` — the
-/// read for a rule that judges a body only under the format it was declared as.
-/// Comparison is on the media type alone: the value's parameters
-/// (`;charset=…`, `;boundary=…`) neither hide it nor make another one match.
+/// Whether the message's `Content-Type` (compact `c`) NAMES `media_type`, its
+/// parameters aside: the read for a rule judging a body under its declared type.
 pub fn content_type_is(raw: &[u8], media_type: &str) -> bool {
     use crate::header::{HeaderValue, MediaType};
     header_rows_compact(raw, "Content-Type").iter().any(|row| {
@@ -431,15 +404,11 @@ pub fn body(raw: &[u8]) -> Option<&[u8]> {
 /// ends the head at the same byte and then refuses it.
 pub fn head_end(raw: &[u8]) -> Option<usize> {
     let at = |i: usize| raw.get(i).copied();
-    let mut i = 0;
-    loop {
-        if i >= raw.len() {
-            return None;
-        }
-        let line_start = i;
-        while at(i).is_some_and(|b| b != b'\r' && b != b'\n') {
-            i += 1;
-        }
+    let end = crate::cursor::walk(raw, 0, |line_start| {
+        let Some(rest) = raw.get(line_start..).filter(|rest| !rest.is_empty()) else {
+            return ControlFlow::Break(None);
+        };
+        let mut i = line_start + rest.iter().take_while(|&&b| b != b'\r' && b != b'\n').count();
         let empty = i == line_start;
         if at(i) == Some(b'\r') {
             i += 1;
@@ -448,12 +417,12 @@ pub fn head_end(raw: &[u8]) -> Option<usize> {
             i += 1;
         }
         if empty {
-            return Some(i);
+            ControlFlow::Break(Some(i))
+        } else {
+            ControlFlow::Continue(i)
         }
-        if i == line_start {
-            return None;
-        }
-    }
+    });
+    end.ok().flatten()
 }
 
 /// The option tags a set-like header lists (`Require`, `Supported`,
@@ -560,10 +529,9 @@ pub fn route_rows(raw: &[u8], name: &str) -> Vec<RouteRow> {
     use crate::header::{HeaderValue, RouteEntry};
     let mut out = Vec::new();
     let mut pos = 0;
-    while let Some(rest) = raw.get(pos..).filter(|rest| !rest.is_empty()) {
-        let line_end = rest.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| pos + p);
-        let next = (line_end + 1).min(raw.len());
-        let Some(line) = raw.get(pos..line_end).map(as_str) else { break };
+    for row in raw.split_inclusive(|&b| b == b'\n') {
+        let next = pos + row.len();
+        let line = as_str(row.strip_suffix(b"\n").unwrap_or(row));
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
             break; // end of headers

@@ -6,17 +6,72 @@
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::name::HeaderName;
-use super::params::{parse_semicolon_params, ParamValue, Params, HEADER_PARAMS};
-use super::scan::{scan_until, skip_ws, sub, sub_trimmed};
+use super::cardinality::{held_to_the_table, lines};
+use super::name::HeaderId;
+use super::params::{read_params, ParamReading, ParamValue, Params};
+use super::reading::Reading;
+use super::scan::{byte_at, scan_until, skip_ws, sub, sub_trimmed, token_end};
+use super::single_valued::Listed;
 use super::uri::{read_sent_by, HostPort};
-use super::value::{Folding, HeaderValue};
+use super::value::HeaderValue;
 use super::wire::Wire;
-use crate::ip_literal::ip_host;
+use crate::ip_literal::{ip_host, same_host};
+use crate::parser::custom::structured_headers::top_level_comma_entries;
 
 /// The RFC 3261 §8.1.1.7 magic cookie every branch this stack emits starts
 /// with.
 pub const BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
+
+/// Whether `branch` starts with the magic cookie, compared ignoring ASCII case
+/// as every branch is (RFC 3261 §7.3.1: `via-branch` states no exception).
+pub fn has_magic_cookie(branch: &str) -> bool {
+    branch
+        .get(..BRANCH_MAGIC_COOKIE.len())
+        .is_some_and(|lead| lead.eq_ignore_ascii_case(BRANCH_MAGIC_COOKIE))
+}
+
+/// Whether two branches name one transaction: compared ignoring ASCII case
+/// (RFC 3261 §7.3.1, §17.1.3, §17.2.3).
+pub fn same_branch(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// Feeds `branch` to `state` as [`same_branch`] compares it, so two branches
+/// that are one hash alike.
+pub fn hash_branch<H: std::hash::Hasher>(branch: &str, state: &mut H) {
+    fold_branch(branch, |chunk| state.write(chunk));
+    state.write_u8(0xff);
+}
+
+/// Hands `branch` to `feed` folded to lower case, chunk by chunk, folded on
+/// the stack: what a digest of a branch reads, as [`same_branch`] compares.
+pub fn fold_branch(branch: &str, mut feed: impl FnMut(&[u8])) {
+    let mut room = [0u8; 64];
+    for chunk in branch.as_bytes().chunks(room.len()) {
+        let Some(folded) = room.get_mut(..chunk.len()) else { return };
+        for (slot, byte) in folded.iter_mut().zip(chunk) {
+            *slot = byte.to_ascii_lowercase();
+        }
+        feed(folded);
+    }
+}
+
+/// `branch` folded to lower case as one byte string: in `room` when it fits,
+/// allocated only past it.
+pub fn folded_branch<'r, const N: usize>(
+    branch: &str,
+    room: &'r mut [u8; N],
+) -> std::borrow::Cow<'r, [u8]> {
+    match room.get_mut(..branch.len()) {
+        Some(folded) => {
+            for (slot, byte) in folded.iter_mut().zip(branch.bytes()) {
+                *slot = byte.to_ascii_lowercase();
+            }
+            std::borrow::Cow::Borrowed(folded)
+        }
+        None => std::borrow::Cow::Owned(branch.to_ascii_lowercase().into_bytes()),
+    }
+}
 
 /// The parameter names a router writes, spelled once so stamping a hop copies
 /// no name text.
@@ -67,17 +122,6 @@ impl Via {
         Self::new(SipStr::from_static("TLS"), HostPort::new(host, Some(port)))
     }
 
-    /// Assemble from already-scanned parts — the parser's seam.
-    pub(crate) fn from_parts(
-        protocol: SipStr,
-        version: SipStr,
-        transport: SipStr,
-        sent_by: HostPort,
-        params: Params,
-    ) -> Self {
-        Self { protocol, version, transport, sent_by, params }
-    }
-
     pub fn protocol(&self) -> &str {
         self.protocol.as_str()
     }
@@ -120,9 +164,9 @@ impl Via {
         self.params.value("branch")
     }
 
-    /// Whether the branch carries the RFC 3261 magic cookie.
+    /// Whether the branch carries the RFC 3261 magic cookie, in any case.
     pub fn is_rfc3261_branch(&self) -> bool {
-        self.branch().is_some_and(|b| b.starts_with(BRANCH_MAGIC_COOKIE))
+        self.branch().is_some_and(has_magic_cookie)
     }
 
     /// The source address the previous hop was seen from (RFC 3261 §18.2.1).
@@ -143,7 +187,8 @@ impl Via {
 
     /// The address a response to this hop is actually sent to: `received` (and
     /// an observed `rport`) override the sent-by (RFC 3261 §18.2.2, RFC 3581).
-    /// A `received` that is no IP address (§25.1) is no target.
+    /// A `received` that is no IP address (§25.1) is no target. `maddr` chooses
+    /// no destination (ADR-0001).
     pub fn response_target(&self) -> (&str, u16) {
         let host = self.received().filter(|r| ip_host(r).is_some()).unwrap_or_else(|| self.host());
         let port = match self.rport() {
@@ -185,15 +230,10 @@ impl Via {
     /// host, the hop carries `rport` (even when they are equal), or the hop
     /// already carries a `received`; `rport` is the source port whenever the
     /// hop carries one. A value the sender wrote in either is never kept.
-    /// Two IP literals differ as addresses, an IPv4-mapped IPv6 address being
-    /// its IPv4 address; anything else as text.
+    /// Hosts differ as [`same_host`] tells them.
     pub fn stamped_from(mut self, source_host: &str, source_port: u16) -> Self {
         let rport_asked = self.params.get(RPORT.as_str()).is_some();
-        let same_host = match (ip_host(self.host()), ip_host(source_host)) {
-            (Some(sent_by), Some(source)) => sent_by.to_canonical() == source.to_canonical(),
-            _ => self.host() == source_host,
-        };
-        if rport_asked || self.received().is_some() || !same_host {
+        if rport_asked || self.received().is_some() || !same_host(self.host(), source_host) {
             self = self.with_received(SipStr::owned(source_host));
         }
         if rport_asked {
@@ -203,58 +243,104 @@ impl Via {
     }
 }
 
-impl HeaderValue for Via {
-    fn header_name() -> HeaderName {
-        HeaderName::Via
+impl Via {
+    /// Read one Via entry (RFC 3261 §20.42, §25.1): `sent-protocol LWS
+    /// sent-by *( SEMI via-params )`, `sent-protocol = protocol-name SLASH
+    /// protocol-version SLASH transport`, each a token, the via-params held to
+    /// `generic-param` with `branch` a token and `received` also an
+    /// unbracketed `IPv6address`. [`Reading::Lenient`] keeps what it can: an
+    /// empty part, a sent-by no host reader takes held whole, the parameters
+    /// read on past a byte off their grammar.
+    pub(crate) fn read(raw: &SipStr, reading: Reading) -> Result<Self, SipParseError> {
+        let value = raw.trimmed();
+        let strict = reading == Reading::Strict;
+        let refused =
+            |reason: &str| SipParseError::new(format!("Via {reason}: {:?}", value.as_str()));
+        let bytes = value.as_bytes();
+        let (protocol, i) = protocol_part(&value, 0, reading, false);
+        if strict && protocol.is_empty() {
+            return Err(refused("has an empty protocol-name"));
+        }
+        if strict && byte_at(bytes, i) != Some(b'/') {
+            return Err(refused("has no `/` after its protocol-name"));
+        }
+        let (version, i) = protocol_part(&value, i + 1, reading, false);
+        if strict && version.is_empty() {
+            return Err(refused("has an empty protocol-version"));
+        }
+        if strict && byte_at(bytes, i) != Some(b'/') {
+            return Err(refused("has no `/` after its protocol-version"));
+        }
+        let (transport, after_transport) = protocol_part(&value, i + 1, reading, true);
+        if strict && transport.is_empty() {
+            return Err(refused("has an empty transport"));
+        }
+        let host_at = skip_ws(bytes, after_transport);
+        if strict && host_at == after_transport {
+            return Err(refused("transport is not a token followed by LWS"));
+        }
+        let read = read_sent_by(&value, host_at).and_then(|(host, port, after)| {
+            let narrow = port.map(u16::try_from).transpose();
+            let port_text = port.map(|p| p.to_string()).unwrap_or_default();
+            narrow
+                .map(|port| (HostPort::new(host, port), after))
+                .map_err(|_| format!("port out of range: {port_text}"))
+        });
+        let (sent_by, params_at) = match read {
+            Ok(read) => read,
+            Err(reason) if strict => return Err(refused(&format!("sent-by: {reason}"))),
+            Err(_) => {
+                let end = scan_until(bytes, host_at, b";");
+                (HostPort::whole(sub_trimmed(&value, host_at, end)), end)
+            }
+        };
+        let param_reading = if strict { ParamReading::Strict } else { ParamReading::Lenient };
+        let (params, _) = read_params(&value, params_at, param_reading, Some("received"))
+            .map_err(|e| refused(&e.reason))?;
+        if strict && params.get("branch").is_some_and(|b| !matches!(b, ParamValue::Token(_))) {
+            return Err(refused("branch is not a token"));
+        }
+        Ok(Self { protocol, version, transport, sent_by, params })
     }
+}
 
-    fn folding() -> Folding {
-        Folding::Comma
+/// One part of a sent-protocol from byte `i`; yields it and the position
+/// after it. Strict, a token, the position past the LWS that follows unless it
+/// is the `last` part, whose LWS the sent-by needs; lenient, every byte up to
+/// a `/`, or LWS, `;` or `,` for the `last` part, trimmed.
+fn protocol_part(value: &SipStr, i: usize, reading: Reading, last: bool) -> (SipStr, usize) {
+    let bytes = value.as_bytes();
+    let at = skip_ws(bytes, i);
+    match reading {
+        Reading::Strict => {
+            let end = token_end(bytes, at);
+            (sub(value, at, end), if last { end } else { skip_ws(bytes, end) })
+        }
+        Reading::Lenient => {
+            let end = scan_until(bytes, at, if last { b" \t;," } else { b"/" });
+            (sub_trimmed(value, at, end), end)
+        }
     }
+}
+
+impl Via {
+    /// The first hop one Via line states, the line held as written: a line may
+    /// fold several hops with commas (RFC 3261 §7.3.1), so the first entry is
+    /// read, strictly, and the ones after it are not.
+    pub fn first_of_line(line: &SipStr) -> Result<Self, SipParseError> {
+        let first = top_level_comma_entries(line.as_str()).next().unwrap_or_default();
+        Self::parse(&line.reslice(first))
+    }
+}
+
+impl HeaderValue for Via {
+    type Lines = lines::Comma;
+    held_to_the_table!();
+
+    const HEADER: Listed = Listed::Known(HeaderId::Via);
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let value = raw.trimmed();
-        let bytes = value.as_bytes();
-        let mut i = skip_ws(bytes, 0);
-
-        let proto_end = scan_until(bytes, i, b"/");
-        if proto_end >= bytes.len() {
-            return Err(SipParseError::new(format!(
-                "Via has no sent-protocol: {:?}",
-                value.as_str()
-            )));
-        }
-        let protocol = sub_trimmed(&value, i, proto_end);
-        i = proto_end + 1;
-
-        let ver_end = scan_until(bytes, i, b"/");
-        if ver_end >= bytes.len() {
-            return Err(SipParseError::new(format!("Via has no transport: {:?}", value.as_str())));
-        }
-        let version = sub_trimmed(&value, i, ver_end);
-        i = skip_ws(bytes, ver_end + 1);
-
-        let trans_end = scan_until(bytes, i, b" \t;,");
-        let transport = sub(&value, i, trans_end);
-        if transport.is_empty() {
-            return Err(SipParseError::new(format!(
-                "Via has an empty transport: {:?}",
-                value.as_str()
-            )));
-        }
-
-        let host_at = skip_ws(bytes, trans_end);
-        let refused = |reason: String| {
-            SipParseError::new(format!("Via sent-by: {reason}: {:?}", value.as_str()))
-        };
-        let (host, port, after_host) = read_sent_by(&value, host_at).map_err(refused)?;
-        let port = port
-            .map(u16::try_from)
-            .transpose()
-            .map_err(|_| refused(format!("port out of range: {port:?}")))?;
-        let (params, _) = parse_semicolon_params(&value, after_host, &HEADER_PARAMS);
-
-        Ok(Self { protocol, version, transport, sent_by: HostPort::new(host, port), params })
+        Self::read(raw, Reading::Strict)
     }
 
     fn render(&self, out: &mut Wire) {
@@ -358,6 +444,39 @@ mod tests {
             Via::udp("proxy.example", 5080).with_branch("z9hG4bKabc").requesting_rport().to_wire(),
             "SIP/2.0/UDP proxy.example:5080;branch=z9hG4bKabc;rport"
         );
+    }
+
+    /// A line folding two hops yields its first; the whole line is no one hop.
+    #[test]
+    fn the_first_hop_of_a_folded_line_reads() {
+        let line = SipStr::owned(
+            "SIP/2.0/UDP 192.0.2.10:5070;branch=z9hG4bK-a, SIP/2.0/UDP 192.0.2.20;branch=z9hG4bK-b",
+        );
+        assert_eq!(Via::first_of_line(&line).unwrap().host_port(), ("192.0.2.10", 5070));
+        assert!(Via::parse(&line).is_err());
+    }
+
+    /// The one reader holds a hop to §25.1 whole: the transport a token then
+    /// LWS, the branch a token, every parameter once, nothing after them.
+    #[test]
+    fn a_hop_off_the_grammar_is_refused() {
+        for raw in [
+            "SIP/2.0/UDP/foo 192.0.2.11;branch=z9hG4bK-b",
+            "SIP/2.0/X(y) 192.0.2.11;branch=z9hG4bK-b",
+            "SIP/2.0/UDP 192.0.2.10;branch=z9hG4bK-a garbage;rport",
+            "SIP/2.0/UDP 192.0.2.10;branch=\"z9hG4bK-a\"",
+            "SIP/2.0/UDP 192.0.2.10;branch=z9hG4bK-a;branch=z9hG4bK-a",
+            "SIP/2.0/UDP 192.0.2.10;branch=z9hG4bK-a;x=\"abc",
+            "SIP/2.0/UDP 192.0.2.10;branch=z9hG4bK-a;a(b=c",
+        ] {
+            assert!(Via::parse(&SipStr::owned(raw)).is_err(), "{raw}");
+        }
+        let lenient = Via::read(
+            &SipStr::owned("SIP/2.0/UDP 192.0.2.10;branch=z9hG4bK-a garbage;rport"),
+            Reading::Lenient,
+        )
+        .unwrap();
+        assert_eq!(lenient.rport(), Some(Rport::Requested));
     }
 
     #[test]

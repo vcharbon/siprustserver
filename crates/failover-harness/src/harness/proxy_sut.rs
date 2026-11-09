@@ -30,9 +30,9 @@ pub struct ProxySut {
     ///
     /// [`FailoverHarness::spawn_proxy_with_health_probe`]: super::FailoverHarness::spawn_proxy_with_health_probe
     pub(super) probe_task: Option<JoinHandle<()>>,
-    /// The dead notifier (ADR-0050 §3): each dead verdict a health write
-    /// makes is told to the other alive workers; `None` for a proxy that tells
-    /// none. Aborted on drop.
+    /// The dead notifier (ADR-0050 §3): each dead verdict of the registry, a
+    /// health write's or an endpoint flip's, is told to the other alive
+    /// workers; `None` for a proxy that tells none. Aborted on drop.
     pub(super) notices: Option<JoinHandle<()>>,
     /// The node the proxy serves: its tasks run under it, and every registry
     /// change the scenario drives is lined as it.
@@ -75,6 +75,12 @@ impl ProxySut {
     /// Mark a worker's acceptance of new calls (e.g. `Refuse` on a drain).
     pub fn set_acceptance(&self, ordinal: &str, acceptance: Acceptance) {
         self.node.enter(|| self.registry.set_acceptance(ordinal, acceptance));
+    }
+
+    /// Show this proxy a worker's endpoint conditions: for a proxy beside the
+    /// one the harness's membership verbs drive, which read the same slice.
+    pub fn set_endpoint_conditions(&self, ordinal: &str, ready: bool, terminating: bool) {
+        self.node.enter(|| self.registry.set_conditions(ordinal, ready, terminating));
     }
 
     /// The proxy's CURRENT acceptance view of a worker.
@@ -130,6 +136,11 @@ impl ProxySut {
     /// probe (rather than asserting it via `set_health`).
     pub fn health(&self, ordinal: &str) -> Option<WorkerHealth> {
         self.registry.resolve(ordinal).map(|w| w.health)
+    }
+
+    /// The health the proxy's probe holds for a worker, routed or not.
+    pub fn probed_health(&self, ordinal: &str) -> Option<WorkerHealth> {
+        self.registry.probed().into_iter().find(|w| w.id == ordinal).map(|w| w.health)
     }
 
     /// The `(primary, backup)` the proxy places a new call with `call_id` on

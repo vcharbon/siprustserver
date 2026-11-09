@@ -19,12 +19,14 @@ mod branch_memo;
 mod intake;
 mod overload;
 mod parse;
+mod rejects;
 pub use branch_memo::{BRANCH_MEMO, BRANCH_MEMO_BYTES, BRANCH_MEMO_EVICTIONS};
 pub use intake::{INTAKE_SHED, INTAKE_UNANSWERABLE};
 pub use overload::{
     LB_EMERGENCY_BYPASSED, LB_RATE_CAP_SPILLED, OVERLOAD_REJECTIONS, WORKER_STALE_DECREASE,
 };
 pub use parse::{PARSE_ERRORS, PARSE_PANICS, PARSE_REFUSALS_ANSWERED, PARSE_REFUSALS_CAPPED};
+pub use rejects::REJECTS;
 
 /// `direction:result`, every direction then every result.
 const MESSAGE_LABELS: [&str; Direction::ALL.len() * MessageResult::ALL.len()] = [
@@ -81,27 +83,6 @@ const UNTRUSTED_CLAIM_VALUES: [&str; 5] =
 const CANCEL_LOOKUP_VALUES: [&str; 2] = label_values!(CancelLookup::ALL, CancelLookup::as_str);
 
 const NO_TARGET_DROP_VALUES: [&str; 3] = label_values!(NoTargetDrop::ALL, NoTargetDrop::as_str);
-
-/// Every locally decided reject: the routing path's own, the load
-/// balancer's selection failures, the self gate's.
-const REJECT_REASONS: [&str; 16] = [
-    "drop_unforwardable",
-    "no_target_dropped",
-    "non_request",
-    "ack_not_answered",
-    "ack_max_forwards_exhausted",
-    "too_many_hops",
-    "ack_proxy_require_unsupported",
-    "proxy_require_unsupported",
-    "malformed_request_uri",
-    "unsupported_uri_scheme",
-    "stickiness_decode_rejected",
-    "no_target_selected",
-    "no_target_available",
-    "worker_rate_capped",
-    ShedReason::IntakeAge.label(),
-    ShedReason::Cps.label(),
-];
 
 const SHED_REASON_VALUES: [&str; 2] = label_values!(ShedReason::ALL, ShedReason::label);
 
@@ -198,12 +179,6 @@ pub const ROUTING_DECISION: Family = Family::counter(
     "sip_routing_decision_total",
     Labels::Product(&[ROUTING_KIND]),
     "Routing decisions by kind.",
-);
-
-pub const REJECTS: Family = Family::counter(
-    "sip_proxy_rejects_total",
-    Labels::Product(&[Dim::new("reason", &REJECT_REASONS)]),
-    "Locally decided rejects by reason (the per-cause split of sip_routing_decision_total kind=reject).",
 );
 
 pub const HMAC_FAILURES: Family = Family::counter(
@@ -321,6 +296,12 @@ pub const EXTERNAL_FACE_USABLE: Family = Family::gauge(
     "sip_proxy_external_face_usable",
     Labels::None,
     "1 while the external interface is up and one of its next hops is not FAILED in the neighbour table, or no face check is set; 0 flips /readyz and withdraws the node's announcements.",
+);
+
+pub const ROUTING_ON_ANSWERS: Family = Family::gauge(
+    "sip_proxy_routing_on_answers",
+    Labels::None,
+    "1 while no worker endpoint reads ready in the slice and the proxy routes on the workers' OPTIONS answers instead.",
 );
 
 pub const WORKER_POOL_EMPTY: Family = Family::gauge(
@@ -466,6 +447,7 @@ pub const PROXY: &[Family] = &[
     INTAKE_UNANSWERABLE,
     RECV_SHARDS_STALLED,
     EXTERNAL_FACE_USABLE,
+    ROUTING_ON_ANSWERS,
     WORKER_POOL_EMPTY,
     DISCOVERY_NO_CLIENT,
     DISCOVERY_WATCH_BROKEN_SINCE,

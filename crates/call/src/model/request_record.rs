@@ -275,10 +275,11 @@ impl RequestRecord {
     /// for `method`, on the client transaction `branch`, answers: a record
     /// holding its sent transaction by that transaction's branch (RFC 3261
     /// §17.1.3), so a final to another request reusing the number answers
-    /// nothing here; one holding none by its number.
+    /// nothing here; one holding none by its number. A branch compares
+    /// ignoring case (§7.3.1).
     pub fn answered_by(&self, method: &str, cseq: i64, branch: Option<&str>) -> bool {
         let transaction = match &self.sent {
-            Some(sent) => branch == Some(sent.branch.as_str()),
+            Some(sent) => branch.is_some_and(|b| b.eq_ignore_ascii_case(&sent.branch)),
             None => true,
         };
         self.awaits_final() && transaction && self.outbound_cseq == cseq && self.method == method

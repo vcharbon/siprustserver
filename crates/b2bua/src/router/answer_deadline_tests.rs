@@ -165,6 +165,7 @@ fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::Handl
         owners: Default::default(),
     };
     rule_chain_turn(&node.core.router_ctx().framework(), call, input, &mut scope)
+        .expect("the turn crosses no cap")
 }
 
 /// The outcome the probe's rules read, if any rule read an answer.

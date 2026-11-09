@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use b2bua_sdk::header_update::SipHeaderUpdates;
 use call::helpers::{mark_decision, set_call_ext};
 use call::{Call, DecisionKind, TerminationCause};
-use sip_ids::TurnIds;
 use sip_message::generators::CapabilitySet;
 use sip_message::SipRequest;
 
@@ -44,7 +43,6 @@ pub(crate) fn apply_reject(
     leg_id: Option<String>,
     a_invite: &SipRequest,
     advertisement: &CapabilitySet,
-    ids: &mut TurnIds,
     now_ms: i64,
 ) -> HandlerResult {
     mark_decision(&mut call, now_ms, kind, leg_id, reject.label);
@@ -59,7 +57,6 @@ pub(crate) fn apply_reject(
             reject.update_headers.as_ref(),
             &[],
             advertisement,
-            ids,
             now_ms,
             TerminationCause::Admission,
         );
@@ -72,7 +69,6 @@ pub(crate) fn apply_reject(
         reject.update_headers.as_ref(),
         &[],
         advertisement,
-        ids,
         now_ms,
         TerminationCause::DecisionReject,
     )
@@ -106,7 +102,6 @@ pub(crate) fn apply_redirect(
     leg_id: Option<String>,
     a_invite: &SipRequest,
     advertisement: &CapabilitySet,
-    ids: &mut TurnIds,
     now_ms: i64,
 ) -> HandlerResult {
     mark_decision(&mut call, now_ms, kind, leg_id, redirect.label);
@@ -121,7 +116,6 @@ pub(crate) fn apply_redirect(
             redirect.update_headers.as_ref(),
             &[],
             advertisement,
-            ids,
             now_ms,
             TerminationCause::Admission,
         );
@@ -134,7 +128,6 @@ pub(crate) fn apply_redirect(
         redirect.update_headers.as_ref(),
         &redirect.contacts,
         advertisement,
-        ids,
         now_ms,
         TerminationCause::DecisionReject,
     )
@@ -152,7 +145,6 @@ pub(crate) fn stated_refusal(
     update_headers: Option<&SipHeaderUpdates>,
     a_invite: &SipRequest,
     advertisement: &CapabilitySet,
-    ids: &mut TurnIds,
     now_ms: i64,
 ) -> HandlerResult {
     let (code, reason) = if is_reject_code(code) {
@@ -169,7 +161,6 @@ pub(crate) fn stated_refusal(
         update_headers,
         &[],
         advertisement,
-        ids,
         now_ms,
         TerminationCause::Admission,
     )

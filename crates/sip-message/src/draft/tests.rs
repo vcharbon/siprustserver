@@ -55,11 +55,11 @@ fn a_blank_draft_names_every_header_it_still_needs() {
 fn a_blank_draft_builds_a_message_that_reparses_to_itself() {
     let frozen = RequestDraft::new(Method::Options, Uri::sip("biloxi.com"))
         .push(Via::udp("atlanta.com", 5060).with_branch("z9hG4bKopt"))
-        .push(header::MaxForwards::new(70))
-        .push(header::From::from_uri(Uri::sip_user("alice", "atlanta.com")).with_tag("t1"))
-        .push(header::To::from_uri(Uri::sip_user("bob", "biloxi.com")))
-        .push(header::CallId::new("call-1@atlanta.com"))
-        .push(header::CSeq::new(1, Method::Options))
+        .set(header::MaxForwards::new(70))
+        .set(header::From::from_uri(Uri::sip_user("alice", "atlanta.com")).with_tag("t1"))
+        .set(header::To::from_uri(Uri::sip_user("bob", "biloxi.com")))
+        .set(header::CallId::new("call-1@atlanta.com"))
+        .set(header::CSeq::new(1, Method::Options))
         .freeze()
         .expect("every mandatory header is present");
 
@@ -172,7 +172,7 @@ fn freeze_bytes_is_the_frozen_message_without_the_message() {
 #[test]
 fn prepending_a_header_the_draft_lacks_appends_it() {
     let draft = RequestDraft::new(Method::Options, Uri::sip("biloxi.com"))
-        .push(header::CallId::new("call-1@atlanta.com"))
+        .set(header::CallId::new("call-1@atlanta.com"))
         .prepend(Via::udp("atlanta.com", 5060).with_branch("z9hG4bKopt"));
     let names: Vec<&HeaderName> = draft.entries().iter().map(|e| e.name()).collect();
     assert_eq!(names, [&HeaderName::CallId, &HeaderName::Via]);
@@ -228,10 +228,10 @@ fn a_response_draft_rides_the_same_engine() {
     let request = invite();
     let response = ResponseDraft::new(180, "Ringing")
         .push_raw(HeaderName::Via, request.raw(HeaderName::Via).next().unwrap().to_owned())
-        .push(request.from().clone())
-        .push(request.to().clone().with_tag("b0b"))
-        .push(request.call_id().clone())
-        .push(request.cseq().clone())
+        .set(request.from().clone())
+        .set(request.to().clone().with_tag("b0b"))
+        .set(request.call_id().clone())
+        .set(request.cseq().clone())
         .freeze()
         .expect("a response needs no Max-Forwards");
 
@@ -254,7 +254,7 @@ fn an_untouched_entry_is_never_reparsed() {
 #[test]
 fn a_draft_reads_its_own_typed_values() {
     let draft = invite().thaw();
-    let supported = draft.header::<header::Supported>().expect("present").expect("reads");
+    let supported = draft.token_set::<header::Supported>().expect("present").expect("reads");
     assert!(supported.contains("100rel"));
     assert_eq!(draft.header::<header::From>().unwrap().unwrap().tag(), Some("9fxced76sl"));
     assert_eq!(draft.values::<header::RouteEntry>().unwrap().len(), 2);
@@ -268,7 +268,7 @@ fn a_frozen_message_answers_the_typed_read_surface() {
     assert_eq!(msg.top_via().branch(), Some("z9hG4bK74bf9"));
     assert_eq!(msg.cseq().to_wire(), "1 INVITE");
     assert_eq!(msg.call_id().as_str(), "3848276298220188511@atlanta.com");
-    assert!(msg.header::<header::Supported>().unwrap().unwrap().contains("100rel"));
+    assert!(msg.token_set::<header::Supported>().unwrap().unwrap().contains("100rel"));
     assert_eq!(msg.request_uri().user(), Some("bob"));
     assert!(msg.has(&HeaderName::Contact));
     assert_eq!(msg.raw(HeaderName::ContentType).next(), Some("application/sdp"));

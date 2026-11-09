@@ -14,8 +14,12 @@ use super::params::{ParamValue, Params};
 use super::wire::Wire;
 
 mod equivalent;
+mod host_port;
+mod next_hop;
+mod params;
 mod read;
-pub(crate) use read::{host_refusal, read_sent_by};
+pub use host_port::HostPort;
+pub(crate) use read::read_sent_by;
 
 /// What a URI's host is for, the one axis on which its grammar varies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,70 +31,6 @@ pub enum UriRole {
     /// A host that names a party and is never resolved (From, To, the identity
     /// headers): the top label may also start with a digit (RFC 1123 §2.1).
     Identity,
-}
-
-/// A host with an optional explicit port. An IPv6 literal is held WITHOUT its
-/// brackets; [`render`](Self::render) puts them back. A value held
-/// [`whole`](Self::whole) renders as written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostPort {
-    host: SipStr,
-    port: Option<u16>,
-    whole: bool,
-}
-
-impl HostPort {
-    /// The port a peer reaches when the URI names none (RFC 3261 §19.1.2).
-    pub const DEFAULT_PORT: u16 = 5060;
-
-    pub fn new(host: impl Into<SipStr>, port: Option<u16>) -> Self {
-        Self { host: host.into(), port, whole: false }
-    }
-
-    /// Text no host reader accepts, held whole as the host, with no port: it
-    /// renders as written, never bracketed.
-    pub fn whole(text: impl Into<SipStr>) -> Self {
-        Self { host: text.into(), port: None, whole: true }
-    }
-
-    pub fn host(&self) -> &str {
-        self.host.as_str()
-    }
-
-    /// The port as written — `None` when the URI relies on the default.
-    pub fn port(&self) -> Option<u16> {
-        self.port
-    }
-
-    /// The port to send to.
-    pub fn port_or_default(&self) -> u16 {
-        self.port.unwrap_or(Self::DEFAULT_PORT)
-    }
-
-    /// Host and effective port — what a transport wants.
-    pub fn pair(&self) -> (&str, u16) {
-        (self.host(), self.port_or_default())
-    }
-
-    pub fn with_port(mut self, port: u16) -> Self {
-        self.port = Some(port);
-        self
-    }
-
-    pub fn render(&self, out: &mut Wire) {
-        let ipv6 = !self.whole && self.host.contains(':');
-        if ipv6 {
-            out.byte(b'[');
-        }
-        out.str(self.host.as_str());
-        if ipv6 {
-            out.byte(b']');
-        }
-        if let Some(port) = self.port {
-            out.byte(b':');
-            out.num(port as u64);
-        }
-    }
 }
 
 /// A SIP/SIPS/tel/any-scheme URI.
@@ -119,6 +59,8 @@ pub struct Uri {
     opaque_part: Option<SipStr>,
     /// The text this URI was read from, dropped by the first update.
     source: Option<SipStr>,
+    /// The parameter names whose second, identical copy the read collapsed.
+    repeated: Option<Box<[SipStr]>>,
 }
 
 impl PartialEq for Uri {
@@ -159,6 +101,7 @@ impl Uri {
             headers: Vec::new(),
             opaque_part: None,
             source: None,
+            repeated: None,
         }
     }
 
@@ -174,6 +117,7 @@ impl Uri {
             headers: Vec::new(),
             opaque_part: None,
             source: Some(text),
+            repeated: None,
         }
     }
 
@@ -194,7 +138,7 @@ impl Uri {
     /// colon alone does not say so — `anonymous@10.0.0.1:5060` carries a PORT
     /// colon, and reading it as a scheme mints a name-addr holding no URI.
     pub fn value_has_scheme(value: &str) -> bool {
-        let bytes = value.trim().as_bytes();
+        let bytes = crate::whitespace::trim(value).as_bytes();
         let Some(&first) = bytes.first() else { return false };
         if !first.is_ascii_alphabetic() {
             return false;
@@ -421,9 +365,19 @@ impl Uri {
     /// Read all of `value` as one URI, whitespace included: the reading of a
     /// URI whose surroundings already delimit it (a Request-URI, the inside of
     /// `<...>`), where a space is a byte of the URI and refuses it.
+    ///
+    /// A parameter written twice with one value reads as one copy, and the
+    /// text the URI renders is the text read without the second, so it carries
+    /// one copy wherever it goes (§19.1.4 compares a parameter by value); its
+    /// name is [`repeated_params`](Self::repeated_params). One written twice
+    /// with two values is refused.
     pub(crate) fn read_exact(value: &SipStr, role: UriRole) -> Result<Self, SipParseError> {
-        let read::UriParts { scheme, user, authority, params, headers, opaque } =
+        let read::UriParts { scheme, user, authority, params, headers, opaque, repeated } =
             read::read(value, role)?;
+        let (source, repeated) = match repeated.names.is_empty() {
+            true => (value.clone(), None),
+            false => (without(value, &repeated.segments), Some(repeated.names.into_boxed_slice())),
+        };
         Ok(Self {
             scheme,
             user,
@@ -431,8 +385,16 @@ impl Uri {
             params,
             headers,
             opaque_part: opaque,
-            source: Some(value.clone()),
+            source: Some(source),
+            repeated,
         })
+    }
+
+    /// The parameter names this URI was read with twice, one value each time:
+    /// a shape RFC 3261 §19.1.1 forbids, which an ingress gate refuses unless
+    /// its deployment names it (ADR-0001, exemptions).
+    pub fn repeated_params(&self) -> impl Iterator<Item = &str> {
+        self.repeated.iter().flat_map(|names| names.iter()).map(SipStr::as_str)
     }
 
     /// [`parse`](Self::parse), falling back to [`opaque`](Self::opaque): text no
@@ -484,6 +446,19 @@ impl Uri {
             }
         }
     }
+}
+
+/// `value` with the byte ranges `cut` (in order, apart) left out.
+fn without(value: &SipStr, cut: &[std::ops::Range<usize>]) -> SipStr {
+    let text = value.as_str();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for range in cut {
+        out.push_str(text.get(at..range.start).unwrap_or_default());
+        at = range.end;
+    }
+    out.push_str(text.get(at..).unwrap_or_default());
+    SipStr::owned(&out)
 }
 
 impl std::fmt::Display for Uri {

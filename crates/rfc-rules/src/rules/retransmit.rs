@@ -75,6 +75,7 @@
 //! whose bytes the vantage did not carry, or a divergence under no branch, is
 //! undecidable rather than charged.
 
+use crate::rules::branch::BranchName;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
@@ -238,7 +239,7 @@ struct Identity<'a> {
     call_id: &'a str,
     /// The top-Via branch, or `None` where this vantage carried none — the
     /// identity still folds, but a divergence under it is undecidable.
-    branch: Option<&'a str>,
+    branch: Option<BranchName<'a>>,
     cseq: u32,
     /// The request method for a request, the CSeq method for a response,
     /// ASCII-uppercased.
@@ -274,7 +275,7 @@ impl<'a> Identity<'a> {
                 taker: msg.dst.as_str(),
                 hop: msg.hop,
                 call_id: msg.call_id.as_str(),
-                branch: msg.via_branch.as_deref().filter(|b| !b.is_empty()),
+                branch: msg.via_branch.as_deref().filter(|b| !b.is_empty()).map(BranchName),
                 cseq: msg.cseq,
                 method,
                 status,

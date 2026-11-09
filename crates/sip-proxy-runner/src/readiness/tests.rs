@@ -5,6 +5,7 @@
 //! the same as `/readyz` with the isolation verdict in place of the drain.
 
 use probe_http::{ProbeRoutes, ProbeServer};
+use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{Acceptance, WorkerEntry, WorkerHealth};
 use sip_proxy::ProxyAddr;
@@ -149,6 +150,32 @@ async fn with_the_view_in_and_no_worker_alive_readyz_fails() {
             .await;
     assert!(is_ok(&get(s.addr(), "/healthz").await));
     assert!(get(s.addr(), "/readyz").await.starts_with("HTTP/1.1 503"));
+}
+
+/// Two workers whose endpoints read not ready, `w0` read as `health`.
+fn pool_none_ready(health: WorkerHealth) -> Arc<dyn WorkerRegistry> {
+    let unprobed = |id, host| WorkerEntry {
+        health: WorkerHealth::Unknown,
+        ..WorkerEntry::alive(id, ProxyAddr::new(host, 5060))
+    };
+    let registry =
+        SimulatedWorkerRegistry::new(vec![unprobed("w0", "10.0.0.1"), unprobed("w1", "10.0.0.2")]);
+    registry.set_ready("w0", false);
+    registry.set_ready("w1", false);
+    registry.set_health("w0", health);
+    Arc::new(registry)
+}
+
+/// No endpoint reads ready and one worker answers: the proxy stays ready. A
+/// fresh rollout, every worker booting and none answering, stays no worker.
+#[test]
+fn with_no_endpoint_ready_readiness_follows_the_workers_answers() {
+    let answering = pool_none_ready(WorkerHealth::Alive);
+    assert_eq!(probe_state(false, false, true, true, answering.as_ref()), ProbeState::Ready);
+    assert_eq!(fitness(false, true, true, false, answering.as_ref()), Ok(()));
+    let booting = pool_none_ready(WorkerHealth::Unknown);
+    assert_eq!(probe_state(false, false, true, true, booting.as_ref()), ProbeState::NotReady);
+    assert_eq!(fitness(false, true, true, false, booting.as_ref()), Err(Unfit::NoWorkerAlive));
 }
 
 /// Every other condition met, an external face read unusable fails

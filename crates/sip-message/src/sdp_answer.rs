@@ -13,13 +13,15 @@
 //! are carried byte for byte except the ones an answer must change. Pure and
 //! deterministic: no clocks, no randomness, no I/O.
 
-use crate::sdp::{sdp_origin_address, sdp_session_id, BuildHeldSdpOptions};
 use crate::sdp_doc::{
-    direction_of, extract_cryptos, extract_direction, extract_rtpmaps, parse_sdp_body, MediaLine,
-    SdpDirection, Sections,
+    direction_of, extract_cryptos, extract_direction, extract_rtpmaps, parse_sdp_body,
+    stated_direction, MediaLine, SdpDirection, Sections,
 };
 
 mod formats;
+mod reject;
+
+pub use reject::reject_offer;
 
 use lookup_map::LookupMap;
 
@@ -99,11 +101,14 @@ pub fn answer_from_own_agreeing(
     origin: Option<&str>,
     agreed: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
+    if origin.is_some_and(crate::sdp_octets::holds_stand_in) {
+        return None;
+    }
     let agreed_media = agreed.and_then(parse_sdp_body).map(|d| d.media).unwrap_or_default();
     let offer_doc = parse_sdp_body(offer)?;
     let own_doc = parse_sdp_body(own)?;
-    let offer_text = String::from_utf8_lossy(offer);
-    let own_text = String::from_utf8_lossy(own);
+    let offer_text = crate::sdp_octets::decode(offer)?;
+    let own_text = crate::sdp_octets::decode(own)?;
     let offered = Sections::of(&offer_text)?;
     let owned = Sections::of(&own_text)?;
     if bundles(offered.session) || bundles(owned.session) {
@@ -119,8 +124,7 @@ pub fn answer_from_own_agreeing(
             _ => push_line(&mut out, line, eol),
         }
     }
-    let own_session_dir = session_direction(owned.session);
-    let offer_session_dir = session_direction(offered.session);
+    let own_session_dir = stated_direction(&own_doc.attributes);
     let stub_c = own_doc
         .c_line
         .is_none()
@@ -168,14 +172,13 @@ pub fn answer_from_own_agreeing(
             continue;
         };
         let inherited = own_session_dir.unwrap_or(SdpDirection::SendRecv);
-        let own_dir = media_direction(mine).unwrap_or(inherited);
-        let offered_dir =
-            media_direction(stream).or(offer_session_dir).unwrap_or(SdpDirection::SendRecv);
+        let own_dir = stated_direction(&mine.attributes).unwrap_or(inherited);
+        let offered_dir = extract_direction(&offer_doc, stream);
         let dir = answer_direction(own_dir, offered_dir);
         let answer = Answered { stream, own: mine, kept: &kept, crypto, dir, inherited };
         answered_section(&mut out, owned.media.get(i)?.text, &answer, eol);
     }
-    Some(out.into_bytes())
+    Some(crate::sdp_octets::encode(&out))
 }
 
 /// The two answers a back-to-back UA composes for a re-offer inside an early
@@ -242,39 +245,6 @@ pub fn answer_direction(own: SdpDirection, offered: SdpDirection) -> SdpDirectio
         (false, true) => SdpDirection::RecvOnly,
         (false, false) => SdpDirection::Inactive,
     }
-}
-
-/// The answer to `offer` rejecting each of its streams (RFC 3264 §6): every
-/// offered m-line with port 0, its formats and `a=inactive`, under an origin
-/// and a session-level `c=` of the answerer's own (`options`' address, a
-/// session id from its clock). `None` where `offer` is not a session
-/// description.
-pub fn reject_offer(offer: &[u8], options: &BuildHeldSdpOptions) -> Option<Vec<u8>> {
-    let doc = parse_sdp_body(offer)?;
-    let text = String::from_utf8_lossy(offer);
-    let sections = Sections::of(&text)?;
-    let address = sdp_origin_address(&options.local_ip);
-    let addrtype = if address.contains(':') { "IP6" } else { "IP4" };
-    let sess = sdp_session_id(options.now_ms);
-    let mut out = String::new();
-    for line in [
-        "v=0",
-        &format!("o=b2bua {sess} {sess} IN {addrtype} {address}"),
-        "s=-",
-        &format!("c=IN {addrtype} {address}"),
-        "t=0 0",
-    ] {
-        push_line(&mut out, line, "\r\n");
-    }
-    for (stream, section) in doc.media.iter().zip(&sections.media) {
-        let value = match stream.port {
-            Some(0) => section.value().to_string(),
-            _ => with_port_zero(section.value()),
-        };
-        push_line(&mut out, &format!("m={value}"), "\r\n");
-        push_line(&mut out, "a=inactive", "\r\n");
-    }
-    Some(out.into_bytes())
 }
 
 /// One kept format: the number the offer gives it and the one `own` gives it.
@@ -392,7 +362,7 @@ fn sets_up_own_connection(media: &MediaLine, session: &str) -> bool {
 fn bundles(session: &str) -> bool {
     lines(session).any(|l| {
         l.strip_prefix("a=group:").is_some_and(|g| {
-            g.split_whitespace().next().is_some_and(|s| s.eq_ignore_ascii_case("BUNDLE"))
+            crate::whitespace::split(g).next().is_some_and(|s| s.eq_ignore_ascii_case("BUNDLE"))
         })
     })
 }
@@ -421,7 +391,7 @@ const PER_FORMAT: [&str; 3] = ["rtpmap:", "fmtp:", "rtcp-fb:"];
 fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &str) {
     let mut section = lines(text);
     let m_value = section.next().and_then(|l| l.get(2..)).unwrap_or_default();
-    let port_field = m_value.split_whitespace().nth(1).unwrap_or("0");
+    let port_field = crate::whitespace::split(m_value).nth(1).unwrap_or("0");
     let formats: Vec<&str> = answer.kept.iter().map(|k| k.offered.as_str()).collect();
     push_line(
         out,
@@ -458,7 +428,8 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
                 Some(enc) if name == "rtpmap:" => enc.as_str(),
                 _ => tail,
             };
-            push_line(out, format!("a={name}{} {tail}", kept.offered).trim_end(), eol);
+            let line = format!("a={name}{} {tail}", kept.offered);
+            push_line(out, crate::whitespace::trim_end(&line), eol);
             continue;
         }
         if attr.is_some_and(|a| a.starts_with("mid:")) {
@@ -500,22 +471,11 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
     }
 }
 
-/// The direction a media block states for itself, if any.
-fn media_direction(media: &MediaLine) -> Option<SdpDirection> {
-    media.attributes.iter().any(|a| direction_of(a).is_some()).then(|| extract_direction(media))
-}
-
-/// The direction the session-level lines state, if any.
-fn session_direction(session: &str) -> Option<SdpDirection> {
-    lines(session).find_map(|l| l.strip_prefix("a=").and_then(direction_of))
-}
-
 /// An `m=` value with its port set to 0, every other token as written.
-fn with_port_zero(m_value: &str) -> String {
-    let mut tokens = m_value.split_whitespace();
+pub(super) fn with_port_zero(m_value: &str) -> String {
+    let mut tokens = crate::whitespace::split(m_value);
     let kind = tokens.next().unwrap_or_default();
-    let _port = tokens.next();
-    let rest: Vec<&str> = tokens.collect();
+    let rest: Vec<&str> = tokens.skip(1).collect();
     if rest.is_empty() {
         format!("{kind} 0")
     } else {
@@ -528,7 +488,7 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
     text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).filter(|l| !l.is_empty())
 }
 
-fn push_line(out: &mut String, line: &str, eol: &str) {
+pub(super) fn push_line(out: &mut String, line: &str, eol: &str) {
     out.push_str(line);
     out.push_str(eol);
 }

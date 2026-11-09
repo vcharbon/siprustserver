@@ -17,19 +17,19 @@ use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 
 use super::address::{address, identity, UnreadableAddress};
-use super::body::{media_type, sdp, source_content_type};
+use super::body::{description_in, media_type, override_content_type};
 use super::egress::apply_b_leg_egress;
 use super::identity::{allocate_leg_contact, dialling_via, stated_contact, CallMarks};
 use super::option_tags::{apply_offered_option_tags, apply_withheld_option_tags};
-use super::stated_text::writable;
+use super::stated_text::writable_on_new_request;
 use b2bua_sdk::model::Body;
 
 /// What an override's bytes are to the originator's body, the one place an
 /// override is classed: the originator's own bytes are [`SourceBody::Verbatim`];
-/// a body of the originator's media type standing in its place (an untyped
-/// override re-sends that type) is [`SourceBody::Replaced`]; none at all, a body
-/// of another type, or one described by the message it was taken from
-/// ([`Body::descriptors`]) is [`SourceBody::Dropped`] — nothing of the
+/// a body of the originator's media type standing in its place, typed as
+/// [`override_content_type`] types it, is [`SourceBody::Replaced`]; none at
+/// all, a body of another type, or one described by the message it was taken
+/// from ([`Body::descriptors`]) is [`SourceBody::Dropped`] — nothing of the
 /// originator's describes it.
 fn override_role(a_leg_invite: &SipRequest, body: &Body) -> SourceBody {
     let source = a_leg_invite.body();
@@ -40,9 +40,8 @@ fn override_role(a_leg_invite: &SipRequest, body: &Body) -> SourceBody {
         return SourceBody::Verbatim;
     }
     let source_type = a_leg_invite.raw(HeaderName::ContentType).next().and_then(media_type);
-    let override_type = body.content_type.as_deref().and_then(media_type);
-    match (source_type, override_type) {
-        (Some(_), None) => SourceBody::Replaced,
+    let override_type = override_content_type(a_leg_invite, body);
+    match (source_type, override_type.as_deref().and_then(media_type)) {
         (Some(source), Some(stated)) if source.is(stated.token()) => SourceBody::Replaced,
         _ => SourceBody::Dropped,
     }
@@ -79,7 +78,10 @@ fn describes_minted_body(scope: RelayScope<'_>, name: &str) -> bool {
 /// taken from ([`Body::descriptors`]), else the originator's as far as
 /// [`override_role`] keeps them describing it — all of its entity headers
 /// beside its own bytes, the role alone beside a stand-in.
-fn override_descriptors(a_leg_invite: &SipRequest, body: &Body) -> Vec<(String, String)> {
+pub(super) fn override_descriptors(
+    a_leg_invite: &SipRequest,
+    body: &Body,
+) -> Vec<(String, String)> {
     let pairs = |lines: &[MsgHeader]| -> Vec<(String, String)> {
         lines.iter().map(|h| (h.name.to_string(), h.value.to_string())).collect()
     };
@@ -111,7 +113,7 @@ fn minted_body(
     skipped: &mut Vec<WriteRefusal>,
 ) -> (Vec<u8>, Option<header::MediaType>, Vec<(String, String)>) {
     if let Some((body, parts)) = body_override.and_then(|b| Some((b, b.parts.as_ref()?))) {
-        let ct = source_content_type(a_leg_invite, body);
+        let ct = override_content_type(a_leg_invite, body);
         let described = override_descriptors(a_leg_invite, body);
         let attached = sip_message::attach_parts(ct.as_deref(), &described, &body.bytes, parts);
         skipped.extend(attached.refused);
@@ -125,16 +127,15 @@ fn minted_body(
         Some(b) => (b.bytes.clone(), Vec::new()),
         None => (a_leg_invite.body().to_vec(), Vec::new()),
     };
-    // An override typed for itself states its type; an untyped one re-sends
-    // the originator's kind of body.
     let content_type = if body.is_empty() {
         None
     } else {
-        body_override
-            .and_then(|b| b.content_type.as_deref())
-            .and_then(media_type)
-            .or_else(|| a_leg_invite.raw(HeaderName::ContentType).next().and_then(media_type))
-            .or_else(|| body_override.map(|_| sdp()))
+        match body_override {
+            Some(b) => override_content_type(a_leg_invite, b),
+            None => a_leg_invite.raw(HeaderName::ContentType).next().map(str::to_string),
+        }
+        .as_deref()
+        .and_then(media_type)
     };
     (body, content_type, described)
 }
@@ -155,6 +156,24 @@ fn fits_a_line(text: &str, skipped: &mut Vec<WriteRefusal>) -> bool {
 /// carry-through both honour so a withheld name has one meaning on every path.
 fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> bool {
     header_updates.iter().any(|(name, value)| value.is_none() && header.matches(name))
+}
+
+/// The lines `header_updates` set on the leg the stack dials: a structural
+/// name is the generator's, and every line of a single-valued header set on
+/// more than one line is left out, as though never stated, its refusal pushed
+/// onto `skipped` (ADR-0053 §7).
+pub(crate) fn decided_sets(
+    header_updates: &[(String, Option<String>)],
+    skipped: &mut Vec<WriteRefusal>,
+) -> Vec<MsgHeader> {
+    let set: Vec<MsgHeader> = header_updates
+        .iter()
+        .filter(|(n, _)| HeaderName::class_of(n) != HeaderClass::Structural)
+        .filter_map(|(n, v)| {
+            v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
+        })
+        .collect();
+    write_check::one_line_each(set, skipped)
 }
 
 /// The INVITE that dialled `leg`, as it left the stack (after every edit a
@@ -229,6 +248,8 @@ pub fn build_b_leg(
     skipped: &mut Vec<WriteRefusal>,
 ) -> Result<(Leg, OutboundSipEffect), UnreadableAddress> {
     let stamp = generators::timestamp_value(now_ms);
+    // The INVITE is a new request: its next hop reads it at first ingress.
+    let first_ingress = &config.parser_limits.first_ingress;
     let scope = if caller_invite_pending {
         relay_scope(a_leg_invite, body_override)
     } else {
@@ -263,14 +284,11 @@ pub fn build_b_leg(
     // those on the leg it mints, so a decision stating one would ride BESIDE the
     // stack's line rather than replace it — two `Max-Forwards`, and a budget the
     // decision could refill.
-    // A set the wire cannot carry whole is skipped, as though never stated.
-    let mut extra_headers: Vec<MsgHeader> = header_updates
-        .iter()
-        .filter(|(n, _)| HeaderName::class_of(n) != HeaderClass::Structural)
-        .filter_map(|(n, v)| {
-            v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
-        })
-        .filter(|h| writable(h, skipped))
+    // A set the wire cannot carry whole, or a single-valued header set on more
+    // than one line (ADR-0053 §7), is skipped, as though never stated.
+    let mut extra_headers: Vec<MsgHeader> = decided_sets(header_updates, skipped)
+        .into_iter()
+        .filter(|h| writable_on_new_request(h, first_ingress, skipped))
         .collect();
     // The entity headers the minted body states for itself; a name the decision
     // stated stands, and a structural name is the generator's.
@@ -281,7 +299,7 @@ pub fn build_b_leg(
         if HeaderName::class_of(&name) != HeaderClass::Structural
             && !decided.iter().any(|h| header.matches(&h.name))
             && !removed(header_updates, &header)
-            && writable(&line, skipped)
+            && writable_on_new_request(&line, first_ingress, skipped)
         {
             extra_headers.push(line);
         }
@@ -367,12 +385,14 @@ pub fn build_b_leg(
                 name: SipStr::owned(name.as_wire_str()),
                 value: SipStr::owned(&ChargingVector::new(icid, host).to_wire()),
             };
-            if writable(&line, skipped) {
+            if writable_on_new_request(&line, first_ingress, skipped) {
                 extra_headers.push(line);
             }
         }
     }
 
+    // The via-extension's offer flag reads the minted body as `sdp()` will.
+    let offer = description_in(&body, content_type.as_ref(), &extra_headers).is_some();
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(request_uri.clone()),
         call_id: b_call_id.clone(),
@@ -383,11 +403,7 @@ pub fn build_b_leg(
             config,
             marks,
             leg_id,
-            super::RequestFacts {
-                method: "INVITE",
-                uri: &request_uri.text(),
-                offer: !body.is_empty(),
-            },
+            super::RequestFacts { method: "INVITE", uri: &request_uri.text(), route: "", offer },
             branch.clone(),
         )),
         contact: stated_contact(&contact),

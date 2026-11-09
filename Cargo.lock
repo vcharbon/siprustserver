@@ -535,6 +535,7 @@ version = "0.1.0"
 dependencies = [
  "b2bua-core",
  "b2bua-sdk",
+ "bounds",
  "call",
  "lookup-map",
  "proptest",
@@ -656,6 +657,7 @@ dependencies = [
  "sip-ids",
  "sip-message",
  "sip-retransmit",
+ "tracing",
 ]
 
 [[package]]
@@ -798,6 +800,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bounds"
+version = "0.1.0"
+dependencies = [
+ "stacker",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -841,6 +850,7 @@ dependencies = [
  "call-limiter-wire",
  "http-net",
  "http-net-testkit",
+ "lock-poison",
  "metric-catalogue",
  "observe",
  "serde",
@@ -1037,6 +1047,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 name = "clock-bridge"
 version = "0.1.0"
 dependencies = [
+ "lock-poison",
  "tokio",
 ]
 
@@ -2862,6 +2873,7 @@ dependencies = [
  "rtcp",
  "rtp",
  "sip-clock",
+ "sip-message",
  "sip-net",
  "sip-net-testkit",
  "thiserror 2.0.21",
@@ -4651,6 +4663,7 @@ version = "0.1.0"
 dependencies = [
  "alloc-counter",
  "base64 0.23.1",
+ "bounds",
  "bytes",
  "criterion",
  "flate2",
@@ -4674,6 +4687,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "libc",
+ "lock-poison",
+ "metric-catalogue",
  "sip-clock",
  "sip-message",
  "socket2",
@@ -4767,6 +4782,7 @@ dependencies = [
  "serde_json",
  "sip-clock",
  "sip-ids",
+ "sip-message",
  "sip-net",
  "sip-net-testkit",
  "sip-proxy",

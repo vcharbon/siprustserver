@@ -17,20 +17,25 @@
 //! decision it does not apply (ADR-0047 D6). One owner acts on the answer
 //! (ADR-0047 D7): a takeover copy whose call's primary wrote the call since
 //! the copy was made — a restarted primary's reclaim, which asks the decision
-//! itself — applies nothing and stands down on that write.
+//! itself — applies nothing and stands down on that write. A re-ask past a
+//! per-call cap fails as the initial INVITE's turn does (ADR-0057 §4).
 
 use std::sync::Arc;
 
-use call::{Call, CallModelState, CdrEvent, CdrEventType, TerminationCause};
+use call::{Call, CallModelState};
 
 use super::cancel_in_consult::consult_writing_its_cancel;
-use super::interpret::process_result;
+use super::commit::commit_turn;
+use super::off_wire;
 use super::RouterCtx;
+use crate::caps::{hold, Checked, Gauge};
 use crate::effects::HandlerResult;
 use crate::initial_consult::{handle_initial_invite, Consulted};
 use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::ActionExecutor;
+use crate::setup_budget::SetupBudget;
+use crate::undecided::Settled;
 use b2bua_sdk::event::CallEvent;
 
 /// The topic of the re-ask notice, an internal event the router raises itself
@@ -53,16 +58,23 @@ pub(super) fn is_undecided(call: &Call) -> bool {
 /// caller's INVITE, so none seeded means another transaction here already
 /// holds its branch — the caller's retransmission placed as a call of its own
 /// — and an answer would reach that call's caller: the call then ends with
-/// nothing on the wire, as does a setup the caller CANCELed. Otherwise its
+/// nothing on the wire, as does a setup the caller CANCELed, the call's own
+/// record or its setup-CANCEL mark saying so, with the cancel's cause and
+/// event. Otherwise its
 /// decision is asked again on a turn of its own ([`reask_turn`]). A takeover
 /// copy defers its CDR to the call's primary, a reclaim writes it
 /// (ADR-0020 X3).
 pub(super) async fn settle_undecided(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    call: Call,
+    mut call: Call,
     seeded: usize,
 ) {
+    // A CANCEL the layer took for the INVITE before the call was resident
+    // marked its setup: the call ends cancelled.
+    if ctx.state.is_setup_cancelled(call_ref, call.a_leg_invite.cseq) {
+        call.setup_cancelled = true;
+    }
     if seeded > 0 && !call.setup_cancelled && !ctx.readiness.left_the_slice() {
         tracing::info!(
             node = observe::node(),
@@ -74,61 +86,25 @@ pub(super) async fn settle_undecided(
         return;
     }
     let now_ms = ctx.clock.now_ms();
-    let turn = crate::turn_scope::TurnScope::of(ctx.id_gen.turn());
-    let mut turn = turn.with_faults(ctx.wire_faults.snapshot());
+    let mut turn = off_wire::scope(ctx);
     let before = call.clone();
-    let advertisement = &ctx.config.minted_final_advertisement;
     let answer = seeded > 0 && !call.setup_cancelled;
-    let caller =
-        answer.then(|| crate::rules::relay::caller_invite(&call, &mut turn.notes)).flatten();
-    let (handled, unanswered) = if let Some(a_invite) = caller.as_ref() {
-        let refused = crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            503,
-            Some("Service Unavailable".into()),
-            None,
-            &[],
-            advertisement,
-            &mut turn.ids,
-            now_ms,
-            TerminationCause::Admission,
-        );
-        (refused, UnansweredCaller::Answer(advertisement))
-    } else {
-        let (cause, by_leg) = if call.setup_cancelled {
-            (TerminationCause::RemoteCancel, Some(call.a_leg.leg_id.clone()))
-        } else {
-            (TerminationCause::Admission, None)
+    let advertisement = &ctx.config.minted_final_advertisement;
+    let (result, caller) =
+        match crate::undecided::settle(call, answer, advertisement, &mut turn, now_ms) {
+            Settled::Refused(result) => (result, off_wire::Caller::Answer),
+            Settled::Ended(result) => (result, off_wire::Caller::Leave),
         };
-        let mut ended = call;
-        // The caller's cancel, as the CANCEL's own turn records it.
-        if ended.setup_cancelled {
-            let event = CdrEvent {
-                event_type: CdrEventType::Cancel,
-                timestamp: now_ms,
-                leg_id: ended.a_leg.leg_id.clone(),
-                status_code: None,
-                reason: None,
-                decision_ordinal: 0,
-            };
-            call::helpers::add_cdr_event(&mut ended, event);
-        }
-        call::helpers::record_termination(&mut ended, now_ms, cause, by_leg);
-        ended.state = CallModelState::Terminated;
-        (HandlerResult::new(ended), UnansweredCaller::Leave)
-    };
     tracing::info!(
         node = observe::node(),
         call_ref,
         call_id = %before.a_leg.call_id,
-        answered = caller.is_some(),
+        answered = matches!(caller, off_wire::Caller::Answer),
         "undecided call settled"
     );
-    let notes = &mut turn.notes;
-    let result = enforce(&ctx.obligations, &before, finalize(handled), now_ms, unanswered, notes);
-    super::notes::drain(ctx, call_ref, &mut turn);
-    process_result(ctx, call_ref, result, now_ms, &"the settle of an undecided call", None).await;
+    let ending = off_wire::Ending::Built { before: &before, result, turn: Box::new(turn) };
+    let label = &"the settle of an undecided call";
+    off_wire::end(ctx, call_ref, ending, caller, now_ms, label).await;
 }
 
 /// The re-ask notice of `call`.
@@ -152,12 +128,13 @@ pub(super) fn notice_of(event: &CallEvent) -> Option<&str> {
 }
 
 /// The re-ask turn of `call_ref`, under its per-call lock: the resident call,
-/// still undecided, is consulted as its initial INVITE's turn consults, and
-/// the turn lands as that one does. A call gone, decided meanwhile or whose
-/// setup the caller CANCELed asks nothing; a copy its primary wrote over
-/// ([`primary_wrote_since`]) asks nothing, and applies no answer that returns
-/// after that write.
-pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
+/// still undecided, is consulted as its initial INVITE's turn consults, under
+/// the fresh `budget` its notice started, and the turn lands as that one does;
+/// the budget spent before the turn ran, its caller is refused unasked. A call
+/// gone, decided meanwhile or whose setup the caller CANCELed asks nothing; a
+/// copy its primary wrote over ([`primary_wrote_since`]) asks nothing, and
+/// applies no answer that returns after that write.
+pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: SetupBudget) {
     let _guard = ctx.state.lock(call_ref).await;
     let Some(call) = ctx.state.peek(call_ref) else { return };
     let cseq = call.a_leg_invite.cseq;
@@ -176,37 +153,39 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
     let owners = crate::store::envelope::owners(&ctx.relay_owner, topology.as_ref());
     // The INVITE as it arrived is in no record: a trace backfills its image.
     let wire = caller.image().to_vec();
-    let consult = handle_initial_invite(
-        call.clone(),
-        &caller,
-        ctx.decision.as_ref(),
-        &ctx.limiter,
-        &ctx.config,
-        &owners,
-        &mut turn,
-        &ctx.services,
-        &wire,
-        &ctx.clock,
-        now_ms,
-        &cancelled,
-    );
-    let consult = consult_writing_its_cancel(ctx, call_ref, &call, &caller, consult).await;
-    let (handled, recorded) = match consult {
-        Consulted::Applied(handled) => (*handled, false),
-        // The caller CANCELed during the round trip: the decision is recorded,
-        // never applied, and her CANCEL's turn, queued behind this one, ends
-        // the call and releases what the decision admitted.
-        Consulted::Cancelled(decided) => {
-            ctx.metrics.bump_decision_dropped_cancelled();
-            let call = super::initial_turn::recorded_turn(&call, *decided);
-            (HandlerResult { call, effects: crate::effects::HandlerEffects::new() }, true)
+    let refused = budget.spent();
+    let (handled, recorded) = if refused {
+        (super::initial_turn::refused_unavailable(ctx, call.clone(), &caller, now_ms), false)
+    } else {
+        let consult = handle_initial_invite(
+            call.clone(),
+            &caller,
+            ctx.decision.as_ref(),
+            &ctx.limiter,
+            &ctx.config,
+            &owners,
+            &mut turn,
+            &ctx.services,
+            &wire,
+            &ctx.clock,
+            now_ms,
+            budget,
+            &cancelled,
+        );
+        match consult_writing_its_cancel(ctx, call_ref, &call, &caller, consult).await {
+            Consulted::Applied(handled) => (*handled, false),
+            // The caller CANCELed during the round trip: the decision is recorded,
+            // never applied, and her CANCEL's turn, queued behind this one, ends
+            // the call and releases what the decision admitted.
+            Consulted::Cancelled(decided) => {
+                ctx.metrics.bump_decision_dropped_cancelled();
+                let call = super::initial_turn::recorded_turn(&call, *decided);
+                (HandlerResult { call, effects: crate::effects::HandlerEffects::new() }, true)
+            }
         }
     };
     let handled = if !recorded && ctx.readiness.left_the_slice() {
-        let ids = &mut turn.ids;
-        super::initial_turn::refused_after_leaving_the_slice(
-            ctx, &call, &caller, handled, now_ms, ids,
-        )
+        super::initial_turn::refused_after_leaving_the_slice(ctx, &call, &caller, handled, now_ms)
     } else {
         handled
     };
@@ -221,16 +200,27 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
     let advertisement = UnansweredCaller::Answer(&ctx.config.minted_final_advertisement);
     let enforced =
         enforce(&ctx.obligations, &call, finalize(handled), now_ms, advertisement, &mut turn.notes);
-    let mut result = {
+    let closed = {
         let mut exec =
             ActionExecutor { config: &ctx.config, owners: &owners, turn: &mut turn, now_ms };
         close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)
     };
+    let mut result =
+        match hold(&ctx.config.caps, &Gauge::of(&call), Checked::All, &mut turn, closed) {
+            Ok(result) => result,
+            Err(tripped) => {
+                // The record as it stands now, a cancel the consult wrote included.
+                let safepoint = ctx.state.peek(call_ref);
+                super::notes::drain_discarded(ctx, &mut turn);
+                super::tripped::fail_turn(ctx, call_ref, None, tripped, safepoint, now_ms).await;
+                return;
+            }
+        };
     // A decision another node may have asked.
-    result.effects.reasked = true;
+    result.effects.reasked = !refused;
     super::notes::drain(ctx, call_ref, &mut turn);
     let turn_label = &"the re-ask of an undecided call's decision";
-    process_result(ctx, call_ref, result, now_ms, turn_label, None).await;
+    commit_turn(ctx, call_ref, result, now_ms, turn_label, None).await;
 }
 
 /// Whether `call_ref` is a takeover copy whose primary wrote the call since

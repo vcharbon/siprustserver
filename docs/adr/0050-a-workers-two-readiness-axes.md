@@ -5,6 +5,11 @@ each dead verdict to the workers; §5, the undecided call's residual.
 Amended (2026-11-01): §2 and §9, a backed-up event queue refuses new calls
 (`cause=overload`, and the admission ladder's event-queue rung); §12, the
 keepalive lane. Amended (2026-11-03): §11, the node's announcement follows `/readyz` (ADR-0056).
+Amended (2026-11-04): §3 and §5, the flip of a worker read `Alive` to not ready, not
+terminating, is a dead verdict.
+Amended (2026-11-05): §9, the transaction layer refuses on the queue's age by itself while
+its router writes nothing. Amended (2026-11-05): §3, §8 and §11, the proxy probes every worker
+present in the slice, and a view where none reads ready routes on the answers.
 
 **Owner:** `crates/sip-message` (the `X-Readiness` and `X-Incarnation` headers),
 `crates/b2bua/src/repl/readiness.rs` and `router/responses.rs` (the worker's
@@ -90,17 +95,24 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    address tombstone (ADR-0031 D4) make it `Dead`. The proxy's `Draining`
    health, its grace, and the `503` Reason-text split are gone.
 
-   A turn of a worker's health to `Dead` from another health is a **dead
-   verdict**. The proxy tells it to every other `Alive` worker on an
-   out-of-dialog OPTIONS carrying the notice, signed with the cluster key the
-   workers share (ADR-0055 §12) over the ordinal and the verdict's instant:
+   A turn of a worker's health to `Dead` is a **dead verdict** from `Alive`, or
+   from `Unknown` while its endpoint reads ready; and so is the flip of a worker
+   read `Alive` to an endpoint not `ready` and not `terminating` (ADR-0031 case 4)
+   while another member reads ready, which usually comes before the probe's
+   reading. The flip leaves the worker's health `Unknown` until it answers
+   again, so the probe's reading of the same silence tells nothing more, and a
+   death after an answer is a verdict of its own. The proxy tells it to every
+   other `Alive` worker, routed or not, on an out-of-dialog OPTIONS carrying the
+   notice, signed with the cluster key the workers share (ADR-0055 §12) over the
+   ordinal and the verdict's instant, the instant the proxy tells it:
 
    ```
    X-Worker-Dead: worker-0; at=1792155573698; sig=<base64url>
    ```
 
-   A departure is no verdict: the ordinal leaves the projection and its
-   address is tombstoned. A worker takes a notice only when it verifies and
+   A departure, a `terminating` flip and a flip that empties the view of ready
+   members (§11) are no verdict, and neither is the silence of a worker not ready
+   that never answered, a booting pod. A worker takes a notice only when it verifies and
    its instant stands within the freshness window of the worker's own clock,
    either way (`B2BUA_DEAD_NOTICE_FRESH_MS`, 10 s); it refuses and counts any
    other (`b2bua_dead_notices_refused_total`). A taken verdict is held for
@@ -139,13 +151,14 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    copy's: the decision may be in flight at a primary the proxy misread dead;
    a confirmed verdict, the departure or a reclaim asks it again (ADR-0047 D4). An initial INVITE whose cookie
    names another primary and that copies no such record gets no final
-   (`b2bua_foreign_invite_copies_dropped_total`; the transaction layer's 100
-   Trying has already gone out): the primary still owns that transaction, and
-   a final from this worker would end the caller's.
+   (`b2bua_foreign_invite_copies_dropped_total`; its transaction is relinquished
+   with nothing sent, ahead of the 100's 200 ms bound unless the router lags
+   that long): the primary still owns that transaction, and a final from this
+   worker would end the caller's.
    Accepted residuals:
    - a copy of an undecided call whose primary really died is dropped: the
-     confirmed dead verdict (§3) takes the call over and asks its decision
-     again;
+     confirmed dead verdict (§3), the probe's or the endpoint's flip, takes the
+     call over and asks its decision again;
    - an INVITE that never replicated, from a primary that really died, gets
      no final from the backup; the caller's transaction timers end it;
    - a discovered pool whose watch never delivers a listing never has a first
@@ -169,8 +182,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    the cookie's `w_bak`, unchanged.
 8. **No fresh-pod guard.** The guard, its 20 s window and its promotion
    reason are removed. A worker joins `Unknown` (ADR-0012 D4) and is routed
-   once a probe answers `200`, which its Ready gate allows only after its
-   partition is bootstrapped and current; the calls its backup changed while
+   once a probe answers `200`, its endpoint ready or none ready (§11), which its
+   Ready gate allows only after its partition is bootstrapped and current; a
+   worker that answered while it read not ready is routed as soon as it reads
+   ready. The calls its backup changed while
    it was away are folded by on-demand reclaim, stand-down (ADR-0047 D7) and
    the version vector (ADR-0014). The proxy resets a worker to `Unknown`
    when its `X-Incarnation` changes, so a restart in place at the same address
@@ -201,7 +216,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
      while the gate refuses gets the ladder's `503` as it arrives, ahead of
      the queue it would wait in, from the gate's first refusing reading on,
      before any probe reads it; emergency INVITEs and in-dialog requests are
-     never refused by it. The bounds, their defaults
+     never refused by it. Only the router reads the gate, so a router held in
+     one turn writes no refusal: the transaction layer reads the queue's age
+     itself as each new INVITE arrives, and refuses from that same 450 ms
+     (ADR-0037 item 11). The bounds, their defaults
      and the boot checks between them are the runner's `B2BUA_EVENT_QUEUE_*`
      grammar. The proxy keeps a refusing worker `Alive` and every dialog it
      owns on it (§4), and places new calls elsewhere (§6): a worker whose
@@ -239,6 +257,63 @@ take a new call, and may an in-dialog request of a call it owns reach it.
     face usable (ADR-0056 §3); the livenessProbe keeps reading `/healthz`
     alone.
 
+    The proxy probes every worker present in the slice and not `terminating`,
+    routed or not. While one reads ready, only the ready ones are routed. **While
+    none reads ready the proxy routes on the probe's answers**: every worker
+    present and not `terminating` stands in its view on the health the probe holds,
+    so those that answer are `Alive` and those that stay silent are not. The slice
+    then speaks of the orchestrator's reach to the nodes, not of the workers: a
+    node controller that loses their heartbeats marks every endpoint not ready
+    while the workers serve, replicate and do not drain (ADR-0031 case 3b,
+    ADR-0055 §6). The rule reads the slice and the health as they stand, with no
+    state of its own and no timer:
+
+    - **The fleet flips one worker at a time.** Each flip with a ready member left
+      leaves the routing and is told as a verdict, which the worker's stream refutes;
+      its in-dialog requests go to its backup meanwhile (§4). The last flip empties
+      the view, tells nothing, and the workers left before it are routed at once on
+      the health their probes kept.
+    - **A worker that does not answer** reads `Dead` by the usual misses, whatever
+      its endpoint says, and that is the verdict (§3). A fleet booting silent, or a
+      stalled worker (ADR-0033 §4), is no worker: `/readyz` fails and new calls get
+      the proxy's refusal until the routes withdraw. A whole fleet crashing on live
+      nodes is read by the probe, 2.6 to 3.6 s, and not by its flips; `/fitz` turns
+      unfit on the isolation window, 2 s, so the withdrawal comes about as it does
+      with a ready member left, and new INVITEs reach a dead worker for about 2 s.
+    - **A `terminating` worker never counts**, and the proxy stops probing it. Every
+      member terminating is no worker.
+    - **It ends** at the first reading of a ready member: routing follows readiness
+      again. A worker still not ready leaves the routing with no verdict, nothing
+      about it having changed, and its in-dialog requests go to its backup until it
+      reads ready, as any not-ready worker's. A second emptying reopens it.
+    - **A worker restarted inside it** answers its probe once bootstrapped and takes
+      new calls and in-dialog requests. Its reclaimed calls stay parked until a
+      message arms them or its own endpoint reads ready (ADR-0055 §8), since it
+      cannot tell a proxy routing on answers from one that holds no address for it.
+    - **A proxy started inside it** needs no memory of an earlier view: its first
+      round reads the workers, and its first view latches at the round's end.
+    - **A proxy's own pod read not ready** is another matter: its node's speaker
+      withdraws the node whatever `/readyz` answers (ADR-0056 §1).
+
+    `sip_proxy_routing_on_answers` is 1 meanwhile, and each turn logs a line.
+
+    Open: the rule reads "none ready" literally. A worker the slice still reads ready
+    while the probe reads it `Dead`, beside a not-ready worker that answers, leaves no
+    worker to route to. Say w1 reads not ready and w0 powers off: the probe reads w0
+    `Dead` within 3.6 s, the slice reads it ready until the node controller's grace
+    runs out, 45 to 53 s after the loss (measured), the projection holds only w0,
+    `/readyz` and `/fitz` fail, every proxy withdraws, and in-dialog requests are
+    dropped as unroutable. About 50 s; as long as the cut when only the path from the
+    proxy to w0 is cut, bounded by w1's own toleration of the orchestrator's eviction.
+
+    A worker out of the routing while another reads ready stays one the proxy knows:
+    its address reads `Dead` for as long as it is a member, so its own requests leave
+    as a worker's. The answers to them follow the owner rule to its backup, so a
+    keepalive falling due then is unanswered and ends the call at Timer F
+    (`no_worker_reads_ready.rs`, the keepalive cell), and a call whose two owners are
+    both out, with a third worker ready, has its in-dialog requests dropped for as
+    long as that lasts.
+
 12. **The keepalive lane.** The worker's transaction layer passes each
     out-of-dialog OPTIONS (§2: no transaction) up on a small bounded lane of
     its own, apart from the event queue; a full lane drops the newest and
@@ -268,8 +343,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
   in-dialog requests move when its ordinal leaves the projection or the probe
   reads it `Dead`.
 - ADR-0046 §2: readiness counts `Alive` workers, whatever their acceptance,
-  and waits for the first worker view; D4: the VRRP check also reads the
-  first-view latch.
+  among those it routes to, and waits for the first worker view; D4: the VRRP
+  check also reads the first-view latch.
+- ADR-0031 D1: a `ready` member is the routing target while one reads ready;
+  none reading ready, every member present and not terminating is, on its answers.
 - ADR-0012 D4, ADR-0014 §5, ADR-0009: an address change resets health to
   `Unknown` and re-arms nothing; affinity is the ACK/CANCEL exemption and
   liveness routing (4); the drain grace and the fresh-pod guard are removed.
@@ -301,7 +378,11 @@ take a new call, and may an in-dialog request of a call it owns reach it.
   after a primary returns, served by the primary), and the event-queue cells
   (an OPTIONS behind a backlog answered within the reply window; the refusal
   by depth and by a persisting delay with its hold; a stalled router reading
-  the age of the event behind it; a wait shorter than the interval refusing
+  the age of the event behind it; a held router's INVITE refused on arrival
+  past that age, with no 100; a wait shorter than the interval refusing
   nothing; a backed-up worker kept alive, its
   dialogs on it, new calls elsewhere; a dead notice behind a backlog taken
-  once, in order; a wedged or partitioned worker read dead).
+  once, in order; a wedged or partitioned worker read dead), and the cells of
+  `no_worker_reads_ready.rs` (the flips' spacing and order; a death inside the
+  view and after a refuted flip; the view's end; a restart and a proxy started
+  inside it; a terminating worker).

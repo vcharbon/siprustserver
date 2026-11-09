@@ -221,6 +221,35 @@ describe("flow stats", () => {
   })
 })
 
+describe("set-aside counts", () => {
+  it("reads the refusal and header-failure tables, and their absence as none", () => {
+    const doc = wrap({ ...base, raw: "X" }) as { flow_stats: Record<string, unknown> }
+    const bare = decodeFlowsSync(doc).flow_stats
+    expect([bare.parse_failed_by_reason, bare.header_failed_by_reason]).toEqual([undefined, undefined])
+    doc.flow_stats = {
+      ...doc.flow_stats,
+      parse_failed: 3,
+      parse_failed_by_reason: { "INVITE has no Contact (RFC 3261 §8.1.1.8)": 2, "Expected CRLF at position N": 1 },
+      header_failed: 1,
+      header_failed_by_reason: { "Strict Diversion: unterminated quoted value of parameter n": 1 },
+      header_failures: [{ call_id: "c1", msg: 0, header: "Diversion", reason: "unterminated" }]
+    }
+    const stats = decodeFlowsSync(doc).flow_stats
+    expect(stats.parse_failed_by_reason?.["INVITE has no Contact (RFC 3261 §8.1.1.8)"]).toBe(2)
+    expect(stats.header_failed_by_reason).toEqual({ "Strict Diversion: unterminated quoted value of parameter n": 1 })
+    expect(stats.header_failures?.[0].header).toBe("Diversion")
+  })
+})
+
+describe("a leg whose opening request was set aside", () => {
+  it("reads the mark, and its absence as none", () => {
+    const doc = wrap({ ...base, raw: "X" }) as { legs: Array<Record<string, unknown>> }
+    expect(decodeFlowsSync(doc).legs[0].opening_request_set_aside).toBeUndefined()
+    doc.legs[0] = { ...doc.legs[0], opening_request_set_aside: true }
+    expect(decodeFlowsSync(doc).legs[0].opening_request_set_aside).toBe(true)
+  })
+})
+
 describe("a leniently decoded document", () => {
   it("accepts a document carrying an unknown field rather than refusing it", () => {
     const grown: Record<string, unknown> = { ...(wrap({ ...base, raw: "X" }) as object) }

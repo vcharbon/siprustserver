@@ -74,7 +74,7 @@ async fn a_call_awaiting_an_answer_is_taken_over_at_the_verdict_and_asks_again()
     call::helpers::arm_timer(&mut call, call::TimerKey::call(deadline), 1_000);
     put(&n.store, &call).await;
 
-    assert!(super::super::departure::take_over_read_dead(ctx, "w0"));
+    assert!(super::super::departure::take_over_read_dead(ctx, "w0", None));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "the call was taken over");
     let body = n.store.get_call(PartitionRole::Backup, "w0", &call.call_ref).await.unwrap();

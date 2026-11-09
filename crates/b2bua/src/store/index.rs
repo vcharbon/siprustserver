@@ -2,6 +2,8 @@
 //! pointing at its `callRef`, kept as the call is written and resolved by the
 //! dispatcher for a message that carries no `callRef` of ours.
 
+use std::collections::HashMap;
+
 use call::{IndexHit, IndexLookup, Probe};
 
 use super::{CallState, Inner};
@@ -17,6 +19,33 @@ impl Inner {
     }
 }
 
+/// Resolve `lookup` against `index`, a SIP index of key → callRef, probing in
+/// [`IndexLookup::probes`] order; `key` is the buffer each probe's key is
+/// written into ([`IndexLookup::key_buffer`]).
+pub(crate) fn resolve_in(
+    index: &HashMap<String, String>,
+    lookup: &IndexLookup<'_>,
+    key: &mut String,
+) -> Option<IndexHit> {
+    for probe in lookup.probes() {
+        match *probe {
+            Probe::Resolve(kind) => {
+                lookup.write_key(kind, key);
+                if let Some(r) = index.get(key.as_str()) {
+                    return Some(IndexHit { call_ref: r.clone(), kind });
+                }
+            }
+            Probe::Refuse(kind) => {
+                lookup.write_key(kind, key);
+                if index.contains_key(key.as_str()) {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
 impl CallState {
     /// Resolve a message that carries no `callRef` of ours to a call from
     /// the in-memory index only (the sync path the dispatcher's route key
@@ -25,23 +54,7 @@ impl CallState {
     pub fn resolve_from_sip_key_sync(&self, lookup: IndexLookup<'_>) -> Option<IndexHit> {
         let mut key = lookup.key_buffer();
         let inner = self.locked();
-        for probe in lookup.probes() {
-            match *probe {
-                Probe::Resolve(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    if let Some(r) = inner.sip_index.get(key.as_str()) {
-                        return Some(IndexHit { call_ref: r.clone(), kind });
-                    }
-                }
-                Probe::Refuse(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    if inner.sip_index.contains_key(key.as_str()) {
-                        return None;
-                    }
-                }
-            }
-        }
-        None
+        resolve_in(&inner.sip_index, &lookup, &mut key)
     }
 
     /// Point every one of `keys` at `call_ref` and make them the keys it

@@ -71,14 +71,14 @@ impl Owner {
             .accepted
             .iter()
             .find(|b| {
-                self.clients.get(b.as_str()).is_some_and(|t| {
+                self.clients.get(b).is_some_and(|t| {
                     t.state == TxnState::Accepted
                         && t.call_id == call_id
                         && t.from_tag == from_tag
                         && t.cseq == seq
                 })
             })
-            .cloned()
+            .map(str::to_string)
         else {
             return;
         };
@@ -87,12 +87,12 @@ impl Owner {
         }
     }
 
-    /// The INVITE of the Accepted client txn at `branch`, parsed again from
-    /// the image it keeps, a parser panic contained as at ingress; `None`,
-    /// logged, where that image reads as none.
+    /// The INVITE of the Accepted client txn at `branch`, read back from the
+    /// image it keeps ([`sip_message::read_stored`]), a parser panic contained as
+    /// at ingress; `None`, logged, where that image reads as none.
     pub(super) fn accepted_invite(&self, branch: &str) -> Option<SipRequest> {
         let image = self.clients.get(branch)?.retransmit_buf.clone()?;
-        match parse_datagram(image, |raw| self.parser.parse_shared(raw)) {
+        match parse_datagram(image, |raw| sip_message::read_stored(&raw)) {
             Ok(Ok(SipMessage::Request(invite))) => Some(invite),
             _ => {
                 tracing::warn!(%branch, "the INVITE an Accepted transaction keeps reads as none");

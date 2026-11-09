@@ -20,7 +20,7 @@ fn message(text: String) -> SipMessage {
 fn request(method: &str, cseq: u32) -> SipMessage {
     let to = if method == "INVITE" { String::new() } else { ";tag=B1".to_string() };
     message(format!(
-        "{method} sip:bob@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
+        "{method} sip:bob@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
          From: <sip:a@host>;tag=A1\r\nTo: <sip:bob@host>{to}\r\nCall-ID: c1@host\r\n\
          CSeq: {cseq} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
     ))
@@ -29,7 +29,7 @@ fn request(method: &str, cseq: u32) -> SipMessage {
 /// Bob's `status` to the request `method` numbered `cseq`.
 fn response(status: u16, method: &str, cseq: u32) -> SipMessage {
     message(format!(
-        "SIP/2.0 {status} Reason\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
+        "SIP/2.0 {status} Reason\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
          From: <sip:a@host>;tag=A1\r\nTo: <sip:bob@host>;tag=B1\r\nCall-ID: c1@host\r\n\
          CSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
     ))
@@ -64,7 +64,7 @@ async fn a_clean_end_waiver_covers_one_bye_per_dialog_from_its_start() {
 /// A NOTIFY on bob's dialog stating its subscription `state`.
 fn notify(cseq: u32, state: &str) -> SipMessage {
     message(format!(
-        "NOTIFY sip:bob@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
+        "NOTIFY sip:bob@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
          From: <sip:a@host>;tag=A1\r\nTo: <sip:bob@host>;tag=B1\r\nCall-ID: c1@host\r\n\
          CSeq: {cseq} NOTIFY\r\nEvent: refer\r\nSubscription-State: {state}\r\n\
          Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"

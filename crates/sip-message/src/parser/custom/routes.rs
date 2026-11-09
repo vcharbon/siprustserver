@@ -6,19 +6,28 @@
 //! [`record_route_set`](crate::SipRequest::record_route_set)) use the same
 //! readers.
 
+use super::dialog_ids::uri_repeat_refusal;
 use super::header_index::HeaderIndex;
 use super::request_uri::request_uri_refusal;
 use crate::error::SipParseError;
-use crate::header::{HeaderValue, RecordRouteEntry, RouteEntry};
+use crate::header::{HeaderName, HeaderValue, RecordRouteEntry, RouteEntry};
+use crate::parser::Exemptions;
 use crate::types::ReadRoutes;
 
 /// The Route and Record-Route entries of the message, or why one of them does
-/// not read.
-pub(super) fn read_routes(idx: &HeaderIndex) -> Result<ReadRoutes, SipParseError> {
+/// not read: an empty line or entry, a URI the one URI reader refuses, or one
+/// with a parameter written twice that `exemptions` does not name.
+pub(super) fn read_routes(
+    idx: &HeaderIndex,
+    exemptions: &Exemptions,
+) -> Result<ReadRoutes, SipParseError> {
     let mut routes = Vec::with_capacity(idx.route.len());
     for line in &idx.route {
         RouteEntry::parse_line_into(line, &mut routes)
             .map_err(|e| SipParseError::new(format!("Strict Route: {}", e.reason)))?;
+    }
+    for entry in &routes {
+        uri_repeat_refusal(entry.uri(), &HeaderName::Route, exemptions)?;
     }
     let mut recorded = Vec::with_capacity(idx.record_route.len());
     for line in &idx.record_route {
@@ -27,6 +36,7 @@ pub(super) fn read_routes(idx: &HeaderIndex) -> Result<ReadRoutes, SipParseError
             .map_err(|e| SipParseError::new(format!("Strict Record-Route: {}", e.reason)))?;
         for entry in recorded.get(read..).unwrap_or_default() {
             request_uri_refusal(entry.uri())?;
+            uri_repeat_refusal(entry.uri(), &HeaderName::RecordRoute, exemptions)?;
         }
     }
     let sets = (!routes.is_empty() || !recorded.is_empty()).then(|| Box::new((routes, recorded)));

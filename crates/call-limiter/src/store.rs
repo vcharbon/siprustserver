@@ -240,7 +240,7 @@ impl CallStore {
         release_on_refusal: bool,
     ) -> AdmitResult {
         let now_ms = self.now_ms();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = crate::poison::locked(&self.inner);
         sweep(&mut inner, now_ms);
 
         if inner.fences.get(key).is_some_and(|(fence, _)| *fence == Fence::Released) {
@@ -307,7 +307,7 @@ impl CallStore {
     pub fn release<K: AsRef<str>>(&self, keys: &[K]) {
         let now_ms = self.now_ms();
         let fenced_until_ms = now_ms + self.lease_ms();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = crate::poison::locked(&self.inner);
         sweep(&mut inner, now_ms);
         for key in keys {
             let key = key.as_ref();
@@ -336,7 +336,7 @@ impl CallStore {
     ) -> Vec<Refreshed> {
         let now_ms = self.now_ms();
         let lease_expires_at_ms = now_ms + self.lease_ms();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = crate::poison::locked(&self.inner);
         sweep(&mut inner, now_ms);
         calls
             .into_iter()
@@ -350,7 +350,7 @@ impl CallStore {
     /// it knows nothing of; `None` for a released key).
     pub fn held_set(&self, key: &str) -> Option<HeldSet> {
         let now_ms = self.now_ms();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = crate::poison::locked(&self.inner);
         sweep(&mut inner, now_ms);
         if inner.fences.get(key).is_some_and(|(fence, _)| *fence == Fence::Released) {
             return None;
@@ -362,7 +362,7 @@ impl CallStore {
     /// Returns how many sets lapsed.
     pub fn sweep_now(&self) -> u64 {
         let now_ms = self.now_ms();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = crate::poison::locked(&self.inner);
         let before = inner.lease_expired_calls;
         sweep(&mut inner, now_ms);
         inner.lease_expired_calls - before
@@ -371,7 +371,7 @@ impl CallStore {
     /// The live count `id` holds over every call's set.
     pub fn held(&self, id: &str) -> i64 {
         let now_ms = self.now_ms();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = crate::poison::locked(&self.inner);
         sweep(&mut inner, now_ms);
         inner.counts.get(id).copied().unwrap_or(0)
     }
@@ -379,7 +379,7 @@ impl CallStore {
     /// The number of calls holding a set.
     pub fn calls(&self) -> usize {
         let now_ms = self.now_ms();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = crate::poison::locked(&self.inner);
         sweep(&mut inner, now_ms);
         inner.calls.len()
     }
@@ -387,7 +387,7 @@ impl CallStore {
     /// The gauges and cumulative counters, for metrics.
     pub fn stats(&self) -> StoreStats {
         let now_ms = self.now_ms();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = crate::poison::locked(&self.inner);
         sweep(&mut inner, now_ms);
         StoreStats {
             calls: inner.calls.len() as u64,

@@ -10,9 +10,10 @@
 //! ([`b2bua_core::turn_driver::Session::lose`]), the peers keeping what they
 //! heard.
 
+use b2bua_core::dialog_gate::Verdict;
 use b2bua_core::effects::CriticalStateEffect;
 use b2bua_core::rules::{Match, RuleAction, RuleDefinition, RuleHandleResult, SERVICE_LAYER};
-use b2bua_core::turn_driver::{callee_tag, Driver, Session, Step, Turn};
+use b2bua_core::turn_driver::{callee_tag, Driver, Outcome, Session, Step, Turn};
 use call::{CallModelState, DialogState, Direction};
 use sip_ids::SigningKey;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
@@ -160,6 +161,38 @@ fn a_2xx_to_the_relayed_reinvite_on_its_branch_is_relayed_to_the_caller() {
     let turn = call.turned(Step::AnswersLast("b-1", Method::Invite, 200));
     assert_eq!(turn.rule, Some("relay-reinvite-response"));
     assert_eq!(turn.statuses_to("a"), vec![200]);
+}
+
+/// `raw` with its top Via's branch cookie re-cased: the same branch (RFC 3261
+/// §7.3.1).
+fn recased(raw: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(raw).replacen("branch=z9hG4bK", "branch=Z9HG4BK", 1).into_bytes()
+}
+
+/// The 2xx to the relayed re-INVITE whose branch a hop re-cased is still
+/// the caller's answer: relayed to her, no evidence.
+#[test]
+fn a_2xx_to_the_relayed_reinvite_on_its_branch_recased_is_relayed_to_the_caller() {
+    let driver = Driver::new();
+    let mut call = bridged(&driver);
+    call.run([Step::Sends("a", Method::Invite)]);
+    let outcome = call.step_edited(Step::AnswersLast("b-1", Method::Invite, 200), &recased);
+    let turn = outcome.turn().expect("the 2xx reaches the rules");
+    assert_eq!(turn.rule, Some("relay-reinvite-response"));
+    assert_eq!(turn.statuses_to("a"), vec![200]);
+}
+
+/// This side re-used a number another owner sent: the final to this side's
+/// own request at that number, its branch re-cased, answers that request and
+/// is no evidence.
+#[test]
+fn a_final_at_a_reused_number_on_its_own_branch_recased_is_no_evidence() {
+    let driver = Driver::new();
+    let mut call = losing(bridged(&driver), [Step::Sends("a", Method::Info)]);
+    call.run([Step::Sends("a", Method::Info)]);
+    let outcome = call.step_edited(Step::AnswersHeard("b-1", Method::Info, 1, 200), &recased);
+    let turn = outcome.turn().expect("the final reaches the rules");
+    assert_ne!(turn.rule, Some("evidence-final"));
 }
 
 /// A final at or below the sequence that answers no request held open at its
@@ -482,6 +515,7 @@ fn an_ack_of_a_relayed_reinvite_keeps_the_callees_2xx_acked() {
     call.run([Step::Sends("a", Method::Invite)]);
     let relayed = call.peer("b-1").and_then(|p| p.last_heard().cloned()).expect("bob's re-INVITE");
     let mut call = losing(call, [Step::AnswersSent("b-1", 200)]);
+    call.copy_served(true);
     let turn = call.turned(Step::AliceAcks);
     assert_eq!(turn.rule, Some("evidence-ack"));
     let ack = turn.request_to("b-1", "ACK").expect("bob's 2xx is ACKed");
@@ -490,4 +524,61 @@ fn an_ack_of_a_relayed_reinvite_keeps_the_callees_2xx_acked() {
     let again = call.turned(Step::AnswersLast("b-1", Method::Invite, 200));
     let reack = again.request_to("b-1", "ACK").expect("the repeat of bob's 2xx is ACKed again");
     assert_eq!(reack.cseq().seq(), relayed.cseq().seq());
+}
+
+/// The dialog gate kept an ACK from the rules, as one that proves nothing.
+fn assert_ignored(outcome: &Outcome) {
+    assert!(matches!(outcome, Outcome::Gated(Verdict::UnexplainedAck)), "{outcome:?}");
+}
+
+/// An ACK of a re-INVITE the record never saw is evidence on a call a copy
+/// served: both dialogs BYEd. On a call one node served it proves nothing: the
+/// final it answers may be a stateless refusal the re-INVITE drew before it
+/// reached the call (RFC 3261 §17.1.1.3), which leaves the session unchanged
+/// (§14.1), so no turn reads it.
+#[test]
+fn an_ack_above_the_last_cseq_is_evidence_only_on_a_served_call() {
+    let driver = Driver::new();
+    let unseen = losing(bridged(&driver), [Step::Sends("a", Method::Invite)]);
+
+    let mut served = unseen.clone();
+    served.copy_served(true);
+    let turn = served.turned(Step::AliceAcks);
+    assert_eq!(turn.rule, Some("evidence-ack"));
+    assert!(turn.methods_to("a").iter().any(|(m, _)| m == "BYE"), "the caller's BYE");
+    assert!(turn.methods_to("b-1").iter().any(|(m, _)| m == "BYE"), "the callee's BYE");
+
+    let mut single = unseen;
+    let before = single.call().clone();
+    assert_ignored(single.step(Step::AliceAcks));
+    assert_eq!(single.call(), &before, "the record is untouched");
+    assert_eq!(single.call().state, CallModelState::Active);
+}
+
+/// An ACK at the number of a re-INVITE relayed and untaken, on a call one node
+/// served: no final left this stack, so no 2xx is ACKed by it. No turn reads it,
+/// nothing reaches the callee, and his final still settles the relay.
+#[test]
+fn an_ack_of_an_open_relay_on_a_call_one_node_served_leaves_the_relay_open() {
+    let driver = Driver::new();
+    let mut call = bridged(&driver);
+    call.run([Step::Sends("a", Method::Invite)]);
+    let heard_before = call.peer("b-1").expect("bob").heard.len();
+
+    assert_ignored(call.step(Step::AliceAcks));
+    assert_eq!(call.peer("b-1").expect("bob").heard.len(), heard_before, "nothing reaches bob");
+
+    let turn = call.turned(Step::AnswersLast("b-1", Method::Invite, 200));
+    assert_eq!(turn.rule, Some("relay-reinvite-response"));
+    assert_eq!(turn.statuses_to("a"), vec![200]);
+}
+
+/// The caller's own unanswered INVITE: on a call one node served an ACK naming it
+/// reaches no turn either, whatever tag it names.
+#[test]
+fn an_ack_of_the_unanswered_caller_invite_reaches_no_turn_on_a_call_one_node_served() {
+    let driver = Driver::new();
+    let mut call = losing(ringing(&driver), [Step::ForkAnswers("fork2", 200)]);
+    assert_ignored(call.step(Step::AliceAcks));
+    assert_eq!(call.call().state, CallModelState::Active);
 }

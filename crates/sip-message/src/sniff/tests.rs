@@ -499,8 +499,9 @@ fn the_head_ends_where_the_parser_s_scanner_ends_it() {
         b"INFO sip:b SIP/2.0\r\nContent-Length: 3\r\n\rv=0",
         b"INFO sip:b SIP/2.0\r\nContent-Length: 6\r\n\r\n\x00\xff\r\n\r\n",
     ] {
-        assert_eq!(head_end(raw), header_block(raw).end, "{raw:?}");
-        assert_eq!(body(raw), Some(&raw[header_block(raw).end..]), "{raw:?}");
+        let end = header_block(raw).expect("a header block").end;
+        assert_eq!(head_end(raw), end, "{raw:?}");
+        assert_eq!(body(raw), Some(&raw[end..]), "{raw:?}");
     }
     assert_eq!(body(b"INFO sip:b SIP/2.0\rContent-Length: 3\r"), None, "unterminated by CR");
 }
@@ -509,4 +510,24 @@ fn the_head_ends_where_the_parser_s_scanner_ends_it() {
 fn a_multibyte_character_before_the_cseq_line_is_read_past() {
     let raw = "INVITE sip:bob@192.0.2.20 SIP/2.0\r\nabcd\u{e9}\r\nCSeq: 7 INVITE\r\n\r\n";
     assert_eq!(cseq_number(raw.as_bytes()), Some(7));
+}
+
+#[test]
+fn a_require_lists_100rel_only_when_every_row_reads() {
+    let reliable = b"SIP/2.0 183 OK\r\nRequire: timer\r\nRequire: foo, 100REL\r\n\r\n";
+    assert!(require_has_100rel(reliable), "any row, case aside");
+    assert!(!require_has_100rel(b"SIP/2.0 183 OK\r\nRequire: timer\r\n\r\n"));
+    let unreadable = b"SIP/2.0 183 OK\r\nRequire: 100rel, x y\r\n\r\n";
+    assert!(!require_has_100rel(unreadable), "a row that does not read marks nothing");
+    let one_bad_row = b"SIP/2.0 183 OK\r\nRequire: 100rel\r\nRequire: x y\r\n\r\n";
+    assert!(!require_has_100rel(one_bad_row), "nor does a message holding one");
+}
+
+/// A status line whose SIP-Version is written in another case is a response's
+/// (RFC 3261 §7.1), never a request whose method is the version.
+#[test]
+fn identity_reads_a_status_line_whatever_the_version_case() {
+    let id = identity(b"sip/2.0 180 Ringing\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\n\r\n");
+    assert_eq!((id.status, id.method), (Some(180), None));
+    assert_eq!(id.call_id, Some("c1"));
 }

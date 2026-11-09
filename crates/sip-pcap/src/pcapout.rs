@@ -190,9 +190,14 @@ mod tests {
             dg(2_000_001, "10.0.0.1:5060", "10.0.0.2:5060"),
             dg(1_000_000, "[2001:db8::1]:5060", "[2001:db8::2]:5070"),
         ];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
-        let doc = flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default())
-            .expect("emits");
+        let flows =
+            build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
+        let doc = flows_to_doc(
+            &flows,
+            &DecodeStats::default(),
+            &EnrichOptions::under(sip_message::ToolReading::plain_rfc()),
+        )
+        .expect("emits");
         let (back, stats) = read_back(&doc_to_pcap(&doc).expect("encodes"));
 
         assert_eq!((stats.records, stats.datagrams), (2, 2));
@@ -206,17 +211,23 @@ mod tests {
             ]
         );
         assert!(back.iter().all(|d| d.payload == RAW.as_bytes()));
-        assert_eq!(build_flows(&back, &FlowConfig::default()).stats.sip_messages, 2);
+        assert_eq!(
+            build_flows(&back, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()))
+                .stats
+                .sip_messages,
+            2
+        );
     }
 
     /// The datagrams the parser rejected come back as they were captured.
     #[test]
     fn rejected_datagrams_are_written_as_captured() {
-        let garbage = b"INVITE sip:x SIP/2.0\r\nGarbage\r\n\r\n".to_vec();
+        let garbage = b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nGarbage\r\n\r\n".to_vec();
         let mut rejected = dg(2_000, "10.0.0.1:5060", "10.0.0.2:5060");
         rejected.payload = garbage.clone();
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060"), rejected];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows =
+            build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
         let failed = flows.stats.parse_failed_at.iter().map(|&i| &datagrams[i]);
         let (back, stats) = read_back(&datagrams_to_pcap(failed).expect("encodes"));
         assert_eq!(stats.datagrams, 1);
@@ -226,8 +237,8 @@ mod tests {
         );
     }
 
-    /// An accepted message whose Refer-To the grammar refuses (a bare
-    /// addr-spec with `?headers`, RFC 3261 §20) stays in the model, is counted
+    /// An accepted message whose Refer-To the grammar refuses (a `<` never
+    /// closed, RFC 3261 §25.1) stays in the model, is counted
     /// `header_failed` with its header and reason, and is copied into the
     /// set-aside capture beside the refused datagram, in capture order.
     #[test]
@@ -236,25 +247,30 @@ mod tests {
             Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-r1\r\nMax-Forwards: 70\r\n\
             From: <sip:alice@10.0.0.1>;tag=a1\r\nTo: <sip:bob@10.0.0.2>;tag=b1\r\n\
             Call-ID: refer-1@10.0.0.1\r\nCSeq: 2 REFER\r\nContact: <sip:alice@10.0.0.1>\r\n\
-            Refer-To: sip:carol@192.0.2.9:5060?User-to-User=0430%3Bencoding%3Dhex\r\n\
+            Refer-To: <sip:carol@192.0.2.9:5060\r\n\
             Content-Length: 0\r\n\r\n"
             .to_vec();
         let mut refused = dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060");
-        refused.payload = b"INVITE sip:x SIP/2.0\r\nGarbage\r\n\r\n".to_vec();
+        refused.payload = b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nGarbage\r\n\r\n".to_vec();
         let mut kept = dg(2_000, "10.0.0.1:5060", "10.0.0.2:5060");
         kept.payload = refer.clone();
         let datagrams = vec![kept, refused];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows =
+            build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
         assert_eq!((flows.stats.sip_messages, flows.stats.parse_failed), (1, 1));
         assert_eq!((flows.stats.header_failed, flows.stats.header_failed_at.clone()), (1, vec![0]));
         let failure = &flows.stats.header_failures[0];
         assert_eq!((failure.call_id.as_str(), failure.msg), ("refer-1@10.0.0.1", 0));
         assert_eq!(failure.header, "Refer-To");
-        assert!(failure.reason.contains("bare addr-spec"), "{}", failure.reason);
+        assert!(failure.reason.contains("Refer-To"), "{}", failure.reason);
         assert_eq!(flows.legs[0].msgs.len(), 1, "the message stays in the model");
 
-        let doc = flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default())
-            .expect("emits");
+        let doc = flows_to_doc(
+            &flows,
+            &DecodeStats::default(),
+            &EnrichOptions::under(sip_message::ToolReading::plain_rfc()),
+        )
+        .expect("emits");
         assert_eq!(doc.flow_stats.header_failed, 1);
         assert_eq!(doc.flow_stats.header_failures[0].header, "Refer-To");
 
@@ -266,9 +282,16 @@ mod tests {
 
     #[test]
     fn a_socket_that_is_not_an_address_is_refused_by_name() {
-        let flows = build_flows(&[dg(0, "10.0.0.1:5060", "10.0.0.2:5060")], &FlowConfig::default());
-        let mut doc = flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default())
-            .expect("emits");
+        let flows = build_flows(
+            &[dg(0, "10.0.0.1:5060", "10.0.0.2:5060")],
+            &FlowConfig::standard(sip_message::ToolReading::plain_rfc()),
+        );
+        let mut doc = flows_to_doc(
+            &flows,
+            &DecodeStats::default(),
+            &EnrichOptions::under(sip_message::ToolReading::plain_rfc()),
+        )
+        .expect("emits");
         doc.legs[0].msgs[0].src = "a".into();
         let err = doc_to_pcap(&doc).expect_err("refused");
         assert!(err.contains("leg 0 msg 0") && err.contains("src"), "{err}");

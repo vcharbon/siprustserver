@@ -6,7 +6,7 @@
 
 use pivot_schema::bundle::RecordedMessage;
 
-const HEAD: &str = "INFO sip:b@h SIP/2.0\r\nCSeq: 2 INFO\r\nContent-Type: application/vnd.example.blob\r\nContent-Length: 6\r\n\r\n";
+const HEAD: &str = "INFO sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nCSeq: 2 INFO\r\nContent-Type: application/vnd.example.blob\r\nContent-Length: 6\r\n\r\n";
 
 /// Six bytes, three of them never valid UTF-8 (`ff fe 80` after `00 01 02`).
 const BODY_B64: &str = "AAEC//6A";
@@ -47,7 +47,7 @@ fn an_opaque_line_is_a_recorded_message() {
 
 #[test]
 fn a_text_line_stays_a_text_line() {
-    let line = r#"{"seq":1,"dir":"out","at_us":0,"raw":"INVITE sip:x SIP/2.0\r\n\r\n"}"#;
+    let line = r#"{"seq":1,"dir":"out","at_us":0,"raw":"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\r\n"}"#;
     let message = decode(line).unwrap();
     assert_eq!(serde_json::to_string(&message).unwrap(), line);
 }

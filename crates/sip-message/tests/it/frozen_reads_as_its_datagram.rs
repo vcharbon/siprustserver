@@ -10,7 +10,7 @@ use sip_message::{
 };
 
 fn reread(image: &[u8]) -> SipMessage {
-    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     CustomParser::with_limits(lenient).parse(image).expect("its own datagram reads back")
 }
 
@@ -18,16 +18,16 @@ fn invite() -> RequestDraft {
     RequestDraft::new(Method::Invite, Uri::sip_user("bob", "example.com"))
         .push(Via::udp("10.0.0.1", 5060).with_branch("z9hG4bK-a").with_received("192.0.2.1"))
         .push(Via::tcp("2001:db8::1", 5070).with_branch("z9hG4bK-b").requesting_rport())
-        .push(MaxForwards::new(70))
-        .push(
+        .set(MaxForwards::new(70))
+        .set(
             header::From::from_uri(Uri::sip_user("alice", "example.com").with_port(5062))
                 .with_display("Alice \"A\" Smith")
                 .with_tag("1928")
                 .with_param("x", ParamValue::text("y z")),
         )
-        .push(To::from_uri(Uri::sip_user("bob", "example.com")).with_display("Bob"))
-        .push(CallId::new("a84b4c76e66710@pc33.example.com"))
-        .push(CSeq::new(314159, Method::Invite))
+        .set(To::from_uri(Uri::sip_user("bob", "example.com")).with_display("Bob"))
+        .set(CallId::new("a84b4c76e66710@pc33.example.com"))
+        .set(CSeq::new(314159, Method::Invite))
         .push(Contact::from_uri(
             Uri::sip_user("b2bua", "10.0.0.1")
                 .with_port(5060)
@@ -62,10 +62,10 @@ fn a_frozen_request_holds_what_its_datagram_reads_as() {
 fn a_frozen_response_holds_what_its_datagram_reads_as() {
     let response = ResponseDraft::new(200, "OK")
         .push(Via::udp("10.0.0.1", 5060).with_branch("z9hG4bK-a"))
-        .push(header::From::from_uri(Uri::sip_user("alice", "example.com")).with_tag("1928"))
-        .push(To::from_uri(Uri::sip_user("bob", "example.com")).with_tag("as83kf"))
-        .push(CallId::new("a84b4c76e66710@pc33.example.com"))
-        .push(CSeq::new(314159, Method::Invite))
+        .set(header::From::from_uri(Uri::sip_user("alice", "example.com")).with_tag("1928"))
+        .set(To::from_uri(Uri::sip_user("bob", "example.com")).with_tag("as83kf"))
+        .set(CallId::new("a84b4c76e66710@pc33.example.com"))
+        .set(CSeq::new(314159, Method::Invite))
         .push(Contact::from_uri(Uri::sip_user("bob", "192.0.2.4")))
         .freeze()
         .expect("it freezes");
@@ -89,11 +89,11 @@ fn a_thawed_request_with_typed_edits_holds_what_its_datagram_reads_as() {
 fn options(via: Via, from: header::From, to: To) -> RequestDraft {
     RequestDraft::new(Method::Options, Uri::sip("example.com"))
         .push(via)
-        .push(MaxForwards::new(70))
-        .push(from)
-        .push(to)
-        .push(CallId::new("c1"))
-        .push(CSeq::new(1, Method::Options))
+        .set(MaxForwards::new(70))
+        .set(from)
+        .set(to)
+        .set(CallId::new("c1"))
+        .set(CSeq::new(1, Method::Options))
 }
 
 fn plain_from() -> header::From {
@@ -137,19 +137,19 @@ fn a_user_holding_a_semicolon_and_a_space_freezes_as_its_render_reads() {
 fn a_value_the_lenient_read_refuses_refuses_the_freeze() {
     let empty_branch = RequestDraft::new(Method::Options, Uri::sip("example.com"))
         .push(Via::udp("10.0.0.1", 5060).with_branch(""))
-        .push(MaxForwards::new(70))
-        .push(header::From::from_uri(Uri::sip("example.com")).with_tag("1"))
-        .push(To::from_uri(Uri::sip("example.com")))
-        .push(CallId::new("c1"))
-        .push(CSeq::new(1, Method::Options));
+        .set(MaxForwards::new(70))
+        .set(header::From::from_uri(Uri::sip("example.com")).with_tag("1"))
+        .set(To::from_uri(Uri::sip("example.com")))
+        .set(CallId::new("c1"))
+        .set(CSeq::new(1, Method::Options));
     assert!(empty_branch.freeze().is_err(), "an empty branch is refused");
 
     let empty_tag = RequestDraft::new(Method::Options, Uri::sip("example.com"))
         .push(Via::udp("10.0.0.1", 5060).with_branch("z9hG4bK-1"))
-        .push(MaxForwards::new(70))
-        .push(header::From::from_uri(Uri::sip("example.com")).with_tag(""))
-        .push(To::from_uri(Uri::sip("example.com")))
-        .push(CallId::new("c1"))
-        .push(CSeq::new(1, Method::Options));
+        .set(MaxForwards::new(70))
+        .set(header::From::from_uri(Uri::sip("example.com")).with_tag(""))
+        .set(To::from_uri(Uri::sip("example.com")))
+        .set(CallId::new("c1"))
+        .set(CSeq::new(1, Method::Options));
     assert!(empty_tag.freeze().is_err(), "an empty tag is refused");
 }

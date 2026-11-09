@@ -30,15 +30,49 @@ fn extra_colon_ipv6(text: &str) -> Option<Ipv6Addr> {
     format!("{head}{tail}").parse().ok()
 }
 
-/// The socket address of an IP-literal `host` at `port`. `None` when `host`
-/// is not an IP literal.
+/// The socket address of an IP-literal `host` at `port`, an IPv4-mapped IPv6
+/// address being its IPv4 address, which an IPv4 socket can send to. `None`
+/// when `host` is not an IP literal.
 pub fn ip_socket_addr(host: &str, port: u16) -> Option<SocketAddr> {
-    ip_host(host).map(|ip| SocketAddr::new(ip, port))
+    ip_host(host).map(|ip| SocketAddr::new(ip.to_canonical(), port))
+}
+
+/// Whether two hosts name one host: two IP literals as addresses, an IPv4-mapped
+/// IPv6 address being its IPv4 address; two names case-insensitively, a trailing
+/// dot aside (RFC 3261 §19.1.4). A literal and a name never do.
+pub fn same_host(a: &str, b: &str) -> bool {
+    match (ip_host(a), ip_host(b)) {
+        (Some(a), Some(b)) => a.to_canonical() == b.to_canonical(),
+        (None, None) => {
+            let name = |host: &'_ str| host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+            name(a) == name(b)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosts_compare_as_what_they_name() {
+        for (a, b) in [
+            ("192.0.2.1", "::ffff:192.0.2.1"),
+            ("192.0.2.1", "[::ffff:192.0.2.1]"),
+            ("2001:db8::1", "2001:DB8:0::1"),
+            ("Proxy.Example", "proxy.example."),
+        ] {
+            assert!(same_host(a, b), "{a} {b}");
+        }
+        for (a, b) in [
+            ("192.0.2.1", "192.0.2.2"),
+            ("192.0.2.1", "proxy.example"),
+            ("proxy.example", "other.example"),
+        ] {
+            assert!(!same_host(a, b), "{a} {b}");
+        }
+    }
 
     #[test]
     fn an_ipv4_literal_joins_its_port() {
@@ -60,6 +94,13 @@ mod tests {
             ip_socket_addr("[2001:db8::1]", 5070),
             Some("[2001:db8::1]:5070".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn a_mapped_literal_names_its_ipv4_address() {
+        let v4: SocketAddr = "198.51.100.4:5070".parse().unwrap();
+        assert_eq!(ip_socket_addr("::ffff:198.51.100.4", 5070), Some(v4));
+        assert_eq!(ip_socket_addr("[::ffff:198.51.100.4]", 5070), Some(v4));
     }
 
     #[test]

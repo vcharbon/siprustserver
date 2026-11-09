@@ -6,7 +6,6 @@
 
 use call::helpers::{callee_dialog_mut, fronting_dialog, is_adopted};
 use call::{Call, CallModelState, DialogId, DialogState, LegDisposition};
-use sip_message::header;
 use sip_message::SipResponse;
 
 use crate::rules::relay;
@@ -74,8 +73,7 @@ impl ActionExecutor<'_> {
             .b_legs
             .iter()
             .any(|l| l.leg_id == leg_id && l.disposition() == LegDisposition::Cancelling);
-        let remote_target = contact_uri(resp.header::<header::Contact>(), &call.call_ref, leg_id)
-            .unwrap_or_default();
+        let remote_target = contact_uri(resp.contacts()).unwrap_or_default();
         let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
         if !winner.is_empty() {
             self.track_b_early_dialog(call, leg_id, resp, &winner);
@@ -136,12 +134,12 @@ impl ActionExecutor<'_> {
         if let Some(pref) = preferred.filter(|p| !p.is_empty() && answers_the_caller) {
             adopt_a_tag(call, &pref);
         }
-        // The relayFirst18x / fake-PRACK cache: the body the relay carries
-        // toward the caller, the policy override else the callee's.
+        // The relayFirst18x / fake-PRACK cache: the description the relay
+        // carries toward the caller, the policy override else the callee's,
+        // the description alone wherever the body framed it.
         let answer_body = match call.policy_update_body.clone() {
             Some(call::PolicyUpdateBody::Bytes(b)) => Some(b),
-            _ if !resp.body().is_empty() => Some(resp.body().to_vec()),
-            _ => None,
+            _ => resp.sdp().map(<[u8]>::to_vec),
         };
         if let (Some(body), Some(d)) = (answer_body, own_a_dialog_mut(call)) {
             d.cached_sdp = Some(body);

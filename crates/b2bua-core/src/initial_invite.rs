@@ -168,7 +168,6 @@ pub fn treatment(
     response: Result<NewCallResponse, CallDecisionError>,
     a_invite: &SipRequest,
     config: &B2buaConfig,
-    ids: &mut TurnIds,
     now_ms: i64,
 ) -> Initial {
     let advertisement = &config.minted_final_advertisement;
@@ -183,7 +182,6 @@ pub fn treatment(
             Some("a".into()),
             a_invite,
             advertisement,
-            ids,
             now_ms,
         ),
         Ok(NewCallResponse::Redirect(rd)) => apply_redirect(
@@ -193,7 +191,6 @@ pub fn treatment(
             Some("a".into()),
             a_invite,
             advertisement,
-            ids,
             now_ms,
         ),
         // `Relay` is a failover-only treatment; with no captured downstream
@@ -208,7 +205,6 @@ pub fn treatment(
                 None,
                 &[],
                 advertisement,
-                ids,
                 now_ms,
                 TerminationCause::DecisionReject,
             )
@@ -223,7 +219,6 @@ pub fn treatment(
                 update_headers.as_ref(),
                 a_invite,
                 advertisement,
-                ids,
                 now_ms,
             )
         }
@@ -235,7 +230,6 @@ pub fn treatment(
             None,
             &[],
             advertisement,
-            ids,
             now_ms,
             TerminationCause::Admission,
         ),
@@ -269,45 +263,62 @@ pub fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// here is reported the same way.
 #[allow(clippy::too_many_arguments)]
 pub fn reject_call(
-    mut call: Call,
+    call: Call,
     a_invite: &SipRequest,
     status: u16,
     reason: Option<String>,
     update_headers: Option<&SipHeaderUpdates>,
     contacts: &[RedirectContact],
     advertisement: &CapabilitySet,
-    ids: &mut TurnIds,
     now_ms: i64,
     cause: TerminationCause,
 ) -> HandlerResult {
-    let mut skipped = Vec::new();
-    let reason = reason.unwrap_or_else(|| default_reason(status).to_string());
+    let mut extra_headers = end_to_end_headers(update_headers);
     // A redirect whose target does not read cannot be authored: the caller dials
     // what a 3xx Contact names, so an invented one sends it at an address the
-    // decision never stated. Answer the plain server error instead — the
-    // re-entry carries no contacts, so it always terminates.
-    let mut extra_headers = match build_reject_headers(update_headers, contacts) {
-        Ok(headers) => headers,
+    // decision never stated. Answer the plain server error instead, with no
+    // Contact.
+    match contact_headers(contacts) {
+        Ok(headers) => {
+            extra_headers.extend(headers);
+            let stated = Stated { update_headers, extra_headers, advertisement };
+            reject_with(call, a_invite, status, reason, stated, now_ms, cause)
+        }
         Err(err) => {
             tracing::warn!(
                 call_ref = %call.call_ref,
                 detail = %err.detail(),
                 "redirect refused"
             );
-            return reject_call(
-                call,
-                a_invite,
-                500,
-                Some(err.to_string()),
-                update_headers,
-                &[],
-                advertisement,
-                ids,
-                now_ms,
-                TerminationCause::Admission,
-            );
+            let stated = Stated { update_headers, extra_headers, advertisement };
+            let reason = Some(err.to_string());
+            reject_with(call, a_invite, 500, reason, stated, now_ms, TerminationCause::Admission)
         }
-    };
+    }
+}
+
+/// The headers a rejecting final carries: what the decision stated, the
+/// headers built from it, and the deployment's advertisement.
+struct Stated<'a> {
+    update_headers: Option<&'a SipHeaderUpdates>,
+    extra_headers: Vec<SipHeader>,
+    advertisement: &'a CapabilitySet,
+}
+
+/// The final `status` to the caller under `stated`, and the call ended
+/// ([`reject_call`]).
+fn reject_with(
+    mut call: Call,
+    a_invite: &SipRequest,
+    status: u16,
+    reason: Option<String>,
+    stated: Stated<'_>,
+    now_ms: i64,
+    cause: TerminationCause,
+) -> HandlerResult {
+    let Stated { update_headers, mut extra_headers, advertisement } = stated;
+    let mut skipped = Vec::new();
+    let reason = reason.unwrap_or_else(|| default_reason(status).to_string());
     // A failure final refused in this element's own name carries the
     // deployment's advertisement, each half under the decision's statements.
     if crate::rules::capabilities::is_minted_failure(status) {
@@ -381,19 +392,13 @@ pub fn build_request(invite: &SipRequest) -> NewCallRequest {
     }
 }
 
-/// Build the extra response headers for a reject/redirect: the non-structural
-/// `update_headers` *sets* (e.g. `Reason:`), one line per stated line — its
-/// adds yield to the final as built ([`reject_call`]) — plus one
-/// `Contact: <uri>;q=…` per redirect target. Removals and stack-owned keys are dropped — the response
-/// generator owns the structural set (ADR-0017 X2), including the Contact a
-/// redirect authors from its typed target list.
-/// Errs when a redirect target does not read — the whole redirect is refused,
-/// never partially authored (dropping the unreadable entry would send the caller
-/// at whichever targets happened to parse).
-fn build_reject_headers(
-    update_headers: Option<&SipHeaderUpdates>,
-    contacts: &[RedirectContact],
-) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
+/// The extra response headers a reject/redirect takes from `update_headers`:
+/// the non-structural *sets* (e.g. `Reason:`), one line per stated line — its
+/// adds yield to the final as built ([`reject_call`]). Removals and stack-owned
+/// keys are dropped — the response generator owns the structural set
+/// (ADR-0017 X2), including the Contact a redirect authors from its typed
+/// target list.
+fn end_to_end_headers(update_headers: Option<&SipHeaderUpdates>) -> Vec<SipHeader> {
     let mut out: Vec<SipHeader> = Vec::new();
     if let Some(map) = update_headers {
         for (name, val) in map {
@@ -409,10 +414,17 @@ fn build_reject_headers(
             }
         }
     }
-    for c in contacts {
-        out.push(relay::redirect_contact(&c.uri, c.q)?);
-    }
-    Ok(out)
+    out
+}
+
+/// One `Contact: <uri>;q=…` per redirect target, or the error of the first
+/// that does not read: the whole redirect is refused, never partially
+/// authored (dropping the unreadable entry would send the caller at whichever
+/// targets happened to parse).
+fn contact_headers(
+    contacts: &[RedirectContact],
+) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
+    contacts.iter().map(|c| relay::redirect_contact(&c.uri, c.q)).collect()
 }
 
 #[cfg(test)]

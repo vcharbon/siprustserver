@@ -1,8 +1,9 @@
 //! [`TurnScope`]: what one turn on a call carries from its first gate to its
 //! landing, beside the call itself: the identifiers it draws (ADR-0052 §3),
-//! what it reports (ADR-0052 §4) and the wire faults armed as it started
-//! (ADR-0052 §5).
+//! what it reports (ADR-0052 §4), the wire faults armed as it started
+//! (ADR-0052 §5) and the fuel it spent (ADR-0057 §3).
 
+use b2bua_sdk::config::Cap;
 use sip_ids::TurnIds;
 
 use crate::turn_notes::TurnNotes;
@@ -25,6 +26,13 @@ pub struct TurnScope {
     /// The rule that handled the turn's event, by its id; `None` while no
     /// rule has, and on a turn the framework takes before the rules.
     pub handled_by: Option<&'static str>,
+    /// The actions the turn returned so far, rule and lifecycle actions
+    /// together.
+    actions: u64,
+    /// The cap the turn crossed, once it crossed one.
+    tripped: Option<Cap>,
+    /// The turn is charged for its actions.
+    fueled: bool,
 }
 
 impl TurnScope {
@@ -37,7 +45,40 @@ impl TurnScope {
             faults: WireFaultSet::none(),
             rule: None,
             handled_by: None,
+            actions: 0,
+            tripped: None,
+            fueled: true,
         }
+    }
+
+    /// `self`, charged for no action: the router's own ending of a call,
+    /// whose actions it composed and which ends the call whatever it holds.
+    pub fn unfueled(mut self) -> Self {
+        self.fueled = false;
+        self
+    }
+
+    /// Charge `n` actions to the turn's fuel of `fuel`: `false`, the turn
+    /// tripped, once it holds more than that. A tripped turn charges nothing
+    /// more and runs no action.
+    pub fn charge(&mut self, n: usize, fuel: u64) -> bool {
+        if self.tripped.is_some() {
+            return false;
+        }
+        if !self.fueled {
+            return true;
+        }
+        self.actions = self.actions.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        if self.actions > fuel {
+            self.tripped = Some(Cap::ActionsPerTurn);
+            return false;
+        }
+        true
+    }
+
+    /// The cap the turn crossed, if it crossed one.
+    pub fn tripped(&self) -> Option<Cap> {
+        self.tripped
     }
 
     /// `self`, emitting the wire faults `faults`.

@@ -25,6 +25,14 @@ pub struct AdaptationHttpPort {
 }
 
 impl AdaptationHttpPort {
+    /// This port with its default request budget, and so one attempt's, no
+    /// longer than `cap`.
+    pub fn capped(mut self, cap: std::time::Duration) -> Self {
+        self.default_timeout = self.default_timeout.min(cap);
+        self.attempt = self.attempt.min(self.default_timeout);
+        self
+    }
+
     /// A port to the backend at `base` over `transport`, with the default
     /// client settings and a breaker probing `/`; one attempt fills a
     /// request's budget, `default_timeout` when the effect states none.

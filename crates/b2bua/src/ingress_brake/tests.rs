@@ -72,7 +72,7 @@ Content-Length: 0\r\n\r\n"
 
 fn response_buf() -> Vec<u8> {
     format!(
-        "SIP/2.0 200 OK\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
 Via: SIP/2.0/UDP {FLOODER_IP}:{FLOODER_PORT};branch=z9hG4bK-resp\r\n\
 From: <sip:alice@flooder.test>;tag=alice-tag-r\r\n\
 To: <sip:bob@b2bua.test>;tag=bob-tag-r\r\n\
@@ -90,7 +90,7 @@ type OnBytes = Box<dyn Fn(&[u8], std::net::SocketAddr, usize) -> PreIngressActio
 fn brake_over(refusals: Refusals) -> (OnBytes, IngressBrakeCounters) {
     let counters = IngressBrakeCounters::new();
     let cfg = IngressBrakeConfig { queue_max: 5, threshold_pct: 40 };
-    let hook = build_ingress_brake_hook(cfg, counters.clone(), refusals);
+    let hook = build_ingress_brake_hook(cfg, counters.clone(), refusals, CustomParser::new());
     let on_bytes: OnBytes = Box::new(move |raw, src, depth| {
         hook(&mut Arrival::new(sip_message::Bytes::copy_from_slice(raw)), src, depth)
     });
@@ -300,7 +300,9 @@ fn responses_are_accepted() {
 fn a_malformed_datagram_above_threshold_is_accepted() {
     let (hook, counters) = brake();
     // Looks like an INVITE but does not parse — the normal pipeline owns it.
-    let junk = b"INVITE sip:x SIP/2.0\r\nGarbage".to_vec();
+    let junk =
+        b"INVITE sip:x SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nGarbage"
+            .to_vec();
     assert_eq!(hook(&junk, src(), 99), PreIngressAction::Accept);
     assert_eq!(answered(&counters), 0);
     assert_eq!(answered(&counters), 0);

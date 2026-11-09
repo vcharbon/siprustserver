@@ -1,4 +1,5 @@
 use super::*;
+use crate::header::ParamValue;
 
 fn media(raw: &str) -> MediaType {
     MediaType::parse(&SipStr::owned(raw)).unwrap()
@@ -10,22 +11,22 @@ fn media(raw: &str) -> MediaType {
 #[test]
 fn the_sdp_range_reads_a_bare_body_and_a_framed_part_alike() {
     let bare = sdp().payload;
-    assert_eq!(sdp_range(&media("application/sdp"), &bare), Some(0..bare.len()));
-    assert_eq!(sdp_range(&media("application/sdp"), b""), None);
+    assert_eq!(sdp_range(&media("application/sdp"), None, &bare), Some(0..bare.len()));
+    assert_eq!(sdp_range(&media("application/sdp"), None, b""), None);
 
     let composed = compose("multipart/mixed", &[indata(), sdp()]).unwrap();
-    let range = sdp_range(&media(&composed.content_type), &composed.body)
+    let range = sdp_range(&media(&composed.content_type), None, &composed.body)
         .expect("the framed description is located");
     assert_eq!(&composed.body[range], sdp().payload.as_slice());
 
     let none = compose("multipart/mixed", &[indata()]).unwrap();
-    assert_eq!(sdp_range(&media(&none.content_type), &none.body), None);
+    assert_eq!(sdp_range(&media(&none.content_type), None, &none.body), None);
     let empty =
         compose("multipart/mixed", &[MultipartPart::new("application/sdp", Vec::new()), indata()])
             .unwrap();
-    assert_eq!(sdp_range(&media(&empty.content_type), &empty.body), None, "an empty part");
-    assert_eq!(sdp_range(&media("multipart/mixed"), &composed.body), None, "no boundary");
-    assert_eq!(sdp_range(&media("text/plain"), b"v=0\r\n"), None);
+    assert_eq!(sdp_range(&media(&empty.content_type), None, &empty.body), None, "an empty part");
+    assert_eq!(sdp_range(&media("multipart/mixed"), None, &composed.body), None, "no boundary");
+    assert_eq!(sdp_range(&media("text/plain"), None, b"v=0\r\n"), None);
 }
 
 fn sdp() -> MultipartPart {
@@ -119,8 +120,34 @@ fn a_derived_boundary_never_occurs_inside_a_payload() {
     assert!(!contains(&hostile.payload, used.as_bytes()));
 }
 
+/// A part's head is framed text too: a head line starting with `--` and the
+/// boundary would be a line no reader takes for a delimiter, so the derivation
+/// walks past a boundary any head line holds, a lifted description's head
+/// included.
+#[test]
+fn a_derived_boundary_never_occurs_inside_a_part_head() {
+    let seed = compose("multipart/mixed", &[sdp(), data()]).unwrap();
+    let boundary = seed.content_type.split("boundary=").nth(1).unwrap().to_string();
+    let hostile = data().with_header(format!("--{boundary}x"), "v");
+    let parts = [sdp(), hostile];
+    let composed = compose("multipart/mixed", &parts).unwrap();
+    let used = composed.content_type.split("boundary=").nth(1).unwrap();
+    assert!(framing::frames_cleanly(&composed.body, used), "{used} frames the composed body");
+    assert_eq!(entity_parts(Some(&composed.content_type), &[], &composed.body), parts);
+
+    let framed = frame("source", &[sdp().with_header(format!("--{boundary}x"), "v")]);
+    let attached = attach(Some("multipart/mixed;boundary=source"), &[], &framed, &[data()]);
+    let content_type = attached.content_type.expect("a body");
+    let used = content_type.split("boundary=").nth(1).unwrap();
+    assert!(framing::frames_cleanly(&attached.body, used), "{used} frames the attached body");
+    let lifted = entity_parts(Some(&content_type), &[], &attached.body);
+    assert_eq!(lifted.len(), 2, "{}", String::from_utf8_lossy(&attached.body));
+    assert_eq!(lifted[0].headers, [(format!("--{boundary}x"), "v".to_string())]);
+}
+
 /// A caller that states its own boundary keeps it — and is refused when a
-/// payload holds it, rather than framing a body nothing can split.
+/// part's payload or head holds it, rather than framing a body nothing can
+/// split.
 #[test]
 fn a_stated_boundary_is_honoured_and_a_colliding_one_is_refused() {
     let composed = compose("multipart/mixed;boundary=unique-boundary-1", &[sdp()]).unwrap();
@@ -129,7 +156,12 @@ fn a_stated_boundary_is_honoured_and_a_colliding_one_is_refused() {
     let hostile = MultipartPart::new("text/plain", b"x unique-boundary-1 x".to_vec());
     assert_eq!(
         compose("multipart/mixed;boundary=unique-boundary-1", &[hostile]),
-        Err(MultipartError::BoundaryInPayload { boundary: "unique-boundary-1".into() })
+        Err(MultipartError::BoundaryInPart { boundary: "unique-boundary-1".into() })
+    );
+    let in_head = sdp().with_header("--unique-boundary-1x", "v");
+    assert_eq!(
+        compose("multipart/mixed;boundary=unique-boundary-1", &[in_head]),
+        Err(MultipartError::BoundaryInPart { boundary: "unique-boundary-1".into() })
     );
 }
 
@@ -389,6 +421,137 @@ fn the_description_keeps_its_entity_headers_in_order() {
         parts[0].entity_headers,
         [("Content-Disposition".to_string(), "session".to_string())]
     );
+}
+
+/// `attach` lifts the description [`sdp_range`] locates, with its own part
+/// head: past an `early-session` part to the session's, and out of a nested
+/// `multipart/alternative`.
+#[test]
+fn attach_lifts_the_description_sdp_range_locates() {
+    let early = MultipartPart::new("application/sdp", b"v=0\r\nc=IN IP4 5.6.7.8\r\n".to_vec())
+        .with_header("Content-Disposition", "early-session");
+    let source =
+        compose("multipart/mixed", &[early, sdp().with_header("Content-ID", "<s@x>")]).unwrap();
+    let range = sdp_range(&media(&source.content_type), None, &source.body).unwrap();
+    assert_eq!(&source.body[range], sdp().payload.as_slice());
+    let attached = attach(Some(&source.content_type), &[], &source.body, &[data()]);
+    let boundary = media(attached.content_type.as_deref().unwrap())
+        .param("boundary")
+        .and_then(ParamValue::as_str)
+        .unwrap()
+        .to_string();
+    let parts = decompose(&attached.body, &boundary);
+    assert_eq!(parts.len(), 2, "{parts:?}");
+    assert_eq!(&attached.body[parts[0].offset..][..parts[0].len], sdp().payload.as_slice());
+    assert_eq!(parts[0].entity_headers, [("Content-ID".to_string(), "<s@x>".to_string())]);
+
+    let inner = compose("multipart/alternative", &[location(), sdp()]).unwrap();
+    let nested = compose(
+        "multipart/mixed",
+        &[MultipartPart::new(inner.content_type.clone(), inner.body.clone()), data()],
+    )
+    .unwrap();
+    let range = sdp_range(&media(&nested.content_type), None, &nested.body).unwrap();
+    assert_eq!(&nested.body[range], sdp().payload.as_slice());
+    let attached = attach(Some(&nested.content_type), &[], &nested.body, &[]);
+    assert_eq!(attached.content_type.as_deref(), Some("application/sdp"));
+    assert_eq!(attached.body, sdp().payload);
+}
+
+/// A bare description disposed `early-session` or `render` is no session's,
+/// and `attach` lifts none.
+#[test]
+fn a_bare_description_counts_only_as_a_sessions() {
+    let bare = sdp().payload;
+    let ct = media("application/sdp");
+    assert_eq!(sdp_range(&ct, Some("session;handling=required"), &bare), Some(0..bare.len()));
+    for disposition in ["early-session", "render", "Early-Session;handling=optional", "?"] {
+        assert_eq!(sdp_range(&ct, Some(disposition), &bare), None, "{disposition}");
+    }
+    let message = [("Content-Disposition".to_string(), "early-session".to_string())];
+    let attached = attach(Some("application/sdp"), &message, &bare, &[data()]);
+    assert_eq!(attached.content_type.as_deref(), Some("application/vnd.example.data"));
+}
+
+/// The search goes four multipart levels down, the message's own included.
+#[test]
+fn the_search_stops_at_the_depth_cap() {
+    let nest = |levels: usize| {
+        let mut part = sdp();
+        for _ in 0..levels {
+            let framed = compose("multipart/mixed", &[part]).unwrap();
+            part = MultipartPart::new(framed.content_type, framed.body);
+        }
+        part
+    };
+    let at_cap = nest(4);
+    assert!(sdp_range(&media(&at_cap.content_type), None, &at_cap.payload).is_some());
+    let past = nest(5);
+    assert_eq!(sdp_range(&media(&past.content_type), None, &past.payload), None);
+}
+
+/// A part with no head is `text/plain` and keeps every byte; a part head's
+/// `Content-Length` is one of its headers.
+#[test]
+fn a_part_reads_its_head_and_keeps_its_content() {
+    let body = b"--b\r\n\r\nline one\r\n--b\r\nContent-Type: application/sdp\r\n\
+                 Content-Length: 4\r\n\r\nv=0\n\r\n--b--\r\n";
+    let parts = decompose(body, "b");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].content_type, "text/plain");
+    assert_eq!(&body[parts[0].offset..][..parts[0].len], b"line one");
+    assert_eq!(parts[1].entity_headers, [("Content-Length".to_string(), "4".to_string())]);
+    assert_eq!(&body[parts[1].offset..][..parts[1].len], b"v=0\n", "the 0x0a is content");
+}
+
+/// The description `attach` lifts keeps no `Content-Length` or `MIME-Version`
+/// of its head, and a head line that was not UTF-8 is left out as refused,
+/// never re-framed with a replacement character.
+#[test]
+fn attach_lifts_a_description_head_it_can_write() {
+    let sdp_text = String::from_utf8(sdp().payload).unwrap();
+    let body = [
+        b"--b\r\nContent-Type: application/sdp\r\nContent-Length: 4\r\nMIME-Version: 1.0\r\n\
+          Content-Description: caf\xe9\r\nContent-ID: <s@x>\r\n\r\n"
+            .as_slice(),
+        sdp_text.as_bytes(),
+        b"\r\n--b--\r\n",
+    ]
+    .concat();
+    let attached = attach(Some("multipart/mixed;boundary=b"), &[], &body, &[]);
+    assert_eq!(attached.content_type.as_deref(), Some("application/sdp"));
+    assert_eq!(attached.headers, [("Content-ID".to_string(), "<s@x>".to_string())]);
+    assert_eq!(attached.refused.len(), 1, "{:?}", attached.refused);
+    assert!(attached.refused[0].reason.contains("Content-Description"));
+}
+
+/// Which entity part holds the description: the one `attach` lifts, nested or
+/// not; none for a bare early-session body.
+#[test]
+fn the_description_entity_is_the_part_attach_lifts() {
+    let early = sdp().with_header("Content-Disposition", "early-session");
+    let framed = compose("multipart/mixed", &[early.clone(), indata(), sdp()]).unwrap();
+    assert_eq!(description_entity(Some(&framed.content_type), &[], &framed.body), Some(2));
+    let inner = compose("multipart/alternative", &[location(), sdp()]).unwrap();
+    let nested = compose(
+        "multipart/mixed",
+        &[data(), MultipartPart::new(inner.content_type.clone(), inner.body.clone())],
+    )
+    .unwrap();
+    assert_eq!(description_entity(Some(&nested.content_type), &[], &nested.body), Some(1));
+    assert_eq!(description_entity(Some("application/sdp"), &[], &sdp().payload), Some(0));
+    let disposed = [("Content-Disposition".to_string(), "early-session".to_string())];
+    assert_eq!(description_entity(Some("application/sdp"), &disposed, &sdp().payload), None);
+}
+
+/// RFC 2046 §5.1.5: a `multipart/digest` part stating no type is a message.
+#[test]
+fn a_digest_part_stating_no_type_is_a_message() {
+    let body = b"--b\r\n\r\nFrom: a\r\n--b--\r\n";
+    let parts = entity_parts(Some("multipart/digest;boundary=b"), &[], body);
+    assert_eq!(parts[0].content_type, "message/rfc822");
+    let parts = entity_parts(Some("multipart/mixed;boundary=b"), &[], body);
+    assert_eq!(parts[0].content_type, "text/plain");
 }
 
 /// A body's entity parts: each part of a multipart body, or the bare body

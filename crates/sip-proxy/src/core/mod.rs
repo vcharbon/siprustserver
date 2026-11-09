@@ -13,31 +13,37 @@
 
 mod builder;
 #[cfg(test)]
+mod crossing_tests;
+#[cfg(test)]
 mod departed_originator_tests;
 #[cfg(test)]
 mod dual_face_tests;
-mod face_pick;
 #[cfg(test)]
 mod first_view_tests;
 #[cfg(test)]
 mod liveness_routing_tests;
 #[cfg(test)]
+mod maddr_tests;
+#[cfg(test)]
 mod owner_rule_tests;
 mod request;
 mod response;
+#[cfg(test)]
+mod worker_ack_tests;
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use sip_clock::Clock;
+use sip_message::ip_literal::same_host;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::{parse_datagram, ParserPanicked, UdpEndpoint, UdpPacket};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
-use crate::face::FaceCidrs;
+use crate::face::EgressPolicy;
 use crate::health::FirstView;
 use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
@@ -50,7 +56,6 @@ use crate::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 use crate::trace::ProxyTraces;
 pub use builder::ProxyCoreBuilder;
-use face_pick::FacePickSendEndpoint;
 
 /// The per-peer bucket a failed send belongs in: an oversize datagram accuses
 /// the message, everything else the peer or the socket.
@@ -71,8 +76,7 @@ fn is_dialog_creating(method: &str) -> bool {
 }
 
 /// The **external face** of a dual-face (multi-homed edge) proxy — the second
-/// UDP socket bound on the caller plane, its own advertise, and the internal
-/// CIDR classifier that picks the egress face per destination IP. Handed to
+/// UDP socket bound on the caller plane and its own advertise. Handed to
 /// [`ProxyCoreBuilder::external_face`]; when absent the core is the classic
 /// single-face proxy.
 pub struct ExternalFaceParts {
@@ -80,15 +84,14 @@ pub struct ExternalFaceParts {
     pub endpoint: Box<dyn UdpEndpoint>,
     /// The `host:port` stamped on Via / Record-Route for external-face egress.
     pub advertised: ProxyAddr,
-    /// Destination IP ∈ any listed CIDR → internal face; else external.
-    pub int_cidrs: FaceCidrs,
 }
 
 /// The live external face inside a running core.
 struct ExternalFace {
     endpoint: Arc<dyn UdpEndpoint>,
     advertised: ProxyAddr,
-    int_cidrs: FaceCidrs,
+    /// Off-loop send path for DNS-named targets leaving on this face.
+    named: NamedForwarder,
 }
 
 /// The dependency bundle for a [`ProxyCore`] (avoids a 10-argument
@@ -99,8 +102,8 @@ pub(crate) struct ProxyCoreParts {
     /// The address the proxy stamps on Via / Record-Route (its advertised
     /// `host:port`). Usually the endpoint's bound address.
     pub advertised: ProxyAddr,
-    /// Dual-face mode: the external-plane socket + advertise + face picker.
-    /// `None` → single-face.
+    /// Dual-face mode: the external-plane socket + advertise. `None` →
+    /// single-face.
     pub external: Option<ExternalFaceParts>,
     pub strategy: Arc<dyn RoutingStrategy>,
     pub registry: Arc<dyn WorkerRegistry>,
@@ -132,6 +135,8 @@ pub(crate) struct ProxyCoreParts {
     pub pulse: Arc<ShardPulse>,
     /// The proxy's first worker view, shared with its probe.
     pub first_view: Arc<FirstView>,
+    /// What reads a datagram no intake hook parsed: the process's one parser.
+    pub parser: CustomParser,
 }
 
 /// The stateless proxy.
@@ -140,8 +145,10 @@ pub struct ProxyCore {
     endpoint: Arc<dyn UdpEndpoint>,
     /// The internal-face advertise (single-face mode: THE advertise).
     advertised: ProxyAddr,
-    /// Dual-face mode: the external-plane socket/advertise/picker.
+    /// Dual-face mode: the external-plane socket/advertise.
     external: Option<ExternalFace>,
+    /// Which face a message leaves on.
+    egress: EgressPolicy,
     strategy: Arc<dyn RoutingStrategy>,
     registry: Arc<dyn WorkerRegistry>,
     cancel_lru: Arc<CancelBranchLru>,
@@ -152,7 +159,8 @@ pub struct ProxyCore {
     self_gate: Arc<dyn ProxySelfGate>,
     intake_age: IntakeAgeRecorder,
     parser: CustomParser,
-    /// Off-loop send path for DNS-named targets (cache + single-flight resolve).
+    /// Off-loop send path for DNS-named targets leaving on the internal face
+    /// (cache + single-flight resolve).
     named: NamedForwarder,
     shard: usize,
     pub(super) traces: Arc<ProxyTraces>,
@@ -163,34 +171,28 @@ pub struct ProxyCore {
 impl ProxyCore {
     pub(crate) fn new(parts: ProxyCoreParts) -> Self {
         let endpoint: Arc<dyn UdpEndpoint> = Arc::from(parts.endpoint);
-        let external = parts.external.map(|e| ExternalFace {
-            endpoint: Arc::from(e.endpoint),
-            advertised: e.advertised,
-            int_cidrs: e.int_cidrs,
-        });
-        // The named-target (DNS) forwarder resolves off-path and only then
-        // sends to the resolved SocketAddr; in dual-face mode hand it a
-        // face-picking send seam so a resolved destination still egresses on
-        // the face its IP lives on. Single-face keeps the raw endpoint.
-        let named_ep: Arc<dyn UdpEndpoint> = match &external {
-            Some(ext) => Arc::new(FacePickSendEndpoint {
-                internal: endpoint.clone(),
-                external: ext.endpoint.clone(),
-                int_cidrs: ext.int_cidrs.clone(),
-            }),
-            None => endpoint.clone(),
+        let forwarder = |endpoint: &Arc<dyn UdpEndpoint>| {
+            NamedForwarder::new(
+                endpoint.clone(),
+                parts.resolver.clone(),
+                parts.resolver_cfg,
+                parts.clock.clone(),
+                parts.metrics.clone(),
+            )
         };
-        let named = NamedForwarder::new(
-            named_ep,
-            parts.resolver,
-            parts.resolver_cfg,
-            parts.clock.clone(),
-            parts.metrics.clone(),
-        );
+        let named = forwarder(&endpoint);
+        let external = parts.external.map(|e| {
+            let endpoint: Arc<dyn UdpEndpoint> = Arc::from(e.endpoint);
+            let named = forwarder(&endpoint);
+            ExternalFace { endpoint, advertised: e.advertised, named }
+        });
+        let egress =
+            if external.is_some() { EgressPolicy::Crossing } else { EgressPolicy::SingleFace };
         Self {
             endpoint,
             advertised: parts.advertised,
             external,
+            egress,
             strategy: parts.strategy,
             registry: parts.registry,
             cancel_lru: parts.cancel_lru,
@@ -200,7 +202,7 @@ impl ProxyCore {
             metrics: parts.metrics,
             self_gate: parts.self_gate,
             intake_age: parts.intake_age,
-            parser: CustomParser::default(),
+            parser: parts.parser,
             named,
             shard: parts.shard,
             pulse: parts.pulse,
@@ -225,57 +227,31 @@ impl ProxyCore {
     }
 
     // ── Dual-face plumbing ──────────────────────────────────────────────────
-    // Single-face mode (external = None): every helper below degenerates to
-    // internal endpoint, internal advertise, `is_self_addr` == "matches the
-    // one advertise".
+    // A single-face proxy has one socket and one advertise, the internal ones,
+    // and every message it handles is on that face.
 
-    /// Is `ip` on the internal plane? Single-face: everything is internal.
-    fn ip_is_internal(&self, ip: IpAddr) -> bool {
-        match &self.external {
-            Some(ext) => ext.int_cidrs.contains_ip(ip),
-            None => true,
-        }
-    }
-
-    /// The send socket for a concrete destination (the egress face picker).
-    fn egress_endpoint(&self, dst: SocketAddr) -> &Arc<dyn UdpEndpoint> {
-        match &self.external {
-            Some(ext) if !ext.int_cidrs.contains_ip(dst.ip()) => &ext.endpoint,
+    /// The socket of `face`.
+    fn endpoint_of(&self, face: Face) -> &Arc<dyn UdpEndpoint> {
+        match (&self.external, face) {
+            (Some(ext), Face::External) => &ext.endpoint,
             _ => &self.endpoint,
         }
     }
 
-    /// The metrics label of the face a destination egresses on.
-    fn egress_face(&self, dst: SocketAddr) -> Face {
-        if self.ip_is_internal(dst.ip()) {
-            Face::Internal
-        } else {
-            Face::External
-        }
-    }
-
-    /// The advertise stamped for egress **toward `target`** (the Via sent-by of
-    /// a forwarded request, the proxy hop inside a synthesized ACK). An
-    /// IP-literal target classifies by CIDR; a DNS-named target (a worker-
-    /// outbound b-leg R-URI — callers/callees live on the external plane, the
-    /// worker pool is always IP literals) classifies **external** when a second
-    /// face exists.
-    pub(super) fn egress_advertised(&self, target: &ProxyAddr) -> &ProxyAddr {
-        match &self.external {
-            Some(ext) => match target.to_socket_addr() {
-                Some(sa) if ext.int_cidrs.contains_ip(sa.ip()) => &self.advertised,
-                _ => &ext.advertised,
-            },
-            None => &self.advertised,
-        }
-    }
-
-    /// The advertise of the face `ip` lives on (the ingress-face advertise for
-    /// a request arriving from that source).
-    pub(super) fn advertised_for_ip(&self, ip: IpAddr) -> &ProxyAddr {
-        match &self.external {
-            Some(ext) if !ext.int_cidrs.contains_ip(ip) => &ext.advertised,
+    /// The advertise of `face`: what a Via or Record-Route entry states for a
+    /// message leaving on it, or for later requests to reach the proxy there.
+    pub(super) fn advertised_of(&self, face: Face) -> &ProxyAddr {
+        match (&self.external, face) {
+            (Some(ext), Face::External) => &ext.advertised,
             _ => &self.advertised,
+        }
+    }
+
+    /// The named-target send path of `face`.
+    fn named_of(&self, face: Face) -> &NamedForwarder {
+        match (&self.external, face) {
+            (Some(ext), Face::External) => &ext.named,
+            _ => &self.named,
         }
     }
 
@@ -283,24 +259,33 @@ impl ProxyCore {
     /// self-identity check for Route popping (§16.4), the response top-Via
     /// ownership check (§16.7.3), and Record-Route cookie recovery: in
     /// dual-face mode the proxy's Via/Record-Route entries legitimately carry
-    /// EITHER face's advertise.
+    /// EITHER face's advertise. Hosts compare as what they name
+    /// ([`same_host`]): another spelling of this proxy's address is this proxy.
     pub(super) fn is_self_addr(&self, host: &str, port: u16) -> bool {
-        if host == self.advertised.host && port == self.advertised.port {
-            return true;
-        }
-        match &self.external {
-            Some(ext) => host == ext.advertised.host && port == ext.advertised.port,
-            None => false,
-        }
+        let names = |at: &ProxyAddr| port == at.port && same_host(host, &at.host);
+        names(&self.advertised) || self.external.as_ref().is_some_and(|e| names(&e.advertised))
+    }
+
+    /// Whether `src` is one of this proxy's own addresses: a face's bind or its
+    /// IP-literal advertise. A request from there was forwarded by this proxy
+    /// and came back to it. A face bound to an unspecified address with a name
+    /// or NAT advertise names no source here (ADR-0056, "Residuals").
+    pub(super) fn is_own_source(&self, src: SocketAddr) -> bool {
+        let names = |endpoint: &Arc<dyn UdpEndpoint>, at: &ProxyAddr| {
+            endpoint.local_addr() == src || at.to_socket_addr() == Some(src)
+        };
+        names(&self.endpoint, &self.advertised)
+            || self.external.as_ref().is_some_and(|e| names(&e.endpoint, &e.advertised))
     }
 
     /// Pin + pre-resolve DNS-named forward targets (`PROXY_RESOLVER_PREWARM`)
     /// so their FIRST b-leg forward is a warm cache hit; pinned names are kept
     /// permanently warm by the resolver's proactive refresh. Runs off the
     /// serving path and never blocks the caller (boot must not wait on DNS).
-    /// See [`crate::resolver`].
+    /// See [`crate::resolver`]. A name is a worker's dialled target, so it
+    /// warms the face that request leaves on.
     pub fn prewarm_named_targets(&self, targets: Vec<ProxyAddr>) {
-        self.named.prewarm(targets);
+        self.external.as_ref().map_or(&self.named, |ext| &ext.named).prewarm(targets);
     }
 
     fn now_ms(&self) -> u64 {
@@ -312,30 +297,32 @@ impl ProxyCore {
         self.clock.now_ms().max(0)
     }
 
-    /// Send raw bytes to a [`ProxyAddr`] target. An IP-literal host (the fast
-    /// path: registry workers and the simulated fabric are always IP literals)
-    /// is sent inline; a DNS name — e.g. a `sipp-uas` pod FQDN in a
+    /// Send raw bytes to a [`ProxyAddr`] target, on `face`. An IP-literal host
+    /// (the fast path: registry workers and the simulated fabric are always IP
+    /// literals) is sent inline; a DNS name — e.g. a `sipp-uas` pod FQDN in a
     /// worker-outbound b-leg R-URI — goes through the [`NamedForwarder`], which
     /// serves cache hits inline and resolves misses on a spawned task so the
-    /// recv loop NEVER waits on DNS (see [`crate::resolver`]).
-    async fn send_to(&self, bytes: &[u8], target: &ProxyAddr) {
-        if let Some(dst) = target.to_socket_addr() {
-            self.metrics.record_face_egress(self.egress_face(dst));
-            if let Err(e) = self.egress_endpoint(dst).send_to(bytes, dst).await {
-                self.metrics.record_send_failure();
-                // Per-peer attribution (sip_proxy_peer_failures_total{...,
-                // kind=…}): classify against the registry (a known worker is
-                // internal and always its own series, else external, under the cap), and name an
-                // oversize message as such rather than blaming the peer.
-                self.metrics.record_peer_failure(
-                    &dst,
-                    self.classify_peer(target),
-                    peer_failure_kind(&e),
-                );
-            }
-            return;
-        }
-        self.named.send(bytes, target).await;
+    /// recv loop NEVER waits on DNS (see [`crate::resolver`]). Every refusal is
+    /// counted; the kind of one the socket answered inline is returned, `None`
+    /// when the datagram left or a resolve sends it later.
+    async fn send_to(
+        &self,
+        bytes: &[u8],
+        target: &ProxyAddr,
+        face: Face,
+    ) -> Option<sip_net::SendErrorKind> {
+        self.metrics.record_face_egress(face);
+        let Some(dst) = target.to_socket_addr() else {
+            return self.named_of(face).send(bytes, target).await;
+        };
+        let e = self.endpoint_of(face).send_to(bytes, dst).await.err()?;
+        self.metrics.record_send_failure();
+        // Per-peer attribution (sip_proxy_peer_failures_total{..., kind=…}):
+        // classify against the registry (a known worker is internal and always
+        // its own series, else external, under the cap), and name an oversize
+        // message as such rather than blaming the peer.
+        self.metrics.record_peer_failure(&dst, self.classify_peer(target), peer_failure_kind(&e));
+        Some(e.kind)
     }
 
     /// Classify a forward target internal/external for the per-peer metric: a
@@ -350,18 +337,17 @@ impl ProxyCore {
         }
     }
 
-    /// Reply to the packet's source (egresses on the face the source lives on
-    /// — which is the face the packet arrived on).
-    async fn reply_to_source(&self, bytes: &[u8], src: SocketAddr) {
-        self.metrics.record_face_egress(self.egress_face(src));
-        if let Err(e) = self.egress_endpoint(src).send_to(bytes, src).await {
+    /// Send an own final to `dst`, on `face`, the one its request arrived on.
+    async fn send_response(&self, bytes: &[u8], dst: SocketAddr, face: Face) {
+        self.metrics.record_face_egress(face);
+        if let Err(e) = self.endpoint_of(face).send_to(bytes, dst).await {
             self.metrics.record_send_failure();
-            // The reply source is whoever sent us the packet (typically an
+            // The destination is whoever the request's Via names (typically an
             // upstream UAC/UAS — external); still classify via the registry in
             // case it is a worker.
-            let target = ProxyAddr::from(src);
+            let target = ProxyAddr::from(dst);
             self.metrics.record_peer_failure(
-                &src,
+                &dst,
                 self.classify_peer(&target),
                 peer_failure_kind(&e),
             );
@@ -448,7 +434,7 @@ impl ProxyCore {
                 Ok(Ok(msg)) => msg,
                 Ok(Err(error)) => {
                     crate::refused_sample::sample(src, &error, &raw, now_ms);
-                    self.refuse_unparsed(&error, src).await;
+                    self.refuse_unparsed(&error, src, face).await;
                     self.pulse.waiting(self.shard);
                     continue;
                 }

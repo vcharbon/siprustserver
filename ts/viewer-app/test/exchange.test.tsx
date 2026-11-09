@@ -79,6 +79,27 @@ describe("the exchange pane", () => {
     expect(markup).toContain("&quot;cause&quot;: &quot;NO_ANSWER&quot;")
   })
 
+  it("names the message each exchange follows beside a ladder, and marks those after the selected one", () => {
+    const after = [{ id: "A#1", label: "INVITE" }, { id: "B#2", label: "200 OK" }]
+    const beside = renderToStaticMarkup(
+      <Exchange exchanges={exchanges} ladder={{ after, selectedId: "B#2", onSelect: () => undefined }} />
+    )
+    expect(beside).toContain("after INVITE (A#1)</button>")
+    expect(beside).toContain("after 200 OK (B#2)</button>")
+    expect(beside.match(/class="ledger-entry exchange-marked"/g)).toHaveLength(1)
+    expect(beside).toMatch(/<li class="ledger-entry exchange-marked"><div class="ledger-head"><code class="on">#2 \+3\.100/)
+    const first = renderToStaticMarkup(
+      <Exchange exchanges={exchanges} ladder={{ after: [undefined, after[1]], selectedId: undefined, onSelect: () => undefined }} />
+    )
+    expect(first).toContain("before any message")
+    expect(first).not.toContain("exchange-marked")
+  })
+
+  it("draws no ladder link where it stands alone", () => {
+    expect(markup).not.toContain("exchange-after")
+    expect(markup).not.toContain("exchange-marked")
+  })
+
   it("says so where a run recorded no exchange at all", () => {
     expect(renderToStaticMarkup(<Exchange exchanges={[]} />)).toContain("no exchange")
   })

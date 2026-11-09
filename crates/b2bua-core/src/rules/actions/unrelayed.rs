@@ -1,10 +1,12 @@
 //! The final an in-dialog request draws when the relay it was given to has no
-//! dialog to carry it ([`Unrelayed`]): a relay never leaves its sender to run
-//! out Timer F (RFC 3261 §8.2, §17.2.2).
+//! dialog to carry it, or builds a copy that cannot leave ([`Unrelayed`]): a
+//! relay never leaves its sender to run out Timer F (RFC 3261 §8.2, §17.2.2).
 
 use call::Call;
+use sip_message::datagram::max_udp_payload;
 use sip_message::header::HeaderName;
-use sip_message::{Method, SipHeader, SipStr};
+use sip_message::ip_literal::ip_socket_addr;
+use sip_message::{Method, SipHeader, SipRequest, SipStr};
 
 use crate::effects::HandlerEffects;
 use b2bua_sdk::model::RuleContext;
@@ -30,6 +32,16 @@ pub(super) enum Unrelayed {
     /// The request comes from a leg its service owns (ADR-0014), and no rule
     /// of that service took it: 403 (§21.4.4).
     ServiceOwned,
+    /// Its copy toward the peer is past the largest UDP payload, though the
+    /// request fit: 513 (§21.5.14). A refused re-INVITE leaves the session
+    /// unchanged (§14.1); a non-INVITE draws no 408 (RFC 4320 §4.2).
+    TooLarge,
+}
+
+/// Whether `copy`, bound for `dest`, is past the largest UDP payload of an IP
+/// literal's family. A name next hop is judged where it is sent.
+pub(super) fn too_large(copy: &SipRequest, dest: &(String, u16)) -> bool {
+    ip_socket_addr(&dest.0, dest.1).is_some_and(|at| copy.image().len() > max_udp_payload(at))
 }
 
 impl ActionExecutor<'_> {
@@ -65,6 +77,9 @@ impl ActionExecutor<'_> {
             }
             Unrelayed::ServiceOwned => {
                 self.respond(call, fx, ctx, 403, "Forbidden", &[], None, vec![]);
+            }
+            Unrelayed::TooLarge => {
+                self.respond(call, fx, ctx, 513, "Message Too Large", &[], None, vec![]);
             }
         }
     }

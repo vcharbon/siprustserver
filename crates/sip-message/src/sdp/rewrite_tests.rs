@@ -36,10 +36,12 @@ fn rejected_streams_and_declined_bookings_ride_verbatim() {
     assert_eq!(offers, 1, "only the live stream was offered");
 }
 
-/// A line the m= grammar does not fit is not guessed at.
+/// A line the m= grammar does not fit is not guessed at: the port field is
+/// `port ["/" integer]` (RFC 8866 §9), as the document reader reads it.
 #[test]
 fn an_unparsable_media_line_rides_verbatim() {
-    let sdp = "m=audio\r\nm=audio five RTP/AVP 0\r\n";
+    let sdp =
+        "m=audio\r\nm=audio five RTP/AVP 0\r\nm=audio +5 RTP/AVP 0\r\nm=audio 5/0 RTP/AVP 0\r\n";
     let out = rewrite_connection_and_ports(sdp, None, |_| Some(41000));
     assert_eq!(out, sdp);
 }

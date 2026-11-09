@@ -31,7 +31,7 @@ fn lenient_invite_with_record_route(rr: &str) -> SipRequest {
         CustomParser::new().parse(raw_invite(Some(rr)).as_bytes()).is_err(),
         "the wire parse refuses a recorded route no reader accepts"
     );
-    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     read_invite(Some(rr), &CustomParser::with_limits(lenient))
 }
 

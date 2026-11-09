@@ -28,11 +28,13 @@ impl Obligation for CancelRequestUri {
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if !msg.repeat && msg.is_request("CANCEL") {
                 if let Some(dlg) = st.taker_of(msg) {
-                    let matched = dlg
-                        .open_invites
-                        .iter()
-                        .rev()
-                        .find(|(b, _)| b.is_some() && *b == msg.via_branch);
+                    let matched = dlg.open_invites.iter().rev().find(|(b, _)| {
+                        b.is_some()
+                            && crate::rules::branch::same_branch(
+                                b.as_deref(),
+                                msg.via_branch.as_deref(),
+                            )
+                    });
                     if let Some((_, invite_uri)) = matched {
                         let finding = |d| charge(RuleId::CancelRequestUri, msg, mi, d);
                         let cancel_uri = msg.head.as_deref().and_then(sniff::request_uri);
@@ -88,8 +90,9 @@ impl Obligation for CancelViaBranch {
                         let finding = |d| charge(RuleId::CancelViaBranch, msg, mi, d);
                         if dlg.relays() {
                             out.push(finding(Decision::Undecidable(RELAYED)));
-                        } else if dlg.open_invites.iter().any(|(b, _)| b.as_deref() == Some(branch))
-                        {
+                        } else if dlg.open_invites.iter().any(|(b, _)| {
+                            crate::rules::branch::same_branch(b.as_deref(), Some(branch))
+                        }) {
                             out.push(finding(Decision::Compliant));
                         } else {
                             out.push(finding(Decision::Violated(

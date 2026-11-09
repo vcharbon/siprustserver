@@ -62,6 +62,13 @@ export interface Interface {
   /** Milliseconds this process has spent compiling, waits for another process's build left out. */
   readonly compileMs: Effect.Effect<number>
   readonly decides: Effect.Effect<Decides, ToolUnavailable>
+  /**
+   * The arguments stating the reading the extractor parses every message's
+   * bytes under (`sipflow --reading FILE`), passed to each extraction and
+   * enrichment. Empty, it reads the RFC: no exemption, the parser's default
+   * bounds.
+   */
+  readonly reading: ReadonlyArray<string>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Tools") {}
@@ -82,8 +89,16 @@ export const layer = Layer.succeed(
     generator: unknown("generator"),
     measure: unknown("measure"),
     compileMs: Effect.succeed(0),
-    decides: unknown("decides")
+    decides: unknown("decides"),
+    // No extractor is known either, so no reading reaches one.
+    reading: []
   })
+)
+
+/** The extractor's reading arguments, as the deployment states them. */
+export const reading: Effect.Effect<ReadonlyArray<string>, never, Service> = Effect.map(
+  Service,
+  (tools) => tools.reading
 )
 
 /** A deployment's own tools. */

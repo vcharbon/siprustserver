@@ -7,7 +7,6 @@
 
 use call::{Call, Dialog, DialogState, RetainedEmission};
 use sip_message::generators::{self, GenerateAckFor2xxOpts};
-use sip_message::header;
 
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
@@ -61,8 +60,7 @@ impl ActionExecutor<'_> {
             }
         };
         straggler.our_cseq = straggler.our_cseq.max(i64::from(invite_cseq));
-        if let Some(target) = contact_uri(resp.header::<header::Contact>(), &call.call_ref, leg_id)
-        {
+        if let Some(target) = contact_uri(resp.contacts()) {
             straggler.remote_target = target;
         }
         straggler.route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);

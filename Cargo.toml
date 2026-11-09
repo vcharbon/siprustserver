@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/bounds",
     "crates/lookup-map",
     "crates/sip-message",
     "crates/sip-template",
@@ -122,6 +123,8 @@ async-trait = "0.1"
 # carries the per-service opaque `ext` slices losslessly. See ADR-0008.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The stack left on the running thread, read by a depth guard (`bounds`, ADR-0057 §5).
+stacker = "0.1"
 # E2E test-management JSON model (ADR-0018): authored Test cases / Endpoint
 # configs / Check sets derive `JsonSchema`; `xtask e2e-schema` emits committed
 # `e2e/schemas/*.schema.json` the authored files reference via `$schema`.
@@ -259,6 +262,8 @@ opt-level = 1
 # (tokio, jemalloc, …) use unsafe freely and are unaffected.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# `fuzzing`: set by cargo-fuzz on the fuzz workspace's builds (docs/testing/fuzzing.md).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 # Function-size ceiling (threshold in clippy.toml, 200 lines initially): a
 # function past it is presumed to be several concepts and wants extraction.
@@ -267,8 +272,12 @@ unsafe_code = "forbid"
 # The disallowed lists of clippy.toml are the panic and purity rules of
 # ADR-0051; scripts/panic-sites.py runs them over the tiered crates, so every
 # other clippy run, test code included, holds them at `allow`.
+#
+# A std lock guard held across an `.await` blocks its worker thread on any
+# contender, a deadlock on a current-thread runtime: denied everywhere.
 [workspace.lints.clippy]
 too_many_lines = "warn"
 disallowed_macros = "allow"
 disallowed_methods = "allow"
 disallowed_types = "allow"
+await_holding_lock = "deny"

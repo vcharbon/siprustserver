@@ -3,6 +3,7 @@
 **Status:** accepted (2026-10-12). Amended (2026-10-16): §2, readiness waits for the first
 worker view and ignores acceptance; D4, the VRRP check also reads the first-view latch (ADR-0050).
 D4 superseded (2026-11-03) by ADR-0056; a total backend outage withdraws the routes (ADR-0056 §3).
+Amended (2026-11-05): §2, a view where no worker reads ready routes on the probe's answers (ADR-0050 §11).
 
 **Owner:** `crates/sip-proxy-runner/src/config.rs` and `config/reader.rs` (the
 env grammar and its ranges), `discovery.rs` (the worker pool),
@@ -40,9 +41,12 @@ its family.
    the life of the process. There is no stand-in pool.
 2. **Readiness is "at least one worker `Alive`"**, with no hard timer. The
    proxy is NotReady until its first worker view (ADR-0050 §11) and while no
-   worker is `Alive`, whatever its acceptance. A broken watch
-   never changes readiness: the last listed pool stays, and the OPTIONS probe
-   keeps its health current.
+   worker it routes to is `Alive`, whatever its acceptance. It routes to the
+   workers whose endpoint reads ready; while none does, to every worker present
+   and not terminating, on the probe's answers (ADR-0050 §11), so a fleet read
+   not ready while it answers keeps the proxy ready and a fleet booting silent
+   does not. A broken watch never changes readiness: the last listed pool stays,
+   and the OPTIONS probe keeps its health current.
 3. **Discovery reports its own health.** `sip_proxy_discovery_no_client` is 1
    once a kube client build has failed and while none is built (0 before the
    first attempt ends); `sip_proxy_discovery_watch_broken_since_seconds` is the
@@ -136,7 +140,6 @@ its family.
 |---|---|---|
 | `PROXY_LISTEN`, `PROXY_LISTEN_EXT`, `PROXY_METRICS` | IP literal `ip:port` | `0.0.0.0:5060`, unset, `0.0.0.0:9090` |
 | `PROXY_ADVERTISE`, `PROXY_ADVERTISE_EXT` | `host:port`; required when the listen IP is unspecified | the listen address |
-| `PROXY_FACE_INT_CIDRS` | IPv4 CIDR list; required with `PROXY_LISTEN_EXT` | — |
 | `PROXY_WORKERS` | `id@ip:port,..` | unset: discovery |
 | `PROXY_WORKER_SERVICE` | non-empty | `b2bua-worker` |
 | `PROXY_WORKER_PORT` | 1..65535 | 5060 |

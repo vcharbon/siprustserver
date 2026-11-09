@@ -175,7 +175,7 @@ impl MessageTemplate {
     /// [`from_message_with_limits`](Self::from_message_with_limits) with the
     /// original limits to avoid that.
     pub fn from_message(msg: &SipMessage) -> Self {
-        Self::from_message_with_limits(msg, &sip_message::parser::SipParserLimits::default())
+        Self::from_message_with_limits(msg, &sip_message::parser::SipParserLimits::DEFAULT)
     }
 
     /// [`from_message`](Self::from_message) scanning the wire name-forms under an

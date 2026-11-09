@@ -128,13 +128,6 @@ const CASES: &[Case] = &[
         N,
         Some((100, 400, Growth::Constant)),
     ),
-    case(
-        "read single header",
-        "lines of it",
-        ops::read_single_repeated,
-        ENTRIES,
-        Some((50, 200, Growth::Constant)),
-    ),
     case("read turn set", "header lines", ops::read_turn, N, LINEAR_LINES),
     case("read route_set", "Route lines", ops::read_route_set, ENTRIES, LINEAR_ENTRIES),
     case("read sdp()", "SDP body KiB", ops::read_sdp_kib, KIB, LINEAR_KIB),

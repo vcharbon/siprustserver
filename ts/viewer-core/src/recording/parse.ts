@@ -21,6 +21,8 @@ export interface RecordedMessage {
   readonly atUs: number
   /** The flow step the interpreter was on, when it said so. */
   readonly stepId: string | undefined
+  /** What the interpreter said of the line, when it said anything. */
+  readonly note: string | undefined
   readonly method: string | undefined
   readonly status: number | undefined
   readonly reason: string | undefined
@@ -134,6 +136,7 @@ export const parseRecordingLeg = (
       dir,
       atUs: atUs ?? 0,
       stepId: asString(line["step"]) ?? asString(line["step_id"]),
+      note: asString(line["note"]),
       method,
       status,
       reason: asString(msg?.["reason"]) ?? decoded?.reason,

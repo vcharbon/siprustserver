@@ -68,7 +68,9 @@ pub fn flows_to_doc_selected(
             sip_messages: flows.stats.sip_messages,
             capture_dups: flows.stats.capture_dups,
             parse_failed: flows.stats.parse_failed,
+            parse_failed_by_reason: flows.stats.parse_failed_by_reason.clone(),
             header_failed: flows.stats.header_failed,
+            header_failed_by_reason: flows.stats.header_failed_by_reason.clone(),
             header_failures: flows
                 .stats
                 .header_failures
@@ -118,6 +120,7 @@ fn leg_json(leg: &FlowLeg) -> LegJson {
         final_status: leg.final_status,
         saw_180: leg.saw_180,
         terminated_by: leg.terminated_by.map(|t| t.as_str().to_string()),
+        opening_request_set_aside: leg.opening_request_set_aside,
         tokens: leg.tokens().iter().map(|t| (*t).to_string()).collect(),
         msgs: leg.msgs.iter().map(msg_json).collect(),
     }
@@ -216,6 +219,7 @@ mod tests {
     use crate::flow::{build_flows, FlowConfig};
     use crate::Datagram;
     use serde_json::Value;
+    use sip_message::ToolReading;
 
     fn dg(ts_us: u64, src: &str, dst: &str, payload: &[u8]) -> Datagram {
         Datagram {
@@ -228,13 +232,14 @@ mod tests {
     }
 
     fn json(flows: &Flows, decode: &DecodeStats) -> Value {
-        let doc = flows_to_doc(flows, decode, &EnrichOptions::default()).expect("model enriches");
+        let doc = flows_to_doc(flows, decode, &EnrichOptions::under(ToolReading::plain_rfc()))
+            .expect("model enriches");
         serde_json::to_value(&doc).expect("document serializes")
     }
 
     fn sip_request(method: &str, call_id: &str, cseq: u32, branch: &str, extra: &str) -> Vec<u8> {
         format!(
-            "{method} sip:bob@10.0.0.9 SIP/2.0\r\n\
+            "{method} sip:bob@10.0.0.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
@@ -249,7 +254,7 @@ mod tests {
 
     fn sip_response(status: u16, reason: &str, call_id: &str, cseq: u32, branch: &str) -> Vec<u8> {
         format!(
-            "SIP/2.0 {status} {reason}\r\n\
+            "SIP/2.0 {status} {reason}\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
              To: <sip:bob@10.0.0.9>;tag=t1\r\n\
@@ -272,7 +277,7 @@ mod tests {
             dg(9_000, "10.0.0.9:5060", "10.0.0.2:5062", &ok),
             dg(10_000, "10.0.0.2:5060", "10.0.0.1:5060", &ok),
         ];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         let decode = DecodeStats { records: 4, datagrams: 4, ..Default::default() };
         let v = json(&flows, &decode);
 
@@ -309,7 +314,7 @@ mod tests {
     fn utf8_payload_emits_as_text() {
         let inv = sip_request("INVITE", "emit-raw", 1, "b1", "X-Mixed-Case-HDR: kept\r\n");
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         let v = json(&flows, &DecodeStats::default());
         let m = &v["legs"][0]["msgs"][0];
         assert_eq!(m["raw"].as_str().unwrap().as_bytes(), &inv[..]);
@@ -327,7 +332,7 @@ mod tests {
     fn binary_body_splits_into_head_and_body_b64() {
         let body: Vec<u8> = vec![0x30, 0x82, 0xff, 0x00, 0x9c, 0x01]; // ASN.1-ish
         let mut inv = format!(
-            "INVITE sip:bob@10.0.0.9 SIP/2.0\r\n\
+            "INVITE sip:bob@10.0.0.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKmsd\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:alice@10.0.0.1>;tag=f1\r\n\
@@ -342,7 +347,7 @@ mod tests {
         let head_len = inv.len();
         inv.extend_from_slice(&body);
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         assert_eq!(flows.stats.sip_messages, 1, "binary-body INVITE must parse");
         let v = json(&flows, &DecodeStats::default());
         let m = &v["legs"][0]["msgs"][0];
@@ -369,7 +374,7 @@ mod tests {
     fn a_tail_past_the_content_length_still_splits_the_arm_by_the_bytes() {
         let head = |len: usize| {
             format!(
-                "INVITE sip:bob@10.0.0.9 SIP/2.0\r\n\
+                "INVITE sip:bob@10.0.0.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
                  Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKtail\r\n\
                  Max-Forwards: 70\r\n\
                  From: <sip:alice@10.0.0.1>;tag=f1\r\n\
@@ -386,7 +391,7 @@ mod tests {
             let mut inv = head(declared);
             inv.extend_from_slice(tail);
             let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
-            let flows = build_flows(&datagrams, &FlowConfig::default());
+            let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
             assert_eq!(flows.stats.sip_messages, 1, "Content-Length {declared}: the INVITE parses");
             let v = json(&flows, &DecodeStats::default());
             let m = &v["legs"][0]["msgs"][0];
@@ -438,7 +443,7 @@ mod tests {
             dg(7_000, "10.0.1.1:5060", "10.0.1.5:5060", &adj_a),
             dg(8_000, "10.0.1.5:5062", "10.0.1.9:5060", &adj_b),
         ];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         let v = json(&flows, &DecodeStats::default());
         assert_eq!(v["groups"].as_array().unwrap().len(), 4);
         let tok_ev = &v["groups"][0]["evidence"][0];
@@ -476,9 +481,14 @@ mod tests {
     fn string_form_parses_back() {
         let inv = sip_request("INVITE", "emit-rt", 1, "b1", "");
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
-        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let flows = build_flows(&datagrams, &FlowConfig::standard(ToolReading::plain_rfc()));
         let s = serde_json::to_string(
-            &flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default()).unwrap(),
+            &flows_to_doc(
+                &flows,
+                &DecodeStats::default(),
+                &EnrichOptions::under(ToolReading::plain_rfc()),
+            )
+            .unwrap(),
         )
         .unwrap();
         let back: FlowsDoc = serde_json::from_str(&s).unwrap();

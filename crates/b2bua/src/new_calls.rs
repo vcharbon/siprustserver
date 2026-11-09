@@ -3,8 +3,9 @@
 //! CANCELed it before its turn ran: the call is born and ends at once, with
 //! no decision and no limiter admit) or refused by a rung of the admission
 //! ladder ([`crate::admission`]) before any call state exists, and why. A
-//! cordoned worker's refusal is a refusal too, though its call is born to
-//! write the record of a call no decision reached.
+//! cordoned worker's refusal and the refusal of a turn past its setup budget
+//! are refusals too, though their call is born to write the record of a call
+//! no decision reached.
 //!
 //! A new call is a new initial INVITE (no To-tag). Its first refusal is
 //! counted once, on `b2bua_new_calls_total`, in the class it was judged in;
@@ -70,11 +71,15 @@ pub enum Refusal {
     /// The event-queue gate refused: the worker's transaction event queue is
     /// backed up (ADR-0050 §9).
     EventQueue,
+    /// The setup budget ran out before the INVITE's turn ran (ADR-0022 X1):
+    /// answered the bare 503 before any decision. Its call is born only to
+    /// write its record.
+    SetupBudget,
 }
 
 impl Refusal {
     /// Every reason, in exposition order.
-    pub const ALL: [Refusal; 14] = [
+    pub const ALL: [Refusal; 15] = [
         Refusal::BucketEmpty,
         Refusal::PanicElu,
         Refusal::CapacityCalls,
@@ -89,6 +94,7 @@ impl Refusal {
         Refusal::Cordoned,
         Refusal::Unrecoverable,
         Refusal::EventQueue,
+        Refusal::SetupBudget,
     ];
 
     /// Stable `reason` label.
@@ -108,6 +114,7 @@ impl Refusal {
             Refusal::Cordoned => "cordoned",
             Refusal::Unrecoverable => "unrecoverable",
             Refusal::EventQueue => "event_queue",
+            Refusal::SetupBudget => "setup_budget",
         }
     }
 

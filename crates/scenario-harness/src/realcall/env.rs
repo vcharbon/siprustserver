@@ -136,6 +136,10 @@ pub struct CallEnv<'a> {
     /// responder for a credential, and resend once. A library-consumer seam — no
     /// CLI flag mints one yet.
     pub challenge_responder: Option<Arc<dyn ChallengeResponder>>,
+    /// The longest an actor call waits on one barrier or goal. `None` keeps the
+    /// plan's own ceiling, else the standard re-emission bound; a longer value
+    /// keeps a caller waiting for a final a slow peer still owes it.
+    pub wait_ceiling: Option<Duration>,
     /// Long-hold duration for the OPTIONS-keepalive scenario.
     pub options_hold: Duration,
     /// In-dialog OPTIONS keepalive cadence.
@@ -199,6 +203,7 @@ impl<'a> CallEnv<'a> {
             // Auth is deferred: no responder → no §22.2 retry (a 401/407 is a
             // counted deviation). A consumer wires one via `with_challenge_responder`.
             challenge_responder: None,
+            wait_ceiling: None,
             // Realistic dwell defaults (free under a paused clock).
             options_hold: Duration::from_secs(2),
             options_cadence: Duration::from_secs(1),

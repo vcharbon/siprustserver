@@ -78,7 +78,7 @@ async fn a_reliable_provisional_to_a_relayed_reinvite_is_numbered_by_this_stack(
     assert!(
         re_uas
             .request()
-            .header::<Supported>()
+            .token_set::<Supported>()
             .expect("a Supported")
             .expect("readable Supported")
             .contains("100rel"),
@@ -97,7 +97,10 @@ async fn a_reliable_provisional_to_a_relayed_reinvite_is_numbered_by_this_stack(
     // Alice sees a RELIABLE provisional — under this stack's own sequence.
     let p183 = reinv.expect(183).await;
     assert!(
-        p183.header::<Require>().expect("a Require").expect("readable Require").contains("100rel"),
+        p183.token_set::<Require>()
+            .expect("a Require")
+            .expect("readable Require")
+            .contains("100rel"),
         "Require: 100rel relayed to alice",
     );
     let shown = rseq_of(&p183);
@@ -191,7 +194,7 @@ async fn a_reliable_provisional_to_a_callee_originated_reinvite_is_numbered_by_t
     assert!(
         alice_uas
             .request()
-            .header::<Supported>()
+            .token_set::<Supported>()
             .expect("a Supported")
             .expect("readable Supported")
             .contains("100rel"),
@@ -209,7 +212,10 @@ async fn a_reliable_provisional_to_a_callee_originated_reinvite_is_numbered_by_t
     // Bob sees a RELIABLE provisional — under this stack's own sequence.
     let p183 = reinv.expect(183).await;
     assert!(
-        p183.header::<Require>().expect("a Require").expect("readable Require").contains("100rel"),
+        p183.token_set::<Require>()
+            .expect("a Require")
+            .expect("readable Require")
+            .contains("100rel"),
         "Require: 100rel relayed to bob",
     );
     let shown = rseq_of(&p183);

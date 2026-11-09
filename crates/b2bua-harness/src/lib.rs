@@ -44,7 +44,7 @@ pub mod witness;
 
 pub use backlog::{drop_backlog_answers, send_backlog, BACKLOG_METHOD};
 pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
-pub use proxy_core::{spawn_proxy_core, spawn_proxy_core_with, ExternalProxyFace, ProxyCoreParts};
+pub use proxy_core::{spawn_proxy_core, spawn_proxy_reading, ExternalProxyFace, ProxyCoreParts};
 pub use router_pace::{Pace, RouterPace};
 pub use scene::{B2buaScene, ALICE_PORT, B2BUA_PORT, BOB_PORT};
 pub use settle::settle_until;
@@ -490,9 +490,8 @@ impl B2buaSutBuilder {
             node: None,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
-            // Production default is 300 s (5 min); the paused-clock keepalive
-            // tests advance in 30 s steps, so the harness baseline stays at 30 s.
-            // A scenario can still override via `tune`.
+            // Production default is 300 s; the paused-clock keepalive tests advance
+            // in 30 s steps, so the baseline is 30 s. A scenario overrides via `tune`.
             config.keepalive_interval_sec = 30;
             // Panic-ELU rung: off in the harness baseline. The live
             // sampler reads a paused-clock `Harness::advance` as a saturated loop
@@ -510,6 +509,7 @@ impl B2buaSutBuilder {
                 config,
                 counters.clone(),
                 core.refusals().clone(),
+                core.parser(),
             );
             assert!(slot.set(hook).is_ok(), "the brake is installed once");
             (counters, forced)

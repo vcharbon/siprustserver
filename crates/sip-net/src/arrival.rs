@@ -32,8 +32,9 @@ impl Arrival {
 
     /// The datagram's parse: made by `parser` on the first call, with a
     /// parser panic contained to it, and returned unchanged by every later
-    /// call whatever parser it names. The message shares the datagram's
-    /// buffer.
+    /// call. A process's hook and its consumer hold one configured parser, so
+    /// the reading is the same whichever stage made it. The message shares the
+    /// datagram's buffer.
     pub fn parse(&mut self, parser: &dyn SipParser) -> &ParseOutcome {
         let raw = &self.raw;
         self.parsed.get_or_insert_with(|| {

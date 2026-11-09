@@ -18,10 +18,14 @@ use crate::rules::{Obligation, FAMILIES};
 pub struct RuleId(&'static str);
 
 /// One declared rule: its id, whether a copy of its offence can be relayed
-/// onward, and its body.
+/// onward, whether it judges one message alone, and its body.
 pub struct Rule {
     pub id: RuleId,
     pub relayable: bool,
+    /// The rule's occasion is one message, judged on that message's own
+    /// bytes: it reads no other message of the view, so a view that lacks a
+    /// message of the dialog or transaction still decides it.
+    pub one_message: bool,
     pub body: &'static dyn Obligation,
 }
 
@@ -61,10 +65,12 @@ impl RuleId {
 
 /// Declares a family's rules: one row per rule, its doc line the RFC clause
 /// and contract, `Name = "token"` naming both the `RuleId` constant and the
-/// unit-struct body in scope, and `, relayable` where a forwarded copy carries
-/// the offence. Expands to the `RuleId` constants and the family's `RULES`.
+/// unit-struct body in scope, then its flags: `, relayable` where a forwarded
+/// copy carries the offence, `, one_message` where the rule reads one message
+/// alone ([`Rule::one_message`]). An unknown flag fails the build. Expands to
+/// the `RuleId` constants and the family's `RULES`.
 macro_rules! rules {
-    ($( $(#[doc = $doc:literal])+ $id:ident = $token:literal $(, $flag:ident)?; )+) => {
+    ($( $(#[doc = $doc:literal])+ $id:ident = $token:literal $(, $flag:ident)*; )+) => {
         #[allow(non_upper_case_globals)]
         impl $crate::RuleId {
             $( $(#[doc = $doc])+ pub const $id: $crate::RuleId = $crate::RuleId::declare($token); )+
@@ -74,13 +80,21 @@ macro_rules! rules {
         pub(crate) const RULES: &[$crate::registry::Rule] = &[$(
             $crate::registry::Rule {
                 id: $crate::RuleId::$id,
-                relayable: $crate::registry::rules!(@relayable $($flag)?),
+                relayable: $crate::registry::rules!(@flag relayable; $($flag)*),
+                one_message: $crate::registry::rules!(@flag one_message; $($flag)*),
                 body: &$id,
             },
         )+];
     };
-    (@relayable relayable) => { true };
-    (@relayable) => { false };
+    (@flag $want:ident;) => { false };
+    (@flag relayable; relayable $($rest:ident)*) => { true };
+    (@flag one_message; one_message $($rest:ident)*) => { true };
+    (@flag $want:ident; relayable $($rest:ident)*) => {
+        $crate::registry::rules!(@flag $want; $($rest)*)
+    };
+    (@flag $want:ident; one_message $($rest:ident)*) => {
+        $crate::registry::rules!(@flag $want; $($rest)*)
+    };
 }
 pub(crate) use rules;
 
@@ -188,4 +202,43 @@ impl<'de> Deserialize<'de> for RuleId {
         let token = String::deserialize(deserializer)?;
         token.parse().map_err(|_| serde::de::Error::unknown_variant(&token, &TOKENS))
     }
+}
+
+/// The `one_message` contract, checked where a family's tests judge their
+/// fixtures: every finding of a `one_message` rule over the whole view is the
+/// one it states judging the message alone. Findings compare with their
+/// message index taken out, and a repeat is judged by no rule of the flag.
+#[cfg(test)]
+pub(crate) fn judged_alone(
+    body: &dyn Obligation,
+    wire: &crate::WireView<'_>,
+) -> Vec<crate::Finding> {
+    let whole = body.eval(wire);
+    let Some(first) = whole.first() else { return whole };
+    if !first.rule.rule().one_message {
+        return whole;
+    }
+    let keyed = |findings: &[crate::Finding], at: usize| -> Vec<String> {
+        findings
+            .iter()
+            .map(|f| {
+                format!("{:?}", crate::Finding { anchor: 0, ..f.clone() })
+                    .replace(&format!("_msg: {at},"), "_msg: #,")
+                    .replace(&format!("_msg: {at} "), "_msg: # ")
+            })
+            .collect()
+    };
+    let mut alone = Vec::new();
+    for (at, msg) in wire.msgs.iter().enumerate().filter(|(_, m)| !m.repeat) {
+        let view = crate::WireView { msgs: std::slice::from_ref(msg), obs: wire.obs };
+        alone.extend(keyed(&body.eval(&view), 0).into_iter().map(|f| (at, f)));
+    }
+    let mut seen: Vec<(usize, String)> = whole
+        .iter()
+        .flat_map(|f| keyed(std::slice::from_ref(f), f.anchor).into_iter().map(|k| (f.anchor, k)))
+        .collect();
+    seen.sort();
+    alone.sort();
+    assert_eq!(seen, alone, "{} judges more than one message", first.rule);
+    whole
 }

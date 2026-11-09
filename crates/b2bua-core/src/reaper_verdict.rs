@@ -25,5 +25,5 @@ pub const OUTCOME_MESSAGE_CAP: &str = "message-cap";
 /// Strike-2 verdict: the rules path itself failed (a second panic, or stale
 /// verdicts that never took effect). Deliberately has NO rule — the router's
 /// discharge branch forces the last persisted snapshot terminal and runs it
-/// through `finalize → enforce → process_result` directly.
+/// through `finalize → enforce → commit_turn` directly.
 pub const OUTCOME_DISCHARGE: &str = "discharge";

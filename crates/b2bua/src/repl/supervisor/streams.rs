@@ -29,7 +29,10 @@ impl ReplicationSupervisor {
     /// Whether this node's Backup flow from `peer` confirms a dead verdict
     /// taken at `since` on the incarnation it streams then: `false` once a
     /// frame of that incarnation arrives after `since`, the peer speaking for
-    /// itself; a frame of another generation (the peer restarted) confirms it.
+    /// itself, or a write of another generation, the restarted peer holding
+    /// its calls again. Another generation's frame that writes nothing confirms
+    /// it: a takeover copy made then meets that peer's reclaim write
+    /// (ADR-0047 D7).
     ///
     /// - An open stream is waited on until it ends; one still open a tick past
     ///   the silence bound refutes the verdict, so a silent stream's idle end
@@ -89,6 +92,28 @@ impl ReplicationSupervisor {
             .is_some_and(|rx| rx.borrow().last_frame_at.is_some_and(|at| at > since))
     }
 
+    /// The incarnation generation this node's Backup flow from `peer` last
+    /// heard; `None` before its first frame or for a flow not running.
+    pub fn heard_generation(&self, peer: &str) -> Option<u64> {
+        self.inner
+            .peers()
+            .get(peer)
+            .and_then(|e| e.backup.status_rx.as_ref())
+            .and_then(|rx| rx.borrow().last_frame_gen)
+    }
+
+    /// Whether a write of a later generation than `generation` arrived on the
+    /// Backup flow from `peer`; an older generation's write says nothing of a
+    /// later process. A frame is heard before it is applied, so a write this
+    /// reads `false` for is not in the store yet.
+    pub fn writes_a_later_generation(&self, peer: &str, generation: u64) -> bool {
+        self.inner
+            .peers()
+            .get(peer)
+            .and_then(|e| e.backup.status_rx.as_ref())
+            .is_some_and(|rx| rx.borrow().last_write_gen.is_some_and(|gen| gen > generation))
+    }
+
     /// The longest an open stream from a peer that went silent stays open:
     /// the pullers' idle bound (ADR-0045).
     pub fn silence_bound(&self) -> Duration {
@@ -109,10 +134,14 @@ struct Reading {
 }
 
 impl Reading {
-    /// A frame of the verdict's incarnation arrived after the verdict; with no
-    /// generation heard before it, any frame is of that incarnation.
+    /// The peer speaks for its calls after the verdict: a frame of the
+    /// verdict's incarnation (with no generation heard before it, any frame is
+    /// of that incarnation), or a write of another generation. A restarted
+    /// process writes once it recovered its calls, and a takeover copy made
+    /// after its reclaim write would never meet that write.
     fn heard(self, s: &PullerStatus) -> bool {
-        s.last_frame_at.is_some_and(|at| at > self.since) && !self.another(s)
+        let writing = s.last_write_gen == s.last_frame_gen;
+        s.last_frame_at.is_some_and(|at| at > self.since) && (!self.another(s) || writing)
     }
 
     /// A frame of another generation arrived: the peer restarted, and the

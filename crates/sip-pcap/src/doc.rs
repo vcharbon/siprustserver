@@ -66,11 +66,19 @@ pub struct FlowStatsJson {
     pub sip_messages: u64,
     pub capture_dups: u64,
     pub parse_failed: u64,
+    /// The `parse_failed` datagrams by the key of their refusal reason
+    /// (`sip_message::error::reason_key`). Absent when none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parse_failed_by_reason: BTreeMap<String, u64>,
     /// Ingested messages carrying a non-fatal header reading that failed
     /// (`sip_pcap::header_errors`), set aside beside the `parse_failed` ones.
     /// Absent when none.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub header_failed: u64,
+    /// The `header_failed` messages by the key of each failed reading's
+    /// reason, a message counted once under each key. Absent when none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub header_failed_by_reason: BTreeMap<String, u64>,
     /// Each failed reading of those messages. Absent when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub header_failures: Vec<HeaderFailureJson>,
@@ -85,6 +93,10 @@ pub struct FlowStatsJson {
 
 fn is_zero(n: &u64) -> bool {
     *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One failed non-fatal header reading of an ingested message
@@ -129,6 +141,12 @@ pub struct LegJson {
     pub saw_180: bool,
     /// `"BYE"` | `"CANCEL"` — the first teardown request seen.
     pub terminated_by: Option<String>,
+    /// Extraction refused a request of this Call-ID that opens a dialog or
+    /// transaction (no To-tag, neither ACK nor CANCEL), and no request of that
+    /// method without a To-tag was read on any hop of the leg: the leg lacks
+    /// its opening request. Absent when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub opening_request_set_aside: bool,
     /// Union over all token strategies, sorted and deduped; which strategy a
     /// value came from is in the group evidence.
     pub tokens: Vec<String>,

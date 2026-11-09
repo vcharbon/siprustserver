@@ -25,6 +25,7 @@ fn on(branch: &str, mut m: Msg) -> Msg {
 
 fn msg(at_us: u64, src: &str, dst: &str, kind: Kind, cseq_method: &str) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),
@@ -391,7 +392,7 @@ fn a_branchless_vantage_keys_no_cancellation() {
 /// head the §9.1 rules read.
 fn sent(at_us: u64, method: &str, branch: &str, extra: &str) -> Msg {
     let head = format!(
-        "{method} sip:bob@10.0.0.2 SIP/2.0\r\n\
+        "{method} sip:bob@10.0.0.2 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}\r\n\
              From: <sip:alice@h>;tag=fa\r\n\
              To: <sip:bob@h>\r\n\

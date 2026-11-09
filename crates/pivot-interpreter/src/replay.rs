@@ -81,7 +81,7 @@ pub async fn replay(
         &case,
         canonical,
         config.clone(),
-        Recording::new(),
+        Recording::new(lane.reader.clone()),
         plan.document().timing.settle_budget_ms,
     );
     let outcome = exec::run_recording_into(&plan, config, lane, sut, writer.recording()).await;

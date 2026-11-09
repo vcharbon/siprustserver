@@ -65,35 +65,6 @@ fn the_branch_memo_bounds_are_read() {
     assert!(errors.iter().any(|e| e.contains("PROXY_BRANCH_MEMO_INVITES_PER_CALL")), "{errors:?}");
 }
 
-// ── parse_ext_face_cidrs — dual-face boot rule ───────────────────────────
-
-#[test]
-fn single_face_ignores_cidrs() {
-    assert_eq!(parse_ext_face_cidrs(false, None).unwrap(), None);
-    assert_eq!(parse_ext_face_cidrs(false, Some("10.0.0.0/8")).unwrap(), None);
-}
-
-#[test]
-fn dual_face_requires_cidrs() {
-    let e = parse_ext_face_cidrs(true, None).unwrap_err();
-    assert!(e.contains("PROXY_FACE_INT_CIDRS is REQUIRED"), "{e}");
-    let e = parse_ext_face_cidrs(true, Some("  ")).unwrap_err();
-    assert!(e.contains("REQUIRED"), "blank counts as missing: {e}");
-}
-
-#[test]
-fn dual_face_rejects_unparseable_cidrs() {
-    let e = parse_ext_face_cidrs(true, Some("10.0.0.0/8,bogus")).unwrap_err();
-    assert!(e.contains("bad PROXY_FACE_INT_CIDRS"), "{e}");
-}
-
-#[test]
-fn dual_face_parses_a_valid_list() {
-    let f = parse_ext_face_cidrs(true, Some("10.244.0.0/16,172.20.0.0/16")).unwrap().unwrap();
-    assert!(f.contains_ip("10.244.1.2".parse().unwrap()));
-    assert!(!f.contains_ip("192.168.60.9".parse().unwrap()));
-}
-
 // ── LB_* operator overrides ─────────────────────────────────────────────
 
 /// Each `LB_*` value replaces exactly its field; a coherent set boots.
@@ -206,16 +177,13 @@ fn a_missing_cookie_signing_key_refuses_the_boot() {
 /// would deliver external-plane datagrams to the trusted internal socket.
 #[test]
 fn a_dual_face_wildcard_bind_refuses_the_boot() {
-    let dual = [("PROXY_LISTEN_EXT", "192.0.2.250:5060"), ("PROXY_FACE_INT_CIDRS", "10.0.0.0/8")];
+    let dual = [("PROXY_LISTEN_EXT", "192.0.2.250:5060")];
     boot(&dual).expect("exact binds on both faces boot");
     let internal =
-        [dual[0], dual[1], ("PROXY_LISTEN", "0.0.0.0:5060"), ("PROXY_ADVERTISE", "10.0.0.9:5060")];
+        [dual[0], ("PROXY_LISTEN", "0.0.0.0:5060"), ("PROXY_ADVERTISE", "10.0.0.9:5060")];
     refused(&internal, "PROXY_LISTEN 0.0.0.0:5060");
-    let external = [
-        ("PROXY_LISTEN_EXT", "0.0.0.0:5060"),
-        ("PROXY_ADVERTISE_EXT", "192.0.2.250:5060"),
-        dual[1],
-    ];
+    let external =
+        [("PROXY_LISTEN_EXT", "0.0.0.0:5060"), ("PROXY_ADVERTISE_EXT", "192.0.2.250:5060")];
     refused(&external, "PROXY_LISTEN_EXT 0.0.0.0:5060");
 }
 
@@ -266,4 +234,24 @@ fn the_isolation_window_holds_a_probe_interval_and_its_first_retransmission() {
         ),
         "{errors:?}"
     );
+}
+
+#[test]
+fn no_exemption_is_stated_unless_a_boot_names_one() {
+    assert!(boot(&[]).expect("valid").parser_limits.exemptions.is_empty());
+}
+
+/// A name no exemption has refuses the boot, naming the variable: a typo never
+/// reads as a setting.
+#[test]
+fn an_exemption_no_name_matches_refuses_the_boot() {
+    let refused = boot(&[("SIP_EXEMPTIONS", "not-an-exemption")]).expect_err("refused");
+    assert!(
+        refused.iter().any(|e| e.contains("SIP_EXEMPTIONS") && e.contains("not-an-exemption")),
+        "{refused:?}"
+    );
+    for blank in ["", ",", " , "] {
+        let refused = boot(&[("SIP_EXEMPTIONS", blank)]).expect_err("refused");
+        assert!(refused.iter().any(|e| e.contains("SIP_EXEMPTIONS")), "{blank:?}: {refused:?}");
+    }
 }

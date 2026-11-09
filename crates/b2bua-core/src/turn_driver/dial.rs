@@ -50,8 +50,7 @@ pub(super) fn fold(driver: &Driver, invite: &SipRequest) -> Option<HandlerResult
         let reason = Some("Bad Request - missing From tag".into());
         let advertisement = &config.minted_final_advertisement;
         let cause = TerminationCause::Admission;
-        let ids = &mut turn.ids;
-        reject_call(call, &caller, 400, reason, None, &[], advertisement, ids, 0, cause)
+        reject_call(call, &caller, 400, reason, None, &[], advertisement, 0, cause)
     } else {
         routed(driver, call, &caller, &mut turn)
     };
@@ -68,13 +67,12 @@ pub(super) fn fold(driver: &Driver, invite: &SipRequest) -> Option<HandlerResult
 fn routed(driver: &Driver, call: Call, caller: &SipRequest, turn: &mut TurnScope) -> HandlerResult {
     let config = &driver.config;
     let ids = &mut turn.ids;
-    let result =
-        match route_fold::up_to_admit(call, driver.route.clone(), caller, config, ids, 0, 0) {
-            Admitting::Final(result) => *result,
-            Admitting::Admit(admitting) => {
-                route_fold::admitted(*admitting, caller, config, Owners::none(), ids, 0, 0)
-            }
-        };
+    let result = match route_fold::up_to_admit(call, driver.route.clone(), caller, config, 0, 0) {
+        Admitting::Final(result) => *result,
+        Admitting::Admit(admitting) => {
+            route_fold::admitted(*admitting, caller, config, Owners::none(), ids, 0, 0)
+        }
+    };
     let setup = setup_event(&result.call, caller);
     let mut exec = executor(config, turn);
     seed_services(result, &driver.services, &mut exec, &setup, "a", Direction::FromA)

@@ -7,7 +7,8 @@
 
 use std::fmt::Debug;
 
-use super::echo;
+use super::typed_read::{own_reading, values, ReadLines};
+use super::{break_rule, echo, readable};
 use sip_message::generators::cancel::generate_cancel;
 use sip_message::generators::generate_invalid_request;
 use sip_message::generators::response::{generate_response, retag_response, GenerateResponseOpts};
@@ -72,22 +73,24 @@ impl Digest {
 
 /// The limit sets a datagram is parsed under.
 fn parsers() -> Vec<(&'static str, CustomParser)> {
-    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let lenient = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     let stream =
-        SipParserLimits { framing: sip_message::Framing::Stream, ..SipParserLimits::default() };
+        SipParserLimits { framing: sip_message::Framing::Stream, ..SipParserLimits::DEFAULT };
     let tight =
-        SipParserLimits { max_header_length: 16, max_uri_length: 8, ..SipParserLimits::default() };
+        SipParserLimits { max_header_length: 16, max_uri_length: 8, ..SipParserLimits::DEFAULT };
     vec![
         ("default", CustomParser::new()),
         ("lenient", CustomParser::with_limits(lenient)),
         ("stream", CustomParser::with_limits(stream)),
         ("tight", CustomParser::with_limits(tight)),
+        ("exempting", break_rule::exempting()),
     ]
 }
 
 /// One datagram through every message entry point.
 pub fn message(raw: &[u8], d: &mut Digest) {
     sniffs(raw, d);
+    d.note("stored", &sip_message::read_stored(raw).map(|_| ()));
     for (name, parser) in parsers() {
         let parsed = parser.parse(raw);
         d.note(name, &parsed.as_ref().map(|_| ()));
@@ -98,9 +101,23 @@ pub fn message(raw: &[u8], d: &mut Digest) {
             d.note("shared", &parser.parse_shared(Bytes::copy_from_slice(raw)));
             d.note("header-fields", &parser.parse_header_fields(raw));
         }
-        // The stream and tight sets accept a subset of what these two accept.
-        if let (Ok(msg), "default" | "lenient") = (parsed, name) {
-            parsed_message(&msg, name == "default", d);
+        let Ok(msg) = parsed else { continue };
+        match name {
+            "default" => {
+                parsed_message(&msg, true, d);
+                break_rule::assert_refused(&msg, &parser, name);
+            }
+            "lenient" => parsed_message(&msg, false, d),
+            // An exempted shape reads through every typed reader, and only
+            // the shapes its set names are lifted.
+            "exempting" => {
+                readable::assert_readable(&msg);
+                break_rule::assert_refused(&msg, &parser, name);
+                break_rule::assert_exempted_repeat(&msg, &parser, &CustomParser::new());
+            }
+            // The stream and tight sets accept a subset of what the default
+            // set accepts.
+            _ => {}
         }
     }
 }
@@ -115,6 +132,9 @@ fn invalid_request(error: &sip_message::SipParseError, d: &mut Digest) {
 
 /// What a parsed message answers; `strict` where the wire grammar read it.
 fn parsed_message(msg: &SipMessage, strict: bool, d: &mut Digest) {
+    if strict {
+        readable::assert_readable(msg);
+    }
     d.note("message", msg);
     d.note("serialize", &sip_message::serialize(msg));
     d.note("summary", &sip_message::message_summary(msg));
@@ -165,6 +185,8 @@ fn uri(u: &Uri, d: &mut Digest) {
             u.scheme(),
             u.user(),
             u.host_port(),
+            u.next_hop(),
+            u.maddr(),
             u.is_loose_route(),
             u.user_identity(),
             u.user_digits(),
@@ -177,19 +199,20 @@ fn uri(u: &Uri, d: &mut Digest) {
     d.note("uri-same", &u.same_user_identity(u));
 }
 
-fn read<H: HeaderValue>(msg: &SipMessage, d: &mut Digest) {
-    let one = msg.header::<H>();
+fn read<H: HeaderValue>(msg: &SipMessage, d: &mut Digest)
+where
+    H::Lines: ReadLines<H>,
+{
     let label = H::header_name().to_string();
-    d.note(&label, &one);
-    if let Some(Ok(v)) = &one {
-        d.note(&label, &v.to_wire());
-    }
-    if let Ok(all) = msg.list::<H>() {
-        for v in &all {
-            d.note(&label, &v.to_wire());
+    d.note(&label, &own_reading::<H>(msg));
+    match values::<H>(msg) {
+        Ok(all) => {
+            for v in &all {
+                d.note(&label, &v);
+                d.note(&label, &v.to_wire());
+            }
         }
-    } else {
-        d.note(&label, &"list refused");
+        Err(e) => d.note(&label, &e),
     }
 }
 
@@ -252,10 +275,8 @@ fn typed_reads(msg: &SipMessage, d: &mut Digest) {
         header::Via,
         header::ChargingVector,
     );
-    if let Ok(refer_to) = msg.list::<header::ReferTo>() {
-        for r in &refer_to {
-            uri(r.uri(), d);
-        }
+    if let Some(Ok(refer_to)) = msg.header::<header::ReferTo>() {
+        uri(refer_to.uri(), d);
     }
     if let Ok(pai) = msg.list::<header::PAssertedIdentity>() {
         for p in &pai {
@@ -325,11 +346,13 @@ fn body(msg: &SipMessage, d: &mut Digest) {
     let content_type = raw_text(msg, HeaderName::ContentType).into_iter().next();
     let ct = content_type.as_ref().map(|c| c.as_str());
     d.note("mscml", &mscml::requests_in(ct, body));
+    d.note("mscml-response", &mscml::responses_in(ct, body));
     d.note("sipfrag-status", &sipfrag::status(body));
     d.note("sipfrag-fields", &sipfrag::header_fields(body));
     d.note("entity-parts", &entity_parts(ct, &[], body));
     if let Some(Ok(media_type)) = msg.header::<MediaType>() {
-        d.note("sdp-range", &sdp_range(&media_type, body));
+        let disposition = raw_text(msg, HeaderName::ContentDisposition).into_iter().next();
+        d.note("sdp-range", &sdp_range(&media_type, disposition.as_deref(), body));
         if let Some(boundary) = media_type.params().value("boundary") {
             d.note("decompose", &decompose_multipart(body, boundary));
         }
@@ -345,7 +368,7 @@ fn body(msg: &SipMessage, d: &mut Digest) {
 }
 
 fn request(req: &SipRequest, strict: bool, d: &mut Digest) {
-    d.note("method", &(req.method(), req.version(), req.offers_100rel()));
+    d.note("method", &(req.method(), req.version(), req.offers_100rel().ok()));
     uri(req.request_uri(), d);
     d.note("trace-sample", &sip_message::trace_sample::trace_sample(req));
     d.note("emergency", &sip_message::emergency::is_emergency_request(req));
@@ -477,7 +500,7 @@ pub fn description(a: &[u8], b: &[u8], d: &mut Digest) {
     if let Some(doc) = parse_sdp_body(a) {
         d.note("doc", &doc);
         for m in &doc.media {
-            d.note("direction", &sip_message::extract_direction(m));
+            d.note("direction", &sip_message::extract_direction(&doc, m));
             d.note("rtpmaps", &sip_message::extract_rtpmaps(m));
             d.note("fmtps", &sip_message::extract_fmtps(m));
             d.note("cryptos", &sip_message::extract_cryptos(m));

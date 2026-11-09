@@ -147,12 +147,39 @@ provides:
   announce-only Services among them. The operator firewalls them on the external plane (or binds
   them to the node's internal address).
 - **The internal plane's isolation** of ADR-0048: nothing on the external plane reaches
-  a worker or the proxies' internal face.
+  a worker or the proxies' internal face. That covers the cluster's CIDRs and a router's own
+  addresses on the internal plane, seen from the external side: the proxy's external socket sends
+  to whatever address a peer's Contact names (ADR-0056 §11).
+- **Recommended hardening: `network.externalEgressDrop`.** Off by default. On, each proxy node
+  drops what is sourced from the external VIP and leaves by any other interface, local delivery
+  included, so a peer's Contact naming the internal VIP cannot reach the socket trusted by its face.
+  A target naming a VIP the node holds then fails its send (ADR-0056 §11); off, the proxy answers
+  the request it gets back from its own address 482 Loop Detected.
+- **The external router carries the external VIP's traffic.** Everything a proxy node sends from
+  the external VIP goes to a next hop, a caller on the node's own subnet included. The router
+  forwards such a datagram back out the interface it arrived on, does not drop it on uRPF for its
+  VIP source, and sends no ICMP redirect.
 - Each proxy node's external interface (`network.externalInterface`) and its external BGP
-  peers' addresses on it (`network.externalNextHops`): the proxy's readiness requires the
-  interface up and one of those next hops resolved; their BFD and keepalive traffic keeps them
-  resolved. A lab router also holds a blackhole route per VIP below BGP, so a VIP nobody
-  announces is unreachable instead of following a default route.
+  peers' addresses on it (`network.externalNextHops`), each on the interface's own subnet: the
+  proxy's readiness requires the interface up and one of those next hops resolved; their BFD and
+  keepalive traffic keeps them resolved. While none is resolved after two readings of `FAILED` or
+  `INCOMPLETE`, the proxy sends each next hop one empty UDP datagram to port 9 per
+  `PROXY_EXT_FACE_CHECK_MS` to make the kernel resolve it (ADR-0056 §3), so the routers answer ARP
+  from the proxy nodes and an ACL may drop the datagram, not the ARP. The node's own firewall must
+  let that datagram out (dropped at output the send fails, the proxy warns once per latch, and the
+  latch waits for outside traffic). A lab router also holds a blackhole route per VIP below BGP, so a VIP nobody announces is unreachable instead of following
+  a default route.
+- **Egress over both next hops.** The external VIP's traffic leaves through table 5060, which the
+  chart keeps multipath over every address of `network.externalNextHops` (ADR-0056 §11; the node
+  learns no route over its BGP sessions). A list of one alone keeps sending a worker's finals
+  to a next hop that died with its carrier up, while the other keeps the face usable: a caller
+  who heard a 100 then loses its final once Timer H runs out. The `vip-loopback` init step turns
+  `net.ipv4.fib_multipath_use_neigh` on, so multipath leaves a next hop not resolved, and sets the
+  neighbour timers of every interface from `proxy.neighbour`: such a next hop reads `FAILED`
+  within at most about 11 s by default, a router silent to ARP for 3 s reads dead, and a dead next hop draws 4
+  ARP broadcasts a second from each node (`docs/TUNING.md`).
+- A bond as the external interface monitors its own members (its `miimon` or ARP monitoring is
+  the operator's): the face reads the bond, which stays up while one member lives.
 - The drain grace, `minReadySeconds` and the readiness probe set from the measured
   withdrawal and announcement latency (`proxy.announce.propagationMs`,
   `docs/TUNING.md`).

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Stop the kubelet of the node pod runs on, or else of every node node_selector
+# names, every node when both are empty. Facts: the nodes, the pods they hold in
+# the namespace, the instant.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+if [ -n "$HAKIT_PARAM_POD" ]; then
+  list="$(kubectl -n "$NS" get pod "$HAKIT_PARAM_POD" -o jsonpath='{.spec.nodeName}')"
+elif [ -n "$HAKIT_PARAM_NODE_SELECTOR" ]; then
+  list="$(kubectl get nodes -l "$HAKIT_PARAM_NODE_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+else
+  list="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+fi
+mapfile -t nodes <<<"$list"
+[ -n "${nodes[0]:-}" ] || hk_die "no node names $HAKIT_PARAM_NODE_SELECTOR"
+printf '%s\n' "${nodes[@]}" > "$HAKIT_EVENT_DIR/nodes"
+held="[]"
+for n in "${nodes[@]}"; do
+  pods="$(kubectl -n "$NS" get pods --field-selector "spec.nodeName=$n" -o json)"
+  held="$(jq -c --argjson h "$held" '$h + [.items[].metadata.name]' <<<"$pods")"
+done
+at="$(hk_now_ms)"
+echo "$at" > "$HAKIT_EVENT_DIR/stopped_at_ms"
+for n in "${nodes[@]}"; do docker exec "$n" systemctl stop kubelet; done
+jq -cn --argjson n "$(printf '%s\n' "${nodes[@]}" | jq -Rnc '[inputs]')" --argjson p "$held" --argjson at "$at" \
+  '{nodes: $n, pods: $p, stopped_at_ms: $at, applied_at_ms: $at}'

@@ -49,7 +49,8 @@ pub fn uas_addresses(invite: &SipRequest) -> (String, String) {
 
 /// The transport destination the URI `target` names: a dialog's remote target
 /// or a Request-URI, read whole as a URI (RFC 3261 §12.1), so a `;` in its user
-/// part stays in the user part. The `call` crate keeps dialog targets and route
+/// part stays in the user part, its `maddr` where it has one ([`Uri::next_hop`]).
+/// The `call` crate keeps dialog targets and route
 /// sets as text (it has no sip-message dependency by design, ADR-0008), so
 /// reading one back is a parse; a URI no reader accepts, or whose scheme names
 /// no host, falls back to its own text on the default port, and says so — the
@@ -63,7 +64,7 @@ pub fn target_dest(target: &str) -> (String, u16) {
     });
     match read {
         Ok(uri) => {
-            let (host, port) = uri.host_port();
+            let (host, port) = uri.next_hop();
             (host.to_string(), port)
         }
         Err(err) => {
@@ -97,6 +98,19 @@ mod tests {
         ] {
             assert_eq!(target_dest(target), ("192.0.2.10".to_string(), 5070), "{target}");
         }
+    }
+
+    /// RFC 3263 §4: `maddr` is the target, at the URI's own port or the default.
+    #[test]
+    fn a_targets_maddr_is_its_destination() {
+        assert_eq!(
+            target_dest("sip:bob@name.example:5070;maddr=192.0.2.9"),
+            ("192.0.2.9".to_string(), 5070)
+        );
+        assert_eq!(
+            target_dest("sip:bob@name.example;maddr=[2001:db8::9]"),
+            ("2001:db8::9".to_string(), 5060)
+        );
     }
 
     /// A target whose scheme names no host resolves to no part of its text.

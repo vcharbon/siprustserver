@@ -13,12 +13,16 @@ each runner's startup check.
 | proxy PROXY_DRAIN_GRACE_MS > `readinessProbe.periodSeconds` × `failureThreshold` + `announce.propagationMs` | a draining proxy keeps forwarding until its node's route is out of the routers' tables (ADR-0056) |
 | proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.propagationMs` | a rollout stops the next proxy only once the replaced one is back in the routers' tables |
 | proxy HEALTH_ISOLATION_MS + 2 × `routeGuard.pollMs` + `bfd.detectMultiplier` × max(`bfd.receiveIntervalMs`, `bfd.transmitIntervalMs`) ≤ `routeGuard.withdrawWithinMs` (route guard on) | a proxy cut off every worker leaves the routers' ECMP within the bound (ADR-0056 §10) |
-| proxy PROXY_EXT_FACE_CHECK_MS + 2 × `routeGuard.pollMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a proxy whose external interface or link is lost leaves it within the bound; a next hop dying with its carrier up reads unresolved only after the neighbour table's STALE/DELAY/PROBE cycle, tens of seconds, outside the bound |
+| 2 × proxy PROXY_EXT_FACE_CHECK_MS + 2 × `routeGuard.pollMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a proxy whose external link is lost, read down twice in a row, leaves it within the bound |
+| 1.5 × `neighbour.baseReachableTimeMs` + `neighbour.delayFirstProbeSeconds` + `neighbour.ucastSolicit` × `neighbour.retransTimeMs` + the next packet 1 s + 2 × proxy PROXY_EXT_FACE_CHECK_MS, and with the route guard on + 2 × `routeGuard.pollMs` + the BFD detection time, ≤ 32000 ms | a next hop dying with its carrier up leaves the node's egress, and with no next hop left the node leaves the routers' ECMP, while a final retransmitted through it can still reach its caller inside Timer H (64 × T1); it stays outside the 3.4 s bound |
+| 2 × `neighbour.retransTimeMs` ≤ proxy PROXY_EXT_FACE_CHECK_MS | when the first ARP retry after a carrier flap is answered, the flap's INCOMPLETE aftermath meets one reading only, which holds the face; a router answering later latches the face until the solicit is answered |
 | `routeGuard.deadMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a hung or dead proxy, whose guard stops refreshing, leaves it within the bound |
 | proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.metallb.connectTimeSeconds` + 2 s (route guard on) | the pod is Ready once its guard let the node out; its BGP sessions are back before the rollout stops the next proxy |
 | proxy PROXY_METRICS keeps port 9090 | the readiness and liveness probes and the route guard read the proxy there |
 | proxy `announce.port` ≠ the metrics port 9090 and ≠ `network.sipPort` | the announce-only Services expose nothing kube-proxy would forward to a listener |
 | `proxy.nodeSelector` set | the workers' node affinity keeps them off every node it names: a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056 §7) |
+| `network.externalNextHops` set | traffic from the external VIP leaves only through the table these next hops fill (ADR-0056 §11): with none, nothing reaches a caller |
+| `proxy.egressRoutes.periodSeconds` × 1000 < `routeGuard.holdMs` (route guard on) | the table's next hops are installed before the guard lets the node out |
 | `network.externalNextHops` = the addresses of `proxy.announce.metallb.peers.external` (MetalLB objects rendered) | the face check reads next hops whose BFD and keepalive traffic keeps them resolved |
 | `worker.replication.enabled` ⇒ `worker.replicas` ≥ 2 | a backup lives on another worker |
 | `worker.replication.enabled` ⇒ worker B2BUA_REPL_MAX_CONNECTIONS ≥ 4 × (`worker.replicas` − 1) | ADR-0045 item 5 |
@@ -109,6 +113,21 @@ operator's to keep consistent.
 {{- if le (mul (int64 $p.minReadySeconds) 1000) (add (mul $period 1000) $propagation) }}
 {{- fail (printf "proxy.minReadySeconds=%d s must exceed proxy.readinessProbe.periodSeconds=%d s + proxy.announce.propagationMs=%d: a rollout would stop the next proxy before the replaced one is announced" (int64 $p.minReadySeconds) $period $propagation) }}
 {{- end }}
+{{- $faceCheck := include "siprust.envInt" (list $penv "PROXY_EXT_FACE_CHECK_MS" 500) | int64 }}
+{{- $n := $p.neighbour }}
+{{- /* The entry leaves STALE at the next packet, up to 1 s later with its session's BFD down. */ -}}
+{{- $deadHop := add (div (mul 3 (int64 $n.baseReachableTimeMs)) 2) (mul (int64 $n.delayFirstProbeSeconds) 1000) (mul (int64 $n.ucastSolicit) (int64 $n.retransTimeMs)) 1000 (mul 2 $faceCheck) }}
+{{- $guardWithdrawal := 0 }}
+{{- if $p.routeGuard.enabled }}
+{{- $guardBfd := $p.announce.metallb.bfd }}
+{{- $guardWithdrawal = add (mul 2 (int64 $p.routeGuard.pollMs)) (mul (int64 $guardBfd.detectMultiplier) (max (int64 $guardBfd.receiveIntervalMs) (int64 $guardBfd.transmitIntervalMs))) }}
+{{- end }}
+{{- if gt (add $deadHop $guardWithdrawal) 32000 }}
+{{- fail (printf "1.5 × proxy.neighbour.baseReachableTimeMs=%d + proxy.neighbour.delayFirstProbeSeconds=%d s + proxy.neighbour.ucastSolicit=%d × proxy.neighbour.retransTimeMs=%d + the next packet 1000 ms + 2 × proxy PROXY_EXT_FACE_CHECK_MS=%d + the route guard's two readings and the BFD detection %d ms = %d ms must not exceed 32000 ms, RFC 3261 Timer H: a next hop dying with its carrier up would swallow a final until its transaction gives up" (int64 $n.baseReachableTimeMs) (int64 $n.delayFirstProbeSeconds) (int64 $n.ucastSolicit) (int64 $n.retransTimeMs) $faceCheck $guardWithdrawal (add $deadHop $guardWithdrawal)) }}
+{{- end }}
+{{- if gt (mul 2 (int64 $n.retransTimeMs)) $faceCheck }}
+{{- fail (printf "2 × proxy.neighbour.retransTimeMs=%d must not exceed proxy PROXY_EXT_FACE_CHECK_MS=%d: a carrier flap's INCOMPLETE aftermath would meet two readings and latch the face" (int64 $n.retransTimeMs) $faceCheck) }}
+{{- end }}
 {{- if $p.routeGuard.enabled }}
 {{- $g := $p.routeGuard }}
 {{- $bfd := $p.announce.metallb.bfd }}
@@ -116,10 +135,10 @@ operator's to keep consistent.
 {{- $interval := max (int64 $bfd.receiveIntervalMs) (int64 $bfd.transmitIntervalMs) }}
 {{- $within := int64 $g.withdrawWithinMs }}
 {{- $poll := int64 $g.pollMs }}
-{{- /* The guard withdraws on its second unfit reading (route-guard UNFIT_READINGS). */ -}}
+{{- /* The guard withdraws on its second unfit reading (route-guard UNFIT_READINGS); the face reads down on its second reading of the link (external_face.rs). */ -}}
 {{- $paths := list
   (list (printf "proxy HEALTH_ISOLATION_MS=%d" (include "siprust.envInt" (list $penv "HEALTH_ISOLATION_MS" 2000) | int64)) (include "siprust.envInt" (list $penv "HEALTH_ISOLATION_MS" 2000) | int64) 2 "a proxy cut off every worker")
-  (list (printf "proxy PROXY_EXT_FACE_CHECK_MS=%d" (include "siprust.envInt" (list $penv "PROXY_EXT_FACE_CHECK_MS" 500) | int64)) (include "siprust.envInt" (list $penv "PROXY_EXT_FACE_CHECK_MS" 500) | int64) 2 "a proxy whose external interface or link is lost")
+  (list (printf "2 × proxy PROXY_EXT_FACE_CHECK_MS=%d" $faceCheck) (mul 2 $faceCheck) 2 "a proxy whose external link is lost")
   (list (printf "proxy.routeGuard.deadMs=%d" (int64 $g.deadMs)) (int64 $g.deadMs) 0 "a hung or dead proxy") }}
 {{- range $paths }}
 {{- $name := index . 0 }}{{- $detect := index . 1 }}{{- $readings := index . 2 }}{{- $what := index . 3 }}
@@ -139,6 +158,12 @@ operator's to keep consistent.
 {{- end }}
 {{- if not $p.nodeSelector }}
 {{- fail "proxy.nodeSelector is required: the workers' node affinity keeps them off every node it names, since a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056)" }}
+{{- end }}
+{{- if not .Values.network.externalNextHops }}
+{{- fail "network.externalNextHops is required: traffic from the external VIP leaves only through the table these next hops fill (ADR-0056 §11), so with none nothing reaches a caller" }}
+{{- end }}
+{{- if and $p.routeGuard.enabled (ge (mul (int64 $p.egressRoutes.periodSeconds) 1000) (int64 $p.routeGuard.holdMs)) }}
+{{- fail (printf "proxy.egressRoutes.periodSeconds=%d s must stay below proxy.routeGuard.holdMs=%d ms: the guard would let the node out before the external VIP's table holds its next hops" (int64 $p.egressRoutes.periodSeconds) (int64 $p.routeGuard.holdMs)) }}
 {{- end }}
 {{- if $p.announce.metallb.enabled }}
 {{- $peers := list }}

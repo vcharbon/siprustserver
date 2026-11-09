@@ -35,6 +35,7 @@ describe("the summary page's place", () => {
       labels: [],
       checked: {},
     scope: null,
+    selection: null,
       lanes: [{
         lane: "l",
         runId: id,
@@ -42,11 +43,13 @@ describe("the summary page's place", () => {
         status: "done",
         detail: null,
         skipped: 0,
+        excluded: [],
         results: caseIds.map((caseId) => ({ caseId, outcome: "pass" as const, cell: null, log: null, detail: null, checks: [] }))
       }]
     })
     const view: Campaign = {
       capture: "c",
+      title: null,
       env: "env-a",
       envs: ["env-a"],
       launch: null,
@@ -63,10 +66,12 @@ describe("the summary page's place", () => {
 
   it("reads its full runs, a partial run only where asked by id", () => {
     const run = (id: number, scope: string | null) => ({
-      id, env: null, startedAt: "", finishedAt: null, labels: [], checked: {}, scope, lanes: []
+      id, env: null, startedAt: "", finishedAt: null, labels: [], checked: {}, scope, selection: null, lanes: []
     })
     const view: Campaign = {
-      capture: "c", env: null, envs: [], launch: null, own: null, saidLabel: "s", sides: [], lanes: [], cases: [],
+      capture: "c",
+      title: null,
+      env: null, envs: [], launch: null, own: null, saidLabel: "s", sides: [], lanes: [], cases: [],
       runs: [run(3, "Routing/x [a]"), run(2, null), run(1, null)]
     }
     expect(summaryOf(view, undefined).runs.map((r) => r.id)).toEqual([2, 1])

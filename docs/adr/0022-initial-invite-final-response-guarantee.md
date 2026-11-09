@@ -5,6 +5,9 @@ INVITE response bound for a dead worker fails over on the cookie of its Record-R
 Amended (2026-10-12): X4 and X5, a caller that heard the 100 is answered when its worker departs (ADR-0047).
 Amended (2026-10-23): the first provisional of an INVITE leaves after the call's write,
 up to a cap (ADR-0055 §3).
+Amended (2026-11-04): X1, one setup budget from the INVITE's receipt to its final; X3, a limiter
+chain that ends with no route is an internal error, and every final the stack mints for an initial
+INVITE has a class.
 
 ## Context
 
@@ -52,7 +55,7 @@ deliberately transaction-less and cannot produce "100-then-silence".
 
 The bound is enforced in the **core**, not in the adapter, so it holds
 *structurally* no matter how the injected `CallDecisionEngine` is written.
-`b2bua::decision::DeadlineDecisionEngine::wrap(engine, call_control_timeout_ms)`
+`b2bua::decision::DeadlineDecisionEngine::wrap(engine, config.call_control_timeout())`
 wraps whatever engine the host injects, at `B2buaCore::spawn_with_overload`,
 *after* the harness `tune` seam has finalized the config — so no injection path
 (tests included) can bypass it. Each wrapped call rides `tokio::time::timeout`
@@ -62,9 +65,10 @@ response. The expired inner future is dropped — for an HTTP adapter that cance
 the in-flight request, exactly like the TS `Effect.timeoutOrElse`.
 
 Config: `call_control_timeout_ms`, default **5000** (TS `CALL_CONTROL_*_TIMEOUT_MS`
-parity), env `B2BUA_CALL_CONTROL_TIMEOUT_MS`; `<= 0` disables (the escape hatch
-the reaper wedge test uses to exercise the abort-escalation ladder against a
-*genuinely* wedged await).
+parity), env `B2BUA_CALL_CONTROL_TIMEOUT_MS`. It is a deadline, never a switch:
+`B2buaConfig::validate` refuses `<= 0` at startup, and the one reader,
+`B2buaConfig::call_control_timeout`, gives a harness config that writes it anyway
+the default. No consult runs unbounded while it holds its call's lock.
 
 **Scope — `new_call` + `call_failure`, deliberately NOT `call_refer`.** These two
 are the decision calls that can block a caller waiting behind the INVITE's
@@ -77,6 +81,46 @@ bounded instead by the dedicated `refer_subscription_expiry_sec` (60 s) and
 This is a **documented divergence** from the TS `callControlReferTimeoutMs`: the
 Rust port bounds the REFER lifecycle with those subscription timers rather than a
 decision deadline, so `call_refer` passes straight through the wrapper.
+
+**One setup budget, from the INVITE's receipt to its final** (`b2bua::setup_budget`).
+On an initial INVITE's turn `call_control_timeout_ms` bounds the whole setup, not each
+round trip: a caller behind the 100 waits for all of it together. The budget runs from
+the instant the transaction layer opened the INVITE's server transaction
+(`TransactionEvent::Message::opened_at`), through the event queue and the router, and a
+retransmission moves nothing: the transaction absorbs it (RFC 3261 §17.2.3). A copy on a
+new branch (§8.2.2.2) opened a transaction of its own and heard its own 100: it is no new
+call, but its turn stops waiting at its own budget and answers its 482. It covers the wait for the turn's
+handler permits, the decision round trips with their retries, the limiter's admits and
+the failover chain they start. It has one check and one deadline:
+
+- **At the permit.** A turn stops waiting at the deadline and runs holding no permit
+  (`Runnable::due_by`). One whose budget is spent as it starts asks nothing: its caller
+  gets the 503 of an unavailable decision (X3), its call born only to write its record,
+  and the INVITE is counted once as `setup_budget` on `b2bua_new_calls_total`. A setup
+  its caller CANCELed first ends as cancelled, with no second final. This is no admission
+  rung: no rung of ADR-0037 reads it, and an emergency INVITE is held to it too, since a
+  caller left waiting serves nobody.
+- **On the turn.** `DeadlineDecisionEngine` is the one bound on a round trip: a consult
+  on a setup's turn is bounded by what is left of the budget and fails `Unavailable` at
+  the deadline, asking nothing once it is spent, and the admit of each route is cut there
+  as an unavailable limiter. A route the budget ran out on dials nothing: it ends
+  `Refused`, the caller gets the bare 503 wherever in the chain it was cut (ADR-0043
+  §10), and the call's record owes the release of any admit that left (ADR-0040).
+
+The final leaves through the call's outbox, so under the `applied` sync level it may
+leave up to the sync cap after the deadline (ADR-0055 §3). A re-ask after a takeover
+(ADR-0047 D4) gets a fresh budget from its notice: its caller's first one died with the
+node that spent it. The `/call/failure` consult after a b-leg's failure runs off the turn
+and keeps one deadline per round trip under its answer deadline (ADR-0039).
+
+The bound assumes the message leaves the receive buffer inside the budget. One that
+waits there has no transaction and drew no 100, so its caller is still retransmitting
+under Timer A and gives up by its own Timer B (§17.1.1.2).
+
+`b2bua_new_call_turn_wait_seconds` reads the time from the receipt to the turn's start,
+`b2bua_new_call_permit_hold_seconds` the time a turn holds its permits. Coverage:
+`b2bua-harness/tests/it/setup_budget.rs`,
+`failover-harness/tests/it/undecided_call_settled_on_departure.rs` (the re-ask's budget).
 
 ## Decision X2 — one central "terminated-but-unanswered a-leg ⇒ 503" invariant
 
@@ -116,7 +160,29 @@ paths, and it lets an upstream proxy or caller fail over. The X2 synthesis and
 the decision-error reject carry **no Reason header** (the bare canonical reject).
 A new INVITE refused at admission — the overload and capacity gates, the
 ingress brake, the deferred backlog — gets the 503 with a jittered
-`Retry-After` and no `Reason` either (ADR-0037 item 3).
+`Retry-After` and no `Reason` either (ADR-0037 item 3). A route the limiter refused with
+no way to fail over, past `MAX_LIMITER_FAILOVER` or with no callback context, on the
+initial INVITE's turn or off it (ADR-0039), is no capacity statement to its caller: it
+gets the same bare 503, and its record still owes the release of the admits that left.
+
+A route's stated `Reason` never rides this 503. A `Reason` states the cause of a
+rejection someone decided (RFC 3326), and a caller rerouting on a 5xx reads it as one. So
+the end-of-turn stamp (`rules::stated_headers`) leaves `Reason` as it finds it on any 5xx
+this stack authors for the initial INVITE: whichever path minted it (a spent budget, an
+unanswered consult, a refused route, the chain's depth, the X2 synthesis, a service's
+teardown), a stated `Reason` adds none. A final that states its own, as a decision's
+reject does, keeps it over the route's. The route's other stated headers ride as ever,
+and a callee's relayed final takes them all.
+
+This rule is the initial INVITE's alone: a re-INVITE or another request in a dialog is
+answered by its own rules. Every final the stack mints for an initial INVITE is one of:
+an internal error (this 5xx, no `Reason`); a status a decision engine or a peer stated;
+the plain 500 refusing an engine's answer whose status is no final it may state; RFC
+3261's own (400 §8.1.1.3, 482 §8.2.2.2, 483 §16.3, 487 §9.2); or the generic default
+of a callee's silence (480 or 408: a no-answer deadline with no consult, a timeout let
+stand, a relay treatment with no failure captured, the setup deadline). A deployment's
+service may state otherwise. `b2bua-harness/tests/it/initial_invite_finals.rs` reads
+them off the sources and pins each to its class, so a new one needs a row and a class.
 
 ## Decision X4 — the LB proxy stays transaction-less; the caller's timer owns downstream silence
 
@@ -131,7 +197,7 @@ proxy timer — decides when a dead downstream is given up on (local 408 at 64·
 adding one would re-introduce the per-INVITE proxy transaction state ADR-0009 /
 ADR-0014 deliberately keep out of the LB (and duplicate a backstop the endpoints
 already own). All proxy-*internal* errors do answer immediately with a final
-(483/420/400/403, and 503+Retry-After+Reason for every shed path); the only
+(483/420/400/403, and a 503 with a Retry-After and no Reason for every shed path); the only
 silent paths are pre-parse recv-queue overflow, unparseable datagrams, and the
 downstream-blackhole case — all three bounded by the caller's transaction timer.
 

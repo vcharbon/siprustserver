@@ -4,12 +4,15 @@
 //! the dead one's calls takes over those with work in flight at once, as the
 //! proxy now routes the dead worker's traffic to it (ADR-0047 D1).
 //!
-//! The verdict is the health view's, whatever wrote it: the probe's misses in
-//! a runner, a harness's health write in a test. A membership departure is no
-//! verdict ([`WorkerRegistry::read_dead`]). Each notice is one non-INVITE
-//! client transaction, retransmitted on Timer E until it is answered or
-//! Timer F ends it; the answer is the worker's ordinary OPTIONS report, read
-//! by the probe only.
+//! The verdict is the registry's ([`WorkerRegistry::read_dead`]): a turn to
+//! `Dead` of the health view, whatever wrote it, the probe's misses in a runner
+//! or a harness's health write in a test, and the flip of a worker read `Alive`
+//! to not ready, not terminating, with another member still ready. A membership
+//! departure and a terminating flip are no verdict. The notice's instant is when
+//! it is told, so another proxy's notice of the same flip is the same verdict only
+//! at the same instant, a later one otherwise. Each notice is one non-INVITE client
+//! transaction, retransmitted on Timer E until it is answered or Timer F ends it; the
+//! answer is the worker's ordinary OPTIONS report, read by the probe only.
 
 use std::sync::Arc;
 
@@ -28,7 +31,8 @@ use sip_txn::{IdGen, TransactionConfig, TransactionLayer, TransactionLayerClosed
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::registry::{WorkerEntry, WorkerHealth, WorkerId, WorkerRegistry};
+use super::stated_host::stated_host;
+use crate::registry::{WorkerEntry, WorkerId, WorkerRegistry};
 
 /// The sender of dead notices. Owns a UAC endpoint of its own.
 pub struct DeadNotifier {
@@ -46,8 +50,10 @@ pub struct DeadNotifier {
 impl DeadNotifier {
     /// Must be called within a tokio runtime (it spawns the transaction-layer
     /// owner task over `endpoint`). Every verdict from now on is told.
+    /// `parser` is the process's ingress parser.
     pub fn new(
         endpoint: Box<dyn UdpEndpoint>,
+        parser: CustomParser,
         registry: Arc<dyn WorkerRegistry>,
         key: SigningKey,
         clock: Clock,
@@ -56,14 +62,14 @@ impl DeadNotifier {
         let local = endpoint.local_addr();
         let (txn, events) = TransactionLayer::spawn(
             endpoint,
-            Arc::new(CustomParser::default()),
+            Arc::new(parser),
             TransactionConfig::new(id_gen.clone()),
         );
         let verdicts = registry.read_dead();
         Self {
             txn,
             events,
-            host: local.ip().to_string(),
+            host: stated_host(local),
             port: local.port(),
             registry,
             verdicts,
@@ -74,8 +80,8 @@ impl DeadNotifier {
     }
 
     /// Tell every verdict until the transaction layer or the registry closes
-    /// (spawn it; abort to stop). A reader that lags tells every worker the
-    /// view reads `Dead` now.
+    /// (spawn it; abort to stop). A reader that lags tells every ordinal a
+    /// verdict may stand on now ([`WorkerRegistry::read_dead_now`]).
     pub async fn run(mut self) {
         loop {
             tokio::select! {
@@ -97,20 +103,14 @@ impl DeadNotifier {
     }
 
     async fn tell_every_dead(&self) -> Result<(), TransactionLayerClosed> {
-        let dead: Vec<WorkerId> = self
-            .registry
-            .snapshot()
-            .into_iter()
-            .filter(|w| w.health == WorkerHealth::Dead)
-            .map(|w| w.id)
-            .collect();
-        for id in dead {
+        for id in self.registry.read_dead_now() {
             self.tell(&id).await?;
         }
         Ok(())
     }
 
-    /// Tell every other `Alive` worker that `dead` is read dead now.
+    /// Tell every other `Alive` worker, routed or not, that `dead` is read dead
+    /// now.
     async fn tell(&self, dead: &str) -> Result<(), TransactionLayerClosed> {
         let notice = DeadNotice { ordinal: dead.to_string(), at_ms: self.clock.now_ms() };
         let fields = notice.signed_fields();
@@ -120,7 +120,7 @@ impl DeadNotifier {
             return Ok(());
         };
         tracing::info!(node = observe::node(), worker = dead, "dead verdict told to the workers");
-        for w in self.registry.snapshot() {
+        for w in self.registry.probed() {
             if w.id == dead || !w.is_alive() {
                 continue;
             }
@@ -157,7 +157,8 @@ impl DeadNotifier {
                 cseq: 1,
                 via: Some(
                     Via::udp(SipStr::owned(&self.host), self.port)
-                        .with_branch(SipStr::owned(&branch)),
+                        .with_branch(SipStr::owned(&branch))
+                        .requesting_rport(),
                 ),
                 contact: Some(header::Contact::from_uri(
                     Uri::sip_user(SipStr::from_static("proxy"), SipStr::owned(&self.host))

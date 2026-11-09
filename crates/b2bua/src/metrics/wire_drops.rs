@@ -1,20 +1,20 @@
-//! The wire messages that went nowhere: outbound ones with no IP-literal next
-//! hop (`b2bua_outbound_unaddressable_total`) and inbound ones or own events
-//! that named no call (`b2bua_unroutable_*`).
+//! The wire messages that went nowhere: outbound ones that could not leave
+//! (`b2bua_outbound_unsent_total`) and inbound ones or own events that named no
+//! call (`b2bua_unroutable_*`).
 
 use super::B2buaMetrics;
 
 impl B2buaMetrics {
-    /// Count one outbound message left unsent for a next hop that is not an IP
-    /// literal, for `b2bua_outbound_unaddressable_total{kind}`: `kind` is
-    /// `request`, `response` or `datagram`.
-    pub fn record_outbound_unaddressable(&self, kind: &str) {
-        self.inner.rows.outbound_unaddressable.add(&[kind], 1);
+    /// Count one outbound message that could not leave, for
+    /// `b2bua_outbound_unsent_total{reason,kind}`: `reason` is `unaddressable`
+    /// or `too_long`, `kind` is `request`, `response` or `datagram`.
+    pub fn record_outbound_unsent(&self, reason: &str, kind: &str) {
+        self.inner.rows.outbound_unsent.add(&[reason, kind], 1);
     }
 
-    /// The count of one `b2bua_outbound_unaddressable_total{kind}` row.
-    pub fn outbound_unaddressable_of(&self, kind: &str) -> u64 {
-        self.inner.rows.outbound_unaddressable.get(&[kind])
+    /// The count of one `b2bua_outbound_unsent_total{reason,kind}` row.
+    pub fn outbound_unsent_of(&self, reason: &str, kind: &str) -> u64 {
+        self.inner.rows.outbound_unsent.get(&[reason, kind])
     }
 
     /// Count one wire message naming no call that drew no answer, for

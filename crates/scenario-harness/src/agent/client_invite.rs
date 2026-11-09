@@ -25,7 +25,7 @@ pub(crate) use won::WonInvite;
 
 /// The first Contact URI on a response — the dialog remote target it teaches.
 fn first_contact_uri(resp: &SipResponse) -> Option<String> {
-    let contact = resp.header::<header::Contact>()?.ok()?;
+    let contact = resp.contacts().as_slice().first()?;
     Some(contact.uri().to_string())
 }
 

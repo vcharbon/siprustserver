@@ -35,7 +35,7 @@ async fn the_rerouted_leg_is_solicited_the_same_reliability_as_the_first() {
 
     let mut uas1 = bob1.receive("INVITE").await;
     assert!(
-        !has_token(uas1.request().header::<Supported>(), "100rel"),
+        !has_token(uas1.request().token_set::<Supported>(), "100rel"),
         "100rel withheld from bob1's Supported",
     );
     uas1.respond(180, "Ringing").await;
@@ -45,7 +45,7 @@ async fn the_rerouted_leg_is_solicited_the_same_reliability_as_the_first() {
 
     // The rerouted leg: the same withhold, the rest of alice's set relayed.
     let mut uas2 = bob2.receive("INVITE").await;
-    let supported = uas2.request().header::<Supported>().expect("a Supported line").unwrap();
+    let supported = uas2.request().token_set::<Supported>().expect("a Supported line").unwrap();
     assert!(!supported.contains("100rel"), "100rel withheld from bob2's Supported");
     assert!(supported.contains("timer"), "the rest of alice's set rides bob2's INVITE");
 
@@ -100,7 +100,7 @@ async fn a_declared_advertisement_is_narrowed_by_the_strategy_not_discarded() {
         .await;
 
     let mut uas = bob.receive("INVITE").await;
-    let supported = uas.request().header::<Supported>().expect("a Supported line").unwrap();
+    let supported = uas.request().token_set::<Supported>().expect("a Supported line").unwrap();
     assert_eq!(
         supported.iter().collect::<Vec<_>>(),
         ["timer"],

@@ -25,12 +25,14 @@
 //! draws 500 (§12.2.2); one the gate passes or answers sets that last CSeq
 //! ([`note_in_order`]). An ACK passes on a dialog a 2xx established, ended by
 //! a BYE since or not (RFC 5407 §2); it is never answered (§17.1.1.3), so one
-//! the gate refuses is dropped. An ACK on the a-leg naming the caller's INVITE
-//! while the record holds no final sent for it reaches the rules only on a
-//! call another owner served, as evidence of an answer the record lacks
-//! whatever tag it names (ADR-0055 §4), with no dialog resolved when none
-//! names it; otherwise it acknowledges nothing and is dropped (the answer's
-//! ladder draws the ACK again, RFC 3261 §13.2.2.4). A CANCEL is matched by
+//! the gate refuses is dropped. An ACK naming an INVITE on its leg for which
+//! the record holds no final sent reaches the rules only on a call another
+//! owner served, as evidence of an answer the record lacks (ADR-0055 §4); the
+//! caller's INVITE does whatever tag the ACK names, with no dialog resolved
+//! when none names it. On any other call it proves nothing
+//! ([`Verdict::UnexplainedAck`]): its final may be a stateless refusal of a
+//! re-INVITE that never reached the call, and a 2xx's ladder draws the ACK
+//! again (RFC 3261 §13.2.2.4). A CANCEL is matched by
 //! transaction (§9.1) and passes unread. A response whose From-tag is no tag
 //! this stack put on the leg answers nothing of this stack's and is dropped,
 //! save a 2xx to an INVITE whose verified via-extension names a leg the record
@@ -43,6 +45,7 @@ use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use crate::config::B2buaConfig;
 use crate::rules::actions::possibly_confirmed;
+use crate::rules::evidence::acks_unanswered_invite;
 use crate::rules::method_table::OnEnding;
 
 /// The gate's reading of a message.
@@ -60,6 +63,10 @@ pub enum Verdict {
     Terminated(Resolved),
     /// An ACK naming no dialog that takes it: dropped unanswered (§17.1.1.3).
     Drop,
+    /// An ACK of an INVITE the record holds no final sent for, on a call no
+    /// other owner served: dropped unanswered, the dialog untouched, and counted
+    /// (ADR-0055 §4).
+    UnexplainedAck,
     /// A response that answers nothing of this stack's, dropped unread.
     Stray,
 }
@@ -73,7 +80,7 @@ impl Verdict {
             Verdict::OutOfOrder => Some(500),
             Verdict::Absorbed(_) => Some(200),
             Verdict::Terminated(_) => Some(487),
-            Verdict::Pass(_) | Verdict::Drop | Verdict::Stray => None,
+            Verdict::Pass(_) | Verdict::Drop | Verdict::UnexplainedAck | Verdict::Stray => None,
         }
     }
 
@@ -88,7 +95,7 @@ impl Verdict {
 
 /// How the gate reads `event` arriving on `leg_id` of `call`. `copy_served`
 /// states whether another owner served the call; it is read only for an ACK
-/// of the caller's unanswered INVITE.
+/// of an INVITE the record holds no final sent for.
 pub fn verdict(
     call: &Call,
     leg_id: &str,
@@ -99,8 +106,8 @@ pub fn verdict(
     let CallEvent::Sip { message, .. } = event else { return Verdict::Pass(Resolved::default()) };
     match message.as_ref() {
         SipMessage::Response(resp) => response_verdict(call, leg_id, resp, config),
-        SipMessage::Request(req) if acks_unanswered_caller(call, leg_id, req) && !copy_served() => {
-            Verdict::Drop
+        SipMessage::Request(req) if acks_no_final_held(call, leg_id, req) && !copy_served() => {
+            Verdict::UnexplainedAck
         }
         SipMessage::Request(req) => request_verdict(call, leg_id, req),
     }
@@ -205,11 +212,19 @@ pub fn admission(dialog: Option<&Dialog>, method: &Method) -> Admission {
 /// Whether `ack`, an ACK on `leg_id` naming a dialog by its To-tag, names
 /// the caller's INVITE while the record holds no final sent for it.
 fn acks_unanswered_caller(call: &Call, leg_id: &str, ack: &SipRequest) -> bool {
-    *ack.method() == Method::Ack
-        && ack.to().tag().is_some()
-        && leg_id == call.a_leg.leg_id
-        && ack.cseq().seq() == call.a_leg_invite.cseq
-        && call.a_leg.invite_final_sent().is_none()
+    acks_unanswered_invite((&call.a_leg, call.a_leg_invite.cseq), leg_id, ack, || None)
+}
+
+/// Whether `ack` names an INVITE on `leg_id` for which the record holds no final
+/// sent, on the dialog it names (ADR-0055 §4's trigger 3).
+fn acks_no_final_held(call: &Call, leg_id: &str, ack: &SipRequest) -> bool {
+    acks_unanswered_invite((&call.a_leg, call.a_leg_invite.cseq), leg_id, ack, || {
+        let leg = call::helpers::find_leg(call, leg_id)?;
+        let dialog = leg.dialogs.of_request(ack.to().tag(), ack.from().tag())?;
+        let id = dialog.id();
+        let relayed_to = call::helpers::relay_peer_dialog(call, leg_id, Some(&id));
+        Some((dialog, relayed_to.map(|(_, d)| d)))
+    })
 }
 
 /// Whether `ack`, an ACK of the caller's INVITE, names a caller dialog held

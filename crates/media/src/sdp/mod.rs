@@ -1,10 +1,9 @@
 //! Structured SDP model, parser and builder for the negotiation engine.
 //!
-//! Port of `../sipjsserver/src/media/sdp/{types,parse}.ts`. Handles the subset a
-//! plain RTP/AVP audio UA emits and reads: `v= o= s= c= t= m=audio` plus
-//! `a=rtpmap` and direction attributes. Round-trippable. Deliberately
-//! independent of the b2bua-scoped string SDP in `sip-message` — this is the
-//! conformance witness the negotiator validates against.
+//! Handles the subset a plain RTP/AVP audio UA emits and reads: `v= o= s= c=
+//! t= m=audio` plus `a=rtpmap` and direction attributes. Round-trippable. A
+//! description is read through `sip_message`'s document reader, so a simulated
+//! UA reads each field as the stack does.
 
 pub mod negotiator;
 
@@ -102,93 +101,80 @@ pub fn media_connection_addr(sdp: &Sdp, m: &SdpMedia) -> String {
         .unwrap_or_else(|| sdp.origin.address.clone())
 }
 
-/// Parse SDP text. Infallible like the TS parser — unknown lines are ignored and
-/// missing fields take RFC defaults; all conformance checks live in the
-/// negotiator.
+/// Parse SDP text through `sip_message`'s document reader. Infallible: text
+/// that is no description reads as one with no media, missing fields take RFC
+/// defaults, and all conformance checks live in the negotiator. A stream's
+/// direction is its own, else the session's (RFC 4566 §5); a port field
+/// `<port>/<number of ports>` reads its port (RFC 8866 §5.14).
 pub fn parse_sdp(input: &str) -> Sdp {
-    let mut origin = SdpOrigin {
+    let Some(doc) = sip_message::parse_sdp_body(input.as_bytes()) else {
+        return Sdp { origin: default_origin(), connection_addr: None, media: Vec::new() };
+    };
+    let origin = doc.origin.as_deref().map_or_else(default_origin, |value| {
+        // o=<user> <sess-id> <sess-version> IN IP4 <addr>
+        let p: Vec<&str> = value.split_whitespace().collect();
+        SdpOrigin {
+            username: p.first().copied().unwrap_or("-").to_string(),
+            session_id: p.get(1).copied().unwrap_or("0").to_string(),
+            version: p.get(2).copied().unwrap_or("0").to_string(),
+            address: p.get(5).copied().unwrap_or("0.0.0.0").to_string(),
+        }
+    });
+    let media = doc.media.iter().map(|m| media_of(&doc, m)).collect();
+    Sdp { origin, connection_addr: doc.c_line.as_deref().and_then(c_address), media }
+}
+
+fn default_origin() -> SdpOrigin {
+    SdpOrigin {
         username: "-".into(),
         session_id: "0".into(),
         version: "0".into(),
         address: "0.0.0.0".into(),
+    }
+}
+
+/// The address of a `c=IN IP4 <addr>` value.
+fn c_address(value: &str) -> Option<String> {
+    value.split_whitespace().nth(2).map(str::to_string)
+}
+
+/// One stream of `doc` in the negotiator's model.
+fn media_of(doc: &sip_message::SdpDoc, m: &sip_message::MediaLine) -> SdpMedia {
+    let or = |value: &str, default: &str| {
+        if value.is_empty() {
+            default.to_string()
+        } else {
+            value.to_string()
+        }
     };
-    let mut session_conn: Option<String> = None;
-    let mut media: Vec<SdpMedia> = Vec::new();
-    let mut cur: Option<SdpMedia> = None;
-
-    for line in input.split(['\r', '\n']).filter(|l| !l.is_empty()) {
-        let bytes = line.as_bytes();
-        if bytes.len() < 2 || bytes[1] != b'=' {
-            continue;
-        }
-        let kind = bytes[0];
-        let value = &line[2..];
-        match kind {
-            b'o' => {
-                // o=<user> <sess-id> <sess-version> IN IP4 <addr>
-                let p: Vec<&str> = value.split_whitespace().collect();
-                origin = SdpOrigin {
-                    username: p.first().copied().unwrap_or("-").to_string(),
-                    session_id: p.get(1).copied().unwrap_or("0").to_string(),
-                    version: p.get(2).copied().unwrap_or("0").to_string(),
-                    address: p.get(5).copied().unwrap_or("0.0.0.0").to_string(),
-                };
-            }
-            b'c' => {
-                // c=IN IP4 <addr>
-                if let Some(addr) = value.split_whitespace().nth(2) {
-                    match cur.as_mut() {
-                        Some(m) => m.connection_addr = Some(addr.to_string()),
-                        None => session_conn = Some(addr.to_string()),
-                    }
-                }
-            }
-            b'm' => {
-                if let Some(done) = cur.take() {
-                    media.push(done);
-                }
-                let p: Vec<&str> = value.split_whitespace().collect();
-                cur = Some(SdpMedia {
-                    kind: p.first().copied().unwrap_or("audio").to_string(),
-                    port: p.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    protocol: p.get(2).copied().unwrap_or("RTP/AVP").to_string(),
-                    formats: p.iter().skip(3).filter_map(|f| f.parse::<u8>().ok()).collect(),
-                    rtpmap: Vec::new(),
-                    direction: MediaDirection::SendRecv, // RFC 3264 default
-                    connection_addr: None,
-                });
-            }
-            b'a' => {
-                if let Some(rest) = value.strip_prefix("rtpmap:") {
-                    // a=rtpmap:<pt> <name>/<rate>[/<channels>]
-                    if let Some(sp) = rest.find(' ') {
-                        let pt = rest[..sp].parse::<u8>().ok();
-                        let tail = &rest[sp + 1..];
-                        let mut parts = tail.split('/');
-                        let name = parts.next().unwrap_or("");
-                        let rate = parts.next().and_then(|r| r.parse::<u32>().ok()).unwrap_or(8000);
-                        if let (Some(pt), Some(m)) = (pt, cur.as_mut()) {
-                            m.rtpmap.push(SdpRtpMap {
-                                payload_type: pt,
-                                encoding_name: name.to_string(),
-                                clock_rate: rate,
-                            });
-                        }
-                    }
-                } else if let Some(dir) = MediaDirection::from_str(value) {
-                    if let Some(m) = cur.as_mut() {
-                        m.direction = dir;
-                    }
-                }
-            }
-            _ => {}
-        }
+    let rtpmap = sip_message::extract_rtpmaps(m)
+        .into_iter()
+        .filter_map(|(pt, encoding)| {
+            // <name>/<rate>[/<channels>]
+            let mut parts = encoding.split('/');
+            let name = parts.next().unwrap_or("");
+            let rate = parts.next().and_then(|r| r.parse::<u32>().ok()).unwrap_or(8000);
+            Some(SdpRtpMap {
+                payload_type: pt.parse().ok()?,
+                encoding_name: name.to_string(),
+                clock_rate: rate,
+            })
+        })
+        .collect();
+    SdpMedia {
+        kind: or(&m.r#type, "audio"),
+        port: m.port.and_then(|p| u16::try_from(p).ok()).unwrap_or(0),
+        protocol: or(&m.transport, "RTP/AVP"),
+        formats: m.formats.iter().filter_map(|f| f.parse::<u8>().ok()).collect(),
+        rtpmap,
+        direction: match sip_message::extract_direction(doc, m) {
+            sip_message::SdpDirection::SendRecv => MediaDirection::SendRecv,
+            sip_message::SdpDirection::SendOnly => MediaDirection::SendOnly,
+            sip_message::SdpDirection::RecvOnly => MediaDirection::RecvOnly,
+            sip_message::SdpDirection::Inactive => MediaDirection::Inactive,
+        },
+        connection_addr: m.c_line.as_deref().and_then(c_address),
     }
-    if let Some(done) = cur.take() {
-        media.push(done);
-    }
-
-    Sdp { origin, connection_addr: session_conn, media }
 }
 
 /// Serialise an [`Sdp`] to wire text (CRLF line endings).
@@ -252,6 +238,19 @@ mod tests {
         };
         let reparsed = parse_sdp(&build_sdp(&sdp));
         assert_eq!(reparsed, sdp);
+    }
+
+    /// RFC 4566 §5: the session-level direction is every stream's default;
+    /// RFC 8866 §5.14: a port field may state its number of ports.
+    #[test]
+    fn a_stream_reads_the_session_direction_and_a_counted_port() {
+        let sdp = parse_sdp(
+            "v=0\r\no=- 0 0 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+             a=sendonly\r\nm=audio 49170/2 RTP/AVP 8\r\nm=audio 49174 RTP/AVP 0\r\na=inactive\r\n",
+        );
+        assert_eq!(sdp.media[0].port, 49170);
+        assert_eq!(sdp.media[0].direction, MediaDirection::SendOnly);
+        assert_eq!(sdp.media[1].direction, MediaDirection::Inactive, "its own wins");
     }
 
     #[test]

@@ -49,15 +49,21 @@ c=IN IP4 127.0.0.1\r\n\
 t=0 0\r\n\
 m=audio 20000 RTP/AVP 0\r\n";
 
-/// The head a synthetic message carries: `extra` lines, and the
-/// `Content-Type` a body demands (RFC 3261 §20.15) — `application/sdp`,
-/// which is what every description these tests carry declares.
-fn head(extra: &str, body: Option<&str>) -> Vec<u8> {
+/// The head a synthetic message carries: its `start` line, `extra` lines,
+/// and the `Content-Type` a body demands (RFC 3261 §20.15) —
+/// `application/sdp`, which is what every description these tests carry
+/// declares.
+fn head(start: &str, extra: &str, body: Option<&str>) -> Vec<u8> {
     let declared = match body {
         Some(b) if !b.is_empty() => "Content-Type: application/sdp\r\n",
         _ => "",
     };
-    format!("X: y\r\n{extra}{declared}\r\n").into_bytes()
+    format!("{start}\r\nX: y\r\n{extra}{declared}\r\n").into_bytes()
+}
+
+/// The status line of a response.
+fn status_line(status: u16) -> String {
+    format!("SIP/2.0 {status} Reason")
 }
 
 fn req(
@@ -70,6 +76,7 @@ fn req(
     body: Option<&str>,
 ) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),
@@ -82,7 +89,7 @@ fn req(
         via_branch: Some(format!("z9hG4bK-{method}-{cseq}")),
         from_tag: Some("at".to_string()),
         to_tag: to_tag.map(str::to_string),
-        head: Some(head("", body)),
+        head: Some(head(&format!("{method} sip:bob@host SIP/2.0"), "", body)),
         body: Some(body.unwrap_or("").as_bytes().to_vec()),
     }
 }
@@ -97,6 +104,7 @@ fn resp(
     body: Option<&str>,
 ) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),
@@ -109,7 +117,7 @@ fn resp(
         via_branch: Some(format!("z9hG4bK-{method}-{cseq}")),
         from_tag: Some("at".to_string()),
         to_tag: Some("bt".to_string()),
-        head: Some(head("", body)),
+        head: Some(head(&status_line(status), "", body)),
         body: Some(body.unwrap_or("").as_bytes().to_vec()),
     }
 }
@@ -120,7 +128,7 @@ fn view(msgs: &[Msg]) -> (Observation, &[Msg]) {
 
 fn run(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<Finding> {
     let (obs, msgs) = view(msgs);
-    rule.eval(&WireView { msgs, obs: &obs })
+    crate::registry::judged_alone(rule, &WireView { msgs, obs: &obs })
 }
 
 fn violations(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<Finding> {

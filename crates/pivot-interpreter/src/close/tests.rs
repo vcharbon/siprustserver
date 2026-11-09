@@ -1,67 +1,34 @@
 use super::*;
+use crate::close;
+use sip_message::CustomParser;
 
+mod messages;
 mod transactions;
+
+use messages::{reply, request, response, taken};
+
+/// The close's readers over a recording made under `CustomParser::built()`.
+fn unscripted(messages: &[RecordedMessage], trigger: &SipMessage) -> Option<Owed> {
+    close::unscripted(&CustomParser::built(), messages, trigger)
+}
+
+fn unacked_finals(messages: &[RecordedMessage]) -> Vec<UnackedFinal> {
+    close::unacked_finals(&CustomParser::built(), messages)
+}
+
+fn pending_invites(messages: &[RecordedMessage]) -> Vec<PendingInvite> {
+    close::pending_invites(&CustomParser::built(), messages)
+}
 
 const INVITE: &str = "INVITE sip:bob@127.0.0.1:5080 SIP/2.0\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-a\r\n\
+        Max-Forwards: 70\r\n\
+        Contact: <sip:alice@127.0.0.1:5060>\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>\r\n\
         Call-ID: call-a\r\n\
         CSeq: 1 INVITE\r\n\
         Content-Length: 0\r\n\r\n";
-
-fn response(status: u16, cseq: &str) -> String {
-    format!(
-        "SIP/2.0 {status} Whatever\r\n\
-             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-a\r\n\
-             From: <sip:alice@example.test>;tag=a1\r\n\
-             To: <sip:bob@example.test>;tag=b1\r\n\
-             Call-ID: call-a\r\n\
-             CSeq: {cseq}\r\n\
-             Content-Length: 0\r\n\r\n"
-    )
-}
-
-fn request(method: &str, cseq: &str) -> String {
-    format!(
-        "{method} sip:alice@127.0.0.1:5060 SIP/2.0\r\n\
-             Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-x\r\n\
-             From: <sip:bob@example.test>;tag=b1\r\n\
-             To: <sip:alice@example.test>;tag=a1\r\n\
-             Call-ID: call-a\r\n\
-             CSeq: {cseq}\r\n\
-             Content-Length: 0\r\n\r\n"
-    )
-}
-
-/// The response this leg sends to a [`request`] the peer sent it: the
-/// request's own From and To (RFC 3261 §8.2.6.2).
-fn reply(status: u16, cseq: &str) -> String {
-    format!(
-        "SIP/2.0 {status} Whatever\r\n\
-             Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-x\r\n\
-             From: <sip:bob@example.test>;tag=b1\r\n\
-             To: <sip:alice@example.test>;tag=a1\r\n\
-             Call-ID: call-a\r\n\
-             CSeq: {cseq}\r\n\
-             Content-Length: 0\r\n\r\n"
-    )
-}
-
-/// A request this leg TOOK, on the dialog `to_tag` names, with `extra`
-/// headers ahead of the CSeq.
-fn taken(method: &str, cseq: &str, to_tag: Option<&str>, extra: &str) -> String {
-    let tag = to_tag.map(|t| format!(";tag={t}")).unwrap_or_default();
-    format!(
-        "{method} sip:bob@127.0.0.1:5080 SIP/2.0\r\n\
-             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
-             From: <sip:alice@example.test>;tag=a1\r\n\
-             To: <sip:bob@example.test>{tag}\r\n\
-             Call-ID: call-a\r\n\
-             {extra}CSeq: {cseq}\r\n\
-             Content-Length: 0\r\n\r\n"
-    )
-}
 
 /// A reliable provisional this leg SENT under `to_tag` (RFC 3262 §7.1).
 fn rang(status: u16, to_tag: &str, rseq: u32) -> String {
@@ -101,7 +68,7 @@ fn answer_under(
 /// A ladder's entries: `(dir, raw)`, and whether the datagram is a byte-
 /// identical repeat of an earlier one the recording marks as such.
 fn record(entries: &[(Dir, String, bool)]) -> Recording {
-    let recording = Recording::new();
+    let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     recording.declare("A");
     for (at, (dir, raw, repeat)) in entries.iter().enumerate() {
         if *repeat {
@@ -126,14 +93,14 @@ fn ladder(entries: &[(Dir, String)]) -> Vec<RecordedMessage> {
 }
 
 fn message(raw: &str) -> SipMessage {
-    parse(raw.as_bytes()).expect("the fixture parses")
+    CustomParser::built().parse(raw.as_bytes()).expect("the fixture parses")
 }
 
 /// A BYE the leg refused 481 as naming no dialog it holds (RFC 3261
 /// §12.2.2) ended nothing: the dialog the leg opened still owes its BYE.
 #[test]
 fn a_bye_refused_as_naming_no_dialog_ends_nothing() {
-    let recording = Recording::new();
+    let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     recording.declare("A");
     let foreign_bye = request("BYE", "2 BYE").replace("tag=b1", "tag=b9");
     let refusal = reply(481, "2 BYE").replace("tag=b1", "tag=b9");

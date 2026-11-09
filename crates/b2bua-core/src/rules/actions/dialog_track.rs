@@ -7,8 +7,8 @@
 use call::helpers::{callee_dialog, caller_dialog, caller_dialog_mut, fronting_dialog};
 use call::{Call, Dialog, DialogState, EndingBy, LegState, PeerDialog};
 use sip_message::draft::HeaderList;
-use sip_message::header::{self, HeaderValue, RecordRouteEntry};
-use sip_message::SipParseError;
+use sip_message::header::{HeaderValue, RecordRouteEntry};
+use sip_message::{ContactSet, SipParseError};
 
 use crate::rules::relay;
 use b2bua_sdk::model::RuleContext;
@@ -61,7 +61,7 @@ impl ActionExecutor<'_> {
         if callee_dialog(leg, to_tag).is_some() {
             return;
         }
-        let contact = contact_uri(resp.header::<header::Contact>(), &call.call_ref, source_leg_id)
+        let contact = contact_uri(resp.contacts())
             .or_else(|| leg.invite_request_uri.clone())
             .unwrap_or_default();
         // §12.1.2: an EARLY dialog's route set is established from the reliable
@@ -237,7 +237,9 @@ impl ActionExecutor<'_> {
     /// uses `preferred` as its tag instead of minting a fresh one (tag
     /// continuity across forking/failover, `relayFirst18xTo180`). A caller
     /// whose INVITE took a non-2xx final holds no dialog of it (RFC 3261
-    /// §12.1): none is opened then, and the tag returned names none.
+    /// §12.1): none is opened then, and the tag returned names none; nor is one
+    /// for a stored INVITE naming no remote target, a defect
+    /// ([`crate::turn_notes::STORED_IMAGE_READS`]).
     pub(super) fn ensure_a_dialog_with(
         &mut self,
         call: &mut Call,
@@ -253,11 +255,14 @@ impl ActionExecutor<'_> {
         }
         let tag = preferred.unwrap_or_else(|| crate::caller_tags::own(call));
         let Some(a_invite) = self.caller_invite(call) else { return tag };
-        let from = a_invite.from();
         let a_leg_id = call.a_leg.leg_id.clone();
-        let remote_target =
-            contact_uri(a_invite.header::<header::Contact>(), &call.call_ref, &a_leg_id)
-                .unwrap_or_else(|| from.uri().to_string());
+        // Ingress refuses an INVITE with no readable Contact (RFC 3261
+        // §8.1.1.8): a stored one without is a defect, and opens no dialog.
+        let Some(remote_target) = contact_uri(a_invite.contacts()) else {
+            let detail = "the caller's stored INVITE names no remote target".to_string();
+            self.turn.notes.defect(crate::turn_notes::STORED_IMAGE_READS, detail, call);
+            return tag;
+        };
         // §12.1.1: the a-leg is a UAS dialog — route set is the INVITE's
         // Record-Route entries in forward order, one entry per recorded route (a
         // comma-combined header — the proxy's double-record-route halves — is
@@ -416,26 +421,9 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
 }
 
 /// The dialog's remote target: the URI of the peer's Contact (RFC 3261
-/// §12.1.1/§12.1.2). `None` when the peer sent none; a Contact no reader
-/// accepts is named on stderr and leaves the dialog's current target in place
-/// rather than silently retargeting it at nothing.
-pub(super) fn contact_uri(
-    contact: Option<Result<header::Contact, SipParseError>>,
-    call_ref: &str,
-    leg_id: &str,
-) -> Option<String> {
-    match contact? {
-        Ok(c) => Some(c.uri().to_string()),
-        Err(err) => {
-            tracing::warn!(
-                %call_ref,
-                %leg_id,
-                error = %err,
-                "Contact does not read; keeping the dialog's current remote target"
-            );
-            None
-        }
-    }
+/// §12.1.1/§12.1.2), as the parse read it; `None` when the peer sent none.
+pub(super) fn contact_uri(contacts: &ContactSet) -> Option<String> {
+    contacts.as_slice().first().map(|c| c.uri().to_string())
 }
 
 /// The route set a UAC applies: the responder's recorded routes reversed

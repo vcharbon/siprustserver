@@ -86,6 +86,47 @@ fn a_second_content_length_is_refused() {
     assert!(answered(&raw).contains("Content-Length"));
 }
 
+/// A single-valued header (`header::SINGLE_VALUED`) on two lines is refused
+/// whatever the two values, a compact form counted as its long one; a list
+/// header and an extension header may repeat.
+#[test]
+fn a_second_line_of_a_single_valued_header_is_refused() {
+    for pair in [
+        [&b"Subject: a"[..], b"s: a"],
+        [b"Content-Type: text/plain", b"c: text/plain"],
+        [b"o: refer", b"Event: refer"],
+        [b"r: <sip:carol@example.com>", b"Refer-To: <sip:dave@example.com>"],
+        [b"User-Agent: stack/1", b"User-Agent: stack/1"],
+        [b"P-Charging-Vector: icid-value=a", b"p-charging-vector: icid-value=a"],
+    ] {
+        let raw = options(&[b"Max-Forwards: 70", pair[0], pair[1], b"Content-Length: 0"], b"");
+        assert!(answered(&raw).starts_with("Multiple "), "{pair:?}");
+    }
+    for pair in [
+        [&b"P-Asserted-Identity: <sip:a@example.com>"[..], b"P-Asserted-Identity: <tel:+15551234>"],
+        [b"Call-Info: <http://example.com/a>", b"Call-Info: <http://example.com/b>"],
+        [b"Supported: timer", b"k: 100rel"],
+        [b"X-Note: a", b"X-Note: a"],
+    ] {
+        accepted(&options(&[b"Max-Forwards: 70", pair[0], pair[1], b"Content-Length: 0"], b""));
+    }
+}
+
+/// Only SP and HTAB are whitespace: a value's trailing blanks are trimmed, an
+/// NBSP inside or at the edge of a Subject is its text.
+#[test]
+fn whitespace_is_sp_and_htab_alone() {
+    let msg = accepted(&options(
+        &[b"Max-Forwards: 70 \t", "Subject: a\u{a0}b\u{a0}".as_bytes(), b"Content-Length: 0"],
+        b"",
+    ));
+    let subject = msg.headers().iter().find(|h| h.name.as_str() == "Subject").expect("kept");
+    assert_eq!(subject.value.as_str(), "a\u{a0}b\u{a0}");
+    for line in ["Max-Forwards: \u{a0}70", "X-Note: abc\u{c}", "Content-Length: \u{b}0"] {
+        assert!(parse(&options(&[line.as_bytes()], b"")).is_err(), "{line:?}");
+    }
+}
+
 #[test]
 fn a_second_max_forwards_is_refused() {
     let raw = options(&[b"Max-Forwards: 70", b"Max-Forwards: 5", b"Content-Length: 0"], b"");
@@ -100,6 +141,10 @@ fn a_bare_control_byte_in_a_value_is_refused() {
             (b"Subject: a", b"b"),
             (b"X-Note: \"a", b"b\""),
             (b"X-Note: a\\", b"b"),
+            // At a value's edges: only SP and HTAB are trimmed.
+            (b"X-Note: ", b"b"),
+            (b"Subject: a", b""),
+            (b"Organization: \"a\\", b"b\""),
         ] {
             let line = [prefix, &[ctl], suffix].concat();
             let raw = options(&[b"Max-Forwards: 70", &line, b"Content-Length: 0"], b"");
@@ -171,7 +216,10 @@ fn a_header_block_that_is_not_utf8_is_refused_and_answered() {
     let Err(err) = parse(&raw) else { panic!("refused") };
     assert!(err.partial().is_none(), "{}", err.reason);
     // The body is bytes, never text: a binary body parses.
-    let raw = options(&[b"Max-Forwards: 70", b"Content-Length: 2"], b"\xe9\xff");
+    let raw = options(
+        &[b"Max-Forwards: 70", b"Content-Type: application/octet-stream", b"Content-Length: 2"],
+        b"\xe9\xff",
+    );
     assert_eq!(accepted(&raw).body().as_ref(), b"\xe9\xff");
 }
 

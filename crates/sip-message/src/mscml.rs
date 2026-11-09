@@ -5,12 +5,16 @@
 //! `<response>` or `<notification>`. A request's command element (`<play>`,
 //! `<playcollect>`, `<stop>` …) MAY carry a client-defined `id` (§4.1), and the
 //! `<response>` that answers it echoes that `id` beside its `request` attribute,
-//! which names the command type (§10.2). This module reads those three
-//! attributes and sets or removes a response's `id`, every other byte of the
-//! body kept as it was. It is no XML parser: it walks the leading tags only,
-//! skipping the declaration, comments and processing instructions, and reads
-//! attribute values in either XML quote, raw (entities are not expanded).
+//! which names the command type (§10.2) and reports its outcome in `code`
+//! and `reason`. This module reads those attributes and sets or removes a
+//! response's `id`, every other byte of the body kept as it was. It is no XML
+//! parser: it walks the leading tags only, skipping the declaration, comments
+//! and processing instructions, and reads attribute values in either XML
+//! quote, raw (entities are not expanded).
 
+use std::ops::ControlFlow::{Break, Continue};
+
+use crate::cursor::{items, walk};
 use crate::header::{HeaderValue, MediaType};
 use crate::multipart::entity_parts;
 use crate::sip_str::SipStr;
@@ -31,6 +35,19 @@ pub struct Request {
     pub id: Option<String>,
 }
 
+/// What one MSCML `<response>` reports (RFC 5022 §10.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    /// The `request` attribute: the command type answered, raw.
+    pub request: Option<String>,
+    /// The `code` attribute where it is a three-digit status code of a class
+    /// MSCML uses (2xx, 4xx, 5xx, §10.2); `None` where it is absent or
+    /// anything else.
+    pub code: Option<u16>,
+    /// The `reason` attribute, raw.
+    pub reason: Option<String>,
+}
+
 /// Whether `content_type` names the MSCML media type, parameters and casing
 /// aside.
 pub fn is_mscml(content_type: &str) -> bool {
@@ -40,7 +57,7 @@ pub fn is_mscml(content_type: &str) -> bool {
 /// The request an MSCML body holds, or `None` where its root holds no
 /// `<request>` with a command element.
 pub fn request(xml: &str) -> Option<Request> {
-    let mut tags = Tags::new(xml);
+    let mut tags = tags(xml);
     let wrapper = body_element(&mut tags)?;
     if wrapper.name != "request" || wrapper.empty {
         return None;
@@ -60,6 +77,46 @@ pub fn requests_in(content_type: Option<&str>, body: &[u8]) -> Vec<Request> {
         .filter(|part| is_mscml(&part.content_type))
         .filter_map(|part| std::str::from_utf8(&part.payload).ok().and_then(request))
         .collect()
+}
+
+/// The response an MSCML body holds, or `None` where its root holds no
+/// `<response>`. Only the attributes of the response element itself are
+/// read: a name that merely ends in `code`, or `code=` inside another
+/// attribute's value, is not its code.
+pub fn response(xml: &str) -> Option<Response> {
+    let element = response_element(xml)?;
+    let value = |name: &str| attribute(xml, &element, name).map(|a| a.value);
+    Some(Response {
+        request: value("request").map(str::to_string),
+        code: value("code").and_then(three_digits),
+        reason: value("reason").map(str::to_string),
+    })
+}
+
+/// Every MSCML response a message body carries under `content_type`, read by
+/// the rule of [`requests_in`].
+pub fn responses_in(content_type: Option<&str>, body: &[u8]) -> Vec<Response> {
+    entity_parts(content_type, &[], body)
+        .iter()
+        .filter(|part| is_mscml(&part.content_type))
+        .filter_map(|part| std::str::from_utf8(&part.payload).ok().and_then(response))
+        .collect()
+}
+
+/// `value` as a three-digit code of a class MSCML uses, nothing else around
+/// it: there are no 1xx, 3xx or 6xx codes in MSCML (RFC 5022 §10.2).
+fn three_digits(value: &str) -> Option<u16> {
+    match value.as_bytes() {
+        [b'2' | b'4' | b'5', b, c] if b.is_ascii_digit() && c.is_ascii_digit() => {
+            value.parse().ok()
+        }
+        _ => None,
+    }
+}
+
+/// XML white space (XML 1.0 `S`): SP, HTAB, CR and LF.
+fn is_xml_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\r' | '\n')
 }
 
 /// The `request` attribute of an MSCML body's `<response>` — the command type
@@ -114,11 +171,11 @@ fn quote_for(value: &str, preferred: char) -> char {
 
 /// The root's `<response>` element, where the body holds one.
 fn response_element(xml: &str) -> Option<Tag<'_>> {
-    body_element(&mut Tags::new(xml)).filter(|tag| tag.name == "response")
+    body_element(&mut tags(xml)).filter(|tag| tag.name == "response")
 }
 
 /// The element the `<MediaServerControl>` root holds — its first child.
-fn body_element<'a>(tags: &mut Tags<'a>) -> Option<Tag<'a>> {
+fn body_element<'a>(tags: &mut impl Iterator<Item = Tag<'a>>) -> Option<Tag<'a>> {
     tags.next().filter(|tag| tag.name == ROOT && !tag.close && !tag.empty)?;
     tags.next().filter(|tag| !tag.close)
 }
@@ -140,65 +197,63 @@ struct Tag<'a> {
 /// The element tags of a body in document order; the XML declaration,
 /// processing instructions, comments, CDATA sections and a DOCTYPE are
 /// skipped, and so is character data.
-struct Tags<'a> {
-    xml: &'a str,
-    at: usize,
+fn tags(xml: &str) -> impl Iterator<Item = Tag<'_>> {
+    items(xml.as_bytes(), move |at| tag_from(xml, at))
 }
 
-impl<'a> Tags<'a> {
-    fn new(xml: &'a str) -> Self {
-        Tags { xml, at: 0 }
-    }
+/// The first element tag of `xml` at or after byte `from`, and the position
+/// after it.
+fn tag_from(xml: &str, from: usize) -> Option<(Tag<'_>, usize)> {
+    let read = walk(xml.as_bytes(), from, |at| {
+        let Some(open) = xml.get(at..).and_then(|rest| rest.find('<')).map(|p| at + p) else {
+            return Break(None);
+        };
+        let rest = xml.get(open..).unwrap_or_default();
+        let skip = [("<?", "?>"), ("<!--", "-->"), ("<![CDATA[", "]]>"), ("<!", ">")]
+            .into_iter()
+            .find_map(|(lead, end)| Some((lead, end, rest.strip_prefix(lead)?)));
+        match skip {
+            Some((lead, end, inner)) => match inner.find(end) {
+                Some(p) => Continue(open + lead.len() + p + end.len()),
+                None => Break(None),
+            },
+            None => Break(element_tag(xml, open)),
+        }
+    });
+    read.ok().flatten()
 }
 
-impl<'a> Iterator for Tags<'a> {
-    type Item = Tag<'a>;
-
-    fn next(&mut self) -> Option<Tag<'a>> {
-        let xml = self.xml;
-        loop {
-            let open = self.at + xml.get(self.at..)?.find('<')?;
-            let rest = xml.get(open..)?;
-            let skip = [("<?", "?>"), ("<!--", "-->"), ("<![CDATA[", "]]>"), ("<!", ">")]
-                .into_iter()
-                .find_map(|(lead, end)| Some((lead, end, rest.strip_prefix(lead)?)));
-            if let Some((lead, end, inner)) = skip {
-                self.at = open + lead.len() + inner.find(end)? + end.len();
-                continue;
+/// The element tag whose `<` sits at byte `open`, and the position after it.
+fn element_tag(xml: &str, open: usize) -> Option<(Tag<'_>, usize)> {
+    let close = xml.get(open..)?.starts_with("</");
+    let name_start = open + if close { 2 } else { 1 };
+    let name_end = name_start
+        + xml.get(name_start..)?.find(|c: char| is_xml_space(c) || c == '/' || c == '>')?;
+    // A `>` inside a quoted attribute value does not end the tag.
+    let mut quote = None;
+    let mut gt = None;
+    for (offset, c) in xml.get(name_end..)?.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '>') => {
+                gt = Some(name_end + offset);
+                break;
             }
-            let close = rest.starts_with("</");
-            let name_start = open + if close { 2 } else { 1 };
-            let name_end = name_start
-                + xml
-                    .get(name_start..)?
-                    .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')?;
-            // A `>` inside a quoted attribute value does not end the tag.
-            let mut quote = None;
-            let mut gt = None;
-            for (offset, c) in xml.get(name_end..)?.char_indices() {
-                match (quote, c) {
-                    (Some(q), c) if c == q => quote = None,
-                    (Some(_), _) => {}
-                    (None, '"' | '\'') => quote = Some(c),
-                    (None, '>') => {
-                        gt = Some(name_end + offset);
-                        break;
-                    }
-                    (None, _) => {}
-                }
-            }
-            let gt = gt?;
-            let empty = !close && xml.get(..gt)?.ends_with('/');
-            self.at = gt + 1;
-            return Some(Tag {
-                name: xml.get(name_start..name_end)?,
-                name_end,
-                attrs_end: if empty { gt.checked_sub(1)? } else { gt },
-                close,
-                empty,
-            });
+            (None, _) => {}
         }
     }
+    let gt = gt?;
+    let empty = !close && xml.get(..gt)?.ends_with('/');
+    let tag = Tag {
+        name: xml.get(name_start..name_end)?,
+        name_end,
+        attrs_end: if empty { gt.checked_sub(1)? } else { gt },
+        close,
+        empty,
+    };
+    Some((tag, gt + 1))
 }
 
 /// One attribute of a tag, located in the body.
@@ -213,217 +268,45 @@ struct Attribute<'a> {
     quote: char,
 }
 
-/// The attribute `name` of `tag`, where it states one in well-formed shape.
+/// The attribute `name` of `tag`, where it states one in well-formed shape:
+/// XML white space before each attribute (XML 1.0 §3.1 `STag`), around `=`
+/// optional. The walk stops at the first attribute off that shape.
 fn attribute<'a>(xml: &'a str, tag: &Tag<'_>, name: &str) -> Option<Attribute<'a>> {
-    let end = tag.attrs_end;
+    let read =
+        walk(xml.as_bytes(), tag.name_end, |at| match attribute_at(xml, tag.attrs_end, at) {
+            None => Break(None),
+            Some((attr_name, attr)) if attr_name == name => Break(Some(attr)),
+            Some((_, attr)) => Continue(attr.value_end + 1),
+        });
+    read.ok().flatten()
+}
+
+/// The attribute whose leading white space starts at byte `start` of a tag
+/// whose attributes end at `end`, and its name.
+fn attribute_at(xml: &str, end: usize, start: usize) -> Option<(&str, Attribute<'_>)> {
     let within = |from: usize| xml.get(from..end);
-    let lead_ws = |from: usize| within(from).map(|s| s.len() - s.trim_start().len());
-    let mut at = tag.name_end;
-    loop {
-        let start = at;
-        at += lead_ws(at)?;
-        if at >= end {
-            return None;
-        }
-        let name_end = at + within(at)?.find(|c: char| c.is_ascii_whitespace() || c == '=')?;
-        let attr_name = xml.get(at..name_end)?;
-        at = name_end;
-        at += lead_ws(at)?;
-        if !within(at)?.starts_with('=') {
-            return None;
-        }
-        at += 1;
-        at += lead_ws(at)?;
-        let quote = within(at)?.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-        let value_start = at + 1;
-        let value_end = value_start + within(value_start)?.find(quote)?;
-        at = value_end + 1;
-        if attr_name == name {
-            return Some(Attribute {
-                start,
-                value: xml.get(value_start..value_end)?,
-                value_start,
-                value_end,
-                quote,
-            });
-        }
+    let lead_ws =
+        |from: usize| within(from).map(|s| s.len() - s.trim_start_matches(is_xml_space).len());
+    let space = lead_ws(start)?;
+    let mut at = start + space;
+    if at >= end || space == 0 {
+        return None;
     }
+    let name_end = at + within(at)?.find(|c: char| is_xml_space(c) || c == '=')?;
+    let attr_name = xml.get(at..name_end)?;
+    at = name_end;
+    at += lead_ws(at)?;
+    if !within(at)?.starts_with('=') {
+        return None;
+    }
+    at += 1;
+    at += lead_ws(at)?;
+    let quote = within(at)?.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let value_start = at + 1;
+    let value_end = value_start + within(value_start)?.find(quote)?;
+    let value = xml.get(value_start..value_end)?;
+    Some((attr_name, Attribute { start, value, value_start, value_end, quote }))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const DECL: &str = r#"<?xml version="1.0" encoding="utf-8"?>"#;
-
-    /// The response a media resource sends for a `playcollect`, as captured.
-    const PLAYCOLLECT_RESPONSE: &str = r#"<MediaServerControl version="1.0"><response playduration="11081" reason="timeout" playoffset="11081" text="The request has succeeded" request="playcollect" code="200" digits=""></response></MediaServerControl>"#;
-
-    fn wrap(inner: &str) -> String {
-        format!(r#"{DECL}<MediaServerControl version="1.0">{inner}</MediaServerControl>"#)
-    }
-
-    #[test]
-    fn a_request_names_its_command_element_and_its_client_defined_id() {
-        let body = wrap(
-            r#"<request><play id="332985001"><prompt><audio url="file://a.wav"/></prompt></play></request>"#,
-        );
-        assert_eq!(
-            request(&body),
-            Some(Request { command: "play".into(), id: Some("332985001".into()) })
-        );
-    }
-
-    #[test]
-    fn a_request_without_an_id_reads_as_its_command_alone() {
-        let body = wrap(
-            r#"<request><playcollect maxdigits="1" barge="yes"><prompt><audio url="file://a.wav"/></prompt></playcollect></request>"#,
-        );
-        assert_eq!(request(&body), Some(Request { command: "playcollect".into(), id: None }));
-    }
-
-    /// XML admits either quote around a value, and whitespace around `=`.
-    #[test]
-    fn an_id_reads_in_either_quote_on_an_empty_element() {
-        let single = wrap("<request><stop id='s-1'/></request>");
-        assert_eq!(
-            request(&single),
-            Some(Request { command: "stop".into(), id: Some("s-1".into()) })
-        );
-        let spaced = wrap("<request>\r\n  <stop  id = \"s 2\" />\r\n</request>");
-        assert_eq!(
-            request(&spaced),
-            Some(Request { command: "stop".into(), id: Some("s 2".into()) })
-        );
-    }
-
-    /// Only the attribute NAMED `id` is the id: a longer name ending in it, or
-    /// an `id` on the `<request>` wrapper, is not the command's.
-    #[test]
-    fn only_the_command_element_s_own_id_attribute_is_read() {
-        let body = wrap(r#"<request id="wrapper"><play xid="x" uid='u'/></request>"#);
-        assert_eq!(request(&body), Some(Request { command: "play".into(), id: None }));
-    }
-
-    /// A comment, a processing instruction and an attribute value holding `>`
-    /// before the command element do not move the walk.
-    #[test]
-    fn the_walk_skips_comments_and_reads_through_a_quoted_angle_bracket() {
-        let body = "<!-- lead --><?pi x?>\r\n<MediaServerControl version=\"1.0\" note=\"a>b\">\
-                    <!-- inner --><request><playrecord id=\"r1\" dest=\"x>y\"/></request>\
-                    </MediaServerControl>";
-        assert_eq!(
-            request(body),
-            Some(Request { command: "playrecord".into(), id: Some("r1".into()) })
-        );
-    }
-
-    #[test]
-    fn a_response_a_notification_or_another_root_is_no_request() {
-        assert_eq!(request(PLAYCOLLECT_RESPONSE), None);
-        assert_eq!(request(&wrap(r#"<notification><keypress digit="1"/></notification>"#)), None);
-        assert_eq!(request(r#"<other><request><play id="1"/></request></other>"#), None);
-        assert_eq!(request(&wrap("<request/>")), None, "a request with no command names none");
-        assert_eq!(request("not xml at all"), None);
-    }
-
-    #[test]
-    fn a_response_names_the_command_type_it_answers() {
-        assert_eq!(response_request(PLAYCOLLECT_RESPONSE), Some("playcollect"));
-        assert_eq!(
-            response_request(&wrap(r#"<response request='stop' code="200"/>"#)),
-            Some("stop")
-        );
-        assert_eq!(response_request(&wrap(r#"<request><play id="1"/></request>"#)), None);
-        assert_eq!(response_request(&wrap(r#"<notification><keypress/></notification>"#)), None);
-        assert_eq!(response_request(&wrap(r#"<response code="400"/>"#)), None);
-    }
-
-    /// Inserted right after the element name; every other byte as it was.
-    #[test]
-    fn an_id_is_inserted_into_a_response_that_states_none() {
-        let echoed = with_response_id(PLAYCOLLECT_RESPONSE, Some("332985001"));
-        assert_eq!(
-            echoed,
-            PLAYCOLLECT_RESPONSE.replacen("<response ", "<response id=\"332985001\" ", 1)
-        );
-        assert_eq!(response_request(&echoed), Some("playcollect"));
-    }
-
-    #[test]
-    fn a_stated_id_is_replaced_in_place_keeping_its_quote() {
-        let body = wrap(r#"<response request="play" id='old-1' code="200" reason="stopped"/>"#);
-        assert_eq!(
-            with_response_id(&body, Some("live-7")),
-            wrap(r#"<response request="play" id='live-7' code="200" reason="stopped"/>"#)
-        );
-    }
-
-    /// A value holding the stated quote takes the other one, so the attribute
-    /// stays well-formed.
-    #[test]
-    fn a_value_holding_the_quote_takes_the_other_quote() {
-        let body = wrap(r#"<response request="play" id="old" code="200"/>"#);
-        assert_eq!(
-            with_response_id(&body, Some(r#"a"b"#)),
-            wrap(r#"<response request="play" id='a"b' code="200"/>"#)
-        );
-        let bare = wrap(r#"<response request="play" code="200"/>"#);
-        assert_eq!(
-            with_response_id(&bare, Some(r#"a"b"#)),
-            wrap(r#"<response id='a"b' request="play" code="200"/>"#)
-        );
-    }
-
-    /// Removed with the whitespace that led it; a response stating none and
-    /// asked for none is unchanged.
-    #[test]
-    fn a_stated_id_is_removed_where_the_request_carried_none() {
-        let body = wrap(r#"<response request="stop"  id = "old" code="200"></response>"#);
-        assert_eq!(
-            with_response_id(&body, None),
-            wrap(r#"<response request="stop" code="200"></response>"#)
-        );
-        assert_eq!(with_response_id(PLAYCOLLECT_RESPONSE, None), PLAYCOLLECT_RESPONSE);
-    }
-
-    #[test]
-    fn a_body_holding_no_response_is_never_rewritten() {
-        let notification = wrap(r#"<notification><keypress digit="1" id="k"/></notification>"#);
-        assert_eq!(with_response_id(&notification, Some("x")), notification);
-        let req = wrap(r#"<request><play id="1"/></request>"#);
-        assert_eq!(with_response_id(&req, Some("x")), req);
-        assert_eq!(with_response_id(&req, None), req);
-    }
-
-    #[test]
-    fn the_media_type_is_read_by_token() {
-        assert!(is_mscml("application/mediaservercontrol+xml"));
-        assert!(is_mscml(" Application/MediaServerControl+XML ; charset=utf-8"));
-        assert!(!is_mscml("application/xml"));
-        assert!(!is_mscml("application/mediaservercontrol+xml-x"));
-    }
-
-    /// A bare MSCML body is one request; a multipart body yields each MSCML
-    /// part's; any other type, or an empty body, yields none.
-    #[test]
-    fn requests_are_read_off_a_bare_body_and_off_each_mscml_part() {
-        let play = wrap(r#"<request><play id="p1"/></request>"#);
-        assert_eq!(
-            requests_in(Some(CONTENT_TYPE), play.as_bytes()),
-            vec![Request { command: "play".into(), id: Some("p1".into()) }]
-        );
-        assert!(requests_in(Some("application/xml"), play.as_bytes()).is_empty());
-        assert!(requests_in(None, play.as_bytes()).is_empty());
-        assert!(requests_in(Some(CONTENT_TYPE), b"").is_empty());
-
-        let framed = format!(
-            "--b1\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\r\n\
-             --b1\r\nContent-Type: {CONTENT_TYPE}\r\n\r\n{play}\r\n--b1--\r\n"
-        );
-        assert_eq!(
-            requests_in(Some("multipart/mixed;boundary=b1"), framed.as_bytes()),
-            vec![Request { command: "play".into(), id: Some("p1".into()) }]
-        );
-    }
-}
+mod tests;

@@ -74,7 +74,7 @@ fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
         req.to().tag().is_some(),
         "a re-INVITE names its dialog by the To-tag (RFC 3261 §14.1)"
     );
-    let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");
+    let contact = req.first::<Contact>().expect("a Contact").expect("readable Contact");
     assert_eq!(
         contact.uri().param("leg").and_then(ParamValue::as_str),
         Some(leg),
@@ -202,7 +202,7 @@ async fn refer_allow_full_c_reliable_provisional_is_acknowledged_by_the_stack() 
     assert!(
         charlie_uas
             .request()
-            .header::<sip_message::header::Supported>()
+            .token_set::<sip_message::header::Supported>()
             .expect("a Supported")
             .expect("readable Supported")
             .contains("100rel"),

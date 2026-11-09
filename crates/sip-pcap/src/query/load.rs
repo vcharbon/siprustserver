@@ -40,8 +40,9 @@ fn err<T>(path: &str, msg: impl Into<String>) -> R<T> {
 const DERIVED_MIN_BASE_LEN: usize = 8;
 
 impl Query {
-    /// Parse a query document.
-    pub fn from_json(v: &Value) -> R<Query> {
+    /// Parse a query document. A `correlate` block reads each message under
+    /// `reading`, the caller's.
+    pub fn from_json(v: &Value, reading: &sip_message::ToolReading) -> R<Query> {
         let obj = v.as_object().ok_or_else(|| QueryError {
             path: "$".into(),
             msg: "a query is a JSON object".into(),
@@ -69,7 +70,7 @@ impl Query {
                 None => Scope::default(),
             },
             correlate: match obj.get("correlate") {
-                Some(c) => Some(correlate(c, "$.correlate")?),
+                Some(c) => Some(correlate(c, "$.correlate", reading)?),
                 None => None,
             },
             select: match obj.get("select") {
@@ -118,11 +119,15 @@ fn scope(v: &Value, path: &str) -> R<Scope> {
     Ok(out)
 }
 
-fn correlate(v: &Value, path: &str) -> R<FlowConfig> {
+fn correlate(v: &Value, path: &str, reading: &sip_message::ToolReading) -> R<FlowConfig> {
     let obj = v
         .as_object()
         .ok_or_else(|| QueryError { path: path.into(), msg: "expected an object".into() })?;
-    let mut cfg = FlowConfig { strategies: Vec::new(), dedup_window_us: DEFAULT_DEDUP_WINDOW_US };
+    let mut cfg = FlowConfig {
+        strategies: Vec::new(),
+        dedup_window_us: DEFAULT_DEDUP_WINDOW_US,
+        reading: reading.clone(),
+    };
     let mut saw_strategies = false;
     for (k, val) in obj {
         match k.as_str() {
@@ -146,7 +151,7 @@ fn correlate(v: &Value, path: &str) -> R<FlowConfig> {
         }
     }
     if !saw_strategies {
-        cfg.strategies = FlowConfig::default().strategies;
+        cfg.strategies = FlowConfig::standard(reading.clone()).strategies;
     }
     Ok(cfg)
 }

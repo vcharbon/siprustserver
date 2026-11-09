@@ -339,8 +339,8 @@ async fn a_name_is_sent_to_its_first_address_in_the_socket_family() {
     let sent: Vec<SocketAddr> = ep.sent.lock().unwrap().iter().map(|(_, d)| *d).collect();
     assert_eq!(sent, [dst(), dst()]);
 
-    // A dual-stack `[::]` socket reaches both families: the first address wins.
-    let resolver = Arc::new(FakeResolver::answering_all(vec![v6, dst()]));
+    // An IPv6-only `[::]` socket takes the IPv6 address, wherever it stands.
+    let resolver = Arc::new(FakeResolver::answering_all(vec![dst(), v6]));
     let ep = Arc::new(CapturingEndpoint {
         local: Some("[::]:5060".parse().unwrap()),
         ..CapturingEndpoint::default()

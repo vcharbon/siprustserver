@@ -61,7 +61,8 @@ const tools = (built: Array<string>, ms: number) => {
     generator: Effect.die("unused"),
     measure: Effect.die("unused"),
     compileMs: Effect.sync(() => clock),
-    decides: Effect.die("unused")
+    decides: Effect.die("unused"),
+    reading: []
   })
 }
 

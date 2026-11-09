@@ -3,16 +3,14 @@
 //! 500, 200 (an OPTIONS stating what this stack supports, §11.2) or 487,
 //! each under the call's stated headers — and whether another owner served
 //! the call is read off this node's topology for the ACK the verdict asks it
-//! of.
+//! of. An ACK that proves nothing on a call no other owner served is counted.
 
 use call::helpers::Resolved;
 use call::Call;
 use sip_message::{Method, SipMessage, SipResponse};
 
 use super::resolve::Resolution;
-use super::responses::{
-    build_200, build_200_advertising, build_481, build_487, build_out_of_order_500,
-};
+use super::responses::{build_200, build_200_advertising, build_481, build_487, build_bare_500};
 use super::RouterCtx;
 use b2bua_core::dialog_gate::{verdict, Verdict};
 use b2bua_sdk::event::CallEvent;
@@ -40,6 +38,10 @@ pub(super) fn admit(ctx: &RouterCtx, call: &Call, event: &CallEvent, res: &Resol
         Verdict::Pass(resolved) => return Gate::Pass(resolved),
         Verdict::Stray => return Gate::Dropped,
         Verdict::Drop => return Gate::Answered { answer: None, in_order: None },
+        Verdict::UnexplainedAck => {
+            ctx.metrics.bump_unexplained_ack();
+            return Gate::Answered { answer: None, in_order: None };
+        }
         refused => refused,
     };
     let in_order = refused.in_order().cloned();
@@ -52,10 +54,12 @@ pub(super) fn admit(ctx: &RouterCtx, call: &Call, event: &CallEvent, res: &Resol
         }
         Verdict::Absorbed(_) => build_200(req),
         Verdict::Terminated(_) => build_487(req),
-        Verdict::OutOfOrder => build_out_of_order_500(req),
-        Verdict::NoDialog | Verdict::Pass(_) | Verdict::Drop | Verdict::Stray => {
-            build_481(req, None)
-        }
+        Verdict::OutOfOrder => build_bare_500(req),
+        Verdict::NoDialog
+        | Verdict::Pass(_)
+        | Verdict::Drop
+        | Verdict::UnexplainedAck
+        | Verdict::Stray => build_481(req, None),
     };
     // A request whose lines no response can echo is answered with none.
     let Ok(mut answer) = answer else { return Gate::Answered { answer: None, in_order } };
@@ -69,9 +73,8 @@ pub(super) fn admit(ctx: &RouterCtx, call: &Call, event: &CallEvent, res: &Resol
 }
 
 /// Whether a copy served `call` ([`crate::store::CallTopology::copy_served`],
-/// read on this node). Only then is an ACK of the caller's unanswered INVITE
-/// evidence (ADR-0055 §4); otherwise the copy that answered it is live and its
-/// write is on its way.
+/// read on this node). Only then is an ACK of an INVITE the record holds no
+/// final sent for evidence (ADR-0055 §4).
 fn copy_served(ctx: &RouterCtx, call: &Call) -> bool {
     let this = &ctx.relay_owner.ordinal;
     ctx.state.topology(&call.call_ref).is_some_and(|t| t.copy_served(this))

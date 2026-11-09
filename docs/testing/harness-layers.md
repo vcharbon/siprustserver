@@ -168,7 +168,8 @@ default lane: the upstream sweep alone is about an hour of CPU.
   RFC windows, dialog-verdict waivers, party outcomes, the clean-end goal
   drop, CDR counts); its measured tier (`windows::tier`) decides which of the
   rows that fired it accepts. A Guaranteed cell fires none, and the evidence
-  rule ends none of its calls. Each row names an upstream witness cell that
+  rule ends none of its calls (no shape sends what can still end one, a
+  re-INVITE a proxy refuses after the kill: ADR-0055 §11). Each row names an upstream witness cell that
   must fire it.
 - **Ratchet.** `failover-sweep.ratchet` beside the crate's manifest (and a
   consumer's own) lists the cells that fail today, each with the ADR-0055

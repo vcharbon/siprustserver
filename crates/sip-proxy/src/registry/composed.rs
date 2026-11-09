@@ -88,6 +88,12 @@ impl WorkerRegistry for ComposedWorkerRegistry {
     fn snapshot(&self) -> Vec<WorkerEntry> {
         self.set.snapshot()
     }
+    fn probed(&self) -> Vec<WorkerEntry> {
+        self.set.probed()
+    }
+    fn routes_on_answers(&self) -> bool {
+        self.set.routes_on_answers()
+    }
     fn resolve(&self, id: &str) -> Option<WorkerEntry> {
         self.set.resolve(id)
     }
@@ -105,6 +111,9 @@ impl WorkerRegistry for ComposedWorkerRegistry {
     }
     fn read_dead(&self) -> tokio::sync::broadcast::Receiver<super::WorkerId> {
         self.set.read_dead()
+    }
+    fn read_dead_now(&self) -> Vec<super::WorkerId> {
+        self.set.read_dead_now()
     }
 }
 

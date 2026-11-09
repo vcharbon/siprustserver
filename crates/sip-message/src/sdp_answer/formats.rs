@@ -113,7 +113,9 @@ fn amr_alignment(params: Option<&str>, enc: &str) -> Option<String> {
     }
     let aligned = params.unwrap_or_default().split(';').find_map(|p| {
         let (k, v) = p.split_once('=')?;
-        k.trim().eq_ignore_ascii_case("octet-align").then(|| v.trim().to_string())
+        crate::whitespace::trim(k)
+            .eq_ignore_ascii_case("octet-align")
+            .then(|| crate::whitespace::trim(v).to_string())
     });
     Some(aligned.unwrap_or_else(|| "0".to_string()))
 }

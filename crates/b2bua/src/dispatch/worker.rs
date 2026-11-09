@@ -1,7 +1,8 @@
 //! The per-call worker: the tokio adapter over a [`CallQueue`]. One task per
 //! call takes the queue's items in order and runs each as a handler body on a
 //! spawned task it awaits, holding the permits of the item's
-//! [pool](super::class::PermitPool) for the body's whole run. A panicking
+//! [pool](super::class::PermitPool) for the body's whole run; an item
+//! [due](Runnable::due_by) before they come runs holding none. A panicking
 //! body is isolated (`JoinError`) and reported; a hung one can be aborted
 //! from outside ([`InFlight::abort`]). The worker exits on the call's
 //! release, taking the queue out of the dispatcher's map, unless a new call
@@ -14,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::time::Instant;
 
 use super::class::PermitPool;
 use super::queue::{CallQueue, Popped};
@@ -26,9 +28,15 @@ pub type DispatchBody = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 /// An item a call's worker can run.
 pub trait Runnable: Send + 'static {
     /// The body that runs this item. Called by the worker once it holds the
-    /// item's permits; the body may be dropped unpolled if it is aborted
-    /// before its first poll.
+    /// item's permits, or at [`due_by`](Self::due_by); the body may be dropped
+    /// unpolled if it is aborted before its first poll.
     fn into_body(self) -> DispatchBody;
+
+    /// The instant this item stops waiting for its permits: its body then runs
+    /// holding none. `None`: it waits as long as it takes.
+    fn due_by(&self) -> Option<Instant> {
+        None
+    }
 }
 
 impl Runnable for DispatchBody {
@@ -37,13 +45,15 @@ impl Runnable for DispatchBody {
     }
 }
 
-/// Why a handler body died (ADR-0020 X6). `Panicked` = the spawned body's
-/// `JoinError::is_panic()`; `Aborted` = the call reaper's escalation cancelled
-/// a hung body via [`InFlight::abort`].
+/// Why a handler body's turn failed (ADR-0020 X6). `Panicked` = the spawned
+/// body's `JoinError::is_panic()`; `Aborted` = the call reaper's escalation
+/// cancelled a hung body via [`InFlight::abort`]; `Tripped` = the turn crossed
+/// a per-call cap and was discarded, reported by the router (ADR-0057 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerFailure {
     Panicked,
     Aborted,
+    Tripped(b2bua_core::caps::Tripped),
 }
 
 /// Notified from the per-call worker when a handler body failed — after the
@@ -162,6 +172,20 @@ impl Permits {
             _shared: take(&self.shared, || metrics.bump_saturation()).await,
         }
     }
+
+    /// [`acquire`](Self::acquire) up to `due`: `None` when the instant came
+    /// first, a permit already taken handed back.
+    async fn acquire_by(
+        &self,
+        pool: PermitPool,
+        due: Option<Instant>,
+        metrics: &B2buaMetrics,
+    ) -> Option<Held> {
+        match due {
+            Some(due) => tokio::time::timeout_at(due, self.acquire(pool, metrics)).await.ok(),
+            None => Some(self.acquire(pool, metrics).await),
+        }
+    }
 }
 
 /// A pool of `permits`, at most the semaphore's ceiling.
@@ -242,7 +266,9 @@ pub(super) async fn run<T: Runnable>(call_ref: String, slot: Arc<Slot<T>>, ctx: 
             }
             Some(Popped::Item(_, _)) if ctx.in_flight.halted() => return,
             Some(Popped::Item(item, class)) => {
-                let held = ctx.permits.acquire(class.row().pool, &ctx.metrics).await;
+                let due = item.due_by();
+                let held = ctx.permits.acquire_by(class.row().pool, due, &ctx.metrics).await;
+                let held_from = Instant::now();
                 let task = observe::spawn_keeping_node(item.into_body());
                 ctx.in_flight.insert(&call_ref, task.abort_handle());
                 let outcome = task.await;
@@ -261,6 +287,9 @@ pub(super) async fn run<T: Runnable>(call_ref: String, slot: Arc<Slot<T>>, ctx: 
                 };
                 if let (Some(failure), Some(hook)) = (failure, &ctx.failure_hook) {
                     hook(&call_ref, failure);
+                }
+                if class.is_new_call() && held.is_some() {
+                    ctx.metrics.observe_new_call_permit_hold(held_from.elapsed());
                 }
                 drop(held);
             }

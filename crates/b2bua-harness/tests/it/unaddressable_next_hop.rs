@@ -32,7 +32,7 @@ async fn a_b_leg_invite_to_a_name_fails_the_attempt_at_once() {
         "an unaddressable INVITE fails at once, not on a timer: {elapsed:?}"
     );
     assert_eq!(
-        s.b2bua.metrics().outbound_unaddressable_of("request"),
+        s.b2bua.metrics().outbound_unsent_of("unaddressable", "request"),
         2,
         "the INVITE and the CANCEL that abandons its leg are counted unsent"
     );
@@ -71,7 +71,11 @@ async fn an_in_dialog_bye_to_a_named_target_is_logged_and_the_call_still_ends() 
     bob_dialog.bye().await.expect(200).await;
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     assert_eq!(s.b2bua.cdr_records().len(), 1, "the call's CDR is written");
-    assert_eq!(s.b2bua.metrics().outbound_unaddressable_of("request"), 1, "the BYE is unsent");
+    assert_eq!(
+        s.b2bua.metrics().outbound_unsent_of("unaddressable", "request"),
+        1,
+        "the BYE is unsent"
+    );
     let unsent = log.matching("not sent");
     assert!(
         unsent.iter().filter(|e| e.level == "WARN" && e.contains(target)).count() == 1,

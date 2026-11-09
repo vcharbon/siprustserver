@@ -159,7 +159,7 @@ struct RegisterProxy {
 impl RegisterProxy {
     async fn run(&self) {
         while let Some(pkt) = self.ep.recv().await {
-            let Ok(msg) = CustomParser::new().parse(&pkt.raw) else {
+            let Ok(msg) = CustomParser::built().parse(&pkt.raw) else {
                 continue; // ignore garbage on the wire (same as the real proxy)
             };
             match msg {
@@ -395,13 +395,13 @@ fn effective_expires(req: &SipRequest, contact: Option<&Contact>) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// The hop count a forwarded request carries (RFC 3261 §16.6 step 3): the
-/// inbound value decremented, or the §8.1.1.6 default decremented when the
-/// request states no readable count. `Err(())` when the inbound count is
+/// inbound value decremented, or 70 when the request states no readable
+/// count. `Err(())` when the inbound count is
 /// already 0 — the caller answers 483 Too Many Hops or drops an ACK.
 fn forwarded_max_forwards(req: &SipRequest) -> Result<MaxForwards, ()> {
     match req.header::<MaxForwards>() {
         Some(Ok(hops)) => hops.decremented().ok_or(()),
-        _ => Ok(MaxForwards::new(DEFAULT_MAX_FORWARDS - 1)),
+        _ => Ok(MaxForwards::new(DEFAULT_MAX_FORWARDS)),
     }
 }
 
@@ -410,9 +410,10 @@ fn extra_header(value: impl HeaderValue) -> SipHeader {
     SipHeader { name: value.name().as_wire_str().into(), value: value.to_wire().into() }
 }
 
-/// The transport address a URI names, defaulting the port per RFC 3261 §19.1.2.
+/// The transport address a URI names, its `maddr` where it has one, defaulting
+/// the port per RFC 3261 §19.1.2.
 fn uri_addr(uri: &Uri) -> Option<SocketAddr> {
-    let (host, port) = uri.host_port();
+    let (host, port) = uri.next_hop();
     hostport_to_addr(&format!("{host}:{port}"))
 }
 

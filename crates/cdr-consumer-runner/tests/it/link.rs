@@ -15,7 +15,8 @@ const SETUP: Duration = Duration::from_millis(300);
 const GIVE_UP: Duration = Duration::from_secs(5);
 
 fn target(broker: &Broker, setup_timeout: Duration) -> Target {
-    Target { url: broker.url(), queue: "cdr".into(), max_len: 100, setup_timeout }
+    let tls = amqp_connect::BrokerTls::PLAIN;
+    Target { url: broker.url(), tls, queue: "cdr".into(), max_len: 100, setup_timeout }
 }
 
 fn line(metrics: &LinkMetrics, name: &str) -> String {

@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from . import jsonval as jv
-from .classify import Impact
+from .classify import FINAL_LATE, Impact
 from .jsonval import Json
 from .judge import ALL_CALL_IDS, MAX_CALL_IDS
 from .windows import Window
@@ -61,7 +61,9 @@ def hurts(impacts: Iterable[Impact], counted: Iterable[Impact]) -> list[tuple[st
     """Each impact no budget allowance takes, by call and instant: every
     in-dialog impact and every counted one (a CDR mismatch, a product's
     class)."""
-    return [(i.call_id, i.at_ms) for i in impacts if not i.budgetable] + [(i.call_id, i.at_ms) for i in counted]
+    return [(i.call_id, i.at_ms) for i in impacts if not i.setup_lost and i.cls != FINAL_LATE] + [
+        (i.call_id, i.at_ms) for i in counted
+    ]
 
 
 def until_next(windows: list[Window], w: Window) -> float:

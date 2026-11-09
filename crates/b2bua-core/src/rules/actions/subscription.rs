@@ -38,12 +38,17 @@ fn cap_key() -> TimerKey {
     TimerKey::call(TimerType::NotifyAnswerCap)
 }
 
-/// The subscription an `Event` value names: its package and `id`. A value
-/// the reader rejects names the package it spells.
+/// The subscription an `Event` value of a NOTIFY this stack sends names: its
+/// package and `id`, compared byte by byte (RFC 6665 §8.2.1). The value is
+/// the stack's own and ingress refuses an unreadable Event, so one the reader
+/// rejects is a defect, logged, and keyed as written.
 fn named(event: &str) -> (String, Option<String>) {
     match Event::parse(&SipStr::owned(event)) {
         Ok(event) => subscription_key(&event),
-        Err(_) => (event.trim().to_ascii_lowercase(), None),
+        Err(e) => {
+            tracing::error!(event, reason = %e.reason, "DEFECT: an Event this stack states does not read");
+            (event.to_string(), None)
+        }
     }
 }
 
@@ -268,7 +273,12 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         id: &DialogId,
     ) {
-        loop {
+        let Some(queued) = dialog_of(call, leg_id, id).map(|d| d.queued.as_slice()) else {
+            return;
+        };
+        // Each pass takes one request off the queue: its length bounds them.
+        let passes = queued.len();
+        for _ in 0..passes {
             let Some(d) = dialog_of(call, leg_id, id) else { return };
             let in_flight = d.notify_wait_ends_at_ms().is_some_and(|end| self.now_ms < end);
             if d.queued_behind(Behind::OwnNotify).next().is_none() || in_flight {

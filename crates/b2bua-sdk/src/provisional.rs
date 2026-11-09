@@ -3,7 +3,7 @@
 
 use call::CdrEventType;
 use sip_message::header;
-use sip_message::SipResponse;
+use sip_message::{SipParseError, SipResponse};
 
 use crate::model::{RuleAction, RuleCall, RuleContext};
 
@@ -17,13 +17,23 @@ pub fn originator_final_sent(call: &RuleCall) -> bool {
 }
 
 /// The `RSeq` a reliable provisional states (RFC 3262: `Require: 100rel` plus
-/// a numeric `RSeq`), or `None` when this response is not one.
+/// a numeric `RSeq`), or `None` when this response is not one. Ingress drops a
+/// response whose `Require` or `RSeq` does not read, so one here is a defect:
+/// logged, and read as no reliable provisional.
 pub fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
-    let requires = resp.header::<header::Require>()?.ok()?;
+    let requires = resp.token_set::<header::Require>()?.inspect_err(unreadable).ok()?;
     if !requires.contains("100rel") {
         return None;
     }
-    Some(resp.header::<header::RSeq>()?.ok()?.value() as i64)
+    Some(resp.header::<header::RSeq>()?.inspect_err(unreadable).ok()?.value() as i64)
+}
+
+/// Log a reliability header past ingress that does not read.
+fn unreadable(error: &SipParseError) {
+    tracing::error!(
+        reason = %error.reason,
+        "DEFECT: a provisional's Require or RSeq past ingress does not read"
+    );
 }
 
 /// Whether the event's INVITE provisional is shown to no one: the

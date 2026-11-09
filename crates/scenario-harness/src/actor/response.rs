@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use sip_message::error::SipParseError;
 use sip_message::generators::InDialogMethod;
-use sip_message::header::MediaType;
 use sip_message::SipResponse;
 
 use super::endpoint::{SUBFLOW_EARLY, SUBFLOW_REFER, SUBFLOW_RENEG};
@@ -451,18 +449,6 @@ pub(super) fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, n
     }
 }
 
-/// Whether a message carries a session description: a non-empty body typed
-/// `application/sdp`. `content_type` is the message's own [`MediaType`] read.
-pub(super) fn carries_sdp(
-    body: &[u8],
-    content_type: Option<Result<MediaType, SipParseError>>,
-) -> bool {
-    !body.is_empty()
-        && content_type
-            .and_then(Result::ok)
-            .is_some_and(|media| media.token().to_ascii_lowercase().contains("sdp"))
-}
-
 /// The answer the ACK to an in-dialog INVITE 2xx owes (RFC 3261 §13.2.2.4):
 /// `Some` ONLY in the delayed-offer form — our re-INVITE was bodyless and the
 /// 2xx carries the offer, so the ACK closes the round with our answer (RFC 3264
@@ -475,8 +461,8 @@ fn delayed_offer_answer(st: &ActorState<'_>, resp: &SipResponse) -> Option<&'sta
         .sent_reinvite_txns
         .get(&resp.cseq().seq())
         .and_then(crate::InDialogTxn::sent_invite)
-        .is_none_or(|req| carries_sdp(req.body(), req.header::<MediaType>()));
-    (!we_offered && carries_sdp(resp.body(), resp.header::<MediaType>())).then(|| st.answer_body())
+        .is_none_or(|req| req.sdp().is_some());
+    (!we_offered && resp.sdp().is_some()).then(|| st.answer_body())
 }
 
 /// The body of the ACK to an in-dialog INVITE 2xx: the pending

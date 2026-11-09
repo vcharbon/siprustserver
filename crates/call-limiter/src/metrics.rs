@@ -75,7 +75,8 @@ impl LimiterMetrics {
     }
 
     /// Render the full Prometheus exposition: the request counters here, the
-    /// store's own counters and gauges, and the process's observability
+    /// store's own counters and gauges, the lock recoveries
+    /// ([`crate::poison`]) and the process's observability
     /// counters (`observe::counters`), every family of
     /// [`crate::catalogue::CATALOGUE`].
     pub fn prometheus_text(&self, stats: StoreStats) -> String {
@@ -94,6 +95,7 @@ impl LimiterMetrics {
         c::FENCES.render_value(&mut s, stats.fences);
         c::CHANGE_MARKERS.render_value(&mut s, stats.change_markers);
         c::ADMISSION_MAX.render_value(&mut s, stats.admission_max);
+        s.push_str(&crate::poison::prometheus_text());
         s.push_str(&observe::counters::prometheus_text());
         s
     }
@@ -146,5 +148,7 @@ mod tests {
         ] {
             assert!(text.contains(&format!("\n{line}\n")), "{line} missing in\n{text}");
         }
+        let recoveries = "\nlimiter_poisoned_lock_recoveries_total{lock=\"store\"} ";
+        assert!(text.contains(recoveries), "the store's lock recoveries missing in\n{text}");
     }
 }

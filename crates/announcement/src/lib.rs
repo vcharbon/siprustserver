@@ -187,7 +187,7 @@ fn mscml_reject_status(code: u16) -> (u16, &'static str) {
 fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
     media_leg_id(&ctx.call)?; // fire only while a parked media leg exists
     let req = ctx.request()?;
-    let code = mscml::parse_response_code(req.body()).unwrap_or(500);
+    let code = mscml::response_code(req).unwrap_or(500);
     let (status, reason) = mscml_reject_status(code);
     ok(vec![
         // Answer the MRF's in-dialog INFO (the B2BUA is its UAS).
@@ -315,7 +315,7 @@ define_service! {
                 .direction(Direction::FromB)
                 .filter(|ctx| {
                     on_media_leg(ctx)
-                        && ctx.request().is_some_and(|r| mscml::is_success_response(r.body()))
+                        && ctx.request().is_some_and(mscml::is_success_response)
                 }),
             handle: on_mscml_done,
         },
@@ -336,7 +336,7 @@ define_service! {
                 .direction(Direction::FromB)
                 .filter(|ctx| {
                     on_media_leg(ctx)
-                        && ctx.request().is_some_and(|r| mscml::is_failure_response(r.body()))
+                        && ctx.request().is_some_and(mscml::is_failure_response)
                 }),
             handle: on_mscml_failed,
         },

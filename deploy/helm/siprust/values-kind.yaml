@@ -18,7 +18,6 @@ network:
   externalNextHops: [192.168.60.1]
   externalSubnet: 192.168.60.0/25
   sipPort: 5060
-  internalCidrs: 10.244.0.0/16,172.20.0.0/17
 
 # The host stack's VictoriaTraces through the kind bridge gateway; the lab
 # trusts X-Trace-Sample.

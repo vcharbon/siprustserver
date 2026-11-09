@@ -292,6 +292,7 @@ mod tests {
             queue: "cdr".into(),
             declare,
             bounds: CdrDeliveryBounds::default(),
+            tls: amqp_connect::BrokerTls::PLAIN,
         }
     }
 

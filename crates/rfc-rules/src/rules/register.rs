@@ -31,7 +31,7 @@ crate::registry::rules! {
     SerialRegister = "serial-register";
     /// RFC 3261 §10.2: a REGISTER carries no Route header — registration forms no route set.
     /// Charges the REGISTER's sender.
-    RegisterNoRouteSet = "register-no-route-set";
+    RegisterNoRouteSet = "register-no-route-set", one_message;
 }
 
 /// **RFC 3261 §10.2 — a REGISTER carries no Route header.** Registration
@@ -211,7 +211,7 @@ mod tests {
     /// `extra` header rows appended.
     fn register(at_us: u64, branch: &str, contact: &str, extra: &str) -> Msg {
         let head = format!(
-            "REGISTER sip:h SIP/2.0\r\n\
+            "REGISTER sip:h SIP/2.0\r\nMax-Forwards: 70\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}\r\n\
              From: <sip:alice@h>;tag=at\r\n\
              To: <sip:alice@h>\r\n\
@@ -221,6 +221,7 @@ mod tests {
              {extra}\r\n"
         );
         Msg {
+            refused: false,
             at_us,
             src: UAC.to_string(),
             dst: REGISTRAR.to_string(),
@@ -262,7 +263,7 @@ mod tests {
     }
 
     fn routeless(msgs: &[Msg]) -> Vec<Finding> {
-        RegisterNoRouteSet.eval(&WireView { msgs, obs: &obs(msgs) })
+        crate::registry::judged_alone(&RegisterNoRouteSet, &WireView { msgs, obs: &obs(msgs) })
     }
 
     fn serial(msgs: &[Msg]) -> Vec<Finding> {

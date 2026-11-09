@@ -6,8 +6,6 @@
 use call::helpers::Scope;
 use call::{Call, DialogId};
 use sip_message::generators::{self, InviteClientTransactionHandle};
-use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
 
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
@@ -34,7 +32,8 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         outbound_cseq: i64,
     ) {
-        let Some(cancel) = pending_reinvite_cancel(call, leg_id, outbound_cseq) else {
+        let notes = &mut self.turn.notes;
+        let Some(cancel) = pending_reinvite_cancel(call, leg_id, outbound_cseq, notes) else {
             return;
         };
         self.commit_pending_reinvite_cancel(call, fx, leg_id, outbound_cseq, cancel);
@@ -114,7 +113,8 @@ impl ActionExecutor<'_> {
             refused("the originator's top Via does not read, so it names no destination");
             return;
         };
-        let Some(cancel) = pending_reinvite_cancel(call, leg_id, outbound_cseq) else {
+        let notes = &mut self.turn.notes;
+        let Some(cancel) = pending_reinvite_cancel(call, leg_id, outbound_cseq, notes) else {
             refused("the pending re-INVITE toward the target cannot be CANCELled");
             return;
         };
@@ -154,13 +154,12 @@ fn pending_reinvite_cancel(
     call: &Call,
     leg_id: &str,
     outbound_cseq: i64,
+    notes: &mut crate::turn_notes::TurnNotes,
 ) -> Option<PendingReinviteCancel> {
     let (t_id, dialog) = find_pending_dialog(call, leg_id, outbound_cseq)?;
     let leg = call::helpers::find_leg(call, leg_id)?;
     let handle = call::helpers::sent_invite_image(leg, &dialog)?;
-    let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.image) else {
-        return None;
-    };
+    let req = crate::stored_image::request_noted(&handle.image, call, "re-INVITE CANCEL", notes)?;
     if req.cseq().seq() as i64 != outbound_cseq {
         return None;
     }

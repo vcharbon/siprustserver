@@ -62,8 +62,15 @@ fn no_notify_leaves_on_a_subscription_after_its_terminating_one() {
 #[test]
 fn a_second_terminating_notify_on_the_subscription_is_refused() {
     let (call, later) = after_terminated();
-    let result = execute_at(&call, later, &[notify("Refer", "terminated")]);
-    assert_eq!(notifies(&result), 0, "the event package is matched without case");
+    let result = execute_at(&call, later, &[notify("refer", "terminated")]);
+    assert_eq!(notifies(&result), 0, "the subscription is over (RFC 6665 §4.2.2)");
+}
+
+#[test]
+fn an_event_package_in_another_case_is_another_subscription() {
+    let (call, later) = after_terminated();
+    let result = execute_at(&call, later, &[notify("Refer", "active;expires=60")]);
+    assert_eq!(notifies(&result), 1, "the package compares byte by byte (RFC 6665 §8.2.1)");
 }
 
 #[test]

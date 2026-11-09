@@ -96,6 +96,7 @@ fn cfg(via: SocketAddr, secs: u64) -> DriverCfg {
             reinvite_gap: Duration::from_millis(0),
             long_hold: Duration::from_millis(120),
             teardown_quiesce: Duration::from_millis(200),
+            final_wait: None,
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),

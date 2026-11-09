@@ -70,3 +70,20 @@ class VictoriaMetrics:
             value = as_list(as_obj(r).get("value"))
             total += float(str(value[1]))
         return total
+
+    def by_label(self, query: str, label: str, at_s: float) -> dict[str, float]:
+        """An instant query at `at_s`, each series' value by its `label`; empty
+        when it selects no series; `QueryFailed` when VictoriaMetrics does not answer."""
+        url = f"{self.base_url}/api/v1/query?{urllib.parse.urlencode({'query': query, 'time': f'{at_s:.3f}'})}"
+        res = self.executor.http("GET", url)
+        if res.status != 200:
+            raise QueryFailed(f"VictoriaMetrics did not answer {query!r}: HTTP {res.status} {res.body[:120]}")
+        try:
+            data = as_obj(as_obj(json.loads(res.body)).get("data"))
+            out: dict[str, float] = {}
+            for r in as_list(data.get("result")):
+                row = as_obj(r)
+                out[str(as_obj(row.get("metric")).get(label, ""))] = float(str(as_list(row.get("value"))[1]))
+            return out
+        except (ValueError, TypeError) as e:
+            raise QueryFailed(f"VictoriaMetrics answered {query!r} with no vector: {e}") from e

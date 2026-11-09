@@ -6,7 +6,9 @@ so callRef ownership, the proxy's cookie and replication membership agree by
 construction. Readiness is /ready: 503 while re-hydrating or draining, so a
 NotReady worker leaves the EndpointSlice the proxy and its peers watch.
 Liveness is /healthz: 503 while a loop has been on one piece of work past
-B2BUA_LOOP_STALL_MS. The operator routes listen on loopback (B2BUA_ADMIN),
+B2BUA_LOOP_STALL_MS; a loop still on it past B2BUA_LOOP_EXIT_MS exits the
+process first, and the probe stays the backstop for a runtime wedged whole. The
+operator routes listen on loopback (B2BUA_ADMIN),
 reached through kubectl port-forward, never through a Service.
 */ -}}
 {{- if .Values.worker.enabled }}
@@ -131,9 +133,13 @@ spec:
             httpGet: { path: /ready, port: 9091 }
             initialDelaySeconds: 1
             periodSeconds: 2
+            # A flip to not ready tells the proxies' dead verdict (ADR-0050 §3):
+            # the timeout holds on a CPU-starved node, and a process that died
+            # refuses at once.
+            timeoutSeconds: 2
             failureThreshold: 2
-          # Three misses 10 s apart restart the container; the 5 s timeout
-          # holds on a CPU-starved node.
+          # Three misses 10 s apart restart the container, a worker whose runtime
+          # is wedged whole; the 5 s timeout holds on a CPU-starved node.
           livenessProbe:
             httpGet: { path: /healthz, port: 9091 }
             initialDelaySeconds: 10

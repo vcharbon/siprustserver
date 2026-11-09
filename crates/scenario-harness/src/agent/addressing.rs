@@ -22,6 +22,12 @@ fn authority_to_addr(authority: &HostPort) -> Option<SocketAddr> {
     hostport_to_addr(&format!("{}:{}", authority.host(), authority.port_or_default()))
 }
 
+/// The socket address a URI's next hop names ([`Uri::next_hop`]).
+fn next_hop_addr(uri: &Uri) -> Option<SocketAddr> {
+    let (host, port) = uri.next_hop();
+    hostport_to_addr(&format!("{host}:{port}"))
+}
+
 /// Resolve a SIP URI to a socket address. Handles a bare `sip:user@host:port`
 /// URI read whole (a `;` in its user part stays there, RFC 3261 §25.1), the
 /// `<sip:host:port;lr>` name-addr form of a Route / Record-Route entry, and a
@@ -30,11 +36,11 @@ pub(super) fn uri_to_addr(uri: &str) -> Option<SocketAddr> {
     let t = uri.trim();
     if t.starts_with("sip:") || t.starts_with("sips:") {
         let uri = Uri::parse(&SipStr::owned(t)).ok()?;
-        return authority_to_addr(uri.authority());
+        return next_hop_addr(&uri);
     }
     if t.starts_with('<') {
         let addr = NameAddr::parse(&SipStr::owned(t)).ok()?;
-        return authority_to_addr(addr.uri().authority());
+        return next_hop_addr(addr.uri());
     }
     // A bare `host[:port]` is not a URI — it resolves directly.
     hostport_to_addr(t)
@@ -87,6 +93,8 @@ mod tests {
             "sip:alice%3Bx=y;isub=12@192.0.2.10:5070;transport=udp",
             "<sip:+33612345678;foo=bar@192.0.2.10:5070;lr>",
             "192.0.2.10:5070",
+            "sip:bob@name.invalid:5070;maddr=192.0.2.10",
+            "<sip:name.invalid:5070;maddr=192.0.2.10;lr>",
         ] {
             assert_eq!(uri_to_addr(target), Some("192.0.2.10:5070".parse().unwrap()), "{target}");
         }

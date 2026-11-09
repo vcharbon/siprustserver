@@ -41,7 +41,7 @@ Call-ID: t100-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("expected response")
     };
     core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
@@ -127,7 +127,7 @@ async fn relayed_non_2xx_final_is_never_hop_acked_and_the_upstream_ack_relays() 
     // b-leg INVITE carries it through the LB.
     let invite_ruri = "sip:+155501113301000@uas.example:6001;user=phone";
     let raw_invite = format!(
-        "INVITE {invite_ruri} SIP/2.0\r\n\
+        "INVITE {invite_ruri} SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri;rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:worker@{UAC}>;tag=w1\r\n\
@@ -136,7 +136,7 @@ Call-ID: ackuri-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let msg = CustomParser::default().parse(raw_invite.as_bytes()).unwrap();
+    let msg = CustomParser::new().parse(raw_invite.as_bytes()).unwrap();
     core.handle_request_from(msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     // The branch the proxy stamped on its forwarded INVITE — the relayed
@@ -163,8 +163,7 @@ Call-ID: ackuri-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let SipMessage::Response(resp) = CustomParser::default().parse(raw_486.as_bytes()).unwrap()
-    else {
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw_486.as_bytes()).unwrap() else {
         panic!("expected response")
     };
     core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
@@ -192,7 +191,7 @@ Call-ID: ackuri-1@test\r\n\
 CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let ack_msg = CustomParser::default().parse(raw_ack.as_bytes()).unwrap();
+    let ack_msg = CustomParser::new().parse(raw_ack.as_bytes()).unwrap();
     core.handle_request_from(ack_msg, format!("{UAC}:5060").parse().unwrap()).await;
 
     let sent = ep.sent.lock().unwrap();

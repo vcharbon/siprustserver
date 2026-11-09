@@ -22,7 +22,7 @@ fn tagged(name: &str, tag: Option<&str>) -> String {
 fn request(method: &str, cseq: u32, from_tag: &str, to_tag: Option<&str>) -> SipRequest {
     let cseq_method = if method == "ACK" { "ACK" } else { method };
     let text = format!(
-        "{method} sip:x@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}{method}\r\n\
+        "{method} sip:x@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}{method}\r\n\
          From: {}\r\nTo: {}\r\nCall-ID: {CALL}\r\nCSeq: {cseq} {cseq_method}\r\n\
          Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
         tagged("a", Some(from_tag)),
@@ -37,7 +37,7 @@ fn request(method: &str, cseq: u32, from_tag: &str, to_tag: Option<&str>) -> Sip
 /// A `status` response to `method` numbered `cseq`, From `from_tag`, To `to_tag`.
 fn response(status: u16, method: &str, cseq: u32, from_tag: &str, to_tag: &str) -> SipResponse {
     let text = format!(
-        "SIP/2.0 {status} Reason\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}{method}\r\n\
+        "SIP/2.0 {status} Reason\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}{method}\r\n\
          From: {}\r\nTo: {}\r\nCall-ID: {CALL}\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n",
         tagged("a", Some(from_tag)),
         tagged("b", Some(to_tag)),
@@ -179,7 +179,7 @@ fn answered_on_an_unrung_fork() -> DialogTable {
 /// A request from the callee, From its fork tag, To the caller's tag.
 fn from_fork(method: &str, cseq: u32, fork: &str) -> SipRequest {
     let text = format!(
-        "{method} sip:a@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-{fork}{cseq}\r\n\
+        "{method} sip:a@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-{fork}{cseq}\r\n\
          From: <sip:b@host>;tag={fork}\r\nTo: <sip:a@host>;tag=A1\r\nCall-ID: {CALL}\r\n\
          CSeq: {cseq} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
     );
@@ -231,7 +231,7 @@ fn the_ack_of_a_refusal_is_not_judged() {
 /// A NOTIFY with its Subscription-State.
 fn notify(cseq: u32, state: &str) -> SipRequest {
     let text = format!(
-        "NOTIFY sip:b@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-n{cseq}\r\n\
+        "NOTIFY sip:b@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-n{cseq}\r\n\
          From: <sip:a@host>;tag=A1\r\nTo: <sip:b@host>;tag=B1\r\nCall-ID: {CALL}\r\n\
          CSeq: {cseq} NOTIFY\r\nEvent: refer\r\nSubscription-State: {state}\r\n\
          Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
@@ -249,7 +249,7 @@ fn a_referrers_notifies_outlive_its_bye() {
     let mut t = ringing_uas(BackwardsCseq::Verdict);
     t.note_sent_response(&response(200, "INVITE", 1, "A1", "B1"), 0);
     let refer = parse(format!(
-        "REFER sip:a@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-r1\r\n\
+        "REFER sip:a@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-r1\r\n\
          From: <sip:b@host>;tag=B1\r\nTo: <sip:a@host>;tag=A1\r\nCall-ID: {CALL}\r\n\
          CSeq: 1 REFER\r\nRefer-To: <sip:c@host>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
     ));
@@ -343,7 +343,7 @@ fn a_refer_sub_false_refer_opens_no_subscription() {
     let mut t = ringing_uas(BackwardsCseq::Verdict);
     t.note_sent_response(&response(200, "INVITE", 1, "A1", "B1"), 0);
     let refer = parse(format!(
-        "REFER sip:a@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-r1\r\n\
+        "REFER sip:a@host SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-r1\r\n\
          From: <sip:b@host>;tag=B1\r\nTo: <sip:a@host>;tag=A1\r\nCall-ID: {CALL}\r\n\
          CSeq: 1 REFER\r\nRefer-To: <sip:c@host>\r\nRefer-Sub: false\r\n\
          Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"

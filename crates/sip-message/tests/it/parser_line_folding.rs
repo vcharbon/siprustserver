@@ -61,7 +61,7 @@ fn twenty_thousand_folds_parse_on_a_small_stack() {
         value.push_str("\r\n ");
     }
     let raw = invite_with_subject(&value);
-    let limits = SipParserLimits { max_header_lines: usize::MAX, ..SipParserLimits::default() };
+    let limits = SipParserLimits { max_header_lines: usize::MAX, ..SipParserLimits::DEFAULT };
     assert!(CustomParser::new().parse(&raw).is_err(), "refused at the line limit by default");
     let parsed = std::thread::Builder::new()
         .stack_size(128 * 1024)

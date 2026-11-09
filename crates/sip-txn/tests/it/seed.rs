@@ -599,9 +599,10 @@ async fn a_cancel_on_a_seed_with_no_provisional_waits_for_one() {
     let branch = "z9hG4bK-seed-unanswered";
     let call_id = "seed-unanswered";
     stack.txn.seed(CALL_REF, vec![unanswered_client_seed(branch, call_id)]).await.unwrap();
+    let cr = sip_message::param_codec::encode_param(CALL_REF);
     let cancel = parse_request(&format!(
         "CANCEL sip:bob@192.0.2.20:5060 SIP/2.0\n\
-         Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={CALL_REF};lg=b-1\n\
+         Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={cr};lg=b-1\n\
          Max-Forwards: 70\n\
          From: <sip:b2bua@127.0.0.1:15071>;tag=b2bua-b-1\n\
          To: <sip:bob@192.0.2.20:5060>\n\
@@ -743,9 +744,10 @@ async fn a_seeds_ack_ahead_leaves_before_its_re_sent_invite() {
 
 /// The CANCEL of the INVITE [`invite_with_cr_lg`] builds on `branch`.
 fn seed_cancel(branch: &str, call_id: &str) -> SipRequest {
+    let cr = sip_message::param_codec::encode_param(CALL_REF);
     parse_request(&format!(
         "CANCEL sip:bob@192.0.2.20:5060 SIP/2.0\n\
-         Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={CALL_REF};lg=b-1\n\
+         Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={cr};lg=b-1\n\
          Max-Forwards: 70\n\
          From: <sip:b2bua@127.0.0.1:15071>;tag=b2bua-b-1\n\
          To: <sip:bob@192.0.2.20:5060>\n\

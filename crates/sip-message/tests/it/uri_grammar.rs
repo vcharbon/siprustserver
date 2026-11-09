@@ -5,7 +5,7 @@
 //! the parser reads keep their character classes. Each refusal sits beside a
 //! well-formed counterpart that must keep parsing.
 
-use sip_message::header::{NameAddr, Uri, UriRole};
+use sip_message::header::{NameAddr, ReplyTo, Uri, UriRole};
 use sip_message::{CustomParser, SipMessage, SipParser, SipRequest, SipStr};
 
 /// An INVITE with one line replaced by `line` (matched on its header name, or the
@@ -236,7 +236,8 @@ fn a_request_line_method_is_a_token() {
 }
 
 /// An identity header the grammar refuses is a non-fatal `Err`: the message
-/// parses, and the entry is not used.
+/// parses, and the entry is not used. A bare Refer-To whose `?` starts its
+/// URI's headers is valid (RFC 3515 §2.1 admits `addr-spec`) and reads.
 #[test]
 fn an_identity_header_the_grammar_refuses_is_stored_as_an_error() {
     let raw = invite(
@@ -247,7 +248,7 @@ fn an_identity_header_the_grammar_refuses_is_stored_as_an_error() {
          Diversion: <sip: +33612345678@example.com>;reason=unconditional\r\n",
     );
     let r = request(&raw);
-    assert!(r.optional().refer_to.is_err(), "bare addr-spec with ?headers");
+    assert!(r.optional().refer_to.is_ok(), "a bare addr-spec with ?headers reads");
     assert!(r.optional().history_info.is_err(), "raw `;` in an escaped header");
     assert!(r.optional().diversion.is_err(), "a space inside <...>");
 }
@@ -484,7 +485,7 @@ fn a_branch_is_a_token() {
 
 #[test]
 fn a_cseq_method_is_a_token() {
-    let raw = "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-uri1\r\n\
+    let raw = "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-uri1\r\n\
                From: <sip:alice@example.com>;tag=a1\r\nTo: <sip:bob@example.com>;tag=b1\r\n\
                Call-ID: c1\r\nCSeq: 1 INVIT\u{cb}\r\nContent-Length: 0\r\n\r\n";
     refused("CSeq method", raw);
@@ -505,4 +506,24 @@ fn a_malformed_date_never_refuses_the_message() {
     request(&invite("", "", "Date: Sat, 13 Nov 2010 23:29:00 PST\r\n"));
     request(&invite("", "", "Date: Sat, 3 Nov 2010 23:29:00 GMT\r\n"));
     request(&invite("", "", "Date: Sat, 13 Nov 2010 23:29:00 GMT\r\n"));
+}
+
+/// A URI a target role reads holds a `maddr` naming a host or none; a party's URI
+/// on From or To is never routed on.
+#[test]
+fn a_maddr_naming_no_host_refuses_the_lines_that_route() {
+    for bad in [";maddr", ";maddr=1.2.3.4:5060", ";maddr=[::1"] {
+        let target = format!("sip:h.example{bad}");
+        refused("Request-URI", &invite("INVITE", &format!("INVITE {target} SIP/2.0"), ""));
+        refused("Contact", &invite("Contact", &format!("Contact: <{target}>"), ""));
+        refused("Route", &invite("", "", &format!("Route: <{target};lr>\r\n")));
+        refused("Record-Route", &invite("", "", &format!("Record-Route: <{target};lr>\r\n")));
+        // Not gated at ingress: the typed read a consumer makes refuses them.
+        let unread =
+            request(&invite("", "", &format!("Refer-To: <{target}>\r\nReply-To: <{target}>\r\n")));
+        assert!(unread.optional().refer_to.is_err(), "Refer-To {bad}");
+        assert!(unread.header::<ReplyTo>().is_some_and(|r| r.is_err()), "Reply-To {bad}");
+    }
+    assert!(parse(&invite("From", "From: <sip:alice@example.com;maddr>;tag=a1", "")).is_ok());
+    assert!(parse(&invite("Contact", "Contact: <sip:a@h.example;maddr=192.0.2.9>", "")).is_ok());
 }

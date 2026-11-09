@@ -17,9 +17,11 @@ use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use super::cardinality::held_to_the_table;
+use super::cardinality::TokenSet;
 use super::kind::TokenKind;
-use super::name::HeaderName;
-use super::value::{Folding, HeaderValue};
+use super::single_valued::Listed;
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// Whether `s` is one RFC 3261 §25.1 `token`: at least one character, all of
@@ -115,17 +117,30 @@ impl<K: TokenKind> TokenListHeader<K> {
 }
 
 impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
-    fn header_name() -> HeaderName {
-        K::name()
-    }
+    type Lines = K::Lines;
+    held_to_the_table!();
 
-    fn folding() -> Folding {
-        K::FOLDING
-    }
+    const HEADER: Listed = K::HEADER;
 
+    /// Every entry is one token: an entry that is not, an empty entry, and an
+    /// empty value where the grammar needs a token are refused (RFC 3261
+    /// §25.1, RFC 3323 §4.2, RFC 6665 §8.4). A repeated token is read once.
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let entries = K::name().item_separator().split(raw.as_str());
-        Ok(Self::empty().extended(entries.map(|entry| raw.reslice(entry))))
+        let mut entries = K::name().item_separator().split(raw.as_str()).peekable();
+        if entries.peek().is_none() && !K::MAY_BE_EMPTY {
+            return Err(SipParseError::new(format!("{} has no value", K::name())));
+        }
+        let mut tokens = Vec::new();
+        for entry in entries {
+            if !is_token(entry) {
+                return Err(SipParseError::new(format!(
+                    "{} entry is not a token: {entry:?}",
+                    K::name()
+                )));
+            }
+            tokens.push(raw.reslice(entry));
+        }
+        Ok(Self::empty().extended(tokens))
     }
 
     fn render(&self, out: &mut Wire) {
@@ -137,12 +152,12 @@ impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
             out.str(token.as_str());
         }
     }
+}
 
-    const COMBINES: bool = true;
-
+impl<K: TokenKind> TokenSet for TokenListHeader<K> {
     /// Several lines of a set-like header are one set.
-    fn combine(values: Vec<Self>) -> Option<Self> {
-        let mut it = values.into_iter();
+    fn union(sets: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut it = sets.into_iter();
         let first = it.next()?;
         Some(first.extended(it.flat_map(|extra| extra.tokens)))
     }
@@ -174,7 +189,7 @@ mod tests {
             Supported::parse(&SipStr::owned("100rel")).unwrap(),
             Supported::parse(&SipStr::owned("timer, 100rel")).unwrap(),
         ];
-        let merged = Supported::combine(lines).unwrap();
+        let merged = Supported::union(lines).unwrap();
         assert_eq!(merged.to_wire(), "100rel, timer");
     }
 
@@ -189,24 +204,30 @@ mod tests {
         assert_eq!(set.to_wire(), "timer");
     }
 
-    /// RFC 3323 §4.2: the priv-values are `;`-separated, so the set reads and
-    /// writes them that way while the option-tag family keeps its commas.
+    /// RFC 3323 §4.2 separates the priv-values with `;`, its erratum 5184
+    /// with `,`: the set reads both and writes the erratum's.
     #[test]
-    fn the_priv_value_set_reads_and_writes_semicolons() {
-        let p = Privacy::parse(&SipStr::owned("id;user; critical")).unwrap();
-        assert!(p.contains("id"));
-        assert!(p.contains("USER"));
-        assert_eq!(p.len(), 3);
-        assert_eq!(p.to_wire(), "id;user;critical");
+    fn the_priv_value_set_reads_both_separators_and_writes_commas() {
+        for raw in ["id;user; critical", "id, user,critical", "id;user, critical"] {
+            let p = Privacy::parse(&SipStr::owned(raw)).unwrap();
+            assert!(p.contains("id"));
+            assert!(p.contains("USER"));
+            assert_eq!(p.len(), 3, "{raw}");
+            assert_eq!(p.to_wire(), "id, user, critical");
+        }
         assert_eq!(Supported::of(["100rel", "timer"]).to_wire(), "100rel, timer");
     }
 
-    /// A comma is DATA inside a priv-value list: splitting on it would mint a
-    /// token the sender never wrote.
+    /// An entry that is no token, an empty entry and an empty value where the
+    /// grammar needs a token are refused; Supported and Allow may be empty.
     #[test]
-    fn a_comma_is_not_a_priv_value_separator() {
-        let p = Privacy::parse(&SipStr::owned("id,user")).unwrap();
-        assert_eq!(p.len(), 0, "`id,user` is one malformed priv-value, not two: {p:?}");
+    fn a_set_off_its_grammar_is_refused() {
+        for raw in ["foo bar", "\"foo\"", "100rel, foo/bar", "100rel,,timer", ",100rel", ""] {
+            assert!(Require::parse(&SipStr::owned(raw)).is_err(), "{raw:?}");
+        }
+        assert!(Privacy::parse(&SipStr::owned("")).is_err());
+        assert!(Supported::parse(&SipStr::owned("")).unwrap().is_empty());
+        assert!(crate::header::Allow::parse(&SipStr::owned("")).unwrap().is_empty());
     }
 
     #[test]

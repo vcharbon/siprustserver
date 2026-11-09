@@ -55,7 +55,10 @@ fails, whatever crate unified it in.
   `cast_sign_loss`, `cast_possible_wrap`; the `assert!` family disallowed. `debug_assert!` is
   allowed: release compiles it out and the property lane runs it.
 - A curated `disallowed-methods` list for panics inside library calls, each entry with its
-  reason and the checked alternative.
+  reason and the checked alternative. The same list holds the parser's reading-role entries
+  (ADR-0053 §6), which the pass counts beside the panic set: a parser built with no reading
+  role is a site in every member, tiered or not, and the deployment's ingress parser one
+  outside its composition root.
 - `arithmetic_side_effects` per module, where protocol numbers are computed (sequence numbers,
   versions, lengths and durations read from a message) and in the parser's cursor. Elsewhere
   offset arithmetic moves into cursor methods and checked access (`get`, `split_at_checked`,
@@ -84,7 +87,8 @@ the crate carries `#![cfg_attr(not(test), deny(…))]` with the eleven lints at 
 (a pure crate adds `iter_over_hash_type`, which the pass counts in pure crates only),
 which exempts all test code; the disallowed lists stay with the pass for every tiered crate,
 since one list holds both tiers' entries, and a crate whose remaining sites are all of the
-lists keeps its attribute.
+lists keeps its attribute. The same allowlist counts the loop and recursion sites of ADR-0057 §5,
+which no attribute states.
 
 ### 4. Abort-class failures
 

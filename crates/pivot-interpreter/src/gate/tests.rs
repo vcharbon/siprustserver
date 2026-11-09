@@ -719,7 +719,7 @@ fn a_compact_spelled_message_is_read_as_its_headers() {
     use sip_message::{CustomParser, SipParser};
     let msg = CustomParser::new()
         .parse(
-            b"INVITE sip:b@h SIP/2.0\r\n\
+            b"INVITE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 v: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
 From: <sip:a@h>;tag=f1\r\n\
 To: <sip:b@h>\r\n\

@@ -1,0 +1,43 @@
+schema: incident.v1
+name: kill_worker_loop
+description: >-
+  A crash loop of one ready worker on its live node: every container process of
+  the pod is killed with SIGKILL from its node, then again each time the kubelet
+  restarts it, kill_after_s after the new container runs, so the kubelet's
+  backoff grows; the loop ends with the first restart that kept the worker away
+  for away_s, which it lets live. inject returns then, with each round's kill,
+  death and restart instants. The probe waits until the worker is Ready and reads
+  kill_worker's timings of the last round.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: one
+params:
+  kill_after_s:
+    type: number
+    default: 0
+    description: How long a restarted container runs before it is killed again; 0 kills it as soon as it is seen running, before it can answer.
+  away_s:
+    type: number
+    default: 30
+    description: The loop ends with the first restart that came this long after the death before it.
+  max_rounds:
+    type: integer
+    default: 12
+    description: The rounds after which a backoff still under away_s fails the inject.
+  proxy_selector:
+    type: string
+    default: app=sip-front-proxy
+    description: The front proxies whose registry join of the restarted worker is timed; empty skips them.
+  proxy_container:
+    type: string
+    default: sip-front-proxy
+    description: The proxy container whose log holds the registry lines.
+duration_s: 0
+expected_s: 300
+timeouts:
+  inject_s: 600
+  heal_s: 10
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind, docker]

@@ -136,9 +136,12 @@ fn max_len(raw: &str) -> Result<i64, String> {
 /// connects.
 pub async fn run(view: Arc<dyn ObservationView>) -> Result<std::convert::Infallible, String> {
     let url = env_or("CDR_AMQP_URL", "amqp://guest:guest@rabbitmq:5672/%2f");
-    amqp_connect::checked_uri("CDR_AMQP_URL", &url)?;
+    let uri = amqp_connect::checked_uri("CDR_AMQP_URL", &url)?;
+    let tls = amqp_connect::BrokerTls::for_uri(&uri)
+        .map_err(|e| format!("CDR_AMQP_URL is amqps and the system's CA roots do not load: {e}"))?;
     let target = Target {
         url,
+        tls,
         queue: env_or("CDR_QUEUE", "cdr"),
         max_len: max_len(&env_or("CDR_QUEUE_MAX_LEN", "100000"))?,
         setup_timeout: SETUP_TIMEOUT,

@@ -12,6 +12,7 @@ use sip_net_testkit::SimulatedSignalingNetwork;
 use super::*;
 use crate::addr::ProxyAddr;
 use crate::registry::simulated::SimulatedWorkerRegistry;
+use crate::registry::WorkerHealth;
 
 const NOTIFIER: &str = "192.0.2.250:5061";
 const W1: (&str, u16) = ("10.244.5.8", 5060);
@@ -43,8 +44,14 @@ async fn three_alive_workers() -> Fixture {
         workers.push(net.bind_udp(bind(format!("{host}:{port}"))).await.unwrap());
     }
     let ep = net.bind_udp(bind(NOTIFIER.into())).await.unwrap();
-    let notifier =
-        DeadNotifier::new(ep, Arc::new(registry.clone()), key(), clock, Arc::new(IdGen::seeded(9)));
+    let notifier = DeadNotifier::new(
+        ep,
+        sip_message::CustomParser::new(),
+        Arc::new(registry.clone()),
+        key(),
+        clock,
+        Arc::new(IdGen::seeded(9)),
+    );
     let task = tokio::spawn(notifier.run());
     Fixture { registry, workers, task }
 }
@@ -52,7 +59,7 @@ async fn three_alive_workers() -> Fixture {
 /// The OPTIONS `worker` received within a second, if any.
 async fn received(worker: &dyn UdpEndpoint) -> Option<SipRequest> {
     let packet = tokio::time::timeout(Duration::from_secs(1), worker.recv()).await.ok()??;
-    match CustomParser::default().parse(&packet.raw).ok()? {
+    match CustomParser::new().parse(&packet.raw).ok()? {
         SipMessage::Request(req) => Some(req),
         SipMessage::Response(_) => None,
     }
@@ -85,6 +92,48 @@ async fn a_departure_and_a_worker_read_alive_are_no_verdict() {
     f.registry.set_health("w3", WorkerHealth::Alive);
     f.registry.set_health("w3", WorkerHealth::Unknown);
     assert!(received(f.workers[1].as_ref()).await.is_none(), "nothing is told");
+    f.task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_worker_read_alive_flipping_not_ready_is_told_to_the_others_signed() {
+    let f = three_alive_workers().await;
+    f.registry.set_conditions("w1", false, false);
+
+    for worker in [&f.workers[1], &f.workers[2]] {
+        let req = received(worker.as_ref()).await.expect("the other workers are told");
+        let notice = &dead_notice(&req).expect("a notice");
+        assert_eq!(notice.notice.ordinal, "w1");
+        assert_eq!(notice.notice.at_ms, 1_000, "the instant it was told");
+        let fields = notice.notice.signed_fields();
+        let signature = notice.signature.as_deref().expect("signed");
+        assert!(key().verify(&fields.each_ref().map(Vec::as_slice), signature));
+    }
+    assert!(received(f.workers[0].as_ref()).await.is_none(), "the flipped worker is told nothing");
+    f.task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_terminating_flip_is_told_to_nobody() {
+    let f = three_alive_workers().await;
+    f.registry.set_conditions("w1", false, true);
+    assert!(received(f.workers[1].as_ref()).await.is_none(), "nothing is told");
+    f.task.abort();
+}
+
+/// Behind by more verdicts than the backlog holds, the notifier reads who
+/// stands dead now: a worker that flipped not ready has no entry in the
+/// projection, and its verdict is still told.
+#[tokio::test(start_paused = true)]
+async fn a_lagging_notifier_still_tells_a_flip() {
+    let f = three_alive_workers().await;
+    f.registry.set_conditions("w1", false, false);
+    for _ in 0..80 {
+        f.registry.set_health("w3", WorkerHealth::Dead);
+        f.registry.set_health("w3", WorkerHealth::Alive);
+    }
+    let req = received(f.workers[1].as_ref()).await.expect("w2 is told");
+    assert_eq!(dead_notice(&req).expect("a notice").notice.ordinal, "w1");
     f.task.abort();
 }
 

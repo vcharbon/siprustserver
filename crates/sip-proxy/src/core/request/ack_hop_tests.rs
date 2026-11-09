@@ -3,10 +3,11 @@
 //! on the absence of a Route header. A b-leg INVITE behind an outbound
 //! proxy carries a preloaded Route, so its non-2xx ACK carries one too; a
 //! `route.is_none()` heuristic misroutes exactly that ACK.
-//! A matched ACK for a RELAYED final is relayed to the node the final arrived
-//! from, on the INVITE's outbound branch (the downstream server transaction
-//! must match it to stop retransmitting the final); a matched ACK for a
-//! final the proxy generated ITSELF is absorbed (the proxy is the UAS).
+//! A caller's matched ACK for a RELAYED final is relayed to the node the final
+//! arrived from, a worker's where its INVITE went, on the INVITE's outbound
+//! branch (the downstream server transaction must match it to stop retransmitting
+//! the final); a matched ACK for a final the proxy generated ITSELF is absorbed
+//! (the proxy is the UAS).
 
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ async fn core() -> ProxyCore {
 }
 
 fn parse_req(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 fn invite(branch: &str) -> SipMessage {
@@ -101,7 +102,7 @@ Call-ID: absorb-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+    let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("expected response")
     };
     resp
@@ -255,7 +256,7 @@ Content-Length: 0\r\n\r\n"
 /// §8.1.1.7 magic-cookie gate is a wire-grammar rule, so it is hydrated
 /// rather than read off the wire.
 fn branchless(raw: &str) -> SipMessage {
-    let limits = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    let limits = SipParserLimits { wire_grammar: false, ..SipParserLimits::DEFAULT };
     CustomParser::with_limits(limits).parse(raw.as_bytes()).unwrap()
 }
 

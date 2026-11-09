@@ -1,0 +1,52 @@
+schema: incident.v1
+name: next_hop_dead
+description: >-
+  A next hop of the target proxies' nodes goes silent with their carrier up:
+  every frame to or from its MAC is dropped at the node's external interface,
+  below IP and ARP. The routers' BFD withdraws the node at once; its neighbour
+  entry reads unresolved at the end of the neighbour cycle, its proxy turns
+  unfit and its route guard drops the node's BFD and BGP. At heal the frames
+  pass again and nothing is sent from outside: the face check's own solicit
+  must clear the latch. A recovery proves that only against a passive router
+  (one that opens no session toward the node and sends it no BFD while its
+  session is down) with a duration_s past the router's own ARP window: for
+  about 100 s after the death its retransmissions on the session it closed
+  make it ARP for the node, which would answer for the solicit. The probe
+  wants both VIPs routed over every live proxy's node. `pick: all` takes the
+  VIPs away altogether until the heal.
+kind: fault
+target:
+  selector: app=sip-front-proxy
+  pick: one
+params:
+  internal_vip:
+    type: string
+    default: 172.20.255.250
+    description: The VIP the workers reach the proxies at.
+  external_vip:
+    type: string
+    default: 192.168.60.250
+    description: The VIP the callers dial.
+  network:
+    type: string
+    default: sipext
+    description: The docker network of the callers' plane.
+  interface:
+    type: string
+    default: eth1
+    description: The node's interface on that network, where the next hop's frames are dropped.
+  next_hop:
+    type: string
+    default: 192.168.60.1
+    description: The next hop that goes silent.
+  withdraw_timeout_s:
+    type: integer
+    default: 90
+    description: How long inject waits for each node to leave both VIPs' next hops and its proxy to read unfit.
+duration_s: 120
+timeouts:
+  inject_s: 120
+  heal_s: 60
+  probe_s: 120
+  probe_interval_s: 2
+requires: [kind, docker]

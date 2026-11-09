@@ -1,0 +1,3 @@
+# Rows known to fail: the row's name, then the area of the stack that owns its fix.
+# The list only shrinks: a listed row that no longer fails fails the suite.
+

@@ -86,6 +86,20 @@ fn a_prack_draws_2xx_on_a_match_and_481_without_one() {
     assert!(matches!(decide(&Prack2xxOr481, &rejected)[0].decision, Decision::Compliant));
 }
 
+/// A PRACK the strict reading refuses owes its 400, not the 2xx or 481 its
+/// `RAck` would otherwise draw.
+#[test]
+fn a_refused_prack_owes_no_2xx_or_481() {
+    let mut refused = prack_on(1_200_000, "1 1 INVITE", false);
+    refused.refused = true;
+    let msgs = vec![
+        inv_resp(1_100_000, 180, &reliable_rows(1), false),
+        refused,
+        prack_answer(1_250_000, 400),
+    ];
+    assert!(decide(&Prack2xxOr481, &msgs).is_empty());
+}
+
 /// `prack-2xx-or-481`: a UAS taking the PRACK at its Contact, not at the
 /// address it sent the provisional from, holds the same `RSeq` state there:
 /// the PRACK matches and owes the 2xx.

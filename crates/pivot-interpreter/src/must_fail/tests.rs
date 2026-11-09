@@ -3,7 +3,7 @@ use pivot_schema::bundle::Dir;
 use pivot_schema::violation::RfcRule;
 
 /// The callee's 200, as leg B put it on the wire.
-const ANSWER: &str = "SIP/2.0 200 OK\r\n\
+const ANSWER: &str = "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-b\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>;tag=b1\r\n\
@@ -12,7 +12,7 @@ const ANSWER: &str = "SIP/2.0 200 OK\r\n\
         Content-Length: 0\r\n\r\n";
 
 /// The platform's own ACK to it — the datagram no step of the document holds.
-const ACK: &str = "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+const ACK: &str = "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-c\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>;tag=b1\r\n\
@@ -32,7 +32,7 @@ const PROGRESS: &str = "SIP/2.0 183 Session Progress\r\n\
         Content-Length: 0\r\n\r\n";
 
 /// The platform's own PRACK to it — the datagram no step of the document holds.
-const PRACK: &str = "PRACK sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+const PRACK: &str = "PRACK sip:bob@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-d\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>;tag=b1\r\n\
@@ -91,7 +91,7 @@ const DECLARED_CANCEL: &str = r#""must_fail": [ { "failure": "unexpected-cancel"
 /// The platform's own CANCEL for the transaction the anchor's final ended —
 /// the datagram no step of the document holds. §9.1 names the INVITE by
 /// Call-ID and CSeq number, and its To carries no tag.
-const CANCEL: &str = "CANCEL sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+const CANCEL: &str = "CANCEL sip:bob@127.0.0.1:5070 SIP/2.0\r\nMax-Forwards: 70\r\n\
         Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-b\r\n\
         From: <sip:alice@example.test>;tag=a1\r\n\
         To: <sip:bob@example.test>\r\n\
@@ -102,7 +102,7 @@ const CANCEL: &str = "CANCEL sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
 /// A recording of the anchor's reliable 183 out, and whatever `arrival`
 /// states in.
 fn recording_prack(arrival: Option<(&str, Option<&str>)>) -> Recording {
-    let rec = Recording::new();
+    let rec = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     rec.push("B", Dir::Out, 0, PROGRESS, Some("s2"), None);
     if let Some((raw, step)) = arrival {
         rec.push("B", Dir::In, 10, raw, step, None);
@@ -112,7 +112,7 @@ fn recording_prack(arrival: Option<(&str, Option<&str>)>) -> Recording {
 
 /// A recording of the anchor's 200 out, and whatever `arrival` states in.
 fn recording(arrival: Option<(&str, Option<&str>)>) -> Recording {
-    let rec = Recording::new();
+    let rec = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     rec.push("B", Dir::Out, 0, ANSWER, Some("s2"), None);
     if let Some((raw, step)) = arrival {
         rec.push("B", Dir::In, 10, raw, step, None);
@@ -121,7 +121,8 @@ fn recording(arrival: Option<(&str, Option<&str>)>) -> Recording {
 }
 
 fn refused(leg: &str, raw: &str) -> Failure {
-    let message = parse(raw.as_bytes()).expect("the fixture parses");
+    let message = sip_message::SipParser::parse(&sip_message::CustomParser::new(), raw.as_bytes())
+        .expect("the fixture parses");
     Failure::UnexpectedDatagram {
         leg: leg.to_string(),
         arrived: Inbound::of(&message).arrived(),
@@ -280,7 +281,7 @@ fn an_unexpected_datagram_of_another_dialog_or_another_method_satisfies_nothing(
 #[test]
 fn the_declared_ack_counts_only_on_the_anchor_s_own_leg() {
     let plan = plan(DECLARED);
-    let recording = Recording::new();
+    let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     recording.push("B", Dir::Out, 0, ANSWER, Some("s2"), None);
     recording.push("A", Dir::In, 10, ACK, None, None);
     let mut verdict = RunVerdict::ok("negative", "upstream-demo");
@@ -432,7 +433,7 @@ fn a_carried_divergence_survives_the_bundle() {
 #[test]
 fn a_run_that_never_reached_the_anchor_fails_with_both_facts_stated() {
     let plan = plan(DECLARED);
-    let empty = Recording::new();
+    let empty = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
     let mut verdict = RunVerdict::ok("negative", "upstream-demo");
     verdict.fail(Failure::SettleTimedOut { budget_ms: 1000, open: vec!["A".into()] });
 

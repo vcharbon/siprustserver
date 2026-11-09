@@ -61,9 +61,11 @@ pub(super) fn build_481(
     generate_response(req, 481, "Call/Transaction Does Not Exist", &opts)
 }
 
-/// `500 Server Internal Error` to `req`, an in-dialog request whose CSeq is
-/// below the last one its dialog took: out of order (RFC 3261 §12.2.2).
-pub(super) fn build_out_of_order_500(req: &SipRequest) -> Result<SipResponse, GenerateError> {
+/// The bare `500 Server Internal Error` to `req`, an in-dialog request whose
+/// CSeq is below the last one its dialog took (out of order, RFC 3261
+/// §12.2.2), or whose turn crossed a per-call cap and was discarded
+/// (ADR-0057 §4): nothing says why.
+pub(super) fn build_bare_500(req: &SipRequest) -> Result<SipResponse, GenerateError> {
     generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default())
 }
 
@@ -211,6 +213,28 @@ pub(super) fn build_unborn_500(
     )
 }
 
+/// The bare **503 Service Unavailable** for an initial INVITE whose call is
+/// gone before the final it was owed (ADR-0022 X2/X3): the failure an
+/// upstream element reroutes on. Sent through the INVITE server transaction,
+/// the To-tag `minted` (RFC 3261 §8.2.6.2), no Retry-After, no Reason; the
+/// deployment's `advertisement` for a minted final rides.
+pub(super) fn build_unborn_503(
+    req: &sip_message::SipRequest,
+    minted: String,
+    advertisement: &CapabilitySet,
+) -> Result<SipResponse, GenerateError> {
+    generate_response(
+        req,
+        503,
+        "Service Unavailable",
+        &GenerateResponseOpts {
+            to_tag: Some(minted),
+            extra_headers: minted_final_lines(advertisement),
+            ..Default::default()
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,7 +242,7 @@ mod tests {
     use sip_message::{CustomParser, SipMessage, SipParser};
 
     fn invite() -> SipRequest {
-        let raw = "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+        let raw = "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-r\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@caller.test>;tag=a\r\n\

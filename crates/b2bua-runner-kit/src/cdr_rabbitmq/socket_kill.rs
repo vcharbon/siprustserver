@@ -45,7 +45,7 @@ impl SocketKill {
     /// Whether [`Self::kill`] ran.
     #[cfg(test)]
     pub(super) fn killed(&self) -> bool {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).killed
+        locked(&self.state, CDR_SOCKET_KILL).killed
     }
 }
 

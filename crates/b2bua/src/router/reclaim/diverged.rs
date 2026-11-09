@@ -14,22 +14,20 @@
 
 use std::sync::Arc;
 
-use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleAction;
 use call::helpers::{caller_answered, lifecycle_behind};
 use call::TerminationCause;
 use call::{
-    Call, CallModelState, CdrEventType, Dialog, DialogEnd, DialogState, Direction, EndingBy, Leg,
-    RelayOwner, RequestRecord,
+    Call, CallModelState, CdrEventType, Dialog, DialogEnd, DialogState, EndingBy, Leg, RelayOwner,
+    RequestRecord,
 };
 
-use super::super::interpret::process_result;
+use super::super::off_wire;
 use super::super::RouterCtx;
 use super::meeting::resync_timers;
 use super::FlushDirection;
-use crate::rules::{ActionExecutor, RuleCall, RuleContext};
+use crate::owners::Owners;
 use crate::store::Enveloped;
-use crate::turn_scope::TurnScope;
 
 /// The reason the CDR event and the termination of a call ended on two
 /// diverged copies carry.
@@ -100,7 +98,7 @@ async fn end_from(
     resync_timers(ctx, call_ref, live, &mut union.call, now_ms).await;
     ctx.state.update_enveloped(union.clone());
     let owners = ctx.owners_of(&union);
-    end_cleanly(ctx, call_ref, &union.call, &owners, now_ms).await;
+    end_cleanly(ctx, call_ref, &union.call, owners, now_ms).await;
 }
 
 /// Whether `live` holds what `ending` cannot end: an early or confirmed
@@ -238,16 +236,16 @@ fn rank(state: &DialogState) -> u8 {
 }
 
 /// The teardown of `call` as a turn of its own: the closing CDR event and the
-/// termination, through the one enforcement funnel, the caller answered if
-/// she still waits on this node.
+/// termination, off the wire ([`off_wire::Ending::Actions`]), the caller
+/// answered if she still waits on this node.
 async fn end_cleanly(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     call: &Call,
-    owners: &crate::owners::Owners,
+    owners: Owners,
     now_ms: i64,
 ) {
-    let actions = [
+    let list = vec![
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Bye,
             leg_id: call.a_leg.leg_id.clone(),
@@ -260,37 +258,8 @@ async fn end_cleanly(
             by_leg: None,
         },
     ];
-    let event = CallEvent::InternalEvent {
-        call_ref: call_ref.to_string(),
-        topic: DIVERGED.into(),
-        outcome: String::new(),
-        payload: serde_json::Value::Null,
-        body: Vec::new(),
-        incarnation: None,
-    };
-    let rule_ctx = RuleContext {
-        call: RuleCall::new(call),
-        call_ref,
-        event: &event,
-        source_leg_id: "",
-        direction: Direction::FromA,
-        now_ms,
-        config: &ctx.config,
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
-    let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
-    let mut exec = ActionExecutor { config: &ctx.config, owners, turn: &mut turn, now_ms };
-    let result = exec.execute(&actions, call, &rule_ctx);
-    let result = crate::rules::invariants::enforce(
-        &ctx.obligations,
-        call,
-        crate::rules::invariants::finalize(result),
-        now_ms,
-        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
-        &mut turn.notes,
-    );
-    super::super::notes::drain(ctx, call_ref, &mut turn);
-    process_result(ctx, call_ref, result, now_ms, &"the clean end of two diverged copies", None)
-        .await;
+    let actions = off_wire::Actions { topic: DIVERGED, list, owners };
+    let ending = off_wire::Ending::Actions { before: call, actions };
+    let label = &"the clean end of two diverged copies";
+    off_wire::end(ctx, call_ref, ending, off_wire::Caller::Answer, now_ms, label).await;
 }

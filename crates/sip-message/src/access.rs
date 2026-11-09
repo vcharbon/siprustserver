@@ -1,7 +1,7 @@
 //! The typed read surface of ADR-0025 on a frozen message.
 //!
 //! A reader asks the message for the value it wants — `msg.from().tag()`,
-//! `msg.top_via().branch()`, `msg.header::<Require>()` — instead of looking a
+//! `msg.top_via().branch()`, `msg.token_set::<Require>()` — instead of looking a
 //! header up by string and re-parsing it. The mandatory values are the ones the
 //! parser validated and stored, so they are infallible and borrowed; everything
 //! else reads the header line on demand and reports its own parse errors.
@@ -15,7 +15,9 @@ use bytes::Bytes;
 
 use crate::draft::{HeaderList, RequestDraft, ResponseDraft};
 use crate::error::SipParseError;
-use crate::header::{self, HeaderName, HeaderValue, Uri};
+use crate::header::{
+    self, HeaderName, HeaderValue, ListHeader, SequenceHeader, SingleHeader, TokenSet, Uri,
+};
 use crate::header_table::HeaderTable;
 use crate::method::Method;
 use crate::parser::custom::request_uri::request_uri_refusal;
@@ -37,7 +39,7 @@ fn raw_text_values(headers: &HeaderTable, name: HeaderName) -> impl Iterator<Ite
     headers.of(name).map(|h| h.value.clone())
 }
 
-fn values_of<H: HeaderValue>(core: &MessageCore) -> Result<Vec<H>, SipParseError> {
+fn values_of<H: ListHeader>(core: &MessageCore) -> Result<Vec<H>, SipParseError> {
     if let Some(read) = read_at_parse::<H>(core) {
         return Ok(read);
     }
@@ -79,23 +81,36 @@ fn recorded_routes(
     Ok(HeaderList::new(set))
 }
 
-/// The single logical value of `H`. A header read from its first line only
-/// ([`HeaderValue::first_line_only`]) is that line's value, whatever a later
-/// line of it holds, malformed or not; any other reads every line and
-/// [`combine`](HeaderValue::combine)s them.
-fn header_of<H: HeaderValue>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
-    if H::first_line_only() {
-        let name = H::header_name();
-        let first = core.headers.of(&name).next()?;
-        return match H::parse_line(&first.value) {
-            Err(e) => Some(Err(e)),
-            Ok(values) => H::combine(values).map(Ok),
-        };
+/// The value of the single-valued `H`, read from its one line: every way a
+/// message is made refuses a second line of a single-valued header.
+fn header_of<H: SingleHeader>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
+    let line = core.headers.of(H::header_name()).next()?;
+    Some(H::parse(&line.value))
+}
+
+/// The first value of `H`, read from the lines up to the one holding it.
+fn first_of<H: SequenceHeader>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
+    if let Some(read) = read_at_parse::<H>(core) {
+        return read.into_iter().next().map(Ok);
     }
+    for line in core.headers.of(H::header_name()) {
+        match H::parse_line(&line.value) {
+            Err(e) => return Some(Err(e)),
+            Ok(values) => {
+                if let Some(first) = values.into_iter().next() {
+                    return Some(Ok(first));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The one set the lines of `H` make, `None` when the message carries none.
+fn token_set_of<H: TokenSet>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
     match values_of::<H>(core) {
         Err(e) => Some(Err(e)),
-        Ok(values) if values.is_empty() => None,
-        Ok(values) => H::combine(values).map(Ok),
+        Ok(values) => H::union(values).map(Ok),
     }
 }
 
@@ -162,11 +177,17 @@ macro_rules! core_read_surface {
 
             /// The session description this message carries, bare under
             /// `application/sdp` or framed in a `multipart/…` body (RFC 5621
-            /// §3.1); `None` where it carries none. Located once, when the
-            /// message was parsed or built.
+            /// §3.1), as [`sdp_range`](crate::sdp_range) reads it; `None` where
+            /// it carries none. Located once, when the message was parsed or
+            /// built.
             pub fn sdp(&self) -> Option<&[u8]> {
+                self.body().get(self.sdp_range()?)
+            }
+
+            /// Where [`body`](Self::body) holds [`sdp`](Self::sdp).
+            pub fn sdp_range(&self) -> Option<std::ops::Range<usize>> {
                 let r = self.core().sdp.clone()?;
-                self.body().get(usize::try_from(r.start).ok()?..usize::try_from(r.end).ok()?)
+                Some(usize::try_from(r.start).ok()?..usize::try_from(r.end).ok()?)
             }
 
             /// The datagram this message is — received or rendered at freeze.
@@ -174,16 +195,30 @@ macro_rules! core_read_surface {
                 &self.core().image
             }
 
-            /// The single logical value of `H`, or `None` when the message
-            /// carries no such header.
-            pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
+            /// The value of the single-valued `H`, or `None` when the
+            /// message carries no such header.
+            pub fn header<H: SingleHeader>(&self) -> Option<Result<H, SipParseError>> {
                 header_of::<H>(self.core())
             }
 
-            /// Every value of `H`, flattening comma folds where the header's
-            /// grammar admits them.
-            pub fn list<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
+            /// Every value of the list header `H`, flattening comma folds
+            /// where the header's grammar admits them.
+            pub fn list<H: ListHeader>(&self) -> Result<Vec<H>, SipParseError> {
                 values_of::<H>(self.core())
+            }
+
+            /// The first value of the list header `H` (one whose values stand
+            /// in order, not a token set), or `None` when the message carries
+            /// none. The lines up to the one holding it are read, and one of
+            /// them that does not read is the error; a later line is not read.
+            pub fn first<H: SequenceHeader>(&self) -> Option<Result<H, SipParseError>> {
+                first_of::<H>(self.core())
+            }
+
+            /// The one token set every line of `H` makes (RFC 3261 §7.3.1),
+            /// or `None` when the message carries no such header.
+            pub fn token_set<H: TokenSet>(&self) -> Option<Result<H, SipParseError>> {
+                token_set_of::<H>(self.core())
             }
 
             /// The unparsed values of one header, in wire order — the escape
@@ -244,15 +279,12 @@ impl SipRequest {
 
     /// Whether this request offers reliable provisional responses (RFC 3262
     /// §3): `100rel` listed in `Require` (the UAS MUST then answer reliably) or
-    /// in `Supported` (it MAY). A line that does not read offers nothing.
-    pub fn offers_100rel(&self) -> bool {
-        let required = self
-            .list::<header::Require>()
-            .is_ok_and(|values| values.iter().any(|v| v.contains("100rel")));
-        let supported = self
-            .list::<header::Supported>()
-            .is_ok_and(|values| values.iter().any(|v| v.contains("100rel")));
-        required || supported
+    /// in `Supported` (it MAY). `Err` when a line of either does not read:
+    /// ingress refuses such a request, so an `Err` names one built past it.
+    pub fn offers_100rel(&self) -> Result<bool, SipParseError> {
+        let required = self.list::<header::Require>()?.iter().any(|v| v.contains("100rel"));
+        let supported = self.list::<header::Supported>()?.iter().any(|v| v.contains("100rel"));
+        Ok(required || supported)
     }
 }
 
@@ -325,12 +357,20 @@ impl SipMessage {
         }
     }
 
-    pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
+    pub fn header<H: SingleHeader>(&self) -> Option<Result<H, SipParseError>> {
         header_of::<H>(self.core())
     }
 
-    pub fn list<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
+    pub fn list<H: ListHeader>(&self) -> Result<Vec<H>, SipParseError> {
         values_of::<H>(self.core())
+    }
+
+    pub fn first<H: SequenceHeader>(&self) -> Option<Result<H, SipParseError>> {
+        first_of::<H>(self.core())
+    }
+
+    pub fn token_set<H: TokenSet>(&self) -> Option<Result<H, SipParseError>> {
+        token_set_of::<H>(self.core())
     }
 
     pub fn raw(&self, name: HeaderName) -> impl Iterator<Item = &str> {
@@ -361,7 +401,7 @@ mod offers_100rel_tests {
 
     fn request(extra: &str) -> crate::SipRequest {
         let raw = format!(
-            "INVITE sip:bob@example.com SIP/2.0\r\n\
+            "INVITE sip:bob@example.com SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-a\r\n\
 From: <sip:alice@example.com>;tag=a1\r\n\
 To: <sip:bob@example.com>\r\n\
@@ -377,20 +417,27 @@ CSeq: 1 INVITE\r\n\
 
     #[test]
     fn supported_or_require_listing_100rel_offers_it() {
-        assert!(request("Supported: timer, 100rel\r\n").offers_100rel());
-        assert!(request("Require: 100REL\r\n").offers_100rel(), "option tags are case-insensitive");
+        assert!(request("Supported: timer, 100rel\r\n").offers_100rel().expect("every line reads"));
         assert!(
-            request("Supported: timer\r\nSupported: 100rel\r\n").offers_100rel(),
+            request("Require: 100REL\r\n").offers_100rel().expect("every line reads"),
+            "option tags are case-insensitive"
+        );
+        assert!(
+            request("Supported: timer\r\nSupported: 100rel\r\n")
+                .offers_100rel()
+                .expect("every line reads"),
             "every line counts"
         );
     }
 
     #[test]
     fn a_request_listing_it_nowhere_offers_nothing() {
-        assert!(!request("").offers_100rel());
-        assert!(!request("Supported: timer, replaces\r\n").offers_100rel());
+        assert!(!request("").offers_100rel().expect("every line reads"));
+        assert!(!request("Supported: timer, replaces\r\n")
+            .offers_100rel()
+            .expect("every line reads"));
         assert!(
-            !request("Allow: PRACK\r\n").offers_100rel(),
+            !request("Allow: PRACK\r\n").offers_100rel().expect("every line reads"),
             "advertising the method is not offering the extension"
         );
     }

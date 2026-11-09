@@ -221,7 +221,7 @@ fn with_timer_offer(invite: Invite<'_>) -> Invite<'_> {
 
 /// Whether `req`'s `Supported` names `timer`.
 fn supports_timer(req: &SipRequest) -> bool {
-    req.header::<Supported>().is_some_and(|s| s.expect("readable Supported").contains("timer"))
+    req.token_set::<Supported>().is_some_and(|s| s.expect("readable Supported").contains("timer"))
 }
 
 /// `req` carries the caller's whole negotiation onward: interval, floor,
@@ -468,7 +468,7 @@ async fn promote_pem_withholds_the_session_timer_from_the_callee() {
         .await;
     let promoted = call.expect(200).await;
     let advertised = promoted
-        .header::<Supported>()
+        .token_set::<Supported>()
         .expect("the callee's other tags ride")
         .expect("readable Supported");
     assert!(

@@ -4,17 +4,11 @@
 //! (ADR-0052 §8), in the order the turn met them.
 
 use super::RouterCtx;
-use crate::turn_notes::TurnNotes;
 use crate::turn_scope::TurnScope;
 
 /// Drain what `turn` has reported on `call_ref`.
 pub(super) fn drain(ctx: &RouterCtx, call_ref: &str, turn: &mut TurnScope) {
-    drain_notes(ctx, call_ref, turn.notes.take());
-}
-
-/// Drain `notes`, reported on `call_ref` by a core call the shell makes
-/// outside a turn's scope.
-pub(super) fn drain_notes(ctx: &RouterCtx, call_ref: &str, notes: TurnNotes) {
+    let notes = turn.notes.take();
     for fact in notes.trace_facts() {
         crate::trace::emit::turn_fact(call_ref, fact);
     }
@@ -24,7 +18,19 @@ pub(super) fn drain_notes(ctx: &RouterCtx, call_ref: &str, notes: TurnNotes) {
     for _ in 0..notes.message_caps() {
         ctx.metrics.bump_message_cap_terminated();
     }
+    for cap in notes.caps_near() {
+        ctx.metrics.record_cap_near(*cap);
+    }
     for defect in notes.defects() {
+        crate::model_invariants::defect(&ctx.metrics, defect);
+    }
+}
+
+/// Drain what a turn past a per-call cap reported (ADR-0057 §4): its result
+/// is discarded, so only the defects it met stand; its trace facts and counts
+/// name what never happened.
+pub(super) fn drain_discarded(ctx: &RouterCtx, turn: &mut TurnScope) {
+    for defect in turn.notes.take().defects() {
         crate::model_invariants::defect(&ctx.metrics, defect);
     }
 }

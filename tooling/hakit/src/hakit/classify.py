@@ -5,7 +5,13 @@ success when its ending is in the shape's `expected` and every catalog leg the
 generator saw ended as its leg expects. A setup that ends unanswered and
 unexpected is `setup_failed` where the shape expects an answer, or where it
 drew no final at all whatever the shape expects; a final the shape does not
-expect is otherwise an `unexpected_ending`. `producer_verdict` is never read.
+expect is otherwise an `unexpected_ending`. A setup the generator gave up on
+after hearing a provisional, 100 Trying included, is `silent_after_provisional`:
+past it the caller sends nothing more (RFC 3261 §17.1.1.2), so nothing but its
+own timer ends the wait, and no budget allows it. A final that came more than
+the stream's setup deadline after the first provisional heard is `final_late`:
+`setup_slow` stops at that provisional, and the caller's wait past it is read
+here. `producer_verdict` is never read.
 """
 
 from __future__ import annotations
@@ -18,6 +24,8 @@ from .jsonval import Json
 from .model import ExpectedEnding, Leg, Shape
 
 SETUP_FAILED = "setup_failed"
+SILENT_AFTER_PROVISIONAL = "silent_after_provisional"
+FINAL_LATE = "final_late"
 UNEXPECTED_ENDING = "unexpected_ending"
 SETUP_SLOW = "setup_slow"
 DIALOG_REQUEST_FAILED = "dialog_request_failed"
@@ -53,6 +61,11 @@ class Impact:
         """Takes a budget: a failed or unexpected setup before answer, or a
         consult's contract refusal on an otherwise clean call."""
         return self.cls == SETUP_FAILED or (self.cls == UNEXPECTED_ENDING and not self.answered) or self.consult_refused
+
+    @property
+    def setup_lost(self) -> bool:
+        """The setup itself failed: whatever takes a budget, and the class none allows."""
+        return self.budgetable or self.cls == SILENT_AFTER_PROVISIONAL
 
 
 @dataclass(frozen=True)
@@ -148,7 +161,38 @@ def setup_latency(r: Json) -> SetupLatency | None:
     return SetupLatency(jv.string(r, "stream"), jv.string(r, "call_id"), measured_at, measured_at - started)
 
 
-def classify(r: Json, shape: Shape) -> Classified:
+def silent_after_provisional(r: Json) -> bool:
+    """The generator gave up with no final on a caller who had heard a
+    provisional by then. One heard after the give-up leaves it a setup that
+    heard nothing, the generator's CANCEL being all that came of it."""
+    if jv.string(r, "ending") != "timeout" or jv.opt_int(r, "final_code") is not None:
+        return False
+    heard = _first_heard(r)
+    gave_up = jv.opt_number(r, "setup_ended_at_ms")
+    return heard is not None and (gave_up is None or heard <= gave_up)
+
+
+def _first_heard(r: Json) -> float | None:
+    """When the caller first heard a provisional, 100 Trying included."""
+    heard = [t for t in (jv.opt_number(r, "trying_at_ms"), jv.opt_number(r, "first_provisional_at_ms")) if t is not None]
+    return min(heard) if heard else None
+
+
+def _final_late(r: Json, base: Impact, wait_ms: float | None) -> Impact | None:
+    """The `final_late` impact of a call whose final came more than `wait_ms`
+    after the first provisional it heard; a caller's own CANCEL is not waited on."""
+    heard = _first_heard(r)
+    final = jv.opt_number(r, "setup_ended_at_ms")
+    if wait_ms is None or heard is None or final is None or jv.opt_int(r, "final_code") is None:
+        return None
+    if jv.string(r, "ending") == "abandoned" or final - heard <= wait_ms:
+        return None
+    return replace(base, cls=FINAL_LATE, at_ms=final, detail=f"{round(final - heard)} ms", answered=False)
+
+
+def classify(r: Json, shape: Shape, final_late_after_ms: float | None = None) -> Classified:
+    """`final_late_after_ms` is the stream's setup deadline: past it a heard
+    caller's final is `final_late`; None reads no such impact."""
     stream = jv.string(r, "stream")
     call_id = jv.string(r, "call_id")
     started = jv.number(r, "started_at_ms")
@@ -176,7 +220,9 @@ def classify(r: Json, shape: Shape) -> Classified:
 
     caller_ok = caller_expected(r, shape)
     if not caller_ok:
-        if ending in PRE_ANSWER_ENDINGS and not answered:
+        if not answered and silent_after_provisional(r):
+            out.impacts.append(replace(base, cls=SILENT_AFTER_PROVISIONAL, code=0, reason=reason or ending))
+        elif ending in PRE_ANSWER_ENDINGS and not answered:
             cls = SETUP_FAILED if shape.expects_answer or code is None else UNEXPECTED_ENDING
             out.impacts.append(replace(base, cls=cls, code=code or 0, reason=reason or ending))
         elif ending == "cut":
@@ -188,6 +234,9 @@ def classify(r: Json, shape: Shape) -> Classified:
             out.impacts.append(replace(base, code=code or 0, reason=reason or ending, detail=f"ending {ending}"))
     leg_impacts = _leg_impacts(r, shape, base) if caller_ok else []
     out.impacts.extend(leg_impacts)
+    late = _final_late(r, base, final_late_after_ms)
+    if late is not None:
+        out.impacts.append(late)
 
     for f in failures:
         kind = jv.string(f, "kind")

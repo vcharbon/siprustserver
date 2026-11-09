@@ -130,3 +130,55 @@ fn a_lattice_of_links_is_walked_once_per_directory() {
     assert_eq!(found.len(), 1, "the document once");
     assert_eq!(capture_of(&found[0]), "capture_5");
 }
+
+/// Capture directories with no ingest record are judged by name: a store
+/// holding a capture under two generations yields only the current one's
+/// document, so the census counts the capture once. A file named on the
+/// command line is read whatever its generation.
+#[test]
+fn a_superseded_generation_is_left_out_of_the_walk() {
+    let root = scratch("generations");
+    let superseded = capture_dir(&root.join("capture_6"));
+    let current = capture_dir(&root.join("capture_6.anon2"));
+    let first_anon = capture_dir(&root.join("capture_7.anon"));
+    let later = capture_dir(&root.join("capture_7.anon3"));
+    let alone = capture_dir(&root.join("capture_8.anon2"));
+
+    let walked = expand_flows_documents(std::slice::from_ref(&root));
+    let named = expand_flows_documents(&[root.clone(), superseded.clone()]);
+    std::fs::remove_dir_all(&root).ok();
+
+    assert_eq!(walked, vec![current.clone(), later.clone(), alone.clone()]);
+    assert!(!walked.contains(&first_anon), "generation 1 under `.anon` is superseded too");
+    assert_eq!(named, vec![superseded, current, later, alone], "a named file stays");
+}
+
+/// Where the ingest records speak, they decide: a capture another walked
+/// record `follows` is superseded, and a source whose own name reads as a
+/// later generation stands beside the capture it merely resembles.
+#[test]
+fn the_ingest_record_names_the_superseded_generation() {
+    let root = scratch("follows");
+    let record = |dir: &str, follows: Option<&str>| {
+        let follows = follows.map_or(String::new(), |f| format!(r#","follows":"{f}""#));
+        std::fs::write(
+            root.join(dir).join("ingest.json"),
+            format!(r#"{{"capture":"{dir}"{follows}}}"#),
+        )
+        .expect("ingest record");
+    };
+    let superseded = capture_dir(&root.join("capture_9"));
+    record("capture_9", None);
+    let current = capture_dir(&root.join("capture_9.anon2"));
+    record("capture_9.anon2", Some("capture_9"));
+    let source = capture_dir(&root.join("capture_10"));
+    record("capture_10", None);
+    let lookalike = capture_dir(&root.join("capture_10.anon2"));
+    record("capture_10.anon2", None);
+
+    let walked = expand_flows_documents(std::slice::from_ref(&root));
+    std::fs::remove_dir_all(&root).ok();
+
+    assert!(!walked.contains(&superseded), "{walked:?}");
+    assert_eq!(walked, vec![source, lookalike, current]);
+}

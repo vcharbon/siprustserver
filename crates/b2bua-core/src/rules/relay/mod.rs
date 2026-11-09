@@ -58,6 +58,8 @@ mod originate_charging_tests;
 mod originate_line_safety_tests;
 #[cfg(test)]
 mod originate_tests;
+#[cfg(test)]
+mod originate_typing_tests;
 
 // Originating a leg + answering/acknowledging on an existing one.
 pub use a_leg_invite::{caller_invite, note_unrebuilt, rebuild_a_leg_invite};
@@ -65,16 +67,16 @@ pub use a_leg_response::{provisional_after_final, response_to_a_leg};
 pub use ack::{ack_b_leg, ack_lost_non_2xx};
 pub(crate) use ack::{acked_invite, acked_invite_carries_offer, acked_invite_cseq};
 pub use cancelled_final::cancelled_final;
-pub(crate) use option_tags::apply_withheld_option_tags;
+pub(crate) use option_tags::{apply_withheld_option_tags, offers_100rel};
 pub use originate::build_b_leg;
-pub(crate) use originate::dialling_invite;
+pub(crate) use originate::{decided_sets, dialling_invite};
 pub(crate) use owed_answer::{
     ack_answer_on_leg, answer_never_comes, bare_ack_owed, invite_carried_offer,
     offer_deferred_to_ack, offer_owed_in_ack, offered_reliably, owe_answer_in_ack, owes_bare_ack,
 };
 pub(crate) use repeat::retransmitted_2xx;
 pub(crate) use session_timer::{settle_session_timer, TIMER};
-pub(crate) use stated_text::writable_lines;
+pub(crate) use stated_text::{set_lines, writable_lines, writable_status, Statements};
 pub(crate) use unbuilt::unbuilt;
 
 // One session per dialog, whoever authored the description (RFC 3264 §8).
@@ -87,7 +89,7 @@ pub use sdp_session::{
 };
 
 // Wire routing for what those emit.
-pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};
+pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set, route_past_front};
 
 // Transparency + advertisement across the back-to-back UA.
 pub use advert::{stamp_advertisement, stamp_options_advertisement};
@@ -99,7 +101,9 @@ pub use provisional_withhold::withhold_from_relayed_provisional;
 
 // Reading text back into typed values (decision fields, dialog state, bodies).
 pub use address::{redirect_contact, UnreadableAddress};
-pub use body::{carries_sdp, describe_body, media_type, mints_offer, sdp};
+pub use body::{
+    carries_sdp, describe_body, description_in, description_of, media_type, mints_offer, sdp,
+};
 pub use dialog::{received_on, target_dest, to_gen_dialog, uas_addresses, wire_cseq};
 
 // The relayed-failure-headers Call.ext slot.

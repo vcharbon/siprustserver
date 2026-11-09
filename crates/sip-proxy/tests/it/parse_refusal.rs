@@ -1,7 +1,7 @@
 //! A request the parser refuses is answered `400 Invalid Request` by the
 //! proxy's stateless path when its Via / From / To / Call-ID / CSeq read
-//! (RFC 3261 §16.3): to the packet's source, every copy answered again, the
-//! ACK to the 400 absorbed (the proxy is that INVITE's UAS) and nothing
+//! (RFC 3261 §16.3): to its stamped top Via's response target, every copy
+//! answered again, the ACK to the 400 absorbed (the proxy is that INVITE's UAS) and nothing
 //! forwarded. A response, an ACK and a request no response can echo are
 //! dropped unanswered; the 400s are capped by a token bucket, an answer it
 //! refuses dropped and counted.
@@ -32,6 +32,7 @@ fn addr(s: &str) -> SocketAddr {
 
 struct Rig {
     task: JoinHandle<()>,
+    net: SimulatedSignalingNetwork,
     metrics: Arc<ProxyMetrics>,
     caller: Box<dyn UdpEndpoint>,
     worker: Box<dyn UdpEndpoint>,
@@ -54,11 +55,16 @@ impl Rig {
             strategy,
             registry,
             Arc::new(IdGen::seeded(0x400)),
+            sip_message::CustomParser::new(),
         )
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
         .build(endpoint);
-        Rig { task: tokio::spawn(core.run()), metrics, caller, worker }
+        Rig { task: tokio::spawn(core.run()), net, metrics, caller, worker }
+    }
+
+    async fn bind(&self, at: &str) -> Box<dyn UdpEndpoint> {
+        self.net.bind_udp(BindUdpOpts::new(addr(at), 1024)).await.expect("bind")
     }
 
     async fn send(&self, datagram: &[u8]) {
@@ -227,4 +233,74 @@ async fn well_formed_traffic_draws_no_400() {
         "no 400 to a well-formed request"
     );
     assert_eq!(rig.counters(), (0, 0, 0));
+}
+
+/// The peer's own sender socket, on another port than the sent-by the Rig's
+/// caller listens on, and a socket at a `maddr` it writes.
+const SENDER: &str = "192.0.2.20:40000";
+const MADDR: &str = "192.0.2.99:5060";
+/// A sent-by on another host than the source, at the caller's port.
+const ELSEWHERE: &str = "198.51.100.7:5060";
+
+/// `malformed_invite` with `via_tail` after the branch of its top Via.
+fn malformed_invite_via(branch: &str, via_tail: &str) -> Vec<u8> {
+    let plain = String::from_utf8(malformed_invite(branch, FROM)).expect("text");
+    plain
+        .replacen(&format!(";branch={branch}"), &format!(";branch={branch}{via_tail}"), 1)
+        .into_bytes()
+}
+
+/// RFC 3261 §18.2.2: `received` at the sent-by port, not the source port.
+#[tokio::test(start_paused = true)]
+async fn without_rport_the_400_reaches_the_sent_by_port() {
+    let rig = Rig::new().await;
+    let sender = rig.bind(SENDER).await;
+    sender.send_to(&malformed_invite_via("z9hG4bK-no-rport", ""), addr(PROXY)).await.expect("sent");
+    rig.settle().await;
+
+    let sent = rig.to_caller();
+    assert_eq!(sent.len(), 1, "the 400 reaches the sent-by port");
+    assert_eq!(response(&sent[0]).status(), 400);
+    assert!(sender.try_recv().is_none(), "nothing reaches the source port");
+}
+
+/// RFC 3581 §4: a requested `rport` is the source port.
+#[tokio::test(start_paused = true)]
+async fn with_rport_the_400_reaches_the_source_port() {
+    let rig = Rig::new().await;
+    let sender = rig.bind(SENDER).await;
+    sender
+        .send_to(&malformed_invite_via("z9hG4bK-rport", ";rport"), addr(PROXY))
+        .await
+        .expect("sent");
+    rig.settle().await;
+
+    let packet = sender.try_recv().expect("the 400 reaches the source port");
+    assert_eq!(response(&packet.raw).status(), 400);
+    assert!(rig.to_caller().is_empty(), "nothing reaches the sent-by port");
+}
+
+/// A Via's `maddr` chooses no destination (ADR-0001), with no `rport`: `received`
+/// at the sent-by port, and nothing reaches the sent-by host, the address the
+/// sender wrote, or the source port.
+#[tokio::test(start_paused = true)]
+async fn a_via_maddr_draws_nothing_and_the_400_reaches_received_at_the_sent_by_port() {
+    let rig = Rig::new().await;
+    let sender = rig.bind(SENDER).await;
+    let aimed = rig.bind(MADDR).await;
+    let named = rig.bind(ELSEWHERE).await;
+    let invite = String::from_utf8(malformed_invite_via("z9hG4bK-maddr", ";maddr=192.0.2.99"))
+        .expect("text")
+        .replacen(CALLER, ELSEWHERE, 1);
+    sender.send_to(invite.as_bytes(), addr(PROXY)).await.expect("sent");
+    rig.settle().await;
+
+    let sent = rig.to_caller();
+    assert_eq!(sent.len(), 1, "the 400 reaches `received` at the sent-by port");
+    let refusal = response(&sent[0]);
+    assert_eq!(refusal.status(), 400);
+    assert_eq!(refusal.top_via().received(), Some("192.0.2.20"));
+    assert!(aimed.try_recv().is_none(), "nothing reaches the maddr");
+    assert!(named.try_recv().is_none(), "nothing reaches the sent-by host");
+    assert!(sender.try_recv().is_none(), "nothing reaches the source port");
 }

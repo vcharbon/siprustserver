@@ -1,47 +1,44 @@
 //! The limiter refused a route on the call's own turn: the `/call/failure`
-//! consult it raises, awaited, and the treatment that answers it applied
-//! ([`failover_fold`]) — a failover route applied as the route was, or the
-//! call's final.
+//! consult it raises, awaited, and the treatment that answers it
+//! ([`failover_fold`]) — a failover route, which `apply_route` applies as it
+//! applied the refused one, or the call's final.
 
 use call::Call;
 use sip_clock::Clock;
-use sip_ids::TurnIds;
 use sip_message::SipRequest;
 
 use crate::config::B2buaConfig;
 use crate::decision::failover_fold::{self, Consult, Failover};
-use crate::decision::{CallDecisionEngine, CallTreatment};
-use crate::effects::HandlerResult;
-use crate::limiter::LimiterWorker;
-use crate::owners::Owners;
+use crate::decision::{CallTreatment, DeadlineDecisionEngine};
+use crate::setup_budget::SetupBudget;
 
 /// The limiter refused this route: consult `/call/failure` for a failover
-/// treatment and apply it, or answer the call's final
-/// ([`failover_fold::consult_or_busy`]).
+/// treatment, `depth` failovers deep, and return the failover route or the
+/// call's final ([`failover_fold::consult_or_unavailable`]). The consult runs
+/// under `budget`: with none left it asks nothing and the call ends as an
+/// unanswered consult does.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn limiter_reject_failover(
     call: Call,
     limiter_id: String,
     a_invite: &SipRequest,
     invite_wire: &[u8],
-    decision: &dyn CallDecisionEngine,
-    limiter: &LimiterWorker,
+    decision: &DeadlineDecisionEngine,
     config: &B2buaConfig,
-    owners: &Owners,
-    ids: &mut TurnIds,
     clock: &Clock,
     now_ms: i64,
     depth: u32,
-) -> HandlerResult {
+    budget: SetupBudget,
+) -> Failover {
     let consult =
-        failover_fold::consult_or_busy(call, &limiter_id, a_invite, config, ids, now_ms, depth);
+        failover_fold::consult_or_unavailable(call, &limiter_id, a_invite, config, now_ms, depth);
     let (mut call, req) = match consult {
-        Consult::Final(result) => return *result,
+        Consult::Final(result) => return Failover::Final(result),
         Consult::Raise { call, request } => (*call, *request),
     };
     let mut request_json = crate::trace::intake::request_body(&call, &req);
     let sent_at_ms = clock.now_ms();
-    let response = decision.call_failure(req).await;
+    let response = decision.call_failure_within(req, budget).await;
     let received_at_ms = clock.now_ms();
     // A failover route carrying `trace: true` opens the trace right here, so
     // activate before recording: the consult that turned tracing on is the first
@@ -59,26 +56,7 @@ pub(super) async fn limiter_reject_failover(
         }
     }
     record_failure_round_trip(&call, request_json, &response, sent_at_ms, received_at_ms);
-    match failover_fold::treatment(call, response, a_invite, config, ids, now_ms) {
-        Failover::Route { call, route } => {
-            Box::pin(super::apply_route::apply_route(
-                *call,
-                *route,
-                a_invite,
-                invite_wire,
-                decision,
-                limiter,
-                config,
-                owners,
-                ids,
-                clock,
-                now_ms,
-                depth + 1,
-            ))
-            .await
-        }
-        Failover::Final(result) => *result,
-    }
+    failover_fold::treatment(call, response, a_invite, config, now_ms)
 }
 
 /// Record the limiter-reject `/call/failure` consult as a child span on a traced

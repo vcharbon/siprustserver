@@ -41,6 +41,17 @@ impl Proxy {
         self.forward_request_altered(next, |req| req).await
     }
 
+    /// [`Self::forward_request`] on `branch`: the CANCEL or non-2xx ACK of an
+    /// INVITE this hop forwarded on it (RFC 3261 §9.1, §17.1.1.3).
+    pub async fn forward_request_on_branch(&self, next: SocketAddr, branch: &str) -> SipRequest {
+        let SipMessage::Request(req) = self.agent.recv().await else {
+            panic!("{} expected a request to forward", self.agent.name);
+        };
+        let forwarded = forwarded_request(&req, self.agent.addr, branch);
+        unwrap_step(self.agent.try_send_wire(forwarded.image(), next).await);
+        forwarded
+    }
+
     /// [`Self::forward_request`] with `alter` applied to the rewritten request
     /// before it leaves: how a test scripts a proxy that corrupts what it
     /// forwards.
@@ -129,7 +140,7 @@ pub fn forwarded_response(resp: &SipResponse, hop: SocketAddr) -> SipResponse {
 /// else its Request-URI.
 pub fn request_next_hop(req: &SipRequest) -> Option<SocketAddr> {
     top_route_addr(req).or_else(|| {
-        let (host, port) = req.request_uri().host_port();
+        let (host, port) = req.request_uri().next_hop();
         hostport_to_addr(&format!("{host}:{port}"))
     })
 }
@@ -142,7 +153,7 @@ pub fn response_next_hop(resp: &SipResponse) -> Option<SocketAddr> {
 /// The address the request's first Route entry names, if it has one.
 fn top_route_addr(req: &SipRequest) -> Option<SocketAddr> {
     let routes = req.route_set().ok()?;
-    let (host, port) = routes.first()?.uri().host_port();
+    let (host, port) = routes.first()?.uri().next_hop();
     hostport_to_addr(&format!("{host}:{port}"))
 }
 
@@ -164,9 +175,14 @@ mod tests {
              To: <sip:bob@127.0.0.1>\r\n\
              Call-ID: hops@127.0.0.1\r\n\
              CSeq: 1 INVITE\r\n\
+             Contact: <sip:alice@127.0.0.1:5060>\r\n\
              Content-Length: 0\r\n\r\n"
         );
-        match CustomParser::new().parse(raw.as_bytes()) {
+        // A request stating no count reads where a deployment names the shape.
+        let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).unwrap();
+        let limits =
+            sip_message::SipParserLimits { exemptions, ..sip_message::SipParserLimits::DEFAULT };
+        match CustomParser::with_limits(limits).parse(raw.as_bytes()) {
             Ok(SipMessage::Request(r)) => r,
             other => panic!("not a request: {other:?}"),
         }
@@ -174,6 +190,34 @@ mod tests {
 
     fn hops(req: &SipRequest) -> u32 {
         req.header::<MaxForwards>().expect("stated").expect("readable").value()
+    }
+
+    /// §16.6 steps 6-7: where a URI picks the next hop, its `maddr` is the target
+    /// (RFC 3263 §4), at the URI's own port.
+    #[test]
+    fn a_next_hop_reads_the_maddr_of_the_route_else_the_request_uri() {
+        let hop: SocketAddr = "192.0.2.9:5070".parse().unwrap();
+        let by_request_uri = String::from_utf8_lossy(invite(None).image()).replace(
+            "INVITE sip:bob@127.0.0.1:5070",
+            "INVITE sip:bob@name.invalid:5070;maddr=192.0.2.9",
+        );
+        let by_route = String::from_utf8_lossy(invite(None).image()).replace(
+            "Content-Length: 0",
+            "Route: <sip:next.invalid:5070;maddr=192.0.2.9;lr>\r\nContent-Length: 0",
+        );
+        for raw in [by_request_uri, by_route] {
+            let exemptions = sip_message::Exemptions::read(Some("max-forwards:absent")).unwrap();
+            let limits = sip_message::SipParserLimits {
+                exemptions,
+                ..sip_message::SipParserLimits::DEFAULT
+            };
+            let Ok(SipMessage::Request(req)) =
+                CustomParser::with_limits(limits).parse(raw.as_bytes())
+            else {
+                panic!("a request: {raw}");
+            };
+            assert_eq!(request_next_hop(&req), Some(hop), "{raw}");
+        }
     }
 
     /// §16.6 step 3: the received count, less one.

@@ -30,7 +30,7 @@ fn request() -> SipRequest {
 
 fn response() -> SipResponse {
     let raw = format!(
-        "SIP/2.0 200 OK\r\nVia: {VIA}\r\nFrom: <sip:alice@example.com>;tag=a1\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: {VIA}\r\nFrom: <sip:alice@example.com>;tag=a1\r\n\
          To: <sip:bob@example.com>;tag=b1\r\nCall-ID: write-1@192.0.2.10\r\n\
          CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
     );

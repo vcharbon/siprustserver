@@ -11,12 +11,13 @@ mod reader;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use sip_message::{CustomParser, Exemptions, SipParserLimits};
 use sip_proxy::cancel_lru::{calls_per_second, MemoBounds};
 use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
 use sip_proxy::resolver::ResolverConfig;
 use sip_proxy::self_gate::ProxySelfGateConfig;
-use sip_proxy::{FaceCidrs, ProxyAddr};
+use sip_proxy::ProxyAddr;
 
 pub use preflight::{refusal, validate_config, ProbeTimingConfig};
 use reader::{EnvReader, Span};
@@ -40,7 +41,6 @@ pub enum WorkerSource {
 pub struct ExternalFace {
     pub listen: SocketAddr,
     pub advertise: ProxyAddr,
-    pub int_cidrs: FaceCidrs,
 }
 
 /// The proxy's boot configuration.
@@ -52,6 +52,9 @@ pub struct ProxyConfig {
     pub workers: WorkerSource,
     pub metrics: SocketAddr,
     pub queue_max: usize,
+    /// What the process reads the wire under: the defaults, with the exemptions
+    /// `SIP_EXEMPTIONS` states. [`parser`](Self::parser) is the one reader.
+    pub parser_limits: SipParserLimits,
     pub udp_sndbuf: Option<usize>,
     pub udp_rcvbuf: Option<usize>,
     pub shard_stall_ms: u64,
@@ -96,6 +99,13 @@ const DEFAULT_ISOLATION_MS: u64 = 2_000;
 const T1_MS: u64 = 500;
 
 impl ProxyConfig {
+    /// The reader of the wire, whichever stage reads a datagram first: the
+    /// proxy's composition root, built once and handed to every stage.
+    #[expect(clippy::disallowed_methods, reason = "the proxy's composition root")]
+    pub fn parser(&self) -> CustomParser {
+        CustomParser::ingress(self.parser_limits.clone())
+    }
+
     /// Reads every boot variable through `get` (`None` = unset).
     /// `pod_namespace` reads the namespace of the pod the proxy runs in.
     /// `Err` holds every problem, one line each.
@@ -114,6 +124,7 @@ impl ProxyConfig {
             .bind_addr("PROXY_METRICS", SocketAddr::from(([0, 0, 0, 0], 9090)))
             .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 9090)));
         let queue_max = env.int_usize("PROXY_QUEUE", 8192, 1, u32::MAX);
+        let parser_limits = parser_limits(&mut env);
         let udp_sndbuf = socket_buffer(&mut env, "PROXY_UDP_SNDBUF");
         let udp_rcvbuf = socket_buffer(&mut env, "PROXY_UDP_RCVBUF");
         let shard_stall_ms = env.int("PROXY_SHARD_STALL_MS", 2000, 1, MAX_MS);
@@ -207,6 +218,7 @@ impl ProxyConfig {
             workers,
             metrics,
             queue_max,
+            parser_limits,
             udp_sndbuf,
             udp_rcvbuf,
             shard_stall_ms,
@@ -230,6 +242,16 @@ impl ProxyConfig {
             external_face_period,
         })
     }
+}
+
+/// The default limits with the exemptions `SIP_EXEMPTIONS` states.
+fn parser_limits(env: &mut EnvReader) -> SipParserLimits {
+    let stated = env.raw("SIP_EXEMPTIONS");
+    let exemptions = Exemptions::read(stated.as_deref()).unwrap_or_else(|problem| {
+        env.refuse(format!("SIP_EXEMPTIONS {problem}"));
+        Exemptions::NONE
+    });
+    SipParserLimits { exemptions, ..SipParserLimits::DEFAULT }
 }
 
 /// The address stamped on Via and Record-Route for egress on the face that
@@ -258,26 +280,12 @@ fn advertise(env: &mut EnvReader, key: &str, listen: Option<SocketAddr>) -> Prox
     }
 }
 
-/// `PROXY_LISTEN_EXT` enables the external face; it then needs
-/// `PROXY_FACE_INT_CIDRS`, and each face binds its own address: a wildcard
-/// bind of `PROXY_LISTEN` (the internal face, `listen`) or of
-/// `PROXY_LISTEN_EXT` would let the external plane reach the trusted internal
-/// socket (ADR-0048).
+/// `PROXY_LISTEN_EXT` enables the external face, and each face then binds its
+/// own address: a wildcard bind of `PROXY_LISTEN` (the internal face, `listen`)
+/// or of `PROXY_LISTEN_EXT` would let the external plane reach the trusted
+/// internal socket (ADR-0048).
 fn external_face(env: &mut EnvReader, listen: Option<SocketAddr>) -> Option<ExternalFace> {
     let listen_ext = env.present("PROXY_LISTEN_EXT");
-    let cidrs = env.present("PROXY_FACE_INT_CIDRS");
-    let int_cidrs = match parse_ext_face_cidrs(listen_ext.is_some(), cidrs.as_deref()) {
-        Ok(c) => c,
-        Err(e) => {
-            env.refuse(e);
-            return None;
-        }
-    };
-    if listen_ext.is_none() && cidrs.is_some() {
-        tracing::warn!(
-            "PROXY_FACE_INT_CIDRS set but PROXY_LISTEN_EXT unset — single-face mode, CIDR list ignored"
-        );
-    }
     if listen_ext.is_none() {
         tracing::warn!(
             "single-face proxy (PROXY_LISTEN_EXT unset): every sender is trusted as the internal \
@@ -296,31 +304,7 @@ fn external_face(env: &mut EnvReader, listen: Option<SocketAddr>) -> Option<Exte
         }
     }
     let listen = listen.unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
-    Some(ExternalFace { listen, advertise, int_cidrs: int_cidrs? })
-}
-
-/// Dual-face boot rule: `PROXY_FACE_INT_CIDRS` is required, and must parse,
-/// whenever `PROXY_LISTEN_EXT` enables the second face — a dual-face proxy
-/// without a plane classifier would egress worker traffic on the caller plane.
-/// A single-face proxy never reads it.
-pub fn parse_ext_face_cidrs(
-    listen_ext_set: bool,
-    cidrs: Option<&str>,
-) -> Result<Option<FaceCidrs>, String> {
-    if !listen_ext_set {
-        return Ok(None);
-    }
-    match cidrs.map(str::trim).filter(|s| !s.is_empty()) {
-        None => {
-            Err("PROXY_FACE_INT_CIDRS is REQUIRED when PROXY_LISTEN_EXT is set: the dual-face \
-             egress picker needs the internal-plane CIDR list (e.g. \
-             PROXY_FACE_INT_CIDRS=10.244.0.0/16,172.20.0.0/16)."
-                .to_string())
-        }
-        Some(s) => {
-            FaceCidrs::parse(s).map(Some).map_err(|e| format!("bad PROXY_FACE_INT_CIDRS: {e}"))
-        }
-    }
+    Some(ExternalFace { listen, advertise })
 }
 
 /// `PROXY_WORKERS` when set, else EndpointSlice discovery in

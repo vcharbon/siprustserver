@@ -16,6 +16,7 @@
  */
 import type { JSX } from "react"
 import { useState } from "react"
+import { useCopy } from "../use-copy.ts"
 
 /** One reason a capture is unreplayable, as the record will state it. */
 interface Reason {
@@ -124,7 +125,7 @@ export const IgnoreRecord = (
 ): JSX.Element => {
   const [pick, setPick] = useState(FIRST)
   const [typed, setTyped] = useState("")
-  const [copied, setCopied] = useState(false)
+  const copy = useCopy()
   const note = pick === OTHER ? typed : REASONS.find((entry) => entry.label === pick)?.note ?? ""
   const bundle = evidenceDir === undefined ? "" : repoRelative(repoRoot, evidenceDir)
   const text = ignoreRecordText({ capture, bundle, step, note, decidedOn: today() })
@@ -136,10 +137,7 @@ export const IgnoreRecord = (
       <div className="ignore-controls">
         <select
           value={pick}
-          onChange={(event) => {
-            setPick(event.target.value)
-            setCopied(false)
-          }}
+          onChange={(event) => setPick(event.target.value)}
         >
           {REASONS.map((entry) => <option key={entry.label} value={entry.label}>{entry.label}</option>)}
         </select>
@@ -149,10 +147,7 @@ export const IgnoreRecord = (
             className="ignore-note"
             placeholder="note"
             value={typed}
-            onChange={(event) => {
-              setTyped(event.target.value)
-              setCopied(false)
-            }}
+            onChange={(event) => setTyped(event.target.value)}
           />
         )}
         <button
@@ -160,14 +155,9 @@ export const IgnoreRecord = (
           className="copy-ref"
           disabled={!ready}
           title={ready ? `copy the record for ${capture}` : "needs a note and an evidence path"}
-          onClick={() => {
-            void navigator.clipboard.writeText(text).then(() => {
-              setCopied(true)
-              window.setTimeout(() => setCopied(false), 1600)
-            })
-          }}
+          onClick={() => copy.copy(text)}
         >
-          {copied ? "copied" : "copy record"}
+          {copy.label("copy record")}
         </button>
       </div>
       {bundle === "" && (

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Panic-sites ratchet of the tiered crates (ADR-0051 §2-§3).
+"""Panic-sites ratchet of the tiered crates (ADR-0051 §2-§3, ADR-0057 §5).
 
   panic-sites.py [-C DIR] [--allow FILE] [--base REV] [-p CRATE]... [--json FILE]
                  [--record FILE]
@@ -23,11 +23,23 @@ the root clippy.toml (`CLIPPY_CONF_DIR` is the root):
   disallowed_macros  disallowed_methods  disallowed_types
 
 A list entry whose reason starts with `pure tier` counts in pure crates only;
-every other entry counts in both tiers. A disallowed `assert!` expanded from
+every other entry counts in both tiers. An entry whose reason starts with
+`reading role` names a parser built with no reading role (ADR-0053 §6); one
+starting `reading role, every crate` also counts in every untiered member,
+where no site is allowed. A disallowed `assert!` expanded from
 `debug_assert!` does not count: release compiles it out. A disallowed
 `unwrap`/`expect` call an `unwrap_used`/`expect_used` site holds is that
 one site. A site is exempt when one `#[expect(lint, reason = "…")]` on an
 item or statement covers it and no other site of its lint.
+
+Beside the pass, the syntax scanner tooling/site-scan counts two site sets
+(panic_sites_scan): the loop sites of the pure crates and of the services
+built on the SDK (`loop`, `while`, a hand-written `Iterator::next`, an
+infinite iterator's constructor, an iterated range whose end is neither a
+constant nor a `len()`), and the recursion sites of every tiered crate (a
+call-graph cycle resolved by path through no function that takes a
+`bounds::Depth` and calls `descend` on it). Their sites count in the same
+allowlist, as `site::loop` and `site::recursion`; no attribute exempts one.
 
 The allowlist (`panic-sites.allow` at the root of DIR's repository) holds
 `path count` entries: a file may have at most its count, an unlisted file
@@ -65,8 +77,9 @@ pass, are refused in a tiered crate (panic_sites_attrs).
              file at zero or gone; `--update` fixes it)
   -p CRATE   the sites of these members only, the untiered among them
              skipped; entries of the other crates are left alone
-  --record F writes the pass's clippy JSON to F
-  --json F   reads the pass's clippy JSON from F instead of running it
+  --record F writes the pass's clippy JSON, then the scanner's lines, to F
+  --json F   reads the pass's clippy JSON and the scanner's lines from F
+             instead of running either
   --staged   the staged allowlist and clippy.toml against the base only (a
              pre-commit hook; moved and revealed sites are not known there,
              so a raised entry passes when the total does not rise, or by
@@ -91,10 +104,13 @@ sys.dont_write_bytecode = True  # the helper modules beside it leave no __pycach
 from panic_sites_attrs import expects, refusals, zero_lints, zero_of, zero_text
 from panic_sites_base import Base as BaseRules, revealed
 from panic_sites_diff import lines as diff_lines, renames
-from panic_sites_lints import COUNTED, PURE_COUNTED
+from panic_sites_lints import COUNTED, PURE_COUNTED, SITES
+import panic_sites_scan as scan
 from panic_sites_lists import entries as list_entries, loosened
 
 PURE_ONLY = "pure tier"
+ROLE = "reading role"
+EVERY_CRATE = "reading role, every crate"
 DEBUG_ASSERTS = ("debug_assert!", "debug_assert_eq!", "debug_assert_ne!")
 
 
@@ -208,6 +224,7 @@ class Crate:
         self.id = pkg["id"]
         self.tier = ((pkg.get("metadata") or {}).get("purity") or {}).get("tier")
         self.dir = os.path.relpath(os.path.dirname(pkg["manifest_path"]), root)
+        self.deps = {d["name"] for d in pkg.get("dependencies", []) if d.get("kind") is None}
         self.roots = sorted(
             os.path.relpath(t["src_path"], root) for t in pkg["targets"]
             if set(t["kind"]) & {"lib", "rlib", "bin", "proc-macro"})
@@ -227,7 +244,8 @@ def tiered_crates(root):
     for c in crates:
         if c.tier not in (None, "pure", "shell"):
             fail_setup(f"{c.name} declares tier `{c.tier}`; a tier is `pure` or `shell`")
-    return root, [c for c in crates if c.tier], {c.name for c in crates}
+    return root, [c for c in crates if c.tier], {c.name for c in crates}, \
+        [c for c in crates if not c.tier]
 
 
 def clippy_pass(root, members):
@@ -266,16 +284,21 @@ def call_site(span):
     return span
 
 
-def pure_only(msg):
-    return any(ch.get("level") == "note" and ch.get("message", "").startswith(PURE_ONLY)
+def noted(msg, prefix):
+    return any(ch.get("level") == "note" and ch.get("message", "").startswith(prefix)
                for ch in msg.get("children", []))
+
+
+def pure_only(msg):
+    return noted(msg, PURE_ONLY)
 
 
 class Finding:
     """A counted site: its file and the lines its span covers."""
 
-    def __init__(self, crate, site, code, level, message, rendered):
+    def __init__(self, crate, site, code, level, message, rendered, role=False):
         self.crate, self.code, self.level, self.rendered = crate, code, level, rendered
+        self.role = role
         self.message = message
         self.file, self.line, self.end = (
             site["file_name"], site["line_start"], site.get("line_end", site["line_start"]))
@@ -340,8 +363,37 @@ def findings_of(text, crates):
             continue
         seen.add(key)
         found.append(Finding(crate, site, code, msg.get("level"), msg["message"],
-                             msg.get("rendered") or msg["message"]))
+                             msg.get("rendered") or msg["message"], noted(msg, ROLE)))
     return deduplicated(found), errors
+
+
+def scanned_of(text, crates):
+    """The loop and recursion sites of `text`'s scanner lines."""
+    return [Finding(crate, rec, f"site::{rec['set']}", "warning", rec["message"],
+                    scan.rendered(rec)) for crate, rec in scan.sites_of(text, crates)]
+
+
+def unnamed_roles(text, untiered):
+    """The sites of an untiered member that build a parser with no reading
+    role: the `reading role, every crate` entries, none allowed."""
+    by_id = {c.id: c for c in untiered}
+    bad = []
+    for raw in text.splitlines():
+        if not raw.startswith("{"):
+            continue
+        rec = json.loads(raw)
+        if rec.get("reason") != "compiler-message" or rec.get("package_id") not in by_id:
+            continue
+        msg = rec["message"]
+        primary = next((s for s in msg.get("spans", []) if s.get("is_primary")), None)
+        if (msg.get("code") or {}).get("code") != "clippy::disallowed_methods" or \
+                primary is None or not noted(msg, EVERY_CRATE):
+            continue
+        site = call_site(primary)
+        line = f"{site['file_name']}:{site['line_start']}: {msg['message']}"
+        if line not in bad:
+            bad.append(line)
+    return bad
 
 
 def expected(root, found):
@@ -397,16 +449,46 @@ def over_budget(found, counts, allow):
         budget = allow.entries.get(rel, 0)
         if n > budget:
             listed = "" if rel in allow.entries else " (unlisted)"
-            bad.append(f"{rel} has {n} panic-class sites, budget {budget}{listed}")
+            mine = [f for f in found if f.file == rel]
+            role = sum(1 for f in mine if f.role)
+            loops = sum(1 for f in mine if f.code == scan.LOOP)
+            cycles = sum(1 for f in mine if f.code == scan.RECURSION)
+            classes = ", ".join(f"{k} {name}" for k, name in (
+                (n - role - loops - cycles, "panic-class"), (role, "reading-role"),
+                (loops, "loop"), (cycles, "recursion")) if k)
+            bad.append(f"{rel} has {n} sites ({classes}), budget {budget}{listed}")
             if rel not in allow.entries:
-                bad.extend(f"  {f.file}:{f.line} {f.code}" for f in found if f.file == rel)
+                bad.extend(f"  {f.file}:{f.line} {f.code}" + (" (reading role)" if f.role else "")
+                           for f in found if f.file == rel)
     return bad
 
 
-def in_hunks(found, touched):
+def over_budget_sites(found, counts, allow):
+    """The sites of the files over their budget."""
+    over = {rel for rel, n in counts.items() if n > allow.entries.get(rel, 0)}
+    return [f for f in found if f.file in over]
+
+
+def hint_for(sites):
+    """The hint `sites` take: the panic one for a panic-class site, the
+    reading-role one for a parser built with no reading role."""
+    hints = []
+    if any(not f.role and f.code not in SITES for f in sites):
+        hints.append(GROW_HINT)
+    if any(f.role for f in sites):
+        hints.append(ROLE_HINT)
+    if any(f.code in SITES for f in sites):
+        hints.append(scan.HINT)
+    return "\npanic-sites: ".join(hints) or GROW_HINT
+
+
+def touched_sites(found, touched):
     """The sites whose span holds a line the branch touches."""
-    return [f"new site in a touched hunk:\n{f.rendered.rstrip()}" for f in found
-            if f.lines() & touched.get(f.file, set())]
+    return [f for f in found if f.lines() & touched.get(f.file, set())]
+
+
+def in_hunks(sites):
+    return [f"new site in a touched hunk:\n{f.rendered.rstrip()}" for f in sites]
 
 
 def stale(counts, allow, crates):
@@ -430,14 +512,14 @@ def read(root, rel):
         return f.read()
 
 
-def zero_attrs(root, crates, allow, counts, found):
-    """A crate with no entry and no site carries the zero attribute at each
+def zero_attrs(root, crates, found):
+    """A crate with no panic-class site carries the zero attribute at each
     root; a crate with a site of a lint the attribute denies carries none.
-    A crate whose sites are all of the disallowed lists may carry it."""
+    A crate whose sites are all of the disallowed lists may carry it. Loop
+    and recursion sites, which no lint states, leave a crate at zero."""
     bad = []
     for c in crates:
-        listed = any(c.owns(rel) for rel in allow.entries)
-        at_zero = not listed and not any(c.owns(rel) for rel in counts)
+        at_zero = not any(c.owns(f.file) for f in found if f.code not in SITES)
         for rel in c.roots:
             have, want = zero_lints(read(root, rel)), zero_of(c.tier)
             if at_zero and (have is None or not want <= have):
@@ -500,30 +582,45 @@ GROW_HINT = ("a panic-class site is rewritten (checked access, an error returned
 BASE_HINT = ("the allowlist only tightens: an entry rises only by the sites moved into its file "
              "and the sites a rule the base did not count reveals")
 LIST_HINT = "the lists only tighten: a pass that sees fewer sites lowers every count"
+ROLE_HINT = ("a parser names the reading it is for (ADR-0053 §6): `ingress` at the composition "
+             "root alone, under `#[expect(clippy::disallowed_methods, reason = …)]`, `built`, "
+             "`tool` or `read_stored` elsewhere; `new` and `with_limits` are test support")
 
 
-def run_pass(root, crates, members, json_file, record=None):
+def run_pass(root, crates, members, json_file, record=None, untiered=()):
+    scan_errors = []
     if json_file:
         with open(json_file) as f:
             text, rc, stderr = f.read(), 0, ""
     else:
         rc, text, stderr = clippy_pass(root, members)
+        scan_rc, scanned, scan_stderr = scan.run(root, crates)
+        if scan_rc != 0:
+            scan_errors.append(f"site-scan (exit {scan_rc}): {scan_stderr.strip()}")
+        text = text + ("" if text.endswith("\n") or not text else "\n") + scanned
         if record:
             with open(record, "w") as f:
                 f.write(text)
     found, errors = findings_of(text, crates)
-    found = expected(root, found)
+    found = expected(root, found) + scanned_of(text, crates)
+    if json_file and not scan.complete(text):
+        scan_errors.append(f"{json_file} holds no complete site scan (no `{scan.DONE}` line)")
+    errors += scan_errors
+    roles = unnamed_roles(text, untiered)
     denied = [f for f in found if f.level == "error"]
     if errors or denied or rc != 0:
         for e in errors + [f.rendered for f in denied]:
             print(e.rstrip(), file=sys.stderr)
         if not errors and not denied:
             print(stderr.rstrip(), file=sys.stderr)
-        print(f"panic-sites: the clippy pass failed (exit {rc}): {len(denied)} site(s) at deny, "
-              f"{len(errors)} other error(s); the crates after them went unlinted",
-              file=sys.stderr)
-        return found, False
-    return found, True
+        if scan_errors and not denied and len(errors) == len(scan_errors) and rc == 0:
+            print("panic-sites: the site scan failed; its sites went uncounted", file=sys.stderr)
+        else:
+            print(f"panic-sites: the clippy pass failed (exit {rc}): {len(denied)} site(s) at "
+                  f"deny, {len(errors)} other error(s); the crates after them went unlinted",
+                  file=sys.stderr)
+        return found, False, roles
+    return found, True, roles
 
 
 def diff_of(root, base):
@@ -548,25 +645,29 @@ def revealed_of(root, base, found, moved_sites, moved):
 
 
 def now_lints():
-    return set(COUNTED) - set(PURE_COUNTED), set(PURE_COUNTED)
+    return (set(COUNTED) - set(PURE_COUNTED)) | set(SITES), set(PURE_COUNTED)
 
 
-def cmd_check(root, allow, base, crates, every, members, json_file, record):
-    found, ok = run_pass(root, crates, members, json_file, record)
+def cmd_check(root, allow, base, crates, every, members, json_file, record, untiered):
+    found, ok, roles = run_pass(root, crates, members, json_file, record, untiered)
     counts = counts_of(found)
     (touched, moved, moved_from), renamed = diff_of(root, base)
     base_list = base_allow(root, base, allow.path)
     touched, moved_sites = carried(found, counts, base_list, touched, moved, moved_from)
     shown = revealed_of(root, base, found, moved_sites, moved)
     rc = 0 if ok else 1
-    rc = report(over_budget(found, counts, allow), GROW_HINT) or rc
-    rc = report(in_hunks(found, touched), GROW_HINT) or rc
+    rc = report(over_budget(found, counts, allow),
+                hint_for(over_budget_sites(found, counts, allow))) or rc
+    rc = report(roles, f"an untiered member, test support included, builds its parser through "
+                       f"a reading role too: {ROLE_HINT}") or rc
+    hunk_sites = touched_sites(found, touched)
+    rc = report(in_hunks(hunk_sites), hint_for(hunk_sites)) or rc
     rc = report(against_base(allow, base_list, renamed, moved_sites, shown), BASE_HINT) or rc
     rc = report(lists_against_base(root, base, False), LIST_HINT) or rc
     rc = report(lint_attrs(root, crates)) or rc
     if not ok:
         return rc
-    rc = report(zero_attrs(root, crates, allow, counts, found)) or rc
+    rc = report(zero_attrs(root, crates, found)) or rc
     old = stale(counts, allow, crates) + unowned(allow, every)
     return report(old, "run `panic-sites.py --update` and commit the allowlist") or rc
 
@@ -628,7 +729,7 @@ def updated(allow, counts, moved_sites, base, renamed, crates, shown):
 
 
 def cmd_update(root, allow, allow_file, base, crates, members, json_file, record):
-    found, ok = run_pass(root, crates, members, json_file, record)
+    found, ok, _ = run_pass(root, crates, members, json_file, record)
     if not ok:
         return 1
     counts = counts_of(found)
@@ -653,7 +754,7 @@ def cmd_update(root, allow, allow_file, base, crates, members, json_file, record
 
 
 def cmd_report(root, allow, crates, members, json_file, record):
-    found, _ = run_pass(root, crates, members, json_file, record)
+    found, _, _ = run_pass(root, crates, members, json_file, record)
     counts = counts_of(found)
     for c in sorted(crates, key=lambda c: c.name):
         files = {rel: n for rel, n in counts.items() if c.owns(rel)}
@@ -688,7 +789,7 @@ def main():
         fail_setup(f"--base {a.base} is no commit")
     base = a.base or default_base(root)
     allow = load_allow(root, a.allow)
-    ws_root, every, members = tiered_crates(root)
+    ws_root, every, members, untiered = tiered_crates(root)
     if os.path.realpath(ws_root) != os.path.realpath(root):
         fail_setup(f"the workspace root {ws_root} is not the repository root {root}")
     if not every:
@@ -707,7 +808,9 @@ def main():
                           a.json_file, a.record)
     if a.report:
         return cmd_report(root, allow, crates, members, a.json_file, a.record)
-    return cmd_check(root, allow, base, crates, every, members, a.json_file, a.record)
+    if a.crates:
+        untiered = [c for c in untiered if c.name in a.crates]
+    return cmd_check(root, allow, base, crates, every, members, a.json_file, a.record, untiered)
 
 
 if __name__ == "__main__":

@@ -2,14 +2,12 @@
 //! received ([`RequestFact`]) or a response ([`ResponseFact`]), the facts the
 //! observed state folds and the barriers read.
 
-use sip_message::header::MediaType;
 use sip_message::header::{HeaderName, HeaderValue, SubscriptionState};
 use sip_message::sip_str::SipStr;
 use sip_message::{SipRequest, SipResponse};
 use tokio::time::Instant;
 
 use super::goals::GoalStep;
-use super::response::carries_sdp;
 use super::runner::ActorState;
 use super::state::Observation;
 
@@ -83,7 +81,7 @@ pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, 
             .goals
             .remaining_steps()
             .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
-    let body_is_sdp = carries_sdp(resp.body(), resp.header::<MediaType>());
+    let body_is_sdp = resp.sdp().is_some();
     st.obs.record(
         Observation::LegResponse {
             leg: st.role,

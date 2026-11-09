@@ -33,6 +33,8 @@ pub mod capture;
 pub mod char_class;
 mod checked;
 mod control_bytes;
+mod cursor;
+pub use cursor::NoProgress;
 pub mod draft;
 pub mod error;
 pub mod header;
@@ -43,6 +45,7 @@ pub mod sip_str;
 pub mod status;
 pub mod types;
 
+pub mod datagram;
 pub mod dead_notice;
 pub mod deviation;
 pub mod emergency;
@@ -64,6 +67,7 @@ pub mod sdp_answer;
 pub mod sdp_diff;
 pub mod sdp_doc;
 pub mod sdp_form;
+mod sdp_octets;
 pub mod sdp_session;
 pub mod sdp_text;
 pub mod serializer;
@@ -73,6 +77,7 @@ pub mod site;
 pub mod sniff;
 pub mod trace_sample;
 pub mod via_extension;
+mod whitespace;
 pub mod worker_report;
 pub mod write_check;
 
@@ -87,14 +92,18 @@ pub use header::{canonical_header_items, header_forms_equivalent, HeaderClass, H
 pub use method::Method;
 pub use multipart::{
     attach as attach_parts, compose as compose_multipart, decompose as decompose_multipart,
-    entity_parts, is_entity_header, sdp_range, Attached, Composed, LocatedPart, MultipartError,
-    MultipartPart,
+    description_entity, entity_parts, head_sdp_range, is_entity_header, sdp_range, Attached,
+    Composed, LocatedPart, MultipartError, MultipartPart,
 };
 /// RFC 3261 §7.3.3 compact-form expansion, probed one name at a time.
 pub use parser::custom::compact_forms::compact_form_canonical;
 pub use parser::custom::partial::RequestPartial;
+pub use parser::custom::start_line::is_status_code;
 pub use parser::custom::{hydrate_request, CustomParser};
-pub use parser::{Framing, SipParser, SipParserLimits};
+pub use parser::{
+    read_stored, Exemption, Exemptions, FirstIngressBound, Framing, SipParser, SipParserLimits,
+    ToolReading,
+};
 pub use projection::HeaderProjection;
 pub use sdp::{
     build_held_sdp_from_profile, extract_codec_profile, rewrite_connection_and_ports,
@@ -110,8 +119,8 @@ pub use sdp_diff::sdp_media_equivalent;
 /// The session description read as a document — the only home for SDP grammar.
 pub use sdp_doc::{
     canonical_rtpmap, direction_of, extract_cryptos, extract_direction, extract_fmtps,
-    extract_format_list, extract_rtpmaps, media_line, parse_origin, parse_sdp_body, MediaLine,
-    SdpDirection, SdpDoc, SdpOrigin,
+    extract_format_list, extract_rtpmaps, is_non_zero_int_or_real, media_line, parse_origin,
+    parse_sdp_body, ptime_value, stated_direction, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
 };
 /// A description serialized by the stack itself: canonical attribute order,
 /// the direction always stated.

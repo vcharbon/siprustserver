@@ -85,6 +85,7 @@ fn offerless_invite(call_ref: &str, call_id: &str, branch: &str) -> SipRequest {
 
 /// A re-INVITE on the dialog `tag` names, through `route`.
 fn reinvite(call_ref: &str, call_id: &str, branch: &str, tag: &str, route: &str) -> SipRequest {
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     parse_request(&format!(
         "INVITE sip:bob@192.0.2.20:5060 SIP/2.0\n\
          Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={call_ref};lg=b-1\n\
@@ -101,6 +102,7 @@ fn reinvite(call_ref: &str, call_id: &str, branch: &str, tag: &str, route: &str)
 
 /// The ACK the TU sends for the 2xx `tag` gave the INVITE `cseq`.
 fn tu_ack(call_ref: &str, call_id: &str, cseq: u32, tag: &str) -> SipRequest {
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     parse_request(&format!(
         "ACK sip:bob@192.0.2.20:5060 SIP/2.0\n\
          Via: SIP/2.0/UDP 127.0.0.1:15071;branch=z9hG4bK-tu-ack-{tag};cr={call_ref};lg=b-1\n\
@@ -456,4 +458,31 @@ async fn after_release_a_forked_2xx_is_acked_and_byed_at_its_contact() {
     let out = stack.drain_peer();
     assert_eq!(reqs(&out, "ACK").len(), 1, "the fork's ACK reaches its Contact: {out:?}");
     assert_eq!(reqs(&out, "BYE").len(), 1, "so does its BYE");
+}
+
+/// A released call's INVITE is read back from the image the transaction keeps,
+/// under no limit: a layer holding the first-ingress bound still ACKs and BYEs a
+/// late 2xx to its own INVITE past that bound (RFC 3261 §13.2.2.4, §15.1).
+#[tokio::test(start_paused = true)]
+async fn a_late_2xx_to_an_own_invite_past_the_bound_is_acked_and_byed() {
+    let gated = sip_message::CustomParser::with_limits(sip_message::SipParserLimits {
+        at_first_ingress: true,
+        ..sip_message::SipParserLimits::DEFAULT
+    });
+    let mut stack = Stack::build_reading(5, 64, config(), gated).await;
+    let call_ref = format!("self|{}", "c".repeat(9_000));
+    let (call_id, branch) = ("callid-long", "z9hG4bK-long");
+    let invite = offerless_invite(&call_ref, call_id, branch);
+    stack.txn.send_request(invite, addr(CALLEE), TxnKind::Invite).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t3", &[], "")).await;
+    elapse_ms(20).await;
+    stack.drain_peer();
+    let _ = stack.drain_events();
+
+    stack.txn.cancel_txns_for_call(&call_ref).await.unwrap();
+    stack.inject(&ok(1, branch, call_id, "t3", &[], "")).await;
+    elapse_ms(20).await;
+    let out = stack.drain_peer();
+    assert!(!reqs(&out, "ACK").is_empty(), "the late 2xx draws its ACK: {out:?}");
+    assert!(!reqs(&out, "BYE").is_empty(), "and its BYE: {out:?}");
 }

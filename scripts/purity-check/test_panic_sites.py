@@ -25,6 +25,8 @@ ZERO_PURE = ("#![cfg_attr(not(test), deny(clippy::cast_possible_truncation,"
              " clippy::string_slice, clippy::todo, clippy::unimplemented, clippy::unreachable,"
              " clippy::unwrap_used))]\n")
 HEADER = "# budget\n"
+# The line closing a complete site scan (panic_sites_scan).
+SCAN_DONE = '{"reason": "site-scan-done"}'
 LIB = "pub fn f() {}\n" * 20
 
 
@@ -39,7 +41,7 @@ class Case(unittest.TestCase):
         return ws
 
     def check(self, ws, records, *flags):
-        ws.write("pass.json", "\n".join(records) + "\n")
+        ws.write("pass.json", "\n".join(list(records) + [SCAN_DONE]) + "\n")
         ws.git("add", "pass.json")
         return ws.run(SCRIPT, "--json", os.path.join(ws.root, "pass.json"), *flags)
 
@@ -52,7 +54,7 @@ class Budget(Case):
         self.assertEqual(self.check(ws, two)[0], 0)
         rc, out = self.check(ws, two + [message(a, "clippy::panic", "crates/a/src/lib.rs", 5)])
         self.assertEqual(rc, 1)
-        self.assertIn("crates/a/src/lib.rs has 3 panic-class sites, budget 2", out)
+        self.assertIn("crates/a/src/lib.rs has 3 sites (3 panic-class), budget 2", out)
 
     def test_unlisted_file_with_one_site_fails(self):
         ws = self.workspace(HEADER + "crates/a/src/lib.rs 1\n")
@@ -61,7 +63,7 @@ class Budget(Case):
             message(a, "clippy::unwrap_used", "crates/a/src/lib.rs", 3),
             message(a, "clippy::indexing_slicing", "crates/a/src/new.rs", 7)])
         self.assertEqual(rc, 1)
-        self.assertIn("crates/a/src/new.rs has 1 panic-class sites, budget 0 (unlisted)", out)
+        self.assertIn("crates/a/src/new.rs has 1 sites (1 panic-class), budget 0 (unlisted)", out)
         self.assertIn("crates/a/src/new.rs:7 clippy::indexing_slicing", out)
 
     def test_untiered_crate_is_not_counted(self):
@@ -258,7 +260,7 @@ class Classification(Case):
                              reason=self.PURE)
         rc, out = self.check(ws, base + [pure_clock])
         self.assertEqual(rc, 1)
-        self.assertIn("crates/p/src/lib.rs has 2 panic-class sites, budget 1", out)
+        self.assertIn("crates/p/src/lib.rs has 2 sites (2 panic-class), budget 1", out)
 
     def test_hash_iteration_lint_counts_in_a_pure_crate_only(self):
         ws = self.workspace(HEADER + "crates/s/src/lib.rs 1\ncrates/p/src/lib.rs 1\n",
@@ -271,7 +273,7 @@ class Classification(Case):
         pure_loop = message(ids["p"], "clippy::iter_over_hash_type", "crates/p/src/lib.rs", 5)
         rc, out = self.check(ws, base + [pure_loop])
         self.assertEqual(rc, 1)
-        self.assertIn("crates/p/src/lib.rs has 2 panic-class sites, budget 1", out)
+        self.assertIn("crates/p/src/lib.rs has 2 sites (2 panic-class), budget 1", out)
 
     def test_both_tier_entry_counts_in_a_shell_crate(self):
         ws = self.workspace(HEADER + "crates/a/src/lib.rs 1\n")
@@ -281,7 +283,7 @@ class Classification(Case):
             message(a, "clippy::disallowed_methods", "crates/a/src/lib.rs", 6,
                     reason="panics past the end; use `split_at_checked`")])
         self.assertEqual(rc, 1)
-        self.assertIn("has 2 panic-class sites, budget 1", out)
+        self.assertIn("has 2 sites (2 panic-class), budget 1", out)
 
     def test_assert_from_debug_assert_is_not_counted(self):
         ws = self.workspace(HEADER + "crates/a/src/lib.rs 1\n")
@@ -305,7 +307,7 @@ class Classification(Case):
             message(a, "clippy::panic", "crates/a/src/lib.rs", 2),
             message(a, "clippy::unwrap_used", "/dep/src/lib.rs", 3, expansion=expansion)])
         self.assertEqual(rc, 1)
-        self.assertIn("crates/a/src/lib.rs has 2 panic-class sites, budget 1", out)
+        self.assertIn("crates/a/src/lib.rs has 2 sites (2 panic-class), budget 1", out)
 
     def test_a_disallowed_unwrap_under_unwrap_used_is_one_site(self):
         ws = self.workspace(HEADER + "crates/a/src/lib.rs 2\n")
@@ -320,7 +322,7 @@ class Classification(Case):
                               text=unwrap)
         rc, out = self.check(ws, records + [local_macro])
         self.assertEqual(rc, 1)
-        self.assertIn("has 3 panic-class sites, budget 2", out)
+        self.assertIn("has 3 sites (3 panic-class), budget 2", out)
         external = {"macro_decl_name": "json!", "def_site_span": None,
                     "span": {"file_name": "crates/a/src/lib.rs", "line_start": 12,
                              "line_end": 12, "column_start": 1, "column_end": 4,
@@ -346,7 +348,7 @@ class Classification(Case):
                                           level="error")])
         self.assertEqual(rc, 1)
         self.assertIn("1 site(s) at deny, 0 other error(s)", out)
-        self.assertIn("crates/a/src/lib.rs has 1 panic-class sites, budget 0", out)
+        self.assertIn("crates/a/src/lib.rs has 1 sites (1 panic-class), budget 0", out)
 
 
 class Attributes(Case):
@@ -456,7 +458,7 @@ class Expects(Case):
         rc, out = self.outcome(self.FN, [("clippy::indexing_slicing", 23, 5),
                                          ("clippy::indexing_slicing", 23, 12)])
         self.assertEqual(rc, 1)
-        self.assertIn("crates/a/src/lib.rs has 3 panic-class sites, budget 1", out)
+        self.assertIn("crates/a/src/lib.rs has 3 sites (3 panic-class), budget 1", out)
 
     def test_a_const_item_holding_an_impl_exempts_nothing_of_two(self):
         source = ("pub struct S;\n#[expect(clippy::unwrap_used, reason = \"x\")]\n"
@@ -466,12 +468,12 @@ class Expects(Case):
         rc, out = self.outcome(source, [("clippy::unwrap_used", 25, 41),
                                         ("clippy::unwrap_used", 26, 41)])
         self.assertEqual(rc, 1)
-        self.assertIn("has 3 panic-class sites, budget 1", out)
+        self.assertIn("has 3 sites (3 panic-class), budget 1", out)
 
     def test_an_expect_of_another_lint_exempts_nothing(self):
         rc, out = self.outcome(self.FN, [("clippy::unwrap_used", 23, 5)])
         self.assertEqual(rc, 1)
-        self.assertIn("has 2 panic-class sites, budget 1", out)
+        self.assertIn("has 2 sites (2 panic-class), budget 1", out)
 
     def test_a_statement_expect_covers_its_statement_only(self):
         source = ("pub fn g(v: &[u8]) -> u8 {\n"
@@ -480,7 +482,7 @@ class Expects(Case):
         rc, out = self.outcome(source, [("clippy::indexing_slicing", 23, 13),
                                         ("clippy::indexing_slicing", 24, 9)])
         self.assertEqual(rc, 1)
-        self.assertIn("has 2 panic-class sites, budget 1", out)
+        self.assertIn("has 2 sites (2 panic-class), budget 1", out)
 
 
 KEEP = "pub fn keep_one(v: &[u8]) -> u8 {\n    v[0]\n}\n"
@@ -517,7 +519,7 @@ class Moves(Case):
         ws, sites = self.split("crates/a/src/parse.rs")
         rc, out = self.check(ws, sites)
         self.assertEqual(rc, 1)
-        self.assertIn("crates/a/src/parse.rs has 1 panic-class sites, budget 0", out)
+        self.assertIn("crates/a/src/parse.rs has 1 sites (1 panic-class), budget 0", out)
         self.assertNotIn("touched hunk", out)
         rc, out = self.check(ws, sites, "--update")
         self.assertEqual(rc, 0, out)
@@ -597,7 +599,7 @@ class Moves(Case):
         self.assertIn("crates/a/src/parse.rs 1\n", ws.read("panic-sites.allow"))
         rc, out = self.check(ws, sites)
         self.assertEqual(rc, 1)
-        self.assertIn("crates/a/src/parse.rs has 2 panic-class sites, budget 1", out)
+        self.assertIn("crates/a/src/parse.rs has 2 sites (2 panic-class), budget 1", out)
         self.assertIn("new site in a touched hunk", out)
         ws.write("panic-sites.allow", HEADER + "crates/a/src/lib.rs 1\ncrates/a/src/parse.rs 2\n")
         rc, out = self.check(ws, sites)
@@ -693,7 +695,7 @@ class Revealed(Case):
         ws, sites = self.tightened()
         rc, out = self.check(ws, sites)
         self.assertEqual(rc, 1)
-        self.assertIn("crates/a/src/lib.rs has 3 panic-class sites, budget 1", out)
+        self.assertIn("crates/a/src/lib.rs has 3 sites (3 panic-class), budget 1", out)
         rc, out = self.check(ws, sites, "--update")
         self.assertEqual(rc, 0, out)
         self.assertIn("raised crates/a/src/lib.rs 1 -> 3", out)
@@ -864,6 +866,72 @@ class RealPass(Case):
         self.assertIn("crates/a/src/hidden.rs 6\n", out)
         self.assertIn("crates/a/src/included.in 1\n", out)
 
+    # A stand-in for the crate whose parser the list names, at the same path.
+    PARSER = ("pub mod parser {\n    pub mod custom {\n        pub struct CustomParser;\n"
+              "        impl CustomParser {\n"
+              "            pub fn new() -> Self { CustomParser }\n"
+              "            pub fn with_limits(_: u8) -> Self { CustomParser }\n"
+              "            pub fn ingress(_: u8) -> Self { CustomParser }\n"
+              "            pub fn built() -> Self { CustomParser }\n"
+              "            pub fn tool(_: u8) -> Self { CustomParser }\n"
+              "        }\n    }\n}\n"
+              "pub struct ToolReading;\n"
+              "impl ToolReading {\n"
+              "    pub fn stated(_: &str) -> Self { ToolReading }\n"
+              "    pub fn plain_rfc() -> Self { ToolReading }\n"
+              "}\n")
+    USES = ("use sip_message::parser::custom::CustomParser;\n"
+            "pub fn anonymous() -> CustomParser {\n    CustomParser::new()\n}\n"
+            "pub fn stated() -> CustomParser {\n    CustomParser::with_limits(1)\n}\n"
+            "pub fn named() -> CustomParser {\n    CustomParser::built()\n}\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n    #[test]\n"
+            "    fn t() { let _ = super::CustomParser::new(); }\n}\n")
+
+    def parsers(self, tiered_lib, untiered_lib=None):
+        ws = Workspace()
+        self.addCleanup(ws.tmp.cleanup)
+        ws.crate("sip-message", lib=self.PARSER)
+        ws.crate("a", "shell", deps=("sip-message",), lib=tiered_lib)
+        if untiered_lib is not None:
+            ws.crate("b", deps=("sip-message",), lib=untiered_lib)
+        with open(REAL_CLIPPY_TOML) as f:
+            ws.write("clippy.toml", f.read())
+        ws.write("panic-sites.allow", HEADER)
+        ws.commit()
+        return ws
+
+    def test_a_parser_with_no_reading_role_is_a_site_outside_tests(self):
+        ws = self.parsers(self.USES + (
+            "pub fn wired() -> CustomParser {\n    CustomParser::ingress(1)\n}\n"
+            "#[expect(clippy::disallowed_methods, reason = \"the composition root\")]\n"
+            "pub fn root() -> CustomParser {\n    CustomParser::ingress(1)\n}\n"
+            "pub fn tooled() -> CustomParser {\n    CustomParser::tool(1)\n}\n"
+            "pub fn reading() -> sip_message::ToolReading {\n"
+            "    sip_message::ToolReading::stated(\"\")\n}\n"))
+        rc, out = ws.run(SCRIPT, "--report")
+        self.assertEqual(rc, 0, out)
+        # new, with_limits, built, ingress outside the root, tool, stated.
+        self.assertIn("crates/a/src/lib.rs 6\n", out)
+        self.assertNotIn("does not refer to", out)
+        rc, out = ws.run(SCRIPT)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("crates/a/src/lib.rs has 6 sites (6 reading-role), budget 0", out)
+        self.assertIn("(reading role)", out)
+        self.assertIn("ADR-0053 §6", out)
+
+    def test_an_untiered_member_builds_no_parser_without_a_role_either(self):
+        ws = self.parsers("pub fn f() {}\n", self.USES)
+        rc, out = ws.run(SCRIPT)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("crates/b/src/lib.rs:3:", out)
+        self.assertIn("crates/b/src/lib.rs:6:", out)
+        self.assertNotIn("crates/b/src/lib.rs:9:", out)
+        self.assertIn("an untiered member, test support included, builds its parser through a reading role too", out)
+        clean = self.parsers(ZERO + "pub fn f() {}\n", "pub fn g() -> sip_message::parser::custom::CustomParser "
+                             "{\n    sip_message::parser::custom::CustomParser::built()\n}\n")
+        rc, out = clean.run(SCRIPT)
+        self.assertEqual(rc, 0, out)
 
 if __name__ == "__main__":
     unittest.main()

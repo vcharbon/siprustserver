@@ -13,9 +13,8 @@ use std::ops::Range;
 pub fn relay_stamp_spans(raw: &[u8]) -> Vec<Range<usize>> {
     let mut entry = 0usize;
     let mut pos = 0;
-    while let Some(rest) = raw.get(pos..).filter(|rest| !rest.is_empty()) {
-        let line_end = rest.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| pos + p);
-        let Some(line) = raw.get(pos..line_end) else { break };
+    for row in raw.split_inclusive(|&b| b == b'\n') {
+        let line = row.strip_suffix(b"\n").unwrap_or(row);
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         if line.is_empty() {
             return Vec::new(); // end of headers
@@ -43,7 +42,7 @@ pub fn relay_stamp_spans(raw: &[u8]) -> Vec<Range<usize>> {
                 }
             }
         }
-        pos = line_end + 1;
+        pos += row.len();
     }
     Vec::new()
 }

@@ -39,12 +39,12 @@
 //! `--sut` — so the review answers "what did the platform break on these
 //! calls", not "what is in this capture".
 
-use std::borrow::Cow;
 use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
 use sip_message::header::HeaderName;
 use sip_message::SipMessage;
+use sip_message::ToolReading;
 use sip_pcap::doc::FlowsDoc;
 use sip_pcap::enrich::{enrich_str, EnrichOptions};
 use sip_pcap::flow::{
@@ -60,10 +60,19 @@ use captures::expand_inputs;
 mod census;
 #[path = "sipflow/get.rs"]
 mod get;
+#[path = "sipflow/ladder.rs"]
+mod ladder;
+use ladder::{fmt_ts, print_ladder, print_list_line};
 #[path = "sipflow/reparse.rs"]
 mod reparse;
 #[path = "sipflow/walk.rs"]
 mod walk;
+
+/// The reading the file at `path` states, or every problem with it.
+fn stated_reading(path: &std::path::Path) -> Result<ToolReading, Vec<String>> {
+    let text = std::fs::read_to_string(path).map_err(|e| vec![e.to_string()])?;
+    ToolReading::stated(&text)
+}
 
 /// Serialize an emitted document, exiting with the derivation error a
 /// document that cannot be re-derived must never be printed past.
@@ -83,6 +92,15 @@ fn emit_json(doc: Result<FlowsDoc, String>) -> String {
     about = "capture → SIP callflow extractor with B2BUA leg correlation (see module doc)"
 )]
 struct Args {
+    /// The reading every message's bytes are parsed under, wherever sipflow
+    /// parses them (extraction, `--enrich`, `--reparse`, `--rfc`): a file of
+    /// `key = value` lines naming `exemptions` and the `max-header-length`,
+    /// `max-uri-length`, `max-header-lines` and `max-datagram` bounds
+    /// (`sip_pcap::reading`). A line that does not read refuses the run.
+    /// Without it, the RFC: no exemption, the parser's default bounds.
+    #[arg(long, value_name = "FILE")]
+    reading: Option<PathBuf>,
+
     /// Capture files or directories — pcap/pcapng, plain or `.gz` (a directory
     /// expands to its capture files). Ring files are ordered oldest-first
     /// automatically. Required except with `--schema` / `--enrich`, which read
@@ -231,9 +249,9 @@ struct Args {
     #[arg(long = "parse-failed-pcap")]
     parse_failed_pcap: Option<PathBuf>,
 
-    /// Run the RFC-violation census (`sip_pcap::rfc`) over ALREADY EMITTED
-    /// flows documents — files, or directories walked recursively for
-    /// `*.flows.json` — and print the report as JSON on stdout with its
+    /// Run the RFC-violation census (`sip_pcap::rfc`) over ALREADY EMITTED flows
+    /// documents — files, or directories walked for `*.flows.json`, each capture
+    /// at its current generation — and print the report as JSON on stdout, its
     /// summary on stderr. Reads no capture, and modifies no document.
     #[arg(
         long = "rfc-census",
@@ -248,7 +266,7 @@ struct Args {
     rfc_census_jobs: usize,
 
     /// Re-parse every message of ALREADY EMITTED flows documents — files, or
-    /// directories walked recursively for `*.flows.json` — and print one JSON
+    /// directories walked as `--rfc-census` walks them — and print one JSON
     /// line per message the parser refuses and per failed non-fatal header of
     /// an accepted one, with the totals on stderr. Reads no capture.
     #[arg(
@@ -331,7 +349,19 @@ fn main() {
         println!("{}", serde_json::to_string_pretty(&schema).expect("schema serializes"));
         return;
     }
-    let opts = EnrichOptions::with_headers(&args.emit_headers);
+    let reading = match &args.reading {
+        None => ToolReading::plain_rfc(),
+        Some(path) => match stated_reading(path) {
+            Ok(reading) => reading,
+            Err(problems) => {
+                for problem in problems {
+                    eprintln!("--reading {}: {problem}", path.display());
+                }
+                std::process::exit(2);
+            }
+        },
+    };
+    let opts = EnrichOptions::with_headers(&args.emit_headers, reading.clone());
     if let Some(path) = &args.enrich {
         match std::fs::read_to_string(path)
             .map_err(|e| e.to_string())
@@ -359,7 +389,7 @@ fn main() {
         return;
     }
     if !args.reparse.is_empty() {
-        reparse::run(&args.reparse, args.reparse_jobs);
+        reparse::run(&args.reparse, args.reparse_jobs, &reading);
         return;
     }
     if !args.rfc_census.is_empty() {
@@ -423,11 +453,11 @@ fn main() {
     if !args.no_identity_adjacency {
         strategies.push(CorrelateStrategy::IdentityAdjacency { window_us });
     }
-    let cfg = FlowConfig { strategies, dedup_window_us: DEFAULT_DEDUP_WINDOW_US };
+    let cfg = FlowConfig { strategies, dedup_window_us: DEFAULT_DEDUP_WINDOW_US, reading };
 
     let capture = capture_name(&files);
 
-    if let Some(query) = load_query(&args) {
+    if let Some(query) = load_query(&args, &cfg.reading) {
         // The query owns correlation when it says so: which strategies ran is
         // part of what a recorded query means, not ambient CLI state.
         let cfg = query.correlate.clone().unwrap_or(cfg);
@@ -725,7 +755,7 @@ fn print_review(
 
 /// Load `--query` / `--query-json`, exiting with the parse error's own path
 /// and reason — a mistyped predicate must never widen the match set silently.
-fn load_query(args: &Args) -> Option<Query> {
+fn load_query(args: &Args, reading: &ToolReading) -> Option<Query> {
     let text = match (&args.query, &args.query_json) {
         (Some(path), _) => match std::fs::read_to_string(path) {
             Ok(t) => t,
@@ -744,7 +774,7 @@ fn load_query(args: &Args) -> Option<Query> {
             std::process::exit(2);
         }
     };
-    match Query::from_json(&value) {
+    match Query::from_json(&value, reading) {
         Ok(q) => Some(q),
         Err(e) => {
             eprintln!("query rejected at {e}");
@@ -898,129 +928,6 @@ fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args, sut: Option<&
         }
     }
     true
-}
-
-fn fmt_ts(ts_us: u64) -> String {
-    let secs = ts_us / 1_000_000;
-    let ms = (ts_us % 1_000_000) / 1_000;
-    let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-    format!("{h:02}:{m:02}:{s:02}.{ms:03}Z")
-}
-
-fn leg_label(pos: usize) -> String {
-    match pos {
-        0 => "A".to_string(),
-        n => format!("B{n}"),
-    }
-}
-
-fn summary_line(msg: &SipMessage) -> String {
-    match msg {
-        SipMessage::Request(r) => format!(
-            "{} {} (CSeq {} {})",
-            r.method(),
-            r.request_uri().text(),
-            r.cseq().seq(),
-            r.cseq().method()
-        ),
-        SipMessage::Response(r) => {
-            format!("{} {} (CSeq {} {})", r.status(), r.reason(), r.cseq().seq(), r.cseq().method())
-        }
-    }
-}
-
-fn final_str(leg: &FlowLeg) -> String {
-    match (leg.invite.is_some(), leg.final_status) {
-        (false, _) => "-".to_string(),
-        (true, Some(c)) => c.to_string(),
-        (true, None) => "NONE".to_string(),
-    }
-}
-
-fn invite_strs(leg: &FlowLeg) -> (Cow<'_, str>, Cow<'_, str>, Cow<'_, str>) {
-    match &leg.invite {
-        Some(inv) => (inv.ruri.text(), inv.from_uri.text(), inv.to_uri.text()),
-        None => (Cow::Borrowed("-"), Cow::Borrowed("-"), Cow::Borrowed("-")),
-    }
-}
-
-fn print_list_line(n: usize, group: &CallGroup, legs: &[FlowLeg]) {
-    let a = &legs[group.legs[0]];
-    let a_tokens = a.tokens();
-    let token = a_tokens.iter().next().copied().unwrap_or("-");
-    let (ruri, from, to) = invite_strs(a);
-    let dur_ms = (legs[group.legs.last().copied().unwrap_or(group.legs[0])].t_last())
-        .saturating_sub(a.t_first())
-        / 1_000;
-    println!(
-        "#{n:<4} {} legs={} token={token} ruri={ruri} from={from} to={to} finals=[{}] ring={} term={} dur={dur_ms}ms msgs={}",
-        fmt_ts(a.t_first()),
-        group.legs.len(),
-        group.legs.iter().map(|&l| final_str(&legs[l])).collect::<Vec<_>>().join(","),
-        group.legs.iter().any(|&l| legs[l].saw_180),
-        group
-            .legs
-            .iter()
-            .filter_map(|&l| legs[l].terminated_by)
-            .next()
-            .map(|t| t.as_str())
-            .unwrap_or("-"),
-        group.legs.iter().map(|&l| legs[l].msgs.len()).sum::<usize>(),
-    );
-}
-
-fn print_ladder(n: usize, group: &CallGroup, legs: &[FlowLeg], full: bool) {
-    let t0 = legs[group.legs[0]].t_first();
-    println!("\n━━━ call group #{n} ─ {} ─ legs={} ━━━", fmt_ts(t0), group.legs.len());
-    for (pos, &l) in group.legs.iter().enumerate() {
-        let leg = &legs[l];
-        let tokens: Vec<&str> = leg.tokens().into_iter().collect();
-        let (ruri, from, to) = invite_strs(leg);
-        println!(
-            "  leg {}: Call-ID {}\n         INVITE {}  {} -> {}\n         final: {}  term: {}  msgs: {}{}",
-            leg_label(pos),
-            leg.call_id,
-            ruri,
-            from,
-            to,
-            final_str(leg),
-            leg.terminated_by.map(|t| t.as_str()).unwrap_or("-"),
-            leg.msgs.len(),
-            if tokens.is_empty() { String::new() } else { format!("  token: {}", tokens.join(",")) },
-        );
-    }
-    // Merged chronological ladder across all legs of the group.
-    let mut lines: Vec<(u64, String, Option<String>)> = Vec::new();
-    for (pos, &l) in group.legs.iter().enumerate() {
-        let leg = &legs[l];
-        for m in &leg.msgs {
-            let line = format!(
-                "  {:>9.3}s {} {:>21} → {:<21} [{}] {}{}",
-                (m.ts_us.saturating_sub(t0)) as f64 / 1e6,
-                fmt_ts(m.ts_us),
-                m.src.to_string(),
-                m.dst.to_string(),
-                leg_label(pos),
-                summary_line(&m.parsed),
-                if m.retx { "  (retx)" } else { "" },
-            );
-            let body = full.then(|| {
-                String::from_utf8_lossy(m.raw())
-                    .lines()
-                    .map(|l| format!("      | {l}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            });
-            lines.push((m.ts_us, line, body));
-        }
-    }
-    lines.sort_by_key(|line| line.0);
-    for (_, line, body) in lines {
-        println!("{line}");
-        if let Some(b) = body {
-            println!("{b}");
-        }
-    }
 }
 
 #[cfg(all(test, unix))]

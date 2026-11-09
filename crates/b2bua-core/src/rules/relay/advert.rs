@@ -96,14 +96,15 @@ pub(crate) mod advertisement_tests {
 
     /// Alice's INVITE, carrying `extra` header lines of her own.
     pub(crate) fn a_leg_invite_carrying(extra: &[(&str, &str)]) -> SipRequest {
-        let mut raw = "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+        let mut raw =
+            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice;lg=a\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
 To: <sip:bob@10.244.2.7:5060>\r\n\
 Call-ID: alice-call-id@192.0.2.5\r\n\
 CSeq: 314 INVITE\r\n"
-            .to_string();
+                .to_string();
         for (name, value) in extra {
             raw.push_str(&format!("{name}: {value}\r\n"));
         }
@@ -181,7 +182,8 @@ CSeq: 314 INVITE\r\n"
 
     /// An inbound re-INVITE carrying the peer's own `Supported`.
     fn peer_reinvite() -> SipRequest {
-        let raw = "INVITE sip:b2bua@10.244.2.7:5080 SIP/2.0\r\n\
+        let raw =
+            "INVITE sip:b2bua@10.244.2.7:5080 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-reinvite\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\

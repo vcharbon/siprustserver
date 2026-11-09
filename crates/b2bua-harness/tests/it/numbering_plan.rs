@@ -89,7 +89,7 @@ async fn route_rewrites_from_to_ruri_pai_and_pani() {
     );
     assert_eq!(req.to().uri().host(), "carrier.example", "To host rewritten");
     assert_eq!(
-        req.header::<PAssertedIdentity>().expect("PAI added").expect("readable PAI").uri().text(),
+        req.first::<PAssertedIdentity>().expect("PAI added").expect("readable PAI").uri().text(),
         "sip:+15551000@trunk.example",
         "PAI added"
     );
@@ -188,7 +188,8 @@ async fn direct_reject_carries_reason_header() {
 
     let resp = call.expect(603).await;
     assert_eq!(resp.status(), 603);
-    let reason = resp.header::<Reason>().expect("a Reason").expect("readable Reason");
+    let reasons = resp.list::<Reason>().expect("readable Reason");
+    let reason = sip_message::header::reason_for(&reasons, "Q.850").expect("a Q.850 Reason");
     assert!(reason.is("Q.850"), "Reason protocol relayed: {}", reason.to_wire());
     assert_eq!(reason.param("cause").and_then(ParamValue::as_str), Some("21"));
     assert_eq!(reason.param("text").and_then(ParamValue::as_str), Some("call rejected"));

@@ -135,6 +135,7 @@ impl ActionExecutor<'_> {
             &mut leg,
             &mut effect,
             header_adds,
+            &self.config.parser_limits.first_ingress,
         ));
         fx.buffered.extend(BufferedObservabilityEffect::skipped("originated INVITE", skipped));
         let author = match body_override {

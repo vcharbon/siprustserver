@@ -157,6 +157,7 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method: "BYE",
                     uri: &dialog.remote_target,
+                    route: "",
                     offer: false,
                 }),
                 branch,

@@ -37,18 +37,18 @@ pub(super) async fn offer(ctx: &Arc<RouterCtx>, call_ref: String, incarnation: O
         body: Vec::new(),
         incarnation: None,
     };
-    super::ingress::on_event(ctx, event, false).await;
+    super::ingress::on_event(ctx, event, Default::default(), None).await;
 }
 
 /// The drop turn of `call_ref` on the notice's `payload`, the incarnation the
 /// delete named ([`offer`]). Read under the per-call lock, held across the
 /// release.
 pub(super) async fn drop_turn(ctx: &Arc<RouterCtx>, call_ref: &str, payload: &serde_json::Value) {
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     let Some(live) = ctx.state.peek(call_ref) else {
-        // Released between the notice and its turn: this turn's queue and
-        // lock entry are all that is left of the call here.
-        drop(guard);
+        // Released between the notice and its turn: this turn's queue is all
+        // that is left of the call here.
+        drop(_guard);
         release_call(ctx, call_ref, ReleaseKind::Orphan).await;
         return;
     };

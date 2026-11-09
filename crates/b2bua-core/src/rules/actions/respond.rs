@@ -9,7 +9,7 @@ use call::helpers::Scope;
 use call::{Call, TimerKey, TimerType};
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateResponseOpts, RelayDirection, RelaySituation};
-use sip_message::header::{HeaderClass, HeaderName};
+use sip_message::header::HeaderName;
 use sip_message::{Method, SipHeader, SipStr};
 
 use crate::config::{B2buaConfig, RetryAfterRange};
@@ -29,13 +29,12 @@ use super::ActionExecutor;
 const GLARE_500_RETRY_AFTER: RetryAfterRange = RetryAfterRange { min_sec: 0, max_sec: 10 };
 
 impl ActionExecutor<'_> {
-    /// Answer the current request event in place with `status` (no relay) —
-    /// the response goes to the request's top-Via response target on the
-    /// source leg's server transaction, under the source face's Contact where
-    /// [`generators::response_states_own_contact`] states one (the 2xx to
-    /// UPDATE, the 202 to REFER). `extra_headers` ride the response as given; on a failure final to the
-    /// initial INVITE the deployment's minted-final advertisement fills a half
-    /// they leave unnamed.
+    /// Answer the current request event in place with `status`, no relay: to its
+    /// top-Via response target on the source leg's server transaction, under the
+    /// source face's Contact where [`generators::response_states_own_contact`]
+    /// states one (the 2xx to UPDATE, the 202 to REFER). `extra_headers` ride as
+    /// given; on a failure final to an initial INVITE the deployment's minted-final
+    /// advertisement fills a half they leave unnamed.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn respond(
         &mut self,
@@ -48,6 +47,7 @@ impl ActionExecutor<'_> {
         content_type: Option<&str>,
         mut extra_headers: Vec<SipHeader>,
     ) {
+        let (status, reason) = relay::writable_status("response", status, reason, fx);
         if let Some(req) = ctx.request() {
             if req.method() == Method::Invite
                 && req.to().tag().is_none()
@@ -80,7 +80,7 @@ impl ActionExecutor<'_> {
                 relay::Author::Stack,
                 relay::Carried::of(req.method(), Some(status), req.to().tag().is_some()),
                 body.to_vec(),
-                content_type.as_ref(),
+                relay::description_in(body, content_type.as_ref(), &extra_headers),
                 self.config.sdp_form.as_ref(),
             );
             relay::note_answered_here(call, ctx.source_leg_id, req);
@@ -241,7 +241,7 @@ impl ActionExecutor<'_> {
                         detail = %err.detail(),
                         "redirect refused"
                     );
-                    (500, err.to_string(), header_update_lines(header_updates), true)
+                    (500, err.to_string(), relay::set_lines(header_updates), true)
                 }
             };
         // A 3xx is a new instruction, not a relayed refusal: RFC 3261 §20.33
@@ -402,8 +402,8 @@ impl ActionExecutor<'_> {
     /// abandoned early dialog / the ADR-0022 `invariants::enforce` unanswered-a-leg
     /// funnel own the failure paths). Steps: mint/adopt A2, OVERWRITE the a-dialog
     /// `local_tag` to A2 (the MRF `ConfirmDialog` / an earlier 18x pinned A1),
-    /// relay the final/SDP under A2, and confirm the a-leg. The answer SDP is
-    /// kept as the dialog's `cached_sdp` (the relayFirst18x / fake-PRACK
+    /// relay the final/SDP under A2, and confirm the a-leg. The answer's
+    /// description is kept as the dialog's `cached_sdp` (the relayFirst18x / fake-PRACK
     /// cache, mirroring `confirm_dialog`); the §13.3.1.4 repeat needs none of
     /// it — it re-sends the retained datagram.
     ///
@@ -452,29 +452,19 @@ impl ActionExecutor<'_> {
         // §16.6: the delivered final's lines ride as received, except the names
         // the service's `header_updates` state — those are the service's, set
         // or removed, and a relayed line of the same name never competes.
-        let mut extra_headers: Vec<SipHeader> = relayed
-            .headers()
-            .iter()
-            .filter(|h| {
-                !header_updates.iter().any(|(n, _)| HeaderName::from(n.as_str()).matches(&h.name))
-            })
-            .cloned()
-            .collect();
+        let stated = relay::Statements::of("final to the caller", header_updates, fx);
+        let mut extra_headers: Vec<SipHeader> =
+            relayed.headers().iter().filter(|h| !stated.states(&h.name)).cloned().collect();
         // The advert (RFC 3261 §13.2.1): a DECLARED half stands, an undeclared
         // one states what the delivered final advertised, and none where
         // neither does — the ordinary relay's rule. A `header_updates` entry
         // naming a half owns it: a set value is kept verbatim, a removal keeps
-        // it absent (`header_update_lines` already dropped it).
+        // it absent (`relay::set_lines` already dropped it).
         let advert = capabilities::relaying(call, Face::Originator, &extra_headers);
-        let undecided: Vec<SipHeader> = descriptors
-            .iter()
-            .filter(|d| {
-                !header_updates.iter().any(|(n, _)| HeaderName::from(n.as_str()).matches(&d.name))
-            })
-            .cloned()
-            .collect();
+        let undecided: Vec<SipHeader> =
+            descriptors.iter().filter(|d| !stated.states(&d.name)).cloned().collect();
         relay::describe_body(&mut extra_headers, body, &undecided);
-        extra_headers.extend(header_update_lines(header_updates));
+        extra_headers.extend(stated.lines);
         let service_owned: Vec<Entry> =
             [HeaderName::Allow, HeaderName::Supported, HeaderName::Accept]
                 .into_iter()
@@ -486,6 +476,8 @@ impl ActionExecutor<'_> {
                 })
                 .collect();
         relay::stamp_advertisement(&mut extra_headers, &service_owned, &advert);
+        // The description the answer holds, wherever the body frames it.
+        let answer = relay::description_of(body, content_type.as_ref(), &extra_headers);
         // Built before the a-dialog moves to A2: a refused answer (the INVITE
         // already carries its final) leaves the dialog the caller holds intact.
         let Some(effect) = relay::response_to_a_leg(
@@ -507,14 +499,12 @@ impl ActionExecutor<'_> {
         // Seed the a-dialog if absent (fresh minting adopts A2 directly); when it
         // already exists under the early-media A1, `adopt_a_tag` confirms a
         // dialog of its own under A2 and retires A1 — the early dialog is
-        // superseded, not kept. The answer SDP becomes the dialog's
+        // superseded, not kept. The answer's description becomes the dialog's
         // `cached_sdp`, as `confirm_dialog` keeps it.
         self.ensure_a_dialog_with(call, Some(a2.clone()));
         super::dialog_track::adopt_a_tag(call, &a2);
-        if let Some(d) = super::dialog_track::own_a_dialog_mut(call) {
-            if !body.is_empty() {
-                d.cached_sdp = Some(body.to_vec());
-            }
+        if let (Some(d), Some(answer)) = (super::dialog_track::own_a_dialog_mut(call), answer) {
+            d.cached_sdp = Some(answer.to_vec());
         }
         // This 2xx answers the caller: it goes through the one seam that
         // retains the datagram + arms the §13.3.1.4 ladder.
@@ -534,29 +524,6 @@ impl ActionExecutor<'_> {
             }
         }
     }
-}
-
-/// Build the extra a-leg response headers for a decision-authored Reject/Redirect
-/// ([`b2bua_sdk::model::RuleAction::RespondToALeg`]): non-structural
-/// `header_updates` *sets* plus one `Contact: <uri>;q=…` per redirect target.
-/// Removals and structural keys drop — the response generator owns the
-/// stack-owned set (ADR-0017 X2), including the Contact a redirect authors from
-/// its typed target list.
-/// The non-structural `header_updates` *sets*. Removals and structural keys
-/// drop — the response generator owns the stack-owned set (ADR-0017 X2).
-fn header_update_lines(header_updates: &[(String, Option<String>)]) -> Vec<SipHeader> {
-    header_updates
-        .iter()
-        .filter_map(|(name, val)| {
-            let named = HeaderName::from(name.as_str());
-            match (val, named.class()) {
-                (Some(v), HeaderClass::EndToEnd) => {
-                    Some(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) })
-                }
-                _ => None,
-            }
-        })
-        .collect()
 }
 
 /// What the decision authored for the caller's final, as
@@ -604,7 +571,7 @@ fn build_a_leg_response_headers(
     header_updates: &[(String, Option<String>)],
     contacts: &[(String, Option<f32>)],
 ) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
-    let mut out = header_update_lines(header_updates);
+    let mut out = relay::set_lines(header_updates);
     for (uri, q) in contacts {
         out.push(relay::redirect_contact(uri, *q)?);
     }

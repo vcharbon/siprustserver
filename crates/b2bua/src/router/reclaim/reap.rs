@@ -1,11 +1,13 @@
 //! The periodic replica-store reap (ADR-0020 X3, ADR-0055 §5): expired bodies
 //! evicted, the limiter holds of a deferred terminal no primary came back for
 //! released with its CDR counted lost, and a call no node ended whose primary
-//! departed ended here with its CDR.
+//! departed ended here with its CDR ([`ended_body`]).
 
 use std::sync::Arc;
 
+use super::super::ended_body::{self, Cause};
 use super::super::RouterCtx;
+use crate::store::Enveloped;
 
 /// Periodic replica-store maintenance. A deferred terminal whose primary never came back to reclaim
 /// it (crashed for good, past the replica TTL = `reboot_budget`) must NOT be left
@@ -27,26 +29,59 @@ use super::super::RouterCtx;
 /// wire, its legs forced terminal and its CDR written, the call's only one
 /// (ADR-0055 §5). A ghost of a primary still a member is evicted silently:
 /// that primary holds the call.
+///
+/// The pass shares its task with the call reaper's sweep, whose aborts free a
+/// hung turn, so it waits on no call's lock: a ghost whose lock a turn holds
+/// is ended by a task of its own once that turn let the lock go
+/// ([`end_after_its_holder`]).
 pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
     let reaped = ctx.state.reap_replica(now_ms).await;
     for ghost in reaped.ghosts {
         let call_ref = ghost.call.call_ref.clone();
-        if !super::super::interpret::primary_departed(ctx, &call_ref) {
+        if !super::super::departure::primary_departed(ctx, &call_ref) {
             continue;
         }
-        let guard = ctx.state.lock(&call_ref).await;
+        let Some(_guard) = ctx.state.try_lock(&call_ref) else {
+            end_after_its_holder(ctx, ghost);
+            continue;
+        };
         if !ctx.state.contains(&call_ref) {
-            super::discharge_materialized_terminal(ctx, &call_ref, ghost, now_ms, true).await;
+            ended_body::pay(ctx, &call_ref, Cause::Ghost, ghost, now_ms).await;
         }
-        drop(guard);
     }
     for terminal in reaped.deferred_terminals {
         // No per-call lock: the body is already evicted and this node does not
         // serve the call live (a takeover copy self-released at its terminal), so
-        // there is no writer to serialize against — and taking the lock would leak
-        // a `locks` map entry (only `release_call`/`discard_orphan` clear it). The
-        // decoded snapshot is all the limiter release needs.
-        super::super::owed_limiter_key::release(ctx, &terminal.call);
+        // there is no writer to serialize against. The decoded snapshot is all
+        // the limiter release needs.
+        let call_ref = terminal.call.call_ref.clone();
+        ended_body::pay(ctx, &call_ref, Cause::Evicted, terminal, now_ms).await;
         ctx.metrics.bump_repl_terminal_lost();
     }
 }
+
+/// End `ghost` on a task of its own, under its call's lock once the turn
+/// holding it let it go, unless a copy of the call is live here by then. The
+/// body was evicted, so this task is all that is left to end it. The
+/// dispatcher tracks it before it starts, so a crash of the node stops it with
+/// the call work it runs, however close the crash.
+fn end_after_its_holder(ctx: &Arc<RouterCtx>, ghost: Enveloped) {
+    let task_ctx = ctx.clone();
+    let (tracked, start) = tokio::sync::oneshot::channel::<()>();
+    let task = observe::spawn_keeping_node(async move {
+        if start.await.is_err() {
+            return;
+        }
+        let ctx = &task_ctx;
+        let call_ref = ghost.call.call_ref.clone();
+        let _guard = ctx.state.lock(&call_ref).await;
+        if !ctx.state.contains(&call_ref) {
+            ended_body::pay(ctx, &call_ref, Cause::Ghost, ghost, ctx.clock.now_ms()).await;
+        }
+    });
+    ctx.dispatcher.track(task.abort_handle());
+    let _ = tracked.send(());
+}
+
+#[cfg(test)]
+mod tests;

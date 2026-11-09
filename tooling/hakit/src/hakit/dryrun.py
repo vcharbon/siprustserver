@@ -28,8 +28,15 @@ STAT_ROW = "0;0;0;0;0\n"
 HELD_STAT = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated;TargetRate\n0;0;0;0;0;0\n"
 # Every label selector names two ready pods.
 READY_PODS = json.dumps(
-    {"items": [{"metadata": {"name": f"p{i}"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}} for i in (0, 1)]}
+    {
+        "items": [
+            {"metadata": {"name": f"p{i}"}, "spec": {"nodeName": "n0"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+            for i in (0, 1)
+        ]
+    }
 )
+# Every node selector names the node those pods run on.
+NODES = json.dumps({"items": [{"metadata": {"name": "n0"}}]})
 
 
 class SimulatedLab:
@@ -56,6 +63,8 @@ class SimulatedLab:
             return ProcResult(0, "10.96.0.10", "")
         if "get" in a and "pods" in a and "-l" in a:
             return ProcResult(0, READY_PODS, "")
+        if "get" in a and "nodes" in a and "-l" in a:
+            return ProcResult(0, NODES, "")
         if "create" in a and "-f" in a and "--raw" not in a:
             doc = as_obj(json.loads(Path(a[a.index("-f") + 1]).read_text()))
             meta = as_obj(doc["metadata"])

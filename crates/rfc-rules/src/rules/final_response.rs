@@ -52,6 +52,7 @@
 //! are in subject, is consumer policy — the rule states only what the wire
 //! shows one emitter doing.
 
+use crate::rules::branch::BranchName;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
@@ -333,7 +334,7 @@ struct TxnKey<'a> {
     emitter: &'a str,
     call_id: &'a str,
     /// The top-Via branch, or `None` where this vantage carried none.
-    branch: Option<&'a str>,
+    branch: Option<BranchName<'a>>,
     cseq: u32,
     /// The CSeq method, ASCII-uppercased: a CANCEL's transaction is not its
     /// INVITE's even though the two share a branch.
@@ -351,7 +352,7 @@ impl<'a> TxnKey<'a> {
         TxnKey {
             emitter: msg.src.as_str(),
             call_id: msg.call_id.as_str(),
-            branch: msg.via_branch.as_deref(),
+            branch: msg.via_branch.as_deref().map(BranchName),
             cseq: msg.cseq,
             method: msg.cseq_method.to_ascii_uppercase(),
         }

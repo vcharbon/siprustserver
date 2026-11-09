@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use amqp_connect::BrokerTls;
 use lapin::{
     options::{BasicConsumeOptions, QueueDeclareOptions},
     types::{AMQPValue, FieldTable, LongString},
@@ -24,6 +25,9 @@ use tokio::time::{timeout_at, Instant};
 pub struct Target {
     /// The broker's AMQP URI.
     pub url: String,
+    /// The TLS the URI's scheme asks for, built once: every setup's
+    /// handshake rides it.
+    pub tls: BrokerTls,
     /// The queue declared and consumed.
     pub queue: String,
     /// The queue's `x-max-length` (with `drop-head`); 0 or less declares none.
@@ -91,7 +95,7 @@ impl Target {
         tracing::info!(node = observe::node(), state = "connecting", %url, "AMQP connection");
         let uri: AMQPUri =
             url.parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let connected = amqp_connect::connect_uri(&uri, deadline).await?;
+        let connected = amqp_connect::connect_uri(&uri, &self.tls, deadline).await?;
         let socket = ShutdownOnDrop(connected.socket);
         let connection = amqp_connect::open_over(uri, connected.stream).await?;
         tracing::info!(node = observe::node(), state = "connected", %url, "AMQP connection");

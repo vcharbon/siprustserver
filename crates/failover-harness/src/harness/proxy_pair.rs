@@ -114,13 +114,14 @@ impl FailoverHarness {
         self.relay_lanes.push(format!("{sock}#{label}"));
         let node = NodeScope::named(label);
         let parts = node.enter(|| {
-            b2bua_harness::spawn_proxy_core_with(
+            b2bua_harness::spawn_proxy_reading(
                 ep,
                 sock,
                 None,
                 workers,
                 self.clock.clone(),
                 which.id_seed(),
+                self.proxy_limits.clone(),
             )
         });
         let b2bua_harness::ProxyCoreParts { addr: sock, registry, metrics, observer: _, task } =

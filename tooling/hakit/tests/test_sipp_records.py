@@ -100,6 +100,47 @@ def test_every_exit_writes_one_valid_record(case: Case, pairings: dict[str, Pair
     assert str(r["call_id"]).endswith("-loopback@127.0.0.1")
 
 
+def test_a_100_then_silence_is_stamped_and_cancelled_at_the_final_wait(tmp_path: Path) -> None:
+    """The caller past a 100 waits the final wait, not the setup deadline, then
+    CANCELs (RFC 3261 §9.1); it stamps the 100 and records no later provisional."""
+    p = run_pair("peer-trying-then-silent.xml", tmp_path, keys={"final_ms": "5000"})
+    assert p.uac_rc == 0, p.uac_exit
+    assert p.peer_rc == 0, p.peer_exit
+    (r,) = p.records
+    assert SchemaSet.load().errors("call-outcome.v1", r) == []
+    assert (r["ending"], r["final_code"], r["first_provisional_at_ms"]) == ("timeout", None, None)
+    started, trying, gave_up = (jv.number(r, k) for k in ("started_at_ms", "trying_at_ms", "setup_ended_at_ms"))
+    assert 0 <= trying - started < 1_000
+    assert 5_000 <= gave_up - started < 7_000
+
+
+def test_a_call_served_late_after_its_100_runs_past_the_setup_deadline_to_its_answer(tmp_path: Path) -> None:
+    p = run_pair("peer-trying-then-late-answer.xml", tmp_path, keys={"final_ms": "8000"})
+    assert p.uac_rc == 0, p.uac_exit
+    assert p.peer_rc == 0, p.peer_exit
+    (r,) = p.records
+    assert (r["ending"], r["final_code"]) == ("answered", 200)
+    assert 4_000 <= jv.number(r, "answered_at_ms") - jv.number(r, "started_at_ms") < 6_000
+    assert r["trying_at_ms"] is not None and r["first_provisional_at_ms"] is None
+
+
+def test_a_100_after_the_give_up_is_stamped_as_a_100_and_no_provisional(tmp_path: Path) -> None:
+    p = run_pair("peer-late-trying.xml", tmp_path)
+    assert p.uac_rc == 0, p.uac_exit
+    assert p.peer_rc == 0, p.peer_exit
+    (r,) = p.records
+    assert (r["ending"], r["final_code"], r["first_provisional_at_ms"]) == ("timeout", None, None)
+    assert jv.number(r, "trying_at_ms") > jv.number(r, "setup_ended_at_ms")
+
+
+def test_no_response_still_gives_up_at_the_setup_deadline_whatever_the_final_wait(tmp_path: Path) -> None:
+    p = run_pair("peer-silent.xml", tmp_path, keys={"final_ms": "20000"})
+    assert p.uac_rc == 0, p.uac_exit
+    (r,) = p.records
+    assert (r["ending"], r["trying_at_ms"], r["first_provisional_at_ms"]) == ("timeout", None, None)
+    assert 3_000 <= jv.number(r, "setup_ended_at_ms") - jv.number(r, "started_at_ms") < 5_000
+
+
 def test_a_response_landing_on_a_deadline_check_is_acted_on(pairings: dict[str, Pairing]) -> None:
     """The peer answers 1 s after its 180, where the caller checks its deadline:
     every call is answered, ACKed and torn down."""

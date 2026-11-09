@@ -228,13 +228,14 @@ fn no_strategy_withholds_nothing() {
 }
 
 /// The PEM promotion absorbs the destination's 2xx, so it withholds the
-/// session timer from a destination leg (nobody would refresh it) and
-/// nothing from a media leg.
+/// session timer from a destination leg (nobody would refresh it), and
+/// `100rel` where the INVITE carries no offer; nothing from a media leg.
 #[test]
-fn the_pem_promotion_withholds_the_session_timer() {
+fn the_pem_promotion_withholds_the_session_timer_and_100rel_without_an_offer() {
     let features = arming(RelayFirst18xStrategy::PromotePemTo200);
+    assert_eq!(withheld_by_strategy_in(Some(&features), None, true), ["timer"]);
+    assert_eq!(withheld_by_strategy_in(Some(&features), None, false), ["timer", "100rel"]);
     for offers_sdp in [true, false] {
-        assert_eq!(withheld_by_strategy_in(Some(&features), None, offers_sdp), ["timer"]);
         assert!(
             withheld_by_strategy_in(Some(&features), Some(LegKind::Media), offers_sdp).is_empty()
         );

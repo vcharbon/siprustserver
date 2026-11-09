@@ -5,7 +5,7 @@
 //! ```text
 //! cargo run -p loadgen --release -- \
 //!   --cps 50 --duration 600 --max-in-flight 4000 \
-//!   --target 172.20.255.250:5060 --bind-ip 172.20.0.1 \
+//!   --target 192.168.60.250:5060 --bind-ip 192.168.60.1 \
 //!   --correlation-header X-Loadgen-Id --route-pin-to-uas \
 //!   --out-dir ./loadgen-report
 //! ```

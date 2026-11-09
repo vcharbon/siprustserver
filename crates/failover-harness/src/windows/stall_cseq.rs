@@ -56,7 +56,7 @@ mod tests {
 
     fn request(method: &str, cseq: u32, branch: &str) -> String {
         format!(
-            "{method} sip:b@x SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5080;branch={branch}\r\n\
+            "{method} sip:b@x SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 127.0.0.1:5080;branch={branch}\r\n\
              From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>;tag=b\r\nCall-ID: c1\r\n\
              CSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
         )
@@ -64,7 +64,7 @@ mod tests {
 
     fn response(status: u16, method: &str, cseq: u32, branch: &str) -> String {
         format!(
-            "SIP/2.0 {status} Whatever\r\nVia: SIP/2.0/UDP 127.0.0.1:5080;branch={branch}\r\n\
+            "SIP/2.0 {status} Whatever\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 127.0.0.1:5080;branch={branch}\r\n\
              From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>;tag=b\r\nCall-ID: c1\r\n\
              CSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
         )

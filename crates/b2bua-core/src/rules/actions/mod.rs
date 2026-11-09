@@ -74,7 +74,7 @@ mod subscription;
 mod teardown;
 mod unrelayed;
 
-use call::helpers::{cap_keepalive_fire_at, disarm_timer, retire_timers};
+use call::helpers::{disarm_timer, keepalive_fire_at, retire_timers};
 use call::{Call, TimerEntry, TimerKey, TimerType};
 
 use crate::config::B2buaConfig;
@@ -118,7 +118,8 @@ impl ActionExecutor<'_> {
     /// rules never hold it (ADR-0020 X8). An action that breaks ends the list:
     /// the actions after it are not applied. A peer's BYE the actions answer
     /// by ending its leg first draws the ACK its 2xx is owed (RFC 3261
-    /// §13.2.2.4).
+    /// §13.2.2.4). The actions are charged to the turn's fuel first: past it
+    /// the turn is tripped and none is applied (ADR-0057 §3).
     pub fn execute(
         &mut self,
         actions: &[RuleAction],
@@ -127,6 +128,9 @@ impl ActionExecutor<'_> {
     ) -> HandlerResult {
         let mut call = call.clone();
         let mut fx = HandlerEffects::new();
+        if !self.turn.charge(actions.len(), self.config.caps.actions_per_turn) {
+            return HandlerResult { call, effects: fx };
+        }
         self.ack_before_peer_bye_answer(&mut call, &mut fx, ctx, actions);
         for action in actions {
             if self.step(action, ctx, &mut call, &mut fx).is_break() {
@@ -138,9 +142,7 @@ impl ActionExecutor<'_> {
 
     /// Arm (or re-arm) the persisted per-call timer `key`, replacing the
     /// instance it held under the call's next generation. A `Keepalive` is
-    /// additionally held to the ledger's one-interval ceiling
-    /// ([`cap_keepalive_fire_at`]) — the arming half of the invariant
-    /// `router::restore_hygiene` enforces on hydrated deadlines.
+    /// armed exactly one interval out ([`keepalive_fire_at`]).
     fn schedule(&mut self, call: &mut Call, fx: &mut HandlerEffects, key: TimerKey, delay_ms: i64) {
         let fire_at = self.capped_fire_at(call, &key.timer_type, self.now_ms + delay_ms);
         crate::timer_arm::arm(call, fx, key, fire_at);
@@ -181,22 +183,22 @@ impl ActionExecutor<'_> {
         }
     }
 
-    /// `fire_at` for a minted timer, with a `Keepalive` held to one keepalive
-    /// interval (the configured cadence — every arming site re-arms at exactly
-    /// that, so a farther deadline is a defect at the caller, noted on the
-    /// turn). Non-keepalive deadlines pass through: a policy timer
-    /// legitimately outlives a probe cadence.
+    /// `fire_at` for a minted timer, with a `Keepalive` armed exactly one
+    /// keepalive interval out whatever it asks for, so its window resets at
+    /// most once per interval (ADR-0057 §1); a farther deadline is a defect
+    /// at the caller, noted on the turn. Non-keepalive deadlines pass
+    /// through: a policy timer legitimately outlives a probe cadence.
     fn capped_fire_at(&mut self, call: &Call, timer_type: &TimerType, fire_at: i64) -> i64 {
         if !matches!(timer_type, TimerType::Keepalive) {
             return fire_at;
         }
         let interval_ms = self.config.keepalive_interval_sec * 1000;
-        let capped = cap_keepalive_fire_at(fire_at, self.now_ms, interval_ms);
-        if capped != fire_at {
+        let armed = keepalive_fire_at(fire_at, self.now_ms, interval_ms);
+        if fire_at > armed && interval_ms > 0 {
             let out = fire_at - self.now_ms;
             let detail = format!("Keepalive armed {out} ms out of a {interval_ms} ms cadence");
             self.turn.notes.defect(crate::turn_notes::KEEPALIVE_WITHIN_CADENCE, detail, call);
         }
-        capped
+        armed
     }
 }

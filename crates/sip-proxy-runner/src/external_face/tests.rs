@@ -29,13 +29,23 @@ fn check(next_hops: &[Ipv4Addr]) -> FaceCheck {
     FaceCheck { interface: "eth1".into(), next_hops: next_hops.to_vec() }
 }
 
+/// A solicit that sends.
+fn sent(_: Ipv4Addr) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// One reading with a fresh latch.
 fn read(
     check: &FaceCheck,
     root: &std::path::Path,
     table: impl FnOnce() -> std::io::Result<Vec<Neighbour>>,
 ) -> FaceState {
-    check.read_at(root, table, &mut FaceLatch::default())
+    check.read_at(root, table, sent, &mut FaceLatch::default())
+}
+
+/// Rewrite `eth1`'s operstate under `root`.
+fn set_operstate(root: &std::path::Path, operstate: &str) {
+    std::fs::write(root.join("eth1").join("operstate"), format!("{operstate}\n")).unwrap();
 }
 
 fn entry(addr: Ipv4Addr, state: u16) -> Neighbour {
@@ -92,8 +102,9 @@ fn an_incomplete_flap_stays_unusable_until_the_next_hop_resolves() {
     let root = class_net("flap", "up", None);
     let face = check(&[TOR]);
     let mut latch = FaceLatch::default();
-    let mut step = |table: Vec<Neighbour>| face.read_at(&root, || Ok(table), &mut latch);
+    let mut step = |table: Vec<Neighbour>| face.read_at(&root, || Ok(table), sent, &mut latch);
     assert_eq!(step(vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+    assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), FaceState::UnresolvedOnce);
     assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), FaceState::NextHopsUnresolved);
     assert_eq!(step(vec![]), FaceState::NextHopsUnresolved, "gone after INCOMPLETE");
     assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), FaceState::NextHopsUnresolved);
@@ -109,16 +120,199 @@ fn only_a_resolved_state_clears_the_latch() {
     let face = check(&[TOR]);
     for resolved in [0x02, 0x04, 0x08, 0x10, 0x80] {
         let mut latch = FaceLatch::default();
-        face.read_at(&root, || Ok(vec![entry(TOR, NUD_FAILED)]), &mut latch);
-        let state = face.read_at(&root, || Ok(vec![entry(TOR, resolved)]), &mut latch);
+        face.read_at(&root, || Ok(vec![entry(TOR, NUD_FAILED)]), sent, &mut latch);
+        let state = face.read_at(&root, || Ok(vec![entry(TOR, resolved)]), sent, &mut latch);
         assert_eq!(state, FaceState::Usable, "state {resolved:#x}");
     }
     for other in [0x00, 0x40] {
         let mut latch = FaceLatch::default();
-        face.read_at(&root, || Ok(vec![entry(TOR, NUD_FAILED)]), &mut latch);
-        let state = face.read_at(&root, || Ok(vec![entry(TOR, other)]), &mut latch);
+        face.read_at(&root, || Ok(vec![entry(TOR, NUD_FAILED)]), sent, &mut latch);
+        let state = face.read_at(&root, || Ok(vec![entry(TOR, other)]), sent, &mut latch);
         assert_eq!(state, FaceState::NextHopsUnresolved, "state {other:#x}");
     }
+}
+
+/// While latched, every reading solicits every next hop: nothing else sends
+/// toward them once the node is withdrawn. An answer clears the latch and the
+/// soliciting with it; while none answers the latch holds, whatever the table
+/// shows of an unanswered entry. A next hop is never solicited while no latch
+/// is set: one dead hop of two is left to the traffic that still flows.
+#[test]
+fn the_latch_clears_on_the_solicits_answer_and_stays_while_none_answers() {
+    let root = class_net("solicit", "up", None);
+    let face = check(&[TOR, TOR_B]);
+    let mut latch = FaceLatch::default();
+    let mut step = |table: Vec<Neighbour>| {
+        let mut asked = Vec::new();
+        let solicit = |hop| {
+            asked.push(hop);
+            Ok(())
+        };
+        let state = face.read_at(&root, || Ok(table), solicit, &mut latch);
+        (state, asked)
+    };
+    let usable = (FaceState::Usable, vec![]);
+    let latched = (FaceState::NextHopsUnresolved, vec![TOR, TOR_B]);
+    assert_eq!(step(vec![entry(TOR, REACHABLE), entry(TOR_B, REACHABLE)]), usable);
+    assert_eq!(step(vec![entry(TOR, NUD_FAILED), entry(TOR_B, REACHABLE)]), usable);
+    let once = (FaceState::UnresolvedOnce, vec![]);
+    assert_eq!(step(vec![entry(TOR, NUD_FAILED), entry(TOR_B, NUD_FAILED)]), once);
+    assert_eq!(step(vec![entry(TOR, NUD_FAILED), entry(TOR_B, NUD_FAILED)]), latched);
+    assert_eq!(step(vec![]), latched, "no answer: the entries gone");
+    assert_eq!(step(vec![entry(TOR, NUD_INCOMPLETE)]), latched, "no answer: the solicit pending");
+    assert_eq!(step(vec![entry(TOR_B, NUD_FAILED)]), latched, "no answer: the solicit failed");
+    assert_eq!(step(vec![entry(TOR_B, REACHABLE)]), usable, "one answer clears the latch");
+    assert_eq!(step(vec![]), usable, "no latch, nothing solicited");
+}
+
+/// The kernel read of the loopback, whose next hops the table never holds: a
+/// latched read sends each next hop its empty datagram, an unlatched one sends
+/// nothing, read in that order from the sockets' queues.
+#[test]
+fn a_latched_read_solicits_every_next_hop_and_an_unlatched_read_sends_nothing() {
+    let (first, second) = (Ipv4Addr::new(127, 0, 0, 1), Ipv4Addr::new(127, 0, 0, 2));
+    let a = std::net::UdpSocket::bind((first, 0)).unwrap();
+    let port = a.local_addr().unwrap().port();
+    let b = std::net::UdpSocket::bind((second, port)).unwrap();
+    let face = FaceCheck { interface: "lo".into(), next_hops: vec![first, second] };
+    let mut latch = FaceLatch::default();
+    assert_eq!(face.read_soliciting(port, &mut latch), FaceState::Usable);
+    latch.unresolved = true;
+    assert_eq!(face.read_soliciting(port, &mut latch), FaceState::NextHopsUnresolved);
+    for socket in [&a, &b] {
+        socket.set_read_timeout(Some(std::time::Duration::from_millis(900))).unwrap();
+        let mut buf = [0u8; 8];
+        assert_eq!(socket.recv(&mut buf).unwrap(), 0, "the latched read's empty datagram");
+        socket.set_nonblocking(true).unwrap();
+        let none = socket.recv(&mut buf).unwrap_err();
+        assert_eq!(none.kind(), std::io::ErrorKind::WouldBlock, "one datagram, the latched read's");
+    }
+}
+
+/// A solicit the node's firewall refuses leaves the latch as it stands, marked
+/// so that one latch warns once, until a next hop resolves.
+#[test]
+fn a_failed_solicit_marks_the_latch_until_a_next_hop_resolves() {
+    let root = class_net("solicit-refused", "up", None);
+    let face = check(&[TOR, TOR_B]);
+    let mut latch = FaceLatch::default();
+    let refused = |_| Err(std::io::Error::from_raw_os_error(libc::EPERM));
+    let table = || Ok(vec![entry(TOR, NUD_FAILED)]);
+    assert_eq!(face.read_at(&root, table, refused, &mut latch), FaceState::NextHopsUnresolved);
+    assert!(latch.solicit_failed);
+    assert_eq!(face.read_at(&root, table, sent, &mut latch), FaceState::NextHopsUnresolved);
+    assert!(latch.solicit_failed, "the next send's success does not end the latch's warning");
+    let live = || Ok(vec![entry(TOR, REACHABLE)]);
+    assert_eq!(face.read_at(&root, live, sent, &mut latch), FaceState::Usable);
+    assert!(!latch.solicit_failed);
+}
+
+/// One reading of the interface down, between two up, holds the verdict: a
+/// carrier flap shorter than the reading period withdraws nothing. The second
+/// in a row is the face down, and an up reading starts the count again.
+#[test]
+fn one_down_reading_withdraws_nothing_and_two_do() {
+    let root = class_net("two-down", "up", None);
+    let face = check(&[TOR]);
+    let mut latch = FaceLatch::default();
+    let mut step = |operstate: &str| {
+        set_operstate(&root, operstate);
+        face.read_at(&root, || Ok(vec![entry(TOR, REACHABLE)]), sent, &mut latch)
+    };
+    assert_eq!(step("up"), FaceState::Usable);
+    assert!(step("down").is_usable(), "one down reading");
+    assert_eq!(step("up"), FaceState::Usable);
+    let again = step("lowerlayerdown");
+    assert_eq!(again, FaceState::DownOnce("lowerlayerdown".into()), "the count started again");
+    assert_eq!(step("lowerlayerdown"), FaceState::Down("lowerlayerdown".into()));
+    assert_eq!(step("down"), FaceState::Down("down".into()), "stays down");
+    assert_eq!(step("up"), FaceState::Usable);
+}
+
+/// A carrier flap flushes the neighbour table, and the traffic that meets the
+/// flushed entry leaves it `INCOMPLETE` until the ARP retry, past the flap
+/// itself. One such reading is the flap's own aftermath, not a dead next hop.
+#[test]
+fn a_flap_read_down_then_unresolved_then_resolved_stays_usable() {
+    let root = class_net("flap-aftermath", "up", None);
+    let face = check(&[TOR]);
+    let mut latch = FaceLatch::default();
+    let mut step = |operstate: &str, table: Vec<Neighbour>| {
+        set_operstate(&root, operstate);
+        face.read_at(&root, || Ok(table), sent, &mut latch)
+    };
+    assert_eq!(step("up", vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+    assert!(step("down", vec![]).is_usable(), "the flap");
+    assert!(step("up", vec![entry(TOR, NUD_INCOMPLETE)]).is_usable(), "the flap's aftermath");
+    assert_eq!(step("up", vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+}
+
+/// A next hop read unresolved twice since the last that resolved latches the
+/// face, with an absent reading between the two, or the first reading on a
+/// face that was not usable.
+#[test]
+fn a_next_hop_read_unresolved_twice_latches_the_face() {
+    let root = class_net("two-unresolved", "up", None);
+    let face = check(&[TOR]);
+    let mut latch = FaceLatch::default();
+    let mut step = |table: Vec<Neighbour>| face.read_at(&root, || Ok(table), sent, &mut latch);
+    assert_eq!(step(vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+    assert!(step(vec![entry(TOR, NUD_INCOMPLETE)]).is_usable(), "one reading holds");
+    assert!(step(vec![]).is_usable(), "gone: no verdict either way");
+    assert_eq!(step(vec![entry(TOR, NUD_FAILED)]), FaceState::NextHopsUnresolved);
+    assert_eq!(step(vec![entry(TOR, REACHABLE)]), FaceState::Usable);
+    assert!(step(vec![entry(TOR, NUD_FAILED)]).is_usable(), "a resolved reading starts over");
+}
+
+/// A face that read unusable has no verdict to hold: its first down reading is
+/// down, so a proxy that starts on a dead carrier, or a latched face whose
+/// carrier then drops, never reads usable for one reading.
+#[test]
+fn a_down_reading_holds_only_a_usable_face() {
+    let root = class_net("down-unusable", "up", None);
+    let face = check(&[TOR]);
+    let mut latch = FaceLatch::default();
+    let failed = || Ok(vec![entry(TOR, NUD_FAILED)]);
+    assert_eq!(face.read_at(&root, failed, sent, &mut latch), FaceState::NextHopsUnresolved);
+    set_operstate(&root, "down");
+    assert_eq!(face.read_at(&root, failed, sent, &mut latch), FaceState::Down("down".into()));
+}
+
+/// An interface removed is no carrier flap: the first reading without it is
+/// unusable.
+#[test]
+fn a_removed_interface_withdraws_at_its_first_reading() {
+    let root = class_net("removed", "up", None);
+    let face = check(&[TOR]);
+    let mut latch = FaceLatch::default();
+    let live = || Ok(vec![entry(TOR, REACHABLE)]);
+    assert_eq!(face.read_at(&root, live, sent, &mut latch), FaceState::Usable);
+    std::fs::remove_dir_all(root.join("eth1")).unwrap();
+    assert_eq!(face.read_at(&root, live, sent, &mut latch), FaceState::Missing);
+}
+
+/// The monitor carries the first down reading to the next one, across its
+/// blocking reads: one tick down keeps the face usable, the next withdraws it.
+#[tokio::test(start_paused = true)]
+async fn the_monitor_withdraws_on_the_second_down_reading() {
+    let root = class_net("monitor-down", "up", None);
+    let face = check(&[TOR]);
+    let monitor = FaceMonitor::new(face.clone());
+    let read_root = root.clone();
+    let task = monitor.spawn_reading(
+        std::time::Duration::from_millis(500),
+        std::sync::Arc::new(move |latch: &mut FaceLatch| {
+            face.read_at(&read_root, || Ok(vec![entry(TOR, REACHABLE)]), sent, latch)
+        }),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(monitor.usable());
+    set_operstate(&root, "down");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(monitor.usable(), "one reading down");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!monitor.usable(), "two readings down");
+    task.abort();
 }
 
 /// The monitor publishes each reading, taken off the async runtime, and
@@ -144,6 +338,29 @@ async fn the_monitor_publishes_each_reading() {
     usable.store(false, std::sync::atomic::Ordering::SeqCst);
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
     assert!(!monitor.usable());
+    task.abort();
+}
+
+/// A tick the runtime delivers late reads once and waits a whole period: a
+/// burst of readings microseconds apart would count a short flap twice.
+#[tokio::test(start_paused = true)]
+async fn a_late_tick_reads_once_and_the_next_waits_a_period() {
+    let period = std::time::Duration::from_millis(500);
+    let monitor = FaceMonitor::new(check(&[TOR]));
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = reads.clone();
+    let task = monitor.spawn_reading(
+        period,
+        std::sync::Arc::new(move |_latch: &mut FaceLatch| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            FaceState::Usable
+        }),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1, "the first tick");
+    tokio::time::advance(period * 3).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2, "one reading for the late tick");
     task.abort();
 }
 

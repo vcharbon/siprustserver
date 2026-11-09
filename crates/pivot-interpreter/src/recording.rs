@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use pivot_schema::bundle::{Dir, RecordedMessage};
+use sip_message::SipParser;
 
 /// One datagram as its recorder states it, before the leg numbers it: `seq` is
 /// the log's to assign, never a caller's.
@@ -36,15 +37,29 @@ struct Log {
 
 /// A handle onto one run's recording. Cloneable and `Send`-free by design: the
 /// harness is single-threaded, and the handle's job is to survive a panic in the
-/// run body, not to cross threads.
-#[derive(Debug, Clone, Default)]
+/// run body, not to cross threads. It carries the reader every message it holds
+/// is read by: the lane's reading of what its parties exchange.
+#[derive(Clone)]
 pub struct Recording {
     log: Arc<Mutex<Log>>,
+    reader: Arc<dyn SipParser + Send + Sync>,
+}
+
+impl std::fmt::Debug for Recording {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recording").field("log", &self.log).finish_non_exhaustive()
+    }
 }
 
 impl Recording {
-    pub fn new() -> Self {
-        Recording::default()
+    /// An empty recording whose messages `reader` reads.
+    pub fn new(reader: Arc<dyn SipParser + Send + Sync>) -> Self {
+        Recording { log: Arc::default(), reader }
+    }
+
+    /// The reader of every message this recording holds.
+    pub fn reader(&self) -> &dyn SipParser {
+        self.reader.as_ref()
     }
 
     /// Declare a leg the run BOUND a socket for, before it has heard anything.
@@ -112,6 +127,7 @@ impl Recording {
             entry.at_us,
             entry.step.map(str::to_string),
             entry.wire,
+            self.reader.as_ref(),
         );
         message.repeat_of = entry.repeat_of;
         message.note = entry.note.map(str::to_string);
@@ -201,7 +217,7 @@ mod tests {
 
     #[test]
     fn a_leg_s_messages_number_from_one_in_wire_order() {
-        let rec = Recording::new();
+        let rec = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         rec.push("A", Dir::Out, 0, "INVITE\r\n", Some("s1"), None);
         rec.push("A", Dir::In, 1900, "SIP/2.0 100\r\n", Some("s2"), None);
         rec.push("B", Dir::In, 2000, "INVITE\r\n", None, Some("unclaimed"));
@@ -213,7 +229,7 @@ mod tests {
 
     #[test]
     fn a_datagram_recorded_before_its_step_claimed_it_is_attributed_after_the_fact() {
-        let rec = Recording::new();
+        let rec = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         rec.push("B", Dir::In, 10, "INVITE\r\n", None, None);
         let seq = rec.last_seq("B").expect("just recorded");
         rec.attribute("B", seq, "s3");
@@ -222,7 +238,7 @@ mod tests {
 
     #[test]
     fn a_declared_leg_that_heard_nothing_still_has_a_ladder() {
-        let rec = Recording::new();
+        let rec = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         rec.declare("A");
         rec.declare("B");
         rec.push("A", Dir::Out, 0, "INVITE\r\n", Some("s1"), None);
@@ -235,7 +251,7 @@ mod tests {
 
     #[test]
     fn a_repeat_points_at_the_earliest_datagram_it_repeats_in_its_own_direction() {
-        let rec = Recording::new();
+        let rec = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         rec.push("A", Dir::Out, 0, "INVITE\r\n", Some("s1"), None);
         rec.push("A", Dir::In, 1, "INVITE\r\n", None, Some("looped back"));
         rec.push_repeat(
@@ -263,7 +279,7 @@ mod tests {
 
     #[test]
     fn the_jsonl_form_is_one_object_per_line_with_a_trailing_newline() {
-        let rec = Recording::new();
+        let rec = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         rec.push("A", Dir::Out, 0, "INVITE\r\n", Some("s1"), None);
         rec.push("A", Dir::In, 5, "SIP/2.0 100\r\n", None, Some("absorbed repeat"));
         let files = rec.to_jsonl();

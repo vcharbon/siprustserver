@@ -38,8 +38,9 @@ use super::super::ProxyCore;
 /// Where a response bound for a worker goes.
 pub(super) enum OwnerRoute {
     /// Along its next Via: the owner holding its transaction is there, or no
-    /// cookie names the call's owners.
-    Via,
+    /// cookie names the call's owners. `owner_named`: a verified cookie names
+    /// that owner, so it is a worker whatever else that Via says.
+    Via { owner_named: bool },
     /// To this address: the holder's own, moved since, or the other owner's.
     To(ProxyAddr),
     /// No owner can take it.
@@ -48,14 +49,16 @@ pub(super) enum OwnerRoute {
 
 impl ProxyCore {
     /// The owner rule for `msg`, a response whose top Via is `ours` and whose
-    /// next Via's sent-by is `sent_by`.
+    /// next Via's sent-by is `sent_by`. With `for_a_worker` false the registry
+    /// names nothing: only a cookie on `ours` can name an owner.
     pub(super) async fn owner_route(
         &self,
         msg: &SipMessage,
         ours: &Via,
         sent_by: &ProxyAddr,
+        for_a_worker: bool,
     ) -> OwnerRoute {
-        let named = self.registry.lookup_by_address(sent_by);
+        let named = for_a_worker.then(|| self.registry.lookup_by_address(sent_by)).flatten();
         let dead = named.as_ref().filter(|n| n.health == WorkerHealth::Dead);
         let cookie = self
             .strategy
@@ -64,7 +67,7 @@ impl ProxyCore {
         let Some(cookie) = cookie else {
             return match dead {
                 Some(dead) => self.moved(dead).map_or(OwnerRoute::Nowhere, OwnerRoute::To),
-                None => OwnerRoute::Via,
+                None => OwnerRoute::Via { owner_named: false },
             };
         };
         let primary = self.strategy.stickiness_primary(&cookie).unwrap_or_default();
@@ -79,7 +82,7 @@ impl ProxyCore {
             .filter(|n| n.id == primary || n.id == backup)
             .map_or(primary, |n| n.id.as_str());
         if named.as_ref().is_some_and(|n| n.id == holder && n.health != WorkerHealth::Dead) {
-            return OwnerRoute::Via;
+            return OwnerRoute::Via { owner_named: true };
         }
         let at_now = self.registry.resolve(holder).filter(|w| w.health != WorkerHealth::Dead);
         if let Some(holder) = at_now {

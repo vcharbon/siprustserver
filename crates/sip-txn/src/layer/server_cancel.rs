@@ -96,6 +96,7 @@ impl Owner {
                         src,
                         matched_client_txn: false,
                         datagram,
+                        opened_at: None,
                     });
                 }
                 return false;

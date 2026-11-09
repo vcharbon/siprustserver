@@ -4,15 +4,16 @@
 //! `Err` there only.
 
 use crate::error::SipParseError;
-use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 
-use super::name::HeaderName;
+use super::cardinality::{held_to_the_table, lines};
+use super::name::HeaderId;
 use super::name_addr::{AddrForm, NameAddr};
-use super::params::{read_generic_params, Params};
+use super::params::{read_params, ParamReading, Params};
 use super::scan::{clamped, digits_end};
+use super::single_valued::Listed;
 use super::uri::{Uri, UriRole};
-use super::value::{Folding, HeaderValue};
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// One location reference (RFC 6442 §4.1): `locationValue = LAQUOT
@@ -35,13 +36,10 @@ impl Geolocation {
 }
 
 impl HeaderValue for Geolocation {
-    fn header_name() -> HeaderName {
-        HeaderName::Geolocation
-    }
+    type Lines = lines::Comma;
+    held_to_the_table!();
 
-    fn folding() -> Folding {
-        Folding::Comma
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::Geolocation);
 
     /// The URI between angle brackets, read by the one URI reader, then the
     /// generic parameters: a display name or a bare URI is refused.
@@ -55,15 +53,6 @@ impl HeaderValue for Geolocation {
             )));
         }
         Ok(Self { uri: addr.uri().clone(), params: addr.params().clone() })
-    }
-
-    /// Every location of one line; an empty entry between commas, or after
-    /// the last one, names none and is skipped.
-    fn parse_line_into(raw: &SipStr, out: &mut Vec<Self>) -> Result<(), SipParseError> {
-        for entry in top_level_comma_entries(raw.as_str()).filter(|entry| !entry.is_empty()) {
-            out.push(Self::parse(&raw.reslice(entry))?);
-        }
-        Ok(())
     }
 
     fn render(&self, out: &mut Wire) {
@@ -101,13 +90,10 @@ impl GeolocationError {
 }
 
 impl HeaderValue for GeolocationError {
-    fn header_name() -> HeaderName {
-        HeaderName::GeolocationError
-    }
+    type Lines = lines::Single;
+    held_to_the_table!();
 
-    fn folding() -> Folding {
-        Folding::Single
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::GeolocationError);
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = raw.trimmed();
@@ -123,7 +109,8 @@ impl HeaderValue for GeolocationError {
                 value.as_str()
             ))
         })?;
-        let params = read_generic_params(&value, end)
+        let params = read_params(&value, end, ParamReading::Strict, None)
+            .map(|(params, _)| params)
             .map_err(|e| SipParseError::new(format!("Geolocation-Error: {}", e.reason)))?;
         Ok(Self { code, digits: value.reslice(digits), params })
     }
@@ -148,13 +135,10 @@ impl GeolocationRouting {
 }
 
 impl HeaderValue for GeolocationRouting {
-    fn header_name() -> HeaderName {
-        HeaderName::GeolocationRouting
-    }
+    type Lines = lines::Single;
+    held_to_the_table!();
 
-    fn folding() -> Folding {
-        Folding::Single
-    }
+    const HEADER: Listed = Listed::Known(HeaderId::GeolocationRouting);
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = raw.trimmed();

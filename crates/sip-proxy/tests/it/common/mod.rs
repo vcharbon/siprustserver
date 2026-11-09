@@ -56,10 +56,16 @@ pub async fn spawn_proxy(
     let (ep, sock) = h.bind_sut("proxy", addr).await;
     let metrics = Arc::new(ProxyMetrics::new());
     let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
-        .clock(Clock::test_at(0))
-        .metrics(metrics.clone())
-        .build(ep);
+    let core = ProxyCoreBuilder::new(
+        ProxyAddr::from(sock),
+        strategy,
+        registry,
+        id_gen,
+        sip_message::CustomParser::new(),
+    )
+    .clock(Clock::test_at(0))
+    .metrics(metrics.clone())
+    .build(ep);
     let task = tokio::spawn(core.run());
     ProxySut { addr: sock, metrics, task }
 }
@@ -76,11 +82,17 @@ pub async fn spawn_proxy_with_traces(
     let (ep, sock) = h.bind_sut("proxy", addr).await;
     let metrics = Arc::new(ProxyMetrics::new());
     let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
-        .clock(Clock::test_at(0))
-        .metrics(metrics.clone())
-        .traces(traces)
-        .build(ep);
+    let core = ProxyCoreBuilder::new(
+        ProxyAddr::from(sock),
+        strategy,
+        registry,
+        id_gen,
+        sip_message::CustomParser::new(),
+    )
+    .clock(Clock::test_at(0))
+    .metrics(metrics.clone())
+    .traces(traces)
+    .build(ep);
     let task = tokio::spawn(core.run());
     ProxySut { addr: sock, metrics, task }
 }

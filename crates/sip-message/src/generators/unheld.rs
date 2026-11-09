@@ -38,11 +38,11 @@ fn in_dialog_of(
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
     let draft = RequestDraft::new(method.clone(), uri)
         .push(hop)
-        .push(MaxForwards::DEFAULT)
+        .set(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
-        .push(CSeq::new(cseq, method));
+        .set(CSeq::new(cseq, method));
     Ok(with_routes(draft, &routes))
 }
 
@@ -68,32 +68,37 @@ pub fn generate_bye_for_unheld_2xx(
     hop: Via,
 ) -> Result<SipRequest, GenerateError> {
     let draft = in_dialog_of(final_response, Method::Bye, cseq, hop)?;
-    emit::request(draft.push(ContentLength::new(0)))
+    emit::request(draft.set(ContentLength::new(0)))
 }
 
 /// The ACK of a non-2xx final to an INVITE whose UAC holds no record of it
 /// (RFC 3261 §17.1.1.3): the INVITE's `request_uri`, the INVITE's top Via as
 /// the final echoes it (branch included), less what the next hop stamped on it
 /// (`received`, the `rport` value, §18.2.1, RFC 3581 §4), From, To and
-/// Call-ID echoing the final, its CSeq number with method ACK. No Route: the
-/// caller states the INVITE's route for the hop. No body.
+/// Call-ID echoing the final, its CSeq number with method ACK, the `route` the
+/// INVITE carried past its first hop, one header value, when not empty. The
+/// caller states that first hop. No body.
 pub fn generate_ack_for_unheld_non_2xx(
     final_response: &SipResponse,
     request_uri: Uri,
+    route: &str,
 ) -> Result<SipRequest, GenerateError> {
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
     let mut via = final_response.top_via().clone().without_param("received");
     if via.rport().is_some() {
         via = via.requesting_rport();
     }
-    let draft = RequestDraft::new(Method::Ack, request_uri)
+    let mut draft = RequestDraft::new(Method::Ack, request_uri)
         .push(via)
-        .push(MaxForwards::DEFAULT)
+        .set(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
-        .push(CSeq::new(final_response.cseq().seq(), Method::Ack));
-    emit::request(draft.push(ContentLength::new(0)))
+        .set(CSeq::new(final_response.cseq().seq(), Method::Ack));
+    if !route.is_empty() {
+        draft = draft.push_raw(HeaderName::Route, SipStr::owned(route));
+    }
+    emit::request(draft.set(ContentLength::new(0)))
 }
 
 #[cfg(test)]
@@ -162,17 +167,21 @@ Content-Length: 0\r\n\r\n",
         assert_eq!(bye.request_uri().to_string(), "sip:bob@10.0.0.2:5070");
     }
 
+    /// Ingress refuses a 2xx to INVITE with no Contact (RFC 3261 §12.1.1); one
+    /// read with no grammar held still draws no ACK.
     #[test]
     fn a_2xx_without_a_contact_draws_nothing() {
-        let no_contact = response(
-            "SIP/2.0 200 OK\r\n\
+        let raw = "SIP/2.0 200 OK\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKinv\r\n\
 From: <sip:svc@10.0.0.9>;tag=ours\r\n\
 To: <sip:bob@10.0.0.2>;tag=bobs\r\n\
 Call-ID: c\r\n\
 CSeq: 1 INVITE\r\n\
-Content-Length: 0\r\n\r\n",
-        );
+Content-Length: 0\r\n\r\n";
+        assert!(CustomParser::new().parse(raw.as_bytes()).is_err());
+        let SipMessage::Response(no_contact) = crate::read_stored(raw.as_bytes()).unwrap() else {
+            panic!("a response")
+        };
         assert!(generate_ack_for_unheld_2xx(&no_contact, hop("z9hG4bKa"), None).is_err());
     }
 
@@ -188,7 +197,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n",
         );
         let uri = Uri::parse(&SipStr::from_static("sip:bob@10.0.0.2:5070")).expect("a URI");
-        let ack = generate_ack_for_unheld_non_2xx(&busy, uri).expect("an ACK");
+        let ack = generate_ack_for_unheld_non_2xx(&busy, uri, "").expect("an ACK");
         assert_eq!(ack.top_via().branch(), Some("z9hG4bKinv"));
         assert_eq!(ack.top_via().received(), None, "what the next hop stamped is left out");
         assert_eq!(

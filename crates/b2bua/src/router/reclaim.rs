@@ -3,33 +3,35 @@
 //! discharge of deferred terminals; the bulk reboot reclaim and the straggler
 //! reclaim live in `bulk`, how two copies of a call meet in `meeting` and how
 //! two diverged copies end in `diverged` (ADR-0055 §7), the periodic
-//! replica-store reap in `reap`.
+//! replica-store reap in `reap`, and the steps those sweeps defer to a turn
+//! of the call's own queue rather than wait on its lock in `deferred`.
 
 use std::sync::Arc;
 
 use call::CallModelState;
 
-use super::interpret::process_result;
+use super::off_wire;
 use super::restore_hygiene::reanchor;
 use super::RouterCtx;
-use crate::store::{role_of, CallTopology, Enveloped, MaterialiseOrigin, PartitionRole};
+use crate::store::{role_of, CallTopology, Enveloped, PartitionRole};
 
 mod bulk;
+pub(super) mod deferred;
 mod diverged;
 mod ending;
 mod meeting;
 mod reap;
 use bulk::reclaim_into_live;
-pub(super) use bulk::{announce_reclaim, arm_parked, park_all};
+pub(super) use bulk::{announce_reclaim, arm_parked, park_all, Deferral};
 pub(super) use meeting::meet_live;
 pub(crate) use reap::reap_expired_replicas;
 
 /// Apply a backup's reverse-flushed copy that the puller just landed in our
 /// `pri:{self}` partition (ADR-0014 Reclaim-tail reconcile, extended to the
-/// live copy). The acting backup served the call while we still own it live:
-/// its copy meets our live copy ([`meet_live`], ADR-0055 §7). A copy whose
-/// primary is a member defers the CDR to it (ADR-0055 §5): the live primary
-/// discharges the call.
+/// live copy), on a turn of the call (`flush_turn`). The acting backup served
+/// the call while we still own it live: its copy meets our live copy
+/// ([`meet_live`], ADR-0055 §7). A copy whose primary is a member defers the
+/// CDR to it (ADR-0055 §5): the live primary discharges the call.
 ///
 /// Not live: a **Terminated** body is a reboot-reclaimed deferral — materialise +
 /// discharge (no keepalive arming); anything else is the existing reactive
@@ -48,14 +50,10 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
         reclaim_into_live(ctx, call_ref).await;
         return;
     }
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     // Read again under the lock: a turn that held it may have ended the call
     // and deleted the body, its CDR written; the body read before is stale.
     let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
-        if !ctx.state.contains(call_ref) {
-            drop(guard);
-            ctx.state.discard_orphan(call_ref);
-        }
         return;
     };
     reanchor(&mut replica.call, skew_offset_ms);
@@ -68,73 +66,12 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
             meet_live(ctx, FlushDirection::Reverse, call_ref, &live, replica, now_ms).await;
         }
         // A reverse-flushed deferral for a call we no longer hold live (the
-        // reactive straggler equivalent of the reboot-reclaim terminal): discharge.
+        // reactive straggler equivalent of the reboot-reclaim terminal).
         None => {
-            if replica.call.state == CallModelState::Terminated {
-                discharge_materialized_terminal(ctx, call_ref, replica, now_ms, false).await;
-            }
+            let cause = super::ended_body::Cause::ReverseFlush;
+            super::ended_body::pay(ctx, call_ref, cause, replica, now_ms).await;
         }
     }
-}
-
-/// Materialise a not-live deferred-terminal body and discharge it through the ONE
-/// funnel with a synthetic non-terminal `before` so `enforce`'s `became_terminated`
-/// edge fires (the body is already terminal, so the edge must be synthesised). The
-/// single materialise + synth-`before` + enforce + `process_result` site, shared by
-/// every "discharge a body we don't hold live" caller:
-///   - the reverse-flush reconcile (a backup's deferral for a call we released) and
-///     the reboot bulk/on-demand reclaim of a `Terminated` body → `force_terminal =
-///     false`: the body already carries its real BYE CDR, so discharge it as-is.
-///   - the backup-durable fallback (`reap_expired_terminals`) → `force_terminal =
-///     true`: routes through `reaper::discharge_result`, which FORCES every leg
-///     terminal + appends a synthetic CDR, so a deferral caught mid-teardown
-///     (`Terminating`, peer-silent) is resolved too.
-///
-/// Materialise-first so `backup_of` resolves and the propagated delete reaches the
-/// peer. The caller MUST hold the per-call lock. No-op if already resident
-/// (idempotent reclaim/reap re-pass — `materialize_if_absent` returns false).
-/// Returns whether it discharged the body.
-pub(super) async fn discharge_materialized_terminal(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    terminal: Enveloped,
-    now_ms: i64,
-    force_terminal: bool,
-) -> bool {
-    if !ctx.state.materialize_if_absent(terminal.clone(), MaterialiseOrigin::Reclaim) {
-        return false;
-    }
-    let terminal = terminal.call;
-    let mut before = terminal.clone();
-    before.state = CallModelState::Active; // synth non-terminal → became_terminated fires
-    let discharged = if force_terminal {
-        crate::reaper::discharge_result(terminal, now_ms)
-    } else {
-        crate::effects::HandlerResult::new(terminal)
-    };
-    let mut notes = crate::turn_notes::TurnNotes::default();
-    let result = crate::rules::invariants::enforce(
-        &ctx.obligations,
-        &before,
-        crate::rules::invariants::finalize(discharged),
-        now_ms,
-        // Already-terminal reclaimed body: whoever served it to terminal
-        // answered on the wire (or its caller died with the crashed node).
-        // Reclaim-discharge stays OFF the SIP wire (ADR-0022 / ADR-0014).
-        crate::rules::invariants::UnansweredCaller::Leave,
-        &mut notes,
-    );
-    super::notes::drain_notes(ctx, call_ref, notes);
-    process_result(
-        ctx,
-        call_ref,
-        result,
-        now_ms,
-        &"the discharge of a materialised terminal body",
-        None,
-    )
-    .await;
-    true
 }
 
 /// A call's `(p,b)` version vector rendered for a lifecycle line (`-` when
@@ -177,12 +114,24 @@ impl FlushDirection {
     }
 }
 
+/// Whether a refused flush of `direction` may meet a copy of `call_ref` here: a
+/// flush of the role this node plays for the ref, on a call live here or with a
+/// queue, whose earlier turn may make it live. An Element alone opens no queue.
+pub(super) fn refused_flush_may_meet(
+    ctx: &RouterCtx,
+    direction: FlushDirection,
+    call_ref: &str,
+) -> bool {
+    role_of(&ctx.config.self_ordinal, call_ref) == direction.expected_role()
+        && (ctx.state.contains(call_ref) || ctx.dispatcher.has_queue(call_ref))
+}
+
 /// Meet a copy the store did not take with the live copy (the body rides the
-/// command, the store kept its own): the store's copy contains it, or the two
-/// diverged, and the live copy may hold more than the store's
-/// ([`meet_live`], ADR-0055 §7). **A live copy is required**: an Element
-/// alone is kept as it is, and a call we do not serve live is never
-/// resurrected here.
+/// command, the store kept its own), on a turn of the call (`flush_turn`): the
+/// store's copy contains it, or the two diverged, and the live copy may hold
+/// more than the store's ([`meet_live`], ADR-0055 §7). **A live copy is
+/// required**: an Element alone is kept as it is, and a call we do not serve
+/// live is never resurrected here.
 pub(super) async fn meet_refused_flush(
     ctx: &Arc<RouterCtx>,
     direction: FlushDirection,
@@ -196,21 +145,15 @@ pub(super) async fn meet_refused_flush(
     let Some(mut replica) = ctx.state.decode_body(body) else {
         return;
     };
-    // No live copy ⇒ nothing to meet — tested BEFORE the per-call lock,
-    // because locking a call this node does not serve inserts a `locks` entry
-    // only a release clears, and an Element with no live copy is the common
-    // case.
+    // No live copy ⇒ nothing to meet, and an Element with no live copy is the
+    // common case: it takes no lock.
     if !ctx.state.contains(call_ref) {
         return;
     }
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     let now_ms = ctx.clock.now_ms();
+    // The call may have been released between the peek and the lock.
     let Some(live) = ctx.state.peek_enveloped(call_ref) else {
-        // The call was released between the peek and the lock. Drop the guard
-        // FIRST: `discard_orphan` removes the very `locks` entry this guard is
-        // held on, and a live guard would re-strand it.
-        drop(guard);
-        ctx.state.discard_orphan(call_ref);
         return;
     };
     // Another call on the ref (the one the live call retried, or one a
@@ -222,29 +165,16 @@ pub(super) async fn meet_refused_flush(
     meet_live(ctx, direction, call_ref, &live, replica, now_ms).await;
 }
 
-/// Force the last persisted snapshot of `call_ref` terminal and run it through
-/// the ordinary `finalize → enforce → process_result` funnel: the `ObligationSet`
-/// discharges the CDR + limiter holds, and `RemoveCall` logs the delete and
-/// rides `release_call(Terminated)`. Reached ONLY by the
-/// reaper `OUTCOME_DISCHARGE` branch — a takeover copy DEFERS its discharge to
-/// the primary instead of discharging here (see `process_result`). `discharge_result` forces every leg terminal with NO wire
-/// traffic. The caller MUST hold the per-call lock.
+/// Discharge the live `call_ref` the rules failed on twice, off the wire
+/// ([`off_wire::Ending::Forced`]), its caller answered if she still waits on
+/// this node. Reached only by the reaper's discharge outcome; a takeover copy
+/// defers its discharge to the primary (`commit_turn`). The caller holds the
+/// per-call lock.
 pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) {
     let Some(call) = ctx.state.peek(call_ref) else { return };
-    let before = call.clone();
-    let mut notes = crate::turn_notes::TurnNotes::default();
-    let result = crate::rules::invariants::enforce(
-        &ctx.obligations,
-        &before,
-        crate::rules::invariants::finalize(crate::reaper::discharge_result(call, now_ms)),
-        now_ms,
-        // LIVE call the rules path failed on twice — if its a-leg is still
-        // unanswered the caller is waiting on OUR server txn: answer it.
-        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
-        &mut notes,
-    );
-    super::notes::drain_notes(ctx, call_ref, notes);
-    process_result(ctx, call_ref, result, now_ms, &"the reaper discharge", None).await;
+    let ending = off_wire::Ending::Forced { before: &call };
+    let label = &"the reaper discharge";
+    off_wire::end(ctx, call_ref, ending, off_wire::Caller::Answer, now_ms, label).await;
 }
 
 #[cfg(test)]

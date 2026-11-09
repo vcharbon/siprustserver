@@ -48,7 +48,7 @@ mod sut;
 #[cfg(test)]
 mod testkit;
 
-pub use census::{Census, LocatedHit, ReadFailure, RuleTally};
+pub use census::{Census, LocatedHit, ReadFailure, RuleTally, SetAsideTally};
 pub use relay::{RelayOrigin, RELAYABLE};
 pub use sut::{Side, SutSet};
 

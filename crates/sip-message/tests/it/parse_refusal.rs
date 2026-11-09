@@ -156,12 +156,24 @@ fn a_bad_request_line_leaves_no_partial() {
     assert!(err.partial().is_none(), "{err:?}");
 }
 
-/// A line with no colon ends neither the split nor the reading of the five.
+/// A value breaking its grammar ends neither the split nor the reading of the
+/// five.
 #[test]
 fn the_split_reads_past_a_line_breaking_the_grammar() {
-    let err = refusal(&invite_with(&["Bad Header: x"]));
-    assert!(err.reason.starts_with("Expected byte 0x3a"), "{}", err.reason);
+    let err = refusal(&invite_with(&["Subject: a\u{1}b"]));
+    assert!(err.reason.contains("control byte 0x01"), "{}", err.reason);
     assert!(err.partial().is_some(), "the five after the bad line still read: {err:?}");
+}
+
+/// A name that stops short of its colon did not read (ADR-0054 §2): what was
+/// read may be a part of any name, one of the five included, so no partial.
+#[test]
+fn a_line_with_no_colon_after_its_name_leaves_no_partial() {
+    for line in ["Bad Header: x", "Vi a: SIP/2.0/UDP 192.0.2.99;branch=z9hG4bK-real-top"] {
+        let err = refusal(&invite_with(&[line]));
+        assert!(err.reason.starts_with("Expected byte 0x3a"), "{}", err.reason);
+        assert!(err.partial().is_none(), "{line}: {err:?}");
+    }
 }
 
 /// A line whose name does not read may have been one of the five: no partial.
@@ -235,7 +247,7 @@ fn limited_refusal(tail: &[&str]) -> SipParseError {
     ];
     lines.extend(tail.iter().map(|l| l.to_string()));
     lines.push("Content-Length: 0".to_string());
-    let limits = SipParserLimits { max_header_length: 60, ..SipParserLimits::default() };
+    let limits = SipParserLimits { max_header_length: 60, ..SipParserLimits::DEFAULT };
     CustomParser::with_limits(limits).parse(&wire(&lines)).expect_err("refused")
 }
 
@@ -249,12 +261,57 @@ fn a_header_past_the_length_limit_leaves_no_partial() {
     assert!(err.partial().is_none(), "{err:?}");
 }
 
+/// ADR-0001's first-ingress bound: a line and a Request-URI of 8,192 bytes and a
+/// block of 100 lines read at first ingress, one more of any is refused with the
+/// partial that answers it. A parser that is not at first ingress reads them.
+#[test]
+fn a_new_request_meets_the_first_ingress_bound() {
+    let bound = SipParserLimits::DEFAULT.first_ingress;
+    assert_eq!((bound.header_length, bound.uri_length, bound.header_lines), (8192, 8192, 100));
+    let gated = CustomParser::with_limits(SipParserLimits {
+        at_first_ingress: true,
+        ..SipParserLimits::DEFAULT
+    });
+    let long = |len: usize| format!("X-Long: {}", "a".repeat(len - "X-Long: ".len()));
+    let at_uri = |len: usize| {
+        let target = format!("sip:{}@192.0.2.20", "b".repeat(len - "sip:@192.0.2.20".len()));
+        wire(&invite_lines(&format!("INVITE {target} SIP/2.0"), &[]))
+    };
+    let at_lines = |n: usize| invite_with(&vec!["Q:a"; n - 9]);
+    for (at, past) in [
+        (invite_with(&[&long(8192)]), invite_with(&[&long(8193)])),
+        (at_uri(8192), at_uri(8193)),
+        (at_lines(100), at_lines(101)),
+    ] {
+        assert!(gated.parse(&at).is_ok(), "at the bound");
+        let refused = gated.parse(&past).expect_err("one past it");
+        assert!(refused.reason.contains("first-ingress bound"), "{}", refused.reason);
+        assert!(refused.partial().is_some(), "answerable: {refused:?}");
+        assert!(CustomParser::new().parse(&past).is_ok(), "read with room");
+    }
+}
+
+/// A request with a To-tag carries what hops added to its dialog's lines.
+#[test]
+fn a_request_with_a_to_tag_is_not_held_to_the_first_ingress_bound() {
+    let gated = CustomParser::with_limits(SipParserLimits {
+        at_first_ingress: true,
+        ..SipParserLimits::DEFAULT
+    });
+    let long = format!("X-Long: {}", "a".repeat(9_000));
+    let raw = invite_with(&[&long]);
+    let tagged = String::from_utf8(raw)
+        .expect("text")
+        .replace(&format!("To: {TO}"), &format!("To: {TO};tag=dialog"));
+    assert!(gated.parse(tagged.as_bytes()).is_ok());
+}
+
 /// A header block past the line limit is refused before any header is read,
 /// with no partial: 12 000 legal one-letter headers in one datagram. A block
 /// at the limit parses.
 #[test]
 fn a_header_block_past_the_line_limit_is_refused_unanswered() {
-    let limit = SipParserLimits::default().max_header_lines;
+    let limit = SipParserLimits::DEFAULT.max_header_lines;
     let crowd = vec!["Q:a"; 12_000];
     let err = CustomParser::new().parse(&invite_with(&crowd)).expect_err("refused");
     assert_eq!(err.reason, format!("header block of 12009 lines exceeds limit {limit}"));

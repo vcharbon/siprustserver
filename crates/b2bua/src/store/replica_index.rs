@@ -5,7 +5,7 @@
 
 use call::{IndexHit, IndexLookup, Probe};
 
-use super::{CallState, CallStore, StoreError};
+use super::{role_of, CallState, CallStore, PartitionRole, StoreError};
 
 impl CallState {
     /// Whether this node replicates: it holds other primaries' replicas.
@@ -15,7 +15,9 @@ impl CallState {
 
     /// The call of an in-dialog request or a CANCEL that states no `callRef`
     /// of ours, and the namespace that matched, counted as a takeover
-    /// resolution. A request routed per RFC 3261 §12.2.1.1 carries our
+    /// resolution when this node backs the call up; a call of its own, which
+    /// a reboot reclaim has not made resident yet, is no takeover. A request
+    /// routed per RFC 3261 §12.2.1.1 carries our
     /// Contact, `callRef` included, as its Request-URI, and a strict router's
     /// §16.4 rewrite restores it; only an element that rewrites the
     /// Request-URI leaves the call to be found by dialog identity. The router
@@ -30,7 +32,9 @@ impl CallState {
     ) -> Result<Option<IndexHit>, StoreError> {
         let hit = self.replica_index_hit(lookup).await?;
         if let Some(hit) = &hit {
-            self.note_takeover_resolved(hit);
+            if role_of(&self.self_ordinal, &hit.call_ref) == PartitionRole::Backup {
+                self.note_takeover_resolved(hit);
+            }
         }
         Ok(hit)
     }

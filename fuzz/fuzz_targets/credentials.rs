@@ -1,18 +1,20 @@
 //! Digest credentials and challenges a peer sends (RFC 3261 §22, RFC 2617):
 //! each line of the input as each header of the authentication family in a
-//! request, read through the parser as a peer's line is. Every value read
-//! renders to text that, in the same request, reads back to the same
-//! rendering, and the request refreezes.
+//! request, read through the parser as a peer's line is. A request ingress
+//! accepts reads its Authorization and Proxy-Authorization (accepted means
+//! readable). Every value read renders to text that, in the same request,
+//! reads back to the same rendering, and the request refreezes.
 
 #![no_main]
 
 use fuzz_lanes::on_lane_stack;
 use libfuzzer_sys::fuzz_target;
 use sip_message::header::{
-    Authorization, HeaderValue, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate,
+    Authorization, HeaderValue, ProxyAuthenticate, ProxyAuthorization, SequenceHeader,
+    WwwAuthenticate,
 };
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
+use sip_message::{HeaderName, SipMessage, SipParser};
 
 fuzz_target!(|data: &[u8]| {
     let data = data.to_vec();
@@ -43,14 +45,22 @@ fn request<H: HeaderValue>(value: &str) -> Result<SipMessage, sip_message::SipPa
     CustomParser::new().parse(raw.as_bytes())
 }
 
-fn round_trip<H: HeaderValue>(line: &str) {
-    let Ok(Some(Ok(value))) = request::<H>(line).map(|m| m.header::<H>()) else { return };
+fn round_trip<H: SequenceHeader>(line: &str) {
+    let Ok(accepted) = request::<H>(line) else { return };
     let name = H::header_name();
+    let vouched = matches!(name, HeaderName::Authorization | HeaderName::ProxyAuthorization);
+    let value = match accepted.first::<H>() {
+        Some(Ok(value)) => value,
+        Some(Err(e)) if vouched => {
+            panic!("{name} {line:?} is accepted and does not read: {}", e.reason)
+        }
+        Some(Err(_)) | None => return,
+    };
     let wire = value.to_wire();
     let again = request::<H>(&wire).unwrap_or_else(|e| {
         panic!("{name} {line:?} renders as {wire:?}, which its request refuses: {}", e.reason)
     });
-    match again.header::<H>() {
+    match again.first::<H>() {
         Some(Ok(v)) => assert_eq!(v.to_wire(), wire, "{name} {line:?} renders to itself"),
         other => panic!("{name} {line:?} renders as {wire:?}, which reads as {other:?}"),
     }

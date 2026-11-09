@@ -73,11 +73,10 @@ fn pair(expected: &str, observed: &str) -> Option<(String, String)> {
     Some((expected.into(), observed.into()))
 }
 
-/// Two parts framed under `boundary`, with a preamble and bare-LF delimiters
-/// where `loose` asks for them.
-fn framed(boundary: &str, types: &[&str], loose: bool) -> Vec<u8> {
-    let eol = if loose { "\n" } else { "\r\n" };
-    let mut body = if loose { format!("a preamble{eol}") } else { String::new() };
+/// Parts framed under `boundary`, with a preamble where `preamble` asks for one.
+fn framed(boundary: &str, types: &[&str], preamble: bool) -> Vec<u8> {
+    let eol = "\r\n";
+    let mut body = if preamble { format!("a preamble{eol}") } else { String::new() };
     for content_type in types {
         body.push_str(&format!("--{boundary}{eol}Content-Type: {content_type}{eol}"));
         body.push_str(&format!("Content-ID: <p@example.invalid>{eol}{eol}payload{eol}"));
@@ -168,7 +167,7 @@ fn a_multipart_type_is_its_container_its_part_count_and_its_part_types() {
         assert_eq!(
             miss(stated(), check, &arrived),
             None,
-            "boundary, preamble, delimiters and parameters are framing"
+            "boundary, preamble and parameters are framing"
         );
 
         let one = framed("b1", &["application/sdp"], false);

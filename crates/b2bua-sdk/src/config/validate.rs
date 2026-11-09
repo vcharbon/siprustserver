@@ -21,6 +21,14 @@ impl B2buaConfig {
     }
 
     fn check(&self, out: &mut Vec<String>) {
+        if let Some((host, port)) = self.front.outbound_proxy() {
+            if host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_err() {
+                out.push(format!(
+                    "B2BUA_OUTBOUND_PROXY={host}:{port} is no IP literal: the transaction layer \
+                     sends what it builds itself there and resolves no name"
+                ));
+            }
+        }
         if let Some(r) = self.glare_retry_after {
             if r.min_sec > r.max_sec {
                 out.push(format!(
@@ -70,7 +78,7 @@ impl B2buaConfig {
                     .to_string(),
             );
         }
-        if self.reaper_enabled && self.max_messages_per_call_lifetime == 0 {
+        if self.max_messages_per_call_lifetime == 0 {
             out.push(
                 "B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME=0: the per-call work bound has no off; \
                  set it far above any healthy call"
@@ -170,6 +178,16 @@ impl B2buaConfig {
                  to wait first (default {})",
                 self.ack_timeout_sec,
                 Self::DEFAULT_ACK_TIMEOUT_SEC
+            ));
+        }
+        // The setup budget is a deadline, never a switch: an unbounded consult
+        // holds its call's lock and its caller past the 100 for good.
+        if self.call_control_timeout_ms <= 0 {
+            out.push(format!(
+                "B2BUA_CALL_CONTROL_TIMEOUT_MS={} is not a positive deadline: every consult and \
+                 every setup is bounded, the knob only says how many milliseconds (default {})",
+                self.call_control_timeout_ms,
+                Self::DEFAULT_CALL_CONTROL_TIMEOUT_MS
             ));
         }
         // An enabled bucket (size > 0) with no refill drains once and 503s

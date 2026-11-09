@@ -247,9 +247,8 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
         seed,
         call: CallConfig {
             via,
-            // route_all_* routes the b-leg by config — the transparent layout
-            // (the refer scenarios resolve charlie through the same seam and
-            // authorize via their per-run `refer_key`).
+            // route_all_* routes the b-leg by config, the transparent layout; the
+            // refer scenarios resolve charlie and authorize via their `refer_key`.
             egress: EgressPolicy::Transparent,
             options_hold: Duration::from_millis(120),
             options_cadence: Duration::from_millis(40),
@@ -260,6 +259,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
             reinvite_gap: Duration::from_millis(0),
             long_hold: Duration::from_millis(120),
             teardown_quiesce: Duration::from_millis(200),
+            final_wait: None,
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),
@@ -574,11 +574,11 @@ async fn loadgen_mux_orphan_observability() {
     let uas = addr(6431);
 
     // A new INVITE with NO correlation header → orphan_no_header.
-    let no_header = "INVITE sip:x@127.0.0.1 SIP/2.0\r\nCall-ID: stray-1@h\r\nTo: <sip:x@127.0.0.1>\r\nFrom: <sip:y@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n";
+    let no_header = "INVITE sip:x@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: stray-1@h\r\nTo: <sip:x@127.0.0.1>\r\nFrom: <sip:y@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n";
     sender.send_to(no_header.as_bytes(), uas).await.unwrap();
 
     // An INVITE WITH a header matching no pending call → orphan_unknown_token.
-    let bad_token = "INVITE sip:x@127.0.0.1 SIP/2.0\r\nCall-ID: stray-2@h\r\nX-Loadgen-Id: lgBOGUS\r\nTo: <sip:x@127.0.0.1>\r\nFrom: <sip:y@h>;tag=2\r\nCSeq: 1 INVITE\r\n\r\n";
+    let bad_token = "INVITE sip:x@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: stray-2@h\r\nX-Loadgen-Id: lgBOGUS\r\nTo: <sip:x@127.0.0.1>\r\nFrom: <sip:y@h>;tag=2\r\nCSeq: 1 INVITE\r\n\r\n";
     sender.send_to(bad_token.as_bytes(), uas).await.unwrap();
 
     settle_until(|| {
@@ -636,7 +636,7 @@ async fn loadgen_mux_picker_disambiguates_shared_socket() {
     let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let invite = |who: &str, cid: &str| {
         format!(
-            "INVITE sip:{who}@127.0.0.1 SIP/2.0\r\nCall-ID: {cid}@h\r\nX-Loadgen-Id: {token}\r\n\
+            "INVITE sip:{who}@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: {cid}@h\r\nX-Loadgen-Id: {token}\r\n\
              To: <sip:{who}@127.0.0.1>\r\nFrom: <sip:a@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n"
         )
     };
@@ -707,7 +707,7 @@ async fn loadgen_mux_prefix_picker_shares_callee_port() {
     // transfer leg carries a per-call SUFFIX to prove prefix (not exact) matching.
     let invite = |ruri_user: &str, cid: &str| {
         format!(
-            "INVITE sip:{ruri_user}@127.0.0.1 SIP/2.0\r\nCall-ID: {cid}@h\r\n\
+            "INVITE sip:{ruri_user}@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: {cid}@h\r\n\
              X-Loadgen-Id: {token}\r\nTo: <sip:{ruri_user}@127.0.0.1>\r\n\
              From: <sip:a@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n"
         )
@@ -775,7 +775,7 @@ async fn loadgen_mux_tokenless_in_dialog_ack_demuxes_by_dialog() {
 
     // The b-leg INVITE as the LB forwards it: full R-URI, proxy Via on top.
     let invite = format!(
-        "INVITE sip:+15511113301000@127.0.0.1:6444;user=phone SIP/2.0\r\n\
+        "INVITE sip:+15511113301000@127.0.0.1:6444;user=phone SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKproxy1;rport\r\n\
          X-Loadgen-Id: {token}\r\n\
          Call-ID: hopack-1@h\r\nTo: <sip:+15511113301000@127.0.0.1>\r\n\
@@ -788,7 +788,7 @@ async fn loadgen_mux_tokenless_in_dialog_ack_demuxes_by_dialog() {
     // The hop-routed ACK to this leg's 486: user-part
     // stripped from the R-URI, ONE fresh proxy Via, no token header — only the
     // dialog identity (Call-ID / From / To / CSeq) survives.
-    let ack = "ACK sip:127.0.0.1:6444 SIP/2.0\r\n\
+    let ack = "ACK sip:127.0.0.1:6444 SIP/2.0\r\nMax-Forwards: 70\r\n\
          Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKproxy2;rport\r\n\
          Call-ID: hopack-1@h\r\nTo: <sip:+15511113301000@127.0.0.1>;tag=c486\r\n\
          From: <sip:worker@h>;tag=w1\r\nCSeq: 1 ACK\r\n\r\n";
@@ -844,12 +844,12 @@ async fn loadgen_mux_recorded_inbox_taps_delivery_and_modeled_loss() {
     })));
 
     let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let invite = "INVITE sip:x@127.0.0.1:6446 SIP/2.0\r\n\
+    let invite = "INVITE sip:x@127.0.0.1:6446 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKt1\r\n\
          X-Loadgen-Id: lgTAP1\r\n\
          Call-ID: tap-1@h\r\nTo: <sip:x@127.0.0.1>\r\n\
          From: <sip:w@h>;tag=w1\r\nCSeq: 1 INVITE\r\n\r\n";
-    let ack = "ACK sip:127.0.0.1:6446 SIP/2.0\r\n\
+    let ack = "ACK sip:127.0.0.1:6446 SIP/2.0\r\nMax-Forwards: 70\r\n\
          Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKt2\r\n\
          Call-ID: tap-1@h\r\nTo: <sip:x@127.0.0.1>;tag=c486\r\n\
          From: <sip:w@h>;tag=w1\r\nCSeq: 1 ACK\r\n\r\n";
@@ -953,7 +953,7 @@ async fn loadgen_mux_unrouted_correlated_datagram_taps_for_the_ladder() {
     // Correlated (token matches) but the R-URI prefix matches NO declared leg.
     let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let invite = format!(
-        "INVITE sip:+0999000@127.0.0.1:6447 SIP/2.0\r\n\
+        "INVITE sip:+0999000@127.0.0.1:6447 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKu1\r\n\
          X-Loadgen-Id: {token}\r\n\
          Call-ID: unrouted-1@h\r\nTo: <sip:+0999000@127.0.0.1>\r\n\

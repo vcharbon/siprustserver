@@ -214,3 +214,100 @@ fn a_user_part_holding_semicolons_and_escapes_ends_at_the_at_sign() {
         "sip:+33612345678;foo=bar@198.51.100.1:5080"
     );
 }
+
+/// RFC 3263 §4: `TARGET = maddr, else host`, with the URI's own port or the
+/// default; RFC 3261 §19.1.1: the port applies to the `maddr`.
+#[test]
+fn the_next_hop_is_the_maddr_at_the_uris_own_port() {
+    for (text, hop) in [
+        ("sip:bob@name.example", ("name.example", 5060)),
+        ("sip:bob@name.example:5070", ("name.example", 5070)),
+        ("sip:bob@name.example;maddr=192.0.2.9", ("192.0.2.9", 5060)),
+        ("sip:bob@name.example:5070;maddr=192.0.2.9", ("192.0.2.9", 5070)),
+        ("sip:bob@name.example;MADDR=other.example;lr", ("other.example", 5060)),
+        ("sip:bob@name.example;maddr=[2001:db8::9]", ("2001:db8::9", 5060)),
+        ("sips:bob@name.example:5061;maddr=192.0.2.9", ("192.0.2.9", 5061)),
+    ] {
+        assert_eq!(uri(text).next_hop(), hop, "{text}");
+    }
+    assert_eq!(
+        uri("sip:bob@name.example;maddr=192.0.2.9").host_port(),
+        ("name.example", 5060),
+        "`host_port` stays the authority"
+    );
+}
+
+/// A tel URI's parameters name no address, and an opaque value has none.
+#[test]
+fn only_a_sip_uri_has_a_maddr_target() {
+    assert_eq!(uri("tel:+15551212;maddr=192.0.2.9").maddr(), None);
+    assert_eq!(Uri::opaque("not a uri;maddr=192.0.2.9").maddr(), None);
+}
+
+/// A target-role read refuses a `maddr` that names no host, so `next_hop` never
+/// fails; a URI that names a party is never routed on.
+#[test]
+fn a_maddr_that_names_no_host_refuses_a_target_uri() {
+    for bad in [
+        "sip:bob@h.example;maddr",
+        "sip:bob@h.example;maddr=1.2.3.4:5060",
+        "sip:bob@h.example;maddr=1.2.3.999",
+        "sip:bob@h.example;maddr=[[2001:db8::9]]",
+        "sip:bob@h.example;maddr=[foo.example]",
+        "sip:bob@h.example;maddr=[1.2.3.4]",
+        "sip:bob@h.example;maddr=2001:db8::9",
+        "sip:bob@h.example;maddr=[2001:db8::9",
+        "sip:bob@h.example;maddr=a%20b",
+        "sip:bob@h.example;MADDR",
+    ] {
+        assert!(Uri::parse(&SipStr::owned(bad)).is_err(), "{bad}");
+        assert!(Uri::parse_as(&SipStr::owned(bad), UriRole::Identity).is_ok(), "{bad}");
+    }
+}
+
+/// A repeat is the one reader's to refuse; until then the first is the one read,
+/// and past its own `maddr` a URI holds none.
+#[test]
+fn a_maddr_written_twice_reads_once_and_two_maddrs_are_refused() {
+    let repeated = uri("sip:bob@h.example;maddr=192.0.2.9;maddr=192.0.2.9");
+    assert_eq!(repeated.next_hop(), ("192.0.2.9", 5060));
+    assert_eq!(repeated.without_own_maddr().to_string(), "sip:bob@h.example");
+    assert!(
+        Uri::parse(&SipStr::owned("sip:bob@h.example;maddr=192.0.2.9;maddr=192.0.2.8")).is_err()
+    );
+}
+
+/// RFC 3261 §19.1.1: a parameter written twice with one value reads as one
+/// copy, renders with one, and keeps every other byte as written.
+#[test]
+fn a_parameter_written_twice_renders_once() {
+    let read = uri("SIP:Bob@H.example;X-Dup=1;lr;x-dup=1;%41");
+    assert_eq!(read.to_string(), "SIP:Bob@H.example;X-Dup=1;lr;%41");
+    assert_eq!(read.repeated_params().collect::<Vec<_>>(), ["x-dup"]);
+    assert_eq!(uri("sip:a@h;lr").repeated_params().count(), 0);
+}
+
+/// §25.1 gives `transport`, `user` and `method` a token form, so a token value
+/// reads there; any other parameter's value is `paramchar`.
+#[test]
+fn a_token_value_reads_where_the_grammar_gives_one() {
+    for text in ["sip:a@h;transport=%", "sip:a@h;user=`x`", "sip:a@h;method=X'Y"] {
+        uri(text);
+    }
+    assert!(Uri::parse(&SipStr::owned("sip:a@h;x=a`b")).is_err());
+}
+
+/// RFC 3261 §16.4: the `maddr` goes with any non-default port or transport.
+#[test]
+fn past_its_own_maddr_a_uri_keeps_every_other_part() {
+    for (text, past) in [
+        ("sip:bob@h.example;maddr=192.0.2.9", "sip:bob@h.example"),
+        ("sip:bob@h.example:5060;maddr=192.0.2.9", "sip:bob@h.example:5060"),
+        ("sip:bob@h.example:5080;maddr=192.0.2.9;user=phone", "sip:bob@h.example;user=phone"),
+        ("sip:bob@h.example;transport=tcp;maddr=192.0.2.9;lr", "sip:bob@h.example;lr"),
+        ("sip:bob@h.example;transport=UDP;maddr=192.0.2.9", "sip:bob@h.example;transport=UDP"),
+        ("sip:bob@[2001:db8::1]:5080;maddr=192.0.2.9", "sip:bob@[2001:db8::1]"),
+    ] {
+        assert_eq!(uri(text).without_own_maddr().to_string(), past, "{text}");
+    }
+}

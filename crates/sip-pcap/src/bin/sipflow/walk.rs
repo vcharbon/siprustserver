@@ -4,8 +4,14 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+#[path = "walk/generation.rs"]
+mod generation;
+
 /// Every flows document under `inputs`: a named file is taken as given, a
 /// directory is walked recursively for `*.flows.json`.
+///
+/// A walk reads each capture at its current generation
+/// ([`generation::standing`]); a named file is read whatever its generation.
 ///
 /// The walk follows symlinks, to directories and to documents alike, so a
 /// corpus assembled from links is swept whole. It walks the real tree of every
@@ -19,11 +25,13 @@ use std::path::{Path, PathBuf};
 /// depend on the filesystem.
 pub(crate) fn expand_flows_documents(inputs: &[PathBuf]) -> Vec<PathBuf> {
     let mut walk = Walk::default();
+    let mut named = HashSet::new();
     for input in inputs {
         if input.is_dir() {
             walk.directory(input);
         } else {
             walk.document(input.clone());
+            named.insert(input.clone());
         }
     }
     while let Some(link) = walk.links.pop_front() {
@@ -34,8 +42,9 @@ pub(crate) fn expand_flows_documents(inputs: &[PathBuf]) -> Vec<PathBuf> {
             _ => {}
         }
     }
-    walk.found.sort();
-    walk.found
+    let mut found = generation::standing(walk.found, &named);
+    found.sort();
+    found
 }
 
 /// The capture a document is counted under: the name of the directory the

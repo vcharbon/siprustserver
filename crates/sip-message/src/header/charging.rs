@@ -10,9 +10,10 @@ use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::name::HeaderName;
+use super::cardinality::{held_to_the_table, lines};
 use super::params::Params;
-use super::value::{Folding, HeaderValue};
+use super::single_valued::Listed;
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// RFC 7315 §5.6 charging correlation: the identifier of the charging session
@@ -53,13 +54,10 @@ fn gen_value(out: &mut Wire, value: &str) {
 }
 
 impl HeaderValue for ChargingVector {
-    fn header_name() -> HeaderName {
-        HeaderName::Other(SipStr::from_static("P-Charging-Vector"))
-    }
+    type Lines = lines::Single;
+    held_to_the_table!();
 
-    fn folding() -> Folding {
-        Folding::Single
-    }
+    const HEADER: Listed = Listed::Extension("P-Charging-Vector");
 
     /// A value carrying no `icid-value` is not a charging vector: RFC 7315 §5.6
     /// makes the identifier the header's only mandatory parameter.

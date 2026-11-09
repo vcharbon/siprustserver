@@ -4,8 +4,9 @@ The run directory holds what the verdict reads: the resolved profile, the
 budgets and catalogs it used, `events.jsonl`, the exported `records.jsonl`,
 `cdrs.jsonl` when the profile joins CDRs, the kept answers of the product
 classes (`classes/`), `streams.json` (each generator's own counters),
-`integrity.jsonl` (what the runner saw go wrong while it ran) and `host.jsonl`
-(the host's pressure, host_stress.py).
+`integrity.jsonl` (what the runner saw go wrong while it ran), `host.jsonl`
+(the host's pressure, host_stress.py) and `report-metrics.json` (the series the
+profile asks the report to read per window, report_metrics.py).
 """
 
 from __future__ import annotations
@@ -15,11 +16,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import jsonval as jv
+from . import loadgen
 from .cdr_check import cdr_impacts_of
 from .cdrjoin import DIFFERS
 from .classes import read_counts
 from .jsonl import read_jsonl
-from .classify import SETUP_FAILED, Classified, Impact, SetupLatency, classify
+from .classify import FINAL_LATE, SETUP_FAILED, SILENT_AFTER_PROVISIONAL, Classified, Impact, SetupLatency, classify
 from .established import established_row, hurts, until_next
 from .judge import ALL_CALL_IDS, budget_of, judge
 from .limiters import judge_limiters
@@ -27,6 +29,7 @@ from .jsonval import Json, as_obj
 from .model import Budget, Shape, parse_budget, parse_catalog
 from .profile import Profile, parse_profile
 from .recovery import Sample, StreamSamples
+from .report_metrics import kept as kept_report_metrics
 from .reconcile import integrity, reconcile
 from .schemas import SchemaSet
 from .generator_health import run_stalls
@@ -47,7 +50,8 @@ def _load_json(p: Path) -> Json:
 class _Calls:
     """The schema-valid records of a run, classified, with what the classifier refused."""
 
-    def __init__(self, records: list[Json], shapes: dict[str, Shape], schemas: SchemaSet) -> None:
+    def __init__(self, records: list[Json], shapes: dict[str, Shape], schemas: SchemaSet, profile: Profile) -> None:
+        deadlines = {s.name: s.setup_deadline_s * 1000 for s in profile.streams}
         self.valid: list[tuple[Json, Classified]] = []
         self.per_stream: Counter[str] = Counter()
         self.bad: dict[str, list[str]] = defaultdict(list)
@@ -67,7 +71,7 @@ class _Calls:
                 self.dups += 1
             seen.add(call_id)
             self.by_id.setdefault(call_id, r)
-            self.valid.append((r, classify(r, shape)))
+            self.valid.append((r, classify(r, shape, deadlines.get(stream))))
 
     def starts(self) -> dict[str, list[float]]:
         out: dict[str, list[float]] = defaultdict(list)
@@ -77,12 +81,17 @@ class _Calls:
 
 
 def _spoiled_timeout(imp: Impact, stalls: list[Stall], profile: Profile) -> Stall | None:
-    """The stall a timeout's setup deadline (its start + the stream's
-    `setup_deadline_s`) falls in: the generator checked it while it stalled."""
+    """The stall a give-up falls in, at the call's start + its bound: for loadgen
+    its one wait, for SIPp `setup_deadline_s` with nothing heard and the final
+    wait past a provisional. The generator checked it while it stalled."""
     s = profile.stream(imp.stream)
-    if imp.cls != SETUP_FAILED or imp.reason != "timeout" or s is None:
+    if imp.reason != "timeout" or s is None or imp.cls not in (SETUP_FAILED, SILENT_AFTER_PROVISIONAL):
         return None
-    return stall_holding(stalls, imp.stream, imp.started_at_ms + s.setup_deadline_s * 1000)
+    if s.driver == "loadgen":
+        deadline_s = loadgen.give_up_s(s)
+    else:
+        deadline_s = s.setup_deadline_s if imp.cls == SETUP_FAILED else s.give_up_s
+    return stall_holding(stalls, imp.stream, imp.started_at_ms + deadline_s * 1000)
 
 
 def _spoiled_cdr(imp: Impact, by_id: dict[str, Json], stalls: list[Stall]) -> Stall | None:
@@ -115,7 +124,7 @@ def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, 
         ms = None
         if lat is not None and stall_of(stalls, stream, lat.at_ms - lat.ms, lat.at_ms) is None:
             ms = lat.ms
-        ok = not any(i.budgetable for i in c.impacts)
+        ok = not any(i.setup_lost for i in c.impacts)
         by_stream[stream].append(Sample(jv.number(r, "started_at_ms"), ok, ms))
     return {k: StreamSamples(v) for k, v in by_stream.items()}
 
@@ -164,7 +173,7 @@ class _Run:
         for p in sorted((run_dir / "catalogs").glob("*.json")):
             for s in parse_catalog(_load_json(p)).shapes:
                 self.shapes[s.shape] = s
-        self.calls = _Calls(read_jsonl(run_dir / "records.jsonl"), self.shapes, schemas)
+        self.calls = _Calls(read_jsonl(run_dir / "records.jsonl"), self.shapes, schemas, self.profile)
         load_start = jv.opt_number(self.meta, "load_started_at_ms") or jv.number(self.meta, "started_at_ms")
         self.load_start_ms = load_start
         self.stalls = run_stalls(run_dir, self.calls.starts(), self.profile, load_start)
@@ -216,6 +225,8 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
             continue
         for imp in c.impacts:
             st = _spoiled_timeout(imp, stalls, profile)
+            if imp.cls == FINAL_LATE:
+                st = stall_of(stalls, imp.stream, imp.started_at_ms, imp.at_ms)
             if st is None:
                 impacts.append(imp)
             else:
@@ -270,6 +281,7 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
     load_end_ms = run.load_start_ms + profile.duration_s * 1000
     limiters = judge_limiters(profile, [r for r, _ in calls.valid], windows, budgets, run.load_start_ms, load_end_ms)
     windows_out: list[Json] = []
+    read_series = kept_report_metrics(run_dir)
     findings = len(judged.in_dialog) + len(judged.unattributed) + len(limiters)
     hurt = hurts(impacts, cdr_impacts + class_impacts)
     for w in windows:
@@ -298,6 +310,8 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         }
         if healed is not None and recs:
             out["recovery"] = [{"stream": r.stream, "recovery_s": r.recovery_s(healed)} for r in recs]
+        if w.event in read_series:
+            out["metrics"] = read_series[w.event]
         windows_out.append(out)
     by_cause = unanswered(
         ((r, run.shapes[jv.string(r, "shape")]) for r, _ in calls.valid), windows, budgets, profile, run.shapes

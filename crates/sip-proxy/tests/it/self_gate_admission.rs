@@ -50,11 +50,17 @@ async fn spawn_proxy_with_gate(
     let (ep, sock) = h.bind_sut("proxy", PROXY).await;
     let metrics = Arc::new(ProxyMetrics::new());
     let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
-        .clock(Clock::test_at(0))
-        .metrics(metrics.clone())
-        .self_gate(gate)
-        .build(ep);
+    let core = ProxyCoreBuilder::new(
+        ProxyAddr::from(sock),
+        strategy,
+        registry,
+        id_gen,
+        sip_message::CustomParser::new(),
+    )
+    .clock(Clock::test_at(0))
+    .metrics(metrics.clone())
+    .self_gate(gate)
+    .build(ep);
     ProxySut::from_task(sock, metrics, tokio::spawn(core.run()))
 }
 

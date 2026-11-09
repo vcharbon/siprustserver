@@ -21,7 +21,7 @@ pub(crate) fn split_lines(text: &str) -> Vec<&str> {
 /// A leading integer: optional sign, leading digits, stop at the first
 /// non-digit; `None` when no digits are present.
 fn leading_integer(s: &str) -> Option<i64> {
-    let s = s.trim_start();
+    let s = crate::whitespace::trim_start(s);
     let (neg, unsigned) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, s.strip_prefix('+').unwrap_or(s)),
@@ -40,9 +40,9 @@ fn line_with<'a>(lines: &[&'a str], prefix: &str) -> Option<(&'a str, &'a str)> 
     lines.iter().find_map(|l| l.strip_prefix(prefix).map(|value| (*l, value)))
 }
 
-/// Split a value on runs of whitespace, dropping empties.
+/// Split a value on runs of SP and HTAB, dropping empties.
 fn ws_tokens(s: &str) -> Vec<&str> {
-    s.split_whitespace().collect()
+    crate::whitespace::split(s).collect()
 }
 
 // ===========================================================================
@@ -129,12 +129,15 @@ pub fn validate_sdp_body(body: &[u8]) -> Result<(), SdpValidationError> {
 ///   - `o=` sess-id and sess-version are non-negative integers, read as opaque
 ///     digit strings — RFC 4566 §5.2 bounds neither below 64 bits, and the
 ///     recommended NTP timestamp is exactly that wide;
-///   - every `m=` block has a `c=` — its own or the session's — and a
-///     non-negative-integer port;
-///   - every `a=ptime:N` states `N > 0`.
+///   - the description opens with `v=` and states no session-level line after
+///     its first `m=` (RFC 8866 §5 fixes the order);
+///   - every `m=` block has a port field `port ["/" integer]` (RFC 8866 §5.14)
+///     and a `c=` — its own or the session's;
+///   - every media-level `a=ptime` states a `non-zero-int-or-real` (§6.4).
 ///
-/// An EMPTY body passes: it carries no description to reject. Content-Type is
-/// the caller's responsibility — invoke only for `application/sdp`.
+/// The document facts are [`crate::sdp_doc`]'s reading. An EMPTY body passes:
+/// it carries no description to reject. Content-Type is the caller's
+/// responsibility — invoke only for `application/sdp`.
 pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError> {
     if body.is_empty() {
         return Ok(());
@@ -180,58 +183,34 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
         }
     }
 
-    // Walk m= blocks: a session-level c= (before the first m=) satisfies the
-    // c=-presence requirement for every block; otherwise each block needs its
-    // own c= before the next m= boundary. Each m= line needs an integer port.
-    let mut session_level_c = false;
-    let mut in_media = false;
-    let mut current_media_has_c = false;
-    let mut current_media_name = String::new();
-    let missing_c = |name: &str| {
-        SdpValidationError::new(format!("m={name} block has no c= line and no session-level c="))
+    let Some(doc) = crate::sdp_doc::parse_sdp_body(body) else {
+        return Err(SdpValidationError::new("the description does not open with its v= line"));
     };
-    for line in &lines {
-        if let Some(m_val) = line.strip_prefix("m=") {
-            if in_media && !current_media_has_c && !session_level_c {
-                return Err(missing_c(&current_media_name));
-            }
-            let m_tokens = ws_tokens(m_val);
-            let [media_name, port_tok, _, ..] = m_tokens.as_slice() else {
-                return Err(SdpValidationError::new(format!(
-                    "m= line '{line}' has fewer than 3 tokens (expected: media port proto fmt...)"
-                )));
-            };
-            if port_tok.is_empty() || !port_tok.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(SdpValidationError::new(format!(
-                    "m= line port '{port_tok}' is not a non-negative integer"
-                )));
-            }
-            in_media = true;
-            current_media_has_c = false;
-            current_media_name = media_name.to_string();
-            continue;
-        }
-        if line.starts_with("c=") {
-            if in_media {
-                current_media_has_c = true;
-            } else {
-                session_level_c = true;
-            }
-        }
-        if let Some(raw) = line.strip_prefix("a=ptime:") {
-            // Digit string with a non-zero digit — positive without an integer
-            // width the value would have to fit.
-            let raw = raw.trim();
-            let positive_integer = !raw.is_empty()
-                && raw.bytes().all(|b| b.is_ascii_digit())
-                && raw.bytes().any(|b| b != b'0');
-            if !positive_integer {
-                return Err(SdpValidationError::new(format!("a=ptime:{raw} is not > 0")));
-            }
-        }
+    if let Some(line) = doc.misplaced.first() {
+        return Err(SdpValidationError::new(format!(
+            "'{line}' follows an m= line (RFC 8866 §5 places it in the session-level section)"
+        )));
     }
-    if in_media && !current_media_has_c && !session_level_c {
-        return Err(missing_c(&current_media_name));
+    for media in &doc.media {
+        let name = &media.r#type;
+        if media.port.is_none() {
+            return Err(SdpValidationError::new(format!(
+                "m={name} line states no port field <port>[/<number of ports>] (RFC 8866 §5.14)"
+            )));
+        }
+        if media.c_line.is_none() && doc.c_line.is_none() {
+            return Err(SdpValidationError::new(format!(
+                "m={name} block has no c= line and no session-level c="
+            )));
+        }
+        let ptimes = media.attributes.iter().filter_map(|a| crate::sdp_doc::ptime_value(a));
+        for value in ptimes {
+            if !crate::sdp_doc::is_non_zero_int_or_real(value) {
+                return Err(SdpValidationError::new(format!(
+                    "a=ptime value {value:?} is not a non-zero integer or real (RFC 8866 §6.4)"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -327,7 +306,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("a=rtpmap:") {
-            if let Some((pt, _)) = rest.trim().split_once(' ') {
+            if let Some((pt, _)) = crate::whitespace::trim(rest).split_once(' ') {
                 if let Some(pt) = leading_integer(pt) {
                     if allowed.contains(&pt) {
                         rtpmaps.push((*line).to_string());
@@ -335,7 +314,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("a=fmtp:") {
-            if let Some((pt, _)) = rest.trim().split_once(' ') {
+            if let Some((pt, _)) = crate::whitespace::trim(rest).split_once(' ') {
                 if let Some(pt) = leading_integer(pt) {
                     if allowed.contains(&pt) {
                         fmtp.push((*line).to_string());
@@ -463,15 +442,15 @@ fn rewrite_media_line(line: &str, port_of: &mut impl FnMut(u16) -> Option<u16>) 
         Some((port, rest)) => (port, Some(rest)),
         None => (tail, None),
     };
-    let (port, pair_count) = match port_field.split_once('/') {
-        Some((port, count)) => (port, Some(count)),
-        None => (port_field, None),
+    let Some((port, count)) = crate::sdp_doc::port_field(port_field) else {
+        return line.to_string();
     };
-    let Ok(port) = port.parse::<u16>() else { return line.to_string() };
+    let pair_count = port_field.split_once('/').map(|(_, count)| count);
+    let Ok(port) = u16::try_from(port) else { return line.to_string() };
     if port == 0 {
         return line.to_string();
     }
-    let pairs = pair_count.and_then(|count| count.parse::<u16>().ok()).unwrap_or(1);
+    let pairs = count.and_then(|count| u16::try_from(count).ok()).unwrap_or(1);
     let Some(booked) = port_of(pairs) else { return line.to_string() };
     let mut out = format!("m={kind} {booked}");
     if let Some(count) = pair_count {

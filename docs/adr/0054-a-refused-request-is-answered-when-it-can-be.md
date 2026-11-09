@@ -43,9 +43,13 @@ A header line that breaks the grammar or a gate beyond it (ADR-0001) is left
 out and the split reads on, so the five fields after it are still read; the
 first refused line is the one reported. A limit (the header length) stops the
 split at once and leaves no partial: a message past a limit is not worth
-reading further. A refused line naming Via, From, To, Call-ID or CSeq leaves
+reading further. The first-ingress bound (ADR-0001) is no limit of the read: the
+message was read whole, so a request past it leaves its partial and is answered.
+A refused line naming Via, From, To, Call-ID or CSeq leaves
 no partial either, since the field it held is not echoed, and so does a refused
-line whose name did not read, which may have been any of them. A line holding
+line whose name did not read, which may have been any of them. A name no colon
+follows did not read: what was read may be a part of a name (`Vi a:` may be a
+Via). A line holding
 a byte that is not UTF-8 (RFC 3629) is a refused line: the message is refused
 as not UTF-8, and answered when the five fields read.
 
@@ -62,12 +66,23 @@ letters, digits, space and `.,:;-_()/=+'@[]<>`, every other byte becomes `?`,
 and it stops at 200 bytes: no byte of a reason can close the quoted-string or
 the header line, and no escaping is needed. No body.
 
-The 400 is stateless: no server transaction, sent to the datagram's source
-address and port. Every copy of the request is answered again under the same
+The 400 is stateless: no server transaction, sent to its stamped top Via's
+response target, where every response to that request goes (§18.2.2, RFC 3581
+§4). Every copy of the request is answered again under the same
 To-tag (derived from the request with a per-instance secret, §8.2.6.2). The
-ACK to the 400 ends at the element that sent it: the transaction layer
-recognises its derived To-tag on an ACK matching no transaction, the proxy
-absorbs it as the ACK to its own non-2xx final.
+ACK to a 400 under that derived To-tag ends at the element that sent it: the
+transaction layer recognises the tag on an ACK matching no transaction, the
+proxy absorbs it as the ACK to its own non-2xx final. A request that already
+had a To-tag keeps it in the 400 (a re-INVITE keeps the dialog's), so no
+stateless element can recognise its ACK, and the ACK travels on to the call it
+names. There it answers an INVITE the call never saw, as the ACK of any final a
+hop gave that re-INVITE does: ADR-0055 §4's trigger 3 ignores it, and on a call
+a takeover copy served ends the call with a clean BYE.
+
+A missing Contact on a new request is no ingress refusal: the Contact is the
+remote target of a dialog the request may never open. The element that would
+establish the dialog answers it 400 there, so a refusal that comes first wins:
+a request at `Max-Forwards: 0` is answered 483 (§16.3) whatever it lacks.
 
 ### 4. What is never answered
 

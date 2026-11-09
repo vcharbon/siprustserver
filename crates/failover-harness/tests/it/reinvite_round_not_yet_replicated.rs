@@ -33,6 +33,10 @@ use crate::inflight_resend::{
 /// RFC 3261 §17.1.2.2's T2: where the §13.3.1.4 2xx ladder stops doubling.
 const T2: Duration = Duration::from_secs(4);
 
+/// Long enough for a relayed 2xx's write to reach the backup, short of the
+/// first rung of its §13.3.1.4 ladder.
+const BEFORE_THE_LADDER: Duration = Duration::from_millis(100);
+
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 
@@ -53,6 +57,12 @@ struct LostRound {
 }
 
 async fn lose_a_round(name: &str) -> LostRound {
+    lose_a_round_answered(name, false).await
+}
+
+/// [`lose_a_round`], with `answered`: the callee's 2xx is relayed to the caller
+/// before the replica is rewound and the node dies, her ACK still to come.
+async fn lose_a_round_answered(name: &str, answered: bool) -> LostRound {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -68,7 +78,13 @@ async fn lose_a_round(name: &str) -> LostRound {
     reinvite.expect(100).await;
     let mut at_bob = bob.receive("INVITE").await;
     at_bob.respond(100, "Trying").await;
-    fh.advance(REPLICATE).await;
+    if answered {
+        at_bob.respond(200, "OK").with_sdp(REANSWER).await;
+        reinvite.expect(200).await;
+        fh.advance(BEFORE_THE_LADDER).await;
+    } else {
+        fh.advance(REPLICATE).await;
+    }
     // The round's replica never landed: the backup holds the call as it was
     // before the round when the node dies.
     survivor_of(&pri_ord, &w_b1, &w_b2)
@@ -196,4 +212,67 @@ async fn a_round_refused_before_it_replicated_is_acknowledged_and_the_call_ended
     lost.taken_over_once("the callee's 488 and the answers to the BYEs");
     let _ = &lost.dialog;
     lost.settle().await;
+}
+
+/// The ordinary path of ADR-0055 §4's trigger 3: the dead node relayed the
+/// callee's 2xx and the replica predates the round, so her ACK, which takes the
+/// call over on the survivor, is the only thing proving the round. The survivor
+/// ends the call over both dialogs.
+#[tokio::test(start_paused = true)]
+async fn her_ack_of_a_round_answered_before_it_replicated_ends_the_call_on_the_copy() {
+    let mut lost = lose_a_round_answered("reinvite-round-acked-on-the-copy", true).await;
+    lost.fh.strike(failover_harness::Incident::PrimaryKilled);
+
+    lost.dialog.ack(None).await;
+    let mut bye = lost.bob.receive("BYE").await;
+    bye.respond(200, "OK").await;
+    lost.alice.receive("BYE").await.respond(200, "OK").await;
+    lost.fh.advance(Duration::from_millis(500)).await;
+    lost.taken_over_once("her ACK");
+    assert!(
+        lost.survivor()
+            .cdr_records()
+            .iter()
+            .flat_map(|c| &c.events)
+            .any(|e| e.reason.as_deref() == Some("evidence")),
+        "the ending is the evidence rule's"
+    );
+    lost.settle().await;
+}
+
+/// A primary returned behind what its previous run sent, no copy having written
+/// the call: the record lacks the round and reads as a call no other owner
+/// served, so her ACK proves nothing there and is ignored. The callee's repeat
+/// of the 2xx nobody ACKed still names the round above the dialog's sequence
+/// (trigger 1), and the call ends on it.
+#[tokio::test(start_paused = true)]
+async fn at_a_primary_returned_behind_a_round_her_ack_is_ignored_and_the_callees_2xx_ends_the_call()
+{
+    let mut lost =
+        lose_a_round_answered("reinvite-round-acked-at-the-returned-primary", true).await;
+    lost.fh.strike(failover_harness::Incident::PrimaryKilled);
+    let (answer, toward) = lost
+        .fh
+        .sip_entries()
+        .into_iter()
+        .rfind(|e| e.from == lost.bob.addr() && e.opens_with("SIP/2.0 200"))
+        .map(|e| (e.raw, e.to))
+        .expect("the callee's 200 is on the wire");
+    let (primary, survivor) = split_mut(&lost.pri_ord, &mut lost.w_b1, &mut lost.w_b2);
+    reboot_and_reclaim(&mut lost.fh, primary, survivor, &lost.pri_ord, &lost.proxy).await;
+
+    lost.dialog.ack(None).await;
+    lost.fh.advance(Duration::from_secs(1)).await;
+    let at_bob = lost.bob.take_queued().await;
+    assert!(at_bob.is_none(), "her ACK alone moves nothing: {:?}", at_bob.map(|m| m.cseq().seq()));
+    let (primary, _) = split_mut(&lost.pri_ord, &mut lost.w_b1, &mut lost.w_b2);
+    assert_eq!(primary.metrics().unexplained_acks_total(), 1, "the ACK it ignored is counted");
+
+    lost.bob.try_send_datagram(&answer, toward).await.expect("the retransmitted 200 leaves");
+    let ack = lost.bob.receive("ACK").await;
+    assert_eq!(ack.request().cseq().seq(), lost.round_cseq(), "the ACK names the round");
+    lost.ended_on_both_legs().await;
+    let nodes = [&lost.w_b1, &lost.w_b2];
+    settle_to_one_cdr(&lost.fh, &[&lost.alice, &lost.bob], &nodes, &lost.call_ref).await;
+    drop(lost.proxy);
 }

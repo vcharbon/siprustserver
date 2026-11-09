@@ -1,8 +1,9 @@
 /**
  * The lanes a campaign start picks: only the lanes the server runs, of one
  * group, since the lanes of one run must run together. The default pick is
- * the group of the first runnable lane; a pick of two groups is refused here,
- * before any job starts, naming the groups that run.
+ * the lanes the campaign states, else the group of the first runnable lane; a
+ * pick of two groups is refused here, before any job starts, naming the groups
+ * that run.
  */
 import type { LaunchLane } from "./api.ts"
 
@@ -20,8 +21,15 @@ export const groups = (lanes: readonly LaunchLane[]): readonly (readonly string[
 export const groupsLine = (lanes: readonly LaunchLane[]): string =>
   groups(lanes).map((ids) => (ids.length === 1 ? `${ids[0]} alone` : ids.join(" + "))).join(", or ")
 
-/** The pick a start opens with: every runnable lane of the first runnable lane's group. */
-export const defaultPick = (lanes: readonly LaunchLane[]): readonly string[] => groups(lanes)[0] ?? []
+/**
+ * The pick a start opens with: the lanes the campaign `stated` but those refused
+ * here, which the page cannot uncheck, else every runnable lane of the first
+ * runnable lane's group.
+ */
+export const defaultPick = (lanes: readonly LaunchLane[], stated: readonly string[] | null = null): readonly string[] =>
+  stated === null
+    ? groups(lanes)[0] ?? []
+    : stated.filter((id) => !lanes.some((l) => l.lane === id && l.refused !== null))
 
 /** Why `picked` cannot start, or null: no lane, a lane refused here, or lanes of two groups. */
 export const pickRefusal = (picked: readonly string[], lanes: readonly LaunchLane[]): string | null => {

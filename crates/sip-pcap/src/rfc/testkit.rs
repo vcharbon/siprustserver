@@ -113,7 +113,7 @@ fn request_with(
 ) -> String {
     let to_tag = to_tag.map(|t| format!(";tag={t}")).unwrap_or_default();
     format!(
-        "{method} sip:+1555123@h SIP/2.0\r\n\
+        "{method} sip:+1555123@h SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}\r\n\
          Max-Forwards: 70\r\n\
          From: <sip:001555900@h>;tag={from_tag}\r\n\
@@ -184,7 +184,7 @@ fn response_with(
 ) -> String {
     let to_tag = to_tag.map(|t| format!(";tag={t}")).unwrap_or_default();
     format!(
-        "SIP/2.0 {status} {reason}\r\n\
+        "SIP/2.0 {status} {reason}\r\nContact: <sip:fixture@192.0.2.98>\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}\r\n\
          From: <sip:001555900@h>;tag={from_tag}\r\n\
          To: <sip:+1555123@h>{to_tag}\r\n\
@@ -195,9 +195,14 @@ fn response_with(
 }
 
 pub(super) fn doc_of(datagrams: Vec<Datagram>) -> FlowsDoc {
-    let flows = build_flows(&datagrams, &FlowConfig::default());
-    crate::emit::flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default())
-        .expect("the model enriches")
+    let flows =
+        build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
+    crate::emit::flows_to_doc(
+        &flows,
+        &DecodeStats::default(),
+        &EnrichOptions::under(sip_message::ToolReading::plain_rfc()),
+    )
+    .expect("the model enriches")
 }
 
 /// `msg` carrying `body` as its session description, the head's

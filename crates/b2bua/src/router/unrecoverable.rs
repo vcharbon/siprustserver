@@ -1,9 +1,10 @@
-//! An unrecoverable call (ADR-0052 §11): one whose record does not rebuild
-//! its caller's INVITE. It is discharged silently, as the reaper's second
-//! strike discharges a call (ADR-0020 X6): its legs are abandoned, its CDR and
-//! its limiter release go through the one enforcement path with nothing on the
-//! wire, the call is removed, and the discharge is counted. The request that
-//! met it is answered as one for a vanished call.
+//! An unrecoverable call (ADR-0052 §11): one whose record does not rebuild its
+//! caller's INVITE, or holds a stored image a seed of its copy needs that does
+//! not read. It is discharged silently, as the reaper's second strike discharges
+//! a call (ADR-0020 X6): its legs are abandoned, its CDR and its limiter release
+//! go through the one enforcement path with nothing on the wire, the call is
+//! removed, and the discharge is counted. The request that met it is answered
+//! as one for a vanished call.
 
 use std::sync::Arc;
 
@@ -11,15 +12,16 @@ use b2bua_sdk::event::CallEvent;
 use call::Call;
 use sip_ids::TurnIds;
 
-use super::interpret::process_result;
+use super::off_wire;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
-use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
 use crate::store::{Enveloped, MaterialiseOrigin};
 
-/// Whether the materialised `copy` rebuilds its caller's INVITE; one that does
-/// not is made resident under `origin` and discharged. The caller holds the
-/// per-call lock.
+/// Whether the materialised `copy` rebuilds its caller's INVITE and every image
+/// its seeds name at `now_ms` reads back. One that fails either cannot serve the
+/// transactions its record names, and the record may be behind the wire, so it
+/// sends nothing: it is made resident under `origin` and discharged. An image no
+/// seed names costs a live call nothing. The caller holds the per-call lock.
 pub(super) async fn copy_recoverable(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -27,13 +29,25 @@ pub(super) async fn copy_recoverable(
     origin: MaterialiseOrigin,
     now_ms: i64,
 ) -> bool {
-    let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&copy.call.a_leg_invite) else {
+    let Err(err) = record_reads(&copy.call, now_ms) else {
         return true;
     };
     if ctx.state.materialize_if_absent(copy.clone(), origin) {
         discharge(ctx, call_ref, copy.call.clone(), now_ms, &err).await;
     }
     false
+}
+
+/// Whether `call`'s record serves a copy of it at `now_ms`: `Err` names the part
+/// that does not read.
+pub(super) fn record_reads(call: &Call, now_ms: i64) -> Result<(), String> {
+    if let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite) {
+        return Err(format!("the caller's INVITE does not rebuild: {err}"));
+    }
+    match super::materialise::unreadable_seed_image(call, now_ms) {
+        Some(refusal) => Err(format!("an image a seed names does not read: {refusal}")),
+        None => Ok(()),
+    }
 }
 
 /// The call whose turn on `event` met a record that does not rebuild its
@@ -67,13 +81,8 @@ async fn discharge(
     err: &impl std::fmt::Display,
 ) {
     ctx.metrics.bump_unrecoverable_call();
-    tracing::error!(%call_ref, error = %err, "the call's record does not rebuild its caller's INVITE: discharged");
-    let before = call.clone();
-    let discharged = finalize(crate::reaper::discharge_result(call, now_ms));
-    let mut notes = crate::turn_notes::TurnNotes::default();
-    let leave = UnansweredCaller::Leave;
-    let result = enforce(&ctx.obligations, &before, discharged, now_ms, leave, &mut notes);
-    super::notes::drain_notes(ctx, call_ref, notes);
-    process_result(ctx, call_ref, result, now_ms, &"the discharge of an unrecoverable call", None)
-        .await;
+    tracing::error!(%call_ref, error = %err, "the call's record does not serve a copy: discharged");
+    let ending = off_wire::Ending::Forced { before: &call };
+    let label = &"the discharge of an unrecoverable call";
+    off_wire::end(ctx, call_ref, ending, off_wire::Caller::Leave, now_ms, label).await;
 }

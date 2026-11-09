@@ -68,7 +68,7 @@ pub(super) fn with_dialog_identity(draft: RequestDraft, dialog: &StackDialog) ->
             HeaderName::To,
             emit::name_addr_text(&dialog.remote_uri, Some(&dialog.remote_tag)),
         )
-        .push(CallId::new(SipStr::owned(&dialog.call_id)))
+        .set(CallId::new(SipStr::owned(&dialog.call_id)))
 }
 
 /// Inputs for [`generate_in_dialog_request`]. Every header is a typed value;
@@ -136,8 +136,8 @@ pub fn generate_in_dialog_request(
 
     let mut draft = RequestDraft::new(verb.clone(), uri)
         .push(hop)
-        .push(MaxForwards::new(opts.max_forwards.unwrap_or(emit::DEFAULT_MAX_FORWARDS)));
-    draft = with_dialog_identity(draft, dialog).push(CSeq::new(next_cseq, verb));
+        .set(MaxForwards::new(opts.max_forwards.unwrap_or(emit::DEFAULT_MAX_FORWARDS)));
+    draft = with_dialog_identity(draft, dialog).set(CSeq::new(next_cseq, verb));
 
     // Contact only where it refreshes the dialog target
     // (`contact_policy::request_states_contact`).
@@ -149,15 +149,15 @@ pub fn generate_in_dialog_request(
 
     if method == InDialogMethod::Prack {
         if let Some(rack) = &opts.rack {
-            draft = draft.push(rack.clone());
+            draft = draft.set(rack.clone());
         }
     }
     if method == InDialogMethod::Notify {
         if let Some(event) = &opts.event {
-            draft = draft.push(event.clone());
+            draft = draft.set(event.clone());
         }
         if let Some(state) = &opts.subscription_state {
-            draft = draft.push(state.clone());
+            draft = draft.set(state.clone());
         }
     }
     if method == InDialogMethod::Invite {

@@ -6,10 +6,11 @@
 
 use call::helpers::{caller_dialog, record_invite_final, update_leg};
 use call::{Call, DialogState, Repeated, RetainedEmission};
-use sip_message::header::{HeaderValue, Via};
-use sip_message::{HeaderName, Method, SipRequest, SipResponse, SipStr};
+use sip_message::header::Via;
+use sip_message::{HeaderName, Method, SipHeader, SipRequest, SipResponse, SipStr};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, OutboundBody, Provenance};
+use crate::rules::evidence::names_branch;
 use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{LegEnd, RuleContext};
@@ -99,7 +100,7 @@ impl ActionExecutor<'_> {
                 d.our_cseq = d.our_cseq.max(cseq);
                 if invite {
                     open_relay = d.sent_invite.take().filter(|r| {
-                        r.awaits_final() && r.branch().is_some_and(|b| Some(b) != branch)
+                        r.awaits_final() && r.branch().is_some_and(|b| !names_branch(b, branch))
                     });
                 }
                 if reinvite && d.awaits_invite_final() {
@@ -298,16 +299,22 @@ impl ActionExecutor<'_> {
         else {
             return;
         };
-        let via = relay.source_vias.first().and_then(|v| Via::parse(&SipStr::owned(v)).ok());
+        let via =
+            relay.source_vias.first().and_then(|v| Via::first_of_line(&SipStr::owned(v)).ok());
         if !via.as_ref().is_some_and(|via| acks_a_refusal(via, req)) {
             let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
+            let disposition = HeaderName::ContentDisposition;
+            let described = req.raw(disposition.clone()).next().map(|value| SipHeader {
+                name: SipStr::owned(disposition.as_wire_str()),
+                value: SipStr::owned(value),
+            });
             self.ack_leg(
                 call,
                 fx,
                 &peer_leg,
                 req.body().to_vec(),
                 content_type,
-                Vec::new(),
+                described.into_iter().collect(),
                 Provenance::Relayed,
                 relay::Author::Leg(ctx.source_leg_id),
             );
@@ -324,5 +331,9 @@ impl ActionExecutor<'_> {
 /// own (§13.2.2.4).
 fn acks_a_refusal(via: &Via, ack: &SipRequest) -> bool {
     let top = ack.top_via();
-    via.is_rfc3261_branch() && top.branch() == via.branch() && top.sent_by() == via.sent_by()
+    let same = match (top.branch(), via.branch()) {
+        (Some(a), Some(b)) => sip_message::header::same_branch(a, b),
+        (a, b) => a == b,
+    };
+    via.is_rfc3261_branch() && same && top.sent_by() == via.sent_by()
 }

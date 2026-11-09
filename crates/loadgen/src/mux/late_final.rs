@@ -56,14 +56,14 @@ pub(in crate::mux) enum Reply {
 }
 
 fn parse_request(raw: &[u8]) -> Option<SipRequest> {
-    match CustomParser::new().parse(raw) {
+    match CustomParser::built().parse(raw) {
         Ok(SipMessage::Request(r)) => Some(r),
         _ => None,
     }
 }
 
 fn parse_response(raw: &[u8]) -> Option<SipResponse> {
-    match CustomParser::new().parse(raw) {
+    match CustomParser::built().parse(raw) {
         Ok(SipMessage::Response(r)) => Some(r),
         _ => None,
     }

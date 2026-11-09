@@ -4,8 +4,8 @@
 
 **Owner:** `crates/sip-proxy/src/core/request/classify.rs` (a request's
 direction), `core/request/admission.rs` (the To-tag rule and the gate),
-`core/response.rs` (the response rule), `crates/sip-message/src/header/via.rs`
-(`received`), `crates/sip-proxy-runner/src/config.rs` (the single-face warning,
+`core/response.rs` (the response rule), `crates/sip-proxy/src/face.rs` (the
+egress face), `crates/sip-message/src/header/via.rs` (`received`), `crates/sip-proxy-runner/src/config.rs` (the single-face warning,
 the wildcard refusal), `deploy/helm/siprust/templates/masq-exempt.yaml` and
 `files/masq-exempt.sh` (the edge node's drop rule).
 
@@ -41,7 +41,10 @@ but used it only for a metric.
      external plane (a requirement, `deploy/README.md`); on the kind lab the
      node also drops every packet to `PROXY_VIP` that arrives on the external
      interface (`deploy/helm/siprust/files/masq-exempt.sh`, re-asserted with
-     its other rules).
+     its other rules);
+   - a datagram the proxy sends from the external VIP reaches the internal socket
+     by local delivery unless the node's optional drop refuses it (ADR-0056 §11);
+     a request arriving that way is answered 482 Loop Detected (RFC 3261 §16.3).
 2. **On the internal face a request is worker-outbound** when its direction
    entry carries `;outbound`, when its source is a registry worker, or when its
    top Via sent-by is one. The marker is what recognises a worker rebooted onto
@@ -96,6 +99,52 @@ but used it only for a metric.
    `wps.0` or `q735.0` arriving on the external face still bypasses the gate and
    the new-call caps. Such a request still goes to a worker, never to a host the
    sender names. The external plane is semi-trusted for this.
+10. **A dual-face proxy crosses, with one exception the registry decides.** The
+    egress face, and with it the socket and the advertise a message states, comes
+    from the ingress face, the message and the registry through one pure function
+    (`face::EgressPolicy`, single-face or crossing). No address plan enters: the
+    proxy holds no CIDR, a name and its resolved address are one face, and any
+    instance picks the same egress with nothing stored, so a flow that moves keeps
+    its one sent-by (RFC 3261 §17.2.3).
+
+    | Message | Condition | Leaves on |
+    |---|---|---|
+    | Request | arrived external | internal |
+    | Request | arrived internal, worker-outbound or a loose hop | external, whatever the target |
+    | Request | arrived internal, neither, target a registry worker or re-entering on a verified cookie | internal |
+    | Request | arrived internal, any other target | external |
+    | Response | arrived external | internal (D4: every destination is a worker) |
+    | Response | arrived internal, the owner rule names a worker | internal |
+    | Response | arrived internal, the proxy's own Via it pops carrying the marker | internal |
+    | Response | arrived internal, otherwise | external |
+    | Own final | any | the face its request arrived on (RFC 3581 §4) |
+
+    Via states the egress face. In Record-Route the top entry states the egress
+    face and the lower one the ingress face, so each party's later requests reach
+    the face it talks to; the `;outbound` marker stays on the worker's half. The
+    third row keeps a call that loops back
+    through the platform on the workers' plane: its in-dialog request re-enters
+    with two of this proxy's pairs back to back, the last pair's cookie verifying for
+    the call, when no hop between the passes Record-Routes, and the workers admit SIP only from the internal VIP and the
+    proxy nodes. A request on that row carries a `;same-face` flag on the Via the proxy pushes,
+    and a response arriving internal stays internal on that flag alone, read off the
+    Via it pops, which is this proxy's own and leaves with it. The flag travels with
+    the message, so either instance reads it and nothing is stored. No Via below it
+    decides a face: those are their senders' to write, and a phone behind a NAT whose
+    private sent-by equals a worker's address is answered from the face it reached.
+    A response arriving internal with no marker answers a request that left external, so the registry
+    names nothing for it: the owner rule's dead, moved and Record-Route-cookie branches apply only to a
+    response arriving external or marked
+    (`crossing_tests::an_unmarked_response_naming_a_departed_worker_follows_its_via_external`). A
+    re-entry's request, its CANCEL included, stays internal on its verified cookie whatever the registry
+    did since its INVITE
+    (`crossing_tests::a_re_entry_and_its_cancel_stay_internal_past_the_registry`).
+    This rests on one assumption of the deployment: everything dialled through the
+    proxy, a media resource function included, is on the external plane. Tests:
+    `core::crossing_tests`, `face::tests`,
+    `ingress_trust::an_own_final_to_a_translated_worker_leaves_the_face_it_arrived_on`,
+    `ingress_trust::own_finals_to_a_sender_near_the_workers_leave_the_external_face`.
+    `failover-harness`'s `dual_face` runs the callflows through real workers.
 
 ## Consequences
 
@@ -114,3 +163,19 @@ but used it only for a metric.
   transactions.
 - A sender placed on the internal plane is trusted whatever it is: a caller
   that dials the internal address bypasses every rule above.
+- A peer's Contact or Record-Route chooses the Request-URI or the next hop of a
+  worker's request, and that request leaves on the external face whatever it names
+  (`crossing_tests::a_contact_naming_a_registry_worker_leaves_external`). The routers'
+  isolation stops it, then the workers' NetworkPolicy (ADR-0056 §11); on a CNI that does
+  not enforce NetworkPolicy, the routers' isolation alone does. Entries naming this proxy prove no recorded
+  pass, only a cookie verifying for the call does
+  (`crossing_tests::a_cookie_that_does_not_verify_for_the_call_proves_no_pass`). So a
+  peer aims a worker's request onto the internal plane only with a cookie this proxy
+  signed for that Call-ID, one it holds from an earlier dialog of its own: the request
+  reaches the worker the cookie names, which holds no such dialog and answers 481.
+- A worker's first hop is the front proxy whatever a callee's Record-Route says,
+  the route set intact (`b2bua-core` `relay::egress`); standalone it follows its
+  route set.
+- The ACK of a non-2xx final a translated worker sent on a spiral goes to the node
+  address the final came from, on the internal face its INVITE took
+  (`crossing_tests::a_spirals_ack_to_a_translated_worker_stays_internal`).

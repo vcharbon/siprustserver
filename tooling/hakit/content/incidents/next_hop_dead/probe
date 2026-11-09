@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Recovered when every silenced node's proxy is Ready again and both VIPs are
+# routed over every live proxy's node, with no traffic from outside. Exit 75
+# while not yet, or while a read fails. Facts: the next hops and the instant.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+live="$(hk_live_pods)" || exit "$HK_NOT_YET"
+for node in $(hk_state silenced); do
+  awk -v n="$node" '$3 == n { found = 1 } END { exit !found }' <<<"$live" || exit "$HK_NOT_YET"
+done
+routes="$(hk_probe_routed_over_live)"
+jq -cn --argjson r "$routes" --argjson at "$(hk_now_ms)" '{next_hops: $r, announced_at_ms: $at}'

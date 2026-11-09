@@ -18,7 +18,17 @@ use crate::store::MaterialiseOrigin;
 fn backups_probe(cseq: i64, deadline_ms: i64) -> RequestRecord {
     let sent = SentRequest {
         branch: format!("z9hG4bK-backup-probe-{cseq}"),
-        image: b"OPTIONS sip:alice@192.0.2.10 SIP/2.0\r\n\r\n".to_vec(),
+        image: format!(
+            "OPTIONS sip:alice@192.0.2.10 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 192.0.2.20:5060;branch=z9hG4bK-backup-probe-{cseq}\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:bob@192.0.2.20>;tag=w1\r\n\
+             To: <sip:alice@192.0.2.10>;tag=a1\r\n\
+             Call-ID: backup-probe@192.0.2.20\r\n\
+             CSeq: {cseq} OPTIONS\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes(),
         destination: HostPort { host: "192.0.2.10".into(), port: 5060 },
     };
     RequestRecord {

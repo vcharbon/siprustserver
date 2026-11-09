@@ -33,7 +33,7 @@ fn mixed_doc() -> SeqDoc {
                 from: "alice".into(),
                 to: Some("b1".into()),
                 label: "INVITE sip:bob".into(),
-                detail: Some("INVITE sip:bob SIP/2.0\r\n".into()),
+                detail: Some("INVITE sip:bob SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n".into()),
                 conn: None,
                 kind: RowKind::Sip { delivered: true },
             },

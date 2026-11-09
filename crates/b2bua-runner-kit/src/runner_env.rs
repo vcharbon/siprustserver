@@ -9,13 +9,25 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
+use sip_message::{Exemptions, SipParserLimits};
 
 use crate::{
     addresses_from_lookup, capacity_env, drain_env, env_or, limiter_env, liveness_env, split_csv,
     stated, stated_list, ReplicationSettings, WorkerAddresses,
 };
 
+pub(crate) mod caps_env;
 mod event_queue_env;
+
+/// The limits a worker reads the wire under ([`RunnerEnv::parser_limits`]), the
+/// exemptions as `SIP_EXEMPTIONS` states them through `lookup`.
+pub(crate) fn parser_limits(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<SipParserLimits, String> {
+    let exemptions = Exemptions::read(lookup("SIP_EXEMPTIONS").as_deref())
+        .map_err(|problem| format!("SIP_EXEMPTIONS {problem}"))?;
+    Ok(SipParserLimits { exemptions, ..SipParserLimits::DEFAULT })
+}
 
 /// Every generic runner knob, parsed once from env by [`RunnerEnv::from_env`].
 /// All fields are pub: tweak any of them between `from_env()` and
@@ -35,6 +47,11 @@ pub struct RunnerEnv {
     pub admin_addr: SocketAddr,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
+    /// What the process reads the wire under: the default limits and the
+    /// exemptions `SIP_EXEMPTIONS` states (comma-separated, default none; a blank
+    /// value or a name no exemption has refuses the boot, as on the proxy).
+    /// [`bind`](Self::bind) makes the one parser of it.
+    pub parser_limits: SipParserLimits,
     /// `B2BUA_UDP_SNDBUF` — `SO_SNDBUF` requested on the signalling socket,
     /// bytes (default 4 MiB; empty = the kernel's `wmem_default`; clamped at
     /// `wmem_max`). See ADR-0033.
@@ -99,8 +116,9 @@ pub struct RunnerEnv {
     /// "response"` (ADR-0044). Default 5; supported range
     /// 2..=32. In-dialog INVITE and non-INVITE never read it.
     pub invite_first_response_timeout_sec: i64,
-    /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — decision-backend deadline per
-    /// round-trip (default 5000; <= 0 disables — ADR-0022).
+    /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — the setup budget from an initial
+    /// INVITE's receipt to its final, an off-turn consult's deadline per round
+    /// trip (default 5000; <= 0 is refused at startup — ADR-0022 X1).
     pub call_control_timeout_ms: i64,
     /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
     /// §13.3.1.4, 64·T1 = 32 s; <= 0 tears nothing down — the ladder itself
@@ -179,10 +197,16 @@ pub struct RunnerEnv {
     /// The memory ceilings (ADR-0037), every one off unless stated; the
     /// grammar is in `capacity_env`.
     pub capacity: CapacityConfig,
+    /// The per-call caps (ADR-0057), each at its upstream default unless
+    /// stated; the grammar and the boot checks are in `caps_env`.
+    pub caps: b2bua::config::CallCaps,
     /// How long one turn of the transaction owner or router may run before
     /// the loop reads stalled; the grammar, its default and the boot check
     /// against the call-control timeout in `liveness_env`.
     pub loop_stall: Duration,
+    /// How long one such turn may run before the worker exits non-zero; the
+    /// grammar, its default and the boot check in `liveness_env`.
+    pub loop_exit: Duration,
     /// The event-queue gate's bounds (ADR-0050 §9), the grammar, defaults
     /// and boot checks in `runner_env::event_queue_env`.
     pub event_queue_gate: b2bua::config::EventQueueGateConfig,
@@ -276,9 +300,13 @@ impl RunnerEnv {
         let invalid = |e: String| format!("invalid B2BUA config: {e}");
         let cdr = cdr_ring_from_lookup(lookup)?;
         let limiter = limiter_env::limiter_from_lookup(lookup).map_err(invalid)?;
-        let call_control_timeout_ms: i64 = knob("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")?;
-        let call_control =
-            Duration::from_millis(u64::try_from(call_control_timeout_ms).unwrap_or(0));
+        let call_control_timeout_ms: i64 = knob(
+            "B2BUA_CALL_CONTROL_TIMEOUT_MS",
+            &B2buaConfig::DEFAULT_CALL_CONTROL_TIMEOUT_MS.to_string(),
+        )?;
+        let call_control = B2buaConfig::call_control_timeout_of(call_control_timeout_ms);
+        let loop_stall =
+            liveness_env::loop_stall_from_lookup(lookup, call_control).map_err(invalid)?;
         let addresses = addresses_from_lookup(lookup)?;
         Ok(Self {
             listen: env_or("B2BUA_LISTEN", "0.0.0.0:5060"),
@@ -286,6 +314,7 @@ impl RunnerEnv {
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             admin_addr: admin_addr(lookup)?,
             queue_max: knob("B2BUA_QUEUE", "8192")?,
+            parser_limits: parser_limits(lookup)?,
             udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF")?,
             udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF")?,
             cdr_queue: knob("B2BUA_CDR_QUEUE", "1024")?,
@@ -353,8 +382,9 @@ impl RunnerEnv {
             limiter_backend: limiter.backend,
             drain: drain_env::drain_from_lookup(lookup).map_err(invalid)?,
             capacity: capacity_env::capacity_from_lookup(lookup).map_err(invalid)?,
-            loop_stall: liveness_env::loop_stall_from_lookup(lookup, call_control)
-                .map_err(invalid)?,
+            caps: caps_env::caps_from_lookup(lookup).map_err(invalid)?,
+            loop_stall,
+            loop_exit: liveness_env::loop_exit_from_lookup(lookup, loop_stall).map_err(invalid)?,
             event_queue_gate: event_queue_env::event_queue_gate_from_lookup(lookup)
                 .map_err(invalid)?,
             replication: ReplicationSettings::from_lookup(lookup).map_err(invalid)?,

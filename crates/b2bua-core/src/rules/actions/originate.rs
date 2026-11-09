@@ -52,6 +52,7 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method: "NOTIFY",
                     uri: &gen_dialog.remote_target,
+                    route: "",
                     offer: false,
                 }),
                 branch,
@@ -132,7 +133,11 @@ impl ActionExecutor<'_> {
         let creating = if leg_id == call.a_leg.leg_id {
             self.caller_invite(call)
         } else {
-            relay::dialling_invite(leg)
+            let notes = &mut self.turn.notes;
+            let dialled = leg.dialled_sent();
+            dialled.and_then(|sent| {
+                crate::stored_image::request_noted(&sent.image, call, "re-INVITE", notes)
+            })
         };
         let outbound_cseq = dialog.our_cseq + 1;
         // The call as it stands before the re-INVITE records anything: one
@@ -147,13 +152,14 @@ impl ActionExecutor<'_> {
             return;
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
-        let mut extra: Vec<sip_message::SipHeader> = add_headers
+        let stated: Vec<sip_message::SipHeader> = add_headers
             .iter()
             .map(|e| sip_message::SipHeader {
                 name: sip_message::SipStr::owned(e.name().as_wire_str()),
                 value: e.text(),
             })
             .collect();
+        let mut extra = relay::writable_lines("re-INVITE to a leg", stated, fx);
         // RFC 7315 §5.6: the arm's vector for the leg, unless the action states one.
         let vector = sip_message::header::ChargingVector::header_name();
         if !extra.iter().any(|h| vector.matches(&h.name)) {
@@ -167,6 +173,7 @@ impl ActionExecutor<'_> {
         relay::describe_body(&mut extra, body, descriptors);
         let content_type = (!body.is_empty())
             .then(|| content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp));
+        let description = relay::description_in(body, content_type.as_ref(), &extra);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
@@ -175,7 +182,8 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method: "INVITE",
                     uri: &gen_dialog.remote_target,
-                    offer: !body.is_empty(),
+                    route: &relay::route_past_front(self.config, &gen_dialog.route_set),
+                    offer: description.is_some(),
                 }),
                 branch.clone(),
             )),
@@ -187,7 +195,7 @@ impl ActionExecutor<'_> {
                 author,
                 relay::Carried::InDialog,
                 body.to_vec(),
-                content_type.as_ref(),
+                description,
                 self.config.sdp_form.as_ref(),
             ),
             content_type,
@@ -323,6 +331,7 @@ impl ActionExecutor<'_> {
             return;
         };
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
+        let description = relay::description_in(body, content_type.as_ref(), &extra_headers);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
@@ -331,7 +340,12 @@ impl ActionExecutor<'_> {
                 Some(relay::RequestFacts {
                     method,
                     uri: &gen_dialog.remote_target,
-                    offer: m == InDialogMethod::Invite && !body.is_empty(),
+                    route: &if m == InDialogMethod::Invite {
+                        relay::route_past_front(self.config, &gen_dialog.route_set)
+                    } else {
+                        String::new()
+                    },
+                    offer: m == InDialogMethod::Invite && description.is_some(),
                 }),
                 branch,
             )),
@@ -344,7 +358,7 @@ impl ActionExecutor<'_> {
                 author,
                 relay::Carried::of(&Method::from_wire(method), None, true),
                 body.to_vec(),
-                content_type.as_ref(),
+                description,
                 self.config.sdp_form.as_ref(),
             ),
             content_type,

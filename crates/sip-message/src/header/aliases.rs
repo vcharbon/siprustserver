@@ -42,9 +42,11 @@ pub type SubscriptionState = TokenParamsHeader<kind::SubscriptionState>;
 /// RFC 4488 §4 — whether a REFER asks for its implicit subscription:
 /// `true` or `false`, then extension parameters.
 pub type ReferSub = TokenParamsHeader<kind::ReferSub>;
-/// The Content-Type value — the media type describing the body.
-pub type MediaType = TokenParamsHeader<kind::ContentType>;
-/// One media range of an `Accept` line (RFC 3261 §20.1); a line carries several, comma-separated.
+/// One media range of an `Accept` line (RFC 3261 §20.1); a line carries several,
+/// comma-separated. Its leading `type/subtype` is one token kept as written, SWS
+/// around the slash included, unlike [`MediaType`](super::MediaType)'s two. The
+/// capability relay reads a received line through it and restates each range as
+/// written, so `application / sdp` and `application/sdp` are two ranges there.
 pub type AcceptRange = TokenParamsHeader<kind::Accept>;
 pub type ContentDisposition = TokenParamsHeader<kind::ContentDisposition>;
 pub type SessionExpires = TokenParamsHeader<kind::SessionExpires>;
@@ -65,37 +67,3 @@ pub type Authorization = Credentials<kind::Authorization>;
 pub type ProxyAuthorization = Credentials<kind::ProxyAuthorization>;
 pub type WwwAuthenticate = Credentials<kind::WwwAuthenticate>;
 pub type ProxyAuthenticate = Credentials<kind::ProxyAuthenticate>;
-
-/// The two body classifications every consumer branches on, answered by the
-/// parsed TOKEN so a parameter or an odd casing never fools them.
-impl MediaType {
-    /// Whether the value names the SDP media type (RFC 4566 §8).
-    pub fn is_sdp(&self) -> bool {
-        self.is("application/sdp")
-    }
-
-    /// Whether the value names any `multipart/…` composite type (RFC 2046 §5.1).
-    pub fn is_multipart(&self) -> bool {
-        const COMPOSITE: &[u8] = b"multipart/";
-        let token = self.token().as_bytes();
-        token.get(..COMPOSITE.len()).is_some_and(|head| head.eq_ignore_ascii_case(COMPOSITE))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::MediaType;
-    use crate::header::HeaderValue;
-    use crate::sip_str::SipStr;
-
-    #[test]
-    fn a_media_type_classifies_by_token_not_by_value_prefix() {
-        let parse = |raw: &str| MediaType::parse(&SipStr::owned(raw)).unwrap();
-        assert!(parse("application/sdp").is_sdp());
-        assert!(parse(" Application/SDP ; charset=utf-8").is_sdp());
-        assert!(!parse("application/sdp-x").is_sdp(), "a longer token is another type");
-        assert!(parse("multipart/mixed;boundary=b").is_multipart());
-        assert!(parse("Multipart/Related").is_multipart());
-        assert!(!parse("application/sdp").is_multipart());
-    }
-}

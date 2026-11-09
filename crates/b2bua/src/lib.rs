@@ -12,7 +12,7 @@
 //! - [`rules`] — the core's first-match, layer-ranked rule engine + invariant
 //!   enforcement, re-exported.
 //! - [`router`] — consumes the transaction-layer event stream, resolves the
-//!   `callRef`, runs the core's turn, interprets the typed [`effects`].
+//!   `callRef`, runs the core's turn, commits the typed [`effects`].
 //! - [`admission`] — the ordered ladder of rungs that may refuse a new
 //!   INVITE, and the one answer a refusal draws (ADR-0037).
 //! - [`lifecycle`] — the aggregated lifecycle-log vocabulary (ADR-0026).
@@ -65,6 +65,7 @@ pub mod reaper;
 pub mod release_all;
 pub mod repl;
 pub mod router;
+pub mod setup_budget;
 pub mod store;
 pub mod supervise;
 pub(crate) mod sweep;
@@ -76,10 +77,10 @@ pub mod wire_faults;
 #[cfg(test)]
 pub(crate) mod test_call;
 pub use ::b2bua_core::{
-    answer_deadline, attempts, config, decision_log, destination_allowlist, effects,
+    answer_deadline, attempts, caps, config, decision_log, destination_allowlist, effects,
     failure_terminate, failure_unavailable, initial_invite, landing, message_ring, obligations,
     off_turn, owners, reaper_verdict, ring_deadline, rule_chain, rules, stack_identity, timer_arm,
-    turn_notes, turn_scope, wire_fault_set,
+    turn_notes, turn_scope, undecided, wire_fault_set,
 };
 
 pub use node::replica::ReplicaConfig;

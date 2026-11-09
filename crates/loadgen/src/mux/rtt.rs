@@ -290,7 +290,7 @@ mod tests {
 
     fn req(method: &str, cseq: u32, cid: &str) -> Vec<u8> {
         format!(
-            "{method} sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
+            "{method} sip:bob@192.0.2.2 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
              Call-ID: {cid}\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
         )
         .into_bytes()
@@ -298,7 +298,7 @@ mod tests {
 
     fn resp(status: u16, method: &str, cseq: u32, cid: &str) -> Vec<u8> {
         format!(
-            "SIP/2.0 {status} Reason\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
+            "SIP/2.0 {status} Reason\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
              Call-ID: {cid}\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
         )
         .into_bytes()

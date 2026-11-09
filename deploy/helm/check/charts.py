@@ -104,7 +104,7 @@ def canonical(docs: list[Doc]) -> str:
 def net_env_defaults() -> dict[str, str]:
     """net-env.sh's values in a clean environment (no caller override)."""
     names = ["SIP_SUBNET", "SIP_GATEWAY", "PROXY_VIP", "SIP_PORT", "SIPEXT_VIP", "SIPEXT_SUBNET",
-             "SIPEXT_GATEWAY", "SIPEXT_IF", "PROXY_FACE_INT_CIDRS", "SIPEXT_UAS_IP", "TOR_ASN",
+             "SIPEXT_GATEWAY", "SIPEXT_IF", "SIPEXT_UAS_IP", "TOR_ASN",
              "PROXY_NODE_ASN", "BFD_INTERVAL_MS", "BFD_DETECT_MULTIPLIER"]
     script = f'. "{NET_ENV}"; ' + "; ".join(f'echo "{n}=${n}"' for n in names)
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True,

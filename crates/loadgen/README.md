@@ -44,9 +44,9 @@ nothing external.
 
 ### 2. Host → real cluster — the `loadgen` binary
 
-Build the binary and point it at the front-proxy VIP. The mux endpoints bind on a
-host IP **reachable from the cluster pods** (the kind bridge gateway, *not*
-`127.0.0.1`), and `--route-pin-to-uas` selects the `api-call-pin` **egress
+Build the binary and point it at the front proxy's external VIP. The mux endpoints
+bind on a host IP **the proxy reaches on the callers' plane** (the external bridge's
+gateway, *not* `127.0.0.1`), and `--route-pin-to-uas` selects the `api-call-pin` **egress
 policy** (the same `EgressPolicy` the e2e framework's layouts declare): the
 INVITE carries an `X-Api-Call` destination pin so our B2BUA sends the callee leg
 back to the host `uas` socket:
@@ -55,8 +55,8 @@ back to the host `uas` socket:
 cargo build --release -p loadgen
 
 ./target/release/loadgen \
-  --target 172.20.255.250:5060 \      # front-proxy VIP
-  --bind-ip 172.20.0.1 \              # kind bridge gateway (pods reach the host here)
+  --target 192.168.60.250:5060 \      # front proxy's external VIP
+  --bind-ip 192.168.60.1 \            # the host's address on the callers' bridge
   --route-pin-to-uas \                # X-Api-Call pin: SUT routes b-leg → host uas/refer
   --scenario basic_call=4 --scenario reinvite=2 --scenario refer=1 \
   --cps 50 --duration 60 \
@@ -71,9 +71,9 @@ Prerequisites for the real cluster (one-time):
   leg never correlates and you'll see `loadgen_mux_orphan_total` climb / zero OK
   calls — or switch to `--correlate to-user`, which needs no SUT cooperation
   (see *Correlation strategies* below).
-- `--bind-ip` = the kind bridge gateway:
-  `docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}'` (e.g.
-  `172.20.0.1`). See the `cluster-nat-inventory` notes for the NAT details.
+- `--bind-ip` = the external bridge's gateway:
+  `docker network inspect sipext -f '{{(index .IPAM.Config 0).Gateway}}'` (e.g.
+  `192.168.60.1`). See the `cluster-nat-inventory` notes for the NAT details.
 
 Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
 `--base-port` (uac=base, uas=base+1, refer=base+2), `--shared-socket` (all
@@ -106,7 +106,7 @@ It carries every run knob (`cps`, `durationSecs`, `maxInFlight`, `sampleCap`,
 
 ```bash
 ./target/release/loadgen \
-  --target 172.20.255.250:5060 --bind-ip 172.20.0.1 --route-pin-to-uas \
+  --target 192.168.60.250:5060 --bind-ip 192.168.60.1 --route-pin-to-uas \
   --load-profile e2e/loadprofiles/endurance-baseline.json
 ```
 
@@ -184,10 +184,10 @@ ingress), `recvTimeoutMs`, and the optional **`egress` policy**:
 {
   "infraShape": "loadgen-mux",
   "roles": {
-    "alice":   "172.20.0.1:6000",
-    "bob":     "172.20.0.1:6001",
-    "charlie": "172.20.0.1:6002",
-    "lb":      "172.20.255.250:5060"
+    "alice":   "192.168.60.1:6000",
+    "bob":     "192.168.60.1:6001",
+    "charlie": "192.168.60.1:6002",
+    "lb":      "192.168.60.250:5060"
   },
   "recvTimeoutMs": 5000,
   "egress": "api-call-pin"

@@ -182,6 +182,9 @@
         "externalInterface": {
           "type": "string"
         },
+        "externalEgressDrop": {
+          "type": "boolean"
+        },
         "externalNextHops": {
           "type": "array",
           "items": {
@@ -195,9 +198,6 @@
         },
         "sipPort": {
           "$ref": "#/definitions/port"
-        },
-        "internalCidrs": {
-          "type": "string"
         }
       }
     },
@@ -401,6 +401,17 @@
           "type": "integer",
           "minimum": 1
         },
+        "neighbour": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "baseReachableTimeMs": { "type": "integer", "minimum": 1 },
+            "delayFirstProbeSeconds": { "type": "integer", "minimum": 1 },
+            "ucastSolicit": { "type": "integer", "minimum": 1 },
+            "mcastSolicit": { "type": "integer", "minimum": 1 },
+            "retransTimeMs": { "type": "integer", "minimum": 1 }
+          }
+        },
         "readinessProbe": {
           "type": "object",
           "additionalProperties": false,
@@ -557,6 +568,19 @@
         },
         "priorityClassName": {
           "type": "string"
+        },
+        "egressRoutes": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
         },
         "routeGuard": {
           "type": "object",

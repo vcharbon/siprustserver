@@ -32,7 +32,9 @@ const notRun = (run: CampaignRun | undefined, lane: string): number =>
 const runLabel = (run: CampaignRun): string =>
   `#${run.id}${run.scope === null ? "" : "°"} · ${run.startedAt.slice(5, 16).replace("T", " ")}${
     run.labels.filter((l) => l.name !== "branch" && l.name !== "env").slice(0, 3).map((l) => ` · ${l.value}`).join("")
-  }${run.finishedAt === null ? " · running" : ""}`
+  }${(run.selection?.allow.length ?? 0) === 0 ? "" : ` · allowed ${run.selection!.allow.join(",")}`}${
+    run.finishedAt === null ? " · running" : ""
+  }`
 
 const Tiles = ({ view, run, vs, lanes }: {
   readonly view: Campaign
@@ -64,7 +66,7 @@ const Tiles = ({ view, run, vs, lanes }: {
           <div>
             <span className={`cp-big ${failing > 0 ? "cp-nok" : "cp-ok"}`}>{failing}</span> ✗ ·{" "}
             <span className="cp-err">{errors}</span> ! · <span className="cp-ok">{passing}</span> ✓ ·{" "}
-            <span className="muted">{skipped}</span> —
+            <span className="muted" title={status.excluded.length === 0 ? undefined : `${status.excluded.length} excluded`}>{skipped}</span> —
           </div>
           <div className="cp-bar">
             <i className="pass" style={{ width: `${(passing / total) * 100}%` }} />
@@ -90,7 +92,7 @@ const Campaigns = (): JSX.Element => {
       {listed.state === "error" && <p className="cp-nok">{listed.message}</p>}
       {listed.state === "ok" && (
         <ul>
-          {listed.value.map((capture) => <li key={capture}><Link to={href.campaign(capture)}>{capture}</Link></li>)}
+          {listed.value.map(({ capture, title }) => <li key={capture}><Link to={href.campaign(capture)}>{title ?? capture}</Link></li>)}
           {listed.value.length === 0 && <li className="muted">none</li>}
         </ul>
       )}
@@ -151,7 +153,7 @@ const Summary = ({ view: whole }: { readonly view: Campaign }): JSX.Element => {
     <div className="page campaign">
       <header className="cp-head">
         <div>
-          <h1>Campaign summary</h1>
+          <h1>{view.title ?? "Campaign summary"}</h1>
           <p className="muted mono">{view.capture}{view.env === null ? "" : ` · ${view.env}`}</p>
         </div>
         <div className="cp-controls">
@@ -183,7 +185,16 @@ const Summary = ({ view: whole }: { readonly view: Campaign }): JSX.Element => {
           {flag("failing", "failing", "fails on a lane read")}
           {flag("oneLane", "one lane", "fails on exactly one lane read")}
           {flag("fresh", "new", "fails where the compared run did not")}
-          {view.launch !== null && <CampaignStart capture={view.capture} lanes={view.launch.lanes} />}
+          {view.launch !== null && (
+            <CampaignStart
+              key={view.capture}
+              capture={view.capture}
+              lanes={view.launch.lanes}
+              stated={view.launch.defaultLanes}
+              tags={view.launch.tags}
+              cases={view.cases}
+            />
+          )}
           <input
             className="cp-filter"
             placeholder="filter"

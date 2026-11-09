@@ -57,6 +57,7 @@ fn writer_to(addr: SocketAddr) -> RabbitMqCdrWriter {
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 0 },
         bounds: CdrDeliveryBounds { connect_timeout: Duration::from_secs(5), ..Default::default() },
+        tls: amqp_connect::BrokerTls::PLAIN,
     };
     RabbitMqCdrWriter::new(settings, Arc::new(Fixed), B2buaMetrics::new())
 }

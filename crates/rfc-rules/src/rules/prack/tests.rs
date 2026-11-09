@@ -40,6 +40,7 @@ fn msg(
     head: String,
 ) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: src.to_string(),
         dst: dst.to_string(),
@@ -60,7 +61,7 @@ fn msg(
 /// An INVITE offering `100rel`, from `src`.
 fn invite(at_us: u64, src: &str, dst: &str, cseq: u32) -> Msg {
     let head = format!(
-        "INVITE sip:bob@h SIP/2.0\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>\r\n\
+        "INVITE sip:bob@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>\r\n\
              CSeq: {cseq} INVITE\r\nSupported: 100rel\r\nContent-Length: 0\r\n\r\n"
     );
     msg(at_us, src, dst, Kind::Request { method: "INVITE".to_string() }, cseq, None, head)
@@ -77,7 +78,7 @@ fn reliable(
     to_tag: &str,
 ) -> Msg {
     let head = format!(
-        "SIP/2.0 {status} Ringing\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
+        "SIP/2.0 {status} Ringing\r\nContact: <sip:fixture@192.0.2.98>\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
              CSeq: {cseq} INVITE\r\nRequire: 100rel\r\nRSeq: {rseq}\r\nContent-Length: 0\r\n\r\n"
     );
     msg(at_us, src, dst, Kind::Response { status }, cseq, Some(to_tag), head)
@@ -94,7 +95,7 @@ fn prack(
     to_tag: &str,
 ) -> Msg {
     let head = format!(
-        "PRACK sip:bob@h SIP/2.0\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
+        "PRACK sip:bob@h SIP/2.0\r\nMax-Forwards: 70\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
              CSeq: {cseq} PRACK\r\nRAck: {rseq} {rack_cseq} INVITE\r\nContent-Length: 0\r\n\r\n"
     );
     let mut m = msg(
@@ -113,7 +114,7 @@ fn prack(
 /// The INVITE final that releases the transaction.
 fn ok200(at_us: u64, cseq: u32, to_tag: &str) -> Msg {
     let head = format!(
-        "SIP/2.0 200 OK\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
+        "SIP/2.0 200 OK\r\nContact: <sip:fixture@192.0.2.98>\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
              CSeq: {cseq} INVITE\r\nContent-Length: 0\r\n\r\n"
     );
     msg(at_us, UAS, UAC, Kind::Response { status: 200 }, cseq, Some(to_tag), head)
@@ -164,7 +165,7 @@ fn invite_on(at_us: u64, extra: &str, to_tag: Option<&str>, body: bool) -> Msg {
         None => "<sip:b@h>".to_string(),
     };
     let head = format!(
-        "INVITE sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP h;branch={INV_BRANCH}\r\n\
+        "INVITE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP h;branch={INV_BRANCH}\r\n\
              From: <sip:a@h>;tag=fa\r\nTo: {to}\r\nCSeq: 1 INVITE\r\n{extra}{}\r\n",
         body_rows(body)
     );
@@ -177,7 +178,7 @@ fn invite_on(at_us: u64, extra: &str, to_tag: Option<&str>, body: bool) -> Msg {
 /// An INVITE-transaction response the UAS sends.
 fn inv_resp(at_us: u64, status: u16, extra: &str, body: bool) -> Msg {
     let head = format!(
-        "SIP/2.0 {status} X\r\nVia: SIP/2.0/UDP h;branch={INV_BRANCH}\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP h;branch={INV_BRANCH}\r\n\
              From: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag=tb\r\nCSeq: 1 INVITE\r\n{extra}{}\r\n",
         body_rows(body)
     );
@@ -189,7 +190,7 @@ fn inv_resp(at_us: u64, status: u16, extra: &str, body: bool) -> Msg {
 /// A PRACK the UAC sends, its `RAck` spelled out.
 fn prack_on(at_us: u64, rack: &str, body: bool) -> Msg {
     let head = format!(
-        "PRACK sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP h;branch={PRACK_BRANCH}\r\n\
+        "PRACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP h;branch={PRACK_BRANCH}\r\n\
              From: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag=tb\r\nCSeq: 2 PRACK\r\n\
              RAck: {rack}\r\n{}\r\n",
         body_rows(body)
@@ -222,7 +223,7 @@ fn decide(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<crate::verdict::Finding> {
 /// on the branch it shares with its sibling.
 fn fork_resp(at_us: u64, status: u16, extra: &str, to_tag: &str, sdp: bool) -> Msg {
     let head = format!(
-        "SIP/2.0 {status} X\r\nVia: SIP/2.0/UDP h;branch={INV_BRANCH}\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP h;branch={INV_BRANCH}\r\n\
              From: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\nCSeq: 1 INVITE\r\n\
              {extra}{}\r\n",
         body_rows(sdp)
@@ -235,7 +236,7 @@ fn fork_resp(at_us: u64, status: u16, extra: &str, to_tag: &str, sdp: bool) -> M
 /// The PRACK of one fork's provisional, on that fork's own dialog.
 fn fork_prack(at_us: u64, rack: &str, to_tag: &str, branch: &str) -> Msg {
     let head = format!(
-        "PRACK sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP h;branch={branch}\r\n\
+        "PRACK sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP h;branch={branch}\r\n\
              From: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\nCSeq: 2 PRACK\r\n\
              RAck: {rack}\r\nContent-Length: 0\r\n\r\n"
     );

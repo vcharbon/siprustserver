@@ -46,22 +46,15 @@ fn first_line(raw: &[u8]) -> String {
 }
 
 fn has_sdp(msg: &SipMessage) -> bool {
-    let body = match msg {
-        SipMessage::Request(r) => &r.body(),
-        SipMessage::Response(r) => &r.body(),
-    };
-    if body.is_empty() {
-        return false;
+    match msg {
+        SipMessage::Request(r) => r.sdp().is_some(),
+        SipMessage::Response(r) => r.sdp().is_some(),
     }
-    msg.header::<sip_message::header::MediaType>()
-        .and_then(Result::ok)
-        .is_some_and(|media| media.is("application/sdp"))
-        || body.starts_with(b"v=0")
 }
 
 /// Extract the renderer facets from raw packet bytes.
 pub fn facets(raw: &[u8]) -> Facets {
-    let parser = CustomParser::new();
+    let parser = CustomParser::built();
     let Ok(msg) = parser.parse(raw) else {
         return Facets {
             label: first_line(raw),

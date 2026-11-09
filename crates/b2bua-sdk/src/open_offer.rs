@@ -7,7 +7,7 @@
 use call::{Call, Dialog, DialogId, Ladder, Leg, LegState, RequestRecord, Shown};
 use sip_message::header::{HeaderValue, MediaType};
 use sip_message::sip_str::SipStr;
-use sip_message::{HeaderName, SipMessage, SipParser};
+use sip_message::{HeaderName, SipMessage};
 
 /// The owner of the INVITE offer open on the sender's dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,9 +86,7 @@ fn dialled(call: &Call, leg: &Leg, callee_tag: &str) -> Option<OpenOffer> {
         return None;
     }
     let bytes = &leg.dialled_sent()?.image;
-    let SipMessage::Request(invite) =
-        sip_message::CustomParser::new().parse(bytes.as_slice()).ok()?
-    else {
+    let SipMessage::Request(invite) = sip_message::read_stored(bytes).ok()? else {
         return None;
     };
     invite.sdp()?;
@@ -130,10 +128,11 @@ fn responder_answered(call: &Call, leg_id: &str, tag: &str, cseq: Option<i64>) -
 
 /// The caller's INVITE carried a session description (RFC 5621 §3.1).
 fn snapshot_carries_sdp(invite: &call::ALegInviteSnapshot) -> bool {
-    invite
-        .headers
-        .iter()
-        .filter(|h| HeaderName::ContentType.matches(&h.name))
-        .filter_map(|h| MediaType::parse(&SipStr::owned(&h.value)).ok())
-        .any(|ct| sip_message::multipart::sdp_range(&ct, &invite.body).is_some())
+    let first = |name: HeaderName| {
+        invite.headers.iter().find(|h| name.matches(&h.name)).map(|h| h.value.as_str())
+    };
+    let disposition = first(HeaderName::ContentDisposition);
+    first(HeaderName::ContentType)
+        .and_then(|ct| MediaType::parse(&SipStr::owned(ct)).ok())
+        .is_some_and(|ct| sip_message::sdp_range(&ct, disposition, &invite.body).is_some())
 }

@@ -112,12 +112,6 @@ impl Method {
             _ => Method::Other(s.to_string()),
         }
     }
-
-    /// RFC 3261 §12.1 — methods whose 2xx establishes a dialog (so the proxy
-    /// Record-Routes them and the transaction layer treats them specially).
-    pub fn is_dialog_creating(&self) -> bool {
-        matches!(self, Method::Invite | Method::Subscribe)
-    }
 }
 
 impl fmt::Display for Method {
@@ -225,14 +219,6 @@ mod tests {
         assert!(Method::Invite != "invite");
         assert!(Method::Invite == "INVITE");
         assert!(Method::Bye != "INVITE");
-    }
-
-    #[test]
-    fn dialog_creating_set() {
-        assert!(Method::Invite.is_dialog_creating());
-        assert!(Method::Subscribe.is_dialog_creating());
-        assert!(!Method::Bye.is_dialog_creating());
-        assert!(!Method::Refer.is_dialog_creating());
     }
 
     #[test]

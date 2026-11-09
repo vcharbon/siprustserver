@@ -83,7 +83,7 @@ impl Owner {
         let backlog = self.backlog_refuses(req);
         let gate = match backlog {
             Some(_) => None,
-            None => self.new_call_gate.as_ref().and_then(|gate| gate.refuses(req)),
+            None => self.new_call_gate.as_ref().and_then(|g| g.refuses(req, &self.event_ages)),
         };
         match refusals.admit(req, backlog.is_some() || gate.is_some()) {
             Admission::Admit { held } => return NewInvite::Admitted { held },

@@ -5,8 +5,9 @@
 //! Via whichever node sent the INVITE (§8.1.1.7), an offer the 2xx
 //! makes to an INVITE that carried none answered with every stream rejected
 //! (RFC 3264 §4, §6); a non-2xx final to an INVITE is ACKed hop by hop
-//! (§17.1.1.3) at the Request-URI the extension states. A BYE into a dialog
-//! already ended draws a 481 and does no harm. Anything else is owed nothing.
+//! (§17.1.1.3) where the INVITE went (§17.1.1.2), on the Request-URI and the
+//! route the extension states. A BYE into a dialog already ended draws a 481 and
+//! does no harm. Anything else is owed nothing.
 
 use sip_ids::TurnIds;
 use sip_message::generators::{
@@ -42,9 +43,26 @@ pub fn answer_unheld_response(
         return answer_2xx(config, resp, &ext.leg, answer, ids);
     }
     let Ok(uri) = Uri::parse(&SipStr::owned(&ext.request_uri)) else { return Vec::new() };
-    let Ok(ack) = generate_ack_for_unheld_non_2xx(resp, uri) else { return Vec::new() };
-    let (ack, dest) = apply_b_leg_egress(config, &ext.leg, &[], ack, src);
+    let Ok(ack) = generate_ack_for_unheld_non_2xx(resp, uri, &ext.route) else {
+        return Vec::new();
+    };
+    // The front proxy's first hop, whichever leg; with none, the request's own.
+    let first_hop = if config.front.outbound_proxy().is_some() { src } else { next_hop(&ack) };
+    let (ack, dest) = apply_b_leg_egress(config, &ext.leg, &[], ack, first_hop);
     vec![effect(ack, dest, OutboundTxnMode::Raw, "ACK (non-2xx, unheld)", &ext.leg)]
+}
+
+/// Where `req` goes with no front proxy: its first Route, else its Request-URI
+/// (RFC 3261 §8.1.2).
+fn next_hop(req: &SipRequest) -> (String, u16) {
+    let routes = req.route_set().ok();
+    match routes.as_ref().and_then(|routes| routes.first()) {
+        Some(route) => {
+            let (host, port) = route.uri().next_hop();
+            (host.to_string(), port)
+        }
+        None => target_dest(&req.request_uri().to_string()),
+    }
 }
 
 /// The answer to the offer `resp` makes, every stream rejected (RFC 3264 §6).

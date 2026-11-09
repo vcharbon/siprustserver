@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::received::observed_source;
 use sip_message::{CustomParser, SipMessage, SipParser};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
@@ -45,6 +46,7 @@ fn respond(
                 continue;
             }
             let opts = GenerateResponseOpts {
+                incoming_source: Some(observed_source(pkt.src)),
                 to_tag: Some("probed".into()),
                 extra_headers: crate::common::options_capabilities(),
                 ..Default::default()
@@ -90,6 +92,7 @@ async fn run(answered: [usize; 2], run_for: Duration) -> Run {
     let reach = WorkerReach::unheard();
     let probe = HealthProbe::new(
         probe_ep,
+        sip_message::CustomParser::new(),
         registry.clone(),
         registry.control(),
         Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default())),

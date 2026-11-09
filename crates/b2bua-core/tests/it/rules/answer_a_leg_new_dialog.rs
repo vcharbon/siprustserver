@@ -479,3 +479,57 @@ fn header_updates_own_a_name_over_the_relayed_line() {
         _ => panic!("expected an outbound response"),
     }
 }
+
+/// A single-valued header the service states on two lines is left out as
+/// though never stated (ADR-0053 §7): the delivered final's own line rides,
+/// once, and the skip is reported.
+#[test]
+fn a_header_stated_twice_leaves_the_relayed_line_as_it_would_be_unstated() {
+    let call = call_with_early_a_dialog("A1early");
+    let event = some_event();
+    let config = B2buaConfig::default();
+    let mut id_gen = scope(1);
+    let raw = String::from_utf8(callee_final().image().to_vec()).expect("text");
+    let raw = raw.replace("Privacy: none\r\n", "Privacy: none\r\nSubject: the callee's\r\n");
+    let SipMessage::Response(delivered) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
+        panic!("expected a response")
+    };
+    let result = exec_on(
+        &call,
+        &event,
+        "b-1",
+        &config,
+        &mut id_gen,
+        &[RuleAction::AnswerALegNewDialog {
+            status: 200,
+            reason: "OK".into(),
+            body: Some(Body::from_leg(delivered.body().to_vec(), "b-1")),
+            to_tag: None,
+            header_updates: vec![
+                ("Subject".into(), Some("one".into())),
+                ("s".into(), Some("two".into())),
+            ],
+            relayed: RelayedFinal::of(
+                &delivered,
+                &call.a_leg_invite,
+                200,
+                SourceBody::Verbatim,
+                &B2buaConfig::default(),
+            ),
+        }],
+    );
+    match &result.effects.outbound[0].body {
+        OutboundBody::Response(r) => {
+            let subjects: Vec<&str> = r.raw(HeaderName::Subject).collect();
+            assert_eq!(subjects, ["the callee's"], "the delivered final's own line rides");
+        }
+        _ => panic!("expected an outbound response"),
+    }
+    let skips = result
+        .effects
+        .buffered
+        .iter()
+        .filter(|e| matches!(e, BufferedObservabilityEffect::StatedTextSkipped { .. }))
+        .count();
+    assert_eq!(skips, 1, "the skip is reported");
+}

@@ -40,7 +40,9 @@ pub fn retag_response(response: &SipResponse, tag: &str) -> Option<SipResponse> 
 }
 
 /// Inputs for [`generate_response`]. Via / From / To / Call-ID / CSeq are not
-/// inputs at all — §8.2.6.2 makes them echoes of the request, carried verbatim.
+/// inputs at all — §8.2.6.2 makes them echoes of the request, carried as their
+/// lines read (a surrogate pair the request wrote in CESU-8 echoes in UTF-8,
+/// ADR-0053 §3).
 #[derive(Debug, Clone, Default)]
 pub struct GenerateResponseOpts {
     /// Tag added to To when status > 100 and the request's To lacks one.
@@ -68,14 +70,17 @@ pub(super) fn echo_via(
         return draft.push_raw(HeaderName::Via, line);
     };
     let text = line.as_str();
-    let mut entries = top_level_comma_entries(text);
-    let Some(first) = entries.next() else {
+    let (first, second) = {
+        let mut entries = top_level_comma_entries(text);
+        (entries.next(), entries.next())
+    };
+    let Some(first) = first else {
         return draft.push_raw(HeaderName::Via, line);
     };
     let Ok(hop) = Via::parse(&line.reslice(first)) else {
         return draft.push_raw(HeaderName::Via, line);
     };
-    let rest = entries.next().and_then(|second| {
+    let rest = second.and_then(|second| {
         let start = (second.as_ptr() as usize).checked_sub(text.as_ptr() as usize)?;
         text.get(start..)
     });
@@ -106,7 +111,7 @@ pub(super) fn echo_to(
     let tag = || to_tag.map(str::to_owned).unwrap_or_else(|| fallback_to_tag(call_id));
     match To::parse(&line) {
         Ok(to) if to.tag().is_some() => draft.push_raw(HeaderName::To, line),
-        Ok(to) => draft.push(to.with_tag(SipStr::owned(&tag()))),
+        Ok(to) => draft.set(to.with_tag(SipStr::owned(&tag()))),
         // A To the strict reader cannot read still leaves tagged, so the peer
         // rejects the address it sent rather than a tag this stack dropped.
         Err(_) => draft
@@ -124,7 +129,7 @@ pub fn delayed_trying_timestamp(
     delay: std::time::Duration,
 ) -> Option<SipHeader> {
     let stated = request.raw_text(HeaderName::Timestamp).next()?;
-    let value = stated.as_str().split_whitespace().next()?;
+    let value = crate::whitespace::split(stated.as_str()).next()?;
     let ms = delay.as_millis();
     let delayed = format!("{value} {}.{:03}", ms / 1000, ms % 1000);
     Some(SipHeader::new(HeaderName::Timestamp.as_wire_str().to_string(), delayed))
@@ -194,7 +199,7 @@ mod tests {
     use crate::SipParser;
 
     fn notify() -> SipRequest {
-        let raw = "NOTIFY sip:as@127.0.0.1:5060 SIP/2.0\r\n\
+        let raw = "NOTIFY sip:as@127.0.0.1:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-n1\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@127.0.0.1:5070>;tag=a1\r\n\

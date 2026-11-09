@@ -36,6 +36,7 @@ sip-ids = { path = "../sip-ids" }
 sip-retransmit = { path = "../sip-retransmit" }
 # The rule engine's lookups (ADR-0051: no iteration in hash-seed order).
 lookup-map = { path = "../lookup-map" }
+bounds = { path = "../bounds" }
 
 [dev-dependencies]
 # The tests drive turns through the shared turn driver (`turn_driver`).

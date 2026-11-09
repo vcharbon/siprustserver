@@ -171,6 +171,7 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
             reinvite_gap: Duration::from_millis(args.reinvite_gap_ms),
             long_hold: Duration::from_secs(args.long_hold_secs),
             teardown_quiesce: Duration::from_millis(250),
+            final_wait: args.final_wait_ms.map(Duration::from_millis),
         },
         default_tuning: base_tuning,
         tuning,

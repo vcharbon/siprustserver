@@ -16,7 +16,7 @@
 //! cannot render a second value or inject a header line.
 
 use crate::draft::Entry;
-use crate::header::{AcceptRange, Allow, HeaderName, HeaderValue, Supported};
+use crate::header::{AcceptRange, Allow, HeaderName, HeaderValue, Supported, TokenSet};
 use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 use crate::types::SipHeader;
@@ -165,14 +165,14 @@ impl CapabilitySet {
 /// carries no line of that header. Several lines are one set (RFC 3261 §7.3.1),
 /// and a line whose value is empty states the empty set — a statement, distinct
 /// from carrying no line at all.
-fn line_value<V: HeaderValue>(received: &[SipHeader]) -> Option<V> {
+fn line_value<V: TokenSet>(received: &[SipHeader]) -> Option<V> {
     let name = V::header_name();
     let lines: Vec<V> = received
         .iter()
         .filter(|h| name.matches(&h.name))
         .filter_map(|h| V::parse(&h.value).ok())
         .collect();
-    V::combine(lines)
+    V::union(lines)
 }
 
 /// The media ranges `received` states across its `Accept` lines, in order,
@@ -201,8 +201,8 @@ fn accept_value(received: &[SipHeader]) -> Option<Vec<AcceptRange>> {
 impl Default for CapabilitySet {
     fn default() -> Self {
         Self {
-            allow: Some(Allow::of(B2BUA_ALLOW.split(',').map(str::trim))),
-            supported: Some(Supported::of(B2BUA_SUPPORTED.split(',').map(str::trim))),
+            allow: Some(Allow::of(B2BUA_ALLOW.split(',').map(crate::whitespace::trim))),
+            supported: Some(Supported::of(B2BUA_SUPPORTED.split(',').map(crate::whitespace::trim))),
             accept: Some(vec![AcceptRange::new(B2BUA_ACCEPT)]),
         }
     }

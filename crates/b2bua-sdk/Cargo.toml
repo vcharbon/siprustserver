@@ -22,3 +22,4 @@ call = { path = "../call" }
 sip-message = { path = "../sip-message" }
 sip-ids = { path = "../sip-ids" }
 sip-retransmit = { path = "../sip-retransmit" }
+tracing = { workspace = true }

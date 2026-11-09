@@ -5,20 +5,16 @@
 //! turn; it runs on the call's own queue, behind any message already queued,
 //! and lands as any turn does, so the write precedes the sends, each deadline
 //! is armed afresh from the re-send, and the requests leave through the
-//! call's outbox. An admit the request carries is numbered above every change
-//! the call reserved before ([`call::CallLimiterState::renumber_consult`],
-//! [`call::CallLimiterState::renumber_replacement`]): the limiter checks it
-//! net of what the key holds, so a set the first request admitted is not
-//! counted twice.
+//! call's outbox. What is sent again is the core's fold
+//! ([`crate::off_turn::resend`]).
 
 use std::sync::Arc;
 
-use call::{Call, CallModelState, OffTurnRequest, TimerType};
+use call::{Call, OffTurnRequest};
 
-use super::interpret::process_result;
+use super::commit::commit_turn;
 use super::RouterCtx;
-use crate::effects::{CriticalStateEffect, FireAndForgetEffect, HandlerEffects, HandlerResult};
-use crate::limiter::report::LimiterAdmitResult;
+use crate::off_turn::resend;
 use b2bua_sdk::event::CallEvent;
 
 /// The topic of the re-send notice, an internal event the router raises
@@ -60,130 +56,26 @@ pub(super) fn notice_of(event: &CallEvent) -> Option<(&str, Option<Vec<OffTurnRe
 }
 
 /// The re-send turn of `call_ref`, under its per-call lock: every request the
-/// resident call awaits, or those of `only` among them, is sent again, the
-/// deadline its sender armed retired. A call gone, ending or awaiting none of
-/// them sends nothing.
+/// resident call awaits, or those of `only` among them, is sent again
+/// ([`resend::fold`]). A call gone, ending or awaiting none of them sends
+/// nothing.
 pub(super) async fn resend_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     only: Option<Vec<OffTurnRequest>>,
 ) {
     let _guard = ctx.state.lock(call_ref).await;
-    let Some(mut call) = ctx.state.peek(call_ref) else { return };
-    let (again, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut call.awaited)
-        .into_iter()
-        .partition(|r| only.as_ref().is_none_or(|o| o.contains(r)));
-    call.awaited = kept;
-    if again.is_empty() || call.state != CallModelState::Active {
-        return;
-    }
-    let now_ms = ctx.clock.now_ms();
-    let mut effects = HandlerEffects { resent: true, ..HandlerEffects::new() };
-    for request in again {
-        let retired =
-            call::helpers::retire_timers(&mut call, |t| answers(&request, t.timer_type()));
-        for entry in retired {
-            effects.critical.push(CriticalStateEffect::CancelTimer { key: entry.key });
-        }
-        effects.fire_and_forget.push(sent_again(&mut call, request));
-    }
+    let Some(call) = ctx.state.peek(call_ref) else { return };
+    let Some(result) = resend::fold(call, only.as_deref()) else { return };
     tracing::info!(
         node = observe::node(),
         call_ref,
-        requests = effects.fire_and_forget.len(),
+        requests = result.effects.fire_and_forget.len(),
         "awaited requests sent again"
     );
-    let result = HandlerResult { call, effects };
+    let now_ms = ctx.clock.now_ms();
     let turn = &"the re-send of the requests the call awaits";
-    process_result(ctx, call_ref, result, now_ms, turn, None).await;
-}
-
-/// Whether `deadline` is the answer deadline of a request `call` awaits.
-pub(super) fn awaited_deadline(call: &Call, deadline: &TimerType) -> bool {
-    call.awaited.iter().any(|r| answers(r, deadline))
-}
-
-/// Whether `deadline` is the answer deadline of `request`.
-fn answers(request: &OffTurnRequest, deadline: &TimerType) -> bool {
-    match (request, deadline) {
-        (
-            OffTurnRequest::ServiceHttp { correlation_id: a, .. },
-            TimerType::ServiceHttpAnswer { correlation_id: b },
-        )
-        | (
-            OffTurnRequest::Admit { correlation_id: a, .. },
-            TimerType::ServiceAdmitAnswer { correlation_id: b, .. },
-        ) => a == b,
-        (OffTurnRequest::Failure { limiter, .. }, TimerType::FailureAnswer { change, .. })
-        | (OffTurnRequest::Release { limiter, .. }, TimerType::ReleaseAnswer { change }) => {
-            limiter.first_change == *change
-        }
-        _ => false,
-    }
-}
-
-/// The effect that sends `request` of `call` again, its admits numbered
-/// afresh.
-fn sent_again(call: &mut Call, request: OffTurnRequest) -> FireAndForgetEffect {
-    let call_ref = call.call_ref.clone();
-    match request {
-        OffTurnRequest::Refer { request, .. } => {
-            FireAndForgetEffect::ReferAsyncHttp { call_ref, request }
-        }
-        OffTurnRequest::ServiceHttp {
-            correlation_id,
-            endpoint,
-            method,
-            headers,
-            body,
-            content_type,
-            timeout_ms,
-        } => FireAndForgetEffect::ServiceHttpRequest {
-            call_ref,
-            correlation_id,
-            endpoint,
-            method,
-            headers,
-            body,
-            content_type,
-            timeout_ms,
-        },
-        OffTurnRequest::Failure { request, .. } => {
-            let chain = u64::from(crate::answer_deadline::FAILURE_CHAIN);
-            let limiter = call.limiter.renumber_consult(chain);
-            FireAndForgetEffect::FailureAsyncHttp { call_ref, request, limiter, deadline: None }
-        }
-        OffTurnRequest::Release { request, .. } => {
-            let limiter = call.limiter.renumber_consult(1);
-            FireAndForgetEffect::ReleaseAsyncHttp { call_ref, request, limiter, deadline: None }
-        }
-        // A later change of the set superseded the replacement before it was
-        // answered: it is answered so, and nothing is sent.
-        OffTurnRequest::Admit { correlation_id, entries, change }
-            if call.limiter.target_change() > change =>
-        {
-            let report = call::AdmitReport {
-                key: call.limiter.key().to_string(),
-                change,
-                entries,
-                outcome: call::AdmitOutcome::Superseded { held: call.limiter.held_set() },
-            };
-            let result = LimiterAdmitResult { call_ref, correlation_id, report };
-            FireAndForgetEffect::Reenter(Box::new(result.into_event()))
-        }
-        OffTurnRequest::Admit { correlation_id, entries, .. } => {
-            let (change, held) = call.limiter.renumber_replacement(entries.clone());
-            let key = call.limiter.key().to_string();
-            FireAndForgetEffect::LimiterAdmit {
-                call_ref,
-                correlation_id,
-                key,
-                change,
-                held,
-                entries,
-            }
-        }
-    }
+    commit_turn(ctx, call_ref, result, now_ms, turn, None).await;
 }
 
 #[cfg(test)]

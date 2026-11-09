@@ -13,12 +13,11 @@ use super::{AckCseqMatchesInvite, CseqInDialogOrder, ResponseCseqMatchesTransact
 const ALICE: &str = "10.0.0.1:5060";
 const BOB: &str = "10.0.0.2:5070";
 
-/// A request alice sent bob: method, CSeq, top-Via branch and dialog To tag
-/// all caller-controlled, so a test can model a new transaction (fresh
-/// branch), a retransmission (reused branch), a fork (distinct To tag) or a
-/// dialog-creating request (`None`).
+/// A request alice sent bob, method, CSeq, branch and To tag caller-chosen: a
+/// new transaction, a retransmission, a fork, or a dialog-creating one (`None`).
 fn req(at_us: u64, method: &str, cseq: u32, branch: &str, to_tag: Option<&str>) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: ALICE.to_string(),
         dst: BOB.to_string(),
@@ -49,6 +48,7 @@ fn options(at_us: u64, cseq: u32) -> Msg {
 /// A response bob sent alice on `branch`, carrying a chosen `CSeq`.
 fn rsp(at_us: u64, status: u16, cseq: u32, method: &str, branch: &str) -> Msg {
     Msg {
+        refused: false,
         at_us,
         src: BOB.to_string(),
         dst: ALICE.to_string(),

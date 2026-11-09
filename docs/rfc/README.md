@@ -7,14 +7,14 @@ RFC the codebase cites, so they are on hand offline. Grep the codebase for
 ## Errata
 
 `rfcNNNN-errata.md` beside `rfcNNNN.txt` holds that RFC's full errata record —
-a 2026-08-06 snapshot of the RFC Editor database
+a snapshot of the RFC Editor database, dated in the file
 (<https://www.rfc-editor.org/errata/rfcNNNN>), sorted Verified → Held for
 Document Update → Reported → Rejected, Technical before Editorial. **Read the
 errata alongside the RFC — Verified technical errata correct the spec text.**
 Rejected entries are kept (clearly labelled) because the rejection rationale is
 often itself an authoritative reading. No errata file means the RFC had zero
-errata at snapshot time: 3263, 3311, 3326, 3551, 4412, 4475, 5009, 5407, 6665,
-7433, 8760.
+errata at snapshot time: 3263, 3311, 3326, 3551, 3892, 4412, 4475, 4488, 5009,
+5407, 5621, 5626, 6665, 7433, 8760, 8866.
 
 ## Core SIP
 
@@ -28,18 +28,24 @@ errata at snapshot time: 3263, 3311, 3326, 3551, 4412, 4475, 5009, 5407, 6665,
 
 - [rfc3311.txt](rfc3311.txt) — The SIP UPDATE Method
 - [rfc3325.txt](rfc3325.txt) — Private Extensions for Asserted Identity (P-Asserted-Identity)
+- [rfc3323.txt](rfc3323.txt) — A Privacy Mechanism for SIP (Privacy)
 - [rfc3326.txt](rfc3326.txt) — The Reason Header Field
 - [rfc3420.txt](rfc3420.txt) — Internet Media Type message/sipfrag
 - [rfc3515.txt](rfc3515.txt) — The SIP REFER Method
 - [rfc3581.txt](rfc3581.txt) — Symmetric Response Routing (rport)
 - [rfc3891.txt](rfc3891.txt) — The SIP "Replaces" Header
+- [rfc3892.txt](rfc3892.txt) — The SIP Referred-By Mechanism
 - [rfc4028.txt](rfc4028.txt) — Session Timers in SIP
 - [rfc4412.txt](rfc4412.txt) — Communications Resource Priority (Resource-Priority)
+- [rfc4488.txt](rfc4488.txt) — Suppression of the Implicit REFER Subscription (Refer-Sub)
 - [rfc5009.txt](rfc5009.txt) — P-Header for Authorization of Early Media (P-Early-Media)
+- [rfc5621.txt](rfc5621.txt) — Message Body Handling in SIP
+- [rfc5626.txt](rfc5626.txt) — Managing Client-Initiated Connections in SIP (Flow-Timer, reg-id)
 - [rfc5806.txt](rfc5806.txt) — Diversion Indication in SIP
 - [rfc6442.txt](rfc6442.txt) — Location Conveyance for SIP
 - [rfc6665.txt](rfc6665.txt) — SIP-Specific Event Notification (obsoletes 3265)
 - [rfc7044.txt](rfc7044.txt) — Request History Information (History-Info)
+- [rfc7315.txt](rfc7315.txt) — Private SIP Header Extensions for 3GPP (P-Charging-Vector, P-Access-Network-Info)
 - [rfc7433.txt](rfc7433.txt) — Transporting User-to-User Call Control Information
 
 ## URIs
@@ -56,10 +62,16 @@ errata at snapshot time: 3263, 3311, 3326, 3551, 4412, 4475, 5009, 5407, 6665,
 ## SDP & media
 
 - [rfc4566.txt](rfc4566.txt) — SDP: Session Description Protocol
+- [rfc8866.txt](rfc8866.txt) — SDP: Session Description Protocol (obsoletes 4566)
 - [rfc3550.txt](rfc3550.txt) — RTP: A Transport Protocol for Real-Time Applications
 - [rfc3551.txt](rfc3551.txt) — RTP Profile for Audio and Video Conferences
 - [rfc5761.txt](rfc5761.txt) — Multiplexing RTP Data and Control Packets on a Single Port (rtcp-mux)
 - [rfc5022.txt](rfc5022.txt) — Media Server Control Markup Language (MSCML)
+
+## MIME
+
+- [rfc2045.txt](rfc2045.txt) — MIME Part One: Format of Internet Message Bodies
+- [rfc2046.txt](rfc2046.txt) — MIME Part Two: Media Types (multipart framing)
 
 ## Authentication & crypto
 

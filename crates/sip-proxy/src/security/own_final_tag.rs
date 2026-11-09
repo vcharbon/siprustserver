@@ -38,7 +38,7 @@ mod tests {
         };
         use sip_message::SipParser;
         let invite = parse(
-            "INVITE sip:bob@192.0.2.9 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bKk\r\n\
+            "INVITE sip:bob@192.0.2.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bKk\r\n\
              From: <sip:a@192.0.2.1>;tag=a\r\nTo: <sip:bob@192.0.2.9>\r\nCall-ID: k@192.0.2.1\r\n\
              CSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
         );
@@ -49,6 +49,6 @@ mod tests {
         // Pinned: every proxy of a deployment, whatever its build, derives
         // this tag, so a change of derivation shows here before a rolling
         // upgrade stops absorbing the other proxies' ACKs.
-        assert_eq!(tag(b"0123456789abcdef-golden"), "b362222fb49239cb");
+        assert_eq!(tag(b"0123456789abcdef-golden"), "16bf91b42197364c");
     }
 }

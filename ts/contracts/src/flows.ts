@@ -53,11 +53,31 @@ export const AlignedProbe = Schema.Struct({
 })
 export interface AlignedProbe extends Schema.Schema.Type<typeof AlignedProbe> {}
 
+/** One failed non-fatal header reading of an ingested message: message `msg` of the leg on `call_id`. */
+export const HeaderFailure = Schema.Struct({
+  call_id: Schema.String,
+  msg: Schema.Int,
+  header: Schema.String,
+  reason: Schema.String
+})
+export interface HeaderFailure extends Schema.Schema.Type<typeof HeaderFailure> {}
+
 /** SIP-classification counters over the decoded datagrams. */
 export const FlowStats = Schema.Struct({
   sip_messages: Schema.Int,
   capture_dups: Schema.Int,
   parse_failed: Schema.Int,
+  /** The `parse_failed` datagrams by the key of their refusal reason. Absent when none. */
+  parse_failed_by_reason: Schema.optionalKey(Schema.Record(Schema.String, Schema.Int)),
+  /** Ingested messages carrying a non-fatal header reading that failed. Absent when none. */
+  header_failed: Schema.optionalKey(Schema.Int),
+  /**
+   * The `header_failed` messages by the key of each failed reading's reason, a
+   * message counted once under each key. Absent when none.
+   */
+  header_failed_by_reason: Schema.optionalKey(Schema.Record(Schema.String, Schema.Int)),
+  /** Each failed reading of those messages. Absent when none. */
+  header_failures: Schema.optionalKey(Schema.Array(HeaderFailure)),
   non_sip: Schema.Int,
   /**
    * Every stretch of every rebased probe, a zero one (the clock back inside the
@@ -258,6 +278,12 @@ export const Leg = Schema.Struct({
   saw_180: Schema.Boolean,
   /** `"BYE"` | `"CANCEL"` — the first teardown request seen. */
   terminated_by: nullable(Schema.String),
+  /**
+   * Extraction refused a request of this Call-ID that opens a dialog or transaction (no To-tag,
+   * neither ACK nor CANCEL), and no request of that method without a To-tag was read on any hop of
+   * the leg: the leg lacks its opening request. Absent when false.
+   */
+  opening_request_set_aside: Schema.optionalKey(Schema.Boolean),
   /** Union over all token strategies, sorted and deduped. */
   tokens: Schema.Array(Schema.String),
   /** Capture-time order across all hops. */

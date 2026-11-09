@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
-use scenario_harness::{AgentBinder, EgressPolicy, WaiverScope};
+use scenario_harness::{AgentBinder, WaiverScope};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
@@ -35,10 +35,12 @@ use crate::{call_rtt::CallRtts, call_task::call_task, failed_call};
 use scenario_harness::actor::ScenarioVerdict;
 
 mod binding;
+mod call_config;
 mod record;
 mod seeds;
 pub(crate) use binding::CALLER;
 use binding::{bind_agents, bind_refusal, call_key, call_routing, KEY_DRAWS};
+pub use call_config::{CallConfig, CallTuning};
 use record::{phase_annotated_detail, record_unrun};
 use seeds::{next_seed, panic_msg, xorshift};
 
@@ -60,50 +62,6 @@ pub struct MuxTransport {
     /// The one process-wide clock every per-call binder records on (created once
     /// at startup), so all call timelines sit on a single monotonic-anchored axis.
     pub clock: Clock,
-}
-
-/// Static per-call routing config (shared `Arc` across all calls).
-pub struct CallConfig {
-    /// The address the initial INVITE routes through (SUT / VIP).
-    pub via: SocketAddr,
-    /// How this run's layout realizes a logical INVITE on the wire — the
-    /// environment axis shared with the e2e framework (`EndpointConfig.egress`):
-    /// [`EgressPolicy::Transparent`] when the SUT routes the callee itself,
-    /// [`EgressPolicy::ApiCallPin`] to pin the b-leg back to the static `uas`
-    /// endpoint (`--route-pin-to-uas`).
-    pub egress: EgressPolicy,
-    pub options_hold: Duration,
-    pub options_cadence: Duration,
-    /// Realistic ring time (callee 180→200 dwell). `0` = answer immediately.
-    pub ring_delay: Duration,
-    /// Post-connect talk time before BYE (basic call). `0` = hang up immediately.
-    pub talk_time: Duration,
-    /// Spacing held before and after a re-INVITE. `0` = back-to-back.
-    pub reinvite_gap: Duration,
-    /// Total hold of a long recorded call, split either side of its OPTIONS ping.
-    pub long_hold: Duration,
-    /// After a *failed* call's a-leg is torn down, how long to drain-and-200 the
-    /// in-process callee legs so the SUT closes its relayed b-leg promptly.
-    pub teardown_quiesce: Duration,
-}
-
-/// Robustness knobs applied per call, resolved per scenario (a global default
-/// overridden by any per-scenario entry). Both default off: an un-tuned run
-/// drops and retransmits nothing extra.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CallTuning {
-    /// Simulated packet-drop probability on this call's mux legs (0 = off). Each
-    /// datagram is independently dropped; the SUT (and, when enabled,
-    /// auto-retransmit) is what recovers the call.
-    pub drop_rate: f64,
-    /// Whether the harness auto-retransmits per real SIP timers (Timer A/E for
-    /// requests, 2xx-until-ACK for answers) on this call — so a rare drop is
-    /// recovered instead of failing the call.
-    pub retransmit: bool,
-    /// Optional DETERMINISTIC targeted drop (test knob): discard the nth
-    /// distinct inbound request of a given CSeq method, once or permanently —
-    /// see [`crate::mux::TargetedDrop`]. Default off.
-    pub drop_nth: Option<crate::mux::TargetedDrop>,
 }
 
 /// The settings [`Driver::new`] builds a driver from.
@@ -395,6 +353,7 @@ pub(crate) async fn run_one(
         // responder, folded into every call so the §22.2 retry is a one-object
         // opt-in, not a choreography change.
         challenge_responder: challenge_responder.clone(),
+        wait_ceiling: call.final_wait,
         options_hold: call.options_hold,
         // Per-call dwells: the resolved case extras override the global
         // CallConfig defaults knob-by-knob (unset knobs keep the default).

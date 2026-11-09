@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sip_clock::Clock;
+use sip_message::{CustomParser, SipParserLimits};
 use sip_net::UdpEndpoint;
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
@@ -71,31 +72,32 @@ pub fn spawn_proxy_core(
     workers: &[(&str, SocketAddr)],
     clock: Clock,
 ) -> ProxyCoreParts {
-    spawn_proxy_core_with(endpoint, addr, None, workers, clock, 0xC0FFEE)
+    spawn_proxy_reading(endpoint, addr, None, workers, clock, 0xC0FFEE, SipParserLimits::DEFAULT)
 }
 
 /// The **external face** of a dual-face proxy SUT (see
-/// [`spawn_proxy_core_with`]): a second bound endpoint on the caller plane +
-/// its advertise + the internal-plane CIDR list driving the egress face picker
-/// (`PROXY_FACE_INT_CIDRS` equivalent).
+/// [`spawn_proxy_reading`]): a second bound endpoint on the caller plane and
+/// its advertise.
 pub struct ExternalProxyFace {
     pub endpoint: Box<dyn UdpEndpoint>,
     pub addr: SocketAddr,
-    pub int_cidrs: sip_proxy::FaceCidrs,
 }
 
-/// [`spawn_proxy_core`] generalized: optional dual-face external endpoint and
-/// an explicit `id_seed` (a takeover twin re-bound on the same VIPs must mint
-/// DIFFERENT Via branches than the proxy it replaces — reusing the seed would
-/// replay the dead proxy's branch sequence into the same dialogs). The run
-/// loop serves the caller's node ([`observe::NodeScope`]).
-pub fn spawn_proxy_core_with(
+/// [`spawn_proxy_core`] generalized: an optional dual-face external endpoint,
+/// the `limits` the proxy reads the wire under (the exemptions a deployment
+/// names among them, ADR-0001) and an explicit `id_seed` (a takeover twin
+/// re-bound on the same VIPs must mint DIFFERENT Via branches than the proxy it
+/// replaces — reusing the seed would replay the dead proxy's branch sequence
+/// into the same dialogs). The run loop serves the caller's node
+/// ([`observe::NodeScope`]).
+pub fn spawn_proxy_reading(
     endpoint: Box<dyn UdpEndpoint>,
     addr: SocketAddr,
     external: Option<ExternalProxyFace>,
     workers: &[(&str, SocketAddr)],
     clock: Clock,
     id_seed: u64,
+    limits: SipParserLimits,
 ) -> ProxyCoreParts {
     let entries: Vec<WorkerEntry> = workers
         .iter()
@@ -116,14 +118,15 @@ pub fn spawn_proxy_core_with(
 
     let metrics = Arc::new(ProxyMetrics::new());
     let id_gen = Arc::new(IdGen::seeded(id_seed));
-    let mut builder = ProxyCoreBuilder::new(ProxyAddr::from(addr), strategy, registry_dyn, id_gen)
-        .clock(clock)
-        .metrics(metrics.clone());
+    let parser = CustomParser::ingress(limits);
+    let mut builder =
+        ProxyCoreBuilder::new(ProxyAddr::from(addr), strategy, registry_dyn, id_gen, parser)
+            .clock(clock)
+            .metrics(metrics.clone());
     if let Some(ext) = external {
         builder = builder.external_face(sip_proxy::ExternalFaceParts {
             endpoint: ext.endpoint,
             advertised: ProxyAddr::from(ext.addr),
-            int_cidrs: ext.int_cidrs,
         });
     }
     let core = builder.build(endpoint);

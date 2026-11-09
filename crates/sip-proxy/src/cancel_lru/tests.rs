@@ -46,15 +46,16 @@ fn key_format_is_branch_sent_by_then_dialog_fields() {
     let v = via("SIP/2.0/UDP Host.Example:5060;branch=z9hG4bK1;received=10.0.0.9;rport=4");
     assert_eq!(
         invite_txn_key(&v, "abc@h", Some("t1"), 7),
-        "inv|z9hG4bK1|host.example:5060|abc@h|t1|7"
+        "inv|z9hg4bk1|host.example:5060|abc@h|t1|7",
+        "the branch folded, as it compares (RFC 3261 §7.3.1)"
     );
     assert_eq!(
         invite_txn_key(&via("SIP/2.0/UDP h;branch=z9hG4bK1"), "abc@h", None, 7),
-        "inv|z9hG4bK1|h|abc@h||7"
+        "inv|z9hg4bk1|h|abc@h||7"
     );
     assert_eq!(
         ack_hop_key(&v, "abc@h", Some("t1"), 7),
-        "ackhop|z9hG4bK1|host.example:5060|abc@h|t1|7"
+        "ackhop|z9hg4bk1|host.example:5060|abc@h|t1|7"
     );
 }
 

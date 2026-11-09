@@ -5,14 +5,13 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use metric_catalogue::HistogramValue;
-
 use crate::dispatch::{Discard, PastBound};
 use crate::drain::DrainExit;
 use catalogue::worker::{DRAIN_BUCKETS, PAST_BOUND, REMOVAL_CLASS};
 
 pub mod catalogue;
 mod cells;
+mod durations;
 mod limiter;
 mod operator;
 mod removal_class;
@@ -20,6 +19,7 @@ mod repl_gauges;
 mod repl_hold;
 mod retransmit_row;
 mod rows;
+mod setup_times;
 pub mod shell;
 mod turn_counts;
 mod udp_transport;
@@ -47,11 +47,10 @@ struct Inner {
     // departing worker abandoned live calls no peer reported holding: a lost
     // flush window, the one reason that must never be read as a clean drain.
     drain_exits: [AtomicU64; DrainExit::ALL.len()],
-    // Time-in-drain: fixed-bucket cumulative counts (`le` in seconds), the sum in
-    // milliseconds and the observation count.
-    drain_seconds_buckets: [AtomicU64; catalogue::worker::DRAIN_BUCKETS.len()],
-    drain_seconds_sum_ms: AtomicU64,
-    drain_seconds_count: AtomicU64,
+    // Time-in-drain.
+    drain_seconds: durations::Durations<{ DRAIN_BUCKETS.len() }>,
+    // A new call's turn wait and permit hold (ADR-0022 X1).
+    setup_times: setup_times::SetupTimes,
     // What every operator release-all reached, by kind (ADR-0050 §10).
     operator_releases: operator::OperatorReleases,
     // The worker's view of its call limiter (ADR-0040).
@@ -349,14 +348,9 @@ impl B2buaMetrics {
     /// into `b2bua_limiter_release_flushes_total{outcome}` and
     /// `b2bua_limiter_release_flush_seconds_total` (ADR-0040 decision 9).
     pub fn record_drain_exit(&self, outcome: &crate::drain::DrainOutcome) {
-        let elapsed = outcome.elapsed;
         cells::add_at(&self.inner.drain_exits, outcome.exit as usize, 1);
         self.inner.limiter.count_release_flush(&outcome.release_flush);
-        let secs = elapsed.as_secs_f64();
-        let buckets = DRAIN_BUCKETS.iter().zip(&self.inner.drain_seconds_buckets);
-        buckets.filter(|(le, _)| secs <= **le).for_each(|(_, n)| cells::add(n, 1));
-        cells::add(&self.inner.drain_seconds_sum_ms, sip_clock::wall::millis_u64(elapsed));
-        self.inner.drain_seconds_count.fetch_add(1, Ordering::Relaxed);
+        self.inner.drain_seconds.observe(&DRAIN_BUCKETS, outcome.elapsed);
     }
 
     /// Drains that returned for `reason` (test/observability).
@@ -506,7 +500,7 @@ impl B2buaMetrics {
         self.inner.clock_wall_divergence_ms.load(Ordering::Relaxed).cast_signed()
     }
 
-    /// Push the call-store map lengths (memory-attribution gauges). Sampled
+    /// Push the call-store map lengths (memory-attribution gauges), read
     /// periodically by the runner under the store's own lock. `calls` is the
     /// true live call-map size; the rest are its sibling indexes + per-call
     /// state. See the field docs for what a divergence localises.
@@ -527,12 +521,6 @@ impl B2buaMetrics {
         self.inner.store_touched.store(touched, Ordering::Relaxed);
     }
 
-    /// Push the per-call Vec census (summed across the live call map). Sampled
-    /// alongside `set_store_gauges` under the same store lock. The sum whose
-    /// ratio over `store_calls` climbs while the count-gauges stay flat names the
-    /// leaking per-call Vec (the bytes-inside-each-call leak the count-gauges
-    /// cannot see).
-    #[allow(clippy::too_many_arguments)]
     /// Push the inner CallStore map sizes (sampled in the runner's reap loop).
     pub fn set_store_map_sizes(&self, bodies: u64, idx_entries: u64, tombstones: u64) {
         self.inner.store_bodies.store(bodies, Ordering::Relaxed);
@@ -540,6 +528,12 @@ impl B2buaMetrics {
         self.inner.store_tombstones.store(tombstones, Ordering::Relaxed);
     }
 
+    /// Push the per-call Vec census, summed over the calls whose count
+    /// `set_store_gauges` publishes. The sum whose
+    /// ratio over `store_calls` climbs while the count-gauges stay flat names the
+    /// leaking per-call Vec (the bytes-inside-each-call leak the count-gauges
+    /// cannot see).
+    #[allow(clippy::too_many_arguments)]
     pub fn set_call_census(
         &self,
         cdr_events: u64,
@@ -563,7 +557,7 @@ impl B2buaMetrics {
 
     /// Replace the state-machine cursor census (ADR-0016) wholesale —
     /// `census` maps `(machine, state)` to the count of live calls resting there,
-    /// sampled from the call map under the store lock on the slow gauge cadence.
+    /// counted over a snapshot of the call map on the slow gauge cadence.
     /// Overwriting (rather than incrementing) means a cursor that drained to zero
     /// disappears from the next scrape instead of sticking at its last value.
     pub fn set_sm_cursor_census(&self, census: BTreeMap<(String, String), u64>) {
@@ -594,12 +588,11 @@ impl B2buaMetrics {
         rows.responses.render(&mut s);
         rows.requests_out.render(&mut s);
         rows.retransmits.render(&mut s);
-        rows.outbound_unaddressable.render(&mut s);
+        rows.outbound_unsent.render(&mut s);
         rows.unroutable_dropped.render(&mut s);
         rows.unroutable_refused.render(&mut s);
         rows.unroutable_internal.render(&mut s);
-        rows.repeat_give_ups.render(&mut s);
-        rows.model_defects.render(&mut s);
+        self.render_turn_counts(&mut s);
         rows.repl_quiet_turns.render(&mut s);
         rows.repl_applied.render(&mut s);
         rows.repl_noops_sent.render(&mut s);
@@ -608,15 +601,8 @@ impl B2buaMetrics {
         catalogue::worker::DRAIN_EXITS.render(&mut s, |series| {
             cells::get_at(&i.drain_exits, series.index(&catalogue::worker::DRAIN_REASON))
         });
-        catalogue::worker::DRAIN_SECONDS.render_histogram(&mut s, |_| HistogramValue {
-            buckets: catalogue::worker::DRAIN_BUCKETS
-                .iter()
-                .zip(&i.drain_seconds_buckets)
-                .map(|(le, n)| (*le, n.load(Ordering::Relaxed)))
-                .collect(),
-            sum: i.drain_seconds_sum_ms.load(Ordering::Relaxed) as f64 / 1_000.0,
-            count: i.drain_seconds_count.load(Ordering::Relaxed),
-        });
+        i.drain_seconds.render(&catalogue::worker::DRAIN_SECONDS, &DRAIN_BUCKETS, &mut s);
+        i.setup_times.render(&mut s);
         operator::render(self, &mut s);
         self.inner.limiter.render(&mut s);
         catalogue::worker::CALL_REMOVALS_BY_CLASS.render(&mut s, |r| {

@@ -18,10 +18,6 @@ use sip_message::Bytes;
 use crate::arrival::Arrival;
 use crate::parse_guard::ParseOutcome;
 
-/// Theoretical max single-UDP-datagram payload (65535 − 20 IP − 8 UDP). The
-/// paranoid decorator rejects sends above this; SIP fragments far below it.
-pub const MAX_UDP_PAYLOAD: usize = 65507;
-
 /// One received datagram handed up from an endpoint's inbound queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpPacket {
@@ -378,7 +374,8 @@ impl BindError {
 pub enum SendErrorKind {
     /// `EMSGSIZE`: the datagram exceeds what this path accepts whole. On a
     /// socket pinned to fragment (ADR-0027) this means the message is over
-    /// [`MAX_UDP_PAYLOAD`], not merely over the path MTU.
+    /// the largest UDP payload ([`crate::max_udp_payload`]), not merely over
+    /// the path MTU.
     MessageTooLong,
     /// `ENETUNREACH` / `EHOSTUNREACH` / `ECONNREFUSED`: no route to the peer,
     /// or the peer's port answered with an ICMP rejection.

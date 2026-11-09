@@ -49,7 +49,7 @@ pub mod addr;
 mod branch;
 pub mod cancel_lru;
 pub mod core;
-pub mod face;
+pub(crate) mod face;
 pub mod headers;
 pub mod health;
 pub mod intake_shed;
@@ -71,7 +71,6 @@ pub mod trace;
 
 pub use addr::ProxyAddr;
 pub use core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};
-pub use face::{FaceCidrs, Ipv4Cidr};
 pub use observability::ProxyMetrics;
 pub use strategies::{ForwardAllStrategy, LoadBalancerStrategy};
 pub use strategy::{

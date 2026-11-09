@@ -6,6 +6,7 @@ use call::{Call, Direction, IndexHit, IndexLookup, KeyKind};
 use sip_message::header::{ParamValue, Via};
 use sip_message::{Method, SipMessage};
 
+use super::deferred_parks::DeferredParks;
 use super::materialise::{names_server_branch, names_unanswered_caller_invite};
 use super::topology_cookie::foreign_primary;
 use super::undecided::is_undecided;
@@ -30,6 +31,10 @@ pub(super) struct Resolution {
     /// until [`bind_indexed_leg`](Self::bind_indexed_leg) names the leg that
     /// owns the key.
     pub(super) indexed: Option<KeyKind>,
+    /// A copy of the caller's initial INVITE of this node's own call whose
+    /// park a bulk reclaim deferred ([`InitialInvite::Deferred`]), judged at
+    /// its turn (`super::deferred_copy`).
+    pub(super) deferred_copy: bool,
 }
 
 impl Resolution {
@@ -109,6 +114,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                         initial_invite: true,
                         incarnation: None,
                         indexed: None,
+                        deferred_copy: false,
                     };
                 }
                 // In-dialog request: read our cr/lg from the Request-URI params.
@@ -125,6 +131,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                     initial_invite: false,
                     incarnation: None,
                     indexed: None,
+                    deferred_copy: false,
                 };
                 if let Some(leg) = request_leg(req) {
                     res.direction = leg_direction(&leg);
@@ -156,6 +163,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                     initial_invite: false,
                     incarnation: None,
                     indexed: None,
+                    deferred_copy: false,
                 };
                 if res.call_ref.is_none() {
                     if let Some(hit) = ctx.state.resolve_from_sip_key_sync(response_lookup(resp)) {
@@ -186,6 +194,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 initial_invite: false,
                 incarnation: None,
                 indexed: None,
+                deferred_copy: false,
             }
         }
         CallEvent::Timeout { call_ref, leg_id, .. } => {
@@ -197,6 +206,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 initial_invite: false,
                 incarnation: None,
                 indexed: None,
+                deferred_copy: false,
             }
         }
         CallEvent::Timer { call_ref, key, .. } => {
@@ -208,6 +218,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 initial_invite: false,
                 incarnation: None,
                 indexed: None,
+                deferred_copy: false,
             }
         }
         CallEvent::InternalEvent { call_ref, .. } => Resolution {
@@ -217,6 +228,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             initial_invite: false,
             incarnation: None,
             indexed: None,
+            deferred_copy: false,
         },
         // A lifecycle event is delivered, never dispatched: it names no call.
         CallEvent::Lifecycle(_) => Resolution {
@@ -226,6 +238,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             initial_invite: false,
             incarnation: None,
             indexed: None,
+            deferred_copy: false,
         },
     }
 }
@@ -263,6 +276,10 @@ pub(super) enum InitialInvite {
     /// node holds: the primary owns its transaction, and placing it would
     /// dial a second call.
     Foreign,
+    /// A copy of the initial INVITE of this node's own call whose park a bulk
+    /// reclaim deferred, until its deferred arming ran
+    /// ([`DeferredParks::copies`]).
+    Deferred,
 }
 
 /// **A copy of a replicated call's initial INVITE.** An INVITE with no To-tag,
@@ -276,11 +293,14 @@ pub(super) enum InitialInvite {
 /// of a decided call serves it. Failing that, an INVITE whose cookie names
 /// another primary is that primary's (the proxy re-placed its
 /// retransmission): foreign. Any other is this node's own, as is every
-/// INVITE of a node that does not replicate: it backs up no primary.
+/// INVITE of a node that does not replicate: it backs up no primary. Before
+/// the replicated calls, one copying the INVITE of a call of `parks`, the
+/// parks a bulk reclaim deferred, is that call's.
 pub(super) async fn initial_invite_copy(
     ctx: &RouterCtx,
     event: &CallEvent,
     res: &Resolution,
+    parks: Option<&DeferredParks>,
 ) -> InitialInvite {
     let (true, Some(derived)) = (res.initial_invite, res.call_ref.as_deref()) else {
         return InitialInvite::Own;
@@ -288,7 +308,13 @@ pub(super) async fn initial_invite_copy(
     let CallEvent::Sip { message, .. } = event else { return InitialInvite::Own };
     let SipMessage::Request(req) = message.as_ref() else { return InitialInvite::Own };
     let cseq = req.cseq().seq();
-    if !ctx.state.replicates() || ctx.unborn.holds(derived, cseq) || ctx.state.contains(derived) {
+    if !ctx.state.replicates() || ctx.unborn.holds(derived, cseq) {
+        return InitialInvite::Own;
+    }
+    if parks.is_some_and(|parks| parks.copies(req)) {
+        return InitialInvite::Deferred;
+    }
+    if ctx.state.contains(derived) {
         return InitialInvite::Own;
     }
     if let Some((hit, unanswered)) = replicated_call_copied(ctx, req).await {

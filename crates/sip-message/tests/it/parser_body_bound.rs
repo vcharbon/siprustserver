@@ -19,7 +19,7 @@ fn wire(content_length: Option<usize>, tail: &[u8]) -> Vec<u8> {
 }
 
 fn parser(framing: Framing) -> CustomParser {
-    CustomParser::with_limits(SipParserLimits { framing, ..SipParserLimits::default() })
+    CustomParser::with_limits(SipParserLimits { framing, ..SipParserLimits::DEFAULT })
 }
 
 fn body_of(msg: SipMessage) -> Vec<u8> {

@@ -11,8 +11,8 @@ use call::{Call, TimerType};
 use sip_message::{Method, SipMessage};
 
 use super::admit::UnbornCall;
+use super::commit::{behind_the_write, commit_turn, Rider};
 use super::incarnation_gate::of_another_incarnation;
-use super::interpret::process_result;
 
 use super::materialise::{
     materialise, materialise_after, reoffer_trigger, Materialised, Offered, Origin, Reason,
@@ -27,21 +27,22 @@ use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::limiter::refresh_batch::RefreshAnswered;
 use crate::rule_chain::{enforced, fired, rule_chain_turn, TurnInput};
+use crate::setup_budget::SetupBudget;
 use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 
-/// The per-call handler body: check the call out, run the handler, interpret.
+/// The per-call handler body: check the call out, run the handler, commit.
 /// `matched_client_txn`: a response `event` carries answered a client
-/// transaction the transaction layer holds. `unborn` holds a new call
-/// admitted at ingress until its call is created; every other exit drops it.
-/// `true` when a turn's outbox entry took the event, and with it what the
-/// transaction layer holds for that entry's release.
+/// transaction the transaction layer holds. `admitted` is a new call admitted
+/// at ingress: its hold, until its call is created (every other exit drops
+/// it), and its setup budget. `true` when a turn's outbox entry took the event,
+/// and with it what the transaction layer holds for that entry's release.
 pub(super) async fn process(
     ctx: &Arc<RouterCtx>,
     event: &CallEvent,
     matched_client_txn: bool,
     mut res: Resolution,
-    unborn: Option<UnbornCall>,
+    admitted: Option<(UnbornCall, SetupBudget)>,
 ) -> bool {
     let Some(call_ref) = res.call_ref.clone() else {
         // The dispatcher keys every event it runs by its callRef.
@@ -72,23 +73,35 @@ pub(super) async fn process(
             },
             _ => return false,
         };
+        if res.deferred_copy {
+            match super::deferred_copy::judge(ctx, &call_ref, &req, src, event, &mut turn).await {
+                super::deferred_copy::Judged::Parked => {}
+                super::deferred_copy::Judged::Absorbed => return false,
+                super::deferred_copy::Judged::Gone => {
+                    drop(_guard);
+                    release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
+                    return false;
+                }
+            }
+        }
         let initial = super::initial_turn::initial_invite_turn(
-            ctx, &call_ref, &req, src, datagram, now_ms, unborn, &mut turn,
+            ctx, &call_ref, &req, src, datagram, now_ms, admitted, &mut turn,
         );
         match initial.await {
             super::initial_turn::Turn::Consumed => return false,
             // A final went on the wire with no call here, but this dispatch created a
-            // per-call queue (one `bump_creation`) + lock entry for a brand-new
-            // call_ref and nothing will ever emit `RemoveCall`. Release through
-            // the one teardown executor (`ReleaseKind::Orphan`: no store
-            // mutation, so no spurious reverse-propagated delete) so the worker
-            // exits and `removals` balances `creations`. Drop our guard first.
+            // per-call queue (one `bump_creation`) for a brand-new call_ref and
+            // nothing will ever emit `RemoveCall`. Release through the one
+            // teardown executor (`ReleaseKind::Orphan`: no store mutation, so
+            // no spurious reverse-propagated delete) so the worker exits and
+            // `removals` balances `creations`.
             super::initial_turn::Turn::Shed => {
                 drop(_guard);
                 release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
                 return false;
             }
-            super::initial_turn::Turn::Result(r) => *r,
+            super::initial_turn::Turn::Result(r) => Ok(*r),
+            super::initial_turn::Turn::Tripped(tripped) => Err(tripped),
         }
     } else if crate::off_turn::is_answer(event) && !ctx.state.contains(&call_ref) {
         // The answer to a request this node sent while it held the call: a
@@ -118,7 +131,7 @@ pub(super) async fn process(
         else {
             return false;
         };
-        enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes)
+        Ok(enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes))
     } else {
         if of_another_incarnation(ctx, event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
@@ -137,16 +150,15 @@ pub(super) async fn process(
             // have counted.
             super::callouts::release_admit_fold_call(&ctx.limiter, event);
             // This event was dispatched into a fresh per-call queue (one
-            // `bump_creation`) and took the per-call lock, but resolved to NO
-            // live call — nothing will ever emit `RemoveCall`, and a per-call
-            // dispatch worker exits ONLY on poison, so the queue, its idle
-            // task, the unmatched creation, and the lock entry would all leak
-            // permanently (a mass-orphan failover turns that into an
-            // `active_calls`/`store_locks` ratchet that never drains). Release
+            // `bump_creation`), but resolved to NO live call — nothing will
+            // ever emit `RemoveCall`, and a per-call dispatch worker exits ONLY
+            // on poison, so the queue, its idle task and the unmatched
+            // creation would leak permanently (a mass-orphan failover turns
+            // that into an `active_calls` ratchet that never drains). Release
             // through the one teardown executor (`ReleaseKind::Orphan` — no
-            // store mutation, so no spurious reverse-propagated delete). Drop
-            // our guard first so the poisoned worker never contends on this
-            // call_ref's (now removed) lock.
+            // store mutation, so no spurious reverse-propagated delete). The
+            // guard goes first, so a step a sweep deferred behind this turn
+            // runs before the release.
             drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return false;
@@ -229,7 +241,7 @@ pub(super) async fn process(
             let limiter = &ctx.limiter;
             let res =
                 crate::limiter::refresh_turn::on_refresh_due(limiter, call, &call_ref, now_ms);
-            enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes)
+            Ok(enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes))
         } else {
             let input = TurnInput {
                 event,
@@ -245,7 +257,11 @@ pub(super) async fn process(
         }
     };
     let unrecoverable = turn.notes.unrecoverable();
-    super::notes::drain(ctx, &call_ref, &mut turn);
+    if result.is_ok() {
+        super::notes::drain(ctx, &call_ref, &mut turn);
+    } else {
+        super::notes::drain_discarded(ctx, &mut turn);
+    }
     if unrecoverable {
         let ids = &mut turn.ids;
         if !discharge_after_turn(ctx, &call_ref, event, now_ms, ids).await {
@@ -254,13 +270,22 @@ pub(super) async fn process(
         }
         return false;
     }
+    let result = match result {
+        Ok(result) => result,
+        Err(tripped) => {
+            let safepoint = ctx.state.peek(&call_ref);
+            let in_hand = (!res.initial_invite).then_some(event);
+            super::tripped::fail_turn(ctx, &call_ref, in_hand, tripped, safepoint, now_ms).await;
+            return false;
+        }
+    };
 
     if probe_failed {
         record_keepalive_failure_peer(ctx, &res.source_leg_id, &result.call);
     }
 
     let turn = super::turn_label::EventSummary { call_ref: &call_ref, event };
-    process_result(ctx, &call_ref, result, now_ms, &turn, Some(event)).await;
+    commit_turn(ctx, &call_ref, result, now_ms, &turn, Some(event)).await;
     true
 }
 
@@ -296,8 +321,8 @@ async fn reaper_verdict_gate(
             if !crate::reaper::verdict_confirmed(outcome, watermark, current) {
                 if current.is_none() && !ctx.state.contains(call_ref) {
                     // The call is gone — but this verdict's dispatch may have
-                    // spun up a fresh per-call queue (+ lock entry). Tear the
-                    // ephemera down via the orphan path so nothing ratchets.
+                    // spun up a fresh per-call queue. Tear it down via the
+                    // orphan path so nothing ratchets.
                     return Gate::Shed;
                 }
                 return Gate::Consumed;
@@ -305,7 +330,7 @@ async fn reaper_verdict_gate(
             if outcome == crate::reaper::OUTCOME_DISCHARGE {
                 // Strike-2: the rules path itself failed. Force the last
                 // persisted snapshot terminal and run it through the ORDINARY
-                // finalize → enforce → process_result — the ObligationSet
+                // finalize → enforce → commit_turn — the ObligationSet
                 // discharges the CDR + limiter holds, RemoveCall logs the
                 // delete and rides release_call(Terminated) (X6).
                 if !ctx.state.contains(call_ref) {
@@ -323,7 +348,7 @@ async fn reaper_verdict_gate(
     } else if matches!(event, CallEvent::Sip { .. }) {
         // The last-touched stamp (ADR-0020 X4): liveness derives from **real
         // SIP traffic only** — a received message here, or a turn that sent
-        // SIP out (stamped in `process_result` after the outbound effects).
+        // SIP out (stamped in `commit_turn` after the outbound effects).
         // Self-generated turns that touch no wire (`LimiterRefresh`, internal
         // events, timer fires whose rules emit nothing) deliberately do NOT
         // stamp — the call must not vouch for itself, or a crash-orphaned call
@@ -374,10 +399,11 @@ async fn resident_or_materialised(
 }
 
 /// Whether `event` is an ACK or a BYE request. An ACK reaching the router
-/// acknowledges a 2xx: the transaction layer absorbs the ACK of a non-2xx on
-/// the INVITE's own transaction (RFC 3261 §17.2.1). A BYE ends the dialog it
-/// names, early or confirmed (§15). After either, a provisional to the INVITE
-/// tells its sender nothing.
+/// proves its sender holds a final: a 2xx, or a refusal no transaction here
+/// holds, since the transaction layer absorbs the ACK of a non-2xx on the
+/// INVITE's own transaction (RFC 3261 §17.2.1). A BYE ends the dialog it names,
+/// early or confirmed (§15). After either, a provisional to the INVITE tells
+/// its sender nothing.
 fn answered(event: &CallEvent) -> bool {
     matches!(event, CallEvent::Sip { message, .. }
         if matches!(message.as_ref(), SipMessage::Request(r)
@@ -422,9 +448,9 @@ fn record_refusal(
     }
 }
 
-/// Send `answer`, the router's answer to `event`'s request, through
-/// `call_ref`'s outbox, after the write that recorded it.
-async fn answer_after_the_write(
+/// Send `answer`, the router's answer to `event`'s request, behind the write
+/// that recorded it.
+pub(super) async fn answer_after_the_write(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     event: &CallEvent,
@@ -435,12 +461,5 @@ async fn answer_after_the_write(
         SipMessage::Request(req) => super::reply_to::reply_to(req, *src),
         SipMessage::Response(_) => *src,
     };
-    let sender = ctx.clone();
-    let wait = ctx.state.hold_target(call_ref);
-    let send: super::outbox::Effects = Box::new(move |_| {
-        Box::pin(async move {
-            let _ = sender.txn.send_response(*answer, dest).await;
-        })
-    });
-    ctx.outboxes.push(call_ref, wait, send).await;
+    behind_the_write(ctx, call_ref, Rider::Answer(answer, dest)).await;
 }

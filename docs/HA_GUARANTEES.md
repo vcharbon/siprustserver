@@ -32,9 +32,11 @@ product built on this stack states its own additions beside it.
 - **Split brain is reconciled, not prevented.** Two copies of a call can serve
   at once across a partition; the versions are folded when the planes heal
   (ADR-0014, ADR-0031 D3). Until then each side answers what reaches it.
-- **A backend request can be sent twice.** A request in flight when its
-  worker dies is sent again by the copy that takes the call over (ADR-0039
-  decision 5): a decision or limiter backend sees it twice and answers both.
+- **A backend request can be sent twice, or lost with an ending call.** A
+  request in flight when its worker dies is sent again by the copy that takes
+  an `Active` call over (ADR-0039 decision 5): a decision or limiter backend
+  sees it twice and answers both. A request is made for its answer, never for
+  its effect at the service, so an ending call sends none again.
 - **The replica TTL is not a reboot budget.** `B2BUA_REBOOT_BUDGET_SEC` bounds
   how long a backup keeps a replica no write refreshed. A primary down longer
   than that loses the quiet calls whose replicas expired; the TTL is sized

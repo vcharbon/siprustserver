@@ -1,20 +1,22 @@
 //! `SipRouter` — consumes the transaction-layer event stream + the timer fire
 //! channel, resolves each event's `callRef` (synchronously), dispatches the
-//! handler body to the per-call FIFO, and interprets the typed effects in the
-//! fixed order (persist → critical → outbound → soft → buffered).
+//! handler body to the per-call FIFO, and commits each turn's result
+//! (`commit`).
 //!
 //! One concern per submodule: `inbox` what the loop takes next (the keepalive
 //! lane first), `resolve` keys events to calls, `ingress` is
 //! the pre-dispatch pipeline, `admit` a new INVITE's router rungs of the
 //! admission ladder, `process` the per-call handler body,
-//! `interpret` the effect interpreter, `callouts` the fire-and-forget
+//! `commit` the tail of a turn, `turn_mark` a turn's marks at the turn-point
+//! seam, `callouts` the fire-and-forget
 //! async-HTTP folds, `materialise` the one path a stored replica takes to
 //! become the live copy this node serves (takeover or reclaim), `departure`
 //! the takeover of a departed peer's in-flight calls, `undecided` the end of
 //! a call materialised before its routing decision, `quiesced` the
 //! self-release turn of a takeover copy, `stand_down` the turn that releases a
 //! takeover copy on its primary's write, `dropped_on_delete` the turn that
-//! drops a live copy of a call its backup discharged, `reclaim`
+//! drops a live copy of a call its backup discharged, `flush_turn` the turn a
+//! replicated flush takes on its call, `reclaim`
 //! the replication reclaim/discharge funnels, `readmission` the hold of those
 //! reclaims while the node's own endpoint does not read ready,
 //! `restore_hygiene` the replicated-timer restore seam, `release` the one
@@ -32,21 +34,27 @@ mod callouts;
 #[cfg(test)]
 mod cancel_crossing_tests;
 mod cancel_in_consult;
+mod cannot_leave;
+mod commit;
 mod dead_verdict;
+mod deferred_copy;
+mod deferred_parks;
 mod departure;
 mod dialog_gate;
 mod dropped_on_delete;
+mod ended_body;
 #[cfg(test)]
 mod evidence_gate_tests;
+mod flush_turn;
 mod fold_payload;
 mod inbox;
 mod incarnation_gate;
 mod ingress;
 mod initial_turn;
-mod interpret;
 pub(crate) mod late_prack;
 mod materialise;
 mod notes;
+mod off_wire;
 mod outbox;
 mod owed;
 mod owed_final;
@@ -55,6 +63,8 @@ mod peer_metrics;
 #[cfg(test)]
 mod possibly_confirmed_tests;
 pub(crate) use peer_metrics::outbound_proxy_target;
+#[cfg(test)]
+mod oversize_send_tests;
 mod process;
 #[cfg(test)]
 mod provisional_turn_tests;
@@ -81,11 +91,11 @@ pub(crate) mod test_support;
 pub(crate) mod topology_cookie;
 #[cfg(test)]
 mod topology_cookie_tests;
+mod tripped;
 mod turn;
-mod turn_entry;
 mod turn_label;
+mod turn_mark;
 pub(crate) mod txn_event;
-mod unaddressable;
 mod undecided;
 mod unheld;
 #[cfg(test)]
@@ -95,6 +105,7 @@ mod unrecoverable;
 mod unrecoverable_tests;
 mod unroutable;
 
+use deferred_parks::DeferredParks;
 pub(crate) use outbox::Outboxes;
 use readmission::ReadmissionGate;
 pub(crate) use reclaim::reap_expired_replicas;
@@ -110,7 +121,6 @@ use tokio::sync::mpsc;
 
 use crate::cdr::CdrWriter;
 use crate::config::B2buaConfig;
-use crate::decision::CallDecisionEngine;
 use crate::dispatch::PerCallDispatcher;
 use crate::limiter::LimiterWorker;
 use crate::metrics::B2buaMetrics;
@@ -124,7 +134,7 @@ use b2bua_sdk::event::CallEvent;
 
 pub use b2bua_decision::AdaptationHttpPort;
 
-/// Everything a handler body + the interpreter need. Shared via `Arc`.
+/// Everything a handler body and the turn commit need. Shared via `Arc`.
 pub struct RouterCtx {
     pub config: B2buaConfig,
     /// This worker as a request record names the worker that relayed it: its
@@ -153,7 +163,7 @@ pub struct RouterCtx {
     /// Hears a call past its lifetime cap or at its overflow ceiling, as the
     /// dispatcher's offers state them.
     pub reaper: crate::reaper::Reaper,
-    pub decision: Arc<dyn CallDecisionEngine>,
+    pub decision: Arc<crate::decision::DeadlineDecisionEngine>,
     /// The worker's one handle on its call limiter: every admit, release
     /// and refresh, none of which a call waits on beyond the admit bound.
     pub limiter: LimiterWorker,
@@ -175,7 +185,7 @@ pub struct RouterCtx {
     /// Self-reported readiness driving the OPTIONS health responder. The
     /// unwired node uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
-    /// Outbound messages left unsent, by next hop (`router::unaddressable`).
+    /// Outbound messages left unsent, by next hop (`router::cannot_leave`).
     pub unsent_waves: Arc<observe::WaveSet<crate::lifecycle::Unsent>>,
     /// The To-tag of the OPTIONS health answer, derived from the request: the
     /// transaction layer holds no transaction for an out-of-dialog OPTIONS.
@@ -217,6 +227,8 @@ pub struct RouterCtx {
     /// (ADR-0026): a node coming back meets every call it shares in one
     /// episode, not one line per call.
     pub meeting_waves: Arc<observe::WaveSet>,
+    /// Turns that crossed a per-call cap, by cap (ADR-0057 §7).
+    pub cap_trip_waves: Arc<observe::WaveSet<crate::lifecycle::CapTrip>>,
     /// The configured outbound proxy, its name looked up off the router task
     /// (per-peer failure attribution reads only its kept addresses).
     pub outbound_proxy: Option<Arc<http_net::ResolvedTarget>>,
@@ -244,6 +256,27 @@ impl RouterCtx {
             config: &self.config,
             rules: &self.rules,
             obligations: &self.obligations,
+        }
+    }
+
+    /// What a turn's result lands under: the configuration, the budgets the
+    /// requests sent off a call's turn are answered by (the adaptation port's
+    /// default, the limiter's admit budget, a `/call/failure` consult's chain
+    /// under the decision deadline) and the limiter's refresh period.
+    pub(crate) fn landing(&self) -> crate::landing::Landing<'_> {
+        let admit = self.limiter.admit_budget();
+        crate::landing::Landing {
+            config: &self.config,
+            budgets: crate::answer_deadline::AnswerBudgets {
+                http: self
+                    .adaptation_http
+                    .as_ref()
+                    .map_or(std::time::Duration::ZERO, |p| p.default_timeout),
+                admit,
+                failure: crate::answer_deadline::failure_budget_under(&self.config, admit),
+                release: crate::answer_deadline::release_budget_under(&self.config, admit),
+            },
+            refresh_period: self.limiter.refresh_period(),
         }
     }
 
@@ -280,9 +313,9 @@ pub enum ReplCommand {
     /// A backup's reverse flush the store did not take — the stored copy
     /// contains it or the two diverged — or one the store already read: the
     /// body is handed up to meet the live copy (`reclaim::meet_refused_flush`,
-    /// ADR-0055 §7). `origin_now_ms` is the flushing node's wall clock, for
-    /// timer re-anchoring. Held with the reclaim, so it meets the copy the
-    /// reclaim makes live.
+    /// ADR-0055 §7), on a turn of the call. `origin_now_ms` is the flushing
+    /// node's wall clock, for timer re-anchoring. Held with the reclaim, so it
+    /// meets the copy the reclaim makes live.
     ReverseFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
     /// A primary's forward flush this backup did not take: the body is handed
     /// up on the same terms as the reverse case, and meets only a live
@@ -315,11 +348,10 @@ pub enum PrimaryWrite {
     Delete(Option<String>),
 }
 
-/// What one turn of the router took: an event, with whether a response it
-/// carries answered a client transaction the layer holds, or a replication
-/// command.
+/// What one turn of the router took: an event, with what the transaction layer
+/// states of it, or a replication command.
 enum Work {
-    Event(CallEvent, bool),
+    Event(CallEvent, txn_event::Arrival),
     Repl(ReplCommand),
     /// What `readmission` held: the arming of parked calls, then the reclaim
     /// commands in arrival order.
@@ -342,13 +374,14 @@ pub async fn run(
     repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
 ) {
     let mut readmission = ReadmissionGate::new(ctx.readiness.own_endpoint_ready());
+    let mut parks = DeferredParks::default();
     let pulse = ctx.router_pulse.clone();
     let mut inbox = inbox::Inbox::new(txn_rx, timer_rx, reentry_rx, repl_rx);
     loop {
         let work = match inbox.next(&ctx, &mut readmission).await {
             inbox::Taken::Keepalive(ev) => {
-                let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
-                Work::Event(ev, matched_client_txn)
+                let (ev, arrival) = txn_event::call_event(ev, ctx.clock.now_ms());
+                Work::Event(ev, arrival)
             }
             inbox::Taken::Work(work) => work,
             inbox::Taken::Closed => break,
@@ -356,20 +389,32 @@ pub async fn run(
         pulse.turning();
         ctx.turn_probe.router_turn(&ctx.config.self_ordinal).await;
         match work {
-            Work::Event(ev, matched_client_txn) => {
-                ingress::on_event(&ctx, ev, matched_client_txn).await
+            Work::Event(ev, arrival) => {
+                if let Some((call_ref, ended)) = reclaim::deferred::arming_ended_of(&ev) {
+                    match ended {
+                        reclaim::deferred::ArmingEnded::Ran => parks.armed(call_ref),
+                        reclaim::deferred::ArmingEnded::Held => {
+                            parks.held_back(call_ref);
+                            readmission.held_back(call_ref);
+                        }
+                    }
+                } else {
+                    ingress::on_event(&ctx, ev, arrival, Some(&parks)).await;
+                }
             }
             Work::Repl(cmd) => {
                 if let Some(cmd) = readmission.admit(cmd) {
-                    on_repl_command(&ctx, cmd, &mut readmission).await
+                    on_repl_command(&ctx, cmd, &mut readmission, &mut parks).await
                 }
             }
             Work::Released(released) => {
-                if released.arm {
-                    reclaim::arm_parked(&ctx).await;
+                if released.arm || !released.deferred.is_empty() {
+                    let arming =
+                        reclaim::arm_parked(&ctx, &released.deferred, parks.unarmed()).await;
+                    after_arming(&mut parks, arming);
                 }
                 for cmd in released.cmds {
-                    on_repl_command(&ctx, cmd, &mut readmission).await
+                    on_repl_command(&ctx, cmd, &mut readmission, &mut parks).await
                 }
             }
         }
@@ -377,30 +422,49 @@ pub async fn run(
     }
 }
 
+/// Note how an arming pass left each deferred call: its arming queued, or
+/// discarded by the call's released queue, the call ended and no longer
+/// deferred.
+fn after_arming(parks: &mut DeferredParks, arming: Vec<(String, bool)>) {
+    for (call_ref, queued) in arming {
+        if queued {
+            parks.arming(&call_ref);
+        } else {
+            parks.armed(&call_ref);
+        }
+    }
+}
+
 /// Interpret a replication-driven [`ReplCommand`] (ADR-0011 X11 / ADR-0014);
-/// the bulk reclaim's arming waits on `readmission`.
+/// the bulk reclaim's arming waits on `readmission`, and ingress serves the
+/// parks it deferred from `parks`.
 async fn on_repl_command(
     ctx: &Arc<RouterCtx>,
     cmd: ReplCommand,
     readmission: &mut ReadmissionGate,
+    parks: &mut DeferredParks,
 ) {
     match cmd {
         ReplCommand::ReclaimAll => {
-            reclaim::park_all(ctx).await;
-            if readmission.arm_now() {
-                reclaim::arm_parked(ctx).await;
+            for reclaim::Deferral { call_ref, scanned } in reclaim::park_all(ctx).await {
+                if let Some(call) = scanned {
+                    parks.defer(call);
+                }
+                readmission.defer([call_ref]);
+            }
+            if let Some(deferred) = readmission.arm_now() {
+                let arming = reclaim::arm_parked(ctx, &deferred, parks.unarmed()).await;
+                after_arming(parks, arming);
             }
         }
-        ReplCommand::ReclaimCall(call_ref) => {
-            reclaim::reconcile_reverse_flush(ctx, &call_ref).await
-        }
+        ReplCommand::ReclaimCall(call_ref) => flush_turn::offer_reconcile(ctx, call_ref).await,
         ReplCommand::ReverseFlushRefused { call_ref, body, origin_now_ms } => {
             let dir = reclaim::FlushDirection::Reverse;
-            reclaim::meet_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
+            flush_turn::offer_refused(ctx, dir, call_ref, &body, origin_now_ms).await
         }
         ReplCommand::ForwardFlushRefused { call_ref, body, origin_now_ms } => {
             let dir = reclaim::FlushDirection::Forward;
-            reclaim::meet_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
+            flush_turn::offer_refused(ctx, dir, call_ref, &body, origin_now_ms).await
         }
         ReplCommand::ForwardFlushApplied { call_ref, write } => {
             stand_down::offer(ctx, call_ref, write).await

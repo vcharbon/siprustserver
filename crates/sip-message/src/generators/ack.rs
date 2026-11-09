@@ -49,8 +49,8 @@ pub fn generate_ack_for_2xx(
     let (uri, routes) = route_for_in_dialog(remote_target, &dialog.route_set);
     let hop = opts.via.clone().ok_or(GenerateError::Missing("via"))?;
 
-    let draft = RequestDraft::new(Method::Ack, uri).push(hop).push(MaxForwards::DEFAULT);
-    let draft = with_dialog_identity(draft, dialog).push(CSeq::new(invite_cseq, Method::Ack));
+    let draft = RequestDraft::new(Method::Ack, uri).push(hop).set(MaxForwards::DEFAULT);
+    let draft = with_dialog_identity(draft, dialog).set(CSeq::new(invite_cseq, Method::Ack));
     let draft = emit::extra_headers(with_routes(draft, &routes), &opts.extra_headers);
 
     emit::request(emit::framed(draft, opts.body.clone(), opts.content_type.clone()))
@@ -78,16 +78,16 @@ pub fn generate_ack_for_non_2xx(
 
     let mut draft = RequestDraft::new(Method::Ack, original_invite.request_uri().clone())
         .push_raw(HeaderName::Via, via)
-        .push(MaxForwards::DEFAULT)
+        .set(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
-        .push(CSeq::new(original_invite.cseq().seq(), Method::Ack));
+        .set(CSeq::new(original_invite.cseq().seq(), Method::Ack));
     for route in original_invite.raw_text(HeaderName::Route) {
         draft = draft.push_raw(HeaderName::Route, route);
     }
 
-    emit::request(emit::extra_headers(draft, extra_headers).push(ContentLength::new(0)))
+    emit::request(emit::extra_headers(draft, extra_headers).set(ContentLength::new(0)))
 }
 
 /// Build the ACK for a non-2xx final to an INVITE this side sent in `dialog`
@@ -104,12 +104,12 @@ pub fn generate_ack_for_non_2xx_in_dialog(
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
     let draft = RequestDraft::new(Method::Ack, uri)
         .push(final_response.top_via().clone())
-        .push(MaxForwards::DEFAULT)
+        .set(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
-        .push(CSeq::new(final_response.cseq().seq(), Method::Ack));
-    emit::request(with_routes(draft, &routes).push(ContentLength::new(0)))
+        .set(CSeq::new(final_response.cseq().seq(), Method::Ack));
+    emit::request(with_routes(draft, &routes).set(ContentLength::new(0)))
 }
 
 /// Build the ACK for a 2xx from the INVITE transaction alone — no dialog
@@ -159,14 +159,14 @@ pub fn generate_ack_for_2xx_from_invite(
 
     let mut draft = RequestDraft::new(Method::Ack, uri)
         .push(hop)
-        .push(MaxForwards::DEFAULT)
+        .set(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed_from(original_invite, HeaderName::From))
         .push_raw(
             HeaderName::To,
             final_response.raw_text(HeaderName::To).next().unwrap_or(SipStr::EMPTY),
         )
         .push_raw(HeaderName::CallId, echoed_from(original_invite, HeaderName::CallId))
-        .push(CSeq::new(original_invite.cseq().seq(), Method::Ack));
+        .set(CSeq::new(original_invite.cseq().seq(), Method::Ack));
     draft = with_routes(draft, &routes);
 
     emit::request(emit::framed(draft, answer.unwrap_or_default(), None))

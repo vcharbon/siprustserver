@@ -11,7 +11,7 @@
 //! The proxy is the ONLY bridge between the planes: every datagram a caller
 //! ever sees must originate from the EXT face's bind, every worker-bound one
 //! from the INT face's — asserted from the recorded wire trace on every test
-//! ([`assert_plane_discipline`]), which is simultaneously the face-picker
+//! ([`assert_plane_discipline`]), which is simultaneously the crossing
 //! check (requests AND responses) and the per-face source-address discipline
 //! check. Double-RR order/cookie, in-dialog traversal in both directions,
 //! CANCEL/ACK correlation across faces, and the dual-VIP takeover ride the
@@ -22,7 +22,8 @@
 //! Beyond the failover sweep: the two-faced proxy topology and the face each message crosses.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
@@ -43,7 +44,6 @@ const PROXY_EXT: &str = "192.168.60.250:5060"; // external VIP
                                                // Internal (worker) plane.
 const PROXY_INT: &str = "10.244.255.250:5080"; // internal VIP
 const B1: &str = "10.244.0.11:5091";
-const INT_CIDRS: &str = "10.244.0.0/16";
 
 /// Which plane an address lives on (the test topology is two disjoint IPv4
 /// prefixes, so this is total).
@@ -59,10 +59,9 @@ fn plane(a: SocketAddr) -> &'static str {
 }
 
 /// THE dual-face invariant, read off the recorded wire trace: **no datagram
-/// ever crosses the planes** — the proxy bridges by re-originating from the
-/// face the destination lives on, so every recorded send has `from` and `to`
-/// on the SAME plane. This is simultaneously (a) the egress face picker check
-/// for requests and responses (a response relayed out the wrong socket would
+/// ever crosses the planes** — the proxy bridges by re-originating from its
+/// other face, so every recorded send has `from` and `to` on the SAME plane.
+/// This is simultaneously (a) the crossing check for requests and responses (a response relayed out the wrong socket would
 /// pair an int `from` with an ext `to`) and (e) the per-face source-address
 /// discipline (each face's egress sources from that face's bind).
 fn assert_plane_discipline(fh: &FailoverHarness) {
@@ -175,14 +174,7 @@ async fn stand_up(
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let proxy = fh
-        .spawn_proxy_dual(
-            "proxy",
-            PROXY_INT,
-            PROXY_EXT,
-            INT_CIDRS,
-            &[("b1", B1.parse().unwrap())],
-            0xC0FFEE,
-        )
+        .spawn_proxy_dual("proxy", PROXY_INT, PROXY_EXT, &[("b1", B1.parse().unwrap())], 0xC0FFEE)
         .await;
     let b1 = fh
         .spawn_worker_limited(
@@ -456,14 +448,7 @@ async fn dual_face_takeover_moves_both_faces_together() {
     // before the peer claims the same two VIP addresses.
     fh.advance(Duration::from_millis(100)).await;
     let proxy_b = fh
-        .spawn_proxy_dual(
-            "proxy2",
-            PROXY_INT,
-            PROXY_EXT,
-            INT_CIDRS,
-            &[("b1", B1.parse().unwrap())],
-            0xFACE2,
-        )
+        .spawn_proxy_dual("proxy2", PROXY_INT, PROXY_EXT, &[("b1", B1.parse().unwrap())], 0xFACE2)
         .await;
     fh.mark("proxy", None, "reboot", "peer proxy holds both VIPs");
 
@@ -477,4 +462,114 @@ async fn dual_face_takeover_moves_both_faces_together() {
     assert_plane_discipline(&fh);
     fh.assert_full_rfc_clean("dual-face-takeover");
     drop(proxy_b);
+}
+
+/// **A caller's Record-Route naming the proxy.** Alice records two entries of
+/// her own at the proxy's addresses, so the worker's route set toward her holds
+/// four entries naming the proxy and only the first two are its pair. The BYE
+/// the worker relays toward her reaches her and no worker, which would answer it
+/// with a stray 481.
+#[tokio::test(start_paused = true)]
+async fn a_callers_record_route_at_the_proxy_keeps_the_workers_requests_to_her() {
+    let mut fh = FailoverHarness::new("dual-face-caller-record-route", &["b1"]);
+    fh.allow_rfc_violation(
+        "no-record-route-from-ua",
+        "alice plays a caller recording entries at the proxy's addresses, the input of this test",
+    );
+    let (alice, bob, proxy, b1) = stand_up(&mut fh, route_all_to_bob()).await;
+    let recorded = format!("<sip:{PROXY_EXT};lr>, <sip:{PROXY_INT};lr>");
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Record-Route", &recorded)
+        .through(proxy.ext_addr())
+        .send()
+        .await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bob_dialog = bob_uas.dialog();
+    let mut bye = bob_dialog.bye().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    assert_reaped(&fh, &b1).await;
+    drop(proxy);
+}
+
+/// A route naming the proxy's internal face, reached from the external face by
+/// local delivery on the node.
+const VIP_ROUTE: &str = "sip:+0411@10.244.255.250:5080;user=phone";
+
+/// A route naming the proxy's own internal face: the worker's b-leg leaves the
+/// external face toward it and arrives back from the proxy's own address, so
+/// the proxy answers it 482 Loop Detected and no second call reaches the worker.
+/// The decision service grants `reroutes` reroutes to the call, each to the same
+/// route: each costs one attempt and one failure consult, and the caller gets the
+/// last 482, with the call's one CDR.
+async fn a_route_naming_the_proxy(reroutes: usize) {
+    let mut fh = FailoverHarness::new("dual-face-route-names-the-proxy", &["b1"]);
+    let consults = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let (counted, seen) = (consults.clone(), failures.clone());
+    let at_the_proxy = || {
+        let mut r = route_to("10.244.255.250", 5080);
+        r.new_ruri = Some(VIP_ROUTE.into());
+        r
+    };
+    let decision = ScriptedDecisionEngine::builder()
+        .fallback(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let mut r = at_the_proxy();
+            r.callback_context = Some("0".into());
+            NewCallResponse::Route(r)
+        })
+        .on_failure(move |req| {
+            seen.lock().unwrap().push(req.failure.status_code);
+            let done: usize =
+                req.callback_context.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
+            if done >= reroutes {
+                return CallTreatment::Relay { label: None };
+            }
+            let mut r = at_the_proxy();
+            r.callback_context = Some((done + 1).to_string());
+            CallTreatment::Route(r)
+        })
+        .build();
+    let (alice, bob, proxy, b1) = stand_up(&mut fh, Arc::new(decision)).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.ext_addr()).send().await;
+    call.expect(482).await;
+    // Her ACK reaches the proxy, which relays it to the worker.
+    fh.advance(Duration::from_millis(100)).await;
+    assert_reaped(&fh, &b1).await;
+
+    assert_eq!(consults.load(Ordering::SeqCst), 1, "one new-call consult");
+    assert_eq!(
+        *failures.lock().unwrap(),
+        vec![Some(482); reroutes + 1],
+        "each attempt fails once, on the proxy's 482"
+    );
+    assert_eq!(b1.metrics().creations_total(), 1, "no looped copy reaches the worker as a call");
+    assert_eq!(b1.cdr_records().len(), 1, "the call writes its one CDR");
+    let (ext, int): (SocketAddr, SocketAddr) =
+        (PROXY_EXT.parse().unwrap(), PROXY_INT.parse().unwrap());
+    let entries = fh.sip_entries();
+    let looped = entries.iter().filter(|e| e.opens_with("INVITE") && e.from == ext && e.to == int);
+    assert_eq!(looped.count(), reroutes + 1, "one pass back through the proxy per attempt");
+    fh.assert_full_rfc_clean("dual-face-route-names-the-proxy");
+    drop(proxy);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_route_naming_the_proxy_is_refused_482_at_once() {
+    a_route_naming_the_proxy(0).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_reroute_to_a_route_naming_the_proxy_costs_one_attempt() {
+    a_route_naming_the_proxy(1).await;
 }

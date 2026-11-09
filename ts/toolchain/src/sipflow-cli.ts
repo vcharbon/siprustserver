@@ -16,10 +16,15 @@ import { SIPFLOW } from "./binaries.js"
 import { type CliFailed, type CliUnavailable, runner } from "./spawn.js"
 
 export interface Interface {
-  /** `sipflow --json <capture> [--emit-headers a,b]` → the decoded flows document. */
+  /**
+   * `sipflow [reading…] --json <capture> [--emit-headers a,b]` → the decoded
+   * flows document, its messages read under `reading` (`--reading FILE`, or
+   * none for the RFC's reading).
+   */
   readonly flows: (
     capture: string,
-    emitHeaders: ReadonlyArray<string>
+    emitHeaders: ReadonlyArray<string>,
+    reading: ReadonlyArray<string>
   ) => Effect.Effect<Flows.FlowsDoc, CliFailed | CliUnavailable | Schema.SchemaError>
   /** `sipflow --schema` → the flows document's own JSON Schema, as text. */
   readonly schema: () => Effect.Effect<string, CliFailed | CliUnavailable>
@@ -40,9 +45,10 @@ export const layer = Layer.effect(
 
     const flows = Effect.fn("SipflowCli.flows")(function* (
       capture: string,
-      emitHeaders: ReadonlyArray<string>
+      emitHeaders: ReadonlyArray<string>,
+      reading: ReadonlyArray<string>
     ) {
-      const args = ["--json", capture]
+      const args = [...reading, "--json", capture]
       if (emitHeaders.length > 0) args.push("--emit-headers", emitHeaders.join(","))
       return yield* Flows.parseFlows(yield* cli.ok(bin, args))
     })

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Recovered when the last round's restart is Ready, with no overlap between it
+# and the incarnation before. Exit 75 while not yet. Facts: as kill_worker's, of
+# the last round.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=crash.sh
+source "$HAKIT_LIB/crash.sh"
+# shellcheck source=worker.sh
+source "$HAKIT_LIB/worker.sh"
+crashed="$(hk_probe_crashed)"
+read -r pod _ _ <<<"$(hk_targets)"
+timings="$(hk_worker_timings "$pod" "$(cat "$HAKIT_EVENT_DIR/killed_at_ms")")"
+jq -cn --argjson c "$crashed" --argjson t "$timings" '$c + $t'

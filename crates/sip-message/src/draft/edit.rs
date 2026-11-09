@@ -11,7 +11,10 @@
 use bytes::Bytes;
 
 use crate::error::SipParseError;
-use crate::header::{ContentLength, HeaderName, HeaderValue, MediaType, Via};
+use crate::header::{
+    first_repeated, second_line, ContentLength, HeaderName, HeaderValue, ListHeader, MediaType,
+    SingleHeader, Via,
+};
 use crate::header_table::HeaderTable;
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::SipHeader;
@@ -35,6 +38,9 @@ pub enum IncompleteDraft {
     /// A line cannot be written whole: a header name off `token`, or a CR or
     /// LF inside the start line or a header value (ADR-0053).
     Unwritable(WriteRefusal),
+    /// A single-valued header (`header::SINGLE_VALUED`) is on two lines
+    /// (RFC 3261 §7.3.1).
+    Repeated(HeaderName),
 }
 
 impl std::fmt::Display for IncompleteDraft {
@@ -49,6 +55,9 @@ impl std::fmt::Display for IncompleteDraft {
             }
             IncompleteDraft::Unreadable(e) => write!(f, "draft header is unreadable: {}", e.reason),
             IncompleteDraft::Unwritable(e) => write!(f, "draft line is unwritable: {e}"),
+            IncompleteDraft::Repeated(name) => {
+                write!(f, "draft carries {name} twice (RFC 3261 §7.3.1 — one value)")
+            }
         }
     }
 }
@@ -61,8 +70,8 @@ impl std::error::Error for IncompleteDraft {}
 #[derive(Debug)]
 pub struct Draft<S: StartKind> {
     start: S::Line,
-    entries: Vec<Entry>,
-    body: Bytes,
+    pub(super) entries: Vec<Entry>,
+    pub(super) body: Bytes,
 }
 
 impl<S: StartKind> Clone for Draft<S> {
@@ -85,63 +94,11 @@ impl<S: StartKind> Draft<S> {
         self
     }
 
-    // --- reading ---
-
-    pub fn entries(&self) -> &[Entry] {
-        &self.entries
-    }
-
-    pub fn has(&self, name: &HeaderName) -> bool {
-        let key = name.key();
-        self.entries.iter().any(|e| e.is_key(&key))
-    }
-
-    /// Every line of `name` as text, in wire order.
-    pub fn raw(&self, name: &HeaderName) -> Vec<SipStr> {
-        let key = name.key();
-        self.entries.iter().filter(|e| e.is_key(&key)).map(Entry::text).collect()
-    }
-
-    /// Every value of `H` the draft carries.
-    pub fn values<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
-        let name = H::header_name();
-        let key = name.key();
-        let mut values = Vec::new();
-        for entry in self.entries.iter().filter(|e| e.is_key(&key)) {
-            values.extend(entry.read::<H>()?);
-        }
-        Ok(values)
-    }
-
-    /// The single logical value of `H`, or `None` when the draft carries none.
-    /// A header read from its first line only
-    /// ([`HeaderValue::first_line_only`]) is that line's value, whatever a
-    /// later line of it holds, malformed or not, as on a message.
-    pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
-        if H::first_line_only() {
-            let name = H::header_name();
-            let key = name.key();
-            let first = self.entries.iter().find(|e| e.is_key(&key))?;
-            return match first.read::<H>() {
-                Err(e) => Some(Err(e)),
-                Ok(values) => H::combine(values).map(Ok),
-            };
-        }
-        match self.values::<H>() {
-            Err(e) => Some(Err(e)),
-            Ok(values) if values.is_empty() => None,
-            Ok(values) => H::combine(values).map(Ok),
-        }
-    }
-
-    pub fn body_bytes(&self) -> &Bytes {
-        &self.body
-    }
-
     // --- editing ---
 
-    /// Append a typed value as its own line.
-    pub fn push(mut self, value: impl HeaderValue) -> Self {
+    /// Append a value of a list header as its own line. A single-valued
+    /// header is written with [`set`](Self::set).
+    pub fn push<H: ListHeader>(mut self, value: H) -> Self {
         self.entries.push(Entry::typed(value));
         self
     }
@@ -154,8 +111,8 @@ impl<S: StartKind> Draft<S> {
         self
     }
 
-    /// Put a typed value on the first line of the whole message.
-    pub fn push_front(mut self, value: impl HeaderValue) -> Self {
+    /// Put a value of a list header on the first line of the whole message.
+    pub fn push_front<H: ListHeader>(mut self, value: H) -> Self {
         insert_entry(&mut self.entries, 0, Entry::typed(value));
         self
     }
@@ -164,7 +121,7 @@ impl<S: StartKind> Draft<S> {
     /// header already has — where a router's own Via and Route go. Nothing is
     /// read, so a lower line this hop has no business parsing cannot fail the
     /// edit; [`list`](Self::list) is the way in when the existing values matter.
-    pub fn prepend(mut self, value: impl HeaderValue) -> Self {
+    pub fn prepend<H: ListHeader>(mut self, value: H) -> Self {
         let name = value.name();
         let key = name.key();
         let at = self.entries.iter().position(|e| e.is_key(&key)).unwrap_or(self.entries.len());
@@ -180,8 +137,8 @@ impl<S: StartKind> Draft<S> {
     /// generator recipe lowers such a value onto.
     ///
     /// `freeze` still gates the mandatory headers and reads the ones the typed
-    /// core comes from, so a raw line in one of those, or one holding a CR or
-    /// LF, fails the freeze; a value
+    /// core comes from, so a raw line in one of those, one holding a CR or LF,
+    /// or a second line of a single-valued header, fails the freeze; a value
     /// that must go out invalid leaves through
     /// [`render_unchecked`](Self::render_unchecked). A line from outside the
     /// stack goes in through [`Entry::checked_raw`], which refuses it before
@@ -192,12 +149,17 @@ impl<S: StartKind> Draft<S> {
     }
 
     /// Replace every line of this header with one carrying `value`, keeping the
-    /// wire position the header already had.
+    /// wire position the header already had; a header the draft does not
+    /// carry goes last. A typed single-valued header is written this way, never
+    /// appended; a line [`push_raw`](Self::push_raw) or
+    /// [`push_entry`](Self::push_entry) adds beside one the draft carries makes
+    /// it refuse to freeze ([`IncompleteDraft::Repeated`]).
     pub fn set(mut self, value: impl HeaderValue) -> Self {
         let name = value.name();
         let key = name.key();
         let Some(at) = self.entries.iter().position(|e| e.is_key(&key)) else {
-            return self.push(value);
+            self.entries.push(Entry::typed(value));
+            return self;
         };
         self.entries.retain(|e| !e.is_key(&key));
         insert_entry(&mut self.entries, at, Entry::typed(value));
@@ -227,7 +189,7 @@ impl<S: StartKind> Draft<S> {
     /// it unedited: a request forwarded with no Via of its own has no path back
     /// for the response, and one forwarded undecremented has lost its loop
     /// bound.
-    pub fn list<H: HeaderValue>(
+    pub fn list<H: ListHeader>(
         mut self,
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
     ) -> Result<Self, SipParseError> {
@@ -247,33 +209,79 @@ impl<S: StartKind> Draft<S> {
         Ok(self)
     }
 
-    /// Rewrite the first value of one header, reading every line the header
-    /// has. A header the draft does not carry is left as it stands; a line that
-    /// does not read as `H` is an error, per [`list`](Self::list).
-    pub fn update<H: HeaderValue>(self, f: impl FnOnce(H) -> H) -> Result<Self, SipParseError> {
-        self.list::<H>(|list| list.map_first(f))
+    /// Rewrite the value of the single-valued `H` on the line it stands on. A
+    /// header the draft does not carry is left as it stands; a line that does
+    /// not read as `H`, or a second line of it, is an error, per
+    /// [`list`](Self::list).
+    pub fn update<H: SingleHeader>(
+        mut self,
+        f: impl FnOnce(H) -> H,
+    ) -> Result<Self, SipParseError> {
+        let name = H::header_name();
+        let key = name.key();
+        let Some(at) = self.entries.iter().position(|e| e.is_key(&key)) else {
+            return Ok(self);
+        };
+        if self.entries.iter().skip(at.saturating_add(1)).any(|e| e.is_key(&key)) {
+            return Err(second_line(&name));
+        }
+        let value = match self.entries.get(at) {
+            Some(entry) => entry.read_one::<H>()?,
+            None => return Ok(self),
+        };
+        replace_entries(&mut self.entries, at..at.saturating_add(1), [Entry::typed(f(value))]);
+        Ok(self)
     }
 
     /// Rewrite the first value of one header, reading only the LINE that
     /// carries it — a router stamps its own hop without parsing hops it has no
     /// business parsing. Lines below the first are left byte-untouched.
-    pub fn update_top<H: HeaderValue>(self, f: impl FnOnce(H) -> H) -> Result<Self, SipParseError> {
+    pub fn update_top<H: ListHeader>(self, f: impl FnOnce(H) -> H) -> Result<Self, SipParseError> {
         self.edit_top_line::<H>(|list| list.map_first(f))
     }
 
     /// Drop the first value of one header — the RFC 3261 §7.3.1 aware entry
     /// pop. A comma-folded line keeps the values below the one removed; a line
     /// carrying only that value goes away. Only that line is read.
-    pub fn pop_top<H: HeaderValue>(self) -> Result<Self, SipParseError> {
-        self.edit_top_line::<H>(|mut list| {
-            list.pop_front();
-            list
-        })
+    pub fn pop_top<H: ListHeader>(self) -> Result<Self, SipParseError> {
+        self.pop_top_values::<H>(1)
+    }
+
+    /// Drop the first `count` values of one header, reading each line it
+    /// reaches once, so the work is linear in the header's values whatever its
+    /// folding.
+    pub fn pop_top_values<H: ListHeader>(
+        mut self,
+        mut count: usize,
+    ) -> Result<Self, SipParseError> {
+        let name = H::header_name();
+        let key = name.key();
+        let mut at = 0;
+        // Each pass takes a line out, or drops the last values counted.
+        let lines = self.entries.len();
+        for _ in 0..lines {
+            if count == 0 {
+                break;
+            }
+            let Some(found) = self.entries.iter().skip(at).position(|e| e.is_key(&key)) else {
+                break;
+            };
+            at = at.saturating_add(found);
+            let Some(entry) = self.entries.get(at) else { break };
+            let values = entry.read::<H>()?;
+            let dropped = count.min(values.len());
+            count -= dropped;
+            let kept = values.into_iter().skip(dropped);
+            replace_entries(&mut self.entries, at..at.saturating_add(1), one_line(kept));
+        }
+        Ok(self)
     }
 
     /// Replace the first line of one header with the values `f` yields, at the
-    /// position that line held. Every other line is left as it stands.
-    fn edit_top_line<H: HeaderValue>(
+    /// position that line held and on that one line (RFC 3261 §7.3.1): an edit
+    /// adds no line to what a reader bounds. Every other line is left as it
+    /// stands.
+    fn edit_top_line<H: ListHeader>(
         mut self,
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
     ) -> Result<Self, SipParseError> {
@@ -285,11 +293,7 @@ impl<S: StartKind> Draft<S> {
         };
         let values = entry.read::<H>()?;
         let updated = f(HeaderList::new(values));
-        replace_entries(
-            &mut self.entries,
-            at..at.saturating_add(1),
-            updated.into_iter().map(Entry::typed),
-        );
+        replace_entries(&mut self.entries, at..at.saturating_add(1), one_line(updated));
         Ok(self)
     }
 
@@ -340,7 +344,7 @@ impl<S: StartKind> Draft<S> {
 
     /// The single render of a draft and the typed message read back from it.
     fn rendered(self) -> Result<S::Message, IncompleteDraft> {
-        let draft = self;
+        let draft = self.one_line_each()?;
         let rendered = render::<S>(&draft.start, &draft.entries, &draft.body);
         if let Some(refusal) = rendered.refusal {
             return Err(IncompleteDraft::Unwritable(refusal));
@@ -372,7 +376,7 @@ impl<S: StartKind> Draft<S> {
     /// [`freeze`](Self::freeze), without assembling the typed message a relay
     /// never reads. Byte-identical to `freeze()?.raw`.
     pub fn freeze_bytes(self) -> Result<Bytes, IncompleteDraft> {
-        let draft = self.complete()?;
+        let draft = self.complete()?.one_line_each()?;
         render_bytes::<S>(&draft.start, &draft.entries, &draft.body)
             .map(Bytes::from)
             .map_err(IncompleteDraft::Unwritable)
@@ -389,6 +393,14 @@ impl<S: StartKind> Draft<S> {
     /// deviation fixtures — and the reviewable grep target that says so.
     pub fn render_unchecked(self) -> Bytes {
         Bytes::from(render::<S>(&self.start, &self.entries, &self.body).bytes)
+    }
+
+    /// This draft, refused when it holds a single-valued header on two lines.
+    fn one_line_each(self) -> Result<Self, IncompleteDraft> {
+        match repeated_single(&self.entries) {
+            Some(name) => Err(IncompleteDraft::Repeated(name)),
+            None => Ok(self),
+        }
     }
 
     /// This draft with its Content-Length restated, once every header RFC 3261
@@ -421,6 +433,11 @@ impl<S: StartKind> Draft<S> {
     }
 }
 
+/// The first single-valued header `entries` carry on a second line.
+fn repeated_single(entries: &[Entry]) -> Option<HeaderName> {
+    first_repeated(entries.iter().map(|e| (e.id(), e.name().as_wire_str())))
+}
+
 /// Puts `entry` at `at`, the lines from `at` on moving down one; past the end
 /// it goes last.
 fn insert_entry(entries: &mut Vec<Entry>, at: usize, entry: Entry) {
@@ -430,6 +447,16 @@ fn insert_entry(entries: &mut Vec<Entry>, at: usize, entry: Entry) {
 
 /// Replaces the lines in `range` by `with`, moving the lines after them once
 /// whatever the number of lines put in. A range past the end appends.
+/// The one line `values` take, comma-folded past the first; none for no value.
+fn one_line<H: HeaderValue>(values: impl IntoIterator<Item = H>) -> Option<Entry> {
+    let mut values = values.into_iter();
+    let first = values.next()?;
+    let Some(second) = values.next() else { return Some(Entry::typed(first)) };
+    let wire: Vec<String> =
+        [first, second].into_iter().chain(values).map(|v| v.to_wire()).collect();
+    Some(Entry::raw(H::header_name(), wire.join(", ")))
+}
+
 fn replace_entries(
     entries: &mut Vec<Entry>,
     range: std::ops::Range<usize>,

@@ -61,7 +61,7 @@ async fn prack_reliable_provisional_relayed_end_to_end() {
     let mut uas = bob.receive("INVITE").await;
     assert!(
         uas.request()
-            .header::<Supported>()
+            .token_set::<Supported>()
             .expect("a Supported")
             .expect("readable Supported")
             .contains("100rel"),
@@ -74,7 +74,10 @@ async fn prack_reliable_provisional_relayed_end_to_end() {
     // Alice sees a RELIABLE provisional — under this stack's own RSeq.
     let p183 = call.expect(183).await;
     assert!(
-        p183.header::<Require>().expect("a Require").expect("readable Require").contains("100rel"),
+        p183.token_set::<Require>()
+            .expect("a Require")
+            .expect("readable Require")
+            .contains("100rel"),
         "Require: 100rel relayed to alice",
     );
     assert_ne!(

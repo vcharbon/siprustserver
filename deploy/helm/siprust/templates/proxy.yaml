@@ -20,7 +20,6 @@ discovered from the EndpointSlices of the headless b2bua-worker Service
   "PROXY_ADVERTISE" (printf "%s:%d" $vip $port)
   "PROXY_LISTEN_EXT" (printf "%s:%d" $extVip $port)
   "PROXY_ADVERTISE_EXT" (printf "%s:%d" $extVip $port)
-  "PROXY_FACE_INT_CIDRS" (include "siprust.net" (dict "root" $ "key" "internalCidrs"))
   "PROXY_EXT_INTERFACE" (include "siprust.net" (dict "root" $ "key" "externalInterface"))
   "PROXY_METRICS" "0.0.0.0:9090"
   "PROXY_WORKER_SERVICE" "b2bua-worker"
@@ -28,9 +27,7 @@ discovered from the EndpointSlices of the headless b2bua-worker Service
   "OTEL_EXPORTER_OTLP_ENDPOINT" .Values.tracing.otlpEndpoint
   "SIP_TRACE_HEADER" (include "siprust.traceHeader" .)
 }}
-{{- with .Values.network.externalNextHops }}
-{{- $_ := set $env "PROXY_EXT_NEXT_HOPS" (join "," .) }}
-{{- end }}
+{{- $_ := set $env "PROXY_EXT_NEXT_HOPS" (join "," .Values.network.externalNextHops) }}
 {{- if not (kindIs "invalid" .Values.inviteTxnTimeoutSec) }}
 {{- $_ := set $env "PROXY_INVITE_TXN_TIMEOUT_SEC" (toString (int .Values.inviteTxnTimeoutSec)) }}
 {{- end }}
@@ -134,7 +131,14 @@ spec:
           env:
             - { name: PROXY_VIP, value: {{ $vip | quote }} }
             - { name: EXTERNAL_VIP, value: {{ $extVip | quote }} }
+            - { name: EXTERNAL_INTERFACE, value: {{ include "siprust.net" (dict "root" $ "key" "externalInterface") | quote }} }
+            - { name: EXTERNAL_EGRESS_DROP, value: {{ ternary "on" "off" .Values.network.externalEgressDrop | quote }} }
             - { name: UNRES_QLEN_BYTES, value: {{ int $p.unresQlenBytes | toString | quote }} }
+            - { name: NEIGH_BASE_REACHABLE_TIME_MS, value: {{ int $p.neighbour.baseReachableTimeMs | toString | quote }} }
+            - { name: NEIGH_DELAY_FIRST_PROBE_S, value: {{ int $p.neighbour.delayFirstProbeSeconds | toString | quote }} }
+            - { name: NEIGH_UCAST_SOLICIT, value: {{ int $p.neighbour.ucastSolicit | toString | quote }} }
+            - { name: NEIGH_MCAST_SOLICIT, value: {{ int $p.neighbour.mcastSolicit | toString | quote }} }
+            - { name: NEIGH_RETRANS_TIME_MS, value: {{ int $p.neighbour.retransTimeMs | toString | quote }} }
             - { name: ROUTE_GUARD, value: {{ ternary "on" "off" $p.routeGuard.enabled | quote }} }
           securityContext:
             privileged: true
@@ -227,6 +231,34 @@ spec:
           resources:
             {{- toYaml $g.resources | nindent 12 }}
         {{- end }}
+        # The external next hops in the table of the external VIP's traffic
+        # (ADR-0056 §11). Ready while the table holds one: a pod whose table is
+        # empty stays out of Ready, across a restart of this container too.
+        - name: egress-routes
+          {{- include "siprust.netToolsImage" . | nindent 10 }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              {{- .Files.Get "files/vip-egress-routes.sh" | nindent 14 }}
+          env:
+            - { name: EXTERNAL_INTERFACE, value: {{ include "siprust.net" (dict "root" $ "key" "externalInterface") | quote }} }
+            - { name: EXTERNAL_NEXT_HOPS, value: {{ join " " .Values.network.externalNextHops | quote }} }
+            - { name: PERIOD, value: {{ int $p.egressRoutes.periodSeconds | toString | quote }} }
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "ip -o route show table 5060 default | grep -q ' via '"]
+            periodSeconds: {{ int $p.readinessProbe.periodSeconds }}
+            failureThreshold: 1
+            successThreshold: 1
+            timeoutSeconds: 1
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"], add: ["NET_ADMIN"] }
+          resources:
+            {{- toYaml $p.egressRoutes.resources | nindent 12 }}
         {{- with $p.extraContainers }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

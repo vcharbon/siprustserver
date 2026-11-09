@@ -16,8 +16,10 @@
 //! gate's one writer: a reading is a clock read and a few atomic loads and
 //! stores, no lock. The transaction layer reads only the `refusing` state, as
 //! each new INVITE arrives: the state the last reading wrote, so while the
-//! router is held in one turn it is the state from before that turn, and an
-//! INVITE it admits is judged again at its take. Time is `tokio::time`.
+//! router is held in one turn it is the state from before that turn. That layer
+//! then refuses on the queue's age itself, at the refusal delay and interval
+//! together, the age that trips this gate at a single reading, and an INVITE
+//! it admits under that age is judged again at its take. Time is `tokio::time`.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;

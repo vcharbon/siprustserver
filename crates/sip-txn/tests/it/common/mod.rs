@@ -77,12 +77,22 @@ impl Stack {
         b2bua_queue: usize,
         config: TransactionConfig,
     ) -> Stack {
+        Self::build_reading(transit_ms, b2bua_queue, config, CustomParser::new()).await
+    }
+
+    /// [`build_with_config`](Self::build_with_config) reading the wire with `parser`.
+    pub async fn build_reading(
+        transit_ms: u64,
+        b2bua_queue: usize,
+        config: TransactionConfig,
+        parser: CustomParser,
+    ) -> Stack {
         let net = SimulatedSignalingNetwork::new(transit_ms);
         let b2bua_ep =
             net.bind_udp(BindUdpOpts::new(addr(B2BUA), b2bua_queue)).await.expect("bind b2bua");
         let peer = net.bind_udp(BindUdpOpts::new(addr(PEER), 1024)).await.expect("bind peer");
 
-        let parser = Arc::new(CustomParser::new());
+        let parser = Arc::new(parser);
         // Deterministic ids (the `build` default seeds 0xC0FFEE) so any
         // tag/branch fabrication is stable.
         let (txn, events) = TransactionLayer::spawn(b2bua_ep, parser, config);
@@ -235,6 +245,9 @@ pub const INCARNATION_MARK: &str = "k3x9";
 
 /// INVITE carrying Via `cr`/`lg` custom params (cancel-on-evict test).
 pub fn invite_with_cr_lg(call_ref: &str, call_id: &str, branch: &str, leg_id: &str) -> SipRequest {
+    // The Via parameter carries the call ref encoded as a token, as the stack's
+    // own Via does.
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     parse_request(&format!(
         "INVITE sip:bob@192.0.2.20:5060 SIP/2.0\n\
          Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={call_ref};lg={leg_id};ci={INCARNATION_MARK}\n\

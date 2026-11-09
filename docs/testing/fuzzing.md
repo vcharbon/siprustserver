@@ -27,13 +27,15 @@ Ordered by what a panic costs (ADR-0051 §5): `just fuzz-list` prints them in th
 | `sdp_answer` | every SDP read, answer and restatement of the message lane's probe, over two descriptions | tears the call down (the answer is built in a turn) |
 | `worker_probe` | the health probe reading a worker's OPTIONS answer whose status and header lines (`X-Overload`, `X-Readiness`, `X-Incarnation`) are the input, then a caller's INVITE routed on what it read | exits the proxy process: its runner ends when the probe does |
 | `overload_value` | lines read as `X-Overload` and `X-Readiness` values, each payload fed to the load observer a probe interval apart; a payload that reads is in range | exits the proxy process: its runner ends when the probe does |
-| `proxy_datagram` | one proxy core on the simulated fabric, every name resolved in-process, the input sent twice from a seed's peer | restarts the recv loop every call shares |
+| `proxy_datagram` | one proxy core on the simulated fabric, every name resolved in-process, the input sent twice from a seed's peer; every response the proxy sends outside the workers goes to its top Via's target (RFC 3261 §18.2.2) | restarts the recv loop every call shares |
 | `proxy_variants` | `proxy_datagram` on the rig's variants: the self-gate closed, no worker alive, one worker down, two faces, names that resolve to nothing | restarts the recv loop every call shares |
 | `repl_frame` | the replication stream reader and frame decoder; a decoded frame writes back to itself | restarts the replication task |
 | `call_snapshot` | the call body decode; a decoded call writes back to itself | restarts the replication task |
 | `message_roundtrip` | every entry point of the message lane's probe, and parse → render → parse: the rendering reads back to itself and passes the write check | drops one datagram (contained) |
-| `multipart` | a multipart body under its boundary, read and composed again | drops one datagram |
-| `credentials` | each line as each header of the authentication family; the rendering reads back to itself and passes the write check | drops one datagram |
+| `must_accept` | a value of one header's grammar or of a start line (the conformance suite's generator), its derivation steered by the input, in a whole message: the production path and the typed reader read it, unless a stated rule refuses that form | drops one datagram; a failure is a false refusal |
+| `no_progress` | the input through the message lane's probe and as a multipart body under the boundary its first line names, each of its lines as a header line of a request through the probe again, and each line through the text readers (list splits, escapes, reason keys, MSCML): no reader's step stalls | drops one datagram; a failure is a reader that would have spun |
+| `multipart` | a multipart body under its boundary: each part starts after a CRLF-ended delimiter line and ends at the next one's CRLF, no content holds a delimiter, nothing is read past the close, and the parts composed again read back as themselves | drops one datagram |
+| `credentials` | each line as each header of the authentication family; an accepted Authorization or Proxy-Authorization reads, and the rendering reads back to itself and passes the write check | drops one datagram |
 
 A target compiles in the driver and seeds of its no-panic lane from the crate's own test tree
 (`fuzz/lanes`), so it drives what the lane drives. A change to a lane driver's signature
@@ -66,6 +68,22 @@ What a run checks beside panics:
   code, and its audited exceptions are socket calls the simulated fabric never makes.
 - **Arithmetic overflow and debug assertions**: on, as in the lanes.
 - **Recursion driven by input**: each case runs on the lanes' small stack.
+- **A reader that stalls**: a loop of `sip-message` over its input runs on the bounded cursor
+  (ADR-0057 §5), whose step that moves no byte on is a recoverable error in a release build
+  and a panic under `cfg(fuzzing)`, which cargo-fuzz sets: every target reports one, and
+  `no_progress` aims at it.
+- **Accepted means readable**: a message the strict parser accepted reads through the typed
+  reader of every header ingress vouches for (`no_panic_lane/readable.rs`), and so does one a
+  parser stating every generic exemption accepted. The lane, its structured corpus and
+  `message_roundtrip` carry it from one site. A header with a row `readable/<header>` on the
+  conformance ratchet is left out until the row leaves the list.
+- **Broken means refused** (`no_panic_lane/break_rule.rs`): an accepted message with one
+  operator breaking one rule (a single-valued header twice, a second `tag` or `branch`, junk
+  after a value, a control byte, no blank line, a URI parameter repeated with another value)
+  is refused by the parser that accepted it, the exempting one included; a From or Contact URI
+  parameter repeated with an equal value is accepted where the set names it and refused where
+  it does not.
+- **Valid means accepted**: `must_accept` is the one target that fails on a false refusal.
 
 With `--jobs J` the run forks J processes; a crash, timeout or OOM is kept under
 `fuzz/artifacts/<target>/` and the run goes on. cargo-fuzz builds the target; the fuzzer runs

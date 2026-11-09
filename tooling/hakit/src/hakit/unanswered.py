@@ -6,8 +6,9 @@ A call falls in exactly one cause, tried in this order: `other` with detail
 `generator` (the generator failed the call), `expected` (an ending of its shape
 other than answered), `overload` (a 503 with Retry-After), `dependency_fault` (a
 503 without Retry-After whose setup, start to setup end, overlaps a window whose
-budget allows a 503 without Retry-After), `setup_timeout`, `cut` (cut, stranded,
-or failed after its answer), `other` (any other ending or code, a bare 503 in a
+budget allows a 503 without Retry-After), `silent_after_provisional`,
+`setup_timeout` (no response heard by the give-up), `cut` (cut, stranded, or
+failed after its answer), `other` (any other ending or code, a bare 503 in a
 window that does not allow it among them). Its place is the incident kinds of
 the first window its setup overlaps (a cut: the window holding its last failure,
 else its end), or `outside`. Its detail is its ending and final code, with its
@@ -24,13 +25,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from . import jsonval as jv
-from .classify import caller_expected
+from .classify import SILENT_AFTER_PROVISIONAL, caller_expected, silent_after_provisional
 from .jsonval import Json
 from .model import Budget, Shape
 from .profile import Profile
 from .windows import Window
 
-CAUSES = ("expected", "overload", "dependency_fault", "setup_timeout", "cut", "other")
+CAUSES = ("expected", "overload", "dependency_fault", SILENT_AFTER_PROVISIONAL, "setup_timeout", "cut", "other")
 OUTSIDE = "outside"
 PRIORITY_HEADER = "resource-priority"
 OVERLOAD_CODE = 503
@@ -114,6 +115,8 @@ def cause_of(r: Json, shape: Shape, places: Places) -> Cause | None:
             return Cause("dependency_fault", detail, setup_where)
         if setup_w is not None:
             return Cause("other", f"503 without Retry-After in {setup_where} window", setup_where)
+    if silent_after_provisional(r):
+        return Cause(SILENT_AFTER_PROVISIONAL, detail, setup_where)
     if ending == "timeout":
         return Cause("setup_timeout", detail, setup_where)
     if ending == "stranded":

@@ -136,6 +136,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, talk_ms: u64, seed: u64) -> DriverC
             reinvite_gap: Duration::from_millis(0),
             long_hold: Duration::from_millis(120),
             teardown_quiesce: Duration::from_millis(200),
+            final_wait: None,
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),

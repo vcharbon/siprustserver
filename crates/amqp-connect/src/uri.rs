@@ -8,6 +8,7 @@ use lapin::uri::AMQPUri;
 use tokio::time::{timeout_at, Instant};
 
 use crate::stream::{connect_stream, timed_out, Connected};
+use crate::tls::BrokerTls;
 
 /// The heartbeat, seconds, a connection whose URI states none negotiates
 /// ([`open_over`](crate::open_over)): a silent broker or a half-open link is
@@ -28,13 +29,17 @@ pub fn checked_uri(var: &str, url: &str) -> Result<AMQPUri, String> {
     Ok(uri)
 }
 
-/// Resolves the host of `uri` and connects its stream ([`connect_stream`]),
-/// both by `deadline`.
-pub async fn connect_uri(uri: &AMQPUri, deadline: Instant) -> io::Result<Connected> {
+/// Resolves the host of `uri` and connects its stream over `tls`
+/// ([`connect_stream`]), both by `deadline`.
+pub async fn connect_uri(
+    uri: &AMQPUri,
+    tls: &BrokerTls,
+    deadline: Instant,
+) -> io::Result<Connected> {
     let host = (uri.authority.host.as_str(), uri.authority.port);
     let addrs: Vec<SocketAddr> = timeout_at(deadline, tokio::net::lookup_host(host))
         .await
         .map_err(|_| timed_out())??
         .collect();
-    connect_stream(uri, &addrs, deadline).await
+    connect_stream(uri, tls, &addrs, deadline).await
 }

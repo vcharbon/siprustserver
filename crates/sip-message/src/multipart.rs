@@ -17,9 +17,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::header::{HeaderClass, HeaderId, HeaderName, HeaderValue, MediaType, ParamValue};
+use crate::header::{HeaderId, HeaderValue, MediaType};
 use crate::header_table::HeaderTable;
 use crate::sip_str::SipStr;
+use crate::whitespace;
 use crate::write_check::WriteRefusal;
 
 /// One entity part: its media type, any further entity headers it states, and
@@ -81,9 +82,10 @@ pub enum MultipartError {
     /// A multipart body with no parts frames nothing (RFC 2046 §5.1.1 requires
     /// at least one encapsulation).
     NoParts,
-    /// The caller stated a boundary that occurs inside a part's payload, so the
-    /// delimiter would split a part rather than separate two.
-    BoundaryInPayload { boundary: String },
+    /// The caller stated a boundary that occurs inside a part, its head or its
+    /// payload, so a line of the part could start like a delimiter that is
+    /// none, or the delimiter would split a part rather than separate two.
+    BoundaryInPart { boundary: String },
     /// A part's `Content-Type` or header line cannot be written whole.
     Unwritable(WriteRefusal),
 }
@@ -95,8 +97,8 @@ impl std::fmt::Display for MultipartError {
                 write!(f, "{content_type:?} is not a multipart media type")
             }
             MultipartError::NoParts => write!(f, "a multipart body states no parts"),
-            MultipartError::BoundaryInPayload { boundary } => {
-                write!(f, "the stated boundary {boundary:?} occurs inside a part's payload")
+            MultipartError::BoundaryInPart { boundary } => {
+                write!(f, "the stated boundary {boundary:?} occurs inside a part")
             }
             MultipartError::Unwritable(refusal) => write!(f, "a part line: {refusal}"),
         }
@@ -109,8 +111,8 @@ impl std::error::Error for MultipartError {}
 /// …).
 ///
 /// A container type that already names a `boundary` uses it, and is refused
-/// when a payload contains it; otherwise the boundary is derived from the parts
-/// and extended until no payload holds it.
+/// when a part (its head or its payload) contains it; otherwise the boundary is
+/// derived from the parts and extended until no part holds it.
 pub fn compose(container_type: &str, parts: &[MultipartPart]) -> Result<Composed, MultipartError> {
     let media = MediaType::parse(&SipStr::owned(container_type)).ok();
     if !media.as_ref().is_some_and(MediaType::is_multipart) {
@@ -128,8 +130,8 @@ pub fn compose(container_type: &str, parts: &[MultipartPart]) -> Result<Composed
         .and_then(|v| v.as_str().map(str::to_string));
     let boundary = match &stated {
         Some(boundary) => {
-            if parts.iter().any(|p| contains(&p.payload, boundary.as_bytes())) {
-                return Err(MultipartError::BoundaryInPayload { boundary: boundary.clone() });
+            if parts.iter().any(|p| holds(p, boundary)) {
+                return Err(MultipartError::BoundaryInPart { boundary: boundary.clone() });
             }
             boundary.clone()
         }
@@ -173,94 +175,30 @@ fn frame(boundary: &str, parts: &[MultipartPart]) -> Vec<u8> {
     body
 }
 
-/// A message body built by [`attach`]: the bytes, the `Content-Type` that
-/// describes them (`None` for no body), the further entity headers the
-/// message itself states for them, `(name, value)` in emission order, and
-/// what of the parts was left out because it cannot be written whole.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Attached {
-    pub content_type: Option<String>,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-    pub refused: Vec<WriteRefusal>,
-}
-
-/// The body carrying the session description of `body` (typed `content_type`,
-/// described by the message's `entity_headers`) beside `parts`, which replace
-/// every other part `body` carries (RFC 5621 §3).
-///
-/// - a description and parts: `multipart/mixed`, the description first;
-/// - no description, one part: that part is the body, its entity headers the
-///   message's;
-/// - no description, several parts: `multipart/mixed` of them;
-/// - a description alone: that description, bare, its entity headers the
-///   message's; nothing at all: no body.
-///
-/// A body carrying a part states `MIME-Version: 1.0` on the message (RFC 2045
-/// §4). The description keeps its own entity headers in wire order, a bare
-/// one those the message stated for it. A part's own `Content-Type` header
-/// types it; its `MIME-Version` and any structural header never ride. A part
-/// header line that cannot be written whole is left out, and so is a part
-/// whose `Content-Type` cannot; each is named in [`Attached::refused`].
-pub fn attach(
+/// The description a message body typed `content_type` and described by
+/// `entity_headers` holds, as [`sdp_range`] reads it.
+fn find_description(
     content_type: Option<&str>,
     entity_headers: &[(String, String)],
     body: &[u8],
-    parts: &[MultipartPart],
-) -> Attached {
-    let mut refused = Vec::new();
-    let mut all: Vec<MultipartPart> = Vec::with_capacity(parts.len() + 1);
-    all.extend(
-        entity_parts(content_type, entity_headers, body)
-            .into_iter()
-            .find(|part| !part.payload.is_empty() && is_sdp(&part.content_type)),
-    );
-    all.extend(parts.iter().filter_map(|part| writable(normalized(part), &mut refused)));
-    let mime = if parts.is_empty() { Vec::new() } else { vec![mime_version()] };
-    match all.as_slice() {
-        [] => Attached { content_type: None, headers: Vec::new(), body: Vec::new(), refused },
-        [one] => Attached {
-            content_type: Some(one.content_type.clone()),
-            headers: mime.into_iter().chain(one.headers.iter().cloned()).collect(),
-            body: one.payload.clone(),
-            refused,
-        },
-        several => {
-            let boundary = derive_boundary(several);
-            Attached {
-                content_type: Some(format!("multipart/mixed;boundary={boundary}")),
-                headers: vec![mime_version()],
-                body: frame(&boundary, several),
-                refused,
-            }
-        }
-    }
+) -> Option<description::Found> {
+    let media = MediaType::parse(&SipStr::owned(content_type?)).ok()?;
+    let disposition = entity_headers
+        .iter()
+        .find(|(name, _)| whitespace::trim(name).eq_ignore_ascii_case("Content-Disposition"))
+        .map(|(_, value)| value.as_str());
+    description::find(&media, disposition, body, &description::top())
 }
 
-fn mime_version() -> (String, String) {
-    ("MIME-Version".to_string(), "1.0".to_string())
-}
-
-fn is_sdp(content_type: &str) -> bool {
-    MediaType::parse(&SipStr::owned(content_type)).is_ok_and(|ct| ct.is_sdp())
-}
-
-/// `part` as it is framed or lifted: a `Content-Type` among its headers types
-/// it, and `MIME-Version` (the message's own) and structural headers such as
-/// `Content-Length` (RFC 3261 §20.14, the message's framing) are dropped.
-fn normalized(part: &MultipartPart) -> MultipartPart {
-    let mut out = MultipartPart::new(part.content_type.clone(), part.payload.clone());
-    for (name, value) in &part.headers {
-        let name_trimmed = name.trim();
-        if name_trimmed.eq_ignore_ascii_case("Content-Type") {
-            out.content_type = value.clone();
-        } else if !name_trimmed.eq_ignore_ascii_case("MIME-Version")
-            && HeaderName::class_of(name_trimmed) != HeaderClass::Structural
-        {
-            out.headers.push((name.clone(), value.clone()));
-        }
-    }
-    out
+/// Which of the [`entity_parts`] of a message body holds the session
+/// description [`sdp_range`] locates, nested or not: the part [`attach`]
+/// lifts. `None` where the body holds none.
+pub fn description_entity(
+    content_type: Option<&str>,
+    entity_headers: &[(String, String)],
+    body: &[u8],
+) -> Option<usize> {
+    find_description(content_type, entity_headers, body).map(|found| found.index)
 }
 
 /// The entity parts a message body carries (RFC 2045 §2.4): each part of a
@@ -277,13 +215,12 @@ pub fn entity_parts(
         return Vec::new();
     };
     let media = MediaType::parse(&SipStr::owned(text)).ok();
-    let boundary = media
-        .as_ref()
-        .filter(|m| m.is_multipart())
-        .and_then(|m| m.param("boundary"))
-        .and_then(|b| b.as_str().map(str::to_string));
-    if let Some(boundary) = boundary {
-        return decompose(body, &boundary)
+    let framing = media.as_ref().filter(|m| m.is_multipart()).and_then(|m| {
+        let boundary = m.param("boundary")?.as_str()?.to_string();
+        Some((boundary, default_part_type(m)))
+    });
+    if let Some((boundary, default)) = framing {
+        return located(body, &boundary, default)
             .into_iter()
             .filter_map(|part| {
                 Some(MultipartPart {
@@ -294,18 +231,28 @@ pub fn entity_parts(
             })
             .collect();
     }
-    let headers = entity_headers
+    let headers = describing_entity_headers(entity_headers);
+    vec![MultipartPart {
+        content_type: whitespace::trim(text).to_string(),
+        headers,
+        payload: body.to_vec(),
+    }]
+}
+
+/// The message's entity headers that describe a bare body as one part: every
+/// `Content-` field but `Content-Type` and `Content-Length`.
+fn describing_entity_headers(entity_headers: &[(String, String)]) -> Vec<(String, String)> {
+    entity_headers
         .iter()
         .filter(|(name, _)| {
-            let name = name.trim();
+            let name = whitespace::trim(name);
             is_entity_header(name)
                 && !name.eq_ignore_ascii_case("Content-Type")
                 && !name.eq_ignore_ascii_case("Content-Length")
                 && !name.eq_ignore_ascii_case("MIME-Version")
         })
         .cloned()
-        .collect();
-    vec![MultipartPart { content_type: text.trim().to_string(), headers, payload: body.to_vec() }]
+        .collect()
 }
 
 /// Whether `name` is a MIME entity header (RFC 2045 §9: `MIME-Version` and every
@@ -313,15 +260,25 @@ pub fn entity_parts(
 /// rides only with that body.
 pub fn is_entity_header(name: &str) -> bool {
     const CONTENT: &[u8] = b"content-";
-    let bytes = name.trim().as_bytes();
-    name.trim().eq_ignore_ascii_case("MIME-Version")
+    let bytes = whitespace::trim(name).as_bytes();
+    whitespace::trim(name).eq_ignore_ascii_case("MIME-Version")
         || (bytes.len() > CONTENT.len()
             && bytes.get(..CONTENT.len()).is_some_and(|head| head.eq_ignore_ascii_case(CONTENT)))
 }
 
-/// A boundary no payload contains, derived from the parts so the same parts
-/// always frame the same way. RFC 2046 §5.1.1's `bchars` set is respected: the
-/// derivation emits hex digits and `-` only.
+/// Whether `boundary` has RFC 2046 §5.1.1's form: 1 to 70 `bchars`, the last
+/// no space.
+pub(crate) fn is_boundary(boundary: &str) -> bool {
+    let bcharsnospace = |b: u8| b.is_ascii_alphanumeric() || b"'()+_,-./:=?".contains(&b);
+    let bytes = boundary.as_bytes();
+    (1..=70).contains(&bytes.len())
+        && bytes.iter().all(|&b| b == b' ' || bcharsnospace(b))
+        && bytes.last().is_some_and(|&b| bcharsnospace(b))
+}
+
+/// A boundary no part contains, its head or its payload, derived from the parts
+/// so the same parts always frame the same way. RFC 2046 §5.1.1's `bchars` set
+/// is respected: the derivation emits hex digits and `-` only.
 fn derive_boundary(parts: &[MultipartPart]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for part in parts {
@@ -331,10 +288,27 @@ fn derive_boundary(parts: &[MultipartPart]) -> String {
         }
     }
     let mut boundary = format!("boundary-{hash:016x}");
-    while parts.iter().any(|p| contains(&p.payload, boundary.as_bytes())) {
+    // A boundary longer than every field is held by none.
+    let longest = parts.iter().flat_map(fields).max_by_key(|field| field.len()).unwrap_or_default();
+    for _ in 0..=longest.len() {
+        if !parts.iter().any(|p| holds(p, &boundary)) {
+            break;
+        }
         boundary.push('-');
     }
     boundary
+}
+
+/// What `part` is framed from: its type, each head line's name and value, its
+/// payload.
+fn fields(part: &MultipartPart) -> impl Iterator<Item = &[u8]> {
+    let head = part.headers.iter().flat_map(|(name, value)| [name.as_bytes(), value.as_bytes()]);
+    std::iter::once(part.content_type.as_bytes()).chain(head).chain([part.payload.as_ref()])
+}
+
+/// Whether `boundary` occurs anywhere `part` is framed from.
+fn holds(part: &MultipartPart, boundary: &str) -> bool {
+    fields(part).any(|field| contains(field, boundary.as_bytes()))
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -346,7 +320,8 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocatedPart {
     /// The part's `Content-Type`, parameters included — `text/plain` where the
-    /// block states none (RFC 2045 §5.2).
+    /// block states none (RFC 2045 §5.2), `message/rfc822` in a
+    /// `multipart/digest` (RFC 2046 §5.1.5).
     pub content_type: String,
     /// The part's `Content-ID`, where it states one.
     pub content_id: Option<String>,
@@ -358,7 +333,8 @@ pub struct LocatedPart {
     /// order and with the part's own spelling.
     pub entity_headers: Vec<(String, String)>,
     /// Every entity header, `Content-Type` included, as its name and the range
-    /// of its value in the body [`decompose`] walked, in wire order.
+    /// of its value in the body [`decompose`] walked, folds included, in wire
+    /// order.
     pub entity_spans: Vec<(String, std::ops::Range<usize>)>,
     /// Where the part's content starts in the body [`decompose`] walked.
     pub offset: usize,
@@ -367,52 +343,61 @@ pub struct LocatedPart {
 }
 
 /// Locate each MIME part of `body` framed under `boundary` (RFC 2046 §5.1):
-/// split on `--boundary`, drop the preamble and the closing delimiter, then
-/// read each block's entity headers and the offsets of its content.
+/// the delimiter lines found, the preamble and the epilogue dropped, then each
+/// part's head read and the offsets of its content. A part stating no type is
+/// `text/plain`, a `multipart/digest`'s aside ([`entity_parts`] reads those).
 pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
+    located(body, boundary, "text/plain")
+}
+
+/// The type of a part of `container` that states none (RFC 2045 §5.2, RFC
+/// 2046 §5.1.5).
+fn default_part_type(container: &MediaType) -> &'static str {
+    if container.subtype().eq_ignore_ascii_case("digest") {
+        "message/rfc822"
+    } else {
+        "text/plain"
+    }
+}
+
+/// [`decompose`], a part stating no type typed `default`.
+fn located(body: &[u8], boundary: &str, default: &str) -> Vec<LocatedPart> {
     framed_parts(body, boundary)
+        .into_iter()
         .map(|part| LocatedPart {
-            content_type: part_header(part.head, "content-type")
-                .unwrap_or_else(|| "text/plain".to_string()),
-            content_id: part_header(part.head, "content-id"),
-            headers: part_headers_beyond(part.head, &["content-type", "content-id"]),
-            entity_headers: part_headers_beyond(part.head, &["content-type"]),
-            entity_spans: part_header_spans(part.head, part.head_at),
+            content_type: part.head.get("content-type").unwrap_or(default).to_string(),
+            content_id: part.head.get("content-id").map(str::to_string),
+            headers: part.head.beyond(&["content-type", "content-id"]),
+            entity_headers: part.head.beyond(&["content-type"]),
+            entity_spans: part.head.spans(),
             offset: part.offset,
             len: part.len,
         })
         .collect()
 }
 
-/// The session description a body carries under `content_type`, as the range
-/// of `body` holding it: the whole body under `application/sdp`, the first
-/// `application/sdp` part of a `multipart/…` body (RFC 5621 §3.1 — a body that
-/// frames a description carries it as an offer or answer like a bare one),
-/// none where the type names neither or the body is empty.
-pub fn sdp_range(content_type: &MediaType, body: &[u8]) -> Option<std::ops::Range<usize>> {
-    if body.is_empty() {
-        return None;
-    }
-    if content_type.is_sdp() {
-        return Some(0..body.len());
-    }
-    if !content_type.is_multipart() {
-        return None;
-    }
-    let boundary = content_type.param("boundary").and_then(ParamValue::as_str)?;
-    framed_parts(body, boundary)
-        .find(|part| {
-            part.len > 0
-                && part_header(part.head, "content-type").is_some_and(|ct| {
-                    MediaType::parse(&SipStr::owned(&ct)).is_ok_and(|ct| ct.is_sdp())
-                })
-        })
-        .map(|part| part.offset..part.offset + part.len)
+/// The session description a body typed `content_type` carries, as the range
+/// of `body` holding it, `None` where it holds none:
+///
+/// - the whole body under `application/sdp`, when `disposition` (the body's
+///   `Content-Disposition` value, `None` when none is stated) is absent or
+///   `session`, SDP's default (RFC 3261 §20.11, RFC 5621 §8.2);
+/// - under `multipart/…`, a part read by the same rule with its own head,
+///   nested multiparts searched four levels down, the message's own included:
+///   the first found in a `mixed` (or any other) body, the last in an
+///   `alternative` one (RFC 2046 §5.1.4, RFC 5621 §6.1). The disposition of a
+///   multipart body or part never hides what it frames.
+pub fn sdp_range(
+    content_type: &MediaType,
+    disposition: Option<&str>,
+    body: &[u8],
+) -> Option<std::ops::Range<usize>> {
+    description::find(content_type, disposition, body, &description::top()).map(|found| found.range)
 }
 
 /// Where the body of the message `headers` head holds its session
-/// description, by its `Content-Type` ([`sdp_range`]); `None` where the type
-/// does not read or names none.
+/// description, by its `Content-Type` and `Content-Disposition`
+/// ([`sdp_range`]); `None` where the type does not read or names none.
 pub(crate) fn message_sdp_range(
     headers: &HeaderTable,
     body: &[u8],
@@ -422,18 +407,35 @@ pub(crate) fn message_sdp_range(
     }
     let line = headers.of_id(HeaderId::ContentType).next()?;
     let content_type = MediaType::parse(&line.value).ok()?;
-    sdp_range(&content_type, body)
+    let disposition = headers.of_id(HeaderId::ContentDisposition).next();
+    sdp_range(&content_type, disposition.map(|d| d.value.as_str()), body)
 }
 
+/// Where `body` holds the session description of the message whose start
+/// line and header block `head` holds: the head read as a stored message's is
+/// (lenient, every bound off), then its first `Content-Type` and
+/// `Content-Disposition` as a parsed message's ([`sdp_range`]); `None` where
+/// the head does not read or names none.
+pub fn head_sdp_range(head: &[u8], body: &[u8]) -> Option<std::ops::Range<usize>> {
+    if body.is_empty() {
+        return None;
+    }
+    let lines = crate::parser::lenient_header_fields(head).ok()?;
+    message_sdp_range(&HeaderTable::new(lines), body)
+}
+
+mod attach;
+pub use attach::{attach, Attached};
+
+mod description;
 mod entity;
 
 mod framing;
 use framing::framed_parts;
-
-use entity::{part_header, part_header_spans, part_headers_beyond};
+pub(crate) use framing::frames_cleanly;
 
 mod part_lines;
-use part_lines::{part_refusal, writable};
+use part_lines::part_refusal;
 
 #[cfg(test)]
 mod tests;

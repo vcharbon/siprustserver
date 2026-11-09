@@ -53,7 +53,7 @@ async fn core() -> ProxyCore {
 }
 
 fn parse(raw: &str) -> SipMessage {
-    CustomParser::default().parse(raw.as_bytes()).unwrap()
+    CustomParser::new().parse(raw.as_bytes()).unwrap()
 }
 
 fn response(raw: &str) -> SipResponse {
@@ -217,10 +217,11 @@ async fn two_invites_on_one_identity_keep_their_cancels_apart_in_either_order() 
 }
 
 // Both INVITEs end on a 487 relayed through this proxy, the spiralled one's
-// first. Each upstream's §17.1.1.3 ACK reaches the node its own final came
-// from: the 487 relayed second must not take the first one's ACK hop.
+// first. The third party's §17.1.1.3 ACK reaches the node its own final came
+// from, and the worker's goes where its own INVITE went: neither takes the
+// other's hop.
 #[tokio::test(start_paused = true)]
-async fn a_spirals_two_non_2xx_acks_each_follow_their_own_final() {
+async fn a_spirals_two_non_2xx_acks_keep_their_own_hops() {
     let core = core().await;
     both_invites(&core, Order::WorkerFirst).await;
 
@@ -239,5 +240,5 @@ Via: SIP/2.0/UDP {WORKER}:5060;branch={WORKER_BRANCH};rport\r\n"
 
     let out = core.route_request_from(&ack(WORKER, WORKER_BRANCH, THIRD), worker_src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::AckHop, "the worker's INVITE's ACK");
-    assert_eq!(out.target, Some(ProxyAddr::new(THIRD, 5060)), "to where its 487 came from");
+    assert_eq!(out.target, Some(ProxyAddr::new(THIRD, 5060)), "to where its INVITE went");
 }

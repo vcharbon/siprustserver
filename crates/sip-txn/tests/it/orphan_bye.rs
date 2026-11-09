@@ -4,7 +4,9 @@
 use crate::common;
 use call::TxnKind;
 use common::*;
-use sip_message::{SipMessage, SipRequest};
+use sip_message::header::HeaderName;
+use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
+use sip_net::SignalingNetwork;
 
 fn reqs(msgs: &[SipMessage], method: &str) -> Vec<SipRequest> {
     msgs.iter()
@@ -27,6 +29,31 @@ fn ok_tagged(cseq_method: &str, cseq: u32, branch: &str, call_id: &str, tag: &st
          Content-Length: 0\r\n\r\n"
     )
     .into_bytes()
+}
+
+/// A 2xx whose Contact names a `maddr`: the ACK and the BYE the layer owes go to it
+/// (RFC 3263 §4), the name in its host never read.
+#[tokio::test(start_paused = true)]
+async fn an_orphans_ack_and_bye_go_to_the_maddr_of_the_2xx_contact() {
+    let stack = Stack::build(5, 64, 64).await;
+    let call_ref = "self|call-P2";
+    let branch = "z9hG4bK-P2";
+    let invite = invite_with_cr_lg(call_ref, "callid-P2", branch, "b-1");
+    stack.txn.send_request(invite, addr(PEER), TxnKind::Invite).await.unwrap();
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    elapse_ms(20).await;
+    stack.drain_peer();
+
+    let peer = addr(PEER);
+    let contact = format!("<sip:bob@name.invalid:{};maddr={}>", peer.port(), peer.ip());
+    let ok = String::from_utf8(ok_tagged("INVITE", 1, branch, "callid-P2", "fork-a"))
+        .expect("text")
+        .replace(&format!("<sip:bob@{PEER}>"), &contact);
+    stack.inject(ok.as_bytes()).await;
+    elapse_ms(20).await;
+    let out = stack.drain_peer();
+    assert_eq!(reqs(&out, "ACK").len(), 1, "the ACK reaches the maddr: {out:?}");
+    assert_eq!(reqs(&out, "BYE").len(), 1, "the BYE reaches the maddr: {out:?}");
 }
 
 /// RFC 6026 §7.2: a second 2xx (another fork's To-tag) to an orphaned INVITE
@@ -94,9 +121,10 @@ async fn the_orphan_bye_cseq_is_above_an_early_prack() {
     let branch = "z9hG4bK-P3";
     let invite = invite_with_cr_lg(call_ref, "callid-P3", branch, "b-1");
     stack.txn.send_request(invite, addr(PEER), TxnKind::Invite).await.unwrap();
+    let cr = sip_message::param_codec::encode_param(call_ref);
     let prack = parse_request(&format!(
         "PRACK sip:bob@192.0.2.20:5060 SIP/2.0\n\
-         Via: SIP/2.0/UDP 127.0.0.1:15071;branch=z9hG4bK-P3-prack;cr={call_ref};lg=b-1\n\
+         Via: SIP/2.0/UDP 127.0.0.1:15071;branch=z9hG4bK-P3-prack;cr={cr};lg=b-1\n\
          Max-Forwards: 70\n\
          From: <sip:b2bua@127.0.0.1:15071>;tag=b2bua-b-1\n\
          To: <sip:bob@192.0.2.20:5060>;tag=t3\n\
@@ -115,4 +143,52 @@ async fn the_orphan_bye_cseq_is_above_an_early_prack() {
     elapse_ms(20).await;
     let bye = reqs(&stack.drain_peer(), "BYE").pop().expect("bye");
     assert!(bye.cseq().seq() > 2, "BYE CSeq {} not above the PRACK's 2", bye.cseq().seq());
+}
+
+const FRONT: &str = "192.0.2.77:5060";
+
+/// A 2xx to an orphaned INVITE of an element behind a front proxy: the ACK and
+/// the BYE leave for the proxy, what the peer wrote choosing no first hop, and
+/// the Route they carry stays the dialog's (RFC 3261 §12.1.2).
+async fn an_orphans_obligations_behind_a_front_proxy(record_route: &str) -> Vec<SipMessage> {
+    let config = sip_txn::TransactionConfig { first_hop: Some(addr(FRONT)), ..common::config() };
+    let stack = Stack::build_with_config(5, 64, config).await;
+    let front = stack
+        .net
+        .bind_udp(sip_net::BindUdpOpts::new(addr(FRONT), 64))
+        .await
+        .expect("bind the front proxy");
+    let call_ref = "self|call-F1";
+    let branch = "z9hG4bK-F1";
+    let invite = invite_with_cr_lg(call_ref, "callid-F1", branch, "b-1");
+    stack.txn.send_request(invite, addr(FRONT), TxnKind::Invite).await.unwrap();
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
+    elapse_ms(20).await;
+    while front.try_recv().is_some() {}
+
+    let ok = String::from_utf8(ok_tagged("INVITE", 1, branch, "callid-F1", "fork-a"))
+        .expect("text")
+        .replace("Contact:", &format!("{record_route}Contact:"));
+    stack.inject(ok.as_bytes()).await;
+    elapse_ms(20).await;
+    assert!(stack.drain_peer().is_empty(), "nothing goes straight to the peer");
+    std::iter::from_fn(|| front.try_recv())
+        .map(|p| CustomParser::new().parse(&p.raw).expect("a message"))
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn behind_a_front_proxy_a_record_route_chooses_no_orphan_first_hop() {
+    let rr = format!("Record-Route: <sip:{FRONT};outbound;lr>, <sip:{PEER};lr>\r\n");
+    let out = an_orphans_obligations_behind_a_front_proxy(&rr).await;
+    assert_eq!((reqs(&out, "ACK").len(), reqs(&out, "BYE").len()), (1, 1), "{out:?}");
+    let routes: Vec<String> =
+        reqs(&out, "ACK")[0].raw(HeaderName::Route).map(|r| r.to_string()).collect();
+    assert_eq!(routes.join(", "), format!("<sip:{PEER};lr>, <sip:{FRONT};outbound;lr>"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn behind_a_front_proxy_a_contact_chooses_no_orphan_first_hop() {
+    let out = an_orphans_obligations_behind_a_front_proxy("").await;
+    assert_eq!((reqs(&out, "ACK").len(), reqs(&out, "BYE").len()), (1, 1), "{out:?}");
 }

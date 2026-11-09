@@ -1,10 +1,11 @@
 //! One bind's stream in the wire model: the audit-visible events projected
-//! per bind, and the closed observation over each.
+//! per bind, and the closed observation over each. A request the audit's
+//! lenient reading refuses is projected off its identity lines.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use layer_harness::{LaneKey, Stamped};
-use sip_message::{SipMessage, SipParser};
+use sip_message::{sniff, SipMessage, SipParser};
 
 use rfc_rules::{Kind, Msg, Observation};
 
@@ -23,6 +24,59 @@ pub(super) struct BindView {
     pub(super) meta: Vec<(u64, String)>,
 }
 
+/// The wire-model facts of one recorded datagram.
+struct Facts {
+    kind: Kind,
+    call_id: String,
+    cseq: u32,
+    cseq_method: String,
+    via_branch: Option<String>,
+    from_tag: Option<String>,
+    to_tag: Option<String>,
+    body: Vec<u8>,
+}
+
+impl Facts {
+    fn of(parsed: &SipMessage) -> Facts {
+        let kind = match parsed {
+            SipMessage::Request(r) => Kind::Request { method: r.method().to_string() },
+            SipMessage::Response(_) => Kind::Response { status: status(parsed) },
+        };
+        Facts {
+            kind,
+            call_id: call_id(parsed).to_string(),
+            cseq: cseq_seq(parsed),
+            cseq_method: cseq_method(parsed).to_string(),
+            via_branch: top_via_branch(parsed),
+            from_tag: from_tag(parsed).map(str::to_string),
+            to_tag: to_tag(parsed).map(str::to_string),
+            body: body_of(parsed).to_vec(),
+        }
+    }
+
+    /// A request no reading accepts, read off its identity lines: refused for a
+    /// line every reading refuses (a single-valued header stated twice), it
+    /// still names the transaction its refusal answers and the CSeq its dialog
+    /// moved to (RFC 3261 §12.2.1.1). A response no reading accepts is
+    /// discarded by its taker and owes nothing, so it stays out, as does a
+    /// datagram whose start line, Call-ID or CSeq does not read.
+    fn sniffed(raw: &[u8]) -> Option<Facts> {
+        let id = sniff::identity(raw);
+        let (Some(method), None) = (id.method, id.status) else { return None };
+        let tag = |t: String| (!t.is_empty()).then_some(t);
+        Some(Facts {
+            kind: Kind::Request { method: method.to_string() },
+            call_id: id.call_id?.to_string(),
+            cseq: id.cseq?,
+            cseq_method: id.cseq_method?.to_string(),
+            via_branch: id.branch.filter(|b| !b.is_empty()).map(str::to_string),
+            from_tag: tag(sniff::from_tag(raw)),
+            to_tag: id.to_tag.map(str::to_string),
+            body: sniff::body(raw).unwrap_or_default().to_vec(),
+        })
+    }
+}
+
 /// Project the (audit-visible) events into per-bind views, in event order.
 pub(super) fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindView> {
     let mut order: Vec<LaneKey> = Vec::new();
@@ -33,45 +87,63 @@ pub(super) fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindV
     // (modeled loss) starts at the first copy that is: the endpoint took it
     // as new.
     let mut held_chains: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    // The requests no reading accepts, per bind: a byte-identical copy of one
+    // is its repeat.
+    let mut unread: HashSet<(LaneKey, Vec<u8>)> = HashSet::new();
     let parser = crate::rfc_audit::lenient_parser();
+    // The strict reading of RFC 3261, which marks what a stack refuses at
+    // ingress (`Msg::refused`). A shape a deployment exempts reads as refused
+    // here too: it then opens no owed-final occasion, and no false one.
+    let strict = sip_message::CustomParser::built();
 
     for s in events {
-        let (bind, parsed, repeat, src, dst, head): (
+        let (bind, facts, repeat, src, dst, head): (
             &LaneKey,
-            SipMessage,
+            Facts,
             bool,
             String,
             String,
             Vec<u8>,
         ) = match &s.event {
             SignalingNetworkEvent::RecvItem { bind_key, packet, wire, .. } => {
-                // Parsed once at event production; a datagram even the lenient
-                // parser rejects can key no obligation.
-                let Some(parsed) = wire.parsed.as_deref() else { continue };
-                let chain = wire.repeat_of.unwrap_or(s.seq);
+                // Parsed once at event production.
+                let (facts, repeat) = match wire.parsed.as_deref() {
+                    Some(parsed) => {
+                        let chain = wire.repeat_of.unwrap_or(s.seq);
+                        (Facts::of(parsed), !held_chains.insert(chain))
+                    }
+                    None => {
+                        let Some(facts) = Facts::sniffed(&packet.raw) else { continue };
+                        (facts, !unread.insert((bind_key.clone(), packet.raw.to_vec())))
+                    }
+                };
                 (
                     bind_key,
-                    parsed.clone(),
-                    !held_chains.insert(chain),
+                    facts,
+                    repeat,
                     packet.src.to_string(),
                     bind_key.clone(),
                     packet.raw.to_vec(),
                 )
             }
             SignalingNetworkEvent::SendCalled { bind_key, to, msg } => {
-                let Ok(parsed) = parser.parse(msg) else { continue };
-                let repeat = send_tables
-                    .entry(bind_key.clone())
-                    .or_default()
-                    .note(msg, &parsed, s.seq)
-                    .is_some();
-                (bind_key, parsed, repeat, bind_key.clone(), to.to_string(), msg.clone())
+                let (facts, repeat) = match parser.parse(msg) {
+                    Ok(parsed) => {
+                        let repeat = send_tables
+                            .entry(bind_key.clone())
+                            .or_default()
+                            .note(msg, &parsed, s.seq)
+                            .is_some();
+                        (Facts::of(&parsed), repeat)
+                    }
+                    Err(_) => {
+                        let Some(facts) = Facts::sniffed(msg) else { continue };
+                        (facts, !unread.insert((bind_key.clone(), msg.clone())))
+                    }
+                };
+                (bind_key, facts, repeat, bind_key.clone(), to.to_string(), msg.clone())
             }
             _ => continue,
-        };
-        let kind = match &parsed {
-            SipMessage::Request(r) => Kind::Request { method: r.method().to_string() },
-            SipMessage::Response(_) => Kind::Response { status: status(&parsed) },
         };
         let view = views.entry(bind.clone()).or_insert_with(|| {
             order.push(bind.clone());
@@ -83,25 +155,27 @@ pub(super) fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindV
         // passed a message on). Event `seq` is the total order (the wire
         // model's tiebreak); a µs bump inside the tied ms preserves it.
         let at_us = (s.at_ms * 1_000).max(view.msgs.last().map_or(0, |m| m.at_us + 1));
+        view.meta.push((s.seq, facts.call_id.clone()));
+        let refused = strict.parse(&head).is_err();
         view.msgs.push(Msg {
             at_us,
             src,
             dst,
             hop: 0,
             repeat,
-            kind,
-            call_id: call_id(&parsed).to_string(),
-            cseq: cseq_seq(&parsed),
-            cseq_method: cseq_method(&parsed).to_string(),
-            via_branch: top_via_branch(&parsed),
-            from_tag: from_tag(&parsed).map(str::to_string),
-            to_tag: to_tag(&parsed).map(str::to_string),
+            kind: facts.kind,
+            call_id: facts.call_id,
+            cseq: facts.cseq,
+            cseq_method: facts.cseq_method,
+            via_branch: facts.via_branch,
+            from_tag: facts.from_tag,
+            to_tag: facts.to_tag,
             head: Some(head),
             // The vantage IS the datagram, so the body is always carried: a
             // message with none states an EMPTY one, never an unknown one.
-            body: Some(body_of(&parsed).to_vec()),
+            body: Some(facts.body),
+            refused,
         });
-        view.meta.push((s.seq, call_id(&parsed).to_string()));
     }
     order.into_iter().filter_map(|b| views.remove(&b)).collect()
 }

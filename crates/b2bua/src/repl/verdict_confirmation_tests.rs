@@ -16,6 +16,7 @@
 //!   a refused asked connect                      → the backoff schedule unchanged
 //!   asked while backing off                      → the step starts again from it
 //!   the peer restarted: a frame of a new generation → confirmed
+//!   the peer restarted and writes: a write of a new generation → not confirmed
 //!   a connect taken with no frame                → confirmed at the idle bound
 //!   the puller respawned meanwhile               → confirmed
 //!   the last frame at the verdict, then silence  → the one connect, never refuted
@@ -27,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use repl_net::frame::{Frame, Watermark};
+use repl_net::frame::{Frame, Op, Partition, Watermark};
 use repl_net::transport::{
     ConnectError, ListenError, ReplicationConnection, ReplicationListener, ReplicationNetwork,
     SendError,
@@ -67,6 +68,8 @@ struct Script {
     gen: AtomicU64,
     /// Every stream delivers nothing more, open until hung up.
     mute: AtomicBool,
+    /// A stream's first frame is a write.
+    writes: AtomicBool,
 }
 
 impl Script {
@@ -145,7 +148,7 @@ impl ReplicationConnection for Stream {
                 if self.script.mute.load(Ordering::SeqCst) {
                     std::future::pending::<()>().await;
                 }
-            } => (!self.hung_up()).then_some(Frame::Noop { at: Watermark::new(self.gen, 1) }),
+            } => (!self.hung_up()).then(|| self.frame(first)),
             _ = hang_up.changed() => None,
         }
     }
@@ -162,6 +165,28 @@ impl ReplicationConnection for Stream {
 impl Stream {
     fn hung_up(&self) -> bool {
         self.hang_up.lock().unwrap().has_changed().unwrap_or(true)
+    }
+
+    /// A `Noop`, or a write for the stream's first frame when the peer writes.
+    fn frame(&self, first: bool) -> Frame {
+        let at = Watermark::new(self.gen, 1);
+        if !first || !self.script.writes.load(Ordering::SeqCst) {
+            return Frame::Noop { at };
+        }
+        Frame::Data {
+            at,
+            op: Op::Delete,
+            partition: Partition::Bak,
+            call_ref: format!("{PEER}|gone|t"),
+            call_gen: 1,
+            call_bgen: 0,
+            body_ttl_ms: 0,
+            origin_now_ms: 0,
+            indexes: Vec::new(),
+            body: None,
+            answered: false,
+            incarnation: None,
+        }
     }
 }
 
@@ -182,6 +207,7 @@ async fn backing_up_in(
         hang_up: watch::Sender::new(0),
         gen: AtomicU64::new(1),
         mute: AtomicBool::new(false),
+        writes: AtomicBool::new(false),
     });
     let clock = Clock::test_at(0);
     let store = ReplicatingCallStore::new(1, clock.clone());
@@ -405,6 +431,38 @@ async fn a_frame_of_a_new_generation_confirms_the_verdict() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(confirmed.is_finished(), "answered by the new process's first frame");
     assert!(confirmed.await.unwrap(), "another incarnation speaks: confirmed");
+}
+
+/// The peer restarted in place and already holds its calls: the first frame of
+/// its new generation is a write. A copy made now would never meet its reclaim
+/// write, and its own reclaim takes its calls back: not confirmed.
+#[tokio::test(start_paused = true)]
+async fn a_write_of_a_new_generation_refutes_the_verdict() {
+    let (sup, script) = backing_up(fast_config()).await;
+    tick(1_000).await;
+    into_a_long_backoff(&script).await;
+    script.gen.store(2, Ordering::SeqCst);
+    script.writes.store(true, Ordering::SeqCst);
+    let confirmed = verdict(&sup);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(confirmed.is_finished(), "answered by the new process's first frame");
+    assert!(!confirmed.await.unwrap(), "the restarted process holds its calls: not confirmed");
+}
+
+/// A write of the generation before the one the flow hears now is no return:
+/// the restarted process wrote nothing, and may die without.
+#[tokio::test(start_paused = true)]
+async fn a_write_of_an_older_generation_is_no_write_of_a_later_one() {
+    let (sup, script) = backing_up(fast_config()).await;
+    script.writes.store(true, Ordering::SeqCst);
+    tick(1_000).await;
+    script.writes.store(false, Ordering::SeqCst);
+    into_a_long_backoff(&script).await;
+    script.gen.store(2, Ordering::SeqCst);
+    tick(5_000).await;
+    assert_eq!(sup.heard_generation(PEER), Some(2), "the verdict would name the restart");
+    assert!(!sup.writes_a_later_generation(PEER, 2), "generation 2 wrote nothing, 1 is older");
+    assert!(sup.writes_a_later_generation(PEER, 0), "generation 1 is later than 0");
 }
 
 /// The peer's kernel takes the connect, its process sends nothing: the

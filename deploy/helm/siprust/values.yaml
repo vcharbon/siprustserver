@@ -45,18 +45,21 @@ network:
   externalVip: ""
   externalInterface: ""
   # The external interface's next hops (IPv4): the external plane's BGP peers,
-  # whose BFD and keepalive traffic keeps them resolved. Readiness requires one
-  # of them resolved in the node's neighbour table (PROXY_EXT_NEXT_HOPS); equal
-  # to proxy.announce.metallb.peers.external when the chart renders MetalLB's
-  # objects (refused at render otherwise). Empty checks the interface only.
+  # whose BFD and keepalive traffic keeps them resolved. Required: traffic from
+  # the external VIP leaves through them and nowhere else (ADR-0056 §11), and
+  # readiness requires one of them resolved in the node's neighbour table
+  # (PROXY_EXT_NEXT_HOPS). Equal to proxy.announce.metallb.peers.external when the
+  # chart renders MetalLB's objects (refused at render otherwise).
   externalNextHops: []
+  # A recommended hardening (ADR-0056 §11): each proxy node drops what is sourced
+  # from the external VIP and leaves by any other interface, local delivery
+  # included. Off, a datagram from the external socket to the internal VIP reaches
+  # a socket trusted by its face. The routing of that traffic does not depend on it.
+  externalEgressDrop: false
   # The external plane's subnet (masq-exempt only).
   externalSubnet: ""
   # UDP port both VIPs listen on.
   sipPort: 5060
-  # The proxy's egress face-picker: a destination in these comma-separated
-  # CIDRs leaves on the internal face, any other on the external face.
-  internalCidrs: ""
 
 # The INVITE transaction bound, seconds (33..=600): the workers' give-up on a
 # ringing call (B2BUA_INVITE_TXN_TIMEOUT_SEC) and what the proxy's branch memo
@@ -240,6 +243,23 @@ proxy:
   # Per-neighbour bound of the unresolved ARP queue in the proxy node's
   # network namespace (ADR-0033), set by the vip-loopback init container.
   unresQlenBytes: 16384
+  # The neighbour timers of every interface of the proxy node, set by the
+  # vip-loopback init container, with net.ipv4.fib_multipath_use_neigh on. A next
+  # hop that dies with its carrier up reads FAILED within 1.5 ×
+  # baseReachableTimeMs + delayFirstProbeSeconds + ucastSolicit × retransTimeMs
+  # (10 s here, about 50 s at the kernel's defaults) + up to 1 s for the next packet, when multipath egress
+  # leaves it and, if no next hop is left, the face reads unusable (ADR-0056 §10).
+  # A worker's retransmitted final then still reaches its caller inside Timer H
+  # (32 s). retransTimeMs is the ARP retry: at most half of PROXY_EXT_FACE_CHECK_MS,
+  # so a carrier flap's INCOMPLETE aftermath meets one reading only; the solicit
+  # counts keep a router silent to ARP for 3 s alive. The cost: an ARP probe every
+  # few seconds per live next hop, 4 broadcasts a second per dead one.
+  neighbour:
+    baseReachableTimeMs: 4000
+    delayFirstProbeSeconds: 1
+    ucastSolicit: 12
+    mcastSolicit: 12
+    retransTimeMs: 250
   # The readiness probe the node's announcement follows (ADR-0056):
   # periodSeconds × failureThreshold bounds how long a failing proxy stays
   # announced before the withdrawal starts.
@@ -321,13 +341,21 @@ proxy:
     metricsPort: 9095
     # The bound, ms, from a fault to the routers' withdrawal that the render
     # checks every detection path against: its detection (HEALTH_ISOLATION_MS,
-    # PROXY_EXT_FACE_CHECK_MS for a lost interface or link, or deadMs for a
-    # hung or dead proxy), two unfit readings (2 × pollMs, none for deadMs),
-    # and detectMultiplier × the BFD interval.
+    # 2 × PROXY_EXT_FACE_CHECK_MS for a lost link, or deadMs for a hung or dead
+    # proxy), two unfit readings (2 × pollMs, none for deadMs), and
+    # detectMultiplier × the BFD interval.
     withdrawWithinMs: 3400
     resources:
       requests: { cpu: "20m", memory: "16Mi" }
       limits: { memory: "64Mi" }
+  # The container that keeps network.externalNextHops in the table of the
+  # external VIP's traffic (ADR-0056 §11). A turn writes only on a difference.
+  # Below routeGuard.holdMs, so the table is filled before the node is let out.
+  egressRoutes:
+    periodSeconds: 1
+    resources:
+      requests: { cpu: "5m", memory: "8Mi" }
+      limits: { memory: "32Mi" }
   env: {}
   extraEnv: []
   extraPorts: []

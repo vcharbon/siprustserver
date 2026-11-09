@@ -786,7 +786,7 @@ impl CallDecisionEngine for ScriptedDecisionEngine {
             ReferOutcome::Error => {
                 Err(CallDecisionError::Unavailable("scripted /call/refer error".into()))
             }
-            // The HTTP request hangs: never resolve. The detached interpreter
+            // The HTTP request hangs: never resolve. The detached callout
             // task awaits this forever (it is dropped at process exit); the
             // sub-expiry timer fires the outcome instead.
             ReferOutcome::Hang => std::future::pending().await,

@@ -6,7 +6,7 @@ use super::*;
 /// no provisional it draws may be reliable.
 fn update_on(at_us: u64, extra: &str) -> Msg {
     let head = format!(
-        "UPDATE sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP h;branch={UPDATE_BRANCH}\r\n\
+        "UPDATE sip:b@h SIP/2.0\r\nMax-Forwards: 70\r\nVia: SIP/2.0/UDP h;branch={UPDATE_BRANCH}\r\n\
              From: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag=tb\r\nCSeq: 2 UPDATE\r\n{extra}\
              Content-Length: 0\r\n\r\n"
     );
@@ -67,6 +67,16 @@ fn a_plain_18x_against_require_100rel_charges_the_uas() {
         decide(&RequireReliable1xxOnRequire, &rejected).iter().all(|f| !f.violated()),
         "the 420 discharges the transaction",
     );
+}
+
+/// A request the strict reading refuses owes its 400, not the reliable
+/// provisional its `Require: 100rel` would otherwise demand.
+#[test]
+fn a_refused_invite_requiring_100rel_is_no_occasion() {
+    let mut refused = invite_on(1_000_000, "Require: 100rel\r\n", None, false);
+    refused.refused = true;
+    let msgs = vec![refused, inv_resp(1_100_000, 180, "", false)];
+    assert!(decide(&RequireReliable1xxOnRequire, &msgs).is_empty());
 }
 
 /// `reliable-needs-client-opt-in`: `Supported` alone licenses the PRACK

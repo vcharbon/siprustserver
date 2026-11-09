@@ -59,7 +59,7 @@ fn reached(fh: &FailoverHarness, agent: &Agent) -> bool {
 }
 
 /// How many INVITEs reached `agent` this run, a retransmission counted once.
-fn dialled(fh: &FailoverHarness, agent: &Agent) -> usize {
+pub(crate) fn dialled(fh: &FailoverHarness, agent: &Agent) -> usize {
     fh.sip_entries()
         .iter()
         .filter(|e| e.to == agent.addr() && e.opens_with("INVITE "))
@@ -76,7 +76,7 @@ fn dialled(fh: &FailoverHarness, agent: &Agent) -> usize {
 
 /// The callee answers the INVITE the backup dials, the caller takes the 2xx,
 /// ACKs it and hangs up.
-async fn answer_and_hang_up(call: &mut scenario_harness::ClientInvite, bob: &Agent) {
+pub(crate) async fn answer_and_hang_up(call: &mut scenario_harness::ClientInvite, bob: &Agent) {
     let mut uas = bob.receive("INVITE").await;
     uas.respond(200, "OK").with_sdp(OFFER).await;
     call.expect(200).await;
@@ -87,7 +87,7 @@ async fn answer_and_hang_up(call: &mut scenario_harness::ClientInvite, bob: &Age
 }
 
 /// How many 503 responses reached `agent` this run.
-fn rejections_to(fh: &FailoverHarness, agent: &Agent) -> usize {
+pub(crate) fn rejections_to(fh: &FailoverHarness, agent: &Agent) -> usize {
     fh.sip_entries().iter().filter(|e| e.to == agent.addr() && e.opens_with("SIP/2.0 503")).count()
 }
 
@@ -178,8 +178,8 @@ async fn an_undecided_call_reclaimed_by_its_restarted_node_is_asked_again() {
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
     let (mut proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
-    // A restart in place is read by the tombstone, not the probe (ADR-0031
-    // case 4): the proxy tells no dead verdict.
+    // A proxy with no cluster key tells no dead verdict: the restart's own
+    // reclaim serves the call (ADR-0031 case 4).
     proxy.tell_no_dead_verdict();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -401,6 +401,96 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     assert_eq!(total_cdrs_for(&nodes, &call_ref), 1, "one CDR across the cluster");
     assert_call_fully_released(&nodes, &call_ref).await;
     drop((replacement, proxy));
+}
+
+/// How long after the INVITE's receipt its node dies, in the cells of the
+/// re-ask's budget: most of the first budget is gone.
+const KILLED_AFTER: Duration = Duration::from_secs(3);
+
+/// A re-ask after a takeover has a setup budget of its own (ADR-0022 X1): an
+/// answer that takes most of a budget, landing past the first one, still
+/// dials the callee.
+#[tokio::test(start_paused = true)]
+async fn a_reask_has_a_setup_budget_of_its_own() {
+    let name = "undecided-call-reask-fresh-budget";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    let delay = Duration::from_millis(4_500);
+    let (decision, consults) = CountedDecision::counting(route, delay);
+    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+
+    let received = fh.now_ms();
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    call.expect(100).await;
+    let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
+    fh.advance(KILLED_AFTER).await;
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+
+    let mut uas = bob.receive("INVITE").await;
+    assert!(fh.now_ms() - received > 5_000, "the answer landed past the first budget");
+    assert_eq!(consults.load(Ordering::SeqCst), 2, "the decision is asked again, once");
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(rejections_to(&fh, &alice), 0, "the caller is not refused");
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    let released = fh
+        .settle_terminal(async || {
+            survivor.memory_clean() && !survivor.holds_any_trace(&call_ref).await
+        })
+        .await;
+    assert!(released, "nothing of the call is left live or stored");
+    assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
+}
+
+/// A re-ask left unanswered ends at its own budget, counted from the takeover:
+/// its caller gets the bare 503, with nothing dialled.
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_reask_refuses_the_caller_at_its_budget() {
+    let name = "undecided-call-reask-unanswered";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    let (decision, consults) = CountedDecision::counting(route, Duration::from_secs(60));
+    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    call.expect(100).await;
+    let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
+    fh.advance(KILLED_AFTER).await;
+    let killed_at = fh.now_ms();
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    assert_eq!(consults.load(Ordering::SeqCst), 2, "the backup asks the decision again");
+
+    let refused = call.expect(503).await;
+    assert!(!refused.has(&HeaderName::Reason), "no Reason");
+    assert!(!refused.has(&HeaderName::RetryAfter), "no Retry-After");
+    let waited = fh.now_ms() - killed_at;
+    assert!((5_000..5_500).contains(&waited), "one budget from the takeover: {waited} ms");
+    assert!(!reached(&fh, &bob), "the callee is never dialled");
+
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    let released = fh
+        .settle_terminal(async || {
+            survivor.memory_clean() && !survivor.holds_any_trace(&call_ref).await
+        })
+        .await;
+    assert!(released, "nothing of the call is left live or stored");
+    assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
 }
 
 /// A plain crash after the decision was applied, before the routed call's

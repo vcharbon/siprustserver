@@ -7,6 +7,7 @@ nothing (ADR-0055 §6); D2's sweep also serves a departed primary's `Terminating
 and discharges those with nothing left to serve (ADR-0055 §5); D7's stand-down reads
 containment, and the lifecycle order its gates read only ranks the base of a diverged
 call's end (ADR-0055 §7).
+Amended (2026-11-04): D4, the re-ask has a setup budget of its own (ADR-0022 X1).
 Amended (2026-10-28): D1, a proxy's dead verdict is a second trigger; D2, the sweep's
 takeover half runs on either trigger, and its discharge half and the refusal of an
 undecided call on a departure only; the residual of a death the peers are not told of
@@ -21,6 +22,14 @@ its returning primary applies no answer (D7).
 Amended (2026-10-31): D2 and D8, a dead verdict that acted releases the limiter key of
 every ended call of the peer here, and a copy that ends a call while its primary reads
 dead releases the key at its end; the CDR still waits for the departure or the reconcile.
+Amended (2026-11-04): D1, a worker read `Alive` whose endpoint flips not ready and not
+terminating is a dead verdict too, and a write of another generation refutes a verdict
+and stops its sweep; the residuals of a death no proxy reads dead and of a verdict that
+is spent.
+Amended (2026-11-05): D1, the probe keeps reading a worker after its flip, so a death after
+a refuted flip is a verdict; the residuals narrowed to a process that never answered.
+Amended (2026-11-07): D2, only an `Active` call is taken over for an awaited answer: a
+request is made for its answer, and an ending call needs none (ADR-0039 decision 5).
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -39,7 +48,7 @@ the slice does not apply), `rules/evidence.rs` and
 `store/adoption.rs` and `repl/store/admission.rs` (an adopted version's write),
 `router/reclaim.rs` (the reverse fold of a copy's ending), `call`'s
 `helpers/lifecycle.rs` (the lifecycle order), `sip-txn`'s `layer/relinquish.rs`,
-`repl/departed.rs`, `router/interpret.rs` and `router/departure.rs` (the discharge of a departed primary's call), `router/dropped_on_delete.rs` (the drop of a live copy on the backup's delete).
+`repl/departed.rs`, `router/commit.rs` and `router/departure.rs` (the discharge of a departed primary's call), `router/dropped_on_delete.rs` (the drop of a live copy on the backup's delete).
 
 ## Context
 
@@ -84,6 +93,20 @@ the backups act on that verdict rather than wait for the endpoint to leave the s
 notice naming this node is ignored (`router/dead_verdict/tests.rs`;
 `read_dead_primary_taken_over.rs`).
 
+A process that dies on a live node flips its endpoint not ready, not terminating, usually
+before the probe's verdict (ADR-0031 case 4), and the proxy stops routing to it at once. So
+the flip of a worker it read `Alive` is its verdict, whichever comes first: one verdict per
+flip, none for a worker it read `Unknown` or `Dead`, none for a `terminating` flip (a
+planned drain), for leaving the slice, or for the flip that leaves no member ready, whose
+worker the probe goes on reading (ADR-0050 §11)
+(`not_ready_flip_tells_a_dead_verdict.rs`, the flip-timing cells and the terminating cell;
+`no_worker_reads_ready.rs`). The probe keeps reading a flipped worker, so a death after it
+answered again is a verdict of its own, and the reading of the silence the flip already told
+is none.
+Two proxies read one flip at their own instants: a copy at the same instant is the same
+verdict, a later one is a later verdict, which joins a confirmation still waiting or else
+sweeps again and takes over nothing more (the second-proxy cells there).
+
 The backup confirms the verdict by itself, on its own Backup flow from that peer (user
 ruling). With the stream open, it waits for the stream's end, which the pullers' idle
 bound (ADR-0045) brings at most that long after the peer's last frame. With the stream
@@ -97,12 +120,23 @@ one that reconnects, or a stream open past the idle bound, speaks for a live pee
 proxy misread, and the verdict takes nothing over. That frame must carry the incarnation
 generation the flow last heard before the verdict: a frame of another generation comes
 from a process that restarted in place, the incarnation the verdict named is gone, and
-the verdict is confirmed (`repl/verdict_confirmation_tests.rs`). A restarted process
+the verdict is confirmed (`repl/verdict_confirmation_tests.rs`); the copies it makes stand
+down on the restarted process's reclaim write (D7;
+`not_ready_flip_tells_a_dead_verdict.rs`, the cell returning during the confirmation).
+A write of another generation refutes the verdict: that process holds its calls again,
+and a copy made after its reclaim write would meet no write to stand down on
+(the cell reclaiming inside the backoff). For the same reason the sweep of a verdict so
+confirmed stops at the first write of a later generation than it named, read before each
+copy, a frame being heard before it is applied: the copies it made stand down, the calls it
+did not reach are the process's (`sweep_meets_the_reclaim_write.rs`, the sweep's duration
+its axis; an older generation's write stops nothing, its cell of a restart that dies
+before it writes). A restarted process
 the flow already streams from at the verdict is that generation, and its own reclaim
-takes its calls back
+takes its calls back (the cell returning before the flip)
 (`b2bua_dead_verdicts_unconfirmed_total`, one wait per peer however many verdicts;
 `verdict_meets_a_down_stream.rs`, the backoff, connect and cut cells). Two independent
-signals must agree, so a flap, a partition between the proxy and a live peer, or a
+signals must agree, so a flap, a live worker whose readiness flips with its stream open
+(`not_ready_flip_tells_a_dead_verdict.rs`, the live cell), a partition between the proxy and a live peer, or a
 second proxy that alone lost the peer never moves its calls: a notice from any proxy
 holding the cluster key is advisory (`verdict_meets_a_down_stream.rs`, the standby
 cell). A crashed process on a live node refuses the connect at once
@@ -116,8 +150,8 @@ crash of the node stops it (`router/departure/tests.rs`). It
 reads the bodies one at a time, yielding as it goes, and for every call that names an
 INVITE transaction in flight — exactly the calls a materialisation would seed — or an
 in-dialog request in flight but the keepalive (a relay, a request of its own or one it
-holds), or holds the answer to a request it sent off its turn, whose task died with the
-peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover
+holds), or, `Active`, awaits the answer to a request it sent off its turn, whose task died
+with the peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover
 at once: its timers re-arm at their
 replicated deadlines, its INVITE transactions are rebuilt, the self-release watch is
 armed. A call already live here is left as it is. A call with nothing in flight is
@@ -167,6 +201,7 @@ unanswered, no decision applied, no attempt, no leg dialled — has that decisio
 again on a turn of the call's own (user ruling): the initial consult runs on the
 materialised call, its caller's INVITE rebuilt from the record, and the caller is
 answered through the INVITE server transaction the materialisation seeded. The
+re-ask has a setup budget of its own from its notice (ADR-0022 X1). The
 backend may be asked twice and the callee dialled twice; the backend is stateless
 (ADR-0055 §1). One owner acts on the answer (D7): a takeover copy whose primary wrote
 the call since the copy was made — a returning primary's reclaim, which asks the
@@ -380,13 +415,17 @@ the call has one CDR.
 
 ## Residuals
 
-- **A death no proxy reads dead stays reactive.** A restart in place (ADR-0031 case
-  4) never leaves the membership set and is read by the tombstone, not the probe, and
-  a proxy with no cluster key tells no verdict: a message takes the call over
-  (`inflight_resend.rs`, `prack_takeover.rs`, each on a proxy that tells no verdict).
-  An undecided call there is taken over by a message (the CANCEL cell of
+- **A death no proxy reads dead stays reactive.** A proxy with no cluster key tells no
+  verdict: a message takes the call over (`inflight_resend.rs`, `prack_takeover.rs`, each
+  on a proxy that tells no verdict; `not_ready_flip_tells_a_dead_verdict.rs`, the no-key
+  cell). An undecided call there is taken over by a message (the CANCEL cell of
   `undecided_call_settled_on_departure.rs`), and a restarted node asks its own
-  undecided calls' decisions again on its reclaim (the restart cell there).
+  undecided calls' decisions again on its reclaim (the restart cell there). A process
+  the proxy never read `Alive` draws no verdict: one that dies again after it reclaimed
+  its calls, its copies stood down, and before it answered a probe `200`, leaves them to a
+  message or the departure (`not_ready_flip_tells_a_dead_verdict.rs`, the cell of a second
+  death before the proxy read it alive). One that answered first, its endpoint ready or
+  not, is read dead by the probe (`no_worker_reads_ready.rs`, the crash loop cell).
 - **A primary read dead while it lives.** A flap or a partition between the proxy and
   the primary alone takes nothing over, the stream open or reconnecting: nothing is
   dialled, asked or relayed twice (`cancel_and_retransmission_follow_a_live_hop.rs`, the
@@ -396,6 +435,12 @@ the call has one CDR.
   work in flight while the primary may still serve them, so the callee may get the
   dialled INVITE twice and an outside service the request twice
   (`read_dead_primary_taken_over.rs`, the silent-host cell, confirmed by its partition).
+- **A sweep stopped by a write, then a second death.** The sweep stops at the restarted
+  process's first write; if that process dies after it, the calls past the stop are left to
+  a message, a later verdict, the next restart's reclaim or the departure.
+- **A confirmation that read no generation.** A connect that fails on a puller with no frame
+  heard yet names none (`generation: None`), so nothing stops that sweep: a reclaim write
+  landing during it can still reach a copy read after it.
 - **A peer that goes silent** is confirmed once its stream is left at the pullers'
   idle bound (2 s after its last frame, `B2BUA_REPL_IDLE_TIMEOUT_MS`; ADR-0045) and the
   one connect fails: at once when the path to it refuses connects
@@ -408,11 +453,18 @@ the call has one CDR.
   lost whole is taken over at most idle + lookup + connect after the verdict, plus idle
   once more for a frozen process: 6 to 8 s by default. A live peer whose stream stalls
   longer than the idle bound is pulled again from its watermark.
-- **A refuted verdict is spent.** The proxy tells one notice per health change; a
-  primary that sends one frame on the backup's reconnect and then dies is not taken
-  over proactively: its calls are taken over by a message (the reactive path), at a
-  later verdict on another health change (`live_primary_read_dead.rs`, the second
-  verdict), or at its departure.
+- **A refuted verdict is spent until the worker answers.** The proxy tells one notice per
+  health change or flip; a primary read dead that sends one frame on the backup's reconnect
+  and then dies, answering no probe in between, is not taken over proactively. Its calls
+  are taken over by a message (the reactive path), at a later verdict on another health
+  change (`live_primary_read_dead.rs`, the second verdict), or at its departure. A worker
+  whose readiness flips with its stream open answers its next probe, and the probe's reading
+  of its later death is a second verdict (`no_worker_reads_ready.rs`, the cell of a death
+  after a refuted flip).
+  A stalled loop goes the first way: the probe's verdict is refuted on its heartbeats, the
+  flip of its endpoint comes while the proxy reads it dead and tells nothing, whichever side
+  of the flip the process exits on (ADR-0033 §4); its restart's reclaim serves its calls
+  (`stalled_worker_exits.rs`).
 - **A split healing on both planes at once.** The partitioned primary's ladders (its
   480's Timer G repeats, its CANCEL) reach the parties until its own pull reconnects
   and it learns the takeover; the parties draw 481s and hop-ACKs. Judged as a split:

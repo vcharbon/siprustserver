@@ -2,11 +2,12 @@
 //! event-queue gate refuses (ADR-0050 §9), a new normal INVITE is refused on
 //! arrival by the transaction layer with the new-call `503` and its
 //! `Retry-After`, ahead of the backlog it would wait behind, from the instant
-//! the gate trips and with no probe needed. An INVITE admitted on arrival
-//! while the gate's state still read accepting, its router held in one turn,
-//! is judged again when the router takes it. An emergency INVITE and an
-//! in-dialog request are judged as by the panic-ELU rung: admitted. Once the
-//! gate accepts again, a new INVITE is admitted.
+//! the gate trips and with no probe needed. A router held in one turn trips
+//! nothing, so the layer reads the queue's age itself and refuses from the
+//! gate's own bound, a gap under it refusing nothing. An INVITE admitted on
+//! arrival under that age is judged again when the router takes it. An
+//! emergency INVITE and an in-dialog request are judged as by the panic-ELU
+//! rung: admitted. Once the gate accepts again, a new INVITE is admitted.
 //!
 //! The backlog is out-of-dialog requests the worker refuses `405`, behind a
 //! router loop that spends [`PER_TURN`] of simulated time on each turn
@@ -37,6 +38,11 @@ const PER_TURN: Duration = Duration::from_millis(10);
 const BACKLOG: usize = 300;
 /// How long the gate stays refusing once the queue has drained.
 const ACCEPT_HOLD: Duration = Duration::from_millis(3000);
+/// The queue's age from which the transaction layer refuses by itself: the
+/// gate's refusal delay and interval together.
+const REFUSE_AT_AGE: Duration = Duration::from_millis(450);
+/// Past the 200 ms the layer sends a held 100 at, and its flight.
+const TRYING_BOUND_PASSED: Duration = Duration::from_millis(400);
 /// The re-INVITE's offer.
 const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
 
@@ -46,7 +52,10 @@ async fn refused(s: &B2buaScene) {
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
     let resp = call.expect(503).await;
     assert!(resp.header::<RetryAfter>().is_some(), "the new-call 503 carries a Retry-After");
-    assert!(resp.header::<Reason>().is_none(), "the new-call 503 carries no Reason");
+    assert!(
+        resp.list::<Reason>().expect("readable Reason").is_empty(),
+        "the new-call 503 carries no Reason"
+    );
 }
 
 /// A new INVITE from alice, `emergency` or not, admitted, answered by bob and
@@ -118,6 +127,123 @@ async fn a_backed_up_queue_refuses_a_new_invite_on_arrival_until_the_gate_accept
     s.hangup(&mut emergency).await;
     s.hangup(&mut held).await;
     settle_until(|| s.b2bua.cdr_records().len() == 3).await;
+    let _report = s.finish().await;
+}
+
+/// The number of 100 Trying that left toward `caller`.
+fn trying_sent_to(s: &B2buaScene, caller: std::net::SocketAddr) -> usize {
+    sip_net_testkit::to_sip_entries(&s.h.recording().channel().snapshot())
+        .iter()
+        .filter(|e| e.to == caller && e.start_line().starts_with("SIP/2.0 100"))
+        .count()
+}
+
+/// The router is held in one turn with an event behind it. The gate's state
+/// stays the accepting one it last wrote, and the transaction layer reads the
+/// queue's age itself: from the gate's own bound on, delay 300 ms held 150 ms, a
+/// new normal INVITE draws the refusal on arrival and no 100, its copy the same
+/// refusal, counted once. An emergency INVITE passes. Released, the router
+/// serves what queued.
+#[tokio::test(start_paused = true)]
+async fn a_held_router_draws_the_refusal_past_the_queues_age_and_no_100() {
+    let pace = RouterPace::new();
+    let probe = TurnProbes::new(pace.clone());
+    let s = B2buaScene::with_b2bua("event-queue-admission-at-age", move |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe)
+    })
+    .await;
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
+    let mut held = s.establish().await;
+    let trying_before = trying_sent_to(&s, s.alice.addr());
+
+    // ── the router stops on one turn, one event behind it ───────────────────
+    pace.set(NODE, Pace::Frozen);
+    send_backlog(&carol, s.b2bua.addr, 1, "held").await;
+    s.h.advance(Duration::from_millis(10)).await;
+    send_backlog(&carol, s.b2bua.addr, 1, "behind").await;
+    s.h.advance(REFUSE_AT_AGE + Duration::from_millis(10)).await;
+    assert_eq!(s.b2bua.txn_metrics().event_queue_depth(), 1, "the event behind the held turn");
+    let on_arrival = || Class::ALL.map(|c| s.b2bua.txn_metrics().new_call_gate_refused(c));
+    assert_eq!(on_arrival(), [0; 3], "nothing refused yet");
+
+    // ── past the age: the refusal, no 100 ───────────────────────────────────
+    let mut late = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let resp = late.expect(503).await;
+    assert!(resp.header::<RetryAfter>().is_some(), "the new-call 503 carries a Retry-After");
+    assert!(
+        resp.list::<Reason>().expect("readable Reason").is_empty(),
+        "the new-call 503 carries no Reason"
+    );
+    late.retransmit().await;
+    s.h.advance(TRYING_BOUND_PASSED).await;
+    assert_eq!(trying_sent_to(&s, s.alice.addr()), trying_before, "no 100 past the age");
+    let refused = on_arrival();
+    assert_eq!(s.b2bua.txn_metrics().new_call_gate_refused(Class::Normal), 1, "counted once");
+    assert_eq!(s.b2bua.txn_metrics().refused_copies(), 1, "its copy counted as a copy");
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::EventQueue, Class::Normal), 1);
+
+    // ── an emergency INVITE passes, and is served once the router turns ─────
+    let mut emergency = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER_SDP)
+        .with_header("Resource-Priority", "esnet.0")
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    s.h.advance(Duration::from_millis(300)).await;
+    assert_eq!(on_arrival(), refused, "admitted on arrival");
+    pace.set(NODE, Pace::Free);
+    let mut at_bob = s.bob.receive("INVITE").await;
+    at_bob.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    emergency.expect(200).await;
+    let mut emergency = emergency.ack().await;
+    s.bob.receive("ACK").await;
+
+    let refused_405 = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    settle_until(|| refused_405() == 2).await;
+    s.h.advance(ACCEPT_HOLD + Duration::from_secs(1)).await;
+    s.hangup(&mut emergency).await;
+    s.hangup(&mut held).await;
+    let _report = s.finish().await;
+}
+
+/// A gap the gate itself tolerates, a throttle or a slow turn under its delay
+/// and interval together, refuses nothing: the INVITE that arrives in it is
+/// admitted and the call goes on.
+#[tokio::test(start_paused = true)]
+async fn a_gap_under_the_queues_age_refuses_nothing() {
+    let pace = RouterPace::new();
+    let probe = TurnProbes::new(pace.clone());
+    let s = B2buaScene::with_b2bua("event-queue-admission-brief-gap", move |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe)
+    })
+    .await;
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
+
+    pace.set(NODE, Pace::Frozen);
+    send_backlog(&carol, s.b2bua.addr, 1, "held").await;
+    s.h.advance(Duration::from_millis(10)).await;
+    send_backlog(&carol, s.b2bua.addr, 1, "behind").await;
+    s.h.advance(REFUSE_AT_AGE - Duration::from_millis(250)).await;
+
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    s.h.advance(Duration::from_millis(150)).await;
+    pace.set(NODE, Pace::Free);
+    let mut at_bob = s.bob.receive("INVITE").await;
+    at_bob.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+
+    let on_arrival = || Class::ALL.map(|c| s.b2bua.txn_metrics().new_call_gate_refused(c));
+    assert_eq!(on_arrival(), [0; 3], "nothing refused on arrival");
+    assert_eq!(s.b2bua.new_calls().rejected_sum(), 0, "nor at its take");
+
+    let refused_405 = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    settle_until(|| refused_405() == 2).await;
+    s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     let _report = s.finish().await;
 }
 

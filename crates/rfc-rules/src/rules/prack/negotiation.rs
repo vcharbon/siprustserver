@@ -15,7 +15,8 @@ use super::reading::Reading;
 ///
 /// The occasion is ONE provisional the UAS sent on the demanding transaction.
 /// The 420 discharges the WHOLE transaction wherever on it it went out.
-/// Charges the UAS.
+/// Charges the UAS. A request the strict reading refuses
+/// ([`crate::Msg::refused`]) is no occasion.
 pub struct RequireReliable1xxOnRequire;
 
 impl Obligation for RequireReliable1xxOnRequire {
@@ -23,7 +24,8 @@ impl Obligation for RequireReliable1xxOnRequire {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for (key, served) in &seen.served {
-            if !served.requires_100rel {
+            // A request the strict reading refuses owes its 400, not 100rel.
+            if !served.requires_100rel || wire.msgs[served.msg].refused {
                 continue;
             }
             let answers = seen.answers_on(key);

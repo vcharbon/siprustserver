@@ -74,6 +74,7 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
     };
     let fw = node.core.router_ctx().framework();
     rule_chain_turn(&fw, call, input, &mut super::test_support::turn(1))
+        .expect("the turn crosses no cap")
 }
 
 /// The ring deadline `call` holds on `b-1`.

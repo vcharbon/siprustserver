@@ -311,3 +311,70 @@ async fn a_refresh_whose_lookup_hangs_serves_stale_at_once() {
     sip_clock::testkit::settle().await;
     assert_eq!(resolver.started.load(Ordering::SeqCst), 1);
 }
+
+/// Polls one `resolve_all` of `target` once on a thread of its own, inside
+/// `runtime` when one is given: what the poll came back with, or `None` when
+/// the thread did not come back within the bound.
+fn poll_once_on_a_thread(
+    target: Arc<ResolvedTarget>,
+    runtime: Option<tokio::runtime::Handle>,
+) -> Option<std::thread::Result<std::task::Poll<Option<Addresses>>>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut lookup = std::pin::pin!(target.resolve_all());
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            std::future::Future::poll(lookup.as_mut(), &mut cx)
+        }));
+        let _ = tx.send(polled);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(30)).ok()
+}
+
+/// A target whose resolver knows `limiter:8080`.
+fn known_target() -> (Arc<FakeResolver>, Arc<ResolvedTarget>) {
+    let resolver = Arc::new(FakeResolver::default());
+    resolver.names.lock().unwrap().insert("limiter:8080".into(), addr());
+    let target = Arc::new(ResolvedTarget::name_with("limiter:8080", resolver.clone()));
+    (resolver, target)
+}
+
+/// The next lookup of `target`, on a live runtime, resolves afresh.
+fn resolves_afresh(resolver: &FakeResolver, target: &ResolvedTarget) {
+    let live = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    assert_eq!(live.block_on(target.resolve()), Some(addr()), "the slot is free");
+    assert_eq!(resolver.lookups.load(Ordering::SeqCst), 1, "one fresh resolve");
+}
+
+/// A runtime that is shut down drops a spawned lookup on the spawning
+/// thread: the request gets no address at once, and the slot is freed.
+#[test]
+fn a_lookup_spawned_on_a_shut_down_runtime_frees_its_slot() {
+    let (resolver, target) = known_target();
+    let closed = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let handle = closed.handle().clone();
+    drop(closed);
+    for attempt in 0..2 {
+        let polled = poll_once_on_a_thread(target.clone(), Some(handle.clone()))
+            .expect("the request comes back, never deadlocks");
+        assert!(
+            matches!(polled, Ok(std::task::Poll::Ready(None))),
+            "attempt {attempt}: no address, at once"
+        );
+    }
+    assert_eq!(resolver.lookups.load(Ordering::SeqCst), 0, "no lookup ran");
+    resolves_afresh(&resolver, &target);
+}
+
+/// Outside any runtime the spawn is refused: the request panics at once,
+/// and the slot is freed.
+#[test]
+fn a_lookup_started_outside_a_runtime_frees_its_slot() {
+    let (resolver, target) = known_target();
+    let polled = poll_once_on_a_thread(target.clone(), None)
+        .expect("the request comes back, never deadlocks");
+    assert!(polled.is_err(), "a spawn outside a runtime panics");
+    assert_eq!(resolver.lookups.load(Ordering::SeqCst), 0, "no lookup ran");
+    resolves_afresh(&resolver, &target);
+}

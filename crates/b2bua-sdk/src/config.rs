@@ -6,12 +6,15 @@ use crate::sdp_form::{AsWritten, SdpFormPolicy};
 use crate::service_params::ServiceParams;
 
 mod bounds;
+mod call_caps;
 mod capacity;
 mod cdr;
+mod defaults;
 mod event_queue_gate;
 mod front;
 mod retry_after;
 mod validate;
+pub use call_caps::{AgeCap, CallCaps, Cap, CapKind};
 pub use capacity::{CapacityConfig, Ceilings};
 pub use cdr::CdrConfig;
 pub use event_queue_gate::{EventQueueGateConfig, GateBound, GateViolation, EVENT_QUEUE_CAPACITY};
@@ -22,6 +25,9 @@ pub use retry_after::RetryAfterRange;
 /// short strings); share one instance across the stack.
 #[derive(Clone, Debug)]
 pub struct B2buaConfig {
+    /// What the process reads the wire under: stated once at startup, held by
+    /// the transaction layer and the ingress brake alike ([`Self::parser`]).
+    pub parser_limits: sip_message::SipParserLimits,
     /// This worker's ordinal, encoded into `callRef` for partition routing.
     pub self_ordinal: String,
     /// The key every worker of the cluster shares to sign what it states
@@ -66,9 +72,8 @@ pub struct B2buaConfig {
     /// queue bound, so a stuck handler or a full queue hides none — the call
     /// ends (ADR-0020). The node's own timers and internal events do not
     /// count. A healthy call stays far below it: a 24 h call with 300 s
-    /// keepalives and session refreshes offers a few thousand. Enforced, and
-    /// checked (never 0), only with the reaper on, whose verdict ends the
-    /// call.
+    /// keepalives and session refreshes offers a few thousand. Enforced and
+    /// checked (never 0) with the reaper's sweep on or off.
     ///
     /// A call held just under `max_messages_per_call` per keepalive window
     /// reaches it after `lifetime / max_messages_per_call × keepalive
@@ -119,9 +124,10 @@ pub struct B2buaConfig {
     pub limiter_refresh_batch_ms: u64,
     /// Most keys one limiter refresh request carries. Default 1000.
     pub limiter_refresh_batch_max: usize,
-    /// **Call reaper** master switch (ADR-0020 X1). ON by default; `false` is a
+    /// **Call reaper sweep** switch (ADR-0020 X1). ON by default; `false` is a
     /// debugging escape hatch only — the in-process "released exactly once, one
-    /// CDR" promise does not hold without it.
+    /// CDR" promise does not hold without it. Failure reports, trips and the
+    /// lifetime cap's verdict act either way (ADR-0057 §4).
     pub reaper_enabled: bool,
     /// Check the call model's invariants at the end of every turn, before
     /// the record lands, and panic with the call's dump on a violation
@@ -261,22 +267,18 @@ pub struct B2buaConfig {
     /// `WORKER_ALLOWED_TARGET_SUFFIXES` (comma-separated, trimmed, empties
     /// dropped).
     pub worker_allowed_target_suffixes: Vec<String>,
-    /// **Decision-backend deadline** (ms) — the hard per-round-trip bound on a
-    /// caller-blocking `CallDecisionEngine` call (`new_call` and `call_failure`;
-    /// `call_refer` is bounded by the refer subscription/safety timers instead —
-    /// see `DeadlineDecisionEngine`), enforced by the CORE
-    /// (`b2bua::decision::DeadlineDecisionEngine` wraps whatever engine the host
-    /// injects at `B2buaCore::spawn`). This is the load-bearing half of the
-    /// initial-INVITE guarantee (ADR-0022): sip-txn auto-answers 100 Trying
-    /// before the router ever sees the INVITE, so the caller is already waiting
-    /// — a decision backend that hangs must NOT strand them. On expiry the call
-    /// takes the ordinary decision-error path (503 to the caller for
-    /// `new_call`; the per-site `Err` fallback for failure/refer). The core owns
-    /// this as ONE knob, not each adapter, so a third-party adapter cannot
-    /// forget it. Default **5000**. `<= 0` disables
-    /// (escape hatch for tests that need a genuinely wedged decision await —
-    /// the reaper ladder still cleans up, see `reaper.rs`). Overridable via
-    /// `B2BUA_CALL_CONTROL_TIMEOUT_MS`.
+    /// **The setup budget and the decision-backend deadline** (ms). On an
+    /// initial INVITE's turn: the bound from the INVITE's receipt to its final,
+    /// the wait for a handler permit, the decision round trips and the limiter's
+    /// admits together, then the bare 503 (ADR-0022 X1,
+    /// `b2bua::setup_budget`). Off the turn: the bound on one round trip of a
+    /// consult (`DeadlineDecisionEngine`; `call_refer` has the refer timers
+    /// instead). The core owns this as ONE knob, not each adapter, so a
+    /// third-party adapter cannot forget it. Default **5000**. `<= 0` is NOT
+    /// allowed: [`validate`](Self::validate) refuses it, and a harness config
+    /// that writes it anyway gets the default
+    /// ([`call_control_timeout`](Self::call_control_timeout), the one reader).
+    /// Overridable via `B2BUA_CALL_CONTROL_TIMEOUT_MS`.
     pub call_control_timeout_ms: i64,
     /// **Opt-in transparent header relay.** Header names whose *value* is copied
     /// verbatim from the a-leg INVITE onto every originated b-leg INVITE (the
@@ -349,81 +351,23 @@ pub struct B2buaConfig {
     /// here, one value per type; their rules read them through `ctx.config`.
     /// Empty by default.
     pub service_params: ServiceParams,
-}
-
-impl Default for B2buaConfig {
-    fn default() -> Self {
-        Self {
-            self_ordinal: "w0".to_string(),
-            cluster_key: None,
-            sip_local_ip: "127.0.0.1".to_string(),
-            sip_local_port: 5060,
-            front: Front::Standalone,
-            event_dispatch_concurrency: 1024,
-            per_call_queue_depth: 64,
-            per_call_queue_cap: 200_000,
-            new_call_permit_share_percent: 50,
-            new_call_queue_headroom_percent: 5,
-            // Loop/runaway guard, per keepalive interval (the tick resets the
-            // counter — see the field doc): 200, so a legitimate per-interval
-            // burst stays well under it while a flood/glare loop is still capped
-            // inside one window. Override with `B2BUA_MAX_MESSAGES_PER_CALL`.
-            max_messages_per_call: 200,
-            max_messages_per_call_lifetime: 100_000,
-            cdr_buffer_queue_max: 1_024,
-            refer_subscription_expiry_sec: 60,
-            refer_reinvite_answer_sec: 32,
-            refer_overall_safety_sec: 120,
-            release_reroute_guard_sec: 120,
-            keepalive_interval_sec: 300,
-            limiter_refresh_sec: 40,
-            limiter_release_queue_cap: 100_000,
-            limiter_refresh_batch_ms: 1_000,
-            limiter_refresh_batch_max: 1_000,
-            reaper_enabled: true,
-            model_invariants: cfg!(debug_assertions),
-            reaper_sweep_interval_sec: 30,
-            reaper_idle_max_sec: 0,
-            setup_timeout_ms: 150_000,
-            invite_txn_timeout_sec: Self::DEFAULT_INVITE_TXN_TIMEOUT_SEC,
-            invite_first_response_timeout_sec: Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC,
-            ack_timeout_sec: Self::DEFAULT_ACK_TIMEOUT_SEC,
-            // CPS bucket and panic-ELU rungs. Defaults match the env knobs
-            // (B2BUA_CPS_BUCKET_SIZE / B2BUA_CPS_BUCKET_RATE /
-            // B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD / B2BUA_RETRY_AFTER_BASE_SEC).
-            cps_bucket_size: 1000,
-            cps_bucket_rate: 500,
-            overload_panic_elu_threshold: 0.75,
-            retry_after_base_sec: 5,
-            retry_after_jitter_sec: 5,
-            glare_retry_after: None,
-            // b-leg admission allow-list. Default is the single K8s in-cluster
-            // DNS suffix `.svc.cluster.local`; production traffic (pod FQDNs)
-            // always passes, bogus hostnames are 503'd pre-leg. The paused-clock
-            // test harness builds configs directly; a fixture that routes to a
-            // non-suffixed host (e.g. `bob` / a loopback name) must set `["*"]`
-            // or add its suffix to opt out of the gate.
-            worker_allowed_target_suffixes: vec![".svc.cluster.local".to_string()],
-            // Decision-backend deadline: one knob for all three methods (ADR-0022).
-            call_control_timeout_ms: 5_000,
-            relay_headers: Vec::new(),
-            privacy_service: true,
-            relay_policy: sip_message::generators::RelayPolicy::transparent(),
-            relayed_cancel_reason: crate::release_reason::CancelReason::Verbatim,
-            own_release_reason: None,
-            default_sdp: None,
-            sdp_form: std::sync::Arc::new(AsWritten),
-            node_capabilities: sip_message::generators::CapabilitySet::default(),
-            minted_final_advertisement: sip_message::generators::CapabilitySet::silent(),
-            cdr: CdrConfig::default(),
-            capacity: CapacityConfig::default(),
-            event_queue_gate: EventQueueGateConfig::default(),
-            service_params: ServiceParams::default(),
-        }
-    }
+    /// **Per-call caps** (ADR-0057): what one call's record may hold and what
+    /// one turn may do; a crossing fails the turn. The upstream defaults are
+    /// [`CallCaps::DEFAULT`].
+    pub caps: CallCaps,
 }
 
 impl B2buaConfig {
+    /// The longest a service's HTTP request runs ([`CallCaps::service_http_timeout_ms`]).
+    pub fn service_http_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.caps.service_http_timeout_ms)
+    }
+
+    /// The reader of the wire, whichever stage reads a datagram first.
+    pub fn parser(&self) -> sip_message::CustomParser {
+        self.front.parser(&self.parser_limits)
+    }
+
     /// The configured initial-INVITE transaction bound in ms — the value wired
     /// into `TransactionConfig::invite_initial_timeout_ms`. `<= 0` is NOT
     /// "disabled" (unlike [`setup_timeout_ms`](Self::setup_timeout_ms)):
@@ -486,6 +430,21 @@ impl B2buaConfig {
             Self::DEFAULT_ACK_TIMEOUT_SEC
         };
         u64::try_from(sec).unwrap_or(Self::DEFAULT_ACK_TIMEOUT_SEC as u64).saturating_mul(1000)
+    }
+
+    /// The setup budget and the decision deadline
+    /// ([`call_control_timeout_ms`](Self::call_control_timeout_ms)), never
+    /// zero: a non-positive value reads the 5 s default, so no consult runs
+    /// unbounded.
+    pub fn call_control_timeout(&self) -> std::time::Duration {
+        Self::call_control_timeout_of(self.call_control_timeout_ms)
+    }
+
+    /// [`call_control_timeout`](Self::call_control_timeout) of a stated `ms`,
+    /// for a reader that runs before the configuration holds it.
+    pub fn call_control_timeout_of(ms: i64) -> std::time::Duration {
+        let ms = if ms > 0 { ms } else { Self::DEFAULT_CALL_CONTROL_TIMEOUT_MS };
+        std::time::Duration::from_millis(ms.unsigned_abs())
     }
 
     /// Clamp a route-supplied `NoAnswer` deadline, as ms after the leg's

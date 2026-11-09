@@ -5,7 +5,8 @@
 //! The first tick fires as soon as the registry holds its first listing, and
 //! its round latches the proxy's [`FirstView`] (ADR-0050 §11). Per tick (every
 //! `interval_ms`): prune per-worker state for departed/recreated workers, then
-//! fan one OPTIONS client transaction out to every registered worker. Each
+//! fan one OPTIONS client transaction out to every worker the registry holds for
+//! judging ([`WorkerRegistry::probed`]), ready or not (ADR-0050 §11). Each
 //! probe is reaped at the end of its own `timeout_ms` reply window (each reap =
 //! one miss; `threshold` consecutive misses → `Dead`), so the verdict lands
 //! [`HealthProbeConfig::verdict_after_first_miss`] after the first unanswered
@@ -60,14 +61,10 @@ use std::time::Duration;
 
 use call::TxnKind;
 use sip_clock::Clock;
-use sip_message::generators::{
-    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
-};
-use sip_message::header::{self, ParamValue, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipResponse;
 use sip_message::worker_report;
-use sip_message::{SipMessage, SipRequest, SipStr};
+use sip_message::SipMessage;
 use sip_net::UdpEndpoint;
 use sip_txn::{
     IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed,
@@ -76,14 +73,16 @@ use tokio::time::Instant;
 
 use super::first_view::{FirstRound, FirstView};
 use super::reach::WorkerReach;
+use super::stated_host::stated_host;
 use crate::addr::ProxyAddr;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
-use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use crate::registry::{WorkerHealth, WorkerRegistry};
 
 mod answer;
 mod config;
+mod options;
 
 pub use answer::{read_answer, AnswerReading};
 pub use config::HealthProbeConfig;
@@ -150,10 +149,12 @@ pub struct HealthProbe {
 
 impl HealthProbe {
     /// Must be called within a tokio runtime (it spawns the transaction-layer
-    /// owner task over `endpoint`).
+    /// owner task over `endpoint`). `parser` is the process's ingress parser:
+    /// the workers' answers are read as the rest of the wire is.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         endpoint: Box<dyn UdpEndpoint>,
+        parser: CustomParser,
         registry: Arc<dyn WorkerRegistry>,
         control: Arc<dyn WorkerRegistryControl>,
         observer: Arc<WorkerLoadObserver>,
@@ -164,13 +165,13 @@ impl HealthProbe {
         let local = endpoint.local_addr();
         let (txn, events) = TransactionLayer::spawn(
             endpoint,
-            Arc::new(CustomParser::default()),
+            Arc::new(parser),
             TransactionConfig::new(id_gen.clone()),
         );
         Self {
             txn,
             events,
-            probe_host: local.ip().to_string(),
+            probe_host: stated_host(local),
             probe_port: local.port(),
             registry,
             control,
@@ -307,7 +308,7 @@ impl HealthProbe {
         // Departed ordinals are dropped (bounded maps under worker churn); a
         // host move (recreated pod under the same ordinal) resets the miss
         // count and the overload band — the fresh pod is judged from scratch.
-        let snapshot = self.registry.snapshot();
+        let snapshot = self.registry.probed();
         for w in &snapshot {
             if state.last_addr.get(&w.id).is_some_and(|prev| prev != &w.address) {
                 state.misses.remove(&w.id);
@@ -366,7 +367,7 @@ impl HealthProbe {
         // Stale-origin guard: only the worker's CURRENT registry address may
         // report its health — a late 200 from a dead pod's old IP must not
         // resurrect the recreated, never-probed pod.
-        if !self.registry.resolve(&p.worker_id).is_some_and(|w| w.address == p.addr) {
+        if !self.still_at(&p) {
             return;
         }
 
@@ -411,11 +412,16 @@ impl HealthProbe {
         self.control.set_view(&p.worker_id, health, reading.acceptance);
     }
 
+    /// Whether `p`'s worker is still judged at the address it was probed at.
+    fn still_at(&self, p: &PendingProbe) -> bool {
+        self.registry.probed().iter().any(|w| w.id == p.worker_id && w.address == p.addr)
+    }
+
     /// Count one missed reply window. Only a worker still registered at the
     /// probed address accrues it — a departed or recreated worker's silence is
     /// not the fresh pod's fault.
     fn count_miss(&self, p: PendingProbe, misses: &mut HashMap<String, u32>) {
-        if !self.registry.resolve(&p.worker_id).is_some_and(|w| w.address == p.addr) {
+        if !self.still_at(&p) {
             return;
         }
         // Per-peer attribution: a probe OPTIONS to a worker got no final response.
@@ -435,50 +441,6 @@ impl HealthProbe {
         if *n >= self.config.threshold {
             self.control.set_health(&p.worker_id, WorkerHealth::Dead);
         }
-    }
-
-    /// The OPTIONS probing `w`; `None` where its address does not make one.
-    fn build_options(&self, w: &WorkerEntry, branch: &str, now_ms: u64) -> Option<SipRequest> {
-        generate_out_of_dialog_request(
-            OutOfDialogMethod::Options,
-            &GenerateOutOfDialogRequestOpts {
-                request_uri: Some(
-                    Uri::sip(SipStr::owned(&w.address.host)).with_port(w.address.port),
-                ),
-                // Diagnostic only — correlation is the transaction branch.
-                call_id: format!("probe-{}-{}@{}", w.id, now_ms, self.probe_host),
-                from: Some(
-                    header::From::from_uri(Uri::sip_user(
-                        SipStr::from_static("probe"),
-                        SipStr::owned(&self.probe_host),
-                    ))
-                    .with_tag(SipStr::from_static("probe")),
-                ),
-                to: Some(header::To::from_uri(
-                    Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&w.address.host))
-                        .with_port(w.address.port),
-                )),
-                cseq: 1,
-                via: Some(
-                    Via::udp(SipStr::owned(&self.probe_host), self.probe_port)
-                        .with_branch(SipStr::owned(branch))
-                        .with_param(
-                            "cr",
-                            ParamValue::Token(SipStr::owned(&probe_call_ref(branch))),
-                        ),
-                ),
-                contact: Some(header::Contact::from_uri(
-                    Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&self.probe_host))
-                        .with_port(self.probe_port),
-                )),
-                max_forwards: Some(70),
-                ..Default::default()
-            },
-        )
-        .inspect_err(|e| {
-            tracing::warn!(worker = %w.id, error = %e, "health probe not sent: its address makes no OPTIONS");
-        })
-        .ok()
     }
 }
 

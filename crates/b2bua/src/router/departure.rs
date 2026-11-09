@@ -4,8 +4,8 @@
 //! §17.1.1.2), a silent callee stays silent, nobody else repeats a 2xx the
 //! caller lost (§13.3.1.4), and nobody else ends a call the peer was ending.
 //! Every call this node backs up for the peer with an INVITE transaction to
-//! serve or an in-dialog request in flight but the keepalive, every one
-//! awaiting the answer to a request it sent off its turn,
+//! serve or an in-dialog request in flight but the keepalive, every `Active`
+//! one awaiting the answer to a request it sent off its turn,
 //! which died with the peer's task (ADR-0039), and every `Terminating` one
 //! with any request record open — its own BYE in flight, a request it held —
 //! or a caller dialog held possibly confirmed (ADR-0055 §4), is taken over at
@@ -31,7 +31,10 @@
 //! its departure; the final a finished call may still owe its caller is sent
 //! at once, and the limiter key it owes is released (ADR-0047 D8): the
 //! release is keyed by the call, so the peer's own release, or the
-//! discharge's, frees nothing more.
+//! discharge's, frees nothing more. That half stops at the first write of a
+//! later generation than the verdict named: the restarted peer holds its calls
+//! again, and a copy read from a replica its reclaim write already reached meets
+//! no later write to stand down on (ADR-0047 D1, D7).
 //!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
@@ -46,17 +49,25 @@ use std::sync::Arc;
 
 use call::{Call, CallModelState};
 
+use super::ended_body;
 use super::materialise::{
     has_invite_to_serve, has_work_to_serve, materialise, names_request_in_flight, Materialised,
     Origin,
 };
-use super::reclaim::discharge_materialized_terminal;
 use super::restore_hygiene::reanchor;
 use super::undecided::{is_undecided, settle_undecided};
 use super::RouterCtx;
 use crate::abort_on_drop::AbortOnDrop;
 use crate::rules::actions::possibly_confirmed;
 use crate::store::PartitionRole;
+
+/// Whether `call_ref`'s primary is another node that has departed.
+pub(super) fn primary_departed(ctx: &RouterCtx, call_ref: &str) -> bool {
+    match (&ctx.departed, call::call_ref_primary(call_ref)) {
+        (Some(departed), Some(primary)) => primary != ctx.config.self_ordinal && departed(primary),
+        _ => false,
+    }
+}
 
 /// How many calls the sweep reads between two yields to the runtime.
 const YIELD_EVERY: usize = 32;
@@ -68,8 +79,9 @@ pub(super) enum Cause {
     /// finished ones discharged.
     Departed,
     /// A proxy read the peer dead: its calls are taken over, and its finished
-    /// ones release their limiter keys, with no CDR.
-    ReadDead,
+    /// ones release their limiter keys, with no CDR. `generation` is the
+    /// incarnation the verdict named, when the flow from the peer heard one.
+    ReadDead { generation: Option<u64> },
 }
 
 /// Start the sweep of `ordinal`'s backup partition and return at once.
@@ -79,9 +91,14 @@ pub(super) fn take_over_departed(ctx: &Arc<RouterCtx>, ordinal: &str) {
 
 /// Start the takeover half of the sweep of `ordinal`'s backup partition, on a
 /// proxy's dead verdict, and return at once; whether this node backs any call
-/// for `ordinal`, and so swept anything.
-pub(super) fn take_over_read_dead(ctx: &Arc<RouterCtx>, ordinal: &str) -> bool {
-    start(ctx, ordinal, Cause::ReadDead)
+/// for `ordinal`, and so swept anything. `generation` is the incarnation the
+/// verdict named.
+pub(super) fn take_over_read_dead(
+    ctx: &Arc<RouterCtx>,
+    ordinal: &str,
+    generation: Option<u64>,
+) -> bool {
+    start(ctx, ordinal, Cause::ReadDead { generation })
 }
 
 /// Whether this node backs any call for `ordinal`.
@@ -92,8 +109,9 @@ pub(super) fn backs_calls_of(ctx: &RouterCtx, ordinal: &str) -> bool {
 /// Start the sweep for `cause` unless `ordinal`'s backup partition is empty;
 /// whether it started.
 fn start(ctx: &Arc<RouterCtx>, ordinal: &str, cause: Cause) -> bool {
-    let refs = ctx.state.partition_refs(PartitionRole::Backup, ordinal);
-    if refs.is_empty() && cause == Cause::ReadDead {
+    let mut refs = ctx.state.partition_refs(PartitionRole::Backup, ordinal);
+    refs.sort_unstable();
+    if refs.is_empty() && matches!(cause, Cause::ReadDead { .. }) {
         return false;
     }
     let (task_ctx, ordinal) = (ctx.clone(), ordinal.to_string());
@@ -117,11 +135,13 @@ enum Swept {
     Discharged,
     /// Finished, the peer read dead: its limiter key released.
     Released,
+    /// The restarted peer writes again: this call and the rest are its own.
+    PeerReturned,
 }
 
-/// Run `step` over every call of `refs`, one at a time, each in a subtask of
+/// Run `step` over the calls of `refs`, one at a time, each in a subtask of
 /// its own: a step that panics is counted and logged, and the next call is
-/// taken.
+/// taken. A step that finds the peer returned ends the run.
 async fn sweep<F, Fut>(
     ctx: &Arc<RouterCtx>,
     ordinal: &str,
@@ -139,6 +159,7 @@ async fn sweep<F, Fut>(
         if i % YIELD_EVERY == YIELD_EVERY - 1 {
             tokio::task::yield_now().await;
         }
+        ctx.turn_probe.sweep_step(&ctx.config.self_ordinal).await;
         let mut run = AbortOnDrop(observe::spawn_keeping_node(step(ctx.clone(), call_ref.clone())));
         // A crash of the node stops the call in flight with the sweep.
         ctx.dispatcher.track(run.0.abort_handle());
@@ -148,6 +169,14 @@ async fn sweep<F, Fut>(
             Ok(Swept::TakenAndSettled) => (taken, settled) = (taken + 1, settled + 1),
             Ok(Swept::Discharged) => discharged += 1,
             Ok(Swept::Released) => released += 1,
+            Ok(Swept::PeerReturned) => {
+                tracing::info!(
+                    node = observe::node(),
+                    peer = ordinal,
+                    "the read-dead peer restarted and writes: the sweep stops, its calls are its own"
+                );
+                break;
+            }
             Err(e) if e.is_panic() => {
                 panicked += 1;
                 ctx.metrics.bump_departure_takeover_panic();
@@ -172,7 +201,7 @@ async fn sweep<F, Fut>(
             panicked,
             "departed peer's in-flight calls taken over"
         ),
-        Cause::ReadDead => tracing::info!(
+        Cause::ReadDead { .. } => tracing::info!(
             node = observe::node(),
             peer = ordinal,
             scanned,
@@ -189,24 +218,33 @@ async fn sweep<F, Fut>(
 /// serve, and the peer departed; else take it over when it names an INVITE
 /// transaction to serve ([`has_invite_to_serve`]) or an in-dialog request in
 /// flight ([`names_request_in_flight`]), is ending with work left
-/// ([`ending_work`]), or awaits the answer to a request it sent off its turn,
-/// which the copy sends again; an undecided call's decision is asked again
+/// ([`ending_work`]), or, `Active`, awaits the answer to a request it sent off
+/// its turn, which the copy sends again; an undecided call's decision is asked again
 /// ([`settle_undecided`]). On a dead verdict a finished call is left to the
 /// departure, the final it may still owe its caller sent
 /// ([`super::owed_final`]), and the limiter key it owes released while the
 /// peer still reads dead. The body is read once without the lock to leave a
-/// quiet call untouched; a call already live here is left as it is.
+/// quiet call untouched; a call already live here is left as it is. On a dead
+/// verdict the flow from the peer is read before the call is touched, again
+/// under the lock right before the copy reads the replica, and once the copy is
+/// marked ([`peer_returned`]): a write heard after that mark rides up to the
+/// copy, and one heard before it may have found no mark, so the copy is offered
+/// the Element as that write
+/// ([`offer_the_element`](super::stand_down::offer_the_element)).
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
-    let Ok((copy, skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
-    let mut call = copy.call;
-    if finished(&call) {
+    if peer_returned(ctx, call_ref, cause) {
+        return Swept::PeerReturned;
+    }
+    let Ok((mut copy, skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
+    if finished(&copy.call) {
         return match cause {
             Cause::Departed => discharge_finished(ctx, call_ref).await,
-            Cause::ReadDead => {
-                reanchor(&mut call, skew);
-                super::owed_final::deliver(ctx, call_ref, &call).await;
-                let read_dead = super::dead_verdict::primary_read_dead(ctx, call_ref);
-                if read_dead && super::owed_limiter_key::release(ctx, &call) {
+            Cause::ReadDead { .. } => {
+                reanchor(&mut copy.call, skew);
+                let still = super::dead_verdict::primary_read_dead(ctx, call_ref);
+                let owed = ended_body::Cause::ReadDead { still };
+                let paid = ended_body::pay(ctx, call_ref, owed, copy, ctx.clock.now_ms()).await;
+                if paid.released {
                     Swept::Released
                 } else {
                     Swept::Left
@@ -214,14 +252,22 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
             }
         };
     }
+    let call = copy.call;
     let ending = call.state == CallModelState::Terminating;
     let at_once = has_invite_to_serve(&call) || (ending && ending_work(&call));
     let awaited = call.state == CallModelState::Active && !call.awaited.is_empty();
     if !at_once && !names_request_in_flight(&call) && !awaited {
         return Swept::Left;
     }
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
+    if peer_returned(ctx, call_ref, cause) {
+        return Swept::PeerReturned;
+    }
     match materialise(ctx, call_ref, Origin::Takeover).await {
+        Materialised::Served { .. } if peer_returned(ctx, call_ref, cause) => {
+            super::stand_down::offer_the_element(ctx, call_ref).await;
+            Swept::PeerReturned
+        }
         Materialised::Served { call, seeded } => match seeded {
             Some(seeded) if is_undecided(&call) => {
                 settle_undecided(ctx, call_ref, call, seeded).await;
@@ -229,16 +275,20 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
             }
             _ => Swept::Taken,
         },
-        Materialised::Resident(_) | Materialised::Parked(_) => Swept::Left,
-        // Gone from the partition since it was read: the lock entry this pass
-        // made is the only trace, and no release will clear it. The guard
-        // goes first, as it is held on that entry.
-        Materialised::Refused(_) => {
-            drop(guard);
-            ctx.state.discard_orphan(call_ref);
+        // Live here already, or gone from the partition since it was read.
+        Materialised::Resident(_) | Materialised::Parked(_) | Materialised::Refused(_) => {
             Swept::Left
         }
     }
+}
+
+/// Whether, on a dead verdict, the flow from `call_ref`'s primary heard a write
+/// of a later generation than the verdict named. A frame is heard before it is
+/// applied, so a reclaim write this reads `false` for is not in the replica yet.
+fn peer_returned(ctx: &RouterCtx, call_ref: &str, cause: Cause) -> bool {
+    let Cause::ReadDead { generation: Some(generation) } = cause else { return false };
+    let Some(primary) = call::call_ref_primary(call_ref) else { return false };
+    ctx.peer_streams.as_ref().is_some_and(|s| s.writes_a_later_generation(primary, generation))
 }
 
 /// Whether `call` needs no copy to serve it, only its discharge: ended, or
@@ -264,28 +314,22 @@ fn ending_work(call: &Call) -> bool {
 /// lock, which the call's own turns take: one of them may have deleted it
 /// since the sweep's read. An ending body's legs are forced terminal.
 async fn discharge_finished(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
-    let guard = ctx.state.lock(call_ref).await;
+    let _guard = ctx.state.lock(call_ref).await;
     let ended = match ctx.state.peek_replica(call_ref).await {
         Ok((mut ended, skew)) if finished(&ended.call) => {
             reanchor(&mut ended.call, skew);
             ended
         }
-        _ if ctx.state.contains(call_ref) => return Swept::Left,
-        Ok(_) => return Swept::Left,
-        Err(_) => {
-            drop(guard);
-            ctx.state.discard_orphan(call_ref);
-            return Swept::Left;
-        }
+        _ => return Swept::Left,
     };
     let now_ms = ctx.clock.now_ms();
-    let force_terminal = ended.call.state == CallModelState::Terminating;
-    super::owed_final::deliver(ctx, call_ref, &ended.call).await;
-    if discharge_materialized_terminal(ctx, call_ref, ended, now_ms, force_terminal).await {
+    if ended_body::pay(ctx, call_ref, ended_body::Cause::Departed, ended, now_ms).await.discharged {
         return Swept::Discharged;
     }
     Swept::Left
 }
 
+#[cfg(test)]
+mod crossing_tests;
 #[cfg(test)]
 mod tests;

@@ -22,6 +22,12 @@ impl WorkerRegistry for PanicsOnce {
         }
         Vec::new()
     }
+    fn probed(&self) -> Vec<WorkerEntry> {
+        Vec::new()
+    }
+    fn routes_on_answers(&self) -> bool {
+        false
+    }
     fn resolve(&self, _id: &str) -> Option<WorkerEntry> {
         None
     }
@@ -37,6 +43,9 @@ impl WorkerRegistry for PanicsOnce {
     }
     fn read_dead(&self) -> tokio::sync::broadcast::Receiver<String> {
         tokio::sync::broadcast::channel(1).1
+    }
+    fn read_dead_now(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 

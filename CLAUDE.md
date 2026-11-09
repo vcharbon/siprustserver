@@ -9,7 +9,7 @@ To show a html file or a URL to the user, `xdg-open ./path/to/file/index.html` /
 Doc comments state present-tense contracts and invariants. History (dates, commit hashes, ticket IDs, "previously/replaces/no longer") lives in git and ADRs — a comment may cite ADR-00xx in one line, never retell it. A comment that has to justify wrong behavior is never written: the defect is reported. If a comment needs more than ~5 lines to justify a behavior rather than describe it, the rationale is architectural and belongs in an ADR with a one-line pointer. Implement correct behavior unless specifically asked to delay specific corner cases.
 Each file must have it own concern. No not mix concerns.
 Never implement SIP header or message extraction in crates other than sip-message.
-A crate a production binary links declares its tier and never panics on input, a pure one does no effects ([ADR-0051](docs/adr/0051-production-crates-never-panic-on-input.md)): `just purity` and `just panic-sites` check it, and `panic-sites.allow` only goes down, except by sites a rule the change adds reveals.
+A crate a production binary links declares its tier and never panics on input, a pure one does no effects ([ADR-0051](docs/adr/0051-production-crates-never-panic-on-input.md)): `just purity` and `just panic-sites` check it, and `panic-sites.allow` only goes down, except by sites a rule the change adds reveals. The same ratchet counts the loop and recursion sites of [ADR-0057](docs/adr/0057-a-call-is-bounded-a-turn-is-bounded-by-construction.md) §5 (`tooling/site-scan`): a loop in a pure crate is a `for` over a finite collection, a range to a constant or a `len()`, or `bounds::bounded`; a recursion descends through a `bounds::Depth`.
 A branch that touches `Cargo.lock` or `.cargo/audit.toml` passes `just audit-gate`: no RustSec vulnerability outside the `[advisories] ignore` list of `.cargo/audit.toml`, whose every entry states who links the crate and why it is acceptable.
 The flow viewer's UI (text, colours, dark mode) follows [ts/viewer-app/UI-STYLE.md](ts/viewer-app/UI-STYLE.md).
 Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it; `.githooks/prepare-commit-msg` refuses an amend on `develop`, the integration branch (commit on a topic branch).
@@ -169,9 +169,10 @@ folded in, it does not fail the suite, it wedges it.
 
 ## Agent & build concurrency
 
-**Never run more than ONE agent (subagent / workflow stage) at a time that
-compiles or runs tests.** Builds serialise on the target directory and a build
-racing a running SUT or loadgen skews what the run measures. The jobs cap in
+**By default two agents (subagent / workflow stage) compile or run tests at
+once;** other work that is not heavy on disk, CPU or memory runs without limit.
+Builds serialise on the target directory and a build racing a running SUT or
+loadgen skews what the run measures. The jobs cap in
 `.cargo/config.toml` is sized for a quiet host; beside other builds lower it
 (`cargo test --workspace --jobs 2`) and, on a host short on memory, cap the
 command in a scope: `systemd-run --user --scope -q -p MemoryMax=12G cargo …`; a

@@ -7,8 +7,9 @@ description: >-
   caller-facing interface. Its proxy turns not ready (the external face is
   unusable), so the node withdraws both VIPs, the internal one too, and the
   peer carries every flow. Inject measures, from the cut, when the node left
-  each VIP's next hops in the host's table. The probe wants the interface back
-  and both VIPs routed over every live proxy's node again.
+  each VIP's next hops in the host's table. The probe wants the interface back,
+  the external VIP's routing table holding its next hops again with no container
+  restarted, and both VIPs routed over every live proxy's node again.
 kind: fault
 target:
   selector: app=sip-front-proxy

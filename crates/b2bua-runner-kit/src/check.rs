@@ -11,6 +11,7 @@
 //! | every worker tunable, its range and its order against the others (setup deadline under the INVITE bound, keepalive floor, reaper window, capacity ceilings, event-queue gate) | `B2buaConfig::validate` |
 //! | `B2BUA_UDP_INGRESS_BRAKE_PCT` in 1..=100 | [`validate_ingress_brake_pct`](crate::validate_ingress_brake_pct) |
 //! | `B2BUA_LOOP_STALL_MS` above `B2BUA_CALL_CONTROL_TIMEOUT_MS` + the lock-wait margin | `liveness_env` |
+//! | `B2BUA_LOOP_EXIT_MS` above `B2BUA_LOOP_STALL_MS` and `B2BUA_CALL_CONTROL_TIMEOUT_MS` + the lock-wait margin | `liveness_env` |
 //! | `B2BUA_DRAIN_MIN_MS` ≤ `B2BUA_DRAIN_GRACE_MS` | `drain_env` |
 //! | `B2BUA_QUEUE` ≥ [`MIN_INGRESS_QUEUE`]; `B2BUA_CONCURRENCY`, `B2BUA_CALL_CAP` ≥ 1 | here |
 //! | with replication: the replica TTL against the keepalive round and the INVITE bound, the backup ceilings against the emergency ceilings | `ReplicaConfig::validate` |
@@ -80,10 +81,11 @@ impl ConfigCheck {
     pub(crate) fn generic(&mut self, env: &RunnerEnv, deps: &B2buaDeps) {
         let config = &deps.config;
         self.take(config.validate());
+        self.take(crate::runner_env::caps_env::check_caps(&config.caps));
         self.take(validate_ingress_brake_pct(env.udp_ingress_brake_pct));
-        let call_control =
-            std::time::Duration::from_millis(config.call_control_timeout_ms.unsigned_abs());
+        let call_control = config.call_control_timeout();
         self.take(liveness_env::check_loop_stall(env.loop_stall, call_control));
+        self.take(liveness_env::check_loop_exit(env.loop_exit, env.loop_stall, call_control));
         self.require(env.drain.floor <= env.drain.grace, || {
             format!(
                 "B2BUA_DRAIN_MIN_MS={} > B2BUA_DRAIN_GRACE_MS={}: the floor of a caught-up exit \

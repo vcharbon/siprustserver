@@ -15,6 +15,7 @@ const REFUSED = "lane sut-b runs only in the shared environment"
 
 const view: Campaign = {
   capture: "e2e",
+  title: null,
   env: null,
   envs: [],
   saidLabel: "service said",
@@ -27,7 +28,9 @@ const view: Campaign = {
     lanes: [
       { lane: "sut-a", group: "group-1", refused: null },
       { lane: "sut-b", group: "group-1", refused: REFUSED }
-    ]
+    ],
+    tags: [],
+    defaultLanes: null
   }
 }
 
@@ -42,6 +45,33 @@ describe("a campaign with no run", () => {
     expect(markup).toContain(REFUSED)
     expect(markup).toMatch(/<input[^>]*disabled[^>]*>sut-b/)
     expect(markup).toContain("run campaign")
+  })
+
+  it("offers a tag a lane it opens with excludes, unchecked, and no tag no such lane excludes", () => {
+    const tag = (name: string, excludedOn: readonly string[]) => ({ tag: name, label: `Label ${name}`, warning: "Warned", excludedOn, allowed: false })
+    const launch = { ...view.launch!, tags: [tag("left", ["sut-a"]), tag("free", ["sut-c"])] }
+    const markup = renderToStaticMarkup(<CampaignNoRun view={{ ...view, launch }} />)
+    expect(markup).toMatch(/<input type="checkbox"\/>Label left/)
+    expect(markup).not.toContain("Label left (")
+    expect(markup).not.toContain("Label free")
+    expect(markup).not.toContain("Warned")
+  })
+
+  it("names itself by its title and opens on the lanes it states", () => {
+    const lanes = [{ lane: "sut-a", group: "group-1", refused: null }, { lane: "sut-c", group: "group-2", refused: null }]
+    const markup = renderToStaticMarkup(
+      <CampaignNoRun view={{ ...view, title: "Second campaign", launch: { lanes, tags: [], defaultLanes: ["sut-c"] } }} />
+    )
+    expect(markup).toContain("<h1>Second campaign</h1>")
+    expect(markup).toMatch(/<input type="checkbox"\/>sut-a/)
+    expect(markup).toMatch(/<input type="checkbox" checked=""\/>sut-c/)
+  })
+
+  it("shows a tag the campaign opts into checked and fixed, with its warning", () => {
+    const tags = [{ tag: "own", label: "Label own", warning: "Warned", excludedOn: ["sut-a"], allowed: true }]
+    const markup = renderToStaticMarkup(<CampaignNoRun view={{ ...view, launch: { ...view.launch!, tags } }} />)
+    expect(markup).toMatch(/<input type="checkbox" disabled="" checked=""\/>Label own/)
+    expect(markup).toContain("Warned")
   })
 
   it("offers no start where the server does not run the environment read", () => {

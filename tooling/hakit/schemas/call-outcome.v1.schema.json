@@ -55,8 +55,12 @@
       "description": "When the first provisional response past 100 Trying (101 to 199) to the INVITE arrived: a 100 is the next hop's own acknowledgement (RFC 3261 §8.2.6.1). Null when none did.",
       "type": ["number", "null"]
     },
+    "trying_at_ms": {
+      "description": "When the first 100 Trying to the INVITE arrived. Past it the caller retransmits nothing (RFC 3261 §17.1.1.2), so with `first_provisional_at_ms` it tells a caller who heard something from one who heard nothing. Null or absent when none did.",
+      "type": ["number", "null"]
+    },
     "setup_ended_at_ms": {
-      "description": "When the INVITE's final response arrived, or when the generator's setup deadline passed with none. Null only when the generator stopped the call before either (`ending: failed`).",
+      "description": "When the INVITE's final response arrived, or when the generator gave up with none: at the setup deadline with no response, at the final wait past one. Null only when the generator stopped the call before either (`ending: failed`).",
       "type": ["number", "null"]
     },
     "answered_at_ms": {

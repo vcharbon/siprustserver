@@ -7,10 +7,12 @@ use std::marker::PhantomData;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use super::cardinality::held_to_the_table;
 use super::kind::NumericKind;
-use super::name::HeaderName;
+use super::params::{read_params, ParamReading};
 use super::scan::parse_u32;
-use super::value::{Folding, HeaderValue};
+use super::single_valued::Listed;
+use super::value::HeaderValue;
 use super::wire::Wire;
 
 /// A `1*DIGIT` header value, always inside the range its kind states. Every
@@ -62,16 +64,24 @@ impl NumericHeader<super::kind::MaxForwards> {
 }
 
 impl<K: NumericKind> HeaderValue for NumericHeader<K> {
-    fn header_name() -> HeaderName {
-        K::name()
-    }
+    type Lines = K::Lines;
+    held_to_the_table!();
 
-    fn folding() -> Folding {
-        K::FOLDING
-    }
+    const HEADER: Listed = K::HEADER;
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let value = parse_u32(raw.as_str(), K::name().as_wire_str())?;
+        let name = K::name();
+        let digits = match K::PARAMS {
+            false => raw.clone(),
+            true => {
+                let text = raw.trimmed();
+                let at = text.as_str().find(';').unwrap_or(text.len());
+                read_params(&text, at, ParamReading::Strict, None)
+                    .map_err(|e| SipParseError::new(format!("{name}: {}", e.reason)))?;
+                text.subspan(0, at)
+            }
+        };
+        let value = parse_u32(digits.as_str(), name.as_wire_str())?;
         Self::checked(value).ok_or_else(|| {
             SipParseError::new(format!(
                 "{} value {value} outside [{}, {}]",
@@ -114,12 +124,12 @@ mod tests {
         assert!(MaxForwards::parse(&SipStr::owned("256")).is_err());
         assert_eq!(MaxForwards::parse(&SipStr::owned("255")).unwrap().value(), 255);
 
-        // RFC 3262 §7.1: an RSeq is 1..2^31-1, so zero is not one.
+        // RFC 3262 §7.1: an RSeq is 1..2^32-1, so zero is not one.
         assert_eq!(RSeq::checked(0), None);
         assert_eq!(RSeq::new(0).value(), 1);
         assert!(RSeq::parse(&SipStr::owned("0")).is_err());
-        assert!(RSeq::parse(&SipStr::owned("2147483648")).is_err());
-        assert!(RSeq::parse(&SipStr::owned("2147483647")).is_ok());
+        assert!(RSeq::parse(&SipStr::owned("4294967296")).is_err());
+        assert!(RSeq::parse(&SipStr::owned("4294967295")).is_ok());
 
         assert!(ContentLength::parse(&SipStr::owned("2147483648")).is_err());
         assert_eq!(ContentLength::new(u32::MAX).value(), 2147483647);
@@ -137,6 +147,19 @@ mod tests {
         assert!(MaxForwards::parse(&SipStr::owned("seventy")).is_err());
         assert!(MaxForwards::parse(&SipStr::owned("")).is_err());
         assert!(MaxForwards::parse(&SipStr::owned("99999999999")).is_err());
+    }
+
+    /// RFC 4028 §5: a Min-SE reads its number past its parameters, which meet
+    /// the generic-param grammar.
+    #[test]
+    fn a_min_se_reads_past_its_parameters() {
+        use crate::header::MinSe;
+        assert_eq!(MinSe::parse(&SipStr::owned("90;foo=bar")).unwrap().value(), 90);
+        assert_eq!(MinSe::parse(&SipStr::owned("90 ; x")).unwrap().value(), 90);
+        for raw in ["90;=;;", "90;x=\"abc", "90;a(b=c", "90 x"] {
+            assert!(MinSe::parse(&SipStr::owned(raw)).is_err(), "{raw}");
+        }
+        assert!(MaxForwards::parse(&SipStr::owned("70;x")).is_err());
     }
 
     #[test]

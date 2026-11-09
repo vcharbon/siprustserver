@@ -46,6 +46,7 @@ const run = (id: number, lanes: Readonly<Record<string, ReadonlyArray<CampaignRe
   labels: [],
   checked: {},
     scope: null,
+    selection: null,
   lanes: Object.entries(lanes).map(([lane, results], at) => ({
     lane,
     runId: id * 10 + at,
@@ -53,6 +54,7 @@ const run = (id: number, lanes: Readonly<Record<string, ReadonlyArray<CampaignRe
     status: "done",
     detail: null,
     skipped: 2,
+    excluded: [],
     results
   }))
 })
@@ -68,6 +70,7 @@ const GROUPS: Readonly<Record<string, ReadonlyArray<string>>> = {
 /** Four runs, newest first: run 3 a pre-run error; PAI failing since run 2, URI new in run 4. */
 const VIEW: Campaign = {
   capture: "campaign",
+  title: null,
   env: null,
   envs: [],
   launch: null,
@@ -83,6 +86,7 @@ const VIEW: Campaign = {
     title: caseId === "fam-a/one" ? "Number one" : null,
     description: null,
     groups: GROUPS[caseId] ?? [],
+    tags: [],
     links: [],
     source: null
   })),

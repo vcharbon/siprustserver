@@ -104,7 +104,7 @@ mod unreadable_address_tests {
     use sip_message::{SipMessage, SipParser, SipRequest};
 
     fn a_leg_invite() -> SipRequest {
-        let raw = "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+        let raw = "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\n\
 Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice;lg=a\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\

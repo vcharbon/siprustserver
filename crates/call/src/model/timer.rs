@@ -135,6 +135,12 @@ pub enum TimerType {
 }
 
 impl TimerType {
+    /// Whether only the framework arms this type: a rule's arm of one is
+    /// dropped (ADR-0057 §1), since neither message cap counts its fire.
+    pub fn is_framework_only(&self) -> bool {
+        matches!(self, TimerType::Rung | TimerType::NotifyAnswerCap | TimerType::HeldAnswer)
+    }
+
     /// A service-owned timer from compile-time literals (usable in `const` —
     /// e.g. an `Effect::GuardTimer` declaration or a static match column).
     pub const fn service(service_id: MachineId, key: &'static str) -> Self {

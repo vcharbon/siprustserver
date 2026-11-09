@@ -1,38 +1,48 @@
-//! RFC 3581 — the `rport` bargain struck on the top Via: a sender that asks to
-//! be told its source port must be told it, or symmetric-response routing
-//! through a NAT has nothing to aim at.
+//! What a response's top Via says about where it goes: the hop it answers
+//! (RFC 3261 §18.2.2) and the `rport` bargain struck on it (RFC 3581).
 //!
-//! **The occasion is a RESPONSE, paired to its request by the top-Via branch.**
-//! §4 makes the duty conditional: only a request whose top Via carried a BARE
-//! `;rport` asks for anything, so a response is judged only on a branch this
-//! vantage saw the same endpoint open with that ask. Everything else opens no
-//! occasion at all.
+//! **`rport-echo`: the occasion is a RESPONSE, paired to its request by the
+//! top-Via branch.** §4 makes the duty conditional: only a request whose top
+//! Via carried a BARE `;rport` asks for anything, so a response is judged only
+//! on a branch this vantage saw the same endpoint open with that ask.
+//! Everything else opens no occasion at all.
 //!
 //! **The four states of the parameter are kept apart** ([`sniff::ViaRport`]):
 //! absent is the response that dropped the ask, a bare flag or a value no
 //! reader accepts is the response that kept the parameter without filling it
-//! in, and only an observed port discharges the duty.
+//! in, and only the port the request left from discharges the duty.
+//!
+//! **`response-destination` needs no pairing**: the response carries the stamp
+//! its sender aims by ([`ResponseDestination`]).
 
 use std::collections::BTreeMap;
 
 use sip_message::sniff::{self, ViaRport};
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
-use crate::wire::{Kind, Msg, WireView};
+use crate::wire::{endpoint_addr, Kind, Msg, WireView};
 
 use super::Obligation;
+
+mod destination;
+
+pub use destination::ResponseDestination;
 
 crate::registry::rules! {
     /// RFC 3581 §4: a server that took a request advertising a bare `;rport` echoes
     /// `rport=<source-port>` on the response's top Via. Charges the server.
     RportEcho = "rport-echo";
+    /// RFC 3261 §18.2.2, RFC 3581 §4: a response over unreliable unicast goes to
+    /// the address its own top Via names. Charges the sender.
+    ResponseDestination = "response-destination";
 }
 
 /// **RFC 3581 §4 — a server that takes `rport` echoes `rport=<source-port>`.**
 /// When a request's top Via advertises a bare `;rport`, the response's top Via
 /// carries `rport=N` with the source port the server observed. Dropping the
-/// parameter, or echoing it empty, leaves the UAC's NAT binding unnamed and the
-/// response unroutable back through it.
+/// parameter, echoing it empty, or naming a port the request did not leave
+/// from leaves the UAC's NAT binding unnamed and the response unroutable back
+/// through it. The source port is the one the request carried at this vantage.
 ///
 /// The occasion is ONE response the endpoint took on a branch it had opened
 /// with a bare `;rport`. Charges the endpoint that sent the response.
@@ -45,9 +55,10 @@ pub struct RportEcho;
 impl Obligation for RportEcho {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Branches on which an endpoint's own SENT request advertised a bare
-        // `;rport`, with the method that asked — built as the walk goes, so a
-        // response is only ever measured against an ask that preceded it.
-        let mut asked: BTreeMap<(&str, &str, &str), &str> = BTreeMap::new();
+        // `;rport`, with the method that asked and the port it left from —
+        // built as the walk goes, so a response is only ever measured against
+        // an ask that preceded it.
+        let mut asked: BTreeMap<(&str, &str, &str), (&str, Option<u16>)> = BTreeMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else {
@@ -56,16 +67,17 @@ impl Obligation for RportEcho {
             match &msg.kind {
                 Kind::Request { method } => {
                     if rport_of(msg) == ViaRport::Requested {
+                        let source_port = endpoint_addr(&msg.src).map(|a| a.port());
                         asked.insert(
                             (msg.src.as_str(), msg.call_id.as_str(), branch),
-                            method.as_str(),
+                            (method.as_str(), source_port),
                         );
                     }
                 }
                 Kind::Response { status } => {
                     // The ask is the TAKER's: it sent the request, and the
                     // response answers its own top Via.
-                    let Some(request_method) =
+                    let Some((request_method, source_port)) =
                         asked.get(&(msg.dst.as_str(), msg.call_id.as_str(), branch)).copied()
                     else {
                         continue;
@@ -83,13 +95,20 @@ impl Obligation for RportEcho {
                         out.push(finding(Decision::Undecidable("no header block at this vantage")));
                         continue;
                     }
-                    let echoed_empty = match rport_of(msg) {
-                        ViaRport::Observed(_) => {
+                    let (echoed_empty, echoed_port) = match (rport_of(msg), source_port) {
+                        (ViaRport::Observed(_), None) => {
+                            out.push(finding(Decision::Undecidable(
+                                "no source address at this vantage",
+                            )));
+                            continue;
+                        }
+                        (ViaRport::Observed(port), Some(source)) if port == source => {
                             out.push(finding(Decision::Compliant));
                             continue;
                         }
-                        ViaRport::Absent => false,
-                        ViaRport::Requested | ViaRport::Unreadable => true,
+                        (ViaRport::Observed(port), Some(_)) => (false, Some(port)),
+                        (ViaRport::Absent, _) => (false, None),
+                        (ViaRport::Requested | ViaRport::Unreadable, _) => (true, None),
                     };
                     out.push(finding(Decision::Violated(Evidence::RportNotEchoed {
                         rport_msg: mi,
@@ -99,6 +118,8 @@ impl Obligation for RportEcho {
                         request_method: request_method.to_string(),
                         branch: branch.to_string(),
                         echoed_empty,
+                        source_port: echoed_port.and(source_port),
+                        echoed_port,
                     })));
                 }
             }
@@ -132,7 +153,7 @@ mod tests {
     /// An OPTIONS alice sent bob, with a caller-chosen top-Via parameter tail.
     fn ask(at_us: u64, branch: &str, via_tail: &str) -> Msg {
         let head = format!(
-            "OPTIONS sip:bob@127.0.0.1 SIP/2.0\r\n\
+            "OPTIONS sip:bob@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}{via_tail}\r\n\
              From: <sip:alice@127.0.0.1>;tag=at\r\n\
              To: <sip:bob@127.0.0.1>;tag=bt\r\n\
@@ -141,6 +162,7 @@ mod tests {
              Content-Length: 0\r\n\r\n"
         );
         Msg {
+            refused: false,
             at_us,
             src: ALICE.to_string(),
             dst: BOB.to_string(),
@@ -170,6 +192,7 @@ mod tests {
              Content-Length: 0\r\n\r\n"
         );
         Msg {
+            refused: false,
             at_us,
             src: BOB.to_string(),
             dst: ALICE.to_string(),
@@ -239,6 +262,39 @@ mod tests {
         assert_eq!((*status, request_method.as_str()), (200, "OPTIONS"));
         assert_eq!(branch.as_str(), "z9hG4bK-o");
         assert!(!echoed_empty, "the parameter is gone, not empty");
+    }
+
+    /// Naming a port the request did not leave from aims the response at no
+    /// binding: the echo is the source port, not any number.
+    #[test]
+    fn an_echo_of_another_port_is_violated() {
+        let msgs = [ask(1_000, "z9hG4bK-o", ";rport"), answer(2_000, "z9hG4bK-o", ";rport=5099")];
+        let f = hits(&msgs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        let Decision::Violated(Evidence::RportNotEchoed {
+            echoed_empty,
+            echoed_port,
+            source_port,
+            ..
+        }) = &f[0].decision
+        else {
+            panic!("{:?}", f[0].decision)
+        };
+        assert!(!echoed_empty);
+        assert_eq!((*echoed_port, *source_port), (Some(5099), Some(5060)));
+    }
+
+    /// A vantage whose request source is no address cannot say which port the
+    /// echo owes.
+    #[test]
+    fn an_echo_with_no_source_address_is_undecidable() {
+        let mut asked = ask(1_000, "z9hG4bK-o", ";rport");
+        asked.src = "alice".to_string();
+        let mut answered = answer(2_000, "z9hG4bK-o", ";rport=5060");
+        answered.dst = "alice".to_string();
+        let all = eval(&[asked, answered]);
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert!(matches!(all[0].decision, Decision::Undecidable(_)), "{:?}", all[0].decision);
     }
 
     /// Keeping the parameter without filling it in is the other half: a bare

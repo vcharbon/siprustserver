@@ -38,7 +38,10 @@ impl<'a, 'p> Runner<'a, 'p> {
             .iter()
             .find(|recorded| Some(recorded.seq) == seq)
             .map_or_else(|| self.now_us(), |recorded| recorded.at_us);
-        let Some(after_ms) = progress::answered_after_ms(ladder, inbound, arrived_us) else {
+        let recording = self.instance.recording();
+        let Some(after_ms) =
+            progress::answered_after_ms(recording.reader(), ladder, inbound, arrived_us)
+        else {
             return false;
         };
         if !self.instance.retire_step(&step.id) {

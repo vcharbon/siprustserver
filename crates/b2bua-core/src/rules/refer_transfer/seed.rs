@@ -195,7 +195,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                     c_initial_sdp: None,
                 };
 
-                // Build the /call/refer request JSON the interpreter reposts.
+                // Build the /call/refer request JSON the router's callout fold reposts.
                 let dialog_id = state_dialog_id(ctx, &leg_id);
                 let mut request = serde_json::Map::new();
                 request.insert("call_id".into(), serde_json::json!(ctx.call.a_leg().call_id));

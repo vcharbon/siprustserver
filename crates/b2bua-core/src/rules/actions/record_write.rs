@@ -38,6 +38,11 @@ impl ActionExecutor<'_> {
                 }
             }
             RuleAction::ScheduleTimer { key, delay } => {
+                if key.timer_type.is_framework_only() {
+                    let detail = format!("a rule armed {key:?}; the arm is dropped");
+                    self.turn.notes.defect(crate::turn_notes::FRAMEWORK_TIMER, detail, call);
+                    return;
+                }
                 self.schedule(call, fx, key.clone(), delay.as_millis());
             }
             RuleAction::CancelTimer { key } => self.disarm(call, fx, key),
@@ -107,7 +112,7 @@ impl ActionExecutor<'_> {
                     headers: headers.clone(),
                     body: body.clone(),
                     content_type: content_type.clone(),
-                    timeout_ms: *timeout_ms,
+                    timeout_ms: timeout_ms.map(|t| t.min(self.config.caps.service_http_timeout_ms)),
                 });
             }
             RuleAction::SetTransfer { state } => {

@@ -29,7 +29,7 @@ pub fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
         .entries()
         .iter()
         .filter(|e| e.to == to)
-        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
+        .filter_map(|e| match CustomParser::built().parse(&e.raw) {
             Ok(SipMessage::Response(r))
                 if r.status() >= 200 && *r.cseq().method() == Method::Invite =>
             {

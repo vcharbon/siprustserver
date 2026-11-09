@@ -218,7 +218,7 @@ mod tests {
     /// header line, for extraction tests.
     fn invite(to: &str, extra: &str) -> Vec<u8> {
         format!(
-            "INVITE sip:x@127.0.0.1 SIP/2.0\r\nCall-ID: c1@h\r\n{extra}To: {to}\r\n\
+            "INVITE sip:x@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c1@h\r\n{extra}To: {to}\r\n\
              From: <sip:a@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n"
         )
         .into_bytes()
@@ -343,7 +343,7 @@ mod tests {
 
         let leg = |from: &str| {
             format!(
-                "INVITE sip:+15550900@10.0.0.9 SIP/2.0\r\nCall-ID: c2@h\r\n\
+                "INVITE sip:+15550900@10.0.0.9 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c2@h\r\n\
                  X-Loadgen-Id: lg999\r\nTo: <sip:+15550900@10.0.0.9>\r\n\
                  From: {from}\r\nCSeq: 1 INVITE\r\n\r\n"
             )
@@ -381,7 +381,7 @@ mod tests {
 
         let leg = |from: &str| {
             format!(
-                "INVITE sip:+15550900@10.0.0.9 SIP/2.0\r\nCall-ID: c3@h\r\n\
+                "INVITE sip:+15550900@10.0.0.9 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\nCall-ID: c3@h\r\n\
                  To: <sip:+15550900@10.0.0.9>\r\nFrom: {from}\r\nCSeq: 1 INVITE\r\n\r\n"
             )
             .into_bytes()
@@ -414,7 +414,7 @@ mod tests {
 
         let leg = |call_id: &str| {
             format!(
-                "INVITE sip:bob@10.0.0.9 SIP/2.0\r\n{call_id}\r\nTo: <sip:bob@10.0.0.9>\r\n\
+                "INVITE sip:bob@10.0.0.9 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n{call_id}\r\nTo: <sip:bob@10.0.0.9>\r\n\
                  From: <sip:alice@sut.example>;tag=s\r\nCSeq: 1 INVITE\r\n\r\n"
             )
             .into_bytes()

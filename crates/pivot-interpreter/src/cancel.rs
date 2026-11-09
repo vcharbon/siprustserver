@@ -12,7 +12,6 @@
 //! leg's recording — this run's wire — never off the document's list order.
 
 use pivot_schema::bundle::{Dir, RecordedMessage};
-use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
 use crate::gate::Inbound;
@@ -29,6 +28,7 @@ const EITHER: [u16; 2] = [200, 481];
 /// `Cursor::opening_send`), else the leg's last CANCEL sent — the transaction
 /// `progress` charges the step on.
 pub fn answers_late_cancel(
+    reader: &dyn SipParser,
     step: &CompiledStep,
     inbound: &Inbound,
     leg: &[RecordedMessage],
@@ -48,11 +48,11 @@ pub fn answers_late_cancel(
     {
         return false;
     }
-    let Some((at, cseq)) = cancel_sent(leg, opener) else { return false };
+    let Some((at, cseq)) = cancel_sent(reader, leg, opener) else { return false };
     cseq == inbound.cseq
         && leg[..at].iter().any(|recorded| {
             recorded.dir == Dir::In
-                && matches!(parse(recorded), Some(SipMessage::Response(r))
+                && matches!(reader.parse(recorded.wire()).ok(), Some(SipMessage::Response(r))
                     if r.status() >= 300
                         && *r.cseq().method() == Method::Invite
                         && r.cseq().seq() == cseq)
@@ -70,10 +70,14 @@ pub fn note(named: u16, arrived: u16) -> String {
 
 /// Where the CANCEL the step waits on stands on the leg, and its CSeq number:
 /// the first CANCEL recorded under `opener`, else the leg's last CANCEL sent.
-fn cancel_sent(leg: &[RecordedMessage], opener: Option<&str>) -> Option<(usize, u32)> {
+fn cancel_sent(
+    reader: &dyn SipParser,
+    leg: &[RecordedMessage],
+    opener: Option<&str>,
+) -> Option<(usize, u32)> {
     let mut cancels =
         leg.iter().enumerate().filter(|(_, recorded)| recorded.dir == Dir::Out).filter_map(
-            |(at, recorded)| match parse(recorded)? {
+            |(at, recorded)| match reader.parse(recorded.wire()).ok()? {
                 SipMessage::Request(r) if *r.method() == Method::Cancel => {
                     Some((at, r.cseq().seq(), recorded.step.as_deref()))
                 }
@@ -87,10 +91,6 @@ fn cancel_sent(leg: &[RecordedMessage], opener: Option<&str>) -> Option<(usize, 
     found.map(|(at, cseq, _)| (at, cseq))
 }
 
-fn parse(recorded: &RecordedMessage) -> Option<SipMessage> {
-    CustomParser::new().parse(recorded.wire()).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,10 +99,11 @@ mod tests {
     use crate::recording::Recording;
     use pivot_schema::flow::{Anchor, CheckMode, Delay};
     use pivot_schema::msg::MsgSpec;
+    use sip_message::CustomParser;
 
     fn request(method: &str, cseq: u32) -> String {
         format!(
-            "{method} sip:bob@127.0.0.1:5080 SIP/2.0\r\n\
+            "{method} sip:bob@127.0.0.1:5080 SIP/2.0\r\nMax-Forwards: 70\r\nContact: <sip:fixture@192.0.2.99>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-a\r\n\
              From: <sip:alice@example.test>;tag=a1\r\n\
              To: <sip:bob@example.test>\r\n\
@@ -114,7 +115,7 @@ mod tests {
 
     fn response(status: u16, cseq: u32, method: &str) -> String {
         format!(
-            "SIP/2.0 {status} Whatever\r\n\
+            "SIP/2.0 {status} Whatever\r\nContact: <sip:fixture@192.0.2.98>\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-a\r\n\
              From: <sip:alice@example.test>;tag=a1\r\n\
              To: <sip:bob@example.test>;tag=b1\r\n\
@@ -126,7 +127,7 @@ mod tests {
 
     /// Leg A's recording, each datagram under the step that claimed it.
     fn ladder(entries: &[(Dir, String, Option<&str>)]) -> Vec<RecordedMessage> {
-        let recording = Recording::new();
+        let recording = Recording::new(std::sync::Arc::new(sip_message::CustomParser::built()));
         recording.declare("A");
         for (at, (dir, raw, step)) in entries.iter().enumerate() {
             recording.push("A", *dir, at as u64, raw.clone(), *step, None);
@@ -179,9 +180,27 @@ mod tests {
         let leg = late();
         let ok = arrival(&response(200, 1, "CANCEL"));
         let gone = arrival(&response(481, 1, "CANCEL"));
-        assert!(answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, Some("s7")));
-        assert!(answers_late_cancel(&expects(200, Some("CANCEL")), &gone, &leg, Some("s7")));
-        assert!(answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, None));
+        assert!(answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &ok,
+            &leg,
+            Some("s7")
+        ));
+        assert!(answers_late_cancel(
+            &CustomParser::new(),
+            &expects(200, Some("CANCEL")),
+            &gone,
+            &leg,
+            Some("s7")
+        ));
+        assert!(answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &ok,
+            &leg,
+            None
+        ));
     }
 
     #[test]
@@ -189,12 +208,36 @@ mod tests {
         let leg = late();
         let terminated = arrival(&response(487, 1, "CANCEL"));
         let busy = arrival(&response(486, 1, "CANCEL"));
-        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &terminated, &leg, Some("s7")));
-        assert!(!answers_late_cancel(&expects(200, Some("CANCEL")), &busy, &leg, Some("s7")));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &terminated,
+            &leg,
+            Some("s7")
+        ));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(200, Some("CANCEL")),
+            &busy,
+            &leg,
+            Some("s7")
+        ));
         let ok = arrival(&response(200, 1, "CANCEL"));
-        assert!(!answers_late_cancel(&expects(487, Some("CANCEL")), &ok, &leg, Some("s7")));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(487, Some("CANCEL")),
+            &ok,
+            &leg,
+            Some("s7")
+        ));
         assert!(
-            !answers_late_cancel(&expects(200, Some("CANCEL")), &ok, &leg, Some("s7")),
+            !answers_late_cancel(
+                &CustomParser::new(),
+                &expects(200, Some("CANCEL")),
+                &ok,
+                &leg,
+                Some("s7")
+            ),
             "the named status is the discriminator's own match"
         );
     }
@@ -203,10 +246,22 @@ mod tests {
     fn a_step_naming_no_cancel_transaction_gets_nothing() {
         let leg = late();
         let ok = arrival(&response(200, 1, "CANCEL"));
-        assert!(!answers_late_cancel(&expects(481, None), &ok, &leg, None));
-        assert!(!answers_late_cancel(&expects(481, Some("BYE")), &ok, &leg, None));
+        assert!(!answers_late_cancel(&CustomParser::new(), &expects(481, None), &ok, &leg, None));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("BYE")),
+            &ok,
+            &leg,
+            None
+        ));
         let bye = arrival(&response(200, 1, "BYE"));
-        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &bye, &leg, Some("s7")));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &bye,
+            &leg,
+            Some("s7")
+        ));
     }
 
     /// A CANCEL sent while the INVITE was still unanswered is the ordinary
@@ -220,7 +275,13 @@ mod tests {
             (Dir::In, response(487, 1, "INVITE"), Some("s9")),
         ]);
         let ok = arrival(&response(200, 1, "CANCEL"));
-        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, Some("s7")));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &ok,
+            &leg,
+            Some("s7")
+        ));
     }
 
     #[test]
@@ -231,7 +292,13 @@ mod tests {
             (Dir::Out, request("CANCEL", 1), Some("s7")),
         ]);
         let gone = arrival(&response(481, 1, "CANCEL"));
-        assert!(!answers_late_cancel(&expects(200, Some("CANCEL")), &gone, &leg, Some("s7")));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(200, Some("CANCEL")),
+            &gone,
+            &leg,
+            Some("s7")
+        ));
     }
 
     /// The INVITE final must be for the CSeq number the CANCEL carries, and the
@@ -245,9 +312,21 @@ mod tests {
             (Dir::Out, request("CANCEL", 2), Some("s7")),
         ]);
         let ok = arrival(&response(200, 2, "CANCEL"));
-        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, Some("s7")));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &ok,
+            &leg,
+            Some("s7")
+        ));
         let other = arrival(&response(200, 2, "CANCEL"));
-        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &other, &late(), Some("s7")));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &other,
+            &late(),
+            Some("s7")
+        ));
     }
 
     /// A 2xx ends the INVITE server transaction at once (RFC 3261 §17.2.1): no
@@ -260,7 +339,13 @@ mod tests {
             (Dir::Out, request("CANCEL", 1), Some("s7")),
         ]);
         let ok = arrival(&response(200, 1, "CANCEL"));
-        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, Some("s7")));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &ok,
+            &leg,
+            Some("s7")
+        ));
     }
 
     #[test]
@@ -270,8 +355,20 @@ mod tests {
             (Dir::In, response(486, 1, "INVITE"), Some("s6")),
         ]);
         let ok = arrival(&response(200, 1, "CANCEL"));
-        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, None));
-        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, Some("s7")));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &ok,
+            &leg,
+            None
+        ));
+        assert!(!answers_late_cancel(
+            &CustomParser::new(),
+            &expects(481, Some("CANCEL")),
+            &ok,
+            &leg,
+            Some("s7")
+        ));
     }
 
     #[test]

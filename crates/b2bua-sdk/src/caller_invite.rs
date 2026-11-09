@@ -23,7 +23,7 @@ pub fn rebuild(snap: &call::ALegInviteSnapshot) -> Result<SipRequest, Incomplete
         draft = draft.push_raw(HeaderName::from(h.name.as_str()), SipStr::owned(&h.value));
     }
     if !draft.has(&HeaderName::MaxForwards) {
-        draft = draft.push(MaxForwards::DEFAULT);
+        draft = draft.set(MaxForwards::DEFAULT);
     }
     draft.with_body(snap.body.clone().into()).freeze()
 }

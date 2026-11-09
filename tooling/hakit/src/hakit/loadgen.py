@@ -46,6 +46,7 @@ RESERVED = frozenset(
         "duration",
         "max_in_flight",
         "recv_timeout_ms",
+        "final_wait_ms",
         "ring_delay_ms",
         "talk_time_ms",
         "run",
@@ -63,10 +64,17 @@ PRODUCT = ("image", "command")
 _SAMPLE = re.compile(r"^(?P<name>[a-z_]+)\{(?P<labels>[^}]*)\}\s+(?P<value>\S+)$")
 
 
+def give_up_s(stream: Stream) -> float:
+    """How long a call waits for its INVITE's final, whatever it heard: the
+    profile's final wait, else loadgen's standard step. `setup_deadline_s` is no
+    bound on this wait: it is loadgen's per-receive timeout."""
+    return stream.final_wait_s if stream.final_wait_s is not None else TXN_BOUND_S
+
+
 def worst_call_s(stream: Stream) -> float:
-    """The longest a call can take: its setup deadline, its ring and hold, and
-    a teardown request that gets no final."""
-    return stream.setup_deadline_s + stream.ring_s + stream.hold_s + TXN_BOUND_S
+    """The longest a call can take: its give-up, its ring and hold, and a
+    teardown request that gets no final."""
+    return give_up_s(stream) + stream.ring_s + stream.hold_s + TXN_BOUND_S
 
 
 def param_errors(stream: Stream) -> list[str]:
@@ -186,6 +194,8 @@ class LoadgenStream:
             "--metrics-addr",
             f"0.0.0.0:{METRICS_PORT}",
         ]
+        if s.final_wait_s is not None:
+            argv.append(f"--final-wait-ms={int(s.final_wait_s * 1000)}")
         if self.call_id_tag:
             # `=`: a tag starts with `-`, which would read as a flag.
             argv.append(f"--call-id-tag={self.call_id_tag}")

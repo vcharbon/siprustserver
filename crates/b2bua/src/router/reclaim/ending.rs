@@ -5,29 +5,22 @@
 
 use std::sync::Arc;
 
-use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleAction;
 use call::helpers::{keep_dialogs, raise_sequences};
-use call::{Call, Direction, RelayOwner, RequestRecord};
+use call::{Call, RelayOwner, RequestRecord};
 
-use super::super::interpret::process_result;
+use super::super::commit::{behind_the_write, Rider};
 use super::super::materialise::relayed_server_key;
+use super::super::off_wire::{self, Actions};
 use super::super::RouterCtx;
-use crate::effects::HandlerResult;
-use crate::rules::{ActionExecutor, RuleCall, RuleContext};
 use crate::store::Enveloped;
-use crate::turn_scope::TurnScope;
 
-/// Discharge an already-`Terminated` body (a backup's deferred terminal, met
-/// in our live map or reclaimed on reboot) through the ONE enforcement funnel.
-/// `before` is the live (non-terminal) snapshot so `enforce`'s `became_terminated`
-/// edge fires — `discharge_result`/`discharge_as_own` cannot be reused here because
-/// they synthesise the terminal from a NON-terminal call, whereas this body is
-/// already Terminated (the edge would be vacuous and the ObligationSet would never
-/// settle the CDR / limiter / RemoveCall). The CDR + limiter release + propagated
-/// delete all ride `process_result`, exactly as a primary-served BYE would. The
-/// discharged body keeps the higher of both views' dialog sequences, and the
-/// dialogs only this node's copy holds.
+/// Discharge the other owner's ended body met here off the wire
+/// ([`off_wire::Ending::Met`]), from `before`, the live record, so its edge
+/// is this turn's: the CDR, the limiter release and the propagated delete
+/// ride the commit as a primary-served BYE's would. The discharged body
+/// keeps the higher of both views' dialog sequences, and the dialogs only
+/// this node's copy holds.
 ///
 /// Every re-INVITE this node relayed and the record holds open draws one
 /// final for its originator (RFC 3261 §15.1.2), from the server transaction
@@ -53,64 +46,24 @@ pub(super) async fn discharge_met_ending(
     // Behind the sends the call's outbox still holds (ADR-0055 §3).
     let keys: Vec<_> = answered_there.iter().filter_map(relayed_server_key).collect();
     if !keys.is_empty() {
-        let sender = ctx.clone();
-        let relinquish: crate::router::outbox::Effects = Box::new(move |_| {
-            Box::pin(async move {
-                for key in keys {
-                    let _ = sender.txn.relinquish_server(key).await;
-                }
-            })
-        });
-        ctx.outboxes.push(call_ref, ctx.state.hold_target(call_ref), relinquish).await;
+        behind_the_write(ctx, call_ref, Rider::Relinquish(keys)).await;
     }
-    let mut result = HandlerResult::new(keep_dialogs(raise_sequences(terminal, before), before));
-    let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
-    let owners = ctx.owners(call_ref);
-    let rounds = Rounds { record: before, rounds: ours, owners: &owners };
-    answer_the_records_rounds(ctx, call_ref, rounds, &mut result, now_ms, &mut turn);
+    let body = keep_dialogs(raise_sequences(terminal, before), before);
+    let actions = Actions {
+        topic: "folded-ending",
+        list: rounds_answered(ours),
+        owners: ctx.owners(call_ref),
+    };
     ctx.state.update_enveloped(Enveloped::new(before.clone(), topology));
-    let result = crate::rules::invariants::enforce(
-        &ctx.obligations,
-        before,
-        crate::rules::invariants::finalize(result),
-        now_ms,
-        // The other copy's already-terminal body: same off-the-wire contract as
-        // `discharge_materialized_terminal`.
-        crate::rules::invariants::UnansweredCaller::Leave,
-        &mut turn.notes,
-    );
-    super::super::notes::drain(ctx, call_ref, &mut turn);
-    process_result(
-        ctx,
-        call_ref,
-        result,
-        now_ms,
-        &"the discharge of the other copy's ending",
-        None,
-    )
-    .await;
+    let ending = off_wire::Ending::Met { before, body, actions };
+    let label = &"the discharge of the other copy's ending";
+    off_wire::end(ctx, call_ref, ending, off_wire::Caller::Leave, now_ms, label).await;
 }
 
-/// The record's re-INVITE relays to answer — `(leg, outbound CSeq)` — and
-/// the call's owners.
-struct Rounds<'a> {
-    record: &'a Call,
-    rounds: Vec<(String, i64)>,
-    owners: &'a crate::owners::Owners,
-}
-
-/// The effects answering the record's re-INVITE relays `rounds`: 487 to the
-/// originator and CANCEL to the target.
-fn answer_the_records_rounds(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    rounds: Rounds,
-    result: &mut HandlerResult,
-    now_ms: i64,
-    turn: &mut TurnScope,
-) {
-    let Rounds { record, rounds, owners } = rounds;
-    let actions: Vec<RuleAction> = rounds
+/// The actions answering the record's re-INVITE relays `rounds` — `(leg,
+/// outbound CSeq)`: a 487 to the originator and a CANCEL to the target.
+fn rounds_answered(rounds: Vec<(String, i64)>) -> Vec<RuleAction> {
+    rounds
         .into_iter()
         .map(|(leg_id, outbound_cseq)| RuleAction::RejectPendingReinvite {
             leg_id,
@@ -118,36 +71,7 @@ fn answer_the_records_rounds(
             status: 487,
             reason: "Request Terminated".into(),
         })
-        .collect();
-    if actions.is_empty() {
-        return;
-    }
-    let event = CallEvent::InternalEvent {
-        call_ref: call_ref.to_string(),
-        topic: "folded-ending".into(),
-        outcome: String::new(),
-        payload: serde_json::Value::Null,
-        body: Vec::new(),
-        incarnation: None,
-    };
-    let rule_ctx = RuleContext {
-        call: RuleCall::new(record),
-        call_ref,
-        event: &event,
-        source_leg_id: "",
-        direction: Direction::FromA,
-        now_ms,
-        config: &ctx.config,
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
-    let mut exec = ActionExecutor { config: &ctx.config, owners, turn, now_ms };
-    let answered = exec.execute(&actions, record, &rule_ctx).effects;
-    result.effects.critical.extend(answered.critical);
-    result.effects.outbound.extend(answered.outbound);
-    result.effects.soft.extend(answered.soft);
-    result.effects.buffered.extend(answered.buffered);
-    result.effects.fire_and_forget.extend(answered.fire_and_forget);
+        .collect()
 }
 
 /// The re-INVITE relays worker `by` made that `record` holds open, not

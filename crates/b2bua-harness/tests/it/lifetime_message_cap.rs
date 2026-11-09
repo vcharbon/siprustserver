@@ -2,8 +2,8 @@
 //! offered for it — counted at dispatch, in every state, while its handler is
 //! stuck and its queue full — the call ends. Its later requests draw the
 //! answer of a call that no longer exists, 481, where they are refused; the
-//! responses its teardown needs still get in. With the reaper off nothing
-//! would end a capped call, and the cap is not installed.
+//! responses its teardown needs still get in. The cap holds with the
+//! reaper's sweep on or off.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -236,25 +236,32 @@ async fn a_bye_to_a_capped_call_is_answered_where_it_is_refused() {
     let _ = s.finish().await;
 }
 
-/// With the reaper off nothing would end a call past its lifetime cap, so
-/// the cap is not installed: a call past it hangs up as usual.
+/// With the reaper's sweep off a call past its lifetime cap still ends at the
+/// cap (ADR-0057 §1): bob rings past the cap of 10, the cap's teardown
+/// CANCELs him, and alice is sent the 503 the teardown owes her.
 #[tokio::test(start_paused = true)]
-async fn with_the_reaper_off_a_call_past_the_lifetime_cap_hangs_up_as_usual() {
-    let s = B2buaScene::with_b2bua("b2bua-lifetime-cap-reaper-off", |bob_port| {
+async fn with_the_sweep_off_a_call_past_the_lifetime_cap_still_ends_at_the_cap() {
+    let s = B2buaScene::with_b2bua("b2bua-lifetime-cap-sweep-off", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
             c.reaper_enabled = false;
-            c.max_messages_per_call_lifetime = 3;
+            c.max_messages_per_call_lifetime = 10;
         })
     })
     .await;
-    let mut dialog = s.establish().await;
-    let mut bye = dialog.bye().await;
-    let mut uas = s.bob.try_receive("BYE").await.expect("the BYE is relayed past the cap");
-    uas.respond(200, "OK").await;
-    bye.expect(200).await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    for _ in 0..10 {
+        uas.respond(180, "Ringing").await;
+    }
+    s.h.advance(Duration::from_millis(300)).await;
+    assert_eq!(s.b2bua.metrics().message_cap_lifetime_crossed_total(), 1, "the cap is crossed");
+
+    let mut cancel = s.bob.try_receive("CANCEL").await.expect("the cap's teardown CANCELs bob");
+    cancel.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    let _ = call.try_expect_final(503).await.expect("alice is answered the teardown's 503");
 
     settle_until(|| s.b2bua.is_reaped()).await;
-    assert_eq!(s.b2bua.metrics().message_cap_lifetime_crossed_total(), 0);
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

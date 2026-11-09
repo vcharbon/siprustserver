@@ -180,7 +180,7 @@ async fn a_route_refused_on_its_second_limiter_holds_nothing() {
     })
     .await;
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
-    call.expect(486).await;
+    call.expect(503).await;
     settle_until(|| s.b2bua.is_reaped()).await;
     let store = s.b2bua.limiter_store().expect("the default limiter has a store");
     assert_eq!(["x", "y", DEFAULT_LIMITER_ID].map(|id| store.held(id)), [0, 0, 0]);

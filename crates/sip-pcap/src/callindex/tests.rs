@@ -6,7 +6,7 @@ use crate::{Datagram, DecodeStats};
 
 fn request(method: &str, call_id: &str, cseq: u32) -> Vec<u8> {
     format!(
-        "{method} sip:bob@10.0.0.9 SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{cseq}{method}\r\n\
+        "{method} sip:bob@10.0.0.9 SIP/2.0\r\nContact: <sip:fixture@192.0.2.99>\r\nVia: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{cseq}{method}\r\n\
          Max-Forwards: 70\r\nFrom: <sip:alice@10.0.0.1>;tag=f1\r\nTo: <sip:bob@10.0.0.9>\r\n\
          Call-ID: {call_id}\r\nCSeq: {cseq} {method}\r\nSubject: a \"quoted\" {{brace}} [bracket]\r\n\
          Content-Length: 0\r\n\r\n"
@@ -16,7 +16,7 @@ fn request(method: &str, call_id: &str, cseq: u32) -> Vec<u8> {
 
 fn response(status: u16, call_id: &str, cseq: u32, method: &str) -> Vec<u8> {
     format!(
-        "SIP/2.0 {status} X\r\nVia: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{cseq}{method}\r\n\
+        "SIP/2.0 {status} X\r\nContact: <sip:fixture@192.0.2.98>\r\nVia: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{cseq}{method}\r\n\
          From: <sip:alice@10.0.0.1>;tag=f1\r\nTo: <sip:bob@10.0.0.9>;tag=t1\r\nCall-ID: {call_id}\r\n\
          CSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
     )
@@ -44,8 +44,14 @@ fn document(pretty: bool) -> String {
         probe: 0,
     })
     .collect();
-    let flows = build_flows(&datagrams, &FlowConfig::default());
-    let doc = flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default()).unwrap();
+    let flows =
+        build_flows(&datagrams, &FlowConfig::standard(sip_message::ToolReading::plain_rfc()));
+    let doc = flows_to_doc(
+        &flows,
+        &DecodeStats::default(),
+        &EnrichOptions::under(sip_message::ToolReading::plain_rfc()),
+    )
+    .unwrap();
     if pretty {
         serde_json::to_string_pretty(&doc).unwrap()
     } else {

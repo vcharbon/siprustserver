@@ -56,11 +56,12 @@
 //!   B2BUA_NEW_CALL_PERMIT_SHARE_PCT share of B2BUA_CONCURRENCY normal initial-INVITE turns may hold (default 50; 1..=100; emergency INVITEs draw the whole pool)
 //!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
+//!   B2BUA_CAP_* per-call caps (ADR-0057): LEGS / ATTEMPTS / CDR_EVENTS (+ _PER_HOUR), TIMERS, REQUESTS, DIALOGS, HEADER_UPDATES, EXT_BYTES, ACTIONS_PER_TURN, SERVICE_HTTP_TIMEOUT_MS (defaults and relations in docs/TUNING.md; never 0)
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60, >= keepalive + Timer F + 10 s, > B2BUA_INVITE_TXN_TIMEOUT_SEC)
 //!   B2BUA_SETUP_TIMEOUT_MS a-leg total setup deadline in ms, reroutes included (default 150000, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
 //!   B2BUA_INVITE_TXN_TIMEOUT_SEC out-of-dialog INVITE txn bound, both call halves (default 158; range 33..=600)
 //!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC the worker gives up on a b-leg hop when NOTHING answers its initial INVITE, not even a 100 (default 5; range 2..=32; ADR-0044: the transaction keeps Timer A/B; in-dialog INVITE and non-INVITE never read it)
-//!   B2BUA_CALL_CONTROL_TIMEOUT_MS decision-backend deadline per round-trip (default 5000; <= 0 disables — ADR-0022)
+//!   B2BUA_CALL_CONTROL_TIMEOUT_MS setup budget from an INVITE's receipt to its final, an off-turn consult's deadline per round trip (default 5000; positive — ADR-0022 X1)
 //!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg destination allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
 //!   B2BUA_PRIVACY_SERVICE on (default) = this worker is the RFC 3323 privacy service and withholds the asserted identity a concealing Privacy names; off = the next hop is the trust boundary and the identity rides
 //!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)
@@ -119,7 +120,8 @@
 //! the worker into `Draining` (OPTIONS 503 + readiness probe fails) so k8s
 //! steers new calls away while in-flight calls finish, then exits 0. A
 //! transaction owner or router loop stalled past `B2BUA_LOOP_STALL_MS` fails
-//! `/ready` and `/healthz`; one whose task ended exits the process non-zero.
+//! `/ready` and `/healthz`; one stalled past `B2BUA_LOOP_EXIT_MS`, or whose
+//! task ended, exits the process non-zero.
 
 // Use jemalloc instead of the glibc system allocator. Under the many tokio worker
 // threads, glibc malloc spawns up to 8×ncpu arenas and retains freed chunks (it

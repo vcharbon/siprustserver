@@ -30,6 +30,9 @@ pub enum Outcome {
     Unparsed,
     /// The call gives the step nothing to say, or ended before it.
     Nothing,
+    /// The turn crossed a per-call cap (ADR-0057): its result is discarded
+    /// and the record stays as the turn found it.
+    Tripped(crate::caps::Tripped),
     /// The clock moved on.
     Advanced,
 }
@@ -121,6 +124,7 @@ impl Turn {
     }
 
     /// The messages the turn sends on `leg`, a datagram read back.
+    #[expect(clippy::disallowed_methods, reason = "test support: reads what the stack built")]
     fn outbound_to<'a>(&'a self, leg: &'a str) -> impl Iterator<Item = SipMessage> + 'a {
         self.result
             .effects
@@ -130,7 +134,7 @@ impl Turn {
             .filter_map(|e| match &e.body {
                 OutboundBody::Request(r) => Some(SipMessage::Request(r.clone())),
                 OutboundBody::Response(r) => Some(SipMessage::Response(r.clone())),
-                OutboundBody::Datagram(d) => CustomParser::new().parse(d.wire().0).ok(),
+                OutboundBody::Datagram(d) => CustomParser::built().parse(d.wire().0).ok(),
             })
     }
 }
