@@ -148,10 +148,14 @@ pub struct AgeCap {
 impl AgeCap {
     /// The cap of a call granted `granted_ms` (`0`: none granted yet).
     pub fn at(self, granted_ms: i64) -> u64 {
+        self.base.saturating_add(self.per_hour.saturating_mul(Self::started_hours(granted_ms)))
+    }
+
+    /// The started hours of a grant of `granted_ms`; `0` for none or a
+    /// negative one.
+    pub fn started_hours(granted_ms: i64) -> u64 {
         const HOUR_MS: u64 = 3_600_000;
-        let granted = u64::try_from(granted_ms).unwrap_or(0);
-        let hours = granted.div_ceil(HOUR_MS);
-        self.base.saturating_add(self.per_hour.saturating_mul(hours))
+        u64::try_from(granted_ms).unwrap_or(0).div_ceil(HOUR_MS)
     }
 }
 

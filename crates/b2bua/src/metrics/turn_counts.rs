@@ -1,6 +1,6 @@
 //! The counts a turn's notes owe the metrics (ADR-0052 §4), the model
-//! oracle's violations (ADR-0052 §8) and the turns held to a per-call cap
-//! (ADR-0057 §7).
+//! oracle's violations (ADR-0052 §8), the turns held to a per-call cap
+//! (ADR-0057 §7) and the readings of each cap (ADR-0057 §9).
 
 use b2bua_sdk::config::Cap;
 
@@ -50,6 +50,28 @@ impl B2buaMetrics {
         self.inner.rows.cap_near.get(&[cap.label()])
     }
 
+    /// Raise `cap`'s reading to `value` (`b2bua_cap_peak{cap}`) and, for a
+    /// cap on what grows with a call's age, its reading per started hour to
+    /// `per_hour` (`b2bua_cap_peak_per_hour{cap}`); a `0` reads nothing.
+    pub fn record_cap_reading(&self, cap: Cap, value: u64, per_hour: u64) {
+        if value > 0 {
+            self.inner.rows.cap_peak.raise(&[cap.label()], value);
+        }
+        if per_hour > 0 {
+            self.inner.rows.cap_peak_per_hour.raise(&[cap.label()], per_hour);
+        }
+    }
+
+    /// The largest reading of `cap` a landed turn left.
+    pub fn cap_peak_of(&self, cap: Cap) -> u64 {
+        self.inner.rows.cap_peak.get(&[cap.label()])
+    }
+
+    /// The largest reading of the aged `cap` per started hour of a grant.
+    pub fn cap_peak_per_hour_of(&self, cap: Cap) -> u64 {
+        self.inner.rows.cap_peak_per_hour.get(&[cap.label()])
+    }
+
     /// Write the turn counts' families, in exposition order.
     pub(super) fn render_turn_counts(&self, s: &mut String) {
         let rows = &self.inner.rows;
@@ -57,5 +79,7 @@ impl B2buaMetrics {
         rows.model_defects.render(s);
         rows.cap_trips.render(s);
         rows.cap_near.render(s);
+        rows.cap_peak.render(s);
+        rows.cap_peak_per_hour.render(s);
     }
 }

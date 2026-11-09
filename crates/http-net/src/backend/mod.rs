@@ -4,7 +4,8 @@
 //! One per backend, over any [`HttpTransport`]: the transport's own client
 //! for the backend's [`ResolvedTarget`] ([`HttpTransport::client`]), renewed
 //! every rotation period; at most [`ClientSettings::max_in_flight`] requests
-//! in flight; and a circuit breaker under the window rule ([`WindowBreaker`])
+//! in flight, a [`BackendClient::share`] holding one class of requests to a
+//! smaller count of its own; and a circuit breaker under the window rule ([`WindowBreaker`])
 //! that a probe closes. One attempt ([`BackendClient::attempt`]) waits for a
 //! slot and its answer inside its budget, capped by the settings' ceiling, so
 //! no request is ever unbounded; [`BackendClient::send_with_retry`] sends a
@@ -75,6 +76,9 @@ pub type ProbeReport = Arc<dyn Fn(Result<&HttpResponse, &AttemptError>) + Send +
 #[derive(Clone)]
 pub struct BackendClient {
     inner: Arc<Inner>,
+    /// The share of the backend's slots this client's requests are held to,
+    /// beside the backend's own ([`BackendClient::share`]).
+    share: Option<Arc<slots::Slots>>,
 }
 
 struct Inner {
@@ -111,6 +115,7 @@ impl BackendClient {
         let peer = target.to_string();
         let (open, _) = watch::channel(false);
         Self {
+            share: None,
             inner: Arc::new(Inner {
                 slots: slots::Slots::new(settings.max_in_flight, peer.clone()),
                 ceiling: settings.ceiling,
@@ -137,6 +142,19 @@ impl BackendClient {
     ) -> Self {
         let target = ResolvedTarget::name_with_lookup(name, resolver, config.lookup);
         Self::new(transport, Arc::new(target), config.client.clone(), config.breaker.clone())
+    }
+
+    /// A client of the same backend, its breaker, connections and slots,
+    /// whose requests each also hold one of `max_in_flight` slots of their
+    /// own, named `name` in the slot metrics (`<peer>/<name>`): one class of
+    /// requests held below the backend's cap, so it never takes every slot
+    /// the others need. A share of a share replaces it.
+    pub fn share(&self, name: &str, max_in_flight: usize) -> Self {
+        let peer = format!("{}/{name}", self.inner.peer);
+        Self {
+            inner: self.inner.clone(),
+            share: Some(Arc::new(slots::Slots::new(max_in_flight, peer))),
+        }
     }
 
     /// The backend's target.
@@ -171,7 +189,7 @@ impl BackendClient {
         tokio::spawn(async move {
             if target.resolve_all().await.is_none() {
                 if let Some(inner) = inner.upgrade() {
-                    BackendClient { inner }.trip();
+                    BackendClient { inner, share: None }.trip();
                 }
             }
         });
@@ -215,6 +233,13 @@ impl BackendClient {
             return Err(AttemptError::BreakerOpen);
         }
         let deadline = Instant::now() + budget.min(self.inner.ceiling);
+        let shared = match &self.share {
+            Some(share) => match share.take(deadline).await {
+                Some(slot) => Some(slot),
+                None => return Err(AttemptError::Saturated),
+            },
+            None => None,
+        };
         let Some(slot) = self.inner.slots.take(deadline).await else {
             return Err(AttemptError::Saturated);
         };
@@ -232,6 +257,7 @@ impl BackendClient {
         }
         let outcome = tokio::time::timeout_at(deadline, client.request(req)).await;
         drop(slot);
+        drop(shared);
         match outcome {
             Ok(Ok(resp)) => {
                 sent.answered();

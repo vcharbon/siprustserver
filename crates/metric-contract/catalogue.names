@@ -80,6 +80,8 @@ b2bua-runner b2bua_repeat_give_ups_total counter fixed {obligation}
 b2bua-runner b2bua_model_defects_total counter fixed {invariant}
 b2bua-runner b2bua_cap_trips_total counter fixed {cap,kind|cap,kind}
 b2bua-runner b2bua_cap_near_total counter fixed {cap}
+b2bua-runner b2bua_cap_peak gauge fixed {cap}
+b2bua-runner b2bua_cap_peak_per_hour gauge fixed {cap}
 b2bua-runner b2bua_repl_quiet_turns_total counter fixed {kind}
 b2bua-runner b2bua_repl_applied_total counter semi_open {flow,peer,op}
 b2bua-runner b2bua_repl_noops_sent_total counter semi_open {flow,peer}

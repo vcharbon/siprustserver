@@ -14,7 +14,7 @@
 use std::io;
 use std::ops::ControlFlow;
 
-use b2bua_sdk::config::{CallCaps, Cap};
+use b2bua_sdk::config::{AgeCap, CallCaps, Cap};
 use b2bua_sdk::event::CallEvent;
 use call::features::StatedHeaders;
 use call::{Call, CallModelState, ExtMap, Leg};
@@ -115,10 +115,14 @@ impl Gauge {
     }
 }
 
+/// The caps on what grows with a call's age.
+const AGED: [Cap; 3] = [Cap::Legs, Cap::Attempts, Cap::CdrEvents];
+
 /// The turn that started at `start` and left `result`, held to `checked`
 /// under `caps`: `Err` when its fuel ran out or it grew a collection past its
 /// cap. A turn that lands has each collection it grew across half its cap
-/// noted on `turn`.
+/// noted on `turn`, and what it left the call holding read against each cap
+/// it is held to (ADR-0057 §9).
 pub fn hold(
     caps: &CallCaps,
     start: &Gauge,
@@ -131,6 +135,7 @@ pub fn hold(
         return Err(Tripped { cap, verdict });
     }
     if checked != Checked::All {
+        turn.notes.cap_reading(Cap::ActionsPerTurn, turn.actions());
         return Ok(result);
     }
     let end = Gauge::of(&result.call);
@@ -148,13 +153,39 @@ pub fn hold(
             near.push(cap);
         }
     }
-    if ext_bytes(&result.call) > caps.ext_bytes {
+    let ext = ext_bytes(&result.call);
+    if ext > caps.ext_bytes {
         return Err(Tripped { cap: Cap::ExtBytes, verdict });
     }
     for cap in near {
         turn.notes.cap_near(cap);
     }
+    let actions = turn.actions();
+    read(&mut turn.notes, &end, ext, actions, granted);
     Ok(result)
+}
+
+/// What a landed turn left its call holding, `end` and `ext` bytes, and the
+/// `actions` it returned, read against each cap; an aged collection also per
+/// started hour of the `granted` duration, once one is granted.
+fn read(
+    notes: &mut crate::turn_notes::TurnNotes,
+    end: &Gauge,
+    ext: u64,
+    actions: u64,
+    granted: i64,
+) {
+    notes.cap_reading(Cap::ActionsPerTurn, actions);
+    for cap in COUNTED {
+        notes.cap_reading(cap, end.get(cap));
+    }
+    notes.cap_reading(Cap::ExtBytes, ext);
+    let hours = AgeCap::started_hours(granted);
+    if hours > 0 {
+        for cap in AGED {
+            notes.cap_reading_per_hour(cap, end.get(cap).div_ceil(hours));
+        }
+    }
 }
 
 /// The call's granted maximum duration, in ms; `0` before a decision granted

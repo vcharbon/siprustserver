@@ -243,7 +243,11 @@ are what keep that input from existing.
   allocated bytes of an in-dialog `rule_chain_turn`, jemalloc's
   `thread.allocated` read around that synchronous call on the one thread it runs
   on (the initial turn's folds span awaits and are not measured);
-- the watchdog's log line, the last before the exit.
+- the watchdog's log line, the last before the exit;
+- `b2bua_cap_peak{cap}`, the largest reading of each cap a landed turn left
+  (a collection's length, the ext value's bytes, the turn's actions), and
+  `b2bua_cap_peak_per_hour{cap}`, an aged cap's reading per started hour of
+  the call's grant: the measurement of §9.
 
 A defect-cap trip is an alert; a peer-cap trip is a counter.
 

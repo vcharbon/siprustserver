@@ -1,5 +1,6 @@
 //! The counts of a fixed family keyed by its label values: one lock-free
-//! counter per declared label set, looked up by the values a caller names.
+//! counter per declared label set, looked up by the values a caller names,
+//! added to or raised to a largest value.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +46,20 @@ impl FixedCounts {
         }
     }
 
+    /// Raise the label set `values` to `n` when it holds less: a gauge of the
+    /// largest value observed. A label set the family does not declare is a
+    /// caller's bug: refused in a debug build, not counted.
+    pub fn raise(&self, values: &[&str], n: u64) {
+        match with_key(values, |k| self.slots.get(k).and_then(|at| self.counts.get(*at))) {
+            Some(slot) => {
+                if slot.load(Ordering::Relaxed) < n {
+                    slot.fetch_max(n, Ordering::Relaxed);
+                }
+            }
+            None => debug_assert!(false, "{} declares no {values:?}", self.family.name),
+        }
+    }
+
     /// The count of the label set `values`, 0 when it is not declared.
     pub fn get(&self, values: &[&str]) -> u64 {
         with_key(values, |k| self.slots.get(k).copied())
@@ -84,6 +99,16 @@ mod tests {
         c.render(&mut s);
         assert!(s.ends_with("k_total{kind=\"a\"} 0\nk_total{kind=\"b\"} 2\n"), "{s}");
         assert_eq!(F.check(&s), Ok(()));
+    }
+
+    #[test]
+    fn a_raise_keeps_the_largest_value() {
+        let c = FixedCounts::new(&F);
+        c.raise(&["a"], 5);
+        c.raise(&["a"], 3);
+        assert_eq!(c.get(&["a"]), 5);
+        c.raise(&["a"], 9);
+        assert_eq!(c.get(&["a"]), 9);
     }
 
     #[test]

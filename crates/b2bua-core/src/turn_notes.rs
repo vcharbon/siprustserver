@@ -89,7 +89,37 @@ pub struct TurnNotes {
     repeat_give_ups: Vec<&'static str>,
     message_caps: u32,
     caps_near: Vec<Cap>,
+    cap_readings: CapReadings,
     defects: Vec<Defect>,
+}
+
+/// What a landed turn left its call holding against each cap, the largest
+/// reading of each: the measurement the caps' defaults are set from
+/// (ADR-0057 §9). A cap on what grows with a call's age is also read per
+/// started hour of the call's granted duration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CapReadings {
+    values: [u64; Cap::ALL.len()],
+    per_hour: [u64; Cap::ALL.len()],
+}
+
+impl CapReadings {
+    /// Raise `cap`'s slot of `slots` to `value`.
+    fn raise(slots: &mut [u64; Cap::ALL.len()], cap: Cap, value: u64) {
+        let at = Cap::ALL.iter().position(|c| *c == cap);
+        if let Some(slot) = at.and_then(|at| slots.get_mut(at)) {
+            *slot = (*slot).max(value);
+        }
+    }
+
+    /// Each cap read, with its reading and its reading per started hour
+    /// (`0`: none taken).
+    pub fn iter(&self) -> impl Iterator<Item = (Cap, u64, u64)> + '_ {
+        Cap::ALL
+            .into_iter()
+            .zip(self.values.iter().zip(self.per_hour.iter()))
+            .map(|(cap, (value, per_hour))| (cap, *value, *per_hour))
+    }
 }
 
 impl TurnNotes {
@@ -122,6 +152,17 @@ impl TurnNotes {
         self.caps_near.push(cap);
     }
 
+    /// The turn landed leaving `value` against `cap`.
+    pub fn cap_reading(&mut self, cap: Cap, value: u64) {
+        CapReadings::raise(&mut self.cap_readings.values, cap, value);
+    }
+
+    /// The turn landed leaving `value` per started hour of the call's
+    /// granted duration against `cap`.
+    pub fn cap_reading_per_hour(&mut self, cap: Cap, value: u64) {
+        CapReadings::raise(&mut self.cap_readings.per_hour, cap, value);
+    }
+
     /// The defect `name`, with `detail`, met on `call`.
     pub fn defect(&mut self, name: &'static str, detail: String, call: &Call) {
         self.defects.push(Defect { name, detail, call: Box::new(call.clone()) });
@@ -150,6 +191,11 @@ impl TurnNotes {
     /// The caps whose half the turn crossed, one per crossing.
     pub fn caps_near(&self) -> &[Cap] {
         &self.caps_near
+    }
+
+    /// What the turn left its call holding against each cap.
+    pub fn cap_readings(&self) -> &CapReadings {
+        &self.cap_readings
     }
 
     /// The defects, in the order the turn met them.
