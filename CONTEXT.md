@@ -297,7 +297,7 @@ _Avoid_: "reason" for the cause (the free-text `reason` is a label the rules
 pass, an RFC 3326 value at most — the cause is typed); "snapshot" for the cut
 (the ring is whole; the cut is a `seq`).
 
-**Snooze** (`RuleAction::Snooze`):
+**Snooze** (`RuleAction::SnoozeTimer`):
 A timer fire that a rule puts off by one short step instead of acting on, so the
 same timer fires again. The call's timer ledger counts the snoozes of a key, and
 arming the key fresh resets the count, so the rule can bound how long it puts off

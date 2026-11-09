@@ -60,3 +60,16 @@ fn a_rule_snoozing_a_framework_timer_is_refused() {
     assert!(call.snoozes.is_empty(), "not counted");
     assert_eq!(defects, [b2bua_core::turn_notes::FRAMEWORK_TIMER]);
 }
+
+/// A rule sees a release event's consult as awaited from the moment it is sent
+/// until its answer takes it off the call.
+#[test]
+fn a_release_consult_is_awaited_until_answered() {
+    let mut call = test_call();
+    assert!(!b2bua_sdk::rules::RuleCall::new(&call).release_awaited());
+    call.awaited.push(call::OffTurnRequest::Release {
+        request: serde_json::json!({ "event": "max_call_duration" }),
+        limiter: call::ConsultAdmits { first_change: 1, may_hold: true },
+    });
+    assert!(b2bua_sdk::rules::RuleCall::new(&call).release_awaited());
+}

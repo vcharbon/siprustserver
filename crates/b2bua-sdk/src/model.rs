@@ -310,10 +310,10 @@ pub enum RuleAction {
         key: TimerKey,
         delay: TimerDelay,
     },
-    /// Snooze the timer `key` that just fired (CONTEXT.md "Snooze"): arm it
-    /// again `delay` out, as [`Self::ScheduleTimer`] does, and count one more
-    /// snooze of it, which `call::helpers::snoozes` reads until the key is
-    /// armed fresh.
+    /// Snooze the timer `key` (CONTEXT.md "Snooze"), meant for the one whose
+    /// fire the rule handles: arm it again `delay` out, as
+    /// [`Self::ScheduleTimer`] does, and count one more snooze of it, which
+    /// `call::helpers::snoozes` reads until the key is armed fresh.
     SnoozeTimer {
         key: TimerKey,
         delay: TimerDelay,

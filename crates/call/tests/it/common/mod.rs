@@ -346,7 +346,7 @@ pub fn representative_call() -> Call {
         leg_space: call::LegSpace::Creator,
         answered: Vec::new(),
         awaited: Vec::new(),
-        snoozes: Vec::new(),
+        snoozes: vec![Snoozed { key: TimerKey::call(TimerType::GlobalDuration), count: 2 }],
     }
 }
 
