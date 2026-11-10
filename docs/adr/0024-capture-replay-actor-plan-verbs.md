@@ -1,6 +1,6 @@
 # Capture-replay verbs in the actor plan: one executor for every lane
 
-Status: proposed (2026-07-19)
+Status: accepted (2026-07-19)
 
 The verb signatures, the matcher model, the scripted CANCEL reception, the
 accepted-delta hook and the long form of each rejected alternative are in the

@@ -100,8 +100,7 @@ principle (who authors the message), the three tracked side effects are:
 - **guard timer**: a service safety or watchdog timer the rule arms or cancels.
 
 `SetState` is the transition and `ClearState` is machine deactivation; neither is a side
-effect. Pure data bookkeeping is auto-allowed. The leg-message method is a single canonical
-`sip-message::Method`. Detail: [appendix X9](appendix/0016-callflow-service-state-machines.md#decision-x9-a-rule-declares-its-tracked-side-effects-the-type-system-forces-it).
+effect. Pure data bookkeeping is auto-allowed. The leg-message method is `sip-message::Method`. Detail: [appendix X9](appendix/0016-callflow-service-state-machines.md#decision-x9-a-rule-declares-its-tracked-side-effects-the-type-system-forces-it).
 
 ## Consequences
 
@@ -119,5 +118,5 @@ The rest: [appendix, consequences](appendix/0016-callflow-service-state-machines
   `ext`).
 - Source model: `portsource/sipjsserver/CONTEXT.md`; source ADRs
   `0014-leg-kind-and-singleton-active-peer`, `0016-callflow-services-typed-ext`.
-- `crates/b2bua/src/rules/` (engine, actions, invariants), `crates/call/src/model.rs`
+- `crates/b2bua-core/src/rules/` (engine, actions, invariants), `crates/call/src/model/`
   (`LegKind`, `Leg.adopted`, `CallModelState`).

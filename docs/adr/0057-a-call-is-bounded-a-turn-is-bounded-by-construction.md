@@ -1,6 +1,6 @@
 # A call is bounded by caps; a turn is bounded by construction; a stuck poll ends the process
 
-**Status:** proposed
+**Status:** accepted
 
 **Owner:** `crates/b2bua-core` (fuel, caps, `Tripped`), `crates/b2bua` (the tripped turn's
 handling), the runner kits (the poll watchdog), the ADR-0051 site scanner; the full list,

@@ -1,6 +1,6 @@
 # Header value hierarchy, immutable messages, and the editor/builder seam
 
-**Status:** proposed
+**Status:** accepted
 
 Supersedes the *access* half of ADR-0003. The refined-view mechanisms A–D stay, mechanism E's
 `TypedHeader` trait is absorbed, and the `message_helpers` free-function surface and the

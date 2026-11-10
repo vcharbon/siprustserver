@@ -2,14 +2,13 @@
 
 Full definitions of the terms [CONTEXT.md](../../CONTEXT.md) indexes under "Call reaper vocabulary".
 
-The terminal-guarantee module (design in progress; extends ADR-0010 X5's
-invariant enforcer). Its one-sentence interface: **every call admitted to the
+The terminal-guarantee module (extends ADR-0010 X5's invariant enforcer). Its one-sentence interface: **every call admitted to the
 live map is released exactly once, through the existing `release_call` +
 invariant path, with exactly one CDR**, guaranteed in-process (panic, dropped
 event, lost timer, wedged `Terminating`); a hard-crash window is out of scope.
 
 **Call reaper**:
-The module owning that promise. Three implementation legs, all funnelling into
+The module owning that promise. Two implementation legs, both funnelling into
 the *existing* teardown path (never a second teardown vocabulary): a handler
 panic becomes a synthetic event through the normal rules (two-strike: a second
 panic on the same call discharges **obligations** directly and releases); a
@@ -19,7 +18,7 @@ _Avoid_: "garbage collector", "orphan sweep" (the source-era concept); reaping
 `bak:` **Elements** or **takeover copies** (**self-release** owns those, push-based
 on `CallQuiesced`, ADR-0014).
 
-**Obligation**:
+**Release obligation**:
 A consequence of admitting a call that must be discharged exactly once at
 release, **derivable from the persisted `Call` snapshot alone** and idempotently
 dischargeable through the normal effects pipeline. The two: the owed CDR

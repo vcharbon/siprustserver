@@ -90,8 +90,7 @@ Detail: [appendix X7](appendix/0009-front-proxy-rust-shape.md#decision-x7-two-ac
 - The metrics layer is atomics-backed (`ProxyMetrics`) with a hand-rolled tokio Prometheus
   `/metrics` HTTP server (no HTTP framework dep).
 - The harness can drive any in-process SUT.
-- Not ported (MIGRATION_STATUS slice 9): the registrar/REGISTER path, and the failover and
-  replication tests.
+- Not ported (MIGRATION_STATUS slice 9): the registrar/REGISTER path.
 - HA is ADR-0056. Two anti-affined replicas run active-active, each node announcing the VIPs over
   BGP while its proxy is Ready, and X7 states what two active instances need. Each proxy's rate
   budgets stay its own. The stateless §16 design and the HMAC cookie (X3) let either replica serve

@@ -379,7 +379,7 @@ pub(super) struct Transaction {
     /// txn, the INVITE's image, which stands in for `original_request`.
     pub(super) retransmit_buf: Option<Bytes>,
     /// On a client INVITE seeded `Trying` (ADR-0014): its INVITE, re-sent once
-    /// when a CANCEL is first held on it (ADR-0043), taken at that send.
+    /// when a CANCEL is first held on it (ADR-0058), taken at that send.
     pub(super) seed_resend: Option<Bytes>,
     /// On a client INVITE that took a non-2xx final: its ACK and where it
     /// goes, held until the consumer releases it or its bound passes

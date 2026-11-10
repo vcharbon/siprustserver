@@ -114,9 +114,8 @@ health, so a reset-to-`Unknown` worker is re-probed on the next tick. The runner
 health sampler publishes `sip_worker_health{health=...}` from the live registry,
 so a stuck-single-worker pool reads `alive=1` against an expected `2` (alert on
 that, plus `sip_proxy_worker_pool_empty`). Regression:
-`membership_reg::tests::{address_move_resets_health_and_rearms_fresh_pod_guard,
-restart_of_dead_worker_resets_and_reprobes}` (and the converse
-`unchanged_reconcile_preserves_probe_written_health`).
+`registry::projection::tests::address_move_resets_health` (and the converse
+`health_write_composes_and_survives_membership_recompose`).
 
 ## Decision D5. The consistency we enforce is membership source and identity, not address representation
 

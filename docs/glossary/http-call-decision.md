@@ -2,8 +2,8 @@
 
 Full definitions of the terms [CONTEXT.md](../../CONTEXT.md) indexes under "HTTP call-decision adaptation".
 
-The vocabulary for the external decision layer (the future HTTP adapter; today
-the in-process scripted adapter) that tells the B2BUA *how to treat a call*,
+The vocabulary for the external decision layer (the HTTP decision backend, or the
+in-process scripted adapter in tests) that tells the B2BUA *how to treat a call*,
 the substrate for numbering-plan services. The decision request carries the
 inbound call context (R-URI, From/To, all non-structural `X-*` headers, body);
 the response is a **call treatment**. See [ADR-0017](../../docs/adr/0017-http-call-treatment-and-header-ownership.md).
@@ -38,7 +38,7 @@ through typed identity fields, and tags are never HTTP-settable.
 The ordered remainder of destinations (plus the **on-exhausted** behaviour) a
 call still has to try, stashed by the decision layer inside the call's opaque
 **callback context**, the field the platform treats as a token it round-trips
-untouched (a real HTTP backend would hold this state itself). On a b-leg
+untouched. On a b-leg
 failure the failure callback pops the head, returns a **route** to it, and
 re-stashes the tail; on an empty list it returns the plan's **on-exhausted**
 **call treatment** (a **reject**, **relay**, or **redirect**). Because the plan

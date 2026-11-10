@@ -1,6 +1,6 @@
 # Services are HA-blind
 
-**Status:** proposed (2026-10-23)
+**Status:** accepted (2026-10-23)
 
 The [appendix](appendix/0055-services-are-ha-blind.md) holds each section in full under the
 same number, the window table and the rejected alternatives. Read it to change the mechanism.

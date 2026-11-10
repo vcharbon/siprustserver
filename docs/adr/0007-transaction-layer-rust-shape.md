@@ -140,7 +140,7 @@ behavioural suites are the whole test surface.
 
 ## References
 
-- [`crates/sip-txn/src/layer.rs`](../../crates/sip-txn/src/layer.rs) — the actor
+- [`crates/sip-txn/src/layer/`](../../crates/sip-txn/src/layer/) — the actor
 - Source: `src/sip/TransactionLayer.ts`; per-call FIFO: source ADR-0005
 - [ADR-0005 — network layer Rust shape](./0005-network-layer-rust-shape.md);
   sip-clock decisions: [MIGRATION_PLAN_B2B §2](../MIGRATION_PLAN_B2B.md)

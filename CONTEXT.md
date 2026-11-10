@@ -174,7 +174,7 @@ Full definitions: [docs/glossary/dialog-model.md](docs/glossary/dialog-model.md)
 Full definitions: [docs/glossary/call-reaper.md](docs/glossary/call-reaper.md).
 
 - **Call reaper**: the module releasing every admitted call exactly once, with one CDR, through panic handling and a liveness sweep.
-- **Obligation**: a consequence of admitting a call, discharged once at release from the `Call` alone: the owed CDR, one limiter release.
+- **Release obligation**: a consequence of admitting a call, discharged once at release from the `Call` alone: the owed CDR, one limiter release.
 - **Release queue**: the worker's unreplicated queue of limiter releases, sent batched and given up after one lease. ADR-0040.
 - **Last-touched stamp**: the node-local per-call activity timestamp, the reaper's only liveness input.
 - **Acting-backup terminal contract**: an acting backup ends a call only when serving an explicit BYE or CANCEL.

@@ -108,6 +108,10 @@ transparency oracle.
 
 ## Axes (legal cross-product, transparent v1)
 
+The legality filter keeps `ConfirmedPreAck` and `Established` in transparent v1. `Early`,
+re-negotiating, terminating-in-flight and `CANCEL` are listed for completeness and run as
+disruptive cases with their own expectations.
+
 - **A. Dialog state at the safe-point:** early · confirmed-pre-ACK · established ·
   re-negotiating · terminating-in-flight.
 - **B. In-dialog event the backup processes**, as behavioral *categories*:

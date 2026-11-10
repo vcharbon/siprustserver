@@ -14,8 +14,8 @@
 //! single bulk `advance` fires the sleeps but does NOT run the freshly-spawned
 //! delivery task bodies — the woken task needs a scheduler turn — so we
 //! `advance` one hop then `yield_now` until the fabric is fully quiescent
-//! (`in_flight == 0`). This is the CLAUDE.md "drive the protocol between
-//! advances" discipline applied to the spawn-per-datagram fabric. No real
+//! (`in_flight == 0`). This is the test-clock guide's "advance between protocol
+//! steps" rule applied to the spawn-per-datagram fabric. No real
 //! wall-clock cost — default lane.
 
 use std::net::SocketAddr;

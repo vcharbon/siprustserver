@@ -58,7 +58,7 @@ an incident (`FailoverHarness::strike`) and is given its rows; every accepted
 finding names its row, the first in table order. A hand-written test's fault
 no incident names keeps its windows under a transitional row (`T-…`).
 _Avoid_: "waiver" (a waiver is not tied to an incident or to §11), "accepted
-trade-off", "declared window" for a window a test opens itself (none does).
+trade-off".
 
 **Tier** (Guaranteed / Degraded / Off):
 How much a cell may deviate, measured from its run (ADR-0055 §11).

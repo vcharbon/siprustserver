@@ -226,7 +226,7 @@ impl ReplicatingCallStore {
     }
 
     /// Re-establish the denormalised `CallMeta.backup` for a `pri:{self}` call
-    /// from the authoritative `topology.bak` (ADR-0014 #4). `backup` is normally
+    /// from the authoritative `topology.bak` (ADR-0014). `backup` is normally
     /// captured on the Forward flush, but the **reboot-reclaim** hydration path
     /// imports the body through the peerless `PutOpts::default()`, leaving it
     /// `None` — which makes the call invisible to the **Backup**-flow bootstrap

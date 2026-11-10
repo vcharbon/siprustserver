@@ -36,7 +36,7 @@ identically, including
 the parallelism cap: `.cargo/config.toml` sets `[build] jobs = 4`, because this
 workspace links ~250 test binaries and the concurrent mold links at one job per
 core exhaust a 32 GB host (ADR-0029 X5). `--jobs N` overrides it per call:
-lower on a shared host, never higher for a whole-workspace run.
+lower on a shared host, never higher for a whole-workspace run. A host that wraps cargo in a jobserver states its own bound, and `--jobs` may then be ignored.
 
 Prerequisites: mold and gcc >= 12; for the dependency audit (`just audit`,
 `just audit-gate`), cargo-audit and cargo-edit (`cargo upgrade`), cargo-outdated

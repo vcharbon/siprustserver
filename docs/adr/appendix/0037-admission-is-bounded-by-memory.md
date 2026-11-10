@@ -231,5 +231,5 @@ stay short while the router falls seconds behind.
 - A transaction ceiling also counts the transactions of rejected and finished
   INVITEs that linger for their timers, of answered client INVITEs (held
   Accepted 64·T1 past their 2xx, ADR-0034), and of client INVITEs that gave up
-  (held 64·T1 past their `Timeout`, ADR-0043), so it is sized from the
+  (held 64·T1 past their `Timeout`, ADR-0058), so it is sized from the
   offered rate, not from live calls alone.

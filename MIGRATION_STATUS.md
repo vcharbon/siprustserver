@@ -473,8 +473,8 @@ integration. Plan: [docs/plan/lexical-doodling-boot.md](docs/plan/lexical-doodli
 - **Media-timescale advance.** A 20 ms paced loop is finer than the harness's
   100 ms advance chunks; advancing past many ptime deadlines in one step starves
   the loop. `media-harness::testkit::advance_media` steps ≤ ptime with a
-  `yield_now` between — the media-timescale version of CLAUDE.md's "drive the
-  protocol between advances."
+  `yield_now` between — the media-timescale version of the test-clock guide's "advance
+  between protocol steps" rule.
 - **Structured SDP lives in `media`**, separate from the b2bua-scoped string SDP
   in `sip-message` (left untouched). The offer/answer engine is hand-rolled (the
   negotiation policy is the thing under test) with typed per-RFC-MUST refusals.

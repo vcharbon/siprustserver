@@ -10,7 +10,7 @@ same doubling retransmission rule, in two units and two crates.
 | site | class | state carried |
 |---|---|---|
 | `sip-txn/src/layer/client.rs:417-432` | Timer A / E | `interval_ms` + `elapsed_ms` + `max_ms` (u64) |
-| `sip-txn/src/layer/client.rs:311` | CANCEL Timer E (ADR-0043 X4) | `HeldCancel` interval + elapsed |
+| `sip-txn/src/layer/client.rs:311` | CANCEL Timer E (ADR-0058 X4) | `HeldCancel` interval + elapsed |
 | `sip-txn/src/layer/server.rs:32-61` | Timer G | `interval_ms` |
 | `b2bua/src/rules/actions/respond.rs:257-276` | §13.3.1.4 2xx | `ack_retransmit_interval_ms` (i64, replicated) |
 | `b2bua/src/rules/actions/reliable_ladder.rs:97-158` | RFC 3262 §3 | `interval_ms` (i64, replicated) |

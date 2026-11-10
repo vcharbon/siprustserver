@@ -49,7 +49,7 @@ impl Owner {
         // without creating a map entry. This closes the branch-collision foot-gun at
         // its source, so the branch-only key never has to disambiguate by method.
         if msg.method() == Method::Cancel || msg.method() == Method::Ack {
-            // RFC 3261 §9.1 (ADR-0043 X1): a CANCEL for an INVITE client txn that
+            // RFC 3261 §9.1 (ADR-0058 X1): a CANCEL for an INVITE client txn that
             // has received NO response is held on the txn and flushed on the
             // first provisional (`handle_inbound_response`) — before one, a UAS
             // that has not built the server txn answers it 481 while Timer A

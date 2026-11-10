@@ -1,9 +1,6 @@
 # The CANCEL waits for a provisional, without bound
 
-**Status:** accepted (2026-10-11). Supersedes ADR-0028. Amended (2026-10-12):
-the front proxy relays the callee's 100 (Context, X1, Consequences). Amended
-(2026-10-23): a `Trying` seed re-sends its INVITE at the seed, not when a
-CANCEL is held on it.
+**Status:** accepted (2026-10-11). Supersedes ADR-0028.
 
 **Owner:** `crates/sip-txn/src/layer/client.rs` (the CANCEL gate, the
 provisional flush, the Timer-E ladder), `crates/sip-txn/src/layer/seed.rs`
@@ -20,9 +17,9 @@ while Timer-A retransmits keep ringing a call nobody can cancel.
 
 The rules emit `cancel_to_leg` / `cancel_pending_reinvite` whenever the call
 decides to abandon a leg (caller CANCEL, no-answer, service watchdogs); only
-the transaction layer knows the branch's response history. ADR-0028 bounded
-the wait with a grace window after which the CANCEL went regardless. That
-bound sent the CANCEL §9.1 forbids, and is withdrawn.
+the transaction layer knows the branch's response history. The wait has no
+bound: a grace window after which the CANCEL goes regardless sends the CANCEL
+§9.1 forbids.
 
 The front proxy is stateless (§16.11, ADR-0022 X4) and relays a callee's
 `100 Trying` to the worker like any response, so a worker's b-leg branch sees
@@ -87,8 +84,7 @@ leaves a live transaction behind it arms a `CancelRetransmit` timer paced T1 →
 doubling → capped at T2. The ladder stops on the first response whose CSeq
 method is CANCEL, on the INVITE taking a final, on transaction death, and at its
 own 64·T1 ceiling, which gives up on the CANCEL only. A superseding CANCEL
-replaces the parked datagram. A CANCEL matching no transaction stays a raw
-single send. Counter: `cancel_retransmits`.
+replaces the parked datagram. Counter: `cancel_retransmits`.
 
 ## Consequences
 

@@ -371,9 +371,9 @@ replica deleted, a later request drawing `481`); a call in setup is aborted (`50
 the caller, CANCEL to the callee). Counted on `b2bua_operator_released_total{kind}`.
 **Ready** = every **Reclaim** stream to a
 *reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
-dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
-`Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,
-not a readiness sub-state). **Draining** = latched on SIGTERM, or on the worker's own observation that its
+dead/slow peer cannot hang readiness). **Backup** streams are opened once the
+**Reclaim** streams are ready, and gate `Ready` too: a node reads ready once both flows hit
+their first `Noop` (ADR-0014 §11). **Draining** = latched on SIGTERM, or on the worker's own observation that its
 endpoint is withdrawn; terminal. The drain exits on the first of: live calls
 cleared (`quiescent`), every live call's backup holding its changelog head once
 the floor `B2BUA_DRAIN_MIN_MS` has passed, for a worker that has observed its own

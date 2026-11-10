@@ -28,7 +28,7 @@ impl CallState {
     ///
     /// The call's envelope enters with it. On a [`MaterialiseOrigin::Reclaim`]
     /// insert it also re-establishes the replica's denormalised backup from
-    /// the envelope's authoritative `bak` (ADR-0014 #4): the reboot-reclaim hydration imports the
+    /// the envelope's authoritative `bak` (ADR-0014): the reboot-reclaim hydration imports the
     /// body peerless, leaving `CallMeta.backup == None` and the call invisible to
     /// its backup's bootstrap scan until the next keepalive re-flush. A takeover
     /// copy holds the `bak:` element itself and re-establishes nothing.

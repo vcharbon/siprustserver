@@ -179,7 +179,7 @@ pub const BREAKER_OPEN: Family = Family::gauge(
 pub const BREAKER_TRANSITIONS: Family = Family::counter(
     "b2bua_limiter_breaker_transitions_total",
     Labels::Product(&[BREAKER_TO]),
-    "limiter circuit breaker transitions (to=open: consecutive admits with no usable answer reached the threshold, or the limiter's address was not known at boot; to=closed: a health probe was answered)",
+    "limiter circuit breaker transitions (to=open: the breaker's window saw its count of requests sent and no HTTP response, or the limiter's address was not known at boot; to=closed: a health probe was answered)",
 );
 
 pub const LEASE_SECONDS: Family = Family::gauge(

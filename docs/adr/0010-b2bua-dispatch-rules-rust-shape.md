@@ -15,7 +15,8 @@ model, `sip-txn`, `sip-message`, `sip-net` and `sip-clock`.
 ## Decision X1. One `crates/b2bua` crate
 
 Rust forbids crate cycles; the dispatcher ↔ router ↔ rules ↔ store are mutually
-dependent, so they share one crate (`crates/b2bua`) on top of `call`. The test
+dependent, so they share one crate (`crates/b2bua`) on top of `call`. The rules and the
+decision core live in the pure `crates/b2bua-core` (ADR-0052). The test
 harness lives in a separate `crates/b2bua-harness` (X9).
 
 ## Decision X2. Per-call FIFO = per-call queues + worker tasks + a global semaphore
@@ -116,17 +117,6 @@ on the simulated fabric via `Harness::bind_sut`. This keeps `scenario-harness`
 generic (no B2BUA knowledge) and avoids a dev-dependency cycle like `with_proxy`'s. The
 fluent UAC's `expect_response` absorbs an unsolicited `100 Trying`, as a real UAC does
 (`scenario-harness/src/agent.rs`).
-
-## Deferred (with justification)
-
-- **18x-management strategies and REFER transfer**: SERVICE_LAYER policy modules,
-  user-deferred. Vocabulary present, dormant.
-- **Real HTTP decision adapter**: the scripted backend stands in.
-- **Failover via `call_failure`**: the rule path relays the failure + tears the
-  call down; the async failover round-trip (and the `refer-async-http`
-  re-entrant fire-and-forget) lands with the transfer/decision-HTTP slice.
-- **Real CallLimiter** (row 20): no-op admit/decrement.
-- **Tracing / OTel span machinery**: no tokio analogue.
 
 ## References
 
