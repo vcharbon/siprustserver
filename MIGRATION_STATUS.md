@@ -688,11 +688,8 @@ ported in `load_observer.rs`).
 - **Kubernetes registry** (`registry/kubernetes.ts`) + **k8s HMAC fs-watch** —
   production-only; static + simulated cover the slice.
 - **Proxy failover / replication / call-limiter integration tests** (`failover/**`,
-  k8s `proxy-*`) — these *proxy-side* tests depend on the unported B2BUA call cache +
-  replication; only the proxy *request-path* `forwardBackup`/reverse-path mechanics
-  are ported (covered by `decode-forward-*`). (The call-limiter *itself* is ported —
-  see the Call-limiter row; this bullet is the proxy's limiter-coupled failover tests,
-  not the limiter.)
+  k8s `proxy-*`): covered by `crates/failover-harness` and
+  `crates/sip-proxy/tests/it/active_active`.
 - **Real B2BUA OPTIONS handler** (`b2bua/{options-readiness-distinct,draining-options}`)
   — `options-e2e` is retargeted to a simulated responder; the readiness-disambiguation
   tests are deferred with the B2BUA.

@@ -197,5 +197,5 @@ byte-identity rule in the `rfc-rules` census. X6:
 `b2bua-harness/tests/it/{prack_disposition,reliable_1xx_out_of_order,
 reliable_provisional_repeat_prack,prack_owed_at_final,prack_owed_at_cancel,
 prack_rejects_an_unanswered_offer}.rs`, `b2bua/src/router/provisional_turn_tests.rs`,
-the provisional invariants in `b2bua/src/rules/model_invariants_provisionals.rs`,
+the provisional invariants in `b2bua/src/model_invariants_provisionals.rs`,
 and the `prack-2xx-or-481` and `reliable-needs-client-opt-in` rules.

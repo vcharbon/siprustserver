@@ -11,7 +11,7 @@ event, lost timer, wedged `Terminating`); a hard-crash window is out of scope.
 The module owning that promise. Two implementation legs, both funnelling into
 the *existing* teardown path (never a second teardown vocabulary): a handler
 panic becomes a synthetic event through the normal rules (two-strike: a second
-panic on the same call discharges **obligations** directly and releases); a
+panic on the same call discharges **release obligations** directly and releases); a
 liveness sweep keyed off the **last-touched stamp** catches wedged calls; both
 ride the per-call FIFO + lock.
 _Avoid_: "garbage collector", "orphan sweep" (the source-era concept); reaping
@@ -30,7 +30,7 @@ divergence hazard; would not survive failover, while `limiter` and
 `cdr_events` ride the replicated Element for free).
 
 **Release queue**:
-The worker's queue of limiter releases. The **obligation**'s limiter
+The worker's queue of limiter releases. The **release obligation**'s limiter
 release is handed to it and the call ends in its last turn; the queue sends
 every waiting key in one request, backs off after a failed send, and gives
 up an entry that waited one lease or is the oldest at its cap (ADR-0040). It

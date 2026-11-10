@@ -152,11 +152,9 @@ re-INVITEs to A and C). `CreateLeg` is attributed to the service as a *leg messa
 (method `INVITE`) because the rule initiates the leg and authors its INVITE
 payload; the global machine owns only leg *registration* and the mechanical layer.
 
-This assumes a **single canonical `sip-message::Method`** (in- and out-of-dialog,
-shared by every crate) for the leg-message method. Today methods are fragmented
-(`InDialogMethod` + `OutOfDialogMethod` + bare `String`); unifying them is a
-**prerequisite cleanup tracked independently** (see the consequences) — this ADR
-assumes it has landed.
+The leg-message method is the one `sip-message::Method`, in- and out-of-dialog, shared by
+every crate. `InDialogMethod` and `OutOfDialogMethod` remain as inputs of the message
+generators.
 
 ## Consequences
 
@@ -166,10 +164,6 @@ assumes it has landed.
 - `RuleDefinition` gains a required-for-service-rules `effects` field
   (`RuleDefinition::core` defaults it empty); `RuleAction` gains `ClearState`
   (machine deactivation) and a total `effect_kind`.
-- **Prerequisite cleanup (independent):** consolidate `InDialogMethod` +
-  `OutOfDialogMethod` + bare-`String` methods into a single canonical
-  `sip-message::Method` shared by all crates. The leg-message effect assumes it;
-  it is *not* part of this work and lands before it.
 - `Call` gains `sm_cursors`; the global call machine's cursor projects from
   `CallModelState`, so the termination invariants are untouched.
 - `xtask` depends on `b2bua-runner` for doc-gen (it must see the composed

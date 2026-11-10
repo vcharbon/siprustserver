@@ -61,8 +61,8 @@ router never blocks on the store, whichever store is behind the seam.
 ## Decision X4. Decision-engine adapter seam + a scripted test backend
 
 The `CallDecisionEngine` trait (`new_call` / `call_failure` / `call_refer`) is
-the seam the B2BUA calls to route a new INVITE. The production HTTP adapter is
-deferred; a `ScriptedDecisionEngine` emulates the jssip reference backend by
+the seam the B2BUA calls to route a new INVITE. The production adapter is the HTTP
+decision backend (`b2bua-decision`, ADR-0043); in tests a `ScriptedDecisionEngine` emulates the jssip reference backend by
 inspecting the request JSON (R-URI / To / `X-*` headers / body) and returning a
 route/reject, so existing SIPp scenario scripts keep producing the same call
 flows. `apply_route` + `handle_initial_invite` translate the response into call
@@ -87,7 +87,7 @@ reaper + obligation vocabulary that make it exactly-once across the panic / drop
 The basic-B2BUA default rule set is ported (relay / dialog / absorb / lifecycle /
 terminating / corner-case / failure / timer). The 18x-management strategies
 (`relayFirst18xTo180`, `promote18xPemTo200`, PEM/fake-prack) and REFER transfer
-(SERVICE_LAYER) are deferred. Their action vocabulary is defined but dormant.
+(SERVICE_LAYER) are service state machines (ADR-0016).
 
 ## Decision X6. B2BUA-local timer DelayQueue
 
@@ -103,7 +103,7 @@ exactly one CDR per terminated call; `BufferedCdrWriter` is the production
 drop-on-overload buffer (passthrough at `queue_max == 0`). The CDR is written
 once, on termination, carrying the accumulated `Call.cdr_events`.
 
-## Decision X8. OPTIONS 200 minimal; drain/health deferred
+## Decision X8. OPTIONS 200 minimal; drain and health in ADR-0011 X6
 
 Out-of-dialog OPTIONS is answered inline so a fronting proxy's health probe passes. The
 readiness/OPTIONS gate of ADR-0011 X6 sets the answer (200, or 503 not-ready or

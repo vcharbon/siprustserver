@@ -85,7 +85,7 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    face. Our sequence on a caller-facing dialog starts at 1, as on a dialled
    leg (§8.1.1.5 allows any start below 2³¹).
 8. **The model states its invariants at the end of every turn**
-   (`crates/b2bua/src/rules/model_invariants.rs`, on in debug builds and every
+   (`crates/b2bua/src/model_invariants.rs`, on in debug builds and every
    harness): each dialog of a leg is named by exactly one pair of tags; a leg
    holds at most one confirmed or ending dialog (§12.1); every `fronts` entry and the
    leg's own tag name a dialog the call holds; a dialog stays until the call

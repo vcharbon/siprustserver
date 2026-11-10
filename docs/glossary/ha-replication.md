@@ -369,11 +369,9 @@ or a SIGTERM: every answered call ends with no BYE (an owed ACK is sent, a still
 leg CANCELled; its record closed under `operator_release`, its holds released, its
 replica deleted, a later request drawing `481`); a call in setup is aborted (`503` to
 the caller, CANCEL to the callee). Counted on `b2bua_operator_released_total{kind}`.
-**Ready** = every **Reclaim** stream to a
-*reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
-dead/slow peer cannot hang readiness). **Backup** streams are opened once the
-**Reclaim** streams are ready, and gate `Ready` too: a node reads ready once both flows hit
-their first `Noop` (ADR-0014 §11). **Draining** = latched on SIGTERM, or on the worker's own observation that its
+**Ready** = every stream to a *reachable ready* peer, **Reclaim** first then
+**Backup**, has hit its first `Noop` (ADR-0014 §11; best-effort, hard-timer bounded so a
+dead/slow peer cannot hang readiness). **Draining** = latched on SIGTERM, or on the worker's own observation that its
 endpoint is withdrawn; terminal. The drain exits on the first of: live calls
 cleared (`quiescent`), every live call's backup holding its changelog head once
 the floor `B2BUA_DRAIN_MIN_MS` has passed, for a worker that has observed its own
