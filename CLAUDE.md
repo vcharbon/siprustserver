@@ -23,14 +23,15 @@ To show the user an html file or a URL: `xdg-open <path or URL>`.
 - A branch that touches `Cargo.lock` or `.cargo/audit.toml` passes `just audit-gate`. Every
   `[advisories] ignore` entry states who links the crate and why it is acceptable.
 - The flow viewer's UI follows [ts/viewer-app/UI-STYLE.md](ts/viewer-app/UI-STYLE.md).
-- Formatting is `cargo fmt` under the root `rustfmt.toml`. Run `just fmt` before a commit and
+- Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit and
   never hand-format around the pre-commit hook (`just hooks` installs it). An amend on `develop`
   is refused: commit on a topic branch.
 
 ## Agent models
 
 Delegated work runs on Opus, B2BUA changes included. Each review pass is one adversarial
-reviewer on Opus. Fable reviews a change only when the user names it for that change, once.
+reviewer on Opus. Fable reviews a change only when the user names it for that change, once. The complexity of a
+change does not call for Fable.
 
 ## Read before the matching work
 

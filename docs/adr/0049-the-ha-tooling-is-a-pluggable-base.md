@@ -38,7 +38,7 @@ on the path is refused, naming both files. A product changes a base incident
 through its profile's parameters and targets, never by shadowing it. Every
 file is validated against its versioned schema before anything runs. Data is
 the contract and an executable in any language is the leaf.
-Detail: [appendix §1](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#1-the-search-path).
+Items 1.1–1.6: [appendix §1](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#1-the-search-path).
 
 ### 2. The incident contract
 
@@ -50,7 +50,7 @@ the phases `inject`, `injected`, `heal`, `healed`, `recovered` (or `failed`).
 `heal` always runs and is idempotent. A step concludes only from a positive
 answer. A heal that fails twice makes the run `invalid`. The base incidents
 target pods by label, so a product points each at its own components.
-Detail: [appendix §2](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#2-the-incident-contract).
+Items 2.1–2.11: [appendix §2](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#2-the-incident-contract).
 
 ### 3. The impact-budget contract
 
@@ -64,7 +64,7 @@ is `unattributed`. Recovery, CDR mismatches, added classes, generator stalls,
 limiter self-repair, established calls and one-at-a-time faults have stated
 rules. `verdict.json` is `invalid` on an integrity finding, else `fail`
 on any finding impact, else `pass`.
-Detail: [appendix §3](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#3-the-impact-budget-contract).
+Items 3.1–3.15: [appendix §3](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#3-the-impact-budget-contract).
 
 ### 4. The call-outcome record
 
@@ -77,7 +77,7 @@ reach VictoriaLogs in one shape, and the verdict reads the run directory's
 export. Records plus calls not placed plus calls the generator failed equal
 the generator's offered-call counter, else a `record_gap`. The classifier is
 the one pure module `tooling/hakit/src/hakit/classify.py`.
-Detail: [appendix §4](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#4-the-call-outcome-record).
+Items 4.1–4.6: [appendix §4](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#4-the-call-outcome-record).
 
 ### 5. The treatment catalog and the product-shape seam
 
@@ -88,7 +88,7 @@ the same catalog, so a request and its judged ending cannot drift. loadgen is a 
 `ShapeRegistry`; a product registers its shapes under catalog ids. A stream's
 generator runs as a docker container or, for an unreachable system under
 test, as a pod.
-Detail: [appendix §5](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#5-the-treatment-catalog-and-the-product-shape-seam).
+Items 5.1–5.5: [appendix §5](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#5-the-treatment-catalog-and-the-product-shape-seam).
 
 ### 6. The runner
 
@@ -101,7 +101,7 @@ runner refuses a run on a stressed host or one with leftover calls, samples
 host pressure every second, checks live series for freshness and applies rate
 steps. Fault primitives stay shell; product terms of the readers are flags or
 a `--spec` file.
-Detail: [appendix §6](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#6-the-runner).
+Items 6.1–6.7: [appendix §6](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#6-the-runner).
 
 ### 7. Deployment, dashboards and metrics
 
@@ -113,7 +113,7 @@ host compose stack. `hakit up` passes the lab values; nothing is rendered by
 `envsubst`. Every dashboard on the path carries the generic window block. A
 product extends the metric contract through `metrics/` with declared
 prefixes.
-Detail: [appendix §7](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#7-deployment-dashboards-and-metrics).
+Items 7.1–7.7: [appendix §7](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#7-deployment-dashboards-and-metrics).
 
 ## Considered and rejected
 
@@ -129,7 +129,6 @@ Long form: [appendix](appendix/0049-the-ha-tooling-is-a-pluggable-base.md#consid
 
 ## Consequences
 
-- The runner, the charts and `deploy/helm/kind-lab.sh` are the only lab path.
 - The base's SIPp scenarios and dashboards live in
   `tooling/hakit/content/`, so the base is the first search-path entry like
   any other.

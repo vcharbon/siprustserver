@@ -1,6 +1,7 @@
 # 0031. A worker's ways out: graceful, abrupt, vanished, restarted in place
 
-**Status:** accepted. Amended by ADR-0047, ADR-0050 §3 and §11, ADR-0055 §3, §7, §8.
+**Status:** accepted. Amended by ADR-0047, ADR-0050 §3 and §11, and ADR-0055 §3, §7, §8, which
+replaces D2, D4 and the per-axis fold of D3 with containment and one routing rule.
 
 **Source:** `crates/failover-harness/tests/it/withdrawn_primary_answers_in_its_window.rs`.
 Amends ADR-0012 D4 and ADR-0014 §3 and §12. Builds on the departed-address tombstone
@@ -30,7 +31,6 @@ drops, so what its drain authors lives on one node, and the reclaimed or takeove
 a second final onto an ACKed INVITE (RFC 3261 §17.2.1, §13.3.1.4). In case 3 a healed
 primary's forward flush would regress or wipe the survivor's Element: `(p+1, 0)` is never
 dominated by `(p, 1)`.
-Detail: [appendix](appendix/0031-a-workers-three-ways-out.md#context).
 
 ## Decision
 
@@ -92,6 +92,8 @@ lost); case 3 D3, and D1 in 3b; case 4 D1. Detail: [appendix, the cases](appendi
 
 ## Amendment: progress is a chain, and every refusal moves the counter
 
+ADR-0055 §7 replaces this fold with containment.
+
 - Progress is a chain on two monotone axes, *answered* and *ending*. A refused flush folds
   only when it made every step the live copy made and one more.
 - A re-INVITE round is a third chain, per dialog, ordered by CSeq; its end or opening folds
@@ -123,4 +125,3 @@ Detail: [appendix, amendment](appendix/0031-a-workers-three-ways-out.md#amendmen
 - Residuals: the dual-owner window of a partition (ADR-0014). A partitioned primary that
   discharged a call the survivor kept serving loses the answered call's record. The `Delete`
   guard protects the answer only, never a later in-dialog turn.
-  Detail: [appendix, residuals](appendix/0031-a-workers-three-ways-out.md#residuals).

@@ -78,7 +78,7 @@ backstop: even if a guard is ever wrong, the a-leg server txn drops a second
 final while `Completed` (`sip-txn::do_send_response`), so the worst case is a
 harmless late raw datagram to a caller a *swept* (≥193 s old) txn already served.
 
-X5 states why the `answer_unanswered_a_leg` split is a correctness requirement, not a
+X5 states why the `UnansweredCaller` split is a correctness requirement, not a
 convenience.
 
 ## Decision X3: the canonical error-case status is 503, no Reason header
@@ -181,11 +181,11 @@ This is the critical HA design point. The X2 synthesis must fire for calls the
 is waiting on *us*), and must **not** fire when a node discharges an
 **already-terminal body it reclaimed or had folded to it** by HA replication:
 
-- **Live-serving paths (`answer_unanswered_a_leg = true`).** initial-INVITE,
+- **Live-serving paths (`UnansweredCaller::Answer`).** initial-INVITE,
   the rule chain, limiter-refresh, and the reaper's `discharge_as_own` — here an
   unanswered a-leg means a caller is genuinely parked on our server txn. Answer.
 
-- **HA discharge paths (`answer_unanswered_a_leg = false`).**
+- **HA discharge paths (`UnansweredCaller::Leave`).**
   `discharge_materialized_terminal` (reverse-flush reconcile, reboot
   bulk/on-demand reclaim of a `Terminated` body) and `discharge_folded_terminal`
   (a backup's deferred terminal folded into our live map). These bodies were
@@ -219,9 +219,9 @@ server transaction and answers it 503, so it holds the live transaction and answ
   the reaper strike-1 + X2 synthesis. `reaper.rs::wedged_setup_is_aborted_and_reaped` runs
   with the deadline disabled, to exercise the abort ladder, and the reap answers the caller
   a late 503.
-- `invariants::enforce` takes `now_ms` and `answer_unanswered_a_leg` at its seven call
+- `invariants::enforce` takes `now_ms` and `UnansweredCaller` at its seven call
   sites. The verbatim limiter/CDR-extraction property test pins the additive nature by
-  passing `answer_unanswered_a_leg = false`.
+  passing `UnansweredCaller::Leave`.
 - A call-control adapter may set a tighter internal timeout for its own resource hygiene.
 - X4 is a codified invariant of the LB proxy and its regression test, with no change to the
   proxy's behaviour.

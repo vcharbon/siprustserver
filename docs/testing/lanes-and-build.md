@@ -1,6 +1,6 @@
 # Lanes and build
 
-Moved out of [CLAUDE.md](../../CLAUDE.md), which keeps the directives. Read before choosing a
+[CLAUDE.md](../../CLAUDE.md) keeps the directives; this page holds their detail. Read before choosing a
 lane for a test, adding an integration test, or changing how the workspace builds.
 
 ## Test-runtime policy (default and slow lane)

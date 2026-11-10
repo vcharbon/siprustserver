@@ -883,3 +883,6 @@ made. A run profile joins the two.
   An incident that exposed a real defect is later reproduced in the harness
   through the same incident spec.
 
+## Consequences, further
+
+- The runner, the charts and `deploy/helm/kind-lab.sh` are the only lab path.

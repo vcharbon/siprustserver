@@ -46,8 +46,8 @@ as a fast, well-distributed hash only: the top 8 bytes as a `u64`, multiplied by
 
 ## Decision X4. Proxy self-gate stubbed; overload = OPTIONS health + tail-drop
 
-An always-admit stub (`self_gate::AlwaysAdmitGate`) stands for the proxy's own load gate. The seam,
-the request path's admission branch and the `note_bypass` calls are wired as the real gate needs.
+The proxy's own load gate is `self_gate::EluCpsGate`, on by default (`PROXY_SELF_GATE`, ADR-0046 §5).
+`PROXY_SELF_GATE=0` selects the always-admit `self_gate::AlwaysAdmitGate`.
 Overload protection rests on OPTIONS-driven worker health and band classification (the LB filters
 `above_critical` workers from new-dialog selection) and on `sip-net`'s receive-buffer tail-drop
 (`PacketQueue`).
@@ -56,7 +56,7 @@ Overload protection rests on OPTIONS-driven worker health and band classificatio
 
 The routing hot path reads `snapshot`, `resolve` and `lookup_by_address` synchronously and
 lock-free: the worker set lives behind an `arc_swap::ArcSwap<Vec<WorkerEntry>>`. Only background
-mutators (the health probe through the `WorkerRegistryControl` seam, a k8s watcher once one exists) write.
+mutators (the health probe through the `WorkerRegistryControl` seam, the k8s membership watcher, ADR-0012 D4) write.
 `changes()` is a `tokio::sync::broadcast` of deltas, with no backfill.
 
 ## Decision X6. Worker overload: band classification and the per-worker AIMD bucket
@@ -90,8 +90,8 @@ Detail: [appendix X7](appendix/0009-front-proxy-rust-shape.md#decision-x7-two-ac
 - The metrics layer is atomics-backed (`ProxyMetrics`) with a hand-rolled tokio Prometheus
   `/metrics` HTTP server (no HTTP framework dep).
 - The harness can drive any in-process SUT.
-- Not ported (MIGRATION_STATUS slice 9): the registrar/REGISTER path, the real self-gate, and the
-  failover and replication tests.
+- Not ported (MIGRATION_STATUS slice 9): the registrar/REGISTER path, and the failover and
+  replication tests.
 - HA is ADR-0056. Two anti-affined replicas run active-active, each node announcing the VIPs over
   BGP while its proxy is Ready, and X7 states what two active instances need. Each proxy's rate
   budgets stay its own. The stateless §16 design and the HMAC cookie (X3) let either replica serve

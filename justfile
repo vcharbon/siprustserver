@@ -10,7 +10,7 @@
 # per test, 16 at once across every binary. nextest skips doc tests, so
 # `just test` runs them with `cargo test --doc`.
 #
-# Test lanes follow CLAUDE.md "Test-runtime policy": the default lane is every
+# Test lanes follow docs/testing/lanes-and-build.md: the default lane is every
 # test on the fake clock (paused tokio), whatever its length, and every
 # real-clock test under 1 s; real-clock tests of 1 s or more and every loadgen
 # test are `#[ignore]`d into the slow lane. One crate's tests: `cargo nextest
