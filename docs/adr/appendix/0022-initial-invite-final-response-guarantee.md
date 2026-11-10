@@ -198,7 +198,7 @@ is waiting on *us*), and must **not** fire when a node discharges an
   nothing more. Synthesizing a 503 here would put a spurious final onto a wire
   the reclaiming node does not own, toward a caller who is either long gone or
   already answered — re-introducing exactly the double-serve class ADR-0014
-  structurally removed. So the HA discharge helpers pass `false`.
+  structurally removed. So the off-wire endings pass `UnansweredCaller::Leave`.
 
 The boundary is therefore the same one ADR-0020 X3 draws for the reaper (primary
 live-served + rehydrated calls in scope; acting-backup takeover copies out of

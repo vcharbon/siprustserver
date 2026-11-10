@@ -57,8 +57,8 @@ deadline (ADR-0039). Detail: [appendix X1](appendix/0022-initial-invite-final-re
 `→ terminated` edge. If the a-leg entered the turn unanswered (`Trying` or `Early`) and
 nothing on the turn answered it, the funnel appends `503 Service Unavailable` with no Reason
 header, and a `Reject`/`503` CDR event (`reason = "unanswered_at_termination"`). `enforce` takes
-`UnansweredCaller`, `Answer` on every live-serving funnel and `Leave` on the two HA
-discharge helpers (X5). Detail: [appendix X2](appendix/0022-initial-invite-final-response-guarantee.md#decision-x2-one-central-terminated-but-unanswered-a-leg--503-invariant).
+`UnansweredCaller`, `Answer` on every live-serving funnel and `Leave` on the off-wire
+endings (X5). Detail: [appendix X2](appendix/0022-initial-invite-final-response-guarantee.md#decision-x2-one-central-terminated-but-unanswered-a-leg--503-invariant).
 
 ## Decision X3: the canonical error-case status is 503, no Reason header
 
@@ -97,7 +97,7 @@ that carried the 100, counted as a cap-shed new call. Detail: [appendix X6](appe
 The node that holds the live transaction answers. The node that merely holds terminal state
 settles silently. The live-serving funnels (initial-INVITE, the rule chain, limiter-refresh,
 the reaper's `discharge_as_own`) pass `UnansweredCaller::Answer`.
-`discharge_materialized_terminal` and `discharge_folded_terminal` pass `false`: they settle
+The off-wire endings (`invariants.rs`, `UnansweredCaller::Leave`) settle
 CDR and limiter obligations and propagate the delete, never touching the SIP wire. A node
 that dies mid-setup leaves a live body, and whoever materialises it rebuilds the caller's
 server transaction and answers it 503 (ADR-0047 D4). Detail: [appendix X5](appendix/0022-initial-invite-final-response-guarantee.md#decision-x5-ha-interaction-reclaim-discharge-stays-off-the-sip-wire).

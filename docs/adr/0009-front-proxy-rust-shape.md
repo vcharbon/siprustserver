@@ -44,7 +44,7 @@ as a fast, well-distributed hash only: the top 8 bytes as a `u64`, multiplied by
 `u128`. The root manifest justifies the six deps (`hmac`/`sha2`/`sha1`/`base64`/`subtle`/
 `arc-swap`).
 
-## Decision X4. Proxy self-gate stubbed; overload = OPTIONS health + tail-drop
+## Decision X4. Proxy self-gate; overload = self-gate + OPTIONS health + tail-drop
 
 The proxy's own load gate is `self_gate::EluCpsGate`, on by default (`PROXY_SELF_GATE`, ADR-0046 §5).
 `PROXY_SELF_GATE=0` selects the always-admit `self_gate::AlwaysAdmitGate`.
