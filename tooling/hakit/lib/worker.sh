@@ -2,7 +2,9 @@
 # The restart timings of a killed B2BUA worker, read from the logs of the
 # pods around it (sourced after incident.sh, in a probe): when each surviving
 # worker parked the killed one's replication peer, and when each front proxy
-# dropped it from its registry and took it back. Log lines are this
+# dropped it from its routing and took it back: a worker that leaves the
+# registry, or one that stays a member and reads not ready, then accepts
+# new calls again. Log lines are this
 # repository's (`b2bua::repl::supervisor`, `sip_proxy::registry::projection`);
 # a line not in the log leaves its instant null, a log that cannot be read is
 # not yet.
@@ -33,8 +35,8 @@ hk_worker_timings() { # pod killed_ms
     pods="$(hk_live_pods "$proxy_sel")" || exit "$HK_NOT_YET"
     while read -r p _ _; do
       [ -n "$p" ] || continue
-      left="$(hk_log_instant "$p" "$proxy_c" "$at" "worker left the registry .* worker=${pod}( |\$)")"
-      joined="$(hk_log_instant "$p" "$proxy_c" "$at" "worker (joined the registry|re-created at a new host) .* worker=${pod}( |\$)")"
+      left="$(hk_log_instant "$p" "$proxy_c" "$at" "worker (left the registry|reads not ready, another reads ready: out of the routing) .* worker=${pod}( |\$)")"
+      joined="$(hk_log_instant "$p" "$proxy_c" "$at" "worker ((joined the registry|re-created at a new host) .* worker=${pod}( |\$)|acceptance flip .* worker=\"${pod}\" from=Refuse to=Accept)")"
       proxies="$(jq -c --arg p "$p" --argjson l "${left:-null}" --argjson j "${joined:-null}" \
         '. + [{pod: $p, left_at_ms: $l, joined_at_ms: $j}]' <<<"$proxies")"
     done <<<"$pods"
