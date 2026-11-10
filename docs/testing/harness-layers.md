@@ -183,6 +183,20 @@ default lane: the upstream sweep alone is about an hour of CPU.
   per row and per tier, and lists the failing Guaranteed cells. It gates
   nothing.
 
+## Writing a new b2bua or failover test
+
+Do NOT hand-roll the INVITE/180/200/ACK dance, it lives once in
+`scenario_harness::callflow`. Single-SUT b2bua test: use `B2buaScene::new(name)`
+(alice :5060 / bob :5070 / b2bua :5080, routes to bob) then `scene.establish()`
+→ interesting part → `scene.hangup(&mut dialog)` → `scene.finish()` (the
+reaped check runs there); for a non-default decision use
+`B2buaScene::with_b2bua(name, |bob_port| …builder…)`.
+HA failover test: `scenario_harness::callflow::establish(&alice,&bob,proxy.addr())`
+(or `Call::new(..).no_ring()` for the 200-only variant) and `hangup` for teardown.
+ONLY for the uninterrupted happy-path setup, any dance that asserts on the 18x,
+reads the relayed cookie/SDP, or injects a crash/partition mid-handshake stays
+hand-rolled (those are the subject of the test). When unsure, hand-roll it.
+
 ## Cookbook
 
 The agent verbs a test reaches for most, each in a few lines.

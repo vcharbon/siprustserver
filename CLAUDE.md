@@ -1,237 +1,113 @@
 # SIP Rust server
 
-Project is ultra early, not in production, do not worry about upgrade
-compatibility when designing solutions.
-To show a html file or a URL to the user, `xdg-open ./path/to/file/index.html` / `xdg-open "http://localhost:.../"`.
+The project is not in production: a design ignores upgrade compatibility.
+To show the user an html file or a URL: `xdg-open <path or URL>`.
 
 ## Coding rules
 
-Doc comments state present-tense contracts and invariants. History (dates, commit hashes, ticket IDs, "previously/replaces/no longer") lives in git and ADRs — a comment may cite ADR-00xx in one line, never retell it. A comment that has to justify wrong behavior is never written: the defect is reported. If a comment needs more than ~5 lines to justify a behavior rather than describe it, the rationale is architectural and belongs in an ADR with a one-line pointer. Implement correct behavior unless specifically asked to delay specific corner cases.
-Each file must have it own concern. No not mix concerns.
-Never implement SIP header or message extraction in crates other than sip-message.
-A crate a production binary links declares its tier and never panics on input, a pure one does no effects ([ADR-0051](docs/adr/0051-production-crates-never-panic-on-input.md)): `just purity` and `just panic-sites` check it, and `panic-sites.allow` only goes down, except by sites a rule the change adds reveals. The same ratchet counts the loop and recursion sites of [ADR-0057](docs/adr/0057-a-call-is-bounded-a-turn-is-bounded-by-construction.md) §5 (`tooling/site-scan`): a loop in a pure crate is a `for` over a finite collection, a range to a constant or a `len()`, or `bounds::bounded`; a recursion descends through a `bounds::Depth`.
-A branch that touches `Cargo.lock` or `.cargo/audit.toml` passes `just audit-gate`: no RustSec vulnerability outside the `[advisories] ignore` list of `.cargo/audit.toml`, whose every entry states who links the crate and why it is acceptable.
-The flow viewer's UI (text, colours, dark mode) follows [ts/viewer-app/UI-STYLE.md](ts/viewer-app/UI-STYLE.md).
-Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it; `.githooks/prepare-commit-msg` refuses an amend on `develop`, the integration branch (commit on a topic branch).
-
+- Doc comments state present-tense contracts and invariants. History (dates, commit hashes,
+  ticket IDs, "previously", "replaces", "no longer") lives in git and ADRs. A comment may cite
+  ADR-00xx in one line, never retell it.
+- A comment that has to justify wrong behavior is never written: report the defect. A comment
+  that needs more than ~5 lines to justify a behavior belongs in an ADR, with a one-line pointer.
+- Implement correct behavior unless asked to delay a named corner case.
+- Each file has one concern.
+- SIP header and message extraction lives in `sip-message` and nowhere else.
+- A crate a production binary links declares its tier and never panics on input, and a pure one
+  does no effects ([ADR-0051](docs/adr/0051-production-crates-never-panic-on-input.md)).
+  `just purity` and `just panic-sites` check it. `panic-sites.allow` only goes down, except by
+  sites a rule the change adds reveals. The same count covers the loop and recursion sites of
+  [ADR-0057](docs/adr/0057-a-call-is-bounded-a-turn-is-bounded-by-construction.md) §5: a loop in
+  a pure crate is a `for` over a finite collection, a range to a constant or a `len()`, or
+  `bounds::bounded`; a recursion descends through a `bounds::Depth`.
+- A branch that touches `Cargo.lock` or `.cargo/audit.toml` passes `just audit-gate`. Every
+  `[advisories] ignore` entry states who links the crate and why it is acceptable.
+- The flow viewer's UI follows [ts/viewer-app/UI-STYLE.md](ts/viewer-app/UI-STYLE.md).
+- Formatting is `cargo fmt` under the root `rustfmt.toml`. Run `just fmt` before a commit and
+  never hand-format around the pre-commit hook (`just hooks` installs it). An amend on `develop`
+  is refused: commit on a topic branch.
 
 ## Agent models
 
-When work is delegated to sub-agents: implementation, tests, fix-ups and every other task run on
-Opus, B2BUA changes included. Each review pass is one adversarial reviewer on Opus. Fable
-reviews a change only when the user names it for that change, at most once; later review passes
-run on Opus. The complexity of a change does not call for Fable.
+Delegated work runs on Opus, B2BUA changes included. Each review pass is one adversarial
+reviewer on Opus. Fable reviews a change only when the user names it for that change, once.
 
-## Where the details live (progressive disclosure)
+## Read before the matching work
 
-Read the linked doc BEFORE the matching kind of work; the sections below are
-summaries + hard directives only.
+- A timed test, written or modified: [docs/testing/test-clock.md](docs/testing/test-clock.md).
+  Most flaky tests here break one of its rules.
+- Choosing a harness, what `finish()` gates, writing a b2bua or failover test:
+  [docs/testing/harness-layers.md](docs/testing/harness-layers.md).
+- Lanes, building, adding an integration test, build concurrency:
+  [docs/testing/lanes-and-build.md](docs/testing/lanes-and-build.md).
+- HA, chaos or endurance triage (SUT bug, declared window or infra artifact):
+  [docs/testing/ha-acceptance.md](docs/testing/ha-acceptance.md).
+- A change to a reader: [docs/testing/fuzzing.md](docs/testing/fuzzing.md).
+- Any new `info!` or per-call trace emission: [docs/observability.md](docs/observability.md).
+- Decisions: [docs/adr/](docs/adr/). An ADR over 8 KB keeps its decision in the numbered file
+  and its scenarios, tables and evidence in `docs/adr/appendix/`. Most used:
+  [ADR-0055](docs/adr/0055-services-are-ha-blind.md) (services are HA-blind),
+  [ADR-0014](docs/adr/0014-reactive-only-takeover-version-vector.md) (reactive takeover),
+  [ADR-0022](docs/adr/0022-initial-invite-final-response-guarantee.md) (the initial INVITE gets
+  a final).
+- A term: grep [CONTEXT.md](CONTEXT.md), one line per term, full definitions in `docs/glossary/`.
 
-- [docs/testing/test-clock.md](docs/testing/test-clock.md) — **driving time in
-  paused-runtime tests. Read before writing or modifying ANY timed test** —
-  most flaky/broken tests here come from breaking one of its rules.
-- [docs/testing/harness-layers.md](docs/testing/harness-layers.md) — the
-  test-infrastructure stack: which harness for which test, what `finish()`
-  gates automatically vs what you must assert.
-- [docs/testing/ha-acceptance.md](docs/testing/ha-acceptance.md) — HA/chaos/
-  endurance triage: SUT bug vs a declared window (ADR-0055 §11) vs infra
-  artifact, and the HA design invariants that must never be reintroduced.
-- [docs/testing/fuzzing.md](docs/testing/fuzzing.md) — coverage-guided
-  fuzzing (`fuzz/`, `just fuzz`): when to run it after a change to a reader,
-  and how a finding becomes a regression test.
-- [docs/observability.md](docs/observability.md) — **read before adding any
-  `info!` or any per-call trace emission**: operating the lab trace stack, plus
-  the directive guidelines for new code.
-- [docs/adr/](docs/adr/) — decisions. Load-bearing day-to-day:
-  [ADR-0055](docs/adr/0055-services-are-ha-blind.md) (services are HA-blind:
-  the replication write path, the evidence rule, containment, the failover
-  sweep), on
-  [ADR-0014](docs/adr/0014-reactive-only-takeover-version-vector.md) (reactive
-  takeover, the `(p,b)` vector),
-  [ADR-0022](docs/adr/0022-initial-invite-final-response-guarantee.md)
-  (initial-INVITE final-response guarantee).
+## Every test, no exceptions
 
-## Default test requirements (every test — no exceptions)
+- **RFC-compliant on the wire.** The RFC 3261/3262/3264 audit of the recorded trace gates at
+  `finish()`, and at Drop without it. `allow_violation(rule, justification)` is only for a test
+  whose purpose is interworking with a broken or lossy peer, and the deviation sits on the peer
+  side. The SUT's own output stays compliant: a finding the SUT causes is a bug to fix.
+- **Properly terminated.** Every call reaches a terminal state before the test ends. When the
+  scenario is a lost teardown, advance the paused clock past the SUT's own dead-call detection
+  (keepalive timeout, the 32 s terminating safety timer, `GlobalDuration`) so the B2BUA reaps
+  the call.
+- **Assert release, not silence.** `B2buaScene::finish()` runs `assert_fully_reaped()` (calls,
+  locks, reaper stamps, setup-CANCEL marks, limiter holds); `finish_leaving(leak)` declares
+  limiter holds left on purpose. `Harness::finish()` alone does not catch a leaked call: on a
+  bare `Harness` and `B2buaSut`, drain with `settle_until(|| sut.is_reaped())` and assert
+  `assert_fully_reaped()` (`assert_call_fully_over` in failover tests).
+- **The setup dance is not hand-rolled.** `B2buaScene` and `scenario_harness::callflow` hold
+  it. Hand-roll only a handshake that is the subject of the test.
+- **Paused clock.** `#[tokio::test(start_paused = true)]` and `Harness::advance`, called
+  between protocol steps, exactly to the deadline being tripped. Never leap two deadlines in
+  one advance, never feed a paused test a wall-clock signal, transit delay at least 1 ms. A
+  panicking scenario dumps its wire trace to stderr: read it before instrumenting.
+- **Lanes.** A real-clock test of 1 s or more carries
+  `#[ignore = "slow lane: real clock >= 1 s"]`, every `loadgen` test
+  `#[ignore = "slow lane: loadgen"]`. A fake-clock test stays in the default lane whatever its
+  length.
+- **One integration binary per crate.** A new test file goes in the crate's `tests/it/` with
+  its `mod` line in `tests/it/main.rs`. Only a test that installs process-global state is a
+  `tests/*.rs` target of its own.
 
-Every test models a complete, functioning callflow:
+## Build
 
-- **RFC-compliant on the wire.** The recorded-trace RFC 3261/3262/3264 audit
-  gates at `finish()` (and at Drop if you forget `finish()`). A deliberate
-  violation is sanctioned ONLY via `allow_violation(rule, justification)`, ONLY
-  when the test's *purpose* is interworking with a buggy/lossy peer, and the
-  delta must sit on the **Alice/Bob (peer) side — the SUT's own output stays
-  compliant**. Never waive a rule to mute a finding caused by the SUT; that is
-  a bug to fix.
-- **Properly terminated — no exceptions.** Every call reaches a terminal state
-  before the test ends: BYE/CANCEL/error-final in the flow. If the scenario
-  itself is a lost or withheld teardown (dead peer, dropped 200), the worst
-  case is still termination — advance the paused clock past the SUT's own
-  dead-call detection (keepalive timeout, the 32 s terminating safety timer,
-  `GlobalDuration`) so the B2BUA detects the dead call and reaps it. Never
-  leave a call up at `finish()`.
-- **Assert release, not just silence.** `B2buaScene::finish()` settles the SUT
-  and runs `B2buaSut::assert_fully_reaped()` (calls, locks, reaper stamps,
-  setup-CANCEL marks, limiter holds); `finish_leaving(leak)` declares limiter
-  holds left on purpose. `Harness::finish()` alone does NOT catch a leaked
-  call (structural leak anomalies deliberately don't gate): a test on a bare
-  `Harness` + `B2buaSut` drains with `settle_until(|| sut.is_reaped())` then
-  asserts `assert_fully_reaped()` itself (`assert_call_fully_over` in
-  failover tests).
+`just` lists the lanes. Two agents compile or run tests at once by default; work light on
+disk, CPU and memory has no limit. Never set `RUSTFLAGS` (it drops `tokio_unstable` and mold),
+never change `profile.dev`'s codegen backend, and keep profile settings in `Cargo.toml`.
 
-## Writing a new b2bua / failover test
+## HA
 
-Do NOT hand-roll the INVITE/180/200/ACK dance — it lives once in
-`scenario_harness::callflow`. Single-SUT b2bua test: use `B2buaScene::new(name)`
-(alice :5060 / bob :5070 / b2bua :5080, routes to bob) then `scene.establish()`
-→ interesting part → `scene.hangup(&mut dialog)` → `scene.finish()` (the
-reaped check runs there); for a non-default decision use
-`B2buaScene::with_b2bua(name, |bob_port| …builder…)`.
-HA failover test: `scenario_harness::callflow::establish(&alice,&bob,proxy.addr())`
-(or `Call::new(..).no_ring()` for the 200-only variant) and `hangup` for teardown.
-ONLY for the uninterrupted happy-path setup — any dance that asserts on the 18x,
-reads the relayed cookie/SDP, or injects a crash/partition mid-handshake stays
-hand-rolled (those are the subject of the test). When unsure, hand-roll it.
-Full stack map: [docs/testing/harness-layers.md](docs/testing/harness-layers.md).
+Services are HA-blind (ADR-0055 §1): HA lives only in the aware crates. What an incident may
+cost is ADR-0055 §11 and nothing else. A deviation no window declares is a SUT defect. Never
+reintroduce: a time-based settle or handback, smoothing or skew re-anchoring inside the timer
+driver, a discharge of an already-terminal body answering the caller, a non-pristine reboot.
 
-## Test clock — summary ([full guide](docs/testing/test-clock.md))
+## Logging and tracing
 
-Behaviour rides `tokio::time` directly; `Clock::test_at(0)` reads the same
-timeline, so one `advance` moves behaviour timers *and* report timestamps —
-there is **no separate fake-clock counter** (deliberately simpler than the TS
-`TestClock` pump; keep it that way). Tests use
-`#[tokio::test(start_paused = true)]` + `Harness::advance` (settled: work in
-flight runs at each instant it falls due), called *between* protocol steps,
-exactly to the deadline being tripped. The non-negotiables (details + smell table in the guide): never leap two deadlines
-in one advance; never feed a paused test a real wall-clock signal; transit
-delay ≥ 1 ms, never 0; don't hand-roll timer drivers — copy the epoch +
-lockstep-`Key` shape in `crates/b2bua/src/timers.rs` (module doc) if you must.
-A panicking scenario auto-dumps its wire trace to stderr (`PanicDump`) — read
-that before instrumenting.
+`info!` is lifecycle only and traffic-independent: a 5000-call failover prints about 5 lines.
+A per-call `info!` line is a review must-fix. A per-call event class goes through
+`observe::WaveSet`, per-call diagnostics in the per-call trace or at `debug!`. Every per-call
+trace emission sits behind `if call.sampled { … }`. New code adds a trace only for per-call
+external-service I/O, as a child span.
 
-## Test-runtime policy (default vs slow lane)
+## The initial INVITE gets a final
 
-**The default lane holds every fake-clock test, whatever its length, and every
-real-clock test under 1 s. Nothing else runs by default.** A test is fake-clock
-when its runtime is paused (`start_paused`, `sip_clock::run_paused_within`);
-any other test, synchronous ones included, is real-clock. A real-clock test of
-1 s or more (worst run at 16 test threads) is
-`#[ignore = "slow lane: real clock >= 1 s"]`, and every `loadgen` test, lib and
-integration alike, is `#[ignore = "slow lane: loadgen"]`. Lanes live in the
-`justfile` and run under cargo-nextest (`.config/nextest.toml`: one process per
-test, 16 at once across every binary; doc tests through `cargo test --doc`):
-`just test` (default), `just test-slow [filterset]` (`cargo nextest run --release
--P slow --run-ignored only [-E filterset]`; `just test-slow 'package(=loadgen)'`
-runs one crate's slow lane). One crate's tests:
-`cargo nextest run --workspace -E 'package(=<crate>)' <filter>`, which reuses
-the workspace build (a `-p` build resolves other features and recompiles). A
-filtered run skips an ignored test without a word: add `--run-ignored all`
-(`cargo test`: `-- --include-ignored`) to run one. Moving a real-clock scenario out is the
-moment to write its paused-clock equivalent for the default lane. A slow
-paused-clock test stays in the default lane: cut its timer churn at the source
-(clock guide, rule 5).
-
-## Compiling ([ADR-0029](docs/adr/0029-dev-build-cost.md))
-
-`just` is the entry point — run it bare to list the lanes. `just check` for the
-fast signal (no codegen), `just test [filter]` / `just test-slow [filterset]`, `just lint`,
-`just image` for the k8s image, `just doctor` when a machine looks broken,
-`just disk` / `just clean-incremental` under disk pressure. Every recipe is a
-plain cargo call, so a hand-typed `cargo nextest run` or `cargo test` builds
-identically — including
-the parallelism cap: `.cargo/config.toml` sets `[build] jobs = 4`, because this
-workspace links ~250 test binaries and the concurrent mold links at one job per
-core exhaust a 32 GB host (ADR-0029 X5). `--jobs N` overrides it per call:
-lower on a shared host, never higher for a whole-workspace run.
-
-Prerequisites: mold and gcc >= 12; for the dependency audit (`just audit`,
-`just audit-gate`), cargo-audit and cargo-edit (`cargo upgrade`), cargo-outdated
-optionally (on Arch: `pacman -S cargo-audit cargo-edit cargo-outdated`). Do not:
-
-- set `RUSTFLAGS` — it replaces `[build] rustflags` wholesale, silently
-  dropping `tokio_unstable` *and* mold; anything that must set it re-states
-  both flags;
-- change `profile.dev`'s codegen backend — Cranelift is rejected (ADR-0029 X3),
-  and re-proposing it means re-running the three panic tests named there;
-- put profile settings in `.cargo/config.toml` — profile shape lives in
-  `Cargo.toml`, toolchain/linker wiring in `.cargo/config.toml`.
-
-## Adding an integration test ([ADR-0030](docs/adr/0030-one-integration-test-binary-per-crate.md))
-
-A crate's integration tests compile into ONE binary. In a crate that has a
-`tests/it/` directory, a new test file goes **inside it**, with a `mod` line
-added to `tests/it/main.rs`; a stray `tests/foo.rs` links a second copy of the
-whole dependency graph. Select one with
-`cargo nextest run --workspace -E 'package(=<crate>) & binary(it)' <module>::<name>`.
-
-A test that installs process-global state (a trace registry, the allocation
-counter, a real socket, process env) stays a `tests/*.rs` target of its own —
-folded in, it does not fail the suite, it wedges it.
-
-## Agent & build concurrency
-
-**By default two agents (subagent / workflow stage) compile or run tests at
-once;** other work that is not heavy on disk, CPU or memory runs without limit.
-Builds serialise on the target directory and a build racing a running SUT or
-loadgen skews what the run measures. The jobs cap in
-`.cargo/config.toml` is sized for a quiet host; beside other builds lower it
-(`cargo test --workspace --jobs 2`) and, on a host short on memory, cap the
-command in a scope: `systemd-run --user --scope -q -p MemoryMax=12G cargo …`; a
-long-lived test process (SUT, loadgen, e2e-web) then gets its own small scope.
-
-## HA / chaos — summary ([acceptance guide](docs/testing/ha-acceptance.md))
-
-Services are HA-blind (ADR-0055 §1): HA lives only in the aware crates. What
-an incident may cost is ADR-0055 §11 and nothing else: per incident, the CDR
-count, what the parties may be left waiting for, and the declared windows (the
-only RFC deviations accepted). Once an incident strikes the SUT may end a call
-cleanly at any instant (§4); a kill may cost the calls whose state changed in
-the replication window (§3). Every effect a turn sends leaves through the
-call's ordered outbox, released by the replication sync level (`applied`, the
-default: once the backup applied the write, at most the cap; `off`: at once).
-A deviation no window declares is a SUT defect.
-The failover sweep (`just sweep`) checks every cell against the window table
-of §11 at its measured tier (Guaranteed: no row; Degraded; Off) and holds the
-failing ones, and each test's Guaranteed count, to a ratchet that only
-shrinks. On a real cluster the HA tooling
-judges each impact against its incident window's budget (ADR-0049 §3.5). A
-takeover keepalive firing ~one interval early on an endurance run is a host
-clock-STEP artifact (fix is infra; the SUT re-anchors replicated instants,
-§9). Design invariants — never reintroduce: time-based settle/handback (copies
-reconcile by containment, §7), smoothing or skew re-anchoring inside the timer
-driver, a discharge of an already-terminal body answering the caller, a
-non-pristine reboot. Details + references in the guide.
-
-## Logging & tracing — summary ([guide](docs/observability.md), [ADR-0026](docs/adr/0026-observability-logging-tracing.md))
-
-Two planes, never mixed. **`info!` is lifecycle ONLY** — state transitions, HA,
-startup, readiness, drain, long-term peer state — and MUST be
-**traffic-independent**: a 5000-call failover prints ~5 lines. A per-call event
-class goes through `observe::WaveSet` (rising edge / ~5 s summary /
-falling-edge totals); **a per-call `info!` line is a review must-fix**. Per-call
-diagnostics go in the per-call trace or at `debug!`. Every line carries node
-identity (+ peer / epoch / `(p,b)` where relevant).
-Per-call **traces**: the choke points (SIP messages, rule/context transitions,
-limiter) are already hooked — most work adds nothing. The ONLY class new code
-adds is per-call external-service I/O (a new per-call HTTP/remote dependency) as
-a child span with its request/response. **Every emission site sits behind
-`if call.sampled { … }`** — an unsampled call evaluates no format arg and
-allocates nothing; subscriber-side filtering is never the mechanism. Tracing is
-inert unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set; `X-Trace-Sample` is honored
-only under `SIP_TRACE_HEADER=1` (lab/endurance) and, like every SIP header, is
-extracted ONLY in `sip-message`, from the parsed message (`sip_message::sniff`
-is tooling, behind its feature).
-
-## Initial-INVITE final-response guarantee — summary ([ADR-0022](docs/adr/0022-initial-invite-final-response-guarantee.md))
-
-Read the ADR before touching the decision seam, `invariants::enforce`, or the
-proxy's response path. Once sip-txn auto-sends 100 Trying, the caller MUST get
-a final: accept + forward, or 503. Two mechanisms — do not remove either:
-`DeadlineDecisionEngine` bounds `new_call`/`call_failure` (NOT `call_refer`;
-X1), and `invariants::enforce` synthesizes the 503 for any a-leg terminated
-unanswered (X2). The `answer_unanswered_a_leg` flag is a **correctness knob**:
-`true` only on live-serving funnels; `false` on the two HA discharge helpers —
-reclaim discharge never touches the wire (X5, and
-[ha-acceptance.md](docs/testing/ha-acceptance.md)). The LB proxy is
-transaction-less BY DESIGN: never emits/relays a 100, no Timer C, the caller
-owns downstream-blackhole give-up (X4, pinned by
-`stateless_final_response_contract.rs`).
+Read ADR-0022 before touching the decision seam, `invariants::enforce` or the proxy's response
+path. Once sip-txn sent 100 Trying, the caller gets a final: accept and forward, or 503. Keep
+both mechanisms: `DeadlineDecisionEngine` bounds `new_call` and `call_failure`, and
+`invariants::enforce` synthesizes the 503 for an a-leg terminated unanswered. Only a
+live-serving funnel answers an unanswered caller (`UnansweredCaller::Answer`); the HA discharge
+helpers pass `Leave` and never touch the wire. The LB proxy is transaction-less by design: no
+100, no Timer C.
