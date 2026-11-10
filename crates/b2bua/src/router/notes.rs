@@ -21,6 +21,9 @@ pub(super) fn drain(ctx: &RouterCtx, call_ref: &str, turn: &mut TurnScope) {
     for cap in notes.caps_near() {
         ctx.metrics.record_cap_near(*cap);
     }
+    for (cap, value, per_hour) in notes.cap_readings().iter() {
+        ctx.metrics.record_cap_reading(cap, value, per_hour);
+    }
     for defect in notes.defects() {
         crate::model_invariants::defect(&ctx.metrics, defect);
     }

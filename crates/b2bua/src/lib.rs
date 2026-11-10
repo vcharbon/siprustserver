@@ -84,6 +84,7 @@ pub use ::b2bua_core::{
 };
 
 pub use node::replica::ReplicaConfig;
+pub use node::stuck::StuckDischarge;
 pub use node::txn_config::EVENT_QUEUE_CAPACITY;
 pub use node::{B2buaCore, B2buaDeps, ReplicationSetup};
 pub use router::AdaptationHttpPort;

@@ -55,6 +55,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
         metric_values::poison::FAMILIES,
         sip_net::poison::FAMILIES,
         crate::poison::FAMILIES,
+        poll_watchdog::poison::FAMILIES,
         jemalloc_stats::catalogue::FAMILIES,
     ],
 };
@@ -64,7 +65,8 @@ impl WorkerMetrics {
     /// observability counters (dropped log lines, trace admission), the
     /// cause-labelled client HTTP failures, the backend clients' counters
     /// (slots, retries, breaker, 5xx closes), the HTTP client's, the metric
-    /// rows', the UDP endpoint's and the kit's lock recoveries, then `extra`
+    /// rows', the UDP endpoint's, the kit's and the poll watchdog's lock
+    /// recoveries, then `extra`
     /// (the allocator's exposition).
     pub fn body(&self, extra: Option<&probe_http::MetricsFn>) -> String {
         let mut text = self.prometheus_text();
@@ -75,6 +77,7 @@ impl WorkerMetrics {
         text.push_str(&metric_values::poison::prometheus_text());
         text.push_str(&sip_net::poison::prometheus_text());
         text.push_str(&crate::poison::prometheus_text());
+        text.push_str(&poll_watchdog::poison::prometheus_text());
         if let Some(extra) = extra {
             text.push_str(&extra());
         }

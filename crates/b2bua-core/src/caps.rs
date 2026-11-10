@@ -14,7 +14,7 @@
 use std::io;
 use std::ops::ControlFlow;
 
-use b2bua_sdk::config::{CallCaps, Cap};
+use b2bua_sdk::config::{AgeCap, CallCaps, Cap};
 use b2bua_sdk::event::CallEvent;
 use call::features::StatedHeaders;
 use call::{Call, CallModelState, ExtMap, Leg};
@@ -95,7 +95,7 @@ impl Gauge {
             requests: legs().map(requests_of).sum::<u64>() + len(call.awaited.len()),
             cdr_events: len(call.cdr_events.len()),
             dialogs: legs().map(|l| len(l.dialogs.len())).max().unwrap_or(0),
-            header_updates: header_updates(call),
+            header_updates: header_updates(call, STATED_SETS_MAX),
         }
     }
 
@@ -118,7 +118,8 @@ impl Gauge {
 /// The turn that started at `start` and left `result`, held to `checked`
 /// under `caps`: `Err` when its fuel ran out or it grew a collection past its
 /// cap. A turn that lands has each collection it grew across half its cap
-/// noted on `turn`.
+/// noted on `turn`, and what it left the call holding read against each cap
+/// it is held to (ADR-0057 §9).
 pub fn hold(
     caps: &CallCaps,
     start: &Gauge,
@@ -131,6 +132,7 @@ pub fn hold(
         return Err(Tripped { cap, verdict });
     }
     if checked != Checked::All {
+        turn.notes.cap_reading(Cap::ActionsPerTurn, turn.actions());
         return Ok(result);
     }
     let end = Gauge::of(&result.call);
@@ -148,13 +150,39 @@ pub fn hold(
             near.push(cap);
         }
     }
-    if ext_bytes(&result.call) > caps.ext_bytes {
+    let ext = ext_bytes(&result.call);
+    if ext > caps.ext_bytes {
         return Err(Tripped { cap: Cap::ExtBytes, verdict });
     }
     for cap in near {
         turn.notes.cap_near(cap);
     }
+    let actions = turn.actions();
+    read(&mut turn.notes, &end, ext, actions, granted);
     Ok(result)
+}
+
+/// What a landed turn left its call holding, `end` and `ext` bytes, and the
+/// `actions` it returned, read against each cap; an aged collection also per
+/// started hour of the `granted` duration, once one is granted.
+fn read(
+    notes: &mut crate::turn_notes::TurnNotes,
+    end: &Gauge,
+    ext: u64,
+    actions: u64,
+    granted: i64,
+) {
+    notes.cap_reading(Cap::ActionsPerTurn, actions);
+    for cap in COUNTED {
+        notes.cap_reading(cap, end.get(cap));
+    }
+    notes.cap_reading(Cap::ExtBytes, ext);
+    let hours = AgeCap::started_hours(granted);
+    if hours > 0 {
+        for cap in Cap::AGED {
+            notes.cap_reading_per_hour(cap, end.get(cap).div_ceil(hours));
+        }
+    }
 }
 
 /// The call's granted maximum duration, in ms; `0` before a decision granted
@@ -175,17 +203,17 @@ fn requests_of(leg: &Leg) -> u64 {
 
 /// The header lines the call states, a removal counting one: every stated set
 /// it holds, each leg's own and each one a set reverts to, however nested,
-/// and the policy header overrides.
-fn header_updates(call: &Call) -> u64 {
+/// and the policy header overrides; `u64::MAX`, past every cap, for a tree of
+/// more than `max_sets` sets.
+fn header_updates(call: &Call, max_sets: usize) -> u64 {
     let policy = call.policy_update_headers.as_ref().map_or(0, |h| len(h.len()));
     let Some(root) = call.features.as_ref().and_then(|f| f.stated_headers.as_ref()) else {
         return policy;
     };
     // A worklist over the record's own tree of sets, each visited once, then
-    // the run that finds it empty; a tree past STATED_SETS_MAX reads as past
-    // every cap.
+    // the run that finds it empty.
     let (mut sets, mut total) = (vec![root], policy);
-    let walked = bounds::bounded(STATED_SETS_MAX + 1, || {
+    let walked = bounds::bounded(max_sets.saturating_add(1), || {
         let Some(set) = sets.pop() else {
             return ControlFlow::Break(());
         };
@@ -197,9 +225,10 @@ fn header_updates(call: &Call) -> u64 {
     walked.map_or(u64::MAX, |()| total)
 }
 
-/// The stated sets the header-updates gauge walks at most: far past a call
-/// at its leg cap, each leg holding a set and the one it reverts to.
-const STATED_SETS_MAX: usize = 1 << 16;
+/// The stated sets the header-updates gauge walks at most: past a call at the
+/// default leg cap on the longest grant a decision can state (`i32::MAX` ms,
+/// 597 started hours), each leg holding a set and the one it reverts to.
+const STATED_SETS_MAX: usize = 1 << 20;
 
 /// The lines one stated set states over its three scopes.
 fn stated_lines(set: &StatedHeaders) -> u64 {

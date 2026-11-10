@@ -256,6 +256,9 @@ pub(super) async fn process(
             rule_chain_turn(&ctx.framework(), call, input, &mut turn)
         }
     };
+    if super::commit::fenced(ctx, &call_ref) {
+        return true;
+    }
     let unrecoverable = turn.notes.unrecoverable();
     if result.is_ok() {
         super::notes::drain(ctx, &call_ref, &mut turn);

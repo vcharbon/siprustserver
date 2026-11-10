@@ -1,0 +1,30 @@
+[package]
+name = "poll-watchdog"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The poll watchdog (ADR-0057 §6): every runtime thread that polls tasks keeps a slot the watchdog thread reads once a second with the thread's CPU time; a poll that stays on one thread's CPU past its threshold is published as stuck, and the process exits by a hard deadline whatever its threads are doing."
+
+[package.metadata.purity]
+tier = "shell"
+
+[package.metadata.ha]
+side = "blind"
+
+[lints]
+workspace = true
+
+[features]
+# `Watchdog::publish`: a host's tests drive its stuck exit without ending
+# the process.
+testkit = []
+
+[dependencies]
+lock-poison = { path = "../lock-poison" }
+metric-catalogue = { path = "../metric-catalogue" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# The task a thread polls, shared with the watchdog thread without a lock:
+# `tokio::task::Id` is eight bytes, so its cell is one atomic word.
+crossbeam-utils = "0.8"

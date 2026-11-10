@@ -3,7 +3,9 @@
 //! leaves the node (timers, the CDR, metrics, re-entries), queues everything
 //! the turn sends on the call's outbox behind the write that records it, and
 //! ends the call once that outbox drained, as its [`CommitKind`] states. Only
-//! the commit pushes on a call's outbox and reports a turn's marks.
+//! the commit pushes on a call's outbox and reports a turn's marks. A turn on
+//! the body a poll watchdog read stuck, fenced off before its call's
+//! discharge, stops at the next of the commit's fence checks (ADR-0057 §6).
 
 mod held;
 mod rider;
@@ -141,6 +143,9 @@ pub(super) async fn commit_turn(
     turn: &(dyn std::fmt::Display + Sync),
     trigger: Option<&CallEvent>,
 ) {
+    if fenced(ctx, call_ref) {
+        return;
+    }
     let message = trigger.and_then(|e| match e {
         CallEvent::Sip { message, .. } => Some(message.as_ref()),
         _ => None,
@@ -179,6 +184,9 @@ pub(super) async fn commit_turn(
     // only reads it.
     let HandlerResult { call, effects } = result;
     let call = Arc::new(call);
+    if fenced(ctx, call_ref) {
+        return;
+    }
     let wrote = persist(ctx, call_ref, &call, commit, cdr, now_ms).await;
     let version = ctx.state.topology(call_ref).map_or((0, 0), |t| (t.gen, t.bak_gen));
     reach(ctx, call_ref, TurnPoint::Logged, version, wrote, kind, None).await;
@@ -203,6 +211,9 @@ pub(super) async fn commit_turn(
             limiter_releases,
             ..TurnEntry::new(ctx, call_ref, call, now_ms, effects.outbound, mark)
         };
+        if fenced(ctx, call_ref) {
+            return;
+        }
         push(ctx, call_ref, entry).await;
         ctx.outboxes.drained(call_ref).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
@@ -258,12 +269,21 @@ pub(super) async fn commit_turn(
         callouts,
         ..TurnEntry::new(ctx, call_ref, call, now_ms, effects.outbound, mark)
     };
+    if fenced(ctx, call_ref) {
+        return;
+    }
     push(ctx, call_ref, entry).await;
+    if fenced(ctx, call_ref) {
+        return;
+    }
 
     // A turn that ends the call releases it once its outbox drained: the call
     // stays resident and takes no turn until then.
     if commit.removes() {
         ctx.outboxes.drained(call_ref).await;
+        if fenced(ctx, call_ref) {
+            return;
+        }
         if commit == CommitKind::DeleteAfterDrain {
             ctx.state.log_delete(call_ref);
         }
@@ -301,6 +321,9 @@ async fn persist(
         CommitKind::DeleteAfterDrain => {
             if cdr {
                 ctx.cdr.write(call, now_ms).await;
+            }
+            if fenced(ctx, call_ref) {
+                return false;
             }
             ctx.state.write(Arc::clone(call))
         }
@@ -376,6 +399,9 @@ pub(super) async fn commit_cancel(
     call: &Call,
     invite: &SipRequest,
 ) {
+    if fenced(ctx, call_ref) {
+        return;
+    }
     let mut marked = call.clone();
     marked.setup_cancelled = true;
     let call = Arc::new(marked);
@@ -388,7 +414,20 @@ pub(super) async fn commit_cancel(
         cancel: Some(HeldCancel::of(invite)),
         ..TurnEntry::new(ctx, call_ref, call, now_ms, Vec::new(), (version, wrote, kind))
     };
+    if fenced(ctx, call_ref) {
+        return;
+    }
     push(ctx, call_ref, entry).await;
+}
+
+/// Whether this turn runs on the body a poll watchdog read stuck, whose call
+/// the exit discharges without it: it stops here.
+pub(super) fn fenced(ctx: &RouterCtx, call_ref: &str) -> bool {
+    let fenced = ctx.dispatcher.fenced_here();
+    if fenced {
+        tracing::warn!(%call_ref, "a turn read stuck went on after its call's discharge: dropped");
+    }
+    fenced
 }
 
 /// Queue `entry` on `call_ref`'s outbox behind the call's latest write.

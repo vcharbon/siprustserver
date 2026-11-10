@@ -116,6 +116,13 @@ pub trait CdrWriter: Send + Sync {
     /// inline holds nothing to close.
     async fn close(&self, deadline: Instant);
 
+    /// Whether a close has begun: a record written from then on may be
+    /// counted dropped rather than delivered. A sink that writes inline never
+    /// is.
+    fn closing(&self) -> bool {
+        false
+    }
+
     /// The task this sink delivers through, when it has one: the worker ends
     /// when that task ends.
     fn task(&self) -> Option<tokio::task::AbortHandle> {

@@ -3,7 +3,7 @@
 //! *types*, scopes, keys and entries live in [`crate::model::timer`]; live
 //! scheduling lives in the b2bua timer driver.
 
-use crate::model::{Call, TimerEntry, TimerKey};
+use crate::model::{Call, Snoozed, TimerEntry, TimerKey};
 
 /// Safety-net timer delay for the `terminating` state (ms). 32 s = SIP Timer
 /// H/J — beyond it no legitimate BYE/2xx retransmit can land.
@@ -39,13 +39,29 @@ pub fn cap_keepalive_fire_at(fire_at: i64, now_ms: i64, keepalive_interval_ms: i
 }
 
 /// Arm `key` to fire at `fire_at` under the call's next generation,
-/// replacing the entry the key held; the entry to schedule.
+/// replacing the entry the key held and dropping its snooze count; the entry
+/// to schedule.
 pub fn arm_timer(call: &mut Call, key: TimerKey, fire_at: i64) -> TimerEntry {
     call.timer_generation += 1;
     let entry = TimerEntry { key, generation: call.timer_generation, fire_at };
     call.timers.retain(|t| t.key != entry.key);
+    call.snoozes.retain(|s| s.key != entry.key);
     call.timers.push(entry.clone());
     entry
+}
+
+/// Snooze `key`: arm it to fire again at `fire_at` as [`arm_timer`] does, and
+/// count one more snooze of it; the entry to schedule.
+pub fn snooze_timer(call: &mut Call, key: TimerKey, fire_at: i64) -> TimerEntry {
+    let count = snoozes(call, &key).saturating_add(1);
+    let entry = arm_timer(call, key, fire_at);
+    call.snoozes.push(Snoozed { key: entry.key.clone(), count });
+    entry
+}
+
+/// How many times `key` was snoozed since it was last armed fresh.
+pub fn snoozes(call: &Call, key: &TimerKey) -> u32 {
+    call.snoozes.iter().find(|s| &s.key == key).map_or(0, |s| s.count)
 }
 
 /// Take the entry `key` holds off the ledger, if any.

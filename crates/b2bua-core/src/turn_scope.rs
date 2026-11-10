@@ -76,6 +76,11 @@ impl TurnScope {
         true
     }
 
+    /// The actions charged to the turn so far.
+    pub fn actions(&self) -> u64 {
+        self.actions
+    }
+
     /// The cap the turn crossed, if it crossed one.
     pub fn tripped(&self) -> Option<Cap> {
         self.tripped

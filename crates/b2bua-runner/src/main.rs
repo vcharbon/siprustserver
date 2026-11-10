@@ -57,6 +57,7 @@
 //!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
 //!   B2BUA_CAP_* per-call caps (ADR-0057): LEGS / ATTEMPTS / CDR_EVENTS (+ _PER_HOUR), TIMERS, REQUESTS, DIALOGS, HEADER_UPDATES, EXT_BYTES, ACTIONS_PER_TURN, SERVICE_HTTP_TIMEOUT_MS (defaults and relations in docs/TUNING.md; never 0)
+//!   B2BUA_STUCK_POLL_CPU_MS the CPU one poll may spend on one runtime thread before the worker discharges the call it serves and exits with code 70 (default 10000; 100..=600000; ADR-0057 §6)
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60, >= keepalive + Timer F + 10 s, > B2BUA_INVITE_TXN_TIMEOUT_SEC)
 //!   B2BUA_SETUP_TIMEOUT_MS a-leg total setup deadline in ms, reroutes included (default 150000, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
 //!   B2BUA_INVITE_TXN_TIMEOUT_SEC out-of-dialog INVITE txn bound, both call halves (default 158; range 33..=600)

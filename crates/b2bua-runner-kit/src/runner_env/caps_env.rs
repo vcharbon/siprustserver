@@ -11,13 +11,19 @@
 //!   admissions;
 //! - `B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS` above a held request's answer
 //!   deadline less the answer margin: a service's answer would come after the
-//!   request it holds was answered.
+//!   request it holds was answered;
+//! - `B2BUA_CAP_ACTIONS_PER_TURN` at or below `B2BUA_CAP_LEGS` plus the
+//!   teardown's two further actions: a call at its base leg cap could not be
+//!   torn down.
 
 use b2bua::config::{AgeCap, CallCaps, Cap};
 
 use crate::stated;
 
 const SERVICE_HTTP_TIMEOUT: &str = "B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS";
+
+/// The actions a teardown takes beside one per unresolved leg.
+const TEARDOWN_ACTIONS: u64 = 2;
 
 /// The caps `lookup` states over the defaults. An unparsable value is an
 /// `Err` naming it.
@@ -88,6 +94,14 @@ pub(crate) fn check_caps(caps: &CallCaps) -> Result<(), String> {
             ));
         }
     }
+    let (fuel, legs) = (caps.actions_per_turn, caps.legs.base);
+    if fuel <= legs.saturating_add(TEARDOWN_ACTIONS) {
+        out.push(format!(
+            "B2BUA_CAP_ACTIONS_PER_TURN={fuel} <= B2BUA_CAP_LEGS={legs} + {TEARDOWN_ACTIONS}: the \
+             teardown of a call at its leg cap, one action per unresolved leg and two more, \
+             would trip its own fuel"
+        ));
+    }
     let longest = longest_service_http_ms();
     if caps.service_http_timeout_ms > longest {
         out.push(format!(
@@ -121,14 +135,30 @@ mod caps_env_tests {
     fn a_zero_cap_and_too_few_attempts_are_refused() {
         let caps = caps_from_lookup(lookup(&[
             ("B2BUA_CAP_TIMERS", "0"),
-            ("B2BUA_CAP_LEGS", "200"),
+            ("B2BUA_CAP_LEGS", "3000"),
             ("B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS", "30000"),
         ]))
         .expect("every value parses");
         let err = check_caps(&caps).unwrap_err();
         assert!(err.contains("B2BUA_CAP_TIMERS=0"), "{err}");
-        assert!(err.contains("B2BUA_CAP_ATTEMPTS=720 < B2BUA_CAP_LEGS=200"), "{err}");
+        assert!(err.contains("B2BUA_CAP_ATTEMPTS=12000 < B2BUA_CAP_LEGS=3000"), "{err}");
         assert!(err.contains("B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS=30000 > 26000"), "{err}");
+    }
+
+    #[test]
+    fn a_fuel_that_cannot_tear_down_a_call_at_its_leg_cap_is_refused() {
+        let caps = caps_from_lookup(lookup(&[
+            ("B2BUA_CAP_ACTIONS_PER_TURN", "1202"),
+            ("B2BUA_CAP_LEGS", "1200"),
+        ]))
+        .expect("every value parses");
+        let err = check_caps(&caps).unwrap_err();
+        assert!(
+            err.contains("B2BUA_CAP_ACTIONS_PER_TURN=1202 <= B2BUA_CAP_LEGS=1200 + 2"),
+            "{err}"
+        );
+        let caps = CallCaps { actions_per_turn: 1203, ..caps };
+        assert_eq!(check_caps(&caps), Ok(()));
     }
 
     #[test]

@@ -351,7 +351,9 @@ pub(super) fn check_declared_effects(
             Some(format!("{kind:?}"))
         } else {
             match action {
-                RuleAction::ScheduleTimer { key, .. } | RuleAction::CancelTimer { key }
+                RuleAction::ScheduleTimer { key, .. }
+                | RuleAction::SnoozeTimer { key, .. }
+                | RuleAction::CancelTimer { key }
                     if !declares_timer(rule, key) =>
                 {
                     Some(format!("timer {key:?}"))

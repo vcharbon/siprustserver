@@ -222,6 +222,12 @@ impl<T> PerCallDispatcher<T> {
         self.in_flight.abort(call_ref)
     }
 
+    /// Whether the calling task is the body fenced off as stuck; see
+    /// [`InFlight::fenced_here`].
+    pub fn fenced_here(&self) -> bool {
+        self.in_flight.fenced_here()
+    }
+
     /// The handle on every call's in-flight body.
     pub fn in_flight(&self) -> InFlight {
         self.in_flight.clone()

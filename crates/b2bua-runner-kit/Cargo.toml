@@ -19,6 +19,8 @@ workspace = true
 # The cluster key a worker signs its via-extension with (`B2BUA_CLUSTER_KEY`).
 sip-ids = { path = "../sip-ids" }
 lock-poison = { path = "../lock-poison" }
+# The poll watchdog the runtime is built with (ADR-0057 §6).
+poll-watchdog = { path = "../poll-watchdog" }
 metric-catalogue = { path = "../metric-catalogue" }
 metric-values = { path = "../metric-values" }
 jemalloc-stats = { path = "../jemalloc-stats" }
@@ -55,6 +57,7 @@ kube = { version = "4.2.0", default-features = false, features = ["client", "rus
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
+poll-watchdog = { path = "../poll-watchdog", features = ["testkit"] }
 b2bua = { path = "../b2bua", features = ["testkit"] }
 # The fixed-key turn a test call is built under.
 sip-ids = { path = "../sip-ids", features = ["testkit"] }

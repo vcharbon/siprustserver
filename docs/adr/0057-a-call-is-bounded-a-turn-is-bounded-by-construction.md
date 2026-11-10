@@ -191,7 +191,8 @@ hooks, under `tokio_unstable`), through a thread-local: only threads that run
 polls register, so blocking-pool threads, which tokio also starts its workers
 from, never do. Each registered thread keeps a sequence number in its slot, odd
 inside a poll and even between polls, and its thread id. A watchdog std thread
-reads the slots once a second, and each registered thread's CPU time
+reads the slots once a second (twice per threshold below two seconds), and each
+registered thread's CPU time
 (`/proc/self/task/<tid>/schedstat`). A poll is **stuck** when its slot stayed odd
 on the same sequence number while its thread spent more than
 `B2BUA_STUCK_POLL_CPU_MS` (default 10 000) of CPU. A thread that is throttled,
@@ -210,10 +211,21 @@ not re-run by the backup's takeover or by the node's own reclaim after its
 restart. The parties of that one call are left connected. The process then
 leaves through the worker's shutdown path; the watchdog thread arms a hard
 `std::process::exit` past the shutdown's flush bounds plus one second, so the
-exit completes even when the only worker is the stuck one. HA takes the node's
+exit completes even when the only worker is the stuck one. The discharge first
+fences the stuck body off: a turn of it that goes on, slow rather than stuck,
+stops at its next fence check (before its write, its CDR, its sends and its
+release), and the call's worker runs no further item of it; a body that is no
+longer the call's in-flight one ended its turn, and its call is left to the
+takeover, as it is once the CDR sink's close has begun or the node is
+superseded. The discharge owes the release of the call's limiter key whatever
+the record says: the stuck turn may have sent an admit. The
+runtime's workers keep no LIFO slot: a task the stuck poll woke last would wait
+there, unstolen, and the discharge's write would never reach the backup. The
+cost is the slot's shortcut: a task one task wakes runs after those already
+queued on that worker. HA takes the node's
 other calls over (ADR-0047). The front proxy's runner carries the same watchdog
-and hard exit; it holds no call, and its traffic moves off it as its route is
-withdrawn (ADR-0056).
+and hard exit (`PROXY_STUCK_POLL_CPU_MS`); it holds no call, and its traffic
+moves off it as its route is withdrawn (ADR-0056).
 
 A spin that escapes §5 thus costs one node per delivery of the input that causes
 it, and the discharge keeps the record from delivering it again; §5 and fuzzing
@@ -231,7 +243,11 @@ are what keep that input from existing.
   allocated bytes of an in-dialog `rule_chain_turn`, jemalloc's
   `thread.allocated` read around that synchronous call on the one thread it runs
   on (the initial turn's folds span awaits and are not measured);
-- the watchdog's log line, the last before the exit.
+- the watchdog's log line, the last before the exit;
+- `b2bua_cap_peak{cap}`, the largest reading of each cap a landed turn left
+  (a collection's length, the ext value's bytes, the turn's actions), and
+  `b2bua_cap_peak_per_hour{cap}`, an aged cap's reading per started hour of
+  the call's grant: the measurement of §9.
 
 A defect-cap trip is an alert; a peer-cap trip is a counter.
 
@@ -244,25 +260,35 @@ settings' documentation, on by default. Startup refuses:
 - `B2BUA_CAP_ATTEMPTS` below `B2BUA_CAP_LEGS × (MAX_LIMITER_FAILOVER + 1)`, since
   every leg may follow refused admissions;
 - `B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS` above the service answer deadline less its
-  margin.
+  margin;
+- `B2BUA_CAP_ACTIONS_PER_TURN` at or below `B2BUA_CAP_LEGS` (its base) plus the
+  teardown's two further actions: a call at its leg cap before any grant could
+  not be torn down. A teardown takes one action per unresolved leg, far fewer
+  than the legs a granted call may have dialled.
 
 The upstream defaults are constants stated with their derivation from the
 scenario catalogue's heaviest shapes; a deployment sets its own from measurement
 (§9).
 
-### 9. Defaults are a measured maximum times ten
+### 9. Defaults are a measured maximum times a factor set by what the cap costs
 
-A cap on what a call holds at once (timers, requests, dialogs, header updates,
-ext bytes) defaults to ten times the largest value measured over the replay
-corpus and a soak: the maximum over valid calls, never the average. The fuel's
-default is checked against the turns that reach it: the initial turn's longest
-failover chain with every service's start, and the teardown of a call at its leg
-cap. A cap on what grows with a call's age (legs, attempts, CDR events) is a base
+Each default is the largest value measured over the replay corpus and a soak
+(the maximum over valid calls, never the average) times a factor that follows
+what reaching the cap costs the node:
+
+| Caps | Factor | Why |
+|---|---|---|
+| the fuel | 500 and more | an action costs CPU and the turn's transient effects, and the CPU has orders of magnitude of room; above the teardown of a call at its base leg cap |
+| attempts | 1 000 | an attempt record holds tens of bytes |
+| legs | 100 | a route count, and the record's heaviest entry: kilobytes each |
+| timers, requests, dialogs, CDR events, header updates, ext bytes | 20 | memory a call holds: past twenty times, a few runaway calls weigh on the node |
+
+A cap on what grows with a call's age (legs, attempts, CDR events) is a base
 plus a rate per hour of the call's granted maximum duration, read from the call,
-each ten times the largest measured, since captures truncate long calls. The
-measurement also checks the sizing formula's memory per call with every call at
-its caps; past that, admission (ADR-0037) refuses new calls before the node grows
-further.
+each its factor times the largest measured, since captures truncate long calls.
+The measurement also states the memory one call holds with every cap reached at
+once; past what the sizing formula counts, admission (ADR-0037) refuses new
+calls before the node grows further.
 
 ## Consequences
 

@@ -1,6 +1,8 @@
 //! The tokio runtime a worker binary runs on, with its thread stack size set
 //! explicitly (ADR-0051 §4): a stack overflow aborts the process, so the
-//! budget is stated, not inherited.
+//! budget is stated, not inherited. Its threads register with the process's
+//! poll watchdog on their first poll (ADR-0057 §6), which `RunnerEnv::bind`
+//! starts.
 
 use std::future::Future;
 use std::process::ExitCode;
@@ -17,9 +19,15 @@ pub const THREAD_STACK_BYTES: usize = 4 * 1024 * 1024;
 pub const EXIT_THREADS_BOUND: Duration = Duration::from_secs(1);
 
 /// The multi-thread runtime with every driver enabled, as `#[tokio::main]`
-/// builds it, and threads of [`THREAD_STACK_BYTES`].
+/// builds it, threads of [`THREAD_STACK_BYTES`], and the poll hooks of the
+/// process's watchdog. Its workers keep no LIFO slot: a task a stuck poll
+/// woke last would wait there for ever, since no other worker steals from
+/// it, and the stuck call's discharge needs every task but the stuck one.
 pub fn runtime() -> std::io::Result<Runtime> {
-    Builder::new_multi_thread().enable_all().thread_stack_size(THREAD_STACK_BYTES).build()
+    let mut builder = Builder::new_multi_thread();
+    builder.enable_all().thread_stack_size(THREAD_STACK_BYTES).disable_lifo_slot();
+    poll_watchdog::Watchdog::process().install(&mut builder);
+    builder.build()
 }
 
 /// Run `serve` to its exit code on [`runtime`], then return within

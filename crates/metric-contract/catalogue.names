@@ -80,6 +80,8 @@ b2bua-runner b2bua_repeat_give_ups_total counter fixed {obligation}
 b2bua-runner b2bua_model_defects_total counter fixed {invariant}
 b2bua-runner b2bua_cap_trips_total counter fixed {cap,kind|cap,kind}
 b2bua-runner b2bua_cap_near_total counter fixed {cap}
+b2bua-runner b2bua_cap_peak gauge fixed {cap}
+b2bua-runner b2bua_cap_peak_per_hour gauge fixed {cap}
 b2bua-runner b2bua_repl_quiet_turns_total counter fixed {kind}
 b2bua-runner b2bua_repl_applied_total counter semi_open {flow,peer,op}
 b2bua-runner b2bua_repl_noops_sent_total counter semi_open {flow,peer}
@@ -229,6 +231,7 @@ b2bua-runner http_request_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner metric_values_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner sip_net_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner b2bua_runner_poisoned_lock_recoveries_total counter fixed {lock}
+b2bua-runner poll_watchdog_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner jemalloc_allocated_bytes gauge fixed {}
 b2bua-runner jemalloc_active_bytes gauge fixed {}
 b2bua-runner jemalloc_resident_bytes gauge fixed {}
@@ -330,6 +333,7 @@ sip-proxy-runner sip_proxy_branch_memo_evictions_total counter fixed {}
 sip-proxy-runner sip_proxy_task_restarts_total counter fixed {task}
 sip-proxy-runner metric_values_poisoned_lock_recoveries_total counter fixed {lock}
 sip-proxy-runner sip_net_poisoned_lock_recoveries_total counter fixed {lock}
+sip-proxy-runner poll_watchdog_poisoned_lock_recoveries_total counter fixed {lock}
 sip-proxy-runner log_lines_dropped_total counter fixed {}
 sip-proxy-runner trace_dropped_no_exporter_total counter fixed {}
 sip-proxy-runner trace_denied_rate_total counter fixed {}

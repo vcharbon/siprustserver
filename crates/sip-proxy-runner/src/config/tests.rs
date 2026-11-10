@@ -41,6 +41,18 @@ fn the_retry_after_jitter_is_bounded() {
     assert!(errors.iter().any(|e| e.contains("PROXY_RETRY_AFTER_JITTER_SEC")), "{errors:?}");
 }
 
+/// The stuck-poll threshold takes 100..=600000 ms, 10 s by default.
+#[test]
+fn the_stuck_poll_threshold_is_bounded() {
+    assert_eq!(boot(&[]).expect("valid").stuck_poll_cpu, Duration::from_secs(10));
+    let cfg = boot(&[("PROXY_STUCK_POLL_CPU_MS", "200")]).expect("valid");
+    assert_eq!(cfg.stuck_poll_cpu, Duration::from_millis(200));
+    for bad in ["0", "99", "600001"] {
+        let errors = boot(&[("PROXY_STUCK_POLL_CPU_MS", bad)]).expect_err(bad);
+        assert!(errors.iter().any(|e| e.contains("PROXY_STUCK_POLL_CPU_MS")), "{errors:?}");
+    }
+}
+
 /// The branch memo's bounds default to the design working set and take any
 /// positive count; zero is refused.
 #[test]

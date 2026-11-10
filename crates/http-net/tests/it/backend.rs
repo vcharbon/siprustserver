@@ -343,6 +343,45 @@ async fn the_in_flight_cap_holds_under_a_flood() {
     assert_eq!(metrics::slot_wait_ms("cap-flood:8080"), 6 * 2_500);
 }
 
+/// Cap 4, a share of 2: ten shared requests to a blackholed backend hold at
+/// most 2 slots, the 8 others wait on the share and fail at their budget
+/// unsent, counted under the share's name; the backend keeps 2 slots free
+/// for the requests outside the share throughout.
+#[tokio::test(start_paused = true)]
+async fn a_share_holds_its_requests_below_the_backend_cap() {
+    let net = SimulatedHttpNetwork::new().with_connect_timeout(Duration::from_secs(60));
+    let breaker = BreakerConfig::probing("/health");
+    let settings = ClientSettings::with_max_in_flight(4);
+    let rig = Rig::on("share-flood:8080", settings, breaker, net).await;
+    rig.behave(Behaviour::Blackhole);
+    let shared = rig.client.share("services", 2);
+    let flood: Vec<_> = (0..10)
+        .map(|_| {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                shared.attempt(HttpRequest::post("/event", Vec::new()), ATTEMPT).await
+            })
+        })
+        .collect();
+    let mut most = 0;
+    for _ in 0..26 {
+        settle().await;
+        most = most.max(rig.net.in_flight(rig.dst));
+        assert!(rig.client.free_slots() >= 2, "the share never takes the others' slots");
+        advance_settled(Duration::from_millis(100)).await;
+    }
+    let mut outcomes = Vec::new();
+    for task in flood {
+        outcomes.push(task.await.unwrap());
+    }
+    assert_eq!(most, 2, "never more than the share in flight");
+    let saturated = outcomes.iter().filter(|o| **o == Err(AttemptError::Saturated)).count();
+    let timed_out = outcomes.iter().filter(|o| **o == Err(AttemptError::Timeout)).count();
+    assert_eq!((timed_out, saturated), (2, 8), "{outcomes:?}");
+    assert_eq!(metrics::slot_waits("share-flood:8080/services"), 8);
+    assert_eq!(metrics::slot_waits("share-flood:8080"), 0, "the backend's slots never ran out");
+}
+
 // ── rotation ────────────────────────────────────────────────────────────────
 
 /// Period 1 s: a request after the period starts the name's fresh lookup and

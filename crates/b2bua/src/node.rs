@@ -30,13 +30,13 @@ mod drain;
 #[cfg(test)]
 mod drain_tests;
 mod fence;
-use fence::Fence;
 mod introspection;
 #[cfg(test)]
 mod loops_tests;
 mod readiness;
 mod release_all;
 mod samplers;
+pub mod stuck;
 pub(crate) mod txn_config;
 use txn_config::txn_config;
 #[cfg(test)]
@@ -72,7 +72,7 @@ pub struct B2buaCore {
     tasks: Vec<tokio::task::JoinHandle<()>>,
     /// What stopping this worker's authoring reaches: closed by a simulated
     /// crash and when the worker is superseded (ADR-0055 §6).
-    fence: Arc<Fence>,
+    fence: Arc<fence::Fence>,
     /// The transaction owner and router loops: their pulses and tasks.
     loops: crate::loops::WorkerLoops,
     /// The X11 fail-back command sender of a wired node, retained so the
@@ -459,7 +459,7 @@ impl B2buaCore {
 
         // A worker superseded by a recreation of its ordinal stops authoring
         // the instant it observes it (ADR-0055 §6).
-        let fence = Arc::new(Fence {
+        let fence = Arc::new(fence::Fence {
             tasks: tasks.iter().map(|t| t.abort_handle()).collect(),
             ctx: Arc::downgrade(&ctx),
             supervisor: supervisor.clone(),

@@ -14,3 +14,10 @@ pub fn arm(call: &mut Call, fx: &mut HandlerEffects, key: TimerKey, fire_at: i64
     let entry = call::helpers::arm_timer(call, key, fire_at);
     fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
 }
+
+/// Snooze `key` on `call` (CONTEXT.md "Snooze"): arm it to fire again at
+/// `fire_at` (epoch ms), one more snooze counted, and schedule it on `fx`.
+pub fn snooze(call: &mut Call, fx: &mut HandlerEffects, key: TimerKey, fire_at: i64) {
+    let entry = call::helpers::snooze_timer(call, key, fire_at);
+    fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
+}

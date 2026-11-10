@@ -1,4 +1,5 @@
-//! Backend client counters, by backend (`peer`, the target as configured):
+//! Backend client counters, by backend (`peer`, the target as configured; a
+//! share's slot counters `<peer>/<name>`, [`super::BackendClient::share`]):
 //! the in-flight cap's saturation and wait, retries, breaker transitions,
 //! and the 5xx answers by what became of their connection. Counters only, never a per-request log line (ADR-0026). A
 //! runner appends [`prometheus_text`] to its `/metrics` body. Capped like

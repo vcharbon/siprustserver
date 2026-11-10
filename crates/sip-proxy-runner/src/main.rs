@@ -74,6 +74,10 @@
 //!                    crash-looping (default 20000)
 //!   PROXY_DRAIN_GRACE_MS  SIGTERM (/readyz Draining) to exit, ms ≥ 1 (8800),
 //!                    past the withdrawal of the node's routes (ADR-0056)
+//!   PROXY_STUCK_POLL_CPU_MS  the CPU one poll may spend on one runtime thread
+//!                    before the proxy exits with the watchdog's code, its
+//!                    routes then withdrawn (ADR-0057 §6), ms 100..=600000
+//!                    (default 10000); only the poll's own CPU counts
 //!   PROXY_EXT_INTERFACE / PROXY_EXT_NEXT_HOPS / PROXY_EXT_FACE_CHECK_MS  the
 //!                    external interface, its IPv4 next hops, read every 500 ms:
 //!                    /readyz wants it up, one hop resolved (default: no check)
@@ -218,6 +222,10 @@ async fn run() -> Result<i32, String> {
     // Every variable is read and checked before the first bind: a value the
     // proxy cannot honour refuses the boot, naming every problem at once.
     let cfg = ProxyConfig::from_env()?;
+    let watchdog = poll_watchdog::Watchdog::process();
+    watchdog
+        .start(cfg.stuck_poll_cpu)
+        .map_err(|e| format!("the poll watchdog cannot read a thread's CPU time: {e}"))?;
     let sigterm = sigterm()?;
     let metrics_sa = cfg.metrics;
     let advertised = cfg.advertise.clone();
@@ -470,6 +478,9 @@ async fn run() -> Result<i32, String> {
             tracing::error!(outcome = ?res, "FATAL: health probe or dead notifier exited — exiting for restart");
             1
         }
+        // The watchdog logged the poll; it ends the process itself past its
+        // bound when this arm cannot run.
+        _ = watchdog.stuck() => i32::from(poll_watchdog::EXIT_CODE),
     };
     drop(_metrics_server);
     Ok(exit_code)

@@ -18,9 +18,10 @@
 //! `B2BUA_CAP_SERVICE_HTTP_TIMEOUT_MS` clamps a service's HTTP timeout; it
 //! trips nothing.
 //!
-//! The upstream defaults are ten times the heaviest shape of the scenario
-//! catalogue (ADR-0057 §9), each stated beside its value in
-//! [`CallCaps::DEFAULT`]; a deployment sets its own from measurement.
+//! The upstream defaults are the heaviest shape of the scenario catalogue
+//! times the factor ADR-0057 §9 sets by what the cap costs, each stated
+//! beside its value in [`CallCaps::DEFAULT`]; a deployment sets its own from
+//! measurement.
 
 /// One per-call cap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -88,6 +89,25 @@ impl Cap {
         }
     }
 
+    /// The caps on what grows with a call's age, in [`Cap::ALL`] order.
+    pub const AGED: [Cap; 3] = [Cap::Legs, Cap::Attempts, Cap::CdrEvents];
+
+    /// The cap's position in [`Cap::ALL`].
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The cap's position in [`Cap::AGED`]; `None` for a cap on what a call
+    /// holds at once.
+    pub const fn aged_index(self) -> Option<usize> {
+        match self {
+            Cap::Legs => Some(0),
+            Cap::Attempts => Some(1),
+            Cap::CdrEvents => Some(2),
+            _ => None,
+        }
+    }
+
     /// The cap named `label`.
     pub fn of_label(label: &str) -> Option<Cap> {
         Cap::ALL.into_iter().find(|c| c.label() == label)
@@ -148,10 +168,14 @@ pub struct AgeCap {
 impl AgeCap {
     /// The cap of a call granted `granted_ms` (`0`: none granted yet).
     pub fn at(self, granted_ms: i64) -> u64 {
+        self.base.saturating_add(self.per_hour.saturating_mul(Self::started_hours(granted_ms)))
+    }
+
+    /// The started hours of a grant of `granted_ms`; `0` for none or a
+    /// negative one.
+    pub fn started_hours(granted_ms: i64) -> u64 {
         const HOUR_MS: u64 = 3_600_000;
-        let granted = u64::try_from(granted_ms).unwrap_or(0);
-        let hours = granted.div_ceil(HOUR_MS);
-        self.base.saturating_add(self.per_hour.saturating_mul(hours))
+        u64::try_from(granted_ms).unwrap_or(0).div_ceil(HOUR_MS)
     }
 }
 
@@ -173,34 +197,37 @@ pub struct CallCaps {
 }
 
 impl CallCaps {
-    /// The upstream defaults, each ten times the heaviest catalogue shape.
+    /// The upstream defaults: the heaviest catalogue shape times the factor
+    /// of its cap's cost (ADR-0057 §9).
     pub const DEFAULT: CallCaps = CallCaps {
-        // A setup dials at most the decision service's reroute budget (10
-        // routes) plus a media leg and a transfer target: 12. An answered
+        // × 100. A setup dials at most the decision service's reroute budget
+        // (10 routes) plus a media leg and a transfer target: 12. An answered
         // call adds about 6 an hour (release reroutes, transfers).
-        legs: AgeCap { base: 120, per_hour: 60 },
-        // Every leg may follow MAX_LIMITER_FAILOVER (5) refused admissions:
-        // the legs' cap times 6, the floor the startup check holds.
-        attempts: AgeCap { base: 720, per_hour: 360 },
-        // About 2 events per attempt over a 10-route setup, then about 10 an
-        // hour.
-        cdr_events: AgeCap { base: 200, per_hour: 100 },
-        // About 20 at once: the call's setup, duration, keepalive and refresh
-        // timers, a no-answer per ringing leg, a ladder per dialog, an answer
-        // deadline per request in flight.
-        timers: 200,
-        // About 20 at once: relays both ways, keepalive probes, queued
+        legs: AgeCap { base: 1_200, per_hour: 600 },
+        // × 1 000 of the 12 routes and 6 an hour, above the floor the
+        // startup check holds: every leg may follow MAX_LIMITER_FAILOVER (5)
+        // refused admissions, the legs' cap times 6.
+        attempts: AgeCap { base: 12_000, per_hour: 6_000 },
+        // × 20. About 2 events per attempt over a 10-route setup, then about
+        // 10 an hour.
+        cdr_events: AgeCap { base: 400, per_hour: 200 },
+        // × 20. About 20 at once: the call's setup, duration, keepalive and
+        // refresh timers, a no-answer per ringing leg, a ladder per dialog, an
+        // answer deadline per request in flight.
+        timers: 400,
+        // × 20. About 20 at once: relays both ways, keepalive probes, queued
         // NOTIFYs, service requests.
-        requests: 200,
-        // A forking callee shows about 5 early dialogs.
-        dialogs: 50,
-        // A decision states about 50 header lines over its scopes.
-        header_updates: 500,
-        // A service's state stays near 6 KiB.
-        ext_bytes: 65_536,
-        // The initial turn's longest failover chain with every service's
-        // start, or the teardown of a call at its leg cap: about 200.
-        actions_per_turn: 2_000,
+        requests: 400,
+        // × 20. A forking callee shows about 5 early dialogs.
+        dialogs: 100,
+        // × 20. A decision states about 50 header lines over its scopes.
+        header_updates: 1_000,
+        // × 20. A service's state stays near 6 KiB.
+        ext_bytes: 122_880,
+        // × 500 of about 200 actions, the initial turn's longest failover
+        // chain with every service's start; above the teardown of a call at
+        // its base leg cap, one action per unresolved leg and two more.
+        actions_per_turn: 100_000,
         // A held request's answer deadline (Timer F less T2, 28 s) less the
         // 2 s answer margin (ADR-0039): the longest a service's answer can
         // take and still answer the request it holds.
@@ -241,6 +268,18 @@ mod tests {
         assert_eq!(cap.at(3_600_000), 14);
         assert_eq!(cap.at(3_600_001), 18);
         assert_eq!(cap.at(-5), 10, "a negative grant reads as none");
+    }
+
+    #[test]
+    fn every_cap_knows_its_positions() {
+        for (at, cap) in Cap::ALL.into_iter().enumerate() {
+            assert_eq!(cap.index(), at);
+        }
+        for (at, cap) in Cap::AGED.into_iter().enumerate() {
+            assert_eq!(cap.aged_index(), Some(at));
+        }
+        let aged = Cap::ALL.into_iter().filter(|c| c.aged_index().is_some()).count();
+        assert_eq!(aged, Cap::AGED.len());
     }
 
     #[test]

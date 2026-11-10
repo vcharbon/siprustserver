@@ -45,6 +45,14 @@ impl ActionExecutor<'_> {
                 }
                 self.schedule(call, fx, key.clone(), delay.as_millis());
             }
+            RuleAction::SnoozeTimer { key, delay } => {
+                if key.timer_type.is_framework_only() {
+                    let detail = format!("a rule snoozed {key:?}; the snooze is dropped");
+                    self.turn.notes.defect(crate::turn_notes::FRAMEWORK_TIMER, detail, call);
+                    return;
+                }
+                self.snooze(call, fx, key.clone(), delay.as_millis());
+            }
             RuleAction::CancelTimer { key } => self.disarm(call, fx, key),
             RuleAction::CancelAllTimers => {
                 call.timers.clear();

@@ -155,7 +155,8 @@ async fn an_answered_call_at_the_requests_cap_with_a_relay_pending_is_byed() {
 }
 
 /// Any answered call over the default caps lands every turn: the caps are a
-/// failsafe that shapes no valid call.
+/// failsafe that shapes no valid call. Its turns' readings reach the peak
+/// gauges: one leg, the INFO relay in flight, timers, CDR events and actions.
 #[tokio::test(start_paused = true)]
 async fn the_default_caps_trip_no_valid_call() {
     let s = scene("cap-defaults", |_| {}).await;
@@ -166,7 +167,13 @@ async fn the_default_caps_trip_no_valid_call() {
     info.expect(200).await;
     s.hangup(&mut dialog).await;
     settle_until(|| s.b2bua.is_reaped()).await;
-    assert!(Cap::ALL.iter().all(|c| s.b2bua.metrics().cap_trips_of(*c) == 0));
+    let m = s.b2bua.metrics();
+    assert!(Cap::ALL.iter().all(|c| m.cap_trips_of(*c) == 0));
+    assert_eq!(m.cap_peak_of(Cap::Legs), 1);
+    assert!(m.cap_peak_of(Cap::Requests) >= 1, "the INFO relay");
+    for cap in [Cap::Timers, Cap::CdrEvents, Cap::ActionsPerTurn] {
+        assert!(m.cap_peak_of(cap) > 0, "{cap:?} read");
+    }
     let _ = s.finish().await;
 }
 

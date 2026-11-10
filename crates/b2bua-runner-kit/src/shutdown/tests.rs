@@ -56,38 +56,60 @@ const LOOP_EXIT: Duration = crate::liveness_env::DEFAULT_LOOP_EXIT;
 /// How far past the exit threshold the wait for the loops reads a stall.
 const WITHIN_TWO_POLLS: Duration = Duration::from_secs(2);
 
+/// A watchdog no runtime thread registers with: no poll ever reads stuck.
+fn unwatched() -> &'static Watchdog {
+    static UNWATCHED: std::sync::OnceLock<Watchdog> = std::sync::OnceLock::new();
+    UNWATCHED.get_or_init(Watchdog::new)
+}
+
+fn stuck_on(call_ref: Option<String>) -> Stuck {
+    Stuck { task: None, thread: 1, cpu: Duration::from_secs(11), call_ref }
+}
+
+#[tokio::test]
+async fn a_stuck_poll_wins_over_every_other_stop() {
+    let out = LoopOut::Ended("router");
+    let stuck = stuck_on(None);
+    let stop =
+        next_stop(ready(stuck.clone()), ready(()), ready(()), ready(()), ready(()), ready(out))
+            .await;
+    assert_eq!(stop, Stop::Stuck(stuck));
+}
+
 #[tokio::test]
 async fn a_withdrawal_with_no_signal_is_a_stop() {
-    let stop = next_stop(pending(), pending(), pending(), ready(()), pending()).await;
+    let stop = next_stop(pending(), pending(), pending(), pending(), ready(()), pending()).await;
     assert_eq!(stop, Stop::Withdrawn);
 }
 
 #[tokio::test]
 async fn a_loop_that_ended_wins_over_a_signal() {
     let out = LoopOut::Ended("router");
-    let stop = next_stop(pending(), pending(), ready(()), pending(), ready(out)).await;
+    let stop = next_stop(pending(), pending(), pending(), ready(()), pending(), ready(out)).await;
     assert_eq!(stop, Stop::Loop(out));
 }
 
 #[tokio::test]
 async fn a_loop_stalled_past_its_exit_wins_over_a_signal() {
     let out = LoopOut::Stalled("router");
-    let stop = next_stop(pending(), pending(), ready(()), pending(), ready(out)).await;
+    let stop = next_stop(pending(), pending(), pending(), ready(()), pending(), ready(out)).await;
     assert_eq!(stop, Stop::Loop(out));
 }
 
 #[tokio::test]
 async fn a_supersession_wins_over_the_loops_its_fence_ends() {
     let out = LoopOut::Ended("router");
-    let stop = next_stop(ready(()), ready(()), pending(), pending(), ready(out)).await;
+    let stop = next_stop(pending(), ready(()), ready(()), pending(), pending(), ready(out)).await;
     assert_eq!(stop, Stop::Superseded);
 }
 
 #[tokio::test]
 async fn sigterm_and_interrupt_are_stops() {
-    let terminate = next_stop(pending(), pending(), ready(()), pending(), pending()).await;
+    let terminate =
+        next_stop(pending(), pending(), pending(), ready(()), pending(), pending()).await;
     assert_eq!(terminate, Stop::Terminate);
-    let interrupt = next_stop(pending(), ready(()), pending(), pending(), pending()).await;
+    let interrupt =
+        next_stop(pending(), pending(), ready(()), pending(), pending(), pending()).await;
     assert_eq!(interrupt, Stop::Interrupt);
 }
 
@@ -348,7 +370,7 @@ async fn a_router_that_stays_stalled_exits_non_zero_at_its_threshold() {
     let start = tokio::time::Instant::now();
     let code = tokio::time::timeout(
         LOOP_EXIT * 2,
-        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending()),
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), pending()),
     )
     .await
     .expect("the stall stops the worker");
@@ -371,7 +393,7 @@ async fn an_owner_that_stays_stalled_exits_non_zero_at_its_threshold() {
     w.ringing_call().await;
     let code = tokio::time::timeout(
         LOOP_EXIT * 2,
-        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending()),
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), pending()),
     )
     .await
     .expect("the owner's stall stops the worker");
@@ -389,7 +411,8 @@ async fn a_turn_under_the_exit_threshold_stops_nothing() {
     let (w, wedge) = wedgeable().await;
     w.stall_router(&wedge).await;
     let under = LOOP_EXIT - Duration::from_secs(2);
-    let serve = serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending());
+    let serve =
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), pending());
     assert!(tokio::time::timeout(under, serve).await.is_err(), "the worker serves on");
     assert_eq!(w.flushes(ReleaseFlushOutcome::Empty), 0);
 }
@@ -402,7 +425,9 @@ async fn a_stalled_workers_exit_is_held_by_no_limiter() {
     w.core.limiter().release("a-key");
     w.stall_router(&wedge).await;
     let start = tokio::time::Instant::now();
-    let code = serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending()).await;
+    let code =
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), pending())
+            .await;
     assert_eq!(code, ExitCode::FAILURE);
     let waited = start.elapsed();
     let bound = LOOP_EXIT + WITHIN_TWO_POLLS + BOUNDS.release_flush + BOUNDS.cdr_flush;
@@ -418,7 +443,8 @@ async fn a_loop_stalled_during_a_drain_cuts_it_short_and_exits_non_zero() {
     w.ringing_call().await;
     let long_grace = DrainBounds { grace: LOOP_EXIT * 4, ..BOUNDS };
     let start = tokio::time::Instant::now();
-    let serve = serve_until_stop(&w.core, "test", long_grace, LOOP_EXIT, pending(), ready(()));
+    let serve =
+        serve_until_stop(&w.core, "test", long_grace, LOOP_EXIT, unwatched(), pending(), ready(()));
     let stall = async {
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(w.core.readiness().is_draining(), "the drain is under way");
@@ -447,7 +473,9 @@ async fn a_drain_with_its_router_stalled_ends_at_its_own_bound() {
     w.ringing_call().await;
     w.stall_router(&wedge).await;
     let start = tokio::time::Instant::now();
-    let code = serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), ready(())).await;
+    let code =
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), ready(()))
+            .await;
     assert_eq!(code, ExitCode::SUCCESS);
     let waited = start.elapsed();
     let bound = BOUNDS.grace + BOUNDS.release_flush * 2 + BOUNDS.cdr_flush;
@@ -461,7 +489,7 @@ async fn a_withdrawal_drains_and_exits_zero() {
     w.withdraw();
     let code = tokio::time::timeout(
         Duration::from_secs(10),
-        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending()),
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), pending()),
     )
     .await
     .expect("the withdrawal stops the worker");
@@ -478,7 +506,7 @@ async fn sigterm_drains_a_cordoned_worker_and_exits_zero() {
     assert_eq!(w.core.readiness_state(), b2bua::repl::ReadinessState::Cordoned);
     let code = tokio::time::timeout(
         Duration::from_secs(10),
-        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), ready(())),
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), ready(())),
     )
     .await
     .expect("SIGTERM stops the worker");
@@ -496,7 +524,7 @@ async fn a_superseded_worker_exits_non_zero_without_a_drain() {
     w.supersede();
     let code = tokio::time::timeout(
         Duration::from_millis(100),
-        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending()),
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), pending()),
     )
     .await
     .expect("the supersession stops the worker at once");
@@ -518,7 +546,7 @@ async fn a_loop_task_that_ends_flushes_the_releases_and_exits_non_zero() {
     w.close_sip();
     let code = tokio::time::timeout(
         Duration::from_secs(10),
-        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending()),
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), pending()),
     )
     .await
     .expect("the ended loop stops the worker");
@@ -532,7 +560,8 @@ async fn a_loop_task_that_ends_mid_drain_cuts_it_short_and_exits_non_zero() {
     w.ringing_call().await;
     w.withdraw();
     let start = tokio::time::Instant::now();
-    let serve = serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending());
+    let serve =
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), pending());
     let close = async {
         tokio::time::sleep(Duration::from_millis(1_500)).await;
         assert!(w.core.readiness().is_draining(), "the drain is under way");
@@ -611,7 +640,9 @@ async fn sigterm_exits_once_the_queued_cdrs_are_written() {
     for n in 0..4 {
         w.core.cdr().write(&a_terminated_call(n), 2_000).await;
     }
-    let code = serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), ready(())).await;
+    let code =
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), ready(()))
+            .await;
     assert_eq!(code, ExitCode::SUCCESS);
     assert_eq!(sink.written.snapshot().len(), 4, "every queued CDR is written before the exit");
     assert_eq!(w.core.metrics().cdr_dropped_total(), 0);
@@ -626,7 +657,9 @@ async fn the_cdrs_the_flush_bound_gives_up_are_counted_dropped() {
         w.core.cdr().write(&a_terminated_call(n), 2_000).await;
     }
     let start = tokio::time::Instant::now();
-    let code = serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), ready(())).await;
+    let code =
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), ready(()))
+            .await;
     assert_eq!(code, ExitCode::SUCCESS);
     let written = sink.written.snapshot().len() as u64;
     let dropped = w.core.metrics().cdr_dropped_total();
@@ -642,7 +675,9 @@ async fn an_interrupt_and_an_ended_loop_exit_once_the_queued_cdrs_are_written() 
     for n in 0..4 {
         w.core.cdr().write(&a_terminated_call(n), 2_000).await;
     }
-    let code = serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, ready(()), pending()).await;
+    let code =
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), ready(()), pending())
+            .await;
     assert_eq!(code, ExitCode::SUCCESS);
     assert_eq!(sink.written.snapshot().len(), 4, "interrupt");
 
@@ -651,7 +686,78 @@ async fn an_interrupt_and_an_ended_loop_exit_once_the_queued_cdrs_are_written() 
         w.core.cdr().write(&a_terminated_call(n), 2_000).await;
     }
     w.close_sip();
-    let code = serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, pending(), pending()).await;
+    let code =
+        serve_until_stop(&w.core, "test", BOUNDS, LOOP_EXIT, unwatched(), pending(), pending())
+            .await;
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(sink.written.snapshot().len(), 4, "loop ended");
+}
+
+/// The exit of a poll read stuck whose task no longer runs a turn of the
+/// call it named: Draining, nothing discharged, the releases flushed, and the
+/// watchdog's code.
+#[tokio::test(start_paused = true)]
+async fn a_stuck_exit_whose_turn_is_over_drains_and_exits_with_the_watchdog_code() {
+    let w = worker().await;
+    w.ringing_call().await;
+    let calls = (w.core.live_calls_probe())().expect("the live calls read");
+    let call_ref = calls.first().expect("the ringing call").call_ref.clone();
+    let task = tokio::spawn(async {});
+    let mut stuck = stuck_on(Some(call_ref));
+    stuck.task = Some(task.id());
+    task.await.expect("the task ran");
+    let code = stuck_exit(&w.core, "test", BOUNDS, stuck).await;
+    assert_eq!(code, ExitCode::from(poll_watchdog::EXIT_CODE));
+    assert!(w.core.readiness().is_draining(), "the worker steers new calls away");
+    assert_eq!(w.core.active_calls(), 1, "no stuck turn holds the call: it is left to HA");
+    assert_eq!(w.flushes(ReleaseFlushOutcome::Empty), 1, "the release flush ran");
+}
+
+/// A poll read stuck while a SIGTERM drain waits on its live call cuts the
+/// drain short for the stuck exit and its code.
+#[tokio::test(start_paused = true)]
+async fn a_poll_read_stuck_mid_drain_takes_the_stuck_exit() {
+    let w = worker().await;
+    w.ringing_call().await;
+    let watchdog = Watchdog::new();
+    let long_grace = DrainBounds { grace: Duration::from_secs(60), ..BOUNDS };
+    let start = tokio::time::Instant::now();
+    let serve =
+        serve_until_stop(&w.core, "test", long_grace, LOOP_EXIT, &watchdog, pending(), ready(()));
+    let publish = async {
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(w.core.readiness().is_draining(), "the drain is under way");
+        watchdog.publish(stuck_on(None));
+        pending::<()>().await;
+    };
+    let code = tokio::select! {
+        code = serve => code,
+        _ = publish => unreachable!(),
+    };
+    assert_eq!(code, ExitCode::from(poll_watchdog::EXIT_CODE));
+    assert!(start.elapsed() < long_grace.grace, "cut short: {:?}", start.elapsed());
+}
+
+/// Once the CDR sink's close has begun, the stuck exit leaves its call to
+/// the takeover: a discharge's CDR could be dropped while its delete reaches
+/// the backup.
+#[tokio::test(start_paused = true)]
+async fn a_stuck_exit_leaves_its_call_once_the_cdr_sink_closes() {
+    let (w, _sink) = worker_with_slow_sink(Duration::from_millis(1)).await;
+    assert_eq!(stuck::leaves_the_call(&w.core), None);
+    w.core.cdr().close(tokio::time::Instant::now() + Duration::from_secs(1)).await;
+    assert_eq!(stuck::leaves_the_call(&w.core), Some("the CDR sink is closing"));
+}
+
+/// A superseded worker authors nothing: its stuck exit leaves the call.
+#[tokio::test(start_paused = true)]
+async fn a_superseded_worker_leaves_its_stuck_call() {
+    let w = worker().await;
+    w.supersede();
+    let mut waited = Duration::ZERO;
+    while !w.core.is_superseded() && waited < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        waited += Duration::from_millis(10);
+    }
+    assert_eq!(stuck::leaves_the_call(&w.core), Some("superseded"));
 }
