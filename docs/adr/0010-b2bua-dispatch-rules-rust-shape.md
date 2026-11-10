@@ -61,8 +61,9 @@ router never blocks on the store, whichever store is behind the seam.
 ## Decision X4. Decision-engine adapter seam + a scripted test backend
 
 The `CallDecisionEngine` trait (`new_call` / `call_failure` / `call_refer`) is
-the seam the B2BUA calls to route a new INVITE. The production adapter is the HTTP
-decision backend (`b2bua-decision`, ADR-0043); in tests a `ScriptedDecisionEngine` emulates the jssip reference backend by
+the seam the B2BUA calls to route a new INVITE. `b2bua-decision`
+holds the port, and a deployment supplies its HTTP adapter under the client policy of
+ADR-0043. In tests a `ScriptedDecisionEngine` emulates the jssip reference backend by
 inspecting the request JSON (R-URI / To / `X-*` headers / body) and returning a
 route/reject, so existing SIPp scenario scripts keep producing the same call
 flows. `apply_route` + `handle_initial_invite` translate the response into call
@@ -87,7 +88,8 @@ reaper + obligation vocabulary that make it exactly-once across the panic / drop
 The basic-B2BUA default rule set is ported (relay / dialog / absorb / lifecycle /
 terminating / corner-case / failure / timer). The 18x-management strategies
 (`relayFirst18xTo180`, `promote18xPemTo200`, PEM/fake-prack) and REFER transfer
-(SERVICE_LAYER) are service state machines (ADR-0016).
+(SERVICE_LAYER) are landed: `relayFirst18xTo180`, fake-prack included, and REFER transfer as
+service state machines (ADR-0016), `promote18xPemTo200` as rules over the call's own slice.
 
 ## Decision X6. B2BUA-local timer DelayQueue
 

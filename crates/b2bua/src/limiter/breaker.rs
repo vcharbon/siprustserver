@@ -3,7 +3,7 @@
 //!
 //! The breaker is the limiter client's backend breaker
 //! ([`crate::limiter::LimiterHealth::breaker`], `http_net::backend`): it opens when the last
-//! 2 s saw at least 3 requests sent to the limiter (admits, refreshes,
+//! 2 s saw at least 3 requests in flight to the limiter (admits, refreshes,
 //! releases) and not one HTTP response, and its probe asks the limiter's
 //! health every second until any response closes it. Opening forgets the
 //! limiter's address, so the probe reaches a limiter that moved.

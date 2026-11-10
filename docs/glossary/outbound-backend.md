@@ -20,7 +20,7 @@ addresses (breaker open, failed probe); **refresh** looks the name up again
 and **serves stale** when that lookup finds nothing (client rotation).
 
 **Backend breaker**:
-Opens when its window saw the configured number of requests sent and no HTTP
+Opens when its window saw the configured number of requests in flight and no HTTP
 response of any status; a probe of the backend's health path closes it on any
 response. What an open breaker means for a call (fail it, let it through
 uncounted) is the caller's **policy**.

@@ -687,7 +687,7 @@ ported in `load_observer.rs`).
   the `tests/load_balancer.rs` `selectForNewDialog-overload` bucket coverage.
 - **Kubernetes registry** (`registry/kubernetes.ts`) + **k8s HMAC fs-watch** —
   production-only; static + simulated cover the slice.
-- **Proxy failover / replication / call-limiter integration tests** (`failover/**`,
+- ✅ **RESOLVED** — **Proxy failover / replication / call-limiter integration tests** (`failover/**`,
   k8s `proxy-*`): covered by `crates/failover-harness` and
   `crates/sip-proxy/tests/it/active_active`.
 - **Real B2BUA OPTIONS handler** (`b2bua/{options-readiness-distinct,draining-options}`)
