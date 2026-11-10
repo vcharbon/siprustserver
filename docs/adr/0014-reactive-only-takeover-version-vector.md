@@ -1,7 +1,7 @@
 # ADR-0014: Reactive-only takeover and `(p,b)` version-vector reconciliation
 
-**Status:** accepted. Amends ADR-0011 X4, X9 and X11. Amended by ADR-0047 (its §1–§2),
-ADR-0050 (its §5) and ADR-0055 (its §2–§4, §7, §9).
+**Status:** accepted. Amends ADR-0011 X4, X9 and X11. ADR-0047 amends §1 and §2, ADR-0050
+amends §5, and ADR-0055 amends it (its §2–§4, §7, §9).
 Plan: [plan of record](../plan/passive-backup-reclaim-strategy.md),
 [task list](../plan/0014-rehydration-simplification-tasks.md). [Detail](appendix/0014-reactive-only-takeover-version-vector.md).
 
@@ -18,8 +18,8 @@ primary and backup mutations. [Detail](appendix/0014-reactive-only-takeover-vers
    an INVITE in flight is taken over when its primary leaves the membership (ADR-0047).
 2. **Remove the `Deactivate` handback.** The acting backup self-releases when the last
    in-flight transaction of a taken-over call ends. On a terminal it writes no CDR and
-   propagates no delete, and releases the limiter key only when its primary reads dead at a
-   verdict (ADR-0047 D8).
+   propagates no delete, and releases the limiter key only on a dead verdict of its
+   primary (ADR-0047 D8).
    It reverse-flushes the terminal with a grace TTL and drops its live copy; the
    primary is the sole discharge authority (§Terminal reconcile). Detail: [appendix §2](appendix/0014-reactive-only-takeover-version-vector.md#2-remove-the-deactivate-handback).
 3. **Reconcile by a per-context `(p,b)` version vector.** `p` is the primary counter, `b`
