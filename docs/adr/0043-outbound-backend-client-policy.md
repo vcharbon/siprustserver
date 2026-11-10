@@ -1,188 +1,102 @@
 # Outbound backend client policy
 
-**Status:** accepted (2026-10-11). Amended (2026-10-16): §11, the open breaker reports
-`new=refuse; cause=backend` on an OPTIONS `200`; §12, in-dialog routing reads liveness only
-(ADR-0050). Amended (2026-11-04): §6 and §10, a consult on a setup's turn runs under what is left of
-the setup budget (ADR-0022 X1).
+**Status:** accepted (2026-10-11). Amended with ADR-0050 (§11, §12) and ADR-0022 X1 (§6, §10).
 
-**Owner:** `crates/http-net/src/backend/` (the backend client, its breaker,
-probe, rotation, in-flight slots, retry rule and env grammar),
-`crates/http-net/src/resolved_target.rs` and `resolver.rs` (name lookup),
-`crates/http-net/src/settings.rs` and `transport/real_client.rs` (the
-`reqwest` client settings); `crates/b2bua-runner-kit/src/backend_url.rs` (a backend's
+**Owner:** `crates/http-net/src/backend/` (the backend client, its breaker, probe, rotation,
+in-flight slots, retry rule and env grammar), `crates/http-net/src/resolved_target.rs` and
+`resolver.rs` (name lookup), `crates/http-net/src/settings.rs` and `transport/real_client.rs`
+(the `reqwest` client settings); `crates/b2bua-runner-kit/src/backend_url.rs` (a backend's
 URL in the env); the SIP side is `crates/b2bua/src/failure_unavailable.rs`,
 `decision/limiter_failover.rs`, `rules/refer_transfer/machine/authorizing.rs`,
 `repl/backend_gate.rs` and `limiter/breaker.rs`;
 `crates/sip-proxy/src/strategies/load_balancer.rs` for the new-dialog fallback.
 
+The long form of each rule, the settings table, the other outbound clients and the tests:
+[appendix](appendix/0043-outbound-backend-client-policy.md).
+
 ## Context
 
-A worker calls HTTP backends on its request path: a decision backend (the
-new-call, failure and REFER consults), the call limiter, and any service's own
-backend. The transport was a bare `reqwest` client: no connect timeout, no
-ceiling on a request, a 90 s idle timeout, no limit on connections, and one
-client for the life of the process, so a load balancer in front of a backend
-never saw new connections under steady traffic. A backend name was resolved
-once at boot with a blocking lookup, and a lookup that never returned blocked
-every later one. A decision backend failure reached the caller as whatever
-final the engine chose, and a backend outage across the cluster left every
-worker reporting itself healthy.
+A worker calls HTTP backends on its request path: a decision backend (the new-call, failure
+and REFER consults), the call limiter, and any service's own backend. A stock client has no
+connect timeout and no ceiling on a request, keeps one connection set for the life of the
+process so a load balancer never sees new connections, and resolves a name once at boot with a
+lookup that can block every later one. Without a policy, a backend failure reaches the caller
+as whatever final the engine chooses, and a cluster-wide outage leaves every worker healthy.
 
 ## Decision
 
-1. **One client per backend** (`BackendClient`), over the transport seam
-   (`HttpTransport::client`): stock `reqwest`, no connection pool of our own.
-   The URL carries the backend's name as configured, so `Host` is the name.
-2. **Name lookup through the target** (`ResolvedTarget`, plugged as
-   `reqwest`'s resolver). Lookups are single-flight and bounded; a lookup past
-   its bound frees its slot and runs on until it ends by itself (a blocking
-   resolver thread cannot be cancelled), and no new lookup starts while a cap
-   of them is stuck. Every address found is returned. The addresses are
-   **forgotten** when the breaker opens and when a probe fails; at each client
-   **rotation** they are **refreshed**: the first request past the period
-   starts a new lookup and is sent at once to the last good addresses, never
-   waiting for it; what the lookup finds replaces them, and when it finds
-   nothing they keep serving until the next rotation (serve stale). A request
-   resolves its target before the transport connects, under its own attempt
-   budget, so a lookup is bounded by the lookup bound or the attempt, never cut
-   by the connect timeout, and an attempt that ends with no address fails as a
-   name that does not resolve (`Dns`), never as a timeout. A client whose name has no address at boot opens its breaker once
-   that first lookup finds nothing (`BackendClient::trip_unless_resolved`).
-3. **Transport settings** (`ClientSettings`): connect timeout, an idle timeout
-   below a typical backend keep-alive, TCP keepalive and `TCP_USER_TIMEOUT`, a
-   ceiling on any one request, so no request is ever unbounded.
-4. **In-flight cap**: a semaphore on requests in flight, with
-   `pool_max_idle_per_host` at the same value, caps the TCP connections. A
-   request waits for a slot inside its own attempt budget; a request whose
-   budget runs out waiting is never sent, and the wait never reaches the
-   breaker. Waits, their time and the requests that never got a slot are
-   counted (`http_request_slot_*`).
-5. **Rotation**: once the rotation period has passed, the target's fresh
-   lookup starts and the current client keeps taking requests; a new client
-   takes over once that lookup is over (landed, past its bound, or refused by
-   the stuck cap), so its first connections go to what the lookup found and a
-   moved name is reached within one period. The old client finishes its
-   in-flight requests and closes its connections when the last of them drops
-   it.
-6. **Budgets**: one attempt has its own budget, inside a total. The total is
-   the caller's (the decision deadline, `call_control_timeout_ms`); every
-   attempt is capped by the ceiling. A consult on a setup's turn is cut earlier when what is left of the
-   setup budget is shorter (ADR-0022 X1): the time the turn waited comes off its
-   last attempt.
-7. **Retry rule** (`BackendClient::send_with_retry`): one retry, on the same
-   client, after a connection-level failure (refused, unreachable, connect
-   timeout, reset, EOF, broken pipe) or a request timeout, when the total
-   budget leaves room for a whole attempt after the first one was due to end
-   (read from its deadline, not from the clock after it, so a total of two
-   attempts always holds the second). Never after an HTTP response of any status, never while the breaker
-   is open, never for a name that does not resolve or a request never sent.
-   The pool hands out the most recently returned idle connection first, so a
-   retry lands on a connection that just proved itself. `hyper-util`'s own
-   resend of a request never written on a reused connection stays. A caller
-   that must not retry (the limiter's admit, which fails open) uses one
-   attempt (`BackendClient::attempt`). A service's requests through the
-   adaptation port (`AdaptationHttpPort`) follow the rule, each attempt under
-   the port's attempt budget inside the request's own.
-8. **Breaker** (`WindowBreaker`, one per backend): it opens when at least
-   the configured number of requests were in flight during the last window
-   (sent inside it, or sent before it and unanswered when it began) and not
-   one HTTP response of any status arrived inside it, evaluated each time a
-   request ends without one. One dead peer among several never opens it (the
-   others answer); a total outage or a hung application does, whatever the
-   attempt budget against the window. A request never sent (no slot) is not
-   counted; one its caller gives up on stays counted but opens nothing. While
-   open, a request fails at once, nothing sent, and a probe runs every period:
-   it forgets the addresses, looks the name up afresh, and asks the backend's
-   health path, under at most one period by default, on a client that keeps
-   no pool; any HTTP response closes the breaker. A probe that panics runs
-   again the next period.
-9. **Policy while open is the caller's.** The limiter lets the call through
-   uncounted and holds its release queue and refresh batch until the close
-   (ADR-0040); a decision backend fails the call (10).
-10. **A decision backend failure is a bare 503** — no `Reason`, no
-    `Retry-After` — wherever the stack authors the final: the initial INVITE
-    (`CallDecisionError::Unavailable`, the `DeadlineDecisionEngine` expiry
-    included), the `/call/failure` consult (`failure_unavailable`: an engine
-    error or the answer's deadline, after a b-leg final or after a limiter
-    refusal alike; none of the failed peer's relayed headers), a setup whose
-    budget ran out, before its turn ran or anywhere in its failover chain
-    (ADR-0022 X1), a limiter refusal with no way to fail over (ADR-0022 X3),
-    and the REFER NOTIFY sipfrag (`SIP/2.0 503`, as if the
-    transfer target had answered 503). It is no decision: it marks nothing in
-    the decision log.
-11. **Backend gate on the OPTIONS self-health only**
-    (`Readiness::gate_options_on`): while a gating backend's breaker is open,
-    a `Ready` node answers OPTIONS `503` not-ready, and `200` again once it
-    closes; never latched. `/ready` and the replication membership ignore it,
-    so a backend outage across the cluster never empties the service. The
-    limiter never gates.
-12. **Proxy fallback**: `select_for_new_dialog` takes the not-ready workers
-    only when no worker is alive, whatever the cause: a node not-ready on a
-    backend still serves calls. In-dialog routing is unchanged.
-13. **No blocking lookup on the router task**: per-peer failure attribution
-    reads the outbound proxy's kept addresses and starts its lookup off the
-    task; a named hop other than the proxy is not attributed.
+1. **One client per backend** (`BackendClient`), over `HttpTransport::client`: stock
+   `reqwest`, no connection pool of our own. The URL carries the configured name, so `Host` is
+   the name.
+2. **Name lookup through the target** (`ResolvedTarget`, plugged as `reqwest`'s resolver).
+   Lookups are single-flight and bounded, and none starts while a cap of them is stuck. The
+   addresses are forgotten when the breaker opens and when a probe fails, and refreshed at
+   each rotation, serving stale meanwhile. An attempt that ends with no address fails as `Dns`,
+   never as a timeout. A client whose name has no address at boot opens its breaker once that
+   first lookup finds nothing. Detail: [appendix §2](appendix/0043-outbound-backend-client-policy.md#2-name-lookup-through-the-target).
+3. **Transport settings** (`ClientSettings`): connect timeout, an idle timeout below a typical
+   backend keep-alive, TCP keepalive and `TCP_USER_TIMEOUT`, a ceiling on any one request, so
+   no request is ever unbounded.
+4. **In-flight cap**: a semaphore on requests in flight, with `pool_max_idle_per_host` at the
+   same value, caps the TCP connections. A request waits for a slot inside its own attempt
+   budget, and one whose budget runs out waiting is never sent and never reaches the breaker.
+   Counted as `http_request_slot_*`.
+5. **Rotation**: past the rotation period the target's fresh lookup starts while the current
+   client keeps serving. A new client takes over once that lookup is over, so a moved name is
+   reached within one period. Detail: [appendix §5](appendix/0043-outbound-backend-client-policy.md#5-rotation).
+6. **Budgets**: one attempt has its own budget, inside a total. The total is the caller's (the
+   decision deadline, `call_control_timeout_ms`), and the ceiling caps every attempt. A consult
+   on a setup's turn is cut earlier when less of the setup budget is left (ADR-0022 X1).
+   Detail: [appendix §6](appendix/0043-outbound-backend-client-policy.md#6-budgets).
+7. **Retry rule** (`BackendClient::send_with_retry`): one retry, on the same client, after a
+   connection-level failure or a request timeout, when the total budget leaves room for a whole
+   attempt. Never after an HTTP response of any status, never while the breaker is open, never
+   for a name that does not resolve or a request never sent. A caller that must not retry uses
+   `BackendClient::attempt`. The adaptation port (`AdaptationHttpPort`) follows the rule.
+   Detail: [appendix §7](appendix/0043-outbound-backend-client-policy.md#7-retry-rule).
+8. **Breaker** (`WindowBreaker`, one per backend): it opens when at least the configured number
+   of requests were in flight during the last window and not one HTTP response of any status
+   arrived inside it. While open, a request fails at once, and a probe runs every period on a
+   fresh lookup against the backend's health path. Any HTTP response closes it. Detail:
+   [appendix §8](appendix/0043-outbound-backend-client-policy.md#8-breaker).
+9. **Policy while open is the caller's.** The limiter lets the call through uncounted and holds
+   its release queue and refresh batch until the close (ADR-0040). A decision backend fails the
+   call (10).
+10. **A decision backend failure is a bare 503**, no `Reason`, no `Retry-After`, wherever the
+    stack authors the final: the initial INVITE, the `/call/failure` consult, a setup whose
+    budget ran out, a limiter refusal with no way to fail over, and the REFER NOTIFY sipfrag
+    (`SIP/2.0 503`). It is no decision and marks nothing in the decision log. Detail:
+    [appendix §10](appendix/0043-outbound-backend-client-policy.md#10-a-decision-backend-failure-is-a-bare-503).
+11. **Backend gate on the OPTIONS self-health only** (`Readiness::gate_options_on`): while a
+    gating backend's breaker is open, a `Ready` node answers OPTIONS `503` not-ready, and `200`
+    again once it closes; never latched. `/ready` and the replication membership ignore it. The
+    limiter never gates. Detail: [appendix §11](appendix/0043-outbound-backend-client-policy.md#11-backend-gate-on-the-options-self-health-only).
+12. **Proxy fallback**: `select_for_new_dialog` takes the not-ready workers only when no worker
+    is alive, whatever the cause. In-dialog routing is unchanged. Detail:
+    [appendix §12](appendix/0043-outbound-backend-client-policy.md#12-proxy-fallback).
+13. **No blocking lookup on the router task**: per-peer failure attribution reads the outbound
+    proxy's kept addresses and starts its lookup off the task. A named hop other than the proxy
+    is not attributed.
 
 ### Settings and their env keys
 
-Read at boot under the backend's prefix (`BackendConfig::from_lookup`; the
-limiter's prefix is `LIMITER`). Unset takes the default; a value that is not a
-positive integer (or a health path not starting with `/`) refuses boot.
-
-| key | meaning | default |
-|---|---|---|
-| `<P>_TIMEOUT_MS` | one attempt's budget, its slot wait included | per backend (limiter: 150) |
-| `<P>_CONNECT_TIMEOUT_MS` | one TCP connect | 1000 |
-| `<P>_POOL_IDLE_MS` | idle pooled connection closed past it | 4000 |
-| `<P>_KEEPALIVE_IDLE_MS` / `_INTERVAL_MS` / `_RETRIES` | TCP keepalive | 5000 / 2000 / 3 |
-| `<P>_USER_TIMEOUT_MS` | `TCP_USER_TIMEOUT` | 10000 |
-| `<P>_CEILING_MS` | any one request | 5000 |
-| `<P>_MAX_IN_FLIGHT` | requests in flight, idle connections kept | per backend (limiter: 64, default 256) |
-| `<P>_ROTATION_MS` | client rotation period | 60000 |
-| `<P>_BREAKER_REQUESTS` | requests in the window, none answered, that open the breaker | 3 |
-| `<P>_BREAKER_WINDOW_MS` | the breaker window | 2000 |
-| `<P>_BREAKER_PROBE_MS` | probe period while open | 1000 |
-| `<P>_BREAKER_PROBE_TIMEOUT_MS` | one probe request, after its lookup | the attempt budget, at most the probe period |
-| `<P>_HEALTH_PATH` | the path the probe asks with `GET` | per backend (limiter: `/v1/health`) |
-| `<P>_LOOKUP_TIMEOUT_MS` | one name lookup | 2000 |
-| `<P>_LOOKUP_MAX_STUCK` | lookups past their bound before none starts | 4 |
-
-At a high call rate the breaker's request threshold belongs well above 3: a
-burst of a few lost requests should not open it.
+Read at boot under the backend's prefix (`BackendConfig::from_lookup`; the limiter's prefix is
+`LIMITER`). Unset takes the default. A value that is not a positive integer, or a health path
+not starting with `/`, refuses boot. At a high call rate the breaker's request threshold
+belongs well above 3. Keys and defaults: [appendix, settings](appendix/0043-outbound-backend-client-policy.md#settings-and-their-env-keys).
 
 ### Other outbound clients (checked, unchanged)
 
-- **CDR export over AMQP** (`b2bua-runner-kit/src/cdr_rabbitmq`): every wait
-  is bounded — the connect by its own timeout around the session open (the
-  socket connect under a deadline), each publish and confirm by theirs, the
-  broker connection by its heartbeat — and reconnects are spaced by a
-  backoff. The broker name is looked up with a blocking `getaddrinfo` on a
-  blocking-pool thread the AMQP client spawns: a hanging lookup holds that
-  thread until the system resolver gives up, never the caller.
-- **OTLP trace export** (`observe/src/otlp.rs`): the batch exporter runs on
-  its own thread with a bounded queue, and each export is bounded by the
-  exporter's timeout (`OTEL_EXPORTER_OTLP_TIMEOUT`, 10 s by default), its
-  lookup included.
+CDR export over AMQP and OTLP trace export bound every wait of their own. Detail:
+[appendix, other clients](appendix/0043-outbound-backend-client-policy.md#other-outbound-clients-checked-unchanged).
 
 ## Consequences
 
-- A worker whose decision backend does not resolve at boot starts without
-  waiting for the lookup; its breaker opens once that first lookup finds
-  nothing (within the lookup bound), from then on it answers 503 at once, and
-  it routes through the backend once the name resolves and a probe is
-  answered.
-- The limiter's breaker follows the same rule: a limiter answering every
-  request `5xx` keeps it closed (each admit fails open on its own budget);
-  only silence opens it. Refreshes and releases count as requests.
-- The unanswered `/call/failure` consult no longer relays the failed leg's
-  final (ADR-0039's fold of an unanswered consult is this 503).
-- Pinned by: `http-net` `tests/it/backend.rs` (retry, cap, rotation, breaker,
-  lookup bound), `tests/it/backend_breaker.rs` (a hung burst, slot waits, a
-  panicking probe, the boot lookup), `tests/it/classify.rs` (the loopback
-  classifier, a hanging lookup on the real client), `tests/it/real_backend.rs`
-  (the retry's room and a moved name, on the real clock),
-  `resolved_target/tests.rs` (stuck lookups, serve stale); `b2bua-harness`
-  `unanswered_failure_consult`, `decision_deadline`, `refer_consult_error`,
-  `service_http` (the adaptation port's retry),
-  `options_backend_gate`, `limiter_breaker`; `sip-proxy` `load_balancer`
-  (the not-ready fallback and its two guards).
+- A worker whose decision backend does not resolve at boot starts without waiting, answers 503
+  at once once its breaker opens, and routes through the backend once the name resolves and a
+  probe is answered.
+- Only silence opens the limiter's breaker: a limiter answering every request `5xx` keeps it
+  closed. Refreshes and releases count as requests.
+- An unanswered `/call/failure` consult never relays the failed leg's final (ADR-0039).
+
+Tests: [appendix, consequences](appendix/0043-outbound-backend-client-policy.md#consequences).

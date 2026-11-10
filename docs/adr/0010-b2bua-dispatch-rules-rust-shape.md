@@ -1,28 +1,24 @@
-# 0010 — B2BUA Rust shape: one crate, per-call FIFO, rule engine, replication-aware store
+# 0010: B2BUA Rust shape. One crate, per-call FIFO, rule engine, replication-aware store
 
-**Status:** accepted (2026-05-31)
+**Status:** accepted.
 
-**Source:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`,
-`src/sip/{SipRouter,PerCallDispatcher}.ts`, `src/call/CallState.ts`,
+**Source:** sipjsserver `src/sip/{SipRouter,PerCallDispatcher}.ts`, `src/call/CallState.ts`,
 `src/b2bua/rules/`, `src/decision/`, `src/cdr/CdrWriter.ts`.
 
 ## Context
 
-The B2BUA-only slices — the per-call FIFO dispatcher + router (deferred from the
-transaction layer, ADR-0007 §X3), the in-memory call store (`CallState`,
-deferred from the data-model slice, ADR-0008), and the rule engine — land
-together because they are mutually dependent (rules mutate the `Call`, the
-dispatcher serializes per call, the store holds the `Call`). They sit on the
-already-ported `call` data model, `sip-txn`, `sip-message`, `sip-net`, and
-`sip-clock`.
+The per-call FIFO dispatcher and router (ADR-0007 §X3), the in-memory call store
+(`CallState`, ADR-0008) and the rule engine depend on each other: rules mutate the `Call`,
+the dispatcher serializes per call, the store holds the `Call`. They sit on the `call` data
+model, `sip-txn`, `sip-message`, `sip-net` and `sip-clock`.
 
-## Decision X1 — one `crates/b2bua` crate
+## Decision X1. One `crates/b2bua` crate
 
 Rust forbids crate cycles; the dispatcher ↔ router ↔ rules ↔ store are mutually
 dependent, so they share one crate (`crates/b2bua`) on top of `call`. The test
 harness lives in a separate `crates/b2bua-harness` (X9).
 
-## Decision X2 — per-call FIFO = per-call queues + worker tasks + a global semaphore
+## Decision X2. Per-call FIFO = per-call queues + worker tasks + a global semaphore
 
 A faithful port of source ADR-0004/0005, not the txn-layer actor (ADR-0007 X2).
 The dispatcher owns `callRef → queue`; each call has one worker task that runs
@@ -30,15 +26,14 @@ its handler bodies in strict FIFO order; a global `Semaphore` caps total
 in-flight handlers. Handler bodies run on spawned sub-tasks the worker awaits, so
 a panicking handler is isolated and the worker survives. cap-drop / queue-drop /
 saturation are atomic counters. An offer to a call's queue either queues the
-event or hands it back with why it was discarded and its owed answer — an
-answer, a forget of its transaction, or nothing — which the router renders. An
+event or hands it back with why it was discarded and its owed answer (an
+answer, a forget of its transaction, or nothing), which the router renders. An
 event the protocol will not send again queues past the bounds in FIFO order
 instead, up to a per-call overflow ceiling (the queue depth); the release, the
 reaper verdicts, every timer fire, every client transaction's outcome and every
 answer to a request the call sent off its turn (ADR-0037) queue past every
-bound. Rationale: a slow handler on one call must not block other calls — the
-single actor (the txn-layer choice) would stall every call, which is exactly
-what `PerCallDispatcher` exists to prevent. `CallState` adds a per-`callRef`
+bound. Rationale: a slow handler on one call must not block other calls, and a single
+actor (the txn-layer choice) would stall every call. `CallState` adds a per-`callRef`
 lock as a second serialization layer (uncontended under the dispatcher; it
 orders the out-of-band callers, the departure sweep and the reclaim and reap
 passes, against the call's turns). One mutex stands per `callRef` while any
@@ -50,21 +45,19 @@ call's own queue.
 
 Each event class's room, lifetime-cap counting and owed answer: one row of the dispatch table, [`dispatch/class.rs`](../../crates/b2bua/src/dispatch/class.rs).
 
-## Decision X3 — replication-aware `CallStore` seam, in-memory impl no-ops HA
+## Decision X3. Replication-aware `CallStore` seam, in-memory impl no-ops HA
 
 `CallState` holds live calls *typed* in memory (the `sip_index` is the routing
 fast-path); the persistence path encodes via `MsgpackCodec` through a `CallStore`
 trait shaped after `PartitionedRelayStorage`. The trait's method signatures
-already carry every HA parameter — partition `role`/`primary`, propagate
-`peer`/`direction`, `call_gen`, index keys, `ttl` — but the shipped
-`InMemoryCallStore` ignores them. A replicating implementation (propagate-set /
-topology-gen / a peer drain) drops in later with **zero changes** to the rule
-engine, the dispatcher, or `CallState`. The terminate path runs through a
-`BufferedTerminateWriter` (non-blocking submit + drainer) so the router never
-blocks on the store — the seam is identical even though the in-memory store
-cannot stall.
+already carry every HA parameter (partition `role`/`primary`, propagate
+`peer`/`direction`, `call_gen`, index keys, `ttl`), and
+`InMemoryCallStore` ignores them. The replicating implementation (ADR-0011) plugs into the
+same seam with no change to the rule engine, the dispatcher or `CallState`. The terminate
+path runs through a `BufferedTerminateWriter` (non-blocking submit and drainer), so the
+router never blocks on the store, whichever store is behind the seam.
 
-## Decision X4 — decision-engine adapter seam + a scripted test backend
+## Decision X4. Decision-engine adapter seam + a scripted test backend
 
 The `CallDecisionEngine` trait (`new_call` / `call_failure` / `call_refer`) is
 the seam the B2BUA calls to route a new INVITE. The production HTTP adapter is
@@ -74,7 +67,7 @@ route/reject, so existing SIPp scenario scripts keep producing the same call
 flows. `apply_route` + `handle_initial_invite` translate the response into call
 state (features, service ext, limiter, b-leg creation).
 
-## Decision X5 — rule engine: first-match, layer-ranked, with framework invariants
+## Decision X5. Rule engine: first-match, layer-ranked, with framework invariants
 
 Rules are `RuleDefinition`s with a declarative `Match` (request/response/timer/
 timeout/cancelled/internal-event columns + a sync corner-case `filter`). The
@@ -93,60 +86,54 @@ reaper + obligation vocabulary that make it exactly-once across the panic / drop
 The basic-B2BUA default rule set is ported (relay / dialog / absorb / lifecycle /
 terminating / corner-case / failure / timer). The 18x-management strategies
 (`relayFirst18xTo180`, `promote18xPemTo200`, PEM/fake-prack) and REFER transfer
-(SERVICE_LAYER) are **deferred** — their action vocabulary is defined but dormant.
+(SERVICE_LAYER) are deferred. Their action vocabulary is defined but dormant.
 
-## Decision X6 — B2BUA-local timer DelayQueue
+## Decision X6. B2BUA-local timer DelayQueue
 
 `TimerService` owns one `tokio_util::time::DelayQueue` driver (the ADR-0007
 shape) firing `CallEvent::Timer`s the router routes through the per-call FIFO.
 It is B2BUA-local because `sip-txn`'s queue is private to its actor. It rides
 `tokio::time`, so `pause`/`advance` drives it in tests.
 
-## Decision X7 — buffered CDR through the recording
+## Decision X7. Buffered CDR through the recording
 
 `CdrWriter` (`write` / `read_all`); the `InMemoryCdrWriter` lets tests assert
 exactly one CDR per terminated call; `BufferedCdrWriter` is the production
 drop-on-overload buffer (passthrough at `queue_max == 0`). The CDR is written
 once, on termination, carrying the accumulated `Call.cdr_events`.
 
-## Decision X8 — OPTIONS 200 minimal; drain/health deferred
+## Decision X8. OPTIONS 200 minimal; drain/health deferred
 
-Out-of-dialog OPTIONS is answered 200 OK inline so a fronting proxy's health
-probe passes. `DrainingState` / `WorkerReadiness` / `OverloadController` (the
-serving/draining/ready 200/503/silence matrix + new-call admission) are a distinct
-deferred slice — see the new MIGRATION_STATUS "Draining / readiness / overload"
-line.
+Out-of-dialog OPTIONS is answered inline so a fronting proxy's health probe passes. The
+readiness/OPTIONS gate of ADR-0011 X6 sets the answer (200, or 503 not-ready or
+draining).
 
-## Decision X9 — `b2bua-harness` test crate (extends ADR-0006)
+## Decision X9. `b2bua-harness` test crate (extends ADR-0006)
 
 The alice ↔ b2bua ↔ bob e2e tests run in a dedicated `crates/b2bua-harness`
 that depends on both `scenario-harness` and `b2bua`, binding a real `B2buaCore`
 on the simulated fabric via `Harness::bind_sut`. This keeps `scenario-harness`
-generic (no B2BUA knowledge) and avoids the dev-dependency cycle the proxy slice
-took with `with_proxy`. One additive harness change: the fluent UAC's
-`expect_response` now absorbs an unsolicited `100 Trying` (a real UAC does, and a
-stateful txn layer emits one) — see `scenario-harness/src/agent.rs`.
+generic (no B2BUA knowledge) and avoids a dev-dependency cycle like `with_proxy`'s. The
+fluent UAC's `expect_response` absorbs an unsolicited `100 Trying`, as a real UAC does
+(`scenario-harness/src/agent.rs`).
 
 ## Deferred (with justification)
 
-- **18x-management strategies + REFER transfer** — SERVICE_LAYER policy modules;
+- **18x-management strategies and REFER transfer**: SERVICE_LAYER policy modules,
   user-deferred. Vocabulary present, dormant.
-- **Real HTTP decision adapter** — the scripted backend stands in.
-- **Failover via `call_failure`** — the rule path relays the failure + tears the
+- **Real HTTP decision adapter**: the scripted backend stands in.
+- **Failover via `call_failure`**: the rule path relays the failure + tears the
   call down; the async failover round-trip (and the `refer-async-http`
   re-entrant fire-and-forget) lands with the transfer/decision-HTTP slice.
-- **Real CallLimiter** (row 20) — no-op admit/decrement.
-- **HA replication transport** — the `CallStore` seam carries the params; the
-  replicating impl + orphan-sweep / `loadOwnedCalls` rehydrate are the HA slice.
-- **Draining / readiness / overload** — minimal OPTIONS 200 only (X8).
-- **Tracing / OTel span machinery** — no tokio analogue this slice.
+- **Real CallLimiter** (row 20): no-op admit/decrement.
+- **Tracing / OTel span machinery**: no tokio analogue.
 
 ## References
 
 - [`crates/b2bua/src/dispatch/`](../../crates/b2bua/src/dispatch/),
   [`router/`](../../crates/b2bua/src/router/),
   [`store/`](../../crates/b2bua/src/store/),
-  [`rules/`](../../crates/b2bua/src/rules/)
+  [`b2bua-core/src/rules/`](../../crates/b2bua-core/src/rules/)
 - [ADR-0007](./0007-transaction-layer-rust-shape.md) (X3 deferral),
   [ADR-0008](./0008-call-context-data-model.md) (CallState deferral),
   [ADR-0006](./0006-scenario-harness-recording-first.md) (SUT seam).

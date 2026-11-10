@@ -1,388 +1,83 @@
 # A worker's two readiness axes: serving dialogs, accepting new calls
 
-**Status:** accepted (2026-10-16). Amended (2026-10-28): §3, the proxy tells
-each dead verdict to the workers; §5, the undecided call's residual.
-Amended (2026-11-01): §2 and §9, a backed-up event queue refuses new calls
-(`cause=overload`, and the admission ladder's event-queue rung); §12, the
-keepalive lane. Amended (2026-11-03): §11, the node's announcement follows `/readyz` (ADR-0056).
-Amended (2026-11-04): §3 and §5, the flip of a worker read `Alive` to not ready, not
-terminating, is a dead verdict.
-Amended (2026-11-05): §9, the transaction layer refuses on the queue's age by itself while
-its router writes nothing. Amended (2026-11-05): §3, §8 and §11, the proxy probes every worker
-present in the slice, and a view where none reads ready routes on the answers.
+**Status:** accepted.
 
-**Owner:** `crates/sip-message` (the `X-Readiness` and `X-Incarnation` headers),
-`crates/b2bua/src/repl/readiness.rs` and `router/responses.rs` (the worker's
-state and its OPTIONS answer), `crates/b2bua-runner-kit/src/probe.rs` (the
-admin routes), `crates/sip-proxy/src/registry/` and `health/probe.rs` (the
-proxy's view of a worker), `strategies/load_balancer.rs` (target selection,
-the cookie's `w_bak`), `load_observer/observer.rs` (the stale-payload sweep),
-`crates/sip-proxy/src/health/dead_notice.rs`, `crates/sip-message`'s
-`dead_notice.rs` and `crates/b2bua/src/router/dead_verdict.rs` (the dead
-notice),
-`crates/sip-proxy-runner/src/readiness.rs` and `main.rs` (`/readyz`, the boot
-probe), the proxy chart's VRRP check, `crates/sip-txn/src/layer/event_receiver.rs`
-and `events.rs` (the keepalive lane), `event_age.rs` (the queue's delay),
-`crates/b2bua/src/overload/event_queue_gate.rs` and
-`crates/b2bua-runner-kit/src/runner_env/event_queue_env.rs` (the event-queue gate).
+**Owner:** the worker's state in `crates/b2bua/src/repl/readiness.rs`, the proxy's view in
+`crates/sip-proxy/src/registry/` and `health/probe.rs`; the full list is in the
+[appendix](appendix/0050-a-workers-two-readiness-axes.md), with each section in full.
 
-Amends ADR-0043 §11–12, ADR-0031 D4, ADR-0046 §2 and D4, ADR-0012 D4,
-ADR-0014 §5 and ADR-0009 (the fresh-pod guard and the drain grace).
+Amends ADR-0043 §11–12, ADR-0031 D1 and D4, ADR-0046 §2 and D4, ADR-0012 D4, ADR-0014 §5 and
+ADR-0009 (the fresh-pod guard and the drain grace).
+Detail: [appendix, amended](appendix/0050-a-workers-two-readiness-axes.md#amended).
 
 ## Context
 
-A worker told the proxy one thing about itself, "ready or not", on its OPTIONS
-answer, and the proxy used it for two different questions: may this worker
-take a new call, and may an in-dialog request of a call it owns reach it.
-
-- A gating backend's open breaker made a worker answer OPTIONS `503`
-  not-ready (ADR-0043 §11). The proxy treated a not-ready primary like a dead
-  one for in-dialog requests, sent them to `w_bak` only when the backup was
-  `Alive`, and otherwise ran a fresh selection that never falls back for an
-  in-dialog request. With the backend down for the whole cluster, every
-  in-dialog request of every established call, the BYE included, got `503`
-  `no_target_available`, and the calls stayed up on the workers. With one
-  worker gated, its in-dialog requests went to its backup and forced a
-  takeover of calls the worker still held.
-- The `503` carried no load payload, so the proxy's stale-payload sweep
-  floored the fallback worker's admission cap to 1 cps and the proxy refused
-  new calls itself: no worker saw them, and no record of them was written.
-- The fresh-pod guard sent every in-dialog request but ACK and CANCEL to
-  `w_bak` for 20 s after the proxy first saw a worker. The cookie names no
-  incarnation, so the guard also diverted the dialogs a worker created after
-  it joined, and, after a proxy restart, every dialog of every worker. The
-  case it was built for (a worker routed before its first OPTIONS answer) is
-  covered by `Unknown` health and by the worker's own Ready gate, which
-  latches only once its partition is bootstrapped and current.
-- A freshly started proxy answered `503` to everything, in-dialog requests
-  included, until its first probe round, a full probe interval after boot.
-- Taking a worker or a whole site out of service cleanly needs a state that
-  refuses new calls and keeps serving established ones for as long as the
-  operator wants. The only "no new calls" state was the terminal `Draining`
-  of a SIGTERM, which hands every call over within seconds.
+One "ready or not" bit on a worker's OPTIONS answer answered two questions: may it take a new
+call, and may an in-dialog request reach it. A gating backend's outage then failed every
+in-dialog request of the cluster with `503`, or forced takeovers of calls a worker still held.
+The fresh-pod guard diverted dialogs for 20 s after any join or proxy restart. A starting proxy
+answered `503` to everything. No state refused new calls while keeping established ones.
+Detail: [appendix, context](appendix/0050-a-workers-two-readiness-axes.md#context).
 
 ## Decision
 
-1. **Two axes.** A worker is **serving dialogs** while its process is up and
-   holds its calls, and **accepting new calls** while it takes an initial
-   INVITE. The proxy reads the first as liveness and the second as
-   acceptance, and never derives one from the other.
-2. **The OPTIONS answer.** A worker answers its peer proxy's OPTIONS `200`
-   whenever it serves dialogs (Ready, Cordoned, Draining), always with its
-   load payload (`X-Overload`), its `X-Readiness`, and its `X-Incarnation`
-   (the process's boot generation, ADR-0011 X9). It answers `503` only while
-   NotReady (not yet bootstrapped), with its `X-Incarnation` and no payload.
-
-   ```
-   X-Readiness: new=accept
-   X-Readiness: new=refuse; cause=backend
-   X-Readiness: new=refuse; cause=cordoned
-   X-Readiness: new=refuse; cause=draining
-   X-Readiness: new=refuse; cause=overload
-   ```
-
-   `cause` is free text for metrics and logs; the proxy acts on `new` alone.
-
-   The worker holds no transaction for an out-of-dialog OPTIONS: every copy
-   is answered afresh under a To-tag derived from the request (RFC 3261
-   §8.2.7), so a retransmitted probe can draw a newer payload or readiness
-   than the copy before it.
-3. **The proxy's view of a worker** is health `Unknown | Alive | Dead` plus
-   acceptance. A `200` makes it `Alive` and sets acceptance from `new` (an
-   absent header reads `accept`); a `503` sets acceptance to `refuse` and
-   leaves health as it was; any other final response makes it `Alive` and
-   keeps acceptance. Missed probes (`HEALTH_THRESHOLD`) and the departed
-   address tombstone (ADR-0031 D4) make it `Dead`. The proxy's `Draining`
-   health, its grace, and the `503` Reason-text split are gone.
-
-   A turn of a worker's health to `Dead` is a **dead verdict** from `Alive`, or
-   from `Unknown` while its endpoint reads ready; and so is the flip of a worker
-   read `Alive` to an endpoint not `ready` and not `terminating` (ADR-0031 case 4)
-   while another member reads ready, which usually comes before the probe's
-   reading. The flip leaves the worker's health `Unknown` until it answers
-   again, so the probe's reading of the same silence tells nothing more, and a
-   death after an answer is a verdict of its own. The proxy tells it to every
-   other `Alive` worker, routed or not, on an out-of-dialog OPTIONS carrying the
-   notice, signed with the cluster key the workers share (ADR-0055 §12) over the
-   ordinal and the verdict's instant, the instant the proxy tells it:
-
-   ```
-   X-Worker-Dead: worker-0; at=1792155573698; sig=<base64url>
-   ```
-
-   A departure, a `terminating` flip and a flip that empties the view of ready
-   members (§11) are no verdict, and neither is the silence of a worker not ready
-   that never answered, a booting pod. A worker takes a notice only when it verifies and
-   its instant stands within the freshness window of the worker's own clock,
-   either way (`B2BUA_DEAD_NOTICE_FRESH_MS`, 10 s); it refuses and counts any
-   other (`b2bua_dead_notices_refused_total`). A taken verdict is held for
-   `B2BUA_DEAD_VERDICT_HOLD_MS` (42 s), at least the window plus Timer F, the
-   last a repeat of its notice arrives, so a repeat is the same verdict; a
-   boot refuses a shorter hold, naming both variables. A proxy
-   with no cluster key tells nothing and a worker with none trusts nothing.
-   A worker takes each verdict once, however many copies reach it, and runs
-   on it the takeover half of the departure sweep over the calls it backs for
-   the dead worker (ADR-0047 D1, D2) once its own replication stream from that
-   worker is down: the proxy now routes their traffic to it, and the stream
-   tells a dead worker from a live one the proxy misread. An undecided call's
-   decision is asked again there (ADR-0047 D4).
-4. **In-dialog routing reads liveness only.** A request carrying a verified
-   cookie goes to `w_pri` while `w_pri` is `Alive`, whatever its acceptance;
-   otherwise to `w_bak` while `w_bak` is `Alive`. It never runs a fresh
-   selection. An `Unknown` worker (just joined, re-hosted, of a new
-   incarnation, or before a proxy's first probe answer) is not routed. A
-   worker that refuses new calls keeps every dialog it owns, and no takeover
-   is caused by its acceptance. A CANCEL goes where its INVITE went while
-   that node is an `Alive` worker its cookie names, and a retransmission
-   repeats its first copy's target on the same terms; otherwise each follows
-   the cookie.
-5. **No answer without a target.** An in-dialog request whose two workers are
-   both absent or not `Alive`, or that reaches a proxy before its first
-   worker view, is dropped and counted
-   (`sip_proxy_no_target_dropped_total{kind}`), never answered `503`: the
-   sender's retransmission reaches the next view. A worker that receives a
-   copy of a replicated call's initial INVITE (the call's CSeq, and a branch
-   naming the call's server transaction, unanswered or answered 2xx in the
-   record) takes the call over, whichever worker the cookie names: the copy is
-   absorbed by the transaction the record rebuilds, which repeats the 2xx the
-   record holds. The worker holding the record serves the call; when the
-   primary still lives, the callee may get the dialled INVITE twice under one
-   branch. A call whose routing decision the record does not hold is no
-   copy's: the decision may be in flight at a primary the proxy misread dead;
-   a confirmed verdict, the departure or a reclaim asks it again (ADR-0047 D4). An initial INVITE whose cookie
-   names another primary and that copies no such record gets no final
-   (`b2bua_foreign_invite_copies_dropped_total`; its transaction is relinquished
-   with nothing sent, ahead of the 100's 200 ms bound unless the router lags
-   that long): the primary still owns that transaction, and a final from this
-   worker would end the caller's.
-   Accepted residuals:
-   - a copy of an undecided call whose primary really died is dropped: the
-     confirmed dead verdict (§3), the probe's or the endpoint's flip, takes the
-     call over and asks its decision again;
-   - an INVITE that never replicated, from a primary that really died, gets
-     no final from the backup; the caller's transaction timers end it;
-   - a discovered pool whose watch never delivers a listing never has a first
-     view, so every request is dropped: an initial INVITE ends on the caller's
-     Timer B instead of a fast `503`; the drop counter and `/readyz` show it.
-6. **New calls.** A new dialog goes to an `Alive` accepting worker. When none
-   accepts, it goes to an `Alive` refusing one (the fallback of ADR-0043 §12),
-   which answers it with its own refusal and writes its call record. The proxy
-   authors a refusal of a new call only from its own overload gates (the
-   self-gate and the per-worker admission cap, ADR-0009 X6), never from a
-   worker's state. The stale-payload sweep caps only a worker whose payload is
-   stale while it is `Alive`: a `200` always carries one, so a refusing worker
-   is never floored by it.
-7. **The cookie's `w_bak`** is the rendezvous winner among `Alive` accepting
-   workers other than the primary, and among all `Alive` ones when none
-   accepts. A worker leaving the service is not chosen as the backup of new
-   calls while another is alive, and a cluster that refuses everywhere still
-   replicates. With no other worker alive, it is the winner among the other
-   ordinals the proxy knows and does not read alive (ADR-0055 §8); it is
-   empty only when the proxy knows no other ordinal. The worker replicates to
-   the cookie's `w_bak`, unchanged.
-8. **No fresh-pod guard.** The guard, its 20 s window and its promotion
-   reason are removed. A worker joins `Unknown` (ADR-0012 D4) and is routed
-   once a probe answers `200`, its endpoint ready or none ready (§11), which its
-   Ready gate allows only after its partition is bootstrapped and current; a
-   worker that answered while it read not ready is routed as soon as it reads
-   ready. The calls its backup changed while
-   it was away are folded by on-demand reclaim, stand-down (ADR-0047 D7) and
-   the version vector (ADR-0014). The proxy resets a worker to `Unknown`
-   when its `X-Incarnation` changes, so a restart in place at the same address
-   is never routed on the previous process's health. The cookie format is
-   unchanged.
-9. **The worker's states.**
-   - **NotReady**: not yet bootstrapped; OPTIONS `503`.
-   - **Ready**: accepting, unless a gating backend's breaker is open, which
-     reports `new=refuse; cause=backend` and refuses new calls (ADR-0043 §10),
-     or else the event-queue gate refuses, which reports `new=refuse;
-     cause=overload`. Never latched. The gate reads the transaction event
-     queue when it reads: its depth, and its delay, the age of the oldest
-     event waiting in it (an empty queue reads zero), so a router that takes
-     nothing still reads a growing delay. It refuses at the refusal depth
-     (512) at once, and on the delay once it has stayed at or past the
-     refusal delay (300 ms, below T1) for the refusal interval (150 ms,
-     CoDel's persistence: a CPU-quota throttle gap, or a slow turn shorter
-     than the two together, trips nothing; a single turn of at least 450 ms
-     trips it on the next reading, and while the gate is read 450 ms is the
-     longest one event waits before the worker refuses). It accepts again once depth and delay have both stayed at or
-     below their accept bounds (64, 50 ms) for the hold (3 s, at least two
-     probe intervals). The router reads it at each event it takes, the
-     OPTIONS answer at each probe; each reading is a clock read and a few
-     atomics, the transaction layer stamping each event as it enters the
-     queue, with no lock on the event path.
-     The same gate is the event-queue rung of the worker's admission ladder
-     (ADR-0037 item 11): a new normal INVITE that still reaches the worker
-     while the gate refuses gets the ladder's `503` as it arrives, ahead of
-     the queue it would wait in, from the gate's first refusing reading on,
-     before any probe reads it; emergency INVITEs and in-dialog requests are
-     never refused by it. Only the router reads the gate, so a router held in
-     one turn writes no refusal: the transaction layer reads the queue's age
-     itself as each new INVITE arrives, and refuses from that same 450 ms
-     (ADR-0037 item 11). The bounds, their defaults
-     and the boot checks between them are the runner's `B2BUA_EVENT_QUEUE_*`
-     grammar. The proxy keeps a refusing worker `Alive` and every dialog it
-     owns on it (§4), and places new calls elsewhere (§6): a worker whose
-     process is starved of CPU while its load signal reads low sheds new
-     calls instead of being read dead and taken over.
-   - **Cordoned**: `new=refuse; cause=cordoned`. New calls that reach it are
-     refused (bare `503`, its call record written); every established dialog
-     is served normally. Reversible, no timer of its own: the operator's next
-     step uncordons it, sends SIGTERM, or releases its calls (10). The cordon
-     is held by the process: a restart clears it.
-   - **Draining**: SIGTERM or withdrawal (ADR-0031 D6); terminal;
-     `new=refuse; cause=draining`; the handover drain of ADR-0031 D2,
-     unchanged. A cordoned worker that receives SIGTERM drains the same way.
-10. **Operator routes** on a listener of their own bound to the worker's
-    loopback (`B2BUA_ADMIN`), reached through `kubectl port-forward`; the
-    probe server and every SIP face answer none of them:
-    - `POST /admin/cordon`, `DELETE /admin/cordon`; `GET /admin/cordon` returns
-      the state and the live call count. Gauge `b2bua_cordoned`.
-    - `POST /admin/release-all` releases every call the worker owns without
-      signalling: each established call's record is closed (answered, ended
-      now, cause `operator_release`), its admission holds freed and its replica
-      deleted on the backup, and its dialogs dropped; no BYE is sent and no
-      backend is consulted. A 2xx still owed its ACK is ACKed, and a leg
-      still ringing (a transfer target) is CANCELled, as in setup. A later in-dialog request for it is answered
-      `481`. A call still in setup is aborted as usual: `503` to the caller,
-      CANCEL to the callee. Only an explicit call releases; neither a cordon
-      nor a SIGTERM does.
-11. **The proxy's readiness.** `/readyz` is Ready when SIGTERM has not
-    latched, no recv shard is stalled, and at least one worker is `Alive`;
-    acceptance plays no part, so a backend outage across the cluster never
-    turns the proxy NotReady. A starting proxy probes every listed worker as
-    soon as it binds and is NotReady until its first worker view (the first
-    registry snapshot and one probe round). A node announces the proxy's
-    addresses exactly while `/readyz` passes, which also requires the external
-    face usable (ADR-0056 §3); the livenessProbe keeps reading `/healthz`
-    alone.
-
-    The proxy probes every worker present in the slice and not `terminating`,
-    routed or not. While one reads ready, only the ready ones are routed. **While
-    none reads ready the proxy routes on the probe's answers**: every worker
-    present and not `terminating` stands in its view on the health the probe holds,
-    so those that answer are `Alive` and those that stay silent are not. The slice
-    then speaks of the orchestrator's reach to the nodes, not of the workers: a
-    node controller that loses their heartbeats marks every endpoint not ready
-    while the workers serve, replicate and do not drain (ADR-0031 case 3b,
-    ADR-0055 §6). The rule reads the slice and the health as they stand, with no
-    state of its own and no timer:
-
-    - **The fleet flips one worker at a time.** Each flip with a ready member left
-      leaves the routing and is told as a verdict, which the worker's stream refutes;
-      its in-dialog requests go to its backup meanwhile (§4). The last flip empties
-      the view, tells nothing, and the workers left before it are routed at once on
-      the health their probes kept.
-    - **A worker that does not answer** reads `Dead` by the usual misses, whatever
-      its endpoint says, and that is the verdict (§3). A fleet booting silent, or a
-      stalled worker (ADR-0033 §4), is no worker: `/readyz` fails and new calls get
-      the proxy's refusal until the routes withdraw. A whole fleet crashing on live
-      nodes is read by the probe, 2.6 to 3.6 s, and not by its flips; `/fitz` turns
-      unfit on the isolation window, 2 s, so the withdrawal comes about as it does
-      with a ready member left, and new INVITEs reach a dead worker for about 2 s.
-    - **A `terminating` worker never counts**, and the proxy stops probing it. Every
-      member terminating is no worker.
-    - **It ends** at the first reading of a ready member: routing follows readiness
-      again. A worker still not ready leaves the routing with no verdict, nothing
-      about it having changed, and its in-dialog requests go to its backup until it
-      reads ready, as any not-ready worker's. A second emptying reopens it.
-    - **A worker restarted inside it** answers its probe once bootstrapped and takes
-      new calls and in-dialog requests. Its reclaimed calls stay parked until a
-      message arms them or its own endpoint reads ready (ADR-0055 §8), since it
-      cannot tell a proxy routing on answers from one that holds no address for it.
-    - **A proxy started inside it** needs no memory of an earlier view: its first
-      round reads the workers, and its first view latches at the round's end.
-    - **A proxy's own pod read not ready** is another matter: its node's speaker
-      withdraws the node whatever `/readyz` answers (ADR-0056 §1).
-
-    `sip_proxy_routing_on_answers` is 1 meanwhile, and each turn logs a line.
-
-    Open: the rule reads "none ready" literally. A worker the slice still reads ready
-    while the probe reads it `Dead`, beside a not-ready worker that answers, leaves no
-    worker to route to. Say w1 reads not ready and w0 powers off: the probe reads w0
-    `Dead` within 3.6 s, the slice reads it ready until the node controller's grace
-    runs out, 45 to 53 s after the loss (measured), the projection holds only w0,
-    `/readyz` and `/fitz` fail, every proxy withdraws, and in-dialog requests are
-    dropped as unroutable. About 50 s; as long as the cut when only the path from the
-    proxy to w0 is cut, bounded by w1's own toleration of the orchestrator's eviction.
-
-    A worker out of the routing while another reads ready stays one the proxy knows:
-    its address reads `Dead` for as long as it is a member, so its own requests leave
-    as a worker's. The answers to them follow the owner rule to its backup, so a
-    keepalive falling due then is unanswered and ends the call at Timer F
-    (`no_worker_reads_ready.rs`, the keepalive cell), and a call whose two owners are
-    both out, with a third worker ready, has its in-dialog requests dropped for as
-    long as that lasts.
-
-12. **The keepalive lane.** The worker's transaction layer passes each
-    out-of-dialog OPTIONS (§2: no transaction) up on a small bounded lane of
-    its own, apart from the event queue; a full lane drops the newest and
-    counts it (`b2bua_txn_keepalive_lane_drops_total`), and the prober
-    repeats. The router takes the lane first whenever it waits for work, but
-    after an OPTIONS turn takes other ready work first for one turn, so a
-    steady stream of probes starves nothing: a probe waits for the turn in
-    progress and, when that turn was itself an OPTIONS and other work is
-    ready, one more turn, never behind the queued call and transaction
-    events. The answer is built on the router loop as for any
-    event, and the dead notice it carries (§3) is taken right after it, so
-    verdicts apply in the order their OPTIONS arrived. A frozen or
-    partitioned process, and a wedged router loop or transaction owner,
-    still answer nothing and are still read `Dead` (§3). Residual: an OPTIONS
-    still waits behind the datagrams ahead of it in the transport's receive
-    queue and behind the transaction owner's own processing of them. The
-    lane is opt-in in the transaction layer (`keepalive_lane`), so its other
-    users keep one queue. A slow but still turning worker stays `Alive`, and
-    the delay of its in-dialog requests is not capped.
-
-### Amended
-
-- ADR-0043 §11: the open breaker sets `new=refuse; cause=backend` on a `200`
-  instead of a `503`. §12: the fallback stands, and "a node not-ready on a
-  backend still serves calls" now holds for in-dialog requests (4).
-- ADR-0031 D4: the proxy's `Draining` grace is gone; a leaving worker's
-  in-dialog requests move when its ordinal leaves the projection or the probe
-  reads it `Dead`.
-- ADR-0046 §2: readiness counts `Alive` workers, whatever their acceptance,
-  among those it routes to, and waits for the first worker view; D4: the VRRP
-  check also reads the first-view latch.
-- ADR-0031 D1: a `ready` member is the routing target while one reads ready;
-  none reading ready, every member present and not terminating is, on its answers.
-- ADR-0012 D4, ADR-0014 §5, ADR-0009: an address change resets health to
-  `Unknown` and re-arms nothing; affinity is the ACK/CANCEL exemption and
-  liveness routing (4); the drain grace and the fresh-pod guard are removed.
+1. **Two axes.** A worker is **serving dialogs** while its process is up and holds its calls,
+   and **accepting new calls** while it takes an initial INVITE. The proxy reads the first as
+   liveness and the second as acceptance, and never derives one from the other.
+2. **The OPTIONS answer.** `200` whenever the worker serves dialogs, with `X-Overload`,
+   `X-Readiness: new=accept|refuse; cause=…` and `X-Incarnation`; `503` only while NotReady.
+   The proxy acts on `new` alone. No transaction is held for an out-of-dialog OPTIONS.
+   [Detail](appendix/0050-a-workers-two-readiness-axes.md#2-the-options-answer).
+3. **The proxy's view of a worker** is health `Unknown | Alive | Dead` plus acceptance. A turn
+   to `Dead` from `Alive` (or a flip of an `Alive` worker to not ready, not terminating, with
+   another member ready) is a **dead verdict**, told to every other `Alive` worker on a signed
+   `X-Worker-Dead` notice. A worker takes a verified notice fresh within
+   `B2BUA_DEAD_NOTICE_FRESH_MS` (10 s), holds the verdict `B2BUA_DEAD_VERDICT_HOLD_MS` (42 s), and
+   takes over the dead worker's calls once its own stream from it is down (ADR-0047 D1, D2).
+   [Detail](appendix/0050-a-workers-two-readiness-axes.md#3-the-proxys-view-of-a-worker).
+4. **In-dialog routing reads liveness only.** A cookied request goes to `w_pri` while `Alive`,
+   else to `w_bak` while `Alive`, never to a fresh selection. An `Unknown` worker is not routed.
+   A worker that refuses new calls keeps every dialog it owns.
+   [Detail](appendix/0050-a-workers-two-readiness-axes.md#4-in-dialog-routing-reads-liveness-only).
+5. **No answer without a target.** An in-dialog request with no `Alive` owner, or before the
+   first worker view, is dropped and counted, never answered `503`. A worker receiving a copy of
+   a replicated call's initial INVITE takes the call over; a foreign INVITE with no record gets
+   no final. [Detail](appendix/0050-a-workers-two-readiness-axes.md#5-no-answer-without-a-target).
+6. **New calls.** A new dialog goes to an `Alive` accepting worker, else to an `Alive` refusing
+   one, which answers its own refusal and writes its call record. The proxy refuses a new call
+   only from its own overload gates, never from a worker's state. [Detail](appendix/0050-a-workers-two-readiness-axes.md#6-new-calls).
+7. **The cookie's `w_bak`** is the rendezvous winner among `Alive` accepting workers other than
+   the primary, among all `Alive` ones when none accepts, else among the known ordinals.
+   [Detail](appendix/0050-a-workers-two-readiness-axes.md#7-the-cookies-w_bak).
+8. **No fresh-pod guard.** A worker joins `Unknown` and is routed once a probe answers `200`. A
+   changed `X-Incarnation` resets it to `Unknown`.
+   [Detail](appendix/0050-a-workers-two-readiness-axes.md#8-no-fresh-pod-guard).
+9. **The worker's states.** NotReady (`503`); Ready (accepting, unless a gating backend's
+   breaker or the event-queue gate refuses); Cordoned (refuses new calls, serves the rest,
+   reversible); Draining (SIGTERM or withdrawal, terminal, ADR-0031 D2).
+   [Detail](appendix/0050-a-workers-two-readiness-axes.md#9-the-workers-states).
+10. **Operator routes** on a loopback listener (`B2BUA_ADMIN`): `/admin/cordon` (POST, DELETE,
+    GET) and `POST /admin/release-all`, which closes every call's record without signalling.
+    [Detail](appendix/0050-a-workers-two-readiness-axes.md#10-operator-routes).
+11. **The proxy's readiness.** `/readyz` is Ready when SIGTERM has not latched, no recv shard is
+    stalled and one worker is `Alive`; acceptance plays no part. The proxy probes every member
+    present and not `terminating`. While none reads ready, it routes on the probe's answers.
+    [Detail](appendix/0050-a-workers-two-readiness-axes.md#11-the-proxys-readiness).
+12. **The keepalive lane.** The transaction layer passes each out-of-dialog OPTIONS up on a
+    small bounded lane apart from the event queue, taken first by the router, so a probe never
+    waits behind the queued events.
+    [Detail](appendix/0050-a-workers-two-readiness-axes.md#12-the-keepalive-lane).
 
 ## Consequences
 
-- A backend outage refuses new calls at the workers, each with its call
-  record, and touches no established call.
-- One worker cut from its backend loses no call: new calls go to the others,
-  its own dialogs stay with it.
-- A restarted worker's new calls stay on it; a restarted proxy diverts
-  nothing once its first probe round has answered.
-- A site is taken out of service by cordoning its workers, waiting on their
-  call counts, then SIGTERM (calls handed to backups elsewhere) or
-  release-all (no backup outside the site). Nothing places a call's backup
-  outside its site today (ADR-0015 is unimplemented).
-- An in-dialog request with no live worker gets no answer; the sender's
-  transaction timers end it.
-- A starved worker's backlog no longer delays its probe answers past the
-  probe's reply window: it reads refusing, keeps its dialogs, and is never
-  taken over for it. Its new calls go to the other workers until its queue
-  has stayed drained for the hold.
-- Pinned by proxy tests (in-dialog to a refusing primary, to a `NotReady`
-  backup, with no target; a `w_bak` among accepting workers; an incarnation
-  change resets health; no guard after a join or a proxy restart; no `503`
-  before the first view), worker tests (the OPTIONS answer in each state,
-  cordon reversal, release-all), and failover-harness cells (a cluster-wide
-  backend outage with established calls ended by their BYE; a re-INVITE right
-  after a primary returns, served by the primary), and the event-queue cells
-  (an OPTIONS behind a backlog answered within the reply window; the refusal
-  by depth and by a persisting delay with its hold; a stalled router reading
-  the age of the event behind it; a held router's INVITE refused on arrival
-  past that age, with no 100; a wait shorter than the interval refusing
-  nothing; a backed-up worker kept alive, its
-  dialogs on it, new calls elsewhere; a dead notice behind a backlog taken
-  once, in order; a wedged or partitioned worker read dead), and the cells of
-  `no_worker_reads_ready.rs` (the flips' spacing and order; a death inside the
-  view and after a refuted flip; the view's end; a restart and a proxy started
-  inside it; a terminating worker).
+- A backend outage refuses new calls at the workers, each with its call record, and touches no
+  established call.
+- A restarted worker's new calls stay on it; a restarted proxy diverts nothing once its first
+  probe round answered.
+- A site leaves service by cordon, then SIGTERM or release-all.
+- An in-dialog request with no live worker gets no answer; the sender's timers end it.
+- A starved worker reads refusing, keeps its dialogs, and is never taken over for it.
+- Open: "none ready" is read literally, so a worker the slice reads ready but the probe reads
+  `Dead`, beside a not-ready worker that answers, leaves no target for about 50 s.
+
+Tests and the long form: [appendix, consequences](appendix/0050-a-workers-two-readiness-axes.md#consequences).

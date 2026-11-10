@@ -1,0 +1,247 @@
+# Appendix: ADR-0012, HA addressing and membership reconcile
+
+Decision part: [ADR-0012](../0012-ha-addressing-and-membership-reconcile.md).
+
+## Context
+
+ADR-0011 X7 promised "the k8s watcher is written **once** and consumed by both
+the proxy and the b2bua replication engine — neither re-implements discovery."
+At the time only the **repl** consumer used it (`topology::K8sMembership`, an
+EndpointSlice informer → `MemberDelta` broadcast); the **proxy** was left on a
+`StaticWorkerRegistry` whose worker IPs `deploy/k8s/run.sh` baked from live pod
+IPs at deploy time, and `chaos.sh` re-ran `deploy` to refresh after every kill.
+X7 was therefore only half-realized.
+
+A chaos run then exposed a second, sharper defect. The repl
+`ReplicationSupervisor` reconcile loop did `Err(_) => return` on **any**
+`broadcast::error::RecvError` — both `Lagged` and `Closed`. During kill-churn the
+membership delta channel lagged once; the loop exited permanently; the node went
+**deaf to all further membership deltas**; its puller kept re-dialing a peer's
+**dead pod IP** forever (its own connection-loss detection + backoff were
+correct — nothing ever told it the address moved). The backup partition for that
+peer went stale and the next kill lost failover (chaos `kill_worker` #5 resolved
+87% < 90%).
+
+Two distinct concerns surfaced, and this ADR pins both plus the addressing
+question they raised:
+
+1. **Liveness of the membership-consuming loop** (the actual bug).
+2. **Addressing**: should the repl puller and the proxy reach workers by **Pod
+   IP** (re-resolved on membership change) or by **stable per-pod DNS name**
+   (re-resolved per connect)? And must the two flows be **consistent**?
+
+The two flows differ in transport: repl is a **long-lived TCP** stream (a
+connection break is a crisp re-resolve trigger); proxy→worker is **connectionless
+UDP** SIP (liveness is inferred from an OPTIONS health probe, not a socket
+error). That difference is load-bearing for the decisions below.
+
+## Decision D3. Repl addressing: stable per-pod DNS name, resolved fresh per connect attempt
+
+The puller resolves its peer's **stable per-pod DNS name**
+(`{ordinal}.{headless-svc}.{ns}.svc.cluster.local`, derived from the ordinal =
+StatefulSet pod name = membership identity) **fresh on every connect attempt**,
+instead of caching a `SocketAddr` at construction. Its existing
+`recv→None → Backoff → Connecting` loop then re-resolves the name → the restarted
+peer's new IP automatically, **with no membership delta required**. This would
+have prevented the incident on its own.
+
+This is a **robustness multiplier, not a correctness substitute**, and is
+explicitly **hybrid**:
+
+- The **EndpointSlice informer stays** the source of the membership *set* +
+  readiness (D1/D2). DNS answers "address of a name I already know"; it cannot
+  enumerate peers, observe scale-down, or gate readiness of the set. DNS can
+  never replace the informer.
+- `publishNotReadyAddresses: false` ⇒ NXDOMAIN-while-not-ready **preserves** the
+  "don't replicate to an un-rehydrated peer" gate the EndpointSlice ready flag
+  gave; backoff-retry absorbs it. No deadlock: re-hydration is directional (the
+  new node pulls from the surviving node, whose DNS resolves).
+
+Resolution is **async** (`tokio::net::lookup_host`) so it never blocks the
+runtime, and a **bare IP fast-path** (`parse::<IpAddr>()`) keeps the sim test
+seam (literal `SocketAddr`s) and the legacy static-`B2BUA_PEERS` path working
+unchanged. The per-connect resolver is the seam; the sim resolver returns its
+fixed mapping, so tiers 1–2 (ADR-0011 X10) are untouched.
+
+## Decision D4. The proxy joins the same informer (ADR-0011 X7); it still reaches workers by direct Pod IP
+
+The proxy replaces its baked-IP `StaticWorkerRegistry` with a
+`ComposedWorkerRegistry` (membership ⊕ health projection) that wraps the **same**
+`topology::K8sMembership` informer the repl path runs, mapping each ready
+`Peer{ordinal, host}` →
+`WorkerEntry{id = ordinal, address = host:sip_port}`. The proxy then **still
+sends OPTIONS and forwards SIP straight to the worker's Pod IP** — the informer's
+only job is to keep that IP list correct automatically on reboot/scale. No DNS in
+the proxy data path.
+
+Why informer (not DNS) for the proxy, despite D3 choosing DNS for repl: UDP has
+**no connection event** to trigger re-resolution, so DNS would need either a
+blocking per-forward lookup (a hot-path footgun) or a background refresh task
+plus a **cluster-wide** CoreDNS TTL reduction. The informer is **event-driven
+(≈instant, no NXDOMAIN negative-cache lag), adds no DNS QPS, needs no cluster-
+wide change**, and reuses an already-running watch. It is strictly better here.
+
+Two health signals stay **separate and must not fight**:
+
+- **Membership** (set + Pod IP + k8s-readiness) ← informer.
+- **Health/load** (`Alive`/`NotReady`/`Draining`/`Dead` + load bands) ← the
+  unchanged OPTIONS `HealthProbe`.
+
+The informer's reconcile is therefore **health-preserving for *unchanged*
+workers**: a worker whose ordinal **and** Pod IP are both unchanged keeps its
+probe-written health untouched (the genuine no-op wakeup the design protects). A
+new worker enters `Unknown` (not routable for new dialogs) until its first OPTIONS
+flips it `Alive`. No fresh-pod guard or drain grace applies (ADR-0050).
+
+### D4 follow-up. A restarted worker is a fresh incarnation, not an unchanged one
+
+The discriminator is **address change, not ordinal identity.** A killed worker
+that recreates under the same StatefulSet ordinal at a **new Pod IP** is a new
+process — whatever health the OPTIONS probe last wrote (typically `Dead`, from the
+kill) is stale and must **not** be preserved. Preserving it black-holes the
+recovered worker forever: the proxy keeps it `Dead`, never re-probes the new
+address, drops it from the routable pool (no new dialogs), and reroutes in-dialog
+traffic to a backup — the cluster silently degrades to single-worker with a
+`max_udp_retrans` failure tail. (Observed live in an endurance+chaos run; this is the proxy-side analog of the D1
+puller restart-reconcile bug.)
+
+So on a `AddressChanged` (or a `Removed`→`Added` across reconciles), the registry
+treats the endpoint as fresh: it **resets health to `Unknown`**, re-arms no guard
+(ADR-0050), and lets the OPTIONS probe
+re-classify it — `Alive` only once a fresh probe at the new address succeeds. The
+probe loop already fans OPTIONS at **every** worker in the snapshot regardless of
+health, so a reset-to-`Unknown` worker is re-probed on the next tick. The runner's
+health sampler publishes `sip_worker_health{health=...}` from the live registry,
+so a stuck-single-worker pool reads `alive=1` against an expected `2` (alert on
+that, plus `sip_proxy_worker_pool_empty`). Regression:
+`membership_reg::tests::{address_move_resets_health_and_rearms_fresh_pod_guard,
+restart_of_dead_worker_resets_and_reprobes}` (and the converse
+`unchanged_reconcile_preserves_probe_written_health`).
+
+## Decision D5. The consistency we enforce is membership source and identity, not address representation
+
+### Failure modes that work in only one scheme (the consistency rationale)
+
+- **Only DNS (D3) gives:** recovery with **no membership delta at all** —
+  survives a deaf/lagged consumer or a watch gap. The incident's silver bullet;
+  layered on top of D1/D2.
+- **Only the informer + ready-flag gives:** event-driven readiness with **no
+  negative-cache lag**; **no hard dependency on CoreDNS** in the recovery path
+  (DNS is itself a common incident cause); works in the **paused-clock sim
+  tests** (DNS isn't modeled there); and **set/scale enumeration** DNS
+  structurally cannot provide.
+
+This is why the design is **layered**: D1/D2 (informer + self-healing reconcile)
+is the correctness floor; D3 (DNS-per-connect) is additive robustness for repl;
+D4 puts the proxy on the same floor.
+
+## Decision D6. The proxy gates k8s readiness on ≥1 routable worker, and exposes an empty-pool gauge
+
+D4's "informer-fed pool, `Unknown` until first OPTIONS" has a sharp edge the
+old baked-IP registry did not: the pool **starts empty and fills asynchronously**
+(`K8sMembership::spawn` returns before the first watch event), and **stays empty**
+if the watch is RBAC-forbidden, the worker Service name is wrong, or no endpoint
+is Ready. The old `StaticWorkerRegistry` started every worker `Alive`, so the
+proxy could route the instant the process bound its socket. The proxy now runs HA
+(D7), but a freshly (re)started replica still starts with an empty pool until its
+own informer fills, so the readiness gate below keeps an unready replica out of
+rotation and turns a misconfigured watch into a loud rollout timeout instead of a
+silent black-hole.
+
+So the proxy adopts the worker's contract: a `GET /readyz` that is `200` only
+when the registry holds **≥1 `Alive`** worker, wired to the k8s `readinessProbe`
+(was a bare `tcpSocket`). The Service then withholds traffic during a (re)start
+until the pool is genuinely routable, and a forbidden/mis-named watch surfaces as
+a **`kubectl rollout status` timeout** instead of a silent outage. A
+`sip_proxy_worker_pool_empty` gauge (`1` iff zero `Alive` workers), published by a
+runner-side sampler that also populates the `sip_worker_health` gauges,
+makes the condition alertable in Prometheus. Liveness (`/healthz`, the process is
+up) stays separate from readiness (`/readyz`, fit to serve) — mirroring the
+worker.
+
+## Decision D7. Front-proxy HA via active/passive keepalived VRRP VIP
+
+Superseded by [ADR-0056](../0056-the-front-proxys-addresses-are-announced-by-bgp.md): the VIPs are announced by BGP from every node whose proxy is Ready. The text below states the superseded design.
+
+The end-state architecture is **fully resilient**: no component is a single point
+of failure. Worker HA is peer-to-peer replication (ADR-0011); this decision closes
+the last gap — the front proxy. It supersedes the earlier "proxy HA is out of
+scope for this thin runner" stance (a deliberate temporary choice).
+
+**Shape (ported from sipjsserver `deploy/helm/sip-front-proxy/`):** two
+anti-affined proxy replicas on the two `tier=edge` nodes, fronted by a **keepalived
+VRRP virtual IP** (`172.20.255.250`, static in the kind `172.20.0.0/16` node
+subnet). Active/passive: the VRRP master owns the VIP and serves all traffic; the
+backup is warm. On master loss the backup claims the VIP: at once when the
+master's keepalived stops, within the 3.6 s master-down timer (3 × 1 s advert
+plus skew) when it goes silent. The survivor keeps it (ADR-0046 for the
+priorities and the health check). `hostNetwork: true` lets the keepalived
+sidecar answer ARP on the node and read the proxy's `/healthz` over the host
+network; an init container pins the VIP on `lo` and sets strict-ARP so both pods can `bind(VIP:5060)`
+and only the ARP owner answers.
+
+**Why this needs no proxy code change (the load-bearing fact).** The proxy already
+binds **two** sockets: the forwarding socket (`PROXY_LISTEN`) and a *separate*
+ephemeral OPTIONS health-probe socket (`0.0.0.0:0`). So we set
+`PROXY_LISTEN = PROXY_ADVERTISE = VIP`: the master sources forwarded SIP from the
+VIP (responses return to the VIP owner), while **both** proxies keep health-probing
+workers from their own node IPs — the backup keeps a live worker view and its
+`/readyz` passes, so it is genuinely warm and takes over instantly.
+
+**Why active/passive (not active/active behind a Service).** Advertising the
+**stable VIP** (not the per-pod IP, the old D-era choice) means in-dialog
+Record-Route survives both failover *and* a pod restart — the retransmit tail that
+a pod-IP advertise caused on every `kill_proxy` is gone. The HMAC stickiness cookie
+(ADR-0009 X3) + worker replication (ADR-0011) already make in-dialog routing and
+worker failover correct from either proxy. Active/passive (a single live proxy at a
+time) additionally keeps the per-pod `cancel_lru` (CANCEL / hop-by-hop-ACK
+correlation, ADR-0009 X1) **coherent** — an active/active pair behind a ClusterIP
+would split it and fail to ACK non-2xx finals (e.g. the limiter's 486s), so the VIP
+is the correct full-resilience design, not just the simplest.
+> The memo argument is void: every transaction path routes without the memo (ADR-0009 X7).
+
+The HA tooling's `kill_proxy` incident crashes **only the VIP holder** (the pod
+carrying the VIP on an interface other than `lo`); its window's budget states
+what the failover may cost — failover, not a tolerated outage.
+
+## Consequences
+
+- **Deploy simplification.** Deploy bakes no worker IPs into `PROXY_WORKERS`, and
+  chaos runs re-deploy nothing to refresh worker IPs after a kill. The proxy has its
+  RBAC (ServiceAccount/Role/RoleBinding for the EndpointSlice
+  watch, `templates/proxy-rbac.yaml`, mirroring the worker's). The
+  pod-name-as-id invariant (a worker's StatefulSet pod name is its ordinal,
+  `templates/worker.yaml`) is unchanged and still required.
+- **New dependency for the proxy:** an in-cluster kube client + EndpointSlice
+  watch RBAC. A fixed `PROXY_WORKERS` list replaces discovery only when set; a
+  kube client that fails to build is built again in the background and the
+  proxy stays NotReady meanwhile (ADR-0046).
+- **CoreDNS enters the repl reconnect path** (D3) — bounded by backoff; negative
+  caching can slow a just-ready peer's first reconnect by up to the SOA negative
+  TTL, which is acceptable because D1/D2 already converge via the informer.
+- **Regression test** added at the membership/supervisor layer: a deliberately-
+  lagged broadcast channel (filled past its 256 capacity) followed by an
+  address change must still redirect the puller to the new address — proving D1.
+
+## Deferred (with justification)
+
+- **DNS-with-low-TTL for the proxy** — rejected in favour of D4's informer; would
+  only be revisited if giving the proxy watch RBAC proves undesirable in some
+  target cluster.
+- **Lowering cluster-wide CoreDNS TTL** — not needed; D4 is event-driven and D3's
+  staleness is backoff-bounded.
+- **Per-connect resolution pushed below the `ReplicationNetwork` seam** (a
+  `connect_host` API) — D3 resolves *above* the seam (in the puller) to keep the
+  transport seam `SocketAddr`-typed and the sim transport untouched.
+
+## References
+
+- ADR-0011 (HA replication peer-to-peer: X1 drop-Redis, X5 liveness-over-
+  completeness, X7 one-watcher-both-consumers, X9 incarnation gen, X10 sim
+  transport / test tiers — the decisions this ADR extends).
+- ADR-0009 (proxy HRW + stickiness cookie + fresh-pod guard / drain grace),
+  ADR-0002 (crate-per-layer / acyclicity: `topology` is a shared leaf consumed by
+  both proxy and b2bua).
+- `crates/b2bua/src/repl/{supervisor,puller}.rs`, `crates/topology/src/{lib,k8s}.rs`,
+  `crates/sip-proxy/src/registry/`, `crates/{b2bua-runner,sip-proxy-runner}/src/main.rs`,
+  `deploy/helm/siprust/`.
