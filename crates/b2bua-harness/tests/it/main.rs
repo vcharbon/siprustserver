@@ -50,6 +50,7 @@ mod contactless_invite;
 mod cordon;
 mod coverage_doc;
 mod crossing_2xx_repeat_is_a_write;
+mod dead_hop_reroute_release;
 mod decision_context;
 mod decision_deadline;
 mod decision_lands_on_cancelled_call;
