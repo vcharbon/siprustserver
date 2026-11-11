@@ -98,7 +98,13 @@ export const CellSummary = Schema.Struct({
    * Information beside the verdict, passed or failed: it fails no cell, which
    * `passed` judges on the system under test alone.
    */
-  sourceFault: Schema.optionalKey(Schema.Literal(true))
+  sourceFault: Schema.optionalKey(Schema.Literal(true)),
+  /**
+   * Set when the deployment's reclassifier restated a run the interpreter
+   * failed as passed: its reason, naming the rules it stood on. Every failure
+   * of the cell's lines then stands waived, the reclassifier answering it.
+   */
+  restated: Schema.optionalKey(Schema.String)
 })
 export interface CellSummary extends Schema.Schema.Type<typeof CellSummary> {}
 
@@ -174,7 +180,8 @@ export const cellSummaryJson = (summary: CellSummary): Record<string, unknown> =
     dir: summary.dir,
     error: summary.error,
     skipped: summary.skipped,
-    sourceFault: summary.sourceFault
+    sourceFault: summary.sourceFault,
+    restated: summary.restated
   })
 
 export const cellSkipJson = (skip: CellSkip): Record<string, unknown> => ({

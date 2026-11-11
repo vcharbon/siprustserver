@@ -158,7 +158,8 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
       dir,
       ...(outcome.crashed ? { error: firstLine(outcome.detail) } : {}),
       ...(outcome.skipped === undefined ? {} : { skipped: outcome.skipped }),
-      ...(outcome.sourceFault === undefined ? {} : { sourceFault: outcome.sourceFault })
+      ...(outcome.sourceFault === undefined ? {} : { sourceFault: outcome.sourceFault }),
+      ...(outcome.restated === undefined ? {} : { restated: outcome.restated })
     },
     detail: outcome.detail
   } satisfies CellRun
@@ -190,6 +191,8 @@ interface CellOutcome {
   readonly skipped?: Tokens.LaneVerdict
   /** The cell's RFC audit holds a source fault: information beside `passed`, which it never decides. */
   readonly sourceFault?: true
+  /** The reclassifier restated the failed run as passed: its reason. */
+  readonly restated?: string
 }
 
 /**
@@ -301,6 +304,7 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
     yield* fs.writeFileString(path.join(absolute, RULE_HITS_FILE), CellHits.emitHits(final.hits))
   }
   const sutPassed = !panicked && final.passed
+  const restated = sutPassed && !gated ? final.reason ?? "no reason stated" : undefined
   const sourceSaid = `(see ${RFC_FILE}):\n` +
     source.map((f) => `  ${f.rule} [${f.lane}] by ${f.actor ?? "a scripted party"}: ${f.detail}`).join("\n")
   const sutSaid = panicked
@@ -325,7 +329,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       : `${sutSaid}\nbeside it, a source fault ${sourceSaid}`,
     crashed: false,
     stderr: report.stderr,
-    ...(source.length > 0 ? { sourceFault: true as const } : {})
+    ...(source.length > 0 ? { sourceFault: true as const } : {}),
+    ...(restated === undefined ? {} : { restated })
   } satisfies CellOutcome
 })
 

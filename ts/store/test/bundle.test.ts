@@ -253,4 +253,28 @@ describe("Bundle.read", () => {
     }))
     expect(Verification.finalStatusOf(waived)).toBe("pass")
   })
+
+  it("states a failure the reclassifier restated as passed as a waived line it answers, naming its rules, and passes its own line", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const restated = reading.cases.find((entry) => entry.caseId.endsWith("-restated"))!
+    expect(restated.passed).toBe(true)
+    const lines = restated.verifications!
+    expect(lines).toContainEqual({
+      name: "call",
+      source: "reclassifier",
+      answer: "fail",
+      message: "restated as passed (allow-trimmed — ok with accepted delta): check-failed: site=B1 180, field=header.Allow, " +
+        "op=eq, expected=INVITE, ACK, observed=INVITE",
+      detail: { step: "s7" },
+      waived: true
+    })
+    expect(lines.filter((line) => line.answer === "fail" && Verification.decides(line))).toEqual([])
+    expect(lines.at(-1)).toEqual({
+      name: "reclassifier",
+      source: "reclassifier",
+      answer: "pass",
+      message: "allow-trimmed — ok with accepted delta"
+    })
+    expect(Verification.finalStatusOf(lines)).toBe("pass")
+  })
 })

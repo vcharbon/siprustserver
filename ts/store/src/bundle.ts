@@ -68,6 +68,7 @@ interface Rollup {
     readonly dir?: string
     readonly skipped?: string
     readonly error?: string
+    readonly restated?: string
   }>
 }
 
@@ -297,7 +298,8 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
             verdict: decoded,
             audit: auditedOf(rfc) ? findings : null,
             charged,
-            answered: answeredOf(yield* readJson(path.join(dir, VERIFICATIONS_FILE)))
+            answered: answeredOf(yield* readJson(path.join(dir, VERIFICATIONS_FILE))),
+            restated: typeof cell.restated === "string" ? cell.restated : null
           })
         }
         : {})

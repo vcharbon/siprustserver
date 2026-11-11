@@ -402,6 +402,17 @@ describe("the post-run escape hatch", () => {
     })
     expect(cell.passed).toBe(false)
     expect(detail).toContain("known open defect")
+    expect(cell.restated).toBeUndefined()
+  })
+
+  it("names its reason in the rollup where it restates a failed run as passed", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const { cell } = await one(replayCell({ case: caseNamed(cases, "rfc-source-fault-beside-a-failure.v3.json") }), {
+      rig: { reclassifier: Reclassifier.layerWith(() => Effect.succeed({ passed: true, reason: "rule-a — ok with accepted delta" })) }
+    })
+    expect(cell.passed).toBe(true)
+    expect(cell.restated).toBe("rule-a — ok with accepted delta")
   })
 
   it("never restates a panicked run as passed", async () => {
@@ -411,11 +422,13 @@ describe("the post-run escape hatch", () => {
       rig: { reclassifier: Reclassifier.layerWith(() => Effect.succeed({ passed: true, reason: "restated" })) }
     })
     expect(cell.passed).toBe(false)
+    expect(cell.restated).toBeUndefined()
   })
 
   it("changes nothing by default", async () => {
     const { dir, cell } = await one(replayCell(), { rig: {} })
     expect(cell.passed).toBe(true)
+    expect(cell.restated).toBeUndefined()
     expect(fs.existsSync(path.join(dir, cell.dir, RULE_HITS_FILE))).toBe(false)
   })
 

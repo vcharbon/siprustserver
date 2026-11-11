@@ -1,0 +1,9 @@
+{
+  "case": "capture_lines.pcap.gz-restated",
+  "lane": "fake",
+  "status": "failed",
+  "failed_step": "s7",
+  "failures": [
+    { "failure": "check-failed", "site": "B1 180", "field": "header.Allow", "op": "eq", "expected": "INVITE, ACK", "observed": "INVITE" }
+  ]
+}
