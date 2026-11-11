@@ -385,7 +385,7 @@ The items below were traced through the implementation.
 | CANCEL-6 — B-leg CANCEL/2xx glare | Correct, untested | `cancel-200-crossing` rule: ConfirmDialog → ACK → BYE (`defaults.rs:112-128`). |
 | REFER-SCOPE-4 — REFER retransmission | Correct, untested | Absorbed at txn layer (`layer.rs:1136-1143`, cached-202 replay); transfer code never sees the dup. |
 | REFER-NOTIFY-9 — no NOTIFY after terminal | Correct, tested | The core's subscription record refuses a NOTIFY on a terminated subscription, whoever asks (RFC 6665 §4.2.2; ADR-0055 §2, `b2bua-core/src/rules/actions/subscription.rs`). |
-| ID-1/2/3, HDR-2 — per-leg identity | Correct, untested | `build_b_leg` mints fresh Call-ID/From-tag/CSeq=1 and rewrites Contact to the B2BUA (`relay.rs:195-246`, `stack_identity.rs:45-59`). |
+| ID-1/2/3, HDR-2 — per-leg identity | Correct, untested | `build_b_leg` derives the Call-ID from the originator's (ADR-0059), mints a fresh From-tag and CSeq=1 and rewrites Contact to the B2BUA (`relay.rs:195-246`, `stack_identity.rs:45-59`). |
 
 ## Priority recommendations (what to add first)
 

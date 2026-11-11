@@ -34,9 +34,9 @@ fn a_leg_id_no_space_minted_has_no_derived_call_id() {
 }
 
 #[test]
-fn a_call_id_line_past_the_first_ingress_bound_is_not_derived() {
-    let bound = FirstIngressBound { header_length: 20, ..BOUND };
-    // "Call-ID: 1-" is 11 bytes: a 9-byte originator id fits, a 10-byte one does not.
-    assert_eq!(dialled_call_id("b-1", "123456789", &bound).as_deref(), Some("1-123456789"));
+fn a_call_id_line_at_the_first_ingress_bound_is_derived_one_byte_past_it_is_not() {
+    let fits = "123456789";
+    let bound = FirstIngressBound { header_length: "Call-ID: 1-".len() + fits.len(), ..BOUND };
+    assert_eq!(dialled_call_id("b-1", fits, &bound).as_deref(), Some("1-123456789"));
     assert_eq!(dialled_call_id("b-1", "1234567890", &bound), None);
 }

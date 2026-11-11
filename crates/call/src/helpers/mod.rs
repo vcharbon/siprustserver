@@ -89,7 +89,7 @@ pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
     carrying_dialog, dialog_with_peer, dialog_with_peer_mut, find_b_leg, find_b_leg_by_call_id,
     find_leg, is_adopted, is_fully_resolved, leg_call_id_number, leg_is_going_away,
-    leg_is_resolved, leg_kind, leg_own_tag, mark_rang, next_b_leg_id, own_dialog,
+    leg_is_resolved, leg_kind, leg_own_tag, mark_rang, next_b_leg_id, own_dialog, same_leg,
 };
 pub use leg_end::{
     abandon_leg, cancel_early_dialogs, record_cancel_sent, record_cancelled_invite,

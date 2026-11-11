@@ -51,8 +51,66 @@ Content-Length: 0\r\n\r\n",
         req.first::<Contact>().expect("b-leg INVITE has a Contact").expect("a readable Contact")
     }
 
-    // The b-leg INVITE's dialog identity is independent of the a-leg's: a fresh
-    // Call-ID, a fresh From-tag, no To-tag, CSeq 1, and the B2BUA's own Contact.
+    /// The b-leg INVITE `build_b_leg` dials on `config` for leg `b-1`.
+    fn dialled_b1(config: &B2buaConfig) -> SipRequest {
+        let (_, effect) = build_b_leg(
+            CallMarks {
+                call_ref: "w0|call-ref|xyz",
+                incarnation_mark: "k",
+                is_emergency: false,
+                owners: crate::owners::Owners::none(),
+            },
+            "b-1",
+            &a_leg_invite(),
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            config,
+            &mut TurnIds::fixed(0xB2B),
+            None,
+            &[],
+            &CapabilitySet::default(),
+            None,
+            &[],
+            &[],
+            None,
+            true,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("no identity rewrites, so nothing to refuse");
+        match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
+        }
+    }
+
+    // A derived Call-ID line one byte past the next hop's first-ingress bound is
+    // not sent: the leg takes a Call-ID of the B2BUA's own.
+    #[test]
+    fn a_derived_call_id_past_the_first_ingress_bound_falls_back_to_a_minted_one() {
+        let derived = format!("Call-ID: 1-{}", a_leg_invite().call_id().as_str()).len();
+        let mut config = B2buaConfig::default(); // sip_local_ip = 127.0.0.1
+        config.parser_limits.first_ingress.header_length = derived;
+        let at_bound = dialled_b1(&config);
+        assert_eq!(at_bound.call_id().as_str(), "1-alice-call-id@192.0.2.5");
+
+        config.parser_limits.first_ingress.header_length = derived - 1;
+        let past = dialled_b1(&config);
+        let call_id = past.call_id();
+        let call_id = call_id.as_str();
+        assert!(
+            call_id.starts_with("b-1-") && call_id.ends_with("@127.0.0.1"),
+            "the minted `<leg>-<tag>@<host>` shape: {call_id}"
+        );
+    }
+
+    // The b-leg INVITE's dialog identity is independent of the a-leg's: a Call-ID
+    // of its own derived from the a-leg's, a fresh From-tag, no To-tag, CSeq 1,
+    // and the B2BUA's own Contact.
     #[test]
     fn b_leg_identity_is_independent_of_a_leg() {
         let a = a_leg_invite();
@@ -94,8 +152,7 @@ Content-Length: 0\r\n\r\n",
             }
         };
 
-        // (a) ID-1 — the Call-ID derives from the a-leg's: `<N>-<a-leg Call-ID>`, `N` the leg's
-        // ordinal, so it is a fresh Call-ID a capture still joins to the a-leg.
+        // (a) ID-1 — the Call-ID derives from the a-leg's.
         let call_id = invite.call_id();
         let call_id = call_id.as_str();
         assert_eq!(call_id, format!("1-{}", a.call_id().as_str()), "b-1 dials `1-<a-leg Call-ID>`");

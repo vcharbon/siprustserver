@@ -109,8 +109,7 @@ async fn end_from(
 fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
     let up = |d: &Dialog| matches!(d.state, DialogState::Early | DialogState::Confirmed);
     let leg_only_here = live.b_legs.iter().any(|leg| {
-        let theirs =
-            ending.b_legs.iter().find(|l| l.leg_id == leg.leg_id && l.call_id == leg.call_id);
+        let theirs = ending.b_legs.iter().find(|l| call::helpers::same_leg(l, leg));
         let held_there = |d: &Dialog| {
             theirs.is_some_and(|t| {
                 t.dialogs
@@ -174,7 +173,7 @@ pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call 
     let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
     for leg in legs {
         let theirs =
-            call::helpers::find_leg(live, &leg.leg_id).filter(|l| l.call_id == leg.call_id);
+            call::helpers::find_leg(live, &leg.leg_id).filter(|l| call::helpers::same_leg(l, leg));
         for d in leg.dialogs.iter_mut() {
             let held = theirs.and_then(|l| l.dialogs.by_tags(&d.our_tag, &d.peer_tag));
             d.requests = held
@@ -192,7 +191,7 @@ pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call 
 }
 
 fn union_leg(ours: &mut Leg, theirs: &Leg) {
-    if ours.call_id != theirs.call_id {
+    if !call::helpers::same_leg(ours, theirs) {
         return;
     }
     if ours.own_tag.is_none() {

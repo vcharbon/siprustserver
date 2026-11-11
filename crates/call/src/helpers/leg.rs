@@ -50,6 +50,22 @@ pub fn callee_dialog_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a mut
     leg.dialogs.by_tags_mut(&ours, peer_tag)
 }
 
+/// Whether `a` and `b` record one leg: one leg id and one Call-ID and, on a
+/// leg this stack dialled, one From-tag. A Call-ID derives from the leg id
+/// ([`leg_call_id_number`]), so a leg id minted twice names two legs only
+/// by the From-tag each INVITE drew.
+pub fn same_leg(a: &Leg, b: &Leg) -> bool {
+    fn dialled_tag(leg: &Leg) -> Option<&str> {
+        leg.outbound_invite().map(|i| i.our_tag.as_str())
+    }
+    a.leg_id == b.leg_id
+        && a.call_id == b.call_id
+        && match (dialled_tag(a), dialled_tag(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => true,
+        }
+}
+
 /// This stack's tag on `leg` for a message no dialog names (RFC 3261
 /// §8.2.6.2): the From-tag of the INVITE it sent the leg, else the tag of the
 /// dialog it answers the leg's INVITE under ([`Leg::own_tag`]).
@@ -128,8 +144,8 @@ pub fn next_b_leg_id(call: &Call) -> String {
 
 /// The number a dialled leg's Call-ID starts with: the ordinal of `leg_id`
 /// (`{prefix}-{n}`, [`next_b_leg_id`]) plus its space's
-/// [`call_id_base`](crate::LegSpace::call_id_base). Distinct leg ids number
-/// distinctly; `None` for an id no leg space minted.
+/// [`call_id_base`](crate::LegSpace::call_id_base). Two ids [`next_b_leg_id`]
+/// mints for one call number distinctly; `None` for an id no leg space minted.
 pub fn leg_call_id_number(leg_id: &str) -> Option<u64> {
     let (prefix, n) = leg_id.split_once('-')?;
     let space = crate::LegSpace::of_prefix(prefix)?;

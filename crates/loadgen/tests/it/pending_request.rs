@@ -24,7 +24,7 @@ use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
 use serde_json::Value;
 use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipMessage, SipParser};
+use sip_message::{Method, SipMessage, SipParser, SipRequest};
 
 use crate::fake_rig::{cfg, setup_fake};
 
@@ -94,18 +94,27 @@ impl ActorScenario for InfoByeCrossing {
     }
 }
 
-/// The instants (ms) the B2BUA received the caller's INFO, each copy.
+/// The instants (ms) the B2BUA received the caller's INFO, each copy: an INFO
+/// on the Call-ID of the first INVITE the B2BUA received.
 fn caller_infos(h: &scenario_harness::Harness, b2bua: std::net::SocketAddr) -> Vec<u64> {
-    h.wire_entries()
+    let requests: Vec<(u64, SipRequest)> = h
+        .wire_entries()
         .iter()
         .filter(|e| e.to == b2bua)
-        .filter(|e| match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Request(r)) => {
-                r.method() == Method::Info && r.call_id().to_string().contains(".run-1@")
-            }
-            _ => false,
+        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
+            Ok(SipMessage::Request(r)) => Some((e.sent_ms, r)),
+            _ => None,
         })
-        .map(|e| e.sent_ms)
+        .collect();
+    let caller = requests
+        .iter()
+        .find(|(_, r)| r.method() == Method::Invite)
+        .map(|(_, r)| r.call_id().to_string())
+        .expect("the caller's INVITE reached the B2BUA");
+    requests
+        .iter()
+        .filter(|(_, r)| r.method() == Method::Info && r.call_id().as_str() == caller)
+        .map(|(at, _)| *at)
         .collect()
 }
 
