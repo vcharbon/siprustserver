@@ -91,14 +91,16 @@ fn one_trying_per_invite_is_compliant() {
 
 /// A second 100 against one INVITE is a downstream copy the proxy should
 /// A UAC sending its INVITE from another socket than its sent-by takes the
-/// INVITE's one 100 at that sent-by: no copy is in excess.
+/// INVITE's 100s at that sent-by: a second one is the stray copy.
 #[test]
-fn a_two_socket_uac_s_one_trying_is_compliant() {
+fn a_two_socket_uac_s_stray_trying_is_violated() {
     let mut sent = invite(1_000, 1);
     sent.src = "127.0.0.1:40000".to_string();
     sent.head = Some(format!("Via: SIP/2.0/UDP {ALICE};branch=z9hG4bK-i\r\n\r\n").into_bytes());
-    let msgs = [sent, trying(2_000, 1)];
-    assert!(hits(&msgs).is_empty(), "{:?}", eval(&msgs));
+    let msgs = [sent, trying(2_000, 1), trying(3_000, 1)];
+    let f = hits(&msgs);
+    assert_eq!(f.len(), 1, "{:?}", eval(&msgs));
+    assert_eq!(f[0].emitter, BOB, "the hop that forwarded the stray 100 is charged");
 }
 
 /// have absorbed, and it charges the hop that forwarded it.
