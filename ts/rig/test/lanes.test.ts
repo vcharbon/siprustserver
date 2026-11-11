@@ -113,6 +113,21 @@ describe("the lanes of a root", () => {
     expect(served?.operations.get("restart")?.file).toBe(path.join(dir, "operations/restart-worker/operation.toml"))
   })
 
+  it("name the operations a cell asks for that a lane binds none of: a cell asking for one is not runnable there", async () => {
+    const dir = workspace({
+      "lanes/served.toml": REAL("served", `[parts]\nworker-pool = "small"\n[operations]\nrestart = "restart-worker"`),
+      "lanes/proxied.toml": REAL("proxied"),
+      "targets/worker-pool/small.toml": `size = 2\n`
+    })
+    const { lanes } = await lanesOf(dir)
+    const asked = ["restart", "partition", "restart", "freeze"]
+    expect(lanes.map((lane) => [lane.id, Lanes.unboundOf(lane, asked)])).toEqual([
+      ["proxied", ["freeze", "partition", "restart"]],
+      ["served", ["freeze", "partition"]]
+    ])
+    expect(Lanes.unboundOf(lanes.find((lane) => lane.id === "served")!, ["restart"])).toEqual([])
+  })
+
   it("refuses a part file that breaks its schema, naming the file and the field", async () => {
     const lane = { "lanes/served.toml": REAL("served", `[parts]\nrecords-store = "a"`) }
     const file = (dir: string) => path.join(dir, "targets/records-store/a.toml")

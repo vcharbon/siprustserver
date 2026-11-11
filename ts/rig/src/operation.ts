@@ -15,8 +15,25 @@ export const FILE = "operation.toml"
 const Timeouts = Schema.Struct({
   inject_s: Schema.optionalKey(Seconds),
   heal_s: Schema.optionalKey(Seconds),
-  probe_s: Schema.optionalKey(Seconds)
+  /** The bound of the whole probe: a `probe` answering "not yet" is called again within it. */
+  probe_s: Schema.optionalKey(Seconds),
+  /** The pause between two calls of a `probe` that answered "not yet". */
+  probe_interval_s: Schema.optionalKey(Seconds)
 })
+
+/** Each timeout of an operation, in seconds. */
+export interface Bounds {
+  readonly inject_s: number
+  readonly heal_s: number
+  readonly probe_s: number
+  readonly probe_interval_s: number
+}
+
+/** The timeouts an operation takes where its manifest states none. */
+export const DEFAULT_BOUNDS: Bounds = { inject_s: 60, heal_s: 120, probe_s: 60, probe_interval_s: 1 }
+
+/** The exit status of a `probe` that answers "not yet" (`EX_TEMPFAIL`). */
+export const NOT_YET = 75
 
 const Run = Schema.Struct({
   inject: RelativePath,
@@ -39,6 +56,9 @@ export const Operation = Schema.Struct({
   run: Run
 })
 export interface Operation extends Schema.Schema.Type<typeof Operation> {}
+
+/** The timeouts of `operation`: its manifest's, each default where it states none. */
+export const boundsOf = (operation: Operation): Bounds => ({ ...DEFAULT_BOUNDS, ...operation.timeouts })
 
 /** The executables an operation names, by the step that runs each. */
 export const executablesOf = (operation: Operation): ReadonlyArray<readonly [string, string]> =>

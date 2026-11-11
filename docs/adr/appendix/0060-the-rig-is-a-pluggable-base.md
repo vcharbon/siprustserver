@@ -198,28 +198,41 @@ needs  = ["orchestrator"]
 locks  = []
 [params]
 grace_s = 5
-[timeouts]
+[timeouts]                     # defaults: 60, 120, 60, 1
 inject_s = 60
 heal_s = 120
-probe_s = 10
+probe_s = 10                   # the whole probe, its "not yet" answers included
+probe_interval_s = 1
 [run]
 inject = "./inject"
 heal   = "./heal"
 probe  = "./probe"             # optional
 ```
 
-- `heal` always runs and is idempotent. `probe` proves recovery after `heal`: exit 0 is
-  recovered, 75 is not yet, anything else is failed. A step concludes only from a positive
-  answer. These are the rules of ADR-0049 §2; the file format and the variables are not its.
+- `heal` always runs and is idempotent: after a failed or interrupted `inject` too. `probe`
+  proves recovery after `heal`: exit 0 is recovered, 75 is not yet (called again every
+  `probe_interval_s` within `probe_s`), anything else is failed. A step concludes only from a
+  positive answer. These are the rules of ADR-0049 §2; the file format and the variables are
+  not its.
+- Each executable runs in a process group of its own. A timeout kills the group; a signal to
+  the runner reaches only the runner, which then heals.
 - A named campaign's `setup` list injects after provisioning and heals in reverse at the end of
-  the job, whatever happened, an interrupted job included.
+  the job, whatever happened, an interrupted job and a SIGINT or SIGTERM to the runner included.
+  A setup name is an operation of the path. One that needs parts runs once per distinct set of
+  those part files among the job's lanes, with the first lane naming the set as its context.
+  One that needs no part runs once. A name the path lacks, or parts no lane names, refuse the
+  job before it opens.
 - A case step injects at a named point of its call and heals when the cell ends. The case
   carries a tag that runs alone.
 - A lane file's `[operations]` table binds the name a case asks for to an operation of the path.
   A lane where the name resolves to nothing, or that lacks a part the operation needs, cannot
   run the case.
-- A `heal` that fails is run once more. A second failure marks the job *lab left changed*.
-- Each phase is an event of the job with its instant on both clocks, shown on the job.
+- A heal attempt is `heal` and its `probe`. A failed attempt is run once more. A second failure
+  marks the job *lab left changed*.
+- Each phase is an event of the job with its instant on both clocks (the store's
+  `job_events`): `inject`, `injected`, `heal`, `healed`, `recovered`, `failed` and
+  `lab-left-changed`, the job's mark.
+- A cell whose case asks for an operation its lane binds none of is `not runnable` there.
 - A case's own heal time (the wait a lane holds after a disruptive case) is another thing and
   keeps its name.
 

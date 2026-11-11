@@ -8,6 +8,7 @@
  */
 import * as Schema from "effect/Schema"
 import { Cell, Instant } from "./cell.js"
+import type * as Lanes from "./lanes.js"
 
 /** The schema version the context file states. */
 export const SCHEMA = "context.v1"
@@ -46,3 +47,12 @@ export const Context = Schema.Struct({
   params: Schema.Record(Schema.String, Schema.Unknown)
 })
 export interface Context extends Schema.Schema.Type<typeof Context> {}
+
+/** The lane `loaded` as an executable reads it: its id, clock, `[sip]`, `[backend]` and parts. */
+export const laneOf = (loaded: Lanes.Loaded): LaneContext => ({
+  name: loaded.id,
+  clock: loaded.lane.clock,
+  sip: { ...loaded.lane.sip },
+  backend: { ...loaded.lane.backend },
+  parts: Object.fromEntries([...loaded.parts].map(([kind, part]) => [kind, { name: part.name, file: part.file, value: part.value }]))
+})

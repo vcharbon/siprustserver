@@ -6,7 +6,8 @@
  * document, never in it.
  *
  * A cell is refused when a resource path leaves its directory, or when a body
- * of its document names a resource the cell does not carry.
+ * of its document names a resource the cell does not carry. A cell asking for
+ * an operation its lane does not bind is not runnable there (`Lanes.unboundOf`).
  */
 import { Body, Pivot } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -34,7 +35,9 @@ export const CompiledCell = Schema.Struct({
   /** Each resource file by its path relative to the cell's directory, as the document's bodies name it. */
   resources: Schema.Record(RelativePath, Schema.String),
   /** What the case expects of each collector, by its name (§4), opaque to the base. */
-  claims: Schema.Record(Name, Schema.Unknown)
+  claims: Schema.Record(Name, Schema.Unknown),
+  /** The operation names its steps ask for (§7): a lane binding none of one cannot run the cell. */
+  operations: Schema.optionalKey(Schema.Array(Name))
 })
 export interface CompiledCell extends Schema.Schema.Type<typeof CompiledCell> {}
 

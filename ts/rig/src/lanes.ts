@@ -60,6 +60,14 @@ export const capabilitiesOf = (
   return derived
 }
 
+/**
+ * The operation names among `asked` that `lane` binds none of, sorted: a cell
+ * asking for one is not runnable on the lane, since nothing there would run
+ * its step.
+ */
+export const unboundOf = (lane: Loaded, asked: ReadonlyArray<string>): ReadonlyArray<string> =>
+  [...new Set(asked.filter((name) => !lane.operations.has(name)))].sort()
+
 /** A lane's `[collectors]`, as the job's wiring check reads it (`Collection.check`). */
 export const wiringOf = (lane: Loaded): Collection.LaneWiring => ({ file: lane.file, collectors: lane.lane.collectors })
 

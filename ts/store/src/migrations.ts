@@ -12,8 +12,8 @@
  * cut made of one capture), over the content-addressed stores a case rebuilds
  * from — `case_assets`, `ledger_rows`, `flows_documents` and `flows_legs`.
  * Around them: the replay `population`, replay `requests`, the `jobs` that
- * ran them and the `batches` those drove, and the {@link Current} population
- * setting.
+ * ran them, the `batches` those drove and the `job_events` their runners
+ * wrote, and the {@link Current} population setting.
  *
  * `case_documents` (the v3 case JSON) is shared by both, content-hash deduped
  * so a corpus question is a query and a re-cut or re-run that changed nothing
@@ -805,6 +805,30 @@ const batches = Effect.gen(function*() {
 export const BATCHES = "13_batches"
 
 /**
+ * `job_events`: what a job's runner did to the lab, one row per phase of one
+ * subject (an operation's inject, heal, probe), on the runner's clock
+ * (`clock_ms`) and the wall clock (`at`), in the order written.
+ */
+const jobEvents = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE job_events (
+      id        bigserial PRIMARY KEY,
+      job_id    bigint NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+      subject   text NOT NULL,
+      phase     text NOT NULL,
+      clock_ms  double precision NOT NULL,
+      at        timestamptz NOT NULL,
+      message   text
+    )
+  `
+  yield* sql`CREATE INDEX job_events_job_idx ON job_events (job_id, id)`
+})
+
+/** The key of the migration that records a job's events. */
+export const JOB_EVENTS = "14_job_events"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -821,7 +845,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [CAMPAIGN_JOBS]: campaignJobs,
   [FORCED_RUNS]: forcedRuns,
   [INBOX_JOBS]: inboxJobs,
-  [BATCHES]: batches
+  [BATCHES]: batches,
+  [JOB_EVENTS]: jobEvents
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)
