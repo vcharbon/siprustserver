@@ -169,6 +169,25 @@ fn a_crossing_race_answered_491_is_compliant() {
     assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
 }
 
+/// A UAS that answers from another socket than the one it takes INVITEs at
+/// completed each re-INVITE: sequential ones never race.
+#[test]
+fn sequential_re_invites_to_a_two_socket_uas_are_no_race() {
+    const BOB_SENDS: &str = "10.0.0.2:41000";
+    let f = eval(
+        &ConcurrentReInvite500Or491,
+        &[
+            req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
+            rsp(2_000, BOB_SENDS, ALICE, 200, "z9hG4bK-1", 2, "at", "bt", ""),
+            req(3_000, ALICE, BOB, "ACK", "z9hG4bK-k1", 2, "at", "bt"),
+            req(4_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
+            rsp(5_000, BOB_SENDS, ALICE, 200, "z9hG4bK-2", 3, "at", "bt", ""),
+            req(6_000, ALICE, BOB, "ACK", "z9hG4bK-k2", 3, "at", "bt"),
+        ],
+    );
+    assert!(f.is_empty(), "no re-INVITE raced another: {f:?}");
+}
+
 /// At a hop carrying both directions, a re-INVITE that finds its sender's
 /// own INVITE AND a crossing one in flight is judged against its sender's:
 /// 500 with Retry-After is owed and a 491 is the violation, whichever
@@ -370,6 +389,28 @@ fn a_re_invite_after_the_ack_is_compliant() {
     assert_eq!(f.len(), 1, "one occasion, the re-INVITE: {f:?}");
     assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
     assert_eq!(f[0].emitter, ALICE, "the UAC that sent it is charged");
+}
+
+/// A UAC that sends from another socket than its sent-by took the 491 that
+/// ended its re-INVITE at that sent-by: the next re-INVITE overlaps nothing.
+#[test]
+fn a_two_socket_uac_s_re_invite_after_a_491_is_compliant() {
+    const ALICE_SENDS: &str = "10.0.0.1:40000";
+    let from_second = |at_us, branch: &str, cseq| {
+        let mut m = req(at_us, ALICE_SENDS, BOB, "INVITE", branch, cseq, "at", "bt");
+        m.head = Some(format!("Via: SIP/2.0/UDP {ALICE};branch={branch}\r\n\r\n").into_bytes());
+        m
+    };
+    let f = eval(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            from_second(1_000, "z9hG4bK-1", 2),
+            rsp(2_000, BOB, ALICE, 491, "z9hG4bK-1", 2, "at", "bt", ""),
+            from_second(3_000, "z9hG4bK-2", 3),
+        ],
+    );
+    assert_eq!(f.len(), 2, "two occasions, the two re-INVITEs: {f:?}");
+    assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
 }
 
 /// RFC 6026's *Accepted* interval: the 2xx has landed but the ACK has not

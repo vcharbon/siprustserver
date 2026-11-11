@@ -6,6 +6,7 @@ use sip_message::header::{HeaderValue, RAck, Supported};
 use sip_message::{sniff, SipStr};
 
 use crate::rules::branch::BranchName;
+use crate::rules::sides::Sides;
 
 use crate::wire::{Kind, Msg};
 
@@ -88,6 +89,7 @@ pub(super) struct Reading<'a> {
 
 impl<'a> Reading<'a> {
     pub(super) fn of(msgs: &'a [Msg]) -> Self {
+        let sides = Sides::of(msgs);
         let mut seen = Reading::default();
         for (mi, msg) in msgs.iter().enumerate() {
             seen.last_ts_us = seen.last_ts_us.max(msg.at_us);
@@ -99,7 +101,7 @@ impl<'a> Reading<'a> {
             if msg.repeat {
                 continue;
             }
-            seen.absorb(mi, msg);
+            seen.absorb(&sides, mi, msg);
         }
         seen
     }
@@ -147,9 +149,9 @@ impl<'a> Reading<'a> {
         }
     }
 
-    fn absorb(&mut self, mi: usize, msg: &'a Msg) {
+    fn absorb(&mut self, sides: &Sides<'a>, mi: usize, msg: &'a Msg) {
         let head = msg.head.as_deref();
-        self.absorb_transaction(mi, msg, head);
+        self.absorb_transaction(sides, mi, msg, head);
         if msg.is_request("INVITE") {
             let call = msg.call_id.as_str();
             let from_tag = msg.from_tag.as_deref().unwrap_or_default();
@@ -242,8 +244,17 @@ impl<'a> Reading<'a> {
     ///
     /// **A message with no top-Via branch keys no transaction.** The branch IS
     /// the pairing; without one, no response can be matched to the request it
-    /// answers, and the reading states nothing rather than guessing.
-    fn absorb_transaction(&mut self, mi: usize, msg: &'a Msg, head: Option<&[u8]>) {
+    /// answers, and the reading states nothing rather than guessing. A
+    /// response is filed under the socket its request reached, whichever
+    /// socket of the UAS sent it (`Sides`), as [`Reading::restated`] files
+    /// that request.
+    fn absorb_transaction(
+        &mut self,
+        sides: &Sides<'a>,
+        mi: usize,
+        msg: &'a Msg,
+        head: Option<&[u8]>,
+    ) {
         let call = msg.call_id.as_str();
         let branch = msg.via_branch.as_deref().filter(|b| !b.is_empty());
         match &msg.kind {
@@ -253,7 +264,7 @@ impl<'a> Reading<'a> {
                 if let Some(branch) = branch {
                     self.answers
                         .entry(TxnKey {
-                            uas: msg.src.as_str(),
+                            uas: sides.uas(msg),
                             call_id: call,
                             branch: BranchName(branch),
                         })

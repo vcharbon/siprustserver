@@ -86,13 +86,14 @@ impl<'m> Sides<'m> {
 }
 
 /// `(Call-ID, top-Via branch, CSeq method)`: the transaction a message belongs
-/// to (§17.1.3).
-type TransactionKey<'m> = (&'m str, BranchName<'m>, String);
+/// to (§17.1.3). The method compares as written: method names are
+/// case-sensitive (§7.1), and a response echoes its request's CSeq.
+type TransactionKey<'m> = (&'m str, BranchName<'m>, &'m str);
 
 /// The transaction `msg` belongs to, `None` without a branch.
 fn transaction_key(msg: &Msg) -> Option<TransactionKey<'_>> {
     let branch = BranchName(msg.via_branch.as_deref().filter(|b| !b.is_empty())?);
-    Some((msg.call_id.as_str(), branch, msg.cseq_method.to_ascii_uppercase()))
+    Some((msg.call_id.as_str(), branch, msg.cseq_method.as_str()))
 }
 
 #[cfg(test)]

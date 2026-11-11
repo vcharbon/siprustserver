@@ -21,9 +21,9 @@
 //! its own emission. The occasion is keyed by `(taker, Call-ID, top-Via
 //! branch)` — RFC 3261 §17's transaction identity, the taker named by the
 //! socket the request reached, whichever socket answers (`Sides`) — so a
-//! §17.2.3 retransmission
-//! of the request neither opens a second occasion nor replaces the answer
-//! already recorded, and a retransmitted final is the same answer again.
+//! §17.2.3 retransmission of the request neither opens a second occasion nor
+//! replaces the answer already recorded, and a retransmitted final is the same
+//! answer again.
 //!
 //! **Facts beyond the wire model come from `Msg::head` via `sip_message::sniff`
 //! — never parsed here.** Where the unreadable header is what would make the

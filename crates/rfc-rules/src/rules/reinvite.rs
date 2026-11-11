@@ -45,13 +45,13 @@
 use crate::rules::branch::BranchName;
 use std::collections::{BTreeMap, BTreeSet};
 
-use sip_message::header::SentBy;
 use sip_message::sniff;
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
 use super::branch::BranchReading;
+use super::sides::Sides;
 use super::Obligation;
 
 crate::registry::rules! {
@@ -107,6 +107,9 @@ pub const REINVITE_FINAL_WINDOW_US: u64 = 180_000_000;
 /// **A re-INVITE the strict reading refuses ([`Msg::refused`]) is neither an
 /// occasion nor in progress**: the UAS answers it 400 or drops it, and no
 /// session change rides it.
+///
+/// A final is filed under the socket its INVITE reached, whichever socket of
+/// the UAS sent it (`Sides`).
 pub struct ConcurrentReInvite500Or491;
 
 impl Obligation for ConcurrentReInvite500Or491 {
@@ -114,6 +117,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
         // Per endpoint's view of a dialog: the branches of the INVITE
         // transactions still in progress at it. Built as the walk goes, so a
         // re-INVITE is judged against what was in flight BEFORE it.
+        let sides = Sides::of(wire.msgs);
         let mut in_progress: BTreeMap<PairKey<'_>, BTreeSet<&str>> = BTreeMap::new();
         let mut dialog_of: BTreeMap<TxnKey<'_>, PairKey<'_>> = BTreeMap::new();
         // Each INVITE transaction's From tag: who sent it on the dialog.
@@ -180,7 +184,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                 }
                 Kind::Response { status } if msg.cseq_method.eq_ignore_ascii_case("INVITE") => {
                     let txn = TxnKey {
-                        endpoint: msg.src.as_str(),
+                        endpoint: sides.uas(msg),
                         call_id: msg.call_id.as_str(),
                         branch: BranchName(branch),
                     };
@@ -276,7 +280,9 @@ impl Obligation for ConcurrentReInvite500Or491 {
 }
 
 mod in_progress;
+mod origins;
 pub use in_progress::NoReInviteWhileInviteInProgress;
+use origins::Origins;
 
 /// **RFC 3261 §14.1 — a failed re-INVITE leaves the dialog in its prior
 /// state.** A non-2xx final to an in-dialog INVITE does not end the call: the
@@ -427,40 +433,6 @@ struct Answer {
     /// Whether it carried `Retry-After`, or `None` where the vantage carried no
     /// header block to read.
     retry_after: Option<bool>,
-}
-
-/// The bottom Via (sent-by and branch) and CSeq of each INVITE transaction an
-/// endpoint drove, where the vantage carried them: what every forwarder keeps
-/// (§16.6), so the INVITE by another path (§16.3) is told by them.
-#[derive(Default)]
-struct Origins<'a> {
-    of: BTreeMap<TxnKey<'a>, (SentBy, String, u32)>,
-}
-
-impl<'a> Origins<'a> {
-    fn record(&mut self, msg: &Msg, txn: TxnKey<'a>) {
-        if let Some(origin) = origin(msg) {
-            self.of.entry(txn).or_insert(origin);
-        }
-    }
-
-    /// Whether `msg` is, by its bottom Via and CSeq, one of the INVITEs
-    /// `endpoint` has `in_flight` on its dialog under another top-Via branch.
-    fn copies_one_of(&self, msg: &Msg, endpoint: &str, in_flight: &BTreeSet<&str>) -> bool {
-        let Some(origin) = origin(msg) else { return false };
-        in_flight.iter().any(|branch| {
-            let txn =
-                TxnKey { endpoint, call_id: msg.call_id.as_str(), branch: BranchName(branch) };
-            self.of.get(&txn) == Some(&origin)
-        })
-    }
-}
-
-/// `msg`'s bottom Via sent-by and branch, and its CSeq number, or `None` where
-/// the vantage carried no header block or the bottom Via names no branch.
-fn origin(msg: &Msg) -> Option<(SentBy, String, u32)> {
-    let bottom = msg.head.as_deref().and_then(sniff::bottom_via)?;
-    Some((bottom.sent_by, bottom.branch?, msg.cseq))
 }
 
 /// A message's dialog tags, both present, or `None` where either is missing —

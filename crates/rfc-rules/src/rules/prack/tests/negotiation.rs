@@ -30,6 +30,19 @@ fn update_resp(at_us: u64, status: u16, extra: &str) -> Msg {
     m
 }
 
+/// A UAS that answers from another socket than the one it took the INVITE
+/// at answered that INVITE: its plain 18x is the same miss.
+#[test]
+fn a_plain_18x_from_a_second_uas_socket_charges_the_uas() {
+    let mut second = inv_resp(1_100_000, 180, "", false);
+    second.src = "10.0.0.2:41000".to_string();
+    let msgs = vec![invite_on(1_000_000, "Require: 100rel\r\n", None, false), second];
+    let f = decide(&RequireReliable1xxOnRequire, &msgs);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(f[0].violated(), "{:?}", f[0].decision);
+    assert_eq!(f[0].emitter, UAS, "the socket that took the INVITE is charged");
+}
+
 /// `require-reliable-1xx-on-require`: the INVITE demanded the extension, so
 /// a plain 18x is neither half of §3's disjunction — and the 420 rejecting
 /// the extension discharges the transaction whenever on it it goes out.
