@@ -130,9 +130,9 @@ pub fn evaluate(
     observables: &dyn Observables,
     resolver: &Resolver<'_>,
 ) -> Option<Failure> {
-    let observed = match observed(site, check, observables) {
+    let observed = match observables.observe(&check.field) {
         Ok(value) => value,
-        Err(failure) => return Some(failure),
+        Err(detail) => return Some(unreadable(site, check, detail)),
     };
     let expected = match &check.value {
         None => None,
@@ -159,26 +159,21 @@ pub fn evaluate_resolved(
     check: &Check,
     observables: &dyn Observables,
 ) -> Option<Failure> {
-    match observed(site, check, observables) {
+    match observables.observe(&check.field) {
         Ok(value) => compare(site, check, value, check.value.clone()),
-        Err(failure) => Some(failure),
+        Err(detail) => Some(unreadable(site, check, detail)),
     }
 }
 
-/// The value `check`'s field reads in `observables`, or the failure of a field
-/// that cannot be read.
-fn observed(
-    site: &str,
-    check: &Check,
-    observables: &dyn Observables,
-) -> Result<Option<String>, Failure> {
-    observables.observe(&check.field).map_err(|detail| Failure::CheckFailed {
+/// The failure of `check` at `site` whose field cannot be read, `detail` why.
+fn unreadable(site: &str, check: &Check, detail: String) -> Failure {
+    Failure::CheckFailed {
         site: site.to_string(),
         field: check.field.clone(),
         op: op_name(check.op).into(),
         expected: check.value.clone().unwrap_or_default(),
         observed: format!("unreadable: {detail}"),
-    })
+    }
 }
 
 /// `check`'s operator applied to `observed` against the resolved `expected`.
