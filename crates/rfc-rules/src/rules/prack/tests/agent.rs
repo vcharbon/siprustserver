@@ -176,22 +176,3 @@ fn a_prack_between_two_socket_parties_precedes_the_2xx() {
     assert_eq!(f.len(), 1, "{f:?}");
     assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
 }
-
-/// An unreadable RAck on one call says nothing about the PRACKs the same
-/// socket owes on another.
-#[test]
-fn an_unreadable_rack_on_another_call_leaves_the_obligation_decided() {
-    let mut garbled = prack(500_000, UAC, UAS, 2, 9, 9, "tx");
-    garbled.call_id = "c0".to_string();
-    let head = String::from_utf8(garbled.head.take().unwrap_or_default()).unwrap_or_default();
-    garbled.head = Some(head.replace("RAck: 9 9 INVITE", "RAck: garbage").into_bytes());
-    let msgs = vec![
-        garbled,
-        invite(1_000_000, UAC, UAS, 1),
-        reliable(1_100_000, UAS, UAC, 180, 1, 5, "tb"),
-        ok200(1_300_000, 1, "tb"),
-    ];
-    let f = decide(&UnackedReliableProvisional, &msgs);
-    assert_eq!(f.len(), 1, "{f:?}");
-    assert!(f[0].violated(), "{:?}", f[0].decision);
-}

@@ -29,7 +29,9 @@ fn a_b2bua_listening_at_a_socket_per_call_holds_its_ack_behind_its_caller() {
     let of = |who: &str| f.iter().find(|f| f.emitter == who).expect("an occasion");
     assert!(of(UAC).violated(), "the caller withheld its ACK: {f:?}");
     assert!(
-        matches!(of(B2BUA_SENDS).decision, Decision::Undecidable(_)),
+        matches!(of(B2BUA_SENDS).decision, Decision::Undecidable(
+            "the endpoint answered another call whose caller never ACKed (a B2BUA's ACK waits on its caller's)"
+        )),
         "the B2BUA's ACK waits on the caller's: {f:?}"
     );
 }
@@ -47,7 +49,14 @@ fn a_two_socket_uac_s_untagged_ack_from_its_sent_by_may_be_the_one() {
     let closed = obs(&msgs, true);
     let f = NoAckToDialogCreating2xx.eval(&WireView { msgs: &msgs, obs: &closed });
     assert_eq!(f.len(), 1, "{f:?}");
-    assert!(matches!(f[0].decision, Decision::Undecidable(_)), "{:?}", f[0].decision);
+    assert!(
+        matches!(
+            f[0].decision,
+            Decision::Undecidable("an ACK the emitter sent names no dialog — it may be the one")
+        ),
+        "{:?}",
+        f[0].decision
+    );
 }
 
 /// The UAS half reads the untagged ACK the same way: from the UAC's sent-by,
@@ -105,7 +114,9 @@ fn a_failover_tie_on_another_call_does_not_pick_the_relayed_call() {
     let on_b = f.iter().find(|f| f.anchor == 6).expect("B2's obligation on its dialled call");
     assert_eq!(on_b.emitter, B2);
     assert!(
-        matches!(on_b.decision, Decision::Undecidable(_)),
+        matches!(on_b.decision, Decision::Undecidable(
+            "the endpoint answered another call whose caller never ACKed (a B2BUA's ACK waits on its caller's)"
+        )),
         "B2's ACK waits on the caller of the call it took: {f:?}"
     );
 }
