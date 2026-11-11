@@ -156,6 +156,20 @@ impl<'a> Reading<'a> {
     /// evidence for what MEETS one: an ACK flagged as a repeat is still an ACK
     /// on the wire, and skipping it would charge a UAC whose first ACK this
     /// vantage simply missed.
+    ///
+    /// An INVITE 2xx with a To tag (one without confirms no dialog and draws no
+    /// ACK) feeds both halves:
+    /// - only a FRESH delivery says where it travelled: a retransmission ladder
+    ///   to one endpoint would otherwise read as that endpoint having passed
+    ///   the 2xx on;
+    /// - the UAC half collapses the ladder on ONE obligation (§13.2.2.4: one
+    ///   ACK answers every retransmission) and counts its rungs; a vantage
+    ///   whose first sight of a 2xx is already a repeat never saw the
+    ///   obligation come due and records none;
+    /// - the UAS half opens the emitter's clear-it obligation on every fresh
+    ///   emission, dialog-creating or not: §13.3.1.4 confirms a re-INVITE's 2xx
+    ///   the same way (the UAC half stays dialog-creating-only via its
+    ///   witnessed-INVITE gate).
     fn absorb(&mut self, sides: &Sides<'a>, parties: &Parties<'a>, mi: usize, msg: &'a Msg) {
         let fresh = !msg.repeat;
         let call = msg.call_id.as_str();
@@ -185,11 +199,7 @@ impl<'a> Reading<'a> {
             if !(200..300).contains(&status) || !msg.cseq_method.eq_ignore_ascii_case("INVITE") {
                 return;
             }
-            // A 2xx with no To tag confirms no dialog and draws no ACK.
             let Some(dialog) = msg.to_tag.as_deref() else { return };
-            // Only a FRESH delivery says where the 2xx travelled: a
-            // retransmission ladder to one endpoint would otherwise read as
-            // that endpoint having passed the 2xx on.
             if fresh {
                 let last = self.propagated.entry((call, msg.cseq, dialog)).or_insert(msg.at_us);
                 *last = (*last).max(msg.at_us);
@@ -200,12 +210,7 @@ impl<'a> Reading<'a> {
             let uac = sides.uac(msg);
             let taken = ObligationKey { party: uac, call, cseq: msg.cseq, dialog };
             match self.owed.get_mut(&taken) {
-                // The ladder collapses on ONE obligation (§13.2.2.4: one ACK
-                // answers every retransmission); the rung count is what the
-                // report carries instead.
                 Some(seen) => seen.retransmits += 1,
-                // A vantage whose first sight of a 2xx is already a repeat
-                // never saw the obligation come due, so it records none.
                 None if fresh => {
                     self.owed.insert(
                         taken,
@@ -223,10 +228,6 @@ impl<'a> Reading<'a> {
                 }
                 None => {}
             }
-            // The UAS half: every fresh EMISSION of an INVITE 2xx opens the
-            // emitter's clear-it obligation. Dialog-creating is NOT required —
-            // §13.3.1.4 confirms a re-INVITE's 2xx the same way (the UAC half
-            // above stays dialog-creating-only via its witnessed-INVITE gate).
             let emitted = ObligationKey { party: msg.src.as_str(), call, cseq: msg.cseq, dialog };
             if fresh {
                 self.emitted.entry(emitted).or_insert(Final {
