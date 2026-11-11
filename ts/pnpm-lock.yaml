@@ -153,9 +153,6 @@ importers:
       '@sip/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@sip/viewer-core':
-        specifier: workspace:*
-        version: link:../viewer-core
       effect:
         specifier: 4.0.0-rc.111
         version: 4.0.0-rc.111

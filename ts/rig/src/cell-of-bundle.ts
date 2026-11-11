@@ -3,11 +3,12 @@
  * knows of where it ran. The bundle gives the clock (`run-config.json`), the
  * lane-clock instants (`timing.json`), the legs and every Call-ID the test
  * side sent or received (`recording/<leg>.jsonl`), and the leg roles
- * (`pivot.json`). The wall clock is `timing.json`'s, else the window a
- * `sut-join.json` states; a bundle stating neither has no description.
+ * (`pivot.json`). The user keys are the identities each recorded line states
+ * (`sip-message`'s reading); a line stating none adds none. The wall clock is
+ * `timing.json`'s window, else the window a `sut-join.json` states; a bundle
+ * stating neither has no description.
  */
 import { Batch, Bundle } from "@sip/contracts"
-import { parseRecording, type RecordedMessage } from "@sip/viewer-core/recording"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
@@ -49,60 +50,51 @@ const Roster = Schema.Struct({
 })
 const decodeRoster = Schema.decodeUnknownOption(Roster)
 
-/** The URI a From or To value names: inside its angle brackets, else before its parameters. */
-export const uriOf = (value: string): string => {
-  const bracketed = /<([^>]*)>/.exec(value)
-  return (bracketed?.[1] ?? value.split(";")[0] ?? value).trim()
+/** One recorded datagram of a leg, its head facts read. */
+interface Recorded {
+  readonly atUs: number
+  readonly seq: number
+  readonly head: Bundle.RecordedHead
+  readonly identities: Bundle.RecordedIdentities | undefined
 }
-
-/**
- * The user part of a SIP URI, or the number of a tel URI; none for a URI with
- * no user. A SIP URI with `user=phone` holds a telephone-subscriber (RFC 3261
- * §19.1.1): its number is the user part before its first `;` parameter.
- */
-export const userOf = (uri: string): string | undefined => {
-  const sip = /^sips?:([^@]+)@([^?]*)/i.exec(uri)
-  if (sip !== null) return /;user=phone(;|$)/i.test(sip[2]!) ? sip[1]!.split(";")[0] : sip[1]
-  const tel = /^tel:([^;]+)/i.exec(uri)
-  return tel === null ? undefined : tel[1]
-}
-
-const headerOf = (message: RecordedMessage, ...names: ReadonlyArray<string>): string | undefined =>
-  message.headers.find((header) => names.includes(header.name.toLowerCase()))?.value
 
 const distinct = (values: Iterable<string | undefined>): Array<string> => [
   ...new Set([...values].filter((value): value is string => value !== undefined && value !== ""))
 ]
 
+/** The first INVITE a leg sent or received. */
+const inviteOf = (messages: ReadonlyArray<Recorded>): Recorded | undefined =>
+  messages.find((message) => message.head.method === "INVITE")
+
 /** One leg's description from its datagrams, in arrival order. */
-const legOf = (id: string, messages: ReadonlyArray<RecordedMessage>, actor: string, role: string): Leg => {
-  const invite = messages.find((message) => message.method === "INVITE")
-  const answer = messages.find((message) =>
-    message.status !== undefined && message.status >= 200 && message.status < 300 && message.cseqMethod === "INVITE"
+const legOf = (id: string, messages: ReadonlyArray<Recorded>, actor: string, role: string): Leg => {
+  const identities = inviteOf(messages)?.identities
+  const answer = messages.find(({ head }) =>
+    head.status !== undefined && head.status >= 200 && head.status < 300 && head.cseqMethod === "INVITE"
   )
-  const from = invite === undefined ? undefined : headerOf(invite, "from", "f")
-  const to = invite === undefined ? undefined : headerOf(invite, "to", "t")
-  const callId = messages.find((message) => message.callId !== undefined)?.callId
+  const callId = messages.find((message) => message.head.callId !== undefined)?.head.callId
   return {
     id,
     role,
     actor,
     ...(callId === undefined ? {} : { call_id: callId }),
-    ...(from === undefined ? {} : { from: uriOf(from) }),
-    ...(to === undefined ? {} : { to: uriOf(to) }),
-    ...(invite?.raw === undefined ? {} : { request_uri: invite.raw.split(/\r?\n/)[0]?.split(" ")[1] ?? "" }),
+    ...(identities === undefined ? {} : { from: identities.from.uri, to: identities.to.uri }),
+    ...(identities?.ruri === undefined ? {} : { request_uri: identities.ruri.uri }),
     ...(messages.length === 0 ? {} : { start_us: messages[0]!.atUs, end_us: messages[messages.length - 1]!.atUs }),
     ...(answer === undefined ? {} : { answer_us: answer.atUs })
   }
 }
 
-/** The keys every cell carries, read off its legs' datagrams. */
-const baseKeysOf = (messages: ReadonlyArray<RecordedMessage>, legs: ReadonlyArray<Leg>): Record<string, Array<string>> => ({
-  [CALL_ID]: distinct(messages.map((message) => message.callId)),
-  caller: distinct(legs.map((leg) => (leg.from === undefined ? undefined : userOf(leg.from)))),
-  callee: distinct(legs.map((leg) => (leg.to === undefined ? undefined : userOf(leg.to)))),
-  request_uri_user: distinct(legs.map((leg) => (leg.request_uri === undefined ? undefined : userOf(leg.request_uri))))
-})
+/** The keys every cell carries: every Call-ID, and the users each leg's first INVITE names. */
+const baseKeysOf = (messages: ReadonlyArray<Recorded>, legs: ReadonlyArray<ReadonlyArray<Recorded>>): Record<string, Array<string>> => {
+  const invites = legs.map((leg) => inviteOf(leg)?.identities)
+  return {
+    [CALL_ID]: distinct(messages.map((message) => message.head.callId)),
+    caller: distinct(invites.map((identities) => identities?.from.user ?? undefined)),
+    callee: distinct(invites.map((identities) => identities?.to.user ?? undefined)),
+    request_uri_user: distinct(invites.map((identities) => identities?.ruri?.user ?? undefined))
+  }
+}
 
 /** The base keys with the declared ones merged in, each list without repeats. */
 const keysOf = (
@@ -113,6 +105,20 @@ const keysOf = (
   for (const [name, values] of Object.entries(declared)) out[name] = distinct([...(out[name] ?? []), ...values])
   for (const name of BASE_KEYS) out[name] ??= []
   return out
+}
+
+/**
+ * The wall-clock window of a run, taken whole from one source: `timing.json`'s
+ * when it states both instants, else the SUT join's; none when neither does.
+ */
+const wallWindowOf = (
+  timing: Bundle.RunTiming,
+  join: Batch.SutJoin | undefined
+): { readonly start: number; readonly end: number } | undefined => {
+  if (timing.wall_started_at_ms !== undefined && timing.wall_ended_at_ms !== undefined) {
+    return { start: timing.wall_started_at_ms, end: timing.wall_ended_at_ms }
+  }
+  return join === undefined ? undefined : { start: join.started_at_ms, end: join.ended_at_ms }
 }
 
 /** The description of the cell whose bundle is `dir`, placed as `placement` says. */
@@ -140,30 +146,39 @@ export const ofBundle = (dir: string, placement: Placement): Effect.Effect<Cell,
       Effect.orElseSucceed(() => undefined)
     )
     const recordingDir = path.join(dir, "recording")
-    const files = (yield* fs.readDirectory(recordingDir).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])))
+    const legIds = (yield* fs.readDirectory(recordingDir).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])))
       .filter((file) => file.endsWith(".jsonl"))
-    const texts: Record<string, string> = {}
-    for (const file of files) {
-      texts[file.slice(0, -".jsonl".length)] = yield* fs.readFileString(path.join(recordingDir, file)).pipe(
-        Effect.mapError(() => unreadable(`recording/${file}: not readable`))
+      .map((file) => file.slice(0, -".jsonl".length))
+      .sort()
+    const byLeg: Array<ReadonlyArray<Recorded>> = []
+    for (const leg of legIds) {
+      const file = `recording/${leg}.jsonl`
+      const lines = yield* fs.readFileString(path.join(dir, file)).pipe(
+        Effect.flatMap((text) => Effect.suspend(() => Bundle.decodeRecording(text))),
+        Effect.mapError((error) => unreadable(`${file}: ${error instanceof Error ? error.message : "not readable"}`))
       )
+      byLeg.push(lines.map((line) => ({
+        atUs: line.at_us,
+        seq: line.seq,
+        head: Bundle.recordedHeadOf(line),
+        identities: line.identities
+      })))
     }
-    const recording = parseRecording(texts)
+    const messages = byLeg.flat().sort((left, right) => left.atUs - right.atUs || left.seq - right.seq)
 
-    const wallStart = timing.wall_started_at_ms ?? join?.started_at_ms
-    const wallEnd = timing.wall_ended_at_ms ?? join?.ended_at_ms
-    if (wallStart === undefined || wallEnd === undefined) {
+    const wall = wallWindowOf(timing, join)
+    if (wall === undefined) {
       return yield* Effect.fail(unreadable(`neither timing.json nor ${Batch.SUT_JOIN_FILE} states the wall clock`))
     }
-    const lastUs = recording.messages.reduce((last, message) => Math.max(last, message.atUs), 0)
-    const start: Instant = { lane_ms: timing.started_at_ms, wall_ms: wallStart }
-    const end: Instant = { lane_ms: timing.settled_at_ms ?? Math.max(timing.started_at_ms, lastUs / 1000), wall_ms: wallEnd }
+    const lastUs = messages.reduce((last, message) => Math.max(last, message.atUs), 0)
+    const start: Instant = { lane_ms: timing.started_at_ms, wall_ms: wall.start }
+    const end: Instant = { lane_ms: timing.settled_at_ms ?? Math.max(timing.started_at_ms, lastUs / 1000), wall_ms: wall.end }
 
     const actorOf = new Map((roster?.legs ?? []).map((leg) => [leg.id, leg.actor]))
     const kindOf = new Map((roster?.actors ?? []).map((actor) => [actor.id, actor.kind]))
-    const legs = recording.legs.map((id) => {
+    const legs = legIds.map((id, index) => {
       const actor = actorOf.get(id) ?? id
-      return legOf(id, recording.messages.filter((message) => message.leg === id), actor, kindOf.get(actor) ?? "unknown")
+      return legOf(id, byLeg[index]!, actor, kindOf.get(actor) ?? "unknown")
     })
     const cell: Cell = {
       schema: SCHEMA,
@@ -174,7 +189,7 @@ export const ofBundle = (dir: string, placement: Placement): Effect.Effect<Cell,
       batch: placement.batch,
       attempt: placement.attempt,
       clock: config.clock === "virtual" ? "simulated" : "real",
-      keys: keysOf(baseKeysOf(recording.messages, legs), placement.keys ?? {}),
+      keys: keysOf(baseKeysOf(messages, byLeg), placement.keys ?? {}),
       legs,
       timeline: { start, end },
       claims: { ...placement.claims },

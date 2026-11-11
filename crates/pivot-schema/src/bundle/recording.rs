@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use sip_message::payload::{BodyLayout, Payload};
 use sip_message::SipParser;
 
+use super::identities::Identities;
+
 /// Which way a datagram crossed the leg's vantage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +53,10 @@ pub struct RecordedMessage {
     /// past the declared length included (RFC 3261 §18.3); the layout is the
     /// one bound every comparison of the body uses.
     pub body: Option<BodyLayout>,
+    /// The user identities the datagram names, as the recording's reader read
+    /// them; absent where it did not parse. Written by the recorder, never
+    /// derived on decode: a line written without them states none.
+    pub identities: Option<Identities>,
     /// The `seq` of the earliest datagram on this leg, in this direction, that
     /// this one repeats byte for byte. Set by the caller that
     /// KNOWS it is a repeat — the §17.2 seam for an arrival, the emitting step
@@ -62,8 +68,9 @@ pub struct RecordedMessage {
 }
 
 impl RecordedMessage {
-    /// A recorded line for `wire`, its body layout derived from the bytes as
-    /// `reader` reads them: the reading the run's recording is made under.
+    /// A recorded line for `wire`, its body layout and user identities derived
+    /// from the bytes as `reader` reads them: the reading the run's recording
+    /// is made under.
     pub fn new(
         seq: u64,
         dir: Dir,
@@ -72,8 +79,20 @@ impl RecordedMessage {
         wire: Vec<u8>,
         reader: &dyn SipParser,
     ) -> Self {
-        let body = Self::layout_of(reader, &wire);
-        RecordedMessage { seq, dir, at_us, step, wire, body, repeat_of: None, note: None }
+        let parsed = reader.parse(&wire).ok();
+        let body = parsed.as_ref().and_then(BodyLayout::of);
+        let identities = parsed.as_ref().map(Identities::of);
+        RecordedMessage {
+            seq,
+            dir,
+            at_us,
+            step,
+            wire,
+            body,
+            identities,
+            repeat_of: None,
+            note: None,
+        }
     }
 
     /// The datagram that crossed the socket, whichever arm the line wrote.
@@ -127,6 +146,9 @@ struct RecordedLine {
     /// The body's layout, present iff the datagram carries a body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     body: Option<BodyLayout>,
+    /// The user identities the datagram names, where the recorder read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identities: Option<Identities>,
     /// The `seq` of the earliest datagram on this leg, in this direction, that
     /// this one repeats byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,6 +172,7 @@ impl TryFrom<RecordedLine> for RecordedMessage {
             body_b64,
             raw_b64,
             body,
+            identities,
             repeat_of,
             note,
         } = line;
@@ -191,7 +214,7 @@ impl TryFrom<RecordedLine> for RecordedMessage {
         let body = body.or_else(|| {
             sip_message::read_stored(&wire).ok().and_then(|parsed| BodyLayout::of(&parsed))
         });
-        Ok(RecordedMessage { seq, dir, at_us, step, wire, body, repeat_of, note })
+        Ok(RecordedMessage { seq, dir, at_us, step, wire, body, identities, repeat_of, note })
     }
 }
 
@@ -212,6 +235,7 @@ impl From<RecordedMessage> for RecordedLine {
             body_b64,
             raw_b64,
             body: message.body,
+            identities: message.identities,
             repeat_of: message.repeat_of,
             note: message.note,
         }

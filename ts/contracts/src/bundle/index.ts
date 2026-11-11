@@ -28,6 +28,7 @@ import { RunVerdict } from "./verdict.js"
 
 export * from "./bindings.js"
 export * from "./overlay.js"
+export * from "./recorded-head.js"
 export * from "./recording.js"
 export * from "./rfc.js"
 export * from "./runconfig.js"

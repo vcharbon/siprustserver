@@ -35,6 +35,9 @@ import { PIVOT_FIXTURES, read } from "./fixtures.js"
 
 const BUNDLE = path.join(PIVOT_FIXTURES, "bundle")
 
+/** A recording `pivot-schema`'s `recording_fixture` test pins to its writer. */
+const IDENTITY_RECORDING = path.resolve(import.meta.dirname, "../../rig/test/fixtures/user-identities/recording/A.jsonl")
+
 describe("byte round trips", () => {
   it("run-config.json", () => {
     const text = read(BUNDLE, "run-config.json")
@@ -106,6 +109,15 @@ describe("the post-run RFC audit", () => {
     for (const line of lines) {
       expect(emitRecordedMessage(decodeRecordedMessageSync(JSON.parse(line) as unknown))).toBe(line)
     }
+  })
+
+  it("a recording whose lines state their user identities, as pivot-schema's writer writes them", () => {
+    const lines = read(IDENTITY_RECORDING).split("\n").filter((line) => line.trim().length > 0)
+    expect(lines.length).toBe(5)
+    for (const line of lines) {
+      expect(emitRecordedMessage(decodeRecordedMessageSync(JSON.parse(line) as unknown))).toBe(line)
+    }
+    expect(decodeRecordedMessageSync(JSON.parse(lines[0]!) as unknown).identities?.ruri?.user).toBe("+15550102")
   })
 })
 

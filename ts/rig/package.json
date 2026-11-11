@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@sip/contracts": "workspace:*",
-    "@sip/viewer-core": "workspace:*",
     "effect": "4.0.0-rc.111",
     "smol-toml": "1.9.1"
   },

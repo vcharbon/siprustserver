@@ -169,7 +169,7 @@ Every collector and judge reads the cells of its scope in `cell.v1`:
 |---|---|
 | `id`, `case`, `sub_case`, `lane`, `batch`, `attempt` | identity |
 | `clock` | `real` or `simulated` |
-| `keys` | name to list of values. Always: `call_id` (every Call-ID the test side sent or received), `caller`, `callee`, `request_uri_user`. Plus the keys the case declares, and those the registration seam and earlier collectors added |
+| `keys` | name to list of values. Always: `call_id` (every Call-ID the test side sent or received), `caller`, `callee`, `request_uri_user` (the users `sip-message` reads off each leg's first INVITE, stated in the recording line's `identities`). Plus the keys the case declares, and those the registration seam and earlier collectors added |
 | `legs` | per leg: role, Call-ID, From, To, request-URI, and its start, answer and end instants |
 | `timeline` | start and end of the cell, each on the lane's clock and on the wall clock |
 | `claims` | per collector name, what the case expects |

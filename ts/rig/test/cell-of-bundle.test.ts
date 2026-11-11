@@ -4,7 +4,9 @@
  * lane's clock and on the wall clock. The fixture `simulated-cell` is a bundle
  * this repository's interpreter wrote on a paused clock (the linear-attempt
  * rung of `pivot-interpreter`'s run ladder): its clocks part, 1222 ms of run
- * against 22 ms of wall.
+ * against 51 ms of wall. The fixture `user-identities` holds lines
+ * `pivot-schema`'s writer stands behind (its `recording_fixture` test): a user
+ * key is the identity `sip-message` read, never one this package reads.
  */
 import * as Result from "effect/Result"
 import * as fs from "node:fs"
@@ -15,6 +17,7 @@ import * as CellOfBundle from "../src/cell-of-bundle.js"
 import { run } from "./tree.js"
 
 const SIMULATED = path.join(import.meta.dirname, "fixtures/simulated-cell")
+const USER_IDENTITIES = path.join(import.meta.dirname, "fixtures/user-identities")
 
 const PLACEMENT: CellOfBundle.Placement = {
   id: "linear-attempt__demo",
@@ -23,7 +26,7 @@ const PLACEMENT: CellOfBundle.Placement = {
   batch: "b1",
   attempt: 1,
   claims: { "call-records": { count: 1 } },
-  keys: { call_id: ["A-18e703c5c4a9e6ac0@pivot.invalid"], account: ["0009001"] }
+  keys: { call_id: ["A-18e706e74500347d0@pivot.invalid"], account: ["0009001"] }
 }
 
 const made: Array<string> = []
@@ -46,8 +49,8 @@ const variant = (edit: (files: Record<string, string>) => void): string => {
   return dir
 }
 
-const describeDir = async (dir: string) => {
-  const result = await run(CellOfBundle.ofBundle(dir, PLACEMENT))
+const describeDir = async (dir: string, placement: CellOfBundle.Placement = PLACEMENT) => {
+  const result = await run(CellOfBundle.ofBundle(dir, placement))
   if (Result.isFailure(result)) throw new Error(result.failure.message)
   return result.success
 }
@@ -56,7 +59,7 @@ describe("cell.v1 of a bundle", () => {
   it("carries every Call-ID the test side sent or received, the declared keys merged in", async () => {
     const cell = await describeDir(SIMULATED)
     expect(cell.keys).toEqual({
-      call_id: ["A-18e703c5c4a9e6ac0@pivot.invalid", "1-A-18e703c5c4a9e6ac0@pivot.invalid"],
+      call_id: ["A-18e706e74500347d0@pivot.invalid", "1-A-18e706e74500347d0@pivot.invalid"],
       caller: ["0009001"],
       callee: ["bob5070"],
       request_uri_user: ["bob5070"],
@@ -68,8 +71,8 @@ describe("cell.v1 of a bundle", () => {
     const cell = await describeDir(SIMULATED)
     expect(cell.clock).toBe("simulated")
     expect(cell.timeline).toEqual({
-      start: { lane_ms: 0, wall_ms: 1794407124473 },
-      end: { lane_ms: 1222, wall_ms: 1794407124495 }
+      start: { lane_ms: 0, wall_ms: 1794410566895 },
+      end: { lane_ms: 1222, wall_ms: 1794410566946 }
     })
   })
 
@@ -80,7 +83,7 @@ describe("cell.v1 of a bundle", () => {
         id: "A",
         role: "uac",
         actor: "uac1",
-        call_id: "A-18e703c5c4a9e6ac0@pivot.invalid",
+        call_id: "A-18e706e74500347d0@pivot.invalid",
         from: "sip:0009001@pivot.invalid",
         to: "sip:bob5070@pivot.invalid",
         request_uri: "sip:bob5070@127.0.0.1:5080",
@@ -92,7 +95,7 @@ describe("cell.v1 of a bundle", () => {
         id: "B",
         role: "uas",
         actor: "uas1",
-        call_id: "1-A-18e703c5c4a9e6ac0@pivot.invalid",
+        call_id: "1-A-18e706e74500347d0@pivot.invalid",
         from: "sip:0009001@pivot.invalid",
         to: "sip:bob5070@pivot.invalid",
         request_uri: "sip:bob5070@127.0.0.1:5070",
@@ -124,7 +127,7 @@ describe("cell.v1 of a bundle", () => {
     })
     fs.writeFileSync(
       path.join(dir, "sut-join.json"),
-      JSON.stringify({ call_ids: ["A-18e703c5c4a9e6ac0@pivot.invalid"], started_at_ms: 1700000000000, ended_at_ms: 1700000001223 })
+      JSON.stringify({ call_ids: ["A-18e706e74500347d0@pivot.invalid"], started_at_ms: 1700000000000, ended_at_ms: 1700000001223 })
     )
     const cell = await describeDir(dir)
     expect([cell.clock, cell.timeline]).toEqual([
@@ -141,13 +144,63 @@ describe("cell.v1 of a bundle", () => {
     expect(Result.isFailure(result) && result.failure.reason).toBe("neither timing.json nor sut-join.json states the wall clock")
   })
 
-  it("reads a URI's user, a telephone-subscriber's number without its parameters", () => {
-    expect([
-      CellOfBundle.userOf("sip:+15550100;ext=7@example.invalid;user=phone"),
-      CellOfBundle.userOf("sip:alice;day=tuesday@example.invalid"),
-      CellOfBundle.userOf("tel:+15550100;phone-context=example.invalid"),
-      CellOfBundle.userOf("sip:example.invalid")
-    ]).toEqual(["+15550100", "alice;day=tuesday", "+15550100", undefined])
+  it("keys a call on the users sip-message read: a user-parameter, a visual separator and a tel URI dropped", async () => {
+    const cell = await describeDir(USER_IDENTITIES, { ...PLACEMENT, keys: {} })
+    expect(cell.keys).toEqual({
+      call_id: ["uid-1@a.example"],
+      caller: ["+15550100"],
+      callee: ["+15550101"],
+      request_uri_user: ["+15550102"]
+    })
+    expect(cell.legs[0]).toMatchObject({
+      from: "sip:+15550100;cpc=ordinary@a.example",
+      to: "sip:+1-555-0101@b.example;user=phone",
+      request_uri: "tel:+1-555-0102",
+      answer_us: 20000
+    })
+  })
+
+  it("adds no user key for a line that states no identities", async () => {
+    const dir = variant(() => {})
+    const file = path.join(dir, "recording/A.jsonl")
+    const stripped = fs.readFileSync(path.join(USER_IDENTITIES, "recording/A.jsonl"), "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => {
+        const { identities: _, ...rest } = JSON.parse(line) as Record<string, unknown>
+        return JSON.stringify(rest)
+      })
+    fs.rmSync(path.join(dir, "recording/B.jsonl"))
+    fs.writeFileSync(file, `${stripped.join("\n")}\n`)
+    const cell = await describeDir(dir, { ...PLACEMENT, keys: {} })
+    expect([cell.keys["call_id"], cell.keys["caller"], cell.keys["callee"], cell.keys["request_uri_user"]]).toEqual([
+      ["uid-1@a.example"],
+      [],
+      [],
+      []
+    ])
+  })
+
+  it("takes the wall window whole from timing.json when it states both instants beside a SUT join", async () => {
+    const dir = variant(() => {})
+    fs.writeFileSync(
+      path.join(dir, "sut-join.json"),
+      JSON.stringify({ call_ids: ["A-18e706e74500347d0@pivot.invalid"], started_at_ms: 1700000000000, ended_at_ms: 1700000001223 })
+    )
+    const cell = await describeDir(dir)
+    expect([cell.timeline.start.wall_ms, cell.timeline.end.wall_ms]).toEqual([1794410566895, 1794410566946])
+  })
+
+  it("takes the wall window whole from the SUT join when timing.json states only one instant", async () => {
+    const dir = variant((files) => {
+      files["timing.json"] = `{"settle_budget_ms": 10000, "settled_at_ms": 1222, "started_at_ms": 0, "wall_started_at_ms": 1794410566895}\n`
+    })
+    fs.writeFileSync(
+      path.join(dir, "sut-join.json"),
+      JSON.stringify({ call_ids: ["A-18e706e74500347d0@pivot.invalid"], started_at_ms: 1700000000000, ended_at_ms: 1700000001223 })
+    )
+    const cell = await describeDir(dir)
+    expect([cell.timeline.start.wall_ms, cell.timeline.end.wall_ms]).toEqual([1700000000000, 1700000001223])
   })
 
   it("ends an unsettled run's lane clock at its last datagram", async () => {

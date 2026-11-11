@@ -16,7 +16,7 @@ A pnpm workspace. Ten packages, four of them one layer each of the same stack:
 | `rig/` | `@sip/rig` | the rig's plug-in contract (ADR-0060): the pack, collector, judge and operation manifests, the rig path that finds them, the collection levels and lane wiring checked before a job opens, and the `cell.v1` description built from a cell's bundle |
 
 Dependencies point one way only: `driver → pipeline → toolchain → contracts`,
-`store → contracts`, `rig → {contracts, viewer-core}`, `viewer-app → viewer-core` (the app reads the report
+`store → contracts`, `rig → contracts`, `viewer-app → viewer-core` (the app reads the report
 formats' types from `contracts`, nothing else), and `cli → corpus → {driver,
 store, viewer-core}`. The viewer's server is the deployment's: it serves the
 app's build and the documents the app draws. A policy package never imports the

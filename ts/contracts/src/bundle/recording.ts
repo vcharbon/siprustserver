@@ -11,8 +11,21 @@
  * leg is the FILE NAME, never a field.
  */
 import * as Schema from "effect/Schema"
-import { MsgBody } from "../flows.js"
+import { Identity, MsgBody } from "../flows.js"
 import * as Wire from "../wire.js"
+
+/**
+ * The user identities a recorded datagram names, as the recorder's reader
+ * (`sip-message` `Uri::user_identity`) reduced them: its From, its To and, on a
+ * request, its Request-URI. A reader keys a call on these, never on a URI rule
+ * of its own.
+ */
+export const RecordedIdentities = Schema.Struct({
+  from: Identity,
+  to: Identity,
+  ruri: Schema.optionalKey(Identity)
+})
+export interface RecordedIdentities extends Schema.Schema.Type<typeof RecordedIdentities> {}
 
 /** Which way a datagram crossed the leg's vantage. */
 export const Dir = Schema.Literals(["out", "in"])
@@ -27,6 +40,8 @@ const lineFields = {
   step: Schema.optionalKey(Schema.String),
   /** The body's layout, present iff the datagram carries a body. */
   body: Schema.optionalKey(MsgBody),
+  /** The user identities the datagram names; absent where the recorder did not parse it. */
+  identities: Schema.optionalKey(RecordedIdentities),
   /**
    * The `seq` of the earliest datagram on this leg, in this direction, that this
    * one repeats byte for byte. Set by the caller that KNOWS it is
