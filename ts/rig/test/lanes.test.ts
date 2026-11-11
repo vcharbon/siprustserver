@@ -10,6 +10,7 @@ import * as Result from "effect/Result"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import * as Lane from "../src/lane.js"
 import * as Lanes from "../src/lanes.js"
 import type { Refusal } from "../src/manifest-file.js"
 import * as RigPath from "../src/rig-path.js"
@@ -168,6 +169,13 @@ describe("the lanes of a root", () => {
     )
   })
 
+  it("tells a TOML file stating no schema from one of another schema and from no TOML", () => {
+    expect(Lane.statesNoSchema(`kind = "legacy"\n[parts]\nrecords-store = "a"\n`)).toBe(true)
+    expect(Lane.statesNoSchema(SIMULATED())).toBe(false)
+    expect(Lane.statesNoSchema(SIMULATED().replace("lane.v1", "lane.v2"))).toBe(false)
+    expect(Lane.statesNoSchema(`kind = "legacy\n`)).toBe(false)
+  })
+
   it("refuses a lane id that is not a name", async () => {
     const dir = workspace({ "lanes/Lab_A.toml": SIMULATED() })
     expect((await refusalOf(dir))?.reason).toBe("a lane id is lower-case letters, digits and dashes")
@@ -267,6 +275,16 @@ describe("a part schema the base reads", () => {
     expect(await reasonOf(schema)).toBe(`${pointer}: a keyword the rig does not read`)
   })
 
+  it.each([
+    [{ type: "object", properties: { c: { type: "array", items: [{ type: "string" }] } } }, "/properties/c/items: a subschema is an object or a boolean"],
+    [{ type: "object", additionalProperties: "no" }, "/additionalProperties: a subschema is an object or a boolean"],
+    [{ type: "object", allOf: { type: "object" } }, "/allOf: allOf is a list of subschemas"],
+    [{ type: "object", properties: { a: { anyOf: [1] } } }, "/properties/a/anyOf/0: a subschema is an object or a boolean"],
+    [{ type: "object", properties: [{ type: "string" }] }, "/properties: properties maps names to subschemas"]
+  ])("refuses a keyword stating subschemas in a shape it does not take, naming its JSON Pointer (%j)", async (schema, reason) => {
+    expect(await reasonOf(schema)).toBe(reason)
+  })
+
   it("reads every keyword it checks a part by", async () => {
     expect(await reasonOf({
       $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -288,5 +306,51 @@ describe("a part schema the base reads", () => {
         g: { type: "object", patternProperties: { "^x-": { type: "string" } } }
       }
     })).toBeUndefined()
+  })
+})
+
+/** The refusal of a lane naming a part whose `v` is `value`, under a schema whose `v` is `property`. */
+const partRefusal = async (property: Readonly<Record<string, unknown>>, value: string) => {
+  const schema = { type: "object", $defs: { int: { type: "integer" } }, properties: { v: property } }
+  const dir = root({
+    "parts/records-store.schema.json": JSON.stringify(schema),
+    "lanes/served.toml": REAL("served", `[parts]\nrecords-store = "a"`),
+    "targets/records-store/a.toml": `v = ${value}\n`
+  })
+  return (await refusalOf(dir))?.message
+}
+
+describe("a part file under each keyword the rig reads", () => {
+  it.each([
+    ["type", { type: "integer" }, "1", `"1"`],
+    ["const", { const: 1 }, "1", "2"],
+    ["enum", { enum: ["x"] }, `"x"`, `"y"`],
+    ["$ref", { $ref: "#/$defs/int" }, "1", `"1"`],
+    ["required", { type: "object", required: ["a"] }, "{ a = 1 }", "{ b = 1 }"],
+    ["minLength", { type: "string", minLength: 2 }, `"ab"`, `"a"`],
+    ["maxLength", { type: "string", maxLength: 1 }, `"a"`, `"ab"`],
+    ["pattern", { type: "string", pattern: "^a" }, `"ab"`, `"ba"`],
+    ["minimum", { minimum: 1 }, "1", "0"],
+    ["maximum", { maximum: 1 }, "1", "2"],
+    ["exclusiveMinimum", { exclusiveMinimum: 1 }, "2", "1"],
+    ["exclusiveMaximum", { exclusiveMaximum: 1 }, "0", "1"],
+    ["multipleOf", { multipleOf: 2 }, "4", "3"],
+    ["minProperties", { type: "object", minProperties: 1 }, "{ a = 1 }", "{}"],
+    ["maxProperties", { type: "object", maxProperties: 1 }, "{ a = 1 }", "{ a = 1, b = 2 }"],
+    ["minItems", { type: "array", minItems: 1 }, "[1]", "[]"],
+    ["maxItems", { type: "array", maxItems: 1 }, "[1]", "[1, 2]"],
+    ["uniqueItems", { type: "array", uniqueItems: true }, "[1, 2]", "[1, 1]"],
+    ["additionalProperties", { type: "object", properties: { a: {} }, additionalProperties: false }, "{ a = 1 }", "{ b = 1 }"],
+    ["propertyNames", { type: "object", propertyNames: { pattern: "^a" } }, "{ a = 1 }", "{ b = 1 }"],
+    ["items", { type: "array", items: { type: "integer" } }, "[1]", `["x"]`],
+    ["prefixItems", { type: "array", prefixItems: [{ type: "integer" }] }, "[1]", `["x"]`],
+    ["allOf", { allOf: [{ type: "integer" }, { minimum: 1 }] }, "1", "0"],
+    ["anyOf", { anyOf: [{ type: "integer" }, { type: "boolean" }] }, "1", `"x"`],
+    ["oneOf", { oneOf: [{ type: "integer" }, { minimum: 0 }] }, "-1", "1"],
+    ["properties", { type: "object", properties: { a: { type: "integer" } } }, "{ a = 1 }", `{ a = "x" }`],
+    ["patternProperties", { type: "object", patternProperties: { "^x": { type: "integer" } } }, "{ xa = 1 }", `{ xa = "s" }`]
+  ])("%s: a value it admits loads, one it refuses refuses the lane naming the file", async (_, property, admitted, refused) => {
+    expect(await partRefusal(property, admitted)).toBeUndefined()
+    expect(await partRefusal(property, refused)).toMatch(/targets\/records-store\/a\.toml: v/)
   })
 })

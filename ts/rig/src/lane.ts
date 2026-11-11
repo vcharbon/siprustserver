@@ -170,16 +170,22 @@ const withCollectors = (raw: Schema.Schema.Type<typeof LaneShape>): Result.Resul
 /** The `schema` the TOML value `raw` states, `undefined` where it states none. */
 const schemaOf = (raw: unknown): unknown => (typeof raw === "object" && raw !== null ? (raw as { readonly schema?: unknown }).schema : undefined)
 
-/** The format `text` states in its `schema` key; `undefined` where it is no TOML or states none. */
-export const formatOf = (text: string): string | undefined => {
+/** Whether the TOML value `raw` states no `schema`: the file is of a format before this one. */
+const unschemed = (raw: unknown): boolean => schemaOf(raw) === undefined
+
+/**
+ * Whether `text` is TOML stating no `schema` key, the file {@link parse}
+ * refuses with {@link NO_SCHEMA}: false for text that is no TOML and for a
+ * file stating any schema, `lane.v1` or another.
+ */
+export const statesNoSchema = (text: string): boolean => {
   const raw = tomlOf(text)
-  const schema = Result.isSuccess(raw) ? schemaOf(raw.success) : undefined
-  return typeof schema === "string" ? schema : undefined
+  return Result.isSuccess(raw) && unschemed(raw.success)
 }
 
 /** The lane file `file` holds as `text`, or why it is none. */
 export const parse = (file: string, text: string): Result.Result<LaneFile, Refusal> => {
-  const stated = Result.flatMap(tomlOf(text), (raw) => (schemaOf(raw) === undefined ? Result.fail(NO_SCHEMA) : Result.succeed(raw)))
+  const stated = Result.flatMap(tomlOf(text), (raw) => (unschemed(raw) ? Result.fail(NO_SCHEMA) : Result.succeed(raw)))
   const read = Result.flatMap(Result.flatMap(stated, decode), withCollectors)
   if (Result.isFailure(read)) return Result.fail(refuse([file], read.failure))
   const why = meaningOf(read.success)

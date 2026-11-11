@@ -2,8 +2,9 @@
  * A part (ADR-0060 appendix §11): a file `targets/<kind>/<name>.toml` several
  * lanes may name, valid against the JSON Schema `parts/<kind>.schema.json` of
  * the rig path. The schema is written in the Draft 2020-12 subset Effect's
- * importer translates (`json-schema-subset.ts`): a keyword outside it refuses
- * the schema, naming its JSON Pointer. Its root is an object schema.
+ * importer translates (`json-schema-subset.ts`): a keyword outside it, or a
+ * keyword stating subschemas in no shape it takes, refuses the schema, naming
+ * its JSON Pointer. Its root is an object schema.
  *
  * The schema's root keyword `x-siprig` states what the base reads of the kind:
  *
@@ -60,8 +61,8 @@ export const kindOf = (file: string, schema: Readonly<Record<string, unknown>>):
     return Result.fail(refuse([file], `${ANNOTATION}.capabilities.${derived}: the base derives ${derived} itself, no part gives it`))
   }
   if (document.type !== "object") return Result.fail(refuse([file], `type: a part schema's root is "object"`))
-  const unread = JsonSchemaSubset.firstUnread(document)
-  if (unread !== undefined) return Result.fail(refuse([file], `${unread}: a keyword the rig does not read`))
+  const fault = JsonSchemaSubset.firstFault(document)
+  if (fault !== undefined) return Result.fail(refuse([file], fault))
   let decoder: (raw: unknown) => Result.Result<unknown, string>
   try {
     const imported = SchemaRepresentation.fromJsonSchemaDocument(JsonSchema.fromSchemaDraft2020_12(document), { patterns: "apply" })
