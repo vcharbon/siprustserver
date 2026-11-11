@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use crate::checks::{self, Observables};
 use crate::resolve::Resolver;
 use crate::scope::Scope;
-use crate::state::RunState;
 
 pub use pivot_schema::postcondition::CALL_RECORDS;
 
@@ -75,7 +74,8 @@ pub fn state(
 /// Answers `claim` over `records`, each a record as its field map, into
 /// `verdict`: a count other than the claimed one fails it, and so does a
 /// gating check no record satisfies; a check that does not gate is recorded
-/// as informative. Answers whether the claim held.
+/// as informative. Answers whether the claim held. Each check's value is the
+/// stated one, compared as written: it is never resolved again.
 ///
 /// A check asserts over the record SET — "some record shows this" — because
 /// `{ count, checks }` has no per-record scoping, and its failure says so.
@@ -92,13 +92,10 @@ pub fn judge(
             observed: describe(records),
         });
     }
-    let state = RunState::new();
-    let bindings = pivot_schema::bundle::IdentityBindings::new();
-    let resolver = Resolver::new(&state, &bindings);
     for stated in &claim.checks {
         let check = &stated.check;
         let satisfied = records.iter().any(|record| {
-            checks::evaluate("cdr", check, &RecordObservables(record), &resolver).is_none()
+            checks::evaluate_resolved("cdr", check, &RecordObservables(record)).is_none()
         });
         if satisfied {
             continue;

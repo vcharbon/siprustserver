@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::RunState;
 use pivot_schema::bundle::{ClockMode, IdentityBindings, RunConfig, VerdictStatus};
 use pivot_schema::scoping::CheckClass;
 
@@ -115,6 +116,27 @@ fn a_check_value_is_stated_resolved_and_an_unresolved_one_is_a_failure() {
         matches!(&failures[..], [Failure::AccessorUnresolved { site, .. }] if site == "cdr check \"c\""),
         "{failures:?}"
     );
+}
+
+/// A stated value is the run's resolved one: judging reads it as written, so a
+/// value that resolved to text holding `${…}` matches a record holding it.
+#[test]
+fn a_stated_value_is_compared_as_written_never_resolved_again() {
+    let literal = "x${leg:A.remote-tag}";
+    let stated_check = |op: CheckOp, value: &str| StatedCheck {
+        check: Check { field: "note".into(), op, value: Some(value.into()), class: None },
+        gates: true,
+    };
+    let claim = RecordsClaim {
+        count: 1,
+        checks: vec![
+            stated_check(CheckOp::Eq, literal),
+            stated_check(CheckOp::Regex, &regex::escape(literal)),
+        ],
+    };
+    let mut judged = verdict();
+    assert!(judge(&claim, &[record(&[("note", literal)])], &mut judged), "{judged:?}");
+    assert!(judged.passed(), "{judged:?}");
 }
 
 #[test]
