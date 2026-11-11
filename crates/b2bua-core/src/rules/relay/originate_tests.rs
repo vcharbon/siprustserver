@@ -94,15 +94,12 @@ Content-Length: 0\r\n\r\n",
             }
         };
 
-        // (a) ID-1 — fresh Call-ID, NOT the a-leg's.
+        // (a) ID-1 — the Call-ID derives from the a-leg's: `<N>-<a-leg Call-ID>`, `N` the leg's
+        // ordinal, so it is a fresh Call-ID a capture still joins to the a-leg.
         let call_id = invite.call_id();
         let call_id = call_id.as_str();
-        assert_ne!(call_id, a.call_id().as_str(), "b-leg Call-ID must not be the a-leg's");
+        assert_eq!(call_id, format!("1-{}", a.call_id().as_str()), "b-1 dials `1-<a-leg Call-ID>`");
         assert_eq!(call_id, leg.call_id, "leg + INVITE Call-IDs agree");
-        // The mint shape is `<leg>-<tag>@<local_ip>` (the `build_b_leg` mint), so it carries the
-        // leg id and the B2BUA's own host — never alice's Call-ID host.
-        assert!(call_id.starts_with("b-1-"), "Call-ID carries the leg id: {call_id}");
-        assert!(call_id.ends_with("@127.0.0.1"), "Call-ID host is the B2BUA's: {call_id}");
 
         // (b) ID-2 — fresh From-tag (B2BUA-owned), NOT the a-leg's; To-tag absent
         // on the initial INVITE (the callee mints it in its 2xx, RFC 3261 §12.1.1).

@@ -31,6 +31,7 @@ mod ack;
 mod address;
 mod advert;
 mod body;
+mod call_id;
 mod cancelled_final;
 mod dialog;
 mod egress;
@@ -48,6 +49,8 @@ mod session_timer;
 mod stated_text;
 mod unbuilt;
 
+#[cfg(test)]
+mod call_id_tests;
 #[cfg(test)]
 mod contact_tests;
 #[cfg(test)]

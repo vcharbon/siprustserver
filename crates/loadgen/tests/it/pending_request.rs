@@ -95,9 +95,10 @@ impl ActorScenario for InfoByeCrossing {
 }
 
 /// The instants (ms) the B2BUA received the caller's INFO, each copy.
-fn caller_infos(h: &scenario_harness::Harness) -> Vec<u64> {
+fn caller_infos(h: &scenario_harness::Harness, b2bua: std::net::SocketAddr) -> Vec<u64> {
     h.wire_entries()
         .iter()
+        .filter(|e| e.to == b2bua)
         .filter(|e| match CustomParser::new().parse(&e.raw) {
             Ok(SipMessage::Request(r)) => {
                 r.method() == Method::Info && r.call_id().to_string().contains(".run-1@")
@@ -143,7 +144,7 @@ async fn an_info_whose_final_is_lost_as_a_bye_crosses_it_is_answered_by_its_retr
     let received: Vec<&str> =
         r["received"].as_array().unwrap().iter().filter_map(|q| q["method"].as_str()).collect();
     assert_eq!(received, ["BYE"], "the callee's BYE ended the call: {r}");
-    let infos = caller_infos(&h);
+    let infos = caller_infos(&h, b2bua.addr);
     assert_eq!(infos.len(), 2, "the INFO was retransmitted once: {infos:?}");
     let ended = r["ended_at_ms"].as_u64().unwrap();
     assert!(ended < infos[1], "the call ended before the retransmission: {ended} {infos:?}");

@@ -126,6 +126,16 @@ pub fn next_b_leg_id(call: &Call) -> String {
     format!("{}-{}", call.leg_space.prefix(), call.b_legs.len() + 1)
 }
 
+/// The number a dialled leg's Call-ID starts with: the ordinal of `leg_id`
+/// (`{prefix}-{n}`, [`next_b_leg_id`]) plus its space's
+/// [`call_id_base`](crate::LegSpace::call_id_base). Distinct leg ids number
+/// distinctly; `None` for an id no leg space minted.
+pub fn leg_call_id_number(leg_id: &str) -> Option<u64> {
+    let (prefix, n) = leg_id.split_once('-')?;
+    let space = crate::LegSpace::of_prefix(prefix)?;
+    space.call_id_base().checked_add(n.parse::<u64>().ok()?)
+}
+
 /// Record that `leg_id` rang: its INVITE received a 180–189 provisional.
 pub fn mark_rang(call: &mut Call, leg_id: &str) {
     if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
