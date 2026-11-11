@@ -11,8 +11,9 @@
  * cut invocation), `capture_cuts`, `cut_cases` and `cut_refusals` (what that
  * cut made of one capture), over the content-addressed stores a case rebuilds
  * from — `case_assets`, `ledger_rows`, `flows_documents` and `flows_legs`.
- * Around them: the replay `population`, replay `requests` and the `jobs` that
- * ran them, and the {@link Current} population setting.
+ * Around them: the replay `population`, replay `requests`, the `jobs` that
+ * ran them and the `batches` those drove, and the {@link Current} population
+ * setting.
  *
  * `case_documents` (the v3 case JSON) is shared by both, content-hash deduped
  * so a corpus question is a query and a re-cut or re-run that changed nothing
@@ -775,6 +776,34 @@ const inboxJobs = Effect.gen(function*() {
 export const INBOX_JOBS = "12_inbox_jobs"
 
 /**
+ * `batches`: one row per batch a job (or a sweep that is no job) drove on a
+ * lane: its attempt, its cells by name, and its window, open until its end
+ * gate has read. A retry is a batch of its own, its attempt above 1.
+ */
+const batches = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE batches (
+      id           bigserial PRIMARY KEY,
+      job_id       bigint REFERENCES jobs (id) ON DELETE CASCADE,
+      sweep_id     bigint REFERENCES sweeps (id) ON DELETE CASCADE,
+      lane         text NOT NULL,
+      attempt      integer NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+      cells        text[] NOT NULL,
+      started_at   timestamptz NOT NULL DEFAULT now(),
+      finished_at  timestamptz,
+      detail       text,
+      CHECK (job_id IS NOT NULL OR sweep_id IS NOT NULL)
+    )
+  `
+  yield* sql`CREATE INDEX batches_job_idx ON batches (job_id)`
+  yield* sql`CREATE INDEX batches_sweep_idx ON batches (sweep_id)`
+})
+
+/** The key of the migration that records each batch. */
+export const BATCHES = "13_batches"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -790,7 +819,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [CUT_CASE_HASHES]: cutCaseHashes,
   [CAMPAIGN_JOBS]: campaignJobs,
   [FORCED_RUNS]: forcedRuns,
-  [INBOX_JOBS]: inboxJobs
+  [INBOX_JOBS]: inboxJobs,
+  [BATCHES]: batches
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

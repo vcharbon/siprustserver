@@ -14,7 +14,7 @@ import { NodeServices } from "@effect/platform-node"
 import { Campaign } from "@sip/contracts"
 import { Layout, LanePresets, RoutingCompiler, type runCell } from "@sip/driver"
 import { Classifier, Reclassifier } from "@sip/pipeline"
-import { Cuts, Jobs, Model, Refusals, Requests, RuleHits, Runs, Sessions, Sweeps } from "@sip/store"
+import { Batches, Cuts, Jobs, Model, Refusals, Requests, RuleHits, Runs, Sessions, Sweeps } from "@sip/store"
 import { Client } from "@sip/store"
 import { CURRENT } from "@sip/store/test-identity"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
@@ -102,7 +102,7 @@ const withStore = <A, E>(effect: Effect.Effect<A, E, any>): Promise<A> =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(Requests.layer),
-      Effect.provide(Layer.mergeAll(Cuts.layer, Refusals.layer, Jobs.layer, Runs.layer, RuleHits.layer, Sweeps.layer)),
+      Effect.provide(Layer.mergeAll(Batches.layer, Cuts.layer, Refusals.layer, Jobs.layer, Runs.layer, RuleHits.layer, Sweeps.layer)),
       Effect.provide(Layer.mergeAll(Sessions.layer(ROOT), Client.layerFromUrl(urlFor(SCRATCH)))),
       Effect.provide(seams),
       Effect.provide(NodeServices.layer)
@@ -159,7 +159,7 @@ beforeEach(() => {
   sessions = fs.mkdtempSync(path.join(ROOT, "session-"))
 })
 
-const options = (lane: string, concurrency = 8): Options => ({
+const options = (lane: string, concurrency = 8, batchSize = 1000): Options => ({
   paths: { corpus: path.join(sessions, "corpus"), sessions, census: sessions, registry: sessions, repoRoot: sessions },
   lane,
   selection: {
@@ -172,7 +172,7 @@ const options = (lane: string, concurrency = 8): Options => ({
     limit: undefined,
     cases: []
   },
-  batchSize: 1000,
+  batchSize,
   concurrency,
   startsPerSecond: 0,
   memoryMax: "2G",
@@ -200,10 +200,13 @@ const fakeDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runD
     return { summary: { cell: Layout.cellIdOf(cell), passed, dir: Layout.cellDir(cell) }, detail: "" }
   })) as unknown as typeof runCell
 
-const replay = (lane: string, extra: { readonly host?: StandBatch; readonly concurrency?: number } = {}) =>
+const replay = (
+  lane: string,
+  extra: { readonly host?: StandBatch; readonly concurrency?: number; readonly batchSize?: number } = {}
+) =>
   withStore(
     Effect.gen(function*() {
-      const opts = options(lane, extra.concurrency)
+      const opts = options(lane, extra.concurrency, extra.batchSize)
       const captures = yield* planWork([{ capture: ONE, set: { kind: "full" } }, { capture: TWO, set: { kind: "full" } }], prep, 2)
       const done = yield* phase({
         captures,
@@ -218,7 +221,8 @@ const replay = (lane: string, extra: { readonly host?: StandBatch; readonly conc
       const sql = yield* SqlClient
       const rows = yield* sql<{ capture: string; status: string; concurrency: number; cleanup: string | null }>`
         SELECT capture, status, concurrency, cleanup FROM runs WHERE sweep_id = ${done.sweep} ORDER BY capture`
-      return { done, rows }
+      const batches = yield* Effect.flatMap(Batches.Service, (store) => store.ofSweep(done.sweep))
+      return { done, rows, batches }
     })
   )
 
@@ -264,10 +268,23 @@ describe.skipIf(!served)("the replay phase", () => {
         contexts: () => undefined,
         kill: Effect.sync(() => void events.push("killed"))
       })
-    const { done, rows } = await replay(BATCHED, { host })
+    const { done, rows, batches } = await replay(BATCHED, { host })
     expect(events).toEqual(["gate", "killed"])
+    expect(batches.map((row) => row.detail)).toEqual(["the SUT still held a call"])
     expect(done.dirty).toEqual(["the SUT still held a call"])
     expect(rows.every((row) => row.cleanup === "the SUT still held a call")).toBe(true)
     expect(rows.every((row) => row.concurrency === 2)).toBe(true)
+  })
+
+  it("writes each batch as a row of the sweep, its cells and its window, closed once it ended", async () => {
+    const { done, batches } = await replay(PAUSED, { batchSize: 2 })
+    expect(done.batches).toBe(2)
+    expect(batches.map((row) => [row.jobId, row.lane, row.attempt, row.cells.length, row.detail])).toEqual([
+      [null, PAUSED, 1, 2, null],
+      [null, PAUSED, 1, 1, null]
+    ])
+    expect(batches.flatMap((row) => row.cells).sort()).toEqual([`${ONE}#${ONE}-a@key`, `${ONE}#${ONE}-b@key`, `${TWO}#${TWO}-a@key`])
+    for (const row of batches) expect(Date.parse(row.finishedAt!)).toBeGreaterThanOrEqual(Date.parse(row.startedAt))
+    expect(Date.parse(batches[1]!.startedAt)).toBeGreaterThanOrEqual(Date.parse(batches[0]!.finishedAt!))
   })
 })

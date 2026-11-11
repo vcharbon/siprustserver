@@ -16,6 +16,7 @@
  * features (`case_features`, `Migrations`).
  */
 export * as Aside from "./aside.js"
+export * as Batches from "./batches.js"
 export * as StoreBinding from "./binding.js"
 export * as Bundle from "./bundle.js"
 export * as CallHistory from "./call-history.js"

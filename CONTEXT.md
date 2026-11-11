@@ -254,7 +254,7 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Rig path**: the pack then the workspace, where manifests are found. Not the HA tooling's search path.
 - **Scope**: a job, a batch or a cell. Avoid: lane scope, run scope.
 - **Job**: one launched replay or campaign. Its scope is the widest.
-- **Batch**: the cells a lane runs between a stand and a drain.
+- **Batch**: the cells a lane runs between a stand and a drain; a `batches` row under its job, or its sweep where the replay is no job.
 - **Claim**: what a case expects of one collector. The cell ends without waiting for it.
 - **Export**: records a cell's or a batch's own process leaves under a collector's name.
 - **Collector**: a plug-in that reads the lab around a scope: records, verifications, attachments, keys. Avoid: gatherer, hook, probe.

@@ -34,6 +34,11 @@ export interface BatchRequest {
   readonly memoryMax: string
   /** How many cells the batch runs at once. */
   readonly cells: number
+  /**
+   * The deployment's block for cells routed through its provisioned routing
+   * rather than routing the cells script; absent for scripted cells.
+   */
+  readonly provisioned?: unknown
 }
 
 /** A batch process, as the batch holds it. */
@@ -48,6 +53,11 @@ export interface BatchHost {
   readonly contexts: () => ContextsReport | undefined
   /** Ends the process now, its cells in flight with it, and resolves once it exited; a process already gone is left. */
   readonly kill: Effect.Effect<void>
+  /**
+   * Whether `end` ran the gate to its end line, so every cell's end checks
+   * are final; read once `end` resolved. Absent where resolving says so.
+   */
+  readonly judged?: () => boolean
 }
 
 /** The lane's SUT, as the batch holds it. */
