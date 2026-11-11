@@ -68,4 +68,36 @@ describe("a runner killed by a signal", () => {
       "recovered first"
     ])
   })
+
+  it("heals its setup when its terminal hangs up: SIGHUP, its output's reader gone, a second SIGHUP ignored", async () => {
+    const root = tree(SAMPLES)
+    made.push(root)
+    const events = path.join(root, "events.jsonl")
+    const child = spawn(process.execPath, ["--import", "tsx", RUNNER, root, "first,slow-heal", events], {
+      cwd: PACKAGE,
+      stdio: ["ignore", "pipe", "pipe"]
+    })
+    running.push(child)
+    child.stdout.resume()
+    child.stderr.resume()
+    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
+      child.once("exit", (code, signal) => resolve({ code, signal }))
+    )
+    await until(() => phasesOf(events).includes("injected slow-heal"), 60_000, "the setup injected")
+    child.stdout.destroy()
+    child.stderr.destroy()
+    child.kill("SIGHUP")
+    await until(() => phasesOf(events).includes("heal slow-heal"), 10_000, "the heal began")
+    child.kill("SIGHUP")
+    expect(await exited).toEqual({ code: 130, signal: null })
+    expect(traceOf(root)).toEqual(["inject first", "inject slow-heal", "heal slow-heal", "healed slow-heal", "heal first"])
+    expect(phasesOf(events).slice(-6)).toEqual([
+      "heal slow-heal",
+      "healed slow-heal",
+      "recovered slow-heal",
+      "heal first",
+      "healed first",
+      "recovered first"
+    ])
+  })
 })
