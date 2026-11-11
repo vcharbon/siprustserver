@@ -29,10 +29,6 @@ impl Sut for Idle {
         0
     }
 
-    fn cdr_records(&self) -> Vec<BTreeMap<String, String>> {
-        Vec::new()
-    }
-
     fn observe(&self, name: &str) -> Result<Option<String>, String> {
         Err(format!("{name:?} is not an observable this lane publishes"))
     }

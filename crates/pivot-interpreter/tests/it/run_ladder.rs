@@ -391,10 +391,6 @@ impl Sut for B2buaUnderTest<'_> {
         self.0.active_calls()
     }
 
-    fn cdr_records(&self) -> Vec<BTreeMap<String, String>> {
-        self.0.cdr_records().iter().map(flatten).collect()
-    }
-
     fn observe(&self, name: &str) -> Result<Option<String>, String> {
         Err(format!("{name:?} is not an observable this lane publishes"))
     }
@@ -657,10 +653,21 @@ async fn replay_directed(
 
     let dir = bundle_dir(&case);
     let sut = B2buaUnderTest(&scene.b2bua);
-    let outcome = pivot_interpreter::replay(document, config, lane, &sut, &dir)
+    let mut outcome = pivot_interpreter::replay(document, config, lane, &sut, &dir)
         .await
         .expect("the run replays and leaves its bundle");
+    answer_call_records(&scene.b2bua, &mut outcome);
     (outcome, dir)
+}
+
+/// The ladder's call-records collector: the run's claim answered over the
+/// records the B2BUA wrote, into the outcome's verdict.
+fn answer_call_records(b2bua: &B2buaSut, outcome: &mut Outcome) {
+    if let Some(claim) = &outcome.call_records {
+        let records: Vec<BTreeMap<String, String>> =
+            b2bua.cdr_records().iter().map(flatten).collect();
+        pivot_interpreter::records::judge(claim, &records, &mut outcome.verdict);
+    }
 }
 
 /// Every rung asserts the same floor: green verdict, a settled run, and a

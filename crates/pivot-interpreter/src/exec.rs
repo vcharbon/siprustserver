@@ -58,7 +58,9 @@ use crate::gate::Inbound;
 use crate::instance::Instance;
 use crate::plan::Plan;
 use crate::recording::Recording;
+use crate::records::{self, RecordsClaim};
 use crate::render::UriComposer;
+use crate::resolve::Resolver;
 use crate::retransmit::{DrawnAcks, Repeats};
 use crate::settle::Sut;
 use crate::stack::LegStack;
@@ -97,6 +99,10 @@ pub struct Outcome {
     /// view it belongs to — the WIRE view of the wire/TU pair. The recording is
     /// this same stream rendered per leg.
     pub wire_view: Vec<WireEntry>,
+    /// The document's call-records claim as the run states it, for whoever
+    /// holds the records to answer ([`crate::records::judge`]); `None` where
+    /// the document claims none or the run never drove.
+    pub call_records: Option<RecordsClaim>,
 }
 
 impl Outcome {
@@ -120,10 +126,12 @@ pub async fn run_recording_into(
     recording: Recording,
 ) -> Outcome {
     let mut instance = Instance::with_recording(plan, config, recording.clone());
+    let mut call_records = None;
     let (timing, wire_view) = if instance.verdict().passed() {
         let mut runner = Runner::new(&mut instance, lane);
         let timing = runner.drive(sut).await;
         let wire_view = runner.absorption.wire_view();
+        call_records = state_call_records(&mut instance);
         (timing, wire_view)
     } else {
         // The lane's configuration is already refused (an unbound identity):
@@ -140,7 +148,23 @@ pub async fn run_recording_into(
         )
     };
     instance.seal_verdict();
-    Outcome { verdict: instance.verdict().clone(), recording, timing, wire_view }
+    Outcome { verdict: instance.verdict().clone(), recording, timing, wire_view, call_records }
+}
+
+/// The document's call-records claim as `instance`'s run states it; each check
+/// whose value does not resolve fails the run and is left out. A claim the plan
+/// could not read never reaches a run: compiling it refused the document.
+fn state_call_records(instance: &mut Instance<'_>) -> Option<RecordsClaim> {
+    let post = instance.plan().document().postconditions.as_ref()?;
+    let expected = post.call_records().ok()??;
+    let (claim, failures) = {
+        let resolver = Resolver::new(instance.state(), &instance.config().identities);
+        records::state(&expected, &resolver, &instance.scope())
+    };
+    for failure in failures {
+        instance.fail(failure);
+    }
+    Some(claim)
 }
 
 /// The run loop's own state, kept beside the instance it drives.

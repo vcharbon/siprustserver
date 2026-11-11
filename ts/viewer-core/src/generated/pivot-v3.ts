@@ -1762,15 +1762,16 @@ export interface MustFail {
   step: string
 }
 /**
- * Assertions evaluated once, after settle.
+ * Assertions evaluated once, after settle, and claims answered after the call.
  *
  * This interface was referenced by `PivotV3`'s JSON-Schema
  * via the `definition` "Postconditions".
  */
 export interface Postconditions {
   /**
-   * The call-detail-record expectation. Required (lint), because a call test
-   * that never looks at what was billed is half a test.
+   * The call-record expectation, read as the [`CALL_RECORDS`] claim.
+   * Required (lint), here or as that claim, because a call test that never
+   * looks at what was billed is half a test.
    */
   cdr?: CdrExpectation | null
   /**
@@ -1778,6 +1779,13 @@ export interface Postconditions {
    * settle and never mid-flow. Open field vocabulary.
    */
   checks?: Check[]
+  /**
+   * What the case expects of each collector, by collector name, opaque to
+   * the runner. A [`CALL_RECORDS`] claim has the shape of [`CdrCheck`].
+   */
+  claims?: {
+    [k: string]: unknown
+  }
 }
 /**
  * The records the run must have written.

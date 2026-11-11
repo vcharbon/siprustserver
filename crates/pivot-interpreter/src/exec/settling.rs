@@ -174,7 +174,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         loop {
             if let Some(failure) = stall.check("settle", || {
                 let done = self.instance.cursor().is_done() || self.abandoned.is_some();
-                let mut open = settle::open_reasons(done, sut, post.as_ref());
+                let mut open = settle::open_reasons(done, sut);
                 open.extend(close_reasons(&self.close_obligations()));
                 open.extend(settle::floor(&self.instance.recording(), self.now_us()).reasons());
                 open
@@ -214,12 +214,12 @@ impl<'a, 'p> Runner<'a, 'p> {
             if owed.is_empty()
                 && self.pending_repeats.is_empty()
                 && !floor.holds()
-                && settle::is_settled(flow_done, sut, post.as_ref())
+                && settle::is_settled(flow_done, sut)
             {
                 break;
             }
             if Instant::now() >= deadline {
-                let mut open = settle::open_reasons(flow_done, sut, post.as_ref());
+                let mut open = settle::open_reasons(flow_done, sut);
                 open.extend(close_reasons(&owed));
                 open.extend(floor.reasons());
                 self.instance.fail(Failure::SettleTimedOut { budget_ms, open });

@@ -75,7 +75,29 @@ pub(super) fn postcondition_strings(postconditions: &Postconditions) -> Vec<Text
     if let Some(CdrExpectation::Absent(absent)) = &postconditions.cdr {
         out.push(one("cdr.absent", absent.absent.as_str()));
     }
+    for (collector, claim) in &postconditions.claims {
+        json_strings(&format!("claims.{collector}"), claim, &mut out);
+    }
     out
+}
+
+/// Every string value inside `value`, at its JSON path under `at`: a claim is
+/// opaque, so each of its strings is a position an accessor could hide in.
+fn json_strings<'a>(at: &str, value: &'a serde_json::Value, out: &mut Vec<Text<'a>>) {
+    match value {
+        serde_json::Value::String(text) => out.push(one(at, text.as_str())),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                json_strings(&format!("{at}[]"), item, out);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (key, field) in fields {
+                json_strings(&format!("{at}.{key}"), field, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Every string a deviation carries. Its ids are resolved as references
@@ -312,6 +334,26 @@ mod tests {
         assert_eq!(
             postcondition_strings(&absent).into_iter().map(|t| t.text).collect::<Vec<_>>(),
             ["capture-carries-no-cdr"]
+        );
+    }
+
+    #[test]
+    fn the_inventory_reaches_every_string_a_claim_carries() {
+        let postconditions: Postconditions = serde_json::from_str(
+            r#"{"claims":{"call-records":{"count":1,"checks":[{"field":"events","op":"eq","value":"${A.call_id}"}]},
+                "logs":{"lines":2,"match":"bye"}}}"#,
+        )
+        .expect("postconditions");
+        let found: Vec<(String, &str)> =
+            postcondition_strings(&postconditions).into_iter().map(|t| (t.field, t.text)).collect();
+        assert_eq!(
+            found,
+            [
+                ("claims.call-records.checks[].field".to_string(), "events"),
+                ("claims.call-records.checks[].op".to_string(), "eq"),
+                ("claims.call-records.checks[].value".to_string(), "${A.call_id}"),
+                ("claims.logs.match".to_string(), "bye"),
+            ]
         );
     }
 

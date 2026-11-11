@@ -1,8 +1,9 @@
 //! The **settle contract** (`PCAP2TEST_PIVOT_V3.md` §10).
 //!
 //! After the last flow node the runner ALWAYS runs a settle phase: it waits
-//! until every scripted node has completed, the system reports no active call,
-//! and the CDR expectation is met, bounded by `timing.settle_budget_ms`.
+//! until every scripted node has completed and the system reports no active
+//! call, bounded by `timing.settle_budget_ms`. It never waits for a claim: the
+//! call-records claim is stated once the run is over ([`crate::records`]).
 //!
 //! **Failing to settle is always test failure. There is no soft mode.** A run
 //! that reached its last step and left a call up has not passed; a run whose
@@ -14,10 +15,7 @@
 //! (RFC 3261 §17.2.1), and an INVITE a leg sent holds a client transaction
 //! until its final (§17.1.1.2) — the run is not settled while either is open.
 
-use std::collections::BTreeMap;
-
-use pivot_schema::bundle::Failure;
-use pivot_schema::postcondition::{CdrExpectation, Postconditions};
+use pivot_schema::postcondition::Postconditions;
 use sip_retransmit::timers::{TIMER_B, TIMER_H};
 
 use crate::checks::{self, Observables};
@@ -31,41 +29,10 @@ use crate::scope::Finding;
 pub trait Sut {
     /// How many calls the system reports as active. Settling waits for zero.
     fn active_calls(&self) -> usize;
-    /// The CDRs the run produced, each as its field map. A lane with no CDR
-    /// oracle returns none, and a document that asserts one then fails loudly
-    /// instead of passing blind.
-    fn cdr_records(&self) -> Vec<BTreeMap<String, String>>;
     /// A deployment observable — a metric, a store fact — by name. `None` where
     /// the observable does not exist; `Err` where the name is one this system
     /// does not recognize, which is not the same answer.
     fn observe(&self, name: &str) -> Result<Option<String>, String>;
-}
-
-/// The records a run wrote, with the field a reader has to see to act on the
-/// failure. Bounded: a CDR is a handful of fields, and the whole point is that
-/// the verdict is diagnosable without a rerun.
-fn describe(records: &[BTreeMap<String, String>]) -> String {
-    if records.is_empty() {
-        return "no record was written".to_string();
-    }
-    let rendered: Vec<String> = records
-        .iter()
-        .map(|record| {
-            let fields: Vec<String> =
-                record.iter().map(|(field, value)| format!("{field}={value:?}")).collect();
-            format!("{{{}}}", fields.join(", "))
-        })
-        .collect();
-    format!("{} record(s): {}", records.len(), rendered.join(" | "))
-}
-
-/// One CDR record, as a check source.
-struct RecordObservables<'a>(&'a BTreeMap<String, String>);
-
-impl Observables for RecordObservables<'_> {
-    fn observe(&self, field: &str) -> Result<Option<String>, String> {
-        Ok(self.0.get(field).cloned())
-    }
 }
 
 /// The system's own observables, as a check source.
@@ -79,16 +46,9 @@ impl Observables for SutObservables<'_> {
 
 /// Whether the run has reached a settled state. `flow_done` is the
 /// interpreter's own half — every scripted node completed — and the rest is the
-/// system's.
-pub fn is_settled(flow_done: bool, sut: &dyn Sut, postconditions: Option<&Postconditions>) -> bool {
-    if !flow_done || sut.active_calls() != 0 {
-        return false;
-    }
-    match postconditions.and_then(|p| p.cdr.as_ref()) {
-        Some(CdrExpectation::Expected(cdr)) => sut.cdr_records().len() as u32 >= cdr.count,
-        // An absence is reasoned in the document; nothing to wait for.
-        Some(CdrExpectation::Absent(_)) | None => true,
-    }
+/// system's: no active call.
+pub fn is_settled(flow_done: bool, sut: &dyn Sut) -> bool {
+    flow_done && sut.active_calls() == 0
 }
 
 /// A non-2xx INVITE final a scripted leg sent and the system has not
@@ -181,11 +141,7 @@ pub fn floor(recording: &Recording, now_us: u64) -> Floor {
 }
 
 /// What was still open when the settle budget ran out.
-pub fn open_reasons(
-    flow_done: bool,
-    sut: &dyn Sut,
-    postconditions: Option<&Postconditions>,
-) -> Vec<String> {
+pub fn open_reasons(flow_done: bool, sut: &dyn Sut) -> Vec<String> {
     let mut open = Vec::new();
     if !flow_done {
         open.push("the flow has not completed".into());
@@ -194,25 +150,13 @@ pub fn open_reasons(
     if active != 0 {
         open.push(format!("the system reports {active} active call(s)"));
     }
-    if let Some(CdrExpectation::Expected(cdr)) = postconditions.and_then(|p| p.cdr.as_ref()) {
-        let observed = sut.cdr_records().len();
-        if (observed as u32) < cdr.count {
-            open.push(format!("{observed} of {} CDR(s) written", cdr.count));
-        }
-    }
     open
 }
 
-/// Evaluate the postconditions once the run has settled: the CDR expectation
-/// exactly, then the deployment observables.
-///
-/// A CDR `checks` entry asserts over the record SET — "some record shows this" —
-/// because `{ count, checks }` has no per-record scoping. The
-/// failure says so rather than implying it pinned one record.
+/// Evaluate the deployment observables once the run has settled.
 ///
 /// Each finding carries its check's CLASS; what that costs on this lane is the
-/// run's decision (§9.1), taken where the finding is recorded. The record COUNT
-/// is unclassified — how many calls a system billed is not a vocabulary.
+/// run's decision (§9.1), taken where the finding is recorded.
 pub fn evaluate(
     sut: &dyn Sut,
     postconditions: Option<&Postconditions>,
@@ -220,36 +164,6 @@ pub fn evaluate(
 ) -> Vec<Finding> {
     let mut out = Vec::new();
     let Some(post) = postconditions else { return out };
-    if let Some(CdrExpectation::Expected(cdr)) = &post.cdr {
-        let records = sut.cdr_records();
-        if records.len() as u32 != cdr.count {
-            out.push(Finding::gating(Failure::CdrMismatch {
-                expected: format!("{} record(s)", cdr.count),
-                observed: describe(&records),
-            }));
-        }
-        for check in &cdr.checks {
-            let held = records.iter().any(|record| {
-                checks::evaluate("cdr", check, &RecordObservables(record), resolver).is_none()
-            });
-            if !held {
-                out.push(Finding::new(
-                    check.class,
-                    Failure::CdrMismatch {
-                        expected: format!(
-                            "some record where {} {:?} {}",
-                            check.field,
-                            check.value.as_deref().unwrap_or(""),
-                            format_args!("({:?})", check.op)
-                        ),
-                        // A count without the records is a failure nobody can
-                        // act on: what the run DID bill is the evidence.
-                        observed: describe(&records),
-                    },
-                ));
-            }
-        }
-    }
     for check in &post.checks {
         if let Some(failure) =
             checks::evaluate("postcondition", check, &SutObservables(sut), resolver)

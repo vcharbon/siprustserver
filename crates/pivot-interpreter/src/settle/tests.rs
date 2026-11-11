@@ -1,20 +1,18 @@
+use std::collections::BTreeMap;
+
 use super::*;
 use crate::state::RunState;
-use pivot_schema::bundle::{Dir, IdentityBindings};
+use pivot_schema::bundle::{Dir, Failure, IdentityBindings};
 use pivot_schema::scoping::CheckClass;
 
 struct FakeSut {
     active: usize,
-    cdrs: Vec<BTreeMap<String, String>>,
     metrics: BTreeMap<String, String>,
 }
 
 impl Sut for FakeSut {
     fn active_calls(&self) -> usize {
         self.active
-    }
-    fn cdr_records(&self) -> Vec<BTreeMap<String, String>> {
-        self.cdrs.clone()
     }
     fn observe(&self, name: &str) -> Result<Option<String>, String> {
         if name.starts_with("sip_") {
@@ -25,27 +23,24 @@ impl Sut for FakeSut {
     }
 }
 
-fn record(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
-}
-
 fn post(text: &str) -> Postconditions {
     serde_json::from_str(text).unwrap()
 }
 
+/// Settling waits on the flow and on the system's active calls, never on a
+/// claim: a run whose call ended is settled before any record was written.
 #[test]
-fn settling_waits_on_the_flow_the_call_count_and_the_cdr_count() {
-    let expectation = post(r#"{"cdr":{"count":1}}"#);
-    let mut sut = FakeSut { active: 1, cdrs: vec![], metrics: BTreeMap::new() };
-    assert!(!is_settled(true, &sut, Some(&expectation)));
-    assert!(!is_settled(false, &sut, Some(&expectation)));
+fn settling_waits_on_the_flow_and_the_call_count_alone() {
+    let mut sut = FakeSut { active: 1, metrics: BTreeMap::new() };
+    assert!(!is_settled(true, &sut));
+    assert!(!is_settled(false, &sut));
+    assert_eq!(
+        open_reasons(false, &sut),
+        ["the flow has not completed", "the system reports 1 active call(s)"]
+    );
     sut.active = 0;
-    assert!(!is_settled(true, &sut, Some(&expectation)), "the CDR has not been written");
-    let reasons = open_reasons(false, &sut, Some(&expectation));
-    assert_eq!(reasons, ["the flow has not completed", "0 of 1 CDR(s) written"]);
-    sut.cdrs.push(record(&[("disposition", "ANSWERED")]));
-    assert!(is_settled(true, &sut, Some(&expectation)));
-    assert!(open_reasons(true, &sut, Some(&expectation)).is_empty());
+    assert!(is_settled(true, &sut), "no record is waited for");
+    assert!(open_reasons(true, &sut).is_empty());
 }
 
 /// The floor holds a non-2xx INVITE final a leg sent until its ACK or Timer
@@ -154,86 +149,30 @@ fn the_floor_holds_a_sent_invite_until_its_final_and_bounds_calling_by_timer_b()
     assert_eq!(floor(&recording, at), Floor::default(), "the final ended it");
 }
 
-#[test]
-fn a_reasoned_cdr_absence_waits_for_nothing_and_asserts_nothing() {
-    let expectation = post(r#"{"cdr":{"absent":"capture-carries-no-cdr"}}"#);
-    let sut = FakeSut { active: 0, cdrs: vec![], metrics: BTreeMap::new() };
-    assert!(is_settled(true, &sut, Some(&expectation)));
-    let state = RunState::new();
-    let bindings = IdentityBindings::new();
-    assert!(evaluate(&sut, Some(&expectation), &Resolver::new(&state, &bindings)).is_empty());
-}
-
-#[test]
-fn the_cdr_count_is_exact_at_evaluation_even_though_settling_waits_for_at_least() {
-    let expectation = post(r#"{"cdr":{"count":1}}"#);
-    let sut = FakeSut {
-        active: 0,
-        cdrs: vec![record(&[("disposition", "ANSWERED")]), record(&[("disposition", "BUSY")])],
-        metrics: BTreeMap::new(),
-    };
-    let state = RunState::new();
-    let bindings = IdentityBindings::new();
-    let failures = evaluate(&sut, Some(&expectation), &Resolver::new(&state, &bindings));
-    assert_eq!(failures[0].class, None, "a record COUNT is not a vocabulary");
-    let Failure::CdrMismatch { expected, observed } = &failures[0].failure else {
-        panic!("a CDR mismatch: {failures:?}")
-    };
-    assert_eq!(expected, "1 record(s)");
-    assert!(observed.starts_with("2 record(s):"), "{observed}");
-    assert!(observed.contains("disposition=\"ANSWERED\""), "{observed}");
-}
-
-#[test]
-fn a_cdr_check_asserts_over_the_record_set_and_says_so_when_none_matches() {
-    let expectation = post(
-        r#"{"cdr":{"count":2,"checks":[{"field":"disposition","op":"regex","value":"^(ANSWERED|CANCELLED)$"}]}}"#,
-    );
-    let state = RunState::new();
-    let bindings = IdentityBindings::new();
-    let resolver = Resolver::new(&state, &bindings);
-    let matching = FakeSut {
-        active: 0,
-        cdrs: vec![record(&[("disposition", "ANSWERED")]), record(&[("disposition", "BUSY")])],
-        metrics: BTreeMap::new(),
-    };
-    assert!(evaluate(&matching, Some(&expectation), &resolver).is_empty());
-    let none = FakeSut {
-        active: 0,
-        cdrs: vec![record(&[("disposition", "BUSY")]), record(&[("disposition", "BUSY")])],
-        metrics: BTreeMap::new(),
-    };
-    let failures = evaluate(&none, Some(&expectation), &resolver);
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    // The failure carries what was actually billed, not only how many.
-    let Failure::CdrMismatch { observed, .. } = &failures[0].failure else {
-        panic!("a CDR mismatch")
-    };
-    assert!(observed.contains("disposition=\"BUSY\""), "{observed}");
-}
-
+/// The settle evaluation reads the system's observables alone: the
+/// call-records claim, however it fails, is not its to answer.
 #[test]
 fn a_postcondition_finding_carries_the_class_of_the_check_that_found_it() {
     let expectation = post(
-        r#"{"cdr":{"count":1,"checks":[
-            {"field":"events","op":"regex","value":"InviteReceived","class":"cdr-vocabulary"},
-            {"field":"disposition","op":"eq","value":"ANSWERED"}]},
-           "checks":[{"field":"sip_orphans","op":"eq","value":"0","class":"cdr-vocabulary"}]}"#,
+        r#"{"cdr":{"count":1,"checks":[{"field":"disposition","op":"eq","value":"ANSWERED"}]},
+           "checks":[{"field":"sip_orphans","op":"eq","value":"0","class":"cdr-vocabulary"},
+                     {"field":"sip_drops","op":"eq","value":"0"}]}"#,
     );
     let sut = FakeSut {
         active: 0,
-        cdrs: vec![record(&[("events", "invite_received"), ("disposition", "CANCELLED")])],
-        metrics: BTreeMap::from([("sip_orphans".to_string(), "3".to_string())]),
+        metrics: BTreeMap::from([
+            ("sip_orphans".to_string(), "3".to_string()),
+            ("sip_drops".to_string(), "1".to_string()),
+        ]),
     };
     let state = RunState::new();
     let bindings = IdentityBindings::new();
     let findings = evaluate(&sut, Some(&expectation), &Resolver::new(&state, &bindings));
-    // Every check is EVALUATED; the class only says what the finding costs.
     let classes: Vec<Option<CheckClass>> = findings.iter().map(|f| f.class).collect();
-    assert_eq!(
-        classes,
-        [Some(CheckClass::CdrVocabulary), None, Some(CheckClass::CdrVocabulary)],
-        "{findings:#?}"
+    assert_eq!(classes, [Some(CheckClass::CdrVocabulary), None], "{findings:#?}");
+    assert!(
+        findings.iter().all(|f| matches!(f.failure, Failure::CheckFailed { .. })),
+        "no record was read: {findings:#?}"
     );
 }
 
@@ -242,7 +181,7 @@ fn a_metric_the_system_does_not_publish_fails_rather_than_reading_as_zero() {
     let expectation = post(
         r#"{"cdr":{"absent":"n/a"},"checks":[{"field":"widgets_total","op":"eq","value":"0"}]}"#,
     );
-    let sut = FakeSut { active: 0, cdrs: vec![], metrics: BTreeMap::new() };
+    let sut = FakeSut { active: 0, metrics: BTreeMap::new() };
     let state = RunState::new();
     let bindings = IdentityBindings::new();
     let failures = evaluate(&sut, Some(&expectation), &Resolver::new(&state, &bindings));

@@ -42,7 +42,6 @@ pub(super) fn check(index: &Index<'_>, report: &mut Report) {
         }
     }
     background(index, report);
-    postconditions(index, report);
 }
 
 /// `in_dialog` is TOTAL (§6.1): every step of a leg strictly after that leg's
@@ -746,43 +745,6 @@ fn unordered_rules(group: &crate::flow::Unordered, report: &mut Report) {
                 "a `send` sits in an `unordered` group",
                 "the runner controls when it sends; an order-free group holds the messages it WAITS for",
             );
-        }
-    }
-}
-
-/// The settle contract (§10): a case states what the run must have billed, or
-/// says in one greppable token why it cannot.
-fn postconditions(index: &Index<'_>, report: &mut Report) {
-    match &index.pivot.postconditions {
-        None => report.error(
-            "postconditions/cdr-absent-needs-reason",
-            "postconditions",
-            "the document states no postconditions, so nothing checks what the run billed",
-            "state `postconditions.cdr.count`, or `postconditions.cdr.absent: \"<reason>\"`",
-        ),
-        Some(postconditions) => {
-            if !postconditions.cdr_is_declared() {
-                report.error(
-                    "postconditions/cdr-absent-needs-reason",
-                    "postconditions.cdr",
-                    "no CDR expectation, and no reason given for its absence",
-                    "state `cdr.count`, or `cdr.absent: \"<reason>\"` so the gap is greppable",
-                );
-            }
-            let inline = match &postconditions.cdr {
-                Some(crate::postcondition::CdrExpectation::Expected(cdr)) => cdr.checks.iter(),
-                _ => [].iter(),
-            };
-            for check in postconditions.checks.iter().chain(inline) {
-                if !check.value_is_declarable() {
-                    report.error(
-                        "checks/value-mismatch",
-                        "postconditions",
-                        format!("check on {:?} states a value its operator does not take, or omits one it does", check.field),
-                        "`eq` and `regex` take a value; `exists` and `absent` take none",
-                    );
-                }
-            }
         }
     }
 }

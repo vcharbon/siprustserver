@@ -22,7 +22,6 @@ use pivot_schema::document::PivotV3;
 use pivot_schema::flow::{Anchor, CheckMode, FlowNode, Op, Step};
 use pivot_schema::msg::MsgSpec;
 use pivot_schema::placement::{Actor, Endpoint, Leg};
-use pivot_schema::postcondition::CdrExpectation;
 use pivot_schema::violation::{RfcRule, RfcViolation};
 
 use crate::program::{Branch, Item, ItemKind, Program, StepLoc};
@@ -109,6 +108,8 @@ pub enum PlanError {
     CheckValueMismatch { site: String, op: String, detail: String },
     /// A `regex` check whose pattern does not compile.
     CheckRegexInvalid { site: String, pattern: String, detail: String },
+    /// A call-records claim stated twice, or not as a `{ count, checks }`.
+    RecordsClaim { detail: String },
     /// A dwell that is both timer-linked and compressible: compressing what a
     /// system timer measures changes what the test proves.
     CompressibleTimerLinkedDwell { step: String },
@@ -250,6 +251,7 @@ impl std::fmt::Display for PlanError {
             PlanError::CheckRegexInvalid { site, pattern, detail } => {
                 write!(f, "{site}: regex {pattern:?} does not compile: {detail}")
             }
+            PlanError::RecordsClaim { detail } => write!(f, "postconditions: {detail}"),
             PlanError::EarlyDialogOnRequestSend { step, early } => write!(
                 f,
                 "send {step:?} rides early dialog {early:?}; §6.1 names a fork on a response \
@@ -1206,16 +1208,16 @@ impl Compiler {
     /// Postcondition checks (§10) hold the same shape rules as an inline one.
     fn check_postconditions(&mut self) {
         let Some(post) = self.document.postconditions.clone() else { return };
-        for check in &post.checks {
-            if let Err(e) = check_shape("postcondition check", check) {
+        let records = post.call_records().unwrap_or_else(|why| {
+            self.errors.push(PlanError::RecordsClaim { detail: why.to_string() });
+            None
+        });
+        let stated = post.checks.iter().map(|check| ("postcondition check", check));
+        let claimed =
+            records.iter().flat_map(|r| &r.checks).map(|c| ("postcondition cdr check", c));
+        for (site, check) in stated.chain(claimed) {
+            if let Err(e) = check_shape(site, check) {
                 self.errors.push(e);
-            }
-        }
-        if let Some(CdrExpectation::Expected(cdr)) = &post.cdr {
-            for check in &cdr.checks {
-                if let Err(e) = check_shape("postcondition cdr check", check) {
-                    self.errors.push(e);
-                }
             }
         }
     }
@@ -1356,18 +1358,12 @@ impl Compiler {
             }
         }
         if let Some(post) = &self.document.postconditions {
-            for c in &post.checks {
-                out.push(("postcondition check field".into(), None, c.field.clone()));
+            let records = post.call_records().ok().flatten().map(|r| r.checks).unwrap_or_default();
+            let stated = post.checks.iter().map(|c| ("postcondition check", c));
+            for (site, c) in stated.chain(records.iter().map(|c| ("postcondition cdr check", c))) {
+                out.push((format!("{site} field"), None, c.field.clone()));
                 if let Some(v) = &c.value {
-                    out.push(("postcondition check value".into(), None, v.clone()));
-                }
-            }
-            if let Some(CdrExpectation::Expected(cdr)) = &post.cdr {
-                for c in &cdr.checks {
-                    out.push(("postcondition cdr check field".into(), None, c.field.clone()));
-                    if let Some(v) = &c.value {
-                        out.push(("postcondition cdr check value".into(), None, v.clone()));
-                    }
+                    out.push((format!("{site} value"), None, v.clone()));
                 }
             }
         }

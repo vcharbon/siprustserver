@@ -2722,8 +2722,10 @@ the document measured proves a different thing than the document does.
 ## 10. The settle contract and postconditions
 
 **After the last flow node the runner ALWAYS runs a settle phase.** It waits
-until every scripted dialog is terminal AND the system reports no active call
-AND the CDR expectation is met, bounded by `timing.settle_budget_ms`.
+until every scripted dialog is terminal AND the system reports no active call,
+bounded by `timing.settle_budget_ms`. It never waits for a claim: the run
+states its claims once it is over, and whoever holds the records answers them
+after the call (ADR-0060 appendix §4).
 
 A scripted dialog is terminal only once the transactions it holds are. A
 non-2xx final a scripted leg sent to an INVITE keeps the run open until the
@@ -2746,7 +2748,7 @@ branch (§17.1.1.3).
 **Failing to settle is always test failure. There is no soft mode.**
 
 A run whose SCRIPT ended because it could not go on (§14) settles by the same
-three conditions, whatever its polarity. "Every scripted dialog is terminal" is
+conditions, whatever its polarity. "Every scripted dialog is terminal" is
 then what the generic close discharges, node by node, inside the same budget; the
 flow's own half is done by ruling, so the abandoned nodes raise no
 `flow-incomplete`.
@@ -2761,11 +2763,12 @@ flow's own half is done by ruling, so the abandoned nodes raise no
 
 | field | meaning |
 |---|---|
-| `cdr` | either `{ count, checks? }` or `{ absent: "<reason token>" }` |
+| `cdr` | either `{ count, checks? }` or `{ absent: "<reason token>" }`; a count is read as the `call-records` claim |
+| `claims` | per collector name, what the case expects of it, opaque to the runner; a `call-records` claim is a `{ count, checks? }`, stated here or as `cdr.count`, never both. The count is exact, each check holds over the record set |
 | `checks` | deployment observables — metric names, store contents — checked at settle and NEVER mid-flow |
 
-**CDR checking is default-on.** A document that states no `cdr` is refused by
-lint; a document with no CDR oracle says so with an open reason token, which
+**CDR checking is default-on.** A document that states neither `cdr` nor a
+`call-records` claim is refused by lint; a document with no CDR oracle says so with an open reason token, which
 makes the gap greppable instead of invisible. Generated documents state
 `{ "absent": "capture-carries-no-cdr" }`: a capture shows what crossed the wire
 and nothing about what was billed.

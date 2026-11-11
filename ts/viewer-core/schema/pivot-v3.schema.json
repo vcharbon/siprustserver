@@ -1746,7 +1746,7 @@
     },
     "Postconditions": {
       "additionalProperties": false,
-      "description": "Assertions evaluated once, after settle.",
+      "description": "Assertions evaluated once, after settle, and claims answered after the call.",
       "properties": {
         "cdr": {
           "anyOf": [
@@ -1757,7 +1757,7 @@
               "type": "null"
             }
           ],
-          "description": "The call-detail-record expectation. Required (lint), because a call test\nthat never looks at what was billed is half a test."
+          "description": "The call-record expectation, read as the [`CALL_RECORDS`] claim.\nRequired (lint), here or as that claim, because a call test that never\nlooks at what was billed is half a test."
         },
         "checks": {
           "description": "Deployment observables — metric names, store contents — checked at\nsettle and never mid-flow. Open field vocabulary.",
@@ -1765,6 +1765,11 @@
             "$ref": "#/$defs/Check"
           },
           "type": "array"
+        },
+        "claims": {
+          "additionalProperties": true,
+          "description": "What the case expects of each collector, by collector name, opaque to\nthe runner. A [`CALL_RECORDS`] claim has the shape of [`CdrCheck`].",
+          "type": "object"
         }
       },
       "type": "object"

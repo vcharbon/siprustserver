@@ -28,7 +28,6 @@ use crate::accessor::Accessor;
 use crate::flow::FlowNode;
 use crate::lint::strings::{deviation_strings, postcondition_strings, step_strings};
 use crate::lint::{at, Index, Report};
-use crate::postcondition::CdrExpectation;
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
     if index.is_capture() {
@@ -142,10 +141,10 @@ fn authored_constructs(index: &Index<'_>, report: &mut Report) {
         }
     }
     if let Some(postconditions) = &index.pivot.postconditions {
-        let has_inline = match &postconditions.cdr {
-            Some(CdrExpectation::Expected(cdr)) => !cdr.checks.is_empty(),
-            _ => false,
-        };
+        let has_inline = matches!(
+            postconditions.call_records(),
+            Ok(Some(records)) if !records.checks.is_empty()
+        );
         if !postconditions.checks.is_empty() || has_inline {
             refuse(
                 report,

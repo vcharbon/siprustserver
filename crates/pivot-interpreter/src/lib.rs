@@ -60,6 +60,8 @@
 //! - `progress` — whether a recorded failure leaves the run able to go on.
 //! - `close` — what a scripted leg owes when its script ends before its call.
 //! - `settle` — the settle contract and the postcondition evaluation.
+//! - `records` — the call-records claim: stated by the run, answered by the
+//!   records written for its calls, never waited for.
 //! - `recording` — MAKING the verbatim per-leg recording.
 //! - `retransmit` — the `retransmits` count: the ladder a `send` emits and
 //!   the repeats an `expect` counts (§6.9).
@@ -95,6 +97,7 @@ pub(crate) mod preserve;
 pub(crate) mod program;
 pub(crate) mod progress;
 pub(crate) mod recording;
+pub mod records;
 pub(crate) mod render;
 mod replay;
 pub(crate) mod resolve;
