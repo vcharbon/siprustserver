@@ -341,6 +341,17 @@ defineBasicCase({
 })
 ```
 
+`@sip/basic-case` compiles it to one cell: a pivot v3 document between a caller
+leg `A` and a callee leg `B`, its id the title's slug, replayable on every lane
+(`lanes: {"*": "ok"}`), its CDR expectation left to the claims
+(`postconditions.cdr.absent: "claims"`). `basic_call` rings, answers, ACKs and
+ends with a BYE from the party `params.ends` names (the caller by default);
+`invite_reject` answers the INVITE with `params.status` (486 by default), a
+status RFC 3261 lets stand without a header beside it. The `final` checks land
+on the caller's final. A key the form does not name, an address that is no
+`sip:`/`sips:` URI naming a user, a title naming no cell, or a final status
+the shape does not end with is refused when the case is defined.
+
 ## 16. The pack manifest
 
 ```toml
@@ -365,6 +376,14 @@ cut = ["./rules"]              # and a cut: a change under one re-runs the step
 ```
 
 Every path the manifest names exists in the pack's tree when the rig path loads it.
+
+A case source is a module whose default export is an array of compiled cells
+(`@sip/rig` `CompiledCell`: id, case, sub-case, title, the pivot v3 document,
+its resources by path, its claims). `CaseSource.load` refuses, naming the
+module, one that does not load, an export that is no such array, a cell that
+does not decode, a body naming a resource the cell does not carry, and two
+cells of one id. A module, not a glob: a pack keeps its own case form and
+compiler behind the module, and the runner reads compiled cells alone.
 
 ## 17. The reference pack
 

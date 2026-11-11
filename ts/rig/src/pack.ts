@@ -27,7 +27,7 @@ const Provision = Schema.Struct({
 })
 
 const Cases = Schema.Struct({
-  /** Modules that yield compiled cells. */
+  /** Modules whose default export is the compiled cells they yield (`case-source.ts`). */
   sources: Schema.Array(RelativePath)
 })
 

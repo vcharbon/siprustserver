@@ -9,6 +9,7 @@ packages:
   - "corpus"
   - "cli"
   - "rig"
+  - "basic-case"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false

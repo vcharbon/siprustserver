@@ -1,0 +1,30 @@
+{
+  "name": "@sip/basic-case",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The minimal case form: two parties as plain SIP addresses, the basic_call and invite_reject shapes on a pivot step builder, compiled to the cells a case source yields.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts",
+    "./fixtures": "./test/fixtures/cases.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/contracts": "workspace:*",
+    "@sip/driver": "workspace:*",
+    "@sip/rig": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@sip/toolchain": "workspace:*",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}
