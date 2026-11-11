@@ -219,6 +219,7 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
                         <div key={`waived${at}`} className="muted">waived {line.name}{line.message === null ? "" : ` · ${line.message}`}</div>
                       ))}
                       {result.outcome === "error" && <div>{(result.detail ?? "").split("\n")[0]}</div>}
+                      {result.unchecked !== undefined && <div className="muted">{result.unchecked}</div>}
                     </td>
                     <td>
                       <button type="button" onClick={() => onDelta(run.id, lane)}>details</button>

@@ -1119,6 +1119,8 @@ export interface CampaignResult {
   readonly status?: CellStatus
   /** Its verification lines in their order; absent where the server states none. */
   readonly lines?: readonly VerificationLine[]
+  /** What its lane could not check though the cell ran (a claim not requested, a source not checkable); absent where it checked everything. */
+  readonly unchecked?: string
   readonly checks: readonly CampaignCheck[]
   /** Every attempt, in order, of a cell replayed more than once on its lane; absent for one attempt. */
   readonly attempts?: readonly CampaignAttempt[]
