@@ -154,8 +154,9 @@ const gateLine = (gate: Gate): Verification.Verification => ({
  * gate its end read, then its {@link END_GATE} line where the end says what
  * no gate does — a failure where the managed SUT died; else not checkable
  * where the end did not run to its end line, whatever it said in its place;
- * else a failure where the end read the SUT dirty with no gate failing; a
- * pass where no gate answered at all.
+ * else a failure where the end read the SUT dirty with no gate failing. An
+ * end that ran to its end line, read no gate and said nothing holds no line:
+ * nothing was verified.
  */
 export const linesOf = (
   ended: Pick<Ended<unknown>, "dirty" | "deadHost" | "interrupted" | "judged" | "hosted" | "gates" | "sutDied">
@@ -170,8 +171,7 @@ export const linesOf = (
   if (ended.sutDied !== undefined) return failed(ended.sutDied)
   if (!ended.judged) return [...gates, { ...line, answer: "not-checkable", message: detailOf(ended) ?? NO_END_LINE }]
   const unstated = gates.some((gate) => gate.answer === "fail") ? undefined : ended.dirty
-  if (unstated !== undefined) return failed(unstated)
-  return gates.length > 0 ? gates : [{ ...line, answer: "pass" }]
+  return unstated === undefined ? gates : failed(unstated)
 }
 
 /** Why a batch ended without an answer, as its row states it. */

@@ -185,7 +185,7 @@ describe.skipIf(!served)("one batch on a lane", () => {
     expect(rows.map((row) => row.detail)).toEqual(["the SUT still held a call; the SUT exited 137"])
   })
 
-  it("holds its end gate's line: passing on a clean end, failing on a dirty one, not checkable unjudged whatever it said in its place, none where nothing stood", async () => {
+  it("holds its end gate's line: none on a clean end with no gate, failing on a dirty one, not checkable unjudged whatever it said in its place, none where nothing stood", async () => {
     const endOn = (lane: string, said: Parameters<typeof endingAs>[0]) =>
       Effect.gen(function*() {
         endingAs(said)
@@ -215,7 +215,7 @@ describe.skipIf(!served)("one batch on a lane", () => {
       endOn(STANDS, { gate: "the batch process wrote no end line within 85 s", judged: false })
     ]))
     expect(lines).toEqual([
-      [`${LaneBatch.END_GATE} pass`],
+      [],
       [`${LaneBatch.END_GATE} fail`],
       [`${LaneBatch.END_GATE} fail`],
       [`${LaneBatch.END_GATE} not-checkable`],
