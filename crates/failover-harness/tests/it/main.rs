@@ -36,6 +36,7 @@ mod cordoned_worker;
 mod crash_after_a_readiness_flip;
 mod crash_mid_invite;
 mod crossed_reinvite_round;
+mod dead_hop_leg_taken_over;
 mod dead_notice_behind_a_backlog;
 mod deferred_end_of_a_departed_primary;
 mod departure_support;

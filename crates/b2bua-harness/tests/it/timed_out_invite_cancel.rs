@@ -15,6 +15,10 @@ use scenario_harness::callflow::OFFER_SDP;
 
 use crate::common::unrun::one_permit_one_deep_with;
 
+/// Past the end of a dead hop's INVITE transaction: Timer B, 64·T1 from the
+/// send, then the give-up's 64·T1 hold (RFC 3261 §17.1.1.2).
+const DEAD_HOP_TXN_OVER: Duration = Duration::from_secs(65);
+
 /// The INVITE bound at its floor, with no setup deadline under it: the
 /// transaction's give-up is what ends the ring.
 const BOUND_SEC: i64 = 33;
@@ -91,8 +95,8 @@ async fn a_timeout_run_late_still_answers_the_caller_and_acks_the_487() {
 
 /// bob answers nothing at all, not even a 100. The hop is dead at the
 /// first-response deadline (5 s by default): alice is answered 480 there, and no CANCEL goes to
-/// bob, who answered nothing (§9.1). The call waits on nothing from him and is
-/// released then, not at the terminating backstop.
+/// bob, who answered nothing (§9.1), while his INVITE transaction runs to its
+/// end. The call waits on nothing from him: it is released at the deadline.
 #[tokio::test(start_paused = true)]
 async fn a_callee_that_answers_nothing_is_not_cancelled() {
     let s = B2buaScene::with_b2bua("timed-out-invite-dead-hop", |bob_port| {
@@ -109,6 +113,8 @@ async fn a_callee_that_answers_nothing_is_not_cancelled() {
     settle_until(|| s.b2bua.is_reaped()).await;
     assert!(s.b2bua.is_reaped(), "released at the first-response deadline");
     s.b2bua.assert_fully_reaped();
+    s.h.advance(DEAD_HOP_TXN_OVER).await;
+    assert_eq!(s.b2bua.txn_metrics().active_transactions(), 0, "bob's transaction ends");
     let bob_addr = s.bob.addr();
     let report = s.finish().await;
     assert!(
@@ -120,8 +126,8 @@ async fn a_callee_that_answers_nothing_is_not_cancelled() {
 /// A backend that lets a failure stand (`Relay`) on the routing consult a
 /// silent hop raised: bob answers nothing, the consult says `response`, and
 /// alice is answered 480 at the default 5 s deadline, where the call is
-/// released. A hop that rang and then went silent past the INVITE bound keeps
-/// 408 (above).
+/// released and bob's INVITE transaction runs on to its end. A hop that rang
+/// and then went silent past the INVITE bound keeps 408 (above).
 #[tokio::test(start_paused = true)]
 async fn a_silent_hop_let_stand_answers_the_caller_480() {
     let s = B2buaScene::with_b2bua("timed-out-invite-let-stand", |bob_port| {
@@ -149,5 +155,7 @@ async fn a_silent_hop_let_stand_answers_the_caller_480() {
     settle_until(|| s.b2bua.is_reaped()).await;
     assert!(s.b2bua.is_reaped(), "released at the first-response deadline");
     s.b2bua.assert_fully_reaped();
+    s.h.advance(DEAD_HOP_TXN_OVER).await;
+    assert_eq!(s.b2bua.txn_metrics().active_transactions(), 0, "bob's transaction ends");
     let _ = s.finish().await;
 }

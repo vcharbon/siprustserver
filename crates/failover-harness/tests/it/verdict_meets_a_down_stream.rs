@@ -181,7 +181,8 @@ async fn a_standby_proxys_verdict_at_a_stream_drop_takes_nothing_over() {
 /// connect runs out at the connect bound, which confirms the verdict, and the
 /// backup dials the callee from its record. The stalled primary ends the call
 /// on its own first-response deadline, its 480 lost, and writes its CDR before
-/// it is killed: a stall then a kill leaves one CDR or two (`W-cdr-two`).
+/// it is killed; the survivor writes the other: a stall then a kill leaves two
+/// (`W-cdr-two`).
 #[tokio::test(start_paused = true)]
 async fn a_host_answering_no_connect_is_confirmed_at_the_connect_bound_and_taken_over() {
     let name = "unanswering-host-taken-over";
@@ -234,7 +235,7 @@ async fn a_host_answering_no_connect_is_confirmed_at_the_connect_bound_and_taken
     primary.crash();
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     survivor.simulate_peer_removed(&pri_ord);
-    settle_to_cdrs(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref, 1..=2).await;
+    settle_to_cdrs(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref, 2..=2).await;
     fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }
