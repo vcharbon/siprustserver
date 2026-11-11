@@ -172,6 +172,34 @@ describe.skipIf(!served)("one batch on a lane", () => {
     expect(rows.map((row) => row.detail)).toEqual(["the SUT still held a call; the SUT exited 137"])
   })
 
+  it("holds its end gate's line: passing on a clean end, failing on a dirty one, not checkable unjudged, none where nothing stood", async () => {
+    const endOn = (lane: string, said: Parameters<typeof endingAs>[0]) =>
+      Effect.gen(function*() {
+        endingAs(said)
+        const job = yield* jobOf
+        yield* LaneBatch.run({ lane, row: { jobId: job, lane, cells: ["a"] }, stand, drive: driveOn(lane) })
+        const [row] = yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job))
+        const sql = yield* SqlClient
+        return yield* sql<{ name: string; answer: string }>`
+          SELECT name, answer FROM verifications WHERE scope = 'batch' AND batch_id = ${row!.id} ORDER BY ordinal
+        `.pipe(Effect.map((lines) => lines.map((line) => `${line.name} ${line.answer}`)))
+      })
+    const lines = await withStore(Effect.all([
+      endOn(STANDS, {}),
+      endOn(STANDS, { gate: "the SUT still held a call" }),
+      endOn(STANDS, { sut: "the SUT exited 137" }),
+      endOn(STANDS, { judged: false }),
+      endOn(PAUSED, {})
+    ]))
+    expect(lines).toEqual([
+      [`${LaneBatch.END_GATE} pass`],
+      [`${LaneBatch.END_GATE} fail`],
+      [`${LaneBatch.END_GATE} fail`],
+      [`${LaneBatch.END_GATE} not-checkable`],
+      []
+    ])
+  })
+
   it("brackets the cells of a lane that stands nothing", async () => {
     endingAs({})
     const { ended, rows } = await withStore(Effect.gen(function*() {

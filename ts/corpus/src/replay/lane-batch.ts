@@ -14,8 +14,11 @@
  * interrupted cells takes none either, and a managed SUT that died is
  * reported beside what the gate read. A batch whose end did not run to its
  * end line is unjudged, and its row says so. A batch that fails or is
- * interrupted still closes its row, the failure as its detail.
+ * interrupted still closes its row, the failure as its detail. A batch a
+ * process stood for holds one verification line, its end gate's
+ * ({@link linesOf}).
  */
+import type { Verification } from "@sip/contracts"
 import { Batches } from "@sip/store"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
@@ -127,6 +130,26 @@ export const detailOf = (ended: Pick<Ended<unknown>, "dirty" | "deadHost" | "int
     ended.interrupted > 0 ? `${ended.interrupted} cell(s) interrupted` : undefined
   ]) ?? (ended.judged ? null : NO_END_LINE)
 
+/** The line a batch process's end gate answers. */
+export const END_GATE = "end-gate"
+
+/**
+ * The batch's verification lines: none where no process stood, else its end
+ * gate's, a failure where it read the SUT dirty or the SUT died, not
+ * checkable where the end did not run to its end line.
+ */
+export const linesOf = (
+  ended: Pick<Ended<unknown>, "dirty" | "deadHost" | "interrupted" | "judged" | "hosted">
+): ReadonlyArray<Verification.Verification> => {
+  if (!ended.hosted) return []
+  const line = { name: END_GATE, source: "batch process" }
+  if (ended.dirty !== undefined) {
+    return [{ ...line, answer: "fail", message: ended.dirty, detail: { seen: ended.dirty, side: "sut" } }]
+  }
+  if (!ended.judged) return [{ ...line, answer: "not-checkable", message: detailOf(ended) ?? NO_END_LINE }]
+  return [{ ...line, answer: "pass" }]
+}
+
 /** Why a batch ended without an answer, as its row states it. */
 const failureOf = (cause: Cause.Cause<unknown>): string =>
   Cause.hasInterruptsOnly(cause) ? "interrupted" : Cause.pretty(cause).split("\n")[0] ?? "failed"
@@ -146,7 +169,7 @@ export const run = <A, E, R, EC = never, RO = never, RC = never>(
     const ended = yield* Effect.scoped(stood(request)).pipe(
       Effect.onExit((exit) => Exit.isSuccess(exit) ? Effect.void : Effect.ignore(batches.close(id, failureOf(exit.cause))))
     )
-    yield* batches.close(id, detailOf(ended))
+    yield* batches.close(id, detailOf(ended), linesOf(ended))
     return ended
   })
 

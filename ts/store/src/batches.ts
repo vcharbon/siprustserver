@@ -7,13 +7,15 @@
  * as abandoned. A retry of failed cells is a batch of its own, its `attempt`
  * above 1. Its `detail` is what its end said of the batch rather than of a
  * cell: a SUT left dirty, a dead batch process, an end gate that wrote no end
- * line, cells a stop interrupted.
+ * line, cells a stop interrupted. Its verification lines (`Verifications`,
+ * scope `batch`) are written with its close.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
+import * as Verifications from "./verifications.js"
 
 /** Whose batch it is: its job, its sweep, or both; at least one. */
 export type Owner =
@@ -45,8 +47,12 @@ export interface Row {
 export interface Interface {
   /** A batch started now: its row, open. */
   readonly open: (request: OpenRequest) => Effect.Effect<number, SqlError>
-  /** The batch ended now, with what its end said of it (`null` clean). */
-  readonly close: (id: number, detail: string | null) => Effect.Effect<void, SqlError>
+  /** The batch ended now, with what its end said of it (`null` clean) and the lines its gates answered, in one transaction. */
+  readonly close: (
+    id: number,
+    detail: string | null,
+    lines?: ReadonlyArray<Verifications.Line>
+  ) => Effect.Effect<void, SqlError>
   /** Every batch of `owner`'s job, or of its sweep, still open, closed now with `detail`; the rows closed. */
   readonly abandon: (owner: Owner, detail: string) => Effect.Effect<ReadonlyArray<number>, SqlError>
   /** A job's batches, in the order they started. */
@@ -96,9 +102,15 @@ export const layer = Layer.effect(
       return Number(rows[0]!.id)
     })
 
-    const close = Effect.fn("Batches.close")(function*(id: number, detail: string | null) {
-      yield* sql`UPDATE batches SET finished_at = now(), detail = ${detail} WHERE id = ${id}`
-    })
+    const close = Effect.fn("Batches.close")(
+      function*(id: number, detail: string | null, lines: ReadonlyArray<Verifications.Line> = []) {
+        yield* sql.withTransaction(Effect.gen(function*() {
+          yield* sql`UPDATE batches SET finished_at = now(), detail = ${detail} WHERE id = ${id}`
+          yield* Verifications.replace({ scope: "batch", batchId: id }, lines)
+        }))
+      },
+      Effect.provideService(SqlClient, sql)
+    )
 
     const abandon = Effect.fn("Batches.abandon")(function*(owner: Owner, detail: string) {
       const rows = yield* sql<{ id: string }>`
