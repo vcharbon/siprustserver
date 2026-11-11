@@ -31,7 +31,7 @@ An executable runs with its own directory as working directory and these variabl
 |---|---|
 | `SIPRIG_CONTEXT` | a JSON file it reads (`context.v1`): the scope, its window, the cells (item 6), the lane (its name, clock, SIP target and backend, as the base reads them) and its parts, its parameters |
 | `SIPRIG_OUT` | a directory it writes attachment files into |
-| `SIPRIG_STATE` | a directory kept from `open` to `close` of one scope, or from `inject` to `heal` |
+| `SIPRIG_STATE` | a directory kept from `open` to `close` of one scope, or from `inject` to `heal`; an `inject` finds it empty and its context fresh |
 
 It answers on stdout, one JSON object per line. Exit status 0 means it did its work. Any other
 status, or the manifest's timeout, means it did not. `open` and `inject` may leave a process
@@ -228,7 +228,8 @@ probe  = "./probe"             # optional
   A lane where the name resolves to nothing, or that lacks a part the operation needs, cannot
   run the case.
 - A heal attempt is `heal` and its `probe`. A failed attempt is run once more. A second failure
-  marks the job *lab left changed*.
+  marks the job *lab left changed*, which closes it failed however it ended. One operation's
+  failed heal never stops the heals after it.
 - Each phase is an event of the job with its instant on both clocks (the store's
   `job_events`): `inject`, `injected`, `heal`, `healed`, `recovered`, `failed` and
   `lab-left-changed`, the job's mark.
