@@ -90,6 +90,20 @@ pub fn abandon_leg(leg: &mut Leg) {
     }
 }
 
+/// Record that the transaction of the INVITE of CSeq `cseq` this stack sent
+/// on `leg_id` reported that nothing answered it (RFC 3261 §17.1.1.2), when it
+/// is the INVITE that dialled the leg and took no final.
+pub fn record_dead_hop(call: &mut Call, leg_id: &str, cseq: i64) {
+    update_leg(call, leg_id, |l| {
+        if l.dialled_cseq() != Some(cseq) {
+            return;
+        }
+        if let Some(invite) = l.outbound_invite_mut().filter(|i| i.final_received.is_none()) {
+            invite.hop_dead = true;
+        }
+    })
+}
+
 /// Note this stack's CANCEL of `leg_id`'s INVITE, stating `stated`, leaving
 /// (RFC 3261 §9.1): the leg's INVITE is cancelled, and each early dialog it
 /// opened is ending, to end on the INVITE's final.

@@ -91,8 +91,8 @@ async fn a_timeout_run_late_still_answers_the_caller_and_acks_the_487() {
 
 /// bob answers nothing at all, not even a 100. The hop is dead at the
 /// first-response deadline (5 s by default): alice is answered 480 there, and no CANCEL goes to
-/// bob, who answered nothing (§9.1). The leg his silence leaves unresolved
-/// rides the terminating backstop out.
+/// bob, who answered nothing (§9.1). The call waits on nothing from him and is
+/// released then, not at the terminating backstop.
 #[tokio::test(start_paused = true)]
 async fn a_callee_that_answers_nothing_is_not_cancelled() {
     let s = B2buaScene::with_b2bua("timed-out-invite-dead-hop", |bob_port| {
@@ -106,9 +106,8 @@ async fn a_callee_that_answers_nothing_is_not_cancelled() {
     s.h.advance(Duration::from_secs(5) + Duration::from_millis(300)).await;
     call.try_expect(480).await.expect("the caller is answered at the first-response deadline");
 
-    s.h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    assert!(s.b2bua.is_reaped(), "released at the first-response deadline");
     s.b2bua.assert_fully_reaped();
     let bob_addr = s.bob.addr();
     let report = s.finish().await;
@@ -120,8 +119,9 @@ async fn a_callee_that_answers_nothing_is_not_cancelled() {
 
 /// A backend that lets a failure stand (`Relay`) on the routing consult a
 /// silent hop raised: bob answers nothing, the consult says `response`, and
-/// alice is answered 480 at the default 5 s deadline. A hop that rang and then
-/// went silent past the INVITE bound keeps 408 (above).
+/// alice is answered 480 at the default 5 s deadline, where the call is
+/// released. A hop that rang and then went silent past the INVITE bound keeps
+/// 408 (above).
 #[tokio::test(start_paused = true)]
 async fn a_silent_hop_let_stand_answers_the_caller_480() {
     let s = B2buaScene::with_b2bua("timed-out-invite-let-stand", |bob_port| {
@@ -146,9 +146,8 @@ async fn a_silent_hop_let_stand_answers_the_caller_480() {
     s.h.advance(Duration::from_secs(5) + Duration::from_millis(300)).await;
     call.try_expect(480).await.expect("a silent hop let stand is a 480");
 
-    s.h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    assert!(s.b2bua.is_reaped(), "released at the first-response deadline");
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

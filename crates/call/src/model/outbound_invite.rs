@@ -31,6 +31,10 @@ pub struct OutboundInvite {
     /// INVITE (a `Reason`, RFC 3326), so a node that takes the call over
     /// rebuilds the same CANCEL.
     pub cancel_headers: Vec<(String, String)>,
+    /// Its client transaction reported that nothing answered it, not even a
+    /// 100 (RFC 3261 §17.1.1.2, a dead hop): what the hop may still send is
+    /// the transaction layer's to close (§9.1, ADR-0034), not the call's.
+    pub hop_dead: bool,
 }
 
 impl OutboundInvite {
@@ -44,6 +48,7 @@ impl OutboundInvite {
             final_at_ms: None,
             cancel_sent: false,
             cancel_headers: Vec::new(),
+            hop_dead: false,
         }
     }
 

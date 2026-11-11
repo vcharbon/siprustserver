@@ -4,6 +4,7 @@
 //! values it is handed ([`Framework`]) and the event as the shell resolved it
 //! ([`TurnInput`]), and nothing else (ADR-0052 §2).
 
+mod dead_hop;
 pub mod message_cap;
 pub mod quiet_turn;
 pub mod response_facts;
@@ -230,6 +231,7 @@ fn chain_turn(
             caller.then(|| crate::rules::relay::cancelled_final(&call, to_tag.clone(), notes));
         call::helpers::record_cancelled_invite(&mut call, source_leg_id, sent.flatten());
     }
+    dead_hop::record(&mut call, source_leg_id, event);
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         exec.turn.notes.repeat_give_up(obligation.kind());
         exec.give_up(&mut call, &mut ladder_fx, obligation);

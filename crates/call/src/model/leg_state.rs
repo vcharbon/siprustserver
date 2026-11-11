@@ -153,7 +153,9 @@ impl Leg {
     /// Whether the call waits on nothing from the leg before its record is
     /// released: no confirmed dialog left to BYE, no BYE or CANCEL in
     /// flight, no dialled INVITE still ringing. A caller's INVITE without a
-    /// final waits on nothing: the call answers it as it ends.
+    /// final waits on nothing: the call answers it as it ends. Nor does a
+    /// CANCEL of an INVITE whose hop is dead: it waits, unsent, in the
+    /// transaction for a provisional that would let it leave (RFC 3261 §9.1).
     pub fn is_resolved(&self) -> bool {
         match self.state() {
             LegState::Confirmed => false,
@@ -161,8 +163,16 @@ impl Leg {
             LegState::Trying => true,
             LegState::Terminated => {
                 self.end() != Some(ByeDisposition::ByeSent)
-                    && self.disposition() != LegDisposition::Cancelling
+                    && (self.disposition() != LegDisposition::Cancelling || self.hop_dead())
             }
         }
+    }
+
+    /// Whether the transaction of the INVITE this stack dialled the leg with
+    /// reported that nothing answered it ([`OutboundInvite::hop_dead`]).
+    ///
+    /// [`OutboundInvite::hop_dead`]: super::OutboundInvite::hop_dead
+    pub fn hop_dead(&self) -> bool {
+        self.outbound_invite().is_some_and(|i| i.hop_dead)
     }
 }
