@@ -244,3 +244,37 @@ Full definitions: [docs/glossary/failover-sweep.md](docs/glossary/failover-sweep
 - **Window table**: every deviation an incident may cause, one named `W-…` row each with its tier, incidents and witness. ADR-0055.
 - **Tier** (Guaranteed / Degraded / Off): how much a cell may deviate, measured from its run. ADR-0055.
 - **Declared window**: an RFC-rule window or dialog-verdict waiver of the window table, open from its incident's strike. Avoid: waiver.
+
+## The rig
+
+Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
+
+- **Rig** (siprig): the capture replay, the campaign runner, their store and their site, as one tool. ADR-0060. Avoid: testkit, flow viewer, tools.
+- **Base**: what this repository holds of the rig. ADR-0060.
+- **Pack**: one product's content for the rig, shipped in its image.
+- **Test bed**: one workspace of the rig and the lab it drives. It builds nothing.
+- **Rig path**: the pack then the workspace, where manifests are found. Not the HA tooling's search path.
+- **Scope**: a job, a batch or a cell. Avoid: lane scope, run scope.
+- **Job**: one launched replay or campaign. Its scope is the widest.
+- **Batch**: the cells a lane runs between a stand and a drain.
+- **Claim**: what a case expects of one collector. The cell ends without waiting for it.
+- **Export**: records a cell's or a batch's own process leaves under a collector's name.
+- **Collector**: a plug-in that reads the lab around a scope: records, verifications, attachments, keys. Avoid: gatherer, hook, probe.
+- **Judge**: a plug-in that answers for the cells of a scope from their claims and their records.
+- **Operation**: a plug-in that changes the lab, with `inject`, `heal` and optionally `probe`. An incident of the HA tooling follows the same rules in another format.
+- **Verification**: one named line of a cell, a batch or a job, with a source and an answer. Avoid: check (the RFC audit's), finding.
+- **Answer**: `pass`, `fail`, `not checkable` or `pending`.
+- **Not requested**: a verification the collection level or the lane did not ask for. It is no line.
+- **Final status**: what a cell's verifications come to: `pass`, `fail`, `fail, still verifying`, `ok so far`, `unverified`.
+- **Attachment**: a file a collector or a judge attached to a job, a batch or a cell, with a kind. Avoid: evidence (ADR-0055's).
+- **Collection level**: a named set of collector defaults a job is launched with.
+- **Required collector**: one no collection level and no lane switches off.
+- **Record**: one object a collector returned or a cell exported, joined to a cell by a key or assigned to it.
+- **Unclaimed record**, **ambiguous record**: one whose key matches no cell, or several.
+- **Key**: a named value a cell carries, that a record is joined on.
+- **Cell description**: `cell.v1`, what a collector or a judge reads of each cell.
+- **Part**: a named property of a lane beyond its SIP target, a file several lanes may name, with a schema a pack or a workspace declares.
+- **Registration seam**: what a product registers into the replay library: its backend double, its simulated system under test, its in-process verifications, its exports.
+- **Case source**: a module that yields compiled cells.
+- **Reference pack**: the pack this repository ships to exercise every seam. It has no test value.
+- **Lab left changed**: the mark of a job where a `close` or a `heal` failed twice.
