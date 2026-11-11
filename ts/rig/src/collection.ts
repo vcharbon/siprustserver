@@ -13,7 +13,7 @@
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as Collector from "./collector.js"
-import { Name, Params, type Refusal, refuse } from "./manifest-file.js"
+import { decoderOf, Name, Params, type Refusal, refuse } from "./manifest-file.js"
 import type { RigPath } from "./rig-path.js"
 
 /** What a level sets a collector to. */
@@ -45,6 +45,16 @@ export type Collection = typeof Collection.Type
 /** A lane file's `[collectors]`: `exclude`, a list of names, beside one table of overrides per collector. */
 export const LaneCollectors = Schema.Record(Schema.String, Schema.Union([Schema.Array(Name), Params]))
 export type LaneCollectors = typeof LaneCollectors.Type
+
+/**
+ * A `[collection]` table as read, or why it is none (the dotted key under the
+ * table first). A host file decodes its table here, by this package's own
+ * schema runtime, rather than nesting {@link Collection} in a schema of its own.
+ */
+export const collectionOf: (raw: unknown) => Result.Result<Collection, string> = decoderOf(Collection)
+
+/** A lane file's `[collectors]` table as read, or why it is none, as {@link collectionOf}. */
+export const laneCollectorsOf: (raw: unknown) => Result.Result<LaneCollectors, string> = decoderOf(LaneCollectors)
 
 /** The levels a `[collection]` defines and the one a job takes when it names none. */
 export interface Levels {

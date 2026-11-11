@@ -141,6 +141,15 @@ describe("cell.v1 of a bundle", () => {
     expect(Result.isFailure(result) && result.failure.reason).toBe("neither timing.json nor sut-join.json states the wall clock")
   })
 
+  it("reads a URI's user, a telephone-subscriber's number without its parameters", () => {
+    expect([
+      CellOfBundle.userOf("sip:+15550100;ext=7@example.invalid;user=phone"),
+      CellOfBundle.userOf("sip:alice;day=tuesday@example.invalid"),
+      CellOfBundle.userOf("tel:+15550100;phone-context=example.invalid"),
+      CellOfBundle.userOf("sip:example.invalid")
+    ]).toEqual(["+15550100", "alice;day=tuesday", "+15550100", undefined])
+  })
+
   it("ends an unsettled run's lane clock at its last datagram", async () => {
     const dir = variant((files) => {
       files["timing.json"] = `{"settle_budget_ms": 10000, "started_at_ms": 0, "wall_ended_at_ms": 1700000000900, "wall_started_at_ms": 1700000000000}\n`

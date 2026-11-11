@@ -106,6 +106,14 @@ describe("the wiring of a job", () => {
       .toBe("lanes/lab-a.toml and pack/collectors/call-records/collector.toml: collectors.call-records.delay_s: not a parameter call-records offers")
   })
 
+  it("reads a host file's tables, naming the key under the table at fault", () => {
+    const refusal = <A>(result: Result.Result<A, string>) => (Result.isFailure(result) ? result.failure : "read")
+    expect(refusal(Collection.collectionOf({ default: "quick", quick: { never: ["capture"] } }))).toBe("read")
+    expect(refusal(Collection.collectionOf({ quick: { sometimes: ["capture"] } }))).toMatch(/^quick/)
+    expect(refusal(Collection.laneCollectorsOf({ exclude: ["capture"], "call-records": { poll_s: 2 } }))).toBe("read")
+    expect(refusal(Collection.laneCollectorsOf({ exclude: "capture" }))).toMatch(/^exclude/)
+  })
+
   it("checks every lane of the job, naming the one at fault", () => {
     const good = lane(`[collectors]\nexclude = ["capture"]\n`)
     const bad = { file: "lanes/lab-b.toml", collectors: lanesOf(`[collectors]\nexclude = ["pcap"]\n`) }

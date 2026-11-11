@@ -55,10 +55,14 @@ export const uriOf = (value: string): string => {
   return (bracketed?.[1] ?? value.split(";")[0] ?? value).trim()
 }
 
-/** The user part of a SIP URI or the number of a tel URI; none for a URI with no user. */
+/**
+ * The user part of a SIP URI, or the number of a tel URI; none for a URI with
+ * no user. A SIP URI with `user=phone` holds a telephone-subscriber (RFC 3261
+ * §19.1.1): its number is the user part before its first `;` parameter.
+ */
 export const userOf = (uri: string): string | undefined => {
-  const sip = /^sips?:([^@]+)@/i.exec(uri)
-  if (sip !== null) return sip[1]
+  const sip = /^sips?:([^@]+)@([^?]*)/i.exec(uri)
+  if (sip !== null) return /;user=phone(;|$)/i.test(sip[2]!) ? sip[1]!.split(";")[0] : sip[1]
   const tel = /^tel:([^;]+)/i.exec(uri)
   return tel === null ? undefined : tel[1]
 }
