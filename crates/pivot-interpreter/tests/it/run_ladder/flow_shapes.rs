@@ -33,21 +33,51 @@ fn wall_now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// The run's lane-clock instant at which [`a_paused_run_states_the_wall_instants_it_began_and_returned_at`]
+/// stalls the runtime: inside the call, between its first and last datagram.
+const STALL_AT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The wall time that stall spends with the runtime blocked.
+const STALL_FOR: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// A run on a paused clock spends wall time only where the runtime is busy, so
+/// the test blocks it once mid-call: the stall's wall instants lie inside the
+/// window the run states, which therefore spans at least the stall.
 #[tokio::test(start_paused = true)]
 async fn a_paused_run_states_the_wall_instants_it_began_and_returned_at() {
     let scene = api_scene("pivot-linear-attempt").await;
     let before = wall_now_ms();
+    let stall = tokio::spawn(async {
+        tokio::time::sleep(STALL_AT).await;
+        let entered = wall_now_ms();
+        std::thread::sleep(STALL_FOR);
+        (entered, wall_now_ms())
+    });
     let (outcome, dir) = replay(&scene, "linear-attempt.v3.json").await;
     let after = wall_now_ms();
+    let (entered, left) = stall.await.expect("the stall ran");
     assert_bundle_is_complete(&outcome, &dir);
+    let sent: Vec<u64> = outcome
+        .recording
+        .legs()
+        .values()
+        .flatten()
+        .filter(|message| message.dir == pivot_schema::bundle::Dir::Out)
+        .map(|message| message.at_us)
+        .collect();
+    let stall_us = STALL_AT.as_micros() as u64;
+    assert!(
+        sent.iter().any(|&at| at < stall_us) && sent.iter().any(|&at| at > stall_us),
+        "the stall falls between the first and the last datagram sent: {sent:?}"
+    );
     let written: pivot_schema::bundle::RunTiming =
         serde_json::from_str(&std::fs::read_to_string(dir.join("timing.json")).unwrap()).unwrap();
     assert_eq!(written, outcome.timing, "timing.json is the run's timing");
     let began = written.wall_started_at_ms.expect("the wall instant the run began at");
     let ended = written.wall_ended_at_ms.expect("the wall instant the run returned at");
     assert!(
-        before <= began && began <= ended && ended <= after,
-        "{before} {began} {ended} {after}"
+        before <= began && began <= entered && left <= ended && ended <= after,
+        "{before} {began} {entered} {left} {ended} {after}"
     );
     scene.finish().await;
 }
