@@ -29,4 +29,6 @@ portsource/
 
 # TypeScript workspace (`ts/`) — installed dependencies and build output; sources are committed
 **/node_modules/
+# The host's env file the DB-bound test suites read (ts/store/test/server-url.ts)
+ts/.env.local
 ts/viewer-app/dist/
