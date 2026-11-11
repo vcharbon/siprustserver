@@ -260,6 +260,8 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Collector**: a plug-in that reads the lab around a scope: records, verifications, attachments, keys. Avoid: gatherer, hook, probe.
 - **Judge**: a plug-in that answers for the cells of a scope from their claims and their records.
 - **Operation**: a plug-in that changes the lab, with `inject`, `heal` and optionally `probe`. An incident of the HA tooling follows the same rules in another format.
+- **Setup**: the operations a named campaign injects after provisioning and heals in reverse when its job ends, however it ends.
+- **Job event**: one phase of an operation on a job (`inject`, `injected`, `heal`, `healed`, `recovered`, `failed`, `lab-left-changed`), on the runner's clock and the wall clock; a `job_events` row.
 - **Verification**: one named line of a cell, a batch or a job, with a source and an answer. Avoid: check (the RFC audit's), finding.
 - **Answer**: `pass`, `fail`, `not checkable` or `pending`.
 - **Not requested**: a verification the collection level or the lane did not ask for. It is no line.
