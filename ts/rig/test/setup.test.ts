@@ -53,6 +53,15 @@ const collecting = () => {
   return { events, sink, phases: () => events.map((event) => `${event.phase} ${event.operation}`) }
 }
 
+/** `sink`, then a defect, on each event of operation `second` whose phase is one of `phases`. */
+const dyingOn = (sink: OperationRun.Sink, phases: ReadonlyArray<string>): OperationRun.Sink => (event) =>
+  Effect.andThen(
+    sink(event),
+    event.operation === "second" && phases.includes(event.phase)
+      ? Effect.die(new Error(`the sink broke on ${event.phase} second`))
+      : Effect.void
+  )
+
 const exitOf = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(Effect.exit(effect))
 
 describe("a job's setup", () => {
@@ -185,6 +194,32 @@ describe("a job's setup", () => {
       "recovered first"
     ])
     expect(Exit.isFailure(exit) && String(exit.cause)).toContain("second: inject not run: its directory")
+  })
+
+  it("counts a heal attempt that dies as a failed one, marks the lab and heals the earlier operations", async () => {
+    const { root, rig } = await samples()
+    const { events, sink, phases } = collecting()
+    const exit = await exitOf(Setup.around(plan(rig, root, ["first", "second"]), dyingOn(sink, ["heal"]), Effect.succeed("done")))
+    expect(exit).toEqual(Exit.succeed({ value: "done", labLeftChanged: true }))
+    expect(phases().filter((phase) => phase.endsWith("second")).slice(2)).toEqual([
+      "heal second",
+      "heal second",
+      "lab-left-changed second"
+    ])
+    expect(events.find((event) => event.phase === "lab-left-changed")?.message).toMatch(/the last: heal attempt died: /)
+    expect(phases().slice(-3)).toEqual(["heal first", "healed first", "recovered first"])
+    expect(traceOf(root)).toEqual(["inject first", "inject second", "heal first"])
+  })
+
+  it("heals the earlier operations and marks the lab when a heal dies outside its attempts", async () => {
+    const { root, rig } = await samples()
+    const { sink, phases } = collecting()
+    const exit = await exitOf(
+      Setup.around(plan(rig, root, ["first", "second"]), dyingOn(sink, ["heal", "lab-left-changed"]), Effect.succeed("done"))
+    )
+    expect(exit).toEqual(Exit.succeed({ value: "done", labLeftChanged: true }))
+    expect(phases().slice(-4)).toEqual(["lab-left-changed second", "heal first", "healed first", "recovered first"])
+    expect(traceOf(root)).toEqual(["inject first", "inject second", "heal first"])
   })
 
   it("tells a watching sink of a lab left changed by a job that was interrupted", async () => {
