@@ -10,7 +10,7 @@ use super::super::sides::Sides;
 use super::super::Obligation;
 
 /// How long an open observation must run past a NON-2xx INVITE final before
-/// "its ACK never arrived" is charged to the UAS that sent it.
+/// "its ACK never arrived" is charged to the UAC that owed it.
 ///
 /// 33 seconds: §17.2.1 has the rejecting UAS retransmit the final until Timer H
 /// (64·T1, 32 s), and an ACK answering any rung of that ladder discharges the
@@ -29,9 +29,11 @@ pub const REJECT_ACK_WINDOW_US: u64 = 33_000_000;
 /// the UAS of — it TOOK that transaction's INVITE. Charges the UAC that took
 /// the final and owed the ACK; the socket the INVITE reached is the `taker`,
 /// the one owed. An ACK on the same branch discharges it only at that socket
-/// (§17.1.1.3: the same address, port and transport as the INVITE). The UAC's
-/// ACK on the branch to any other socket, such as the one the final came from,
-/// leaves it `Violated`, the evidence naming where that ACK went.
+/// (§17.1.1.3: the same address, port and transport as the INVITE), whichever
+/// socket it came from: the server matches it by branch, not by source
+/// (§17.2.3). The UAC's ACK on the branch to any other socket, such as the one
+/// the final came from, leaves it `Violated`, the evidence naming where that
+/// ACK went.
 ///
 /// **A retransmitted final re-uses the obligation** (§17.2.1 obliges the
 /// repeat, and one transaction owes one ACK), and **an ACK is only a discharge
@@ -61,12 +63,12 @@ impl Obligation for UnackedInviteNon2xxFinal {
                 Kind::Request { method } if method.eq_ignore_ascii_case("ACK") => {
                     for (key, reject) in rejects.iter_mut() {
                         let (uas, call, on) = *key;
-                        if call != msg.call_id || on != branch || !reject.owed_by(msg) {
+                        if call != msg.call_id || on != branch {
                             continue;
                         }
                         if uas == msg.dst {
                             reject.acked = true;
-                        } else {
+                        } else if reject.owed_by(msg) {
                             reject.ack_sent_to.get_or_insert(msg.dst.as_str());
                         }
                     }

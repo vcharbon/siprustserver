@@ -184,6 +184,24 @@ impl RfcAcceptance {
         })
     }
 
+    /// The full-suite findings of `events` that gate: non-advisory, not
+    /// waived for the run, taken by no window, and not informative inside the
+    /// system under test (`is_sut` holding both ends of the hop) — the same
+    /// classification [`partition`](Self::partition) applies.
+    pub fn full_suite_gating(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+        is_sut: impl Fn(&str) -> bool,
+    ) -> Vec<sip_net_testkit::RfcFinding> {
+        let capture = CaptureIndex::new(sip_net_testkit::audit_wire_entries(events));
+        sip_net_testkit::evaluate_rfc_findings(events)
+            .into_iter()
+            .filter(|f| !f.advisory && !self.waived(&f.rule))
+            .filter(|f| self.accepts(&f.rule, f.offending, &capture).is_none())
+            .filter(|f| !f.inside_sut(&is_sut))
+            .collect()
+    }
+
     /// Run the cross-message audit over `events` (already the cross-audit
     /// endpoint-scoped view, the binds of `scoped_out` taken out of it) and
     /// classify its non-advisory findings: a finding is accepted, by the row
@@ -350,6 +368,19 @@ mod tests {
         let border = acceptance.partition(&events, &scoped_out, |bind| bind == PROXY);
         assert_eq!(rules(&border.gating), [UNACKED_NON_2XX]);
         assert!(border.informative.is_empty(), "a hop to a simulated party gates");
+    }
+
+    #[test]
+    fn the_full_suite_gates_an_ack_at_another_worker_only_at_the_border() {
+        let acceptance = RfcAcceptance::default();
+        let events = acked_at_another_worker();
+        let rules = |findings: Vec<sip_net_testkit::RfcFinding>| -> Vec<String> {
+            findings.into_iter().map(|f| f.rule).collect()
+        };
+        let inside = acceptance.full_suite_gating(&events, |_| true);
+        assert!(rules(inside).iter().all(|r| r != UNACKED_NON_2XX), "both ends under test");
+        let border = acceptance.full_suite_gating(&events, |bind| bind == PROXY);
+        assert!(rules(border).iter().any(|r| r == UNACKED_NON_2XX), "a simulated worker gates");
     }
 
     #[test]

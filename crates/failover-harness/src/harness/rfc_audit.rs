@@ -3,11 +3,11 @@
 //! test opts into. A deviation an incident causes is accepted only by the
 //! window a strike opened ([`FailoverHarness::strike`]).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
 
 use layer_harness::{NetworkTag, Stamped};
-use sip_net_testkit::{cross_audit_event, CaptureIndex, SignalingNetworkEvent};
+use sip_net_testkit::{cross_audit_event, SignalingNetworkEvent};
 
 use super::FailoverHarness;
 use crate::rfc_acceptance::{lane_details, Accepted, Finding, Partitioned};
@@ -31,18 +31,7 @@ impl FailoverHarness {
     /// transactions (e.g. `response-echoes-request-via` §8.1.3/§17.1.3 response matching).
     pub fn assert_full_rfc_clean(&self, cell: &str) {
         let events = self.harness.recording().channel().snapshot();
-        // `offending` is a 1-based index into the AUDIT-visible wire entries — the
-        // same view `evaluate_rfc_findings` hands the rules — so a window must be
-        // resolved against `audit_wire_entries`, never the raw snapshot (whose
-        // extra ReEmit / invisible-disposition rows shift every later index).
-        let capture = CaptureIndex::new(sip_net_testkit::audit_wire_entries(&events));
-        let is_sut = self.is_sut();
-        let findings: Vec<_> = sip_net_testkit::evaluate_rfc_findings(&events)
-            .into_iter()
-            .filter(|f| !f.advisory && !self.rfc_acceptance.waived(&f.rule))
-            .filter(|f| self.rfc_acceptance.accepts(&f.rule, f.offending, &capture).is_none())
-            .filter(|f| !f.inside_sut(&is_sut))
-            .collect();
+        let findings = self.rfc_acceptance.full_suite_gating(&events, self.is_sut());
         assert!(
             findings.is_empty(),
             "[{cell}] full-suite RFC audit violation(s) on the recorded trace:\n{}",
@@ -137,44 +126,12 @@ impl FailoverHarness {
     /// (with its justification) are listed as advisory: classified, never
     /// masked, and they do not fail the run.
     pub(super) fn fold_rfc_findings(&self, doc: &mut seq_report::SeqDoc) {
-        let Partitioned { gating, accepted, informative } = self.partition_rfc_findings();
-        if !gating.is_empty() {
+        let (gates, anomalies) =
+            rfc_anomalies(self.partition_rfc_findings(), self.rfc_acceptance.lifetime_waivers());
+        if gates {
             doc.passed = false;
         }
-        let anomaly = |check: String, detail: String, lane: Option<String>, advisory: bool| {
-            seq_report::Anomaly {
-                check,
-                detail,
-                lane,
-                endpoint: None,
-                advisory: Some(advisory),
-                row_seqs: Vec::new(),
-                rule_sourced: true,
-            }
-        };
-        for (rule, lane, detail) in gating {
-            doc.anomalies.push(anomaly(rule, detail, Some(lane), false));
-        }
-        for ((rule, lane, detail), row) in accepted {
-            doc.anomalies.push(anomaly(
-                rule,
-                format!("ACCEPTED by {row}: {detail}"),
-                Some(lane),
-                true,
-            ));
-        }
-        for (rule, lane, detail) in informative {
-            let detail = format!("INFORMATIVE inside the system under test: {detail}");
-            doc.anomalies.push(anomaly(rule, detail, Some(lane), true));
-        }
-        for (rule, why) in self.rfc_acceptance.lifetime_waivers() {
-            doc.anomalies.push(anomaly(
-                rule.clone(),
-                format!("WAIVED for the run: {why}"),
-                None,
-                true,
-            ));
-        }
+        doc.anomalies.extend(anomalies);
     }
 
     /// The recorded SIP events the audit judges — the endpoint-scoped view —
@@ -212,3 +169,43 @@ impl FailoverHarness {
         (events, worker_binds)
     }
 }
+
+/// The report's RFC anomalies of one classified run, and whether any gates:
+/// each gating finding a gating anomaly; each window-accepted finding, each
+/// finding informative inside the system under test and each rule waived for
+/// the run (with its justification) an advisory one.
+fn rfc_anomalies(
+    partitioned: Partitioned,
+    waivers: &BTreeMap<String, String>,
+) -> (bool, Vec<seq_report::Anomaly>) {
+    let Partitioned { gating, accepted, informative } = partitioned;
+    let anomaly =
+        |check: String, detail: String, lane: Option<String>, advisory: bool| seq_report::Anomaly {
+            check,
+            detail,
+            lane,
+            endpoint: None,
+            advisory: Some(advisory),
+            row_seqs: Vec::new(),
+            rule_sourced: true,
+        };
+    let gates = !gating.is_empty();
+    let mut out = Vec::new();
+    for (rule, lane, detail) in gating {
+        out.push(anomaly(rule, detail, Some(lane), false));
+    }
+    for ((rule, lane, detail), row) in accepted {
+        out.push(anomaly(rule, format!("ACCEPTED by {row}: {detail}"), Some(lane), true));
+    }
+    for (rule, lane, detail) in informative {
+        let detail = format!("INFORMATIVE inside the system under test: {detail}");
+        out.push(anomaly(rule, detail, Some(lane), true));
+    }
+    for (rule, why) in waivers {
+        out.push(anomaly(rule.clone(), format!("WAIVED for the run: {why}"), None, true));
+    }
+    (gates, out)
+}
+
+#[cfg(test)]
+mod tests;

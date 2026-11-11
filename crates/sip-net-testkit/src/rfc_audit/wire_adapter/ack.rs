@@ -9,8 +9,6 @@ pub(super) const LIVE: &[Live] = &[
         .skip(Skip::RelayLanes),
     Live::emitter(RuleId::AckPreservesInviteRoute, ack_preserves_invite_route)
         .skip(Skip::RelayLanes),
-    // Gates: the harness UAC ACKs every non-2xx final (§17.1.1.3); a test modelling a peer that
-    // never ACKs waives it.
     Live::taker_else_emitter(RuleId::UnackedInviteNon2xxFinal, unacked_invite_non_2xx_final)
         .informative_inside_sut(),
 ];
@@ -98,10 +96,11 @@ fn unacked_invite_non_2xx_final(f: &rfc_rules::Finding, cid: &str) -> String {
         ),
         None => format!(
             "Took a non-2xx final {status} to an INVITE (callId {cid}, branch {branch}) and \
-             never ACKed it to the UAS that sent it — the INVITE transaction never \
+             never ACKed it at {}, where the INVITE went — the INVITE transaction never \
              completes and the reject retransmits to Timer H; RFC 3261 §17.1.1.3 makes \
              the ACK mandatory (hop-by-hop, so a proxy in the path owes the UAS its own \
              synthesized ACK)",
+            f.taker,
         ),
     }
 }

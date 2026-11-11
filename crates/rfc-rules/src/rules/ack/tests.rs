@@ -629,6 +629,47 @@ fn an_ack_to_the_reject_s_sender_instead_of_the_invite_s_destination_is_violated
     assert_eq!((f[0].emitter.as_str(), f[0].taker.as_str()), (UAC, UAS));
 }
 
+/// The server matches the ACK by branch, not by source (§17.2.3): an ACK
+/// from another socket of the UAC that reaches the INVITE's destination
+/// discharges the reject.
+#[test]
+fn an_ack_from_another_uac_socket_at_the_invite_s_destination_discharges_it() {
+    let mut ack = on(
+        3_000,
+        "10.0.0.1:40001",
+        UAS,
+        Kind::Request { method: "ACK".to_string() },
+        1,
+        "z9hG4bK-i",
+    );
+    ack.cseq_method = "ACK".to_string();
+    let f = unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), reject(2_000, 486, "z9hG4bK-i"), ack]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+}
+
+/// Only the UAC that owes the ACK names where it went: an ACK on the branch
+/// another endpoint sent elsewhere is no stray of this reject's.
+#[test]
+fn an_ack_another_endpoint_sent_elsewhere_names_no_stray() {
+    let mut foreign = on(
+        3_000,
+        "10.0.0.9:5060",
+        "10.0.0.8:5060",
+        Kind::Request { method: "ACK".to_string() },
+        1,
+        "z9hG4bK-i",
+    );
+    foreign.cseq_method = "ACK".to_string();
+    let f =
+        unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), reject(2_000, 486, "z9hG4bK-i"), foreign]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    let Decision::Violated(Evidence::UnackedReject { ack_sent_to, .. }) = &f[0].decision else {
+        panic!("{:?}", f[0].decision)
+    };
+    assert_eq!(*ack_sent_to, None);
+}
+
 /// The offence is the ACK that never came, so [`Finding::emitter`] is the
 /// party that OWED it: the UAC whose INVITE client transaction took the
 /// reject (§17.1.1.3). The UAS that sent the reject and waited is the one
