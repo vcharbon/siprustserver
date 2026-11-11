@@ -1,6 +1,6 @@
 # The rig is a pluggable base
 
-**Status:** proposed
+**Status:** proposed (2026-11-11).
 
 **Owner:** `ts/` (the site server, the campaign runner, the lifecycle, the store), `crates/`
 (the replay library, `pivot-interpreter`, `pivot-schema`), `tooling/siprig/` (the image kit and

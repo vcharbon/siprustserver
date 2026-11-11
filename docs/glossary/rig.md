@@ -81,7 +81,7 @@ attachment lines. A TypeScript module or an executable.
 A plug-in that changes the lab: `inject`, `heal` and optionally `probe`, under the rules of the
 HA tooling's incidents (ADR-0049 §2) in its own format. A named campaign lists operations as its
 `setup`, a case names one as a step of its call, a lane file binds the name a case asks for.
-_Avoid_: a case's own **heal time** (the wait a lane holds after a disruptive case).
+_Avoid_: a case's own heal time (the wait a lane holds after a disruptive case).
 
 **Part**:
 A named property of a lane beyond its SIP target, the clock, the backend mode, the pacing and the
