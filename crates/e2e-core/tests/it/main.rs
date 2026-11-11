@@ -5,10 +5,4 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=e2e-core) & binary(it)' <module>::`.
 
-mod checks;
-mod job;
-mod model;
-mod portability;
-mod reaped;
 mod result;
-mod shapes_media;

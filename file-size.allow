@@ -45,9 +45,7 @@ crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1132
 crates/call/tests/it/model_helpers.rs 893
-crates/e2e-core/src/infra.rs 622
-crates/e2e-model/src/registry.rs 575
-crates/e2e-web/src/lib.rs 1123
+crates/e2e-model/src/registry.rs 563
 crates/failover-harness/src/harness.rs 1834
 crates/failover-harness/src/runner.rs 615
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 986

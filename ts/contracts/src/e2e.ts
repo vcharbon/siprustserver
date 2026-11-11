@@ -1,7 +1,8 @@
 /**
- * The e2e campaign records, mirroring `e2e_core::result` and
- * `e2e_model::checks`: one `RunResult` per cell of the campaign matrix, plus the
- * `campaign.json` aggregate index.
+ * The e2e campaign records: one `RunResult` per cell, mirroring
+ * `e2e_core::result` and `e2e_model::checks` (a crate's in-test reporter writes
+ * it), plus the `campaign.json` aggregate index and a skipped cell's
+ * `skipped.json`, which the TypeScript side alone writes.
  *
  * camelCase on the wire, and a DIFFERENT byte discipline from the pivot bundle:
  * these are written with `serde_json::to_string_pretty` + `"\n"`, so keys ride
@@ -61,21 +62,6 @@ export const Timings = Schema.Struct({
 })
 export interface Timings extends Schema.Schema.Type<typeof Timings> {}
 
-/**
- * One media artifact a cell produced: what `agent` RECEIVED, as a sibling `.wav`
- * next to `result.json` (never inlined), plus the classifier verdict.
- */
-export const MediaRef = Schema.Struct({
-  agent: Schema.String,
-  /** The sibling file name (e.g. `alice.received.wav`), relative to the cell dir. */
-  wav: Schema.String,
-  /** The classifier's label for the received audio (e.g. `tone:200hz`). */
-  classify: Schema.String,
-  /** RMS level of the recorded PCM (silence ≈ 0). */
-  rms: Schema.Number
-})
-export interface MediaRef extends Schema.Schema.Type<typeof MediaRef> {}
-
 /** Everything one cell run produced. */
 export const RunResult = Schema.Struct({
   cell: CellId,
@@ -84,8 +70,6 @@ export const RunResult = Schema.Struct({
   checks: Schema.Array(CheckVerdict),
   /** Findings the report surfaces alongside the diagram, each tagged advisory/gating. */
   rfc: Schema.Array(Anomaly),
-  /** Media artifacts (media-exchanging shapes only; empty otherwise). */
-  media: Schema.optionalKey(Schema.Array(MediaRef)),
   seqDoc: SeqDoc,
   timings: Timings
 })
@@ -171,13 +155,6 @@ export const checkVerdictJson = (verdict: CheckVerdict): Record<string, unknown>
     detail: verdict.detail
   })
 
-export const mediaRefJson = (media: MediaRef): Record<string, unknown> => ({
-  agent: media.agent,
-  wav: media.wav,
-  classify: media.classify,
-  rms: media.rms
-})
-
 export const timingsJson = (timings: Timings): Record<string, unknown> => ({
   firstMs: timings.firstMs,
   lastMs: timings.lastMs,
@@ -190,7 +167,6 @@ export const runResultJson = (result: RunResult): Record<string, unknown> =>
     passed: result.passed,
     checks: result.checks.map(checkVerdictJson),
     rfc: result.rfc.map(anomalyJson),
-    media: result.media?.map(mediaRefJson),
     seqDoc: seqDocJson(result.seqDoc),
     timings: timingsJson(result.timings)
   })
@@ -216,10 +192,10 @@ export const campaignIndexJson = (index: CampaignIndex): Record<string, unknown>
   cells: index.cells.map(cellSummaryJson)
 })
 
-/** `result.json` as the executor writes it: declaration order, two-space indent, trailing newline. */
+/** `result.json` as a crate's in-test reporter writes it: declaration order, two-space indent, trailing newline. */
 export const emitRunResult = (result: RunResult): string => formatDeclared(runResultJson(result))
 
-/** `campaign.json` as the executor writes it. */
+/** `campaign.json` as a campaign writes it. */
 export const emitCampaignIndex = (index: CampaignIndex): string => formatDeclared(campaignIndexJson(index))
 
 /** `skipped.json` as the driver writes it at a skipped cell's root. */

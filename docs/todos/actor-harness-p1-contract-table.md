@@ -429,9 +429,8 @@ consequences the actor port must honour:
   to §5.1 / §5.2 (the emergency marker only affects admission on the wire,
   `env.rs:299-302`; it does not change any `who`/phase/anchor). Name them in the
   P3 parity set (plan §6).
-- `rerouting_prack` is the one dual-body descriptor
-  (`registry.rs:494-497`): the load body is §5.7; the functional body lives in
-  `e2e-core`. Only the load body is in scope for this port.
+- `rerouting_prack` is the one anchored load descriptor
+  (`registry.rs:494-497`): the load body is §5.7.
 
 ---
 

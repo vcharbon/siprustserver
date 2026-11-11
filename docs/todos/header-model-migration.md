@@ -97,7 +97,7 @@ Coverage verified against the Cargo.toml dep graph (2026-07-26): the direct
 sip-message dependents are exactly {sip-txn, sip-proxy, b2bua-sdk, b2bua,
 b2bua-harness, scenario-harness, e2e-core, e2e-model, announcement, sip-net,
 sip-pcap, loadgen, failover-harness} — all covered by M4–M11. Runner crates
-(sip-proxy-runner, b2bua-runner, e2e-web, e2e-cli, callshapes, …) have no
+(sip-proxy-runner, b2bua-runner, callshapes, …) have no
 direct dep and are covered transitively.
 
 Excluded: `call` (no sip-message dep BY DESIGN — ADR-0008; its

@@ -348,7 +348,7 @@ impl ActorScenario for ReferCharlieReject {
 
 /// Rerouting + a RELIABLE provisional on the winning leg, actor-declared — the
 /// port of `ReroutingPrack` (the LOAD body of the
-/// dual-body `rerouting_prack` shape). Alice INVITEs with a `[bob, bob2]`
+/// anchored `rerouting_prack` shape). Alice INVITEs with a `[bob, bob2]`
 /// candidate list; bob `486`s, the SUT fails over to bob2, which answers
 /// RELIABLY (RFC 3262: `183`/PRACK/`200`/ACK) on the winning leg. Each endpoint
 /// reacts independently: bob rejects, bob2 runs the reliable-answer state

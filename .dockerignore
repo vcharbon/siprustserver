@@ -3,7 +3,6 @@ target/
 .git/
 portsource/
 docs/
-bench/*/results/
 *.diff
 .effect/
 # Observability stack runtime data (Grafana/Victoria volumes) — not part of the

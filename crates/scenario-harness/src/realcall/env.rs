@@ -215,8 +215,7 @@ impl<'a> CallEnv<'a> {
     }
 
     /// Resolve a logical callee **role** (`"bob"`, `"charlie"`) to how THIS
-    /// run's layout addresses it — the callee half of the egress seam, mirroring
-    /// e2e-core `InfraRuntime::callee`. The resolver is the bound agents
+    /// run's layout addresses it — the callee half of the egress seam. The resolver is the bound agents
     /// themselves (the load mux's static endpoints / the functional harness
     /// agents): the role maps to that agent's socket, and the [`EgressPolicy`]
     /// decides the topology-correct URI (registered AOR / `sip:<role>@<addr>`).
@@ -268,8 +267,7 @@ impl<'a> CallEnv<'a> {
         self
     }
 
-    /// Realize the logical initial INVITE on THIS run's wire — mirrors e2e-core
-    /// `InfraRuntime::outgoing_invite`. `callees` is the ordered candidate list
+    /// Realize the logical initial INVITE on THIS run's wire. `callees` is the ordered candidate list
     /// (primary first; every current scenario passes `["bob"]`). It (1) routes
     /// through the SUT ingress ([`Self::via`]), (2) applies the resolved
     /// [`CoreIdentity`] From/To/R-URI overrides (the e2e Test case's `core` on

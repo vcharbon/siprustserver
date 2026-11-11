@@ -192,15 +192,13 @@ Full definitions: [docs/glossary/e2e-test-management.md](docs/glossary/e2e-test-
 - **Check**: a declared assertion over the recorded trace, run post-call by the RFC audit engine, keyed by a message anchor.
 - **Message anchor**: a project-wide message name (`initialInvite`, `answer`, `bye`, …) a shape publishes and checks bind to.
 - **Check set**: a committed reusable JSON bundle of checks keyed by message anchor, referenced by name.
-- **Campaign**: a JSON batch crossing Test cases × compatible Callflow shapes × Infra shapes, one Run per cell.
-- **Run** / **Result**: one executed (Test case, Callflow shape, Infra shape) cell and its generated artifacts.
 
 ## Loadgen fusion vocabulary
 
 Full definitions: [docs/glossary/loadgen-fusion.md](docs/glossary/loadgen-fusion.md).
 
-- **Shape descriptor**: the one declaration of a Callflow shape in the open `ShapeRegistry`, one id across both run surfaces.
-- **Functional body** vs **Load body**: a shape's strict `!Send` e2e body vs its fallible `Send` load body. ADR-0021.
+- **Shape descriptor**: the one declaration of a Callflow shape in the open `ShapeRegistry`, one id for Test cases and the load fleet.
+- **Load body**: a shape's fallible `Send` body the load fleet drives. ADR-0021.
 - **Binding pool**: a Test case's wrap-allowed pool of per-call input overlays, so one case dials a subscriber population.
 - **Correlation strategy** (`loadgen::Correlation`): how the per-call token crosses the SUT: `header`, `header_templated` or `to_user`.
 - **Load profile**: the authored JSON run spec of the load fleet: rate, duration, robustness, overload refusal, shape mix.

@@ -1,7 +1,6 @@
 //! The JSON **Endpoint config** (ADR-0018): the authored document binding one
-//! Infra shape's logical roles to concrete addresses. The Infra shapes
-//! themselves (the trait + the concrete topologies, which spawn the SUT) live
-//! in `e2e-core`; only the authored data model is here.
+//! Infra shape's logical roles to concrete addresses. Only the authored data
+//! model is here; the load generator is its reader.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -90,9 +89,7 @@ impl EndpointConfig {
     }
 
     /// The authored egress policy, resolved: [`EgressPolicy::Transparent`] when
-    /// the optional `egress` field is absent. NOTE: the e2e framework's compiled
-    /// Infra shapes override this (their policy is a layout property, declared
-    /// in `e2e-core::infra`); the load generator standalone is the reader.
+    /// the optional `egress` field is absent.
     pub fn egress_policy(&self) -> EgressPolicy {
         self.egress.as_ref().map(EgressPolicySpec::to_policy).unwrap_or(EgressPolicy::Transparent)
     }

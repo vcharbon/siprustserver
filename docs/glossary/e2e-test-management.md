@@ -15,10 +15,10 @@ A fused `#[tokio::test]` interleaves them and this layer pulls them apart.
 A compiled-Rust, registered message-sequence template (basic call, re-routing,
 re-routing + PRACK) parameterised over a declared **input-data schema** and the
 **checks** it supports. Built on the fluent `Harness`/`Agent` DSL. Selected, not
-authored, from the website; a new shape is Rust + redeploy. Per ADR-0021 a
-shape is declared exactly once, as a **Shape descriptor** in the unified open
-`ShapeRegistry` (`e2e-model`), and may carry a **functional body**, a **load
-body**, or both (see [Loadgen fusion vocabulary](loadgen-fusion.md)).
+authored; a new shape is Rust + redeploy. Per ADR-0021 a shape is declared
+exactly once, as a **Shape descriptor** in the unified open `ShapeRegistry`
+(`e2e-model`), and may carry a **load body** (see
+[Loadgen fusion vocabulary](loadgen-fusion.md)).
 _Avoid_: "scenario" (quadruple-overloaded: the Rust `Scenario` struct, the TS
 instance, the JSON **Test case**, and loadgen's `--scenario` selector all
 collide; a registered shape is a **shape**); "framework".
@@ -93,19 +93,7 @@ _Avoid_: per-shape free-string anchors (drift), raw `{method, nth}` selectors
 
 **Check set**:
 A committed, reusable JSON bundle of **checks** keyed by **Message anchor** (e.g.
-`invite-identity` = From + PAI + R-URI + Diversion assertions on `initialInvite`).
+`loadgen-invite-identity` = From-tag and Max-Forwards assertions on `initialInvite`).
 Referenced by name from any **Test case** whose shape publishes the needed anchors,
 so "verify the identity headers" is authored once and shared everywhere.
 _Avoid_: re-authoring the same identity checks inline per Test case.
-
-**Campaign**:
-A JSON batch that crosses {**Test cases**} × {their compatible **Callflow
-shapes**} × {**Infra shapes**}; launching it materialises one **Run** per cell and
-collects the results.
-_Avoid_: the TS meaning of "campaign" (a SUT-config *variant*, b2bonly / proxy+
-b2b / HA); here a campaign is a test *batch*.
-
-**Run** / **Result**:
-One executed (**Test case**, **Callflow shape**, **Infra shape**) cell and its
-recorded artifacts (SVG call diagram, wire trace, **check** verdicts, RFC audit,
-received RTP). Generated, not committed.

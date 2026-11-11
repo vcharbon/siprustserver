@@ -145,7 +145,7 @@ list stays one file by design, like the `define_service!` index.
   inline in a main.rs — moving logic out likely beats splitting in place.
 - [ ] **7. `crates/sip-pcap/src/flow.rs`** — 1441 L (new arrival; the crate
   also has `bin/sipflow.rs` 569).
-- [ ] **8. `crates/e2e-web/src/lib.rs`** — 1255 L.
+- [x] **8.** (the e2e website crate, removed).
 - [ ] **9. `crates/b2bua/src/metrics.rs`** — 1198 L.
 - [ ] **10. `crates/b2bua/src/decision/test_adapter.rs`** — 1175 L.
 - [ ] **11. `crates/b2bua-sdk/src/model.rs`** — 1171 L.
@@ -180,8 +180,7 @@ list stays one file by design, like the `define_service!` index.
   `agent/client_invite.rs` (585), `agent/server_txn.rs` (514),
   `actor/state.rs` (529), `realcall/env.rs` (580),
   `failover-harness/src/runner.rs` (685), `sip-net/src/contracts.rs` (779),
-  `e2e-model/src/registry.rs` (723), `e2e-core/src/infra.rs` (606) +
-  `registrar.rs` (522), `seq-report/src/lib.rs` (662) + `html.rs` (631),
+  `e2e-model/src/registry.rs` (723), `seq-report/src/lib.rs` (662) + `html.rs` (631),
   `topology/src/lib.rs` (605), `media/src/transport.rs` (560),
   `b2bua/src/decision/apply_route.rs` (513).
 

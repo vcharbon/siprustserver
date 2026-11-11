@@ -71,4 +71,4 @@ loadgen skews what the run measures. The jobs cap in
 `.cargo/config.toml` is sized for a quiet host; beside other builds lower it
 (`cargo test --workspace --jobs 2`) and, on a host short on memory, cap the
 command in a scope: `systemd-run --user --scope -q -p MemoryMax=12G cargo …`; a
-long-lived test process (SUT, loadgen, e2e-web) then gets its own small scope.
+long-lived test process (SUT, loadgen) then gets its own small scope.

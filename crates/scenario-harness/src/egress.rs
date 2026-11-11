@@ -4,14 +4,11 @@
 //! logical callee role ([`CalleeTarget`]) — the a-leg target, a reroute
 //! candidate, or a REFER transfer target — to how that layout addresses it.
 //!
-//! This is the ONE egress model shared by both run surfaces: the e2e framework's
-//! Infra shapes each declare an [`EgressPolicy`] and apply it through
-//! `InfraRuntime::callee` / `InfraRuntime::outgoing_invite` (e2e-core), and the
-//! load generator's per-call [`CallEnv`](crate::realcall::CallEnv) carries the
-//! same policy and applies it through `CallEnv::callee` /
-//! `CallEnv::outgoing_invite`. It lives here — the harness substrate both
-//! surfaces already depend on — and is re-exported by `e2e_model::egress`, so
-//! the axis data model exposes it unchanged.
+//! The load generator's per-call [`CallEnv`](crate::realcall::CallEnv) carries
+//! an [`EgressPolicy`] and applies it through `CallEnv::callee` /
+//! `CallEnv::outgoing_invite`. It lives here, in the harness substrate, and is
+//! re-exported by `e2e_model::egress`, so the axis data model exposes it
+//! unchanged.
 //!
 //! It is **callee-generic**: a scenario never hard-codes a callee's address or
 //! an AOR for any target. It replaces the per-shape / per-scenario hand-coded
@@ -153,9 +150,8 @@ impl ApiCall {
 /// How THIS layout addresses a logical callee **role** on its wire — the generic
 /// resolution every shape/scenario uses for ANY callee (the a-leg INVITE target,
 /// a reroute candidate, a REFER target). Derived from the layout's
-/// [`EgressPolicy`] + its role→address binding (`InfraRuntime::callee` on the
-/// e2e side, `CallEnv::callee` on the load side), so a scenario never hard-codes
-/// a callee's address or AOR.
+/// [`EgressPolicy`] + its role→address binding (`CallEnv::callee`), so a
+/// scenario never hard-codes a callee's address or AOR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalleeTarget {
     /// The logical role this resolves (e.g. `"bob2"`).

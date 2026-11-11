@@ -217,3 +217,42 @@ fn a_sent_anchor_does_not_resolve_received_only_and_vice_versa() {
         assert!(v.detail.contains("matches its keys"), "{v:?}");
     }
 }
+
+#[test]
+fn an_unresolved_anchor_fails_its_block_unless_the_block_is_optional() {
+    let (entries, anchors) = fixture();
+    let case = parse_case(
+        r#"{ "id": "t", "compatibleShapes": ["refer"],
+             "checks": [
+               { "on": "bob.reInvite",
+                 "checks": [ { "field": "from.tag", "op": "exists" } ] },
+               { "on": "bob.reInvite", "optional": true,
+                 "checks": [ { "field": "from.tag", "op": "exists" } ] } ] }"#,
+    );
+    let bindings = Bindings { input: &case.input, lb_vip: "10.0.0.9:5080".parse().unwrap() };
+    let refs: Vec<&e2e_model::CheckBlock> = case.checks.iter().collect();
+    let verdicts = evaluate_blocks_over(&refs, &entries, &anchors, &bindings);
+    assert_eq!(verdicts.len(), 2, "{verdicts:?}");
+    assert!(!verdicts[0].passed, "a mandatory unresolved block fails");
+    assert!(verdicts[0].detail.contains("no anchor"), "{}", verdicts[0].detail);
+    assert!(verdicts[1].passed, "an optional unresolved block is skipped");
+    assert!(verdicts[1].detail.contains("skipped"), "{}", verdicts[1].detail);
+}
+
+#[test]
+fn an_unknown_binding_fails_its_check_naming_the_binding() {
+    let (entries, anchors) = fixture();
+    let case = parse_case(
+        r#"{ "id": "t", "compatibleShapes": ["refer"],
+             "input": { "core": { "from": "sip:alice@pool.example" } },
+             "checks": [
+               { "on": "bob.initialInvite",
+                 "checks": [ { "field": "from.uri", "op": "eq", "value": "${input.frmo}" } ] } ] }"#,
+    );
+    let bindings = Bindings { input: &case.input, lb_vip: "10.0.0.9:5080".parse().unwrap() };
+    let refs: Vec<&e2e_model::CheckBlock> = case.checks.iter().collect();
+    let verdicts = evaluate_blocks_over(&refs, &entries, &anchors, &bindings);
+    assert_eq!(verdicts.len(), 1, "{verdicts:?}");
+    assert!(!verdicts[0].passed, "a typo in a binding never passes");
+    assert!(verdicts[0].detail.contains("frmo"), "{}", verdicts[0].detail);
+}

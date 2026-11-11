@@ -7,7 +7,7 @@ A pnpm workspace. Nine packages, four of them one layer each of the same stack:
 | `contracts/` | `@sip/contracts` | Effect Schema mirrors of the Rust-owned wire formats, the canonical formatter, pure readings of those formats (call key, step order, a cell's main error), and the report formats the tooling publishes (`sip.compare/1`, `sip.run-report/1`, their JSON Schemas under `contracts/schemas/`) |
 | `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) and the process primitives above them (a command into a file or a log, a detached command and its liveness, `git`, a node child's heap) — the ONLY package that knows subprocesses exist |
 | `pipeline/` | `@sip/pipeline` | flows ingest, the correlation rule engine, the cut, and case assembly |
-| `driver/` | `@sip/driver` | the campaign orchestrator: cells in, one `campaign.json` out, exit code is the verdict |
+| `driver/` | `@sip/driver` | one cell of a campaign, either shape, into its caller's run dir; the `campaign.json` line it answers is the caller's to fold |
 | `store/` | `@sip/store` | the run store: the postgres record of cuts, runs and what each call said, the readers a queue and a comparison use, and the run selectors |
 | `viewer-core/` | `@sip/viewer-core` | the callflow viewer's core: pivot types generated from the Rust schema, the pure ladder layouts, their SVG components, the run-bundle and capture-flows readers, and the text export |
 | `viewer-app/` | `@sip/viewer-app` | the viewer's Vite + React SPA over a deployment's server: cases, runs, the triage queue and study, and the compare and run report pages over the report formats |
@@ -59,7 +59,7 @@ const composed = Layer.mergeAll(
 `LanePresets` has no usable default on purpose: a guessed lane block would run a
 case against whatever process happened to be listening. `RoutingCompiler`'s
 default is the cell's own `overlay`, which is the escape hatch a pilot needs and
-is visible in the campaign document rather than buried in a layer.
+is visible in the cell rather than buried in a layer.
 
 The orchestration above the driver reads the same way. What only a deployment
 can state is a `@sip/corpus` seam, substituted with `layerWith`:
@@ -97,29 +97,22 @@ The case-id grammar has one source, the binding: the resolver
 
 ```text
 <run-dir>/
-  campaign.json                 the aggregate index (`e2e_core::CampaignIndex`)
+  campaign.json                 the aggregate index (`E2e.CampaignIndex`)
   specs/<cell>.run-spec.json    what the driver asked the interpreter for
   <cell>/                       IS the interpreter out_dir — it WIPES this
   <cell>/error.txt              a cell that never produced a result
 ```
 
 A cell is `{case, shape, infra}` where `shape` is `pivot-replay` or `rust-test`
-and `infra` is the lane or the crate. Cells run one at a time unless a campaign
-says otherwise: a replay cell binds real sockets and a crate cell compiles, and a
-flaky matrix is worse than a slow one.
-
-```sh
-pnpm --filter @sip/driver exec tsx src/main.ts run campaign.json --run-dir runs/1
-```
-
-The neutral entry point runs rust-test cells and refuses every pivot-replay cell
-— it composes no lane presets. A deployment ships its own entry point with its
-layers merged in.
+and `infra` is the lane or the crate. `@sip/driver` runs one cell
+(`runCell`); the replay of `@sip/corpus` (`replay/replay.ts`) runs a cut's
+cells under its ceilings and pace and writes `campaign.json`.
 
 ## Rust is the source of truth
 
-Every schema in `@sip/contracts` mirrors a serde struct in this repository, and
-each module's doc comment names the Rust file it mirrors. **A contract question
+Every schema in `@sip/contracts` that a Rust crate writes mirrors a serde struct
+in this repository, and each module's doc comment names the Rust file it
+mirrors. **A contract question
 is answered by that file, never by the mirror.** When the two disagree, the Rust
 side is right and the mirror is a bug.
 

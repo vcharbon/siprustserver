@@ -1,20 +1,18 @@
 /**
- * The **campaign input**: the document a driver is pointed at, listing the cells
- * one campaign runs.
+ * The **campaign cells**: what one cell of a campaign runs, as the driver takes
+ * it.
  *
- * Driver-owned, not Rust-owned — the one contract here that no serde struct
- * mirrors — so its own keys are camelCase like the e2e records. The one nested
- * shape that IS Rust-owned, a cell's {@link RunOverlay}, keeps its snake_case
- * spelling: it is passed through to the `replay` bin verbatim.
+ * Driver-owned, not Rust-owned — no serde struct mirrors it — so its own keys
+ * are camelCase like the e2e records. The one nested shape that IS Rust-owned,
+ * a cell's {@link RunOverlay}, keeps its snake_case spelling: it is passed
+ * through to the `replay` bin verbatim.
  *
- * The two cell kinds are listed UNIFORMLY, in one array, because a campaign is
- * one matrix: a rust-test cell and a pivot-replay cell land in the same run dir
- * and fold into the same `campaign.json`. They are internally tagged on `kind`.
+ * The two cell kinds are one union, internally tagged on `kind`, because a
+ * campaign is one matrix: a rust-test cell and a pivot-replay cell land in the
+ * same run dir and fold into the same `campaign.json`.
  */
-import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import { RunOverlay } from "./bundle/overlay.js"
-import { STRICT } from "./strict.js"
 
 /** One cargo test the driver runs, and whose in-test reporter writes the results. */
 export const RustTestCell = Schema.Struct({
@@ -51,20 +49,6 @@ export interface PivotReplayCell extends Schema.Schema.Type<typeof PivotReplayCe
 /** One cell of the campaign, whichever kind it is. */
 export const CampaignCell = Schema.Union([RustTestCell, PivotReplayCell])
 export type CampaignCell = typeof CampaignCell.Type
-
-/** What one campaign runs. */
-export const CampaignInput = Schema.Struct({
-  campaign: Schema.String,
-  cells: Schema.Array(CampaignCell)
-})
-export interface CampaignInput extends Schema.Schema.Type<typeof CampaignInput> {}
-
-export const decodeCampaignInput = Schema.decodeUnknownEffect(CampaignInput, STRICT)
-export const decodeCampaignInputSync = Schema.decodeUnknownSync(CampaignInput, STRICT)
-
-/** Parse a campaign document from its text. */
-export const parseCampaignInput = (text: string) =>
-  Effect.suspend(() => decodeCampaignInput(JSON.parse(text) as unknown))
 
 /**
  * The case id a cell contributes to the run: the replayed document's own

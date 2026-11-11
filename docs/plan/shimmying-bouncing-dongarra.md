@@ -155,8 +155,8 @@ governor (interval @ 1/cps) ──pick weighted scenario──► try_acquire(ma
   every cadence for `--options-hold` secs, then BYE (the SIPp OPTIONS-hold replacement).
 
 INVITE built with `Invite::through(vip).with_header("X-Api-Call", pin).with_sdp(OFFER)`
-(`agent.rs:1066,1073,1106`), reproducing `EgressPolicy::ApiCallPin` (`e2e-core/src/infra.rs:183-201,586`)
-without depending on `e2e-core`. `seed_ids(wall-clock entropy)` per call (mandatory vs the
+(`agent.rs:1066,1073,1106`), reproducing `EgressPolicy::ApiCallPin`
+without depending on the e2e run surface. `seed_ids(wall-clock entropy)` per call (mandatory vs the
 stateful cluster; trap documented at `agent.rs:293-305`).
 
 ### Phase 3 — fake-network smoke test FIRST (default lane)

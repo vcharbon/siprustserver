@@ -1,18 +1,17 @@
 //! The machine-readable **Load run index** (`load-result.json`) — the loadgen
-//! run's result as a single authored-shape document, so the e2e website can
-//! render a load run beside a functional Campaign run without re-deriving
-//! anything from Prometheus scrapes or the HTML report.
+//! run's result as a single authored-shape document, so a reader renders a load
+//! run without re-deriving anything from Prometheus scrapes or the HTML report.
 //!
 //! The loadgen `Reporter` writes one of these next to `index.html` on every
 //! periodic report rewrite AND at run end, and serves it live on its metrics
-//! socket; the e2e-web `Load runs` section reads it back. Every page that shows
-//! a load run is rendered from this doc alone (`loadrun-render`), so the live
-//! page, the on-disk `index.html` and the website can never disagree. Every
+//! socket. Every page that shows a load run is rendered from this doc alone
+//! (`loadrun-render`), so the live page and the on-disk `index.html` can never
+//! disagree. Every
 //! path in it is **relative** to the run directory (the `load-result.json` sits
 //! at the run-dir root), so a run dir is self-contained and portable.
 //!
 //! `xtask e2e-schema` emits `load-run-index.schema.json` alongside the authored
-//! docs. Unlike the authored inputs (Test case / Campaign / Load profile) this is
+//! docs. Unlike the authored inputs (Test case / Load profile) this is
 //! an OUTPUT document — nobody hand-writes it — so it carries no `$schema` field
 //! and is not loaded/validated; the schema exists for consumers and the drift
 //! test.
@@ -428,7 +427,7 @@ mod tests {
     }
 
     /// The index round-trips through JSON byte-for-byte (the load-bearing
-    /// property: the loadgen writes it and e2e-web reads it back verbatim).
+    /// property: the loadgen writes it and a reader reads it back verbatim).
     #[test]
     fn round_trips_through_json() {
         let idx = sample_index();
@@ -437,7 +436,7 @@ mod tests {
         assert_eq!(back, idx);
     }
 
-    /// camelCase field names are on the wire (the website/API read `startedMs`,
+    /// camelCase field names are on the wire (a reader reads `startedMs`,
     /// `ringingReceived`, etc.).
     #[test]
     fn serializes_camel_case() {

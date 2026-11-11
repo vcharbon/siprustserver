@@ -1,6 +1,6 @@
 /**
- * A whole campaign, end to end against stub binaries: both cell shapes into one
- * run dir, one `campaign.json`, and an exit code that is the verdict.
+ * One cell, end to end against stub binaries: either shape lands in the run
+ * directory it is handed, and its summary is the verdict a reader is told.
  */
 import { Campaign, CellHits, Confrontation, E2e } from "@sip/contracts"
 import { Reclassifier } from "@sip/pipeline"
@@ -8,16 +8,8 @@ import * as Effect from "effect/Effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { exitCodeOf, runCampaign, summarize, type CampaignRun } from "../src/campaign.js"
-import {
-  CAMPAIGN_INDEX,
-  CONFRONTATION_FILE,
-  ERROR_FILE,
-  RULE_HITS_FILE,
-  SKIP_FILE,
-  SPECS_DIR,
-  STDERR_FILE
-} from "../src/layout.js"
+import { type CellRun, runCell } from "../src/cells.js"
+import { CONFRONTATION_FILE, ERROR_FILE, RULE_HITS_FILE, SKIP_FILE, SPECS_DIR, STDERR_FILE } from "../src/layout.js"
 import { LanePresets, LaneUnknown } from "../src/lanes.js"
 import { RoutingCompiler } from "../src/routing.js"
 import {
@@ -52,55 +44,55 @@ const rustCell = (name = "relay::transparent"): Campaign.RustTestCell => ({
   name
 })
 
-const campaign = async (
-  cells: ReadonlyArray<Campaign.CampaignCell>,
-  options: { tests?: ReturnType<typeof stubTests>; rig?: RigOptions } = {}
-): Promise<CampaignRun & { readonly dir: string }> => {
-  const dir = runDir("campaign")
-  dirs.push(dir)
-  const run = await Effect.runPromise(
-    runCampaign(
-      { campaign: "stub", cells },
-      { runDir: dir, ts: "2026-08-25T00:00:00Z", tests: options.tests ?? stubTests(0, true) }
-    ).pipe(Effect.provide(rig(options.rig ?? {})))
-  )
-  return { ...run, dir }
+interface Options {
+  readonly tests?: ReturnType<typeof stubTests>
+  readonly rig?: RigOptions
 }
 
-describe("a mixed campaign", () => {
-  it("runs both shapes into one run dir and folds one index", async () => {
-    const run = await campaign([rustCell(), replayCell()])
-    expect(run.index.campaign).toBe("stub")
-    expect(run.index.ts).toBe("2026-08-25T00:00:00Z")
-    expect(run.index.cells.map((c) => c.cell.shape)).toEqual(["rust-test", "pivot-replay"])
-    expect(E2e.campaignPassed(run.index)).toBe(true)
-    expect(exitCodeOf(run)).toBe(0)
-  })
+/** Every cell of `list`, one after the other, into one fresh run directory. */
+const cells = async (
+  list: ReadonlyArray<Campaign.CampaignCell>,
+  options: Options = {}
+): Promise<{ readonly dir: string; readonly runs: ReadonlyArray<CellRun> }> => {
+  const dir = runDir("cells")
+  dirs.push(dir)
+  const context = { runDir: dir, tests: options.tests ?? stubTests(0, true), mode: "record" as const }
+  const runs = await Effect.runPromise(
+    Effect.forEach(list, (cell) => runCell(cell, context)).pipe(Effect.provide(rig(options.rig ?? {})))
+  )
+  return { dir, runs }
+}
 
-  it("writes the index where a reader looks for it, in the e2e byte form", async () => {
-    const run = await campaign([replayCell()])
-    expect(run.indexPath).toBe(path.join(run.dir, CAMPAIGN_INDEX))
-    const text = fs.readFileSync(run.indexPath, "utf8")
-    expect(text).toBe(E2e.emitCampaignIndex(run.index))
-    expect(E2e.decodeCampaignIndexSync(JSON.parse(text) as unknown)).toEqual(run.index)
+/** One cell into a fresh run directory: its summary, its detail and where it ran. */
+const one = async (
+  cell: Campaign.CampaignCell,
+  options: Options = {}
+): Promise<{ readonly dir: string; readonly cell: E2e.CellSummary; readonly detail: string }> => {
+  const { dir, runs } = await cells([cell], options)
+  return { dir, cell: runs[0]!.summary, detail: runs[0]!.detail }
+}
+
+describe("a cell of either shape", () => {
+  it("runs into the run dir it is handed, under its own cell id", async () => {
+    const { runs } = await cells([rustCell(), replayCell()])
+    expect(runs.map((r) => r.summary.cell.shape)).toEqual(["rust-test", "pivot-replay"])
+    expect(runs.every((r) => r.summary.passed)).toBe(true)
   })
 
   it("keeps the run-spec clear of the directory the interpreter wipes", async () => {
-    const run = await campaign([replayCell()])
-    const cell = run.index.cells[0]!
+    const { dir, cell } = await one(replayCell())
     // The stub removes its `out_dir` before writing, exactly as the interpreter
     // does — so a spec written there would not survive the run.
-    expect(fs.existsSync(path.join(run.dir, cell.dir, "verdict.json"))).toBe(true)
-    expect(fs.readdirSync(path.join(run.dir, SPECS_DIR))).toEqual([`${cell.dir}.run-spec.json`])
+    expect(fs.existsSync(path.join(dir, cell.dir, "verdict.json"))).toBe(true)
+    expect(fs.readdirSync(path.join(dir, SPECS_DIR))).toEqual([`${cell.dir}.run-spec.json`])
   })
 
   it("hands the interpreter the cell directory as its own out_dir", async () => {
-    const run = await campaign([replayCell()])
-    const cell = run.index.cells[0]!
+    const { dir, cell } = await one(replayCell())
     const spec = JSON.parse(
-      fs.readFileSync(path.join(run.dir, SPECS_DIR, `${cell.dir}.run-spec.json`), "utf8")
+      fs.readFileSync(path.join(dir, SPECS_DIR, `${cell.dir}.run-spec.json`), "utf8")
     ) as { out_dir: string; lane: { kind: string }; run: unknown }
-    expect(spec.out_dir).toBe(path.join(run.dir, cell.dir))
+    expect(spec.out_dir).toBe(path.join(dir, cell.dir))
     expect(spec.lane.kind).toBe("stub")
     expect(spec.run).toEqual({ timing_tolerance_ms: 0 })
   })
@@ -110,60 +102,53 @@ describe("a red cell", () => {
   it("is red, not crashed, when the run produced a failing verdict", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([replayCell({ case: caseNamed(cases, "fails.v3.json") })])
-    const cell = run.index.cells[0]!
+    const { dir, cell } = await one(replayCell({ case: caseNamed(cases, "fails.v3.json") }))
     // A failing run still left a bundle, so it is a RED cell and not a crashed
     // one: the difference is whether anyone can read what happened.
     expect(cell.passed).toBe(false)
     expect(cell.error).toBeUndefined()
-    expect(fs.existsSync(path.join(run.dir, cell.dir, "verdict.json"))).toBe(true)
-    expect(exitCodeOf(run)).toBe(1)
+    expect(fs.existsSync(path.join(dir, cell.dir, "verdict.json"))).toBe(true)
   })
 
   it("is red where the run panicked, whatever verdict it left", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([replayCell({ case: caseNamed(cases, "panics.v3.json") })])
-    const cell = run.index.cells[0]!
-    const verdict = JSON.parse(fs.readFileSync(path.join(run.dir, cell.dir, "verdict.json"), "utf8"))
+    const { dir, cell } = await one(replayCell({ case: caseNamed(cases, "panics.v3.json") }))
+    const verdict = JSON.parse(fs.readFileSync(path.join(dir, cell.dir, "verdict.json"), "utf8"))
     expect(verdict.status).toBe("ok")
     expect(cell.passed).toBe(false)
     expect(cell.error).toBeUndefined()
-    expect(exitCodeOf(run)).toBe(1)
   })
 
   it("keeps its interpreter's stderr, failing verdict or panic alike, and a green cell keeps none", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([
+    const { dir, runs } = await cells([
       replayCell({ case: caseNamed(cases, "fails.v3.json") }),
       replayCell({ case: caseNamed(cases, "panics.v3.json") }),
       replayCell()
     ])
-    const [failed, panicked, green] = run.index.cells
-    expect(fs.readFileSync(path.join(run.dir, failed!.dir, STDERR_FILE), "utf8")).toBe("the run failed\n")
-    expect(fs.readFileSync(path.join(run.dir, panicked!.dir, STDERR_FILE), "utf8")).toBe("the run body panicked\n")
+    const [failed, panicked, green] = runs.map((r) => r.summary)
+    expect(fs.readFileSync(path.join(dir, failed!.dir, STDERR_FILE), "utf8")).toBe("the run failed\n")
+    expect(fs.readFileSync(path.join(dir, panicked!.dir, STDERR_FILE), "utf8")).toBe("the run body panicked\n")
     expect(green!.passed).toBe(true)
-    expect(fs.existsSync(path.join(run.dir, green!.dir, STDERR_FILE))).toBe(false)
+    expect(fs.existsSync(path.join(dir, green!.dir, STDERR_FILE))).toBe(false)
     // A red cell is not a crashed one: it leaves no error file.
-    expect(fs.existsSync(path.join(run.dir, failed!.dir, ERROR_FILE))).toBe(false)
+    expect(fs.existsSync(path.join(dir, failed!.dir, ERROR_FILE))).toBe(false)
   })
 
   it("IS crashed where the interpreter refused before writing anything", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([replayCell({ case: caseNamed(cases, "no-bundle.v3.json") })])
-    const cell = run.index.cells[0]!
+    const { cell } = await one(replayCell({ case: caseNamed(cases, "no-bundle.v3.json") }))
     expect(cell.passed).toBe(false)
     expect(cell.error).toContain("left no bundle")
   })
 
-  it("fails the campaign and the exit code with it", async () => {
-    const run = await campaign([rustCell()], { tests: stubTests(101, true) })
-    expect(run.index.cells[0]!.passed).toBe(false)
-    expect(run.index.cells[0]!.error).toBeUndefined()
-    expect(exitCodeOf(run)).toBe(1)
-    expect(summarize(run)).toContain("FAILED")
+  it("is red, not crashed, where the crate test failed and its reporter wrote a result", async () => {
+    const { cell } = await one(rustCell(), { tests: stubTests(101, true) })
+    expect(cell.passed).toBe(false)
+    expect(cell.error).toBeUndefined()
   })
 })
 
@@ -172,11 +157,10 @@ describe("an expected body", () => {
     const cases = runDir("cases")
     dirs.push(cases)
     const stored = "<request><play/></request>"
-    const run = await campaign([replayCell({ case: caseExpectingBody(cases, stored) })])
-    const cell = run.index.cells[0]!
+    const { dir, cell } = await one(replayCell({ case: caseExpectingBody(cases, stored) }))
     expect(cell.error).toBeUndefined()
     const records = Confrontation.parseConfrontationLines(
-      fs.readFileSync(path.join(run.dir, cell.dir, CONFRONTATION_FILE), "utf8")
+      fs.readFileSync(path.join(dir, cell.dir, CONFRONTATION_FILE), "utf8")
     )
     expect(records.filter((r) => r.kind === "body")).toMatchObject([
       {
@@ -195,11 +179,10 @@ describe("an expected body", () => {
     const stored =
       "v=0\r\no=- 1 2 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\n" +
       "m=audio 6000 RTP/AVP 8\r\na=sendrecv\r\na=rtpmap:8 PCMA/8000\r\na=ptime:20\r\n"
-    const run = await campaign([replayCell({ case: caseExpectingSdp(cases, stored) })])
-    const cell = run.index.cells[0]!
+    const { dir, cell } = await one(replayCell({ case: caseExpectingSdp(cases, stored) }))
     expect(cell.error).toBeUndefined()
     const records = Confrontation.parseConfrontationLines(
-      fs.readFileSync(path.join(run.dir, cell.dir, CONFRONTATION_FILE), "utf8")
+      fs.readFileSync(path.join(dir, cell.dir, CONFRONTATION_FILE), "utf8")
     )
     // The stub ran verbatim, so the `o=` numbers and the `c=` address it
     // changed are rows beside the codec; the attribute order is not.
@@ -217,29 +200,25 @@ describe("a lane the document declares blocked", () => {
   it("is skipped, not failed, and the interpreter is never invoked", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([
+    const { dir, cell } = await one(
       replayCell({ case: caseWithLanes(cases, "blocked.v3.json", { "stub-lane": "blocked:claim-ambiguous" }) })
-    ])
-    const cell = run.index.cells[0]!
+    )
     expect(cell.skipped).toBe("blocked:claim-ambiguous")
     expect(cell.passed).toBe(false)
     expect(cell.error).toBeUndefined()
     // Nothing ran: no spec was written and the stub left no bundle behind.
-    expect(fs.existsSync(path.join(run.dir, SPECS_DIR))).toBe(false)
-    expect(fs.existsSync(path.join(run.dir, cell.dir, "verdict.json"))).toBe(false)
-    expect(E2e.campaignPassed(run.index)).toBe(true)
-    expect(exitCodeOf(run)).toBe(0)
-    expect(summarize(run)).toContain("SKIP")
+    expect(fs.existsSync(path.join(dir, SPECS_DIR))).toBe(false)
+    expect(fs.existsSync(path.join(dir, cell.dir, "verdict.json"))).toBe(false)
+    expect(E2e.campaignPassed({ campaign: "stub", ts: "t", cells: [cell] })).toBe(true)
   })
 
   it("leaves a skipped.json saying which lane and why, verbatim", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([
+    const { dir, cell } = await one(
       replayCell({ case: caseWithLanes(cases, "blocked.v3.json", { "stub-lane": "blocked:multi-party-not-driveable" }) })
-    ])
-    const cell = run.index.cells[0]!
-    const text = fs.readFileSync(path.join(run.dir, cell.dir, SKIP_FILE), "utf8")
+    )
+    const text = fs.readFileSync(path.join(dir, cell.dir, SKIP_FILE), "utf8")
     const skip = E2e.decodeCellSkipSync(JSON.parse(text) as unknown)
     expect(skip.verdict).toBe("blocked:multi-party-not-driveable")
     expect(skip.cell.infra).toBe("stub-lane")
@@ -249,12 +228,11 @@ describe("a lane the document declares blocked", () => {
   it("runs the cell where the document says the lane is ok", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([
+    const { cell } = await one(
       replayCell({
         case: caseWithLanes(cases, "ok.v3.json", { "stub-lane": "ok", "other-lane": "blocked:whatever" })
       })
-    ])
-    const cell = run.index.cells[0]!
+    )
     expect(cell.skipped).toBeUndefined()
     expect(cell.passed).toBe(true)
   })
@@ -262,67 +240,52 @@ describe("a lane the document declares blocked", () => {
   it("is skipped on the verdict stated for every lane where the document does not name it", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([
+    const { cell } = await one(
       replayCell({ case: caseWithLanes(cases, "blocked.v3.json", { "other-lane": "ok", "*": "blocked:claim-ambiguous" }) })
-    ])
-    expect(run.index.cells[0]!.skipped).toBe("blocked:claim-ambiguous")
+    )
+    expect(cell.skipped).toBe("blocked:claim-ambiguous")
   })
 
   it("runs the cell on its own ok verdict, whatever the document states for every lane", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([
+    const { cell } = await one(
       replayCell({ case: caseWithLanes(cases, "ok.v3.json", { "stub-lane": "ok", "*": "blocked:whatever" }) })
-    ])
-    expect(run.index.cells[0]!.skipped).toBeUndefined()
-    expect(run.index.cells[0]!.passed).toBe(true)
+    )
+    expect(cell.skipped).toBeUndefined()
+    expect(cell.passed).toBe(true)
   })
 
   it("runs the cell where the document does not mention the lane at all", async () => {
     // Absence means "none" — a lane nobody ruled on is not a blocked lane.
-    const run = await campaign([replayCell()])
-    expect(run.index.cells[0]!.skipped).toBeUndefined()
-    expect(run.index.cells[0]!.passed).toBe(true)
-  })
-
-  it("never covers for a cell beside it that did run and failed", async () => {
-    const cases = runDir("cases")
-    dirs.push(cases)
-    const run = await campaign([
-      replayCell({ case: caseWithLanes(cases, "blocked.v3.json", { "stub-lane": "blocked:claim-ambiguous" }) }),
-      replayCell({ case: caseNamed(cases, "fails.v3.json") })
-    ])
-    expect(run.index.cells[0]!.skipped).toBe("blocked:claim-ambiguous")
-    expect(run.index.cells[1]!.passed).toBe(false)
-    expect(exitCodeOf(run)).toBe(1)
+    const { cell } = await one(replayCell())
+    expect(cell.skipped).toBeUndefined()
+    expect(cell.passed).toBe(true)
   })
 })
 
 describe("a cell that never produced a result", () => {
-  it("leaves an error.txt and says so in the index", async () => {
-    const run = await campaign([rustCell()], { tests: stubTests(101, false) })
-    const cell = run.index.cells[0]!
+  it("leaves an error.txt and says so in its summary", async () => {
+    const { dir, cell } = await one(rustCell(), { tests: stubTests(101, false) })
     expect(cell.passed).toBe(false)
     expect(cell.error).toContain("exited 101")
-    expect(fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")).toContain("stub stderr")
-    expect(summarize(run)).toContain("ERROR")
+    expect(fs.readFileSync(path.join(dir, cell.dir, ERROR_FILE), "utf8")).toContain("stub stderr")
   })
 
-  it("does not take the rest of the campaign down with it", async () => {
-    const run = await campaign([rustCell("crashes"), replayCell()], {
+  it("answers its summary rather than failing, so the cell after it still runs", async () => {
+    const { runs } = await cells([rustCell("crashes"), replayCell()], {
       tests: {
         command: "/nonexistent/runner",
         args: () => [],
         cellDirEnv: "CELL_DIR"
       }
     })
-    expect(run.index.cells[0]!.error).toBeDefined()
-    expect(run.index.cells[1]!.passed).toBe(true)
-    expect(fs.existsSync(run.indexPath)).toBe(true)
+    expect(runs[0]!.summary.error).toBeDefined()
+    expect(runs[1]!.summary.passed).toBe(true)
   })
 
   it("carries the host's own words where it runs no crate test, and spawns nothing", async () => {
-    const run = await campaign([rustCell(), replayCell()], {
+    const { dir, runs } = await cells([rustCell(), replayCell()], {
       tests: {
         command: "/nonexistent/runner",
         args: () => [],
@@ -330,23 +293,22 @@ describe("a cell that never produced a result", () => {
         unavailable: "crate-test cells: not available on this host"
       }
     })
-    const cell = run.index.cells[0]!
+    const cell = runs[0]!.summary
     expect(cell.passed).toBe(false)
     expect(cell.error).toBe("crate-test cells: not available on this host")
-    expect(fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")).toBe(
+    expect(fs.readFileSync(path.join(dir, cell.dir, ERROR_FILE), "utf8")).toBe(
       "crate-test cells: not available on this host\n"
     )
-    expect(run.index.cells[1]!.passed).toBe(true)
+    expect(runs[1]!.summary.passed).toBe(true)
   })
 
   it("is what an unknown lane produces, because a lane is never guessed", async () => {
-    const run = await campaign([replayCell({ lane: "nobody-described-this" })], {
+    const { dir, cell } = await one(replayCell({ lane: "nobody-described-this" }), {
       rig: { lanes: LanePresets.layer }
     })
-    const cell = run.index.cells[0]!
     expect(cell.passed).toBe(false)
     expect(cell.error).toBeDefined()
-    const written = fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")
+    const written = fs.readFileSync(path.join(dir, cell.dir, ERROR_FILE), "utf8")
     expect(written).toContain("LaneUnknown")
     expect(written).toContain("nobody-described-this")
     expect(new LaneUnknown({ lane: "x", detail: "y" })._tag).toBe("Driver.LaneUnknown")
@@ -354,7 +316,7 @@ describe("a cell that never produced a result", () => {
 
   /** A refusal's reason is its message: the error file carries it, not the tag alone. */
   it("names the reason a deployment's routing compiler refused the cell", async () => {
-    const run = await campaign([replayCell()], {
+    const { dir, cell } = await one(replayCell(), {
       rig: {
         routing: RoutingCompiler.layerWith((cell, pivot) =>
           Effect.fail(
@@ -367,9 +329,8 @@ describe("a cell that never produced a result", () => {
         )
       }
     })
-    const cell = run.index.cells[0]!
     expect(cell.passed).toBe(false)
-    const written = fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")
+    const written = fs.readFileSync(path.join(dir, cell.dir, ERROR_FILE), "utf8")
     expect(written).toContain("RoutingRefused")
     expect(written).toContain("stub-lane: attempt 1/0 dials a number whose route this compiler does not state")
   })
@@ -379,8 +340,7 @@ describe("the post-run RFC audit", () => {
   const audited = async (name: string) => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([replayCell({ case: caseNamed(cases, `${name}.v3.json`) })])
-    return { cell: run.index.cells[0]!, detail: run.cells[0]!.detail }
+    return one(replayCell({ case: caseNamed(cases, `${name}.v3.json`) }))
   }
 
   it("passes a cell whose only finding is a scripted party's the reference shows", async () => {
@@ -413,14 +373,13 @@ describe("the post-run RFC audit", () => {
   it("judges the SUT's side alone: a bless of the SUT's side passes the cell over its source fault", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([replayCell({ case: caseNamed(cases, "rfc-source-fault-beside-a-failure.v3.json") })], {
+    const { cell } = await one(replayCell({ case: caseNamed(cases, "rfc-source-fault-beside-a-failure.v3.json") }), {
       rig: {
         reclassifier: Reclassifier.layerWith((outcome) =>
           Effect.succeed({ passed: true, reason: `${outcome.lane}: every failure is a named difference` })
         )
       }
     })
-    const cell = run.index.cells[0]!
     expect(cell.passed).toBe(true)
     expect(cell.sourceFault).toBe(true)
   })
@@ -435,40 +394,38 @@ describe("the post-run RFC audit", () => {
 
 describe("the post-run escape hatch", () => {
   it("lets a deployment restate a cell, and the reason rides the run", async () => {
-    const run = await campaign([replayCell()], {
+    const { cell, detail } = await one(replayCell(), {
       rig: {
         reclassifier: Reclassifier.layerWith((outcome) =>
           Effect.succeed({ passed: false, reason: `${outcome.lane} is a known open defect` })
         )
       }
     })
-    expect(run.index.cells[0]!.passed).toBe(false)
-    expect(run.cells[0]!.detail).toContain("known open defect")
-    expect(exitCodeOf(run)).toBe(1)
+    expect(cell.passed).toBe(false)
+    expect(detail).toContain("known open defect")
   })
 
   it("never restates a panicked run as passed", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
-    const run = await campaign([replayCell({ case: caseNamed(cases, "panics.v3.json") })], {
+    const { cell } = await one(replayCell({ case: caseNamed(cases, "panics.v3.json") }), {
       rig: { reclassifier: Reclassifier.layerWith(() => Effect.succeed({ passed: true, reason: "restated" })) }
     })
-    expect(run.index.cells[0]!.passed).toBe(false)
-    expect(exitCodeOf(run)).toBe(1)
+    expect(cell.passed).toBe(false)
   })
 
   it("changes nothing by default", async () => {
-    const run = await campaign([replayCell()], { rig: {} })
-    expect(run.index.cells[0]!.passed).toBe(true)
-    expect(fs.existsSync(path.join(run.dir, run.index.cells[0]!.dir, RULE_HITS_FILE))).toBe(false)
+    const { dir, cell } = await one(replayCell(), { rig: {} })
+    expect(cell.passed).toBe(true)
+    expect(fs.existsSync(path.join(dir, cell.dir, RULE_HITS_FILE))).toBe(false)
   })
 
   it("writes the deployment's per-cell counts beside the cell, in its own tokens", async () => {
     const hits: CellHits.Hits = [{ family: "tolerance", rule: "via-stack-owned", bucket: "accepted", hits: 2 }]
-    const run = await campaign([replayCell()], {
+    const { dir, cell } = await one(replayCell(), {
       rig: { reclassifier: Reclassifier.layerWith((outcome) => Effect.succeed({ passed: outcome.passed, hits })) }
     })
-    const written = fs.readFileSync(path.join(run.dir, run.index.cells[0]!.dir, RULE_HITS_FILE), "utf8")
+    const written = fs.readFileSync(path.join(dir, cell.dir, RULE_HITS_FILE), "utf8")
     expect(CellHits.decodeHitsSync(JSON.parse(written) as unknown)).toEqual(hits)
   })
 })

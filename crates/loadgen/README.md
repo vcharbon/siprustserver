@@ -96,8 +96,7 @@ warns at bind when `net.core.rmem_max` / `wmem_max` clamped the request.
 
 Instead of a long flag line, the whole run can come from **one authored
 document** — a `LoadProfile` JSON (schema:
-`e2e/schemas/load-profile.schema.json`) — the load analogue of an e2e *Campaign*.
-It carries every run knob (`cps`, `durationSecs`, `maxInFlight`, `sampleCap`,
+`e2e/schemas/load-profile.schema.json`). It carries every run knob (`cps`, `durationSecs`, `maxInFlight`, `sampleCap`,
 `backgroundRecordEvery`, `reportIntervalSecs`, `recvTimeoutMs`), the global
 `robustness` (`dropRate` + `retransmit`) defaults, `overloadReject` (see
 *Accepted endings* below), and the scenario **`mix`**
@@ -174,8 +173,7 @@ the `post_rate_retargets_the_running_server` HTTP smoke test.
 ### The environment axis: `--endpoint-config`
 
 Addressing + egress can come from **one authored document** instead of the flags:
-`--endpoint-config <file>` loads an `e2e-model` `EndpointConfig` (the same JSON
-the ADR-0018 e2e framework binds its Infra shapes with; schema:
+`--endpoint-config <file>` loads an `e2e-model` `EndpointConfig` (schema:
 `e2e/schemas/endpoint-config.schema.json`). loadgen reads the roles `alice`
 (UAC bind), `bob` (UAS bind), `charlie` (REFER-target bind), `lb` (the SUT
 ingress), `recvTimeoutMs`, and the optional **`egress` policy**:
@@ -380,8 +378,8 @@ N s so it is browsable mid-run.
 
 The dwell flags above are **global**; identities default to the agent URIs. To
 drive **per-call identities and per-call dwells from data**, attach an authored
-`e2e-model` **Test case** (the same JSON documents the ADR-0018/0019 framework
-runs; schema: `e2e/schemas/test-case.schema.json`) to a mix entry:
+`e2e-model` **Test case** (ADR-0018/0019; schema:
+`e2e/schemas/test-case.schema.json`) to a mix entry:
 
 ```bash
 # one case for the whole mix:
@@ -535,8 +533,7 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   `<who>[:<goal kind>#<goal index>]@<barrier>` (e.g. `alice:bye#1@established`,
   or `settle` for an unmet settle barrier), in a filesystem-safe spelling.
 - **`load-result.json`** — the run's index, everything `index.html` shows
-  (`index.html` is rendered from it alone, by the `loadrun-render` crate the
-  e2e website's `/load/<run>` page uses too).
+  (`index.html` is rendered from it alone, by the `loadrun-render` crate).
 - **Live report:** `http://<metrics-addr>/` (printed at startup as
   `live report: …`) is the same page rendered on demand from the running
   reporter, with the rate and drain controls, reloading every 60 s
@@ -665,8 +662,8 @@ the shape ids the product registered and exits.
    - `env` gives you the bound agents (`env.alice` UAC, `env.bob` UAS, optional
      `env.charlie`), `env.via` (the SUT ingress) and `env.outgoing_invite(&["bob"],
      inv)` — the egress seam that realizes the logical INVITE on this run's wire
-     (correlation stamp + emergency marker + the run's `EgressPolicy` rewrite,
-     mirroring e2e-core `InfraRuntime::outgoing_invite`) — plus `env.callee(role)`
+     (correlation stamp + emergency marker + the run's `EgressPolicy` rewrite)
+     — plus `env.callee(role)`
      to resolve any callee target and the REFER helpers (`env.refer_to()`,
      `env.refer_authorization(refer_key)`). Per-run SUT auth data (the refer
      scenarios' `refer_key`) is fed at CONSTRUCTION via `ScenarioInputs`, not the
@@ -690,10 +687,7 @@ the shape ids the product registered and exits.
    shipped tables) — there is no `match` table left to extend, and a duplicate
    id panics at registration. An **emergency variant** is free: a second
    descriptor (`"my_flow_em"`) with `.emergency()` reusing the same body — the
-   report id comes from the descriptor. A shape that ALSO has an e2e functional
-   body attaches it by the same id in
-   `e2e-core/src/shapes/mod.rs::default_bodies` (see `rerouting_prack`, the
-   first dual-body shape; ADR-0021).
+   report id comes from the descriptor.
 
 ### Accepted endings
 
@@ -879,10 +873,7 @@ wire.
 
 There is no REGISTER **load shape** yet, but the pieces are in place:
 
-- The functional harness already speaks REGISTER (`Agent::register`) and a
-  **registrar mimic** exists in `e2e-core` (the `fake-register-proxy` the portable
-  `basic-call`-over-registrar E2E runs against), so a load shape has a SUT to
-  register against.
+- The functional harness already speaks REGISTER (`Agent::register`).
 - The out-of-dialog builder (`Agent::request(OutOfDialogMethod::Register, …)`)
   plus `OutOfDialogRequest::try_send_authed` give REGISTER its **authenticated**
   send for free — a registrar almost always challenges, and the

@@ -9,9 +9,9 @@
 //!                       (ADR-0016) under `docs/sm/<machine>.md` from the composed
 //!                       service registry. A CI test asserts the committed files
 //!                       match this output (drift fails CI).
-//!   e2e-schema          Regenerate the committed JSON Schemas for the authored
-//!                       E2E test-management docs (ADR-0018) under
-//!                       `e2e/schemas/<doc>.schema.json` from the e2e-core model.
+//!   e2e-schema          Regenerate the committed JSON Schemas for the E2E docs
+//!                       (ADR-0018) under `e2e/schemas/<doc>.schema.json` from
+//!                       the e2e-model types.
 //!                       Authored files reference them via `$schema`.
 //!
 //! The corpus is committed so CI is deterministic and needs no external
@@ -100,13 +100,13 @@ fn state_machine_docs() -> Result<(), String> {
     Ok(())
 }
 
-/// Regenerate `e2e/schemas/<doc>.schema.json` from the e2e-core model types.
+/// Regenerate `e2e/schemas/<doc>.schema.json` from the e2e-model types.
 fn e2e_schema() -> Result<(), String> {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     dir.pop(); // workspace root
     dir.push("e2e/schemas");
     fs::create_dir_all(&dir).map_err(|e| format!("create e2e/schemas dir: {e}"))?;
-    for (stem, schema) in e2e_core::model::schemas() {
+    for (stem, schema) in e2e_model::model::schemas() {
         let path = dir.join(format!("{stem}.schema.json"));
         let json = serde_json::to_string_pretty(&schema)
             .map_err(|e| format!("serialize {stem} schema: {e}"))?;

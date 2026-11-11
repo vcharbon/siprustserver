@@ -114,8 +114,7 @@ NOT automatic (deliberately — timeout/reap/stall fixtures would false-fail):
 - **Leak / termination checks.** The structural close anomalies
   (`inFlightImbalance`, `queueLeak`) do not gate. A call left un-terminated is
   invisible to `Harness::finish()` unless it also violated an RFC rule.
-  `B2buaScene::finish()` and the e2e fake infra's `InfraRuntime::finish()` run
-  `B2buaSut::assert_fully_reaped()` for you; a test on a bare `Harness`
+  `B2buaScene::finish()` runs `B2buaSut::assert_fully_reaped()` for you; a test on a bare `Harness`
   asserts it explicitly (single-SUT), or `assert_call_fully_over` /
   `assert_call_fully_released` in failover tests. Drain async teardown first
   with `settle_until`.

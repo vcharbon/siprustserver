@@ -5,17 +5,15 @@ Full definitions of the terms [CONTEXT.md](../../CONTEXT.md) indexes under "Load
 The language of the loadgen × e2e fusion
 ([ADR-0021](../../docs/adr/0021-loadgen-e2e-fusion.md)): **one axis data model**
 (`crates/e2e-model`, holding Test case, checks, Endpoint config, shape descriptors,
-Load profile) feeding **two deliberately distinct run surfaces**, the
-functional per-cell executor (`e2e-core`: `!Send`, paused-clock capable,
-panic-on-deviation) and the load fleet (`loadgen`: `Send`, wall-clock, fallible,
+Load profile) feeding the load fleet (`loadgen`: `Send`, wall-clock, fallible,
 rate-driven). The axes of the [E2E test-management vocabulary](e2e-test-management.md)
 (Test case, Endpoint config, Check, Message anchor) carry over unchanged; these are the fusion-specific terms.
 
 **Shape descriptor** (`e2e_model::ShapeDescriptor`):
 The ONE declaration of a **Callflow shape** in the unified open `ShapeRegistry`:
-its stable id (**one id space** across both surfaces, so the Test-case selector,
-load report directory, metrics label, and functional-body attachment key are the
-same string; a duplicate id panics at registration), its published **Message
+its stable id (**one id space**, so the Test-case selector, load report
+directory and metrics label are the same string; a duplicate id panics at
+registration), its published **Message
 anchors** and required input, an optional authoring params schema, the load
 attributes the driver consults per call (`needs_charlie`/`needs_bob2`/
 `emergency`, default/abnormal-end mix weights), and the optional **load body**
@@ -25,17 +23,12 @@ selects one by id but does not name the concept); declaring a shape's
 id/attributes in more than one place (the silent drift separate closed
 registries invite).
 
-**Functional body** vs **Load body** (a **dual-body shape** carries both):
-The two run-surface implementations a **Shape descriptor** may carry. The
-*functional* body is the `!Send` `CallflowShape` that `e2e-core` `attach()`es by
-id (it drives an `InfraRuntime`, which cannot live in the light model crate;
-it is strict, so a deviation panics the cell). The *load* body is the `Send + Sync`
-`RealCallScenario` minted by the descriptor's `LoadFactory` from per-run
-`ScenarioInputs` (fallible `try_*` surface; a deviation is a counted
-`StepError`). `rerouting_prack` is the first dual-body shape.
-_Avoid_: merging the two body types or their engines (the thread/clock/
-failure-model split is load-bearing, ADR-0021); "LoadScenario" as the trait
-name in new code (a re-export alias of `RealCallScenario`).
+**Load body**:
+The `Send + Sync` `RealCallScenario` a **Shape descriptor** may carry, minted by
+the descriptor's `LoadFactory` from per-run `ScenarioInputs` (fallible `try_*`
+surface; a deviation is a counted `StepError`).
+_Avoid_: "LoadScenario" as the trait name in new code (a re-export alias of
+`RealCallScenario`).
 
 **Binding pool**:
 A **Test case**'s optional `bindings: { mode, entries }`, a **wrap-allowed**

@@ -59,8 +59,6 @@ members = [
     "crates/callshapes",
     "crates/e2e-model",
     "crates/e2e-core",
-    "crates/e2e-cli",
-    "crates/e2e-web",
     "crates/loadgen",
     "crates/loadrun-render",
     "crates/rfc-rules",
@@ -126,18 +124,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The stack left on the running thread, read by a depth guard (`bounds`, ADR-0057 §5).
 stacker = "0.1"
-# E2E test-management JSON model (ADR-0018): authored Test cases / Endpoint
-# configs / Check sets derive `JsonSchema`; `xtask e2e-schema` emits committed
+# E2E JSON model (ADR-0018): authored Test cases / Endpoint configs / Check
+# sets / Load profiles derive `JsonSchema`; `xtask e2e-schema` emits committed
 # `e2e/schemas/*.schema.json` the authored files reference via `$schema`.
 # `regex` backs the check engine's `regex` op (ADR-0019 field grammar).
 schemars = "1"
 regex = "1"
-# E2E test-management website (`e2e-web`, ADR-0018): axum serves the
-# content-negotiated route set (HTML + JSON on ONE handler per resource), maud
-# renders the HTML server-side (htmx does fragment polling client-side, loaded
-# from CDN — no JS build step). TEST-TOOLING ONLY, never in a runner.
-axum = "0.8"
-maud = "0.27"
 serde_bytes = "0.11"
 rmp-serde = "1"
 # HA replication wire codec (`crates/repl-net`). The five replication

@@ -1,8 +1,7 @@
 //! The canonical Message-anchor vocabulary (ADR-0019), the shared input core
 //! every Callflow shape receives, and [`ShapeSpec`] — the load-time metadata
-//! slice of a shape the model validates against. The full run trait
-//! (`CallflowShape`, which drives an `InfraRuntime`) lives in `e2e-core`; this
-//! crate only ever needs to ask a shape *what it publishes and requires*.
+//! slice of a shape the model validates against. This crate only ever asks a
+//! shape *what it publishes and requires*, never how it runs.
 
 /// The canonical, project-wide Message-anchor vocabulary. A Callflow shape
 /// publishes the subset it produces; a Check binds to `<agent>.<anchor>`
@@ -69,9 +68,8 @@ pub struct CoreInput {
 
 /// The **load-time metadata** half of a Callflow shape — everything
 /// [`validate_case`](crate::model::validate_case) needs to judge a Test case's
-/// compatibility, split from the heavy run trait (`CallflowShape` in
-/// `e2e-core`, which bridges its trait objects onto this) so the axis model
-/// stays dependency-light.
+/// compatibility, split from any run body so the axis model stays
+/// dependency-light.
 pub trait ShapeSpec {
     /// The anchors this shape publishes (per-agent at runtime).
     fn anchors(&self) -> &[Anchor];
@@ -86,8 +84,8 @@ pub trait ShapeSpec {
 /// A **catalog of shapes by id** — the lookup surface
 /// [`validate_case`](crate::model::validate_case) consumes, so the one
 /// validation serves every registry representation: the unified
-/// [`ShapeRegistry`](crate::registry::ShapeRegistry) (descriptors), `e2e-core`'s
-/// descriptor+functional-body map, and any plain test fixture map.
+/// [`ShapeRegistry`](crate::registry::ShapeRegistry) (descriptors) and any
+/// plain test fixture map.
 pub trait ShapeCatalog {
     /// The load-time metadata of shape `id`, if registered.
     fn spec(&self, id: &str) -> Option<&dyn ShapeSpec>;
@@ -96,8 +94,7 @@ pub trait ShapeCatalog {
 }
 
 /// Present a registry entry's load-time metadata view. Implemented for boxed
-/// specs (test fixtures) and — downstream — for `e2e-core`'s
-/// descriptor+functional-body entry, so ANY `BTreeMap<String, impl AsShapeSpec>`
+/// specs (test fixtures) and by any downstream registry entry, so ANY `BTreeMap<String, impl AsShapeSpec>`
 /// is a [`ShapeCatalog`] despite the orphan rule.
 pub trait AsShapeSpec {
     fn as_spec(&self) -> &dyn ShapeSpec;

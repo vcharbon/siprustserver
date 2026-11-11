@@ -4,10 +4,8 @@
 //! agent recv bound, and the **scenario mix** (which shapes run, at what weight,
 //! with what attached Test case and per-scenario loss/retransmit overrides).
 //!
-//! It is the load analogue of a [`Campaign`](crate::model::Campaign): a Campaign
-//! expands a {case × shape × infra} matrix for the functional e2e runner; a Load
-//! profile parameterizes one sustained load RUN. Both are dependency-light
-//! authored documents validated at load, and `xtask e2e-schema` emits a
+//! A Load profile parameterizes one sustained load RUN. It is a dependency-light
+//! authored document validated at load, and `xtask e2e-schema` emits a
 //! `load-profile.schema.json` alongside the others.
 //!
 //! Precedence at the CLI (documented on the `--load-profile` flag): the profile

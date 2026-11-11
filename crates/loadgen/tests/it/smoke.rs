@@ -476,10 +476,8 @@ async fn loadgen_mux_smoke_prack_update_mix() {
     b2bua.assert_fully_reaped();
 }
 
-/// The DUAL-BODY `rerouting_prack` shape's LOAD body against the in-process
-/// SUT — the first shape served by BOTH run surfaces from ONE registry
-/// declaration (the functional body runs in e2e-core over the fake infra; this
-/// is the load half). Under the `api-call-pin` egress the ordered candidate
+/// The anchored `rerouting_prack` shape's LOAD body against the in-process
+/// SUT. Under the `api-call-pin` egress the ordered candidate
 /// list [bob, bob2] rides an `X-Api-Call` `routes` failover plan (ADR-0017):
 ///
 ///   INVITE(Supported:100rel, routes plan) → bob 486 → the SUT walks the plan

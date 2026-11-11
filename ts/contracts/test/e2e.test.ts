@@ -135,7 +135,6 @@ const RUN_RESULT = {
     { on: "alice.invite", field: "(anchor)", op: "exists", passed: false, detail: "no anchor was tagged" }
   ],
   rfc: SEQ_DOC.anomalies,
-  media: [{ agent: "alice", wav: "alice.received.wav", classify: "tone:200hz", rms: 0.42 }],
   seqDoc: SEQ_DOC,
   timings: { firstMs: 0, lastMs: 120, messages: 8 }
 }
@@ -143,7 +142,7 @@ const RUN_RESULT = {
 describe("a cell result", () => {
   const result = decodeRunResultSync(RUN_RESULT)
 
-  it("names its own directory the way the executor does", () => {
+  it("names its own directory the way the driver does", () => {
     expect(cellDirName(result.cell)).toBe("basic__transparent__fake")
   })
 
