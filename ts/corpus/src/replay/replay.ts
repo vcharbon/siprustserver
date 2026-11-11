@@ -296,6 +296,7 @@ const interpreterEnv = (memoryMax: string, rowsDir: string | undefined) =>
  * batch after it are landed unrun, and its row closes `error`. A stop asked
  * for mid-batch admits no further cell, waits the stop's grace for the cells
  * in flight, then interrupts them; the batch's end runs as on any other.
+ * The batch's row names the cells it drives, the materialised ones.
  */
 export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) {
   const { options, stop, tallies } = request
@@ -338,7 +339,9 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
   /**
    * Every cell in flight at once, bounded by the permit gate, on what the lane
    * stood: a batch process's cells run in it (the interpreter seam's `run` is
-   * the process's, everything else about a cell is `runCell`'s as ever).
+   * the process's, everything else about a cell is `runCell`'s as ever). The
+   * cells run on a fiber of their own, so a stop can wait for them and then
+   * cut them short.
    */
   const driveAll = (host: BatchHost | undefined) =>
     Effect.gen(function*() {
@@ -375,7 +378,6 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
 
       const inHost = <A, E, R>(self: Effect.Effect<A, E, R>) =>
         host === undefined ? self : Effect.updateService(self, ReplayCli.Service, (cli) => ({ ...cli, run: host.run }))
-      // On a fiber of its own, so a stop can wait for it and then cut it short.
       const running = yield* Effect.forkChild(
         Effect.forEach(cells, one, { concurrency: "unbounded", discard: true }).pipe(
           Effect.provideService(ReplayCli.Environment, env),
@@ -404,11 +406,9 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
       return { value: undefined, interrupted } satisfies LaneBatch.Driven<void>
     })
 
-  // The lane's batch process stands first (it serves what the SUT asks of its
-  // peers), then its SUT; both are given back whichever way the batch ends.
   const ended = yield* LaneBatch.run({
     lane: options.lane,
-    row: { ...request.owner, lane: options.lane, cells: request.cells.map(cellName) },
+    row: { ...request.owner, lane: options.lane, cells: cells.map(cellName) },
     stand: merged === undefined
       ? undefined
       : { under: runtime, rowsDir: merged, memoryMax: options.memoryMax, cells: limits.cells },

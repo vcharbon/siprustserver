@@ -98,6 +98,36 @@ describe.skipIf(!Server.served)("Batches", () => {
       ])
     })))
 
+  it("closes a gone owner's open batches as abandoned, leaving its ended ones and other owners' as they were", () =>
+    withStore(Effect.gen(function*() {
+      const batches = yield* Batches.Service
+      const sweeps = yield* Sweeps.Service
+      const job = yield* campaignJob
+      const other = yield* campaignJob
+      const ended = yield* batches.open({ jobId: job, lane: "paused", cells: ["a"] })
+      yield* batches.close(ended, null)
+      const cut = yield* batches.open({ jobId: job, lane: "paused", attempt: 2, cells: ["a"] })
+      const running = yield* batches.open({ jobId: other, lane: "paused", cells: ["z"] })
+      expect(yield* batches.abandon({ jobId: job }, "abandoned: gone")).toEqual([cut])
+      expect((yield* batches.ofJob(job)).map((row) => [row.id, row.detail, row.finishedAt !== null])).toEqual([
+        [ended, null, true],
+        [cut, "abandoned: gone", true]
+      ])
+      expect((yield* batches.ofJob(other)).map((row) => [row.id, row.finishedAt])).toEqual([[running, null]])
+      const sweep = yield* sweeps.open({
+        lane: "paused",
+        universe: "named",
+        selection: "x",
+        captures: 1,
+        concurrency: 1,
+        batchSize: 2,
+        memoryMax: "1G"
+      })
+      const swept = yield* batches.open({ sweepId: sweep, lane: "paused", cells: ["x#1"] })
+      expect(yield* batches.abandon({ sweepId: sweep }, "abandoned: gone")).toEqual([swept])
+      expect((yield* batches.ofJob(other)).map((row) => row.finishedAt)).toEqual([null])
+    })))
+
   it("refuses a batch with no owner, and drops a job's batches with the job", () =>
     withStore(Effect.gen(function*() {
       const batches = yield* Batches.Service

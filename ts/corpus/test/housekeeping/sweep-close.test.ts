@@ -1,9 +1,9 @@
 /**
  * Closing a sweep whose process is gone: its open runs closed with the
- * reaper's detail and the sweep ended, on the two pieces of evidence the
+ * reaper's detail, its open batches as abandoned, and the sweep ended, on the two pieces of evidence the
  * reaper asks for — and refused, closing nothing, where either is missing.
  */
-import { Jobs, Runs, Sweeps } from "@sip/store"
+import { Batches, Jobs, Runs, Sweeps } from "@sip/store"
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -11,7 +11,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { DETAIL } from "../../src/housekeeping/reap.js"
+import { BATCH_DETAIL, DETAIL } from "../../src/housekeeping/reap.js"
 import { close, QUIET_MINUTES } from "../../src/housekeeping/sweep-close.js"
 
 let root = ""
@@ -37,6 +37,7 @@ const bundle = (name: string, minutes: number): string => {
 
 interface Seen {
   abandoned: Array<[ReadonlyArray<number>, string]>
+  batches: Array<[Batches.Owner, string]>
   finished: Array<number>
   closedJobs: Array<number>
 }
@@ -62,7 +63,7 @@ const store = (
   open: ReadonlyArray<Runs.Abandonable>,
   options: { readonly finishedAt?: string; readonly job?: Jobs.Row } = {}
 ) => {
-  const seen: Seen = { abandoned: [], finished: [], closedJobs: [] }
+  const seen: Seen = { abandoned: [], batches: [], finished: [], closedJobs: [] }
   const unused = Effect.die(new Error("closing a sweep asked the store the wrong question"))
   const layer = Layer.mergeAll(
     Layer.succeed(Sweeps.Service, Sweeps.Service.of({
@@ -78,6 +79,13 @@ const store = (
           return ids.length
         })
     } as unknown as Runs.Interface),
+    Layer.succeed(Batches.Service, {
+      abandon: (owner: Batches.Owner, detail: string) =>
+        Effect.sync(() => {
+          seen.batches.push([owner, detail])
+          return []
+        })
+    } as unknown as Batches.Interface),
     Layer.succeed(Jobs.Service, {
       running: Effect.succeed(options.job === undefined ? [] : [options.job]),
       close: (id: number) => Effect.sync(() => void seen.closedJobs.push(id))
@@ -86,7 +94,7 @@ const store = (
   return { layer, seen }
 }
 
-const run = (layer: Layer.Layer<Sweeps.Service | Runs.Service | Jobs.Service>) =>
+const run = (layer: Layer.Layer<Sweeps.Service | Runs.Service | Jobs.Service | Batches.Service>) =>
   Effect.runPromise(close(SWEEP, NOW).pipe(Effect.provide(Layer.merge(layer, NodeServices.layer))))
 
 describe("closing a sweep whose process is gone", () => {
@@ -97,6 +105,7 @@ describe("closing a sweep whose process is gone", () => {
     ])
     expect(await run(layer)).toEqual({ _tag: "closed", runs: [11, 12], job: null })
     expect(seen.abandoned).toEqual([[[11, 12], DETAIL]])
+    expect(seen.batches).toEqual([[{ sweepId: SWEEP }, BATCH_DETAIL]])
     expect(seen.finished).toEqual([SWEEP])
   })
 
@@ -105,6 +114,7 @@ describe("closing a sweep whose process is gone", () => {
     const answer = await run(layer)
     expect(answer._tag).toBe("refused")
     expect(seen.abandoned).toEqual([])
+    expect(seen.batches).toEqual([])
     expect(seen.finished).toEqual([])
   })
 

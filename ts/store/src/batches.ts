@@ -1,11 +1,13 @@
 /**
  * The BATCH: the cells one lane runs between a stand and a drain, as a row of
  * its own under the job that drove it, or under its sweep where the replay is
- * no job. Its window opens when the batch starts and closes once its end gate
- * has read; a row still open has not ended (or its process was cut). A retry
- * of failed cells is a batch of its own, its `attempt` above 1. Its `detail`
- * is what its end said of the batch rather than of a cell: a SUT left dirty,
- * a dead batch process, cells a stop interrupted.
+ * no job. Its window opens when the batch starts and closes once what the
+ * lane stood for it (its SUT, its batch process) is given back; a row still
+ * open has not ended, unless its owner was closed as gone, which closes it
+ * as abandoned. A retry of failed cells is a batch of its own, its `attempt`
+ * above 1. Its `detail` is what its end said of the batch rather than of a
+ * cell: a SUT left dirty, a dead batch process, an end gate that wrote no end
+ * line, cells a stop interrupted.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -45,6 +47,8 @@ export interface Interface {
   readonly open: (request: OpenRequest) => Effect.Effect<number, SqlError>
   /** The batch ended now, with what its end said of it (`null` clean). */
   readonly close: (id: number, detail: string | null) => Effect.Effect<void, SqlError>
+  /** Every batch of `owner`'s job, or of its sweep, still open, closed now with `detail`; the rows closed. */
+  readonly abandon: (owner: Owner, detail: string) => Effect.Effect<ReadonlyArray<number>, SqlError>
   /** A job's batches, in the order they started. */
   readonly ofJob: (jobId: number) => Effect.Effect<ReadonlyArray<Row>, SqlError>
   /** A sweep's batches, in the order they started. */
@@ -96,6 +100,16 @@ export const layer = Layer.effect(
       yield* sql`UPDATE batches SET finished_at = now(), detail = ${detail} WHERE id = ${id}`
     })
 
+    const abandon = Effect.fn("Batches.abandon")(function*(owner: Owner, detail: string) {
+      const rows = yield* sql<{ id: string }>`
+        UPDATE batches SET finished_at = now(), detail = ${detail}
+        WHERE finished_at IS NULL
+          AND (job_id = ${owner.jobId ?? null} OR sweep_id = ${owner.sweepId ?? null})
+        RETURNING id
+      `
+      return rows.map((row) => Number(row.id)).sort((a, b) => a - b)
+    })
+
     const ofJob = Effect.fn("Batches.ofJob")(function*(jobId: number) {
       const rows = yield* sql<BatchRow>`SELECT * FROM batches WHERE job_id = ${jobId} ORDER BY id`
       return rows.map(rowOf)
@@ -106,6 +120,6 @@ export const layer = Layer.effect(
       return rows.map(rowOf)
     })
 
-    return Service.of({ open, close, ofJob, ofSweep })
+    return Service.of({ open, close, abandon, ofJob, ofSweep })
   })
 )

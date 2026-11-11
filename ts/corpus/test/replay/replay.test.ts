@@ -30,7 +30,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { Boxing, CaseLayout, CellHost, Identity, LaneHosting, Tools } from "../../src/deployment/index.js"
 import type { Options } from "../../src/options.js"
 import { TERMINATED } from "../../src/replay/cell-trim.js"
-import { planWork } from "../../src/replay/plan.js"
+import * as Content from "../../src/content/content.js"
+import { cellsOf, planWork } from "../../src/replay/plan.js"
 import { phase, type StandBatch } from "../../src/replay/replay.js"
 
 const SCRATCH = await scratch("corpus_replay_test")
@@ -202,12 +203,21 @@ const fakeDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runD
 
 const replay = (
   lane: string,
-  extra: { readonly host?: StandBatch; readonly concurrency?: number; readonly batchSize?: number } = {}
+  extra: {
+    readonly host?: StandBatch
+    readonly concurrency?: number
+    readonly batchSize?: number
+    /** A capture whose cases' cache entries are left unreadable, so the batch cannot materialise it. */
+    readonly breaking?: string
+  } = {}
 ) =>
   withStore(
     Effect.gen(function*() {
       const opts = options(lane, extra.concurrency, extra.batchSize)
       const captures = yield* planWork([{ capture: ONE, set: { kind: "full" } }, { capture: TWO, set: { kind: "full" } }], prep, 2)
+      for (const ref of cellsOf(captures)) {
+        if (ref.capture === extra.breaking) fs.mkdirSync(Content.caseDir(sessions, ref.caseHash), { recursive: true })
+      }
       const done = yield* phase({
         captures,
         options: opts,
@@ -286,5 +296,13 @@ describe.skipIf(!served)("the replay phase", () => {
     expect(batches.flatMap((row) => row.cells).sort()).toEqual([`${ONE}#${ONE}-a@key`, `${ONE}#${ONE}-b@key`, `${TWO}#${TWO}-a@key`])
     for (const row of batches) expect(Date.parse(row.finishedAt!)).toBeGreaterThanOrEqual(Date.parse(row.startedAt))
     expect(Date.parse(batches[1]!.startedAt)).toBeGreaterThanOrEqual(Date.parse(batches[0]!.finishedAt!))
+  })
+
+  it("names in a batch's row only the cells it drove, not those of a capture it could not materialise", async () => {
+    const { done, rows, batches } = await replay(PAUSED, { breaking: TWO })
+    expect(rows.map((row) => [row.capture, row.status])).toEqual([[ONE, "done"], [TWO, "error"]])
+    expect(driven.map((cell) => cell.id).sort()).toEqual([`${ONE}-a`, `${ONE}-b`])
+    expect(done.batches).toBe(1)
+    expect(batches.map((row) => [...row.cells].sort())).toEqual([[`${ONE}#${ONE}-a@key`, `${ONE}#${ONE}-b@key`]])
   })
 })

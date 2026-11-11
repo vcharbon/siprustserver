@@ -5,7 +5,7 @@
  * running one is left alone.
  */
 import { NodeServices } from "@effect/platform-node"
-import { Jobs, Runs } from "@sip/store"
+import { Batches, Jobs, Runs } from "@sip/store"
 import * as Effect from "effect/Effect"
 import type * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
@@ -231,7 +231,21 @@ describe("reaping jobs", () => {
 
     const closed: Array<[number, Jobs.CloseRequest]> = []
     const abandoned: Array<[ReadonlyArray<number>, string]> = []
+    const batchesOf: Array<[Batches.Owner, string]> = []
     const store = Layer.mergeAll(
+      Layer.succeed(
+        Batches.Service,
+        Batches.Service.of({
+          open: () => refuse,
+          close: () => refuse,
+          abandon: (owner, detail) => Effect.sync(() => {
+            batchesOf.push([owner, detail])
+            return []
+          }),
+          ofJob: () => refuse,
+          ofSweep: () => refuse
+        })
+      ),
       Layer.succeed(
         Jobs.Service,
         Jobs.Service.of({
@@ -287,15 +301,18 @@ describe("reaping jobs", () => {
       expect(reaped).toEqual([{ id: 4, close: { status: "died", exit: null }, runs: [7, 8] }])
       expect(closed).toEqual([[4, { status: "died", exit: null }]])
       expect(abandoned).toEqual([[[7, 8], Reap.JOB_DETAIL]])
+      expect(batchesOf).toEqual([[{ jobId: 4 }, Reap.BATCH_DETAIL]])
       expect(Reap.jobLines(reaped, false)).toEqual([
         "[cleanup] job 4 reads died: its process is gone; 2 open run(s) closed"
       ])
       // A dry run rules the same and closes nothing.
       closed.length = 0
       abandoned.length = 0
+      batchesOf.length = 0
       expect(await Effect.runPromise(Reap.reapJobs(true).pipe(Effect.provide(Layer.merge(store, NodeServices.layer))))).toHaveLength(1)
       expect(closed).toEqual([])
       expect(abandoned).toEqual([])
+      expect(batchesOf).toEqual([])
     } finally {
       process.kill(-alive.pid, "SIGKILL")
     }

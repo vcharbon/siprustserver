@@ -3,14 +3,17 @@
  * batch process and SUT: the lane stands before the collectors open, the
  * cells run on what it stood, the end gate reads before the collectors close
  * and both are given back last; a dead process takes no gate and leaves the
- * batch unjudged; a lane that stands nothing still brackets its cells; a
- * batch that fails still closes its row; a retry is a row of its own.
+ * batch unjudged; an end gate that wrote no end line leaves it unjudged, its
+ * row saying so; a gate's leak and a dead SUT are both said; a lane that
+ * stands nothing still brackets its cells; a batch that fails still closes
+ * its row; a batch filed under no owner writes no row.
  *
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  */
 import { Batches, Client, Jobs } from "@sip/store"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
 import * as Effect from "effect/Effect"
+import { SqlClient } from "effect/unstable/sql/SqlClient"
 import * as Layer from "effect/Layer"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { LaneHosting } from "../../src/deployment/index.js"
@@ -24,22 +27,25 @@ const PAUSED = "paused"
 
 let events: Array<string> = []
 let hostDied: string | undefined
+let gateRead: string | undefined
+let hostJudged = true
+let sutDied: string | undefined
 
 const host: BatchHost = {
   run: () => Effect.die("unused"),
   died: () => hostDied,
   end: Effect.sync(() => {
     events.push("gate")
-    return undefined
+    return gateRead
   }),
   contexts: () => undefined,
   kill: Effect.sync(() => void events.push("killed")),
-  judged: () => true
+  judged: () => hostJudged
 }
 
 const sut: SutHandle = {
   metrics: undefined,
-  died: () => undefined,
+  died: () => sutDied,
   stop: Effect.sync(() => void events.push("sut stopped"))
 }
 
@@ -59,7 +65,7 @@ const hosting = LaneHosting.layerWith({
   preflight: () => Effect.succeed(null)
 })
 
-const withStore = <A, E>(effect: Effect.Effect<A, E, Batches.Service | Jobs.Service | LaneHosting.Service>): Promise<A> =>
+const withStore = <A, E>(effect: Effect.Effect<A, E, Batches.Service | Jobs.Service | LaneHosting.Service | SqlClient>): Promise<A> =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(Layer.mergeAll(Batches.layer, Jobs.layer, hosting)),
@@ -87,6 +93,15 @@ const collect = Effect.sync(() => {
 
 const stand: LaneBatch.Stand = { under: "/tmp/unused", memoryMax: "1G", cells: 2, provisioned: { routing: "x" }, sutVariables: { A: "1" } }
 
+/** The lane's batch ends as `said`, everything else clean. */
+const endingAs = (said: { readonly gate?: string; readonly judged?: boolean; readonly sut?: string; readonly died?: string }) => {
+  events = []
+  hostDied = said.died
+  gateRead = said.gate
+  hostJudged = said.judged ?? true
+  sutDied = said.sut
+}
+
 const driveOn = (lane: string) => (stood: LaneBatch.Stood) =>
   Effect.sync(() => {
     events.push(`cells ran${stood.host === undefined ? "" : " in the batch process"}`)
@@ -95,8 +110,7 @@ const driveOn = (lane: string) => (stood: LaneBatch.Stood) =>
 
 describe.skipIf(!served)("one batch on a lane", () => {
   it("stands the lane, opens the collectors, runs the cells, reads the gate, closes the collectors, then gives back", async () => {
-    events = []
-    hostDied = undefined
+    endingAs({})
     const { ended, rows } = await withStore(Effect.gen(function*() {
       const job = yield* jobOf
       const ended = yield* LaneBatch.run({
@@ -124,8 +138,7 @@ describe.skipIf(!served)("one batch on a lane", () => {
   })
 
   it("reads no gate of a dead process, leaving the batch unjudged and its row saying why", async () => {
-    events = []
-    hostDied = "the batch process exited 9"
+    endingAs({ died: "the batch process exited 9" })
     const { ended, rows } = await withStore(Effect.gen(function*() {
       const job = yield* jobOf
       const ended = yield* LaneBatch.run({ lane: STANDS, row: { jobId: job, lane: STANDS, cells: ["a"] }, stand, drive: driveOn(STANDS) })
@@ -136,29 +149,61 @@ describe.skipIf(!served)("one batch on a lane", () => {
     expect(rows.map((row) => row.detail)).toEqual(["the batch process exited 9"])
   })
 
-  it("brackets the cells of a lane that stands nothing, and writes a retry as a row of its own", async () => {
-    events = []
-    const rows = await withStore(Effect.gen(function*() {
+  it("leaves a batch whose end gate wrote no end line unjudged, its row saying so", async () => {
+    endingAs({ judged: false })
+    const { ended, rows } = await withStore(Effect.gen(function*() {
       const job = yield* jobOf
-      yield* LaneBatch.run({ lane: PAUSED, row: { jobId: job, lane: PAUSED, cells: ["a", "b"] }, stand, collect, drive: driveOn(PAUSED) })
-      yield* LaneBatch.run({ lane: PAUSED, row: { jobId: job, lane: PAUSED, attempt: 2, cells: ["b"] }, stand, collect, drive: driveOn(PAUSED) })
-      return yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job))
+      const ended = yield* LaneBatch.run({ lane: STANDS, row: { jobId: job, lane: STANDS, cells: ["a"] }, stand, drive: driveOn(STANDS) })
+      return { ended, rows: yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job)) }
+    }))
+    expect(events).toContain("gate")
+    expect(ended).toMatchObject({ dirty: undefined, deadHost: undefined, judged: false, hosted: true })
+    expect(rows.map((row) => row.detail)).toEqual([LaneBatch.NO_END_LINE])
+  })
+
+  it("says both what the gate read the SUT holding and how the managed SUT died", async () => {
+    endingAs({ gate: "the SUT still held a call", sut: "the SUT exited 137" })
+    const { ended, rows } = await withStore(Effect.gen(function*() {
+      const job = yield* jobOf
+      const ended = yield* LaneBatch.run({ lane: STANDS, row: { jobId: job, lane: STANDS, cells: ["a"] }, stand, drive: driveOn(STANDS) })
+      return { ended, rows: yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job)) }
+    }))
+    expect(ended).toMatchObject({ dirty: "the SUT still held a call; the SUT exited 137", judged: true })
+    expect(rows.map((row) => row.detail)).toEqual(["the SUT still held a call; the SUT exited 137"])
+  })
+
+  it("brackets the cells of a lane that stands nothing", async () => {
+    endingAs({})
+    const { ended, rows } = await withStore(Effect.gen(function*() {
+      const job = yield* jobOf
+      const ended = yield* LaneBatch.run({ lane: PAUSED, row: { jobId: job, lane: PAUSED, cells: ["a", "b"] }, stand, collect, drive: driveOn(PAUSED) })
+      return { ended, rows: yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job)) }
     }))
     expect(events.filter((event) => event.startsWith("collectors") || event.startsWith("cells"))).toEqual([
       "collectors opened",
       "cells ran",
-      "collectors closed",
-      "collectors opened",
-      "cells ran",
       "collectors closed"
     ])
-    expect(rows.map((row) => [row.attempt, row.cells])).toEqual([[1, ["a", "b"]], [2, ["b"]]])
-    expect(rows.every((row) => row.finishedAt !== null && row.detail === null)).toBe(true)
+    expect(ended).toMatchObject({ value: PAUSED, judged: true, hosted: false })
+    expect(rows.map((row) => [row.cells, row.detail, row.finishedAt !== null])).toEqual([[["a", "b"], null, true]])
+  })
+
+  it("writes no row for a batch filed under no owner, and still runs it", async () => {
+    endingAs({})
+    const { ended, before, after } = await withStore(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      const count = Effect.map(sql<{ n: string }>`SELECT count(*) AS n FROM batches`, (rows) => Number(rows[0]!.n))
+      const before = yield* count
+      const ended = yield* LaneBatch.run({ lane: STANDS, stand, collect, drive: driveOn(STANDS) })
+      return { ended, before, after: yield* count }
+    }))
+    expect(ended).toMatchObject({ value: STANDS, judged: true, hosted: true })
+    expect(events).toContain("cells ran in the batch process")
+    expect(after).toBe(before)
   })
 
   it("closes the row of a batch whose cells failed, the failure as its detail, and gives the lane back", async () => {
-    events = []
-    hostDied = undefined
+    endingAs({})
     const { failed, rows } = await withStore(Effect.gen(function*() {
       const job = yield* jobOf
       const failed = yield* Effect.flip(LaneBatch.run({

@@ -1,18 +1,20 @@
 /**
  * ONE BATCH on a lane, whoever drives its cells (a capture replay, a
- * campaign): its row opened in the store (`@sip/store` `Batches`), what the
- * lane stands for it stood (`LaneHosting.standBatch`, then
- * `LaneHosting.standSut`), its collectors opened, its cells driven by the
- * caller, its end gate read, its collectors closed, then the SUT and the
- * batch process given back and the row closed with what the end said of the
- * batch. On a lane that stands nothing a batch is the cells its driver runs
- * in one pass, and its collectors still bracket it.
+ * campaign): its row opened in the store (`@sip/store` `Batches`) where its
+ * caller files one, what the lane stands for it stood (its batch process
+ * first, `LaneHosting.standBatch`, as it serves what the SUT asks of its
+ * peers, then `LaneHosting.standSut`), its collectors opened, its cells
+ * driven by the caller, its end gate read, its collectors closed, then the
+ * SUT and the batch process given back and the row closed with what the end
+ * said of the batch. On a lane that stands nothing a batch is the cells its
+ * driver runs in one pass, and its collectors still bracket it.
  *
  * The end gate is the batch process's, read once every cell ended: a process
  * that died is a cause of its own and takes no gate, a batch whose stop
  * interrupted cells takes none either, and a managed SUT that died is
- * reported as itself, never as a leak. A batch that fails or is interrupted
- * still closes its row, the failure as its detail.
+ * reported beside what the gate read. A batch whose end did not run to its
+ * end line is unjudged, and its row says so. A batch that fails or is
+ * interrupted still closes its row, the failure as its detail.
  */
 import { Batches } from "@sip/store"
 import * as Cause from "effect/Cause"
@@ -73,8 +75,8 @@ export interface Driven<A> {
 /** What one batch is asked to do: its cells driven under `E`/`R`, its collectors opened under `EC`/`RO`, closed under `RC`. */
 export interface Request<A, E, R, EC = never, RO = never, RC = never> {
   readonly lane: string
-  /** The batch's row: its owner, its attempt, its cells by name. */
-  readonly row: Batches.OpenRequest
+  /** The batch's row: its owner, its attempt, its cells by name; none is written where absent. */
+  readonly row?: Batches.OpenRequest
   /** What the lane stands; `undefined` stands nothing (a batch left with no cell to run). */
   readonly stand: Stand | undefined
   /** Who stands the batch process, where not the deployment's `LaneHosting`. */
@@ -90,7 +92,7 @@ export interface Request<A, E, R, EC = never, RO = never, RC = never> {
 /** What one batch came to. */
 export interface Ended<A> {
   readonly value: A
-  /** What the SUT was still holding, or how a managed SUT died; `undefined` where it let go of everything. */
+  /** What the end gate read the SUT still holding, and how a managed SUT died; `undefined` where neither. */
   readonly dirty: string | undefined
   /** How the batch process died, or `undefined` where it served the whole batch. */
   readonly deadHost: string | undefined
@@ -104,21 +106,32 @@ export interface Ended<A> {
   readonly hosted: boolean
 }
 
-/** What the batch's end said of the batch rather than of a cell; `null` on a clean end. */
-export const detailOf = (ended: Pick<Ended<unknown>, "dirty" | "deadHost" | "interrupted">): string | null => {
-  const said = [
+/** What an unjudged batch's end states where nothing else says why. */
+export const NO_END_LINE = "the batch's end gate wrote no end line"
+
+/** The parts said, joined; `undefined` where none is. */
+const joined = (parts: ReadonlyArray<string | undefined>): string | undefined => {
+  const said = parts.filter((part): part is string => part !== undefined)
+  return said.length === 0 ? undefined : said.join("; ")
+}
+
+/**
+ * What the batch's end said of the batch rather than of a cell; `null` on a
+ * clean end. An unjudged batch always says why, {@link NO_END_LINE} where
+ * nothing else does.
+ */
+export const detailOf = (ended: Pick<Ended<unknown>, "dirty" | "deadHost" | "interrupted" | "judged">): string | null =>
+  joined([
     ended.deadHost,
     ended.dirty,
     ended.interrupted > 0 ? `${ended.interrupted} cell(s) interrupted` : undefined
-  ].filter((part): part is string => part !== undefined)
-  return said.length === 0 ? null : said.join("; ")
-}
+  ]) ?? (ended.judged ? null : NO_END_LINE)
 
 /** Why a batch ended without an answer, as its row states it. */
 const failureOf = (cause: Cause.Cause<unknown>): string =>
   Cause.hasInterruptsOnly(cause) ? "interrupted" : Cause.pretty(cause).split("\n")[0] ?? "failed"
 
-/** One batch, its row open from before the stand until what it stood is given back. */
+/** One batch, its row (where it files one) open from before the stand until what it stood is given back. */
 export const run = <A, E, R, EC = never, RO = never, RC = never>(
   request: Request<A, E, R, EC, RO, RC>
 ): Effect.Effect<
@@ -127,6 +140,7 @@ export const run = <A, E, R, EC = never, RO = never, RC = never>(
   R | Exclude<RO, Scope.Scope> | RC | LaneHosting.Service | Batches.Service
 > =>
   Effect.gen(function*() {
+    if (request.row === undefined) return yield* Effect.scoped(stood(request))
     const batches = yield* Batches.Service
     const id = yield* batches.open(request.row)
     const ended = yield* Effect.scoped(stood(request)).pipe(
@@ -161,7 +175,7 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
     const deadHost = host?.died()
     const reapedBy = host === undefined || driven.interrupted > 0 ? Effect.succeed(undefined) : host.end
     const hostDirty = deadHost === undefined ? yield* reapedBy : undefined
-    const dirty = sut?.died() ?? hostDirty
+    const dirty = joined([hostDirty, sut?.died()])
     const judged = host === undefined || (deadHost === undefined && driven.interrupted === 0 && (host.judged?.() ?? true))
     const contexts = host?.contexts()
     if (close !== undefined) yield* close

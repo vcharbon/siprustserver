@@ -1,6 +1,7 @@
 /**
  * Closing a SWEEP whose process is gone (a campaign stopped from outside, a
- * kill): its open runs land `error` with the reaper's own detail, its job —
+ * kill): its open runs land `error` with the reaper's own detail, its open
+ * batches close as abandoned, its job —
  * where it ran as one — closes as its record says, and the sweep row gets its
  * end, so the passes that read `finished_at` stop treating it as in flight.
  *
@@ -10,10 +11,10 @@
  * written within {@link QUIET_MINUTES}. Either missing, it refuses and closes
  * nothing.
  */
-import { Jobs, Runs, Sweeps } from "@sip/store"
+import { Batches, Jobs, Runs, Sweeps } from "@sip/store"
 import * as Effect from "effect/Effect"
 import { liveness } from "../jobs/job.js"
-import { DETAIL, lastWrite } from "./reap.js"
+import { BATCH_DETAIL, DETAIL, lastWrite } from "./reap.js"
 
 /** How long every open bundle of the sweep must have gone unwritten. */
 export const QUIET_MINUTES = 10
@@ -28,6 +29,7 @@ export const close = Effect.fn("SweepClose.close")(function*(sweepId: number, no
   const sweeps = yield* Sweeps.Service
   const runs = yield* Runs.Service
   const jobs = yield* Jobs.Service
+  const batches = yield* Batches.Service
   const row = (yield* sweeps.list(Number.MAX_SAFE_INTEGER)).find((one) => one.id === sweepId)
   if (row === undefined) return { _tag: "refused", why: `no sweep ${sweepId}` } satisfies Closed
   if (row.finishedAt !== null) {
@@ -51,6 +53,7 @@ export const close = Effect.fn("SweepClose.close")(function*(sweepId: number, no
   }
   const ids = open.map((run) => run.id)
   yield* runs.abandon(ids, DETAIL)
+  yield* batches.abandon(job === undefined ? { sweepId } : { sweepId, jobId: job.id }, BATCH_DETAIL)
   if (job !== undefined && state?._tag === "ended") yield* jobs.close(job.id, state.close)
   yield* sweeps.finish(sweepId)
   return { _tag: "closed", runs: ids, job: job?.id ?? null } satisfies Closed

@@ -26,10 +26,10 @@
  * A JOB is reaped on one piece of evidence, because a job has a process: a
  * `running` row whose process is gone ended without closing itself — `failed`
  * or `done` with the exit its supervisor recorded, `died` where none was — and
- * the runs it opened and left open are closed with it, whatever their
- * bundles' age: nobody is coming back for them.
+ * the runs and batches it opened and left open are closed with it, whatever
+ * their bundles' age: nobody is coming back for them.
  */
-import { Jobs, Runs } from "@sip/store"
+import { Batches, Jobs, Runs } from "@sip/store"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
@@ -47,6 +47,9 @@ export const HORIZON_HOURS = 12
 export const DETAIL = "abandoned: no process closed this run, and its bundle stopped changing"
 
 export const JOB_DETAIL = "abandoned: the job that opened this run is gone"
+
+/** What a batch left open by a job or sweep that is gone states as its end. */
+export const BATCH_DETAIL = "abandoned: the process that ran this batch is gone"
 
 /** A path's mtime, Unix milliseconds; 0 where it has none to read. */
 const mtimeOf = (fs: FileSystem.FileSystem, file: string) =>
@@ -114,11 +117,12 @@ export interface ReapedJob {
 
 /**
  * Every `running` job whose process is gone, closed as its record says, its
- * open runs closed with it. A dry run rules and closes nothing.
+ * open runs and batches closed with it. A dry run rules and closes nothing.
  */
 export const reapJobs = Effect.fn("Reap.reapJobs")(function*(dryRun: boolean) {
   const jobs = yield* Jobs.Service
   const runs = yield* Runs.Service
+  const batches = yield* Batches.Service
   const reaped: Array<ReapedJob> = []
   for (const row of yield* jobs.running) {
     const state = yield* liveness(row)
@@ -127,6 +131,7 @@ export const reapJobs = Effect.fn("Reap.reapJobs")(function*(dryRun: boolean) {
     reaped.push({ id: row.id, close: state.close, runs: open })
     if (dryRun) continue
     yield* runs.abandon(open, JOB_DETAIL)
+    yield* batches.abandon({ jobId: row.id }, BATCH_DETAIL)
     yield* jobs.close(row.id, state.close)
   }
   return reaped as ReadonlyArray<ReapedJob>

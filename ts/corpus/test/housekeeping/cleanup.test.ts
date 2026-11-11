@@ -11,7 +11,7 @@
  * `@sip/store`'s `abandon.test.ts` and `cuts.test.ts`.
  */
 import { NodeServices } from "@effect/platform-node"
-import { Cuts, Jobs, Runs } from "@sip/store"
+import { Batches, Cuts, Jobs, Runs } from "@sip/store"
 import * as Effect from "effect/Effect"
 import type * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
@@ -87,7 +87,7 @@ const bundle = (stem: string, id: number): string => {
 }
 
 interface Store {
-  readonly layer: Layer.Layer<Runs.Service | Cuts.Service | Jobs.Service>
+  readonly layer: Layer.Layer<Runs.Service | Cuts.Service | Jobs.Service | Batches.Service>
   readonly abandoned: Array<ReadonlyArray<number>>
   /** The floor prep every cache sweep asked the cut store for. */
   readonly floors: Array<number>
@@ -156,6 +156,16 @@ const store = (shape: StoreShape): Store => {
       ),
       // No job runs in these trees: the job pass finds nothing to rule on.
       Layer.succeed(
+        Batches.Service,
+        Batches.Service.of({
+          open: () => refuse,
+          close: () => refuse,
+          abandon: () => refuse,
+          ofJob: () => refuse,
+          ofSweep: () => refuse
+        })
+      ),
+      Layer.succeed(
         Jobs.Service,
         Jobs.Service.of({
           create: () => refuse,
@@ -207,7 +217,7 @@ const store = (shape: StoreShape): Store => {
 }
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, Runs.Service | Cuts.Service | Jobs.Service | LaneHosting.Service | FileSystem.FileSystem>,
+  effect: Effect.Effect<A, E, Runs.Service | Cuts.Service | Jobs.Service | Batches.Service | LaneHosting.Service | FileSystem.FileSystem>,
   on: Store
 ) =>
   Effect.runPromise(effect.pipe(Effect.provide(Layer.mergeAll(on.layer, hosting, NodeServices.layer))))
