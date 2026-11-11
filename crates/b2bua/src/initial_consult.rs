@@ -51,12 +51,13 @@ pub enum Consulted {
 /// a-leg (from [`crate::initial_invite::build_initial_call`]), and `a_invite` is
 /// its snapshot rebuilt; `invite_wire` is the datagram it arrived as, which only
 /// the router holds (the call carries a header snapshot, not bytes). `now_ms` is
-/// the turn's timestamp — every CDR entry and timer deadline this handler mints
-/// reads it, so it is taken once; `clock` measures the decision round trip,
-/// whose two ends are by definition not the same instant. `budget` bounds every
-/// await of the consult and the failover chain behind it. `cancelled` reads
-/// whether the caller CANCELed the setup; it is read once, after the consult's
-/// last await.
+/// the turn's timestamp, the INVITE's instant: the decision and the route read
+/// it, so the setup deadlines run from the INVITE. `clock` measures the
+/// decision round trip, and the services seed at its reading once the route is
+/// applied, so a deadline a seed arms runs from the legs it dials. `budget`
+/// bounds every await of the consult and the failover chain behind it.
+/// `cancelled` reads whether the caller CANCELed the setup; it is read once,
+/// after the consult's last await.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_initial_invite(
     mut call: Call,
@@ -127,7 +128,7 @@ pub async fn handle_initial_invite(
     // folding any seed (cursor + data + initial actions) through the normal
     // executor. A dormant service (`init` → `None`) and the empty-service list
     // both leave the result untouched.
-    let mut exec = ActionExecutor { config, owners, turn, now_ms };
+    let mut exec = ActionExecutor { config, owners, turn, now_ms: clock.now_ms() };
     let setup_event = setup_event(&result.call, a_invite);
     let seeded = seed_services(result, services, &mut exec, &setup_event, "a", Direction::FromA);
     Consulted::Applied(Box::new(seeded))

@@ -54,7 +54,8 @@ pub(super) enum Turn {
 /// copy, whose budget only ends its wait for its permits: it asks nothing and
 /// answers at once. Every identifier the turn mints is drawn from `turn`; `datagram` is
 /// the INVITE as it arrived, what a trace activation backfills its `sip.in`
-/// from.
+/// from. The turn closes at the clock's reading after its consult, so a
+/// lifecycle handler's deadline runs from the attempt the consult opened.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn initial_invite_turn(
     ctx: &Arc<RouterCtx>,
@@ -290,7 +291,8 @@ pub(super) async fn initial_invite_turn(
         crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
         &mut turn.notes,
     );
-    let mut exec = ActionExecutor { config: &ctx.config, owners: &owners, turn, now_ms };
+    let closed_ms = ctx.clock.now_ms();
+    let mut exec = ActionExecutor { config: &ctx.config, owners: &owners, turn, now_ms: closed_ms };
     let closed = close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec);
     match crate::caps::hold(&ctx.config.caps, &Gauge::of(&call), Checked::All, turn, closed) {
         Ok(result) => Turn::Result(Box::new(result)),

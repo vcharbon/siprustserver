@@ -49,6 +49,7 @@ mod contactless_invite;
 mod cordon;
 mod coverage_doc;
 mod crossing_2xx_repeat_is_a_write;
+mod deadline_after_slow_decision;
 mod decision_context;
 mod decision_deadline;
 mod decision_lands_on_cancelled_call;

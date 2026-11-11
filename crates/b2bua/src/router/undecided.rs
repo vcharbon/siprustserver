@@ -133,7 +133,8 @@ pub(super) fn notice_of(event: &CallEvent) -> Option<&str> {
 /// the budget spent before the turn ran, its caller is refused unasked. A call
 /// gone, decided meanwhile or whose setup the caller CANCELed asks nothing; a
 /// copy its primary wrote over ([`primary_wrote_since`]) asks nothing, and
-/// applies no answer that returns after that write.
+/// applies no answer that returns after that write. The turn closes at the
+/// clock's reading after its consult, as the initial INVITE's does.
 pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: SetupBudget) {
     let _guard = ctx.state.lock(call_ref).await;
     let Some(call) = ctx.state.peek(call_ref) else { return };
@@ -201,8 +202,13 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str, budget: Set
     let enforced =
         enforce(&ctx.obligations, &call, finalize(handled), now_ms, advertisement, &mut turn.notes);
     let closed = {
-        let mut exec =
-            ActionExecutor { config: &ctx.config, owners: &owners, turn: &mut turn, now_ms };
+        let closed_ms = ctx.clock.now_ms();
+        let mut exec = ActionExecutor {
+            config: &ctx.config,
+            owners: &owners,
+            turn: &mut turn,
+            now_ms: closed_ms,
+        };
         close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)
     };
     let mut result =
