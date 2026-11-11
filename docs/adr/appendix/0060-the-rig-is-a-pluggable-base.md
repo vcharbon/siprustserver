@@ -29,7 +29,7 @@ An executable runs with its own directory as working directory and these variabl
 
 | Variable | Names |
 |---|---|
-| `SIPRIG_CONTEXT` | a JSON file it reads: the scope, its window, the cells (item 6), the lane's parts, its parameters |
+| `SIPRIG_CONTEXT` | a JSON file it reads (`context.v1`): the scope, its window, the cells (item 6), the lane (its name, clock, SIP target and backend, as the base reads them) and its parts, its parameters |
 | `SIPRIG_OUT` | a directory it writes attachment files into |
 | `SIPRIG_STATE` | a directory kept from `open` to `close` of one scope, or from `inject` to `heal` |
 
@@ -348,6 +348,7 @@ schema  = "pack.v1"
 name    = "reference"
 title   = "siprig reference"
 wrapper = "rigref"
+component = "rigref"           # the product's component name; absent, the pack's name
 [image]
 packages = []                  # OS packages the pack's image adds
 binaries = "./bin"             # product binaries, the replay one included when it registers
@@ -358,7 +359,12 @@ sources = ["./cases.ts"]       # modules that yield compiled cells
 [modules]
 deployment = "./deployment.ts" # the pipeline and corpus seams the pack fills
 lanes = "./lanes"              # default lane and part files
+[decides]
+extraction = ["./anonymiser"]  # the pack's paths whose content decides an extraction
+cut = ["./rules"]              # and a cut: a change under one re-runs the step
 ```
+
+Every path the manifest names exists in the pack's tree when the rig path loads it.
 
 ## 17. The reference pack
 
