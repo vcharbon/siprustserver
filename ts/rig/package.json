@@ -1,0 +1,28 @@
+{
+  "name": "@sip/rig",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The rig's plug-in contract: the pack, collector, judge and operation manifests, the rig path they are found on, the collection levels, and the cell description every collector and judge reads.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/contracts": "workspace:*",
+    "@sip/viewer-core": "workspace:*",
+    "effect": "4.0.0-rc.111",
+    "smol-toml": "1.9.1"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -8,6 +8,7 @@ packages:
   - "viewer-app"
   - "corpus"
   - "cli"
+  - "rig"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false
