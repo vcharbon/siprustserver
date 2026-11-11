@@ -7,6 +7,7 @@ import * as path from "node:path"
 import { describe, expect, it } from "vitest"
 import { NodeServices } from "@effect/platform-node"
 import * as Effect from "effect/Effect"
+import { Verification } from "@sip/contracts"
 import * as Bundle from "../src/bundle.js"
 
 const readOf = (dir: string, options?: Bundle.Options): Promise<Bundle.BundleReading> =>
@@ -207,5 +208,28 @@ describe("Bundle.read", () => {
     expect(asked).toEqual([
       [`${CAPTURE}-case2__pivot-replay__fake`, ["rport-echo", "cseq-in-dialog-order"]]
     ])
+  })
+
+  it("states each ran cell's lines, failing it where the rollup does, and none for a cell that did not run", async () => {
+    const cells = byCase(await readOf(RUN))
+    expect(cells.get("case1")!.verifications?.[0]).toMatchObject({
+      name: "call",
+      source: "interpreter",
+      answer: "fail",
+      detail: { step: "s14" }
+    })
+    expect(cells.get("case2")!.verifications?.find((line) => line.name === "rfc-audit")).toMatchObject({
+      answer: "fail",
+      message: expect.stringContaining("rport-echo")
+    })
+    expect(cells.get("case3")!.verifications).toEqual([
+      { name: "call", source: "interpreter", answer: "pass" },
+      { name: "rfc-audit", source: "rfc audit", answer: "pass" }
+    ])
+    expect(cells.get("case5")!.verifications).toBeUndefined()
+    for (const [name, cell] of cells) {
+      if (cell.verifications === undefined) continue
+      expect([name, Verification.finalStatusOf(cell.verifications) === "pass"]).toEqual([name, cell.passed])
+    }
   })
 })

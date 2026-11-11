@@ -12,8 +12,9 @@
  * cut made of one capture), over the content-addressed stores a case rebuilds
  * from — `case_assets`, `ledger_rows`, `flows_documents` and `flows_legs`.
  * Around them: the replay `population`, replay `requests`, the `jobs` that
- * ran them, the `batches` those drove and the `job_events` their runners
- * wrote, and the {@link Current} population setting.
+ * ran them, the `batches` those drove, the `job_events` their runners
+ * wrote, the `verifications` lines of a cell, a batch or a job, and the
+ * {@link Current} population setting.
  *
  * `case_documents` (the v3 case JSON) is shared by both, content-hash deduped
  * so a corpus question is a query and a re-cut or re-run that changed nothing
@@ -829,6 +830,60 @@ const jobEvents = Effect.gen(function*() {
 export const JOB_EVENTS = "14_job_events"
 
 /**
+ * `verifications`: the verification lines (`@sip/contracts` `Verification`)
+ * of a cell (a `case_results` row), a batch or a job, in the order they were
+ * written; `cell_statuses`: the final status of every cell holding a line,
+ * read off its lines (`Verification.finalStatusOf`), never stored.
+ */
+const verifications = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE verifications (
+      id          bigserial PRIMARY KEY,
+      scope       text NOT NULL CHECK (scope IN ('cell', 'batch', 'job')),
+      run_id      bigint,
+      case_id     text,
+      batch_id    bigint REFERENCES batches (id) ON DELETE CASCADE,
+      job_id      bigint REFERENCES jobs (id) ON DELETE CASCADE,
+      ordinal     integer NOT NULL,
+      name        text NOT NULL,
+      source      text NOT NULL,
+      answer      text NOT NULL CHECK (answer IN ('pass', 'fail', 'not-checkable', 'pending')),
+      message     text,
+      detail      jsonb,
+      informative boolean NOT NULL DEFAULT false,
+      waived      boolean NOT NULL DEFAULT false,
+      FOREIGN KEY (run_id, case_id) REFERENCES case_results (run_id, case_id) ON DELETE CASCADE,
+      CHECK ((scope = 'cell') = (run_id IS NOT NULL AND case_id IS NOT NULL)),
+      CHECK ((scope = 'batch') = (batch_id IS NOT NULL)),
+      CHECK ((scope = 'job') = (job_id IS NOT NULL)),
+      CHECK (NOT waived OR answer = 'fail')
+    )
+  `
+  yield* sql`CREATE INDEX verifications_cell_idx ON verifications (run_id, case_id, ordinal) WHERE scope = 'cell'`
+  yield* sql`CREATE INDEX verifications_batch_idx ON verifications (batch_id, ordinal) WHERE scope = 'batch'`
+  yield* sql`CREATE INDEX verifications_job_idx ON verifications (job_id, ordinal) WHERE scope = 'job'`
+  yield* sql`CREATE INDEX verifications_name_idx ON verifications (name, answer)`
+  yield* sql`
+    CREATE VIEW cell_statuses AS
+    SELECT run_id, case_id,
+           CASE
+             WHEN bool_or(answer = 'fail') FILTER (WHERE deciding) THEN
+               CASE WHEN bool_or(answer = 'pending') FILTER (WHERE deciding) THEN 'fail, still verifying' ELSE 'fail' END
+             WHEN bool_or(answer = 'pending') FILTER (WHERE deciding) THEN 'ok so far'
+             WHEN bool_or(answer = 'not-checkable') FILTER (WHERE deciding) THEN 'unverified'
+             ELSE 'pass'
+           END AS status
+    FROM (SELECT run_id, case_id, answer, NOT informative AND NOT waived AS deciding
+          FROM verifications WHERE scope = 'cell') lines
+    GROUP BY run_id, case_id
+  `
+})
+
+/** The key of the migration that holds the verification lines of a cell, a batch and a job. */
+export const VERIFICATIONS = "14_verifications"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -846,7 +901,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [FORCED_RUNS]: forcedRuns,
   [INBOX_JOBS]: inboxJobs,
   [BATCHES]: batches,
-  [JOB_EVENTS]: jobEvents
+  [JOB_EVENTS]: jobEvents,
+  [VERIFICATIONS]: verifications
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

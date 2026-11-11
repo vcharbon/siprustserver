@@ -23,6 +23,7 @@ import {
   Refusals,
   Removal,
   Requests,
+  ResultReset,
   RuleHits,
   Runs,
   RunSets,
@@ -30,6 +31,7 @@ import {
   Sources,
   StoreBinding,
   Sweeps,
+  Verifications,
   Wipe
 } from "@sip/store"
 import * as Effect from "effect/Effect"
@@ -54,6 +56,7 @@ export const services = Layer.provideMerge(
     Measure.layer,
     Refusals.layer,
     Removal.layer,
+    ResultReset.layer,
     StoreBinding.resolver,
     Runs.layer,
     RunSets.layer,
@@ -61,6 +64,7 @@ export const services = Layer.provideMerge(
     RuleHits.layer,
     Sources.layer,
     Sweeps.layer,
+    Verifications.layer,
     Delta.layer
   )
 )

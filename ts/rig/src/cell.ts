@@ -5,6 +5,7 @@
  * wall clock, the claims its case states, the records joined to it so far,
  * the verification lines answered so far, and its directory.
  */
+import { Verification as Verifications } from "@sip/contracts"
 import * as Schema from "effect/Schema"
 
 /** The schema version a cell description states. */
@@ -44,15 +45,9 @@ export const Leg = Schema.Struct({
 })
 export interface Leg extends Schema.Schema.Type<typeof Leg> {}
 
-/** A verification line answered so far (ADR-0060 appendix §8). */
-export const Verification = Schema.Struct({
-  name: Schema.String,
-  source: Schema.String,
-  answer: Schema.Literals(["pass", "fail", "not-checkable", "pending"]),
-  message: Schema.optionalKey(Schema.String),
-  detail: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown))
-})
-export interface Verification extends Schema.Schema.Type<typeof Verification> {}
+/** A verification line answered so far (ADR-0060 appendix §8, `@sip/contracts` `Verification`). */
+export const Verification = Verifications.Verification
+export type Verification = Verifications.Verification
 
 export const Cell = Schema.Struct({
   schema: Schema.Literal(SCHEMA),

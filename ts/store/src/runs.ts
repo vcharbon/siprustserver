@@ -28,6 +28,7 @@ import type { CaseOutcome, CaseResult, CaseRun, Deltas, Provenance, RunStatus, S
 import { UNKNOWN_PROVENANCE } from "./model.js"
 import { type RunIdentity, UNKNOWN_IDENTITY } from "./run-identity.js"
 import * as Sessions from "./sessions.js"
+import * as Verifications from "./verifications.js"
 
 export interface OpenRequest {
   readonly capture: string
@@ -299,6 +300,11 @@ export const layer = Layer.effect(
             error_source = EXCLUDED.error_source,
             body_failing = EXCLUDED.body_failing
         `
+        if (entry.verifications !== undefined) {
+          yield* Verifications.replace({ scope: "cell", runId, caseId: entry.caseId }, entry.verifications).pipe(
+            Effect.provideService(SqlClient, sql)
+          )
+        }
       }
       yield* refreshRollup(runId)
     })

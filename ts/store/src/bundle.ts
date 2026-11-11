@@ -27,6 +27,7 @@ import { Bundle, Confrontation as Records, MainError, StepOrder } from "@sip/con
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
+import { linesOf } from "./cell-lines.js"
 import type { CaseResult, RunStatus } from "./model.js"
 
 const { BAD_BODY, failingBody, mainErrorOf, sourceFaultOf } = MainError
@@ -177,6 +178,9 @@ const findingsOf = (stored: Record<string, unknown> | null): ReadonlyArray<Bundl
   }
 }
 
+/** Whether `rfc.json` states an audit of the cell. */
+const auditedOf = (rfc: Record<string, unknown> | null): boolean => rfc?.["status"] === "audited"
+
 /** The confrontation counts `classification.json` states; none where the cell wrote no counts. */
 const confrontationOf = (classification: Record<string, unknown> | null): Confrontation | undefined => {
   const unknown = classification?.["unknown"]
@@ -260,6 +264,9 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
     const body = failingBody(records)
     const source = findings.filter((finding) => finding.source_fault === true)
     const sourceFault = sourceFaultOf(source)
+    const decoded = verdictOf(verdict)
+    const error = typeof cell.error === "string" ? cell.error : undefined
+    const ran = dir !== undefined && skipped === null && error === undefined
     cases.push({
       caseId,
       passed,
@@ -271,8 +278,8 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
       mainError: mainErrorOf({
         passed,
         skipped,
-        ...(typeof cell.error === "string" ? { error: cell.error } : {}),
-        verdict: verdictOf(verdict),
+        ...(error === undefined ? {} : { error }),
+        verdict: decoded,
         charged,
         source,
         confrontation: confrontationOf(classification),
@@ -282,7 +289,17 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
       }),
       ...(sourceFault === undefined ? {} : { sourceFault }),
       classification,
-      document
+      document,
+      ...(ran
+        ? {
+          verifications: linesOf({
+            passed,
+            verdict: decoded,
+            audit: auditedOf(rfc) ? findings : null,
+            charged
+          })
+        }
+        : {})
     })
   }
   return {

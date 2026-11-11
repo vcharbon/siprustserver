@@ -9,7 +9,7 @@
  * failure is green; an interrupted run is a case's last run for what it
  * landed and never a capture's standing.
  */
-import { MainError as MainErrors } from "@sip/contracts"
+import { MainError as MainErrors, Verification } from "@sip/contracts"
 import * as Schema from "effect/Schema"
 
 export const RunStatus = Schema.Literals(["done", "no-cases", "error", "interrupted"])
@@ -90,7 +90,12 @@ export const CaseResult = Schema.Struct({
   sourceFault: Schema.optionalKey(MainErrors.SourceFault),
   classification: Schema.Unknown,
   /** The v3 case document this case ran, for content-hash storage; null = not captured. */
-  document: Schema.Unknown
+  document: Schema.Unknown,
+  /**
+   * The cell's verification lines (`verifications.ts`), replacing any it held;
+   * absent, its lines are left as they stand (a cell that did not run holds none).
+   */
+  verifications: Schema.optionalKey(Schema.Array(Verification.Verification))
 })
 export interface CaseResult extends Schema.Schema.Type<typeof CaseResult> {}
 
