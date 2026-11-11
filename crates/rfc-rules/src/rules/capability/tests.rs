@@ -164,6 +164,20 @@ fn an_invite_2xx_advertising_neither_is_violated() {
     assert_eq!(*status, 200);
 }
 
+/// A UAS that answers from another socket than the one it took the initial
+/// INVITE at takes the re-offer at that second socket: a re-offer still.
+#[test]
+fn a_re_invite_to_a_two_socket_uas_s_other_socket_is_a_re_offer() {
+    let mut answer = ok(2_000, 1, BOTH);
+    answer.src = BOB_SENDS.to_string();
+    let mut re_offer = invite(3_000, "z9hG4bK-r", 2, Some("bt"), "");
+    re_offer.dst = BOB_SENDS.to_string();
+    let msgs = [invite(1_000, "z9hG4bK-i", 1, None, BOTH), answer, re_offer];
+    let f = hits(&msgs);
+    assert_eq!(f.len(), 1, "{:?}", eval(&msgs));
+    assert_eq!((f[0].emitter.as_str(), f[0].taker.as_str()), (ALICE, BOB_SENDS));
+}
+
 /// A §17.2.3 retransmission of the initial INVITE repeats its branch: it is
 /// that INVITE again, not a re-offer.
 #[test]

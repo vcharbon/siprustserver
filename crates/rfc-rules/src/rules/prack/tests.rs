@@ -247,6 +247,18 @@ fn fork_prack(at_us: u64, rack: &str, to_tag: &str, branch: &str) -> Msg {
     m
 }
 
+/// `m` on transaction `branch`, its top Via naming `sent_by`: the socket its
+/// sender listens at for the answers (RFC 3261 §18.2.2).
+fn via(mut m: Msg, branch: &str, sent_by: &str) -> Msg {
+    let head = String::from_utf8(m.head.take().unwrap_or_default()).unwrap_or_default();
+    let (start, rest) = head.split_once("\r\n").unwrap_or((head.as_str(), ""));
+    m.head = Some(
+        format!("{start}\r\nVia: SIP/2.0/UDP {sent_by};branch={branch}\r\n{rest}").into_bytes(),
+    );
+    m.via_branch = Some(branch.to_string());
+    m
+}
+
 /// The same message exchanged with the UAS's Contact instead of the address
 /// the INVITE reached it on: a request addressed to it, a response sent from
 /// it.

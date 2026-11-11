@@ -719,3 +719,25 @@ fn an_unreadable_unreliable_provisional_leaves_the_final_the_answer() {
     assert_eq!(f.len(), 1, "the 2xx re-typed the offered stream: {f:?}");
     assert_eq!(f[0].anchor, 2, "judged at the 2xx");
 }
+
+/// A UAC that sends from another socket than its sent-by still has its INVITE
+/// offer pending when it offers again from the sent-by: the two sockets are
+/// one agent once bob's 180 reached the sent-by.
+#[test]
+fn a_two_socket_agent_s_second_offer_over_its_pending_one_is_flagged() {
+    const ALICE_SENDS: &str = "10.0.0.1:40000";
+    let mut invite = req(1, ALICE_SENDS, BOB, "INVITE", 1, None, Some(OFFER_1AUDIO));
+    invite.head = Some(head(
+        "INVITE sip:bob@host SIP/2.0",
+        &format!("Via: SIP/2.0/UDP {ALICE};branch=z9hG4bK-INVITE-1\r\n"),
+        Some(OFFER_1AUDIO),
+    ));
+    let msgs = vec![
+        invite,
+        resp(2, BOB, ALICE, 180, 1, "INVITE", None),
+        req(3, ALICE, BOB, "UPDATE", 2, Some("bt"), Some(OFFER_1AUDIO)),
+    ];
+    let f = violations(&NoNewOfferWhileOfferPending, &msgs);
+    assert_eq!(f.len(), 1, "{:?}", run(&NoNewOfferWhileOfferPending, &msgs));
+    assert_eq!((f[0].anchor, f[0].emitter.as_str()), (2, ALICE));
+}

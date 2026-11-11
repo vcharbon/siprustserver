@@ -528,6 +528,21 @@ fn record_route_answering_a_two_socket_uac_s_in_dialog_request_is_violated() {
     assert_eq!(f.len(), 1, "{:?}", eval(&RecordRoutePlacement, &msgs));
 }
 
+/// A UAC that sends from another socket than its sent-by learned the route
+/// set from the 2xx its sent-by took: its in-dialog request owes that set.
+#[test]
+fn a_two_socket_uac_owes_the_route_set_its_sent_by_learned() {
+    const ALICE_SENDS: &str = "127.0.0.1:40000";
+    let msgs = [
+        req(1_000, ALICE_SENDS, BOB, "INVITE", B_URI, "z9hG4bK-i", 1, A_URI, B_URI, None, ""),
+        rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", "Record-Route: <sip:p1@127.0.0.1:5090;lr>\r\n"),
+        req(3_000, ALICE_SENDS, BOB, "BYE", B_URI, "z9hG4bK-b", 2, A_URI, B_URI, Some("bt"), ""),
+    ];
+    let f = hits(&MidDialogRoute, &msgs);
+    assert_eq!(f.len(), 1, "{:?}", eval(&MidDialogRoute, &msgs));
+    assert_eq!(f[0].emitter, ALICE_SENDS, "the socket that sent the BYE is charged");
+}
+
 /// §17.1.1.3: the ACK for a non-2xx final reuses the INVITE's branch and
 /// carries the final's To tag. A §17.2.1 retransmit landing after it must
 /// still read as answering the INVITE — an ACK elicits no response, so it is

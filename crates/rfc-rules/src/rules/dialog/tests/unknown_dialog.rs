@@ -284,3 +284,24 @@ fn a_rejected_reinvite_keeps_the_confirmed_dialog() {
     ];
     assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
 }
+
+/// A UAS that answers from another socket than the one it takes requests at
+/// knows the dialogs its answers created at both: a request it takes at the
+/// first naming an unknown peer tag owes the 481 there.
+#[test]
+fn a_two_socket_uas_owes_the_481_where_it_takes_the_request() {
+    const BOB_SENDS: &str = "127.0.0.1:5071";
+    let from_second = |mut m: Msg| {
+        m.src = BOB_SENDS.to_string();
+        m
+    };
+    let msgs = [
+        invite(1_000, "z9hG4bK-i", ""),
+        from_second(rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", "")),
+        in_dialog(3_000, "BYE", "z9hG4bK-b", 2, "zz", "bt"),
+        from_second(rsp(4_000, 200, 2, "BYE", "z9hG4bK-b", "")),
+    ];
+    let f = hits(&UnknownDialog481, &msgs);
+    assert_eq!(f.len(), 1, "{:?}", eval(&UnknownDialog481, &msgs));
+    assert_eq!(f[0].emitter, BOB, "the socket that took the request is charged");
+}

@@ -256,6 +256,53 @@ fn a_two_socket_b2buas_ack_held_behind_its_unacking_caller_is_undecided() {
     );
 }
 
+/// A B2BUA that takes its caller's INVITE at one socket, sends from a second
+/// and takes its callee's answer at a third is one user agent across both
+/// calls: its ACK still waits on its caller's.
+#[test]
+fn a_b2bua_listening_at_a_socket_per_call_holds_its_ack_behind_its_caller() {
+    const B2BUA_A: &str = "10.0.0.5:5060";
+    const B2BUA_SENDS: &str = "10.0.0.5:40000";
+    const B2BUA_B: &str = "10.0.0.5:5080";
+    let on = |mut m: Msg, call: &str| {
+        m.call_id = call.to_string();
+        m
+    };
+    let ok = |at_us, src, dst, to_tag| {
+        msg(at_us, src, dst, Kind::Response { status: 200 }, 1, Some("fa"), Some(to_tag))
+    };
+    let msgs = vec![
+        on(via(req(1_000_000, UAC, B2BUA_A, "INVITE", 1, None), "z9hG4bK-a", UAC), "a"),
+        on(via(req(1_010_000, B2BUA_SENDS, UAS, "INVITE", 1, None), "z9hG4bK-b", B2BUA_B), "b"),
+        on(via(ok(1_200_000, UAS, B2BUA_B, "tb"), "z9hG4bK-b", B2BUA_B), "b"),
+        on(via(ok(1_210_000, B2BUA_SENDS, UAC, "ta"), "z9hG4bK-a", UAC), "a"),
+    ];
+    let closed = obs(&msgs, true);
+    let f = NoAckToDialogCreating2xx.eval(&WireView { msgs: &msgs, obs: &closed });
+    let of = |who: &str| f.iter().find(|f| f.emitter == who).expect("an occasion");
+    assert!(of(UAC).violated(), "the caller withheld its ACK: {f:?}");
+    assert!(
+        matches!(of(B2BUA_SENDS).decision, Decision::Undecidable(_)),
+        "the B2BUA's ACK waits on the caller's: {f:?}"
+    );
+}
+
+/// An ACK naming no dialog that a two-socket UAC sent from its sent-by may be
+/// the one its INVITE's 2xx owed.
+#[test]
+fn a_two_socket_uac_s_untagged_ack_from_its_sent_by_may_be_the_one() {
+    const UAC_SENDS: &str = "10.0.0.1:40000";
+    let msgs = vec![
+        via(req(1_000_000, UAC_SENDS, UAS, "INVITE", 1, None), "z9hG4bK-i", UAC),
+        via(ok200(1_200_000, 1), "z9hG4bK-i", UAC),
+        req(1_210_000, UAC, UAS, "ACK", 1, None),
+    ];
+    let closed = obs(&msgs, true);
+    let f = NoAckToDialogCreating2xx.eval(&WireView { msgs: &msgs, obs: &closed });
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(matches!(f[0].decision, Decision::Undecidable(_)), "{:?}", f[0].decision);
+}
+
 /// One trace — a dialog-creating 2xx that is BYE'd but never ACKed — and
 /// the pair states BOTH obligations: the UAC
 /// broke §13.2.2.4 (a BYE is corroboration, never a discharge), and the

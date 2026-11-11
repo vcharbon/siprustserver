@@ -403,3 +403,21 @@ fn the_server_transaction_half_changes_no_obligation_verdict() {
     assert!(f[0].violated(), "the UAC took it and never PRACKed: {:?}", f[0].decision);
     assert_eq!(f[0].emitter, UAC);
 }
+
+/// A UAC that sends its INVITE from another socket than its sent-by is the
+/// UAC of the reliable provisional its sent-by took: the missing PRACK is
+/// its own, named by the socket its INVITE left from.
+#[test]
+fn a_two_socket_uac_owes_the_prack_of_its_own_invite() {
+    const UAC_SENDS: &str = "10.0.0.1:40000";
+    let msgs = vec![
+        via(invite(1_000_000, UAC_SENDS, UAS, 1), "z9hG4bK-i", UAC),
+        via(reliable(1_100_000, UAS, UAC, 180, 1, 5, "tb"), "z9hG4bK-i", UAC),
+        via(ok200(1_300_000, 1, "tb"), "z9hG4bK-i", UAC),
+    ];
+    let o = obs(&msgs, true);
+    let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(f[0].violated(), "{:?}", f[0].decision);
+    assert_eq!(f[0].emitter, UAC_SENDS, "the socket that opened the INVITE is charged");
+}
