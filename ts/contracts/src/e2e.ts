@@ -86,9 +86,9 @@ export const CellSummary = Schema.Struct({
   /**
    * Set when the cell was SKIPPED: the case document declares this cell's lane
    * blocked, so nothing ran and there is no bundle, only `skipped.json`. Carries
-   * that lane verdict verbatim. A skipped cell is neither a pass nor a failure —
-   * `passed` is false because nothing passed, and {@link campaignPassed} ignores
-   * it because nothing failed either.
+   * that lane verdict verbatim. A skipped cell is neither a pass nor a failure:
+   * `passed` is false because nothing passed, and `error` is unset because
+   * nothing failed either.
    */
   skipped: Schema.optionalKey(LaneVerdict),
   /**
@@ -121,10 +121,6 @@ export const CampaignIndex = Schema.Struct({
   cells: Schema.Array(CellSummary)
 })
 export interface CampaignIndex extends Schema.Schema.Type<typeof CampaignIndex> {}
-
-/** `true` iff every cell that RAN passed — a skipped cell drags no campaign down. */
-export const campaignPassed = (index: CampaignIndex): boolean =>
-  index.cells.every((cell) => cell.passed || cell.skipped !== undefined)
 
 export const decodeRunResult = Schema.decodeUnknownEffect(RunResult, STRICT)
 export const decodeRunResultSync = Schema.decodeUnknownSync(RunResult, STRICT)

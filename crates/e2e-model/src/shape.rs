@@ -94,8 +94,9 @@ pub trait ShapeCatalog {
 }
 
 /// Present a registry entry's load-time metadata view. Implemented for boxed
-/// specs (test fixtures) and by any downstream registry entry, so ANY `BTreeMap<String, impl AsShapeSpec>`
-/// is a [`ShapeCatalog`] despite the orphan rule.
+/// specs (test fixtures) and by any downstream registry entry, so ANY
+/// `BTreeMap<String, impl AsShapeSpec>` is a [`ShapeCatalog`] despite the
+/// orphan rule.
 pub trait AsShapeSpec {
     fn as_spec(&self) -> &dyn ShapeSpec;
 }

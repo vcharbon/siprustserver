@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The one HTML renderer of a load run: a LoadRunIndex (load-result.json) to the report page the load generator serves live, writes as its final index.html, and the e2e website embeds. Plain HTML and inline SVG, no script."
+description = "The one HTML renderer of a load run: a LoadRunIndex (load-result.json) to the report page the load generator serves live and writes as its final index.html. Plain HTML and inline SVG, no script."
 
 [package.metadata.ha]
 side = "aware"

@@ -74,7 +74,6 @@ fn layout(alice: &str, bob: &str) -> EndpointConfig {
         infra_shape: "test".to_string(),
         roles,
         recv_timeout_ms: 1000,
-        transit_delay_ms: 0,
         egress: None,
     }
 }

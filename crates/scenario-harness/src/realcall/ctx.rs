@@ -122,8 +122,9 @@ impl CallCtx {
     }
 
     /// Label a message `agent` just RECEIVED with a canonical anchor name
-    /// (ADR-0019) — the load-surface analogue of `Harness::tag_anchor`. A no-op (one relaxed atomic load,
-    /// `keys` never converted) unless anchor collection was enabled. `name` is
+    /// (ADR-0019) — the load-surface analogue of `Harness::tag_anchor`. A no-op
+    /// (one relaxed atomic load, `keys` never converted) unless anchor
+    /// collection was enabled. `name` is
     /// `'static` to keep the vocabulary fixed, like phases/checkpoints.
     pub fn anchor(&self, agent: &Agent, name: &'static str, keys: impl Into<AnchorKeys>) {
         self.push_anchor(agent, name, keys, false);

@@ -2,14 +2,13 @@
 
 Full definitions of the terms [CONTEXT.md](../../CONTEXT.md) indexes under "E2E test-management vocabulary".
 
-The language of the test-management website + CLI (Axum/Maud/htmx front-end and a
-CI/CD CLI over one shared run-core) that authors, launches, and displays
-end-to-end SIP tests. See [ADR-0018](../../docs/adr/0018-e2e-test-management-architecture.md)
+The language of the authored end-to-end documents (Test cases, Check sets,
+Endpoint configs) and the cell result record a campaign cell writes. See
+[ADR-0018](../../docs/adr/0018-e2e-test-management-architecture.md)
 (architecture) and [ADR-0019](../../docs/adr/0019-e2e-check-model-and-anchors.md)
-(checks/anchors). Its organising idea is **four orthogonal axes**: *what the
-call does* (Callflow shape), *what the topology is* (Infra shape), *where the
-endpoints live* (Endpoint config), and *what data fills the call* (Test case).
-A fused `#[tokio::test]` interleaves them and this layer pulls them apart.
+(checks/anchors). It keeps apart *what the call does* (Callflow shape), *where
+the endpoints live* (Endpoint config) and *what data fills the call* (Test
+case), and labels each run with the topology it ran under (Infra shape).
 
 **Callflow shape**:
 A compiled-Rust, registered message-sequence template (basic call, re-routing,
@@ -24,11 +23,11 @@ instance, the JSON **Test case**, and loadgen's `--scenario` selector all
 collide; a registered shape is a **shape**); "framework".
 
 **Infra shape**:
-A compiled-Rust topology + clock a Callflow shape runs under, either **fake** (Alice/
-Bob1/Bob2/LB/b2bua all in-process on `SimulatedSignalingNetwork`, paused clock)
-or **real** (Alice/Bob* are real-socket **Test Agents**, the **SUT** is an
-external kind cluster, wall clock). The *same* Callflow shape runs unchanged over
-any Infra shape. This is the portability invariant.
+The label naming the topology and clock a run was under: **fake** (Alice/Bob*,
+LB and b2bua all in-process on `SimulatedSignalingNetwork`, paused clock) or
+**real** (Alice/Bob* are real-socket **Test Agents**, the **SUT** is an external
+kind cluster, wall clock). An **Endpoint config** carries it as `infraShape`, a
+cell result as `cell.infra`.
 _Avoid_: "topology"/"network" unqualified (the latter is the `SignalingNetwork`
 trait).
 
@@ -51,17 +50,17 @@ invariant exists to forbid (see the `force-b-leg-through-lb-proxy` finding).
 **Test case** (a.k.a. **test data**):
 A committed JSON file = input data (From/To/R-URI, timers, specific header
 content) + **checks** + the **list of compatible Callflow shapes** it can drive
-(validated against each shape's declared input schema at load). The unit a user
-authors from the website. Per ADR-0021 the same document also feeds the load
+(validated against each shape's declared input schema at load). Per ADR-0021 the same document also feeds the load
 fleet (attached to a mix entry via `--case` / `case=`), optionally carrying a
 **binding pool** and `allowViolations`.
 _Avoid_: "scenario" (the overloaded word; loadgen's `--scenario`
 flag selects a registered **shape** by id, never a Test case).
 
 **Endpoint config**:
-A JSON file binding an **Infra shape**'s logical roles (alice, bob1, sut…) to
-concrete addresses + clock + recv-timeout. One per Infra shape (fake = loopback
-sim ports; real = kind ip:ports). The `RECV_TIMEOUT` knob is part of it.
+A JSON file binding logical roles (alice, bob, charlie, lb…) to concrete
+addresses, plus the agent recv-timeout and an optional egress policy, labelled
+with the **Infra shape** it addresses. The load generator reads it
+(`--endpoint-config`).
 
 **Check**:
 A declared assertion in a **Test case** / **Check set**, evaluated **post-call

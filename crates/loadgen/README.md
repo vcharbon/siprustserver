@@ -96,9 +96,10 @@ warns at bind when `net.core.rmem_max` / `wmem_max` clamped the request.
 
 Instead of a long flag line, the whole run can come from **one authored
 document** — a `LoadProfile` JSON (schema:
-`e2e/schemas/load-profile.schema.json`). It carries every run knob (`cps`, `durationSecs`, `maxInFlight`, `sampleCap`,
-`backgroundRecordEvery`, `reportIntervalSecs`, `recvTimeoutMs`), the global
-`robustness` (`dropRate` + `retransmit`) defaults, `overloadReject` (see
+`e2e/schemas/load-profile.schema.json`). It carries every run knob (`cps`,
+`durationSecs`, `maxInFlight`, `sampleCap`, `backgroundRecordEvery`,
+`reportIntervalSecs`, `recvTimeoutMs`), the global `robustness` (`dropRate` +
+`retransmit`) defaults, `overloadReject` (see
 *Accepted endings* below), and the scenario **`mix`**
 (each entry: `shape` id, `weight`, an optional attached `case`, and per-scenario
 `dropRate`/`retransmit` overrides):
@@ -197,9 +198,7 @@ ingress), `recvTimeoutMs`, and the optional **`egress` policy**:
 `--route-pin-to-uas` selects), or `{"registrar-aor": {"domain": …}}` (dial the
 callee's registered AOR). The flags (`--target`/`--bind-ip`/`--base-port`/
 `--route-pin-to-uas`/`--recv-timeout-ms`) stay as **shorthand that synthesizes
-an equivalent EndpointConfig** when no file is given. Note: the e2e framework's
-compiled infra layouts keep declaring their own policy and override this field;
-loadgen standalone is its reader.
+an equivalent EndpointConfig** when no file is given.
 
 ### Correlation strategies
 

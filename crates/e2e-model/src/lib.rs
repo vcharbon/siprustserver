@@ -43,7 +43,7 @@ pub use model::{
     ModelError, TestCase,
 };
 pub use registry::{
-    intern, intern_legs, intern_prefixes, LegSpec, LoadFactory, ReroutingParams, Scenario,
-    ScenarioInputs, ShapeDescriptor, ShapeRegistry, ShapeSource,
+    intern, intern_legs, intern_prefixes, LegSpec, LoadFactory, Scenario, ScenarioInputs,
+    ShapeDescriptor, ShapeRegistry, ShapeSource,
 };
 pub use shape::{Anchor, CoreInput, ShapeCatalog, ShapeSpec};

@@ -121,8 +121,8 @@ pub struct CallEnv<'a> {
     /// where it folds in (and what supersedes it).
     pub core: CoreIdentity,
     /// How THIS run's layout realizes a logical INVITE on its wire — the
-    /// environment-axis seam shared with the e2e framework (same
-    /// [`EgressPolicy`] the Infra shapes declare). The callee resolver is
+    /// environment-axis seam an Endpoint config's `egress` field authors. The
+    /// callee resolver is
     /// [`Self::callee`] (role → the bound agent's socket, URI'd by the policy);
     /// scenarios never branch on the policy — they call
     /// [`Self::outgoing_invite`], which consults it. Replaces the hand-rolled
@@ -215,12 +215,11 @@ impl<'a> CallEnv<'a> {
     }
 
     /// Resolve a logical callee **role** (`"bob"`, `"charlie"`) to how THIS
-    /// run's layout addresses it — the callee half of the egress seam. The resolver is the bound agents
-    /// themselves (the load mux's static endpoints / the functional harness
-    /// agents): the role maps to that agent's socket, and the [`EgressPolicy`]
-    /// decides the topology-correct URI (registered AOR / `sip:<role>@<addr>`).
-    /// Panics on an unknown role or an unbound charlie (like the e2e resolver
-    /// panics on a role missing from the Endpoint config).
+    /// run's layout addresses it — the callee half of the egress seam. The
+    /// resolver is the bound agents themselves (the load mux's static endpoints
+    /// / the functional harness agents): the role maps to that agent's socket,
+    /// and the [`EgressPolicy`] decides the topology-correct URI (registered AOR
+    /// / `sip:<role>@<addr>`). Panics on an unknown role or an unbound charlie.
     pub fn callee(&self, role: &str) -> CalleeTarget {
         let addr = self.callee_agent(role).addr();
         CalleeTarget { role: role.to_string(), uri: self.egress.callee_uri(role, addr), addr }
@@ -267,8 +266,9 @@ impl<'a> CallEnv<'a> {
         self
     }
 
-    /// Realize the logical initial INVITE on THIS run's wire. `callees` is the ordered candidate list
-    /// (primary first; every current scenario passes `["bob"]`). It (1) routes
+    /// Realize the logical initial INVITE on THIS run's wire. `callees` is the
+    /// ordered candidate list (primary first; every current scenario passes
+    /// `["bob"]`). It (1) routes
     /// through the SUT ingress ([`Self::via`]), (2) applies the resolved
     /// [`CoreIdentity`] From/To/R-URI overrides (the e2e Test case's `core` on
     /// the load surface), (3) applies the per-call run identity — the

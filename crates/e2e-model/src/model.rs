@@ -1,6 +1,7 @@
 //! The authored JSON surface (ADR-0018): Test cases and Check sets as `serde`
-//! + `schemars::JsonSchema` documents, plus the loader and the **load-time compatibility validation** (ADR-0019): a Test case is
-//! compatible with a Callflow shape iff (i) its input satisfies the shape's
+//! and `schemars::JsonSchema` documents, plus the loader and the **load-time
+//! compatibility validation** (ADR-0019): a Test case is compatible with a
+//! Callflow shape iff (i) its input satisfies the shape's
 //! `required_input`, and (ii) every `<agent>.<anchor>` its checks (inline or via
 //! referenced Check sets) bind to names an anchor the shape publishes. An
 //! incompatible case fails loudly at load, never silently at run.
@@ -47,18 +48,6 @@ impl Input {
             "ruri" => self.core.ruri.is_some(),
             other => self.extras.contains_key(other),
         }
-    }
-
-    /// Deserialize the open `extras` map into a shape's typed parameters `T`
-    /// (paired with its `JsonSchema` via the descriptor's `params_schema`, so
-    /// the schema the author saw IS the type the shape body reads). `T` should carry
-    /// `#[serde(default)]` so an absent/partial `extras` yields its defaults; a
-    /// *malformed* one panics loudly (the harness philosophy — never a silent
-    /// fallback to defaults that masks a typo).
-    pub fn params<T: DeserializeOwned>(&self) -> T {
-        let obj = serde_json::Value::Object(self.extras.clone().into_iter().collect());
-        serde_json::from_value(obj)
-            .unwrap_or_else(|e| panic!("invalid shape params in `extras`: {e}"))
     }
 }
 

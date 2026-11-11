@@ -12,7 +12,6 @@ import * as Schema from "effect/Schema"
 import { describe, expect, it } from "vitest"
 import {
   allChecksPassed,
-  campaignPassed,
   cellDirName,
   CheckOp,
   decodeCampaignIndexSync,
@@ -208,10 +207,6 @@ describe("a campaign index", () => {
 
   it("emits in declaration order and reads back identically", () => {
     expect(emitCampaignIndex(index)).toBe(`${JSON.stringify(CAMPAIGN, undefined, 2)}\n`)
-  })
-
-  it("passes only when every cell did", () => {
-    expect(campaignPassed(index)).toBe(false)
   })
 })
 

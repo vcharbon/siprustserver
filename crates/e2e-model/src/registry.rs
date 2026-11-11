@@ -105,9 +105,9 @@ impl LegSpec {
 /// The ONE declaration of a Callflow shape (see the module docs): its stable
 /// **id** (the Test-case selector and the load report/metrics label — one id
 /// space), its load-time metadata
-/// ([`ShapeSpec`]: published anchors + required input), its optional authoring
-/// **params schema** (typed `input.extras`), the **load-side attributes** the
-/// driver consults per call, and the optional **load body** factory.
+/// ([`ShapeSpec`]: published anchors + required input), the **load-side
+/// attributes** the driver consults per call, and the optional **load body**
+/// factory.
 #[derive(Clone)]
 pub struct ShapeDescriptor {
     /// Stable shape id — one id space.
@@ -119,10 +119,6 @@ pub struct ShapeDescriptor {
     /// Input core/extra field names this shape *requires* (beyond the always-
     /// optional core overrides).
     pub required_input: &'static [&'static str],
-    /// JSON schema for the shape's typed authoring parameters (spliced over the
-    /// Test case's open `extras` map by the editor projection). `None` = no
-    /// declared params.
-    pub params_schema: Option<serde_json::Value>,
     /// Load: this shape's **named callee legs** ([`LegSpec`]: agent role +
     /// R-URI user-part prefixes) on the shared UAS socket, in the load-bearing
     /// bind order. Empty (the default) = derive from the
@@ -176,7 +172,6 @@ impl ShapeDescriptor {
             id,
             anchors: &[],
             required_input: &[],
-            params_schema: None,
             legs: &[],
             needs_charlie: false,
             needs_bob2: false,
@@ -194,11 +189,6 @@ impl ShapeDescriptor {
 
     pub fn required_input(mut self, fields: &'static [&'static str]) -> Self {
         self.required_input = fields;
-        self
-    }
-
-    pub fn params_schema(mut self, schema: serde_json::Value) -> Self {
-        self.params_schema = Some(schema);
         self
     }
 
@@ -344,27 +334,6 @@ impl ShapeRegistry {
 // Shipped shape declarations — THE one place each shape's vocabulary lives.
 // ---------------------------------------------------------------------------
 
-/// Authoring parameters for the `rerouting` shape — the typed `input.extras`
-/// the editor suggests. All optional (defaults reproduce the canonical 486
-/// flow). Declared here, next to the shape's descriptor, and read through
-/// `Input::params`.
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
-pub struct ReroutingParams {
-    /// SIP status bob1 rejects the first b-leg with, triggering the SUT's
-    /// failover to bob2. Any 4xx–6xx the decision engine treats as a reroute
-    /// trigger (default `486` Busy Here; e.g. `503` Service Unavailable).
-    pub reject_status: u16,
-    /// Reason phrase paired with `rejectStatus` (default `"Busy Here"`).
-    pub reject_reason: String,
-}
-
-impl Default for ReroutingParams {
-    fn default() -> Self {
-        ReroutingParams { reject_status: 486, reject_reason: "Busy Here".to_string() }
-    }
-}
-
 /// The anchor set of a plain full-call shape.
 const CALL_ANCHORS: &[Anchor] = &[Anchor::InitialInvite, Anchor::Answer, Anchor::Ack, Anchor::Bye];
 /// The anchor set the standard LOAD establishment + teardown publishes (the
@@ -400,22 +369,13 @@ const PRACK_ANCHORS: &[Anchor] = &[
     Anchor::Ack,
     Anchor::Bye,
 ];
-/// The `transfer-refer-media` anchor set.
-const TRANSFER_ANCHORS: &[Anchor] = &[
-    Anchor::InitialInvite,
-    Anchor::Answer,
-    Anchor::Ack,
-    Anchor::Refer,
-    Anchor::ReInvite,
-    Anchor::Bye,
-];
 
 /// Every shipped shape, declared once. Grouped by surface:
 ///
 ///  - **load-only** — the fallible real-call scenarios (`basic_call`,
 ///    `reinvite`, …);
-///  - **anchors-only** — the anchored e2e shapes (`basic-call`, `rerouting`,
-///    …), declarations a Test case validates against, with no load body;
+///  - **anchors-only** — `basic-call`, the declaration a Test case validates
+///    against, with no load body;
 ///  - **anchored load** — `rerouting_prack`: anchors and a load body.
 fn default_shapes() -> Vec<ShapeDescriptor> {
     let mut shapes = vec![
@@ -525,12 +485,6 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
                 Arc::new(cs::refer_charlie_reject(cs::default_binder(), &inputs.refer_key))
             }),
         ShapeDescriptor::new("basic-call").anchors(CALL_ANCHORS),
-        ShapeDescriptor::new("basic-call-media").anchors(CALL_ANCHORS),
-        ShapeDescriptor::new("rerouting").anchors(CALL_ANCHORS).params_schema(
-            serde_json::to_value(schemars::schema_for!(ReroutingParams))
-                .expect("ReroutingParams schema"),
-        ),
-        ShapeDescriptor::new("transfer-refer-media").anchors(TRANSFER_ANCHORS),
         ShapeDescriptor::new("rerouting_prack")
             .anchors(PRACK_ANCHORS)
             .needs_bob2()

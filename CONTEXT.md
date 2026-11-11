@@ -184,11 +184,11 @@ Full definitions: [docs/glossary/call-reaper.md](docs/glossary/call-reaper.md).
 Full definitions: [docs/glossary/e2e-test-management.md](docs/glossary/e2e-test-management.md).
 
 - **Callflow shape**: a registered compiled-Rust message-sequence template over an input schema and checks. ADR-0021. Avoid: scenario.
-- **Infra shape**: the topology and clock a Callflow shape runs under: fake (in-process, paused clock) or real (kind cluster).
+- **Infra shape**: the label naming the topology and clock a run was under: fake (in-process, paused clock) or real (kind cluster).
 - **Test Agent**: a scenario-driven UA the framework controls (Alice, Bob1, Bob2). Avoid: client, UA, endpoint.
 - **SUT** (system under test): the LB and b2bua the Test Agents exercise; the LB is the sole boundary in both directions.
 - **Test case** (a.k.a. **test data**): a committed JSON of input data, checks and compatible shapes; it also feeds the load fleet. ADR-0021.
-- **Endpoint config**: a JSON binding an Infra shape's logical roles to addresses, clock and recv-timeout.
+- **Endpoint config**: a JSON binding logical roles to addresses, recv-timeout and egress policy, labelled with its Infra shape; loadgen reads it.
 - **Check**: a declared assertion over the recorded trace, run post-call by the RFC audit engine, keyed by a message anchor.
 - **Message anchor**: a project-wide message name (`initialInvite`, `answer`, `bye`, …) a shape publishes and checks bind to.
 - **Check set**: a committed reusable JSON bundle of checks keyed by message anchor, referenced by name.

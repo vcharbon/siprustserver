@@ -395,11 +395,11 @@ pub fn render_svg(doc: &SeqDoc) -> String {
 }
 
 /// Render the diagram as a SELF-CONTAINED, EMBEDDABLE fragment for a host page
-/// (the E2E cell page): the clickable SVG in a bounded scrollable pane on the
-/// LEFT, a FIXED message-detail pane on the RIGHT, the hidden per-message
-/// payload blocks, and the click `<script>` — everything scoped under
-/// `.seq-embed` with its own `<style>` so it drops into a host document without
-/// colliding with the host CSS. Unlike [`render_html`] it emits NO
+/// (a load-run report's message ladder): the clickable SVG in a bounded
+/// scrollable pane on the LEFT, a FIXED message-detail pane on the RIGHT, the
+/// hidden per-message payload blocks, and the click `<script>` — everything
+/// scoped under `.seq-embed` with its own `<style>` so it drops into a host
+/// document without colliding with the host CSS. Unlike [`render_html`] it emits NO
 /// `<html>/<head>/<body>` chrome; unlike [`render_svg`] the messages are wired
 /// to actually reveal their payload on click. The script scopes its lookups to
 /// the embed root, so multiple embeds (or other page content) never interfere.

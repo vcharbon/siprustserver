@@ -209,7 +209,6 @@ describe("a lane the document declares blocked", () => {
     // Nothing ran: no spec was written and the stub left no bundle behind.
     expect(fs.existsSync(path.join(dir, SPECS_DIR))).toBe(false)
     expect(fs.existsSync(path.join(dir, cell.dir, "verdict.json"))).toBe(false)
-    expect(E2e.campaignPassed({ campaign: "stub", ts: "t", cells: [cell] })).toBe(true)
   })
 
   it("leaves a skipped.json saying which lane and why, verbatim", async () => {
