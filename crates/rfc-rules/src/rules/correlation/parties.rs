@@ -2,16 +2,19 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::rules::branch::BranchName;
+use crate::rules::via::went_to_its_via;
 use crate::wire::{Endpoint, Kind, Msg};
 
 /// The user agent each endpoint of a view acts as, per Call-ID.
 ///
 /// An endpoint is a user agent of its own until a transaction ties it to
-/// another. A response joins its taker to the sender of the request it answers
-/// (§18.2.2 sends it to the Via sent-by, not to the source) and its sender to
-/// that request's taker. The request is the one of the same Call-ID, top-Via
-/// branch and CSeq method (§17.1.3); a key carried between two different
-/// endpoint pairs ties nothing. A tag ties nothing: proxies relay tags
+/// another. A response that went to the address its top Via names (§18.2.2,
+/// not necessarily the request's source) joins its taker to the sender of the
+/// request it answers and its sender to that request's taker. The request is
+/// the one of the same Call-ID, top-Via branch and CSeq method (§17.1.3); a key
+/// carried between two different endpoint pairs ties nothing, and so does a
+/// response sent anywhere else. A tag ties nothing: proxies relay tags
 /// unchanged (§16.6). Built over the whole view, since identity is topology,
 /// not evidence a party held; each component is named by its smallest endpoint.
 pub struct Parties {
@@ -25,8 +28,8 @@ type Answered = Option<(Endpoint, Endpoint)>;
 impl Parties {
     /// The parties of `msgs`, a view's stream in observation order.
     pub fn of<'m>(msgs: impl IntoIterator<Item = &'m Msg>) -> Self {
-        let mut requests: BTreeMap<(String, String, String), Answered> = BTreeMap::new();
-        let mut responses: Vec<((String, String, String), &Msg)> = Vec::new();
+        let mut requests: BTreeMap<TransactionKey<'m>, Answered> = BTreeMap::new();
+        let mut responses: Vec<(TransactionKey<'m>, &Msg)> = Vec::new();
         for msg in msgs.into_iter().filter(|m| !m.repeat && !m.call_id.is_empty()) {
             let Some(key) = transaction_key(msg) else { continue };
             match msg.kind {
@@ -41,7 +44,8 @@ impl Parties {
                         })
                         .or_insert(Some(pair));
                 }
-                Kind::Response { .. } => responses.push((key, msg)),
+                Kind::Response { .. } if went_to_its_via(msg) => responses.push((key, msg)),
+                Kind::Response { .. } => {}
             }
         }
         let mut ua: HashMap<String, HashMap<Endpoint, Endpoint>> = HashMap::new();
@@ -103,9 +107,12 @@ fn join(named: &mut HashMap<Endpoint, Endpoint>, a: Endpoint, b: Endpoint) {
     }
 }
 
-/// `(Call-ID, top-Via branch ignoring ASCII case, CSeq method)`: the transaction
-/// a message belongs to, `None` without a branch.
-fn transaction_key(msg: &Msg) -> Option<(String, String, String)> {
-    let branch = msg.via_branch.as_deref()?.to_ascii_lowercase();
-    Some((msg.call_id.clone(), branch, msg.cseq_method.to_ascii_uppercase()))
+/// `(Call-ID, top-Via branch, CSeq method)`: the transaction a message belongs
+/// to (§17.1.3).
+type TransactionKey<'m> = (&'m str, BranchName<'m>, String);
+
+/// The transaction `msg` belongs to, `None` without a branch.
+fn transaction_key(msg: &Msg) -> Option<TransactionKey<'_>> {
+    let branch = BranchName(msg.via_branch.as_deref()?);
+    Some((msg.call_id.as_str(), branch, msg.cseq_method.to_ascii_uppercase()))
 }

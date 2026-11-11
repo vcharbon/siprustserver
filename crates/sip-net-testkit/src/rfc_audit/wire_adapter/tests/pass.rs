@@ -180,3 +180,36 @@ fn a_position_after_a_dropped_arrival_indexes_the_audit_wire_entries() {
     assert_eq!(finding.offending, Some(6), "{finding:?}");
     assert_eq!(entries[5].seq, 9, "the 603 the B2BUA sent after its 487");
 }
+
+/// A party view holds its members' streams in event order, a datagram one
+/// member sent another once, as sent, under strictly rising stamps (two
+/// members' events in one millisecond included); a bind
+/// with no other in its party keeps its own view.
+#[test]
+fn a_party_view_merges_its_members_once_in_event_order() {
+    const ALICE_SEND: &str = "127.0.0.1:40000";
+    let mut events = vec![
+        sent(ALICE_SEND, req("INVITE", "z9hG4bK-i1", 1, None), BOB, 0),
+        recv(BOB, req("INVITE", "z9hG4bK-i1", 1, None), ALICE_SEND, 1),
+        sent(BOB, resp(200, 1, "INVITE", "bt", "z9hG4bK-i1"), ALICE, 2),
+        recv(ALICE, resp(200, 1, "INVITE", "bt", "z9hG4bK-i1"), BOB, 3),
+        sent(ALICE_SEND, req("ACK", "z9hG4bK-a1", 1, Some("bt")), BOB, 4),
+        recv(BOB, req("ACK", "z9hG4bK-a1", 1, Some("bt")), ALICE_SEND, 5),
+        sent(ALICE_SEND, req("OPTIONS", "z9hG4bK-o", 2, Some("bt")), ALICE, 6),
+        recv(ALICE, req("OPTIONS", "z9hG4bK-o", 2, Some("bt")), ALICE_SEND, 7),
+    ];
+    events[3].at_ms = events[0].at_ms;
+    let pass = AuditPass::new(&events);
+    let views = pass.party_views();
+    let of = |bind: &str| {
+        let (view, _) = views.iter().find(|(v, _)| v.bind == bind).expect("a view");
+        let seqs: Vec<u64> = view.meta.iter().map(|(seq, _)| *seq).collect();
+        let stamps: Vec<u64> = view.msgs.iter().map(|m| m.at_us).collect();
+        (seqs, stamps)
+    };
+    let (seqs, stamps) = of(ALICE);
+    assert_eq!(seqs, [0, 3, 4, 6], "the OPTIONS stands once, as sent");
+    assert_eq!(of(ALICE_SEND).0, seqs, "both members read one stream");
+    assert!(stamps.windows(2).all(|w| w[0] < w[1]), "strictly rising: {stamps:?}");
+    assert_eq!(of(BOB).0, [1, 2, 5], "a party of one bind keeps its own view");
+}

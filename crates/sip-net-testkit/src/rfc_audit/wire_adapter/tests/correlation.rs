@@ -110,3 +110,34 @@ fn a_final_under_a_shown_tag_charges_neither_arm() {
         .into_iter()
         .all(|f| f.rule != live_arm(RuleId::TagConsistency, true).name()));
 }
+
+/// The socket the caller sends from; its Via sent-by, where it listens, is `ALICE`.
+const ALICE_SEND: &str = "127.0.0.1:40000";
+
+/// A call the caller places from `ALICE_SEND`, every answer reaching `ALICE`
+/// (RFC 3261 §18.2.2), the 200 under the From-tag `from_tag`.
+fn placed_from_two_sockets(from_tag: &str) -> Vec<Stamped<SignalingNetworkEvent>> {
+    let ok = String::from_utf8(resp(200, 1, "INVITE", "bt", "z9hG4bK-i1"))
+        .expect("text")
+        .replacen(";tag=at\r\n", &format!(";tag={from_tag}\r\n"), 1)
+        .into_bytes();
+    vec![
+        sent(ALICE_SEND, req("INVITE", "z9hG4bK-i1", 1, None), BOB, 0),
+        recv(BOB, req("INVITE", "z9hG4bK-i1", 1, None), ALICE_SEND, 1),
+        sent(BOB, ok.clone(), ALICE, 2),
+        recv(ALICE, ok, BOB, 3),
+        sent(ALICE_SEND, req("ACK", "z9hG4bK-a1", 1, Some("bt")), BOB, 4),
+        recv(BOB, req("ACK", "z9hG4bK-a1", 1, Some("bt")), ALICE_SEND, 5),
+    ]
+}
+
+/// The caller's two binds are one party: the 200 at `ALICE` names the tag
+/// `ALICE_SEND` minted, and a foreign one is reported once, at `ALICE`.
+#[test]
+fn a_party_of_two_binds_is_judged_on_its_whole_stream() {
+    assert!(live(RuleId::MidDialogTags).check(&placed_from_two_sockets("at")).is_empty());
+    let out = live(RuleId::MidDialogTags).check_positioned(&placed_from_two_sockets("nope"));
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].0, ALICE, "reported at the bind that took the 200");
+    assert_eq!(out[0].3, Some(BOB.to_string()), "charged to its sender");
+}

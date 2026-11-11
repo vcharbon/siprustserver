@@ -40,14 +40,14 @@
 //! alternate between the two parties, so its per-endpoint dialog state conflates
 //! them and proves nothing. Those occasions stand `Undecidable`.
 //!
-//! [`DialogCallIdStable`] deliberately does NOT partition on Call-ID — a
-//! partition would make a Call-ID CHANGE invisible by opening a second one, and
-//! keys the socket, since [`Parties`] ties sockets per Call-ID —
-//! [`TagConsistency`] keys on the server transaction rather than the dialog, and
-//! [`InDialogToTag`] needs a witness `PeerDialogs` does not carry (which
-//! branch established the dialog, which drew a non-2xx), and [`InDialogFromTag`]
-//! one per confirmed dialog (its tag pair), so each walks the view under its
-//! own key.
+//! [`TagConsistency`] keys on the server transaction rather than the dialog,
+//! [`InDialogToTag`] needs a witness `PeerDialogs` does not carry (which branch
+//! established the dialog, which drew a non-2xx), and [`InDialogFromTag`] one per
+//! confirmed dialog (its tag pair), so each walks the view under its own key.
+//!
+//! [`DialogCallIdStable`] keys `(socket, From-tag)` across Call-IDs: a partition
+//! on Call-ID would hide a Call-ID change by opening a second one, and
+//! [`Parties`] ties sockets within one Call-ID only.
 
 mod cancel_target;
 mod dialog_id;

@@ -22,7 +22,7 @@ fn in_event_order<'v>(views: &[&'v BindView]) -> Vec<(u64, &'v String, &'v Msg, 
     rows
 }
 
-/// Per bind a party holds with another recorded bind, every bind of that party.
+/// The recorded binds of every party holding two or more, keyed by each of them.
 pub(super) fn joined(views: &[&BindView]) -> HashMap<LaneKey, BTreeSet<LaneKey>> {
     let binds: BTreeSet<&LaneKey> = views.iter().map(|v| &v.bind).collect();
     let parties = Parties::of(in_event_order(views).into_iter().map(|(_, _, m, _)| m));

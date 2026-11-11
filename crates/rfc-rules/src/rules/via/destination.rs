@@ -9,7 +9,7 @@ use sip_message::ip_literal::ip_host;
 use sip_message::sniff;
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
-use crate::wire::{endpoint_addr, Kind, WireView};
+use crate::wire::{endpoint_addr, Kind, Msg, WireView};
 
 use super::super::Obligation;
 
@@ -57,27 +57,18 @@ impl Obligation for ResponseDestination {
                 anchor: mi,
                 decision,
             };
-            let Some(head) = msg.head.as_deref() else {
-                out.push(finding(Decision::Undecidable("no header block at this vantage")));
-                continue;
-            };
-            let Some(via) = sniff::top_via(head) else {
-                out.push(finding(Decision::Undecidable("no top Via a reader accepts")));
-                continue;
-            };
-            if !via.transport().eq_ignore_ascii_case("UDP") {
-                continue;
-            }
-            let (host, port) = via.response_target();
-            let Some(ip) = ip_host(host) else {
-                out.push(finding(Decision::Undecidable("a sent-by name RFC 3263 §5 resolves")));
-                continue;
+            let (target, rport_unfilled) = match via_target(msg) {
+                ViaTarget::Reliable => continue,
+                ViaTarget::Unread(why) => {
+                    out.push(finding(Decision::Undecidable(why)));
+                    continue;
+                }
+                ViaTarget::At { target, rport_unfilled } => (target, rport_unfilled),
             };
             let Some(sent_to) = endpoint_addr(&msg.dst) else {
                 out.push(finding(Decision::Undecidable("no wire destination at this vantage")));
                 continue;
             };
-            let target = SocketAddr::new(ip.to_canonical(), port);
             let sent_to = SocketAddr::new(sent_to.ip().to_canonical(), sent_to.port());
             if sent_to == target {
                 out.push(finding(Decision::Compliant));
@@ -91,11 +82,52 @@ impl Obligation for ResponseDestination {
                 response_dest_method: msg.cseq_method.clone(),
                 dest_sent_to: sent_to.to_string(),
                 via_target: target.to_string(),
-                rport_unfilled: matches!(via.rport(), Some(Rport::Requested)),
+                rport_unfilled,
             })));
         }
         out
     }
+}
+
+/// Where a response's own top Via sends it over unreliable unicast.
+enum ViaTarget {
+    /// A reliable transport answers on the request's connection.
+    Reliable,
+    /// No address to compare against, and why.
+    Unread(&'static str),
+    /// `received` (else the sent-by host) at the observed `rport` (else the
+    /// sent-by port), canonical; whether the Via asked an `rport` no hop filled.
+    At { target: SocketAddr, rport_unfilled: bool },
+}
+
+/// The address `resp`'s top Via names (RFC 3261 §18.2.2, RFC 3581 §4).
+fn via_target(resp: &Msg) -> ViaTarget {
+    let Some(head) = resp.head.as_deref() else {
+        return ViaTarget::Unread("no header block at this vantage");
+    };
+    let Some(via) = sniff::top_via(head) else {
+        return ViaTarget::Unread("no top Via a reader accepts");
+    };
+    if !via.transport().eq_ignore_ascii_case("UDP") {
+        return ViaTarget::Reliable;
+    }
+    let (host, port) = via.response_target();
+    let Some(ip) = ip_host(host) else {
+        return ViaTarget::Unread("a sent-by name RFC 3263 §5 resolves");
+    };
+    ViaTarget::At {
+        target: SocketAddr::new(ip.to_canonical(), port),
+        rport_unfilled: matches!(via.rport(), Some(Rport::Requested)),
+    }
+}
+
+/// Whether `resp` went over UDP to the address its top Via names, as an
+/// IP literal: a sent-by name, a reliable transport or an unread Via is not
+/// known to.
+pub(crate) fn went_to_its_via(resp: &Msg) -> bool {
+    let ViaTarget::At { target, .. } = via_target(resp) else { return false };
+    endpoint_addr(&resp.dst)
+        .is_some_and(|to| SocketAddr::new(to.ip().to_canonical(), to.port()) == target)
 }
 
 #[cfg(test)]
