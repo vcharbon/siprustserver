@@ -656,13 +656,21 @@ async fn replay_directed(
     let mut outcome = pivot_interpreter::replay(document, config, lane, &sut, &dir)
         .await
         .expect("the run replays and leaves its bundle");
-    answer_call_records(&scene.b2bua, &mut outcome);
+    answer_call_records(&plan, &scene.b2bua, &mut outcome);
     (outcome, dir)
 }
 
 /// The ladder's call-records collector: the run's claim answered over the
-/// records the B2BUA wrote, into the outcome's verdict.
-fn answer_call_records(b2bua: &B2buaSut, outcome: &mut Outcome) {
+/// records the B2BUA wrote, into the outcome's verdict. A run states the claim
+/// exactly when its document states one.
+fn answer_call_records(plan: &Plan, b2bua: &B2buaSut, outcome: &mut Outcome) {
+    let post = plan.document().postconditions.as_ref();
+    let claimed = post.is_some_and(|post| matches!(post.call_records(), Ok(Some(_))));
+    assert_eq!(
+        outcome.call_records.is_some(),
+        claimed,
+        "the run states the call-records claim exactly when its document does"
+    );
     if let Some(claim) = &outcome.call_records {
         let records: Vec<BTreeMap<String, String>> =
             b2bua.cdr_records().iter().map(flatten).collect();

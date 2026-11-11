@@ -39,43 +39,45 @@ pub struct StatedCheck {
     /// Whether a record set failing it fails the run on this lane; a check
     /// that does not gate carries its class and is recorded as informative.
     pub gates: bool,
+    /// Why the check's value did not resolve against the run, its value then
+    /// the one written: no record set satisfies the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved: Option<String>,
 }
 
 /// The claim `expected` states for a run that resolves accessors with
-/// `resolver` on the lane `scope` binds, and the failure of each check whose
-/// value does not resolve, left out of the claim.
-pub fn state(
-    expected: &CdrCheck,
-    resolver: &Resolver<'_>,
-    scope: &Scope<'_>,
-) -> (RecordsClaim, Vec<Failure>) {
-    let mut failures = Vec::new();
-    let mut checks = Vec::new();
-    for check in &expected.checks {
-        let resolved = match &check.value {
-            None => Ok(None),
-            Some(text) if check.op == CheckOp::Regex => resolver.pattern(text).map(Some),
-            Some(text) => resolver.text(text).map(Some),
-        };
-        match resolved {
-            Ok(value) => checks.push(StatedCheck {
-                check: Check { value, ..check.clone() },
-                gates: scope.gates(check.class),
-            }),
-            Err(e) => failures.push(Failure::AccessorUnresolved {
-                site: format!("cdr check {:?}", check.field),
-                detail: e.to_string(),
-            }),
-        }
-    }
-    (RecordsClaim { count: expected.count, checks }, failures)
+/// `resolver` on the lane `scope` binds. A check whose value does not resolve
+/// stays in the claim, failing whatever the records ([`StatedCheck::unresolved`]).
+pub fn state(expected: &CdrCheck, resolver: &Resolver<'_>, scope: &Scope<'_>) -> RecordsClaim {
+    let checks = expected
+        .checks
+        .iter()
+        .map(|check| {
+            let resolved = match &check.value {
+                None => Ok(None),
+                Some(text) if check.op == CheckOp::Regex => resolver.pattern(text).map(Some),
+                Some(text) => resolver.text(text).map(Some),
+            };
+            let gates = scope.gates(check.class);
+            match resolved {
+                Ok(value) => {
+                    StatedCheck { check: Check { value, ..check.clone() }, gates, unresolved: None }
+                }
+                Err(e) => {
+                    StatedCheck { check: check.clone(), gates, unresolved: Some(e.to_string()) }
+                }
+            }
+        })
+        .collect();
+    RecordsClaim { count: expected.count, checks }
 }
 
 /// Answers `claim` over `records`, each a record as its field map, into
 /// `verdict`: a count other than the claimed one fails it, and so does a
 /// gating check no record satisfies; a check that does not gate is recorded
 /// as informative. Answers whether the claim held. Each check's value is the
-/// stated one, compared as written: it is never resolved again.
+/// stated one, compared as written: it is never resolved again. A check whose
+/// value did not resolve fails the same way, saying why.
 ///
 /// A check asserts over the record SET — "some record shows this" — because
 /// `{ count, checks }` has no per-record scoping, and its failure says so.
@@ -94,12 +96,17 @@ pub fn judge(
     }
     for stated in &claim.checks {
         let check = &stated.check;
-        let satisfied = records.iter().any(|record| {
-            checks::evaluate_resolved("cdr", check, &RecordObservables(record)).is_none()
-        });
+        let satisfied = stated.unresolved.is_none()
+            && records.iter().any(|record| {
+                checks::evaluate_resolved("cdr", check, &RecordObservables(record)).is_none()
+            });
         if satisfied {
             continue;
         }
+        let observed = match &stated.unresolved {
+            Some(why) => format!("the check's value does not resolve against the run: {why}"),
+            None => describe(records),
+        };
         let finding = Failure::CdrMismatch {
             expected: format!(
                 "some record where {} {:?} {}",
@@ -107,7 +114,7 @@ pub fn judge(
                 check.value.as_deref().unwrap_or(""),
                 format_args!("({:?})", check.op)
             ),
-            observed: describe(records),
+            observed,
         };
         match (stated.gates, check.class) {
             (false, Some(class)) => verdict.informative.push(Informative { class, finding }),

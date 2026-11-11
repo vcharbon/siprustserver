@@ -147,20 +147,6 @@ impl Postconditions {
             .map(Some)
             .map_err(|e| RecordsClaimError::Malformed(e.to_string()))
     }
-
-    /// Every claim the document states, by collector name: `claims`, and
-    /// `cdr` as the [`CALL_RECORDS`] claim where it states a count and
-    /// `claims` does not name that collector.
-    pub fn stated_claims(&self) -> BTreeMap<String, serde_json::Value> {
-        let mut out = self.claims.clone();
-        if let Some(CdrExpectation::Expected(cdr)) = &self.cdr {
-            if !out.contains_key(CALL_RECORDS) {
-                let value = serde_json::to_value(cdr).expect("a record expectation serializes");
-                out.insert(CALL_RECORDS.to_string(), value);
-            }
-        }
-        out
-    }
 }
 
 #[cfg(test)]
@@ -204,18 +190,8 @@ mod tests {
         );
         assert_eq!(counted.call_records(), claimed.call_records());
         assert_eq!(counted.call_records().unwrap().map(|c| c.count), Some(2));
-        assert_eq!(
-            counted.stated_claims()[CALL_RECORDS],
-            serde_json::json!({"count": 2, "checks": [{"field": "d", "op": "exists"}]})
-        );
-        assert_eq!(
-            claimed.stated_claims().keys().collect::<Vec<_>>(),
-            [CALL_RECORDS, "logs"],
-            "every other claim is carried as stated"
-        );
         let absent = parse(r#"{"cdr":{"absent":"capture-carries-no-cdr"}}"#);
         assert_eq!(absent.call_records(), Ok(None));
-        assert!(absent.stated_claims().is_empty());
     }
 
     #[test]

@@ -131,7 +131,7 @@ pub async fn run_recording_into(
         let mut runner = Runner::new(&mut instance, lane);
         let timing = runner.drive(sut).await;
         let wire_view = runner.absorption.wire_view();
-        call_records = state_call_records(&mut instance);
+        call_records = state_call_records(&instance);
         (timing, wire_view)
     } else {
         // The lane's configuration is already refused (an unbound identity):
@@ -151,20 +151,14 @@ pub async fn run_recording_into(
     Outcome { verdict: instance.verdict().clone(), recording, timing, wire_view, call_records }
 }
 
-/// The document's call-records claim as `instance`'s run states it; each check
-/// whose value does not resolve fails the run and is left out. A claim the plan
-/// could not read never reaches a run: compiling it refused the document.
-fn state_call_records(instance: &mut Instance<'_>) -> Option<RecordsClaim> {
+/// The document's call-records claim as `instance`'s run states it, a check
+/// whose value does not resolve carried failing in it. A claim the plan could
+/// not read never reaches a run: compiling it refused the document.
+fn state_call_records(instance: &Instance<'_>) -> Option<RecordsClaim> {
     let post = instance.plan().document().postconditions.as_ref()?;
     let expected = post.call_records().ok()??;
-    let (claim, failures) = {
-        let resolver = Resolver::new(instance.state(), &instance.config().identities);
-        records::state(&expected, &resolver, &instance.scope())
-    };
-    for failure in failures {
-        instance.fail(failure);
-    }
-    Some(claim)
+    let resolver = Resolver::new(instance.state(), &instance.config().identities);
+    Some(records::state(&expected, &resolver, &instance.scope()))
 }
 
 /// The run loop's own state, kept beside the instance it drives.

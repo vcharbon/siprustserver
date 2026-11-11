@@ -30,6 +30,22 @@ fn a_call_records_claim_of_another_shape_is_refused() {
     });
 }
 
+/// An accessor in the call-records claim is resolved like any other; another
+/// collector's claim is opaque to the run, so its strings are never read as
+/// accessors.
+#[test]
+fn only_the_call_records_claim_is_scanned_for_accessors() {
+    assert_fires("accessor/leg-unknown", |d| {
+        d["postconditions"] = json!({ "claims": { "call-records": {
+            "count": 1, "checks": [{ "field": "d", "op": "eq", "value": "${leg:Z.call-id}" }] } } });
+    });
+    assert_clean("accessor/leg-unknown", |d| {
+        d["postconditions"] = json!({ "claims": {
+            "call-records": { "count": 1 },
+            "call-traces": { "match": "${leg:Z.call-id}" } } });
+    });
+}
+
 #[test]
 fn a_call_records_claim_check_holds_the_check_shape() {
     assert_fires("checks/value-mismatch", |d| {

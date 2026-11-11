@@ -13,7 +13,7 @@ fn expected(text: &str) -> CdrCheck {
 
 /// `expected` as a run on `lane` states it, for a document whose content
 /// came from `origin`.
-fn stated(text: &str, lane: &str, origin: Option<&str>) -> (RecordsClaim, Vec<Failure>) {
+fn stated(text: &str, lane: &str, origin: Option<&str>) -> RecordsClaim {
     let config = RunConfig::new(lane, ClockMode::Virtual, "h:1");
     let run = RunState::new();
     let bindings = IdentityBindings::new();
@@ -27,8 +27,7 @@ fn verdict() -> RunVerdict {
 
 #[test]
 fn the_record_count_is_exact() {
-    let (claim, failures) = stated(r#"{"count":1}"#, "lane", None);
-    assert!(failures.is_empty());
+    let claim = stated(r#"{"count":1}"#, "lane", None);
     let two = [record(&[("disposition", "ANSWERED")]), record(&[("disposition", "BUSY")])];
     let mut judged = verdict();
     assert!(!judge(&claim, &two, &mut judged));
@@ -53,7 +52,7 @@ fn the_record_count_is_exact() {
 
 #[test]
 fn a_check_asserts_over_the_record_set_and_says_so_when_none_matches() {
-    let (claim, _) = stated(
+    let claim = stated(
         r#"{"count":2,"checks":[{"field":"disposition","op":"regex","value":"^(ANSWERED|CANCELLED)$"}]}"#,
         "lane",
         None,
@@ -82,7 +81,7 @@ fn a_classified_check_is_informative_off_its_origin_lane() {
         {"field":"disposition","op":"eq","value":"ANSWERED"}]}"#;
     let records = [record(&[("events", "invite_received"), ("disposition", "CANCELLED")])];
 
-    let (foreign, _) = stated(text, "here", Some("origin"));
+    let foreign = stated(text, "here", Some("origin"));
     assert_eq!(foreign.checks.iter().map(|c| c.gates).collect::<Vec<_>>(), [false, true]);
     let mut judged = verdict();
     assert!(!judge(&foreign, &records, &mut judged));
@@ -90,7 +89,7 @@ fn a_classified_check_is_informative_off_its_origin_lane() {
     assert_eq!(judged.informative.len(), 1);
     assert_eq!(judged.informative[0].class, CheckClass::CdrVocabulary);
 
-    let (home, _) = stated(text, "origin", Some("origin"));
+    let home = stated(text, "origin", Some("origin"));
     let mut judged = verdict();
     assert!(!judge(&home, &records, &mut judged));
     assert_eq!(judged.failures.len(), 2, "both gate on the origin lane: {judged:?}");
@@ -98,10 +97,10 @@ fn a_classified_check_is_informative_off_its_origin_lane() {
 }
 
 /// A value carrying no accessor is stated as written, a regex included; one
-/// whose accessor the run cannot resolve is a failure and leaves the claim.
+/// whose accessor the run cannot resolve stays in the claim, saying why.
 #[test]
-fn a_check_value_is_stated_resolved_and_an_unresolved_one_is_a_failure() {
-    let (claim, failures) = stated(
+fn a_check_value_is_stated_resolved_and_an_unresolved_one_says_why() {
+    let claim = stated(
         r#"{"count":1,"checks":[
             {"field":"a","op":"regex","value":"^x+$"},
             {"field":"b","op":"exists"},
@@ -109,13 +108,43 @@ fn a_check_value_is_stated_resolved_and_an_unresolved_one_is_a_failure() {
         "lane",
         None,
     );
-    let values: Vec<(&str, Option<&str>)> =
-        claim.checks.iter().map(|c| (c.check.field.as_str(), c.check.value.as_deref())).collect();
-    assert_eq!(values, [("a", Some("^x+$")), ("b", None)]);
-    assert!(
-        matches!(&failures[..], [Failure::AccessorUnresolved { site, .. }] if site == "cdr check \"c\""),
-        "{failures:?}"
+    let values: Vec<(&str, Option<&str>, bool)> = claim
+        .checks
+        .iter()
+        .map(|c| (c.check.field.as_str(), c.check.value.as_deref(), c.unresolved.is_some()))
+        .collect();
+    assert_eq!(
+        values,
+        [("a", Some("^x+$"), false), ("b", None, false), ("c", Some("${step:s9.cseq}"), true)]
     );
+}
+
+/// A check whose value does not resolve fails the claim on the record line
+/// whatever the records hold, and keeps its class: it gates on its origin lane
+/// and is informative off it.
+#[test]
+fn an_unresolved_check_fails_the_claim_by_its_class() {
+    let text = r#"{"count":1,"checks":[
+        {"field":"call_id","op":"eq","value":"${step:s9.cseq}","class":"cdr-vocabulary"}]}"#;
+    let records = [record(&[("call_id", "${step:s9.cseq}")])];
+
+    let mut home = verdict();
+    assert!(!judge(&stated(text, "origin", Some("origin")), &records, &mut home));
+    let [Failure::CdrMismatch { expected, observed }] = &home.failures[..] else {
+        panic!("one record mismatch: {:?}", home.failures)
+    };
+    assert!(expected.starts_with("some record where call_id"), "{expected}");
+    assert!(
+        observed.starts_with("the check's value does not resolve against the run"),
+        "{observed}"
+    );
+    assert!(home.informative.is_empty());
+
+    let mut foreign = verdict();
+    assert!(judge(&stated(text, "here", Some("origin")), &records, &mut foreign));
+    assert!(foreign.passed(), "{foreign:?}");
+    assert_eq!(foreign.informative.len(), 1);
+    assert_eq!(foreign.informative[0].class, CheckClass::CdrVocabulary);
 }
 
 /// A stated value is the run's resolved one: judging reads it as written, so a
@@ -126,6 +155,7 @@ fn a_stated_value_is_compared_as_written_never_resolved_again() {
     let stated_check = |op: CheckOp, value: &str| StatedCheck {
         check: Check { field: "note".into(), op, value: Some(value.into()), class: None },
         gates: true,
+        unresolved: None,
     };
     let claim = RecordsClaim {
         count: 1,
@@ -141,7 +171,7 @@ fn a_stated_value_is_compared_as_written_never_resolved_again() {
 
 #[test]
 fn a_stated_claim_round_trips() {
-    let (claim, _) =
+    let claim =
         stated(r#"{"count":1,"checks":[{"field":"a","op":"eq","value":"v"}]}"#, "lane", None);
     let text = serde_json::to_string(&claim).unwrap();
     assert_eq!(text, r#"{"count":1,"checks":[{"field":"a","op":"eq","value":"v","gates":true}]}"#);

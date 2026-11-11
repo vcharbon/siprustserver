@@ -50,3 +50,15 @@ export const Postconditions = Schema.Struct({
   checks: Schema.optionalKey(Schema.Array(Check))
 })
 export interface Postconditions extends Schema.Schema.Type<typeof Postconditions> {}
+
+/**
+ * Every claim `postconditions` states, by collector name: its `claims`, and a
+ * `cdr` count as the {@link CALL_RECORDS} claim where `claims` does not name
+ * that collector. A stated absence claims nothing.
+ */
+export const statedClaims = (postconditions: Postconditions | undefined): Readonly<Record<string, unknown>> => {
+  const claims = { ...postconditions?.claims }
+  const cdr = postconditions?.cdr
+  if (cdr !== undefined && "count" in cdr && !(CALL_RECORDS in claims)) claims[CALL_RECORDS] = cdr
+  return claims
+}
