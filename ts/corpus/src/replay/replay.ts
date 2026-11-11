@@ -296,7 +296,8 @@ const interpreterEnv = (memoryMax: string, rowsDir: string | undefined) =>
  * batch after it are landed unrun, and its row closes `error`. A stop asked
  * for mid-batch admits no further cell, waits the stop's grace for the cells
  * in flight, then interrupts them; the batch's end runs as on any other.
- * The batch's row names the cells it drives, the materialised ones.
+ * The batch's row names the cells it drives, the materialised ones; a
+ * batch with none files no row.
  */
 export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) {
   const { options, stop, tallies } = request
@@ -408,7 +409,7 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
 
   const ended = yield* LaneBatch.run({
     lane: options.lane,
-    row: { ...request.owner, lane: options.lane, cells: cells.map(cellName) },
+    ...(cells.length === 0 ? {} : { row: { ...request.owner, lane: options.lane, cells: cells.map(cellName) } }),
     stand: merged === undefined
       ? undefined
       : { under: runtime, rowsDir: merged, memoryMax: options.memoryMax, cells: limits.cells },

@@ -777,8 +777,9 @@ export const INBOX_JOBS = "12_inbox_jobs"
 
 /**
  * `batches`: one row per batch a job (or a sweep that is no job) drove on a
- * lane: its attempt, its cells by name, and its window, open until its end
- * gate has read. A retry is a batch of its own, its attempt above 1.
+ * lane: its attempt, its cells by name, and its window, closed once what the
+ * lane stood for it (its SUT, its batch process) is given back. A retry is a
+ * batch of its own, its attempt above 1.
  */
 const batches = Effect.gen(function*() {
   const sql = yield* SqlClient

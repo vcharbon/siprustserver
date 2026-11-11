@@ -305,4 +305,10 @@ describe.skipIf(!served)("the replay phase", () => {
     expect(done.batches).toBe(1)
     expect(batches.map((row) => [...row.cells].sort())).toEqual([[`${ONE}#${ONE}-a@key`, `${ONE}#${ONE}-b@key`]])
   })
+
+  it("files no row for a batch whose every capture it could not materialise", async () => {
+    const { rows, batches } = await replay(PAUSED, { batchSize: 2, breaking: ONE })
+    expect(rows.map((row) => [row.capture, row.status])).toEqual([[ONE, "error"], [TWO, "done"]])
+    expect(batches.map((row) => row.cells)).toEqual([[`${TWO}#${TWO}-a@key`]])
+  })
 })
