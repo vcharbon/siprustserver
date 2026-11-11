@@ -82,15 +82,25 @@ fn ack_preserves_invite_route(f: &rfc_rules::Finding, cid: &str) -> String {
 }
 
 fn unacked_invite_non_2xx_final(f: &rfc_rules::Finding, cid: &str) -> String {
-    let Decision::Violated(rfc_rules::Evidence::UnackedReject { status, branch, .. }) = &f.decision
+    let Decision::Violated(rfc_rules::Evidence::UnackedReject {
+        status, branch, ack_sent_to, ..
+    }) = &f.decision
     else {
         return String::new();
     };
-    format!(
-        "Took a non-2xx final {status} to an INVITE (callId {cid}, branch {branch}) and \
-         never ACKed it to the UAS that sent it — the INVITE transaction never \
-         completes and the reject retransmits to Timer H; RFC 3261 §17.1.1.3 makes \
-         the ACK mandatory (hop-by-hop, so a proxy in the path owes the UAS its own \
-         synthesized ACK)",
-    )
+    match ack_sent_to {
+        Some(to) => format!(
+            "Took a non-2xx final {status} to an INVITE (callId {cid}, branch {branch}) and \
+             ACKed it at {to}, not at {}, where the INVITE went — RFC 3261 §17.1.1.3 sends \
+             the ACK to the INVITE's own address, port and transport",
+            f.taker,
+        ),
+        None => format!(
+            "Took a non-2xx final {status} to an INVITE (callId {cid}, branch {branch}) and \
+             never ACKed it to the UAS that sent it — the INVITE transaction never \
+             completes and the reject retransmits to Timer H; RFC 3261 §17.1.1.3 makes \
+             the ACK mandatory (hop-by-hop, so a proxy in the path owes the UAS its own \
+             synthesized ACK)",
+        ),
+    }
 }

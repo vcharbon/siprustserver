@@ -780,12 +780,9 @@ pub enum Evidence {
         /// The grace the 100 was owed within, microseconds.
         grace_us: u64,
     },
-    /// The non-2xx INVITE final whose ACK never reached the UAS that sent it.
-    ///
-    /// Untagged and unambiguous both ways: it is the only variant carrying
-    /// `reject_msg`, and it carries none of the required keys of any other
-    /// variant — every other variant naming an `invite_msg` also requires a
-    /// `cancel_msg`, an `ack_require_msg` or an `ack_route_msg` this one lacks.
+    /// The non-2xx INVITE final whose ACK never reached its INVITE's address.
+    /// Untagged, unambiguous: the only variant carrying `reject_msg`; any other
+    /// naming an `invite_msg` requires `cancel_msg`, `ack_require_msg` or `ack_route_msg`.
     UnackedReject {
         /// Index into the view's `msgs` of the non-2xx final the emitter sent.
         reject_msg: usize,
@@ -801,6 +798,9 @@ pub enum Evidence {
         /// How long the observation kept running after the final,
         /// microseconds. At least the rule's window, or there is no hit.
         window_us: u64,
+        /// Where the UAC's ACK on the branch went, if not to the INVITE's address.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ack_sent_to: Option<String>,
     },
     /// The re-INVITE that drew a provisional and then nothing, on a dialog
     /// nothing else ended.

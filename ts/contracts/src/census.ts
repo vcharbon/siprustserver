@@ -154,7 +154,9 @@ export const UnackedRejectHit = Schema.Struct({
   status: Schema.Int,
   invite_msg: Schema.Int,
   branch: Schema.String,
-  window_us: Schema.Int
+  window_us: Schema.Int,
+  /** Where the UAC's ACK on the branch went instead of the INVITE's destination. */
+  ack_sent_to: Schema.optionalKey(Schema.String)
 })
 export interface UnackedRejectHit extends Schema.Schema.Type<typeof UnackedRejectHit> {}
 

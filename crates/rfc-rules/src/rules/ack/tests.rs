@@ -600,18 +600,33 @@ fn a_reject_from_a_second_uas_socket_is_owed_its_ack() {
     ]);
     assert_eq!(acked.len(), 1, "{acked:?}");
     assert!(matches!(acked[0].decision, Decision::Compliant), "{:?}", acked[0].decision);
-    assert_eq!(acked[0].taker, UAS_SENDS, "the socket that sent the reject is the one owed");
-
-    let mut ack_at_the_sender =
-        on(3_000, UAC, UAS_SENDS, Kind::Request { method: "ACK".to_string() }, 1, "z9hG4bK-i");
-    ack_at_the_sender.cseq_method = "ACK".to_string();
-    let at_the_sender =
-        unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), from_second(2_000), ack_at_the_sender]);
-    assert!(matches!(at_the_sender[0].decision, Decision::Compliant), "{at_the_sender:?}");
+    assert_eq!(acked[0].taker, UAS, "the ACK is owed at the socket the INVITE reached");
 
     let never = unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), from_second(2_000)]);
     assert_eq!(never.len(), 1, "{never:?}");
     assert!(never[0].violated(), "{:?}", never[0].decision);
+}
+
+/// §17.1.1.3 sends the ACK to the INVITE's own destination: an ACK to the
+/// socket the reject came from discharges nothing, and the evidence names
+/// where it went.
+#[test]
+fn an_ack_to_the_reject_s_sender_instead_of_the_invite_s_destination_is_violated() {
+    const UAS_SENDS: &str = "10.0.0.2:41000";
+    let mut stray =
+        on(3_000, UAC, UAS_SENDS, Kind::Request { method: "ACK".to_string() }, 1, "z9hG4bK-i");
+    stray.cseq_method = "ACK".to_string();
+    let f = unacked(&[
+        took(1_000, "INVITE", "z9hG4bK-i"),
+        on(2_000, UAS_SENDS, UAC, Kind::Response { status: 486 }, 1, "z9hG4bK-i"),
+        stray,
+    ]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    let Decision::Violated(Evidence::UnackedReject { ack_sent_to, .. }) = &f[0].decision else {
+        panic!("{:?}", f[0].decision)
+    };
+    assert_eq!(ack_sent_to.as_deref(), Some(UAS_SENDS));
+    assert_eq!((f[0].emitter.as_str(), f[0].taker.as_str()), (UAC, UAS));
 }
 
 /// The offence is the ACK that never came, so [`Finding::emitter`] is the
