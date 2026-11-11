@@ -34,13 +34,32 @@ impl Request<'_> {
     /// its originator's own reuse rather than this request by another path or
     /// another originator's — read off the two bottom Vias (see the module
     /// doc). Without both Vias, or a bottom branch, the reuse reading stands.
-    pub(super) fn reused_by(&self, copy: &Request<'_>) -> bool {
+    /// A copy that [`Request::fails_over_to`] is this request again.
+    pub(super) fn reused_by(&self, copy: &Request<'_>, responses: &[Response<'_>]) -> bool {
+        if self.fails_over_to(copy, responses) {
+            return false;
+        }
         let (Some(first), Some(again)) = (&self.origin, &copy.origin) else { return true };
         if !first.sent_by.as_borrowed().same_host(&again.sent_by.as_borrowed()) {
             return false;
         }
         let same = first.branch.as_deref().zip(again.branch.as_deref());
         first.branch.is_none() || !same.is_some_and(|(a, b)| same_branch(a, b))
+    }
+
+    /// Whether `copy` is this request's RFC 3263 §4.3 retry: the same method
+    /// sent to another socket of the agent after this one drew no final but a
+    /// 503 — identical but for its branch, CSeq included.
+    fn fails_over_to(&self, copy: &Request<'_>, responses: &[Response<'_>]) -> bool {
+        let mine = |r: &&Response<'_>| {
+            r.status >= 200
+                && r.method.eq_ignore_ascii_case(self.method)
+                && r.branch.is_some_and(|b| same_branch(b, self.branch))
+        };
+        !self.branch.is_empty()
+            && copy.taker != self.taker
+            && copy.method.eq_ignore_ascii_case(self.method)
+            && responses.iter().filter(mine).all(|r| r.status == 503)
     }
 
     pub(super) fn not_contiguous(&self, prior_cseq: u32, to_tag: &str) -> Evidence {

@@ -547,7 +547,7 @@ impl<'a> Reading<'a> {
             }
             // Another path for the same request, or another originator's
             // request: not this UAC's reuse (see the module doc).
-            Some(first) if !first.reused_by(&req) => {}
+            Some(first) if !first.reused_by(&req, &self.responses) => {}
             // A DIFFERENT transaction carried a CSeq the dialog already spent →
             // the dialog CSeq failed to increment. Same branch, different method
             // is one transaction's shape restated, and records nothing new.
