@@ -47,3 +47,25 @@ fn an_ack_at_a_two_socket_uas_s_other_socket_matches_its_invite() {
     assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
     assert_eq!(f[0].taker, BOB_SENDS);
 }
+
+/// RFC 3263 §4.3: a request that drew a 503 is retried, identical but for
+/// its branch, at the agent's other socket: the same request, not a reuse.
+#[test]
+fn a_retry_after_a_503_to_the_uas_s_other_socket_is_no_reuse() {
+    let mut msgs = opened();
+    msgs.push(in_dialog(4_000, "BYE", 2, "z9hG4bK-b1"));
+    msgs.push(rsp(4_500, 503, 2, "BYE", "z9hG4bK-b1"));
+    msgs.push(at_second(in_dialog(5_000, "BYE", 2, "z9hG4bK-b2")));
+    assert!(hits(&CseqInDialogOrder, &msgs).is_empty(), "{:?}", order(&msgs));
+}
+
+/// A request that drew a final other than 503 was served: the same number on
+/// a new transaction to the agent's other socket is a reuse.
+#[test]
+fn a_cseq_spent_on_a_served_request_is_reused_at_the_other_socket() {
+    let mut msgs = opened();
+    msgs.push(in_dialog(4_000, "INFO", 2, "z9hG4bK-n"));
+    msgs.push(rsp(4_500, 200, 2, "INFO", "z9hG4bK-n"));
+    msgs.push(at_second(in_dialog(5_000, "INFO", 2, "z9hG4bK-n2")));
+    assert_eq!(hits(&CseqInDialogOrder, &msgs).len(), 1, "{:?}", order(&msgs));
+}
