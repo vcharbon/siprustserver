@@ -74,6 +74,18 @@ pub type Finding = (String, String, String);
 /// A finding a window accepted, with the window-table row that took it.
 pub type Accepted = (Finding, &'static str);
 
+/// The cross-message audit of one run, classified.
+#[derive(Default)]
+pub struct Partitioned {
+    /// The findings that fail the run.
+    pub gating: Vec<Finding>,
+    /// The findings a window took, each with its row.
+    pub accepted: Vec<Accepted>,
+    /// The findings of a rule informative inside the system under test, on a
+    /// hop whose two ends are both under test: recorded, never gating.
+    pub informative: Vec<Finding>,
+}
+
 /// `(rule, lane, detail)` findings reduced to the `(lane, detail)` pairs the
 /// assertion messages render.
 pub fn lane_details(findings: Vec<Finding>) -> Vec<(String, String)> {
@@ -174,18 +186,21 @@ impl RfcAcceptance {
 
     /// Run the cross-message audit over `events` (already the cross-audit
     /// endpoint-scoped view, the binds of `scoped_out` taken out of it) and
-    /// split its non-advisory findings into `(gating, accepted)`: a finding is
-    /// accepted, by the row of the first window taking it, when its OFFENDING
-    /// message was captured inside a window for its rule; a lifetime-waived
-    /// rule is dropped outright; an unattributable finding gates.
+    /// classify its non-advisory findings: a finding is accepted, by the row
+    /// of the first window taking it, when its OFFENDING message was captured
+    /// inside a window for its rule; else informative when its rule is
+    /// informative inside the system under test and `is_sut` holds both ends
+    /// of its hop ([`sip_net_testkit::rfc_finding_inside_sut`]); else it gates.
+    /// A lifetime-waived rule is dropped outright; an unattributable finding
+    /// gates.
     pub fn partition(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
         scoped_out: &HashSet<String>,
-    ) -> (Vec<Finding>, Vec<Accepted>) {
+        is_sut: impl Fn(&str) -> bool,
+    ) -> Partitioned {
         let capture = CaptureIndex::new(sip_net_testkit::audit_wire_entries(events));
-        let mut gating = Vec::new();
-        let mut accepted = Vec::new();
+        let mut out = Partitioned::default();
         let pass = sip_net_testkit::AuditPass::new(events);
         for rule in sip_net_testkit::rfc_cross_message_rules_scoped(scoped_out.clone()) {
             // Honour the advisory tier exactly as the scenario-harness hard gate
@@ -198,15 +213,22 @@ impl RfcAcceptance {
                 continue;
             }
             let mut per_dialog = DialogRequests::default();
-            for (lane, detail, offending, _charged) in rule.check_pass(&pass) {
+            for (lane, detail, offending, charged, counterpart) in rule.check_pass(&pass) {
                 let finding = (rule.name().to_string(), lane, detail);
+                let inside = sip_net_testkit::rfc_finding_inside_sut(
+                    rule.name(),
+                    charged.as_deref(),
+                    counterpart.as_deref(),
+                    &is_sut,
+                );
                 match self.taker(rule.name(), offending, &capture, &mut per_dialog) {
-                    Some(row) => accepted.push((finding, row)),
-                    None => gating.push(finding),
+                    Some(row) => out.accepted.push((finding, row)),
+                    None if inside => out.informative.push(finding),
+                    None => out.gating.push(finding),
                 }
             }
         }
-        (gating, accepted)
+        out
     }
 }
 
@@ -265,6 +287,69 @@ mod tests {
             acceptance.open_row(row(id).expect("a row of the table"), from_seq);
         }
         acceptance
+    }
+
+    const PROXY: &str = "127.0.0.1:5080";
+    const WORKER: &str = "127.0.0.1:5091";
+    const OTHER_WORKER: &str = "127.0.0.1:5092";
+    const UNACKED_NON_2XX: &str = "unacked-invite-non-2xx-final";
+
+    fn sent(raw: String, to: &str, seq: u64) -> Stamped<SignalingNetworkEvent> {
+        let event = SignalingNetworkEvent::SendCalled {
+            bind_key: PROXY.to_string(),
+            to: to.parse().unwrap(),
+            msg: raw.into_bytes(),
+        };
+        Stamped { event, seq, at_ms: seq }
+    }
+
+    fn taken(raw: String, src: &str, seq: u64) -> Stamped<SignalingNetworkEvent> {
+        let event = SignalingNetworkEvent::RecvItem {
+            bind_key: PROXY.to_string(),
+            disposition: sip_net::types::RecvDisposition::Delivered,
+            wire: sip_net_testkit::WireStamp::of_bytes(raw.as_bytes()),
+            packet: sip_net::types::UdpPacket::unparsed(
+                raw.into_bytes(),
+                src.parse().unwrap(),
+                seq,
+            ),
+        };
+        Stamped { event, seq, at_ms: seq }
+    }
+
+    /// The proxy INVITEs a worker, takes its 486 and ACKs another worker,
+    /// where RFC 3261 §17.1.1.3 owes the ACK at the INVITE's destination.
+    fn acked_at_another_worker() -> Vec<Stamped<SignalingNetworkEvent>> {
+        let head = |start: &str, cseq: &str, to_tag: &str| {
+            format!(
+                "{start}\r\nVia: SIP/2.0/UDP {PROXY};branch=z9hG4bK-w1\r\nMax-Forwards: 70\r\n\
+                 From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>{to_tag}\r\nCall-ID: c1\r\nCSeq: {cseq}\r\n"
+            )
+        };
+        let invite = head("INVITE sip:b@x SIP/2.0", "1 INVITE", "")
+            + &format!("Contact: <sip:a@{PROXY}>\r\nAllow: INVITE, ACK, CANCEL, BYE\r\n")
+            + "Supported: timer\r\nContent-Length: 0\r\n\r\n";
+        let busy =
+            head("SIP/2.0 486 Busy Here", "1 INVITE", ";tag=b") + "Content-Length: 0\r\n\r\n";
+        let ack = head("ACK sip:b@x SIP/2.0", "1 ACK", ";tag=b") + "Content-Length: 0\r\n\r\n";
+        vec![sent(invite, WORKER, 1), taken(busy, WORKER, 2), sent(ack, OTHER_WORKER, 3)]
+    }
+
+    #[test]
+    fn an_ack_at_another_worker_is_informative_only_inside_the_sut() {
+        let acceptance = RfcAcceptance::default();
+        let events = acked_at_another_worker();
+        let scoped_out = HashSet::new();
+        let rules = |findings: &[Finding]| -> Vec<String> {
+            findings.iter().map(|(rule, ..)| rule.clone()).collect()
+        };
+        let inside = acceptance.partition(&events, &scoped_out, |_| true);
+        assert_eq!(rules(&inside.gating), Vec::<String>::new());
+        assert_eq!(rules(&inside.informative), [UNACKED_NON_2XX]);
+
+        let border = acceptance.partition(&events, &scoped_out, |bind| bind == PROXY);
+        assert_eq!(rules(&border.gating), [UNACKED_NON_2XX]);
+        assert!(border.informative.is_empty(), "a hop to a simulated party gates");
     }
 
     #[test]

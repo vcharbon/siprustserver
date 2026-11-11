@@ -105,6 +105,7 @@ pub(crate) fn as_findings(verdicts: Vec<GatedVerdict>) -> Vec<sip_net_testkit::R
             advisory: false,
             offending: None,
             charged: None,
+            counterpart: None,
         })
         .collect()
 }

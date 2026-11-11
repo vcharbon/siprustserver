@@ -590,7 +590,7 @@ fn every_detail_opens_on_its_charged_party() {
     }));
     let mut seen = 0;
     for rule in cross_rules() {
-        for (lane, detail, _, charged) in rule.check_positioned(&evs) {
+        for (lane, detail, _, charged, _) in rule.check_positioned(&evs) {
             let charged = charged.expect("every live row charges a party");
             assert!(
                 detail.starts_with(&format!("{charged}: ")),

@@ -24,6 +24,7 @@ fn finding(rule: &str, offending: usize) -> RfcFinding {
         advisory: false,
         offending: Some(offending),
         charged: None,
+        counterpart: None,
     }
 }
 

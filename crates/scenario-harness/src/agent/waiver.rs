@@ -17,6 +17,11 @@
 //! ([`Harness::allow_violation`](super::Harness::allow_violation),
 //! [`WaiverScope::rule`] alone) covers simulated-party findings only.
 //!
+//! A finding of a rule informative inside the system under test
+//! ([`RfcFinding::inside_sut`](sip_net_testkit::RfcFinding::inside_sut)) whose
+//! charged party and hop's other end are both lanes bound as SUT never gates,
+//! and no waiver is needed for it.
+//!
 //! A position-scoped waiver needs the finding's `offending` entry: a finding
 //! that does not carry one stays gated and such a waiver goes unused-loud.
 //!
@@ -231,6 +236,17 @@ fn charged_lane(charged: &str, entry: Option<&RecordedSipEntry>) -> Option<Strin
     }
 }
 
+/// Whether `f` lies on a hop inside the system under test: its rule is
+/// informative there and both its charged bind and the other end of its hop
+/// resolve to lanes bound as SUT.
+fn inside_sut(f: &RfcFinding, entries: &[RecordedSipEntry], attr: &Attribution) -> bool {
+    let entry = f.offending.and_then(|idx| entries.get(idx.checked_sub(1)?));
+    f.inside_sut(|bind| {
+        let party = charged_lane(bind, entry).and_then(|lane| party_of(&Some(lane), attr));
+        attr.is_sut(party.as_deref())
+    })
+}
+
 /// Whether `w` covers `finding`, charged to `party`: the rule matches, the
 /// position (when scoped) is the offending entry, and the party is the one the
 /// waiver names — or, for a party-less waiver, a simulated party.
@@ -254,7 +270,7 @@ pub(crate) struct Waived<T> {
     /// The gating findings no waiver covers: the non-advisory ones, and the
     /// advisory ones of a rule that gates the SUT
     /// ([`rfc_rule_gates_sut`](sip_net_testkit::rfc_rule_gates_sut)) charged
-    /// to it.
+    /// to it, less those on a hop inside the SUT of a rule informative there.
     pub gating: Vec<T>,
     /// Per rule, how many findings charged to the SUT a waiver covered.
     pub sut: BTreeMap<String, usize>,
@@ -289,7 +305,7 @@ fn waive(
         let party = finding_party(f, entries, attr);
         let gates = !f.advisory
             || (sip_net_testkit::rfc_rule_gates_sut(&f.rule) && attr.is_sut(party.as_deref()));
-        if !gates {
+        if !gates || inside_sut(f, entries, attr) {
             continue;
         }
         let mut waived = false;

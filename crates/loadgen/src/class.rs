@@ -285,6 +285,7 @@ mod tests {
             advisory: false,
             offending: None,
             charged: None,
+            counterpart: None,
         };
         let rejected = || CallOutcome::Ok { branch: "rejected" };
         let dirty = rejected().audited(|| vec![finding.clone()]);

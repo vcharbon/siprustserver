@@ -71,7 +71,10 @@ fn doc_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
 /// the rule's `subject()` intersects the originating bind's declared roles —
 /// so the report can no longer list a proxy-subject rule against a UA lane
 /// (the e2e false-positive class). This is the same pass the `agent.rs` hard
-/// gate panics on; the two can never disagree.
+/// gate panics on; the two can never disagree: an advisory rule that gates the
+/// stack under test reads as gating on a finding charged to a lane bound as
+/// SUT, and a finding on a hop between two such lanes of a rule informative
+/// inside the SUT reads as advisory.
 ///
 /// (For the `agent.rs` path the recorder also carries these rules natively, so
 /// findings duplicate the recorder's ledger entries — the projector dedupes
@@ -83,8 +86,6 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
     // rendered doc keys on (the doc's rows are a superset view over the same
     // recording, so seq equality is the join).
     let wire = sip_net_testkit::audit_wire_entries(report.events());
-    // A rule that gates the stack under test reads as gating on a finding
-    // charged to a lane bound as SUT, as the hard gate judges it.
     let sut: Vec<std::net::SocketAddr> = report
         .scenario()
         .lanes
@@ -92,12 +93,10 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
         .filter(|l| l.network == layer_harness::NetworkTag::Core)
         .map(|l| l.addr)
         .collect();
+    let is_sut =
+        |bind: &str| sip_net_testkit::report::lane_addr(bind).is_some_and(|at| sut.contains(&at));
     let gates = |f: &sip_net_testkit::RfcFinding| {
-        sip_net_testkit::rfc_rule_gates_sut(&f.rule)
-            && f.charged
-                .as_deref()
-                .and_then(sip_net_testkit::report::lane_addr)
-                .is_some_and(|at| sut.contains(&at))
+        sip_net_testkit::rfc_rule_gates_sut(&f.rule) && f.charged.as_deref().is_some_and(is_sut)
     };
     report
         .rfc_findings()
@@ -107,7 +106,7 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
             detail: f.detail.clone(),
             lane: Some(f.lane.clone()),
             endpoint: None, // resolved against the recorder lanes by `sip_doc`
-            advisory: Some(f.advisory && !gates(f)),
+            advisory: Some((f.advisory && !gates(f)) || f.inside_sut(is_sut)),
             row_seqs: f
                 .offending
                 .and_then(|i| wire.get(i - 1))

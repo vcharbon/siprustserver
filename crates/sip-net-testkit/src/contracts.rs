@@ -189,7 +189,7 @@ pub struct SignalingAuditViolation {
     pub bind_key: Option<LaneKey>,
 }
 
-pub use crate::audit_rules::{CrossMessageAuditRule, PeerAuditRule};
+pub use crate::audit_rules::{CrossMessageAuditRule, PeerAuditRule, PositionedFinding};
 
 use std::collections::HashSet;
 
@@ -329,7 +329,7 @@ impl RecordingSignalingNetwork {
             let bind_roles = self.0.bind_roles.lock().unwrap().clone();
             let pass = crate::AuditPass::new(&snapshot);
             for rule in self.0.cross_rules.iter() {
-                for (bind_key, detail, _, _) in rule.check_pass(&pass) {
+                for (bind_key, detail, ..) in rule.check_pass(&pass) {
                     if !(self.0.should_audit)(&bind_key) {
                         continue;
                     }

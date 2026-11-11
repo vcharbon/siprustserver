@@ -27,6 +27,12 @@ pub trait PeerAuditRule: Send + Sync {
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>], bind_key: &str) -> Vec<String>;
 }
 
+/// One cross-message finding as a rule positions it: the reporting lane, the
+/// detail line, the 1-based wire-entry index of the OFFENDING message, the bind
+/// the rule holds RESPONSIBLE, and the bind at the other end of that party's
+/// hop (the one that took the offending message, or was owed the missing one).
+pub type PositionedFinding = (LaneKey, String, Option<usize>, Option<LaneKey>, Option<LaneKey>);
+
 /// A cross-message rule operates on the full event log at layer close. Each
 /// finding carries an originating `bind_key`. (Port of `CrossMessageAuditRule`.)
 pub trait CrossMessageAuditRule: Send + Sync {
@@ -40,19 +46,20 @@ pub trait CrossMessageAuditRule: Send + Sync {
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)>;
 
     /// The findings with the 1-based wire-entry index of the OFFENDING message
-    /// (into `to_sip_entries(events)`), when the rule can pinpoint it, and the
+    /// (into `to_sip_entries(events)`), when the rule can pinpoint it, the
     /// bind the rule holds RESPONSIBLE — the one that emitted the offending
-    /// message, or owed the one never emitted — when it can name it. The
-    /// reporting lane is the vantage and is not always the culprit: an
-    /// out-of-order request is reported where it was taken, an un-ACKed 2xx
-    /// where the ACK was owed. The default derives from [`check`](Self::check)
-    /// with neither; a rule that knows overrides THIS instead. Consumers scope
-    /// waivers on the index; a finding with neither is unattributable.
+    /// message, or owed the one never emitted — and the other end of its hop,
+    /// when it can name them. The reporting lane is the vantage and is not
+    /// always the culprit: an out-of-order request is reported where it was
+    /// taken, an un-ACKed 2xx where the ACK was owed. The default derives from
+    /// [`check`](Self::check) with none of them; a rule that knows overrides
+    /// THIS instead. Consumers scope waivers on the index; a finding with
+    /// neither index nor charged bind is unattributable.
     fn check_positioned(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        self.check(events).into_iter().map(|(b, d)| (b, d, None, None)).collect()
+    ) -> Vec<PositionedFinding> {
+        self.check(events).into_iter().map(|(b, d)| (b, d, None, None, None)).collect()
     }
 
     /// [`check_positioned`](Self::check_positioned) over the projections of
@@ -60,10 +67,7 @@ pub trait CrossMessageAuditRule: Send + Sync {
     /// builds one [`AuditPass`](crate::AuditPass) and hands it to each, and
     /// the findings are those of `check_positioned(pass.events())`. The
     /// default is exactly that call.
-    fn check_pass(
-        &self,
-        pass: &crate::AuditPass<'_>,
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    fn check_pass(&self, pass: &crate::AuditPass<'_>) -> Vec<PositionedFinding> {
         self.check_positioned(pass.events())
     }
 }

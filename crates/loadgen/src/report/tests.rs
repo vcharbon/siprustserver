@@ -13,6 +13,7 @@ fn rfc_fail(rule: &str, detail: &str) -> CallOutcome {
         advisory: false,
         offending: None,
         charged: None,
+        counterpart: None,
     }])
 }
 

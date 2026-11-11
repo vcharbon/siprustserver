@@ -27,20 +27,17 @@ impl CrossMessageAuditRule for Scoped {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
-        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
+        self.check_positioned(events).into_iter().map(|(b, d, ..)| (b, d)).collect()
     }
 
     fn check_positioned(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    ) -> Vec<PositionedFinding> {
         self.check_pass(&AuditPass::new(events))
     }
 
-    fn check_pass(
-        &self,
-        pass: &AuditPass<'_>,
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    fn check_pass(&self, pass: &AuditPass<'_>) -> Vec<PositionedFinding> {
         self.live.found(pass, &self.scoped_out)
     }
 }

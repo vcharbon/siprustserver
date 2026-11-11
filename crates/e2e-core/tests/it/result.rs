@@ -96,6 +96,7 @@ async fn a_gating_rfc_finding_fails_the_cell() {
         advisory: false,
         offending: None,
         charged: None,
+        counterpart: None,
     }];
     let result = RunResult::from_run(cell(), &report, Vec::new(), &gate);
     assert!(!result.passed, "the RFC hard gate fails the cell with its report intact");

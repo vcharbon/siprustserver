@@ -9,9 +9,10 @@ pub(super) const LIVE: &[Live] = &[
         .skip(Skip::RelayLanes),
     Live::emitter(RuleId::AckPreservesInviteRoute, ack_preserves_invite_route)
         .skip(Skip::RelayLanes),
-    // Gates: the harness UAC ACKs every non-2xx final (§17.1.1.3); a test modelling a peer that
-    // never ACKs waives it.
-    Live::taker_else_emitter(RuleId::UnackedInviteNon2xxFinal, unacked_invite_non_2xx_final),
+    // Gates on a border hop: the harness UAC ACKs every non-2xx final (§17.1.1.3); a test
+    // modelling a peer that never ACKs waives it. Inside the system under test, informative.
+    Live::taker_else_emitter(RuleId::UnackedInviteNon2xxFinal, unacked_invite_non_2xx_final)
+        .informative_inside_sut(),
 ];
 
 /// The To tag a violated ACK-family finding names, off its evidence.

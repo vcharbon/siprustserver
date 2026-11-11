@@ -160,6 +160,7 @@ fn an_audit_vote_on_a_released_call_is_no_cut() {
         advisory: false,
         offending: None,
         charged: None,
+        counterpart: None,
     };
     let r = record(
         &WireFacts { bye_received: Some(Some(200)), ..answered() },

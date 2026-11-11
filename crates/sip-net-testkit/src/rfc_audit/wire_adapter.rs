@@ -29,7 +29,7 @@ use layer_harness::{LaneKey, Stamped};
 use rfc_rules::rules::Obligation;
 use rfc_rules::{Decision, Observation, RuleId, WireView};
 
-use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
+use crate::contracts::{CrossMessageAuditRule, PositionedFinding, SignalingNetworkEvent};
 use crate::types::UaRole;
 
 mod ack;
@@ -55,16 +55,17 @@ mod wellformed;
 pub use pass::AuditPass;
 
 /// Run `rule` over `views` and keep the violated, non-relayed findings the
-/// `vantage` predicate accepts for the bind the view belongs to. Every
-/// non-relayed occasion at that vantage, violated or not, is noted for the
-/// run's rule population.
+/// `vantage` predicate accepts for the bind the view belongs to, each charged
+/// to the rule's `emitter` with its `taker` as the hop's other end, whatever
+/// vantage reports it. Every non-relayed occasion at that vantage, violated or
+/// not, is noted for the run's rule population.
 fn at_vantage(
     pass: &AuditPass<'_>,
     views: &[(&view::BindView, &Observation)],
     rule: &dyn Obligation,
     vantage: impl Fn(&rfc_rules::Finding, &LaneKey, &str) -> bool,
     detail: impl Fn(&rfc_rules::Finding, &str) -> String,
-) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+) -> Vec<PositionedFinding> {
     let positions = pass.positions();
     let mut out = Vec::new();
     for &(view, obs) in views {
@@ -77,14 +78,12 @@ fn at_vantage(
             if !f.violated() {
                 continue;
             }
-            // The charged party is the rule's own `emitter` — the bind that
-            // emitted the offending message or owed the missing one — whatever
-            // vantage this finding is reported at.
             out.push((
                 view.bind.clone(),
                 format!("{}: {}", f.emitter, detail(&f, cid)),
                 positions.get(seq).copied(),
                 Some(f.emitter.clone()),
+                Some(f.taker.clone()),
             ));
         }
     }
@@ -167,6 +166,9 @@ struct Live {
     per_party: bool,
     /// An advisory row that gates a finding charged to a system under test.
     gates_sut: bool,
+    /// A gating row whose finding is informative when both ends of its hop
+    /// are under test.
+    informative_inside_sut: bool,
     admits: fn(&rfc_rules::Finding) -> bool,
     detail: Detail,
 }
@@ -207,6 +209,7 @@ impl Live {
             advisory: false,
             per_party: false,
             gates_sut: false,
+            informative_inside_sut: false,
             admits: |_| true,
             detail,
         }
@@ -235,6 +238,16 @@ impl Live {
     /// run on a finding charged to one ([`rfc_rule_gates_sut`]).
     const fn gating_the_sut(mut self) -> Live {
         self.gates_sut = true;
+        self
+    }
+
+    /// Gating on a border hop, informative on a hop inside the system under
+    /// test: a harness that knows which recorded parties are under test
+    /// reports, and never fails the run on, a finding whose charged party and
+    /// hop's other end are both under test
+    /// ([`rfc_rule_informative_inside_sut`]).
+    const fn informative_inside_sut(mut self) -> Live {
+        self.informative_inside_sut = true;
         self
     }
 
@@ -274,20 +287,17 @@ impl CrossMessageAuditRule for Live {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
-        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
+        self.check_positioned(events).into_iter().map(|(b, d, ..)| (b, d)).collect()
     }
 
     fn check_positioned(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    ) -> Vec<PositionedFinding> {
         self.check_pass(&AuditPass::new(events))
     }
 
-    fn check_pass(
-        &self,
-        pass: &AuditPass<'_>,
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    fn check_pass(&self, pass: &AuditPass<'_>) -> Vec<PositionedFinding> {
         self.found(pass, &HashSet::new())
     }
 }
@@ -299,11 +309,7 @@ impl Live {
     /// judge the audit-visible events; the arrivals the loss model dropped
     /// only tell [`Vantage::EmitterUnlessLost`] where a sender's traffic is
     /// incomplete.
-    fn found(
-        &self,
-        pass: &AuditPass<'_>,
-        scoped_out: &HashSet<LaneKey>,
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    fn found(&self, pass: &AuditPass<'_>, scoped_out: &HashSet<LaneKey>) -> Vec<PositionedFinding> {
         let body = self.id.rule().body;
         let admits = self.admits;
         let views = if self.per_party {
@@ -374,7 +380,7 @@ impl Live {
         match self.skip.lanes(pass) {
             None => found,
             Some(skipped) => {
-                found.into_iter().filter(|(lane, _, _, _)| !skipped.contains(lane)).collect()
+                found.into_iter().filter(|(lane, ..)| !skipped.contains(lane)).collect()
             }
         }
     }
@@ -431,6 +437,33 @@ pub fn rfc_rule_gates_sut(token: &str) -> bool {
         .filter(|id| id.token() == token)
         .flat_map(|&id| rows_of(id))
         .any(|live| live.gates_sut)
+}
+
+/// Whether the rule `token` is informative on a hop inside the system under
+/// test: one stack's parties may hand each other what the RFC asks of a
+/// border, where it still gates.
+pub fn rfc_rule_informative_inside_sut(token: &str) -> bool {
+    RuleId::ALL
+        .iter()
+        .filter(|id| id.token() == token)
+        .flat_map(|&id| rows_of(id))
+        .any(|live| live.informative_inside_sut)
+}
+
+/// Whether a finding of rule `token`, charged to `charged` with `counterpart`
+/// at the other end of its hop, is informative: the rule is
+/// ([`rfc_rule_informative_inside_sut`]) and `is_sut` holds both ends. A
+/// finding missing either end, or a consumer that knows no party under test,
+/// keeps it gating.
+pub fn rfc_finding_inside_sut(
+    token: &str,
+    charged: Option<&str>,
+    counterpart: Option<&str>,
+    is_sut: impl Fn(&str) -> bool,
+) -> bool {
+    rfc_rule_informative_inside_sut(token)
+        && charged.is_some_and(&is_sut)
+        && counterpart.is_some_and(&is_sut)
 }
 
 /// The merged-rule cross checks this adapter contributes to the default suite:

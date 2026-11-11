@@ -138,6 +138,25 @@ pub struct RfcFinding {
     /// REPORTED, which for a taker-vantage rule is the other party. `None` ⇒
     /// the rule names no culprit.
     pub charged: Option<String>,
+    /// The bind at the other end of the charged party's hop: the one that
+    /// took the offending message, or was owed the one never emitted. `None`
+    /// ⇒ the rule names none.
+    pub counterpart: Option<String>,
+}
+
+impl RfcFinding {
+    /// Whether the finding is informative to a consumer whose parties under
+    /// test `is_sut` names: its rule is informative inside the system under
+    /// test and both ends of its hop are under test
+    /// ([`rfc_finding_inside_sut`](wire_adapter::rfc_finding_inside_sut)).
+    pub fn inside_sut(&self, is_sut: impl Fn(&str) -> bool) -> bool {
+        wire_adapter::rfc_finding_inside_sut(
+            &self.rule,
+            self.charged.as_deref(),
+            self.counterpart.as_deref(),
+            is_sut,
+        )
+    }
 }
 
 /// The recorded wire entries THE AUDIT SEES — `to_sip_entries` over the
@@ -240,7 +259,7 @@ pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit
                 population.entry(token).or_default().add(noted);
             }
         }
-        for (bind, detail, offending, charged) in positioned {
+        for (bind, detail, offending, charged, counterpart) in positioned {
             if subject_hits(&subject, charged.as_deref().unwrap_or(&bind)) {
                 findings.push(RfcFinding {
                     rule: rule.name().to_string(),
@@ -249,6 +268,7 @@ pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit
                     advisory: rule.force_advisory(),
                     offending,
                     charged,
+                    counterpart,
                 });
             }
         }
