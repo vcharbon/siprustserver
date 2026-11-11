@@ -29,7 +29,7 @@ use super::super::Obligation;
 /// proxy mints a FRESH branch on the leg it forwards, so branch equality
 /// systematically misses the forward and would charge every relaying proxy.
 ///
-/// **A request the strict reading refuses is no occasion** ([`Msg::refused`]):
+/// **A request the strict reading refuses is no occasion** ([`Msg::refused`](crate::wire::Msg::refused)):
 /// its 400 says what went wrong, and no target was looked for.
 ///
 /// **A relayed rejection is not a no-target outcome**: where the endpoint TOOK
@@ -40,9 +40,6 @@ pub struct NoTarget404;
 
 impl Obligation for NoTarget404 {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // Per endpoint: the transactions it forwarded, the finals it took, the
-        // request it took first on each server transaction, and the first final
-        // it answered there.
         let sides = Sides::of(wire.msgs);
         let parties = Parties::of(wire.msgs);
         let mut forwarded: BTreeSet<(String, &str, u32, String)> = BTreeSet::new();

@@ -18,7 +18,7 @@ use super::super::Obligation;
 /// The occasion is ONE response the endpoint TOOK. Charges the endpoint that
 /// sent it. The request it answers is the one of its transaction (Call-ID,
 /// top-Via branch, CSeq method) its UAC sent, the UAC named by the socket that
-/// request left from ([`Sides`]). A response whose request this vantage never
+/// request left from (`Sides`). A response whose request this vantage never
 /// carried settles nothing (`Undecidable`): whether the transaction was
 /// in-dialog is exactly what decides it.
 ///
@@ -27,6 +27,9 @@ use super::super::Obligation;
 /// To tag — recording it would let a §17.2.1-retransmitted final that crosses
 /// the ACK be misread as answering an "in-dialog ACK".
 ///
+/// The requests are read as the walk goes, so a response is only ever measured
+/// against a request that preceded it.
+///
 /// This is the teeth for a B2BUA or proxy that leaks Record-Route onto these
 /// responses; the test UA ignores it, a strict UAC's route-set bookkeeping does
 /// not.
@@ -34,9 +37,6 @@ pub struct RecordRoutePlacement;
 
 impl Obligation for RecordRoutePlacement {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // Requests each UAC SENT, by transaction, with whether they were
-        // in-dialog when they went out — built as the walk goes, so a response
-        // is only ever measured against a request that preceded it.
         let sides = Sides::of(wire.msgs);
         let mut sent: BTreeMap<(&str, &str, &str, String), (&str, bool)> = BTreeMap::new();
         let mut out = Vec::new();

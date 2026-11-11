@@ -282,7 +282,7 @@ impl<'a> Reading<'a> {
     /// Absorb one message. Repeats are NOT folded away: a retransmitted INVITE
     /// is owed its own replayed 100, so both sides of the budget count every
     /// copy the wire carried. A 100 is counted at the socket its INVITE left
-    /// from ([`Sides`]), wherever the UAC's sent-by took it.
+    /// from (`Sides`), wherever the UAC's sent-by took it.
     fn absorb(&mut self, sides: &Sides<'a>, mi: usize, msg: &'a Msg) {
         if msg.is_request("INVITE") {
             let txn = self

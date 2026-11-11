@@ -600,7 +600,14 @@ fn a_reject_from_a_second_uas_socket_is_owed_its_ack() {
     ]);
     assert_eq!(acked.len(), 1, "{acked:?}");
     assert!(matches!(acked[0].decision, Decision::Compliant), "{:?}", acked[0].decision);
-    assert_eq!(acked[0].taker, UAS, "the ACK is owed at the socket the INVITE reached");
+    assert_eq!(acked[0].taker, UAS_SENDS, "the socket that sent the reject is the one owed");
+
+    let mut ack_at_the_sender =
+        on(3_000, UAC, UAS_SENDS, Kind::Request { method: "ACK".to_string() }, 1, "z9hG4bK-i");
+    ack_at_the_sender.cseq_method = "ACK".to_string();
+    let at_the_sender =
+        unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), from_second(2_000), ack_at_the_sender]);
+    assert!(matches!(at_the_sender[0].decision, Decision::Compliant), "{at_the_sender:?}");
 
     let never = unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), from_second(2_000)]);
     assert_eq!(never.len(), 1, "{never:?}");

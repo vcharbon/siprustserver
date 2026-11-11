@@ -26,7 +26,7 @@
 //! transaction (§17.2.3 matches no ended one), and the next final is that
 //! transaction's own occasion. The request arrives at the socket the
 //! transaction's requests reach, which a UAS answering from another socket
-//! does not share ([`Sides`]). A final with no such request before it is
+//! does not share (`Sides`). A final with no such request before it is
 //! still the old transaction's, however late.
 //!
 //! **Every divergent status is reported exactly once, all on ONE finding.** The

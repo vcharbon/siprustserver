@@ -32,7 +32,7 @@
 //! absence is the UAS rule's business, not this one's.
 //!
 //! **A side of a transaction is named by the socket its INVITE used**
-//! ([`Sides`]): the UAC by the socket the INVITE left from, wherever its sent-by
+//! (`Sides`): the UAC by the socket the INVITE left from, wherever its sent-by
 //! took the final; the UAS by the socket the INVITE reached, whichever socket
 //! answered.
 //!

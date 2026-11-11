@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
-use crate::wire::{Kind, WireView};
+use crate::wire::{Kind, Msg, WireView};
 
 use super::super::sides::Sides;
 use super::super::Obligation;
@@ -28,7 +28,10 @@ pub const REJECT_ACK_WINDOW_US: u64 = 33_000_000;
 /// The occasion is ONE non-2xx final an endpoint SENT on a transaction it is
 /// the UAS of — it TOOK that transaction's INVITE. Charges the UAC that took
 /// the final and owed the ACK; the UAS that sent it is the `taker`, the one
-/// owed. An ACK on the same branch discharges it.
+/// owed. An ACK on the same branch discharges it, sent to the socket that took
+/// the INVITE or to the one that sent the final: a UAS answering from another
+/// socket, or a backup answering a transaction another node took, is owed the
+/// ACK where its final came from.
 ///
 /// **A retransmitted final re-uses the obligation** (§17.2.1 obliges the
 /// repeat, and one transaction owes one ACK), and **an ACK is only a discharge
@@ -43,9 +46,6 @@ pub struct UnackedInviteNon2xxFinal;
 
 impl Obligation for UnackedInviteNon2xxFinal {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // Per (UAS, call, branch): the INVITE it took, the reject it sent, and
-        // whether the ACK came back. Built as the walk goes, so the order the
-        // three arrived in is what decides.
         let sides = Sides::of(wire.msgs);
         let mut invite: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
         let mut rejects: BTreeMap<(&str, &str, &str), Reject<'_>> = BTreeMap::new();
@@ -58,12 +58,10 @@ impl Obligation for UnackedInviteNon2xxFinal {
                 Kind::Request { method } if method.eq_ignore_ascii_case("INVITE") => {
                     invite.entry((msg.dst.as_str(), msg.call_id.as_str(), branch)).or_insert(mi);
                 }
-                // §17.1.1.3: the ACK of a non-2xx final rides its INVITE's own
-                // branch, so it discharges that transaction and no other.
                 Kind::Request { method } if method.eq_ignore_ascii_case("ACK") => {
-                    if let Some(reject) =
-                        rejects.get_mut(&(msg.dst.as_str(), msg.call_id.as_str(), branch))
-                    {
+                    if let Some(reject) = rejects.iter_mut().find_map(|(key, reject)| {
+                        acknowledges(msg, branch, key, reject).then_some(reject)
+                    }) {
                         reject.acked = true;
                     }
                 }
@@ -80,6 +78,7 @@ impl Obligation for UnackedInviteNon2xxFinal {
                         status: *status,
                         invite_msg,
                         taker: msg.dst.as_str(),
+                        sent_from: msg.src.as_str(),
                         cseq: msg.cseq,
                         acked: false,
                     });
@@ -93,7 +92,7 @@ impl Obligation for UnackedInviteNon2xxFinal {
             let finding = |decision| Finding {
                 rule: RuleId::UnackedInviteNon2xxFinal,
                 emitter: reject.taker.to_string(),
-                taker: key.0.to_string(),
+                taker: reject.sent_from.to_string(),
                 cseq: reject.cseq,
                 relayed: false,
                 anchor: reject.msg,
@@ -133,6 +132,16 @@ struct Reject<'a> {
     invite_msg: usize,
     /// Where it went — the hop that owes the ACK, and so the one charged.
     taker: &'a str,
+    /// The socket that sent it, the UAS owed the ACK.
+    sent_from: &'a str,
     cseq: u32,
     acked: bool,
+}
+
+/// Whether `ack`, on `branch`, acknowledges the reject filed under `key`
+/// (UAS, call, branch): §17.1.1.3 has it ride the INVITE's own branch, and it
+/// reaches the socket that took the INVITE or the one the reject came from.
+fn acknowledges(ack: &Msg, branch: &str, key: &(&str, &str, &str), reject: &Reject<'_>) -> bool {
+    let (uas, call, on) = *key;
+    call == ack.call_id && on == branch && (uas == ack.dst || reject.sent_from == ack.dst)
 }

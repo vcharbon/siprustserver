@@ -20,7 +20,7 @@
 //! obligation runs against: the request arrived at it, and what it answered is
 //! its own emission. The occasion is keyed by `(taker, Call-ID, top-Via
 //! branch)` — RFC 3261 §17's transaction identity, the taker named by the
-//! socket the request reached, whichever socket answers ([`Sides`]) — so a
+//! socket the request reached, whichever socket answers (`Sides`) — so a
 //! §17.2.3 retransmission
 //! of the request neither opens a second occasion nor replaces the answer
 //! already recorded, and a retransmitted final is the same answer again.

@@ -32,13 +32,14 @@ pub const PROXY_100_GRACE_US: u64 = 200_000;
 /// **Proxy-scoped by consumer policy.** §16.7 binds proxies — a UAS answering
 /// an INVITE is governed by §8.2.6. An INVITE the strict reading refuses
 /// ([`crate::Msg::refused`]) is no occasion: the hop answers it 400 or drops it.
+/// A response is filed under the socket its INVITE reached, whichever socket of
+/// the hop sent it.
 pub struct Proxy100WithinGrace;
 
 impl Obligation for Proxy100WithinGrace {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per (taker, call, branch): the INVITE it took, whether it said it was
-        // trying, and its earliest final on the transaction — a response filed
-        // under the socket its INVITE reached, whichever socket sent it.
+        // trying, and its earliest final on the transaction.
         let sides = Sides::of(wire.msgs);
         let mut taken: BTreeMap<(&str, &str, &str), Taken<'_>> = BTreeMap::new();
         let mut said_trying: BTreeSet<(&str, &str, &str)> = BTreeSet::new();

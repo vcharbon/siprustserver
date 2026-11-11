@@ -10,7 +10,7 @@ use crate::wire::{Endpoint, Msg};
 ///
 /// An endpoint is a user agent of its own until a transaction ties it to
 /// another. A response joins its sender to the taker of the request it answers
-/// ([`Sides`]), and its taker to that request's sender when it reached an
+/// (`Sides`), and its taker to that request's sender when it reached an
 /// address that sender wrote (`sender_listens_at`; §18.2.2 answers at the
 /// sent-by, not necessarily the source). A tag ties nothing: proxies relay tags
 /// unchanged (§16.6). Built over the whole view, since identity is topology,

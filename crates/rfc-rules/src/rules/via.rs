@@ -5,7 +5,7 @@
 //! transaction.** §4 makes the duty conditional: only a request whose top Via
 //! carried a BARE `;rport` asks for anything, so a response is judged only on a
 //! transaction this vantage saw the same UAC open with that ask, the UAC named
-//! by the socket its request left from ([`Sides`](super::sides::Sides)).
+//! by the socket its request left from (`Sides`).
 //! Everything else opens no occasion at all.
 //!
 //! **The four states of the parameter are kept apart** ([`sniff::ViaRport`]):
@@ -59,7 +59,7 @@ pub struct RportEcho;
 impl Obligation for RportEcho {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let sides = Sides::of(wire.msgs);
-        let mut asked: BTreeMap<(&str, &str, &str, String), (&str, Option<u16>)> = BTreeMap::new();
+        let mut asked: BTreeMap<AskKey<'_>, (&str, Option<u16>)> = BTreeMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else {
@@ -125,14 +125,13 @@ impl Obligation for RportEcho {
     }
 }
 
+/// `(UAC socket, Call-ID, top-Via branch, CSeq method)`: one UAC's transaction.
+type AskKey<'a> = (&'a str, &'a str, &'a str, String);
+
 /// The transaction `msg` rides, filed under its UAC's sending socket: asks
 /// are recorded as the walk goes, so a response is only ever measured against
 /// an ask that preceded it.
-fn asked_key<'a>(
-    sides: &Sides<'a>,
-    msg: &'a Msg,
-    branch: &'a str,
-) -> (&'a str, &'a str, &'a str, String) {
+fn asked_key<'a>(sides: &Sides<'a>, msg: &'a Msg, branch: &'a str) -> AskKey<'a> {
     (sides.uac(msg), msg.call_id.as_str(), branch, msg.cseq_method.to_ascii_uppercase())
 }
 

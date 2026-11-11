@@ -1,6 +1,6 @@
 //! The two keys the CANCEL family files a transaction under: by its UAS side
 //! and by its UAC side, each named by the socket its requests used
-//! ([`Sides`]). A branch in either compares ignoring case (RFC 3261 §7.3.1).
+//! (`Sides`). A branch in either compares ignoring case (RFC 3261 §7.3.1).
 
 use crate::rules::branch::BranchName;
 use crate::rules::sides::Sides;

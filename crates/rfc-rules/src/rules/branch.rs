@@ -24,7 +24,7 @@
 //! identity: an endpoint is measured against what IT sent, never against a
 //! peer's copy of the same transaction. The emitter is the socket its requests
 //! left from, and a response it took is filed there, not under the sent-by
-//! it reached ([`Sides`]).
+//! it reached (`Sides`).
 //!
 //! **Repeats are not fresh events.** A message the adapter marked
 //! [`Msg::repeat`] is absorbed by nothing here — retransmitting until answered

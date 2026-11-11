@@ -27,7 +27,7 @@ pub const UNKNOWN_DIALOG_WINDOW_US: u64 = 1_000_000;
 /// vantage carried at least one dialog-CREATING response for it — without that
 /// there is nothing to say which dialogs the endpoint has, and the request is
 /// not an occasion at all. Charges the taker; the 481 discharges it, from
-/// whichever socket the taker answers its transaction ([`Sides`]).
+/// whichever socket the taker answers its transaction (`Sides`).
 ///
 /// **A dialog is known by its PEER tag** — the dialog key the other four
 /// rules use. It is the half the endpoint does not mint and the half that is

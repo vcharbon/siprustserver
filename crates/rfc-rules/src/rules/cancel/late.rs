@@ -20,7 +20,7 @@ use super::keys::UacKey;
 ///
 /// **The occasion is the INVITE transaction as its UAC drove it** — the call,
 /// the top-Via branch the CANCEL reuses, and DIRECTION, the reading
-/// [`No200AfterCancel`] uses from the other side. A final that ended an
+/// [`No200AfterCancel`](super::No200AfterCancel) uses from the other side. A final that ended an
 /// earlier attempt on the same Call-ID and CSeq number completed a different
 /// transaction and says nothing about this CANCEL.
 ///
@@ -36,6 +36,9 @@ use super::keys::UacKey;
 /// final, and every other ordering is compliant — under-reporting the racy half
 /// rather than charging a crossing.
 ///
+/// An INVITE this vantage never saw the emitter send on the branch ahead of
+/// the CANCEL makes no occasion. Findings come out in observation order.
+///
 /// Charges the CANCEL's sender.
 pub struct NoCancelAfterFinal;
 
@@ -45,8 +48,6 @@ impl Obligation for NoCancelAfterFinal {
         let mut out = Vec::new();
         for (key, txn) in &seen.txns {
             for cancel in &txn.cancels {
-                // An INVITE this vantage never saw the emitter send on the
-                // branch ahead of the CANCEL is no occasion at all.
                 let Some(invite) = txn.invites.iter().rev().find(|i| i.msg < cancel.msg) else {
                     continue;
                 };
@@ -65,7 +66,6 @@ impl Obligation for NoCancelAfterFinal {
                 }));
             }
         }
-        // Observation order, so a ladder and the report read the same way.
         out.sort_by_key(|f| f.anchor);
         out
     }
@@ -151,7 +151,9 @@ struct Final<'a> {
 
 /// What one view's messages say about the transactions each endpoint drove as
 /// UAC. Repeats are skipped: retransmitting until answered is required
-/// behaviour, never a second act.
+/// behaviour, never a second act. A request's act is read off its request
+/// line, never its CSeq method, which a CANCEL may mis-spell
+/// (`cancel-cseq-method`).
 #[derive(Debug, Default)]
 struct UacReading<'a> {
     txns: BTreeMap<UacKey<'a>, UacTxn<'a>>,
@@ -213,10 +215,6 @@ impl<'a> UacReading<'a> {
             });
             return;
         }
-        // The REQUEST LINE names the act; the CSeq NUMBER names the
-        // transaction. Reading the method off the CSeq instead would let a
-        // CANCEL that mis-spelled its own CSeq method (`cancel-cseq-method`,
-        // a rule of its own) be read as something else entirely.
         let Kind::Request { method } = &msg.kind else { return };
         let emitted = Emitted { msg: mi, hop: msg.hop, ts_us: msg.at_us, taker: msg.dst.as_str() };
         let method = method.to_ascii_uppercase();
