@@ -22,37 +22,6 @@ export const CampaignFailures = ({ view, facets, run, vs, lanes, selected, onTog
     <div className="cp-facets">
       <aside>
         <section className="cp-panel">
-          <h2>Failed checks</h2>
-          {facets.checks.length === 0 && <p className="muted">none</p>}
-          {facets.checks.map((f) => (
-            <button
-              key={f.key}
-              type="button"
-              className={`cp-facet${selected.checks.includes(f.key) ? " on" : ""}`}
-              onClick={() => onToggle("check", f.key)}
-            >
-              <span className="cp-count">{f.calls}</span>
-              <span className="mono">{f.anchor} · {f.field}</span>
-              <span className="cp-tags">
-                {Object.entries(f.sides).map(([side, n]) => (
-                  <SideTag key={side} side={side} sides={view.sides} count={Object.keys(f.sides).length > 1 ? n : undefined} />
-                ))}
-                {f.since === run ? <span className="cp-tag new">new #{run}</span> : <span className="cp-tag">since #{f.since}</span>}
-              </span>
-              <span className="cp-lanes mono">
-                {Object.entries(f.lanes).map(([lane, n]) => `${lane} ${n}`).join(" · ")}
-              </span>
-            </button>
-          ))}
-          {facets.passingAgain.map((f) => (
-            <div key={f.key} className="cp-facet gone" title={`failed in #${vs}`}>
-              <span className="cp-count">{f.calls}</span>
-              <span className="mono">{f.key}</span>
-              <span className="cp-tags"><span className="cp-tag fixed">✓ since #{vs}</span></span>
-            </div>
-          ))}
-        </section>
-        <section className="cp-panel">
           <h2>Status</h2>
           <div className="cp-chips">
             {facets.statuses.map((one) => (
@@ -85,6 +54,37 @@ export const CampaignFailures = ({ view, facets, run, vs, lanes, selected, onTog
             </div>
           </section>
         )}
+        <section className="cp-panel">
+          <h2>Failed checks</h2>
+          {facets.checks.length === 0 && <p className="muted">none</p>}
+          {facets.checks.map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              className={`cp-facet${selected.checks.includes(f.key) ? " on" : ""}`}
+              onClick={() => onToggle("check", f.key)}
+            >
+              <span className="cp-count">{f.calls}</span>
+              <span className="mono">{f.anchor} · {f.field}</span>
+              <span className="cp-tags">
+                {Object.entries(f.sides).map(([side, n]) => (
+                  <SideTag key={side} side={side} sides={view.sides} count={Object.keys(f.sides).length > 1 ? n : undefined} />
+                ))}
+                {f.since === run ? <span className="cp-tag new">new #{run}</span> : <span className="cp-tag">since #{f.since}</span>}
+              </span>
+              <span className="cp-lanes mono">
+                {Object.entries(f.lanes).map(([lane, n]) => `${lane} ${n}`).join(" · ")}
+              </span>
+            </button>
+          ))}
+          {facets.passingAgain.map((f) => (
+            <div key={f.key} className="cp-facet gone" title={`failed in #${vs}`}>
+              <span className="cp-count">{f.calls}</span>
+              <span className="mono">{f.key}</span>
+              <span className="cp-tags"><span className="cp-tag fixed">✓ since #{vs}</span></span>
+            </div>
+          ))}
+        </section>
         {facets.groups.length > 0 && (
           <section className="cp-panel">
             <h2>Groups</h2>

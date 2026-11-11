@@ -2719,7 +2719,8 @@ tr.rule-unrostered td {
 /* Verification lines: a cell's, a batch's, a job's. */
 .vl h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; }
 .vl-table td { font-size: 12px; }
-.vl-message { max-width: 32em; white-space: pre-wrap; overflow-wrap: anywhere; }
+.vl { overflow-x: auto; }
+.vl-text { max-width: 24em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vl-aside td { color: var(--mute); }
 .vl-status { font-weight: 600; font-size: 12px; padding: 1px 6px !important; }
 .cp-tag.vl-waived { background: var(--warn-bg); color: var(--warn); border-color: transparent; }

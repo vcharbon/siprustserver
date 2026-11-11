@@ -1,8 +1,9 @@
 /**
  * The verification lines of a cell, a batch or a job as a table: each line's
  * answer, name, source, message, and the step, expected, seen and side its
- * detail states, a waived or informative line marked; the cell's status in
- * the head where there is one.
+ * detail states, each text on one line with its whole in the tooltip, a
+ * waived or informative line marked; the cell's status in the head where
+ * there is one.
  */
 import type { JSX } from "react"
 import type { CellStatus, VerificationLine } from "../api.ts"
@@ -56,10 +57,10 @@ export const VerificationLines = ({ lines, status, sides = [], title = "Lines", 
                   {line.informative && <> <span className="cp-tag" title="decides nothing">informative</span></>}
                 </td>
                 <td className="muted">{line.source}</td>
-                <td className="mono vl-message">{line.message ?? ""}</td>
+                <td className="mono vl-text" title={line.message ?? undefined}>{line.message ?? ""}</td>
                 <td className="mono">{detail.step ?? ""}</td>
-                <td className="mono cp-expected">{detail.expected ?? ""}</td>
-                <td className="mono">{detail.seen ?? ""}</td>
+                <td className="mono cp-expected vl-text" title={detail.expected ?? undefined}>{detail.expected ?? ""}</td>
+                <td className="mono vl-text" title={detail.seen ?? undefined}>{detail.seen ?? ""}</td>
                 <td>{detail.side === null ? null : <SideTag side={detail.side} sides={sides} />}</td>
               </tr>
             )
