@@ -1,19 +1,33 @@
 /**
  * The verification lines a cell's bundle states (ADR-0060 appendix §8), for a
  * cell that ran:
- * - `call`, the interpreter's: `verdict.json`'s status, its first failure
- *   where it failed, a failure where it wrote none;
+ * - the lines the lane's in-process verifications answered, where the cell
+ *   wrote `verifications.json` (ADR-0060 item 13): its call and each gate;
+ *   else `call`, the interpreter's: `verdict.json`'s status, its first failure
+ *   where it failed, a failure where it wrote none, and each check a lane's
+ *   known bug stood down as a waived failure of it;
  * - `rfc-audit`, the audit's, where `rfc.json` audited the cell: a failure
  *   where a charge stands, the source faults kept as informative;
  * - `run`, the driver's, where the rollup failed the cell and no other line
- *   fails: what failed it beyond the call and the audit (a gate of its batch).
+ *   fails: what failed it beyond the lines above.
  *
  * A cell that did not run (skipped, or never driven) holds no line. On a
  * bundle the replay wrote whole, the lines fail the cell where the rollup does.
  */
-import type { Bundle, Verification } from "@sip/contracts"
+import { type Bundle, Verification } from "@sip/contracts"
+import * as Option from "effect/Option"
+import * as Schema from "effect/Schema"
 
 type Line = Verification.Verification
+
+/** The cell file holding the lines its lane answered in process. */
+export const VERIFICATIONS_FILE = "verifications.json"
+
+const decodeAnswered = Schema.decodeUnknownOption(Schema.Array(Verification.Verification))
+
+/** `verifications.json` as read: its lines, null where the file is absent or holds no lines. */
+export const answeredOf = (json: unknown): ReadonlyArray<Line> | null =>
+  json === null ? null : Option.getOrNull(decodeAnswered(json))
 
 /** What a cell's bundle says of it, as `bundle.ts` read it. */
 export interface CellReading {
@@ -24,6 +38,8 @@ export interface CellReading {
   readonly audit: ReadonlyArray<Bundle.RfcFinding> | null
   /** The gating findings the SUT answers for. */
   readonly charged: ReadonlyArray<Bundle.RfcFinding>
+  /** `verifications.json`: the lines the lane answered in process; null where the cell wrote none. */
+  readonly answered: ReadonlyArray<Line> | null
 }
 
 /** The line names and sources this reading writes. */
@@ -76,15 +92,26 @@ const auditOf = (audit: ReadonlyArray<Bundle.RfcFinding>, charged: ReadonlyArray
   return [own, ...faults]
 }
 
-/** The lines of a cell that ran, in the order call, audit, run. */
+/** Each check `verdict` states a lane's known bug stood down, as a waived failure of the call. */
+const waivedOf = (verdict: Bundle.RunVerdict | null): ReadonlyArray<Line> =>
+  (verdict?.waived ?? []).map((waived) => ({
+    name: CALL,
+    source: "interpreter",
+    answer: "fail",
+    message: `known bug ${waived.bug}: ${failureLine(waived.finding)}`,
+    waived: true
+  }))
+
+/** The lines of a cell that ran, in the order the lane's (or the call's), audit, run. */
 export const linesOf = (reading: CellReading): ReadonlyArray<Line> => {
-  const lines = [callOf(reading.verdict), ...(reading.audit === null ? [] : auditOf(reading.audit, reading.charged))]
-  const failing = lines.some((line) => line.answer === "fail" && line.informative !== true)
+  const own = reading.answered ?? [callOf(reading.verdict), ...waivedOf(reading.verdict)]
+  const lines = [...own, ...(reading.audit === null ? [] : auditOf(reading.audit, reading.charged))]
+  const failing = lines.some((line) => line.answer === "fail" && Verification.decides(line))
   if (reading.passed || failing) return lines
   return [...lines, {
     name: RUN,
     source: "driver",
     answer: "fail",
-    message: "the run failed the cell beyond its call and its audit"
+    message: "the run failed the cell beyond its lines"
   }]
 }

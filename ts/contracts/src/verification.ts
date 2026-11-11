@@ -51,13 +51,14 @@ export const decides = (line: Pick<Verification, "informative" | "waived">): boo
  * The final status of a cell that ran, over the lines that decide it: a
  * `fail` fails it (still verifying while a line is `pending`), a `pending`
  * leaves it `ok so far`, a `not-checkable` leaves it `unverified`, and only
- * lines that all pass make it `pass`.
+ * lines that all pass make it `pass`. A cell no line decides was verified by
+ * nothing: `unverified`, never `pass`.
  */
 export const finalStatusOf = (lines: ReadonlyArray<Pick<Verification, "answer" | "informative" | "waived">>): FinalStatus => {
   const deciding = lines.filter(decides)
   const has = (answer: Answer): boolean => deciding.some((line) => line.answer === answer)
   if (has("fail")) return has("pending") ? "fail, still verifying" : "fail"
   if (has("pending")) return "ok so far"
-  if (has("not-checkable")) return "unverified"
+  if (has("not-checkable") || deciding.length === 0) return "unverified"
   return "pass"
 }

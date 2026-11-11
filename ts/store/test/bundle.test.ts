@@ -232,4 +232,25 @@ describe("Bundle.read", () => {
       expect([name, Verification.finalStatusOf(cell.verifications) === "pass"]).toEqual([name, cell.passed])
     }
   })
+
+  it("states the lines a cell's lane answered, and a known bug as a waived line that fails nothing", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const cells = new Map(reading.cases.map((entry) => [entry.caseId.split("-").at(-1), entry]))
+    const answered = cells.get("answered")!.verifications!
+    expect(answered.map((line) => `${line.name} ${line.answer}`)).toEqual([
+      "call pass",
+      "cleanup pass",
+      "call-records fail",
+      "rfc-audit pass"
+    ])
+    expect(Verification.finalStatusOf(answered)).toBe("fail")
+    const waived = cells.get("waived")!.verifications!
+    expect(waived).toContainEqual(expect.objectContaining({
+      name: "call",
+      answer: "fail",
+      waived: true,
+      message: expect.stringContaining("known bug provisional-rewrite-not-applied")
+    }))
+    expect(Verification.finalStatusOf(waived)).toBe("pass")
+  })
 })

@@ -872,6 +872,7 @@ const verifications = Effect.gen(function*() {
                CASE WHEN bool_or(answer = 'pending') FILTER (WHERE deciding) THEN 'fail, still verifying' ELSE 'fail' END
              WHEN bool_or(answer = 'pending') FILTER (WHERE deciding) THEN 'ok so far'
              WHEN bool_or(answer = 'not-checkable') FILTER (WHERE deciding) THEN 'unverified'
+             WHEN bool_and(NOT deciding) THEN 'unverified'
              ELSE 'pass'
            END AS status
     FROM (SELECT run_id, case_id, answer, NOT informative AND NOT waived AS deciding

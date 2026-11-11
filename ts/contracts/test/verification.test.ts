@@ -29,8 +29,11 @@ describe("the final status of a cell that ran", () => {
   it("is not failed by a waived or an informative failure", () => {
     expect(finalStatusOf([line("pass"), line("fail", { waived: true }), line("fail", { informative: true })]))
       .toBe("pass")
-    expect(finalStatusOf([line("pending", { informative: true }), line("not-checkable", { informative: true })]))
-      .toBe("pass")
+  })
+
+  it("is unverified where no line decides it, a cell holding no line included", () => {
+    expect(finalStatusOf([])).toBe("unverified")
+    expect(finalStatusOf([line("pass", { informative: true }), line("fail", { waived: true })])).toBe("unverified")
   })
 })
 

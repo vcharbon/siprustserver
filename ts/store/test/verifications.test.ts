@@ -144,7 +144,8 @@ describe.skipIf(!Server.served)("verification lines", () => {
             name: "call-records",
             source: "judge",
             answer: "not-checkable"
-          }])
+          }]),
+          cell("f", [{ name: "call", source: "interpreter", answer: "pass", informative: true }])
         ]
       })
       const read = yield* lines.cells([runId])
@@ -154,7 +155,8 @@ describe.skipIf(!Server.served)("verification lines", () => {
         { case_id: "b", status: "ok so far" },
         { case_id: "c", status: "pass" },
         { case_id: "d", status: "fail, still verifying" },
-        { case_id: "e", status: "unverified" }
+        { case_id: "e", status: "unverified" },
+        { case_id: "f", status: "unverified" }
       ])
     })))
 

@@ -1,0 +1,8 @@
+{
+  "campaign": "lines-run",
+  "ts": "2026-11-11T10:00:00Z",
+  "cells": [
+    { "cell": { "case": "capture_lines.pcap.gz-answered", "shape": "pivot-replay", "infra": "fake" }, "passed": false, "dir": "answered" },
+    { "cell": { "case": "capture_lines.pcap.gz-waived", "shape": "pivot-replay", "infra": "fake" }, "passed": true, "dir": "waived" }
+  ]
+}

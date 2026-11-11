@@ -1,0 +1,11 @@
+[
+  { "name": "call", "source": "interpreter", "answer": "pass" },
+  { "name": "cleanup", "source": "lane gate", "answer": "pass" },
+  {
+    "name": "call-records",
+    "source": "judge",
+    "answer": "fail",
+    "message": "call records: count eq 1, observed 2",
+    "detail": { "expected": "1", "seen": "2", "side": "sut" }
+  }
+]

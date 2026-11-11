@@ -27,7 +27,7 @@ import { Bundle, Confrontation as Records, MainError, StepOrder } from "@sip/con
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
-import { linesOf } from "./cell-lines.js"
+import { answeredOf, linesOf, VERIFICATIONS_FILE } from "./cell-lines.js"
 import type { CaseResult, RunStatus } from "./model.js"
 
 const { BAD_BODY, failingBody, mainErrorOf, sourceFaultOf } = MainError
@@ -296,7 +296,8 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
             passed,
             verdict: decoded,
             audit: auditedOf(rfc) ? findings : null,
-            charged
+            charged,
+            answered: answeredOf(yield* readJson(path.join(dir, VERIFICATIONS_FILE)))
           })
         }
         : {})
