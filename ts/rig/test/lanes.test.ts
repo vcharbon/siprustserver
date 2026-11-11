@@ -285,6 +285,32 @@ describe("a part schema the base reads", () => {
     expect(await reasonOf(schema)).toBe(reason)
   })
 
+  const TYPES = "one of array, boolean, integer, null, number, object, string, or a non-empty list of distinct ones"
+  it.each([
+    ["type", "integr", TYPES],
+    ["type", ["string", "string"], TYPES],
+    ["type", [], TYPES],
+    ["enum", "a", "a list"],
+    ["$ref", 1, "a string"],
+    ["required", "v", "a list of distinct strings"],
+    ["required", [1], "a list of distinct strings"],
+    ["minLength", "3", "a non-negative integer"],
+    ["maxLength", -1, "a non-negative integer"],
+    ["pattern", 3, "a string"],
+    ["minimum", true, "a number"],
+    ["maximum", "10", "a number"],
+    ["exclusiveMinimum", true, "a number"],
+    ["exclusiveMaximum", "1", "a number"],
+    ["multipleOf", 0, "a number above 0"],
+    ["minProperties", 1.5, "a non-negative integer"],
+    ["maxProperties", "1", "a non-negative integer"],
+    ["minItems", null, "a non-negative integer"],
+    ["maxItems", "2", "a non-negative integer"],
+    ["uniqueItems", "yes", "a boolean"]
+  ])("refuses %s whose value is %j, naming its JSON Pointer", async (keyword, value, is) => {
+    expect(await reasonOf({ type: "object", properties: { v: { [keyword]: value } } })).toBe(`/properties/v/${keyword}: ${keyword} is ${is}`)
+  })
+
   it("reads every keyword it checks a part by", async () => {
     expect(await reasonOf({
       $schema: "https://json-schema.org/draft/2020-12/schema",
