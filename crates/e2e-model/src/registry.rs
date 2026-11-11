@@ -524,7 +524,6 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .load_actor_with(|inputs| {
                 Arc::new(cs::refer_charlie_reject(cs::default_binder(), &inputs.refer_key))
             }),
-        // ── Functional: the anchored e2e shapes ──────────────────────────────
         ShapeDescriptor::new("basic-call").anchors(CALL_ANCHORS),
         ShapeDescriptor::new("basic-call-media").anchors(CALL_ANCHORS),
         ShapeDescriptor::new("rerouting").anchors(CALL_ANCHORS).params_schema(
@@ -532,10 +531,6 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
                 .expect("ReroutingParams schema"),
         ),
         ShapeDescriptor::new("transfer-refer-media").anchors(TRANSFER_ANCHORS),
-        // ── ANCHORED LOAD: rerouting + reliable provisional on the winning leg ─
-        // The load body drives the flow fallibly through the egress candidate
-        // list ([bob, bob2] → the `X-Api-Call` routes failover plan on a pinned
-        // layout), ACTOR-executed (the reactive 100rel/PRACK machinery).
         ShapeDescriptor::new("rerouting_prack")
             .anchors(PRACK_ANCHORS)
             .needs_bob2()

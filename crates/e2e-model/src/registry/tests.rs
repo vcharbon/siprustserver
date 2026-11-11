@@ -23,13 +23,11 @@ fn defaults_register_one_id_space_with_both_surfaces() {
         let d = reg.get(id).unwrap_or_else(|| panic!("load shape {id:?} missing"));
         assert!(d.load.is_some(), "{id} carries a load body");
     }
-    // Anchors-only ids; no load body.
     for id in ["basic-call", "basic-call-media", "rerouting", "transfer-refer-media"] {
         let d = reg.get(id).unwrap_or_else(|| panic!("anchors-only shape {id:?} missing"));
         assert!(d.load.is_none(), "{id} is anchors-only");
         assert!(!ShapeSpec::anchors(d).is_empty(), "{id} publishes anchors");
     }
-    // The anchored load shape carries BOTH the anchor vocabulary and a load body.
     let dual = reg.get("rerouting_prack").expect("anchored load shape registered");
     assert!(dual.load.is_some() && !dual.anchors.is_empty());
     assert!(dual.needs_bob2, "rerouting needs the second callee receiver");
