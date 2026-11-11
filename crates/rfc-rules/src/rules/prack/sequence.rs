@@ -38,7 +38,7 @@ impl Obligation for NoOverlappingReliableProvisionals {
                 if !sent.is_empty() {
                     out.push(Finding {
                         rule: RuleId::NoOverlappingReliableProvisionals,
-                        emitter: uas.to_string(),
+                        emitter: r.own.to_string(),
                         taker: r.peer.to_string(),
                         cseq: r.cseq,
                         relayed: seen.relayed_provisional(uas, dialog, r),
@@ -93,7 +93,7 @@ impl Obligation for NonContiguousRseq {
                 prior = Some(r.rseq);
                 out.push(Finding {
                     rule: RuleId::NonContiguousRseq,
-                    emitter: uas.to_string(),
+                    emitter: r.own.to_string(),
                     taker: r.peer.to_string(),
                     cseq: r.cseq,
                     relayed: seen.relayed_provisional(uas, dialog, r),

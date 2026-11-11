@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use sip_message::sniff;
 
+use crate::rules::correlation::Parties;
 use crate::wire::{Kind, Msg};
 
 use super::doc::Doc;
@@ -105,11 +106,13 @@ impl<'a> Reading<'a> {
             described: msgs.iter().map(|m| m.sdp().is_some()).collect(),
             ..Reading::default()
         };
+        let parties = Parties::of(msgs);
         let mut agents: BTreeMap<AgentKey<'a>, AgentState<'a>> = BTreeMap::new();
         for (mi, msg) in msgs.iter().enumerate() {
-            seen.absorb(&mut agents, mi, msg, msg.src.as_str(), true);
-            if msg.dst != msg.src {
-                seen.absorb(&mut agents, mi, msg, msg.dst.as_str(), false);
+            let (sender, taker) = (parties.sent_by(msg), parties.took(msg));
+            seen.absorb(&mut agents, mi, msg, sender, true);
+            if taker != sender {
+                seen.absorb(&mut agents, mi, msg, taker, false);
             }
         }
         for stream in agents.into_values().flat_map(|s| s.streams.into_streams()) {

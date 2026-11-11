@@ -41,11 +41,13 @@ impl Obligation for UnmatchedPrackProxied {
             };
             let known: Vec<u64> = seen
                 .rseqs_taken
-                .get(&(p.dst, p.call_id))
+                .get(&(p.dst_agent, p.call_id))
                 .map(|s| s.iter().copied().collect())
                 .unwrap_or_default();
             let forwarded = seen.pracks.iter().any(|q| {
-                q.src == p.dst && q.call_id == p.call_id && q.rack_triple.as_ref() == Some(triple)
+                q.src_agent == p.dst_agent
+                    && q.call_id == p.call_id
+                    && q.rack_triple.as_ref() == Some(triple)
             });
             let (rseq, cseq, method) = triple;
             out.push(head(if known.contains(rseq) || forwarded {
@@ -151,12 +153,12 @@ impl Obligation for Prack2xxOr481 {
 }
 
 /// Whether a PRACK of another transaction naming the same `RAck` in the same
-/// dialog reached the UAS of `key` before `prack` did and drew its 2xx, at
-/// any time: the provisional left the unacknowledged list as that PRACK
-/// arrived (RFC 3262 §3).
+/// dialog reached the UAS of `key`, at any of its sockets, before `prack` did
+/// and drew its 2xx, at any time: the provisional left the unacknowledged list
+/// as that PRACK arrived (RFC 3262 §3).
 fn acknowledged_before(seen: &Reading<'_>, key: &TxnKey<'_>, prack: &Served<'_>) -> bool {
     seen.served.iter().any(|(other, earlier)| {
-        other.uas == key.uas
+        seen.parties.same(key.call_id, other.uas, key.uas)
             && other.call_id == key.call_id
             && other.branch != key.branch
             && earlier.method.eq_ignore_ascii_case("PRACK")

@@ -81,13 +81,13 @@ impl PeerDialog {
 /// The dialog state EVERY user agent in a view builds, keyed
 /// `(user agent, Call-ID)` ([`Parties`]). A rule walks the view and reads the
 /// taker's entry as it stood before the message it is judging.
-pub(super) struct PeerDialogs {
-    parties: Parties,
+pub(super) struct PeerDialogs<'a> {
+    parties: Parties<'a>,
     by: HashMap<(String, String), PeerDialog>,
 }
 
-impl PeerDialogs {
-    pub(super) fn new(wire: &WireView<'_>) -> Self {
+impl<'a> PeerDialogs<'a> {
+    pub(super) fn new(wire: &WireView<'a>) -> Self {
         PeerDialogs { parties: Parties::of(wire.msgs), by: HashMap::new() }
     }
 

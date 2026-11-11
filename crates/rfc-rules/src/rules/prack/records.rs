@@ -2,11 +2,12 @@
 
 use crate::rules::branch::BranchName;
 
-/// One 100rel obligation: the endpoint that owes the PRACK, the transaction
+/// One 100rel obligation: the user agent that owes the PRACK, the transaction
 /// and the early dialog it rides, and the `RSeq` the PRACK's RAck must name.
 /// Spelled out as a struct so the four parts can never swap places.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct ObligationKey<'a> {
+    /// The UAC's user agent ([`Parties`](crate::rules::correlation::Parties)).
     pub(super) uac: &'a str,
     /// The Call-ID: one endpoint may carry several calls, each numbering its
     /// CSeqs on its own.
@@ -116,6 +117,8 @@ pub(super) struct Trying<'a> {
     pub(super) rseq: u64,
     /// Who sent it — the other side of the occasion.
     pub(super) peer: &'a str,
+    /// The UAC's socket: the one its INVITE left from (`Sides`).
+    pub(super) own: &'a str,
 }
 
 /// One INVITE as this view carried it.
@@ -139,6 +142,10 @@ pub(super) struct Reliable<'a> {
     /// the UAS that owes the retransmissions; for one the UAS sent, the UAC
     /// that owes the PRACK.
     pub(super) peer: &'a str,
+    /// This side's socket, the one a finding names: for one the UAC took, the
+    /// socket its INVITE left from (`Sides`); for one the UAS sent, the socket
+    /// it left from.
+    pub(super) own: &'a str,
 }
 
 /// One PRACK as this view carried it.
@@ -149,6 +156,10 @@ pub(super) struct Prack<'a> {
     pub(super) ts_us: u64,
     pub(super) src: &'a str,
     pub(super) dst: &'a str,
+    /// The user agents of `src` and `dst` on the call
+    /// ([`Parties`](crate::rules::correlation::Parties)).
+    pub(super) src_agent: &'a str,
+    pub(super) dst_agent: &'a str,
     /// The call it rides — a view carries many.
     pub(super) call_id: &'a str,
     /// The early dialog's To tag.

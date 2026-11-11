@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
+use super::super::correlation::Parties;
 use super::super::sides::Sides;
 use super::super::Obligation;
 use super::message_facts::remote_tag_of;
@@ -23,11 +24,14 @@ pub const UNKNOWN_DIALOG_WINDOW_US: u64 = 1_000_000;
 /// test UA answers whatever it is handed) hides a stale or mis-copied dialog id
 /// that a real UAS would refuse.
 ///
-/// The occasion is ONE in-dialog request the endpoint TOOK on a call where this
-/// vantage carried at least one dialog-CREATING response for it — without that
-/// there is nothing to say which dialogs the endpoint has, and the request is
-/// not an occasion at all. Charges the taker; the 481 discharges it, from
-/// whichever socket the taker answers its transaction (`Sides`).
+/// The occasion is ONE in-dialog request the user agent TOOK on a call where
+/// this vantage carried at least one dialog-CREATING response for it — without
+/// that there is nothing to say which dialogs the agent has, and the request is
+/// not an occasion at all. The agent is every socket its transactions tie on
+/// the call ([`Parties`]), so a dialog its answers created at one socket is
+/// known at the socket it takes requests at. Charges the socket that took the
+/// request; the 481 discharges it, from whichever socket the taker answers its
+/// transaction (`Sides`).
 ///
 /// **A dialog is known by its PEER tag** — the dialog key the other four
 /// rules use. It is the half the endpoint does not mint and the half that is
@@ -69,6 +73,7 @@ impl Obligation for UnknownDialog481 {
         // their transaction (0 = none yet).
         let mut unknown: Vec<usize> = Vec::new();
         let sides = Sides::of(wire.msgs);
+        let parties = Parties::of(wire.msgs);
         let mut answers: BTreeMap<(&str, &str, &str), u16> = BTreeMap::new();
         let mut out: Vec<Finding> = Vec::new();
 
@@ -98,7 +103,7 @@ impl Obligation for UnknownDialog481 {
                         continue;
                     }
                     let Some(branch) = branch else { continue };
-                    let taker = msg.dst.as_str();
+                    let taker = parties.took(msg);
                     if !creating_seen.contains(&(taker, call)) {
                         continue; // nothing says which dialogs this endpoint has
                     }
@@ -112,7 +117,7 @@ impl Obligation for UnknownDialog481 {
                         continue;
                     }
                     unknown.push(mi);
-                    answers.entry((taker, call, branch)).or_insert(0);
+                    answers.entry((msg.dst.as_str(), call, branch)).or_insert(0);
                 }
                 Kind::Response { status } => {
                     // A tagged answer names both halves: the peer tag this
@@ -129,10 +134,11 @@ impl Obligation for UnknownDialog481 {
                         && invite
                         && branch.is_some_and(|b| establishing.contains(&(call, b)));
                     if tagged && both && !call.is_empty() {
-                        for endpoint in [msg.src.as_str(), msg.dst.as_str()] {
-                            let key =
-                                (endpoint, call, remote_tag_of(msg, endpoint == msg.src.as_str()));
-                            creating_seen.insert((endpoint, call));
+                        for (agent, sent) in
+                            [(parties.sent_by(msg), true), (parties.took(msg), false)]
+                        {
+                            let key = (agent, call, remote_tag_of(msg, sent));
+                            creating_seen.insert((agent, call));
                             if !ends {
                                 confirmed.insert(key);
                                 ended.remove(&key);

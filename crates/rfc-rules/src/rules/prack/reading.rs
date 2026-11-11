@@ -6,6 +6,7 @@ use sip_message::header::{HeaderValue, RAck, Supported};
 use sip_message::{sniff, SipStr};
 
 use crate::rules::branch::BranchName;
+use crate::rules::correlation::Parties;
 use crate::rules::sides::Sides;
 
 use crate::wire::{Kind, Msg};
@@ -14,13 +15,21 @@ use super::records::{
     Answer, Invite, ObligationKey, Prack, Rack, Reliable, Served, Trying, TxnKey,
 };
 
-/// (endpoint, call, early dialog, INVITE CSeq number, `RSeq`): one PRACK
+/// (user agent, call, early dialog, INVITE CSeq number, `RSeq`): one PRACK
 /// ledger's key.
 type PrackKey<'a> = (&'a str, &'a str, &'a str, u32, u64);
 
 /// What one view's messages say about the 100rel obligations on it.
+///
+/// **A party is its user agent** ([`Parties`]): every socket its transactions
+/// tie on the call, so a party that sends from one socket and listens on
+/// another keeps one ledger. "Endpoint" below names that agent; the server
+/// transactions (`served`, `answers`) stay keyed by the socket the request
+/// reached (`Sides`), and every row keeps the real sockets a finding names.
 #[derive(Debug, Default)]
 pub(super) struct Reading<'a> {
+    /// Who acts as one user agent on each call.
+    pub(super) parties: Parties<'a>,
     /// (endpoint, INVITE CSeq number) → the INVITE that endpoint SENT.
     pub(super) invite: BTreeMap<(&'a str, u32), Invite>,
     /// (endpoint, Call-ID, INVITE CSeq number) → when that endpoint SENT the
@@ -90,7 +99,7 @@ pub(super) struct Reading<'a> {
 impl<'a> Reading<'a> {
     pub(super) fn of(msgs: &'a [Msg]) -> Self {
         let sides = Sides::of(msgs);
-        let mut seen = Reading::default();
+        let mut seen = Reading { parties: Parties::of(msgs), ..Reading::default() };
         for (mi, msg) in msgs.iter().enumerate() {
             seen.last_ts_us = seen.last_ts_us.max(msg.at_us);
             // A repeat is not a fresh ACT, but it is still a fact on the wire
@@ -137,12 +146,9 @@ impl<'a> Reading<'a> {
         if method.eq_ignore_ascii_case("PRACK") {
             if let Some((rseq, cseq)) = head.and_then(rack_of) {
                 let dialog = msg.to_tag.as_deref().unwrap_or_default();
-                for (ledger, endpoint) in
-                    [(&mut self.pracked_to, &msg.dst), (&mut self.pracked_by, &msg.src)]
-                {
-                    let at = ledger
-                        .entry((endpoint.as_str(), call, dialog, cseq, rseq))
-                        .or_insert(msg.at_us);
+                let (to, by) = (self.parties.took(msg), self.parties.sent_by(msg));
+                for (ledger, agent) in [(&mut self.pracked_to, to), (&mut self.pracked_by, by)] {
+                    let at = ledger.entry((agent, call, dialog, cseq, rseq)).or_insert(msg.at_us);
                     *at = (*at).min(msg.at_us);
                 }
             }
@@ -152,21 +158,19 @@ impl<'a> Reading<'a> {
     fn absorb(&mut self, sides: &Sides<'a>, mi: usize, msg: &'a Msg) {
         let head = msg.head.as_deref();
         self.absorb_transaction(sides, mi, msg, head);
+        let (sender, taker) = (self.parties.sent_by(msg), self.parties.took(msg));
         if msg.is_request("INVITE") {
             let call = msg.call_id.as_str();
             let from_tag = msg.from_tag.as_deref().unwrap_or_default();
             let first = self.invite_first_us.entry((call, from_tag, msg.cseq)).or_insert(msg.at_us);
             *first = (*first).min(msg.at_us);
-            self.opened.entry((msg.src.as_str(), call, msg.cseq)).or_insert(msg.at_us);
+            self.opened.entry((sender, call, msg.cseq)).or_insert(msg.at_us);
             self.invite
-                .entry((msg.src.as_str(), msg.cseq))
+                .entry((sender, msg.cseq))
                 .or_insert(Invite { offers_100rel: head.is_some_and(offers_100rel) });
         } else if msg.is_request("BYE") {
             let dialog = msg.from_tag.as_deref().unwrap_or_default();
-            let at = self
-                .byed_at
-                .entry((msg.dst.as_str(), msg.call_id.as_str(), dialog))
-                .or_insert(msg.at_us);
+            let at = self.byed_at.entry((taker, msg.call_id.as_str(), dialog)).or_insert(msg.at_us);
             *at = (*at).min(msg.at_us);
         } else if msg.is_request("PRACK") {
             let rack = head.and_then(rack_of);
@@ -176,7 +180,7 @@ impl<'a> Reading<'a> {
                     self.acked_at.entry((seq, dialog, rseq)).or_insert(msg.at_us);
                 }
                 None => {
-                    self.unreadable_prack.insert(msg.src.as_str());
+                    self.unreadable_prack.insert(sender);
                 }
             }
             self.pracks.push(Prack {
@@ -185,6 +189,8 @@ impl<'a> Reading<'a> {
                 ts_us: msg.at_us,
                 src: msg.src.as_str(),
                 dst: msg.dst.as_str(),
+                src_agent: sender,
+                dst_agent: taker,
                 call_id: msg.call_id.as_str(),
                 dialog,
                 rack,
@@ -195,7 +201,7 @@ impl<'a> Reading<'a> {
                 return;
             }
             if status >= 200 {
-                self.answered_finally(msg.dst.as_str(), msg.call_id.as_str(), msg.cseq, msg.at_us);
+                self.answered_finally(taker, msg.call_id.as_str(), msg.cseq, msg.at_us);
                 return;
             }
             let Some(head) = head else { return };
@@ -205,10 +211,7 @@ impl<'a> Reading<'a> {
             }
             let Some(rseq) = sniff::rseq_of(head) else { return };
             let dialog = msg.to_tag.as_deref().unwrap_or_default();
-            let last = self
-                .propagated
-                .entry((msg.src.as_str(), msg.cseq, dialog, rseq))
-                .or_insert(msg.at_us);
+            let last = self.propagated.entry((sender, msg.cseq, dialog, rseq)).or_insert(msg.at_us);
             *last = (*last).max(msg.at_us);
             let common = Reliable {
                 msg: mi,
@@ -218,21 +221,23 @@ impl<'a> Reading<'a> {
                 cseq: msg.cseq,
                 rseq,
                 peer: msg.src.as_str(),
+                own: sides.uac(msg),
             };
             self.owed
                 .entry(ObligationKey {
-                    uac: msg.dst.as_str(),
+                    uac: taker,
                     call: msg.call_id.as_str(),
                     cseq: msg.cseq,
                     dialog,
                     rseq,
                 })
                 .or_insert(common);
-            self.taken.entry((msg.dst.as_str(), dialog)).or_default().push(common);
-            self.emitted
-                .entry((msg.src.as_str(), dialog))
-                .or_default()
-                .push(Reliable { peer: msg.dst.as_str(), ..common });
+            self.taken.entry((taker, dialog)).or_default().push(common);
+            self.emitted.entry((sender, dialog)).or_default().push(Reliable {
+                peer: msg.dst.as_str(),
+                own: msg.src.as_str(),
+                ..common
+            });
         }
     }
 
@@ -291,18 +296,19 @@ impl<'a> Reading<'a> {
                     // §4: a 100 is never reliable, so an RSeq on one is a
                     // temptation rather than an obligation.
                     if head.is_some_and(sniff::require_has_100rel) {
-                        self.trying_100rel.entry((msg.dst.as_str(), call)).or_default().push(
-                            Trying {
-                                msg: mi,
-                                ts_us: msg.at_us,
-                                cseq: msg.cseq,
-                                rseq,
-                                peer: msg.src.as_str(),
-                            },
-                        );
+                        let uac = self.parties.took(msg);
+                        self.trying_100rel.entry((uac, call)).or_default().push(Trying {
+                            msg: mi,
+                            ts_us: msg.at_us,
+                            cseq: msg.cseq,
+                            rseq,
+                            peer: msg.src.as_str(),
+                            own: sides.uac(msg),
+                        });
                     }
                 } else if (101..200).contains(&status) {
-                    self.rseqs_taken.entry((msg.dst.as_str(), call)).or_default().insert(rseq);
+                    let uac = self.parties.took(msg);
+                    self.rseqs_taken.entry((uac, call)).or_default().insert(rseq);
                 }
             }
         }
@@ -320,7 +326,8 @@ impl<'a> Reading<'a> {
     /// By `uas`: the PRACK may come straight from a UAC whose provisionals
     /// came through a proxy. To `uac`: the PRACK reaches the UAS at its
     /// Contact, which need not be the address its provisionals came from (§4).
-    /// The To tag keeps forks apart: each numbers its own `RSeq`s.
+    /// The To tag keeps forks apart: each numbers its own `RSeq`s. `uas` and
+    /// `uac` stand for their user agents.
     pub(super) fn reliably_sent_before(
         &self,
         uas: &str,
@@ -333,7 +340,9 @@ impl<'a> Reading<'a> {
             .iter()
             .filter(|(k, _)| k.call_id == call)
             .flat_map(|(k, list)| list.iter().map(move |a| (k, a)))
-            .filter(|(k, a)| k.uas == uas || a.taker == uac)
+            .filter(|(k, a)| {
+                self.parties.same(call, k.uas, uas) || self.parties.same(call, a.taker, uac)
+            })
             .map(|(_, a)| a)
             .filter(|a| a.ts_us < ts_us && a.reliable_1xx() && a.to_tag == dialog)
             .filter_map(|a| a.rseq.map(|rseq| (rseq, a.cseq)))
@@ -345,13 +354,15 @@ impl<'a> Reading<'a> {
     /// provisional went to, between the provisional and a later emission of
     /// `uas`: the PRACK may come straight from a UAC behind a proxy, or reach
     /// the UAS at a Contact that is not the address it answers from (§4).
+    /// `uas` and `uac` stand for their user agents.
     pub(super) fn pracked_between(
         &self,
-        (uas, uac): (&str, &str),
+        (uas, uac): (&'a str, &'a str),
         (call, dialog, cseq, rseq): (&str, &str, u32, u64),
         after: u64,
         before: u64,
     ) -> bool {
+        let (uas, uac) = (self.parties.agent(call, uas), self.parties.agent(call, uac));
         let to = self.pracked_to.get(&(uas, call, dialog, cseq, rseq));
         let by = self.pracked_by.get(&(uac, call, dialog, cseq, rseq));
         [to, by].into_iter().flatten().any(|at| *at > after && *at < before)
@@ -362,9 +373,9 @@ impl<'a> Reading<'a> {
         *at = (*at).min(ts_us);
     }
 
-    /// The INVITE CSeq numbers `endpoint` opened on this view.
-    pub(super) fn invites_opened_by(&self, endpoint: &str) -> Vec<u32> {
-        self.invite.keys().filter(|(ep, _)| *ep == endpoint).map(|(_, cseq)| *cseq).collect()
+    /// The INVITE CSeq numbers the user agent `agent` opened on this view.
+    pub(super) fn invites_opened_by(&self, agent: &str) -> Vec<u32> {
+        self.invite.keys().filter(|(ep, _)| *ep == agent).map(|(_, cseq)| *cseq).collect()
     }
 
     pub(super) fn pracked_before(&self, r: &Reliable<'a>, dialog: &'a str, ts_us: u64) -> bool {
@@ -384,11 +395,13 @@ impl<'a> Reading<'a> {
         })
     }
 
-    /// The endpoint passed this PRACK on rather than originating it: the same
-    /// `RAck` reached it earlier on this view.
+    /// The sender's user agent passed this PRACK on rather than originating
+    /// it: the same `RAck` reached it earlier on this view.
     pub(super) fn relayed_prack(&self, p: &Prack<'a>) -> bool {
         p.rack.is_some_and(|rack| {
-            self.pracks.iter().any(|q| q.dst == p.src && q.rack == Some(rack) && q.ts_us < p.ts_us)
+            self.pracks
+                .iter()
+                .any(|q| q.dst_agent == p.src_agent && q.rack == Some(rack) && q.ts_us < p.ts_us)
         })
     }
 }

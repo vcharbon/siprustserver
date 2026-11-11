@@ -1,6 +1,6 @@
 //! RFC 3261 §12 — what establishing a dialog FIXES, what every later message on
 //! it must reproduce, and (§15) what may end it. SIX obligations, each read
-//! against one endpoint's own view of one dialog:
+//! against one user agent's own view of one dialog:
 //!
 //!   - [`MidDialogUri`] (§12.2.1.1) charges the UAC: an in-dialog request
 //!     repeats the peer URIs the dialog was created with.
@@ -18,16 +18,20 @@
 //!     names a dialog that exists, and the callee of one it has not accepted
 //!     rejects or CANCELs rather than BYE-ing.
 //!
-//! **A dialog is `(endpoint, Call-ID, PEER tag)`.** The peer's tag is the half
-//! of the §12 dialog id this endpoint does not mint, and it is direction-
-//! independent: a request the endpoint SENT names its peer in To, a request it
+//! **A dialog is `(user agent, Call-ID, PEER tag)`.** The user agent is the set
+//! of sockets its transactions tie on the Call-ID
+//! ([`Parties`](super::correlation::Parties)), so a party that sends from one
+//! socket and listens on another holds one dialog; a finding still names the
+//! socket of the message judged. The peer's tag is the half
+//! of the §12 dialog id this agent does not mint, and it is direction-
+//! independent: a request the agent SENT names its peer in To, a request it
 //! TOOK names its peer in From, and the two orientations of one dialog collapse
 //! onto one key. That is what keeps a callee-initiated re-INVITE or BYE — whose
 //! From/To are reversed relative to the establishing INVITE — on the dialog it
 //! actually rides.
 //!
 //! **Before the peer has a tag there is one PENDING state per
-//! `(endpoint, Call-ID)`**, and every tag that later appears is seeded from it.
+//! `(user agent, Call-ID)`**, and every tag that later appears is seeded from it.
 //! The UAC learns its peer's tag only from the first tagged response, so the
 //! establishing INVITE — which fixes the dialog URIs and the initial-INVITE
 //! branch — is recorded there and copied into each dialog that materialises.
@@ -39,7 +43,7 @@
 //! **Only the dialog-ESTABLISHING INVITE (no To tag) seeds role and URIs.** A
 //! UAS-initiated re-INVITE carries both tags in the reverse orientation and
 //! shares the dialog with the establishing INVITE; taking it for the initial one
-//! would flip the endpoint's role and corrupt the route set it learned.
+//! would flip the agent's role and corrupt the route set it learned.
 //!
 //! **Facts beyond the wire model come from `Msg::head` via `sip_message::sniff`
 //! — never parsed here.** A message the vantage carried no header block for

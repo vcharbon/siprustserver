@@ -7,6 +7,7 @@ use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, WireView};
 
 use super::super::branch::BranchName;
+use super::super::correlation::Parties;
 use super::super::sides::Sides;
 use super::super::Obligation;
 use super::{branch_msg, OrderedKey, Origins, TxnKey};
@@ -38,8 +39,9 @@ use super::{branch_msg, OrderedKey, Origins, TxnKey};
 /// early dialog or overtaking that ACK still collides. A 2xx on an early dialog
 /// to a later INVITE the capture never showed sent ends the filing there: the
 /// capture lost that hop's final, and an unseen INVITE charges nothing. A
-/// response is filed under the socket its INVITE left from, wherever the UAC's
-/// sent-by took it (`Sides`).
+/// requester is a user agent ([`Parties`]), every socket its transactions tie
+/// on the call, and a response is filed under the agent of the socket its
+/// INVITE left from (`Sides`).
 pub struct NoReInviteWhileInviteInProgress;
 
 impl Obligation for NoReInviteWhileInviteInProgress {
@@ -47,6 +49,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
         // Per requester (endpoint + dialog + DIRECTION): the branches of its own
         // INVITE transactions still outstanding.
         let sides = Sides::of(wire.msgs);
+        let parties = Parties::of(wire.msgs);
         let mut in_progress: BTreeMap<OrderedKey<'_>, BTreeSet<&str>> = BTreeMap::new();
         let mut dialog_of: BTreeMap<TxnKey<'_>, OrderedKey<'_>> = BTreeMap::new();
         // The early dialogs a dialog-creating INVITE's To-tagged 1xx named: the
@@ -64,7 +67,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
         for (mi, msg) in wire.msgs.iter().enumerate() {
             match &msg.kind {
                 Kind::Request { method } if method.eq_ignore_ascii_case("ACK") => {
-                    let sender = msg.src.as_str();
+                    let sender = parties.sent_by(msg);
                     let from_tag = msg.from_tag.as_deref().unwrap_or_default();
                     let to_tag = msg.to_tag.as_deref().unwrap_or_default();
                     // The pre-answer (From-only) key too: a branch parks there
@@ -103,7 +106,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                     let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else {
                         continue;
                     };
-                    let sender = msg.src.as_str();
+                    let sender = parties.sent_by(msg);
                     let txn = TxnKey {
                         endpoint: sender,
                         call_id: msg.call_id.as_str(),
@@ -126,7 +129,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                     if in_dialog {
                         let finding = |decision| Finding {
                             rule: RuleId::NoReInviteWhileInviteInProgress,
-                            emitter: sender.to_string(),
+                            emitter: msg.src.to_string(),
                             taker: msg.dst.to_string(),
                             cseq: msg.cseq,
                             relayed: false,
@@ -156,7 +159,12 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                                         overtaking_invite_ts_us: msg.at_us,
                                         branch: branch.to_string(),
                                         prior_branch: prior_branch.to_string(),
-                                        prior_msg: branch_msg(wire.msgs, sender, prior_branch),
+                                        prior_msg: branch_msg(
+                                            wire.msgs,
+                                            &parties,
+                                            sender,
+                                            prior_branch,
+                                        ),
                                         prior_accepted: accepted.contains(&prior_txn),
                                     },
                                 )));
@@ -175,7 +183,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                         continue;
                     };
                     let to_tag = msg.to_tag.as_deref().unwrap_or_default();
-                    let uac = sides.uac(msg);
+                    let uac = parties.agent(&msg.call_id, sides.uac(msg));
                     let txn = TxnKey {
                         endpoint: uac,
                         call_id: msg.call_id.as_str(),
@@ -198,7 +206,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                     let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else {
                         continue;
                     };
-                    let uac = sides.uac(msg);
+                    let uac = parties.agent(&msg.call_id, sides.uac(msg));
                     let txn = TxnKey {
                         endpoint: uac,
                         call_id: msg.call_id.as_str(),

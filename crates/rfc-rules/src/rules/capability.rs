@@ -39,6 +39,7 @@ use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
 use super::branch::{BranchKey, BranchReading};
+use super::correlation::Parties;
 use super::sides::Sides;
 use super::Obligation;
 
@@ -129,7 +130,8 @@ struct Answer {
 /// that sent it.
 ///
 /// **Three exemptions, each because the message is not a re-offer.** The FIRST
-/// INVITE this vantage saw the endpoint take on a call opens the negotiation. A
+/// INVITE this vantage saw the user agent take on a call opens the negotiation,
+/// at whichever of its sockets ([`Parties`]) it took it. A
 /// later INVITE repeating that branch is a §17.2.3 retransmission of it. And a
 /// dialog-ESTABLISHING INVITE — one carrying no To tag — is a fresh attempt on
 /// the call (the §22.2 retry after a 401), never an in-dialog re-offer.
@@ -139,6 +141,7 @@ impl Obligation for AllowSupportedOnInvite {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // The first INVITE branch each endpoint took per call — the one that
         // opened the negotiation, and the branch its retransmissions repeat.
+        let parties = Parties::of(wire.msgs);
         let mut opened: BTreeMap<(&str, &str), &str> = BTreeMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -148,7 +151,7 @@ impl Obligation for AllowSupportedOnInvite {
                         continue;
                     }
                     let branch = msg.via_branch.as_deref().unwrap_or_default();
-                    match opened.entry((msg.dst.as_str(), msg.call_id.as_str())) {
+                    match opened.entry((parties.took(msg), msg.call_id.as_str())) {
                         Entry::Vacant(e) => {
                             e.insert(branch);
                             continue; // the INVITE that opened the negotiation

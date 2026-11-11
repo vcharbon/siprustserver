@@ -59,7 +59,7 @@ impl Obligation for UnackedReliableProvisional {
             let ObligationKey { uac, call, cseq, dialog, rseq } = *key;
             let head = |decision| Finding {
                 rule: RuleId::UnackedReliableProvisional,
-                emitter: uac.to_string(),
+                emitter: p.own.to_string(),
                 taker: p.peer.to_string(),
                 cseq,
                 relayed: false, // a hop that forwarded the provisional never reaches Violated
@@ -148,7 +148,7 @@ impl Obligation for RackWithoutKnownInvite {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for p in &seen.pracks {
-            let known = seen.invites_opened_by(p.src);
+            let known = seen.invites_opened_by(p.src_agent);
             let head = |decision| Finding {
                 rule: RuleId::RackWithoutKnownInvite,
                 emitter: p.src.to_string(),
@@ -212,7 +212,7 @@ impl Obligation for NoPrackOfOutOfOrderRseq {
             };
             let arrivals: Vec<&Reliable<'_>> = seen
                 .taken
-                .get(&(p.src, p.dialog))
+                .get(&(p.src_agent, p.dialog))
                 .map(|list| list.iter().filter(|r| r.ts_us <= p.ts_us).collect())
                 .unwrap_or_default();
             if !arrivals.iter().any(|r| r.rseq == rseq) {
@@ -275,14 +275,14 @@ impl Obligation for NoPrackOf100Trying {
         for ((uac, call), tryings) in &seen.trying_100rel {
             for t in tryings {
                 let offender = seen.pracks.iter().find(|p| {
-                    p.src == *uac
+                    p.src_agent == *uac
                         && p.call_id == *call
                         && p.ts_us > t.ts_us
                         && p.racked_rseq() == Some(t.rseq)
                 });
                 out.push(Finding {
                     rule: RuleId::NoPrackOf100Trying,
-                    emitter: uac.to_string(),
+                    emitter: t.own.to_string(),
                     taker: offender.map_or(t.peer, |p| p.dst).to_string(),
                     cseq: t.cseq,
                     relayed: false,

@@ -237,15 +237,14 @@ fn an_in_flight_retransmit_is_no_race() {
 
 /// The race is read on the UNORDERED dialog: a callee-initiated re-INVITE
 /// crossing the caller's is exactly the §14.2 collision, tags reversed and
-/// all.
+/// all. BOB takes the first and SENDS the reversed one; only what it TOOK is
+/// judged here.
 #[test]
 fn crossing_re_invites_collide_at_the_uas_whichever_way_they_point() {
     let f = hits(
         &ConcurrentReInvite500Or491,
         &[
             req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-a", 2, "at", "bt"),
-            // BOB is the taker of the first and the SENDER of the reversed
-            // one; only what it TOOK is judged here.
             req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-b", 2, "bt", "at"),
             rsp(3_000, BOB, ALICE, 200, "z9hG4bK-b", 2, "bt", "at", ""),
         ],
@@ -268,7 +267,8 @@ fn an_initial_invite_is_no_race() {
 }
 
 /// A race the observation stopped on top of settles nothing: silence
-/// inside the window is truncation, not a missing answer.
+/// inside the window is truncation, not a missing answer. Closed, the window
+/// collapses and the absence decides.
 #[test]
 fn an_unanswered_race_inside_the_window_is_undecidable() {
     let msgs = [
@@ -278,6 +278,5 @@ fn an_unanswered_race_inside_the_window_is_undecidable() {
     let open = eval_open(&ConcurrentReInvite500Or491, &msgs);
     assert_eq!(open.len(), 1, "{open:?}");
     assert!(!open[0].decided(), "{:?}", open[0].decision);
-    // Closed, the window collapses and the absence decides.
     assert_eq!(hits(&ConcurrentReInvite500Or491, &msgs).len(), 1);
 }
