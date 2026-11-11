@@ -3,7 +3,8 @@
  * collection level or a lane naming a collector the path does not define is
  * refused naming the file, and so is a level setting a `required` collector, a
  * lane excluding one, and a lane override of a key the collector does not
- * offer. The appendix's own wiring holds.
+ * offer or of another type than its manifest's value. The appendix's own
+ * wiring holds.
  */
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
@@ -104,6 +105,13 @@ describe("the wiring of a job", () => {
   it("refuses a lane override of a key the collector does not offer", () => {
     expect(checked({ lanes: [lane(`[collectors.call-records]\ndelay_s = 40\n`)] }))
       .toBe("lanes/lab-a.toml and pack/collectors/call-records/collector.toml: collectors.call-records.delay_s: not a parameter call-records offers")
+  })
+
+  it("refuses a lane override of another type than the manifest's value, naming both files", () => {
+    expect(checked({ lanes: [lane(`[collectors.call-records]\npoll_s = "two"\n`)] }))
+      .toBe("lanes/lab-a.toml and pack/collectors/call-records/collector.toml: collectors.call-records.poll_s: of type string, where call-records states one of type number")
+    expect(checked({ lanes: [lane(`[collectors.calls-ended]\ndelay_s = [40]\n`)] }))
+      .toBe("lanes/lab-a.toml and pack/collectors/calls-ended/collector.toml: collectors.calls-ended.delay_s: of type array, where calls-ended states one of type number")
   })
 
   it("reads a host file's tables, naming the key under the table at fault", () => {

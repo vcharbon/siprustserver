@@ -6,6 +6,7 @@
  */
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
+import { posix } from "node:path"
 import * as Toml from "smol-toml"
 
 /** Why a job does not open: the files at fault, and what is wrong with them. */
@@ -24,14 +25,28 @@ export const refuse = (files: ReadonlyArray<string>, reason: string): Refusal =>
 /** A name a manifest, a level or a lane states: lower-case letters, digits and dashes. */
 export const Name = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]*$/, { title: "a name of lower-case letters, digits and dashes" }))
 
+/** Whether a relative `path` resolves above the directory it is relative to. */
+const escapes = (path: string): boolean => {
+  const normal = posix.normalize(path)
+  return normal === ".." || normal.startsWith("../")
+}
+
 /** A non-empty string. */
 export const Text = Schema.String.check(Schema.isNonEmpty())
 
 /** A count of seconds, zero included. */
 export const Seconds = Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))
 
-/** A path relative to the manifest's own directory. */
-export const RelativePath = Text.check(Schema.makeFilter((path) => !path.startsWith("/") || "a path relative to the manifest's directory"))
+/**
+ * A path inside the manifest's own directory, relative to it: neither absolute
+ * nor, once its `..` segments are resolved, above the directory. The check is
+ * on the text; a symbolic link is followed where the path is used.
+ */
+export const RelativePath = Text.check(
+  Schema.makeFilter((path) =>
+    !path.startsWith("/") && !escapes(path) || "a path inside the manifest's directory, relative to it"
+  )
+)
 
 /** A parameter value a manifest states and a lane file may override. */
 export const ParamValue = Schema.Union([

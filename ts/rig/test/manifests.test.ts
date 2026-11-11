@@ -82,6 +82,13 @@ describe("collector.v1", () => {
       .toMatch(/^c\/collector\.toml: run\.collect: /)
   })
 
+  it("refuses an executable path resolving above the manifest's directory", () => {
+    expect(refusalOf(Collector.parse("c/collector.toml", COLLECTOR.replace(`collect = "./collect"`, `collect = "./bin/../../collect"`))))
+      .toBe("c/collector.toml: run.collect: a path inside the manifest's directory, relative to it")
+    expect(Result.isSuccess(Collector.parse("c/collector.toml", COLLECTOR.replace(`collect = "./collect"`, `collect = "./bin/../collect"`))))
+      .toBe(true)
+  })
+
   it("refuses text that is no TOML", () => {
     expect(refusalOf(Collector.parse("c/collector.toml", "schema = "))).toMatch(/^c\/collector\.toml: not TOML: /)
   })
@@ -173,5 +180,10 @@ lanes = "./lanes"
   it("refuses a field it does not name", () => {
     expect(refusalOf(Pack.parse("pack.toml", PACK.replace("[modules]", "[modules]\nsite = \"./site.ts\""))))
       .toBe("pack.toml: modules.site: not a key of this file")
+  })
+
+  it("refuses a decides path resolving above the pack's directory", () => {
+    expect(refusalOf(Pack.parse("pack.toml", `${PACK}[decides]\ncut = ["./rules", "../../etc"]\n`)))
+      .toBe("pack.toml: decides.cut: a path inside the manifest's directory, relative to it")
   })
 })

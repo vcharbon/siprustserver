@@ -7,8 +7,9 @@
  * {@link check} runs before a job opens and refuses, naming the file, a level
  * or a lane that names a collector the path does not define, a level that sets
  * a `required` collector or a lane that excludes one, and a lane override of a
- * key the collector's manifest does not offer. A lane may tune a required
- * collector's parameters: that does not switch it off.
+ * key the collector's manifest does not offer or of another type than the
+ * manifest's value. A lane may tune a required collector's parameters: that
+ * does not switch it off.
  */
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
@@ -120,11 +121,19 @@ export interface Wiring {
   readonly lanes: ReadonlyArray<LaneWiring>
 }
 
-/** The keys a lane may override on `collector`: its parameters, and its delay at cell scope. */
-export const overridableOf = (collector: Collector.Collector): ReadonlyArray<string> => [
-  ...Object.keys(collector.params ?? {}),
-  ...(collector.scope === "cell" ? ["delay_s"] : [])
-]
+/** The type of a parameter value, as an override must match it: `string`, `number`, `boolean` or `array`. */
+export const kindOf = (value: unknown): string => (Array.isArray(value) ? "array" : typeof value)
+
+/**
+ * The keys a lane may override on `collector`, each with the type its value
+ * takes: its parameters, typed by the manifest's values, and its delay at cell
+ * scope, a number.
+ */
+export const overridableOf = (collector: Collector.Collector): ReadonlyMap<string, string> =>
+  new Map([
+    ...Object.entries(collector.params ?? {}).map(([key, value]) => [key, kindOf(value)] as const),
+    ...(collector.scope === "cell" ? [["delay_s", "number"] as const] : [])
+  ])
 
 const isNames = (value: ReadonlyArray<string> | Readonly<Record<string, unknown>>): value is ReadonlyArray<string> =>
   Array.isArray(value)
@@ -177,9 +186,13 @@ const checkLane = (rig: RigPath, lane: LaneWiring): Refusal | undefined => {
     if (defined === undefined) return refuse([lane.file], `collectors.${name}: names a collector the path does not define`)
     if (read.success.exclude.includes(name)) return refuse([lane.file], `collectors.${name}: the lane excludes it`)
     const offered = overridableOf(defined.manifest)
-    const unknown = Object.keys(overrides).find((key) => !offered.includes(key))
-    if (unknown !== undefined) {
-      return refuse([lane.file, defined.file], `collectors.${name}.${unknown}: not a parameter ${name} offers`)
+    for (const [key, value] of Object.entries(overrides)) {
+      const kind = offered.get(key)
+      const at = `collectors.${name}.${key}`
+      if (kind === undefined) return refuse([lane.file, defined.file], `${at}: not a parameter ${name} offers`)
+      if (kindOf(value) !== kind) {
+        return refuse([lane.file, defined.file], `${at}: of type ${kindOf(value)}, where ${name} states one of type ${kind}`)
+      }
     }
   }
   return undefined
