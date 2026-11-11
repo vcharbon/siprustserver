@@ -9,7 +9,7 @@
  */
 import type { JSX } from "react"
 import { useEffect, useMemo, useState } from "react"
-import { api, type Campaign, type CampaignRun, useAsync } from "../api.ts"
+import { api, type Campaign, type CampaignLane, type CampaignRun, useAsync } from "../api.ts"
 import { type FacetKind, facets as facetsOf, lanesRead, SELECTED } from "../campaign-facets.ts"
 import { grid as gridOf } from "../campaign-history.ts"
 import { type CampaignState, paramsOf, readState, runOf, summaryOf, vsOf } from "../campaign-state.ts"
@@ -28,6 +28,12 @@ const count = (run: CampaignRun | undefined, lane: string, outcome: string): num
 
 const notRun = (run: CampaignRun | undefined, lane: string): number =>
   run?.lanes.find((l) => l.lane === lane)?.skipped ?? 0
+
+/** What a lane did not run, by status (`2 excluded · 5 not ported`); undefined where it ran every cell. */
+const notRunTitle = (lane: CampaignLane): string | undefined => {
+  const counts = Object.entries(lane.notRun ?? (lane.excluded.length === 0 ? {} : { excluded: lane.excluded.length }))
+  return counts.length === 0 ? undefined : counts.map(([status, n]) => `${n} ${status}`).join(" · ")
+}
 
 const runLabel = (run: CampaignRun): string =>
   `#${run.id}${run.scope === null ? "" : "°"} · ${run.startedAt.slice(5, 16).replace("T", " ")}${
@@ -66,7 +72,7 @@ const Tiles = ({ view, run, vs, lanes }: {
           <div>
             <span className={`cp-big ${failing > 0 ? "cp-nok" : "cp-ok"}`}>{failing}</span> ✗ ·{" "}
             <span className="cp-err">{errors}</span> ! · <span className="cp-ok">{passing}</span> ✓ ·{" "}
-            <span className="muted" title={status.excluded.length === 0 ? undefined : `${status.excluded.length} excluded`}>{skipped}</span> —
+            <span className="muted" title={notRunTitle(status)}>{skipped}</span> —
           </div>
           <div className="cp-bar">
             <i className="pass" style={{ width: `${(passing / total) * 100}%` }} />
@@ -206,7 +212,7 @@ const Summary = ({ view: whole }: { readonly view: Campaign }): JSX.Element => {
       {run === undefined ? <p className="muted">no run</p> : (
         <>
           <Tiles view={view} run={run} vs={vs} lanes={lanes} />
-          <p className="muted cp-legend">✓ pass · ✗ fail · ! error · — not run</p>
+          <p className="muted cp-legend">✓ pass · ✗ fail · ! error, unverified · — not run</p>
           <nav className="cp-tabs">
             <button type="button" className={state.tab === "failures" ? "on" : ""} onClick={() => update({ tab: "failures" })}>
               Failures

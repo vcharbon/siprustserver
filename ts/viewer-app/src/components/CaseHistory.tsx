@@ -5,12 +5,12 @@
  * the file it was compiled from, folded), every check it makes marked per
  * lane (folded),
  * its verdict per run and lane, what changed between runs, the flip table, the
- * runs with their deltas and, for a cell replayed more than once, its attempts,
+ * runs with their status, waived lines and deltas and, for a cell replayed more than once, its attempts,
  * over the latest runs the case ran in unless every one is asked for.
  */
 import { type JSX, useState } from "react"
 import type { Campaign } from "../api.ts"
-import { resultOf } from "../campaign-facets.ts"
+import { resultOf, statusOf } from "../campaign-facets.ts"
 import { attemptLines } from "../campaign-attempts.ts"
 import { checkList } from "../campaign-checks.ts"
 import { exclusionsOf } from "../campaign-tags.ts"
@@ -209,9 +209,15 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
                   <tr key={`${run.id}:${lane}`}>
                     <td className="mono">#{run.id}</td>
                     <td className="mono">{lane}</td>
-                    <td><span className={`cp-dot ${result.outcome}`}>{MARK[result.outcome]}</span></td>
+                    <td>
+                      <span className={`cp-dot ${result.outcome}`}>{MARK[result.outcome]}</span>
+                      <div className="muted cp-small">{statusOf(result)}</div>
+                    </td>
                     <td className="mono cp-small">
                       {result.checks.map((c) => <div key={`${c.anchor}${c.field}`}>✗ {c.anchor} · {c.field}</div>)}
+                      {(result.lines ?? []).filter((line) => line.waived).map((line, at) => (
+                        <div key={`waived${at}`} className="muted">waived {line.name}{line.message === null ? "" : ` · ${line.message}`}</div>
+                      ))}
                       {result.outcome === "error" && <div>{(result.detail ?? "").split("\n")[0]}</div>}
                     </td>
                     <td>

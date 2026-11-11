@@ -10,7 +10,9 @@
  * head names the call and links up to the capture study, and a refused call
  * shows its own refusal record over the legs it was judged on.
  *
- * The page leads with the RUN'S OWN VERDICT. The delta classification below it
+ * The page leads with the RUN'S OWN VERDICT: the cell's verification lines and
+ * the status they give it, where the store holds them, then the verdict. The
+ * delta classification below it
  * rules on wire differences only, and a replay that stopped early diverges from
  * almost nothing — so the two must never be confused, and the verdict is what
  * says whether there is a defect here at all.
@@ -67,6 +69,7 @@ import { SipMessageView } from "../components/SipMessageView.tsx"
 import { StudyHead } from "../components/StudyHead.tsx"
 import { SutRecords } from "../components/SutRecords.tsx"
 import { VerdictPane } from "../components/VerdictPane.tsx"
+import { VerificationLines } from "../components/VerificationLines.tsx"
 import { findingsByStep, marksOnLadder } from "../findings.ts"
 import { caseIdOf, cellPassed, studyCells } from "../study-cells.ts"
 import { useCommands } from "../commands.ts"
@@ -387,6 +390,9 @@ const CellStudy = (
       <div className="study-verdict">
         <Outcome cell={cell} classification={detail?.classification} onPickStep={pickStep} />
         <OwnRun study={study} cell={cell} session={session} lane={lane} />
+        {detail?.verifications !== undefined && detail.verifications !== null && (
+          <VerificationLines lines={detail.verifications.lines} status={detail.verifications.status} />
+        )}
         {skipped === undefined
           ? (
             <>

@@ -145,7 +145,13 @@ affect the final status; the job says why.
 **Final status**:
 What the verifications of a cell that ran come to, informative and waived ones aside: `pass`
 (all pass), `fail` (one fails, none pending), `fail, still verifying`, `ok so far` (none fails,
-some pending) or `unverified` (none fails or is pending, one is not checkable).
+some pending) or `unverified` (none fails or is pending, one is not checkable, or no line decides
+the cell).
+
+**Cell status**:
+A cell's final status, or why it did not run: `excluded`, `not runnable`, `not ported` or `error`
+(it could not be driven). In JUnit `fail` is a failure typed by `side`, `unverified` and `error`
+are errors, a cell that did not run is skipped, and a status a pending line leaves is open.
 
 **Attachment**:
 A file a collector or a judge attached to a job, a batch or a cell, with a kind: `log`,

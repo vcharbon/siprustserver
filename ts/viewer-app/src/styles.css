@@ -2715,3 +2715,14 @@ tr.rule-unrostered td {
 .exchange-after { font: inherit; font-size: 12px; color: var(--acc); background: none; border: 1px solid transparent; padding: 0 2px; cursor: pointer; }
 .exchange-after:hover { text-decoration: underline; }
 .exchange-marked { outline: 2px solid var(--sel); outline-offset: 2px; border-radius: 4px; }
+
+/* Verification lines: a cell's, a batch's, a job's. */
+.vl h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; }
+.vl-table td { font-size: 12px; }
+.vl-message { max-width: 32em; white-space: pre-wrap; overflow-wrap: anywhere; }
+.vl-aside td { color: var(--mute); }
+.vl-status { font-weight: 600; font-size: 12px; padding: 1px 6px !important; }
+.cp-tag.vl-waived { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.cp-chip.vl-chip.pass { color: var(--ok); }
+.cp-chip.vl-chip.failure { color: var(--nok); }
+.cp-chip.vl-chip.error { color: var(--warn); }

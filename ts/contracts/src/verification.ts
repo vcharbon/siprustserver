@@ -62,3 +62,60 @@ export const finalStatusOf = (lines: ReadonlyArray<Pick<Verification, "answer" |
   if (has("not-checkable") || deciding.length === 0) return "unverified"
   return "pass"
 }
+
+/**
+ * Why a cell did not run: a campaign tag left it out (`excluded`), its lane
+ * lacks a need or an operation it uses (`not runnable`), no file ports it
+ * (`not ported`), or it could not be driven (`error`).
+ */
+export const NotRun = Schema.Literals(["excluded", "not runnable", "not ported", "error"])
+export type NotRun = typeof NotRun.Type
+
+/** A cell's status: the final status of a cell that ran, or why it did not run. */
+export const CellStatus = Schema.Union([FinalStatus, NotRun])
+export type CellStatus = typeof CellStatus.Type
+
+/** Every cell status, in the order the site lists them. */
+export const CELL_STATUSES: ReadonlyArray<CellStatus> = [
+  "pass",
+  "fail",
+  "fail, still verifying",
+  "ok so far",
+  "unverified",
+  "error",
+  "excluded",
+  "not runnable",
+  "not ported"
+]
+
+/** What a JUnit report makes of a cell: `open` while its job still verifies it. */
+export type Junit = "passed" | "failure" | "error" | "skipped" | "open"
+
+/**
+ * The JUnit outcome of a cell status (appendix §8): `fail` a failure,
+ * `unverified` and `error` errors, a cell that did not run skipped, and a
+ * status a pending line leaves (`fail, still verifying`, `ok so far`) open.
+ */
+export const junitOf = (status: CellStatus): Junit => {
+  switch (status) {
+    case "pass":
+      return "passed"
+    case "fail":
+      return "failure"
+    case "fail, still verifying":
+    case "ok so far":
+      return "open"
+    case "unverified":
+    case "error":
+      return "error"
+    case "excluded":
+    case "not runnable":
+    case "not ported":
+      return "skipped"
+  }
+}
+
+/** The lines that fail the cell: failures neither informative nor waived. */
+export const failing = <L extends Pick<Verification, "answer" | "informative" | "waived">>(
+  lines: ReadonlyArray<L>
+): ReadonlyArray<L> => lines.filter((line) => line.answer === "fail" && decides(line))

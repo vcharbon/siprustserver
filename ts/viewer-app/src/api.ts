@@ -397,6 +397,8 @@ export interface TriageStudyCellDetail {
   readonly windows?: readonly TriageStudyHook[]
   /** The call contexts the SUT still held after a batch whose call this cell placed. */
   readonly held?: readonly unknown[]
+  /** The cell's verification lines as the store holds them, and the status they give it; null or absent where it holds none. */
+  readonly verifications?: { readonly status: CellStatus; readonly lines: readonly VerificationLine[] } | null
 }
 
 /** What joins a cell to the SUT's own records. */
@@ -864,6 +866,22 @@ export interface JobDetail {
     readonly selection: string
   } | null
   readonly lineage: { readonly ancestors: readonly JobKin[]; readonly descendants: readonly JobKin[] }
+  /** The job's own verification lines; absent where the server states none. */
+  readonly lines?: readonly VerificationLine[]
+  /** The job's batches in the order they started, each with the lines its end gates answered; absent where the server states none. */
+  readonly batchList?: readonly JobBatch[]
+}
+
+/** One batch of a job: its lane, attempt, cells, when it ran, what its end said, its lines. */
+export interface JobBatch {
+  readonly id: number
+  readonly lane: string
+  readonly attempt: number
+  readonly cells: number
+  readonly startedAt: string
+  readonly finishedAt: string | null
+  readonly detail: string | null
+  readonly lines: readonly VerificationLine[]
 }
 
 /** A byte range of the job's log: the next poll starts at `to`; `done` once the job ended and the end was reached. */
@@ -1047,6 +1065,41 @@ export interface CampaignCheck {
   readonly step?: string | null
 }
 
+/** What a verification line answered. */
+export type VerificationAnswer = "pass" | "fail" | "not-checkable" | "pending"
+
+/**
+ * One verification line of a cell, a batch or a job: a named question, who
+ * answered it and how; its detail's `step`, `expected`, `seen` and `side`
+ * where stated. A `waived` failure is a known bug of the lane; an
+ * `informative` line never decides the cell.
+ */
+export interface VerificationLine {
+  readonly name: string
+  readonly source: string
+  readonly answer: VerificationAnswer
+  readonly message: string | null
+  readonly detail: Readonly<Record<string, unknown>> | null
+  readonly informative: boolean
+  readonly waived: boolean
+}
+
+/**
+ * A cell's status: the final status its lines give a cell that ran (`pass`,
+ * `fail`, `fail, still verifying`, `ok so far`, `unverified`), or why it did
+ * not run (`excluded`, `not runnable`, `not ported`, `error`).
+ */
+export type CellStatus =
+  | "pass"
+  | "fail"
+  | "fail, still verifying"
+  | "ok so far"
+  | "unverified"
+  | "error"
+  | "excluded"
+  | "not runnable"
+  | "not ported"
+
 /** One replay of a cell replayed more than once on its lane: its bundle directory, outcome, failed checks, whether it is the result. */
 export interface CampaignAttempt {
   readonly cell: string | null
@@ -1062,6 +1115,10 @@ export interface CampaignResult {
   readonly cell: string | null
   readonly log: { readonly records?: number; readonly missing?: string } | null
   readonly detail: string | null
+  /** Its status; absent where the server states none. */
+  readonly status?: CellStatus
+  /** Its verification lines in their order; absent where the server states none. */
+  readonly lines?: readonly VerificationLine[]
   readonly checks: readonly CampaignCheck[]
   /** Every attempt, in order, of a cell replayed more than once on its lane; absent for one attempt. */
   readonly attempts?: readonly CampaignAttempt[]
@@ -1078,6 +1135,8 @@ export interface CampaignLane {
   readonly skipped: number
   /** The cases a tag left out on the lane, each with why. */
   readonly excluded: readonly { readonly caseId: string; readonly reason: string }[]
+  /** Per status of a cell that did not run, how many; absent where the server states none. */
+  readonly notRun?: Readonly<Record<string, number>>
   readonly results: readonly CampaignResult[]
 }
 

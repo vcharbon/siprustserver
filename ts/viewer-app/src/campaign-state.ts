@@ -1,6 +1,6 @@
 /**
  * The summary page's place as the URL carries it: the environment, the tab, the run read and
- * the one compared, the lanes, the filters, the selected facets (checks, groups, families),
+ * the one compared, the lanes, the filters, the selected facets (checks, groups, families, statuses, lines),
  * the open case and the delta on screen. Read from a query string and written back to
  * one, so a reload and a pasted link show the same view.
  */
@@ -39,7 +39,13 @@ export const readState = (query: URLSearchParams): CampaignState => {
       fresh: query.get("new") === "1",
       text: query.get("q") ?? ""
     },
-    selection: { checks: query.getAll("check"), groups: query.getAll("group"), families: query.getAll("family") },
+    selection: {
+      checks: query.getAll("check"),
+      groups: query.getAll("group"),
+      families: query.getAll("family"),
+      statuses: query.getAll("status"),
+      lines: query.getAll("line")
+    },
     caseId: query.get("case") ?? undefined,
     delta: campaignDelta(query)
   }
@@ -60,6 +66,8 @@ export const paramsOf = (state: CampaignState): CampaignParams => ({
   check: state.selection.checks,
   group: state.selection.groups,
   family: state.selection.families,
+  status: state.selection.statuses,
+  line: state.selection.lines,
   case: state.caseId,
   delta: state.delta === undefined ? undefined : `${state.delta.run}:${state.delta.lane}`
 })

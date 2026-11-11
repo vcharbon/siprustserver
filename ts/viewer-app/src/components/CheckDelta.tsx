@@ -1,5 +1,6 @@
 /**
- * One case's delta on one run and lane: the failed checks as large cards, each
+ * One case's delta on one run and lane: the cell's verification lines and
+ * status, the failed checks as large cards, each
  * with its decision line and the cell's decision-service log beside it, the
  * cell's CDRs and their delta against the case's other sub-cases or lanes,
  * then the ladder of what the run produced and the HTTP exchanges, the
@@ -15,6 +16,7 @@ import { arrivedMessages } from "../campaign-arrived-message.ts"
 import { caseLink } from "../campaign-case-link.ts"
 import { declaredOf } from "../campaign-cdr.ts"
 import { checkMessages } from "../campaign-check-message.ts"
+import { statusOf } from "../campaign-facets.ts"
 import { exchangesAfter } from "../exchange-after.ts"
 import { cellDocument } from "../opening.ts"
 import { useLinkOrigin } from "../server-config.ts"
@@ -26,6 +28,7 @@ import { Exchange } from "./Exchange.tsx"
 import { LadderPane } from "./LadderPane.tsx"
 import { scrollTopFor } from "./scroll.ts"
 import { SipMessageView } from "./SipMessageView.tsx"
+import { VerificationLines } from "./VerificationLines.tsx"
 
 const logPath = (capture: string, session: string, cell: string) =>
   `/api/campaign/${encodeURIComponent(capture)}/runs/${encodeURIComponent(session)}/cells/${encodeURIComponent(cell)}/log`
@@ -93,6 +96,9 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
   const picked = layout?.events.find((event: LadderEvent) => event.id === selected)
   return (
     <>
+      {result.lines !== undefined && (
+        <VerificationLines lines={result.lines} status={statusOf(result)} sides={view.sides} />
+      )}
       {result.outcome === "pass" && <p className="cp-ok">✓ every check</p>}
       {result.outcome === "error" && <pre className="cp-pre">{result.detail}</pre>}
       {result.checks.map((check, at) => {

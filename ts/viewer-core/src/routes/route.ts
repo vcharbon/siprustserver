@@ -231,6 +231,10 @@ export interface CampaignParams {
   readonly group?: ReadonlyArray<string> | undefined
   /** The selected family facets. */
   readonly family?: ReadonlyArray<string> | undefined
+  /** The selected status facets. */
+  readonly status?: ReadonlyArray<string> | undefined
+  /** The selected verification line facets (`<name> <answer>[ <mark>]`). */
+  readonly line?: ReadonlyArray<string> | undefined
   /** The case whose history is open. */
   readonly case?: string | undefined
   /** `<run>:<lane>`: the delta of the open case on screen. */

@@ -1,7 +1,8 @@
 /**
  * One job (§6 J3, J4, J8): its status, exit and instants, the request it
  * runs with its selection, the chain it restarts, the progress bar with its
- * counts and the batch it is on, the live log, the hook logs folded, the
+ * counts and the batch it is on, the job's verification lines and each batch
+ * with the lines its end gates answered, the live log, the hook logs folded, the
  * cells the resolution found gone with their reasons, and the cells landed
  * red so far, each linked to its study — and the same verbs as the list.
  * Re-read every two seconds while the job runs; everything shown is a row
@@ -15,6 +16,7 @@ import { JobActions } from "../components/JobActions.tsx"
 import { Link } from "../components/Link.tsx"
 import { LogTail } from "../components/LogTail.tsx"
 import { ProgressBar } from "../components/ProgressBar.tsx"
+import { VerificationLines } from "../components/VerificationLines.tsx"
 import { useHeld } from "../held.ts"
 import { unitOf } from "../job-progress.ts"
 import { alsoBadBody } from "../bad-body.ts"
@@ -226,6 +228,18 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
           {job.sweepId !== null && <> · sweep {job.sweepId}</>}
         </p>
       </section>
+
+      {(job.lines ?? []).length > 0 && <VerificationLines lines={job.lines!} title="Job lines" />}
+      {(job.batchList ?? []).map((batch) => (
+        <VerificationLines
+          key={batch.id}
+          lines={batch.lines}
+          title={`Batch ${batch.id}`}
+          subtitle={`${batch.lane} · attempt ${batch.attempt} · ${batch.cells} cells${
+            batch.finishedAt === null ? " · open" : batch.detail === null ? "" : ` · ${batch.detail}`
+          }`}
+        />
+      ))}
 
       <h2>log</h2>
       <LogTail id={job.id} path={job.logPath} />

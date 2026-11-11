@@ -4,8 +4,8 @@
  * facets narrowing by AND; one check read by the shapes of what was seen.
  */
 import { describe, expect, it } from "vitest"
-import type { Campaign, CampaignCheck, CampaignResult } from "../src/api.ts"
-import { ALL_FILTERS, facets, NO_SELECTION } from "../src/campaign-facets.ts"
+import type { Campaign, CampaignCheck, CampaignResult, VerificationLine } from "../src/api.ts"
+import { ALL_FILTERS, facets, NO_SELECTION, type Selection } from "../src/campaign-facets.ts"
 
 const check = (anchor: string, field: string, seen: string | null, side = "sut"): CampaignCheck => ({
   anchor,
@@ -108,7 +108,7 @@ const keyOf = (c: CampaignCheck) => `${c.anchor} ${c.field}`
 
 describe("the failure facets of a run", () => {
   it("count a call under every check it fails, with the lanes and sides it failed on", () => {
-    const f = facets(VIEW, 4, 2, ALL_FILTERS, { checks: [], groups: [], families: [] })
+    const f = facets(VIEW, 4, 2, ALL_FILTERS, { ...NO_SELECTION, checks: [], groups: [], families: [] })
     expect(f.checks.map((c) => [c.key, c.calls, c.lanes, c.sides])).toEqual([
       [keyOf(PAI), 2, { "lane-x": 2, "lane-y": 1 }, { sut: 3 }],
       [keyOf(UUI), 1, { "lane-x": 1 }, { decision: 1 }],
@@ -120,7 +120,7 @@ describe("the failure facets of a run", () => {
   })
 
   it("date a check from the first run of its streak, a run that judged no call keeping it", () => {
-    const f = facets(VIEW, 4, 2, ALL_FILTERS, { checks: [], groups: [], families: [] })
+    const f = facets(VIEW, 4, 2, ALL_FILTERS, { ...NO_SELECTION, checks: [], groups: [], families: [] })
     expect(Object.fromEntries(f.checks.map((c) => [c.key, c.since]))).toEqual({
       [keyOf(PAI)]: 2,
       [keyOf(UUI)]: 2,
@@ -129,41 +129,41 @@ describe("the failure facets of a run", () => {
   })
 
   it("list the checks that pass again since the compared run, only once no call fails them", () => {
-    const f = facets(VIEW, 4, 1, ALL_FILTERS, { checks: [], groups: [], families: [] })
+    const f = facets(VIEW, 4, 1, ALL_FILTERS, { ...NO_SELECTION, checks: [], groups: [], families: [] })
     expect(f.passingAgain).toEqual([{ key: "A final status", calls: 1 }])
-    expect(facets(VIEW, 4, 2, ALL_FILTERS, { checks: [], groups: [], families: [] }).passingAgain).toEqual([])
+    expect(facets(VIEW, 4, 2, ALL_FILTERS, { ...NO_SELECTION, checks: [], groups: [], families: [] }).passingAgain).toEqual([])
   })
 
   it("narrow the calls by AND over the selected checks and families, each call with all its failed checks", () => {
-    const both = facets(VIEW, 4, 2, ALL_FILTERS, { checks: [keyOf(PAI), keyOf(RURI)], groups: [], families: [] })
+    const both = facets(VIEW, 4, 2, ALL_FILTERS, { ...NO_SELECTION, checks: [keyOf(PAI), keyOf(RURI)], groups: [], families: [] })
     expect(both.matching.map((m) => m.caseId)).toEqual(["fam-a/one"])
     expect(both.matching[0]!.failed).toEqual([
       { key: keyOf(PAI), lanes: ["lane-x", "lane-y"] },
       { key: keyOf(RURI), lanes: ["lane-x"] }
     ])
-    expect(facets(VIEW, 4, 2, ALL_FILTERS, { checks: [keyOf(PAI)], groups: [], families: ["fam-b"] }).matching).toEqual([])
-    expect(facets(VIEW, 4, 2, ALL_FILTERS, { checks: [], groups: [], families: ["fam-b"] }).matching.map((m) => m.caseId))
+    expect(facets(VIEW, 4, 2, ALL_FILTERS, { ...NO_SELECTION, checks: [keyOf(PAI)], groups: [], families: ["fam-b"] }).matching).toEqual([])
+    expect(facets(VIEW, 4, 2, ALL_FILTERS, { ...NO_SELECTION, checks: [], groups: [], families: ["fam-b"] }).matching.map((m) => m.caseId))
       .toEqual(["fam-b/four"])
   })
 
   it("read one selected check by the shapes of what was seen, long digit runs and ports folded", () => {
-    const f = facets(VIEW, 4, 2, ALL_FILTERS, { checks: [keyOf(PAI)], groups: [], families: [] })
+    const f = facets(VIEW, 4, 2, ALL_FILTERS, { ...NO_SELECTION, checks: [keyOf(PAI)], groups: [], families: [] })
     expect(f.shapes.map((s) => [s.shape, s.side, s.count])).toEqual([["sip:+#@192.0.2.1:#", "sut", 3]])
   })
 
   it("hold to the lanes and the filters asked", () => {
-    const one = facets(VIEW, 4, 2, { ...ALL_FILTERS, lanes: ["lane-y"] }, { checks: [], groups: [], families: [] })
+    const one = facets(VIEW, 4, 2, { ...ALL_FILTERS, lanes: ["lane-y"] }, { ...NO_SELECTION, checks: [], groups: [], families: [] })
     expect(one.checks.map((c) => [c.key, c.calls])).toEqual([[keyOf(PAI), 1]])
-    const single = facets(VIEW, 4, 2, { ...ALL_FILTERS, oneLane: true }, { checks: [], groups: [], families: [] })
+    const single = facets(VIEW, 4, 2, { ...ALL_FILTERS, oneLane: true }, { ...NO_SELECTION, checks: [], groups: [], families: [] })
     expect(single.matching.map((m) => m.caseId)).toEqual(["fam-a/two", "fam-b/four"])
-    const fresh = facets(VIEW, 4, 2, { ...ALL_FILTERS, fresh: true }, { checks: [], groups: [], families: [] })
+    const fresh = facets(VIEW, 4, 2, { ...ALL_FILTERS, fresh: true }, { ...NO_SELECTION, checks: [], groups: [], families: [] })
     expect(fresh.matching.map((m) => m.caseId)).toEqual(["fam-a/one", "fam-a/two", "fam-b/four"])
-    const text = facets(VIEW, 4, 2, { ...ALL_FILTERS, text: "user-to" }, { checks: [], groups: [], families: [] })
+    const text = facets(VIEW, 4, 2, { ...ALL_FILTERS, text: "user-to" }, { ...NO_SELECTION, checks: [], groups: [], families: [] })
     expect(text.matching.map((m) => m.caseId)).toEqual(["fam-b/four"])
   })
 
   it("state a run that judged no call as one error facet", () => {
-    const f = facets(VIEW, 3, 2, ALL_FILTERS, { checks: [], groups: [], families: [] })
+    const f = facets(VIEW, 3, 2, ALL_FILTERS, { ...NO_SELECTION, checks: [], groups: [], families: [] })
     expect(f.checks.map((c) => [c.key, c.calls, c.sides])).toEqual([["error database init failed", 4, { error: 8 }]])
   })
 
@@ -178,10 +178,10 @@ describe("the failure facets of a run", () => {
         only(1, [failed("fam-a/one", PAI), ok("fam-a/two")])
       ]
     }
-    const f = facets(view, 3, 2, ALL_FILTERS, { checks: [], groups: [], families: [] })
+    const f = facets(view, 3, 2, ALL_FILTERS, { ...NO_SELECTION, checks: [], groups: [], families: [] })
     expect(f.checks.map((c) => [c.key, c.since])).toEqual([[keyOf(PAI), 1]])
     expect(f.passingAgain).toEqual([])
-    expect(facets(view, 3, 2, { ...ALL_FILTERS, fresh: true }, { checks: [], groups: [], families: [] }).matching).toEqual([])
+    expect(facets(view, 3, 2, { ...ALL_FILTERS, fresh: true }, { ...NO_SELECTION, checks: [], groups: [], families: [] }).matching).toEqual([])
   })
 
   it("count a failing call under each of its groups, and narrow to the calls of any group selected", () => {
@@ -197,5 +197,53 @@ describe("the failure facets of a run", () => {
     })
     expect(facets(VIEW, 4, 2, { ...ALL_FILTERS, text: "number one" }, NO_SELECTION).matching.map((m) => m.caseId))
       .toEqual(["fam-a/one"])
+  })
+})
+
+describe("the status and line facets of a run", () => {
+  const line = (name: string, answer: VerificationLine["answer"], marks: Partial<VerificationLine> = {}): VerificationLine => ({
+    name,
+    source: "interpreter",
+    answer,
+    message: null,
+    detail: null,
+    informative: false,
+    waived: false,
+    ...marks
+  })
+  const CDR = check("call", "record-count", "0 lines")
+  const view: Campaign = {
+    ...VIEW,
+    lanes: ["lane-x"],
+    runs: [
+      run(1, {
+        "lane-x": [
+          { ...failed("fam-a/one", CDR), status: "fail", lines: [line("call", "pass"), line("cdr", "fail")] },
+          { ...ok("fam-a/two"), status: "pass", lines: [line("call", "pass"), line("call", "fail", { waived: true })] },
+          { ...ok("fam-b/three"), outcome: "error", status: "unverified", lines: [line("call", "pass"), line("cdr", "not-checkable")] },
+          { ...ok("fam-b/four"), status: "pass", lines: [line("call", "pass")] }
+        ]
+      })
+    ]
+  }
+
+  it("count a call under its status and under each line it holds, passing calls included", () => {
+    const f = facets(view, 1, undefined, ALL_FILTERS, NO_SELECTION)
+    expect(f.statuses).toEqual([{ status: "pass", calls: 2 }, { status: "fail", calls: 1 }, { status: "unverified", calls: 1 }])
+    expect(f.lines).toEqual([
+      { key: "call pass", calls: 4 },
+      { key: "call fail waived", calls: 1 },
+      { key: "cdr fail", calls: 1 },
+      { key: "cdr not-checkable", calls: 1 }
+    ])
+  })
+
+  it("narrow to the calls of a selected status or holding every selected line, a passing call among them", () => {
+    const of = (selection: Partial<Selection>) =>
+      facets(view, 1, undefined, ALL_FILTERS, { ...NO_SELECTION, ...selection }).matching.map((m) => [m.caseId, m.statuses["lane-x"]])
+    expect(of({ lines: ["call fail waived"] })).toEqual([["fam-a/two", "pass"]])
+    expect(of({ statuses: ["fail", "unverified"] })).toEqual([["fam-a/one", "fail"], ["fam-b/three", "unverified"]])
+    expect(of({ lines: ["call pass", "cdr fail"] })).toEqual([["fam-a/one", "fail"]])
+    expect(of({})).toEqual([["fam-a/one", "fail"], ["fam-b/three", "unverified"]])
   })
 })

@@ -19,7 +19,7 @@ describe("the link to a case's call details", () => {
       run: 7,
       vs: undefined,
       filters: { lanes: [], failing: false, oneLane: false, fresh: false, text: "" },
-      selection: { checks: [], groups: [], families: [] },
+      selection: { checks: [], groups: [], families: [], statuses: [], lines: [] },
       caseId: "fam-a/one [s]",
       delta: { run: 7, lane: "lane-x" }
     })

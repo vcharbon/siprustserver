@@ -3,6 +3,7 @@
  * environment, the run, the case and the delta, none of the page's filters,
  * tab or selection, so whoever opens it lands on that modal alone.
  */
+import { NO_SELECTION } from "./campaign-facets.ts"
 import { paramsOf } from "./campaign-state.ts"
 import { href } from "./router.ts"
 
@@ -22,7 +23,7 @@ export const caseLink = (origin: string, capture: string, at: {
         run: at.run,
         vs: undefined,
         filters: { lanes: [], failing: false, oneLane: false, fresh: false, text: "" },
-        selection: { checks: [], groups: [], families: [] },
+        selection: NO_SELECTION,
         caseId: at.caseId,
         delta: { run: at.run, lane: at.lane }
       })

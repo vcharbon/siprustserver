@@ -1,7 +1,8 @@
-/** The failures of the run read as facets: checks, groups and families to pick, the calls they narrow to, one check's shapes. */
+/** The failures of the run read as facets: checks, statuses, lines, groups and families to pick, the calls they narrow to, one check's shapes. */
 import type { JSX } from "react"
 import type { Campaign } from "../api.ts"
 import type { FacetKind, Facets, Selection } from "../campaign-facets.ts"
+import { statusTone } from "../verification-lines.ts"
 import { CheckCard, SideTag } from "./CheckCard.tsx"
 
 const MARK: Readonly<Record<string, string>> = { pass: "✓", failure: "✗", error: "!", none: "—" }
@@ -51,6 +52,39 @@ export const CampaignFailures = ({ view, facets, run, vs, lanes, selected, onTog
             </div>
           ))}
         </section>
+        <section className="cp-panel">
+          <h2>Status</h2>
+          <div className="cp-chips">
+            {facets.statuses.map((one) => (
+              <button
+                key={one.status}
+                type="button"
+                className={`cp-chip vl-chip ${statusTone(one.status)}${selected.statuses.includes(one.status) ? " on" : ""}`}
+                onClick={() => onToggle("status", one.status)}
+              >
+                {one.status} <b>{one.calls}</b>
+              </button>
+            ))}
+            {facets.statuses.length === 0 && <span className="muted">none</span>}
+          </div>
+        </section>
+        {facets.lines.length > 0 && (
+          <section className="cp-panel">
+            <h2>Lines</h2>
+            <div className="cp-chips">
+              {facets.lines.map((one) => (
+                <button
+                  key={one.key}
+                  type="button"
+                  className={`cp-chip mono${selected.lines.includes(one.key) ? " on" : ""}`}
+                  onClick={() => onToggle("line", one.key)}
+                >
+                  {one.key} <b>{one.calls}</b>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
         {facets.groups.length > 0 && (
           <section className="cp-panel">
             <h2>Groups</h2>
@@ -87,8 +121,10 @@ export const CampaignFailures = ({ view, facets, run, vs, lanes, selected, onTog
       </aside>
       <section className="cp-panel">
         <div className="cp-matched">
-          <b>{facets.matching.length}</b> failing of {facets.ran}
+          <b>{facets.matching.length}</b> {selected.statuses.length + selected.lines.length > 0 ? "matching" : "failing"} of {facets.ran}
           {[
+            ...selected.statuses.map((k) => ["status", k] as const),
+            ...selected.lines.map((k) => ["line", k] as const),
             ...selected.checks.map((k) => ["check", k] as const),
             ...selected.groups.map((k) => ["group", k] as const),
             ...selected.families.map((k) => ["family", k] as const)
@@ -125,7 +161,7 @@ export const CampaignFailures = ({ view, facets, run, vs, lanes, selected, onTog
                   <div className="muted mono">{[...m.groups, m.family].join(" · ")}</div>
                 </td>
                 {lanes.map((lane) => (
-                  <td key={lane}><span className={`cp-dot ${m.outcomes[lane]}`} title={m.outcomes[lane]}>{MARK[m.outcomes[lane] ?? "none"]}</span></td>
+                  <td key={lane}><span className={`cp-dot ${m.outcomes[lane]}`} title={m.statuses[lane]}>{MARK[m.outcomes[lane] ?? "none"]}</span></td>
                 ))}
                 <td className="mono">
                   {m.failed.map((f) => (
