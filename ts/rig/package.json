@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "The rig's plug-in contract: the pack, collector, judge and operation manifests, the rig path they are found on, the collection levels, and the cell description every collector and judge reads.",
+  "description": "The rig's plug-in contract: the pack, collector, judge and operation manifests, the rig path they are found on, the lane file and its parts, the collection levels, and the cell description every collector and judge reads.",
   "exports": {
     ".": "./src/index.ts",
     "./*": "./src/*.ts"

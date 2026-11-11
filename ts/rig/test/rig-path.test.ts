@@ -83,8 +83,8 @@ describe("the rig path", () => {
   })
 
   it("refuses a part schema both roots define, naming both files", async () => {
-    const packDir = root({ "pack.toml": pack(), "parts/records-store.schema.json": "{}" })
-    const workspace = root({ "parts/records-store.schema.json": "{}" })
+    const packDir = root({ "pack.toml": pack(), "parts/records-store.schema.json": `{"type": "object"}` })
+    const workspace = root({ "parts/records-store.schema.json": `{"type": "object"}` })
     expect((await refusalOf({ pack: packDir, workspace }))?.files).toEqual([
       path.join(packDir, "parts/records-store.schema.json"),
       path.join(workspace, "parts/records-store.schema.json")

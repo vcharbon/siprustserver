@@ -290,19 +290,33 @@ it opens.
 schema = "lane.v1"
 clock  = "real"                # real | simulated
 order  = 10
-[sip]
+[sip]                          # a real lane only
 lifecycle = "standing"         # managed | standing
 ingress = "192.0.2.10:5060"
 endpoint_host = "192.0.2.1"
 exclusive = false
-[backend]
+up = "…"                       # how a standing system is brought up, said when its ingress is silent
+[backend]                      # a real lane only
 mode = "served"                # served | proxied | none
-listen = "192.0.2.1:8080"
-http_budget_ms = 2000
-[pacing]
-calls_per_second = 5
-[timers]                       # the system's own timers a case may name
-keepalive_s = 30
+listen = "192.0.2.1:8080"      # stated unless mode = "none"
+holder = "…"                   # what may hold listen, named when it is taken
+[backend.http_budget]
+new_call_ms = 2000
+follow_up_ms = 2000
+transit_ms = 1
+[pacing]                       # what a replay takes where nobody states it
+concurrency = 100
+batch_size = 4000
+starts_per_second = 10
+[pacing.ceilings]              # the most the lane takes
+cells = 600
+starts_per_second = 50
+[pacing.campaign]
+concurrency = 50
+starts_per_second = 10
+timing_tolerance_ms = 20
+[timers]                       # the system's own timers a case may name, in ms
+keepalive_ms = 30000
 known_bugs = ["…"]             # failures this lane waives
 [parts]
 records-store = "lab-a"        # targets/records-store/lab-a.toml
@@ -314,8 +328,26 @@ restart-worker = "restart-worker-compose"
 ```
 
 A part file `targets/<kind>/<name>.toml` is validated against `parts/<kind>.schema.json` of the
-path. Several lanes may name one file. A lane's capabilities derive from its backend mode, its
-parts and what is bound to it.
+path, a JSON Schema whose root is an object, read in the Draft 2020-12 subset Effect's importer
+translates. A refusal names the part file and the dotted field. Several lanes may name one
+file. The schema's root keyword `x-siprig` states what the base reads of the kind:
+
+```json
+"x-siprig": {
+  "shared": true,
+  "capabilities": { "records-readable": { "reader": true }, "records-writable": { "mode": ["append", "reset"] } }
+}
+```
+
+- `shared`: the lanes of one job name one file of the kind, or none on every lane.
+- `capabilities`: what a part of the kind gives the lane, each when the fields it lists hold:
+  `true` for present, a list for one of those values.
+
+A lane's capabilities derive from its clock and backend mode (`scripted-routing` where the rig
+serves the backend or the lane is simulated, `routing-visible` where it also relays it,
+`real-clock` or `paused-clock`), from its parts, and `operation:<name>` for each name its
+`[operations]` binds. A binding to an operation the path does not define, or whose `needs` the
+lane's parts lack, refuses the lane.
 
 ## 13. The registration seam
 

@@ -21,6 +21,7 @@ import * as Judge from "./judge.js"
 import { type Refusal, refuse } from "./manifest-file.js"
 import * as Operation from "./operation.js"
 import * as Pack from "./pack.js"
+import * as Part from "./part.js"
 
 /** Who owns a root of the path. */
 export type Level = "pack" | "workspace"
@@ -36,12 +37,13 @@ export interface Defined<M> {
   readonly manifest: M
 }
 
-/** A part schema, `parts/<kind>.schema.json`. */
+/** A part schema, `parts/<kind>.schema.json`, and what the base reads of it (`part.ts`). */
 export interface PartSchema {
   readonly kind: string
   readonly file: string
   readonly level: Level
   readonly schema: Readonly<Record<string, unknown>>
+  readonly reads: Part.Kind
 }
 
 /** Every plug-in the path defines, by name. */
@@ -179,7 +181,9 @@ const loadParts = (root: string, level: Level) =>
       if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
         return yield* Effect.fail(refuse([file], "a part schema is one JSON Schema object"))
       }
-      found.push({ kind, file, level, schema: schema as Record<string, unknown> })
+      const reads = Part.kindOf(file, schema as Record<string, unknown>)
+      if (Result.isFailure(reads)) return yield* Effect.fail(reads.failure)
+      found.push({ kind, file, level, schema: schema as Record<string, unknown>, reads: reads.success })
     }
     return found
   })
