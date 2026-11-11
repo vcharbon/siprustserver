@@ -34,7 +34,7 @@ export const Verification = Schema.Struct({
   detail: Schema.optionalKey(Detail),
   /** The line never decides the cell. */
   informative: Schema.optionalKey(Schema.Boolean),
-  /** A failure the lane lists as a known bug: it never decides the cell. */
+  /** A failure stood down, by a known bug of the lane or by a reclassifier: it never decides the cell. */
   waived: Schema.optionalKey(Schema.Boolean)
 })
 export interface Verification extends Schema.Schema.Type<typeof Verification> {}
@@ -114,6 +114,14 @@ export const junitOf = (status: CellStatus): Junit => {
       return "skipped"
   }
 }
+
+/** The bundle file holding the lines a cell's lane answered in process. */
+export const FILE = "verifications.json"
+
+/** The lines a cell is still waiting on: `pending` ones neither informative nor waived. */
+export const pending = <L extends Pick<Verification, "answer" | "informative" | "waived">>(
+  lines: ReadonlyArray<L>
+): ReadonlyArray<L> => lines.filter((line) => line.answer === "pending" && decides(line))
 
 /** The lines that fail the cell: failures neither informative nor waived. */
 export const failing = <L extends Pick<Verification, "answer" | "informative" | "waived">>(

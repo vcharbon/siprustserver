@@ -300,11 +300,9 @@ export const layer = Layer.effect(
             error_source = EXCLUDED.error_source,
             body_failing = EXCLUDED.body_failing
         `
-        if (entry.verifications !== undefined) {
-          yield* Verifications.replace({ scope: "cell", runId, caseId: entry.caseId }, entry.verifications).pipe(
-            Effect.provideService(SqlClient, sql)
-          )
-        }
+        yield* Verifications.replace({ scope: "cell", runId, caseId: entry.caseId }, entry.verifications ?? []).pipe(
+          Effect.provideService(SqlClient, sql)
+        )
       }
       yield* refreshRollup(runId)
     })

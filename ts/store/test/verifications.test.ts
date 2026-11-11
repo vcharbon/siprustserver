@@ -160,7 +160,7 @@ describe.skipIf(!Server.served)("verification lines", () => {
       ])
     })))
 
-  it("are replaced whole when the cell is written again", () =>
+  it("are replaced whole when the cell is written again, by none where it states none", () =>
     withStore(Effect.gen(function*() {
       const runs = yield* Runs.Service
       const lines = yield* Verifications.Service
@@ -175,6 +175,10 @@ describe.skipIf(!Server.served)("verification lines", () => {
         { name: "call", source: "interpreter", answer: "pass" }
       ])
       expect(yield* statusesOf(runId)).toEqual([{ case_id: "a", status: "pass" }])
+      const { verifications: _, ...lineless } = cell("a", [])
+      yield* runs.finish({ id: runId, status: "done", cases: [lineless] })
+      expect(yield* lines.of({ scope: "cell", runId, caseId: "a" })).toEqual([])
+      expect(yield* statusesOf(runId)).toEqual([])
     })))
 
   it("refuses a waived line that is no failure", async () => {

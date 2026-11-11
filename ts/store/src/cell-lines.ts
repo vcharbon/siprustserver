@@ -7,9 +7,10 @@
  *   where it failed, a failure where it wrote none, and each check a lane's
  *   known bug stood down as a waived failure of it;
  * - `rfc-audit`, the audit's, where `rfc.json` audited the cell: a failure
- *   where a charge stands, the source faults kept as informative;
+ *   where a charge stands, the source faults kept as informative; not
+ *   checkable, for its reason, where `rfc.json` states the cell not audited;
  * - `run`, the driver's, where the rollup failed the cell and no other line
- *   fails: what failed it beyond the lines above.
+ *   fails or is pending: what failed it beyond the lines above.
  *
  * Where the deployment's reclassifier restated the failed run as passed,
  * every failure deciding the cell stands waived, the reclassifier its source
@@ -18,7 +19,8 @@
  * agree.
  *
  * A cell that did not run (skipped, or never driven) holds no line. On a
- * bundle the replay wrote whole, the lines fail the cell where the rollup does.
+ * bundle the replay wrote whole, the lines leave the cell short of a pass
+ * where the rollup does: failed, or still pending.
  */
 import { type Bundle, Verification } from "@sip/contracts"
 import * as Option from "effect/Option"
@@ -27,7 +29,7 @@ import * as Schema from "effect/Schema"
 type Line = Verification.Verification
 
 /** The cell file holding the lines its lane answered in process. */
-export const VERIFICATIONS_FILE = "verifications.json"
+export const VERIFICATIONS_FILE = Verification.FILE
 
 const decodeAnswered = Schema.decodeUnknownOption(Schema.Array(Verification.Verification))
 
@@ -42,6 +44,8 @@ export interface CellReading {
   readonly verdict: Bundle.RunVerdict | null
   /** The audit's findings, empty where the cell was not audited; null where `rfc.json` is absent or not audited. */
   readonly audit: ReadonlyArray<Bundle.RfcFinding> | null
+  /** Why `rfc.json` states the cell not audited; null where it audited the cell or is absent. */
+  readonly unaudited: string | null
   /** The gating findings the SUT answers for; every gating finding of a cell the reclassifier restated. */
   readonly charged: ReadonlyArray<Bundle.RfcFinding>
   /** `verifications.json`: the lines the lane answered in process; null where the cell wrote none. */
@@ -101,6 +105,14 @@ const auditOf = (audit: ReadonlyArray<Bundle.RfcFinding>, charged: ReadonlyArray
   return [own, ...faults]
 }
 
+/** The audit's line of a cell `rfc.json` states not audited, for `reason`. */
+const unauditedOf = (reason: string): Line => ({
+  name: RFC_AUDIT,
+  source: "rfc audit",
+  answer: "not-checkable",
+  message: `not audited: ${reason}`
+})
+
 /** Each check `verdict` states a lane's known bug stood down, as a waived failure of the call. */
 const waivedOf = (verdict: Bundle.RunVerdict | null): ReadonlyArray<Line> =>
   (verdict?.waived ?? []).map((waived) => ({
@@ -132,10 +144,15 @@ const restatedOf = (lines: ReadonlyArray<Line>, reason: string): ReadonlyArray<L
 /** The lines of a cell that ran, in the order the lane's (or the call's), audit, run. */
 export const linesOf = (reading: CellReading): ReadonlyArray<Line> => {
   const own = reading.answered ?? [callOf(reading.verdict), ...waivedOf(reading.verdict)]
-  const read = [...own, ...(reading.audit === null ? [] : auditOf(reading.audit, reading.charged))]
+  const audit = reading.audit !== null
+    ? auditOf(reading.audit, reading.charged)
+    : reading.unaudited !== null
+    ? [unauditedOf(reading.unaudited)]
+    : []
+  const read = [...own, ...audit]
   const lines = reading.restated === null ? read : restatedOf(read, reading.restated)
-  const failing = lines.some((line) => line.answer === "fail" && Verification.decides(line))
-  if (reading.passed || failing) return lines
+  const short = lines.some((line) => (line.answer === "fail" || line.answer === "pending") && Verification.decides(line))
+  if (reading.passed || short) return lines
   return [...lines, {
     name: RUN,
     source: "driver",

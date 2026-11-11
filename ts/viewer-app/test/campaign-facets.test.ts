@@ -238,6 +238,12 @@ describe("the status and line facets of a run", () => {
     ])
   })
 
+  it("state an unverified call as the lines it could not check, never as one no call was judged in", () => {
+    const f = facets(view, 1, undefined, ALL_FILTERS, NO_SELECTION)
+    expect(f.checks.map((c) => c.key)).toContain("unverified cdr")
+    expect(f.checks.map((c) => c.key).filter((key) => key.startsWith("error"))).toEqual([])
+  })
+
   it("narrow to the calls of a selected status or holding every selected line, a passing call among them", () => {
     const of = (selection: Partial<Selection>) =>
       facets(view, 1, undefined, ALL_FILTERS, { ...NO_SELECTION, ...selection }).matching.map((m) => [m.caseId, m.statuses["lane-x"]])

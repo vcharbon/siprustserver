@@ -254,6 +254,29 @@ describe("Bundle.read", () => {
     expect(Verification.finalStatusOf(waived)).toBe("pass")
   })
 
+  it("states an audit that did not run as a not-checkable rfc-audit line, never a pass", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const unaudited = reading.cases.find((entry) => entry.caseId.endsWith("-unaudited"))!
+    expect(unaudited.verifications).toEqual([
+      { name: "call", source: "interpreter", answer: "pass" },
+      {
+        name: "rfc-audit",
+        source: "rfc audit",
+        answer: "not-checkable",
+        message: "not audited: the lane's binder recorded no wire"
+      }
+    ])
+    expect(Verification.finalStatusOf(unaudited.verifications!)).toBe("unverified")
+  })
+
+  it("leaves a cell whose lane line is still pending ok so far, the rollup not passing it", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const pending = reading.cases.find((entry) => entry.caseId.endsWith("-pending"))!
+    expect(pending.passed).toBe(false)
+    expect(pending.verifications!.map((line) => `${line.name} ${line.answer}`)).toEqual(["call pass", "cleanup pending"])
+    expect(Verification.finalStatusOf(pending.verifications!)).toBe("ok so far")
+  })
+
   it("states a failure the reclassifier restated as passed as a waived line it answers, naming its rules, and passes its own line", async () => {
     const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
     const restated = reading.cases.find((entry) => entry.caseId.endsWith("-restated"))!

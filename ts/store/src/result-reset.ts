@@ -12,7 +12,9 @@
  *
  * {@link Interface.plan} is read-only and lists the pins the reset drops.
  * {@link Interface.execute} refuses, removing nothing, while a job runs, a run
- * or a batch is open, or a cited run it drops has no summary.
+ * or a batch is open, or a cited run it drops has no summary; it holds `runs`
+ * and `batches` exclusively from its check to its emptying, so none opens
+ * between them.
  */
 import * as Context from "effect/Context"
 import * as Data from "effect/Data"
@@ -163,6 +165,7 @@ export const layer = Layer.effect(
       if (misnamed.length > 0) return yield* new Refused({ reasons: [`not a table name: ${misnamed.join(", ")}`] })
       return yield* sql.withTransaction(Effect.gen(function*() {
         yield* sql`SET LOCAL lock_timeout = '5s'`
+        yield* sql`LOCK TABLE runs, batches IN EXCLUSIVE MODE`
         const planned = yield* planIn(named)
         const reasons = [...planned.holders]
         if (planned.unsummarised > 0) {

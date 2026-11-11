@@ -152,9 +152,10 @@ const gateLine = (gate: Gate): Verification.Verification => ({
 /**
  * The batch's verification lines: none where no process stood, else one per
  * gate its end read, then its {@link END_GATE} line where the end says what
- * no gate does — a failure where the managed SUT died or the end read the
- * SUT dirty with no gate failing, not checkable where the end did not run to
- * its end line, a pass where no gate answered at all.
+ * no gate does — a failure where the managed SUT died; else not checkable
+ * where the end did not run to its end line, whatever it said in its place;
+ * else a failure where the end read the SUT dirty with no gate failing; a
+ * pass where no gate answered at all.
  */
 export const linesOf = (
   ended: Pick<Ended<unknown>, "dirty" | "deadHost" | "interrupted" | "judged" | "hosted" | "gates" | "sutDied">
@@ -162,12 +163,14 @@ export const linesOf = (
   if (!ended.hosted) return []
   const gates = ended.gates.map(gateLine)
   const line = { name: END_GATE, source: SOURCE }
-  const unstated = gates.some((gate) => gate.answer === "fail") ? undefined : ended.dirty
-  const failure = ended.sutDied ?? unstated
-  if (failure !== undefined) {
-    return [...gates, { ...line, answer: "fail", message: failure, detail: { seen: failure, side: "sut" } }]
-  }
+  const failed = (failure: string): ReadonlyArray<Verification.Verification> => [
+    ...gates,
+    { ...line, answer: "fail", message: failure, detail: { seen: failure, side: "sut" } }
+  ]
+  if (ended.sutDied !== undefined) return failed(ended.sutDied)
   if (!ended.judged) return [...gates, { ...line, answer: "not-checkable", message: detailOf(ended) ?? NO_END_LINE }]
+  const unstated = gates.some((gate) => gate.answer === "fail") ? undefined : ended.dirty
+  if (unstated !== undefined) return failed(unstated)
   return gates.length > 0 ? gates : [{ ...line, answer: "pass" }]
 }
 

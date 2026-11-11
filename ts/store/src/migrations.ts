@@ -882,7 +882,7 @@ const verifications = Effect.gen(function*() {
 })
 
 /** The key of the migration that holds the verification lines of a cell, a batch and a job. */
-export const VERIFICATIONS = "14_verifications"
+export const VERIFICATIONS = "15_verifications"
 
 /**
  * The migration record, static so `tsx` and a bundler both resolve it: the

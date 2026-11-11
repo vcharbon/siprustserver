@@ -137,6 +137,17 @@ describe("a red cell", () => {
     expect(fs.existsSync(path.join(dir, failed!.dir, ERROR_FILE))).toBe(false)
   })
 
+  it("is not passed where its lane still waits on one of its lines, whatever verdict it left", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const { dir, cell, detail } = await one(replayCell({ case: caseNamed(cases, "pending-line.v3.json") }))
+    const verdict = JSON.parse(fs.readFileSync(path.join(dir, cell.dir, "verdict.json"), "utf8"))
+    expect(verdict.status).toBe("ok")
+    expect(cell.passed).toBe(false)
+    expect(cell.error).toBeUndefined()
+    expect(detail).toContain("still verifying: cleanup pending")
+  })
+
   it("IS crashed where the interpreter refused before writing anything", async () => {
     const cases = runDir("cases")
     dirs.push(cases)

@@ -2,7 +2,8 @@
  * The failures of one campaign run as facets. Every failed check (anchor and
  * field) is a facet and all weigh the same: a call counts under each check it
  * fails, so the counts overlap. A cell no call was judged in is the facet
- * `error <its first line>`. Groups and families stand beside the checks; a
+ * `error <its first line>`, an unverified or ok-so-far one `unverified <lines>`
+ * or `ok so far <lines>`, the lines that leave it so. Groups and families stand beside the checks; a
  * call counts under each of its groups too. Selected checks narrow the calls
  * by AND, selected groups and families each by OR, the three by AND; one
  * selected check is read by the shapes of what was seen (long digit runs and
@@ -126,18 +127,31 @@ export const checkKey = (check: { readonly anchor: string; readonly field: strin
 export const shapeOf = (seen: string | null): string =>
   seen === null ? "(absent)" : seen.replace(/(\d{1,3}(?:\.\d{1,3}){3}):\d+/g, "$1:#").replace(/\d{6,}/g, "#")
 
-/** The failed checks of a result, an error's included as its one pseudo-check. */
-export const failedChecks = (result: CampaignResult): readonly CampaignCheck[] =>
-  result.outcome === "error"
-    ? [{
-      anchor: "error",
-      field: (result.detail ?? "no call judged").split("\n")[0]!,
-      expected: null,
-      seen: result.detail,
-      said: null,
-      side: "error"
-    }]
-    : result.checks
+/** The lines a cell of `status` waits on or could not check, by name: what keeps it short of a verdict. */
+const openLines = (result: CampaignResult, status: "unverified" | "ok so far"): string => {
+  const answer = status === "ok so far" ? "pending" : "not-checkable"
+  const open = (result.lines ?? []).filter((line) => line.answer === answer && !line.informative && !line.waived)
+  return open.length === 0 ? "no line decides the cell" : open.map((line) => line.name).join(", ")
+}
+
+/**
+ * The failed checks of a result, an error's included as its one pseudo-check:
+ * `unverified` or `ok so far` with the lines that leave it so where the cell
+ * ran, `error` with its first line where no call was judged.
+ */
+export const failedChecks = (result: CampaignResult): readonly CampaignCheck[] => {
+  if (result.outcome !== "error") return result.checks
+  const status = result.status
+  const open = status === "unverified" || status === "ok so far"
+  return [{
+    anchor: open ? status : "error",
+    field: open ? openLines(result, status) : (result.detail ?? "no call judged").split("\n")[0]!,
+    expected: null,
+    seen: result.detail,
+    said: null,
+    side: "error"
+  }]
+}
 
 /** The lanes `filters` reads. */
 export const lanesRead = (view: Campaign, filters: Filters): readonly string[] =>

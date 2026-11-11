@@ -15,6 +15,9 @@
  * the same line, so a reader never has to guess whether a cell failed or never
  * ran. A cell that ran its interpreter and did not pass keeps what the
  * interpreter wrote on stderr in `stderr.txt`, whatever the verdict says. A
+ * pivot-replay cell whose lane still waits on one of its verification lines
+ * (`pending` in `verifications.json`: a batch end that never answered) does
+ * not pass: nothing verified it whole. A
  * cell whose document declares its lane BLOCKED is not red either: it leaves
  * a `skipped.json` and never reaches the interpreter.
  *
@@ -24,13 +27,15 @@
  * answers nothing — its fiber is interrupted — so the caller counts it from
  * what it admitted and what landed.
  */
-import { Body, Bundle, Campaign, CellHits, Confrontation, E2e, Flows, Pivot, Tokens } from "@sip/contracts"
+import { Body, Bundle, Campaign, CellHits, Confrontation, E2e, Flows, Pivot, Tokens, Verification } from "@sip/contracts"
 import { Classifier, Confront, FlowsFile, Reclassifier } from "@sip/pipeline"
 import { ReplayCli, runner as toolchainRunner } from "@sip/toolchain"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
+import * as Option from "effect/Option"
 import * as Path from "effect/Path"
+import * as Schema from "effect/Schema"
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner"
 import { LanePresets } from "./lanes.js"
 import { readRecordings } from "./recordings.js"
@@ -218,6 +223,16 @@ const guarded = <R>(
  * so the run-spec is written under `specs/` and nothing else is put there before
  * the run.
  */
+const decodeLines = Schema.decodeUnknownOption(Schema.Array(Verification.Verification))
+
+/** The lines deciding a cell that its lane still waits on, read off `file`; none where the file is absent or unreadable. */
+const pendingLines = Effect.fn("Driver.pendingLines")(function*(file: string) {
+  const fs = yield* FileSystem.FileSystem
+  const text = yield* fs.readFileString(file).pipe(Effect.orElseSucceed(() => "null"))
+  const json = yield* Effect.try(() => JSON.parse(text) as unknown).pipe(Effect.orElseSucceed(() => null))
+  return Verification.pending(Option.getOrElse(decodeLines(json), () => []))
+})
+
 const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   cell: Campaign.PivotReplayCell,
   context: CellContext,
@@ -285,7 +300,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   // whatever verdict it left was written before the unwind, so it cannot
   // answer for what came after.
   const panicked = report.outcome._tag === "panicked"
-  const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0
+  const pending = (yield* pendingLines(path.join(absolute, Verification.FILE))).map((line) => line.name)
+  const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0 && pending.length === 0
 
   const caseId = Campaign.cellCaseId(cell)
   const classification = yield* confrontCell(cell, context, absolute, pivot, verdict, caseId)
@@ -311,7 +327,9 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
     ? `replay exited ${report.exitCode} (panicked):\n${report.stderr}`
     : final.passed === gated
       ? gated === structural
-        ? rfcGating.length > 0
+        ? pending.length > 0
+          ? `still verifying: ${pending.join(", ")} pending (see ${Verification.FILE})`
+          : rfcGating.length > 0
           ? `the RFC audit failed the cell (see ${RFC_FILE}):\n` +
             rfcGating.map((f) => `  ${f.rule} [${f.lane}]: ${f.detail}`).join("\n")
           : report.stderr

@@ -128,6 +128,13 @@ JSON
     ;;
 esac
 
+# A case whose lane still waits on one of its lines leaves it pending.
+case "$case_path" in
+  *pending-line*)
+    printf '[{"name": "call", "source": "interpreter", "answer": "pass"}, {"name": "cleanup", "source": "lane gate", "answer": "pending"}]\n' > "$out_dir/verifications.json"
+    ;;
+esac
+
 # A case expecting a body leaves the reception the confrontation reads it off:
 # one in-dialog INFO on leg B, attributed to step s9, carrying another document
 # than the one the case stores — or, for a session description, another codec

@@ -182,6 +182,10 @@ const findingsOf = (stored: Record<string, unknown> | null): ReadonlyArray<Bundl
 /** Whether `rfc.json` states an audit of the cell. */
 const auditedOf = (rfc: Record<string, unknown> | null): boolean => rfc?.["status"] === "audited"
 
+/** Why `rfc.json` states the cell not audited; null where it audited it or is absent. */
+const unauditedOf = (rfc: Record<string, unknown> | null): string | null =>
+  rfc?.["status"] === "not-audited" ? String(rfc["reason"] ?? "no reason stated") : null
+
 /** The confrontation counts `classification.json` states; none where the cell wrote no counts. */
 const confrontationOf = (classification: Record<string, unknown> | null): Confrontation | undefined => {
   const unknown = classification?.["unknown"]
@@ -298,6 +302,7 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
             passed,
             verdict: decoded,
             audit: auditedOf(rfc) ? findings : null,
+            unaudited: unauditedOf(rfc),
             charged: restated === null ? charged : findings.filter((finding) => finding.gating),
             answered: answeredOf(yield* readJson(path.join(dir, VERIFICATIONS_FILE))),
             restated
