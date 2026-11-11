@@ -46,6 +46,19 @@ impl<'m> Parties<'m> {
         self.ua.get(call_id).and_then(|named| named.get(ep)).copied().unwrap_or(ep)
     }
 
+    /// The endpoints the user agent of `ep` holds on `call_id`, `ep` included.
+    pub fn held_on<'s>(&self, call_id: &str, ep: &'s str) -> Vec<&'s str>
+    where
+        'm: 's,
+    {
+        let name = self.agent(call_id, ep);
+        let named = self.ua.get(call_id).into_iter().flatten();
+        let mut held: Vec<&'s str> =
+            named.filter(|(_, n)| **n == name).map(|(ep, _)| *ep).collect();
+        held.push(ep);
+        held
+    }
+
     /// The user agent that sent `msg`, as [`Parties::agent`] names it.
     pub fn sent_by(&self, msg: &'m Msg) -> &'m str {
         self.agent(&msg.call_id, &msg.src)

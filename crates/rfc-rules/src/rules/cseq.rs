@@ -12,7 +12,11 @@
 //!     INVITE on its stream used.
 //!
 //! **A stream is one `(taker, Call-ID, From-tag)`** — one originating UA's
-//! request flow in one direction, as one endpoint received it. Within a stream
+//! request flow in one direction, as one user agent received it: the taker is
+//! every socket its transactions tie on the call
+//! ([`Parties`](super::correlation::Parties)), so a UAS that
+//! takes requests at two sockets holds one CSeq space. A finding names the
+//! socket the judged request reached. Within a stream
 //! each **dialog** is tracked by its To tag (`""` for the dialog-creating
 //! request that has none yet): forking materialises several dialogs that share
 //! Call-ID + From-tag but diverge by To tag, and each owns an independent CSeq
@@ -110,7 +114,11 @@ use sip_message::sniff::{self, OriginVia};
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
+use super::correlation::Parties;
 use super::Obligation;
+use records::{Ack, Request, Response};
+
+mod records;
 
 crate::registry::rules! {
     /// RFC 3261 §12.2.1.1: within a dialog a UAC increments the CSeq by exactly one per new request
@@ -141,7 +149,7 @@ impl Obligation for CseqInDialogOrder {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
-        for (key, stream) in &seen.streams {
+        for stream in seen.streams.values() {
             // Every dialog-CREATING request (empty To tag) on this stream: one
             // INVITE for a plain call, both attempts under an auth retry.
             let creating: Vec<u32> = stream
@@ -155,7 +163,7 @@ impl Obligation for CseqInDialogOrder {
                     out.push(Finding {
                         rule: RuleId::CseqInDialogOrder,
                         emitter: req.emitter.to_string(),
-                        taker: key.taker.to_string(),
+                        taker: req.taker.to_string(),
                         cseq: req.cseq,
                         relayed: seen.relayed(req),
                         anchor: req.msg,
@@ -253,7 +261,7 @@ impl Obligation for AckCseqMatchesInvite {
                 let head = |decision| Finding {
                     rule: RuleId::AckCseqMatchesInvite,
                     emitter: ack.emitter.to_string(),
-                    taker: key.taker.to_string(),
+                    taker: ack.taker.to_string(),
                     cseq: ack.cseq,
                     relayed: false,
                     anchor: ack.msg,
@@ -284,12 +292,12 @@ impl Obligation for AckCseqMatchesInvite {
     }
 }
 
-/// One request stream as ONE endpoint TOOK it. Spelled out as a struct so the
-/// three parts can never swap places.
+/// One request stream as ONE user agent TOOK it. Spelled out as a struct so
+/// the three parts can never swap places.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct StreamKey<'a> {
-    /// The endpoint the requests were addressed to — the vantage a consumer
-    /// reads the far UAC's conduct from.
+    /// The user agent the requests were addressed to ([`Parties::took`]) — the
+    /// vantage a consumer reads the far UAC's conduct from.
     taker: &'a str,
     call_id: &'a str,
     /// The From tag: one originating UA's flow in ONE direction, so the two
@@ -413,87 +421,12 @@ impl<'a> Dialog<'a> {
     }
 }
 
-/// One new in-dialog request as the taker accounted it.
-#[derive(Debug)]
-struct Request<'a> {
-    msg: usize,
-    hop: usize,
-    ts_us: u64,
-    cseq: u32,
-    /// The request-line method, as the wire spelled it.
-    method: &'a str,
-    /// The top-Via branch, `""` where the vantage carried none.
-    branch: &'a str,
-    emitter: &'a str,
-    from_tag: &'a str,
-    /// The request's bottom Via, where the vantage carried its head: the hop
-    /// that originated it.
-    origin: Option<OriginVia>,
-    /// The request as a forwarder keeps it, where a bottom Via names it.
-    forwarded: Option<ForwardedKey<'a>>,
-}
-
-impl Request<'_> {
-    /// Whether `copy`, a later request on this one's number, is
-    /// its originator's own reuse rather than this request by another path or
-    /// another originator's — read off the two bottom Vias (see the module
-    /// doc). Without both Vias, or a bottom branch, the reuse reading stands.
-    fn reused_by(&self, copy: &Request<'_>) -> bool {
-        let (Some(first), Some(again)) = (&self.origin, &copy.origin) else { return true };
-        if !first.sent_by.as_borrowed().same_host(&again.sent_by.as_borrowed()) {
-            return false;
-        }
-        let same = first.branch.as_deref().zip(again.branch.as_deref());
-        first.branch.is_none() || !same.is_some_and(|(a, b)| same_branch(a, b))
-    }
-
-    fn not_contiguous(&self, prior_cseq: u32, to_tag: &str) -> Evidence {
-        Evidence::CseqNotContiguous {
-            skip_msg: self.msg,
-            skip_hop: self.hop,
-            skip_ts_us: self.ts_us,
-            cseq: self.cseq,
-            prior_cseq,
-            method: self.method.to_string(),
-            from_tag: self.from_tag.to_string(),
-            to_tag: to_tag.to_string(),
-        }
-    }
-}
-
-/// One ACK the stream carried, with the INVITE numbers known when it arrived.
-#[derive(Debug)]
-struct Ack<'a> {
-    msg: usize,
-    hop: usize,
-    ts_us: u64,
-    cseq: u32,
-    emitter: &'a str,
-    /// `None` where the stream had carried no INVITE yet — nothing to judge
-    /// the ACK against.
-    known: Option<Vec<u32>>,
-}
-
-/// One response the view carried.
-#[derive(Debug)]
-struct Response<'a> {
-    msg: usize,
-    hop: usize,
-    ts_us: u64,
-    status: u16,
-    cseq: u32,
-    /// The CSeq header's method, as the wire spelled it.
-    method: &'a str,
-    branch: Option<&'a str>,
-    emitter: &'a str,
-    taker: &'a str,
-}
-
 impl<'a> Reading<'a> {
     fn of(msgs: &'a [Msg]) -> Self {
+        let parties = Parties::of(msgs);
         let mut seen = Reading::default();
         for (mi, msg) in msgs.iter().enumerate() {
-            seen.absorb(mi, msg);
+            seen.absorb(&parties, mi, msg);
         }
         seen
     }
@@ -523,7 +456,7 @@ impl<'a> Reading<'a> {
     /// Absorb one message. A repeat is not skipped here: the §12.2.1.1 fold is
     /// the rule's own and strictly stronger (see the module doc), and the two
     /// transaction rules judge every copy the taker took, as a UAC does.
-    fn absorb(&mut self, mi: usize, msg: &'a Msg) {
+    fn absorb(&mut self, parties: &Parties<'a>, mi: usize, msg: &'a Msg) {
         let branch = msg.via_branch.as_deref().filter(|b| !b.is_empty());
         let method = match &msg.kind {
             Kind::Response { status } => {
@@ -560,7 +493,7 @@ impl<'a> Reading<'a> {
         let Some(from_tag) = msg.from_tag.as_deref() else { return };
         let stream = self
             .streams
-            .entry(StreamKey { taker: msg.dst.as_str(), call_id: msg.call_id.as_str(), from_tag })
+            .entry(StreamKey { taker: parties.took(msg), call_id: msg.call_id.as_str(), from_tag })
             .or_default();
 
         // §13.2.2.4 accounting runs on EVERY copy, before the §12.2.1.1 fold:
@@ -574,6 +507,7 @@ impl<'a> Reading<'a> {
                 ts_us: msg.at_us,
                 cseq: msg.cseq,
                 emitter: msg.src.as_str(),
+                taker: msg.dst.as_str(),
                 known: (!stream.invite_cseqs.is_empty())
                     .then(|| stream.invite_cseqs.iter().copied().collect()),
             });
@@ -601,6 +535,7 @@ impl<'a> Reading<'a> {
             method,
             branch: branch.unwrap_or_default(),
             emitter: msg.src.as_str(),
+            taker: msg.dst.as_str(),
             from_tag,
             origin,
             forwarded,

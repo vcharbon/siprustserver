@@ -48,8 +48,8 @@
 //! - the charged endpoint must have OPENED that INVITE rather than relayed
 //!   it, and must not have passed the 2xx on — on its own call, or as a
 //!   B2BUA onto another call whose caller never ACKed it, where its own ACK
-//!   waits on that caller's (its legs tied by the sockets it holds on both,
-//!   [`Parties::joined`](super::correlation::Parties::joined));
+//!   waits on that caller's (its legs tied by the sockets its transactions
+//!   tie on each call, [`Parties`](super::correlation::Parties));
 //! - an ACK the UAC's user agent sent on the call with no To tag, from any of
 //!   its sockets, makes every obligation of that agent on the call ambiguous —
 //!   it may be the one;

@@ -156,9 +156,10 @@ pub(super) struct Prack<'a> {
     pub(super) ts_us: u64,
     pub(super) src: &'a str,
     pub(super) dst: &'a str,
-    /// The user agents of `src` and `dst` on the call
+    /// The user agent of `src` on the call
     /// ([`Parties`](crate::rules::correlation::Parties)).
     pub(super) src_agent: &'a str,
+    /// The user agent of `dst` on the call.
     pub(super) dst_agent: &'a str,
     /// The call it rides — a view carries many.
     pub(super) call_id: &'a str,

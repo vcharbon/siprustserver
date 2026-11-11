@@ -59,9 +59,9 @@ pub(super) struct Reading<'a> {
     /// undecidable. The agent is every socket its transactions tie on the call
     /// ([`Parties`]): the ACK may leave from another socket than the INVITE.
     pub(super) untagged_ack: BTreeSet<(&'a str, &'a str)>,
-    /// The sockets each user agent holds across the view's calls
-    /// ([`Parties::joined`]): what ties a B2BUA's two legs.
-    pub(super) held: Vec<BTreeSet<String>>,
+    /// Who acts as one user agent on each call: what ties a B2BUA's sockets
+    /// on each of its legs.
+    pub(super) parties: Parties<'a>,
     /// Every BYE the view carried, in observation order — discharge for the
     /// UAS rule, corroboration for the UAC rule.
     pub(super) byes: Vec<Bye<'a>>,
@@ -107,34 +107,38 @@ impl<'a> Reading<'a> {
     /// took at `taken_us` on `call`, where it is a B2BUA relaying one: the call
     /// whose INVITE it took LAST before dialling `call` is the one it relayed,
     /// and the first 2xx it emitted there from `taken_us` on is the answer
-    /// passed on. The agent holds every socket [`Reading::held`] ties to
-    /// `sockets`, on any call.
+    /// passed on. The B2BUA is every socket its transactions tie to
+    /// `sockets` on `call`, and on the relayed call every socket tied there to
+    /// one of those ([`Parties`]): a tie on a third call joins nothing.
     pub(super) fn relayed_upstream(
         &self,
         sockets: [&'a str; 2],
         call: &'a str,
         taken_us: u64,
     ) -> Option<ObligationKey<'a>> {
-        let mut held: BTreeSet<&str> = sockets.into_iter().collect();
-        for set in self.held.iter().filter(|set| sockets.iter().any(|ep| set.contains(*ep))) {
-            held.extend(set.iter().map(String::as_str));
-        }
-        let sockets = held;
+        let held: BTreeSet<&str> =
+            sockets.into_iter().flat_map(|ep| self.parties.held_on(call, ep)).collect();
         let dialled_us = self
             .invite
             .iter()
-            .filter(|((src, c, _), _)| sockets.contains(src) && *c == call)
+            .filter(|((src, c, _), _)| held.contains(src) && *c == call)
             .map(|(_, at)| *at)
             .min()?;
-        let (upstream, _) = self
+        let ((b2bua_at, upstream), _) = self
             .invite_taken
             .iter()
-            .filter(|((dst, c), at)| sockets.contains(dst) && *c != call && **at < dialled_us)
+            .filter(|((dst, c), at)| {
+                *c != call
+                    && **at < dialled_us
+                    && held.iter().any(|ep| self.parties.same(c, dst, ep))
+            })
             .max_by_key(|(_, at)| **at)?;
         self.emitted
             .iter()
             .filter(|(k, sent)| {
-                sockets.contains(&k.party) && k.call == upstream.1 && sent.ts_us >= taken_us
+                k.call == *upstream
+                    && self.parties.same(upstream, k.party, b2bua_at)
+                    && sent.ts_us >= taken_us
             })
             .min_by_key(|(_, sent)| sent.ts_us)
             .map(|(k, _)| *k)
@@ -143,10 +147,11 @@ impl<'a> Reading<'a> {
     pub(super) fn of(msgs: &'a [Msg]) -> Self {
         let sides = Sides::of(msgs);
         let parties = Parties::of(msgs);
-        let mut seen = Reading { held: parties.joined(), ..Reading::default() };
+        let mut seen = Reading::default();
         for (mi, msg) in msgs.iter().enumerate() {
             seen.absorb(&sides, &parties, mi, msg);
         }
+        seen.parties = parties;
         seen
     }
 

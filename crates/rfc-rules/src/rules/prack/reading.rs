@@ -21,51 +21,51 @@ type PrackKey<'a> = (&'a str, &'a str, &'a str, u32, u64);
 
 /// What one view's messages say about the 100rel obligations on it.
 ///
-/// **A party is its user agent** ([`Parties`]): every socket its transactions
-/// tie on the call, so a party that sends from one socket and listens on
-/// another keeps one ledger. "Endpoint" below names that agent; the server
+/// **A party is its user agent on the call** ([`Parties`]): every socket its
+/// transactions tie on that Call-ID, so a party that sends from one socket and
+/// listens on another keeps one ledger, and each ledger is per call. The server
 /// transactions (`served`, `answers`) stay keyed by the socket the request
 /// reached (`Sides`), and every row keeps the real sockets a finding names.
 #[derive(Debug, Default)]
 pub(super) struct Reading<'a> {
     /// Who acts as one user agent on each call.
     pub(super) parties: Parties<'a>,
-    /// (endpoint, INVITE CSeq number) → the INVITE that endpoint SENT.
-    pub(super) invite: BTreeMap<(&'a str, u32), Invite>,
-    /// (endpoint, Call-ID, INVITE CSeq number) → when that endpoint SENT the
+    /// (user agent, Call-ID, INVITE CSeq number) → the INVITE that agent SENT.
+    pub(super) invite: BTreeMap<(&'a str, &'a str, u32), Invite>,
+    /// (user agent, Call-ID, INVITE CSeq number) → when that agent SENT the
     /// INVITE: the per-call reading the obligation's hop test takes.
     pub(super) opened: BTreeMap<(&'a str, &'a str, u32), u64>,
     /// (Call-ID, From tag, INVITE CSeq number) → the first time that INVITE
-    /// crossed any vantage of the view. An endpoint whose own emission is not
+    /// crossed any vantage of the view. An agent whose own emission is not
     /// that first one relayed an INVITE somebody else opened. The From tag
     /// keeps the two directions of one dialog apart: each side numbers its own
     /// CSeq space (RFC 3261 §12.2.1.1).
     pub(super) invite_first_us: BTreeMap<(&'a str, &'a str, u32), u64>,
     /// The reliable provisionals taken, one entry per obligation.
     pub(super) owed: BTreeMap<ObligationKey<'a>, Reliable<'a>>,
-    /// (endpoint, To tag) → the reliable provisionals that endpoint SENT on
-    /// that early dialog, in emission order.
-    pub(super) emitted: BTreeMap<(&'a str, &'a str), Vec<Reliable<'a>>>,
-    /// (endpoint, To tag) → the reliable provisionals that endpoint TOOK on
-    /// that early dialog, in arrival order.
-    pub(super) taken: BTreeMap<(&'a str, &'a str), Vec<Reliable<'a>>>,
-    /// (INVITE CSeq number, To tag, RSeq) → when some endpoint on this view
+    /// (user agent, Call-ID, To tag) → the reliable provisionals that agent
+    /// SENT on that early dialog, in emission order.
+    pub(super) emitted: BTreeMap<(&'a str, &'a str, &'a str), Vec<Reliable<'a>>>,
+    /// (user agent, Call-ID, To tag) → the reliable provisionals that agent
+    /// TOOK on that early dialog, in arrival order.
+    pub(super) taken: BTreeMap<(&'a str, &'a str, &'a str), Vec<Reliable<'a>>>,
+    /// (INVITE CSeq number, To tag, RSeq) → when some party on this view
     /// first PRACKed it.
     pub(super) acked_at: BTreeMap<(u32, &'a str, u64), u64>,
     /// Every PRACK the view carried, in observation order.
     pub(super) pracks: Vec<Prack<'a>>,
-    /// (sender, INVITE CSeq number, To tag, RSeq) → the LAST time that
-    /// endpoint SENT that provisional. A taker that sent it after taking it
-    /// passed it on; a copy it only received again is the responder's
-    /// retransmission, which forwards nothing.
-    pub(super) propagated: BTreeMap<(&'a str, u32, &'a str, u64), u64>,
-    /// A PRACK this endpoint sent whose `RAck` will not parse: every
-    /// obligation of that endpoint on this view becomes undecidable.
-    pub(super) unreadable_prack: BTreeSet<&'a str>,
-    /// (UAC, Call-ID, INVITE CSeq number) → when the INVITE's first final
-    /// reached the UAC. A CANCEL ends nothing (RFC 3262 §4).
+    /// (sender's user agent, Call-ID, INVITE CSeq number, To tag, RSeq) → the
+    /// LAST time that agent SENT that provisional. A taker that sent it after
+    /// taking it passed it on; a copy it only received again is the
+    /// responder's retransmission, which forwards nothing.
+    pub(super) propagated: BTreeMap<(&'a str, &'a str, u32, &'a str, u64), u64>,
+    /// (user agent, Call-ID) that sent a PRACK whose `RAck` will not parse:
+    /// every obligation of that agent on that call becomes undecidable.
+    pub(super) unreadable_prack: BTreeSet<(&'a str, &'a str)>,
+    /// (UAC's user agent, Call-ID, INVITE CSeq number) → when the INVITE's
+    /// first final reached the UAC. A CANCEL ends nothing (RFC 3262 §4).
     pub(super) final_at: BTreeMap<(&'a str, &'a str, u32), u64>,
-    /// (UAC, Call-ID, dialog's To tag) → when the responder's BYE on that
+    /// (UAC's user agent, Call-ID, dialog's To tag) → when the responder's BYE on that
     /// dialog first reached the UAC: before the INVITE's final, it ended the
     /// early dialog, and nothing rides it after (RFC 3261 §15.1.2).
     pub(super) byed_at: BTreeMap<(&'a str, &'a str, &'a str), u64>,
@@ -80,17 +80,17 @@ pub(super) struct Reading<'a> {
     /// (UAS, call, branch) → the responses that endpoint SENT on the
     /// transaction, in emission order.
     pub(super) answers: BTreeMap<TxnKey<'a>, Vec<Answer<'a>>>,
-    /// (endpoint, call) → every `RSeq` that endpoint TOOK on a non-100
+    /// (user agent, call) → every `RSeq` that agent TOOK on a non-100
     /// provisional, reliable or not: what a PRACK arriving at it can name.
     pub(super) rseqs_taken: BTreeMap<(&'a str, &'a str), BTreeSet<u64>>,
-    /// (endpoint, call) → the `100 Trying`s that endpoint took carrying BOTH
+    /// (user agent, call) → the `100 Trying`s that agent took carrying BOTH
     /// `Require: 100rel` and an `RSeq` — the 100rel §4 has a UAC ignore.
     pub(super) trying_100rel: BTreeMap<(&'a str, &'a str), Vec<Trying<'a>>>,
-    /// (taker, call, early dialog, INVITE CSeq number, `RSeq`) → when that
-    /// endpoint FIRST took a PRACK naming it. The To tag keeps forks apart:
+    /// (taker's user agent, call, early dialog, INVITE CSeq number, `RSeq`) →
+    /// when that agent FIRST took a PRACK naming it. The To tag keeps forks apart:
     /// each numbers its own `RSeq`s.
     pracked_to: BTreeMap<PrackKey<'a>, u64>,
-    /// The same, keyed by the PRACK's sender: the PRACK goes to the early
+    /// The same, keyed by the PRACK sender's user agent: the PRACK goes to the early
     /// dialog's remote target, the UAS's Contact, which need not be the
     /// address the provisional came from (RFC 3262 §4).
     pracked_by: BTreeMap<PrackKey<'a>, u64>,
@@ -166,7 +166,7 @@ impl<'a> Reading<'a> {
             *first = (*first).min(msg.at_us);
             self.opened.entry((sender, call, msg.cseq)).or_insert(msg.at_us);
             self.invite
-                .entry((sender, msg.cseq))
+                .entry((sender, call, msg.cseq))
                 .or_insert(Invite { offers_100rel: head.is_some_and(offers_100rel) });
         } else if msg.is_request("BYE") {
             let dialog = msg.from_tag.as_deref().unwrap_or_default();
@@ -180,7 +180,7 @@ impl<'a> Reading<'a> {
                     self.acked_at.entry((seq, dialog, rseq)).or_insert(msg.at_us);
                 }
                 None => {
-                    self.unreadable_prack.insert(sender);
+                    self.unreadable_prack.insert((sender, msg.call_id.as_str()));
                 }
             }
             self.pracks.push(Prack {
@@ -211,7 +211,9 @@ impl<'a> Reading<'a> {
             }
             let Some(rseq) = sniff::rseq_of(head) else { return };
             let dialog = msg.to_tag.as_deref().unwrap_or_default();
-            let last = self.propagated.entry((sender, msg.cseq, dialog, rseq)).or_insert(msg.at_us);
+            let call = msg.call_id.as_str();
+            let last =
+                self.propagated.entry((sender, call, msg.cseq, dialog, rseq)).or_insert(msg.at_us);
             *last = (*last).max(msg.at_us);
             let common = Reliable {
                 msg: mi,
@@ -232,8 +234,8 @@ impl<'a> Reading<'a> {
                     rseq,
                 })
                 .or_insert(common);
-            self.taken.entry((taker, dialog)).or_default().push(common);
-            self.emitted.entry((sender, dialog)).or_default().push(Reliable {
+            self.taken.entry((taker, call, dialog)).or_default().push(common);
+            self.emitted.entry((sender, call, dialog)).or_default().push(Reliable {
                 peer: msg.dst.as_str(),
                 own: msg.src.as_str(),
                 ..common
@@ -373,24 +375,24 @@ impl<'a> Reading<'a> {
         *at = (*at).min(ts_us);
     }
 
-    /// The INVITE CSeq numbers the user agent `agent` opened on this view.
-    pub(super) fn invites_opened_by(&self, agent: &str) -> Vec<u32> {
-        self.invite.keys().filter(|(ep, _)| *ep == agent).map(|(_, cseq)| *cseq).collect()
+    /// The INVITE CSeq numbers the user agent `agent` opened on `call`.
+    pub(super) fn invites_opened_by(&self, agent: &str, call: &str) -> Vec<u32> {
+        let mine = |(ep, c, _): &&(&str, &str, u32)| *ep == agent && *c == call;
+        self.invite.keys().filter(mine).map(|(_, _, cseq)| *cseq).collect()
     }
 
     pub(super) fn pracked_before(&self, r: &Reliable<'a>, dialog: &'a str, ts_us: u64) -> bool {
         self.acked_at.get(&(r.cseq, dialog, r.rseq)).is_some_and(|at| *at < ts_us)
     }
 
-    /// The endpoint passed this provisional on rather than originating it: the
-    /// same `RSeq` reached it earlier on this view.
+    /// The user agent `agent` passed this provisional on rather than
+    /// originating it: the same `RSeq` reached it earlier on `call`.
     pub(super) fn relayed_provisional(
         &self,
-        ep: &'a str,
-        dialog: &'a str,
+        (agent, call, dialog): (&'a str, &'a str, &'a str),
         r: &Reliable<'a>,
     ) -> bool {
-        self.taken.get(&(ep, dialog)).is_some_and(|list| {
+        self.taken.get(&(agent, call, dialog)).is_some_and(|list| {
             list.iter().any(|q| q.cseq == r.cseq && q.rseq == r.rseq && q.ts_us < r.ts_us)
         })
     }

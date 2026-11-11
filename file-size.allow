@@ -66,8 +66,8 @@ crates/pivot-schema/src/lint/flow_rules.rs 788
 crates/pivot-schema/src/lint/references.rs 505
 crates/pivot-schema/tests/it/lint.rs 2890
 crates/repl-net-testkit/src/simulated.rs 955
-crates/rfc-rules/src/rules/cseq.rs 626
-crates/rfc-rules/src/rules/cseq/tests.rs 874
+crates/rfc-rules/src/rules/cseq.rs 561
+crates/rfc-rules/src/rules/cseq/tests.rs 815
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1659
 crates/scenario-harness/src/actor/runner.rs 555

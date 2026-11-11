@@ -83,7 +83,7 @@ impl Obligation for UnackedReliableProvisional {
             }
             let arrivals: Vec<&Reliable<'_>> = seen
                 .taken
-                .get(&(uac, dialog))
+                .get(&(uac, call, dialog))
                 .map(|list| list.iter().filter(|r| r.cseq == cseq && r.ts_us <= p.ts_us).collect())
                 .unwrap_or_default();
             if rseq_order(&arrivals).1.contains(&rseq) {
@@ -99,15 +99,17 @@ impl Obligation for UnackedReliableProvisional {
                 .opened
                 .get(&(uac, call, cseq))
                 .is_some_and(|at| seen.invite_first_us.get(&(call, from_tag, cseq)) == Some(at));
-            let forwarded_it =
-                seen.propagated.get(&(uac, cseq, dialog, rseq)).is_some_and(|last| p.ts_us < *last);
+            let forwarded_it = seen
+                .propagated
+                .get(&(uac, call, cseq, dialog, rseq))
+                .is_some_and(|last| p.ts_us < *last);
             let undecidable = if !opened_it {
                 Some("the charged endpoint did not open the INVITE (a hop is not a UAC)")
             } else if forwarded_it {
                 Some("the endpoint passed the provisional on (a hop is not a UAC)")
-            } else if !seen.invite.get(&(uac, cseq)).is_some_and(|i| i.offers_100rel) {
+            } else if !seen.invite.get(&(uac, call, cseq)).is_some_and(|i| i.offers_100rel) {
                 Some("the INVITE did not offer 100rel — the negotiation was never witnessed")
-            } else if seen.unreadable_prack.contains(uac) {
+            } else if seen.unreadable_prack.contains(&(uac, call)) {
                 Some("a PRACK the emitter sent has an unreadable RAck — it may be the one")
             } else if final_us.is_none() && !(wire.obs.closed || window_us >= PRACK_WINDOW_US) {
                 Some("the observation stopped inside the window — truncation, not absence")
@@ -139,7 +141,7 @@ impl Obligation for UnackedReliableProvisional {
 /// naming an INVITE its sender never opened matches no reliable transaction,
 /// so it settles nothing and the provisional keeps retransmitting.
 ///
-/// Charges the PRACK's SENDER. A sender that opened no INVITE on this view is
+/// Charges the PRACK's SENDER. A sender that opened no INVITE on its call is
 /// undecidable, not offending — the vantage has nothing to correlate against.
 pub struct RackWithoutKnownInvite;
 
@@ -148,7 +150,7 @@ impl Obligation for RackWithoutKnownInvite {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for p in &seen.pracks {
-            let known = seen.invites_opened_by(p.src_agent);
+            let known = seen.invites_opened_by(p.src_agent, p.call_id);
             let head = |decision| Finding {
                 rule: RuleId::RackWithoutKnownInvite,
                 emitter: p.src.to_string(),
@@ -164,7 +166,7 @@ impl Obligation for RackWithoutKnownInvite {
             };
             if known.is_empty() {
                 out.push(head(Decision::Undecidable(
-                    "the emitter opened no INVITE on this view — nothing to correlate",
+                    "the emitter opened no INVITE on this call — nothing to correlate",
                 )));
             } else if known.contains(&cseq) {
                 out.push(head(Decision::Compliant));
@@ -212,7 +214,7 @@ impl Obligation for NoPrackOfOutOfOrderRseq {
             };
             let arrivals: Vec<&Reliable<'_>> = seen
                 .taken
-                .get(&(p.src_agent, p.dialog))
+                .get(&(p.src_agent, p.call_id, p.dialog))
                 .map(|list| list.iter().filter(|r| r.ts_us <= p.ts_us).collect())
                 .unwrap_or_default();
             if !arrivals.iter().any(|r| r.rseq == rseq) {
