@@ -14,7 +14,7 @@
 //! **A stream is one `(taker, Call-ID, From-tag)`** — one originating UA's
 //! request flow in one direction, as one user agent received it: the taker is
 //! every socket its transactions tie on the call
-//! ([`Parties`](super::correlation::Parties)), so a UAS that
+//! ([`Parties`]), so a UAS that
 //! takes requests at two sockets holds one CSeq space. A finding names the
 //! socket the judged request reached. Within a stream
 //! each **dialog** is tracked by its To tag (`""` for the dialog-creating
