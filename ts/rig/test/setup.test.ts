@@ -169,7 +169,6 @@ describe("a job's setup", () => {
         })
       )
     const exit = await exitOf(Setup.around(plan(rig, root, ["first", "second"]), locking, Effect.succeed("the job ran")))
-    expect(Exit.isFailure(exit) && String(exit.cause)).toContain("second: inject not run: its directory")
     expect(traceOf(root)).toEqual(["inject first", "heal first"])
     expect(events.filter((event) => event.operation === "second").map((event) => event.phase)).toEqual([
       "inject",
@@ -185,6 +184,7 @@ describe("a job's setup", () => {
       "healed first",
       "recovered first"
     ])
+    expect(Exit.isFailure(exit) && String(exit.cause)).toContain("second: inject not run: its directory")
   })
 
   it("tells a watching sink of a lab left changed by a job that was interrupted", async () => {
