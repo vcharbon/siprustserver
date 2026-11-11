@@ -4,7 +4,9 @@
  * cells run on what it stood, the end gate reads before the collectors close
  * and both are given back last; a dead process takes no gate and leaves the
  * batch unjudged; an end gate that wrote no end line leaves it unjudged, its
- * row saying so; a gate's leak and a dead SUT are both said; a lane that
+ * row saying so; a gate's leak and a dead SUT are both said; each gate the
+ * end read is a line of the batch, its end's own line beside them only where
+ * it says what no gate does; a lane that
  * stands nothing still brackets its cells; a batch that fails still closes
  * its row; a batch filed under no owner writes no row.
  *
@@ -17,7 +19,7 @@ import { SqlClient } from "effect/unstable/sql/SqlClient"
 import * as Layer from "effect/Layer"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { LaneHosting } from "../../src/deployment/index.js"
-import type { BatchHost, SutHandle } from "../../src/replay/batch-protocol.js"
+import type { BatchHost, Gate, SutHandle } from "../../src/replay/batch-protocol.js"
 import * as LaneBatch from "../../src/replay/lane-batch.js"
 
 const SCRATCH = await scratch("corpus_lane_batch_test")
@@ -30,6 +32,7 @@ let hostDied: string | undefined
 let gateRead: string | undefined
 let hostJudged = true
 let sutDied: string | undefined
+let gatesRead: ReadonlyArray<Gate> = []
 
 const host: BatchHost = {
   run: () => Effect.die("unused"),
@@ -39,6 +42,7 @@ const host: BatchHost = {
     return gateRead
   }),
   contexts: () => undefined,
+  gates: () => gatesRead,
   kill: Effect.sync(() => void events.push("killed")),
   judged: () => hostJudged
 }
@@ -94,10 +98,19 @@ const collect = Effect.sync(() => {
 const stand: LaneBatch.Stand = { under: "/tmp/unused", memoryMax: "1G", cells: 2, provisioned: { routing: "x" }, sutVariables: { A: "1" } }
 
 /** The lane's batch ends as `said`, everything else clean. */
-const endingAs = (said: { readonly gate?: string; readonly judged?: boolean; readonly sut?: string; readonly died?: string }) => {
+const endingAs = (
+  said: {
+    readonly gate?: string
+    readonly gates?: ReadonlyArray<Gate>
+    readonly judged?: boolean
+    readonly sut?: string
+    readonly died?: string
+  }
+) => {
   events = []
   hostDied = said.died
   gateRead = said.gate
+  gatesRead = said.gates ?? []
   hostJudged = said.judged ?? true
   sutDied = said.sut
 }
@@ -184,20 +197,51 @@ describe.skipIf(!served)("one batch on a lane", () => {
           SELECT name, answer FROM verifications WHERE scope = 'batch' AND batch_id = ${row!.id} ORDER BY ordinal
         `.pipe(Effect.map((lines) => lines.map((line) => `${line.name} ${line.answer}`)))
       })
+    const leak = "the SUT never reaped"
+    const read: ReadonlyArray<Gate> = [
+      { name: "reap", answer: "fail", message: leak },
+      { name: "contexts", answer: "pass" },
+      { name: "limiter-drain", answer: "pass" }
+    ]
     const lines = await withStore(Effect.all([
       endOn(STANDS, {}),
       endOn(STANDS, { gate: "the SUT still held a call" }),
       endOn(STANDS, { sut: "the SUT exited 137" }),
       endOn(STANDS, { judged: false }),
-      endOn(PAUSED, {})
+      endOn(PAUSED, {}),
+      endOn(STANDS, { gate: leak, gates: read }),
+      endOn(STANDS, { gates: read.slice(1) }),
+      endOn(STANDS, { gate: leak, gates: read, sut: "the SUT exited 137" })
     ]))
     expect(lines).toEqual([
       [`${LaneBatch.END_GATE} pass`],
       [`${LaneBatch.END_GATE} fail`],
       [`${LaneBatch.END_GATE} fail`],
       [`${LaneBatch.END_GATE} not-checkable`],
-      []
+      [],
+      ["reap fail", "contexts pass", "limiter-drain pass"],
+      ["contexts pass", "limiter-drain pass"],
+      ["reap fail", "contexts pass", "limiter-drain pass", `${LaneBatch.END_GATE} fail`]
     ])
+  })
+
+  it("states a failing gate's finding as its line's message, typed to the SUT", () => {
+    const lines = LaneBatch.linesOf({
+      dirty: "the SUT never reaped",
+      gates: [{ name: "reap", answer: "fail", message: "the SUT never reaped" }],
+      sutDied: undefined,
+      deadHost: undefined,
+      interrupted: 0,
+      judged: true,
+      hosted: true
+    })
+    expect(lines).toEqual([{
+      name: "reap",
+      source: "batch process",
+      answer: "fail",
+      message: "the SUT never reaped",
+      detail: { seen: "the SUT never reaped", side: "sut" }
+    }])
   })
 
   it("brackets the cells of a lane that stands nothing", async () => {

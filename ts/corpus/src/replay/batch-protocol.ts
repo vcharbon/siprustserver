@@ -24,6 +24,9 @@ export type HeldContext = Batch.HeldContext
 /** What the batch's gate read of the SUT's call contexts. */
 export type ContextsReport = Batch.ContextsReport
 
+/** One check the batch's end read, answered apart. */
+export type Gate = Batch.Gate
+
 /** What a batch process is stood with. */
 export interface BatchRequest {
   /** Where the batch's scratch goes. */
@@ -51,6 +54,8 @@ export interface BatchHost {
   readonly end: Effect.Effect<string | undefined>
   /** What the gate read of the SUT's call contexts once `end` resolved; `undefined` before, and where the lane reads none. */
   readonly contexts: () => ContextsReport | undefined
+  /** Each gate the end read, apart, once `end` resolved; none before, and where the process states none apart. */
+  readonly gates?: () => ReadonlyArray<Gate>
   /** Ends the process now, its cells in flight with it, and resolves once it exited; a process already gone is left. */
   readonly kill: Effect.Effect<void>
   /**

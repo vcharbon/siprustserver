@@ -15,8 +15,8 @@
  * reported beside what the gate read. A batch whose end did not run to its
  * end line is unjudged, and its row says so. A batch that fails or is
  * interrupted still closes its row, the failure as its detail. A batch a
- * process stood for holds one verification line, its end gate's
- * ({@link linesOf}).
+ * process stood for holds one verification line per gate its end read, and
+ * one for its end itself where that says what no gate does ({@link linesOf}).
  */
 import type { Verification } from "@sip/contracts"
 import { Batches } from "@sip/store"
@@ -26,7 +26,7 @@ import * as Exit from "effect/Exit"
 import type * as Scope from "effect/Scope"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import * as LaneHosting from "../deployment/lane-hosting.js"
-import type { BatchHost, ContextsReport, SutHandle } from "./batch-protocol.js"
+import type { BatchHost, ContextsReport, Gate, SutHandle } from "./batch-protocol.js"
 
 /** Who stands the batch process of a lane; `undefined` where its cells run on their own. */
 export type StandBatch = (
@@ -97,6 +97,10 @@ export interface Ended<A> {
   readonly value: A
   /** What the end gate read the SUT still holding, and how a managed SUT died; `undefined` where neither. */
   readonly dirty: string | undefined
+  /** Each gate the end read, apart; none where it states none or did not run. */
+  readonly gates: ReadonlyArray<Gate>
+  /** How a managed SUT died, or `undefined` where it lived through the batch. */
+  readonly sutDied: string | undefined
   /** How the batch process died, or `undefined` where it served the whole batch. */
   readonly deadHost: string | undefined
   /** Whether the end gate answered for every cell: false where a process stood and its end did not run to its end. */
@@ -130,24 +134,41 @@ export const detailOf = (ended: Pick<Ended<unknown>, "dirty" | "deadHost" | "int
     ended.interrupted > 0 ? `${ended.interrupted} cell(s) interrupted` : undefined
   ]) ?? (ended.judged ? null : NO_END_LINE)
 
-/** The line a batch process's end gate answers. */
+/** The line a batch process's end answers where no gate's line says it. */
 export const END_GATE = "end-gate"
 
+/** Who answers a batch's lines. */
+const SOURCE = "batch process"
+
+/** One gate the end read, as the batch's line. */
+const gateLine = (gate: Gate): Verification.Verification => ({
+  name: gate.name,
+  source: SOURCE,
+  answer: gate.answer,
+  ...(gate.message === undefined ? {} : { message: gate.message }),
+  ...(gate.answer === "fail" && gate.message !== undefined ? { detail: { seen: gate.message, side: "sut" } } : {})
+})
+
 /**
- * The batch's verification lines: none where no process stood, else its end
- * gate's, a failure where it read the SUT dirty or the SUT died, not
- * checkable where the end did not run to its end line.
+ * The batch's verification lines: none where no process stood, else one per
+ * gate its end read, then its {@link END_GATE} line where the end says what
+ * no gate does — a failure where the managed SUT died or the end read the
+ * SUT dirty with no gate failing, not checkable where the end did not run to
+ * its end line, a pass where no gate answered at all.
  */
 export const linesOf = (
-  ended: Pick<Ended<unknown>, "dirty" | "deadHost" | "interrupted" | "judged" | "hosted">
+  ended: Pick<Ended<unknown>, "dirty" | "deadHost" | "interrupted" | "judged" | "hosted" | "gates" | "sutDied">
 ): ReadonlyArray<Verification.Verification> => {
   if (!ended.hosted) return []
-  const line = { name: END_GATE, source: "batch process" }
-  if (ended.dirty !== undefined) {
-    return [{ ...line, answer: "fail", message: ended.dirty, detail: { seen: ended.dirty, side: "sut" } }]
+  const gates = ended.gates.map(gateLine)
+  const line = { name: END_GATE, source: SOURCE }
+  const unstated = gates.some((gate) => gate.answer === "fail") ? undefined : ended.dirty
+  const failure = ended.sutDied ?? unstated
+  if (failure !== undefined) {
+    return [...gates, { ...line, answer: "fail", message: failure, detail: { seen: failure, side: "sut" } }]
   }
-  if (!ended.judged) return [{ ...line, answer: "not-checkable", message: detailOf(ended) ?? NO_END_LINE }]
-  return [{ ...line, answer: "pass" }]
+  if (!ended.judged) return [...gates, { ...line, answer: "not-checkable", message: detailOf(ended) ?? NO_END_LINE }]
+  return gates.length > 0 ? gates : [{ ...line, answer: "pass" }]
 }
 
 /** Why a batch ended without an answer, as its row states it. */
@@ -198,13 +219,17 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
     const deadHost = host?.died()
     const reapedBy = host === undefined || driven.interrupted > 0 ? Effect.succeed(undefined) : host.end
     const hostDirty = deadHost === undefined ? yield* reapedBy : undefined
-    const dirty = joined([hostDirty, sut?.died()])
+    const sutDied = sut?.died()
+    const dirty = joined([hostDirty, sutDied])
     const judged = host === undefined || (deadHost === undefined && driven.interrupted === 0 && (host.judged?.() ?? true))
     const contexts = host?.contexts()
+    const gates = deadHost === undefined ? host?.gates?.() ?? [] : []
     if (close !== undefined) yield* close
     return {
       value: driven.value,
       dirty,
+      gates,
+      sutDied,
       deadHost,
       judged,
       contexts,
