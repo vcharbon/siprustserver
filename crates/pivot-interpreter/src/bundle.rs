@@ -6,7 +6,8 @@
 //!   run-config.json   the lane's compiled configuration
 //!   recording/<leg>.jsonl   every datagram, verbatim, in wire order
 //!   verdict.json      what the run decided, and why it failed if it did
-//!   timing.json       when it started, when it settled, and the budget
+//!   timing.json       when it started, when it settled, and the budget, on
+//!                     the run's clock and on the wall clock
 //! ```
 //!
 //! The writer holds the recording and is armed BEFORE the run body, so a
@@ -23,6 +24,7 @@ use pivot_schema::bundle::{Failure, RunConfig, RunTiming, RunVerdict};
 use serde::Serialize;
 
 use crate::recording::Recording;
+use crate::wall;
 
 /// One run's bundle, ready to write.
 #[derive(Debug, Clone)]
@@ -74,6 +76,9 @@ pub struct BundleWriter {
     /// Set by [`commit`](BundleWriter::commit): the bundle is already on disk
     /// and the drop write must not run again over it.
     committed: bool,
+    /// The wall clock's reading when the writer was armed: where an unwound
+    /// run's timing starts.
+    armed_wall_ms: u64,
 }
 
 impl BundleWriter {
@@ -95,6 +100,7 @@ impl BundleWriter {
             case: case.into(),
             settle_budget_ms,
             committed: false,
+            armed_wall_ms: wall::now_ms(),
         }
     }
 
@@ -131,6 +137,8 @@ impl BundleWriter {
                     started_at_ms: 0,
                     settled_at_ms: None,
                     settle_budget_ms: self.settle_budget_ms,
+                    wall_started_at_ms: Some(self.armed_wall_ms),
+                    wall_ended_at_ms: Some(wall::now_ms()),
                 },
             )
         });
@@ -201,6 +209,8 @@ mod tests {
                 started_at_ms: 0,
                 settled_at_ms: Some(1420),
                 settle_budget_ms: 32000,
+                wall_started_at_ms: Some(1_700_000_000_000),
+                wall_ended_at_ms: Some(1_700_000_001_420),
             },
         };
         let dir = std::env::temp_dir().join(format!("pivot-bundle-{}", std::process::id()));
@@ -261,7 +271,13 @@ mod tests {
             );
             writer.finish(
                 RunVerdict::ok("case", "upstream-fake"),
-                RunTiming { started_at_ms: 0, settled_at_ms: Some(740), settle_budget_ms: 32000 },
+                RunTiming {
+                    started_at_ms: 0,
+                    settled_at_ms: Some(740),
+                    settle_budget_ms: 32000,
+                    wall_started_at_ms: None,
+                    wall_ended_at_ms: None,
+                },
             );
         }
         let verdict: RunVerdict =

@@ -25,6 +25,33 @@ async fn rung_one_a_linear_answered_call_runs_green_and_writes_its_bundle() {
     scene.finish().await;
 }
 
+/// Unix milliseconds now, read off the system clock a paused runtime leaves running.
+fn wall_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the test box's clock is after the epoch")
+        .as_millis() as u64
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paused_run_states_the_wall_instants_it_began_and_returned_at() {
+    let scene = api_scene("pivot-linear-attempt").await;
+    let before = wall_now_ms();
+    let (outcome, dir) = replay(&scene, "linear-attempt.v3.json").await;
+    let after = wall_now_ms();
+    assert_bundle_is_complete(&outcome, &dir);
+    let written: pivot_schema::bundle::RunTiming =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("timing.json")).unwrap()).unwrap();
+    assert_eq!(written, outcome.timing, "timing.json is the run's timing");
+    let began = written.wall_started_at_ms.expect("the wall instant the run began at");
+    let ended = written.wall_ended_at_ms.expect("the wall instant the run returned at");
+    assert!(
+        before <= began && began <= ended && ended <= after,
+        "{before} {began} {ended} {after}"
+    );
+    scene.finish().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn rung_two_an_alt_commits_to_the_branch_that_arrived_and_discards_the_other() {
     let scene = api_scene("pivot-alt-answered").await;

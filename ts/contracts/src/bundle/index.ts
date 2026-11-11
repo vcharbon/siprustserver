@@ -8,7 +8,7 @@
  *   run-config.json         `RunConfig` — the lane's compiled configuration
  *   recording/<leg>.jsonl   one `RecordedMessage` per line, in wire order
  *   verdict.json            `RunVerdict` — what the run decided, and why
- *   timing.json             `RunTiming` — when it started and when it settled
+ *   timing.json             `RunTiming` — when it started and settled, on its clock and the wall clock
  *   rfc.json                `RunRfcAudit` — the post-run RFC audit, or that none ran
  * ```
  *

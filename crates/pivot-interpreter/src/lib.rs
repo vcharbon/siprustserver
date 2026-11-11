@@ -68,6 +68,7 @@
 //! - `mscml` — the MSCML request id a replayed response echoes (RFC 5022).
 //! - `stack` — the per-leg UA: tier-1 regeneration and the automatics.
 //! - `exec` — the run loop that drives a plan over the scenario harness.
+//! - `wall` — the wall clock a bundle's timing states beside the run's own.
 //!
 //! The §17.2 receive view is NOT one of them: it lives once for the whole tree
 //! in `scenario_harness::absorption`, and the interpreter drives it in `exec`
@@ -103,6 +104,7 @@ pub(crate) mod scripted_final;
 pub(crate) mod settle;
 pub(crate) mod stack;
 pub(crate) mod state;
+pub(crate) mod wall;
 
 pub use events::{LaneEventSender, LaneEvents};
 pub use exec::{Lane, Outcome};

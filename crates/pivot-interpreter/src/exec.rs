@@ -62,6 +62,7 @@ use crate::render::UriComposer;
 use crate::retransmit::{DrawnAcks, Repeats};
 use crate::settle::Sut;
 use crate::stack::LegStack;
+use crate::wall;
 
 /// What the lane supplies: a bound agent per actor, where a request goes, and
 /// how a tier-2 position becomes a URI.
@@ -132,6 +133,8 @@ pub async fn run_recording_into(
                 started_at_ms: 0,
                 settled_at_ms: None,
                 settle_budget_ms: plan.document().timing.settle_budget_ms,
+                wall_started_at_ms: Some(wall::now_ms()),
+                wall_ended_at_ms: Some(wall::now_ms()),
             },
             Vec::new(),
         )
@@ -194,6 +197,8 @@ struct Runner<'a, 'p> {
     /// would be a queue.
     held: Option<Held>,
     started: Instant,
+    /// The wall clock's reading when [`Self::started`] was taken.
+    wall_started_ms: u64,
 }
 
 /// A datagram an armed expect is holding out on, recorded already, undelivered.
@@ -227,6 +232,7 @@ struct PendingRepeat {
 impl<'a, 'p> Runner<'a, 'p> {
     fn new(instance: &'a mut Instance<'p>, lane: Lane<'a>) -> Self {
         let started = Instant::now();
+        let wall_started_ms = wall::now_ms();
         // The interpreter owns §17.2 (see [`Absorption`]): the agents must not
         // absorb beneath it, or the retransmissions never reach the recording.
         // It owns the dialog verdicts too: each UA's table judges what it
@@ -286,6 +292,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             pending_repeats: Vec::new(),
             held: None,
             started,
+            wall_started_ms,
         }
     }
 
@@ -335,7 +342,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         // still arriving.
         self.reconcile_retransmits();
         self.state_abandonment();
-        RunTiming { started_at_ms: 0, settled_at_ms: settled_at, settle_budget_ms: settle_budget }
+        RunTiming {
+            started_at_ms: 0,
+            settled_at_ms: settled_at,
+            settle_budget_ms: settle_budget,
+            wall_started_at_ms: Some(self.wall_started_ms),
+            wall_ended_at_ms: Some(wall::now_ms()),
+        }
     }
 
     /// Record one ARRIVING datagram, with the §17.2 seam deciding whether it is
