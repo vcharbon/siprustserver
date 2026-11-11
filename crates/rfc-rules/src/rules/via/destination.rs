@@ -121,13 +121,21 @@ fn via_target(resp: &Msg) -> ViaTarget {
     }
 }
 
-/// Whether `resp` went over UDP to the address its top Via names, as an
-/// IP literal: a sent-by name, a reliable transport or an unread Via is not
-/// known to.
-pub(crate) fn went_to_its_via(resp: &Msg) -> bool {
-    let ViaTarget::At { target, .. } = via_target(resp) else { return false };
-    endpoint_addr(&resp.dst)
-        .is_some_and(|to| SocketAddr::new(to.ip().to_canonical(), to.port()) == target)
+/// Whether `ep` is an address the sender of `request` wrote for its responses:
+/// its top Via sent-by, or its source address at the sent-by port, where a
+/// `received` sends a response (RFC 3261 §18.2.2). An `rport` or `received`
+/// value is the answering side's stamp, not the sender's word, and a sent-by
+/// name resolves by RFC 3263 §5, which no view holds.
+pub(crate) fn sender_listens_at(request: &Msg, ep: &str) -> bool {
+    let canonical = |a: SocketAddr| SocketAddr::new(a.ip().to_canonical(), a.port());
+    let (Some(head), Some(at)) = (request.head.as_deref(), endpoint_addr(ep)) else {
+        return false;
+    };
+    let Some(via) = sniff::top_via(head) else { return false };
+    let (host, port) = via.host_port();
+    let sent_by = ip_host(host).map(|ip| SocketAddr::new(ip.to_canonical(), port));
+    let received = endpoint_addr(&request.src).map(|src| SocketAddr::new(src.ip(), port));
+    [sent_by, received].into_iter().flatten().map(canonical).any(|a| a == canonical(at))
 }
 
 #[cfg(test)]

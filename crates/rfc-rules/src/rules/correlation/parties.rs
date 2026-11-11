@@ -3,57 +3,57 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::rules::branch::BranchName;
-use crate::rules::via::went_to_its_via;
+use crate::rules::via::sender_listens_at;
 use crate::wire::{Endpoint, Kind, Msg};
 
 /// The user agent each endpoint of a view acts as, per Call-ID.
 ///
 /// An endpoint is a user agent of its own until a transaction ties it to
-/// another. A response that went to the address its top Via names (§18.2.2,
-/// not necessarily the request's source) joins its taker to the sender of the
-/// request it answers and its sender to that request's taker. The request is
-/// the one of the same Call-ID, top-Via branch and CSeq method (§17.1.3); a key
-/// carried between two different endpoint pairs ties nothing, and so does a
-/// response sent anywhere else. A tag ties nothing: proxies relay tags
+/// another. A response joins its sender to the taker of the request it answers,
+/// and its taker to that request's sender when it reached an address that
+/// sender wrote (`sender_listens_at`; §18.2.2 answers at the sent-by, not
+/// necessarily the source). The request is the one of the same Call-ID, top-Via
+/// branch and CSeq method (§17.1.3); a key carried between two different
+/// endpoint pairs ties nothing. A tag ties nothing: proxies relay tags
 /// unchanged (§16.6). Built over the whole view, since identity is topology,
 /// not evidence a party held; each component is named by its smallest endpoint.
 pub struct Parties {
     ua: HashMap<String, HashMap<Endpoint, Endpoint>>,
 }
 
-/// The endpoint pair of the requests one `(Call-ID, branch, method)` names:
-/// `None` once two different pairs carried it.
-type Answered = Option<(Endpoint, Endpoint)>;
+/// The first request one `(Call-ID, branch, method)` names: `None` once a
+/// request between another endpoint pair carried it.
+type Answered<'m> = Option<&'m Msg>;
 
 impl Parties {
     /// The parties of `msgs`, a view's stream in observation order.
     pub fn of<'m>(msgs: impl IntoIterator<Item = &'m Msg>) -> Self {
-        let mut requests: BTreeMap<TransactionKey<'m>, Answered> = BTreeMap::new();
+        let mut requests: BTreeMap<TransactionKey<'m>, Answered<'m>> = BTreeMap::new();
         let mut responses: Vec<(TransactionKey<'m>, &Msg)> = Vec::new();
         for msg in msgs.into_iter().filter(|m| !m.repeat && !m.call_id.is_empty()) {
             let Some(key) = transaction_key(msg) else { continue };
             match msg.kind {
                 Kind::Request { .. } => {
-                    let pair = (msg.src.clone(), msg.dst.clone());
                     requests
                         .entry(key)
                         .and_modify(|seen| {
-                            if seen.as_ref() != Some(&pair) {
+                            if seen.is_some_and(|r| (&r.src, &r.dst) != (&msg.src, &msg.dst)) {
                                 *seen = None;
                             }
                         })
-                        .or_insert(Some(pair));
+                        .or_insert(Some(msg));
                 }
-                Kind::Response { .. } if went_to_its_via(msg) => responses.push((key, msg)),
-                Kind::Response { .. } => {}
+                Kind::Response { .. } => responses.push((key, msg)),
             }
         }
         let mut ua: HashMap<String, HashMap<Endpoint, Endpoint>> = HashMap::new();
         for (key, msg) in responses {
-            if let Some(Some((uac, uas))) = requests.get(&key) {
+            if let Some(Some(request)) = requests.get(&key) {
                 let named = ua.entry(msg.call_id.clone()).or_default();
-                join(named, msg.dst.clone(), uac.clone());
-                join(named, msg.src.clone(), uas.clone());
+                join(named, msg.src.clone(), request.dst.clone());
+                if sender_listens_at(request, &msg.dst) {
+                    join(named, msg.dst.clone(), request.src.clone());
+                }
             }
         }
         Parties { ua }

@@ -26,7 +26,7 @@ use super::Obligation;
 
 mod destination;
 
-pub(crate) use destination::went_to_its_via;
+pub(crate) use destination::sender_listens_at;
 pub use destination::ResponseDestination;
 
 crate::registry::rules! {

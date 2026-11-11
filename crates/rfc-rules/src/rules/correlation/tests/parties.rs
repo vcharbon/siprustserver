@@ -277,3 +277,50 @@ fn a_response_sent_past_its_via_ties_no_one() {
     let d = decision_at(&f, RuleId::ResponseEchoesRequestVia, 2);
     assert!(matches!(d, Decision::Violated(Evidence::ResponseViaDiverged { .. })), "{d:?}");
 }
+
+/// B's answering socket ties to the one that took its request whatever A's
+/// Via names: the sent-by is a name no view resolves, and the BYE still names
+/// the tag B minted.
+#[test]
+fn the_answering_side_ties_under_a_named_sent_by() {
+    let msgs: Vec<Msg> = answered_from_two_sockets("bt")
+        .into_iter()
+        .map(|m| via_sent_by(m, "alice.example:5060"))
+        .collect();
+    let f = run(&MidDialogTags, &msgs);
+    let d = decision_at(&f, RuleId::MidDialogTags, 3);
+    assert!(matches!(d, Decision::Compliant), "{d:?}");
+}
+
+/// The `rport` and `received` a response carries are the answering side's
+/// stamp: a 486 sent to a socket A's request never named ties that socket to
+/// no one.
+#[test]
+fn a_response_at_a_stamped_rport_the_sender_never_wrote_ties_no_one() {
+    const ELSEWHERE: &str = "10.0.0.1:40001";
+    let msgs = vec![
+        via_sent_by(
+            req(
+                1_000,
+                A_SEND,
+                B,
+                "INVITE",
+                "sip:bob@h",
+                1,
+                "z9hG4bK-i",
+                "sip:alice@h",
+                "at",
+                None,
+                1,
+            ),
+            "10.0.0.1:5060;rport",
+        ),
+        via_sent_by(
+            resp(2_000, B, ELSEWHERE, 486, 1, "INVITE", "z9hG4bK-i", "at", Some("bt"), 1),
+            "10.0.0.1:5060;rport=40001;received=10.0.0.1",
+        ),
+    ];
+    let parties = Parties::of(&msgs);
+    assert_eq!(parties.taker(&msgs[1]).0, ELSEWHERE);
+    assert_eq!(parties.sender(&msgs[0]).0, A_SEND);
+}
