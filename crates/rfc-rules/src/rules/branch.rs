@@ -22,7 +22,9 @@
 //! carries many calls (a live bind serves every dialog on its socket), and both
 //! ends of a hop see the one branch, so the endpoint judged is part of the
 //! identity: an endpoint is measured against what IT sent, never against a
-//! peer's copy of the same transaction.
+//! peer's copy of the same transaction. The emitter is the socket its requests
+//! left from, and a response it took is filed there, not under the sent-by
+//! it reached ([`Sides`]).
 //!
 //! **Repeats are not fresh events.** A message the adapter marked
 //! [`Msg::repeat`] is absorbed by nothing here — retransmitting until answered
@@ -37,6 +39,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use crate::wire::Msg;
+
+use super::sides::Sides;
 
 /// Whether two top-Via branches name one transaction: compared ignoring ASCII
 /// case (RFC 3261 §7.3.1), two absent branches alike.
@@ -102,10 +106,10 @@ impl<'a> BranchKey<'a> {
         BranchKey { emitter: msg.src.as_str(), call_id: msg.call_id.as_str(), branch }
     }
 
-    /// The branch `msg`'s RECIPIENT drives — a response coming back.
-    pub fn taken_by(msg: &'a Msg, branch: &'a str) -> Self {
+    /// The branch whose UAC took `msg` drives — a response coming back.
+    pub fn taken_by(sides: &Sides<'a>, msg: &'a Msg, branch: &'a str) -> Self {
         let branch = BranchName(branch);
-        BranchKey { emitter: msg.dst.as_str(), call_id: msg.call_id.as_str(), branch }
+        BranchKey { emitter: sides.uac(msg), call_id: msg.call_id.as_str(), branch }
     }
 }
 
@@ -158,9 +162,10 @@ pub(super) struct BranchReading<'a> {
 
 impl<'a> BranchReading<'a> {
     pub fn of(msgs: &'a [Msg]) -> Self {
+        let sides = Sides::of(msgs);
         let mut seen = BranchReading::default();
         for (mi, msg) in msgs.iter().enumerate() {
-            seen.absorb(mi, msg);
+            seen.absorb(&sides, mi, msg);
         }
         seen
     }
@@ -172,7 +177,7 @@ impl<'a> BranchReading<'a> {
     }
 
     /// Absorb one message onto the branch it names.
-    fn absorb(&mut self, mi: usize, msg: &'a Msg) {
+    fn absorb(&mut self, sides: &Sides<'a>, mi: usize, msg: &'a Msg) {
         if msg.repeat {
             return;
         }
@@ -181,7 +186,7 @@ impl<'a> BranchReading<'a> {
             // A response belongs to the endpoint that TOOK it — the UAC side of
             // the branch. Its own arrival order in the view is what a "before"
             // test reads.
-            let taken = self.branches.entry(BranchKey::taken_by(msg, branch)).or_default();
+            let taken = self.branches.entry(BranchKey::taken_by(sides, msg, branch)).or_default();
             if (100..200).contains(&status) {
                 taken.first_1xx.get_or_insert(mi);
             } else {

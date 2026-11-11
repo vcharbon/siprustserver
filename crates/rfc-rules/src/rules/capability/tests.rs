@@ -15,6 +15,8 @@ use super::{
 
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
+/// A second socket of bob's, the one it answers from.
+const BOB_SENDS: &str = "127.0.0.1:41000";
 
 /// An INVITE alice sent bob, with a caller-chosen capability block.
 fn invite(at_us: u64, branch: &str, cseq: u32, to_tag: Option<&str>, extra: &str) -> Msg {
@@ -297,6 +299,19 @@ fn serving_an_unrecognised_method_is_violated() {
     assert!(unsupported_tags.is_empty(), "the METHOD is unrecognised, not an extension");
 }
 
+/// A UAS that answers from another socket than the one it took the request
+/// at still answered its own transaction.
+#[test]
+fn a_405_from_a_second_uas_socket_discharges_the_unrecognised_method() {
+    let mut reply = answered(2_000, 405, "FROBNICATE", "z9hG4bK-x", 1, "Allow: INVITE, BYE\r\n");
+    reply.src = BOB_SENDS.to_string();
+    let msgs = [taken(1_000, "FROBNICATE", "z9hG4bK-x", 1, ""), reply];
+    let all = run(&UnsupportedMethod405Allow, &msgs);
+    assert_eq!(all.len(), 1, "one occasion: {all:?}");
+    assert!(matches!(all[0].decision, Decision::Compliant), "{:?}", all[0].decision);
+    assert_eq!(all[0].emitter, BOB, "the socket that took the verb owes the 405");
+}
+
 /// A 405 carrying no Allow states no alternative — still the miss.
 #[test]
 fn a_405_without_allow_is_violated() {
@@ -497,6 +512,17 @@ fn an_options_2xx_describes_what_it_supports() {
         panic!("{:?}", f[0].decision)
     };
     assert_eq!(missing.as_slice(), ["Allow", "Supported", "Accept"]);
+}
+
+/// A bare 2xx to OPTIONS answered from a second UAS socket is the same miss.
+#[test]
+fn a_bare_options_2xx_from_a_second_uas_socket_is_violated() {
+    let mut reply = answered(2_000, 200, "OPTIONS", "z9hG4bK-o", 1, "");
+    reply.src = BOB_SENDS.to_string();
+    let msgs = [taken(1_000, "OPTIONS", "z9hG4bK-o", 1, ""), reply];
+    let f = violations(&OptionsResponseEchoes, &msgs);
+    assert_eq!(f.len(), 1, "{:?}", run(&OptionsResponseEchoes, &msgs));
+    assert_eq!(f[0].emitter, BOB_SENDS, "the socket that sent the 2xx is charged");
 }
 
 /// A 2xx whose OPTIONS this vantage never carried settles nothing about

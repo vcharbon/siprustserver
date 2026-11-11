@@ -242,6 +242,21 @@ fn a_non_invite_server_transaction_ends_at_timer_j() {
     assert_eq!((*first_status, *second_status), (481, 500));
 }
 
+/// A request reaching the UAS's listening socket opens the next transaction
+/// for the finals it sends from another socket.
+#[test]
+fn a_request_at_the_listening_socket_opens_the_answering_socket_s_next_transaction() {
+    let cancel = |at_us, status| {
+        let mut m = rsp(at_us, status, "z9hG4bK-c", "CANCEL");
+        m.src = "10.0.0.2:41000".to_string();
+        m
+    };
+    let ends = 1_000 + T1_64_US;
+    let f =
+        eval(&[cancel(1_000, 200), req(ends, "z9hG4bK-c", "CANCEL"), cancel(ends + 1_000, 481)]);
+    assert!(f.is_empty(), "two transactions, each answered once: {f:?}");
+}
+
 /// §17.2.1: an INVITE server transaction answered non-2xx ends at Timer H
 /// then Timer I, 64·T1 + T4 after its final at the latest; one answered 2xx
 /// at 64·T1, the end of the 2xx's retransmission (§13.3.1.4). A later final

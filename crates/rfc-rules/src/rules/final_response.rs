@@ -24,7 +24,9 @@
 //! retransmitted, 64·T1 (§13.3.1.4). Each bound is the latest end over UDP. A
 //! request on the key arriving at the emitter after that end opens a new
 //! transaction (§17.2.3 matches no ended one), and the next final is that
-//! transaction's own occasion. A final with no such request before it is
+//! transaction's own occasion. The request arrives at the socket the
+//! transaction's requests reach, which a UAS answering from another socket
+//! does not share ([`Sides`]). A final with no such request before it is
 //! still the old transaction's, however late.
 //!
 //! **Every divergent status is reported exactly once, all on ONE finding.** The
@@ -58,6 +60,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Msg, WireView};
 
+use super::sides::Sides;
 use super::Obligation;
 
 /// 64·T1 over UDP (RFC 3261 §17): Timer J, Timer H, and the 2xx's
@@ -95,7 +98,8 @@ impl Obligation for SingleFinalPerServerTxn {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for (key, finals) in &seen.txns {
-            let arrivals = seen.arrivals.get(key).map_or(&[][..], Vec::as_slice);
+            let taken_at = TxnKey { emitter: finals[0].taken_at, ..key.clone() };
+            let arrivals = seen.arrivals.get(&taken_at).map_or(&[][..], Vec::as_slice);
             let txns = transactions(&key.method, finals, arrivals);
             out.extend(txns.filter_map(|txn| judge(key, txn)));
         }
@@ -297,16 +301,17 @@ struct Reading<'a> {
 
 impl<'a> Reading<'a> {
     fn of(msgs: &'a [Msg]) -> Self {
+        let sides = Sides::of(msgs);
         let mut seen = Reading::default();
         for (mi, msg) in msgs.iter().enumerate() {
-            seen.absorb(mi, msg);
+            seen.absorb(&sides, mi, msg);
         }
         seen
     }
 
     /// Absorb one message: a request reaching its receiver, or a fresh final
     /// response the message's SENDER emitted.
-    fn absorb(&mut self, mi: usize, msg: &'a Msg) {
+    fn absorb(&mut self, sides: &Sides<'a>, mi: usize, msg: &'a Msg) {
         if msg.status().is_none() {
             self.arrivals.entry(TxnKey::received_by(msg)).or_default().push(msg.at_us);
             return;
@@ -321,6 +326,7 @@ impl<'a> Reading<'a> {
             ts_us: msg.at_us,
             status,
             taker: msg.dst.as_str(),
+            taken_at: sides.uas(msg),
         });
     }
 }
@@ -367,6 +373,8 @@ struct Final<'a> {
     ts_us: u64,
     status: u16,
     taker: &'a str,
+    /// The socket the transaction's request reached.
+    taken_at: &'a str,
 }
 
 #[cfg(test)]

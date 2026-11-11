@@ -1,8 +1,9 @@
 //! The two keys the CANCEL family files a transaction under: by its UAS side
-//! and by its UAC side. A branch in either compares ignoring case (RFC 3261
-//! §7.3.1).
+//! and by its UAC side, each named by the socket its requests used
+//! ([`Sides`]). A branch in either compares ignoring case (RFC 3261 §7.3.1).
 
 use crate::rules::branch::BranchName;
+use crate::rules::sides::Sides;
 use crate::wire::Msg;
 
 /// One INVITE transaction as ONE endpoint saw it: the call it rides, the
@@ -28,10 +29,10 @@ impl<'a> TxnKey<'a> {
     }
 
     /// The transaction `msg`'s SENDER is the UAS side of — a response going out
-    /// on `branch`.
-    pub(super) fn emitted_by(msg: &'a Msg, branch: &'a str) -> Self {
+    /// on `branch`, filed under the socket its request reached.
+    pub(super) fn emitted_by(sides: &Sides<'a>, msg: &'a Msg, branch: &'a str) -> Self {
         TxnKey {
-            emitter: msg.src.as_str(),
+            emitter: sides.uas(msg),
             call_id: msg.call_id.as_str(),
             branch: BranchName(branch),
         }
@@ -60,10 +61,10 @@ impl<'a> UacKey<'a> {
     }
 
     /// The transaction `msg`'s RECIPIENT drives — a response coming back on
-    /// `branch`.
-    pub(super) fn taken_by(msg: &'a Msg, branch: &'a str) -> Self {
+    /// `branch`, filed under the socket its request left from.
+    pub(super) fn taken_by(sides: &Sides<'a>, msg: &'a Msg, branch: &'a str) -> Self {
         UacKey {
-            emitter: msg.dst.as_str(),
+            emitter: sides.uac(msg),
             call_id: msg.call_id.as_str(),
             branch: BranchName(branch),
         }

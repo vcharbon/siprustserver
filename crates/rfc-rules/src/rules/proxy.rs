@@ -24,20 +24,24 @@
 //! A transaction whose INVITE this vantage never carried opens no occasion: a
 //! 100 counted against nothing settles nothing.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use sip_message::sniff;
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
+use super::correlation::Parties;
+use super::sides::Sides;
 use super::Obligation;
 use owed_request_uri::owed_request_uri;
 
 mod grace;
+mod no_target;
 mod owed_request_uri;
 
 pub use grace::{Proxy100WithinGrace, PROXY_100_GRACE_US};
+pub use no_target::NoTarget404;
 
 crate::registry::rules! {
     /// RFC 3261 §16.7 step 5: a stateful proxy absorbs the downstream 100 Trying, so a UAC takes at
@@ -115,102 +119,6 @@ impl Obligation for Proxy100TryingNotForwarded {
     }
 }
 
-/// **RFC 3261 §16.3 — a proxy with no resolvable target answers 404.** When
-/// target resolution yields nothing, "Not Found" is the answer that names the
-/// outcome; any other error final tells the UAC the request failed for a reason
-/// that did not happen, and a retry or a fallback is chosen on that lie.
-///
-/// The occasion is ONE request the endpoint took, never forwarded, and answered
-/// with a 4xx/5xx/6xx final of its own. Charges that endpoint; a 404 discharges
-/// it. Nothing else is an occasion: a forwarded request had a target, a
-/// non-error final is not a resolution failure, and a request answered nothing
-/// at all states no outcome to judge.
-///
-/// **"Forwarded" is correlated by Call-ID + CSeq, never by branch.** A §16.6
-/// proxy mints a FRESH branch on the leg it forwards, so branch equality
-/// systematically misses the forward and would charge every relaying proxy.
-///
-/// **A request the strict reading refuses is no occasion** ([`Msg::refused`]):
-/// its 400 says what went wrong, and no target was looked for.
-///
-/// **A relayed rejection is not a no-target outcome**: where the endpoint TOOK
-/// that same final status on the same Call-ID + CSeq, it did resolve a target
-/// and the target said no — even when the forwarded leg itself rode a different
-/// vantage.
-pub struct NoTarget404;
-
-impl Obligation for NoTarget404 {
-    fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // Per endpoint: the transactions it forwarded, the finals it took, the
-        // request it took first on each server transaction, and the first final
-        // it answered there.
-        let mut forwarded: BTreeSet<(&str, &str, u32, String)> = BTreeSet::new();
-        let mut took_final: BTreeSet<(&str, &str, u32, String, u16)> = BTreeSet::new();
-        let mut taken: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
-        let mut answered: BTreeMap<(&str, &str, &str), u16> = BTreeMap::new();
-
-        for (mi, msg) in wire.msgs.iter().enumerate() {
-            let call = msg.call_id.as_str();
-            let txn_method = msg.cseq_method.to_ascii_uppercase();
-            let branch = msg.via_branch.as_deref().filter(|b| !b.is_empty());
-            match &msg.kind {
-                Kind::Request { .. } => {
-                    forwarded.insert((msg.src.as_str(), call, msg.cseq, txn_method));
-                    if let Some(branch) = branch.filter(|_| !msg.refused) {
-                        taken.entry((msg.dst.as_str(), call, branch)).or_insert(mi);
-                    }
-                }
-                Kind::Response { status } if *status >= 200 => {
-                    took_final.insert((msg.dst.as_str(), call, msg.cseq, txn_method, *status));
-                    if let Some(branch) = branch {
-                        answered.entry((msg.src.as_str(), call, branch)).or_insert(*status);
-                    }
-                }
-                Kind::Response { .. } => {}
-            }
-        }
-
-        let mut out = Vec::new();
-        for ((endpoint, call, branch), mi) in &taken {
-            let msg = &wire.msgs[*mi];
-            let txn_method = msg.cseq_method.to_ascii_uppercase();
-            if forwarded.contains(&(endpoint, call, msg.cseq, txn_method.clone())) {
-                continue;
-            }
-            let Some(&status) = answered.get(&(endpoint, call, branch)) else { continue };
-            if !(400..700).contains(&status) {
-                continue;
-            }
-            if took_final.contains(&(endpoint, call, msg.cseq, txn_method, status)) {
-                continue; // the downstream's rejection, relayed
-            }
-            let Kind::Request { method } = &msg.kind else { continue };
-            out.push(Finding {
-                rule: RuleId::NoTarget404,
-                emitter: endpoint.to_string(),
-                taker: msg.src.to_string(),
-                cseq: msg.cseq,
-                relayed: false,
-                anchor: *mi,
-                decision: if status == 404 {
-                    Decision::Compliant
-                } else {
-                    Decision::Violated(Evidence::NoTargetFinal {
-                        no_target_msg: *mi,
-                        no_target_hop: msg.hop,
-                        no_target_ts_us: msg.at_us,
-                        method: method.to_string(),
-                        branch: branch.to_string(),
-                        status,
-                    })
-                },
-            });
-        }
-        out.sort_by_key(|f| f.anchor);
-        out
-    }
-}
-
 /// **RFC 3261 §16.4 / §16.6 step 6 — a strict-routed request is rewritten
 /// before it is forwarded.** A Route without `;lr` is a pre-loose-routing hop
 /// that expects to be addressed in the Request-URI. Two shapes reach a proxy:
@@ -239,8 +147,9 @@ impl Obligation for NoTarget404 {
 /// of the same method it sent on the same call whose Via stack carries the
 /// branch the INCOMING request named — on top when it stayed on the branch,
 /// under the proxy's own Via when it forwarded statefully (§16.6 step 8) —
-/// with the URI the rewrite owes as its Request-URI. Having forwarded NOTHING
-/// is the violation the tripwire is for.
+/// with the URI the rewrite owes as its Request-URI, sent from a socket of the
+/// user agent that took it ([`Parties`]). Having forwarded NOTHING is the
+/// violation the tripwire is for.
 ///
 /// Charges the endpoint that TOOK the strict-routed request — §16.4 is proxy
 /// behaviour, and a UA that receives one forwards nothing at all, which is why
@@ -249,6 +158,7 @@ pub struct StrictRouteRewriteHandled;
 
 impl Obligation for StrictRouteRewriteHandled {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        let parties = Parties::of(wire.msgs);
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if msg.repeat {
@@ -290,8 +200,8 @@ impl Obligation for StrictRouteRewriteHandled {
             };
             let forwarded = wire.msgs.iter().skip(mi + 1).find(|m| {
                 !m.repeat
-                    && m.src == msg.dst
                     && m.call_id == msg.call_id
+                    && parties.same(&msg.call_id, &m.src, &msg.dst)
                     && m.is_request(method)
                     && m.head
                         .as_deref()
@@ -361,17 +271,19 @@ struct Reading<'a> {
 
 impl<'a> Reading<'a> {
     fn of(msgs: &'a [Msg]) -> Self {
+        let sides = Sides::of(msgs);
         let mut seen = Reading::default();
         for (mi, msg) in msgs.iter().enumerate() {
-            seen.absorb(mi, msg);
+            seen.absorb(&sides, mi, msg);
         }
         seen
     }
 
     /// Absorb one message. Repeats are NOT folded away: a retransmitted INVITE
     /// is owed its own replayed 100, so both sides of the budget count every
-    /// copy the wire carried.
-    fn absorb(&mut self, mi: usize, msg: &'a Msg) {
+    /// copy the wire carried. A 100 is counted at the socket its INVITE left
+    /// from ([`Sides`]), wherever the UAC's sent-by took it.
+    fn absorb(&mut self, sides: &Sides<'a>, mi: usize, msg: &'a Msg) {
         if msg.is_request("INVITE") {
             let txn = self
                 .txns
@@ -391,11 +303,7 @@ impl<'a> Reading<'a> {
         }
         let txn = self
             .txns
-            .entry(TxnKey {
-                taker: msg.dst.as_str(),
-                call_id: msg.call_id.as_str(),
-                cseq: msg.cseq,
-            })
+            .entry(TxnKey { taker: sides.uac(msg), call_id: msg.call_id.as_str(), cseq: msg.cseq })
             .or_default();
         txn.taken += 1;
         if txn.taken > txn.sent {
@@ -430,6 +338,7 @@ pub struct StrictRouteShuffleOnSend;
 
 impl Obligation for StrictRouteShuffleOnSend {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        let parties = Parties::of(wire.msgs);
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if msg.repeat {
@@ -439,7 +348,7 @@ impl Obligation for StrictRouteShuffleOnSend {
             let Some(head) = msg.head.as_deref() else { continue };
             let Some(routes) = sniff::route_uris(head, "Route") else { continue };
             let Some(first) = routes.first() else { continue };
-            let decision = if first.loose || swapped(wire.msgs, mi, head) {
+            let decision = if first.loose || swapped(wire.msgs, &parties, mi, head) {
                 Decision::Compliant
             } else {
                 Decision::Violated(Evidence::HeaderValueRejected {
@@ -469,24 +378,26 @@ impl Obligation for StrictRouteShuffleOnSend {
 }
 
 /// Whether the request at `mi` (header block `head`) is the §16.6 step 6 swap
-/// of a request its sender took: that request rides below the sender's own
-/// Via, and the sent Request-URI is the one [`owed_request_uri`] names for it.
-fn swapped(msgs: &[Msg], mi: usize, head: &[u8]) -> bool {
+/// of a request its sender took at a socket of its user agent ([`Parties`]):
+/// that request rides below the sender's own Via, and the sent Request-URI is
+/// the one [`owed_request_uri`] names for it.
+fn swapped(msgs: &[Msg], parties: &Parties, mi: usize, head: &[u8]) -> bool {
     let sent = &msgs[mi];
     let Some(request_uri) = sniff::request_uri_facts(head) else { return false };
     let below = sniff::via_branches(head);
     let below = below.get(1..).unwrap_or_default();
     let taken = msgs[..mi].iter().rev().find(|taken| {
         !taken.repeat
-            && taken.dst == sent.src
             && taken.call_id == sent.call_id
+            && parties.same(&sent.call_id, &taken.dst, &sent.src)
             && matches!((&taken.kind, &sent.kind),
                 (Kind::Request { method: a }, Kind::Request { method: b }) if a.eq_ignore_ascii_case(b))
             && taken.via_branch.as_deref().is_some_and(|b| below.iter().any(|v| v == b))
     });
-    let Some(taken_head) = taken.and_then(|t| t.head.as_deref()) else { return false };
+    let Some(taken) = taken else { return false };
+    let Some(taken_head) = taken.head.as_deref() else { return false };
     let Some(routes) = sniff::route_uris(taken_head, "Route") else { return false };
-    owed_request_uri(taken_head, &routes, sent.src.as_str())
+    owed_request_uri(taken_head, &routes, taken.dst.as_str())
         .is_some_and(|owed| owed == request_uri.uri)
 }
 

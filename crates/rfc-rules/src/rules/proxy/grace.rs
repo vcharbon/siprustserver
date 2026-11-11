@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, WireView};
 
+use super::super::sides::Sides;
 use super::super::Obligation;
 
 /// The §16.7 grace: how long a hop may hold an INVITE before it owes the UAC a
@@ -36,7 +37,9 @@ pub struct Proxy100WithinGrace;
 impl Obligation for Proxy100WithinGrace {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per (taker, call, branch): the INVITE it took, whether it said it was
-        // trying, and its earliest final on the transaction.
+        // trying, and its earliest final on the transaction — a response filed
+        // under the socket its INVITE reached, whichever socket sent it.
+        let sides = Sides::of(wire.msgs);
         let mut taken: BTreeMap<(&str, &str, &str), Taken<'_>> = BTreeMap::new();
         let mut said_trying: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
         let mut first_final: BTreeMap<(&str, &str, &str), u64> = BTreeMap::new();
@@ -63,7 +66,7 @@ impl Obligation for Proxy100WithinGrace {
                     );
                 }
                 Kind::Response { status } => {
-                    let key = (msg.src.as_str(), msg.call_id.as_str(), branch);
+                    let key = (sides.uas(msg), msg.call_id.as_str(), branch);
                     if *status == 100 {
                         said_trying.insert(key);
                     } else if *status >= 200 {

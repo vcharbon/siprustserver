@@ -502,6 +502,32 @@ fn record_route_on_a_response_to_an_in_dialog_request_is_violated() {
     assert_eq!(request_method.as_str(), "INVITE");
 }
 
+/// A UAC that sends its re-INVITE from another socket than its sent-by still
+/// opened the transaction its response answers.
+#[test]
+fn record_route_answering_a_two_socket_uac_s_in_dialog_request_is_violated() {
+    let msgs = [
+        invite(1_000, "z9hG4bK-i", ""),
+        rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", ""),
+        req(
+            3_000,
+            "127.0.0.1:40000",
+            BOB,
+            "INVITE",
+            B_URI,
+            "z9hG4bK-r",
+            2,
+            A_URI,
+            B_URI,
+            Some("bt"),
+            "",
+        ),
+        rsp(4_000, 200, 2, "INVITE", "z9hG4bK-r", "Record-Route: <sip:p1@127.0.0.1;lr>\r\n"),
+    ];
+    let f = hits(&RecordRoutePlacement, &msgs);
+    assert_eq!(f.len(), 1, "{:?}", eval(&RecordRoutePlacement, &msgs));
+}
+
 /// §17.1.1.3: the ACK for a non-2xx final reuses the INVITE's branch and
 /// carries the final's To tag. A §17.2.1 retransmit landing after it must
 /// still read as answering the INVITE — an ACK elicits no response, so it is

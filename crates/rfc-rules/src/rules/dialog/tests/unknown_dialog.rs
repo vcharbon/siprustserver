@@ -68,6 +68,21 @@ fn a_481_answers_the_unknown_dialog() {
     assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
 }
 
+/// A 481 the taker sends from another socket than the one the request
+/// reached answers that request's transaction.
+#[test]
+fn a_481_from_a_second_socket_of_the_taker_answers_the_unknown_dialog() {
+    let mut second = rsp(4_000, 481, 2, "BYE", "z9hG4bK-b", "");
+    second.src = "127.0.0.1:41000".to_string();
+    let msgs = [
+        invite(1_000, "z9hG4bK-i", ""),
+        rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", ""),
+        in_dialog(3_000, "BYE", "z9hG4bK-b", 2, "zz", "bt"),
+        second,
+    ];
+    assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
+}
+
 /// Without a dialog-creating response on the call, nothing at this vantage
 /// says which dialogs the taker has — an orphan request is no occasion.
 #[test]

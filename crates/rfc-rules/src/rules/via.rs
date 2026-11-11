@@ -1,10 +1,11 @@
 //! What a response's top Via says about where it goes: the hop it answers
 //! (RFC 3261 §18.2.2) and the `rport` bargain struck on it (RFC 3581).
 //!
-//! **`rport-echo`: the occasion is a RESPONSE, paired to its request by the
-//! top-Via branch.** §4 makes the duty conditional: only a request whose top
-//! Via carried a BARE `;rport` asks for anything, so a response is judged only
-//! on a branch this vantage saw the same endpoint open with that ask.
+//! **`rport-echo`: the occasion is a RESPONSE, paired to its request by its
+//! transaction.** §4 makes the duty conditional: only a request whose top Via
+//! carried a BARE `;rport` asks for anything, so a response is judged only on a
+//! transaction this vantage saw the same UAC open with that ask, the UAC named
+//! by the socket its request left from ([`Sides`](super::sides::Sides)).
 //! Everything else opens no occasion at all.
 //!
 //! **The four states of the parameter are kept apart** ([`sniff::ViaRport`]):
@@ -22,6 +23,7 @@ use sip_message::sniff::{self, ViaRport};
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{endpoint_addr, Kind, Msg, WireView};
 
+use super::sides::Sides;
 use super::Obligation;
 
 mod destination;
@@ -45,8 +47,9 @@ crate::registry::rules! {
 /// from leaves the UAC's NAT binding unnamed and the response unroutable back
 /// through it. The source port is the one the request carried at this vantage.
 ///
-/// The occasion is ONE response the endpoint took on a branch it had opened
-/// with a bare `;rport`. Charges the endpoint that sent the response.
+/// The occasion is ONE response the UAC took on a transaction (Call-ID,
+/// top-Via branch, CSeq method) it had opened with a bare `;rport`. Charges
+/// the endpoint that sent the response.
 ///
 /// **Gating by consumer policy for the stack under test only**: a fake stack
 /// that omits the echo is surfaced as advisory, a stack under test that omits
@@ -55,11 +58,8 @@ pub struct RportEcho;
 
 impl Obligation for RportEcho {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // Branches on which an endpoint's own SENT request advertised a bare
-        // `;rport`, with the method that asked and the port it left from —
-        // built as the walk goes, so a response is only ever measured against
-        // an ask that preceded it.
-        let mut asked: BTreeMap<(&str, &str, &str), (&str, Option<u16>)> = BTreeMap::new();
+        let sides = Sides::of(wire.msgs);
+        let mut asked: BTreeMap<(&str, &str, &str, String), (&str, Option<u16>)> = BTreeMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else {
@@ -69,17 +69,13 @@ impl Obligation for RportEcho {
                 Kind::Request { method } => {
                     if rport_of(msg) == ViaRport::Requested {
                         let source_port = endpoint_addr(&msg.src).map(|a| a.port());
-                        asked.insert(
-                            (msg.src.as_str(), msg.call_id.as_str(), branch),
-                            (method.as_str(), source_port),
-                        );
+                        asked
+                            .insert(asked_key(&sides, msg, branch), (method.as_str(), source_port));
                     }
                 }
                 Kind::Response { status } => {
-                    // The ask is the TAKER's: it sent the request, and the
-                    // response answers its own top Via.
                     let Some((request_method, source_port)) =
-                        asked.get(&(msg.dst.as_str(), msg.call_id.as_str(), branch)).copied()
+                        asked.get(&asked_key(&sides, msg, branch)).copied()
                     else {
                         continue;
                     };
@@ -127,6 +123,17 @@ impl Obligation for RportEcho {
         }
         out
     }
+}
+
+/// The transaction `msg` rides, filed under its UAC's sending socket: asks
+/// are recorded as the walk goes, so a response is only ever measured against
+/// an ask that preceded it.
+fn asked_key<'a>(
+    sides: &Sides<'a>,
+    msg: &'a Msg,
+    branch: &'a str,
+) -> (&'a str, &'a str, &'a str, String) {
+    (sides.uac(msg), msg.call_id.as_str(), branch, msg.cseq_method.to_ascii_uppercase())
 }
 
 /// What the message's top Via says about `rport`. A vantage with no header
@@ -323,6 +330,56 @@ mod tests {
 
         let orphan = [answer(1_000, "z9hG4bK-unseen", "")];
         assert!(eval(&orphan).is_empty());
+    }
+
+    /// A UAC that sends from one socket and names another as its sent-by owns
+    /// the ask the response at that sent-by answers: the server is judged.
+    #[test]
+    fn a_two_socket_uac_s_ask_is_judged_at_its_sent_by() {
+        let mut asked = ask(1_000, "z9hG4bK-o", ";rport");
+        asked.src = "127.0.0.1:40000".to_string();
+        let dropped = [asked.clone(), answer(2_000, "z9hG4bK-o", ";rport")];
+        let f = hits(&dropped);
+        assert_eq!(f.len(), 1, "{:?}", eval(&dropped));
+        let Decision::Violated(Evidence::RportNotEchoed { echoed_empty, .. }) = &f[0].decision
+        else {
+            panic!("{:?}", f[0].decision)
+        };
+        assert!(echoed_empty);
+        assert_eq!(f[0].emitter, BOB);
+
+        let echoed = [asked, answer(2_000, "z9hG4bK-o", ";rport=40000")];
+        let all = eval(&echoed);
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert!(matches!(all[0].decision, Decision::Compliant), "{:?}", all[0].decision);
+    }
+
+    /// A response sent to an address its request's sender never wrote reached
+    /// no one that asked.
+    #[test]
+    fn a_response_past_every_address_the_uac_wrote_opens_no_occasion() {
+        let mut asked = ask(1_000, "z9hG4bK-o", ";rport");
+        asked.src = "127.0.0.1:40000".to_string();
+        let mut astray = answer(2_000, "z9hG4bK-o", "");
+        astray.dst = "127.0.0.1:5999".to_string();
+        assert!(eval(&[asked, astray]).is_empty());
+    }
+
+    /// The ask rides one transaction: a CANCEL on the request's branch files
+    /// its own ask, and the request's response is judged against the request's.
+    #[test]
+    fn a_cancel_on_the_branch_keeps_its_own_ask() {
+        let mut cancel = ask(1_500, "z9hG4bK-o", ";rport");
+        cancel.kind = Kind::Request { method: "CANCEL".to_string() };
+        cancel.cseq_method = "CANCEL".to_string();
+        let msgs = [ask(1_000, "z9hG4bK-o", ";rport"), cancel, answer(2_000, "z9hG4bK-o", "")];
+        let f = hits(&msgs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        let Decision::Violated(Evidence::RportNotEchoed { request_method, .. }) = &f[0].decision
+        else {
+            panic!("{:?}", f[0].decision)
+        };
+        assert_eq!(request_method, "OPTIONS");
     }
 
     /// The ask is the TAKER's own: a response answering someone else's branch

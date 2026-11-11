@@ -19,7 +19,9 @@
 //! **A rejection is judged at its TAKER**, because that is the endpoint the
 //! obligation runs against: the request arrived at it, and what it answered is
 //! its own emission. The occasion is keyed by `(taker, Call-ID, top-Via
-//! branch)` — RFC 3261 §17's transaction identity — so a §17.2.3 retransmission
+//! branch)` — RFC 3261 §17's transaction identity, the taker named by the
+//! socket the request reached, whichever socket answers ([`Sides`]) — so a
+//! §17.2.3 retransmission
 //! of the request neither opens a second occasion nor replaces the answer
 //! already recorded, and a retransmitted final is the same answer again.
 //!
@@ -37,6 +39,7 @@ use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
 use super::branch::{BranchKey, BranchReading};
+use super::sides::Sides;
 use super::Obligation;
 
 crate::registry::rules! {
@@ -99,18 +102,12 @@ const RECOGNISED_OPTION_TAGS: &[&str] =
 /// RFC 3261 §17's `(Call-ID, top-Via branch)` at one endpoint.
 type TxnKey<'a> = (&'a str, &'a str, &'a str);
 
-/// The key `msg` opens at the endpoint that TOOK it, or `None` where the
+/// The key of the transaction `msg` rides, at the socket its request reached
+/// (a request's destination, a response's request's), or `None` where the
 /// vantage carried no branch to name the transaction by.
-fn taken_key(msg: &Msg) -> Option<TxnKey<'_>> {
+fn uas_key<'a>(sides: &Sides<'a>, msg: &'a Msg) -> Option<TxnKey<'a>> {
     let branch = msg.via_branch.as_deref().filter(|b| !b.is_empty())?;
-    Some((msg.dst.as_str(), msg.call_id.as_str(), branch))
-}
-
-/// The key `msg` answers at the endpoint that SENT it — the mirror of
-/// [`taken_key`], since a response rides its request's branch.
-fn sent_key(msg: &Msg) -> Option<TxnKey<'_>> {
-    let branch = msg.via_branch.as_deref().filter(|b| !b.is_empty())?;
-    Some((msg.src.as_str(), msg.call_id.as_str(), branch))
+    Some((sides.uas(msg), msg.call_id.as_str(), branch))
 }
 
 /// What one endpoint answered on one transaction: the FIRST final it sent, and
@@ -369,13 +366,14 @@ impl Obligation for OptionsResponseEchoes {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // The OPTIONS transactions each endpoint took — a 2xx is judged only on
         // one of them.
+        let sides = Sides::of(wire.msgs);
         let mut asked: BTreeMap<TxnKey<'_>, ()> = BTreeMap::new();
         let mut answered: BTreeMap<TxnKey<'_>, ()> = BTreeMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             match &msg.kind {
                 Kind::Request { method } if method.eq_ignore_ascii_case("OPTIONS") => {
-                    if let Some(key) = taken_key(msg) {
+                    if let Some(key) = uas_key(&sides, msg) {
                         asked.insert(key, ());
                     }
                 }
@@ -383,7 +381,7 @@ impl Obligation for OptionsResponseEchoes {
                     if !msg.cseq_method.eq_ignore_ascii_case("OPTIONS") {
                         continue;
                     }
-                    let Some(key) = sent_key(msg) else { continue };
+                    let Some(key) = uas_key(&sides, msg) else { continue };
                     if !asked.contains_key(&key) || answered.insert(key, ()).is_some() {
                         continue; // no OPTIONS at this vantage, or the same answer again
                     }

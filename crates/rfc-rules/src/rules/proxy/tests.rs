@@ -90,6 +90,17 @@ fn one_trying_per_invite_is_compliant() {
 }
 
 /// A second 100 against one INVITE is a downstream copy the proxy should
+/// A UAC sending its INVITE from another socket than its sent-by takes the
+/// INVITE's one 100 at that sent-by: no copy is in excess.
+#[test]
+fn a_two_socket_uac_s_one_trying_is_compliant() {
+    let mut sent = invite(1_000, 1);
+    sent.src = "127.0.0.1:40000".to_string();
+    sent.head = Some(format!("Via: SIP/2.0/UDP {ALICE};branch=z9hG4bK-i\r\n\r\n").into_bytes());
+    let msgs = [sent, trying(2_000, 1)];
+    assert!(hits(&msgs).is_empty(), "{:?}", eval(&msgs));
+}
+
 /// have absorbed, and it charges the hop that forwarded it.
 #[test]
 fn a_trying_in_excess_of_the_invites_sent_is_violated() {
@@ -283,6 +294,23 @@ fn a_forward_on_a_fresh_branch_resolves_a_target() {
     );
 }
 
+/// A proxy forwarding from another socket than the one it took the request
+/// at, its sent-by, resolved a target: its own error final is no §16.3
+/// outcome.
+#[test]
+fn a_forward_from_a_second_socket_of_the_proxy_resolves_a_target() {
+    const PROXY_SENDS: &str = "127.0.0.1:41000";
+    let mut out = hop_request(2_000, PROXY_SENDS, BOB, "z9hG4bK-out", 1);
+    out.head = Some(format!("Via: SIP/2.0/UDP {PROXY};branch=z9hG4bK-out\r\n\r\n").into_bytes());
+    let msgs = [
+        hop_request(1_000, ALICE, PROXY, "z9hG4bK-in", 1),
+        out,
+        hop_response(3_000, BOB, PROXY, 486, "z9hG4bK-out", 1),
+        hop_response(4_000, PROXY, ALICE, 500, "z9hG4bK-in", 1),
+    ];
+    assert!(charged_to(PROXY, &msgs).is_empty(), "{:?}", charged_to(PROXY, &msgs));
+}
+
 /// Even where the forwarded leg rode another vantage, a final that MATCHES
 /// one the endpoint took on the same transaction is a relayed rejection.
 #[test]
@@ -390,6 +418,29 @@ fn a_strict_route_swapped_into_the_request_uri_is_compliant() {
         1,
         "the next hop took a strict-routed request too — its own occasion",
     );
+}
+
+/// A proxy that forwards from another socket than the one it took the
+/// strict-routed request at, tied to it by its own 100 on that request,
+/// performed the swap.
+#[test]
+fn a_strict_route_swapped_by_a_second_socket_of_the_proxy_is_compliant() {
+    const PROXY_SENDS: &str = "127.0.0.1:41000";
+    let msgs = [
+        routed(1_000, ALICE, PROXY, "z9hG4bK-in", "sip:bob@h", STRICT_ROUTE),
+        hop_response(1_500, PROXY_SENDS, ALICE, 100, "z9hG4bK-in", 1),
+        hop_msg(
+            2_000,
+            PROXY_SENDS,
+            BOB,
+            "sip:strict@h",
+            &["z9hG4bK-out", "z9hG4bK-in"],
+            &["<sip:bob@h>"],
+        ),
+    ];
+    let f = strict(&msgs);
+    assert_eq!(f.len(), 1, "one occasion, the request taken: {f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
 }
 
 /// Forwarded verbatim: the request reaches a hop the strict URI did not
@@ -615,6 +666,35 @@ fn a_swapped_forward_paired_with_what_it_took_is_compliant() {
     let f = shuffle(&[taken(strict_hop), sent("sip:other@127.0.0.1")]);
     let swap = f.iter().find(|f| f.anchor == 1).expect("the forward is an occasion");
     assert!(matches!(swap.decision, Decision::Violated(_)), "not the route it named");
+}
+
+/// A hop that forwards from another socket than the one it took the request
+/// at, tied to it by its own 100 on that request, swapped what it took.
+#[test]
+fn a_swapped_forward_from_a_second_socket_of_the_hop_is_compliant() {
+    let taken = {
+        let mut m = forwarded("<sip:strict@127.0.0.1>");
+        m.src = "127.0.0.1:5050".to_string();
+        m.dst = ALICE.to_string();
+        m.via_branch = Some("z9hG4bK-r".to_string());
+        m
+    };
+    let mut trying_back =
+        hop_response(1_500, "127.0.0.1:41000", "127.0.0.1:5050", 100, "z9hG4bK-r", 1);
+    trying_back.to_tag = None;
+    let head = "INVITE sip:strict@127.0.0.1 SIP/2.0\r\nMax-Forwards: 70\r\n\
+                Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-fwd\r\n\
+                Via: SIP/2.0/UDP 127.0.0.1:5050;branch=z9hG4bK-r\r\n\
+                Route: <sip:bob@127.0.0.1:5070>\r\n\
+                From: <sip:alice@127.0.0.1>;tag=at\r\nTo: <sip:bob@127.0.0.1>\r\n\
+                Call-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+    let mut sent = invite(2_000, 1);
+    sent.src = "127.0.0.1:41000".to_string();
+    sent.via_branch = Some("z9hG4bK-fwd".to_string());
+    sent.head = Some(head.as_bytes().to_vec());
+    let f = shuffle(&[taken, trying_back, sent]);
+    let swap = f.iter().find(|f| f.anchor == 2).expect("the forward is an occasion");
+    assert!(matches!(swap.decision, Decision::Compliant), "{:?}", swap.decision);
 }
 
 /// A request `src` sent `dst` on Via `branches` (top first), carrying

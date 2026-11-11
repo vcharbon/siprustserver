@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
+use super::super::sides::Sides;
 use super::super::Obligation;
 use super::message_facts::remote_tag_of;
 
@@ -25,7 +26,8 @@ pub const UNKNOWN_DIALOG_WINDOW_US: u64 = 1_000_000;
 /// The occasion is ONE in-dialog request the endpoint TOOK on a call where this
 /// vantage carried at least one dialog-CREATING response for it — without that
 /// there is nothing to say which dialogs the endpoint has, and the request is
-/// not an occasion at all. Charges the taker; the 481 discharges it.
+/// not an occasion at all. Charges the taker; the 481 discharges it, from
+/// whichever socket the taker answers its transaction ([`Sides`]).
 ///
 /// **A dialog is known by its PEER tag** — the dialog key the other four
 /// rules use. It is the half the endpoint does not mint and the half that is
@@ -66,6 +68,7 @@ impl Obligation for UnknownDialog481 {
         // Requests on an unknown dialog, awaiting the final the taker sent on
         // their transaction (0 = none yet).
         let mut unknown: Vec<usize> = Vec::new();
+        let sides = Sides::of(wire.msgs);
         let mut answers: BTreeMap<(&str, &str, &str), u16> = BTreeMap::new();
         let mut out: Vec<Finding> = Vec::new();
 
@@ -144,7 +147,7 @@ impl Obligation for UnknownDialog481 {
                     }
                     if *status >= 200 {
                         if let Some(branch) = branch {
-                            if let Some(at) = answers.get_mut(&(msg.src.as_str(), call, branch)) {
+                            if let Some(at) = answers.get_mut(&(sides.uas(msg), call, branch)) {
                                 if *at == 0 {
                                     *at = *status;
                                 }

@@ -2,66 +2,48 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::rules::branch::BranchName;
+use crate::rules::sides::Sides;
 use crate::rules::via::sender_listens_at;
-use crate::wire::{Endpoint, Kind, Msg};
+use crate::wire::{Endpoint, Msg};
 
 /// The user agent each endpoint of a view acts as, per Call-ID.
 ///
 /// An endpoint is a user agent of its own until a transaction ties it to
-/// another. A response joins its sender to the taker of the request it answers,
-/// and its taker to that request's sender when it reached an address that
-/// sender wrote (`sender_listens_at`; §18.2.2 answers at the sent-by, not
-/// necessarily the source). The request is the one of the same Call-ID, top-Via
-/// branch and CSeq method (§17.1.3); a key carried between two different
-/// endpoint pairs ties nothing. A tag ties nothing: proxies relay tags
+/// another. A response joins its sender to the taker of the request it answers
+/// ([`Sides`]), and its taker to that request's sender when it reached an
+/// address that sender wrote (`sender_listens_at`; §18.2.2 answers at the
+/// sent-by, not necessarily the source). A tag ties nothing: proxies relay tags
 /// unchanged (§16.6). Built over the whole view, since identity is topology,
 /// not evidence a party held; each component is named by its smallest endpoint.
 pub struct Parties {
     ua: HashMap<String, HashMap<Endpoint, Endpoint>>,
 }
 
-/// The first request one `(Call-ID, branch, method)` names: `None` once a
-/// request between another endpoint pair carried it.
-type Answered<'m> = Option<&'m Msg>;
-
 impl Parties {
     /// The parties of `msgs`, a view's stream in observation order.
     pub fn of<'m>(msgs: impl IntoIterator<Item = &'m Msg>) -> Self {
-        let mut requests: BTreeMap<TransactionKey<'m>, Answered<'m>> = BTreeMap::new();
-        let mut responses: Vec<(TransactionKey<'m>, &Msg)> = Vec::new();
-        for msg in msgs.into_iter().filter(|m| !m.repeat && !m.call_id.is_empty()) {
-            let Some(key) = transaction_key(msg) else { continue };
-            match msg.kind {
-                Kind::Request { .. } => {
-                    requests
-                        .entry(key)
-                        .and_modify(|seen| {
-                            if seen.is_some_and(|r| (&r.src, &r.dst) != (&msg.src, &msg.dst)) {
-                                *seen = None;
-                            }
-                        })
-                        .or_insert(Some(msg));
-                }
-                Kind::Response { .. } => responses.push((key, msg)),
-            }
-        }
+        let msgs: Vec<&'m Msg> = msgs.into_iter().collect();
+        let sides = Sides::of(msgs.iter().copied());
         let mut ua: HashMap<String, HashMap<Endpoint, Endpoint>> = HashMap::new();
-        for (key, msg) in responses {
-            if let Some(Some(request)) = requests.get(&key) {
-                let named = ua.entry(msg.call_id.clone()).or_default();
-                join(named, msg.src.clone(), request.dst.clone());
-                if sender_listens_at(request, &msg.dst) {
-                    join(named, msg.dst.clone(), request.src.clone());
-                }
+        for msg in msgs.into_iter().filter(|m| !m.repeat) {
+            let Some(request) = sides.request_of(msg) else { continue };
+            let named = ua.entry(msg.call_id.clone()).or_default();
+            join(named, msg.src.clone(), request.dst.clone());
+            if sender_listens_at(request, &msg.dst) {
+                join(named, msg.dst.clone(), request.src.clone());
             }
         }
         Parties { ua }
     }
 
     /// The user agent `ep` acts as on `call_id`.
-    fn of_endpoint(&self, ep: &Endpoint, call_id: &str) -> Endpoint {
-        self.ua.get(call_id).and_then(|named| named.get(ep)).unwrap_or(ep).clone()
+    fn of_endpoint(&self, ep: &str, call_id: &str) -> Endpoint {
+        self.ua.get(call_id).and_then(|named| named.get(ep)).map_or(ep, String::as_str).to_string()
+    }
+
+    /// Whether `a` and `b` act as one user agent on `call_id`.
+    pub fn same(&self, call_id: &str, a: &str, b: &str) -> bool {
+        a == b || self.of_endpoint(a, call_id) == self.of_endpoint(b, call_id)
     }
 
     /// `(user agent, Call-ID)` of the party that sent `msg`.
@@ -105,14 +87,4 @@ fn join(named: &mut HashMap<Endpoint, Endpoint>, a: Endpoint, b: Endpoint) {
     for ep in [a, b, gone] {
         named.insert(ep, keep.clone());
     }
-}
-
-/// `(Call-ID, top-Via branch, CSeq method)`: the transaction a message belongs
-/// to (§17.1.3).
-type TransactionKey<'m> = (&'m str, BranchName<'m>, String);
-
-/// The transaction `msg` belongs to, `None` without a branch.
-fn transaction_key(msg: &Msg) -> Option<TransactionKey<'_>> {
-    let branch = BranchName(msg.via_branch.as_deref()?);
-    Some((msg.call_id.as_str(), branch, msg.cseq_method.to_ascii_uppercase()))
 }
