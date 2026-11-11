@@ -4,6 +4,7 @@
   "cells": [
     { "cell": { "case": "capture_lines.pcap.gz-answered", "shape": "pivot-replay", "infra": "fake" }, "passed": false, "dir": "answered" },
     { "cell": { "case": "capture_lines.pcap.gz-waived", "shape": "pivot-replay", "infra": "fake" }, "passed": true, "dir": "waived" },
-    { "cell": { "case": "capture_lines.pcap.gz-restated", "shape": "pivot-replay", "infra": "fake" }, "passed": true, "dir": "restated", "restated": "allow-trimmed — ok with accepted delta" }
+    { "cell": { "case": "capture_lines.pcap.gz-restated", "shape": "pivot-replay", "infra": "fake" }, "passed": true, "dir": "restated", "restated": "allow-trimmed — ok with accepted delta" },
+    { "cell": { "case": "capture_lines.pcap.gz-restated-audit", "shape": "pivot-replay", "infra": "fake" }, "passed": true, "dir": "restated-audit", "restated": "1 RFC charge(s) are a peer's own — ok with accepted delta" }
   ]
 }

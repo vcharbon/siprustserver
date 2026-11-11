@@ -268,6 +268,7 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
     const decoded = verdictOf(verdict)
     const error = typeof cell.error === "string" ? cell.error : undefined
     const ran = dir !== undefined && skipped === null && error === undefined
+    const restated = typeof cell.restated === "string" ? cell.restated : null
     cases.push({
       caseId,
       passed,
@@ -297,9 +298,9 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
             passed,
             verdict: decoded,
             audit: auditedOf(rfc) ? findings : null,
-            charged,
+            charged: restated === null ? charged : findings.filter((finding) => finding.gating),
             answered: answeredOf(yield* readJson(path.join(dir, VERIFICATIONS_FILE))),
-            restated: typeof cell.restated === "string" ? cell.restated : null
+            restated
           })
         }
         : {})

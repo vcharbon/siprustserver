@@ -277,4 +277,18 @@ describe("Bundle.read", () => {
     })
     expect(Verification.finalStatusOf(lines)).toBe("pass")
   })
+
+  it("states an RFC charge the reclassifier restated as passed as a waived audit line it answers", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const restated = reading.cases.find((entry) => entry.caseId.endsWith("-restated-audit"))!
+    const lines = restated.verifications!
+    expect(lines.map((line) => `${line.name} ${line.source} ${line.answer}${line.waived === true ? " waived" : ""}`)).toEqual([
+      "call interpreter pass",
+      "rfc-audit reclassifier fail waived",
+      "reclassifier reclassifier pass"
+    ])
+    expect(lines[1]!.message).toContain("restated as passed (1 RFC charge(s) are a peer's own")
+    expect(lines[1]!.message).toContain("sdp-origin-continuity")
+    expect(Verification.finalStatusOf(lines)).toBe("pass")
+  })
 })

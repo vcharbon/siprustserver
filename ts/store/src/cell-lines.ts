@@ -42,7 +42,7 @@ export interface CellReading {
   readonly verdict: Bundle.RunVerdict | null
   /** The audit's findings, empty where the cell was not audited; null where `rfc.json` is absent or not audited. */
   readonly audit: ReadonlyArray<Bundle.RfcFinding> | null
-  /** The gating findings the SUT answers for. */
+  /** The gating findings the SUT answers for; every gating finding of a cell the reclassifier restated. */
   readonly charged: ReadonlyArray<Bundle.RfcFinding>
   /** `verifications.json`: the lines the lane answered in process; null where the cell wrote none. */
   readonly answered: ReadonlyArray<Line> | null
