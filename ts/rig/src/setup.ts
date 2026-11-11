@@ -77,10 +77,13 @@ export const planOf = (
 /**
  * `body` run inside the setup `instances`: each injected in order, then
  * `body`, then every instance whose inject started healed in reverse order,
- * uninterruptibly, however `body` or an inject ended. A failed inject fails
- * the whole with {@link OperationRun.InjectFailed} once healing is done, and
- * `body` does not run. An interruption interrupts the inject or the body under
- * way, never a heal.
+ * uninterruptibly, however `body` or an inject ended. A heal that does not
+ * recover, or dies, leaves the lab changed and the next one still runs. A
+ * failed inject fails the whole with {@link OperationRun.InjectFailed} once
+ * healing is done, and `body` does not run. An interruption interrupts the
+ * inject or the body under way, never a heal; an interrupted or failed job
+ * says no value, so its caller learns a lab left changed from its sink
+ * ({@link watching}).
  */
 export const around = <A, E, R>(
   instances: ReadonlyArray<OperationRun.Instance>,
@@ -98,9 +101,32 @@ export const around = <A, E, R>(
       const exit = yield* Effect.exit(restore(Effect.andThen(injected, body)))
       let labLeftChanged = false
       for (const instance of [...started].reverse()) {
-        if (!(yield* OperationRun.heal(instance, sink))) labLeftChanged = true
+        const healed = yield* Effect.exit(OperationRun.heal(instance, sink))
+        if (!(Exit.isSuccess(healed) && healed.value)) labLeftChanged = true
       }
       if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause)
       return { value: exit.value, labLeftChanged }
     })
   )
+
+/** A sink that passes each event on and remembers the operations it said left the lab changed. */
+export interface Watched {
+  readonly sink: OperationRun.Sink
+  /** The labels of the instances a `lab-left-changed` event named so far, in order. */
+  readonly leftChanged: () => ReadonlyArray<string>
+}
+
+/** `sink` watched for `lab-left-changed`: what a job ended by a failure or an interruption knows of its heals. */
+export const watching = (sink: OperationRun.Sink): Watched => {
+  const left: Array<string> = []
+  return {
+    sink: (event) =>
+      Effect.andThen(
+        Effect.sync(() => {
+          if (event.phase === OperationRun.LAB_LEFT_CHANGED) left.push(event.operation)
+        }),
+        sink(event)
+      ),
+    leftChanged: () => [...left]
+  }
+}

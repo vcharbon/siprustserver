@@ -33,7 +33,10 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...operation("first", {}),
   ...operation("second", {}),
   ...operation("stateful", {
-    inject: traced("inject stateful", `cp "$SIPRIG_CONTEXT" ../../context-seen.json\necho token > "$SIPRIG_STATE/token"`),
+    inject: traced(
+      "inject stateful",
+      `cp "$SIPRIG_CONTEXT" ../../context-seen.json\nls -A "$SIPRIG_STATE" > ../../state-seen\necho token > "$SIPRIG_STATE/token"`
+    ),
     heal: traced("heal stateful $(cat $SIPRIG_STATE/token)")
   }, `needs = ["records-store"]\n[params]\ngrace_s = 5`),
   ...operation("failing-inject", { inject: traced("inject failing-inject", "exit 3") }),

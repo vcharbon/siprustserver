@@ -10,8 +10,11 @@
  * A heal attempt is `heal` and its probe. A failed attempt is run once more;
  * a second failure is the event `lab-left-changed`.
  */
+import * as Cause from "effect/Cause"
 import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
+import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as fs from "node:fs"
 import * as path from "node:path"
@@ -76,31 +79,38 @@ const layoutOf = (instance: Instance) => ({
 })
 
 /**
- * Writes `instance`'s directories and, where it has none yet, its `context.v1`
- * file, its window opening at `start`: a heal reads the context its inject was
- * given.
+ * Lays out `instance`'s directory for `step`. An inject starts from an empty
+ * directory and writes the `context.v1` file, its window opening at `start`;
+ * a heal keeps what its inject left, the context it was given above all, and
+ * writes a context only where the inject left none. Why it could not, as a
+ * failure.
  */
-const prepare = (instance: Instance, start: { readonly lane_ms: number; readonly wall_ms: number }) =>
-  Effect.sync(() => {
-    const layout = layoutOf(instance)
-    fs.mkdirSync(layout.state, { recursive: true })
-    fs.mkdirSync(layout.out, { recursive: true })
-    if (fs.existsSync(layout.context)) return
-    const context: Context.Context = {
-      schema: Context.SCHEMA,
-      scope: "job",
-      window: { start },
-      cells: [],
-      ...(instance.lane === undefined ? {} : { lane: Context.laneOf(instance.lane) }),
-      params: { ...instance.operation.manifest.params }
-    }
-    fs.writeFileSync(layout.context, `${JSON.stringify(context, null, 2)}\n`)
+const prepare = (instance: Instance, step: "inject" | "heal", start: { readonly lane_ms: number; readonly wall_ms: number }) =>
+  Effect.try({
+    try: () => {
+      const layout = layoutOf(instance)
+      if (step === "inject") fs.rmSync(instance.dir, { recursive: true, force: true })
+      fs.mkdirSync(layout.state, { recursive: true })
+      fs.mkdirSync(layout.out, { recursive: true })
+      if (step === "heal" && fs.existsSync(layout.context)) return
+      const context: Context.Context = {
+        schema: Context.SCHEMA,
+        scope: "job",
+        window: { start },
+        cells: [],
+        ...(instance.lane === undefined ? {} : { lane: Context.laneOf(instance.lane) }),
+        params: { ...instance.operation.manifest.params }
+      }
+      fs.writeFileSync(layout.context, `${JSON.stringify(context, null, 2)}\n`)
+    },
+    catch: (cause) => `its directory ${instance.dir} not laid out: ${cause instanceof Error ? cause.message : String(cause)}`
   })
 
 const now = Effect.map(Clock.currentTimeMillis, (clock_ms) => ({ clock_ms, wall_ms: Date.now() }))
 
 /** {@link prepare} with the window opening now. */
-const prepared = (instance: Instance) => Effect.flatMap(now, (at) => prepare(instance, { lane_ms: at.clock_ms, wall_ms: at.wall_ms }))
+const prepared = (instance: Instance, step: "inject" | "heal") =>
+  Effect.flatMap(now, (at) => prepare(instance, step, { lane_ms: at.clock_ms, wall_ms: at.wall_ms }))
 
 const emit = (sink: Sink, instance: Instance, phase: Phase, message?: string) =>
   Effect.flatMap(now, (at) => sink({ operation: instance.label, phase, ...at, ...(message === undefined ? {} : { message }) }))
@@ -115,12 +125,16 @@ const step = (instance: Instance, file: string, name: "inject" | "heal" | "probe
   )
 }
 
-/** Injects `instance`: its directory and context written, then `inject` run within its bound. */
+/** Injects `instance`: its directory emptied and its context written, then `inject` run within its bound. */
 export const inject = (instance: Instance, sink: Sink): Effect.Effect<void, InjectFailed> =>
   Effect.gen(function*() {
     const bounds = Operation.boundsOf(instance.operation.manifest)
-    yield* prepared(instance)
     yield* emit(sink, instance, "inject")
+    const laid = yield* Effect.result(prepared(instance, "inject"))
+    if (Result.isFailure(laid)) {
+      yield* emit(sink, instance, "failed", `inject not run: ${laid.failure}`)
+      return yield* new InjectFailed({ operation: instance.label, reason: `not run: ${laid.failure}` })
+    }
     const { ended, said } = yield* step(instance, instance.operation.manifest.run.inject, "inject", bounds.inject_s * 1000).pipe(
       Effect.onInterrupt(() => emit(sink, instance, "failed", "inject interrupted, its process group killed"))
     )
@@ -153,6 +167,11 @@ const attempt = (instance: Instance, sink: Sink) =>
     const manifest = instance.operation.manifest
     const bounds = Operation.boundsOf(manifest)
     yield* emit(sink, instance, "heal")
+    const laid = yield* Effect.result(prepared(instance, "heal"))
+    if (Result.isFailure(laid)) {
+      yield* emit(sink, instance, "failed", `heal not run: ${laid.failure}`)
+      return `heal not run: ${laid.failure}`
+    }
     const { ended, said } = yield* step(instance, manifest.run.heal, "heal", bounds.heal_s * 1000)
     if (!Executable.succeeded(ended)) {
       yield* emit(sink, instance, "failed", `heal ${said}`)
@@ -168,16 +187,20 @@ const attempt = (instance: Instance, sink: Sink) =>
     return undefined
   })
 
+/** Why an attempt that ended `ended` failed, or `undefined`; one that died failed with its defect. */
+const whyOf = (ended: Exit.Exit<string | undefined>): string | undefined =>
+  Exit.isSuccess(ended) ? ended.value : `heal attempt died: ${Cause.pretty(ended.cause).split("\n")[0]}`
+
 /**
  * Heals `instance`, uninterruptibly: up to {@link HEAL_ATTEMPTS} attempts,
- * the last failed one followed by `lab-left-changed`. Whether it recovered.
+ * the last failed one followed by `lab-left-changed`. An attempt that dies is
+ * a failed one. Whether it recovered.
  */
 export const heal = (instance: Instance, sink: Sink): Effect.Effect<boolean> =>
   Effect.uninterruptible(Effect.gen(function*() {
-    yield* prepared(instance)
     let why: string | undefined
     for (let tried = 1; tried <= HEAL_ATTEMPTS; tried++) {
-      why = yield* attempt(instance, sink)
+      why = whyOf(yield* Effect.exit(attempt(instance, sink)))
       if (why === undefined) return true
     }
     yield* emit(sink, instance, LAB_LEFT_CHANGED, `${HEAL_ATTEMPTS} heal attempts failed, the last: ${why}`)

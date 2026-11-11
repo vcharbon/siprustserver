@@ -2,8 +2,9 @@
  * A job's setup operations, run as real executables: injected in order, then
  * the job, then healed in reverse whatever ended the job (a failure, an
  * interruption, a failed inject); a heal that fails twice is the event
- * `lab-left-changed`; a probe answering 75 is called again within its bound;
- * each step is an event. The plan refuses a name the path does not define and
+ * `lab-left-changed`, and the heals before it still run; a probe answering 75
+ * is called again within its bound; each step is an event; an inject starts
+ * from an empty directory. The plan refuses a name the path does not define and
  * one whose parts no lane names.
  */
 import * as Effect from "effect/Effect"
@@ -23,7 +24,10 @@ import { run, tree } from "./tree.js"
 const made: Array<string> = []
 
 afterEach(() => {
-  for (const dir of made.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const dir of made.splice(0)) {
+    if (fs.existsSync(path.join(dir, "job"))) fs.chmodSync(path.join(dir, "job"), 0o755)
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 /** A rig path holding every sample operation, loaded; its root. */
@@ -135,6 +139,66 @@ describe("a job's setup", () => {
       backend: {},
       parts: { "records-store": { name: "lab-1", file: store, value: { file: store } } }
     })
+  })
+
+  it("injects into an emptied directory with a fresh context when the job's directory is reused", async () => {
+    const { root, rig } = await samples()
+    const { sink } = collecting()
+    const store = "targets/records-store/lab-1.toml"
+    const planned = plan(rig, root, ["stateful"], [laneOf("bench", { "records-store": store })])
+    await exitOf(Setup.around(planned, sink, Effect.void))
+    const dir = planned[0]!.dir
+    const stale = { ...JSON.parse(fs.readFileSync(path.join(dir, "context.json"), "utf8")), params: { grace_s: 99 } }
+    fs.writeFileSync(path.join(dir, "context.json"), JSON.stringify(stale))
+    fs.writeFileSync(path.join(dir, "state", "left-over"), "")
+    await exitOf(Setup.around(planned, sink, Effect.void))
+    expect(JSON.parse(fs.readFileSync(path.join(root, "context-seen.json"), "utf8")).params).toEqual({ grace_s: 5 })
+    expect(fs.readFileSync(path.join(root, "state-seen"), "utf8")).toBe("")
+    expect(traceOf(root)).toEqual(["inject stateful", "heal stateful token", "inject stateful", "heal stateful token"])
+  })
+
+  it("heals every earlier operation when a later one's directory cannot be laid out, that one marking the lab", async () => {
+    const { root, rig } = await samples()
+    const { events, sink } = collecting()
+    const job = path.join(root, "job")
+    const locking: OperationRun.Sink = (event) =>
+      Effect.andThen(
+        sink(event),
+        Effect.sync(() => {
+          if (event.phase === "injected" && event.operation === "first") fs.chmodSync(job, 0o555)
+        })
+      )
+    const exit = await exitOf(Setup.around(plan(rig, root, ["first", "second"]), locking, Effect.succeed("the job ran")))
+    expect(Exit.isFailure(exit) && String(exit.cause)).toContain("second: inject not run: its directory")
+    expect(traceOf(root)).toEqual(["inject first", "heal first"])
+    expect(events.filter((event) => event.operation === "second").map((event) => event.phase)).toEqual([
+      "inject",
+      "failed",
+      "heal",
+      "failed",
+      "heal",
+      "failed",
+      "lab-left-changed"
+    ])
+    expect(events.slice(-3).map((event) => `${event.phase} ${event.operation}`)).toEqual([
+      "heal first",
+      "healed first",
+      "recovered first"
+    ])
+  })
+
+  it("tells a watching sink of a lab left changed by a job that was interrupted", async () => {
+    const { root, rig } = await samples()
+    const { sink, phases } = collecting()
+    const watched = Setup.watching(sink)
+    const exit = await Effect.runPromise(Effect.gen(function*() {
+      const fiber = yield* Effect.forkChild(Setup.around(plan(rig, root, ["first", "failing-heal"]), watched.sink, Effect.never))
+      yield* Effect.sleep("20 millis").pipe(Effect.repeat({ until: () => phases().includes("injected failing-heal") }))
+      return yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
+    }))
+    expect(Exit.hasInterrupts(exit)).toBe(true)
+    expect(watched.leftChanged()).toEqual(["failing-heal"])
+    expect(traceOf(root)).toEqual(["inject first", "inject failing-heal", "heal failing-heal", "heal failing-heal", "heal first"])
   })
 
   it("marks the lab left changed when a heal fails twice, having run it twice", async () => {
