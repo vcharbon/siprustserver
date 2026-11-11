@@ -5,12 +5,13 @@
  * argument and prints it on its standard output, as a runner reports to its
  * terminal. A signal is its only way to end.
  */
-import { NodeRuntime, NodeServices } from "@effect/platform-node"
+import { NodeServices } from "@effect/platform-node"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as RigPath from "../../../src/rig-path.js"
+import * as RunMain from "../../../src/run-main.js"
 import * as Setup from "../../../src/setup.js"
 
 const [root = "", names = "", events = ""] = process.argv.slice(2)
@@ -27,4 +28,4 @@ Effect.gen(function*() {
       ),
     Effect.never
   )
-}).pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain)
+}).pipe(Effect.provide(NodeServices.layer), RunMain.runMain)

@@ -4,7 +4,8 @@
  * path that finds them, the lane file (`lane.v1`) and the parts it names, the
  * collection levels and lane wiring checked before a job opens, the context an
  * executable reads and how one runs, an operation's run and a job's setup, the
- * cell description, and the compiled cells a case source yields.
+ * main of a process that runs them, the cell description, and the compiled
+ * cells a case source yields.
  */
 export * as Capability from "./capability.js"
 export * as CaseSource from "./case-source.js"
@@ -24,4 +25,5 @@ export * as OperationRun from "./operation-run.js"
 export * as Pack from "./pack.js"
 export * as Part from "./part.js"
 export * as RigPath from "./rig-path.js"
+export * as RunMain from "./run-main.js"
 export * as Setup from "./setup.js"

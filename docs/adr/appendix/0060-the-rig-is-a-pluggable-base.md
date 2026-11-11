@@ -217,7 +217,8 @@ probe  = "./probe"             # optional
 - Each executable runs in a process group of its own. A timeout kills the group; a signal to
   the runner reaches only the runner, which then heals.
 - A named campaign's `setup` list injects after provisioning and heals in reverse at the end of
-  the job, whatever happened, an interrupted job and a SIGINT or SIGTERM to the runner included.
+  the job, whatever happened, an interrupted job and a SIGINT, SIGTERM or SIGHUP to the runner
+  included; the runner's output to a terminal or pipe that is gone never stops a heal.
   A setup name is an operation of the path. One that needs parts runs once per distinct set of
   those part files among the job's lanes, with the first lane naming the set as its context.
   One that needs no part runs once. A name the path lacks, or parts no lane names, refuse the
