@@ -885,6 +885,86 @@ const verifications = Effect.gen(function*() {
 export const VERIFICATIONS = "15_verifications"
 
 /**
+ * `attachments`: the typed files (`@sip/contracts` `Attachment`) of a cell (a
+ * `case_results` row), a batch or a job, one per name per holder, in the
+ * order they were listed: `dir` the holder's directory as `runs.bundle_path`
+ * stores a bundle, `file` relative to it (a `link`'s URL, its `dir` empty).
+ */
+const attachments = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE attachments (
+      id        bigserial PRIMARY KEY,
+      scope     text NOT NULL CHECK (scope IN ('cell', 'batch', 'job')),
+      run_id    bigint,
+      case_id   text,
+      batch_id  bigint REFERENCES batches (id) ON DELETE CASCADE,
+      job_id    bigint REFERENCES jobs (id) ON DELETE CASCADE,
+      ordinal   integer NOT NULL,
+      name      text NOT NULL,
+      kind      text NOT NULL CHECK (kind IN ('log', 'records', 'diff', 'table', 'json', 'file', 'link')),
+      title     text,
+      dir       text NOT NULL,
+      file      text NOT NULL,
+      source    text NOT NULL,
+      FOREIGN KEY (run_id, case_id) REFERENCES case_results (run_id, case_id) ON DELETE CASCADE,
+      CHECK ((scope = 'cell') = (run_id IS NOT NULL AND case_id IS NOT NULL)),
+      CHECK ((scope = 'batch') = (batch_id IS NOT NULL)),
+      CHECK ((scope = 'job') = (job_id IS NOT NULL))
+    )
+  `
+  yield* sql`CREATE UNIQUE INDEX attachments_cell_idx ON attachments (run_id, case_id, name) WHERE scope = 'cell'`
+  yield* sql`CREATE UNIQUE INDEX attachments_batch_idx ON attachments (batch_id, name) WHERE scope = 'batch'`
+  yield* sql`CREATE UNIQUE INDEX attachments_job_idx ON attachments (job_id, name) WHERE scope = 'job'`
+})
+
+/** The key of the migration that holds the attachments of a cell, a batch and a job. */
+export const ATTACHMENTS = "16_attachments"
+
+/**
+ * A job's attachments moved to `job_attachments`, which references `jobs`
+ * alone: a `TRUNCATE … CASCADE` of the results (`result-reset.ts`) empties
+ * `attachments` whole and never reaches a job's. Both tables draw their ids
+ * from one sequence; `attachment_rows` reads them as one.
+ */
+const jobAttachments = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE job_attachments (
+      id        bigint PRIMARY KEY DEFAULT nextval('attachments_id_seq'),
+      job_id    bigint NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+      ordinal   integer NOT NULL,
+      name      text NOT NULL,
+      kind      text NOT NULL CHECK (kind IN ('log', 'records', 'diff', 'table', 'json', 'file', 'link')),
+      title     text,
+      dir       text NOT NULL,
+      file      text NOT NULL,
+      source    text NOT NULL
+    )
+  `
+  yield* sql`CREATE UNIQUE INDEX job_attachments_idx ON job_attachments (job_id, name)`
+  yield* sql`
+    INSERT INTO job_attachments (id, job_id, ordinal, name, kind, title, dir, file, source)
+    SELECT id, job_id, ordinal, name, kind, title, dir, file, source FROM attachments WHERE scope = 'job'
+  `
+  yield* sql`DELETE FROM attachments WHERE scope = 'job'`
+  yield* sql`ALTER TABLE attachments DROP COLUMN job_id`
+  yield* sql`ALTER TABLE attachments DROP CONSTRAINT attachments_scope_check`
+  yield* sql`ALTER TABLE attachments ADD CONSTRAINT attachments_scope_check CHECK (scope IN ('cell', 'batch'))`
+  yield* sql`
+    CREATE VIEW attachment_rows AS
+    SELECT id, scope, run_id, case_id, batch_id, NULL::bigint AS job_id, ordinal, name, kind, title, dir, file, source
+    FROM attachments
+    UNION ALL
+    SELECT id, 'job', NULL, NULL, NULL, job_id, ordinal, name, kind, title, dir, file, source
+    FROM job_attachments
+  `
+})
+
+/** The key of the migration that keeps a job's attachments apart from the results. */
+export const JOB_ATTACHMENTS = "17_job_attachments"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -903,7 +983,9 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [INBOX_JOBS]: inboxJobs,
   [BATCHES]: batches,
   [JOB_EVENTS]: jobEvents,
-  [VERIFICATIONS]: verifications
+  [VERIFICATIONS]: verifications,
+  [ATTACHMENTS]: attachments,
+  [JOB_ATTACHMENTS]: jobAttachments
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

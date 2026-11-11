@@ -1,9 +1,9 @@
 /**
  * One case's delta on one run and lane: the cell's verification lines and
  * status, the failed checks as large cards, each
- * with its decision line and the cell's decision-service log beside it, the
- * cell's CDRs and their delta against the case's other sub-cases or lanes,
- * then the ladder of what the run produced and the HTTP exchanges, the
+ * with its decision line and the attachment it was read from beside it, the
+ * cell's attachments and its records compared with the case's other
+ * sub-cases or lanes, then the ladder of what the run produced and the HTTP exchanges, the
  * selected message above the ladder. A check's anchor (the datagram it names
  * where one arrived, else its step's message) and an exchange's preceding
  * message select a ladder message; the header copies the modal's own link.
@@ -11,43 +11,48 @@
 import { buildRecordingLayout, type LadderEvent, NO_HTTP_EXCHANGES, parseRecording } from "@sip/viewer-core"
 import type { JSX } from "react"
 import { useMemo, useRef, useState } from "react"
-import { api, type Campaign, type CampaignLane, type CampaignResult, useAsync } from "../api.ts"
+import {
+  api,
+  type AttachmentListed,
+  attachmentFileHref,
+  type Campaign,
+  type CampaignLane,
+  type CampaignResult,
+  useAsync
+} from "../api.ts"
 import { arrivedMessages } from "../campaign-arrived-message.ts"
 import { caseLink } from "../campaign-case-link.ts"
-import { declaredOf } from "../campaign-cdr.ts"
 import { checkMessages } from "../campaign-check-message.ts"
 import { statusOf } from "../campaign-facets.ts"
 import { exchangesAfter } from "../exchange-after.ts"
 import { cellDocument } from "../opening.ts"
 import { useLinkOrigin } from "../server-config.ts"
 import { useCopy } from "../use-copy.ts"
-import { CdrDeltaTable } from "./CdrDeltaTable.tsx"
-import { CellCdrs } from "./CellCdrs.tsx"
+import { AttachmentList } from "./attachments/AttachmentList.tsx"
 import { CheckCard } from "./CheckCard.tsx"
 import { Exchange } from "./Exchange.tsx"
 import { LadderPane } from "./LadderPane.tsx"
+import { RecordsCompare } from "./RecordsCompare.tsx"
 import { scrollTopFor } from "./scroll.ts"
 import { SipMessageView } from "./SipMessageView.tsx"
 import { VerificationLines } from "./VerificationLines.tsx"
 
-const logPath = (capture: string, session: string, cell: string) =>
-  `/api/campaign/${encodeURIComponent(capture)}/runs/${encodeURIComponent(session)}/cells/${encodeURIComponent(cell)}/log`
-
-const LogLine = ({ capture, session, result }: {
-  readonly capture: string
-  readonly session: string
+/** The count of what `said` was read from, linked to the cell's attachment `log` where it holds it. */
+const LogLine = ({ result, log }: {
   readonly result: CampaignResult
+  readonly log: AttachmentListed | undefined
 }): JSX.Element | null => {
   if (result.cell === null || result.log === null) return null
   if (result.log.missing !== undefined) return <span className="cp-log muted"> · log missing: {result.log.missing}</span>
+  if (log === undefined) return <span className="cp-log muted"> · log ({result.log.records})</span>
   return (
-    <a className="cp-log" href={logPath(capture, session, result.cell)} target="_blank" rel="noreferrer">
+    <a className="cp-log" href={attachmentFileHref(log.id)} target="_blank" rel="noreferrer">
       {" "}· log ({result.log.records})
     </a>
   )
 }
 
-/** The case's checks, CDRs and ladder; a check made at a message the ladder holds links to it. */
+/** The case's checks, attachments and ladder; a check made at a message the ladder holds links to it. */
 const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
   readonly view: Campaign
   readonly laneRun: CampaignLane
@@ -63,6 +68,12 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
     () => (cell === null ? Promise.resolve(undefined) : api.triageCell(capture, session, cell)),
     `${capture}/${session}/${cell ?? ""}`
   )
+  const attached = useAsync(
+    () => (cell === null ? Promise.resolve([]) : api.attachments({ run: laneRun.runId, case: caseId })),
+    `${laneRun.runId}/${caseId}/${cell ?? ""}`
+  )
+  const listed = attached.state === "ok" ? attached.value : []
+  const said = listed.find((one) => one.name === view.saidLog)
   const [selected, setSelected] = useState<string | undefined>(undefined)
   const ladderRef = useRef<HTMLDivElement | null>(null)
   const value = detail.state === "ok" ? detail.value : undefined
@@ -109,7 +120,7 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
             check={check}
             sides={view.sides}
             saidLabel={view.saidLabel}
-            said={<LogLine capture={capture} session={session} result={result} />}
+            said={<LogLine result={result} log={said} />}
             onAnchor={target === undefined ? undefined : () => show(target)}
           />
         )
@@ -117,13 +128,12 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
       {result.checks.length === 0 && result.outcome !== "error" && (
         <p className="mono">
           {view.saidLabel}
-          <LogLine capture={capture} session={session} result={result} />
+          <LogLine result={result} log={said} />
         </p>
       )}
-      {cell !== null && (
-        <CellCdrs capture={capture} session={session} cell={cell} declared={declaredOf(view, caseId, run)} />
-      )}
-      {cell !== null && <CdrDeltaTable view={view} caseId={caseId} run={run} lane={lane} />}
+      {cell !== null && attached.state === "error" && <p className="cp-nok">attachments: {attached.message}</p>}
+      {cell !== null && attached.state === "ok" && <AttachmentList listed={listed} heading="Attachments" />}
+      {cell !== null && <RecordsCompare view={view} caseId={caseId} run={run} lane={lane} listed={listed} />}
       {cell !== null && detail.state === "loading" && <p className="muted">…</p>}
       {detail.state === "error" && <p className="cp-nok">{detail.message}</p>}
       {layout !== undefined && (

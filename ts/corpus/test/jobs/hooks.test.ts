@@ -49,6 +49,13 @@ describe("Hooks.run", () => {
     expect(fs.readFileSync(path.join(dir, "tell.log"), "utf8")).toBe("exit 0\na.pcap b.pcap\n2\n")
   })
 
+  it("states each log a log attachment of the job, its file read under the job's directory", async () => {
+    const logs = await run(Hooks.run([tell], "after", env(["a.pcap"]), path.join(dir, "hooks"), dir))
+    const [attached] = Hooks.attachmentsOf(dir, logs)
+    expect(attached).toEqual({ name: "hook-tell", kind: "log", title: "hook tell", file: "hooks/tell.log", source: "hooks" })
+    expect(fs.readFileSync(path.join(dir, attached!.file), "utf8")).toBe("exit 0\na.pcap\n1\n")
+  })
+
   it("states the count in HOOK_CAPTURE when the list would not fit one environment string", async () => {
     const captures = Array.from({ length: 12_000 }, (_, i) => `capture_${String(i).padStart(36, "0")}.pcap.gz`)
     expect(captures.join(" ").length).toBeGreaterThan(Hooks.CAPTURE_LIMIT)

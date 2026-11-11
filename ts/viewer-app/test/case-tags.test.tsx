@@ -38,6 +38,7 @@ const view: Campaign = {
   env: null,
   envs: [],
   saidLabel: "said",
+  saidLog: "said-log",
   sides: [],
   lanes: ["real"],
   runs: [run],

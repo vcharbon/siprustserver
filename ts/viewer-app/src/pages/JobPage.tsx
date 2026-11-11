@@ -2,7 +2,7 @@
  * One job (§6 J3, J4, J8): its status, exit and instants, the request it
  * runs with its selection, the chain it restarts, the progress bar with its
  * counts and the batch it is on, the job's verification lines and each batch
- * with the lines its end gates answered, the live log, the hook logs folded, the
+ * with the lines its end gates answered, the live log, its attachments folded (its hook logs), the
  * cells the resolution found gone with their reasons, and the cells landed
  * red so far, each linked to its study — and the same verbs as the list.
  * Re-read every two seconds while the job runs; everything shown is a row
@@ -10,8 +10,9 @@
  */
 import type { JSX } from "react"
 import { useEffect, useState } from "react"
-import { api, type JobCells, type JobDetail, type JobHook, type JobRedCell, type TriageMainError } from "../api.ts"
+import { api, type JobCells, type JobDetail, type JobRedCell, type TriageMainError } from "../api.ts"
 import { Age } from "../components/Age.tsx"
+import { AttachmentList } from "../components/attachments/AttachmentList.tsx"
 import { JobActions } from "../components/JobActions.tsx"
 import { Link } from "../components/Link.tsx"
 import { LogTail } from "../components/LogTail.tsx"
@@ -127,19 +128,6 @@ const RedTable = ({ slice }: { readonly slice: Extract<JobCells, { outcome: "red
   </table>
 )
 
-const Hooks = ({ hooks }: { readonly hooks: readonly JobHook[] }): JSX.Element | null =>
-  hooks.length === 0 ? null : (
-    <section>
-      <h2>hooks <span className="count">{hooks.length}</span></h2>
-      {hooks.map((hook) => (
-        <details key={hook.name} className="job-hook">
-          <summary className="mono">{hook.name}.log <span className="count muted">{hook.text.length} chars</span></summary>
-          <pre className="log-tail-text">{hook.text === "" ? <span className="muted">(empty)</span> : hook.text}</pre>
-        </details>
-      ))}
-    </section>
-  )
-
 export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
   const [refresh, setRefresh] = useState(0)
   // Polled every two seconds until the answer says the job has ended.
@@ -151,11 +139,10 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
   useEffect(() => {
     setEvery(ENDED.has(status) ? null : POLL_MS)
   }, [status])
-  // Cells and hooks refetch when the landed count moves while the job runs, and once after it ends.
-  const cellsKey = `${id}#${refresh}#${running ? job?.progress.landed ?? 0 : "ended"}`
-  const gone = useHeld(() => api.jobCells(id, "gone", CELLS_SHOWN), `gone#${cellsKey}`)
-  const red = useHeld(() => api.jobCells(id, "red", CELLS_SHOWN), `red#${cellsKey}`)
-  const hooks = useHeld(() => api.jobHooks(id), `hooks#${id}#${refresh}#${status}`)
+  const landedOrEnded = `${id}#${refresh}#${running ? job?.progress.landed ?? 0 : "ended"}`
+  const gone = useHeld(() => api.jobCells(id, "gone", CELLS_SHOWN), `gone#${landedOrEnded}`)
+  const red = useHeld(() => api.jobCells(id, "red", CELLS_SHOWN), `red#${landedOrEnded}`)
+  const attached = useHeld(() => api.attachments({ job: id }), `attached#${id}#${refresh}#${status}`)
   const onChanged = (): void => setRefresh((n) => n + 1)
 
   if (job === undefined) {
@@ -244,7 +231,9 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
       <h2>log</h2>
       <LogTail id={job.id} path={job.logPath} />
 
-      {hooks.current !== undefined && <Hooks hooks={hooks.current} />}
+      {attached.current !== undefined && attached.current.length > 0 && (
+        <AttachmentList listed={attached.current} heading="attachments" />
+      )}
 
       {gone.current !== undefined && gone.current.outcome === "gone" && gone.current.total > 0 && (
         <section>

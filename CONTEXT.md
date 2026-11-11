@@ -266,7 +266,7 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Answer**: `pass`, `fail`, `not checkable` or `pending`.
 - **Not requested**: a verification the collection level or the lane did not ask for. It is no line.
 - **Final status**: what a cell's verifications come to: `pass`, `fail`, `fail, still verifying`, `ok so far`, `unverified`.
-- **Attachment**: a file a collector or a judge attached to a job, a batch or a cell, with a kind. Avoid: evidence (ADR-0055's).
+- **Attachment**: a file attached to a job, a batch or a cell, with a kind, listed in its holder's `attachments.jsonl`; an `attachments` row. Avoid: evidence (ADR-0055's).
 - **Collection level**: a named set of collector defaults a job is launched with.
 - **Required collector**: one no collection level and no lane switches off.
 - **Record**: one object a collector returned or a cell exported, joined to a cell by a key or assigned to it.

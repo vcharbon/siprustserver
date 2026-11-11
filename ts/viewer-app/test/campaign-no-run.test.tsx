@@ -19,6 +19,7 @@ const view: Campaign = {
   env: null,
   envs: [],
   saidLabel: "service said",
+  saidLog: "said-log",
   sides: [],
   lanes: [],
   runs: [],

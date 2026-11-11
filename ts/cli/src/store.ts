@@ -7,6 +7,7 @@
  */
 import type { Overrides } from "@sip/corpus/paths"
 import {
+  Attachments,
   Batches,
   Calls,
   CaseDocuments,
@@ -42,6 +43,7 @@ import { pathsOf } from "./options.js"
 export const services = Layer.provideMerge(
   Requests.layer,
   Layer.mergeAll(
+    Attachments.layer,
     Batches.layer,
     Calls.layer,
     CaseIds.layer,

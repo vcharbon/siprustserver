@@ -4,7 +4,8 @@
  * The bundle is self-describing: `campaign.json` names the cells and whether
  * each passed, and every cell carries the `pivot.json` it actually ran, its
  * `verdict.json`, its `classification.json` and its `rfc.json` — a cell that
- * wrote no `pivot.json` records the document its run-spec asked for. So the same reader serves the
+ * wrote no `pivot.json` records the document its run-spec asked for — and
+ * lists the files it holds as attachments (`attachments.jsonl`, `attachments.ts`). So the same reader serves the
  * live recorder, the seed and the rebuild — the DB never learns
  * anything the bundle did not already prove.
  *
@@ -27,6 +28,7 @@ import { Bundle, Confrontation as Records, MainError, StepOrder } from "@sip/con
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
+import * as Attachments from "./attachments.js"
 import { answeredOf, linesOf, VERIFICATIONS_FILE } from "./cell-lines.js"
 import type { CaseResult, RunStatus } from "./model.js"
 
@@ -302,6 +304,7 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
       ...(sourceFault === undefined ? {} : { sourceFault }),
       classification,
       document,
+      ...(dir === undefined ? {} : { attachments: yield* Attachments.listed(dir) }),
       ...(ran
         ? {
           verifications: linesOf({

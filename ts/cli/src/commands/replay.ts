@@ -90,6 +90,7 @@ import * as Option from "effect/Option"
 import { Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
 import { triageFlags } from "../flags.js"
+import { attachHooks } from "../hook-attachments.js"
 import * as IdFlags from "../id-flags.js"
 import { replayOptionsOf, requestOptionsOf, USAGE_TAIL } from "../options.js"
 import * as Refusals from "../refusals.js"
@@ -291,7 +292,7 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
     lane: options.lane,
     startedAt: new Date().toISOString()
   }
-  yield* Hooks.run(hooks, "before", env, hooksDir, launcher.hooksCwd)
+  yield* attachHooks(jobId, env.jobDir, yield* Hooks.run(hooks, "before", env, hooksDir, launcher.hooksCwd))
   const watch = (holder: string | undefined) => jobs.waiting(jobId, holder ?? null).pipe(Effect.ignore)
   const stop: Stop = yield* Deferred.make<number>()
   const passes = passesOf(shown.request.knobs)
@@ -339,12 +340,16 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
   if (replays instanceof Session.Held) yield* Console.error(`[replay] refused: ${replays.held}`)
   const finishedAt = new Date().toISOString()
   const bundles = replays instanceof Session.Held ? [] : replays.flatMap((one) => one.bundles)
-  yield* Hooks.run(
-    hooks,
-    "after",
-    { ...env, finishedAt, ...(bundles.length === 1 ? { runDir: bundles[0] } : {}) },
-    hooksDir,
-    launcher.hooksCwd
+  yield* attachHooks(
+    jobId,
+    env.jobDir,
+    yield* Hooks.run(
+      hooks,
+      "after",
+      { ...env, finishedAt, ...(bundles.length === 1 ? { runDir: bundles[0] } : {}) },
+      hooksDir,
+      launcher.hooksCwd
+    )
   )
   // Each real-lane run keeps the hook logs over its own cells' window.
   const kept = yield* HookKeep.keep(hooksDir, bundles)

@@ -64,6 +64,7 @@ const view = (...runs: Run[]): Campaign => ({
   env: null,
   envs: [],
   saidLabel: "said",
+  saidLog: "said-log",
   sides: [],
   lanes: [...new Set(runs.flatMap((r) => r.lanes.map((l) => l.lane)))],
   cases: [{ caseId: "c", ref: "c", subcase: null, family: "f", title: null, description: null, groups: [], tags: [], links: [], source: null }],

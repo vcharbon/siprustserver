@@ -16,6 +16,7 @@
  * `HOOK_RUN_DIR` (after, when the job produced exactly one run), `HOOK_JOB`
  * and `HOOK_JOB_DIR`.
  */
+import type { Attachment } from "@sip/contracts"
 import { Logged } from "@sip/toolchain"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
@@ -46,6 +47,16 @@ export interface HookLog {
   /** `<dir>/<name>.log`: the `exit N` line, then the output whole; absent where it could not be written. */
   readonly path: string
 }
+
+/** `logs` as the `log` attachments of the job whose directory, holding them, is `jobDir`. */
+export const attachmentsOf = (jobDir: string, logs: ReadonlyArray<HookLog>): ReadonlyArray<Attachment.Attachment> =>
+  logs.map((log) => ({
+    name: `hook-${log.name}`,
+    kind: "log",
+    title: `hook ${log.name}`,
+    file: path.relative(jobDir, log.path),
+    source: "hooks"
+  }))
 
 /** A command that never exits would hold the job forever. */
 export const HOOK_TIMEOUT_MS = 120_000

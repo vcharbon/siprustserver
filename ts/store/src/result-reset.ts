@@ -7,7 +7,7 @@
  * tables it names ({@link Request.tables}), with whatever references them.
  * Kept: the frozen ids, the case maps, the population, the cuts and their
  * content, the case documents, the citations and the summaries of cited runs,
- * the jobs, sweeps and requests, and the bundles on disk. The sequences never
+ * the jobs and their attachments, sweeps and requests, and the bundles on disk. The sequences never
  * move back, so no run id a citation names is minted again.
  *
  * {@link Interface.plan} is read-only and lists the pins the reset drops.

@@ -2002,19 +2002,6 @@ tr.rule-unrostered td {
   word-break: break-all;
 }
 
-.job-hook {
-  margin: 4px 0;
-  font-size: 12px;
-}
-
-.job-hook summary {
-  cursor: pointer;
-}
-
-.job-hook .log-tail-text {
-  max-height: 240px;
-}
-
 .jobs-cells td {
   vertical-align: top;
 }
@@ -2330,21 +2317,18 @@ tr.rule-unrostered td {
 .cp-modal-body { background: var(--bg); color: var(--ink); border-radius: 12px; padding: 14px 18px; width: 100%; max-width: 1100px; }
 .cp-modal-body .ladder-pane { background: var(--panel); color: var(--ink); border-radius: 8px; padding: 6px; }
 .cp-pre { font-family: var(--mono); font-size: 12px; background: var(--none-bg); padding: 10px; border-radius: 8px; white-space: pre-wrap; }
-.cp-cdr-file { margin: 6px 0; }
-.cp-cdr-file > summary { cursor: pointer; }
-.cp-cdr { margin: 4px 0 4px 14px; }
-.cp-cdr > summary { cursor: pointer; font-size: 12px; }
-.cp-cdr h4 { font-size: 12px; margin: 8px 0 2px; }
-.cp-cdr-fields td, .cp-cdr-fields th, .cp-cdr-calls td { font-size: 12px; padding: 2px 8px; }
-.cp-cdr-delta { overflow-x: auto; }
-.cp-cdr-delta td { font-size: 12px; padding: 2px 8px; }
 .cp-nowrap { white-space: nowrap; }
-.cp-delta-content td { background: var(--nok-bg); }
-.cp-delta-content td:first-child { color: var(--nok); font-weight: 700; }
-.cp-delta-expected td { background: var(--warn-bg); }
-.cp-delta-expected td:first-child { color: var(--warn); font-weight: 700; }
-.cp-delta-timing td, .cp-delta-identity td { color: var(--mute); }
 .cp-own { border-left: 2px solid var(--acc); border-right: 2px solid var(--acc); }
+
+/* An attachment, folded under its title; its kind's component once unfolded. */
+.at-item { margin: 6px 0; }
+.at-item > summary { cursor: pointer; }
+.at-cells td, .at-cells th { font-size: 12px; padding: 2px 8px; }
+.at-bar { display: flex; gap: 8px; align-items: center; margin: 4px 0; font-size: 12px; }
+.at-log .log-tail-text { max-height: 28rem; overflow: auto; }
+.at-diff { overflow-x: auto; }
+.at-loud td { background: var(--warn-bg); }
+.at-quiet td { color: var(--mute); }
 
 /* ---- study workbench: the three ladder panes ----
    One grid, its rows shared by every pane through subgrid: head, controls,

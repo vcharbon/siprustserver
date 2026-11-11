@@ -274,7 +274,13 @@ level or the lane did not ask for is *not requested*: no line, and no effect on 
 | `link` | a URL | a link |
 
 The site compares the `records` attachments of one name between two cells with the `diff`
-component. A job's text export includes its `log` attachments.
+component, record by position. A `diff` row may carry a `class`, the writer's word for how the
+difference reads; the rows of the classes its `quiet` names are listed on demand. A job's text
+export includes its `log` attachments.
+
+A writer lists what it attaches in its holder's directory, one JSON line each in
+`attachments.jsonl` (`@sip/contracts` `Attachment`): `name`, `kind`, `title`, `file`, `source`.
+The last line naming an attachment states it. The store holds one row per name per holder.
 
 ## 10. Wiring
 

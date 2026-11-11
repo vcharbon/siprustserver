@@ -15,6 +15,7 @@
  * and flattening them would make one shadow the other.
  */
 export * as AllowedErrors from "./allowed-errors.js"
+export * as Attachment from "./attachment.js"
 export * as Body from "./body.js"
 export * as Batch from "./batch.js"
 export * as Bundle from "./bundle/index.js"

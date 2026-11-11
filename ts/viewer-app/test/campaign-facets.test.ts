@@ -76,6 +76,7 @@ const VIEW: Campaign = {
   launch: null,
   own: null,
   saidLabel: "decision said",
+  saidLog: "said-log",
   sides: ["decision", "sut"],
   lanes: ["lane-x", "lane-y"],
   cases: CASES.map((caseId) => ({

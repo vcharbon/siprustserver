@@ -61,6 +61,7 @@ describe("the summary page's place", () => {
       launch: null,
       own: null,
       saidLabel: "s",
+      saidLog: "l",
       sides: [],
       lanes: ["l"],
       cases: [],
@@ -77,7 +78,7 @@ describe("the summary page's place", () => {
     const view: Campaign = {
       capture: "c",
       title: null,
-      env: null, envs: [], launch: null, own: null, saidLabel: "s", sides: [], lanes: [], cases: [],
+      env: null, envs: [], launch: null, own: null, saidLabel: "s", saidLog: "l", sides: [], lanes: [], cases: [],
       runs: [run(3, "Routing/x [a]"), run(2, null), run(1, null)]
     }
     expect(summaryOf(view, undefined).runs.map((r) => r.id)).toEqual([2, 1])

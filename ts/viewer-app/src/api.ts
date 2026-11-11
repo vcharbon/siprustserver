@@ -1,5 +1,5 @@
 /** The server client. One fetch helper, one hook, no state library. */
-import type { CompareReport, RunReport } from "@sip/contracts"
+import type { Attachment, CompareReport, RunReport } from "@sip/contracts"
 import type { HttpExchanges } from "@sip/viewer-core/http"
 import { useEffect, useState } from "react"
 
@@ -921,11 +921,6 @@ export interface JobDeletePlan {
   readonly held: readonly { readonly id: number; readonly why: string }[]
 }
 
-export interface JobHook {
-  readonly name: string
-  readonly text: string
-}
-
 export interface SourceStanding {
   readonly lane: string
   readonly runId: number
@@ -1157,70 +1152,35 @@ export interface CampaignRun {
   readonly selection: { readonly allow: readonly string[]; readonly lanes: Readonly<Record<string, readonly string[]>> } | null
   /** Every check each case the run compiled makes, by case id. */
   readonly checked: Readonly<Record<string, readonly CampaignChecked[]>>
-  /** The raw CDR lines each call of each case the run compiled declares, by case id; absent where the deployment states none. */
-  readonly rawCdr?: Readonly<Record<string, readonly CampaignDeclaredLines[]>>
 }
 
-/** One call's declared raw CDR lines: its id in the case, the caller leg its Call-ID is minted for, how many. */
-export interface CampaignDeclaredLines {
-  readonly call: string
-  readonly leg: string
-  readonly lines: number
-}
+/** What renders an attachment's file (`@sip/contracts` `Attachment.Kind`). */
+export type AttachmentKind = Attachment.Kind
 
-/** One CDR of a cell as the call details draw it: a title, its fields, its tables, the whole as JSON where it is one. */
-export interface CdrBlock {
+/** One attachment a holder lists: its id, its name, its kind, what heads it, who attached it. */
+export interface AttachmentListed {
+  readonly id: number
+  readonly name: string
+  readonly kind: AttachmentKind
   readonly title: string
-  readonly fields: ReadonlyArray<{ readonly name: string; readonly value: string }>
-  readonly tables: readonly CdrTable[]
-  readonly json: unknown
+  readonly source: string
 }
 
-/** A titled table of text cells: its column headings, its rows. */
-export interface CdrTable {
-  readonly title: string
-  readonly columns: readonly string[]
-  readonly rows: ReadonlyArray<readonly string[]>
-}
+/** A holder of attachments: a cell by its run and case, a batch, a job. */
+export type AttachmentHolder =
+  | { readonly run: number; readonly case: string }
+  | { readonly batch: number }
+  | { readonly job: number }
 
-/** A campaign cell's CDRs: each file its bundle holds as blocks or one table, its raw CDR lines per call, the counts its verdict states. */
-export interface CellCdr {
-  readonly files: ReadonlyArray<{
-    readonly name: string
-    readonly label: string
-    readonly blocks: readonly CdrBlock[]
-    /** The whole file as one table, a column per line where it is lines; null where it reads as blocks. */
-    readonly table: CdrTable | null
-    /** Why a held file reads as neither blocks nor a table; null where it reads. */
-    readonly note: string | null
-  }>
-  /** The raw CDR lines of each call, by the caller leg its Call-ID is minted for; null where the cell holds none. */
-  readonly lines: ReadonlyArray<{ readonly leg: string; readonly callId: string; readonly lines: number }> | null
-  readonly facts: ReadonlyArray<{ readonly name: string; readonly value: string }>
-}
-
-/**
- * How a differing CDR field is read: `timing` and `identity` are expected to
- * differ, `expected` differs and is accepted, `content` is not.
- */
-export type CdrDeltaKind = "timing" | "identity" | "expected" | "content"
-
-/** The raw CDR lines of several cells, the fields that tell them apart. */
-export interface CdrDelta {
-  /** Each cell compared and its raw CDR lines; null where its bundle holds none. */
-  readonly columns: ReadonlyArray<{ readonly session: string; readonly cell: string; readonly lines: number | null }>
-  readonly rows: ReadonlyArray<{
-    readonly leg: string
-    readonly line: number
-    /** The last line the row stands for: `line` but for a run of missing lines. */
-    readonly last: number
-    readonly field: string
-    readonly kind: CdrDeltaKind
-    readonly values: ReadonlyArray<string | null>
-  }>
-  /** The fields compared that read the same in every cell holding their line. */
-  readonly same: number
-}
+/** One attachment read for its kind's component. */
+export type AttachmentView =
+  | { readonly kind: "log"; readonly text: string; readonly bytes: number }
+  | { readonly kind: "records"; readonly records: ReadonlyArray<Readonly<Record<string, string>>> }
+  | { readonly kind: "diff"; readonly diff: Attachment.Diff }
+  | ({ readonly kind: "table" } & Attachment.Table)
+  | { readonly kind: "json"; readonly value: unknown }
+  | { readonly kind: "file"; readonly bytes: number }
+  | { readonly kind: "link"; readonly url: string }
 
 /** One thing a campaign case uses, under the role it plays, with the page it is read on where there is one. */
 export interface CampaignLink {
@@ -1276,6 +1236,8 @@ export interface Campaign {
   readonly envs: readonly string[]
   /** The label of a check's `said`. */
   readonly saidLabel: string
+  /** The name of the cell attachment a check's `said` was read from. */
+  readonly saidLog: string
   /** The side vocabulary, in the order the pages list it. */
   readonly sides: readonly string[]
   readonly lanes: readonly string[]
@@ -1498,7 +1460,6 @@ export const api = {
   jobRestart: (id: number, mode: "resume" | "again") => post<JobStarted>(`/api/jobs/${id}/restart`, { mode }),
   jobDeletePlan: (id: number) => request<JobDeletePlan>(`/api/jobs/${id}/delete-plan`),
   jobDelete: (id: number) => post<JobStarted>(`/api/jobs/${id}/delete`, {}),
-  jobHooks: (id: number) => request<readonly JobHook[]>(`/api/jobs/${id}/hooks`),
   sources: (query: { stale?: boolean; q?: string; limit?: number; offset?: number }) =>
     request<SourcesPage>(
       `/api/sources${search({ stale: query.stale === true ? "1" : undefined, q: query.q, limit: query.limit, offset: query.offset })}`
@@ -1509,19 +1470,14 @@ export const api = {
   /** One environment's latest runs of a campaign (the server's choice where none is named), `run` among them. */
   campaign: (capture: string, query: { readonly env?: string | undefined; readonly run?: number | undefined } = {}) =>
     request<Campaign>(`/api/campaign/${encodeURIComponent(capture)}${search({ env: query.env, run: query.run })}`),
-  /** A campaign cell's CDRs, decoded. */
-  campaignCdr: (capture: string, session: string, cell: string) =>
-    request<CellCdr>(`${campaignCellPath(capture, session, cell)}/cdr`),
-  /** The raw CDR lines of `cells` compared, in their order. */
-  campaignCdrDelta: (capture: string, cells: ReadonlyArray<{ readonly session: string; readonly cell: string }>) =>
-    request<CdrDelta>(
-      `/api/campaign/${encodeURIComponent(capture)}/cdr-delta${search({ cells: cells.map((c) => `${c.session}/${c.cell}`).join(",") })}`
-    )
+  /** What `holder` holds attached, in its order. */
+  attachments: (holder: AttachmentHolder) => request<readonly AttachmentListed[]>(`/api/attachments${search(holder)}`),
+  /** The attachment `id` read for its kind. */
+  attachment: (id: number) => request<AttachmentView>(`/api/attachments/${id}`)
 }
 
-/** The path of one campaign cell under the API. */
-export const campaignCellPath = (capture: string, session: string, cell: string): string =>
-  `/api/campaign/${encodeURIComponent(capture)}/runs/${encodeURIComponent(session)}/cells/${encodeURIComponent(cell)}`
+/** Where the attachment `id`'s file is read whole. */
+export const attachmentFileHref = (id: number): string => `/api/attachments/${id}/file`
 
 export type Async<A> =
   | { readonly state: "loading" }

@@ -262,6 +262,9 @@ importers:
 
   viewer-app:
     dependencies:
+      '@sip/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@sip/viewer-core':
         specifier: workspace:*
         version: link:../viewer-core
@@ -272,9 +275,6 @@ importers:
         specifier: 19.2.8
         version: 19.2.8(react@19.2.8)
     devDependencies:
-      '@sip/contracts':
-        specifier: workspace:*
-        version: link:../contracts
       '@types/node':
         specifier: 24.10.1
         version: 24.10.1
