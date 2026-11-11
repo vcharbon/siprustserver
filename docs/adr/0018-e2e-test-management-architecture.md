@@ -5,7 +5,7 @@
 accepted — amended 2026-06-14 (layout-owned **egress rewrite**; see Decision);
 amended 2026-07-03 (the shape registry is now the unified **open**
 `ShapeRegistry` in `e2e-model`, shared with the load surface — ADR-0021).
-Superseded in part by [ADR-0060](0060-the-rig-is-a-pluggable-base.md) (proposed) (the runner and the site).
+Superseded in part by [ADR-0060](0060-the-rig-is-a-pluggable-base.md) (proposed): the runner and the site.
 
 ## Context
 
