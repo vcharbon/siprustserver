@@ -69,6 +69,7 @@ interface Rollup {
     readonly skipped?: string
     readonly error?: string
     readonly restated?: string
+    readonly restatedLines?: ReadonlyArray<unknown>
   }>
 }
 
@@ -272,7 +273,12 @@ export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?:
     const decoded = verdictOf(verdict)
     const error = typeof cell.error === "string" ? cell.error : undefined
     const ran = dir !== undefined && skipped === null && error === undefined
-    const restated = typeof cell.restated === "string" ? cell.restated : null
+    const restated = typeof cell.restated === "string"
+      ? {
+        reason: cell.restated,
+        lines: (cell.restatedLines ?? []).filter((name): name is string => typeof name === "string")
+      }
+      : null
     cases.push({
       caseId,
       passed,

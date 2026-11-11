@@ -1,0 +1,4 @@
+[
+  { "name": "call", "source": "interpreter", "answer": "fail", "message": "check-failed: site=B1 180", "detail": { "step": "s7", "side": "sut" } },
+  { "name": "cleanup", "source": "lane gate", "answer": "fail", "message": "a call left", "detail": { "seen": "a call left", "side": "sut" } }
+]

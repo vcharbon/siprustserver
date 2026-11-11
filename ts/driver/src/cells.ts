@@ -16,10 +16,11 @@
  * ran. A cell that ran its interpreter and did not pass keeps what the
  * interpreter wrote on stderr in `stderr.txt`, whatever the verdict says. A
  * pivot-replay cell whose lane still waits on one of its verification lines
- * (`pending` in `verifications.json`: a batch end that never answered) does
- * not pass: nothing verified it whole. A
- * cell whose document declares its lane BLOCKED is not red either: it leaves
- * a `skipped.json` and never reaches the interpreter.
+ * (`pending` in `verifications.json`) lands not passed, naming them: a line
+ * stays pending until its batch's end answers it, and the cell is read again
+ * then (`pending.ts` `settled`). A cell whose document declares its lane
+ * BLOCKED is not red either: it leaves a `skipped.json` and never reaches the
+ * interpreter.
  *
  * A cell is INTERRUPTIBLE: an interruption reaches the interpreter's process
  * (SIGTERM, then SIGKILL after the toolchain's grace), and the cell leaves
@@ -33,12 +34,10 @@ import { ReplayCli, runner as toolchainRunner } from "@sip/toolchain"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
-import * as Option from "effect/Option"
 import * as Path from "effect/Path"
-import * as Schema from "effect/Schema"
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner"
 import { LanePresets } from "./lanes.js"
-import { pendingIn } from "./pending.js"
+import { landedIn } from "./pending.js"
 import { readRecordings } from "./recordings.js"
 import {
   cellDir,
@@ -166,6 +165,7 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
       ...(outcome.skipped === undefined ? {} : { skipped: outcome.skipped }),
       ...(outcome.sourceFault === undefined ? {} : { sourceFault: outcome.sourceFault }),
       ...(outcome.restated === undefined ? {} : { restated: outcome.restated }),
+      ...(outcome.restatedLines === undefined ? {} : { restatedLines: outcome.restatedLines }),
       ...(outcome.pending === undefined ? {} : { pending: outcome.pending })
     },
     detail: outcome.detail
@@ -200,6 +200,8 @@ interface CellOutcome {
   readonly sourceFault?: true
   /** The reclassifier restated the failed run as passed: its reason. */
   readonly restated?: string
+  /** Beside `restated`: the lane's lines failing the cell as it landed, the ones restated. */
+  readonly restatedLines?: ReadonlyArray<string>
   /** The lines the lane still waits on, where only they keep the cell from passing. */
   readonly pending?: ReadonlyArray<string>
 }
@@ -226,7 +228,9 @@ const guarded = <R>(
  * One document on one lane. The cell directory IS the interpreter's `out_dir`,
  * so the run-spec is written under `specs/` and nothing else is put there before
  * the run. A cell that only lines its lane still waits on keep from passing
- * lands not passed, naming them (`pending.ts`).
+ * lands not passed, naming them (`pending.ts`). A cell the reclassifier
+ * restates as passed names the lane's lines failing it as it lands: those,
+ * and no line failing later, are what it restated.
  */
 const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   cell: Campaign.PivotReplayCell,
@@ -295,7 +299,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   // whatever verdict it left was written before the unwind, so it cannot
   // answer for what came after.
   const panicked = report.outcome._tag === "panicked"
-  const pending = yield* pendingIn(absolute)
+  const landed = yield* landedIn(absolute)
+  const pending = landed.pending
   const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0
 
   const caseId = Campaign.cellCaseId(cell)
@@ -344,7 +349,7 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
     crashed: false,
     stderr: report.stderr,
     ...(source.length > 0 ? { sourceFault: true as const } : {}),
-    ...(restated === undefined ? {} : { restated }),
+    ...(restated === undefined ? {} : { restated, restatedLines: landed.failing }),
     ...(awaiting ? { pending } : {})
   } satisfies CellOutcome
 })

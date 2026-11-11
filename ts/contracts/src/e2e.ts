@@ -101,10 +101,17 @@ export const CellSummary = Schema.Struct({
   sourceFault: Schema.optionalKey(Schema.Literal(true)),
   /**
    * Set when the deployment's reclassifier restated a run the interpreter
-   * failed as passed: its reason, naming the rules it stood on. Every failure
-   * of the cell's lines then stands waived, the reclassifier answering it.
+   * failed as passed: its reason, naming the rules it stood on. The failures
+   * it saw as the cell landed then stand waived, the reclassifier answering
+   * them; a line that fails only later, at its batch's end, still fails.
    */
   restated: Schema.optionalKey(Schema.String),
+  /**
+   * Set beside `restated`: the names of the lines of the cell's
+   * `verifications.json` that failed it as it landed, the ones the
+   * reclassifier restated.
+   */
+  restatedLines: Schema.optionalKey(Schema.Array(Schema.String)),
   /**
    * Set while lines the cell's lane answers at its batch's end are still
    * `pending` and nothing else keeps the cell from passing: their names.
@@ -188,6 +195,7 @@ export const cellSummaryJson = (summary: CellSummary): Record<string, unknown> =
     skipped: summary.skipped,
     sourceFault: summary.sourceFault,
     restated: summary.restated,
+    restatedLines: summary.restatedLines,
     pending: summary.pending
   })
 

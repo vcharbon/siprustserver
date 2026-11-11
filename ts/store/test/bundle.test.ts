@@ -314,4 +314,23 @@ describe("Bundle.read", () => {
     expect(lines[1]!.message).toContain("sdp-origin-continuity")
     expect(Verification.finalStatusOf(lines)).toBe("pass")
   })
+
+  it("leaves failing a lane line its batch's end failed after the reclassifier restated the cell as it landed", async () => {
+    const reading = await readOf(path.join(import.meta.dirname, "fixtures", "run-lines"))
+    const late = reading.cases.find((entry) => entry.caseId.endsWith("-restated-late"))!
+    const lines = late.verifications!
+    expect(lines.map((line) => `${line.name} ${line.source} ${line.answer}${line.waived === true ? " waived" : ""}`)).toEqual([
+      "call reclassifier fail waived",
+      "cleanup lane gate fail",
+      "reclassifier reclassifier pass"
+    ])
+    expect(lines[1]).toEqual({
+      name: "cleanup",
+      source: "lane gate",
+      answer: "fail",
+      message: "a call left",
+      detail: { seen: "a call left", side: "sut" }
+    })
+    expect(Verification.finalStatusOf(lines)).toBe("fail")
+  })
 })

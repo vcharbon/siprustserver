@@ -222,15 +222,45 @@ const pendingDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { r
     }
   })) as unknown as typeof runCell
 
-/** The cell's lines: its call passed, its `cdr` line answering `cdr`. */
-const writeLines = (dir: string, cdr: string): void =>
+/** The cell's lines: its `call` line answering `call`, its `cdr` line answering `cdr`. */
+const writeLines = (dir: string, cdr: string, call = "pass"): void =>
   fs.writeFileSync(
     path.join(dir, "verifications.json"),
     JSON.stringify([
-      { name: "call", source: "interpreter", answer: "pass" },
+      { name: "call", source: "interpreter", answer: call },
       { name: "cdr", source: "cdr oracle", answer: cdr }
     ])
   )
+
+/** The `call` line's answer in the cell's lines. */
+const callIn = (dir: string): string =>
+  (JSON.parse(fs.readFileSync(path.join(dir, "verifications.json"), "utf8")) as Array<{ name: string; answer: string }>)
+    .find((line) => line.name === "call")!.answer
+
+/**
+ * A driver whose every cell's call failed and was restated as passed by the
+ * reclassifier as it landed, its `cdr` line pending on its batch's end.
+ */
+const restatedDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
+  Effect.sync(() => {
+    const id = Campaign.cellCaseId(cell)
+    const dir = path.join(context.runDir, Layout.cellDir(cell))
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, "verdict.json"), `{"status":"failed","case":"${id}"}\n`)
+    writeLines(dir, "pending", "fail")
+    landedPending.push(dir)
+    return {
+      summary: {
+        cell: Layout.cellIdOf(cell),
+        passed: false,
+        dir: Layout.cellDir(cell),
+        restated: "rule r1",
+        restatedLines: ["call"],
+        pending: ["cdr"]
+      },
+      detail: "still verifying: cdr pending"
+    }
+  })) as unknown as typeof runCell
 
 /** A batch process whose end answers every landed cell's `cdr` line `cdr`, or leaves it where `cdr` is undefined. */
 const answering = (cdr: string | undefined): StandBatch => () =>
@@ -238,7 +268,7 @@ const answering = (cdr: string | undefined): StandBatch => () =>
     run: () => Effect.die("the fake driver runs no interpreter"),
     died: () => undefined,
     end: Effect.sync(() => {
-      if (cdr !== undefined) for (const dir of landedPending) writeLines(dir, cdr)
+      if (cdr !== undefined) for (const dir of landedPending) writeLines(dir, cdr, callIn(dir))
       return undefined
     }),
     contexts: () => undefined,
@@ -277,10 +307,13 @@ const replay = (
       const rows = yield* sql<{ capture: string; status: string; concurrency: number; cleanup: string | null }>`
         SELECT capture, status, concurrency, cleanup FROM runs WHERE sweep_id = ${done.sweep} ORDER BY capture`
       const batches = yield* Effect.flatMap(Batches.Service, (store) => store.ofSweep(done.sweep))
-      const lines = yield* sql<{ caseId: string; name: string; answer: string }>`
-        SELECT v.case_id AS "caseId", v.name, v.answer FROM verifications v JOIN runs r ON r.id = v.run_id
+      const lines = yield* sql<{ caseId: string; name: string; answer: string; waived: boolean }>`
+        SELECT v.case_id AS "caseId", v.name, v.answer, v.waived FROM verifications v JOIN runs r ON r.id = v.run_id
         WHERE r.sweep_id = ${done.sweep} AND v.scope = 'cell' ORDER BY v.case_id, v.ordinal`
-      return { done, rows, batches, lines }
+      const statuses = yield* sql<{ status: string }>`
+        SELECT s.status FROM cell_statuses s JOIN runs r ON r.id = s.run_id
+        WHERE r.sweep_id = ${done.sweep} ORDER BY s.case_id`
+      return { done, rows, batches, lines, statuses: statuses.map((row) => row.status) }
     })
   )
 
@@ -356,9 +389,28 @@ describe.skipIf(!served)("the replay phase", () => {
     expect(new Set(lines.map((line) => `${line.name} ${line.answer}`))).toEqual(new Set(["call pass", "cdr pending"]))
   })
 
-  it("fails a batch process's cell whose end failed the line it waited on", async () => {
-    const { lines } = await replay(BATCHED, { host: answering("fail"), drive: pendingDrive })
+  it("fails a batch process's cell whose end failed the line it waited on, nothing left pending", async () => {
+    const { done, lines, statuses } = await replay(BATCHED, { host: answering("fail"), drive: pendingDrive })
+    const index = JSON.parse(fs.readFileSync(path.join(done.bundles[0]!, "campaign.json"), "utf8"))
+    expect(index.cells.map((cell: { passed: boolean; pending?: unknown }) => [cell.passed, cell.pending])).toEqual([
+      [false, undefined],
+      [false, undefined]
+    ])
     expect(new Set(lines.map((line) => `${line.name} ${line.answer}`))).toEqual(new Set(["call pass", "cdr fail"]))
+    expect(statuses).toEqual(["fail", "fail", "fail"])
+  })
+
+  it("fails a restated cell on the line its batch's end failed, waiving only the call the reclassifier saw land", async () => {
+    const { done, lines, statuses } = await replay(BATCHED, { host: answering("fail"), drive: restatedDrive })
+    const index = JSON.parse(fs.readFileSync(path.join(done.bundles[0]!, "campaign.json"), "utf8"))
+    expect(index.cells.map((cell: { passed: boolean; pending?: unknown }) => [cell.passed, cell.pending])).toEqual([
+      [false, undefined],
+      [false, undefined]
+    ])
+    expect(new Set(lines.map((line) => `${line.name} ${line.answer}${line.waived === true ? " waived" : ""}`))).toEqual(
+      new Set(["call fail waived", "cdr fail", "reclassifier pass"])
+    )
+    expect(statuses).toEqual(["fail", "fail", "fail"])
   })
 
   it("writes each batch as a row of the sweep, its cells and its window, closed once it ended", async () => {

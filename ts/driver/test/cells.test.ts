@@ -427,6 +427,18 @@ describe("the post-run escape hatch", () => {
     expect(cell.restated).toBe("rule-a — ok with accepted delta")
   })
 
+  it("names the lines it restated as the cell landed, not one its batch's end still answers", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const { cell } = await one(replayCell({ case: caseNamed(cases, "fails-pending-line.v3.json") }), {
+      rig: { reclassifier: Reclassifier.layerWith(() => Effect.succeed({ passed: true, reason: "rule-a — ok with accepted delta" })) }
+    })
+    expect(cell.restated).toBe("rule-a — ok with accepted delta")
+    expect(cell.restatedLines).toEqual(["call"])
+    expect(cell.pending).toEqual(["cleanup"])
+    expect(cell.passed).toBe(false)
+  })
+
   it("never restates a panicked run as passed", async () => {
     const cases = runDir("cases")
     dirs.push(cases)

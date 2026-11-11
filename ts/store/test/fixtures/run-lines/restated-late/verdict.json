@@ -1,0 +1,10 @@
+{
+  "case": "capture_lines.pcap.gz-restated-late",
+  "lane": "real",
+  "status": "failed",
+  "failed_step": "s7",
+  "failures": [
+    { "failure": "check-failed", "site": "B1 180", "field": "header.Allow", "op": "eq", "expected": "INVITE, ACK", "observed": "INVITE" },
+    { "failure": "check-failed", "site": "post-run cleanup", "field": "sut.reaped", "op": "reaped", "expected": "every call removed", "observed": "a call left" }
+  ]
+}

@@ -1,8 +1,9 @@
 /**
- * The lines a cell's lane still waits on: read as the cell lands, and read
- * again once its batch's end has answered them. A cell that only its pending
- * lines keep from passing lands not passed, naming them (`CellSummary.pending`);
- * {@link settled} gives its outcome once the end has written them.
+ * The lines a cell's lane answered as the cell lands, and those it still
+ * waits on: read as the cell lands, and read again once its batch's end has
+ * answered them. A cell that only its pending lines keep from passing lands
+ * not passed, naming them (`CellSummary.pending`); {@link settled} gives its
+ * outcome once the end has written them.
  */
 import { E2e, Verification } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -21,10 +22,23 @@ const linesIn = Effect.fn("Driver.linesIn")(function*(file: string) {
   return Option.getOrElse(decodeLines(json), () => [])
 })
 
-/** The names of the lines deciding the cell in `cellDir` that its lane still waits on. */
-export const pendingIn = Effect.fn("Driver.pendingIn")(function*(cellDir: string) {
+/** What the lane's lines of a cell say as it lands, by line name. */
+export interface Landed {
+  /** The lines deciding the cell that its lane still waits on. */
+  readonly pending: ReadonlyArray<string>
+  /** The lines failing the cell. */
+  readonly failing: ReadonlyArray<string>
+}
+
+const namesOf = (lines: ReadonlyArray<Verification.Verification>): ReadonlyArray<string> => [
+  ...new Set(lines.map((line) => line.name))
+]
+
+/** The lane's lines of the cell in `cellDir` as it lands. */
+export const landedIn = Effect.fn("Driver.landedIn")(function*(cellDir: string) {
   const path = yield* Path.Path
-  return Verification.pending(yield* linesIn(path.join(cellDir, Verification.FILE))).map((line) => line.name)
+  const lines = yield* linesIn(path.join(cellDir, Verification.FILE))
+  return { pending: namesOf(Verification.pending(lines)), failing: namesOf(Verification.failing(lines)) } satisfies Landed
 })
 
 /**

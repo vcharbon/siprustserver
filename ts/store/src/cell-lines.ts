@@ -13,10 +13,12 @@
  *   fails or is pending: what failed it beyond the lines above.
  *
  * Where the deployment's reclassifier restated the failed run as passed,
- * every failure deciding the cell stands waived, the reclassifier its source
- * and its reason (the rules it stood on) in its message, and the
+ * every failure it saw as the cell landed stands waived, the reclassifier its
+ * source and its reason (the rules it stood on) in its message, and the
  * reclassifier's own `reclassifier` line passes: the lines and the rollup
- * agree.
+ * agree. It saw the call, the audit, and the lane's lines the rollup names
+ * restated; a lane's line failing only later, at its batch's end, still
+ * fails the cell.
  *
  * A cell that did not run (skipped, or never driven) holds no line. On a
  * bundle the replay wrote whole, the lines leave the cell short of a pass
@@ -50,8 +52,16 @@ export interface CellReading {
   readonly charged: ReadonlyArray<Bundle.RfcFinding>
   /** `verifications.json`: the lines the lane answered in process; null where the cell wrote none. */
   readonly answered: ReadonlyArray<Line> | null
-  /** The reclassifier's reason where it restated the failed run as passed; null where it did not. */
-  readonly restated: string | null
+  /** What the reclassifier restated where it restated the failed run as passed; null where it did not. */
+  readonly restated: Restated | null
+}
+
+/** A reclassifier's restatement of a cell as it landed. */
+export interface Restated {
+  /** Its reason: the rules it stood on. */
+  readonly reason: string
+  /** The names of the lane's lines (`verifications.json`) failing the cell as it landed. */
+  readonly lines: ReadonlyArray<string>
 }
 
 /** The line names and sources this reading writes. */
@@ -124,12 +134,12 @@ const waivedOf = (verdict: Bundle.RunVerdict | null): ReadonlyArray<Line> =>
   }))
 
 /**
- * Each failure of `lines` that decides the cell, waived by the reclassifier
- * that restated it as passed for `reason`, and the reclassifier's own line.
+ * Each failure of `lines` that decides the cell and that the reclassifier
+ * `saw`, waived by it as restated as passed for `reason`.
  */
-const restatedOf = (lines: ReadonlyArray<Line>, reason: string): ReadonlyArray<Line> => [
-  ...lines.map((line): Line =>
-    line.answer === "fail" && Verification.decides(line)
+const waivedBy = (lines: ReadonlyArray<Line>, reason: string, saw: (line: Line) => boolean): ReadonlyArray<Line> =>
+  lines.map((line): Line =>
+    line.answer === "fail" && Verification.decides(line) && saw(line)
       ? {
         ...line,
         source: RECLASSIFIER,
@@ -137,8 +147,22 @@ const restatedOf = (lines: ReadonlyArray<Line>, reason: string): ReadonlyArray<L
         waived: true
       }
       : line
-  ),
-  { name: RECLASSIFIER, source: RECLASSIFIER, answer: "pass", message: reason }
+  )
+
+/**
+ * The cell's own lines and its audit's as the reclassifier that restated the
+ * cell leaves them: the failures it saw waived (the lane's, only the lines it
+ * names; the call read off the verdict and the audit, whole), then its own line.
+ */
+const restatedOf = (
+  own: ReadonlyArray<Line>,
+  audit: ReadonlyArray<Line>,
+  laneAnswered: boolean,
+  restated: Restated
+): ReadonlyArray<Line> => [
+  ...waivedBy(own, restated.reason, (line) => !laneAnswered || restated.lines.includes(line.name)),
+  ...waivedBy(audit, restated.reason, () => true),
+  { name: RECLASSIFIER, source: RECLASSIFIER, answer: "pass", message: restated.reason }
 ]
 
 /** The lines of a cell that ran, in the order the lane's (or the call's), audit, run. */
@@ -149,8 +173,9 @@ export const linesOf = (reading: CellReading): ReadonlyArray<Line> => {
     : reading.unaudited !== null
     ? [unauditedOf(reading.unaudited)]
     : []
-  const read = [...own, ...audit]
-  const lines = reading.restated === null ? read : restatedOf(read, reading.restated)
+  const lines = reading.restated === null
+    ? [...own, ...audit]
+    : restatedOf(own, audit, reading.answered !== null, reading.restated)
   const short = lines.some((line) => (line.answer === "fail" || line.answer === "pending") && Verification.decides(line))
   if (reading.passed || short) return lines
   return [...lines, {

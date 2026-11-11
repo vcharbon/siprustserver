@@ -74,6 +74,13 @@ JSON
   "status": "failed"
 }
 JSON
+    # A failing case whose lane still waits on one of its lines leaves its
+    # call failed beside the pending one.
+    case "$case_path" in
+      *pending-line*)
+        printf '[{"name": "call", "source": "interpreter", "answer": "fail"}, {"name": "cleanup", "source": "lane gate", "answer": "pending"}]\n' > "$out_dir/verifications.json"
+        ;;
+    esac
     printf 'the run failed\n' >&2
     exit 1
     ;;
