@@ -25,12 +25,12 @@ ordinal.
 2. A `Call-ID` line past the first-ingress bound takes a minted
    `<leg>-<tag>@<host>` instead: the next hop would refuse it.
 3. Two records of one leg id are one leg only when their dialled INVITEs drew
-   the same From-tag (`same_leg`): the reclaim union keeps a leg id minted
-   twice as two legs.
+   the same From-tag (`same_leg`). The reclaim union of two copies holding a
+   leg id minted twice keeps the base copy's leg and leaves the other's out.
 
 ## Consequences
 
-- Within one call every dialled leg's Call-ID is distinct.
+- Within one copy of a call every dialled leg's Call-ID is distinct.
 - The B2BUA sends a Call-ID it already used, deviating from §8.1.1.4, when:
   - an originator re-offers on a Call-ID an ended call used (a retry after a
     401/407/422/423, an INVITE after its own CANCEL): the new call dials `1-X`

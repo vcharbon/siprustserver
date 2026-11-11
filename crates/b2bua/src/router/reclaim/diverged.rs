@@ -109,7 +109,8 @@ async fn end_from(
 fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
     let up = |d: &Dialog| matches!(d.state, DialogState::Early | DialogState::Confirmed);
     let leg_only_here = live.b_legs.iter().any(|leg| {
-        let theirs = ending.b_legs.iter().find(|l| call::helpers::same_leg(l, leg));
+        let theirs =
+            ending.b_legs.iter().find(|l| l.leg_id == leg.leg_id && l.call_id == leg.call_id);
         let held_there = |d: &Dialog| {
             theirs.is_some_and(|t| {
                 t.dialogs
@@ -136,8 +137,9 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
 /// dialled; a leg's own tag where `base` holds none; the caller answered, under
 /// `other`'s own tag, when `other` answered her; and every early dialog of a
 /// leg whose INVITE took a final ended by it. A leg id names one leg in both
-/// copies: two copies acting at once mint from distinct leg-id spaces
-/// (`call::LegSpace`). The request records of the union are those of `live`
+/// copies acting at once, which mint from distinct leg-id spaces
+/// (`call::LegSpace`); a leg id minted twice across a lost write
+/// (`call::helpers::same_leg` false) keeps `base`'s leg only. The request records of the union are those of `live`
 /// the worker `by` made: this node's teardown answers its own transactions,
 /// the other node's teardown its own.
 fn union_of(base: Enveloped, other: &Call, live: &Call, by: &RelayOwner) -> Enveloped {
@@ -173,7 +175,7 @@ pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call 
     let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
     for leg in legs {
         let theirs =
-            call::helpers::find_leg(live, &leg.leg_id).filter(|l| call::helpers::same_leg(l, leg));
+            call::helpers::find_leg(live, &leg.leg_id).filter(|l| l.call_id == leg.call_id);
         for d in leg.dialogs.iter_mut() {
             let held = theirs.and_then(|l| l.dialogs.by_tags(&d.our_tag, &d.peer_tag));
             d.requests = held

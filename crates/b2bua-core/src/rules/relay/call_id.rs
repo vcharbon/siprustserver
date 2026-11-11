@@ -1,8 +1,8 @@
 //! The Call-ID of a leg the B2BUA dials: `<N>-<originator's Call-ID>`, `N`
 //! the leg's [`leg_call_id_number`](call::helpers::leg_call_id_number). A
 //! capture joins every leg of a call on the originator's Call-ID with
-//! `^\d+-(.+)$`. Distinct within a call; a re-offered Call-ID mints the same
-//! ids again (ADR-0059).
+//! `^\d+-(.+)$`. Distinct within one copy of a call; a re-offered Call-ID mints
+//! the same ids again (ADR-0059).
 
 use sip_message::header::HeaderName;
 use sip_message::FirstIngressBound;

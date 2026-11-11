@@ -16,8 +16,10 @@ fn a_leg_id_numbers_its_call_id_by_its_ordinal_and_space() {
 fn a_leg_id_minted_twice_names_two_legs_by_their_from_tags() {
     let first = call::testkit::dialled_leg("c-2", "from-tag-1");
     let again = call::testkit::dialled_leg("c-2", "from-tag-2");
-    assert_eq!(first.call_id, again.call_id, "one leg id, one Call-ID");
     assert!(same_leg(&first, &first.clone()));
     assert!(!same_leg(&first, &again), "each INVITE drew its own From-tag");
     assert!(!same_leg(&first, &call::testkit::dialled_leg("c-3", "from-tag-1")));
+    let mut other_call_id = first.clone();
+    other_call_id.call_id = "2-x".into();
+    assert!(!same_leg(&first, &other_call_id), "one leg id and From-tag, another Call-ID");
 }

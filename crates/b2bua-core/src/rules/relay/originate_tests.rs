@@ -88,12 +88,12 @@ Content-Length: 0\r\n\r\n",
         }
     }
 
-    // A derived Call-ID line one byte past the next hop's first-ingress bound is
-    // not sent: the leg takes a Call-ID of the B2BUA's own.
+    /// A derived Call-ID line one byte past the next hop's first-ingress bound is
+    /// not sent: the leg takes a Call-ID of the B2BUA's own.
     #[test]
     fn a_derived_call_id_past_the_first_ingress_bound_falls_back_to_a_minted_one() {
         let derived = format!("Call-ID: 1-{}", a_leg_invite().call_id().as_str()).len();
-        let mut config = B2buaConfig::default(); // sip_local_ip = 127.0.0.1
+        let mut config = B2buaConfig::default();
         config.parser_limits.first_ingress.header_length = derived;
         let at_bound = dialled_b1(&config);
         assert_eq!(at_bound.call_id().as_str(), "1-alice-call-id@192.0.2.5");
@@ -102,8 +102,9 @@ Content-Length: 0\r\n\r\n",
         let past = dialled_b1(&config);
         let call_id = past.call_id();
         let call_id = call_id.as_str();
+        let host = format!("@{}", config.sip_local_ip);
         assert!(
-            call_id.starts_with("b-1-") && call_id.ends_with("@127.0.0.1"),
+            call_id.starts_with("b-1-") && call_id.ends_with(&host),
             "the minted `<leg>-<tag>@<host>` shape: {call_id}"
         );
     }
@@ -152,7 +153,6 @@ Content-Length: 0\r\n\r\n",
             }
         };
 
-        // (a) ID-1 — the Call-ID derives from the a-leg's.
         let call_id = invite.call_id();
         let call_id = call_id.as_str();
         assert_eq!(call_id, format!("1-{}", a.call_id().as_str()), "b-1 dials `1-<a-leg Call-ID>`");
