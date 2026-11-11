@@ -38,6 +38,7 @@ import * as Path from "effect/Path"
 import * as Schema from "effect/Schema"
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner"
 import { LanePresets } from "./lanes.js"
+import { pendingIn } from "./pending.js"
 import { readRecordings } from "./recordings.js"
 import {
   cellDir,
@@ -164,7 +165,8 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
       ...(outcome.crashed ? { error: firstLine(outcome.detail) } : {}),
       ...(outcome.skipped === undefined ? {} : { skipped: outcome.skipped }),
       ...(outcome.sourceFault === undefined ? {} : { sourceFault: outcome.sourceFault }),
-      ...(outcome.restated === undefined ? {} : { restated: outcome.restated })
+      ...(outcome.restated === undefined ? {} : { restated: outcome.restated }),
+      ...(outcome.pending === undefined ? {} : { pending: outcome.pending })
     },
     detail: outcome.detail
   } satisfies CellRun
@@ -198,6 +200,8 @@ interface CellOutcome {
   readonly sourceFault?: true
   /** The reclassifier restated the failed run as passed: its reason. */
   readonly restated?: string
+  /** The lines the lane still waits on, where only they keep the cell from passing. */
+  readonly pending?: ReadonlyArray<string>
 }
 
 /**
@@ -221,18 +225,9 @@ const guarded = <R>(
 /**
  * One document on one lane. The cell directory IS the interpreter's `out_dir`,
  * so the run-spec is written under `specs/` and nothing else is put there before
- * the run.
+ * the run. A cell that only lines its lane still waits on keep from passing
+ * lands not passed, naming them (`pending.ts`).
  */
-const decodeLines = Schema.decodeUnknownOption(Schema.Array(Verification.Verification))
-
-/** The lines deciding a cell that its lane still waits on, read off `file`; none where the file is absent or unreadable. */
-const pendingLines = Effect.fn("Driver.pendingLines")(function*(file: string) {
-  const fs = yield* FileSystem.FileSystem
-  const text = yield* fs.readFileString(file).pipe(Effect.orElseSucceed(() => "null"))
-  const json = yield* Effect.try(() => JSON.parse(text) as unknown).pipe(Effect.orElseSucceed(() => null))
-  return Verification.pending(Option.getOrElse(decodeLines(json), () => []))
-})
-
 const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   cell: Campaign.PivotReplayCell,
   context: CellContext,
@@ -300,8 +295,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   // whatever verdict it left was written before the unwind, so it cannot
   // answer for what came after.
   const panicked = report.outcome._tag === "panicked"
-  const pending = (yield* pendingLines(path.join(absolute, Verification.FILE))).map((line) => line.name)
-  const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0 && pending.length === 0
+  const pending = yield* pendingIn(absolute)
+  const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0
 
   const caseId = Campaign.cellCaseId(cell)
   const classification = yield* confrontCell(cell, context, absolute, pivot, verdict, caseId)
@@ -320,16 +315,17 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
     yield* fs.writeFileString(path.join(absolute, RULE_HITS_FILE), CellHits.emitHits(final.hits))
   }
   const sutPassed = !panicked && final.passed
+  const awaiting = sutPassed && pending.length > 0
   const restated = sutPassed && !gated ? final.reason ?? "no reason stated" : undefined
   const sourceSaid = `(see ${RFC_FILE}):\n` +
     source.map((f) => `  ${f.rule} [${f.lane}] by ${f.actor ?? "a scripted party"}: ${f.detail}`).join("\n")
   const sutSaid = panicked
     ? `replay exited ${report.exitCode} (panicked):\n${report.stderr}`
+    : awaiting
+    ? `still verifying: ${pending.join(", ")} pending (see ${Verification.FILE})`
     : final.passed === gated
       ? gated === structural
-        ? pending.length > 0
-          ? `still verifying: ${pending.join(", ")} pending (see ${Verification.FILE})`
-          : rfcGating.length > 0
+        ? rfcGating.length > 0
           ? `the RFC audit failed the cell (see ${RFC_FILE}):\n` +
             rfcGating.map((f) => `  ${f.rule} [${f.lane}]: ${f.detail}`).join("\n")
           : report.stderr
@@ -338,7 +334,7 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       : `${verdict.status} restated as ${final.passed ? "passed" : "failed"}: ` +
         `${final.reason ?? "no reason stated"}`
   return {
-    passed: sutPassed,
+    passed: sutPassed && !awaiting,
     detail: source.length === 0
       ? sutSaid
       : sutPassed
@@ -348,7 +344,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
     crashed: false,
     stderr: report.stderr,
     ...(source.length > 0 ? { sourceFault: true as const } : {}),
-    ...(restated === undefined ? {} : { restated })
+    ...(restated === undefined ? {} : { restated }),
+    ...(awaiting ? { pending } : {})
   } satisfies CellOutcome
 })
 

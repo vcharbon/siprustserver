@@ -46,7 +46,7 @@
  * `planned` on the job, which is what a resume replays.
  */
 import { E2e } from "@sip/contracts"
-import { runCell } from "@sip/driver"
+import { runCell, settled } from "@sip/driver"
 import { perSecond, unpaced } from "@sip/driver/pace"
 import { Batches, Bundle, Jobs, Requests, RuleHits, Runs, Sweeps } from "@sip/store"
 import { ReplayCli } from "@sip/toolchain"
@@ -221,6 +221,19 @@ export interface BatchRequest extends Seams {
   /** What each cell that landed is told to, the moment it lands: a job marks it ran. */
   readonly ran?: (cell: CellRef) => Effect.Effect<void, unknown>
 }
+
+/**
+ * Every landed cell of `tallies` read again once its batch's end has answered
+ * the lines it waited on (`settled`): it passes where they all came back
+ * answered and none failed, and stays not passed while one is still pending.
+ */
+const settleLanded = Effect.fn("Replay.settleLanded")(function*(tallies: ReadonlyArray<Tally>) {
+  for (const tally of new Set(tallies)) {
+    for (const [at, summary] of tally.summaries.entries()) {
+      tally.summaries[at] = yield* settled(summary, path.join(tally.run.bundlePath, summary.dir))
+    }
+  }
+})
 
 /**
  * One capture, closed on what its own cells wrote across every batch it sat
@@ -420,6 +433,7 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
   const { deadHost, dirty, contexts, interrupted } = ended
   if (deadHost !== undefined) yield* Console.error(`[replay] ${deadHost}`)
   if (dirty !== undefined) yield* Console.error(`[replay] ${dirty}`)
+  if (ended.hosted) yield* settleLanded(driven.map((ref) => tallyOf(ref.capture)))
   // What the gate read of a standing SUT's call contexts, on every run the
   // batch's cells ran under; a context one cell's call left is that cell's
   // run's cleanup finding, never the batch's.

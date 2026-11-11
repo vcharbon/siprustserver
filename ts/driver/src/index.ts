@@ -32,6 +32,7 @@
  */
 export { cargoTest, INTERRUPTED, runCell, type CellContext, type CellRun, type TestInvocation } from "./cells.js"
 export { LanePresets, LaneUnknown } from "./lanes.js"
+export { settled } from "./pending.js"
 export * as Layout from "./layout.js"
 export { RoutingCompiler, RoutingRefused } from "./routing.js"
 export { emitRunSpec, type LaneBlock, type RunSpec } from "./run-spec.js"

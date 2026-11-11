@@ -104,7 +104,13 @@ export const CellSummary = Schema.Struct({
    * failed as passed: its reason, naming the rules it stood on. Every failure
    * of the cell's lines then stands waived, the reclassifier answering it.
    */
-  restated: Schema.optionalKey(Schema.String)
+  restated: Schema.optionalKey(Schema.String),
+  /**
+   * Set while lines the cell's lane answers at its batch's end are still
+   * `pending` and nothing else keeps the cell from passing: their names.
+   * `passed` is false while it is set.
+   */
+  pending: Schema.optionalKey(Schema.Array(Schema.String))
 })
 export interface CellSummary extends Schema.Schema.Type<typeof CellSummary> {}
 
@@ -181,7 +187,8 @@ export const cellSummaryJson = (summary: CellSummary): Record<string, unknown> =
     error: summary.error,
     skipped: summary.skipped,
     sourceFault: summary.sourceFault,
-    restated: summary.restated
+    restated: summary.restated,
+    pending: summary.pending
   })
 
 export const cellSkipJson = (skip: CellSkip): Record<string, unknown> => ({

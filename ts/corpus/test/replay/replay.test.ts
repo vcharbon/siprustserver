@@ -201,10 +201,55 @@ const fakeDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runD
     return { summary: { cell: Layout.cellIdOf(cell), passed, dir: Layout.cellDir(cell) }, detail: "" }
   })) as unknown as typeof runCell
 
+/** The cell directories {@link pendingDrive} landed, for the batch's end to answer. */
+let landedPending: Array<string> = []
+
+/**
+ * A driver whose every cell's call passes and whose `cdr` line its batch's end
+ * answers: it lands `pending`, the cell not passed, naming it.
+ */
+const pendingDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
+  Effect.sync(() => {
+    const id = Campaign.cellCaseId(cell)
+    const dir = path.join(context.runDir, Layout.cellDir(cell))
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, "verdict.json"), `{"status":"passed","case":"${id}"}\n`)
+    writeLines(dir, "pending")
+    landedPending.push(dir)
+    return {
+      summary: { cell: Layout.cellIdOf(cell), passed: false, dir: Layout.cellDir(cell), pending: ["cdr"] },
+      detail: "still verifying: cdr pending"
+    }
+  })) as unknown as typeof runCell
+
+/** The cell's lines: its call passed, its `cdr` line answering `cdr`. */
+const writeLines = (dir: string, cdr: string): void =>
+  fs.writeFileSync(
+    path.join(dir, "verifications.json"),
+    JSON.stringify([
+      { name: "call", source: "interpreter", answer: "pass" },
+      { name: "cdr", source: "cdr oracle", answer: cdr }
+    ])
+  )
+
+/** A batch process whose end answers every landed cell's `cdr` line `cdr`, or leaves it where `cdr` is undefined. */
+const answering = (cdr: string | undefined): StandBatch => () =>
+  Effect.succeed({
+    run: () => Effect.die("the fake driver runs no interpreter"),
+    died: () => undefined,
+    end: Effect.sync(() => {
+      if (cdr !== undefined) for (const dir of landedPending) writeLines(dir, cdr)
+      return undefined
+    }),
+    contexts: () => undefined,
+    kill: Effect.void
+  })
+
 const replay = (
   lane: string,
   extra: {
     readonly host?: StandBatch
+    readonly drive?: typeof runCell
     readonly concurrency?: number
     readonly batchSize?: number
     /** A capture whose cases' cache entries are left unreadable, so the batch cannot materialise it. */
@@ -222,7 +267,7 @@ const replay = (
         captures,
         options: opts,
         prepId: prep,
-        drive: fakeDrive,
+        drive: extra.drive ?? fakeDrive,
         binaries: () => Effect.void,
         identity: (_lane, load) => Effect.succeed({ ...CURRENT, load }),
         provenance: Effect.succeed([]),
@@ -232,13 +277,17 @@ const replay = (
       const rows = yield* sql<{ capture: string; status: string; concurrency: number; cleanup: string | null }>`
         SELECT capture, status, concurrency, cleanup FROM runs WHERE sweep_id = ${done.sweep} ORDER BY capture`
       const batches = yield* Effect.flatMap(Batches.Service, (store) => store.ofSweep(done.sweep))
-      return { done, rows, batches }
+      const lines = yield* sql<{ caseId: string; name: string; answer: string }>`
+        SELECT v.case_id AS "caseId", v.name, v.answer FROM verifications v JOIN runs r ON r.id = v.run_id
+        WHERE r.sweep_id = ${done.sweep} AND v.scope = 'cell' ORDER BY v.case_id, v.ordinal`
+      return { done, rows, batches, lines }
     })
   )
 
 describe.skipIf(!served)("the replay phase", () => {
   beforeEach(() => {
     driven = []
+    landedPending = []
   })
 
   it("closes each capture's row on its last cell, its index written and its terminated calls trimmed", async () => {
@@ -284,6 +333,32 @@ describe.skipIf(!served)("the replay phase", () => {
     expect(done.dirty).toEqual(["the SUT still held a call"])
     expect(rows.every((row) => row.cleanup === "the SUT still held a call")).toBe(true)
     expect(rows.every((row) => row.concurrency === 2)).toBe(true)
+  })
+
+  it("passes a batch process's cell that landed pending once its end answers the line it waited on", async () => {
+    const { done, lines } = await replay(BATCHED, { host: answering("pass"), drive: pendingDrive })
+    expect(landedPending).toHaveLength(3)
+    const index = JSON.parse(fs.readFileSync(path.join(done.bundles[0]!, "campaign.json"), "utf8"))
+    expect(index.cells.map((cell: { passed: boolean; pending?: unknown }) => [cell.passed, cell.pending])).toEqual([
+      [true, undefined],
+      [true, undefined]
+    ])
+    expect(new Set(lines.map((line) => `${line.name} ${line.answer}`))).toEqual(new Set(["call pass", "cdr pass"]))
+  })
+
+  it("keeps a batch process's cell ok so far, failing nothing, where its end never answered", async () => {
+    const { done, lines } = await replay(BATCHED, { host: answering(undefined), drive: pendingDrive })
+    const index = JSON.parse(fs.readFileSync(path.join(done.bundles[0]!, "campaign.json"), "utf8"))
+    expect(index.cells.map((cell: { passed: boolean; pending?: unknown }) => [cell.passed, cell.pending])).toEqual([
+      [false, ["cdr"]],
+      [false, ["cdr"]]
+    ])
+    expect(new Set(lines.map((line) => `${line.name} ${line.answer}`))).toEqual(new Set(["call pass", "cdr pending"]))
+  })
+
+  it("fails a batch process's cell whose end failed the line it waited on", async () => {
+    const { lines } = await replay(BATCHED, { host: answering("fail"), drive: pendingDrive })
+    expect(new Set(lines.map((line) => `${line.name} ${line.answer}`))).toEqual(new Set(["call pass", "cdr fail"]))
   })
 
   it("writes each batch as a row of the sweep, its cells and its window, closed once it ended", async () => {

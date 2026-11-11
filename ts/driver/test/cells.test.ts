@@ -144,6 +144,7 @@ describe("a red cell", () => {
     const verdict = JSON.parse(fs.readFileSync(path.join(dir, cell.dir, "verdict.json"), "utf8"))
     expect(verdict.status).toBe("ok")
     expect(cell.passed).toBe(false)
+    expect(cell.pending).toEqual(["cleanup"])
     expect(cell.error).toBeUndefined()
     expect(detail).toContain("still verifying: cleanup pending")
   })
