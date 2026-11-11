@@ -54,9 +54,10 @@ export interface BasicCall extends Schema.Schema.Type<typeof BasicCall> {}
 
 /**
  * The finals a callee rejects an INVITE with that need no header beside the
- * status line (RFC 3261 §21), with their reason phrases. A 401 or 407 needs its
- * challenge, a 405 its Allow, a 420 its Unsupported, and 481, 487 and 491
- * answer states this shape never reaches.
+ * status line (RFC 3261 §21) and that reach the caller as sent, with their
+ * reason phrases. A 401 or 407 needs its challenge, a 405 its Allow, a 420
+ * its Unsupported; 481, 487 and 491 answer states this shape never reaches;
+ * and a proxy relays a 503 as a 500 (§16.7 step 6).
  */
 export const REJECTS = {
   403: "Forbidden",
@@ -68,7 +69,6 @@ export const REJECTS = {
   486: "Busy Here",
   488: "Not Acceptable Here",
   500: "Server Internal Error",
-  503: "Service Unavailable",
   600: "Busy Everywhere",
   603: "Decline",
   604: "Does Not Exist Anywhere",
@@ -76,7 +76,7 @@ export const REJECTS = {
 } as const
 
 /** A status {@link REJECTS} names. */
-export const RejectStatus = Schema.Literals([403, 404, 408, 410, 480, 484, 486, 488, 500, 503, 600, 603, 604, 606])
+export const RejectStatus = Schema.Literals([403, 404, 408, 410, 480, 484, 486, 488, 500, 600, 603, 604, 606])
 export type RejectStatus = typeof RejectStatus.Type
 
 /** The status an `invite_reject` plays where its parameters state none. */

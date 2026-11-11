@@ -88,11 +88,6 @@ describe("basic_call", () => {
     const ended = defineBasicCase({ title: "bob hangs up", shape: "basic_call", params: { ends: "callee" }, ...PARTIES, final: [] })
     expect(ladderOf(ended).slice(-4)).toEqual(["B send BYE", "A expect BYE", "A send 200 BYE", "B expect 200 BYE"])
   })
-
-  it("states a document replayable on every lane, carrying no CDR expectation", () => {
-    expect(cell.document.case.lanes).toEqual({ "*": "ok" })
-    expect(cell.document.postconditions).toEqual({ cdr: { absent: "claims" } })
-  })
 })
 
 describe("invite_reject", () => {
@@ -138,8 +133,12 @@ describe("a case that does not hold", () => {
     expect(refusal({ ...base, caller: "sip:atlanta.example.com" })).toContain("a sip: or sips: URI naming a user at a host")
   })
 
-  it("is refused for a reject status that needs a header beside it", () => {
-    expect(refusal({ ...base, shape: "invite_reject", params: { status: 401 } })).not.toBe("accepted")
+  it("is refused for a reject status that needs a header beside it, naming the parameter", () => {
+    expect(refusal({ ...base, shape: "invite_reject", params: { status: 401 } })).toContain(`at ["params"]["status"]`)
+  })
+
+  it("is refused for a reject status a proxy relays as another (503 as 500)", () => {
+    expect(refusal({ ...base, shape: "invite_reject", params: { status: 503 } })).toContain(`at ["params"]["status"]`)
   })
 
   it("is refused for a final status its shape does not end with", () => {

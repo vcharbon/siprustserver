@@ -347,7 +347,8 @@ leg `A` and a callee leg `B`, its id the title's slug, replayable on every lane
 (`postconditions.cdr.absent: "claims"`). `basic_call` rings, answers, ACKs and
 ends with a BYE from the party `params.ends` names (the caller by default);
 `invite_reject` answers the INVITE with `params.status` (486 by default), a
-status RFC 3261 lets stand without a header beside it. The `final` checks land
+status RFC 3261 lets stand without a header beside it and a proxy relays as
+sent (never 503, relayed as 500, §16.7). The `final` checks land
 on the caller's final. A key the form does not name, an address that is no
 `sip:`/`sips:` URI naming a user, a title naming no cell, or a final status
 the shape does not end with is refused when the case is defined.
