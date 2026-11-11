@@ -183,10 +183,11 @@ pub fn refused(route: AdmittingRoute) -> (Call, HandlerEffects) {
 }
 
 /// Dial the admitted route's b-leg under the attempt it opens, its INVITE
-/// leaving at `sent_ms` (`OutboundInvite::sent_at_ms`), after the admission
-/// the turn waited on; a route whose dial a service defers opens none here.
-/// `now_ms` is the turn's timestamp: every CDR entry and timer deadline below
-/// reads it; `owners` are the call's, as the shell states them.
+/// leaving at `sent_ms`, after the admission the turn waited on: the INVITE's
+/// `Timestamp` and `OutboundInvite::sent_at_ms` read it. A route whose dial a
+/// service defers opens none here. `now_ms` is the turn's timestamp: every CDR
+/// entry and the setup deadline and duration cap read it; `owners` are the
+/// call's, as the shell states them.
 #[allow(clippy::too_many_arguments)]
 pub fn admitted(
     route: AdmittingRoute,
@@ -307,7 +308,7 @@ pub fn admitted(
         &capabilities::offered_option_tags(&call, None),
         None,
         call.a_leg.invite_final_sent().is_none(),
-        now_ms,
+        sent_ms,
         &mut skipped,
     ) {
         Ok(built) => built,
@@ -352,9 +353,6 @@ pub fn admitted(
             BodyUpdate::Drop | BodyUpdate::Replace(_) => relay::Author::Stack,
         },
     );
-    if let Some(invite) = leg.outbound_invite_mut() {
-        invite.sent_at_ms = sent_ms;
-    }
     add_originated_b_leg(&mut call, leg, now_ms);
     fx.outbound.push(effect);
     // The leg rings for the attempt's deadline from its first 18x

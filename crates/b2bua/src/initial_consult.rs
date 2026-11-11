@@ -51,8 +51,8 @@ pub enum Consulted {
 /// a-leg (from [`crate::initial_invite::build_initial_call`]), and `a_invite` is
 /// its snapshot rebuilt; `invite_wire` is the datagram it arrived as, which only
 /// the router holds (the call carries a header snapshot, not bytes). `now_ms` is
-/// the turn's timestamp, the INVITE's instant: the decision and the route read
-/// it, so the setup deadlines run from the INVITE. `clock` measures the
+/// the turn's instant (the INVITE's on the initial turn): the decision and the
+/// route read it, so the setup deadlines run from it. `clock` measures the
 /// decision round trip, and the services seed at its reading once the route is
 /// applied, so a deadline a seed arms runs from the legs it dials. `budget`
 /// bounds every await of the consult and the failover chain behind it.

@@ -1,8 +1,9 @@
-//! A service deadline armed in the initial INVITE's turn after a slow
-//! decision runs from the instant the decision settled, not from the INVITE:
-//! a 3 s deadline behind a 4 s decision round trip fires 7 s after the
-//! INVITE, whether the service arms it in its `init` seed or in its handler of
-//! the route's `AttemptStarted`.
+//! What the initial INVITE's turn mints after a slow decision. A service
+//! deadline armed once the decision is applied runs from the decision's end:
+//! a 3 s deadline behind a 4 s round trip fires 7 s after the INVITE, whether
+//! the service arms it in its `init` seed or in its handler of the route's
+//! `AttemptStarted`. The setup deadline runs from the INVITE. The dialled
+//! INVITE's `Timestamp` (RFC 3261 §20.38) states when it left.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,8 @@ use b2bua::decision::{
 use b2bua::rules::ServiceDef;
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
+use sip_message::generators::InDialogMethod;
+use sip_message::header::HeaderName;
 use tokio::time::Instant;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -253,4 +256,109 @@ async fn an_attempt_started_deadline_runs_from_the_decision() {
     )
     .await;
     assert_runs_from_the_decision(released);
+}
+
+/// The caller's setup deadline (`setup_timeout_ms`) behind the slow decision:
+/// 5 s from the INVITE, 1 s after bob is dialled. Bob rings and never
+/// answers: alice is answered 408 at 5 s, bob's INVITE CANCELed and answered
+/// 487.
+#[tokio::test(start_paused = true)]
+async fn the_setup_deadline_runs_from_the_invite() {
+    let h = Harness::new("setup-deadline-slow-decision");
+    let alice = h.agent("alice", "127.0.0.1:5065").await;
+    let bob = h.agent("bob", "127.0.0.1:5075").await;
+    let decision = Arc::new(SlowDecisionEngine {
+        inner: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5075)),
+        delay: DECISION_DELAY,
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.call_control_timeout_ms = 20_000;
+            c.keepalive_interval_sec = 3_600;
+            c.setup_timeout_ms = 5_000;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5085")
+        .await;
+
+    let invited = Instant::now();
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    call.expect(408).await;
+    let released = invited.elapsed();
+    let due = Duration::from_millis(5_000);
+    assert!(
+        released >= due && released < due + Duration::from_millis(500),
+        "the 408 left {released:?} after the INVITE; the setup deadline runs from it, due at {due:?}",
+    );
+
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+    settle_until(|| b2bua.cdr_records().len() == 1).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// The `Timestamp` this stack states on a request it sends, in ms of its clock.
+fn stamp_ms(req: &sip_message::SipRequest) -> i64 {
+    let value = req.raw(HeaderName::Timestamp).next().expect("the request states a Timestamp");
+    let (secs, frac) = value.split_once('.').unwrap_or((value, "0"));
+    secs.parse::<i64>().expect("seconds") * 1000 + frac.parse::<i64>().expect("milliseconds")
+}
+
+/// The INVITE dialled behind the slow decision states this stack's clock when
+/// it leaves: the BYE this stack mints from hers 10 s after the answer states
+/// a reading within a second of 10 s past it, not 14 s.
+#[tokio::test(start_paused = true)]
+async fn the_dialled_invite_is_stamped_when_it_leaves() {
+    let h = Harness::new("dialled-invite-stamp-slow-decision");
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let bob = h.agent("bob", "127.0.0.1:5076").await;
+    let decision = Arc::new(SlowDecisionEngine {
+        inner: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5076)),
+        delay: DECISION_DELAY,
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.call_control_timeout_ms = 20_000;
+            c.keepalive_interval_sec = 3_600;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Timestamp", "54")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    let dialled = stamp_ms(uas.request());
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let held = Duration::from_secs(10);
+    h.advance(held).await;
+    let mut bye =
+        dialog.send_request(InDialogMethod::Bye).with_header("Timestamp", "61.5").send().await;
+    let mut relayed_bye = bob.receive("BYE").await;
+    let between = stamp_ms(relayed_bye.request()) - dialled;
+    let held_ms = held.as_millis() as i64;
+    assert!(
+        (held_ms..held_ms + 1_000).contains(&between),
+        "the INVITE's Timestamp is {between} ms before the BYE's; it states when the INVITE left",
+    );
+    relayed_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.cdr_records().len() == 1).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
 }
