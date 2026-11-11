@@ -1,10 +1,9 @@
 /**
  * A part (ADR-0060 appendix §11): a file `targets/<kind>/<name>.toml` several
  * lanes may name, valid against the JSON Schema `parts/<kind>.schema.json` of
- * the rig path. The schema is read in the Draft 2020-12 subset Effect's
- * importer translates (types, `properties`, `required`, `additionalProperties`,
- * `enum`, `const`, bounds, `pattern`, `oneOf`, `anyOf`, `$ref` into `$defs`);
- * a keyword outside it validates nothing. Its root is an object schema.
+ * the rig path. The schema is written in the Draft 2020-12 subset Effect's
+ * importer translates (`json-schema-subset.ts`): a keyword outside it refuses
+ * the schema, naming its JSON Pointer. Its root is an object schema.
  *
  * The schema's root keyword `x-siprig` states what the base reads of the kind:
  *
@@ -12,12 +11,15 @@
  * - `capabilities`: per capability a part of the kind gives a lane, the fields
  *   its value must hold, each by dotted path: `true` for present, a list for
  *   one of those values. A capability stating no field is given by the part.
+ *   It names no capability the base derives itself (`capability.ts`).
  */
 import * as JsonSchema from "effect/JsonSchema"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as SchemaRepresentation from "effect/SchemaRepresentation"
 import * as path from "node:path"
+import * as Capability from "./capability.js"
+import * as JsonSchemaSubset from "./json-schema-subset.js"
 import { decoderOf, Name, type Refusal, refuse, tomlOf } from "./manifest-file.js"
 
 /** The directory of the part files under a workspace or a pack's lanes. */
@@ -31,7 +33,7 @@ const Condition = Schema.Union([Schema.Literal(true), Schema.Array(Schema.Union(
 
 const Annotation = Schema.Struct({
   shared: Schema.optionalKey(Schema.Boolean),
-  capabilities: Schema.optionalKey(Schema.Record(Name, Schema.Record(Schema.String, Condition)))
+  capabilities: Schema.optionalKey(Schema.Record(Schema.String, Schema.Record(Schema.String, Condition)))
 })
 
 /** What the base reads of a part kind: how a file of it decodes, whether a job shares it, and the capabilities it gives. */
@@ -48,7 +50,18 @@ export const kindOf = (file: string, schema: Readonly<Record<string, unknown>>):
   const { [ANNOTATION]: annotation, ...document } = schema
   const read = decodeAnnotation(annotation ?? {})
   if (Result.isFailure(read)) return Result.fail(refuse([file], `${ANNOTATION}.${read.failure}`))
+  const named = Object.keys(read.success.capabilities ?? {})
+  const unnamed = named.find((name) => !Schema.is(Name)(name))
+  if (unnamed !== undefined) {
+    return Result.fail(refuse([file], `${ANNOTATION}.capabilities.${unnamed}: a capability is lower-case letters, digits and dashes`))
+  }
+  const derived = named.find(Capability.derivedByBase)
+  if (derived !== undefined) {
+    return Result.fail(refuse([file], `${ANNOTATION}.capabilities.${derived}: the base derives ${derived} itself, no part gives it`))
+  }
   if (document.type !== "object") return Result.fail(refuse([file], `type: a part schema's root is "object"`))
+  const unread = JsonSchemaSubset.firstUnread(document)
+  if (unread !== undefined) return Result.fail(refuse([file], `${unread}: a keyword the rig does not read`))
   let decoder: (raw: unknown) => Result.Result<unknown, string>
   try {
     const imported = SchemaRepresentation.fromJsonSchemaDocument(JsonSchema.fromSchemaDraft2020_12(document), { patterns: "apply" })

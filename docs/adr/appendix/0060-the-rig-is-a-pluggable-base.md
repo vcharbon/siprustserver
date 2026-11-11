@@ -328,9 +328,9 @@ restart-worker = "restart-worker-compose"
 ```
 
 A part file `targets/<kind>/<name>.toml` is validated against `parts/<kind>.schema.json` of the
-path, a JSON Schema whose root is an object, read in the Draft 2020-12 subset Effect's importer
-translates. A refusal names the part file and the dotted field. Several lanes may name one
-file. The schema's root keyword `x-siprig` states what the base reads of the kind:
+path, a JSON Schema whose root is an object, written in the Draft 2020-12 subset Effect's importer
+translates: a keyword outside it refuses the schema, naming its JSON Pointer. A refusal of a part
+file names the file and the dotted field. Several lanes may name one file. The schema's root keyword `x-siprig` states what the base reads of the kind:
 
 ```json
 "x-siprig": {
@@ -341,7 +341,7 @@ file. The schema's root keyword `x-siprig` states what the base reads of the kin
 
 - `shared`: the lanes of one job name one file of the kind, or none on every lane.
 - `capabilities`: what a part of the kind gives the lane, each when the fields it lists hold:
-  `true` for present, a list for one of those values.
+  `true` for present, a list for one of those values. It names no capability the base derives.
 
 A lane's capabilities derive from its clock and backend mode (`scripted-routing` where the rig
 serves the backend or the lane is simulated, `routing-visible` where it also relays it,

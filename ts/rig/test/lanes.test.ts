@@ -195,7 +195,18 @@ describe("the parts the lanes of one job share", () => {
   it("refuses a lane naming none where another names one", async () => {
     const { shared } = await job({ "lanes/one.toml": REAL("served", `[parts]\nrecords-store = "a"`), "lanes/two.toml": SIMULATED() })
     expect(Result.isFailure(shared) && shared.failure.reason).toBe(
-      "the lanes of one job name one records-store part: one names a, two names none"
+      "the lanes of one job name one records-store part: one names a, two names no records-store part"
+    )
+  })
+
+  it("refuses a lane naming no part where another names a part file called none", async () => {
+    const { shared } = await job({
+      "targets/records-store/none.toml": STORE_A,
+      "lanes/one.toml": REAL("served", `[parts]\nrecords-store = "none"`),
+      "lanes/two.toml": SIMULATED()
+    })
+    expect(Result.isFailure(shared) && shared.failure.reason).toBe(
+      "the lanes of one job name one records-store part: one names none, two names no records-store part"
     )
   })
 
@@ -218,5 +229,52 @@ describe("a part schema the base reads", () => {
     const scalar = root({ "parts/records-store.schema.json": JSON.stringify({ type: "string" }) })
     const second = await run(RigPath.load({ workspace: scalar }))
     expect(Result.isFailure(second) && second.failure.reason).toBe(`type: a part schema's root is "object"`)
+  })
+
+  const reasonOf = async (schema: Readonly<Record<string, unknown>>) => {
+    const loaded = await run(RigPath.load({ workspace: root({ "parts/records-store.schema.json": JSON.stringify(schema) }) }))
+    return Result.isFailure(loaded) ? loaded.failure.reason : undefined
+  }
+
+  it("refuses a capability the base derives itself, so no part grants a lane one", async () => {
+    expect(await reasonOf({ type: "object", "x-siprig": { capabilities: { "scripted-routing": {} } } })).toBe(
+      "x-siprig.capabilities.scripted-routing: the base derives scripted-routing itself, no part gives it"
+    )
+    expect(await reasonOf({ type: "object", "x-siprig": { capabilities: { "operation:restart-worker": {} } } })).toBe(
+      "x-siprig.capabilities.operation:restart-worker: a capability is lower-case letters, digits and dashes"
+    )
+  })
+
+  it.each([
+    [{ type: "object", if: { required: ["a"] }, then: { required: ["b"] } }, "/if"],
+    [{ type: "object", dependentRequired: { a: ["b"] } }, "/dependentRequired"],
+    [{ type: "object", properties: { a: { type: "string", format: "email" } } }, "/properties/a/format"],
+    [{ type: "object", properties: { "a/b": { not: { type: "null" } } } }, "/properties/a~1b/not"],
+    [{ type: "object", properties: { a: { anyOf: [{ type: "string" }, { contains: { type: "string" } }] } } }, "/properties/a/anyOf/1/contains"]
+  ])("refuses a keyword the rig does not read, naming its JSON Pointer (%j)", async (schema, pointer) => {
+    expect(await reasonOf(schema)).toBe(`${pointer}: a keyword the rig does not read`)
+  })
+
+  it("reads every keyword it checks a part by", async () => {
+    expect(await reasonOf({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      title: "every keyword",
+      type: "object",
+      additionalProperties: false,
+      required: ["a"],
+      minProperties: 1,
+      maxProperties: 9,
+      propertyNames: { pattern: "^[a-z]+$" },
+      $defs: { port: { type: "integer", minimum: 1, maximum: 65535, multipleOf: 1 } },
+      properties: {
+        a: { $ref: "#/$defs/port" },
+        b: { type: "string", minLength: 1, maxLength: 9, description: "b" },
+        c: { type: "array", items: { enum: ["x", "y"] }, minItems: 1, maxItems: 2, uniqueItems: true },
+        d: { allOf: [{ type: "number", exclusiveMinimum: 0 }, { exclusiveMaximum: 9 }] },
+        e: { oneOf: [{ const: 1 }, { type: "boolean", default: false }] },
+        f: { type: "array", prefixItems: [{ type: "string" }] },
+        g: { type: "object", patternProperties: { "^x-": { type: "string" } } }
+      }
+    })).toBeUndefined()
   })
 })

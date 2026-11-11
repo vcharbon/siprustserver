@@ -16,27 +16,13 @@ import * as FileSystem from "effect/FileSystem"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as path from "node:path"
+import * as Capability from "./capability.js"
 import type * as Collection from "./collection.js"
 import * as Lane from "./lane.js"
 import { Name, type Refusal, refuse } from "./manifest-file.js"
 import type * as Operation from "./operation.js"
 import * as Part from "./part.js"
 import * as RigPath from "./rig-path.js"
-
-/** The capabilities the base derives from a lane's clock and backend mode. */
-export const BASE_CAPABILITIES = {
-  /** The rig serves the backend the system calls (`served`, or a simulated lane), so recorded decisions replay. */
-  scriptedRouting: "scripted-routing",
-  /** The rig sits on the system's backend path (`served`, `proxied`, or a simulated lane), so it sees every exchange. */
-  routingVisible: "routing-visible",
-  /** The system runs on the wall clock. */
-  realClock: "real-clock",
-  /** The system runs on a paused clock, so a long timer takes no wall-clock time. */
-  pausedClock: "paused-clock"
-} as const
-
-/** The prefix of the capability a binding in `[operations]` gives: `operation:<name>`. */
-export const OPERATION_PREFIX = "operation:"
 
 /** A lane as loaded. */
 export interface Loaded {
@@ -52,7 +38,7 @@ export interface Loaded {
 
 /**
  * The capabilities of a lane: those of its clock and backend mode
- * ({@link BASE_CAPABILITIES}), those its parts' schemas give (`part.ts`), and
+ * (`Capability.BASE`), those its parts' schemas give (`part.ts`), and
  * `operation:<name>` for each name bound in `[operations]`.
  */
 export const capabilitiesOf = (
@@ -63,14 +49,14 @@ export const capabilitiesOf = (
   const derived = new Set<string>()
   const mode = lane.backend?.mode
   if (lane.clock === "simulated") {
-    derived.add(BASE_CAPABILITIES.scriptedRouting).add(BASE_CAPABILITIES.routingVisible).add(BASE_CAPABILITIES.pausedClock)
+    derived.add(Capability.BASE.scriptedRouting).add(Capability.BASE.routingVisible).add(Capability.BASE.pausedClock)
   } else {
-    derived.add(BASE_CAPABILITIES.realClock)
-    if (mode === "served") derived.add(BASE_CAPABILITIES.scriptedRouting)
-    if (mode === "served" || mode === "proxied") derived.add(BASE_CAPABILITIES.routingVisible)
+    derived.add(Capability.BASE.realClock)
+    if (mode === "served") derived.add(Capability.BASE.scriptedRouting)
+    if (mode === "served" || mode === "proxied") derived.add(Capability.BASE.routingVisible)
   }
   for (const [kind, part] of parts) for (const capability of Part.capabilitiesOf(kind, part.value)) derived.add(capability)
-  for (const name of bound) derived.add(`${OPERATION_PREFIX}${name}`)
+  for (const name of bound) derived.add(`${Capability.OPERATION_PREFIX}${name}`)
   return derived
 }
 
@@ -163,14 +149,10 @@ export const sharedOf = (
   const shared = new Map<string, Part.Part | undefined>()
   for (const [kind, schema] of rig.parts) {
     if (!schema.reads.shared) continue
-    const named = (lane: Loaded) => lane.parts.get(kind)?.name ?? "none"
+    const named = (lane: Loaded) => lane.parts.get(kind)?.name
     if (new Set(lanes.map(named)).size > 1) {
-      return Result.fail(
-        refuse(
-          lanes.map((lane) => lane.file),
-          `the lanes of one job name one ${kind} part: ${lanes.map((lane) => `${lane.id} names ${named(lane)}`).join(", ")}`
-        )
-      )
+      const said = (lane: Loaded) => `${lane.id} names ${named(lane) ?? `no ${kind} part`}`
+      return Result.fail(refuse(lanes.map((lane) => lane.file), `the lanes of one job name one ${kind} part: ${lanes.map(said).join(", ")}`))
     }
     shared.set(kind, lanes[0]?.parts.get(kind))
   }

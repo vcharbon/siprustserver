@@ -6,6 +6,7 @@
  * executable reads, the cell description, and the compiled cells a case source
  * yields.
  */
+export * as Capability from "./capability.js"
 export * as CaseSource from "./case-source.js"
 export * as Cell from "./cell.js"
 export * as CellOfBundle from "./cell-of-bundle.js"
