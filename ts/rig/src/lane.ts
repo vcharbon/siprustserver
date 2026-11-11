@@ -7,8 +7,9 @@
  * (`[collectors]`, `collection.ts`) and the operations bound to the names a
  * case asks for (`[operations]`). Every other property is a part.
  *
- * A key the schema does not name, or a value of the wrong shape, is refused
- * naming the file and the dotted key.
+ * A file stating no `schema` is refused first, as of another format
+ * ({@link NO_SCHEMA}); then a key the schema does not name, or a value of the
+ * wrong shape, is refused naming the file and the dotted key.
  */
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
@@ -17,6 +18,9 @@ import { decoderOf, Name, type Refusal, refuse, Text, tomlOf } from "./manifest-
 
 /** The schema version a lane file states. */
 export const SCHEMA = "lane.v1"
+
+/** Why a file stating no `schema` is no lane file of this format. */
+export const NO_SCHEMA = `schema: the file states none, so it is no ${SCHEMA} file: rewrite it in ${SCHEMA} (ADR-0060 appendix §11)`
 
 /** The directory of the lane files under a workspace or a pack's lanes. */
 export const LANES_DIR = "lanes"
@@ -163,9 +167,20 @@ const withCollectors = (raw: Schema.Schema.Type<typeof LaneShape>): Result.Resul
   })
 }
 
+/** The `schema` the TOML value `raw` states, `undefined` where it states none. */
+const schemaOf = (raw: unknown): unknown => (typeof raw === "object" && raw !== null ? (raw as { readonly schema?: unknown }).schema : undefined)
+
+/** The format `text` states in its `schema` key; `undefined` where it is no TOML or states none. */
+export const formatOf = (text: string): string | undefined => {
+  const raw = tomlOf(text)
+  const schema = Result.isSuccess(raw) ? schemaOf(raw.success) : undefined
+  return typeof schema === "string" ? schema : undefined
+}
+
 /** The lane file `file` holds as `text`, or why it is none. */
 export const parse = (file: string, text: string): Result.Result<LaneFile, Refusal> => {
-  const read = Result.flatMap(Result.flatMap(tomlOf(text), decode), withCollectors)
+  const stated = Result.flatMap(tomlOf(text), (raw) => (schemaOf(raw) === undefined ? Result.fail(NO_SCHEMA) : Result.succeed(raw)))
+  const read = Result.flatMap(Result.flatMap(stated, decode), withCollectors)
   if (Result.isFailure(read)) return Result.fail(refuse([file], read.failure))
   const why = meaningOf(read.success)
   return why === undefined ? Result.succeed(read.success) : Result.fail(refuse([file], why))

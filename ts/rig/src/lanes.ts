@@ -137,6 +137,17 @@ export const load = (rig: RigPath.RigPath, root: string): Effect.Effect<Readonly
     return loaded.sort((a, b) => orderOf(a) - orderOf(b) || a.id.localeCompare(b.id))
   })
 
+/** The part kinds the schemas of `rig` declare shared (`part.ts`), sorted. */
+export const sharedKinds = (rig: RigPath.RigPath): ReadonlyArray<string> =>
+  [...rig.parts].filter(([, schema]) => schema.reads.shared).map(([kind]) => kind).sort()
+
+/**
+ * Per shared kind of `rig`, the name of the part `lane` names, `undefined`
+ * where it names none: lanes alike in every one may run as one job.
+ */
+export const sharedNamesOf = (rig: RigPath.RigPath, lane: Loaded): ReadonlyArray<readonly [string, string | undefined]> =>
+  sharedKinds(rig).map((kind) => [kind, lane.parts.get(kind)?.name] as const)
+
 /**
  * The parts of the shared kinds the lanes of one job name: one file per kind
  * declared `shared` (`part.ts`), or none on every lane. Refuses, naming the
@@ -147,8 +158,7 @@ export const sharedOf = (
   lanes: ReadonlyArray<Loaded>
 ): Result.Result<ReadonlyMap<string, Part.Part | undefined>, Refusal> => {
   const shared = new Map<string, Part.Part | undefined>()
-  for (const [kind, schema] of rig.parts) {
-    if (!schema.reads.shared) continue
+  for (const kind of sharedKinds(rig)) {
     const named = (lane: Loaded) => lane.parts.get(kind)?.name
     if (new Set(lanes.map(named)).size > 1) {
       const said = (lane: Loaded) => `${lane.id} names ${named(lane) ?? `no ${kind} part`}`

@@ -163,6 +163,9 @@ describe("the lanes of a root", () => {
     expect(await reasonOf(SIMULATED(`[tags]\nrun = ["slow"]\nexclude = ["slow"]`))).toBe("tags: slow stands in both run and exclude")
     expect(await reasonOf(SIMULATED(`[collectors]\nexclude = "sut-log"`))).toMatch(/^collectors\.exclude: /)
     expect(await reasonOf(SIMULATED().replace("lane.v1", "lane.v2"))).toMatch(/^schema: /)
+    expect(await reasonOf(`kind = "legacy"\n[parts]\nrecords-store = "a"\n`)).toBe(
+      "schema: the file states none, so it is no lane.v1 file: rewrite it in lane.v1 (ADR-0060 appendix §11)"
+    )
   })
 
   it("refuses a lane id that is not a name", async () => {
@@ -180,7 +183,7 @@ describe("the parts the lanes of one job share", () => {
       "targets/worker-pool/large.toml": `size = 8\n`,
       ...files
     }))
-    return { lanes, shared: Lanes.sharedOf(rig, lanes) }
+    return { rig, lanes, shared: Lanes.sharedOf(rig, lanes) }
   }
 
   it("refuses two lanes naming two files of a shared kind, naming the lanes", async () => {
@@ -216,6 +219,15 @@ describe("the parts the lanes of one job share", () => {
       "lanes/two.toml": SIMULATED(`[parts]\nrecords-store = "a"\nworker-pool = "large"`)
     })
     expect(Result.isSuccess(shared) && [...shared.success].map(([kind, part]) => [kind, part?.name])).toEqual([["records-store", "a"]])
+  })
+
+  it("state each lane's name per shared kind, a lane naming none apart from one naming a file called none", async () => {
+    const { rig, lanes } = await job({
+      "targets/records-store/none.toml": STORE_A,
+      "lanes/one.toml": REAL("served", `[parts]\nrecords-store = "none"\nworker-pool = "small"`),
+      "lanes/two.toml": SIMULATED(`[parts]\nworker-pool = "large"`)
+    })
+    expect(lanes.map((lane) => Lanes.sharedNamesOf(rig, lane))).toEqual([[["records-store", "none"]], [["records-store", undefined]]])
   })
 })
 
