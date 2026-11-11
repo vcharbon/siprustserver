@@ -26,9 +26,11 @@
 //!   - [`InDialogFromTag`] (§12.2.1.1) — a request the endpoint takes inside a
 //!     dialog it confirmed carries that dialog's remote tag in From.
 //!
-//! **The state is per `(endpoint, Call-ID)` and built from that endpoint's own
-//! stream** (`PeerDialogs`): the tags it minted, the requests it sent, the
-//! INVITEs it took, the URI its dialog was created with. Every rule here reads
+//! **The state is per `(user agent, Call-ID)` and built from that user agent's
+//! own stream** (`PeerDialogs`): the tags it minted, the requests it sent, the
+//! INVITEs it took, the URI its dialog was created with. A user agent is the
+//! set of sockets its transactions tie ([`Parties`]), so a party that sends from
+//! one socket and listens on another is one. Every rule here reads
 //! that state as it stood BEFORE the message being judged — evidence the taker
 //! itself had at the moment it would have had to reject.
 //!
@@ -39,7 +41,8 @@
 //! them and proves nothing. Those occasions stand `Undecidable`.
 //!
 //! [`DialogCallIdStable`] deliberately does NOT partition on Call-ID — a
-//! partition would make a Call-ID CHANGE invisible by opening a second one —
+//! partition would make a Call-ID CHANGE invisible by opening a second one, and
+//! keys the socket, since [`Parties`] ties sockets per Call-ID —
 //! [`TagConsistency`] keys on the server transaction rather than the dialog, and
 //! [`InDialogToTag`] needs a witness `PeerDialogs` does not carry (which
 //! branch established the dialog, which drew a non-2xx), and [`InDialogFromTag`]
@@ -49,6 +52,7 @@
 mod cancel_target;
 mod dialog_id;
 mod from_tag;
+mod parties;
 mod peer_dialogs;
 mod to_tag;
 mod transaction;
@@ -56,6 +60,7 @@ mod transaction;
 pub use cancel_target::{CancelRequestUri, CancelViaBranch};
 pub use dialog_id::{DialogCallIdStable, MidDialogTags, PeerUriStable};
 pub use from_tag::{InDialogFromTag, EARLY_DIALOG_WINDOW_US};
+pub use parties::Parties;
 pub use to_tag::{InDialogToTag, NoToTagOnInitialRequest};
 pub use transaction::{ResponseCorrelation, ResponseEchoesRequestVia, TagConsistency};
 

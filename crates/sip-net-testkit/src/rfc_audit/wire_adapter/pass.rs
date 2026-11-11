@@ -15,6 +15,7 @@ use crate::rfc_audit::recorded::Recorded;
 use crate::rfc_audit::relay_lanes::relay_lanes;
 use crate::types::UaRole;
 
+use super::party_view;
 use super::view::{bind_views, observation, BindView};
 
 /// The shared projection of one recorded event list. A consumer that runs
@@ -28,6 +29,7 @@ pub struct AuditPass<'e> {
     visible: Cow<'e, [Stamped<SignalingNetworkEvent>]>,
     positions: OnceCell<HashMap<u64, usize>>,
     views: OnceCell<Vec<(BindView, Observation)>>,
+    party_views: OnceCell<Vec<Option<(BindView, Observation)>>>,
     recorded: OnceCell<Recorded>,
     dropped: OnceCell<Dropped>,
     relay_lanes: OnceCell<HashSet<LaneKey>>,
@@ -48,6 +50,7 @@ impl<'e> AuditPass<'e> {
             visible,
             positions: OnceCell::new(),
             views: OnceCell::new(),
+            party_views: OnceCell::new(),
             recorded: OnceCell::new(),
             dropped: OnceCell::new(),
             relay_lanes: OnceCell::new(),
@@ -81,6 +84,35 @@ impl<'e> AuditPass<'e> {
                 })
                 .collect()
         })
+    }
+
+    /// Every bind's view, merged with the views of the binds one party holds
+    /// with it ([`rfc_rules::rules::correlation::Parties`]): a party that
+    /// sends from one socket and listens on another is judged on its whole
+    /// stream. The view of a bind no other shares a party with is its own.
+    pub(super) fn party_views(&self) -> Vec<(&BindView, &Observation)> {
+        let merged = self.party_views.get_or_init(|| {
+            built("party_views");
+            let views = self.views();
+            let own: Vec<&BindView> = views.iter().map(|(v, _)| v).collect();
+            let joined = party_view::joined(&own);
+            own.iter()
+                .map(|v| {
+                    let members = joined.get(&v.bind)?;
+                    let view = party_view::merged(v, members, &own);
+                    let obs = observation(&view.msgs);
+                    Some((view, obs))
+                })
+                .collect()
+        });
+        self.views()
+            .iter()
+            .zip(merged)
+            .map(|(own, merged)| match merged {
+                Some((v, o)) => (v, o),
+                None => (&own.0, &own.1),
+            })
+            .collect()
     }
 
     /// The parties the audit-visible events hold a lane for.

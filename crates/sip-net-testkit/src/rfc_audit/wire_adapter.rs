@@ -27,7 +27,7 @@ use std::collections::HashSet;
 use layer_harness::{LaneKey, Stamped};
 
 use rfc_rules::rules::Obligation;
-use rfc_rules::{Decision, RuleId, WireView};
+use rfc_rules::{Decision, Observation, RuleId, WireView};
 
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::types::UaRole;
@@ -40,6 +40,7 @@ mod cseq;
 mod dialog;
 mod final_response;
 mod offer_answer;
+mod party_view;
 mod pass;
 mod prack;
 mod proxy;
@@ -53,19 +54,20 @@ mod wellformed;
 
 pub use pass::AuditPass;
 
-/// Run `rule` over every bind view of the pass and keep the violated,
-/// non-relayed findings the `vantage` predicate accepts for the bind the view
-/// belongs to. Every non-relayed occasion at that vantage, violated or not, is
-/// noted for the run's rule population.
+/// Run `rule` over `views` and keep the violated, non-relayed findings the
+/// `vantage` predicate accepts for the bind the view belongs to. Every
+/// non-relayed occasion at that vantage, violated or not, is noted for the
+/// run's rule population.
 fn at_vantage(
     pass: &AuditPass<'_>,
+    views: &[(&view::BindView, &Observation)],
     rule: &dyn Obligation,
     vantage: impl Fn(&rfc_rules::Finding, &LaneKey, &str) -> bool,
     detail: impl Fn(&rfc_rules::Finding, &str) -> String,
 ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
     let positions = pass.positions();
     let mut out = Vec::new();
-    for (view, obs) in pass.views() {
+    for &(view, obs) in views {
         for f in rule.eval(&WireView { msgs: &view.msgs, obs }) {
             let (seq, cid) = &view.meta[f.anchor];
             if f.relayed || !vantage(&f, &view.bind, cid) {
@@ -160,6 +162,9 @@ struct Live {
     skip: Skip,
     subject: &'static [UaRole],
     advisory: bool,
+    /// Judged on each bind's party view ([`AuditPass::party_views`]) rather
+    /// than its own.
+    per_party: bool,
     /// An advisory row that gates a finding charged to a system under test.
     gates_sut: bool,
     admits: fn(&rfc_rules::Finding) -> bool,
@@ -200,6 +205,7 @@ impl Live {
             skip: Skip::None,
             subject: &[],
             advisory: false,
+            per_party: false,
             gates_sut: false,
             admits: |_| true,
             detail,
@@ -209,6 +215,12 @@ impl Live {
     /// Applies to binds declaring one of `roles` (every role by default).
     const fn roles(mut self, roles: &'static [UaRole]) -> Live {
         self.subject = roles;
+        self
+    }
+
+    /// Judged on each bind's party view: a rule keyed by user agent, not socket.
+    const fn per_party(mut self) -> Live {
+        self.per_party = true;
         self
     }
 
@@ -294,12 +306,18 @@ impl Live {
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
         let body = self.id.rule().body;
         let admits = self.admits;
+        let views = if self.per_party {
+            pass.party_views()
+        } else {
+            pass.views().iter().map(|(v, o)| (v, o)).collect()
+        };
         let found = match self.vantage {
             Vantage::Emitter => {
                 let recorded = pass.recorded().scoped(scoped_out);
                 let falls_back = !self.proxy_only();
                 at_vantage(
                     pass,
+                    &views,
                     body,
                     |f, b, _| {
                         let own = !falls_back || recorded.holds(&f.emitter);
@@ -314,6 +332,7 @@ impl Live {
                 let dropped = pass.dropped();
                 at_vantage(
                     pass,
+                    &views,
                     body,
                     |f, b, cid| {
                         if recorded.holds(&f.emitter) {
@@ -325,13 +344,14 @@ impl Live {
                 )
             }
             Vantage::EmitterOnly => {
-                at_vantage(pass, body, |f, b, _| f.emitter == *b && admits(f), self.detail)
+                at_vantage(pass, &views, body, |f, b, _| f.emitter == *b && admits(f), self.detail)
             }
             Vantage::Taker => {
-                at_vantage(pass, body, |f, b, _| f.taker == *b && admits(f), self.detail)
+                at_vantage(pass, &views, body, |f, b, _| f.taker == *b && admits(f), self.detail)
             }
             Vantage::EitherEnd => at_vantage(
                 pass,
+                &views,
                 body,
                 |f, b, _| (f.emitter == *b || f.taker == *b) && admits(f),
                 self.detail,
@@ -341,6 +361,7 @@ impl Live {
                 let recorded = pass.recorded();
                 at_vantage(
                     pass,
+                    &views,
                     body,
                     |f, b, _| {
                         let at = if recorded.holds(&f.taker) { &f.taker } else { &f.emitter };

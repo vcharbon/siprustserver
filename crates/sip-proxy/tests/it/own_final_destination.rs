@@ -8,17 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{spawn_proxy, FailingSelect, ProxySut};
-use scenario_harness::Harness;
-use sip_clock::Clock;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{HeaderName, SipMessage, SipParser, SipResponse};
-use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
-use sip_net_testkit::SimulatedSignalingNetwork;
+use sip_net::UdpEndpoint;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::WorkerRegistry;
 use sip_proxy::strategy::SelectError;
-use sip_proxy::{ProxyAddr, ProxyCoreBuilder, RoutingStrategy};
-use sip_txn::IdGen;
+use sip_proxy::RoutingStrategy;
 
 const PROXY: &str = "127.0.0.1:5060";
 /// The socket the peer sends from.
@@ -189,44 +186,24 @@ async fn a_mapped_sent_by_reaches_its_ipv4_address() {
     let _ = r.h.finish().await;
 }
 
-/// The 200 to the CANCEL of a refused INVITE (§9.2) takes the same seam. On a
-/// bare network: only a caller breaking §9.1 CANCELs an INVITE no provisional
-/// answered, and the RFC audit reads each socket of this peer as a UA of its own.
+/// The 200 to the CANCEL of a refused INVITE (§9.2) takes the same seam. Only a
+/// caller breaking §9.1 CANCELs an INVITE no provisional answered, so that is
+/// the peer's waived deviation; the audit reads the peer's two sockets as one party.
 #[tokio::test(start_paused = true)]
 async fn without_rport_the_200_to_a_cancel_reaches_the_sent_by_port() {
-    let net = SimulatedSignalingNetwork::new(1);
-    let bind = |at: &str| net.bind_udp(BindUdpOpts::new(at.parse().expect("an address"), 64));
-    let endpoint = bind(PROXY).await.expect("bind the proxy");
-    let send = bind(SEND).await.expect("bind the sender");
-    let listen = bind(LISTEN).await.expect("bind the listener");
-    let strategy: Arc<dyn RoutingStrategy> =
-        Arc::new(FailingSelect(|| SelectError::NoTarget { reason: "no worker alive".into() }));
-    let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-    let core = ProxyCoreBuilder::new(
-        ProxyAddr::new("127.0.0.1", 5060),
-        strategy,
-        registry,
-        Arc::new(IdGen::seeded(0x846)),
-        sip_message::CustomParser::new(),
-    )
-    .clock(Clock::test_at(0))
-    .build(endpoint);
-    let task = tokio::spawn(core.run());
-    let proxy = PROXY.parse().expect("an address");
+    let r = rig("own-final-dest-cancel").await;
+    r.h.waive(
+        WaiverScope::rule("cancel-after-1xx", "the caller's CANCEL of a refused INVITE")
+            .on_party("peer"),
+    );
     let branch = "z9hG4bK-cancel";
 
-    for (raw, status) in [
-        (request("INVITE", branch, "", BOB, ""), 503),
-        (request("CANCEL", branch, "", BOB, ""), 200),
-    ] {
-        send.send_to(raw.as_bytes(), proxy).await.expect("sent");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let packet = listen.try_recv().unwrap_or_else(|| panic!("the {status} arrives"));
-        let Ok(SipMessage::Response(resp)) = CustomParser::new().parse(&packet.raw) else {
-            panic!("a response");
-        };
-        assert_eq!(resp.status(), status);
-        assert!(send.try_recv().is_none(), "nothing reaches the source port");
-    }
-    task.abort();
+    r.send(&request("INVITE", branch, "", BOB, "")).await;
+    let (refusal, _) = r.answered(r.listen.as_ref(), 503);
+    r.send(&request("CANCEL", branch, "", BOB, "")).await;
+    r.answered(r.listen.as_ref(), 200);
+    assert!(r.send.try_recv().is_none(), "nothing reaches the source port (§18.2.2)");
+
+    r.ack(branch, "", &refusal).await;
+    let _ = r.h.finish().await;
 }

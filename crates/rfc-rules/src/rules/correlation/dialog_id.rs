@@ -29,7 +29,7 @@ pub struct MidDialogTags;
 
 impl Obligation for MidDialogTags {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        let mut st = PeerDialogs::default();
+        let mut st = PeerDialogs::new(wire);
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if !msg.repeat {
@@ -86,7 +86,7 @@ pub struct PeerUriStable;
 
 impl Obligation for PeerUriStable {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        let mut st = PeerDialogs::default();
+        let mut st = PeerDialogs::new(wire);
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if !msg.repeat && matches!(msg.kind, Kind::Request { .. }) {

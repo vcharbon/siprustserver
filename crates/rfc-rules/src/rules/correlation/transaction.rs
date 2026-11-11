@@ -11,6 +11,7 @@ use crate::wire::{Kind, WireView};
 use crate::rules::charge::charge;
 use crate::rules::Obligation;
 
+use super::parties::Parties;
 use super::peer_dialogs::{PeerDialogs, RELAYED};
 
 /// **§8.1.3 / §17.1.3 — a response reproduces its request's Via stack.** A UAC
@@ -46,6 +47,7 @@ struct SentVia {
 
 impl Obligation for ResponseEchoesRequestVia {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        let parties = Parties::of(wire.msgs);
         let mut sent: HashMap<(String, String), Vec<SentVia>> = HashMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -54,7 +56,7 @@ impl Obligation for ResponseEchoesRequestVia {
             }
             if matches!(msg.kind, Kind::Request { .. }) {
                 if !msg.repeat {
-                    sent.entry((msg.src.clone(), msg.call_id.clone())).or_default().push(SentVia {
+                    sent.entry(parties.sender(msg)).or_default().push(SentVia {
                         cseq: msg.cseq,
                         method: msg.cseq_method.to_ascii_uppercase(),
                         branch: msg.via_branch.clone(),
@@ -71,7 +73,7 @@ impl Obligation for ResponseEchoesRequestVia {
             }
             let method = msg.cseq_method.to_ascii_uppercase();
             let candidates: Vec<&SentVia> = sent
-                .get(&(msg.dst.clone(), msg.call_id.clone()))
+                .get(&parties.taker(msg))
                 .map(|v| v.iter().filter(|r| r.cseq == msg.cseq && r.method == method).collect())
                 .unwrap_or_default();
             let Some(&latest) = candidates.last() else {
@@ -126,7 +128,7 @@ pub struct ResponseCorrelation;
 
 impl Obligation for ResponseCorrelation {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        let mut st = PeerDialogs::default();
+        let mut st = PeerDialogs::new(wire);
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if let (false, Kind::Response { .. }, Some(dlg)) =
@@ -163,6 +165,10 @@ impl Obligation for ResponseCorrelation {
     }
 }
 
+/// `((user agent, Call-ID), branch, CSeq method)`: the server transaction a
+/// UAS's responses belong to, keyed to the tags its provisionals established.
+type ServerTransaction = ((String, String), String, String);
+
 /// **§17.2.1 / §12.1.1 — a UAS keeps its To-tag across one transaction.** Once a
 /// UAS commits a To-tag on a provisional it carries that tag on the final of the
 /// same server transaction: the tag names the early dialog the UAC already
@@ -178,9 +184,8 @@ pub struct TagConsistency;
 
 impl Obligation for TagConsistency {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // (emitter, branch, CSeq method) -> the tags its provisionals established,
-        // in order.
-        let mut committed: HashMap<(String, String, String), Vec<String>> = HashMap::new();
+        let parties = Parties::of(wire.msgs);
+        let mut committed: HashMap<ServerTransaction, Vec<String>> = HashMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if msg.repeat {
@@ -190,7 +195,7 @@ impl Obligation for TagConsistency {
             let (Some(branch), Some(tag)) = (msg.via_branch.clone(), msg.to_tag.clone()) else {
                 continue;
             };
-            let key = (msg.src.clone(), branch.clone(), msg.cseq_method.to_ascii_uppercase());
+            let key = (parties.sender(msg), branch.clone(), msg.cseq_method.to_ascii_uppercase());
             if (101..200).contains(&status) {
                 committed.entry(key).or_default().push(tag);
                 continue;

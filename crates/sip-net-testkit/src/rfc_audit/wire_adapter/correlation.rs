@@ -3,19 +3,24 @@
 use super::*;
 
 pub(super) const LIVE: &[Live] = &[
-    Live::taker(RuleId::ResponseEchoesRequestVia, response_echoes_request_via),
-    Live::taker(RuleId::ResponseCorrelation, response_correlation),
-    Live::taker(RuleId::MidDialogTags, mid_dialog_tags),
-    Live::taker(RuleId::PeerUriStable, peer_uri_stable),
+    Live::taker(RuleId::ResponseEchoesRequestVia, response_echoes_request_via).per_party(),
+    Live::taker(RuleId::ResponseCorrelation, response_correlation).per_party(),
+    Live::taker(RuleId::MidDialogTags, mid_dialog_tags).per_party(),
+    Live::taker(RuleId::PeerUriStable, peer_uri_stable).per_party(),
     Live::taker(RuleId::DialogCallIdStable, dialog_call_id_stable),
-    Live::taker(RuleId::CancelRequestUri, cancel_request_uri),
-    Live::taker(RuleId::CancelViaBranch, cancel_via_branch),
-    Live::emitter(RuleId::TagConsistency, tag_flip_detail).advisory().admits(tag_flip_2xx),
-    Live::emitter(RuleId::TagConsistency, tag_flip_detail).admits(tag_flip_non_2xx),
-    Live::emitter(RuleId::NoToTagOnInitialRequest, no_to_tag_on_initial_request),
+    Live::taker(RuleId::CancelRequestUri, cancel_request_uri).per_party(),
+    Live::taker(RuleId::CancelViaBranch, cancel_via_branch).per_party(),
+    Live::emitter(RuleId::TagConsistency, tag_flip_detail)
+        .advisory()
+        .admits(tag_flip_2xx)
+        .per_party(),
+    Live::emitter(RuleId::TagConsistency, tag_flip_detail).admits(tag_flip_non_2xx).per_party(),
+    Live::emitter(RuleId::NoToTagOnInitialRequest, no_to_tag_on_initial_request).per_party(),
     // A declared proxy carries the originator's To through unchanged.
-    Live::emitter(RuleId::InDialogToTag, in_dialog_to_tag).roles(&[UaRole::Uac, UaRole::Uas]),
-    Live::taker_else_emitter(RuleId::InDialogFromTag, in_dialog_from_tag),
+    Live::emitter(RuleId::InDialogToTag, in_dialog_to_tag)
+        .roles(&[UaRole::Uac, UaRole::Uas])
+        .per_party(),
+    Live::taker_else_emitter(RuleId::InDialogFromTag, in_dialog_from_tag).per_party(),
 ];
 
 fn response_echoes_request_via(f: &rfc_rules::Finding, _cid: &str) -> String {

@@ -8,6 +8,7 @@ use crate::wire::{Kind, Msg, WireView};
 use crate::rules::charge::charge;
 use crate::rules::Obligation;
 
+use super::parties::Parties;
 use super::peer_dialogs::RELAYED;
 
 /// How long after an endpoint takes the first 2xx to its INVITE an early
@@ -36,26 +37,27 @@ pub struct InDialogFromTag;
 
 impl Obligation for InDialogFromTag {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        let parties = Parties::of(wire.msgs);
         let mut by: HashMap<(String, String), ConfirmedDialogs> = HashMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if msg.call_id.is_empty() {
                 continue;
             }
-            let taker = (msg.dst.clone(), msg.call_id.clone());
+            let taker = parties.taker(msg);
             if !msg.repeat {
                 if let Some(d) = by.get(&taker).and_then(|c| c.decision(msg, mi)) {
                     out.push(charge(RuleId::InDialogFromTag, msg, mi, d));
                 }
             }
-            by.entry((msg.src.clone(), msg.call_id.clone())).or_default().observe(msg, true);
+            by.entry(parties.sender(msg)).or_default().observe(msg, true);
             by.entry(taker).or_default().observe(msg, false);
         }
         out
     }
 }
 
-/// The dialogs ONE endpoint has seen confirmed on ONE Call-ID, as
+/// The dialogs ONE user agent has seen confirmed on ONE Call-ID, as
 /// [`InDialogFromTag`] needs them.
 #[derive(Default)]
 struct ConfirmedDialogs {

@@ -5,9 +5,11 @@ use std::collections::HashMap;
 
 use sip_message::sniff;
 
-use crate::wire::{Kind, Msg};
+use crate::wire::{Kind, Msg, WireView};
 
-/// What ONE endpoint knows about ONE Call-ID from its own stream.
+use super::parties::Parties;
+
+/// What ONE user agent knows about ONE Call-ID from its own stream.
 #[derive(Default)]
 pub(super) struct PeerDialog {
     /// Tags this endpoint minted: the From-tag of requests it sent, the To-tag
@@ -76,18 +78,22 @@ impl PeerDialog {
     }
 }
 
-/// The dialog state EVERY endpoint in a view builds, keyed
-/// `(endpoint, Call-ID)`. A rule walks the view and reads the taker's entry as
-/// it stood before the message it is judging.
-#[derive(Default)]
+/// The dialog state EVERY user agent in a view builds, keyed
+/// `(user agent, Call-ID)` ([`Parties`]). A rule walks the view and reads the
+/// taker's entry as it stood before the message it is judging.
 pub(super) struct PeerDialogs {
+    parties: Parties,
     by: HashMap<(String, String), PeerDialog>,
 }
 
 impl PeerDialogs {
+    pub(super) fn new(wire: &WireView<'_>) -> Self {
+        PeerDialogs { parties: Parties::of(wire.msgs), by: HashMap::new() }
+    }
+
     /// The taker's state for this message's dialog, as it stands now.
     pub(super) fn taker_of(&self, msg: &Msg) -> Option<&PeerDialog> {
-        self.by.get(&(msg.dst.clone(), msg.call_id.clone()))
+        self.by.get(&self.parties.taker(msg))
     }
 
     /// Fold `msg` in at BOTH ends: its sender minted what it states, its taker
@@ -96,8 +102,8 @@ impl PeerDialogs {
         if msg.call_id.is_empty() {
             return;
         }
-        self.by.entry((msg.src.clone(), msg.call_id.clone())).or_default().sent(msg);
-        self.by.entry((msg.dst.clone(), msg.call_id.clone())).or_default().took(msg);
+        self.by.entry(self.parties.sender(msg)).or_default().sent(msg);
+        self.by.entry(self.parties.taker(msg)).or_default().took(msg);
     }
 }
 

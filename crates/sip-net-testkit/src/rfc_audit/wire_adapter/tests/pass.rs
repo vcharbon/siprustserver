@@ -40,7 +40,7 @@ fn recorded_call() -> Vec<Stamped<SignalingNetworkEvent>> {
 
 /// Every projection a pass offers, built once.
 fn each_once() -> builds::Built {
-    ["dropped", "positions", "proxy_only_lanes", "recorded", "relay_lanes", "views"]
+    ["dropped", "party_views", "positions", "proxy_only_lanes", "recorded", "relay_lanes", "views"]
         .into_iter()
         .map(|projection| (projection, 1))
         .collect()
