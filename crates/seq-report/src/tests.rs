@@ -278,11 +278,11 @@ fn diagram_message_is_a_seq_msg_keyed_to_its_payload_block() {
     );
 }
 
+/// `render_embed` is the host-embeddable view (a load-run ladder): no
+/// `<html>` chrome, but the SVG messages ARE wired to reveal their payload on
+/// click — everything scoped under `.seq-embed`.
 #[test]
 fn embed_is_a_self_contained_clickable_fragment() {
-    // `render_embed` is the host-embeddable view (a load-run ladder): no
-    // `<html>` chrome, but the SVG messages ARE wired to reveal their
-    // payload on click — everything scoped under `.seq-embed`.
     let doc = mixed_doc();
     let embed = render_embed(&doc);
 
