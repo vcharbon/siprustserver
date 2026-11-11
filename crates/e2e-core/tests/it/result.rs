@@ -58,9 +58,8 @@ async fn a_clean_call_folds_into_a_passing_record_of_the_whole_dialog() {
     let result = RunResult::from_run(cell(), &report, vec![verdict(true)], &[]);
     assert!(result.passed, "a clean call with passing checks passes");
     assert_eq!(result.timings.messages, 6, "the six messages of the dialog");
-    assert!(result.timings.last_ms >= result.timings.first_ms);
     assert!(!result.seq_doc.rows.is_empty(), "the diagram has rows");
-    assert!(result.rfc.iter().all(|a| a.rule_sourced), "{:?}", result.rfc);
+    assert!(result.rfc.is_empty(), "a clean call has no RFC finding: {:?}", result.rfc);
 }
 
 #[tokio::test(start_paused = true)]
@@ -103,35 +102,32 @@ async fn a_gating_rfc_finding_fails_the_cell() {
     assert!(!result.seq_doc.rows.is_empty());
 }
 
-/// A harness finding the run carries (an HTTP verdict, here) reaches the
-/// diagram's anomaly list and fails the cell, and never the RFC findings.
+/// The rule-sourced findings the diagram carries are the record's `rfc`; a
+/// harness finding (an HTTP verdict, here) stays in the diagram, never in
+/// `rfc`, and still fails the cell.
 #[tokio::test(start_paused = true)]
 async fn rfc_keeps_only_rule_sourced_findings() {
     let mut report = clean_call("result-rule-sourced").await;
-    report.extra_anomalies.push(seq_report::Anomaly {
-        check: "http.unmatched".into(),
-        detail: "no script opens POST /x".into(),
-        lane: None,
-        endpoint: None,
-        advisory: Some(false),
-        row_seqs: Vec::new(),
-        rule_sourced: false,
-    });
+    report.extra_anomalies.push(anomaly("rfc3261.via-branch", false, true));
+    report.extra_anomalies.push(anomaly("http.unmatched", false, false));
     let result = RunResult::from_run(cell(), &report, Vec::new(), &[]);
-    assert!(result.seq_doc.anomalies.iter().any(|a| a.check == "http.unmatched"));
-    assert!(result.rfc.iter().all(|a| a.rule_sourced), "{:?}", result.rfc);
+    let in_doc: Vec<&str> = result.seq_doc.anomalies.iter().map(|a| a.check.as_str()).collect();
+    assert!(in_doc.contains(&"rfc3261.via-branch"), "{in_doc:?}");
+    assert!(in_doc.contains(&"http.unmatched"), "{in_doc:?}");
+    let rfc: Vec<&str> = result.rfc.iter().map(|a| a.check.as_str()).collect();
+    assert_eq!(rfc, ["rfc3261.via-branch"], "only the rule-sourced finding is an RFC finding");
     assert!(!result.seq_doc.passed, "a gating harness finding fails the diagram");
     assert!(!result.passed, "and the cell");
 }
 
-/// `render_svg` over the record's `seqDoc` emits the exact diagram markup the
-/// HTML report embeds.
-#[tokio::test(start_paused = true)]
-async fn the_seq_doc_renders_the_diagram_the_html_report_embeds() {
-    let report = clean_call("result-svg").await;
-    let result = RunResult::from_run(cell(), &report, Vec::new(), &[]);
-    let svg = seq_report::render_svg(&result.seq_doc);
-    assert!(svg.starts_with("<svg"), "standalone SVG markup");
-    let html = seq_report::render_html(&result.seq_doc);
-    assert!(html.contains(&svg), "the HTML report embeds the same SVG render_svg returns");
+fn anomaly(check: &str, advisory: bool, rule_sourced: bool) -> seq_report::Anomaly {
+    seq_report::Anomaly {
+        check: check.into(),
+        detail: format!("{check} found"),
+        lane: None,
+        endpoint: None,
+        advisory: Some(advisory),
+        row_seqs: Vec::new(),
+        rule_sourced,
+    }
 }

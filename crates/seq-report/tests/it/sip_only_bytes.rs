@@ -75,6 +75,14 @@ fn a_sip_only_doc_renders_the_svg_it_rendered_before() {
     assert_eq!(render_svg(&sip_only_doc()), include_str!("fixtures/sip_only.svg"));
 }
 
+/// The HTML report's diagram panel is the exact markup `render_svg` returns.
+#[test]
+fn the_html_embeds_the_svg_render_svg_returns() {
+    let svg = render_svg(&sip_only_doc());
+    assert!(svg.starts_with("<svg"), "standalone SVG markup");
+    assert!(render_html(&sip_only_doc()).contains(&svg));
+}
+
 #[test]
 fn a_sip_only_doc_renders_the_text_it_rendered_before() {
     assert_eq!(render_global_txt(&sip_only_doc()), include_str!("fixtures/sip_only.global.txt"));
