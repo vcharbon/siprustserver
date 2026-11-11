@@ -195,7 +195,9 @@ describe.skipIf(!Server.served)("attachments", () => {
       yield* runs.finish({ id: opened.id, status: "done", cases: [cell("a", { dir, attachments: [LOG] })] })
       const jobsBefore = yield* sql<{ n: string }>`SELECT count(*) AS n FROM jobs`
       const kept = yield* store.of({ scope: "job", jobId: job })
-      expect((yield* reset.plan({})).emptied).toContain("attachments")
+      const plan = yield* reset.plan({})
+      expect(plan.emptied).toContain("attachments")
+      expect(plan.emptied).not.toContain("job_attachments")
       yield* reset.execute({})
       const left = yield* sql<{ n: string }>`SELECT count(*) AS n FROM attachments`
       expect(left[0]!.n).toBe("0")
