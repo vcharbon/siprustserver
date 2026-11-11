@@ -532,7 +532,7 @@ fn record_route_answering_a_two_socket_uac_s_in_dialog_request_is_violated() {
 /// set from the 2xx its sent-by took: its in-dialog request owes that set.
 #[test]
 fn a_two_socket_uac_owes_the_route_set_its_sent_by_learned() {
-    const ALICE_SENDS: &str = "127.0.0.1:40000";
+    const ALICE_SENDS: &str = "127.0.0.1:60000";
     let msgs = [
         req(1_000, ALICE_SENDS, BOB, "INVITE", B_URI, "z9hG4bK-i", 1, A_URI, B_URI, None, ""),
         rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", "Record-Route: <sip:p1@127.0.0.1:5090;lr>\r\n"),

@@ -17,6 +17,7 @@ use super::{
 };
 
 mod acknowledgement;
+mod agent;
 mod answering;
 mod negotiation;
 mod offer;

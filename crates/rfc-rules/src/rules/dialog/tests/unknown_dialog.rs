@@ -290,7 +290,7 @@ fn a_rejected_reinvite_keeps_the_confirmed_dialog() {
 /// first naming an unknown peer tag owes the 481 there.
 #[test]
 fn a_two_socket_uas_owes_the_481_where_it_takes_the_request() {
-    const BOB_SENDS: &str = "127.0.0.1:5071";
+    const BOB_SENDS: &str = "127.0.0.1:5069";
     let from_second = |mut m: Msg| {
         m.src = BOB_SENDS.to_string();
         m

@@ -409,7 +409,7 @@ fn the_server_transaction_half_changes_no_obligation_verdict() {
 /// its own, named by the socket its INVITE left from.
 #[test]
 fn a_two_socket_uac_owes_the_prack_of_its_own_invite() {
-    const UAC_SENDS: &str = "10.0.0.1:40000";
+    const UAC_SENDS: &str = "10.0.0.1:60000";
     let msgs = vec![
         via(invite(1_000_000, UAC_SENDS, UAS, 1), "z9hG4bK-i", UAC),
         via(reliable(1_100_000, UAS, UAC, 180, 1, 5, "tb"), "z9hG4bK-i", UAC),

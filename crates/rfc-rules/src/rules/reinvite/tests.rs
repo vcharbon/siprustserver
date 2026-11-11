@@ -135,7 +135,6 @@ fn a_re_invite_after_the_ack_is_compliant() {
 /// ended its re-INVITE at that sent-by: the next re-INVITE overlaps nothing.
 #[test]
 fn a_two_socket_uac_s_re_invite_after_a_491_is_compliant() {
-    const ALICE_SENDS: &str = "10.0.0.1:40000";
     let from_second = |at_us, branch: &str, cseq| {
         let mut m = req(at_us, ALICE_SENDS, BOB, "INVITE", branch, cseq, "at", "bt");
         m.head = Some(format!("Via: SIP/2.0/UDP {ALICE};branch={branch}\r\n\r\n").into_bytes());
@@ -151,6 +150,65 @@ fn a_two_socket_uac_s_re_invite_after_a_491_is_compliant() {
     );
     assert_eq!(f.len(), 2, "two occasions, the two re-INVITEs: {f:?}");
     assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
+}
+
+/// alice's sending socket; her agent is named by `ALICE`, which sorts first.
+const ALICE_SENDS: &str = "10.0.0.1:60000";
+
+/// A request alice sends from her sending socket, its top Via naming `ALICE`.
+fn from_sending(at_us: u64, method: &str, branch: &str, cseq: u32, to_tag: &str) -> Msg {
+    let mut m = req(at_us, ALICE_SENDS, BOB, method, branch, cseq, "at", to_tag);
+    m.head = Some(format!("Via: SIP/2.0/UDP {ALICE};branch={branch}\r\n\r\n").into_bytes());
+    m
+}
+
+/// §14.1: a re-INVITE alice sends from her sent-by while the one she sent
+/// from her other socket drew only a provisional overlaps it.
+#[test]
+fn a_two_socket_uac_s_re_invite_over_its_other_socket_s_is_violated() {
+    let f = hits(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            from_sending(1_000, "INVITE", "z9hG4bK-1", 2, "bt"),
+            rsp(1_500, BOB, ALICE, 180, "z9hG4bK-1", 2, "at", "bt", ""),
+            req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].emitter, ALICE, "the socket that sent the overlapping re-INVITE");
+}
+
+/// §14.1 rule 2: the ACK alice sends from her sending socket confirms the
+/// re-INVITE whose 2xx her sent-by took, so the next one overlaps nothing.
+#[test]
+fn a_two_socket_uac_s_ack_confirms_the_re_invite_its_sent_by_took() {
+    let f = eval(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            from_sending(1_000, "INVITE", "z9hG4bK-1", 2, "bt"),
+            rsp(2_000, BOB, ALICE, 200, "z9hG4bK-1", 2, "at", "bt", ""),
+            from_sending(3_000, "ACK", "z9hG4bK-k1", 2, "bt"),
+            from_sending(4_000, "INVITE", "z9hG4bK-2", 3, "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 2, "two occasions, the two re-INVITEs: {f:?}");
+    assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
+}
+
+/// The dialog-creating INVITE alice sent from her other socket is
+/// outstanding on the early dialog the 180 her sent-by took names: an INVITE
+/// on that early dialog overlaps it.
+#[test]
+fn an_invite_on_an_early_dialog_a_two_socket_uac_s_sent_by_took_is_violated() {
+    let f = hits(
+        &NoReInviteWhileInviteInProgress,
+        &[
+            from_sending(1_000, "INVITE", "z9hG4bK-1", 1, ""),
+            rsp(1_500, BOB, ALICE, 180, "z9hG4bK-1", 1, "at", "bt", ""),
+            from_sending(2_000, "INVITE", "z9hG4bK-2", 2, "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 1, "{f:?}");
 }
 
 /// RFC 6026's *Accepted* interval: the 2xx has landed but the ACK has not
@@ -528,4 +586,23 @@ fn silence_inside_the_final_window_is_undecidable() {
     ));
     let decided = eval_open(&FailedReinviteTearsDownDialog, &long);
     assert!(decided.iter().any(Finding::violated), "{decided:?}");
+}
+
+/// A BYE alice sends from her sent-by is the other cause that abandons the
+/// re-INVITE she sent from her other socket.
+#[test]
+fn a_two_socket_uac_s_bye_discharges_its_abandoned_re_invite() {
+    let f = eval(
+        &FailedReinviteTearsDownDialog,
+        &[
+            from_sending(1_000, "INVITE", "z9hG4bK-i", 1, ""),
+            rsp(2_000, BOB, ALICE, 200, "z9hG4bK-i", 1, "at", "bt", ""),
+            from_sending(3_000, "ACK", "z9hG4bK-k", 1, "bt"),
+            from_sending(4_000, "INVITE", "z9hG4bK-r", 2, "bt"),
+            rsp(5_000, BOB, ALICE, 180, "z9hG4bK-r", 2, "at", "bt", ""),
+            req(6_000, ALICE, BOB, "BYE", "z9hG4bK-b", 3, "at", "bt"),
+        ],
+    );
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
 }
