@@ -94,7 +94,7 @@ pub use leg::{
 pub use leg_end::{
     abandon_leg, cancel_early_dialogs, record_cancel_sent, record_cancelled_invite,
     record_dead_hop, record_dialled_invite_final, record_dialling_invite_rejected,
-    record_invite_final, reject_early_dialogs, retire_early_dialogs,
+    record_hop_answered, record_invite_final, reject_early_dialogs, retire_early_dialogs,
 };
 pub use lens::{update_dialog, update_leg};
 pub use lifecycle::{lifecycle_behind, lifecycle_position};

@@ -94,12 +94,23 @@ pub fn abandon_leg(leg: &mut Leg) {
 /// on `leg_id` reported that nothing answered it (RFC 3261 §17.1.1.2), when it
 /// is the INVITE that dialled the leg and took no final.
 pub fn record_dead_hop(call: &mut Call, leg_id: &str, cseq: i64) {
+    set_hop_dead(call, leg_id, cseq, true)
+}
+
+/// Record that a response to the INVITE of CSeq `cseq` this stack sent on
+/// `leg_id` arrived: its hop is alive, when it is the INVITE that dialled the
+/// leg and took no final.
+pub fn record_hop_answered(call: &mut Call, leg_id: &str, cseq: i64) {
+    set_hop_dead(call, leg_id, cseq, false)
+}
+
+fn set_hop_dead(call: &mut Call, leg_id: &str, cseq: i64, dead: bool) {
     update_leg(call, leg_id, |l| {
         if l.dialled_cseq() != Some(cseq) {
             return;
         }
         if let Some(invite) = l.outbound_invite_mut().filter(|i| i.final_received.is_none()) {
-            invite.hop_dead = true;
+            invite.hop_dead = dead;
         }
     })
 }

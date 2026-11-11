@@ -101,7 +101,8 @@ pub fn caller_dialog_mut<'a>(call: &'a mut Call, our_tag: &str) -> Option<&'a mu
 /// Whether the call waits on nothing more from `leg` before its record is
 /// released ([`Leg::is_resolved`]). A leg whose CANCEL is in flight is not:
 /// the callee owes a `487`, or a `200` may still cross the CANCEL (RFC 3261
-/// §9.1), and finalization must not strand a ringing callee.
+/// §9.1), and finalization must not strand a ringing callee. A CANCEL held
+/// for a dead hop is not in flight.
 pub fn leg_is_resolved(leg: &Leg) -> bool {
     leg.is_resolved()
 }
@@ -113,10 +114,10 @@ pub fn leg_is_resolved(leg: &Leg) -> bool {
 /// call's lifecycle has entered `Terminating`/`Terminated`, or when the leg
 /// itself reads `Terminated` (its CANCEL or BYE sent, its INVITE ended).
 ///
-/// Distinct from [`leg_is_resolved`]: a `Cancelling` leg is *unresolved*
-/// (its callee still owes a 487 or a crossing 200, so finalization waits) yet
-/// already going away — resolution and progress-eligibility are different
-/// questions.
+/// Distinct from [`leg_is_resolved`]: a `Cancelling` leg whose CANCEL left is
+/// *unresolved* (its callee still owes a 487 or a crossing 200, so
+/// finalization waits) yet already going away — resolution and
+/// progress-eligibility are different questions.
 pub fn leg_is_going_away(call_state: CallModelState, leg: &Leg) -> bool {
     matches!(call_state, CallModelState::Terminating | CallModelState::Terminated)
         || leg.state() == LegState::Terminated

@@ -155,7 +155,8 @@ impl Leg {
     /// flight, no dialled INVITE still ringing. A caller's INVITE without a
     /// final waits on nothing: the call answers it as it ends. Nor does a
     /// CANCEL of an INVITE whose hop is dead: it waits, unsent, in the
-    /// transaction for a provisional that would let it leave (RFC 3261 §9.1).
+    /// transaction for a provisional that would let it leave (RFC 3261 §9.1),
+    /// and that provisional reaching the call makes the hop alive again.
     pub fn is_resolved(&self) -> bool {
         match self.state() {
             LegState::Confirmed => false,
