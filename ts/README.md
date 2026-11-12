@@ -1,11 +1,11 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Ten packages, four of them one layer each of the same stack:
+A pnpm workspace. Thirteen packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
 | `contracts/` | `@sip/contracts` | Effect Schema mirrors of the Rust-owned wire formats, the canonical formatter, pure readings of those formats (call key, step order, a cell's main error), and the report formats the tooling publishes (`sip.compare/1`, `sip.run-report/1`, their JSON Schemas under `contracts/schemas/`) |
-| `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) and the process primitives above them (a command into a file or a log, a detached command and its liveness, `git`, a node child's heap) — the ONLY package that knows subprocesses exist |
+| `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) and the process primitives above them (a command into a file or a log, a detached command and its liveness, `git`, a node child's heap), where each Rust binary is (a prebuilt directory a variable names, else the checkout's release build) and whether an optional host tool is on `PATH` — the ONLY package that adapts a Rust CLI |
 | `pipeline/` | `@sip/pipeline` | flows ingest, the correlation rule engine, the cut, and case assembly |
 | `driver/` | `@sip/driver` | one cell of a campaign, either shape, into its caller's run dir; the `campaign.json` line it answers is the caller's to fold |
 | `store/` | `@sip/store` | the run store: the postgres record of cuts, runs and what each call said, the readers a queue and a comparison use, and the run selectors |
@@ -14,14 +14,20 @@ A pnpm workspace. Ten packages, four of them one layer each of the same stack:
 | `corpus/` | `@sip/corpus` | the orchestration of a capture corpus over a deployment's seams (`deployment/`): extraction, cut and replay on a lane, jobs and requests, and the compare and run reports a command prints and a viewer serves |
 | `cli/` | `@sip/cli` | the command lines over `@sip/corpus`: flag sets and command builders taking a deployment's facts |
 | `rig/` | `@sip/rig` | the rig's plug-in contract (ADR-0060): the pack, collector, judge and operation manifests, the rig path that finds them, the collection levels and lane wiring checked before a job opens, and the `cell.v1` description built from a cell's bundle |
+| `basic-case/` | `@sip/basic-case` | the minimal case form: two parties as plain SIP addresses, the basic call and the rejected INVITE on a pivot step builder, compiled to the cells a case source yields |
+| `workspace/` | `@sip/workspace` | one directory holding a tooling's roots, its store and its one configuration file: its layout and the environment it states, the campaigns and tags it defines, the site's public URL, and the workspace as a run's provenance |
+| `lab-host/` | `@sip/lab-host` | the host a lab runs on: its user session and the boxes its children run in, its binaries built under one box-wide lock, its roots and env files, its inbox, its run bundles, the checks a lane owes before it is driven, and the batch and SUT processes a hosted lane stands |
 
 Dependencies point one way only: `driver → pipeline → toolchain → contracts`,
 `store → contracts`, `rig → contracts`, `viewer-app → viewer-core` (the app reads the report
-formats' types from `contracts`, nothing else), and `cli → corpus → {driver,
-store, viewer-core}`. The viewer's server is the deployment's: it serves the
+formats' types from `contracts`, nothing else), `cli → corpus → {driver,
+store, viewer-core}`, `lab-host → {workspace, corpus}` and
+`workspace → {cli, rig, store, toolchain}`.
+The viewer's server is the deployment's: it serves the
 app's build and the documents the app draws. A policy package never imports the
 store: what it reads of a run reaches it as contract vocabulary. Only
-`@sip/toolchain` spawns a process; `@sip/corpus` runs every child through it.
+`@sip/toolchain` runs a Rust CLI; `@sip/corpus` runs every child through it, and
+`@sip/lab-host` stands the host's own processes (a build, a lane's batch and SUT).
 
 The store's tests build and drop their own databases on a postgres server:
 `STORE_TEST_URL` names one (any database of it, `postgresql:///postgres?host=…`),

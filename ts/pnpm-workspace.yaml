@@ -10,6 +10,8 @@ packages:
   - "cli"
   - "rig"
   - "basic-case"
+  - "workspace"
+  - "lab-host"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false
