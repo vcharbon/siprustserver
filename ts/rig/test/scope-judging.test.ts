@@ -117,6 +117,13 @@ const verdictsOf = (one: CollectorRun.Collected) => ({
 const onCell = (collected: ReadonlyArray<CollectorRun.Collected>, id: string) =>
   collected.flatMap((one) => one.cells.get(id)?.verifications ?? [])
 
+/** The verification lines every entry of `collected` answered on the scope. */
+const onScope = (collected: ReadonlyArray<CollectorRun.Collected>) => collected.flatMap((one) => one.scope.verifications)
+
+/** The base's own line on a holder whose input was not read whole, saying `why`. */
+const inputUnread = (why: string) =>
+  expect.objectContaining({ name: "input", source: "rig", answer: "not-checkable", message: expect.stringContaining(why) })
+
 /** Writes `lines` as the export `name` of the directory `dir`, `raw` text lines after them. */
 const writeExport = (dir: string, name: string, lines: ReadonlyArray<object>, raw: ReadonlyArray<string> = []) => {
   fs.mkdirSync(path.join(dir, "exports"), { recursive: true })
@@ -287,7 +294,7 @@ console.log(JSON.stringify({ verification: "exp", answer: "pass" }))
     writeExport(path.join(root, "cells", "c2"), "exp", [{ record: { n: 2 }, cell: "c2" }])
     const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]), true)
     expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
-      [expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining(why) })],
+      [expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining(why) }), inputUnread(why)],
       [{ name: "exp", source: "exp", answer: "pass" }]
     ])
   })
@@ -299,7 +306,10 @@ console.log(JSON.stringify({ verification: "exp", answer: "pass" }))
     writeExport(path.join(root, "cells", "c2"), "exp", [{ record: { n: 2 }, cell: "c2" }])
     const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]), true)
     expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
-      [expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("exports/aux.jsonl line 1") })],
+      [
+        expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("exports/aux.jsonl line 1") }),
+        inputUnread("exports/aux.jsonl line 1")
+      ],
       [{ name: "exp", source: "exp", answer: "pass" }]
     ])
   })
@@ -311,7 +321,10 @@ console.log(JSON.stringify({ verification: "exp", answer: "pass" }))
     writeExport(path.join(root, "cells", "c2"), "exp", [{ record: { n: 2 }, cell: "c2" }])
     const { collected, said } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]), true)
     expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
-      [expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("its exports are skipped") })],
+      [
+        expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("its exports are skipped") }),
+        inputUnread("its exports are skipped")
+      ],
       [{ name: "exp", source: "exp", answer: "pass" }]
     ])
     expect(said).toEqual([expect.stringMatching(/^failed scope: exports: .*c1\/exports: ENOTDIR/)])
@@ -325,17 +338,31 @@ for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "exp", 
     const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1"]), true)
     expect(onCell(collected, "c1")).toEqual([
       { name: "exp", source: "exp", answer: "fail" },
-      expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("line 2: not JSON") })
+      expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("line 2: not JSON") }),
+      inputUnread("line 2: not JSON")
     ])
   })
 
-  it("answer the name not checkable on a cell the base could not describe", async () => {
+  it("answer the name not checkable on a cell the base could not describe, and on the scope", async () => {
     const { root, rig } = await loaded(passingExp)
     writeExport(path.join(root, "cells", "c1"), "exp", [{ record: { n: 1 }, cell: "c1" }])
     const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1"]), true, [{ id: "c2", lane: LANE.id, why: "no cell.json" }])
-    expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
+    expect([onCell(collected, "c1"), onCell(collected, "c2"), onScope(collected)]).toEqual([
       [{ name: "exp", source: "exp", answer: "pass" }],
-      [{ name: "exp", source: "exp", answer: "not-checkable", message: "the cell c2 was not described: no cell.json" }]
+      [{ name: "exp", source: "exp", answer: "not-checkable", message: "the cell c2 was not described: no cell.json" }, inputUnread("the cell c2 was not described")],
+      [
+        expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("the cell c2 was not described") }),
+        inputUnread("the cell c2 was not described")
+      ]
+    ])
+  })
+
+  it("answer the name not checkable on a cell the base could not describe where no export of the name was read", async () => {
+    const { root, rig } = await loaded(passingExp)
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1"]), true, [{ id: "c2", lane: LANE.id, why: "no cell.json" }])
+    expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
+      [],
+      [{ name: "exp", source: "exp", answer: "not-checkable", message: "the cell c2 was not described: no cell.json" }, inputUnread("the cell c2 was not described")]
     ])
   })
 
@@ -391,6 +418,33 @@ console.log(JSON.stringify({ verification: "checks", answer: "pass" }))`),
     const unwritten = notCheckable(why)
     expect(verdictsOf(byLabel(collected, "checks"))).toEqual({ cells: { c1: unwritten, c2: unwritten }, scope: unwritten })
     expect(said.filter((line) => line.startsWith("failed"))).toEqual([expect.stringContaining(`failed scope: ${why}EISDIR`)])
+  })
+
+  it("leaves every later pass not checkable where the keys file a cell holds is unreadable, the file left as it was", async () => {
+    const { root, rig } = await loaded(passingChecks)
+    writeExport(path.join(root, "cells", "c1"), "aux", [{ key: "ref", cell: "c1", values: ["r1"] }])
+    const keys = path.join(root, "cells", "c1", "keys.json")
+    fs.writeFileSync(keys, `{"trunk": ["t1"]`)
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]))
+    const unwritten = notCheckable("exported keys: ")
+    expect(verdictsOf(byLabel(collected, "checks"))).toEqual({ cells: { c1: unwritten, c2: unwritten }, scope: unwritten })
+    expect(fs.readFileSync(keys, "utf8")).toBe(`{"trunk": ["t1"]`)
+  })
+
+  it.each([
+    ["the scope's export", "batch", ["c1", "c2"]],
+    ["a cell's export", "cells/c1", ["c1"]]
+  ])("writes the base's own not checkable line where %s lost a line, on each cell it concerns and the scope, though no entry answered there", async (_, dir, marked) => {
+    const { root, rig } = await loaded(collector("calls", node(`console.log(JSON.stringify({ record: { n: 1 }, key: "c1@test" }))`), `[join]\nkey = "call_id"`))
+    writeExport(path.join(root, dir), "aux", [], ["not json"])
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]))
+    expect(linesOf(path.join(root, "cells", "c1", "joined", "calls.jsonl"))).toEqual([{ n: 1 }])
+    const unread = [inputUnread("exports/aux.jsonl line 1")]
+    expect([onCell(collected, "c1"), onCell(collected, "c2"), onScope(collected)]).toEqual([
+      unread,
+      marked.includes("c2") ? unread : [],
+      unread
+    ])
   })
 
   /** A collector `calls` keyed by Call-ID whose judge `trusting` passes every cell and the scope without reading a record. */

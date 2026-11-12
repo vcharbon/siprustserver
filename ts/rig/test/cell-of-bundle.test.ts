@@ -137,6 +137,17 @@ describe("cell.v1 of a bundle", () => {
     ])
   })
 
+  it.each([
+    ["a keys.json cut short", (dir: string) => fs.writeFileSync(path.join(dir, "keys.json"), `{"trunk": ["t1"]`), /^keys\.json: /],
+    ["a keys.json holding no string lists", (dir: string) => fs.writeFileSync(path.join(dir, "keys.json"), `{"trunk": [1]}`), /^keys\.json: /],
+    ["a joined that is no directory", (dir: string) => fs.writeFileSync(path.join(dir, "joined"), ""), /^joined: /]
+  ])("refuses a bundle whose narrower scope's additions are unreadable: %s", async (_, lay, why) => {
+    const dir = variant(() => undefined)
+    lay(dir)
+    const result = await run(CellOfBundle.ofBundle(dir, PLACEMENT))
+    expect(Result.isFailure(result) && result.failure.reason).toMatch(why)
+  })
+
   it("reads a real-clock cell's wall clock from its sut-join.json where timing.json states none", async () => {
     const dir = variant((files) => {
       files["run-config.json"] = files["run-config.json"]!.replace(`"clock": "virtual"`, `"clock": "real"`)
