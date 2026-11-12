@@ -142,7 +142,8 @@ Rules:
   answered), and receives only those cells; where none failed its `collect` does not run. A
   source that keeps no history is collected `always` and cut per cell.
 - An `on-demand` collector runs when the site or the CLI asks for it, on the cells named, after
-  their job ended: `open`, `collect` and `close` as a scope of its own, one per lane. What it
+  their job ended: `open`, `collect` and `close` as a scope of its own, one per lane, its
+  context's window the span the cells ran in. What it
   attaches lands on the cell, replacing an attachment of its name. Its lines are said to the
   asker and never merged into the cell: a question asked later does not change a verdict. A
   pre-check, a cell-scope collector, and one the level does not set `on-demand` are refused.
