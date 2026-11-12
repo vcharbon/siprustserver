@@ -149,9 +149,10 @@ Rules:
 - In a job, `open` and `close` run whenever the collector is wired and set `always` or
   `on-failure`.
 - `open` reads no cell (`cells` is empty until the scope ended). Where the runner knows the
-  cells the scope is to run (an on-demand scope's are those named), every step's context states
-  them as `planned`: `id`, `case`, `sub_case`, `lane` and the `claims` the runner knows. A
-  collector that prepares the lab for each cell reads them there.
+  cells the scope is to run (an on-demand scope's are those named, a cell scope's its own cell
+  alone), every step's context states them as `planned`: `id`, `case`, `sub_case`, `lane` and
+  the `claims` the runner knows. A collector that prepares the lab for each cell reads them
+  there.
 - `on-failure` is read when `collect` would run, after every other collector of the scope
   collected, unless one of them names it in its `after`: the collector runs if a cell of its
   scope failed by then (its own outcome a failure or an error, as the base states it when it

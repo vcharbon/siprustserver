@@ -167,6 +167,10 @@ export const notRun = (plan: CollectorPlan.CellPlan, sink: CollectorRun.Sink): E
 const until = (from: number, delay: number) =>
   Effect.flatMap(Clock.currentTimeMillis, (now) => (from + delay > now ? Effect.sleep(from + delay - now) : Effect.void))
 
+/** The batch's `options` as the cell `cell`'s scope runs with them: its planned cells that cell alone, where the batch states them. */
+const optionsOf = (options: CollectorRun.Options, cell: string): CollectorRun.Options =>
+  options.planned === undefined ? options : { ...options, planned: options.planned.filter((one) => one.id === cell) }
+
 /**
  * The cell-scope collectors of `plan` for the batch at hand, run with
  * `options`: their forks in the caller's scope, the batch's, which interrupts
@@ -191,7 +195,7 @@ export const make = (plan: CollectorPlan.CellPlan, options: CollectorRun.Options
         const scope = yield* Scope.fork(batch, "sequential")
         let ended = 0
         const due = (instance: CollectorRun.Instance) => until(ended, delayMsOf(instance))
-        const opened = yield* Scope.provide(scope)(CollectorRun.opened(instances, { ...options, due }))
+        const opened = yield* Scope.provide(scope)(CollectorRun.opened(instances, { ...optionsOf(options, cell), due }))
         const value = yield* run.pipe(Effect.onExit((exit) => (Exit.isSuccess(exit) ? Effect.void : Scope.close(scope, exit))))
         ended = yield* Clock.currentTimeMillis
         const answered = yield* Deferred.make<void>()
