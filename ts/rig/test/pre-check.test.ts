@@ -7,7 +7,9 @@
  * job that asks for it, and refuses that job as a required one would. A
  * required pre-check a real-clock lane names
  * no part of refuses the scope before any pre-check runs; on a simulated lane
- * it does not.
+ * it does not. Each line is answered by the pre-check of its entry, the base's
+ * own input line by none; no judge of exports runs over a pre-check, and a
+ * judge named like a pre-check judges that name's exports alone.
  */
 import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
@@ -20,8 +22,9 @@ import type * as Lanes from "../src/lanes.js"
 import * as PreCheck from "../src/pre-check.js"
 import * as RigPath from "../src/rig-path.js"
 import { memoryLocker, SAMPLES, traceOf } from "./collectors.js"
+import * as JudgePlan from "../src/judge-plan.js"
 import { laneOf } from "./operations.js"
-import { run, tree } from "./tree.js"
+import { type Entry, run, tree } from "./tree.js"
 
 const made: Array<string> = []
 
@@ -31,8 +34,20 @@ afterEach(() => {
 
 const STORE = "records-store"
 
-const samples = async () => {
-  const root = tree(SAMPLES)
+/** A module judge `name` passing its own name once, whatever it reads. */
+const passingJudge = (name: string): Record<string, Entry> => ({
+  [`judges/${name}/judge.toml`]: `schema = "judge.v1"\nname = "${name}"\nmodule = "./judge.ts"\n`,
+  [`judges/${name}/judge.ts`]: `export default () => [{ verification: "${name}", answer: "pass" }]\n`
+})
+
+/** Writes the export `name` of the scope directory `holder` as `lines`. */
+const writeExport = (holder: string, name: string, lines: ReadonlyArray<string>) => {
+  fs.mkdirSync(path.join(holder, "exports"), { recursive: true })
+  fs.writeFileSync(path.join(holder, "exports", `${name}.jsonl`), lines.map((line) => `${line}\n`).join(""))
+}
+
+const samples = async (extra: Readonly<Record<string, Entry>> = {}) => {
+  const root = tree({ ...SAMPLES, ...extra })
   made.push(root)
   const loaded = await run(RigPath.load({ workspace: root }))
   if (!Result.isSuccess(loaded)) throw new Error(`the samples do not load: ${String(loaded.failure)}`)
@@ -78,6 +93,45 @@ describe("a scope's pre-checks", () => {
     expect(checked.refusal).toBeUndefined()
     expect(checked.answers.verifications[0]?.message).toContain("the lab cannot be asked")
     expect(events.some((event) => event.startsWith("refused"))).toBe(false)
+  })
+
+  it("answer each line by the pre-check of its entry: the base's own input line, after them, refuses nothing of theirs", async () => {
+    const { root, rig } = await samples()
+    writeExport(path.join(root, "batch"), "stray", ["not a line"])
+    const { events, sink } = collecting()
+    const instances = batchChecks(rig, root, laneOf("a"), ["refusing-check", "pre-check"])
+    const checked = await Effect.runPromise(PreCheck.run(instances, [], { sink, locker: memoryLocker() }))
+    const down = "nothing takes SIP on 192.0.2.1:5060: the target is down"
+    expect(checked.refusal).toBe(down)
+    expect(events.filter((event) => event.startsWith("refused"))).toEqual([`refused refusing-check: ${down}`])
+    expect(checked.answers.verifications.map((line) => [line.name, line.source, line.answer])).toEqual([
+      ["target-up", "refusing-check", "fail"],
+      ["target-up", "refusing-check", "not-checkable"],
+      ["input", "rig", "not-checkable"]
+    ])
+  })
+
+  it("run no judge of the scope's exports, though the scope's options hand them", async () => {
+    const { root, rig } = await samples(passingJudge("seen"))
+    const holder = path.join(root, "batch")
+    writeExport(holder, "seen", [JSON.stringify({ record: { n: 1 }, key: "c1@test" })])
+    const exportJudges = JudgePlan.exportJudgesOn(rig, laneOf("a"), holder)
+    expect(exportJudges.judges.map((one) => one.judge.name)).toEqual(["seen"])
+    const { sink } = collecting()
+    const instances = batchChecks(rig, root, laneOf("a"), ["refusing-check"])
+    const options: CollectorRun.Options = { sink, locker: memoryLocker(), exportJudges }
+    const checked = await Effect.runPromise(PreCheck.run(instances, [], options))
+    expect(checked.refusal).toBe("nothing takes SIP on 192.0.2.1:5060: the target is down")
+    expect(checked.answers.verifications.map((line) => [line.name, line.answer])).toEqual([["target-up", "fail"]])
+    expect(fs.existsSync(path.join(holder, "judges"))).toBe(false)
+  })
+})
+
+describe("a judge named like a pre-check", () => {
+  it("judges that name's exports alone: no pre-check reads what a scope did", async () => {
+    const { root, rig } = await samples(passingJudge("pre-check"))
+    expect(CollectorPlan.batchPlanOf(rig, laneOf("a"), root, root).map((instance) => instance.id)).toContain("pre-check")
+    expect(JudgePlan.exportJudgesOn(rig, laneOf("a"), root).judges.map((one) => one.judge.name)).toEqual(["pre-check"])
   })
 })
 

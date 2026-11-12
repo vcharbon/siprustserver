@@ -72,6 +72,16 @@ describe("collector.v1", () => {
       .toBe("c/collector.toml: run.open: a pre-check has no open")
   })
 
+  it("refuses a pre-check naming a judge or a join", () => {
+    const before = COLLECTOR.replace(`at       = "after"`, `at = "before"`).replace(`open    = "./open"\n`, "")
+    expect(refusalOf(Collector.parse("c/collector.toml", before)))
+      .toBe("c/collector.toml: judge: a pre-check's lines are its own, no judge decides them")
+    expect(refusalOf(Collector.parse("c/collector.toml", before.replace(`judge    = "call-records"\n`, ""))))
+      .toBe("c/collector.toml: join: a pre-check runs over no cell, it joins nothing")
+    expect(refusalOf(Collector.parse("c/collector.toml", before.replace(`judge    = "call-records"\n`, "").replace(`[join]\nkey = "call_id"\n`, ""))))
+      .toBe("accepted")
+  })
+
   it("refuses a required collector whose default is not always", () => {
     const text = COLLECTOR.replace("required = false", "required = true").replace(`default  = "always"`, `default = "on-demand"`)
     expect(refusalOf(Collector.parse("c/collector.toml", text))).toBe("c/collector.toml: default: a required collector runs always, not on-demand")
