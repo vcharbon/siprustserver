@@ -16,11 +16,13 @@
  * A cell one of whose collectors `holds_cell_locks` keeps its own named locks
  * until its collectors answered or reached their deadlines, and closed
  * ({@link Ran.held}). The batch joins every cell's collectors before it reads
- * its end ({@link CellCollectors.joined}); a batch that ends otherwise
+ * its end ({@link CellCollectors.joined}), for a bounded time where its caller
+ * asks it ({@link CellCollectors.joinedWithin}); a batch that ends otherwise
  * interrupts them, and their `close` still runs.
  */
 import * as Clock from "effect/Clock"
 import * as Deferred from "effect/Deferred"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as Fiber from "effect/Fiber"
@@ -60,6 +62,12 @@ export interface CellCollectors {
   ) => Effect.Effect<Ran<A>, E, R | R2>
   /** Waits for every cell's collectors to answer or reach their deadline: what they answered, by cell in the order the cells ran, each closed. */
   readonly joined: Effect.Effect<ReadonlyArray<CollectorRun.Collected>>
+  /**
+   * {@link joined}, waiting `ms` at most: the cells whose collectors had not
+   * answered by then have them interrupted and closed, each answering `not
+   * checkable` on its cell, saying `why`.
+   */
+  readonly joinedWithin: (ms: number, why: string) => Effect.Effect<ReadonlyArray<CollectorRun.Collected>>
   /** The labels of the instances whose `close` left the lab changed so far. */
   readonly leftChanged: () => ReadonlyArray<string>
 }
@@ -68,8 +76,20 @@ export interface CellCollectors {
 export const NONE: CellCollectors = {
   around: (_cell, run) => Effect.map(run, (value) => ({ value, held: Effect.void })),
   joined: Effect.succeed([]),
+  joinedWithin: () => Effect.succeed([]),
   leftChanged: () => []
 }
+
+/** A cell's collectors at work, forked: the cell, its instances, and the fork answering for them. */
+interface Forked {
+  readonly cell: string
+  readonly instances: ReadonlyArray<CollectorRun.Instance>
+  readonly fiber: Fiber.Fiber<ReadonlyArray<CollectorRun.Collected>>
+}
+
+/** What `forked` came to, `exit` its fork's end: its answers, or, interrupted, `not checkable` on its cell saying `why`. */
+const outcomeOf = (forked: Forked, exit: Exit.Exit<ReadonlyArray<CollectorRun.Collected>>, why: string): ReadonlyArray<CollectorRun.Collected> =>
+  Exit.isSuccess(exit) ? exit.value : notCheckableOf(forked.instances, forked.cell, why)
 
 /** How long after its cell ended `instance` collects, in milliseconds: its lane's `delay_s`, else its manifest's, else none. */
 export const delayMsOf = (instance: CollectorRun.Instance): number => {
@@ -81,6 +101,9 @@ export const delayMsOf = (instance: CollectorRun.Instance): number => {
 const dirNameOf = (n: number, cell: string): string => `${n}-${cell.replace(/[^A-Za-z0-9._-]/g, "_")}`
 
 const NO_ANSWERS: CollectorRun.Answers = { verifications: [], attachments: [] }
+
+/** What a cell's collectors answer that the batch interrupted before they answered. */
+const INTERRUPTED = "interrupted before they answered: the batch ended"
 
 const errorText = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
 
@@ -145,7 +168,7 @@ export const make = (plan: CollectorPlan.CellPlan, options: CollectorRun.Options
   Effect.gen(function*() {
     if (plan.runs.length === 0) return NONE
     const batch = yield* Effect.scope
-    const forks: Array<Fiber.Fiber<ReadonlyArray<CollectorRun.Collected>>> = []
+    const forks: Array<Forked> = []
     const left: Array<string> = []
     let cells = 0
 
@@ -171,14 +194,24 @@ export const make = (plan: CollectorPlan.CellPlan, options: CollectorRun.Options
           Effect.ensuring(Effect.andThen(Scope.close(scope, Exit.void), Effect.sync(() => void left.push(...opened.leftChanged())))),
           Effect.ensuring(Deferred.succeed(answered, undefined))
         )
-        forks.push(yield* Effect.forkIn(work, batch))
+        forks.push({ cell, instances, fiber: yield* Effect.forkIn(work, batch) })
         const holds = instances.some((instance) => instance.collector.manifest.holds_cell_locks === true)
         return { value, held: holds ? Deferred.await(answered) : Effect.void }
       })
 
-    return {
-      around,
-      joined: Effect.map(Effect.suspend(() => Effect.forEach([...forks], Fiber.join)), (all) => all.flat()),
-      leftChanged: () => [...left]
-    } satisfies CellCollectors
+    const joined = Effect.suspend(() =>
+      Effect.map(Effect.forEach([...forks], (forked) => Effect.map(Fiber.await(forked.fiber), (exit) => outcomeOf(forked, exit, INTERRUPTED))), (all) => all.flat())
+    )
+
+    const joinedWithin = (ms: number, why: string) =>
+      Effect.gen(function*() {
+        const all = [...forks]
+        yield* Effect.timeoutOption(Fiber.awaitAll(all.map((forked) => forked.fiber)), Duration.millis(Math.max(0, ms)))
+        const late = all.filter((forked) => forked.fiber.pollUnsafe() === undefined)
+        yield* Fiber.interruptAll(late.map((forked) => forked.fiber))
+        yield* Effect.forEach(late.flatMap((forked) => forked.instances), (instance) => say(options.sink, instance.label, "failed", why), { discard: true })
+        return all.flatMap((forked) => (late.includes(forked) ? notCheckableOf(forked.instances, forked.cell, why) : outcomeOf(forked, forked.fiber.pollUnsafe()!, INTERRUPTED)))
+      })
+
+    return { around, joined, joinedWithin, leftChanged: () => [...left] } satisfies CellCollectors
   })

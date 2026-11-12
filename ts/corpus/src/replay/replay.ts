@@ -54,6 +54,7 @@ import { runCell, settled } from "@sip/driver"
 import { perSecond, unpaced } from "@sip/driver/pace"
 import { Batches, Bundle, JobEvents, Jobs, Requests, RuleHits, Runs, Sweeps } from "@sip/store"
 import { ReplayCli } from "@sip/toolchain"
+import * as Clock from "effect/Clock"
 import * as Console from "effect/Console"
 import * as Deferred from "effect/Deferred"
 import * as Duration from "effect/Duration"
@@ -444,8 +445,10 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
       const stopped = stop === undefined
         ? false
         : yield* Effect.raceFirst(Effect.as(Fiber.await(running), false), Effect.as(Deferred.await(stop), true))
+      let graceEnd: number | undefined
       if (stopped) {
         const grace = yield* Deferred.await(stop!)
+        graceEnd = (yield* Clock.currentTimeMillis) + grace * 1000
         const inFlight = () => admitted.size - driven.length
         yield* Console.log(
           `[replay] stop requested: admitting no new cell; ${inFlight()} cell(s) in flight, waiting up to ${grace} s`
@@ -460,7 +463,7 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
       if (!stopped && Exit.isFailure(ran)) return yield* Effect.failCause(ran.cause)
       const interrupted = admitted.size - driven.length
       if (interrupted > 0) yield* Console.log(`[replay] ${interrupted} cell(s) interrupted, ${driven.length} landed`)
-      return { value: undefined, interrupted } satisfies LaneBatch.Driven<void>
+      return { value: undefined, interrupted, ...(graceEnd === undefined ? {} : { graceEnd }) } satisfies LaneBatch.Driven<void>
     })
 
   const collectors = cells.length === 0 ? undefined : yield* collectorsOf(request, () => ranCells)

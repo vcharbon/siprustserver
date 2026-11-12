@@ -32,7 +32,9 @@
  * Its cell-scope collectors (`@sip/rig` `CellCollectors`) bracket each cell's
  * call as the driver runs it through `Stood.cells`, and are joined once every
  * cell was driven, before the end gate reads: the lane still stands for the
- * last cell's delayed collector. What they answered of a cell comes first in
+ * last cell's delayed collector. Where a stop was asked, those that did not
+ * answer by the end of its grace answer `not checkable` ({@link GRACE_OVER}).
+ * What they answered of a cell comes first in
  * `collected`, and a cell they failed is stated failed to the batch's
  * collectors. On a simulated lane none runs, and the batch says so of each
  * one wired there (an event `not-run`).
@@ -41,6 +43,7 @@ import { type Attachment, Verification } from "@sip/contracts"
 import { CellCollectors, type CollectorPlan, CollectorRun, PreCheck } from "@sip/rig"
 import { Attachments, Batches } from "@sip/store"
 import * as Cause from "effect/Cause"
+import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import type * as Scope from "effect/Scope"
@@ -95,7 +98,16 @@ export interface Stood {
 export interface Driven<A> {
   readonly value: A
   readonly interrupted: number
+  /**
+   * Where a stop was asked, the instant its grace ends on the lane's clock:
+   * the cell-scope collectors that did not answer by then are interrupted and
+   * answer {@link GRACE_OVER}.
+   */
+  readonly graceEnd?: number
 }
+
+/** What a cell-scope collector answers, `not checkable`, that a stop's grace ran out on. */
+export const GRACE_OVER = "not answered within the stop's grace"
 
 /** The rig's collectors of a batch: their instances, what they run with, and the batch's cells as they read them. */
 export interface Collectors<A, RC> {
@@ -355,6 +367,14 @@ const collectedAtEnd = <A, RC>(
   ofCells: ReadonlyArray<CollectorRun.Collected>
 ) => Effect.flatMap(Effect.map(rig.cells(value, end), (over) => failedByCells(failedAtEnd(over, end), ofCells)), opened.collect)
 
+/** What `cells` answered once the batch was `driven`: every cell's, or, a stop asked, those in by the end of its grace. */
+const joinedOf = (cells: CellCollectors.CellCollectors, driven: Driven<unknown>) => {
+  const { graceEnd } = driven
+  return graceEnd === undefined
+    ? cells.joined
+    : Effect.flatMap(Clock.currentTimeMillis, (now) => cells.joinedWithin(graceEnd - now, GRACE_OVER))
+}
+
 const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
   Effect.gen(function*() {
     const hosting = yield* LaneHosting.Service
@@ -383,7 +403,7 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
     if (rig?.cell !== undefined) yield* CellCollectors.notRun(rig.cell, rig.options.sink)
     const close = request.collect === undefined ? undefined : yield* request.collect
     const driven = yield* request.drive({ host, sut, cells })
-    const ofCells = yield* cells.joined
+    const ofCells = yield* joinedOf(cells, driven)
     const deadHost = host?.died()
     const reapedBy = host === undefined || driven.interrupted > 0 ? Effect.succeed(undefined) : host.end
     const hostDirty = deadHost === undefined ? yield* reapedBy : undefined
