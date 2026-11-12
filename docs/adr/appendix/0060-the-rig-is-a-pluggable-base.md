@@ -190,8 +190,13 @@ collected, so a later collector reads them.
 - The keys exports and collectors add are kept in the cell's `keys.json`. A wider scope
   describes the cell anew off its directory and reads them, and its joined records, there.
 - A cell with no record reaches the judge with an empty list.
-- A verification a manifest's `answers` names that nobody answered for a cell, the cell's own
-  lines counted, is `not checkable`.
+- A verification nobody answered for a cell, the cell's own lines counted, is `not checkable`
+  where it is promised: those a manifest's `answers` names, a collector's own name where it
+  names a judge and no `answers`, a judge of exports alone its name. A collector naming
+  neither promises none.
+- An export line that is none, or an export file that cannot be read, is skipped and said, the
+  rest read. A judged name's verifications are then `not checkable` on the cell whose export it
+  is, on every cell and the scope where it is the scope's.
 - Exports judged with no collector of their name (item 4) are a batch's. They join on the
   `[join] key` of the path's collector of that name, wired or not, else on `call_id`.
 
@@ -220,10 +225,14 @@ judge_s = 120
 
 A judge is called once per scope with every cell, the unclaimed and the ambiguous records: its
 `context.v1` states `judging` (the name, the two files). A module's default export is called
-with `{context, out}` and returns its lines as objects; an executable runs with `SIPRIG_STEP` =
-`judge` and answers on stdout. It answers `verification` and `attachment` lines, for the
-verifications its collector names (its own name with no collector). A judge that fails, times
-out or answers another line answers `not checkable` on every cell and the scope.
+with `{context, out}` and returns its lines as objects (an iterable, a Promise or an Effect of
+one); an executable runs with `SIPRIG_STEP` = `judge` and answers on stdout and in
+`SIPRIG_OUT/lines.jsonl`. It answers `verification` and `attachment` lines, for the
+verifications its collector names (its own name with no collector). A judge that fails (a
+module that throws, rejects, dies or returns no iterable included), times out or answers
+another line answers `not checkable` on every cell and the scope. Only an executable judge's
+timeout is enforced whatever it does: a module judge is trusted code in the base's process
+(item 18), timed out only while it awaits, and one that blocks synchronously blocks the base.
 
 ## 7. The operation manifest
 

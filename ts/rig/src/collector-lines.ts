@@ -111,17 +111,24 @@ export interface Placed {
   readonly line: Line
 }
 
-/** The lines `text` holds, blank ones skipped; or why the first that is none is not, after where it is. */
-export const parse = (text: string, origin: string): Result.Result<ReadonlyArray<Placed>, string> => {
+/** The lines `text` holds, blank ones skipped, and why each that is none is not, after where it is. */
+export const parseEach = (text: string, origin: string): { readonly lines: ReadonlyArray<Placed>; readonly faults: ReadonlyArray<string> } => {
   const lines: Array<Placed> = []
+  const faults: Array<string> = []
   for (const [index, raw] of text.split("\n").entries()) {
     if (raw.trim() === "") continue
     const at = `${origin} line ${index + 1}`
     const read = lineOf(raw)
-    if (Result.isFailure(read)) return Result.fail(`${at}: ${read.failure}`)
-    lines.push({ at, line: read.success })
+    if (Result.isFailure(read)) faults.push(`${at}: ${read.failure}`)
+    else lines.push({ at, line: read.success })
   }
-  return Result.succeed(lines)
+  return { lines, faults }
+}
+
+/** The lines `text` holds, blank ones skipped; or why the first that is none is not, after where it is. */
+export const parse = (text: string, origin: string): Result.Result<ReadonlyArray<Placed>, string> => {
+  const { faults, lines } = parseEach(text, origin)
+  return faults.length > 0 ? Result.fail(faults[0]!) : Result.succeed(lines)
 }
 
 /** `line` as the text a collector answers it with, newline included. */

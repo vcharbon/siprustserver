@@ -10,6 +10,11 @@
  * scope's, every cell of the scope whose directory bears it. A record naming
  * none is unclaimed and one naming several ambiguous, each keeping the name it
  * stated; a key naming other than one cell is dropped, said as a fault.
+ *
+ * A line that is no line, or a file that cannot be read, is skipped, said as a
+ * fault, the rest of the file read; the name's export is then not read whole
+ * ({@link Unread}), of its cell where it is a cell's, of the scope where it is
+ * the scope's.
  */
 import * as Result from "effect/Result"
 import * as fs from "node:fs"
@@ -24,12 +29,20 @@ export const DIR = "exports"
 /** The suffix of an export's file name. */
 const SUFFIX = ".jsonl"
 
+/** An export of a name not read whole: whose it is, the cell's id or `undefined` for the scope's own, and why. */
+export interface Unread {
+  readonly cell: string | undefined
+  readonly why: string
+}
+
 /** What the exports of one name hold over a scope. */
 export interface Exported {
   /** Its records, each assigned one with the ids of the cells its directory name resolves to. */
   readonly records: ReadonlyArray<Join.Entry>
   /** Its keys, each naming its cell by id. */
   readonly keys: ReadonlyArray<Lines.KeyLine>
+  /** Each of its files a line or the whole of which was skipped. */
+  readonly unread: ReadonlyArray<Unread>
 }
 
 /** A scope's exports, by name, and what could not be read of them. */
@@ -63,7 +76,9 @@ const resolverOf = (cells: ReadonlyArray<Pick<Cell.Cell, "id" | "dir">>) => {
   const byDir = new Map<string, Array<string>>()
   for (const cell of cells) {
     const name = path.basename(cell.dir)
-    byDir.set(name, [...(byDir.get(name) ?? []), cell.id])
+    const ids = byDir.get(name)
+    if (ids === undefined) byDir.set(name, [cell.id])
+    else ids.push(cell.id)
   }
   return (name: string): ReadonlyArray<string> => byDir.get(name) ?? []
 }
@@ -74,23 +89,24 @@ const resolverOf = (cells: ReadonlyArray<Pick<Cell.Cell, "id" | "dir">>) => {
  * every cell.
  */
 export const read = (cells: ReadonlyArray<Pick<Cell.Cell, "id" | "dir">>, holder: string): Read => {
-  const byName = new Map<string, { records: Array<Join.Entry>; keys: Array<Lines.KeyLine> }>()
+  const byName = new Map<string, { records: Array<Join.Entry>; keys: Array<Lines.KeyLine>; unread: Array<Unread> }>()
   const faults: Array<string> = []
   const scopeResolver = resolverOf(cells)
   const sources = [
-    ...cells.map((cell) => [cell.dir, resolverOf([cell])] as const),
-    [holder, scopeResolver] as const
+    ...cells.map((cell) => [cell.dir, resolverOf([cell]), cell.id] as const),
+    [holder, scopeResolver, undefined] as const
   ]
-  for (const [dir, resolve] of sources) {
+  for (const [dir, resolve, owner] of sources) {
     for (const [name, file] of filesUnder(dir)) {
-      const parsed = Result.flatMap(textOf(file), (text) => Lines.parse(text, file))
-      if (Result.isFailure(parsed)) {
-        faults.push(`${parsed.failure}: the export is skipped`)
-        continue
-      }
-      const held = byName.get(name) ?? { records: [], keys: [] }
+      const held = byName.get(name) ?? { records: [], keys: [], unread: [] }
       byName.set(name, held)
-      for (const { at, line } of parsed.success) {
+      const text = textOf(file)
+      const parsed = Result.isSuccess(text) ? Lines.parseEach(text.success, file) : { lines: [], faults: [`${text.failure}: the export is skipped`] }
+      for (const fault of parsed.faults) {
+        faults.push(fault)
+        held.unread.push({ cell: owner, why: fault })
+      }
+      for (const { at, line } of parsed.lines) {
         switch (line._tag) {
           case "KeyedRecord":
             held.records.push(line.line)

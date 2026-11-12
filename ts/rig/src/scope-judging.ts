@@ -12,8 +12,15 @@
  * 4. Each judge runs once over every cell the name's instances collect: the
  *    judge its collector names, and, over its exports alone, a judge of an
  *    export's name no collector of the scope collects (`ExportJudges`).
- * 5. A verification a collector's manifest names (`answers`) that nobody
- *    answered for a cell, the cell's own lines included, is `not checkable`.
+ * 5. A verification a judged name's export left unread lines or a file of
+ *    (`Exports.Unread`) is `not checkable` where the judge answered it: on the
+ *    cell whose export it is, on every cell and the scope where it is the
+ *    scope's.
+ * 6. A verification the scope's entries promise that nobody answered for a
+ *    cell, the cell's own lines included, is `not checkable`: a collector
+ *    promises those its manifest names (`answers`), or its own name where it
+ *    names a judge and no `answers`; a judge of exports alone its name. A
+ *    collector naming neither promises none: it may only attach.
  *
  * Unclaimed and ambiguous records are kept on the scope: the attachments
  * `<name>-unclaimed` and `<name>-ambiguous` (kind `log`, the JSON lines of
@@ -142,31 +149,59 @@ interface Joined {
   readonly answers: ReadonlyArray<string>
   readonly scope: CollectorRun.Instance["scope"]
   readonly lane: Lanes.Loaded | undefined
+  /** The name's exports not read whole. */
+  readonly unread: ReadonlyArray<Exports.Unread>
 }
 
-/** Whether `lines` hold an answered line named `name`. */
-const answers = (lines: ReadonlyArray<Pick<Verification.Verification, "name" | "answer">>, name: string): boolean =>
-  lines.some((line) => line.name === name && line.answer !== "pending")
+/** What an entry of the scope's collect promises: the verifications it answers `not checkable` on the cells it covers where nobody answered them. */
+interface Promised {
+  readonly source: string
+  readonly names: ReadonlyArray<string>
+  readonly covers: (cell: Cell.Cell) => boolean
+}
+
+/** What `instance` promises: those its manifest names, or its own name where it names a judge; none where it names neither. */
+const promisedBy = (instance: CollectorRun.Instance): Promised => ({
+  source: instance.collector.name,
+  names: instance.judge === undefined ? instance.collector.manifest.answers ?? [] : Collector.answeredBy(instance.collector.manifest),
+  covers: (cell) => instance.lanes === undefined || instance.lanes.includes(cell.lane)
+})
+
+/** The names answered on each of `cells`, other than `pending`: its own lines', then `collected`'s. */
+const answeredOn = (collected: ReadonlyArray<CollectorRun.Collected>, cells: ReadonlyArray<Cell.Cell>): Map<string, Set<string>> => {
+  const answered = new Map(cells.map((cell) => [cell.id, new Set<string>()]))
+  const add = (id: string, lines: ReadonlyArray<Pick<Verification.Verification, "name" | "answer">>) => {
+    const names = answered.get(id)
+    if (names === undefined) return
+    for (const line of lines) if (line.answer !== "pending") names.add(line.name)
+  }
+  for (const cell of cells) add(cell.id, cell.verifications)
+  for (const one of collected) for (const [id, held] of one.cells) add(id, held.verifications)
+  return answered
+}
 
 /**
- * `collected` with, per instance naming `answers`, each such verification
- * nobody answered for one of its cells answered `not checkable` by it: none of
- * `collected` answered it, nor did the cell's own lines.
+ * `collected` with, per entry's promise, each verification nobody answered
+ * for one of the cells it covers answered `not checkable` by it: none of
+ * `collected` answered it, nor did the cell's own lines, nor an earlier
+ * entry's filling.
  */
 const unansweredFilled = (
   collected: ReadonlyArray<CollectorRun.Collected>,
-  instances: ReadonlyArray<CollectorRun.Instance | undefined>,
+  promised: ReadonlyArray<Promised | undefined>,
   cells: ReadonlyArray<Cell.Cell>
-): ReadonlyArray<CollectorRun.Collected> =>
-  collected.map((one, at) => {
-    const instance = instances[at]
-    const named = instance?.collector.manifest.answers ?? []
-    if (instance === undefined || named.length === 0) return one
+): ReadonlyArray<CollectorRun.Collected> => {
+  const answered = answeredOn(collected, cells)
+  return collected.map((one, at) => {
+    const promise = promised[at]
+    if (promise === undefined || promise.names.length === 0) return one
     const byCell = new Map(one.cells)
-    for (const cell of collectedBy(instance, cells)) {
-      const given = [...cell.verifications, ...collected.flatMap((other) => other.cells.get(cell.id)?.verifications ?? [])]
-      const missing = named.filter((name) => !answers(given, name))
+    for (const cell of cells) {
+      if (!promise.covers(cell)) continue
+      const names = answered.get(cell.id)!
+      const missing = promise.names.filter((name) => !names.has(name))
       if (missing.length === 0) continue
+      for (const name of missing) names.add(name)
       const held = byCell.get(cell.id) ?? { verifications: [], attachments: [] }
       byCell.set(cell.id, {
         ...held,
@@ -174,7 +209,7 @@ const unansweredFilled = (
           ...held.verifications,
           ...missing.map((name) => ({
             name,
-            source: instance.collector.name,
+            source: promise.source,
             answer: "not-checkable" as const,
             message: `nobody answered ${name} for the cell ${cell.id}`
           }))
@@ -183,6 +218,44 @@ const unansweredFilled = (
     }
     return { ...one, cells: byCell }
   })
+}
+
+/** `answers` with each line of `names` replaced by `not checkable` from `source`, saying `whys`; as it is where there is no why. */
+const unreadMarked = (answers: CollectorRun.Answers, source: string, names: ReadonlyArray<string>, whys: ReadonlyArray<string>): CollectorRun.Answers =>
+  whys.length === 0 ? answers : {
+    ...answers,
+    verifications: [
+      ...answers.verifications.filter((line) => !names.includes(line.name)),
+      ...names.map((name) => ({
+        name,
+        source,
+        answer: "not-checkable" as const,
+        message: `the exports of ${name} were not read whole: ${whys.join("; ")}`
+      }))
+    ]
+  }
+
+/**
+ * `judged`, a judge's answers over `joined`, with each of its verifications
+ * `not checkable` where an export of the name was not read whole: on the cell
+ * whose export it is, on every cell and on the scope where it is the scope's.
+ */
+const withUnread = (judged: CollectorRun.Collected, source: string, joined: Joined): CollectorRun.Collected => {
+  if (joined.unread.length === 0) return judged
+  const ofScope = joined.unread.flatMap((one) => (one.cell === undefined ? [one.why] : []))
+  const ofCell = new Map<string, Array<string>>()
+  for (const one of joined.unread) {
+    if (one.cell === undefined) continue
+    const whys = ofCell.get(one.cell)
+    if (whys === undefined) ofCell.set(one.cell, [one.why])
+    else whys.push(one.why)
+  }
+  return {
+    ...judged,
+    scope: unreadMarked(judged.scope, source, joined.answers, ofScope),
+    cells: new Map([...judged.cells].map(([id, held]) => [id, unreadMarked(held, source, joined.answers, [...ofScope, ...(ofCell.get(id) ?? [])])]))
+  }
+}
 
 /** The scope's collect: its collectors in order, their records joined, its judges run, its unanswered verifications filled. */
 export const collect = (request: Request): Effect.Effect<ReadonlyArray<CollectorRun.Collected>> =>
@@ -196,7 +269,13 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
     let cells = yield* kept("exported keys", () => CellRecords.withKeys(request.cells, [...exported.byName.values()].flatMap((one) => one.keys)), request.cells)
     const collected: Array<CollectorRun.Collected> = []
     const instances: Array<CollectorRun.Instance | undefined> = []
+    const promised: Array<Promised | undefined> = []
     const joined: Array<Joined> = []
+    const entry = (one: CollectorRun.Collected, instance: CollectorRun.Instance | undefined, promise: Promised | undefined) => {
+      collected.push(one)
+      instances.push(instance)
+      promised.push(promise)
+    }
     const joinOf = (label: string, name: string, key: string | undefined, over: ReadonlyArray<Cell.Cell>, records: Iterable<Join.Entry>) =>
       Effect.gen(function*() {
         const result = Join.join(key, over, records)
@@ -218,14 +297,16 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
       const exports = exported.byName.get(name)
       const hasRecords = exports !== undefined || sameName.some((other) => other.keyed.length + other.assigned.length > 0)
       if (ofName.at(-1) !== step || !(hasRecords || instance.judge !== undefined)) {
-        collected.push(one)
-        instances.push(instance)
+        entry(one, instance, promisedBy(instance))
         continue
       }
       const over = ofName.flatMap((other) => collectedBy(other.instance, cells))
       const held = yield* joinOf(one.label, name, instance.collector.manifest.join?.key, over, recordsOf(sameName, exports))
-      collected.push(held === undefined ? one : { ...one, scope: { ...one.scope, attachments: [...one.scope.attachments, ...held.attachments] } })
-      instances.push(instance)
+      entry(
+        held === undefined ? one : { ...one, scope: { ...one.scope, attachments: [...one.scope.attachments, ...held.attachments] } },
+        instance,
+        promisedBy(instance)
+      )
       if (held !== undefined) {
         joined.push({
           name,
@@ -234,7 +315,8 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
           judge: instance.judge,
           answers: Collector.answeredBy(instance.collector.manifest),
           scope: instance.scope,
-          lane: instance.lane
+          lane: instance.lane,
+          unread: exports?.unread ?? []
         })
       }
     }
@@ -244,16 +326,12 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
       const exports = exported.byName.get(name)
       if (collectedNames.has(name) || exports === undefined) continue
       const held = yield* joinOf(`exports ${name}`, name, exportJudge.key, cells, exports.records)
+      entry(
+        { label: `exports ${name}`, scope: { verifications: [], attachments: held?.attachments ?? [] }, cells: new Map(), keyed: [], assigned: [], keys: [] },
+        undefined,
+        { source: name, names: [name], covers: () => true }
+      )
       if (held === undefined) continue
-      collected.push({
-        label: `exports ${name}`,
-        scope: { verifications: [], attachments: held.attachments },
-        cells: new Map(),
-        keyed: [],
-        assigned: [],
-        keys: []
-      })
-      instances.push(undefined)
       joined.push({
         name,
         cells: cells.map((cell) => cell.id),
@@ -261,21 +339,23 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
         judge: exportJudge.judge,
         answers: [name],
         scope: request.steps[0]?.instance.scope ?? "batch",
-        lane: request.exportJudges?.lane
+        lane: request.exportJudges?.lane,
+        unread: exports.unread
       })
     }
     const end = yield* Effect.map(Clock.currentTimeMillis, (clock_ms) => ({ clock_ms, wall_ms: Date.now() }))
     for (const one of joined) {
       if (one.judge === undefined) continue
-      const judged = cells.filter((cell) => one.cells.includes(cell.id))
-      collected.push(yield* JudgeRun.run({
+      const ids = new Set(one.cells)
+      const judged = cells.filter((cell) => ids.has(cell.id))
+      const answered = yield* JudgeRun.run({
         judge: one.judge,
         context: contextOf(one.scope, request.start, end, judged, one.files, one.lane),
         answers: one.answers,
         dir: path.join(holder, JUDGES_DIR, one.name),
         holder
-      }))
-      instances.push(undefined)
+      })
+      entry(withUnread(answered, one.judge.name, one), undefined, undefined)
     }
-    return unansweredFilled(collected, instances, cells)
+    return unansweredFilled(collected, promised, cells)
   })

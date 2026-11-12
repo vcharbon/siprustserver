@@ -7,14 +7,20 @@
  *
  * A module judge's default export is called with the context and its
  * `SIPRIG_OUT`, and returns its lines as objects; an executable judge reads
- * `SIPRIG_CONTEXT` and answers on stdout, as a collector does, `SIPRIG_STEP`
- * being `judge`. Both forms' lines are read alike: on the same input they
- * answer the same. A judge that fails, times out, or answers a line that is
- * none of its (another kind, a cell outside the scope, a verification it may
- * not answer, a file it does not hold) answers `not checkable`, quoting why,
- * for every verification it may answer, on every cell and on the scope.
+ * `SIPRIG_CONTEXT` and answers on stdout and in `SIPRIG_OUT/lines.jsonl`, as a
+ * collector does, `SIPRIG_STEP` being `judge`. Both forms' lines are read
+ * alike: on the same input they answer the same. A judge that fails (a module
+ * that throws, rejects, dies or returns no iterable of lines included), times
+ * out, or answers a line that is none of its (another kind, a cell outside the
+ * scope, a verification it may not answer, a file it does not hold) answers
+ * `not checkable`, quoting why, for every verification it may answer, on every
+ * cell and on the scope. Only an executable judge's timeout is enforced
+ * whatever it does: a module judge is trusted code in the base's process,
+ * timed out only while it awaits; one that blocks synchronously blocks the
+ * base (ADR-0060 item 18).
  */
 import type { Attachment, Verification } from "@sip/contracts"
+import * as Cause from "effect/Cause"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
@@ -74,17 +80,43 @@ const layoutOf = (dir: string) => ({
   stdout: path.join(dir, `${STEP}.out.jsonl`)
 })
 
-/** The text of the lines a module answered, one JSON object each. */
-const textOfLines = (lines: Iterable<object>): string => [...lines].map((line) => `${JSON.stringify(line)}\n`).join("")
+/** Some text of a judge's lines, and where it was read. */
+interface Answered {
+  readonly text: string
+  readonly origin: string
+}
 
-/** `answered`, whatever a module's default export returned, as its lines' text. */
-const settled = (answered: ReturnType<Judging>): Effect.Effect<string, unknown> =>
-  Effect.isEffect(answered)
-    ? Effect.map(answered, textOfLines)
-    : Effect.map(Effect.tryPromise({ try: async () => await answered, catch: (cause) => cause }), textOfLines)
+/** The text of `answered`, what a module's lines came to, one JSON object each; or why it is none. */
+const textOfLines = (answered: unknown): Result.Result<string, string> => {
+  if (typeof answered !== "object" || answered === null || !(Symbol.iterator in answered)) {
+    return Result.fail(`returned ${String(answered)}, no iterable of lines`)
+  }
+  try {
+    return Result.succeed([...(answered as Iterable<unknown>)].map((line) => `${JSON.stringify(line)}\n`).join(""))
+  } catch (cause) {
+    return Result.fail(`its lines are not JSON: ${errorText(cause)}`)
+  }
+}
 
-/** Runs the module judge of `request`: its lines' text, or why it gave none. */
-const runModule = (request: Request, file: string): Effect.Effect<string, string> => {
+/** `answered`, whatever a module's default export returned, awaited: its lines' text, or why it is none. */
+const settled = (file: string, answered: ReturnType<Judging>): Effect.Effect<string, string> =>
+  Effect.flatMap(
+    Effect.isEffect(answered)
+      ? Effect.mapError(answered, (cause) => `module ${file} failed: ${errorText(cause)}`)
+      : Effect.tryPromise({ try: async () => await answered, catch: (cause) => `module ${file} rejected: ${errorText(cause)}` }),
+    (lines) => Effect.fromResult(Result.mapError(textOfLines(lines), (why) => `module ${file} ${why}`))
+  )
+
+/** Why a module judge's run, ended by `cause`, gave no lines: its failure, else what it died of, else its interruption. */
+const whyOf = (file: string, cause: Cause.Cause<string>): string => {
+  const failed = Cause.findError(cause)
+  if (Result.isSuccess(failed)) return failed.success
+  const died = Cause.findDefect(cause)
+  return Result.isSuccess(died) ? `module ${file} died: ${errorText(died.success)}` : `module ${file} was interrupted`
+}
+
+/** Runs the module judge of `request`: its lines' text, or why it gave none, whatever ended it. */
+const runModule = (request: Request, file: string): Effect.Effect<ReadonlyArray<Answered>, string> => {
   const layout = layoutOf(request.dir)
   const judged = Effect.gen(function*() {
     const loaded = yield* Effect.tryPromise({
@@ -97,23 +129,32 @@ const runModule = (request: Request, file: string): Effect.Effect<string, string
       try: () => judging({ context: request.context, out: layout.out }),
       catch: (cause) => `module ${file} threw: ${errorText(cause)}`
     })
-    return yield* settled(answered).pipe(Effect.mapError((cause) => `module ${file} failed: ${errorText(cause)}`))
+    return yield* settled(file, answered)
   })
   const ms = timeoutMsOf(request.judge.manifest)
   return judged.pipe(
     Effect.timeoutOrElse({ duration: Duration.millis(ms), orElse: () => Effect.fail(`module ${file} timed out after ${ms} ms`) }),
-    Effect.tap((text) => Effect.sync(() => fs.writeFileSync(layout.stdout, text)))
+    Effect.tap((text) => Effect.try({ try: () => fs.writeFileSync(layout.stdout, text), catch: (cause) => `its lines not kept: ${errorText(cause)}` })),
+    Effect.catchCause((cause) => Effect.fail(whyOf(file, cause))),
+    Effect.map((text) => [{ text, origin: "its lines" }])
   )
 }
 
-/** Runs the executable judge of `request`: its stdout's text, or why it gave none, its log's path said. */
-const runExecutable = (request: Request, file: string): Effect.Effect<string, string> => {
+/** Runs the executable judge of `request`: its stdout's text, then its `SIPRIG_OUT/lines.jsonl`'s, or why it gave none, its log's path said. */
+const runExecutable = (request: Request, file: string): Effect.Effect<ReadonlyArray<Answered>, string> => {
   const layout = layoutOf(request.dir)
+  const outFile = path.join(layout.out, Lines.OUT_FILE)
   return Effect.flatMap(
     Executable.run({ dir: request.judge.dir, file, ...layout, step: STEP, timeoutMs: timeoutMsOf(request.judge.manifest) }),
     (ended) =>
       Executable.succeeded(ended)
-        ? Effect.sync(() => fs.readFileSync(layout.stdout, "utf8"))
+        ? Effect.try({
+          try: () => [
+            { text: fs.existsSync(layout.stdout) ? fs.readFileSync(layout.stdout, "utf8") : "", origin: "its stdout" },
+            { text: fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf8") : "", origin: `SIPRIG_OUT/${Lines.OUT_FILE}` }
+          ],
+          catch: (cause) => `its lines not read: ${errorText(cause)}`
+        })
         : Effect.fail(`${STEP} ${Executable.describe(ended)}, its log ${layout.log}`)
   )
 }
@@ -132,16 +173,20 @@ const faultOf = (request: Request, ids: ReadonlySet<string>, writer: Attached.Wr
   }
 }
 
-/** The lines `text` holds, each one of `request`'s judge; or the first that is none, and why. */
-const linesOf = (request: Request, text: string, writer: Attached.Writer): Result.Result<ReadonlyArray<Lines.Line>, string> => {
-  const parsed = Lines.parse(text, "its answer")
-  if (Result.isFailure(parsed)) return Result.fail(parsed.failure)
+/** The lines `answered` holds, each one of `request`'s judge; or the first that is none, and why. */
+const linesOf = (request: Request, answered: ReadonlyArray<Answered>, writer: Attached.Writer): Result.Result<ReadonlyArray<Lines.Line>, string> => {
   const ids = new Set(request.context.cells.map((cell) => cell.id))
-  for (const { at, line } of parsed.success) {
-    const fault = faultOf(request, ids, writer, line)
-    if (fault !== undefined) return Result.fail(`${at}: ${fault}`)
+  const read: Array<Lines.Line> = []
+  for (const { text, origin } of answered) {
+    const parsed = Lines.parse(text, origin)
+    if (Result.isFailure(parsed)) return Result.fail(parsed.failure)
+    for (const { at, line } of parsed.success) {
+      const fault = faultOf(request, ids, writer, line)
+      if (fault !== undefined) return Result.fail(`${at}: ${fault}`)
+      read.push(line)
+    }
   }
-  return Result.succeed(parsed.success.map(({ line }) => line))
+  return Result.succeed(read)
 }
 
 /** The label a judge's answers go by: `judge <judge> of <name>`, `name` the records it judged. */
@@ -195,8 +240,8 @@ const applied = (request: Request, writer: Attached.Writer, lines: ReadonlyArray
   }
 }
 
-/** Runs `request`'s judge once: what it answered, or `not checkable` where it failed. */
-export const run = (request: Request): Effect.Effect<CollectorRun.Collected> =>
+/** `request`'s judge run once, its lines applied: a defect of the base's own reading left to {@link run}. */
+const answeredOf = (request: Request): Effect.Effect<CollectorRun.Collected> =>
   Effect.gen(function*() {
     const layout = layoutOf(request.dir)
     const writer: Attached.Writer = { id: `judge-${request.judge.name}`, source: request.judge.name, out: layout.out }
@@ -220,3 +265,8 @@ export const run = (request: Request): Effect.Effect<CollectorRun.Collected> =>
     const done = yield* Effect.result(Effect.try({ try: () => applied(request, writer, read.success), catch: errorText }))
     return Result.isFailure(done) ? notCheckable(request, `judge ${request.judge.name}: its answers not applied: ${done.failure}`) : done.success
   })
+
+/** Runs `request`'s judge once: what it answered, or `not checkable` where it failed, whatever it failed of. */
+export const run = (request: Request): Effect.Effect<CollectorRun.Collected> =>
+  Effect.catchDefect(answeredOf(request), (defect) =>
+    Effect.succeed(notCheckable(request, `judge ${request.judge.name} died: ${errorText(defect)}`)))

@@ -60,7 +60,11 @@ const keyed = (cell: Cell.Cell, lines: ReadonlyArray<Lines.KeyLine>): Cell.Cell 
 export const withKeys = (cells: ReadonlyArray<Cell.Cell>, lines: ReadonlyArray<Lines.KeyLine>): ReadonlyArray<Cell.Cell> => {
   if (lines.length === 0) return cells
   const byCell = new Map<string, Array<Lines.KeyLine>>()
-  for (const line of lines) byCell.set(line.cell, [...(byCell.get(line.cell) ?? []), line])
+  for (const line of lines) {
+    const mine = byCell.get(line.cell)
+    if (mine === undefined) byCell.set(line.cell, [line])
+    else mine.push(line)
+  }
   return cells.map((cell) => {
     const mine = byCell.get(cell.id)
     return mine === undefined ? cell : keyed(cell, mine)
