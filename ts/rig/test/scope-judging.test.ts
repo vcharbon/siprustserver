@@ -10,7 +10,8 @@
  * non-zero, returns no lines, dies, rejects, answers what is not its, times
  * out), a collector whose open or collect failed, its judge not run over its
  * cells (those of its other instances judged), and a verification nobody
- * answered, `not checkable`; an executable
+ * answered, `not checkable` (the judge's own informative line answers it);
+ * an executable
  * judge's lines read on its stdout and in its `lines.jsonl`.
  */
 import { Verification } from "@sip/contracts"
@@ -570,6 +571,20 @@ fs.writeFileSync(require("node:path").join(process.env.SIPRIG_OUT, "lines.jsonl"
       [{ name: "half", source: "halves", answer: "pass" }],
       [{ name: "half", source: "halves", answer: "not-checkable", message: "nobody answered half for the cell c2" }]
     ])
+  })
+
+  it("is the judge's own informative line on a cell, nothing filled beside it: the cell passes on its other lines", async () => {
+    const { root, rig } = await loaded({
+      ...collector("half", node(`console.log(JSON.stringify({ record: { n: 1 }, key: "c1@test" }))`), `judge = "halves"\n[join]\nkey = "call_id"`),
+      ...executableJudge("halves", node(`
+console.log(JSON.stringify({ verification: "half", cell: "c1", answer: "pass" }))
+console.log(JSON.stringify({ verification: "half", cell: "c2", answer: "pass", message: "c2 holds nothing to judge", informative: true }))
+`))
+    })
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]))
+    const c2 = onCell(collected, "c2")
+    expect(c2).toEqual([{ name: "half", source: "halves", answer: "pass", message: "c2 holds nothing to judge", informative: true }])
+    expect(Verification.finalStatusOf([{ name: "replay", source: "replay", answer: "pass" }, ...c2])).toBe("pass")
   })
 
   it("is not checkable for the cell a judge of exports alone left unanswered", async () => {
