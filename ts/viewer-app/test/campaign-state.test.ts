@@ -79,7 +79,7 @@ describe("the summary page's place", () => {
       capture: "c",
       title: null,
       env: null, envs: [], launch: null, own: null, saidLabel: "s", saidLog: "l", sides: [], lanes: [], cases: [],
-      runs: [run(3, "Routing/x [a]"), run(2, null), run(1, null)]
+      runs: [run(3, "cases/x [a]"), run(2, null), run(1, null)]
     }
     expect(summaryOf(view, undefined).runs.map((r) => r.id)).toEqual([2, 1])
     expect(summaryOf(view, 3).runs.map((r) => r.id)).toEqual([3, 2, 1])

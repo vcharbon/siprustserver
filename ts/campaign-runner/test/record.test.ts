@@ -82,7 +82,7 @@ const OPENING: Record.Opening<never, { readonly label: string }> = {
 
 const cell = (id: string): Cell => ({
   id,
-  ref: `Routing/${id}`,
+  ref: `cases/${id}`,
   subcase: "s",
   retries: 0,
   source: { file: `cases/${id}.ts`, text: "" },
@@ -134,7 +134,7 @@ describe("a run's record", () => {
         record,
         row: record.lanes[0]!,
         results: [result, passed("sim", "b")],
-        notPorted: ["Routing/unported"],
+        notPorted: ["cases/unported"],
         error: undefined,
         unlogged: undefined
       })
@@ -144,11 +144,11 @@ describe("a run's record", () => {
     const finish = calls.finished[0]!
     expect([finish.id, finish.status, finish.detail]).toEqual([100, "done", undefined])
     expect(finish.cases.map((one) => [one.caseId, one.skipped ?? null])).toEqual([
-      ["Routing/a [s]", null],
-      ["Routing/b [s]", null],
-      ["Routing/unported", "not-ported"]
+      ["cases/a [s]", null],
+      ["cases/b [s]", null],
+      ["cases/unported", "not-ported"]
     ])
-    expect(calls.cells).toEqual([{ runId: 100, caseId: "Routing/a [s]", cell: { cell: "a-cell", log: { records: 3 } } }])
+    expect(calls.cells).toEqual([{ runId: 100, caseId: "cases/a [s]", cell: { cell: "a-cell", log: { records: 3 } } }])
     expect(record.closed.get(100)).toBeUndefined()
   })
 

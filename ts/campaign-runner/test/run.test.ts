@@ -14,7 +14,7 @@ const run = <R>(lanes: ReadonlyArray<Lane>, p: Phases<R>) => runOver(lanes, p, [
 
 const cell = (id: string): Cell => ({
   id,
-  ref: `Routing/${id}`,
+  ref: `cases/${id}`,
   subcase: "s",
   retries: 0,
   source: { file: `cases/${id}.ts`, text: "" },

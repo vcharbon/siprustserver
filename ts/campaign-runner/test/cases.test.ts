@@ -37,7 +37,7 @@ const DOCUMENT = {
 } as unknown as Pivot.PivotV3
 
 /** A case file at `name` under the run's case root, its text `text`. */
-const file = (name: string, text = `ref: "Routing/${name}"\n`): CaseFile => {
+const file = (name: string, text = `ref: "cases/${name}"\n`): CaseFile => {
   const absolute = path.join(dir, "cases", `${name}.ts`)
   fs.mkdirSync(path.dirname(absolute), { recursive: true })
   fs.writeFileSync(absolute, text)
@@ -108,8 +108,8 @@ const COMPILER: CaseCompiler<PackCell, Compiled, Selected, never> = {
     one.value === "refused"
       ? Effect.fail({ message: "the pack refuses this case" })
       : one.value === "clash"
-      ? Effect.succeed([subcase("Routing/clash", "a", "two-a")])
-      : Effect.succeed([subcase(`Routing/${String(one.value)}`, "a"), subcase(`Routing/${String(one.value)}`, "b")]),
+      ? Effect.succeed([subcase("cases/clash", "a", "two-a")])
+      : Effect.succeed([subcase(`cases/${String(one.value)}`, "a"), subcase(`cases/${String(one.value)}`, "b")]),
   linted: () => false,
   write: (root, compiled) =>
     Effect.sync(() => {
@@ -149,10 +149,10 @@ describe("the compile loop over a pack's compiler", () => {
     if (compiled._tag !== "Success") throw new Error(String(compiled.failure))
     expect(compiled.success.cells.map((cell) => [cell.id, cell.ref, cell.subcase, cell.dir, cell.tags, cell.egress, cell.packOf]))
       .toEqual([
-        ["two-a", "Routing/two", "a", path.join(dir, "cells", "two-a"), ["pack"], "bob", "two-a"],
-        ["two-b", "Routing/two", "b", path.join(dir, "cells", "two-b"), ["pack"], "bob", "two-b"]
+        ["two-a", "cases/two", "a", path.join(dir, "cells", "two-a"), ["pack"], "bob", "two-a"],
+        ["two-b", "cases/two", "b", path.join(dir, "cells", "two-b"), ["pack"], "bob", "two-b"]
       ])
-    expect(compiled.success.cells[0]!.source).toEqual({ file: "cases/two.ts", text: `ref: "Routing/two"\n` })
+    expect(compiled.success.cells[0]!.source).toEqual({ file: "cases/two.ts", text: `ref: "cases/two"\n` })
     expect(compiled.success.broken.map((one) => [one.file, one.reason])).toEqual([
       ["cases/unloaded.ts", "does not load"],
       ["cases/refused.ts", "the pack refuses this case"]
@@ -180,14 +180,14 @@ describe("the compile loop over a pack's compiler", () => {
     const compiled = await compile([file("two"), file("clash")])
     expect(compiled._tag).toBe("Failure")
     expect(compiled._tag === "Failure" ? compiled.failure.message : "").toContain(
-      "two sub-cases compile to the cell two-a: Routing/two [a] (cases/two.ts) and Routing/clash [a] (cases/clash.ts)"
+      "two sub-cases compile to the cell two-a: cases/two [a] (cases/two.ts) and cases/clash [a] (cases/clash.ts)"
     )
   })
 
   it("compiles only the case a run keeps, and fails where no selected file compiles it", async () => {
-    const kept = await compile([file("two")], { ref: "Routing/two", subcase: "b" })
+    const kept = await compile([file("two")], { ref: "cases/two", subcase: "b" })
     expect(kept._tag === "Success" ? kept.success.cells.map((cell) => cell.id) : kept.failure).toEqual(["two-b"])
-    const none = await compile([file("two")], { ref: "Routing/gone", subcase: null })
-    expect(none._tag === "Failure" ? none.failure.message : "").toContain("no selected case file compiles Routing/gone")
+    const none = await compile([file("two")], { ref: "cases/gone", subcase: null })
+    expect(none._tag === "Failure" ? none.failure.message : "").toContain("no selected case file compiles cases/gone")
   })
 })

@@ -33,7 +33,7 @@ const OPTIONS = { force: false, individually: false, tagging: TAGGING }
 
 const cell = (over: Partial<Cell> = {}): Cell => ({
   id: "c",
-  ref: "Routing/c",
+  ref: "cases/c",
   subcase: "s",
   retries: 0,
   source: { file: "cases/c.ts", text: "" },
@@ -67,7 +67,7 @@ describe("why a cell is skipped on a lane", () => {
 
   it("is an operation the lane binds none of where the pack runs it, before a need the lane lacks, forced or not", () => {
     const asking = cell({ operations: ["block-route", "block-route"], needs: ["video"] })
-    const unbound = "not-runnable: sim binds no operation block-route the case Routing/c asks for"
+    const unbound = "not-runnable: sim binds no operation block-route the case cases/c asks for"
     expect(reason(asking)).toBe(unbound)
     expect(reason(asking, { force: true })).toBe(unbound)
     expect(reason(cell({ operations: ["block-route"], tags: ["lane-refused"] }))).toBe("not-runnable: the pack refuses sim")

@@ -23,7 +23,7 @@ const SIM = LaneView.simulatedBuiltIn("sim", {})
 
 const cell = (id: string): Cell => ({
   id,
-  ref: `Routing/${id}`,
+  ref: `cases/${id}`,
   subcase: "s",
   retries: 0,
   source: { file: `cases/${id}.ts`, text: "" },
