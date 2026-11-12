@@ -217,11 +217,17 @@ interface JoinedOf {
  */
 export const sourceOf = (instance: CollectorRun.Instance): string => instance.judge?.name ?? instance.collector.name
 
-/** What `instance` promises on the cells of its lanes, of `read` alone where it states them: those its manifest names, or its own name where it names a judge; none where it names neither. */
+/**
+ * What `instance` promises on the cells of its lanes, of `read` alone where it
+ * states them: those its manifest names, or its own name where it names a
+ * judge; none where it names neither, or where it is scope-only.
+ */
 const promisedBy = (instance: CollectorRun.Instance, read?: ReadonlyArray<string> | undefined): ScopeAnswers.Promised => ({
   source: sourceOf(instance),
   names: instance.judge === undefined ? instance.collector.manifest.answers ?? [] : Collector.answeredBy(instance.collector.manifest),
-  covers: (cell) => (instance.lanes === undefined || instance.lanes.includes(cell.lane)) && (read === undefined || read.includes(cell.id)),
+  covers: (cell) =>
+    !Collector.isScopeOnly(instance.collector.manifest) &&
+    (instance.lanes === undefined || instance.lanes.includes(cell.lane)) && (read === undefined || read.includes(cell.id)),
   informative: Collector.isInformative(instance.collector.manifest)
 })
 

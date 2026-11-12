@@ -332,16 +332,21 @@ const notCheckableLines = (instance: Instance, message: string): Answers => ({
   attachments: []
 })
 
-/** What `instance` answers where it could not collect over `cells`: `not checkable`, saying `message`, for each verification it names. */
+/**
+ * What `instance` answers where it could not collect over `cells`: `not
+ * checkable`, saying `message`, for each verification it names, on its scope
+ * and, unless it is scope-only, on each of `cells`.
+ */
 export const notCheckable = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, message: string): Collected => {
   const lines = notCheckableLines(instance, message)
-  return { label: instance.label, scope: lines, cells: new Map(cells.map((cell) => [cell.id, lines])), keyed: [], assigned: [], keys: [] }
+  const answered = Collector.isScopeOnly(instance.collector.manifest) ? [] : cells
+  return { label: instance.label, scope: lines, cells: new Map(answered.map((cell) => [cell.id, lines])), keyed: [], assigned: [], keys: [] }
 }
 
-/** `collected` with each cell of `unread` on `instance`'s lanes answered `not checkable`, saying why it was not described. */
+/** `collected` with each cell of `unread` on `instance`'s lanes answered `not checkable`, saying why it was not described; none where it is scope-only. */
 const withUnread = (instance: Instance, collected: Collected, unread: ReadonlyArray<Unread>): Collected => {
   const mine = instance.lanes === undefined ? unread : unread.filter((cell) => instance.lanes!.includes(cell.lane))
-  if (mine.length === 0) return collected
+  if (mine.length === 0 || Collector.isScopeOnly(instance.collector.manifest)) return collected
   const cells = new Map(collected.cells)
   for (const cell of mine) cells.set(cell.id, notCheckableLines(instance, `the cell ${cell.id} was not described: ${cell.why}`))
   return { ...collected, cells }
@@ -354,6 +359,7 @@ const faultOf = (instance: Instance, ids: ReadonlySet<string>, line: Lines.Line)
   const manifest = instance.collector.manifest
   switch (line._tag) {
     case "Verification":
+      if (cell !== undefined && Collector.isScopeOnly(manifest)) return `answers the cell ${cell}, where its manifest answers its scope alone`
       return Collector.answeredBy(manifest).includes(line.line.verification)
         ? undefined
         : `answers ${line.line.verification}, which its manifest does not name`

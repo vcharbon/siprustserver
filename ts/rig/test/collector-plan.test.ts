@@ -51,6 +51,7 @@ describe("the collectors a batch runs", () => {
     const without = CollectorPlan.batchPlanOf(rig, laneOf("d"), "/b/collectors", "/b")
     const always = [
       "also-locked",
+      "deciding-silent",
       "failing-close",
       "failing-collect",
       "failing-open",
@@ -71,12 +72,14 @@ describe("the collectors a batch runs", () => {
       "required-blind",
       "required-failing",
       "required-hanging",
+      "scope-only-failing",
+      "scope-only-naming",
       "slow-open",
       "stranger",
       "unsure-check",
       "wrong-cell"
     ]
-    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 23), "tidy", ...always.slice(23)])
+    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 26), "tidy", ...always.slice(26)])
     expect(without.map((instance) => instance.id)).toEqual(always)
     expect(without.filter((instance) => instance.onFailure === true).map((instance) => instance.id)).toEqual(["on-failure", "on-failure-promising"])
     expect(withStore.find((instance) => instance.id === "tidy")).toMatchObject({

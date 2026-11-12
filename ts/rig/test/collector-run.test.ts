@@ -392,6 +392,46 @@ describe("a scope's collectors", () => {
     }
   })
 
+  it("fills a deciding promise on a cell whose only line of the name is informative: the cell is not verified by it", async () => {
+    const { root, rig } = await samples()
+    const cells = cellsUnder(root)
+    const { collected } = await runScope(
+      [instanceOf(rig, root, "informative-noting"), instanceOf(rig, root, "deciding-silent")],
+      cells,
+      { sink: () => Effect.void, locker: memoryLocker() }
+    )
+    const [noting, silent] = valueOf(collected)
+    for (const cell of cells) {
+      expect(silent!.cells.get(cell.id)!.verifications).toEqual([
+        { name: "note", source: "deciding-silent", answer: "not-checkable", message: `nobody answered note for the cell ${cell.id}` }
+      ])
+      const lines = [{ name: "replay", source: "replay", answer: "pass" as const }, ...noting!.cells.get(cell.id)!.verifications, ...silent!.cells.get(cell.id)!.verifications]
+      expect(Verification.finalStatusOf(lines)).toBe("unverified")
+    }
+  })
+
+  it("answers a scope-only collector's failed collect on its scope alone, and refuses its line naming a cell there too", async () => {
+    const { root, rig } = await samples()
+    const cells = cellsUnder(root)
+    const { collected } = await runScope(
+      [instanceOf(rig, root, "scope-only-failing"), instanceOf(rig, root, "scope-only-naming")],
+      cells,
+      { sink: () => Effect.void, locker: memoryLocker() }
+    )
+    const [failing, naming] = valueOf(collected)
+    const log = path.join(root, "batch", "collectors", "scope-only-failing", "collect.log")
+    expect(failing!.scope.verifications).toEqual([
+      { name: "copy", source: "scope-only-failing", answer: "not-checkable", message: `collect exited 3: the store took no copy, its log ${log}` }
+    ])
+    expect(naming!.scope.verifications).toEqual([{
+      name: "copy",
+      source: "scope-only-naming",
+      answer: "not-checkable",
+      message: "collect: its stdout line 1: answers the cell c1, where its manifest answers its scope alone"
+    }])
+    for (const one of [failing!, naming!]) expect([...one.cells.values()].flatMap((held) => held.verifications)).toEqual([])
+  })
+
   it("answers not checkable, with what the collector said, for every verification it names on every cell when collect exits non-zero", async () => {
     const { root, rig } = await samples()
     const cells = cellsUnder(root)

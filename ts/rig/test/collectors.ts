@@ -77,6 +77,13 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...collector("informative-noting", {
     collect: answering(`{"verification": "note", "cell": "c1", "answer": "fail", "message": "a slow log"}`)
   }, `informative = true\nanswers = ["note"]`),
+  ...collector("deciding-silent", { collect: traced("collect deciding-silent") }, `answers = ["note"]`),
+  ...collector("scope-only-failing", {
+    collect: traced("collect scope-only-failing", `echo "the store took no copy" >&2\nexit 3`)
+  }, `scope_only = true\nanswers = ["copy"]`),
+  ...collector("scope-only-naming", {
+    collect: answering(`{"verification": "copy", "cell": "c1", "answer": "pass"}`)
+  }, `scope_only = true\nanswers = ["copy"]`),
   ...collector("failing-open", {
     open: traced("open failing-open", `echo "no route to the store" >&2\nexit 2`),
     collect: traced("collect failing-open"),

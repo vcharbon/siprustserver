@@ -121,6 +121,7 @@ required = false               # true: no level and no lane switches it off
 after    = ["sut-log"]         # same scope: collectors whose keys and records it reads
 answers  = ["call-records"]    # the verifications it, or its judge, answers
 informative = false            # true: none of its lines decides (no judge then)
+scope_only = false             # true: it answers its scope's lines alone, never a cell's
 judge    = "call-records"      # optional
 locks    = ["records-chain"]   # box-wide, held from open to close; never at cell scope
 delay_s  = 10                  # cell scope: wall clock, after the cell ended
@@ -191,6 +192,12 @@ Rules:
 - An `informative` collector's lines never decide: the base marks informative each it answers,
   each `not checkable` it answers for it (a failed or timed-out step) and each of its promise it
   fills. One naming a judge is refused at load.
+- A `scope_only` collector answers its scope's lines alone: a line of it naming a cell is none
+  of its answers, each `not checkable` the base answers for it lands on the scope's line alone,
+  and it promises no cell a line. Its failed step never decides a cell. One of cell scope, or
+  naming a judge, is refused at load.
+- An informative line never stands for a deciding one: a promise of a collector whose lines
+  decide is filled on a cell unless a deciding line answered its name there.
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
 - `after` orders collectors of one scope. A wider scope always runs after a narrower one ended
   and reads its keys and records without declaring it. An `after` naming a collector that is

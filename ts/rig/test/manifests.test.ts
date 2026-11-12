@@ -96,6 +96,16 @@ describe("collector.v1", () => {
     expect(refusalOf(Collector.parse("c/collector.toml", unjudged))).toBe("accepted")
   })
 
+  it("refuses a scope-only collector naming a judge, or of cell scope", () => {
+    const scopeOnly = COLLECTOR.replace("locks ", "scope_only = true\nlocks ")
+    expect(refusalOf(Collector.parse("c/collector.toml", scopeOnly)))
+      .toBe("c/collector.toml: judge: a scope-only collector answers no cell, and a judge answers its cells")
+    const unjudged = scopeOnly.replace(`judge    = "call-records"\n`, "")
+    expect(refusalOf(Collector.parse("c/collector.toml", unjudged))).toBe("accepted")
+    const ofCell = unjudged.replace(`scope    = "batch"`, `scope    = "cell"`).replace(`locks    = ["records-chain"]\n`, "")
+    expect(refusalOf(Collector.parse("c/collector.toml", ofCell))).toBe("c/collector.toml: scope_only: a cell-scope collector's lines are its cell's")
+  })
+
   it("refuses a pre-check whose default is on-failure", () => {
     const before = COLLECTOR.replace(`at       = "after"`, `at = "before"`)
       .replace(`open    = "./open"\n`, "")

@@ -51,6 +51,8 @@ export const Collector = Schema.Struct({
   answers: Schema.optionalKey(Schema.Array(Name)),
   /** Its lines never decide: each it answers, and each `not checkable` the base answers for it, is informative. */
   informative: Schema.optionalKey(Schema.Boolean),
+  /** It answers its scope's own lines alone, never a cell's: each `not checkable` the base answers for it is its scope's alone. */
+  scope_only: Schema.optionalKey(Schema.Boolean),
   /** The judge of the path that decides over its records. */
   judge: Schema.optionalKey(Name),
   /** Box-wide locks held from `open` to `close`; none on a cell-scope collector. */
@@ -92,6 +94,9 @@ export const answeredBy = (collector: Collector): ReadonlyArray<string> =>
 /** Whether `collector`'s lines never decide a verdict (`informative = true`). */
 export const isInformative = (collector: Collector): boolean => collector.informative === true
 
+/** Whether `collector` answers its scope's own lines alone, never a cell's (`scope_only = true`). */
+export const isScopeOnly = (collector: Collector): boolean => collector.scope_only === true
+
 /** The executables a collector names, by the step that runs each. */
 export const executablesOf = (collector: Collector): ReadonlyArray<readonly [string, string]> =>
   (["open", "collect", "close"] as const).flatMap((step) => {
@@ -124,6 +129,10 @@ const meaningOf = (collector: Collector): string | undefined => {
   if ((collector.after ?? []).includes(collector.name)) return "after: a collector does not run after itself"
   if (collector.informative === true && collector.judge !== undefined) {
     return "judge: an informative collector's lines never decide, no judge decides over its records"
+  }
+  if (collector.scope_only === true && collector.scope === "cell") return "scope_only: a cell-scope collector's lines are its cell's"
+  if (collector.scope_only === true && collector.judge !== undefined) {
+    return "judge: a scope-only collector answers no cell, and a judge answers its cells"
   }
   return undefined
 }
