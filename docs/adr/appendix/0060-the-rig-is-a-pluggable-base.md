@@ -178,7 +178,8 @@ Rules:
   names: its scope lasts past the call to its delayed `collect`, over the lane's next cells.
 - A collector or judge named like a source the base (`interpreter`, `rfc audit`, `driver`, `rig`) answers lines
   as is refused at load. A collector's line merged into a landed cell replaces only a `pending`
-  line of its name and source, never an answered one.
+  line of its name and source, never an answered one. A run's index reads its cells with
+  those lines merged: a row whose batch has collectors closes once they answered.
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
 - `after` orders collectors of one scope. A wider scope always runs after a narrower one ended
   and reads its keys and records without declaring it. An `after` naming a collector that is
