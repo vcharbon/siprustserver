@@ -23,23 +23,42 @@ export interface Promised {
   readonly informative?: boolean
 }
 
-/** The names answered on a cell, other than `pending`: by any line, and by a line that decides (not informative). */
+/** A line as the names a cell holds answered read it. */
+type AnswerLine = Pick<Verification.Verification, "name" | "source" | "answer" | "informative">
+
+/** The names answered on a cell, other than `pending`: by any line, by a line that decides (not informative), and per name the sources that answered it. */
 interface Answered {
   readonly any: Set<string>
   readonly deciding: Set<string>
+  readonly sources: Map<string, Set<string>>
 }
+
+/** Nothing answered yet. */
+const noneAnswered = (): Answered => ({ any: new Set(), deciding: new Set(), sources: new Map() })
+
+/** `line` counted in `answered`, unless it is `pending`. */
+const addAnswer = (answered: Answered, line: AnswerLine): void => {
+  if (line.answer === "pending") return
+  answered.any.add(line.name)
+  if (line.informative !== true) answered.deciding.add(line.name)
+  const sources = answered.sources.get(line.name) ?? new Set<string>()
+  sources.add(line.source)
+  answered.sources.set(line.name, sources)
+}
+
+/** Whether `answered` holds `promise`'s answer of `name`: any line for an informative promise; else a deciding line, or one of the promise's own source. */
+const answers = (answered: Answered, promise: Promised, name: string): boolean =>
+  promise.informative === true
+    ? answered.any.has(name)
+    : answered.deciding.has(name) || answered.sources.get(name)?.has(promise.source) === true
 
 /** The names answered on each of `cells`: its own lines', then `collected`'s. */
 const answeredOn = (collected: ReadonlyArray<CollectorRun.Collected>, cells: ReadonlyArray<Cell.Cell>): Map<string, Answered> => {
-  const answered = new Map(cells.map((cell) => [cell.id, { any: new Set<string>(), deciding: new Set<string>() }]))
-  const add = (id: string, lines: ReadonlyArray<Pick<Verification.Verification, "name" | "answer" | "informative">>) => {
+  const answered = new Map(cells.map((cell) => [cell.id, noneAnswered()]))
+  const add = (id: string, lines: ReadonlyArray<AnswerLine>) => {
     const names = answered.get(id)
     if (names === undefined) return
-    for (const line of lines) {
-      if (line.answer === "pending") continue
-      names.any.add(line.name)
-      if (line.informative !== true) names.deciding.add(line.name)
-    }
+    for (const line of lines) addAnswer(names, line)
   }
   for (const cell of cells) add(cell.id, cell.verifications)
   for (const one of collected) for (const [id, held] of one.cells) add(id, held.verifications)
@@ -50,8 +69,9 @@ const answeredOn = (collected: ReadonlyArray<CollectorRun.Collected>, cells: Rea
  * `collected` with, per entry's promise, each verification nobody answered
  * for one of the cells it covers answered `not checkable` by it: none of
  * `collected` answered it, nor did the cell's own lines, nor an earlier
- * entry's filling. A deciding promise counts only a deciding line as its
- * answer: an informative one beside it never stands for it.
+ * entry's filling. A deciding promise counts a deciding line, or a line of
+ * its own source, as its answer: another source's informative line never
+ * stands for it.
  */
 export const unansweredFilled = (
   collected: ReadonlyArray<CollectorRun.Collected>,
@@ -66,28 +86,18 @@ export const unansweredFilled = (
     for (const cell of cells) {
       if (!promise.covers(cell)) continue
       const names = answered.get(cell.id)!
-      const informative = promise.informative === true
-      const seen = informative ? names.any : names.deciding
-      const missing = promise.names.filter((name) => !seen.has(name))
+      const missing = promise.names.filter((name) => !answers(names, promise, name))
       if (missing.length === 0) continue
-      for (const name of missing) {
-        names.any.add(name)
-        if (!informative) names.deciding.add(name)
-      }
+      const filled = missing.map((name) => ({
+        name,
+        source: promise.source,
+        answer: "not-checkable" as const,
+        message: `nobody answered ${name} for the cell ${cell.id}`,
+        ...(promise.informative === true ? { informative: true } : {})
+      }))
+      for (const line of filled) addAnswer(names, line)
       const held = byCell.get(cell.id) ?? { verifications: [], attachments: [] }
-      byCell.set(cell.id, {
-        ...held,
-        verifications: [
-          ...held.verifications,
-          ...missing.map((name) => ({
-            name,
-            source: promise.source,
-            answer: "not-checkable" as const,
-            message: `nobody answered ${name} for the cell ${cell.id}`,
-            ...(promise.informative === true ? { informative: true } : {})
-          }))
-        ]
-      })
+      byCell.set(cell.id, { ...held, verifications: [...held.verifications, ...filled] })
     }
     return { ...one, cells: byCell }
   })
