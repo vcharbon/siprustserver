@@ -13,8 +13,8 @@
  * from — `case_assets`, `ledger_rows`, `flows_documents` and `flows_legs`.
  * Around them: the replay `population`, replay `requests`, the `jobs` that
  * ran them, the `batches` those drove, the `job_events` their runners
- * wrote, the `verifications` lines of a cell, a batch or a job, and the
- * {@link Current} population setting.
+ * wrote, the `verifications` lines of a cell, a batch or a job, the campaign
+ * runs ({@link CAMPAIGN_RUNS}) and the {@link Current} population setting.
  *
  * `case_documents` (the v3 case JSON) is shared by both, content-hash deduped
  * so a corpus question is a query and a re-cut or re-run that changed nothing
@@ -971,6 +971,64 @@ const jobHooksPathDropped = Effect.flatMap(SqlClient, (sql) => sql`ALTER TABLE j
 export const JOB_HOOKS_PATH_DROPPED = "18_job_hooks_path_dropped"
 
 /**
+ * The CAMPAIGN record (`campaign-runs.ts`): `campaign_runs`, one campaign run
+ * with what its pack states of the target it drove (`target`); the store
+ * `runs` row of each lane it drove (`campaign_run_lanes`); each case result's
+ * cell, its backend's log and its attempts (`campaign_cells`); and what each
+ * case it compiled says of itself (`campaign_case_about`).
+ */
+const campaignRuns = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE campaign_runs (
+      id          bigserial PRIMARY KEY,
+      capture     text NOT NULL,
+      env         text,
+      branch      text,
+      seed        text,
+      dir         text NOT NULL,
+      scope       text,
+      selection   jsonb,
+      target      jsonb NOT NULL DEFAULT '{}'::jsonb,
+      started_at  timestamptz NOT NULL DEFAULT now(),
+      finished_at timestamptz
+    )
+  `
+  yield* sql`CREATE INDEX campaign_runs_capture_id_idx ON campaign_runs (capture, id DESC)`
+  yield* sql`
+    CREATE TABLE campaign_run_lanes (
+      campaign_run_id bigint NOT NULL REFERENCES campaign_runs (id) ON DELETE CASCADE,
+      run_id          bigint NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+      PRIMARY KEY (campaign_run_id, run_id)
+    )
+  `
+  yield* sql`CREATE INDEX campaign_run_lanes_run_idx ON campaign_run_lanes (run_id)`
+  yield* sql`
+    CREATE TABLE campaign_cells (
+      run_id      bigint NOT NULL,
+      case_id     text NOT NULL,
+      cell        text NOT NULL,
+      log_records integer,
+      log_missing text,
+      attempts    jsonb,
+      PRIMARY KEY (run_id, case_id),
+      FOREIGN KEY (run_id, case_id) REFERENCES case_results (run_id, case_id) ON DELETE CASCADE
+    )
+  `
+  yield* sql`
+    CREATE TABLE campaign_case_about (
+      campaign_run_id bigint NOT NULL REFERENCES campaign_runs (id) ON DELETE CASCADE,
+      ref             text NOT NULL,
+      about           jsonb NOT NULL,
+      PRIMARY KEY (campaign_run_id, ref)
+    )
+  `
+})
+
+/** The key of the migration that creates the campaign record. */
+export const CAMPAIGN_RUNS = "19_campaign_runs"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -992,7 +1050,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [VERIFICATIONS]: verifications,
   [ATTACHMENTS]: attachments,
   [JOB_ATTACHMENTS]: jobAttachments,
-  [JOB_HOOKS_PATH_DROPPED]: jobHooksPathDropped
+  [JOB_HOOKS_PATH_DROPPED]: jobHooksPathDropped,
+  [CAMPAIGN_RUNS]: campaignRuns
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

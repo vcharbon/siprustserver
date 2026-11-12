@@ -3,7 +3,8 @@
  * store whose result schema changed and whose old results are not converted.
  *
  * Emptied: `runs`, and with them their case results, verification lines, rule
- * counts and pins; `batches` with their lines; and the deployment's own result
+ * counts and pins; `batches` with their lines; the campaign runs with their
+ * cells and what their cases said of themselves; and the deployment's own result
  * tables it names ({@link Request.tables}), with whatever references them.
  * Kept: the frozen ids, the case maps, the population, the cuts and their
  * content, the case documents, the citations and the summaries of cited runs,
@@ -78,6 +79,9 @@ export class Service extends Context.Service<Service, Interface>()("@sip/store/R
 
 const IDENTIFIER = /^[a-z_][a-z0-9_]*$/
 
+/** The store's own result tables a reset names; what references them goes with them. */
+export const STORE_TABLES: ReadonlyArray<string> = ["runs", "batches", "campaign_runs"]
+
 const n = (value: string | number | null | undefined): number => (value === null || value === undefined ? 0 : Number(value))
 
 export const layer = Layer.effect(
@@ -150,7 +154,7 @@ export const layer = Layer.effect(
       } satisfies Plan
     })
 
-    const namedBy = (request: Request): ReadonlyArray<string> => ["runs", "batches", ...(request.tables ?? [])]
+    const namedBy = (request: Request): ReadonlyArray<string> => [...STORE_TABLES, ...(request.tables ?? [])]
 
     const plan = Effect.fn("ResultReset.plan")(function*(request: Request) {
       return yield* sql.withTransaction(Effect.gen(function*() {

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "The run store: the postgres record of which capture was cut how and ran on which lane, what each call said, and the reads that compare two run sets.",
+  "description": "The run store: the postgres record of which capture was cut how and ran on which lane, what each call said, the campaign runs over those lanes, the reads that compare two run sets, and the schema guard and unattended migration over a deployment's binding.",
   "exports": {
     ".": "./src/index.ts",
     "./test-server": "./test/server.ts",

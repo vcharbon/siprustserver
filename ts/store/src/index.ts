@@ -13,16 +13,22 @@
  * url (`Client`), the env and branch whose runs are current (`Current`), the
  * spelling of its current selector, the capture names its resolver recognises
  * and the migration it runs (`StoreBinding`), and its reading of a document's
- * features (`case_features`, `Migrations`).
+ * features (`case_features`, `Migrations`). `SchemaState` guards an entry point
+ * against a migration its binding has pending; `AutoMigrate` applies them
+ * unattended, backup first. `CampaignRuns` records a campaign run over its
+ * lanes' runs, read back as the results model (`CampaignResults`).
  */
 export * as Aside from "./aside.js"
 export * as Attachments from "./attachments.js"
+export * as AutoMigrate from "./auto-migrate.js"
 export * as Batches from "./batches.js"
 export * as StoreBinding from "./binding.js"
 export * as Bundle from "./bundle.js"
 export * as CallHistory from "./call-history.js"
 export * as Calls from "./calls.js"
 export * as CallSummary from "./call-summary.js"
+export * as CampaignResults from "./campaign-results.js"
+export * as CampaignRuns from "./campaign-runs.js"
 export * as CellAnswers from "./cell-answers.js"
 export * as CaseDocuments from "./case-documents.js"
 export * as CaseIds from "./case-ids.js"
@@ -57,6 +63,7 @@ export * as RunIdentity from "./run-identity.js"
 export * as RunSets from "./run-sets.js"
 export * as RunSummaries from "./run-summaries.js"
 export * as Runs from "./runs.js"
+export * as SchemaState from "./schema-state.js"
 export * as Selector from "./selector.js"
 export * as Sessions from "./sessions.js"
 export * as Sources from "./sources.js"
