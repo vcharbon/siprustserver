@@ -49,7 +49,8 @@ afterAll(async () => {
  * steps the scripts given, its default `setting` where one is given, its
  * trace file; and, where `preCheck` is given, the job pre-check `lab-own`
  * whose collect runs it, required and needing the part `needs` where one is
- * named, the lane's clock `clock`.
+ * named, the lane's clock `clock`, the lane excluding the collectors
+ * `exclude`.
  */
 const labOf = async (steps: {
   readonly collect: string
@@ -59,6 +60,7 @@ const labOf = async (steps: {
   readonly preCheck?: string
   readonly needs?: string
   readonly clock?: "real" | "simulated"
+  readonly exclude?: ReadonlyArray<string>
 }) => {
   const root = fs.mkdtempSync(path.join(TREE, "rig-"))
   const dir = path.join(root, "collectors", "lab")
@@ -91,7 +93,11 @@ const labOf = async (steps: {
   const lane: Lanes.Loaded = {
     id: LANE,
     file: `lanes/${LANE}.toml`,
-    lane: { schema: "lane.v1", clock: steps.clock ?? "simulated" },
+    lane: {
+      schema: "lane.v1",
+      clock: steps.clock ?? "simulated",
+      ...(steps.exclude === undefined ? {} : { collectors: { exclude: steps.exclude } as never })
+    },
     parts: new Map(),
     operations: new Map(),
     capabilities: new Set()
@@ -212,6 +218,16 @@ describe.skipIf(!served)("a job's pre-checks", () => {
       return yield* PreChecks.job({ job, dir: path.join(TREE, `job${job}`), lanes: [LANE] })
     }))
     expect(refused).toBe(`${LANE} names no records-store part, which the required pre-check lab-own needs (lanes/${LANE}.toml)`)
+    expect(lab.trace()).toEqual([])
+  })
+
+  it("refuse a job asking for a pre-check its lane excludes, running none", async () => {
+    const lab = await labOf({ collect: "exit 0", close: "exit 0", preCheck: "exit 0", exclude: ["lab-own"] })
+    const refused = await withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      return yield* PreChecks.job({ job, dir: path.join(TREE, `job${job}`), lanes: [LANE], asked: ["lab-own"] })
+    }))
+    expect(refused).toBe(`${LANE} excludes lab-own, a pre-check the job asks for (lanes/${LANE}.toml)`)
     expect(lab.trace()).toEqual([])
   })
 })

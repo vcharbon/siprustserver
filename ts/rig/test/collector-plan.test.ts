@@ -178,15 +178,16 @@ describe("the collectors a job runs", () => {
     expect(planned.every((instance) => instance.scope === "job" && instance.holder === "/j")).toBe(true)
   })
 
-  it("take an asked pre-check, marked asked, whatever the level sets it, and one the level sets always unasked", async () => {
+  it("take an asked pre-check, marked asked and never on-failure, whatever the level sets it, and one the level sets always unasked", async () => {
     const rig = await samples()
     const checks = (asked: ReadonlyArray<string>, level?: Collection.Level) =>
       CollectorPlan.jobPlanOf(rig, [laneOf("d")], "/j/collectors", "/j", asked, Collection.settingsOf(level === undefined ? undefined : { set: level }, "set"))
         .filter((instance) => instance.id === "asked-check")
-        .map((instance) => [instance.id, instance.asked])
-    expect(checks(["asked-check"])).toEqual([["asked-check", true]])
-    expect(checks(["asked-check"], { never: ["asked-check"] })).toEqual([["asked-check", true]])
-    expect(checks(["asked-check"], { always: ["asked-check"] })).toEqual([["asked-check", true]])
-    expect(checks([], { always: ["asked-check"] })).toEqual([["asked-check", undefined]])
+        .map((instance) => [instance.id, instance.asked, instance.onFailure])
+    expect(checks(["asked-check"])).toEqual([["asked-check", true, undefined]])
+    expect(checks(["asked-check"], { never: ["asked-check"] })).toEqual([["asked-check", true, undefined]])
+    expect(checks(["asked-check"], { always: ["asked-check"] })).toEqual([["asked-check", true, undefined]])
+    expect(checks(["asked-check"], { "on-failure": ["asked-check"] })).toEqual([["asked-check", true, undefined]])
+    expect(checks([], { always: ["asked-check"] })).toEqual([["asked-check", undefined, undefined]])
   })
 })

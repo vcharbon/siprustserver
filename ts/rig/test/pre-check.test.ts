@@ -5,10 +5,10 @@
  * line, but for a required pre-check's, which refuses the scope as does its
  * failed or timed-out collect. An `on-demand` job pre-check runs only for a
  * job that asks for it, and refuses that job as a required one would,
- * whatever the level sets it. A
- * required pre-check a real-clock lane names
+ * whatever the level sets it. A required pre-check a real-clock lane names
  * no part of refuses the scope before any pre-check runs; on a simulated lane
- * it does not. Each line is answered by the pre-check of its entry, the base's
+ * it does not. A pre-check a job asks for that a lane excludes, though it has
+ * the parts it needs, refuses the job before any pre-check runs. Each line is answered by the pre-check of its entry, the base's
  * own input line by none; no judge of exports runs over a pre-check, and a
  * judge named like a pre-check judges that name's exports alone.
  */
@@ -201,6 +201,41 @@ describe("an on-demand pre-check", () => {
     const refused = /^the asked pre-check asked-check could not check asked-check: collect exited 3/
     expect(await refusalUnder({ never: ["asked-check"] })).toMatch(refused)
     expect(await refusalUnder({ always: ["asked-check"] })).toMatch(refused)
+    expect(await refusalUnder({ "on-failure": ["asked-check"] })).toMatch(refused)
+  })
+})
+
+/** The job pre-check `guard-check`, set `always` by default and needing a records store, its collect traced. */
+const GUARD_CHECK: Record<string, Entry> = {
+  "collectors/guard-check/collector.toml": `schema = "collector.v1"\nname = "guard-check"\nscope = "job"\nat = "before"\n` +
+    `default = "always"\nneeds = ["${STORE}"]\n[run]\ncollect = "./collect"\n`,
+  "collectors/guard-check/collect": { text: `#!/bin/sh\necho "collect guard-check" >> ../../trace\n`, executable: true }
+}
+
+/** `lane` excluding the collectors `names` in its `[collectors]`. */
+const excluding = (lane: Lanes.Loaded, names: ReadonlyArray<string>): Lanes.Loaded => ({
+  ...lane,
+  lane: { ...lane.lane, collectors: { exclude: names } as never }
+})
+
+describe("an asked pre-check a lane excludes", () => {
+  it("refuses the job that asks for it, before any pre-check runs, where the lane has the parts it needs", async () => {
+    const { root, rig } = await samples(GUARD_CHECK)
+    const stored = excluding(laneOf("stored", { [STORE]: "targets/x.toml" }), ["guard-check"])
+    const bare = excluding(laneOf("bare"), ["guard-check"])
+    const kept = laneOf("kept", { [STORE]: "targets/y.toml" })
+    const lanes = [stored, bare, kept]
+    expect(PreCheck.unwiredOf(rig, lanes)).toEqual([])
+    const unwired = PreCheck.unwiredOf(rig, lanes, ["guard-check"])
+    const said = "stored excludes guard-check, a pre-check the job asks for (lanes/stored.toml)"
+    expect(unwired).toEqual([{ collector: "guard-check", lane: "stored", message: said }])
+    const checks = CollectorPlan.jobPlanOf(rig, lanes, path.join(root, "job", "collectors"), path.join(root, "job"), ["guard-check"])
+      .filter(PreCheck.isPreCheck)
+    const { events, sink } = collecting()
+    const checked = await Effect.runPromise(PreCheck.run(checks, unwired, { sink, locker: memoryLocker() }))
+    expect(checked.refusal).toBe(said)
+    expect(events).toEqual([`refused guard-check: ${said}`])
+    expect(traceOf(root)).toEqual([])
   })
 })
 
