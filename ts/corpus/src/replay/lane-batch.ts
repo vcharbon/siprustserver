@@ -27,7 +27,7 @@
  * attachments.
  */
 import type { Verification } from "@sip/contracts"
-import { type Cell, CollectorRun } from "@sip/rig"
+import { CollectorRun } from "@sip/rig"
 import { Attachments, Batches } from "@sip/store"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
@@ -90,8 +90,8 @@ export interface Collectors<A, RC> {
   readonly options: CollectorRun.Options
   /** The batch's own directory, which holds the attachments that name no cell. */
   readonly holder: string
-  /** The batch's cells once driven, as `cell.v1` describes them. */
-  readonly cells: (value: A) => Effect.Effect<ReadonlyArray<Cell.Cell>, never, RC>
+  /** The batch's cells once driven, as `cell.v1` describes them, and those it could not describe. */
+  readonly cells: (value: A) => Effect.Effect<CollectorRun.Over, never, RC>
 }
 
 /** What one batch is asked to do: its cells driven under `E`/`R`, its collectors opened under `EC`/`RO`, closed under `RC`. */
@@ -137,6 +137,10 @@ export interface Ended<A> {
   /** The labels of the rig's collectors whose `close` left the lab changed. */
   readonly leftChanged: ReadonlyArray<string>
 }
+
+/** What the batch's end says of each rig collector whose `close` left the lab changed; `undefined` where none did. */
+export const leftChangedOf = (ended: Pick<Ended<unknown>, "leftChanged">): string | undefined =>
+  joined(ended.leftChanged.map((label) => `the collector ${label} left the lab changed`))
 
 /** What an unjudged batch's end states where nothing else says why. */
 export const NO_END_LINE = "the batch's end gate wrote no end line"
@@ -274,7 +278,9 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
     const contexts = host?.contexts()
     const gates = deadHost === undefined ? host?.gates?.() ?? [] : []
     if (close !== undefined) yield* close
-    const collected = rig === undefined || opened === undefined ? [] : yield* opened.collect(yield* rig.cells(driven.value))
+    const collected = rig === undefined || opened === undefined
+      ? []
+      : yield* Effect.flatMap(rig.cells(driven.value), (over) => opened.collect(over.cells, over.unread))
     const ended: Omit<Ended<A>, "leftChanged"> = {
       value: driven.value,
       dirty,

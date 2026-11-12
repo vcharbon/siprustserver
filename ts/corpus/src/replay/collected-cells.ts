@@ -4,14 +4,16 @@
  * as `cell.v1` off their bundles (`@sip/rig` `CellOfBundle`), and what the
  * collectors answered of each merged into the landed cell once its run row
  * closed (`@sip/store` `CellAnswers`). A bundle no description can be read
- * from is said and left out of what the collectors read; an answer the store
- * refuses is said, never the run's failure.
+ * from is said and left out of what the collectors read, each collector
+ * answering it `not checkable`; an answer the store refuses is said, never
+ * the run's failure.
  */
 import { type Cell, CellOfBundle, type CollectorRun } from "@sip/rig"
 import { CellAnswers } from "@sip/store"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import type * as FileSystem from "effect/FileSystem"
+import * as Result from "effect/Result"
 
 /** Where a capture replay keeps its collectors' directories and its batches' attachments, under the session tree. */
 export const COLLECTORS_DIR = "_collectors"
@@ -35,20 +37,30 @@ export interface Pending {
 /** A cell as a scope's collectors read it, its run row aside: its attempt 1 where it states none. */
 export type Described = Omit<LandedCell, "runId"> & { readonly attempt?: number }
 
-/** `cells` described off their bundles as cells of `batch`; one whose bundle states no description is said and left out. */
+/**
+ * `cells` described off their bundles as cells of `batch`; one whose bundle
+ * states no description is said and left unread, which every collector of its
+ * lane answers `not checkable`.
+ */
 export const describe = (
   cells: ReadonlyArray<Described>,
   batch: string
-): Effect.Effect<ReadonlyArray<Cell.Cell>, never, FileSystem.FileSystem> =>
+): Effect.Effect<CollectorRun.Over, never, FileSystem.FileSystem> =>
   Effect.map(
     Effect.forEach(cells, (cell) =>
       CellOfBundle.ofBundle(cell.dir, { id: cell.id, case: cell.caseId, lane: cell.lane, batch, attempt: cell.attempt ?? 1 }).pipe(
-        Effect.map((described): ReadonlyArray<Cell.Cell> => [described]),
+        Effect.map((described): Result.Result<Cell.Cell, CollectorRun.Unread> => Result.succeed(described)),
         Effect.catch((unreadable) =>
-          Effect.as(Console.error(`[collector] ${cell.id} not described, no collector reads it: ${unreadable.message}`), [])
+          Effect.as(
+            Console.error(`[collector] ${cell.id} not described, no collector reads it: ${unreadable.message}`),
+            Result.fail({ id: cell.id, lane: cell.lane, why: unreadable.reason })
+          )
         )
       )),
-    (described) => described.flat()
+    (read) => ({
+      cells: read.flatMap((one) => (Result.isSuccess(one) ? [one.success] : [])),
+      unread: read.flatMap((one) => (Result.isFailure(one) ? [one.failure] : []))
+    })
   )
 
 /** What `collected` answered of each of `cells`, where it answered anything, in their order. */

@@ -366,15 +366,30 @@ const describedDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: {
   })) as unknown as typeof runCell
 
 /** The deployment's collectors: on {@link PAUSED}, the batch collector `lab`, whose collect says why it failed on its stderr and exits 3. */
-const failingLab = async (): Promise<{ readonly layer: Layer.Layer<Collectors.Service>; readonly said: string }> => {
+const failingLab = async (): Promise<{ readonly layer: Layer.Layer<Collectors.Service>; readonly said: string }> => ({
+  layer: await labOf({ collect: `#!/bin/sh\necho "the lab is gone" >&2\nexit 3\n` }),
+  said: "collect exited 3: the lab is gone"
+})
+
+/** A collect answering `lab-check` passed for every cell its context names. */
+const PASSING_COLLECT = `#!/usr/bin/env node
+const fs = require("node:fs")
+const context = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
+for (const cell of context.cells) console.log(JSON.stringify({ verification: "lab-check", cell: cell.id, answer: "pass" }))
+`
+
+/** The deployment's collectors: on {@link PAUSED}, the batch collector `lab` running the scripts `steps` gives, answering `lab-check`. */
+const labOf = async (steps: { readonly collect: string; readonly close?: string }): Promise<Layer.Layer<Collectors.Service>> => {
   const root = fs.mkdtempSync(path.join(ROOT, "rig-"))
   const dir = path.join(root, "collectors", "lab")
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
     path.join(dir, "collector.toml"),
-    `schema = "collector.v1"\nname = "lab"\nscope = "batch"\nanswers = ["lab-check"]\n[run]\ncollect = "./collect"\n`
+    `schema = "collector.v1"\nname = "lab"\nscope = "batch"\nanswers = ["lab-check"]\n[run]\ncollect = "./collect"\n` +
+      (steps.close === undefined ? "" : `close = "./close"\n`)
   )
-  fs.writeFileSync(path.join(dir, "collect"), `#!/bin/sh\necho "the lab is gone" >&2\nexit 3\n`, { mode: 0o755 })
+  fs.writeFileSync(path.join(dir, "collect"), steps.collect, { mode: 0o755 })
+  if (steps.close !== undefined) fs.writeFileSync(path.join(dir, "close"), steps.close, { mode: 0o755 })
   const rig = await Effect.runPromise(RigPath.load({ workspace: root }).pipe(Effect.provide(NodeServices.layer)))
   const lane: Lanes.Loaded = {
     id: PAUSED,
@@ -384,8 +399,22 @@ const failingLab = async (): Promise<{ readonly layer: Layer.Layer<Collectors.Se
     operations: new Map(),
     capabilities: new Set()
   }
-  return { layer: Collectors.layerOf(rig, [lane]), said: "collect exited 3: the lab is gone" }
+  return Collectors.layerOf(rig, [lane])
 }
+
+/**
+ * A driver like {@link describedDrive} where the cell `<TWO>-a` states no
+ * window (no description can be read of it) and `<ONE>-b` crashed, its
+ * window stated.
+ */
+const crashingDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
+  Effect.flatMap(describedDrive(cell, context as never), (ran) =>
+    Effect.sync(() => {
+      const id = Campaign.cellCaseId(cell)
+      const dir = path.join(context.runDir, Layout.cellDir(cell))
+      if (id === `${TWO}-a`) fs.rmSync(path.join(dir, "timing.json"))
+      return id === `${ONE}-b` ? { ...ran, summary: { ...ran.summary, passed: false, error: "the interpreter died" } } : ran
+    }))) as unknown as typeof runCell
 
 describe.skipIf(!served)("the replay phase", () => {
   beforeEach(() => {
@@ -516,6 +545,28 @@ describe.skipIf(!served)("the replay phase", () => {
       for (const line of answered) expect(line.message).toContain(lab.said)
       expect(statuses).toEqual(["unverified", "unverified", "unverified"])
     }
+  })
+
+  it("hands the collectors a crashed cell that states its window, and answers not checkable, saying why, on a cell no description is read of", async () => {
+    const layer = await labOf({ collect: PASSING_COLLECT })
+    const { lines } = await replay(PAUSED, { drive: crashingDrive, collectors: layer })
+    const answered = lines.filter((line) => line.name === "lab-check")
+    expect(answered.map((line) => [line.caseId, line.answer])).toEqual([
+      [`${ONE}-a`, "pass"],
+      [`${ONE}-b`, "pass"],
+      [`${TWO}-a`, "not-checkable"]
+    ])
+    expect(answered[2]!.message).toMatch(new RegExp(`^the cell ${TWO}#${TWO}-a@key was not described: `))
+  })
+
+  it("marks the batch's runs dirty and the replay dirty where a collector's close left the lab changed", async () => {
+    const layer = await labOf({ collect: PASSING_COLLECT, close: `#!/bin/sh\necho "the lab would not reset" >&2\nexit 1\n` })
+    const { done, rows } = await replay(PAUSED, { drive: describedDrive, collectors: layer })
+    expect(done.dirty).toEqual(["the collector lab left the lab changed"])
+    expect(rows.map((row) => [row.capture, row.cleanup])).toEqual([
+      [ONE, "the collector lab left the lab changed"],
+      [TWO, "the collector lab left the lab changed"]
+    ])
   })
 
   it("files no row for a batch whose every capture it could not materialise", async () => {

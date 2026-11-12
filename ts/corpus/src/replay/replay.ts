@@ -400,7 +400,7 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
             tally.summaries.push(finished.summary)
             const { cell: _cell, ...ref } = planned
             driven.push(ref)
-            if (finished.summary.skipped === undefined && finished.summary.error === undefined) {
+            if (finished.summary.skipped === undefined) {
               ranCells.push({
                 id: cellName(ref),
                 caseId: finished.summary.cell.case,
@@ -464,7 +464,8 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
   for (const pending of CollectedCells.pendingOf(ended.collected, ranCells)) {
     [...tallies.values()].find((tally) => tally.run.id === pending.runId)!.answered.push(pending)
   }
-  const { deadHost, dirty, contexts, interrupted } = ended
+  const { deadHost, contexts, interrupted } = ended
+  const dirty = [ended.dirty, LaneBatch.leftChangedOf(ended)].filter((said) => said !== undefined).join("; ") || undefined
   if (deadHost !== undefined) yield* Console.error(`[replay] ${deadHost}`)
   if (dirty !== undefined) yield* Console.error(`[replay] ${dirty}`)
   if (ended.hosted) yield* settleLanded(driven.map((ref) => tallyOf(ref.capture)))

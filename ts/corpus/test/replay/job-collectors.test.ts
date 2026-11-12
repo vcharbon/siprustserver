@@ -11,6 +11,7 @@ import { type Lanes, RigPath } from "@sip/rig"
 import { Attachments, CellAnswers, Client, JobEvents, Jobs, Runs, Sessions, Verifications } from "@sip/store"
 import { CURRENT } from "@sip/store/test-identity"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
+import * as Deferred from "effect/Deferred"
 import * as Effect from "effect/Effect"
 import * as Fiber from "effect/Fiber"
 import type * as FileSystem from "effect/FileSystem"
@@ -21,6 +22,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { Collectors, Roots } from "../../src/deployment/index.js"
+import * as CollectorIo from "../../src/replay/collector-io.js"
 import * as JobCollectors from "../../src/replay/job-collectors.js"
 
 const SCRATCH = await scratch("corpus_job_collectors_test")
@@ -40,7 +42,7 @@ afterAll(async () => {
 }, 120_000)
 
 /** The deployment's collectors: the job collector `lab` on {@link LANE}, its steps the scripts given, its trace file. */
-const labOf = async (steps: { readonly collect: string; readonly close: string }) => {
+const labOf = async (steps: { readonly collect: string; readonly close: string; readonly locks?: ReadonlyArray<string> }) => {
   const root = fs.mkdtempSync(path.join(TREE, "rig-"))
   const dir = path.join(root, "collectors", "lab")
   fs.mkdirSync(dir, { recursive: true })
@@ -48,6 +50,7 @@ const labOf = async (steps: { readonly collect: string; readonly close: string }
   fs.writeFileSync(
     path.join(dir, "collector.toml"),
     `schema = "collector.v1"\nname = "lab"\nscope = "job"\nanswers = ["lab-check"]\n` +
+      (steps.locks === undefined ? "" : `locks = ${JSON.stringify(steps.locks)}\n`) +
       `[run]\nopen = "./open"\ncollect = "./collect"\nclose = "./close"\n`
   )
   const script = (name: string, body: string) =>
@@ -64,7 +67,24 @@ const labOf = async (steps: { readonly collect: string; readonly close: string }
     operations: new Map(),
     capabilities: new Set()
   }
-  return { layer: Collectors.layerOf(rig, [lane]), trace: () => fs.readFileSync(trace, "utf8").split("\n").filter((line) => line !== "") }
+  return {
+    layer: Collectors.layerOf(rig, [lane]),
+    trace: () => (fs.existsSync(trace) ? fs.readFileSync(trace, "utf8").split("\n").filter((line) => line !== "") : [])
+  }
+}
+
+/** A lock root of its own, as the deployment's roots state it. */
+const lockRoot = () => {
+  const locks = fs.mkdtempSync(path.join(TREE, "locks-"))
+  return {
+    locks,
+    roots: Roots.layerWith({
+      paths: () => Effect.die("unused"),
+      pcapRoots: Effect.succeed([]),
+      locks: Effect.succeed(locks),
+      bench: Effect.succeed(locks)
+    })
+  }
 }
 
 type Services =
@@ -166,6 +186,58 @@ describe.skipIf(!served)("a job's collectors", () => {
       yield* Fiber.interrupt(fiber)
     }))
     expect(lab.trace()).toEqual(["open", "close"])
+  })
+
+  it("wait for a held lock interruptibly where the caller runs them masked, saying whom they wait for", async () => {
+    const lab = await labOf({ collect: "exit 0", close: "exit 0", locks: ["lab"] })
+    const { locks, roots } = lockRoot()
+    const holder = path.join(locks, `${CollectorIo.LOCK_PREFIX}lab.json`)
+    fs.writeFileSync(holder, `${JSON.stringify({ pid: process.pid, since: new Date().toISOString(), what: "another job's collector" })}\n`)
+    const seen = await withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      const waitingOn = yield* Deferred.make<string>()
+      const watch = (who: string | undefined) => (who === undefined ? Effect.void : Effect.asVoid(Deferred.succeed(waitingOn, who)))
+      const fiber = yield* Effect.forkChild(Effect.uninterruptibleMask((restore) =>
+        JobCollectors.around({ job, dir: path.join(TREE, `job${job}`), lanes: [LANE], cells: () => [], restore, watch }, Effect.void)
+      ))
+      const who = yield* Deferred.await(waitingOn)
+      const interrupted = Date.now()
+      yield* Fiber.interrupt(fiber)
+      return { who, tookMs: Date.now() - interrupted }
+    }).pipe(Effect.provide(roots)))
+    expect(seen.who).toContain("another job's collector")
+    expect(seen.tookMs).toBeLessThan(5000)
+    expect(lab.trace()).toEqual([])
+    expect(fs.readFileSync(holder, "utf8")).toContain("another job's collector")
+  }, 20_000)
+
+  it("hand the caller what they answered of each cell where it lands its cells itself, and tell it who left the lab changed", async () => {
+    const lab = await labOf({
+      collect: `echo '{"verification":"lab-check","cell":"c1","answer":"fail","message":"the lab saw it"}'`,
+      close: "exit 1"
+    })
+    const seen = await withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      const cell = yield* landedCell
+      let answered: Array<[string, unknown]> = []
+      let left: ReadonlyArray<string> = []
+      yield* JobCollectors.around({
+        job,
+        dir: path.join(TREE, `job${job}`),
+        lanes: [LANE],
+        cells: () => [cell],
+        answered: (cells, collected) =>
+          Effect.sync(() => {
+            answered = cells.map((one) => [one.id, collected.map((by) => by.cells.get(one.id)?.verifications)])
+          }),
+        leftChanged: (labels) => Effect.sync(() => void (left = labels))
+      }, Effect.void)
+      const lines = yield* Effect.flatMap(Verifications.Service, (store) => store.of({ scope: "cell", runId: cell.runId, caseId: cell.caseId }))
+      return { answered, left, lines }
+    }))
+    expect(seen.answered).toEqual([["c1", [[{ name: "lab-check", source: "lab", answer: "fail", message: "the lab saw it" }]]]])
+    expect(seen.lines).toEqual([{ name: "call", source: "interpreter", answer: "pass" }])
+    expect(seen.left).toEqual(["lab"])
   })
 
   it("mark the job lab-left-changed where a close fails twice", async () => {

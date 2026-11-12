@@ -210,7 +210,7 @@ const labCollectors = async (failing: boolean): Promise<LaneBatch.Collectors<str
       locker: () => Effect.succeed(Effect.void)
     },
     holder,
-    cells: () => Effect.succeed([cell])
+    cells: () => Effect.succeed({ cells: [cell], unread: [] })
   }
 }
 

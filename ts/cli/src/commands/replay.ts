@@ -315,7 +315,9 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
         job: jobId,
         dir: Job.jobDir(options.paths.sessions, jobId),
         lanes: [options.lane],
-        cells: (done) => done.flatMap((one) => one.ran)
+        cells: (done) => done.flatMap((one) => one.ran),
+        restore,
+        watch
       }, passed)
     })).pipe(Effect.catchTag("Session.Held", (held) => Effect.succeed(held)))
   )
