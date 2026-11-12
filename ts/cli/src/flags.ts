@@ -1,12 +1,15 @@
 /**
  * The FLAG SETS the commands share, as `effect/unstable/cli` definitions: the
- * roots a line may state, the lane, the patience for a held lane, and the
+ * roots a line may state, the lane, the patience for a held lane, a job's
+ * collection level, and the
  * triage words `cut`, `replay` and `evidence` take alike — the same words for
  * the same things, so a two-command session is the one-command session with a
  * cut in front of it.
  */
 import { DEFAULT_CLEANUP } from "@sip/corpus/knobs"
+import * as Collectors from "@sip/corpus/deployment/collectors"
 import * as Locks from "@sip/corpus/locks"
+import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import { Argument, type Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "./facts.js"
@@ -46,6 +49,16 @@ export const waitFlag = Flag.float("wait").pipe(
   Flag.withDescription("Seconds to wait for a held lane or box"),
   Flag.optional
 )
+
+/** The collection level a job takes (ADR-0060 appendix §10); absent, the workspace's default. */
+export const collectionFlag = Flag.string("collection").pipe(
+  Flag.withDescription("The collection level of the workspace file this job takes: which collectors run, always, on failure or on demand"),
+  Flag.optional
+)
+
+/** `effect` with the level `collection` names as the job's (`@sip/corpus` `Collectors.Level`). */
+export const withCollection = <A, E, R>(collection: Option.Option<string>, effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+  Effect.provideService(effect, Collectors.Level, Option.getOrUndefined(collection))
 
 export const patienceOf = (wait: Option.Option<number>): Locks.Patience => ({
   waitMs: Option.match(wait, {

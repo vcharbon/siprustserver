@@ -5,7 +5,7 @@
  *       [--add-only | --add-and-replay]
  *       [--max-span S] [--sample N] [--limit N] [--concurrency N] [--batch N]
  *       [--memory-max SIZE] [--prep N] [--no-cleanup] [--force-recut] [--dry-run]
- *       [--repo DIR] [--wait SECONDS]
+ *       [--repo DIR] [--wait SECONDS] [--collection LEVEL]
  *
  * `--pcaps` names captures one file each; `--set` names the consecutive files
  * of ONE capture (a call may start in one and end in the next), which the
@@ -27,6 +27,7 @@ import { Command } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
 import * as HostEnv from "../host-env.js"
 import * as Refusals from "../refusals.js"
+import { withCollection } from "../flags.js"
 import { exit, operatorCwd } from "../runner.js"
 import { flags, type Input, optionsOf, usage } from "./campaign-args.js"
 
@@ -78,6 +79,6 @@ const main = Effect.fn("Campaign.main")(function*(facts: CliFacts, input: Input)
 })
 
 export const command = (facts: CliFacts) =>
-  Command.make("campaign", flags(facts), (input) => main(facts, input).pipe(Effect.flatMap(exit))).pipe(
+  Command.make("campaign", flags(facts), (input) => withCollection(input.collection, main(facts, input)).pipe(Effect.flatMap(exit))).pipe(
     Command.withDescription("Pcaps to runs: ingest, add to the population, cut, replay")
   )

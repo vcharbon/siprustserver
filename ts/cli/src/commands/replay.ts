@@ -89,7 +89,7 @@ import * as Fiber from "effect/Fiber"
 import * as Option from "effect/Option"
 import { Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
-import { triageFlags } from "../flags.js"
+import { collectionFlag, triageFlags, withCollection } from "../flags.js"
 import * as IdFlags from "../id-flags.js"
 import { replayOptionsOf, requestOptionsOf, USAGE_TAIL } from "../options.js"
 import * as Refusals from "../refusals.js"
@@ -98,7 +98,7 @@ import * as CaseSelection from "./case-selection.js"
 import { createdBy } from "./compare.js"
 
 const usage = (facts: CliFacts): string =>
-  `usage: ${facts.invocation("replay")} --request <id> | --from-census <file> --rule R | ${USAGE_TAIL}`
+  `usage: ${facts.invocation("replay")} --request <id> | --from-census <file> --rule R | ${USAGE_TAIL} [--collection LEVEL]`
 
 export const flags = (facts: CliFacts) => ({
   ...triageFlags(facts),
@@ -133,7 +133,8 @@ export const flags = (facts: CliFacts) => ({
   force: Flag.boolean("force").pipe(
     Flag.withDescription("Drive a lane lacking a capability a capture replay needs; its results are forced ones"),
     Flag.withDefault(false)
-  )
+  ),
+  collection: collectionFlag
 })
 
 type Input = Command.Command.Config.Infer<ReturnType<typeof flags>>
@@ -487,7 +488,7 @@ const main = Effect.fn("Replay.main")(function*(facts: CliFacts, input: Input) {
 })
 
 export const command = (facts: CliFacts) =>
-  Command.make("replay", flags(facts), (input) => main(facts, input).pipe(Effect.flatMap(exit))).pipe(
+  Command.make("replay", flags(facts), (input) => withCollection(input.collection, main(facts, input)).pipe(Effect.flatMap(exit))).pipe(
     Command.withDescription(
       `The replay alone: a standing cut or a request driven against one lane\n\n${facts.frontDoors}`
     )

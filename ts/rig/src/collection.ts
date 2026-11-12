@@ -83,6 +83,28 @@ export const levelsOf = (collection: Collection | undefined): Result.Result<Leve
   return Result.succeed({ default: chosen, levels })
 }
 
+/** What each collector is set to for one job. */
+export type Settings = (collector: Collector.Collector) => Setting
+
+/**
+ * The setting of each collector under the level `level` names of
+ * `collection` (absent, the file's default): a `required` collector
+ * `always`; one the level names, the setting it gives; any other, its
+ * manifest's default, `always` where it states none. A level the file does
+ * not define reads as {@link STANDARD}: the job's wiring check ({@link check})
+ * refused it before the job opened.
+ */
+export const settingsOf = (collection: Collection | undefined, level?: string): Settings => {
+  const levels = levelsOf(collection)
+  const chosen = Result.isSuccess(levels) ? levels.success.levels.get(level ?? levels.success.default) : undefined
+  const named = new Map<string, Setting>()
+  for (const setting of SETTINGS) for (const name of chosen?.[setting] ?? []) named.set(name, setting)
+  return (collector) => (Collector.isRequired(collector) ? "always" : named.get(collector.name) ?? collector.default ?? "always")
+}
+
+/** Each collector's own default: the {@link STANDARD} level of a workspace that defines none. */
+export const STANDARD_SETTINGS: Settings = settingsOf(undefined)
+
 /** The collectors a lane excludes and those whose parameters it overrides, or why its table states neither. */
 export const laneOf = (
   collectors: LaneCollectors | undefined

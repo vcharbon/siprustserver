@@ -5,7 +5,8 @@
  * to the runner. A scope's named box-wide locks, the union of its
  * instances', are taken once before its first `open` and given back after
  * its last `close`; where they are refused, an instance naming one runs none
- * of its steps.
+ * of its steps. An `on-failure` instance opens and closes as any other, and
+ * collects over the scope's failed cells alone, not at all where none failed.
  *
  * A failed or timed-out `open` or `collect` answers `not checkable`, with
  * what failed, for every verification its manifest names
@@ -14,7 +15,7 @@
  * event `lab-left-changed`, the job's mark. The scope's collect, its records
  * joined and judged, is `scope-judging.ts`'s.
  */
-import { Attachment, type Verification } from "@sip/contracts"
+import { Attachment, Verification } from "@sip/contracts"
 import * as Cause from "effect/Cause"
 import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
@@ -92,6 +93,11 @@ export interface Instance {
   readonly judge?: RigPath.Defined<Judge.Judge> | undefined
   /** An `on-demand` collector its scope asked for by name; a pre-check so asked never fails open (`pre-check.ts`). */
   readonly asked?: true
+  /**
+   * Set `on-failure`: its `collect` reads only the cells with a failed line by
+   * then ({@link failedOf}), and does not run where none failed.
+   */
+  readonly onFailure?: boolean
 }
 
 /** What one holder was answered: its verification lines, the last per name, and its attachments, already listed in its directory. */
@@ -446,6 +452,50 @@ const collectGuarded = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<
     return Effect.as(emit(sink, opening.instance, "failed", message), notCheckable(opening.instance, cellsOf(opening.instance, scopeCells), message))
   })
 
+/**
+ * The cells of `cells` with a failed line by then: one of their own
+ * (`cell.v1` `verifications`), or one an earlier instance of the scope
+ * answered of them in `earlier`; an informative or waived failure fails none.
+ */
+export const failedOf = (cells: ReadonlyArray<Cell.Cell>, earlier: ReadonlyArray<Collected>): ReadonlyArray<Cell.Cell> =>
+  cells.filter((cell) =>
+    Verification.failing([...cell.verifications, ...earlier.flatMap((one) => one.cells.get(cell.id)?.verifications ?? [])]).length > 0
+  )
+
+/** What an `on-failure` instance answers where no cell of its scope failed: nothing. */
+const unasked = (instance: Instance): Collected => ({
+  label: instance.label,
+  scope: NO_ANSWERS,
+  cells: new Map(),
+  keyed: [],
+  assigned: [],
+  keys: []
+})
+
+/**
+ * `opening`'s answers over `cells`, after `earlier`, the answers of the
+ * instances collected before it, and the cells it read: an `on-failure` one
+ * collects over the failed cells alone and answers nothing where none failed;
+ * any other collects over every cell of its lanes, each of `unread` answered
+ * `not checkable`.
+ */
+const answersOf = (
+  opening: Opening,
+  sink: Sink,
+  cells: ReadonlyArray<Cell.Cell>,
+  unread: ReadonlyArray<Unread>,
+  earlier: ReadonlyArray<Collected>
+): Effect.Effect<ScopeJudging.Stepped> => {
+  if (opening.instance.onFailure !== true) {
+    return Effect.map(collectGuarded(opening, sink, cells), (one) => ({ collected: withUnread(opening.instance, one, unread) }))
+  }
+  const failed = failedOf(cellsOf(opening.instance, cells), earlier)
+  const read = failed.map((cell) => cell.id)
+  return failed.length === 0
+    ? Effect.succeed({ collected: unasked(opening.instance), read })
+    : Effect.map(collectGuarded(opening, sink, failed), (collected) => ({ collected, read }))
+}
+
 /** One `close` of `instance`; why it failed, or `undefined`. */
 const closeAttempt = (instance: Instance, file: string, sink: Sink) =>
   Effect.gen(function*() {
@@ -549,7 +599,7 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
             return ScopeJudging.collect({
               steps: openings.map((opening) => ({
                 instance: opening.instance,
-                collect: (current) => Effect.map(collectGuarded(opening, options.sink, current), (one) => withUnread(opening.instance, one, unread))
+                collect: (current, earlier) => answersOf(opening, options.sink, current, unread, earlier)
               })),
               cells,
               undescribed: unread,

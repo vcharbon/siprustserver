@@ -4,6 +4,9 @@
  * 1. The keys its exports add are added to its cells.
  * 2. Its collectors collect in order, each over its cells as the earlier ones
  *    left them: the keys a collector adds are its later collectors' to read.
+ *    An `on-failure` one reads the cells failed by then alone: its records
+ *    join, its judge judges and its promise covers those; where every
+ *    instance of its name read none, its name is neither joined nor judged.
  * 3. Once the last instance of a collector's name collected, the records of
  *    that name (those its instances returned, those the scope's exports hold)
  *    are joined on its manifest's `[join] key` in one pass (`join.ts`), each
@@ -73,11 +76,26 @@ export interface ExportJudges {
   readonly lane?: Lanes.Loaded | undefined
 }
 
+/** What one step collected, and the cells it read. */
+export interface Stepped {
+  readonly collected: CollectorRun.Collected
+  /**
+   * The ids of the cells it read where it read only some of its lanes' (an
+   * `on-failure` instance): its records join, its judge judges and its
+   * promise covers those alone. Every cell of its lanes where absent.
+   */
+  readonly read?: ReadonlyArray<string> | undefined
+}
+
 /** One collector of the scope as the scope collects it. */
 export interface Step {
   readonly instance: CollectorRun.Instance
-  /** Its collect over the scope's cells as the earlier steps left them, those of its lanes; it never fails nor dies, its every failure answered `not checkable`. */
-  readonly collect: (cells: ReadonlyArray<Cell.Cell>) => Effect.Effect<CollectorRun.Collected>
+  /**
+   * Its collect over the scope's cells as the earlier steps left them, those
+   * of its lanes, after `earlier`, what the earlier steps collected; it never
+   * fails nor dies, its every failure answered `not checkable`.
+   */
+  readonly collect: (cells: ReadonlyArray<Cell.Cell>, earlier: ReadonlyArray<CollectorRun.Collected>) => Effect.Effect<Stepped>
 }
 
 /** What a scope's collect runs with. */
@@ -93,9 +111,13 @@ export interface Request {
   readonly say: (message: string) => Effect.Effect<void>
 }
 
-/** The cells of `cells` that `instance` collects. */
-const collectedBy = (instance: CollectorRun.Instance, cells: ReadonlyArray<Cell.Cell>): ReadonlyArray<Cell.Cell> =>
-  instance.lanes === undefined ? cells : cells.filter((cell) => instance.lanes!.includes(cell.lane))
+/** The cells of `cells` that `instance` collects, of `read` alone where it states them. */
+const collectedBy = (
+  instance: CollectorRun.Instance,
+  cells: ReadonlyArray<Cell.Cell>,
+  read?: ReadonlyArray<string> | undefined
+): ReadonlyArray<Cell.Cell> =>
+  cells.filter((cell) => (instance.lanes === undefined || instance.lanes.includes(cell.lane)) && (read === undefined || read.includes(cell.id)))
 
 /** The scope's own directory. */
 const holderOf = (request: Request): string | undefined => request.steps[0]?.instance.holder ?? request.exportJudges?.holder
@@ -172,11 +194,11 @@ interface JoinedOf {
   readonly unwritten: string | undefined
 }
 
-/** What `instance` promises: those its manifest names, or its own name where it names a judge; none where it names neither. */
-const promisedBy = (instance: CollectorRun.Instance): ScopeAnswers.Promised => ({
+/** What `instance` promises on the cells of its lanes, of `read` alone where it states them: those its manifest names, or its own name where it names a judge; none where it names neither. */
+const promisedBy = (instance: CollectorRun.Instance, read?: ReadonlyArray<string> | undefined): ScopeAnswers.Promised => ({
   source: instance.collector.name,
   names: instance.judge === undefined ? instance.collector.manifest.answers ?? [] : Collector.answeredBy(instance.collector.manifest),
-  covers: (cell) => instance.lanes === undefined || instance.lanes.includes(cell.lane)
+  covers: (cell) => (instance.lanes === undefined || instance.lanes.includes(cell.lane)) && (read === undefined || read.includes(cell.id))
 })
 
 /** Why the base could not describe `cell`, as its lines say it. */
@@ -253,8 +275,11 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
         const joinedOf: JoinedOf = { attachments: Result.isSuccess(held) ? held.success : [], unwritten: unwritten.length === 0 ? undefined : unwritten.join("; ") }
         return joinedOf
       })
+    const readBy = new Map<Step, ReadonlyArray<string> | undefined>()
     for (const step of request.steps) {
-      const one = yield* step.collect(cells)
+      const stepped = yield* step.collect(cells, [...collected])
+      const one = stepped.collected
+      readBy.set(step, stepped.read)
       const before = cells
       cells = yield* kept(`${one.label}: its keys`, () => CellRecords.withKeys(before, one.keys), before)
       const { instance } = step
@@ -263,13 +288,15 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
       const sameName = [...collected.filter((_, at) => instances[at]?.collector.name === name), one]
       const exports = exported.byName.get(name)
       const hasRecords = exports !== undefined || sameName.some((other) => other.keyed.length + other.assigned.length > 0)
-      if (ofName.at(-1) !== step || !(hasRecords || instance.judge !== undefined)) {
-        entry(one, instance, promisedBy(instance))
+      const promise = promisedBy(instance, stepped.read)
+      const readNone = ofName.every((other) => readBy.get(other)?.length === 0)
+      if (ofName.at(-1) !== step || readNone || !(hasRecords || instance.judge !== undefined)) {
+        entry(one, instance, promise)
         continue
       }
-      const over = ofName.flatMap((other) => collectedBy(other.instance, cells))
+      const over = ofName.flatMap((other) => collectedBy(other.instance, cells, readBy.get(other)))
       const held = yield* joinOf(one.label, name, instance.collector.manifest.join?.key, over, recordsOf(sameName, exports))
-      entry({ ...one, scope: { ...one.scope, attachments: [...one.scope.attachments, ...held.attachments] } }, instance, promisedBy(instance))
+      entry({ ...one, scope: { ...one.scope, attachments: [...one.scope.attachments, ...held.attachments] } }, instance, promise)
       joined.push({
         name,
         cells: over.map((cell) => cell.id),

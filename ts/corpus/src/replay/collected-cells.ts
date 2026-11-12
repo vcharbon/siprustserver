@@ -8,6 +8,7 @@
  * answering it `not checkable`; an answer the store refuses is said, never
  * the run's failure.
  */
+import type { Verification } from "@sip/contracts"
 import { type Cell, CellOfBundle, type CollectorRun } from "@sip/rig"
 import { CellAnswers } from "@sip/store"
 import * as Console from "effect/Console"
@@ -30,6 +31,8 @@ export interface LandedCell {
   readonly dir: string
   readonly runId: number
   readonly attempt?: number
+  /** The lines the cell was answered by then, where the caller holds them; absent, its bundle's `verifications.json`. */
+  readonly verifications?: ReadonlyArray<Verification.Verification>
 }
 
 /** What the collectors answered of one landed cell, merged once its run row closed. */
@@ -53,7 +56,14 @@ export const describe = (
 ): Effect.Effect<CollectorRun.Over, never, FileSystem.FileSystem> =>
   Effect.map(
     Effect.forEach(cells, (cell) =>
-      CellOfBundle.ofBundle(cell.dir, { id: cell.id, case: cell.caseId, lane: cell.lane, batch, attempt: cell.attempt ?? 1 }).pipe(
+      CellOfBundle.ofBundle(cell.dir, {
+        id: cell.id,
+        case: cell.caseId,
+        lane: cell.lane,
+        batch,
+        attempt: cell.attempt ?? 1,
+        ...(cell.verifications === undefined ? {} : { verifications: cell.verifications })
+      }).pipe(
         Effect.map((described): Result.Result<Cell.Cell, CollectorRun.Unread> => Result.succeed(described)),
         Effect.catch((unreadable) =>
           Effect.as(

@@ -11,9 +11,11 @@
  * are read from the cell's directory (`cell-records.ts`), then the
  * placement's. A `keys.json` or a `joined/` present that cannot be read
  * leaves the bundle with no description: the cell is then input a scope was
- * not handed whole.
+ * not handed whole. The lines answered so far are those the base states,
+ * else the lane's own in the bundle's `verifications.json` (none where it
+ * holds no readable list).
  */
-import { Batch, Bundle, Postcondition } from "@sip/contracts"
+import { Batch, Bundle, Postcondition, Verification as Verifications } from "@sip/contracts"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
@@ -45,6 +47,7 @@ export interface Placement {
   /** The keys the case declares and the registration seam or earlier collectors added. */
   readonly keys?: Readonly<Record<string, ReadonlyArray<string>>> | undefined
   readonly records?: Readonly<Record<string, string>> | undefined
+  /** The lines answered so far; absent, the bundle's `verifications.json`. */
   readonly verifications?: ReadonlyArray<Verification> | undefined
   readonly tags?: ReadonlyArray<string> | undefined
   readonly needs?: ReadonlyArray<string> | undefined
@@ -65,6 +68,8 @@ const decodePostconditions = Schema.decodeUnknownOption(Schema.Struct({ postcond
  */
 const statedClaimsOf = (raw: unknown): Option.Option<Readonly<Record<string, unknown>>> =>
   Option.map(decodePostconditions(raw), (document) => Postcondition.statedClaims(document.postconditions))
+
+const decodeLines = Schema.decodeUnknownOption(Schema.Array(Verifications.Verification))
 
 /** One recorded datagram of a leg, its head facts read. */
 interface Recorded {
@@ -188,6 +193,10 @@ export const ofBundle = (dir: string, placement: Placement): Effect.Effect<Cell,
       .filter((file) => file.endsWith(".jsonl"))
       .sort()
       .map((file) => [file.slice(0, -".jsonl".length), CellRecords.joinedFileOf(dir, file.slice(0, -".jsonl".length))] as const)
+    const verifications = placement.verifications ?? (yield* json(Verifications.FILE).pipe(
+      Effect.map((raw) => Option.getOrElse(decodeLines(raw), (): ReadonlyArray<Verification> => [])),
+      Effect.orElseSucceed((): ReadonlyArray<Verification> => [])
+    ))
     const recordingDir = path.join(dir, "recording")
     const legIds = (yield* fs.readDirectory(recordingDir).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])))
       .filter((file) => file.endsWith(".jsonl"))
@@ -237,7 +246,7 @@ export const ofBundle = (dir: string, placement: Placement): Effect.Effect<Cell,
       timeline: { start, end },
       claims: { ...stated, ...placement.claims },
       records: { ...Object.fromEntries(joined), ...placement.records },
-      verifications: [...(placement.verifications ?? [])],
+      verifications: [...verifications],
       dir,
       tags: [...(placement.tags ?? [])],
       needs: [...(placement.needs ?? [])]

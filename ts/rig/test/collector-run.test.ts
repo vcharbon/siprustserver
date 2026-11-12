@@ -6,7 +6,8 @@
  * directory; a failed, timed-out or unreadable `open` or `collect` answering
  * `not checkable` on every cell, as on a cell the base could not describe; a
  * `close` failing twice marking the lab left changed; locks held from `open`
- * to `close`.
+ * to `close`; an `on-failure` collector collecting the failed cells alone;
+ * an on-demand run over the cells named.
  */
 import { Attachment, Verification } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -17,6 +18,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type * as Cell from "../src/cell.js"
+import * as CollectorOnDemand from "../src/collector-on-demand.js"
 import * as CollectorPlan from "../src/collector-plan.js"
 import * as CollectorRun from "../src/collector-run.js"
 import * as RigPath from "../src/rig-path.js"
@@ -175,6 +177,58 @@ describe("a scope's collectors", () => {
       ["count", "not-checkable", "the cell c4 was not described: its bundle is gone"]
     ])
     expect(fs.existsSync(path.join(root, "batch", "collectors", "failing-collect", "out"))).toBe(true)
+  })
+
+  it("collects an on-failure collector over the cells failed by then alone: their own lines, or an earlier collector's", async () => {
+    const { root, rig } = await samples()
+    const [c1, c2, c3] = ["c1", "c2", "c3"].map((id) => cellOf(id, LANE.id, path.join(root, "cells", id)))
+    const failedCall = { name: "call", source: "interpreter", answer: "fail" as const }
+    const cells = [
+      { ...c1!, verifications: [failedCall] },
+      c2!,
+      { ...c3!, verifications: [{ ...failedCall, waived: true }] }
+    ]
+    const onFailure = { ...instanceOf(rig, root, "on-failure"), onFailure: true }
+    const { collected } = await runScope([instanceOf(rig, root, "fails-c2"), onFailure], cells, {
+      sink: () => Effect.void,
+      locker: memoryLocker()
+    })
+    const [, answered] = valueOf(collected)
+    expect(traceOf(root)).toEqual(["open on-failure", "collect on-failure c1,c2", "close on-failure"])
+    expect([...answered!.cells.keys()]).toEqual(["c1", "c2"])
+  })
+
+  it("opens and closes an on-failure collector but never collects it where no cell failed, which answers nothing", async () => {
+    const { root, rig } = await samples()
+    const { sink, phases } = collecting()
+    const onFailure = { ...instanceOf(rig, root, "on-failure"), onFailure: true }
+    const { collected } = await runScope([onFailure], cellsUnder(root), { sink, locker: memoryLocker() })
+    const [answered] = valueOf(collected)
+    expect(traceOf(root)).toEqual(["open on-failure", "close on-failure"])
+    expect(phases()).toEqual(["open on-failure", "opened on-failure", "close on-failure", "closed on-failure"])
+    expect(answered).toEqual({
+      label: "on-failure",
+      scope: { verifications: [], attachments: [] },
+      cells: new Map(),
+      keyed: [],
+      assigned: [],
+      keys: []
+    })
+  })
+
+  it("runs an on-demand collector over the cells named, as a scope of its own, attaching to each cell", async () => {
+    const { root, rig } = await samples()
+    const planned = CollectorPlan.onDemandOf(rig, "on-demand", LANE, path.join(root, "asked", "collectors"), path.join(root, "asked"))
+    if (!Result.isSuccess(planned)) throw new Error(planned.failure)
+    const [c1] = cellsUnder(root)
+    const ran = await Effect.runPromise(
+      CollectorOnDemand.run([planned.success], { cells: [c1!], unread: [] }, { sink: () => Effect.void, locker: memoryLocker() })
+    )
+    expect(traceOf(root)).toEqual(["collect on-demand c1"])
+    expect(ran.leftChanged).toEqual([])
+    const listed = Attachment.parse(fs.readFileSync(path.join(c1!.dir, Attachment.FILE), "utf8"))
+    expect(listed).toEqual([{ name: "on-demand", kind: "log", title: "asked now", file: "collected/on-demand/c1.log", source: "on-demand" }])
+    expect(fs.readFileSync(path.join(c1!.dir, listed[0]!.file), "utf8")).toBe("asked of c1\n")
   })
 
   it("answers not checkable, with what the collector said, for every verification it names on every cell when collect exits non-zero", async () => {

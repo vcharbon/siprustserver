@@ -96,8 +96,6 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...collector("lost-file", { collect: answering(`{"attachment": {"kind": "log", "file": "gone.log"}}`) }),
   ...collector("job-wide", {}, `needs = ["records-store"]`, "job"),
   ...collector("job-plain", {}, "", "job"),
-  ...collector("on-failure", {}, `default = "on-failure"`),
-  ...collector("pre-check", {}, `at = "before"`),
   ...collector("refusing-check", {
     collect: sh(`echo "collect refusing-check" >> ../../trace\necho '{"verification": "target-up", "answer": "fail", "message": "nothing takes SIP on 192.0.2.1:5060: the target is down"}'`),
     close: traced("close refusing-check")
@@ -120,7 +118,28 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...collector("required-check", {}, `at = "before"\nrequired = true\nneeds = ["records-store"]`, "job"),
   ...collector("asked-check", {
     collect: traced("collect asked-check", `echo "the lab cannot be asked" >&2\nexit 3`)
-  }, `at = "before"\ndefault = "on-demand"`, "job")
+  }, `at = "before"\ndefault = "on-demand"`, "job"),
+  ...collector("on-failure", {
+    open: traced("open on-failure"),
+    collect: node(`
+const ctx = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
+fs.appendFileSync("../../trace", "collect on-failure " + ctx.cells.map((cell) => cell.id).join(",") + "\\n")
+for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "on-failure", cell: cell.id, answer: "pass" }))
+`),
+    close: traced("close on-failure")
+  }, `default = "on-failure"`),
+  ...collector("fails-c2", { collect: answering(`{"verification": "fails-c2", "cell": "c2", "answer": "fail"}`) }),
+  ...collector("on-demand", {
+    collect: node(`
+const ctx = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
+fs.appendFileSync("../../trace", "collect on-demand " + ctx.cells.map((cell) => cell.id).join(",") + "\\n")
+for (const cell of ctx.cells) {
+  fs.writeFileSync(process.env.SIPRIG_OUT + "/" + cell.id + ".log", "asked of " + cell.id + "\\n")
+  console.log(JSON.stringify({ attachment: { kind: "log", title: "asked now", file: cell.id + ".log" }, cell: cell.id }))
+}
+`)
+  }, `default = "on-demand"\nneeds = ["records-store"]`),
+  ...collector("pre-check", {}, `at = "before"`)
 }
 
 /** The trace lines under the rig path `root`, in the order they were written. */

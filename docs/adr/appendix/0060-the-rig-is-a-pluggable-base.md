@@ -135,11 +135,17 @@ close   = "./close"            # optional
 
 Rules:
 
-- `open` runs whenever the collector is wired, whatever its default.
+- In a job, `open` and `close` run whenever the collector is wired and set `always` or
+  `on-failure`.
 - `on-failure` is read when `collect` would run: the collector runs if a cell of its scope has
-  a failed verification by then, and receives only those cells. A source that keeps no history
-  is collected `always` and cut per cell.
-- An `on-demand` collector runs when the site or the CLI asks for it, on the cells named.
+  a failed verification by then (its own lines, or one an earlier collector of the scope
+  answered), and receives only those cells; where none failed its `collect` does not run. A
+  source that keeps no history is collected `always` and cut per cell.
+- An `on-demand` collector runs when the site or the CLI asks for it, on the cells named, after
+  their job ended: `open`, `collect` and `close` as a scope of its own, one per lane. What it
+  attaches lands on the cell, replacing an attachment of its name. Its lines are said to the
+  asker and never merged into the cell: a question asked later does not change a verdict. A
+  pre-check, a cell-scope collector, and one the level does not set `on-demand` are refused.
 - A failed or timed-out `open` or `collect` answers `not checkable` for every verification the
   manifest names, or for one named after the collector where it names none, on every cell of
   the scope and on the scope, quoting what failed. So does a line of `collect` that is none of
@@ -364,9 +370,11 @@ delay_s = 40
 poll_s = 2
 ```
 
-A level sets a collector to `always`, `on-failure`, `on-demand` or `never`. A level or a lane
-that names a `required` collector, or a name the path does not define, refuses the job before
-it opens.
+A level sets a collector to `always`, `on-failure`, `on-demand` or `never`; one it does not
+name keeps its manifest's `default`. A job takes the level its `--collection` names, else the
+file's `default`, else `standard` (every collector's own default). A level or a lane that names
+a `required` collector, or a name the path does not define, and a `--collection` naming no
+level of the file, refuse the job before it opens.
 
 ## 11. The lane file
 

@@ -154,6 +154,16 @@ describe("cell.v1 of a bundle", () => {
     expect(Result.isFailure(result) && result.failure.reason).toMatch(why)
   })
 
+  it("states the lines its lane answered (verifications.json) where the base places none, the base's where it does", async () => {
+    const dir = variant(() => {})
+    const lane = [{ name: "call", source: "interpreter", answer: "fail", message: "no 200 to the INVITE" }]
+    fs.writeFileSync(path.join(dir, "verifications.json"), JSON.stringify(lane))
+    expect((await describeDir(SIMULATED)).verifications).toEqual([])
+    expect((await describeDir(dir)).verifications).toEqual(lane)
+    const placed = [{ name: "call", source: "interpreter", answer: "pass" as const }]
+    expect((await describeDir(dir, { ...PLACEMENT, verifications: placed })).verifications).toEqual(placed)
+  })
+
   it("reads a real-clock cell's wall clock from its sut-join.json where timing.json states none", async () => {
     const dir = variant((files) => {
       files["run-config.json"] = files["run-config.json"]!.replace(`"clock": "virtual"`, `"clock": "real"`)

@@ -5,7 +5,8 @@
  * collection levels and lane wiring checked before a job opens, the context an
  * executable reads and how one runs, an operation's run and a job's setup, a
  * scope's collectors (which run and in what order, their run, the lines they
- * answer), its pre-checks, its exports, the join of its records and its
+ * answer, an on-demand run), its pre-checks, its exports, the join of its
+ * records and its
  * judges, the main
  * of a process that runs them, the cell description, and the compiled cells a
  * case source yields. `defineCollector`, which a collector module runs as its
@@ -20,6 +21,7 @@ export * as CellRecords from "./cell-records.js"
 export * as Collection from "./collection.js"
 export * as Collector from "./collector.js"
 export * as CollectorLines from "./collector-lines.js"
+export * as CollectorOnDemand from "./collector-on-demand.js"
 export * as CollectorOrder from "./collector-order.js"
 export * as CollectorPlan from "./collector-plan.js"
 export * as CollectorRun from "./collector-run.js"
