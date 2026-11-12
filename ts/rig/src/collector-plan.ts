@@ -2,13 +2,13 @@
  * Which collectors run for a job and for a batch (ADR-0060 appendix §5, §10),
  * and as which instances. A collector is wired on a lane that has every part
  * it needs and does not exclude it (`[collectors]`); the job's collection
- * level (`Collection.Settings`) sets each one, a required one `always`. Those
- * planned here are set `always`: the ones `at = "after"` run over their
- * scope's cells, the pre-checks (`at = "before"`, `pre-check.ts`) before any
- * call of it; the ones set `on-failure` and `at = "after"`, over the failed
- * cells alone. A job also runs each job-scope collector set `on-demand` that
- * it asks for by name, marked asked. Their parameters are the manifest's after
- * the lane's overrides.
+ * level (`Collection.Settings`) sets each one, a required one `always`. The
+ * ones planned here are those set `always`, run over their scope's cells
+ * where `at = "after"` and before any call of it where a pre-check
+ * (`at = "before"`, `pre-check.ts`); and those set `on-failure` and
+ * `at = "after"`, run over the failed cells alone. A job also runs each
+ * job-scope collector set `on-demand` that it asks for by name, marked asked.
+ * Their parameters are the manifest's after the lane's overrides.
  *
  * A batch runs one instance of each collector wired on its lane. A job runs
  * one instance of a job-scope collector that needs no part, over the cells of
