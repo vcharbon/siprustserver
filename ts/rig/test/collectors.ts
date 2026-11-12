@@ -128,6 +128,8 @@ for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "on-fai
 `),
     close: traced("close on-failure")
   }, `default = "on-failure"`),
+  ...collector("after-on-failure", {}, `after = ["on-failure"]`),
+  ...collector("on-failure-promising", {}, `default = "on-failure"\nanswers = ["kept-trace"]`),
   ...collector("fails-c2", { collect: answering(`{"verification": "fails-c2", "cell": "c2", "answer": "fail"}`) }),
   ...collector("on-demand", {
     collect: node(`

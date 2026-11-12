@@ -223,6 +223,33 @@ describe("a scope's collectors", () => {
     expect([...collected[0]!.cells.keys()]).toEqual(["c2"])
   })
 
+  it("collects an on-failure collector before one whose after names it, after every other", async () => {
+    const { root, rig } = await samples()
+    const onFailure = { ...instanceOf(rig, root, "on-failure"), onFailure: true }
+    const { collected } = await runScope(
+      [instanceOf(rig, root, "after-on-failure"), onFailure, instanceOf(rig, root, "fails-c2")],
+      cellsUnder(root),
+      { sink: () => Effect.void, locker: memoryLocker() }
+    )
+    expect(traceOf(root)).toEqual(["open on-failure", "collect on-failure c2", "collect after-on-failure", "close on-failure"])
+    expect(valueOf(collected).map((one) => one.label)).toEqual(["fails-c2", "on-failure", "after-on-failure"])
+  })
+
+  it("fills what an on-failure collector promises on the failed cells it read alone, on none where none failed", async () => {
+    const { root, rig } = await samples()
+    const promising = { ...instanceOf(rig, root, "on-failure-promising"), onFailure: true }
+    const unfilled = (failed: ReadonlyArray<string>) =>
+      Effect.runPromise(Effect.scoped(Effect.flatMap(
+        CollectorRun.opened([{ ...promising, dir: path.join(root, `failed-${failed.join("")}`, "collectors", "on-failure-promising") }], {
+          sink: () => Effect.void,
+          locker: memoryLocker()
+        }),
+        (opened) => opened.collect({ cells: cellsUnder(root), unread: [], failed })
+      ))).then((collected) => [...collected[0]!.cells].map(([id, held]) => `${id} ${held.verifications.map((line) => `${line.name} ${line.answer}`).join(",")}`))
+    expect(await unfilled([])).toEqual([])
+    expect(await unfilled(["c2"])).toEqual(["c2 kept-trace not-checkable"])
+  })
+
   it("opens and closes an on-failure collector but never collects it where no cell failed, which answers nothing", async () => {
     const { root, rig } = await samples()
     const { sink, phases } = collecting()
