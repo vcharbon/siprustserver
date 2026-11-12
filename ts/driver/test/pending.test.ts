@@ -27,12 +27,13 @@ const landed: E2e.CellSummary = {
 /** `summary` settled over a cell directory holding `lines`, or no lines file where `lines` is undefined. */
 const settle = async (
   lines: ReadonlyArray<Verification.Verification> | undefined,
-  summary: E2e.CellSummary = landed
+  summary: E2e.CellSummary = landed,
+  answered: ReadonlyArray<Verification.Verification> = []
 ): Promise<E2e.CellSummary> => {
   const dir = runDir("pending")
   dirs.push(dir)
   if (lines !== undefined) fs.writeFileSync(path.join(dir, "verifications.json"), JSON.stringify(lines))
-  return Effect.runPromise(settled(summary, dir).pipe(Effect.provide(NodeServices.layer)))
+  return Effect.runPromise(settled(summary, dir, answered).pipe(Effect.provide(NodeServices.layer)))
 }
 
 const call: Verification.Verification = { name: "call", source: "interpreter", answer: "pass" }
@@ -69,6 +70,13 @@ describe("a cell settled after its batch's end", () => {
   it("reads only the lines it waited on: a failure the reclassifier restated stays its own", async () => {
     const failedCall: Verification.Verification = { ...call, answer: "fail" }
     expect((await settle([failedCall, cdr("pass")], { ...landed, restated: "rule r1" })).passed).toBe(true)
+  })
+
+  it("reads a line its batch's judge answered in place of its own pending one of that name and source", async () => {
+    expect((await settle([call, cdr("pending")], landed, [cdr("pass")])).passed).toBe(true)
+    expect(await settle([call, cdr("pending")], landed, [cdr("fail")])).toMatchObject({ passed: false })
+    const elsewhere = { ...cdr("pass"), source: "another judge" }
+    expect(await settle([call, cdr("pending")], landed, [elsewhere])).toMatchObject({ passed: false, pending: ["cdr"] })
   })
 
   it("leaves a cell that waited on nothing as it landed", async () => {

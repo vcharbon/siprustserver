@@ -398,18 +398,19 @@ for (const cell of context.cells) console.log(JSON.stringify({ verification: "la
 
 /**
  * The deployment's collectors: on {@link PAUSED}, the batch collector `lab`
- * running the scripts `steps` gives, answering `lab-check`, set `always` or
+ * running the scripts `steps` gives, answering `answers`, set `always` or
  * as `steps.setting` says.
  */
 const labOf = async (
-  steps: { readonly collect: string; readonly close?: string; readonly setting?: string }
+  steps: { readonly collect: string; readonly close?: string; readonly setting?: string },
+  answers = "lab-check"
 ): Promise<Layer.Layer<Collectors.Service>> => {
   const root = fs.mkdtempSync(path.join(ROOT, "rig-"))
   const dir = path.join(root, "collectors", "lab")
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
     path.join(dir, "collector.toml"),
-    `schema = "collector.v1"\nname = "lab"\nscope = "batch"\nanswers = ["lab-check"]\n` +
+    `schema = "collector.v1"\nname = "lab"\nscope = "batch"\nanswers = ["${answers}"]\n` +
       (steps.setting === undefined ? "" : `default = "${steps.setting}"\n`) +
       `[run]\ncollect = "./collect"\n` +
       (steps.close === undefined ? "" : `close = "./close"\n`)
@@ -427,6 +428,28 @@ const labOf = async (
   }
   return Collectors.layerOf(rig, [lane])
 }
+
+/**
+ * A driver like {@link describedDrive} whose every cell lands waiting on its
+ * `cdr` line, which the collector `lab` answers.
+ */
+const describedLabPendingDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
+  Effect.flatMap(describedDrive(cell, context as never), (ran) =>
+    Effect.sync(() => {
+      const dir = path.join(context.runDir, Layout.cellDir(cell))
+      fs.writeFileSync(
+        path.join(dir, "verifications.json"),
+        JSON.stringify([{ name: "call", source: "interpreter", answer: "pass" }, { name: "cdr", source: "lab", answer: "pending" }])
+      )
+      return { summary: { ...ran.summary, passed: false, pending: ["cdr"] }, detail: "still verifying: cdr pending" }
+    }))) as unknown as typeof runCell
+
+/** A collect answering `cdr` `answer` for every cell its context names. */
+const cdrCollect = (answer: string) => `#!/usr/bin/env node
+const fs = require("node:fs")
+const context = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
+for (const cell of context.cells) console.log(JSON.stringify({ verification: "cdr", cell: cell.id, answer: "${answer}" }))
+`
 
 /**
  * A driver like {@link describedDrive} where the cell `<TWO>-a` states no
@@ -606,6 +629,19 @@ describe.skipIf(!served)("the replay phase", () => {
       ])
       for (const line of answered) expect(line.message).toContain(lab.said)
       expect(statuses).toEqual(["unverified", "unverified", "unverified"])
+    }
+  })
+
+  it("closes a row whose cells landed pending once its batch's collector answered them, the index reading its answers", async () => {
+    for (const [answer, passed] of [["pass", true], ["fail", false]] as const) {
+      const layer = await labOf({ collect: cdrCollect(answer) }, "cdr")
+      const { done, lines } = await replay(PAUSED, { drive: describedLabPendingDrive, collectors: layer })
+      const index = JSON.parse(fs.readFileSync(path.join(done.bundles[0]!, "campaign.json"), "utf8"))
+      expect(index.cells.map((cell: { passed: boolean; pending?: unknown }) => [cell.passed, cell.pending])).toEqual([
+        [passed, undefined],
+        [passed, undefined]
+      ])
+      expect(new Set(lines.map((line) => `${line.name} ${line.answer}`))).toEqual(new Set(["call pass", `cdr ${answer}`]))
     }
   })
 
