@@ -13,6 +13,7 @@ packages:
   - "workspace"
   - "lab-host"
   - "campaign-runner"
+  - "site"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false
