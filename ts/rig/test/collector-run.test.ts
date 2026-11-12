@@ -18,6 +18,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type * as Cell from "../src/cell.js"
+import * as Collector from "../src/collector.js"
 import * as CollectorOnDemand from "../src/collector-on-demand.js"
 import * as CollectorPlan from "../src/collector-plan.js"
 import * as CollectorRun from "../src/collector-run.js"
@@ -124,6 +125,18 @@ describe("a scope's collectors", () => {
     expect(collected.window.start).toEqual(opened.window.start)
     expect(collected.window.end.wall_ms).toBeGreaterThanOrEqual(opened.window.start.wall_ms)
     expect(opened.planned).toBeUndefined()
+  })
+
+  it("states in the collect context the wall-clock instant its collect_s ends, and none in the open context", async () => {
+    const { root, rig } = await samples()
+    const before = Date.now()
+    await runScope([instanceOf(rig, root, "tidy")], cellsUnder(root), { sink: () => Effect.void, locker: memoryLocker() })
+    const after = Date.now()
+    const opened = JSON.parse(fs.readFileSync(path.join(root, "open-context.json"), "utf8"))
+    const collected = JSON.parse(fs.readFileSync(path.join(root, "collect-context.json"), "utf8"))
+    expect(opened.deadline).toBeUndefined()
+    expect(collected.deadline.wall_ms).toBeGreaterThanOrEqual(before + Collector.DEFAULT_BOUNDS.collect_s * 1000)
+    expect(collected.deadline.wall_ms).toBeLessThanOrEqual(after + Collector.DEFAULT_BOUNDS.collect_s * 1000)
   })
 
   it("states the cells its runner plans, with their claims, in the open and the collect context alike", async () => {
