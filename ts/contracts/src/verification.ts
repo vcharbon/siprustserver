@@ -40,11 +40,11 @@ export const Verification = Schema.Struct({
 export interface Verification extends Schema.Schema.Type<typeof Verification> {}
 
 /**
- * The sources the base answers its own lines as. No collector is named like
- * one (`@sip/rig` refuses it at load), so a collector's answer never stands
- * for the base's.
+ * The sources the base answers its own lines as; `rig`, the runner of a
+ * scope's collectors and judges. No collector is named like one (`@sip/rig`
+ * refuses it at load), so a collector's answer never stands for the base's.
  */
-export const BASE_SOURCES = { interpreter: "interpreter", rfcAudit: "rfc audit", driver: "driver" } as const
+export const BASE_SOURCES = { interpreter: "interpreter", rfcAudit: "rfc audit", driver: "driver", rig: "rig" } as const
 
 /** Every source of {@link BASE_SOURCES}. */
 export const baseSources: ReadonlyArray<string> = Object.values(BASE_SOURCES)

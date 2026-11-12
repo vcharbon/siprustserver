@@ -3,10 +3,16 @@
  * (ADR-0060 appendix §6, `scope-judging.ts`): never a `pass` over input the
  * base did not hand whole, never a promised verification with no line.
  */
-import type { Verification } from "@sip/contracts"
+import { Verification } from "@sip/contracts"
 import type * as Cell from "./cell.js"
 import type * as CollectorRun from "./collector-run.js"
 import type * as Exports from "./exports.js"
+
+/** The verification the base answers `not checkable` on each holder whose input it did not hand whole. */
+export const INPUT = "input"
+
+/** The label of the base's own answers among a scope's collected entries. */
+export const BASE_LABEL = Verification.BASE_SOURCES.rig
 
 /** What an entry of a scope's collect promises: the verifications it answers `not checkable` on the cells it covers where nobody answered them. */
 export interface Promised {
@@ -105,20 +111,42 @@ const edited = (
   }
 }
 
+/** The base's own {@link INPUT} line, `not checkable` saying `message`. */
+const inputLine = (message: string): Verification.Verification => ({
+  name: INPUT,
+  source: Verification.BASE_SOURCES.rig,
+  answer: "not-checkable",
+  message
+})
+
 /**
  * `collected` with, on each holder whose input was not handed whole
- * (`notHanded`: a cell's concerns that cell, the scope's every cell; the scope
- * holds every one), each `pass` answered `not checkable`, saying why, and a
- * `not checkable` added beside each other answer of a name the holder holds
- * no `not checkable` of: a `fail` is never hidden.
+ * (`notHanded`: a cell's concerns that cell, the scope's every one of `cells`;
+ * the scope holds every one), each `pass` answered `not checkable`, saying
+ * why, and a `not checkable` added beside each other answer of a name the
+ * holder holds no `not checkable` of: a `fail` is never hidden. The base's own
+ * entry ({@link BASE_LABEL}) follows, its {@link INPUT} line on each such
+ * holder whether or not an entry answered there: the holder never passes,
+ * whatever a wider scope answers of it.
  */
 export const notHandedMarked = (
   collected: ReadonlyArray<CollectorRun.Collected>,
-  notHanded: ReadonlyArray<Exports.Unread>
+  notHanded: ReadonlyArray<Exports.Unread>,
+  cells: ReadonlyArray<string>
 ): ReadonlyArray<CollectorRun.Collected> => {
   if (notHanded.length === 0) return collected
   const whys = whysOf(notHanded)
   const messageOf = (holder: Holder) => `its input was not read whole: ${whys(holder).join("; ")}`
+  const base: CollectorRun.Collected = {
+    label: BASE_LABEL,
+    scope: { verifications: [inputLine(messageOf(undefined))], attachments: [] },
+    cells: new Map(
+      cells.filter((id) => whys(id).length > 0).map((id) => [id, { verifications: [inputLine(messageOf(id))], attachments: [] }])
+    ),
+    keyed: [],
+    assigned: [],
+    keys: []
+  }
   const passesMarked = collected.map((one) =>
     edited(one, whys, (holder, answers) => ({
       ...answers,
@@ -135,16 +163,19 @@ export const notHandedMarked = (
       for (const line of answers.verifications) if (line.answer === "not-checkable") names.add(line.name)
     }
   }
-  return passesMarked.map((one) =>
-    edited(one, whys, (holder, answers) => {
-      const names = marked.get(holder)!
-      const beside: Array<Verification.Verification> = []
-      for (const line of answers.verifications) {
-        if (names.has(line.name)) continue
-        names.add(line.name)
-        beside.push({ name: line.name, source: line.source, answer: "not-checkable", message: messageOf(holder) })
-      }
-      return beside.length === 0 ? answers : { ...answers, verifications: [...answers.verifications, ...beside] }
-    })
-  )
+  return [
+    ...passesMarked.map((one) =>
+      edited(one, whys, (holder, answers) => {
+        const names = marked.get(holder)!
+        const beside: Array<Verification.Verification> = []
+        for (const line of answers.verifications) {
+          if (names.has(line.name)) continue
+          names.add(line.name)
+          beside.push({ name: line.name, source: line.source, answer: "not-checkable", message: messageOf(holder) })
+        }
+        return beside.length === 0 ? answers : { ...answers, verifications: [...answers.verifications, ...beside] }
+      })
+    ),
+    base
+  ]
 }

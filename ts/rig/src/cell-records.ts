@@ -6,6 +6,7 @@
  * {@link KEYS_FILE}, every added key's values, and `joined/<name>.jsonl`, one
  * record per line, the file `cell.v1`'s `records` names.
  */
+import * as Result from "effect/Result"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import type * as Cell from "./cell.js"
@@ -26,26 +27,34 @@ const mergedValues = (into: ReadonlyArray<string> | undefined, values: ReadonlyA
   ...new Set([...(into ?? []), ...values])
 ]
 
-/** The keys a {@link KEYS_FILE}'s `text` holds; none where it is absent or no object of string lists, each entry that is none skipped. */
-export const addedKeysOf = (text: string | undefined): Record<string, Array<string>> => {
-  if (text === undefined) return {}
+/**
+ * The keys a {@link KEYS_FILE}'s `text` holds, none where it is absent; or why
+ * it holds none readable: it is no JSON object whose every entry is a list of
+ * strings, as the base writes it.
+ */
+export const addedKeysOf = (text: string | undefined): Result.Result<Record<string, Array<string>>, string> => {
+  if (text === undefined) return Result.succeed({})
+  let raw: unknown
   try {
-    const raw: unknown = JSON.parse(text)
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {}
-    return Object.fromEntries(
-      Object.entries(raw).flatMap(([name, values]) =>
-        Array.isArray(values) && values.every((value) => typeof value === "string") ? [[name, values as Array<string>]] : []
-      )
-    )
+    raw = JSON.parse(text)
   } catch {
-    return {}
+    return Result.fail("not JSON")
   }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return Result.fail("no object")
+  const keys: Record<string, Array<string>> = {}
+  for (const [name, values] of Object.entries(raw)) {
+    if (!Array.isArray(values) || !values.every((value) => typeof value === "string")) return Result.fail(`${name}: no list of strings`)
+    keys[name] = values
+  }
+  return Result.succeed(keys)
 }
 
-/** `lines` added to the keys of `cell`, kept in its {@link KEYS_FILE} beside those added before. */
+/** `lines` added to the keys of `cell`, kept in its {@link KEYS_FILE} beside those added before; throws, the file untouched, where it holds none readable. */
 const keyed = (cell: Cell.Cell, lines: ReadonlyArray<Lines.KeyLine>): Cell.Cell => {
   const file = path.join(cell.dir, KEYS_FILE)
-  const kept = addedKeysOf(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : undefined)
+  const read = addedKeysOf(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : undefined)
+  if (Result.isFailure(read)) throw new Error(`${file}: ${read.failure}`)
+  const kept = read.success
   const keys: Record<string, Array<string>> = { ...cell.keys } as Record<string, Array<string>>
   for (const line of lines) {
     kept[line.key] = mergedValues(kept[line.key], line.values)

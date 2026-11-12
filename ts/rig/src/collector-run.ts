@@ -437,6 +437,13 @@ const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell
     return done.success
   })
 
+/** {@link collectOne}, a defect of the base's own reading (a file going between its check and its read) answered `not checkable` saying it died. */
+const collectGuarded = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell.Cell>) =>
+  Effect.catchDefect(collectOne(opening, sink, scopeCells), (defect) => {
+    const message = `collect died: ${errorText(defect)}`
+    return Effect.as(emit(sink, opening.instance, "failed", message), notCheckable(opening.instance, cellsOf(opening.instance, scopeCells), message))
+  })
+
 /** One `close` of `instance`; why it failed, or `undefined`. */
 const closeAttempt = (instance: Instance, file: string, sink: Sink) =>
   Effect.gen(function*() {
@@ -540,7 +547,7 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
             return ScopeJudging.collect({
               steps: openings.map((opening) => ({
                 instance: opening.instance,
-                collect: (current) => Effect.map(collectOne(opening, options.sink, current), (one) => withUnread(opening.instance, one, unread))
+                collect: (current) => Effect.map(collectGuarded(opening, options.sink, current), (one) => withUnread(opening.instance, one, unread))
               })),
               cells,
               undescribed: unread,

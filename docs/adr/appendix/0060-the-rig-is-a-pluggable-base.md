@@ -143,7 +143,7 @@ Rules:
   it. Where they are refused, each collector naming one runs none of its steps and answers
   `not checkable`. A lock named by collectors of two scopes is refused at load: the outer
   scope's would hold it while the inner one's waits.
-- A collector named like a source the base (`interpreter`, `rfc audit`, `driver`) answers lines
+- A collector named like a source the base (`interpreter`, `rfc audit`, `driver`, `rig`) answers lines
   as is refused at load. A collector's line merged into a landed cell replaces only a `pending`
   line of its name and source, never an answered one.
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
@@ -188,7 +188,8 @@ collected, so a later collector reads them.
   id its scope reads the cell by (a retry's, a repeat's). The base reads the name as the scope's
   cell whose directory bears it, in a cell's own export that cell alone.
 - The keys exports and collectors add are kept in the cell's `keys.json`. A wider scope
-  describes the cell anew off its directory and reads them, and its joined records, there.
+  describes the cell anew off its directory and reads them, and its joined records, there; a
+  `keys.json` or `joined/` there that cannot be read leaves the cell undescribed.
 - A cell with no record reaches the judge with an empty list.
 - A verification nobody answered for a cell, the cell's own lines counted, is `not checkable`
   where it is promised: those a manifest's `answers` names, a collector's own name where it
@@ -196,10 +197,14 @@ collected, so a later collector reads them.
   not describe too. A collector naming neither may answer its own name and promises none.
 - An export line that is none, a key naming no one cell, a line other than a record or a key, an
   export file or directory that cannot be read: each is skipped and said, the rest read.
-- Where the scope's input was not handed whole (an export skipped in part, keys or records the
-  base could not write), every `pass` its collectors and judges answered is `not checkable` on
-  the cell it concerns (every cell where it is the scope's) and on the scope; a `fail` or other
-  answer is kept, a `not checkable` beside it.
+- Where the scope's input was not handed whole (an export skipped in part, a cell the base could
+  not describe, keys or records the base could not write), every `pass` its collectors and
+  judges answered is `not checkable` on the cell it concerns (every cell where it is the
+  scope's) and on the scope; a `fail` or other answer is kept, a `not checkable` beside it. The
+  base answers its own line `input` (source `rig`) `not checkable` on each of them, whether or
+  not an entry answered there: the cell never passes, whatever a wider scope answers of it.
+- A collect or a judge's run that dies in the base's own reading answers `not checkable` on
+  every cell and the scope, saying it died; the scope's other answers stand.
 - Exports judged with no collector of their name (item 4) are a batch's. They join on the
   `[join] key` of the path's collector of that name, wired or not, else on `call_id`.
 

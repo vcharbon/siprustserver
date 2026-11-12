@@ -12,15 +12,18 @@
  * 4. Each judge runs once over every cell the name's instances collect: the
  *    judge its collector names, and, over its exports alone, a judge of an
  *    export's name no collector of the scope collects (`ExportJudges`), its
- *    name `not checkable` on each cell of its lane the base could not describe.
- *    A judge whose records the base could not all write does not run: its
- *    verifications are `not checkable` on every cell and the scope.
+ *    name `not checkable` on each cell of its lane the base could not
+ *    describe, whether or not an export of its name was read. A judge whose
+ *    records the base could not all write does not run: its verifications are
+ *    `not checkable` on every cell and the scope.
  * 5. Where the scope's input was not handed whole (an export line, file or
- *    directory skipped, `Exports.Unread`; keys or records the base could not
- *    write), every `pass` the scope's collectors and judges answered on the
- *    cell it concerns is `not checkable`, on every cell where it is the
- *    scope's, and on the scope; any other answer is kept, a `not checkable`
- *    beside it.
+ *    directory skipped, `Exports.Unread`; a cell the base could not describe;
+ *    keys or records the base could not write), every `pass` the scope's
+ *    collectors and judges answered on the cell it concerns is `not
+ *    checkable`, on every cell where it is the scope's, and on the scope; any
+ *    other answer is kept, a `not checkable` beside it; and the base answers
+ *    its own `input` line `not checkable` on each of them
+ *    (`ScopeAnswers.notHandedMarked`).
  * 6. A verification the scope's entries promise that nobody answered for a
  *    cell, the cell's own lines included, is `not checkable`: a collector
  *    promises those its manifest names (`answers`), or its own name where it
@@ -73,7 +76,7 @@ export interface ExportJudges {
 /** One collector of the scope as the scope collects it. */
 export interface Step {
   readonly instance: CollectorRun.Instance
-  /** Its collect over the scope's cells as the earlier steps left them, those of its lanes. */
+  /** Its collect over the scope's cells as the earlier steps left them, those of its lanes; it never fails nor dies, its every failure answered `not checkable`. */
   readonly collect: (cells: ReadonlyArray<Cell.Cell>) => Effect.Effect<CollectorRun.Collected>
 }
 
@@ -176,6 +179,9 @@ const promisedBy = (instance: CollectorRun.Instance): ScopeAnswers.Promised => (
   covers: (cell) => instance.lanes === undefined || instance.lanes.includes(cell.lane)
 })
 
+/** Why the base could not describe `cell`, as its lines say it. */
+const undescribedWhy = (cell: CollectorRun.Unread): string => `the cell ${cell.id} was not described: ${cell.why}`
+
 /** `not checkable` for `name` from `name`, on each of `undescribed` on `lane` (every one where it is none), saying why it was not described. */
 const undescribedAnswered = (
   name: string,
@@ -186,10 +192,24 @@ const undescribedAnswered = (
     undescribed
       .filter((cell) => lane === undefined || cell.lane === lane.id)
       .map((cell) => [cell.id, {
-        verifications: [{ name, source: name, answer: "not-checkable" as const, message: `the cell ${cell.id} was not described: ${cell.why}` }],
+        verifications: [{ name, source: name, answer: "not-checkable" as const, message: undescribedWhy(cell) }],
         attachments: []
       }])
   )
+
+/** The entry of `name`'s exports judged alone: the scope's `attachments`, and what it answered of the cells the base could not describe. */
+const exportsEntry = (
+  name: string,
+  attachments: ReadonlyArray<Attachment.Attachment>,
+  undescribed: ReadonlyMap<string, CollectorRun.Answers>
+): CollectorRun.Collected => ({
+  label: `exports ${name}`,
+  scope: { verifications: [], attachments },
+  cells: undescribed,
+  keyed: [],
+  assigned: [],
+  keys: []
+})
 
 /** The scope's collect: its collectors in order, their records joined, its judges run, its unanswered verifications filled. */
 export const collect = (request: Request): Effect.Effect<ReadonlyArray<CollectorRun.Collected>> =>
@@ -197,7 +217,10 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
     const holder = holderOf(request)
     if (holder === undefined) return []
     const exported = yield* Effect.sync(() => Exports.read(request.cells, holder))
-    const notHanded: Array<Exports.Unread> = [...exported.unread]
+    const notHanded: Array<Exports.Unread> = [
+      ...exported.unread,
+      ...request.undescribed.map((cell) => ({ cell: cell.id, why: undescribedWhy(cell) }))
+    ]
     yield* Effect.forEach(exported.unread, (one) => request.say(`exports: ${one.why}`), { discard: true })
     const failed = (why: string) => {
       notHanded.push({ cell: undefined, why })
@@ -260,21 +283,15 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
     const collectedNames = new Set(request.steps.map((step) => step.instance.collector.name))
     for (const exportJudge of request.exportJudges?.judges ?? []) {
       const name = exportJudge.judge.name
+      if (collectedNames.has(name)) continue
       const exports = exported.byName.get(name)
-      if (collectedNames.has(name) || exports === undefined) continue
+      const undescribed = undescribedAnswered(name, request.undescribed, request.exportJudges?.lane)
+      if (exports === undefined) {
+        if (undescribed.size > 0) entry(exportsEntry(name, [], undescribed), undefined, undefined)
+        continue
+      }
       const held = yield* joinOf(`exports ${name}`, name, exportJudge.key, cells, exports.records)
-      entry(
-        {
-          label: `exports ${name}`,
-          scope: { verifications: [], attachments: held.attachments },
-          cells: undescribedAnswered(name, request.undescribed, request.exportJudges?.lane),
-          keyed: [],
-          assigned: [],
-          keys: []
-        },
-        undefined,
-        { source: name, names: [name], covers: () => true }
-      )
+      entry(exportsEntry(name, held.attachments, undescribed), undefined, { source: name, names: [name], covers: () => true })
       joined.push({
         name,
         cells: cells.map((cell) => cell.id),
@@ -300,5 +317,6 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
         : JudgeRun.notCheckable(judging, `judge ${one.judge.name} not run: ${one.unwritten}`)
       entry(answered, undefined, undefined)
     }
-    return ScopeAnswers.unansweredFilled(ScopeAnswers.notHandedMarked(collected, notHanded), promised, cells)
+    const holders = [...cells.map((cell) => cell.id), ...request.undescribed.map((cell) => cell.id)]
+    return ScopeAnswers.unansweredFilled(ScopeAnswers.notHandedMarked(collected, notHanded, holders), promised, cells)
   })

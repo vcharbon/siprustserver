@@ -9,12 +9,15 @@
  * stating neither has no description. The claims are those the document
  * states, then the placement's; the keys and records a narrower scope added
  * are read from the cell's directory (`cell-records.ts`), then the
- * placement's.
+ * placement's. A `keys.json` or a `joined/` present that cannot be read
+ * leaves the bundle with no description: the cell is then input a scope was
+ * not handed whole.
  */
 import { Batch, Bundle, Postcondition } from "@sip/contracts"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
+import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as path from "node:path"
 import { BASE_KEYS, CALL_ID, type Cell, type Instant, type Leg, SCHEMA, type Verification } from "./cell.js"
@@ -162,12 +165,20 @@ export const ofBundle = (dir: string, placement: Placement): Effect.Effect<Cell,
       Effect.map((raw) => statedClaimsOf(raw)),
       Effect.orElseSucceed(() => ({}))
     )
-    const added = CellRecords.addedKeysOf(
-      yield* fs.readFileString(path.join(dir, CellRecords.KEYS_FILE)).pipe(Effect.orElseSucceed(() => undefined))
-    )
-    const joined = (yield* fs.readDirectory(path.join(dir, CellRecords.JOINED_DIR)).pipe(
-      Effect.orElseSucceed((): ReadonlyArray<string> => [])
-    ))
+    const present = (file: string) => fs.exists(path.join(dir, file)).pipe(Effect.mapError((error) => unreadable(`${file}: ${error.message}`)))
+    const keysText = (yield* present(CellRecords.KEYS_FILE))
+      ? yield* fs.readFileString(path.join(dir, CellRecords.KEYS_FILE)).pipe(
+        Effect.mapError((error) => unreadable(`${CellRecords.KEYS_FILE}: ${error.message}`))
+      )
+      : undefined
+    const added = CellRecords.addedKeysOf(keysText)
+    if (Result.isFailure(added)) return yield* Effect.fail(unreadable(`${CellRecords.KEYS_FILE}: ${added.failure}`))
+    const joinedFiles = (yield* present(CellRecords.JOINED_DIR))
+      ? yield* fs.readDirectory(path.join(dir, CellRecords.JOINED_DIR)).pipe(
+        Effect.mapError((error) => unreadable(`${CellRecords.JOINED_DIR}: ${error.message}`))
+      )
+      : []
+    const joined = joinedFiles
       .filter((file) => file.endsWith(".jsonl"))
       .sort()
       .map((file) => [file.slice(0, -".jsonl".length), CellRecords.joinedFileOf(dir, file.slice(0, -".jsonl".length))] as const)
@@ -215,7 +226,7 @@ export const ofBundle = (dir: string, placement: Placement): Effect.Effect<Cell,
       batch: placement.batch,
       attempt: placement.attempt,
       clock: config.clock === "virtual" ? "simulated" : "real",
-      keys: keysOf(keysOf(baseKeysOf(messages, byLeg), added), placement.keys ?? {}),
+      keys: keysOf(keysOf(baseKeysOf(messages, byLeg), added.success), placement.keys ?? {}),
       legs,
       timeline: { start, end },
       claims: { ...stated, ...placement.claims },
