@@ -36,6 +36,7 @@ import { CURRENT } from "@sip/store/test-identity"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
 import { ReplayCli } from "@sip/toolchain"
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
 import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import * as fs from "node:fs"
@@ -441,6 +442,42 @@ const crashingDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { 
       return id === `${ONE}-b` ? { ...ran, summary: { ...ran.summary, passed: false, error: "the interpreter died" } } : ran
     }))) as unknown as typeof runCell
 
+/**
+ * The deployment's collectors: on {@link BATCHED}, a real-clock lane, the
+ * cell-scope collector `after-call`, whose collect answers it passed at once,
+ * or, over a cell of a case ending `-b`, only after 10 s.
+ */
+const afterCallOf = async (): Promise<Layer.Layer<Collectors.Service>> => {
+  const root = fs.mkdtempSync(path.join(ROOT, "rig-"))
+  const dir = path.join(root, "collectors", "after-call")
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, "collector.toml"),
+    `schema = "collector.v1"\nname = "after-call"\nscope = "cell"\nanswers = ["after-call"]\n[timeouts]\ncollect_s = 30\n[run]\ncollect = "./collect"\n`
+  )
+  fs.writeFileSync(
+    path.join(dir, "collect"),
+    `#!/bin/sh\nif grep -q -- '-b",' "$SIPRIG_CONTEXT"; then sleep 10; fi\necho '{"verification":"after-call","answer":"pass"}'\n`,
+    { mode: 0o755 }
+  )
+  const rig = await Effect.runPromise(RigPath.load({ workspace: root }).pipe(Effect.provide(NodeServices.layer)))
+  const lane: Lanes.Loaded = {
+    id: BATCHED,
+    file: `lanes/${BATCHED}.toml`,
+    lane: { schema: "lane.v1", clock: "real" },
+    parts: new Map(),
+    operations: new Map(),
+    capabilities: new Set()
+  }
+  return Collectors.layerOf(rig, [lane])
+}
+
+/** A driver like {@link describedDrive} whose cell `<TWO>-a` fails its batch 0.5 s after it started, the others landed by then. */
+const failingBatchDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
+  Campaign.cellCaseId(cell) === `${TWO}-a`
+    ? Effect.andThen(Effect.sleep(500), Effect.die(new Error("the driver broke")))
+    : describedDrive(cell, context as never)) as unknown as typeof runCell
+
 describe.skipIf(!served)("the replay phase", () => {
   beforeEach(() => {
     driven = []
@@ -635,6 +672,34 @@ for (const cell of context.cells) {
       [ONE, "the collector lab left the lab changed"],
       [TWO, "the collector lab left the lab changed"]
     ])
+  })
+
+  it("keeps what a failed batch's cell-scope collectors answered, and leaves unverified a landed cell whose collectors it cut short", async () => {
+    const layer = await afterCallOf()
+    const { failed, lines, statuses } = await withStore(
+      Effect.gen(function*() {
+        const captures = yield* planWork([{ capture: ONE, set: { kind: "full" } }, { capture: TWO, set: { kind: "full" } }], prep, 2)
+        const exit = yield* Effect.exit(phase({
+          captures,
+          options: options(BATCHED),
+          prepId: prep,
+          drive: failingBatchDrive,
+          binaries: () => Effect.void,
+          identity: (_lane, load) => Effect.succeed({ ...CURRENT, load }),
+          provenance: Effect.succeed([])
+        }))
+        const sql = yield* SqlClient
+        const lines = yield* sql<{ caseId: string; answer: string }>`
+          SELECT case_id AS "caseId", answer FROM verifications WHERE name = 'after-call' AND scope = 'cell' ORDER BY case_id`
+        const statuses = yield* sql<{ caseId: string; status: string }>`
+          SELECT case_id AS "caseId", status FROM cell_statuses
+          WHERE run_id IN (SELECT run_id FROM verifications WHERE name = 'after-call') ORDER BY case_id`
+        return { failed: Exit.isFailure(exit), lines, statuses }
+      }).pipe(Effect.provide(layer))
+    )
+    expect(failed).toBe(true)
+    expect(lines.map((line) => [line.caseId, line.answer])).toEqual([[`${ONE}-a`, "pass"], [`${ONE}-b`, "not-checkable"]])
+    expect(statuses.map((row) => [row.caseId, row.status])).toEqual([[`${ONE}-a`, "pass"], [`${ONE}-b`, "unverified"]])
   })
 
   it("files no row for a batch whose every capture it could not materialise", async () => {
