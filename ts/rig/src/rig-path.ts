@@ -11,8 +11,9 @@
  * - a name defined twice along the path (naming both files), a collector's
  *   judge no judge defines, a part schema that is no JSON object, and a path
  *   `pack.toml` names that its tree does not hold;
- * - a collector named like a source the base answers lines as, a lock named
- *   by collectors of two scopes (naming both files), and a cycle of `after`
+ * - a collector named like a source the base answers lines as, or like a
+ *   judge another collector names (naming both files), a lock named by
+ *   collectors of two scopes (naming both files), and a cycle of `after`
  *   among one scope's collectors (naming each file).
  */
 import { Verification } from "@sip/contracts"
@@ -258,10 +259,26 @@ export const load = (roots: Roots): Effect.Effect<RigPath, Refusal, FileSystem.F
         return yield* Effect.fail(refuse([collector.file], `judge: names ${judge}, which no judge of the path defines`))
       }
     }
-    const refused = sourceNamed(path) ?? lockOfNestedScopes(path) ?? afterCycle(path)
+    const refused = sourceNamed(path) ?? judgeNamed(path) ?? lockOfNestedScopes(path) ?? afterCycle(path)
     if (refused !== undefined) return yield* Effect.fail(refused)
     return path
   })
+
+/**
+ * The first collector named like a judge another collector names, refused
+ * naming both manifests: the lines of a collector naming a judge carry the
+ * judge's name as their source, so the namesake's lines would stand for its.
+ */
+const judgeNamed = (path: RigPath): Refusal | undefined => {
+  for (const collector of path.collectors.values()) {
+    const judge = collector.manifest.judge
+    const namesake = judge === undefined || judge === collector.name ? undefined : path.collectors.get(judge)
+    if (namesake !== undefined) {
+      return refuse([namesake.file, collector.file], `name: ${judge} is the judge ${collector.name} names, whose lines carry its name`)
+    }
+  }
+  return undefined
+}
 
 /**
  * The first cycle the `after` of one scope's collectors make, refused naming

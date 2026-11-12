@@ -199,7 +199,8 @@ Rules:
   naming a judge, is refused at load.
 - Another source's informative line never stands for a deciding one: a promise of a collector
   whose lines decide is filled on a cell unless a deciding line, or a line of the promise's own
-  source (the collector, or its judge), answered its name there.
+  source (the collector, or its judge), answered its name there. A collector named like a judge
+  another collector names is refused at load: its lines would carry that judge's source.
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
 - `after` orders collectors of one scope. A wider scope always runs after a narrower one ended
   and reads its keys and records without declaring it. An `after` naming a collector that is
