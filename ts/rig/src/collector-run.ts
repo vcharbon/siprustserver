@@ -13,9 +13,10 @@
  * A failed or timed-out `open` or `collect` answers `not checkable`, with
  * what failed, for every verification its manifest names
  * (`Collector.answeredBy`) on every cell of its scope and on the scope
- * itself, and its judge does not judge those cells. A `close` that fails is run once more; a second failure is the
- * event `lab-left-changed`, the job's mark. The scope's collect, its records
- * joined and judged, is `scope-judging.ts`'s.
+ * itself, and its judge does not judge those cells. A `close` that fails is
+ * run once more; a second failure is the event `lab-left-changed`, the job's
+ * mark. The scope's collect, its records joined and judged, is
+ * `scope-judging.ts`'s.
  */
 import { Attachment, Verification } from "@sip/contracts"
 import * as Cause from "effect/Cause"
