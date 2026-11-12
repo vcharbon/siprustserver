@@ -16,6 +16,7 @@
 import type { Attachment, Verification } from "@sip/contracts"
 import { PreCheck } from "@sip/rig"
 import { Attachments, JobEvents, Verifications } from "@sip/store"
+import * as Cause from "effect/Cause"
 import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
@@ -30,7 +31,11 @@ import * as CollectorIo from "./collector-io.js"
 export interface Request {
   /** The job's row, where it is one: its events, lines and attachments are its own. */
   readonly job: number | undefined
-  /** The job's directory: its pre-checks' directories under `collectors/`, its own attachments. */
+  /**
+   * The directory of work no job row files: its pre-checks' directories under
+   * `collectors/`. A job's are under its own directory in the session tree,
+   * with its attachments (`CollectorIo.jobHolderOf`).
+   */
   readonly dir: string
   readonly lanes: ReadonlyArray<string>
   /** The `on-demand` pre-checks the job asks for by name, guarding what it alone does; none where absent. */
@@ -62,13 +67,14 @@ const answerJob = (
     if (answers.attachments.length > 0) {
       yield* Effect.flatMap(Attachments.Service, (store) => store.add({ scope: "job", jobId: job }, { dir, attachments: answers.attachments }))
     }
-  }).pipe(Effect.catchCause(() => Effect.logError(`job ${job}: the store refused its pre-checks' answers`)))
+  }).pipe(Effect.catchCause((cause) => Effect.logError(`job ${job}: the store refused its pre-checks' answers: ${Cause.pretty(cause)}`)))
 
 /** Runs the job's pre-checks: why the job is refused, or `undefined` where it is not or none is wired. */
 export const job = (request: Request) =>
   Effect.gen(function*() {
     const seam = yield* Collectors.Service
-    const instances = (yield* seam.job(request.lanes, path.join(request.dir, "collectors"), request.dir, request.asked))
+    const dir = yield* CollectorIo.jobHolderOf(request.job, request.dir)
+    const instances = (yield* seam.job(request.lanes, path.join(dir, "collectors"), dir, request.asked))
       .filter(PreCheck.isPreCheck)
     const unwired = yield* seam.unwired(request.lanes, request.asked)
     if (instances.length === 0 && unwired.length === 0) return undefined
@@ -77,7 +83,7 @@ export const job = (request: Request) =>
       sink: CollectorIo.sinkOf(request.job === undefined ? undefined : { id: request.job, events }),
       locker: yield* CollectorIo.locker(Locks.DEFAULT_WAIT_MS, request.watch)
     })
-    if (request.job !== undefined) yield* answerJob(request.job, request.dir, checked.answers)
+    if (request.job !== undefined) yield* answerJob(request.job, dir, checked.answers)
     return checked.refusal
   })
 

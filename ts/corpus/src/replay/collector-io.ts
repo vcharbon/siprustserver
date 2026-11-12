@@ -7,15 +7,25 @@
  * mark (`@sip/store` `JobEvents`).
  */
 import type { CollectorRun } from "@sip/rig"
-import type { JobEvents } from "@sip/store"
+import { type JobEvents, Sessions } from "@sip/store"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import type * as FileSystem from "effect/FileSystem"
 import type { Roots } from "../deployment/index.js"
+import * as Job from "../jobs/job.js"
 import * as Locks from "../locks.js"
 
 /** The prefix of a collector lock's name under the lock root, apart from the lanes' own. */
 export const LOCK_PREFIX = "collector-"
+
+/**
+ * The directory a job's collectors keep theirs under (`collectors/`) and what
+ * they attach to the job in: job `job`'s own in the session tree
+ * (`Job.jobDir`), the tree the store keeps every attached file under; `dir`
+ * for work no job row files, whose attachments no row holds.
+ */
+export const jobHolderOf = (job: number | undefined, dir: string): Effect.Effect<string, never, Sessions.Service> =>
+  job === undefined ? Effect.succeed(dir) : Effect.map(Sessions.Service, (root) => Job.jobDir(root.dir, job))
 
 /**
  * The locker over the box-wide exclusive locks, a holder waiting up to

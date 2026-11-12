@@ -7,7 +7,7 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { type Lanes, RigPath } from "@sip/rig"
-import { Attachments, JobEvents, Verifications } from "@sip/store"
+import { Attachments, JobEvents, Sessions, Verifications } from "@sip/store"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as fs from "node:fs"
@@ -91,7 +91,9 @@ const run = (lane: string, buildMs: number, collectors: Layer.Layer<Collectors.S
   const sleep = (ms: number) => Effect.sync(() => void events.push(`settled ${ms}`))
   return Effect.runPromise(
     Effect.scoped(ReplayBuild.session(options(lane), "test", { seams: { build, sleep } })).pipe(
-      Effect.provide(Layer.mergeAll(hosting, roots(), tools([], 0), NodeServices.layer, collectors, unasked))
+      Effect.provide(
+        Layer.mergeAll(hosting, roots(), tools([], 0), NodeServices.layer, collectors, unasked, Sessions.layer(path.join(tree, "sessions")))
+      )
     )
   ).then(() => events)
 }

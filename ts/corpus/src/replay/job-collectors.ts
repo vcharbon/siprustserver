@@ -16,6 +16,7 @@
  */
 import { CollectorRun, type Context, PreCheck } from "@sip/rig"
 import { Attachments, JobEvents } from "@sip/store"
+import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import { identity } from "effect/Function"
 import * as path from "node:path"
@@ -29,7 +30,11 @@ import * as PreChecks from "./pre-checks.js"
 export interface Request<A> {
   /** The job's row, where it is one: its events, lines and attachments are its own. */
   readonly job: number | undefined
-  /** The job's directory: its collectors' directories under `collectors/`, its own attachments. */
+  /**
+   * The directory of work no job row files: its collectors' directories under
+   * `collectors/`. A job's are under its own directory in the session tree,
+   * with its attachments (`CollectorIo.jobHolderOf`).
+   */
   readonly dir: string
   readonly lanes: ReadonlyArray<string>
   /** The cells the work ran to a bundle, once it ended. */
@@ -65,7 +70,8 @@ export const distinct = (cells: ReadonlyArray<CollectedCells.LandedCell>): Reado
 export const around = <A, E, R>(request: Request<A>, work: Effect.Effect<A, E, R>) =>
   Effect.gen(function*() {
     const seam = yield* Collectors.Service
-    const instances = (yield* seam.job(request.lanes, path.join(request.dir, "collectors"), request.dir)).filter((one) => !PreCheck.isPreCheck(one))
+    const dir = yield* CollectorIo.jobHolderOf(request.job, request.dir)
+    const instances = (yield* seam.job(request.lanes, path.join(dir, "collectors"), dir)).filter((one) => !PreCheck.isPreCheck(one))
     if (instances.length === 0) return yield* work
     const events = yield* JobEvents.Service
     const options: CollectorRun.Options = {
@@ -84,24 +90,28 @@ export const around = <A, E, R>(request: Request<A>, work: Effect.Effect<A, E, R
       opened = scope
       const value = yield* work
       const cells = distinct(request.cells(value))
-      const over = yield* CollectedCells.describe(cells, path.basename(request.dir))
+      const over = yield* CollectedCells.describe(cells, path.basename(dir))
       const collected = yield* scope.collect(over)
       yield* request.answered === undefined
         ? CollectedCells.merge(CollectedCells.pendingOf(collected, cells))
         : request.answered(cells, collected)
-      yield* answerJob(request, collected)
+      yield* answerJob(request.job, dir, collected)
       return value
     })).pipe(Effect.ensuring(leftChanged))
   })
 
-/** What `collected` answered of the job itself, written after its lines and added to its attachments; nothing where it is no job. */
-const answerJob = (request: Pick<Request<never>, "job" | "dir">, collected: ReadonlyArray<CollectorRun.Collected>) =>
+/**
+ * What `collected` answered of job `job` itself, written after its lines and
+ * added to its attachments, `dir` holding their files; nothing where it is no
+ * job. A store refusing them is said with why, never the job's failure.
+ */
+const answerJob = (job: number | undefined, dir: string, collected: ReadonlyArray<CollectorRun.Collected>) =>
   Effect.gen(function*() {
-    if (request.job === undefined) return
+    if (job === undefined) return
     const verifications = collected.flatMap((one) => one.scope.verifications)
     const attachments = collected.flatMap((one) => one.scope.attachments)
-    yield* PreChecks.appendJobLines(request.job, verifications)
+    yield* PreChecks.appendJobLines(job, verifications)
     if (attachments.length > 0) {
-      yield* Effect.flatMap(Attachments.Service, (store) => store.add({ scope: "job", jobId: request.job! }, { dir: request.dir, attachments }))
+      yield* Effect.flatMap(Attachments.Service, (store) => store.add({ scope: "job", jobId: job }, { dir, attachments }))
     }
-  }).pipe(Effect.catchCause(() => Effect.logError(`job ${request.job}: the store refused its collectors' answers`)))
+  }).pipe(Effect.catchCause((cause) => Effect.logError(`job ${job}: the store refused its collectors' answers: ${Cause.pretty(cause)}`)))

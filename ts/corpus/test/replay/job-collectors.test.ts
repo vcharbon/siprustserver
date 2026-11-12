@@ -136,6 +136,7 @@ type Services =
   | Jobs.Service
   | Roots.Service
   | Runs.Service
+  | Sessions.Service
   | Verifications.Service
   | FileSystem.FileSystem
   | SqlClient
