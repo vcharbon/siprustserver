@@ -3371,6 +3371,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "pivot-replay"
+version = "0.1.0"
+dependencies = [
+ "b2bua",
+ "b2bua-harness",
+ "call",
+ "http-net",
+ "http-net-testkit",
+ "layer-harness",
+ "observe",
+ "pivot-interpreter",
+ "pivot-schema",
+ "rustix",
+ "scenario-harness",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sip-clock",
+ "sip-message",
+ "sip-net",
+ "sip-net-testkit",
+ "tokio",
+]
+
+[[package]]
 name = "pivot-schema"
 version = "0.1.0"
 dependencies = [

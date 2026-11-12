@@ -3,7 +3,7 @@
 **Status:** proposed (2026-11-11).
 
 **Owner:** `ts/` (the site server, the campaign runner, the lifecycle, the store), `crates/`
-(the replay library, `pivot-interpreter`, `pivot-schema`), `tooling/siprig/` (the image kit and
+(the replay library `pivot-replay`, `pivot-interpreter`, `pivot-schema`), `tooling/siprig/` (the image kit and
 the reference pack).
 
 Manifests, protocol lines, the cell description and every table are in the
