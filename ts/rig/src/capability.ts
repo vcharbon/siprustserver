@@ -7,8 +7,7 @@
  *
  * A run states the capabilities it needs. A lane lacking any of them does not
  * fit it: the run is *not runnable on this lane*; forced, it runs anyway and
- * its results say so ({@link fit}). A check needing a capability the lane
- * lacks is *not checkable* there, never a pass ({@link notCheckable}).
+ * its results say so ({@link fit}).
  */
 
 /** The capabilities the base derives from a lane's clock and backend mode. */
@@ -53,10 +52,3 @@ export const fit = (
     ? { _tag: "forced", lacks, line: `${what} is forced onto ${lane}, which lacks ${missing}: its results are marked forced` }
     : { _tag: "refused", lacks, line: `${what} is not runnable on this lane: ${lane} lacks ${missing}` }
 }
-
-/** Why a check needing `need` is not checkable on `lane` holding `has`, or `undefined` where it is. */
-export const notCheckable = (lane: string, has: ReadonlySet<string>, need: string, what: string): string | undefined =>
-  has.has(need) ? undefined : `${what}: not checkable on ${lane}, which lacks ${need}`
-
-/** What a command offering `--force` adds to a refusal. */
-export const FORCE_HINT = " (--force runs it anyway, marked forced)"

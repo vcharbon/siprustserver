@@ -1,7 +1,6 @@
 /**
  * Whether a run fits a lane: it fits a lane holding what it needs, is refused
- * by one lacking any of it, runs forced and marked so; a check needing what
- * the lane lacks is not checkable there.
+ * by one lacking any of it, runs forced and marked so.
  */
 import { describe, expect, it } from "vitest"
 import * as Capability from "../src/capability.js"
@@ -34,10 +33,5 @@ describe("a run on a lane", () => {
       lacks: ["scripted-routing"],
       line: "a capture replay is forced onto lab, which lacks scripted-routing: its results are marked forced"
     })
-  })
-
-  it("states a check needing a capability the lane lacks not checkable, and says nothing where it holds it", () => {
-    expect(Capability.notCheckable("lab", bare, "records-readable", "records")).toBe("records: not checkable on lab, which lacks records-readable")
-    expect(Capability.notCheckable("lab", readable, "records-readable", "records")).toBeUndefined()
   })
 })
