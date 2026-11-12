@@ -59,12 +59,12 @@ const decodeRoster = Schema.decodeUnknownOption(Roster)
 
 const decodePostconditions = Schema.decodeUnknownOption(Schema.Struct({ postconditions: Schema.optionalKey(Postcondition.Postconditions) }))
 
-/** The claims the document `raw` states (`postconditions`); none where it states none readable. */
-const statedClaimsOf = (raw: unknown): Readonly<Record<string, unknown>> =>
-  Option.match(decodePostconditions(raw), {
-    onNone: () => ({}),
-    onSome: (document) => Postcondition.statedClaims(document.postconditions)
-  })
+/**
+ * The claims the document `raw` states (`postconditions`), empty where it
+ * states none; none where its postconditions do not decode.
+ */
+const statedClaimsOf = (raw: unknown): Option.Option<Readonly<Record<string, unknown>>> =>
+  Option.map(decodePostconditions(raw), (document) => Postcondition.statedClaims(document.postconditions))
 
 /** One recorded datagram of a leg, its head facts read. */
 interface Recorded {
@@ -161,11 +161,17 @@ export const ofBundle = (dir: string, placement: Placement): Effect.Effect<Cell,
       Effect.map((raw) => Option.getOrUndefined(decodeRoster(raw))),
       Effect.orElseSucceed(() => undefined)
     )
-    const stated = yield* json("pivot.json").pipe(
-      Effect.map((raw) => statedClaimsOf(raw)),
-      Effect.orElseSucceed(() => ({}))
-    )
     const present = (file: string) => fs.exists(path.join(dir, file)).pipe(Effect.mapError((error) => unreadable(`${file}: ${error.message}`)))
+    const stated = (yield* present("pivot.json"))
+      ? yield* json("pivot.json").pipe(
+        Effect.flatMap((raw) =>
+          Option.match(statedClaimsOf(raw), {
+            onNone: () => Effect.fail(unreadable("pivot.json: postconditions not readable")),
+            onSome: Effect.succeed
+          })
+        )
+      )
+      : {}
     const keysText = (yield* present(CellRecords.KEYS_FILE))
       ? yield* fs.readFileString(path.join(dir, CellRecords.KEYS_FILE)).pipe(
         Effect.mapError((error) => unreadable(`${CellRecords.KEYS_FILE}: ${error.message}`))

@@ -282,14 +282,14 @@ const afterCycle = (path: RigPath): Refusal | undefined => {
 }
 
 /**
- * The first collector named like a source the base answers lines as
+ * The first collector or judge named like a source the base answers lines as
  * (`Verification.BASE_SOURCES`), refused: its answers would stand for the
  * base's.
  */
 const sourceNamed = (path: RigPath): Refusal | undefined => {
-  for (const collector of path.collectors.values()) {
-    if (Verification.baseSources.includes(collector.name)) {
-      return refuse([collector.file], `name: ${collector.name} is a source the base answers its own lines as`)
+  for (const defined of [...path.collectors.values(), ...path.judges.values()]) {
+    if (Verification.baseSources.includes(defined.name)) {
+      return refuse([defined.file], `name: ${defined.name} is a source the base answers its own lines as`)
     }
   }
   return undefined
