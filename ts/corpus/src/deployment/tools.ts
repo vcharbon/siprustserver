@@ -35,7 +35,12 @@ export class ToolUnavailable extends Schema.TaggedError<ToolUnavailable>()("Corp
 /** Who hears whose build a caller waits for: a job writes it on its row. */
 export type Watch = (holder: string | undefined) => Effect.Effect<void>
 
-/** The source paths, relative to `root`, whose content decides a phase's output. */
+/**
+ * The source paths, relative to `root`, whose content decides a phase's
+ * output. A path's place in its list names its files in the fingerprint, so
+ * moving a path in the tree and in its list keeps the fingerprint; reordering
+ * a list moves it.
+ */
 export interface Decides {
   readonly root: string
   readonly extraction: ReadonlyArray<string>
