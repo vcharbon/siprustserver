@@ -78,12 +78,13 @@ const cellsOf = (
   dirs: Readonly<Record<string, string>> = {}
 ): ReadonlyArray<Cell.Cell> => ids.map((id) => edit(cellOf(id, LANE.id, path.join(root, "cells", dirs[id] ?? id))))
 
-/** The batch's collectors `rig` plans on {@link LANE} under `root`, collected over `cells`, the batch's export judges with them where `exports` says. */
+/** The batch's collectors `rig` plans on {@link LANE} under `root`, collected over `cells` and `undescribed`, the batch's export judges with them where `exports` says. */
 const collectBatch = async (
   rig: RigPath.RigPath,
   root: string,
   cells: ReadonlyArray<Cell.Cell>,
-  exports = false
+  exports = false,
+  undescribed: ReadonlyArray<CollectorRun.Unread> = []
 ) => {
   const holder = path.join(root, "batch")
   const instances = CollectorPlan.batchPlanOf(rig, LANE, path.join(holder, "collectors"), holder)
@@ -93,7 +94,7 @@ const collectBatch = async (
     locker: memoryLocker(),
     ...(exports ? { exportJudges: JudgePlan.exportJudgesOn(rig, LANE, holder) } : {})
   }
-  const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(CollectorRun.opened(instances, options), (opened) => opened.collect(cells))))
+  const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(CollectorRun.opened(instances, options), (opened) => opened.collect(cells, undescribed))))
   return { collected, said, holder }
 }
 
@@ -262,7 +263,7 @@ for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "exp", 
 console.log(JSON.stringify({ verification: "exp", answer: "pass" }))
 `))
 
-  it("skip a cell's unreadable line, its other records joined, the name not checkable on that cell alone, the line said", async () => {
+  it("skip a cell's unreadable line, its other records joined, the name not checkable on that cell and the scope, the line said", async () => {
     const { root, rig } = await loaded(passingExp)
     const cells = cellsOf(root, ["c1", "c2"])
     writeExport(path.join(root, "cells", "c1"), "exp", [{ record: { n: 1 }, cell: "c1" }], [`{"record": {"n": 2}, "key": 5}`])
@@ -270,11 +271,72 @@ console.log(JSON.stringify({ verification: "exp", answer: "pass" }))
     const { collected, said } = await collectBatch(rig, root, cells, true)
     expect(JSON.parse(fs.readFileSync(path.join(root, "exp-read.json"), "utf8"))).toEqual([["c1", `{"n":1}\n`], ["c2", `{"n":3}\n`]])
     const judged = verdictsOf(byLabel(collected, "judge exp of exp"))
-    expect(judged.cells.c1).toEqual([
+    const unread = [
       expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("exports/exp.jsonl line 2") })
-    ])
-    expect([judged.cells.c2, judged.scope]).toEqual([[{ name: "exp", source: "exp", answer: "pass" }], [{ name: "exp", source: "exp", answer: "pass" }]])
+    ]
+    expect(judged).toEqual({ cells: { c1: unread, c2: [{ name: "exp", source: "exp", answer: "pass" }] }, scope: unread })
     expect(said).toEqual([expect.stringMatching(/^failed scope: exports: .*c1\/exports\/exp\.jsonl line 2: /)])
+  })
+
+  it.each([
+    ["a key naming a directory no cell bears", { key: "ref", cell: "elsewhere", values: ["r1"] }, "names the cell directory elsewhere"],
+    ["a verification line", { verification: "exp", cell: "c1", answer: "pass" }, "an export holds records and keys only"]
+  ])("skip %s, the name not checkable on the cell whose export it is", async (_, line, why) => {
+    const { root, rig } = await loaded(passingExp)
+    writeExport(path.join(root, "cells", "c1"), "exp", [{ record: { n: 1 }, cell: "c1" }, line])
+    writeExport(path.join(root, "cells", "c2"), "exp", [{ record: { n: 2 }, cell: "c2" }])
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]), true)
+    expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
+      [expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining(why) })],
+      [{ name: "exp", source: "exp", answer: "pass" }]
+    ])
+  })
+
+  it("leave a judged name not checkable on a cell whose export of another name lost a line", async () => {
+    const { root, rig } = await loaded(passingExp)
+    writeExport(path.join(root, "cells", "c1"), "exp", [{ record: { n: 1 }, cell: "c1" }])
+    writeExport(path.join(root, "cells", "c1"), "aux", [], [`{"key": 5, "cell": "c1", "values": ["r1"]}`])
+    writeExport(path.join(root, "cells", "c2"), "exp", [{ record: { n: 2 }, cell: "c2" }])
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]), true)
+    expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
+      [expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("exports/aux.jsonl line 1") })],
+      [{ name: "exp", source: "exp", answer: "pass" }]
+    ])
+  })
+
+  it("read past a cell whose exports are no directory, the name not checkable on that cell, the others judged", async () => {
+    const { root, rig } = await loaded(passingExp)
+    fs.mkdirSync(path.join(root, "cells", "c1"), { recursive: true })
+    fs.writeFileSync(path.join(root, "cells", "c1", "exports"), "")
+    writeExport(path.join(root, "cells", "c2"), "exp", [{ record: { n: 2 }, cell: "c2" }])
+    const { collected, said } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]), true)
+    expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
+      [expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("its exports are skipped") })],
+      [{ name: "exp", source: "exp", answer: "pass" }]
+    ])
+    expect(said).toEqual([expect.stringMatching(/^failed scope: exports: .*c1\/exports: ENOTDIR/)])
+  })
+
+  it("keep a judge's fail on a cell whose export lost a line, not checkable beside it", async () => {
+    const { root, rig } = await loaded(executableJudge("exp", node(`
+for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "exp", cell: cell.id, answer: "fail" }))
+`)))
+    writeExport(path.join(root, "cells", "c1"), "exp", [{ record: { n: 1 }, cell: "c1" }], ["not json"])
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1"]), true)
+    expect(onCell(collected, "c1")).toEqual([
+      { name: "exp", source: "exp", answer: "fail" },
+      expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("line 2: not JSON") })
+    ])
+  })
+
+  it("answer the name not checkable on a cell the base could not describe", async () => {
+    const { root, rig } = await loaded(passingExp)
+    writeExport(path.join(root, "cells", "c1"), "exp", [{ record: { n: 1 }, cell: "c1" }])
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1"]), true, [{ id: "c2", lane: LANE.id, why: "no cell.json" }])
+    expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
+      [{ name: "exp", source: "exp", answer: "pass" }],
+      [{ name: "exp", source: "exp", answer: "not-checkable", message: "the cell c2 was not described: no cell.json" }]
+    ])
   })
 
   it("judge a name whose only export is unreadable, not checkable on every cell and the scope", async () => {
@@ -285,6 +347,72 @@ console.log(JSON.stringify({ verification: "exp", answer: "pass" }))
     const judged = verdictsOf(byLabel(collected, "judge exp of exp"))
     const unread = [expect.objectContaining({ name: "exp", source: "exp", answer: "not-checkable", message: expect.stringContaining("line 1: not JSON") })]
     expect(judged).toEqual({ cells: { c1: unread, c2: unread }, scope: unread })
+  })
+})
+
+describe("a scope's input not handed whole", () => {
+  /** A collector `checks` answering `checks` pass on every cell and the scope. */
+  const passingChecks = collector(
+    "checks",
+    node(`for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "checks", cell: cell.id, answer: "pass" }))
+console.log(JSON.stringify({ verification: "checks", answer: "pass" }))`),
+    `answers = ["checks"]`
+  )
+
+  const notCheckable = (why: string, source = "checks", name = source) =>
+    [expect.objectContaining({ name, source, answer: "not-checkable", message: expect.stringContaining(why) })]
+
+  it("leaves a collector's pass not checkable on a cell whose export lost a line, and on the scope", async () => {
+    const { root, rig } = await loaded(passingChecks)
+    writeExport(path.join(root, "cells", "c1"), "aux", [], ["not json"])
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]))
+    expect(verdictsOf(byLabel(collected, "checks"))).toEqual({
+      cells: { c1: notCheckable("exports/aux.jsonl line 1"), c2: [{ name: "checks", source: "checks", answer: "pass" }] },
+      scope: notCheckable("exports/aux.jsonl line 1")
+    })
+  })
+
+  it.each([
+    ["an export adds", passingChecks, (root: string) => writeExport(path.join(root, "cells", "c1"), "aux", [{ key: "ref", cell: "c1", values: ["r1"] }]), "exported keys: "],
+    [
+      "an earlier collector adds",
+      {
+        ...collector("adder", node(`console.log(JSON.stringify({ key: "ref", cell: "c1", values: ["r1"] }))`)),
+        ...collector("checks", passingChecks["collectors/checks/collect"]!, `answers = ["checks"]\nafter = ["adder"]`)
+      },
+      () => undefined,
+      "adder: its keys: "
+    ]
+  ])("leave every later pass not checkable where the keys %s could not be written", async (_, files, lay, why) => {
+    const { root, rig } = await loaded(files)
+    lay(root)
+    fs.mkdirSync(path.join(root, "cells", "c1", "keys.json"), { recursive: true })
+    const { collected, said } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]))
+    const unwritten = notCheckable(why)
+    expect(verdictsOf(byLabel(collected, "checks"))).toEqual({ cells: { c1: unwritten, c2: unwritten }, scope: unwritten })
+    expect(said.filter((line) => line.startsWith("failed"))).toEqual([expect.stringContaining(`failed scope: ${why}EISDIR`)])
+  })
+
+  /** A collector `calls` keyed by Call-ID whose judge `trusting` passes every cell and the scope without reading a record. */
+  const trustedCalls = {
+    ...collector("calls", node(`console.log(JSON.stringify({ record: { n: 1 }, key: "c2@test" }))`), `judge = "trusting"\n[join]\nkey = "call_id"`),
+    ...executableJudge("trusting", node(`
+for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "calls", cell: cell.id, answer: "pass" }))
+console.log(JSON.stringify({ verification: "calls", answer: "pass" }))
+`))
+  }
+
+  it.each([
+    ["a cell's joined records", "cells/c1/joined", "the records of calls not written"],
+    ["the scope's unclaimed and ambiguous records", "batch/joined", "the unclaimed and ambiguous records of calls not kept"]
+  ])("runs no judge whose %s could not be written, its verifications not checkable", async (_, blocked, why) => {
+    const { root, rig } = await loaded(trustedCalls)
+    fs.mkdirSync(path.dirname(path.join(root, blocked)), { recursive: true })
+    fs.writeFileSync(path.join(root, blocked), "")
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]))
+    const unwritten = notCheckable(`judge trusting not run: ${why}`, "trusting", "calls")
+    expect(verdictsOf(byLabel(collected, "judge trusting of calls"))).toEqual({ cells: { c1: unwritten, c2: unwritten }, scope: unwritten })
+    expect(fs.existsSync(path.join(root, "batch", "judges", "calls"))).toBe(false)
   })
 })
 
