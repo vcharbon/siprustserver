@@ -2,8 +2,10 @@
  * A scope's pre-checks, run as real executables over no cell: a `fail` one
  * answers refuses the scope with its message and a `refused` event, its
  * `close` still run; a `not checkable` refuses nothing and stays the scope's
- * line. A required pre-check a real-clock lane names no part of refuses the
- * scope before any pre-check runs; on a simulated lane it does not.
+ * line, but for a required pre-check's, which refuses the scope as does its
+ * failed or timed-out collect. A required pre-check a real-clock lane names
+ * no part of refuses the scope before any pre-check runs; on a simulated lane
+ * it does not.
  */
 import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
@@ -75,6 +77,42 @@ describe("a scope's pre-checks", () => {
     expect(checked.answers.verifications[0]?.message).toContain("the lab cannot be asked")
     expect(events.some((event) => event.startsWith("refused"))).toBe(false)
   })
+})
+
+describe("a required pre-check", () => {
+  /** What the required pre-check `name` comes to on its own: the refusal, its refused events, its lines' answers. */
+  const alone = async (name: string) => {
+    const { root, rig } = await samples()
+    const { events, sink } = collecting()
+    const checked = await Effect.runPromise(PreCheck.run(batchChecks(rig, root, laneOf("a"), [name]), [], { sink, locker: memoryLocker() }))
+    return {
+      refusal: checked.refusal,
+      refused: events.filter((event) => event.startsWith("refused")),
+      answers: checked.answers.verifications.map((line) => [line.name, line.answer])
+    }
+  }
+
+  it("refuses its scope where it answers not checkable, saying what it could not check and why", async () => {
+    const said = "the required pre-check required-blind could not check lab-reachable: the lab cannot be asked"
+    expect(await alone("required-blind")).toEqual({
+      refusal: said,
+      refused: [`refused required-blind: ${said}`],
+      answers: [["lab-reachable", "not-checkable"]]
+    })
+  })
+
+  it("refuses its scope where its collect fails, quoting the step", async () => {
+    const { refusal, refused, answers } = await alone("required-failing")
+    expect(refusal).toMatch(/^the required pre-check required-failing could not check required-failing: collect exited 3: the lab cannot be asked/)
+    expect(refused).toEqual([`refused required-failing: ${refusal}`])
+    expect(answers).toEqual([["required-failing", "not-checkable"]])
+  })
+
+  it("refuses its scope where its collect outlives its bound", async () => {
+    const { refusal, answers } = await alone("required-hanging")
+    expect(refusal).toMatch(/^the required pre-check required-hanging could not check required-hanging: collect /)
+    expect(answers).toEqual([["required-hanging", "not-checkable"]])
+  }, 10_000)
 })
 
 describe("a required pre-check a lane names no part of", () => {

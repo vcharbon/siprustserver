@@ -2,9 +2,10 @@
  * The pre-checks of a scope (ADR-0060 appendix §3): its job- or batch-scope
  * collectors `at = "before"`, collected once before any call of the scope,
  * over no cell, then closed. A `fail` one answers of the scope refuses the
- * scope, its message the refusal's and an event `refused` of its instance; a
- * `not checkable`, a failed or timed-out `collect`'s included, refuses
- * nothing and stays the scope's line.
+ * scope, its message the refusal's and an event `refused` of its instance. A
+ * `not checkable`, a failed or timed-out `collect`'s included, refuses the
+ * scope where the pre-check is `required`, so a required one never fails
+ * open; otherwise it refuses nothing and stays the scope's line.
  *
  * A required pre-check that a real-clock lane does not wire, for lack of a
  * part it needs, refuses before any pre-check runs: leaving a part out never
@@ -13,6 +14,7 @@
 import type { Verification } from "@sip/contracts"
 import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
+import * as Collector from "./collector.js"
 import type * as CollectorRun from "./collector-run.js"
 import { opened } from "./collector-run.js"
 import type * as Lanes from "./lanes.js"
@@ -50,7 +52,7 @@ export interface Checked {
   readonly collected: ReadonlyArray<CollectorRun.Collected>
   /** The scope's own answers: each instance's in its order, or a `fail` per required pre-check unwired. */
   readonly answers: CollectorRun.Answers
-  /** Why the scope is refused, each `fail`'s message joined; `undefined` where none failed. */
+  /** Why the scope is refused, each refusing line's reason joined; `undefined` where none refuses. */
   readonly refusal: string | undefined
   /** The labels of the instances whose `close` left the lab changed. */
   readonly leftChanged: ReadonlyArray<string>
@@ -64,6 +66,17 @@ const refused = (sink: CollectorRun.Sink, collector: string, message: string) =>
 
 /** What a `fail` line says: its message, or that it failed. */
 const saidOf = (line: Verification.Verification): string => line.message ?? `${line.name} failed`
+
+/**
+ * Why `line`, answered by the pre-check `instance`, refuses its scope: a
+ * `fail`, and a `not checkable` of a required one; `undefined` otherwise.
+ */
+const refusalOf = (instance: CollectorRun.Instance, line: Verification.Verification): string | undefined => {
+  if (line.answer === "fail") return saidOf(line)
+  if (line.answer !== "not-checkable" || !Collector.isRequired(instance.collector.manifest)) return undefined
+  return `the required pre-check ${instance.label} could not check ${line.name}` +
+    (line.message === undefined ? "" : `: ${line.message}`)
+}
 
 /**
  * Runs the pre-checks `instances` of one scope, with `options`, where
@@ -94,10 +107,12 @@ export const run = (
       return one.collect([])
     }))
     const failed: Array<string> = []
-    for (const one of collected) {
-      for (const line of one.scope.verifications.filter((line) => line.answer === "fail")) {
-        failed.push(saidOf(line))
-        yield* refused(options.sink, one.label, saidOf(line))
+    for (const [at, one] of collected.entries()) {
+      for (const line of one.scope.verifications) {
+        const said = refusalOf(instances[at]!, line)
+        if (said === undefined) continue
+        failed.push(said)
+        yield* refused(options.sink, one.label, said)
       }
     }
     return {

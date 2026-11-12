@@ -57,12 +57,15 @@ describe("the collectors a batch runs", () => {
       "not-json",
       "pre-check",
       "refusing-check",
+      "required-blind",
+      "required-failing",
+      "required-hanging",
       "slow-open",
       "stranger",
       "unsure-check",
       "wrong-cell"
     ]
-    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 14), "tidy", ...always.slice(14)])
+    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 17), "tidy", ...always.slice(17)])
     expect(without.map((instance) => instance.id)).toEqual(always)
     expect(withStore.find((instance) => instance.id === "tidy")).toMatchObject({
       label: "tidy",

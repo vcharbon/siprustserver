@@ -105,6 +105,18 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...collector("unsure-check", {
     collect: traced("collect unsure-check", `echo "the lab cannot be asked" >&2\nexit 3`)
   }, `at = "before"`),
+  ...collector("required-blind", {
+    collect: traced(
+      "collect required-blind",
+      `echo '{"verification": "lab-reachable", "answer": "not-checkable", "message": "the lab cannot be asked"}'`
+    )
+  }, `at = "before"\nrequired = true\nanswers = ["lab-reachable"]`),
+  ...collector("required-failing", {
+    collect: traced("collect required-failing", `echo "the lab cannot be asked" >&2\nexit 3`)
+  }, `at = "before"\nrequired = true`),
+  ...collector("required-hanging", {
+    collect: traced("collect required-hanging", `sleep 30 &\necho $! > ../../sleeper\nwait`)
+  }, `at = "before"\nrequired = true\n[timeouts]\ncollect_s = 0.5`),
   ...collector("required-check", {}, `at = "before"\nrequired = true\nneeds = ["records-store"]`, "job")
 }
 
