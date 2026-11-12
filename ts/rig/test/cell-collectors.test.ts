@@ -51,7 +51,7 @@ const PASS = (name: string) => `echo '{"verification": "${name}", "answer": "pas
 /** A collect that answers `name` pass once the file `<name>-go` is in the rig's root, waiting for it until then. */
 const RELEASED = (name: string) => `while [ ! -e ../../${name}-go ]; do sleep 0.01; done\n${PASS(name)}`
 
-const SAMPLES = {
+const SAMPLES: Readonly<Record<string, Entry>> = {
   ...cellCollector("alpha", "delay_s = 10\n[timeouts]\ncollect_s = 10", { collect: RELEASED("alpha") }),
   ...cellCollector("beta", "[timeouts]\ncollect_s = 10", { collect: RELEASED("beta") }),
   ...cellCollector("delayed", "delay_s = 10", { collect: PASS("delayed") }),
