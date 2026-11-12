@@ -1,0 +1,278 @@
+/**
+ * A scope's collectors, run as real executables: opened before the scope,
+ * collected over its cells, closed after it whatever ended it; `SIPRIG_STATE`
+ * kept from `open` to `close`; the lines of `collect` read from its stdout and
+ * `SIPRIG_OUT`, its attachments copied and listed in their holder's
+ * directory; a failed, timed-out or unreadable `open` or `collect` answering
+ * `not checkable` on every cell; a `close` failing twice marking the lab left
+ * changed; locks held from `open` to `close`.
+ */
+import { Attachment, Verification } from "@sip/contracts"
+import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
+import * as Fiber from "effect/Fiber"
+import * as Result from "effect/Result"
+import * as fs from "node:fs"
+import * as path from "node:path"
+import { afterEach, describe, expect, it } from "vitest"
+import type * as Cell from "../src/cell.js"
+import * as CollectorPlan from "../src/collector-plan.js"
+import * as CollectorRun from "../src/collector-run.js"
+import * as RigPath from "../src/rig-path.js"
+import { alive, cellOf, goneWithin, memoryLocker, SAMPLES, traceOf } from "./collectors.js"
+import { laneOf } from "./operations.js"
+import { run, tree } from "./tree.js"
+
+const made: Array<string> = []
+
+afterEach(() => {
+  for (const dir of made.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+})
+
+const LANE = laneOf("lane-a", { "records-store": "targets/records-store/main.toml" })
+
+/** A rig path holding every sample collector, loaded; its root. */
+const samples = async () => {
+  const root = tree(SAMPLES)
+  made.push(root)
+  const loaded = await run(RigPath.load({ workspace: root }))
+  if (!Result.isSuccess(loaded)) throw new Error(`the samples do not load: ${String(loaded.failure)}`)
+  return { root, rig: loaded.success }
+}
+
+/** The batch instance of collector `name` under `root`, on {@link LANE}. */
+const instanceOf = (rig: RigPath.RigPath, root: string, name: string): CollectorRun.Instance => {
+  const collector = rig.collectors.get(name)!
+  return {
+    collector,
+    id: name,
+    label: name,
+    scope: "batch",
+    lane: LANE,
+    lanes: undefined,
+    params: CollectorPlan.paramsOf(collector.manifest, LANE),
+    dir: path.join(root, "batch", "collectors", name),
+    holder: path.join(root, "batch")
+  }
+}
+
+/** Two cells of {@link LANE}, their directories under `root`. */
+const cellsUnder = (root: string): ReadonlyArray<Cell.Cell> =>
+  ["c1", "c2"].map((id) => cellOf(id, LANE.id, path.join(root, "cells", id)))
+
+/** A sink collecting each event, and the phases it saw as `<phase> <collector>`. */
+const collecting = () => {
+  const events: Array<CollectorRun.Event> = []
+  const sink: CollectorRun.Sink = (event) => Effect.sync(() => void events.push(event))
+  return { events, sink, phases: () => events.map((event) => `${event.phase} ${event.collector}`) }
+}
+
+/** The scope `body` run between opening `instances` and collecting them over `cells`; what they collected and the lab's state. */
+const scope = <E>(
+  instances: ReadonlyArray<CollectorRun.Instance>,
+  cells: ReadonlyArray<Cell.Cell>,
+  options: CollectorRun.Options,
+  body: Effect.Effect<void, E> = Effect.void
+) =>
+  Effect.gen(function*() {
+    let opened: CollectorRun.Opened | undefined
+    const collected = yield* Effect.exit(Effect.scoped(Effect.gen(function*() {
+      opened = yield* CollectorRun.opened(instances, options)
+      yield* body
+      return yield* opened.collect(cells)
+    })))
+    return { collected, leftChanged: opened?.leftChanged() ?? [] }
+  })
+
+const runScope = <E>(
+  instances: ReadonlyArray<CollectorRun.Instance>,
+  cells: ReadonlyArray<Cell.Cell>,
+  options: CollectorRun.Options,
+  body?: Effect.Effect<void, E>
+) => Effect.runPromise(scope(instances, cells, options, body))
+
+/** The collected answers of the scope, which must have collected. */
+const valueOf = <A, E>(exit: Exit.Exit<A, E>): A => {
+  if (!Exit.isSuccess(exit)) throw new Error(`the scope did not collect: ${String(exit.cause)}`)
+  return exit.value
+}
+
+describe("a scope's collectors", () => {
+  it("open before the scope, collect over its cells and close after it, sharing SIPRIG_STATE, each step an event", async () => {
+    const { root, rig } = await samples()
+    const { sink, phases } = collecting()
+    const cells = cellsUnder(root)
+    const { collected } = await runScope([instanceOf(rig, root, "tidy")], cells, { sink, locker: memoryLocker() })
+    valueOf(collected)
+    expect(traceOf(root)).toEqual(["open tidy open", "collect tidy token collect", "close tidy token close"])
+    expect(fs.readFileSync(path.join(root, "state-seen"), "utf8")).toBe("")
+    expect(phases()).toEqual(["open tidy", "opened tidy", "collect tidy", "collected tidy", "close tidy", "closed tidy"])
+  })
+
+  it("gives open a context with no cell and collect one with the scope's cells, its window and the lane's parameters", async () => {
+    const { root, rig } = await samples()
+    const cells = cellsUnder(root)
+    await runScope([instanceOf(rig, root, "tidy")], cells, { sink: () => Effect.void, locker: memoryLocker() })
+    const opened = JSON.parse(fs.readFileSync(path.join(root, "open-context.json"), "utf8"))
+    const collected = JSON.parse(fs.readFileSync(path.join(root, "collect-context.json"), "utf8"))
+    expect(opened).toMatchObject({ schema: "context.v1", scope: "batch", cells: [], params: { poll_s: 1 }, lane: { name: "lane-a" } })
+    expect(opened.window.end).toBeUndefined()
+    expect(collected.cells.map((cell: Cell.Cell) => cell.id)).toEqual(["c1", "c2"])
+    expect(collected.window.start).toEqual(opened.window.start)
+    expect(collected.window.end.wall_ms).toBeGreaterThanOrEqual(opened.window.start.wall_ms)
+  })
+
+  it("reads its lines from stdout and SIPRIG_OUT: each cell's verification, attachment and key, the scope's line, a record", async () => {
+    const { root, rig } = await samples()
+    const cells = cellsUnder(root)
+    const { collected } = await runScope([instanceOf(rig, root, "tidy")], cells, { sink: () => Effect.void, locker: memoryLocker() })
+    const [tidy] = valueOf(collected)
+    const attachment = { name: "tidy", kind: "log", title: "its log", source: "tidy" }
+    for (const cell of cells) {
+      expect(tidy!.cells.get(cell.id)).toEqual({
+        verifications: [{ name: "tidy", source: "tidy", answer: "pass" }],
+        attachments: [{ ...attachment, file: `collected/tidy/${cell.id}.log` }]
+      })
+      const listed = Attachment.parse(fs.readFileSync(path.join(cell.dir, Attachment.FILE), "utf8"))
+      expect(listed).toEqual([{ ...attachment, file: `collected/tidy/${cell.id}.log` }])
+      expect(fs.readFileSync(path.join(cell.dir, listed[0]!.file), "utf8")).toBe(`log of ${cell.id}\n`)
+    }
+    expect(tidy!.scope.verifications).toEqual([{ name: "tidy", source: "tidy", answer: "fail", message: "the scope's own" }])
+    expect(tidy!.keys).toEqual(cells.map((cell) => ({ key: "trunk", cell: cell.id, values: ["t1"] })))
+    expect(tidy!.assigned).toEqual([{ record: { n: 1 }, cell: "c1" }])
+  })
+
+  it("answers not checkable, with what the collector said, for every verification it names on every cell when collect exits non-zero", async () => {
+    const { root, rig } = await samples()
+    const cells = cellsUnder(root)
+    const { events, sink } = collecting()
+    const { collected } = await runScope([instanceOf(rig, root, "failing-collect")], cells, { sink, locker: memoryLocker() })
+    const [failed] = valueOf(collected)
+    const log = path.join(root, "batch", "collectors", "failing-collect", "collect.log")
+    const message = `collect exited 3: the records store is down, its log ${log}`
+    const lines = ["records", "count"].map((name) => ({ name, source: "failing-collect", answer: "not-checkable", message }))
+    for (const cell of cells) {
+      expect(failed!.cells.get(cell.id)!.verifications).toEqual(lines)
+      expect(Verification.finalStatusOf(failed!.cells.get(cell.id)!.verifications)).toBe("unverified")
+    }
+    expect(failed!.scope.verifications).toEqual(lines)
+    expect(events.find((event) => event.phase === "failed")?.message).toBe(message)
+    expect(traceOf(root)).toEqual(["collect failing-collect", "close failing-collect"])
+  })
+
+  it("does not collect a collector whose open failed, answers not checkable with the open's message, and still closes it", async () => {
+    const { root, rig } = await samples()
+    const cells = cellsUnder(root)
+    const { collected } = await runScope([instanceOf(rig, root, "failing-open")], cells, { sink: () => Effect.void, locker: memoryLocker() })
+    const [failed] = valueOf(collected)
+    const log = path.join(root, "batch", "collectors", "failing-open", "open.log")
+    expect(failed!.cells.get("c1")!.verifications).toEqual([
+      { name: "failing-open", source: "failing-open", answer: "not-checkable", message: `open exited 2: no route to the store, its log ${log}` }
+    ])
+    expect(traceOf(root)).toEqual(["open failing-open", "close failing-open"])
+  })
+
+  it("kills a collect past its timeout with every process it started, and answers not checkable", async () => {
+    const { root, rig } = await samples()
+    const cells = cellsUnder(root)
+    const { collected } = await runScope([instanceOf(rig, root, "hanging-collect")], cells, { sink: () => Effect.void, locker: memoryLocker() })
+    const [hung] = valueOf(collected)
+    expect(hung!.cells.get("c2")!.verifications[0]!.message).toMatch(/^collect timed out after 500 ms/)
+    const sleeper = Number(fs.readFileSync(path.join(root, "sleeper"), "utf8"))
+    expect(await goneWithin(sleeper)).toBe(true)
+  })
+
+  it("lets open leave a process running through the scope, which close ends", async () => {
+    const { root, rig } = await samples()
+    let duringScope: boolean | undefined
+    const body = Effect.sync(() => {
+      duringScope = alive(Number(fs.readFileSync(path.join(root, "sleeper"), "utf8")))
+    })
+    await runScope([instanceOf(rig, root, "leaves-process")], cellsUnder(root), { sink: () => Effect.void, locker: memoryLocker() }, body)
+    expect(duringScope).toBe(true)
+    const sleeper = Number(fs.readFileSync(path.join(root, "sleeper"), "utf8"))
+    expect(await goneWithin(sleeper)).toBe(true)
+  })
+
+  it("closes, in reverse order, when the scope fails after open, and does not collect", async () => {
+    const { root, rig } = await samples()
+    const { collected } = await runScope(
+      ["tidy", "leaves-process"].map((name) => instanceOf(rig, root, name)),
+      cellsUnder(root),
+      { sink: () => Effect.void, locker: memoryLocker() },
+      Effect.fail("the batch broke")
+    )
+    expect(collected).toEqual(Exit.fail("the batch broke"))
+    expect(traceOf(root)).toEqual(["open tidy open", "open leaves-process", "close leaves-process", "close tidy token close"])
+  })
+
+  it("closes when the scope is interrupted after open, and when an open under way is interrupted", async () => {
+    const { root, rig } = await samples()
+    const fiber = Effect.runFork(scope(
+      ["tidy", "slow-open"].map((name) => instanceOf(rig, root, name)),
+      cellsUnder(root),
+      { sink: () => Effect.void, locker: memoryLocker() },
+      Effect.never
+    ))
+    await Effect.runPromise(Effect.sleep(200))
+    await Effect.runPromise(Fiber.interrupt(fiber))
+    expect(traceOf(root)).toEqual(["open tidy open", "open slow-open", "close slow-open", "close tidy token close"])
+  })
+
+  it("marks the lab left changed when close fails twice, and closes the others still", async () => {
+    const { root, rig } = await samples()
+    const { events, sink, phases } = collecting()
+    const { leftChanged } = await runScope(
+      ["tidy", "failing-close", "flaky-close"].map((name) => instanceOf(rig, root, name)),
+      cellsUnder(root),
+      { sink, locker: memoryLocker() }
+    )
+    expect(leftChanged).toEqual(["failing-close"])
+    expect(phases().filter((phase) => /^(close|closed|failed|lab-left-changed) /.test(phase))).toEqual([
+      "close flaky-close",
+      "failed flaky-close",
+      "close flaky-close",
+      "closed flaky-close",
+      "close failing-close",
+      "failed failing-close",
+      "close failing-close",
+      "failed failing-close",
+      "lab-left-changed failing-close",
+      "close tidy",
+      "closed tidy"
+    ])
+    expect(events.find((event) => event.phase === "lab-left-changed")?.message).toMatch(/^2 close attempts failed, the last: close exited 1/)
+  })
+
+  it.each([
+    ["not-json", "collect: its stdout line 1: not JSON"],
+    ["stranger", "collect: its stdout line 1: answers someone-else, which its manifest does not name"],
+    ["wrong-cell", "collect: its stdout line 1: names the cell c9, which is not one of its scope"],
+    ["lost-file", "collect: its stdout line 1: attaches gone.log, which is no file under SIPRIG_OUT"]
+  ])("answers not checkable where %s answers a line that is none of its", async (name, message) => {
+    const { root, rig } = await samples()
+    const { collected } = await runScope([instanceOf(rig, root, name)], cellsUnder(root), { sink: () => Effect.void, locker: memoryLocker() })
+    const [read] = valueOf(collected)
+    expect(read!.cells.get("c1")!.verifications).toEqual([{ name, source: name, answer: "not-checkable", message }])
+  })
+
+  it("holds its locks from open to close: a second scope naming one runs none of its steps and is not checkable", async () => {
+    const { root, rig } = await samples()
+    const locker = memoryLocker()
+    const options = { sink: () => Effect.void, locker }
+    const second = { ...instanceOf(rig, root, "locked"), label: "locked again", dir: path.join(root, "second") }
+    let inner: Exit.Exit<ReadonlyArray<CollectorRun.Collected>, unknown> | undefined
+    const body = Effect.gen(function*() {
+      inner = (yield* scope([second], cellsUnder(root), options)).collected
+    })
+    await runScope([instanceOf(rig, root, "locked")], cellsUnder(root), options, body)
+    const [refused] = valueOf(inner!)
+    expect(refused!.cells.get("c1")!.verifications).toEqual([
+      { name: "locked", source: "locked", answer: "not-checkable", message: "its locks not taken: records-chain is held by locked" }
+    ])
+    expect(traceOf(root)).toEqual(["open locked", "collect locked", "close locked"])
+    const third = await runScope([second], cellsUnder(root), options)
+    valueOf(third.collected)
+    expect(traceOf(root).slice(3)).toEqual(["open locked", "collect locked", "close locked"])
+  })
+})

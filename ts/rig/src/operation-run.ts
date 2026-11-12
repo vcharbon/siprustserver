@@ -120,7 +120,7 @@ const step = (instance: Instance, file: string, name: "inject" | "heal" | "probe
   const layout = layoutOf(instance)
   const log = path.join(instance.dir, `${name}.log`)
   return Effect.map(
-    Executable.run({ dir: instance.operation.dir, file, ...layout, timeoutMs, log }),
+    Executable.run({ dir: instance.operation.dir, file, ...layout, step: name, timeoutMs, log }),
     (ended) => ({ ended, said: `${Executable.describe(ended)}, its log ${log}` })
   )
 }

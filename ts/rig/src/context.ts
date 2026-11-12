@@ -17,7 +17,9 @@ export const SCHEMA = "context.v1"
 export const VARIABLES = {
   context: "SIPRIG_CONTEXT",
   out: "SIPRIG_OUT",
-  state: "SIPRIG_STATE"
+  state: "SIPRIG_STATE",
+  /** The step of its manifest the executable runs as, so one file may serve several. */
+  step: "SIPRIG_STEP"
 } as const
 
 /** A part the lane names: the file it is read from and its value, valid against its kind's schema. */

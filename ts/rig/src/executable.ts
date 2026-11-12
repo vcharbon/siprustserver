@@ -1,7 +1,8 @@
 /**
  * One executable of the rig path run as ADR-0060 appendix §2 states it: its
- * own directory as working directory, `SIPRIG_CONTEXT`, `SIPRIG_OUT` and
- * `SIPRIG_STATE` set, its stdout and stderr appended to one log file. It runs
+ * own directory as working directory, `SIPRIG_CONTEXT`, `SIPRIG_OUT`,
+ * `SIPRIG_STATE` and `SIPRIG_STEP` set, its stderr appended to a log file and
+ * its stdout too, unless the caller reads its stdout's lines apart. It runs
  * in a process group of its own: a signal sent to the runner's group never
  * reaches it, and its timeout or the runner's interruption kills the whole
  * group. A process it leaves running after it exits is left alone: an
@@ -25,9 +26,13 @@ export interface Invocation {
   readonly out: string
   /** The directory kept from `inject` to `heal`, or from `open` to `close`. */
   readonly state: string
+  /** The step of its manifest it runs as (`open`, `collect`, `inject` …), its `SIPRIG_STEP`. */
+  readonly step: string
   readonly timeoutMs: number
-  /** The file its stdout and stderr are appended to. */
+  /** The file its stderr is appended to, and its stdout where {@link Invocation.stdout} is absent. */
   readonly log: string
+  /** The file its stdout is written to, emptied first: the lines it answers. */
+  readonly stdout?: string
 }
 
 /** How an executable ended. */
@@ -73,25 +78,29 @@ export const run = (invocation: Invocation): Effect.Effect<Ended> =>
       resumed = true
       resumeOnce(effect)
     }
-    let log: number
+    const opened: Array<number> = []
     try {
-      log = fs.openSync(invocation.log, "a")
+      opened.push(fs.openSync(invocation.log, "a"))
+      if (invocation.stdout !== undefined) opened.push(fs.openSync(invocation.stdout, "w"))
     } catch (error) {
-      resume(Effect.succeed({ _tag: "Unstarted", reason: `its log ${invocation.log}: ${(error as Error).message}` }))
+      for (const fd of opened) fs.closeSync(fd)
+      resume(Effect.succeed({ _tag: "Unstarted", reason: `its output files: ${(error as Error).message}` }))
       return
     }
+    const [log, stdout = log] = opened as [number, number?]
     const child = spawn(path.resolve(invocation.dir, invocation.file), [], {
       cwd: invocation.dir,
       detached: true,
-      stdio: ["ignore", log, log],
+      stdio: ["ignore", stdout, log],
       env: {
         ...process.env,
-        [VARIABLES.context]: invocation.context,
-        [VARIABLES.out]: invocation.out,
-        [VARIABLES.state]: invocation.state
+        [VARIABLES.context]: path.resolve(invocation.context),
+        [VARIABLES.out]: path.resolve(invocation.out),
+        [VARIABLES.state]: path.resolve(invocation.state),
+        [VARIABLES.step]: invocation.step
       }
     })
-    fs.closeSync(log)
+    for (const fd of opened) fs.closeSync(fd)
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true

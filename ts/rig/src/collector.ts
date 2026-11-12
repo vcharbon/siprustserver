@@ -66,6 +66,27 @@ export const Collector = Schema.Struct({
 })
 export interface Collector extends Schema.Schema.Type<typeof Collector> {}
 
+/** Each timeout of a collector, in seconds. */
+export interface Bounds {
+  readonly open_s: number
+  readonly collect_s: number
+  readonly close_s: number
+}
+
+/** The timeouts a collector takes where its manifest states none. */
+export const DEFAULT_BOUNDS: Bounds = { open_s: 30, collect_s: 300, close_s: 30 }
+
+/** The timeouts of `collector`: its manifest's, each default where it states none. */
+export const boundsOf = (collector: Collector): Bounds => ({ ...DEFAULT_BOUNDS, ...collector.timeouts })
+
+/**
+ * The verifications a failed `open` or `collect` of `collector` answers `not
+ * checkable`: those it names, or its own name where it names none, so its
+ * cells never read as verified by a collector that did not run.
+ */
+export const answeredBy = (collector: Collector): ReadonlyArray<string> =>
+  collector.answers === undefined || collector.answers.length === 0 ? [collector.name] : collector.answers
+
 /** The executables a collector names, by the step that runs each. */
 export const executablesOf = (collector: Collector): ReadonlyArray<readonly [string, string]> =>
   (["open", "collect", "close"] as const).flatMap((step) => {

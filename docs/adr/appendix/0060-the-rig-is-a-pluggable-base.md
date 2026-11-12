@@ -31,11 +31,13 @@ An executable runs with its own directory as working directory and these variabl
 |---|---|
 | `SIPRIG_CONTEXT` | a JSON file it reads (`context.v1`): the scope, its window, the cells (item 6), the lane (its name, clock, SIP target and backend, as the base reads them) and its parts, its parameters |
 | `SIPRIG_OUT` | a directory it writes attachment files into |
-| `SIPRIG_STATE` | a directory kept from `open` to `close` of one scope, or from `inject` to `heal`; an `inject` finds it empty and its context fresh |
+| `SIPRIG_STATE` | a directory kept from `open` to `close` of one scope, or from `inject` to `heal`; an `open` or `inject` finds it empty and its context fresh |
+| `SIPRIG_STEP` | the step it runs as (`open`, `collect`, `close`, `inject`, `heal`, `probe`), so one file may serve several |
 
-It answers on stdout, one JSON object per line. Exit status 0 means it did its work. Any other
-status, or the manifest's timeout, means it did not. `open` and `inject` may leave a process
-running; `close` and `heal` end it.
+It answers on stdout, one JSON object per line, or in `lines.jsonl` under `SIPRIG_OUT`; its
+stderr goes to the step's log. Exit status 0 means it did its work. Any other status, or the
+manifest's timeout, means it did not, and the base quotes the log's last line. `open` and
+`inject` may leave a process running; `close` and `heal` end it.
 
 ## 3. The order of a job
 
@@ -130,8 +132,15 @@ Rules:
   is collected `always` and cut per cell.
 - An `on-demand` collector runs when the site or the CLI asks for it, on the cells named.
 - A failed or timed-out `open` or `collect` answers `not checkable` for every verification the
-  manifest names, on every cell of the scope.
-- A `close` that fails is run once more. A second failure marks the job *lab left changed*.
+  manifest names, or for one named after the collector where it names none, on every cell of
+  the scope and on the scope, quoting what failed. So does a line of `collect` that is none of
+  the table below, names a cell outside the scope or a verification the manifest does not name,
+  or attaches no file under `SIPRIG_OUT`.
+- `close` runs whatever ended the scope, after a failed or interrupted `open` too. A `close`
+  that fails is run once more. A second failure marks the job *lab left changed*.
+- `locks` are taken before `open` and given back after `close`. A collector whose locks are
+  refused runs none of its steps and answers `not checkable`.
+- Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
 - `after` orders collectors of one scope. A wider scope always runs after a narrower one ended
   and reads its keys and records without declaring it. An `after` naming a collector that is
   not wired on the lane orders nothing.
@@ -148,10 +157,12 @@ The lines of `collect`:
 | `{"record": {…}, "cell": "<id>"}` | a record the collector assigned itself |
 | `{"verification": "<name>", "cell": "<id>", "answer": "pass\|fail\|not-checkable", "message": "…", "detail": {…}}` | an answer; without `cell` it is the scope's own |
 | `{"key": "<name>", "cell": "<id>", "values": ["…"]}` | a key added to a cell |
-| `{"attachment": {"kind": "log", "title": "…", "file": "<path under SIPRIG_OUT>"}, "cell": "<id>"}` | an attachment; without `cell` it is the scope's own |
+| `{"attachment": {"kind": "log", "title": "…", "file": "<path under SIPRIG_OUT>"}, "cell": "<id>"}` | an attachment; without `cell` it is the scope's own; `name` defaults to the instance's (the collector's name, `-<lane>` added per part set) |
 
-The TypeScript helper `defineCollector` hides the files and the lines. A collector in another
-language needs no library.
+The base copies an attached file under its holder's `collected/<instance>/` and lists it in the
+holder's `attachments.jsonl` (§9). The TypeScript helper `defineCollector`
+(`@sip/rig/define-collector`) hides the files and the lines: one module serves every step,
+`SIPRIG_STEP` choosing. A collector in another language needs no library.
 
 ## 6. The join, the cell description and the judge
 
