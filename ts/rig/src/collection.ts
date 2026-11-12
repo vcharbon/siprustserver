@@ -6,7 +6,8 @@
  *
  * {@link check} runs before a job opens and refuses, naming the file, a level
  * or a lane that names a collector the path does not define, a level that sets
- * a `required` collector or a lane that excludes one, and a lane override of a
+ * a `required` collector or a lane that excludes one, a level that sets a
+ * pre-check `on-failure`, and a lane override of a
  * key the collector's manifest does not offer or of another type than the
  * manifest's value. A lane may tune a required collector's parameters: that
  * does not switch it off.
@@ -170,6 +171,9 @@ const checkLevel = (rig: RigPath, file: string, name: string, level: Level): Ref
       if (defined === undefined) return refuse([file], `${at}: names ${collector}, which no collector of the path defines`)
       if (Collector.isRequired(defined.manifest)) {
         return refuse([file, defined.file], `${at}: names ${collector}, a required collector no level sets`)
+      }
+      if (setting === "on-failure" && defined.manifest.at === "before") {
+        return refuse([file, defined.file], `${at}: names ${collector}, a pre-check, which runs before any cell failed`)
       }
       const earlier = seen.get(collector)
       if (earlier !== undefined) return refuse([file], `${at}: names ${collector}, which collection.${name}.${earlier} names too`)

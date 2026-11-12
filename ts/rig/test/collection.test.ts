@@ -2,7 +2,8 @@
  * A job's wiring is checked against the rig path before it opens: a
  * collection level or a lane naming a collector the path does not define is
  * refused naming the file, and so is a level setting a `required` collector, a
- * lane excluding one, and a lane override of a key the collector does not
+ * lane excluding one, a level setting a pre-check `on-failure`, and a lane
+ * override of a key the collector does not
  * offer or of another type than its manifest's value. The appendix's own
  * wiring holds.
  */
@@ -68,6 +69,17 @@ describe("the wiring of a job", () => {
   it("refuses a level setting a required collector, naming its manifest too", () => {
     expect(checked({ workspace: workspace(`[collection.quick]\nnever = ["records-chain"]\n`), lanes: [] }))
       .toBe("rig.toml and pack/collectors/records-chain/collector.toml: collection.quick.never: names records-chain, a required collector no level sets")
+  })
+
+  it("refuses a level setting a pre-check on-failure, and holds one setting it on-demand", () => {
+    const rig: RigPath = { ...RIG, collectors: new Map([...RIG.collectors, ["lab-up", defined("lab-up", { at: "before" })]]) }
+    const result = (text: string) => {
+      const checked = Collection.check(rig, { workspace: workspace(text), lanes: [] })
+      return Result.isFailure(checked) ? checked.failure.message : "holds"
+    }
+    expect(result(`[collection.quick]\n"on-failure" = ["lab-up"]\n`))
+      .toBe("rig.toml and pack/collectors/lab-up/collector.toml: collection.quick.on-failure: names lab-up, a pre-check, which runs before any cell failed")
+    expect(result(`[collection.quick]\n"on-demand" = ["lab-up"]\n`)).toBe("holds")
   })
 
   it("refuses a level setting one collector twice", () => {

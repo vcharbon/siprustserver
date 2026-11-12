@@ -62,7 +62,8 @@ job     collect and close the job collectors, join, judge
   `fail` does. A batch's pre-checks run before the lane stands anything.
 - An `on-demand` job pre-check runs only for a job that asks for it by name, as one guarding
   what only that kind of job does; a `not checkable` of one so asked refuses as a required
-  one's does.
+  one's does. The job's level decides it as any collector's: set `never`, the ask runs
+  nothing; set `always`, it runs unasked. No pre-check is `on-failure`.
 - A `required` pre-check, of either scope, that a real-clock lane of the job names no part of
   refuses the job before any pre-check runs, as a missing `required` claim does (item 4).
 - Provisioning is one phase the pack fills (`pack.toml`, `[provision]`), once per job.
@@ -381,8 +382,8 @@ poll_s = 2
 A level sets a collector to `always`, `on-failure`, `on-demand` or `never`; one it does not
 name keeps its manifest's `default`. A job takes the level its `--collection` names, else the
 file's `default`, else `standard` (every collector's own default). A level or a lane that names
-a `required` collector, or a name the path does not define, and a `--collection` naming no
-level of the file, refuse the job before it opens.
+a `required` collector, or a name the path does not define, a level setting a pre-check
+`on-failure`, and a `--collection` naming no level of the file, refuse the job before it opens.
 
 ## 11. The lane file
 

@@ -82,6 +82,16 @@ describe("collector.v1", () => {
       .toBe("accepted")
   })
 
+  it("refuses a pre-check whose default is on-failure", () => {
+    const before = COLLECTOR.replace(`at       = "after"`, `at = "before"`)
+      .replace(`open    = "./open"\n`, "")
+      .replace(`judge    = "call-records"\n`, "")
+      .replace(`[join]\nkey = "call_id"\n`, "")
+    expect(refusalOf(Collector.parse("c/collector.toml", before.replace(`default  = "always"`, `default = "on-failure"`))))
+      .toBe("c/collector.toml: default: a pre-check runs before any cell failed, never on-failure")
+    expect(refusalOf(Collector.parse("c/collector.toml", before.replace(`default  = "always"`, `default = "on-demand"`)))).toBe("accepted")
+  })
+
   it("refuses a required collector whose default is not always", () => {
     const text = COLLECTOR.replace("required = false", "required = true").replace(`default  = "always"`, `default = "on-demand"`)
     expect(refusalOf(Collector.parse("c/collector.toml", text))).toBe("c/collector.toml: default: a required collector runs always, not on-demand")

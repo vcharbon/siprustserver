@@ -107,6 +107,9 @@ const meaningOf = (collector: Collector): string | undefined => {
   if (collector.at === "before" && collector.run.open !== undefined) return "run.open: a pre-check has no open"
   if (collector.at === "before" && collector.judge !== undefined) return "judge: a pre-check's lines are its own, no judge decides them"
   if (collector.at === "before" && collector.join !== undefined) return "join: a pre-check runs over no cell, it joins nothing"
+  if (collector.at === "before" && collector.default === "on-failure") {
+    return "default: a pre-check runs before any cell failed, never on-failure"
+  }
   if (collector.required === true && collector.default !== undefined && collector.default !== "always") {
     return `default: a required collector runs always, not ${collector.default}`
   }
