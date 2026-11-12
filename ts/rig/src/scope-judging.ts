@@ -60,7 +60,7 @@ export interface ExportJudges {
 /** One collector of the scope as the scope collects it. */
 export interface Step {
   readonly instance: CollectorRun.Instance
-  /** Its collect over the scope's cells as they stand, each read by it where it collects it. */
+  /** Its collect over the scope's cells as the earlier steps left them, those of its lanes. */
   readonly collect: (cells: ReadonlyArray<Cell.Cell>) => Effect.Effect<CollectorRun.Collected>
 }
 

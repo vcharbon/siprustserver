@@ -98,8 +98,9 @@ export interface Answers {
   readonly attachments: ReadonlyArray<Attachment.Attachment>
 }
 
-/** What one instance's `collect` came to. */
+/** What one instance's `collect` came to, or one judge's run, or a name's exports judged alone (`scope-judging.ts`). */
 export interface Collected {
+  /** The instance's label; `judge <judge> of <name>` for a judge's run; `exports <name>` for exports judged alone. */
   readonly label: string
   /** The scope's own answers. */
   readonly scope: Answers

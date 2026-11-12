@@ -144,7 +144,7 @@ const linesOf = (request: Request, text: string, writer: Attached.Writer): Resul
   return Result.succeed(parsed.success.map(({ line }) => line))
 }
 
-/** The label a judge's answers go by: `judge <name>` of the records it judged. */
+/** The label a judge's answers go by: `judge <judge> of <name>`, `name` the records it judged. */
 export const labelOf = (judge: string, name: string): string => `judge ${judge} of ${name}`
 
 /** `not checkable`, saying `message`, for each verification `request` may answer, on every cell and on the scope. */
