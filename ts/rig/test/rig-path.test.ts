@@ -205,7 +205,7 @@ describe("the rig path", () => {
     expect(await refusalOf({ workspace: siblings })).toBeUndefined()
   })
 
-  it("refuses a lock named by a batch and a cell collector", async () => {
+  it("refuses a cell collector naming a lock, before any batch collector naming it", async () => {
     const workspace = root({
       "collectors/lab-log/collector.toml": collector("lab-log", `locks = ["lab"]`),
       "collectors/lab-log/collect": SCRIPT,
@@ -213,7 +213,9 @@ describe("the rig path", () => {
         `schema = "collector.v1"\nname = "cell-probe"\nscope = "cell"\nlocks = ["lab"]\n[run]\ncollect = "./collect"\n`,
       "collectors/cell-probe/collect": SCRIPT
     })
-    expect((await refusalOf({ workspace }))?.reason).toMatch(/^locks: lab is named by the cell collector cell-probe and the batch collector lab-log/)
+    const refusal = await refusalOf({ workspace })
+    expect(refusal?.files).toEqual([path.join(workspace, "collectors/cell-probe/collector.toml")])
+    expect(refusal?.reason).toMatch(/^locks: a cell-scope collector takes no box-wide lock/)
   })
 
   it("loads an empty workspace and a pack with empty plug-in directories", async () => {

@@ -51,7 +51,7 @@ export const Collector = Schema.Struct({
   answers: Schema.optionalKey(Schema.Array(Name)),
   /** The judge of the path that decides over its records. */
   judge: Schema.optionalKey(Name),
-  /** Box-wide locks held from `open` to `close`. */
+  /** Box-wide locks held from `open` to `close`; none on a cell-scope collector. */
   locks: Schema.optionalKey(Schema.Array(Name)),
   /** Cell scope: wall-clock seconds after the cell ended before it runs. */
   delay_s: Schema.optionalKey(Seconds),
@@ -102,6 +102,9 @@ const meaningOf = (collector: Collector): string | undefined => {
   if (collector.scope !== "cell" && collector.delay_s !== undefined) return "delay_s: only a cell-scope collector is delayed"
   if (collector.scope !== "cell" && collector.holds_cell_locks !== undefined) {
     return "holds_cell_locks: only a cell-scope collector holds a cell's locks"
+  }
+  if (collector.scope === "cell" && (collector.locks ?? []).length > 0) {
+    return "locks: a cell-scope collector takes no box-wide lock, which it would hold over the lane's next cells"
   }
   if (collector.at === "before" && collector.scope === "cell") return "at: a pre-check is of job or batch scope"
   if (collector.at === "before" && collector.run.open !== undefined) return "run.open: a pre-check has no open"
