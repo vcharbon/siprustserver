@@ -54,7 +54,8 @@ job     collect and close the job collectors, join, judge
         report, then heal the setup operations in reverse order
 ```
 
-- A pre-check is a job-scope or batch-scope collector with `at = "before"` and no `open`. A
+- A pre-check is a job-scope or batch-scope collector with `at = "before"` and no `open`,
+  `judge` or `[join]`: it runs over no cell, and no judge, of exports included, decides it. A
   `fail` it answers refuses the job or the batch before any call, with its message on the job
   (an event `refused`). A `not checkable` refuses nothing and stays the scope's line, except a
   `required` pre-check's: that one, its failed or timed-out `collect` included, refuses as a
