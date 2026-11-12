@@ -313,6 +313,52 @@ importers:
         specifier: 4.1.11
         version: 4.1.11(@types/node@24.10.1)(vite@8.2.2(@types/node@24.10.1)(tsx@4.20.6))
 
+  siprig:
+    dependencies:
+      '@effect/platform-node':
+        specifier: 4.0.0-rc.111
+        version: 4.0.0-rc.111(effect@4.0.0-rc.111)(redis@6.2.1)
+      '@sip/cli':
+        specifier: workspace:*
+        version: link:../cli
+      '@sip/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@sip/corpus':
+        specifier: workspace:*
+        version: link:../corpus
+      '@sip/lab-host':
+        specifier: workspace:*
+        version: link:../lab-host
+      '@sip/rig':
+        specifier: workspace:*
+        version: link:../rig
+      '@sip/site':
+        specifier: workspace:*
+        version: link:../site
+      '@sip/store':
+        specifier: workspace:*
+        version: link:../store
+      '@sip/workspace':
+        specifier: workspace:*
+        version: link:../workspace
+      effect:
+        specifier: 4.0.0-rc.111
+        version: 4.0.0-rc.111
+      tsx:
+        specifier: 4.20.6
+        version: 4.20.6
+    devDependencies:
+      '@types/node':
+        specifier: 24.10.1
+        version: 24.10.1
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@24.10.1)(vite@8.2.2(@types/node@24.10.1)(tsx@4.20.6))
+
   site:
     dependencies:
       '@sip/campaign-runner':

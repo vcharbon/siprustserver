@@ -1,0 +1,32 @@
+{
+  "name": "@sip/siprig",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The rig's base deployment: the image kit's reading of a pack manifest, and the workspace, store and site commands the base image runs for a pack that ships none of its own.",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@sip/cli": "workspace:*",
+    "@sip/contracts": "workspace:*",
+    "@sip/corpus": "workspace:*",
+    "@sip/lab-host": "workspace:*",
+    "@sip/rig": "workspace:*",
+    "@sip/site": "workspace:*",
+    "@sip/store": "workspace:*",
+    "@sip/workspace": "workspace:*",
+    "effect": "4.0.0-rc.111",
+    "tsx": "4.20.6"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -15,6 +15,7 @@ packages:
   - "lab-host"
   - "campaign-runner"
   - "site"
+  - "siprig"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false
