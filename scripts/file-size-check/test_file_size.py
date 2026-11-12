@@ -271,6 +271,18 @@ class AgainstTheBase(Case):
         repo.commit()
         self.assertEqual(repo.run("--base", "HEAD~1"), (0, ""))
 
+    def test_a_scan_directory_emptied_into_two_places_keeps_its_settings(self):
+        repo = self.repo(SETTINGS + "src/big.rs 600\n")
+        repo.write("src/big.rs", lines(600))
+        repo.write("src/a.rs", "fn a() {}\n")
+        repo.commit()
+        os.makedirs(os.path.join(repo.root, "lib"))
+        os.makedirs(os.path.join(repo.root, "other"))
+        repo.git("mv", "src/big.rs", "lib/big.rs")
+        repo.git("mv", "src/a.rs", "other/b.rs")
+        repo.write("file-size.allow", SETTINGS.replace("src", "lib") + "lib/big.rs 600\n")
+        self.refused(repo, "changes its settings")
+
     def test_a_scan_directory_renamed_in_part_keeps_its_settings(self):
         repo = self.repo(SETTINGS + "src/big.rs 600\n")
         repo.write("src/big.rs", lines(600))
