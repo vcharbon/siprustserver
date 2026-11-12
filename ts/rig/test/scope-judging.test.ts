@@ -8,9 +8,11 @@
  * a cell by its directory read as that cell, an unreadable line skipped and
  * its name `not checkable` where it was; a judge that fails in any way (exits
  * non-zero, returns no lines, dies, rejects, answers what is not its, times
- * out) and a verification nobody answered, `not checkable`; an executable
+ * out), a collector whose open or collect failed, its judge not run over its
+ * cells, and a verification nobody answered, `not checkable`; an executable
  * judge's lines read on its stdout and in its `lines.jsonl`.
  */
+import { Verification } from "@sip/contracts"
 import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
 import * as fs from "node:fs"
@@ -568,6 +570,32 @@ fs.writeFileSync(require("node:path").join(process.env.SIPRIG_OUT, "lines.jsonl"
       [{ name: "exp", source: "exp", answer: "pass" }],
       [{ name: "exp", source: "exp", answer: "not-checkable", message: "nobody answered exp for the cell c2" }]
     ])
+  })
+
+  /** A collector `sums` keyed by Call-ID, its steps `steps`, whose executable judge `strict` fails every cell holding no record of it. */
+  const strictSums = (steps: Readonly<Record<string, string>>): Record<string, Entry> => ({
+    "collectors/sums/collector.toml": `schema = "collector.v1"\nname = "sums"\nscope = "batch"\njudge = "strict"\nanswers = ["sums"]\n` +
+      `[join]\nkey = "call_id"\n[run]\n${Object.keys(steps).map((step) => `${step} = "./${step}"\n`).join("")}`,
+    ...Object.fromEntries(Object.entries(steps).map(([step, body]) => [`collectors/sums/${step}`, { text: body, executable: true }])),
+    ...executableJudge(
+      "strict",
+      node(`
+const held = (file) => file !== undefined && fs.readFileSync(file, "utf8").trim() !== ""
+for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "sums", cell: cell.id, answer: held(cell.records.sums) ? "pass" : "fail" }))
+`)
+    )
+  })
+
+  it.each([
+    ["its collect exits non-zero", { collect: `#!/bin/sh\necho "the store is gone" >&2\nexit 3\n` }, "collect exited 3: the store is gone"],
+    ["its open exits non-zero", { open: `#!/bin/sh\necho "no route to the store" >&2\nexit 2\n`, collect: `#!/bin/sh\n` }, "open exited 2: no route to the store"]
+  ])("is not checkable, its judge not run, on every cell a collector did not collect because %s", async (_, steps, why) => {
+    const { root, rig } = await loaded(strictSums(steps))
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]))
+    const failed = [expect.objectContaining({ name: "sums", source: "strict", answer: "not-checkable", message: expect.stringContaining(why) })]
+    expect([onCell(collected, "c1"), onCell(collected, "c2"), onScope(collected)]).toEqual([failed, failed, failed])
+    for (const id of ["c1", "c2"]) expect(Verification.finalStatusOf(onCell(collected, id))).toBe("unverified")
+    expect(collected.map((one) => one.label)).toEqual(["sums"])
   })
 
   it("is not checkable for each cell a collector's manifest names it on and nobody answered it, the cell's own lines counted", async () => {
