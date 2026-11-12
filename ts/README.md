@@ -1,6 +1,6 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Fifteen packages, four of them one layer each of the same stack:
+A pnpm workspace. Sixteen packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
@@ -15,6 +15,7 @@ A pnpm workspace. Fifteen packages, four of them one layer each of the same stac
 | `cli/` | `@sip/cli` | the command lines over `@sip/corpus`: flag sets and command builders taking a deployment's facts |
 | `rig/` | `@sip/rig` | the rig's plug-in contract (ADR-0060): the pack, collector, judge and operation manifests, the rig path that finds them, the collection levels and lane wiring checked before a job opens, and the `cell.v1` description built from a cell's bundle |
 | `basic-case/` | `@sip/basic-case` | the minimal case form: two parties as plain SIP addresses, the basic call and the rejected INVITE on a pivot step builder, compiled to the cells a case source yields |
+| `case-modules/` | `@sip/case-modules` | a workspace's TypeScript case files as modules of a tooling's SDK: imported at their on-disk version with the SDK's specifier resolved to the tooling's own entry, typechecked against the SDK's declaration text alone, and that text generated from the tooling's sources — on the TypeScript compiler and node's module hooks, no other package of this workspace |
 | `workspace/` | `@sip/workspace` | one directory holding a tooling's roots, its store and its one configuration file: its layout and the environment it states, the campaigns and tags it defines, the site's public URL, and the workspace as a run's provenance |
 | `lab-host/` | `@sip/lab-host` | the host a lab runs on: its user session and the boxes its children run in, its binaries built under one box-wide lock, its roots and env files, its inbox, its run bundles, the checks a lane owes before it is driven, and the batch and SUT processes a hosted lane stands |
 | `campaign-runner/` | `@sip/campaign-runner` | a campaign run over a pack's cases: its cells compiled and replayed on each lane under their locks and the lane's pacing, retried, judged into verification lines, recorded in the store's campaign record, and reported (JUnit included) |

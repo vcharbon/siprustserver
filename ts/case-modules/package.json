@@ -1,0 +1,26 @@
+{
+  "name": "@sip/case-modules",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "A workspace's TypeScript case files as modules: imported at their on-disk version with the SDK module they name resolved to the tooling's own entry, typechecked against the SDK's declaration text alone, and that text generated from the tooling's sources.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "effect": "4.0.0-rc.111",
+    "typescript": "5.9.3"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "vitest": "4.1.11"
+  }
+}
