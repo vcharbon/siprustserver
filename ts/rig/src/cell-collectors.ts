@@ -215,10 +215,11 @@ export const make = (plan: CollectorPlan.CellPlan, options: CollectorRun.Options
       Effect.gen(function*() {
         const all = [...forks]
         yield* Effect.timeoutOption(Fiber.awaitAll(all.map((forked) => forked.fiber)), Duration.millis(Math.max(0, ms)))
-        const late = all.filter((forked) => forked.fiber.pollUnsafe() === undefined)
-        yield* Fiber.interruptAll(late.map((forked) => forked.fiber))
-        yield* Effect.forEach(late.flatMap((forked) => forked.instances), (instance) => say(options.sink, instance.label, "failed", why), { discard: true })
-        return all.flatMap((forked) => (late.includes(forked) ? notCheckableOf(forked.instances, forked.cell, why) : outcomeOf(forked, forked.fiber.pollUnsafe()!, INTERRUPTED)))
+        const running = all.filter((forked) => forked.fiber.pollUnsafe() === undefined)
+        yield* Fiber.interruptAll(running.map((forked) => forked.fiber))
+        const cut = running.filter((forked) => !Exit.isSuccess(forked.fiber.pollUnsafe()!))
+        yield* Effect.forEach(cut.flatMap((forked) => forked.instances), (instance) => say(options.sink, instance.label, "failed", why), { discard: true })
+        return all.flatMap((forked) => outcomeOf(forked, forked.fiber.pollUnsafe()!, cut.includes(forked) ? why : INTERRUPTED))
       })
 
     const settled = () =>
