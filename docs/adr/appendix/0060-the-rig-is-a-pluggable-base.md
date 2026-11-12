@@ -77,6 +77,10 @@ job     collect and close the job collectors, join, judge
 - A batch does not stand its system under test down before the delayed collectors of its cells
   have answered or reached their deadline: it joins them once its cells were driven, before
   its end gate reads. What they answered fails a cell for its batch's `on-failure` collectors.
+  A stopped batch waits for them to the end of the stop's grace, no longer: those still
+  running are cut short, closed, and answer `not checkable`. A batch that fails keeps what
+  they answered, and a landed cell whose collectors it cut short is answered `not checkable`
+  on their lines, never left passed.
 - A capture replay's run rows (one per capture and lane) are not a scope. Its job is.
 
 ## 4. Claims and exports
@@ -117,7 +121,7 @@ required = false               # true: no level and no lane switches it off
 after    = ["sut-log"]         # same scope: collectors whose keys and records it reads
 answers  = ["call-records"]    # the verifications it, or its judge, answers
 judge    = "call-records"      # optional
-locks    = ["records-chain"]   # box-wide, held from open to close
+locks    = ["records-chain"]   # box-wide, held from open to close; never at cell scope
 delay_s  = 10                  # cell scope: wall clock, after the cell ended
 holds_cell_locks = true        # cell scope: the cell's own locks are kept until it answered
 
@@ -170,7 +174,8 @@ Rules:
   `open`, given back after its last `close`, so collectors of one scope naming one lock share
   it. Where they are refused, each collector naming one runs none of its steps and answers
   `not checkable`. A lock named by collectors of two scopes is refused at load: the outer
-  scope's would hold it while the inner one's waits.
+  scope's would hold it while the inner one's waits. So is a lock a cell-scope collector
+  names: its scope lasts past the call to its delayed `collect`, over the lane's next cells.
 - A collector or judge named like a source the base (`interpreter`, `rfc audit`, `driver`, `rig`) answers lines
   as is refused at load. A collector's line merged into a landed cell replaces only a `pending`
   line of its name and source, never an answered one.
@@ -184,11 +189,13 @@ Rules:
 - A cell's collectors are one scope, in a directory of its own: opened before its call, each
   collecting `delay_s` (the lane's override first) after the call ended, on the lane's clock,
   then closed, while the lane runs its next cells. A line of their `collect` naming no cell is
-  the cell's. Their deadline is the longest `delay_s` plus `collect_s` among them after the
-  call ended: past it each answers `not checkable` on the cell and the scope closes.
-- `holds_cell_locks` keeps the cell's named locks (two cells holding one never run at once)
-  past its call's end, until its collectors answered or reached their deadline; its slot on
-  the lane is free at the call's end.
+  the cell's. Each has its own deadline, its `collect_s` from when it was due or, later, from
+  when the one collecting before it answered: past it, it answers `not checkable` on the cell
+  and the next one collects, what came in before kept. Their judges, run after, are each
+  bounded by their `judge_s`.
+- `holds_cell_locks` keeps the cell's named locks (two cells holding one never run at once),
+  and the lane of a cell that runs alone, past its call's end, until its collectors answered
+  or reached their deadlines and closed; its slot on the lane is free at the call's end.
 - No cell-scope collector runs on a simulated lane (item 12). A batch there says so of each one
   wired, an event `not-run` naming the collector and the lane, which refuses nothing.
 
