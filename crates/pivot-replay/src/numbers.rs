@@ -23,16 +23,17 @@ fn default_number(observed: Option<&str>, name: &str) -> String {
 }
 
 /// Allocate positions and bindings for `plan`, with `seed` (the run-spec's
-/// explicit bindings) winning per (name, form).
+/// explicit bindings) winning per (name, form). Every identity the registry
+/// declares is bound in every form it declares, dialled or not: a `${num:…}`
+/// may name a party no attempt dials (a Refer-To's transfer target), and an
+/// unbound identity refuses at emission. The positional map reads the merged
+/// binding, so an explicit run-spec number and the positional emission agree.
 pub fn lane_numbers(
     plan: &Plan,
     seed: IdentityBindings,
 ) -> (BTreeMap<String, String>, IdentityBindings) {
     let document = plan.document();
     let mut bindings = seed;
-    // EVERY identity the registry declares, in every form it declares: a
-    // `${num:…}` may name a party no attempt dials (a Refer-To's transfer
-    // target is exactly that), and an unbound identity refuses at emission.
     for identity in &document.identities {
         for form in &identity.forms {
             if bindings.resolve(&identity.name, form).is_err() {
@@ -41,8 +42,6 @@ pub fn lane_numbers(
             }
         }
     }
-    // The positional map reads the MERGED binding, so an explicit run-spec
-    // number and the composer's positional emission can never disagree.
     let resolved = |name: &str| -> Option<String> {
         let identity = document.identities.iter().find(|i| i.name == name)?;
         identity

@@ -123,9 +123,7 @@ pub fn audited(
             (finding, relayed)
         })
         .collect();
-    // A relayed statement cancels the SUT's finding only where this run shows
-    // the stated party breaking the rule too, cancelled by its own statement.
-    let committed: Vec<(String, String)> = read
+    let breaches_stated_by_their_party: Vec<(String, String)> = read
         .iter()
         .filter(|(f, _)| f.cancelled_by.is_some())
         .filter_map(|(f, _)| f.actor.clone().map(|actor| (f.rule.clone(), actor)))
@@ -134,7 +132,7 @@ pub fn audited(
         .into_iter()
         .map(|(mut finding, relayed)| {
             let Some(relayed) = relayed else { return finding };
-            if committed
+            if breaches_stated_by_their_party
                 .iter()
                 .any(|(rule, actor)| *rule == finding.rule && *actor == relayed.caused_by)
             {

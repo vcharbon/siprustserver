@@ -246,6 +246,8 @@ fn the_systems_relayed_finding_is_cancelled_as_caused_by_its_origin() {
 /// The document's relaying statement is not enough on its own: where the
 /// run holds no finding of the rule against the stated party — it did not
 /// commit the violation this time — the SUT's finding is its own and gates.
+/// Nor where the party's finding stands uncancelled: it is the party's source
+/// fault, and the SUT's copy of an unstated violation gates beside it.
 #[test]
 fn a_relayed_finding_whose_party_did_not_break_the_rule_in_the_run_gates() {
     let (all, entries, stated) = relaying_run();
@@ -258,9 +260,6 @@ fn a_relayed_finding_whose_party_did_not_break_the_rule_in_the_run_gates() {
         (None, None)
     );
 
-    // Nor where the party's finding stands uncancelled: it is the party's
-    // source fault, and the SUT's copy of an unstated violation gates
-    // beside it.
     let uncancelled = Stated {
         actors: BTreeMap::from([("ep0", "uac1")]),
         cancels: BTreeMap::from([(("payload-type-mapping-stable", "relayed"), "uac1")]),
@@ -544,7 +543,8 @@ fn a_sut_side_sub_lane_is_never_a_scripted_party() {
 /// The audit numbers its own wire order; the recording merges legs by instant,
 /// and two legs' datagrams may share one. The finding names the message as the
 /// recording holds it — its leg and that leg's seq — so a reader resolves the
-/// one message the rule meant, not the one at that merged index.
+/// one message the rule meant, not the one at that merged index. The wire
+/// order here is A's INVITE, B's INVITE, A's 100, all recorded at one instant.
 #[test]
 fn a_finding_names_its_offending_message_as_the_recording_holds_it() {
     use pivot_schema::bundle::{Dir, MessageRef};
@@ -552,7 +552,6 @@ fn a_finding_names_its_offending_message_as_the_recording_holds_it() {
     let trying_a = b"SIP/2.0 100 Trying\r\nCall-ID: a\r\nCSeq: 30 INVITE\r\n\r\n".to_vec();
     let invite_b = b"INVITE sip:c SIP/2.0\r\nCall-ID: b\r\nCSeq: 1 INVITE\r\n\r\n".to_vec();
     let wire = |raw: &Vec<u8>| RecordedSipEntry { raw: raw.clone(), ..entry("127.0.0.1:5071") };
-    // Wire order: A's INVITE, B's INVITE, A's 100 — all recorded at one instant.
     let entries = vec![wire(&invite_a), wire(&invite_b), wire(&trying_a)];
     let legs = BTreeMap::from([
         (
