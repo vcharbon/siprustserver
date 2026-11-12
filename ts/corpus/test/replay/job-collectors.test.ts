@@ -5,6 +5,8 @@
  * close that fails twice marks the job lab-left-changed. A job's pre-checks
  * refuse it with a fail's message, their lines kept before its collectors';
  * a real-clock lane naming no part a required pre-check needs refuses it.
+ * What either attaches to the job is held under its directory in the session
+ * tree, whatever directory the caller names.
  *
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  */
@@ -24,12 +26,15 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { Collectors, Roots } from "../../src/deployment/index.js"
+import * as Job from "../../src/jobs/job.js"
 import * as CollectorIo from "../../src/replay/collector-io.js"
 import * as JobCollectors from "../../src/replay/job-collectors.js"
 import * as PreChecks from "../../src/replay/pre-checks.js"
 
 const SCRATCH = await scratch("corpus_job_collectors_test")
 const TREE = fs.mkdtempSync(path.join(os.tmpdir(), "job-collectors-"))
+/** A directory outside the session tree {@link TREE}, as a caller may name the job's. */
+const ELSEWHERE = fs.mkdtempSync(path.join(os.tmpdir(), "job-collectors-elsewhere-"))
 const LANE = "lane-a"
 
 beforeAll(async () => {
@@ -40,6 +45,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   fs.rmSync(TREE, { recursive: true, force: true })
+  fs.rmSync(ELSEWHERE, { recursive: true, force: true })
   if (!served) return
   await drop(SCRATCH)
 }, 120_000)
@@ -145,6 +151,19 @@ const withStore = <A, E>(collectors: Layer.Layer<Collectors.Service>, effect: Ef
 
 const jobOf = Effect.flatMap(Jobs.Service, (jobs) => jobs.create({ kind: "campaign", args: {}, createdBy: "test" }))
 
+/** A step writing `job.log` under `SIPRIG_OUT` and attaching it to the job. */
+const ATTACHING = `echo job > "$SIPRIG_OUT/job.log"\necho '{"attachment":{"kind":"log","file":"job.log"}}'`
+
+/** What job `job` holds attached: each one's name, source, path and its file's content. */
+const jobAttachmentsOf = (job: number) =>
+  Effect.map(Effect.flatMap(Attachments.Service, (store) => store.of({ scope: "job", jobId: job })), (stored) =>
+    stored.map((one) => ({
+      name: one.name,
+      source: one.source,
+      path: one.path,
+      content: one.path === undefined ? undefined : fs.readFileSync(one.path, "utf8")
+    })))
+
 /** A run whose one cell `case-1` landed passing, its bundle stating its clock and window; the cell as the job ran it. */
 const landedCell = Effect.gen(function*() {
   const runs = yield* Runs.Service
@@ -211,6 +230,18 @@ describe.skipIf(!served)("a job's pre-checks", () => {
     expect(lab.trace()).toEqual(["pre-check", "open", "collect", "close"])
   })
 
+  it("attach their files to the job under its directory in the session tree, whatever directory the caller names", async () => {
+    const lab = await labOf({ collect: "exit 0", close: "exit 0", preCheck: ATTACHING })
+    const { job, attached } = await withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      yield* PreChecks.job({ job, dir: path.join(ELSEWHERE, `job${job}`), lanes: [LANE] })
+      return { job, attached: yield* jobAttachmentsOf(job) }
+    }))
+    expect(attached).toEqual([
+      { name: "lab-own", source: "lab-own", path: path.join(Job.jobDir(TREE, job), "collected", "lab-own", "job.log"), content: "job\n" }
+    ])
+  })
+
   it("refuse a real-clock lane that names no part a required pre-check needs, running none", async () => {
     const lab = await labOf({ collect: "exit 0", close: "exit 0", preCheck: "exit 0", needs: "records-store", clock: "real" })
     const refused = await withStore(lab.layer, Effect.gen(function*() {
@@ -257,6 +288,18 @@ describe.skipIf(!served)("a job's collectors", () => {
     ])
     expect(jobLines).toEqual([{ name: "lab-check", source: "lab", answer: "pass" }])
     expect(lab.trace()).toEqual(["open", "collect", "close"])
+  })
+
+  it("attach their files to the job under its directory in the session tree, whatever directory the caller names", async () => {
+    const lab = await labOf({ collect: ATTACHING, close: "exit 0" })
+    const { job, attached } = await withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      yield* JobCollectors.around({ job, dir: path.join(ELSEWHERE, `job${job}`), lanes: [LANE], cells: () => [] }, Effect.void)
+      return { job, attached: yield* jobAttachmentsOf(job) }
+    }))
+    expect(attached).toEqual([
+      { name: "lab", source: "lab", path: path.join(Job.jobDir(TREE, job), "collected", "lab", "job.log"), content: "job\n" }
+    ])
   })
 
   it("state in their contexts the cells their caller plans, and none where it plans none", async () => {
