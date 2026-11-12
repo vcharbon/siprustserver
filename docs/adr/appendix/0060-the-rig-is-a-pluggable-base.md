@@ -431,7 +431,6 @@ name    = "reference"
 title   = "siprig reference"
 wrapper = "rigref"
 component = "rigref"           # the product's component name; absent, the pack's name
-sources = ["records-check"]    # sources the pack's own code answers lines as; no collector's name
 [image]
 packages = []                  # OS packages the pack's image adds
 binaries = "./bin"             # product binaries, the replay one included when it registers
