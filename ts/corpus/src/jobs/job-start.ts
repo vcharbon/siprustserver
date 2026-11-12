@@ -43,7 +43,7 @@ export interface ReplayKnobs {
   readonly after: number | null
   /** Drive the lane even where it lacks a capability a capture replay needs; the runs are recorded forced. */
   readonly force: boolean
-  /** The collection level the replay takes (`--collection`); `null`, the workspace's default. */
+  /** The collection level the replay takes (`--collection`); `null`, the level its entry point provides, else the workspace's default. */
   readonly collection: string | null
 }
 
@@ -207,8 +207,8 @@ const deleteArgs = (id: number, request: DeleteRequest): ReadonlyArray<string> =
  * What a campaign job is asked: the campaign, its lanes, one case (by its
  * test id) and one of its sub-cases or every case, whether the system's data
  * is rebuilt from scratch before the run, the case tags it takes on the
- * lanes that exclude them, and its collection level (`null`, the workspace's
- * default).
+ * lanes that exclude them, and its collection level (`null`, the level its
+ * entry point provides, else the workspace's default).
  */
 export interface CampaignRequest {
   readonly capture: string
