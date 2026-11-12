@@ -19,7 +19,10 @@
  *    name), what it answers `not checkable` on each cell of its lane the base
  *    could not describe, whether or not an export of its name was read. A judge whose
  *    records the base could not all write does not run: its verifications are
- *    `not checkable` on every cell and the scope.
+ *    `not checkable` on every cell and the scope. A judge judges no cell of an
+ *    instance whose `open` or `collect` failed (`Stepped.failed`): those keep
+ *    its `not checkable` lines alone; where every instance failed, it does
+ *    not run.
  * 5. Where the scope's input was not handed whole (an export line, file or
  *    directory skipped, `Exports.Unread`; a cell the base could not describe;
  *    keys or records the base could not write), every `pass` the scope's
@@ -90,6 +93,12 @@ export interface Stepped {
    * promise covers those alone. Every cell of its lanes where absent.
    */
   readonly read?: ReadonlyArray<string> | undefined
+  /**
+   * Why it collected nothing, where its `open` or its `collect` failed or
+   * died: the cells it was to read keep its `not checkable` lines alone, its
+   * judge judging none of them.
+   */
+  readonly failed?: string | undefined
 }
 
 /** One collector of the scope as the scope collects it. */
@@ -291,10 +300,12 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
         return joinedOf
       })
     const readBy = new Map<Step, ReadonlyArray<string> | undefined>()
+    const failedSteps = new Set<Step>()
     for (const step of request.steps) {
       const stepped = yield* step.collect(cells, [...collected])
       const one = stepped.collected
       readBy.set(step, stepped.read)
+      if (stepped.failed !== undefined) failedSteps.add(step)
       const before = cells
       cells = yield* kept(`${one.label}: its keys`, () => CellRecords.withKeys(before, one.keys), before)
       const { instance } = step
@@ -312,9 +323,12 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
       const over = ofName.flatMap((other) => collectedBy(other.instance, cells, readBy.get(other)))
       const held = yield* joinOf(one.label, name, instance.collector.manifest.join?.key, over, recordsOf(sameName, exports))
       entry({ ...one, scope: { ...one.scope, attachments: [...one.scope.attachments, ...held.attachments] } }, instance, promise)
+      const collectedOf = ofName.filter((other) => !failedSteps.has(other))
+      if (collectedOf.length === 0) continue
+      const judged = collectedOf.flatMap((other) => collectedBy(other.instance, cells, readBy.get(other)))
       joined.push({
         name,
-        cells: over.map((cell) => cell.id),
+        cells: judged.map((cell) => cell.id),
         judge: instance.judge,
         answers: Collector.answeredBy(instance.collector.manifest),
         scope: instance.scope,

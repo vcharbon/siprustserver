@@ -13,7 +13,7 @@
  * A failed or timed-out `open` or `collect` answers `not checkable`, with
  * what failed, for every verification its manifest names
  * (`Collector.answeredBy`) on every cell of its scope and on the scope
- * itself. A `close` that fails is run once more; a second failure is the
+ * itself, and its judge does not judge those cells. A `close` that fails is run once more; a second failure is the
  * event `lab-left-changed`, the job's mark. The scope's collect, its records
  * joined and judged, is `scope-judging.ts`'s.
  */
@@ -436,14 +436,26 @@ const applied = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, lines: Rea
  */
 const dropOut = (instance: Instance) => Effect.ignore(Effect.try(() => fs.rmSync(layoutOf(instance).out, { recursive: true, force: true })))
 
+/** What one collect came to: its answers, and why it collected nothing where its open or its collect failed. */
+interface Outcome {
+  readonly collected: Collected
+  readonly failed?: string | undefined
+}
+
+/** `instance`'s outcome where it could not collect over `cells`: {@link notCheckable}, `message` the why. */
+const notCollected = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, message: string): Outcome => ({
+  collected: notCheckable(instance, cells, message),
+  failed: message
+})
+
 /** `opening`'s collect over `scopeCells`: its answers, or `not checkable` where it did not open or its collect failed. */
-const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell.Cell>) =>
+const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell.Cell>): Effect.Effect<Outcome> =>
   Effect.gen(function*() {
     const { instance } = opening
     const cells = cellsOf(instance, scopeCells)
-    if (opening.failure !== undefined) return notCheckable(instance, cells, opening.failure)
+    if (opening.failure !== undefined) return notCollected(instance, cells, opening.failure)
     const manifest = instance.collector.manifest
-    const failed = (message: string) => Effect.as(emit(sink, instance, "failed", message), notCheckable(instance, cells, message))
+    const failed = (message: string) => Effect.as(emit(sink, instance, "failed", message), notCollected(instance, cells, message))
     yield* emit(sink, instance, "collect")
     const at = yield* now
     const end = opening.end ?? { lane_ms: at.clock_ms, wall_ms: at.wall_ms }
@@ -464,22 +476,23 @@ const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell
     if (Result.isFailure(done)) return yield* failed(`collect ${done.failure}`)
     yield* dropOut(instance)
     yield* emit(sink, instance, "collected")
-    return done.success
+    const outcome: Outcome = { collected: done.success }
+    return outcome
   })
 
 /** {@link collectOne}, a defect of the base's own reading (a file going between its check and its read) answered `not checkable` saying it died. */
-const collectGuarded = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell.Cell>) =>
+const collectGuarded = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell.Cell>): Effect.Effect<Outcome> =>
   Effect.catchDefect(collectOne(opening, sink, scopeCells), (defect) => {
     const message = `collect died: ${errorText(defect)}`
-    return Effect.as(emit(sink, opening.instance, "failed", message), notCheckable(opening.instance, cellsOf(opening.instance, scopeCells), message))
+    return Effect.as(emit(sink, opening.instance, "failed", message), notCollected(opening.instance, cellsOf(opening.instance, scopeCells), message))
   })
 
 /**
  * {@link collectGuarded}, where `options.due` is given awaited first, then
  * bounded by the instance's `collect_s` from the instant it ended: past it the
- * collect is interrupted and its cells answered `not checkable`, saying so.
+ * collect is interrupted and its cells answered `not checkable`, saying so: it collected nothing.
  */
-const collectDue = (opening: Opening, options: Options, cells: ReadonlyArray<Cell.Cell>): Effect.Effect<Collected> => {
+const collectDue = (opening: Opening, options: Options, cells: ReadonlyArray<Cell.Cell>): Effect.Effect<Outcome> => {
   const guarded = collectGuarded(opening, options.sink, cells)
   if (options.due === undefined) return guarded
   const { instance } = opening
@@ -489,7 +502,7 @@ const collectDue = (opening: Opening, options: Options, cells: ReadonlyArray<Cel
     options.due(instance),
     Effect.timeoutOrElse(guarded, {
       duration: Duration.millis(withinMs),
-      orElse: () => Effect.as(emit(options.sink, instance, "failed", late), notCheckable(instance, cellsOf(instance, cells), late))
+      orElse: () => Effect.as(emit(options.sink, instance, "failed", late), notCollected(instance, cellsOf(instance, cells), late))
     })
   )
 }
@@ -539,14 +552,14 @@ const answersOf = (
 ): Effect.Effect<ScopeJudging.Stepped> => {
   const { instance } = opening
   if (instance.onFailure !== true) {
-    return Effect.map(collectDue(opening, options, cells), (one) => ({ collected: withUnread(instance, one, over.unread) }))
+    return Effect.map(collectDue(opening, options, cells), (one) => ({ collected: withUnread(instance, one.collected, over.unread), failed: one.failed }))
   }
   const stated = new Set(over.failed)
   const failed = failedOf(cellsOf(instance, cells), stated, earlier)
   const unreadFailed = over.unread.filter((cell) => stated.has(cell.id))
   const read = failed.map((cell) => cell.id)
-  const collected = failed.length === 0 ? Effect.succeed(unasked(instance)) : collectDue(opening, options, failed)
-  return Effect.map(collected, (one) => ({ collected: withUnread(instance, one, unreadFailed), read }))
+  const outcome = failed.length === 0 ? Effect.succeed<Outcome>({ collected: unasked(instance) }) : collectDue(opening, options, failed)
+  return Effect.map(outcome, (one) => ({ collected: withUnread(instance, one.collected, unreadFailed), read, failed: one.failed }))
 }
 
 /**

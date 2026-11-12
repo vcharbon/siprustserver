@@ -169,6 +169,8 @@ Rules:
   the table below, names a cell outside the scope or a verification the manifest does not name,
   or attaches no file under `SIPRIG_OUT`. A collector naming a judge answers its lines, and the
   base answers them for it, under the judge's name: the source of the lines a cell awaits.
+  Its judge judges none of the cells it failed to collect: an absent record there says nothing
+  of the system under test, so those cells end unverified, never failed.
 - `close` runs whatever ended the scope, after a failed or interrupted `open` too. A `close`
   that fails is run once more. A second failure marks the job *lab left changed*.
 - `locks` are taken per scope: the union of its collectors' locks, once, before its first
