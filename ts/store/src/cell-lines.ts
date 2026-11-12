@@ -30,6 +30,8 @@ import * as Schema from "effect/Schema"
 
 type Line = Verification.Verification
 
+const { interpreter: INTERPRETER, rfcAudit: AUDITOR, driver: DRIVER } = Verification.BASE_SOURCES
+
 /** The cell file holding the lines its lane answered in process. */
 export const VERIFICATIONS_FILE = Verification.FILE
 
@@ -82,12 +84,12 @@ const failureLine = (failure: Bundle.Failure): string => {
 }
 
 const callOf = (verdict: Bundle.RunVerdict | null): Line => {
-  if (verdict === null) return { name: CALL, source: "interpreter", answer: "fail", message: "the cell wrote no verdict" }
-  if (OK.has(verdict.status)) return { name: CALL, source: "interpreter", answer: "pass" }
+  if (verdict === null) return { name: CALL, source: INTERPRETER, answer: "fail", message: "the cell wrote no verdict" }
+  if (OK.has(verdict.status)) return { name: CALL, source: INTERPRETER, answer: "pass" }
   const first = verdict.failures?.[0]
   return {
     name: CALL,
-    source: "interpreter",
+    source: INTERPRETER,
     answer: "fail",
     message: first === undefined ? "the call failed" : failureLine(first),
     ...(verdict.failed_step === undefined ? {} : { detail: { step: verdict.failed_step } })
@@ -97,17 +99,17 @@ const callOf = (verdict: Bundle.RunVerdict | null): Line => {
 const auditOf = (audit: ReadonlyArray<Bundle.RfcFinding>, charged: ReadonlyArray<Bundle.RfcFinding>): ReadonlyArray<Line> => {
   const first = charged[0]
   const own: Line = first === undefined
-    ? { name: RFC_AUDIT, source: "rfc audit", answer: "pass" }
+    ? { name: RFC_AUDIT, source: AUDITOR, answer: "pass" }
     : {
       name: RFC_AUDIT,
-      source: "rfc audit",
+      source: AUDITOR,
       answer: "fail",
       message: `${charged.length} charge(s): ${first.rule}: ${first.detail}`,
       detail: { seen: first.detail, side: "sut" }
     }
   const faults = audit.filter((finding) => finding.source_fault === true).map((finding): Line => ({
     name: RFC_AUDIT,
-    source: "rfc audit",
+    source: AUDITOR,
     answer: "fail",
     message: `source fault: ${finding.rule}: ${finding.detail}`,
     informative: true
@@ -118,7 +120,7 @@ const auditOf = (audit: ReadonlyArray<Bundle.RfcFinding>, charged: ReadonlyArray
 /** The audit's line of a cell `rfc.json` states not audited, for `reason`. */
 const unauditedOf = (reason: string): Line => ({
   name: RFC_AUDIT,
-  source: "rfc audit",
+  source: AUDITOR,
   answer: "not-checkable",
   message: `not audited: ${reason}`
 })
@@ -127,7 +129,7 @@ const unauditedOf = (reason: string): Line => ({
 const waivedOf = (verdict: Bundle.RunVerdict | null): ReadonlyArray<Line> =>
   (verdict?.waived ?? []).map((waived) => ({
     name: CALL,
-    source: "interpreter",
+    source: INTERPRETER,
     answer: "fail",
     message: `known bug ${waived.bug}: ${failureLine(waived.finding)}`,
     waived: true
@@ -180,7 +182,7 @@ export const linesOf = (reading: CellReading): ReadonlyArray<Line> => {
   if (reading.passed || short) return lines
   return [...lines, {
     name: RUN,
-    source: "driver",
+    source: DRIVER,
     answer: "fail",
     message: "the run failed the cell beyond its lines"
   }]

@@ -106,13 +106,29 @@ export interface Collected {
   readonly keys: ReadonlyArray<Lines.KeyLine>
 }
 
+/** A cell of the scope the base could not describe as `cell.v1`: no collector reads it. */
+export interface Unread {
+  readonly id: string
+  readonly lane: string
+  /** Why it has no description. */
+  readonly why: string
+}
+
+/** A scope's cells as its collectors read them: those described, and those the base could not describe. */
+export interface Over {
+  readonly cells: ReadonlyArray<Cell.Cell>
+  readonly unread: ReadonlyArray<Unread>
+}
+
 /** A scope's opened collectors. */
 export interface Opened {
   /**
    * Collects every instance in order over `cells`, the scope's cells, each
-   * instance over those of its lanes; called once, when the scope ended.
+   * instance over those of its lanes; called once, when the scope ended. Each
+   * cell of `unread` on an instance's lanes is answered `not checkable` by it,
+   * saying why the cell was not described.
    */
-  readonly collect: (cells: ReadonlyArray<Cell.Cell>) => Effect.Effect<ReadonlyArray<Collected>>
+  readonly collect: (cells: ReadonlyArray<Cell.Cell>, unread?: ReadonlyArray<Unread>) => Effect.Effect<ReadonlyArray<Collected>>
   /** The labels of the instances whose `close` left the lab changed so far, in order. */
   readonly leftChanged: () => ReadonlyArray<string>
 }
@@ -239,18 +255,30 @@ const cellsOf = (instance: Instance, cells: ReadonlyArray<Cell.Cell>): ReadonlyA
 
 const NO_ANSWERS: Answers = { verifications: [], attachments: [] }
 
+/** `not checkable`, saying `message`, for each verification `instance` names. */
+const notCheckableLines = (instance: Instance, message: string): Answers => ({
+  verifications: Collector.answeredBy(instance.collector.manifest).map((name) => ({
+    name,
+    source: instance.collector.name,
+    answer: "not-checkable" as const,
+    message
+  })),
+  attachments: []
+})
+
 /** What `instance` answers where it could not collect over `cells`: `not checkable`, saying `message`, for each verification it names. */
 export const notCheckable = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, message: string): Collected => {
-  const lines: Answers = {
-    verifications: Collector.answeredBy(instance.collector.manifest).map((name) => ({
-      name,
-      source: instance.collector.name,
-      answer: "not-checkable" as const,
-      message
-    })),
-    attachments: []
-  }
+  const lines = notCheckableLines(instance, message)
   return { label: instance.label, scope: lines, cells: new Map(cells.map((cell) => [cell.id, lines])), keyed: [], assigned: [], keys: [] }
+}
+
+/** `collected` with each cell of `unread` on `instance`'s lanes answered `not checkable`, saying why it was not described. */
+const withUnread = (instance: Instance, collected: Collected, unread: ReadonlyArray<Unread>): Collected => {
+  const mine = instance.lanes === undefined ? unread : unread.filter((cell) => instance.lanes!.includes(cell.lane))
+  if (mine.length === 0) return collected
+  const cells = new Map(collected.cells)
+  for (const cell of mine) cells.set(cell.id, notCheckableLines(instance, `the cell ${cell.id} was not described: ${cell.why}`))
+  return { ...collected, cells }
 }
 
 /** Why `line` is no answer of `instance` over the cells `ids`, or `undefined`. */
@@ -369,6 +397,13 @@ const applied = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, lines: Rea
     catch: (cause) => `its answers not applied: ${errorText(cause)}`
   })
 
+/**
+ * `instance`'s `out/` removed once its answers were applied: every file it
+ * attached is copied into its holder, so none is kept twice. A failed collect
+ * keeps its `out/` to read what it left.
+ */
+const dropOut = (instance: Instance) => Effect.ignore(Effect.try(() => fs.rmSync(layoutOf(instance).out, { recursive: true, force: true })))
+
 /** `opening`'s collect over `scopeCells`: its answers, or `not checkable` where it did not open or its collect failed. */
 const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell.Cell>) =>
   Effect.gen(function*() {
@@ -394,6 +429,7 @@ const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell
     if (Result.isFailure(read)) return yield* failed(`collect: ${read.failure}`)
     const done = yield* Effect.result(applied(instance, cells, read.success))
     if (Result.isFailure(done)) return yield* failed(`collect ${done.failure}`)
+    yield* dropOut(instance)
     yield* emit(sink, instance, "collected")
     return done.success
   })
@@ -481,11 +517,12 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
       }
       let collected = false
       return {
-        collect: (cells) =>
+        collect: (cells, unread = []) =>
           Effect.suspend(() => {
             if (collected) return Effect.die(new Error("a scope's collectors collect once"))
             collected = true
-            return Effect.forEach(openings, (opening) => collectOne(opening, options.sink, cells))
+            return Effect.forEach(openings, (opening) =>
+              Effect.map(collectOne(opening, options.sink, cells), (one) => withUnread(opening.instance, one, unread)))
           }),
         leftChanged: () => [...left]
       } satisfies Opened

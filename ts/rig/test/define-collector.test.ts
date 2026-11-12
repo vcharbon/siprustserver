@@ -80,6 +80,20 @@ describe("a collector defined as a module", () => {
     expect(fs.readFileSync(path.join(root, "trace"), "utf8")).toBe("closed\n")
   })
 
+  it("says what a step logs or prints on its stderr, its answers unchanged", async () => {
+    const { instance, cells } = await moduleCollector({ chatty: true })
+    const exit = await collect(instance, cells)
+    if (!Exit.isSuccess(exit)) throw new Error(String(exit.cause))
+    for (const cell of cells) {
+      expect(exit.value[0]!.cells.get(cell.id)!.verifications).toEqual([{ name: "module-check", source: "module", answer: "pass" }])
+    }
+    const log = fs.readFileSync(path.join(instance.dir, "collect.log"), "utf8")
+    expect(log).toContain("collecting, said through the logger")
+    expect(log).toContain("a warning, said through the logger")
+    expect(log).toContain("collecting, said through the console")
+    expect(fs.readFileSync(path.join(instance.dir, "collect.out.jsonl"), "utf8")).toBe("")
+  })
+
   it("exits non-zero with one line saying why its step failed, which every cell's not checkable quotes", async () => {
     const { instance, cells } = await moduleCollector({ fail: true })
     const exit = await collect(instance, cells)

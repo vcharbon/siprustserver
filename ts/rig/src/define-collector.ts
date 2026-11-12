@@ -13,8 +13,10 @@
 import { NodeServices } from "@effect/platform-node"
 import type { Attachment } from "@sip/contracts"
 import * as Cause from "effect/Cause"
+import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
+import { Console as NodeConsole } from "node:console"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as Lines from "./collector-lines.js"
@@ -147,13 +149,21 @@ const sayOf = (cause: Cause.Cause<unknown>): string => {
 }
 
 /**
+ * The console a step speaks through: every method writes to stderr, since
+ * the runner reads the step's stdout as its answer lines.
+ */
+const stderrConsole: Console.Console = new NodeConsole({ stdout: process.stderr, stderr: process.stderr })
+
+/**
  * Runs, as this process's main, the step of `definition` that `SIPRIG_STEP`
  * names, with the Node platform's services; exit status 0 once it did its
- * work, 1 with one line on stderr where it failed.
+ * work, 1 with one line on stderr where it failed. What the step logs or
+ * prints through Effect's logger or `Console` goes to stderr, its step log.
  */
 export const defineCollector = <E>(definition: Definition<E, NodeServices.NodeServices>): void =>
   program(definition).pipe(
     Effect.tapCause((cause) => Effect.sync(() => void process.stderr.write(`${sayOf(cause)}\n`))),
+    Effect.provideService(Console.Console, stderrConsole),
     Effect.provide(NodeServices.layer),
     (main) => RunMain.runMain(main, { disableErrorReporting: true })
   )

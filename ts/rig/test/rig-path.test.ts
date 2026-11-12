@@ -3,8 +3,9 @@
  * opens a manifest that does not hold, naming its file: a missing or
  * non-executable executable, a name defined in both roots (both files named),
  * a manifest whose name is not its directory's, a judge nobody defines, a
- * part schema that is no JSON object, and a path `pack.toml` names that the
- * pack does not hold.
+ * part schema that is no JSON object, a path `pack.toml` names that the
+ * pack does not hold, a collector named like a source of the base or the
+ * pack, and a lock collectors of nested scopes name.
  */
 import * as Result from "effect/Result"
 import * as fs from "node:fs"
@@ -158,6 +159,62 @@ describe("the rig path", () => {
     expect((await refusalOf({ pack: named }))?.message).toBe(
       `${path.join(named, "pack.toml")}: modules.deployment: the pack holds no file ./deployment.ts`
     )
+  })
+
+  it("refuses a collector named like a source the base answers lines as", async () => {
+    const workspace = root({
+      "collectors/interpreter/collector.toml": collector("interpreter", `answers = ["call"]`),
+      "collectors/interpreter/collect": SCRIPT
+    })
+    const refusal = await refusalOf({ workspace })
+    expect(refusal?.files).toEqual([path.join(workspace, "collectors/interpreter/collector.toml")])
+    expect(refusal?.reason).toBe("name: interpreter is a source the base answers its own lines as")
+  })
+
+  it("refuses a collector named like a source the pack answers lines as, naming its manifest and pack.toml", async () => {
+    const packDir = root({ "pack.toml": pack(`sources = ["records-check"]`) })
+    const workspace = root({
+      "collectors/records-check/collector.toml": collector("records-check"),
+      "collectors/records-check/collect": SCRIPT
+    })
+    const refusal = await refusalOf({ pack: packDir, workspace })
+    expect(refusal?.files).toEqual([path.join(workspace, "collectors/records-check/collector.toml"), path.join(packDir, "pack.toml")])
+    expect(refusal?.reason).toBe("name: records-check is a source the pack answers its own lines as")
+  })
+
+  it("refuses a lock named by a job and a batch collector, naming both manifests; one named by two batch collectors loads", async () => {
+    const scoped = (name: string, scope: string) =>
+      `schema = "collector.v1"\nname = "${name}"\nscope = "${scope}"\nlocks = ["lab"]\n[run]\ncollect = "./collect"\n`
+    const nested = root({
+      "collectors/job-watch/collector.toml": scoped("job-watch", "job"),
+      "collectors/job-watch/collect": SCRIPT,
+      "collectors/lab-log/collector.toml": scoped("lab-log", "batch"),
+      "collectors/lab-log/collect": SCRIPT
+    })
+    const refusal = await refusalOf({ workspace: nested })
+    expect(refusal?.files).toEqual([
+      path.join(nested, "collectors/job-watch/collector.toml"),
+      path.join(nested, "collectors/lab-log/collector.toml")
+    ])
+    expect(refusal?.reason).toMatch(/^locks: lab is named by the job collector job-watch and the batch collector lab-log, whose scopes nest/)
+    const siblings = root({
+      "collectors/lab-log/collector.toml": scoped("lab-log", "batch"),
+      "collectors/lab-log/collect": SCRIPT,
+      "collectors/lab-trace/collector.toml": scoped("lab-trace", "batch"),
+      "collectors/lab-trace/collect": SCRIPT
+    })
+    expect(await refusalOf({ workspace: siblings })).toBeUndefined()
+  })
+
+  it("refuses a lock named by a batch and a cell collector", async () => {
+    const workspace = root({
+      "collectors/lab-log/collector.toml": collector("lab-log", `locks = ["lab"]`),
+      "collectors/lab-log/collect": SCRIPT,
+      "collectors/cell-probe/collector.toml":
+        `schema = "collector.v1"\nname = "cell-probe"\nscope = "cell"\nlocks = ["lab"]\n[run]\ncollect = "./collect"\n`,
+      "collectors/cell-probe/collect": SCRIPT
+    })
+    expect((await refusalOf({ workspace }))?.reason).toMatch(/^locks: lab is named by the cell collector cell-probe and the batch collector lab-log/)
   })
 
   it("loads an empty workspace and a pack with empty plug-in directories", async () => {

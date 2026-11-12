@@ -83,7 +83,7 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
     open: traced("open leaves-process", `sleep 30 > /dev/null 2>&1 &\necho $! > "$SIPRIG_STATE/pid"\necho $! > ../../sleeper`),
     close: traced("close leaves-process", `kill "$(cat "$SIPRIG_STATE/pid")"`)
   }),
-  ...collector("slow-open", { open: traced("open slow-open", "sleep 0.5"), close: traced("close slow-open") }),
+  ...collector("slow-open", { open: traced("open slow-open", "sleep 5"), close: traced("close slow-open") }),
   ...collector("failing-close", { close: traced("close failing-close", "exit 1") }),
   ...collector("flaky-close", {
     close: traced("close flaky-close", `[ -e "$SIPRIG_STATE/tried" ] && exit 0\ntouch "$SIPRIG_STATE/tried"\nexit 1`)
@@ -145,6 +145,16 @@ export const alive = (pid: number): boolean => {
   } catch {
     return false
   }
+}
+
+/** Whether the trace under `root` holds `line` within `withinMs`. */
+export const tracedWithin = async (root: string, line: string, withinMs = 5000): Promise<boolean> => {
+  const deadline = Date.now() + withinMs
+  while (!traceOf(root).includes(line)) {
+    if (Date.now() > deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  return true
 }
 
 /** Whether process `pid` is gone within `withinMs`, a killed one's reaping by its new parent waited for. */

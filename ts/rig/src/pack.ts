@@ -57,7 +57,9 @@ export const Pack = Schema.Struct({
   provision: Schema.optionalKey(Provision),
   cases: Schema.optionalKey(Cases),
   modules: Schema.optionalKey(Modules),
-  decides: Schema.optionalKey(Decides)
+  decides: Schema.optionalKey(Decides),
+  /** The sources the pack's own code answers verification lines as: no collector is named like one. */
+  sources: Schema.optionalKey(Schema.Array(Name))
 })
 export interface Pack extends Schema.Schema.Type<typeof Pack> {}
 

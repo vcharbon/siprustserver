@@ -139,7 +139,11 @@ Rules:
 - `close` runs whatever ended the scope, after a failed or interrupted `open` too. A `close`
   that fails is run once more. A second failure marks the job *lab left changed*.
 - `locks` are taken before `open` and given back after `close`. A collector whose locks are
-  refused runs none of its steps and answers `not checkable`.
+  refused runs none of its steps and answers `not checkable`. A lock named by collectors of
+  two scopes is refused at load: the outer scope's would hold it while the inner one's waits.
+- A collector named like a source the base (`interpreter`, `rfc audit`, `driver`) or the pack
+  (`sources`) answers lines as is refused at load. A collector's line merged into a landed
+  cell replaces only a `pending` line of its name and source.
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
 - `after` orders collectors of one scope. A wider scope always runs after a narrower one ended
   and reads its keys and records without declaring it. An `after` naming a collector that is
@@ -425,6 +429,7 @@ name    = "reference"
 title   = "siprig reference"
 wrapper = "rigref"
 component = "rigref"           # the product's component name; absent, the pack's name
+sources = ["records-check"]    # sources the pack's own code answers lines as; no collector's name
 [image]
 packages = []                  # OS packages the pack's image adds
 binaries = "./bin"             # product binaries, the replay one included when it registers

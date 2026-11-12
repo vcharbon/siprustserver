@@ -39,6 +39,16 @@ export const Verification = Schema.Struct({
 })
 export interface Verification extends Schema.Schema.Type<typeof Verification> {}
 
+/**
+ * The sources the base answers its own lines as. No collector is named like
+ * one (`@sip/rig` refuses it at load), so a collector's answer never stands
+ * for the base's.
+ */
+export const BASE_SOURCES = { interpreter: "interpreter", rfcAudit: "rfc audit", driver: "driver" } as const
+
+/** Every source of {@link BASE_SOURCES}. */
+export const baseSources: ReadonlyArray<string> = Object.values(BASE_SOURCES)
+
 /** The final status of a cell that ran, read off its lines. */
 export const FinalStatus = Schema.Literals(["pass", "fail", "fail, still verifying", "ok so far", "unverified"])
 export type FinalStatus = typeof FinalStatus.Type

@@ -1,8 +1,9 @@
 /**
  * A landed cell answered later, against a real postgres: a collector's lines
- * merge into the cell's (one of the same name and source in place, any other
- * after), its attachments join the cell's, and the cell's final status is
- * read off the merged lines. The suite builds and drops its own database.
+ * merge into the cell's (one in place of the pending line of its name and
+ * source, any other after, an answered line never overwritten), its
+ * attachments join the cell's, and the cell's final status is read off the
+ * merged lines. The suite builds and drops its own database.
  */
 import type { Attachment } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -39,7 +40,7 @@ const AUDIT: Verifications.Line = { name: "rfc-audit", source: "rfc audit", answ
 const RECORDS: Attachment.Attachment = { name: "call-records", kind: "records", file: "records.jsonl", source: "replay" }
 const LOG: Attachment.Attachment = { name: "lab-log", kind: "log", title: "the lab's log", file: "collected/lab-log/a.log", source: "lab-log" }
 
-const cell = (caseId: string): CaseResult => ({
+const cell = (caseId: string, verifications: ReadonlyArray<Verifications.Line>): CaseResult => ({
   caseId,
   passed: true,
   verdict: "ok",
@@ -49,17 +50,21 @@ const cell = (caseId: string): CaseResult => ({
   mainError: null,
   classification: null,
   document: null,
-  verifications: [CALL, AUDIT],
+  verifications,
   attachments: { dir: `/w/answers/${caseId}`, attachments: [RECORDS] }
 })
 
+/** A run whose one cell `a` landed with `verifications` and one attachment; its id. */
+const landedWith = (verifications: ReadonlyArray<Verifications.Line>) =>
+  Effect.gen(function*() {
+    const runs = yield* Runs.Service
+    const opened = yield* runs.open({ capture: "answers.pcap", lane: "fake", mode: "record", sessionDir: "/w/answers", identity: CURRENT })
+    yield* runs.finish({ id: opened.id, status: "done", cases: [cell("a", verifications)] })
+    return opened.id
+  })
+
 /** A run whose one cell `a` landed passing with two lines and one attachment; its id. */
-const landed = Effect.gen(function*() {
-  const runs = yield* Runs.Service
-  const opened = yield* runs.open({ capture: "answers.pcap", lane: "fake", mode: "record", sessionDir: "/w/answers", identity: CURRENT })
-  yield* runs.finish({ id: opened.id, status: "done", cases: [cell("a")] })
-  return opened.id
-})
+const landed = landedWith([CALL, AUDIT])
 
 const statusOf = (runId: number) =>
   Effect.flatMap(SqlClient, (sql) =>
@@ -103,15 +108,28 @@ describe.skipIf(!Server.served)("a landed cell answered later", () => {
       expect(yield* statusOf(runId)).toBe("unverified")
     })))
 
-  it("replaces the line of the same name and source where it stands, and the cell's status follows it", () =>
+  it("replaces the pending line of the same name and source where it stands, and the cell's status follows it", () =>
     withStore(Effect.gen(function*() {
       const answers = yield* CellAnswers.Service
       const lines = yield* Verifications.Service
-      const runId = yield* landed
-      const failed: Verifications.Line = { name: "rfc-audit", source: "rfc audit", answer: "fail", message: "a late finding" }
+      const waiting: Verifications.Line = { name: "lab-log", source: "lab-log", answer: "pending" }
+      const runId = yield* landedWith([CALL, waiting, AUDIT])
+      const failed: Verifications.Line = { name: "lab-log", source: "lab-log", answer: "fail", message: "a late finding" }
       const other: Verifications.Line = { name: "call", source: "lab-log", answer: "pass" }
       yield* answers.merge(runId, "a", { verifications: [failed, other], held: { dir: "/w/answers/a", attachments: [] } })
-      expect(yield* lines.of({ scope: "cell", runId, caseId: "a" })).toEqual([CALL, failed, other])
+      expect(yield* lines.of({ scope: "cell", runId, caseId: "a" })).toEqual([CALL, failed, AUDIT, other])
+      expect(yield* statusOf(runId)).toBe("fail")
+    })))
+
+  it("never overwrites a line already answered: a failed line of the same name and source stands, the cell still failed", () =>
+    withStore(Effect.gen(function*() {
+      const answers = yield* CellAnswers.Service
+      const lines = yield* Verifications.Service
+      const failedCall: Verifications.Line = { name: "call", source: "interpreter", answer: "fail", message: "no 200 OK" }
+      const runId = yield* landedWith([failedCall, AUDIT])
+      const passing: Verifications.Line = { name: "call", source: "interpreter", answer: "pass" }
+      yield* answers.merge(runId, "a", { verifications: [passing], held: { dir: "/w/answers/a", attachments: [] } })
+      expect(yield* lines.of({ scope: "cell", runId, caseId: "a" })).toEqual([failedCall, AUDIT, passing])
       expect(yield* statusOf(runId)).toBe("fail")
     })))
 })

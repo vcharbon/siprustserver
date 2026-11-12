@@ -4,8 +4,9 @@
  * kept from `open` to `close`; the lines of `collect` read from its stdout and
  * `SIPRIG_OUT`, its attachments copied and listed in their holder's
  * directory; a failed, timed-out or unreadable `open` or `collect` answering
- * `not checkable` on every cell; a `close` failing twice marking the lab left
- * changed; locks held from `open` to `close`.
+ * `not checkable` on every cell, as on a cell the base could not describe; a
+ * `close` failing twice marking the lab left changed; locks held from `open`
+ * to `close`.
  */
 import { Attachment, Verification } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -19,7 +20,7 @@ import type * as Cell from "../src/cell.js"
 import * as CollectorPlan from "../src/collector-plan.js"
 import * as CollectorRun from "../src/collector-run.js"
 import * as RigPath from "../src/rig-path.js"
-import { alive, cellOf, goneWithin, memoryLocker, SAMPLES, traceOf } from "./collectors.js"
+import { alive, cellOf, goneWithin, memoryLocker, SAMPLES, traceOf, tracedWithin } from "./collectors.js"
 import { laneOf } from "./operations.js"
 import { run, tree } from "./tree.js"
 
@@ -140,6 +141,40 @@ describe("a scope's collectors", () => {
     expect(tidy!.scope.verifications).toEqual([{ name: "tidy", source: "tidy", answer: "fail", message: "the scope's own" }])
     expect(tidy!.keys).toEqual(cells.map((cell) => ({ key: "trunk", cell: cell.id, values: ["t1"] })))
     expect(tidy!.assigned).toEqual([{ record: { n: 1 }, cell: "c1" }])
+    const out = path.join(root, "batch", "collectors", "tidy", "out")
+    expect(fs.existsSync(out) ? fs.readdirSync(out) : []).toEqual([])
+  })
+
+  it("answers not checkable, saying why, on a cell of its lanes the base could not describe, and keeps its out/ where collect failed", async () => {
+    const { root, rig } = await samples()
+    const cells = cellsUnder(root)
+    const unread: ReadonlyArray<CollectorRun.Unread> = [
+      { id: "c3", lane: LANE.id, why: "its bundle states no wall-clock window" },
+      { id: "c4", lane: "lane-b", why: "its bundle is gone" }
+    ]
+    const lanes = { ...instanceOf(rig, root, "tidy"), lanes: [LANE.id] }
+    const failing = instanceOf(rig, root, "failing-collect")
+    const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(
+      CollectorRun.opened([lanes, failing], { sink: () => Effect.void, locker: memoryLocker() }),
+      (opened) => opened.collect(cells, unread)
+    )))
+    const [tidy, failed] = collected
+    expect(tidy!.cells.get("c1")!.verifications).toEqual([{ name: "tidy", source: "tidy", answer: "pass" }])
+    expect(tidy!.cells.get("c3")).toEqual({
+      verifications: [{
+        name: "tidy",
+        source: "tidy",
+        answer: "not-checkable",
+        message: "the cell c3 was not described: its bundle states no wall-clock window"
+      }],
+      attachments: []
+    })
+    expect(tidy!.cells.has("c4")).toBe(false)
+    expect(failed!.cells.get("c4")!.verifications.map((line) => [line.name, line.answer, line.message])).toEqual([
+      ["records", "not-checkable", "the cell c4 was not described: its bundle is gone"],
+      ["count", "not-checkable", "the cell c4 was not described: its bundle is gone"]
+    ])
+    expect(fs.existsSync(path.join(root, "batch", "collectors", "failing-collect", "out"))).toBe(true)
   })
 
   it("answers not checkable, with what the collector said, for every verification it names on every cell when collect exits non-zero", async () => {
@@ -214,8 +249,10 @@ describe("a scope's collectors", () => {
       { sink: () => Effect.void, locker: memoryLocker() },
       Effect.never
     ))
-    await Effect.runPromise(Effect.sleep(200))
+    expect(await tracedWithin(root, "open slow-open")).toBe(true)
+    const interrupted = Date.now()
     await Effect.runPromise(Fiber.interrupt(fiber))
+    expect(Date.now() - interrupted).toBeLessThan(4000)
     expect(traceOf(root)).toEqual(["open tidy open", "open slow-open", "close slow-open", "close tidy token close"])
   })
 

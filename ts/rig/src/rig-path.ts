@@ -10,8 +10,11 @@
  *   is not executable;
  * - a name defined twice along the path (naming both files), a collector's
  *   judge no judge defines, a part schema that is no JSON object, and a path
- *   `pack.toml` names that its tree does not hold.
+ *   `pack.toml` names that its tree does not hold;
+ * - a collector named like a source the base or the pack answers lines as,
+ *   and a lock named by collectors of two scopes (naming both files).
  */
+import { Verification } from "@sip/contracts"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Result from "effect/Result"
@@ -253,5 +256,48 @@ export const load = (roots: Roots): Effect.Effect<RigPath, Refusal, FileSystem.F
         return yield* Effect.fail(refuse([collector.file], `judge: names ${judge}, which no judge of the path defines`))
       }
     }
+    const refused = sourceNamed(path) ?? lockOfNestedScopes(path)
+    if (refused !== undefined) return yield* Effect.fail(refused)
     return path
   })
+
+/**
+ * The first collector named like a source the base (`Verification.BASE_SOURCES`)
+ * or the pack (`sources`) answers lines as, refused: its answers would stand
+ * for that writer's.
+ */
+const sourceNamed = (path: RigPath): Refusal | undefined => {
+  const packSources = path.pack?.manifest.sources ?? []
+  for (const collector of path.collectors.values()) {
+    if (Verification.baseSources.includes(collector.name)) {
+      return refuse([collector.file], `name: ${collector.name} is a source the base answers its own lines as`)
+    }
+    if (path.pack !== undefined && packSources.includes(collector.name)) {
+      return refuse([collector.file, path.pack.file], `name: ${collector.name} is a source the pack answers its own lines as`)
+    }
+  }
+  return undefined
+}
+
+/**
+ * The first lock collectors of two scopes name, refused naming both
+ * manifests: scopes nest (a job's batches, a batch's cells), so the outer
+ * scope's collector would hold the lock while the inner one's waits for it.
+ */
+const lockOfNestedScopes = (path: RigPath): Refusal | undefined => {
+  const firstNaming = new Map<string, Defined<Collector.Collector>>()
+  for (const collector of path.collectors.values()) {
+    for (const lock of collector.manifest.locks ?? []) {
+      const first = firstNaming.get(lock)
+      if (first === undefined) firstNaming.set(lock, collector)
+      else if (first.manifest.scope !== collector.manifest.scope) {
+        return refuse(
+          [first.file, collector.file],
+          `locks: ${lock} is named by the ${first.manifest.scope} collector ${first.name} and the ${collector.manifest.scope} collector ${collector.name}, ` +
+            `whose scopes nest: the outer one would hold it while the inner one waits`
+        )
+      }
+    }
+  }
+  return undefined
+}
