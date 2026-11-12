@@ -145,6 +145,12 @@ Effect v4 is pinned exactly (`4.0.0-rc.111`, and the same for
 `@effect/platform-node`). There is no build step: every package exports its
 TypeScript source, and consumers run through `tsx` or `vitest`.
 
+The workspace root installs `effect` at `ts/node_modules/effect`. A workspace
+that links these packages (`link:`) takes that copy for its own `effect`
+(`overrides: effect: link:<path to ts>/node_modules/effect`), installed after
+this one: a schema, a tagged error or a check built on one side is then read
+by the other, which two copies of `effect` do not guarantee.
+
 The CLI is `effect/unstable/cli`, Effect v4's own home for what used to be
 `@effect/cli` — the same move that put the platform services and the process
 spawner into core. There is no 4.x `@effect/cli` to depend on; the published one
