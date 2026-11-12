@@ -140,15 +140,17 @@ Rules:
 - `on-failure` is read when `collect` would run, after every other collector of the scope
   collected, unless one of them names it in its `after`: the collector runs if a cell of its
   scope failed by then (its own outcome a failure or an error, as the base states it when it
-  hands the cells over, or a failed line of its own or of a collector of the scope), and
-  receives only those cells; where none failed its `collect` does not run. Its records join,
+  hands the cells over, or a failed line of its own or of a collector of the scope; every cell
+  of a batch whose end did not judge them), and receives only those cells, answering `not
+  checkable` on a failed one the base could not describe; where none failed its `collect`
+  does not run. Its records join,
   its judge judges and the verifications it promises are filled over those cells alone; where
   it read none, its name is neither joined nor judged. A source that keeps no history is
   collected `always` and cut per cell.
 - An `on-demand` collector runs when the site or the CLI asks for it, on the cells named, after
   their job ended: `open`, `collect` and `close` as a scope of its own, one per lane, its
   context's window the span the cells ran in, its directory the ask's own, removed once its
-  attachments landed. What it
+  attachments landed, kept where a step failed so the log its line names stays. What it
   attaches lands on the cell, replacing an attachment of its name. Its lines are said to the
   asker and never merged into the cell: a question asked later does not change a verdict. A
   pre-check, a cell-scope collector, and one the level does not set `on-demand` are refused.
