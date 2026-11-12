@@ -251,6 +251,7 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Base**: what this repository holds of the rig. ADR-0060.
 - **Pack**: one product's content for the rig, shipped in its image.
 - **Test bed**: one workspace of the rig and the lab it drives. It builds nothing.
+- **Image kit**: `tooling/siprig/kit`, which builds the base image `siprig` and a pack's image from it and its `pack.toml`. Avoid: tools image.
 - **Rig path**: the pack then the workspace, where manifests are found. Not the HA tooling's search path.
 - **Scope**: a job, a batch or a cell. Avoid: lane scope, run scope.
 - **Job**: one launched replay or campaign. Its scope is the widest.

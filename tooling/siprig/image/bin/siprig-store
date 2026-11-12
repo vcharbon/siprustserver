@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# The base's store command (`ts/siprig/src/store-cli.ts`): `migrate`. A pack
+# whose store adds tables replaces it with a `siprig-store` of its own binaries.
+set -euo pipefail
+pkg=/opt/siprig/ts/siprig
+exec "$pkg/node_modules/.bin/tsx" "$pkg/src/store-cli.ts" "$@"

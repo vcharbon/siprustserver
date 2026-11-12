@@ -1,0 +1,13 @@
+# A throwaway pack for the kit's own proof (README.md, "Proof"): one OS
+# package, one binary that is a pack verb (`minirig hello`), a setup that
+# leaves a mark in the image, and nothing else: no provisioning, no case, no
+# deployment module, no site of its own.
+schema  = "pack.v1"
+name    = "minimal"
+title   = "minimal pack"
+wrapper = "minirig"
+
+[image]
+packages = ["tree"]
+binaries = "./bin"
+setup    = "./setup"

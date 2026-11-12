@@ -1,0 +1,23 @@
+# The base image's build context: the repository root, sources only. Build
+# output, run output, captures, installed node modules, local env files and
+# the docs never enter it.
+.git
+**/.git
+target
+**/target
+**/results
+**/node_modules
+**/*.pcap
+**/*.pcapng
+**/*.pcap.gz
+**/*.log
+**/.env.local
+.claude
+.agents
+docs
+deploy
+e2e
+fuzz
+tooling/hakit
+tooling/site-scan
+ts/viewer-app/dist

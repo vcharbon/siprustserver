@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# The store brought to this image's schema (s6 oneshot `migrate`), once its
+# server answers (the container's own on its private socket, or the server
+# database.url names): `siprig-store migrate`, the pack's where it ships one,
+# creates the database where missing, dumps it into the workspace's backups/
+# before any pending migration, then applies them. Its lines go to the
+# container log and to logs/store.log. A failure, or the container's postgres
+# refusing its pgdata (/run/siprig/postgres-refused), stops the container
+# before the site starts on a store it cannot read.
+set -euo pipefail
+set -a
+# shellcheck disable=SC1091
+. /run/siprig/workspace.env
+set +a
+for _ in $(seq 1 120); do
+  pg_isready -q -h "$PG_HOST" -p "$PG_PORT" && break
+  if [ -e /run/siprig/postgres-refused ]; then
+    cat /run/siprig/postgres-refused
+    exit 1
+  fi
+  sleep 1
+done
+pg_isready -h "$PG_HOST" -p "$PG_PORT" || { echo "migrate: no postgres answers on $PG_HOST:$PG_PORT"; exit 1; }
+log="$SIPRIG_WORKSPACE/logs/store.log"
+mkdir -p "$SIPRIG_WORKSPACE/logs"
+echo "$(date -u +%FT%TZ) migrate (image $(sed -n 's/^SHA=//p' /opt/siprig/image/stamp/siprig.env | cut -c1-12))" >> "$log"
+siprig-store migrate 2>&1 | tee -a "$log"
+exit "${PIPESTATUS[0]}"

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# The base's workspace command (`ts/siprig/src/workspace-cli.ts`): `init <dir>`,
+# `check [<dir>]`. A pack replaces it with a `siprig-workspace` of its own
+# binaries, answering both verbs as this one does.
+set -euo pipefail
+pkg=/opt/siprig/ts/siprig
+exec "$pkg/node_modules/.bin/tsx" "$pkg/src/workspace-cli.ts" "$@"

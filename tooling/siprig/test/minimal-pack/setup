@@ -1,0 +1,4 @@
+#!/bin/sh
+# The minimal pack's setup: run once by the image's build in the pack's tree, it leaves `setup.done` there.
+set -eu
+tree --version > setup.done

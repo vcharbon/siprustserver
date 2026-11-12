@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# The base's site (`ts/siprig/src/site-main.ts`), its config the base's own
+# (`ts/siprig/site.config.json`: no case root, the viewer app's build served).
+# A pack replaces it with a `siprig-site` of its own binaries.
+set -euo pipefail
+pkg=/opt/siprig/ts/siprig
+export SIPRIG_SITE_CONFIG="${SIPRIG_SITE_CONFIG:-$pkg/site.config.json}"
+cd "$pkg"
+exec "$pkg/node_modules/.bin/tsx" src/site-main.ts

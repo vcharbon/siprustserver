@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# The image's `git`: no repository ships, so the read-only questions a run's
+# provenance asks of a checkout (`@sip/toolchain` `git.ts`) are answered from
+# the build stamps the kit wrote off the host's git
+# (/opt/siprig/image/stamp/<component>.env: SHA, BRANCH, DIRTY, DIFF, and DIR,
+# the directory the image holds that checkout at).
+#
+#   rev-parse HEAD                        the stamped commit
+#   rev-parse --abbrev-ref HEAD           the stamped branch
+#   status --porcelain                    empty for a clean build, one line for a dirty one
+#   diff HEAD                             empty for a clean build, the stamped diff digest for a dirty one
+#   ls-files --others --exclude-standard  nothing: the digest covers untracked files
+#
+# Asked in a stamp's DIR it answers from that stamp; anywhere else under
+# /opt/siprig it answers as git does outside a repository. Everywhere else
+# (the workspace's own repository) the real git answers, every directory
+# trusted: the container runs as the caller's uid over the caller's mount,
+# with HOME=/tmp and no global configuration.
+set -uo pipefail
+stamps=/opt/siprig/image/stamp
+here="$(pwd -P)"
+stamp=""
+for file in "$stamps"/*.env; do
+  [ -e "$file" ] || continue
+  [ "$(sed -n 's/^DIR=//p' "$file")" = "$here" ] && stamp=$file && break
+done
+if [ -z "$stamp" ]; then
+  case "$here" in
+    /opt/siprig | /opt/siprig/*) echo "fatal: not a git repository (this install ships none)" >&2; exit 128 ;;
+    *) exec /usr/bin/git -c safe.directory='*' "$@" ;;
+  esac
+fi
+SHA="" BRANCH="" DIRTY="" DIFF=""
+# shellcheck disable=SC1090
+. "$stamp"
+case "$*" in
+  "rev-parse HEAD") [ -n "$SHA" ] && echo "$SHA" ;;
+  "rev-parse --abbrev-ref HEAD") [ -n "$BRANCH" ] && echo "$BRANCH" ;;
+  "status --porcelain") [ "$DIRTY" = 1 ] && echo " M (the build's tree differed from its commit)"; true ;;
+  "diff HEAD") [ "$DIRTY" = 1 ] && echo "$DIFF"; true ;;
+  "ls-files --others --exclude-standard") true ;;
+  *) echo "git: '$*' is not answered in this install" >&2; exit 1 ;;
+esac

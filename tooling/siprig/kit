@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# The siprig image kit (README.md beside this file):
+#
+#   kit base [--tag T]                              siprig:<T> from this checkout; default the short sha, `-dirty` for a dirty tree
+#   kit pack <dir> [--tag T] [--base IMAGE]         <name>-rig:<T> from the pack at <dir> (its pack.toml), FROM IMAGE;
+#                                                   default T the pack's checkout's short sha (`-dirty`), IMAGE siprig:<this checkout's>
+#   kit tar <dir> [--tag T] [--base IMAGE] [--out DIR]
+#                                                   pack, then DIR/<name>-rig-<T>.tar.zst and DIR/<wrapper>, the wrapper
+#                                                   naming that image (default DIR target/siprig-kit/out)
+#
+# A pack manifest the kit cannot honour is refused before any build, exit 2,
+# naming the key. Each image's provenance is read off git here, since no image
+# ships a repository: SHA, BRANCH, DIRTY and DIFF (a digest of the diff and the
+# untracked files) in <component>.env, which the image's `git` answers from.
+# The base's Rust stage runs with 4 jobs under a memory cap
+# (SIPRIG_IMAGE_BUILD_MEMORY, default 12g), its target dir a BuildKit cache.
+set -euo pipefail
+KIT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "$KIT/../.." && pwd)"
+WORK="$ROOT/target/siprig-kit"
+TSX="$ROOT/ts/siprig/node_modules/.bin/tsx"
+BUILD_MEMORY="${SIPRIG_IMAGE_BUILD_MEMORY:-12g}"
+TAG_FORM='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+die() { echo "kit: $*" >&2; exit 2; }
+
+# One checkout's stamp: SHA, BRANCH, DIRTY (0|1), DIFF (the digest of its diff and untracked files), DIR (where the image holds it).
+stamp_of() {
+  local dir=$1 at=$2 sha branch dirty=0 diff=""
+  sha="$(git -C "$dir" rev-parse HEAD)"
+  branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD)"
+  if [ -n "$(git -C "$dir" status --porcelain)" ]; then
+    dirty=1
+    diff="$({ git -C "$dir" diff HEAD; git -C "$dir" ls-files --others --exclude-standard -z | (cd "$dir" && xargs -0 -r sha256sum); } | sha256sum | cut -d' ' -f1)"
+  fi
+  printf 'SHA=%s\nBRANCH=%s\nDIRTY=%s\nDIFF=%s\nDIR=%s\n' "$sha" "$branch" "$dirty" "$diff" "$at"
+}
+
+# The short sha of the checkout holding <dir>, `-dirty` for a dirty tree.
+tag_of() {
+  local dir=$1 sha
+  sha="$(git -C "$dir" rev-parse --short HEAD)"
+  [ -z "$(git -C "$dir" status --porcelain)" ] || sha="$sha-dirty"
+  echo "$sha"
+}
+
+# Every file of the pack at <dir> its checkout holds, tracked or untracked but not ignored, copied under <into>.
+copy_tree() {
+  local dir=$1 into=$2
+  mkdir -p "$into"
+  if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    cp -a "$dir/." "$into/"
+    return
+  fi
+  git -C "$dir" ls-files -z --cached --others --exclude-standard \
+    | while IFS= read -r -d '' file; do
+        if [ -e "$dir/$file" ] || [ -L "$dir/$file" ]; then printf '%s\0' "$file"; fi
+      done \
+    | tar -C "$dir" --null --no-recursion -T - -cf - \
+    | tar -C "$into" -xf -
+}
+
+verb="${1:-}"; [ -n "$verb" ] || usage; shift
+dir=""
+case "$verb" in
+  pack | tar) dir="${1:-}"; [ -n "$dir" ] || usage; shift ;;
+  base) ;;
+  -h | --help) usage ;;
+  *) echo "kit: unknown verb $verb" >&2; usage ;;
+esac
+tag=""; base=""; out="$WORK/out"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tag) tag=$2; shift 2 ;;
+    --base) base=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    -h | --help) usage ;;
+    *) echo "kit: unknown argument $1" >&2; usage ;;
+  esac
+done
+[ -z "$tag" ] || [[ "$tag" =~ $TAG_FORM ]] || die "--tag $tag is no image tag (letters, digits, _ . -)"
+
+build_base() {
+  local commit
+  commit="$(tag_of "$ROOT")"
+  [ -n "$tag" ] || tag="$commit"
+  mkdir -p "$WORK/base-stamp"
+  stamp_of "$ROOT" /opt/siprig > "$WORK/base-stamp/siprig.env"
+  echo "kit: building siprig:$tag" >&2
+  docker build -f "$KIT/Dockerfile" \
+    --build-context "stamp=$WORK/base-stamp" \
+    --build-arg "SIPRIG_BUILD_COMMIT=$commit" \
+    --resource "memory=$BUILD_MEMORY" \
+    -t "siprig:$tag" "$ROOT"
+}
+
+# The pack's facts (`ts/siprig/src/kit-cli.ts`), read into NAME, IMAGE, WRAPPER, COMPONENT, PACKAGES, BINARIES, SETUP.
+read_pack() {
+  [ -x "$TSX" ] || die "no node modules in $ROOT/ts/siprig: \`pnpm -C $ROOT/ts install\`"
+  local facts status=0
+  facts="$("$TSX" "$ROOT/ts/siprig/src/kit-cli.ts" check "$dir")" || status=$?
+  [ "$status" = 0 ] || exit 2
+  NAME="" IMAGE="" WRAPPER="" COMPONENT="" PACKAGES="" BINARIES="" SETUP=""
+  while IFS='=' read -r key value; do
+    case "$key" in
+      NAME) NAME=$value ;; IMAGE) IMAGE=$value ;; WRAPPER) WRAPPER=$value ;; COMPONENT) COMPONENT=$value ;;
+      PACKAGES) PACKAGES=$value ;; BINARIES) BINARIES=$value ;; SETUP) SETUP=$value ;;
+    esac
+  done <<<"$facts"
+}
+
+build_pack() {
+  read_pack
+  if [ -z "$tag" ]; then
+    git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "$dir is in no git checkout: name the image's --tag"
+    tag="$(tag_of "$dir")"
+  fi
+  [ -n "$base" ] || base="siprig:$(tag_of "$ROOT")"
+  docker image inspect "$base" >/dev/null 2>&1 || die "no base image $base: \`kit base\` builds it, or name one with --base"
+  local stage="$WORK/pack-$NAME"
+  case "$stage" in "$WORK"/pack-?*) ;; *) die "no staging directory for pack $NAME" ;; esac
+  rm -rf "$stage"
+  mkdir -p "$stage/stamp" "$stage/binaries"
+  copy_tree "$dir" "$stage/pack"
+  [ -z "$BINARIES" ] || cp -a "$BINARIES/." "$stage/binaries/"
+  if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    stamp_of "$dir" /opt/siprig/pack > "$stage/stamp/$COMPONENT.env"
+  fi
+  sed -e "s|@WRAPPER@|$WRAPPER|g" -e "s|@IMAGE@|$IMAGE:$tag|g" "$KIT/wrapper" > "$stage/wrapper"
+  chmod +x "$stage/wrapper"
+  echo "kit: building $IMAGE:$tag from $base" >&2
+  docker build -f "$KIT/pack.Dockerfile" \
+    --build-arg "BASE=$base" \
+    --build-arg "PACKAGES=$PACKAGES" \
+    --build-arg "SETUP=$SETUP" \
+    --build-arg "NAME=$NAME" \
+    --build-arg "WRAPPER=$WRAPPER" \
+    --build-arg "COMPONENT=$COMPONENT" \
+    -t "$IMAGE:$tag" "$stage"
+}
+
+case "$verb" in
+  base) build_base ;;
+  pack) build_pack ;;
+  tar)
+    build_pack
+    mkdir -p "$out"
+    file="$out/$IMAGE-$tag.tar.zst"
+    echo "kit: writing $file" >&2
+    docker save "$IMAGE:$tag" | zstd -q -T4 -10 -f -o "$file"
+    cp "$WORK/pack-$NAME/wrapper" "$out/$WRAPPER"
+    echo "$file"
+    echo "$out/$WRAPPER"
+    ;;
+esac

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# The workspace's own postgres (s6 longrun `postgres`), over `pgdata/`:
+# initialised on first start with the superuser `siprig`, it listens on its
+# unix socket alone (PG_HOST, a directory private to the container; trust
+# authentication), never on TCP: with `--network host` a TCP listener would be
+# open to every local user of the machine. A store database.url places
+# elsewhere is not started here.
+#
+# A pgdata of another postgres major is refused: the wrapper's `upgrade-pg` moves it.
+set -euo pipefail
+exec 2>&1
+set -a
+# shellcheck disable=SC1091
+. /run/siprig/workspace.env
+set +a
+if [ "$PG_OWN" != 1 ]; then
+  echo "postgres: the store is on $PG_HOST:$PG_PORT, not in this container; none started"
+  exec s6-pause
+fi
+pgdata="$SIPRIG_WORKSPACE/pgdata"
+major="$(pg_config --version | sed -E 's/^PostgreSQL ([0-9]+).*/\1/')"
+
+# initdb and the server look their own uid up: the uid the wrapper passes has
+# no entry in this image's passwd, so nss_wrapper serves one.
+printf 'siprig:x:%s:%s:siprig:%s:/bin/bash\n' "$(id -u)" "$(id -g)" "$HOME" > /run/siprig/passwd
+printf 'siprig:x:%s:\n' "$(id -g)" > /run/siprig/group
+export LD_PRELOAD=libnss_wrapper.so NSS_WRAPPER_PASSWD=/run/siprig/passwd NSS_WRAPPER_GROUP=/run/siprig/group
+
+if [ ! -s "$pgdata/PG_VERSION" ]; then
+  echo "postgres: initialising $pgdata (postgres $major)"
+  initdb -D "$pgdata" --username=siprig --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C.UTF-8
+fi
+stated="$(cat "$pgdata/PG_VERSION")"
+if [ "$stated" != "$major" ]; then
+  # The refusal is left for `migrate`, which fails on it at once and so stops the container.
+  echo "postgres: $pgdata is postgres $stated, this image runs postgres $major: the wrapper's \`upgrade-pg\` moves it" \
+    | tee -a "$SIPRIG_WORKSPACE/logs/store.log" /run/siprig/postgres-refused
+  exec s6-pause
+fi
+mkdir -p "$PG_HOST"
+exec postgres -D "$pgdata" -p "$PG_PORT" \
+  -c listen_addresses= \
+  -c "unix_socket_directories=$PG_HOST" \
+  -c logging_collector=off

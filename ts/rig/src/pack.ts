@@ -18,7 +18,9 @@ const Image = Schema.Struct({
   /** OS packages the pack's image adds to the base image. */
   packages: Schema.optionalKey(Schema.Array(Text)),
   /** The directory of the product binaries the image carries, the replay one included when it registers. */
-  binaries: Schema.optionalKey(RelativePath)
+  binaries: Schema.optionalKey(RelativePath),
+  /** An executable of the pack's tree the image's build runs once, the tree and the packages in place. */
+  setup: Schema.optionalKey(RelativePath)
 })
 
 const Provision = Schema.Struct({

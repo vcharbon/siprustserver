@@ -1,6 +1,6 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Sixteen packages, four of them one layer each of the same stack:
+A pnpm workspace. Seventeen packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
@@ -20,9 +20,10 @@ A pnpm workspace. Sixteen packages, four of them one layer each of the same stac
 | `lab-host/` | `@sip/lab-host` | the host a lab runs on: its user session and the boxes its children run in, its binaries built under one box-wide lock, its roots and env files, its inbox, its run bundles, the checks a lane owes before it is driven, and the batch and SUT processes a hosted lane stands |
 | `campaign-runner/` | `@sip/campaign-runner` | a campaign run over a pack's cases: its cells compiled and replayed on each lane under their locks and the lane's pacing, retried, judged into verification lines, recorded in the store's campaign record, and reported (JUnit included) |
 | `site/` | `@sip/site` | the viewer's server: an Effect v4 HttpApi over case directories, run bundles, the store, campaign runs and the job console, serving the app's build and the documents it draws, over what a deployment's pack states of itself (`site-pack.ts`) |
+| `siprig/` | `@sip/siprig` | the base deployment the image kit ships (`tooling/siprig/`): its reading of a pack manifest before a build, and the workspace, store and site commands the base image runs for a pack that ships none of its own |
 
 Dependencies point one way only. `contracts` depends on nothing, and every other
-package but the leaves `viewer-core` and `case-modules` depends on it; beyond it, each
+package but the leaves `viewer-core` and `case-modules` and the deployment `siprig` depends on it; beyond it, each
 package's own edges are: `pipeline`, `toolchain`, `store` and `rig` none,
 `driver → {pipeline, toolchain}`, `basic-case → {driver, rig}` (its tests also
 `toolchain`), `corpus → {driver, pipeline, rig, store, toolchain, viewer-core}`,
@@ -30,12 +31,13 @@ package's own edges are: `pipeline`, `toolchain`, `store` and `rig` none,
 `lab-host → {cli, corpus, rig, store, toolchain, workspace}`,
 `campaign-runner → {corpus, rig, store, toolchain, workspace}`,
 `site → {campaign-runner, corpus, lab-host, pipeline, rig, store, viewer-core,
-workspace}` and `viewer-app → viewer-core` (the app reads the report formats' types
+workspace}`, `siprig → {corpus, lab-host, rig, site, store, workspace}` and
+`viewer-app → viewer-core` (the app reads the report formats' types
 from `contracts`, nothing else).
 The viewer's server is `@sip/site`, a package of its own beside the app: the app
 never imports it and meets it over HTTP only, so the SPA's build carries no node
 side. A deployment runs the site under its own entry point, its pack provided
-once (`site-pack.ts`). A policy package never imports the
+once (`site-pack.ts`); `@sip/siprig` `site-main.ts` is the base's. A policy package never imports the
 store: what it reads of a run reaches it as contract vocabulary. Only
 `@sip/toolchain` runs a Rust CLI; `@sip/corpus` runs every child through it, and
 `@sip/lab-host` stands the host's own processes (a build, a lane's batch and SUT).

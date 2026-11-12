@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+# @WRAPPER@ — a siprig pack's image on this machine (the kit writes it, naming its pack's wrapper and image).
+#
+#   @WRAPPER@ load <image tarball .tar.zst>       load the image into docker
+#   @WRAPPER@ init <dir>                          make <dir> a workspace; what it holds is kept
+#   @WRAPPER@ [-w <dir>] up [--lab] [--compose <dir>] [--memory <size>]
+#                                               start the container over the workspace, wait for the site
+#   @WRAPPER@ [-w <dir>] down [--force]           stop the container (postgres shut down cleanly) and remove it
+#   @WRAPPER@ [-w <dir>] restart [--force]        stop and start it again, with the flags `up` gave it
+#   @WRAPPER@ [-w <dir>] status                   whether it runs, and the site's URL
+#   @WRAPPER@ [-w <dir>] logs [site|postgres|store] [-f]
+#                                               the container's log (start-up, migrations), or one service's
+#   @WRAPPER@ [-w <dir>] exec <command>…          any command in the running container (`psql` reaches the store)
+#   @WRAPPER@ [-w <dir>] upgrade-pg [--from <image>]
+#                                               move pgdata/ to this image's postgres major (dump, then restore)
+#   @WRAPPER@ [-w <dir>] <verb> <args>…           the pack's command siprig-<verb> in the running container
+#                                               (`campaign`, `replay`, … as the pack ships them)
+#
+# The workspace is `-w <dir>`, else SIPRIG_WORKSPACE, else the current
+# directory where it holds rig.toml. It is mounted at its own path, so every
+# path the tooling prints is a path of this machine. Everything runs as the
+# caller's uid/gid, on the host's network (`--network host`).
+#
+#   --lab            gives the container the docker socket: a managed target runs its images
+#   --compose <dir>  mounts a compose lab checkout read-only and names it SIPRIG_COMPOSE: the workspace's
+#                    lab, refused while another running workspace names the same one
+#   --memory <size>  the container's memory cap, swap included (default 16g, SIPRIG_MEMORY)
+#   --force          down/restart even while a campaign, replay or job runs in the container (it is cut)
+#
+# The container runs as environment `integration` (SIPRIG_ENV) of its own store.
+# The image is SIPRIG_IMAGE, else @IMAGE@, the one the kit wrote this wrapper for.
+set -euo pipefail
+
+NAME=@WRAPPER@
+IMAGE="${SIPRIG_IMAGE:-@IMAGE@}"
+STOP_TIMEOUT=60
+UP_TIMEOUT=600
+
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+die() { echo "$NAME: $*" >&2; exit 1; }
+
+need_image() {
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || die "image $IMAGE is not loaded: \`$NAME load <tarball>\`"
+}
+
+# The workspace, absolute (symlinks kept, as the tooling names it).
+workspace=""
+resolve_workspace() {
+  local named="${workspace:-${SIPRIG_WORKSPACE:-}}"
+  if [ -z "$named" ]; then
+    [ -f rig.toml ] || die "name a workspace: -w <dir>, SIPRIG_WORKSPACE, or run from a directory holding rig.toml"
+    named=.
+  fi
+  workspace="$(realpath -s -m "$named")"
+  [ -f "$workspace/rig.toml" ] || die "$workspace holds no rig.toml: \`$NAME init $workspace\` makes one"
+}
+
+# One container per workspace, named by the wrapper and the workspace's path.
+container() { echo "$NAME-ws-$(printf %s "$workspace" | sha256sum | cut -c1-8)"; }
+
+running() { [ "$(docker inspect -f '{{.State.Running}}' "$(container)" 2>/dev/null || true)" = true ]; }
+
+need_running() { running || die "the workspace's container $(container) is not running: \`$NAME up\`"; }
+
+# The flags of a one-off container over the workspace: the caller's uid/gid, the mount at its own path.
+oneoff() {
+  docker run --rm --user "$(id -u):$(id -g)" --network host \
+    -v "$workspace:$workspace" -e "SIPRIG_WORKSPACE=$workspace" "$@"
+}
+
+# `docker exec` in the running container, in the caller's directory where the workspace holds it.
+in_container() {
+  local cwd tty=()
+  cwd="$(pwd)"
+  case "$cwd/" in "$workspace"/*) ;; *) cwd="$workspace" ;; esac
+  [ -t 0 ] && [ -t 1 ] && tty=(-t)
+  exec docker exec -i "${tty[@]}" -w "$cwd" "$(container)" "$@"
+}
+
+wait_for_site() {
+  local name url
+  name="$(container)"
+  for _ in $(seq 1 "$UP_TIMEOUT"); do
+    if ! running; then
+      docker logs --tail 40 "$name" >&2 || true
+      die "the container stopped while starting (\`$NAME logs\` for the whole log)"
+    fi
+    if url="$(docker exec "$name" siprig-in site-url 2>/dev/null)"; then
+      echo "$NAME: up — $url  (container $name, workspace $workspace)"
+      return 0
+    fi
+    sleep 1
+  done
+  die "the site did not answer within ${UP_TIMEOUT}s (\`$NAME logs\`)"
+}
+
+up() {
+  local lab=0 compose="" memory="${SIPRIG_MEMORY:-16g}" extra=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lab) lab=1; shift ;;
+      --compose) compose="$(realpath -m "$2")"; shift 2 ;;
+      --memory) memory=$2; shift 2 ;;
+      *) die "up: unknown flag $1" ;;
+    esac
+  done
+  need_image
+  local name uid gid
+  name="$(container)"; uid="$(id -u)"; gid="$(id -g)"
+  if running; then
+    echo "$NAME: $name already runs (\`$NAME restart\` restarts it, \`$NAME down\` stops it)"
+    wait_for_site
+    return 0
+  fi
+  docker rm "$name" >/dev/null 2>&1 || true
+  if [ "$lab" = 1 ]; then
+    [ -S /var/run/docker.sock ] || die "up --lab: no docker socket at /var/run/docker.sock"
+    extra+=(-v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)")
+  fi
+  if [ -n "$compose" ]; then
+    [ -d "$compose" ] || die "up --compose: no directory $compose"
+    local holder
+    holder="$(docker ps --filter "label=org.siprig.compose=$compose" \
+      --format '{{.Names}} {{.Label "org.siprig.workspace"}}' | grep -v "^$name " | head -n 1 || true)"
+    [ -z "$holder" ] || die "up --compose: the lab $compose is already driven by ${holder%% *} (workspace ${holder#* }): one workspace per lab"
+    extra+=(-v "$compose:$compose:ro" -e "SIPRIG_COMPOSE=$compose" --label "org.siprig.compose=$compose")
+  fi
+  docker run -d --name "$name" \
+    --user "$uid:$gid" --network host \
+    --tmpfs "/run:rw,exec,nosuid,size=64m,uid=$uid,gid=$gid,mode=0755" \
+    --memory "$memory" --memory-swap "$memory" \
+    --stop-timeout "$STOP_TIMEOUT" \
+    --label "org.siprig.workspace=$workspace" \
+    -v "$workspace:$workspace" -e "SIPRIG_WORKSPACE=$workspace" -e SIPRIG_ENV=integration \
+    "${extra[@]}" "$IMAGE" >/dev/null
+  echo "$NAME: started $name from $IMAGE"
+  wait_for_site
+}
+
+# A down or restart while work runs in the container cuts it: refused unless forced.
+refuse_while_busy() {
+  local force=$1 busy
+  [ "$force" = 1 ] && return 0
+  running || return 0
+  if busy="$(docker exec "$(container)" siprig-in busy)"; then
+    echo "$busy" >&2
+    die "a campaign, replay or job runs in $(container): wait for it, or --force to cut it"
+  fi
+}
+
+force_flag() {
+  case "${1:-}" in
+    "") echo 0 ;;
+    --force) echo 1 ;;
+    *) die "unknown flag $1" ;;
+  esac
+}
+
+down() {
+  local name force
+  name="$(container)"
+  force="$(force_flag "$@")"
+  refuse_while_busy "$force"
+  if docker inspect "$name" >/dev/null 2>&1; then
+    docker stop -t "$STOP_TIMEOUT" "$name" >/dev/null
+    docker rm "$name" >/dev/null
+    echo "$NAME: $name stopped and removed (the workspace keeps everything)"
+  else
+    echo "$NAME: no container for $workspace"
+  fi
+}
+
+logs() {
+  local which="" follow=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f) follow=(-F); shift ;;
+      site | postgres | store) which=$1; shift ;;
+      *) die "logs: unknown argument $1" ;;
+    esac
+  done
+  case "$which" in
+    "") [ ${#follow[@]} -gt 0 ] && exec docker logs -f "$(container)"; exec docker logs "$(container)" ;;
+    store) exec tail -n 200 "${follow[@]}" "$workspace/logs/store.log" ;;
+    *) exec tail -n 200 "${follow[@]}" "$workspace/logs/$which/current" ;;
+  esac
+}
+
+upgrade_pg() {
+  local from=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from) from=$2; shift 2 ;;
+      *) die "upgrade-pg: unknown flag $1" ;;
+    esac
+  done
+  need_image
+  running && die "upgrade-pg: stop the workspace first (\`$NAME down\`)"
+  local pgdata="$workspace/pgdata" stated major stamp dump
+  [ -s "$pgdata/PG_VERSION" ] || die "upgrade-pg: $pgdata holds no cluster: \`$NAME up\` makes one"
+  stated="$(cat "$pgdata/PG_VERSION")"
+  major="$(docker image inspect -f '{{ index .Config.Labels "org.siprig.pg-major" }}' "$IMAGE")"
+  if [ "$stated" = "$major" ]; then
+    echo "$NAME: $pgdata is already postgres $major, the major of $IMAGE"
+    return 0
+  fi
+  if [ -z "$from" ]; then
+    from="$(docker images --filter "label=org.siprig.pg-major=$stated" --format '{{.Repository}}:{{.Tag}}' | head -n 1)"
+    [ -n "$from" ] || die "upgrade-pg: no loaded siprig image runs postgres $stated; load the one this workspace ran (\`$NAME load\`) or name it with --from"
+  fi
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  dump="$workspace/backups/$stamp-pg$stated.sql"
+  mkdir -p "$workspace/backups"
+  echo "$NAME: dumping postgres $stated with $from into $dump"
+  oneoff --entrypoint siprig-in "$from" pg-dump "$dump"
+  echo "$NAME: restoring into postgres $major with $IMAGE, in $pgdata.new"
+  oneoff --entrypoint siprig-in "$IMAGE" pg-restore "$dump" \
+    || die "upgrade-pg: the restore failed; $pgdata is untouched, $pgdata.new holds the partial restore (\`$NAME logs\`: logs/upgrade-pg.log)"
+  mv "$pgdata" "$pgdata.pg$stated-$stamp"
+  mv "$pgdata.new" "$pgdata"
+  echo "$NAME: done; the old cluster is kept as $pgdata.pg$stated-$stamp; \`$NAME up\` migrates the store and starts the site"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -w | --workspace) workspace=$2; shift 2 ;;
+    -h | --help) usage ;;
+    *) break ;;
+  esac
+done
+verb="${1:-}"; [ -n "$verb" ] || usage; shift
+
+case "$verb" in
+  load)
+    file="${1:?load <tarball>}"
+    zstd -dc "$file" | docker load
+    ;;
+  init)
+    dir="$(realpath -s -m "${1:?init <dir>}")"
+    need_image
+    mkdir -p "$dir"
+    workspace="$dir"
+    oneoff --entrypoint siprig-workspace "$IMAGE" init "$dir"
+    echo "$NAME: \`$NAME -w $dir up\` starts it"
+    ;;
+  up) resolve_workspace; up "$@" ;;
+  down) resolve_workspace; down "$@" ;;
+  restart)
+    resolve_workspace
+    docker inspect "$(container)" >/dev/null 2>&1 || die "no container for $workspace: \`$NAME up\`"
+    force="$(force_flag "$@")"
+    refuse_while_busy "$force"
+    docker restart -t "$STOP_TIMEOUT" "$(container)" >/dev/null
+    echo "$NAME: restarted $(container)"
+    wait_for_site
+    ;;
+  status)
+    resolve_workspace
+    if running; then
+      echo "$NAME: $(container) runs $(docker inspect -f '{{.Config.Image}}' "$(container)")"
+      docker exec "$(container)" siprig-in site-url || echo "$NAME: the site does not answer yet"
+    else
+      echo "$NAME: $(container) is not running"
+    fi
+    ;;
+  logs) resolve_workspace; logs "$@" ;;
+  exec) resolve_workspace; need_running; in_container siprig-in exec "$@" ;;
+  upgrade-pg) resolve_workspace; upgrade_pg "$@" ;;
+  *) resolve_workspace; need_running; in_container siprig-in verb "$verb" "$@" ;;
+esac

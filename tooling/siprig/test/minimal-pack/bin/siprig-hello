@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# The minimal pack's one verb: `minirig hello` names the pack, the workspace and the store it runs with.
+set -euo pipefail
+echo "hello from ${SIPRIG_COMPONENT:?} in ${SIPRIG_WORKSPACE:?}, store ${DATABASE_URL:?}"

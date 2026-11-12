@@ -1,0 +1,57 @@
+/**
+ * The base's workspace (`@sip/workspace`) for a pack that ships no workspace
+ * command of its own: the `SIPRIG_*` variables, `rig.toml` with the generic
+ * sections alone, no directory beyond the generic ones, the store's `siprig`
+ * database in the workspace's own postgres on port 5499, and the site on 5175.
+ */
+import { ConfigFile, Layout, WorkspaceEnv, type WorkspacePack } from "@sip/workspace"
+
+export const PACK: WorkspacePack.WorkspacePack<never> = {
+  variables: {
+    workspace: "SIPRIG_WORKSPACE",
+    artifacts: "SIPRIG_ARTIFACTS",
+    sessions: "SIPRIG_SESSIONS",
+    census: "SIPRIG_CENSUS",
+    pcaps: "SIPRIG_PCAPS",
+    pcapRoots: "SIPRIG_PCAP_ROOTS",
+    locks: "SIPRIG_LOCKS",
+    binDir: "SIPRIG_BIN_DIR",
+    bind: "SIPRIG_SITE_BIND",
+    publicUrl: "SIPRIG_SITE_URL",
+    port: "SIPRIG_SITE_PORT"
+  },
+  configFile: "rig.toml",
+  directories: {},
+  database: "siprig",
+  databasePort: 5499,
+  initCommand: "siprig-workspace init",
+  sitePort: 5175
+}
+
+/** `rig.toml` read with the generic sections alone. */
+export const RigToml = ConfigFile.make(PACK, { fields: {}, campaignFields: {}, check: () => undefined })
+
+export const { configOf, apply } = WorkspaceEnv.make(PACK, RigToml.decodeText)
+
+export const { layoutOf, of } = Layout.make(PACK)
+
+/** The `rig.toml` a new workspace starts with: every key commented out at its default. */
+export const TEMPLATE = `# The workspace's configuration. Every key is optional; an exported variable
+# of the same meaning wins over the value stated here.
+
+[site]
+# The site's port (SIPRIG_SITE_PORT). Default: ${PACK.sitePort}.
+# port = ${PACK.sitePort}
+# The address the site binds (SIPRIG_SITE_BIND). Default: 127.0.0.1.
+# bind = "0.0.0.0"
+# The origin every printed link is built under (SIPRIG_SITE_URL). Default: the
+# bound address and port, the machine's \`hostname -f\` for a wildcard bind.
+# public_url = "http://rig.example.org:${PACK.sitePort}"
+
+[database]
+# The result store (DATABASE_URL). Default: ${Layout.databaseUrlOf(PACK)},
+# the workspace's own postgres.
+# url = "postgresql://siprig@127.0.0.1:${PACK.databasePort}/${PACK.database}"
+`
+
+export * as BaseWorkspace from "./base-workspace.ts"

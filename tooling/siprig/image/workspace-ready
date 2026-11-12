@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# The container's first step (s6 oneshot `workspace`): the workspace named by
+# SIPRIG_WORKSPACE has a valid rig.toml (`siprig-workspace check`), is brought
+# up to this image (`siprig-workspace init`: what it lacks is made, nothing
+# else is touched), its site port is free on the host, and its store is
+# written to /run/siprig/workspace.env (single-quoted values), which every
+# service and `siprig-in` exports:
+#
+#   PG_OWN                1 where database.url names a loopback server: the store is
+#                         this container's own postgres, on its private socket only
+#   PG_HOST, PG_PORT      the server database.url names; for the container's own,
+#                         the socket directory and the port
+#   DATABASE_URL, PGHOST, PGPORT  the own store's socket URL (unset for another server,
+#                         whose URL rig.toml states)
+#   SITE_PORT, SITE_BIND  the site's port and bind address (default 5175, 127.0.0.1)
+#
+# `siprig-workspace` is the pack's where it ships one. Any failure stops the
+# container (S6_BEHAVIOUR_IF_STAGE2_FAILS=2).
+set -euo pipefail
+ws="${SIPRIG_WORKSPACE:?the container is started with SIPRIG_WORKSPACE (the wrapper sets it)}"
+socket_dir=/run/siprig/pg
+mkdir -p /run/siprig
+checked="$(siprig-workspace check "$ws")"
+echo "$checked"
+siprig-workspace init "$ws"
+
+site_port="$(sed -n 's/^SIPRIG_SITE_PORT=//p' <<<"$checked")"
+site_port="${site_port:-5175}"
+site_bind="$(sed -n 's/^SIPRIG_SITE_BIND=//p' <<<"$checked")"
+if [ -n "$(ss -Hltn "sport = :$site_port")" ]; then
+  echo "siprig: port $site_port, the site's, is already listening on this host (another site or service):" \
+    "state a free one as [site] port in $ws/rig.toml" >&2
+  exit 1
+fi
+
+url="$(sed -n 's/^DATABASE_URL=//p' <<<"$checked")"
+rest="${url#*://}"
+authority="${rest%%[/?]*}"
+database="${rest#"$authority"}"; database="${database#/}"; database="${database%%\?*}"
+hostport="${authority##*@}"
+case "$hostport" in
+  \[*\]:*) host="${hostport%%]*}"; host="${host#[}"; port="${hostport##*]:}" ;;
+  \[*\]) host="${hostport#[}"; host="${host%]}"; port=5432 ;;
+  *:*) host="${hostport%:*}"; port="${hostport##*:}" ;;
+  *) host="$hostport"; port=5432 ;;
+esac
+{
+  case "$host" in
+    127.0.0.1 | localhost | ::1)
+      printf "PG_OWN=1\nPG_HOST='%s'\nPG_PORT='%s'\n" "$socket_dir" "$port"
+      printf "DATABASE_URL='postgresql:///%s?host=%s&port=%s'\nPGHOST='%s'\nPGPORT='%s'\n" \
+        "${database:-siprig}" "$socket_dir" "$port" "$socket_dir" "$port"
+      ;;
+    *) printf "PG_OWN=0\nPG_HOST='%s'\nPG_PORT='%s'\n" "$host" "$port" ;;
+  esac
+  printf "SITE_PORT='%s'\nSITE_BIND='%s'\n" "$site_port" "${site_bind:-127.0.0.1}"
+} > /run/siprig/workspace.env
