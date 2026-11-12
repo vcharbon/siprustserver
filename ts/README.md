@@ -21,12 +21,17 @@ A pnpm workspace. Sixteen packages, four of them one layer each of the same stac
 | `campaign-runner/` | `@sip/campaign-runner` | a campaign run over a pack's cases: its cells compiled and replayed on each lane under their locks and the lane's pacing, retried, judged into verification lines, recorded in the store's campaign record, and reported (JUnit included) |
 | `site/` | `@sip/site` | the viewer's server: an Effect v4 HttpApi over case directories, run bundles, the store, campaign runs and the job console, serving the app's build and the documents it draws, over what a deployment's pack states of itself (`site-pack.ts`) |
 
-Dependencies point one way only: `driver → pipeline → toolchain → contracts`,
-`store → contracts`, `rig → contracts`, `viewer-app → viewer-core` (the app reads the report
-formats' types from `contracts`, nothing else), `cli → corpus → {driver,
-store, viewer-core}`, `lab-host → {workspace, corpus}`,
-`campaign-runner → {workspace, corpus}`, `site → {campaign-runner, lab-host,
-viewer-core}` and `workspace → {cli, rig, store, toolchain}`.
+Dependencies point one way only. `contracts` depends on nothing, and every other
+package but the leaves `viewer-core` and `case-modules` depends on it; beyond it, each
+package's own edges are: `pipeline`, `toolchain`, `store` and `rig` none,
+`driver → {pipeline, toolchain}`, `basic-case → {driver, rig}` (its tests also
+`toolchain`), `corpus → {driver, pipeline, rig, store, toolchain, viewer-core}`,
+`cli → {corpus, store}`, `workspace → {cli, rig, store, toolchain}`,
+`lab-host → {cli, corpus, rig, store, toolchain, workspace}`,
+`campaign-runner → {corpus, rig, store, toolchain, workspace}`,
+`site → {campaign-runner, corpus, lab-host, pipeline, rig, store, viewer-core,
+workspace}` and `viewer-app → viewer-core` (the app reads the report formats' types
+from `contracts`, nothing else).
 The viewer's server is `@sip/site`, a package of its own beside the app: the app
 never imports it and meets it over HTTP only, so the SPA's build carries no node
 side. A deployment runs the site under its own entry point, its pack provided
