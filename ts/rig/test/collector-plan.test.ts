@@ -62,6 +62,8 @@ describe("the collectors a batch runs", () => {
       "lost-file",
       "not-json",
       "on-failure",
+      "after-on-failure",
+      "on-failure-promising",
       "pre-check",
       "refusing-check",
       "required-blind",
@@ -72,9 +74,9 @@ describe("the collectors a batch runs", () => {
       "unsure-check",
       "wrong-cell"
     ]
-    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 19), "tidy", ...always.slice(19)])
+    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 21), "tidy", ...always.slice(21)])
     expect(without.map((instance) => instance.id)).toEqual(always)
-    expect(without.filter((instance) => instance.onFailure === true).map((instance) => instance.id)).toEqual(["on-failure"])
+    expect(without.filter((instance) => instance.onFailure === true).map((instance) => instance.id)).toEqual(["on-failure", "on-failure-promising"])
     expect(withStore.find((instance) => instance.id === "tidy")).toMatchObject({
       label: "tidy",
       scope: "batch",
