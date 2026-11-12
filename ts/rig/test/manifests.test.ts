@@ -226,8 +226,8 @@ lanes = "./lanes"
       .toBe("pack.toml: modules.site: not a key of this file")
   })
 
-  it("refuses a decides path resolving above the pack's directory", () => {
+  it("refuses a decides path resolving above the pack's directory, naming its element", () => {
     expect(refusalOf(Pack.parse("pack.toml", `${PACK}[decides]\ncut = ["./rules", "../../etc"]\n`)))
-      .toBe("pack.toml: decides.cut: a path inside the manifest's directory, relative to it")
+      .toBe("pack.toml: decides.cut[1]: a path inside the manifest's directory, relative to it")
   })
 })

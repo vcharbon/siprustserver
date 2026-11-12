@@ -60,17 +60,27 @@ export type ParamValue = typeof ParamValue.Type
 /** A table of parameters by name. */
 export const Params = Schema.Record(Schema.String, ParamValue)
 
+/** A key or an array index of a schema issue's path (`["bugs"][1]["id"]`). */
+const PATH_SEGMENT = /\["([^"]*)"\]|\[(\d+)\]/g
+
+/** The path of a schema issue's `at` line as the file reads it: keys dotted, an array element by its index (`bugs[1].id`). */
+const pathOf = (at: string): string =>
+  [...at.matchAll(PATH_SEGMENT)]
+    .map((match, i) => (match[2] !== undefined ? `[${match[2]}]` : i === 0 ? match[1] : `.${match[1]}`))
+    .join("")
+
 /**
- * One line from the schema's message: the key as a dotted path, then what was
- * wrong with it (`timeouts.open_s: Expected a value greater than or equal to 0`).
+ * One line from the schema's message: the key as its path in the file, then
+ * what was wrong with it (`timeouts.open_s: Expected a value greater than or
+ * equal to 0`, `bugs[1].id: Expected string`); a key the schema does not name
+ * is "not a key of" `file`.
  */
-export const issueLine = (message: string): string => {
+export const issueLine = (message: string, file = "this file"): string => {
   const lines = message.split("\n").map((line) => line.trim()).filter((line) => line !== "")
   const at = lines.find((line) => line.startsWith("at "))
   const what = lines.find((line) => !line.startsWith("at ")) ?? message
   if (at === undefined) return what
-  const key = [...at.matchAll(/\["([^"]*)"\]/g)].map((match) => match[1]).join(".")
-  return `${key}: ${what === "Expected no excess property" ? "not a key of this file" : what}`
+  return `${pathOf(at)}: ${what === "Expected no excess property" ? `not a key of ${file}` : what}`
 }
 
 /** `text` as TOML, or why it is not. */
