@@ -14,6 +14,7 @@ import type * as FileSystem from "effect/FileSystem"
 import type { Roots } from "../deployment/index.js"
 import * as Job from "../jobs/job.js"
 import * as Locks from "../locks.js"
+import * as path from "node:path"
 
 /** The prefix of a collector lock's name under the lock root, apart from the lanes' own. */
 export const LOCK_PREFIX = "collector-"
@@ -26,6 +27,16 @@ export const LOCK_PREFIX = "collector-"
  */
 export const jobHolderOf = (job: number | undefined, dir: string): Effect.Effect<string, never, Sessions.Service> =>
   job === undefined ? Effect.succeed(dir) : Effect.map(Sessions.Service, (root) => Job.jobDir(root.dir, job))
+
+/**
+ * The directory the collectors of job `job`'s batch `batch` keep theirs under
+ * (`collectors/`) and what they attach to the batch in: `batches/<batch>`
+ * under the job's own in the session tree `sessions` (`Job.jobDir`), which the
+ * store keeps every attached file under and a forget of the job removes.
+ * `batch`, a relative path, names the batch apart from the job's others.
+ */
+export const batchHolderOf = (sessions: string, job: number, batch: string): string =>
+  path.join(Job.jobDir(sessions, job), "batches", batch)
 
 /**
  * The locker over the box-wide exclusive locks, a holder waiting up to
