@@ -425,7 +425,7 @@ const CellStudy = (
           </details>
         )}
         {detail?.join !== undefined && detail.join !== null && (
-          <SutRecords join={detail.join} windows={detail.windows ?? []} held={detail.held ?? []} />
+          <SutRecords join={detail.join} sutLogs={detail.sutLogs ?? []} held={detail.held ?? []} />
         )}
         {evidence.state === "error" && <p className="error">evidence: {evidence.message}</p>}
         {detail?.confrontationProblem !== undefined && (
@@ -826,18 +826,6 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
             {value.sessionDir !== undefined && <CopyChip label="session" value={value.sessionDir} />}
             {value.flows?.path !== undefined && <CopyChip label="flows" value={value.flows.path} />}
           </p>
-          {/* What the deployment's hooks recorded around the run on screen —
-              the box's own account of that replay, kept beside it. */}
-          {shownSession?.hooks.map((hook) => (
-            <details key={hook.name} className="rerun-log study-hook">
-              <summary className="muted">
-                hook {hook.name}
-                {hook.bytes !== undefined && <span className="count">{hook.bytes} B</span>}
-              </summary>
-              {hook.href !== undefined && <p className="muted"><a href={hook.href}>whole log</a></p>}
-              <pre className="raw">{hook.text}</pre>
-            </details>
-          ))}
           {/* What each batch's cleanup gate read of the SUT's call state:
               what it held before and after, and what the batch's calls left. */}
           {(shownSession?.held ?? []).length > 0 && (

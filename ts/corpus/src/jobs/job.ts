@@ -5,8 +5,8 @@
  *
  * The record lives under `<sessions>/_jobs/<id>/`: `cmd`, `log` (stdout and
  * stderr, whole), `pid` (the supervisor's pid with its start ticks), `exit`
- * (written by the supervisor the instant the command ends), and `hooks/` for
- * the hook logs. The row names the log; everything else is beside it. A STOP
+ * (written by the supervisor the instant the command ends). The row names
+ * the log; everything else is beside it. A STOP
  * is a TERM to the supervisor's process group — the supervisor leads its own
  * session, so the group is the job's whole tree; a foreground job, which has
  * no supervisor, is TERMed by pid.
@@ -29,13 +29,10 @@ export const jobsDir = (sessions: string): string => path.join(sessions, JOBS)
 
 export const jobDir = (sessions: string, id: number): string => path.join(jobsDir(sessions), String(id))
 
-export const hooksPath = (sessions: string, id: number): string => path.join(jobDir(sessions, id), "hooks")
-
 /** What the launcher knows once the process exists. */
 export interface Launched {
   readonly pid: number
   readonly logPath: string
-  readonly hooksPath: string
 }
 
 /** Why a launch made no process. */
@@ -60,8 +57,7 @@ export const launch = (
   Detached.launch(jobDir(sessions, id), argv, { cwd }).pipe(
     Effect.map((launched) => ({
       pid: launched.pid,
-      logPath: launched.log,
-      hooksPath: hooksPath(sessions, id)
+      logPath: launched.log
     } satisfies Launched)),
     Effect.mapError((error) => new NotLaunched({ detail: `job ${id} could not be launched: ${error.detail}` }))
   )

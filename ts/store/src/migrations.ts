@@ -964,6 +964,12 @@ const jobAttachments = Effect.gen(function*() {
 /** The key of the migration that keeps a job's attachments apart from the results. */
 export const JOB_ATTACHMENTS = "17_job_attachments"
 
+/** A job keeps no directory of shell-hook logs: what its collectors attach is in `job_attachments`. */
+const jobHooksPathDropped = Effect.flatMap(SqlClient, (sql) => sql`ALTER TABLE jobs DROP COLUMN hooks_path`)
+
+/** The key of the migration that drops a job's hook directory. */
+export const JOB_HOOKS_PATH_DROPPED = "18_job_hooks_path_dropped"
+
 /**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
@@ -985,7 +991,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [JOB_EVENTS]: jobEvents,
   [VERIFICATIONS]: verifications,
   [ATTACHMENTS]: attachments,
-  [JOB_ATTACHMENTS]: jobAttachments
+  [JOB_ATTACHMENTS]: jobAttachments,
+  [JOB_HOOKS_PATH_DROPPED]: jobHooksPathDropped
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

@@ -65,8 +65,6 @@ export interface StartedRequest {
   readonly pid: number
   /** The whole stdout+stderr of the process; absent for a job run in the foreground. */
   readonly logPath?: string
-  /** Where the hook logs of this job land. */
-  readonly hooksPath?: string
 }
 
 export interface CloseRequest {
@@ -90,7 +88,6 @@ export interface Row {
   readonly finishedAt: string | null
   readonly exit: number | null
   readonly logPath: string | null
-  readonly hooksPath: string | null
   /** The lock holder's line while the job waits for it; null otherwise. */
   readonly waitingOn: string | null
   readonly sweepId: number | null
@@ -254,7 +251,6 @@ interface JobRow {
   readonly finished_at: Date | null
   readonly exit: number | null
   readonly log_path: string | null
-  readonly hooks_path: string | null
   readonly waiting_on: string | null
   readonly sweep_id: string | null
   readonly batch_at: number | null
@@ -296,7 +292,6 @@ const rowOf = (row: JobRow): Row => ({
   finishedAt: instantOrNull(row.finished_at),
   exit: row.exit,
   logPath: row.log_path,
-  hooksPath: row.hooks_path,
   waitingOn: row.waiting_on,
   sweepId: numberOrNull(row.sweep_id),
   batchAt: row.batch_at,
@@ -345,7 +340,7 @@ export const layer = Layer.effect(
       yield* sql`
         UPDATE jobs SET status = CASE WHEN status = 'queued' THEN 'running' ELSE status END,
                         pid = ${request.pid}, started_at = now(),
-                        log_path = ${request.logPath ?? null}, hooks_path = ${request.hooksPath ?? null}
+                        log_path = ${request.logPath ?? null}
         WHERE id = ${id}
       `
     })

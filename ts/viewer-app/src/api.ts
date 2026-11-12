@@ -393,8 +393,8 @@ export interface TriageStudyCellDetail {
   readonly confrontationProblem?: string
   /** The Call-IDs this cell minted and the wall-clock window it drove the SUT in; null where it states none. */
   readonly join?: TriageCellJoin | null
-  /** The run's hook logs cut to this cell's window; [] where it states none. */
-  readonly windows?: readonly TriageStudyHook[]
+  /** The cell's SUT logs over its window, attached by the rig's `sut-log` collector; [] where it has none. */
+  readonly sutLogs?: readonly TriageSutLog[]
   /** The call contexts the SUT still held after a batch whose call this cell placed. */
   readonly held?: readonly unknown[]
   /** The cell's verification lines as the store holds them, and the status they give it; null or absent where it holds none. */
@@ -423,20 +423,15 @@ export interface TriageStudySession {
   readonly writtenAt?: string
   readonly campaign: unknown
   readonly cells: readonly TriageStudyCell[]
-  /** What the configured hooks recorded around this run; [] where none did. */
-  readonly hooks: readonly TriageStudyHook[]
   /** What each batch's cleanup gate read of the SUT's call state around the run; [] where none did. */
   readonly held?: readonly unknown[]
 }
 
-/** One hook log kept beside a run: `hooks/<name>.log`, its two ends where it is long. */
-export interface TriageStudyHook {
-  readonly name: string
+/** One SUT log of a cell, over its window: its title, its two ends where it is long, the whole log's size. */
+export interface TriageSutLog {
+  readonly title: string
   readonly text: string
-  /** The whole log's size, where the server states it. */
-  readonly bytes?: number
-  /** Where the whole log is read, where the server serves it. */
-  readonly href?: string
+  readonly bytes: number
 }
 
 export interface TriageStudyCase {
@@ -845,7 +840,6 @@ export interface JobDetail {
   readonly finishedAt: string | null
   readonly exit: number | null
   readonly logPath: string | null
-  readonly hooksPath: string | null
   readonly waitingOn: string | null
   readonly sweepId: number | null
   readonly batchAt: number | null

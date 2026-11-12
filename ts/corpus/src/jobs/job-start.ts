@@ -330,8 +330,7 @@ export const isNoSuchJob = (error: unknown): error is NoSuchJob => error instanc
 export const runningAs = Effect.fn("JobStart.runningAs")(function*(
   named: number | undefined,
   kind: Jobs.Kind,
-  args: Readonly<Record<string, unknown>>,
-  sessions: string
+  args: Readonly<Record<string, unknown>>
 ) {
   const jobs = yield* Jobs.Service
   if (named !== undefined) {
@@ -339,7 +338,7 @@ export const runningAs = Effect.fn("JobStart.runningAs")(function*(
     return named
   }
   const id = yield* jobs.create({ kind, args, createdBy: yield* createdBy })
-  yield* jobs.started(id, { pid: process.pid, hooksPath: Job.hooksPath(sessions, id) })
+  yield* jobs.started(id, { pid: process.pid })
   return id
 })
 

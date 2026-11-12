@@ -32,14 +32,17 @@ export interface Pending {
   readonly answers: CellAnswers.Answers
 }
 
+/** A cell as a scope's collectors read it, its run row aside: its attempt 1 where it states none. */
+export type Described = Omit<LandedCell, "runId"> & { readonly attempt?: number }
+
 /** `cells` described off their bundles as cells of `batch`; one whose bundle states no description is said and left out. */
 export const describe = (
-  cells: ReadonlyArray<LandedCell>,
+  cells: ReadonlyArray<Described>,
   batch: string
 ): Effect.Effect<ReadonlyArray<Cell.Cell>, never, FileSystem.FileSystem> =>
   Effect.map(
     Effect.forEach(cells, (cell) =>
-      CellOfBundle.ofBundle(cell.dir, { id: cell.id, case: cell.caseId, lane: cell.lane, batch, attempt: 1 }).pipe(
+      CellOfBundle.ofBundle(cell.dir, { id: cell.id, case: cell.caseId, lane: cell.lane, batch, attempt: cell.attempt ?? 1 }).pipe(
         Effect.map((described): ReadonlyArray<Cell.Cell> => [described]),
         Effect.catch((unreadable) =>
           Effect.as(Console.error(`[collector] ${cell.id} not described, no collector reads it: ${unreadable.message}`), [])

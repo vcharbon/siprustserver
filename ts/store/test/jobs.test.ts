@@ -116,7 +116,7 @@ describe.skipIf(!served)("Jobs", () => {
       const jobs = yield* Jobs.Service
       const id = yield* jobs.create({ kind: "replay", lane: "fake", args: { batch: 5 }, createdBy: "test" })
       expect((yield* jobs.show(id))!.job).toMatchObject({ status: "queued", pid: null, args: { batch: 5 } })
-      yield* jobs.started(id, { pid: 4242, logPath: "/w/_jobs/1/log", hooksPath: "/w/_jobs/1/hooks" })
+      yield* jobs.started(id, { pid: 4242, logPath: "/w/_jobs/1/log" })
       expect((yield* jobs.show(id))!.job).toMatchObject({ status: "running", pid: 4242, logPath: "/w/_jobs/1/log" })
       yield* jobs.waiting(id, "pid 7 has the lane")
       expect((yield* jobs.show(id))!.job.waitingOn).toBe("pid 7 has the lane")

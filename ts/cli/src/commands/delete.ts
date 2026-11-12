@@ -108,8 +108,7 @@ const run = (input: Input) =>
     const job = yield* JobStart.runningAs(
       Option.getOrUndefined(input.job),
       "delete",
-      { selector, measure: input.measure },
-      paths.sessions
+      { selector, measure: input.measure }
     ).pipe(Effect.catchIf(JobStart.isNoSuchJob, (refused) => Effect.succeed(refused)))
     if (job instanceof JobStart.NoSuchJob) {
       yield* Console.error(`[delete] refused: ${job.message}`)

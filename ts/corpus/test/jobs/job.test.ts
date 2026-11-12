@@ -47,7 +47,6 @@ const row = (id: number, launched: Partial<Jobs.Row>): Jobs.Row => ({
   finishedAt: null,
   exit: null,
   logPath: null,
-  hooksPath: null,
   waitingOn: null,
   sweepId: null,
   batchAt: null,
