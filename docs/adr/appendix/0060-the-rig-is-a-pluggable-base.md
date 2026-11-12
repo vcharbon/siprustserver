@@ -143,7 +143,7 @@ Rules:
   it. Where they are refused, each collector naming one runs none of its steps and answers
   `not checkable`. A lock named by collectors of two scopes is refused at load: the outer
   scope's would hold it while the inner one's waits.
-- A collector named like a source the base (`interpreter`, `rfc audit`, `driver`, `rig`) answers lines
+- A collector or judge named like a source the base (`interpreter`, `rfc audit`, `driver`, `rig`) answers lines
   as is refused at load. A collector's line merged into a landed cell replaces only a `pending`
   line of its name and source, never an answered one.
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
@@ -189,7 +189,8 @@ collected, so a later collector reads them.
   cell whose directory bears it, in a cell's own export that cell alone.
 - The keys exports and collectors add are kept in the cell's `keys.json`. A wider scope
   describes the cell anew off its directory and reads them, and its joined records, there; a
-  `keys.json` or `joined/` there that cannot be read leaves the cell undescribed.
+  `keys.json` or `joined/` there that cannot be read leaves the cell undescribed, as does a
+  `pivot.json` whose postconditions (the cell's stated claims) cannot be read.
 - A cell with no record reaches the judge with an empty list.
 - A verification nobody answered for a cell, the cell's own lines counted, is `not checkable`
   where it is promised: those a manifest's `answers` names, a collector's own name where it
