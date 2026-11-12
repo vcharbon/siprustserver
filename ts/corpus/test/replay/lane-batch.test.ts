@@ -23,9 +23,10 @@
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  */
 import { NodeServices } from "@effect/platform-node"
-import { type Cell, CollectorPlan, type Lanes, RigPath } from "@sip/rig"
+import { type Cell, CollectorPlan, CollectorRun, type Lanes, RigPath } from "@sip/rig"
 import { Attachments, Batches, Client, JobEvents, Jobs, Sessions } from "@sip/store"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
+import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
 import * as Fiber from "effect/Fiber"
 import * as Result from "effect/Result"
@@ -336,26 +337,51 @@ describe.skipIf(!served)("the rig's collectors of a batch", () => {
   })
 })
 
+/** What sets the collectors of {@link afterCallCollectors} apart from its defaults. */
+interface AfterCall {
+  /** `after-call`'s delay, in seconds; 0.2 where absent. */
+  readonly delay_s?: number
+  /** `after-call`'s `collect`; where absent, it answers pass where the SUT is up ({@link SUT_UP}), fail where it is not. */
+  readonly collect?: string
+  /** `after-call`'s `close`; none where absent. */
+  readonly close?: string
+  /** Where set, the batch collector `on-fail`, set `on-failure`, whose `collect` passes. */
+  readonly onFailure?: true
+  /** The cells the batch's collectors read, of its lane; none where absent. */
+  readonly cells?: ReadonlyArray<string>
+}
+
 /**
  * The rig's cell-scope collector `after-call` of a batch on `clock`'s lane,
- * delayed 0.2 s, under a directory of its own: its `collect` answers
- * `after-call` pass where the stood SUT is up ({@link SUT_UP}), fail where it
- * is not. The batch's collectors with it alone, its events in `events`.
+ * under a directory of its own, as `as` sets it. The batch's collectors with
+ * it, its events in `events`.
  */
-const afterCallCollectors = async (clock: "real" | "simulated"): Promise<LaneBatch.Collectors<string, never>> => {
+const afterCallCollectors = async (clock: "real" | "simulated", as: AfterCall = {}): Promise<LaneBatch.Collectors<string, never>> => {
   const root = fs.mkdtempSync(path.join(TREE, "rig-"))
   const dir = path.join(root, "collectors", "after-call")
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
     path.join(dir, "collector.toml"),
-    `schema = "collector.v1"\nname = "after-call"\nscope = "cell"\nanswers = ["after-call"]\ndelay_s = 0.2\n[run]\ncollect = "./collect"\n`
+    `schema = "collector.v1"\nname = "after-call"\nscope = "cell"\nanswers = ["after-call"]\ndelay_s = ${as.delay_s ?? 0.2}\n` +
+      `[run]\ncollect = "./collect"\n${as.close === undefined ? "" : `close = "./close"\n`}`
   )
   script(
     dir,
     "collect",
-    `if [ -e "${SUT_UP}" ]; then echo '{"verification":"after-call","answer":"pass"}'; ` +
-      `else echo '{"verification":"after-call","answer":"fail","message":"the SUT is down"}'; fi`
+    as.collect ??
+      `if [ -e "${SUT_UP}" ]; then echo '{"verification":"after-call","answer":"pass"}'; ` +
+        `else echo '{"verification":"after-call","answer":"fail","message":"the SUT is down"}'; fi`
   )
+  if (as.close !== undefined) script(dir, "close", as.close)
+  if (as.onFailure === true) {
+    const onFail = path.join(root, "collectors", "on-fail")
+    fs.mkdirSync(onFail, { recursive: true })
+    fs.writeFileSync(
+      path.join(onFail, "collector.toml"),
+      `schema = "collector.v1"\nname = "on-fail"\nscope = "batch"\ndefault = "on-failure"\n[run]\ncollect = "./collect"\n`
+    )
+    script(onFail, "collect", `echo '{"verification":"on-fail","answer":"pass"}'`)
+  }
   const loaded = await Effect.runPromise(Effect.result(RigPath.load({ workspace: root })).pipe(Effect.provide(NodeServices.layer)))
   if (!Result.isSuccess(loaded)) throw new Error(`the rig path does not load: ${String(loaded.failure)}`)
   const lane: Lanes.Loaded = {
@@ -366,17 +392,26 @@ const afterCallCollectors = async (clock: "real" | "simulated"): Promise<LaneBat
     operations: new Map(),
     capabilities: new Set()
   }
+  const holder = path.join(root, "batch")
   return {
-    instances: [],
+    instances: CollectorPlan.batchPlanOf(loaded.success, lane, path.join(holder, "collectors"), holder),
     options: {
       sink: (event) => Effect.sync(() => void events.push(`collector ${event.phase} ${event.collector}`)),
       locker: () => Effect.succeed(Effect.void)
     },
-    holder: path.join(root, "batch"),
-    cells: () => Effect.succeed({ cells: [], unread: [], failed: [] }),
-    cell: CollectorPlan.cellPlanOf(loaded.success, lane, path.join(root, "batch", "collectors", "_cells"))
+    holder,
+    cells: () => Effect.succeed({ cells: (as.cells ?? []).map((id) => describedCell(id, lane.id)), unread: [], failed: [] }),
+    cell: CollectorPlan.cellPlanOf(loaded.success, lane, path.join(holder, "collectors", "_cells"))
   }
 }
+
+/** The cell ids the context of `instance`'s last step states. */
+const contextCellsOf = (instance: CollectorRun.Instance): ReadonlyArray<string> =>
+  (JSON.parse(fs.readFileSync(path.join(instance.dir, "context.json"), "utf8")) as { cells: ReadonlyArray<{ id: string }> }).cells.map((cell) => cell.id)
+
+/** What `collected` answered of each cell, as `<id> <answer>,…`, in their order. */
+const answersOf = (collected: ReadonlyArray<CollectorRun.Collected>) =>
+  collected.map((one) => [...one.cells].map(([id, answers]) => `${id} ${answers.verifications.map((line) => line.answer).join(",")}`))
 
 /** The cell `id` of the lane `lane` as its collectors read it, its directory under {@link TREE}. */
 const describedCell = (id: string, lane: string): Cell.Cell => ({
@@ -433,6 +468,42 @@ describe.skipIf(!served)("the rig's cell-scope collectors of a batch", () => {
     const ended = await withStore(LaneBatch.run({ lane: PAUSED, stand, collectors, drive: driveCells(PAUSED, ["a"]) }))
     expect(events.filter((event) => event.startsWith("collector"))).toEqual(["collector not-run after-call"])
     expect(ended.collected).toEqual([])
+  })
+
+  it("state a cell they failed failed to the batch's on-failure collectors, which read it alone", async () => {
+    endingAs({})
+    const collectors = await afterCallCollectors("real", {
+      collect: `if grep -q '"id": "a"' "$SIPRIG_CONTEXT"; ` +
+        `then echo '{"verification":"after-call","answer":"fail","message":"a went wrong"}'; ` +
+        `else echo '{"verification":"after-call","answer":"pass"}'; fi`,
+      onFailure: true,
+      cells: ["a", "b"]
+    })
+    const ended = await withStore(LaneBatch.run({ lane: STANDS, stand, collectors, drive: driveCells(STANDS, ["a", "b"]) }))
+    expect(answersOf(ended.collected).slice(0, 2)).toEqual([["a fail"], ["b pass"]])
+    expect(contextCellsOf(collectors.instances[0]!)).toEqual(["a"])
+  })
+
+  it("name in the batch's end a collector whose close left the lab changed", async () => {
+    endingAs({})
+    const collectors = await afterCallCollectors("real", { close: "exit 1" })
+    const ended = await withStore(LaneBatch.run({ lane: STANDS, stand, collectors, drive: driveCells(STANDS, ["a"]) }))
+    expect(events.filter((event) => event === "collector failed after-call of a")).toHaveLength(CollectorRun.CLOSE_ATTEMPTS)
+    expect(LaneBatch.leftChangedOf(ended)).toBe("the collector after-call of a left the lab changed")
+  })
+
+  it("answer not checkable on a cell whose collectors had not answered when the stop's grace ran out, the batch ending then", async () => {
+    endingAs({})
+    const collectors = await afterCallCollectors("real", { delay_s: 5 })
+    const drive = (stood: LaneBatch.Stood) =>
+      Effect.flatMap(driveCells(STANDS, ["a"])(stood), (driven) => Effect.map(Clock.currentTimeMillis, (now) => ({ ...driven, graceEnd: now + 200 })))
+    const started = Date.now()
+    const ended = await withStore(LaneBatch.run({ lane: STANDS, stand, collectors, drive }))
+    expect(Date.now() - started).toBeLessThan(3000)
+    expect(ended.collected.map((one) => one.cells.get("a")?.verifications)).toEqual([
+      [{ name: "after-call", source: "after-call", answer: "not-checkable", message: LaneBatch.GRACE_OVER }]
+    ])
+    expect(events).toContain("collector failed after-call of a")
   })
 })
 
