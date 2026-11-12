@@ -207,6 +207,7 @@ describe("the run report document", () => {
 describe("a deployment's spelling of the current term", () => {
   it("is what a side's selector reads, and a refusal names it among the forms", async () => {
     const spelled = StoreBinding.layerWith({
+      ...StoreBinding.STORE,
       spelling: { current: "@main" },
       grammar: { isCapture: () => false },
       migrate: Effect.succeed([])

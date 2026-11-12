@@ -5,6 +5,7 @@
 import * as Effect from "effect/Effect"
 import { describe, expect, it } from "vitest"
 import * as StoreBinding from "../src/binding.js"
+import * as Migrations from "../src/migrations.js"
 import * as Migrator from "../src/migrator.js"
 import * as Resolver from "../src/resolver.js"
 import * as Selector from "../src/selector.js"
@@ -14,11 +15,7 @@ const terms = (parsed: Selector.Selector | { readonly refused: string }) =>
 
 describe("StoreBinding", () => {
   it("parses in the deployment's spelling of the current term", async () => {
-    const binding = StoreBinding.layerWith({
-      spelling: { current: "@main" },
-      grammar: Resolver.DEFAULT_GRAMMAR,
-      migrate: Migrator.run
-    })
+    const binding = StoreBinding.layerWith({ ...StoreBinding.STORE, spelling: { current: "@main" } })
     const read = await Effect.runPromise(
       Effect.all([StoreBinding.parse("@main/@lane:fake"), StoreBinding.parse("@current"), StoreBinding.current]).pipe(
         Effect.provide(binding)
@@ -33,5 +30,12 @@ describe("StoreBinding", () => {
     const binding = await Effect.runPromise(StoreBinding.Service.pipe(Effect.provide(StoreBinding.layer)))
     expect(binding.spelling).toEqual(Selector.DEFAULT_SPELLING)
     expect(binding.grammar).toBe(Resolver.DEFAULT_GRAMMAR)
+  })
+
+  it("defaults to the store's own schema: the one set its migrator records in its own table, the migrator applying it", async () => {
+    const binding = await Effect.runPromise(StoreBinding.Service.pipe(Effect.provide(StoreBinding.layer)))
+    expect(binding.sets).toEqual([{ table: Migrations.TABLE, record: Migrations.record }])
+    expect(binding.migrate).toBe(Migrator.run)
+    expect(binding.name).toBe("the run store")
   })
 })

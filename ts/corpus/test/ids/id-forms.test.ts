@@ -75,7 +75,7 @@ describe("IdForms.caseForms captureOf", () => {
 
 describe("IdForms.caseFormsOf", () => {
   it("reads the binding's grammar", async () => {
-    const binding = StoreBinding.layerWith({ spelling: { current: "@current" }, grammar: GRAMMAR, migrate: Effect.succeed([]) })
+    const binding = StoreBinding.layerWith({ ...StoreBinding.STORE, grammar: GRAMMAR, migrate: Effect.succeed([]) })
     const read = await Effect.runPromise(IdForms.caseFormsOf.pipe(Effect.provide(binding)))
     expect(read.caseIdIn(C, "x01ab")).toBe(`${C}-x01ab`)
   })
