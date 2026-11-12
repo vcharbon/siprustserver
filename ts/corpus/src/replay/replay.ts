@@ -312,6 +312,17 @@ const landed = (tally: Tally, options: Options, count = 1) =>
     return tally.landed >= tally.planned ? close(tally, options) : Effect.void
   })
 
+/**
+ * Each row of `tallies` still open whose every cell landed, closed: the rows
+ * the batch's end closes, a batch process's once its gate has read and a
+ * batch's with collectors once they answered.
+ */
+const closeLanded = Effect.fn("Replay.closeLanded")(function*(tallies: Iterable<Tally>, options: Options) {
+  for (const tally of new Set(tallies)) {
+    if (tally.outcome === undefined && tally.landed >= tally.planned) yield* close(tally, options)
+  }
+})
+
 /** The variables every interpreter of a batch runs under: its box, and the batch's side rows. */
 const interpreterEnv = (memoryMax: string, rowsDir: string | undefined) =>
   Effect.gen(function*() {
@@ -532,13 +543,7 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
       if (at >= 0) tally.summaries[at] = { ...tally.summaries[at]!, passed: false }
     }
   }
-  // A batch process's rows close once its gate has read, and a batch's with
-  // collectors once they answered, each on its last cell.
-  if (closesHere) {
-    for (const tally of new Set(driven.map((ref) => tallyOf(ref.capture)))) {
-      if (tally.outcome === undefined && tally.landed >= tally.planned) yield* close(tally, options)
-    }
-  }
+  if (closesHere) yield* closeLanded(driven.map((ref) => tallyOf(ref.capture)), options)
   for (const tally of new Set(driven.map((ref) => tallyOf(ref.capture)))) yield* mergeAnswered(tally)
   return { dirty, deadHost, driven, interrupted, ran: ranAsEnded(ranCells, ended, tallies) } satisfies Batch
 })

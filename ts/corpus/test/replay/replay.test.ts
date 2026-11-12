@@ -431,7 +431,7 @@ const labOf = async (
 
 /**
  * A driver like {@link describedDrive} whose every cell lands waiting on its
- * `cdr` line, which the collector `lab` answers.
+ * `records` line, which the collector `lab` answers.
  */
 const describedLabPendingDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
   Effect.flatMap(describedDrive(cell, context as never), (ran) =>
@@ -439,16 +439,16 @@ const describedLabPendingDrive: typeof runCell = ((cell: Campaign.CampaignCell, 
       const dir = path.join(context.runDir, Layout.cellDir(cell))
       fs.writeFileSync(
         path.join(dir, "verifications.json"),
-        JSON.stringify([{ name: "call", source: "interpreter", answer: "pass" }, { name: "cdr", source: "lab", answer: "pending" }])
+        JSON.stringify([{ name: "call", source: "interpreter", answer: "pass" }, { name: "records", source: "lab", answer: "pending" }])
       )
-      return { summary: { ...ran.summary, passed: false, pending: ["cdr"] }, detail: "still verifying: cdr pending" }
+      return { summary: { ...ran.summary, passed: false, pending: ["records"] }, detail: "still verifying: records pending" }
     }))) as unknown as typeof runCell
 
-/** A collect answering `cdr` `answer` for every cell its context names. */
-const cdrCollect = (answer: string) => `#!/usr/bin/env node
+/** A collect answering `records` `answer` for every cell its context names. */
+const recordsCollect = (answer: string) => `#!/usr/bin/env node
 const fs = require("node:fs")
 const context = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
-for (const cell of context.cells) console.log(JSON.stringify({ verification: "cdr", cell: cell.id, answer: "${answer}" }))
+for (const cell of context.cells) console.log(JSON.stringify({ verification: "records", cell: cell.id, answer: "${answer}" }))
 `
 
 /**
@@ -634,14 +634,14 @@ describe.skipIf(!served)("the replay phase", () => {
 
   it("closes a row whose cells landed pending once its batch's collector answered them, the index reading its answers", async () => {
     for (const [answer, passed] of [["pass", true], ["fail", false]] as const) {
-      const layer = await labOf({ collect: cdrCollect(answer) }, "cdr")
+      const layer = await labOf({ collect: recordsCollect(answer) }, "records")
       const { done, lines } = await replay(PAUSED, { drive: describedLabPendingDrive, collectors: layer })
       const index = JSON.parse(fs.readFileSync(path.join(done.bundles[0]!, "campaign.json"), "utf8"))
       expect(index.cells.map((cell: { passed: boolean; pending?: unknown }) => [cell.passed, cell.pending])).toEqual([
         [passed, undefined],
         [passed, undefined]
       ])
-      expect(new Set(lines.map((line) => `${line.name} ${line.answer}`))).toEqual(new Set(["call pass", `cdr ${answer}`]))
+      expect(new Set(lines.map((line) => `${line.name} ${line.answer}`))).toEqual(new Set(["call pass", `records ${answer}`]))
     }
   })
 
