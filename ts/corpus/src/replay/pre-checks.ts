@@ -17,8 +17,8 @@ import { PreCheck } from "@sip/rig"
 import { Attachments, JobEvents, Verifications } from "@sip/store"
 import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
 import * as Schema from "effect/Schema"
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { Collectors } from "../deployment/index.js"
 import * as Locks from "../locks.js"
@@ -99,5 +99,5 @@ export const forReplay = (sessions: string, lane: string, filed: Filed | undefin
     const dir = filed?.dir ?? (yield* unfiledDir(sessions))
     const refused = yield* job({ job: filed?.id, dir, lanes: [lane], ...(watch === undefined ? {} : { watch }) })
     if (refused !== undefined) return yield* new Refused({ reason: refused })
-    if (filed === undefined) yield* Effect.sync(() => fs.rmSync(dir, { recursive: true, force: true }))
+    if (filed === undefined) yield* Effect.ignore(Effect.flatMap(FileSystem.FileSystem, (files) => files.remove(dir, { recursive: true })))
   })
