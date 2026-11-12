@@ -140,8 +140,14 @@ describe("cell.v1 of a bundle", () => {
   it.each([
     ["a keys.json cut short", (dir: string) => fs.writeFileSync(path.join(dir, "keys.json"), `{"trunk": ["t1"]`), /^keys\.json: /],
     ["a keys.json holding no string lists", (dir: string) => fs.writeFileSync(path.join(dir, "keys.json"), `{"trunk": [1]}`), /^keys\.json: /],
-    ["a joined that is no directory", (dir: string) => fs.writeFileSync(path.join(dir, "joined"), ""), /^joined: /]
-  ])("refuses a bundle whose narrower scope's additions are unreadable: %s", async (_, lay, why) => {
+    ["a joined that is no directory", (dir: string) => fs.writeFileSync(path.join(dir, "joined"), ""), /^joined: /],
+    ["a pivot.json cut short", (dir: string) => fs.writeFileSync(path.join(dir, "pivot.json"), `{"postconditions": {`), /^pivot\.json: /],
+    [
+      "a pivot.json whose postconditions do not decode",
+      (dir: string) => fs.writeFileSync(path.join(dir, "pivot.json"), `{"postconditions": 5}`),
+      /^pivot\.json: postconditions/
+    ]
+  ])("refuses a bundle whose claims or narrower scope's additions are unreadable: %s", async (_, lay, why) => {
     const dir = variant(() => undefined)
     lay(dir)
     const result = await run(CellOfBundle.ofBundle(dir, PLACEMENT))

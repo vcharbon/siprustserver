@@ -171,6 +171,16 @@ describe("the rig path", () => {
     expect(refusal?.reason).toBe("name: interpreter is a source the base answers its own lines as")
   })
 
+  it("refuses a judge named like a source the base answers lines as", async () => {
+    const workspace = root({
+      "judges/rig/judge.toml": `schema = "judge.v1"\nname = "rig"\nmodule = "./judge.ts"\n`,
+      "judges/rig/judge.ts": "export default {}\n"
+    })
+    const refusal = await refusalOf({ workspace })
+    expect(refusal?.files).toEqual([path.join(workspace, "judges/rig/judge.toml")])
+    expect(refusal?.reason).toBe("name: rig is a source the base answers its own lines as")
+  })
+
   it("refuses a lock named by a job and a batch collector, naming both manifests; one named by two batch collectors loads", async () => {
     const scoped = (name: string, scope: string) =>
       `schema = "collector.v1"\nname = "${name}"\nscope = "${scope}"\nlocks = ["lab"]\n[run]\ncollect = "./collect"\n`
