@@ -2,7 +2,8 @@
  * A job's wiring is checked against the rig path before it opens: a
  * collection level or a lane naming a collector the path does not define is
  * refused naming the file, and so is a level setting a `required` collector, a
- * lane excluding one, a level setting a pre-check `on-failure`, and a lane
+ * lane excluding one, a level setting a pre-check `on-failure`, a level
+ * setting an on-demand pre-check `never` or a lane excluding one, and a lane
  * override of a key the collector does not
  * offer or of another type than its manifest's value. The appendix's own
  * wiring holds.
@@ -80,6 +81,22 @@ describe("the wiring of a job", () => {
     expect(result(`[collection.quick]\n"on-failure" = ["lab-up"]\n`))
       .toBe("rig.toml and pack/collectors/lab-up/collector.toml: collection.quick.on-failure: names lab-up, a pre-check, which runs before any cell failed")
     expect(result(`[collection.quick]\n"on-demand" = ["lab-up"]\n`)).toBe("holds")
+  })
+
+  it("refuses a level setting an on-demand pre-check never, and a lane excluding one; holds a level setting it always", () => {
+    const rig: RigPath = {
+      ...RIG,
+      collectors: new Map([...RIG.collectors, ["asked-up", defined("asked-up", { scope: "job", at: "before", default: "on-demand" })]])
+    }
+    const result = (wiring: Collection.Wiring) => {
+      const checked = Collection.check(rig, wiring)
+      return Result.isFailure(checked) ? checked.failure.message : "holds"
+    }
+    expect(result({ workspace: workspace(`[collection.quick]\nnever = ["asked-up"]\n`), lanes: [] }))
+      .toBe("rig.toml and pack/collectors/asked-up/collector.toml: collection.quick.never: names asked-up, an on-demand pre-check, which runs whenever a job asks for it")
+    expect(result({ lanes: [lane(`[collectors]\nexclude = ["asked-up"]\n`)] }))
+      .toBe("lanes/lab-a.toml and pack/collectors/asked-up/collector.toml: collectors.exclude: names asked-up, an on-demand pre-check, which runs whenever a job asks for it")
+    expect(result({ workspace: workspace(`[collection.quick]\nalways = ["asked-up"]\n`), lanes: [] })).toBe("holds")
   })
 
   it("refuses a level setting one collector twice", () => {

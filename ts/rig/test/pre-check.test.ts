@@ -4,7 +4,8 @@
  * `close` still run; a `not checkable` refuses nothing and stays the scope's
  * line, but for a required pre-check's, which refuses the scope as does its
  * failed or timed-out collect. An `on-demand` job pre-check runs only for a
- * job that asks for it, and refuses that job as a required one would. A
+ * job that asks for it, and refuses that job as a required one would,
+ * whatever the level sets it. A
  * required pre-check a real-clock lane names
  * no part of refuses the scope before any pre-check runs; on a simulated lane
  * it does not. Each line is answered by the pre-check of its entry, the base's
@@ -16,6 +17,7 @@ import * as Result from "effect/Result"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import * as Collection from "../src/collection.js"
 import * as CollectorPlan from "../src/collector-plan.js"
 import type * as CollectorRun from "../src/collector-run.js"
 import type * as Lanes from "../src/lanes.js"
@@ -185,6 +187,20 @@ describe("an on-demand pre-check", () => {
     expect(checked.refusal).toMatch(/^the asked pre-check asked-check could not check asked-check: collect exited 3: the lab cannot be asked/)
     expect(events.filter((event) => event.startsWith("refused"))).toEqual([`refused asked-check: ${checked.refusal}`])
     expect(traceOf(root)).toEqual(["collect asked-check"])
+  })
+
+  it("refuses the job that asks for it where it cannot check, whatever the level sets it", async () => {
+    const { root, rig } = await samples()
+    const refusalUnder = async (level: Collection.Level) => {
+      const settings = Collection.settingsOf({ set: level }, "set")
+      const checks = CollectorPlan.jobPlanOf(rig, [laneOf("a")], path.join(root, "job", "collectors"), path.join(root, "job"), ["asked-check"], settings)
+        .filter(PreCheck.isPreCheck)
+      const { sink } = collecting()
+      return (await Effect.runPromise(PreCheck.run(checks, [], { sink, locker: memoryLocker() }))).refusal
+    }
+    const refused = /^the asked pre-check asked-check could not check asked-check: collect exited 3/
+    expect(await refusalUnder({ never: ["asked-check"] })).toMatch(refused)
+    expect(await refusalUnder({ always: ["asked-check"] })).toMatch(refused)
   })
 })
 
