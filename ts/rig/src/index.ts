@@ -2,6 +2,8 @@
  * `@sip/rig`: the contract a pack and a workspace plug into (ADR-0060). The
  * manifests (`pack.v1`, `collector.v1`, `judge.v1`, `operation.v1`), the rig
  * path that finds them, the lane file (`lane.v1`) and the parts it names, the
+ * catalog of a deployment's lanes over a pack's reading of their parts, `${VAR}`
+ * expansion of a part's strings, whether a run fits a lane, the
  * collection levels and lane wiring checked before a job opens, the context an
  * executable reads and how one runs, an operation's run and a job's setup, a
  * scope's collectors (which run and in what order, their run, the lines they
@@ -29,12 +31,15 @@ export * as CollectorRun from "./collector-run.js"
 export * as CompiledCell from "./compiled-cell.js"
 export * as Context from "./context.js"
 export * as Executable from "./executable.js"
+export * as Expand from "./expand.js"
 export * as Exports from "./exports.js"
 export * as Join from "./join.js"
 export * as Judge from "./judge.js"
 export * as JudgePlan from "./judge-plan.js"
 export * as JudgeRun from "./judge-run.js"
 export * as Lane from "./lane.js"
+export * as LaneCatalog from "./lane-catalog.js"
+export * as LaneView from "./lane-view.js"
 export * as Lanes from "./lanes.js"
 export * as ManifestFile from "./manifest-file.js"
 export * as Operation from "./operation.js"
