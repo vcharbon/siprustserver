@@ -221,7 +221,8 @@ export const sourceOf = (instance: CollectorRun.Instance): string => instance.ju
 const promisedBy = (instance: CollectorRun.Instance, read?: ReadonlyArray<string> | undefined): ScopeAnswers.Promised => ({
   source: sourceOf(instance),
   names: instance.judge === undefined ? instance.collector.manifest.answers ?? [] : Collector.answeredBy(instance.collector.manifest),
-  covers: (cell) => (instance.lanes === undefined || instance.lanes.includes(cell.lane)) && (read === undefined || read.includes(cell.id))
+  covers: (cell) => (instance.lanes === undefined || instance.lanes.includes(cell.lane)) && (read === undefined || read.includes(cell.id)),
+  informative: Collector.isInformative(instance.collector.manifest)
 })
 
 /** Why the base could not describe `cell`, as its lines say it. */

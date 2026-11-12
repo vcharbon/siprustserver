@@ -368,6 +368,30 @@ describe("a scope's collectors", () => {
     expect(traceOf(root)).toEqual(["collect on-demand c2,c1", "window 1000-7000"])
   })
 
+  it("keeps an informative collector's lines informative: its own, the not checkable of its failed collect, and its promise filled", async () => {
+    const { root, rig } = await samples()
+    const cells = cellsUnder(root)
+    const { collected } = await runScope(
+      [instanceOf(rig, root, "informative-failing"), instanceOf(rig, root, "informative-noting")],
+      cells,
+      { sink: () => Effect.void, locker: memoryLocker() }
+    )
+    const [failing, noting] = valueOf(collected)
+    const log = path.join(root, "batch", "collectors", "informative-failing", "collect.log")
+    const down = { name: "informative-failing", source: "informative-failing", answer: "not-checkable", message: `collect exited 3: the log store is down, its log ${log}`, informative: true }
+    expect(failing!.scope.verifications).toEqual([down])
+    for (const cell of cells) expect(failing!.cells.get(cell.id)!.verifications).toEqual([down])
+    expect(noting!.cells.get("c1")!.verifications).toEqual([{ name: "note", source: "informative-noting", answer: "fail", message: "a slow log", informative: true }])
+    expect(noting!.cells.get("c2")!.verifications).toEqual([
+      { name: "note", source: "informative-noting", answer: "not-checkable", message: "nobody answered note for the cell c2", informative: true }
+    ])
+    const passed = { name: "replay", source: "replay", answer: "pass" as const }
+    for (const cell of cells) {
+      const lines = [passed, ...failing!.cells.get(cell.id)!.verifications, ...noting!.cells.get(cell.id)!.verifications]
+      expect(Verification.finalStatusOf(lines)).toBe("pass")
+    }
+  })
+
   it("answers not checkable, with what the collector said, for every verification it names on every cell when collect exits non-zero", async () => {
     const { root, rig } = await samples()
     const cells = cellsUnder(root)

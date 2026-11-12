@@ -316,13 +316,18 @@ const cellsOf = (instance: Instance, cells: ReadonlyArray<Cell.Cell>): ReadonlyA
 
 const NO_ANSWERS: Answers = { verifications: [], attachments: [] }
 
-/** `not checkable`, saying `message`, for each verification `instance` names. */
+/** The flag every line of `instance` carries: informative where its manifest says its lines never decide; nothing otherwise. */
+const informativeOf = (instance: Instance): { readonly informative?: true } =>
+  Collector.isInformative(instance.collector.manifest) ? { informative: true } : {}
+
+/** `not checkable`, saying `message`, for each verification `instance` names; informative where its lines never decide. */
 const notCheckableLines = (instance: Instance, message: string): Answers => ({
   verifications: Collector.answeredBy(instance.collector.manifest).map((name) => ({
     name,
     source: ScopeJudging.sourceOf(instance),
     answer: "not-checkable" as const,
-    message
+    message,
+    ...informativeOf(instance)
   })),
   attachments: []
 })
@@ -401,7 +406,7 @@ const applied = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, lines: Rea
             const { verification, cell: named, ...rest } = line.line
             const cell = named ?? sole
             const holder = cell === undefined ? scope : byCell.get(cell)!
-            holder.verifications.set(verification, { name: verification, source: ScopeJudging.sourceOf(instance), ...rest })
+            holder.verifications.set(verification, { name: verification, source: ScopeJudging.sourceOf(instance), ...rest, ...informativeOf(instance) })
             break
           }
           case "Attachment": {

@@ -49,6 +49,8 @@ export const Collector = Schema.Struct({
   after: Schema.optionalKey(Schema.Array(Name)),
   /** The verifications it, or its judge, answers. */
   answers: Schema.optionalKey(Schema.Array(Name)),
+  /** Its lines never decide: each it answers, and each `not checkable` the base answers for it, is informative. */
+  informative: Schema.optionalKey(Schema.Boolean),
   /** The judge of the path that decides over its records. */
   judge: Schema.optionalKey(Name),
   /** Box-wide locks held from `open` to `close`; none on a cell-scope collector. */
@@ -87,6 +89,9 @@ export const boundsOf = (collector: Collector): Bounds => ({ ...DEFAULT_BOUNDS, 
 export const answeredBy = (collector: Collector): ReadonlyArray<string> =>
   collector.answers === undefined || collector.answers.length === 0 ? [collector.name] : collector.answers
 
+/** Whether `collector`'s lines never decide a verdict (`informative = true`). */
+export const isInformative = (collector: Collector): boolean => collector.informative === true
+
 /** The executables a collector names, by the step that runs each. */
 export const executablesOf = (collector: Collector): ReadonlyArray<readonly [string, string]> =>
   (["open", "collect", "close"] as const).flatMap((step) => {
@@ -117,6 +122,9 @@ const meaningOf = (collector: Collector): string | undefined => {
     return `default: a required collector runs always, not ${collector.default}`
   }
   if ((collector.after ?? []).includes(collector.name)) return "after: a collector does not run after itself"
+  if (collector.informative === true && collector.judge !== undefined) {
+    return "judge: an informative collector's lines never decide, no judge decides over its records"
+  }
   return undefined
 }
 

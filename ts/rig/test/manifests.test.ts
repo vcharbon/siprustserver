@@ -89,6 +89,13 @@ describe("collector.v1", () => {
       .toBe("accepted")
   })
 
+  it("refuses an informative collector naming a judge", () => {
+    expect(refusalOf(Collector.parse("c/collector.toml", COLLECTOR.replace("locks ", "informative = true\nlocks "))))
+      .toBe("c/collector.toml: judge: an informative collector's lines never decide, no judge decides over its records")
+    const unjudged = COLLECTOR.replace("locks ", "informative = true\nlocks ").replace(`judge    = "call-records"\n`, "")
+    expect(refusalOf(Collector.parse("c/collector.toml", unjudged))).toBe("accepted")
+  })
+
   it("refuses a pre-check whose default is on-failure", () => {
     const before = COLLECTOR.replace(`at       = "after"`, `at = "before"`)
       .replace(`open    = "./open"\n`, "")

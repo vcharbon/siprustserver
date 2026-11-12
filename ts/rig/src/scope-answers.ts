@@ -19,6 +19,8 @@ export interface Promised {
   readonly source: string
   readonly names: ReadonlyArray<string>
   readonly covers: (cell: Cell.Cell) => boolean
+  /** Its filled lines never decide (an informative collector's promise). */
+  readonly informative?: boolean
 }
 
 /** The names answered on each of `cells`, other than `pending`: its own lines', then `collected`'s. */
@@ -65,7 +67,8 @@ export const unansweredFilled = (
             name,
             source: promise.source,
             answer: "not-checkable" as const,
-            message: `nobody answered ${name} for the cell ${cell.id}`
+            message: `nobody answered ${name} for the cell ${cell.id}`,
+            ...(promise.informative === true ? { informative: true } : {})
           }))
         ]
       })

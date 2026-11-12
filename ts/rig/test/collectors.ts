@@ -71,6 +71,12 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
     close: traced("close failing-collect"),
     collect: traced("collect failing-collect", `echo "the records store is down" >&2\nexit 3`)
   }, `answers = ["records", "count"]`),
+  ...collector("informative-failing", {
+    collect: traced("collect informative-failing", `echo "the log store is down" >&2\nexit 3`)
+  }, `informative = true`),
+  ...collector("informative-noting", {
+    collect: answering(`{"verification": "note", "cell": "c1", "answer": "fail", "message": "a slow log"}`)
+  }, `informative = true\nanswers = ["note"]`),
   ...collector("failing-open", {
     open: traced("open failing-open", `echo "no route to the store" >&2\nexit 2`),
     collect: traced("collect failing-open"),

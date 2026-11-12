@@ -259,6 +259,23 @@ describe.skipIf(!served)("a job's collectors", () => {
     expect(lab.trace()).toEqual(["open", "collect", "close"])
   })
 
+  it("state in their contexts the cells their caller plans, and none where it plans none", async () => {
+    const seen = path.join(TREE, "planned-context.json")
+    const lab = await labOf({ collect: `cp "$SIPRIG_CONTEXT" "${seen}"`, close: "exit 0" })
+    const planned = [{ id: "c1", case: "case-1", lane: LANE, claims: { lab: { expects: 1 } } }]
+    const contextOf = (stated: typeof planned | undefined) =>
+      withStore(lab.layer, Effect.gen(function*() {
+        const job = yield* jobOf
+        yield* JobCollectors.around(
+          { job, dir: path.join(TREE, `job${job}`), lanes: [LANE], cells: () => [], ...(stated === undefined ? {} : { planned: stated }) },
+          Effect.void
+        )
+        return JSON.parse(fs.readFileSync(seen, "utf8")) as { readonly planned?: unknown }
+      }))
+    expect((await contextOf(planned)).planned).toEqual(planned)
+    expect((await contextOf(undefined)).planned).toBeUndefined()
+  })
+
   it("collect an on-failure collector over a cell its caller states failed, though no line of it failed", async () => {
     const lab = await labOf({
       collect: `echo '{"verification":"lab-check","cell":"c1","answer":"pass"}'`,

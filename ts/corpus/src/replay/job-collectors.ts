@@ -14,7 +14,7 @@
  * A cell the work ran twice (a repeated request's passes) is read once per
  * run, its later ids suffixed by the order it ran in.
  */
-import { CollectorRun, PreCheck } from "@sip/rig"
+import { CollectorRun, type Context, PreCheck } from "@sip/rig"
 import { Attachments, JobEvents } from "@sip/store"
 import * as Effect from "effect/Effect"
 import { identity } from "effect/Function"
@@ -34,6 +34,8 @@ export interface Request<A> {
   readonly lanes: ReadonlyArray<string>
   /** The cells the work ran to a bundle, once it ended. */
   readonly cells: (value: A) => ReadonlyArray<CollectedCells.LandedCell>
+  /** The cells the work is to run, which every collector step's context states (`planned`); none stated where absent. */
+  readonly planned?: ReadonlyArray<Context.Planned>
   /** Makes the opening (each lock wait, each `open`) interruptible where the caller runs `around` masked. */
   readonly restore?: <X, EX, RX>(effect: Effect.Effect<X, EX, RX>) => Effect.Effect<X, EX, RX>
   /** Told whom a collector's lock waits for, and `undefined` once it is taken. */
@@ -68,7 +70,8 @@ export const around = <A, E, R>(request: Request<A>, work: Effect.Effect<A, E, R
     const events = yield* JobEvents.Service
     const options: CollectorRun.Options = {
       sink: CollectorIo.sinkOf(request.job === undefined ? undefined : { id: request.job, events }),
-      locker: yield* CollectorIo.locker(Locks.DEFAULT_WAIT_MS, request.watch)
+      locker: yield* CollectorIo.locker(Locks.DEFAULT_WAIT_MS, request.watch),
+      planned: request.planned
     }
     const restore = request.restore ?? identity
     let opened: CollectorRun.Opened | undefined
