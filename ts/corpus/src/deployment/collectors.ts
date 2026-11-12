@@ -1,7 +1,8 @@
 /**
  * `Collectors` — the collectors a deployment's rig path runs around a job and
  * around each batch (`@sip/rig` `CollectorPlan`, ADR-0060 appendix §3, §5,
- * §10): the instances a batch on a lane runs, and those a job over its lanes
+ * §10): the instances a batch on a lane runs, its cell-scope ones per cell,
+ * and those a job over its lanes
  * runs, pre-checks among them (`PreCheck.isPreCheck`; an `on-demand` one only
  * where the job asks for it), each instance's directory under the one its
  * caller names, as the job's collection level ({@link Level}) sets them; the
@@ -18,6 +19,7 @@ import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Result from "effect/Result"
+import * as path from "node:path"
 
 /** The collection level the job at hand names (`--collection`); absent, the workspace's default. */
 export const Level: Context.Reference<string | undefined> = Context.Reference("@sip/corpus/Collectors/Level", {
@@ -27,6 +29,8 @@ export const Level: Context.Reference<string | undefined> = Context.Reference("@
 export interface Interface {
   /** The collectors a batch on `lane` runs, their directories under `dir`, the batch's own attachments under `holder`. */
   readonly batch: (lane: string, dir: string, holder: string) => Effect.Effect<ReadonlyArray<CollectorRun.Instance>>
+  /** The cell-scope collectors a batch on `lane` runs, each cell's scope a directory under `root`; none where absent. */
+  readonly cell?: (lane: string, root: string) => Effect.Effect<CollectorPlan.CellPlan | undefined>
   /**
    * The collectors a job over `lanes` runs, their directories under `dir`, the
    * job's own attachments under `holder`; the collectors `asked` names among
@@ -59,11 +63,31 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Collectors") {}
 
-/** What the rig runs at the end of a batch on `lane` whose directory is `holder`: its collectors' instances, under `dir`, and its export judges. */
+/** Whether `batch`, what {@link batchOf} read, runs or names anything around a batch. */
+export const wiresAny = (batch: {
+  readonly instances: ReadonlyArray<CollectorRun.Instance>
+  readonly exportJudges: ScopeJudging.ExportJudges | undefined
+  readonly cell: CollectorPlan.CellPlan | undefined
+}): boolean =>
+  batch.instances.length > 0 || batch.exportJudges !== undefined ||
+  (batch.cell !== undefined && (batch.cell.runs.length > 0 || batch.cell.unrun.length > 0))
+
+/**
+ * The directory under a batch's collectors' where each cell's scope has its
+ * own: no collector is so named, its name not being one a collector takes.
+ */
+export const CELLS_DIR = "_cells"
+
+/**
+ * What the rig runs around a batch on `lane` whose directory is `holder`: its
+ * collectors' instances, under `dir`, its export judges, and its cell-scope
+ * collectors, each cell's under `dir`'s {@link CELLS_DIR}.
+ */
 export const batchOf = (seam: Interface, lane: string, dir: string, holder: string) =>
   Effect.all({
     instances: seam.batch(lane, dir, holder),
-    exportJudges: seam.exportJudges === undefined ? Effect.succeed(undefined) : seam.exportJudges(lane, holder)
+    exportJudges: seam.exportJudges === undefined ? Effect.succeed(undefined) : seam.exportJudges(lane, holder),
+    cell: seam.cell === undefined ? Effect.succeed(undefined) : seam.cell(lane, path.join(dir, CELLS_DIR))
   })
 
 /** A deployment that wires no collector. */
@@ -97,6 +121,11 @@ export const of = (
       Effect.map(settings(collection), (set) => {
         const found = byId.get(lane)
         return found === undefined ? [] : CollectorPlan.batchPlanOf(rig, found, dir, holder, set)
+      }),
+    cell: (lane, root) =>
+      Effect.map(settings(collection), (set) => {
+        const found = byId.get(lane)
+        return found === undefined ? undefined : CollectorPlan.cellPlanOf(rig, found, root, set)
       }),
     job: (named, dir, holder, asked) =>
       Effect.map(settings(collection), (set) => CollectorPlan.jobPlanOf(rig, loaded(named), dir, holder, asked, set)),

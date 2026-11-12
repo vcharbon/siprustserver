@@ -28,9 +28,17 @@
  * attachments. Its pre-checks (`at = "before"`) run once its row opened,
  * before the lane stands anything: a `fail` closes the row with their lines
  * and refuses the batch before any call (`LaneUnready`, the message theirs).
+ *
+ * Its cell-scope collectors (`@sip/rig` `CellCollectors`) bracket each cell's
+ * call as the driver runs it through `Stood.cells`, and are joined once every
+ * cell was driven, before the end gate reads: the lane still stands for the
+ * last cell's delayed collector. What they answered of a cell comes first in
+ * `collected`, and a cell they failed is stated failed to the batch's
+ * collectors. On a simulated lane none runs, and the batch says so of each
+ * one wired there (an event `not-run`).
  */
-import type { Attachment, Verification } from "@sip/contracts"
-import { CollectorRun, PreCheck } from "@sip/rig"
+import { type Attachment, Verification } from "@sip/contracts"
+import { CellCollectors, type CollectorPlan, CollectorRun, PreCheck } from "@sip/rig"
 import { Attachments, Batches } from "@sip/store"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
@@ -79,6 +87,8 @@ export interface Stand {
 export interface Stood {
   readonly host: BatchHost | undefined
   readonly sut: SutHandle | undefined
+  /** The batch's cell-scope collectors: the driver runs each cell's call through `around`; none where the batch wires none. */
+  readonly cells: CellCollectors.CellCollectors
 }
 
 /** What driving the cells came to: the caller's own answer, and how many cells a stop interrupted mid-run. */
@@ -101,6 +111,8 @@ export interface Collectors<A, RC> {
    * them failed whatever this says ({@link failedAtEnd}).
    */
   readonly cells: (value: A, end: End) => Effect.Effect<CollectorRun.Over, never, RC>
+  /** Its cell-scope collectors (`@sip/rig` `CellCollectors`); none run where absent. */
+  readonly cell?: CollectorPlan.CellPlan | undefined
 }
 
 /** What the batch's end came to as its collectors read its cells. */
@@ -286,13 +298,13 @@ const checkedThenStood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO,
     if (checked.refusal !== undefined) {
       return { _tag: "Refused" as const, refusal: checked.refusal, answers: checked.answers, leftChanged: checked.leftChanged }
     }
-    const { ended, opened } = yield* Effect.scoped(stood(request))
+    const { ended, opened, cells } = yield* Effect.scoped(stood(request))
     return {
       _tag: "Ended" as const,
       ended: {
         ...ended,
         collected: [...checked.collected, ...ended.collected],
-        leftChanged: [...checked.leftChanged, ...(opened?.leftChanged() ?? [])]
+        leftChanged: [...checked.leftChanged, ...cells.leftChanged(), ...(opened?.leftChanged() ?? [])]
       } satisfies Ended<A>
     }
   })
@@ -322,9 +334,26 @@ const preChecked = (rig: RigOf) =>
     ? Effect.succeed(PreCheck.NOTHING)
     : PreCheck.run(rig.instances.filter(PreCheck.isPreCheck), [], { sink: rig.options.sink, locker: rig.options.locker })
 
-/** What `opened`, the batch's rig collectors, collected over its cells driven to `value`, its end come to `end`. */
-const collectedAtEnd = <A, RC>(rig: Collectors<A, RC>, opened: CollectorRun.Opened, value: A, end: End) =>
-  Effect.flatMap(Effect.map(rig.cells(value, end), (over) => failedAtEnd(over, end)), opened.collect)
+/** `over` with each of its cells that `ofCells`, its cell-scope collectors' answers, failed stated failed too. */
+const failedByCells = (over: CollectorRun.Over, ofCells: ReadonlyArray<CollectorRun.Collected>): CollectorRun.Over => {
+  const failing = over.cells
+    .filter((cell) => Verification.failing(ofCells.flatMap((one) => one.cells.get(cell.id)?.verifications ?? [])).length > 0)
+    .map((cell) => cell.id)
+  return failing.length === 0 ? over : { ...over, failed: [...new Set([...over.failed, ...failing])] }
+}
+
+/**
+ * What `opened`, the batch's rig collectors, collected over its cells driven
+ * to `value`, its end come to `end`, after its cell-scope collectors answered
+ * `ofCells`.
+ */
+const collectedAtEnd = <A, RC>(
+  rig: Collectors<A, RC>,
+  opened: CollectorRun.Opened,
+  value: A,
+  end: End,
+  ofCells: ReadonlyArray<CollectorRun.Collected>
+) => Effect.flatMap(Effect.map(rig.cells(value, end), (over) => failedByCells(failedAtEnd(over, end), ofCells)), opened.collect)
 
 const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
   Effect.gen(function*() {
@@ -350,8 +379,11 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
     const opened = rig === undefined
       ? undefined
       : yield* CollectorRun.opened(rig.instances.filter((one) => !PreCheck.isPreCheck(one)), rig.options)
+    const cells = rig?.cell === undefined ? CellCollectors.NONE : yield* CellCollectors.make(rig.cell, rig.options)
+    if (rig?.cell !== undefined) yield* CellCollectors.notRun(rig.cell, rig.options.sink)
     const close = request.collect === undefined ? undefined : yield* request.collect
-    const driven = yield* request.drive({ host, sut })
+    const driven = yield* request.drive({ host, sut, cells })
+    const ofCells = yield* cells.joined
     const deadHost = host?.died()
     const reapedBy = host === undefined || driven.interrupted > 0 ? Effect.succeed(undefined) : host.end
     const hostDirty = deadHost === undefined ? yield* reapedBy : undefined
@@ -362,8 +394,8 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
     const gates = deadHost === undefined ? host?.gates?.() ?? [] : []
     if (close !== undefined) yield* close
     const collected = rig === undefined || opened === undefined
-      ? []
-      : yield* collectedAtEnd(rig, opened, driven.value, { judged, deadHost })
+      ? ofCells
+      : [...ofCells, ...yield* collectedAtEnd(rig, opened, driven.value, { judged, deadHost }, ofCells)]
     const ended: Omit<Ended<A>, "leftChanged"> = {
       value: driven.value,
       dirty,
@@ -376,5 +408,5 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
       hosted: host !== undefined,
       collected
     }
-    return { ended, opened }
+    return { ended, opened, cells }
   })

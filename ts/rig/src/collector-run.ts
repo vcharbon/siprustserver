@@ -37,8 +37,12 @@ import type * as Lanes from "./lanes.js"
 import type * as RigPath from "./rig-path.js"
 import * as ScopeJudging from "./scope-judging.js"
 
-/** What an event says of a step; `refused` is a pre-check's `fail`, which refuses its scope (`pre-check.ts`). */
-export const PHASES = ["open", "opened", "collect", "collected", "close", "closed", "failed", "lab-left-changed", "refused"] as const
+/**
+ * What an event says of a step; `refused` is a pre-check's `fail`, which
+ * refuses its scope (`pre-check.ts`); `not-run`, a collector wired where it
+ * does not run, a cell-scope one on a simulated lane (`cell-collectors.ts`).
+ */
+export const PHASES = ["open", "opened", "collect", "collected", "close", "closed", "failed", "lab-left-changed", "refused", "not-run"] as const
 export type Phase = (typeof PHASES)[number]
 
 /** The phase of the event that marks a job whose lab a collector's `close` left changed. */
@@ -80,7 +84,8 @@ export interface Instance {
   readonly id: string
   /** What its events name it by. */
   readonly label: string
-  readonly scope: "job" | "batch"
+  /** A cell scope has one cell: a line of its `collect` naming no cell is that cell's. */
+  readonly scope: "job" | "batch" | "cell"
   /** The lane its context states, whose parts it reads; none for a job-scope collector that needs no part. */
   readonly lane: Lanes.Loaded | undefined
   /** The lanes whose cells it collects; every cell of its scope where absent. */
@@ -380,16 +385,18 @@ const applied = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, lines: Rea
       const keyed: Array<Lines.KeyedRecord> = []
       const assigned: Array<Lines.AssignedRecord> = []
       const keys: Array<Lines.KeyLine> = []
+      const sole = instance.scope === "cell" ? cells[0]?.id : undefined
       for (const line of lines) {
         switch (line._tag) {
           case "Verification": {
-            const { verification, cell, ...rest } = line.line
+            const { verification, cell: named, ...rest } = line.line
+            const cell = named ?? sole
             const holder = cell === undefined ? scope : byCell.get(cell)!
             holder.verifications.set(verification, { name: verification, source: instance.collector.name, ...rest })
             break
           }
           case "Attachment": {
-            const cell = line.line.cell
+            const cell = line.line.cell ?? sole
             const holder = cell === undefined ? scope : byCell.get(cell)!
             holder.attachments.push(Attached.attach(writerOf(instance), cell === undefined ? instance.holder : dirs.get(cell)!, line.line))
             break
@@ -600,6 +607,8 @@ export interface Options {
    * window opens as it opens and ends as it collects.
    */
   readonly window?: { readonly start: Cell.Instant; readonly end: Cell.Instant } | undefined
+  /** Awaited before each instance's `collect`, in their collect order: a delayed cell-scope collector's wait (`cell-collectors.ts`); none where absent. */
+  readonly due?: ((instance: Instance) => Effect.Effect<void>) | undefined
 }
 
 /**
@@ -656,7 +665,8 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
             return ScopeJudging.collect({
               steps: collectOrderOf(openings).map((opening) => ({
                 instance: opening.instance,
-                collect: (current, earlier) => answersOf(opening, options.sink, current, over, earlier)
+                collect: (current, earlier) =>
+                  Effect.andThen(options.due?.(opening.instance) ?? Effect.void, () => answersOf(opening, options.sink, current, over, earlier))
               })),
               cells: over.cells,
               undescribed: over.unread,

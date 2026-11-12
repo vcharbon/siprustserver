@@ -75,7 +75,8 @@ job     collect and close the job collectors, join, judge
 - On a simulated lane a batch is the cells the lane's driver runs in one pass. Nothing is stood,
   and batch collectors still bracket it.
 - A batch does not stand its system under test down before the delayed collectors of its cells
-  have answered or reached their deadline.
+  have answered or reached their deadline: it joins them once its cells were driven, before
+  its end gate reads. What they answered fails a cell for its batch's `on-failure` collectors.
 - A capture replay's run rows (one per capture and lane) are not a scope. Its job is.
 
 ## 4. Claims and exports
@@ -180,8 +181,16 @@ Rules:
   among one scope's collectors is refused at load.
 - A job-scope collector that needs a part runs once per distinct part file among the job's
   lanes, over the cells of the lanes naming it.
-- A delayed collector has a deadline of `delay_s` plus `collect_s`.
-- No cell-scope collector runs on a simulated lane (item 12).
+- A cell's collectors are one scope, in a directory of its own: opened before its call, each
+  collecting `delay_s` (the lane's override first) after the call ended, on the lane's clock,
+  then closed, while the lane runs its next cells. A line of their `collect` naming no cell is
+  the cell's. Their deadline is the longest `delay_s` plus `collect_s` among them after the
+  call ended: past it each answers `not checkable` on the cell and the scope closes.
+- `holds_cell_locks` keeps the cell's named locks (two cells holding one never run at once)
+  past its call's end, until its collectors answered or reached their deadline; its slot on
+  the lane is free at the call's end.
+- No cell-scope collector runs on a simulated lane (item 12). A batch there says so of each one
+  wired, an event `not-run` naming the collector and the lane, which refuses nothing.
 
 The lines of `collect`:
 

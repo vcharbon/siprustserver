@@ -23,7 +23,7 @@
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  */
 import { NodeServices } from "@effect/platform-node"
-import { type Cell, RigPath } from "@sip/rig"
+import { type Cell, CollectorPlan, type Lanes, RigPath } from "@sip/rig"
 import { Attachments, Batches, Client, JobEvents, Jobs, Sessions } from "@sip/store"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
 import * as Effect from "effect/Effect"
@@ -69,10 +69,16 @@ const host: BatchHost = {
   judged: () => hostJudged
 }
 
+/** The file a stood SUT keeps while it is up: stood, it is written; stopped, removed. */
+const SUT_UP = path.join(TREE, "sut-up")
+
 const sut: SutHandle = {
   metrics: undefined,
   died: () => sutDied,
-  stop: Effect.sync(() => void events.push("sut stopped"))
+  stop: Effect.sync(() => {
+    events.push("sut stopped")
+    fs.rmSync(SUT_UP, { force: true })
+  })
 }
 
 const hosting = LaneHosting.layerWith({
@@ -86,6 +92,7 @@ const hosting = LaneHosting.layerWith({
   standSut: (lane, _under, variables) =>
     Effect.sync(() => {
       events.push(`sut stood${variables === undefined ? "" : ` with ${Object.keys(variables).join(",")}`}`)
+      if (lane === STANDS) fs.writeFileSync(SUT_UP, "up\n")
       return lane === STANDS ? sut : undefined
     }),
   preflight: () => Effect.succeed(null)
@@ -326,6 +333,106 @@ describe.skipIf(!served)("the rig's collectors of a batch", () => {
     }))
     expect(events).not.toContain("collector collect")
     expect(events.slice(-4)).toEqual(["collector close", "collector closed", "sut stopped", "killed"])
+  })
+})
+
+/**
+ * The rig's cell-scope collector `after-call` of a batch on `clock`'s lane,
+ * delayed 0.2 s, under a directory of its own: its `collect` answers
+ * `after-call` pass where the stood SUT is up ({@link SUT_UP}), fail where it
+ * is not. The batch's collectors with it alone, its events in `events`.
+ */
+const afterCallCollectors = async (clock: "real" | "simulated"): Promise<LaneBatch.Collectors<string, never>> => {
+  const root = fs.mkdtempSync(path.join(TREE, "rig-"))
+  const dir = path.join(root, "collectors", "after-call")
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, "collector.toml"),
+    `schema = "collector.v1"\nname = "after-call"\nscope = "cell"\nanswers = ["after-call"]\ndelay_s = 0.2\n[run]\ncollect = "./collect"\n`
+  )
+  script(
+    dir,
+    "collect",
+    `if [ -e "${SUT_UP}" ]; then echo '{"verification":"after-call","answer":"pass"}'; ` +
+      `else echo '{"verification":"after-call","answer":"fail","message":"the SUT is down"}'; fi`
+  )
+  const loaded = await Effect.runPromise(Effect.result(RigPath.load({ workspace: root })).pipe(Effect.provide(NodeServices.layer)))
+  if (!Result.isSuccess(loaded)) throw new Error(`the rig path does not load: ${String(loaded.failure)}`)
+  const lane: Lanes.Loaded = {
+    id: clock === "real" ? STANDS : PAUSED,
+    file: "lanes/stands.toml",
+    lane: { schema: "lane.v1", clock },
+    parts: new Map(),
+    operations: new Map(),
+    capabilities: new Set()
+  }
+  return {
+    instances: [],
+    options: {
+      sink: (event) => Effect.sync(() => void events.push(`collector ${event.phase} ${event.collector}`)),
+      locker: () => Effect.succeed(Effect.void)
+    },
+    holder: path.join(root, "batch"),
+    cells: () => Effect.succeed({ cells: [], unread: [], failed: [] }),
+    cell: CollectorPlan.cellPlanOf(loaded.success, lane, path.join(root, "batch", "collectors", "_cells"))
+  }
+}
+
+/** The cell `id` of the lane `lane` as its collectors read it, its directory under {@link TREE}. */
+const describedCell = (id: string, lane: string): Cell.Cell => ({
+  schema: "cell.v1",
+  id,
+  case: `case-${id}`,
+  lane,
+  batch: "batch-1",
+  attempt: 1,
+  clock: "real",
+  keys: { call_id: [], caller: [], callee: [], request_uri_user: [] },
+  legs: [],
+  timeline: { start: { lane_ms: 0, wall_ms: 0 }, end: { lane_ms: 1, wall_ms: 1 } },
+  claims: {},
+  records: {},
+  verifications: [],
+  dir: path.join(TREE, "cells", id),
+  tags: [],
+  needs: []
+})
+
+/** The cells `ids` driven through the batch's cell-scope collectors, one after the other, each said in `events`. */
+const driveCells = (lane: string, ids: ReadonlyArray<string>) => (stood: LaneBatch.Stood) =>
+  Effect.as(
+    Effect.forEach(ids, (id) =>
+      stood.cells.around(
+        id,
+        Effect.sync(() => void events.push(`cell ${id} ran`)),
+        () => Effect.succeed({ cells: [describedCell(id, lane)], unread: [], failed: [] })
+      ), { discard: true }),
+    { value: lane, interrupted: 0 }
+  )
+
+describe.skipIf(!served)("the rig's cell-scope collectors of a batch", () => {
+  it("run after each cell, the lane going on, and answer before the end gate reads and the SUT stands down", async () => {
+    endingAs({})
+    const collectors = await afterCallCollectors("real")
+    const ended = await withStore(LaneBatch.run({ lane: STANDS, stand, collectors, drive: driveCells(STANDS, ["a", "b"]) }))
+    expect(events.slice(0, 4)).toEqual(["batch stood for 2 cell(s), provisioned", "sut stood with A", "cell a ran", "cell b ran"])
+    expect(events.slice(4, 8).sort()).toEqual([
+      "collector collect after-call of a",
+      "collector collect after-call of b",
+      "collector collected after-call of a",
+      "collector collected after-call of b"
+    ])
+    expect(events.slice(8)).toEqual(["gate", "sut stopped", "killed"])
+    expect(ended.collected.map((one) => [...one.cells].map(([id, answers]) => `${id} ${answers.verifications.map((line) => line.answer).join(",")}`)))
+      .toEqual([["a pass"], ["b pass"]])
+  })
+
+  it("run on no cell of a simulated lane, the batch saying so of each one wired there", async () => {
+    endingAs({})
+    const collectors = await afterCallCollectors("simulated")
+    const ended = await withStore(LaneBatch.run({ lane: PAUSED, stand, collectors, drive: driveCells(PAUSED, ["a"]) }))
+    expect(events.filter((event) => event.startsWith("collector"))).toEqual(["collector not-run after-call"])
+    expect(ended.collected).toEqual([])
   })
 })
 

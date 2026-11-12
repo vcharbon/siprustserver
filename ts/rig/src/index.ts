@@ -5,7 +5,7 @@
  * collection levels and lane wiring checked before a job opens, the context an
  * executable reads and how one runs, an operation's run and a job's setup, a
  * scope's collectors (which run and in what order, their run, the lines they
- * answer, an on-demand run), its pre-checks, its exports, the join of its
+ * answer, an on-demand run, a batch's cell-scope ones), its pre-checks, its exports, the join of its
  * records and its
  * judges, the main
  * of a process that runs them, the cell description, and the compiled cells a
@@ -16,6 +16,7 @@ export * as Attached from "./attached.js"
 export * as Capability from "./capability.js"
 export * as CaseSource from "./case-source.js"
 export * as Cell from "./cell.js"
+export * as CellCollectors from "./cell-collectors.js"
 export * as CellOfBundle from "./cell-of-bundle.js"
 export * as CellRecords from "./cell-records.js"
 export * as Collection from "./collection.js"

@@ -49,6 +49,7 @@
  * `planned` on the job, which is what a resume replays.
  */
 import { E2e } from "@sip/contracts"
+import type { CellCollectors } from "@sip/rig"
 import { runCell, settled } from "@sip/driver"
 import { perSecond, unpaced } from "@sip/driver/pace"
 import { Batches, Bundle, JobEvents, Jobs, Requests, RuleHits, Runs, Sweeps } from "@sip/store"
@@ -377,48 +378,60 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
    * cells run on a fiber of their own, so a stop can wait for them and then
    * cut them short.
    */
-  const driveAll = (host: BatchHost | undefined) =>
+  const driveAll = (host: BatchHost | undefined, cellCollectors: CellCollectors.CellCollectors) =>
     Effect.gen(function*() {
       const gate = yield* Semaphore.make(limits.cells)
       const pace = limits.starts > 0 ? yield* perSecond(limits.starts) : unpaced
 
       /**
-       * One cell, run and landed under its row — which closes here on its last,
+       * One cell's call, landed under its row — which closes here on its last,
        * or once the batch's gate has read where a batch process runs the cells.
-       * Not admitted once a stop is in: it stays planned. The landing is
-       * uninterruptible, so a cell whose result is in hand is never half-recorded.
+       * The landing is uninterruptible, so a cell whose result is in hand is
+       * never half-recorded. The cell as the rig's collectors read it, where
+       * it ran to a bundle.
        */
-      const one = (planned: PlannedCell) => {
-        const tally = tallyOf(planned.capture)
-        return gate.withPermits(1)(Effect.gen(function*() {
-          yield* pace.admit
-          if (yield* stopping) return
-          admitted.add(planned)
+      const call = (planned: PlannedCell) =>
+        Effect.gen(function*() {
+          const tally = tallyOf(planned.capture)
           const finished = yield* drive(planned.cell, { runDir: tally.run.bundlePath, tests, mode: "record" })
           yield* trimTerminated(path.join(tally.run.bundlePath, finished.summary.dir), finished.summary.passed)
-          yield* Effect.uninterruptible(Effect.suspend(() => {
+          return yield* Effect.uninterruptible(Effect.suspend(() => {
             tally.summaries.push(finished.summary)
             const { cell: _cell, ...ref } = planned
             driven.push(ref)
-            if (finished.summary.skipped === undefined) {
-              ranCells.push({
-                id: cellName(ref),
-                caseId: finished.summary.cell.case,
-                lane: options.lane,
-                dir: path.join(tally.run.bundlePath, finished.summary.dir),
-                runId: tally.run.id,
-                failed: failedOwn(finished.summary)
-              })
+            const ran: CollectedCells.LandedCell | undefined = finished.summary.skipped !== undefined ? undefined : {
+              id: cellName(ref),
+              caseId: finished.summary.cell.case,
+              lane: options.lane,
+              dir: path.join(tally.run.bundlePath, finished.summary.dir),
+              runId: tally.run.id,
+              failed: failedOwn(finished.summary)
             }
+            if (ran !== undefined) ranCells.push(ran)
             // Marked as it lands, not at the batch's end: a real-clock batch is a
             // quarter of an hour, and the job's progress reads these marks.
-            return Effect.andThen(
-              request.ran === undefined ? Effect.void : Effect.ignore(request.ran(ref)),
-              host === undefined ? landed(tally, options) : Effect.sync(() => void (tally.landed += 1))
+            return Effect.as(
+              Effect.andThen(
+                request.ran === undefined ? Effect.void : Effect.ignore(request.ran(ref)),
+                host === undefined ? landed(tally, options) : Effect.sync(() => void (tally.landed += 1))
+              ),
+              ran
             )
           }))
+        })
+
+      /** One cell, its call bracketed by its cell-scope collectors. Not admitted once a stop is in: it stays planned. */
+      const one = (planned: PlannedCell) =>
+        gate.withPermits(1)(Effect.gen(function*() {
+          yield* pace.admit
+          if (yield* stopping) return
+          admitted.add(planned)
+          yield* cellCollectors.around(
+            cellName(planned),
+            call(planned),
+            (ran) => (ran === undefined ? Effect.succeed(undefined) : CollectedCells.describe([ran], batchNameOf(request)))
+          )
         }))
-      }
 
       const inHost = <A, E, R>(self: Effect.Effect<A, E, R>) =>
         host === undefined ? self : Effect.updateService(self, ReplayCli.Service, (cli) => ({ ...cli, run: host.run }))
@@ -460,7 +473,7 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
     ...(request.host === undefined ? {} : { host: request.host }),
     ...(request.sut === undefined ? {} : { sut: request.sut }),
     ...(collectors === undefined ? {} : { collectors }),
-    drive: ({ host }) => driveAll(host)
+    drive: ({ host, cells: cellCollectors }) => driveAll(host, cellCollectors)
   })
   for (const pending of CollectedCells.pendingOf(ended.collected, ranCells)) {
     [...tallies.values()].find((tally) => tally.run.id === pending.runId)!.answered.push(pending)
@@ -525,35 +538,44 @@ const ranAsEnded = (
  * The rig's collectors of `request`'s batch (`@sip/corpus` `Collectors`), their
  * directories under the sweep's batch's own, their events the job's where the
  * replay is one, over the cells `ran` names once driven, with the judges of
- * the batch's exports alone; none where the deployment wires neither on the
- * lane.
+ * the batch's exports alone and its cell-scope collectors, each cell's over
+ * that cell once its call landed; none where the deployment wires nothing on
+ * the lane.
  */
 const collectorsOf = Effect.fn("Replay.collectorsOf")(function*(
   request: BatchRequest,
   ran: () => ReadonlyArray<CollectedCells.LandedCell>
 ) {
   const { options, owner } = request
-  const holder = path.join(
-    options.paths.sessions,
-    CollectedCells.COLLECTORS_DIR,
-    owner.sweepId === undefined ? `job${owner.jobId}` : `sweep${owner.sweepId}`,
-    `batch${request.number}`
-  )
-  const { instances, exportJudges } = yield* Effect.flatMap(Collectors.Service, (seam) =>
+  const holder = holderOf(request)
+  const batch = yield* Effect.flatMap(Collectors.Service, (seam) =>
     Collectors.batchOf(seam, options.lane, path.join(holder, "collectors"), holder))
-  if (instances.length === 0 && exportJudges === undefined) return undefined
+  if (!Collectors.wiresAny(batch)) return undefined
   const events = yield* JobEvents.Service
   return {
-    instances,
+    instances: batch.instances,
     holder,
     options: {
       sink: CollectorIo.sinkOf(owner.jobId === undefined ? undefined : { id: owner.jobId, events }),
       locker: yield* CollectorIo.locker(),
-      exportJudges
+      exportJudges: batch.exportJudges
     },
-    cells: () => CollectedCells.describe(ran(), path.basename(holder))
+    cells: () => CollectedCells.describe(ran(), batchNameOf(request)),
+    cell: batch.cell
   } satisfies LaneBatch.Collectors<void, FileSystem.FileSystem>
 })
+
+/** The directory of `request`'s batch under the session tree: what its collectors attach to it, theirs under it. */
+const holderOf = (request: BatchRequest): string =>
+  path.join(
+    request.options.paths.sessions,
+    CollectedCells.COLLECTORS_DIR,
+    request.owner.sweepId === undefined ? `job${request.owner.jobId}` : `sweep${request.owner.sweepId}`,
+    batchNameOf(request)
+  )
+
+/** The batch's name as its cells' descriptions state it. */
+const batchNameOf = (request: BatchRequest): string => `batch${request.number}`
 
 /** A cell as its batch's row names it: its capture and its call. */
 const cellName = (ref: CellRef): string => `${ref.capture}#${ref.callKey}`

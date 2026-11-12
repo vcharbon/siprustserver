@@ -19,7 +19,9 @@
  * context the first of them. Instances open and close in the order of their
  * `after`, else of their names (`collector-order.ts`); the `on-failure` ones
  * collect after the others where their `after` lets them (`CollectorRun`).
- * Each runs with the judge its manifest names.
+ * Each runs with the judge its manifest names. A batch on a real-clock lane
+ * runs, per cell, one instance of each cell-scope collector wired on its lane
+ * ({@link cellPlanOf}); on a simulated lane it runs none.
  *
  * An `on-demand` collector is planned when the site or the CLI asks for it,
  * one instance over the cells it names on one lane ({@link onDemandOf}).
@@ -96,7 +98,7 @@ const instanceOf = (
   defined: Defined,
   id: string,
   label: string,
-  scope: "job" | "batch",
+  scope: CollectorRun.Instance["scope"],
   lane: Lanes.Loaded | undefined,
   lanes: ReadonlyArray<string> | undefined,
   root: string,
@@ -128,6 +130,47 @@ export const batchPlanOf = (
   plannedOn(rig, "batch", lane, [], settings).map((defined) =>
     instanceOf(defined, defined.name, defined.name, "batch", lane, undefined, root, holder, rig, settings(defined.manifest) === "on-failure")
   )
+
+/** What a batch on one lane runs at cell scope (`cell-collectors.ts`). */
+export interface CellPlan {
+  /** The lane's id. */
+  readonly lane: string
+  /** The directory under which each cell's scope has a directory of its own. */
+  readonly root: string
+  /** The collectors each cell runs, by name, in their order; none on a simulated lane. */
+  readonly runs: ReadonlyArray<string>
+  /** The instances of {@link runs} the cell `cell` runs, `dir` its scope's directory, holding theirs. */
+  readonly instancesFor: (cell: string, dir: string) => ReadonlyArray<CollectorRun.Instance>
+  /** The cell-scope collectors the level runs and the lane wires that run on none of its cells: its clock is simulated (ADR-0060 item 12). */
+  readonly unrun: ReadonlyArray<string>
+}
+
+/**
+ * The cell-scope collectors a batch on `lane` runs under `settings`, those
+ * set `always`, and those set `on-failure` over a failed cell alone, their
+ * scope directories under `root`; on a simulated lane none, each named
+ * {@link CellPlan.unrun}.
+ */
+export const cellPlanOf = (
+  rig: RigPath.RigPath,
+  lane: Lanes.Loaded,
+  root: string,
+  settings: Collection.Settings = Collection.STANDARD_SETTINGS
+): CellPlan => {
+  const planned = plannedOn(rig, "cell", lane, [], settings)
+  const real = lane.lane.clock === "real"
+  const running = real ? planned : []
+  return {
+    lane: lane.id,
+    root,
+    runs: running.map((defined) => defined.name),
+    instancesFor: (cell, dir) =>
+      running.map((defined) =>
+        instanceOf(defined, defined.name, `${defined.name} of ${cell}`, "cell", lane, undefined, dir, dir, rig, settings(defined.manifest) === "on-failure")
+      ),
+    unrun: real ? [] : planned.map((defined) => defined.name)
+  }
+}
 
 /**
  * The instances a job over `lanes` runs under `settings`, each with its
