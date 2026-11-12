@@ -7,7 +7,7 @@
  * and attachments, after any it holds; their events are the job's. A refusal
  * of theirs (`PreCheck.run`) refuses the job with its message, as does a
  * required pre-check, of either scope, that a real-clock lane of the job
- * names no part of.
+ * names no part of, and one the job asks for that a lane excludes.
  *
  * A capture replay runs them once its lane is held ({@link forReplay}, from
  * `build.ts` `session`), so nothing it checked changes before its first call.
@@ -70,7 +70,7 @@ export const job = (request: Request) =>
     const seam = yield* Collectors.Service
     const instances = (yield* seam.job(request.lanes, path.join(request.dir, "collectors"), request.dir, request.asked))
       .filter(PreCheck.isPreCheck)
-    const unwired = yield* seam.unwired(request.lanes)
+    const unwired = yield* seam.unwired(request.lanes, request.asked)
     if (instances.length === 0 && unwired.length === 0) return undefined
     const events = yield* JobEvents.Service
     const checked = yield* PreCheck.run(instances, unwired, {

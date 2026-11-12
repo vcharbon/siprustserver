@@ -8,7 +8,8 @@
  * (`at = "before"`, `pre-check.ts`); and those set `on-failure` and
  * `at = "after"`, run over the failed cells alone. A job also runs each
  * job-scope collector it asks for by name, marked asked, whatever the level
- * sets it: a level cannot switch off what the job asks for.
+ * sets it: a level cannot switch off what the job asks for, nor can a lane
+ * excluding an asked pre-check (`PreCheck.unwiredOf` refuses the job).
  * Their parameters are the manifest's after the lane's overrides.
  *
  * A batch runs one instance of each collector wired on its lane. A job runs
@@ -50,9 +51,15 @@ const runsOnItsOwn = (collector: Collector.Collector, settings: Collection.Setti
   return setting === "always" || (setting === "on-failure" && (collector.at ?? "after") === "after")
 }
 
+/** Whether `lane` has every part `defined` needs. */
+export const hasPartsFor = (defined: Defined, lane: Lanes.Loaded): boolean =>
+  (defined.manifest.needs ?? []).every((kind) => lane.parts.has(kind))
+
+/** Whether `lane`'s `[collectors]` excludes `defined`. */
+export const excludes = (lane: Lanes.Loaded, defined: Defined): boolean => laneWiringOf(lane).exclude.includes(defined.name)
+
 /** Whether `defined` is wired on `lane`: the lane has every part it needs and does not exclude it. */
-export const isWiredOn = (defined: Defined, lane: Lanes.Loaded): boolean =>
-  (defined.manifest.needs ?? []).every((kind) => lane.parts.has(kind)) && !laneWiringOf(lane).exclude.includes(defined.name)
+export const isWiredOn = (defined: Defined, lane: Lanes.Loaded): boolean => hasPartsFor(defined, lane) && !excludes(lane, defined)
 
 /** Whether `defined` runs because its scope asked for it: named in `asked`, whatever the level sets it. */
 const isAsked = (defined: Defined, asked: ReadonlyArray<string>): boolean => asked.includes(defined.name)
@@ -125,7 +132,9 @@ export const batchPlanOf = (
 /**
  * The instances a job over `lanes` runs under `settings`, each with its
  * directory under `root`; `holder` is the job's directory, `asked` the
- * `on-demand` collectors the job asks for.
+ * collectors the job asks for, planned whatever the level sets them. A lane
+ * that excludes an asked pre-check plans none of it; `PreCheck.unwiredOf`
+ * refuses the job.
  */
 export const jobPlanOf = (
   rig: RigPath.RigPath,

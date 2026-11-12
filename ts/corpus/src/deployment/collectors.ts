@@ -5,7 +5,7 @@
  * runs, pre-checks among them (`PreCheck.isPreCheck`; an `on-demand` one only
  * where the job asks for it), each instance's directory under the one its
  * caller names, as the job's collection level ({@link Level}) sets them; the
- * required pre-checks a job's lanes leave unwired (`PreCheck.unwiredOf`); the
+ * pre-checks a job must run that its lanes leave unwired (`PreCheck.unwiredOf`); the
  * judges a batch runs over its exports alone (`@sip/rig` `JudgePlan`); and the
  * instance an on-demand run of one collector takes on a lane.
  *
@@ -29,8 +29,8 @@ export interface Interface {
   readonly batch: (lane: string, dir: string, holder: string) => Effect.Effect<ReadonlyArray<CollectorRun.Instance>>
   /**
    * The collectors a job over `lanes` runs, their directories under `dir`, the
-   * job's own attachments under `holder`; the `on-demand` ones `asked` names
-   * among them.
+   * job's own attachments under `holder`; the collectors `asked` names among
+   * them, whatever the level sets them.
    */
   readonly job: (
     lanes: ReadonlyArray<string>,
@@ -40,8 +40,12 @@ export interface Interface {
   ) => Effect.Effect<ReadonlyArray<CollectorRun.Instance>>
   /** The judges a batch on `lane`, whose directory is `holder`, runs over its exports alone; none where absent or it runs none. */
   readonly exportJudges?: (lane: string, holder: string) => Effect.Effect<ScopeJudging.ExportJudges | undefined>
-  /** The required pre-checks, of either scope, that a real-clock lane of `lanes` names no part of. */
-  readonly unwired: (lanes: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<PreCheck.Unwired>>
+  /**
+   * The pre-checks a job over `lanes` must run that a lane leaves unwired
+   * (`PreCheck.unwiredOf`): the required ones, of either scope, a real-clock
+   * lane names no part of, and those `asked` names that a lane excludes.
+   */
+  readonly unwired: (lanes: ReadonlyArray<string>, asked?: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<PreCheck.Unwired>>
   /** The instance an on-demand run of the collector `name` takes on `lane`, or why it cannot run there. */
   readonly onDemand: (
     name: string,
@@ -102,7 +106,7 @@ export const of = (
         const planned = found === undefined ? undefined : JudgePlan.exportJudgesOn(rig, found, holder)
         return planned === undefined || planned.judges.length === 0 ? undefined : planned
       }),
-    unwired: (named) => Effect.sync(() => PreCheck.unwiredOf(rig, loaded(named))),
+    unwired: (named, asked) => Effect.sync(() => PreCheck.unwiredOf(rig, loaded(named), asked)),
     onDemand: (name, lane, dir, holder) =>
       Effect.map(settings(collection), (set) => {
         const found = byId.get(lane)

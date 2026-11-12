@@ -64,7 +64,9 @@ job     collect and close the job collectors, join, judge
   what only that kind of job does; a `not checkable` of one so asked refuses as a required
   one's does. A level cannot switch off what a job asks for: an asked pre-check runs whatever
   the level sets it, a level setting an `on-demand` pre-check `never` and a lane excluding one
-  are refused at load; set `always`, it runs unasked too. No pre-check is `on-failure`.
+  are refused at load; set `always`, it runs unasked too. No pre-check is `on-failure`. A job
+  asking for a pre-check that a lane excludes, the lane having every part it needs, is refused
+  before any pre-check runs.
 - A `required` pre-check, of either scope, that a real-clock lane of the job names no part of
   refuses the job before any pre-check runs, as a missing `required` claim does (item 4).
 - Provisioning is one phase the pack fills (`pack.toml`, `[provision]`), once per job.
