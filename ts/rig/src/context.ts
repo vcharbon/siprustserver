@@ -4,7 +4,8 @@
  * its window, the cells in `cell.v1`, the cells it is to run where its runner
  * states them, its parameters after the lane's
  * overrides, and the lane: its name and clock, its `[sip]` and `[backend]`
- * blocks as the base read them, and its parts; a judge's, what it judges. A
+ * blocks as the base read them, and its parts; a collect's, the instant it is
+ * stopped at; a judge's, what it judges. A
  * plug-in reads the lane's target and backend here rather than from a part
  * that restates them.
  */
@@ -78,6 +79,12 @@ export const Context = Schema.Struct({
   planned: Schema.optionalKey(Schema.Array(Planned)),
   lane: Schema.optionalKey(LaneContext),
   params: Schema.Record(Schema.String, Schema.Unknown),
+  /**
+   * A collect's context only: the wall-clock instant its runner stops the
+   * collect at, its `collect_s` from the instant the context is written. A
+   * collect answers what it read before it.
+   */
+  deadline: Schema.optionalKey(Schema.Struct({ wall_ms: Schema.Number })),
   /** A judge's context only. */
   judging: Schema.optionalKey(Judging)
 })

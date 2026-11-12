@@ -479,15 +479,17 @@ const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell
     const at = yield* now
     const end = opening.end ?? { lane_ms: at.clock_ms, wall_ms: at.wall_ms }
     const stdout = path.join(instance.dir, "collect.out.jsonl")
+    const withinMs = Collector.boundsOf(manifest).collect_s * 1000
     const laid = yield* Effect.result(Effect.try({
       try: () => {
         fs.rmSync(path.join(layoutOf(instance).out, Lines.OUT_FILE), { force: true })
-        writeContext(instance, { window: { start: opening.start, end }, cells, ...plannedOf(opening) })
+        const deadline = { wall_ms: Date.now() + withinMs }
+        writeContext(instance, { window: { start: opening.start, end }, cells, ...plannedOf(opening), deadline })
       },
       catch: (cause) => `collect not run: its context not written: ${errorText(cause)}`
     }))
     if (Result.isFailure(laid)) return yield* failed(laid.failure)
-    const ran = yield* runStep(instance, manifest.run.collect, "collect", Collector.boundsOf(manifest).collect_s * 1000, stdout)
+    const ran = yield* runStep(instance, manifest.run.collect, "collect", withinMs, stdout)
     if (!Executable.succeeded(ran.ended)) return yield* failed(ran.said)
     const read = linesOf(instance, stdout, new Set(cells.map((cell) => cell.id)))
     if (Result.isFailure(read)) return yield* failed(`collect: ${read.failure}`)

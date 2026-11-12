@@ -29,7 +29,7 @@ An executable runs with its own directory as working directory and these variabl
 
 | Variable | Names |
 |---|---|
-| `SIPRIG_CONTEXT` | a JSON file it reads (`context.v1`): the scope, its window, the cells (item 6) and those it is to run (§5), the lane (its name, clock, SIP target and backend, as the base reads them) and its parts, its parameters |
+| `SIPRIG_CONTEXT` | a JSON file it reads (`context.v1`): the scope, its window, the cells (item 6) and those it is to run (§5), the lane (its name, clock, SIP target and backend, as the base reads them) and its parts, its parameters; a collect's, the wall-clock instant its `collect_s` ends (`deadline`) |
 | `SIPRIG_OUT` | a directory it writes attachment files into |
 | `SIPRIG_STATE` | a directory kept from `open` to `close` of one scope, or from `inject` to `heal`; an `open` or `inject` finds it empty and its context fresh |
 | `SIPRIG_STEP` | the step it runs as (`open`, `collect`, `close`, `inject`, `heal`, `probe`, `judge`), so one file may serve several |
