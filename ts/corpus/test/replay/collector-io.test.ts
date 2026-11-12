@@ -4,7 +4,8 @@
  * the case's own: two collectors of two scopes naming one lock run one after
  * the other, open to close; a scope interrupted while its collector waits for
  * a lock another holds runs none of its steps and gives back nothing, the
- * holder's lock kept until its own close.
+ * holder's lock kept until its own close; two collectors of one scope share
+ * it, taken once.
  *
  * Locks poll on the real clock (`Locks` POLL_MS): a waiter is seen waiting
  * after one poll.
@@ -78,13 +79,17 @@ const setup = async () => {
   }
 }
 
-/** One scope of `instance` under the box-wide locker: opened, `held` run, collected over no cell, closed. */
-const scopeOf = (instance: CollectorRun.Instance, held: Effect.Effect<void>) =>
+/**
+ * One scope of `instances` under the box-wide locker, each lock waited for up
+ * to `waitMs`: opened, `held` run, collected over no cell, closed; what they
+ * collected.
+ */
+const scopeOf = (instances: ReadonlyArray<CollectorRun.Instance>, held: Effect.Effect<void>, waitMs = 10_000) =>
   Effect.scoped(Effect.gen(function*() {
-    const locker = yield* CollectorIo.locker(10_000)
-    const opened = yield* CollectorRun.opened([instance], { sink: () => Effect.void, locker })
+    const locker = yield* CollectorIo.locker(waitMs)
+    const opened = yield* CollectorRun.opened(instances, { sink: () => Effect.void, locker })
     yield* held
-    yield* opened.collect([])
+    return yield* opened.collect([])
   }))
 
 describe("collectors naming one box-wide lock", () => {
@@ -92,8 +97,8 @@ describe("collectors naming one box-wide lock", () => {
     const lab = await setup()
     await Effect.runPromise(
       Effect.all([
-        scopeOf(lab.alpha, Effect.sleep(ONE_POLL_MS)),
-        Effect.andThen(Effect.sleep(100), scopeOf(lab.beta, Effect.void))
+        scopeOf([lab.alpha], Effect.sleep(ONE_POLL_MS)),
+        Effect.andThen(Effect.sleep(100), scopeOf([lab.beta], Effect.void))
       ], { concurrency: 2 }).pipe(Effect.provide(Layer.merge(lab.roots, NodeServices.layer)))
     )
     expect(lab.trace()).toEqual(["alpha open", "alpha collect", "alpha close", "beta open", "beta collect", "beta close"])
@@ -104,9 +109,9 @@ describe("collectors naming one box-wide lock", () => {
     const lab = await setup()
     const seen = await Effect.runPromise(Effect.gen(function*() {
       const go = yield* Deferred.make<void>()
-      const holder = yield* Effect.forkChild(scopeOf(lab.alpha, Deferred.await(go)))
+      const holder = yield* Effect.forkChild(scopeOf([lab.alpha], Deferred.await(go)))
       yield* Effect.sleep(200)
-      const waiter = yield* Effect.forkChild(scopeOf(lab.beta, Effect.void))
+      const waiter = yield* Effect.forkChild(scopeOf([lab.beta], Effect.void))
       yield* Effect.sleep(ONE_POLL_MS)
       yield* Fiber.interrupt(waiter)
       const afterInterrupt = { trace: lab.trace(), lock: fs.readFileSync(lab.lockFile, "utf8") }
@@ -118,5 +123,15 @@ describe("collectors naming one box-wide lock", () => {
     expect(seen.afterInterrupt.lock).toContain("collector alpha")
     expect(seen.trace).toEqual(["alpha open", "alpha collect", "alpha close"])
     expect(seen.lockLeft).toBe(false)
+  })
+
+  it("share it within one scope: both open, collect and close, the lock given back after the last close", async () => {
+    const lab = await setup()
+    const collected = await Effect.runPromise(
+      scopeOf([lab.alpha, lab.beta], Effect.void, ONE_POLL_MS).pipe(Effect.provide(Layer.merge(lab.roots, NodeServices.layer)))
+    )
+    expect(collected.flatMap((one) => one.scope.verifications)).toEqual([])
+    expect(lab.trace()).toEqual(["alpha open", "beta open", "alpha collect", "beta collect", "beta close", "alpha close"])
+    expect(fs.existsSync(lab.lockFile)).toBe(false)
   })
 })

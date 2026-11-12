@@ -2,9 +2,10 @@
  * The run of a scope's collectors (ADR-0060 appendix §3, §5): each opened
  * before its scope, collected over the scope's cells once it ended, and
  * closed after it, whatever ended it: a failure, an interruption, a signal
- * to the runner. An instance's named box-wide locks are taken before its
- * `open` and given back after its `close`; one whose locks are refused runs
- * none of its steps.
+ * to the runner. A scope's named box-wide locks, the union of its
+ * instances', are taken once before its first `open` and given back after
+ * its last `close`; where they are refused, an instance naming one runs none
+ * of its steps.
  *
  * A failed or timed-out `open` or `collect` answers `not checkable`, with
  * what failed, for every verification its manifest names
@@ -137,11 +138,20 @@ export interface Opened {
 interface Opening {
   readonly instance: Instance
   start: Context.Context["window"]["start"]
-  /** Set once its locks are taken; its `close` runs then. */
-  release: Effect.Effect<void> | undefined
+  /** Set once it went past its scope's locks; its `close` runs then. */
+  closes: boolean
   /** Why it did not open; its `collect` does not run and its verifications are not checkable. */
   failure: string | undefined
 }
+
+/** The locks `instance`'s manifest names. */
+const locksOf = (instance: Instance): ReadonlyArray<string> => instance.collector.manifest.locks ?? []
+
+/** The locks of a scope of `instances`: the union of theirs, sorted, and the labels of those naming one as their holder. */
+const scopeLocksOf =(instances: ReadonlyArray<Instance>) => ({
+  names: [...new Set(instances.flatMap(locksOf))].sort(),
+  holder: instances.filter((instance) => locksOf(instance).length > 0).map((instance) => instance.label).join(", ")
+})
 
 const layoutOf = (instance: Instance) => ({
   state: path.join(instance.dir, "state"),
@@ -216,19 +226,26 @@ const runStep = (instance: Instance, file: string, step: "open" | "collect" | "c
   )
 }
 
-/** Takes `instance`'s locks and runs its `open` into `opening`; `opening.release` set once the locks are held. */
-const openOne = (opening: Opening, options: Options, restore: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>) =>
+/**
+ * Runs `opening`'s `open`, `opening.closes` set once it went past its
+ * scope's locks: `refused`, why they were not taken, where they were not
+ * and it names one.
+ */
+const openOne = (
+  opening: Opening,
+  refused: string | undefined,
+  options: Options,
+  restore: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
+) =>
   Effect.gen(function*() {
     const { instance } = opening
     const manifest = instance.collector.manifest
-    const locks = manifest.locks ?? []
-    const taken = locks.length === 0 ? Result.succeed(Effect.void) : yield* restore(Effect.result(options.locker(locks, instance.label)))
-    if (Result.isFailure(taken)) {
-      opening.failure = `its locks not taken: ${taken.failure}`
+    if (refused !== undefined && locksOf(instance).length > 0) {
+      opening.failure = `its locks not taken: ${refused}`
       yield* emit(options.sink, instance, "failed", opening.failure)
       return
     }
-    opening.release = taken.success
+    opening.closes = true
     const laid = yield* Effect.result(layOut(instance, opening.start))
     if (Result.isFailure(laid)) {
       opening.failure = laid.failure
@@ -488,32 +505,42 @@ export interface Options {
 }
 
 /**
- * Opens `instances` in order for the scope at hand: each takes its locks,
- * its directory laid out empty and its context written, then runs `open`
- * within its bound. The scope's finalizer closes, in reverse order and
- * uninterruptibly, every instance whose locks were taken, then gives its
- * locks back: after the scope collected, failed or was interrupted, an
- * instance whose `open` failed or was interrupted included. An interruption
- * interrupts the `open` under way, never a `close`.
+ * Opens `instances` in order for the scope at hand, once the scope's locks
+ * are taken: each its directory laid out empty and its context written, then
+ * its `open` run within its bound. The scope's finalizer closes, in reverse
+ * order and uninterruptibly, every instance that went past the locks, then
+ * gives the locks back: after the scope collected, failed or was
+ * interrupted, an instance whose `open` failed or was interrupted included.
+ * An interruption interrupts the lock wait or the `open` under way, never a
+ * `close`.
  */
 export const opened = (instances: ReadonlyArray<Instance>, options: Options): Effect.Effect<Opened, never, Scope.Scope> =>
   Effect.uninterruptibleMask((restore) =>
     Effect.gen(function*() {
       const openings: Array<Opening> = []
       const left: Array<string> = []
+      let release: Effect.Effect<void> = Effect.void
       yield* Effect.addFinalizer(() =>
-        Effect.forEach([...openings].reverse(), (opening) =>
-          opening.release === undefined ? Effect.void : Effect.gen(function*() {
-            const closed = yield* Effect.exit(close(opening.instance, options.sink))
-            if (!(Exit.isSuccess(closed) && closed.value)) left.push(opening.instance.label)
-            yield* opening.release!
-          }), { discard: true })
+        Effect.andThen(
+          Effect.forEach([...openings].reverse(), (opening) =>
+            opening.closes ? Effect.gen(function*() {
+              const closed = yield* Effect.exit(close(opening.instance, options.sink))
+              if (!(Exit.isSuccess(closed) && closed.value)) left.push(opening.instance.label)
+            }) : Effect.void, { discard: true }),
+          release
+        )
       )
+      const locks = scopeLocksOf(instances)
+      const taken = locks.names.length === 0
+        ? Result.succeed(Effect.void)
+        : yield* restore(Effect.result(options.locker(locks.names, locks.holder)))
+      if (Result.isSuccess(taken)) release = taken.success
+      const refused = Result.isFailure(taken) ? taken.failure : undefined
       for (const instance of instances) {
         const at = yield* now
-        const opening: Opening = { instance, start: { lane_ms: at.clock_ms, wall_ms: at.wall_ms }, release: undefined, failure: undefined }
+        const opening: Opening = { instance, start: { lane_ms: at.clock_ms, wall_ms: at.wall_ms }, closes: false, failure: undefined }
         openings.push(opening)
-        yield* openOne(opening, options, restore)
+        yield* openOne(opening, refused, options, restore)
       }
       let collected = false
       return {

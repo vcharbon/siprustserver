@@ -11,8 +11,8 @@
  * - a name defined twice along the path (naming both files), a collector's
  *   judge no judge defines, a part schema that is no JSON object, and a path
  *   `pack.toml` names that its tree does not hold;
- * - a collector named like a source the base or the pack answers lines as,
- *   and a lock named by collectors of two scopes (naming both files).
+ * - a collector named like a source the base answers lines as, and a lock
+ *   named by collectors of two scopes (naming both files).
  */
 import { Verification } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -262,18 +262,14 @@ export const load = (roots: Roots): Effect.Effect<RigPath, Refusal, FileSystem.F
   })
 
 /**
- * The first collector named like a source the base (`Verification.BASE_SOURCES`)
- * or the pack (`sources`) answers lines as, refused: its answers would stand
- * for that writer's.
+ * The first collector named like a source the base answers lines as
+ * (`Verification.BASE_SOURCES`), refused: its answers would stand for the
+ * base's.
  */
 const sourceNamed = (path: RigPath): Refusal | undefined => {
-  const packSources = path.pack?.manifest.sources ?? []
   for (const collector of path.collectors.values()) {
     if (Verification.baseSources.includes(collector.name)) {
       return refuse([collector.file], `name: ${collector.name} is a source the base answers its own lines as`)
-    }
-    if (path.pack !== undefined && packSources.includes(collector.name)) {
-      return refuse([collector.file, path.pack.file], `name: ${collector.name} is a source the pack answers its own lines as`)
     }
   }
   return undefined

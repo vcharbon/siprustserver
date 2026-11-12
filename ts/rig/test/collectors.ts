@@ -89,6 +89,7 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
     close: traced("close flaky-close", `[ -e "$SIPRIG_STATE/tried" ] && exit 0\ntouch "$SIPRIG_STATE/tried"\nexit 1`)
   }),
   ...collector("locked", { open: traced("open locked"), close: traced("close locked") }, `locks = ["records-chain"]`),
+  ...collector("also-locked", { open: traced("open also-locked"), close: traced("close also-locked") }, `locks = ["records-chain", "store"]`),
   ...collector("not-json", { collect: answering("the store said hello") }),
   ...collector("stranger", { collect: answering(`{"verification": "someone-else", "answer": "pass"}`) }),
   ...collector("wrong-cell", { collect: answering(`{"verification": "wrong-cell", "cell": "c9", "answer": "pass"}`) }),

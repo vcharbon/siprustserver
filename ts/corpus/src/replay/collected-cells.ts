@@ -18,13 +18,18 @@ import * as Result from "effect/Result"
 /** Where a capture replay keeps its collectors' directories and its batches' attachments, under the session tree. */
 export const COLLECTORS_DIR = "_collectors"
 
-/** A cell that ran to a bundle: its id among its scope's, its case, its lane, its bundle, the run row it lands under. */
+/**
+ * A cell that ran to a bundle: its id among its scope's, its case, its lane,
+ * its bundle, the run row it lands under, and which of the cell's replays on
+ * the lane it is (1 where absent).
+ */
 export interface LandedCell {
   readonly id: string
   readonly caseId: string
   readonly lane: string
   readonly dir: string
   readonly runId: number
+  readonly attempt?: number
 }
 
 /** What the collectors answered of one landed cell, merged once its run row closed. */
@@ -35,7 +40,7 @@ export interface Pending {
 }
 
 /** A cell as a scope's collectors read it, its run row aside: its attempt 1 where it states none. */
-export type Described = Omit<LandedCell, "runId"> & { readonly attempt?: number }
+export type Described = Omit<LandedCell, "runId">
 
 /**
  * `cells` described off their bundles as cells of `batch`; one whose bundle

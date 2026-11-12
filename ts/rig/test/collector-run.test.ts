@@ -312,4 +312,51 @@ describe("a scope's collectors", () => {
     valueOf(third.collected)
     expect(traceOf(root).slice(3)).toEqual(["open locked", "collect locked", "close locked"])
   })
+
+  it("takes a scope's locks once for all its collectors, from the first open to the last close", async () => {
+    const { root, rig } = await samples()
+    const takes: Array<string> = []
+    const memory = memoryLocker()
+    const locker: CollectorRun.Locker = (names, holder) => {
+      takes.push(`${names.join(" ")} for ${holder}`)
+      return memory(names, holder)
+    }
+    let heldDuring: string | undefined
+    const body = Effect.flatMap(Effect.result(memory(["store"], "a probe")), (probed) =>
+      Effect.sync(() => {
+        heldDuring = Result.isFailure(probed) ? probed.failure : "free"
+      }))
+    const { collected } = await runScope(
+      ["locked", "also-locked", "tidy"].map((name) => instanceOf(rig, root, name)),
+      cellsUnder(root),
+      { sink: () => Effect.void, locker },
+      body
+    )
+    valueOf(collected)
+    expect(takes).toEqual(["records-chain store for locked, also-locked"])
+    expect(heldDuring).toBe("store is held by locked, also-locked")
+    expect(traceOf(root).filter((line) => /locked$/.test(line))).toEqual([
+      "open locked",
+      "open also-locked",
+      "collect locked",
+      "collect also-locked",
+      "close also-locked",
+      "close locked"
+    ])
+    const after = await Effect.runPromise(Effect.result(memory(["records-chain", "store"], "the next scope")))
+    expect(Result.isSuccess(after)).toBe(true)
+  })
+
+  it("runs a locked collector planned twice in one scope, once per part set, under one take of its lock", async () => {
+    const { root, rig } = await samples()
+    const twice = ["a", "b"].map((part): CollectorRun.Instance => ({
+      ...instanceOf(rig, root, "locked"),
+      id: `locked-${part}`,
+      label: `locked-${part}`,
+      dir: path.join(root, "job", "collectors", `locked-${part}`)
+    }))
+    const { collected } = await runScope(twice, cellsUnder(root), { sink: () => Effect.void, locker: memoryLocker() })
+    expect(valueOf(collected).flatMap((one) => [...one.cells.values()].flatMap((answers) => answers.verifications))).toEqual([])
+    expect(traceOf(root)).toEqual(["open locked", "open locked", "collect locked", "collect locked", "close locked", "close locked"])
+  })
 })

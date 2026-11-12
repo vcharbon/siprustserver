@@ -138,12 +138,14 @@ Rules:
   or attaches no file under `SIPRIG_OUT`.
 - `close` runs whatever ended the scope, after a failed or interrupted `open` too. A `close`
   that fails is run once more. A second failure marks the job *lab left changed*.
-- `locks` are taken before `open` and given back after `close`. A collector whose locks are
-  refused runs none of its steps and answers `not checkable`. A lock named by collectors of
-  two scopes is refused at load: the outer scope's would hold it while the inner one's waits.
-- A collector named like a source the base (`interpreter`, `rfc audit`, `driver`) or the pack
-  (`sources`) answers lines as is refused at load. A collector's line merged into a landed
-  cell replaces only a `pending` line of its name and source.
+- `locks` are taken per scope: the union of its collectors' locks, once, before its first
+  `open`, given back after its last `close`, so collectors of one scope naming one lock share
+  it. Where they are refused, each collector naming one runs none of its steps and answers
+  `not checkable`. A lock named by collectors of two scopes is refused at load: the outer
+  scope's would hold it while the inner one's waits.
+- A collector named like a source the base (`interpreter`, `rfc audit`, `driver`) answers lines
+  as is refused at load. A collector's line merged into a landed cell replaces only a `pending`
+  line of its name and source, never an answered one.
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
 - `after` orders collectors of one scope. A wider scope always runs after a narrower one ended
   and reads its keys and records without declaring it. An `after` naming a collector that is

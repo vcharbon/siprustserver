@@ -4,8 +4,8 @@
  * non-executable executable, a name defined in both roots (both files named),
  * a manifest whose name is not its directory's, a judge nobody defines, a
  * part schema that is no JSON object, a path `pack.toml` names that the
- * pack does not hold, a collector named like a source of the base or the
- * pack, and a lock collectors of nested scopes name.
+ * pack does not hold, a collector named like a source of the base, and a lock
+ * collectors of nested scopes name.
  */
 import * as Result from "effect/Result"
 import * as fs from "node:fs"
@@ -169,17 +169,6 @@ describe("the rig path", () => {
     const refusal = await refusalOf({ workspace })
     expect(refusal?.files).toEqual([path.join(workspace, "collectors/interpreter/collector.toml")])
     expect(refusal?.reason).toBe("name: interpreter is a source the base answers its own lines as")
-  })
-
-  it("refuses a collector named like a source the pack answers lines as, naming its manifest and pack.toml", async () => {
-    const packDir = root({ "pack.toml": pack(`sources = ["records-check"]`) })
-    const workspace = root({
-      "collectors/records-check/collector.toml": collector("records-check"),
-      "collectors/records-check/collect": SCRIPT
-    })
-    const refusal = await refusalOf({ pack: packDir, workspace })
-    expect(refusal?.files).toEqual([path.join(workspace, "collectors/records-check/collector.toml"), path.join(packDir, "pack.toml")])
-    expect(refusal?.reason).toBe("name: records-check is a source the pack answers its own lines as")
   })
 
   it("refuses a lock named by a job and a batch collector, naming both manifests; one named by two batch collectors loads", async () => {
