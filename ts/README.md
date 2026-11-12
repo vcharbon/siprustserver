@@ -147,9 +147,10 @@ TypeScript source, and consumers run through `tsx` or `vitest`.
 
 The workspace root installs `effect` at `ts/node_modules/effect`. A workspace
 that links these packages (`link:`) takes that copy for its own `effect`
-(`overrides: effect: link:<path to ts>/node_modules/effect`), installed after
-this one: a schema, a tagged error or a check built on one side is then read
-by the other, which two copies of `effect` do not guarantee.
+(`overrides: effect: link:<path to ts>/node_modules/effect`); the link resolves
+once this workspace is installed. A schema, a tagged error or a check built on
+one side is then read by the other, which two copies of `effect` do not
+guarantee.
 
 The CLI is `effect/unstable/cli`, Effect v4's own home for what used to be
 `@effect/cli` — the same move that put the platform services and the process
