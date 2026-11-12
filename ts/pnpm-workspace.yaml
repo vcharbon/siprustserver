@@ -12,6 +12,7 @@ packages:
   - "basic-case"
   - "workspace"
   - "lab-host"
+  - "campaign-runner"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false

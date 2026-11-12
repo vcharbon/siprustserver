@@ -1,6 +1,6 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Thirteen packages, four of them one layer each of the same stack:
+A pnpm workspace. Fourteen packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
@@ -17,11 +17,13 @@ A pnpm workspace. Thirteen packages, four of them one layer each of the same sta
 | `basic-case/` | `@sip/basic-case` | the minimal case form: two parties as plain SIP addresses, the basic call and the rejected INVITE on a pivot step builder, compiled to the cells a case source yields |
 | `workspace/` | `@sip/workspace` | one directory holding a tooling's roots, its store and its one configuration file: its layout and the environment it states, the campaigns and tags it defines, the site's public URL, and the workspace as a run's provenance |
 | `lab-host/` | `@sip/lab-host` | the host a lab runs on: its user session and the boxes its children run in, its binaries built under one box-wide lock, its roots and env files, its inbox, its run bundles, the checks a lane owes before it is driven, and the batch and SUT processes a hosted lane stands |
+| `campaign-runner/` | `@sip/campaign-runner` | a campaign run over a pack's cases: its cells compiled and replayed on each lane under their locks and the lane's pacing, retried, judged into verification lines, recorded in the store's campaign record, and reported (JUnit included) |
 
 Dependencies point one way only: `driver → pipeline → toolchain → contracts`,
 `store → contracts`, `rig → contracts`, `viewer-app → viewer-core` (the app reads the report
 formats' types from `contracts`, nothing else), `cli → corpus → {driver,
-store, viewer-core}`, `lab-host → {workspace, corpus}` and
+store, viewer-core}`, `lab-host → {workspace, corpus}`,
+`campaign-runner → {workspace, corpus}` and
 `workspace → {cli, rig, store, toolchain}`.
 The viewer's server is the deployment's: it serves the
 app's build and the documents the app draws. A policy package never imports the
