@@ -2,10 +2,11 @@
  * `Collectors` — the collectors a deployment's rig path runs around a job and
  * around each batch (`@sip/rig` `CollectorPlan`, ADR-0060 appendix §3, §5):
  * the instances a batch on a lane runs, and those a job over its lanes runs,
- * pre-checks among them (`PreCheck.isPreCheck`), each instance's directory
- * under the one its caller names; the required pre-checks a job's lanes
- * leave unwired (`PreCheck.unwiredOf`); and the judges a batch runs over its
- * exports alone (`@sip/rig` `JudgePlan`).
+ * pre-checks among them (`PreCheck.isPreCheck`; an `on-demand` one only where
+ * the job asks for it), each instance's directory under the one its caller
+ * names; the required pre-checks a job's lanes leave unwired
+ * (`PreCheck.unwiredOf`); and the judges a batch runs over its exports alone
+ * (`@sip/rig` `JudgePlan`).
  *
  * The default runs none. A deployment states its rig path and its lanes, as
  * the rig loaded them, with {@link layerOf}; a lane it did not load wires no
@@ -19,8 +20,17 @@ import * as Layer from "effect/Layer"
 export interface Interface {
   /** The collectors a batch on `lane` runs, their directories under `dir`, the batch's own attachments under `holder`. */
   readonly batch: (lane: string, dir: string, holder: string) => Effect.Effect<ReadonlyArray<CollectorRun.Instance>>
-  /** The collectors a job over `lanes` runs, their directories under `dir`, the job's own attachments under `holder`. */
-  readonly job: (lanes: ReadonlyArray<string>, dir: string, holder: string) => Effect.Effect<ReadonlyArray<CollectorRun.Instance>>
+  /**
+   * The collectors a job over `lanes` runs, their directories under `dir`, the
+   * job's own attachments under `holder`; the `on-demand` ones `asked` names
+   * among them.
+   */
+  readonly job: (
+    lanes: ReadonlyArray<string>,
+    dir: string,
+    holder: string,
+    asked?: ReadonlyArray<string>
+  ) => Effect.Effect<ReadonlyArray<CollectorRun.Instance>>
   /** The judges a batch on `lane`, whose directory is `holder`, runs over its exports alone; none where absent or it runs none. */
   readonly exportJudges?: (lane: string, holder: string) => Effect.Effect<ScopeJudging.ExportJudges | undefined>
   /** The required pre-checks, of either scope, that a real-clock lane of `lanes` names no part of. */
@@ -52,7 +62,7 @@ export const of = (rig: RigPath.RigPath, lanes: ReadonlyArray<Lanes.Loaded>): In
         const found = byId.get(lane)
         return found === undefined ? [] : CollectorPlan.batchPlanOf(rig, found, dir, holder)
       }),
-    job: (named, dir, holder) => Effect.sync(() => CollectorPlan.jobPlanOf(rig, loaded(named), dir, holder)),
+    job: (named, dir, holder, asked) => Effect.sync(() => CollectorPlan.jobPlanOf(rig, loaded(named), dir, holder, asked)),
     exportJudges: (lane, holder) =>
       Effect.sync(() => {
         const found = byId.get(lane)

@@ -59,6 +59,9 @@ job     collect and close the job collectors, join, judge
   (an event `refused`). A `not checkable` refuses nothing and stays the scope's line, except a
   `required` pre-check's: that one, its failed or timed-out `collect` included, refuses as a
   `fail` does. A batch's pre-checks run before the lane stands anything.
+- An `on-demand` job pre-check runs only for a job that asks for it by name, as one guarding
+  what only that kind of job does; a `not checkable` of one so asked refuses as a required
+  one's does.
 - A `required` pre-check, of either scope, that a real-clock lane of the job names no part of
   refuses the job before any pre-check runs, as a missing `required` claim does (item 4).
 - Provisioning is one phase the pack fills (`pack.toml`, `[provision]`), once per job.

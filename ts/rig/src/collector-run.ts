@@ -90,6 +90,8 @@ export interface Instance {
   readonly holder: string
   /** The judge its manifest names, as the path defines it; none judges its records where absent. */
   readonly judge?: RigPath.Defined<Judge.Judge> | undefined
+  /** An `on-demand` collector its scope asked for by name; a pre-check so asked never fails open (`pre-check.ts`). */
+  readonly asked?: true
 }
 
 /** What one holder was answered: its verification lines, the last per name, and its attachments, already listed in its directory. */

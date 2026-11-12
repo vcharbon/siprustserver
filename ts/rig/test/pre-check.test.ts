@@ -3,7 +3,9 @@
  * answers refuses the scope with its message and a `refused` event, its
  * `close` still run; a `not checkable` refuses nothing and stays the scope's
  * line, but for a required pre-check's, which refuses the scope as does its
- * failed or timed-out collect. A required pre-check a real-clock lane names
+ * failed or timed-out collect. An `on-demand` job pre-check runs only for a
+ * job that asks for it, and refuses that job as a required one would. A
+ * required pre-check a real-clock lane names
  * no part of refuses the scope before any pre-check runs; on a simulated lane
  * it does not.
  */
@@ -113,6 +115,23 @@ describe("a required pre-check", () => {
     expect(refusal).toMatch(/^the required pre-check required-hanging could not check required-hanging: collect /)
     expect(answers).toEqual([["required-hanging", "not-checkable"]])
   }, 10_000)
+})
+
+describe("an on-demand pre-check", () => {
+  it("runs only for a job that asks for it, and refuses that job where its collect fails, as a required one does", async () => {
+    const { root, rig } = await samples()
+    const jobChecks = (asked: ReadonlyArray<string>) =>
+      CollectorPlan.jobPlanOf(rig, [laneOf("a")], path.join(root, "job", "collectors"), path.join(root, "job"), asked)
+        .filter(PreCheck.isPreCheck)
+    expect(jobChecks([]).map((instance) => instance.id)).toEqual([])
+    const asked = jobChecks(["asked-check"])
+    expect(asked.map((instance) => [instance.id, instance.asked])).toEqual([["asked-check", true]])
+    const { events, sink } = collecting()
+    const checked = await Effect.runPromise(PreCheck.run(asked, [], { sink, locker: memoryLocker() }))
+    expect(checked.refusal).toMatch(/^the asked pre-check asked-check could not check asked-check: collect exited 3: the lab cannot be asked/)
+    expect(events.filter((event) => event.startsWith("refused"))).toEqual([`refused asked-check: ${checked.refusal}`])
+    expect(traceOf(root)).toEqual(["collect asked-check"])
+  })
 })
 
 describe("a required pre-check a lane names no part of", () => {

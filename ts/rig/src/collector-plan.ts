@@ -4,7 +4,9 @@
  * needs and does not exclude it (`[collectors]`); the ones planned here run
  * `always`, as a required one does: those `at = "after"` over their scope's
  * cells, the pre-checks (`at = "before"`, `pre-check.ts`) before any call of
- * it. Their parameters are the manifest's after the lane's overrides.
+ * it. A job also runs each `on-demand` job-scope collector it asks for by
+ * name, marked asked. Their parameters are the manifest's after the lane's
+ * overrides.
  *
  * A batch runs one instance of each collector wired on its lane. A job runs
  * one instance of a job-scope collector that needs no part, over the cells of
@@ -39,11 +41,25 @@ const runsAlways = (collector: Collector.Collector): boolean =>
 export const isWiredOn = (defined: Defined, lane: Lanes.Loaded): boolean =>
   (defined.manifest.needs ?? []).every((kind) => lane.parts.has(kind)) && !laneWiringOf(lane).exclude.includes(defined.name)
 
-/** The collectors of `scope` planned on `lane`, in the order they run (`collector-order.ts`). */
-export const plannedOn = (rig: RigPath.RigPath, scope: Collector.Scope, lane: Lanes.Loaded): ReadonlyArray<Defined> =>
+/** Whether `defined` runs because its scope asked for it: an `on-demand` collector named in `asked`. */
+const isAsked = (defined: Defined, asked: ReadonlyArray<string>): boolean =>
+  defined.manifest.default === "on-demand" && asked.includes(defined.name)
+
+/**
+ * The collectors of `scope` planned on `lane`, in the order they run
+ * (`collector-order.ts`): those that run always, and those `asked` names.
+ */
+export const plannedOn = (
+  rig: RigPath.RigPath,
+  scope: Collector.Scope,
+  lane: Lanes.Loaded,
+  asked: ReadonlyArray<string> = []
+): ReadonlyArray<Defined> =>
   CollectorOrder.ordered(
     [...rig.collectors.values()]
-      .filter((defined) => defined.manifest.scope === scope && runsAlways(defined.manifest) && isWiredOn(defined, lane))
+      .filter((defined) =>
+        defined.manifest.scope === scope && (runsAlways(defined.manifest) || isAsked(defined, asked)) && isWiredOn(defined, lane)
+      )
   )
 
 /** `collector`'s parameters: its manifest's, each overridden where `lane` overrides it. */
@@ -85,15 +101,20 @@ export const batchPlanOf = (
 ): ReadonlyArray<CollectorRun.Instance> =>
   plannedOn(rig, "batch", lane).map((defined) => instanceOf(defined, defined.name, defined.name, "batch", lane, undefined, root, holder, rig))
 
-/** The instances a job over `lanes` runs, each with its directory under `root`; `holder` is the job's directory. */
+/**
+ * The instances a job over `lanes` runs, each with its directory under
+ * `root`; `holder` is the job's directory, `asked` the `on-demand` collectors
+ * the job asks for.
+ */
 export const jobPlanOf = (
   rig: RigPath.RigPath,
   lanes: ReadonlyArray<Lanes.Loaded>,
   root: string,
-  holder: string
+  holder: string,
+  asked: ReadonlyArray<string> = []
 ): ReadonlyArray<CollectorRun.Instance> => {
   const planned: Array<CollectorRun.Instance> = []
-  const names = new Set(lanes.flatMap((lane) => plannedOn(rig, "job", lane).map((defined) => defined.name)))
+  const names = new Set(lanes.flatMap((lane) => plannedOn(rig, "job", lane, asked).map((defined) => defined.name)))
   for (const defined of CollectorOrder.ordered([...names].map((name) => rig.collectors.get(name)!))) {
     const name = defined.name
     const needs = defined.manifest.needs ?? []
@@ -106,7 +127,8 @@ export const jobPlanOf = (
       const first = needs.length === 0 ? undefined : group[0]
       const id = first === undefined ? name : `${name}-${first.id}`
       const label = first === undefined ? name : `${name} for ${first.id}`
-      planned.push(instanceOf(defined, id, label, "job", first, group.map((lane) => lane.id), root, holder, rig))
+      const instance = instanceOf(defined, id, label, "job", first, group.map((lane) => lane.id), root, holder, rig)
+      planned.push(isAsked(defined, asked) ? { ...instance, asked: true } : instance)
     }
   }
   return planned

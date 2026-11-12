@@ -2,7 +2,8 @@
  * A job's pre-checks (`@sip/rig` `PreCheck`, ADR-0060 appendix §3), whoever
  * runs the job (a capture replay, a campaign): the job-scope collectors `at =
  * "before"` the deployment wires over the job's lanes, run before the job's
- * provisioning and its first call. What they answer of the job are its lines
+ * provisioning and its first call, and the `on-demand` ones the job asks for
+ * by name (a capture replay asks for none). What they answer of the job are its lines
  * and attachments, after any it holds; their events are the job's. A refusal
  * of theirs (`PreCheck.run`) refuses the job with its message, as does a
  * required pre-check, of either scope, that a real-clock lane of the job
@@ -32,6 +33,8 @@ export interface Request {
   /** The job's directory: its pre-checks' directories under `collectors/`, its own attachments. */
   readonly dir: string
   readonly lanes: ReadonlyArray<string>
+  /** The `on-demand` pre-checks the job asks for by name, guarding what it alone does; none where absent. */
+  readonly asked?: ReadonlyArray<string>
   /** Told whom a pre-check's lock waits for, and `undefined` once it is taken. */
   readonly watch?: Locks.Watch
 }
@@ -65,7 +68,8 @@ const answerJob = (
 export const job = (request: Request) =>
   Effect.gen(function*() {
     const seam = yield* Collectors.Service
-    const instances = (yield* seam.job(request.lanes, path.join(request.dir, "collectors"), request.dir)).filter(PreCheck.isPreCheck)
+    const instances = (yield* seam.job(request.lanes, path.join(request.dir, "collectors"), request.dir, request.asked))
+      .filter(PreCheck.isPreCheck)
     const unwired = yield* seam.unwired(request.lanes)
     if (instances.length === 0 && unwired.length === 0) return undefined
     const events = yield* JobEvents.Service

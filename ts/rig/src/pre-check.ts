@@ -4,8 +4,9 @@
  * over no cell, then closed. A `fail` one answers of the scope refuses the
  * scope, its message the refusal's and an event `refused` of its instance. A
  * `not checkable`, a failed or timed-out `collect`'s included, refuses the
- * scope where the pre-check is `required`, so a required one never fails
- * open; otherwise it refuses nothing and stays the scope's line.
+ * scope where the pre-check is `required` or the job asked for it by name (an
+ * `on-demand` one, `collector-plan.ts`), so neither fails open; otherwise it
+ * refuses nothing and stays the scope's line.
  *
  * A required pre-check that a real-clock lane does not wire, for lack of a
  * part it needs, refuses before any pre-check runs: leaving a part out never
@@ -67,14 +68,20 @@ const refused = (sink: CollectorRun.Sink, collector: string, message: string) =>
 /** What a `fail` line says: its message, or that it failed. */
 const saidOf = (line: Verification.Verification): string => line.message ?? `${line.name} failed`
 
+/** How a refusal names the pre-check `instance` that could not check: required, or asked for. */
+const kindOf = (instance: CollectorRun.Instance): string | undefined =>
+  Collector.isRequired(instance.collector.manifest) ? "required" : instance.asked === true ? "asked" : undefined
+
 /**
  * Why `line`, answered by the pre-check `instance`, refuses its scope: a
- * `fail`, and a `not checkable` of a required one; `undefined` otherwise.
+ * `fail`, and a `not checkable` of a required or asked one; `undefined`
+ * otherwise.
  */
 const refusalOf = (instance: CollectorRun.Instance, line: Verification.Verification): string | undefined => {
   if (line.answer === "fail") return saidOf(line)
-  if (line.answer !== "not-checkable" || !Collector.isRequired(instance.collector.manifest)) return undefined
-  return `the required pre-check ${instance.label} could not check ${line.name}` +
+  const kind = kindOf(instance)
+  if (line.answer !== "not-checkable" || kind === undefined) return undefined
+  return `the ${kind} pre-check ${instance.label} could not check ${line.name}` +
     (line.message === undefined ? "" : `: ${line.message}`)
 }
 

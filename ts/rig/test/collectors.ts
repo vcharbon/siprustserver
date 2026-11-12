@@ -117,7 +117,10 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...collector("required-hanging", {
     collect: traced("collect required-hanging", `sleep 30 &\necho $! > ../../sleeper\nwait`)
   }, `at = "before"\nrequired = true\n[timeouts]\ncollect_s = 0.5`),
-  ...collector("required-check", {}, `at = "before"\nrequired = true\nneeds = ["records-store"]`, "job")
+  ...collector("required-check", {}, `at = "before"\nrequired = true\nneeds = ["records-store"]`, "job"),
+  ...collector("asked-check", {
+    collect: traced("collect asked-check", `echo "the lab cannot be asked" >&2\nexit 3`)
+  }, `at = "before"\ndefault = "on-demand"`, "job")
 }
 
 /** The trace lines under the rig path `root`, in the order they were written. */
