@@ -55,7 +55,11 @@ job     collect and close the job collectors, join, judge
 ```
 
 - A pre-check is a job-scope or batch-scope collector with `at = "before"` and no `open`. A
-  `fail` it answers refuses the job or the batch before any call, with its message on the job.
+  `fail` it answers refuses the job or the batch before any call, with its message on the job
+  (an event `refused`). A `not checkable` refuses nothing and stays the scope's line. A batch's
+  pre-checks run before the lane stands anything.
+- A `required` pre-check, of either scope, that a real-clock lane of the job names no part of
+  refuses the job before any pre-check runs, as a missing `required` claim does (item 4).
 - Provisioning is one phase the pack fills (`pack.toml`, `[provision]`), once per job.
 - A retry is decided when the batch's verifications have answered. Job-scope verifications
   apply to the attempt kept for each cell and start no retry.

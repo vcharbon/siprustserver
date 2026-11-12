@@ -2,7 +2,9 @@
  * A job's collectors around its work, real executables against a real
  * postgres: what they answer of a landed cell is merged into it, of the job
  * are its lines; a job interrupted after they opened still closes them; a
- * close that fails twice marks the job lab-left-changed.
+ * close that fails twice marks the job lab-left-changed. A job's pre-checks
+ * refuse it with a fail's message, their lines kept before its collectors';
+ * a real-clock lane naming no part a required pre-check needs refuses it.
  *
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  */
@@ -24,6 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { Collectors, Roots } from "../../src/deployment/index.js"
 import * as CollectorIo from "../../src/replay/collector-io.js"
 import * as JobCollectors from "../../src/replay/job-collectors.js"
+import * as PreChecks from "../../src/replay/pre-checks.js"
 
 const SCRATCH = await scratch("corpus_job_collectors_test")
 const TREE = fs.mkdtempSync(path.join(os.tmpdir(), "job-collectors-"))
@@ -41,12 +44,35 @@ afterAll(async () => {
   await drop(SCRATCH)
 }, 120_000)
 
-/** The deployment's collectors: the job collector `lab` on {@link LANE}, its steps the scripts given, its trace file. */
-const labOf = async (steps: { readonly collect: string; readonly close: string; readonly locks?: ReadonlyArray<string> }) => {
+/**
+ * The deployment's collectors: the job collector `lab` on {@link LANE}, its
+ * steps the scripts given, its trace file; and, where `preCheck` is given, the
+ * job pre-check `lab-own` whose collect runs it, required and needing the part
+ * `needs` where one is named, the lane's clock `clock`.
+ */
+const labOf = async (steps: {
+  readonly collect: string
+  readonly close: string
+  readonly locks?: ReadonlyArray<string>
+  readonly preCheck?: string
+  readonly needs?: string
+  readonly clock?: "real" | "simulated"
+}) => {
   const root = fs.mkdtempSync(path.join(TREE, "rig-"))
   const dir = path.join(root, "collectors", "lab")
   fs.mkdirSync(dir, { recursive: true })
   const trace = path.join(root, "trace")
+  if (steps.preCheck !== undefined) {
+    const own = path.join(root, "collectors", "lab-own")
+    fs.mkdirSync(own, { recursive: true })
+    fs.writeFileSync(
+      path.join(own, "collector.toml"),
+      `schema = "collector.v1"\nname = "lab-own"\nscope = "job"\nat = "before"\n` +
+        (steps.needs === undefined ? "" : `required = true\nneeds = ["${steps.needs}"]\n`) +
+        `[run]\ncollect = "./collect"\n`
+    )
+    fs.writeFileSync(path.join(own, "collect"), `#!/bin/sh\necho pre-check >> "${trace}"\n${steps.preCheck}\n`, { mode: 0o755 })
+  }
   fs.writeFileSync(
     path.join(dir, "collector.toml"),
     `schema = "collector.v1"\nname = "lab"\nscope = "job"\nanswers = ["lab-check"]\n` +
@@ -62,7 +88,7 @@ const labOf = async (steps: { readonly collect: string; readonly close: string; 
   const lane: Lanes.Loaded = {
     id: LANE,
     file: `lanes/${LANE}.toml`,
-    lane: { schema: "lane.v1", clock: "simulated" },
+    lane: { schema: "lane.v1", clock: steps.clock ?? "simulated" },
     parts: new Map(),
     operations: new Map(),
     capabilities: new Set()
@@ -136,6 +162,55 @@ const landedCell = Effect.gen(function*() {
     }]
   })
   return { id: "c1", caseId: "case-1", lane: LANE, dir, runId: opened.id }
+})
+
+describe.skipIf(!served)("a job's pre-checks", () => {
+  const OTHER_LAB = "the container sut carries the root of another lab"
+
+  it("refuse the job with a fail's message, its line and its refused event the job's", async () => {
+    const lab = await labOf({ collect: "exit 0", close: "exit 0", preCheck: `echo '{"verification":"lab-own","answer":"fail","message":"${OTHER_LAB}"}'` })
+    const { refused, jobLines, said } = await withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      const refused = yield* PreChecks.job({ job, dir: path.join(TREE, `job${job}`), lanes: [LANE] })
+      return {
+        refused,
+        jobLines: yield* Effect.flatMap(Verifications.Service, (lines) => lines.of({ scope: "job", jobId: job })),
+        said: (yield* Effect.flatMap(JobEvents.Service, (events) => events.ofJob(job))).filter((event) => event.phase === "refused")
+      }
+    }))
+    expect(refused).toBe(OTHER_LAB)
+    expect(jobLines).toEqual([{ name: "lab-own", source: "lab-own", answer: "fail", message: OTHER_LAB }])
+    expect(said.map((event) => [event.subject, event.message])).toEqual([["lab-own", OTHER_LAB]])
+    expect(lab.trace()).toEqual(["pre-check"])
+  })
+
+  it("keep their lines of the job before those its collectors answer, which never run them again", async () => {
+    const lab = await labOf({
+      collect: `echo '{"verification":"lab-check","answer":"pass"}'`,
+      close: "exit 0",
+      preCheck: `echo '{"verification":"lab-own","answer":"pass"}'`
+    })
+    const { refused, jobLines } = await withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      const dir = path.join(TREE, `job${job}`)
+      const refused = yield* PreChecks.job({ job, dir, lanes: [LANE] })
+      yield* JobCollectors.around({ job, dir, lanes: [LANE], cells: () => [] }, Effect.void)
+      return { refused, jobLines: yield* Effect.flatMap(Verifications.Service, (lines) => lines.of({ scope: "job", jobId: job })) }
+    }))
+    expect(refused).toBeUndefined()
+    expect(jobLines).toEqual([{ name: "lab-own", source: "lab-own", answer: "pass" }, { name: "lab-check", source: "lab", answer: "pass" }])
+    expect(lab.trace()).toEqual(["pre-check", "open", "collect", "close"])
+  })
+
+  it("refuse a real-clock lane that names no part a required pre-check needs, running none", async () => {
+    const lab = await labOf({ collect: "exit 0", close: "exit 0", preCheck: "exit 0", needs: "records-store", clock: "real" })
+    const refused = await withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      return yield* PreChecks.job({ job, dir: path.join(TREE, `job${job}`), lanes: [LANE] })
+    }))
+    expect(refused).toBe(`${LANE} names no records-store part, which the required pre-check lab-own needs (lanes/${LANE}.toml)`)
+    expect(lab.trace()).toEqual([])
+  })
 })
 
 describe.skipIf(!served)("a job's collectors", () => {

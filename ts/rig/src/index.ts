@@ -5,7 +5,8 @@
  * collection levels and lane wiring checked before a job opens, the context an
  * executable reads and how one runs, an operation's run and a job's setup, a
  * scope's collectors (which run and in what order, their run, the lines they
- * answer), its exports, the join of its records and its judges, the main
+ * answer), its pre-checks, its exports, the join of its records and its
+ * judges, the main
  * of a process that runs them, the cell description, and the compiled cells a
  * case source yields. `defineCollector`, which a collector module runs as its
  * main, is `@sip/rig/define-collector`.
@@ -37,6 +38,7 @@ export * as Operation from "./operation.js"
 export * as OperationRun from "./operation-run.js"
 export * as Pack from "./pack.js"
 export * as Part from "./part.js"
+export * as PreCheck from "./pre-check.js"
 export * as RigPath from "./rig-path.js"
 export * as RunMain from "./run-main.js"
 export * as ScopeJudging from "./scope-judging.js"

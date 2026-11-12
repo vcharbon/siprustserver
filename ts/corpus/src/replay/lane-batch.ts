@@ -24,10 +24,12 @@
  * the SUT and the batch process are given back, whatever ended the batch.
  * What they answered of each cell is the caller's to land ({@link Ended}
  * `collected`); what they answered of the batch joins its lines and its
- * attachments.
+ * attachments. Its pre-checks (`at = "before"`) run once its row opened,
+ * before the lane stands anything: a `fail` closes the row with their lines
+ * and refuses the batch before any call (`LaneUnready`, the message theirs).
  */
-import type { Verification } from "@sip/contracts"
-import { CollectorRun } from "@sip/rig"
+import type { Attachment, Verification } from "@sip/contracts"
+import { CollectorRun, PreCheck } from "@sip/rig"
 import { Attachments, Batches } from "@sip/store"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
@@ -86,6 +88,7 @@ export interface Driven<A> {
 
 /** The rig's collectors of a batch: their instances, what they run with, and the batch's cells as they read them. */
 export interface Collectors<A, RC> {
+  /** Its pre-checks among them. */
   readonly instances: ReadonlyArray<CollectorRun.Instance>
   readonly options: CollectorRun.Options
   /** The batch's own directory, which holds the attachments that name no cell. */
@@ -226,24 +229,49 @@ export const run = <A, E, R, EC = never, RO = never, RC = never>(
   R | Exclude<RO, Scope.Scope> | RC | LaneHosting.Service | Batches.Service | Attachments.Service
 > =>
   Effect.gen(function*() {
+    const batches = request.row === undefined ? undefined : yield* Batches.Service
+    const id = batches === undefined || request.row === undefined ? undefined : yield* batches.open(request.row)
+    const checked = yield* preChecked(request.collectors)
+    if (checked.refusal !== undefined) {
+      if (batches !== undefined && id !== undefined) {
+        yield* batches.close(id, checked.refusal, checked.answers.verifications)
+        yield* attach(request.collectors, id, checked.answers.attachments)
+      }
+      return yield* new LaneHosting.LaneUnready({ lane: request.lane, detail: checked.refusal })
+    }
     const scoped = Effect.map(
       Effect.scoped(stood(request)),
-      ({ ended, opened }): Ended<A> => ({ ...ended, leftChanged: opened?.leftChanged() ?? [] })
+      ({ ended, opened }): Ended<A> => ({
+        ...ended,
+        collected: [...checked.collected, ...ended.collected],
+        leftChanged: [...checked.leftChanged, ...(opened?.leftChanged() ?? [])]
+      })
     )
-    if (request.row === undefined) return yield* scoped
-    const batches = yield* Batches.Service
-    const id = yield* batches.open(request.row)
+    if (batches === undefined || id === undefined) return yield* scoped
     const ended = yield* scoped.pipe(
       Effect.onExit((exit) => Exit.isSuccess(exit) ? Effect.void : Effect.ignore(batches.close(id, failureOf(exit.cause))))
     )
     const answered = scopeAnswersOf(ended.collected)
     yield* batches.close(id, detailOf(ended), [...linesOf(ended), ...answered.verifications])
-    if (answered.attachments.length > 0 && request.collectors !== undefined) {
-      const attachments = yield* Attachments.Service
-      yield* attachments.add({ scope: "batch", batchId: id }, { dir: request.collectors.holder, attachments: answered.attachments })
-    }
+    yield* attach(request.collectors, id, answered.attachments)
     return ended
   })
+
+/** A batch's rig collectors, what runs them and holds what they attach, its cells aside. */
+type RigOf = Pick<Collectors<unknown, never>, "instances" | "options" | "holder"> | undefined
+
+/** `attachments` added to batch `id`'s, `rig`'s holder holding their files; nothing where none is. */
+const attach = (rig: RigOf, id: number, attachments: ReadonlyArray<Attachment.Attachment>) =>
+  attachments.length === 0 || rig === undefined
+    ? Effect.void
+    : Effect.flatMap(Attachments.Service, (store) => store.add({ scope: "batch", batchId: id }, { dir: rig.holder, attachments }))
+
+/**
+ * The batch's pre-checks (`@sip/rig` `PreCheck`): its rig collectors `at =
+ * "before"`, run before the lane stands anything, with the batch's options.
+ */
+const preChecked = (rig: RigOf) =>
+  rig === undefined ? Effect.succeed(PreCheck.NOTHING) : PreCheck.run(rig.instances.filter(PreCheck.isPreCheck), [], rig.options)
 
 const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
   Effect.gen(function*() {
@@ -266,7 +294,9 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
       (held) => held?.stop ?? Effect.void
     )
     const rig = request.collectors
-    const opened = rig === undefined ? undefined : yield* CollectorRun.opened(rig.instances, rig.options)
+    const opened = rig === undefined
+      ? undefined
+      : yield* CollectorRun.opened(rig.instances.filter((one) => !PreCheck.isPreCheck(one)), rig.options)
     const close = request.collect === undefined ? undefined : yield* request.collect
     const driven = yield* request.drive({ host, sut })
     const deadHost = host?.died()

@@ -34,8 +34,8 @@ import type * as Lanes from "./lanes.js"
 import type * as RigPath from "./rig-path.js"
 import * as ScopeJudging from "./scope-judging.js"
 
-/** What an event says of a step. */
-export const PHASES = ["open", "opened", "collect", "collected", "close", "closed", "failed", "lab-left-changed"] as const
+/** What an event says of a step; `refused` is a pre-check's `fail`, which refuses its scope (`pre-check.ts`). */
+export const PHASES = ["open", "opened", "collect", "collected", "close", "closed", "failed", "lab-left-changed", "refused"] as const
 export type Phase = (typeof PHASES)[number]
 
 /** The phase of the event that marks a job whose lab a collector's `close` left changed. */

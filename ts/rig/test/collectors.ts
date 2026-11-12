@@ -97,7 +97,15 @@ export const SAMPLES: Readonly<Record<string, Entry>> = {
   ...collector("job-wide", {}, `needs = ["records-store"]`, "job"),
   ...collector("job-plain", {}, "", "job"),
   ...collector("on-failure", {}, `default = "on-failure"`),
-  ...collector("pre-check", {}, `at = "before"`)
+  ...collector("pre-check", {}, `at = "before"`),
+  ...collector("refusing-check", {
+    collect: sh(`echo "collect refusing-check" >> ../../trace\necho '{"verification": "target-up", "answer": "fail", "message": "nothing takes SIP on 192.0.2.1:5060: the target is down"}'`),
+    close: traced("close refusing-check")
+  }, `at = "before"\nanswers = ["target-up"]`),
+  ...collector("unsure-check", {
+    collect: traced("collect unsure-check", `echo "the lab cannot be asked" >&2\nexit 3`)
+  }, `at = "before"`),
+  ...collector("required-check", {}, `at = "before"\nrequired = true\nneeds = ["records-store"]`, "job")
 }
 
 /** The trace lines under the rig path `root`, in the order they were written. */

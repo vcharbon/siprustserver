@@ -6,15 +6,16 @@
  * bundle once it ended, and close after it, whatever ended it: a failure, an
  * interruption, a signal to the runner. What they answered of a cell is
  * merged into the landed cell (`collected-cells.ts`), or handed to a caller
- * that lands its cells after them; of the job itself are the job's lines and
+ * that lands its cells after them; of the job itself are the job's lines,
+ * after those its pre-checks answered (`pre-checks.ts`, which run them), and
  * attachments. Their events are the job's, where a `lab-left-changed` one
  * marks it, and the caller is told who left the lab changed.
  *
  * A cell the work ran twice (a repeated request's passes) is read once per
  * run, its later ids suffixed by the order it ran in.
  */
-import { CollectorRun } from "@sip/rig"
-import { Attachments, JobEvents, Verifications } from "@sip/store"
+import { CollectorRun, PreCheck } from "@sip/rig"
+import { Attachments, JobEvents } from "@sip/store"
 import * as Effect from "effect/Effect"
 import { identity } from "effect/Function"
 import * as path from "node:path"
@@ -22,6 +23,7 @@ import { Collectors } from "../deployment/index.js"
 import * as Locks from "../locks.js"
 import * as CollectedCells from "./collected-cells.js"
 import * as CollectorIo from "./collector-io.js"
+import * as PreChecks from "./pre-checks.js"
 
 /** What a job's collectors run around. */
 export interface Request<A> {
@@ -61,7 +63,7 @@ export const distinct = (cells: ReadonlyArray<CollectedCells.LandedCell>): Reado
 export const around = <A, E, R>(request: Request<A>, work: Effect.Effect<A, E, R>) =>
   Effect.gen(function*() {
     const seam = yield* Collectors.Service
-    const instances = yield* seam.job(request.lanes, path.join(request.dir, "collectors"), request.dir)
+    const instances = (yield* seam.job(request.lanes, path.join(request.dir, "collectors"), request.dir)).filter((one) => !PreCheck.isPreCheck(one))
     if (instances.length === 0) return yield* work
     const events = yield* JobEvents.Service
     const options: CollectorRun.Options = {
@@ -89,13 +91,13 @@ export const around = <A, E, R>(request: Request<A>, work: Effect.Effect<A, E, R
     })).pipe(Effect.ensuring(leftChanged))
   })
 
-/** What `collected` answered of the job itself, written as its lines and added to its attachments; nothing where it is no job. */
+/** What `collected` answered of the job itself, written after its lines and added to its attachments; nothing where it is no job. */
 const answerJob = (request: Pick<Request<never>, "job" | "dir">, collected: ReadonlyArray<CollectorRun.Collected>) =>
   Effect.gen(function*() {
     if (request.job === undefined) return
     const verifications = collected.flatMap((one) => one.scope.verifications)
     const attachments = collected.flatMap((one) => one.scope.attachments)
-    if (verifications.length > 0) yield* Effect.flatMap(Verifications.Service, (store) => store.writeJob(request.job!, verifications))
+    yield* PreChecks.appendJobLines(request.job, verifications)
     if (attachments.length > 0) {
       yield* Effect.flatMap(Attachments.Service, (store) => store.add({ scope: "job", jobId: request.job! }, { dir: request.dir, attachments }))
     }

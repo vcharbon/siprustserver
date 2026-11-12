@@ -15,13 +15,14 @@
  * before the SUT is given back; their line of the batch is the row's, their
  * attachment of it the batch's; one whose collect exits non-zero answers
  * every cell and the batch not checkable with its message; a batch whose
- * cells fail still closes them.
+ * cells fail still closes them. Its pre-checks run before the lane stands:
+ * one that fails refuses the batch with its message, on the row and the job.
  *
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  */
 import { NodeServices } from "@effect/platform-node"
 import { type Cell, RigPath } from "@sip/rig"
-import { Attachments, Batches, Client, Jobs, Sessions } from "@sip/store"
+import { Attachments, Batches, Client, JobEvents, Jobs, Sessions } from "@sip/store"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
 import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
@@ -33,6 +34,7 @@ import * as path from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { LaneHosting } from "../../src/deployment/index.js"
 import type { BatchHost, Gate, SutHandle } from "../../src/replay/batch-protocol.js"
+import * as CollectorIo from "../../src/replay/collector-io.js"
 import * as LaneBatch from "../../src/replay/lane-batch.js"
 
 const SCRATCH = await scratch("corpus_lane_batch_test")
@@ -40,6 +42,9 @@ const TREE = fs.mkdtempSync(path.join(os.tmpdir(), "lane-batch-"))
 
 const STANDS = "stands"
 const PAUSED = "paused"
+
+/** What the stand-in pre-check `target-up` answers where the lane's target is down. */
+const TARGET_DOWN = "nothing takes SIP on 192.0.2.1:5060: the target is down"
 
 let events: Array<string> = []
 let hostDied: string | undefined
@@ -83,12 +88,12 @@ const hosting = LaneHosting.layerWith({
   preflight: () => Effect.succeed(null)
 })
 
-type Services = Attachments.Service | Batches.Service | Jobs.Service | LaneHosting.Service | SqlClient
+type Services = Attachments.Service | Batches.Service | JobEvents.Service | Jobs.Service | LaneHosting.Service | SqlClient
 
 const withStore = <A, E>(effect: Effect.Effect<A, E, Services>): Promise<A> =>
   Effect.runPromise(
     effect.pipe(
-      Effect.provide(Layer.mergeAll(Attachments.layer, Batches.layer, Jobs.layer, hosting)),
+      Effect.provide(Layer.mergeAll(Attachments.layer, Batches.layer, JobEvents.layer, Jobs.layer, hosting)),
       Effect.provide(Sessions.layer(TREE)),
       Effect.provide(Client.layerFromUrl(urlFor(SCRATCH)))
     )
@@ -150,10 +155,23 @@ const script = (dir: string, name: string, body: string) => {
  * the batch and attaches a log to the batch, or, `failing`, says why on its
  * stderr and exits 3. The batch's collectors with it, its events in `events`.
  */
-const labCollectors = async (failing: boolean): Promise<LaneBatch.Collectors<string, never>> => {
+const labCollectors = async (failing: boolean, target?: "up" | "down"): Promise<LaneBatch.Collectors<string, never>> => {
   const root = fs.mkdtempSync(path.join(TREE, "rig-"))
   const dir = path.join(root, "collectors", "lab")
   fs.mkdirSync(dir, { recursive: true })
+  const check = path.join(root, "collectors", "target-up")
+  fs.mkdirSync(check, { recursive: true })
+  fs.writeFileSync(
+    path.join(check, "collector.toml"),
+    `schema = "collector.v1"\nname = "target-up"\nscope = "batch"\nat = "before"\n[run]\ncollect = "./collect"\n`
+  )
+  script(
+    check,
+    "collect",
+    target === "down"
+      ? `echo '{"verification":"target-up","answer":"fail","message":"${TARGET_DOWN}"}'`
+      : `echo '{"verification":"target-up","answer":"pass"}'`
+  )
   fs.writeFileSync(
     path.join(dir, "collector.toml"),
     `schema = "collector.v1"\nname = "lab"\nscope = "batch"\nanswers = ["lab-check"]\n[run]\nopen = "./open"\ncollect = "./collect"\nclose = "./close"\n`
@@ -193,20 +211,21 @@ const labCollectors = async (failing: boolean): Promise<LaneBatch.Collectors<str
     tags: [],
     needs: []
   }
+  const instanceOf = (name: string) => ({
+    collector: loaded.success.collectors.get(name)!,
+    id: name,
+    label: name,
+    scope: "batch" as const,
+    lane: undefined,
+    lanes: undefined,
+    params: {},
+    dir: path.join(holder, "collectors", name),
+    holder
+  })
   return {
-    instances: [{
-      collector: loaded.success.collectors.get("lab")!,
-      id: "lab",
-      label: "lab",
-      scope: "batch",
-      lane: undefined,
-      lanes: undefined,
-      params: {},
-      dir: path.join(holder, "collectors", "lab"),
-      holder
-    }],
+    instances: [...(target === undefined ? [] : [instanceOf("target-up")]), instanceOf("lab")],
     options: {
-      sink: (event) => Effect.sync(() => void events.push(`collector ${event.phase}`)),
+      sink: (event) => Effect.sync(() => void events.push(`collector ${event.phase}${event.phase === "refused" ? `: ${event.message}` : ""}`)),
       locker: () => Effect.succeed(Effect.void)
     },
     holder,
@@ -296,6 +315,54 @@ describe.skipIf(!served)("the rig's collectors of a batch", () => {
     }))
     expect(events).not.toContain("collector collect")
     expect(events.slice(-4)).toEqual(["collector close", "collector closed", "sut stopped", "killed"])
+  })
+})
+
+describe.skipIf(!served)("the pre-checks of a batch", () => {
+  it("refuse a lane whose target is down before it stands anything, the pre-check's message the refusal's, the row's and the job's", async () => {
+    endingAs({})
+    const collectors = await labCollectors(false, "down")
+    const { refused, row, lines, said } = await withStore(Effect.gen(function*() {
+      const job = yield* jobOf
+      const jobEvents = yield* JobEvents.Service
+      const refused = yield* Effect.flip(LaneBatch.run({
+        lane: STANDS,
+        row: { jobId: job, lane: STANDS, cells: ["a"] },
+        stand,
+        collect,
+        collectors: { ...collectors, options: { ...collectors.options, sink: CollectorIo.sinkOf({ id: job, events: jobEvents }) } },
+        drive: driveOn(STANDS)
+      }))
+      const [row] = yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job))
+      const sql = yield* SqlClient
+      const lines = yield* sql<{ name: string; answer: string; message: string }>`
+        SELECT name, answer, message FROM verifications WHERE scope = 'batch' AND batch_id = ${row!.id} ORDER BY ordinal
+      `
+      const said = (yield* jobEvents.ofJob(job)).filter((event) => event.phase === "refused")
+      return { refused, row: row!, lines, said }
+    }))
+    expect(refused).toEqual(new LaneHosting.LaneUnready({ lane: STANDS, detail: TARGET_DOWN }))
+    expect(events).toEqual([])
+    expect(row.detail).toBe(TARGET_DOWN)
+    expect(lines).toEqual([{ name: "target-up", answer: "fail", message: TARGET_DOWN }])
+    expect(said.map((event) => [event.subject, event.message])).toEqual([["target-up", TARGET_DOWN]])
+  })
+
+  it("run before the lane stands where the target is up, their line the batch's beside the collectors'", async () => {
+    endingAs({})
+    const collectors = await labCollectors(false, "up")
+    const lines = await withStore(Effect.gen(function*() {
+      const job = yield* jobOf
+      yield* LaneBatch.run({ lane: STANDS, row: { jobId: job, lane: STANDS, cells: ["a"] }, stand, collectors, drive: driveOn(STANDS) })
+      const [row] = yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job))
+      const sql = yield* SqlClient
+      return yield* sql<{ name: string; answer: string }>`
+        SELECT name, answer FROM verifications WHERE scope = 'batch' AND batch_id = ${row!.id} ORDER BY ordinal
+      `
+    }))
+    expect(events.slice(0, 3)).toEqual(["collector collect", "collector collected", "batch stood for 2 cell(s), provisioned"])
+    expect(events.filter((event) => event === "collector open")).toHaveLength(1)
+    expect(lines.map((line) => `${line.name} ${line.answer}`)).toEqual(["target-up pass", "lab-check pass"])
   })
 })
 

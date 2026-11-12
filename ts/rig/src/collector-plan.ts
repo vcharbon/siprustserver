@@ -2,8 +2,9 @@
  * Which collectors run for a job and for a batch (ADR-0060 appendix §5), and
  * as which instances. A collector is wired on a lane that has every part it
  * needs and does not exclude it (`[collectors]`); the ones planned here run
- * after their scope's cells (`at = "after"`) and `always`, as a required one
- * does. Their parameters are the manifest's after the lane's overrides.
+ * `always`, as a required one does: those `at = "after"` over their scope's
+ * cells, the pre-checks (`at = "before"`, `pre-check.ts`) before any call of
+ * it. Their parameters are the manifest's after the lane's overrides.
  *
  * A batch runs one instance of each collector wired on its lane. A job runs
  * one instance of a job-scope collector that needs no part, over the cells of
@@ -30,9 +31,9 @@ const laneWiringOf = (lane: Lanes.Loaded) => {
   return Result.isSuccess(read) ? read.success : { exclude: [], overrides: new Map<string, Readonly<Record<string, unknown>>>() }
 }
 
-/** Whether `collector` runs on its own once its scope ended: `at = "after"`, and `always` or required. */
-const runsAfterAlways = (collector: Collector.Collector): boolean =>
-  (collector.at ?? "after") === "after" && (collector.required === true || (collector.default ?? "always") === "always")
+/** Whether `collector` runs on its own, before or after its scope's cells: `always` or required. */
+const runsAlways = (collector: Collector.Collector): boolean =>
+  collector.required === true || (collector.default ?? "always") === "always"
 
 /** Whether `defined` is wired on `lane`: the lane has every part it needs and does not exclude it. */
 export const isWiredOn = (defined: Defined, lane: Lanes.Loaded): boolean =>
@@ -42,7 +43,7 @@ export const isWiredOn = (defined: Defined, lane: Lanes.Loaded): boolean =>
 export const plannedOn = (rig: RigPath.RigPath, scope: Collector.Scope, lane: Lanes.Loaded): ReadonlyArray<Defined> =>
   CollectorOrder.ordered(
     [...rig.collectors.values()]
-      .filter((defined) => defined.manifest.scope === scope && runsAfterAlways(defined.manifest) && isWiredOn(defined, lane))
+      .filter((defined) => defined.manifest.scope === scope && runsAlways(defined.manifest) && isWiredOn(defined, lane))
   )
 
 /** `collector`'s parameters: its manifest's, each overridden where `lane` overrides it. */

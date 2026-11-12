@@ -1,7 +1,7 @@
 /**
  * Which collectors a batch and a job run: a batch one instance of each
- * collector of its scope wired on its lane (its parts present, not excluded),
- * `at = "after"` and `always`; a job one instance of a job-scope collector
+ * collector of its scope wired on its lane (its parts present, not excluded)
+ * and `always`, a pre-check as one `at = "after"`; a job one instance of a job-scope collector
  * per distinct set of the part files it needs, over the cells of the lanes
  * naming that set, and one over every lane where it needs none. Parameters
  * are the manifest's after the lane's overrides.
@@ -40,7 +40,7 @@ const wiring = (lane: Lanes.Loaded, collectors: Record<string, unknown>): Lanes.
 })
 
 describe("the collectors a batch runs", () => {
-  it("are those of batch scope wired on its lane, after its cells and always, by name", async () => {
+  it("are those of batch scope wired on its lane and always, pre-checks among them, by name", async () => {
     const rig = await samples()
     const withStore = CollectorPlan.batchPlanOf(rig, laneOf("a", { [STORE]: "targets/x.toml" }), "/b/collectors", "/b")
     const without = CollectorPlan.batchPlanOf(rig, laneOf("d"), "/b/collectors", "/b")
@@ -55,11 +55,14 @@ describe("the collectors a batch runs", () => {
       "locked",
       "lost-file",
       "not-json",
+      "pre-check",
+      "refusing-check",
       "slow-open",
       "stranger",
+      "unsure-check",
       "wrong-cell"
     ]
-    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 12), "tidy", "wrong-cell"])
+    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 14), "tidy", ...always.slice(14)])
     expect(without.map((instance) => instance.id)).toEqual(always)
     expect(withStore.find((instance) => instance.id === "tidy")).toMatchObject({
       label: "tidy",
@@ -94,7 +97,9 @@ describe("the collectors a job runs", () => {
     expect(planned.map((instance) => [instance.id, instance.label, instance.lane?.id, instance.lanes])).toEqual([
       ["job-plain", "job-plain", undefined, ["a", "b", "c", "d"]],
       ["job-wide-a", "job-wide for a", "a", ["a", "b"]],
-      ["job-wide-c", "job-wide for c", "c", ["c"]]
+      ["job-wide-c", "job-wide for c", "c", ["c"]],
+      ["required-check-a", "required-check for a", "a", ["a", "b"]],
+      ["required-check-c", "required-check for c", "c", ["c"]]
     ])
     expect(planned.every((instance) => instance.scope === "job" && instance.holder === "/j")).toBe(true)
   })
