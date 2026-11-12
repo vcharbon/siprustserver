@@ -68,6 +68,13 @@ export interface CellCollectors {
    * checkable` on its cell, saying `why`.
    */
   readonly joinedWithin: (ms: number, why: string) => Effect.Effect<ReadonlyArray<CollectorRun.Collected>>
+  /**
+   * What the cells' collectors that ended by now came to, by cell in the order
+   * the cells ran: their answers, or, where the batch's end interrupted them,
+   * `not checkable` on their cell. Read once a batch that failed ended, it
+   * answers for every cell that forked its collectors.
+   */
+  readonly settled: () => ReadonlyArray<CollectorRun.Collected>
   /** The labels of the instances whose `close` left the lab changed so far. */
   readonly leftChanged: () => ReadonlyArray<string>
 }
@@ -77,6 +84,7 @@ export const NONE: CellCollectors = {
   around: (_cell, run) => Effect.map(run, (value) => ({ value, held: Effect.void })),
   joined: Effect.succeed([]),
   joinedWithin: () => Effect.succeed([]),
+  settled: () => [],
   leftChanged: () => []
 }
 
@@ -213,5 +221,11 @@ export const make = (plan: CollectorPlan.CellPlan, options: CollectorRun.Options
         return all.flatMap((forked) => (late.includes(forked) ? notCheckableOf(forked.instances, forked.cell, why) : outcomeOf(forked, forked.fiber.pollUnsafe()!, INTERRUPTED)))
       })
 
-    return { around, joined, joinedWithin, leftChanged: () => [...left] } satisfies CellCollectors
+    const settled = () =>
+      forks.flatMap((forked) => {
+        const exit = forked.fiber.pollUnsafe()
+        return exit === undefined ? [] : outcomeOf(forked, exit, INTERRUPTED)
+      })
+
+    return { around, joined, joinedWithin, settled, leftChanged: () => [...left] } satisfies CellCollectors
   })

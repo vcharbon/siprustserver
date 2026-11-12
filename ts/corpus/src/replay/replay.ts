@@ -49,7 +49,7 @@
  * `planned` on the job, which is what a resume replays.
  */
 import { E2e } from "@sip/contracts"
-import type { CellCollectors } from "@sip/rig"
+import { CellCollectors, type CollectorRun } from "@sip/rig"
 import { runCell, settled } from "@sip/driver"
 import { perSecond, unpaced } from "@sip/driver/pace"
 import { Batches, Bundle, JobEvents, Jobs, Requests, RuleHits, Runs, Sweeps } from "@sip/store"
@@ -329,6 +329,9 @@ const interpreterEnv = (memoryMax: string, rowsDir: string | undefined) =>
  * batch after it are landed unrun, and its row closes `error`. A stop asked
  * for mid-batch admits no further cell, waits the stop's grace for the cells
  * in flight, then interrupts them; the batch's end runs as on any other.
+ * A batch that fails still merges what its cell-scope collectors answered
+ * into the landed cells whose rows closed, and `not checkable` where it cut
+ * them short, so no such cell passes unanswered.
  * The batch's row names the cells it drives, the materialised ones; a
  * batch with none files no row.
  */
@@ -467,6 +470,12 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
     })
 
   const collectors = cells.length === 0 ? undefined : yield* collectorsOf(request, () => ranCells)
+  const answeredOf = (collected: ReadonlyArray<CollectorRun.Collected>) => {
+    for (const pending of CollectedCells.pendingOf(collected, ranCells)) {
+      [...tallies.values()].find((tally) => tally.run.id === pending.runId)!.answered.push(pending)
+    }
+  }
+  let ofCells = CellCollectors.NONE
   const ended = yield* LaneBatch.run({
     lane: options.lane,
     ...(cells.length === 0 ? {} : { row: { ...request.owner, lane: options.lane, cells: cells.map(cellName) } }),
@@ -476,11 +485,19 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
     ...(request.host === undefined ? {} : { host: request.host }),
     ...(request.sut === undefined ? {} : { sut: request.sut }),
     ...(collectors === undefined ? {} : { collectors }),
-    drive: ({ host, cells: cellCollectors }) => driveAll(host, cellCollectors)
-  })
-  for (const pending of CollectedCells.pendingOf(ended.collected, ranCells)) {
-    [...tallies.values()].find((tally) => tally.run.id === pending.runId)!.answered.push(pending)
-  }
+    drive: ({ host, cells: cellCollectors }) => {
+      ofCells = cellCollectors
+      return driveAll(host, cellCollectors)
+    }
+  }).pipe(
+    Effect.tapCause(() =>
+      Effect.suspend(() => {
+        answeredOf(ofCells.settled())
+        return Effect.forEach(new Set(driven.map((ref) => tallyOf(ref.capture))), mergeAnswered, { discard: true })
+      })
+    )
+  )
+  answeredOf(ended.collected)
   const { deadHost, contexts, interrupted } = ended
   const dirty = [ended.dirty, LaneBatch.leftChangedOf(ended)].filter((said) => said !== undefined).join("; ") || undefined
   if (deadHost !== undefined) yield* Console.error(`[replay] ${deadHost}`)
