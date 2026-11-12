@@ -10,7 +10,7 @@
  * `collect_s` among them after the cell ended: past it every one answers `not
  * checkable` on the cell, saying so, and the scope closes. A cell one of whose
  * collectors `holds_cell_locks` keeps its own named locks until its
- * collectors answered or reached that deadline ({@link Ran.held}). The batch
+ * collectors answered or reached that deadline, and closed ({@link Ran.held}). The batch
  * joins every cell's collectors before it reads its end
  * ({@link CellCollectors.joined}); a batch that ends otherwise interrupts
  * them, and their `close` still runs.
@@ -37,7 +37,7 @@ export interface Ran<A> {
   /**
    * Resolves once the cell's own named locks may be given back: at once, or,
    * where one of its collectors `holds_cell_locks`, once its collectors
-   * answered or reached their deadline.
+   * answered or reached their deadline, and closed.
    */
   readonly held: Effect.Effect<void>
 }
@@ -177,8 +177,8 @@ export const make = (plan: CollectorPlan.CellPlan, options: CollectorRun.Options
               : Effect.as(Effect.forEach(instances, (instance) => say(options.sink, instance.label, "failed", late), { discard: true }), notCheckableOf(instances, cell, late))
           ),
           Effect.catchDefect((defect) => Effect.succeed(notCheckableOf(instances, cell, `its collectors died: ${errorText(defect)}`))),
-          Effect.ensuring(Deferred.succeed(answered, undefined)),
-          Effect.ensuring(Effect.andThen(Scope.close(scope, Exit.void), Effect.sync(() => void left.push(...opened.leftChanged()))))
+          Effect.ensuring(Effect.andThen(Scope.close(scope, Exit.void), Effect.sync(() => void left.push(...opened.leftChanged())))),
+          Effect.ensuring(Deferred.succeed(answered, undefined))
         )
         forks.push(yield* Effect.forkIn(work, batch))
         const holds = instances.some((instance) => instance.collector.manifest.holds_cell_locks === true)
