@@ -7,7 +7,8 @@
  * {@link check} runs before a job opens and refuses, naming the file, a level
  * or a lane that names a collector the path does not define, a level that sets
  * a `required` collector or a lane that excludes one, a level that sets a
- * pre-check `on-failure`, and a lane override of a
+ * pre-check `on-failure`, a level that sets an on-demand pre-check (one a job
+ * asks for by name) `never` or a lane that excludes one, and a lane override of a
  * key the collector's manifest does not offer or of another type than the
  * manifest's value. A lane may tune a required collector's parameters: that
  * does not switch it off.
@@ -159,6 +160,9 @@ export const overridableOf = (collector: Collector.Collector): ReadonlyMap<strin
     ...(collector.scope === "cell" ? [["delay_s", "number"] as const] : [])
   ])
 
+/** Whether `collector` is a pre-check that runs where a job asks for it by name: `at = "before"`, its default `on-demand`. */
+const isAskablePreCheck = (collector: Collector.Collector): boolean => collector.at === "before" && collector.default === "on-demand"
+
 const isNames = (value: ReadonlyArray<string> | Readonly<Record<string, unknown>>): value is ReadonlyArray<string> =>
   Array.isArray(value)
 
@@ -174,6 +178,9 @@ const checkLevel = (rig: RigPath, file: string, name: string, level: Level): Ref
       }
       if (setting === "on-failure" && defined.manifest.at === "before") {
         return refuse([file, defined.file], `${at}: names ${collector}, a pre-check, which runs before any cell failed`)
+      }
+      if (setting === "never" && isAskablePreCheck(defined.manifest)) {
+        return refuse([file, defined.file], `${at}: names ${collector}, an on-demand pre-check, which runs whenever a job asks for it`)
       }
       const earlier = seen.get(collector)
       if (earlier !== undefined) return refuse([file], `${at}: names ${collector}, which collection.${name}.${earlier} names too`)
@@ -206,6 +213,9 @@ const checkLane = (rig: RigPath, lane: LaneWiring): Refusal | undefined => {
     if (defined === undefined) return refuse([lane.file], `${at}: names ${name}, which no collector of the path defines`)
     if (Collector.isRequired(defined.manifest)) {
       return refuse([lane.file, defined.file], `${at}: names ${name}, a required collector no lane excludes`)
+    }
+    if (isAskablePreCheck(defined.manifest)) {
+      return refuse([lane.file, defined.file], `${at}: names ${name}, an on-demand pre-check, which runs whenever a job asks for it`)
     }
   }
   for (const [name, overrides] of read.success.overrides) {

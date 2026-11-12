@@ -93,7 +93,7 @@ export interface Instance {
   readonly holder: string
   /** The judge its manifest names, as the path defines it; none judges its records where absent. */
   readonly judge?: RigPath.Defined<Judge.Judge> | undefined
-  /** An `on-demand` collector its scope asked for by name; a pre-check so asked never fails open (`pre-check.ts`). */
+  /** A collector its scope asked for by name, whatever the level sets it; a pre-check so asked never fails open (`pre-check.ts`). */
   readonly asked?: true
   /**
    * Set `on-failure`: its `collect` runs after every other instance's of its

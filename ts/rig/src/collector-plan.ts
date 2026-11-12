@@ -7,7 +7,8 @@
  * where `at = "after"` and before any call of it where a pre-check
  * (`at = "before"`, `pre-check.ts`); and those set `on-failure` and
  * `at = "after"`, run over the failed cells alone. A job also runs each
- * job-scope collector set `on-demand` that it asks for by name, marked asked.
+ * job-scope collector it asks for by name, marked asked, whatever the level
+ * sets it: a level cannot switch off what the job asks for.
  * Their parameters are the manifest's after the lane's overrides.
  *
  * A batch runs one instance of each collector wired on its lane. A job runs
@@ -53,9 +54,8 @@ const runsOnItsOwn = (collector: Collector.Collector, settings: Collection.Setti
 export const isWiredOn = (defined: Defined, lane: Lanes.Loaded): boolean =>
   (defined.manifest.needs ?? []).every((kind) => lane.parts.has(kind)) && !laneWiringOf(lane).exclude.includes(defined.name)
 
-/** Whether `defined` runs because its scope asked for it: set `on-demand` under `settings` and named in `asked`. */
-const isAsked = (defined: Defined, asked: ReadonlyArray<string>, settings: Collection.Settings): boolean =>
-  settings(defined.manifest) === "on-demand" && asked.includes(defined.name)
+/** Whether `defined` runs because its scope asked for it: named in `asked`, whatever the level sets it. */
+const isAsked = (defined: Defined, asked: ReadonlyArray<string>): boolean => asked.includes(defined.name)
 
 /**
  * The collectors of `scope` planned on `lane` under `settings`, in the order
@@ -73,7 +73,7 @@ export const plannedOn = (
     [...rig.collectors.values()]
       .filter((defined) =>
         defined.manifest.scope === scope &&
-        (runsOnItsOwn(defined.manifest, settings) || isAsked(defined, asked, settings)) &&
+        (runsOnItsOwn(defined.manifest, settings) || isAsked(defined, asked)) &&
         isWiredOn(defined, lane)
       )
   )
@@ -140,7 +140,8 @@ export const jobPlanOf = (
   for (const defined of CollectorOrder.ordered([...names].map((name) => rig.collectors.get(name)!))) {
     const name = defined.name
     const needs = defined.manifest.needs ?? []
-    const onFailure = settings(defined.manifest) === "on-failure"
+    const isAskedFor = isAsked(defined, asked)
+    const onFailure = !isAskedFor && settings(defined.manifest) === "on-failure"
     const groups = new Map<string, Array<Lanes.Loaded>>()
     for (const lane of lanes.filter((lane) => isWiredOn(defined, lane))) {
       const key = needs.map((kind) => lane.parts.get(kind)!.file).join("\n")
@@ -151,7 +152,7 @@ export const jobPlanOf = (
       const id = first === undefined ? name : `${name}-${first.id}`
       const label = first === undefined ? name : `${name} for ${first.id}`
       const instance = instanceOf(defined, id, label, "job", first, group.map((lane) => lane.id), root, holder, rig, onFailure)
-      planned.push(isAsked(defined, asked, settings) ? { ...instance, asked: true } : instance)
+      planned.push(isAskedFor ? { ...instance, asked: true } : instance)
     }
   }
   return planned
