@@ -57,6 +57,8 @@ describe("the collectors a batch runs", () => {
       "fails-c2",
       "flaky-close",
       "hanging-collect",
+      "informative-failing",
+      "informative-noting",
       "leaves-process",
       "locked",
       "lost-file",
@@ -74,7 +76,7 @@ describe("the collectors a batch runs", () => {
       "unsure-check",
       "wrong-cell"
     ]
-    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 21), "tidy", ...always.slice(21)])
+    expect(withStore.map((instance) => instance.id)).toEqual([...always.slice(0, 23), "tidy", ...always.slice(23)])
     expect(without.map((instance) => instance.id)).toEqual(always)
     expect(without.filter((instance) => instance.onFailure === true).map((instance) => instance.id)).toEqual(["on-failure", "on-failure-promising"])
     expect(withStore.find((instance) => instance.id === "tidy")).toMatchObject({
