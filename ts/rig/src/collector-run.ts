@@ -175,6 +175,8 @@ interface Opening {
   start: Context.Context["window"]["start"]
   /** Where its collect's window ends; undefined, the instant it collects. */
   readonly end: Cell.Instant | undefined
+  /** The cells its scope is to run, stated in each of its contexts; none where the runner states none. */
+  readonly planned: ReadonlyArray<Context.Planned> | undefined
   /** Set once it went past its scope's locks; its `close` runs then. */
   closes: boolean
   /** Why it did not open; its `collect` does not run and its verifications are not checkable. */
@@ -215,17 +217,22 @@ const writeContext = (instance: Instance, context: Omit<Context.Context, "schema
   fs.writeFileSync(layoutOf(instance).context, `${JSON.stringify(written, null, 2)}\n`)
 }
 
-/** `instance`'s directory emptied and laid out, its context written with no cell and its window opening at `start`. */
-const layOut = (instance: Instance, start: Context.Context["window"]["start"]) =>
+/** `opening`'s cells planned, as its contexts state them; nothing where there are none. */
+const plannedOf = (opening: Opening): Pick<Context.Context, "planned"> =>
+  opening.planned === undefined ? {} : { planned: opening.planned }
+
+/** `opening`'s directory emptied and laid out, its context written with no cell, its planned ones, and its window opening at its start. */
+const layOut = (opening: Opening) =>
   Effect.try({
     try: () => {
+      const { instance } = opening
       const layout = layoutOf(instance)
       fs.rmSync(instance.dir, { recursive: true, force: true })
       fs.mkdirSync(layout.state, { recursive: true })
       fs.mkdirSync(layout.out, { recursive: true })
-      writeContext(instance, { window: { start }, cells: [] })
+      writeContext(instance, { window: { start: opening.start }, cells: [], ...plannedOf(opening) })
     },
-    catch: (cause) => `its directory ${instance.dir} not laid out: ${errorText(cause)}`
+    catch: (cause) => `its directory ${opening.instance.dir} not laid out: ${errorText(cause)}`
   })
 
 /** The last line of `file` that says something, at most 300 characters of it; `undefined` where none does. */
@@ -283,7 +290,7 @@ const openOne = (
       return
     }
     opening.closes = true
-    const laid = yield* Effect.result(layOut(instance, opening.start))
+    const laid = yield* Effect.result(layOut(opening))
     if (Result.isFailure(laid)) {
       opening.failure = laid.failure
       yield* emit(options.sink, instance, "failed", `open not run: ${laid.failure}`)
@@ -464,7 +471,7 @@ const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell
     const laid = yield* Effect.result(Effect.try({
       try: () => {
         fs.rmSync(path.join(layoutOf(instance).out, Lines.OUT_FILE), { force: true })
-        writeContext(instance, { window: { start: opening.start, end }, cells })
+        writeContext(instance, { window: { start: opening.start, end }, cells, ...plannedOf(opening) })
       },
       catch: (cause) => `collect not run: its context not written: ${errorText(cause)}`
     }))
@@ -650,6 +657,8 @@ export interface Options {
    * checkable` and the next one collects. None where absent.
    */
   readonly due?: ((instance: Instance) => Effect.Effect<void>) | undefined
+  /** The cells the scope is to run, which every step's context states (`planned`); none stated where absent. */
+  readonly planned?: ReadonlyArray<Context.Planned> | undefined
 }
 
 /**
@@ -690,6 +699,7 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
           instance,
           start: options.window?.start ?? { lane_ms: at.clock_ms, wall_ms: at.wall_ms },
           end: options.window?.end,
+          planned: options.planned,
           closes: false,
           failure: undefined
         }

@@ -10,6 +10,7 @@
 import * as Effect from "effect/Effect"
 import type * as Cell from "./cell.js"
 import * as CollectorRun from "./collector-run.js"
+import type * as Context from "./context.js"
 
 /** What an on-demand run came to. */
 export interface Ran {
@@ -32,7 +33,21 @@ export const windowOf = (
   }
 }
 
-/** `instances` opened, collected over `over` and closed, as one scope whose window is the one `over`'s cells ran in. */
+/** `cells` as an on-demand scope's contexts state them planned: the cells it reads, known before it opens. */
+export const plannedOf = (cells: ReadonlyArray<Cell.Cell>): ReadonlyArray<Context.Planned> =>
+  cells.map((cell) => ({
+    id: cell.id,
+    case: cell.case,
+    ...(cell.sub_case === undefined ? {} : { sub_case: cell.sub_case }),
+    lane: cell.lane,
+    claims: cell.claims
+  }))
+
+/**
+ * `instances` opened, collected over `over` and closed, as one scope whose
+ * window is the one `over`'s cells ran in and whose every context states
+ * `over`'s cells planned.
+ */
 export const run = (
   instances: ReadonlyArray<CollectorRun.Instance>,
   over: CollectorRun.Over,
@@ -40,8 +55,9 @@ export const run = (
 ): Effect.Effect<Ran> =>
   Effect.gen(function*() {
     let opened: CollectorRun.Opened | undefined
+    const scoped = { ...options, window: windowOf(over.cells), planned: plannedOf(over.cells) }
     const collected = yield* Effect.scoped(
-      Effect.flatMap(CollectorRun.opened(instances, { ...options, window: windowOf(over.cells) }), (scope) => {
+      Effect.flatMap(CollectorRun.opened(instances, scoped), (scope) => {
         opened = scope
         return scope.collect(over)
       })

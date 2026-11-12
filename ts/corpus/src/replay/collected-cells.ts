@@ -35,6 +35,8 @@ export interface LandedCell {
   readonly verifications?: ReadonlyArray<Verification.Verification>
   /** Whether the cell's own outcome, as the caller knows it by then, is a failure or an error: an `on-failure` collector reads it. */
   readonly failed?: boolean
+  /** The claims its case source states beside its document (ADR-0060 appendix §4); none where absent. */
+  readonly claims?: Readonly<Record<string, unknown>>
 }
 
 /** What the collectors answered of one landed cell, merged once its run row closed. */
@@ -64,6 +66,7 @@ export const describe = (
         lane: cell.lane,
         batch,
         attempt: cell.attempt ?? 1,
+        claims: cell.claims,
         ...(cell.verifications === undefined ? {} : { verifications: cell.verifications })
       }).pipe(
         Effect.map((described): Result.Result<Cell.Cell, CollectorRun.Unread> => Result.succeed(described)),

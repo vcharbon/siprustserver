@@ -1,7 +1,8 @@
 /**
  * The file `SIPRIG_CONTEXT` names (ADR-0060 appendix §2): what a collector,
  * judge or operation executable reads of the scope it runs for. The scope and
- * its window, the cells in `cell.v1`, its parameters after the lane's
+ * its window, the cells in `cell.v1`, the cells it is to run where its runner
+ * states them, its parameters after the lane's
  * overrides, and the lane: its name and clock, its `[sip]` and `[backend]`
  * blocks as the base read them, and its parts; a judge's, what it judges. A
  * plug-in reads the lane's target and backend here rather than from a part
@@ -53,11 +54,28 @@ export const Judging = Schema.Struct({
 })
 export interface Judging extends Schema.Schema.Type<typeof Judging> {}
 
+/**
+ * A cell as its scope knows it before it runs (ADR-0060 appendix §5): its
+ * identity and the claims its case states. An `open` reads the cells it
+ * prepares the lab for here, `cells` being empty until the scope ended.
+ */
+export const Planned = Schema.Struct({
+  id: Schema.String,
+  case: Schema.String,
+  sub_case: Schema.optionalKey(Schema.String),
+  lane: Schema.String,
+  /** Per collector name, what the case expects of it. */
+  claims: Schema.Record(Schema.String, Schema.Unknown)
+})
+export interface Planned extends Schema.Schema.Type<typeof Planned> {}
+
 export const Context = Schema.Struct({
   schema: Schema.Literal(SCHEMA),
   scope: Schema.Literals(["job", "batch", "cell"]),
   window: Schema.Struct({ start: Instant, end: Schema.optionalKey(Instant) }),
   cells: Schema.Array(Cell),
+  /** The cells the scope is to run, in every step's context, where its runner states them. */
+  planned: Schema.optionalKey(Schema.Array(Planned)),
   lane: Schema.optionalKey(LaneContext),
   params: Schema.Record(Schema.String, Schema.Unknown),
   /** A judge's context only. */

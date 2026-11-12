@@ -29,7 +29,7 @@ An executable runs with its own directory as working directory and these variabl
 
 | Variable | Names |
 |---|---|
-| `SIPRIG_CONTEXT` | a JSON file it reads (`context.v1`): the scope, its window, the cells (item 6), the lane (its name, clock, SIP target and backend, as the base reads them) and its parts, its parameters |
+| `SIPRIG_CONTEXT` | a JSON file it reads (`context.v1`): the scope, its window, the cells (item 6) and those it is to run (§5), the lane (its name, clock, SIP target and backend, as the base reads them) and its parts, its parameters |
 | `SIPRIG_OUT` | a directory it writes attachment files into |
 | `SIPRIG_STATE` | a directory kept from `open` to `close` of one scope, or from `inject` to `heal`; an `open` or `inject` finds it empty and its context fresh |
 | `SIPRIG_STEP` | the step it runs as (`open`, `collect`, `close`, `inject`, `heal`, `probe`, `judge`), so one file may serve several |
@@ -146,6 +146,10 @@ Rules:
 
 - In a job, `open` and `close` run whenever the collector is wired and set `always` or
   `on-failure`.
+- `open` reads no cell (`cells` is empty until the scope ended). Where the runner knows the
+  cells the scope is to run (an on-demand scope's are those named), every step's context states
+  them as `planned`: `id`, `case`, `sub_case`, `lane` and the `claims` the runner knows. A
+  collector that prepares the lab for each cell reads them there.
 - `on-failure` is read when `collect` would run, after every other collector of the scope
   collected, unless one of them names it in its `after`: the collector runs if a cell of its
   scope failed by then (its own outcome a failure or an error, as the base states it when it

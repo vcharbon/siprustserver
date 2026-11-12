@@ -123,6 +123,56 @@ describe("a scope's collectors", () => {
     expect(collected.cells.map((cell: Cell.Cell) => cell.id)).toEqual(["c1", "c2"])
     expect(collected.window.start).toEqual(opened.window.start)
     expect(collected.window.end.wall_ms).toBeGreaterThanOrEqual(opened.window.start.wall_ms)
+    expect(opened.planned).toBeUndefined()
+  })
+
+  it("states the cells its runner plans, with their claims, in the open and the collect context alike", async () => {
+    const { root, rig } = await samples()
+    const planned = [
+      { id: "c1", case: "case-1", lane: LANE.id, claims: { stub: { answers: ["a"] } } },
+      { id: "c2", case: "case-2", sub_case: "b", lane: LANE.id, claims: {} }
+    ]
+    await runScope([instanceOf(rig, root, "tidy")], cellsUnder(root), { sink: () => Effect.void, locker: memoryLocker(), planned })
+    const opened = JSON.parse(fs.readFileSync(path.join(root, "open-context.json"), "utf8"))
+    const collected = JSON.parse(fs.readFileSync(path.join(root, "collect-context.json"), "utf8"))
+    expect(opened.cells).toEqual([])
+    expect(opened.planned).toEqual(planned)
+    expect(collected.planned).toEqual(planned)
+  })
+
+  it("states the planned cells in an on-failure collector's collect context, over the failed cells alone", async () => {
+    const { root, rig } = await samples()
+    const planned = [
+      { id: "c1", case: "case-c1", lane: LANE.id, claims: {} },
+      { id: "c2", case: "case-c2", lane: LANE.id, claims: { stub: { answers: ["b"] } } }
+    ]
+    const onFailure = { ...instanceOf(rig, root, "tidy"), onFailure: true }
+    await Effect.runPromise(Effect.scoped(Effect.flatMap(
+      CollectorRun.opened([onFailure], { sink: () => Effect.void, locker: memoryLocker(), planned }),
+      (opened) => opened.collect({ cells: cellsUnder(root), unread: [], failed: ["c2"] })
+    )))
+    const collected = JSON.parse(fs.readFileSync(path.join(root, "collect-context.json"), "utf8"))
+    expect(collected.cells.map((cell: Cell.Cell) => cell.id)).toEqual(["c2"])
+    expect(collected.planned).toEqual(planned)
+  })
+
+  it("states an on-demand scope's cells planned, with their claims, in its open and collect context", async () => {
+    const { root, rig } = await samples()
+    const [c1, c2] = cellsUnder(root)
+    const claimed = { ...c2!, sub_case: "b", claims: { stub: { answers: ["b"] } } }
+    await Effect.runPromise(CollectorOnDemand.run(
+      [instanceOf(rig, root, "tidy")],
+      { cells: [c1!, claimed], unread: [], failed: [] },
+      { sink: () => Effect.void, locker: memoryLocker() }
+    ))
+    const planned = [
+      { id: "c1", case: "case-c1", lane: LANE.id, claims: {} },
+      { id: "c2", case: "case-c2", sub_case: "b", lane: LANE.id, claims: { stub: { answers: ["b"] } } }
+    ]
+    const opened = JSON.parse(fs.readFileSync(path.join(root, "open-context.json"), "utf8"))
+    const collected = JSON.parse(fs.readFileSync(path.join(root, "collect-context.json"), "utf8"))
+    expect(opened.planned).toEqual(planned)
+    expect(collected.planned).toEqual(planned)
   })
 
   it("reads its lines from stdout and SIPRIG_OUT: each cell's verification, attachment and key, the scope's line, a record", async () => {
