@@ -45,7 +45,12 @@ const cellCollector = (name: string, extra: string, steps: { readonly open?: str
 /** The line a collect prints that names no cell: its scope's own, which is its one cell's. */
 const PASS = (name: string) => `echo '{"verification": "${name}", "answer": "pass"}'`
 
+/** A collect that answers `name` pass once the file `<name>-go` is in the rig's root, waiting for it until then. */
+const RELEASED = (name: string) => `while [ ! -e ../../${name}-go ]; do sleep 0.01; done\n${PASS(name)}`
+
 const SAMPLES = {
+  ...cellCollector("alpha", "delay_s = 10\n[timeouts]\ncollect_s = 10", { collect: RELEASED("alpha") }),
+  ...cellCollector("beta", "[timeouts]\ncollect_s = 10", { collect: RELEASED("beta") }),
   ...cellCollector("delayed", "delay_s = 10", { collect: PASS("delayed") }),
   ...cellCollector("holding", "delay_s = 10\nholds_cell_locks = true", { collect: PASS("holding") }),
   ...cellCollector("bracketed", "", { open: "exit 0", collect: PASS("bracketed"), close: "exit 0" }),
@@ -170,6 +175,45 @@ describe("a batch's cell-scope collectors", () => {
     ])
     expect(said()).toContain(`4000 failed hanging of c1`)
     expect(traceOf(root)).toEqual(["collect hanging", "close hanging"])
+  })
+
+  /**
+   * The cell `c1`, its call of 1 s, collected by `alpha` (due 10 s after it,
+   * released at 16 s) then `beta` (due at once, released at `betaAt` where
+   * given, never where not), each with a `collect_s` of 10: what each answered
+   * of it, and when `beta` failed where it did.
+   */
+  const inSequence = async (betaAt: number | undefined) => {
+    const { root, rig } = await rigWith("alpha", "beta")
+    const plan = CollectorPlan.cellPlanOf(rig, REAL, path.join(root, "_cells"))
+    const { said, sink } = collecting()
+    const release = (name: string, at: number) =>
+      Effect.forkChild(Effect.andThen(Effect.sleep(at), Effect.sync(() => fs.writeFileSync(path.join(root, `${name}-go`), ""))))
+    const collected = await onFakeClock(Effect.scoped(Effect.gen(function*() {
+      yield* release("alpha", 16_000)
+      if (betaAt !== undefined) yield* release("beta", betaAt)
+      const cells = yield* CellCollectors.make(plan, { sink, locker: memoryLocker() })
+      yield* cells.around("c1", call(1000), () => Effect.succeed(overOf(root, "c1")))
+      return yield* cells.joined
+    })))
+    return {
+      answers: collected.map((one) => `${one.label}: ${one.cells.get("c1")?.verifications.map((line) => line.answer).join(",")}`),
+      failed: said().filter((line) => line.includes(" failed "))
+    }
+  }
+
+  it("give each collector collect_s from when it was due or the one before it answered: a later one past the first's deadline still answers", async () => {
+    const { answers, failed } = await inSequence(22_000)
+    expect(answers).toEqual(["alpha of c1: pass", "beta of c1: pass"])
+    expect(failed).toEqual([])
+  })
+
+  it("keep what a collector answered where the one after it reaches its own deadline", async () => {
+    const { answers, failed } = await inSequence(undefined)
+    expect(answers).toEqual(["alpha of c1: pass", "beta of c1: not-checkable"])
+    expect(failed).toHaveLength(1)
+    expect(Number(failed[0]!.split(" ")[0])).toBeGreaterThanOrEqual(26_000)
+    expect(Number(failed[0]!.split(" ")[0])).toBeLessThan(28_000)
   })
 
   it("close a cell's collectors and fail where its call fails", async () => {
