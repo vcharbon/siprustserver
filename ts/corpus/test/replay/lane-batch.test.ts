@@ -16,7 +16,8 @@
  * attachment of it the batch's; one whose collect exits non-zero answers
  * every cell and the batch not checkable with its message; a batch whose
  * cells fail still closes them. Its pre-checks run before the lane stands:
- * one that fails refuses the batch with its message, on the row and the job;
+ * one that fails refuses the batch with its message, on the row and the job,
+ * the row and the refusal also saying where its close left the lab changed;
  * a batch interrupted while they run still closes its row.
  *
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
@@ -157,20 +158,26 @@ const script = (dir: string, name: string, body: string) => {
  * the batch and attaches a log to the batch, or, `failing`, says why on its
  * stderr and exits 3. The batch's collectors with it, its events in `events`.
  */
-const labCollectors = async (failing: boolean, target?: "up" | "down" | "slow"): Promise<LaneBatch.Collectors<string, never>> => {
+const labCollectors = async (
+  failing: boolean,
+  target?: "up" | "down" | "down-left-changed" | "slow"
+): Promise<LaneBatch.Collectors<string, never>> => {
   const root = fs.mkdtempSync(path.join(TREE, "rig-"))
   const dir = path.join(root, "collectors", "lab")
   fs.mkdirSync(dir, { recursive: true })
   const check = path.join(root, "collectors", "target-up")
   fs.mkdirSync(check, { recursive: true })
+  const leftChanged = target === "down-left-changed"
   fs.writeFileSync(
     path.join(check, "collector.toml"),
-    `schema = "collector.v1"\nname = "target-up"\nscope = "batch"\nat = "before"\n[run]\ncollect = "./collect"\n`
+    `schema = "collector.v1"\nname = "target-up"\nscope = "batch"\nat = "before"\n[run]\ncollect = "./collect"\n` +
+      (leftChanged ? `close = "./close"\n` : "")
   )
+  if (leftChanged) script(check, "close", "exit 1")
   script(
     check,
     "collect",
-    target === "down"
+    target === "down" || leftChanged
       ? `echo '{"verification":"target-up","answer":"fail","message":"${TARGET_DOWN}"}'`
       : target === "slow"
       ? "sleep 30"
@@ -350,6 +357,23 @@ describe.skipIf(!served)("the pre-checks of a batch", () => {
     expect(row.detail).toBe(TARGET_DOWN)
     expect(lines).toEqual([{ name: "target-up", answer: "fail", message: TARGET_DOWN }])
     expect(said.map((event) => [event.subject, event.message])).toEqual([["target-up", TARGET_DOWN]])
+  })
+
+  it("say on the refused batch's row and refusal that a refusing pre-check's close left the lab changed", async () => {
+    endingAs({})
+    const collectors = await labCollectors(false, "down-left-changed")
+    const { refused, row } = await withStore(Effect.gen(function*() {
+      const job = yield* jobOf
+      const refused = yield* Effect.flip(
+        LaneBatch.run({ lane: STANDS, row: { jobId: job, lane: STANDS, cells: ["a"] }, stand, collectors, drive: driveOn(STANDS) })
+      )
+      const [row] = yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job))
+      return { refused, row: row! }
+    }))
+    const detail = `${TARGET_DOWN}; the collector target-up left the lab changed`
+    expect(refused).toEqual(new LaneHosting.LaneUnready({ lane: STANDS, detail }))
+    expect(row.detail).toBe(detail)
+    expect(events.filter((event) => event.startsWith("batch") || event.startsWith("sut"))).toEqual([])
   })
 
   it("run before the lane stands where the target is up, their line the batch's beside the collectors'", async () => {

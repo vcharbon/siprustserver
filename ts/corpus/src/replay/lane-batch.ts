@@ -234,7 +234,7 @@ export const run = <A, E, R, EC = never, RO = never, RC = never>(
     const row = request.row
     if (row === undefined) {
       const outcome = yield* checkedThenStood(request)
-      return outcome._tag === "Refused" ? yield* unready(outcome.refusal) : outcome.ended
+      return outcome._tag === "Refused" ? yield* unready(refusedDetailOf(outcome)) : outcome.ended
     }
     const batches = yield* Batches.Service
     return yield* Effect.uninterruptibleMask((restore) =>
@@ -244,9 +244,10 @@ export const run = <A, E, R, EC = never, RO = never, RC = never>(
           Effect.onExit((exit) => Exit.isSuccess(exit) ? Effect.void : Effect.ignore(batches.close(id, failureOf(exit.cause))))
         )
         if (outcome._tag === "Refused") {
-          yield* batches.close(id, outcome.refusal, outcome.answers.verifications)
+          const detail = refusedDetailOf(outcome)
+          yield* batches.close(id, detail, outcome.answers.verifications)
           yield* attach(request.collectors, id, outcome.answers.attachments)
-          return yield* unready(outcome.refusal)
+          return yield* unready(detail)
         }
         const ended = outcome.ended
         const answered = scopeAnswersOf(ended.collected)
@@ -265,7 +266,9 @@ export const run = <A, E, R, EC = never, RO = never, RC = never>(
 const checkedThenStood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
   Effect.gen(function*() {
     const checked = yield* preChecked(request.collectors)
-    if (checked.refusal !== undefined) return { _tag: "Refused" as const, refusal: checked.refusal, answers: checked.answers }
+    if (checked.refusal !== undefined) {
+      return { _tag: "Refused" as const, refusal: checked.refusal, answers: checked.answers, leftChanged: checked.leftChanged }
+    }
     const { ended, opened } = yield* Effect.scoped(stood(request))
     return {
       _tag: "Ended" as const,
@@ -276,6 +279,12 @@ const checkedThenStood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO,
       } satisfies Ended<A>
     }
   })
+
+/** What a batch its pre-checks refused states: the refusal, then each pre-check whose `close` left the lab changed. */
+const refusedDetailOf = (refused: { readonly refusal: string; readonly leftChanged: ReadonlyArray<string> }): string => {
+  const left = leftChangedOf(refused)
+  return left === undefined ? refused.refusal : `${refused.refusal}; ${left}`
+}
 
 /** A batch's rig collectors, what runs them and holds what they attach, its cells aside. */
 type RigOf = Pick<Collectors<unknown, never>, "instances" | "options" | "holder"> | undefined
