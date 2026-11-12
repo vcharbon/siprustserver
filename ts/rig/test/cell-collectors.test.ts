@@ -5,8 +5,9 @@
  * per cell; a cell whose collector `holds_cell_locks` keeps its locks until
  * they answered; a collector past its deadline answers `not checkable` and
  * still closes; a cell a collector did not collect (its collect failed or
- * late) is left unverified, its judge not run; a simulated lane runs none and
- * says so of each wired one.
+ * late) is left unverified, its judge not run; each step's context states its
+ * own cell alone planned; a simulated lane runs none and says so of each
+ * wired one.
  */
 import { Verification } from "@sip/contracts"
 import * as Clock from "effect/Clock"
@@ -51,7 +52,22 @@ const PASS = (name: string) => `echo '{"verification": "${name}", "answer": "pas
 /** A collect that answers `name` pass once the file `<name>-go` is in the rig's root, waiting for it until then. */
 const RELEASED = (name: string) => `while [ ! -e ../../${name}-go ]; do sleep 0.01; done\n${PASS(name)}`
 
+/** A step of the cell collector `planning` tracing, as `<step> planning <ids>`, the ids of the cells its context states planned; its collect answers pass. */
+const plannedTraced = (step: "open" | "collect"): Entry => ({
+  text: `#!/usr/bin/env node
+const fs = require("node:fs")
+const ctx = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
+fs.appendFileSync("../../trace", "${step} planning " + (ctx.planned ?? []).map((one) => one.id).join(",") + "\\n")
+if ("${step}" === "collect") console.log(JSON.stringify({ verification: "planning", answer: "pass" }))
+`,
+  executable: true
+})
+
 const SAMPLES: Readonly<Record<string, Entry>> = {
+  "collectors/planning/collector.toml":
+    `schema = "collector.v1"\nname = "planning"\nscope = "cell"\nanswers = ["planning"]\n[run]\nopen = "./open"\ncollect = "./collect"\n`,
+  "collectors/planning/open": plannedTraced("open"),
+  "collectors/planning/collect": plannedTraced("collect"),
   ...cellCollector("alpha", "delay_s = 10\n[timeouts]\ncollect_s = 10", { collect: RELEASED("alpha") }),
   ...cellCollector("beta", "[timeouts]\ncollect_s = 10", { collect: RELEASED("beta") }),
   ...cellCollector("delayed", "delay_s = 10", { collect: PASS("delayed") }),
@@ -174,6 +190,18 @@ describe("a batch's cell-scope collectors", () => {
     expect(collected.map((one) => ({ scope: one.scope.verifications, c1: one.cells.get("c1")?.verifications }))).toEqual([
       { scope: [], c1: [{ name: "bracketed", source: "bracketed", answer: "pass" }] }
     ])
+  })
+
+  it("state their own cell alone as planned in each step's context, of the batch's planned cells", async () => {
+    const { root, rig } = await rigWith("planning")
+    const plan = CollectorPlan.cellPlanOf(rig, REAL, path.join(root, "_cells"))
+    const planned = ["c1", "c2"].map((id) => ({ id, case: `case-${id}`, lane: REAL.id, claims: {} }))
+    await onFakeClock(Effect.scoped(Effect.gen(function*() {
+      const cells = yield* CellCollectors.make(plan, { sink: () => Effect.void, locker: memoryLocker(), planned })
+      for (const id of ["c1", "c2"]) yield* cells.around(id, Effect.void, () => Effect.succeed(overOf(root, id)))
+      return yield* cells.joined
+    })))
+    expect([...traceOf(root)].sort()).toEqual(["collect planning c1", "collect planning c2", "open planning c1", "open planning c2"])
   })
 
   it("answer not checkable on the cell past their deadline, collect_s once due, and still close", async () => {
