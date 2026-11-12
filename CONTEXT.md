@@ -270,6 +270,7 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Collection level**: a named set of collector defaults a job is launched with.
 - **Required collector**: one no collection level and no lane switches off.
 - **Pre-check**: a job- or batch-scope collector `at = "before"`; a `fail` it answers, or a `not checkable` of a `required` or asked-for one, refuses its scope before any call.
+- **On-demand run**: a collector asked by the site or the CLI over named cells after their job ended; its attachments land, its lines never merge.
 - **Record**: one object a collector returned or a cell exported, joined to a cell by a key or assigned to it.
 - **Unclaimed record**, **ambiguous record**: one whose key matches no cell, or several.
 - **Join**: the base matching a name's records to a scope's cells on one key, in one pass over the records. Avoid: correlation.
