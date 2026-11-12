@@ -9,12 +9,13 @@
  * whose directory bears it: in a cell's export, that cell alone; in the
  * scope's, every cell of the scope whose directory bears it. A record naming
  * none is unclaimed and one naming several ambiguous, each keeping the name it
- * stated; a key naming other than one cell is dropped, said as a fault.
+ * stated.
  *
- * A line that is no line, or a file that cannot be read, is skipped, said as a
- * fault, the rest of the file read; the name's export is then not read whole
- * ({@link Unread}), of its cell where it is a cell's, of the scope where it is
- * the scope's.
+ * A line that is no line, a key naming other than one cell, a line other than
+ * a record or a key, a file or a directory of exports that cannot be read: each
+ * is skipped, said as a fault, the rest read. The export is then not read
+ * whole ({@link Unread}), of its cell where it is a cell's, of the scope where
+ * it is the scope's.
  */
 import * as Result from "effect/Result"
 import * as fs from "node:fs"
@@ -29,7 +30,7 @@ export const DIR = "exports"
 /** The suffix of an export's file name. */
 const SUFFIX = ".jsonl"
 
-/** An export of a name not read whole: whose it is, the cell's id or `undefined` for the scope's own, and why. */
+/** Exports not read whole: whose they are, the cell's id or `undefined` for the scope's own, and what was skipped. */
 export interface Unread {
   readonly cell: string | undefined
   readonly why: string
@@ -41,25 +42,31 @@ export interface Exported {
   readonly records: ReadonlyArray<Join.Entry>
   /** Its keys, each naming its cell by id. */
   readonly keys: ReadonlyArray<Lines.KeyLine>
-  /** Each of its files a line or the whole of which was skipped. */
+}
+
+/** A scope's exports, by name, and what of them was skipped. */
+export interface Read {
+  readonly byName: ReadonlyMap<string, Exported>
+  /** Each line, file or directory skipped, in reading order. */
   readonly unread: ReadonlyArray<Unread>
 }
 
-/** A scope's exports, by name, and what could not be read of them. */
-export interface Read {
-  readonly byName: ReadonlyMap<string, Exported>
-  /** Each file or line skipped, and why. */
-  readonly faults: ReadonlyArray<string>
-}
+const errorText = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
 
-/** The export files under `dir`, by name. */
-const filesUnder = (dir: string): ReadonlyArray<readonly [string, string]> => {
+/** The export files under `dir`, by name; or why its directory of exports could not be read. */
+const filesUnder = (dir: string): Result.Result<ReadonlyArray<readonly [string, string]>, string> => {
   const exports = path.join(dir, DIR)
-  if (!fs.existsSync(exports)) return []
-  return fs.readdirSync(exports)
-    .filter((file) => file.endsWith(SUFFIX))
-    .sort()
-    .map((file) => [file.slice(0, -SUFFIX.length), path.join(exports, file)] as const)
+  try {
+    if (!fs.existsSync(exports)) return Result.succeed([])
+    return Result.succeed(
+      fs.readdirSync(exports)
+        .filter((file) => file.endsWith(SUFFIX))
+        .sort()
+        .map((file) => [file.slice(0, -SUFFIX.length), path.join(exports, file)] as const)
+    )
+  } catch (cause) {
+    return Result.fail(`${exports}: ${errorText(cause)}: its exports are skipped`)
+  }
 }
 
 /** The text of `file`, or why it could not be read. */
@@ -67,7 +74,7 @@ const textOf = (file: string): Result.Result<string, string> => {
   try {
     return Result.succeed(fs.readFileSync(file, "utf8"))
   } catch (cause) {
-    return Result.fail(`${file}: ${cause instanceof Error ? cause.message : String(cause)}`)
+    return Result.fail(`${file}: ${errorText(cause)}`)
   }
 }
 
@@ -89,23 +96,26 @@ const resolverOf = (cells: ReadonlyArray<Pick<Cell.Cell, "id" | "dir">>) => {
  * every cell.
  */
 export const read = (cells: ReadonlyArray<Pick<Cell.Cell, "id" | "dir">>, holder: string): Read => {
-  const byName = new Map<string, { records: Array<Join.Entry>; keys: Array<Lines.KeyLine>; unread: Array<Unread> }>()
-  const faults: Array<string> = []
+  const byName = new Map<string, { records: Array<Join.Entry>; keys: Array<Lines.KeyLine> }>()
+  const unread: Array<Unread> = []
   const scopeResolver = resolverOf(cells)
   const sources = [
     ...cells.map((cell) => [cell.dir, resolverOf([cell]), cell.id] as const),
     [holder, scopeResolver, undefined] as const
   ]
   for (const [dir, resolve, owner] of sources) {
-    for (const [name, file] of filesUnder(dir)) {
-      const held = byName.get(name) ?? { records: [], keys: [], unread: [] }
+    const skipped = (why: string) => void unread.push({ cell: owner, why })
+    const files = filesUnder(dir)
+    if (Result.isFailure(files)) {
+      skipped(files.failure)
+      continue
+    }
+    for (const [name, file] of files.success) {
+      const held = byName.get(name) ?? { records: [], keys: [] }
       byName.set(name, held)
       const text = textOf(file)
       const parsed = Result.isSuccess(text) ? Lines.parseEach(text.success, file) : { lines: [], faults: [`${text.failure}: the export is skipped`] }
-      for (const fault of parsed.faults) {
-        faults.push(fault)
-        held.unread.push({ cell: owner, why: fault })
-      }
+      for (const fault of parsed.faults) skipped(fault)
       for (const { at, line } of parsed.lines) {
         switch (line._tag) {
           case "KeyedRecord":
@@ -117,14 +127,14 @@ export const read = (cells: ReadonlyArray<Pick<Cell.Cell, "id" | "dir">>, holder
           case "Key": {
             const ids = resolve(line.line.cell)
             if (ids.length === 1) held.keys.push({ ...line.line, cell: ids[0]! })
-            else faults.push(`${at}: names the cell directory ${line.line.cell}, which no one cell of the scope bears: the key is dropped`)
+            else skipped(`${at}: names the cell directory ${line.line.cell}, which no one cell of the scope bears: the key is dropped`)
             break
           }
           default:
-            faults.push(`${at}: an export holds records and keys only: the line is skipped`)
+            skipped(`${at}: an export holds records and keys only: the line is skipped`)
         }
       }
     }
   }
-  return { byName, faults }
+  return { byName, unread }
 }

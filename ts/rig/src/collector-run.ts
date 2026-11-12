@@ -135,8 +135,8 @@ export interface Opened {
    * instance over those of its lanes as the earlier ones left them, then joins
    * and judges their records (`scope-judging.ts`): what each instance, then
    * each judge, answered. Called once, when the scope ended. Each cell of
-   * `unread` on an instance's lanes is answered `not checkable` by it, saying
-   * why the cell was not described.
+   * `unread` on an instance's lanes is answered `not checkable` by it, and by
+   * each judge of exports alone, saying why the cell was not described.
    */
   readonly collect: (cells: ReadonlyArray<Cell.Cell>, unread?: ReadonlyArray<Unread>) => Effect.Effect<ReadonlyArray<Collected>>
   /** The labels of the instances whose `close` left the lab changed so far, in order. */
@@ -543,6 +543,7 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
                 collect: (current) => Effect.map(collectOne(opening, options.sink, current), (one) => withUnread(opening.instance, one, unread))
               })),
               cells,
+              undescribed: unread,
               exportJudges: options.exportJudges,
               start,
               say: (message) => Effect.flatMap(now, (at) => options.sink({ collector: "scope", phase: "failed", ...at, message }))

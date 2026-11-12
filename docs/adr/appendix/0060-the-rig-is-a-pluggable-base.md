@@ -192,11 +192,14 @@ collected, so a later collector reads them.
 - A cell with no record reaches the judge with an empty list.
 - A verification nobody answered for a cell, the cell's own lines counted, is `not checkable`
   where it is promised: those a manifest's `answers` names, a collector's own name where it
-  names a judge and no `answers`, a judge of exports alone its name. A collector naming
-  neither promises none.
-- An export line that is none, or an export file that cannot be read, is skipped and said, the
-  rest read. A judged name's verifications are then `not checkable` on the cell whose export it
-  is, on every cell and the scope where it is the scope's.
+  names a judge and no `answers`, a judge of exports alone its name, on a cell the base could
+  not describe too. A collector naming neither may answer its own name and promises none.
+- An export line that is none, a key naming no one cell, a line other than a record or a key, an
+  export file or directory that cannot be read: each is skipped and said, the rest read.
+- Where the scope's input was not handed whole (an export skipped in part, keys or records the
+  base could not write), every `pass` its collectors and judges answered is `not checkable` on
+  the cell it concerns (every cell where it is the scope's) and on the scope; a `fail` or other
+  answer is kept, a `not checkable` beside it.
 - Exports judged with no collector of their name (item 4) are a batch's. They join on the
   `[join] key` of the path's collector of that name, wired or not, else on `call_id`.
 
