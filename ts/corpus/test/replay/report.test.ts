@@ -58,7 +58,7 @@ describe("report", () => {
     try {
       await code(replay())
       expect(said.mock.calls.map((call) => String(call[0]))).toContain(
-        "[replay] study any of them at /triage/<capture> in the flow viewer"
+        "[replay] study any of them at /triage/<capture> on the site"
       )
     } finally {
       said.mockRestore()

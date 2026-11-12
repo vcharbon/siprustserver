@@ -22,7 +22,7 @@ To show the user an html file or a URL: `xdg-open <path or URL>`.
   `bounds::bounded`; a recursion descends through a `bounds::Depth`.
 - A branch that touches `Cargo.lock` or `.cargo/audit.toml` passes `just audit-gate`. Every
   `[advisories] ignore` entry states who links the crate and why it is acceptable.
-- The flow viewer's UI follows [ts/viewer-app/UI-STYLE.md](ts/viewer-app/UI-STYLE.md).
+- The site's UI follows [ts/viewer-app/UI-STYLE.md](ts/viewer-app/UI-STYLE.md).
 - Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit and
   never hand-format around the pre-commit hook (`just hooks` installs it). An amend on `develop`
   is refused: commit on a topic branch.

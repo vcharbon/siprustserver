@@ -48,7 +48,7 @@ export interface CliFacts {
   readonly environmentRefusal: (what: string) => string | null
   /** How an operator runs `command` (`replay`, `job`…) here, as a hint line spells it. */
   readonly invocation: (command: string) => string
-  /** The flow viewer a report's links point at, read when the report is made. */
+  /** The site a report's links point at, read when the report is made. */
   readonly viewer: () => string
   /** The run-selector forms as the deployment spells them (`@sip/store` `Selector.formsOf`), for help texts. */
   readonly selectorForms: string
