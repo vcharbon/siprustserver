@@ -56,9 +56,13 @@ export const collectionFlag = Flag.string("collection").pipe(
   Flag.optional
 )
 
-/** `effect` with the level `collection` names as the job's (`@sip/corpus` `Collectors.Level`). */
+/**
+ * `effect` with the level `collection` names as the job's (`@sip/corpus`
+ * `Collectors.Level`); where it names none, the level its caller provides,
+ * else the workspace's default.
+ */
 export const withCollection = <A, E, R>(collection: Option.Option<string>, effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-  Effect.provideService(effect, Collectors.Level, Option.getOrUndefined(collection))
+  Option.isSome(collection) ? Effect.provideService(effect, Collectors.Level, collection.value) : effect
 
 export const patienceOf = (wait: Option.Option<number>): Locks.Patience => ({
   waitMs: Option.match(wait, {

@@ -8,6 +8,7 @@
 import { NodeServices } from "@effect/platform-node"
 import { Collectors, LaneHosting } from "@sip/corpus"
 import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
 import { Command } from "effect/unstable/cli"
 import { afterEach, describe, expect, it } from "vitest"
 import * as Campaign from "../src/commands/campaign.js"
@@ -65,6 +66,13 @@ describe("a job line's collection level", () => {
   it("is the one a replay names, read where the replay first looks at its lane; absent, none", async () => {
     expect(await levelSeenBy(Replay.command(FACTS), ["--collection", "deep"])).toEqual(["deep"])
     expect(await levelSeenBy(Replay.command(FACTS), [])).toEqual([undefined])
+  })
+
+  it("is, where a replay names none, the one its caller provides, and the one it names otherwise", async () => {
+    const provided = (argv: ReadonlyArray<string>) =>
+      levelSeenBy(Command.provide(Replay.command(FACTS), () => Layer.succeed(Collectors.Level, "lean")), argv)
+    expect(await provided([])).toEqual(["lean"])
+    expect(await provided(["--collection", "deep"])).toEqual(["deep"])
   })
 
   it("is the one a campaign names, read where the campaign first looks at its lane; absent, none", async () => {
