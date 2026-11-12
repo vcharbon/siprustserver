@@ -4,8 +4,8 @@
  * non-executable executable, a name defined in both roots (both files named),
  * a manifest whose name is not its directory's, a judge nobody defines, a
  * part schema that is no JSON object, a path `pack.toml` names that the
- * pack does not hold, a collector named like a source of the base, and a lock
- * collectors of nested scopes name.
+ * pack does not hold, a collector named like a source of the base or like a
+ * judge another collector names, and a lock collectors of nested scopes name.
  */
 import * as Result from "effect/Result"
 import * as fs from "node:fs"
@@ -145,6 +145,23 @@ describe("the rig path", () => {
       "collectors/call-records/collect": SCRIPT
     })
     expect((await refusalOf({ workspace }))?.reason).toBe("judge: names call-records, which no judge of the path defines")
+  })
+
+  it("refuses a collector named like a judge another collector names, both files named", async () => {
+    const workspace = root({
+      "judges/records/judge.toml": `schema = "judge.v1"\nname = "records"\nmodule = "./judge.ts"\n`,
+      "judges/records/judge.ts": "export default {}\n",
+      "collectors/records-read/collector.toml": collector("records-read", `judge = "records"`),
+      "collectors/records-read/collect": SCRIPT,
+      "collectors/records/collector.toml": collector("records", `answers = ["records"]\ninformative = true`),
+      "collectors/records/collect": SCRIPT
+    })
+    const refusal = await refusalOf({ workspace })
+    expect(refusal?.files).toEqual([
+      path.join(workspace, "collectors/records/collector.toml"),
+      path.join(workspace, "collectors/records-read/collector.toml")
+    ])
+    expect(refusal?.reason).toBe("name: records is the judge records-read names, whose lines carry its name")
   })
 
   it("refuses a part schema that is no JSON object", async () => {
