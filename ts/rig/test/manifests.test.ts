@@ -67,6 +67,13 @@ describe("collector.v1", () => {
       .toBe("c/collector.toml: delay_s: only a cell-scope collector is delayed")
   })
 
+  it("refuses a box-wide lock on a collector of cell scope, accepting its delay", () => {
+    const cell = COLLECTOR.replace(`scope    = "batch"`, `scope = "cell"\ndelay_s = 10`)
+    expect(refusalOf(Collector.parse("c/collector.toml", cell)))
+      .toBe("c/collector.toml: locks: a cell-scope collector takes no box-wide lock, which it would hold over the lane's next cells")
+    expect(refusalOf(Collector.parse("c/collector.toml", cell.replace(`locks    = ["records-chain"]\n`, "")))).toBe("accepted")
+  })
+
   it("refuses a pre-check that opens", () => {
     expect(refusalOf(Collector.parse("c/collector.toml", COLLECTOR.replace(`at       = "after"`, `at = "before"`))))
       .toBe("c/collector.toml: run.open: a pre-check has no open")
