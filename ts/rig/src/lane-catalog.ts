@@ -63,9 +63,9 @@ export const ids = (catalog: Catalog): ReadonlyArray<string> => catalog.lanes.ma
 export const find = <L extends View>(catalog: Catalog<L>, id: string): L | undefined => catalog.lanes.find((lane) => lane.id === id)
 
 /** The hosted lane `id` names in `catalog`. */
-export const real = <L extends View>(catalog: Catalog<L>, id: string): Extract<L, { readonly kind: "real" }> | undefined => {
+export const hosted = <L extends View>(catalog: Catalog<L>, id: string): Extract<L, { readonly kind: "hosted" }> | undefined => {
   const lane = find(catalog, id)
-  return lane?.kind === "real" ? (lane as Extract<L, { readonly kind: "real" }>) : undefined
+  return lane?.kind === "hosted" ? (lane as Extract<L, { readonly kind: "hosted" }>) : undefined
 }
 
 /** The catalog the files under `dirs` state as `reading` reads them, a part's variables read from `stated`, else the process's. */

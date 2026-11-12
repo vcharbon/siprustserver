@@ -57,20 +57,20 @@ interface Common {
   readonly loaded: Lanes.Loaded
   readonly capabilities: ReadonlySet<string>
   /** Its SUT's timers. */
-  readonly sutTimers: Timers
+  readonly timers: Timers
   readonly tags: TagLists
 }
 
 /** The built-in simulated lane. */
 export interface Simulated extends Common {
-  readonly kind: "fake"
+  readonly kind: "simulated"
   /** Its own file, where the deployment states one. */
   readonly file: string | undefined
 }
 
 /** A hosted lane, read from its file. */
 export interface Hosted extends Common {
-  readonly kind: "real"
+  readonly kind: "hosted"
   readonly file: string
   readonly sip: Target
   readonly backendMode: Lane.BackendMode
@@ -94,7 +94,7 @@ export const builtIn = (id: string): Lanes.Loaded => ({
 /** The built-in lane `id` with no file, naming no part, its in-process SUT's timers `timers`. */
 export const simulatedBuiltIn = (id: string, timers: Timers): Simulated => {
   const loaded = builtIn(id)
-  return { kind: "fake", id, file: undefined, loaded, capabilities: loaded.capabilities, sutTimers: timers, tags: NO_TAG_LISTS }
+  return { kind: "simulated", id, file: undefined, loaded, capabilities: loaded.capabilities, timers, tags: NO_TAG_LISTS }
 }
 
 const tagListsOf = (lane: Lane.LaneFile): TagLists => ({ run: lane.tags?.run ?? [], exclude: lane.tags?.exclude ?? [] })
@@ -114,12 +114,12 @@ export const simulatedOf = (loaded: Lanes.Loaded, timers: Timers): Result.Result
     return Result.fail(refuse([loaded.file], `${fixed}: ${loaded.id} is the built-in lane, its SUT the in-process worker`))
   }
   return Result.succeed({
-    kind: "fake",
+    kind: "simulated",
     id: loaded.id,
     file: loaded.file,
     loaded,
     capabilities: loaded.capabilities,
-    sutTimers: timers,
+    timers,
     tags: tagListsOf(loaded.lane)
   })
 }
@@ -136,7 +136,7 @@ export const hostedOf = (loaded: Lanes.Loaded, simulatedId: string): Result.Resu
   if (knownBugs !== undefined && Result.isFailure(knownBugs)) return Result.fail(refuse([file], `known_bugs.${knownBugs.failure}`))
   const { ceilings, campaign, ...knobs } = lane.pacing ?? {}
   return Result.succeed({
-    kind: "real",
+    kind: "hosted",
     id: loaded.id,
     file,
     sip: {
@@ -157,7 +157,7 @@ export const hostedOf = (loaded: Lanes.Loaded, simulatedId: string): Result.Resu
     backendMode: backend.mode,
     backendListen: backend.listen,
     capabilities: loaded.capabilities,
-    sutTimers: lane.timers ?? {},
+    timers: lane.timers ?? {},
     tags: tagListsOf(lane)
   })
 }

@@ -85,9 +85,9 @@ describe("the lane catalog", () => {
     expect(LaneCatalog.ids(catalog)).toEqual(["sim"])
     expect(reads).toEqual(["sim"])
     const sim = LaneCatalog.find(catalog, "sim")!
-    expect(sim).toMatchObject({ kind: "fake", file: undefined, sutTimers: { keepalive_ms: 30_000 }, tags: LaneView.NO_TAG_LISTS, store: undefined })
+    expect(sim).toMatchObject({ kind: "simulated", file: undefined, timers: { keepalive_ms: 30_000 }, tags: LaneView.NO_TAG_LISTS, store: undefined })
     expect([...sim.capabilities].sort()).toEqual(["paused-clock", "routing-visible", "scripted-routing"])
-    expect(LaneCatalog.real(catalog, "sim")).toBeUndefined()
+    expect(LaneCatalog.hosted(catalog, "sim")).toBeUndefined()
   })
 
   it("states the simulated lane first, then the hosted ones by order then id, each as its file states it", async () => {
@@ -101,8 +101,8 @@ describe("the lane catalog", () => {
       )
     })
     expect(LaneCatalog.ids(catalog)).toEqual(["sim", "b", "a", "c"])
-    const a = LaneCatalog.real(catalog, "a")!
-    expect(a).toMatchObject({ kind: "real", backendMode: "proxied", backendListen: "192.0.2.1:8080", sutTimers: {}, tags: LaneView.NO_TAG_LISTS })
+    const a = LaneCatalog.hosted(catalog, "a")!
+    expect(a).toMatchObject({ kind: "hosted", backendMode: "proxied", backendListen: "192.0.2.1:8080", timers: {}, tags: LaneView.NO_TAG_LISTS })
     expect(a.sip).toEqual({
       name: "a",
       file: a.file,
@@ -114,10 +114,10 @@ describe("the lane catalog", () => {
       http_budget: { new_call_ms: 200, follow_up_ms: 300, transit_ms: 1 }
     })
     expect([...a.capabilities].sort()).toEqual(["real-clock", "routing-visible"])
-    const c = LaneCatalog.real(catalog, "c")!
-    expect(c).toMatchObject({ backendMode: "none", backendListen: undefined, sutTimers: { keepalive_ms: 300_000 }, tags: { run: ["long"], exclude: ["short"] } })
+    const c = LaneCatalog.hosted(catalog, "c")!
+    expect(c).toMatchObject({ backendMode: "none", backendListen: undefined, timers: { keepalive_ms: 300_000 }, tags: { run: ["long"], exclude: ["short"] } })
     expect(c.sip).toMatchObject({ description: "c", knobs: { concurrency: 4 }, ceilings: { cells: 10 } })
-    expect(LaneCatalog.real(catalog, "b")!.sip.knobs).toBeUndefined()
+    expect(LaneCatalog.hosted(catalog, "b")!.sip.knobs).toBeUndefined()
   })
 
   it("reads the simulated lane's own file: its tags and the parts it names reach the pack's reading", async () => {
@@ -128,7 +128,7 @@ describe("the lane catalog", () => {
     }, reads)
     expect(reads).toEqual(["sim"])
     const sim = LaneCatalog.find(catalog, "sim")!
-    expect(sim).toMatchObject({ kind: "fake", store: "one", tags: { run: ["long"], exclude: [] }, sutTimers: { keepalive_ms: 30_000 } })
+    expect(sim).toMatchObject({ kind: "simulated", store: "one", tags: { run: ["long"], exclude: [] }, timers: { keepalive_ms: 30_000 } })
     expect(sim.file).toMatch(/lanes\/sim\.toml$/)
     expect(sim.capabilities.has("records-readable")).toBe(false)
   })
