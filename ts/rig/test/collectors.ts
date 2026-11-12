@@ -133,6 +133,7 @@ for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "on-fai
     collect: node(`
 const ctx = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
 fs.appendFileSync("../../trace", "collect on-demand " + ctx.cells.map((cell) => cell.id).join(",") + "\\n")
+fs.appendFileSync("../../trace", "window " + ctx.window.start.wall_ms + "-" + ctx.window.end.wall_ms + "\\n")
 for (const cell of ctx.cells) {
   fs.writeFileSync(process.env.SIPRIG_OUT + "/" + cell.id + ".log", "asked of " + cell.id + "\\n")
   console.log(JSON.stringify({ attachment: { kind: "log", title: "asked now", file: cell.id + ".log" }, cell: cell.id }))

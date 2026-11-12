@@ -107,6 +107,8 @@ export interface Request {
   readonly exportJudges: ExportJudges | undefined
   /** When the scope opened. */
   readonly start: Cell.Instant
+  /** Where the judges' window ends; absent, the instant they run. */
+  readonly end?: Cell.Instant | undefined
   /** Says a fault of the scope's exports or files: it never fails the collect. */
   readonly say: (message: string) => Effect.Effect<void>
 }
@@ -329,7 +331,9 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
         unwritten: held.unwritten
       })
     }
-    const end = yield* Effect.map(Clock.currentTimeMillis, (clock_ms) => ({ clock_ms, wall_ms: Date.now() }))
+    const end = request.end === undefined
+      ? yield* Effect.map(Clock.currentTimeMillis, (clock_ms) => ({ clock_ms, wall_ms: Date.now() }))
+      : { clock_ms: request.end.lane_ms, wall_ms: request.end.wall_ms }
     for (const one of joined) {
       if (one.judge === undefined) continue
       const ids = new Set(one.cells)

@@ -155,6 +155,8 @@ export interface Opened {
 interface Opening {
   readonly instance: Instance
   start: Context.Context["window"]["start"]
+  /** Where its collect's window ends; undefined, the instant it collects. */
+  readonly end: Cell.Instant | undefined
   /** Set once it went past its scope's locks; its `close` runs then. */
   closes: boolean
   /** Why it did not open; its `collect` does not run and its verifications are not checkable. */
@@ -424,12 +426,13 @@ const collectOne = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<Cell
     const manifest = instance.collector.manifest
     const failed = (message: string) => Effect.as(emit(sink, instance, "failed", message), notCheckable(instance, cells, message))
     yield* emit(sink, instance, "collect")
-    const end = yield* now
+    const at = yield* now
+    const end = opening.end ?? { lane_ms: at.clock_ms, wall_ms: at.wall_ms }
     const stdout = path.join(instance.dir, "collect.out.jsonl")
     const laid = yield* Effect.result(Effect.try({
       try: () => {
         fs.rmSync(path.join(layoutOf(instance).out, Lines.OUT_FILE), { force: true })
-        writeContext(instance, { window: { start: opening.start, end: { lane_ms: end.clock_ms, wall_ms: end.wall_ms } }, cells })
+        writeContext(instance, { window: { start: opening.start, end }, cells })
       },
       catch: (cause) => `collect not run: its context not written: ${errorText(cause)}`
     }))
@@ -549,6 +552,13 @@ export interface Options {
   readonly locker: Locker
   /** The judges of the scope's exports alone (`scope-judging.ts`); none where absent. */
   readonly exportJudges?: ScopeJudging.ExportJudges | undefined
+  /**
+   * The window every instance's context states, and every judge's of the
+   * scope (`scope-judging.ts`), for a scope that reads calls
+   * which ended before it opened (an on-demand run); absent, an instance's
+   * window opens as it opens and ends as it collects.
+   */
+  readonly window?: { readonly start: Cell.Instant; readonly end: Cell.Instant } | undefined
 }
 
 /**
@@ -585,7 +595,13 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
       const refused = Result.isFailure(taken) ? taken.failure : undefined
       for (const instance of instances) {
         const at = yield* now
-        const opening: Opening = { instance, start: { lane_ms: at.clock_ms, wall_ms: at.wall_ms }, closes: false, failure: undefined }
+        const opening: Opening = {
+          instance,
+          start: options.window?.start ?? { lane_ms: at.clock_ms, wall_ms: at.wall_ms },
+          end: options.window?.end,
+          closes: false,
+          failure: undefined
+        }
         openings.push(opening)
         yield* openOne(opening, refused, options, restore)
       }
@@ -605,6 +621,7 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
               undescribed: unread,
               exportJudges: options.exportJudges,
               start,
+              end: options.window?.end,
               say: (message) => Effect.flatMap(now, (at) => options.sink({ collector: "scope", phase: "failed", ...at, message }))
             })
           }),

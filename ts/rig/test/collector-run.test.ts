@@ -224,11 +224,28 @@ describe("a scope's collectors", () => {
     const ran = await Effect.runPromise(
       CollectorOnDemand.run([planned.success], { cells: [c1!], unread: [] }, { sink: () => Effect.void, locker: memoryLocker() })
     )
-    expect(traceOf(root)).toEqual(["collect on-demand c1"])
+    expect(traceOf(root)).toEqual(["collect on-demand c1", "window 0-1000"])
     expect(ran.leftChanged).toEqual([])
     const listed = Attachment.parse(fs.readFileSync(path.join(c1!.dir, Attachment.FILE), "utf8"))
     expect(listed).toEqual([{ name: "on-demand", kind: "log", title: "asked now", file: "collected/on-demand/c1.log", source: "on-demand" }])
     expect(fs.readFileSync(path.join(c1!.dir, listed[0]!.file), "utf8")).toBe("asked of c1\n")
+  })
+
+  it("states an on-demand run's window as the one its cells ran in, long before it was asked", async () => {
+    const { root, rig } = await samples()
+    const planned = CollectorPlan.onDemandOf(rig, "on-demand", LANE, path.join(root, "asked", "collectors"), path.join(root, "asked"))
+    if (!Result.isSuccess(planned)) throw new Error(planned.failure)
+    const [c1, c2] = cellsUnder(root)
+    const at = (cell: typeof c1, from: number, to: number) => ({
+      ...cell!,
+      timeline: { start: { lane_ms: 0, wall_ms: from }, end: { lane_ms: to - from, wall_ms: to } }
+    })
+    await Effect.runPromise(CollectorOnDemand.run(
+      [planned.success],
+      { cells: [at(c2, 5_000, 7_000), at(c1, 1_000, 2_000)], unread: [] },
+      { sink: () => Effect.void, locker: memoryLocker() }
+    ))
+    expect(traceOf(root)).toEqual(["collect on-demand c2,c1", "window 1000-7000"])
   })
 
   it("answers not checkable, with what the collector said, for every verification it names on every cell when collect exits non-zero", async () => {
