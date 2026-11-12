@@ -6,22 +6,24 @@
  * override first) after the cell ended on the lane's clock, and close, while
  * the lane goes on to its next cells. A line naming no cell is the cell's.
  *
- * A cell's collectors have one deadline, the longest `delay_s` plus
- * `collect_s` among them after the cell ended: past it every one answers `not
- * checkable` on the cell, saying so, and the scope closes. A cell one of whose
- * collectors `holds_cell_locks` keeps its own named locks until its
- * collectors answered or reached that deadline, and closed ({@link Ran.held}). The batch
- * joins every cell's collectors before it reads its end
- * ({@link CellCollectors.joined}); a batch that ends otherwise interrupts
- * them, and their `close` still runs.
+ * Each collector has a deadline of its own, its `collect_s` from when it was
+ * due or, later, from when the one collecting before it answered: past it, it
+ * answers `not checkable` on the cell, saying so, and the next one collects
+ * (`CollectorRun.Options.due`). A judge of theirs, run once they all
+ * answered, is bounded by its own `judge_s` (`judge-run.ts`): a cell's collect
+ * ends by its last collector's deadline plus its judges' `judge_s`.
+ *
+ * A cell one of whose collectors `holds_cell_locks` keeps its own named locks
+ * until its collectors answered or reached their deadlines, and closed
+ * ({@link Ran.held}). The batch joins every cell's collectors before it reads
+ * its end ({@link CellCollectors.joined}); a batch that ends otherwise
+ * interrupts them, and their `close` still runs.
  */
 import * as Clock from "effect/Clock"
 import * as Deferred from "effect/Deferred"
-import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as Fiber from "effect/Fiber"
-import * as Option from "effect/Option"
 import * as Scope from "effect/Scope"
 import * as path from "node:path"
 import * as Collector from "./collector.js"
@@ -74,10 +76,6 @@ export const delayMsOf = (instance: CollectorRun.Instance): number => {
   const overridden = instance.params[DELAY_KEY]
   return 1000 * (typeof overridden === "number" ? overridden : instance.collector.manifest.delay_s ?? 0)
 }
-
-/** The deadline of a cell's `instances` after the cell ended, in milliseconds: the longest `delay_s` plus `collect_s` among them. */
-export const deadlineMsOf = (instances: ReadonlyArray<CollectorRun.Instance>): number =>
-  Math.max(0, ...instances.map((instance) => delayMsOf(instance) + Collector.boundsOf(instance.collector.manifest).collect_s * 1000))
 
 /** The directory of the `n`-th cell's scope: file-safe, unique among the batch's. */
 const dirNameOf = (n: number, cell: string): string => `${n}-${cell.replace(/[^A-Za-z0-9._-]/g, "_")}`
@@ -166,16 +164,9 @@ export const make = (plan: CollectorPlan.CellPlan, options: CollectorRun.Options
         const value = yield* run.pipe(Effect.onExit((exit) => (Exit.isSuccess(exit) ? Effect.void : Scope.close(scope, exit))))
         ended = yield* Clock.currentTimeMillis
         const answered = yield* Deferred.make<void>()
-        const deadline = deadlineMsOf(instances)
-        const late = `not answered within its deadline of ${deadline / 1000} s after the cell ended`
         const collect = Effect.flatMap(describe(value), (over) => (over === undefined ? Effect.succeed([]) : opened.collect(over)))
         const work = collect.pipe(
-          Effect.timeoutOption(Duration.millis(deadline)),
-          Effect.flatMap((got) =>
-            Option.isSome(got)
-              ? Effect.succeed(heldByCell(cell, got.value))
-              : Effect.as(Effect.forEach(instances, (instance) => say(options.sink, instance.label, "failed", late), { discard: true }), notCheckableOf(instances, cell, late))
-          ),
+          Effect.map((got) => heldByCell(cell, got)),
           Effect.catchDefect((defect) => Effect.succeed(notCheckableOf(instances, cell, `its collectors died: ${errorText(defect)}`))),
           Effect.ensuring(Effect.andThen(Scope.close(scope, Exit.void), Effect.sync(() => void left.push(...opened.leftChanged())))),
           Effect.ensuring(Deferred.succeed(answered, undefined))

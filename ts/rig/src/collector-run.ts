@@ -20,6 +20,7 @@
 import { Attachment, Verification } from "@sip/contracts"
 import * as Cause from "effect/Cause"
 import * as Clock from "effect/Clock"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as Result from "effect/Result"
@@ -474,6 +475,26 @@ const collectGuarded = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<
   })
 
 /**
+ * {@link collectGuarded}, where `options.due` is given awaited first, then
+ * bounded by the instance's `collect_s` from the instant it ended: past it the
+ * collect is interrupted and its cells answered `not checkable`, saying so.
+ */
+const collectDue = (opening: Opening, options: Options, cells: ReadonlyArray<Cell.Cell>): Effect.Effect<Collected> => {
+  const guarded = collectGuarded(opening, options.sink, cells)
+  if (options.due === undefined) return guarded
+  const { instance } = opening
+  const withinMs = Collector.boundsOf(instance.collector.manifest).collect_s * 1000
+  const late = `not answered within its collect_s of ${withinMs / 1000} s once due`
+  return Effect.andThen(
+    options.due(instance),
+    Effect.timeoutOrElse(guarded, {
+      duration: Duration.millis(withinMs),
+      orElse: () => Effect.as(emit(options.sink, instance, "failed", late), notCheckable(instance, cellsOf(instance, cells), late))
+    })
+  )
+}
+
+/**
  * The cells of `cells` failed by then: those `failed` names, whose own
  * outcome is a failure or an error, and those with a failed line, one of
  * their own (`cell.v1` `verifications`) or one an earlier instance of the
@@ -511,20 +532,20 @@ const unasked = (instance: Instance): Collected => ({
  */
 const answersOf = (
   opening: Opening,
-  sink: Sink,
+  options: Options,
   cells: ReadonlyArray<Cell.Cell>,
   over: Over,
   earlier: ReadonlyArray<Collected>
 ): Effect.Effect<ScopeJudging.Stepped> => {
   const { instance } = opening
   if (instance.onFailure !== true) {
-    return Effect.map(collectGuarded(opening, sink, cells), (one) => ({ collected: withUnread(instance, one, over.unread) }))
+    return Effect.map(collectDue(opening, options, cells), (one) => ({ collected: withUnread(instance, one, over.unread) }))
   }
   const stated = new Set(over.failed)
   const failed = failedOf(cellsOf(instance, cells), stated, earlier)
   const unreadFailed = over.unread.filter((cell) => stated.has(cell.id))
   const read = failed.map((cell) => cell.id)
-  const collected = failed.length === 0 ? Effect.succeed(unasked(instance)) : collectGuarded(opening, sink, failed)
+  const collected = failed.length === 0 ? Effect.succeed(unasked(instance)) : collectDue(opening, options, failed)
   return Effect.map(collected, (one) => ({ collected: withUnread(instance, one, unreadFailed), read }))
 }
 
@@ -607,7 +628,13 @@ export interface Options {
    * window opens as it opens and ends as it collects.
    */
   readonly window?: { readonly start: Cell.Instant; readonly end: Cell.Instant } | undefined
-  /** Awaited before each instance's `collect`, in their collect order: a delayed cell-scope collector's wait (`cell-collectors.ts`); none where absent. */
+  /**
+   * Awaited before each instance's `collect`, in their collect order: a
+   * delayed cell-scope collector's wait (`cell-collectors.ts`). Where given,
+   * each collect is bounded by its `collect_s` from the instant its wait ended,
+   * the one before it having answered by then: past it, it answers `not
+   * checkable` and the next one collects. None where absent.
+   */
   readonly due?: ((instance: Instance) => Effect.Effect<void>) | undefined
 }
 
@@ -665,8 +692,7 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
             return ScopeJudging.collect({
               steps: collectOrderOf(openings).map((opening) => ({
                 instance: opening.instance,
-                collect: (current, earlier) =>
-                  Effect.andThen(options.due?.(opening.instance) ?? Effect.void, () => answersOf(opening, options.sink, current, over, earlier))
+                collect: (current, earlier) => answersOf(opening, options, current, over, earlier)
               })),
               cells: over.cells,
               undescribed: over.unread,

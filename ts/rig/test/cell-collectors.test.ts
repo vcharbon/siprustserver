@@ -160,7 +160,7 @@ describe("a batch's cell-scope collectors", () => {
     ])
   })
 
-  it("answer not checkable on the cell past their deadline of delay_s plus collect_s, and still close", async () => {
+  it("answer not checkable on the cell past their deadline, collect_s once due, and still close", async () => {
     const { root, rig } = await rigWith("hanging")
     const plan = CollectorPlan.cellPlanOf(rig, REAL, path.join(root, "_cells"))
     const { said, sink } = collecting()
@@ -169,7 +169,7 @@ describe("a batch's cell-scope collectors", () => {
       yield* cells.around("c1", call(1000), () => Effect.succeed(overOf(root, "c1")))
       return yield* cells.joined
     })))
-    const late = "not answered within its deadline of 3 s after the cell ended"
+    const late = "not answered within its collect_s of 2 s once due"
     expect(collected.map((one) => one.cells.get("c1")?.verifications)).toEqual([
       [{ name: "hanging", source: "hanging", answer: "not-checkable", message: late }]
     ])
@@ -227,12 +227,11 @@ describe("a batch's cell-scope collectors", () => {
     expect(traceOf(root)).toEqual(["open bracketed", "close bracketed"])
   })
 
-  it("wait the lane's delay_s where it overrides the manifest's, and set the deadline by it", async () => {
+  it("wait the lane's delay_s where it overrides the manifest's", async () => {
     const { root, rig } = await rigWith("delayed")
     const lane: Lanes.Loaded = { ...REAL, lane: { ...REAL.lane, collectors: { delayed: { delay_s: 2 } } } }
     const instances = CollectorPlan.cellPlanOf(rig, lane, path.join(root, "_cells")).instancesFor("c1", path.join(root, "_cells", "c1"))
     expect(instances.map(CellCollectors.delayMsOf)).toEqual([2000])
-    expect(CellCollectors.deadlineMsOf(instances)).toBe(302_000)
   })
 
   it("run none on a simulated lane, and say so of each one wired there", async () => {
