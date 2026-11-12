@@ -9,7 +9,8 @@
  * its name `not checkable` where it was; a judge that fails in any way (exits
  * non-zero, returns no lines, dies, rejects, answers what is not its, times
  * out), a collector whose open or collect failed, its judge not run over its
- * cells, and a verification nobody answered, `not checkable`; an executable
+ * cells (those of its other instances judged), and a verification nobody
+ * answered, `not checkable`; an executable
  * judge's lines read on its stdout and in its `lines.jsonl`.
  */
 import { Verification } from "@sip/contracts"
@@ -24,6 +25,7 @@ import type * as Cell from "../src/cell.js"
 import * as CollectorPlan from "../src/collector-plan.js"
 import * as CollectorRun from "../src/collector-run.js"
 import * as JudgePlan from "../src/judge-plan.js"
+import type * as Lanes from "../src/lanes.js"
 import * as RigPath from "../src/rig-path.js"
 import { cellOf, memoryLocker } from "./collectors.js"
 import { laneOf } from "./operations.js"
@@ -98,6 +100,14 @@ const collectBatch = async (
   }
   const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(CollectorRun.opened(instances, options), (opened) => opened.collect({ cells, unread: undescribed, failed: [] }))))
   return { collected, said, holder }
+}
+
+/** The job's collectors `rig` plans over `lanes` under `root`, collected over `cells`. */
+const collectJob = (rig: RigPath.RigPath, root: string, lanes: ReadonlyArray<Lanes.Loaded>, cells: ReadonlyArray<Cell.Cell>) => {
+  const holder = path.join(root, "job")
+  const instances = CollectorPlan.jobPlanOf(rig, lanes, path.join(holder, "collectors"), holder)
+  const options: CollectorRun.Options = { sink: () => Effect.void, locker: memoryLocker() }
+  return Effect.runPromise(Effect.scoped(Effect.flatMap(CollectorRun.opened(instances, options), (opened) => opened.collect({ cells, unread: [], failed: [] }))))
 }
 
 const linesOf = (file: string): ReadonlyArray<unknown> =>
@@ -572,11 +582,17 @@ fs.writeFileSync(require("node:path").join(process.env.SIPRIG_OUT, "lines.jsonl"
     ])
   })
 
-  /** A collector `sums` keyed by Call-ID, its steps `steps`, whose executable judge `strict` fails every cell holding no record of it. */
-  const strictSums = (steps: Readonly<Record<string, string>>): Record<string, Entry> => ({
-    "collectors/sums/collector.toml": `schema = "collector.v1"\nname = "sums"\nscope = "batch"\njudge = "strict"\nanswers = ["sums"]\n` +
+  /**
+   * A collector `sums` keyed by Call-ID, its steps `steps`, of `scope` (its
+   * manifest's `extra` lines with it), whose executable judge `strict` fails
+   * every cell holding no record of it.
+   */
+  const strictSums = (steps: Readonly<Record<string, Entry | string>>, scope = "batch", extra = ""): Record<string, Entry> => ({
+    "collectors/sums/collector.toml": `schema = "collector.v1"\nname = "sums"\nscope = "${scope}"\njudge = "strict"\nanswers = ["sums"]\n${extra}` +
       `[join]\nkey = "call_id"\n[run]\n${Object.keys(steps).map((step) => `${step} = "./${step}"\n`).join("")}`,
-    ...Object.fromEntries(Object.entries(steps).map(([step, body]) => [`collectors/sums/${step}`, { text: body, executable: true }])),
+    ...Object.fromEntries(
+      Object.entries(steps).map(([step, body]) => [`collectors/sums/${step}`, typeof body === "string" ? { text: body, executable: true } : body])
+    ),
     ...executableJudge(
       "strict",
       node(`
@@ -596,6 +612,28 @@ for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "sums",
     expect([onCell(collected, "c1"), onCell(collected, "c2"), onScope(collected)]).toEqual([failed, failed, failed])
     for (const id of ["c1", "c2"]) expect(Verification.finalStatusOf(onCell(collected, id))).toBe("unverified")
     expect(collected.map((one) => one.label)).toEqual(["sums"])
+  })
+
+  it("is not checkable on the cells of the one instance whose collect failed, the cells of the instance that collected judged", async () => {
+    const collect = node(`
+if (ctx.lane.name === "lane-a") { console.error("the store is gone"); process.exit(3) }
+for (const cell of ctx.cells) console.log(JSON.stringify({ record: { n: 1 }, key: cell.keys.call_id[0] }))
+`)
+    const { root, rig } = await loaded(strictSums({ collect }, "job", `needs = ["records-store"]\n`))
+    const lanes = [laneOf("lane-a", { "records-store": "targets/a.toml" }), laneOf("lane-b", { "records-store": "targets/b.toml" })]
+    const cells = [
+      ...cellsOf(root, ["a1", "a2"]),
+      ...cellsOf(root, ["b1", "b2"], (cell) => ({ ...cell, lane: "lane-b" }))
+    ]
+    const collected = await collectJob(rig, root, lanes, cells)
+    const why = "collect exited 3: the store is gone"
+    const notCollected = [expect.objectContaining({ name: "sums", source: "strict", answer: "not-checkable", message: expect.stringContaining(why) })]
+    expect([onCell(collected, "a1"), onCell(collected, "a2")]).toEqual([notCollected, notCollected])
+    for (const id of ["a1", "a2"]) expect(Verification.finalStatusOf(onCell(collected, id))).toBe("unverified")
+    expect([onCell(collected, "b1"), onCell(collected, "b2")]).toEqual([
+      [{ name: "sums", source: "strict", answer: "pass" }],
+      [{ name: "sums", source: "strict", answer: "pass" }]
+    ])
   })
 
   it("is not checkable for each cell a collector's manifest names it on and nobody answered it, the cell's own lines counted", async () => {
