@@ -8,7 +8,7 @@
  * answering it `not checkable`; an answer the store refuses is said, never
  * the run's failure.
  */
-import type { Verification } from "@sip/contracts"
+import { Verification } from "@sip/contracts"
 import { type Cell, CellOfBundle, type CollectorRun } from "@sip/rig"
 import { CellAnswers } from "@sip/store"
 import * as Console from "effect/Console"
@@ -33,6 +33,8 @@ export interface LandedCell {
   readonly attempt?: number
   /** The lines the cell was answered by then, where the caller holds them; absent, its bundle's `verifications.json`. */
   readonly verifications?: ReadonlyArray<Verification.Verification>
+  /** Whether the cell's own outcome, as the caller knows it by then, is a failure or an error: an `on-failure` collector reads it. */
+  readonly failed?: boolean
 }
 
 /** What the collectors answered of one landed cell, merged once its run row closed. */
@@ -74,8 +76,20 @@ export const describe = (
       )),
     (read) => ({
       cells: read.flatMap((one) => (Result.isSuccess(one) ? [one.success] : [])),
-      unread: read.flatMap((one) => (Result.isFailure(one) ? [one.failure] : []))
+      unread: read.flatMap((one) => (Result.isFailure(one) ? [one.failure] : [])),
+      failed: cells.filter((cell) => cell.failed === true).map((cell) => cell.id)
     })
+  )
+
+/** `cells` each marked failed where `collected` answered a failing line of it, beside those failed already. */
+export const failedBy = (
+  cells: ReadonlyArray<LandedCell>,
+  collected: ReadonlyArray<CollectorRun.Collected>
+): ReadonlyArray<LandedCell> =>
+  cells.map((cell) =>
+    cell.failed === true || Verification.failing(collected.flatMap((one) => one.cells.get(cell.id)?.verifications ?? [])).length === 0
+      ? cell
+      : { ...cell, failed: true }
   )
 
 /** What `collected` answered of each of `cells`, where it answered anything, in their order. */

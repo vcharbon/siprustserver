@@ -43,7 +43,7 @@ export const run = (
     const collected = yield* Effect.scoped(
       Effect.flatMap(CollectorRun.opened(instances, { ...options, window: windowOf(over.cells) }), (scope) => {
         opened = scope
-        return scope.collect(over.cells, over.unread)
+        return scope.collect(over)
       })
     )
     return { collected, leftChanged: opened?.leftChanged() ?? [] }

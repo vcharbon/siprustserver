@@ -94,7 +94,7 @@ const collectBatch = async (
     locker: memoryLocker(),
     ...(exports ? { exportJudges: JudgePlan.exportJudgesOn(rig, LANE, holder) } : {})
   }
-  const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(CollectorRun.opened(instances, options), (opened) => opened.collect(cells, undescribed))))
+  const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(CollectorRun.opened(instances, options), (opened) => opened.collect({ cells, unread: undescribed, failed: [] }))))
   return { collected, said, holder }
 }
 

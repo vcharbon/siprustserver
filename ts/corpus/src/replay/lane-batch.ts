@@ -93,7 +93,7 @@ export interface Collectors<A, RC> {
   readonly options: CollectorRun.Options
   /** The batch's own directory, which holds the attachments that name no cell. */
   readonly holder: string
-  /** The batch's cells once driven, as `cell.v1` describes them, and those it could not describe. */
+  /** The batch's cells once driven, as `cell.v1` describes them, those it could not describe, and those whose own outcome failed or errored. */
   readonly cells: (value: A) => Effect.Effect<CollectorRun.Over, never, RC>
 }
 
@@ -342,7 +342,7 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
     if (close !== undefined) yield* close
     const collected = rig === undefined || opened === undefined
       ? []
-      : yield* Effect.flatMap(rig.cells(driven.value), (over) => opened.collect(over.cells, over.unread))
+      : yield* Effect.flatMap(rig.cells(driven.value), opened.collect)
     const ended: Omit<Ended<A>, "leftChanged"> = {
       value: driven.value,
       dirty,

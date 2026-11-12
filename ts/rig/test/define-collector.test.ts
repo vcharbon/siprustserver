@@ -59,7 +59,7 @@ const moduleCollector = async (params: Readonly<Record<string, unknown>>) => {
 const collect = (instance: CollectorRun.Instance, cells: ReadonlyArray<Cell.Cell>) =>
   Effect.runPromise(Effect.exit(Effect.scoped(Effect.flatMap(
     CollectorRun.opened([instance], { sink: () => Effect.void, locker: memoryLocker() }),
-    (opened) => opened.collect(cells)
+    (opened) => opened.collect({ cells, unread: [], failed: [] })
   ))))
 
 describe("a collector defined as a module", () => {

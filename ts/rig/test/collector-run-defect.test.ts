@@ -53,7 +53,7 @@ it("is not checkable on every cell and the scope where the base's own reading of
     sink: (event) => Effect.sync(() => void said.push(`${event.phase} ${event.collector}${event.message === undefined ? "" : `: ${event.message}`}`)),
     locker: memoryLocker()
   }
-  const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(CollectorRun.opened(instances, options), (opened) => opened.collect(cells))))
+  const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(CollectorRun.opened(instances, options), (opened) => opened.collect({ cells, unread: [], failed: [] }))))
   const byLabel = Object.fromEntries(collected.map((one) => [
     one.label,
     { cells: Object.fromEntries([...one.cells].map(([id, held]) => [id, held.verifications])), scope: one.scope.verifications }

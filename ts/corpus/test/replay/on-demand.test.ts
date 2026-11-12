@@ -91,33 +91,96 @@ const withStore = <A, E>(collectors: Layer.Layer<Collectors.Service>, effect: Ef
     ) as Effect.Effect<A, E>
   )
 
-/** A run whose one cell `case-1` landed passing, its bundle stating its clock and window. */
-const landedCell = Effect.gen(function*() {
-  const runs = yield* Runs.Service
-  const bundle = fs.mkdtempSync(path.join(TREE, "run-"))
-  const dir = path.join(bundle, "c1")
+/**
+ * A rig path with the batch collector `asked`, on-demand: its `open` keeps
+ * the window its context states in `SIPRIG_STATE` and lingers 400 ms; its
+ * `collect` fails where its state no longer holds the window its context
+ * states, else attaches to each cell a log naming it.
+ */
+const windowKeeping = async () => {
+  const root = fs.mkdtempSync(path.join(TREE, "rig-"))
+  const dir = path.join(root, "collectors", "asked")
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, "collector.toml"),
+    `schema = "collector.v1"\nname = "asked"\nscope = "batch"\ndefault = "on-demand"\n[run]\nopen = "./open"\ncollect = "./collect"\n`
+  )
+  const node = (body: string) => `#!/usr/bin/env node\nconst fs = require("node:fs")\nconst path = require("node:path")\n${body}\n`
+  const windowOf = `JSON.stringify(JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8")).window.start)`
+  fs.writeFileSync(
+    path.join(dir, "open"),
+    node(`fs.writeFileSync(path.join(process.env.SIPRIG_STATE, "window"), ${windowOf})\nsetTimeout(() => {}, 400)`),
+    { mode: 0o755 }
+  )
+  fs.writeFileSync(
+    path.join(dir, "collect"),
+    node([
+      `if (fs.readFileSync(path.join(process.env.SIPRIG_STATE, "window"), "utf8") !== ${windowOf}) process.exit(3)`,
+      `for (const cell of JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8")).cells) {`,
+      `  fs.writeFileSync(path.join(process.env.SIPRIG_OUT, cell.id + ".log"), "asked of " + cell.id + "\\n")`,
+      `  console.log(JSON.stringify({ attachment: { kind: "log", title: "asked of " + cell.id, file: cell.id + ".log" }, cell: cell.id }))`,
+      `}`
+    ].join("\n")),
+    { mode: 0o755 }
+  )
+  const rig = await Effect.runPromise(RigPath.load({ workspace: root }).pipe(Effect.provide(NodeServices.layer)))
+  const lane: Lanes.Loaded = {
+    id: LANE,
+    file: `lanes/${LANE}.toml`,
+    lane: { schema: "lane.v1", clock: "simulated" },
+    parts: new Map(),
+    operations: new Map(),
+    capabilities: new Set()
+  }
+  return Collectors.layerOf(rig, [lane])
+}
+
+/** A cell's bundle under `bundle`, stating its clock and its wall-clock window from `wallMs` on. */
+const bundleOf = (bundle: string, id: string, wallMs: number): string => {
+  const dir = path.join(bundle, id)
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(path.join(dir, "run-config.json"), `{"claim_numbers":{},"clock":"virtual","identities":{},"lane":"${LANE}","route_target":"127.0.0.1:5080"}\n`)
-  fs.writeFileSync(path.join(dir, "timing.json"), `{"settle_budget_ms":100,"settled_at_ms":10,"started_at_ms":0,"wall_started_at_ms":1,"wall_ended_at_ms":2}\n`)
-  const opened = yield* runs.open({ capture: "asked.pcap", lane: LANE, mode: "record", sessionDir: bundle, identity: CURRENT })
-  yield* runs.finish({
-    id: opened.id,
-    status: "done",
-    cases: [{
-      caseId: "case-1",
-      passed: true,
-      verdict: "ok",
-      skipped: null,
-      failedStep: null,
-      rfcGating: null,
-      mainError: null,
-      classification: null,
-      document: null,
-      verifications: [{ name: "call", source: "interpreter", answer: "pass" }]
-    }]
+  fs.writeFileSync(
+    path.join(dir, "timing.json"),
+    `{"settle_budget_ms":100,"settled_at_ms":10,"started_at_ms":0,"wall_started_at_ms":${wallMs},"wall_ended_at_ms":${wallMs + 1}}\n`
+  )
+  return dir
+}
+
+/** A run whose cells `case-<n>` (`c<n>`), one per wall-clock start of `walls`, landed passing; the cells. */
+const landedCells = (walls: ReadonlyArray<number>) =>
+  Effect.gen(function*() {
+    const runs = yield* Runs.Service
+    const bundle = fs.mkdtempSync(path.join(TREE, "run-"))
+    const opened = yield* runs.open({ capture: "asked.pcap", lane: LANE, mode: "record", sessionDir: bundle, identity: CURRENT })
+    const cells = walls.map((wall, at) => ({
+      id: `c${at + 1}`,
+      caseId: `case-${at + 1}`,
+      lane: LANE,
+      dir: bundleOf(bundle, `c${at + 1}`, wall),
+      runId: opened.id
+    }))
+    yield* runs.finish({
+      id: opened.id,
+      status: "done",
+      cases: cells.map((cell) => ({
+        caseId: cell.caseId,
+        passed: true,
+        verdict: "ok",
+        skipped: null,
+        failedStep: null,
+        rfcGating: null,
+        mainError: null,
+        classification: null,
+        document: null,
+        verifications: [{ name: "call", source: "interpreter", answer: "pass" }]
+      }))
+    })
+    return cells
   })
-  return { id: "c1", caseId: "case-1", lane: LANE, dir, runId: opened.id }
-})
+
+/** A run whose one cell `case-1` landed passing, its bundle stating its clock and window. */
+const landedCell = Effect.map(landedCells([1]), (cells) => cells[0]!)
 
 describe.skipIf(!served)("an on-demand run", () => {
   it("lands its attachment on the cell and leaves the cell's lines as they stand", async () => {
@@ -136,6 +199,19 @@ describe.skipIf(!served)("an on-demand run", () => {
     expect(lines).toEqual([{ name: "call", source: "interpreter", answer: "pass" }])
     expect(ran.cells[0]!.answers.verifications).toEqual([{ name: "asked", source: "asked", answer: "fail" }])
     expect(ran.leftChanged).toEqual([])
+  })
+
+  it("gives each of two asks at once on one run, lane and collector a directory of its own, removed once it landed", async () => {
+    const collectors = await windowKeeping()
+    const dir = path.join(TREE, "asked-together")
+    const attached = await withStore(collectors, Effect.gen(function*() {
+      const cells = yield* landedCells([1_000, 5_000])
+      yield* Effect.all(cells.map((cell) => OnDemand.run({ collector: "asked", cells: [cell], dir })), { concurrency: "unbounded" })
+      const store = yield* Attachments.Service
+      return yield* Effect.forEach(cells, (cell) => store.of({ scope: "cell", runId: cell.runId, caseId: cell.caseId }))
+    }))
+    expect(attached.map((listed) => listed.map((one) => one.title))).toEqual([["asked of c1"], ["asked of c2"]])
+    expect(fs.readdirSync(dir)).toEqual([])
   })
 
   it("is refused where the job's level sets the collector always, and runs nothing", async () => {

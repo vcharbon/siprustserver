@@ -46,14 +46,16 @@ afterAll(async () => {
 
 /**
  * The deployment's collectors: the job collector `lab` on {@link LANE}, its
- * steps the scripts given, its trace file; and, where `preCheck` is given, the
- * job pre-check `lab-own` whose collect runs it, required and needing the part
- * `needs` where one is named, the lane's clock `clock`.
+ * steps the scripts given, its default `setting` where one is given, its
+ * trace file; and, where `preCheck` is given, the job pre-check `lab-own`
+ * whose collect runs it, required and needing the part `needs` where one is
+ * named, the lane's clock `clock`.
  */
 const labOf = async (steps: {
   readonly collect: string
   readonly close: string
   readonly locks?: ReadonlyArray<string>
+  readonly setting?: string
   readonly preCheck?: string
   readonly needs?: string
   readonly clock?: "real" | "simulated"
@@ -77,6 +79,7 @@ const labOf = async (steps: {
     path.join(dir, "collector.toml"),
     `schema = "collector.v1"\nname = "lab"\nscope = "job"\nanswers = ["lab-check"]\n` +
       (steps.locks === undefined ? "" : `locks = ${JSON.stringify(steps.locks)}\n`) +
+      (steps.setting === undefined ? "" : `default = "${steps.setting}"\n`) +
       `[run]\nopen = "./open"\ncollect = "./collect"\nclose = "./close"\n`
   )
   const script = (name: string, body: string) =>
@@ -238,6 +241,25 @@ describe.skipIf(!served)("a job's collectors", () => {
     ])
     expect(jobLines).toEqual([{ name: "lab-check", source: "lab", answer: "pass" }])
     expect(lab.trace()).toEqual(["open", "collect", "close"])
+  })
+
+  it("collect an on-failure collector over a cell its caller states failed, though no line of it failed", async () => {
+    const lab = await labOf({
+      collect: `echo '{"verification":"lab-check","cell":"c1","answer":"pass"}'`,
+      close: "exit 0",
+      setting: "on-failure"
+    })
+    const cellLines = await withStore(lab.layer, Effect.gen(function*() {
+      const job = yield* jobOf
+      const cell = yield* landedCell
+      yield* JobCollectors.around(
+        { job, dir: path.join(TREE, `job${job}`), lanes: [LANE], cells: () => [{ ...cell, failed: true }] },
+        Effect.void
+      )
+      return yield* Effect.flatMap(Verifications.Service, (store) => store.of({ scope: "cell", runId: cell.runId, caseId: cell.caseId }))
+    }))
+    expect(lab.trace()).toEqual(["open", "collect", "close"])
+    expect(cellLines.map((line) => [line.name, line.answer])).toEqual([["call", "pass"], ["lab-check", "pass"]])
   })
 
   it("close where the job is interrupted after they opened", async () => {

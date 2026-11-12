@@ -119,7 +119,7 @@ export const run = (
     let scope: CollectorRun.Opened | undefined
     const collected = yield* Effect.scoped(Effect.flatMap(opened(instances, { sink: options.sink, locker: options.locker }), (one) => {
       scope = one
-      return one.collect([])
+      return one.collect({ cells: [], unread: [], failed: [] })
     }))
     const byLabel = new Map(instances.map((instance) => [instance.label, instance]))
     const failed: Array<string> = []

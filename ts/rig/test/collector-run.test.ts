@@ -82,7 +82,7 @@ const scope = <E>(
     const collected = yield* Effect.exit(Effect.scoped(Effect.gen(function*() {
       opened = yield* CollectorRun.opened(instances, options)
       yield* body
-      return yield* opened.collect(cells)
+      return yield* opened.collect({ cells, unread: [], failed: [] })
     })))
     return { collected, leftChanged: opened?.leftChanged() ?? [] }
   })
@@ -158,7 +158,7 @@ describe("a scope's collectors", () => {
     const failing = instanceOf(rig, root, "failing-collect")
     const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(
       CollectorRun.opened([lanes, failing], { sink: () => Effect.void, locker: memoryLocker() }),
-      (opened) => opened.collect(cells, unread)
+      (opened) => opened.collect({ cells, unread, failed: [] })
     )))
     const [tidy, failed] = collected
     expect(tidy!.cells.get("c1")!.verifications).toEqual([{ name: "tidy", source: "tidy", answer: "pass" }])
@@ -198,6 +198,31 @@ describe("a scope's collectors", () => {
     expect([...answered!.cells.keys()]).toEqual(["c1", "c2"])
   })
 
+  it("collects an on-failure collector after every other of its scope, one ordered after it included", async () => {
+    const { root, rig } = await samples()
+    const onFailure = { ...instanceOf(rig, root, "on-failure"), onFailure: true }
+    const { collected } = await runScope([onFailure, instanceOf(rig, root, "fails-c2")], cellsUnder(root), {
+      sink: () => Effect.void,
+      locker: memoryLocker()
+    })
+    const answers = valueOf(collected)
+    const answered = answers.find((one) => one.label === "on-failure")
+    expect(traceOf(root)).toEqual(["open on-failure", "collect on-failure c2", "close on-failure"])
+    expect(answers.map((one) => one.label)).toEqual(["fails-c2", "on-failure"])
+    expect([...answered!.cells.keys()]).toEqual(["c2"])
+  })
+
+  it("collects an on-failure collector over the cells its caller states failed or errored, though no line of theirs failed", async () => {
+    const { root, rig } = await samples()
+    const onFailure = { ...instanceOf(rig, root, "on-failure"), onFailure: true }
+    const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(
+      CollectorRun.opened([onFailure], { sink: () => Effect.void, locker: memoryLocker() }),
+      (opened) => opened.collect({ cells: cellsUnder(root), unread: [], failed: ["c2"] })
+    )))
+    expect(traceOf(root)).toEqual(["open on-failure", "collect on-failure c2", "close on-failure"])
+    expect([...collected[0]!.cells.keys()]).toEqual(["c2"])
+  })
+
   it("opens and closes an on-failure collector but never collects it where no cell failed, which answers nothing", async () => {
     const { root, rig } = await samples()
     const { sink, phases } = collecting()
@@ -222,7 +247,7 @@ describe("a scope's collectors", () => {
     if (!Result.isSuccess(planned)) throw new Error(planned.failure)
     const [c1] = cellsUnder(root)
     const ran = await Effect.runPromise(
-      CollectorOnDemand.run([planned.success], { cells: [c1!], unread: [] }, { sink: () => Effect.void, locker: memoryLocker() })
+      CollectorOnDemand.run([planned.success], { cells: [c1!], unread: [], failed: [] }, { sink: () => Effect.void, locker: memoryLocker() })
     )
     expect(traceOf(root)).toEqual(["collect on-demand c1", "window 0-1000"])
     expect(ran.leftChanged).toEqual([])
@@ -242,7 +267,7 @@ describe("a scope's collectors", () => {
     })
     await Effect.runPromise(CollectorOnDemand.run(
       [planned.success],
-      { cells: [at(c2, 5_000, 7_000), at(c1, 1_000, 2_000)], unread: [] },
+      { cells: [at(c2, 5_000, 7_000), at(c1, 1_000, 2_000)], unread: [], failed: [] },
       { sink: () => Effect.void, locker: memoryLocker() }
     ))
     expect(traceOf(root)).toEqual(["collect on-demand c2,c1", "window 1000-7000"])

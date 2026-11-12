@@ -82,7 +82,7 @@ export const around = <A, E, R>(request: Request<A>, work: Effect.Effect<A, E, R
       const value = yield* work
       const cells = distinct(request.cells(value))
       const over = yield* CollectedCells.describe(cells, path.basename(request.dir))
-      const collected = yield* scope.collect(over.cells, over.unread)
+      const collected = yield* scope.collect(over)
       yield* request.answered === undefined
         ? CollectedCells.merge(CollectedCells.pendingOf(collected, cells))
         : request.answered(cells, collected)

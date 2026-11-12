@@ -6,7 +6,9 @@
  * instances', are taken once before its first `open` and given back after
  * its last `close`; where they are refused, an instance naming one runs none
  * of its steps. An `on-failure` instance opens and closes as any other, and
- * collects over the scope's failed cells alone, not at all where none failed.
+ * collects after the others, where its `after` lets it, over the scope's
+ * failed cells alone (those the caller states failed or errored, or with a
+ * failing line by then), not at all where none failed.
  *
  * A failed or timed-out `open` or `collect` answers `not checkable`, with
  * what failed, for every verification its manifest names
@@ -94,8 +96,9 @@ export interface Instance {
   /** An `on-demand` collector its scope asked for by name; a pre-check so asked never fails open (`pre-check.ts`). */
   readonly asked?: true
   /**
-   * Set `on-failure`: its `collect` reads only the cells with a failed line by
-   * then ({@link failedOf}), and does not run where none failed.
+   * Set `on-failure`: its `collect` runs after every other instance's of its
+   * scope, reads only the cells failed by then ({@link failedOf}), and does
+   * not run where none failed.
    */
   readonly onFailure?: boolean
 }
@@ -130,23 +133,30 @@ export interface Unread {
   readonly why: string
 }
 
-/** A scope's cells as its collectors read them: those described, and those the base could not describe. */
+/**
+ * A scope's cells as its collectors read them: those described, those the
+ * base could not describe, and the ids of those whose own outcome, as the
+ * caller knows it when it hands them over, is a failure or an error.
+ */
 export interface Over {
   readonly cells: ReadonlyArray<Cell.Cell>
   readonly unread: ReadonlyArray<Unread>
+  readonly failed: ReadonlyArray<string>
 }
 
 /** A scope's opened collectors. */
 export interface Opened {
   /**
-   * Collects every instance in order over `cells`, the scope's cells, each
-   * instance over those of its lanes as the earlier ones left them, then joins
-   * and judges their records (`scope-judging.ts`): what each instance, then
-   * each judge, answered. Called once, when the scope ended. Each cell of
-   * `unread` on an instance's lanes is answered `not checkable` by it, and by
-   * each judge of exports alone, saying why the cell was not described.
+   * Collects over `over`, the scope's cells, each instance over those of its
+   * lanes as the earlier ones left them, in their {@link collectOrderOf}
+   * order: the `on-failure` ones over the cells failed by then
+   * ({@link failedOf}). Then joins and judges their records
+   * (`scope-judging.ts`): what each instance, in the order they collected,
+   * then each judge, answered. Called once, when the scope ended. Each cell of
+   * `over.unread` on an instance's lanes is answered `not checkable` by it,
+   * and by each judge of exports alone, saying why the cell was not described.
    */
-  readonly collect: (cells: ReadonlyArray<Cell.Cell>, unread?: ReadonlyArray<Unread>) => Effect.Effect<ReadonlyArray<Collected>>
+  readonly collect: (over: Over) => Effect.Effect<ReadonlyArray<Collected>>
   /** The labels of the instances whose `close` left the lab changed so far, in order. */
   readonly leftChanged: () => ReadonlyArray<string>
 }
@@ -456,12 +466,19 @@ const collectGuarded = (opening: Opening, sink: Sink, scopeCells: ReadonlyArray<
   })
 
 /**
- * The cells of `cells` with a failed line by then: one of their own
- * (`cell.v1` `verifications`), or one an earlier instance of the scope
- * answered of them in `earlier`; an informative or waived failure fails none.
+ * The cells of `cells` failed by then: those `failed` names, whose own
+ * outcome is a failure or an error, and those with a failed line, one of
+ * their own (`cell.v1` `verifications`) or one an earlier instance of the
+ * scope answered of them in `earlier`; an informative or waived failure fails
+ * none.
  */
-export const failedOf = (cells: ReadonlyArray<Cell.Cell>, earlier: ReadonlyArray<Collected>): ReadonlyArray<Cell.Cell> =>
+export const failedOf = (
+  cells: ReadonlyArray<Cell.Cell>,
+  failed: ReadonlySet<string>,
+  earlier: ReadonlyArray<Collected>
+): ReadonlyArray<Cell.Cell> =>
   cells.filter((cell) =>
+    failed.has(cell.id) ||
     Verification.failing([...cell.verifications, ...earlier.flatMap((one) => one.cells.get(cell.id)?.verifications ?? [])]).length > 0
   )
 
@@ -476,27 +493,47 @@ const unasked = (instance: Instance): Collected => ({
 })
 
 /**
- * `opening`'s answers over `cells`, after `earlier`, the answers of the
- * instances collected before it, and the cells it read: an `on-failure` one
- * collects over the failed cells alone and answers nothing where none failed;
- * any other collects over every cell of its lanes, each of `unread` answered
- * `not checkable`.
+ * `opening`'s answers over `cells`, the scope's as the earlier instances left
+ * them, after `earlier`, the answers of the instances collected before it,
+ * and the cells it read: an `on-failure` one collects over the failed cells
+ * alone (`over.failed` among them) and answers nothing where none failed; any
+ * other collects over every cell of its lanes, each of `over.unread`
+ * answered `not checkable`.
  */
 const answersOf = (
   opening: Opening,
   sink: Sink,
   cells: ReadonlyArray<Cell.Cell>,
-  unread: ReadonlyArray<Unread>,
+  over: Over,
   earlier: ReadonlyArray<Collected>
 ): Effect.Effect<ScopeJudging.Stepped> => {
   if (opening.instance.onFailure !== true) {
-    return Effect.map(collectGuarded(opening, sink, cells), (one) => ({ collected: withUnread(opening.instance, one, unread) }))
+    return Effect.map(collectGuarded(opening, sink, cells), (one) => ({ collected: withUnread(opening.instance, one, over.unread) }))
   }
-  const failed = failedOf(cellsOf(opening.instance, cells), earlier)
+  const failed = failedOf(cellsOf(opening.instance, cells), new Set(over.failed), earlier)
   const read = failed.map((cell) => cell.id)
   return failed.length === 0
     ? Effect.succeed({ collected: unasked(opening.instance), read })
     : Effect.map(collectGuarded(opening, sink, failed), (collected) => ({ collected, read }))
+}
+
+/**
+ * `openings` in the order they collect: the first in their order whose
+ * `after` (`collector-order.ts`) left none of the others' instances to
+ * collect, one that is not `on-failure` before any `on-failure` one; where
+ * none is free (a cycle the path refuses), the first left.
+ */
+const collectOrderOf = (openings: ReadonlyArray<Opening>): ReadonlyArray<Opening> => {
+  const left = [...openings]
+  const out: Array<Opening> = []
+  const free = (opening: Opening) =>
+    (opening.instance.collector.manifest.after ?? []).every((name) => !left.some((other) => other.instance.collector.name === name))
+  while (left.length > 0) {
+    const first = left.findIndex((opening) => free(opening) && opening.instance.onFailure !== true)
+    const at = first >= 0 ? first : Math.max(0, left.findIndex(free))
+    out.push(...left.splice(at, 1))
+  }
+  return out
 }
 
 /** One `close` of `instance`; why it failed, or `undefined`. */
@@ -608,17 +645,17 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
       let collected = false
       const start = openings[0]?.start ?? (yield* Effect.map(now, (at) => ({ lane_ms: at.clock_ms, wall_ms: at.wall_ms })))
       return {
-        collect: (cells, unread = []) =>
+        collect: (over) =>
           Effect.suspend(() => {
             if (collected) return Effect.die(new Error("a scope's collectors collect once"))
             collected = true
             return ScopeJudging.collect({
-              steps: openings.map((opening) => ({
+              steps: collectOrderOf(openings).map((opening) => ({
                 instance: opening.instance,
-                collect: (current, earlier) => answersOf(opening, options.sink, current, unread, earlier)
+                collect: (current, earlier) => answersOf(opening, options.sink, current, over, earlier)
               })),
-              cells,
-              undescribed: unread,
+              cells: over.cells,
+              undescribed: over.unread,
               exportJudges: options.exportJudges,
               start,
               end: options.window?.end,

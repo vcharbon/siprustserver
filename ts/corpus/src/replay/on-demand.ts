@@ -14,9 +14,10 @@ import { CollectorOnDemand, type CollectorRun } from "@sip/rig"
 import { Attachments } from "@sip/store"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
-import type * as FileSystem from "effect/FileSystem"
+import * as FileSystem from "effect/FileSystem"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
+import { randomUUID } from "node:crypto"
 import * as path from "node:path"
 import { Collectors, type Roots } from "../deployment/index.js"
 import * as CollectedCells from "./collected-cells.js"
@@ -35,9 +36,16 @@ export interface Request {
   readonly collector: string
   /** The cells it reads, each landed under its run row. */
   readonly cells: ReadonlyArray<CollectedCells.LandedCell>
-  /** Its own directory: each lane's instance under `<lane>/`, the scope's own attachments there. */
+  /**
+   * Where it makes its own directory, one per ask (`ask-<unique>`), each
+   * lane's instance under its `<lane>/`, removed once the attachments were
+   * copied onto their cells: two asks at once never share one.
+   */
   readonly dir: string
 }
+
+/** The prefix of an ask's own directory under {@link Request.dir}. */
+export const ASK_PREFIX = "ask-"
 
 /** What it answered of one cell. */
 export interface CellAnswered {
@@ -79,13 +87,26 @@ export const run = (
   Effect.gen(function*() {
     if (request.cells.length === 0) return yield* new Refused({ reason: `no cell named for ${request.collector}` })
     const seam = yield* Collectors.Service
+    const fs = yield* FileSystem.FileSystem
+    const asked = path.join(request.dir, `${ASK_PREFIX}${randomUUID()}`)
     const planned: Array<readonly [CollectorRun.Instance, ReadonlyArray<CollectedCells.LandedCell>]> = []
     for (const [lane, cells] of byLane(request.cells)) {
-      const dir = path.join(request.dir, lane)
+      const dir = path.join(asked, lane)
       const instance = yield* seam.onDemand(request.collector, lane, path.join(dir, "collectors"), dir)
       if (Result.isFailure(instance)) return yield* new Refused({ reason: instance.failure })
       planned.push([instance.success, cells])
     }
+    yield* fs.makeDirectory(request.dir, { recursive: true }).pipe(Effect.orDie)
+    yield* fs.makeDirectory(asked).pipe(Effect.orDie)
+    return yield* ranOver(request, planned).pipe(Effect.ensuring(Effect.ignore(fs.remove(asked, { recursive: true }))))
+  })
+
+/** `planned`, each lane's instance and its cells, run one after the other, their attachments landed on their cells. */
+const ranOver = (
+  request: Request,
+  planned: ReadonlyArray<readonly [CollectorRun.Instance, ReadonlyArray<CollectedCells.LandedCell>]>
+) =>
+  Effect.gen(function*() {
     const options: CollectorRun.Options = { sink: CollectorIo.sinkOf(undefined), locker: yield* CollectorIo.locker() }
     const answered: Array<CellAnswered> = []
     const leftChanged: Array<string> = []

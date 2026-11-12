@@ -137,6 +137,7 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
       {cell !== null && attached.state === "ok" && <AttachmentList listed={listed} heading="Attachments" />}
       {cell !== null && (
         <CollectOnDemand
+          key={`${laneRun.runId}/${cell}`}
           cell={collectCellOf(capture, laneRun, cell, caseId)}
           onLanded={() => setLanded((n) => n + 1)}
         />

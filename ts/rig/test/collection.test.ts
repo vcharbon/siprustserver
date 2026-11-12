@@ -86,6 +86,11 @@ describe("the wiring of a job", () => {
     expect(checked({ workspace: workspace(`[collection]\nquick = "never"\n`), lanes: [] })).toBe("rig.toml: collection.quick: a level is a table")
   })
 
+  it("refuses a level named standard, each collector's own default", () => {
+    expect(checked({ workspace: workspace(`[collection.standard]\nnever = ["capture"]\n`), lanes: [] }))
+      .toBe("rig.toml: collection.standard: standard is each collector's own default, which no file defines")
+  })
+
   it("refuses a lane excluding a collector the path does not define", () => {
     expect(checked({ lanes: [lane(`[collectors]\nexclude = ["pcap"]\n`)] }))
       .toBe("lanes/lab-a.toml: collectors.exclude: names pcap, which no collector of the path defines")

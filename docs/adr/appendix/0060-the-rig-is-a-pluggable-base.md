@@ -137,13 +137,16 @@ Rules:
 
 - In a job, `open` and `close` run whenever the collector is wired and set `always` or
   `on-failure`.
-- `on-failure` is read when `collect` would run: the collector runs if a cell of its scope has
-  a failed verification by then (its own lines, or one an earlier collector of the scope
-  answered), and receives only those cells; where none failed its `collect` does not run. A
-  source that keeps no history is collected `always` and cut per cell.
+- `on-failure` is read when `collect` would run, after every other collector of the scope
+  collected: the collector runs if a cell of its scope failed by then (its own outcome a
+  failure or an error, as the base states it when it hands the cells over, or a failed line of
+  its own or of a collector of the scope), and receives only those cells; where none failed
+  its `collect` does not run. A source that keeps no history is collected `always` and cut per
+  cell.
 - An `on-demand` collector runs when the site or the CLI asks for it, on the cells named, after
   their job ended: `open`, `collect` and `close` as a scope of its own, one per lane, its
-  context's window the span the cells ran in. What it
+  context's window the span the cells ran in, its directory the ask's own, removed once its
+  attachments landed. What it
   attaches lands on the cell, replacing an attachment of its name. Its lines are said to the
   asker and never merged into the cell: a question asked later does not change a verdict. A
   pre-check, a cell-scope collector, and one the level does not set `on-demand` are refused.

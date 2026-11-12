@@ -38,8 +38,8 @@
  *
  * A replay job passes on only the knobs its start states: the replay resolves
  * the rest off the request, then its lane's defaults; a `--collection` level
- * reaches the replay, whose wiring check refuses it before the job opens
- * where the workspace does not define it, and a restart keeps it. An ingest or a cut job
+ * the deployment refuses (`CliFacts.levelRefusal`) is refused before the
+ * job's row is made, else it reaches the replay, and a restart keeps it. An ingest or a cut job
  * drives no lane and takes the generic defaults.
  */
 import { selectorOf } from "@sip/corpus/housekeeping/delete-runs"
@@ -145,7 +145,11 @@ const knobsOf = (input: StartInput): JobStart.ReplayKnobs => ({
   collection: Option.getOrNull(input.collection)
 })
 
-/** A replay launched, said: the job, its log, the commands that follow it. */
+/**
+ * A replay launched, said: the job, its log, the commands that follow it; a
+ * collection level the deployment refuses (`CliFacts.levelRefusal`) refused
+ * before the job's row is made.
+ */
 const launchReplay = Effect.fn("JobCli.launchReplay")(function*(
   facts: CliFacts,
   sessions: string,
@@ -153,6 +157,11 @@ const launchReplay = Effect.fn("JobCli.launchReplay")(function*(
   knobs: JobStart.ReplayKnobs,
   restartOf: number | undefined
 ) {
+  const level = knobs.collection === null || facts.levelRefusal === undefined ? null : yield* facts.levelRefusal(knobs.collection)
+  if (level !== null) {
+    yield* Console.error(`[job] refused: ${level}`)
+    return yield* exit(2)
+  }
   const started = yield* JobStart.replay(sessions, request, knobs, restartOf).pipe(
     Effect.catchIf(JobStart.isNotStarted, (refused) => Effect.succeed(refused))
   )

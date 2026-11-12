@@ -378,14 +378,22 @@ const context = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
 for (const cell of context.cells) console.log(JSON.stringify({ verification: "lab-check", cell: cell.id, answer: "pass" }))
 `
 
-/** The deployment's collectors: on {@link PAUSED}, the batch collector `lab` running the scripts `steps` gives, answering `lab-check`. */
-const labOf = async (steps: { readonly collect: string; readonly close?: string }): Promise<Layer.Layer<Collectors.Service>> => {
+/**
+ * The deployment's collectors: on {@link PAUSED}, the batch collector `lab`
+ * running the scripts `steps` gives, answering `lab-check`, set `always` or
+ * as `steps.setting` says.
+ */
+const labOf = async (
+  steps: { readonly collect: string; readonly close?: string; readonly setting?: string }
+): Promise<Layer.Layer<Collectors.Service>> => {
   const root = fs.mkdtempSync(path.join(ROOT, "rig-"))
   const dir = path.join(root, "collectors", "lab")
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
     path.join(dir, "collector.toml"),
-    `schema = "collector.v1"\nname = "lab"\nscope = "batch"\nanswers = ["lab-check"]\n[run]\ncollect = "./collect"\n` +
+    `schema = "collector.v1"\nname = "lab"\nscope = "batch"\nanswers = ["lab-check"]\n` +
+      (steps.setting === undefined ? "" : `default = "${steps.setting}"\n`) +
+      `[run]\ncollect = "./collect"\n` +
       (steps.close === undefined ? "" : `close = "./close"\n`)
   )
   fs.writeFileSync(path.join(dir, "collect"), steps.collect, { mode: 0o755 })
@@ -557,6 +565,30 @@ describe.skipIf(!served)("the replay phase", () => {
       [`${TWO}-a`, "not-checkable"]
     ])
     expect(answered[2]!.message).toMatch(new RegExp(`^the cell ${TWO}#${TWO}-a@key was not described: `))
+  })
+
+  it("hands an on-failure batch collector the crashed cell, which states no failing line, and no cell that passed", async () => {
+    const layer = await labOf({ collect: PASSING_COLLECT, setting: "on-failure" })
+    const { lines } = await replay(PAUSED, { drive: crashingDrive, collectors: layer })
+    const answered = lines.filter((line) => line.name === "lab-check")
+    expect(answered.map((line) => [line.caseId, line.answer])).toEqual([[`${ONE}-b`, "pass"]])
+  })
+
+  it("hands the job's collectors each cell failed as its batch ended: crashed, or failed by a batch collector's line", async () => {
+    const failsA = `#!/usr/bin/env node
+const fs = require("node:fs")
+const context = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
+for (const cell of context.cells) {
+  console.log(JSON.stringify({ verification: "lab-check", cell: cell.id, answer: cell.case.endsWith("-a") ? "fail" : "pass" }))
+}
+`
+    const layer = await labOf({ collect: failsA })
+    const { done } = await replay(PAUSED, { drive: crashingDrive, collectors: layer })
+    expect(done.ran.map((cell) => [cell.caseId, cell.failed]).sort()).toEqual([
+      [`${ONE}-a`, true],
+      [`${ONE}-b`, true],
+      [`${TWO}-a`, false]
+    ])
   })
 
   it("marks the batch's runs dirty and the replay dirty where a collector's close left the lab changed", async () => {

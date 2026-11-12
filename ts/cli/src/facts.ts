@@ -60,4 +60,10 @@ export interface CliFacts {
   readonly defaultPcaps: () => ReadonlyArray<string>
   /** Where to watch a campaign on `lane`: the lines it prints before and after it. */
   readonly where: (lane: string) => ReadonlyArray<string>
+  /**
+   * Why a job naming the collection level `level` may not open, as the job's
+   * own entry point would refuse it; `null` where it may. A detached start
+   * asks it before it makes the job's row; absent, only the job itself checks.
+   */
+  readonly levelRefusal?: (level: string) => Effect.Effect<string | null, never, FileSystem.FileSystem>
 }

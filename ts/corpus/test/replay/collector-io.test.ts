@@ -89,7 +89,7 @@ const scopeOf = (instances: ReadonlyArray<CollectorRun.Instance>, held: Effect.E
     const locker = yield* CollectorIo.locker(waitMs)
     const opened = yield* CollectorRun.opened(instances, { sink: () => Effect.void, locker })
     yield* held
-    return yield* opened.collect([])
+    return yield* opened.collect({ cells: [], unread: [], failed: [] })
   }))
 
 describe("collectors naming one box-wide lock", () => {

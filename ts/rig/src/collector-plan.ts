@@ -14,9 +14,10 @@
  * one instance of a job-scope collector that needs no part, over the cells of
  * every lane wiring it, and one per distinct set of the part files it needs
  * among the job's lanes, over the cells of the lanes naming that set, its
- * context the first of them. Instances run in the order of their `after`,
- * else of their names (`collector-order.ts`), each with the judge its
- * manifest names.
+ * context the first of them. Instances open and close in the order of their
+ * `after`, else of their names (`collector-order.ts`); the `on-failure` ones
+ * collect after the others where their `after` lets them (`CollectorRun`).
+ * Each runs with the judge its manifest names.
  *
  * An `on-demand` collector is planned when the site or the CLI asks for it,
  * one instance over the cells it names on one lane ({@link onDemandOf}).

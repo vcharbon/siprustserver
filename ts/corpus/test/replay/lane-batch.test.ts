@@ -240,7 +240,7 @@ const labCollectors = async (
       locker: () => Effect.succeed(Effect.void)
     },
     holder,
-    cells: () => Effect.succeed({ cells: [cell], unread: [] })
+    cells: () => Effect.succeed({ cells: [cell], unread: [], failed: [] })
   }
 }
 

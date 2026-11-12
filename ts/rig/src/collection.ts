@@ -63,7 +63,7 @@ export interface Levels {
   readonly levels: ReadonlyMap<string, Level>
 }
 
-/** The levels `collection` states, or why it states none (the dotted key first). */
+/** The levels `collection` states, or why it states none (the dotted key first): a level named {@link STANDARD} is refused. */
 export const levelsOf = (collection: Collection | undefined): Result.Result<Levels, string> => {
   const levels = new Map<string, Level>()
   let chosen = STANDARD
@@ -75,6 +75,7 @@ export const levelsOf = (collection: Collection | undefined): Result.Result<Leve
     }
     if (typeof value === "string") return Result.fail(`collection.${key}: a level is a table`)
     if (!Schema.is(Name)(key)) return Result.fail(`collection.${key}: a level's name is lower-case letters, digits and dashes`)
+    if (key === STANDARD) return Result.fail(`collection.${key}: ${STANDARD} is each collector's own default, which no file defines`)
     levels.set(key, value)
   }
   if (chosen !== STANDARD && !levels.has(chosen)) {
