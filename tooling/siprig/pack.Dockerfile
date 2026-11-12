@@ -7,7 +7,7 @@
 # (the pack's provenance, `<component>.env`) and `wrapper` (the wrapper the
 # kit wrote for this image). The kit hands the manifest's facts in as
 # build arguments, each checked before the build (`ts/siprig/src/pack-image.ts`).
-ARG BASE
+ARG BASE=siprig
 FROM ${BASE}
 
 ARG PACKAGES=""
