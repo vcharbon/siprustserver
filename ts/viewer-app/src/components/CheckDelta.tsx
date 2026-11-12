@@ -2,7 +2,7 @@
  * One case's delta on one run and lane: the cell's verification lines and
  * status, the failed checks as large cards, each
  * with its decision line and the attachment it was read from beside it, the
- * cell's attachments and its records compared with the case's other
+ * cell's attachments, the on-demand collectors its lane offers, and its records compared with the case's other
  * sub-cases or lanes, then the ladder of what the run produced and the HTTP exchanges, the
  * selected message above the ladder. A check's anchor (the datagram it names
  * where one arrived, else its step's message) and an exchange's preceding
@@ -29,6 +29,7 @@ import { cellDocument } from "../opening.ts"
 import { useLinkOrigin } from "../server-config.ts"
 import { useCopy } from "../use-copy.ts"
 import { AttachmentList } from "./attachments/AttachmentList.tsx"
+import { CollectOnDemand } from "./attachments/CollectOnDemand.tsx"
 import { CheckCard } from "./CheckCard.tsx"
 import { Exchange } from "./Exchange.tsx"
 import { LadderPane } from "./LadderPane.tsx"
@@ -68,9 +69,10 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
     () => (cell === null ? Promise.resolve(undefined) : api.triageCell(capture, session, cell)),
     `${capture}/${session}/${cell ?? ""}`
   )
+  const [landed, setLanded] = useState(0)
   const attached = useAsync(
     () => (cell === null ? Promise.resolve([]) : api.attachments({ run: laneRun.runId, case: caseId })),
-    `${laneRun.runId}/${caseId}/${cell ?? ""}`
+    `${laneRun.runId}/${caseId}/${cell ?? ""}/${landed}`
   )
   const listed = attached.state === "ok" ? attached.value : []
   const said = listed.find((one) => one.name === view.saidLog)
@@ -133,6 +135,12 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
       )}
       {cell !== null && attached.state === "error" && <p className="cp-nok">attachments: {attached.message}</p>}
       {cell !== null && attached.state === "ok" && <AttachmentList listed={listed} heading="Attachments" />}
+      {cell !== null && (
+        <CollectOnDemand
+          cell={{ capture, session, cell, runId: laneRun.runId, caseId, lane }}
+          onLanded={() => setLanded((n) => n + 1)}
+        />
+      )}
       {cell !== null && <RecordsCompare view={view} caseId={caseId} run={run} lane={lane} listed={listed} />}
       {cell !== null && detail.state === "loading" && <p className="muted">…</p>}
       {detail.state === "error" && <p className="cp-nok">{detail.message}</p>}

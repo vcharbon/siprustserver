@@ -1,5 +1,5 @@
 /** The server client. One fetch helper, one hook, no state library. */
-import type { Attachment, CompareReport, RunReport } from "@sip/contracts"
+import type { Attachment, CompareReport, RunReport, Verification } from "@sip/contracts"
 import type { HttpExchanges } from "@sip/viewer-core/http"
 import { useEffect, useState } from "react"
 
@@ -1166,6 +1166,24 @@ export type AttachmentHolder =
   | { readonly batch: number }
   | { readonly job: number }
 
+/** An on-demand collector to run on one cell: the cell as the study lists it, and the case result it lands under. */
+export interface CollectAsked {
+  readonly collector: string
+  readonly capture: string
+  readonly session: string
+  readonly cell: string
+  readonly runId: number
+  readonly caseId: string
+  readonly lane: string
+}
+
+/** What an on-demand run answered of the cell: its lines (never merged into the cell's), how many attachments it landed, who left the lab changed. */
+export interface CollectAnswered {
+  readonly verifications: readonly Verification.Verification[]
+  readonly attached: number
+  readonly leftChanged: readonly string[]
+}
+
 /** One attachment read for its kind's component. */
 export type AttachmentView =
   | { readonly kind: "log"; readonly text: string; readonly bytes: number }
@@ -1467,7 +1485,11 @@ export const api = {
   /** What `holder` holds attached, in its order. */
   attachments: (holder: AttachmentHolder) => request<readonly AttachmentListed[]>(`/api/attachments${search(holder)}`),
   /** The attachment `id` read for its kind. */
-  attachment: (id: number) => request<AttachmentView>(`/api/attachments/${id}`)
+  attachment: (id: number) => request<AttachmentView>(`/api/attachments/${id}`),
+  /** The on-demand collectors a cell of `lane` may run, by name. */
+  collectOffered: (lane: string) => request<readonly string[]>(`/api/collect${search({ lane })}`),
+  /** Runs an on-demand collector on one cell; its attachments land on the cell. */
+  collect: (asked: CollectAsked) => post<CollectAnswered>("/api/collect", asked)
 }
 
 /** Where the attachment `id`'s file is read whole. */
