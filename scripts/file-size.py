@@ -24,15 +24,18 @@ The allowlist itself only ever tightens: against its version at a base (REV,
 by default the merge-base of HEAD and `develop`, else HEAD; HEAD under
 --staged), a new entry, a raised number or any changed setting line fails.
 The one new entry allowed is a file git sees renamed from a listed one in the
-same diff (`-M`), the old entry gone and the number no higher than its own.
+same diff (`-M`), the old entry gone and the number no higher than its own;
+the one changed setting allowed is a `scan` or `exclude` path following a scan
+directory git sees renamed whole, none of its files left behind.
 
   (no flag)  every scanned file against its budget, and the allowlist
              against the base; an entry above its file's size, or naming a
              file under the limit or gone, is stale and fails too
              (`--update` fixes it)
   --staged   the staged blobs of the staged files only, and the staged
-             allowlist against HEAD's (a pre-commit hook); stale entries are
-             not reported
+             allowlist against HEAD's (a pre-commit hook), following the
+             renames since the base (a rename committed before the allowlist
+             follows it); stale entries are not reported
   --update   lowers each entry to its file's size, moves the entry of a
              renamed file to its new path, removes the entries of files under
              the limit or gone; never raises nor adds one
@@ -202,14 +205,54 @@ def renames(root, base, cached):
     return found
 
 
-def against_base(allow, base, renamed):
-    """What `allow` loosens against its `base` version."""
+def moved_dirs(root, dirs, renamed, cached):
+    """`{old: new}` of the `dirs` git sees renamed whole: `new` is the one
+    directory below which renamed files keep their path under `old`, every file
+    renamed from under `old` lands under `new`, and no file is left under `old`
+    (in the index when `cached`, else tracked or untracked)."""
+    moved = {}
+    for d in dirs:
+        pre = d + "/"
+        moves = [(new, old[len(pre):]) for new, old in renamed.items() if old.startswith(pre)]
+        news = {new[:-len(rest) - 1] for new, rest in moves if new.endswith("/" + rest)}
+        if len(news) != 1:
+            continue
+        target = news.pop()
+        if any(not new.startswith(target + "/") for new, _ in moves):
+            continue
+        extra = [] if cached else ["--others", "--exclude-standard"]
+        if not git(root, "ls-files", "-z", "--cached", *extra, "--", d).strip("\0"):
+            moved[d] = target
+    return moved
+
+
+def follow_moves(setting, moved):
+    """`setting` with each `scan` or `exclude` path under a moved directory
+    named under its new one."""
+    key, *words = setting.split()
+    if key not in ("scan", "exclude"):
+        return setting
+
+    def follow(word):
+        for old, new in moved.items():
+            if word.rstrip("/") == old or word.startswith(old + "/"):
+                return new + word[len(old):]
+        return word
+
+    return " ".join([key] + [follow(w) for w in words])
+
+
+def against_base(allow, base, renamed, moved):
+    """What `allow` loosens against its `base` version, whose settings `allow`
+    keeps as they are or with their `scan` and `exclude` paths following the
+    directories git sees `moved`."""
     if base is None:
         return []
     bad = []
-    if allow.settings != base.settings:
-        gone = [x for x in base.settings if x not in allow.settings]
-        new = [x for x in allow.settings if x not in base.settings]
+    base_settings = [follow_moves(x, moved) for x in base.settings]
+    if allow.settings != base.settings and allow.settings != base_settings:
+        gone = [x for x in base_settings if x not in allow.settings]
+        new = [x for x in allow.settings if x not in base_settings]
         change = "; ".join([f"was `{x}`" for x in gone] + [f"now `{x}`" for x in new])
         bad.append(f"{allow.path} changes its settings against {base.path} ({change or 'order'})")
     for rel, n in sorted(allow.entries.items()):
@@ -223,6 +266,16 @@ def against_base(allow, base, renamed):
             continue
         bad.append(f"{allow.path} adds {rel} at {n}, which {base.path} does not list")
     return bad
+
+
+def loosened(root, allow, base, since, cached):
+    """What `allow` loosens against its version at `base`, following the
+    renames git sees from `since` to the worktree (the index when `cached`)."""
+    held = base_allow(root, base, allow.path)
+    if held is None:
+        return []
+    renamed = renames(root, since, cached)
+    return against_base(allow, held, renamed, moved_dirs(root, held.scan, renamed, cached))
 
 
 BASE_HINT = "the allowlist only tightens: a file over its limit is split, never listed or raised"
@@ -243,7 +296,7 @@ def cmd_check(root, allow, base):
     sizes = scanned(root, allow)
     grown = over_budget(sizes, allow)
     old = stale(sizes, allow)
-    loose = against_base(allow, base_allow(root, base, allow.path), renames(root, base, False))
+    loose = loosened(root, allow, base, base, False)
     rc = report(grown, SPLIT_HINT if grown else None)
     rc = report(loose, BASE_HINT if loose else None) or rc
     return report(old, "run `file-size.py --update` and commit the allowlist" if old else None) or rc
@@ -262,7 +315,7 @@ def cmd_staged(root, allow_rel):
             sizes[rel] = count_lines(git(root, "cat-file", "blob", f":{rel}", binary=True))
     grown = over_budget(sizes, allow)
     base = "HEAD" if rev_exists(root, "HEAD") else None
-    loose = against_base(allow, base_allow(root, base, allow_rel), renames(root, base, True))
+    loose = loosened(root, allow, base, default_base(root), True)
     rc = report(grown, SPLIT_HINT if grown else None)
     return report(loose, BASE_HINT if loose else None) or rc
 
@@ -297,7 +350,7 @@ def cmd_update(root, allow, allow_file, base):
         print(f"file-size: {c}")
     allow = load_allow(root, os.path.relpath(allow_file, root))
     grown = over_budget(sizes, allow)
-    loose = against_base(allow, base_allow(root, base, allow.path), renames(root, base, False))
+    loose = loosened(root, allow, base, base, False)
     rc = report(grown, SPLIT_HINT if grown else None)
     return report(loose, BASE_HINT if loose else None) or rc
 

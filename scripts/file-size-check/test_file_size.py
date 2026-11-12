@@ -257,6 +257,50 @@ class AgainstTheBase(Case):
         repo.write("file-size.allow", SETTINGS + "src/huge.rs 650\n")
         self.refused(repo, "adds src/huge.rs at 650")
 
+    def test_a_scan_directory_renamed_whole_moves_its_settings_and_entries(self):
+        repo = self.repo(SETTINGS + "src/big.rs 600\n")
+        repo.write("src/big.rs", lines(600))
+        repo.write("src/a.rs", lines(10))
+        repo.commit()
+        repo.git("mv", "src", "lib")
+        repo.git("mv", "lib/a.rs", "lib/b.rs")
+        repo.write("file-size.allow", SETTINGS.replace("src", "lib") + "lib/big.rs 600\n")
+        self.assertEqual(repo.run(), (0, ""))
+        repo.git("add", "-A")
+        self.assertEqual(repo.run("--staged"), (0, ""))
+        repo.commit()
+        self.assertEqual(repo.run("--base", "HEAD~1"), (0, ""))
+
+    def test_a_scan_directory_renamed_in_part_keeps_its_settings(self):
+        repo = self.repo(SETTINGS + "src/big.rs 600\n")
+        repo.write("src/big.rs", lines(600))
+        repo.write("src/left.rs", lines(700))
+        repo.write("file-size.allow", SETTINGS + "src/big.rs 600\nsrc/left.rs 700\n")
+        repo.commit()
+        os.makedirs(os.path.join(repo.root, "lib"))
+        repo.git("mv", "src/big.rs", "lib/big.rs")
+        repo.write("file-size.allow", SETTINGS.replace("src", "lib") + "lib/big.rs 600\n")
+        self.refused(repo, "changes its settings")
+
+    def test_staged_follows_a_rename_committed_earlier_on_the_branch(self):
+        repo = self.based()
+        repo.git("branch", "develop")
+        repo.git("checkout", "-q", "-b", "topic")
+        repo.git("mv", "src", "lib")
+        repo.commit()
+        repo.write("lib/c.rs", lines(10))
+        repo.git("add", "lib/c.rs")
+        self.assertEqual(repo.run("--staged"), (0, ""))
+        repo.write("file-size.allow", SETTINGS.replace("src", "lib") + "lib/big.rs 600\n")
+        repo.git("add", "-A")
+        self.assertEqual(repo.run("--staged"), (0, ""))
+        repo.write("file-size.allow", SETTINGS.replace("src", "lib") + "lib/big.rs 650\n")
+        repo.write("lib/big.rs", lines(650))
+        repo.git("add", "-A")
+        rc, out = repo.run("--staged")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("adds lib/big.rs at 650", out)
+
 
 class RealAllowlist(Case):
     """The repository's own settings catch both probes."""
