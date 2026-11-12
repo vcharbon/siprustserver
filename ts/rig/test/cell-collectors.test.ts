@@ -4,8 +4,11 @@
  * ended while the next cells run, so a delay costs the batch once, not once
  * per cell; a cell whose collector `holds_cell_locks` keeps its locks until
  * they answered; a collector past its deadline answers `not checkable` and
- * still closes; a simulated lane runs none and says so of each wired one.
+ * still closes; a cell a collector did not collect (its collect failed or
+ * late) is left unverified, its judge not run; a simulated lane runs none and
+ * says so of each wired one.
  */
+import { Verification } from "@sip/contracts"
 import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
 import * as Fiber from "effect/Fiber"
@@ -54,7 +57,20 @@ const SAMPLES = {
   ...cellCollector("delayed", "delay_s = 10", { collect: PASS("delayed") }),
   ...cellCollector("holding", "delay_s = 10\nholds_cell_locks = true", { collect: PASS("holding") }),
   ...cellCollector("bracketed", "", { open: "exit 0", collect: PASS("bracketed"), close: "exit 0" }),
-  ...cellCollector("hanging", "delay_s = 1\n[timeouts]\ncollect_s = 2", { collect: "sleep 30 &\nwait", close: "exit 0" })
+  ...cellCollector("hanging", "delay_s = 1\n[timeouts]\ncollect_s = 2", { collect: "sleep 30 &\nwait", close: "exit 0" }),
+  ...cellCollector("judged", `judge = "strict"\n[join]\nkey = "call_id"\n[timeouts]\ncollect_s = 2`, {
+    collect: `if [ -e ../../judged-hangs ]; then sleep 30 &\nwait; fi\necho "the store is gone" >&2\nexit 3`
+  }),
+  "judges/strict/judge.toml": `schema = "judge.v1"\nname = "strict"\nrun = "./judge"\n`,
+  "judges/strict/judge": {
+    text: `#!/usr/bin/env node
+const fs = require("node:fs")
+const ctx = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))
+const held = (file) => file !== undefined && fs.readFileSync(file, "utf8").trim() !== ""
+for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "judged", cell: cell.id, answer: held(cell.records.judged) ? "pass" : "fail" }))
+`,
+    executable: true
+  }
 }
 
 /** A real-clock lane. */
@@ -232,6 +248,23 @@ describe("a batch's cell-scope collectors", () => {
     const lane: Lanes.Loaded = { ...REAL, lane: { ...REAL.lane, collectors: { delayed: { delay_s: 2 } } } }
     const instances = CollectorPlan.cellPlanOf(rig, lane, path.join(root, "_cells")).instancesFor("c1", path.join(root, "_cells", "c1"))
     expect(instances.map(CellCollectors.delayMsOf)).toEqual([2000])
+  })
+
+  it.each([
+    ["its collect exits non-zero", false, "collect exited 3: the store is gone"],
+    ["its collect is past its collect_s", true, "not answered within its collect_s of 2 s once due"]
+  ])("leave unverified, their judge not run, a cell their collector did not collect because %s", async (_, hangs, why) => {
+    const { root, rig } = await rigWith("judged")
+    if (hangs) fs.writeFileSync(path.join(root, "judged-hangs"), "")
+    const plan = CollectorPlan.cellPlanOf(rig, REAL, path.join(root, "_cells"))
+    const collected = await onFakeClock(Effect.scoped(Effect.gen(function*() {
+      const cells = yield* CellCollectors.make(plan, { sink: () => Effect.void, locker: memoryLocker() })
+      yield* cells.around("c1", call(1000), () => Effect.succeed(overOf(root, "c1")))
+      return yield* cells.joined
+    })))
+    const lines = collected.flatMap((one) => one.cells.get("c1")?.verifications ?? [])
+    expect(lines).toEqual([expect.objectContaining({ name: "judged", source: "strict", answer: "not-checkable", message: expect.stringContaining(why) })])
+    expect(Verification.finalStatusOf(lines)).toBe("unverified")
   })
 
   it("run none on a simulated lane, and say so of each one wired there", async () => {
