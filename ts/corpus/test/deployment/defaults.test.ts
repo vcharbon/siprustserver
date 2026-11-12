@@ -3,8 +3,8 @@
  * guess would make dangerous — roots, tools, the anonymiser, the cell host, a
  * job's entry point, the tracker's texts — refuses by name when a command
  * reaches for it; the others state nothing (no lane declared, no side row, no
- * repository, every ticket missing). A deployment's own layer is what a
- * reader is answered from.
+ * repository, every ticket missing, no collector). A deployment's own layer
+ * is what a reader is answered from.
  */
 import { NodeServices } from "@effect/platform-node"
 import * as Cause from "effect/Cause"
@@ -16,6 +16,7 @@ import {
   Boxing,
   CaseLayout,
   CellHost,
+  Collectors,
   Extraction,
   Identity,
   LaneHosting,
@@ -28,6 +29,7 @@ import {
 const defaults = Layer.mergeAll(
   Boxing.layer,
   CaseLayout.layer,
+  Collectors.layer,
   CellHost.layer,
   Extraction.layer,
   Identity.layer,
@@ -65,10 +67,15 @@ describe("the seams a guess would make dangerous", () => {
       .toContain("CellHost.layerWith")
   })
 
-  it("refuse a job launch, naming the kind, and run no hook", async () => {
+  it("refuse a job launch, naming the kind", async () => {
     const launcher = await seam(Launcher.Service)
     expect(await refusal(launcher.entry("cut"))).toContain("no entry point runs a cut job")
-    expect(await Effect.runPromise(launcher.hooks)).toEqual([])
+  })
+
+  it("run no collector", async () => {
+    const collectors = await seam(Collectors.Service)
+    expect(await Effect.runPromise(collectors.batch("any", "/unused", "/unused"))).toEqual([])
+    expect(await Effect.runPromise(collectors.job(["any"], "/unused", "/unused"))).toEqual([])
   })
 
   it("refuse the tracker's texts, so a pass keeping what tickets cite never reads 'nothing cited'", async () => {

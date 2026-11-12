@@ -36,9 +36,9 @@
  * A request's replay is a JOB: `--job <id>` names the row `job start` made and
  * launched this process for; without it the process makes its own row,
  * `running` under its own pid, so a foreground replay is in the queue too. The
- * hooks bracket it, each run keeps their logs over its own cells' window
- * (`@sip/corpus` `hook-keep.ts`), its lock waits show on the row, and the row
- * closes with the exit code on the way out.
+ * job-scope collectors the deployment wires on the lane bracket its passes
+ * once the lane is held (`@sip/corpus` `job-collectors.ts`), its lock waits
+ * show on the row, and the row closes with the exit code on the way out.
  *
  * A job STOPS on SIGTERM (`job stop`): the phase admits no new cell, waits the
  * grace the stop wrote on the row (else `DEFAULT_GRACE`) for the cells in
@@ -63,8 +63,6 @@
  * is `no-cases`. Silence is never an outcome.
  */
 import { afterSweep } from "@sip/corpus/housekeeping/cleanup"
-import * as HookKeep from "@sip/corpus/jobs/hook-keep"
-import * as Hooks from "@sip/corpus/jobs/hooks"
 import * as Job from "@sip/corpus/jobs/job"
 import { DEFAULT_GRACE } from "@sip/corpus/jobs/job"
 import { errorsFail, type Options } from "@sip/corpus/options"
@@ -77,8 +75,8 @@ import * as ReplaySummary from "@sip/corpus/report/replay-summary"
 import { passes as passesOf } from "@sip/corpus/requests/compare-request"
 import { resolutionLines, unranOnly } from "@sip/corpus/requests/request"
 import * as Session from "@sip/corpus/session"
+import * as JobCollectors from "@sip/corpus/replay/job-collectors"
 import { label, type Work, workList } from "@sip/corpus/universe"
-import { Launcher } from "@sip/corpus"
 import { Jobs, Requests } from "@sip/store"
 import * as Cause from "effect/Cause"
 import * as Console from "effect/Console"
@@ -90,7 +88,6 @@ import * as Option from "effect/Option"
 import { Command, Flag } from "effect/unstable/cli"
 import type { CliFacts } from "../facts.js"
 import { triageFlags } from "../flags.js"
-import { attachHooks } from "../hook-attachments.js"
 import * as IdFlags from "../id-flags.js"
 import { replayOptionsOf, requestOptionsOf, USAGE_TAIL } from "../options.js"
 import * as Refusals from "../refusals.js"
@@ -166,7 +163,7 @@ const jobOf = Effect.fn("Replay.job")(function*(input: Input, row: Requests.Row,
     args: { batch: options.batchSize, concurrency: options.concurrency, memoryMax: options.memoryMax },
     createdBy: yield* createdBy
   })
-  yield* jobs.started(id, { pid: process.pid, hooksPath: Job.hooksPath(options.paths.sessions, id) })
+  yield* jobs.started(id, { pid: process.pid })
   return id
 })
 
@@ -212,15 +209,15 @@ const graceOf = Effect.fn("Replay.grace")(function*(jobId: number) {
 })
 
 /**
- * A request replayed as a job: resolved against the pin, bracketed by the
- * hooks, the phase under the lane's locks with the row saying whom it waits
- * for, the row closed on the way out — with the exit code, or `failed` when
- * the process failed before it had one.
+ * A request replayed as a job: resolved against the pin, the phase under the
+ * lane's locks with the row saying whom it waits for and the job's collectors
+ * around its passes, the row closed on the way out — with the exit code, or
+ * `failed` when the process failed before it had one.
  *
  * The whole of it runs MASKED: a SIGTERM (the runtime interrupts the main
  * fiber) lands in one of two places — the wait for the lane, which simply
  * ends, or the wait on the phase, which asks it to stop and waits for its
- * answer — and the closing, the hooks and the row are written whatever came
+ * answer — and the collectors' close and the row are written whatever came
  * in. The fiber ends interrupted once the mask is left, so the process exits
  * `INTERRUPTED_EXIT` as the row says.
  */
@@ -282,17 +279,6 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
   }
   // The row states its cells before the lane is waited for: `job_cells` are written under the lane.
   yield* jobs.planned(jobId, cellsOf(resolution))
-  const launcher = yield* Launcher.Service
-  const hooks = yield* launcher.hooks
-  const hooksDir = Job.hooksPath(options.paths.sessions, jobId)
-  const env: Hooks.HookEnv = {
-    job: jobId,
-    jobDir: Job.jobDir(options.paths.sessions, jobId),
-    captures: resolution.captures.map((capture) => capture.capture),
-    lane: options.lane,
-    startedAt: new Date().toISOString()
-  }
-  yield* attachHooks(jobId, env.jobDir, yield* Hooks.run(hooks, "before", env, hooksDir, launcher.hooksCwd))
   const watch = (holder: string | undefined) => jobs.waiting(jobId, holder ?? null).pipe(Effect.ignore)
   const stop: Stop = yield* Deferred.make<number>()
   const passes = passesOf(shown.request.knobs)
@@ -316,13 +302,21 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
   const ran = yield* Effect.exit(
     Effect.scoped(Effect.gen(function*() {
       yield* restore(ReplayBuild.session(options, `job ${jobId}: replaying request ${id} on ${options.lane}`, watch))
-      const done: Array<Replay> = []
-      for (let at = 0; at < passes; at++) {
-        const one = yield* pass(at)
-        done.push(one)
-        if (one.interrupted) break
-      }
-      return done as ReadonlyArray<Replay>
+      const passed = Effect.gen(function*() {
+        const done: Array<Replay> = []
+        for (let at = 0; at < passes; at++) {
+          const one = yield* pass(at)
+          done.push(one)
+          if (one.interrupted) break
+        }
+        return done as ReadonlyArray<Replay>
+      })
+      return yield* JobCollectors.around({
+        job: jobId,
+        dir: Job.jobDir(options.paths.sessions, jobId),
+        lanes: [options.lane],
+        cells: (done) => done.flatMap((one) => one.ran)
+      }, passed)
     })).pipe(Effect.catchTag("Session.Held", (held) => Effect.succeed(held)))
   )
   if (Exit.isFailure(ran)) {
@@ -338,22 +332,6 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
   const replays = ran.value
   const code = replays instanceof Session.Held ? 2 : yield* closingCode(replays)
   if (replays instanceof Session.Held) yield* Console.error(`[replay] refused: ${replays.held}`)
-  const finishedAt = new Date().toISOString()
-  const bundles = replays instanceof Session.Held ? [] : replays.flatMap((one) => one.bundles)
-  yield* attachHooks(
-    jobId,
-    env.jobDir,
-    yield* Hooks.run(
-      hooks,
-      "after",
-      { ...env, finishedAt, ...(bundles.length === 1 ? { runDir: bundles[0] } : {}) },
-      hooksDir,
-      launcher.hooksCwd
-    )
-  )
-  // Each real-lane run keeps the hook logs over its own cells' window.
-  const kept = yield* HookKeep.keep(hooksDir, bundles)
-  if (kept > 0) yield* Console.log(`[replay] job ${jobId}: ${kept} hook log(s) kept with the runs they cover`)
   yield* jobs.close(jobId, closing(code))
   if (replays instanceof Session.Held) return code
   if (input.summary) for (const line of yield* ReplaySummary.read(`@job:${jobId}`, options.lane)) yield* Console.log(line)

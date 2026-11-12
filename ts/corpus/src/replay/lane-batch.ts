@@ -17,9 +17,18 @@
  * interrupted still closes its row, the failure as its detail. A batch a
  * process stood for holds one verification line per gate its end read, and
  * one for its end itself where that says what no gate does ({@link linesOf}).
+ *
+ * The rig's batch-scope collectors (`@sip/rig` `CollectorRun`, ADR-0060
+ * appendix §3) open once the lane stood, collect over the batch's cells once
+ * the end gate read and the caller's own collectors closed, and close before
+ * the SUT and the batch process are given back, whatever ended the batch.
+ * What they answered of each cell is the caller's to land ({@link Ended}
+ * `collected`); what they answered of the batch joins its lines and its
+ * attachments.
  */
 import type { Verification } from "@sip/contracts"
-import { Batches } from "@sip/store"
+import { type Cell, CollectorRun } from "@sip/rig"
+import { Attachments, Batches } from "@sip/store"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
@@ -75,6 +84,16 @@ export interface Driven<A> {
   readonly interrupted: number
 }
 
+/** The rig's collectors of a batch: their instances, what they run with, and the batch's cells as they read them. */
+export interface Collectors<A, RC> {
+  readonly instances: ReadonlyArray<CollectorRun.Instance>
+  readonly options: CollectorRun.Options
+  /** The batch's own directory, which holds the attachments that name no cell. */
+  readonly holder: string
+  /** The batch's cells once driven, as `cell.v1` describes them. */
+  readonly cells: (value: A) => Effect.Effect<ReadonlyArray<Cell.Cell>, never, RC>
+}
+
 /** What one batch is asked to do: its cells driven under `E`/`R`, its collectors opened under `EC`/`RO`, closed under `RC`. */
 export interface Request<A, E, R, EC = never, RO = never, RC = never> {
   readonly lane: string
@@ -86,8 +105,10 @@ export interface Request<A, E, R, EC = never, RO = never, RC = never> {
   readonly host?: StandBatch
   /** Who stands the SUT, likewise. */
   readonly sut?: StandSut
-  /** The batch's collectors: opened once the lane stood, their close run once the end gate read. */
+  /** The caller's own collectors: opened once the lane stood, their close run once the end gate read. */
   readonly collect?: Effect.Effect<Effect.Effect<void, never, RC>, EC, RO>
+  /** The rig's collectors of the batch; none runs where absent. */
+  readonly collectors?: Collectors<A, RC>
   /** Drives the batch's cells on what the lane stood. */
   readonly drive: (stood: Stood) => Effect.Effect<Driven<A>, E, R>
 }
@@ -111,6 +132,10 @@ export interface Ended<A> {
   readonly interrupted: number
   /** Whether a batch process ran the cells. */
   readonly hosted: boolean
+  /** What each of the rig's collectors answered, in their order; its cells' answers are the caller's to land. */
+  readonly collected: ReadonlyArray<CollectorRun.Collected>
+  /** The labels of the rig's collectors whose `close` left the lab changed. */
+  readonly leftChanged: ReadonlyArray<string>
 }
 
 /** What an unjudged batch's end states where nothing else says why. */
@@ -178,22 +203,41 @@ export const linesOf = (
 const failureOf = (cause: Cause.Cause<unknown>): string =>
   Cause.hasInterruptsOnly(cause) ? "interrupted" : Cause.pretty(cause).split("\n")[0] ?? "failed"
 
-/** One batch, its row (where it files one) open from before the stand until what it stood is given back. */
+/** What the rig's collectors answered of the batch itself: their lines and their attachments, in their order. */
+export const scopeAnswersOf = (collected: ReadonlyArray<CollectorRun.Collected>): CollectorRun.Answers => ({
+  verifications: collected.flatMap((one) => one.scope.verifications),
+  attachments: collected.flatMap((one) => one.scope.attachments)
+})
+
+/**
+ * One batch, its row (where it files one) open from before the stand until
+ * what it stood is given back, closed with its lines and the rig's
+ * collectors' lines of it, their attachments of it added.
+ */
 export const run = <A, E, R, EC = never, RO = never, RC = never>(
   request: Request<A, E, R, EC, RO, RC>
 ): Effect.Effect<
   Ended<A>,
   E | EC | LaneHosting.LaneUnready | LaneHosting.LaneUnstated | SqlError,
-  R | Exclude<RO, Scope.Scope> | RC | LaneHosting.Service | Batches.Service
+  R | Exclude<RO, Scope.Scope> | RC | LaneHosting.Service | Batches.Service | Attachments.Service
 > =>
   Effect.gen(function*() {
-    if (request.row === undefined) return yield* Effect.scoped(stood(request))
+    const scoped = Effect.map(
+      Effect.scoped(stood(request)),
+      ({ ended, opened }): Ended<A> => ({ ...ended, leftChanged: opened?.leftChanged() ?? [] })
+    )
+    if (request.row === undefined) return yield* scoped
     const batches = yield* Batches.Service
     const id = yield* batches.open(request.row)
-    const ended = yield* Effect.scoped(stood(request)).pipe(
+    const ended = yield* scoped.pipe(
       Effect.onExit((exit) => Exit.isSuccess(exit) ? Effect.void : Effect.ignore(batches.close(id, failureOf(exit.cause))))
     )
-    yield* batches.close(id, detailOf(ended), linesOf(ended))
+    const answered = scopeAnswersOf(ended.collected)
+    yield* batches.close(id, detailOf(ended), [...linesOf(ended), ...answered.verifications])
+    if (answered.attachments.length > 0 && request.collectors !== undefined) {
+      const attachments = yield* Attachments.Service
+      yield* attachments.add({ scope: "batch", batchId: id }, { dir: request.collectors.holder, attachments: answered.attachments })
+    }
     return ended
   })
 
@@ -217,6 +261,8 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
       standSut(request.lane, stand.under, stand.sutVariables),
       (held) => held?.stop ?? Effect.void
     )
+    const rig = request.collectors
+    const opened = rig === undefined ? undefined : yield* CollectorRun.opened(rig.instances, rig.options)
     const close = request.collect === undefined ? undefined : yield* request.collect
     const driven = yield* request.drive({ host, sut })
     const deadHost = host?.died()
@@ -228,7 +274,8 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
     const contexts = host?.contexts()
     const gates = deadHost === undefined ? host?.gates?.() ?? [] : []
     if (close !== undefined) yield* close
-    return {
+    const collected = rig === undefined || opened === undefined ? [] : yield* opened.collect(yield* rig.cells(driven.value))
+    const ended: Omit<Ended<A>, "leftChanged"> = {
       value: driven.value,
       dirty,
       gates,
@@ -237,6 +284,8 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
       judged,
       contexts,
       interrupted: driven.interrupted,
-      hosted: host !== undefined
-    } satisfies Ended<A>
+      hosted: host !== undefined,
+      collected
+    }
+    return { ended, opened }
   })

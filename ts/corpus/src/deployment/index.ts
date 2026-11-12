@@ -11,6 +11,7 @@
 export * as Boxing from "./boxing.js"
 export * as CaseLayout from "./case-layout.js"
 export * as CellHost from "./cell-host.js"
+export * as Collectors from "./collectors.js"
 export * as Extraction from "./extraction.js"
 export * as Identity from "./identity.js"
 export * as LaneHosting from "./lane-hosting.js"

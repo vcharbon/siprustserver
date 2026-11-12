@@ -30,7 +30,10 @@
  * answer for one call. The lane's SUT is the batch's too — stood up where the
  * deployment manages it, attached to where it stands (`LaneHosting.standSut`).
  * Elsewhere each cell is its own interpreter process. Either runs inside the
- * deployment's box (`Boxing`), per cell or per batch.
+ * deployment's box (`Boxing`), per cell or per batch. The collectors the
+ * deployment wires on the lane (`Collectors`) bracket each batch and read the
+ * cells it ran to a bundle; what they answered of a cell is merged into it
+ * once its row closed (`collected-cells.ts`).
  *
  * The phase writes nothing anybody else reads: the bundles are store-named and
  * the cases content-named, so any number of replays run at once over one cut.
@@ -48,7 +51,7 @@
 import { E2e } from "@sip/contracts"
 import { runCell, settled } from "@sip/driver"
 import { perSecond, unpaced } from "@sip/driver/pace"
-import { Batches, Bundle, Jobs, Requests, RuleHits, Runs, Sweeps } from "@sip/store"
+import { Batches, Bundle, JobEvents, Jobs, Requests, RuleHits, Runs, Sweeps } from "@sip/store"
 import { ReplayCli } from "@sip/toolchain"
 import * as Console from "effect/Console"
 import * as Deferred from "effect/Deferred"
@@ -61,8 +64,10 @@ import * as Option from "effect/Option"
 import * as Semaphore from "effect/Semaphore"
 import * as path from "node:path"
 import * as Content from "../content/content.js"
-import { Boxing, CaseLayout, CellHost, LaneHosting, Tools } from "../deployment/index.js"
+import { Boxing, CaseLayout, CellHost, Collectors, LaneHosting, Tools } from "../deployment/index.js"
 import type { BatchHost } from "./batch-protocol.js"
+import * as CollectedCells from "./collected-cells.js"
+import * as CollectorIo from "./collector-io.js"
 import * as LaneBatch from "./lane-batch.js"
 import type { StandBatch, StandSut } from "./lane-batch.js"
 import type { Options } from "../options.js"
@@ -130,6 +135,8 @@ export interface Replay {
   readonly dirty: ReadonlyArray<string>
   /** How each batch's process died, for every batch whose process did. */
   readonly deadHosts: ReadonlyArray<string>
+  /** Every cell the phase ran to a bundle, as a job's collectors read them. */
+  readonly ran: ReadonlyArray<CollectedCells.LandedCell>
 }
 
 /**
@@ -149,6 +156,8 @@ export interface Batch {
   readonly driven: ReadonlyArray<CellRef>
   /** How many cells the stop interrupted mid-run: admitted, never landed. */
   readonly interrupted: number
+  /** The cells the batch ran to a bundle, in the order they landed. */
+  readonly ran: ReadonlyArray<CollectedCells.LandedCell>
 }
 
 /** Where a batch process keeps its scratch, and a managed SUT its log. */
@@ -205,6 +214,8 @@ export interface Tally {
   /** Why the row closes `error` rather than on its bundle, once a batch of it broke. */
   broke: string | undefined
   outcome: Outcome | undefined
+  /** What the rig's collectors answered of its landed cells, merged once the row closed. */
+  readonly answered: Array<CollectedCells.Pending>
 }
 
 /** What one batch is asked to do. */
@@ -220,7 +231,13 @@ export interface BatchRequest extends Seams {
   readonly stop?: Stop
   /** What each cell that landed is told to, the moment it lands: a job marks it ran. */
   readonly ran?: (cell: CellRef) => Effect.Effect<void, unknown>
+  /** The batch's number in its sweep, from 1: its collectors' directory. */
+  readonly number: number
 }
+
+/** The answers of `tally`'s landed cells merged, once its row closed. */
+const mergeAnswered = (tally: Tally) =>
+  tally.outcome === undefined ? Effect.void : CollectedCells.merge(tally.answered.splice(0))
 
 /**
  * Every landed cell of `tallies` read again once its batch's end has answered
@@ -278,6 +295,7 @@ const close = Effect.fn("Replay.close")(function*(tally: Tally, options: Options
   const line = interrupted ? `${capture}  ${run.name}: INTERRUPTED ${stopped}` : summarise(capture, run.name, bundle)
   yield* Console.log(line)
   tally.outcome = { capture, status: interrupted ? "interrupted" : bundle.status, detail: line }
+  yield* mergeAnswered(tally)
 })
 
 /** A cell landed under its capture's row; the row closes on its last one. */
@@ -349,6 +367,8 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
   /** The cells handed to the driver, and the ones that came back with a result. */
   const admitted = new Set<PlannedCell>()
   const driven: Array<CellRef> = []
+  /** The cells that ran to a bundle, as the rig's collectors read them. */
+  const ranCells: Array<CollectedCells.LandedCell> = []
 
   /**
    * Every cell in flight at once, bounded by the permit gate, on what the lane
@@ -380,6 +400,15 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
             tally.summaries.push(finished.summary)
             const { cell: _cell, ...ref } = planned
             driven.push(ref)
+            if (finished.summary.skipped === undefined && finished.summary.error === undefined) {
+              ranCells.push({
+                id: cellName(ref),
+                caseId: finished.summary.cell.case,
+                lane: options.lane,
+                dir: path.join(tally.run.bundlePath, finished.summary.dir),
+                runId: tally.run.id
+              })
+            }
             // Marked as it lands, not at the batch's end: a real-clock batch is a
             // quarter of an hour, and the job's progress reads these marks.
             return Effect.andThen(
@@ -420,6 +449,7 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
       return { value: undefined, interrupted } satisfies LaneBatch.Driven<void>
     })
 
+  const collectors = cells.length === 0 ? undefined : yield* collectorsOf(request, () => ranCells)
   const ended = yield* LaneBatch.run({
     lane: options.lane,
     ...(cells.length === 0 ? {} : { row: { ...request.owner, lane: options.lane, cells: cells.map(cellName) } }),
@@ -428,8 +458,12 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
       : { under: runtime, rowsDir: merged, memoryMax: options.memoryMax, cells: limits.cells },
     ...(request.host === undefined ? {} : { host: request.host }),
     ...(request.sut === undefined ? {} : { sut: request.sut }),
+    ...(collectors === undefined ? {} : { collectors }),
     drive: ({ host }) => driveAll(host)
   })
+  for (const pending of CollectedCells.pendingOf(ended.collected, ranCells)) {
+    [...tallies.values()].find((tally) => tally.run.id === pending.runId)!.answered.push(pending)
+  }
   const { deadHost, dirty, contexts, interrupted } = ended
   if (deadHost !== undefined) yield* Console.error(`[replay] ${deadHost}`)
   if (dirty !== undefined) yield* Console.error(`[replay] ${dirty}`)
@@ -456,7 +490,40 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
       if (tally.outcome === undefined && tally.landed >= tally.planned) yield* close(tally, options)
     }
   }
-  return { dirty, deadHost, driven, interrupted } satisfies Batch
+  for (const tally of new Set(driven.map((ref) => tallyOf(ref.capture)))) yield* mergeAnswered(tally)
+  return { dirty, deadHost, driven, interrupted, ran: ranCells } satisfies Batch
+})
+
+/**
+ * The rig's collectors of `request`'s batch (`@sip/corpus` `Collectors`), their
+ * directories under the sweep's batch's own, their events the job's where the
+ * replay is one, over the cells `ran` names once driven; none where the
+ * deployment wires none on the lane.
+ */
+const collectorsOf = Effect.fn("Replay.collectorsOf")(function*(
+  request: BatchRequest,
+  ran: () => ReadonlyArray<CollectedCells.LandedCell>
+) {
+  const { options, owner } = request
+  const holder = path.join(
+    options.paths.sessions,
+    CollectedCells.COLLECTORS_DIR,
+    owner.sweepId === undefined ? `job${owner.jobId}` : `sweep${owner.sweepId}`,
+    `batch${request.number}`
+  )
+  const instances = yield* Effect.flatMap(Collectors.Service, (seam) =>
+    seam.batch(options.lane, path.join(holder, "collectors"), holder))
+  if (instances.length === 0) return undefined
+  const events = yield* JobEvents.Service
+  return {
+    instances,
+    holder,
+    options: {
+      sink: CollectorIo.sinkOf(owner.jobId === undefined ? undefined : { id: owner.jobId, events }),
+      locker: yield* CollectorIo.locker()
+    },
+    cells: () => CollectedCells.describe(ran(), path.basename(holder))
+  } satisfies LaneBatch.Collectors<void, FileSystem.FileSystem>
 })
 
 /** A cell as its batch's row names it: its capture and its call. */
@@ -637,7 +704,8 @@ export const phase = Effect.fn("Replay.phase")(function*(request: PhaseRequest) 
       landed: 0,
       summaries: [],
       broke: undefined,
-      outcome: undefined
+      outcome: undefined,
+      answered: []
     })
   }
 
@@ -645,12 +713,14 @@ export const phase = Effect.fn("Replay.phase")(function*(request: PhaseRequest) 
   const swept = yield* Effect.gen(function*() {
     const dirty: Array<string> = []
     const deadHosts: Array<string> = []
+    const ran: Array<CollectedCells.LandedCell> = []
     for (let at = 0; at < cells.length; at += options.batchSize) {
       // A stop in before a batch starts: no batch starts.
       if (yield* stopping) break
       if (job !== undefined) yield* jobs.batch(job.id, Math.floor(at / options.batchSize) + 1, batches)
       const done = yield* batch({
         cells: cells.slice(at, at + options.batchSize),
+        number: Math.floor(at / options.batchSize) + 1,
         tallies,
         owner: job === undefined ? { sweepId: sweep } : { sweepId: sweep, jobId: job.id },
         options,
@@ -667,8 +737,9 @@ export const phase = Effect.fn("Replay.phase")(function*(request: PhaseRequest) 
         yield* runs.dirty(touched, done.dirty)
       }
       if (done.deadHost !== undefined) deadHosts.push(done.deadHost)
+      ran.push(...done.ran)
     }
-    return { dirty, deadHosts }
+    return { dirty, deadHosts, ran }
   }).pipe(Effect.provide(cellHost.services({ interpreter, audit })))
   // Stopped: every row still open closes on what landed under it.
   const interrupted = yield* stopping
@@ -691,7 +762,8 @@ export const phase = Effect.fn("Replay.phase")(function*(request: PhaseRequest) 
     bundles: [...opened.values()].map((run) => run.bundlePath),
     outcomes: captures.map((plan) => settled.get(plan.capture) ?? tallies.get(plan.capture)!.outcome!),
     dirty: swept.dirty,
-    deadHosts: swept.deadHosts
+    deadHosts: swept.deadHosts,
+    ran: swept.ran
   } satisfies Replay
 })
 

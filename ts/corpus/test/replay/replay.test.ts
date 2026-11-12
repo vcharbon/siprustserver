@@ -6,7 +6,9 @@
  * no terminated calls and a failing one keeps them compressed; the lane's
  * ceilings bound the load the rows record; and where the lane runs a batch
  * process, the rows close once its gate has read, a dirty gate marking every
- * run the batch touched.
+ * run the batch touched. The lane's batch collectors run over the cells a
+ * batch drove, what they answered merged into each cell once its row closed,
+ * a row spanning batches included.
  *
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  */
@@ -14,7 +16,21 @@ import { NodeServices } from "@effect/platform-node"
 import { Campaign } from "@sip/contracts"
 import { Layout, LanePresets, RoutingCompiler, type runCell } from "@sip/driver"
 import { Classifier, Reclassifier } from "@sip/pipeline"
-import { Batches, Cuts, Jobs, Model, Refusals, Requests, RuleHits, Runs, Sessions, Sweeps } from "@sip/store"
+import { type Lanes, RigPath } from "@sip/rig"
+import {
+  Batches,
+  CellAnswers,
+  Cuts,
+  JobEvents,
+  Jobs,
+  Model,
+  Refusals,
+  Requests,
+  RuleHits,
+  Runs,
+  Sessions,
+  Sweeps
+} from "@sip/store"
 import { Client } from "@sip/store"
 import { CURRENT } from "@sip/store/test-identity"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
@@ -27,7 +43,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import * as zlib from "node:zlib"
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
-import { Boxing, CaseLayout, CellHost, Identity, LaneHosting, Tools } from "../../src/deployment/index.js"
+import { Boxing, CaseLayout, CellHost, Collectors, Identity, LaneHosting, Roots, Tools } from "../../src/deployment/index.js"
 import type { Options } from "../../src/options.js"
 import { TERMINATED } from "../../src/replay/cell-trim.js"
 import * as Content from "../../src/content/content.js"
@@ -97,13 +113,25 @@ const cellHost = CellHost.layerWith({
   hitsOf: () => []
 })
 
-const seams = Layer.mergeAll(layout, boxing, hosting, tools, cellHost, Identity.layer)
+const seams = Layer.mergeAll(layout, boxing, hosting, tools, cellHost, Identity.layer, Roots.layer)
 
 const withStore = <A, E>(effect: Effect.Effect<A, E, any>): Promise<A> =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(Requests.layer),
-      Effect.provide(Layer.mergeAll(Batches.layer, Cuts.layer, Refusals.layer, Jobs.layer, Runs.layer, RuleHits.layer, Sweeps.layer)),
+      Effect.provide(
+        Layer.mergeAll(
+          Batches.layer,
+          CellAnswers.layer,
+          Cuts.layer,
+          JobEvents.layer,
+          Refusals.layer,
+          Jobs.layer,
+          Runs.layer,
+          RuleHits.layer,
+          Sweeps.layer
+        )
+      ),
       Effect.provide(Layer.mergeAll(Sessions.layer(ROOT), Client.layerFromUrl(urlFor(SCRATCH)))),
       Effect.provide(seams),
       Effect.provide(NodeServices.layer)
@@ -284,6 +312,8 @@ const replay = (
     readonly batchSize?: number
     /** A capture whose cases' cache entries are left unreadable, so the batch cannot materialise it. */
     readonly breaking?: string
+    /** The deployment's collectors, none where absent. */
+    readonly collectors?: Layer.Layer<Collectors.Service>
   } = {}
 ) =>
   withStore(
@@ -307,15 +337,55 @@ const replay = (
       const rows = yield* sql<{ capture: string; status: string; concurrency: number; cleanup: string | null }>`
         SELECT capture, status, concurrency, cleanup FROM runs WHERE sweep_id = ${done.sweep} ORDER BY capture`
       const batches = yield* Effect.flatMap(Batches.Service, (store) => store.ofSweep(done.sweep))
-      const lines = yield* sql<{ caseId: string; name: string; answer: string; waived: boolean }>`
-        SELECT v.case_id AS "caseId", v.name, v.answer, v.waived FROM verifications v JOIN runs r ON r.id = v.run_id
+      const lines = yield* sql<{ caseId: string; name: string; answer: string; waived: boolean; message: string | null }>`
+        SELECT v.case_id AS "caseId", v.name, v.answer, v.waived, v.message FROM verifications v JOIN runs r ON r.id = v.run_id
         WHERE r.sweep_id = ${done.sweep} AND v.scope = 'cell' ORDER BY v.case_id, v.ordinal`
       const statuses = yield* sql<{ status: string }>`
         SELECT s.status FROM cell_statuses s JOIN runs r ON r.id = s.run_id
         WHERE r.sweep_id = ${done.sweep} ORDER BY s.case_id`
       return { done, rows, batches, lines, statuses: statuses.map((row) => row.status) }
-    })
+    }).pipe(Effect.provide(extra.collectors ?? Collectors.layer))
   )
+
+/** A driver like {@link fakeDrive} whose every cell passes and states its clock and its window, as a cell description reads them. */
+const describedDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
+  Effect.sync(() => {
+    const id = Campaign.cellCaseId(cell)
+    const dir = path.join(context.runDir, Layout.cellDir(cell))
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, "verdict.json"), `{"status":"ok","case":"${id}"}\n`)
+    fs.writeFileSync(
+      path.join(dir, "run-config.json"),
+      `{"claim_numbers":{},"clock":"virtual","identities":{},"lane":"${PAUSED}","route_target":"127.0.0.1:5080"}\n`
+    )
+    fs.writeFileSync(
+      path.join(dir, "timing.json"),
+      `{"settle_budget_ms":100,"settled_at_ms":10,"started_at_ms":0,"wall_started_at_ms":1,"wall_ended_at_ms":2}\n`
+    )
+    return { summary: { cell: Layout.cellIdOf(cell), passed: true, dir: Layout.cellDir(cell) }, detail: "" }
+  })) as unknown as typeof runCell
+
+/** The deployment's collectors: on {@link PAUSED}, the batch collector `lab`, whose collect says why it failed on its stderr and exits 3. */
+const failingLab = async (): Promise<{ readonly layer: Layer.Layer<Collectors.Service>; readonly said: string }> => {
+  const root = fs.mkdtempSync(path.join(ROOT, "rig-"))
+  const dir = path.join(root, "collectors", "lab")
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, "collector.toml"),
+    `schema = "collector.v1"\nname = "lab"\nscope = "batch"\nanswers = ["lab-check"]\n[run]\ncollect = "./collect"\n`
+  )
+  fs.writeFileSync(path.join(dir, "collect"), `#!/bin/sh\necho "the lab is gone" >&2\nexit 3\n`, { mode: 0o755 })
+  const rig = await Effect.runPromise(RigPath.load({ workspace: root }).pipe(Effect.provide(NodeServices.layer)))
+  const lane: Lanes.Loaded = {
+    id: PAUSED,
+    file: `lanes/${PAUSED}.toml`,
+    lane: { schema: "lane.v1", clock: "simulated" },
+    parts: new Map(),
+    operations: new Map(),
+    capabilities: new Set()
+  }
+  return { layer: Collectors.layerOf(rig, [lane]), said: "collect exited 3: the lab is gone" }
+}
 
 describe.skipIf(!served)("the replay phase", () => {
   beforeEach(() => {
@@ -431,6 +501,21 @@ describe.skipIf(!served)("the replay phase", () => {
     expect(driven.map((cell) => cell.id).sort()).toEqual([`${ONE}-a`, `${ONE}-b`])
     expect(done.batches).toBe(1)
     expect(batches.map((row) => [...row.cells].sort())).toEqual([[`${ONE}#${ONE}-a@key`, `${ONE}#${ONE}-b@key`]])
+  })
+
+  it("runs the lane's batch collectors over the cells it drove: one failing leaves every landed cell unverified with its message", async () => {
+    const lab = await failingLab()
+    for (const batchSize of [1000, 1]) {
+      const { lines, statuses } = await replay(PAUSED, { drive: describedDrive, collectors: lab.layer, batchSize })
+      const answered = lines.filter((line) => line.name === "lab-check")
+      expect(answered.map((line) => [line.caseId, line.answer])).toEqual([
+        [`${ONE}-a`, "not-checkable"],
+        [`${ONE}-b`, "not-checkable"],
+        [`${TWO}-a`, "not-checkable"]
+      ])
+      for (const line of answered) expect(line.message).toContain(lab.said)
+      expect(statuses).toEqual(["unverified", "unverified", "unverified"])
+    }
   })
 
   it("files no row for a batch whose every capture it could not materialise", async () => {

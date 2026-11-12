@@ -143,11 +143,30 @@ export const replace = Effect.fn("Attachments.replace")(function*(holder: Holder
   if (rows.length > 0) yield* sql`INSERT INTO ${place.table} ${sql.insert(rows)}`
 })
 
+/**
+ * Adds `held`'s attachments to what `holder` holds: one of a name it already
+ * holds replaces it where it stands, a new name comes after the others. Runs
+ * in the caller's transaction.
+ */
+export const addTo = Effect.fn("Attachments.addTo")(function*(holder: Holder, held: Held) {
+  const sql = yield* SqlClient
+  const root = yield* Sessions.Service
+  const place = placeOf(sql, holder)
+  const [next] = yield* sql<{ next: number }>`
+    SELECT coalesce(max(ordinal) + 1, 0)::int AS next FROM ${place.table} WHERE ${place.where}
+  `
+  for (const row of rowsOf(root, holder, held, next?.next ?? 0)) {
+    yield* sql`
+      INSERT INTO ${place.table} ${sql.insert(row)}
+      ON CONFLICT ${place.conflict} DO UPDATE SET
+        kind = EXCLUDED.kind, title = EXCLUDED.title, dir = EXCLUDED.dir,
+        file = EXCLUDED.file, source = EXCLUDED.source
+    `
+  }
+})
+
 export interface Interface {
-  /**
-   * Adds `held`'s attachments to what `holder` holds: one of a name it already
-   * holds replaces it where it stands, a new name comes after the others.
-   */
+  /** {@link addTo} in a transaction of its own. */
   readonly add: (holder: Holder, held: Held) => Effect.Effect<void, SqlError>
   /** What `holder` holds, in its order. */
   readonly of: (holder: Holder) => Effect.Effect<ReadonlyArray<Stored>, SqlError>
@@ -164,20 +183,10 @@ export const layer = Layer.effect(
     const root = yield* Sessions.Service
 
     const add = (holder: Holder, held: Held) =>
-      sql.withTransaction(Effect.gen(function*() {
-        const place = placeOf(sql, holder)
-        const [next] = yield* sql<{ next: number }>`
-          SELECT coalesce(max(ordinal) + 1, 0)::int AS next FROM ${place.table} WHERE ${place.where}
-        `
-        for (const row of rowsOf(root, holder, held, next?.next ?? 0)) {
-          yield* sql`
-            INSERT INTO ${place.table} ${sql.insert(row)}
-            ON CONFLICT ${place.conflict} DO UPDATE SET
-              kind = EXCLUDED.kind, title = EXCLUDED.title, dir = EXCLUDED.dir,
-              file = EXCLUDED.file, source = EXCLUDED.source
-          `
-        }
-      }))
+      sql.withTransaction(addTo(holder, held)).pipe(
+        Effect.provideService(SqlClient, sql),
+        Effect.provideService(Sessions.Service, root)
+      )
 
     const of = Effect.fn("Attachments.of")(function*(holder: Holder) {
       const rows = yield* sql<Row>`SELECT * FROM attachment_rows WHERE ${placeOf(sql, holder).where} ORDER BY ordinal`

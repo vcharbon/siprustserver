@@ -24,6 +24,7 @@ const replay = (over: Partial<Replay> = {}): Replay => ({
   batches: 1,
   interrupted: false,
   bundles: [],
+  ran: [],
   outcomes: [
     { capture: "a.pcap.gz", status: "done", detail: "" },
     { capture: "b.pcap.gz", status: "error", detail: "no cut" }

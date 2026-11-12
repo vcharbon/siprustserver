@@ -122,8 +122,6 @@ describe("the census gate of a cut", () => {
     const launcher = Launcher.layerWith({
       entry: () => Effect.die(new Error("not asked")),
       cwd: tree,
-      hooksCwd: tree,
-      hooks: Effect.succeed([]),
       seedIds: "`seed-the-ids`"
     })
     const refused = await Effect.runPromise(

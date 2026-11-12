@@ -10,19 +10,33 @@
  * stands nothing still brackets its cells; a batch that fails still closes
  * its row; a batch filed under no owner writes no row.
  *
+ * The rig's collectors, real executables: opened once the lane stood,
+ * collected once the gate read and the caller's collectors closed, closed
+ * before the SUT is given back; their line of the batch is the row's, their
+ * attachment of it the batch's; one whose collect exits non-zero answers
+ * every cell and the batch not checkable with its message; a batch whose
+ * cells fail still closes them.
+ *
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  */
-import { Batches, Client, Jobs } from "@sip/store"
+import { NodeServices } from "@effect/platform-node"
+import { type Cell, RigPath } from "@sip/rig"
+import { Attachments, Batches, Client, Jobs, Sessions } from "@sip/store"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
 import * as Effect from "effect/Effect"
+import * as Result from "effect/Result"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import * as Layer from "effect/Layer"
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { LaneHosting } from "../../src/deployment/index.js"
 import type { BatchHost, Gate, SutHandle } from "../../src/replay/batch-protocol.js"
 import * as LaneBatch from "../../src/replay/lane-batch.js"
 
 const SCRATCH = await scratch("corpus_lane_batch_test")
+const TREE = fs.mkdtempSync(path.join(os.tmpdir(), "lane-batch-"))
 
 const STANDS = "stands"
 const PAUSED = "paused"
@@ -69,10 +83,13 @@ const hosting = LaneHosting.layerWith({
   preflight: () => Effect.succeed(null)
 })
 
-const withStore = <A, E>(effect: Effect.Effect<A, E, Batches.Service | Jobs.Service | LaneHosting.Service | SqlClient>): Promise<A> =>
+type Services = Attachments.Service | Batches.Service | Jobs.Service | LaneHosting.Service | SqlClient
+
+const withStore = <A, E>(effect: Effect.Effect<A, E, Services>): Promise<A> =>
   Effect.runPromise(
     effect.pipe(
-      Effect.provide(Layer.mergeAll(Batches.layer, Jobs.layer, hosting)),
+      Effect.provide(Layer.mergeAll(Attachments.layer, Batches.layer, Jobs.layer, hosting)),
+      Effect.provide(Sessions.layer(TREE)),
       Effect.provide(Client.layerFromUrl(urlFor(SCRATCH)))
     )
   )
@@ -84,6 +101,7 @@ beforeAll(async () => {
 }, 120_000)
 
 afterAll(async () => {
+  fs.rmSync(TREE, { recursive: true, force: true })
   if (!served) return
   await drop(SCRATCH)
 }, 120_000)
@@ -120,6 +138,166 @@ const driveOn = (lane: string) => (stood: LaneBatch.Stood) =>
     events.push(`cells ran${stood.host === undefined ? "" : " in the batch process"}`)
     return { value: lane, interrupted: 0 }
   })
+
+/** A script file under `dir`, executable. */
+const script = (dir: string, name: string, body: string) => {
+  fs.writeFileSync(path.join(dir, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 })
+}
+
+/**
+ * The rig's collector `lab` of a batch under a directory of its own, as the
+ * rig path loads it: its `collect` answers `lab-check` for the cell `a` and
+ * the batch and attaches a log to the batch, or, `failing`, says why on its
+ * stderr and exits 3. The batch's collectors with it, its events in `events`.
+ */
+const labCollectors = async (failing: boolean): Promise<LaneBatch.Collectors<string, never>> => {
+  const root = fs.mkdtempSync(path.join(TREE, "rig-"))
+  const dir = path.join(root, "collectors", "lab")
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, "collector.toml"),
+    `schema = "collector.v1"\nname = "lab"\nscope = "batch"\nanswers = ["lab-check"]\n[run]\nopen = "./open"\ncollect = "./collect"\nclose = "./close"\n`
+  )
+  script(dir, "open", "exit 0")
+  script(
+    dir,
+    "collect",
+    failing
+      ? `echo "the lab is gone" >&2\nexit 3`
+      : [
+        `echo '{"verification":"lab-check","cell":"a","answer":"pass"}'`,
+        `echo '{"verification":"lab-check","answer":"pass"}'`,
+        `echo batch > "$SIPRIG_OUT/batch.log"`,
+        `echo '{"attachment":{"kind":"log","file":"batch.log"}}'`
+      ].join("\n")
+  )
+  script(dir, "close", "exit 0")
+  const loaded = await Effect.runPromise(Effect.result(RigPath.load({ workspace: root })).pipe(Effect.provide(NodeServices.layer)))
+  if (!Result.isSuccess(loaded)) throw new Error(`the rig path does not load: ${String(loaded.failure)}`)
+  const holder = path.join(root, "batch")
+  const cell: Cell.Cell = {
+    schema: "cell.v1",
+    id: "a",
+    case: "case-a",
+    lane: STANDS,
+    batch: "batch-1",
+    attempt: 1,
+    clock: "simulated",
+    keys: { call_id: [], caller: [], callee: [], request_uri_user: [] },
+    legs: [],
+    timeline: { start: { lane_ms: 0, wall_ms: 0 }, end: { lane_ms: 1, wall_ms: 1 } },
+    claims: {},
+    records: {},
+    verifications: [],
+    dir: path.join(root, "cells", "a"),
+    tags: [],
+    needs: []
+  }
+  return {
+    instances: [{
+      collector: loaded.success.collectors.get("lab")!,
+      id: "lab",
+      label: "lab",
+      scope: "batch",
+      lane: undefined,
+      lanes: undefined,
+      params: {},
+      dir: path.join(holder, "collectors", "lab"),
+      holder
+    }],
+    options: {
+      sink: (event) => Effect.sync(() => void events.push(`collector ${event.phase}`)),
+      locker: () => Effect.succeed(Effect.void)
+    },
+    holder,
+    cells: () => Effect.succeed([cell])
+  }
+}
+
+describe.skipIf(!served)("the rig's collectors of a batch", () => {
+  it("open once the lane stood, collect once the gate read and the caller's collectors closed, close before the lane is given back", async () => {
+    endingAs({})
+    const collectors = await labCollectors(false)
+    const { ended, lines, attached } = await withStore(Effect.gen(function*() {
+      const job = yield* jobOf
+      const ended = yield* LaneBatch.run({
+        lane: STANDS,
+        row: { jobId: job, lane: STANDS, cells: ["a"] },
+        stand,
+        collect,
+        collectors,
+        drive: driveOn(STANDS)
+      })
+      const [row] = yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job))
+      const sql = yield* SqlClient
+      const lines = yield* sql<{ name: string; source: string; answer: string }>`
+        SELECT name, source, answer FROM verifications WHERE scope = 'batch' AND batch_id = ${row!.id} ORDER BY ordinal
+      `
+      const attached = yield* Effect.flatMap(Attachments.Service, (store) => store.of({ scope: "batch", batchId: row!.id }))
+      return { ended, lines, attached }
+    }))
+    expect(events).toEqual([
+      "batch stood for 2 cell(s), provisioned",
+      "sut stood with A",
+      "collector open",
+      "collector opened",
+      "collectors opened",
+      "cells ran in the batch process",
+      "gate",
+      "collectors closed",
+      "collector collect",
+      "collector collected",
+      "collector close",
+      "collector closed",
+      "sut stopped",
+      "killed"
+    ])
+    expect(ended.collected[0]!.cells.get("a")!.verifications).toEqual([{ name: "lab-check", source: "lab", answer: "pass" }])
+    expect(lines.map((line) => `${line.name} ${line.source} ${line.answer}`)).toEqual(["lab-check lab pass"])
+    expect(attached.map((one) => [one.name, one.path])).toEqual([
+      ["lab", path.join(collectors.holder, "collected", "lab", "batch.log")]
+    ])
+    expect(fs.readFileSync(attached[0]!.path!, "utf8")).toBe("batch\n")
+  })
+
+  it("answer every cell and the batch not checkable, quoting the step, where collect exits non-zero, and still close", async () => {
+    endingAs({})
+    const collectors = await labCollectors(true)
+    const { ended, lines } = await withStore(Effect.gen(function*() {
+      const job = yield* jobOf
+      const ended = yield* LaneBatch.run({ lane: STANDS, row: { jobId: job, lane: STANDS, cells: ["a"] }, stand, collectors, drive: driveOn(STANDS) })
+      const [row] = yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job))
+      const sql = yield* SqlClient
+      const lines = yield* sql<{ name: string; answer: string; message: string }>`
+        SELECT name, answer, message FROM verifications WHERE scope = 'batch' AND batch_id = ${row!.id} ORDER BY ordinal
+      `
+      return { ended, lines }
+    }))
+    const said = `collect exited 3: the lab is gone, its log ${path.join(collectors.instances[0]!.dir, "collect.log")}`
+    expect(ended.collected[0]!.cells.get("a")!.verifications).toEqual([
+      { name: "lab-check", source: "lab", answer: "not-checkable", message: said }
+    ])
+    expect(lines).toEqual([{ name: "lab-check", answer: "not-checkable", message: said }])
+    expect(events.slice(-4)).toEqual(["collector close", "collector closed", "sut stopped", "killed"])
+  })
+
+  it("close where the batch's cells failed, before the lane is given back", async () => {
+    endingAs({})
+    const collectors = await labCollectors(false)
+    await withStore(Effect.gen(function*() {
+      const job = yield* jobOf
+      yield* Effect.flip(LaneBatch.run({
+        lane: STANDS,
+        row: { jobId: job, lane: STANDS, cells: ["a"] },
+        stand,
+        collectors,
+        drive: () => Effect.fail(new Error("no cell could start"))
+      }))
+    }))
+    expect(events).not.toContain("collector collect")
+    expect(events.slice(-4)).toEqual(["collector close", "collector closed", "sut stopped", "killed"])
+  })
+})
 
 describe.skipIf(!served)("one batch on a lane", () => {
   it("stands the lane, opens the collectors, runs the cells, reads the gate, closes the collectors, then gives back", async () => {
