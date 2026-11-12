@@ -1,40 +1,37 @@
 /**
- * The top bar names the rig, then the pack the server runs where its config
- * states one, and shows the bundle's build stamp: commit and build time.
+ * The top bar shows the site's name as the server's config states it, linking
+ * to the index, and the bundle's build stamp: commit and build time.
  */
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 import type { ServerConfig } from "../src/api.ts"
-import { Brand, Stamp, tabTitle } from "../src/components/Brand.tsx"
-import { packTitleOf } from "../src/server-config.ts"
+import { Brand, Stamp } from "../src/components/Brand.tsx"
+import { siteNameOf } from "../src/server-config.ts"
 
-const config = (title: string | undefined): ServerConfig => ({
+const config = (name: string | undefined): ServerConfig => ({
   configPath: "c.json",
   caseRoots: [],
   runRoots: [],
   flowsRoots: [],
   port: 1,
-  ...(title === undefined ? {} : { title })
+  ...(name === undefined ? {} : { name })
 })
 
 /** The markup's text, tags dropped. */
 const text = (markup: string): string => markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
 
 describe("the top bar's identity", () => {
-  it("names the rig, linking to the index, and the pack beside it", () => {
-    const markup = renderToStaticMarkup(<Brand title="Pack One" />)
-    expect(text(markup)).toBe("siprig Pack One")
+  it("shows the site's name, linking to the index", () => {
+    const markup = renderToStaticMarkup(<Brand name="Rig One · Pack One" />)
+    expect(text(markup)).toBe("Rig One · Pack One")
     expect(markup).toContain(`href="/"`)
-    expect(tabTitle("Pack One")).toBe("siprig · Pack One")
   })
 
-  it("names the rig alone until the server states a pack", () => {
-    expect(text(renderToStaticMarkup(<Brand title={undefined} />))).toBe("siprig")
-    expect(tabTitle(undefined)).toBe("siprig")
-    expect(packTitleOf(undefined)).toBeUndefined()
-    expect(packTitleOf(config(undefined))).toBeUndefined()
-    expect(packTitleOf(config(" "))).toBeUndefined()
-    expect(packTitleOf(config("Pack One"))).toBe("Pack One")
+  it("reads the site's name from the server's config, none where it states none", () => {
+    expect(siteNameOf(config("Rig One · Pack One"))).toBe("Rig One · Pack One")
+    expect(siteNameOf(undefined)).toBeUndefined()
+    expect(siteNameOf(config(undefined))).toBeUndefined()
+    expect(siteNameOf(config(" "))).toBeUndefined()
   })
 
   it("shows the build's commit and its UTC minute", () => {
