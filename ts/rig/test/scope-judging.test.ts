@@ -1,0 +1,271 @@
+/**
+ * A scope's records joined and judged, its collectors and judges run as real
+ * executables and modules: a collector's 1000 records joined to the cells
+ * whose Call-ID they carry, written in each cell's directory; a record two
+ * cells' keys hold reaching the judge as ambiguous; a module judge and an
+ * executable judge answering the same lines on the same input; a later
+ * collector reading the keys and records an earlier one added; exports naming
+ * a cell by its directory read as that cell; a judge that fails, and a
+ * verification nobody answered, `not checkable`.
+ */
+import * as Effect from "effect/Effect"
+import * as Result from "effect/Result"
+import * as fs from "node:fs"
+import * as path from "node:path"
+import { afterEach, describe, expect, it } from "vitest"
+import type * as Cell from "../src/cell.js"
+import * as CollectorPlan from "../src/collector-plan.js"
+import * as CollectorRun from "../src/collector-run.js"
+import * as JudgePlan from "../src/judge-plan.js"
+import * as RigPath from "../src/rig-path.js"
+import { cellOf, memoryLocker } from "./collectors.js"
+import { laneOf } from "./operations.js"
+import { type Entry, run, tree } from "./tree.js"
+
+const made: Array<string> = []
+
+afterEach(() => {
+  for (const dir of made.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+})
+
+const LANE = laneOf("lane-a", {})
+
+const node = (body: string): Entry => ({
+  text: `#!/usr/bin/env node\nconst fs = require("node:fs")\nconst ctx = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))\n${body}\n`,
+  executable: true
+})
+
+/** The files of a batch collector `name`: its manifest (`extra` lines before `[run]`) and its collect. */
+const collector = (name: string, collect: Entry, extra = ""): Record<string, Entry> => ({
+  [`collectors/${name}/collector.toml`]: `schema = "collector.v1"\nname = "${name}"\nscope = "batch"\n${extra}\n[run]\ncollect = "./collect"\n`,
+  [`collectors/${name}/collect`]: collect
+})
+
+/** The files of an executable judge `name`. */
+const executableJudge = (name: string, body: Entry): Record<string, Entry> => ({
+  [`judges/${name}/judge.toml`]: `schema = "judge.v1"\nname = "${name}"\nrun = "./judge"\n`,
+  [`judges/${name}/judge`]: body
+})
+
+/** The files of a module judge `name`. */
+const moduleJudge = (name: string, text: string): Record<string, Entry> => ({
+  [`judges/${name}/judge.toml`]: `schema = "judge.v1"\nname = "${name}"\nmodule = "./judge.ts"\n`,
+  [`judges/${name}/judge.ts`]: text
+})
+
+/** The rig path of `files`, loaded; its root. */
+const loaded = async (files: Readonly<Record<string, Entry>>) => {
+  const root = tree(files)
+  made.push(root)
+  const read = await run(RigPath.load({ workspace: root }))
+  if (!Result.isSuccess(read)) throw new Error(`the path does not load: ${String(read.failure)}`)
+  return { root, rig: read.success }
+}
+
+/** The cells `ids` of {@link LANE}, their directories under `root`'s `cells/` named as `dirs` says, `edit` applied to each. */
+const cellsOf = (
+  root: string,
+  ids: ReadonlyArray<string>,
+  edit: (cell: Cell.Cell) => Cell.Cell = (cell) => cell,
+  dirs: Readonly<Record<string, string>> = {}
+): ReadonlyArray<Cell.Cell> => ids.map((id) => edit(cellOf(id, LANE.id, path.join(root, "cells", dirs[id] ?? id))))
+
+/** The batch's collectors `rig` plans on {@link LANE} under `root`, collected over `cells`, the batch's export judges with them where `exports` says. */
+const collectBatch = async (
+  rig: RigPath.RigPath,
+  root: string,
+  cells: ReadonlyArray<Cell.Cell>,
+  exports = false
+) => {
+  const holder = path.join(root, "batch")
+  const instances = CollectorPlan.batchPlanOf(rig, LANE, path.join(holder, "collectors"), holder)
+  const said: Array<string> = []
+  const options: CollectorRun.Options = {
+    sink: (event) => Effect.sync(() => void said.push(`${event.phase} ${event.collector}${event.message === undefined ? "" : `: ${event.message}`}`)),
+    locker: memoryLocker(),
+    ...(exports ? { exportJudges: JudgePlan.exportJudgesOn(rig, LANE, holder) } : {})
+  }
+  const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(CollectorRun.opened(instances, options), (opened) => opened.collect(cells))))
+  return { collected, said, holder }
+}
+
+const linesOf = (file: string): ReadonlyArray<unknown> =>
+  fs.readFileSync(file, "utf8").split("\n").filter((line) => line !== "").map((line) => JSON.parse(line))
+
+const byLabel = (collected: ReadonlyArray<CollectorRun.Collected>, label: string): CollectorRun.Collected => {
+  const found = collected.find((one) => one.label === label)
+  if (found === undefined) throw new Error(`no ${label} among ${collected.map((one) => one.label).join(", ")}`)
+  return found
+}
+
+/** Per cell id, then for the scope, the verification lines `one` answered. */
+const verdictsOf = (one: CollectorRun.Collected) => ({
+  cells: Object.fromEntries([...one.cells].map(([id, answers]) => [id, answers.verifications])),
+  scope: one.scope.verifications
+})
+
+describe("a scope's join", () => {
+  it("joins a collector's 1000 records keyed by Call-ID to the cells holding it, each cell's in its directory, the stray one kept on the scope", async () => {
+    const { root, rig } = await loaded(collector(
+      "calls",
+      node(`
+for (let i = 0; i < 999; i++) console.log(JSON.stringify({ record: { seq: i }, key: i % 2 === 0 ? "c1@test" : "c2@test" }))
+console.log(JSON.stringify({ record: { seq: 999 }, key: "stray@test" }))
+`),
+      `[join]\nkey = "call_id"`
+    ))
+    const cells = cellsOf(root, ["c1", "c2"])
+    const { collected, holder } = await collectBatch(rig, root, cells)
+    const c1 = linesOf(path.join(root, "cells", "c1", "joined", "calls.jsonl"))
+    const c2 = linesOf(path.join(root, "cells", "c2", "joined", "calls.jsonl"))
+    expect([c1.length, c2.length, c1[1], c2[0]]).toEqual([500, 499, { seq: 2 }, { seq: 1 }])
+    expect(linesOf(path.join(holder, "joined", "calls.unclaimed.jsonl"))).toEqual([{ record: { seq: 999 }, key: "stray@test" }])
+    expect(byLabel(collected, "calls").scope.attachments).toEqual([
+      { name: "calls-unclaimed", kind: "log", title: "1 unclaimed record(s) of calls", file: "joined/calls.unclaimed.jsonl", source: "calls" }
+    ])
+  })
+
+  it("hands the judge a record two cells' keys hold as ambiguous, joined to neither cell", async () => {
+    const { root, rig } = await loaded({
+      ...collector("shared", node(`console.log(JSON.stringify({ record: { n: 1 }, key: "shared@test" }))`), `judge = "peek"\n[join]\nkey = "call_id"`),
+      ...executableJudge("peek", node(`
+fs.copyFileSync(process.env.SIPRIG_CONTEXT, "../../peek-context.json")
+fs.copyFileSync(ctx.judging.ambiguous, "../../peek-ambiguous.jsonl")
+`))
+    })
+    const cells = cellsOf(root, ["c1", "c2"], (cell) => ({ ...cell, keys: { ...cell.keys, call_id: [`${cell.id}@test`, "shared@test"] } }))
+    await collectBatch(rig, root, cells)
+    const context = JSON.parse(fs.readFileSync(path.join(root, "peek-context.json"), "utf8"))
+    expect(linesOf(path.join(root, "peek-ambiguous.jsonl"))).toEqual([{ record: { n: 1 }, key: "shared@test", cells: ["c1", "c2"] }])
+    expect(context.judging.name).toBe("shared")
+    expect(context.cells.map((cell: Cell.Cell) => [cell.id, linesOf(cell.records.shared!)])).toEqual([["c1", []], ["c2", []]])
+  })
+
+  it("answers the same lines from a module judge and an executable judge given the same records and claims", async () => {
+    const counts = collector(
+      "counts",
+      node(`
+for (const key of ["c1@test", "c1@test", "c2@test", "nobody@test"]) console.log(JSON.stringify({ record: { key }, key }))
+`),
+      `judge = "counts"\nanswers = ["counts"]\n[join]\nkey = "call_id"`
+    )
+    const asExecutable = await loaded({
+      ...counts,
+      ...executableJudge("counts", node(`
+const count = (file) => fs.readFileSync(file, "utf8").split("\\n").filter((line) => line !== "").length
+for (const cell of ctx.cells) {
+  const n = count(cell.records.counts)
+  console.log(JSON.stringify({ verification: "counts", cell: cell.id, answer: n === cell.claims.counts.count ? "pass" : "fail", message: n + " record(s)" }))
+}
+console.log(JSON.stringify({ verification: "counts", answer: "pass", message: "unclaimed " + count(ctx.judging.unclaimed) + ", ambiguous " + count(ctx.judging.ambiguous) }))
+`))
+    })
+    const asModule = await loaded({
+      ...counts,
+      ...moduleJudge("counts", `import * as fs from "node:fs"
+const count = (file: string): number => fs.readFileSync(file, "utf8").split("\\n").filter((line) => line !== "").length
+export default ({ context }: { context: any }) => [
+  ...context.cells.map((cell: any) => {
+    const n = count(cell.records.counts)
+    return { verification: "counts", cell: cell.id, answer: n === cell.claims.counts.count ? "pass" : "fail", message: n + " record(s)" }
+  }),
+  { verification: "counts", answer: "pass", message: "unclaimed " + count(context.judging.unclaimed) + ", ambiguous " + count(context.judging.ambiguous) }
+]
+`)
+    })
+    const claimed = (cell: Cell.Cell): Cell.Cell => ({ ...cell, claims: { counts: { count: 2 } } })
+    const judged = await Promise.all([asExecutable, asModule].map(async ({ root, rig }) => {
+      const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"], claimed))
+      return verdictsOf(byLabel(collected, "judge counts of counts"))
+    }))
+    expect(judged[0]).toEqual({
+      cells: {
+        c1: [{ name: "counts", source: "counts", answer: "pass", message: "2 record(s)" }],
+        c2: [{ name: "counts", source: "counts", answer: "fail", message: "1 record(s)" }]
+      },
+      scope: [{ name: "counts", source: "counts", answer: "pass", message: "unclaimed 1, ambiguous 0" }]
+    })
+    expect(judged[1]).toEqual(judged[0])
+  })
+
+  it("lets a collector read the keys and records one it runs after added, whatever their names' order", async () => {
+    const { root, rig } = await loaded({
+      ...collector(
+        "keyer",
+        node(`for (const cell of ctx.cells) {
+  console.log(JSON.stringify({ key: "trunk", cell: cell.id, values: ["t-" + cell.id] }))
+  console.log(JSON.stringify({ record: { of: cell.id }, cell: cell.id }))
+}`)
+      ),
+      ...collector("a-reader", node(`fs.copyFileSync(process.env.SIPRIG_CONTEXT, "../../reader-context.json")`), `after = ["keyer"]`)
+    })
+    const cells = cellsOf(root, ["c1", "c2"])
+    const { collected } = await collectBatch(rig, root, cells)
+    const read = JSON.parse(fs.readFileSync(path.join(root, "reader-context.json"), "utf8"))
+    expect(collected.map((one) => one.label)).toEqual(["keyer", "a-reader"])
+    expect(read.cells.map((cell: Cell.Cell) => [cell.keys.trunk, linesOf(cell.records.keyer!)])).toEqual([
+      [["t-c1"], [{ of: "c1" }]],
+      [["t-c2"], [{ of: "c2" }]]
+    ])
+    expect(JSON.parse(fs.readFileSync(path.join(root, "cells", "c1", "keys.json"), "utf8"))).toEqual({ trunk: ["t-c1"] })
+  })
+})
+
+describe("a scope's exports", () => {
+  it("are judged where no collector of their name runs, a line naming a cell by its directory's name read as that cell", async () => {
+    const { root, rig } = await loaded(executableJudge("exp", node(`
+fs.copyFileSync(process.env.SIPRIG_CONTEXT, "../../exp-context.json")
+for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "exp", cell: cell.id, answer: "pass" }))
+`)))
+    const cells = cellsOf(root, ["c1", "c2"], undefined, { c1: "c1~2" })
+    const write = (dir: string, lines: ReadonlyArray<object>) => {
+      fs.mkdirSync(path.join(dir, "exports"), { recursive: true })
+      fs.writeFileSync(path.join(dir, "exports", "exp.jsonl"), lines.map((line) => `${JSON.stringify(line)}\n`).join(""))
+    }
+    write(path.join(root, "cells", "c1~2"), [
+      { record: { n: 1 }, cell: "c1~2" },
+      { key: "ref", cell: "c1~2", values: ["r1"] },
+      { record: { n: 3 }, cell: "c2" }
+    ])
+    write(path.join(root, "batch"), [{ record: { n: 2 }, key: "c2@test" }])
+    const { collected } = await collectBatch(rig, root, cells, true)
+    const context = JSON.parse(fs.readFileSync(path.join(root, "exp-context.json"), "utf8"))
+    expect(context.cells.map((cell: Cell.Cell) => [cell.id, cell.keys.ref ?? [], linesOf(cell.records.exp!)])).toEqual([
+      ["c1", ["r1"], [{ n: 1 }]],
+      ["c2", [], [{ n: 2 }]]
+    ])
+    expect(linesOf(context.judging.unclaimed)).toEqual([{ record: { n: 3 }, cell: "c2" }])
+    expect(verdictsOf(byLabel(collected, "judge exp of exp")).cells).toEqual({
+      c1: [{ name: "exp", source: "exp", answer: "pass" }],
+      c2: [{ name: "exp", source: "exp", answer: "pass" }]
+    })
+  })
+})
+
+describe("a verification nobody could answer", () => {
+  it("is not checkable on every cell and the scope where the judge fails, quoting why", async () => {
+    const { root, rig } = await loaded({
+      ...collector("broken", node(`console.log(JSON.stringify({ record: { n: 1 }, key: "c1@test" }))`), `judge = "crashes"\nanswers = ["sums"]\n[join]\nkey = "call_id"`),
+      ...executableJudge("crashes", node(`console.error("the sums do not add up"); process.exit(4)`))
+    })
+    const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]))
+    const judged = verdictsOf(byLabel(collected, "judge crashes of broken"))
+    expect(judged.scope).toEqual([
+      expect.objectContaining({ name: "sums", source: "crashes", answer: "not-checkable", message: expect.stringContaining("judge exited 4") })
+    ])
+    expect(Object.keys(judged.cells)).toEqual(["c1", "c2"])
+    expect(judged.cells.c2).toEqual(judged.scope)
+  })
+
+  it("is not checkable for each cell a collector's manifest names it on and nobody answered it, the cell's own lines counted", async () => {
+    const { root, rig } = await loaded(collector("silent", node(""), `answers = ["quiet"]`))
+    const cells = cellsOf(root, ["c1", "c2"], (cell) =>
+      cell.id === "c2" ? { ...cell, verifications: [{ name: "quiet", source: "interpreter", answer: "pass" }] } : cell
+    )
+    const { collected } = await collectBatch(rig, root, cells)
+    expect(verdictsOf(byLabel(collected, "silent")).cells).toEqual({
+      c1: [{ name: "quiet", source: "silent", answer: "not-checkable", message: "nobody answered quiet for the cell c1" }],
+      c2: []
+    })
+  })
+})

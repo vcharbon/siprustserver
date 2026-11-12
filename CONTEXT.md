@@ -271,6 +271,7 @@ Full definitions: [docs/glossary/rig.md](docs/glossary/rig.md).
 - **Required collector**: one no collection level and no lane switches off.
 - **Record**: one object a collector returned or a cell exported, joined to a cell by a key or assigned to it.
 - **Unclaimed record**, **ambiguous record**: one whose key matches no cell, or several.
+- **Join**: the base matching a name's records to a scope's cells on one key, in one pass over the records. Avoid: correlation.
 - **Key**: a named value a cell carries, that a record is joined on.
 - **Cell description**: `cell.v1`, what a collector or a judge reads of each cell.
 - **Part**: a named property of a lane beyond its SIP target, a file several lanes may name, with a schema a pack or a workspace declares.

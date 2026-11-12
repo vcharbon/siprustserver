@@ -32,7 +32,7 @@ An executable runs with its own directory as working directory and these variabl
 | `SIPRIG_CONTEXT` | a JSON file it reads (`context.v1`): the scope, its window, the cells (item 6), the lane (its name, clock, SIP target and backend, as the base reads them) and its parts, its parameters |
 | `SIPRIG_OUT` | a directory it writes attachment files into |
 | `SIPRIG_STATE` | a directory kept from `open` to `close` of one scope, or from `inject` to `heal`; an `open` or `inject` finds it empty and its context fresh |
-| `SIPRIG_STEP` | the step it runs as (`open`, `collect`, `close`, `inject`, `heal`, `probe`), so one file may serve several |
+| `SIPRIG_STEP` | the step it runs as (`open`, `collect`, `close`, `inject`, `heal`, `probe`, `judge`), so one file may serve several |
 
 It answers on stdout, one JSON object per line, or in `lines.jsonl` under `SIPRIG_OUT`; its
 stderr goes to the step's log. Exit status 0 means it did its work. Any other status, or the
@@ -149,7 +149,8 @@ Rules:
 - Timeouts default to 30 s for `open` and `close`, 300 s for `collect`.
 - `after` orders collectors of one scope. A wider scope always runs after a narrower one ended
   and reads its keys and records without declaring it. An `after` naming a collector that is
-  not wired on the lane orders nothing.
+  not wired on the lane orders nothing. Collectors free to run go by name. A cycle of `after`
+  among one scope's collectors is refused at load.
 - A job-scope collector that needs a part runs once per distinct part file among the job's
   lanes, over the cells of the lanes naming it.
 - A delayed collector has a deadline of `delay_s` plus `collect_s`.
@@ -172,13 +173,27 @@ holder's `attachments.jsonl` (§9). The TypeScript helper `defineCollector`
 
 ## 6. The join, the cell description and the judge
 
-The base groups the records of a name by key value once, then looks each cell's key values up.
+The base indexes the scope's cells by their values of the manifest's key once, then reads the
+records of a name in one pass, looking each up. The records of a name are those its instances
+returned and those the scope's exports hold. They are joined once the name's last instance
+collected, so a later collector reads them.
 
-- A record matching one cell is joined to it.
+- A record matching one cell is joined to it: a line of `joined/<name>.jsonl` in the cell's
+  directory, the file `records` names. A record a collector assigned names its cell by id.
 - A record matching no cell is *unclaimed*. A record matching several is *ambiguous*. Both are
-  kept as an attachment of the scope and handed to the judge, joined to no cell.
+  joined to no cell and kept on the scope: the attachments `<name>-unclaimed` and
+  `<name>-ambiguous` (kind `log`, `joined/<name>.unclaimed.jsonl` and `.ambiguous.jsonl` in its
+  directory, each line as its writer stated it, an ambiguous one with the `cells` it matched).
+- An export names a cell by its directory's name: the process that writes it does not know the
+  id its scope reads the cell by (a retry's, a repeat's). The base reads the name as the scope's
+  cell whose directory bears it, in a cell's own export that cell alone.
+- The keys exports and collectors add are kept in the cell's `keys.json`. A wider scope
+  describes the cell anew off its directory and reads them, and its joined records, there.
 - A cell with no record reaches the judge with an empty list.
-- A verification a manifest names and nobody answered for a cell is `not checkable`.
+- A verification a manifest's `answers` names that nobody answered for a cell, the cell's own
+  lines counted, is `not checkable`.
+- Exports judged with no collector of their name (item 4) are a batch's. They join on the
+  `[join] key` of the path's collector of that name, wired or not, else on `call_id`.
 
 Every collector and judge reads the cells of its scope in `cell.v1`:
 
@@ -203,8 +218,12 @@ module = "./judge.ts"          # or: run = "./judge"
 judge_s = 120
 ```
 
-A judge is called once per scope with every cell, the unclaimed and the ambiguous records. It
-answers `verification` and `attachment` lines. A judge that fails answers `not checkable`.
+A judge is called once per scope with every cell, the unclaimed and the ambiguous records: its
+`context.v1` states `judging` (the name, the two files). A module's default export is called
+with `{context, out}` and returns its lines as objects; an executable runs with `SIPRIG_STEP` =
+`judge` and answers on stdout. It answers `verification` and `attachment` lines, for the
+verifications its collector names (its own name with no collector). A judge that fails, times
+out or answers another line answers `not checkable` on every cell and the scope.
 
 ## 7. The operation manifest
 

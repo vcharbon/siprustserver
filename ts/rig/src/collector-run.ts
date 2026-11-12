@@ -11,7 +11,8 @@
  * what failed, for every verification its manifest names
  * (`Collector.answeredBy`) on every cell of its scope and on the scope
  * itself. A `close` that fails is run once more; a second failure is the
- * event `lab-left-changed`, the job's mark.
+ * event `lab-left-changed`, the job's mark. The scope's collect, its records
+ * joined and judged, is `scope-judging.ts`'s.
  */
 import { Attachment, type Verification } from "@sip/contracts"
 import * as Cause from "effect/Cause"
@@ -24,11 +25,14 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import type * as Cell from "./cell.js"
 import * as Collector from "./collector.js"
+import * as Attached from "./attached.js"
 import * as Lines from "./collector-lines.js"
 import * as Context from "./context.js"
 import * as Executable from "./executable.js"
+import type * as Judge from "./judge.js"
 import type * as Lanes from "./lanes.js"
 import type * as RigPath from "./rig-path.js"
+import * as ScopeJudging from "./scope-judging.js"
 
 /** What an event says of a step. */
 export const PHASES = ["open", "opened", "collect", "collected", "close", "closed", "failed", "lab-left-changed"] as const
@@ -41,7 +45,7 @@ export const LAB_LEFT_CHANGED: Phase = "lab-left-changed"
 export const CLOSE_ATTEMPTS = 2
 
 /** The directory under a holder's where an instance's attached files go, one directory per instance. */
-export const COLLECTED_DIR = "collected"
+export const COLLECTED_DIR = Attached.COLLECTED_DIR
 
 /** One phase of one collector instance, at its instant on the runner's clock and on the wall clock. */
 export interface Event {
@@ -84,6 +88,8 @@ export interface Instance {
   readonly dir: string
   /** The scope's own directory, which holds the attachments that name no cell. */
   readonly holder: string
+  /** The judge its manifest names, as the path defines it; none judges its records where absent. */
+  readonly judge?: RigPath.Defined<Judge.Judge> | undefined
 }
 
 /** What one holder was answered: its verification lines, the last per name, and its attachments, already listed in its directory. */
@@ -125,9 +131,11 @@ export interface Over {
 export interface Opened {
   /**
    * Collects every instance in order over `cells`, the scope's cells, each
-   * instance over those of its lanes; called once, when the scope ended. Each
-   * cell of `unread` on an instance's lanes is answered `not checkable` by it,
-   * saying why the cell was not described.
+   * instance over those of its lanes as the earlier ones left them, then joins
+   * and judges their records (`scope-judging.ts`): what each instance, then
+   * each judge, answered. Called once, when the scope ended. Each cell of
+   * `unread` on an instance's lanes is answered `not checkable` by it, saying
+   * why the cell was not described.
    */
   readonly collect: (cells: ReadonlyArray<Cell.Cell>, unread?: ReadonlyArray<Unread>) => Effect.Effect<ReadonlyArray<Collected>>
   /** The labels of the instances whose `close` left the lab changed so far, in order. */
@@ -310,13 +318,8 @@ const faultOf = (instance: Instance, ids: ReadonlySet<string>, line: Lines.Line)
         : `answers ${line.line.verification}, which its manifest does not name`
     case "KeyedRecord":
       return manifest.join === undefined ? "a record by key, where its manifest states no [join] key" : undefined
-    case "Attachment": {
-      const file = line.line.attachment.file
-      if (line.line.attachment.kind === "link") return undefined
-      if (!Attachment.isHeld({ kind: "file", file })) return `attaches ${file}, which is not a path under SIPRIG_OUT`
-      const source = path.join(layoutOf(instance).out, file)
-      return fs.existsSync(source) && fs.statSync(source).isFile() ? undefined : `attaches ${file}, which is no file under SIPRIG_OUT`
-    }
+    case "Attachment":
+      return Attached.faultOf(writerOf(instance), line.line)
     default:
       return undefined
   }
@@ -339,26 +342,8 @@ const linesOf = (instance: Instance, stdout: string, ids: ReadonlySet<string>): 
   return Result.succeed(read)
 }
 
-/** `line`'s file copied into `dir`'s collected files and listed there; the attachment as listed. */
-const attach = (instance: Instance, dir: string, line: Lines.AttachmentLine): Attachment.Attachment => {
-  const { name, kind, title, file } = line.attachment
-  const listed = kind === "link" ? file : path.posix.join(COLLECTED_DIR, instance.id, file)
-  if (kind !== "link") {
-    const target = path.join(dir, listed)
-    fs.mkdirSync(path.dirname(target), { recursive: true })
-    fs.copyFileSync(path.join(layoutOf(instance).out, file), target)
-  }
-  const attachment: Attachment.Attachment = {
-    name: name ?? instance.id,
-    kind,
-    ...(title === undefined ? {} : { title }),
-    file: listed,
-    source: instance.collector.name
-  }
-  fs.mkdirSync(dir, { recursive: true })
-  fs.appendFileSync(path.join(dir, Attachment.FILE), Attachment.line(attachment))
-  return attachment
-}
+/** `instance` as the writer of its attachment lines. */
+const writerOf = (instance: Instance): Attached.Writer => ({ id: instance.id, source: instance.collector.name, out: layoutOf(instance).out })
 
 /** One holder's answers as they accrue: its lines by name, the last kept, and its attachments. */
 const accrued = () => ({ verifications: new Map<string, Verification.Verification>(), attachments: [] as Array<Attachment.Attachment> })
@@ -384,7 +369,7 @@ const applied = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, lines: Rea
           case "Attachment": {
             const cell = line.line.cell
             const holder = cell === undefined ? scope : byCell.get(cell)!
-            holder.attachments.push(attach(instance, cell === undefined ? instance.holder : dirs.get(cell)!, line.line))
+            holder.attachments.push(Attached.attach(writerOf(instance), cell === undefined ? instance.holder : dirs.get(cell)!, line.line))
             break
           }
           case "KeyedRecord":
@@ -502,6 +487,8 @@ export const close = (instance: Instance, sink: Sink): Effect.Effect<boolean> =>
 export interface Options {
   readonly sink: Sink
   readonly locker: Locker
+  /** The judges of the scope's exports alone (`scope-judging.ts`); none where absent. */
+  readonly exportJudges?: ScopeJudging.ExportJudges | undefined
 }
 
 /**
@@ -543,13 +530,22 @@ export const opened = (instances: ReadonlyArray<Instance>, options: Options): Ef
         yield* openOne(opening, refused, options, restore)
       }
       let collected = false
+      const start = openings[0]?.start ?? (yield* Effect.map(now, (at) => ({ lane_ms: at.clock_ms, wall_ms: at.wall_ms })))
       return {
         collect: (cells, unread = []) =>
           Effect.suspend(() => {
             if (collected) return Effect.die(new Error("a scope's collectors collect once"))
             collected = true
-            return Effect.forEach(openings, (opening) =>
-              Effect.map(collectOne(opening, options.sink, cells), (one) => withUnread(opening.instance, one, unread)))
+            return ScopeJudging.collect({
+              steps: openings.map((opening) => ({
+                instance: opening.instance,
+                collect: (current) => Effect.map(collectOne(opening, options.sink, current), (one) => withUnread(opening.instance, one, unread))
+              })),
+              cells,
+              exportJudges: options.exportJudges,
+              start,
+              say: (message) => Effect.flatMap(now, (at) => options.sink({ collector: "scope", phase: "failed", ...at, message }))
+            })
           }),
         leftChanged: () => [...left]
       } satisfies Opened

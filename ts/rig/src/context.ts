@@ -3,8 +3,9 @@
  * judge or operation executable reads of the scope it runs for. The scope and
  * its window, the cells in `cell.v1`, its parameters after the lane's
  * overrides, and the lane: its name and clock, its `[sip]` and `[backend]`
- * blocks as the base read them, and its parts. A plug-in reads the lane's
- * target and backend here rather than from a part that restates them.
+ * blocks as the base read them, and its parts; a judge's, what it judges. A
+ * plug-in reads the lane's target and backend here rather than from a part
+ * that restates them.
  */
 import * as Schema from "effect/Schema"
 import { Cell, Instant } from "./cell.js"
@@ -40,13 +41,27 @@ export const LaneContext = Schema.Struct({
 })
 export interface LaneContext extends Schema.Schema.Type<typeof LaneContext> {}
 
+/**
+ * What a judge judges (ADR-0060 appendix §6): the name of the records, and
+ * the files of those joined to no cell, each a JSON line as its writer stated
+ * it, an ambiguous one with the `cells` it matched.
+ */
+export const Judging = Schema.Struct({
+  name: Schema.String,
+  unclaimed: Schema.String,
+  ambiguous: Schema.String
+})
+export interface Judging extends Schema.Schema.Type<typeof Judging> {}
+
 export const Context = Schema.Struct({
   schema: Schema.Literal(SCHEMA),
   scope: Schema.Literals(["job", "batch", "cell"]),
   window: Schema.Struct({ start: Instant, end: Schema.optionalKey(Instant) }),
   cells: Schema.Array(Cell),
   lane: Schema.optionalKey(LaneContext),
-  params: Schema.Record(Schema.String, Schema.Unknown)
+  params: Schema.Record(Schema.String, Schema.Unknown),
+  /** A judge's context only. */
+  judging: Schema.optionalKey(Judging)
 })
 export interface Context extends Schema.Schema.Type<typeof Context> {}
 

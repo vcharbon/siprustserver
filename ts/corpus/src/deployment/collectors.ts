@@ -2,13 +2,14 @@
  * `Collectors` — the collectors a deployment's rig path runs around a job and
  * around each batch (`@sip/rig` `CollectorPlan`, ADR-0060 appendix §3, §5):
  * the instances a batch on a lane runs, and those a job over its lanes runs,
- * each instance's directory under the one its caller names.
+ * each instance's directory under the one its caller names; and the judges a
+ * batch runs over its exports alone (`@sip/rig` `JudgePlan`).
  *
  * The default runs none. A deployment states its rig path and its lanes, as
  * the rig loaded them, with {@link layerOf}; a lane it did not load wires no
  * collector.
  */
-import { CollectorPlan, type CollectorRun, type Lanes, type RigPath } from "@sip/rig"
+import { CollectorPlan, type CollectorRun, JudgePlan, type Lanes, type RigPath, type ScopeJudging } from "@sip/rig"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -18,9 +19,18 @@ export interface Interface {
   readonly batch: (lane: string, dir: string, holder: string) => Effect.Effect<ReadonlyArray<CollectorRun.Instance>>
   /** The collectors a job over `lanes` runs, their directories under `dir`, the job's own attachments under `holder`. */
   readonly job: (lanes: ReadonlyArray<string>, dir: string, holder: string) => Effect.Effect<ReadonlyArray<CollectorRun.Instance>>
+  /** The judges a batch on `lane`, whose directory is `holder`, runs over its exports alone; none where absent or it runs none. */
+  readonly exportJudges?: (lane: string, holder: string) => Effect.Effect<ScopeJudging.ExportJudges | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/Collectors") {}
+
+/** What the rig runs at the end of a batch on `lane` whose directory is `holder`: its collectors' instances, under `dir`, and its export judges. */
+export const batchOf = (seam: Interface, lane: string, dir: string, holder: string) =>
+  Effect.all({
+    instances: seam.batch(lane, dir, holder),
+    exportJudges: seam.exportJudges === undefined ? Effect.succeed(undefined) : seam.exportJudges(lane, holder)
+  })
 
 /** The default: no collector runs. */
 export const layer = Layer.succeed(
@@ -40,7 +50,13 @@ export const of = (rig: RigPath.RigPath, lanes: ReadonlyArray<Lanes.Loaded>): In
     job: (named, dir, holder) =>
       Effect.sync(() =>
         CollectorPlan.jobPlanOf(rig, named.flatMap((lane) => byId.get(lane) ?? []), dir, holder)
-      )
+      ),
+    exportJudges: (lane, holder) =>
+      Effect.sync(() => {
+        const loaded = byId.get(lane)
+        const planned = loaded === undefined ? undefined : JudgePlan.exportJudgesOn(rig, loaded, holder)
+        return planned === undefined || planned.judges.length === 0 ? undefined : planned
+      })
   }
 }
 

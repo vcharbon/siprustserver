@@ -120,6 +120,23 @@ describe("cell.v1 of a bundle", () => {
     ])
   })
 
+  it("reads the keys and records a narrower scope added in its directory, and the claims its document states", async () => {
+    const dir = variant(() => undefined)
+    fs.writeFileSync(path.join(dir, "keys.json"), JSON.stringify({ trunk: ["t1"], account: ["0009002"] }))
+    fs.mkdirSync(path.join(dir, "joined"))
+    fs.writeFileSync(path.join(dir, "joined", "store-records.jsonl"), `{"n":1}\n`)
+    const pivot = JSON.parse(fs.readFileSync(path.join(dir, "pivot.json"), "utf8"))
+    pivot.postconditions = { claims: { "store-records": { count: 2 } } }
+    fs.writeFileSync(path.join(dir, "pivot.json"), JSON.stringify(pivot))
+    const cell = await describeDir(dir, { ...PLACEMENT, claims: { audit: { lines: 1 } } })
+    expect([cell.keys.trunk, cell.keys.account, cell.records, cell.claims]).toEqual([
+      ["t1"],
+      ["0009002", "0009001"],
+      { "store-records": path.join(dir, "joined", "store-records.jsonl") },
+      { "store-records": { count: 2 }, audit: { lines: 1 } }
+    ])
+  })
+
   it("reads a real-clock cell's wall clock from its sut-join.json where timing.json states none", async () => {
     const dir = variant((files) => {
       files["run-config.json"] = files["run-config.json"]!.replace(`"clock": "virtual"`, `"clock": "real"`)

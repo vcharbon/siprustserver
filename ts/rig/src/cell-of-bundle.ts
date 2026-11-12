@@ -6,15 +6,19 @@
  * (`pivot.json`). The user keys are the identities each recorded line states
  * (`sip-message`'s reading); a line stating none adds none. The wall clock is
  * `timing.json`'s window, else the window a `sut-join.json` states; a bundle
- * stating neither has no description.
+ * stating neither has no description. The claims are those the document
+ * states, then the placement's; the keys and records a narrower scope added
+ * are read from the cell's directory (`cell-records.ts`), then the
+ * placement's.
  */
-import { Batch, Bundle } from "@sip/contracts"
+import { Batch, Bundle, Postcondition } from "@sip/contracts"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
 import * as path from "node:path"
 import { BASE_KEYS, CALL_ID, type Cell, type Instant, type Leg, SCHEMA, type Verification } from "./cell.js"
+import * as CellRecords from "./cell-records.js"
 
 /** Why a bundle yields no cell description. */
 export class Unreadable extends Schema.TaggedError<Unreadable>()("Rig.CellUnreadable", {
@@ -49,6 +53,15 @@ const Roster = Schema.Struct({
   actors: Schema.Array(Schema.Struct({ id: Schema.String, kind: Schema.String }))
 })
 const decodeRoster = Schema.decodeUnknownOption(Roster)
+
+const decodePostconditions = Schema.decodeUnknownOption(Schema.Struct({ postconditions: Schema.optionalKey(Postcondition.Postconditions) }))
+
+/** The claims the document `raw` states (`postconditions`); none where it states none readable. */
+const statedClaimsOf = (raw: unknown): Readonly<Record<string, unknown>> =>
+  Option.match(decodePostconditions(raw), {
+    onNone: () => ({}),
+    onSome: (document) => Postcondition.statedClaims(document.postconditions)
+  })
 
 /** One recorded datagram of a leg, its head facts read. */
 interface Recorded {
@@ -145,6 +158,19 @@ export const ofBundle = (dir: string, placement: Placement): Effect.Effect<Cell,
       Effect.map((raw) => Option.getOrUndefined(decodeRoster(raw))),
       Effect.orElseSucceed(() => undefined)
     )
+    const stated = yield* json("pivot.json").pipe(
+      Effect.map((raw) => statedClaimsOf(raw)),
+      Effect.orElseSucceed(() => ({}))
+    )
+    const added = CellRecords.addedKeysOf(
+      yield* fs.readFileString(path.join(dir, CellRecords.KEYS_FILE)).pipe(Effect.orElseSucceed(() => undefined))
+    )
+    const joined = (yield* fs.readDirectory(path.join(dir, CellRecords.JOINED_DIR)).pipe(
+      Effect.orElseSucceed((): ReadonlyArray<string> => [])
+    ))
+      .filter((file) => file.endsWith(".jsonl"))
+      .sort()
+      .map((file) => [file.slice(0, -".jsonl".length), CellRecords.joinedFileOf(dir, file.slice(0, -".jsonl".length))] as const)
     const recordingDir = path.join(dir, "recording")
     const legIds = (yield* fs.readDirectory(recordingDir).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])))
       .filter((file) => file.endsWith(".jsonl"))
@@ -189,11 +215,11 @@ export const ofBundle = (dir: string, placement: Placement): Effect.Effect<Cell,
       batch: placement.batch,
       attempt: placement.attempt,
       clock: config.clock === "virtual" ? "simulated" : "real",
-      keys: keysOf(baseKeysOf(messages, byLeg), placement.keys ?? {}),
+      keys: keysOf(keysOf(baseKeysOf(messages, byLeg), added), placement.keys ?? {}),
       legs,
       timeline: { start, end },
-      claims: { ...placement.claims },
-      records: { ...placement.records },
+      claims: { ...stated, ...placement.claims },
+      records: { ...Object.fromEntries(joined), ...placement.records },
       verifications: [...(placement.verifications ?? [])],
       dir,
       tags: [...(placement.tags ?? [])],

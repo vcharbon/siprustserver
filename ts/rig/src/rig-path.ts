@@ -11,8 +11,9 @@
  * - a name defined twice along the path (naming both files), a collector's
  *   judge no judge defines, a part schema that is no JSON object, and a path
  *   `pack.toml` names that its tree does not hold;
- * - a collector named like a source the base answers lines as, and a lock
- *   named by collectors of two scopes (naming both files).
+ * - a collector named like a source the base answers lines as, a lock named
+ *   by collectors of two scopes (naming both files), and a cycle of `after`
+ *   among one scope's collectors (naming each file).
  */
 import { Verification } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -20,6 +21,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as Result from "effect/Result"
 import * as path from "node:path"
 import * as Collector from "./collector.js"
+import * as CollectorOrder from "./collector-order.js"
 import * as Judge from "./judge.js"
 import { type Refusal, refuse } from "./manifest-file.js"
 import * as Operation from "./operation.js"
@@ -256,10 +258,28 @@ export const load = (roots: Roots): Effect.Effect<RigPath, Refusal, FileSystem.F
         return yield* Effect.fail(refuse([collector.file], `judge: names ${judge}, which no judge of the path defines`))
       }
     }
-    const refused = sourceNamed(path) ?? lockOfNestedScopes(path)
+    const refused = sourceNamed(path) ?? lockOfNestedScopes(path) ?? afterCycle(path)
     if (refused !== undefined) return yield* Effect.fail(refused)
     return path
   })
+
+/**
+ * The first cycle the `after` of one scope's collectors make, refused naming
+ * its manifests: none of its collectors could run after the others.
+ */
+const afterCycle = (path: RigPath): Refusal | undefined => {
+  for (const scope of Collector.SCOPES) {
+    const ofScope = [...path.collectors.values()].filter((collector) => collector.manifest.scope === scope)
+    const cycle = CollectorOrder.cycleOf(ofScope)
+    if (cycle !== undefined) {
+      return refuse(
+        [...new Set(cycle)].map((name) => path.collectors.get(name)!.file),
+        `after: ${cycle.join(" runs after ")}: a cycle, so none of them runs first`
+      )
+    }
+  }
+  return undefined
+}
 
 /**
  * The first collector named like a source the base answers lines as

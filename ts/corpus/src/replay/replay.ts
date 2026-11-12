@@ -498,8 +498,9 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
 /**
  * The rig's collectors of `request`'s batch (`@sip/corpus` `Collectors`), their
  * directories under the sweep's batch's own, their events the job's where the
- * replay is one, over the cells `ran` names once driven; none where the
- * deployment wires none on the lane.
+ * replay is one, over the cells `ran` names once driven, with the judges of
+ * the batch's exports alone; none where the deployment wires neither on the
+ * lane.
  */
 const collectorsOf = Effect.fn("Replay.collectorsOf")(function*(
   request: BatchRequest,
@@ -512,16 +513,17 @@ const collectorsOf = Effect.fn("Replay.collectorsOf")(function*(
     owner.sweepId === undefined ? `job${owner.jobId}` : `sweep${owner.sweepId}`,
     `batch${request.number}`
   )
-  const instances = yield* Effect.flatMap(Collectors.Service, (seam) =>
-    seam.batch(options.lane, path.join(holder, "collectors"), holder))
-  if (instances.length === 0) return undefined
+  const { instances, exportJudges } = yield* Effect.flatMap(Collectors.Service, (seam) =>
+    Collectors.batchOf(seam, options.lane, path.join(holder, "collectors"), holder))
+  if (instances.length === 0 && exportJudges === undefined) return undefined
   const events = yield* JobEvents.Service
   return {
     instances,
     holder,
     options: {
       sink: CollectorIo.sinkOf(owner.jobId === undefined ? undefined : { id: owner.jobId, events }),
-      locker: yield* CollectorIo.locker()
+      locker: yield* CollectorIo.locker(),
+      exportJudges
     },
     cells: () => CollectedCells.describe(ran(), path.basename(holder))
   } satisfies LaneBatch.Collectors<void, FileSystem.FileSystem>
