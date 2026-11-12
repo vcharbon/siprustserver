@@ -392,7 +392,7 @@ describe("a scope's collectors", () => {
     }
   })
 
-  it("fills a deciding promise on a cell whose only line of the name is informative: the cell is not verified by it", async () => {
+  it("fills a deciding promise on a cell whose only line of the name is another source's informative line: the cell is not verified by it", async () => {
     const { root, rig } = await samples()
     const cells = cellsUnder(root)
     const { collected } = await runScope(
