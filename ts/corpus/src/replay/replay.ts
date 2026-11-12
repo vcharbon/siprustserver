@@ -259,6 +259,15 @@ const settleLanded = Effect.fn("Replay.settleLanded")(function*(
   }
 })
 
+/** The lines `collected` answered of each cell of `ran`, by the cell's directory: none for a directory it does not name. */
+const answeredByDir = (
+  ran: ReadonlyArray<CollectedCells.LandedCell>,
+  collected: ReadonlyArray<CollectorRun.Collected>
+): (cellDir: string) => ReadonlyArray<Verification.Verification> => {
+  const byDir = new Map(ran.map((cell) => [cell.dir, collected.flatMap((one) => one.cells.get(cell.id)?.verifications ?? [])]))
+  return (cellDir) => byDir.get(cellDir) ?? []
+}
+
 /**
  * One capture, closed on what its own cells wrote across every batch it sat
  * in: the bundle's index over ALL its cells, the row, the rule counts.
@@ -340,14 +349,17 @@ const interpreterEnv = (memoryMax: string, rowsDir: string | undefined) =>
  * One batch: its cells materialised, then every cell run under one side-row
  * directory, one batch process (where the lane has one) and one SUT, each
  * capture's row closed as its own last cell lands — or, under a batch
- * process, once the batch's gate has read and charged its cells.
+ * process, once the batch's gate has read and charged its cells, and with
+ * collectors, once they answered.
  * A capture a batch cannot materialise breaks: its cells here and in every
  * batch after it are landed unrun, and its row closes `error`. A stop asked
  * for mid-batch admits no further cell, waits the stop's grace for the cells
  * in flight, then interrupts them; the batch's end runs as on any other.
- * A batch that fails still merges what its cell-scope collectors answered
- * into the landed cells whose rows closed, and `not checkable` where it cut
- * them short, so no such cell passes unanswered.
+ * A batch that fails still closes, where no batch process ran it, each row of
+ * its collectors whose every cell landed, its cells settled on what its
+ * cell-scope collectors answered, and merges those answers into the landed
+ * cells whose rows closed, `not checkable` where it cut them short, so no such
+ * cell passes unanswered.
  * The batch's row names the cells it drives, the materialised ones; a
  * batch with none files no row.
  */
@@ -495,6 +507,8 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
     }
   }
   let ofCells = CellCollectors.NONE
+  let hosted = false
+  const touched = () => driven.map((ref) => tallyOf(ref.capture))
   const ended = yield* LaneBatch.run({
     lane: options.lane,
     ...(cells.length === 0 ? {} : { row: { ...request.owner, lane: options.lane, cells: cells.map(cellName) } }),
@@ -506,13 +520,19 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
     ...(collectors === undefined ? {} : { collectors }),
     drive: ({ host, cells: cellCollectors }) => {
       ofCells = cellCollectors
+      hosted = host !== undefined
       return driveAll(host, cellCollectors)
     }
   }).pipe(
     Effect.tapCause(() =>
       Effect.suspend(() => {
-        answeredOf(ofCells.settled())
-        return Effect.forEach(new Set(driven.map((ref) => tallyOf(ref.capture))), mergeAnswered, { discard: true })
+        const settled = ofCells.settled()
+        answeredOf(settled)
+        const closing = hosted || collectors === undefined ? Effect.void : Effect.andThen(
+          settleLanded(touched(), answeredByDir(ranCells, settled)),
+          closeLanded(touched(), options)
+        )
+        return Effect.andThen(closing, Effect.forEach(new Set(touched()), mergeAnswered, { discard: true }))
       })
     )
   )
@@ -521,12 +541,8 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
   const dirty = [ended.dirty, LaneBatch.leftChangedOf(ended)].filter((said) => said !== undefined).join("; ") || undefined
   if (deadHost !== undefined) yield* Console.error(`[replay] ${deadHost}`)
   if (dirty !== undefined) yield* Console.error(`[replay] ${dirty}`)
-  const answeredIn = new Map(ranCells.map((cell) => [
-    cell.dir,
-    ended.collected.flatMap((one) => one.cells.get(cell.id)?.verifications ?? [])
-  ]))
   const closesHere = ended.hosted || collectors !== undefined
-  if (closesHere) yield* settleLanded(driven.map((ref) => tallyOf(ref.capture)), (dir) => answeredIn.get(dir) ?? [])
+  if (closesHere) yield* settleLanded(touched(), answeredByDir(ranCells, ended.collected))
   // What the gate read of a standing SUT's call contexts, on every run the
   // batch's cells ran under; a context one cell's call left is that cell's
   // run's cleanup finding, never the batch's.
