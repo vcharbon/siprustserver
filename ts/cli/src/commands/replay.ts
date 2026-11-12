@@ -36,9 +36,9 @@
  * A request's replay is a JOB: `--job <id>` names the row `job start` made and
  * launched this process for; without it the process makes its own row,
  * `running` under its own pid, so a foreground replay is in the queue too. Its
- * pre-checks run first (`@sip/corpus` `pre-checks.ts`): one that fails closes
- * the row and exits 2 with its message, before the lane is waited for. The
- * job-scope collectors the deployment wires on the lane bracket its passes
+ * pre-checks run once the lane is held, before any call (`@sip/corpus`
+ * `pre-checks.ts`), a work list's too: a refusal of theirs exits 2 with its
+ * message, the job's row closed with it. The job-scope collectors the deployment wires on the lane bracket its passes
  * once the lane is held (`@sip/corpus` `job-collectors.ts`), its lock waits
  * show on the row, and the row closes with the exit code on the way out.
  *
@@ -78,7 +78,6 @@ import { passes as passesOf } from "@sip/corpus/requests/compare-request"
 import { resolutionLines, unranOnly } from "@sip/corpus/requests/request"
 import * as Session from "@sip/corpus/session"
 import * as JobCollectors from "@sip/corpus/replay/job-collectors"
-import * as PreChecks from "@sip/corpus/replay/pre-checks"
 import { label, type Work, workList } from "@sip/corpus/universe"
 import { Jobs, Requests } from "@sip/store"
 import * as Cause from "effect/Cause"
@@ -214,7 +213,7 @@ const LAB_LEFT_CHANGED_EXIT = 1
  */
 const stoppedWhere = (opening: { readonly laneTaken: boolean; readonly lockHeldBy: string | undefined }): string =>
   !opening.laneTaken
-    ? "before the lane was taken"
+    ? "before the lane was taken and its pre-checks passed"
     : opening.lockHeldBy !== undefined
     ? `while its collectors waited for a lock held by ${opening.lockHeldBy}`
     : "while its collectors opened"
@@ -300,15 +299,6 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
   // The row states its cells before the lane is waited for: `job_cells` are written under the lane.
   yield* jobs.planned(jobId, cellsOf(resolution))
   const watch = (holder: string | undefined) => jobs.waiting(jobId, holder ?? null).pipe(Effect.ignore)
-  const checked = yield* Effect.exit(restore(
-    PreChecks.job({ job: jobId, dir: Job.jobDir(options.paths.sessions, jobId), lanes: [options.lane], watch })
-  ))
-  if (Exit.isFailure(checked) || checked.value !== undefined) {
-    const code = Exit.isFailure(checked) ? INTERRUPTED_EXIT : 2
-    yield* Console.error(Exit.isFailure(checked) ? `[replay] job ${jobId}: stopped in its pre-checks` : `[replay] refused: ${checked.value}`)
-    yield* jobs.close(jobId, closing(code))
-    return code
-  }
   const stop: Stop = yield* Deferred.make<number>()
   const passes = passesOf(shown.request.knobs)
   /** One pass over the request's cells; the first records them on the job, every one marks them ran. */
@@ -334,7 +324,10 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
   let leftChanged: ReadonlyArray<string> = []
   const ran = yield* Effect.exit(
     Effect.scoped(Effect.gen(function*() {
-      yield* restore(ReplayBuild.session(options, `job ${jobId}: replaying request ${id} on ${options.lane}`, watch))
+      yield* restore(ReplayBuild.session(options, `job ${jobId}: replaying request ${id} on ${options.lane}`, {
+        watch,
+        job: { id: jobId, dir: Job.jobDir(options.paths.sessions, jobId) }
+      }))
       opening.laneTaken = true
       const passed = Effect.gen(function*() {
         const done: Array<Replay> = []
@@ -358,7 +351,10 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
             Console.error(`[replay] job ${jobId}: the collector(s) ${labels.join(", ")} left the lab changed`)
           )
       }, passed)
-    })).pipe(Effect.catchTag("Session.Held", (held) => Effect.succeed(held)))
+    })).pipe(
+      Effect.catchTag("Session.Held", (held) => Effect.succeed(held.held)),
+      Effect.catchTag("PreChecks.Refused", (refused) => Effect.succeed(refused.reason))
+    )
   )
   if (Exit.isFailure(ran)) {
     if (Cause.hasInterruptsOnly(ran.cause)) {
@@ -370,11 +366,11 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
     return yield* Effect.failCause(ran.cause)
   }
   const replays = ran.value
-  const passesCode = replays instanceof Session.Held ? 2 : yield* closingCode(replays)
+  const passesCode = typeof replays === "string" ? 2 : yield* closingCode(replays)
   const code = leftChanged.length === 0 ? passesCode : Math.max(passesCode, LAB_LEFT_CHANGED_EXIT)
-  if (replays instanceof Session.Held) yield* Console.error(`[replay] refused: ${replays.held}`)
+  if (typeof replays === "string") yield* Console.error(`[replay] refused: ${replays}`)
   yield* jobs.close(jobId, closing(code))
-  if (replays instanceof Session.Held) return code
+  if (typeof replays === "string") return code
   if (input.summary) for (const line of yield* ReplaySummary.read(`@job:${jobId}`, options.lane)) yield* Console.log(line)
   // After the lane is given back, never under it: a sweep must not be what the
   // next one queues behind while it tidies.
@@ -464,17 +460,13 @@ const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Inpu
     yield* Console.error(noPrep(facts, options.prep))
     return 2
   }
-  const refused = yield* PreChecks.unfiled(options.paths.sessions, [options.lane])
-  if (refused !== undefined) {
-    yield* Console.error(`[replay] refused: ${refused}`)
-    return 2
-  }
   const replay = yield* Effect.scoped(Effect.gen(function*() {
     yield* ReplayBuild.session(options, `replaying ${captures.length} capture(s) on ${options.lane}`)
     const plans = yield* planWork(captures, prep, options.concurrency)
     return yield* phase({ captures: plans, options, prepId: prep })
   })).pipe(
     Effect.catchTag("Session.Held", (held) => Effect.succeed(held.held)),
+    Effect.catchTag("PreChecks.Refused", (refused) => Effect.succeed(refused.reason)),
     Effect.catchTag("ReplayDb.UnknownCases", (unknown) => Effect.succeed(unknown.message))
   )
   if (typeof replay === "string") {

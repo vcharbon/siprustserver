@@ -3,10 +3,13 @@
  * runs the job (a capture replay, a campaign): the job-scope collectors `at =
  * "before"` the deployment wires over the job's lanes, run before the job's
  * provisioning and its first call. What they answer of the job are its lines
- * and attachments, after any it holds; their events are the job's. A `fail`
- * refuses the job with its message, as does a required pre-check, of either
- * scope, that a real-clock lane of the job names no part of.
+ * and attachments, after any it holds; their events are the job's. A refusal
+ * of theirs (`PreCheck.run`) refuses the job with its message, as does a
+ * required pre-check, of either scope, that a real-clock lane of the job
+ * names no part of.
  *
+ * A capture replay runs them once its lane is held ({@link forReplay}, from
+ * `build.ts` `session`), so nothing it checked changes before its first call.
  * A batch's own pre-checks run in the batch driver (`lane-batch.ts`).
  */
 import type { Attachment, Verification } from "@sip/contracts"
@@ -14,6 +17,8 @@ import { PreCheck } from "@sip/rig"
 import { Attachments, JobEvents, Verifications } from "@sip/store"
 import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
+import * as Schema from "effect/Schema"
+import * as fs from "node:fs"
 import * as path from "node:path"
 import { Collectors } from "../deployment/index.js"
 import * as Locks from "../locks.js"
@@ -29,6 +34,13 @@ export interface Request {
   readonly lanes: ReadonlyArray<string>
   /** Told whom a pre-check's lock waits for, and `undefined` once it is taken. */
   readonly watch?: Locks.Watch
+}
+
+/** A job's pre-checks refused it: `reason` says why. */
+export class Refused extends Schema.TaggedError<Refused>()("PreChecks.Refused", { reason: Schema.String }) {
+  override get message(): string {
+    return this.reason
+  }
 }
 
 /** `lines` written after those job `job` holds; nothing where none is given. */
@@ -65,11 +77,27 @@ export const job = (request: Request) =>
     return checked.refusal
   })
 
+/** The job row a replay files its pre-checks under, and the job's directory. */
+export interface Filed {
+  readonly id: number
+  readonly dir: string
+}
+
+/** The directory, under `sessions`' collectors, of one run of the pre-checks of work no job row files. */
+const unfiledDir = (sessions: string) =>
+  Effect.map(Clock.currentTimeMillis, (ms) => path.join(sessions, CollectedCells.COLLECTORS_DIR, `pre-checks-${ms}-${process.pid}`))
+
 /**
- * {@link job} for work no job row files (a sweep, a campaign's or an evidence
- * run's replay): its directory under `sessions`' collectors, its events the
- * output's only.
+ * The pre-checks of a capture replay on `lane`, run once its lane is held:
+ * those of job `filed`, its directory holding theirs; of work no job row files
+ * (a sweep, a campaign's or an evidence run's replay), under `sessions`'
+ * collectors, in a directory removed once they let the work through. Fails
+ * {@link Refused} with why they refused it.
  */
-export const unfiled = (sessions: string, lanes: ReadonlyArray<string>) =>
-  Effect.flatMap(Clock.currentTimeMillis, (ms) =>
-    job({ job: undefined, dir: path.join(sessions, CollectedCells.COLLECTORS_DIR, `pre-checks-${ms}-${process.pid}`), lanes }))
+export const forReplay = (sessions: string, lane: string, filed: Filed | undefined, watch?: Locks.Watch) =>
+  Effect.gen(function*() {
+    const dir = filed?.dir ?? (yield* unfiledDir(sessions))
+    const refused = yield* job({ job: filed?.id, dir, lanes: [lane], ...(watch === undefined ? {} : { watch }) })
+    if (refused !== undefined) return yield* new Refused({ reason: refused })
+    if (filed === undefined) yield* Effect.sync(() => fs.rmSync(dir, { recursive: true, force: true }))
+  })

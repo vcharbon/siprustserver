@@ -217,9 +217,10 @@ export const scopeAnswersOf = (collected: ReadonlyArray<CollectorRun.Collected>)
 })
 
 /**
- * One batch, its row (where it files one) open from before the stand until
- * what it stood is given back, closed with its lines and the rig's
- * collectors' lines of it, their attachments of it added.
+ * One batch, its row (where it files one) open from before its pre-checks
+ * until what it stood is given back, closed with its lines and the rig's
+ * collectors' lines of it, their attachments of it added; closed however the
+ * batch ended once it opened, a failure or an interruption included.
  */
 export const run = <A, E, R, EC = never, RO = never, RC = never>(
   request: Request<A, E, R, EC, RO, RC>
@@ -229,32 +230,51 @@ export const run = <A, E, R, EC = never, RO = never, RC = never>(
   R | Exclude<RO, Scope.Scope> | RC | LaneHosting.Service | Batches.Service | Attachments.Service
 > =>
   Effect.gen(function*() {
-    const batches = request.row === undefined ? undefined : yield* Batches.Service
-    const id = batches === undefined || request.row === undefined ? undefined : yield* batches.open(request.row)
-    const checked = yield* preChecked(request.collectors)
-    if (checked.refusal !== undefined) {
-      if (batches !== undefined && id !== undefined) {
-        yield* batches.close(id, checked.refusal, checked.answers.verifications)
-        yield* attach(request.collectors, id, checked.answers.attachments)
-      }
-      return yield* new LaneHosting.LaneUnready({ lane: request.lane, detail: checked.refusal })
+    const unready = (refusal: string) => new LaneHosting.LaneUnready({ lane: request.lane, detail: refusal })
+    const row = request.row
+    if (row === undefined) {
+      const outcome = yield* checkedThenStood(request)
+      return outcome._tag === "Refused" ? yield* unready(outcome.refusal) : outcome.ended
     }
-    const scoped = Effect.map(
-      Effect.scoped(stood(request)),
-      ({ ended, opened }): Ended<A> => ({
+    const batches = yield* Batches.Service
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function*() {
+        const id = yield* batches.open(row)
+        const outcome = yield* restore(checkedThenStood(request)).pipe(
+          Effect.onExit((exit) => Exit.isSuccess(exit) ? Effect.void : Effect.ignore(batches.close(id, failureOf(exit.cause))))
+        )
+        if (outcome._tag === "Refused") {
+          yield* batches.close(id, outcome.refusal, outcome.answers.verifications)
+          yield* attach(request.collectors, id, outcome.answers.attachments)
+          return yield* unready(outcome.refusal)
+        }
+        const ended = outcome.ended
+        const answered = scopeAnswersOf(ended.collected)
+        yield* batches.close(id, detailOf(ended), [...linesOf(ended), ...answered.verifications])
+        yield* attach(request.collectors, id, answered.attachments)
+        return ended
+      })
+    )
+  })
+
+/**
+ * The batch's pre-checks, then, where they refuse nothing, what the lane
+ * stands for its cells: what its pre-checks refused it with, or how it ended,
+ * their answers and leftovers before its collectors'.
+ */
+const checkedThenStood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
+  Effect.gen(function*() {
+    const checked = yield* preChecked(request.collectors)
+    if (checked.refusal !== undefined) return { _tag: "Refused" as const, refusal: checked.refusal, answers: checked.answers }
+    const { ended, opened } = yield* Effect.scoped(stood(request))
+    return {
+      _tag: "Ended" as const,
+      ended: {
         ...ended,
         collected: [...checked.collected, ...ended.collected],
         leftChanged: [...checked.leftChanged, ...(opened?.leftChanged() ?? [])]
-      })
-    )
-    if (batches === undefined || id === undefined) return yield* scoped
-    const ended = yield* scoped.pipe(
-      Effect.onExit((exit) => Exit.isSuccess(exit) ? Effect.void : Effect.ignore(batches.close(id, failureOf(exit.cause))))
-    )
-    const answered = scopeAnswersOf(ended.collected)
-    yield* batches.close(id, detailOf(ended), [...linesOf(ended), ...answered.verifications])
-    yield* attach(request.collectors, id, answered.attachments)
-    return ended
+      } satisfies Ended<A>
+    }
   })
 
 /** A batch's rig collectors, what runs them and holds what they attach, its cells aside. */

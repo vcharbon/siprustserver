@@ -16,7 +16,8 @@
  * attachment of it the batch's; one whose collect exits non-zero answers
  * every cell and the batch not checkable with its message; a batch whose
  * cells fail still closes them. Its pre-checks run before the lane stands:
- * one that fails refuses the batch with its message, on the row and the job.
+ * one that fails refuses the batch with its message, on the row and the job;
+ * a batch interrupted while they run still closes its row.
  *
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  */
@@ -25,6 +26,7 @@ import { type Cell, RigPath } from "@sip/rig"
 import { Attachments, Batches, Client, JobEvents, Jobs, Sessions } from "@sip/store"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
 import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
 import * as Result from "effect/Result"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import * as Layer from "effect/Layer"
@@ -155,7 +157,7 @@ const script = (dir: string, name: string, body: string) => {
  * the batch and attaches a log to the batch, or, `failing`, says why on its
  * stderr and exits 3. The batch's collectors with it, its events in `events`.
  */
-const labCollectors = async (failing: boolean, target?: "up" | "down"): Promise<LaneBatch.Collectors<string, never>> => {
+const labCollectors = async (failing: boolean, target?: "up" | "down" | "slow"): Promise<LaneBatch.Collectors<string, never>> => {
   const root = fs.mkdtempSync(path.join(TREE, "rig-"))
   const dir = path.join(root, "collectors", "lab")
   fs.mkdirSync(dir, { recursive: true })
@@ -170,6 +172,8 @@ const labCollectors = async (failing: boolean, target?: "up" | "down"): Promise<
     "collect",
     target === "down"
       ? `echo '{"verification":"target-up","answer":"fail","message":"${TARGET_DOWN}"}'`
+      : target === "slow"
+      ? "sleep 30"
       : `echo '{"verification":"target-up","answer":"pass"}'`
   )
   fs.writeFileSync(
@@ -364,6 +368,23 @@ describe.skipIf(!served)("the pre-checks of a batch", () => {
     expect(events.filter((event) => event === "collector open")).toHaveLength(1)
     expect(lines.map((line) => `${line.name} ${line.answer}`)).toEqual(["target-up pass", "lab-check pass"])
   })
+
+  it("close the row of a batch interrupted while they run, standing nothing", async () => {
+    endingAs({})
+    const collectors = await labCollectors(false, "slow")
+    const row = await withStore(Effect.gen(function*() {
+      const job = yield* jobOf
+      const batch = yield* Effect.forkChild(
+        LaneBatch.run({ lane: STANDS, row: { jobId: job, lane: STANDS, cells: ["a"] }, stand, collectors, drive: driveOn(STANDS) })
+      )
+      yield* Effect.sleep("20 millis").pipe(Effect.repeat({ until: () => events.includes("collector collect") }))
+      yield* Fiber.interrupt(batch)
+      const [row] = yield* Effect.flatMap(Batches.Service, (batches) => batches.ofJob(job))
+      return row!
+    }))
+    expect(events).toEqual(["collector collect"])
+    expect([row.finishedAt !== null, row.detail]).toEqual([true, "interrupted"])
+  }, 10_000)
 })
 
 describe.skipIf(!served)("one batch on a lane", () => {

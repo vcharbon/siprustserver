@@ -31,8 +31,9 @@
  * What the cut refused lands in `<stem>/<capture>/excluded.json` under the
  * session tree, and each replay in a `run<id>` holding its cells, their
  * run-specs and its own index; the id comes from the store, so no two replays
- * collide on a run directory. The lane's job pre-checks run before the lane is
- * taken (`@sip/corpus` `pre-checks.ts`): one that fails exits 2 with its message.
+ * collide on a run directory. The lane's job pre-checks run once the lane is
+ * taken, before the cut (`@sip/corpus` `pre-checks.ts`): a refusal of theirs
+ * exits 2 with its message.
  */
 import { afterSweep } from "@sip/corpus/housekeeping/cleanup"
 import { errorsFail } from "@sip/corpus/options"
@@ -40,7 +41,6 @@ import * as Population from "@sip/corpus/population"
 import * as ReplayBuild from "@sip/corpus/replay/build"
 import { prepOf, workAsOf } from "@sip/corpus/replay/evidence-prep"
 import { planWork } from "@sip/corpus/replay/plan"
-import * as PreChecks from "@sip/corpus/replay/pre-checks"
 import { phase as replay, report } from "@sip/corpus/replay/replay"
 import * as ReplaySummary from "@sip/corpus/report/replay-summary"
 import { label, workList } from "@sip/corpus/universe"
@@ -105,11 +105,6 @@ const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input)
     for (const work of captures) yield* Console.log(label(work))
     return 0
   }
-  const unchecked = yield* PreChecks.unfiled(options.paths.sessions, [options.lane])
-  if (unchecked !== undefined) {
-    yield* Console.error(`[evidence] refused: ${unchecked}`)
-    return 2
-  }
   const what = `${captures.length} capture(s) on ${options.lane}`
   // The lane is taken around BOTH phases: the cut needs nothing, but a command
   // that cut and then queued for its lane would replay a cut the wait aged.
@@ -123,6 +118,7 @@ const main = Effect.fn("Evidence.main")(function*(facts: CliFacts, input: Input)
     return yield* replay({ captures: plans, options, prepId: prep.prep })
   })).pipe(
     Effect.catchTag("Session.Held", (held) => Effect.succeed(held.held)),
+    Effect.catchTag("PreChecks.Refused", (refused) => Effect.succeed(refused.reason)),
     Effect.catchTag("ReplayDb.UnknownCases", (unknown) => Effect.succeed(unknown.message))
   )
   if (typeof replayed === "string") {

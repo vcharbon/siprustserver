@@ -21,6 +21,7 @@ import type * as Locks from "../locks.js"
 import type { Options } from "../options.js"
 import * as Session from "../session.js"
 import * as Timing from "../timing.js"
+import * as PreChecks from "./pre-checks.js"
 
 /** How long a real-clock lane waits after a build that compiled. */
 export const SETTLE_MS = 30_000
@@ -53,19 +54,32 @@ export interface Seams {
   readonly sleep?: (ms: number) => Effect.Effect<void>
 }
 
+/** What a session is opened with beside its options. */
+export interface With {
+  /** Told whom a lock waits for, and `undefined` once it is taken. */
+  readonly watch?: Locks.Watch
+  /** The job the replay is, where a row files it: its pre-checks' events, lines and directory. */
+  readonly job?: PreChecks.Filed
+  readonly seams?: Seams
+}
+
 /**
  * The lane read first — a lane the deployment does not state is refused before
  * any build or lock — then the tools built, then {@link Session.forReplay}
- * held for the caller's scope, then the settle a real-clock lane owes a build
- * that compiled.
+ * held for the caller's scope, then the replay's job pre-checks run under it
+ * (`pre-checks.ts`, failing `PreChecks.Refused`), then the settle a
+ * real-clock lane owes a build that compiled.
  */
-export const session = (options: Options, what: string, watch: Locks.Watch = () => Effect.void, seams: Seams = {}) =>
+export const session = (options: Options, what: string, given: With = {}) =>
   Effect.gen(function*() {
+    const watch = given.watch ?? (() => Effect.void)
+    const seams = given.seams ?? {}
     yield* Effect.flatMap(LaneHosting.Service, (hosting) => hosting.lane(options.lane))
     const built = seams.build === undefined
       ? yield* forLane(options.lane, watch)
       : yield* seams.build(options.lane, watch)
     yield* Session.forReplay(options, what, watch)
+    yield* PreChecks.forReplay(options.paths.sessions, options.lane, given.job, watch)
     const settle = yield* settleAfter(options.lane, built)
     if (settle === 0) return
     yield* Console.log(
