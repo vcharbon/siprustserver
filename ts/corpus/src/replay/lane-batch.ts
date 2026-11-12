@@ -297,10 +297,13 @@ const attach = (rig: RigOf, id: number, attachments: ReadonlyArray<Attachment.At
 
 /**
  * The batch's pre-checks (`@sip/rig` `PreCheck`): its rig collectors `at =
- * "before"`, run before the lane stands anything, with the batch's options.
+ * "before"`, run before the lane stands anything, with the batch's sink and
+ * locker: the batch's judges of exports judge what its cells did, not them.
  */
 const preChecked = (rig: RigOf) =>
-  rig === undefined ? Effect.succeed(PreCheck.NOTHING) : PreCheck.run(rig.instances.filter(PreCheck.isPreCheck), [], rig.options)
+  rig === undefined
+    ? Effect.succeed(PreCheck.NOTHING)
+    : PreCheck.run(rig.instances.filter(PreCheck.isPreCheck), [], { sink: rig.options.sink, locker: rig.options.locker })
 
 const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
   Effect.gen(function*() {

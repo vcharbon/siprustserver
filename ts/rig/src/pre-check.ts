@@ -68,32 +68,40 @@ const refused = (sink: CollectorRun.Sink, collector: string, message: string) =>
 /** What a `fail` line says: its message, or that it failed. */
 const saidOf = (line: Verification.Verification): string => line.message ?? `${line.name} failed`
 
-/** How a refusal names the pre-check `instance` that could not check: required, or asked for. */
-const kindOf = (instance: CollectorRun.Instance): string | undefined =>
-  Collector.isRequired(instance.collector.manifest) ? "required" : instance.asked === true ? "asked" : undefined
+/** How a refusal names the pre-check `instance` that could not check: required, or asked for; neither where no instance answered. */
+const kindOf = (instance: CollectorRun.Instance | undefined): string | undefined =>
+  instance === undefined
+    ? undefined
+    : Collector.isRequired(instance.collector.manifest)
+    ? "required"
+    : instance.asked === true
+    ? "asked"
+    : undefined
 
 /**
- * Why `line`, answered by the pre-check `instance`, refuses its scope: a
- * `fail`, and a `not checkable` of a required or asked one; `undefined`
- * otherwise.
+ * Why `line`, answered by the entry labelled `label` (the pre-check
+ * `instance` of that label, none for the base's own lines), refuses its
+ * scope: a `fail`, and a `not checkable` of a required or asked pre-check;
+ * `undefined` otherwise.
  */
-const refusalOf = (instance: CollectorRun.Instance, line: Verification.Verification): string | undefined => {
+const refusalOf = (label: string, instance: CollectorRun.Instance | undefined, line: Verification.Verification): string | undefined => {
   if (line.answer === "fail") return saidOf(line)
   const kind = kindOf(instance)
   if (line.answer !== "not-checkable" || kind === undefined) return undefined
-  return `the ${kind} pre-check ${instance.label} could not check ${line.name}` +
+  return `the ${kind} pre-check ${label} could not check ${line.name}` +
     (line.message === undefined ? "" : `: ${line.message}`)
 }
 
 /**
- * Runs the pre-checks `instances` of one scope, with `options`, where
- * `unwired` is empty; refuses with `unwired`'s messages, running none,
- * otherwise.
+ * Runs the pre-checks `instances` of one scope, with `options`' sink and
+ * locker (no judge of exports runs over a pre-check), where `unwired` is
+ * empty; refuses with `unwired`'s messages, running none, otherwise. Each
+ * answered entry is matched to its instance by label.
  */
 export const run = (
   instances: ReadonlyArray<CollectorRun.Instance>,
   unwired: ReadonlyArray<Unwired>,
-  options: CollectorRun.Options
+  options: Pick<CollectorRun.Options, "sink" | "locker">
 ): Effect.Effect<Checked> =>
   Effect.gen(function*() {
     if (unwired.length > 0) {
@@ -109,14 +117,15 @@ export const run = (
     }
     if (instances.length === 0) return NOTHING
     let scope: CollectorRun.Opened | undefined
-    const collected = yield* Effect.scoped(Effect.flatMap(opened(instances, options), (one) => {
+    const collected = yield* Effect.scoped(Effect.flatMap(opened(instances, { sink: options.sink, locker: options.locker }), (one) => {
       scope = one
       return one.collect([])
     }))
+    const byLabel = new Map(instances.map((instance) => [instance.label, instance]))
     const failed: Array<string> = []
-    for (const [at, one] of collected.entries()) {
+    for (const one of collected) {
       for (const line of one.scope.verifications) {
-        const said = refusalOf(instances[at]!, line)
+        const said = refusalOf(one.label, byLabel.get(one.label), line)
         if (said === undefined) continue
         failed.push(said)
         yield* refused(options.sink, one.label, said)
