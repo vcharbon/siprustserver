@@ -56,6 +56,7 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
           scope={{ case: known.ref, ...(known.subcase === null ? {} : { subcase: known.subcase }) }}
           tags={view.launch.tags}
           carried={known.tags}
+          collection={view.launch.collection}
         />
       )}
       {exclusionsOf(view.runs, caseId).map((one) => (

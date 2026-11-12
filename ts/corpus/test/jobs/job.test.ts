@@ -207,6 +207,13 @@ describe("starting a replay job", () => {
     expect(JobStart.replayArgs(5, 11, JobStart.replayKnobsOf({})).includes("--force")).toBe(false)
     expect(JobStart.replayKnobsOf({ ...forced }).force).toBe(true)
   })
+
+  it("launches a replay naming a collection level with it, and a restart of its row with the same level", () => {
+    const leveled = { ...JobStart.replayKnobsOf({}), collection: "lean" }
+    expect(JobStart.replayArgs(5, 11, leveled).slice(-2)).toEqual(["--collection", "lean"])
+    expect(JobStart.replayArgs(5, 11, JobStart.replayKnobsOf({})).includes("--collection")).toBe(false)
+    expect(JobStart.replayKnobsOf({ ...leveled }).collection).toBe("lean")
+  })
 })
 
 describe("an inbox job", () => {

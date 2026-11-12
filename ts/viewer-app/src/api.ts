@@ -744,6 +744,8 @@ export type JobStartBody =
       readonly startsPerSecond?: number
       readonly cleanup?: boolean
       readonly wait?: number
+      /** The collection level the replay takes; absent, the workspace's default. */
+      readonly collection?: string
     }
     readonly recutFirst?: "stale-only" | "force"
   }
@@ -759,6 +761,8 @@ export type JobStartBody =
     readonly rebuild?: boolean
     /** Case tags the run takes on the lanes that exclude them. */
     readonly allow?: readonly string[]
+    /** The collection level the run takes; absent, the workspace's default. */
+    readonly collection?: string
   }
   | { readonly kind: "ingest"; readonly paths: readonly string[]; readonly set?: boolean; readonly cut?: boolean }
   /** A file of the pcap root on a lane: an ingest with its cut, then a replay after it. */
@@ -1264,6 +1268,8 @@ export interface Campaign {
     readonly lanes: readonly LaunchLane[]
     readonly tags: readonly LaunchTag[]
     readonly defaultLanes: readonly string[] | null
+    /** The collection levels a start may name; absent where the server states none. */
+    readonly collection?: LaunchCollection
   } | null
   /** The environment the server starts this campaign's runs in; null where it starts none. */
   readonly own: string | null
@@ -1277,6 +1283,12 @@ export interface LaunchTag {
   readonly warning: string | null
   readonly excludedOn: readonly string[]
   readonly allowed: boolean
+}
+
+/** The collection levels a start may name (ADR-0060 appendix §10), and the one a start naming none takes. */
+export interface LaunchCollection {
+  readonly default: string
+  readonly levels: readonly string[]
 }
 
 /** One lane a page start may name: the lanes of one group run together, a refused one does not run here. */

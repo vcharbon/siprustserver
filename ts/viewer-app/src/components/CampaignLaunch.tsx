@@ -7,12 +7,13 @@
  * job starts (`campaign-pick.ts`). A whole-campaign start opens on the lanes the
  * campaign states and offers the case tags its lanes exclude, unchecked, those
  * the campaign opts into checked and fixed (`campaign-tags.ts`); one case always
- * runs, showing what its tags warn of. A start answers its job, linked to its page,
- * or the server's refusal.
+ * runs, showing what its tags warn of. Where the server offers collection levels
+ * past `standard`, a start may name one; blank takes the server's default. A
+ * start answers its job, linked to its page, or the server's refusal.
  */
 import type { JSX } from "react"
 import { useState } from "react"
-import { api, type CampaignCase, type JobStarted, type LaunchLane, type LaunchTag } from "../api.ts"
+import { api, type CampaignCase, type JobStarted, type LaunchCollection, type LaunchLane, type LaunchTag } from "../api.ts"
 import { defaultPick, groups, pickRefusal } from "../campaign-pick.ts"
 import { asked as askedTags, carriedBy, offered, taken } from "../campaign-tags.ts"
 import { JobLinks } from "./JobLink.tsx"
@@ -30,11 +31,25 @@ type Outcome = { readonly jobs: readonly JobStarted[] } | { readonly error: stri
 const useStart = (capture: string) => {
   const [busy, setBusy] = useState(false)
   const [outcome, setOutcome] = useState<Outcome>(undefined)
-  const start = async (lanes: readonly string[], scope: Scope, rebuild: boolean, allow: readonly string[] = []): Promise<void> => {
+  const start = async (
+    lanes: readonly string[],
+    scope: Scope,
+    rebuild: boolean,
+    allow: readonly string[] = [],
+    collection: string | undefined = undefined
+  ): Promise<void> => {
     setBusy(true)
     setOutcome(undefined)
     try {
-      setOutcome(await api.jobStart({ kind: "campaign", capture, lanes, ...scope, rebuild, ...(allow.length === 0 ? {} : { allow }) }))
+      setOutcome(await api.jobStart({
+        kind: "campaign",
+        capture,
+        lanes,
+        ...scope,
+        rebuild,
+        ...(allow.length === 0 ? {} : { allow }),
+        ...(collection === undefined ? {} : { collection })
+      }))
     } catch (error) {
       setOutcome({ error: said(error) })
     } finally {
@@ -55,6 +70,25 @@ const Rebuild = ({ on, set }: { readonly on: boolean; readonly set: (on: boolean
     rebuild data
   </label>
 )
+
+/**
+ * The collection level a start names: blank, the server's default, which the
+ * blank option names; nothing renders where `standard` is the only level.
+ */
+const Level = ({ collection, value, set }: {
+  readonly collection: LaunchCollection | undefined
+  readonly value: string | undefined
+  readonly set: (level: string | undefined) => void
+}): JSX.Element | null =>
+  collection === undefined || collection.levels.length < 2 ? null : (
+    <label className="cp-check" title="which collectors the run takes: always, on failure or on demand">
+      collection{" "}
+      <select value={value ?? ""} onChange={(event) => set(event.target.value === "" ? undefined : event.target.value)}>
+        <option value="">{collection.default} (default)</option>
+        {collection.levels.map((level) => <option key={level} value={level}>{level}</option>)}
+      </select>
+    </label>
+  )
 
 /** The lanes refused here, one line each: the server's reason, which names the lane. */
 const RefusedLanes = ({ lanes }: { readonly lanes: readonly LaunchLane[] }): JSX.Element | null => {
@@ -77,17 +111,19 @@ const Warnings = ({ tags }: { readonly tags: readonly LaunchTag[] }): JSX.Elemen
 }
 
 /** The whole campaign on the lanes picked; `open` shows the lanes and the run control unfolded. */
-export const CampaignStart = ({ capture, lanes, stated, tags, cases, open = false }: {
+export const CampaignStart = ({ capture, lanes, stated, tags, cases, collection, open = false }: {
   readonly capture: string
   readonly lanes: readonly LaunchLane[]
   /** The lanes the campaign states; null where it states none. */
   readonly stated: readonly string[] | null
   readonly tags: readonly LaunchTag[]
   readonly cases: readonly CampaignCase[]
+  readonly collection?: LaunchCollection | undefined
   readonly open?: boolean
 }): JSX.Element => {
   const [picked, setPicked] = useState<readonly string[]>(() => defaultPick(lanes, stated))
   const [rebuild, setRebuild] = useState(false)
+  const [level, setLevel] = useState<string | undefined>(undefined)
   const [allowed, setAllowed] = useState<readonly string[]>([])
   const { busy, outcome, start } = useStart(capture)
   const toggle = (lane: string) =>
@@ -128,7 +164,8 @@ export const CampaignStart = ({ capture, lanes, stated, tags, cases, open = fals
             {offer.label}{offer.cases === 0 ? "" : ` (${offer.cases})`}
           </label>
         ))}
-        <button type="button" disabled={busy || refusal !== null} onClick={() => void start(picked, {}, rebuild, allowing)}>
+        <Level collection={collection} value={level} set={setLevel} />
+        <button type="button" disabled={busy || refusal !== null} onClick={() => void start(picked, {}, rebuild, allowing, level)}>
           run campaign
         </button>
         {refusal !== null && picked.length > 0 ? <span className="cp-nok">run: {refusal}</span> : <Said outcome={outcome} />}
@@ -140,15 +177,17 @@ export const CampaignStart = ({ capture, lanes, stated, tags, cases, open = fals
 }
 
 /** One case's sub-case, or every sub-case of the case, on one lane or on one group of lanes. */
-export const CaseReplay = ({ capture, lanes, scope, tags, carried }: {
+export const CaseReplay = ({ capture, lanes, scope, tags, carried, collection }: {
   readonly capture: string
   readonly lanes: readonly LaunchLane[]
   readonly scope: Scope
   readonly tags: readonly LaunchTag[]
   readonly carried: readonly string[]
+  readonly collection?: LaunchCollection | undefined
 }): JSX.Element => {
   const [rebuild, setRebuild] = useState(false)
   const [whole, setWhole] = useState(false)
+  const [level, setLevel] = useState<string | undefined>(undefined)
   const { busy, outcome, start } = useStart(capture)
   const asked: Scope = whole && scope.case !== undefined ? { case: scope.case } : scope
   return (
@@ -161,13 +200,13 @@ export const CaseReplay = ({ capture, lanes, scope, tags, carried }: {
           className="mono"
           disabled={busy || l.refused !== null}
           title={l.refused ?? undefined}
-          onClick={() => void start([l.lane], asked, rebuild)}
+          onClick={() => void start([l.lane], asked, rebuild, [], level)}
         >
           {l.lane}
         </button>
       ))}
       {groups(lanes).filter((group) => group.length > 1).map((group) => (
-        <button key={group.join("+")} type="button" disabled={busy} onClick={() => void start(group, asked, rebuild)}>
+        <button key={group.join("+")} type="button" disabled={busy} onClick={() => void start(group, asked, rebuild, [], level)}>
           {group.join(" + ")}
         </button>
       ))}
@@ -178,6 +217,7 @@ export const CaseReplay = ({ capture, lanes, scope, tags, carried }: {
         </label>
       )}
       <Rebuild on={rebuild} set={setRebuild} />
+      <Level collection={collection} value={level} set={setLevel} />
       <Said outcome={outcome} />
       <Warnings tags={carriedBy(tags, carried)} />
     </div>

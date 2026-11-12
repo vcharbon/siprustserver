@@ -29,7 +29,7 @@ import { cellDocument } from "../opening.ts"
 import { useLinkOrigin } from "../server-config.ts"
 import { useCopy } from "../use-copy.ts"
 import { AttachmentList } from "./attachments/AttachmentList.tsx"
-import { CollectOnDemand } from "./attachments/CollectOnDemand.tsx"
+import { collectCellOf, CollectOnDemand } from "./attachments/CollectOnDemand.tsx"
 import { CheckCard } from "./CheckCard.tsx"
 import { Exchange } from "./Exchange.tsx"
 import { LadderPane } from "./LadderPane.tsx"
@@ -137,7 +137,7 @@ const CallDetails = ({ view, laneRun, result, caseId, run, lane }: {
       {cell !== null && attached.state === "ok" && <AttachmentList listed={listed} heading="Attachments" />}
       {cell !== null && (
         <CollectOnDemand
-          cell={{ capture, session, cell, runId: laneRun.runId, caseId, lane }}
+          cell={collectCellOf(capture, laneRun, cell, caseId)}
           onLanded={() => setLanded((n) => n + 1)}
         />
       )}

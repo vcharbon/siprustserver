@@ -199,6 +199,7 @@ const Summary = ({ view: whole }: { readonly view: Campaign }): JSX.Element => {
               stated={view.launch.defaultLanes}
               tags={view.launch.tags}
               cases={view.cases}
+              collection={view.launch.collection}
             />
           )}
           <input

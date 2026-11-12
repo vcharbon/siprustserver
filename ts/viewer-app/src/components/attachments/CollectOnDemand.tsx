@@ -7,7 +7,7 @@
  */
 import type { JSX } from "react"
 import { useState } from "react"
-import { api, type CollectAnswered, type CollectAsked, useAsync } from "../../api.ts"
+import { api, type CampaignLane, type CollectAnswered, type CollectAsked, useAsync } from "../../api.ts"
 
 /** Where one run stands. */
 type Run =
@@ -25,6 +25,25 @@ const doneLine = (collector: string, answered: CollectAnswered): string => {
     ...(answered.leftChanged.length === 0 ? [] : [`lab left changed by ${answered.leftChanged.join(", ")}`])
   ].join(" · ")
 }
+
+/**
+ * The cell an on-demand run is asked of: the kept cell `cell` of the lane run
+ * `laneRun` of `capture`, landed under the case result `caseId`, its lane the
+ * id the run states and the page shows, as the server's lane catalog names it.
+ */
+export const collectCellOf = (
+  capture: string,
+  laneRun: CampaignLane,
+  cell: string,
+  caseId: string
+): Omit<CollectAsked, "collector"> => ({
+  capture,
+  session: laneRun.session,
+  cell,
+  runId: laneRun.runId,
+  caseId,
+  lane: laneRun.lane
+})
 
 export const CollectOnDemand = ({ cell, onLanded }: {
   readonly cell: Omit<CollectAsked, "collector">

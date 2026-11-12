@@ -3,6 +3,7 @@
  *
  *   job start replay --request <id> [--prep N] [--batch N] [--concurrency N]
  *                    [--memory-max SIZE] [--starts-per-second N] [--no-cleanup] [--wait S]
+ *                    [--collection <level>]
  *   job start ingest <path>... [--set <file>]... [--cut]        (= source add)
  *   job start cut [--stale-only | --force] <capture>... | --standing | --all | --known [--slice N]
  *   job start retire <capture>... [--measure]                (= retire --yes, detached)
@@ -36,7 +37,9 @@
  * against the standing prep when they run.
  *
  * A replay job passes on only the knobs its start states: the replay resolves
- * the rest off the request, then its lane's defaults. An ingest or a cut job
+ * the rest off the request, then its lane's defaults; a `--collection` level
+ * reaches the replay, whose wiring check refuses it before the job opens
+ * where the workspace does not define it, and a restart keeps it. An ingest or a cut job
  * drives no lane and takes the generic defaults.
  */
 import { selectorOf } from "@sip/corpus/housekeeping/delete-runs"
@@ -56,7 +59,7 @@ import * as Option from "effect/Option"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import * as path from "node:path"
 import type { CliFacts } from "../facts.js"
-import { pathFlags } from "../flags.js"
+import { collectionFlag, pathFlags } from "../flags.js"
 import * as IdFlags from "../id-flags.js"
 import { overridesOf, pathsOf } from "../options.js"
 import * as Refusals from "../refusals.js"
@@ -93,6 +96,7 @@ const startFlags = {
     Flag.withDefault(DEFAULT_CLEANUP)
   ),
   wait: Flag.float("wait").pipe(Flag.withDescription("Seconds to wait for a held lane or box"), Flag.optional),
+  collection: collectionFlag,
   // An ingest's paths or a cut's captures, and the words of each.
   items: Argument.string("item").pipe(
     Argument.withDescription("ingest: a pcap or a directory of them; cut: a capture name"),
@@ -137,7 +141,8 @@ const knobsOf = (input: StartInput): JobStart.ReplayKnobs => ({
   wait: Option.getOrNull(input.wait),
   unran: false,
   after: null,
-  force: false
+  force: false,
+  collection: Option.getOrNull(input.collection)
 })
 
 /** A replay launched, said: the job, its log, the commands that follow it. */
