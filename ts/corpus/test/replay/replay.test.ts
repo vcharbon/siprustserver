@@ -365,6 +365,23 @@ const describedDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: {
     return { summary: { cell: Layout.cellIdOf(cell), passed: true, dir: Layout.cellDir(cell) }, detail: "" }
   })) as unknown as typeof runCell
 
+/** A driver like {@link describedDrive} whose every cell's call passes and lands `pending` on a `cdr` line its batch's end answers. */
+const describedPendingDrive: typeof runCell = ((cell: Campaign.CampaignCell, context: { runDir: string }) =>
+  Effect.map(describedDrive(cell, context as never), (ran) => ({
+    summary: { ...ran.summary, passed: false, pending: ["cdr"] },
+    detail: "still verifying: cdr pending"
+  }))) as unknown as typeof runCell
+
+/** A batch process that died under its batch: no end of it runs. */
+const dying: StandBatch = () =>
+  Effect.succeed({
+    run: () => Effect.die("the fake driver runs no interpreter"),
+    died: () => "the batch process died",
+    end: Effect.die("a dead batch process's end never runs"),
+    contexts: () => undefined,
+    kill: Effect.void
+  })
+
 /** The deployment's collectors: on {@link PAUSED}, the batch collector `lab`, whose collect says why it failed on its stderr and exits 3. */
 const failingLab = async (): Promise<{ readonly layer: Layer.Layer<Collectors.Service>; readonly said: string }> => ({
   layer: await labOf({ collect: `#!/bin/sh\necho "the lab is gone" >&2\nexit 3\n` }),
@@ -589,6 +606,25 @@ for (const cell of context.cells) {
       [`${ONE}-b`, true],
       [`${TWO}-a`, false]
     ])
+  })
+
+  it("hands the job's collectors as failed a cell that landed pending and whose batch's end failed it, as passed one its end passed", async () => {
+    const failedOf = async (cdr: string) =>
+      (await replay(BATCHED, { host: answering(cdr), drive: pendingDrive })).done.ran.map((cell) => [cell.caseId, cell.failed]).sort()
+    expect(await failedOf("fail")).toEqual([[`${ONE}-a`, true], [`${ONE}-b`, true], [`${TWO}-a`, true]])
+    expect(await failedOf("pass")).toEqual([[`${ONE}-a`, false], [`${ONE}-b`, false], [`${TWO}-a`, false]])
+  })
+
+  it("hands an on-failure batch collector, and the job's collectors, every cell of a batch whose process died, though each landed pending", async () => {
+    const layer = await labOf({ collect: PASSING_COLLECT, setting: "on-failure" })
+    const { done, lines } = await replay(PAUSED, { host: dying, drive: describedPendingDrive, collectors: layer })
+    const answered = lines.filter((line) => line.name === "lab-check")
+    expect(answered.map((line) => [line.caseId, line.answer])).toEqual([
+      [`${ONE}-a`, "pass"],
+      [`${ONE}-b`, "pass"],
+      [`${TWO}-a`, "pass"]
+    ])
+    expect(done.ran.map((cell) => [cell.caseId, cell.failed]).sort()).toEqual([[`${ONE}-a`, true], [`${ONE}-b`, true], [`${TWO}-a`, true]])
   })
 
   it("marks the batch's runs dirty and the replay dirty where a collector's close left the lab changed", async () => {

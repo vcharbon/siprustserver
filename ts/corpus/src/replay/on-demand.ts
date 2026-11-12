@@ -39,7 +39,9 @@ export interface Request {
   /**
    * Where it makes its own directory, one per ask (`ask-<unique>`), each
    * lane's instance under its `<lane>/`, removed once the attachments were
-   * copied onto their cells: two asks at once never share one.
+   * copied onto their cells: two asks at once never share one. It is kept
+   * where a step failed or a `close` left the lab changed, so the log its
+   * message names stays readable.
    */
   readonly dir: string
 }
@@ -98,16 +100,26 @@ export const run = (
     }
     yield* fs.makeDirectory(request.dir, { recursive: true }).pipe(Effect.orDie)
     yield* fs.makeDirectory(asked).pipe(Effect.orDie)
-    return yield* ranOver(request, planned).pipe(Effect.ensuring(Effect.ignore(fs.remove(asked, { recursive: true }))))
+    const failing = { seen: false }
+    const sink = CollectorIo.sinkOf(undefined)
+    const watched: CollectorRun.Sink = (event) =>
+      Effect.andThen(Effect.sync(() => void (failing.seen ||= FAILING.has(event.phase))), sink(event))
+    return yield* ranOver(request, planned, watched).pipe(
+      Effect.ensuring(Effect.suspend(() => failing.seen ? Effect.void : Effect.ignore(fs.remove(asked, { recursive: true }))))
+    )
   })
 
-/** `planned`, each lane's instance and its cells, run one after the other, their attachments landed on their cells. */
+/** The phases that say a step failed, its log kept under the ask's directory. */
+const FAILING: ReadonlySet<CollectorRun.Phase> = new Set(["failed", "lab-left-changed"])
+
+/** `planned`, each lane's instance and its cells, run one after the other under `sink`, their attachments landed on their cells. */
 const ranOver = (
   request: Request,
-  planned: ReadonlyArray<readonly [CollectorRun.Instance, ReadonlyArray<CollectedCells.LandedCell>]>
+  planned: ReadonlyArray<readonly [CollectorRun.Instance, ReadonlyArray<CollectedCells.LandedCell>]>,
+  sink: CollectorRun.Sink
 ) =>
   Effect.gen(function*() {
-    const options: CollectorRun.Options = { sink: CollectorIo.sinkOf(undefined), locker: yield* CollectorIo.locker() }
+    const options: CollectorRun.Options = { sink, locker: yield* CollectorIo.locker() }
     const answered: Array<CellAnswered> = []
     const leftChanged: Array<string> = []
     for (const [instance, cells] of planned) {

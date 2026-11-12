@@ -1,8 +1,9 @@
 /**
  * An on-demand run of one collector over a landed cell, a real executable
  * against a real postgres: its attachment lands on the cell, its lines leave
- * the cell's own as they stand; a collector the job's level does not set
- * on-demand is refused before anything runs. And the level a job names
+ * the cell's own as they stand; an ask whose collect failed keeps its
+ * directory and the log its line names; a collector the job's level does not
+ * set on-demand is refused before anything runs. And the level a job names
  * (`Collectors.Level`) deciding what a batch plans.
  *
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
@@ -135,6 +136,28 @@ const windowKeeping = async () => {
   return Collectors.layerOf(rig, [lane])
 }
 
+/** A rig path with the batch collector `asked`, on-demand, answering `asked`, whose `collect` says why it failed on its stderr and exits 3. */
+const failing = async () => {
+  const root = fs.mkdtempSync(path.join(TREE, "rig-"))
+  const dir = path.join(root, "collectors", "asked")
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, "collector.toml"),
+    `schema = "collector.v1"\nname = "asked"\nscope = "batch"\ndefault = "on-demand"\nanswers = ["asked"]\n[run]\ncollect = "./collect"\n`
+  )
+  fs.writeFileSync(path.join(dir, "collect"), `#!/bin/sh\necho "the lab is gone" >&2\nexit 3\n`, { mode: 0o755 })
+  const rig = await Effect.runPromise(RigPath.load({ workspace: root }).pipe(Effect.provide(NodeServices.layer)))
+  const lane: Lanes.Loaded = {
+    id: LANE,
+    file: `lanes/${LANE}.toml`,
+    lane: { schema: "lane.v1", clock: "simulated" },
+    parts: new Map(),
+    operations: new Map(),
+    capabilities: new Set()
+  }
+  return Collectors.layerOf(rig, [lane])
+}
+
 /** A cell's bundle under `bundle`, stating its clock and its wall-clock window from `wallMs` on. */
 const bundleOf = (bundle: string, id: string, wallMs: number): string => {
   const dir = path.join(bundle, id)
@@ -212,6 +235,20 @@ describe.skipIf(!served)("an on-demand run", () => {
     }))
     expect(attached.map((listed) => listed.map((one) => one.title))).toEqual([["asked of c1"], ["asked of c2"]])
     expect(fs.readdirSync(dir)).toEqual([])
+  })
+
+  it("keeps the ask's directory where its collect failed: the log its not-checkable line names is there to read", async () => {
+    const collectors = await failing()
+    const dir = path.join(TREE, "asked-failing")
+    const ran = await withStore(collectors, Effect.gen(function*() {
+      const cell = yield* landedCell
+      return yield* OnDemand.run({ collector: "asked", cells: [cell], dir })
+    }))
+    const [line] = ran.cells[0]!.answers.verifications
+    expect([line!.name, line!.answer]).toEqual(["asked", "not-checkable"])
+    const log = /its log (\S+)$/.exec(line!.message ?? "")?.[1]
+    expect(log?.startsWith(path.join(dir, OnDemand.ASK_PREFIX))).toBe(true)
+    expect(fs.readFileSync(log!, "utf8")).toContain("the lab is gone")
   })
 
   it("is refused where the job's level sets the collector always, and runs nothing", async () => {

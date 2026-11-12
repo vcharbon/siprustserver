@@ -21,7 +21,8 @@
  * The rig's batch-scope collectors (`@sip/rig` `CollectorRun`, ADR-0060
  * appendix §3) open once the lane stood, collect over the batch's cells once
  * the end gate read and the caller's own collectors closed, and close before
- * the SUT and the batch process are given back, whatever ended the batch.
+ * the SUT and the batch process are given back, whatever ended the batch; an
+ * unjudged batch hands them every cell stated failed ({@link failedAtEnd}).
  * What they answered of each cell is the caller's to land ({@link Ended}
  * `collected`); what they answered of the batch joins its lines and its
  * attachments. Its pre-checks (`at = "before"`) run once its row opened,
@@ -93,9 +94,25 @@ export interface Collectors<A, RC> {
   readonly options: CollectorRun.Options
   /** The batch's own directory, which holds the attachments that name no cell. */
   readonly holder: string
-  /** The batch's cells once driven, as `cell.v1` describes them, those it could not describe, and those whose own outcome failed or errored. */
-  readonly cells: (value: A) => Effect.Effect<CollectorRun.Over, never, RC>
+  /**
+   * The batch's cells once driven and its end read, as `cell.v1` describes
+   * them, those it could not describe, and those whose own outcome failed or
+   * errored. Where `end` did not judge them, the batch states every one of
+   * them failed whatever this says ({@link failedAtEnd}).
+   */
+  readonly cells: (value: A, end: End) => Effect.Effect<CollectorRun.Over, never, RC>
 }
+
+/** What the batch's end came to as its collectors read its cells. */
+export type End = Pick<Ended<unknown>, "judged" | "deadHost">
+
+/**
+ * `over`, its every cell, described or not, stated failed where `end` did not
+ * judge them: no end gate answered for them (a batch process died, a stop
+ * cut it short), so none is known to have passed.
+ */
+export const failedAtEnd = (over: CollectorRun.Over, end: End): CollectorRun.Over =>
+  end.judged ? over : { ...over, failed: [...over.cells.map((cell) => cell.id), ...over.unread.map((cell) => cell.id)] }
 
 /** What one batch is asked to do: its cells driven under `E`/`R`, its collectors opened under `EC`/`RO`, closed under `RC`. */
 export interface Request<A, E, R, EC = never, RO = never, RC = never> {
@@ -305,6 +322,10 @@ const preChecked = (rig: RigOf) =>
     ? Effect.succeed(PreCheck.NOTHING)
     : PreCheck.run(rig.instances.filter(PreCheck.isPreCheck), [], { sink: rig.options.sink, locker: rig.options.locker })
 
+/** What `opened`, the batch's rig collectors, collected over its cells driven to `value`, its end come to `end`. */
+const collectedAtEnd = <A, RC>(rig: Collectors<A, RC>, opened: CollectorRun.Opened, value: A, end: End) =>
+  Effect.flatMap(Effect.map(rig.cells(value, end), (over) => failedAtEnd(over, end)), opened.collect)
+
 const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
   Effect.gen(function*() {
     const hosting = yield* LaneHosting.Service
@@ -342,7 +363,7 @@ const stood = <A, E, R, EC, RO, RC>(request: Request<A, E, R, EC, RO, RC>) =>
     if (close !== undefined) yield* close
     const collected = rig === undefined || opened === undefined
       ? []
-      : yield* Effect.flatMap(rig.cells(driven.value), opened.collect)
+      : yield* collectedAtEnd(rig, opened, driven.value, { judged, deadHost })
     const ended: Omit<Ended<A>, "leftChanged"> = {
       value: driven.value,
       dirty,

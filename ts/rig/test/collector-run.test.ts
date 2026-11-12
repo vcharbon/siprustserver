@@ -223,6 +223,24 @@ describe("a scope's collectors", () => {
     expect([...collected[0]!.cells.keys()]).toEqual(["c2"])
   })
 
+  it("answers not checkable from an on-failure collector on a failed cell the base could not describe, on no other undescribed one", async () => {
+    const { root, rig } = await samples()
+    const onFailure = { ...instanceOf(rig, root, "on-failure"), onFailure: true }
+    const unread: ReadonlyArray<CollectorRun.Unread> = [
+      { id: "c3", lane: LANE.id, why: "its bundle is gone" },
+      { id: "c4", lane: LANE.id, why: "its bundle is gone" }
+    ]
+    const collected = await Effect.runPromise(Effect.scoped(Effect.flatMap(
+      CollectorRun.opened([onFailure], { sink: () => Effect.void, locker: memoryLocker() }),
+      (opened) => opened.collect({ cells: cellsUnder(root), unread, failed: ["c3"] })
+    )))
+    expect(traceOf(root)).toEqual(["open on-failure", "close on-failure"])
+    expect([...collected[0]!.cells]).toEqual([["c3", {
+      verifications: [{ name: "on-failure", source: "on-failure", answer: "not-checkable", message: "the cell c3 was not described: its bundle is gone" }],
+      attachments: []
+    }]])
+  })
+
   it("collects an on-failure collector before one whose after names it, after every other", async () => {
     const { root, rig } = await samples()
     const onFailure = { ...instanceOf(rig, root, "on-failure"), onFailure: true }

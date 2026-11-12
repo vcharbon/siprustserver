@@ -50,7 +50,6 @@
  */
 import { E2e } from "@sip/contracts"
 import { runCell, settled } from "@sip/driver"
-import type { CollectorRun } from "@sip/rig"
 import { perSecond, unpaced } from "@sip/driver/pace"
 import { Batches, Bundle, JobEvents, Jobs, Requests, RuleHits, Runs, Sweeps } from "@sip/store"
 import { ReplayCli } from "@sip/toolchain"
@@ -494,7 +493,7 @@ export const batch = Effect.fn("Replay.batch")(function*(request: BatchRequest) 
     }
   }
   for (const tally of new Set(driven.map((ref) => tallyOf(ref.capture)))) yield* mergeAnswered(tally)
-  return { dirty, deadHost, driven, interrupted, ran: ranAsEnded(ranCells, ended.collected, tallies) } satisfies Batch
+  return { dirty, deadHost, driven, interrupted, ran: ranAsEnded(ranCells, ended, tallies) } satisfies Batch
 })
 
 /** Whether `summary`'s cell failed or errored as it stands: not passed, not skipped, and no line of it still pending. */
@@ -502,19 +501,21 @@ const failedOwn = (summary: E2e.CellSummary): boolean =>
   !summary.passed && summary.skipped === undefined && summary.pending === undefined
 
 /**
- * `ran`, a batch's landed cells, each marked failed as its batch ended: its
- * summary read again once the batch's end settled and charged it, or a
- * failing line the batch's collectors answered of it (`collected`).
+ * `ran`, a batch's landed cells, each marked failed as its batch ended
+ * (`ended`): every one where its end did not judge them (`LaneBatch.failedAtEnd`),
+ * else its summary read again once the batch's end settled and charged it,
+ * or a failing line the batch's collectors answered of it.
  */
 const ranAsEnded = (
   ran: ReadonlyArray<CollectedCells.LandedCell>,
-  collected: ReadonlyArray<CollectorRun.Collected>,
+  ended: Pick<LaneBatch.Ended<unknown>, "judged" | "collected">,
   tallies: ReadonlyMap<string, Tally>
 ): ReadonlyArray<CollectedCells.LandedCell> => {
+  if (!ended.judged) return ran.map((cell) => ({ ...cell, failed: true }))
   const summaries = new Map(
     [...tallies.values()].flatMap((tally) => tally.summaries.map((summary) => [path.join(tally.run.bundlePath, summary.dir), summary] as const))
   )
-  return CollectedCells.failedBy(ran, collected).map((cell) => {
+  return CollectedCells.failedBy(ran, ended.collected).map((cell) => {
     const summary = summaries.get(cell.dir)
     return cell.failed !== true && summary !== undefined && failedOwn(summary) ? { ...cell, failed: true } : cell
   })

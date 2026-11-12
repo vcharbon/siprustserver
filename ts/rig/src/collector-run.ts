@@ -153,8 +153,9 @@ export interface Opened {
    * ({@link failedOf}). Then joins and judges their records
    * (`scope-judging.ts`): what each instance, in the order they collected,
    * then each judge, answered. Called once, when the scope ended. Each cell of
-   * `over.unread` on an instance's lanes is answered `not checkable` by it,
-   * and by each judge of exports alone, saying why the cell was not described.
+   * `over.unread` on an instance's lanes is answered `not checkable` by it (by
+   * an `on-failure` one where `over.failed` names it), and by each judge of
+   * exports alone, saying why the cell was not described.
    */
   readonly collect: (over: Over) => Effect.Effect<ReadonlyArray<Collected>>
   /** The labels of the instances whose `close` left the lab changed so far, in order. */
@@ -496,9 +497,10 @@ const unasked = (instance: Instance): Collected => ({
  * `opening`'s answers over `cells`, the scope's as the earlier instances left
  * them, after `earlier`, the answers of the instances collected before it,
  * and the cells it read: an `on-failure` one collects over the failed cells
- * alone (`over.failed` among them) and answers nothing where none failed; any
- * other collects over every cell of its lanes, each of `over.unread`
- * answered `not checkable`.
+ * alone (`over.failed` among them) and answers nothing where none failed,
+ * each of `over.unread` stated failed answered `not checkable`; any other
+ * collects over every cell of its lanes, each of `over.unread` answered
+ * `not checkable`.
  */
 const answersOf = (
   opening: Opening,
@@ -507,14 +509,16 @@ const answersOf = (
   over: Over,
   earlier: ReadonlyArray<Collected>
 ): Effect.Effect<ScopeJudging.Stepped> => {
-  if (opening.instance.onFailure !== true) {
-    return Effect.map(collectGuarded(opening, sink, cells), (one) => ({ collected: withUnread(opening.instance, one, over.unread) }))
+  const { instance } = opening
+  if (instance.onFailure !== true) {
+    return Effect.map(collectGuarded(opening, sink, cells), (one) => ({ collected: withUnread(instance, one, over.unread) }))
   }
-  const failed = failedOf(cellsOf(opening.instance, cells), new Set(over.failed), earlier)
+  const stated = new Set(over.failed)
+  const failed = failedOf(cellsOf(instance, cells), stated, earlier)
+  const unreadFailed = over.unread.filter((cell) => stated.has(cell.id))
   const read = failed.map((cell) => cell.id)
-  return failed.length === 0
-    ? Effect.succeed({ collected: unasked(opening.instance), read })
-    : Effect.map(collectGuarded(opening, sink, failed), (collected) => ({ collected, read }))
+  const collected = failed.length === 0 ? Effect.succeed(unasked(instance)) : collectGuarded(opening, sink, failed)
+  return Effect.map(collected, (one) => ({ collected: withUnread(instance, one, unreadFailed), read }))
 }
 
 /**
