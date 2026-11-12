@@ -263,6 +263,30 @@ for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "exp", 
     })
   })
 
+  it("are judged, where their collector is not wired, by the judge it names, answering what it answers, joined on its key", async () => {
+    const { root, rig } = await loaded({
+      ...collector("records", node(``), `needs = ["records-store"]\njudge = "differ"\nanswers = ["records-match", "records-ref"]\n[join]\nkey = "ref"\n`),
+      "parts/records-store.schema.json": `{"type": "object"}`,
+      ...executableJudge("differ", node(`
+for (const cell of ctx.cells) console.log(JSON.stringify({ verification: "records-match", cell: cell.id, answer: fs.readFileSync(cell.records.records, "utf8") === "" ? "fail" : "pass" }))
+console.log(JSON.stringify({ verification: "records-match", answer: "pass" }))
+`))
+    })
+    const cells = cellsOf(root, ["c1", "c2"], (cell) => ({ ...cell, keys: { ...cell.keys, ref: [`r-${cell.id}`] } }))
+    writeExport(path.join(root, "batch"), "records", [{ record: { n: 1 }, key: "r-c1" }])
+    const { collected } = await collectBatch(rig, root, cells, true)
+    expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
+      [
+        { name: "records-ref", source: "differ", answer: "not-checkable", message: "nobody answered records-ref for the cell c1" },
+        { name: "records-match", source: "differ", answer: "pass" }
+      ],
+      [
+        { name: "records-ref", source: "differ", answer: "not-checkable", message: "nobody answered records-ref for the cell c2" },
+        { name: "records-match", source: "differ", answer: "fail" }
+      ]
+    ])
+  })
+
   /** A judge `exp` of exports alone, copying the records it reads and passing every cell. */
   const passingExp = executableJudge("exp", node(`
 fs.writeFileSync("../../exp-read.json", JSON.stringify(ctx.cells.map((cell) => [cell.id, fs.readFileSync(cell.records.exp, "utf8")])))

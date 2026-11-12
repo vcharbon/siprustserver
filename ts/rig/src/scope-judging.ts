@@ -13,10 +13,11 @@
  *    cell's written into its directory and named in its `records`
  *    (`cell-records.ts`); later collectors read them.
  * 4. Each judge runs once over every cell the name's instances collect: the
- *    judge its collector names, and, over its exports alone, a judge of an
- *    export's name no collector of the scope collects (`ExportJudges`), its
- *    name `not checkable` on each cell of its lane the base could not
- *    describe, whether or not an export of its name was read. A judge whose
+ *    judge its collector names, and, over its exports alone, the judge of an
+ *    export's name no collector of the scope collects (`ExportJudges`: the
+ *    one the path's collector of that name names, else the judge of that
+ *    name), what it answers `not checkable` on each cell of its lane the base
+ *    could not describe, whether or not an export of its name was read. A judge whose
  *    records the base could not all write does not run: its verifications are
  *    `not checkable` on every cell and the scope.
  * 5. Where the scope's input was not handed whole (an export line, file or
@@ -30,7 +31,7 @@
  * 6. A verification the scope's entries promise that nobody answered for a
  *    cell, the cell's own lines included, is `not checkable`: a collector
  *    promises those its manifest names (`answers`), or its own name where it
- *    names a judge and no `answers`; a judge of exports alone its name. A
+ *    names a judge and no `answers`; a judge of exports alone what it answers. A
  *    collector naming neither may answer its own name, and promises none.
  *
  * Unclaimed and ambiguous records are kept on the scope: the attachments
@@ -60,11 +61,15 @@ import * as ScopeAnswers from "./scope-answers.js"
 /** The directory under a scope's where each judge's run keeps its files, one directory per judged name. */
 export const JUDGES_DIR = "judges"
 
-/** A judge of the path that judges a name's exports where no collector of the scope collects that name. */
+/** A judge of the path that judges a name's exports where no collector of the scope collects that name (`judge-plan.ts`). */
 export interface ExportJudge {
+  /** The name of the exports it judges. */
+  readonly name: string
   readonly judge: RigPath.Defined<JudgeManifest.Judge>
   /** The cell key its records join on: the `[join] key` of the path's collector of its name, else {@link Cell.CALL_ID}. */
   readonly key: string
+  /** The verifications it answers and promises: those of the path's collector naming it, else the name. */
+  readonly answers: ReadonlyArray<string>
 }
 
 /** The judges a scope runs over its exports alone, and the scope they run in. */
@@ -206,9 +211,10 @@ const promisedBy = (instance: CollectorRun.Instance, read?: ReadonlyArray<string
 /** Why the base could not describe `cell`, as its lines say it. */
 const undescribedWhy = (cell: CollectorRun.Unread): string => `the cell ${cell.id} was not described: ${cell.why}`
 
-/** `not checkable` for `name` from `name`, on each of `undescribed` on `lane` (every one where it is none), saying why it was not described. */
+/** `not checkable` for each of `names` from `source`, on each of `undescribed` on `lane` (every one where it is none), saying why it was not described. */
 const undescribedAnswered = (
-  name: string,
+  names: ReadonlyArray<string>,
+  source: string,
   undescribed: ReadonlyArray<CollectorRun.Unread>,
   lane: Lanes.Loaded | undefined
 ): ReadonlyMap<string, CollectorRun.Answers> =>
@@ -216,7 +222,7 @@ const undescribedAnswered = (
     undescribed
       .filter((cell) => lane === undefined || cell.lane === lane.id)
       .map((cell) => [cell.id, {
-        verifications: [{ name, source: name, answer: "not-checkable" as const, message: undescribedWhy(cell) }],
+        verifications: names.map((name) => ({ name, source, answer: "not-checkable" as const, message: undescribedWhy(cell) })),
         attachments: []
       }])
   )
@@ -311,21 +317,22 @@ export const collect = (request: Request): Effect.Effect<ReadonlyArray<Collector
     }
     const collectedNames = new Set(request.steps.map((step) => step.instance.collector.name))
     for (const exportJudge of request.exportJudges?.judges ?? []) {
-      const name = exportJudge.judge.name
+      const { name, answers } = exportJudge
+      const source = exportJudge.judge.name
       if (collectedNames.has(name)) continue
       const exports = exported.byName.get(name)
-      const undescribed = undescribedAnswered(name, request.undescribed, request.exportJudges?.lane)
+      const undescribed = undescribedAnswered(answers, source, request.undescribed, request.exportJudges?.lane)
       if (exports === undefined) {
         if (undescribed.size > 0) entry(exportsEntry(name, [], undescribed), undefined, undefined)
         continue
       }
       const held = yield* joinOf(`exports ${name}`, name, exportJudge.key, cells, exports.records)
-      entry(exportsEntry(name, held.attachments, undescribed), undefined, { source: name, names: [name], covers: () => true })
+      entry(exportsEntry(name, held.attachments, undescribed), undefined, { source, names: answers, covers: () => true })
       joined.push({
         name,
         cells: cells.map((cell) => cell.id),
         judge: exportJudge.judge,
-        answers: [name],
+        answers,
         scope: request.steps[0]?.instance.scope ?? "batch",
         lane: request.exportJudges?.lane,
         unwritten: held.unwritten

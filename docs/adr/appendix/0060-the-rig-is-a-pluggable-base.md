@@ -104,7 +104,7 @@ records it would have published. A backend double exports what it alone saw of a
 | Case | What answers the claim |
 |---|---|
 | a collector of that name is wired on the lane | its judge, over its records and the exports |
-| no collector, exports exist, a judge of that name is on the path | that judge, over the exports |
+| no collector wired, exports exist, the path's collector of that name names a judge, or a judge of that name is on the path | that judge, over the exports |
 | neither, and the collector is `required` | the batch is refused before any call |
 | neither, not `required` | the verification is *not requested* and the job says why |
 
@@ -237,7 +237,7 @@ collected, so a later collector reads them.
 - A cell with no record reaches the judge with an empty list.
 - A verification nobody answered for a cell, the cell's own lines counted, is `not checkable`
   where it is promised: those a manifest's `answers` names, a collector's own name where it
-  names a judge and no `answers`, a judge of exports alone its name, on a cell the base could
+  names a judge and no `answers`, a judge of exports alone what it answers, on a cell the base could
   not describe too. A collector naming neither may answer its own name and promises none.
 - An export line that is none, a key naming no one cell, a line other than a record or a key, an
   export file or directory that cannot be read: each is skipped and said, the rest read.
@@ -249,8 +249,10 @@ collected, so a later collector reads them.
   not an entry answered there: the cell never passes, whatever a wider scope answers of it.
 - A collect or a judge's run that dies in the base's own reading answers `not checkable` on
   every cell and the scope, saying it died; the scope's other answers stand.
-- Exports judged with no collector of their name (item 4) are a batch's. They join on the
-  `[join] key` of the path's collector of that name, wired or not, else on `call_id`.
+- Exports judged with no collector of their name (item 4) are a batch's. The path's collector
+  of that name, wired or not, states how: its judge answers what it answers, the records
+  joined on its `[join] key`. With no such collector, or one naming no judge, the judge of
+  their name answers that name, joined on `call_id` where no collector states a key.
 
 Every collector and judge reads the cells of its scope in `cell.v1`:
 
