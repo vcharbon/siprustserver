@@ -312,7 +312,7 @@ const NO_ANSWERS: Answers = { verifications: [], attachments: [] }
 const notCheckableLines = (instance: Instance, message: string): Answers => ({
   verifications: Collector.answeredBy(instance.collector.manifest).map((name) => ({
     name,
-    source: instance.collector.name,
+    source: ScopeJudging.sourceOf(instance),
     answer: "not-checkable" as const,
     message
   })),
@@ -393,7 +393,7 @@ const applied = (instance: Instance, cells: ReadonlyArray<Cell.Cell>, lines: Rea
             const { verification, cell: named, ...rest } = line.line
             const cell = named ?? sole
             const holder = cell === undefined ? scope : byCell.get(cell)!
-            holder.verifications.set(verification, { name: verification, source: instance.collector.name, ...rest })
+            holder.verifications.set(verification, { name: verification, source: ScopeJudging.sourceOf(instance), ...rest })
             break
           }
           case "Attachment": {

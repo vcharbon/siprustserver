@@ -167,7 +167,8 @@ Rules:
   manifest names, or for one named after the collector where it names none, on every cell of
   the scope and on the scope, quoting what failed. So does a line of `collect` that is none of
   the table below, names a cell outside the scope or a verification the manifest does not name,
-  or attaches no file under `SIPRIG_OUT`.
+  or attaches no file under `SIPRIG_OUT`. A collector naming a judge answers its lines, and the
+  base answers them for it, under the judge's name: the source of the lines a cell awaits.
 - `close` runs whatever ended the scope, after a failed or interrupted `open` too. A `close`
   that fails is run once more. A second failure marks the job *lab left changed*.
 - `locks` are taken per scope: the union of its collectors' locks, once, before its first

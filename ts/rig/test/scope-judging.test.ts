@@ -548,7 +548,7 @@ fs.writeFileSync(require("node:path").join(process.env.SIPRIG_OUT, "lines.jsonl"
     })
   })
 
-  it("is not checkable for the cell a collector's judge left unanswered, the collector naming no answers but its judge", async () => {
+  it("is not checkable, under the judge's name, for the cell a collector's judge left unanswered, the collector naming no answers but its judge", async () => {
     const { root, rig } = await loaded({
       ...collector("half", node(`console.log(JSON.stringify({ record: { n: 1 }, key: "c1@test" }))`), `judge = "halves"\n[join]\nkey = "call_id"`),
       ...executableJudge("halves", node(`console.log(JSON.stringify({ verification: "half", cell: "c1", answer: "pass" }))`))
@@ -556,7 +556,7 @@ fs.writeFileSync(require("node:path").join(process.env.SIPRIG_OUT, "lines.jsonl"
     const { collected } = await collectBatch(rig, root, cellsOf(root, ["c1", "c2"]))
     expect([onCell(collected, "c1"), onCell(collected, "c2")]).toEqual([
       [{ name: "half", source: "halves", answer: "pass" }],
-      [{ name: "half", source: "half", answer: "not-checkable", message: "nobody answered half for the cell c2" }]
+      [{ name: "half", source: "halves", answer: "not-checkable", message: "nobody answered half for the cell c2" }]
     ])
   })
 

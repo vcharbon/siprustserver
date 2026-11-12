@@ -348,6 +348,18 @@ describe("a scope's collectors", () => {
     expect(traceOf(root)).toEqual(["open failing-open", "close failing-open"])
   })
 
+  it("answers a failed open under the name of the judge its manifest names, the source of the lines a cell awaits", async () => {
+    const { root, rig } = await samples()
+    const judge = { name: "records-judge" } as CollectorRun.Instance["judge"]
+    const instance = { ...instanceOf(rig, root, "failing-open"), judge }
+    const { collected } = await runScope([instance], cellsUnder(root), { sink: () => Effect.void, locker: memoryLocker() })
+    const [failed] = valueOf(collected)
+    const log = path.join(root, "batch", "collectors", "failing-open", "open.log")
+    const line = { name: "failing-open", source: "records-judge", answer: "not-checkable", message: `open exited 2: no route to the store, its log ${log}` }
+    for (const id of ["c1", "c2"]) expect(failed!.cells.get(id)!.verifications).toEqual([line])
+    expect(failed!.scope.verifications).toEqual([line])
+  })
+
   it("kills a collect past its timeout with every process it started, and answers not checkable", async () => {
     const { root, rig } = await samples()
     const cells = cellsUnder(root)
