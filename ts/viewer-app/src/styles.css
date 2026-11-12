@@ -147,20 +147,9 @@ a:hover {
   margin-left: auto;
 }
 
-.brand-block {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  white-space: nowrap;
-}
-
 .brand {
   font-weight: 700;
-}
-
-.pack-title {
-  color: var(--mute);
-  font-weight: 600;
+  white-space: nowrap;
 }
 
 .build-stamp {

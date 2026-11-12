@@ -1,7 +1,7 @@
 /** The shell: route in, page out, under the top bar every page shares. */
 import { type JSX, useEffect } from "react"
 import { BUILD } from "./build-stamp.ts"
-import { Brand, Stamp, tabTitle } from "./components/Brand.tsx"
+import { Brand, Stamp } from "./components/Brand.tsx"
 import { Link } from "./components/Link.tsx"
 import { CampaignPage } from "./pages/CampaignPage.tsx"
 import { CasePage } from "./pages/CasePage.tsx"
@@ -20,21 +20,24 @@ import { StudyPage } from "./pages/StudyPage.tsx"
 import { TriagePage } from "./pages/TriagePage.tsx"
 import { ThemeSwitch } from "./components/ThemeSwitch.tsx"
 import { href, useRoute } from "./router.ts"
-import { usePackTitle } from "./server-config.ts"
+import { useSiteName } from "./server-config.ts"
+
+/** The name the page's HTML gives it, which the top bar shows until the server's config names the site. */
+const PAGE_NAME = document.title
 
 export const App = (): JSX.Element => {
   const route = useRoute()
-  const title = usePackTitle()
+  const name = useSiteName() ?? PAGE_NAME
   useEffect(() => {
-    document.title = tabTitle(title)
-  }, [title])
+    document.title = name
+  }, [name])
   return (
     <div className="app">
       <nav className="app-nav">
         {/* Lane-less on purpose: a page opened without a lane reads the one the
             browser remembers (`lane-memory`), and a rendered href could only
             carry the memory as it stood at render time. */}
-        <Brand title={title} />
+        <Brand name={name} />
         <Link to={href.triage()}>triage</Link>
         <Link to={href.rules()}>rules</Link>
         <Link to={href.sources()}>sources</Link>

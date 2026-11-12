@@ -1014,8 +1014,8 @@ export interface RetirePlan {
 }
 
 export interface ServerConfig {
-  /** The title of the pack the server runs, which the top bar shows beside the rig's name; absent where the server states none. */
-  readonly title?: string
+  /** The site's name, which the top bar and the browser tab show; absent where the server states none. */
+  readonly name?: string
   readonly configPath: string
   readonly caseRoots: readonly { readonly id: string; readonly label: string; readonly path: string }[]
   readonly runRoots: readonly { readonly id: string; readonly label: string; readonly path: string }[]
