@@ -15,9 +15,10 @@
 # /opt/siprig it answers as git does outside a repository. Everywhere else
 # (the workspace's own repository) the real git answers, every directory
 # trusted: the container runs as the caller's uid over the caller's mount,
-# with HOME=/tmp and no global configuration.
+# with HOME=/tmp and no global configuration. SIPRIG_STAMP_DIR names another
+# stamp directory than the image's.
 set -uo pipefail
-stamps=/opt/siprig/image/stamp
+stamps="${SIPRIG_STAMP_DIR:-/opt/siprig/image/stamp}"
 here="$(pwd -P)"
 stamp=""
 for file in "$stamps"/*.env; do
