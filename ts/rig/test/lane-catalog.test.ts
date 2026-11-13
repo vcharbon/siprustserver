@@ -151,6 +151,23 @@ describe("the lane catalog", () => {
   }
 })
 
+describe("a pack's own lanes", () => {
+  it("read under the pack's directory, with no workspace, load its plug-ins and part schemas once", async () => {
+    const dir = root({
+      "pack.toml": pack(),
+      "parts/records-store.schema.json": RECORDS_STORE,
+      "judges/records/judge.toml": `schema = "judge.v1"\nname = "records"\nmodule = "./judge.ts"\n`,
+      "judges/records/judge.ts": "export default () => []\n",
+      "lanes/a.toml": HOSTED("none", "", `[parts]\nrecords-store = "one"\n`),
+      ...STORES
+    })
+    const result = await run(LaneCatalog.load(reading(dir), LaneCatalog.dirsUnder(dir), {}))
+    if (Result.isFailure(result)) throw new Error(String(typeof result.failure === "string" ? result.failure : result.failure.message))
+    expect([...result.success.rig.judges.keys()]).toEqual(["records"])
+    expect(result.success.lanes.map((lane) => [lane.id, lane.store])).toEqual([["sim", undefined], ["a", "one"]])
+  })
+})
+
 describe("the lanes of one job", () => {
   const JOB = {
     "lanes/a.toml": HOSTED("served", "", `[parts]\nrecords-store = "one"\n`),
