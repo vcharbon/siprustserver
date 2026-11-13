@@ -31,9 +31,14 @@ const recordsIn = (file: string | undefined): ReadonlyArray<unknown> =>
 /** `value` as the text a flat record holds: a string as it is, anything else as JSON. */
 const textOf = (value: unknown): string => (typeof value === "string" ? value : JSON.stringify(value))
 
-/** `value` flattened under `prefix`: each leaf, and each empty object or array, at its dotted path. */
+/**
+ * `value` flattened under `prefix`: each leaf, and each empty object or
+ * array, at its dotted path; a `null` is no field, so a check reads it
+ * absent, as the interpreter's flattened record does.
+ */
 const flatten = (value: unknown, prefix = ""): ReadonlyArray<readonly [string, string]> => {
-  const entries = typeof value === "object" && value !== null ? Object.entries(value) : []
+  if (value === null) return []
+  const entries = typeof value === "object" ? Object.entries(value) : []
   if (entries.length === 0) return prefix === "" ? [] : [[prefix, textOf(value)]]
   return entries.flatMap(([key, inner]) => flatten(inner, prefix === "" ? key : `${prefix}.${key}`))
 }
