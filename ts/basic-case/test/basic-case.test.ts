@@ -177,6 +177,23 @@ describe("an operation step", () => {
     ])
   })
 
+  it("answered, forgetting the call: each party ends its leg with a BYE the system answers 481 (RFC 3261 §15.1.2)", () => {
+    const cell = defineBasicCase({
+      title: "the worker restarts",
+      shape: "basic_call",
+      ...PARTIES,
+      final: [],
+      tags: ["disruptive"],
+      steps: [{ operation: "restart-worker", at: "answered", forgets: true }]
+    })
+    expect(flowOf(cell).slice(10)).toEqual([
+      "A send BYE (after the inject)",
+      "A expect 481 BYE",
+      "B send BYE",
+      "B expect 481 BYE"
+    ])
+  })
+
   it("leaves the ladder of a case stating none as it is, and its cell carrying no tag", () => {
     const plain = defineBasicCase({ title: "alice calls bob", shape: "basic_call", ...PARTIES, final: [] })
     expect(plain.document.flow.every((node) => node.op !== "inject" && node.after === undefined)).toBe(true)
@@ -225,6 +242,12 @@ describe("a case that does not hold", () => {
   it("is refused for an operation step at a point its shape does not reach, naming the shape's points", () => {
     expect(refusal({ ...base, shape: "invite_reject", steps: [{ operation: "restart-worker", at: "answered" }] })).toContain(
       "steps: restart-worker is at answered, which invite_reject does not reach (its points: reached)"
+    )
+  })
+
+  it("is refused forgetting the call at a point the call is not up", () => {
+    expect(refusal({ ...base, steps: [{ operation: "restart-worker", at: "reached", forgets: true }] })).toContain(
+      "steps: restart-worker forgets the call at reached: a call is forgotten once answered"
     )
   })
 

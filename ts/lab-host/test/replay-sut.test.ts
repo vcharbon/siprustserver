@@ -132,4 +132,22 @@ describe("a managed lane's worker", () => {
     expect(alive()).toBe(false)
     expect(fs.existsSync(pidFile)).toBe(false)
   })
+
+  it("stands its worker again where it died, named in its pid file, and leaves a running one as it is", async () => {
+    const pidFile = path.join(dir, "named", "sut.pid")
+    const held = (await run(Sut.stand({ ...packLogging(undefined), pidFileOf: () => pidFile }, lane, path.join(dir, "batch"))))!
+    const first = Number(fs.readFileSync(pidFile, "utf8").trim())
+    await run(held.restand!)
+    expect(Number(fs.readFileSync(pidFile, "utf8").trim()), "a running worker left as it is").toBe(first)
+    process.kill(first, "SIGKILL")
+    while (alive()) await new Promise((resolve) => setTimeout(resolve, 10))
+    await run(held.restand!)
+    const second = Number(fs.readFileSync(pidFile, "utf8").trim())
+    expect(second).not.toBe(first)
+    expect(alive(), "the worker stood again runs").toBe(true)
+    expect(held.died(), "the death it stood again after is no death of the lane's system").toBeUndefined()
+    await Effect.runPromise(held.stop)
+    expect(alive()).toBe(false)
+    expect(fs.existsSync(pidFile)).toBe(false)
+  })
 })

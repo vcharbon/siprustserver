@@ -128,6 +128,24 @@ describe("the lanes of a root", () => {
     expect(Lanes.unboundOf(lanes.find((lane) => lane.id === "served")!, ["restart"])).toEqual([])
   })
 
+  it("bind a name to an operation with parameters of the lane's own, which override the manifest's for a step", async () => {
+    const dir = workspace({
+      "lanes/served.toml": REAL(
+        "served",
+        `[parts]\nworker-pool = "small"\n[operations]\nrestart = "restart-worker"\n[operations.kill]\noperation = "restart-worker"\nparams = { signal = "SIGKILL" }`
+      ),
+      "targets/worker-pool/small.toml": `size = 2\n`
+    })
+    const { lanes } = await lanesOf(dir)
+    const served = lanes.find((lane) => lane.id === "served")!
+    expect([...served.capabilities].filter((one) => one.startsWith("operation:")).sort()).toEqual(["operation:kill", "operation:restart"])
+    expect(served.operations.get("kill")?.file).toBe(path.join(dir, "operations/restart-worker/operation.toml"))
+    expect(served.operationParams?.get("kill")).toEqual({ signal: "SIGKILL" })
+    expect(served.operationParams?.get("restart")).toBeUndefined()
+    const unnamed = workspace({ "lanes/served.toml": REAL("served", `[operations.kill]\nparams = { signal = "SIGKILL" }`) })
+    expect((await refusalOf(unnamed))?.reason).toMatch(/^operations\.kill/)
+  })
+
   it("refuses a part file that breaks its schema, naming the file and the field", async () => {
     const lane = { "lanes/served.toml": REAL("served", `[parts]\nrecords-store = "a"`) }
     const file = (dir: string) => path.join(dir, "targets/records-store/a.toml")
