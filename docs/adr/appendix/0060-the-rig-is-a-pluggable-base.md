@@ -317,6 +317,7 @@ schema = "operation.v1"
 name   = "restart-worker"
 needs  = ["orchestrator"]
 locks  = []
+stops  = "system"              # optional: its inject names the process it stopped
 [params]
 grace_s = 5
 [timeouts]                     # defaults: 60, 120, 60, 1
@@ -365,19 +366,24 @@ probe  = "./probe"             # optional
   whose inject started heals, a failed inject's too; its events are the job's
   (`campaign-runner` `cell-steps.ts`). A heal left changed is the batch's dirty end.
 - On a managed lane the base is the system's orchestrator: where a step's inject stopped the
-  system, the base stands it again before answering `injected`, and each heal attempt stands it
-  again where it is still down, between `heal` and `probe`. Its death is then no death of the
-  batch's system (`lab-host` `replay-sut.ts` `restand`).
+  system, the base stands it again before answering `injected` (a failure to is the inject's
+  `failed`), and each heal attempt stands it again where it is still down, between `heal` and
+  `probe`. An operation whose manifest states `stops = "system"` names the process its inject
+  stopped in `SIPRIG_OUT/stopped`; that death alone is the step's. Any other death the base finds
+  stays the batch's system's death (its dirty end) and is the step's event `system-died`, with
+  the exit (`lab-host` `replay-sut.ts` `restand`).
 - A lane file's `[operations]` table binds the name a case asks for to an operation of the path:
   `name = "<operation>"`, or `[operations.<name>]` with `operation` and `params`, the lane's
   parameters over the manifest's when a case's step runs it. A lane where the name resolves to
-  nothing, or that lacks a part the operation needs, cannot run the case.
+  nothing, that lacks a part the operation needs, or that binds a parameter the manifest's
+  `[params]` does not declare or of another type, cannot load.
 - A heal attempt is `heal` and its `probe`. A failed attempt is run once more. A second failure
   marks the job *lab left changed*, which closes it failed however it ended. One operation's
-  failed heal never stops the heals after it.
+  failed heal never stops the heals after it. A case step's heal left changed runs no later cell
+  of its batch: each is an environment error, not run.
 - Each phase is an event of the job with its instant on both clocks (the store's
-  `job_events`): `inject`, `injected`, `heal`, `healed`, `recovered`, `failed` and
-  `lab-left-changed`, the job's mark.
+  `job_events`): `inject`, `injected`, `heal`, `healed`, `recovered`, `failed`,
+  `system-died` and `lab-left-changed`, the job's mark.
 - A cell whose case asks for an operation its lane binds none of is `not runnable` there.
 - A case's own heal time (the wait a lane holds after a disruptive case) is another thing and
   keeps its name.

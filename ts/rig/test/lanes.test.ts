@@ -49,7 +49,8 @@ const RECORDS_STORE = JSON.stringify({
 /** A worker pool: the processes a system runs on, one per lane. */
 const WORKER_POOL = JSON.stringify({ type: "object", required: ["size"], properties: { size: { type: "integer", minimum: 1 } } })
 
-const OPERATION = `schema = "operation.v1"\nname = "restart-worker"\nneeds = ["worker-pool"]\n[run]\ninject = "./inject"\nheal = "./heal"\n`
+const OPERATION =
+  `schema = "operation.v1"\nname = "restart-worker"\nneeds = ["worker-pool"]\n[params]\nsignal = "SIGTERM"\n[run]\ninject = "./inject"\nheal = "./heal"\n`
 
 /** A workspace holding the part schemas, one operation, and `files`. */
 const workspace = (files: Readonly<Record<string, Entry>>) =>
@@ -144,6 +145,21 @@ describe("the lanes of a root", () => {
     expect(served.operationParams?.get("restart")).toBeUndefined()
     const unnamed = workspace({ "lanes/served.toml": REAL("served", `[operations.kill]\nparams = { signal = "SIGKILL" }`) })
     expect((await refusalOf(unnamed))?.reason).toMatch(/^operations\.kill/)
+  })
+
+  it("refuses a binding's parameter its operation's manifest does not declare, or of another type", async () => {
+    const bound = (params: string) =>
+      workspace({
+        "lanes/served.toml": REAL("served", `[parts]\nworker-pool = "small"\n[operations.kill]\noperation = "restart-worker"\nparams = ${params}`),
+        "targets/worker-pool/small.toml": `size = 2\n`
+      })
+    const typo = bound(`{ signl = "SIGKILL" }`)
+    const refusal = await refusalOf(typo)
+    expect(refusal?.reason).toBe("operations.kill.params.signl: the operation's [params] declares no signl")
+    expect(refusal?.files).toEqual([path.join(typo, "lanes/served.toml"), path.join(typo, "operations/restart-worker/operation.toml")])
+    expect((await refusalOf(bound(`{ signal = 9 }`)))?.reason).toBe(
+      "operations.kill.params.signal: a number, where the operation's [params] states a string"
+    )
   })
 
   it("refuses a part file that breaks its schema, naming the file and the field", async () => {

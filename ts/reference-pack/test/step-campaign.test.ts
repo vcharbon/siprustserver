@@ -10,9 +10,12 @@
  * record written. A case asking for a step whose tags state no alone is
  * refused at compile, no call placed.
  *
- * Its own real-clock waits: the call's ring and hold (about 0.3 s) per cell;
- * the rest is process work (the runner's restart, the operation's three
- * node processes). The suite builds and drops its OWN database
+ * Its own real-clock waits, about 0.9 s: each call's answer, ring and hold
+ * (0.26 s) and its `calls-ended` read 0.1 s after it, for two cells, then the
+ * `call-records` settle the workspace states ({@link SETTLE_S}), waited in
+ * full since the killed call has no record; the rest is process work (the
+ * runner's restart, the operation's node processes). The suite builds and
+ * drops its OWN database
  * (`@sip/store/test-server`). The binaries are those of
  * `reference-campaign.test.ts`; `TOOLCHAIN_TEST_SKIP=1` skips the suite.
  */
@@ -23,6 +26,7 @@ import { CampaignResults, CampaignRuns, JobEvents, Jobs } from "@sip/store"
 import { layerFromUrl } from "@sip/store/client"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
 import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -63,48 +67,60 @@ afterAll(async () => {
   if (served) await drop(SCRATCH)
 }, 120_000)
 
+/**
+ * How long `call-records` waits for a record of each cell's call. The killed
+ * call never gets one, so the collect waits it in full. The runner writes a
+ * call's record through its CDR queue as the call ends, and the collect starts
+ * only once the batch's end gate read the runner holding no call, the
+ * `calls-ended` read 0.1 s after the last call before it: a record the
+ * runner writes reaches the file well within 0.2 s of that.
+ */
+const SETTLE_S = 0.2
+
 /** The workspace `name` holding the reference lane, its `rig.toml` declaring {@link TAG} alone or not: its directory and what its runner writes. */
 const workspaceOf = async (name: string, alone: boolean) => {
   const dir = path.join(work, name)
   const written = writtenUnder(dir, "b2bua-runner")
   await hostedWorkspace(PACK, dir, written)
+  fs.appendFileSync(path.join(dir, "lanes", "reference.toml"), `\n[collectors.call-records]\nsettle_s = ${SETTLE_S}\n`)
   fs.writeFileSync(path.join(dir, "rig.toml"), `[tags.${TAG}]\nlabel = "restarts the system under test"\ndefault = "run"\nalone = ${alone}\n`)
   return { dir, written }
 }
 
-/** The step source run on the reference lane of `workspace` as the job it creates: its exit code, its run, its job's events. */
-const stepCampaign = (workspace: string, name: string) =>
-  Effect.gen(function*() {
-    const manifest = yield* manifestOf(PACK)
-    const services = layerOf(layerFromUrl(urlFor(SCRATCH)), path.join(work, `sessions-${name}`), {
+/** The base campaign's services of the run `name`, over the suite's database. */
+const servicesOf = (name: string) =>
+  Layer.unwrap(Effect.map(manifestOf(PACK), (manifest) =>
+    layerOf(layerFromUrl(urlFor(SCRATCH)), path.join(work, `sessions-${name}`), {
       env: "step-test",
       checkout: CHECKOUT,
       pack: { dir: PACK, manifest }
+    }))).pipe(Layer.provide(NodeServices.layer))
+
+/** The step source run on the reference lane of `workspace` as the job it creates: its exit code, its run, its job's events. */
+const stepCampaign = (workspace: string, name: string) =>
+  Effect.gen(function*() {
+    const job = yield* (yield* Jobs.Service).create({ kind: "campaign", args: {}, createdBy: "step-test" })
+    const code = yield* BaseCampaign.run({
+      pack: PACK,
+      workspace,
+      lanes: "reference",
+      out: path.join(work, `run-${name}`),
+      runs: work,
+      junit: undefined,
+      job,
+      env: "step-test",
+      site: "http://127.0.0.1:5175",
+      replay: REPLAY,
+      runner: RUNNER,
+      pivotSchema: PIVOT_SCHEMA,
+      collection: undefined,
+      setup: [],
+      sources: [STEP_CASES]
     })
-    return yield* Effect.gen(function*() {
-      const job = yield* (yield* Jobs.Service).create({ kind: "campaign", args: {}, createdBy: "step-test" })
-      const code = yield* BaseCampaign.run({
-        pack: PACK,
-        workspace,
-        lanes: "reference",
-        out: path.join(work, `run-${name}`),
-        runs: work,
-        junit: undefined,
-        job,
-        env: "step-test",
-        site: "http://127.0.0.1:5175",
-        replay: REPLAY,
-        runner: RUNNER,
-        pivotSchema: PIVOT_SCHEMA,
-        collection: undefined,
-        setup: [],
-        sources: [STEP_CASES]
-      })
-      const runs = yield* (yield* CampaignRuns.Service).read("reference", { limit: 1 })
-      const events = yield* (yield* JobEvents.Service).ofJob(job)
-      return { code, run: runs[0], events, job }
-    }).pipe(Effect.provide(services))
-  }).pipe(Effect.provide(NodeServices.layer))
+    const runs = yield* (yield* CampaignRuns.Service).read("reference", { limit: 1 })
+    const events = yield* (yield* JobEvents.Service).ofJob(job)
+    return { code, run: runs[0], events, job }
+  }).pipe(Effect.provide(servicesOf(name)), Effect.provide(NodeServices.layer))
 
 /** The JSON lines of `file`. */
 const linesOf = (file: string): ReadonlyArray<Record<string, unknown>> =>
@@ -142,6 +158,36 @@ describe.skipIf(!served || skipping)("an operation as a step of a case on the re
     const log = batchLogOf(job, "alone")
     expect(log.split("listening UDP").length - 1, "the runner stood again after the kill, within the batch").toBe(1)
     expect(linesOf(written.cdr), "one record: the call after the restart, which the killed runner could not write").toHaveLength(1)
+  })
+
+  it("runs no later cell of the batch once a step left the lab changed, each an environment failure, and closes the job failed", async () => {
+    const { dir } = await workspaceOf("left-changed", true)
+    const operations = path.join(PACK, "operations")
+    const stuck = path.join(dir, "operations", "stuck-restart")
+    fs.mkdirSync(stuck, { recursive: true })
+    for (const file of ["main.ts", "run"]) fs.copyFileSync(path.join(operations, "restart-worker", file), path.join(stuck, file))
+    fs.chmodSync(path.join(stuck, "run"), 0o755)
+    fs.writeFileSync(path.join(stuck, "never"), "#!/bin/sh\necho 'this heal never heals' >&2\nexit 1\n", { mode: 0o755 })
+    fs.writeFileSync(
+      path.join(stuck, "operation.toml"),
+      fs.readFileSync(path.join(operations, "restart-worker", "operation.toml"), "utf8")
+        .replace(`name = "restart-worker"`, `name = "stuck-restart"`)
+        .replace(`heal = "./run"`, `heal = "./never"`)
+    )
+    const lane = path.join(dir, "lanes", "reference.toml")
+    fs.writeFileSync(lane, fs.readFileSync(lane, "utf8").replace(`operation = "restart-worker"`, `operation = "stuck-restart"`))
+    const { run, events, job } = await Effect.runPromise(stepCampaign(dir, "left-changed"))
+    const results = new Map(run!.lanes[0]!.results.map((result) => [CampaignResults.caseNameOf(result.caseId).ref, result]))
+    const after = results.get("alice calls bob after the restart")
+    expect(after?.passed).toBe(false)
+    expect(after?.verifications, "no call placed").toEqual([])
+    expect(after?.errorDetail).toContain("not run: the step restart-worker for")
+    expect(after?.errorDetail).toContain("left the lab changed")
+    expect(events.filter((event) => event.phase === JobEvents.LAB_LEFT_CHANGED)).toHaveLength(1)
+    const row = await Effect.runPromise(
+      Effect.flatMap(Jobs.Service, (jobs) => jobs.show(job)).pipe(Effect.provide(servicesOf("left-changed")))
+    )
+    expect(row?.job.status, "a job whose lab a step left changed closes failed").toBe("failed")
   })
 
   it("refuses at compile a case asking for a step whose tags state no alone, no call placed", async () => {

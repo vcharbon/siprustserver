@@ -3,13 +3,17 @@
 # answering at the `b2bua-runner` part's admin address names that pid, its
 # orchestrator standing the next one: on the reference lane the base, which
 # stands one per batch. `heal` ends a stop an interrupted inject left; `probe`
-# answers once the stopped runner is gone (`main.ts`). As a job's setup, it
+# answers once the stopped runner is gone and, as a case's step, once another
+# runner answers at the admin address (`main.ts`). As a job's setup, it
 # stops a runner an earlier job left on the lane's addresses, so the job's
 # batches stand their own there. A lane binds it by name (`[operations]`) for
 # a case to ask for; a lane naming neither part, or only one, cannot bind it.
+# It stops the system: the runner it names stopped is the one whose death
+# the base claims as the step's.
 schema = "operation.v1"
 name = "restart-worker"
 needs = ["b2bua-runner", "runner-pid"]
+stops = "system"
 
 [params]
 # The signal the runner is stopped with: SIGTERM drains its calls, SIGKILL

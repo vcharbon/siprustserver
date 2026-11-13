@@ -7,8 +7,9 @@
  * Loading refuses, naming the file: a lane file that does not hold
  * (`lane.ts`), an id that is not a name, a part kind the path has no schema
  * for, a part file that is not there, a part file its schema refuses (the
- * dotted field named), and a binding to an operation the path does not define
- * or whose parts the lane lacks. {@link sharedOf} refuses a job whose lanes
+ * dotted field named), and a binding to an operation the path does not define,
+ * whose parts the lane lacks, or with a parameter its manifest does not
+ * declare or of another type. {@link sharedOf} refuses a job whose lanes
  * name different files of a kind its schema declares shared.
  */
 import * as Effect from "effect/Effect"
@@ -17,7 +18,7 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as path from "node:path"
 import * as Capability from "./capability.js"
-import type * as Collection from "./collection.js"
+import * as Collection from "./collection.js"
 import * as Lane from "./lane.js"
 import { Name, type Refusal, refuse } from "./manifest-file.js"
 import type * as Operation from "./operation.js"
@@ -87,6 +88,21 @@ const idsOf = (dir: string) =>
     return names.filter((name) => name.endsWith(".toml")).map((name) => name.slice(0, -".toml".length)).sort()
   })
 
+/**
+ * Why the parameters `bound` a lane binds an operation with do not hold
+ * against its manifest's `offered` (`<key>: …`): a key the manifest's
+ * `[params]` does not declare, or a value of another type than its default;
+ * `undefined` where they hold.
+ */
+const paramRefusalOf = (offered: Readonly<Record<string, unknown>>, bound: Readonly<Record<string, unknown>>): string | undefined => {
+  for (const [key, value] of Object.entries(bound)) {
+    if (!(key in offered)) return `${key}: the operation's [params] declares no ${key}`
+    const kind = Collection.kindOf(offered[key])
+    if (Collection.kindOf(value) !== kind) return `${key}: a ${Collection.kindOf(value)}, where the operation's [params] states a ${kind}`
+  }
+  return undefined
+}
+
 /** The bindings of `lane` resolved on `rig`, or why one does not hold. */
 const operationsOf = (rig: RigPath.RigPath, file: string, lane: Lane.LaneFile, parts: ReadonlyMap<string, Part.Part>) => {
   const bound = new Map<string, RigPath.Defined<Operation.Operation>>()
@@ -101,6 +117,8 @@ const operationsOf = (rig: RigPath.RigPath, file: string, lane: Lane.LaneFile, p
     if (lacks.length > 0) {
       return Result.fail(refuse([file, defined.file], `operations.${name}: ${operation} needs the part ${lacks.join(", ")}, which the lane names none of`))
     }
+    const unoffered = paramRefusalOf(defined.manifest.params ?? {}, binding.params ?? {})
+    if (unoffered !== undefined) return Result.fail(refuse([file, defined.file], `operations.${name}.params.${unoffered}`))
     bound.set(name, defined)
   }
   return Result.succeed({ bound, params })

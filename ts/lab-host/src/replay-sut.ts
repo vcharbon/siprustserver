@@ -20,7 +20,7 @@
  * not ready in time, exited, interrupted — closes it, so no worker outlives a
  * stand that did not hand it over, and the lane's fixed port is free again.
  */
-import type { SutHandle } from "@sip/corpus/replay/batch-protocol"
+import type { Restood, SutHandle } from "@sip/corpus/replay/batch-protocol"
 import type { LaneView } from "@sip/rig"
 import { Said } from "@sip/toolchain"
 import * as Deferred from "effect/Deferred"
@@ -53,8 +53,12 @@ export type Requirements = ChildProcessSpawner.ChildProcessSpawner | FileSystem.
 
 /** A worker that announced itself. */
 export interface Worker {
+  /** Its process's pid. */
+  readonly pid: number
   /** How it died, if it has; `undefined` while it runs or once stopped. */
   readonly died: () => string | undefined
+  /** Resolves once its process exited, on how it ended; never where it is stopped first. */
+  readonly exited: Effect.Effect<string>
   /** SIGTERM, SIGKILL past the grace; resolves once it exited. */
   readonly stop: Effect.Effect<void>
   /** Whether its process has not exited yet. */
@@ -118,6 +122,9 @@ export const worker = Effect.fn("ReplaySut.worker")(function*(
   const stop = Scope.close(scope, Exit.void)
   const unnamed = pidFile === undefined ? Effect.void : fs.remove(pidFile, { force: true }).pipe(Effect.ignore)
   let died: string | undefined
+  const exited = yield* Deferred.make<string>()
+  const said = (ended: Result.Result<ChildProcessSpawner.ExitCode, unknown>) =>
+    `the ${name} worker exited ${endedBy(ended)} — its log is ${log}`
   const spawned = yield* Effect.gen(function*() {
     yield* Scope.addFinalizer(scope, unnamed)
     const handle = yield* spawner.spawn(command).pipe(Scope.provide(scope))
@@ -132,9 +139,10 @@ export const worker = Effect.fn("ReplaySut.worker")(function*(
     const drained = logClosed(logged)
     yield* stopsBeforeLogEnds(scope, handle.kill({ forceKillAfter: STOP_GRACE }), drained)
     yield* Effect.result(handle.exitCode).pipe(
+      Effect.tap((ended) => Deferred.succeed(exited, said(ended))),
       Effect.tap(() => Effect.andThen(drained, unnamed)),
       Effect.flatMap((ended) => {
-        died = `the ${name} worker exited ${endedBy(ended)} — its log is ${log}`
+        died = said(ended)
         return Deferred.fail(ready, new Error(`the ${name} worker exited ${endedBy(ended)} before it was ready`))
       }),
       Effect.forkIn(scope)
@@ -149,7 +157,7 @@ export const worker = Effect.fn("ReplaySut.worker")(function*(
     return handle
   }).pipe(Effect.onError(() => stop))
   const running = spawned.isRunning.pipe(Effect.orElseSucceed(() => false))
-  return { died: () => died, stop, running } satisfies Worker
+  return { pid: spawned.pid, died: () => died, exited: Deferred.await(exited), stop, running } satisfies Worker
 })
 
 /** What a pack stands its managed worker with. */
@@ -195,8 +203,9 @@ const logUnder = (path: Path.Path, under: string): string =>
  * cell. A managed worker's stop resolves once it exited, so the next batch
  * finds its addresses free. `extraEnv` is added to a managed worker's
  * environment. A managed worker that died is stood again by `restand` with
- * the same command, log and pid file, as its orchestrator would; the handle
- * then answers for the one stood.
+ * the same command, log and pid file, as its orchestrator would. The death is
+ * a step's only where the step claims that worker's pid; every other death
+ * the handle still says, beside that of the one stood.
  */
 export const stand = <L extends LaneView.View, R>(
   pack: SutPack<L, R>,
@@ -221,19 +230,26 @@ export const stand = <L extends LaneView.View, R>(
     const services = yield* Effect.context<Requirements>()
     let held = yield* worker(command, log, lane, READY_WITHIN, pidFile)
     console.log(`[sut] ${lane}: one ${pack.worker} on ${hosted.sip.ingress}, logging to ${log}`)
-    const restand = Effect.gen(function*() {
-      if (yield* held.running) return
-      yield* held.stop
-      held = yield* worker(command, log, lane, READY_WITHIN, pidFile)
-      console.log(`[sut] ${lane}: its ${pack.worker} died, one stood again on ${hosted.sip.ingress}`)
-    }).pipe(
-      Effect.mapError((e) => `the ${pack.worker} of ${lane} not stood again: ${e.message}`),
-      Effect.provideContext(services)
-    )
-    return {
-      metrics,
-      died: () => held.died(),
-      stop: Effect.suspend(() => held.stop),
-      restand
-    } satisfies SutHandle
+    const unclaimed = new Map<Worker, string>()
+    const restand = (claim?: number) =>
+      Effect.gen(function*() {
+        if (yield* held.running) return undefined
+        const exit = yield* held.exited
+        const claimed = claim === held.pid
+        if (!claimed) unclaimed.set(held, exit)
+        yield* held.stop
+        held = yield* worker(command, log, lane, READY_WITHIN, pidFile)
+        const whose = claimed ? "stopped by a step" : "no step stopped it"
+        console.log(`[sut] ${lane}: ${exit}, ${whose}; one stood again on ${hosted.sip.ingress}`)
+        return { exit, claimed } satisfies Restood
+      }).pipe(
+        Effect.mapError((e) => `the ${pack.worker} of ${lane} not stood again: ${e.message}`),
+        Effect.provideContext(services)
+      )
+    const died = () => {
+      const current = unclaimed.has(held) ? undefined : held.died()
+      const said = [...unclaimed.values(), ...(current === undefined ? [] : [current])]
+      return said.length === 0 ? undefined : said.join("; ")
+    }
+    return { metrics, died, stop: Effect.suspend(() => held.stop), restand } satisfies SutHandle
   }).pipe(Effect.withSpan("ReplaySut.stand"))

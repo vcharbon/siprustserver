@@ -10,7 +10,8 @@
  * `verifications.json` where the cell wrote it, and the audit's line off
  * `rfc.json` (`check-lines.ts` `auditLineOf`). A hosted-lane cell
  * whose batch's end did not run ({@link unjudgedAtEnd}) is an error whatever
- * its verdict says. What a pack's collectors answer of a cell is joined by
+ * its verdict says. An error that wrote no bundle (a cell not run) states
+ * none, so no collector reads one. What a pack's collectors answer of a cell is joined by
  * the batch (`replay.ts`). A cell claiming
  * of a collector no part of the lane answers is skipped where it would pass,
  * naming the claims not requested (`claims.ts`).
@@ -83,7 +84,11 @@ export const readAny = (file: string, fallback: unknown) =>
 export const judge = <C extends Cell>(typer: Typer, lane: Lane, cell: C, exit: number, summary: string, bundle: string) =>
   Effect.gen(function*() {
     const base = { ...errored(lane, cell, ""), bundle }
-    if (exit >= 2) return { ...base, message: summary.trim() } satisfies CellResult<C>
+    if (exit >= 2) {
+      const wrote = yield* Effect.flatMap(FileSystem.FileSystem, (fs) => fs.exists(bundle)).pipe(Effect.orElseSucceed(() => true))
+      const own = wrote ? base : errored(lane, cell, "")
+      return { ...own, message: summary.trim() } satisfies CellResult<C>
+    }
     const verdict = yield* readJson(path.join(bundle, "verdict.json"), Verdict)
     const rfc = yield* readJson(path.join(bundle, "rfc.json"), Rfc)
     if (verdict._tag === "None") {

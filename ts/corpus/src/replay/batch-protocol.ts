@@ -75,11 +75,21 @@ export interface BatchHost {
   readonly judged?: () => boolean
 }
 
+/** What a {@link SutHandle.restand} stood the SUT again after: how its process ended, and whether the step claimed that death. */
+export interface Restood {
+  readonly exit: string
+  readonly claimed: boolean
+}
+
 /** The lane's SUT, as the batch holds it. */
 export interface SutHandle {
   /** Where it publishes Prometheus text, where it publishes any. */
   readonly metrics: string | undefined
-  /** How a managed SUT died, if it has; `undefined` while it is alive. */
+  /**
+   * How a managed SUT died, where it has: each death a {@link restand} stood it
+   * again after and no step claimed, and the death of the one now stood;
+   * `undefined` while none.
+   */
   readonly died: () => string | undefined
   /**
    * Stops a managed SUT and resolves once its process exited, so the next
@@ -89,8 +99,10 @@ export interface SutHandle {
   readonly stop: Effect.Effect<void>
   /**
    * Stands a managed SUT whose process died again, as its orchestrator would,
-   * and leaves a running one as it is; `died` then answers for the one stood.
-   * Fails with why it could not. Absent where the harness stands no process.
+   * and leaves a running one as it is (`undefined`). The death is the step's
+   * only where `claim` is the dead process's pid, the one a step's inject
+   * named stopped; any other stays in `died`. Fails with why it could not
+   * stand it. Absent where the harness stands no process.
    */
-  readonly restand?: Effect.Effect<void, string>
+  readonly restand?: (claim?: number) => Effect.Effect<Restood | undefined, string>
 }

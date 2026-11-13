@@ -8,7 +8,9 @@
  * ran out of its bound. A step concludes only from a positive answer.
  *
  * A heal attempt is `heal` and its probe. A failed attempt is run once more;
- * a second failure is the event `lab-left-changed`.
+ * a second failure is the event `lab-left-changed`. `system-died` records the
+ * lane's managed system found dead while the step ran, no inject of the step
+ * having stopped it: the batch's, never the step's.
  */
 import * as Cause from "effect/Cause"
 import * as Clock from "effect/Clock"
@@ -25,7 +27,7 @@ import * as Operation from "./operation.js"
 import type * as RigPath from "./rig-path.js"
 
 /** What an event says of a step. */
-export const PHASES = ["inject", "injected", "heal", "healed", "recovered", "failed", "lab-left-changed"] as const
+export const PHASES = ["inject", "injected", "heal", "healed", "recovered", "failed", "lab-left-changed", "system-died"] as const
 export type Phase = (typeof PHASES)[number]
 
 /** The phase of the event that marks a job whose lab an operation left changed. */
@@ -117,8 +119,20 @@ const now = Effect.map(Clock.currentTimeMillis, (clock_ms) => ({ clock_ms, wall_
 const prepared = (instance: Instance, step: "inject" | "heal") =>
   Effect.flatMap(now, (at) => prepare(instance, step, { lane_ms: at.clock_ms, wall_ms: at.wall_ms }))
 
-const emit = (sink: Sink, instance: Instance, phase: Phase, message?: string) =>
+/** The event `phase` of `instance` at this instant, `message` where given, to `sink`. */
+export const emit = (sink: Sink, instance: Instance, phase: Phase, message?: string): Effect.Effect<void> =>
   Effect.flatMap(now, (at) => sink({ operation: instance.label, phase, ...at, ...(message === undefined ? {} : { message }) }))
+
+/**
+ * The process an inject of `instance` named stopped ({@link Operation.STOPPED_FILE}),
+ * where its operation `stops` the system and the file names a pid; else `undefined`.
+ */
+const stoppedOf = (instance: Instance): number | undefined => {
+  if (instance.operation.manifest.stops !== "system") return undefined
+  const file = path.join(layoutOf(instance).out, Operation.STOPPED_FILE)
+  const pid = fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8").trim()) : Number.NaN
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined
+}
 
 /** Runs `step`'s executable of `instance` within `timeoutMs`, its output appended to `<step>.log`. */
 const step = (instance: Instance, file: string, name: "inject" | "heal" | "probe", timeoutMs: number) => {
@@ -130,8 +144,18 @@ const step = (instance: Instance, file: string, name: "inject" | "heal" | "probe
   )
 }
 
-/** Injects `instance`: its directory emptied and its context written, then `inject` run within its bound. */
-export const inject = (instance: Instance, sink: Sink): Effect.Effect<void, InjectFailed> =>
+/**
+ * Injects `instance`: its directory emptied and its context written, then
+ * `inject` run within its bound, then `settle`, given the process the inject
+ * named stopped where its operation `stops` the system: it restores what the
+ * lane's orchestrator owns before `injected` is said, and its failure fails
+ * the inject.
+ */
+export const inject = (
+  instance: Instance,
+  sink: Sink,
+  settle: (stopped: number | undefined) => Effect.Effect<void, string> = () => Effect.void
+): Effect.Effect<void, InjectFailed> =>
   Effect.gen(function*() {
     const bounds = Operation.boundsOf(instance.operation.manifest)
     yield* emit(sink, instance, "inject")
@@ -146,6 +170,11 @@ export const inject = (instance: Instance, sink: Sink): Effect.Effect<void, Inje
     if (!Executable.succeeded(ended)) {
       yield* emit(sink, instance, "failed", `inject ${said}`)
       return yield* new InjectFailed({ operation: instance.label, reason: said })
+    }
+    const settled = yield* Effect.result(settle(stoppedOf(instance)))
+    if (Result.isFailure(settled)) {
+      yield* emit(sink, instance, "failed", `inject: ${settled.failure}`)
+      return yield* new InjectFailed({ operation: instance.label, reason: settled.failure })
     }
     yield* emit(sink, instance, "injected")
   })

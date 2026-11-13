@@ -133,21 +133,48 @@ describe("a managed lane's worker", () => {
     expect(fs.existsSync(pidFile)).toBe(false)
   })
 
+  /** The managed lane's worker named in `pidFile`, and how to kill the one running and wait for its end. */
+  const named = async (pidFile: string) => {
+    const held = (await run(Sut.stand({ ...packLogging(undefined), pidFileOf: () => pidFile }, lane, path.join(dir, "batch"))))!
+    const current = () => Number(fs.readFileSync(pidFile, "utf8").trim())
+    const killed = async () => {
+      const pid = current()
+      process.kill(pid, "SIGKILL")
+      while (alive()) await new Promise((resolve) => setTimeout(resolve, 10))
+      return pid
+    }
+    return { held, current, killed }
+  }
+
   it("stands its worker again where it died, named in its pid file, and leaves a running one as it is", async () => {
     const pidFile = path.join(dir, "named", "sut.pid")
-    const held = (await run(Sut.stand({ ...packLogging(undefined), pidFileOf: () => pidFile }, lane, path.join(dir, "batch"))))!
-    const first = Number(fs.readFileSync(pidFile, "utf8").trim())
-    await run(held.restand!)
-    expect(Number(fs.readFileSync(pidFile, "utf8").trim()), "a running worker left as it is").toBe(first)
-    process.kill(first, "SIGKILL")
-    while (alive()) await new Promise((resolve) => setTimeout(resolve, 10))
-    await run(held.restand!)
-    const second = Number(fs.readFileSync(pidFile, "utf8").trim())
-    expect(second).not.toBe(first)
+    const { held, current, killed } = await named(pidFile)
+    const first = current()
+    expect(await run(held.restand!(first)), "a running worker left as it is").toBeUndefined()
+    expect(current()).toBe(first)
+    await killed()
+    const restood = await run(held.restand!(first))
+    expect(restood).toEqual({ exit: expect.stringContaining("the lane-x worker exited SIGKILL"), claimed: true })
+    expect(current()).not.toBe(first)
     expect(alive(), "the worker stood again runs").toBe(true)
-    expect(held.died(), "the death it stood again after is no death of the lane's system").toBeUndefined()
+    expect(held.died(), "a death the step claimed is no death of the lane's system").toBeUndefined()
     await Effect.runPromise(held.stop)
     expect(alive()).toBe(false)
     expect(fs.existsSync(pidFile)).toBe(false)
+  })
+
+  it("keeps saying a death no step claimed once it stood its worker again, beside a later one", async () => {
+    const pidFile = path.join(dir, "named", "sut.pid")
+    const { held, current, killed } = await named(pidFile)
+    const first = await killed()
+    expect(await run(held.restand!(first + 1))).toEqual({ exit: expect.stringContaining("exited SIGKILL"), claimed: false })
+    expect(held.died(), "the death of a worker the step did not stop").toContain("the lane-x worker exited SIGKILL")
+    expect(alive(), "the worker stood again runs").toBe(true)
+    const second = await killed()
+    expect(await run(held.restand!())).toEqual({ exit: expect.stringContaining("exited SIGKILL"), claimed: false })
+    expect(held.died()!.split("; "), "each death no step claimed").toHaveLength(2)
+    expect(current()).not.toBe(second)
+    await Effect.runPromise(held.stop)
+    expect(held.died()!.split("; ")).toHaveLength(2)
   })
 })

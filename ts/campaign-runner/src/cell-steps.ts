@@ -9,7 +9,11 @@
  * The lane's managed system is its orchestrator's to stand: where a step's
  * inject stopped it, it is stood again before the inject is answered, so what
  * the call sends next reaches the system as it restarted; each heal attempt
- * stands it again where it is still down, before its probe.
+ * stands it again where it is still down, before its probe. Only the death of
+ * the process an inject of an operation that `stops` the system named stopped
+ * is the step's; any other death found there stays the batch's (the system's
+ * `died`, its dirty end) and is the event `system-died` of the step, its
+ * exit stated.
  */
 import type { Injector, SutHandle } from "@sip/corpus/replay/batch-protocol"
 import { type Context, type Lanes, OperationRun, OperationStep } from "@sip/rig"
@@ -36,7 +40,14 @@ export const stepsOf = (
   sut: SutHandle | undefined
 ): Steps => {
   const started: Array<OperationRun.Instance> = []
-  const restood = sut?.restand ?? Effect.void
+  const restand = sut?.restand
+  const stoodAgain = (instance: OperationRun.Instance, claim?: number): Effect.Effect<void, string> =>
+    restand === undefined
+      ? Effect.void
+      : Effect.flatMap(restand(claim), (restood) =>
+        restood === undefined || restood.claimed
+          ? Effect.void
+          : OperationRun.emit(sink, instance, "system-died", `no step stopped it: ${restood.exit}`))
   const injector: Injector = (ask) =>
     Effect.suspend(() => {
       const name = OperationStep.operationOf(ask.action)
@@ -53,12 +64,14 @@ export const stepsOf = (
         ...(params === undefined ? {} : { params })
       }
       started.push(instance)
-      return OperationRun.inject(instance, sink).pipe(Effect.mapError((failed) => failed.message), Effect.andThen(restood))
+      return OperationRun.inject(instance, sink, (stopped) => stoodAgain(instance, stopped)).pipe(
+        Effect.mapError((failed) => failed.message)
+      )
     })
   const healed = Effect.suspend(() =>
     Effect.map(
       Effect.forEach([...started].reverse(), (instance) =>
-        Effect.map(OperationRun.heal(instance, sink, restood), (recovered) => (recovered ? [] : [instance.label]))),
+        Effect.map(OperationRun.heal(instance, sink, stoodAgain(instance)), (recovered) => (recovered ? [] : [instance.label]))),
       (left) => left.flat()
     )
   )

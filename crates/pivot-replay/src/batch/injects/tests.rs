@@ -98,8 +98,8 @@ async fn a_late_answer_for_an_earlier_ask_does_not_resolve_a_re_run_s_ask() {
     assert_ne!(asks[0], asks[1], "each ask its own id");
 
     injects.answer(&injected(&asks[0], "/cells/p.spec.json", "i1"));
-    assert_eq!(superseded.await, Ok(()));
     assert_eq!(injects.asked(), [key("/cells/p.spec.json", "i1")], "the re-run's ask still asked");
+    assert_eq!(superseded.await, Ok(()));
     injects.answer(&refused(&asks[1], "/cells/p.spec.json", "i1", "exit 1"));
     assert_eq!(waiting.await, Err("exit 1".to_string()));
 }

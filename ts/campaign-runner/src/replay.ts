@@ -31,12 +31,15 @@
  *
  * A hosted cell asking for operation steps runs them (`cell-steps.ts`): the
  * injects its run asks are performed and healed once it ended, its events
- * the job's; a step whose heals failed twice is the batch's dirty end.
+ * the job's; a step whose heals failed twice is the batch's dirty end, and
+ * every cell of the batch not started by then is an environment failure, not
+ * run ({@link notRunOf}).
  *
  * Each attempt of the lane's cells (`run.ts`) is a batch of its own, under
  * its own directory, each cell's bundle its own (`attempts.ts`).
  */
-import type { LaneCatalog, LaneView } from "@sip/rig"
+import type { CellCollectors, LaneCatalog, LaneView } from "@sip/rig"
+import { ReplayCli } from "@sip/toolchain"
 import { CollectedCells, CollectorIo, Collectors } from "@sip/corpus"
 import * as LaneBatch from "@sip/corpus/replay/lane-batch"
 import * as Session from "@sip/corpus/session"
@@ -223,7 +226,8 @@ const failedOwn = <C extends Cell>(pack: Pick<CampaignPack<C>, "typer">, lane: L
  * `placed`'s cells, each stated failed or not off how its replay ended
  * (`exitedOf`, in `placed`'s order), every one where the batch's end did not
  * judge them (`LaneBatch.failedAtEnd`), with the judges of the batch's
- * exports alone; none where it wires neither.
+ * exports alone; none where it wires neither. A cell whose id `unrun` holds
+ * once the batch ended placed no call and wrote no bundle: none reads it.
  */
 export const rigCollectorsOf = <A, C extends Cell>(
   pack: Pick<CampaignPack<C>, "typer" | "claimsOf">,
@@ -231,7 +235,8 @@ export const rigCollectorsOf = <A, C extends Cell>(
   found: LaneView.View,
   placed: ReadonlyArray<Placed<C>>,
   context: Pick<Context, "root" | "attempt" | "job">,
-  exitedOf: (value: A) => ReadonlyArray<Exited>
+  exitedOf: (value: A) => ReadonlyArray<Exited>,
+  unrun: ReadonlySet<string> = new Set()
 ) =>
   Effect.gen(function*() {
     const sessions = yield* Sessions.Service
@@ -254,7 +259,7 @@ export const rigCollectorsOf = <A, C extends Cell>(
           Effect.forEach(placed, (p, at) => (end.judged ? failedOwn(pack, lane, p, exitedOf(value)[at]!) : Effect.succeed(true))),
           (failed) =>
             CollectedCells.describe(
-              placed.map((p, at) => describedOf(pack, found, p, context.attempt, failed[at]!)),
+              placed.flatMap((p, at) => unrun.has(p.cell.id) ? [] : [describedOf(pack, found, p, context.attempt, failed[at]!)]),
               batchNameOf(lane, context.attempt)
             )
         ),
@@ -276,6 +281,18 @@ const describedAlone = <C extends Cell>(
     failedOwn(pack, lane, p, exited),
     (failed) => CollectedCells.describe([describedOf(pack, found, p, attempt, failed)], batchNameOf(lane, attempt))
   )
+
+/**
+ * The report of a cell its batch does not run since a step left the lab
+ * changed (`changed`, as the batch's end states it): an environment failure,
+ * no call placed on a lab no longer as the cell expects it.
+ */
+export const notRunOf = (changed: string): ReplayCli.RunReport => ({
+  outcome: ReplayCli.outcomeOf(3),
+  exitCode: 3,
+  stdout: "",
+  stderr: `environment: not run: ${changed}`
+})
 
 /** What the batch driver refused or failed with, as the lane's phase failure. */
 const driverFailed = (lane: Lane) => (e: unknown): PhaseFailed => (e instanceof PhaseFailed ? e : failed(lane, message(e)))
@@ -392,6 +409,17 @@ const replayed = <C extends Cell, L extends LaneView.View, R>(
         Effect.ensuring(Effect.flatMap(steps.healed, (labels) => Effect.sync(() => void left.push(...labels))))
       )
     }
+    const unrun = new Set<string>()
+    const cellOf = (p: Placed<C>, host: BatchHost, sut: SutHandle | undefined, cells: CellCollectors.CellCollectors) =>
+      Effect.suspend(() => {
+        const changed = stepsLeftChangedOf(left)
+        if (changed !== undefined) {
+          unrun.add(p.cell.id)
+          return Effect.map(timed(Effect.succeed(notRunOf(changed))), (value) => ({ value, held: Effect.void }))
+        }
+        return cells.around(p.cell.id, ranOf(p, host, sut), ({ value: report }) =>
+          describedAlone(pack, lane, found, p, context.attempt, { code: report.exitCode, summary: `${report.stdout}\n${report.stderr}` }))
+      })
     const batch = yield* inBatch(context, placed.map((p) => p.cell), {
       lane: name,
       stand: {
@@ -408,23 +436,14 @@ const replayed = <C extends Cell, L extends LaneView.View, R>(
         placed,
         context,
         (reports: ReadonlyArray<{ readonly value: HostReport }>): ReadonlyArray<Exited> =>
-          reports.map(({ value: report }) => ({ code: report.exitCode, summary: `${report.stdout}\n${report.stderr}` }))
+          reports.map(({ value: report }) => ({ code: report.exitCode, summary: `${report.stdout}\n${report.stderr}` })),
+        unrun
       )),
       drive: ({ host, sut, cells }) =>
         host === undefined
           ? Effect.fail(failed(lane, `${name} has no batch process`))
           : Effect.map(
-            schedule(
-              placed,
-              pacing,
-              (p) =>
-                cells.around(p.cell.id, ranOf(p, host, sut), ({ value: report }) =>
-                  describedAlone(pack, lane, found, p, context.attempt, {
-                    code: report.exitCode,
-                    summary: `${report.stdout}\n${report.stderr}`
-                  })),
-              (ran) => ran.held
-            ),
+            schedule(placed, pacing, (p) => cellOf(p, host, sut, cells), (ran) => ran.held),
             (ran) => ({ value: ran.map((one) => one.value), interrupted: 0 })
           )
     }).pipe(Effect.mapError(driverFailed(lane)))

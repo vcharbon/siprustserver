@@ -43,12 +43,24 @@ const Run = Schema.Struct({
   probe: Schema.optionalKey(RelativePath)
 })
 
+/** What an inject may stop that the lane's orchestrator stands again: the lane's managed system under test. */
+export const STOPS = ["system"] as const
+
+/**
+ * The file under `SIPRIG_OUT` an inject of an operation that `stops` the
+ * system names the process it stopped in (its pid, one line). Its death alone
+ * is the step's doing; any other death of the system stays the batch's.
+ */
+export const STOPPED_FILE = "stopped"
+
 export const Operation = Schema.Struct({
   schema: Schema.Literal(SCHEMA),
   /** Its directory's name. */
   name: Name,
   /** The lane parts it needs: a lane lacking one cannot run a case asking for it. */
   needs: Schema.optionalKey(Schema.Array(Name)),
+  /** What its inject stops, its orchestrator standing it again ({@link STOPPED_FILE}). */
+  stops: Schema.optionalKey(Schema.Literals(STOPS)),
   /** Box-wide locks held from `inject` to `heal`. */
   locks: Schema.optionalKey(Schema.Array(Name)),
   params: Schema.optionalKey(Params),

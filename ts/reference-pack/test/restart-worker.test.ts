@@ -8,7 +8,9 @@
  * find the stopped one gone. A pid file naming a process the lane's admin
  * address does not vouch for refuses the inject, the process left running:
  * no runner answers there, the address answers without a runner's state, or
- * the runner answering is another process (a stale pid file). A lane binding
+ * the runner answering is another process (a stale pid file). As a case's
+ * step, the inject names the runner it stopped, and the probe answers not yet
+ * until another runner answers at the lane's admin address. A lane binding
  * the operation while it names no `runner-pid` part is refused at load.
  *
  * The runner is `B2BUA_RUNNER_BIN`, else the build of `b2bua-runner`; a
@@ -16,7 +18,7 @@
  * suite instead.
  */
 import { NodeServices } from "@effect/platform-node"
-import { LaneCatalog, OperationRun, Setup } from "@sip/rig"
+import { Executable, LaneCatalog, Operation, OperationRun, Setup } from "@sip/rig"
 import { runnerEnvOf, runnerPartOf, standSut } from "@sip/siprig/base-hosted-lane"
 import { readingOf } from "@sip/siprig/base-lane-hosting"
 import * as Effect from "effect/Effect"
@@ -124,6 +126,50 @@ describe.skipIf(skipping)("restart-worker on the reference lane", () => {
       expect(fs.existsSync(found.pid), "no runner named once the job's stopped").toBe(false)
     } finally {
       left.kill("SIGKILL")
+    }
+  })
+
+  it("as a case's step, names the runner it stopped, and proves recovery only once another runner answers at the lane's admin address", async () => {
+    const found = await referenceLane("step")
+    const part = Result.getOrThrow(runnerPartOf(found.lane))
+    const spawnRunner = async () => {
+      const runner = spawn(RUNNER, [], { env: { ...process.env, ...runnerEnvOf(found.lane, part) }, stdio: ["ignore", "pipe", "pipe"] })
+      await readyOf(runner, endOf(runner))
+      return runner
+    }
+    const first = await spawnRunner()
+    let next: ChildProcess | undefined
+    try {
+      fs.writeFileSync(found.pid, `${first.pid}\n`)
+      const instance: OperationRun.Instance = {
+        operation: found.catalog.rig.operations.get("restart-worker")!,
+        label: "restart-worker for a cell",
+        lane: found.lane.loaded,
+        dir: path.join(found.dir, "step"),
+        cell: { id: "a-cell", case: "a case", lane: "reference", claims: {} },
+        params: { signal: "SIGKILL" }
+      }
+      const events: Array<OperationRun.Event> = []
+      await Effect.runPromise(OperationRun.inject(instance, (event) => Effect.sync(() => void events.push(event))))
+      expect(running(first.pid!), "the runner stopped").toBe(false)
+      expect(fs.readFileSync(path.join(instance.dir, "out", "stopped"), "utf8").trim(), "the runner it stopped named").toBe(String(first.pid))
+      const probe = () =>
+        Effect.runPromise(Executable.run({
+          dir: instance.operation.dir,
+          file: instance.operation.manifest.run.probe!,
+          context: path.join(instance.dir, "context.json"),
+          out: path.join(instance.dir, "out"),
+          state: path.join(instance.dir, "state"),
+          step: "probe",
+          timeoutMs: 5_000,
+          log: path.join(instance.dir, "probe.log")
+        }))
+      expect(await probe(), "no runner stood again: not yet").toEqual({ _tag: "Exited", code: Operation.NOT_YET })
+      next = await spawnRunner()
+      expect(await probe(), "another runner answers: recovered").toEqual({ _tag: "Exited", code: 0 })
+    } finally {
+      first.kill("SIGKILL")
+      next?.kill("SIGKILL")
     }
   })
 
