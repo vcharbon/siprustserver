@@ -230,7 +230,7 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
   const pending = new Map<string, (report: ReplayCli.RunReport) => void>()
   /** Per running cell given an injector, where its asks go. */
   const injectors = new Map<string, (ask: InjectAsk) => void>()
-  /** Per running cell whose inject line did not decode and was refused, why. */
+  /** Per running cell an inject line of which did not decode, why: the cell fails once its own line came. */
   const unreadAsks = new Map<string, string>()
   let exit: string | undefined
   let ended: ((dirty: string | undefined) => void) | undefined
@@ -285,17 +285,26 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
   child.stdin.on("error", sayStdinError)
 
   /**
+   * An inject line that does not decode: refused with `why` wherever its ask
+   * reads. The running cell it names fails once its line came, so the call it
+   * holds ends first; one naming no running cell fails no other where its ask
+   * read, every one where nothing of it does.
+   */
+  const malformedInject = (read: Extract<Batch.Read, { readonly _tag: "malformed" }>, why: string) => {
+    if (read.asked !== undefined) answer(Batch.refusedLine(read.asked, why))
+    const spec = read.asked?.spec ?? read.spec
+    if (spec !== undefined && pending.has(spec)) return void unreadAsks.set(spec, why)
+    if (read.asked === undefined) lost(why)
+  }
+
+  /**
    * A protocol line that does not decode: the cell, the end or the readiness it
-   * names fails, never waits. An inject naming its ask is refused with why, and
-   * its cell fails once its line came, so the call it holds ends first.
+   * names fails, never waits; an inject as {@link malformedInject} says.
    */
   const malformed = (read: Extract<Batch.Read, { readonly _tag: "malformed" }>) => {
     const why = `the ${lane} batch process wrote ${read.key === "inject" ? "an" : "a"} ${read.key} line that does not decode: ${read.why}`
-    if (read.key === "inject" && read.asked !== undefined && pending.has(read.asked.spec)) {
-      unreadAsks.set(read.asked.spec, why)
-      return answer(Batch.refusedLine(read.asked, why))
-    }
-    if (read.key === "cell" || read.key === "inject") {
+    if (read.key === "inject") return malformedInject(read, why)
+    if (read.key === "cell") {
       const resume = read.spec === undefined ? undefined : pending.get(read.spec)
       if (resume === undefined) return lost(why)
       pending.delete(read.spec!)
