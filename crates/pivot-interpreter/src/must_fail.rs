@@ -168,8 +168,8 @@ fn class(failure: &Failure) -> Class {
         | Failure::EmissionNotPreserved { .. } => Class::Structural,
 
         // The document, the lane or the run's own machinery. A plan that does
-        // not compile, an accessor that does not resolve, an injector missing, refusing or
-        // silent, a missing lane event, an unbound identity, a misdirected call directive, a dead socket, a lost
+        // not compile, an accessor that does not resolve, a missing injector or lane event, an
+        // unbound identity, a misdirected call directive, a dead socket, a lost
         // recording, a stall, an unwound body (which is where the RFC gate's own
         // refusal lands).
         Failure::PlanRefused { .. }

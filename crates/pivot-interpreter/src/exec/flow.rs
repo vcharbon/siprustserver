@@ -218,8 +218,6 @@ impl<'a, 'p> Runner<'a, 'p> {
         if let Some(at) = self.next_repeat() {
             soonest = Some(soonest.map_or(at, |s: Instant| s.min(at)));
         }
-        // An inject the lane is performing is a wait the flow owes: its answer
-        // may be all that is left, and its bound must still fail it.
         if let Some(at) = self.next_inject_wake() {
             soonest = Some(soonest.map_or(at, |s: Instant| s.min(at)));
         }

@@ -240,8 +240,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 wake = wake.min(rung);
             }
             match self.wait(wake).await {
-                // An event or an inject's answer past the flow releases
-                // nothing: no send is left.
+                // An event past the flow releases nothing: no send is left.
                 Wake::Timer | Wake::Event(_) | Wake::Injected(_) => {}
                 Wake::Message { actor, message } => {
                     self.record_during_settle(&actor, *message, flow_ok).await;
