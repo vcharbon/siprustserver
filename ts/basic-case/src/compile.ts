@@ -6,7 +6,7 @@
  * states no CDR expectation: what a case expects of the system's records is a
  * claim.
  */
-import { Pivot, Tokens } from "@sip/contracts"
+import { type Flow, Pivot, Tokens } from "@sip/contracts"
 import { ANY_LANE } from "@sip/driver/lanes"
 import type { CompiledCell } from "@sip/rig"
 import * as Result from "effect/Result"
@@ -29,21 +29,37 @@ export const CDR_ABSENT = "claims"
 const CALLER_ENDPOINT = "192.0.2.10:5060"
 const CALLEE_ENDPOINT = "192.0.2.20:5060"
 
+/** One call between two parties, its title naming the cell and its note saying what it plays. */
+export interface Call {
+  readonly title: string
+  readonly caller: string
+  readonly callee: string
+  readonly note: string
+}
+
 /** The pivot document `c` plays. */
-export const documentOf = (c: BasicCase): Pivot.PivotV3 => ({
+export const documentOf = (c: BasicCase): Pivot.PivotV3 =>
+  callDocumentOf({ title: c.title, caller: c.caller, callee: c.callee, note: `basic case of shape ${c.shape}` }, flowOf(c).steps)
+
+/**
+ * The pivot document playing `steps` between the caller's leg `A` and the
+ * callee's leg `B` of `call`, as a basic case's is: a flow a shape does not
+ * write keeps the form's parties, endpoints, lanes and budgets.
+ */
+export const callDocumentOf = (call: Call, steps: ReadonlyArray<Flow.Step>): Pivot.PivotV3 => ({
   pivot_version: Pivot.PIVOT_VERSION,
   case: {
-    id: idOf(c.title),
-    title: c.title,
+    id: idOf(call.title),
+    title: call.title,
     family: "transparent",
     variant: "target",
     origin: "authored",
     lanes: { [ANY_LANE]: Tokens.laneVerdictToken({ _tag: "ok" }) },
-    annotations: { notes: [`basic case of shape ${c.shape}`] }
+    annotations: { notes: [call.note] }
   },
   identities: [
-    { name: "caller", kind: "address", observed: c.caller },
-    { name: "callee", kind: "address", observed: c.callee }
+    { name: "caller", kind: "address", observed: call.caller },
+    { name: "callee", kind: "address", observed: call.callee }
   ],
   calls: [{ id: "c1", caller_leg: "A", attempts: [{ branch: 0, position: 0, leg: "B", callee: { identity: "callee" } }] }],
   endpoints: [
@@ -55,7 +71,7 @@ export const documentOf = (c: BasicCase): Pivot.PivotV3 => ({
     { id: "callee", kind: "uas", endpoint: "callee", claim: { by: "arrival-order" } }
   ],
   legs: [{ id: "A", actor: "caller", dir: "out" }, { id: "B", actor: "callee", dir: "in" }],
-  flow: flowOf(c).steps,
+  flow: [...steps],
   postconditions: { cdr: { absent: CDR_ABSENT } },
   timing: { expect_budget_ms: EXPECT_BUDGET_MS, settle_budget_ms: SETTLE_BUDGET_MS }
 })

@@ -248,6 +248,14 @@ reference-campaign:
     cargo build -p pivot-replay -p pivot-schema -p b2bua-runner
     REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay B2BUA_RUNNER_BIN={{ justfile_directory() }}/target/debug/b2bua-runner PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema pnpm -C ts/reference-pack exec vitest run
 
+# The reference capture recorded again (ts/reference-pack/README.md, "The
+# reference capture"): the forked call with reliable provisionals played on the
+# reference lane, the B2BUA runner's capture of it replacing
+# ts/reference-pack/capture/forked-reliable.pcapng.
+reference-capture:
+    cargo build -p pivot-replay -p pivot-schema -p b2bua-runner
+    REFERENCE_CAPTURE_WRITE=1 REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay B2BUA_RUNNER_BIN={{ justfile_directory() }}/target/debug/b2bua-runner PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema pnpm -C ts/reference-pack exec vitest run reference-capture
+
 # ── environment ────────────────────────────────────────────────────────
 
 # Check this machine can build the workspace (toolchain, mold, a real compile);

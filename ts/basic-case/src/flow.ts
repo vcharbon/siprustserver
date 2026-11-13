@@ -16,15 +16,27 @@ export interface Timing {
   readonly ms?: number
 }
 
-/** What an `expect` may state beside its timing. */
-export interface ExpectOptions extends Timing {
+/**
+ * The early dialog a step rides, where its leg's INVITE forked: the label the
+ * leg gives that fork's To-tag (RFC 3261 §12.1, §13.2.2.4). Absent, the step
+ * rides the leg's one dialog.
+ */
+export interface Fork {
+  readonly early?: string
+}
+
+/** Where a step sits: its timing and the early dialog it rides. */
+export interface Placement extends Timing, Fork {}
+
+/** What an `expect` may state beside its placement. */
+export interface ExpectOptions extends Placement {
   /** The message is the stack's own (a 100 Trying, a hop's ACK): recorded, never asserted. */
   readonly auto?: boolean
   readonly checks?: ReadonlyArray<Check.Check>
 }
 
-/** What a `send` may state beside its timing. */
-export interface SendOptions extends Timing {
+/** What a `send` may state beside its placement. */
+export interface SendOptions extends Placement {
   /** The stack sends it unasked (the ACK to a final). */
   readonly auto?: boolean
 }
@@ -54,7 +66,7 @@ export class CallFlow {
     })
   }
 
-  private add(leg: string, op: Flow.Op, msg: Msg.MsgSpec, timing: Timing, fields: Partial<Flow.Step>): string {
+  private add(leg: string, op: Flow.Op, msg: Msg.MsgSpec, timing: Placement, fields: Partial<Flow.Step>): string {
     const id = `s${this.next++}`
     const inDialog = this.confirmed.has(leg)
     const confirms = inDialog && msg.method === "ACK" && this.ackOwed.delete(leg)
@@ -62,6 +74,7 @@ export class CallFlow {
       id,
       leg,
       op,
+      ...(timing.early === undefined ? {} : { early: timing.early }),
       ...(inDialog ? { in_dialog: true } : {}),
       ...(confirms ? { confirms_dialog: true } : {}),
       ...fields,

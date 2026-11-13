@@ -34,10 +34,27 @@ export const pivotSchemaOf = (env: NodeJS.ProcessEnv, checkout: string): string 
   return path.join(checkout, "target", "release", "pivot-schema")
 }
 
-/** Every case source the pack at `pack` names, in its order, each loaded or broken; a manifest that does not read refuses. */
-export const selectionOf = (pack: string) =>
+/**
+ * The case sources a run reads: `sources`, paths in the pack, where the run
+ * names them, else every one the pack's manifest names, in its order. A
+ * named path leading out of the pack's tree is refused.
+ */
+const namedOf = (pack: string, sources: ReadonlyArray<string> | undefined) => {
+  if (sources === undefined) return CaseSource.namedBy(pack)
+  const outside = sources.find((source) => path.relative(pack, path.resolve(pack, source)).startsWith(".."))
+  return outside === undefined
+    ? Effect.succeed(sources.map((source) => ({ path: source, absolute: path.resolve(pack, source) })))
+    : Effect.fail({ message: `the case source ${outside} leads out of the pack ${pack}` })
+}
+
+/**
+ * Every case source the run reads of the pack at `pack` (`sources`, else the
+ * manifest's), in its order, each loaded or broken; a manifest that does not
+ * read, or a named source out of the pack's tree, refuses.
+ */
+export const selectionOf = (pack: string, sources?: ReadonlyArray<string>) =>
   Effect.gen(function*() {
-    const named = yield* CaseSource.namedBy(pack)
+    const named = yield* namedOf(pack, sources)
     const selected: Array<CaseFile> = []
     const broken: Array<Broken> = []
     for (const source of named) {

@@ -67,6 +67,8 @@ export interface Options {
   readonly collection: string | undefined
   /** The operations of the rig path the run injects after provisioning, in order, and heals in reverse at its end (`@sip/rig` `Setup`). */
   readonly setup: ReadonlyArray<string>
+  /** The case source modules the run reads, paths in the pack; every one its manifest names where undefined. */
+  readonly sources?: ReadonlyArray<string> | undefined
 }
 
 /** What a refusal of the run's setup names as where the setup was stated. */
@@ -105,7 +107,7 @@ export const run = (options: Options) =>
     if (typeof named === "string") return yield* refuse(named)
     if (!Arr.isReadonlyArrayNonEmpty(named)) return yield* refuse("the pack states no lane")
     const lanes = named
-    const selection = yield* selectionOf(options.pack).pipe(Effect.result)
+    const selection = yield* selectionOf(options.pack, options.sources).pipe(Effect.result)
     if (Result.isFailure(selection)) return yield* refuse(selection.failure.message)
     const capture = manifest.success.name
     const root = path.resolve(options.out ?? path.join(options.runs, `${stamp()}-${options.env}`))

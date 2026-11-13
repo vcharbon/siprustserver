@@ -11,7 +11,10 @@
  * `base-campaign-cells.ts` find them.
  *
  *   siprig-campaign run [--lanes <a,b>] [--out <dir>] [--junit <file>] [--job <id>] [--collection <level>] [--setup <op,op>]
+ *     [--sources <module,module>]
  *
+ * `--sources` names the case source modules the run reads, paths in the pack,
+ * in place of those its manifest names.
  * `--setup` names the operations of the rig path the run injects before its
  * cells and heals at its end (ADR-0060 appendix §7): a pack's campaign is
  * the base's one campaign, so its setup is the run's to name.
@@ -39,8 +42,8 @@ import { apply, of, PACK, packDirOf } from "./base-workspace.ts"
 
 const VERB = "siprig-campaign run"
 
-/** The operation names a comma-separated `--setup` states, in order; none where it is absent. */
-const setupOf = (stated: string | undefined): ReadonlyArray<string> =>
+/** The names a comma-separated `--setup` or `--sources` states, in order; none where it is absent. */
+const namesOf =(stated: string | undefined): ReadonlyArray<string> =>
   (stated ?? "").split(",").map((name) => name.trim()).filter((name) => name !== "")
 
 const fail = (reason: string) => Effect.andThen(Console.error(`${VERB}: ${reason}`), Effect.sync(() => (process.exitCode = 2)))
@@ -53,6 +56,10 @@ const run = Command.make("run", {
   collection: collectionFlag,
   setup: Flag.string("setup").pipe(
     Flag.withDescription("The operations injected before the cells and healed at the end, comma-separated (none where none is named)"),
+    Flag.optional
+  ),
+  sources: Flag.string("sources").pipe(
+    Flag.withDescription("The case source modules to read, paths in the pack, comma-separated (the manifest's where none is named)"),
     Flag.optional
   )
 }, (input) =>
@@ -83,7 +90,8 @@ const run = Command.make("run", {
       runner: runnerBinaryOf(process.env, process.env[BIN_DIR_VARIABLE], CHECKOUT),
       pivotSchema: pivotSchemaOf(process.env, CHECKOUT),
       collection: Option.getOrUndefined(input.collection),
-      setup: setupOf(Option.getOrUndefined(input.setup))
+      setup: namesOf(Option.getOrUndefined(input.setup)),
+      sources: Option.getOrUndefined(Option.map(input.sources, namesOf))
     }).pipe(
       Effect.provide(layerOf(client, sessions, { env, checkout: CHECKOUT, pack: { dir: path.resolve(pack), manifest: manifest.success } })),
       Effect.catchCause((cause) => Effect.as(Console.error(`${VERB}: the store: ${String(cause)}`), 2 as const))
