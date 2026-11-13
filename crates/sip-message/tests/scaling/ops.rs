@@ -433,6 +433,7 @@ pub fn attach_planted_head_kib(kib: usize) -> Op {
 
 /// A description lifted beside a part, its head holding one line of `kib`
 /// KiB: boundaries as the derivation spells them, each for another number.
+/// The derivation collects every one and steps past none.
 pub fn attach_spelled_boundaries_head_kib(kib: usize) -> Op {
     let spelled = |number: usize| format!("boundary-{number:016x} ");
     let count = kib * 1024 / spelled(0).len();

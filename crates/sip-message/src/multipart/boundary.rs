@@ -81,10 +81,14 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// or moved from one to the next, is another input.
 fn start(parts: &[MultipartPart]) -> u64 {
     parts.iter().fold(FNV_OFFSET, |hash, part| {
-        let hash = hashed(hash, &part.headers.len().to_le_bytes());
-        fields(part)
-            .fold(hash, |hash, field| hashed(hashed(hash, &field.len().to_le_bytes()), field))
+        let hash = hashed_count(hash, part.headers.len());
+        fields(part).fold(hash, |hash, field| hashed(hashed_count(hash, field.len()), field))
     })
+}
+
+/// `hash` after `count` as eight bytes, whatever the target's pointer width.
+fn hashed_count(hash: u64, count: usize) -> u64 {
+    hashed(hash, &u64::try_from(count).unwrap_or(u64::MAX).to_le_bytes())
 }
 
 /// `hash` after `bytes`.
@@ -94,6 +98,7 @@ fn hashed(hash: u64, bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use insn_counter::InsnCounter;
     use proptest::prelude::*;
 
     use super::super::framing::frames_cleanly;
@@ -155,6 +160,32 @@ mod tests {
         let boundary = boundary_from(start, &parts);
         assert_eq!(boundary, spelled(2));
         assert!(parts.iter().all(|part| !holds(part, &boundary)));
+    }
+
+    /// The instructions [`boundary_from`] retires over one part holding
+    /// `run` numbers in a row from the start, the least of three readings.
+    fn instructions_past_a_run(run: u64) -> u64 {
+        let start = 0x5eed_0000_0000_0000;
+        let parts = [text((0..run).map(|step| spelled(start + step)).collect::<String>())];
+        let mut counter = InsnCounter::open()
+            .expect("a user-space instruction counter, as tests/scaling states what it needs");
+        let readings = (0..3).map(|_| {
+            let (boundary, instructions) =
+                counter.measure(|| boundary_from(start, &parts)).expect("the counter reads");
+            assert_eq!(boundary, spelled(start + run));
+            instructions
+        });
+        readings.min().unwrap_or_default()
+    }
+
+    /// FNV-1a runs backwards, so a peer can start the steps at a run it
+    /// planted. Each step past it costs one lookup: a run four times as long,
+    /// in a part four times the size, retires at most five times the
+    /// instructions.
+    #[test]
+    fn stepping_past_a_run_costs_one_lookup_a_step() {
+        let (short, long) = (instructions_past_a_run(500), instructions_past_a_run(2000));
+        assert!(long <= 5 * short, "{short} instructions past 500 numbers, {long} past 2000");
     }
 
     /// What is not the start's boundary byte for byte leaves it free: digits
