@@ -239,13 +239,14 @@ hakit-check:
     cd tooling/hakit && uv run --locked pyright && uv run --locked pytest
 
 # The reference pack's campaign (ts/reference-pack, ADR-0060 item 17): its two
-# cases on its simulated lane through the base's campaign run, the plain
-# replay binary and pivot-schema built first, recorded in a scratch database
+# cases on its simulated lane and on its reference lane (the B2BUA runner on
+# loopback) through the base's campaign run, the plain replay binary, the
+# B2BUA runner and pivot-schema built first, recorded in a scratch database
 # of the postgres STORE_TEST_URL names (`pnpm -r test` runs the same suite
 # with the binaries it finds).
 reference-campaign:
-    cargo build -p pivot-replay -p pivot-schema
-    REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema pnpm -C ts/reference-pack exec vitest run test/reference-campaign.test.ts
+    cargo build -p pivot-replay -p pivot-schema -p b2bua-runner
+    REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay B2BUA_RUNNER_BIN={{ justfile_directory() }}/target/debug/b2bua-runner PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema pnpm -C ts/reference-pack exec vitest run
 
 # ── environment ────────────────────────────────────────────────────────
 

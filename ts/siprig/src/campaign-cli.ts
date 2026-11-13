@@ -6,8 +6,9 @@
  * directory under the workspace's `runs/_campaign/` (the checkout's
  * `rig-work/campaign/` with no workspace), the store `DATABASE_URL` names
  * guarded against a pending migration, the environment `SIPRIG_ENV` names
- * (`siprig` where it names none), the plain replay binary and `pivot-schema`
- * as `base-lane-hosting.ts` and `base-campaign-cells.ts` find them.
+ * (`siprig` where it names none), the plain replay binary, the B2BUA runner
+ * and `pivot-schema` as `base-lane-hosting.ts`, `base-hosted-lane.ts` and
+ * `base-campaign-cells.ts` find them.
  *
  *   siprig-campaign run [--lanes <a,b>] [--out <dir>] [--junit <file>] [--job <id>] [--collection <level>]
  *
@@ -27,7 +28,8 @@ import * as path from "node:path"
 import { BaseCampaign, manifestOf } from "./base-campaign.ts"
 import { pivotSchemaOf } from "./base-campaign-cells.ts"
 import { layerOf } from "./base-campaign-services.ts"
-import { replayBinaryOf } from "./base-lane-hosting.ts"
+import { runnerBinaryOf } from "./base-hosted-lane.ts"
+import { BIN_DIR_VARIABLE, replayBinaryOf } from "./base-lane-hosting.ts"
 import { CHECKOUT, LAB } from "./base-site-pack.ts"
 import { apply, of, PACK, packDirOf } from "./base-workspace.ts"
 
@@ -66,6 +68,7 @@ const run = Command.make("run", {
       env,
       site: process.env[PACK.variables.publicUrl] ?? `http://127.0.0.1:${process.env[PACK.variables.port] ?? PACK.sitePort}`,
       replay: replayBinaryOf(process.env, CHECKOUT),
+      runner: runnerBinaryOf(process.env, process.env[BIN_DIR_VARIABLE], CHECKOUT),
       pivotSchema: pivotSchemaOf(process.env, CHECKOUT),
       collection: Option.getOrUndefined(input.collection)
     }).pipe(

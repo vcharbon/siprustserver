@@ -1,0 +1,31 @@
+# The reference lane: the upstream B2BUA runner on loopback, on the real
+# clock, one runner stood per batch at the ingress below and stopped with it.
+# The base runs its cells in the plain replay binary's batch process; each
+# call's b-leg is pinned to its cell's callee by the dial's X-Api-Call, so the
+# lane serves no backend. Its runner's metrics and admin addresses and its log
+# are the `b2bua-runner` part's.
+schema = "lane.v1"
+description = "the upstream B2BUA runner on loopback, stood per batch"
+clock = "real"
+order = 2
+
+[sip]
+lifecycle = "managed"
+ingress = "127.0.0.1:5160"
+endpoint_host = "127.0.0.1"
+
+[backend]
+mode = "none"
+
+[backend.http_budget]
+new_call_ms = 2000
+follow_up_ms = 2000
+transit_ms = 1
+
+[pacing.campaign]
+concurrency = 4
+starts_per_second = 10
+timing_tolerance_ms = 250
+
+[parts]
+b2bua-runner = "reference"

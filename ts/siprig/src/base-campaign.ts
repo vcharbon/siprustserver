@@ -54,8 +54,10 @@ export interface Options {
   readonly env: string
   /** The site the report's links point at. */
   readonly site: string
-  /** The replay binary a simulated cell runs. */
+  /** The replay binary a simulated cell runs, and a hosted lane's batch process. */
   readonly replay: string
+  /** The B2BUA runner a managed hosted lane stands. */
+  readonly runner: string
   /** The `pivot-schema` binary the compile's lint runs. */
   readonly pivotSchema: string
   /** The collection level the run names; the default where undefined. */
@@ -154,7 +156,7 @@ export const run = (options: Options) =>
     const program = asJob(CAMPAIGN.verb, options.job, { launch, createdBy: options.env }, exclusively(CAMPAIGN, options.env), body)
     return yield* exitCodeOf(CAMPAIGN.verb, program).pipe(
       Effect.provide(Collectors.layerOf(catalog.success.rig, catalog.success.lanes.map((lane) => lane.loaded))),
-      Effect.provide(LaneHosting.layerWith(deploymentOf(catalog.success))),
+      Effect.provide(LaneHosting.layerWith(deploymentOf(catalog.success, { replay: options.replay, runner: options.runner }))),
       Effect.provideService(Collectors.Level, options.collection)
     )
   })

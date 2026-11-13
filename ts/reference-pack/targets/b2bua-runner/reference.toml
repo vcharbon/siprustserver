@@ -1,0 +1,5 @@
+# The reference lane's B2BUA runner: its metrics and operator routes on
+# loopback, its output appended to the file the `sut-log` collector cuts.
+metrics = "127.0.0.1:9161"
+admin = "127.0.0.1:9162"
+log = "/tmp/siprig-reference/b2bua-runner.log"

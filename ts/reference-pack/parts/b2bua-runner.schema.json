@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The upstream B2BUA runner a hosted lane of the base stands or attaches to: where it publishes its metrics and listens for its operator routes, and the file its output is appended to.",
+  "x-siprig": {},
+  "type": "object",
+  "properties": {
+    "metrics": { "type": "string", "minLength": 1 },
+    "admin": { "type": "string", "minLength": 1 },
+    "log": { "type": "string", "minLength": 1 }
+  },
+  "required": ["metrics", "admin"],
+  "additionalProperties": false
+}
