@@ -30,6 +30,9 @@ pub trait Injector: Send + Sync {
     /// Starts performing `request`; the future resolves with the answer.
     fn inject(&self, request: InjectRequest) -> Injection;
 
-    /// How long the run waits for an answer before it fails the node.
+    /// How long the run waits for an answer before it fails the node, on the
+    /// run's tokio clock. On a paused runtime that bound is virtual: it
+    /// elapses as soon as nothing else is due, so an injector whose answer
+    /// waits on real I/O serves a real-clock run only.
     fn within(&self) -> Duration;
 }

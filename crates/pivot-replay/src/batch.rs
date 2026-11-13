@@ -297,12 +297,13 @@ pub fn serve<P: Registered>(
     let received = Arc::new(AtomicUsize::new(0));
     let live: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     {
-        let (received, live) = (received.clone(), live.clone());
+        let (received, live, injects) = (received.clone(), live.clone(), host.injects.clone());
         host.waiting.on(move || {
             format!(
-                "the harness to close stdin: {} cell(s) received, {}",
+                "the harness to close stdin: {} cell(s) received, {}, {}",
                 received.load(Ordering::SeqCst),
-                running_of(&live)
+                running_of(&live),
+                injects.awaited()
             )
         });
     }

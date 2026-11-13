@@ -3,9 +3,12 @@
 //! node, the action and its target; the harness answers on stdin with an
 //! `injected` or a `refused` line naming the same run-spec and node, and the
 //! cell's run resumes on it. Stdin closing answers every inject still asked,
-//! and every later one, refused ([`CLOSED`]).
+//! and every later one, refused ([`CLOSED`]). An inject stays asked only while
+//! the run that asked it lasts: an answer after that run ended routes nowhere.
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -30,14 +33,22 @@ pub struct Injects {
     /// Where the protocol lines go, once the batch serves them.
     out: OnceLock<Out>,
     asked: Mutex<Asked>,
+    /// The last run handed an injector, each run's own number.
+    runs: AtomicU64,
 }
 
 /// The injects asked and not answered, by `(run-spec, node)`, and whether
 /// stdin closed.
 #[derive(Default)]
 struct Asked {
-    pending: BTreeMap<(String, String), oneshot::Sender<Result<(), String>>>,
+    pending: BTreeMap<(String, String), Pending>,
     closed: bool,
+}
+
+/// One inject asked: the run that asked it, and where its answer goes.
+struct Pending {
+    run: u64,
+    answer: oneshot::Sender<Result<(), String>>,
 }
 
 /// One answer line on stdin.
@@ -56,11 +67,35 @@ impl Injects {
         let _ = self.out.set(out);
     }
 
-    /// The injector of the cell whose run-spec is `spec`, as the cell's line
-    /// names it; `None` where the batch serves no protocol lines.
+    /// The injector of one run of the cell whose run-spec is `spec`, as the
+    /// cell's line names it; `None` where the batch serves no protocol lines.
+    /// Dropping it, as the run ends, withdraws every inject it still asks.
     pub fn injector(self: &Arc<Self>, spec: &str) -> Option<Arc<dyn Injector>> {
         self.out.get()?;
-        Some(Arc::new(CellInjector { injects: self.clone(), spec: spec.to_string() }))
+        let run = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
+        Some(Arc::new(CellInjector { injects: self.clone(), spec: spec.to_string(), run }))
+    }
+
+    /// Every inject asked and not answered, as `(run-spec, node)`.
+    pub(super) fn asked(&self) -> Vec<(String, String)> {
+        self.asked.lock().unwrap_or_else(|p| p.into_inner()).pending.keys().cloned().collect()
+    }
+
+    /// What the batch awaits of the harness's answers, for its waiting line:
+    /// each inject asked and not answered, its run-spec by file name.
+    pub(super) fn awaited(&self) -> String {
+        let asked = self.asked();
+        if asked.is_empty() {
+            return "no inject asked".to_string();
+        }
+        let named: Vec<String> = asked
+            .iter()
+            .map(|(spec, node)| {
+                let file = Path::new(spec).file_name().and_then(|n| n.to_str()).unwrap_or(spec);
+                format!("{file} {node}")
+            })
+            .collect();
+        format!("{} inject(s) asked: {}", asked.len(), named.join(", "))
     }
 
     /// Routes the answer `line` to the inject it names; a line that does not
@@ -77,7 +112,7 @@ impl Injects {
         let asked = self.asked.lock().unwrap_or_else(|p| p.into_inner()).pending.remove(&key);
         match asked {
             Some(asked) => {
-                let _ = asked.send(answer);
+                let _ = asked.answer.send(answer);
             }
             None => eprintln!("replay batch: an answer for no inject asked: {line}"),
         }
@@ -88,12 +123,19 @@ impl Injects {
         let mut asked = self.asked.lock().unwrap_or_else(|p| p.into_inner());
         asked.closed = true;
         for (_, pending) in std::mem::take(&mut asked.pending) {
-            let _ = pending.send(Err(CLOSED.to_string()));
+            let _ = pending.answer.send(Err(CLOSED.to_string()));
         }
     }
 
-    /// Asks `request` of the harness for the cell whose run-spec is `spec`.
-    fn ask(&self, spec: &str, request: InjectRequest) -> Injection {
+    /// The run numbered `run` ended: the injects it still asks are withdrawn.
+    fn withdraw(&self, run: u64) {
+        let mut asked = self.asked.lock().unwrap_or_else(|p| p.into_inner());
+        asked.pending.retain(|_, pending| pending.run != run);
+    }
+
+    /// Asks `request` of the harness for the run numbered `run` of the cell
+    /// whose run-spec is `spec`.
+    fn ask(&self, spec: &str, run: u64, request: InjectRequest) -> Injection {
         let refused = |why: &str| -> Injection {
             let why = why.to_string();
             Box::pin(async move { Err(why) })
@@ -107,25 +149,37 @@ impl Injects {
             if asked.closed {
                 return refused(CLOSED);
             }
-            asked.pending.insert((spec.to_string(), request.node.clone()), tx);
+            let pending = Pending { run, answer: tx };
+            asked.pending.insert((spec.to_string(), request.node.clone()), pending);
         }
         emit(out, &inject_line(spec, &request));
         Box::pin(async move { rx.await.unwrap_or_else(|_| Err(CLOSED.to_string())) })
     }
 }
 
-/// The injector of one cell: each inject asked on the batch's lines.
+/// The injector of one run of a cell: each inject asked on the batch's lines,
+/// withdrawn when the run drops it.
 struct CellInjector {
     injects: Arc<Injects>,
     spec: String,
+    run: u64,
 }
 
 impl Injector for CellInjector {
     fn inject(&self, request: InjectRequest) -> Injection {
-        self.injects.ask(&self.spec, request)
+        self.injects.ask(&self.spec, self.run, request)
     }
 
     fn within(&self) -> Duration {
         INJECT_WITHIN
     }
 }
+
+impl Drop for CellInjector {
+    fn drop(&mut self) {
+        self.injects.withdraw(self.run);
+    }
+}
+
+#[cfg(test)]
+mod tests;
