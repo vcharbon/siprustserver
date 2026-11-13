@@ -220,7 +220,8 @@ describe("an inbox job", () => {
   it("is launched as its row with its files in order", () => {
     const request: JobStart.InboxRequest = {
       files: [{ path: "/in/tap.pcap", size: 1, mtimeMs: 2 }, { path: "/in/tap.pcap1", size: 3, mtimeMs: 4 }],
-      capture: "tap.anon.pcap"
+      capture: "tap.anon.pcap",
+      sidecar: null
     }
     expect(JobStart.inboxArgs(9, request)).toEqual(["--job", "9", "--file", "/in/tap.pcap", "--file", "/in/tap.pcap1"])
   })

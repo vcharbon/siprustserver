@@ -14,6 +14,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as path from "node:path"
+import { stamp } from "./inbox-scan.js"
 
 /** The level stated for a capture could not be read; nothing is taken. */
 export class Unreadable extends Schema.TaggedError<Unreadable>()("InboxLevel.Unreadable", { reason: Schema.String }) {
@@ -22,8 +23,10 @@ export class Unreadable extends Schema.TaggedError<Unreadable>()("InboxLevel.Unr
   }
 }
 
+const SIDECAR_SUFFIX = ".anon.json"
+
 /** The sidecar of the capture whose first file is `first`. */
-export const sidecarOf = (first: string): string => `${first}.anon.json`
+export const sidecarOf = (first: string): string => `${first}${SIDECAR_SUFFIX}`
 
 const Sidecar = Schema.Struct({ level: AnonymiseLevel.Level })
 const decodeSidecar = Schema.decodeUnknownResult(Sidecar, { onExcessProperty: "error" })
@@ -38,19 +41,55 @@ export interface Stated {
   readonly from: "sidecar" | "config" | "default"
 }
 
+/**
+ * The sidecars among the inbox file names `names` whose capture is not among
+ * them: a sidecar left by a capture gone states nothing for a later capture
+ * of that name.
+ */
+export const orphans = (names: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const present = new Set(names)
+  return names.filter((name) => name.endsWith(SIDECAR_SUFFIX) && !present.has(name.slice(0, -SIDECAR_SUFFIX.length)))
+}
+
 /** The sidecar text stating `level`. */
 export const sidecarText = (level: AnonymiseLevel.Level): string => `${JSON.stringify({ level })}\n`
 
-/** The level the workspace configuration file `config` states, else the default; a file that does not read states none. */
+/**
+ * The level the workspace configuration file `config` states, else the
+ * default; a missing file states none. A file that does not parse, or whose
+ * `[anonymise] level` names no level, is refused naming it: a capture is
+ * never taken at a level nobody stated.
+ */
 export const workspaceDefault = Effect.fn("InboxLevel.workspaceDefault")(function*(config: string) {
   const fs = yield* FileSystem.FileSystem
   const text = yield* fs.readFileString(config).pipe(Effect.option)
   if (text._tag === "None") return { level: AnonymiseLevel.DEFAULT, from: "default" } satisfies Stated
   const raw = tomlOf(text.value)
-  const decoded = Result.isSuccess(raw) ? decodeConfig(raw.success) : undefined
-  const level = decoded !== undefined && Result.isSuccess(decoded) ? decoded.success.anonymise?.level : undefined
+  if (Result.isFailure(raw)) {
+    return yield* new Unreadable({ reason: `${path.basename(config)} does not parse, so its [anonymise] level does not read` })
+  }
+  const decoded = decodeConfig(raw.success)
+  if (Result.isFailure(decoded)) {
+    return yield* new Unreadable({
+      reason: `${path.basename(config)} [anonymise] level names no level: write level = "<${AnonymiseLevel.LEVELS.join(" | ")}>"`
+    })
+  }
+  const level = decoded.success.anonymise?.level
   if (level === undefined) return { level: AnonymiseLevel.DEFAULT, from: "default" } satisfies Stated
   return { level, from: "config" } satisfies Stated
+})
+
+/**
+ * The sidecar of the capture whose first inbox file is `first` as it stands
+ * (`inbox-scan.ts` `stamp`), null where there is none: a take refused at one
+ * sidecar stamp is tried again once the sidecar changes.
+ */
+export const sidecarStamp = Effect.fn("InboxLevel.sidecarStamp")(function*(first: string) {
+  const fs = yield* FileSystem.FileSystem
+  const info = yield* fs.stat(sidecarOf(first)).pipe(Effect.option)
+  if (info._tag === "None") return null
+  const mtime = info.value.mtime
+  return stamp({ name: path.basename(first), size: Number(info.value.size), mtimeMs: mtime._tag === "Some" ? mtime.value.getTime() : 0 })
 })
 
 /**

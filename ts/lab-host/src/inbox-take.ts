@@ -13,10 +13,12 @@
  * already there. A copy of that name holding other bytes is another capture:
  * the new one takes the next free name, `<stem>-2.anon.pcap`, `-3`…, under a
  * fresh seed of its own; a copy in `pcaps/` is never replaced. At `none` the
- * files keep their names, `<stem>-2…` where another capture holds them. Each
+ * file keeps its name, `<stem>-2…` where another capture holds it. Each
  * name a take may land under is claimed first (`pcaps/.<copy>.taking`,
  * created exclusively, naming its holder's pid), so two takes never land one
- * name.
+ * name. A ring lands only anonymised, as one copy; at `none` it is refused.
+ * The landed file is digested before it lands, and its marker is written
+ * before it is renamed in ({@link commit}).
  *
  * Only files directly under the inbox are taken. They leave it only once the
  * copy is in `pcaps/`, and only where each still stands as the take found it:
@@ -245,38 +247,64 @@ const leaveInbox = Effect.fn("InboxTake.leaveInbox")(function*(files: ReadonlyAr
 /** The file `name` of a capture of stem `stem` lands as under the `n`-th name: its stem replaced. */
 const asIsName = (name: string, stem: string, n: number): string => nth(stem, n) + name.slice(stem.length)
 
+/** What a take did to the inbox's raw files. */
+interface Left {
+  readonly removed: ReadonlyArray<string>
+  readonly kept: ReadonlyArray<string>
+}
+
 /**
- * A `none` take: the files moved into `pcaps/` unchanged under their own
- * names, or the first `<stem>-n` names another capture holds none of; where
- * every name holds these very bytes, the capture was landed already.
+ * A take's COMMIT, uninterruptible: the marker written beside `target`, then
+ * the capture `landing` renamed in as `target` (absent where `target` holds
+ * it already), then `leave`, the raw files out of the inbox. A capture never
+ * stands in `pcaps/` without its marker, and a cancelled take either landed
+ * nothing or landed it whole; a crash leaves at most a marker with no
+ * capture, which no listing reads and the next take of that name rewrites.
+ */
+const commit = <E, R>(
+  target: string,
+  marker: InboxMarker.Marker,
+  landing: string | undefined,
+  leave: Effect.Effect<Left, E, R>
+) =>
+  Effect.gen(function*() {
+    yield* InboxMarker.write(target, marker)
+    if (landing !== undefined) yield* move(landing, target)
+    return yield* leave
+  }).pipe(Effect.uninterruptible)
+
+/**
+ * A `none` take: the one file moved into `pcaps/` unchanged under its own
+ * name, or the first `<stem>-n` name no other capture holds; where a name
+ * holds these very bytes, the capture was landed already. A ring is refused:
+ * the pcap root lists and replays a capture by its one file.
  */
 const landAsIs = Effect.fn("InboxTake.landAsIs")(function*(request: Request, scope: Scope.Scope) {
   const fs = yield* FileSystem.FileSystem
   const { pcaps } = request.places
-  const stem = copyStem(path.basename(request.files[0]!.path))
-  yield* fs.makeDirectory(pcaps, { recursive: true })
-  for (const file of request.files) {
-    if (!(yield* unchanged(file))) {
-      return yield* new Refused({ reason: `${file.path} changed since the take was asked for it: it stays in the inbox` })
-    }
+  if (request.files.length > 1) {
+    return yield* new Refused({
+      reason: `a ring of ${request.files.length} files lands at level none only as one file: merge it ` +
+        `(mergecap -w <name>.pcap <its files>) and drop that, or take it at an anonymised level; its files stay in the inbox`
+    })
   }
+  const file = request.files[0]!
+  const name = path.basename(file.path)
+  const stem = copyStem(name)
+  yield* fs.makeDirectory(pcaps, { recursive: true })
+  const changed = new Refused({ reason: `${file.path} changed since the take was asked for it: it stays in the inbox` })
+  if (!(yield* unchanged(file))) return yield* changed
+  const sha256 = yield* digest(file.path)
+  if (!(yield* unchanged(file))) return yield* changed
+  const marker: InboxMarker.Marker = { level: "none", sha256 }
   for (let n = 1;; n++) {
     yield* claim(pcaps, nth(stem, n)).pipe(Scope.provide(scope))
-    const targets = request.files.map((file) => path.join(pcaps, asIsName(path.basename(file.path), stem, n)))
-    const held = yield* Effect.forEach(targets, (target) => fs.exists(target))
-    const marked = (already: boolean, left: { readonly removed: ReadonlyArray<string>; readonly kept: ReadonlyArray<string> }) =>
-      Effect.gen(function*() {
-        yield* InboxMarker.write(targets[0]!, { level: "none", sha256: yield* digest(targets[0]!) })
-        return { pcap: targets[0]!, level: request.level, seed: undefined, already, ...left } satisfies Taken
-      })
-    if (held.every((one) => !one)) {
-      yield* Effect.forEach(request.files, (file, at) => move(file.path, targets[at]!), { discard: true })
-      yield* fs.remove(sidecarOf(request.files[0]!.path), { force: true })
-      return yield* marked(false, { removed: request.files.map((file) => file.path), kept: [] })
-    }
-    if (!held.every((one) => one)) continue
-    const same = yield* Effect.forEach(request.files, (file, at) => sameBytes(file.path, targets[at]!))
-    if (same.every((one) => one)) return yield* marked(true, yield* leaveInbox(request.files))
+    const target = path.join(pcaps, asIsName(name, stem, n))
+    const held = yield* fs.exists(target)
+    if (held && (yield* digest(target)) !== sha256) continue
+    const moved = fs.remove(sidecarOf(file.path), { force: true }).pipe(Effect.as({ removed: [file.path], kept: [] }))
+    const left = yield* commit(target, marker, held ? undefined : file.path, held ? leaveInbox([file]) : moved)
+    return { pcap: target, level: request.level, seed: undefined, already: held, ...left } satisfies Taken
   }
 })
 
@@ -337,17 +365,16 @@ const takeIn = Effect.fn("InboxTake.takeIn")(function*(request: Request, scope: 
   })
 
   const copy = yield* landed()
-  if (!copy.already) yield* move(copy.written, copy.target)
   yield* fs.chmod(copy.seed, 0o600)
+  const sha256 = yield* digest(copy.written)
   const document = InboxMarker.documentOf(copy.target)
   yield* move(path.join(path.dirname(copy.written), copyDocument(stem)), document)
-  yield* InboxMarker.write(copy.target, {
-    level: request.level,
-    sha256: yield* digest(copy.target),
-    document,
-    seed: copy.seed
-  })
-  const { removed, kept } = yield* leaveInbox(request.files)
+  const { removed, kept } = yield* commit(
+    copy.target,
+    { level: request.level, sha256, document, seed: copy.seed },
+    copy.already ? undefined : copy.written,
+    leaveInbox(request.files)
+  )
   return { pcap: copy.target, level: request.level, seed: copy.seed, already: copy.already, removed, kept } satisfies Taken
 })
 

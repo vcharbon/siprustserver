@@ -159,7 +159,10 @@ const InboxTable = ({ entries }: { readonly entries: readonly InboxEntry[] }): J
           <td className="mono">{formatBytes(entry.files.reduce((sum, one) => sum + one.size, 0))}</td>
           <td className="muted"><Age at={entry.files.map((one) => one.modifiedAt).sort().at(-1)!} /></td>
           <td><span className={`tag ${INBOX_TONE[entry.state]}`}>{entry.state}</span></td>
-          <td className="mono">{entry.level}</td>
+          <td className="mono">
+            {entry.level ?? <span className="tag error">level unreadable</span>}
+            {entry.unreadable !== null && <div className="muted break">{entry.unreadable}</div>}
+          </td>
           <td className="mono break">{entry.copy}</td>
           <td>{entry.jobId === null ? <span className="muted">—</span> : <Link to={href.job(entry.jobId)}>job {entry.jobId}</Link>}</td>
         </tr>

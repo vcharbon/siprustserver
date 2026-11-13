@@ -985,8 +985,10 @@ export type AnonymiseLevel = (typeof ANONYMISE_LEVELS)[number]
 export interface InboxEntry {
   /** The file it lands as in the pcap root: its anonymised copy, or itself at level `none`. */
   readonly copy: string
-  /** The anonymisation level it is taken at. */
-  readonly level: AnonymiseLevel
+  /** The anonymisation level it is taken at; null where the level stated does not read. */
+  readonly level: AnonymiseLevel | null
+  /** Why the level stated for it (its sidecar, the workspace's `[anonymise] level`) does not read, or null. */
+  readonly unreadable: string | null
   readonly files: readonly { readonly name: string; readonly size: number; readonly modifiedAt: string }[]
   readonly state: "settling" | "waiting" | "taking" | "refused"
   readonly jobId: number | null

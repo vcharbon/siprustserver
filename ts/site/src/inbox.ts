@@ -12,10 +12,12 @@
  * A capture an active inbox job holds is not taken twice; captures whose
  * copies would take one name (`x.pcap` beside `x.pcapng`) are taken one at a
  * time, the take itself claiming the name (`inbox-take.ts`); one whose last
- * take failed is not retried while its files stand as that take found them:
- * the failed job's log says why, and copying the file anew retries it.
- * Outside a workspace there is no inbox: the scan does nothing and the
- * listing is empty.
+ * take failed is not retried while its files and its sidecar stand as that
+ * take found them: the failed job's log says why, and copying the file anew
+ * or fixing the sidecar retries it. A level that does not read is listed as
+ * such, never as the default. A sidecar whose capture is absent at two scans
+ * in a row is removed. Outside a workspace there is no inbox: the scan does
+ * nothing and the listing is empty.
  */
 import * as Job from "@sip/corpus/jobs/job"
 import * as JobStart from "@sip/corpus/jobs/job-start"
@@ -25,6 +27,7 @@ import { AnonymiseLevel } from "@sip/workspace"
 import { Effect, Layer, Schema } from "effect"
 import * as Context from "effect/Context"
 import * as Duration from "effect/Duration"
+import * as FileSystem from "effect/FileSystem"
 import * as Schedule from "effect/Schedule"
 import * as path from "node:path"
 import { ViewerConfig } from "./config.ts"
@@ -55,8 +58,10 @@ export type State = "settling" | "waiting" | "taking" | "refused"
 export interface Entry {
   /** The file it lands as in `pcaps/`: its anonymised copy, or itself at level `none`. */
   readonly copy: string
-  /** The level it is taken at (`@sip/lab-host` `inbox-level.ts`). */
-  readonly level: AnonymiseLevel.Level
+  /** The level it is taken at (`@sip/lab-host` `inbox-level.ts`); null where the level stated does not read. */
+  readonly level: AnonymiseLevel.Level | null
+  /** Why the level stated for it (its sidecar, the workspace's `[anonymise] level`) does not read, or null. */
+  readonly unreadable: string | null
   readonly files: ReadonlyArray<File>
   readonly state: State
   /** The job taking it, or the one that failed to; null otherwise. */
@@ -99,22 +104,30 @@ export const layer = Layer.effect(
 
     // The stamps the last scan found, by file name: what tells a settled file.
     let before: ReadonlyMap<string, string> = new Map()
+    // The sidecars the last scan found with no capture beside them.
+    let orphanedBefore: ReadonlySet<string> = new Set()
 
     const refused = (detail: string) => new Refused({ detail })
 
     /**
-     * The level the capture whose first inbox file is `first` is taken at;
-     * an unreadable sidecar reads as the default here, the take itself
-     * refusing it in its job's log.
+     * The level the capture whose first inbox file is `first` is taken at,
+     * or why the level stated does not read: the take itself refuses it,
+     * in its job's log.
      */
     const levelOf = (first: string) =>
       InboxLevel.levelOf(first, config.workspace!.config).pipe(
-        Effect.map((stated) => stated.level),
-        Effect.orElseSucceed(() => AnonymiseLevel.DEFAULT),
+        Effect.map((stated): AnonymiseLevel.Level | InboxLevel.Unreadable => stated.level),
+        Effect.catchTag("InboxLevel.Unreadable", (unreadable) => Effect.succeed(unreadable)),
         Effect.provide(host)
       )
 
-    /** The inbox jobs holding a file (active) and those refusing it at a stamp (failed), by path. */
+    /** The name what a capture taken at `level` lands as: at a level that does not read, the default's, which the refused take's row records. */
+    const copyOf = (first: string, level: AnonymiseLevel.Level | InboxLevel.Unreadable): string =>
+      InboxTake.copyName(path.basename(first), level instanceof InboxLevel.Unreadable ? AnonymiseLevel.DEFAULT : level)
+
+    const sidecarOf = (first: string) => InboxLevel.sidecarStamp(first).pipe(Effect.provide(host))
+
+    /** The inbox jobs holding a file (active) and those refusing it at a stamp and a sidecar (failed), by path. */
     const ledger = Effect.fn("Inbox.ledger")(function*() {
       const active = yield* jobs.page({ status: "active", kind: "inbox", limit: LOOKBACK, offset: 0 }).pipe(Effect.orDie)
       const holding = new Map<string, number>()
@@ -129,11 +142,12 @@ export const layer = Layer.effect(
         if (typeof row.args["capture"] === "string") copies.set(row.args["capture"], row.id)
       }
       const failed = yield* jobs.page({ status: "failed", kind: "inbox", limit: LOOKBACK, offset: 0 }).pipe(Effect.orDie)
-      const refusing = new Map<string, { readonly id: number; readonly stamp: string }>()
+      const refusing = new Map<string, { readonly id: number; readonly stamp: string; readonly sidecar: string | null }>()
       // Newest first: the latest take of a file is the one that speaks for it.
       for (const row of failed.rows) {
+        const sidecar = typeof row.args["sidecar"] === "string" ? row.args["sidecar"] : null
         for (const file of filesOfRow(row)) {
-          if (!refusing.has(file.path)) refusing.set(file.path, { id: row.id, stamp: stampOf(file) })
+          if (!refusing.has(file.path)) refusing.set(file.path, { id: row.id, stamp: stampOf(file), sidecar })
         }
       }
       return { holding, copies, refusing }
@@ -144,8 +158,9 @@ export const layer = Layer.effect(
       if (triage === undefined) return yield* refused(`no triage block in ${config.configPath}: there is no store to start a job in`)
       const first = files[0]
       if (first === undefined) return yield* refused("an inbox take names the files of its capture")
-      const copy = InboxTake.copyName(path.basename(first.path), yield* levelOf(first.path))
-      const started = yield* JobStart.inbox(pathsOf(pack, triage).sessions, { files, capture: copy }).pipe(
+      const copy = copyOf(first.path, yield* levelOf(first.path))
+      const sidecar = yield* sidecarOf(first.path)
+      const started = yield* JobStart.inbox(pathsOf(pack, triage).sessions, { files, capture: copy, sidecar }).pipe(
         Effect.provideService(Jobs.Service, jobs),
         Effect.provide(host),
         Effect.catch((error) =>
@@ -177,18 +192,22 @@ export const layer = Layer.effect(
       const { holding, copies, refusing } = yield* ledger()
       const found = InboxScan.captures(entries)
       const levels = yield* Effect.forEach(found, (capture) => levelOf(path.join(dir, capture.files[0]!.name)))
+      const sidecars = yield* Effect.forEach(found, (capture) => sidecarOf(path.join(dir, capture.files[0]!.name)))
       return {
         entries,
         captures: found.map((capture, at) => {
           const paths = capture.files.map((file) => path.join(dir, file.name))
-          const level = levels[at]!
-          const copy = InboxTake.copyName(capture.files[0]!.name, level)
+          const stated = levels[at]!
+          const level = stated instanceof InboxLevel.Unreadable ? null : stated
+          const unreadable = stated instanceof InboxLevel.Unreadable ? stated.reason : null
+          const copy = copyOf(paths[0]!, stated)
+          const sidecar = sidecars[at]!
           const held = paths.map((one) => holding.get(one)).find((id) => id !== undefined)
           // Another capture taken under the same copy name waits for that take: one name, one take at a time.
           const queued = held === undefined ? copies.get(copy) : undefined
           const failed = capture.files.map((file, at) => {
             const last = refusing.get(paths[at]!)
-            return last !== undefined && last.stamp === InboxScan.stamp(file) ? last.id : undefined
+            return last !== undefined && last.stamp === InboxScan.stamp(file) && last.sidecar === sidecar ? last.id : undefined
           })
           const state: State = held !== undefined
             ? "taking"
@@ -197,13 +216,30 @@ export const layer = Layer.effect(
             : InboxScan.settled(capture, before)
             ? "waiting"
             : "settling"
-          return { capture, paths, copy, level, queued, state, jobId: held ?? failed.find((id) => id !== undefined) ?? null }
+          return { capture, paths, copy, level, unreadable, queued, state, jobId: held ?? failed.find((id) => id !== undefined) ?? null }
         })
       }
     })
 
+    /**
+     * The sidecars whose capture is absent at two scans in a row removed
+     * (`InboxLevel.orphans`): one written just before its capture is copied
+     * is left for that copy.
+     */
+    const dropOrphans = Effect.fn("Inbox.dropOrphans")(function*(dir: string) {
+      const fs = yield* FileSystem.FileSystem
+      const names = yield* fs.readDirectory(dir).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []))
+      const orphaned = InboxLevel.orphans(names)
+      for (const one of orphaned.filter((name) => orphanedBefore.has(name))) {
+        yield* fs.remove(path.join(dir, one), { force: true }).pipe(Effect.ignore)
+        yield* Effect.logInfo(`inbox: ${one} removed: its capture is not in the inbox`)
+      }
+      orphanedBefore = new Set(orphaned.filter((name) => !orphanedBefore.has(name)))
+    }, Effect.provide(host))
+
     const scan = Effect.gen(function*() {
       if (inbox === undefined) return [] as ReadonlyArray<Started>
+      yield* dropOrphans(inbox)
       const read = yield* standing(inbox)
       before = new Map(read.entries.map((entry) => [entry.name, InboxScan.stamp(entry)]))
       const started: Array<Started> = []
@@ -226,6 +262,7 @@ export const layer = Layer.effect(
       return read.captures.map((one): Entry => ({
         copy: one.copy,
         level: one.level,
+        unreadable: one.unreadable,
         files: one.capture.files.map((file) => ({
           name: file.name,
           size: file.size,

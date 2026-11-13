@@ -233,6 +233,8 @@ export interface InboxRequest {
   readonly files: ReadonlyArray<InboxFile>
   /** The name the capture takes in the pcap root, recorded so the row says what came in. */
   readonly capture: string
+  /** The capture's sidecar as the take found it (`size:mtimeMs`), null where it had none: a later sidecar retries a refused take. */
+  readonly sidecar: string | null
 }
 
 /** The entry point's arguments of an inbox job: the row, then the files. */

@@ -1477,8 +1477,10 @@ export const PcapView = Schema.Struct({
 export const InboxEntryView = Schema.Struct({
   /** The file it lands as in the pcap root: its anonymised copy, or itself at level `none`. */
   copy: Schema.String,
-  /** The anonymisation level it is taken at (`@sip/workspace` `AnonymiseLevel`). */
-  level: Schema.String,
+  /** The anonymisation level it is taken at (`@sip/workspace` `AnonymiseLevel`); null where the level stated does not read. */
+  level: Schema.NullOr(Schema.String),
+  /** Why the level stated for it (its sidecar, the workspace's `[anonymise] level`) does not read, or null. */
+  unreadable: Schema.NullOr(Schema.String),
   files: Schema.Array(Schema.Struct({ name: Schema.String, size: Schema.Number, modifiedAt: Schema.String })),
   /** settling | waiting | taking | refused. */
   state: Schema.String,
