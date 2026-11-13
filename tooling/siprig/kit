@@ -147,7 +147,7 @@ build_pack() {
   if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     stamp_of "$dir" /opt/siprig/pack > "$stage/stamp/$COMPONENT.env"
   fi
-  sed -e "s|@WRAPPER@|$WRAPPER|g" -e "s|@IMAGE@|$IMAGE:$tag|g" "$KIT/wrapper" > "$stage/wrapper"
+  "$KIT/render-wrapper" "$WRAPPER" "$IMAGE:$tag" > "$stage/wrapper"
   chmod +x "$stage/wrapper"
   echo "kit: building $IMAGE:$tag from $base" >&2
   docker build -f "$KIT/pack.Dockerfile" \

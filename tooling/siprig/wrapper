@@ -5,7 +5,8 @@
 #   @WRAPPER@ init <dir>                          make <dir> a workspace; what it holds is kept
 #   @WRAPPER@ [-w <dir>] up [--lab] [--compose <dir>] [--memory <size>]
 #                                               start the container over the workspace, wait for the site;
-#                                               refused while another container runs over it
+#                                               refused while another container runs over it; a site that
+#                                               exits before it ever answers stops it (its log's tail printed)
 #   @WRAPPER@ [-w <dir>] down [--force]           stop the container (postgres shut down cleanly) and remove it
 #   @WRAPPER@ [-w <dir>] restart [--force]        stop and start it again, with the flags `up` gave it
 #   @WRAPPER@ [-w <dir>] status                   whether it runs, and the site's URL
@@ -36,6 +37,7 @@ NAME=@WRAPPER@
 IMAGE="${SIPRIG_IMAGE:-@IMAGE@}"
 STOP_TIMEOUT=60
 UP_TIMEOUT=600
+SITE_NEVER_ANSWERED=3
 
 usage() { sed -n '2,/^set /p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2; }
 die() { echo "$NAME: $*" >&2; exit 1; }
@@ -84,12 +86,25 @@ in_container() {
   exec docker exec -i "${tty[@]}" -w "$cwd" "$(container)" "$@"
 }
 
+# Where the container <name> stopped because its site exited before it ever answered
+# (image/site-finish, status SITE_NEVER_ANSWERED): the tail of the site's log, then a refusal naming it.
+report_site_never_answered() {
+  local log="$workspace/logs/site/current"
+  [ "$(docker inspect -f '{{.State.ExitCode}}' "$1" 2>/dev/null || true)" = "$SITE_NEVER_ANSWERED" ] || return 0
+  if [ -f "$log" ]; then
+    echo "--- the last lines of $log:" >&2
+    tail -n 30 "$log" >&2
+  fi
+  die "the site exited before it ever answered: its log is $log"
+}
+
 wait_for_site() {
   local name url
   name="$(container)"
   for _ in $(seq 1 "$UP_TIMEOUT"); do
     if ! running; then
       docker logs --tail 40 "$name" >&2 || true
+      report_site_never_answered "$name"
       die "the container stopped while starting (\`$NAME logs\` for the whole log)"
     fi
     if url="$(docker exec "$name" siprig-in site-url 2>/dev/null)"; then

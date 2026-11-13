@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# The site's finish (s6 runs it each time the site exits, with its exit code
+# and signal). A site that exits before it ever answered in this container
+# (no /run/siprig/site-answered, image/site-check) would only fail again on
+# every restart: the container stops with status 3, the line naming the
+# site's log, and the wrapper's `up` prints that log's tail. A site that has
+# answered once is restarted by s6.
+set -euo pipefail
+[ ! -e /run/siprig/site-answered ] || exit 0
+echo "siprig: the site exited (code ${1:-?}, signal ${2:-none}) before it ever answered:" \
+  "its log is $SIPRIG_WORKSPACE/logs/site/current; the container stops" >&2
+echo 3 > /run/s6-linux-init-container-results/exitcode
+exec /run/s6/basedir/bin/halt

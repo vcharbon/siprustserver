@@ -27,8 +27,11 @@ Node, postgres (its major in the label `org.siprig.pg-major`), s6-overlay and th
 CLI; no Python. The s6 services run a workspace mounted at its own path (`SIPRIG_WORKSPACE`):
 `workspace` checks and prepares it and writes the store's environment to
 `/run/siprig/workspace.env`, `postgres` runs the workspace's own cluster in `pgdata/` on a
-private socket, `migrate` brings the store to the image's schema, `site` serves. Each
-service runs a base command by name:
+private socket, `migrate` brings the store to the image's schema, `site` serves. The site is
+ready once it answers (`s6-notifyoncheck` over `image/site-check`); a site that exits before
+it ever answered stops the container with status 3 (`image/site-finish`), its line naming the
+site's log, where s6 would otherwise restart it forever; once it has answered, s6 restarts
+it. Each service runs a base command by name:
 
 | Command | Contract | The base's |
 |---|---|---|
@@ -67,13 +70,15 @@ It then builds:
   place, `SIPRIG_BUILD_CACHE` a directory kept between builds;
 - the pack's stamp `<component>.env` (`DIR=/opt/siprig/pack`), `SIPRIG_COMPONENT`, and the
   labels `org.siprig.pack`, `org.siprig.wrapper`;
-- the wrapper named by `wrapper`, written from `wrapper` here naming the image: at
+- the wrapper named by `wrapper`, written from `wrapper` here naming the image by
+  `render-wrapper <wrapper> <image:tag>` (which a pack's own tests run too): at
   `/opt/siprig/image/wrapper` in the image, and beside the tarball `kit tar` writes.
 
 The wrapper (`<wrapper> --help`) loads the image, makes a workspace (`init`), starts one
 container per workspace (`up`, as the caller's uid on the host's network; refused while any
-container labelled `org.siprig.workspace=<the workspace>` runs) and waits for the site, and
-stops, restarts, logs, `exec`s and upgrades the postgres major (`upgrade-pg`).
+container labelled `org.siprig.workspace=<the workspace>` runs) and waits for the site,
+printing the tail of `logs/site/current` where the site stopped the container, and stops,
+restarts, logs, `exec`s and upgrades the postgres major (`upgrade-pg`).
 
 ## Proof
 

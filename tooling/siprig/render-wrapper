@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# render-wrapper <wrapper> <image:tag> — the kit's wrapper template (`wrapper`
+# beside this file) on stdout for one pack: @WRAPPER@ its wrapper's name,
+# @IMAGE@ the image it starts. `kit pack` writes its output beside the image;
+# a pack's own tests render the wrapper they run through it. A name or image
+# holding anything but letters, digits and `_ . : / -` is refused, exit 2.
+set -euo pipefail
+KIT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+FORM='^[A-Za-z0-9_.:/-]+$'
+[ $# -eq 2 ] || { echo "render-wrapper <wrapper> <image:tag>" >&2; exit 2; }
+[[ "$1" =~ $FORM ]] || { echo "render-wrapper: $1 is no wrapper name" >&2; exit 2; }
+[[ "$2" =~ $FORM ]] || { echo "render-wrapper: $2 is no image reference" >&2; exit 2; }
+sed -e "s|@WRAPPER@|$1|g" -e "s|@IMAGE@|$2|g" "$KIT/wrapper"

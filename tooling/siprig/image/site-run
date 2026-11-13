@@ -2,10 +2,13 @@
 # The site (s6 longrun `site`): `siprig-site`, the pack's where it ships one,
 # with the store's environment the first step wrote. It reads the workspace
 # itself (SIPRIG_WORKSPACE): its port, bind address and public URL from rig.toml.
+# s6-notifyoncheck runs the service's data/check (image/site-check) each second
+# until the site answers, then reports it ready (notification-fd); the site's
+# finish (image/site-finish) stops the container where it exits before that.
 set -euo pipefail
 exec 2>&1
 set -a
 # shellcheck disable=SC1091
 . /run/siprig/workspace.env
 set +a
-exec siprig-site
+exec s6-notifyoncheck -n 0 -w 1000 -t 10000 siprig-site
