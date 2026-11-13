@@ -1,14 +1,15 @@
 # The B2BUA runner restarted (ADR-0060 appendix §7, §17): `inject` stops the
-# runner the pid file of the lane's `b2bua-runner` part names, its orchestrator
-# standing the next one: on the reference lane the base, which stands one per
-# batch. `heal` ends a stop an interrupted inject left; `probe` answers once
-# the stopped runner is gone (`main.ts`). As a job's setup, it stops a runner
-# an earlier job left on the lane's addresses, so the job's batches stand
-# their own there. A lane binds it by name (`[operations]`) for a case to ask
-# for.
+# runner the file of the lane's `runner-pid` part names, once a runner answers
+# at the `b2bua-runner` part's admin address, its orchestrator standing the
+# next one: on the reference lane the base, which stands one per batch.
+# `heal` ends a stop an interrupted inject left; `probe` answers once the
+# stopped runner is gone (`main.ts`). As a job's setup, it stops a runner an
+# earlier job left on the lane's addresses, so the job's batches stand their
+# own there. A lane binds it by name (`[operations]`) for a case to ask for;
+# a lane naming either part none of cannot bind it.
 schema = "operation.v1"
 name = "restart-worker"
-needs = ["b2bua-runner"]
+needs = ["b2bua-runner", "runner-pid"]
 
 [params]
 # The signal the runner is stopped with: SIGTERM drains its calls, SIGKILL

@@ -505,14 +505,15 @@ lane's parts lack, refuses the lane.
 
 How a managed lane stands its system under test stays a module of the pack's deployment.
 With nothing registered, the base hosts a real lane itself (`ts/siprig` `base-hosted-lane.ts`):
-the upstream B2BUA runner, its addresses and log a `b2bua-runner` part's, `[backend] mode =
+the upstream B2BUA runner, its addresses a `b2bua-runner` part's, `[backend] mode =
 "none"`, the cells in the plain binary's batch process (`pivot-replay batch`), each call's
-b-leg pinned to its cell's callee by the dial's `X-Api-Call`. A managed lane naming a
-`sip-capture` part has its runner append each SIP datagram to the part's pcapng file
-(`B2BUA_CAPTURE`, `sip-net` `CaptureEndpoint`): a packet capture with no privilege and no tool.
-One naming a `cdr-file` part has it append each call's record to the part's file, a JSON line
-each (`B2BUA_CDR_FILE`, `b2bua-runner-kit` `FileCdrWriter`). The runner part's `pid` file names
-the runner the base stands while it runs, where an operation acting on it finds it. The base's
+b-leg pinned to its cell's callee by the dial's `X-Api-Call`. Each file the runner writes is a
+`{ file }` part of its own, which only a managed lane names and a plug-in reading it needs: the
+`runner-log` part's file takes the runner's output; the `runner-pid` part's names the runner
+while it runs, where an operation acting on it finds it; the `sip-capture` part's pcapng file
+takes each SIP datagram (`B2BUA_CAPTURE`, `sip-net` `CaptureEndpoint`), a packet capture with no
+privilege and no tool; the `cdr-file` part's takes each call's record, a JSON line each
+(`B2BUA_CDR_FILE`, `b2bua-runner-kit` `FileCdrWriter`). The base's
 campaign run (`siprig-campaign run`) is a pack's one campaign: the run names its setup
 (`--setup`).
 

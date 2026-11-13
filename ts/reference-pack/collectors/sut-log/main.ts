@@ -1,6 +1,6 @@
 /**
  * The `sut-log` collector: the B2BUA runner's log, bracketed by its batch.
- * `open` keeps how long the log file the lane's `b2bua-runner` part names
+ * `open` keeps how long the log file the lane's `runner-log` part names
  * already is; `collect` reads what the batch appended after it, attaches it
  * whole to the batch and, cut to each cell (`cut.ts`), to each cell, as `log`
  * attachments, then empties the log, the collector's lock keeping every
@@ -17,7 +17,7 @@ import * as path from "node:path"
 import { cut, entriesOf } from "./cut.ts"
 
 /** The part kind naming the runner's log file. */
-const PART = "b2bua-runner"
+const PART = "runner-log"
 
 /** Where `open` keeps the log's length. */
 const OFFSET = "offset"
@@ -58,8 +58,8 @@ const attach = (out: string, file: string, title: string, content: string, cell?
 
 const main = (): void => {
   const context = JSON.parse(fs.readFileSync(variable("SIPRIG_CONTEXT"), "utf8")) as Context
-  const log = context.lane?.parts[PART]?.value["log"]
-  if (typeof log !== "string") throw new Error(`the lane's ${PART} part names no log file`)
+  const log = context.lane?.parts[PART]?.value["file"]
+  if (typeof log !== "string") throw new Error(`the lane's ${PART} part names no file`)
   const offset = path.join(variable("SIPRIG_STATE"), OFFSET)
   const step = variable("SIPRIG_STEP")
   if (step === "open") return fs.writeFileSync(offset, String(lengthOf(log)))

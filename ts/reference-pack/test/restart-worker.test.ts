@@ -2,12 +2,13 @@
  * The reference pack's `restart-worker` on the reference lane, as a job's
  * setup runs it (`@sip/rig` `Setup`), around what a batch of the job does
  * there: stand the base's runner on the lane's addresses. A runner an earlier
- * job left on those addresses, named in the pid file of the lane's runner
+ * job left on those addresses, named in the file of the lane's `runner-pid`
  * part, is stopped by the inject, so the base stands the job's own runner
  * there, naming it in the same pid file while it runs; the heal and its probe
  * find the stopped one gone. A pid file naming a process that answers on no
  * operator route at the lane's admin address refuses the inject, and the
- * process is left running.
+ * process is left running. A lane binding the operation while it names no
+ * `runner-pid` part is refused at load.
  *
  * The runner is `B2BUA_RUNNER_BIN`, else the build of `b2bua-runner`; a
  * missing one FAILS, naming its variable; `TOOLCHAIN_TEST_SKIP=1` skips the
@@ -56,6 +57,13 @@ const endOf = (child: ChildProcess) =>
     child.once("exit", (code, signal) => resolve({ code, signal }))
   )
 
+/** Resolves once the runner `child` printed its ready line; rejects where it `ended` first. */
+const readyOf = (child: ChildProcess, ended: ReturnType<typeof endOf>) =>
+  Promise.race([
+    new Promise<void>((resolve) => child.stdout!.on("data", (chunk: Buffer) => chunk.toString().includes("listening UDP") && resolve())),
+    ended.then((end) => Promise.reject(new Error(`the runner exited before its ready line: ${JSON.stringify(end)}`)))
+  ])
+
 /** Whether the process `pid` runs. */
 const running = (pid: number): boolean => {
   try {
@@ -80,21 +88,25 @@ describe.skipIf(skipping)("restart-worker on the reference lane", () => {
     const found = await referenceLane("left")
     const part = Result.getOrThrow(runnerPartOf(found.lane))
     const left = spawn(RUNNER, [], { env: { ...process.env, ...runnerEnvOf(found.lane, part) }, stdio: ["ignore", "pipe", "pipe"] })
-    const ended = endOf(left)
-    await new Promise<void>((resolve) => left.stdout!.on("data", (chunk: Buffer) => chunk.toString().includes("listening UDP") && resolve()))
-    fs.writeFileSync(found.pid, `${left.pid}\n`)
-    let named: number | undefined
-    const stood = Effect.gen(function*() {
-      const sut = yield* standSut(RUNNER, found.lane, path.join(found.dir, "batch"))
-      named = Number(fs.readFileSync(found.pid, "utf8").trim())
-      yield* sut!.stop
-    }).pipe(Effect.provide(NodeServices.layer))
-    const { ended: setup, events } = await restarted(found, stood)
-    expect(Result.isSuccess(setup), String(Result.isFailure(setup) ? setup.failure : "")).toBe(true)
-    expect(await ended, "the runner left on the lane stopped by its SIGTERM, its drain done").toEqual({ code: 0, signal: null })
-    expect(named, "the job's own runner named in the pid file while it ran").not.toBe(left.pid)
-    expect(events.map((event) => event.phase)).toEqual(["inject", "injected", "heal", "healed", "recovered"])
-    expect(fs.existsSync(found.pid), "no runner named once the job's stopped").toBe(false)
+    try {
+      const ended = endOf(left)
+      await readyOf(left, ended)
+      fs.writeFileSync(found.pid, `${left.pid}\n`)
+      let named: number | undefined
+      const stood = Effect.gen(function*() {
+        const sut = yield* standSut(RUNNER, found.lane, path.join(found.dir, "batch"))
+        named = Number(fs.readFileSync(found.pid, "utf8").trim())
+        yield* sut!.stop
+      }).pipe(Effect.provide(NodeServices.layer))
+      const { ended: setup, events } = await restarted(found, stood)
+      expect(Result.isSuccess(setup), String(Result.isFailure(setup) ? setup.failure : "")).toBe(true)
+      expect(await ended, "the runner left on the lane stopped by its SIGTERM, its drain done").toEqual({ code: 0, signal: null })
+      expect(named, "the job's own runner named in the pid file while it ran").not.toBe(left.pid)
+      expect(events.map((event) => event.phase)).toEqual(["inject", "injected", "heal", "healed", "recovered"])
+      expect(fs.existsSync(found.pid), "no runner named once the job's stopped").toBe(false)
+    } finally {
+      left.kill("SIGKILL")
+    }
   })
 
   it("refuses at load a lane binding it whose runner names its pid in no file", async () => {

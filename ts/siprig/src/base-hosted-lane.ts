@@ -8,17 +8,23 @@
  *
  * The lane names a `b2bua-runner` part ({@link RUNNER_PART}): where the
  * runner publishes its metrics (the batch's end reads its active calls
- * there), where its operator routes listen, the file its output is appended
- * to, where the part states one (a collector reading the system's log reads
- * it there), and the file naming its pid while it runs, where the part states
- * one (an operation acting on the runner finds it there). A `managed` lane stands one runner per batch on the
- * lane's `[sip] ingress`; a `standing` one is attached to as found. A
- * managed lane may name a `sip-capture` part ({@link CAPTURE_PART}): its
- * runner appends each SIP datagram to the part's file (`B2BUA_CAPTURE`),
- * where a collector cutting the capture reads it. It may name a `cdr-file`
- * part ({@link CDR_PART}): its runner appends each call's record to the
- * part's file, a JSON line each (`B2BUA_CDR_FILE`), where a collector of the
- * call records reads them.
+ * there) and where its operator routes listen. A `managed` lane stands one
+ * runner per batch on the lane's `[sip] ingress`; a `standing` one is
+ * attached to as found. Each file the base has a runner it stands write is a
+ * part of its own, `{ file }`, which a managed lane alone may name, and which
+ * a plug-in reading that file needs, so a lane naming none never wires it:
+ *
+ * - `runner-log` ({@link LOG_PART}): the file the runner's output is
+ *   appended to, where a collector reading the system's log reads it; a
+ *   stamped file under the batch's directory where the lane names none.
+ * - `runner-pid` ({@link PID_PART}): the file naming the runner's pid while
+ *   it runs, where an operation acting on the runner finds it.
+ * - `sip-capture` ({@link CAPTURE_PART}): the runner appends each SIP
+ *   datagram to it (`B2BUA_CAPTURE`), where a collector cutting the capture
+ *   reads it.
+ * - `cdr-file` ({@link CDR_PART}): the runner appends each call's record to
+ *   it, a JSON line each (`B2BUA_CDR_FILE`), where a collector of the call
+ *   records reads them.
  */
 import * as Batch from "@sip/lab-host/replay-batch"
 import * as Sut from "@sip/lab-host/replay-sut"
@@ -34,6 +40,12 @@ import * as path from "node:path"
 
 /** The part kind a hosted lane of the base names its runner's addresses in. */
 export const RUNNER_PART = "b2bua-runner"
+
+/** The part kind a hosted lane of the base names the file its runner's output is appended to in. */
+export const LOG_PART = "runner-log"
+
+/** The part kind a hosted lane of the base names the file naming its runner's pid in. */
+export const PID_PART = "runner-pid"
 
 /** The part kind a hosted lane of the base names the file its runner captures its SIP datagrams to in. */
 export const CAPTURE_PART = "sip-capture"
@@ -52,11 +64,7 @@ export const RunnerPart = Schema.Struct({
   /** Where the runner publishes Prometheus text, `ip:port`. */
   metrics: Schema.String,
   /** Where the runner's operator routes listen, `ip:port`. */
-  admin: Schema.String,
-  /** The file the runner's output is appended to; a stamped file under the batch's directory where absent. */
-  log: Schema.optionalKey(Schema.String),
-  /** The file naming the pid of the runner the base stands, while it runs, where an operation acting on it finds it; none where absent. */
-  pid: Schema.optionalKey(Schema.String)
+  admin: Schema.String
 })
 export interface RunnerPart extends Schema.Schema.Type<typeof RunnerPart> {}
 
@@ -72,9 +80,11 @@ export const runnerPartOf = (lane: LaneView.Hosted): Result.Result<RunnerPart, s
 
 /**
  * What the base reads of a part naming one file its runner writes: a
- * `sip-capture` part's pcapng file, which the runner appends each SIP
- * datagram it sends and receives to, a section per start; a `cdr-file`
- * part's, which it appends each call's record to, a JSON line each.
+ * `runner-log` part's, which the runner's output is appended to; a
+ * `runner-pid` part's, naming its pid while it runs; a `sip-capture` part's
+ * pcapng file, which the runner appends each SIP datagram it sends and
+ * receives to, a section per start; a `cdr-file` part's, which it appends
+ * each call's record to, a JSON line each.
  */
 export const FilePart = Schema.Struct({ file: Schema.String })
 export interface FilePart extends Schema.Schema.Type<typeof FilePart> {}
@@ -85,6 +95,8 @@ interface FileKind {
   readonly doing: string
 }
 
+const LOG: FileKind = { kind: LOG_PART, doing: "sets the log file only of a runner it stands" }
+const PID: FileKind = { kind: PID_PART, doing: "names the pid only of a runner it stands" }
 const CAPTURE: FileKind = { kind: CAPTURE_PART, doing: "captures only a runner it stands" }
 const CDR: FileKind = { kind: CDR_PART, doing: "sets the record file only of a runner it stands" }
 
@@ -101,6 +113,12 @@ const filePartOf = (lane: LaneView.Hosted, named: FileKind): Result.Result<FileP
   )
 }
 
+/** The `runner-log` part `lane` names, none where it names none, or why the base cannot set it. */
+export const logPartOf = (lane: LaneView.Hosted) => filePartOf(lane, LOG)
+
+/** The `runner-pid` part `lane` names, none where it names none, or why the base cannot set it. */
+export const pidPartOf = (lane: LaneView.Hosted) => filePartOf(lane, PID)
+
 /** The `sip-capture` part `lane` names, none where it names none, or why the base cannot capture it. */
 export const capturePartOf = (lane: LaneView.Hosted) => filePartOf(lane, CAPTURE)
 
@@ -112,7 +130,13 @@ export const hostedRefusalOf = (lane: LaneView.Hosted): string | null => {
   if (lane.backendMode !== "none") {
     return `${lane.id}: the base serves no backend to its B2BUA runner, which routes each call itself: state [backend] mode = "none"`
   }
-  const parts: ReadonlyArray<Result.Result<unknown, string>> = [runnerPartOf(lane), capturePartOf(lane), cdrPartOf(lane)]
+  const parts: ReadonlyArray<Result.Result<unknown, string>> = [
+    runnerPartOf(lane),
+    logPartOf(lane),
+    pidPartOf(lane),
+    capturePartOf(lane),
+    cdrPartOf(lane)
+  ]
   for (const part of parts) if (Result.isFailure(part)) return part.failure
   return null
 }
@@ -159,8 +183,8 @@ const partOrFail = (lane: LaneView.Hosted) =>
 export const sutPackOf = (runner: string): Sut.SutPack<LaneView.View, never> => ({
   worker: "b2bua-runner",
   metricsOf: (lane) => Result.getOrUndefined(Result.map(runnerPartOf(lane), (part) => part.metrics)),
-  logOf: (lane) => Result.getOrUndefined(runnerPartOf(lane))?.log,
-  pidFileOf: (lane) => Result.getOrUndefined(runnerPartOf(lane))?.pid,
+  logOf: (lane) => Result.getOrUndefined(logPartOf(lane))?.file,
+  pidFileOf: (lane) => Result.getOrUndefined(pidPartOf(lane))?.file,
   command: (lane, extraEnv) =>
     Effect.gen(function*() {
       const part = yield* partOrFail(lane)

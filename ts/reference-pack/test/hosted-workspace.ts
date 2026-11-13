@@ -70,22 +70,16 @@ export const hostedWorkspace = async (pack: string, dir: string, written: Writte
     .replace(`ingress = "127.0.0.1:5160"`, `ingress = "${await freeAddress("udp")}"`) +
     `\n[collectors.calls-ended]\ndelay_s = 0.1\n`
   fs.mkdirSync(path.join(dir, "lanes"), { recursive: true })
-  fs.mkdirSync(path.join(dir, "targets", "b2bua-runner"), { recursive: true })
-  fs.mkdirSync(path.join(dir, "targets", "sip-capture"), { recursive: true })
-  fs.mkdirSync(path.join(dir, "targets", "cdr-file"), { recursive: true })
   fs.writeFileSync(path.join(dir, "lanes", "reference.toml"), lane)
-  fs.writeFileSync(path.join(dir, "targets", "cdr-file", "reference.toml"), `file = "${written.cdr}"\n`)
-  fs.writeFileSync(
-    path.join(dir, "targets", "b2bua-runner", "reference.toml"),
-    [
-      `metrics = "${await freeAddress("tcp")}"`,
-      `admin = "${await freeAddress("tcp")}"`,
-      `log = "${written.log}"`,
-      `pid = "${written.pid}"`,
-      ``
-    ].join("\n")
-  )
-  fs.writeFileSync(path.join(dir, "targets", "sip-capture", "reference.toml"), `file = "${written.capture}"\n`)
+  const target = (kind: string, content: string) => {
+    fs.mkdirSync(path.join(dir, "targets", kind), { recursive: true })
+    fs.writeFileSync(path.join(dir, "targets", kind, "reference.toml"), content)
+  }
+  target("b2bua-runner", `metrics = "${await freeAddress("tcp")}"\nadmin = "${await freeAddress("tcp")}"\n`)
+  target("runner-log", `file = "${written.log}"\n`)
+  target("runner-pid", `file = "${written.pid}"\n`)
+  target("sip-capture", `file = "${written.capture}"\n`)
+  target("cdr-file", `file = "${written.cdr}"\n`)
   if (failing) {
     const collector = path.join(dir, "collectors", "fail-busy")
     fs.mkdirSync(collector, { recursive: true })
