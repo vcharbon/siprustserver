@@ -2,7 +2,8 @@
  * What one DROP of captures queues (`DropCaptures.tsx`): its files as one
  * capture or one capture each, each bound to the anonymisation level the
  * picker shows when the files are dropped ("" = the workspace's default), so
- * a level picked later applies to later drops only.
+ * a level picked later applies to later drops only; each drop returns the
+ * picker to the workspace's default.
  */
 import type { AnonymiseLevel } from "../api.ts"
 
@@ -27,7 +28,9 @@ export interface Picking {
 /**
  * A drop of `files`, in ring order, under `picking`: the captures it queues
  * (all of them one capture where `asSet`, else one each), each at the level
- * picked, and the picking after it.
+ * picked, and the picking after it, its level back at the workspace's
+ * default: a level is picked for one drop, so a production capture dropped
+ * after a lab one at `none` is never taken unanonymised by a leftover pick.
  */
 export const drop = <F>(
   picking: Picking,
@@ -36,5 +39,5 @@ export const drop = <F>(
 ): { readonly queued: readonly Queued<F>[]; readonly picking: Picking } => {
   const groups = asSet ? [files] : files.map((file) => [file])
   const queued = groups.map((group, at) => ({ id: picking.next + at, files: group, level: picking.level }))
-  return { queued, picking: { level: picking.level, next: picking.next + groups.length } }
+  return { queued, picking: { level: "", next: picking.next + groups.length } }
 }
