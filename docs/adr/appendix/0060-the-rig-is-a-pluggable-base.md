@@ -511,7 +511,10 @@ b-leg pinned to its cell's callee by the dial's `X-Api-Call`. A managed lane nam
 `sip-capture` part has its runner append each SIP datagram to the part's pcapng file
 (`B2BUA_CAPTURE`, `sip-net` `CaptureEndpoint`): a packet capture with no privilege and no tool.
 One naming a `cdr-file` part has it append each call's record to the part's file, a JSON line
-each (`B2BUA_CDR_FILE`, `b2bua-runner-kit` `FileCdrWriter`).
+each (`B2BUA_CDR_FILE`, `b2bua-runner-kit` `FileCdrWriter`). The runner part's `pid` file names
+the runner the base stands while it runs, where an operation acting on it finds it. The base's
+campaign run (`siprig-campaign run`) is a pack's one campaign: the run names its setup
+(`--setup`).
 
 ## 14. The minimal case form
 
@@ -585,7 +588,7 @@ compiler behind the module, and the runner reads compiled cells alone.
 
 | Sample | Seam it exercises |
 |---|---|
-| `sut-log`, a batch collector cutting the B2BUA's log per cell | bracket, state directory, `log` attachment |
+| `sut-log`, a batch collector cutting the B2BUA's log per cell | bracket, state directory, a lock, `log` attachment |
 | `capture`, a job collector: `open` starts a packet capture, `collect` cuts it per cell | a lock, `file` and `table` attachments, `on-failure` |
 | `call-records`, a batch collector reading the B2BUA's record file, with its judge | claim, join, judge, `records` and `diff` attachments, a lock |
 | `calls-ended`, a delayed cell collector reading the worker's active-call gauge | delay, the lane not held, `json` and `link` attachments |
