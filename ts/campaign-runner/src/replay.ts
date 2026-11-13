@@ -338,11 +338,14 @@ export const judgeAll = <C extends Cell>(
 /**
  * What a batch left dirty: how its batch process died, what its end gate read
  * the SUT holding, each rig collector whose close left the lab changed, and
- * `steps`, what its cells' operation steps left changed.
+ * `steps`, what its cells' operation steps left changed; the last two also as
+ * what it left changed in the lab.
  */
-const dirtyOf = (batch: LaneBatch.Ended<unknown>, steps?: string): { readonly dirty?: string } => {
-  const end = [batch.deadHost, batch.dirty, LaneBatch.leftChangedOf(batch), steps].filter((x): x is string => x !== undefined).join("; ")
-  return end === "" ? {} : { dirty: end }
+const dirtyOf = (batch: LaneBatch.Ended<unknown>, steps?: string): { readonly dirty?: string; readonly leftChanged?: string } => {
+  const said = (parts: ReadonlyArray<string | undefined>) => parts.filter((x): x is string => x !== undefined).join("; ")
+  const changed = said([LaneBatch.leftChangedOf(batch), steps])
+  const end = said([batch.deadHost, batch.dirty, changed === "" ? undefined : changed])
+  return { ...(end === "" ? {} : { dirty: end }), ...(changed === "" ? {} : { leftChanged: changed }) }
 }
 
 const simulated = <C extends Cell, L extends LaneView.View, R>(

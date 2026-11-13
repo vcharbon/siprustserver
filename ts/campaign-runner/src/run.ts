@@ -71,6 +71,8 @@ export interface LaneOutcome<C extends Cell = Cell> {
   readonly results: ReadonlyArray<CellResult<C>>
   /** What the batch's end gate found, how its process died, which collector's close left the lab changed. */
   readonly dirty?: string
+  /** What of `dirty` its steps or collectors left changed in the lab: the lane runs no retry on it. */
+  readonly leftChanged?: string
 }
 
 export interface Phases<R, C extends Cell = Cell> {
@@ -155,9 +157,15 @@ const keptOf = <C extends Cell>(attempts: ReadonlyArray<CellResult<C>>): CellRes
 /** Whether `result`, its cell's `tried`-th attempt, is replayed again. */
 const retried = (result: CellResult<Cell>, tried: number): boolean => result.status === "failure" && tried <= result.cell.retries
 
+/** The attempt of `cell` its lane does not run since its last batch left the lab changed (`changed`): an environment error. */
+const notRetried = <C extends Cell>(lane: Lane, cell: C, changed: string): CellResult<C> =>
+  errored(lane, cell, `environment: not run: ${changed}`)
+
 /**
  * Each lane's batches of `cells`, its retries included: each cell's kept
- * attempt answered, what errored outside a cell to `errors`.
+ * attempt answered, what errored outside a cell to `errors`. A batch that left
+ * the lab changed ends the lane's retries, each cell it would retry given an
+ * attempt not run.
  */
 const replayLanes = <R, C extends Cell>(
   lanes: ReadonlyArray<Lane>,
@@ -184,7 +192,12 @@ const replayLanes = <R, C extends Cell>(
         if (outcome.dirty !== undefined) {
           errors.push({ phase: `replay ${lane}`, message: `${said}batch end: ${outcome.dirty}` })
         }
-        batch = outcome.results.filter((r) => retried(r, attempt)).map((r) => r.cell)
+        const again = outcome.results.filter((r) => retried(r, attempt)).map((r) => r.cell)
+        if (outcome.leftChanged !== undefined) {
+          for (const cell of again) attempts.get(cell)?.push(notRetried(lane, cell, outcome.leftChanged))
+          break
+        }
+        batch = again
       }
       results.push(...[...attempts.values()].filter((tried) => tried.length > 0).map(keptOf))
     }
