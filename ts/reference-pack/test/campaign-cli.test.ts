@@ -52,6 +52,7 @@ const campaign = (pack: string) => {
     SIPRIG_PACK: pack,
     SIPRIG_WORKSPACE: "",
     SIPRIG_ENV: "cli-test",
+    SIPRIG_SESSIONS: path.join(work, "sessions"),
     DATABASE_URL: urlFor(SCRATCH),
     REPLAY_BIN: binary("REPLAY_BIN", "target/debug/pivot-replay"),
     PIVOT_SCHEMA_BIN: binary("PIVOT_SCHEMA_BIN", "target/release/pivot-schema")
