@@ -1,7 +1,8 @@
 /**
  * One line a batch process writes, read three ways: a protocol line, a
  * protocol line that does not decode (malformed, naming its key and the
- * run-spec it names where it names one), or the process's own talk.
+ * run-spec it names where it names one, and for an inject what its answer
+ * echoes), or the process's own talk.
  */
 import { describe, expect, it } from "vitest"
 import { readLine } from "../src/batch.js"
@@ -24,6 +25,25 @@ describe("Batch.readLine", () => {
     expect(cell).toMatchObject({ _tag: "malformed", key: "cell", spec: "/s/b.json" })
     expect(readLine(`{"cell":{"exit":0}}`)).toMatchObject({ _tag: "malformed", key: "cell", spec: undefined })
     expect(readLine(`{"end":{"dirty":3}}`)).toMatchObject({ _tag: "malformed", key: "end", spec: undefined })
+  })
+
+  it("reads an inject line with its ask, and a malformed one with what its answer echoes where that reads", () => {
+    expect(readLine(`{"inject":{"ask":"4","spec":"/s/a.json","node":"i1","action":"operation:x"}}`)).toEqual({
+      _tag: "line",
+      line: { inject: { ask: "4", spec: "/s/a.json", node: "i1", action: "operation:x" } }
+    })
+    expect(readLine(`{"inject":{"ask":"4","spec":"/s/a.json","node":"i1","action":7}}`)).toMatchObject({
+      _tag: "malformed",
+      key: "inject",
+      spec: "/s/a.json",
+      asked: { ask: "4", spec: "/s/a.json", node: "i1" }
+    })
+    expect(readLine(`{"inject":{"spec":"/s/a.json","node":"i1","action":"operation:x"}}`)).toMatchObject({
+      _tag: "malformed",
+      key: "inject",
+      spec: "/s/a.json",
+      asked: undefined
+    })
   })
 
   it("reads anything else as the process's own talk", () => {

@@ -1,7 +1,7 @@
 //! `pivot-replay batch`'s inject lines: a cell whose document holds an
 //! `inject` writes an `inject` line naming its run-spec, the node and the
-//! action once the node is due, and resumes on the harness's answer line on
-//! stdin, routed by run-spec and node. A refusal, or stdin closing before an
+//! action under an ask id of its own once the node is due, and resumes on the
+//! harness's answer line on stdin echoing that ask. A refusal, or stdin closing before an
 //! answer, fails the cell's run by name; whatever the answer, the call is
 //! billed once and the system holds nothing of it at the batch's end.
 
@@ -197,22 +197,23 @@ fn in_batch(
 }
 
 /// The one injected cell run as a batch, the harness answering its inject
-/// line with `answer` (the line's `spec`, the node), or closing stdin where
-/// `answer` gives none; the cell line and the cell's bundle.
+/// line with `answer` (the line's ask), or closing stdin where `answer` gives
+/// none; the cell line and the cell's bundle.
 fn run_injected(
     run: &str,
-    answer: impl FnOnce(&str, &str) -> Option<String> + Send + 'static,
+    answer: impl FnOnce(&Ask) -> Option<String> + Send + 'static,
 ) -> (serde_json::Value, PathBuf) {
     let ran = in_batch(run, &["injected"], |batch, specs| {
         let spec = &specs[0];
         batch.say(spec);
         let inject = batch.line();
+        let ask = Ask::of(&inject);
         assert_eq!(
             inject,
-            serde_json::json!({ "inject": { "spec": spec, "node": "i1", "action": ACTION } }),
+            serde_json::json!({ "inject": { "ask": ask.id, "spec": spec, "node": "i1", "action": ACTION } }),
             "the cell's inject line before its cell line"
         );
-        if let Some(line) = answer(spec, "i1") {
+        if let Some(line) = answer(&ask) {
             batch.say(&line);
         }
     });
@@ -222,19 +223,41 @@ fn run_injected(
     (cell.clone(), out.to_path_buf())
 }
 
-/// The `injected` line answering `node` of the cell at `spec`.
-fn injected(spec: &str, node: &str) -> String {
-    serde_json::json!({ "injected": { "spec": spec, "node": node } }).to_string()
+/// What an inject line asks, as its answer echoes it: the batch's id of the
+/// ask, the run-spec and the node.
+struct Ask {
+    id: String,
+    spec: String,
+    node: String,
 }
 
-/// The `refused` line answering `node` of the cell at `spec` with `reason`.
-fn refused(spec: &str, node: &str, reason: &str) -> String {
-    serde_json::json!({ "refused": { "spec": spec, "node": node, "reason": reason } }).to_string()
+impl Ask {
+    /// The ask of the `inject` line `line`.
+    fn of(line: &serde_json::Value) -> Ask {
+        let field = |name: &str| {
+            line["inject"][name].as_str().unwrap_or_else(|| panic!("{name} in {line}")).to_string()
+        };
+        Ask { id: field("ask"), spec: field("spec"), node: field("node") }
+    }
+}
+
+/// The `injected` line answering `ask`.
+fn injected(ask: &Ask) -> String {
+    serde_json::json!({ "injected": { "ask": ask.id, "spec": ask.spec, "node": ask.node } })
+        .to_string()
+}
+
+/// The `refused` line answering `ask` with `reason`.
+fn refused(ask: &Ask, reason: &str) -> String {
+    serde_json::json!({
+        "refused": { "ask": ask.id, "spec": ask.spec, "node": ask.node, "reason": reason }
+    })
+    .to_string()
 }
 
 #[test]
 fn an_answered_inject_line_resumes_the_cell_and_its_call_ends_as_scripted() {
-    let (cell, out) = run_injected("inject-answered", |spec, node| Some(injected(spec, node)));
+    let (cell, out) = run_injected("inject-answered", |ask| Some(injected(ask)));
     assert_eq!(cell["exit"], 0, "{cell}");
     assert_eq!(failures(&out), Vec::<serde_json::Value>::new());
     assert_eq!(answer_of(&out, "call"), "pass");
@@ -242,9 +265,8 @@ fn an_answered_inject_line_resumes_the_cell_and_its_call_ends_as_scripted() {
 
 #[test]
 fn a_refused_inject_line_fails_the_cell_in_the_harness_s_words() {
-    let (cell, out) = run_injected("inject-refused", |spec, node| {
-        Some(refused(spec, node, "the operation exited 1"))
-    });
+    let (cell, out) =
+        run_injected("inject-refused", |ask| Some(refused(ask, "the operation exited 1")));
     assert_ne!(cell["exit"], 0, "{cell}");
     assert_eq!(
         failures(&out),
@@ -259,7 +281,7 @@ fn a_refused_inject_line_fails_the_cell_in_the_harness_s_words() {
 
 #[test]
 fn stdin_closing_before_an_answer_fails_the_cell_s_inject_by_name() {
-    let (cell, out) = run_injected("inject-unanswered", |_, _| None);
+    let (cell, out) = run_injected("inject-unanswered", |_| None);
     assert_ne!(cell["exit"], 0, "{cell}");
     assert_eq!(
         failures(&out),
@@ -280,23 +302,25 @@ fn stdin_closing_before_an_answer_fails_the_cell_s_inject_by_name() {
 fn each_answer_line_reaches_the_inject_its_run_spec_asked() {
     let ran = in_batch("inject-routed", &["first", "second"], |batch, specs| {
         batch.say("{ not an answer");
-        batch.say(&injected("/nowhere/asked.spec.json", "i1"));
+        let unasked =
+            Ask { id: "1".into(), spec: "/nowhere/asked.spec.json".into(), node: "i1".into() };
+        batch.say(&injected(&unasked));
         for spec in specs {
             batch.say(spec);
         }
-        let mut asked: Vec<String> = (0..2)
+        let mut asked: Vec<Ask> = (0..2)
             .map(|_| {
                 let inject = batch.line();
                 assert_eq!(inject["inject"]["node"], "i1", "{inject}");
-                inject["inject"]["spec"].as_str().expect("the asking run-spec").to_string()
+                Ask::of(&inject)
             })
             .collect();
         asked.reverse();
-        for spec in asked {
-            if spec == specs[0] {
-                batch.say(&injected(&spec, "i1"));
+        for ask in asked {
+            if ask.spec == specs[0] {
+                batch.say(&injected(&ask));
             } else {
-                batch.say(&refused(&spec, "i1", "the second operation exited 1"));
+                batch.say(&refused(&ask, "the second operation exited 1"));
             }
         }
     });

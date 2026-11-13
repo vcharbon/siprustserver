@@ -23,9 +23,12 @@
  * summary of the end line (its `bl` key) are printed as `[batch]` lines.
  *
  * An `inject` line a cell's run asks is performed by the injector that run
- * was given, one ask at a time per cell, and answered on stdin by spec and
- * node: `injected` once it did its work, `refused` with its words; a cell run
- * with no injector has each inject refused ({@link NO_STEP}).
+ * was given, one ask at a time per cell, and answered on stdin echoing its
+ * ask id, spec and node: `injected` once it did its work, `refused` with its
+ * words; a cell run with no injector has each inject refused ({@link NO_STEP}).
+ * An `inject` line that does not decode but names its ask id, spec and node is
+ * refused with why, and its cell, once its line came, is an environment
+ * failure naming why; one naming less fails its cell at once.
  *
  * The simulated lane has no batch process: its cell builds its backend in-process.
  */
@@ -227,6 +230,8 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
   const pending = new Map<string, (report: ReplayCli.RunReport) => void>()
   /** Per running cell given an injector, where its asks go. */
   const injectors = new Map<string, (ask: InjectAsk) => void>()
+  /** Per running cell whose inject line did not decode and was refused, why. */
+  const unreadAsks = new Map<string, string>()
   let exit: string | undefined
   let ended: ((dirty: string | undefined) => void) | undefined
   let endLine:
@@ -263,6 +268,7 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
   const lost = (why: string) => {
     for (const [spec, resume] of pending) resume(reportOf(3, `environment: ${why} before ${spec} ended`))
     pending.clear()
+    unreadAsks.clear()
   }
 
   let buffered = ""
@@ -278,9 +284,17 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
   child.stderr.on("data", (chunk: Buffer) => process.stderr.write(`[replay batch] ${chunk.toString()}`))
   child.stdin.on("error", sayStdinError)
 
-  /** A protocol line that does not decode: the cell, the end or the readiness it names fails, never waits. */
+  /**
+   * A protocol line that does not decode: the cell, the end or the readiness it
+   * names fails, never waits. An inject naming its ask is refused with why, and
+   * its cell fails once its line came, so the call it holds ends first.
+   */
   const malformed = (read: Extract<Batch.Read, { readonly _tag: "malformed" }>) => {
-    const why = `the ${lane} batch process wrote a ${read.key} line that does not decode: ${read.why}`
+    const why = `the ${lane} batch process wrote ${read.key === "inject" ? "an" : "a"} ${read.key} line that does not decode: ${read.why}`
+    if (read.key === "inject" && read.asked !== undefined && pending.has(read.asked.spec)) {
+      unreadAsks.set(read.asked.spec, why)
+      return answer(Batch.refusedLine(read.asked, why))
+    }
     if (read.key === "cell" || read.key === "inject") {
       const resume = read.spec === undefined ? undefined : pending.get(read.spec)
       if (resume === undefined) return lost(why)
@@ -308,13 +322,20 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
       console.log(`[batch] ${lane}: ${JSON.stringify(parsed.ready)}`)
       readied?.(undefined)
     } else if (parsed.cell !== undefined) {
-      const resume = pending.get(parsed.cell.spec)
-      pending.delete(parsed.cell.spec)
-      if (miswired === undefined && parsed.cell.summary.startsWith(MISWIRED)) {
-        miswired = parsed.cell.summary
+      const cell = parsed.cell
+      const resume = pending.get(cell.spec)
+      pending.delete(cell.spec)
+      if (miswired === undefined && cell.summary.startsWith(MISWIRED)) {
+        miswired = cell.summary
         console.error(`[batch] ${lane}: ${miswired.slice("environment: ".length)}; no further cell is sent`)
       }
-      resume?.(reportOf(parsed.cell.exit, parsed.cell.summary, parsed.cell.stderr ?? ""))
+      const unread = unreadAsks.get(cell.spec)
+      unreadAsks.delete(cell.spec)
+      resume?.(
+        unread === undefined
+          ? reportOf(cell.exit, cell.summary, cell.stderr ?? "")
+          : reportOf(3, `environment: ${cell.spec}: ${unread}`, `the cell ended: ${cell.summary}\n${cell.stderr ?? ""}`)
+      )
     } else if (parsed.end !== undefined) {
       const served = servedOf(line)
       if (served !== undefined) console.log(`[batch] ${lane}: ${options.servedLine(served)}`)
@@ -386,7 +407,11 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
   const ready = awaitReady.pipe(Effect.onError(() => kill))
 
   /** An interrupted run's cell `specPath`, no longer waited on: it runs on in the process, and the batch's end or kill settles it. */
-  const unwaited = (specPath: string) => Effect.sync(() => void pending.delete(specPath))
+  const unwaited = (specPath: string) =>
+    Effect.sync(() => {
+      pending.delete(specPath)
+      unreadAsks.delete(specPath)
+    })
 
   /**
    * One cell given `injector`: its asks queued while it runs and served one at

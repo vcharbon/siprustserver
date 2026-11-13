@@ -33,11 +33,15 @@ pub fn cell_line(line: &CellLine) -> serde_json::Value {
 }
 
 /// The `inject` line asking the harness to perform `request` for the cell
-/// whose run-spec is `spec`, as the cell's line names it; `target` only where
-/// the node states one.
-pub fn inject_line(spec: &str, request: &InjectRequest) -> serde_json::Value {
-    let mut inject =
-        serde_json::json!({ "spec": spec, "node": request.node, "action": request.action });
+/// whose run-spec is `spec`, as the cell's line names it, under the batch's
+/// own id `ask` its answer echoes; `target` only where the node states one.
+pub fn inject_line(ask: &str, spec: &str, request: &InjectRequest) -> serde_json::Value {
+    let mut inject = serde_json::json!({
+        "ask": ask,
+        "spec": spec,
+        "node": request.node,
+        "action": request.action
+    });
     if let Some(target) = &request.target {
         inject["target"] = target.as_str().into();
     }

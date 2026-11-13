@@ -1,10 +1,13 @@
 //! The batch's inject lines: a cell's `inject` node, due in its run, is asked
-//! of the harness as an `inject` line on stdout naming the cell's run-spec, the
-//! node, the action and its target; the harness answers on stdin with an
-//! `injected` or a `refused` line naming the same run-spec and node, and the
-//! cell's run resumes on it. Stdin closing answers every inject still asked,
-//! and every later one, refused ([`CLOSED`]). An inject stays asked only while
-//! the run that asked it lasts: an answer after that run ended routes nowhere.
+//! of the harness as an `inject` line on stdout naming the batch's own id of
+//! the ask, the cell's run-spec, the node, the action and its target; the
+//! harness answers on stdin with an `injected` or a `refused` line echoing the
+//! same id, run-spec and node, and the cell's run resumes on it. Each ask has
+//! an id of its own, so an answer meant for an earlier ask never resolves a
+//! later one of the same run-spec and node. Stdin closing answers every inject
+//! still asked, and every later one, refused ([`CLOSED`]). An inject stays
+//! asked only while the run that asked it lasts: an answer after that run
+//! ended routes nowhere.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -35,18 +38,23 @@ pub struct Injects {
     asked: Mutex<Asked>,
     /// The last run handed an injector, each run's own number.
     runs: AtomicU64,
+    /// The last ask's id, each ask's own number.
+    asks: AtomicU64,
 }
 
-/// The injects asked and not answered, by `(run-spec, node)`, and whether
-/// stdin closed.
+/// The injects asked and not answered, by their ask id, and whether stdin
+/// closed.
 #[derive(Default)]
 struct Asked {
-    pending: BTreeMap<(String, String), Pending>,
+    pending: BTreeMap<u64, Pending>,
     closed: bool,
 }
 
-/// One inject asked: the run that asked it, and where its answer goes.
+/// One inject asked: the run-spec and node it is of, the run that asked it,
+/// and where its answer goes.
 struct Pending {
+    spec: String,
+    node: String,
     run: u64,
     answer: oneshot::Sender<Result<(), String>>,
 }
@@ -56,9 +64,9 @@ struct Pending {
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 enum AnswerLine {
     /// The harness performed the node's action.
-    Injected { spec: String, node: String },
+    Injected { ask: String, spec: String, node: String },
     /// The harness refused or failed it, in its own words.
-    Refused { spec: String, node: String, reason: String },
+    Refused { ask: String, spec: String, node: String, reason: String },
 }
 
 impl Injects {
@@ -76,9 +84,11 @@ impl Injects {
         Some(Arc::new(CellInjector { injects: self.clone(), spec: spec.to_string(), run }))
     }
 
-    /// Every inject asked and not answered, as `(run-spec, node)`.
+    /// Every inject asked and not answered, as `(run-spec, node)`, in the
+    /// order they were asked.
     pub(super) fn asked(&self) -> Vec<(String, String)> {
-        self.asked.lock().unwrap_or_else(|p| p.into_inner()).pending.keys().cloned().collect()
+        let asked = self.asked.lock().unwrap_or_else(|p| p.into_inner());
+        asked.pending.values().map(|pending| (pending.spec.clone(), pending.node.clone())).collect()
     }
 
     /// What the batch awaits of the harness's answers, for its waiting line:
@@ -98,18 +108,28 @@ impl Injects {
         format!("{} inject(s) asked: {}", asked.len(), named.join(", "))
     }
 
-    /// Routes the answer `line` to the inject it names; a line that does not
-    /// decode, or names no inject asked, is said on stderr.
+    /// Routes the answer `line` to the inject whose id, run-spec and node it
+    /// echoes; a line that does not decode, or echoes no inject asked, is said
+    /// on stderr.
     pub(super) fn answer(&self, line: &str) {
-        let (key, answer) = match serde_json::from_str::<AnswerLine>(line) {
-            Ok(AnswerLine::Injected { spec, node }) => ((spec, node), Ok(())),
-            Ok(AnswerLine::Refused { spec, node, reason }) => ((spec, node), Err(reason)),
+        let (ask, spec, node, answer) = match serde_json::from_str::<AnswerLine>(line) {
+            Ok(AnswerLine::Injected { ask, spec, node }) => (ask, spec, node, Ok(())),
+            Ok(AnswerLine::Refused { ask, spec, node, reason }) => (ask, spec, node, Err(reason)),
             Err(e) => {
                 eprintln!("replay batch: an answer line that does not decode ({e}): {line}");
                 return;
             }
         };
-        let asked = self.asked.lock().unwrap_or_else(|p| p.into_inner()).pending.remove(&key);
+        let asked = {
+            let mut asked = self.asked.lock().unwrap_or_else(|p| p.into_inner());
+            let id = ask.parse::<u64>().ok().filter(|id| {
+                asked
+                    .pending
+                    .get(id)
+                    .is_some_and(|pending| pending.spec == spec && pending.node == node)
+            });
+            id.and_then(|id| asked.pending.remove(&id))
+        };
         match asked {
             Some(asked) => {
                 let _ = asked.answer.send(answer);
@@ -134,7 +154,7 @@ impl Injects {
     }
 
     /// Asks `request` of the harness for the run numbered `run` of the cell
-    /// whose run-spec is `spec`.
+    /// whose run-spec is `spec`, under an ask id of its own.
     fn ask(&self, spec: &str, run: u64, request: InjectRequest) -> Injection {
         let refused = |why: &str| -> Injection {
             let why = why.to_string();
@@ -144,15 +164,18 @@ impl Injects {
             return refused("the batch serves no protocol lines to ask an inject on");
         };
         let (tx, rx) = oneshot::channel();
-        {
+        let id = {
             let mut asked = self.asked.lock().unwrap_or_else(|p| p.into_inner());
             if asked.closed {
                 return refused(CLOSED);
             }
-            let pending = Pending { run, answer: tx };
-            asked.pending.insert((spec.to_string(), request.node.clone()), pending);
-        }
-        emit(out, &inject_line(spec, &request));
+            let id = self.asks.fetch_add(1, Ordering::SeqCst) + 1;
+            let pending =
+                Pending { spec: spec.to_string(), node: request.node.clone(), run, answer: tx };
+            asked.pending.insert(id, pending);
+            id
+        };
+        emit(out, &inject_line(&id.to_string(), spec, &request));
         Box::pin(async move { rx.await.unwrap_or_else(|_| Err(CLOSED.to_string())) })
     }
 }

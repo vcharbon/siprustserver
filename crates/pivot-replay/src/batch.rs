@@ -14,7 +14,8 @@
 //! with what the backend double served and how fast (`served`). Each stdin
 //! line is the path of one cell's run-spec, or, starting with `{`, the
 //! harness's answer to an `{"inject":…}` line a cell wrote once one of its
-//! document's `inject` nodes was due ([`Injects`]). A SIGTERM or SIGINT ends
+//! document's `inject` nodes was due, echoing that line's ask id
+//! ([`Injects`]). A SIGTERM or SIGINT ends
 //! the process at once.
 //!
 //! Every wait of the batch's end is bounded, the bound beside it; a wait

@@ -352,10 +352,13 @@ probe  = "./probe"             # optional
   workspace's `rig.toml` declares `alone` is refused at compile.
 - The interpreter hands a due `inject` node to the lane's injector and holds what waits on it
   until the answer. The batch process asks it of the rig on its lines: it writes
-  `{"inject":{"spec","node","action"}}` (plus `target` where the node states one) and resumes on
-  `{"injected":{"spec","node"}}` or `{"refused":{"spec","node","reason"}}` on stdin. A refusal,
-  stdin closing first, or no answer within 90 s fails the cell's run (`inject-refused`,
-  `inject-timed-out`), and its close ends the call.
+  `{"inject":{"ask","spec","node","action"}}` (plus `target` where the node states one; `ask` its
+  own id of that ask) and resumes on `{"injected":{"ask","spec","node"}}` or
+  `{"refused":{"ask","spec","node","reason"}}` on stdin, echoing the three: an answer echoing
+  another ask's id resolves nothing. A refusal, stdin closing first, or no answer within 90 s
+  fails the cell's run (`inject-refused`, `inject-timed-out`), and its close ends the call. The
+  rig refuses an inject line that does not decode where it names its ask, spec and node, and
+  fails that cell as an environment failure once it ended.
 - The base answers an inject by running the operation's `inject` with the cell's context
   (`scope = "cell"`, the cell its one `planned`), `injected` once it exited 0, `refused` with its
   words otherwise; a cell run with no step refuses every inject. Once the cell ended, each step
