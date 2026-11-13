@@ -27,7 +27,7 @@ transit_ms = 1
 
 [pacing.campaign]
 concurrency = 4
-starts_per_second = 10
+starts_per_second = 50
 timing_tolerance_ms = 250
 
 [parts]
