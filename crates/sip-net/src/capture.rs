@@ -1,5 +1,5 @@
 //! [`CaptureEndpoint`]: a decorator appending each datagram its endpoint sends
-//! and delivers to a pcapng file ([`crate::pcapng`]), the packet capture a
+//! and delivers to a pcapng file (encoded by `pcapng.rs`), the packet capture a
 //! process makes of its own signalling with no privilege and no capture tool.
 //!
 //! Each capture opened on a file appends a section of its own, so a file that
