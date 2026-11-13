@@ -290,6 +290,10 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
       expect(attached.map((line) => [line["kind"], line["source"]])).toEqual([["log", "sut-log"]])
       expect(fs.readFileSync(path.join(bundle, String(attached[0]!["file"])), "utf8"), "cut to the call's window, the runner's start before it").not.toContain("listening UDP")
       expect(attachments.filter((line) => line["source"] === "capture"), "no cell failed: the capture is not cut").toEqual([])
+      const reading = attachments.filter((line) => line["source"] === "calls-ended")
+      expect(reading.map((line) => [line["name"], line["kind"]])).toEqual([["calls-ended", "json"], ["calls-ended-metrics", "link"]])
+      expect(JSON.parse(fs.readFileSync(path.join(bundle, String(reading[0]!["file"])), "utf8"))).toEqual({ b2bua_active_calls: 0 })
+      expect(String(reading[1]!["file"]), "where the gauge was read").toMatch(/^http:\/\/127\.0\.0\.1:\d+\/metrics$/)
       const legs = await legCallIdsOf(bundle, result.caseId)
       expect(legs, "the caller's Call-ID and the runner's b-leg one").toHaveLength(2)
       expect(captured, "the runner captured both legs of the call").toEqual(expect.arrayContaining([...legs]))
@@ -316,9 +320,19 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
         expect(cut).toEqual([])
         continue
       }
-      expect(cut.map((line) => line["kind"])).toEqual(["file"])
-      const ids = callIdsIn(fs.readFileSync(path.join(bundle, String(cut[0]!["file"]))))
+      expect(cut.map((line) => line["kind"])).toEqual(["file", "table"])
+      expect(cut[1]!["name"]).toBe("capture-packets")
+      const packets = fs.readFileSync(path.join(bundle, String(cut[0]!["file"])))
+      const ids = callIdsIn(packets)
       expect([...ids].sort(), "both legs of the busy call, and no other call").toEqual(await legCallIdsOf(bundle, result.caseId))
+      const [columns, ...rows] = fs.readFileSync(path.join(bundle, String(cut[1]!["file"])), "utf8").split("\n")
+        .filter((line) => line !== "").map((line) => JSON.parse(line) as ReadonlyArray<string>)
+      expect(columns).toEqual(["packet", "start line", "Call-ID"])
+      expect(rows, "one row per packet of the cut").toHaveLength(blocksOf(packets).filter((block) => block.type === 6).length)
+      expect(rows.map((row) => row[1])).toEqual(expect.arrayContaining([
+        expect.stringMatching(/^INVITE sip:/),
+        expect.stringMatching(/^SIP\/2\.0 486 /)
+      ]))
     }
   })
 })
