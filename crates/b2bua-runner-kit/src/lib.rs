@@ -104,6 +104,7 @@ use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 pub mod backend_url;
 mod base;
 mod capacity_env;
+mod capture_env;
 mod cdr_rabbitmq;
 mod check;
 mod drain_env;
@@ -229,11 +230,9 @@ impl RunnerEnv {
         if let Some(bytes) = self.udp_rcvbuf {
             bind_opts = bind_opts.with_recv_buffer(bytes);
         }
-        let endpoint: Arc<dyn UdpEndpoint> = net
-            .bind_udp(bind_opts)
-            .await
-            .map_err(|e| format!("bind {listen_sa} failed: {e:?}"))?
-            .into();
+        let bound = net.bind_udp(bind_opts).await;
+        let bound = bound.map_err(|e| format!("bind {listen_sa} failed: {e:?}"))?;
+        let endpoint = capture_env::captured(bound.into(), self.capture.as_deref(), name)?;
         let local = endpoint.local_addr();
         log_socket_buffers(name, endpoint.as_ref(), self.udp_rcvbuf, self.udp_sndbuf);
 

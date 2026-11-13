@@ -5,6 +5,7 @@
 use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -48,6 +49,10 @@ pub struct RunnerEnv {
     pub admin_addr: SocketAddr,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
+    /// `B2BUA_CAPTURE` — the pcapng file the worker appends each SIP datagram
+    /// it sends and receives to, one section per start
+    /// ([`sip_net::CaptureEndpoint`]); unset or blank, nothing is captured.
+    pub capture: Option<PathBuf>,
     /// What the process reads the wire under: the default limits and the
     /// exemptions `SIP_EXEMPTIONS` states (comma-separated, default none; a blank
     /// value or a name no exemption has refuses the boot, as on the proxy).
@@ -319,6 +324,7 @@ impl RunnerEnv {
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             admin_addr: admin_addr(lookup)?,
             queue_max: knob("B2BUA_QUEUE", "8192")?,
+            capture: stated(lookup("B2BUA_CAPTURE")).map(PathBuf::from),
             parser_limits: parser_limits(lookup)?,
             udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF")?,
             udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF")?,
