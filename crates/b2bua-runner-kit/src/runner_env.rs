@@ -70,7 +70,8 @@ pub struct RunnerEnv {
     /// `b2bua_udp_kernel_rx_dropped_total`.
     pub udp_rcvbuf: Option<usize>,
     /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024, at
-    /// most [`BufferedCdrWriter::MAX_QUEUE`]).
+    /// most [`BufferedCdrWriter::MAX_QUEUE`]; `0` unbuffered: the sink is
+    /// called inline on the call path).
     pub cdr_queue: usize,
     /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
     pub ordinal: String,
