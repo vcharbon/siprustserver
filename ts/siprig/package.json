@@ -15,6 +15,7 @@
     "@effect/platform-node": "4.0.0-rc.111",
     "@sip/campaign-runner": "workspace:*",
     "@sip/cli": "workspace:*",
+    "@sip/contracts": "workspace:*",
     "@sip/corpus": "workspace:*",
     "@sip/lab-host": "workspace:*",
     "@sip/rig": "workspace:*",

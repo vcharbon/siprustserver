@@ -23,7 +23,7 @@ import type { Declared } from "@sip/workspace/campaign-tags"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Result from "effect/Result"
-import { readFile } from "node:fs/promises"
+import { readdir, readFile, stat } from "node:fs/promises"
 import * as path from "node:path"
 import { type Broken, type CaseFile, refOf, type Selected } from "./case-file.js"
 import type { Cell, Checked, Heal } from "./cell.js"
@@ -88,9 +88,17 @@ export const egressOf = (document: Pivot.PivotV3): string | undefined => {
   return document.actors.find((a) => a.id === leg?.actor)?.endpoint
 }
 
+/**
+ * The text of the case file `file` as compiled; a case source that is a
+ * cut's output directory (`@sip/rig` `CaseSource.ofCut`) reads as the ids of
+ * its cases, one per line.
+ */
 const read = (file: CaseFile) =>
   Effect.tryPromise({
-    try: () => readFile(file.absolute, "utf8"),
+    try: async () =>
+      (await stat(file.absolute)).isDirectory()
+        ? `${(await readdir(path.join(file.absolute, "cases"))).sort().join("\n")}\n`
+        : await readFile(file.absolute, "utf8"),
     catch: (e) => failed(`${file.file}: does not read: ${e instanceof Error ? e.message : String(e)}`)
   })
 

@@ -10,10 +10,21 @@
 import { Logged, NodeHeap } from "@sip/toolchain"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
+import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 import { Boxing, Tools } from "../deployment/index.js"
 
 /** The generator's log, in the directory of the cut it ran for. */
 export const GENERATOR_LOG = "generator.log"
+
+/**
+ * The base's case generator (`base-generator.ts`, the neutral cut), as a
+ * deployment stating no cut rule of its own names it for `Tools.generator`.
+ */
+export const BASE: Tools.Generator = {
+  argv: ["pnpm", "exec", "tsx", "src/cut/base-generator.ts"],
+  cwd: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
+}
 
 /** The CPUs one generator is given: it is one node process with a little help. */
 const CPUS = 4

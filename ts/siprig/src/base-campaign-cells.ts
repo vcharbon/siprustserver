@@ -13,9 +13,10 @@ import type { Cell } from "@sip/campaign-runner/cell"
 import { CLEANUP_GATE, RFC_GATE } from "@sip/campaign-runner/checked"
 import { pivotLint } from "@sip/campaign-runner/lint"
 import { cellOfSource } from "@sip/campaign-runner/source-cells"
+import { Postcondition } from "@sip/contracts"
 import { CaseSource, CompiledCell } from "@sip/rig"
 import * as Effect from "effect/Effect"
-import type * as FileSystem from "effect/FileSystem"
+import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
 
 /** The variable naming the `pivot-schema` binary the lint runs, ahead of any other place. */
@@ -35,17 +36,29 @@ export const pivotSchemaOf = (env: NodeJS.ProcessEnv, checkout: string): string 
 }
 
 /**
- * The case sources a run reads: `sources`, paths in the pack, where the run
- * names them, else every one the pack's manifest names, in its order. A
- * named path leading out of the pack's tree is refused.
+ * The case sources a run reads: `sources` where the run names them, else
+ * every one the pack's manifest names, in its order. A named relative path is
+ * one in the pack, and is refused where it leads out of the pack's tree; an
+ * absolute one, a cut's output say, is taken as named.
  */
 const namedOf = (pack: string, sources: ReadonlyArray<string> | undefined) => {
   if (sources === undefined) return CaseSource.namedBy(pack)
-  const outside = sources.find((source) => path.relative(pack, path.resolve(pack, source)).startsWith(".."))
+  const outside = sources.find((source) =>
+    !path.isAbsolute(source) && path.relative(pack, path.resolve(pack, source)).startsWith("..")
+  )
   return outside === undefined
     ? Effect.succeed(sources.map((source) => ({ path: source, absolute: path.resolve(pack, source) })))
     : Effect.fail({ message: `the case source ${outside} leads out of the pack ${pack}` })
 }
+
+/**
+ * What a cut case claims as a cell of the base's campaign: the one call
+ * record the system writes of each call its document places, which the
+ * simulated lane counts of every cell.
+ */
+const recordPerCall = (document: CompiledCell.CompiledCell["document"]): CompiledCell.CompiledCell["claims"] => ({
+  [Postcondition.CALL_RECORDS]: { count: document.calls.length }
+})
 
 /**
  * Every case source the run reads of the pack at `pack` (`sources`, else the
@@ -55,11 +68,18 @@ const namedOf = (pack: string, sources: ReadonlyArray<string> | undefined) => {
 export const selectionOf = (pack: string, sources?: ReadonlyArray<string>) =>
   Effect.gen(function*() {
     const named = yield* namedOf(pack, sources)
+    const fs = yield* FileSystem.FileSystem
     const selected: Array<CaseFile> = []
     const broken: Array<Broken> = []
     for (const source of named) {
       const file = path.normalize(source.path)
-      const cells = yield* CaseSource.load(source.absolute).pipe(Effect.result)
+      const isCut = yield* fs.stat(source.absolute).pipe(
+        Effect.map((info) => info.type === "Directory"),
+        Effect.orElseSucceed(() => false)
+      )
+      const cells = yield* (isCut ? CaseSource.ofCut(source.absolute, recordPerCall) : CaseSource.load(source.absolute)).pipe(
+        Effect.result
+      )
       if (cells._tag === "Success") selected.push({ file, absolute: source.absolute, value: cells.success, cells: cells.success })
       else broken.push({ file, absolute: source.absolute, reason: cells.failure.reason })
     }
