@@ -3,7 +3,8 @@
 //! [`CdrEncoder`] (default [`JsonRecordEncoder`]), each a line of the file.
 //!
 //! Contract: each record handed to `write` counts once, in `cdr_written_total`
-//! when its line went to the file, else in `cdr_dropped_total`. A line goes
+//! when its line went to the file, else in `cdr_dropped_total`, the first
+//! drop said at warn. A line goes
 //! out in one `write_all` on a file opened for appending, so a reader of a
 //! file several runs appended to reads whole lines. The sink writes inline:
 //! `close` holds nothing.
@@ -11,6 +12,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,6 +32,8 @@ pub struct FileCdrWriter {
     path: PathBuf,
     encoder: Arc<dyn CdrEncoder>,
     metrics: B2buaMetrics,
+    /// Set once a record was dropped: the first drop alone is said at warn.
+    warned: AtomicBool,
 }
 
 impl FileCdrWriter {
@@ -41,7 +45,13 @@ impl FileCdrWriter {
         metrics: B2buaMetrics,
     ) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self { file, path: path.to_path_buf(), encoder, metrics })
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+            encoder,
+            metrics,
+            warned: AtomicBool::new(false),
+        })
     }
 
     /// The file it appends to.
@@ -53,7 +63,9 @@ impl FileCdrWriter {
 /// The file sink `B2BUA_CDR_FILE` selects as `lookup` states it, writing the
 /// default [`JsonRecordEncoder`] record; `None` where it is unset or blank.
 /// `Err` names the variable where the file cannot be opened, and both
-/// variables where `B2BUA_CDR_RABBITMQ_URL` is set too: a worker has one sink.
+/// variables where `B2BUA_CDR_RABBITMQ_URL` is set too (a worker has one
+/// sink) or `B2BUA_CDR_QUEUE` is 0 (an unbuffered path writes the file on
+/// the call path).
 pub fn file_cdr_writer_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
     metrics: &B2buaMetrics,
@@ -63,6 +75,13 @@ pub fn file_cdr_writer_from_lookup(
         return Err(format!(
             "{CDR_FILE_VARIABLE} and B2BUA_CDR_RABBITMQ_URL are both set: a worker writes its \
              CDRs to one sink, name one"
+        ));
+    }
+    if lookup("B2BUA_CDR_QUEUE").and_then(|q| q.parse::<usize>().ok()) == Some(0) {
+        return Err(format!(
+            "B2BUA_CDR_QUEUE=0 calls the CDR sink inline on the call path; with \
+             {CDR_FILE_VARIABLE} set every file write would stall calls: give the CDR buffer \
+             a depth"
         ));
     }
     let path = PathBuf::from(file);
@@ -86,7 +105,16 @@ impl CdrWriter for FileCdrWriter {
             Ok(()) => self.metrics.bump_cdr_written(),
             Err(refused) => {
                 self.metrics.bump_cdr_dropped();
-                tracing::debug!(%refused, file = %self.path.display(), "CDR record dropped");
+                if self.warned.swap(true, Ordering::Relaxed) {
+                    tracing::debug!(%refused, file = %self.path.display(), "CDR record dropped");
+                } else {
+                    tracing::warn!(
+                        %refused,
+                        file = %self.path.display(),
+                        "CDR record dropped: the file sink refused it; later drops are counted \
+                         in cdr_dropped_total, said at debug"
+                    );
+                }
             }
         }
     }
