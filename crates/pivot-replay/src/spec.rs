@@ -112,8 +112,9 @@ pub enum LaneSpec {
     Hosted(HostedBlock),
 }
 
-/// A hosted lane's block: where its system takes SIP and publishes its
-/// metrics, and the endpoint its b-legs are dialled at.
+/// A hosted lane's block: where its system takes SIP, and the endpoint its
+/// b-legs are dialled at. Where it publishes its metrics is the batch's
+/// (`crate::plain_batch::BatchSpec`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct HostedBlock {
@@ -121,10 +122,6 @@ pub struct HostedBlock {
     pub name: String,
     /// Where the system takes SIP, `ip:port`.
     pub ingress: String,
-    /// Where the system publishes Prometheus text, `ip:port`, where it
-    /// publishes any: a document's observables are read there.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metrics: Option<String>,
     /// The `endpoints[].id` whose bound socket the system dials a b-leg at.
     pub egress_endpoint: String,
     /// The port book's base, read only under [`SdpPlane::Rewrite`].
