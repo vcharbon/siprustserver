@@ -37,6 +37,7 @@
  * case the lane stores it under; the view names the one a check's `said` was
  * read from. Where the cell holds no such log, the store's mark says why.
  */
+import { commitLabel } from "@sip/contracts/commit-label"
 import { CampaignResults as Results } from "@sip/store"
 import type { Checked } from "@sip/campaign-runner/cell"
 import * as CampaignLanes from "@sip/campaign-runner/lanes"
@@ -101,7 +102,9 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@sip/site/Campaign") {}
 
-const short = (sha: string | null): string | null => (sha === null ? null : sha.slice(0, 10))
+/** A component's commit as a run label: `commitLabel`, null where no commit was taken (the label is left out). */
+const short = (component: { readonly sha: string | null; readonly dirty: boolean | null }): string | null =>
+  component.sha === null ? null : commitLabel(component)
 
 type CaseView = View["cases"][number]
 
@@ -161,7 +164,7 @@ export const viewOf = (
       ["branch", run.branch],
       ["seed", run.seed],
       ...run.labels,
-      ...components.map((c) => [c.name, short(c.sha)] as const)
+      ...components.map((c) => [c.name, short(c)] as const)
     ].filter((pair): pair is readonly [string, string] => pair[1] !== null)
     return {
       id: run.id,

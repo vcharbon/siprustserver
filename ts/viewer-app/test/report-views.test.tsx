@@ -209,4 +209,10 @@ describe("the report view", () => {
     expect(markup).toContain("died expect-timed-out at s6 waiting 200 to INVITE")
     expect(markup).toContain(`href="/api/triage/c.pcap/runs/run1051725/text?lane=fake&amp;case=c-case1"`)
   })
+
+  it("shows a run built from a dirty tree like any other, `-dirty` after its commit", () => {
+    const run = { ...summarised.runs[0]!, code: [{ name: "app", sha: "a".repeat(40), dirty: true }, { name: "core", sha: "b".repeat(40) }] }
+    const drawn = renderToStaticMarkup(<RunReportView doc={{ ...summarised, runs: [run] }} />)
+    expect(drawn).toContain(`app ${"a".repeat(10)}-dirty, core ${"b".repeat(10)}<`)
+  })
 })

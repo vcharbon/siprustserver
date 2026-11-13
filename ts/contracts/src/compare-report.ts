@@ -123,10 +123,11 @@ export const KnownBug = Schema.Struct({
 })
 export interface KnownBug extends Schema.Schema.Type<typeof KnownBug> {}
 
-/** One component's commit as the cell's run recorded it. */
+/** One component's commit as the cell's run recorded it; `dirty` true where its tree differed from it. */
 export const CellComponent = Schema.Struct({
   name: Schema.String,
-  sha: Schema.NullOr(Schema.String)
+  sha: Schema.NullOr(Schema.String),
+  dirty: Schema.optionalKey(Schema.Boolean)
 })
 export interface CellComponent extends Schema.Schema.Type<typeof CellComponent> {}
 

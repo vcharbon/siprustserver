@@ -79,6 +79,9 @@
                       "type": "null"
                     }
                   ]
+                },
+                "dirty": {
+                  "type": "boolean"
                 }
               },
               "required": [
@@ -372,6 +375,9 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "dirty": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
