@@ -45,3 +45,9 @@ metric-catalogue = { path = "../metric-catalogue" }
 # The IP-literal readers the socket addresses are built with (re-exported);
 # the loopback tests parse what they received.
 sip-message = { path = "../sip-message" }
+# A packet capture whose file refused a write says so once.
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The capture tests read what the endpoint wrote with the capture decoder.
+sip-pcap = { path = "../sip-pcap" }

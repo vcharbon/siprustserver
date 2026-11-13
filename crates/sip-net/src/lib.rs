@@ -2,7 +2,8 @@
 //!
 //! The DI seam is the [`SignalingNetwork`] trait ([`net`]); its production
 //! implementation is [`RealSignalingNetwork`], `tokio::net::UdpSocket`-backed
-//! ([`real`]). The simulated fabric, the recording and audit decorators and the
+//! ([`real`]). [`CaptureEndpoint`] ([`capture`]) appends what an endpoint sends
+//! and delivers to a pcapng file. The simulated fabric, the recording and audit decorators and the
 //! wire-trace projection implement the same seam in `sip-net-testkit`. A
 //! datagram's parse made on the receive path ([`Arrival`]) travels with it
 //! through the queue, so it is parsed once.
@@ -26,9 +27,11 @@
 )]
 
 pub mod arrival;
+pub mod capture;
 pub mod fragmentation;
 pub mod net;
 pub mod parse_guard;
+mod pcapng;
 pub mod poison;
 pub mod pre_ingress;
 pub mod queue;
@@ -37,6 +40,7 @@ pub mod socket_stats;
 pub mod types;
 
 pub use arrival::Arrival;
+pub use capture::CaptureEndpoint;
 pub use net::{SignalingNetwork, UdpEndpoint};
 pub use parse_guard::{parse_datagram, ParseOutcome, ParserPanicked};
 pub use real::RealSignalingNetwork;
