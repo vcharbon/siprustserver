@@ -2,8 +2,9 @@
 //! (`CaptureEndpoint`), read back by the capture decoder (`sip-pcap`): each
 //! datagram sent and delivered, with its own addresses, bytes and wall-clock
 //! time, in order, over IPv4 and IPv6, its UDP checksum one a receiver
-//! accepts; two captures appended to one file read as one capture, a block an
-//! earlier capture left cut short dropped. An endpoint bound to the
+//! accepts at an even and an odd length; two captures appended to one file
+//! read as one capture, a block an earlier capture left cut short dropped, a
+//! tail no capture's write leaves refused. An endpoint bound to the
 //! unspecified address, whose own address no datagram states, is refused.
 
 use std::net::{IpAddr, SocketAddr};
@@ -16,7 +17,10 @@ use tokio::time::timeout;
 
 const OPTIONS: &[u8] =
     b"OPTIONS sip:bob@biloxi.example.com SIP/2.0\r\nCall-ID: capture-1@atlanta.example.com\r\n\r\n";
-const OK: &[u8] = b"SIP/2.0 200 OK\r\nCall-ID: capture-1@atlanta.example.com\r\n\r\n";
+/// Of odd length, where [`OPTIONS`] is of even length: the checksum pads its
+/// last byte.
+const OK: &[u8] =
+    b"SIP/2.0 200 OK\r\nCall-ID: capture-1@atlanta.example.com\r\nContent-Length: 0\r\n\r\n";
 
 /// A file path of its own under the temporary directory, `name` in it.
 fn scratch(name: &str) -> PathBuf {
@@ -35,8 +39,10 @@ async fn bound(net: &RealSignalingNetwork) -> Arc<dyn UdpEndpoint> {
     bound_at(net, "127.0.0.1").await
 }
 
-/// `captured` sends OPTIONS to `peer`, which answers 200, and receives it.
+/// `captured` sends OPTIONS to `peer`, which answers 200, and receives it:
+/// one datagram of even length and one of odd length.
 async fn exchange(captured: &CaptureEndpoint, peer: &dyn UdpEndpoint) {
+    assert_eq!((OPTIONS.len() % 2, OK.len() % 2), (0, 1));
     captured.send_to(OPTIONS, peer.local_addr()).await.unwrap();
     let asked = timeout(Duration::from_secs(2), peer.recv()).await.unwrap().unwrap();
     peer.send_to(OK, asked.src).await.unwrap();
@@ -185,6 +191,27 @@ async fn a_capture_opened_after_a_block_cut_short_drops_it_and_the_file_reads_wh
     let (datagrams, _) = sip_pcap::read_capture_files(&[&file]).unwrap();
     let payloads: Vec<_> = datagrams.iter().map(|d| d.payload.as_slice()).collect();
     assert_eq!(payloads, vec![OPTIONS, OK, OPTIONS, OK]);
+    std::fs::remove_file(&file).unwrap();
+}
+
+/// A file whose last block states a length past any block a capture writes
+/// is refused and kept as it was: its tail is no write of a capture cut short.
+#[tokio::test]
+async fn a_tail_stating_a_block_longer_than_any_capture_writes_is_refused_and_kept() {
+    let net = RealSignalingNetwork::new();
+    let file = scratch("long-tail");
+    let first = CaptureEndpoint::open(bound(&net).await, &file).unwrap();
+    drop(first);
+    let mut bytes = std::fs::read(&file).unwrap();
+    bytes.extend_from_slice(&6u32.to_le_bytes());
+    bytes.extend_from_slice(&(1u32 << 20).to_le_bytes());
+    bytes.extend_from_slice(&[0; 64]);
+    std::fs::write(&file, &bytes).unwrap();
+
+    let refused = CaptureEndpoint::open(bound(&net).await, &file).err().expect("refused");
+
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData, "{refused}");
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
     std::fs::remove_file(&file).unwrap();
 }
 
