@@ -204,8 +204,11 @@ const logUnder = (path: Path.Path, under: string): string =>
  * finds its addresses free. `extraEnv` is added to a managed worker's
  * environment. A managed worker that died is stood again by `restand` with
  * the same command, log and pid file, as its orchestrator would. The death is
- * a step's only where the step claims that worker's pid; every other death
- * the handle still says, beside that of the one stood.
+ * a step's only where a step claimed that worker's pid, a claim kept by that
+ * worker through a stand that failed; every other death the handle still
+ * says, beside that of the one stood. Once a new worker is spawned, the handle
+ * holds it: `restand` stops the dead one and stands the next uninterruptibly,
+ * so none outlives the batch's stop.
  */
 export const stand = <L extends LaneView.View, R>(
   pack: SutPack<L, R>,
@@ -228,26 +231,34 @@ export const stand = <L extends LaneView.View, R>(
     yield* fs.makeDirectory(path.dirname(log), { recursive: true }).pipe(Effect.orDie)
     const pidFile = pack.pidFileOf?.(hosted)
     const services = yield* Effect.context<Requirements>()
-    let held = yield* worker(command, log, lane, READY_WITHIN, pidFile)
+    let held: Worker = yield* worker(command, log, lane, READY_WITHIN, pidFile)
     console.log(`[sut] ${lane}: one ${pack.worker} on ${hosted.sip.ingress}, logging to ${log}`)
     const unclaimed = new Map<Worker, string>()
+    const claimed = new Set<Worker>()
+    const hold = (next: Worker) =>
+      Effect.sync(() => {
+        held = next
+      })
     const restand = (claim?: number) =>
       Effect.gen(function*() {
         if (yield* held.running) return undefined
         const exit = yield* held.exited
-        const claimed = claim === held.pid
-        if (!claimed) unclaimed.set(held, exit)
-        yield* held.stop
-        held = yield* worker(command, log, lane, READY_WITHIN, pidFile)
-        const whose = claimed ? "stopped by a step" : "no step stopped it"
+        if (claim === held.pid) claimed.add(held)
+        const isClaimed = claimed.has(held)
+        if (!isClaimed) unclaimed.set(held, exit)
+        yield* Effect.uninterruptible(held.stop.pipe(
+          Effect.andThen(worker(command, log, lane, READY_WITHIN, pidFile)),
+          Effect.flatMap(hold)
+        ))
+        const whose = isClaimed ? "stopped by a step" : "no step stopped it"
         console.log(`[sut] ${lane}: ${exit}, ${whose}; one stood again on ${hosted.sip.ingress}`)
-        return { exit, claimed } satisfies Restood
+        return { exit, claimed: isClaimed } satisfies Restood
       }).pipe(
         Effect.mapError((e) => `the ${pack.worker} of ${lane} not stood again: ${e.message}`),
         Effect.provideContext(services)
       )
     const died = () => {
-      const current = unclaimed.has(held) ? undefined : held.died()
+      const current = unclaimed.has(held) || claimed.has(held) ? undefined : held.died()
       const said = [...unclaimed.values(), ...(current === undefined ? [] : [current])]
       return said.length === 0 ? undefined : said.join("; ")
     }
