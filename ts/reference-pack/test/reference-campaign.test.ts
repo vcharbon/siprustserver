@@ -168,6 +168,10 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
       const answered = Object.fromEntries(result.verifications.map((line) => [line.name, line.answer]))
       expect(answered["call"]).toBe("pass")
       expect(answered["cleanup"]).toBe("pass")
+      const bundle = path.join(run!.lanes[0]!.bundlePath, result.cell!)
+      const attached = linesOf(path.join(bundle, "attachments.jsonl")).filter((line) => line["name"] === "sut-log")
+      expect(attached.map((line) => [line["kind"], line["source"]])).toEqual([["log", "sut-log"]])
+      expect(fs.readFileSync(path.join(bundle, String(attached[0]!["file"])), "utf8"), "cut to the call's window, the runner's start before it").not.toContain("listening UDP")
     }
     expect(fs.readFileSync(log, "utf8")).toContain("listening UDP")
   })

@@ -1,0 +1,18 @@
+# The B2BUA runner's log, bracketed by its batch (ADR-0060 appendix §17): `open`
+# notes how long the log the lane's `b2bua-runner` part names already is,
+# `collect` attaches what the batch appended to the batch, and each cell's
+# share of it to the cell, as `log` attachments (`main.ts`, `cut.ts`). A lane
+# naming no runner part does not wire it. Informative: a log decides nothing.
+schema = "collector.v1"
+name = "sut-log"
+scope = "batch"
+needs = ["b2bua-runner"]
+informative = true
+
+[timeouts]
+open_s = 30
+collect_s = 60
+
+[run]
+open = "./run"
+collect = "./run"
