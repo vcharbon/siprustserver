@@ -53,7 +53,11 @@ interface Ending {
  */
 const phases = (
   script: (lane: Lane, id: string, attempt: number) => Ending | undefined,
-  options: { readonly dirty?: (lane: Lane, attempt: number) => string | undefined; readonly fails?: (lane: Lane, attempt: number) => boolean } = {}
+  options: {
+    readonly dirty?: (lane: Lane, attempt: number) => string | undefined
+    readonly leftChanged?: (lane: Lane, attempt: number) => string | undefined
+    readonly fails?: (lane: Lane, attempt: number) => boolean
+  } = {}
 ) => {
   const batches: Array<string> = []
   const kept: Array<string> = []
@@ -68,8 +72,10 @@ const phases = (
         if (options.fails?.(lane, attempt) === true) {
           return Effect.fail(new PhaseFailed({ phase: `replay ${lane}`, reason: "the lane broke" }))
         }
-        const dirty = options.dirty?.(lane, attempt)
+        const leftChanged = options.leftChanged?.(lane, attempt)
+        const dirty = options.dirty?.(lane, attempt) ?? leftChanged
         return Effect.succeed({
+          ...(leftChanged === undefined ? {} : { leftChanged }),
           results: cells.map((c): CellResult => {
             const ending = script(lane, c.id, attempt) ?? { status: "pass" }
             return {
@@ -203,6 +209,26 @@ describe("a case's retries", () => {
     expect(a.bundle).toBe("/b/sim/a~1")
     expect(a.attempts?.map((x) => [x.status, x.kept])).toEqual([["failure", true], ["error", false]])
     expect(t.reported().errors).toEqual([{ phase: "replay sim", message: "attempt 2: the lane broke" }])
+  })
+
+  it("runs no retry on a lane whose batch left the lab changed: each cell it would retry has an attempt not run, an environment error", async () => {
+    const changed = "the step kill for a left the lab changed: 2 heal attempts failed"
+    const t = phases((lane, id) => (lane === "sim" && id === "b" ? undefined : { status: "failure" }), {
+      leftChanged: (lane, attempt) => (lane === "sim" && attempt === 1 ? changed : undefined)
+    })
+    expect(await Effect.runPromise(run(["sim", "other"], withCells(t.p, [cell("a", 3), cell("b", 3)])))).toBe(2)
+    expect(t.batches, "no retry on the changed lab; the other lane's run").toEqual([
+      "sim#1: a,b",
+      "other#1: a,b",
+      "other#2: a,b",
+      "other#3: a,b",
+      "other#4: a,b"
+    ])
+    const a = resultOf(t.reported(), "sim", "a")
+    expect(a.status).toBe("failure")
+    expect(a.attempts?.map((x) => [x.status, x.kept])).toEqual([["failure", true], ["error", false]])
+    expect(resultOf(t.reported(), "sim", "b").status).toBe("pass")
+    expect(t.reported().errors).toEqual([{ phase: "replay sim", message: `batch end: ${changed}` }])
   })
 })
 

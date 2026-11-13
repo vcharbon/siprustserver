@@ -50,7 +50,7 @@ const RECORDS_STORE = JSON.stringify({
 const WORKER_POOL = JSON.stringify({ type: "object", required: ["size"], properties: { size: { type: "integer", minimum: 1 } } })
 
 const OPERATION =
-  `schema = "operation.v1"\nname = "restart-worker"\nneeds = ["worker-pool"]\n[params]\nsignal = "SIGTERM"\n[run]\ninject = "./inject"\nheal = "./heal"\n`
+  `schema = "operation.v1"\nname = "restart-worker"\nneeds = ["worker-pool"]\n[params]\nsignal = "SIGTERM"\ncodes = [480]\n[run]\ninject = "./inject"\nheal = "./heal"\n`
 
 /** A workspace holding the part schemas, one operation, and `files`. */
 const workspace = (files: Readonly<Record<string, Entry>>) =>
@@ -159,6 +159,26 @@ describe("the lanes of a root", () => {
     expect(refusal?.files).toEqual([path.join(typo, "lanes/served.toml"), path.join(typo, "operations/restart-worker/operation.toml")])
     expect((await refusalOf(bound(`{ signal = 9 }`)))?.reason).toBe(
       "operations.kill.params.signal: a number, where the operation's [params] states a string"
+    )
+  })
+
+  it("refuses a binding's array parameter whose elements are of another type than the manifest's, and a key only an object's prototype holds", async () => {
+    const bound = (params: string) =>
+      workspace({
+        "lanes/served.toml": REAL("served", `[parts]\nworker-pool = "small"\n[operations.kill]\noperation = "restart-worker"\nparams = ${params}`),
+        "targets/worker-pool/small.toml": `size = 2\n`
+      })
+    const { lanes } = await lanesOf(bound(`{ codes = [486, 603] }`))
+    expect(lanes.find((lane) => lane.id === "served")?.operationParams?.get("kill")).toEqual({ codes: [486, 603] })
+    expect((await refusalOf(bound(`{ codes = ["480"] }`)))?.reason).toBe(
+      "operations.kill.params.codes: an array of string, where the operation's [params] states an array of number"
+    )
+    expect((await refusalOf(bound(`{ codes = 480 }`)))?.reason).toBe(
+      "operations.kill.params.codes: a number, where the operation's [params] states an array of number"
+    )
+    expect((await refusalOf(bound(`{ codes = [{ a = 1 }] }`)))?.reason).toMatch(/^operations\.kill\.params\.codes\[0\]: /)
+    expect((await refusalOf(bound(`{ constructor = "x" }`)))?.reason).toBe(
+      "operations.kill.params.constructor: the operation's [params] declares no constructor"
     )
   })
 

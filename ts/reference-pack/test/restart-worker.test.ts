@@ -166,6 +166,13 @@ describe.skipIf(skipping)("restart-worker on the reference lane", () => {
         }))
       expect(await probe(), "no runner stood again: not yet").toEqual({ _tag: "Exited", code: Operation.NOT_YET })
       next = await spawnRunner()
+      const stopped = path.join(instance.dir, "state", "stopped")
+      fs.writeFileSync(stopped, String(next.pid))
+      expect(await probe(), "the runner answering is the one the step kept as stopped: not yet").toEqual({
+        _tag: "Exited",
+        code: Operation.NOT_YET
+      })
+      fs.writeFileSync(stopped, String(first.pid))
       expect(await probe(), "another runner answers: recovered").toEqual({ _tag: "Exited", code: 0 })
     } finally {
       first.kill("SIGKILL")

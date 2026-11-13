@@ -177,4 +177,40 @@ describe("a managed lane's worker", () => {
     await Effect.runPromise(held.stop)
     expect(held.died()!.split("; ")).toHaveLength(2)
   })
+
+  it("claims each death against the worker running then, not the first one stood", async () => {
+    const pidFile = path.join(dir, "named", "sut.pid")
+    const { held, killed } = await named(pidFile)
+    const first = await killed()
+    expect(await run(held.restand!(first))).toEqual({ exit: expect.stringContaining("exited SIGKILL"), claimed: true })
+    const second = await killed()
+    expect(await run(held.restand!(second))).toEqual({ exit: expect.stringContaining("exited SIGKILL"), claimed: true })
+    expect(held.died(), "two deaths, each claimed by its step").toBeUndefined()
+    await Effect.runPromise(held.stop)
+  })
+
+  it("keeps a claimed death claimed where standing its worker again failed, once a later stand succeeds", async () => {
+    const pidFile = path.join(dir, "named", "sut.pid")
+    const gate = path.join(dir, "gate")
+    fs.writeFileSync(gate, "")
+    const pack: SutPack = {
+      worker: "stand-in",
+      metricsOf: () => undefined,
+      pidFileOf: () => pidFile,
+      command: () => Effect.succeed(standIn(`if [ -e ${gate} ]; then echo "${Sut.READY}"; exec sleep 30; else exit 1; fi`))
+    }
+    const held = (await run(Sut.stand(pack, lane, path.join(dir, "batch"))))!
+    const first = Number(fs.readFileSync(pidFile, "utf8").trim())
+    fs.rmSync(gate)
+    process.kill(first, "SIGKILL")
+    while (alive()) await new Promise((resolve) => setTimeout(resolve, 10))
+    await expect(run(held.restand!(first)), "its port still held, the worker not stood again").rejects.toBeDefined()
+    expect(held.died(), "a claimed death, while no worker runs").toBeUndefined()
+    fs.writeFileSync(gate, "")
+    const later = await run(held.restand!())
+    expect(later).toEqual({ exit: expect.stringContaining("exited SIGKILL"), claimed: true })
+    expect(alive(), "the worker stood again runs").toBe(true)
+    await Effect.runPromise(held.stop)
+    expect(held.died(), "the death the step claimed is no death of the lane's system").toBeUndefined()
+  })
 })

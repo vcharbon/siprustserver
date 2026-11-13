@@ -184,10 +184,15 @@ describe.skipIf(!served || skipping)("an operation as a step of a case on the re
     expect(after?.errorDetail).toContain("not run: the step restart-worker for")
     expect(after?.errorDetail).toContain("left the lab changed")
     expect(events.filter((event) => event.phase === JobEvents.LAB_LEFT_CHANGED)).toHaveLength(1)
-    const row = await Effect.runPromise(
-      Effect.flatMap(Jobs.Service, (jobs) => jobs.show(job)).pipe(Effect.provide(servicesOf("left-changed")))
+    const { row, marked } = await Effect.runPromise(
+      Effect.gen(function*() {
+        const row = yield* (yield* Jobs.Service).show(job)
+        const marked = yield* (yield* JobEvents.Service).labLeftChanged(job)
+        return { row, marked }
+      }).pipe(Effect.provide(servicesOf("left-changed")))
     )
-    expect(row?.job.status, "a job whose lab a step left changed closes failed").toBe("failed")
+    expect(marked, "the job marked as having left its lab changed").toBe(true)
+    expect(row?.job.status, "the job closed failed").toBe("failed")
   })
 
   it("refuses at compile a case asking for a step whose tags state no alone, no call placed", async () => {
