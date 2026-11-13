@@ -84,6 +84,9 @@ pub struct Lane<'a> {
     /// The events the lane observes off the wire, for a send that awaits one
     /// (§6.7g); `None` on a lane that reports none.
     pub events: Option<crate::events::LaneEvents>,
+    /// What performs an `inject` node's action (§6.6); `None` on a lane that
+    /// performs none, where an `inject` fails the run as `injector-missing`.
+    pub injector: Option<std::sync::Arc<dyn crate::injector::Injector>>,
     /// How the run reads what its parties exchanged, off its recording: the
     /// lane's reading of the wire. `CustomParser::built()` reads the RFC; a
     /// lane replaying captured traffic states its tool reading.

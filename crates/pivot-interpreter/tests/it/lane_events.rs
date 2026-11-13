@@ -128,6 +128,7 @@ async fn run(
         base_dir,
         composer: &Composer,
         events,
+        injector: None,
         reader: std::sync::Arc::new(sip_message::CustomParser::built()),
     };
     let dir = std::env::temp_dir().join("pivot-runs").join(case);

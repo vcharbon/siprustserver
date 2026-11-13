@@ -49,6 +49,7 @@
 //!   `optional` release, `unordered` completion.
 //! - `early` — the early dialogs a forking callee answers under (§6.1).
 //! - `events` — the lane events a `send` waits on (§6.7g).
+//! - `injector` — the lane's injector an `inject` node is handed to (§6.6).
 //! - `deviation` — the reproduced non-compliance an emission must carry.
 //! - `preserve` — holding a preserved emission to the block the document
 //!   stores (`verbatim-emission`, `raw-order`).
@@ -88,6 +89,7 @@ pub(crate) mod early;
 pub(crate) mod events;
 pub(crate) mod exec;
 pub(crate) mod gate;
+pub(crate) mod injector;
 pub(crate) mod instance;
 pub(crate) mod media;
 pub(crate) mod mscml;
@@ -111,6 +113,7 @@ pub(crate) mod wall;
 
 pub use events::{LaneEventSender, LaneEvents};
 pub use exec::{Lane, Outcome};
+pub use injector::{InjectRequest, Injection, Injector};
 pub use instance::mint_nonce;
 pub use media::{Booking, MediaMode};
 pub use plan::{Plan, PlanError};

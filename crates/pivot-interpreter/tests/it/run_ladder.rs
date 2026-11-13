@@ -19,6 +19,7 @@ mod finals_and_acks;
 mod flow_shapes;
 mod forks;
 mod hunting;
+mod inject;
 mod limiter;
 mod matching;
 mod negative;
@@ -346,9 +347,11 @@ struct Admission {
 /// interpreter reads directly, and the driver reads it too — a dwell this lane
 /// cannot arm exactly is armed at the nearest value it can, and the difference
 /// has to fit the same window the run will judge the arrival by.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 struct LaneDirectives {
     admission: Option<Admission>,
+    /// What performs the document's `inject` nodes (§6.6); none by default.
+    injector: Option<Arc<dyn pivot_interpreter::Injector>>,
     /// Activate the decision's REFER arm — the platform terminates a REFER
     /// (202 / 400 + `/call/refer`) rather than relaying it to the peer leg.
     local_refer: bool,
@@ -648,6 +651,7 @@ async fn replay_directed(
         base_dir,
         composer: &composer,
         events: None,
+        injector: directives.injector.clone(),
         reader: std::sync::Arc::new(sip_message::CustomParser::built()),
     };
 

@@ -23,7 +23,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pivot_interpreter::{Booking, DialogIdentity, Lane, LaneEvents};
+use pivot_interpreter::{Booking, DialogIdentity, Injector, Lane, LaneEvents};
 use pivot_schema::bundle::{ClockMode, RecordedMessage, RunConfig, RunRfcAudit};
 use scenario_harness::{Agent, AgentBinder};
 use sip_clock::Clock;
@@ -110,6 +110,13 @@ pub trait HostedRun {
     /// The run configuration the cell runs under, from the lane's, and the
     /// lane events the system reports, where it reports any.
     fn directed(&mut self, config: RunConfig) -> (RunConfig, Option<LaneEvents>);
+
+    /// What performs the cell's `inject` nodes, where the system performs
+    /// any; none by default, where an `inject` fails the cell as
+    /// `injector-missing`.
+    fn injector(&self) -> Option<Arc<dyn Injector>> {
+        None
+    }
 
     /// How the run reads its parties' recording, stated to every agent in
     /// `actors` as well.
@@ -221,6 +228,7 @@ fn body(
         base_dir: case.base_dir.clone(),
         composer: &composer,
         events,
+        injector: run.injector(),
     };
     let sut = HostedSut { metrics: lane.metrics };
     let http_epoch_ms = now_ms();

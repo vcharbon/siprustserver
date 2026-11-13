@@ -73,6 +73,7 @@ async fn a_leg_s_local_hostport_is_its_endpoint_s_bound_address() {
         base_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
         composer: &Composer,
         events: None,
+        injector: None,
         reader: std::sync::Arc::new(sip_message::CustomParser::built()),
     };
     let dir = std::env::temp_dir().join("pivot-runs").join("bound-address");

@@ -81,6 +81,7 @@ pub fn run(
             base_dir: case.base_dir.clone(),
             composer: &*composer,
             events,
+            injector: None,
         };
         let http_epoch_ms = rt.block_on(async { clock.now_ms() });
         let ran = catch_unwind(AssertUnwindSafe(|| {

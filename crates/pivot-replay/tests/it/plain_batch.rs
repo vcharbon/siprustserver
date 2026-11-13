@@ -19,12 +19,12 @@ use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_net::{RealSignalingNetwork, SignalingNetwork};
 
-fn fixture(cell: &str) -> PathBuf {
+pub(crate) fn fixture(cell: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cells").join(cell)
 }
 
 /// A scratch directory for `run`, emptied.
-fn scratch(run: &str) -> PathBuf {
+pub(crate) fn scratch(run: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("pivot-replay-batch-{run}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("the scratch directory");
@@ -72,8 +72,18 @@ fn gauges(active: u64, stored: u64, indexed: u64) -> Body {
 /// The run-spec of `cell` on the hosted lane `lane` at `ingress`, its bundle
 /// under `out`, every endpoint on a loopback port of the OS's choosing.
 fn run_spec(cell: &str, lane: &str, ingress: SocketAddr, out: &Path) -> serde_json::Value {
+    run_spec_at(&fixture(cell), lane, ingress, out)
+}
+
+/// [`run_spec`] of the case directory at `case`.
+pub(crate) fn run_spec_at(
+    case: &Path,
+    lane: &str,
+    ingress: SocketAddr,
+    out: &Path,
+) -> serde_json::Value {
     serde_json::json!({
-        "case": fixture(cell),
+        "case": case,
         "out_dir": out,
         "lane": { "kind": "hosted", "name": lane, "ingress": ingress.to_string(), "egress_endpoint": "callee" },
         "run": {
@@ -168,11 +178,9 @@ impl Ran {
     }
 }
 
-/// Both fixture cells run as one hosted batch against a B2BUA on loopback
-/// UDP, its `/metrics` the body `metrics` makes of the B2BUA, the batch-spec
-/// stating `reap_ms` where given.
-fn hosted_batch(run: &str, metrics: impl FnOnce(&B2buaSut) -> Body, reap_ms: Option<u64>) -> Ran {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("a runtime");
+/// A B2BUA on loopback UDP, on `rt`, whose default destination answers
+/// nothing, and the harness it runs in.
+pub(crate) fn stand_b2bua(rt: &tokio::runtime::Runtime) -> (Harness, B2buaSut) {
     let net: Arc<dyn SignalingNetwork> = Arc::new(RealSignalingNetwork::new());
     let h = Harness::with_network_and_clock(
         "plain-batch",
@@ -187,6 +195,15 @@ fn hosted_batch(run: &str, metrics: impl FnOnce(&B2buaSut) -> Body, reap_ms: Opt
         "b2bua",
         &ingress.to_string(),
     ));
+    (h, b2bua)
+}
+
+/// Both fixture cells run as one hosted batch against a B2BUA on loopback
+/// UDP, its `/metrics` the body `metrics` makes of the B2BUA, the batch-spec
+/// stating `reap_ms` where given.
+fn hosted_batch(run: &str, metrics: impl FnOnce(&B2buaSut) -> Body, reap_ms: Option<u64>) -> Ran {
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("a runtime");
+    let (h, b2bua) = stand_b2bua(&rt);
     let metrics = metrics_of(metrics(&b2bua));
     let dir = scratch(run);
     let cells = [("alice-calls-bob", dir.join("basic")), ("bob-is-busy", dir.join("busy"))];

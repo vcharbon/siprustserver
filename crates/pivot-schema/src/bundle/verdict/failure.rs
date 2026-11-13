@@ -123,6 +123,10 @@ pub enum Failure {
     DeviationUnimplemented { deviation: String, kind: String, step: Option<String>, reason: String },
     /// The document holds an `inject` and the lane supplied no injector.
     InjectorMissing { node: String, action: String },
+    /// The lane's injector refused or failed an `inject`, in its own words.
+    InjectRefused { node: String, action: String, reason: String },
+    /// The lane's injector did not answer an `inject` within its bound.
+    InjectTimedOut { node: String, action: String, within_ms: u64 },
     /// A send awaits a lane event the lane does not report (§6.7g): the run
     /// refuses before it dials rather than wait on what can never come.
     LaneEventUnsupported { step: String, event: String },
@@ -276,6 +280,13 @@ impl std::fmt::Display for Failure {
             Failure::InjectorMissing { node, action } => {
                 write!(f, "inject {node:?} names action {action:?} and the lane supplied no injector")
             }
+            Failure::InjectRefused { node, action, reason } => {
+                write!(f, "inject {node:?} of action {action:?} was refused by the lane: {reason}")
+            }
+            Failure::InjectTimedOut { node, action, within_ms } => write!(
+                f,
+                "inject {node:?} of action {action:?} drew no answer from the lane within {within_ms} ms"
+            ),
             Failure::LaneEventUnsupported { step, event } => {
                 write!(f, "send {step:?} awaits lane event {event:?}, which the lane does not report")
             }
