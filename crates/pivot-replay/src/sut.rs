@@ -68,6 +68,11 @@ impl Sut for HostedSut {
     }
 }
 
+/// The SUT's `b2bua_active_calls`, where its `/metrics` answers one.
+pub fn active_calls(metrics: SocketAddr) -> Option<u64> {
+    sample(&scrape(metrics)?, "b2bua_active_calls")?.parse().ok()
+}
+
 /// Each of `names` read off one scrape of the SUT's `/metrics`, in order;
 /// `None` where the endpoint does not answer or renders one of them as no
 /// whole number.
