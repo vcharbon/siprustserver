@@ -67,10 +67,38 @@ describe("kit pack refuses before docker is called, naming the key", () => {
     expect(refusal(kitPack(dir, docker), "modules.deployment", docker.calls())).toEqual(REFUSED)
   })
 
+  it("refuses a module that is a relative link out of the pack, naming where it leads", () => {
+    const docker = fakeDocker()
+    const parent = tree({
+      "outside/deployment.ts": "export {}\n",
+      "pack/pack.toml": manifest(`[modules]\ndeployment = "./deployment.ts"`),
+      "pack/deployment.ts": { link: "../outside/deployment.ts" }
+    })
+    const dir = path.join(parent, "pack")
+    git(dir, "init", "-q", "-b", "main")
+    git(dir, "add", "-A")
+    git(dir, "commit", "-q", "-m", "pack")
+    const out = kitPack(dir, docker)
+    expect({
+      ...refusal(out, "modules.deployment", docker.calls()),
+      leads: out.stderr.includes(`leads out of the pack, to ${fs.realpathSync(path.join(parent, "outside/deployment.ts"))}`),
+      ignored: out.stderr.includes("ignored file")
+    }, out.stderr).toEqual({ ...REFUSED, leads: true, ignored: false })
+  })
+
   it("refuses a link to nothing among the binaries", () => {
     const docker = fakeDocker()
     const dir = tree({ "pack.toml": manifest(`[image]\nbinaries = "./bin"`), "bin/tool": { link: "/nonexistent/tool" } })
     expect(refusal(kitPack(dir, docker), "image.binaries", docker.calls())).toEqual(REFUSED)
+  })
+
+  it("refuses a link to nothing inside a directory the binaries link to, naming it", () => {
+    const docker = fakeDocker()
+    const linked = tree({ "tool": { link: "/nonexistent/tool" } })
+    const dir = tree({ "pack.toml": manifest(`[image]\nbinaries = "./bin"`), "bin/lib": { link: linked } })
+    const out = kitPack(dir, docker)
+    expect({ ...refusal(out, "image.binaries", docker.calls()), named: out.stderr.includes("bin/lib/tool") }, out.stderr)
+      .toEqual({ ...REFUSED, named: true })
   })
 
   it("prints its usage, not a shell error, for an option with no value", () => {

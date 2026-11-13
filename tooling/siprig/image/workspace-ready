@@ -15,11 +15,13 @@
 #   SITE_PORT, SITE_BIND  the site's port and bind address (default 5175, 127.0.0.1)
 #
 # `siprig-workspace` is the pack's where it ships one. Any failure stops the
-# container (S6_BEHAVIOUR_IF_STAGE2_FAILS=2).
+# container (S6_BEHAVIOUR_IF_STAGE2_FAILS=2). SIPRIG_RUN_DIR names another
+# directory than /run/siprig to write workspace.env in.
 set -euo pipefail
 ws="${SIPRIG_WORKSPACE:?the container is started with SIPRIG_WORKSPACE (the wrapper sets it)}"
+run="${SIPRIG_RUN_DIR:-/run/siprig}"
 socket_dir=/run/siprig/pg
-mkdir -p /run/siprig
+mkdir -p "$run"
 checked="$(siprig-workspace check "$ws")"
 echo "$checked"
 siprig-workspace init "$ws"
@@ -54,4 +56,4 @@ esac
     *) printf "PG_OWN=0\nPG_HOST='%s'\nPG_PORT='%s'\n" "$host" "$port" ;;
   esac
   printf "SITE_PORT='%s'\nSITE_BIND='%s'\n" "$site_port" "${site_bind:-127.0.0.1}"
-} > /run/siprig/workspace.env
+} > "$run/workspace.env"

@@ -20,8 +20,8 @@ export interface Docker {
   readonly bin: string
   readonly calls: () => ReadonlyArray<string>
   readonly context: string
-  /** Whose names `docker ps` answers for a filter on `org.siprig.workspace`, one per line. */
-  readonly holders: (names: ReadonlyArray<string>) => void
+  /** The containers `docker ps` answers for the filter `label=org.siprig.workspace=<workspace>`, that exact path only. */
+  readonly holders: (workspace: string, names: ReadonlyArray<string>) => void
   /** Makes every container one that stopped with `status`, its `docker logs` printing `log`. */
   readonly stopped: (status: number, log: string) => void
 }
@@ -29,7 +29,8 @@ export interface Docker {
 /**
  * A directory holding a `docker` that appends each command line to `calls.log`,
  * copies a build's context (its last argument) to `context` with links kept,
- * answers `ps` filtered on a workspace label with the names `holders` set,
+ * answers `ps` filtered on a workspace label with the names `holders` set for
+ * that very workspace path,
  * answers `inspect` of a container as docker does for none, or, once
  * `stopped`, as for a stopped one (its exit status, its logs), and succeeds.
  */
@@ -47,7 +48,9 @@ export const fakeDocker = (): Docker => {
       `echo "$*" >> '${log}'`,
       "case \"$1\" in",
       `  build) for last; do :; done; cp -a "$last" '${context}' ;;`,
-      `  ps) case "$*" in *org.siprig.workspace=*) cat '${holders}' 2>/dev/null ;; esac ;;`,
+      "  ps) for arg; do case \"$arg\" in label=org.siprig.workspace=*)",
+      `    [ -f '${holders}' ] && awk -F '\\t' -v ws="\${arg#label=org.siprig.workspace=}" '$1 == ws { print $2 }' '${holders}' ;;`,
+      "  esac; done ;;",
       `  inspect) [ -f '${status}' ] || { echo "Error: No such object" >&2; exit 1; }`,
       `    case "$*" in *.State.Running*) echo false ;; *.State.ExitCode*) cat '${status}' ;; esac ;;`,
       `  logs) cat '${logs}' 2>/dev/null ;;`,
@@ -61,7 +64,7 @@ export const fakeDocker = (): Docker => {
     bin,
     context,
     calls: () => (fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : []),
-    holders: (names) => fs.writeFileSync(holders, names.map((name) => `${name}\n`).join("")),
+    holders: (workspace, names) => fs.appendFileSync(holders, names.map((name) => `${workspace}\t${name}\n`).join("")),
     stopped: (code, text) => {
       fs.writeFileSync(status, `${code}\n`)
       fs.writeFileSync(logs, text)

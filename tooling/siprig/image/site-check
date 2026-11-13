@@ -2,7 +2,8 @@
 # The site's answer check (s6-notifyoncheck in image/site-run polls it each
 # second until it passes): the site answers (`siprig-in site-url`). Passing,
 # it makes /run/siprig/site-answered, which image/site-finish reads: the site
-# has answered once in this container.
+# has answered once in this container. SIPRIG_RUN_DIR names another directory
+# than /run/siprig.
 set -euo pipefail
 siprig-in site-url >/dev/null 2>&1
-: > /run/siprig/site-answered
+: > "${SIPRIG_RUN_DIR:-/run/siprig}/site-answered"

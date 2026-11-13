@@ -5,9 +5,15 @@
 # every restart: the container stops with status 3, the line naming the
 # site's log, and the wrapper's `up` prints that log's tail. A site that has
 # answered once is restarted by s6.
+#
+# SIPRIG_RUN_DIR (for /run/siprig), SIPRIG_EXITCODE_FILE (for s6's container
+# exit code file) and SIPRIG_HALT (for s6's halt) name others than the image's.
 set -euo pipefail
-[ ! -e /run/siprig/site-answered ] || exit 0
+run="${SIPRIG_RUN_DIR:-/run/siprig}"
+exitcode_file="${SIPRIG_EXITCODE_FILE:-/run/s6-linux-init-container-results/exitcode}"
+halt="${SIPRIG_HALT:-/run/s6/basedir/bin/halt}"
+[ ! -e "$run/site-answered" ] || exit 0
 echo "siprig: the site exited (code ${1:-?}, signal ${2:-none}) before it ever answered:" \
   "its log is $SIPRIG_WORKSPACE/logs/site/current; the container stops" >&2
-echo 3 > /run/s6-linux-init-container-results/exitcode
-exec /run/s6/basedir/bin/halt
+echo 3 > "$exitcode_file"
+exec "$halt"

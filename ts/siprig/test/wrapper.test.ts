@@ -2,7 +2,8 @@
  * The wrapper the kit writes for a pack (`tooling/siprig/wrapper`, rendered by
  * `kit pack`): its usage is its header, an option given no value prints that
  * usage, `up` refuses a workspace another container already runs over (the
- * label `org.siprig.workspace`), whichever wrapper started it, and reports a
+ * label `org.siprig.workspace`), whichever wrapper started it and whichever
+ * link names the workspace (container and label follow its real path), and reports a
  * container its site stopped by exiting before it ever answered with the
  * tail of the site's log and the log's path. The kit's renderer
  * (`render-wrapper`) writes the very wrapper `kit pack` puts beside the image.
@@ -32,6 +33,9 @@ beforeAll(() => {
 const run = (docker: Docker, ...args: ReadonlyArray<string>) =>
   spawnSync(wrapper, args, { encoding: "utf8", env: { ...process.env, PATH: `${docker.bin}:${process.env.PATH ?? ""}` } })
 
+/** The `docker run` calls the wrapper made. */
+const runs = (docker: Docker): ReadonlyArray<string> => docker.calls().filter((call) => call.startsWith("run "))
+
 /** Whether `stderr` is the wrapper's usage: its header's first line, and nothing of the script below it. */
 const isUsage = (stderr: string): boolean =>
   stderr.includes("sample — a siprig pack's image on this machine") && !stderr.includes("set -euo pipefail") &&
@@ -56,19 +60,48 @@ describe("the wrapper's usage", () => {
 describe("the wrapper's up", () => {
   it("refuses a workspace another container runs over, naming it, and starts none", () => {
     const docker = fakeDocker()
-    docker.holders(["other-ws-1234"])
-    const out = run(docker, "-w", tree({ "rig.toml": "" }), "up")
-    expect({
-      status: out.status,
-      named: out.stderr.includes("other-ws-1234"),
-      runs: docker.calls().filter((call) => call.startsWith("run ")).length
-    }).toEqual({ status: 1, named: true, runs: 0 })
+    const workspace = tree({ "rig.toml": "" })
+    docker.holders(fs.realpathSync(workspace), ["other-ws-1234"])
+    const out = run(docker, "-w", workspace, "up")
+    expect({ status: out.status, named: out.stderr.includes("other-ws-1234"), runs: runs(docker).length })
+      .toEqual({ status: 1, named: true, runs: 0 })
+  })
+
+  it("refuses a workspace another container runs over where it is named through a link", () => {
+    const docker = fakeDocker()
+    const workspace = tree({ "rig.toml": "" })
+    const linked = path.join(tree({ "ws": { link: workspace } }), "ws")
+    docker.holders(fs.realpathSync(workspace), ["other-ws-1234"])
+    const out = run(docker, "-w", linked, "up")
+    expect({ status: out.status, named: out.stderr.includes("other-ws-1234"), runs: runs(docker).length })
+      .toEqual({ status: 1, named: true, runs: 0 })
   })
 
   it("starts its container where no other runs over the workspace", () => {
     const docker = fakeDocker()
     run(docker, "-w", tree({ "rig.toml": "" }), "up")
-    expect(docker.calls().filter((call) => call.startsWith("run ")).length).toEqual(1)
+    expect(runs(docker).length).toEqual(1)
+  })
+
+  it("starts its container where another runs over another workspace only", () => {
+    const docker = fakeDocker()
+    docker.holders(fs.realpathSync(tree({ "rig.toml": "" })), ["other-ws-1234"])
+    run(docker, "-w", tree({ "rig.toml": "" }), "up")
+    expect(runs(docker).length).toEqual(1)
+  })
+
+  it("names one container and one label for a workspace, whichever link names it", () => {
+    const workspace = tree({ "rig.toml": "" })
+    const linked = path.join(tree({ "ws": { link: workspace } }), "ws")
+    const started = [workspace, linked].map((named) => {
+      const docker = fakeDocker()
+      run(docker, "-w", named, "up")
+      const call = runs(docker)[0] ?? ""
+      return { name: /--name (\S+)/.exec(call)?.[1], label: /--label org\.siprig\.workspace=(\S+)/.exec(call)?.[1] }
+    })
+    const real = fs.realpathSync(workspace)
+    expect({ names: new Set(started.map((one) => one.name)).size, name: started[0]?.name, labels: started.map((one) => one.label) })
+      .toEqual({ names: 1, name: expect.stringMatching(/^sample-ws-[0-9a-f]{8}$/), labels: [real, real] })
   })
 
   it("reports a site that exited before it ever answered: the tail of its log, and the log's path", () => {
