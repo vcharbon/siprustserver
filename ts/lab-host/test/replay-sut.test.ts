@@ -11,7 +11,10 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import type { LaneView } from "@sip/rig"
 import * as Sut from "../src/replay-sut.js"
+
+type SutPack = Sut.SutPack<LaneView.View, never>
 
 let dir: string
 beforeEach(() => {
@@ -94,5 +97,30 @@ describe("a managed worker", () => {
     await new Promise((resolve) => setTimeout(resolve, 600))
     expect(held.died()).toContain("the lane-x worker exited 7")
     await Effect.runPromise(held.stop)
+  })
+})
+
+describe("a managed lane's worker", () => {
+  const lane = { kind: "hosted", id: "lane-x", sip: { lifecycle: "managed", ingress: "127.0.0.1:5060" } } as unknown as LaneView.Hosted
+  const packLogging = (logOf: SutPack["logOf"]): SutPack => ({
+    worker: "stand-in",
+    metricsOf: () => undefined,
+    ...(logOf === undefined ? {} : { logOf }),
+    command: () => Effect.succeed(standIn(`echo "${Sut.READY}"; echo "a call came"; exec sleep 30`))
+  })
+
+  it("logs to the file its pack states for the lane, its directory made", async () => {
+    const log = path.join(dir, "named", "sut.log")
+    const held = await run(Sut.stand(packLogging(() => log), lane, path.join(dir, "batch")))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    await Effect.runPromise(held!.stop)
+    expect(fs.readFileSync(log, "utf8")).toContain("a call came")
+    expect(fs.existsSync(path.join(dir, "batch"))).toBe(false)
+  })
+
+  it("logs under the batch's directory where its pack states no file", async () => {
+    const held = await run(Sut.stand(packLogging(undefined), lane, path.join(dir, "batch")))
+    await Effect.runPromise(held!.stop)
+    expect(fs.readdirSync(path.join(dir, "batch")).filter((name) => name.startsWith("sut-"))).toHaveLength(1)
   })
 })
