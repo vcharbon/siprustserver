@@ -26,16 +26,18 @@ impl Tally {
         self.observer = Some(observer);
     }
 
-    /// The record handed at `handed_at` was acked by the broker.
+    /// The record handed at `handed_at` was acked by the broker. The observer
+    /// is told before the registry counts it.
     pub(super) fn written(&self, handed_at: Instant) {
-        self.metrics.bump_cdr_written();
         self.tell(CdrDelivery::Written, handed_at);
+        self.metrics.bump_cdr_written();
     }
 
-    /// The record handed at `handed_at` ended without the broker's ack.
+    /// The record handed at `handed_at` ended without the broker's ack. The
+    /// observer is told before the registry counts it.
     pub(super) fn dropped(&self, handed_at: Instant) {
-        self.metrics.bump_cdr_dropped();
         self.tell(CdrDelivery::Dropped, handed_at);
+        self.metrics.bump_cdr_dropped();
     }
 
     fn tell(&self, delivery: CdrDelivery, handed_at: Instant) {

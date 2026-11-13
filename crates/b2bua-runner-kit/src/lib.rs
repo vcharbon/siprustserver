@@ -21,7 +21,7 @@
 //!   ([`FileCdrWriter`]), else the RabbitMQ sink the `B2BUA_CDR_RABBITMQ_*`
 //!   grammar selects ([`RunnerBase::rabbitmq_cdr_sink_from_env`];
 //!   `_with_encoder` publishes a runner-chosen [`CdrEncoder`](b2bua::cdr::CdrEncoder)
-//!   format, `_observed` also reports each record's end);
+//!   format, [`RunnerBase::wired_cdr_sink`] takes a writer the runner built);
 //! - [`RunnerBase::replication_setup_from_env`] — the peer-to-peer
 //!   replication the `B2BUA_REPL*` grammar selects ([`ReplicationSettings`]:
 //!   static or EndpointSlice membership, per-attempt peer addressing), assigned

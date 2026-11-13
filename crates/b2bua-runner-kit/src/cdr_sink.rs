@@ -6,7 +6,7 @@
 use std::env;
 use std::sync::Arc;
 
-use b2bua::cdr::{CdrDeliveryObserver, CdrEncoder, CdrWriter};
+use b2bua::cdr::{CdrEncoder, CdrWriter};
 
 use crate::cdr_file::{file_cdr_writer_from_lookup, FileCdrWriter};
 use crate::cdr_rabbitmq::{
@@ -46,30 +46,16 @@ impl RunnerBase {
         &self,
         encoder: Arc<dyn CdrEncoder>,
     ) -> Result<Option<Arc<dyn CdrWriter>>, String> {
-        Ok(self.rabbitmq_cdr_writer_with_encoder(encoder)?.map(|w| self.wired_cdr_sink(w)))
-    }
-
-    /// [`Self::rabbitmq_cdr_sink_from_env_with_encoder`] telling `observer`
-    /// the end of each record ([`RabbitMqCdrWriter::observed_by`]).
-    pub fn rabbitmq_cdr_sink_from_env_observed(
-        &self,
-        encoder: Arc<dyn CdrEncoder>,
-        observer: Arc<dyn CdrDeliveryObserver>,
-    ) -> Result<Option<Arc<dyn CdrWriter>>, String> {
-        let writer = self.rabbitmq_cdr_writer_with_encoder(encoder)?;
-        Ok(writer.map(|w| self.wired_cdr_sink(w.observed_by(observer))))
-    }
-
-    fn rabbitmq_cdr_writer_with_encoder(
-        &self,
-        encoder: Arc<dyn CdrEncoder>,
-    ) -> Result<Option<RabbitMqCdrWriter>, String> {
         let lookup = |k: &str| env::var(k).ok();
-        rabbitmq_cdr_writer_from_lookup_with_encoder(lookup, encoder, &self.metrics)
-            .map_err(|e| format!("invalid B2BUA config: {e}"))
+        let writer = rabbitmq_cdr_writer_from_lookup_with_encoder(lookup, encoder, &self.metrics)
+            .map_err(|e| format!("invalid B2BUA config: {e}"))?;
+        Ok(writer.map(|w| self.wired_cdr_sink(w)))
     }
 
-    fn wired_cdr_sink(&self, writer: RabbitMqCdrWriter) -> Arc<dyn CdrWriter> {
+    /// `writer` as the sink passed to [`Self::deps`], its wiring logged: for
+    /// a writer the runner composed itself, an observed one
+    /// ([`RabbitMqCdrWriter::observed_by`]) among them.
+    pub fn wired_cdr_sink(&self, writer: RabbitMqCdrWriter) -> Arc<dyn CdrWriter> {
         let settings = writer.settings();
         tracing::info!(
             service = %self.name,
