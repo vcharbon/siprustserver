@@ -105,6 +105,34 @@ pub enum LaneSpec {
     /// The plain system (`crate::plain`) in process, on a shared simulated
     /// fabric under a paused clock anchored at the epoch. Lint is advisory.
     Simulated(SimulatedBlock),
+    /// A B2BUA in its own process, on real UDP and the wall clock, every
+    /// call's b-leg pinned to the cell's egress by the call's `X-Api-Call`
+    /// (`crate::plain_hosted`). Its cells run in the batch process
+    /// (`pivot-replay batch`, `crate::plain_batch`), never on their own.
+    Hosted(HostedBlock),
+}
+
+/// A hosted lane's block: where its system takes SIP and publishes its
+/// metrics, and the endpoint its b-legs are dialled at.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct HostedBlock {
+    /// The lane's name, echoed into the bundle.
+    pub name: String,
+    /// Where the system takes SIP, `ip:port`.
+    pub ingress: String,
+    /// Where the system publishes Prometheus text, `ip:port`, where it
+    /// publishes any: a document's observables are read there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<String>,
+    /// The `endpoints[].id` whose bound socket the system dials a b-leg at.
+    pub egress_endpoint: String,
+    /// The port book's base, read only under [`SdpPlane::Rewrite`].
+    #[serde(default = "default_rtp_base")]
+    pub rtp_base: u16,
+    /// What the scripted peers do to the SDP they send.
+    #[serde(default, skip_serializing_if = "SdpPlane::is_verbatim")]
+    pub sdp: SdpPlane,
 }
 
 /// The simulated lane's knobs.

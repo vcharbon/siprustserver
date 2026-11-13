@@ -30,6 +30,8 @@ pub mod lanes;
 pub mod nofile;
 pub mod numbers;
 pub mod plain;
+pub mod plain_batch;
+pub mod plain_hosted;
 pub mod reap;
 pub mod register;
 pub mod simulated;
@@ -48,12 +50,22 @@ pub fn execute(spec: &spec::RunSpec) -> Result<RunSummary, Failure> {
 }
 
 /// Runs one spec of the binary's run-spec shape: its case on the simulated
-/// lane against `sut`.
+/// lane against `sut`. A hosted lane's spec is refused: its cell runs in the
+/// batch process ([`plain_batch`]).
 pub fn execute_on(
     spec: &spec::RunSpec,
     sut: &dyn register::SimulatedSut,
 ) -> Result<RunSummary, Failure> {
-    let spec::LaneSpec::Simulated(lane) = &spec.lane;
+    let lane = match &spec.lane {
+        spec::LaneSpec::Simulated(lane) => lane,
+        spec::LaneSpec::Hosted(hosted) => {
+            return Err(Failure::Refused(format!(
+                "{} is a hosted lane: its cells run in a batch process (pivot-replay batch \
+                 <batch-spec.json>)",
+                hosted.name
+            )))
+        }
+    };
     let case = Case::load(&spec.case, false, &spec.run.endpoint_addresses)?;
     let lane = simulated::SimulatedLane {
         out_dir: &spec.out_dir,

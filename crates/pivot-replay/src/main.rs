@@ -1,7 +1,9 @@
 //! `pivot-replay <run-spec.json>`: the replay with nothing registered. It runs
 //! one case on the simulated lane against the plain system
 //! (`pivot_replay::plain`), leaves the run bundle and exits with the
-//! structural verdict. `pivot-replay http-stub <spec.json>` serves an
+//! structural verdict. `pivot-replay batch <batch-spec.json>` is the batch
+//! process of a hosted lane against the plain hosted system
+//! (`pivot_replay::plain_batch`). `pivot-replay http-stub <spec.json>` serves an
 //! environment's stub HTTP service (`pivot_replay::http_stub`);
 //! `pivot-replay schema` prints the run-spec JSON Schema.
 //!
@@ -15,11 +17,20 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let Some(arg) = args.next() else {
         eprintln!(
-            "usage: pivot-replay <run-spec.json> | pivot-replay http-stub <spec.json> | \
-             pivot-replay schema"
+            "usage: pivot-replay <run-spec.json> | pivot-replay batch <batch-spec.json> | \
+             pivot-replay http-stub <spec.json> | pivot-replay schema"
         );
         std::process::exit(3);
     };
+    if arg == "batch" {
+        let Some(spec) = args.next() else {
+            eprintln!("usage: pivot-replay batch <batch-spec.json>");
+            std::process::exit(3);
+        };
+        std::process::exit(pivot_replay::batch::run::<pivot_replay::plain_batch::PlainBatch>(
+            std::path::Path::new(&spec),
+        ));
+    }
     if arg == "http-stub" {
         let Some(spec) = args.next() else {
             eprintln!("usage: pivot-replay http-stub <spec.json>");
