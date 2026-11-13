@@ -31,7 +31,8 @@
  * deployment replaces the function and re-adds the generated column.
  *
  * The views, for SQL questions the commands do not class:
- * - `current_runs`: the clean, finished runs of the current population.
+ * - `current_runs`: the clean, finished runs of the current population, of
+ *   every branch of its env where it names none.
  * - `current_cells`: one row per (capture, lane, case) — the call's CURRENT
  *   result, its latest `current_runs` row holding the case, no older than the
  *   capture's latest full `current_runs` reading on the lane (whose case set is
@@ -127,7 +128,7 @@ const viewsOf = (cellColumns: ReadonlyArray<string>): Effect.Effect<void, SqlErr
     CREATE VIEW current_runs AS
     SELECT ${listed("r", RUN_COLUMNS)}
     FROM runs r
-    JOIN current_population p ON p.env = r.env AND p.branch = r.branch
+    JOIN current_population p ON p.env = r.env AND (p.branch IS NULL OR p.branch = r.branch)
     WHERE r.finished_at IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(r.components) c WHERE c->>'dirty' = 'true')
   `)
@@ -1029,6 +1030,20 @@ const campaignRuns = Effect.gen(function*() {
 export const CAMPAIGN_RUNS = "19_campaign_runs"
 
 /**
+ * A current population may name an env with no branch: every branch of that
+ * env is current (`current.ts`), each run keeping the branch it recorded. The
+ * views are restated over the setting's nullable branch.
+ */
+const everyBranch = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE current_population ALTER COLUMN branch DROP NOT NULL`
+  yield* viewsOf(CELL_COLUMNS)
+})
+
+/** The key of the migration that lets the current population name every branch of its env. */
+export const EVERY_BRANCH = "20_every_branch"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -1051,7 +1066,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [ATTACHMENTS]: attachments,
   [JOB_ATTACHMENTS]: jobAttachments,
   [JOB_HOOKS_PATH_DROPPED]: jobHooksPathDropped,
-  [CAMPAIGN_RUNS]: campaignRuns
+  [CAMPAIGN_RUNS]: campaignRuns,
+  [EVERY_BRANCH]: everyBranch
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

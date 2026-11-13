@@ -203,6 +203,30 @@ describe.skipIf(!served)("only @current runs are current", () => {
       yield* current.set(CURRENT_POPULATION)
     })))
 
+  it("reads as current every branch of the env a setting names with no branch, each run keeping its own", () =>
+    withRuns(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      const current = yield* Effect.provide(Current.Service, Current.layer)
+      const capture = "identity_every_branch.pcap.gz"
+      const one = `${capture}-case1`
+      const env = "box-2"
+      const earlier = yield* ran(capture, [failed(one)], "full", LANE, { ...CURRENT, env, branch: "feat/1-earlier" })
+      yield* current.set({ env, branch: null })
+      expect(yield* current.get).toEqual({ env, branch: null })
+      expect((yield* standingOf(capture))?.runId).toBe(earlier.id)
+
+      const later = yield* ran(capture, [passed(one)], "full", LANE, { ...CURRENT, env, branch: "fix/2-later" })
+      yield* ran(capture, [failed(one)], "full", LANE, TASK_ENV)
+      const standing = yield* standingOf(capture)
+      expect(standing?.runId).toBe(later.id)
+      expect(standing?.failed).toBe(0)
+      const branches = yield* sql<{ id: number; branch: string }>`
+        SELECT id::int AS id, branch FROM runs WHERE capture = ${capture} AND env = ${env} ORDER BY id
+      `
+      expect(branches).toEqual([{ id: earlier.id, branch: "feat/1-earlier" }, { id: later.id, branch: "fix/2-later" }])
+      yield* current.set(CURRENT_POPULATION)
+    })))
+
   it("records the env, branch, lane hash and load on the row", () =>
     withRuns(Effect.gen(function*() {
       const sql = yield* SqlClient
