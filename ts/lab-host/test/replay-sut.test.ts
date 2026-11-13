@@ -123,4 +123,13 @@ describe("a managed lane's worker", () => {
     await Effect.runPromise(held!.stop)
     expect(fs.readdirSync(path.join(dir, "batch")).filter((name) => name.startsWith("sut-"))).toHaveLength(1)
   })
+
+  it("names its process in the pid file its pack states for the lane while it runs, the file gone once it stopped", async () => {
+    const pidFile = path.join(dir, "named", "sut.pid")
+    const held = await run(Sut.stand({ ...packLogging(undefined), pidFileOf: () => pidFile }, lane, path.join(dir, "batch")))
+    expect(fs.readFileSync(pidFile, "utf8").trim()).toBe(fs.readFileSync(path.join(dir, "pid"), "utf8").trim())
+    await Effect.runPromise(held!.stop)
+    expect(alive()).toBe(false)
+    expect(fs.existsSync(pidFile)).toBe(false)
+  })
 })
