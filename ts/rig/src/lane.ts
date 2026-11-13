@@ -14,7 +14,7 @@
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as Collection from "./collection.js"
-import { decoderOf, Name, type Refusal, refuse, Text, tomlOf } from "./manifest-file.js"
+import { decoderOf, Name, Params, type Refusal, refuse, Text, tomlOf } from "./manifest-file.js"
 
 /** The schema version a lane file states. */
 export const SCHEMA = "lane.v1"
@@ -113,7 +113,7 @@ const Tags = Schema.Struct({
  */
 export const Binding = Schema.Struct({
   operation: Name,
-  params: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown))
+  params: Schema.optionalKey(Params)
 })
 export interface Binding extends Schema.Schema.Type<typeof Binding> {}
 

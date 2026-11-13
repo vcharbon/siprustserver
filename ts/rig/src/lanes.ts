@@ -20,7 +20,7 @@ import * as path from "node:path"
 import * as Capability from "./capability.js"
 import * as Collection from "./collection.js"
 import * as Lane from "./lane.js"
-import { Name, type Refusal, refuse } from "./manifest-file.js"
+import { Name, type ParamValue, type Refusal, refuse } from "./manifest-file.js"
 import type * as Operation from "./operation.js"
 import * as Part from "./part.js"
 import * as RigPath from "./rig-path.js"
@@ -35,7 +35,7 @@ export interface Loaded {
   /** Per name a case asks for, the operation bound to it. */
   readonly operations: ReadonlyMap<string, RigPath.Defined<Operation.Operation>>
   /** Per bound name stating some, the parameters the lane runs its operation with over the manifest's, as a case's step. */
-  readonly operationParams?: ReadonlyMap<string, Readonly<Record<string, unknown>>>
+  readonly operationParams?: ReadonlyMap<string, Readonly<Record<string, ParamValue>>>
   readonly capabilities: ReadonlySet<string>
 }
 
@@ -88,17 +88,44 @@ const idsOf = (dir: string) =>
     return names.filter((name) => name.endsWith(".toml")).map((name) => name.slice(0, -".toml".length)).sort()
   })
 
+/** The types of the elements of the array parameter `value`. */
+const elementKindsOf = (value: ReadonlyArray<string | number | boolean>): ReadonlySet<string> =>
+  new Set(value.map((element) => typeof element))
+
+/** A parameter value's type as a refusal names it: `a string`, `an array of number`, `an empty array`. */
+const typeNameOf = (value: ParamValue): string => {
+  if (!Array.isArray(value)) return `a ${typeof value}`
+  const kinds = [...elementKindsOf(value)].sort()
+  return kinds.length === 0 ? "an empty array" : `an array of ${kinds.join(" and ")}`
+}
+
+/**
+ * Whether the bound value `bound` is of the type of the manifest's `stated`:
+ * the same scalar type, or an array each of whose elements is of a type the
+ * stated array's elements are; an empty stated array admits any element.
+ */
+const holdsAs = (stated: ParamValue, bound: ParamValue): boolean => {
+  if (!Array.isArray(stated) || !Array.isArray(bound)) {
+    return Array.isArray(stated) === Array.isArray(bound) && typeof stated === typeof bound
+  }
+  const kinds = elementKindsOf(stated)
+  return kinds.size === 0 || bound.every((element) => kinds.has(typeof element))
+}
+
 /**
  * Why the parameters `bound` a lane binds an operation with do not hold
  * against its manifest's `offered` (`<key>: …`): a key the manifest's
- * `[params]` does not declare, or a value of another type than its default;
- * `undefined` where they hold.
+ * `[params]` does not declare as its own, or a value of another type than its
+ * default, an array's elements included; `undefined` where they hold.
  */
-const paramRefusalOf = (offered: Readonly<Record<string, unknown>>, bound: Readonly<Record<string, unknown>>): string | undefined => {
+const paramRefusalOf = (
+  offered: Readonly<Record<string, ParamValue>>,
+  bound: Readonly<Record<string, ParamValue>>
+): string | undefined => {
   for (const [key, value] of Object.entries(bound)) {
-    if (!(key in offered)) return `${key}: the operation's [params] declares no ${key}`
-    const kind = Collection.kindOf(offered[key])
-    if (Collection.kindOf(value) !== kind) return `${key}: a ${Collection.kindOf(value)}, where the operation's [params] states a ${kind}`
+    if (!Object.hasOwn(offered, key)) return `${key}: the operation's [params] declares no ${key}`
+    const stated = offered[key]!
+    if (!holdsAs(stated, value)) return `${key}: ${typeNameOf(value)}, where the operation's [params] states ${typeNameOf(stated)}`
   }
   return undefined
 }
@@ -106,7 +133,7 @@ const paramRefusalOf = (offered: Readonly<Record<string, unknown>>, bound: Reado
 /** The bindings of `lane` resolved on `rig`, or why one does not hold. */
 const operationsOf = (rig: RigPath.RigPath, file: string, lane: Lane.LaneFile, parts: ReadonlyMap<string, Part.Part>) => {
   const bound = new Map<string, RigPath.Defined<Operation.Operation>>()
-  const params = new Map<string, Readonly<Record<string, unknown>>>()
+  const params = new Map<string, Readonly<Record<string, ParamValue>>>()
   for (const [name, stated] of Object.entries(lane.operations ?? {})) {
     const binding = Lane.bindingOf(stated)
     const operation = binding.operation
