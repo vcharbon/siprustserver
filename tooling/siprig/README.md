@@ -27,9 +27,10 @@ Node, postgres (its major in the label `org.siprig.pg-major`), s6-overlay and th
 CLI; no Python. The s6 services run a workspace mounted at its own path (`SIPRIG_WORKSPACE`):
 `workspace` checks and prepares it and writes the store's environment to
 `/run/siprig/workspace.env`, `postgres` runs the workspace's own cluster in `pgdata/` on a
-private socket, `migrate` brings the store to the image's schema, `site` serves. The site is
-ready once it answers (`s6-notifyoncheck` over `image/site-check`); a site that exits before
-it ever answered stops the container with status 3 (`image/site-finish`), its line naming the
+private socket, `migrate` brings the store to the image's schema, `site` serves.
+`s6-notifyoncheck` polls `image/site-check` each second until the site first answers,
+reporting nothing to s6, so the start never waits on the site. A site that exits before it
+ever answered stops the container with status 3 (`image/site-finish`), its line naming the
 site's log, where s6 would otherwise restart it forever; once it has answered, s6 restarts
 it. Each service runs a base command by name:
 
