@@ -27,6 +27,7 @@ interface Named {
   readonly log?: Record<string, unknown>
   readonly pid?: Record<string, unknown>
   readonly lifecycle?: "managed" | "standing"
+  readonly ingress?: string
 }
 
 /** A hosted lane serving `mode`, naming the parts `named` states. */
@@ -51,7 +52,7 @@ const laneOf = (mode: string, named: Named = {}): LaneView.Hosted => {
     kind: "hosted",
     id: "reference",
     backendMode: mode,
-    sip: { lifecycle: named.lifecycle ?? "managed", ingress: "127.0.0.1:5160" },
+    sip: { lifecycle: named.lifecycle ?? "managed", ingress: named.ingress ?? "127.0.0.1:5160" },
     loaded: { parts: new Map(parts) }
   } as unknown as LaneView.Hosted
 }
@@ -89,6 +90,16 @@ describe("the base's hosted lane", () => {
     expect(hostedRefusalOf(laneOf("none", { part: PART, capture: CAPTURE, lifecycle: "standing" }))).toContain(
       `the base captures only a runner it stands: a standing lane names no ${CAPTURE_PART} part`
     )
+  })
+
+  it("is refused where its sip-capture part would capture a runner listening on an unspecified ingress", () => {
+    for (const ingress of ["0.0.0.0:5160", "[::]:5160", "[0:0::0]:5160"]) {
+      expect(hostedRefusalOf(laneOf("none", { part: PART, capture: CAPTURE, ingress })), ingress).toContain(
+        `its ingress ${ingress} is unspecified: the runner captures only on a specific address`
+      )
+      expect(hostedRefusalOf(laneOf("none", { part: PART, ingress })), `${ingress} without a capture`).toBeNull()
+    }
+    expect(hostedRefusalOf(laneOf("none", { part: PART, capture: CAPTURE, ingress: "[2001:db8::1]:5160" }))).toBeNull()
   })
 
   it("stands a runner writing its call records to the file the lane's cdr-file part names", () => {
