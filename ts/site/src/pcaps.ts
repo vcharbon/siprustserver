@@ -1,7 +1,7 @@
 /**
  * The Pcaps page's read: every capture file of the workspace's `pcaps/`, with
  * its size and date, where the pipeline stands with it — `new` (never
- * ingested), `ingested` (in the population, not cut), `cut` (with its case
+ * ingested, or written since its last ingest), `ingested` (in the population, not cut), `cut` (with its case
  * count) — and its last full run per lane, whoever made it; the inbox beside it
  * (`inbox.ts`); and how a capture replay fits each lane (`pcap-lanes.ts`),
  * with the pack's refusal of a lane it does not drive now (its lab guard).
@@ -71,23 +71,37 @@ const isPcap = (name: string): boolean => !name.startsWith(".") && /\.pcap(ng)?(
 export const stateOf = (row: Sources.Row | undefined): State =>
   row === undefined ? "new" : row.prepId === null || row.cut === "broke" || row.cut === "never" ? "ingested" : "cut"
 
-/** One file as the page shows it, off its stat and its source row. */
+/**
+ * Whether the file on disk was written after the row's last ingest (its
+ * instant, else the row's addition): the row then describes an earlier file
+ * of the same path, and its ingest, cut and runs are not this file's.
+ */
+export const writtenSinceIngest = (mtimeMs: number, row: Sources.Row): boolean =>
+  mtimeMs > Date.parse(row.ingestedAt ?? row.addedAt)
+
+/**
+ * One file as the page shows it, off its stat and its source row. A file
+ * written since its row's last ingest lists as `new`, with none of the row's
+ * ingest, cut, cases, problem or runs; it keeps the row's capture name.
+ */
 export const pcapOf = (
   file: { readonly name: string; readonly path: string; readonly size: number; readonly mtimeMs: number },
   row: Sources.Row | undefined
 ): Pcap => {
-  const state = stateOf(row)
+  const capture = row?.capture ?? Discover.captureOf(file.path)
+  const describing = row !== undefined && !writtenSinceIngest(file.mtimeMs, row) ? row : undefined
+  const state = stateOf(describing)
   return {
     file: file.name,
     size: file.size,
     modifiedAt: new Date(file.mtimeMs).toISOString(),
-    capture: row?.capture ?? Discover.captureOf(file.path),
+    capture,
     state,
-    cases: state === "cut" ? row?.cases ?? 0 : null,
-    ingest: row?.ingest ?? null,
-    cut: row?.cut ?? null,
-    problem: row?.ingestFailed ?? row?.cutBroke ?? null,
-    standings: row?.standings ?? []
+    cases: state === "cut" ? describing?.cases ?? 0 : null,
+    ingest: describing?.ingest ?? null,
+    cut: describing?.cut ?? null,
+    problem: describing?.ingestFailed ?? describing?.cutBroke ?? null,
+    standings: describing?.standings ?? []
   }
 }
 
