@@ -45,7 +45,14 @@ impl CaptureEndpoint {
     /// Appends `payload`, from `src` to `dst`, as one block: one write on a
     /// file opened to append, so blocks of concurrent senders never interleave.
     fn record(&self, src: SocketAddr, dst: SocketAddr, payload: &[u8]) {
-        let _ = (src, dst, payload, &self.failed, now_us());
+        if self.failed.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(block) = pcapng::packet_block(now_us(), src, dst, payload) else { return };
+        if let Err(error) = (&self.file).write_all(&block) {
+            self.failed.store(true, Ordering::Relaxed);
+            tracing::warn!(%error, "the packet capture stopped: its file refused a write");
+        }
     }
 
     /// Records `packet`, delivered to this endpoint's own address.
