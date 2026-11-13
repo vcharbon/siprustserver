@@ -4,10 +4,10 @@
  * it sends it the `signal` of `[params]` and awaits its exit, the runner's
  * orchestrator standing the next one (on the reference lane the base, one per
  * batch). A pid file naming no running process has nothing stopped. One
- * naming a process while no runner answers `GET /admin/cordon` with its
- * state at the `admin` address of the lane's `b2bua-runner` part refuses the
- * inject, the process left unsignalled: a pid file outliving its runner may
- * name another process.
+ * naming a process the runner at the `admin` address of the lane's
+ * `b2bua-runner` part does not answer for refuses the inject, the process
+ * left unsignalled: `GET /admin/cordon` there must answer its state and that
+ * pid, since a pid file outliving its runner may name another process.
  *
  * The runner signalled is kept in the state directory until its exit is
  * seen: `heal` SIGKILLs one an interrupted inject left running, after the
@@ -73,23 +73,35 @@ const pidIn = (file: string): number | undefined => {
   return Number.isInteger(pid) && pid > 0 ? pid : undefined
 }
 
-/** Whether a runner answers at `admin`: `GET /admin/cordon` answered 200 with its readiness `state`. */
-const answersAt = async (admin: string): Promise<boolean> => {
+/**
+ * The pid of the runner answering at `admin`: `GET /admin/cordon` answered
+ * 200 with its readiness `state` and its `pid`. Undefined where no runner
+ * answers so.
+ */
+const runnerAt = async (admin: string): Promise<number | undefined> => {
   try {
     const response = await fetch(`http://${admin}/admin/cordon`, { signal: AbortSignal.timeout(ANSWER_WITHIN_MS) })
-    if (response.status !== 200) return false
-    const body = (await response.json()) as { readonly state?: unknown }
-    return typeof body.state === "string"
+    if (response.status !== 200) return undefined
+    const body = (await response.json()) as { readonly state?: unknown; readonly pid?: unknown }
+    return typeof body.state === "string" && Number.isInteger(body.pid) ? (body.pid as number) : undefined
   } catch {
-    return false
+    return undefined
   }
 }
 
-/** Resolves once `pid` may be signalled as the lane's runner; refuses where no runner answers at the lane's admin address. */
+/**
+ * Resolves once `pid` may be signalled as the lane's runner: the runner
+ * answering at the lane's admin address is the process `pid`. Refuses where
+ * no runner answers there, or where the one answering is another process.
+ */
 const vouched = async (context: Context, pid: number): Promise<void> => {
   const admin = partField(context, RUNNER_PART, "admin")
-  if (!(await answersAt(admin))) {
+  const answering = await runnerAt(admin)
+  if (answering === undefined) {
     throw new Error(`the pid file names process ${pid}, but no runner answers at ${admin}: not signalled`)
+  }
+  if (answering !== pid) {
+    throw new Error(`the pid file names process ${pid}, but the runner at ${admin} is process ${answering}: not signalled`)
   }
 }
 

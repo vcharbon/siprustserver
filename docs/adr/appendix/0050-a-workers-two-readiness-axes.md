@@ -248,7 +248,8 @@ The operator routes are on a listener of their own bound to the worker's
 loopback (`B2BUA_ADMIN`), reached through `kubectl port-forward`; the
 probe server and every SIP face answer none of them:
 - `POST /admin/cordon`, `DELETE /admin/cordon`; `GET /admin/cordon` returns
-  the state and the live call count. Gauge `b2bua_cordoned`.
+  the state, the live call count and the worker's pid. Gauge
+  `b2bua_cordoned`.
 - `POST /admin/release-all` releases every call the worker owns without
   signalling: each established call's record is closed (answered, ended
   now, cause `operator_release`), its admission holds freed and its replica
