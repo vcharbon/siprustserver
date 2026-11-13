@@ -9,8 +9,9 @@
 //!   own CRLF and never a byte of the content, so a decomposed part recomposes
 //!   to the same bytes.
 //! - **The boundary is derived from the parts.** A body composed twice from the
-//!   same parts frames identically, so a replay is reproducible; a delimiter
-//!   that would appear inside a payload is extended until it cannot.
+//!   same parts frames identically, so a replay is reproducible; the derived
+//!   boundary has one length, 25 of RFC 2046 §5.1.1's 70 characters, and no
+//!   part holds it, in its head or its payload.
 //! - **A part header line is written whole or not at all.** Its name is a
 //!   `token` and its value holds no CR, LF or NUL (RFC 2045 §3), or the line
 //!   is refused, never framed.
@@ -112,7 +113,7 @@ impl std::error::Error for MultipartError {}
 ///
 /// A container type that already names a `boundary` uses it, and is refused
 /// when a part (its head or its payload) contains it; otherwise the boundary is
-/// derived from the parts and extended until no part holds it.
+/// derived from the parts, one no part holds.
 pub fn compose(container_type: &str, parts: &[MultipartPart]) -> Result<Composed, MultipartError> {
     let media = MediaType::parse(&SipStr::owned(container_type)).ok();
     if !media.as_ref().is_some_and(MediaType::is_multipart) {
@@ -276,29 +277,6 @@ pub(crate) fn is_boundary(boundary: &str) -> bool {
         && bytes.last().is_some_and(|&b| bcharsnospace(b))
 }
 
-/// A boundary no part contains, its head or its payload, derived from the parts
-/// so the same parts always frame the same way. RFC 2046 §5.1.1's `bchars` set
-/// is respected: the derivation emits hex digits and `-` only.
-fn derive_boundary(parts: &[MultipartPart]) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for part in parts {
-        for byte in part.content_type.as_bytes().iter().chain(part.payload.iter()) {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    let mut boundary = format!("boundary-{hash:016x}");
-    // A boundary longer than every field is held by none.
-    let longest = parts.iter().flat_map(fields).max_by_key(|field| field.len()).unwrap_or_default();
-    for _ in 0..=longest.len() {
-        if !parts.iter().any(|p| holds(p, &boundary)) {
-            break;
-        }
-        boundary.push('-');
-    }
-    boundary
-}
-
 /// What `part` is framed from: its type, each head line's name and value, its
 /// payload.
 fn fields(part: &MultipartPart) -> impl Iterator<Item = &[u8]> {
@@ -426,6 +404,9 @@ pub fn head_sdp_range(head: &[u8], body: &[u8]) -> Option<std::ops::Range<usize>
 
 mod attach;
 pub use attach::{attach, Attached};
+
+mod boundary;
+use boundary::derive_boundary;
 
 mod description;
 mod entity;

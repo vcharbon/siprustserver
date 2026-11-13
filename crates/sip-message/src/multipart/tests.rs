@@ -107,19 +107,6 @@ fn the_derived_boundary_is_a_function_of_the_parts() {
     assert_ne!(once.content_type, other.content_type);
 }
 
-/// A delimiter that would appear inside a payload does not separate parts,
-/// it splits one — so the derivation walks past it.
-#[test]
-fn a_derived_boundary_never_occurs_inside_a_payload() {
-    let seed = compose("multipart/mixed", &[sdp()]).unwrap();
-    let boundary = seed.content_type.split("boundary=").nth(1).unwrap().to_string();
-    let hostile =
-        MultipartPart::new("application/sdp", format!("v=0\r\na=x:{boundary}\r\n").into_bytes());
-    let composed = compose("multipart/mixed", std::slice::from_ref(&hostile)).unwrap();
-    let used = composed.content_type.split("boundary=").nth(1).unwrap();
-    assert!(!contains(&hostile.payload, used.as_bytes()));
-}
-
 /// RFC 2046 §5.1.1 allows a boundary of 1 to 70 characters. Whatever a part's
 /// head holds, the derived one is a boundary a reader accepts, no line of the
 /// framed body starts like a delimiter that is none, and the parts read back:

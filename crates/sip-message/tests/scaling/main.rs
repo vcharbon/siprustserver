@@ -208,6 +208,13 @@ const CASES: &[Case] = &[
         KIB,
         LINEAR_KIB,
     ),
+    case(
+        "multipart attach",
+        "part head KiB, spelled boundaries",
+        ops::attach_spelled_boundaries_head_kib,
+        KIB,
+        LINEAR_KIB,
+    ),
 ];
 
 /// Growth beyond the axis ratio a linear case may show, and the growth a
