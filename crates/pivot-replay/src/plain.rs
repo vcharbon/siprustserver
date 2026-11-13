@@ -3,15 +3,17 @@
 //! routed to the cell's egress endpoint (`ScriptedDecisionEngine::route_all_to`),
 //! at [`INGRESS`] on the shared fabric. It runs a case whose calls the callee
 //! answers or rejects as the document states (a basic call, a call the callee
-//! refuses), and states no decision exchange, limiter or call record: a case
-//! that needs a backend's decision, a service or a claim answered is a
-//! product's, which registers its own system.
+//! refuses), and states no decision exchange or limiter: a case that needs a
+//! backend's decision or a service is a product's, which registers its own
+//! system.
 //!
 //! Its post-run gate is the worker's reap check, judged at the interpreter's
 //! settle and again once the harness settled the fabric: a breach fails the
 //! verdict at the reap site and the cell's `cleanup` line ([`GATES`]). The
 //! bundle holds the terminated calls and the worker's cap readings beside the
-//! RFC audit.
+//! RFC audit, and exports the worker's record of each call under
+//! `call-records` ([`call_records`]), for the judge of that name to answer the
+//! cell's claim.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -34,7 +36,9 @@ use crate::numbers::lane_numbers;
 use crate::register::{SimulatedCell, SimulatedRun, SimulatedSut, Standing, Stood};
 use crate::sut::WorkerSut;
 use crate::verifications::{Gate, Gates, Standing::Judged};
-use crate::{audit, cancellation, cap_readings, reap, terminated, verdict, verifications};
+use crate::{
+    audit, call_records, cancellation, cap_readings, reap, terminated, verdict, verifications,
+};
 use crate::{Case, Failure, RunSummary};
 
 /// The plain system's lane name.
@@ -172,6 +176,7 @@ impl SimulatedRun for PlainRun<'_> {
         let (report, gating) = rt.block_on(h.finish_collecting());
         let settled = reaped(&worker);
         terminated::record(out_dir, &worker.terminated_calls())?;
+        call_records::export(out_dir, &worker.cdr_records())?;
         cap_readings::record(out_dir, worker.metrics())?;
         let stages = [at_settle, settled];
         let breaches: Vec<String> = stages.iter().filter_map(|r| r.clone().err()).collect();

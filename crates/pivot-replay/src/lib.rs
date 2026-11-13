@@ -18,6 +18,7 @@ use pivot_schema::PivotV3;
 pub mod attachments;
 pub mod audit;
 pub mod batch;
+pub mod call_records;
 pub mod cancellation;
 pub mod cap_readings;
 pub mod compose;
