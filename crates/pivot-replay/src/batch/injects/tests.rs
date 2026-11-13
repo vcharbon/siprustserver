@@ -93,13 +93,17 @@ async fn a_late_answer_for_an_earlier_ask_does_not_resolve_a_re_run_s_ask() {
     let earlier = injects.injector("/cells/p.spec.json").expect("an injector");
     let rerun = injects.injector("/cells/p.spec.json").expect("an injector");
     let superseded = earlier.inject(request("i1"));
-    let waiting = rerun.inject(request("i1"));
+    let mut waiting = rerun.inject(request("i1"));
     let asks = kept.asks();
     assert_ne!(asks[0], asks[1], "each ask its own id");
 
     injects.answer(&injected(&asks[0], "/cells/p.spec.json", "i1"));
+    assert!(
+        tokio::time::timeout(Duration::ZERO, &mut waiting).await.is_err(),
+        "the re-run's ask not answered by the earlier ask's answer"
+    );
+    assert_eq!(tokio::time::timeout(Duration::ZERO, superseded).await, Ok(Ok(())));
     assert_eq!(injects.asked(), [key("/cells/p.spec.json", "i1")], "the re-run's ask still asked");
-    assert_eq!(superseded.await, Ok(()));
     injects.answer(&refused(&asks[1], "/cells/p.spec.json", "i1", "exit 1"));
     assert_eq!(waiting.await, Err("exit 1".to_string()));
 }
