@@ -11,7 +11,9 @@
  * capture name: the anonymiser uses the kept one where there is one and keeps
  * a fresh one where there is none. Where and how a seed is kept is the
  * deployment's; the ingest only asks whether one is kept, and carries it to
- * the next generation of a name whose bytes changed under it. Which name the
+ * the next generation of a name whose bytes changed under it. An anonymiser
+ * drawing on no seed (`seeded: false`, `extraction-identity.ts`) is
+ * reproducible by itself, and keeps and carries none. Which name the
  * kept document has, and how a failed extraction is recorded beside it, are
  * the deployment's too.
  *
@@ -61,6 +63,12 @@ export class ExtractionUnstated extends Schema.TaggedError<ExtractionUnstated>()
 }
 
 export interface Interface {
+  /**
+   * `false` where the anonymisation draws on no seed: the same raw document
+   * always yields the same kept one, so every extraction stands as one under
+   * a kept seed. Absent, it draws on one.
+   */
+  readonly seeded?: boolean
   /** The kept flows document's file name for `capture`, in its directory. */
   readonly documentName: (capture: string) => Effect.Effect<string, ExtractionUnstated>
   /**

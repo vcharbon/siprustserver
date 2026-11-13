@@ -42,6 +42,7 @@ export const layer = Layer.effect(
     const failed = (capture: string) => (error: { readonly message: string }) =>
       new Extraction.AnonymiseFailed({ capture, line: error.message })
     return Extraction.Service.of({
+      seeded: false,
       documentName: (capture) => Effect.succeed(documentName(capture)),
       anonymise: (request) =>
         Effect.gen(function*() {
