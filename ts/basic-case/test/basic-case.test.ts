@@ -9,7 +9,7 @@ import { CaseSource, type CompiledCell } from "@sip/rig"
 import * as Effect from "effect/Effect"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
-import { defineBasicCase } from "../src/index.js"
+import { CallFlow, defineBasicCase } from "../src/index.js"
 
 const SOURCE = fileURLToPath(new URL("./fixtures/cases.ts", import.meta.url))
 
@@ -87,6 +87,25 @@ describe("basic_call", () => {
   it("lets the callee hang up where its parameters say so", () => {
     const ended = defineBasicCase({ title: "bob hangs up", shape: "basic_call", params: { ends: "callee" }, ...PARTIES, final: [] })
     expect(ladderOf(ended).slice(-4)).toEqual(["B send BYE", "A expect BYE", "A send 200 BYE", "B expect 200 BYE"])
+  })
+})
+
+describe("the step builder", () => {
+  it("states the early dialog a step rides, and marks the leg's dialog from the 2xx answering on one", () => {
+    const flow = new CallFlow()
+    flow.send("B", { status: 183, "cseq-method": "INVITE" }, { early: "f1" })
+    flow.expect("A", { status: 183, "cseq-method": "INVITE" }, { early: "r1" })
+    flow.send("B", { status: 200, "cseq-method": "INVITE" }, { early: "f1" })
+    flow.expect("B", { method: "ACK", cseq: 1 }, { early: "f1", auto: true })
+    flow.send("A", { method: "BYE" })
+    expect(flow.steps.map((step) => [step.leg, step.early ?? null, step.in_dialog === true, step.confirms_dialog === true]))
+      .toEqual([
+        ["B", "f1", false, false],
+        ["A", "r1", false, false],
+        ["B", "f1", false, false],
+        ["B", "f1", true, true],
+        ["A", null, false, false]
+      ])
   })
 })
 
