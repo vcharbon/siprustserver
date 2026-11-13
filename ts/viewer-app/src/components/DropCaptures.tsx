@@ -19,6 +19,7 @@ import type { JSX } from "react"
 import { useEffect, useRef, useState } from "react"
 import { ANONYMISE_LEVELS, type AnonymiseLevel, api, type CaptureIngestStart } from "../api.ts"
 import { href } from "../router.ts"
+import { drop, type Picked, type Queued } from "./drop-queue.ts"
 import { Link } from "./Link.tsx"
 
 /** One dropped capture, from the queue to its job. */
@@ -77,9 +78,7 @@ export const DropCaptures = (
   }
 ): JSX.Element => {
   const [choice, setChoice] = useState(lane ?? "")
-  const [level, setLevel] = useState<AnonymiseLevel | "">("")
-  const levelNow = useRef(level)
-  levelNow.current = level
+  const [level, setLevel] = useState<Picked>("")
   const [asSet, setAsSet] = useState(true)
   const [items, setItems] = useState<readonly Item[]>([])
   const [over, setOver] = useState(false)
@@ -95,7 +94,7 @@ export const DropCaptures = (
     }
   }, [])
 
-  const pending = useRef<{ readonly id: number; readonly files: readonly File[] }[]>([])
+  const pending = useRef<Queued<File>[]>([])
   const draining = useRef(false)
   const counter = useRef(0)
   // The lane in force when a file is POSTED, not when it was dropped: a lane
@@ -106,11 +105,10 @@ export const DropCaptures = (
   const patch = (id: number, fields: Partial<Item>): void =>
     setItems((all) => all.map((item) => (item.id === id ? { ...item, ...fields } : item)))
 
-  const runOne = async (id: number, files: readonly File[]): Promise<void> => {
+  const runOne = async ({ id, files, level: at }: Queued<File>): Promise<void> => {
     const on = laneNow.current
     patch(id, { status: "uploading", lane: on })
     try {
-      const at = levelNow.current
       const started: CaptureIngestStart = await api.captureIngest(files, on, at === "" ? undefined : at)
       if (!live.current) return
       patch(id, { capture: started.capture, detail: started.detail, inbox: started.inbox === true })
@@ -132,7 +130,7 @@ export const DropCaptures = (
       for (;;) {
         const head = pending.current.shift()
         if (head === undefined) return
-        await runOne(head.id, head.files)
+        await runOne(head)
       }
     } finally {
       draining.current = false
@@ -142,8 +140,9 @@ export const DropCaptures = (
   const take = (dropped: FileList | null): void => {
     if (dropped === null || dropped.length === 0) return
     const files = ringOrder(Array.from(dropped))
-    const captures = asSet ? [files] : files.map((file) => [file])
-    const taken = captures.map((group) => ({ id: counter.current++, files: group }))
+    const { queued: taken, picking } = drop({ level, next: counter.current }, files, asSet)
+    counter.current = picking.next
+    setLevel(picking.level)
     setItems((all) => [
       ...all,
       ...taken.map(({ files, id }) => ({
@@ -201,7 +200,7 @@ export const DropCaptures = (
         {anonymise === true && (
           <label>
             anonymisation{" "}
-            <select value={level} onChange={(event) => setLevel(event.target.value as AnonymiseLevel | "")}>
+            <select value={level} onChange={(event) => setLevel(event.target.value as Picked)}>
               <option value="">workspace default (rig.toml)</option>
               {ANONYMISE_LEVELS.map((one) => <option key={one} value={one}>{LEVEL_WORDS[one]}</option>)}
             </select>
