@@ -30,6 +30,9 @@ use crate::{reap, verdict, Case, Failure, RunSummary};
 /// batch-spec states no `metrics_reap_ms`.
 pub const REAP_WITHIN_MS: u64 = 10_000;
 
+/// The longest `metrics_reap_ms` a batch-spec may state: ten minutes.
+pub const REAP_CEILING_MS: u64 = 600_000;
+
 /// The gauges that each read 0 on a system holding no call: its active
 /// calls, its call map's entries and its SIP routing index's keys. A call
 /// the active gauge lets go while the store keeps it is a store-side leak.
@@ -47,16 +50,27 @@ pub struct BatchSpec {
     /// leaves the cleanup gate not checkable.
     #[serde(default)]
     pub metrics: Option<String>,
-    /// How long the batch's end waits for [`HELD`] to read 0: past the
-    /// period a system samples a gauge at (the upstream runner's store
-    /// gauges, every 5 s), else a stale sample fails the gate.
-    #[serde(default = "reap_within_ms")]
+    /// How long the batch's end waits for [`HELD`] to read 0, above 0 and at
+    /// most [`REAP_CEILING_MS`]. The gate trusts each scrape to read the
+    /// system as it is (the upstream runner samples its store at the scrape).
+    #[serde(default = "reap_within_ms", deserialize_with = "reap_ms_of")]
     pub metrics_reap_ms: u64,
 }
 
 /// The `metrics_reap_ms` a batch-spec stating none waits.
 fn reap_within_ms() -> u64 {
     REAP_WITHIN_MS
+}
+
+/// A stated `metrics_reap_ms`, refused at 0 or past [`REAP_CEILING_MS`].
+fn reap_ms_of<'de, D: serde::Deserializer<'de>>(stated: D) -> Result<u64, D::Error> {
+    let ms = u64::deserialize(stated)?;
+    if ms == 0 || ms > REAP_CEILING_MS {
+        return Err(serde::de::Error::custom(format!(
+            "metrics_reap_ms {ms}: a wait above 0 and at most {REAP_CEILING_MS} ms"
+        )));
+    }
+    Ok(ms)
 }
 
 /// The backend double of a system that asks none: it serves nothing, and its
