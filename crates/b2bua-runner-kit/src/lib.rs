@@ -16,9 +16,11 @@
 //! - [`RunnerBase::deps`] — production-shaped defaults for every dependency
 //!   (store / buffered CDR / limiter-from-env / metrics / clock / id-gen),
 //!   each overridable field-by-field on the returned [`B2buaDeps`];
-//! - [`RunnerBase::rabbitmq_cdr_sink_from_env`] — the RabbitMQ CDR sink the
-//!   `B2BUA_CDR_RABBITMQ_*` grammar selects, passed to [`RunnerBase::deps`]
-//!   (`_with_encoder` publishes a runner-chosen [`CdrEncoder`] format);
+//! - [`RunnerBase::cdr_sink_from_env`] — the CDR sink the env selects, passed
+//!   to [`RunnerBase::deps`]: the JSON-lines file `B2BUA_CDR_FILE` names
+//!   ([`FileCdrWriter`]), else the RabbitMQ sink the `B2BUA_CDR_RABBITMQ_*`
+//!   grammar selects ([`RunnerBase::rabbitmq_cdr_sink_from_env`];
+//!   `_with_encoder` publishes a runner-chosen [`CdrEncoder`] format);
 //! - [`RunnerBase::replication_setup_from_env`] — the peer-to-peer
 //!   replication the `B2BUA_REPL*` grammar selects ([`ReplicationSettings`]:
 //!   static or EndpointSlice membership, per-attempt peer addressing), assigned
@@ -59,8 +61,8 @@
 //! those are the runner's own, injected through the seams above. Replication is
 //! the runner's choice to take: a runner may assign any other `ReplicationSetup`
 //! to `deps.replication`. The CDR sink is the runner's choice too: the kit ships
-//! the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env grammar) and the
-//! discarding default; a runner may give the RabbitMQ sink its own
+//! the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env grammar), the
+//! file sink and the discarding default; a runner may give the RabbitMQ sink its own
 //! [`CdrEncoder`] or pass any other [`CdrWriter`] to [`RunnerBase::deps`].
 
 // The panic set at deny outside test code (ADR-0051 §3).
@@ -105,7 +107,9 @@ pub mod backend_url;
 mod base;
 mod capacity_env;
 mod capture_env;
+mod cdr_file;
 mod cdr_rabbitmq;
+mod cdr_sink;
 mod check;
 mod drain_env;
 mod entropy;
@@ -126,6 +130,7 @@ mod spawn;
 mod validate;
 mod worker_metrics;
 pub use base::RunnerBase;
+pub use cdr_file::{file_cdr_writer_from_lookup, FileCdrWriter, CDR_FILE_VARIABLE};
 pub use cdr_rabbitmq::{
     rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter,
@@ -390,42 +395,6 @@ impl RunnerBase {
             Arc::new(SystemResolver),
         )
         .await
-    }
-
-    /// The RabbitMQ CDR sink the env selects ([`RabbitMqCdrSettings`]),
-    /// publishing the default [`JsonRecordEncoder`](b2bua::cdr::JsonRecordEncoder)
-    /// record and recording into [`Self::metrics`]; `None` when the URL is
-    /// unset. `Err` is the boot refusal of a malformed `B2BUA_CDR_RABBITMQ_*`
-    /// value.
-    pub fn rabbitmq_cdr_sink_from_env(&self) -> Result<Option<Arc<dyn CdrWriter>>, String> {
-        let writer = rabbitmq_cdr_writer_from_lookup(|k| env::var(k).ok(), &self.metrics)
-            .map_err(|e| format!("invalid B2BUA config: {e}"))?;
-        Ok(writer.map(|w| self.wired_cdr_sink(w)))
-    }
-
-    /// [`Self::rabbitmq_cdr_sink_from_env`] publishing the bytes `encoder`
-    /// produces: the runner chooses the record format, the kit owns delivery.
-    pub fn rabbitmq_cdr_sink_from_env_with_encoder(
-        &self,
-        encoder: Arc<dyn CdrEncoder>,
-    ) -> Result<Option<Arc<dyn CdrWriter>>, String> {
-        let lookup = |k: &str| env::var(k).ok();
-        let writer = rabbitmq_cdr_writer_from_lookup_with_encoder(lookup, encoder, &self.metrics)
-            .map_err(|e| format!("invalid B2BUA config: {e}"))?;
-        Ok(writer.map(|w| self.wired_cdr_sink(w)))
-    }
-
-    fn wired_cdr_sink(&self, writer: RabbitMqCdrWriter) -> Arc<dyn CdrWriter> {
-        let settings = writer.settings();
-        tracing::info!(
-            service = %self.name,
-            sink = "rabbitmq",
-            queue = %settings.queue,
-            declare = ?settings.declare,
-            buffer = self.env.cdr_queue,
-            "CDR sink wired"
-        );
-        Arc::new(writer)
     }
 
     /// The peer-to-peer replication the env selected ([`RunnerEnv::replication`]),
