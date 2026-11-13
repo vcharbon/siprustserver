@@ -134,7 +134,7 @@ const ReplayOn = (
       >
         {phase.kind === "starting" ? "starting…" : "replay"}
       </button>
-      {phase.kind === "started" && <> <JobLinks jobs={phase.jobs} /></>}
+      {phase.kind === "started" && <div className="pcaps-said"><JobLinks jobs={phase.jobs} /></div>}
       {phase.kind === "error" && <div className="error pcaps-said">{phase.detail}</div>}
     </span>
   )
