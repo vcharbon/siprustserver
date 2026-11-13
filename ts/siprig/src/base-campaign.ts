@@ -9,7 +9,10 @@
  * its own) under the environment's run lock, recorded in the store as the
  * campaign named after the pack, its collectors those the pack's rig path
  * wires on each lane, at the collection level the run names. Nothing is
- * provisioned. The exit code is the runner's: 0 every cell passed, 1 one
+ * provisioned. The operations the run names as its setup are planned over
+ * its lanes (`@sip/rig` `Setup.planOf`), a plan the rig refuses refusing the
+ * run before its job opens, injected before its cells and healed at its end,
+ * each phase an event of its job. The exit code is the runner's: 0 every cell passed, 1 one
  * failed, 2 one errored or a phase did not run.
  */
 import { asJob, progressOf } from "@sip/campaign-runner/job"
@@ -22,7 +25,7 @@ import { run as runPhases, PhaseFailed } from "@sip/campaign-runner/run"
 import { recordOf, type Tagging } from "@sip/campaign-runner/selection"
 import { sinkOf } from "@sip/campaign-runner/setup-phase"
 import { Collectors, LaneHosting, Provenance, ReplayIdentity } from "@sip/corpus"
-import { LaneCatalog } from "@sip/rig"
+import { LaneCatalog, Setup } from "@sip/rig"
 import * as Pack from "@sip/rig/pack"
 import { CampaignRuns, JobEvents, Jobs, Sessions } from "@sip/store"
 import * as Arr from "effect/Array"
@@ -62,7 +65,12 @@ export interface Options {
   readonly pivotSchema: string
   /** The collection level the run names; the default where undefined. */
   readonly collection: string | undefined
+  /** The operations of the rig path the run injects after provisioning, in order, and heals in reverse at its end (`@sip/rig` `Setup`). */
+  readonly setup: ReadonlyArray<string>
 }
+
+/** What a refusal of the run's setup names as where the setup was stated. */
+const SETUP_STATED_BY = "the run's setup"
 
 /** The pack manifest at `pack`, or why it is refused. */
 export const manifestOf = (pack: string) =>
@@ -102,6 +110,14 @@ export const run = (options: Options) =>
     const capture = manifest.success.name
     const root = path.resolve(options.out ?? path.join(options.runs, `${stamp()}-${options.env}`))
     const picked = lanes.map((lane) => LaneCatalog.find(catalog.success, resolve("", catalog.success, lane))!)
+    const setup = Setup.planOf(
+      catalog.success.rig,
+      SETUP_STATED_BY,
+      options.setup,
+      picked.map((lane) => lane.loaded),
+      path.join(root, "operations")
+    )
+    if (Result.isFailure(setup)) return yield* refuse(setup.failure.message)
     const jobs = yield* Jobs.Service
     const events = yield* JobEvents.Service
     const store = yield* CampaignRuns.Service
@@ -136,7 +152,7 @@ export const run = (options: Options) =>
           junit: options.junit === undefined ? undefined : path.resolve(options.junit),
           site: options.site,
           record,
-          setup: { instances: [], sink: sinkOf(job === undefined ? undefined : { id: job, events }) },
+          setup: { instances: setup.success, sink: sinkOf(job === undefined ? undefined : { id: job, events }) },
           ...(job === undefined ? {} : { progress: progressOf(jobs, job) })
         }, {
           provision: Effect.void,

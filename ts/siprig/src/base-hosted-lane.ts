@@ -8,9 +8,10 @@
  *
  * The lane names a `b2bua-runner` part ({@link RUNNER_PART}): where the
  * runner publishes its metrics (the batch's end reads its active calls
- * there), where its operator routes listen, and the file its output is
- * appended to, where the part states one (a collector reading the system's
- * log reads it there). A `managed` lane stands one runner per batch on the
+ * there), where its operator routes listen, the file its output is appended
+ * to, where the part states one (a collector reading the system's log reads
+ * it there), and the file naming its pid while it runs, where the part states
+ * one (an operation acting on the runner finds it there). A `managed` lane stands one runner per batch on the
  * lane's `[sip] ingress`; a `standing` one is attached to as found. A
  * managed lane may name a `sip-capture` part ({@link CAPTURE_PART}): its
  * runner appends each SIP datagram to the part's file (`B2BUA_CAPTURE`),
@@ -53,7 +54,9 @@ export const RunnerPart = Schema.Struct({
   /** Where the runner's operator routes listen, `ip:port`. */
   admin: Schema.String,
   /** The file the runner's output is appended to; a stamped file under the batch's directory where absent. */
-  log: Schema.optionalKey(Schema.String)
+  log: Schema.optionalKey(Schema.String),
+  /** The file naming the pid of the runner the base stands, while it runs, where an operation acting on it finds it; none where absent. */
+  pid: Schema.optionalKey(Schema.String)
 })
 export interface RunnerPart extends Schema.Schema.Type<typeof RunnerPart> {}
 
@@ -157,6 +160,7 @@ export const sutPackOf = (runner: string): Sut.SutPack<LaneView.View, never> => 
   worker: "b2bua-runner",
   metricsOf: (lane) => Result.getOrUndefined(Result.map(runnerPartOf(lane), (part) => part.metrics)),
   logOf: (lane) => Result.getOrUndefined(runnerPartOf(lane))?.log,
+  pidFileOf: (lane) => Result.getOrUndefined(runnerPartOf(lane))?.pid,
   command: (lane, extraEnv) =>
     Effect.gen(function*() {
       const part = yield* partOrFail(lane)

@@ -10,7 +10,11 @@
  * and `pivot-schema` as `base-lane-hosting.ts`, `base-hosted-lane.ts` and
  * `base-campaign-cells.ts` find them.
  *
- *   siprig-campaign run [--lanes <a,b>] [--out <dir>] [--junit <file>] [--job <id>] [--collection <level>]
+ *   siprig-campaign run [--lanes <a,b>] [--out <dir>] [--junit <file>] [--job <id>] [--collection <level>] [--setup <op,op>]
+ *
+ * `--setup` names the operations of the rig path the run injects before its
+ * cells and heals at its end (ADR-0060 appendix §7): a pack's campaign is
+ * the base's one campaign, so its setup is the run's to name.
  *
  * Exit 0 every cell passed, 1 one failed, 2 one errored, a phase did not run,
  * the line or the configuration was refused, or the store was unreachable.
@@ -35,6 +39,10 @@ import { apply, of, PACK, packDirOf } from "./base-workspace.ts"
 
 const VERB = "siprig-campaign run"
 
+/** The operation names a comma-separated `--setup` states, in order; none where it is absent. */
+const setupOf = (stated: string | undefined): ReadonlyArray<string> =>
+  (stated ?? "").split(",").map((name) => name.trim()).filter((name) => name !== "")
+
 const fail = (reason: string) => Effect.andThen(Console.error(`${VERB}: ${reason}`), Effect.sync(() => (process.exitCode = 2)))
 
 const run = Command.make("run", {
@@ -42,7 +50,11 @@ const run = Command.make("run", {
   out: Flag.string("out").pipe(Flag.withDescription("The run's directory"), Flag.optional),
   junit: Flag.string("junit").pipe(Flag.withDescription("Write a JUnit XML report here"), Flag.optional),
   job: Flag.integer("job").pipe(Flag.withDescription("The campaign job row this run closes"), Flag.optional),
-  collection: collectionFlag
+  collection: collectionFlag,
+  setup: Flag.string("setup").pipe(
+    Flag.withDescription("The operations injected before the cells and healed at the end, comma-separated (none where none is named)"),
+    Flag.optional
+  )
 }, (input) =>
   Effect.gen(function*() {
     const applied = yield* apply(process.env).pipe(
@@ -70,7 +82,8 @@ const run = Command.make("run", {
       replay: replayBinaryOf(process.env, CHECKOUT),
       runner: runnerBinaryOf(process.env, process.env[BIN_DIR_VARIABLE], CHECKOUT),
       pivotSchema: pivotSchemaOf(process.env, CHECKOUT),
-      collection: Option.getOrUndefined(input.collection)
+      collection: Option.getOrUndefined(input.collection),
+      setup: setupOf(Option.getOrUndefined(input.setup))
     }).pipe(
       Effect.provide(layerOf(client, sessions, { env, checkout: CHECKOUT, pack: { dir: path.resolve(pack), manifest: manifest.success } })),
       Effect.catchCause((cause) => Effect.as(Console.error(`${VERB}: the store: ${String(cause)}`), 2 as const))
