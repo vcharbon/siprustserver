@@ -21,7 +21,7 @@
  *   it runs, where an operation acting on the runner finds it.
  * - `sip-capture` ({@link CAPTURE_PART}): the runner appends each SIP
  *   datagram to it (`B2BUA_CAPTURE`), where a collector cutting the capture
- *   reads it.
+ *   reads it; refused on an unspecified ingress.
  * - `cdr-file` ({@link CDR_PART}): the runner appends each call's record to
  *   it, a JSON line each (`B2BUA_CDR_FILE`), where a collector of the call
  *   records reads them.
@@ -36,6 +36,7 @@ import * as Schema from "effect/Schema"
 import * as ChildProcess from "effect/unstable/process/ChildProcess"
 import { spawn } from "node:child_process"
 import { mkdirSync } from "node:fs"
+import { isIPv4, isIPv6 } from "node:net"
 import * as path from "node:path"
 
 /** The part kind a hosted lane of the base names its runner's addresses in. */
@@ -119,8 +120,24 @@ export const logPartOf = (lane: LaneView.Hosted) => filePartOf(lane, LOG)
 /** The `runner-pid` part `lane` names, none where it names none, or why the base cannot set it. */
 export const pidPartOf = (lane: LaneView.Hosted) => filePartOf(lane, PID)
 
-/** The `sip-capture` part `lane` names, none where it names none, or why the base cannot capture it. */
-export const capturePartOf = (lane: LaneView.Hosted) => filePartOf(lane, CAPTURE)
+/**
+ * The `sip-capture` part `lane` names, none where it names none, or why the
+ * base cannot capture it: as {@link filePartOf}, and refused on an
+ * unspecified ingress, which the runner refuses to capture on (each
+ * datagram states the runner's own address).
+ */
+export const capturePartOf = (lane: LaneView.Hosted): Result.Result<FilePart | undefined, string> =>
+  Result.flatMap(filePartOf(lane, CAPTURE), (part) =>
+    part !== undefined && unspecified(lane.sip.ingress)
+      ? Result.fail(`${lane.id}: its ingress ${lane.sip.ingress} is unspecified: the runner captures only on a specific address, which its ${CAPTURE_PART} part needs`)
+      : Result.succeed(part))
+
+/** Whether the host of `address` (`ip:port`, an IPv6 one bracketed) is the unspecified address. */
+const unspecified = (address: string): boolean => {
+  const host = address.slice(0, address.lastIndexOf(":")).replace(/^\[(.*)\]$/, "$1")
+  if (isIPv4(host)) return host.split(".").every((octet) => Number(octet) === 0)
+  return isIPv6(host) && host.split(":").every((group) => /^0*$/.test(group))
+}
 
 /** The `cdr-file` part `lane` names, none where it names none, or why the base cannot set it. */
 export const cdrPartOf = (lane: LaneView.Hosted) => filePartOf(lane, CDR)
