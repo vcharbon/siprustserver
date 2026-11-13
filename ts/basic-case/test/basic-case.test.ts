@@ -132,6 +132,58 @@ describe("invite_reject", () => {
   })
 })
 
+/** Each flow node as its ladder line, an inject as `inject <action> after <point's ladder line>`, a node waiting on an inject marked. */
+const flowOf = (cell: CompiledCell.CompiledCell): ReadonlyArray<string> => {
+  const lines = new Map(Pivot.pivotSteps(cell.document).map((step, i) => [step.id, ladderOf(cell)[i]!]))
+  return cell.document.flow.map((node) => {
+    if (node.op === "inject") return `inject ${node.action} after ${node.after?.map((id) => lines.get(id)).join(", ")}`
+    const waits = node.after?.filter((id) => !lines.has(id)) ?? []
+    return `${lines.get(node.id)}${waits.length > 0 ? " (after the inject)" : ""}`
+  })
+}
+
+describe("an operation step", () => {
+  const stepped = (shape: "basic_call" | "invite_reject", at: string) =>
+    defineBasicCase({
+      title: "the worker restarts",
+      shape,
+      ...PARTIES,
+      final: [],
+      tags: ["disruptive"],
+      steps: [{ operation: "restart-worker", at }]
+    } as Parameters<typeof defineBasicCase>[0])
+
+  it("answered: injects the operation once the callee received the ACK of its 200, the hang-up waiting on it", () => {
+    const cell = stepped("basic_call", "answered")
+    expect(flowOf(cell).slice(7, 11)).toEqual([
+      "A send ACK (auto)",
+      "B expect ACK (auto)",
+      "inject operation:restart-worker after B expect ACK (auto)",
+      "A send BYE (after the inject)"
+    ])
+    expect(cell.tags).toEqual(["disruptive"])
+  })
+
+  it("reached: injects the operation once the INVITE reached the callee, its answer waiting on it", () => {
+    expect(flowOf(stepped("invite_reject", "reached")).slice(2, 5)).toEqual([
+      "B expect INVITE",
+      "inject operation:restart-worker after B expect INVITE",
+      "B send 486 INVITE (after the inject)"
+    ])
+    expect(flowOf(stepped("basic_call", "reached")).slice(2, 5)).toEqual([
+      "B expect INVITE",
+      "inject operation:restart-worker after B expect INVITE",
+      "B send 180 INVITE (after the inject)"
+    ])
+  })
+
+  it("leaves the ladder of a case stating none as it is, and its cell carrying no tag", () => {
+    const plain = defineBasicCase({ title: "alice calls bob", shape: "basic_call", ...PARTIES, final: [] })
+    expect(plain.document.flow.every((node) => node.op !== "inject" && node.after === undefined)).toBe(true)
+    expect(plain.tags).toBeUndefined()
+  })
+})
+
 describe("a case that does not hold", () => {
   const refusal = (input: unknown): string => {
     try {
@@ -168,6 +220,22 @@ describe("a case that does not hold", () => {
 
   it("is refused for a title naming no cell", () => {
     expect(refusal({ ...base, title: "!!" })).toContain("its title holds no letter or digit to name its cell by")
+  })
+
+  it("is refused for an operation step at a point its shape does not reach, naming the shape's points", () => {
+    expect(refusal({ ...base, shape: "invite_reject", steps: [{ operation: "restart-worker", at: "answered" }] })).toContain(
+      "steps: restart-worker is at answered, which invite_reject does not reach (its points: reached)"
+    )
+  })
+
+  it("is refused for two operation steps at one point", () => {
+    const steps = [{ operation: "restart-worker", at: "answered" }, { operation: "block-route", at: "answered" }]
+    expect(refusal({ ...base, steps })).toContain("steps: block-route and restart-worker are both at answered: one step per point")
+  })
+
+  it("is refused for an operation or a tag that is no name", () => {
+    expect(refusal({ ...base, steps: [{ operation: "Restart Worker", at: "answered" }] })).toContain(`at ["steps"][0]["operation"]`)
+    expect(refusal({ ...base, tags: ["Disruptive"] })).toContain(`at ["tags"][0]`)
   })
 
   it("is accepted otherwise, its cell named by its title", () => {

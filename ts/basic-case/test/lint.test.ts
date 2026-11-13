@@ -1,5 +1,6 @@
 /**
- * The documents of the fixture source pass the real `pivot-schema lint`:
+ * The documents of the fixture source, and those of cases stating an
+ * operation step at each point of each shape, pass the real `pivot-schema lint`:
  * `PIVOT_SCHEMA_BIN`, else the release build (`Binaries.releaseBinary`). The
  * binary missing, each test fails naming the path tried and how to build it;
  * `TOOLCHAIN_TEST_SKIP=1` skips them instead.
@@ -16,6 +17,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { defineBasicCase } from "../src/index.js"
 
 const SOURCE = fileURLToPath(new URL("./fixtures/cases.ts", import.meta.url))
 
@@ -56,6 +58,24 @@ describe.skipIf(process.env["TOOLCHAIN_TEST_SKIP"] === "1")("the fixture source'
     const cells = await Effect.runPromise(CaseSource.load(SOURCE))
     expect(cells.map((cell) => cell.id)).toEqual(["alice-calls-bob", "bob-is-busy"])
     for (const cell of cells) {
+      const scenario = path.join(dir, `${cell.id}.json`)
+      fs.writeFileSync(scenario, Pivot.emitPivot(cell.document))
+      const errors = (await diagnosticsOf(scenario)).filter((d) => d.startsWith("error "))
+      expect([cell.id, errors]).toEqual([cell.id, []])
+    }
+  })
+})
+
+describe.skipIf(process.env["TOOLCHAIN_TEST_SKIP"] === "1")("a case stating an operation step", () => {
+  it("passes the pivot schema lint with no error at each point of each shape", async () => {
+    const parties = { caller: "sip:alice@atlanta.example.com", callee: "sip:bob@biloxi.example.com", final: [] }
+    const cells = [
+      defineBasicCase({ title: "answered", shape: "basic_call", ...parties, steps: [{ operation: "restart-worker", at: "answered" }] }),
+      defineBasicCase({ title: "reached", shape: "basic_call", ...parties, steps: [{ operation: "restart-worker", at: "reached" }] }),
+      defineBasicCase({ title: "rejected", shape: "invite_reject", ...parties, steps: [{ operation: "restart-worker", at: "reached" }] })
+    ]
+    for (const cell of cells) {
+      expect(cell.document.flow.some((node) => node.op === "inject")).toBe(true)
       const scenario = path.join(dir, `${cell.id}.json`)
       fs.writeFileSync(scenario, Pivot.emitPivot(cell.document))
       const errors = (await diagnosticsOf(scenario)).filter((d) => d.startsWith("error "))
