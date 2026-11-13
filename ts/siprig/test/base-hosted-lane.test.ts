@@ -6,11 +6,12 @@
  * or named by a standing lane, whose runner the base does not start. A lane
  * stating all of it is hosted, its runner standalone at the lane's ingress,
  * capturing to the `sip-capture` part's file and writing its call records to
- * the `cdr-file` part's where the lane names them.
+ * the `cdr-file` part's where the lane names them, its pid in the runner
+ * part's pid file where the part names one.
  */
 import type { LaneView } from "@sip/rig"
 import { describe, expect, it } from "vitest"
-import { CAPTURE_PART, CDR_PART, hostedRefusalOf, RUNNER_PART, runnerEnvOf } from "../src/base-hosted-lane.ts"
+import { CAPTURE_PART, CDR_PART, hostedRefusalOf, RUNNER_PART, runnerEnvOf, sutPackOf } from "../src/base-hosted-lane.ts"
 
 const PART = { metrics: "127.0.0.1:9161", admin: "127.0.0.1:9162" }
 const CAPTURE = { file: "/var/tmp/reference.pcapng" }
@@ -84,6 +85,13 @@ describe("the base's hosted lane", () => {
     const lane = laneOf("none", { part: PART, cdr: CDR })
     expect(hostedRefusalOf(lane)).toBeNull()
     expect(runnerEnvOf(lane, PART)["B2BUA_CDR_FILE"]).toBe(CDR.file)
+  })
+
+  it("names the runner it stands in the pid file the lane's runner part states, and in none where it states none", () => {
+    const pid = "/var/tmp/reference.pid"
+    const pack = sutPackOf("/usr/local/bin/b2bua-runner")
+    expect(pack.pidFileOf?.(laneOf("none", { part: { ...PART, pid } }))).toBe(pid)
+    expect(pack.pidFileOf?.(laneOf("none", { part: PART }))).toBeUndefined()
   })
 
   it("is refused where its cdr-file part names no file, or where the lane is standing", () => {

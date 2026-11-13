@@ -29,7 +29,7 @@ import { NodeServices } from "@effect/platform-node"
 import { CellOfBundle } from "@sip/rig"
 import { BaseCampaign, manifestOf } from "@sip/siprig/base-campaign"
 import { layerOf } from "@sip/siprig/base-campaign-services"
-import { CampaignResults, CampaignRuns } from "@sip/store"
+import { CampaignResults, CampaignRuns, JobEvents, Jobs } from "@sip/store"
 import { layerFromUrl } from "@sip/store/client"
 import { drop, fresh, migrated, on, scratch, served, urlFor } from "@sip/store/test-server"
 import * as Effect from "effect/Effect"
@@ -37,10 +37,9 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
-import * as dgram from "node:dgram"
-import * as net from "node:net"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { blocksOf, callIdOf, payloadOf } from "../collectors/capture/cut.ts"
+import { hostedWorkspace, writtenUnder } from "./hosted-workspace.ts"
 
 const PACK = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const CHECKOUT = path.resolve(PACK, "../..")
@@ -73,8 +72,13 @@ afterAll(async () => {
   if (served) await drop(SCRATCH)
 }, 120_000)
 
-/** The reference campaign run once on `lane`, its lanes the workspace's where one is named: its exit code and the run the store holds of it. */
-const reference = (lane: string, workspace?: string) =>
+/**
+ * The reference campaign run once on `lane` as the job it creates, its lanes
+ * the workspace's where one is named, the operations `setup` names as its
+ * setup: its exit code, the run the store holds of it, its job's events and
+ * its directory.
+ */
+const reference = (lane: string, workspace?: string, setup: ReadonlyArray<string> = []) =>
   Effect.gen(function*() {
     const manifest = yield* manifestOf(PACK)
     const services = layerOf(layerFromUrl(urlFor(SCRATCH)), path.join(work, "sessions"), {
@@ -82,105 +86,43 @@ const reference = (lane: string, workspace?: string) =>
       checkout: CHECKOUT,
       pack: { dir: PACK, manifest }
     })
+    const out = path.join(work, `run-${lane}`)
     return yield* Effect.gen(function*() {
+      const job = yield* (yield* Jobs.Service).create({ kind: "campaign", args: {}, createdBy: "reference-test" })
       const code = yield* BaseCampaign.run({
         pack: PACK,
         workspace,
         lanes: lane,
-        out: path.join(work, `run-${lane}`),
+        out,
         runs: work,
         junit: undefined,
-        job: undefined,
+        job,
         env: "reference-test",
         site: "http://127.0.0.1:5175",
         replay: REPLAY,
         runner: RUNNER,
         pivotSchema: PIVOT_SCHEMA,
-        collection: undefined
+        collection: undefined,
+        setup
       })
       const runs = yield* (yield* CampaignRuns.Service).read("reference", { limit: 1 })
-      return { code, run: runs[0] }
+      const events = yield* (yield* JobEvents.Service).ofJob(job)
+      return { code, run: runs[0], events, out }
     }).pipe(Effect.provide(services))
   }).pipe(Effect.provide(NodeServices.layer))
 
-/** A loopback address no socket of `kind` held a moment ago. */
-const freeAddress = async (kind: "udp" | "tcp"): Promise<string> => {
-  if (kind === "tcp") {
-    const server = net.createServer()
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
-    const { port } = server.address() as net.AddressInfo
-    await new Promise((resolve) => server.close(resolve))
-    return `127.0.0.1:${port}`
-  }
-  const socket = dgram.createSocket("udp4")
-  await new Promise<void>((resolve) => socket.bind(0, "127.0.0.1", resolve))
-  const { port } = socket.address()
-  await new Promise<void>((resolve) => socket.close(resolve))
-  return `127.0.0.1:${port}`
-}
-
-/** What a hosted workspace's runner writes: its log, its packet capture and its call records. */
-interface Written {
-  readonly log: string
-  readonly capture: string
-  readonly cdr: string
-}
-
 /**
- * A job collector failing the cell of `bob is busy` (`fail-busy`), so the
- * job's `on-failure` collectors run over that cell alone.
+ * The workspace `dir` holding `note`, an operation needing no part whose one
+ * executable says the step it runs as, in its step's log.
  */
-const FAIL_BUSY = {
-  "collector.toml": [
-    `schema = "collector.v1"`,
-    `name = "fail-busy"`,
-    `scope = "job"`,
-    `[run]`,
-    `collect = "./run"`,
-    ``
-  ].join("\n"),
-  run: [
-    `#!/usr/bin/env node`,
-    `const fs = require("node:fs")`,
-    `if (process.env.SIPRIG_STEP === "collect") {`,
-    `  const context = JSON.parse(fs.readFileSync(process.env.SIPRIG_CONTEXT, "utf8"))`,
-    `  for (const cell of context.cells.filter((one) => one.case.includes("busy"))) {`,
-    `    console.log(JSON.stringify({ verification: "fail-busy", cell: cell.id, answer: "fail", message: "failed by the test" }))`,
-    `  }`,
-    `}`,
-    ``
-  ].join("\n")
-}
-
-/**
- * A workspace named `name` holding the pack's reference lane on addresses
- * free on this box, so two runs of this suite never share a port: its
- * runner logging and capturing where `written` says, `calls-ended` read
- * 0.1 s after each call so the batch stays under a second, and the
- * `fail-busy` collector where `failing` is set.
- */
-const hostedWorkspace = async (name: string, written: Written, failing = false): Promise<string> => {
-  const dir = path.join(work, name)
-  const lane = fs.readFileSync(path.join(PACK, "lanes", "reference.toml"), "utf8")
-    .replace(`ingress = "127.0.0.1:5160"`, `ingress = "${await freeAddress("udp")}"`) +
-    `\n[collectors.calls-ended]\ndelay_s = 0.1\n`
-  fs.mkdirSync(path.join(dir, "lanes"), { recursive: true })
-  fs.mkdirSync(path.join(dir, "targets", "b2bua-runner"), { recursive: true })
-  fs.mkdirSync(path.join(dir, "targets", "sip-capture"), { recursive: true })
-  fs.mkdirSync(path.join(dir, "targets", "cdr-file"), { recursive: true })
-  fs.writeFileSync(path.join(dir, "lanes", "reference.toml"), lane)
-  fs.writeFileSync(path.join(dir, "targets", "cdr-file", "reference.toml"), `file = "${written.cdr}"\n`)
+const notingWorkspace = (dir: string): string => {
+  const operation = path.join(dir, "operations", "note")
+  fs.mkdirSync(operation, { recursive: true })
   fs.writeFileSync(
-    path.join(dir, "targets", "b2bua-runner", "reference.toml"),
-    `metrics = "${await freeAddress("tcp")}"\nadmin = "${await freeAddress("tcp")}"\nlog = "${written.log}"\n`
+    path.join(operation, "operation.toml"),
+    [`schema = "operation.v1"`, `name = "note"`, `[run]`, `inject = "./run"`, `heal = "./run"`, ``].join("\n")
   )
-  fs.writeFileSync(path.join(dir, "targets", "sip-capture", "reference.toml"), `file = "${written.capture}"\n`)
-  if (failing) {
-    const collector = path.join(dir, "collectors", "fail-busy")
-    fs.mkdirSync(collector, { recursive: true })
-    fs.writeFileSync(path.join(collector, "collector.toml"), FAIL_BUSY["collector.toml"])
-    fs.writeFileSync(path.join(collector, "run"), FAIL_BUSY.run, { mode: 0o755 })
-  }
+  fs.writeFileSync(path.join(operation, "run"), `#!/bin/sh\necho "noted $SIPRIG_STEP" >&2\n`, { mode: 0o755 })
   return dir
 }
 
@@ -202,7 +144,7 @@ const callIdsIn = (capture: Uint8Array): ReadonlyArray<string> => [
 const linesOf = (file: string): ReadonlyArray<Record<string, unknown>> =>
   fs.readFileSync(file, "utf8").split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Record<string, unknown>)
 
-/** What an earlier job left in the runner's capture and record files: a Call-ID no cell holds. */
+/** What an earlier job left in the runner's log, capture and record files: a Call-ID no cell holds. */
 const STALE = "stale-call@192.0.2.1"
 
 /** The block type of a pcapng section header, read little-endian. */
@@ -248,16 +190,36 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
     }
   })
 
+  it("injects the setup operations it is given before its cells and heals them after, each phase an event of its job", async () => {
+    const { code, run, events, out } = await Effect.runPromise(reference("simulated", notingWorkspace(path.join(work, "noting")), ["note"]))
+    expect(code).toBe(0)
+    expect(run?.lanes.map((lane) => [lane.lane, lane.status])).toEqual([["simulated", "done"]])
+    expect(events.filter((event) => event.subject === "note").map((event) => event.phase)).toEqual([
+      "inject",
+      "injected",
+      "heal",
+      "healed",
+      "recovered"
+    ])
+    const ran = path.join(out, "operations", "1-note")
+    expect(fs.readFileSync(path.join(ran, "inject.log"), "utf8")).toContain("noted inject")
+    expect(fs.readFileSync(path.join(ran, "heal.log"), "utf8")).toContain("noted heal")
+  })
+
+  it("refuses, before its job opens, a setup operation needing a part no lane of the run names", async () => {
+    const { code, events } = await Effect.runPromise(reference("simulated", undefined, ["restart-worker"]))
+    expect(code).toBe(2)
+    expect(events).toEqual([])
+  })
+
   it("passes both cases on the reference lane, the B2BUA runner stood for the batch and holding no call at its end", async () => {
-    const written = {
-      log: path.join(work, "b2bua-runner.log"),
-      capture: path.join(work, "passing", "b2bua-runner.pcapng"),
-      cdr: path.join(work, "passing", "b2bua-runner.cdr.jsonl")
-    }
     fs.mkdirSync(path.join(work, "passing"), { recursive: true })
+    const written = writtenUnder(path.join(work, "passing"), "b2bua-runner")
+    fs.writeFileSync(written.log, `${STALE}\n`)
     fs.writeFileSync(written.capture, STALE)
     fs.writeFileSync(written.cdr, `${JSON.stringify({ a_leg: { call_id: STALE } })}\n`)
-    const { code, run } = await Effect.runPromise(reference("reference", await hostedWorkspace("workspace", written)))
+    const workspace = await hostedWorkspace(PACK, path.join(work, "workspace"), written)
+    const { code, run } = await Effect.runPromise(reference("reference", workspace))
     expect(code).toBe(0)
     expect(run?.lanes.map((lane) => [lane.lane, lane.status])).toEqual([["reference", "done"]])
     const results = run!.lanes[0]!.results
@@ -298,16 +260,13 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
       expect(legs, "the caller's Call-ID and the runner's b-leg one").toHaveLength(2)
       expect(captured, "the runner captured both legs of the call").toEqual(expect.arrayContaining([...legs]))
     }
-    expect(fs.readFileSync(written.log, "utf8")).toContain("listening UDP")
+    expect(fs.readFileSync(written.log, "utf8"), "what earlier batches left in the runner's log is gone").not.toContain(STALE)
   })
 
   it("cuts the runner's capture for the failed cell alone, its calls' packets a pcapng of their own", async () => {
-    const written = {
-      log: path.join(work, "failing.log"),
-      capture: path.join(work, "failing", "b2bua-runner.pcapng"),
-      cdr: path.join(work, "failing", "b2bua-runner.cdr.jsonl")
-    }
-    const { run } = await Effect.runPromise(reference("reference", await hostedWorkspace("failing-workspace", written, true)))
+    const written = writtenUnder(path.join(work, "failing"), "b2bua-runner")
+    const workspace = await hostedWorkspace(PACK, path.join(work, "failing-workspace"), written, true)
+    const { run } = await Effect.runPromise(reference("reference", workspace))
     const results = run!.lanes[0]!.results
     expect(results.map((result) => [CampaignResults.caseNameOf(result.caseId).ref, result.passed])).toEqual([
       ["alice calls bob", true],
