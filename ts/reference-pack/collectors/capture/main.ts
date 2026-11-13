@@ -6,7 +6,7 @@
  * to it each time a batch of the job stands it; `collect`, run only where a
  * cell of the job failed, reads the job's capture and attaches to each failed
  * cell the packets of its calls (`cut.ts`) as a `file` attachment, a pcapng
- * capture of its own.
+ * capture of its own, and a `table` of them, a row per packet.
  *
  * It needs no library: node runs it with its types stripped, it reads the
  * step's variables and `context.v1` itself, and answers in the lines of
@@ -14,10 +14,13 @@
  */
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { blocksOf, cut } from "./cut.ts"
+import { blocksOf, cut, packetTableOf } from "./cut.ts"
 
 /** The part kind naming the capture file. */
 const PART = "sip-capture"
+
+/** The name of the table of a failed cell's packets. */
+const PACKETS = "capture-packets"
 
 /** What the collector reads of a cell in `context.v1`. */
 interface Cell {
@@ -56,9 +59,15 @@ const main = (): void => {
   const blocks = blocksOf(fs.existsSync(capture) ? fs.readFileSync(capture) : new Uint8Array())
   for (const cell of context.cells) {
     const file = `${cell.id}.pcapng`
-    fs.writeFileSync(path.join(out, file), cut(blocks, callIdsOf(cell)))
-    const line = { attachment: { kind: "file", title: "the B2BUA runner's capture of the call", file }, cell: cell.id }
-    process.stdout.write(`${JSON.stringify(line)}\n`)
+    const table = `${cell.id}.packets.jsonl`
+    const owned = cut(blocks, callIdsOf(cell))
+    fs.writeFileSync(path.join(out, file), owned)
+    fs.writeFileSync(path.join(out, table), packetTableOf(owned))
+    const lines = [
+      { attachment: { kind: "file", title: "the B2BUA runner's capture of the call", file }, cell: cell.id },
+      { attachment: { name: PACKETS, kind: "table", title: "the packets of the call", file: table }, cell: cell.id }
+    ]
+    for (const line of lines) process.stdout.write(`${JSON.stringify(line)}\n`)
   }
 }
 

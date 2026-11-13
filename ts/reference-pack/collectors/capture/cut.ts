@@ -56,6 +56,20 @@ const CALL_ID = /^(?:call-id|i)[ \t]*:[ \t]*(\S+)/im
 export const callIdOf = (message: Uint8Array): string | undefined =>
   CALL_ID.exec(new TextDecoder("latin1").decode(message))?.[1]
 
+/** The start line of a SIP message's bytes, the request line or the status line. */
+export const startLineOf = (message: Uint8Array): string => new TextDecoder("latin1").decode(message).split("\r\n", 1)[0] ?? ""
+
+/**
+ * The `table` attachment's text of the packets `capture` holds: its columns,
+ * then a row per packet, its number, its SIP message's start line and its
+ * Call-ID.
+ */
+export const packetTableOf = (capture: Uint8Array): string => {
+  const packets = blocksOf(capture).filter((block) => block.type === ENHANCED_PACKET).map(payloadOf)
+  const rows = packets.map((message, at) => [String(at + 1), startLineOf(message), callIdOf(message) ?? ""])
+  return [["packet", "start line", "Call-ID"], ...rows].map((row) => `${JSON.stringify(row)}\n`).join("")
+}
+
 /** The capture of `blocks` a cell owning `callIds` owns: the first section's header and interface, then its packets. */
 export const cut = (blocks: ReadonlyArray<Block>, callIds: ReadonlyArray<string>): Uint8Array => {
   const owned = new Set(callIds)
