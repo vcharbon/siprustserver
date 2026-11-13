@@ -11,7 +11,10 @@
  * there), where its operator routes listen, and the file its output is
  * appended to, where the part states one (a collector reading the system's
  * log reads it there). A `managed` lane stands one runner per batch on the
- * lane's `[sip] ingress`; a `standing` one is attached to as found.
+ * lane's `[sip] ingress`; a `standing` one is attached to as found. A
+ * managed lane may name a `sip-capture` part ({@link CAPTURE_PART}): its
+ * runner appends each SIP datagram to the part's file (`B2BUA_CAPTURE`),
+ * where a collector cutting the capture reads it.
  */
 import * as Batch from "@sip/lab-host/replay-batch"
 import * as Sut from "@sip/lab-host/replay-sut"
@@ -57,13 +60,35 @@ export const runnerPartOf = (lane: LaneView.Hosted): Result.Result<RunnerPart, s
   )
 }
 
-/** Why the base cannot host `lane`, or null: it serves no backend, and reads the runner's part. */
+/** What the base reads of a lane's `sip-capture` part. */
+export const CapturePart = Schema.Struct({
+  /** The pcapng file the runner appends each SIP datagram it sends and receives to, a section per start. */
+  file: Schema.String
+})
+export interface CapturePart extends Schema.Schema.Type<typeof CapturePart> {}
+
+/** The `sip-capture` part `lane` names, none where it names none, or why the base cannot capture it. */
+export const capturePartOf = (lane: LaneView.Hosted): Result.Result<CapturePart | undefined, string> => {
+  const part = lane.loaded.parts.get(CAPTURE_PART)
+  if (part === undefined) return Result.succeed(undefined)
+  if (lane.sip.lifecycle !== "managed") {
+    return Result.fail(`${lane.id}: the base captures only a runner it stands: a standing lane names no ${CAPTURE_PART} part (${part.file})`)
+  }
+  return Result.mapError(
+    Schema.decodeUnknownResult(CapturePart)(part.value),
+    (issue) => `${lane.id}: its ${CAPTURE_PART} part ${part.file}: ${String(issue)}`
+  )
+}
+
+/** Why the base cannot host `lane`, or null: it serves no backend, reads the runner's part, and captures only a runner it stands. */
 export const hostedRefusalOf = (lane: LaneView.Hosted): string | null => {
   if (lane.backendMode !== "none") {
     return `${lane.id}: the base serves no backend to its B2BUA runner, which routes each call itself: state [backend] mode = "none"`
   }
   const part = runnerPartOf(lane)
-  return Result.isFailure(part) ? part.failure : null
+  if (Result.isFailure(part)) return part.failure
+  const capture = capturePartOf(lane)
+  return Result.isFailure(capture) ? capture.failure : null
 }
 
 /**
@@ -78,14 +103,22 @@ export const runnerBinaryOf = (env: NodeJS.ProcessEnv, binDir: string | undefine
   return path.join(checkout, "target", "release", "b2bua-runner")
 }
 
-/** The runner's environment on `lane`: standalone at the lane's ingress, its metrics and admin at the part's addresses. */
-export const runnerEnvOf = (lane: LaneView.Hosted, part: RunnerPart): Readonly<Record<string, string>> => ({
-  B2BUA_MODE: "standalone",
-  B2BUA_LISTEN: lane.sip.ingress,
-  B2BUA_ADVERTISE: lane.sip.ingress,
-  B2BUA_METRICS: part.metrics,
-  B2BUA_ADMIN: part.admin
-})
+/**
+ * The runner's environment on `lane`: standalone at the lane's ingress, its
+ * metrics and admin at the part's addresses, capturing to the file of the
+ * lane's `sip-capture` part where it names one.
+ */
+export const runnerEnvOf = (lane: LaneView.Hosted, part: RunnerPart): Readonly<Record<string, string>> => {
+  const capture = Result.getOrUndefined(capturePartOf(lane))
+  return {
+    B2BUA_MODE: "standalone",
+    B2BUA_LISTEN: lane.sip.ingress,
+    B2BUA_ADVERTISE: lane.sip.ingress,
+    B2BUA_METRICS: part.metrics,
+    B2BUA_ADMIN: part.admin,
+    ...(capture === undefined ? {} : { B2BUA_CAPTURE: capture.file })
+  }
+}
 
 const partOrFail = (lane: LaneView.Hosted) =>
   Effect.fromResult(Result.mapError(runnerPartOf(lane), (why) => new Error(why)))
