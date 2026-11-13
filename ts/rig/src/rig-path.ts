@@ -61,7 +61,7 @@ export interface RigPath {
   readonly parts: ReadonlyMap<string, PartSchema>
 }
 
-/** The roots of a path: the pack's directory, then the workspace's; either may be absent. */
+/** The roots of a path: the pack's directory, then the workspace's; either may be absent, and a workspace that is the pack's directory is the pack alone. */
 export interface Roots {
   readonly pack?: string | undefined
   readonly workspace?: string | undefined
@@ -234,13 +234,20 @@ const loadPack = (root: string) =>
     return defined
   })
 
+/** The workspace root of `roots` the path reads: none where it is the pack's own directory, which the path reads once, as the pack. */
+const workspaceOf = (roots: Roots): string | undefined =>
+  roots.workspace === undefined || (roots.pack !== undefined && path.resolve(roots.workspace) === path.resolve(roots.pack))
+    ? undefined
+    : roots.workspace
+
 /** The path the roots make, or the first refusal of a manifest on it. */
 export const load = (roots: Roots): Effect.Effect<RigPath, Refusal, FileSystem.FileSystem> =>
   Effect.gen(function*() {
     const pack = roots.pack === undefined ? undefined : yield* loadPack(roots.pack)
+    const workspace = workspaceOf(roots)
     const levels: ReadonlyArray<readonly [string, Level]> = [
       ...(roots.pack === undefined ? [] : [[roots.pack, "pack"] as const]),
-      ...(roots.workspace === undefined ? [] : [[roots.workspace, "workspace"] as const])
+      ...(workspace === undefined ? [] : [[workspace, "workspace"] as const])
     ]
     const collectors = yield* Effect.forEach(levels, ([root, level]) => loadKind(COLLECTORS, root, level))
     const judges = yield* Effect.forEach(levels, ([root, level]) => loadKind(JUDGES, root, level))
