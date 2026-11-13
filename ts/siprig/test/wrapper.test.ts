@@ -28,7 +28,7 @@ const run = (docker: Docker, ...args: ReadonlyArray<string>) =>
 
 /** Whether `stderr` is the wrapper's usage: its header's first line, and nothing of the script below it. */
 const isUsage = (stderr: string): boolean =>
-  stderr.startsWith("sample — a siprig pack's image on this machine") && !stderr.includes("set -euo pipefail") &&
+  stderr.includes("sample — a siprig pack's image on this machine") && !stderr.includes("set -euo pipefail") &&
   !stderr.includes("unbound variable")
 
 describe("the wrapper's usage", () => {

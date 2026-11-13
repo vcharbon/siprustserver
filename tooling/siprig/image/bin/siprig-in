@@ -11,8 +11,9 @@
 # Every verb but the pg ones runs in the running container with the store's
 # environment its first step wrote (/run/siprig/workspace.env). A pack verb's
 # process is marked busy (/run/siprig/busy/<pid>) while it lives; `busy` also
-# lists what the pack's own `siprig-busy` prints, where it ships one. The pg
-# verbs run in a one-off container of a stopped workspace (`upgrade-pg`).
+# lists what the pack's own `siprig-busy` prints, where it ships one. The
+# base's commands (`siprig-in`, `-site`, `-store`, `-workspace`, `-busy`) are
+# no verb. The pg verbs run in a one-off container of a stopped workspace.
 set -euo pipefail
 verb="${1:-}"; shift || true
 
@@ -36,12 +37,40 @@ offline_user() {
   mkdir -p /tmp/siprig-pg "$SIPRIG_WORKSPACE/logs"
 }
 
+# Whether a process of this container listens on SITE_PORT: ss names the users of the
+# sockets it can see, and this container sees only its own, so another site of the host
+# on that port is no answer.
+own_listener() {
+  ss -Hltnp "sport = :$SITE_PORT" | grep -q 'users:'
+}
+
+# The base's own commands, which run the container and are no verb of its pack.
+BASE_COMMANDS=" in site store workspace busy "
+
+# The verb <name> refused, exit 2, where it is no pack command's name: not lower-case
+# letters, digits and dashes, or one of BASE_COMMANDS.
+need_verb() {
+  local name=$1
+  case "$name" in
+    *[!a-z0-9-]* | "") echo "siprig-in: $name is no verb (lower-case letters, digits and dashes)" >&2; exit 2 ;;
+  esac
+  case "$BASE_COMMANDS" in
+    *" $name "*) echo "siprig-in: $name is a command of the image (siprig-$name), no verb of its pack" >&2; exit 2 ;;
+  esac
+}
+
+# <file>, a dump of a cluster whose superuser is siprig, restored into the running cluster
+# on the private socket; the dump's `CREATE ROLE siprig;` is left out, since initdb made that
+# role, and any other error stops the restore (its status returned).
+restore_dump() {
+  local file=$1
+  grep -v -x 'CREATE ROLE siprig;' "$file" | psql -h /tmp/siprig-pg -U siprig -d postgres -q -o /dev/null -v ON_ERROR_STOP=1
+}
+
 case "$verb" in
   site-url)
     server
-    # The port's listener must be a process of this container: ss names the
-    # users of sockets it can see, and this container sees only its own.
-    ss -Hltnp "sport = :$SITE_PORT" | grep -q 'users:' || exit 1
+    own_listener || exit 1
     case "$SITE_BIND" in
       0.0.0.0 | ::) at="127.0.0.1" ;;
       *:*) at="[$SITE_BIND]" ;;
@@ -60,9 +89,7 @@ case "$verb" in
     ;;
   verb)
     name="${1:?verb <verb> <args>…}"; shift
-    case "$name" in
-      *[!a-z0-9-]* | "") echo "siprig-in: $name is no verb (lower-case letters, digits and dashes)" >&2; exit 2 ;;
-    esac
+    need_verb "$name"
     command -v "siprig-$name" >/dev/null || { echo "siprig-in: this image has no command siprig-$name: \`$name\` is no verb of its pack" >&2; exit 2; }
     server
     mkdir -p "$BUSY"
@@ -84,11 +111,10 @@ case "$verb" in
     [ ! -e "$fresh" ] || { echo "siprig-in: $fresh exists (an earlier restore?): remove it first" >&2; exit 1; }
     initdb -D "$fresh" --username=siprig --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C.UTF-8
     pg_ctl -D "$fresh" -w -l "$SIPRIG_WORKSPACE/logs/upgrade-pg.log" -o "$SOCKET_ONLY" start
-    # initdb made the superuser the dump creates: its CREATE ROLE line is left out, any other error stops.
     status=0
-    grep -v -x 'CREATE ROLE siprig;' "$file" | psql -h /tmp/siprig-pg -U siprig -d postgres -q -o /dev/null -v ON_ERROR_STOP=1 || status=$?
+    restore_dump "$file" || status=$?
     pg_ctl -D "$fresh" -w -m fast stop
     exit "$status"
     ;;
-  *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

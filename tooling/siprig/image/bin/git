@@ -3,7 +3,9 @@
 # provenance asks of a checkout (`@sip/toolchain` `git.ts`) are answered from
 # the build stamps the kit wrote off the host's git
 # (/opt/siprig/image/stamp/<component>.env: SHA, BRANCH, DIRTY, DIFF, and DIR,
-# the directory the image holds that checkout at).
+# the directory the image holds that checkout at). A stamp is data, one
+# `KEY=value` line each, every value answered as it stands and never run; a
+# question whose key the stamp lacks fails naming the key.
 #
 #   rev-parse HEAD                        the stamped commit
 #   rev-parse --abbrev-ref HEAD           the stamped branch
@@ -31,14 +33,21 @@ if [ -z "$stamp" ]; then
     *) exec /usr/bin/git -c safe.directory='*' "$@" ;;
   esac
 fi
-SHA="" BRANCH="" DIRTY="" DIFF=""
-# shellcheck disable=SC1090
-. "$stamp"
+
+# The value of <key> in the stamp, as it stands after `<key>=` (the stamp is data, never run);
+# a stamp lacking the key, or stating it empty, exits 1 naming it.
+stamped() {
+  local key=$1 line
+  line="$(grep -m 1 "^$key=" "$stamp")" || { echo "git: the build stamp $stamp states no $key" >&2; exit 1; }
+  [ -n "${line#"$key="}" ] || { echo "git: the build stamp $stamp states $key empty" >&2; exit 1; }
+  printf '%s\n' "${line#"$key="}"
+}
+
 case "$*" in
-  "rev-parse HEAD") [ -n "$SHA" ] && echo "$SHA" ;;
-  "rev-parse --abbrev-ref HEAD") [ -n "$BRANCH" ] && echo "$BRANCH" ;;
-  "status --porcelain") [ "$DIRTY" = 1 ] && echo " M (the build's tree differed from its commit)"; true ;;
-  "diff HEAD") [ "$DIRTY" = 1 ] && echo "$DIFF"; true ;;
+  "rev-parse HEAD") stamped SHA ;;
+  "rev-parse --abbrev-ref HEAD") stamped BRANCH ;;
+  "status --porcelain") dirty="$(stamped DIRTY)" || exit 1; [ "$dirty" != 1 ] || echo " M (the build's tree differed from its commit)" ;;
+  "diff HEAD") dirty="$(stamped DIRTY)" || exit 1; [ "$dirty" != 1 ] || stamped DIFF ;;
   "ls-files --others --exclude-standard") true ;;
   *) echo "git: '$*' is not answered in this install" >&2; exit 1 ;;
 esac

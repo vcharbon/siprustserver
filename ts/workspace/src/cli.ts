@@ -50,11 +50,26 @@ export const layoutNamed = <D extends string>(
     return undefined
   })
 
-/** The `check` verb of `program`: the file validated and the environment it states printed; exit 2 with the refusal where it does not read. */
+/**
+ * What `check` verifies of a workspace beyond its configuration file (the
+ * files a tooling reads from it at start), or the refusal naming the file at
+ * fault.
+ */
+export type Verify<A extends ConfigFile.Base> = (
+  layout: Layout.Base,
+  config: A
+) => Effect.Effect<void, { readonly message: string }, FileSystem.FileSystem>
+
+/**
+ * The `check` verb of `program`: the file validated, then the rest of the
+ * workspace `verify` reads, and the environment the file states printed;
+ * exit 2 with the refusal where either does not read.
+ */
 export const check = <A extends ConfigFile.Base>(
   pack: WorkspacePack,
   configOf: (layout: Layout.Base) => Effect.Effect<A, Refused, FileSystem.FileSystem>,
-  program: string
+  program: string,
+  verify: Verify<A> = () => Effect.void
 ) =>
   Command.make("check", { dir: dirArgument(pack) }, (input) =>
     Effect.gen(function*() {
@@ -65,6 +80,11 @@ export const check = <A extends ConfigFile.Base>(
           Effect.andThen(Console.error(refused.reason), Effect.as(Runner.exit(2), undefined)))
       )
       if (config === undefined) return
+      const verified = yield* verify(layout, config).pipe(
+        Effect.as(true),
+        Effect.catch((refusal) => Effect.andThen(Console.error(refusal.message), Effect.as(Runner.exit(2), false)))
+      )
+      if (!verified) return
       yield* Console.log(`${layout.config}: valid`)
       for (const [key, value] of Object.entries(Layout.defaultsOf(pack, layout, config))) {
         yield* Console.log(`${key}=${shown(value)}`)

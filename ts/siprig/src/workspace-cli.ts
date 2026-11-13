@@ -3,10 +3,12 @@
  * ships none (`base-workspace.ts`):
  *
  *   siprig-workspace init <dir>     every fixed subdirectory, a commented rig.toml, an empty census run
- *   siprig-workspace check [<dir>]  rig.toml validated, the environment it states printed
+ *   siprig-workspace check [<dir>]  rig.toml validated, the rig path loaded, the environment rig.toml states printed
  *
  * `check` reads `SIPRIG_WORKSPACE` where no directory is named. A refused
- * `rig.toml` exits 2 naming the file and the key.
+ * `rig.toml` exits 2 naming the file and the key; a rig path plug-in the rig
+ * refuses (the pack's `SIPRIG_PACK`, then the workspace's) exits 2 naming its
+ * file, so the container's first step stops it before the site starts.
  */
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Cli, Init } from "@sip/workspace"
@@ -14,7 +16,7 @@ import * as Clock from "effect/Clock"
 import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import { Argument, Command } from "effect/unstable/cli"
-import { configOf, PACK, TEMPLATE } from "./base-workspace.ts"
+import { configOf, PACK, TEMPLATE, verifyRigPath } from "./base-workspace.ts"
 
 const PROGRAM = "siprig-workspace"
 
@@ -27,6 +29,6 @@ const init = Command.make("init", {
     yield* Console.log(`${PACK.variables.workspace}=${made.layout.root}`)
   })).pipe(Command.withDescription("Make a workspace ready; what it holds is kept"))
 
-const command = Command.make(PROGRAM).pipe(Command.withSubcommands([init, Cli.check(PACK, configOf, PROGRAM)]))
+const command = Command.make(PROGRAM).pipe(Command.withSubcommands([init, Cli.check(PACK, configOf, PROGRAM, verifyRigPath(process.env))]))
 
 Command.run(command, { version: "0.0.0" }).pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain)

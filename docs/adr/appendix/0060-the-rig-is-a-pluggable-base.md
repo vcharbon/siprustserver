@@ -559,9 +559,11 @@ Every path the manifest names exists in the pack's tree when the rig path loads 
 The image kit (`tooling/siprig/`, its README) builds the pack's image `<name>-rig:<tag>`
 from the base image `siprig:<tag>`: the `[image]` packages, the binaries ahead of the
 base's commands on `PATH` (one of the same name replaces it), the tree and the setup, and
-the wrapper named by `wrapper`. It refuses, before any build and naming the key, a manifest
-the rig path refuses, a binaries path that is no directory, a setup that is no executable,
-and a package that is no Debian package name.
+the wrapper named by `wrapper`. It reads the tree as the image receives it (the checkout's
+files, ignored ones left out) and refuses, before any build and naming the key, a manifest
+the rig path refuses, a named path that tree lacks or that leads out of it, a binaries path
+that is no directory or holds a link to nothing, a setup that is no executable, and a
+package that is no Debian package name.
 
 A case source is a module whose default export is an array of compiled cells
 (`@sip/rig` `CompiledCell`: id, case, sub-case, title, the pivot v3 document,

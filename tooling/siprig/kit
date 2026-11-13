@@ -9,7 +9,9 @@
 #                                                   naming that image (default DIR target/siprig-kit/out)
 #
 # A pack manifest the kit cannot honour is refused before any build, exit 2,
-# naming the key. Each image's provenance is read off git here, since no image
+# naming the key, the pack's tree checked as staged for the image (what its
+# checkout holds, ignored files left out); the binaries are copied with every
+# link followed. Each image's provenance is read off git here, since no image
 # ships a repository: SHA, BRANCH, DIRTY and DIFF (a digest of the diff and the
 # untracked files) in <component>.env, which the image's `git` answers from.
 # The base's Rust stage runs with 4 jobs under a memory cap
@@ -61,6 +63,12 @@ copy_tree() {
     | tar -C "$into" -xf -
 }
 
+# The value of the option $1 among the arguments after it, or the usage where none follows.
+value_of() {
+  [ $# -ge 2 ] || { echo "kit: $1 needs a value" >&2; usage; }
+  printf '%s' "$2"
+}
+
 verb="${1:-}"; [ -n "$verb" ] || usage; shift
 dir=""
 case "$verb" in
@@ -72,9 +80,9 @@ esac
 tag=""; base=""; out="$WORK/out"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tag) tag=$2; shift 2 ;;
-    --base) base=$2; shift 2 ;;
-    --out) out=$2; shift 2 ;;
+    --tag) tag="$(value_of "$@")"; shift 2 ;;
+    --base) base="$(value_of "$@")"; shift 2 ;;
+    --out) out="$(value_of "$@")"; shift 2 ;;
     -h | --help) usage ;;
     *) echo "kit: unknown argument $1" >&2; usage ;;
   esac
@@ -95,11 +103,12 @@ build_base() {
     -t "siprig:$tag" "$ROOT"
 }
 
-# The pack's facts (`ts/siprig/src/kit-cli.ts`), read into NAME, IMAGE, WRAPPER, COMPONENT, PACKAGES, BINARIES, SETUP.
+# The pack's facts (`ts/siprig/src/kit-cli.ts`), its tree read in the staged copy <staged>,
+# read into NAME, IMAGE, WRAPPER, COMPONENT, PACKAGES, BINARIES, SETUP.
 read_pack() {
+  local staged=$1 facts status=0
   [ -x "$TSX" ] || die "no node modules in $ROOT/ts/siprig: \`pnpm -C $ROOT/ts install\`"
-  local facts status=0
-  facts="$("$TSX" "$ROOT/ts/siprig/src/kit-cli.ts" check "$dir")" || status=$?
+  facts="$("$TSX" "$ROOT/ts/siprig/src/kit-cli.ts" check --staged "$staged" "$dir")" || status=$?
   [ "$status" = 0 ] || exit 2
   NAME="" IMAGE="" WRAPPER="" COMPONENT="" PACKAGES="" BINARIES="" SETUP=""
   while IFS='=' read -r key value; do
@@ -110,8 +119,18 @@ read_pack() {
   done <<<"$facts"
 }
 
+# The staging directory of this run, removed on exit unless the build took it as pack-<name>.
+staging=""
+drop_staging() { [ -z "$staging" ] || [ ! -d "$staging" ] || rm -rf "$staging"; }
+trap drop_staging EXIT
+
+# The pack's tree staged, then checked there (a refusal before any docker call), then the
+# build context completed at $WORK/pack-<name>: binaries with every link followed, stamp, wrapper.
 build_pack() {
-  read_pack
+  mkdir -p "$WORK"
+  staging="$(mktemp -d "$WORK/staging.XXXXXX")"
+  copy_tree "$dir" "$staging/pack"
+  read_pack "$staging/pack"
   if [ -z "$tag" ]; then
     git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "$dir is in no git checkout: name the image's --tag"
     tag="$(tag_of "$dir")"
@@ -121,9 +140,10 @@ build_pack() {
   local stage="$WORK/pack-$NAME"
   case "$stage" in "$WORK"/pack-?*) ;; *) die "no staging directory for pack $NAME" ;; esac
   rm -rf "$stage"
+  mv "$staging" "$stage"
+  staging=""
   mkdir -p "$stage/stamp" "$stage/binaries"
-  copy_tree "$dir" "$stage/pack"
-  [ -z "$BINARIES" ] || cp -a "$BINARIES/." "$stage/binaries/"
+  [ -z "$BINARIES" ] || cp -RL --preserve=mode,timestamps "$BINARIES/." "$stage/binaries/"
   if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     stamp_of "$dir" /opt/siprig/pack > "$stage/stamp/$COMPONENT.env"
   fi

@@ -4,7 +4,8 @@
 #   @WRAPPER@ load <image tarball .tar.zst>       load the image into docker
 #   @WRAPPER@ init <dir>                          make <dir> a workspace; what it holds is kept
 #   @WRAPPER@ [-w <dir>] up [--lab] [--compose <dir>] [--memory <size>]
-#                                               start the container over the workspace, wait for the site
+#                                               start the container over the workspace, wait for the site;
+#                                               refused while another container runs over it
 #   @WRAPPER@ [-w <dir>] down [--force]           stop the container (postgres shut down cleanly) and remove it
 #   @WRAPPER@ [-w <dir>] restart [--force]        stop and start it again, with the flags `up` gave it
 #   @WRAPPER@ [-w <dir>] status                   whether it runs, and the site's URL
@@ -36,8 +37,14 @@ IMAGE="${SIPRIG_IMAGE:-@IMAGE@}"
 STOP_TIMEOUT=60
 UP_TIMEOUT=600
 
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,/^set /p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2; }
 die() { echo "$NAME: $*" >&2; exit 1; }
+
+# The value of the option $1 among the arguments after it, or the usage where none follows.
+value_of() {
+  [ $# -ge 2 ] || { echo "$NAME: $1 needs a value" >&2; usage; }
+  printf '%s' "$2"
+}
 
 need_image() {
   docker image inspect "$IMAGE" >/dev/null 2>&1 || die "image $IMAGE is not loaded: \`$NAME load <tarball>\`"
@@ -94,13 +101,21 @@ wait_for_site() {
   die "the site did not answer within ${UP_TIMEOUT}s (\`$NAME logs\`)"
 }
 
+# One running container per workspace: `up` is refused while a container other than <name>
+# runs carrying the workspace's label, whichever wrapper (or pack) started it.
+refuse_shared_workspace() {
+  local name=$1 other
+  other="$(docker ps --filter "label=org.siprig.workspace=$workspace" --format '{{.Names}}' | grep -vxF "$name" | head -n 1 || true)"
+  [ -z "$other" ] || die "up: the container $other already runs over $workspace: stop it first (its own wrapper's \`down\`)"
+}
+
 up() {
   local lab=0 compose="" memory="${SIPRIG_MEMORY:-16g}" extra=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --lab) lab=1; shift ;;
-      --compose) compose="$(realpath -m "$2")"; shift 2 ;;
-      --memory) memory=$2; shift 2 ;;
+      --compose) compose="$(value_of "$@")"; compose="$(realpath -m "$compose")"; shift 2 ;;
+      --memory) memory="$(value_of "$@")"; shift 2 ;;
       *) die "up: unknown flag $1" ;;
     esac
   done
@@ -112,6 +127,7 @@ up() {
     wait_for_site
     return 0
   fi
+  refuse_shared_workspace "$name"
   docker rm "$name" >/dev/null 2>&1 || true
   if [ "$lab" = 1 ]; then
     [ -S /var/run/docker.sock ] || die "up --lab: no docker socket at /var/run/docker.sock"
@@ -190,7 +206,7 @@ upgrade_pg() {
   local from=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --from) from=$2; shift 2 ;;
+      --from) from="$(value_of "$@")"; shift 2 ;;
       *) die "upgrade-pg: unknown flag $1" ;;
     esac
   done
@@ -223,7 +239,7 @@ upgrade_pg() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -w | --workspace) workspace=$2; shift 2 ;;
+    -w | --workspace) workspace="$(value_of "$@")"; shift 2 ;;
     -h | --help) usage ;;
     *) break ;;
   esac

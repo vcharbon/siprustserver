@@ -2,9 +2,12 @@
  * The base's workspace (`@sip/workspace`) for a pack that ships no workspace
  * command of its own: the `SIPRIG_*` variables, `rig.toml` with the generic
  * sections alone, no directory beyond the generic ones, the store's `siprig`
- * database in the workspace's own postgres on port 5499, and the site on 5175.
+ * database in the workspace's own postgres on port 5499, the site on 5175,
+ * and the rig path over the pack `SIPRIG_PACK` names and the workspace.
  */
+import { RigPath } from "@sip/rig"
 import { ConfigFile, Layout, WorkspaceEnv, type WorkspacePack } from "@sip/workspace"
+import * as Effect from "effect/Effect"
 
 export const PACK: WorkspacePack.WorkspacePack<never> = {
   variables: {
@@ -34,6 +37,21 @@ export const RigToml = ConfigFile.make(PACK, { fields: {}, campaignFields: {}, c
 export const { configOf, apply } = WorkspaceEnv.make(PACK, RigToml.decodeText)
 
 export const { layoutOf, of } = Layout.make(PACK)
+
+/** The variable naming the pack's directory in the image. */
+export const PACK_VARIABLE = "SIPRIG_PACK"
+
+/** The pack's directory `env` names, `undefined` where it names none. */
+export const packDirOf = (env: NodeJS.ProcessEnv): string | undefined =>
+  env[PACK_VARIABLE] === "" ? undefined : env[PACK_VARIABLE]
+
+/**
+ * The rig path over the pack `env` names and the workspace at `layout`
+ * loaded (`@sip/rig` `RigPath.load`): a plug-in the rig refuses refuses the
+ * workspace at `check`, naming its file, as the site would at start.
+ */
+export const verifyRigPath = (env: NodeJS.ProcessEnv) => (layout: Layout.Base) =>
+  Effect.asVoid(RigPath.load({ pack: packDirOf(env), workspace: layout.root }))
 
 /** The `rig.toml` a new workspace starts with: every key commented out at its default. */
 export const TEMPLATE = `# The workspace's configuration. Every key is optional; an exported variable

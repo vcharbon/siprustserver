@@ -20,23 +20,31 @@ fi
 pgdata="$SIPRIG_WORKSPACE/pgdata"
 major="$(pg_config --version | sed -E 's/^PostgreSQL ([0-9]+).*/\1/')"
 
-# initdb and the server look their own uid up: the uid the wrapper passes has
-# no entry in this image's passwd, so nss_wrapper serves one.
-printf 'siprig:x:%s:%s:siprig:%s:/bin/bash\n' "$(id -u)" "$(id -g)" "$HOME" > /run/siprig/passwd
-printf 'siprig:x:%s:\n' "$(id -g)" > /run/siprig/group
-export LD_PRELOAD=libnss_wrapper.so NSS_WRAPPER_PASSWD=/run/siprig/passwd NSS_WRAPPER_GROUP=/run/siprig/group
+# The caller's uid served a passwd and group entry (`siprig`) by nss_wrapper, for initdb and
+# the server, which look their own uid up: the uid the wrapper passes has none in this image.
+serve_own_user() {
+  printf 'siprig:x:%s:%s:siprig:%s:/bin/bash\n' "$(id -u)" "$(id -g)" "$HOME" > /run/siprig/passwd
+  printf 'siprig:x:%s:\n' "$(id -g)" > /run/siprig/group
+  export LD_PRELOAD=libnss_wrapper.so NSS_WRAPPER_PASSWD=/run/siprig/passwd NSS_WRAPPER_GROUP=/run/siprig/group
+}
 
+# A pgdata of another major left unstarted: the refusal is logged and marked
+# (/run/siprig/postgres-refused) for `migrate`, which fails on it at once and so stops
+# the container; this service pauses meanwhile.
+refuse_other_major() {
+  local stated=$1
+  echo "postgres: $pgdata is postgres $stated, this image runs postgres $major: the wrapper's \`upgrade-pg\` moves it" \
+    | tee -a "$SIPRIG_WORKSPACE/logs/store.log" /run/siprig/postgres-refused
+  exec s6-pause
+}
+
+serve_own_user
 if [ ! -s "$pgdata/PG_VERSION" ]; then
   echo "postgres: initialising $pgdata (postgres $major)"
   initdb -D "$pgdata" --username=siprig --auth-local=trust --auth-host=reject --encoding=UTF8 --locale=C.UTF-8
 fi
 stated="$(cat "$pgdata/PG_VERSION")"
-if [ "$stated" != "$major" ]; then
-  # The refusal is left for `migrate`, which fails on it at once and so stops the container.
-  echo "postgres: $pgdata is postgres $stated, this image runs postgres $major: the wrapper's \`upgrade-pg\` moves it" \
-    | tee -a "$SIPRIG_WORKSPACE/logs/store.log" /run/siprig/postgres-refused
-  exec s6-pause
-fi
+[ "$stated" = "$major" ] || refuse_other_major "$stated"
 mkdir -p "$PG_HOST"
 exec postgres -D "$pgdata" -p "$PG_PORT" \
   -c listen_addresses= \

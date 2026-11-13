@@ -78,10 +78,7 @@ import { createServer } from "node:http"
 import * as path from "node:path"
 import { BaseCampaignRuns } from "./base-campaign-runs.ts"
 import { LAB, packOf } from "./base-site-pack.ts"
-import { apply as applyWorkspace, of as workspaceOf } from "./base-workspace.ts"
-
-/** The variable naming the pack's directory in the image. */
-export const PACK_VARIABLE = "SIPRIG_PACK"
+import { apply as applyWorkspace, of as workspaceOf, packDirOf } from "./base-workspace.ts"
 
 const ApiRoutes = HttpApiBuilder.layer(Api, { openapiPath: "/api/openapi.json" }).pipe(
   Layer.provide(Handlers),
@@ -179,7 +176,7 @@ const titleOf = (dir: string | undefined) =>
 const PackLayer = Layer.effect(
   SitePack.Service,
   Effect.gen(function*() {
-    const pack = process.env[PACK_VARIABLE] === "" ? undefined : process.env[PACK_VARIABLE]
+    const pack = packDirOf(process.env)
     const workspace = workspaceOf(process.env)?.root
     const rig = yield* RigPath.load({ pack, workspace })
     const lanes: LaneCatalog.Catalog = { dirs: LaneCatalog.dirsUnder(workspace ?? LAB.checkout), rig, lanes: [] }

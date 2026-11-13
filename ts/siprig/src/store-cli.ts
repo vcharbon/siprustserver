@@ -1,9 +1,13 @@
 /**
  * `siprig-store migrate`, the base image's store command for a pack that
- * ships none: the store `DATABASE_URL` names brought to the store's own schema
- * (`@sip/store` `AutoMigrate` over the store's binding), the database created
- * where missing and dumped into the workspace's `backups/` before any pending
- * migration on a store that holds anything. A refusal exits 1, naming why.
+ * ships none: the workspace `SIPRIG_WORKSPACE` names applied to the
+ * environment first, so the store is `DATABASE_URL` where exported, else the
+ * one its `rig.toml` states (`[database] url`, the container's own or another
+ * server); that store brought to the store's own schema (`@sip/store`
+ * `AutoMigrate` over the store's binding), the database created where missing
+ * and dumped into the workspace's `backups/` before any pending migration on
+ * a store that holds anything. A refused `rig.toml` exits 2, a refused
+ * migration 1, each naming why.
  */
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { AutoMigrate, StoreBinding } from "@sip/store"
@@ -12,7 +16,7 @@ import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import * as Redacted from "effect/Redacted"
 import { Command } from "effect/unstable/cli"
-import { of, PACK } from "./base-workspace.ts"
+import { apply, of, PACK } from "./base-workspace.ts"
 
 /** The line a run's applied migrations print as. */
 const appliedLine = (applied: ReadonlyArray<readonly [number, string]>): string =>
@@ -22,6 +26,11 @@ const appliedLine = (applied: ReadonlyArray<readonly [number, string]>): string 
 
 const migrate = Command.make("migrate", {}, () =>
   Effect.gen(function*() {
+    const applied = yield* apply(process.env).pipe(
+      Effect.catchTag("HostEnv.Refused", (refused) =>
+        Effect.andThen(Console.error(`[store] ${refused.reason}`), Effect.sync(() => (process.exitCode = 2))).pipe(Effect.as(undefined)))
+    )
+    if (applied === undefined) return
     const url = Redacted.value(yield* Client.url)
     const backups = of(process.env)?.backups
     if (backups === undefined) {
