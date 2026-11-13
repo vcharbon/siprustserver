@@ -146,7 +146,7 @@ pub use replication::{replication_setup_from_lookup, ReplicationSettings};
 pub use runner_env::{switch, RunnerEnv};
 use socket_buffers::log_socket_buffers;
 pub use validate::{validate_default_dest, validate_ingress_brake_pct};
-pub use worker_metrics::{txn_metrics_text, WorkerMetrics, CATALOGUE};
+pub use worker_metrics::{txn_metrics_text, MapSampler, WorkerMetrics, CATALOGUE};
 
 /// How often the gauge sampler publishes.
 const GAUGE_PERIOD: Duration = Duration::from_secs(5);
@@ -455,8 +455,10 @@ impl RunnerBase {
 
     /// Memory-attribution sampler: push the store + replication map sizes into
     /// their gauges every 5 s so an RSS climb can be pinned to a specific map
-    /// even when `active_calls` is flat. 5 s is well inside the scrape cadence;
-    /// the sample is a couple of brief locks, off the call path. It evicts
+    /// even when `active_calls` is flat; the `/metrics` scrape samples them
+    /// again ([`WorkerMetrics::sample_maps`]), so a scrape never reads a
+    /// sample older than itself. The sample is a couple of brief locks and
+    /// one pass over the call map, off the call path. It evicts
     /// nothing: the core's paced replica reap is the one eviction site, since an
     /// expired deferred terminal owes its limiter release on the way out. Each
     /// sample also logs a worker loop stalling past `loop_stall`, and turning
@@ -473,11 +475,7 @@ impl RunnerBase {
                 let mut stalled_before = Vec::new();
                 loop {
                     tick.tick().await;
-                    core.sample_gauges();
-                    if let Some(repl) = core.repl_store() {
-                        let (bodies, idx, _meta, tomb) = repl.map_lens();
-                        core.metrics().set_store_map_sizes(bodies as u64, idx as u64, tomb as u64);
-                    }
+                    worker_metrics::sample_maps(&core);
                     let stalled = core.loops().stalled(stall);
                     if stalled != stalled_before {
                         if stalled.is_empty() {

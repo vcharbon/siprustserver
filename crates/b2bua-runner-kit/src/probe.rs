@@ -39,6 +39,7 @@ impl RunnerBase {
         heap: Option<probe_http::HeapDumpFn>,
     ) -> ProbeServers {
         let core_ready = core.clone();
+        let sampled = core.clone();
         let stall = self.env.loop_stall;
         let worker = WorkerMetrics {
             core: self.metrics.clone(),
@@ -49,6 +50,7 @@ impl RunnerBase {
             loops: core.loops().clone(),
             loop_stall: stall,
             readiness: core.readiness(),
+            sample_maps: Arc::new(move || crate::worker_metrics::sample_maps(&sampled)),
         };
         let routes = ProbeRoutes {
             metrics: Arc::new(move || worker.body(extra_metrics.as_ref())),
