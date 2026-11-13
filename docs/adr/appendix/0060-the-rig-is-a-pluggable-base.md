@@ -591,7 +591,7 @@ compiler behind the module, and the runner reads compiled cells alone.
 | `sut-log`, a batch collector cutting the B2BUA's log per cell | bracket, state directory, a lock, `log` attachment |
 | `capture`, a job collector: `open` starts a packet capture, `collect` cuts it per cell | a lock, `file` and `table` attachments, `on-failure` |
 | `call-records`, a batch collector reading the B2BUA's record file, with its judge | claim, join, judge, `records` and `diff` attachments, a lock |
-| `calls-ended`, a delayed cell collector reading the worker's active-call gauge | delay, the lane not held, `json` and `link` attachments |
+| `calls-ended`, a delayed cell collector reading whether the worker still serves the cell's calls | delay, the lane not held, `json` and `link` attachments |
 | `restart-worker`, an operation on the reference lane | operation, `setup`, a case step |
 | `alice-calls-bob` and `bob-is-busy` | the minimal case form and both shapes |
 | a simulated lane exporting its records | export, the plain replay binary |

@@ -3,9 +3,9 @@
 # The base runs its cells in the plain replay binary's batch process; each
 # call's b-leg is pinned to its cell's callee by the dial's X-Api-Call, so the
 # lane serves no backend. Its runner's metrics and admin addresses, its log
-# and the file naming its pid are the `b2bua-runner` part's; the file it captures its SIP datagrams to is
-# the `sip-capture` part's, the file it appends its call records to the
-# `cdr-file` part's.
+# and the file naming its pid are the `b2bua-runner` part's; the file it
+# captures its SIP datagrams to is the `sip-capture` part's, the file it
+# appends its call records to the `cdr-file` part's.
 schema = "lane.v1"
 description = "the upstream B2BUA runner on loopback, stood per batch"
 clock = "real"
@@ -24,10 +24,8 @@ new_call_ms = 2000
 follow_up_ms = 2000
 transit_ms = 1
 
-# One call at a time: `calls-ended` reads the worker's gauge, which another
-# cell's call in progress would hold.
 [pacing.campaign]
-concurrency = 1
+concurrency = 4
 starts_per_second = 10
 timing_tolerance_ms = 250
 

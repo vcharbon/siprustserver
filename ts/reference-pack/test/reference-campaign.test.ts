@@ -11,13 +11,16 @@
  * reference lane, through a workspace holding it on free loopback addresses,
  * the base stands the upstream B2BUA runner for the batch and runs both cells
  * in the plain binary's batch process on the real clock (about 0.8 s); both
- * pass, `calls-ended` reads the runner holding no call after each, the
- * batch's end reads it holding none, the `call-records` collector reads the
- * record the runner wrote of each call, which the judge passes, and the
- * runner captured both legs of each call while `capture`, cutting for failed
- * cells alone, attaches nothing. The runner's log, capture and record files
- * hold no earlier job's lines. A job collector of the workspace failing `bob
- * is busy` has `capture` attach that cell, and it alone, its calls' packets.
+ * pass, in either order of the cases, `calls-ended` reading none of each
+ * cell's calls among the runner's live ones after it, the batch's end reads
+ * the runner holding none, the `call-records` collector reads the record the
+ * runner wrote of each call, which the judge passes, and the runner captured
+ * both legs of each call while `capture`, cutting for failed cells alone,
+ * attaches nothing. The runner's log, capture and record files hold no
+ * earlier job's lines, and `sut-log` attaches to the batch the lines the
+ * runner wrote over it, from its first call on, none written before. A job
+ * collector of the workspace failing `bob is busy` has `capture` attach that
+ * cell, and it alone, its calls' packets.
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  *
  * The replay binary is `REPLAY_BIN`, else the workspace's build of
@@ -315,9 +318,9 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
     )
     expect(code).toBe(0)
     const results = run!.lanes[0]!.results
-    expect(results.map((result) => [CampaignResults.caseNameOf(result.caseId).ref, result.passed])).toEqual([
-      ["bob is busy", true],
-      ["alice calls bob", true]
+    expect(results.map((result) => [CampaignResults.caseNameOf(result.caseId).ref, result.passed]).sort()).toEqual([
+      ["alice calls bob", true],
+      ["bob is busy", true]
     ])
     for (const result of results) {
       const answered = result.verifications.filter((line) => line.name === "calls-ended")
