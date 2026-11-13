@@ -147,9 +147,12 @@ describe.skipIf(!served || skipping)("the reference replay", () => {
     expect(cases, "the one call between the caller and the forking callee side").toEqual(["forked-reliable-1"])
 
     const { code, run } = await Effect.runPromise(replay(out))
-    expect(code, "every phase ran").not.toBe(2)
-    expect(run!.lanes[0]!.results.map((result) => result.cell), "the cut's case replayed as the run's one cell").toEqual([
-      "forked-reliable-1"
-    ])
+    const results = run!.lanes[0]!.results
+    expect(results.map((result) => result.cell), "the cut's case replayed as the run's one cell").toEqual(["forked-reliable-1"])
+    expect(
+      results.map((result) => [result.passed, result.verifications.filter((line) => line.answer === "fail").map((line) => `${line.name}: ${line.message}`)]),
+      "the forked call replayed as recorded, every check holding"
+    ).toEqual([[true, []]])
+    expect(code).toBe(0)
   })
 })
