@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use pivot_interpreter::LaneEvents;
+use pivot_interpreter::{Injector, LaneEvents};
 use pivot_schema::bundle::RunConfig;
 use scenario_harness::Agent;
 
@@ -38,6 +38,8 @@ pub fn destination_of(egress: SocketAddr) -> String {
 /// The plain system behind a hosted lane, for the cells of one batch.
 pub struct PlainHosted<'a> {
     pub host: &'a Host<PlainBatch>,
+    /// The cell's run-spec path, as its protocol lines name it.
+    pub spec: &'a str,
     /// Where the cell's bundle is written.
     pub out_dir: &'a std::path::Path,
 }
@@ -47,6 +49,7 @@ impl HostedSystem for PlainHosted<'_> {
         self.host.minted(self.out_dir, cell.seeds);
         Ok(Box::new(PlainHostedRun {
             host: self.host,
+            spec: self.spec,
             case: cell.case,
             out_dir: self.out_dir,
             egress: cell.egress,
@@ -57,6 +60,7 @@ impl HostedSystem for PlainHosted<'_> {
 /// One cell of the plain hosted system.
 struct PlainHostedRun<'a> {
     host: &'a Host<PlainBatch>,
+    spec: &'a str,
     case: &'a Case,
     out_dir: &'a std::path::Path,
     egress: SocketAddr,
@@ -71,6 +75,11 @@ impl HostedRun for PlainHostedRun<'_> {
             config.with_call_header(&call.id, DESTINATION_HEADER, destination.clone())
         });
         (config, None)
+    }
+
+    /// Each `inject` is asked of the harness on the batch's lines.
+    fn injector(&self) -> Option<Arc<dyn Injector>> {
+        self.host.injects.injector(self.spec)
     }
 
     fn reader(

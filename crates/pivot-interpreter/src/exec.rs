@@ -33,6 +33,7 @@ mod deliver;
 mod dispatch;
 mod emit;
 mod flow;
+mod injects;
 mod ladders;
 mod legs;
 mod omission;
@@ -217,6 +218,8 @@ struct Runner<'a, 'p> {
     /// one at a time: the hold arbitrates a single instant, and a second hold
     /// would be a queue.
     held: Option<Held>,
+    /// The injects the lane's injector is performing (§6.6).
+    injections: injects::Injections,
     started: Instant,
     /// The wall clock's reading when [`Self::started`] was taken.
     wall_started_ms: u64,
@@ -312,6 +315,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             timer_b_reported: std::collections::BTreeSet::new(),
             pending_repeats: Vec::new(),
             held: None,
+            injections: injects::Injections::default(),
             started,
             wall_started_ms,
         }

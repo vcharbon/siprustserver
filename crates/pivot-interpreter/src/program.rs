@@ -41,9 +41,10 @@ pub struct Item {
     pub steps: Vec<String>,
     /// For an `Alt`: the branch names in order, and each branch's step ids.
     pub branches: Vec<Branch>,
-    /// For an `Inject`: the action token, carried here so the run never walks
-    /// back into the document by index. `Some` exactly on an `Inject`.
-    pub action: Option<String>,
+    /// For an `Inject`: the node itself (action, target, dwell), carried here
+    /// so the run never walks back into the document by index. `Some` exactly
+    /// on an `Inject`.
+    pub inject: Option<pivot_schema::flow::Inject>,
 }
 
 /// One alternative of an `alt` item.

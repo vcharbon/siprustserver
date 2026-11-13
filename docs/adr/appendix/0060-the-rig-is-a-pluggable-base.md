@@ -350,6 +350,12 @@ probe  = "./probe"             # optional
   the call's next send waits on it. A document injecting any other action, or a step naming no
   point, is refused when its source loads; a case asking for a step and carrying no tag the
   workspace's `rig.toml` declares `alone` is refused at compile.
+- The interpreter hands a due `inject` node to the lane's injector and holds what waits on it
+  until the answer. The batch process asks it of the rig on its lines: it writes
+  `{"inject":{"spec","node","action"}}` (plus `target` where the node states one) and resumes on
+  `{"injected":{"spec","node"}}` or `{"refused":{"spec","node","reason"}}` on stdin. A refusal,
+  stdin closing first, or no answer within 90 s fails the cell's run (`inject-refused`,
+  `inject-timed-out`), and its close ends the call.
 - A lane file's `[operations]` table binds the name a case asks for to an operation of the path.
   A lane where the name resolves to nothing, or that lacks a part the operation needs, cannot
   run the case.

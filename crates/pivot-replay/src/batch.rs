@@ -12,8 +12,10 @@
 //! as it ends, carrying the lines that cell wrote on stderr; `{"end":…}` once
 //! stdin closed, every cell ended and the batch's own gates ran ([`End`]),
 //! with what the backend double served and how fast (`served`). Each stdin
-//! line is the path of one cell's run-spec. A SIGTERM or SIGINT ends the
-//! process at once.
+//! line is the path of one cell's run-spec, or, starting with `{`, the
+//! harness's answer to an `{"inject":…}` line a cell wrote once one of its
+//! document's `inject` nodes was due ([`Injects`]). A SIGTERM or SIGINT ends
+//! the process at once.
 //!
 //! Every wait of the batch's end is bounded, the bound beside it; a wait
 //! that lasts is stated on stderr every 30 s (`waiting`), the harness's stdin
@@ -38,7 +40,8 @@ use crate::{exit_code, nofile, Failure, RunSummary};
 
 pub use cell::{guarded, line_of, run_cell};
 pub use end::{End, Ended, BACKEND_SETTLE};
-pub use lines::{cell_line, end_line, ready_line, CellLine};
+pub use injects::{Injects, CLOSED, INJECT_WITHIN};
+pub use lines::{cell_line, end_line, inject_line, ready_line, CellLine};
 pub use placed::Placed;
 pub use served::{Quantiles, Served};
 pub use waiting::Waiting;
@@ -145,6 +148,8 @@ pub struct Host<P: Registered> {
     pub waiting: Waiting,
     /// Whether the SUT calls the backend double the batch serves.
     pub wiring: Wiring,
+    /// The cells' injects asked of the harness and not answered yet.
+    pub injects: Arc<Injects>,
 }
 
 impl<P: Registered> Deref for Host<P> {
@@ -175,6 +180,7 @@ impl<P: Registered> Host<P> {
             minted: Mutex::new(Vec::new()),
             waiting: Waiting::start(waiting::EVERY, |line| eprintln!("{line}")),
             wiring: Wiring::default(),
+            injects: Arc::default(),
         })
     }
 
@@ -281,6 +287,7 @@ pub fn serve<P: Registered>(
     if process.signals {
         rt.spawn(on_signal());
     }
+    host.injects.speak_on(out.clone());
     let ready = ready_line(&host.backend.addr().to_string(), &process.nofile, seed);
     emit(&out, &ready);
     if let Some(note) = rt.block_on(P::before(&host)) {
@@ -300,16 +307,21 @@ pub fn serve<P: Registered>(
         });
     }
     let mut running = Vec::new();
-    for (index, line) in cells.lines().enumerate() {
+    let mut ordinal = 0u64;
+    for line in cells.lines() {
         let Ok(line) = line else { break };
         let path = line.trim().to_string();
+        if path.starts_with('{') {
+            host.injects.answer(&path);
+            continue;
+        }
+        ordinal += 1;
         if path.is_empty() {
             continue;
         }
         received.fetch_add(1, Ordering::SeqCst);
         live.lock().unwrap_or_else(|p| p.into_inner()).insert(path.clone());
         let (cell_host, cell_out, cell_live) = (host.clone(), out.clone(), live.clone());
-        let ordinal = index as u64 + 1;
         let spawned = std::thread::Builder::new()
             .name(format!("cell-{ordinal}"))
             .stack_size(8 << 20)
@@ -334,6 +346,7 @@ pub fn serve<P: Registered>(
             }
         }
     }
+    host.injects.close();
     {
         let live = live.clone();
         host.waiting.on(move || format!("the cells to end: {}", running_of(&live)));
@@ -382,6 +395,7 @@ pub async fn on_signal() {
 mod cell;
 mod end;
 pub mod gates;
+mod injects;
 mod lines;
 mod placed;
 mod served;

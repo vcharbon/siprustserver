@@ -168,6 +168,11 @@ impl<'p> Instance<'p> {
         self.cursor.complete(step)
     }
 
+    /// Mark an `inject` node performed; refused on anything else.
+    pub fn complete_inject(&mut self, node: &str) -> bool {
+        self.cursor.complete_inject(node)
+    }
+
     /// Release a tolerated absence; refused on anything that is not an
     /// `optional` expect.
     pub fn release_step(&mut self, step: &str) -> bool {

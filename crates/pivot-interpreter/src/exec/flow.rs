@@ -30,7 +30,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 self.end_script(None, None);
                 return false;
             }
-            if !self.refuse_injects() {
+            if !self.hand_injects() {
                 return false;
             }
             // A rung due goes out BEFORE the turn's steps: its instant was
@@ -67,13 +67,18 @@ impl<'a, 'p> Runner<'a, 'p> {
                     {
                         return false;
                     }
-                    if !self.expire_expects() || !self.expire_awaits() {
+                    if !self.expire_expects() || !self.expire_awaits() || !self.expire_injects() {
                         return false;
                     }
                 }
                 Wake::Event(event) => {
                     if let Some(events) = self.lane.events.as_mut() {
                         events.record(event);
+                    }
+                }
+                Wake::Injected(answer) => {
+                    if !self.injected(answer) {
+                        return false;
                     }
                 }
                 Wake::Message { actor, message } => {
@@ -90,27 +95,6 @@ impl<'a, 'p> Runner<'a, 'p> {
                 }
             }
         }
-    }
-
-    /// An `inject` the lane cannot perform stops the run by name. `inject` is
-    /// shape-only in this program: no interpreter executes an action.
-    pub(super) fn refuse_injects(&mut self) -> bool {
-        let open = self.instance.cursor().open_injects();
-        if open.is_empty() {
-            return true;
-        }
-        let first = open.first().map(|(node, _)| node.to_string());
-        for (node, action) in open {
-            self.instance.fail(Failure::InjectorMissing {
-                node: node.to_string(),
-                action: action.to_string(),
-            });
-        }
-        let leg = first
-            .as_deref()
-            .and_then(|node| self.instance.plan().step(node).map(|s| s.leg.clone()));
-        self.end_script(leg.as_deref(), first.as_deref());
-        false
     }
 
     /// Emit every send whose leg is at it, whose `after` holds and whose dwell
@@ -234,6 +218,11 @@ impl<'a, 'p> Runner<'a, 'p> {
         if let Some(at) = self.next_repeat() {
             soonest = Some(soonest.map_or(at, |s: Instant| s.min(at)));
         }
+        // An inject the lane is performing is a wait the flow owes: its answer
+        // may be all that is left, and its bound must still fail it.
+        if let Some(at) = self.next_inject_wake() {
+            soonest = Some(soonest.map_or(at, |s: Instant| s.min(at)));
+        }
         // A hold-out that nothing better closed must still close: the datagram
         // it holds is one an armed expect would otherwise have taken.
         if let Some(at) = self.held.as_ref().map(|h| h.release_at) {
@@ -283,6 +272,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 Err(e) => Wake::Closed { actor, detail: e.to_string() },
             },
             event = event => Wake::Event(event),
+            answer = self.injections.next() => Wake::Injected(answer),
             () = tokio::time::sleep_until(wake) => Wake::Timer,
         }
     }
@@ -341,4 +331,6 @@ pub(super) enum Wake {
     Closed { actor: String, detail: String },
     /// The lane reported one occurrence of an event (§6.7g).
     Event(String),
+    /// The lane's injector answered an `inject` (§6.6).
+    Injected(super::injects::Answer),
 }

@@ -669,8 +669,8 @@ impl Compiler {
                 after: node.after().to_vec(),
                 steps: Vec::new(),
                 branches: Vec::new(),
-                action: match node {
-                    FlowNode::Inject(inject) => Some(inject.action.clone()),
+                inject: match node {
+                    FlowNode::Inject(inject) => Some(inject.clone()),
                     _ => None,
                 },
             };

@@ -53,7 +53,7 @@ A v2 reader looking for a field that moved:
 | a deviation pointed at a step | plus `deviations[].header`: which header a content-level malformation breaks (§11) |
 | — | `actors[].background`: the traffic an actor answers outside the flow |
 | — | `alt` / `unordered` flow nodes, `optional` on an expect |
-| — | `inject` flow node (schema and shape only; no execution semantics) |
+| — | `inject` flow node, handed to the lane's injector (§6.6) |
 | — | `checks` on an expect, and a `postconditions` block, in one check vocabulary |
 | — | accessors: `${leg:…}` and `${step:…}`, with `{ from, delta }` arithmetic |
 | deviation kinds: `verbatim-emission` | plus `cseq-override`, `suppress-auto`, `raw-order` |
@@ -1414,7 +1414,7 @@ arrives on every run, so a later step may reference any of them by id. What is
 refused there is a reference BETWEEN two members, since an order-free group has
 no internal order to be earlier in.
 
-### 6.6 inject — AUTHORED ONLY, SHAPE ONLY
+### 6.6 inject — AUTHORED ONLY
 
 ```json
 { "id": "i1", "op": "inject", "action": "store-fault:LiveAudit",
@@ -1430,7 +1430,13 @@ open token from a deployment-owned injector registry (`store-fault:LiveAudit`,
 lane provides. That one mechanism spans store faults, HTTP-fabric faults and HA
 node kills. Setup-time knobs do NOT ride here — those are the scene (§3.2).
 
-v3 freezes the shape; execution semantics are not defined in this program.
+The run hands the node (id, action, target) to the lane's injector once its
+`after` holds and its `delay` elapsed, keeps every leg running while the lane
+performs it, and completes the node on the injector's answer: a node naming it in
+`after` waits for that answer. A refusal fails the run as `inject-refused` in the
+lane's words, no answer within the injector's bound as `inject-timed-out`, and a
+lane with no injector as `injector-missing`; each ends the script (§11.2) at the
+node, and the generic close ends the call.
 
 ### 6.7 after — AUTHORED ONLY
 
@@ -3357,7 +3363,8 @@ Its whole job:
    — but yield to a frontier `expect` whose budget is open and whose
    discriminator the arrival satisfies (§5.1).
 9. **`alt`**: commit on the first discriminating message; never backtrack.
-10. **`inject`**: hand the action token to the lane's injector. Never execute one.
+10. **`inject`**: hand the node to the lane's injector once due, and complete it
+    on the answer (§6.6). Never execute an action.
 11. **Dwell**: wait `delay.ms` from `delay.from` on a `send`. A virtual-clock
     lane may compress only where `compressible` is true. Never re-derive
     compressibility. On an `expect` that declares `timer_linked`, MEASURE the
@@ -3455,7 +3462,6 @@ Everything in this document is frozen except the following.
 |---|---|---|
 | `rfc_violations` vocabulary | **MINIMAL** | §11.1. One member, `no-200-after-cancel`, and no `allowed` flag. The vocabulary and its mechanics grow from the per-endpoint violation census, not before it |
 | `must_fail` vocabulary | **MINIMAL** | §11.2. Two members, `unexpected-ack` and `unexpected-prack`. It grows with the prediction that decides it, as `rfc_violations` grows with the detector |
-| `inject` execution semantics | **DESIGN ONLY** | §6.6 freezes the shape and the injector-interface split. No interpreter executes an action in this program |
 | `media` | **RESERVED** | §12. Open object, deployment-extensible; the vocabulary lands with loadgen adoption |
 | match-less retry chains | **UNEXERCISED** | a retry chain ordered by a match-less rule is absent from the corpus. `calls[].attempts` expresses it; nothing has produced one |
 | body-registry deployment overlay | **NOT MODELLED** | §8.2. A deployment handler that REWRITES a body has no field on a `body`/`part` to name itself with. No corpus case exercises it |

@@ -156,7 +156,8 @@ impl Registered for PlainBatch {
             domain: DOMAIN,
             trunk: "",
         };
-        let system = PlainHosted { host, out_dir: &spec.out_dir };
+        let cell_spec = path.to_string_lossy();
+        let system = PlainHosted { host, spec: &cell_spec, out_dir: &spec.out_dir };
         hosted::run(&lane, &case, host.seed, ordinal, &system)
     }
 
