@@ -27,7 +27,7 @@ const failedCut: Sources.Row = {
   standings: [{
     lane: "simulated",
     runId: 4,
-    status: "failed",
+    status: "error",
     cases: 0,
     failed: 0,
     skipped: 0,
