@@ -79,8 +79,6 @@ pub struct B2buaConfig {
     /// reaches it after `lifetime / max_messages_per_call × keepalive
     /// interval`: 500 windows, about 41.7 h, at the defaults.
     pub max_messages_per_call_lifetime: u64,
-    /// Bounded CDR submit queue; `0` disables buffering (passthrough).
-    pub cdr_buffer_queue_max: usize,
     /// REFER implicit-subscription expiry (RFC 3515), seconds. Armed at REFER
     /// intercept; fires while still `refer-authorizing` (HTTP hung). Default 60.
     pub refer_subscription_expiry_sec: i64,

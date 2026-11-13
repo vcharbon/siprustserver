@@ -302,7 +302,6 @@ impl RunnerEnv {
             sip_local_ip: advertise_ip,
             sip_local_port: advertise_port,
             front: self.addresses.front.clone(),
-            cdr_buffer_queue_max: self.cdr_queue,
             event_dispatch_concurrency: self.concurrency,
             per_call_queue_cap: self.call_cap,
             new_call_permit_share_percent: self.new_call_permit_share_percent,

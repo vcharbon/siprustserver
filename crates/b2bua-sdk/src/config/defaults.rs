@@ -22,7 +22,6 @@ impl Default for B2buaConfig {
             // inside one window. Override with `B2BUA_MAX_MESSAGES_PER_CALL`.
             max_messages_per_call: 200,
             max_messages_per_call_lifetime: 100_000,
-            cdr_buffer_queue_max: 1_024,
             refer_subscription_expiry_sec: 60,
             refer_reinvite_answer_sec: 32,
             refer_overall_safety_sec: 120,
