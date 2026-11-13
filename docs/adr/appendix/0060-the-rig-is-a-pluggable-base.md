@@ -504,6 +504,10 @@ lane's parts lack, refuses the lane.
 | exports and keys | at a cell's end and at a batch's drain |
 
 How a managed lane stands its system under test stays a module of the pack's deployment.
+With nothing registered, the base hosts a real lane itself (`ts/siprig` `base-hosted-lane.ts`):
+the upstream B2BUA runner, its addresses and log a `b2bua-runner` part's, `[backend] mode =
+"none"`, the cells in the plain binary's batch process (`pivot-replay batch`), each call's
+b-leg pinned to its cell's callee by the dial's `X-Api-Call`.
 
 ## 14. The minimal case form
 
