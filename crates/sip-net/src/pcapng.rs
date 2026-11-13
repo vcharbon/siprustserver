@@ -24,6 +24,9 @@ const BYTE_ORDER_MAGIC: u32 = 0x1A2B_3C4D;
 const LINKTYPE_RAW: u16 = 101;
 /// The UDP header's length.
 const UDP_HEADER: usize = 8;
+/// The longest block this encoder writes: an enhanced packet block around an
+/// IPv6 header and the longest UDP datagram, padded to 4 bytes.
+const LONGEST_BLOCK: u64 = (12 + 20 + 40 + 65_535u64).next_multiple_of(4);
 
 /// The section header and its one interface: what opens each capture.
 pub fn section_header() -> Vec<u8> {
@@ -160,8 +163,9 @@ fn ones_sum(parts: &[&[u8]]) -> u16 {
 /// appended to it starts. A last block whose stated length runs past the end
 /// (a write cut short) is not counted. `Err` (`InvalidData`) where the file
 /// is no little-endian pcapng this encoder could have written: a first block
-/// that is no section header, a section of the other byte order, or a block
-/// whose two lengths disagree.
+/// that is no section header, a section of the other byte order, a block
+/// whose two lengths disagree, or a last block cut short that states a length
+/// past [`LONGEST_BLOCK`].
 pub fn whole_blocks(file: &File) -> std::io::Result<u64> {
     let end = file.metadata()?.len();
     let mut reader = BufReader::new(file);
@@ -180,6 +184,12 @@ pub fn whole_blocks(file: &File) -> std::io::Result<u64> {
             return Err(foreign(&format!("the block at byte {at} states a length of {total}")));
         }
         if at + total > end {
+            if total > LONGEST_BLOCK {
+                return Err(foreign(&format!(
+                    "the block cut short at byte {at} states {total} bytes, past any this encoder \
+                     writes"
+                )));
+            }
             break;
         }
         let mut read = 8;
