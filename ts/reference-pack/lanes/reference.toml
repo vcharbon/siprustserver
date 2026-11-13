@@ -3,7 +3,8 @@
 # The base runs its cells in the plain replay binary's batch process; each
 # call's b-leg is pinned to its cell's callee by the dial's X-Api-Call, so the
 # lane serves no backend. Its runner's metrics and admin addresses and its log
-# are the `b2bua-runner` part's.
+# are the `b2bua-runner` part's; the file it captures its SIP datagrams to is
+# the `sip-capture` part's.
 schema = "lane.v1"
 description = "the upstream B2BUA runner on loopback, stood per batch"
 clock = "real"
@@ -29,3 +30,4 @@ timing_tolerance_ms = 250
 
 [parts]
 b2bua-runner = "reference"
+sip-capture = "reference"

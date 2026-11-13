@@ -1,0 +1,5 @@
+#!/bin/sh
+# The calls-ended collector's one executable: its module, which node runs
+# with its types stripped.
+set -eu
+exec node "$(dirname "$0")/main.ts"
