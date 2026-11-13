@@ -2,22 +2,25 @@
  * The base's hosted lane is refused before it is driven where the base
  * cannot host it: a lane serving a backend its B2BUA runner never asks, a
  * lane naming no `b2bua-runner` part, a part lacking an address the base
- * stands the runner with, a `sip-capture` part lacking its file or named by
- * a standing lane, whose runner the base does not start. A lane stating all
- * of it is hosted, its runner standalone at the lane's ingress, capturing to
- * the `sip-capture` part's file where the lane names one.
+ * stands the runner with, a `sip-capture` or `cdr-file` part lacking its file
+ * or named by a standing lane, whose runner the base does not start. A lane
+ * stating all of it is hosted, its runner standalone at the lane's ingress,
+ * capturing to the `sip-capture` part's file and writing its call records to
+ * the `cdr-file` part's where the lane names them.
  */
 import type { LaneView } from "@sip/rig"
 import { describe, expect, it } from "vitest"
-import { CAPTURE_PART, hostedRefusalOf, RUNNER_PART, runnerEnvOf } from "../src/base-hosted-lane.ts"
+import { CAPTURE_PART, CDR_PART, hostedRefusalOf, RUNNER_PART, runnerEnvOf } from "../src/base-hosted-lane.ts"
 
 const PART = { metrics: "127.0.0.1:9161", admin: "127.0.0.1:9162" }
 const CAPTURE = { file: "/var/tmp/reference.pcapng" }
+const CDR = { file: "/var/tmp/reference.cdr.jsonl" }
 
-/** What a lane names beside its backend mode: its runner part, its capture part, its lifecycle. */
+/** What a lane names beside its backend mode: its runner part, its capture and record parts, its lifecycle. */
 interface Named {
   readonly part?: Record<string, unknown>
   readonly capture?: Record<string, unknown>
+  readonly cdr?: Record<string, unknown>
   readonly lifecycle?: "managed" | "standing"
 }
 
@@ -29,6 +32,9 @@ const laneOf = (mode: string, named: Named = {}): LaneView.Hosted => {
   }
   if (named.capture !== undefined) {
     parts.push([CAPTURE_PART, { kind: CAPTURE_PART, name: "lab", file: "targets/sip-capture/lab.toml", value: named.capture }])
+  }
+  if (named.cdr !== undefined) {
+    parts.push([CDR_PART, { kind: CDR_PART, name: "lab", file: "targets/cdr-file/lab.toml", value: named.cdr }])
   }
   return {
     kind: "hosted",
@@ -71,6 +77,19 @@ describe("the base's hosted lane", () => {
     expect(hostedRefusalOf(laneOf("none", { part: PART, capture: {} }))).toMatch(/targets\/sip-capture\/lab\.toml: .*file/s)
     expect(hostedRefusalOf(laneOf("none", { part: PART, capture: CAPTURE, lifecycle: "standing" }))).toContain(
       `the base captures only a runner it stands: a standing lane names no ${CAPTURE_PART} part`
+    )
+  })
+
+  it("stands a runner writing its call records to the file the lane's cdr-file part names", () => {
+    const lane = laneOf("none", { part: PART, cdr: CDR })
+    expect(hostedRefusalOf(lane)).toBeNull()
+    expect(runnerEnvOf(lane, PART)["B2BUA_CDR_FILE"]).toBe(CDR.file)
+  })
+
+  it("is refused where its cdr-file part names no file, or where the lane is standing", () => {
+    expect(hostedRefusalOf(laneOf("none", { part: PART, cdr: {} }))).toMatch(/targets\/cdr-file\/lab\.toml: .*file/s)
+    expect(hostedRefusalOf(laneOf("none", { part: PART, cdr: CDR, lifecycle: "standing" }))).toContain(
+      `the base sets the record file only of a runner it stands: a standing lane names no ${CDR_PART} part`
     )
   })
 })
