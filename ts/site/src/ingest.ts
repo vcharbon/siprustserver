@@ -6,7 +6,8 @@
  * store and launches it detached: the viewer inserts nothing itself and
  * holds no slot, so its restart loses nothing and two drops run at once. In
  * a workspace the drop is saved into its inbox instead and taken from there
- * by an inbox job (`inbox.ts`): a capture enters a workspace anonymised.
+ * by an inbox job (`inbox.ts`) at the level the drop states: a capture enters
+ * a workspace anonymised unless its dropper says it holds nothing private.
  *
  * The viewer never opens the capture. It only names it the way the pipeline
  * will — that name is the answer's link to the study view the run will fill —
@@ -18,7 +19,8 @@ import { Effect, Layer, Schema } from "effect"
 import * as Context from "effect/Context"
 import { FileSystem } from "effect/FileSystem"
 import { Path } from "effect/Path"
-import { InboxTake } from "@sip/lab-host"
+import { InboxLevel, InboxTake } from "@sip/lab-host"
+import { AnonymiseLevel } from "@sip/workspace"
 import * as Discover from "@sip/corpus/ingest/discover"
 import { spawn } from "node:child_process"
 import { ViewerConfig } from "./config.ts"
@@ -56,6 +58,12 @@ export interface Upload {
    * lane here is answered in `detail` as the request to create after it.
    */
   readonly lane: string | undefined
+  /**
+   * The anonymisation level a workspace drop is taken at, written as the
+   * capture's inbox sidecar (`@sip/lab-host` `inbox-level.ts`); absent, the
+   * workspace's default. A server with no inbox has no use for it.
+   */
+  readonly level?: string | undefined
 }
 
 export interface Accepted {
@@ -239,19 +247,36 @@ export const layer = Layer.effect(
     })
 
     /**
-     * A workspace's drop: saved into its inbox and taken from there at once
-     * by an inbox job, its files as one capture; it reaches the population
-     * only when the Pcaps page replays its anonymised copy.
+     * A workspace's drop: saved into its inbox, its level as the sidecar of
+     * its first file, and taken from there at once by an inbox job, its files
+     * as one capture; it reaches the population only when the Pcaps page
+     * replays what landed in the pcap root.
      */
-    const intoInbox = Effect.fn("Ingest.intoInbox")(function*(dir: string, files: ReadonlyArray<Part>) {
+    const intoInbox = Effect.fn("Ingest.intoInbox")(function*(
+      workspace: { readonly inbox: string; readonly config: string },
+      files: ReadonlyArray<Part>,
+      level: AnonymiseLevel.Level | undefined
+    ) {
+      const dir = workspace.inbox
       const filename = files.map((one) => one.filename).join(", ")
-      const copy = InboxTake.copyName(path.basename(files[0]!.filename))
-      const capture = Discover.captureOf(copy)
       const targets = files.map((one) => path.join(dir, path.basename(one.filename)))
-      const failed = yield* saveAll(files, targets).pipe(
+      const sidecar = InboxLevel.sidecarOf(targets[0]!)
+      const saved = Effect.gen(function*() {
+        yield* fs.makeDirectory(dir, { recursive: true })
+        if (level === undefined) yield* fs.remove(sidecar, { force: true })
+        else yield* fs.writeFileString(sidecar, InboxLevel.sidecarText(level))
+        yield* saveAll(files, targets)
+      }).pipe(Effect.onError(() => fs.remove(sidecar, { force: true }).pipe(Effect.ignore)))
+      const failed = yield* saved.pipe(
         Effect.map(() => undefined as string | undefined),
         Effect.catch((cause) => Effect.succeed(String(cause)))
       )
+      const stated = yield* InboxLevel.levelOf(targets[0]!, workspace.config).pipe(
+        Effect.map((one) => one.level),
+        Effect.orElseSucceed(() => level ?? AnonymiseLevel.DEFAULT),
+        Effect.provideService(FileSystem, fs)
+      )
+      const capture = Discover.captureOf(InboxTake.copyName(path.basename(files[0]!.filename), stated))
       if (failed !== undefined) {
         return { capture, started: false, detail: `could not save ${filename} under ${dir}: ${failed}`, study: PCAPS, inbox: true } satisfies Accepted
       }
@@ -284,7 +309,16 @@ export const layer = Layer.effect(
       }
       const files = ringOrder(upload.files)
       const workspace = config.workspace
-      if (workspace !== undefined) return yield* intoInbox(workspace.inbox, files)
+      if (workspace !== undefined) {
+        const level = upload.level === undefined || upload.level === "" ? undefined : upload.level
+        if (level !== undefined && !AnonymiseLevel.isLevel(level)) {
+          return yield* new Refused({
+            filename,
+            detail: `no anonymisation level ${level}: ${AnonymiseLevel.LEVELS.join(", ")}`
+          })
+        }
+        return yield* intoInbox(workspace, files, level)
+      }
       const capture = captureName(files.map((one) => one.filename))
       const targets = files.map((one) => path.join(triage.uploads, path.basename(one.filename)))
       // An unwritable store is the deployment's fault, not the dropper's: it

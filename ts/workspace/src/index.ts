@@ -1,7 +1,8 @@
 /**
  * **@sip/workspace**: one directory holding a tooling's roots, its store and
  * its one configuration file, over the facts the tooling states
- * (`WorkspacePack`). `Layout` places the workspace and the environment it
+ * (`WorkspacePack`). `AnonymiseLevel` names the levels a capture enters it
+ * at. `Layout` places the workspace and the environment it
  * states; `ConfigFile` reads the file, the tooling's sections added;
  * `WorkspaceEnv` applies it to an environment; `DeploymentConfig` reads a
  * workspace's or the checkout's file; `Campaigns` and `CampaignTags` what it
@@ -9,6 +10,7 @@
  * workspace as a run's provenance; `Init` makes one ready; `Cli` holds the
  * workspace command's generic verbs.
  */
+export * as AnonymiseLevel from "./anonymise-level.js"
 export * as CampaignTags from "./campaign-tags.js"
 export * as Campaigns from "./campaigns.js"
 export * as Cli from "./cli.js"

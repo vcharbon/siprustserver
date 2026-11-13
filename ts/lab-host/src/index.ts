@@ -5,7 +5,8 @@
  * box the interpreter a cell runs; `Builds` makes each binary ready under one
  * box-wide build lock; `Paths` and `Roots` place the deployment's roots;
  * `EnvFile` applies the env files beside the checkout; `InboxScan` and
- * `InboxTake` read and take a workspace's inbox; `RunBundle` walks what a
+ * `InboxTake` read and take a workspace's inbox, `InboxLevel` says at which
+ * anonymisation level, `InboxMarker` what a take landed; `RunBundle` walks what a
  * cell left; `OnDemand` runs a collector on landed cells; `TicketStates`
  * reads a tracker's tickets; `LaneChecks` says why a lane cannot be driven;
  * `LaneHosting` says what a lane states to the orchestrator;
@@ -19,6 +20,8 @@ export * as Boxing from "./boxing.js"
 export * as Builds from "./builds.js"
 export * as EnvFile from "./env-file.js"
 export * as Identity from "./identity.js"
+export * as InboxLevel from "./inbox-level.js"
+export * as InboxMarker from "./inbox-marker.js"
 export * as InboxScan from "./inbox-scan.js"
 export * as InboxTake from "./inbox-take.js"
 export * as InterpreterEnv from "./interpreter-env.js"

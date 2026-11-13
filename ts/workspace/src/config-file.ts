@@ -4,8 +4,9 @@
  * campaign tags its definer declares (`[tags.<name>]`, `[[tag_cases]]`), the
  * named campaigns it runs (`[campaign.<name>]`), and its collection levels
  * (`[collection]`, `@sip/rig` `Collection`: their names and default read here,
- * what they name checked against the rig path before a job opens); beside
- * them, the sections and campaign keys the tooling adds ({@link Sections}).
+ * what they name checked against the rig path before a job opens), the
+ * inbox's default anonymisation level (`[anonymise]`, `anonymise-level.ts`);
+ * beside them, the sections and campaign keys the tooling adds ({@link Sections}).
  *
  * Every key is optional; a key the schema does not name, or a value of the
  * wrong shape, is refused naming its key, because a typo in a configuration
@@ -16,6 +17,7 @@ import { issueLine, tomlOf } from "@sip/rig/manifest-file"
 import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
+import * as AnonymiseLevel from "./anonymise-level.js"
 import * as PublicUrl from "./public-url.js"
 import type { WorkspacePack } from "./workspace-pack.js"
 
@@ -90,6 +92,7 @@ const BASE_FIELDS = {
   site: Schema.optionalKey(Site),
   database: Schema.optionalKey(Database),
   tools: Schema.optionalKey(Tools),
+  anonymise: Schema.optionalKey(AnonymiseLevel.Section),
   tags: Schema.optionalKey(Schema.Record(Schema.String, Tag)),
   tag_cases: Schema.optionalKey(Schema.Array(TagCases))
 }

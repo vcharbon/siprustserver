@@ -4,10 +4,9 @@
  * one action — replay on a lane, which starts an ingest with its cut and a
  * replay after it, both linked. The lane list says per lane whether a capture
  * replay fits it, runs there only forced (its results marked so), or runs
- * nowhere. The inbox above it lists what is being anonymised for this
- * network's tooling (public peers faked, SUT and private addresses kept)
- * before it lands in the root, each capture with its state and its job; a
- * drop here goes to the inbox.
+ * nowhere. The inbox above it lists what is being taken into the root, each
+ * capture with the anonymisation level it is taken at, its state and its job;
+ * a drop here goes to the inbox at the level the drop picks.
  *
  * The page polls while the inbox holds something in flight or a job started
  * from it has not ended, and stops once nothing is in progress.
@@ -148,6 +147,7 @@ const InboxTable = ({ entries }: { readonly entries: readonly InboxEntry[] }): J
         <th>size</th>
         <th>modified</th>
         <th>state</th>
+        <th>level</th>
         <th>copy</th>
         <th>job</th>
       </tr>
@@ -159,6 +159,7 @@ const InboxTable = ({ entries }: { readonly entries: readonly InboxEntry[] }): J
           <td className="mono">{formatBytes(entry.files.reduce((sum, one) => sum + one.size, 0))}</td>
           <td className="muted"><Age at={entry.files.map((one) => one.modifiedAt).sort().at(-1)!} /></td>
           <td><span className={`tag ${INBOX_TONE[entry.state]}`}>{entry.state}</span></td>
+          <td className="mono">{entry.level}</td>
           <td className="mono break">{entry.copy}</td>
           <td>{entry.jobId === null ? <span className="muted">—</span> : <Link to={href.job(entry.jobId)}>job {entry.jobId}</Link>}</td>
         </tr>
@@ -253,7 +254,7 @@ export const PcapsPage = (): JSX.Element => {
         ? <p className="muted">pcap root: none</p>
         : (
           <>
-            <DropCaptures lanes={[]} laneless onFresh={() => onStarted()} />
+            <DropCaptures lanes={[]} laneless anonymise onFresh={() => onStarted()} />
             {value.inboxEntries.length > 0 && (
               <section>
                 <h2>Inbox · {value.inboxEntries.length}</h2>

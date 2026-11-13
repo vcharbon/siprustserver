@@ -1,19 +1,22 @@
 /**
- * One INBOX TAKE: the files of one capture in a workspace's `inbox/` made into
- * a verified anonymised copy in `pcaps/` by the anonymiser the request names
- * (which refuses to write a copy anything of the raw capture survives in). The
- * copy is anonymised for this network's tooling (`--keep-sut`): public peers
- * are faked, the SUT's and the private addresses kept as the ingest keeps
- * them, since a capture whose SUT is faked away holds no call the cut can
- * cut. It is not a copy to share outside the network.
+ * One INBOX TAKE: the files of one capture in a workspace's `inbox/` landed in
+ * `pcaps/` at the request's level (`inbox-level.ts`), the capture's ONE
+ * anonymisation. At an anonymised level the anonymiser the request names
+ * reads the raw capture once and writes a verified copy and its flows
+ * document (it refuses to write a copy anything of the raw capture survives
+ * in); at `none` the files land unchanged. Either way a take marker
+ * (`inbox-marker.ts`) beside the landed file says so, and the ingest anonymises
+ * nothing again.
  *
  * The copy is `<stem>.anon.pcap`, its seed `.seeds/<stem>.seed` (0600), so the
  * same raw capture taken again rewrites the same bytes and lands as the copy
  * already there. A copy of that name holding other bytes is another capture:
  * the new one takes the next free name, `<stem>-2.anon.pcap`, `-3`…, under a
- * fresh seed of its own; a copy in `pcaps/` is never replaced. Each name a
- * take may land under is claimed first (`pcaps/.<copy>.taking`, created
- * exclusively, naming its holder's pid), so two takes never land one name.
+ * fresh seed of its own; a copy in `pcaps/` is never replaced. At `none` the
+ * files keep their names, `<stem>-2…` where another capture holds them. Each
+ * name a take may land under is claimed first (`pcaps/.<copy>.taking`,
+ * created exclusively, naming its holder's pid), so two takes never land one
+ * name.
  *
  * Only files directly under the inbox are taken. They leave it only once the
  * copy is in `pcaps/`, and only where each still stands as the take found it:
@@ -23,14 +26,16 @@
  * the inbox, and goes with it, however the take ends. A take that fails keeps
  * every raw file in the inbox and says why.
  */
+import type { AnonymiseLevel } from "@sip/workspace"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Schema from "effect/Schema"
 import * as Scope from "effect/Scope"
 import { spawn } from "node:child_process"
-import * as crypto from "node:crypto"
 import * as nodeFs from "node:fs"
 import * as path from "node:path"
+import { sidecarOf } from "./inbox-level.js"
+import * as InboxMarker from "./inbox-marker.js"
 import { stemOf } from "./inbox-scan.js"
 
 
@@ -60,17 +65,22 @@ export interface Request {
   readonly work: string
   /**
    * The anonymiser's command: it takes the capture's files (`--set` before
-   * each of several), the copy, `--seed`, `--raw-dir` and `--keep-sut`, and
-   * exits non-zero where the copy does not verify.
+   * each of several), the out directory, `--seed`, `--raw-dir` and `--level`,
+   * writes `<stem>.anon.pcap` and `<stem>.anon.flows.json` there, and exits
+   * non-zero where the copy does not verify.
    */
   readonly anonymiser: string
+  /** The level the capture is taken at (`inbox-level.ts` `levelOf`). */
+  readonly level: AnonymiseLevel.Level
 }
 
 /** What a take came to. */
 export interface Taken {
-  /** The anonymised copy, in `pcaps/`. */
+  /** The landed capture's (first) file, in `pcaps/`. */
   readonly pcap: string
-  readonly seed: string
+  readonly level: AnonymiseLevel.Level
+  /** The seed of an anonymised copy; absent at `none`. */
+  readonly seed: string | undefined
   /** The copy was there already, byte for byte: the same capture taken again. */
   readonly already: boolean
   /** The raw files removed from the inbox. */
@@ -92,8 +102,15 @@ export const copyStem = (name: string): string => stemOf(name)
 /** The file the copy of stem `stem` is written as. */
 export const copyFile = (stem: string): string => `${stem}.anon.pcap`
 
-/** The file an anonymised copy of the capture starting at `name` is first written as. */
-export const copyName = (name: string): string => copyFile(copyStem(name))
+/** The flows document the anonymiser writes beside the copy of stem `stem`. */
+const copyDocument = (stem: string): string => `${stem}.anon.flows.json`
+
+/**
+ * The file the capture starting at `name` is first landed as at `level`: its
+ * anonymised copy, or at `none` the file itself.
+ */
+export const copyName = (name: string, level: AnonymiseLevel.Level): string =>
+  level === "none" ? name : copyFile(copyStem(name))
 
 /** The seed kept for the copy of stem `stem`: dots written `_`, as the anonymiser names a seed. */
 export const seedFile = (stem: string): string => `${stem.replaceAll(".", "_")}.seed`
@@ -148,16 +165,9 @@ const unchanged = Effect.fn("InboxTake.unchanged")(function*(file: File) {
   return Number(info.value.size) === file.size && Math.abs(mtime - file.mtimeMs) < 1
 })
 
-/** The SHA-256 of a file, streamed: a copy may be hundreds of megabytes. */
+/** The SHA-256 of a file; one that does not read refuses the take. */
 const digest = (file: string) =>
-  Effect.callback<string, Refused>((resume) => {
-    const hash = crypto.createHash("sha256")
-    const stream = nodeFs.createReadStream(file)
-    stream.on("data", (chunk) => hash.update(chunk))
-    stream.on("error", (error) => resume(Effect.fail(new Refused({ reason: `${file} does not read: ${error.message}` }))))
-    stream.on("end", () => resume(Effect.succeed(hash.digest("hex"))))
-    return Effect.sync(() => stream.destroy())
-  })
+  InboxMarker.digest(file).pipe(Effect.mapError((unreadable) => new Refused({ reason: unreadable.reason })))
 
 /** Whether two files hold the same bytes. */
 const sameBytes = Effect.fn("InboxTake.sameBytes")(function*(a: string, b: string) {
@@ -212,8 +222,67 @@ const outside = (files: ReadonlyArray<File>, inbox: string): string | undefined 
   return astray === undefined ? undefined : `${astray.path} is not directly under the inbox ${inbox}: a take removes what it takes`
 }
 
+/**
+ * The raw files that still stand as the take found them removed from the
+ * inbox, the others kept; the sidecar goes once every file has.
+ */
+const leaveInbox = Effect.fn("InboxTake.leaveInbox")(function*(files: ReadonlyArray<File>) {
+  const fs = yield* FileSystem.FileSystem
+  const removed: Array<string> = []
+  const kept: Array<string> = []
+  for (const file of files) {
+    if (yield* unchanged(file)) {
+      yield* fs.remove(file.path)
+      removed.push(file.path)
+    } else {
+      kept.push(file.path)
+    }
+  }
+  if (kept.length === 0) yield* fs.remove(sidecarOf(files[0]!.path), { force: true })
+  return { removed, kept }
+})
+
+/** The file `name` of a capture of stem `stem` lands as under the `n`-th name: its stem replaced. */
+const asIsName = (name: string, stem: string, n: number): string => nth(stem, n) + name.slice(stem.length)
+
+/**
+ * A `none` take: the files moved into `pcaps/` unchanged under their own
+ * names, or the first `<stem>-n` names another capture holds none of; where
+ * every name holds these very bytes, the capture was landed already.
+ */
+const landAsIs = Effect.fn("InboxTake.landAsIs")(function*(request: Request, scope: Scope.Scope) {
+  const fs = yield* FileSystem.FileSystem
+  const { pcaps } = request.places
+  const stem = copyStem(path.basename(request.files[0]!.path))
+  yield* fs.makeDirectory(pcaps, { recursive: true })
+  for (const file of request.files) {
+    if (!(yield* unchanged(file))) {
+      return yield* new Refused({ reason: `${file.path} changed since the take was asked for it: it stays in the inbox` })
+    }
+  }
+  for (let n = 1;; n++) {
+    yield* claim(pcaps, nth(stem, n)).pipe(Scope.provide(scope))
+    const targets = request.files.map((file) => path.join(pcaps, asIsName(path.basename(file.path), stem, n)))
+    const held = yield* Effect.forEach(targets, (target) => fs.exists(target))
+    const marked = (already: boolean, left: { readonly removed: ReadonlyArray<string>; readonly kept: ReadonlyArray<string> }) =>
+      Effect.gen(function*() {
+        yield* InboxMarker.write(targets[0]!, { level: "none", sha256: yield* digest(targets[0]!) })
+        return { pcap: targets[0]!, level: request.level, seed: undefined, already, ...left } satisfies Taken
+      })
+    if (held.every((one) => !one)) {
+      yield* Effect.forEach(request.files, (file, at) => move(file.path, targets[at]!), { discard: true })
+      yield* fs.remove(sidecarOf(request.files[0]!.path), { force: true })
+      return yield* marked(false, { removed: request.files.map((file) => file.path), kept: [] })
+    }
+    if (!held.every((one) => one)) continue
+    const same = yield* Effect.forEach(request.files, (file, at) => sameBytes(file.path, targets[at]!))
+    if (same.every((one) => one)) return yield* marked(true, yield* leaveInbox(request.files))
+  }
+})
+
 /** The take's body, its claims and its work directory in `scope`. */
 const takeIn = Effect.fn("InboxTake.takeIn")(function*(request: Request, scope: Scope.Scope) {
+  if (request.level === "none") return yield* landAsIs(request, scope)
   const fs = yield* FileSystem.FileSystem
   const first = request.files[0]!
   const stem = copyStem(path.basename(first.path))
@@ -232,17 +301,18 @@ const takeIn = Effect.fn("InboxTake.takeIn")(function*(request: Request, scope: 
   const anonymise = Effect.fn("InboxTake.anonymise")(function*(seed: string) {
     const out = path.join(request.work, `out${++runs}`)
     yield* fs.makeDirectory(out, { recursive: true })
-    const exit = yield* run(anonymiser, [...inputs, out, "--seed", seed, "--raw-dir", raw, "--keep-sut"])
+    const exit = yield* run(anonymiser, [...inputs, out, "--seed", seed, "--raw-dir", raw, "--level", request.level])
     if (exit !== 0) {
       return yield* new Refused({
         reason: `the anonymisation did not verify (${path.basename(anonymiser)} exited ${exit}): the raw capture stays in the inbox`
       })
     }
-    const written = path.join(out, copyFile(stem))
-    if (!(yield* fs.exists(written))) {
-      return yield* new Refused({ reason: `${path.basename(anonymiser)} wrote no ${copyFile(stem)}: the raw capture stays in the inbox` })
+    for (const name of [copyFile(stem), copyDocument(stem)]) {
+      if (!(yield* fs.exists(path.join(out, name)))) {
+        return yield* new Refused({ reason: `${path.basename(anonymiser)} wrote no ${name}: the raw capture stays in the inbox` })
+      }
     }
-    return written
+    return path.join(out, copyFile(stem))
   })
 
   /** Where the copy lands: the first name free of copy and seed, claimed, under a fresh seed. */
@@ -269,17 +339,16 @@ const takeIn = Effect.fn("InboxTake.takeIn")(function*(request: Request, scope: 
   const copy = yield* landed()
   if (!copy.already) yield* move(copy.written, copy.target)
   yield* fs.chmod(copy.seed, 0o600)
-  const removed: Array<string> = []
-  const kept: Array<string> = []
-  for (const file of request.files) {
-    if (yield* unchanged(file)) {
-      yield* fs.remove(file.path)
-      removed.push(file.path)
-    } else {
-      kept.push(file.path)
-    }
-  }
-  return { pcap: copy.target, seed: copy.seed, already: copy.already, removed, kept } satisfies Taken
+  const document = InboxMarker.documentOf(copy.target)
+  yield* move(path.join(path.dirname(copy.written), copyDocument(stem)), document)
+  yield* InboxMarker.write(copy.target, {
+    level: request.level,
+    sha256: yield* digest(copy.target),
+    document,
+    seed: copy.seed
+  })
+  const { removed, kept } = yield* leaveInbox(request.files)
+  return { pcap: copy.target, level: request.level, seed: copy.seed, already: copy.already, removed, kept } satisfies Taken
 })
 
 export const take = Effect.fn("InboxTake.take")(function*(request: Request) {

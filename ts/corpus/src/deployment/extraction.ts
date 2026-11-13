@@ -37,12 +37,18 @@ export class AnonymiseFailed extends Schema.TaggedError<AnonymiseFailed>()("Corp
   }
 }
 
-/** One anonymisation: the raw document, the directory the kept one lands in, the store and the capture name. */
+/**
+ * One anonymisation: the raw document, the directory the kept one lands in,
+ * the store, the capture name, and the capture's own files, read into the raw
+ * document, which tell the deployment what it was given (an anonymised copy,
+ * say).
+ */
 export interface AnonymiseRequest {
   readonly raw: string
   readonly dir: string
   readonly artifacts: string
   readonly capture: string
+  readonly pcaps: ReadonlyArray<string>
 }
 
 /** What the ingest left of a capture it could not extract. */

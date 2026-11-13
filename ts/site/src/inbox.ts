@@ -1,6 +1,7 @@
 /**
  * The workspace's INBOX, as the site keeps it: each capture found there is
- * taken into `pcaps/` by an `inbox` job (`@sip/lab-host` `inbox-take.ts`).
+ * taken into `pcaps/` by an `inbox` job (`@sip/lab-host` `inbox-take.ts`), at
+ * the level its sidecar or the workspace states (`inbox-level.ts`).
  * A drop on the site is taken at once, its files as one capture; a file
  * copied into `inbox/` is picked up by a periodic scan (every
  * {@link SCAN_INTERVAL}), once two scans in a row find it unchanged, so a
@@ -18,8 +19,9 @@
  */
 import * as Job from "@sip/corpus/jobs/job"
 import * as JobStart from "@sip/corpus/jobs/job-start"
-import { InboxScan, InboxTake } from "@sip/lab-host"
+import { InboxLevel, InboxScan, InboxTake } from "@sip/lab-host"
 import { Jobs } from "@sip/store"
+import { AnonymiseLevel } from "@sip/workspace"
 import { Effect, Layer, Schema } from "effect"
 import * as Context from "effect/Context"
 import * as Duration from "effect/Duration"
@@ -51,8 +53,10 @@ export interface File {
 export type State = "settling" | "waiting" | "taking" | "refused"
 
 export interface Entry {
-  /** The file its anonymised copy takes in `pcaps/`. */
+  /** The file it lands as in `pcaps/`: its anonymised copy, or itself at level `none`. */
   readonly copy: string
+  /** The level it is taken at (`@sip/lab-host` `inbox-level.ts`). */
+  readonly level: AnonymiseLevel.Level
   readonly files: ReadonlyArray<File>
   readonly state: State
   /** The job taking it, or the one that failed to; null otherwise. */
@@ -98,6 +102,18 @@ export const layer = Layer.effect(
 
     const refused = (detail: string) => new Refused({ detail })
 
+    /**
+     * The level the capture whose first inbox file is `first` is taken at;
+     * an unreadable sidecar reads as the default here, the take itself
+     * refusing it in its job's log.
+     */
+    const levelOf = (first: string) =>
+      InboxLevel.levelOf(first, config.workspace!.config).pipe(
+        Effect.map((stated) => stated.level),
+        Effect.orElseSucceed(() => AnonymiseLevel.DEFAULT),
+        Effect.provide(host)
+      )
+
     /** The inbox jobs holding a file (active) and those refusing it at a stamp (failed), by path. */
     const ledger = Effect.fn("Inbox.ledger")(function*() {
       const active = yield* jobs.page({ status: "active", kind: "inbox", limit: LOOKBACK, offset: 0 }).pipe(Effect.orDie)
@@ -128,7 +144,7 @@ export const layer = Layer.effect(
       if (triage === undefined) return yield* refused(`no triage block in ${config.configPath}: there is no store to start a job in`)
       const first = files[0]
       if (first === undefined) return yield* refused("an inbox take names the files of its capture")
-      const copy = InboxTake.copyName(path.basename(first.path))
+      const copy = InboxTake.copyName(path.basename(first.path), yield* levelOf(first.path))
       const started = yield* JobStart.inbox(pathsOf(pack, triage).sessions, { files, capture: copy }).pipe(
         Effect.provideService(Jobs.Service, jobs),
         Effect.provide(host),
@@ -159,11 +175,14 @@ export const layer = Layer.effect(
     const standing = Effect.fn("Inbox.standing")(function*(dir: string) {
       const entries = yield* InboxScan.read(dir).pipe(Effect.provide(host))
       const { holding, copies, refusing } = yield* ledger()
+      const found = InboxScan.captures(entries)
+      const levels = yield* Effect.forEach(found, (capture) => levelOf(path.join(dir, capture.files[0]!.name)))
       return {
         entries,
-        captures: InboxScan.captures(entries).map((capture) => {
+        captures: found.map((capture, at) => {
           const paths = capture.files.map((file) => path.join(dir, file.name))
-          const copy = InboxTake.copyName(capture.files[0]!.name)
+          const level = levels[at]!
+          const copy = InboxTake.copyName(capture.files[0]!.name, level)
           const held = paths.map((one) => holding.get(one)).find((id) => id !== undefined)
           // Another capture taken under the same copy name waits for that take: one name, one take at a time.
           const queued = held === undefined ? copies.get(copy) : undefined
@@ -178,7 +197,7 @@ export const layer = Layer.effect(
             : InboxScan.settled(capture, before)
             ? "waiting"
             : "settling"
-          return { capture, paths, copy, queued, state, jobId: held ?? failed.find((id) => id !== undefined) ?? null }
+          return { capture, paths, copy, level, queued, state, jobId: held ?? failed.find((id) => id !== undefined) ?? null }
         })
       }
     })
@@ -205,7 +224,8 @@ export const layer = Layer.effect(
       if (inbox === undefined) return [] as ReadonlyArray<Entry>
       const read = yield* standing(inbox)
       return read.captures.map((one): Entry => ({
-        copy: InboxTake.copyName(one.capture.files[0]!.name),
+        copy: one.copy,
+        level: one.level,
         files: one.capture.files.map((file) => ({
           name: file.name,
           size: file.size,

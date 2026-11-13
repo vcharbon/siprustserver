@@ -221,7 +221,8 @@ export const CaptureHandlers = HttpApiBuilder.group(
       captureIngest: ({ payload }) =>
         ingest.accept({
           files: payload.file.map((one) => ({ filename: one.name, path: one.path })),
-          lane: payload.lane
+          lane: payload.lane,
+          level: payload.level
         }).pipe(
           Effect.mapError((error) =>
             new CaptureRefused({ filename: error.filename, detail: error.detail })

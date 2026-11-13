@@ -213,7 +213,8 @@ const extractTimed = (
       const read = yield* readRaw(tool, source, raw)
       if (read !== undefined) return { capture: source.capture, source, landed: keptLine, broke: read }
       watch.lap("sipflow")
-      const anonymised = yield* extraction.anonymise({ raw, dir: staged, artifacts, capture: source.capture }).pipe(
+      const request = { raw, dir: staged, artifacts, capture: source.capture, pcaps: source.pcaps }
+      const anonymised = yield* extraction.anonymise(request).pipe(
         Effect.as(undefined),
         Effect.catchTag("Corpus.AnonymiseFailed", (failed) => Effect.succeed(failed.line))
       )
@@ -332,7 +333,7 @@ const landInto = (
         yield* fs.rename(path.join(done.dir, file), path.join(dir, file))
       }
     } else {
-      const anonymised = yield* extraction.anonymise({ raw, dir, artifacts, capture: source.capture }).pipe(
+      const anonymised = yield* extraction.anonymise({ raw, dir, artifacts, capture: source.capture, pcaps: source.pcaps }).pipe(
         Effect.as(undefined),
         Effect.catchTag("Corpus.AnonymiseFailed", (failed) => Effect.succeed(failed.line))
       )

@@ -577,7 +577,9 @@ export const RulesView = Schema.Struct({
  */
 export const CaptureUpload = Schema.Struct({
   file: Multipart.FilesSchema,
-  lane: Schema.optional(Schema.String)
+  lane: Schema.optional(Schema.String),
+  /** A workspace drop's anonymisation level (`@sip/workspace` `AnonymiseLevel`); absent = the workspace's default. */
+  level: Schema.optional(Schema.String)
 }).pipe(HttpApiSchema.asMultipart())
 
 /** The ingest job the drop started, and where its capture will be readable. */
@@ -1473,8 +1475,10 @@ export const PcapView = Schema.Struct({
 
 /** One capture of the inbox (`inbox.ts`): its files and where it stands. */
 export const InboxEntryView = Schema.Struct({
-  /** The file its anonymised copy takes in the pcap root. */
+  /** The file it lands as in the pcap root: its anonymised copy, or itself at level `none`. */
   copy: Schema.String,
+  /** The anonymisation level it is taken at (`@sip/workspace` `AnonymiseLevel`). */
+  level: Schema.String,
   files: Schema.Array(Schema.Struct({ name: Schema.String, size: Schema.Number, modifiedAt: Schema.String })),
   /** settling | waiting | taking | refused. */
   state: Schema.String,

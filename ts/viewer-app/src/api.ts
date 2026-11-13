@@ -977,10 +977,16 @@ export interface PcapFile {
   readonly standings: readonly SourceStanding[]
 }
 
+/** The levels a capture dropped into a workspace's inbox is taken at (`@sip/workspace` `AnonymiseLevel`). */
+export const ANONYMISE_LEVELS = ["keep-all-ips", "keep-sut", "shareable", "none"] as const
+export type AnonymiseLevel = (typeof ANONYMISE_LEVELS)[number]
+
 /** One capture of the inbox and where it stands. */
 export interface InboxEntry {
-  /** The file its shareable copy takes in the pcap root. */
+  /** The file it lands as in the pcap root: its anonymised copy, or itself at level `none`. */
   readonly copy: string
+  /** The anonymisation level it is taken at. */
+  readonly level: AnonymiseLevel
   readonly files: readonly { readonly name: string; readonly size: number; readonly modifiedAt: string }[]
   readonly state: "settling" | "waiting" | "taking" | "refused"
   readonly jobId: number | null
@@ -1467,10 +1473,11 @@ export const api = {
       }`
     ),
   /** One capture: one file, or the consecutive files of one tap together. */
-  captureIngest: (files: ReadonlyArray<File>, lane?: string) => {
+  captureIngest: (files: ReadonlyArray<File>, lane?: string, level?: AnonymiseLevel) => {
     const form = new FormData()
     for (const file of files) form.append("file", file, file.name)
     if (lane !== undefined && lane !== "") form.append("lane", lane)
+    if (level !== undefined) form.append("level", level)
     return upload<CaptureIngestStart>("/api/captures", form)
   },
   captureIngestState: (capture: string) =>
