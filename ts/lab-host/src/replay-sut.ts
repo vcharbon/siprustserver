@@ -57,6 +57,8 @@ export interface Worker {
   readonly died: () => string | undefined
   /** SIGTERM, SIGKILL past the grace; resolves once it exited. */
   readonly stop: Effect.Effect<void>
+  /** Whether its process has not exited yet. */
+  readonly running: Effect.Effect<boolean>
 }
 
 /** Whether the output seen so far holds {@link READY}, a line split across two chunks included. */
@@ -116,7 +118,7 @@ export const worker = Effect.fn("ReplaySut.worker")(function*(
   const stop = Scope.close(scope, Exit.void)
   const unnamed = pidFile === undefined ? Effect.void : fs.remove(pidFile, { force: true }).pipe(Effect.ignore)
   let died: string | undefined
-  yield* Effect.gen(function*() {
+  const spawned = yield* Effect.gen(function*() {
     yield* Scope.addFinalizer(scope, unnamed)
     const handle = yield* spawner.spawn(command).pipe(Scope.provide(scope))
     const ready = yield* Deferred.make<void, Error>()
@@ -144,8 +146,10 @@ export const worker = Effect.fn("ReplaySut.worker")(function*(
       })
     )
     if (pidFile !== undefined) yield* named(pidFile, handle.pid)
+    return handle
   }).pipe(Effect.onError(() => stop))
-  return { died: () => died, stop } satisfies Worker
+  const running = spawned.isRunning.pipe(Effect.orElseSucceed(() => false))
+  return { died: () => died, stop, running } satisfies Worker
 })
 
 /** What a pack stands its managed worker with. */
@@ -190,7 +194,9 @@ const logUnder = (path: Path.Path, under: string): string =>
  * lane has none of its own — the simulated lane builds its SUT inside the
  * cell. A managed worker's stop resolves once it exited, so the next batch
  * finds its addresses free. `extraEnv` is added to a managed worker's
- * environment.
+ * environment. A managed worker that died is stood again by `restand` with
+ * the same command, log and pid file, as its orchestrator would; the handle
+ * then answers for the one stood.
  */
 export const stand = <L extends LaneView.View, R>(
   pack: SutPack<L, R>,
@@ -211,7 +217,23 @@ export const stand = <L extends LaneView.View, R>(
     const path = yield* Path.Path
     const log = pack.logOf?.(hosted) ?? logUnder(path, under)
     yield* fs.makeDirectory(path.dirname(log), { recursive: true }).pipe(Effect.orDie)
-    const held = yield* worker(command, log, lane, READY_WITHIN, pack.pidFileOf?.(hosted))
+    const pidFile = pack.pidFileOf?.(hosted)
+    const services = yield* Effect.context<Requirements>()
+    let held = yield* worker(command, log, lane, READY_WITHIN, pidFile)
     console.log(`[sut] ${lane}: one ${pack.worker} on ${hosted.sip.ingress}, logging to ${log}`)
-    return { metrics, died: held.died, stop: held.stop } satisfies SutHandle
+    const restand = Effect.gen(function*() {
+      if (yield* held.running) return
+      yield* held.stop
+      held = yield* worker(command, log, lane, READY_WITHIN, pidFile)
+      console.log(`[sut] ${lane}: its ${pack.worker} died, one stood again on ${hosted.sip.ingress}`)
+    }).pipe(
+      Effect.mapError((e) => `the ${pack.worker} of ${lane} not stood again: ${e.message}`),
+      Effect.provideContext(services)
+    )
+    return {
+      metrics,
+      died: () => held.died(),
+      stop: Effect.suspend(() => held.stop),
+      restand
+    } satisfies SutHandle
   }).pipe(Effect.withSpan("ReplaySut.stand"))

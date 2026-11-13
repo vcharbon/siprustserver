@@ -43,11 +43,14 @@ export type Point = typeof Point.Type
 /**
  * An operation as a step of the call (ADR-0060 appendix §7): the operation
  * the lane binds by this name, injected at `at`; the call's next message sent
- * waits for its inject to answer.
+ * waits for its inject to answer. `forgets`, at `answered` only: the system
+ * loses the call to the operation (a restart), so each party ends its leg
+ * with a BYE the system answers 481 (RFC 3261 §15.1.2).
  */
 export const OperationStep = Schema.Struct({
   operation: Name,
-  at: Point
+  at: Point,
+  forgets: Schema.optionalKey(Schema.Boolean)
 })
 export interface OperationStep extends Schema.Schema.Type<typeof OperationStep> {}
 
@@ -151,6 +154,8 @@ const stepsMeaningOf = (c: BasicCase): string | undefined => {
   if (astray !== undefined) {
     return `steps: ${astray.operation} is at ${astray.at}, which ${c.shape} does not reach (its points: ${points.join(", ")})`
   }
+  const early = steps.find((step) => step.forgets === true && step.at !== "answered")
+  if (early !== undefined) return `steps: ${early.operation} forgets the call at ${early.at}: a call is forgotten once answered`
   for (const point of points) {
     const at = steps.filter((step) => step.at === point).map((step) => step.operation).sort()
     if (at.length > 1) return `steps: ${at.join(" and ")} are both at ${point}: one step per point`

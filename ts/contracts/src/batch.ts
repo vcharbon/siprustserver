@@ -8,8 +8,9 @@
  *   one side-row directory of the batch; a lane's own wiring rides beside it.
  * - The lines: a run-spec path per line in; per line out one of `ready` (the
  *   process serves its lane), `cell` (one run-spec ended, in the `replay
- *   <run-spec>` exit vocabulary) and `end` (the batch's cleanup gate, once its
- *   input closed). A JSON object carrying one of their keys that does not
+ *   <run-spec>` exit vocabulary), `end` (the batch's cleanup gate, once its
+ *   input closed) and `inject` (a cell's run asks an inject, answered on
+ *   stdin by an `injected` or `refused` line). A JSON object carrying one of their keys that does not
  *   decode is malformed, never talk; a line that is none of them is the
  *   process's own talk.
  * - The contexts report: what the gate read of the SUT's call contexts.
@@ -90,16 +91,39 @@ export const EndLine = Schema.Struct({
 })
 export interface EndLine extends Schema.Schema.Type<typeof EndLine> {}
 
+/**
+ * An inject one cell's run asks of the harness (`PCAP2TEST_PIVOT_V3.md`
+ * §6.6): the cell's run-spec, the inject node and its action, and the target
+ * the node states, where it states one. What the node orders after it waits
+ * for the answer on stdin ({@link injectedLine}, {@link refusedLine}).
+ */
+export const InjectLine = Schema.Struct({
+  spec: Schema.String,
+  node: Schema.String,
+  action: Schema.String,
+  target: Schema.optional(Schema.String)
+})
+export interface InjectLine extends Schema.Schema.Type<typeof InjectLine> {}
+
 /** One line the process writes: exactly one of its keys is set. */
 export const Line = Schema.Struct({
   ready: Schema.optional(Schema.Unknown),
   cell: Schema.optional(CellLine),
-  end: Schema.optional(EndLine)
+  end: Schema.optional(EndLine),
+  inject: Schema.optional(InjectLine)
 })
 export interface Line extends Schema.Schema.Type<typeof Line> {}
 
+/** The stdin line answering `ask` done: what waits on its node proceeds. */
+export const injectedLine = (ask: Pick<InjectLine, "spec" | "node">): string =>
+  JSON.stringify({ injected: { spec: ask.spec, node: ask.node } })
+
+/** The stdin line refusing `ask` for `reason`: the cell's run fails at its node. */
+export const refusedLine = (ask: Pick<InjectLine, "spec" | "node">, reason: string): string =>
+  JSON.stringify({ refused: { spec: ask.spec, node: ask.node, reason } })
+
 /** The keys that make a JSON object a protocol line. */
-const KEYS = ["ready", "cell", "end"] as const
+const KEYS = ["ready", "cell", "end", "inject"] as const
 
 /**
  * How one line the process wrote reads: a protocol `line`; `malformed`, a JSON
@@ -129,7 +153,7 @@ export const readLine = (text: string): Read => {
   if (key === undefined) return { _tag: "talk" }
   const decoded = Schema.decodeUnknownResult(Line)(parsed)
   if (decoded._tag === "Success") return { _tag: "line", line: decoded.success }
-  const named = (parsed as { readonly cell?: { readonly spec?: unknown } }).cell?.spec
+  const named = (parsed as Partial<Record<(typeof KEYS)[number], { readonly spec?: unknown }>>)[key]?.spec
   return { _tag: "malformed", key, spec: typeof named === "string" ? named : undefined, why: String(decoded.failure) }
 }
 

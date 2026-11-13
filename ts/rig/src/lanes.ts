@@ -33,6 +33,8 @@ export interface Loaded {
   readonly parts: ReadonlyMap<string, Part.Part>
   /** Per name a case asks for, the operation bound to it. */
   readonly operations: ReadonlyMap<string, RigPath.Defined<Operation.Operation>>
+  /** Per bound name stating some, the parameters the lane runs its operation with over the manifest's, as a case's step. */
+  readonly operationParams?: ReadonlyMap<string, Readonly<Record<string, unknown>>>
   readonly capabilities: ReadonlySet<string>
 }
 
@@ -88,7 +90,11 @@ const idsOf = (dir: string) =>
 /** The bindings of `lane` resolved on `rig`, or why one does not hold. */
 const operationsOf = (rig: RigPath.RigPath, file: string, lane: Lane.LaneFile, parts: ReadonlyMap<string, Part.Part>) => {
   const bound = new Map<string, RigPath.Defined<Operation.Operation>>()
-  for (const [name, operation] of Object.entries(lane.operations ?? {})) {
+  const params = new Map<string, Readonly<Record<string, unknown>>>()
+  for (const [name, stated] of Object.entries(lane.operations ?? {})) {
+    const binding = Lane.bindingOf(stated)
+    const operation = binding.operation
+    if (binding.params !== undefined) params.set(name, binding.params)
     const defined = rig.operations.get(operation)
     if (defined === undefined) return Result.fail(refuse([file], `operations.${name}: names ${operation}, which no operation of the path defines`))
     const lacks = (defined.manifest.needs ?? []).filter((kind) => !parts.has(kind))
@@ -97,7 +103,7 @@ const operationsOf = (rig: RigPath.RigPath, file: string, lane: Lane.LaneFile, p
     }
     bound.set(name, defined)
   }
-  return Result.succeed(bound)
+  return Result.succeed({ bound, params })
 }
 
 /** Every lane of `root`, by `order`, then id; the first file at fault refuses them all. */
@@ -137,8 +143,9 @@ export const load = (rig: RigPath.RigPath, root: string): Effect.Effect<Readonly
         file,
         lane: lane.success,
         parts,
-        operations: operations.success,
-        capabilities: capabilitiesOf(lane.success, named, [...operations.success.keys()])
+        operations: operations.success.bound,
+        operationParams: operations.success.params,
+        capabilities: capabilitiesOf(lane.success, named, [...operations.success.bound.keys()])
       })
     }
     const orderOf = (lane: Loaded) => lane.lane.order ?? Number.MAX_SAFE_INTEGER

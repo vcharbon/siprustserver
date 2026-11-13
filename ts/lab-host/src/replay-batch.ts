@@ -22,15 +22,22 @@
  * interpreter run in its pack's wrapper. The ready line and the backend
  * summary of the end line (its `bl` key) are printed as `[batch]` lines.
  *
+ * An `inject` line a cell's run asks is performed by the injector that run
+ * was given, one ask at a time per cell, and answered on stdin by spec and
+ * node: `injected` once it did its work, `refused` with its words; a cell run
+ * with no injector has each inject refused ({@link NO_STEP}).
+ *
  * The simulated lane has no batch process: its cell builds its backend in-process.
  */
 import { Batch } from "@sip/contracts"
-import type { BatchHost, ContextsReport } from "@sip/corpus/replay/batch-protocol"
+import type { BatchHost, ContextsReport, InjectAsk, Injector } from "@sip/corpus/replay/batch-protocol"
 import type { LaneView } from "@sip/rig"
 import { ReplayCli } from "@sip/toolchain"
 import * as Effect from "effect/Effect"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import * as FileSystem from "effect/FileSystem"
+import * as Queue from "effect/Queue"
+import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as path from "node:path"
 import { boxVariables } from "./interpreter-env.js"
@@ -53,6 +60,9 @@ export const MISWIRED = "environment: lane wiring:"
 
 /** How often what the batch is awaited for is printed. */
 export const EVERY_MS = 30_000
+
+/** The refusal of an inject asked by a cell run with no injector. */
+export const NO_STEP = "the harness serves no operation step for this cell"
 
 /** How {@link attach} bounds the process, in milliseconds: its readiness, its end line, how often a wait is printed. */
 export interface AttachOptions {
@@ -215,6 +225,8 @@ const sayStdinError = (e: Error) => void process.stderr.write(`[replay batch] st
  */
 export const attach = (child: ChildProcessWithoutNullStreams, lane: string, options: AttachOptions) => {
   const pending = new Map<string, (report: ReplayCli.RunReport) => void>()
+  /** Per running cell given an injector, where its asks go. */
+  const injectors = new Map<string, (ask: InjectAsk) => void>()
   let exit: string | undefined
   let ended: ((dirty: string | undefined) => void) | undefined
   let endLine:
@@ -269,7 +281,7 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
   /** A protocol line that does not decode: the cell, the end or the readiness it names fails, never waits. */
   const malformed = (read: Extract<Batch.Read, { readonly _tag: "malformed" }>) => {
     const why = `the ${lane} batch process wrote a ${read.key} line that does not decode: ${read.why}`
-    if (read.key === "cell") {
+    if (read.key === "cell" || read.key === "inject") {
       const resume = read.spec === undefined ? undefined : pending.get(read.spec)
       if (resume === undefined) return lost(why)
       pending.delete(read.spec!)
@@ -312,8 +324,22 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
         gates: parsed.end.gates ?? []
       }
       ended?.(endLine.dirty)
+    } else if (parsed.inject !== undefined) {
+      const serve = injectors.get(parsed.inject.spec)
+      if (serve === undefined) answer(Batch.refusedLine(parsed.inject, NO_STEP))
+      else serve(parsed.inject)
     }
   }
+
+  /** `line` written on the process's stdin, where it still reads it. */
+  const answer = (line: string) => {
+    if (exit === undefined && child.stdin.writable) child.stdin.write(`${line}\n`)
+  }
+
+  /** `ask` performed by `injector` and answered: injected once it succeeded, refused with its words where it failed. */
+  const answered = (ask: InjectAsk, injector: Injector) =>
+    Effect.flatMap(Effect.result(injector(ask)), (done) =>
+      Effect.sync(() => answer(Result.isSuccess(done) ? Batch.injectedLine(ask) : Batch.refusedLine(ask, done.failure))))
 
   /** The process gone, on its `close` rather than its `exit`: its last lines are read before it counts as gone. */
   const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -362,7 +388,26 @@ export const attach = (child: ChildProcessWithoutNullStreams, lane: string, opti
   /** An interrupted run's cell `specPath`, no longer waited on: it runs on in the process, and the batch's end or kill settles it. */
   const unwaited = (specPath: string) => Effect.sync(() => void pending.delete(specPath))
 
-  const run = (specPath: string): Effect.Effect<ReplayCli.RunReport> =>
+  /**
+   * One cell given `injector`: its asks queued while it runs and served one at
+   * a time, the asks no longer taken once its cell line came or it was
+   * interrupted.
+   */
+  const injected = (specPath: string, injector: Injector): Effect.Effect<ReplayCli.RunReport> =>
+    Effect.scoped(Effect.gen(function*() {
+      const asks = yield* Queue.unbounded<InjectAsk>()
+      yield* Effect.acquireRelease(
+        Effect.sync(() => void injectors.set(specPath, (ask) => void Queue.offerUnsafe(asks, ask))),
+        () => Effect.sync(() => void injectors.delete(specPath))
+      )
+      yield* Effect.forkScoped(Effect.forever(Effect.flatMap(Queue.take(asks), (ask) => answered(ask, injector))))
+      return yield* cellRun(specPath)
+    }))
+
+  const run = (specPath: string, injector?: Injector): Effect.Effect<ReplayCli.RunReport> =>
+    injector === undefined ? cellRun(specPath) : injected(specPath, injector)
+
+  const cellRun = (specPath: string): Effect.Effect<ReplayCli.RunReport> =>
     Effect.callback<ReplayCli.RunReport>((resume) => {
       if (exit !== undefined) return resume(Effect.succeed(reportOf(3, `environment: ${exit}`)))
       if (miswired !== undefined) return resume(Effect.succeed(reportOf(3, miswired)))

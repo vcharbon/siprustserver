@@ -59,6 +59,10 @@ export interface Instance {
   readonly lane: Lanes.Loaded | undefined
   /** Its own directory: `state/` and `out/`, its context file, a log per step. */
   readonly dir: string
+  /** The cell it runs as a step of: its context's scope is then the cell's, the cell its one planned cell. */
+  readonly cell?: Context.Planned
+  /** The lane binding's parameters, over its manifest's. */
+  readonly params?: Readonly<Record<string, unknown>>
 }
 
 /** Why an `inject` did not do its work. */
@@ -95,11 +99,12 @@ const prepare = (instance: Instance, step: "inject" | "heal", start: { readonly 
       if (step === "heal" && fs.existsSync(layout.context)) return
       const context: Context.Context = {
         schema: Context.SCHEMA,
-        scope: "job",
+        scope: instance.cell === undefined ? "job" : "cell",
         window: { start },
         cells: [],
+        ...(instance.cell === undefined ? {} : { planned: [instance.cell] }),
         ...(instance.lane === undefined ? {} : { lane: Context.laneOf(instance.lane) }),
-        params: { ...instance.operation.manifest.params }
+        params: { ...instance.operation.manifest.params, ...instance.params }
       }
       fs.writeFileSync(layout.context, `${JSON.stringify(context, null, 2)}\n`)
     },
@@ -161,8 +166,8 @@ const probe = (instance: Instance, file: string, bounds: Operation.Bounds) =>
     }
   })
 
-/** One heal attempt of `instance`: `heal`, then its probe; why it failed, or `undefined`. */
-const attempt = (instance: Instance, sink: Sink) =>
+/** One heal attempt of `instance`: `heal`, then `settle`, then its probe; why it failed, or `undefined`. */
+const attempt = (instance: Instance, sink: Sink, settle: Effect.Effect<void, string>) =>
   Effect.gen(function*() {
     const manifest = instance.operation.manifest
     const bounds = Operation.boundsOf(manifest)
@@ -176,6 +181,11 @@ const attempt = (instance: Instance, sink: Sink) =>
     if (!Executable.succeeded(ended)) {
       yield* emit(sink, instance, "failed", `heal ${said}`)
       return `heal ${said}`
+    }
+    const settled = yield* Effect.result(settle)
+    if (Result.isFailure(settled)) {
+      yield* emit(sink, instance, "failed", `heal: ${settled.failure}`)
+      return `heal: ${settled.failure}`
     }
     yield* emit(sink, instance, "healed")
     const unproved = manifest.run.probe === undefined ? undefined : yield* probe(instance, manifest.run.probe, bounds)
@@ -194,13 +204,15 @@ const whyOf = (ended: Exit.Exit<string | undefined>): string | undefined =>
 /**
  * Heals `instance`, uninterruptibly: up to {@link HEAL_ATTEMPTS} attempts,
  * the last failed one followed by `lab-left-changed`. An attempt that dies is
- * a failed one. Whether it recovered.
+ * a failed one. `settle`, run in each attempt once `heal` succeeded and
+ * before the probe, restores what the lane's orchestrator owns (a step's
+ * system stood again); its failure fails the attempt. Whether it recovered.
  */
-export const heal = (instance: Instance, sink: Sink): Effect.Effect<boolean> =>
+export const heal = (instance: Instance, sink: Sink, settle: Effect.Effect<void, string> = Effect.void): Effect.Effect<boolean> =>
   Effect.uninterruptible(Effect.gen(function*() {
     let why: string | undefined
     for (let tried = 1; tried <= HEAL_ATTEMPTS; tried++) {
-      why = whyOf(yield* Effect.exit(attempt(instance, sink)))
+      why = whyOf(yield* Effect.exit(attempt(instance, sink, settle)))
       if (why === undefined) return true
     }
     yield* emit(sink, instance, LAB_LEFT_CHANGED, `${HEAL_ATTEMPTS} heal attempts failed, the last: ${why}`)

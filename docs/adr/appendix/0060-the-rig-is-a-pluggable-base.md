@@ -356,9 +356,19 @@ probe  = "./probe"             # optional
   `{"injected":{"spec","node"}}` or `{"refused":{"spec","node","reason"}}` on stdin. A refusal,
   stdin closing first, or no answer within 90 s fails the cell's run (`inject-refused`,
   `inject-timed-out`), and its close ends the call.
-- A lane file's `[operations]` table binds the name a case asks for to an operation of the path.
-  A lane where the name resolves to nothing, or that lacks a part the operation needs, cannot
-  run the case.
+- The base answers an inject by running the operation's `inject` with the cell's context
+  (`scope = "cell"`, the cell its one `planned`), `injected` once it exited 0, `refused` with its
+  words otherwise; a cell run with no step refuses every inject. Once the cell ended, each step
+  whose inject started heals, a failed inject's too; its events are the job's
+  (`campaign-runner` `cell-steps.ts`). A heal left changed is the batch's dirty end.
+- On a managed lane the base is the system's orchestrator: where a step's inject stopped the
+  system, the base stands it again before answering `injected`, and each heal attempt stands it
+  again where it is still down, between `heal` and `probe`. Its death is then no death of the
+  batch's system (`lab-host` `replay-sut.ts` `restand`).
+- A lane file's `[operations]` table binds the name a case asks for to an operation of the path:
+  `name = "<operation>"`, or `[operations.<name>]` with `operation` and `params`, the lane's
+  parameters over the manifest's when a case's step runs it. A lane where the name resolves to
+  nothing, or that lacks a part the operation needs, cannot run the case.
 - A heal attempt is `heal` and its `probe`. A failed attempt is run once more. A second failure
   marks the job *lab left changed*, which closes it failed however it ended. One operation's
   failed heal never stops the heals after it.
@@ -552,7 +562,9 @@ status RFC 3261 lets stand without a header beside it and a proxy relays as
 sent (never 503, relayed as 500, §16.7). The `final` checks land
 on the caller's final. The `tags` ride beside the document. A step injects its operation (§7)
 at `reached` (the INVITE reached the callee) or, in `basic_call`, `answered` (the callee
-received the ACK of its 200), one step per point. A key the form does not name, an address that is no
+received the ACK of its 200), one step per point. A step at `answered` may state `forgets: true`:
+the system loses the call to it, so each party ends its leg with a BYE the system answers 481
+(RFC 3261 §15.1.2), the hanging-up party first. A key the form does not name, an address that is no
 `sip:`/`sips:` URI naming a user, a title naming no cell, or a final status
 the shape does not end with is refused when the case is defined.
 

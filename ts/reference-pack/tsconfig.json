@@ -12,5 +12,5 @@
     "exactOptionalPropertyTypes": false,
     "resolveJsonModule": true
   },
-  "include": ["cases.ts", "judges", "collectors", "operations", "test", "vitest.config.ts"]
+  "include": ["cases.ts", "step-cases.ts","judges", "collectors", "operations", "test", "vitest.config.ts"]
 }

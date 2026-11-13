@@ -107,6 +107,19 @@ const Tags = Schema.Struct({
   exclude: Schema.optionalKey(Schema.Array(Text))
 })
 
+/**
+ * The operation of the path a name runs, with parameters of the lane's own
+ * over its manifest's for a case's step: `[operations.<name>]`.
+ */
+export const Binding = Schema.Struct({
+  operation: Name,
+  params: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown))
+})
+export interface Binding extends Schema.Schema.Type<typeof Binding> {}
+
+/** A binding as a lane file states it: the operation's name alone, or a {@link Binding}. */
+export const bindingOf = (bound: string | Binding): Binding => (typeof bound === "string" ? { operation: bound } : bound)
+
 const LaneShape = Schema.Struct({
   schema: Schema.Literal(SCHEMA),
   /** The lane in one line, for a reader of a result. */
@@ -125,8 +138,8 @@ const LaneShape = Schema.Struct({
   parts: Schema.optionalKey(Schema.Record(Name, Name)),
   tags: Schema.optionalKey(Tags),
   collectors: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
-  /** Per name a case asks for, the operation of the path it runs. */
-  operations: Schema.optionalKey(Schema.Record(Name, Name))
+  /** Per name a case asks for, the operation of the path it runs, its name or its {@link Binding}. */
+  operations: Schema.optionalKey(Schema.Record(Name, Schema.Union([Name, Binding])))
 })
 
 /** A lane file as read: its `[collectors]` table read by {@link Collection.laneCollectorsOf}. */

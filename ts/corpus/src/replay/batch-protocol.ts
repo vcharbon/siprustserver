@@ -44,10 +44,20 @@ export interface BatchRequest {
   readonly provisioned?: unknown
 }
 
+/** An inject one cell's run asks of the harness: its node, its action, the target the node states. */
+export type InjectAsk = Batch.InjectLine
+
+/**
+ * What performs the injects one cell's run asks: it succeeds once the inject
+ * did its work, and fails with the words of its refusal. It never outlasts the
+ * batch process's bound on an answer (90 s).
+ */
+export type Injector = (ask: InjectAsk) => Effect.Effect<void, string>
+
 /** A batch process, as the batch holds it. */
 export interface BatchHost {
-  /** Runs one cell's run-spec in the process. */
-  readonly run: (specPath: string) => Effect.Effect<ReplayCli.RunReport>
+  /** Runs one cell's run-spec in the process, the injects it asks performed by `injector`, refused where none is given. */
+  readonly run: (specPath: string, injector?: Injector) => Effect.Effect<ReplayCli.RunReport>
   /** How the process died, if it has; `undefined` while it lives. */
   readonly died: () => string | undefined
   /** Closes the process's input once every cell ended, and resolves on what the SUT still held (`undefined` clean). */
@@ -77,4 +87,10 @@ export interface SutHandle {
    * found.
    */
   readonly stop: Effect.Effect<void>
+  /**
+   * Stands a managed SUT whose process died again, as its orchestrator would,
+   * and leaves a running one as it is; `died` then answers for the one stood.
+   * Fails with why it could not. Absent where the harness stands no process.
+   */
+  readonly restand?: Effect.Effect<void, string>
 }

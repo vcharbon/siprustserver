@@ -37,6 +37,9 @@ runner-pid = "reference"
 sip-capture = "reference"
 cdr-file = "reference"
 
-# The operation a case asks for by the name `restart-worker`.
-[operations]
-restart-worker = "restart-worker"
+# The operation a case asks for by the name `restart-worker`: as a step of a
+# call it SIGKILLs the runner, so the call is lost with it rather than
+# drained (a SIGTERM drains the call, holding the stop until the call ends).
+[operations.restart-worker]
+operation = "restart-worker"
+params = { signal = "SIGKILL" }

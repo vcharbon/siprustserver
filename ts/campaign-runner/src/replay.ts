@@ -29,6 +29,10 @@
  * while one of them holds them (`schedule.ts`); the simulated lane's clock is
  * simulated, so none runs there and its batch says so of each one wired.
  *
+ * A hosted cell asking for operation steps runs them (`cell-steps.ts`): the
+ * injects its run asks are performed and healed once it ended, its events
+ * the job's; a step whose heals failed twice is the batch's dirty end.
+ *
  * Each attempt of the lane's cells (`run.ts`) is a batch of its own, under
  * its own directory, each cell's bundle its own (`attempts.ts`).
  */
@@ -41,9 +45,11 @@ import * as Clock from "effect/Clock"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
+import type { BatchHost, SutHandle } from "@sip/corpus/replay/batch-protocol"
 import { batchDirOf, batchHolderOf, batchNameOf, bundleNameOf } from "./attempts.js"
 import { inBatch, unjudgedOf } from "./batch.js"
 import { type Cell, type CellResult, type Lane, withCollected } from "./cell.js"
+import { leftChangedOf as stepsLeftChangedOf, stepsOf } from "./cell-steps.js"
 import { exec } from "./exec.js"
 import { judge, unjudgedAtEnd } from "./judge.js"
 import { catalogLane, endpointAddresses, pacingOf, refusalOf, timingToleranceOf } from "./lanes.js"
@@ -53,6 +59,7 @@ import * as Results from "@sip/store/campaign-results"
 import { type LaneOutcome, PhaseFailed } from "./run.js"
 import { type Alone, schedule } from "./schedule.js"
 import { aloneOn } from "./selection.js"
+import { sinkOf } from "./setup-phase.js"
 
 /** The memory box of one cell's replay process. */
 export const CELL_MEMORY_MAX = "1G"
@@ -313,10 +320,11 @@ export const judgeAll = <C extends Cell>(
 
 /**
  * What a batch left dirty: how its batch process died, what its end gate read
- * the SUT holding, each rig collector whose close left the lab changed.
+ * the SUT holding, each rig collector whose close left the lab changed, and
+ * `steps`, what its cells' operation steps left changed.
  */
-const dirtyOf = (batch: LaneBatch.Ended<unknown>): { readonly dirty?: string } => {
-  const end = [batch.deadHost, batch.dirty, LaneBatch.leftChangedOf(batch)].filter((x): x is string => x !== undefined).join("; ")
+const dirtyOf = (batch: LaneBatch.Ended<unknown>, steps?: string): { readonly dirty?: string } => {
+  const end = [batch.deadHost, batch.dirty, LaneBatch.leftChangedOf(batch), steps].filter((x): x is string => x !== undefined).join("; ")
   return end === "" ? {} : { dirty: end }
 }
 
@@ -350,14 +358,20 @@ const simulated = <C extends Cell, L extends LaneView.View, R>(
     return { results, ...dirtyOf(batch) } satisfies LaneOutcome<C>
   })
 
-/** The lane's cells replayed by one batch, its lane and the box held for the caller's scope. */
+/**
+ * The lane's cells replayed by one batch, its lane and the box held for the
+ * caller's scope; a cell asking for operation steps runs them
+ * (`cell-steps.ts`), the labels of those its heals left changed pushed on
+ * `left`.
+ */
 const replayed = <C extends Cell, L extends LaneView.View, R>(
   pack: Pick<CampaignPack<C>, "typer" | "claimsOf" | "verb">,
   hosting: LaneHosting<C, L, R>,
   lane: Lane,
   found: HostedOf<L>,
   placed: ReadonlyArray<Placed<C>>,
-  context: Context<C, L>
+  context: Context<C, L>,
+  left: Array<string>
 ) =>
   Effect.gen(function*() {
     const name = found.id
@@ -368,6 +382,16 @@ const replayed = <C extends Cell, L extends LaneView.View, R>(
     )
     const pacing = pacingOf(found)
     const sutVariables = hosting.sutVariables(found)
+    const events = yield* JobEvents.Service
+    const sink = sinkOf(context.job === undefined ? undefined : { id: context.job, events }, "step")
+    const operations = path.join(batchDirOf(context.root, lane, context.attempt), "operations")
+    const ranOf = (p: Placed<C>, host: BatchHost, sut: SutHandle | undefined) => {
+      if ((p.cell.operations ?? []).length === 0) return timed(host.run(p.spec))
+      const steps = stepsOf(found.loaded, plannedOf(p.cell, found.id, pack.claimsOf(p.cell)), operations, sink, sut)
+      return timed(host.run(p.spec, steps.injector)).pipe(
+        Effect.ensuring(Effect.flatMap(steps.healed, (labels) => Effect.sync(() => void left.push(...labels))))
+      )
+    }
     const batch = yield* inBatch(context, placed.map((p) => p.cell), {
       lane: name,
       stand: {
@@ -386,7 +410,7 @@ const replayed = <C extends Cell, L extends LaneView.View, R>(
         (reports: ReadonlyArray<{ readonly value: HostReport }>): ReadonlyArray<Exited> =>
           reports.map(({ value: report }) => ({ code: report.exitCode, summary: `${report.stdout}\n${report.stderr}` }))
       )),
-      drive: ({ host, cells }) =>
+      drive: ({ host, sut, cells }) =>
         host === undefined
           ? Effect.fail(failed(lane, `${name} has no batch process`))
           : Effect.map(
@@ -394,7 +418,7 @@ const replayed = <C extends Cell, L extends LaneView.View, R>(
               placed,
               pacing,
               (p) =>
-                cells.around(p.cell.id, timed(host.run(p.spec)), ({ value: report }) =>
+                cells.around(p.cell.id, ranOf(p, host, sut), ({ value: report }) =>
                   describedAlone(pack, lane, found, p, context.attempt, {
                     code: report.exitCode,
                     summary: `${report.stdout}\n${report.stderr}`
@@ -423,11 +447,14 @@ const hosted = <C extends Cell, L extends LaneView.View, R>(
   placed: ReadonlyArray<Placed<C>>,
   context: Context<C, L>
 ) =>
-  Effect.flatMap(Effect.scoped(replayed(pack, hosting, lane, found, placed, context)), (batch) =>
-    Effect.map(
-      judgeAll(pack, hosting, lane, placed, batch, context),
-      (results) => ({ results, ...dirtyOf(batch) } satisfies LaneOutcome<C>)
-    ))
+  Effect.suspend(() => {
+    const left: Array<string> = []
+    return Effect.flatMap(Effect.scoped(replayed(pack, hosting, lane, found, placed, context, left)), (batch) =>
+      Effect.map(
+        judgeAll(pack, hosting, lane, placed, batch, context),
+        (results) => ({ results, ...dirtyOf(batch, stepsLeftChangedOf(left)) } satisfies LaneOutcome<C>)
+      ))
+  })
 
 /** Replay `cells` on `lane` under the pack's lane hosting. */
 export const replayLane = <C extends Cell, L extends LaneView.View, R>(

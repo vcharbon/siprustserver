@@ -13,7 +13,9 @@
  *
  * The caller's final carries the case's final checks. An operation step is
  * injected at its point: `reached` after the callee's INVITE, `answered` after
- * the callee's ACK of its 200; the next message sent waits for it.
+ * the callee's ACK of its 200; the next message sent waits for it. A step
+ * that forgets the call ends it on 481s: the hanging-up party's BYE answered
+ * 481, then the other party's own BYE answered 481 (RFC 3261 §15.1.2).
  */
 import type { Check, Msg } from "@sip/contracts"
 import { OperationStep } from "@sip/rig"
@@ -36,6 +38,9 @@ const HOLD_MS = 200
 
 /** How long the callee takes to answer an INVITE it received, in ms. */
 const ANSWER_DELAY_MS = 20
+
+/** The reason phrase of a 481 (RFC 3261 §21.4.19). */
+const GONE = "Call/Transaction Does Not Exist"
 
 /** The operation step `c` states at `point`, injected once the step `reached` completed. */
 const stepAt = (flow: CallFlow, c: BasicCase, point: Point, reached: string): void => {
@@ -84,9 +89,20 @@ const basicCall = (flow: CallFlow, c: BasicCall): void => {
   stepAt(flow, c, "answered", acked)
   const [ender, other] = (c.params?.ends ?? "caller") === "caller" ? ["A", "B"] : ["B", "A"]
   const bye = flow.send(ender, { method: "BYE" }, { from: acked, ms: HOLD_MS })
+  if ((c.steps ?? []).some((step) => step.at === "answered" && step.forgets === true)) return forgotten(flow, ender, other, bye)
   const byeIn = flow.expect(other, { method: "BYE" }, { from: bye })
   const byeOk = flow.send(other, { status: 200, reason: "OK", "cseq-method": "BYE" }, { from: byeIn })
   flow.expect(ender, { status: 200, reason: "OK", "cseq-method": "BYE" }, { from: byeOk })
+}
+
+/**
+ * The end of a call the system forgot: the `ender`'s BYE (step `bye`) is
+ * answered 481, then the `other` party ends its own leg the same way.
+ */
+const forgotten = (flow: CallFlow, ender: string, other: string, bye: string): void => {
+  const gone = flow.expect(ender, { status: 481, reason: GONE, "cseq-method": "BYE" }, { from: bye })
+  const otherBye = flow.send(other, { method: "BYE" }, { from: gone })
+  flow.expect(other, { status: 481, reason: GONE, "cseq-method": "BYE" }, { from: otherBye })
 }
 
 const inviteReject = (flow: CallFlow, c: InviteReject): void => {

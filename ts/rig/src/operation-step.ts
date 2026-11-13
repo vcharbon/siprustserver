@@ -25,7 +25,7 @@ const NAME = /^[a-z0-9][a-z0-9-]*$/
 export const actionOf = (name: string): string => `${OPERATION_PREFIX}${name}`
 
 /** The operation `action` asks for, or `undefined` where it asks for none. */
-const operationOf = (action: string): string | undefined => {
+export const operationOf = (action: string): string | undefined => {
   if (!action.startsWith(OPERATION_PREFIX)) return undefined
   const name = action.slice(OPERATION_PREFIX.length)
   return NAME.test(name) ? name : undefined
