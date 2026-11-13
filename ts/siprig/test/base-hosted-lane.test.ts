@@ -2,26 +2,30 @@
  * The base's hosted lane is refused before it is driven where the base
  * cannot host it: a lane serving a backend its B2BUA runner never asks, a
  * lane naming no `b2bua-runner` part, a part lacking an address the base
- * stands the runner with, a `sip-capture` or `cdr-file` part lacking its file
- * or named by a standing lane, whose runner the base does not start. A lane
- * stating all of it is hosted, its runner standalone at the lane's ingress,
- * capturing to the `sip-capture` part's file and writing its call records to
- * the `cdr-file` part's where the lane names them, its pid in the runner
- * part's pid file where the part names one.
+ * stands the runner with, a `runner-log`, `runner-pid`, `sip-capture` or
+ * `cdr-file` part lacking its file or named by a standing lane, whose runner
+ * the base does not start. A lane stating all of it is hosted, its runner
+ * standalone at the lane's ingress, capturing to the `sip-capture` part's
+ * file and writing its call records to the `cdr-file` part's where the lane
+ * names them.
  */
 import type { LaneView } from "@sip/rig"
 import { describe, expect, it } from "vitest"
-import { CAPTURE_PART, CDR_PART, hostedRefusalOf, RUNNER_PART, runnerEnvOf, sutPackOf } from "../src/base-hosted-lane.ts"
+import { CAPTURE_PART, CDR_PART, hostedRefusalOf, LOG_PART, PID_PART, RUNNER_PART, runnerEnvOf } from "../src/base-hosted-lane.ts"
 
 const PART = { metrics: "127.0.0.1:9161", admin: "127.0.0.1:9162" }
 const CAPTURE = { file: "/var/tmp/reference.pcapng" }
 const CDR = { file: "/var/tmp/reference.cdr.jsonl" }
+const LOG = { file: "/var/tmp/reference.log" }
+const PID = { file: "/var/tmp/reference.pid" }
 
-/** What a lane names beside its backend mode: its runner part, its capture and record parts, its lifecycle. */
+/** What a lane names beside its backend mode: its runner part, its capture, record, log and pid parts, its lifecycle. */
 interface Named {
   readonly part?: Record<string, unknown>
   readonly capture?: Record<string, unknown>
   readonly cdr?: Record<string, unknown>
+  readonly log?: Record<string, unknown>
+  readonly pid?: Record<string, unknown>
   readonly lifecycle?: "managed" | "standing"
 }
 
@@ -36,6 +40,12 @@ const laneOf = (mode: string, named: Named = {}): LaneView.Hosted => {
   }
   if (named.cdr !== undefined) {
     parts.push([CDR_PART, { kind: CDR_PART, name: "lab", file: "targets/cdr-file/lab.toml", value: named.cdr }])
+  }
+  if (named.log !== undefined) {
+    parts.push([LOG_PART, { kind: LOG_PART, name: "lab", file: "targets/runner-log/lab.toml", value: named.log }])
+  }
+  if (named.pid !== undefined) {
+    parts.push([PID_PART, { kind: PID_PART, name: "lab", file: "targets/runner-pid/lab.toml", value: named.pid }])
   }
   return {
     kind: "hosted",
@@ -87,11 +97,15 @@ describe("the base's hosted lane", () => {
     expect(runnerEnvOf(lane, PART)["B2BUA_CDR_FILE"]).toBe(CDR.file)
   })
 
-  it("names the runner it stands in the pid file the lane's runner part states, and in none where it states none", () => {
-    const pid = "/var/tmp/reference.pid"
-    const pack = sutPackOf("/usr/local/bin/b2bua-runner")
-    expect(pack.pidFileOf?.(laneOf("none", { part: { ...PART, pid } }))).toBe(pid)
-    expect(pack.pidFileOf?.(laneOf("none", { part: PART }))).toBeUndefined()
+  it("is refused where its runner-log or runner-pid part names no file, or where the lane is standing", () => {
+    expect(hostedRefusalOf(laneOf("none", { part: PART, log: {} }))).toMatch(/targets\/runner-log\/lab\.toml: .*file/s)
+    expect(hostedRefusalOf(laneOf("none", { part: PART, pid: {} }))).toMatch(/targets\/runner-pid\/lab\.toml: .*file/s)
+    expect(hostedRefusalOf(laneOf("none", { part: PART, log: LOG, lifecycle: "standing" }))).toContain(
+      `the base sets the log file only of a runner it stands: a standing lane names no ${LOG_PART} part`
+    )
+    expect(hostedRefusalOf(laneOf("none", { part: PART, pid: PID, lifecycle: "standing" }))).toContain(
+      `the base names the pid only of a runner it stands: a standing lane names no ${PID_PART} part`
+    )
   })
 
   it("is refused where its cdr-file part names no file, or where the lane is standing", () => {

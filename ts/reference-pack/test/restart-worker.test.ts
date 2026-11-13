@@ -97,6 +97,19 @@ describe.skipIf(skipping)("restart-worker on the reference lane", () => {
     expect(fs.existsSync(found.pid), "no runner named once the job's stopped").toBe(false)
   })
 
+  it("refuses at load a lane binding it whose runner names its pid in no file", async () => {
+    const dir = path.join(work, "unnamed")
+    await hostedWorkspace(PACK, dir, writtenUnder(dir, "b2bua-runner"))
+    const lane = path.join(dir, "lanes", "reference.toml")
+    fs.writeFileSync(lane, fs.readFileSync(lane, "utf8").replace(/^runner-pid = .*$/m, ""))
+    const loaded = await Effect.runPromise(
+      Effect.result(LaneCatalog.load(readingOf(PACK), LaneCatalog.dirsUnder(dir))).pipe(Effect.provide(NodeServices.layer))
+    )
+    expect(Result.isFailure(loaded) ? JSON.stringify(loaded.failure) : "loaded").toContain(
+      "operations.restart-worker: restart-worker needs the part runner-pid, which the lane names none of"
+    )
+  })
+
   it("refuses to signal a process its pid file names where no runner answers at the lane's admin address", async () => {
     const found = await referenceLane("stranger")
     const stranger = spawn("sleep", ["30"], { stdio: "ignore" })
