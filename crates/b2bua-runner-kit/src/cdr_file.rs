@@ -73,7 +73,23 @@ pub fn file_cdr_writer_from_lookup(
 
 #[async_trait]
 impl CdrWriter for FileCdrWriter {
-    async fn write(&self, _call: &Call, _terminated_at: i64) {}
+    async fn write(&self, call: &Call, terminated_at: i64) {
+        let line = self.encoder.encode(call, terminated_at).map(|mut bytes| {
+            bytes.push(b'\n');
+            bytes
+        });
+        let written = match line {
+            Ok(bytes) => (&self.file).write_all(&bytes).map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        match written {
+            Ok(()) => self.metrics.bump_cdr_written(),
+            Err(refused) => {
+                self.metrics.bump_cdr_dropped();
+                tracing::debug!(%refused, file = %self.path.display(), "CDR record dropped");
+            }
+        }
+    }
 
     /// None: the records live in the file, not in process memory.
     async fn read_all(&self) -> Vec<CdrRecord> {

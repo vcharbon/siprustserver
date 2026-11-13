@@ -20,7 +20,8 @@
 //!   to [`RunnerBase::deps`]: the JSON-lines file `B2BUA_CDR_FILE` names
 //!   ([`FileCdrWriter`]), else the RabbitMQ sink the `B2BUA_CDR_RABBITMQ_*`
 //!   grammar selects ([`RunnerBase::rabbitmq_cdr_sink_from_env`];
-//!   `_with_encoder` publishes a runner-chosen [`CdrEncoder`] format);
+//!   `_with_encoder` publishes a runner-chosen
+//!   [`CdrEncoder`](b2bua::cdr::CdrEncoder) format);
 //! - [`RunnerBase::replication_setup_from_env`] — the peer-to-peer
 //!   replication the `B2BUA_REPL*` grammar selects ([`ReplicationSettings`]:
 //!   static or EndpointSlice membership, per-attempt peer addressing), assigned
@@ -62,8 +63,9 @@
 //! the runner's choice to take: a runner may assign any other `ReplicationSetup`
 //! to `deps.replication`. The CDR sink is the runner's choice too: the kit ships
 //! the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env grammar), the
-//! file sink and the discarding default; a runner may give the RabbitMQ sink its own
-//! [`CdrEncoder`] or pass any other [`CdrWriter`] to [`RunnerBase::deps`].
+//! file sink and the discarding default; a runner may give the RabbitMQ sink
+//! its own [`CdrEncoder`](b2bua::cdr::CdrEncoder) or pass any other
+//! [`CdrWriter`] to [`RunnerBase::deps`].
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(
@@ -89,7 +91,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::admission::Refusals;
-use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrWriter};
+use b2bua::cdr::{BufferedCdrWriter, CdrWriter};
 use b2bua::config::{B2buaConfig, Front};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};

@@ -13,8 +13,9 @@
 //!            It attaches an always-on `B2BUA_STRESS_LIMITER` entry to every call
 //!            (full-chain stress) and honors an inbound `X-Api-Call` `call_limiter`
 //!            array so a dedicated stream can enforce a real cap.
-//!   - CDR  : RabbitMQ sink when `B2BUA_CDR_RABBITMQ_URL` is set, else the
-//!            kit's discarding `NullCdrWriter` — either way behind the bounded
+//!   - CDR  : the JSON-lines file `B2BUA_CDR_FILE` names, else the RabbitMQ
+//!            sink when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
+//!            discarding `NullCdrWriter` — any of them behind the bounded
 //!            `BufferedCdrWriter` (drop-on-overload).
 //!   - HA   : opt-in peer-to-peer replication with static or kube
 //!            EndpointSlice membership.
@@ -53,6 +54,8 @@
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024; 0 = unbuffered, refused beside a RabbitMQ URL)
 //!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _DECLARE / _MAX_LEN / _WINDOW / _*_TIMEOUT_MS / _BACKOFF*_MS
 //!                   the RabbitMQ CDR sink (see `b2bua_runner_kit::RabbitMqCdrSettings`)
+//!   B2BUA_CDR_FILE  the file each call's record is appended to, a JSON line each
+//!                   (default none; refused beside B2BUA_CDR_RABBITMQ_URL)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
 //!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
 //!   B2BUA_NEW_CALL_PERMIT_SHARE_PCT share of B2BUA_CONCURRENCY normal initial-INVITE turns may hold (default 50; 1..=100; emergency INVITEs draw the whole pool)
@@ -205,9 +208,10 @@ async fn run() -> Result<std::process::ExitCode, String> {
     // brake installed) → the worker's addresses → validated config + metrics/clock.
     let base = RunnerEnv::from_env()?.bind("b2bua-runner").await?;
 
-    // CDR sink: RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
-    // discarding default, either way behind the kit's bounded buffer.
-    let cdr_sink = base.rabbitmq_cdr_sink_from_env()?;
+    // CDR sink: the file `B2BUA_CDR_FILE` names, else RabbitMQ when
+    // `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's discarding default, any
+    // of them behind the kit's bounded buffer.
+    let cdr_sink = base.cdr_sink_from_env()?;
 
     let mut deps = base
         .deps(
