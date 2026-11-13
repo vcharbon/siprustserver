@@ -267,8 +267,8 @@ async fn a_chunked_body_past_the_cap_fails_as_it_streams() {
 }
 
 /// A response is a whole one: a body the peer closes before its declared end,
-/// a length not reached or a chunked body with no last chunk, fails as `Eof`,
-/// a cause the retry rule sends once more.
+/// a length not reached or a chunked body with no last chunk, fails as `Eof`
+/// at the close, not at the client's ceiling.
 #[tokio::test]
 async fn a_body_cut_before_its_declared_end_fails_as_eof() {
     let cut = [
@@ -279,10 +279,15 @@ async fn a_body_cut_before_its_declared_end_fails_as_eof() {
         let dst = raw_peer(head, sent, 1, Then::Close).await;
         let net = RealHttpNetwork::new();
 
-        let err = net.request(dst, HttpRequest::get("/")).await.expect_err(head);
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            net.request(dst, HttpRequest::get("/")),
+        )
+        .await
+        .expect("failed at the close, not at the ceiling")
+        .expect_err(head);
 
         assert_eq!(err.cause, FailureCause::Eof, "{head}: {err:?}");
-        assert!(err.cause.is_retryable(), "{head}");
         assert_eq!(failures::get(&dst.to_string(), FailureCause::Eof), 1, "{head}");
     }
 }

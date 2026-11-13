@@ -155,7 +155,7 @@ burst of a few lost requests should not open it.
   panicking probe, the boot lookup), `tests/it/classify.rs` (the loopback
   classifier, a hanging lookup on the real client), `tests/it/real.rs` (a
   body cut before its end, the size cap), `tests/it/real_backend.rs`
-  (the retry's room and a moved name, on the real clock),
+  (the retry's room, a cut answer retried and a moved name, on the real clock),
   `resolved_target/tests.rs` (stuck lookups, serve stale); `b2bua-harness`
   `unanswered_failure_consult`, `decision_deadline`, `refer_consult_error`,
   `service_http` (the adaptation port's retry),
