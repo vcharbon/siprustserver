@@ -77,10 +77,11 @@ afterAll(async () => {
 /**
  * The reference campaign run once on `lane` as the job it creates, its lanes
  * the workspace's where one is named, the operations `setup` names as its
- * setup: its exit code, the run the store holds of it, its job's events and
- * its directory.
+ * setup, its cases those of `sources` where named, else the pack's: its exit
+ * code, the run the store holds of it, its job's events, its directory and
+ * its job.
  */
-const reference = (lane: string, workspace?: string, setup: ReadonlyArray<string> = []) =>
+const reference = (lane: string, workspace?: string, setup: ReadonlyArray<string> = [], sources?: ReadonlyArray<string>) =>
   Effect.gen(function*() {
     const manifest = yield* manifestOf(PACK)
     const services = layerOf(layerFromUrl(urlFor(SCRATCH)), path.join(work, "sessions"), {
@@ -105,11 +106,12 @@ const reference = (lane: string, workspace?: string, setup: ReadonlyArray<string
         runner: RUNNER,
         pivotSchema: PIVOT_SCHEMA,
         collection: undefined,
-        setup
+        setup,
+        sources
       })
       const runs = yield* (yield* CampaignRuns.Service).read("reference", { limit: 1 })
       const events = yield* (yield* JobEvents.Service).ofJob(job)
-      return { code, run: runs[0], events, out }
+      return { code, run: runs[0], events, out, job }
     }).pipe(Effect.provide(services))
   }).pipe(Effect.provide(NodeServices.layer))
 
@@ -146,6 +148,18 @@ const callIdsIn = (capture: Uint8Array): ReadonlyArray<string> => [
 const linesOf = (file: string): ReadonlyArray<Record<string, unknown>> =>
   fs.readFileSync(file, "utf8").split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Record<string, unknown>)
 
+/**
+ * The directory job `job`'s one batch attaches in, under the job's own in the
+ * session tree, and the lines of its `attachments.jsonl`.
+ */
+const batchAttachmentsOf = (job: number): { readonly dir: string; readonly lines: ReadonlyArray<Record<string, unknown>> } => {
+  const batches = path.join(work, "sessions", "_jobs", String(job), "batches")
+  const listed = (fs.readdirSync(batches, { recursive: true }) as Array<string>).filter((file) => path.basename(file) === "attachments.jsonl")
+  expect(listed, "one batch").toHaveLength(1)
+  const dir = path.join(batches, path.dirname(listed[0]!))
+  return { dir, lines: linesOf(path.join(dir, "attachments.jsonl")) }
+}
+
 /** What an earlier job left in the runner's log, capture and record files: a Call-ID no cell holds. */
 const STALE = "stale-call@192.0.2.1"
 
@@ -168,6 +182,31 @@ const expectJudged = (bundle: string, attachments: ReadonlyArray<Record<string, 
   const compared = JSON.parse(fs.readFileSync(path.join(bundle, String(diff!["file"])), "utf8")) as { rows: unknown; same: number }
   expect(compared.rows, "every claimed field as the record holds it").toEqual([])
   expect(compared.same).toBeGreaterThan(1)
+}
+
+/**
+ * The `calls-ended` collector's attachments to the cell of `bundle`, listed
+ * in `attachments`: the runner's live calls as it read them, none of them the
+ * cell's (`json`), and where it read them (`link`).
+ */
+const expectEnded = (bundle: string, attachments: ReadonlyArray<Record<string, unknown>>) => {
+  const reading = attachments.filter((line) => line["source"] === "calls-ended")
+  expect(reading.map((line) => [line["name"], line["kind"]])).toEqual([["calls-ended", "json"], ["calls-ended-calls", "link"]])
+  const read = JSON.parse(fs.readFileSync(path.join(bundle, String(reading[0]!["file"])), "utf8")) as { held: unknown }
+  expect(read.held, "none of the cell's calls is live").toEqual([])
+  const where = new URL(String(reading[1]!["file"]))
+  expect([where.protocol, where.hostname, where.pathname], "where the calls were read").toEqual(["http:", "127.0.0.1", "/admin/calls"])
+}
+
+/** A case source under `dir` holding the pack's cases in the reverse order. */
+const reversedSource = (dir: string): string => {
+  fs.mkdirSync(dir, { recursive: true })
+  const source = path.join(dir, "reversed.ts")
+  fs.writeFileSync(
+    source,
+    `import cases from ${JSON.stringify(path.join(PACK, "cases.ts"))}\nexport default [...cases].reverse()\n`
+  )
+  return source
 }
 
 describe.skipIf(!served || skipping)("the reference campaign", () => {
@@ -221,7 +260,7 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
     fs.writeFileSync(written.capture, STALE)
     fs.writeFileSync(written.cdr, `${JSON.stringify({ a_leg: { call_id: STALE } })}\n`)
     const workspace = await hostedWorkspace(PACK, path.join(work, "workspace"), written)
-    const { code, run } = await Effect.runPromise(reference("reference", workspace))
+    const { code, run, job } = await Effect.runPromise(reference("reference", workspace))
     expect(code).toBe(0)
     expect(run?.lanes.map((lane) => [lane.lane, lane.status])).toEqual([["reference", "done"]])
     const results = run!.lanes[0]!.results
@@ -254,15 +293,38 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
       expect(attached.map((line) => [line["kind"], line["source"]])).toEqual([["log", "sut-log"]])
       expect(fs.readFileSync(path.join(bundle, String(attached[0]!["file"])), "utf8"), "cut to the call's window, the runner's start before it").not.toContain("listening UDP")
       expect(attachments.filter((line) => line["source"] === "capture"), "no cell failed: the capture is not cut").toEqual([])
-      const reading = attachments.filter((line) => line["source"] === "calls-ended")
-      expect(reading.map((line) => [line["name"], line["kind"]])).toEqual([["calls-ended", "json"], ["calls-ended-metrics", "link"]])
-      expect(JSON.parse(fs.readFileSync(path.join(bundle, String(reading[0]!["file"])), "utf8"))).toEqual({ b2bua_active_calls: 0 })
-      expect(String(reading[1]!["file"]), "where the gauge was read").toMatch(/^http:\/\/127\.0\.0\.1:\d+\/metrics$/)
+      expectEnded(bundle, attachments)
       const legs = await legCallIdsOf(bundle, result.caseId)
       expect(legs, "the caller's Call-ID and the runner's b-leg one").toHaveLength(2)
       expect(captured, "the runner captured both legs of the call").toEqual(expect.arrayContaining([...legs]))
     }
     expect(fs.readFileSync(written.log, "utf8"), "what earlier batches left in the runner's log is gone").not.toContain(STALE)
+    const batch = batchAttachmentsOf(job)
+    const logged = batch.lines.filter((line) => line["source"] === "sut-log")
+    expect(logged.map((line) => line["kind"])).toEqual(["log"])
+    const bracketed = fs.readFileSync(path.join(batch.dir, String(logged[0]!["file"])), "utf8")
+    expect(bracketed, "the line the runner wrote at the batch's first call").toContain("readiness transition")
+    expect(bracketed, "nothing written before the batch's collectors opened").not.toContain(STALE)
+  })
+
+  it("passes both cases in the reverse order on the reference lane, calls-ended reading each cell's own calls ended", async () => {
+    const written = writtenUnder(path.join(work, "reversed"), "b2bua-runner")
+    const workspace = await hostedWorkspace(PACK, path.join(work, "reversed-workspace"), written)
+    const { code, run } = await Effect.runPromise(
+      reference("reference", workspace, [], [reversedSource(path.join(work, "reversed-cases"))])
+    )
+    expect(code).toBe(0)
+    const results = run!.lanes[0]!.results
+    expect(results.map((result) => [CampaignResults.caseNameOf(result.caseId).ref, result.passed])).toEqual([
+      ["bob is busy", true],
+      ["alice calls bob", true]
+    ])
+    for (const result of results) {
+      const answered = result.verifications.filter((line) => line.name === "calls-ended")
+      expect(answered.map((line) => [line.source, line.answer])).toEqual([["calls-ended", "pass"]])
+      const bundle = path.join(run!.lanes[0]!.bundlePath, result.cell!)
+      expectEnded(bundle, linesOf(path.join(bundle, "attachments.jsonl")))
+    }
   })
 
   it("cuts the runner's capture for the failed cell alone, its calls' packets a pcapng of their own", async () => {
