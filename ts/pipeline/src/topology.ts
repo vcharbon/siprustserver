@@ -276,9 +276,15 @@ export const build = (
     })
   })
 
+  const caller = callerIdentity(flows, plan, index.forms, raw)
+  const called = ordered.map((br) =>
+    br.map((i) => calledIdentity(flows, plan, index.forms, raw[i]!))
+  )
+  const calledOf = new Map(ordered.flatMap((br, b) => br.map((i, s) => [i, called[b]![s]!] as const)))
+
   const actors: Array<LayoutActor> = []
   const legs: Array<Placement.Leg> = []
-  for (const a of raw) {
+  for (const [i, a] of raw.entries()) {
     if (a.kind === "uac") {
       actors.push({ id: a.actorId, type: "uac", endpoint: a.endpointId })
     } else if (a.joinedBy) {
@@ -293,7 +299,7 @@ export const build = (
         id: a.actorId,
         type: "uas",
         endpoint: a.endpointId,
-        claim: { by: "ruri-pos", pos: a.pos }
+        claim: calleeClaim(a, calledOf.get(i))
       })
     }
     const media = legHasBody(flows, a) ? { rtp: "book" } : undefined
@@ -304,11 +310,6 @@ export const build = (
       ...(media ? { media } : {})
     })
   }
-
-  const caller = callerIdentity(flows, plan, index.forms, raw)
-  const called = ordered.map((br) =>
-    br.map((i) => calledIdentity(flows, plan, index.forms, raw[i]!))
-  )
 
   const posByKey = new Map<string, string>()
   const uac = raw.find((a) => a.kind === "uac")
@@ -518,6 +519,20 @@ const callerIdentity = (
     ...(forms.length > 0 ? { forms } : {})
   }
 }
+
+/** A URI user-part written as a number: digits, after an optional `+`. */
+const NUMBER_USER = /^\+?[0-9]/
+
+/**
+ * How a hunted callee is claimed: by R-URI position where its INVITE names a
+ * number (one the plan classifies, or digits a lane's routing binds); by
+ * arrival order where the plan classifies none and its R-URI user is no number
+ * (a name, or no user part), since a `ruri-pos` claim matches a number.
+ */
+const calleeClaim = (a: ActorObs, identity: PartyIdentity | undefined): LayoutActor["claim"] =>
+  identity?.kind === "unknown" && !NUMBER_USER.test(identity.observed)
+    ? { by: "arrival-order" }
+    : { by: "ruri-pos", pos: a.pos }
 
 const calledIdentity = (
   flows: Flows.FlowsDoc,
