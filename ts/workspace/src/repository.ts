@@ -6,8 +6,9 @@
  *
  * The files a run reads are those under the tooling's read paths
  * ({@link readPathsOf}: the configuration file, `campaigns/`, the lanes as
- * files, `lanes/` and `targets/`, and the tooling's own), `node_modules/` and
- * dot-entries left out. The content hash is the sha-256 of one line per such file,
+ * files, `lanes/` and `targets/`, the rig path's plug-in directories, and the
+ * tooling's own), `node_modules/`, `__pycache__/` and dot-entries left out.
+ * The content hash is the sha-256 of one line per such file,
  * sorted by path, `<path under the workspace root> <sha-256 of its bytes>`:
  * two runs that read the same files state the same hash, whatever commit,
  * and nothing else of the workspace (its runs, its store) moves it.
@@ -19,6 +20,7 @@
  * alone) is recorded with no commit and no dirty state, its content hash
  * still taken, and the run says why ({@link NOT_VISIBLE}).
  */
+import { RigPath } from "@sip/rig"
 import type { Model } from "@sip/store"
 import { runner } from "@sip/toolchain/spawn"
 import * as Console from "effect/Console"
@@ -33,17 +35,23 @@ import * as Layout from "./layout.js"
 /** The component name a run records the workspace's repository under. */
 export const WORKSPACE_COMPONENT = "workspace"
 
-/** The paths under the workspace root whose files a run reads: the configuration file, `campaigns/`, `own` (the tooling's), the lanes as files. */
+/**
+ * The paths under the workspace root whose files a run reads: the configuration
+ * file, `campaigns/`, `own` (the tooling's), the lanes as files, and the
+ * workspace's plug-ins on the rig path (`collectors/`, `judges/`, `operations/`,
+ * `parts/`).
+ */
 export const readPathsOf = (configFile: string, own: ReadonlyArray<string>): ReadonlyArray<string> => [
   configFile,
   Layout.DIRECTORIES.campaigns,
   ...own,
   Layout.DIRECTORIES.lanes,
-  Layout.DIRECTORIES.targets
+  Layout.DIRECTORIES.targets,
+  ...Object.values(RigPath.DIRS)
 ]
 
-/** Whether a path's part is never read: a dependency tree or a dot-entry. */
-const skippedPart = (part: string): boolean => part === "node_modules" || part.startsWith(".")
+/** Whether a path's part is never read: a dependency tree, a Python bytecode cache, or a dot-entry. */
+const skippedPart = (part: string): boolean => part === "node_modules" || part === "__pycache__" || part.startsWith(".")
 
 const skipped = (relative: string): boolean => relative.split(path.sep).some(skippedPart)
 
