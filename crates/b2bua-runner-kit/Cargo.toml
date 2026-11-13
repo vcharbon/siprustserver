@@ -80,3 +80,5 @@ amq-protocol = { version = "10.6.3", default-features = false }
 # The black-holed broker of the IO-thread test: a listener whose zero backlog is
 # full, so the kernel drops every further SYN.
 socket2 = { workspace = true }
+# The file CDR sink's warn-once test reads its log through a subscriber of its own.
+tracing-subscriber = { workspace = true }

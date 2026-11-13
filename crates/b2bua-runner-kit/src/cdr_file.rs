@@ -201,6 +201,81 @@ mod tests {
         );
     }
 
+    /// A zero `B2BUA_CDR_QUEUE` makes the CDR buffer a passthrough, which
+    /// would put every file write on the call path.
+    #[test]
+    fn an_unbuffered_cdr_path_beside_a_file_sink_is_refused_naming_both_variables() {
+        let file = scratch("unbuffered").join("cdr.jsonl");
+        for queue in ["0", "00"] {
+            let refused = file_cdr_writer_from_lookup(
+                lookup(&[
+                    (CDR_FILE_VARIABLE, file.display().to_string()),
+                    ("B2BUA_CDR_QUEUE", queue.into()),
+                ]),
+                &B2buaMetrics::new(),
+            )
+            .err()
+            .expect("an unbuffered file sink");
+            assert!(
+                refused.contains(CDR_FILE_VARIABLE) && refused.contains("B2BUA_CDR_QUEUE"),
+                "{queue:?}: {refused}"
+            );
+        }
+        let buffered = lookup(&[
+            (CDR_FILE_VARIABLE, file.display().to_string()),
+            ("B2BUA_CDR_QUEUE", "8".into()),
+        ]);
+        assert!(file_cdr_writer_from_lookup(buffered, &B2buaMetrics::new()).expect("ok").is_some());
+    }
+
+    /// The log lines a test's own subscriber received.
+    #[derive(Clone, Default)]
+    struct Logged(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logged {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("the log").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Records a file refuses are each counted dropped, and the first one
+    /// alone is said at warn: a full disk says so once, not per call.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn records_the_file_refuses_are_counted_dropped_and_warned_of_once() {
+        let logged = Logged::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let logged = logged.clone();
+                move || logged.clone()
+            })
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let metrics = B2buaMetrics::new();
+        let writer = FileCdrWriter::open(
+            Path::new("/dev/full"),
+            Arc::new(JsonRecordEncoder),
+            metrics.clone(),
+        )
+        .expect("opens");
+
+        for n in 1..=3 {
+            writer.write(&a_call(n), 2_000).await;
+        }
+
+        assert_eq!((metrics.cdr_written_total(), metrics.cdr_dropped_total()), (0, 3));
+        let log = String::from_utf8(logged.0.lock().expect("the log").clone()).expect("utf-8");
+        let warned: Vec<&str> = log.lines().filter(|line| line.contains("WARN")).collect();
+        assert_eq!(warned.len(), 1, "{log}");
+        assert!(warned[0].contains("/dev/full"), "{log}");
+    }
+
     /// A file sink beside a broker URL is refused naming both variables.
     #[test]
     fn a_file_sink_beside_a_broker_url_is_refused_naming_both() {
