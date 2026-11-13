@@ -49,6 +49,40 @@ fn terminated(out: &Path) -> Vec<serde_json::Value> {
     serde_json::from_str(&text).expect("a list of calls")
 }
 
+/// The lines of the cell's `call-records` export.
+fn exported(out: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(out.join("exports/call-records.jsonl"))
+        .expect("the call-records export")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a JSON line"))
+        .collect()
+}
+
+/// The Call-ID of the first message the caller's leg `A` sent, as the wire
+/// carried it.
+fn caller_call_id(out: &Path) -> String {
+    let text = std::fs::read_to_string(out.join("recording/A.jsonl")).expect("the caller's leg");
+    let first: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("a message")).expect("a JSON line");
+    let raw = first["raw"].as_str().expect("the message's text");
+    let line = raw.lines().find_map(|l| l.strip_prefix("Call-ID: ")).expect("a Call-ID");
+    line.trim().to_string()
+}
+
+#[test]
+fn the_plain_system_exports_one_call_record_per_call_keyed_by_the_callers_call_id() {
+    for (cell, run) in [("alice-calls-bob", "records-basic"), ("bob-is-busy", "records-busy")] {
+        let out = out_dir(run);
+        assert_eq!(replay(cell, "callee", &out), 0, "{cell}");
+        let lines = exported(&out);
+        assert_eq!(lines.len(), 1, "{cell}: one record for its one call: {lines:?}");
+        let call_id = caller_call_id(&out);
+        assert_eq!(lines[0]["key"], call_id.as_str(), "{cell}: joined on the caller's Call-ID");
+        assert_eq!(lines[0]["record"]["a_leg"]["call_id"], call_id.as_str(), "{cell}");
+        assert_eq!(lines[0]["record"]["b_legs"].as_array().map(Vec::len), Some(1), "{cell}");
+    }
+}
+
 #[test]
 fn a_basic_call_passes_on_the_plain_system() {
     let out = out_dir("basic");
