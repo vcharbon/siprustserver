@@ -3,17 +3,17 @@
  * cell its case sources yield (`base-campaign-cells.ts`), on the lanes the
  * run names (every one where it names none) among the workspace's, else the
  * pack's own (`[modules] lanes`, else the `lanes/` of its directory), the
- * built-in simulated lane always among them, through the
- * runner's phases (`@sip/campaign-runner`) under the base's campaign pack and
- * lane hosting. It runs as a campaign job (the row it was launched as, else
- * its own) under the environment's run lock, recorded in the store as the
- * campaign named after the pack, its collectors those the pack's rig path
- * wires on each lane, at the collection level the run names. Nothing is
- * provisioned. The operations the run names as its setup are planned over
- * its lanes (`@sip/rig` `Setup.planOf`), a plan the rig refuses refusing the
- * run before its job opens, injected before its cells and healed at its end,
- * each phase an event of its job. The exit code is the runner's: 0 every cell passed, 1 one
- * failed, 2 one errored or a phase did not run.
+ * built-in simulated lane always among them, through the runner's phases
+ * (`@sip/campaign-runner`) under the base's campaign pack and lane hosting.
+ * It runs as a campaign job (the row it was launched as, else its own) under
+ * the environment's run lock, recorded in the store as the campaign named
+ * after the pack, its collectors those the pack's rig path wires on each
+ * lane, at the collection level the run names. Nothing is provisioned. The
+ * operations the run names as its setup are planned over its lanes
+ * (`@sip/rig` `Setup.planOf`), a plan the rig refuses refusing the run
+ * before its job opens, injected before its cells and healed at its end,
+ * each phase an event of its job. The exit code is the runner's: 0 every
+ * cell passed, 1 one failed, 2 one errored or a phase did not run.
  */
 import { asJob, progressOf } from "@sip/campaign-runner/job"
 import { closedOnExit, exitCodeOf, loadOf, stamp } from "@sip/campaign-runner/command"

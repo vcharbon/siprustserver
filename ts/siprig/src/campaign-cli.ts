@@ -13,8 +13,10 @@
  *   siprig-campaign run [--lanes <a,b>] [--out <dir>] [--junit <file>] [--job <id>] [--collection <level>] [--setup <op,op>]
  *     [--sources <module,module>]
  *
- * `--sources` names the case source modules the run reads, paths in the pack,
- * in place of those its manifest names.
+ * `--sources` names the case sources the run reads in place of those its
+ * manifest names: a relative path is in the pack, refused where it leads out
+ * of it once its links are followed; an absolute one, a cut's output say, is
+ * taken as named.
  * `--setup` names the operations of the rig path the run injects before its
  * cells and heals at its end (ADR-0060 appendix §7): a pack's campaign is
  * the base's one campaign, so its setup is the run's to name.
@@ -43,7 +45,7 @@ import { apply, of, PACK, packDirOf } from "./base-workspace.ts"
 const VERB = "siprig-campaign run"
 
 /** The names a comma-separated `--setup` or `--sources` states, in order; none where it is absent. */
-const namesOf =(stated: string | undefined): ReadonlyArray<string> =>
+const namesOf = (stated: string | undefined): ReadonlyArray<string> =>
   (stated ?? "").split(",").map((name) => name.trim()).filter((name) => name !== "")
 
 const fail = (reason: string) => Effect.andThen(Console.error(`${VERB}: ${reason}`), Effect.sync(() => (process.exitCode = 2)))

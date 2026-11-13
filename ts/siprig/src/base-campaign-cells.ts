@@ -35,21 +35,38 @@ export const pivotSchemaOf = (env: NodeJS.ProcessEnv, checkout: string): string 
   return path.join(checkout, "target", "release", "pivot-schema")
 }
 
+/** Whether `inner` is `root` or a path under it, segment by segment. */
+const within = (root: string, inner: string): boolean => inner === root || inner.startsWith(`${root}${path.sep}`)
+
+/**
+ * Whether the relative `source` stays in the pack at `pack` once every link
+ * is followed; a path leading nowhere is judged as written.
+ */
+const staysIn = (pack: string, source: string) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const named = path.resolve(pack, source)
+    const real = yield* fs.realPath(named).pipe(Effect.option)
+    if (real._tag === "None") return within(path.resolve(pack), named)
+    return within(yield* fs.realPath(pack).pipe(Effect.orElseSucceed(() => path.resolve(pack))), real.value)
+  })
+
 /**
  * The case sources a run reads: `sources` where the run names them, else
  * every one the pack's manifest names, in its order. A named relative path is
- * one in the pack, and is refused where it leads out of the pack's tree; an
- * absolute one, a cut's output say, is taken as named.
+ * one in the pack, and is refused where it leads out of the pack's tree, its
+ * links followed; an absolute one, a cut's output say, is taken as named.
  */
-const namedOf = (pack: string, sources: ReadonlyArray<string> | undefined) => {
-  if (sources === undefined) return CaseSource.namedBy(pack)
-  const outside = sources.find((source) =>
-    !path.isAbsolute(source) && path.relative(pack, path.resolve(pack, source)).startsWith("..")
-  )
-  return outside === undefined
-    ? Effect.succeed(sources.map((source) => ({ path: source, absolute: path.resolve(pack, source) })))
-    : Effect.fail({ message: `the case source ${outside} leads out of the pack ${pack}` })
-}
+const namedOf = (pack: string, sources: ReadonlyArray<string> | undefined) =>
+  Effect.gen(function*() {
+    if (sources === undefined) return yield* CaseSource.namedBy(pack)
+    for (const source of sources) {
+      if (!path.isAbsolute(source) && !(yield* staysIn(pack, source))) {
+        return yield* Effect.fail({ message: `the case source ${source} leads out of the pack ${pack}` })
+      }
+    }
+    return sources.map((source) => ({ path: source, absolute: path.resolve(pack, source) }))
+  })
 
 /**
  * What a cut case claims as a cell of the base's campaign: the one call
