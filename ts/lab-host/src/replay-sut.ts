@@ -87,23 +87,37 @@ const logClosed = (logged: Fiber.Fiber<unknown, unknown>): Effect.Effect<void> =
 const stopsBeforeLogEnds = (scope: Scope.Closeable, stop: Effect.Effect<unknown, unknown>, drained: Effect.Effect<void>) =>
   Scope.addFinalizer(scope, stop.pipe(Effect.ignore, Effect.andThen(drained)))
 
+/** `pid` written to `file`, its directory made; why it could not be, as the stand's failure. */
+const named = (file: string, pid: number) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const path = yield* Path.Path
+    yield* fs.makeDirectory(path.dirname(file), { recursive: true })
+    yield* fs.writeFileString(file, `${pid}\n`)
+  }).pipe(Effect.mapError((cause) => new Error(`the worker's pid file ${file} not written: ${String(cause)}`)))
+
 /**
  * `command` started with its output appended to `log`, handed over once it
  * printed {@link READY}. It fails when the worker exits first or stays silent
- * past `readyWithin`, and the worker is gone by the time it does.
+ * past `readyWithin`, and the worker is gone by the time it does. Where
+ * `pidFile` is named, the worker's pid is written there once it is ready, and
+ * the file is removed once it exited or was stopped.
  */
 export const worker = Effect.fn("ReplaySut.worker")(function*(
   command: ChildProcess.Command,
   log: string,
   name: string,
-  readyWithin: Duration.Input = READY_WITHIN
+  readyWithin: Duration.Input = READY_WITHIN,
+  pidFile?: string
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const fs = yield* FileSystem.FileSystem
   const scope = yield* Scope.make()
   const stop = Scope.close(scope, Exit.void)
+  const unnamed = pidFile === undefined ? Effect.void : fs.remove(pidFile, { force: true }).pipe(Effect.ignore)
   let died: string | undefined
   yield* Effect.gen(function*() {
+    yield* Scope.addFinalizer(scope, unnamed)
     const handle = yield* spawner.spawn(command).pipe(Scope.provide(scope))
     const ready = yield* Deferred.make<void, Error>()
     const seen = readiness()
@@ -116,7 +130,7 @@ export const worker = Effect.fn("ReplaySut.worker")(function*(
     const drained = logClosed(logged)
     yield* stopsBeforeLogEnds(scope, handle.kill({ forceKillAfter: STOP_GRACE }), drained)
     yield* Effect.result(handle.exitCode).pipe(
-      Effect.tap(() => drained),
+      Effect.tap(() => Effect.andThen(drained, unnamed)),
       Effect.flatMap((ended) => {
         died = `the ${name} worker exited ${endedBy(ended)} — its log is ${log}`
         return Deferred.fail(ready, new Error(`the ${name} worker exited ${endedBy(ended)} before it was ready`))
@@ -129,6 +143,7 @@ export const worker = Effect.fn("ReplaySut.worker")(function*(
         orElse: () => Effect.fail(new Error(`the ${name} worker never took its port — see ${log}`))
       })
     )
+    if (pidFile !== undefined) yield* named(pidFile, handle.pid)
   }).pipe(Effect.onError(() => stop))
   return { died: () => died, stop } satisfies Worker
 })
@@ -145,6 +160,12 @@ export interface SutPack<L extends LaneView.View, R> {
    * stamped file under the batch's directory where it states none.
    */
   readonly logOf?: (lane: Extract<L, { readonly kind: "hosted" }>) => string | undefined
+  /**
+   * The file a managed worker's pid is written to on `lane` while it runs,
+   * where the pack states one (an operation acting on the worker finds it
+   * there): written once it is ready, removed once it exited or was stopped.
+   */
+  readonly pidFileOf?: (lane: Extract<L, { readonly kind: "hosted" }>) => string | undefined
   /**
    * The managed worker's command line on `lane`, `extraEnv` added to its
    * environment; a lane that cannot wire one fails, naming why.
@@ -190,7 +211,7 @@ export const stand = <L extends LaneView.View, R>(
     const path = yield* Path.Path
     const log = pack.logOf?.(hosted) ?? logUnder(path, under)
     yield* fs.makeDirectory(path.dirname(log), { recursive: true }).pipe(Effect.orDie)
-    const held = yield* worker(command, log, lane)
+    const held = yield* worker(command, log, lane, READY_WITHIN, pack.pidFileOf?.(hosted))
     console.log(`[sut] ${lane}: one ${pack.worker} on ${hosted.sip.ingress}, logging to ${log}`)
     return { metrics, died: held.died, stop: held.stop } satisfies SutHandle
   }).pipe(Effect.withSpan("ReplaySut.stand"))
