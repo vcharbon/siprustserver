@@ -264,6 +264,31 @@ fn a_key_left_in_the_sip_index_fails_every_cells_cleanup_though_no_call_is_store
     assert_eq!(ran.cells_cleanup(), ["fail", "fail"]);
 }
 
+/// A batch-spec whose end would wait no time, or longer than the ceiling, is
+/// refused before any cell runs, naming the field.
+#[test]
+fn a_reap_wait_of_zero_or_past_the_ceiling_refuses_the_batch_spec() {
+    let dir = scratch("reap-bounds");
+    for (ms, why) in [(0u64, "above 0"), (600_001, "at most 600000"), (u64::MAX, "at most 600000")]
+    {
+        let spec = dir.join(format!("batch-spec-{ms}.json"));
+        let batch = serde_json::json!({
+            "lane": "hosted", "metrics": "127.0.0.1:9", "metrics_reap_ms": ms, "work_dir": dir
+        });
+        std::fs::write(&spec, batch.to_string()).expect("the batch-spec");
+        let ran = Command::new(env!("CARGO_BIN_EXE_pivot-replay"))
+            .arg("batch")
+            .arg(&spec)
+            .stdin(Stdio::null())
+            .output()
+            .expect("the batch process");
+        let stderr = String::from_utf8_lossy(&ran.stderr);
+        assert_eq!(ran.status.code(), Some(2), "{ms}: {stderr}");
+        assert!(stderr.contains("metrics_reap_ms") && stderr.contains(why), "{ms}: {stderr}");
+        assert!(ran.stdout.is_empty(), "{ms}: no protocol line: {:?}", ran.stdout);
+    }
+}
+
 #[test]
 fn a_hosted_cell_run_on_its_own_is_refused_naming_the_batch() {
     let dir = scratch("alone");
