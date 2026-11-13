@@ -507,7 +507,9 @@ How a managed lane stands its system under test stays a module of the pack's dep
 With nothing registered, the base hosts a real lane itself (`ts/siprig` `base-hosted-lane.ts`):
 the upstream B2BUA runner, its addresses and log a `b2bua-runner` part's, `[backend] mode =
 "none"`, the cells in the plain binary's batch process (`pivot-replay batch`), each call's
-b-leg pinned to its cell's callee by the dial's `X-Api-Call`.
+b-leg pinned to its cell's callee by the dial's `X-Api-Call`. A managed lane naming a
+`sip-capture` part has its runner append each SIP datagram to the part's pcapng file
+(`B2BUA_CAPTURE`, `sip-net` `CaptureEndpoint`): a packet capture with no privilege and no tool.
 
 ## 14. The minimal case form
 
