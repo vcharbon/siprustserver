@@ -238,15 +238,16 @@ sipp-exporter-check:
 hakit-check:
     cd tooling/hakit && uv run --locked pyright && uv run --locked pytest
 
-# The reference pack's campaign (ts/reference-pack, ADR-0060 item 17): its two
+# The reference pack's suite (ts/reference-pack, ADR-0060 item 17): its two
 # cases on its simulated lane and on its reference lane (the B2BUA runner on
-# loopback) through the base's campaign run, the plain replay binary, the
-# B2BUA runner and pivot-schema built first, recorded in a scratch database
-# of the postgres STORE_TEST_URL names (`pnpm -r test` runs the same suite
-# with the binaries it finds).
+# loopback) through the base's campaign run, and the reference capture
+# ingested, cut and replayed; the plain replay binary, the B2BUA runner,
+# pivot-schema and the extractor sipflow built first, recorded in a scratch
+# database of the postgres STORE_TEST_URL names (`pnpm -r test` runs the same
+# suite with the binaries it finds).
 reference-campaign:
-    cargo build -p pivot-replay -p pivot-schema -p b2bua-runner
-    REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay B2BUA_RUNNER_BIN={{ justfile_directory() }}/target/debug/b2bua-runner PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema pnpm -C ts/reference-pack exec vitest run
+    cargo build -p pivot-replay -p pivot-schema -p b2bua-runner -p sip-pcap
+    REPLAY_BIN={{ justfile_directory() }}/target/debug/pivot-replay B2BUA_RUNNER_BIN={{ justfile_directory() }}/target/debug/b2bua-runner PIVOT_SCHEMA_BIN={{ justfile_directory() }}/target/debug/pivot-schema SIPFLOW_BIN={{ justfile_directory() }}/target/debug/sipflow pnpm -C ts/reference-pack exec vitest run
 
 # The reference capture recorded again (ts/reference-pack/README.md, "The
 # reference capture"): the forked call with reliable provisionals played on the

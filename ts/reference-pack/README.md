@@ -20,13 +20,15 @@ the image's `siprig-campaign run`).
 | `sut-log` | `collectors/sut-log/` | a batch collector bracketing its batch (`open` notes the runner's log length in its state directory, `collect` reads what the batch appended, then empties the log, so it holds one batch's lines at most), the batch's log and each cell's share of it as `log` attachments; a box-wide lock keeps every other batch's collector off the log; an executable with no library, run by node with its types stripped |
 | `restart-worker` | `operations/restart-worker/`, `lanes/reference.toml` (`[operations]`) | an operation needing the `b2bua-runner` part: `inject` stops the runner the part's `pid` file names (the base names there the runner it stands, while it runs) with the `signal` of its `[params]` and awaits its exit, its orchestrator, the base on this lane, standing the next one; it refuses to signal a process answering on no operator route at the part's `admin`; `heal` ends a stop an interrupted inject left, `probe` answers once the stopped runner is gone. Named in a run's setup (`siprig-campaign run --setup restart-worker`), it stops a runner an earlier job left on the lane's addresses before the job's first batch stands its own; the lane binds it by name for a case to ask for |
 | `capture` | `collectors/capture/`, `parts/sip-capture.schema.json`, `targets/sip-capture/reference.toml` | a job collector, `on-failure`: `open` starts the job's capture, emptying the file the runner captures to (`B2BUA_CAPTURE`, the lane's `sip-capture` part) before the job's first batch stands it, so the file holds one job's capture at most; a box-wide lock keeps every other job's capture off it; `collect` runs only where a cell failed and attaches to each failed cell its calls' packets as a `file` attachment, a pcapng of its own, and a `table` of them, a row per packet |
+| the reference capture | `capture/forked-reliable.ts`, `capture/forked-reliable.pcapng` | a capture recorded through the upstream B2BUA and replayed: ingested with the identity extraction, cut by the base's case generator and replayed as a case source (see below) |
 | `calls-ended` | `collectors/calls-ended/` | a delayed cell collector: `delay_s` after each call it reads the runner's `b2bua_active_calls`, while the lane runs its next cells (the lane not held), and answers the cell's `calls-ended` (`pass` at none, `not-checkable` otherwise: the gauge is the worker's, not the call's); it attaches the reading as `json` and where it read it as a `link` |
 
 ## Plug-in and attachment kinds
 
 | Kind | Sample |
 |---|---|
-| case source | `cases.ts` |
+| case source | `cases.ts`, `capture/forked-reliable.ts` (a flow no shape plays), a cut's output directory (`--sources`) |
+| capture ingest (identity extraction), cut (base generator), replay | `capture/forked-reliable.pcapng`, `test/reference-replay.test.ts` |
 | claim | `cases.ts`, `call-records` |
 | lane file | `lanes/simulated.toml`, `lanes/reference.toml` |
 | part schema and part file | `parts/b2bua-runner.schema.json`, `targets/b2bua-runner/reference.toml`, `parts/sip-capture.schema.json`, `targets/sip-capture/reference.toml`, `parts/cdr-file.schema.json`, `targets/cdr-file/reference.toml` |
@@ -44,3 +46,23 @@ the image's `siprig-campaign run`).
 | attachment `link` | `calls-ended` |
 | attachment `records` | the `call-records` judge |
 | attachment `diff` | the `call-records` judge |
+
+## The reference capture
+
+`capture/forked-reliable.pcapng` is one call recorded through the upstream B2BUA. The case
+`capture/forked-reliable.ts` has Alice call Bob, whose side forks the INVITE. Each fork rings
+reliably (RFC 3262) on an early dialog of its own, the first answers, and the second's early
+dialog ends with the INVITE's transaction (RFC 3261 §13.2.2.4).
+
+- **Recording**: the base's campaign run plays the case (`--sources`) on the reference lane, and
+  the runner's own capture (the `sip-capture` part) is the recording. The parties sit on
+  127.0.0.2 and the runner on 127.0.0.1, since no documentation address binds unprivileged and
+  the cut tells the system from its parties by address. `just reference-capture` records it
+  again (`test/reference-capture.test.ts` with `REFERENCE_CAPTURE_WRITE=1`); without the variable
+  the same test runs in the checks and asserts the wire.
+- **Replay** (`test/reference-replay.test.ts`, in the checks): the capture is ingested with the
+  identity extraction (`@sip/corpus` `ExtractionIdentity`: the kept flows document is the raw
+  one, under no seed), cut by the base's case generator (`@sip/corpus` `cut/base-generator.ts`,
+  the neutral policy, the runner's legs joined by its `counter-prefix` Call-ID derivation) into
+  one case, and replayed by the base's campaign run on the simulated lane as its one cell, which
+  passes. The callee is claimed by arrival order, since its R-URI names no number.

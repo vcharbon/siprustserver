@@ -595,6 +595,6 @@ compiler behind the module, and the runner reads compiled cells alone.
 | `restart-worker`, an operation on the reference lane | operation, `setup`, a case step |
 | `alice-calls-bob` and `bob-is-busy` | the minimal case form and both shapes |
 | a simulated lane exporting its records | export, the plain replay binary |
-| one capture of a forked call with reliable provisionals, recorded through the B2BUA runner, the forking made by the callee side | ingest with an identity anonymiser, cut, replay |
+| one capture of a forked call with reliable provisionals, recorded through the B2BUA runner, the forking made by the callee side | ingest with the identity extraction, cut by the base's case generator, replay of the cut as a case source |
 
 Names, numbers and addresses are those the RFCs reserve for examples.
