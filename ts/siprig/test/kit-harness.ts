@@ -22,19 +22,24 @@ export interface Docker {
   readonly context: string
   /** Whose names `docker ps` answers for a filter on `org.siprig.workspace`, one per line. */
   readonly holders: (names: ReadonlyArray<string>) => void
+  /** Makes every container one that stopped with `status`, its `docker logs` printing `log`. */
+  readonly stopped: (status: number, log: string) => void
 }
 
 /**
  * A directory holding a `docker` that appends each command line to `calls.log`,
  * copies a build's context (its last argument) to `context` with links kept,
  * answers `ps` filtered on a workspace label with the names `holders` set,
- * answers `inspect` of a container as docker does for none, and succeeds.
+ * answers `inspect` of a container as docker does for none, or, once
+ * `stopped`, as for a stopped one (its exit status, its logs), and succeeds.
  */
 export const fakeDocker = (): Docker => {
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), "kit-docker-"))
   const log = path.join(bin, "calls.log")
   const context = path.join(bin, "context")
   const holders = path.join(bin, "holders")
+  const status = path.join(bin, "stopped-status")
+  const logs = path.join(bin, "stopped-logs")
   fs.writeFileSync(
     path.join(bin, "docker"),
     [
@@ -43,7 +48,9 @@ export const fakeDocker = (): Docker => {
       "case \"$1\" in",
       `  build) for last; do :; done; cp -a "$last" '${context}' ;;`,
       `  ps) case "$*" in *org.siprig.workspace=*) cat '${holders}' 2>/dev/null ;; esac ;;`,
-      "  inspect) echo \"Error: No such object\" >&2; exit 1 ;;",
+      `  inspect) [ -f '${status}' ] || { echo "Error: No such object" >&2; exit 1; }`,
+      `    case "$*" in *.State.Running*) echo false ;; *.State.ExitCode*) cat '${status}' ;; esac ;;`,
+      `  logs) cat '${logs}' 2>/dev/null ;;`,
       "esac",
       "exit 0",
       ""
@@ -54,7 +61,11 @@ export const fakeDocker = (): Docker => {
     bin,
     context,
     calls: () => (fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : []),
-    holders: (names) => fs.writeFileSync(holders, names.map((name) => `${name}\n`).join(""))
+    holders: (names) => fs.writeFileSync(holders, names.map((name) => `${name}\n`).join("")),
+    stopped: (code, text) => {
+      fs.writeFileSync(status, `${code}\n`)
+      fs.writeFileSync(logs, text)
+    }
   }
 }
 
