@@ -14,7 +14,10 @@
  * lane's `[sip] ingress`; a `standing` one is attached to as found. A
  * managed lane may name a `sip-capture` part ({@link CAPTURE_PART}): its
  * runner appends each SIP datagram to the part's file (`B2BUA_CAPTURE`),
- * where a collector cutting the capture reads it.
+ * where a collector cutting the capture reads it. It may name a `cdr-file`
+ * part ({@link CDR_PART}): its runner appends each call's record to the
+ * part's file, a JSON line each (`B2BUA_CDR_FILE`), where a collector of the
+ * call records reads them.
  */
 import * as Batch from "@sip/lab-host/replay-batch"
 import * as Sut from "@sip/lab-host/replay-sut"
@@ -64,35 +67,51 @@ export const runnerPartOf = (lane: LaneView.Hosted): Result.Result<RunnerPart, s
   )
 }
 
-/** What the base reads of a lane's `sip-capture` part. */
-export const CapturePart = Schema.Struct({
-  /** The pcapng file the runner appends each SIP datagram it sends and receives to, a section per start. */
-  file: Schema.String
-})
-export interface CapturePart extends Schema.Schema.Type<typeof CapturePart> {}
+/**
+ * What the base reads of a part naming one file its runner writes: a
+ * `sip-capture` part's pcapng file, which the runner appends each SIP
+ * datagram it sends and receives to, a section per start; a `cdr-file`
+ * part's, which it appends each call's record to, a JSON line each.
+ */
+export const FilePart = Schema.Struct({ file: Schema.String })
+export interface FilePart extends Schema.Schema.Type<typeof FilePart> {}
 
-/** The `sip-capture` part `lane` names, none where it names none, or why the base cannot capture it. */
-export const capturePartOf = (lane: LaneView.Hosted): Result.Result<CapturePart | undefined, string> => {
-  const part = lane.loaded.parts.get(CAPTURE_PART)
+/** A part naming a file the runner writes: its kind, and what the base does with it, for a refusal. */
+interface FileKind {
+  readonly kind: string
+  readonly doing: string
+}
+
+const CAPTURE: FileKind = { kind: CAPTURE_PART, doing: "captures only a runner it stands" }
+const CDR: FileKind = { kind: CDR_PART, doing: "sets the record file only of a runner it stands" }
+
+/** The part of `named`'s kind `lane` names, none where it names none, or why the base cannot set its file: the lane is standing, or the part names none. */
+const filePartOf = (lane: LaneView.Hosted, named: FileKind): Result.Result<FilePart | undefined, string> => {
+  const part = lane.loaded.parts.get(named.kind)
   if (part === undefined) return Result.succeed(undefined)
   if (lane.sip.lifecycle !== "managed") {
-    return Result.fail(`${lane.id}: the base captures only a runner it stands: a standing lane names no ${CAPTURE_PART} part (${part.file})`)
+    return Result.fail(`${lane.id}: the base ${named.doing}: a standing lane names no ${named.kind} part (${part.file})`)
   }
   return Result.mapError(
-    Schema.decodeUnknownResult(CapturePart)(part.value),
-    (issue) => `${lane.id}: its ${CAPTURE_PART} part ${part.file}: ${String(issue)}`
+    Schema.decodeUnknownResult(FilePart)(part.value),
+    (issue) => `${lane.id}: its ${named.kind} part ${part.file}: ${String(issue)}`
   )
 }
 
-/** Why the base cannot host `lane`, or null: it serves no backend, reads the runner's part, and captures only a runner it stands. */
+/** The `sip-capture` part `lane` names, none where it names none, or why the base cannot capture it. */
+export const capturePartOf = (lane: LaneView.Hosted) => filePartOf(lane, CAPTURE)
+
+/** The `cdr-file` part `lane` names, none where it names none, or why the base cannot set it. */
+export const cdrPartOf = (lane: LaneView.Hosted) => filePartOf(lane, CDR)
+
+/** Why the base cannot host `lane`, or null: it serves no backend, reads the runner's part, and sets the files of a runner it stands alone. */
 export const hostedRefusalOf = (lane: LaneView.Hosted): string | null => {
   if (lane.backendMode !== "none") {
     return `${lane.id}: the base serves no backend to its B2BUA runner, which routes each call itself: state [backend] mode = "none"`
   }
-  const part = runnerPartOf(lane)
-  if (Result.isFailure(part)) return part.failure
-  const capture = capturePartOf(lane)
-  return Result.isFailure(capture) ? capture.failure : null
+  const parts: ReadonlyArray<Result.Result<unknown, string>> = [runnerPartOf(lane), capturePartOf(lane), cdrPartOf(lane)]
+  for (const part of parts) if (Result.isFailure(part)) return part.failure
+  return null
 }
 
 /**
@@ -110,19 +129,25 @@ export const runnerBinaryOf = (env: NodeJS.ProcessEnv, binDir: string | undefine
 /**
  * The runner's environment on `lane`: standalone at the lane's ingress, its
  * metrics and admin at the part's addresses, capturing to the file of the
- * lane's `sip-capture` part where it names one.
+ * lane's `sip-capture` part and appending its call records to the file of
+ * its `cdr-file` part where it names them.
  */
 export const runnerEnvOf = (lane: LaneView.Hosted, part: RunnerPart): Readonly<Record<string, string>> => {
   const capture = Result.getOrUndefined(capturePartOf(lane))
+  const cdr = Result.getOrUndefined(cdrPartOf(lane))
   return {
     B2BUA_MODE: "standalone",
     B2BUA_LISTEN: lane.sip.ingress,
     B2BUA_ADVERTISE: lane.sip.ingress,
     B2BUA_METRICS: part.metrics,
     B2BUA_ADMIN: part.admin,
-    ...(capture === undefined ? {} : { B2BUA_CAPTURE: capture.file })
+    ...(capture === undefined ? {} : { B2BUA_CAPTURE: capture.file }),
+    ...(cdr === undefined ? {} : { B2BUA_CDR_FILE: cdr.file })
   }
 }
+
+/** The variables of `env` naming a file the runner writes, whose directories the base makes before it stands it. */
+const WRITTEN = ["B2BUA_CAPTURE", "B2BUA_CDR_FILE"] as const
 
 const partOrFail = (lane: LaneView.Hosted) =>
   Effect.fromResult(Result.mapError(runnerPartOf(lane), (why) => new Error(why)))
@@ -136,8 +161,10 @@ export const sutPackOf = (runner: string): Sut.SutPack<LaneView.View, never> => 
     Effect.gen(function*() {
       const part = yield* partOrFail(lane)
       const env = runnerEnvOf(lane, part)
-      const capture = env["B2BUA_CAPTURE"]
-      if (capture !== undefined) yield* Effect.try(() => mkdirSync(path.dirname(capture), { recursive: true }))
+      for (const variable of WRITTEN) {
+        const file = env[variable]
+        if (file !== undefined) yield* Effect.try(() => mkdirSync(path.dirname(file), { recursive: true }))
+      }
       return ChildProcess.make(runner, [], {
         env: { ...env, ...extraEnv },
         extendEnv: true,
