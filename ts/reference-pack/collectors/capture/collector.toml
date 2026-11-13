@@ -1,16 +1,19 @@
 # The B2BUA runner's packet capture over the job, cut per failed cell
-# (ADR-0060 appendix §17): `open` starts the job's capture, keeping in its
-# state directory where the file the lane's `sip-capture` part names ends;
-# `collect` runs only where a cell failed, and attaches to each failed cell
-# the packets of its calls as a `file` attachment, a pcapng of its own
-# (`main.ts`, `cut.ts`). A lane naming no capture part does not wire it.
-# Informative: a capture decides nothing.
+# (ADR-0060 appendix §17): `open` starts the job's capture, emptying the file
+# the lane's `sip-capture` part names before the job's first batch stands its
+# runner, so the file holds one job's capture at most; `collect` runs only
+# where a cell failed, and attaches to each failed cell the packets of its
+# calls as a `file` attachment, a pcapng of its own (`main.ts`, `cut.ts`).
+# The lock keeps every other job's capture off the file from its `open` to
+# its `close`. A lane naming no capture part does not wire it. Informative:
+# a capture decides nothing.
 schema = "collector.v1"
 name = "capture"
 scope = "job"
 needs = ["sip-capture"]
 default = "on-failure"
 informative = true
+locks = ["reference-sip-capture"]
 
 [timeouts]
 open_s = 30

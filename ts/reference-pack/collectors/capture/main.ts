@@ -1,11 +1,12 @@
 /**
  * The `capture` collector: the B2BUA runner's packet capture over the job,
- * cut per failed cell. `open` starts the job's capture: it keeps in its state
- * directory where the capture file the lane's `sip-capture` part names ends,
- * the runner appending a section to it each time a batch stands it; `collect`,
- * run only where a cell of the job failed, reads what the job appended and
- * attaches to each failed cell the packets of its calls (`cut.ts`) as a
- * `file` attachment, a pcapng capture of its own.
+ * cut per failed cell. `open` starts the job's capture: it empties the
+ * capture file the lane's `sip-capture` part names, the collector's lock
+ * keeping every other job's capture off it, and the runner appends a section
+ * to it each time a batch of the job stands it; `collect`, run only where a
+ * cell of the job failed, reads the job's capture and attaches to each failed
+ * cell the packets of its calls (`cut.ts`) as a `file` attachment, a pcapng
+ * capture of its own.
  *
  * It needs no library: node runs it with its types stripped, it reads the
  * step's variables and `context.v1` itself, and answers in the lines of
@@ -17,9 +18,6 @@ import { blocksOf, cut } from "./cut.ts"
 
 /** The part kind naming the capture file. */
 const PART = "sip-capture"
-
-/** Where `open` keeps the capture's length. */
-const OFFSET = "offset"
 
 /** What the collector reads of a cell in `context.v1`. */
 interface Cell {
@@ -51,13 +49,11 @@ const main = (): void => {
   const context = JSON.parse(fs.readFileSync(variable("SIPRIG_CONTEXT"), "utf8")) as Context
   const capture = context.lane?.parts[PART]?.value["file"]
   if (typeof capture !== "string") throw new Error(`the lane's ${PART} part names no file`)
-  const offset = path.join(variable("SIPRIG_STATE"), OFFSET)
   const step = variable("SIPRIG_STEP")
-  if (step === "open") return fs.writeFileSync(offset, String(fs.existsSync(capture) ? fs.statSync(capture).size : 0))
+  if (step === "open") return fs.existsSync(capture) ? fs.truncateSync(capture, 0) : undefined
   if (step !== "collect") return
   const out = variable("SIPRIG_OUT")
-  const appended = fs.existsSync(capture) ? fs.readFileSync(capture).subarray(Number(fs.readFileSync(offset, "utf8"))) : new Uint8Array()
-  const blocks = blocksOf(appended)
+  const blocks = blocksOf(fs.existsSync(capture) ? fs.readFileSync(capture) : new Uint8Array())
   for (const cell of context.cells) {
     const file = `${cell.id}.pcapng`
     fs.writeFileSync(path.join(out, file), cut(blocks, callIdsOf(cell)))

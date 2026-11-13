@@ -1,0 +1,3 @@
+# The reference lane's call records: the file its B2BUA runner appends each
+# call's record to, which the `call-records` collector reads per batch.
+file = "/tmp/siprig-reference/b2bua-runner.cdr.jsonl"

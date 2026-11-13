@@ -1,10 +1,10 @@
 /**
  * The `call-records` judge over the records joined to each cell: `pass`
- * where the cell holds the count of records it claims and each holds the
- * fields it claims, else `fail`. To each claiming cell it attaches its
- * records, flattened to one field per value (`records`), and the claimed
- * count and fields against the joined ones (`diff`, a row per one that
- * differs, `same` counting the others).
+ * where the cell holds the count of records it claims and some record
+ * satisfies each check it claims, else `fail`. To each claiming cell it
+ * attaches its records, flattened to one field per value (`records`), and
+ * the claimed count and checks against the joined records (`diff`, a row per
+ * one that does not hold, `same` counting the others).
  */
 import type { JudgeRun } from "@sip/rig"
 import * as fs from "node:fs"
@@ -24,14 +24,25 @@ const RECORD = {
   termination: { cause: "remote_bye", by_leg: "a" }
 }
 
-const FIELDS = { "termination.cause": "remote_bye", "b_legs.0.disposition": "bridged" }
+const CHECKS = [
+  { field: "termination.cause", op: "eq", value: "remote_bye" },
+  { field: "b_legs.0.disposition", op: "eq", value: "bridged" }
+]
 
-/** A cell `id` claiming `claim`, `records` joined to it in its directory. */
+/** One check of each other operator, each holding on {@link RECORD}. */
+const OTHER_OPS = [
+  { field: "a_leg.call_id", op: "regex", value: "@pc33\\.atlanta\\." },
+  { field: "termination.by_leg", op: "exists" },
+  { field: "billing_context", op: "absent" }
+]
+
+/** A cell `id` claiming `claim` where one is given, `records` joined to it in its directory. */
 const cellOf = (id: string, claim: unknown, records: ReadonlyArray<unknown>) => {
   const dir = path.join(work, id)
   fs.mkdirSync(path.join(dir, "joined"), { recursive: true })
   fs.writeFileSync(path.join(dir, "joined", "call-records.jsonl"), records.map((record) => `${JSON.stringify(record)}\n`).join(""))
-  return { id, dir, claims: { "call-records": claim }, records: { "call-records": "joined/call-records.jsonl" } }
+  const claims: Record<string, unknown> = claim === undefined ? {} : { "call-records": claim }
+  return { id, dir, claims, records: { "call-records": "joined/call-records.jsonl" } }
 }
 
 /** The judge's lines over `cells`, its files written under a directory of their own. */
@@ -54,8 +65,8 @@ const attachedOf = (out: string, lines: ReadonlyArray<Record<string, any>>, cell
 }
 
 describe("the call-records judge", () => {
-  it("passes a cell holding its claimed record and fields, attaching the record flattened and an empty diff", async () => {
-    const { out, lines } = await judged([cellOf("alice", { count: 1, fields: FIELDS }, [RECORD])])
+  it("passes a cell holding its claimed record and checks, attaching the record flattened and an empty diff", async () => {
+    const { out, lines } = await judged([cellOf("alice", { count: 1, checks: [...CHECKS, ...OTHER_OPS] }, [RECORD])])
     expect(verdictOf(lines, "alice")).toMatchObject({ answer: "pass", message: "1 record(s), 1 claimed" })
     const records = attachedOf(out, lines, "alice", "records")
     expect(records.name).toBe("call-records")
@@ -70,11 +81,11 @@ describe("the call-records judge", () => {
     }])
     const diff = attachedOf(out, lines, "alice", "diff")
     expect(diff.name).toBe("call-records-diff")
-    expect(JSON.parse(diff.text)).toEqual({ columns: ["claimed", "joined"], rows: [], same: 3 })
+    expect(JSON.parse(diff.text)).toEqual({ columns: ["claimed", "joined"], rows: [], same: 6 })
   })
 
   it("fails a cell whose record differs in a claimed field, the diff naming that field alone", async () => {
-    const claim = { count: 1, fields: { ...FIELDS, "termination.cause": "remote_final" } }
+    const claim = { count: 1, checks: [{ ...CHECKS[0]!, value: "remote_final" }, CHECKS[1]!] }
     const { out, lines } = await judged([cellOf("busy", claim, [RECORD])])
     expect(verdictOf(lines, "busy")).toMatchObject({ answer: "fail" })
     expect(verdictOf(lines, "busy")!["message"]).toContain("termination.cause")
@@ -86,7 +97,7 @@ describe("the call-records judge", () => {
   })
 
   it("fails a cell holding no record, its count and each claimed field against nothing", async () => {
-    const { out, lines } = await judged([cellOf("lost", { count: 1, fields: FIELDS }, [])])
+    const { out, lines } = await judged([cellOf("lost", { count: 1, checks: CHECKS }, [])])
     expect(verdictOf(lines, "lost")).toMatchObject({ answer: "fail", detail: { expected: "1", seen: "0" } })
     expect(JSON.parse(attachedOf(out, lines, "lost", "diff").text)).toEqual({
       columns: ["claimed", "joined"],
@@ -100,7 +111,7 @@ describe("the call-records judge", () => {
   })
 
   it("answers a claim stating no whole count not checkable, and gives a cell claiming nothing no line", async () => {
-    const { lines } = await judged([cellOf("vague", { fields: FIELDS }, [RECORD]), { ...cellOf("quiet", undefined, []), claims: {} }])
+    const { lines } = await judged([cellOf("vague", { checks: CHECKS }, [RECORD]), cellOf("quiet", undefined, [])])
     expect(verdictOf(lines, "vague")).toMatchObject({ answer: "not-checkable" })
     expect(lines.filter((line) => line["cell"] === "quiet")).toEqual([])
   })
