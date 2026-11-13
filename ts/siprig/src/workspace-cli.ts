@@ -4,6 +4,7 @@
  *
  *   siprig-workspace init <dir>     every fixed subdirectory, a commented rig.toml, an empty census run
  *   siprig-workspace check [<dir>]  rig.toml validated, the rig path loaded, the environment rig.toml states printed
+ *   siprig-workspace check --config-only [<dir>]   rig.toml alone validated (before init), the environment printed
  *
  * `check` reads `SIPRIG_WORKSPACE` where no directory is named. A refused
  * `rig.toml` exits 2 naming the file and the key; a rig path plug-in the rig

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # The container's first step (s6 oneshot `workspace`): the workspace named by
-# SIPRIG_WORKSPACE has a valid rig.toml (`siprig-workspace check`), is brought
-# up to this image (`siprig-workspace init`: what it lacks is made, nothing
-# else is touched), its site port is free on the host, and its store is
-# written to /run/siprig/workspace.env (single-quoted values), which every
-# service and `siprig-in` exports:
+# SIPRIG_WORKSPACE has a valid rig.toml (`siprig-workspace check
+# --config-only`), is brought up to this image (`siprig-workspace init`: what
+# it lacks is made, nothing else is touched), then holds nothing the tooling
+# refuses (`siprig-workspace check`, after init, since a pack's init may set
+# aside a file of an older format the whole check refuses), its site port is
+# free on the host, and its store is written to /run/siprig/workspace.env
+# (single-quoted values), which every service and `siprig-in` exports:
 #
 #   PG_OWN                1 where database.url names a loopback server: the store is
 #                         this container's own postgres, on its private socket only
@@ -22,9 +24,10 @@ ws="${SIPRIG_WORKSPACE:?the container is started with SIPRIG_WORKSPACE (the wrap
 run="${SIPRIG_RUN_DIR:-/run/siprig}"
 socket_dir=/run/siprig/pg
 mkdir -p "$run"
+siprig-workspace check --config-only "$ws" >/dev/null
+siprig-workspace init "$ws"
 checked="$(siprig-workspace check "$ws")"
 echo "$checked"
-siprig-workspace init "$ws"
 
 site_port="$(sed -n 's/^SIPRIG_SITE_PORT=//p' <<<"$checked")"
 site_port="${site_port:-5175}"

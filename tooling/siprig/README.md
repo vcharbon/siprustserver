@@ -25,7 +25,8 @@ kit tar <dir> [--tag T] [--base IMAGE] [--out DIR]  the pack's image saved as DI
 
 Node, postgres (its major in the label `org.siprig.pg-major`), s6-overlay and the docker
 CLI; no Python. The s6 services run a workspace mounted at its own path (`SIPRIG_WORKSPACE`):
-`workspace` checks and prepares it and writes the store's environment to
+`workspace` checks its `rig.toml` (`check --config-only`), prepares it (`init`), checks the
+whole of it (`check`) and writes the store's environment to
 `/run/siprig/workspace.env`, `postgres` runs the workspace's own cluster in `pgdata/` on a
 private socket, `migrate` brings the store to the image's schema, `site` serves.
 `s6-notifyoncheck` polls `image/site-check` each second until the site first answers,
@@ -37,7 +38,7 @@ it. Each service runs a base command by name:
 | Command | Contract | The base's |
 |---|---|---|
 | `siprig-workspace init <dir>` | makes what the workspace lacks, keeps the rest | `@sip/workspace` over `rig.toml`'s generic sections |
-| `siprig-workspace check [<dir>]` | `<file>: valid`, then `KEY=value` lines: `SIPRIG_SITE_PORT`, `SIPRIG_SITE_BIND`, `DATABASE_URL` among them; exit 2 on a refused file, naming it, so the container stops at start | `rig.toml`, and the rig path over the pack and the workspace |
+| `siprig-workspace check [--config-only] [<dir>]` | `<file>: valid`, then `KEY=value` lines: `SIPRIG_SITE_PORT`, `SIPRIG_SITE_BIND`, `DATABASE_URL` among them; exit 2 on a refused file, naming it, so the container stops at start; `--config-only` reads `rig.toml` alone (run before `init`) | `rig.toml`, and the rig path over the pack and the workspace |
 | `siprig-store migrate` | the store `DATABASE_URL` names (exported, else the workspace's `[database] url`) created and migrated, dumped into the workspace's `backups/` first | the store's own migrations |
 | `siprig-site` | the site, on the workspace's port and bind address | `@sip/site` over a site pack with no lane, campaign or rule |
 
@@ -77,7 +78,9 @@ It then builds:
 
 The wrapper (`<wrapper> --help`) loads the image, makes a workspace (`init`), starts one
 container per workspace (`up`, as the caller's uid on the host's network; refused while any
-container labelled `org.siprig.workspace=<the workspace>` runs) and waits for the site,
+container labelled `org.siprig.workspace=<the workspace's real path>` runs; the container's
+name and label follow that real path, so a link to the workspace names the same one) and
+waits for the site,
 printing the tail of `logs/site/current` where the site stopped the container, and stops,
 restarts, logs, `exec`s and upgrades the postgres major (`upgrade-pg`).
 

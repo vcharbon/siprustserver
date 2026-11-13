@@ -1,8 +1,10 @@
 /**
  * The generic verbs and lines of a tooling's workspace command: `check
- * [<dir>]` validates the configuration file and prints the environment it
- * states, a URL's password masked; a verb naming no directory takes the one
- * the workspace variable names; what `init` made is printed one line per path.
+ * [--config-only] [<dir>]` validates the configuration file (and, without the
+ * flag, what else the tooling reads of the workspace) and prints the
+ * environment it states, a URL's password masked; a verb naming no directory
+ * takes the one the workspace variable names; what `init` made is printed one
+ * line per path.
  */
 import type { Refused } from "@sip/cli/host-env"
 import * as Runner from "@sip/cli/runner"
@@ -10,7 +12,7 @@ import * as Console from "effect/Console"
 import * as Effect from "effect/Effect"
 import type * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
-import { Argument, Command } from "effect/unstable/cli"
+import { Argument, Command, Flag } from "effect/unstable/cli"
 import type * as ConfigFile from "./config-file.js"
 import type * as Init from "./init.js"
 import * as Layout from "./layout.js"
@@ -62,8 +64,9 @@ export type Verify<A extends ConfigFile.Base> = (
 
 /**
  * The `check` verb of `program`: the file validated, then the rest of the
- * workspace `verify` reads, and the environment the file states printed;
- * exit 2 with the refusal where either does not read.
+ * workspace `verify` reads (not with `--config-only`, for a workspace `init`
+ * has yet to bring up to the tooling), and the environment the file states
+ * printed; exit 2 with the refusal where either does not read.
  */
 export const check = <A extends ConfigFile.Base>(
   pack: WorkspacePack,
@@ -71,7 +74,13 @@ export const check = <A extends ConfigFile.Base>(
   program: string,
   verify: Verify<A> = () => Effect.void
 ) =>
-  Command.make("check", { dir: dirArgument(pack) }, (input) =>
+  Command.make("check", {
+    configOnly: Flag.boolean("config-only").pipe(
+      Flag.withDescription(`Validate ${pack.configFile} alone, not the rest of the workspace`),
+      Flag.withDefault(false)
+    ),
+    dir: dirArgument(pack)
+  }, (input) =>
     Effect.gen(function*() {
       const layout = yield* layoutNamed(pack, program, input.dir)
       if (layout === undefined) return
@@ -80,7 +89,7 @@ export const check = <A extends ConfigFile.Base>(
           Effect.andThen(Console.error(refused.reason), Effect.as(Runner.exit(2), undefined)))
       )
       if (config === undefined) return
-      const verified = yield* verify(layout, config).pipe(
+      const verified = yield* (input.configOnly ? Effect.void : verify(layout, config)).pipe(
         Effect.as(true),
         Effect.catch((refusal) => Effect.andThen(Console.error(refusal.message), Effect.as(Runner.exit(2), false)))
       )

@@ -12,8 +12,14 @@ set -euo pipefail
 run="${SIPRIG_RUN_DIR:-/run/siprig}"
 exitcode_file="${SIPRIG_EXITCODE_FILE:-/run/s6-linux-init-container-results/exitcode}"
 halt="${SIPRIG_HALT:-/run/s6/basedir/bin/halt}"
+
+# How the site ended, from s6's finish arguments: its exit code, or 256 and the signal that killed it.
+how_it_ended() {
+  if [ "${1:-}" = 256 ]; then echo "was killed by signal ${2:-?}"; else echo "exited with code ${1:-?}"; fi
+}
+
 [ ! -e "$run/site-answered" ] || exit 0
-echo "siprig: the site exited (code ${1:-?}, signal ${2:-none}) before it ever answered:" \
+echo "siprig: the site $(how_it_ended "$@") before it ever answered:" \
   "its log is $SIPRIG_WORKSPACE/logs/site/current; the container stops" >&2
 echo 3 > "$exitcode_file"
 exec "$halt"

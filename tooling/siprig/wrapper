@@ -52,8 +52,11 @@ need_image() {
   docker image inspect "$IMAGE" >/dev/null 2>&1 || die "image $IMAGE is not loaded: \`$NAME load <tarball>\`"
 }
 
-# The workspace, absolute (symlinks kept, as the tooling names it).
+# The workspace, absolute (symlinks kept, as the tooling names it), and its real path
+# (every link followed), which names its container and labels it: one workspace, one
+# container, whichever link names it.
 workspace=""
+workspace_real=""
 resolve_workspace() {
   local named="${workspace:-${SIPRIG_WORKSPACE:-}}"
   if [ -z "$named" ]; then
@@ -62,10 +65,11 @@ resolve_workspace() {
   fi
   workspace="$(realpath -s -m "$named")"
   [ -f "$workspace/rig.toml" ] || die "$workspace holds no rig.toml: \`$NAME init $workspace\` makes one"
+  workspace_real="$(realpath -e "$workspace")"
 }
 
-# One container per workspace, named by the wrapper and the workspace's path.
-container() { echo "$NAME-ws-$(printf %s "$workspace" | sha256sum | cut -c1-8)"; }
+# One container per workspace, named by the wrapper and the workspace's real path.
+container() { echo "$NAME-ws-$(printf %s "$workspace_real" | sha256sum | cut -c1-8)"; }
 
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$(container)" 2>/dev/null || true)" = true ]; }
 
@@ -117,10 +121,10 @@ wait_for_site() {
 }
 
 # One running container per workspace: `up` is refused while a container other than <name>
-# runs carrying the workspace's label, whichever wrapper (or pack) started it.
+# runs carrying the workspace's label (its real path), whichever wrapper (or pack) started it.
 refuse_shared_workspace() {
   local name=$1 other
-  other="$(docker ps --filter "label=org.siprig.workspace=$workspace" --format '{{.Names}}' | grep -vxF "$name" | head -n 1 || true)"
+  other="$(docker ps --filter "label=org.siprig.workspace=$workspace_real" --format '{{.Names}}' | grep -vxF "$name" | head -n 1 || true)"
   [ -z "$other" ] || die "up: the container $other already runs over $workspace: stop it first (its own wrapper's \`down\`)"
 }
 
@@ -161,7 +165,7 @@ up() {
     --tmpfs "/run:rw,exec,nosuid,size=64m,uid=$uid,gid=$gid,mode=0755" \
     --memory "$memory" --memory-swap "$memory" \
     --stop-timeout "$STOP_TIMEOUT" \
-    --label "org.siprig.workspace=$workspace" \
+    --label "org.siprig.workspace=$workspace_real" \
     -v "$workspace:$workspace" -e "SIPRIG_WORKSPACE=$workspace" -e SIPRIG_ENV=integration \
     "${extra[@]}" "$IMAGE" >/dev/null
   echo "$NAME: started $name from $IMAGE"

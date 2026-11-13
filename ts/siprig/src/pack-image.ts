@@ -68,28 +68,45 @@ const holds = (info: FileSystem.File.Info, kind: Kind): boolean => {
 const within = (root: string, inner: string): boolean => inner === root || inner.startsWith(`${root}${path.sep}`)
 
 /**
+ * Where `relative` leads under `root` once every link is followed, when that
+ * lies outside `root`; `undefined` where it stays inside or leads nowhere.
+ */
+const ledOut = (root: string, relative: string) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const real = yield* fs.realPath(path.resolve(root, relative)).pipe(Effect.option)
+    if (real._tag === "None") return undefined
+    const realRoot = yield* fs.realPath(root).pipe(Effect.orElseSucceed(() => root))
+    return within(realRoot, real.value) ? undefined : real.value
+  })
+
+/**
  * Why the staged tree at `staged` cannot hold `named` as its key needs, or
- * `undefined`: it is missing there or of another kind, or it leads out of the
- * tree once its links are followed. A path the pack at `dir` holds but the
- * staged tree does not is named as one its checkout leaves out.
+ * `undefined`: it leads out of the pack at `dir` or of the staged tree once
+ * its links are followed, or it is missing there or of another kind. A path
+ * the pack holds but the staged tree does not is named as one its checkout
+ * leaves out.
  */
 const unheld = (dir: string, staged: string, named: Named) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
+    const out = (yield* ledOut(dir, named.path)) ?? (yield* ledOut(staged, named.path))
+    if (out !== undefined) return `${named.key}: ${named.path} leads out of the pack, to ${out}`
     const kind = named.is === "either" ? "path" : named.is
-    const at = path.resolve(staged, named.path)
-    const info = yield* fs.stat(at).pipe(Effect.option)
+    const info = yield* fs.stat(path.resolve(staged, named.path)).pipe(Effect.option)
     if (info._tag === "None" || !holds(info.value, named.is)) {
       const left = staged !== dir && (yield* fs.exists(path.resolve(dir, named.path)).pipe(Effect.orElseSucceed(() => false)))
       return `${named.key}: the pack holds no ${kind} ${named.path}` +
         (left ? " in what its checkout holds (an ignored file, or one of a nested repository, is left out of the image)" : "")
     }
-    const root = yield* fs.realPath(staged).pipe(Effect.orElseSucceed(() => staged))
-    const real = yield* fs.realPath(at).pipe(Effect.orElseSucceed(() => at))
-    return within(root, real) ? undefined : `${named.key}: ${named.path} leads out of the pack, to ${real}`
+    return undefined
   })
 
-/** Why the binaries directory at `dir` cannot be copied into the image, or `undefined`: a link in it leads to nothing. */
+/**
+ * Why the binaries directory at `dir` cannot be copied into the image, or
+ * `undefined`: a link in it leads to nothing. The walk follows links to
+ * directories (node's recursive `readdir`), as the copy into the image does.
+ */
 const brokenBinary = (dir: string, stated: string) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
