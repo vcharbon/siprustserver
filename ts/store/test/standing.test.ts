@@ -156,8 +156,9 @@ describe.skipIf(!served)("only @current runs are current", () => {
       expect(standing?.caseRuns.map((entry) => entry.runId)).toEqual([current.id])
     })))
 
-  it("never moves on a current-population run made on a dirty tree", () =>
+  it("moves on a current-population run made on a dirty tree like any other, the run keeping its dirty flag", () =>
     withRuns(Effect.gen(function*() {
+      const sql = yield* SqlClient
       const runs = yield* Runs.Service
       const capture = "identity_dirty.pcap.gz"
       const one = `${capture}-case1`
@@ -176,8 +177,14 @@ describe.skipIf(!served)("only @current runs are current", () => {
       yield* runs.finish({ id: dirty.id, status: "done", cases: [passed(one)] })
 
       const standing = yield* standingOf(capture)
-      expect(standing?.runId).toBe(clean.id)
-      expect(standing?.failed).toBe(1)
+      expect(standing?.runId).toBe(dirty.id)
+      expect(standing?.failed).toBe(0)
+      expect(clean.id).toBeLessThan(dirty.id)
+      const recorded = yield* sql<{ name: string; dirty: boolean }>`
+        SELECT c->>'name' AS name, (c->>'dirty')::boolean AS dirty
+        FROM runs r, jsonb_array_elements(r.components) c WHERE r.id = ${dirty.id} ORDER BY name
+      `
+      expect(recorded).toEqual([{ name: "app", dirty: true }, { name: "core", dirty: false }])
     })))
 
   it("reads a run of no recorded env as unknown, never as @current", () =>

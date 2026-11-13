@@ -152,9 +152,6 @@ export const layer = Layer.effect(
     const sql = yield* SqlClient
     const root = yield* Sessions.Service
 
-    /** A run no component of which was dirty: its commits are its code. */
-    const clean = sql`NOT EXISTS (SELECT 1 FROM jsonb_array_elements(r.components) k WHERE k->>'dirty' = 'true')`
-
     const termOf = (term: Term): Fragment => {
       switch (term._tag) {
         case "current":
@@ -164,8 +161,8 @@ export const layer = Layer.effect(
         case "run":
           return sql`r.id = ${term.id}`
         case "sha":
-          return sql`(EXISTS (SELECT 1 FROM jsonb_array_elements(r.components) k
-                              WHERE left(k->>'sha', ${term.prefix.length}) = ${term.prefix}) AND ${clean})`
+          return sql`EXISTS (SELECT 1 FROM jsonb_array_elements(r.components) k
+                             WHERE left(k->>'sha', ${term.prefix.length}) = ${term.prefix})`
         case "lane":
           return sql`r.lane = ${term.lane}`
         case "sweep":

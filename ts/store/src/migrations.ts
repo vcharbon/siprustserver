@@ -130,7 +130,6 @@ const viewsOf = (cellColumns: ReadonlyArray<string>): Effect.Effect<void, SqlErr
     FROM runs r
     JOIN current_population p ON p.env = r.env AND (p.branch IS NULL OR p.branch = r.branch)
     WHERE r.finished_at IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(r.components) c WHERE c->>'dirty' = 'true')
   `)
   yield* sql.unsafe(`
     CREATE VIEW current_cells AS
@@ -1044,6 +1043,16 @@ const everyBranch = Effect.gen(function*() {
 export const EVERY_BRANCH = "20_every_branch"
 
 /**
+ * A run built from a dirty tree is current like any other (`current.ts`),
+ * its dirty flags kept as provenance: the views are restated without
+ * excluding it.
+ */
+const dirtyRunsCurrent = Effect.suspend(() => viewsOf(CELL_COLUMNS))
+
+/** The key of the migration that makes a run built from a dirty tree current like any other. */
+export const DIRTY_RUNS_CURRENT = "21_dirty_runs_current"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -1067,7 +1076,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [JOB_ATTACHMENTS]: jobAttachments,
   [JOB_HOOKS_PATH_DROPPED]: jobHooksPathDropped,
   [CAMPAIGN_RUNS]: campaignRuns,
-  [EVERY_BRANCH]: everyBranch
+  [EVERY_BRANCH]: everyBranch,
+  [DIRTY_RUNS_CURRENT]: dirtyRunsCurrent
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

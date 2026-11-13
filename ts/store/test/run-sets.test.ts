@@ -96,7 +96,7 @@ const A = "sets_a.pcap.gz"
 const B = "sets_b.pcap.gz"
 /** Cut whole twice: the re-cut refuses case9, which the first reading held. */
 const R = "sets_recut.pcap.gz"
-/** Run by the current population on a dirty tree only. */
+/** Run by the current population on a dirty tree, and by the env. */
 const D = "sets_dirty.pcap.gz"
 /** Run on a third commit sharing the env's first seven digits. */
 const E = "sets_twin.pcap.gz"
@@ -164,7 +164,7 @@ const refusalOf = (text: string) => withStore(Effect.flatMap(RunSets.Service, (s
 
 describe.skipIf(!served)("RunSets.runs", () => {
   it("admits the runs every term names", async () => {
-    expect(await runsOf("@current")).toEqual([ids.currentA, ids.currentB, ids.refA, ids.currentR, ids.recutR])
+    expect(await runsOf("@current")).toEqual([ids.currentA, ids.currentB, ids.refA, ids.currentR, ids.recutR, ids.dirtyD])
     expect(await runsOf("@env:dev-7-fix")).toEqual([ids.envA, ids.envAgain, ids.envR, ids.envD, ids.twinE])
     expect(await runsOf("@current/@lane:ref")).toEqual([ids.refA])
     expect(await runsOf(`run${ids.currentB}`)).toEqual([ids.currentB])
@@ -172,9 +172,9 @@ describe.skipIf(!served)("RunSets.runs", () => {
     expect(await runsOf(`@sweep:${ids.sweep}`)).toEqual([ids.currentA, ids.currentB])
   })
 
-  it("leaves a run made on a dirty tree out of @current and out of @sha", async () => {
-    expect(await runsOf("@current")).not.toContain(ids.dirtyD)
-    expect(await runsOf("@sha:aaaa000")).not.toContain(ids.dirtyD)
+  it("holds a run made on a dirty tree in @current and in @sha, like any other", async () => {
+    expect(await runsOf("@current")).toContain(ids.dirtyD)
+    expect(await runsOf("@sha:aaaa000")).toContain(ids.dirtyD)
     expect(await runsOf(`run${ids.dirtyD}`)).toEqual([ids.dirtyD])
   })
 })
@@ -238,12 +238,12 @@ describe.skipIf(!served)("RunSets.pair", () => {
 
   it("loads only the calls both sides hold, and counts the captures one side alone ran", async () => {
     const { before, after } = await pairOf("@current/@lane:fake", "@env:dev-7-fix")
-    expect([...new Set(before.cells.map((cell) => cell.capture))].sort()).toEqual([A, R])
+    expect([...new Set(before.cells.map((cell) => cell.capture))].sort()).toEqual([A, R, D].sort())
     expect(before.cells.map((cell) => `${cell.capture}/${cell.caseId}`).sort())
       .toEqual(after.cells.map((cell) => `${cell.capture}/${cell.caseId}`).sort())
-    // B alone on current; D (current ran it only on a dirty tree) and E alone on the env.
+    // B alone on current (D, run there on a dirty tree, is shared); E alone on the env.
     expect(before.elsewhere).toEqual({ captures: 1, calls: 0, keys: [] })
-    expect(after.elsewhere).toEqual({ captures: 2, calls: 1, keys: [`${R}/${R}-case9`] })
+    expect(after.elsewhere).toEqual({ captures: 1, calls: 1, keys: [`${R}/${R}-case9`] })
   })
 })
 
@@ -254,6 +254,7 @@ describe.skipIf(!served)("compare over two sides", () => {
     expect(comparison.moves.map((move) => [move.caseId, move.class, move.code])).toEqual([
       [`${A}-case2`, "green→red", "different"],
       [`${A}-case1`, "red→green", "different"],
+      [`${D}-auto`, "unchanged", "different"],
       [`${R}-case1`, "unchanged", "different"]
     ])
     expect(comparison.onlyBefore).toEqual({ captures: 1, calls: 0, keys: [] })
