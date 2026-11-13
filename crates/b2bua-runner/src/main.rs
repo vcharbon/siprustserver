@@ -14,9 +14,9 @@
 //!            (full-chain stress) and honors an inbound `X-Api-Call` `call_limiter`
 //!            array so a dedicated stream can enforce a real cap.
 //!   - CDR  : the JSON-lines file `B2BUA_CDR_FILE` names, else the RabbitMQ
-//!            sink when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
-//!            discarding `NullCdrWriter` — any of them behind the bounded
-//!            `BufferedCdrWriter` (drop-on-overload).
+//!     sink when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's discarding
+//!     `NullCdrWriter` — any of them behind the bounded `BufferedCdrWriter`
+//!     (drop-on-overload).
 //!   - HA   : opt-in peer-to-peer replication with static or kube
 //!            EndpointSlice membership.
 //!   - alloc: jemalloc (+ heap-profiling `/debug/heap` route, jemalloc stats
@@ -208,9 +208,6 @@ async fn run() -> Result<std::process::ExitCode, String> {
     // brake installed) → the worker's addresses → validated config + metrics/clock.
     let base = RunnerEnv::from_env()?.bind("b2bua-runner").await?;
 
-    // CDR sink: the file `B2BUA_CDR_FILE` names, else RabbitMQ when
-    // `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's discarding default, any
-    // of them behind the kit's bounded buffer.
     let cdr_sink = base.cdr_sink_from_env()?;
 
     let mut deps = base
