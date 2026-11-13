@@ -10,10 +10,11 @@
  * kept under `<out>/cells/`, with `cells.json` and `validation.json` beside
  * them, and with `expand`, each cell's `expanded.json`
  * (`@sip/campaign-runner` `expanded.ts`). Exit 0 with no problem, 1 with one,
- * 2 where the line or the configuration is refused.
+ * 2 where the line or the configuration is refused: a `pivot-schema` that
+ * does not run, an `out` holding what a validation does not write.
  */
 import { readExpanded } from "@sip/campaign-runner/expanded"
-import { pivotLint } from "@sip/campaign-runner/lint"
+import { pivotLint, runningPivotSchema } from "@sip/campaign-runner/lint"
 import * as Validate from "@sip/campaign-runner/validate"
 import { LaneCatalog } from "@sip/rig"
 import * as Console from "effect/Console"
@@ -58,15 +59,17 @@ export const validate = (options: Options) =>
     if (Result.isFailure(catalog)) return yield* refuse(catalog.failure.message)
     const selection = yield* selectionOf(options.pack, options.sources).pipe(Effect.result)
     if (Result.isFailure(selection)) return yield* refuse(selection.failure.message)
-    const lint = yield* pivotLint(Effect.succeed(options.pivotSchema))
-    const validation = yield* Validate.withCellsDir(options.out, (cellsDir) =>
+    const lint = yield* pivotLint(runningPivotSchema(Effect.succeed(options.pivotSchema))).pipe(Effect.result)
+    if (Result.isFailure(lint)) return yield* refuse(lint.failure.message)
+    const out = options.out === undefined ? undefined : path.resolve(options.out)
+    const taken = out === undefined ? undefined : yield* Validate.outRefusal(out)
+    if (taken !== undefined) return yield* refuse(taken)
+    const validation = yield* Validate.withCellsDir(out, (cellsDir) =>
       Validate.validate(compile(selection.success, cellsDir, options.pivotSchema, declared.success), {
-        lint,
+        lint: lint.success,
         lanes: catalog.success.lanes
       }))
-    if (options.out !== undefined) {
-      yield* Validate.writeOut(path.resolve(options.out), validation, options.expand ? (cell) => readExpanded(cell) : undefined)
-    }
+    if (out !== undefined) yield* Validate.writeOut(out, validation, options.expand ? (cell) => readExpanded(cell) : undefined)
     const files = selection.success.selected.length + selection.success.broken.length
     yield* Console.log(`${VERB}: ${validation.cells.length} cell(s) from ${files} case source(s), ${validation.problems.length} problem(s)`)
     for (const note of validation.notes) yield* Console.log(`note: ${note}`)

@@ -6,7 +6,8 @@
  * expectation. One seeded defect per level exits 1 with its line: a case
  * whose tag no workspace declares (compile), a document whose step waits
  * `after` a step it does not hold (schema), two cells filed under one case id
- * (consistency). Each seeded source is a module under a scratch directory
+ * (consistency). A pivot schema tool that does not run is refused once,
+ * exit 2. Each seeded source is a module under a scratch directory
  * re-exporting the pack's cells changed, named by its absolute path.
  *
  * Its `pivot-schema` is found as `campaign-cli.test.ts` finds it;
@@ -29,17 +30,17 @@ const skipping = process.env["TOOLCHAIN_TEST_SKIP"] === "1"
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "campaign-validate-"))
 afterAll(() => fs.rmSync(work, { recursive: true, force: true }))
 
-/** `siprig-campaign validate <args>` on the reference pack: its exit code, its stdout and its stderr. */
-const validate = (...args: ReadonlyArray<string>) => {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    SIPRIG_PACK: PACK,
-    SIPRIG_WORKSPACE: "",
-    PIVOT_SCHEMA_BIN: process.env["PIVOT_SCHEMA_BIN"] ?? path.join(CHECKOUT, "target/release/pivot-schema")
-  }
+const PIVOT_SCHEMA = process.env["PIVOT_SCHEMA_BIN"] ?? path.join(CHECKOUT, "target/release/pivot-schema")
+
+/** `siprig-campaign validate <args>` on the reference pack, linting with `pivotSchema`: its exit code, its stdout and its stderr. */
+const validateWith = (pivotSchema: string, ...args: ReadonlyArray<string>) => {
+  const env: NodeJS.ProcessEnv = { ...process.env, SIPRIG_PACK: PACK, SIPRIG_WORKSPACE: "", PIVOT_SCHEMA_BIN: pivotSchema }
   const ran = spawnSync(TSX, [CLI, "validate", ...args], { env, encoding: "utf8" })
   return { code: ran.status, stdout: ran.stdout, stderr: ran.stderr.split("\n").filter((line) => !/Deprecation|trace-deprecation/.test(line)) }
 }
+
+/** `siprig-campaign validate <args>` on the reference pack: its exit code, its stdout and its stderr. */
+const validate = (...args: ReadonlyArray<string>) => validateWith(PIVOT_SCHEMA, ...args)
 
 /** A case source `name` under the scratch directory: the pack's cells, `body` mapping them (`cells`). */
 const seeded = (name: string, body: string): string => {
@@ -90,6 +91,16 @@ describe.skipIf(skipping)("siprig-campaign validate", () => {
     expect(stderr.filter((line) => line !== "")).toEqual([
       `consistency ${source}: the cell alice-calls-bob-again is filed under the case id alice calls bob, as the cell alice-calls-bob of ${source} is: ` +
       "the store keys a cell's results by it"
+    ])
+  })
+
+  it("refuses a pivot schema tool that does not run once, naming it, exit 2", () => {
+    const broken = path.join(work, "pivot-schema-broken")
+    fs.writeFileSync(broken, "#!/bin/sh\necho 'cannot load its library' >&2\nexit 3\n", { mode: 0o755 })
+    const { code, stderr } = validateWith(broken)
+    expect(code).toBe(2)
+    expect(stderr.filter((line) => line !== "")).toEqual([
+      `siprig-campaign validate: the pivot schema tool ${broken} does not run: ${broken} schema pivot exited 3: cannot load its library`
     ])
   })
 })

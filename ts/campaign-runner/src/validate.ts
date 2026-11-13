@@ -148,16 +148,36 @@ export const describedOf = (cell: Cell) => {
   return { ...rest, file: source.file }
 }
 
+/** What a validation writes under its `--out`: anything else there is not its own. */
+const WRITTEN = new Set(["cells", "cells.json", "validation.json"])
+
+/**
+ * Why `out` cannot take a validation's output, or `undefined`: it holds an
+ * entry a validation does not write. An absent or empty directory, or one a
+ * validation wrote, takes it.
+ */
+export const outRefusal = (out: string) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const entries = yield* fs.readDirectory(out).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []))
+    const foreign = entries.filter((entry) => !WRITTEN.has(entry)).sort()
+    return foreign.length === 0
+      ? undefined
+      : `--out ${out} holds ${foreign.join(", ")}, which a validation does not write: name an empty directory, or one a validation wrote`
+  })
+
 /**
  * `body` over a cells directory: `<out>/cells` where `out` is named (the
- * compiled documents kept for inspection), else a scratch directory removed
- * once `body` ends.
+ * compiled documents kept for inspection), emptied first so it holds this
+ * validation's cells alone, else a scratch directory removed once `body` ends.
+ * The caller has had `out` pass {@link outRefusal}.
  */
 export const withCellsDir = <A, E, R>(out: string | undefined, body: (cellsDir: string) => Effect.Effect<A, E, R>) =>
   Effect.scoped(Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
     if (out === undefined) return yield* body(yield* fs.makeTempDirectoryScoped({ prefix: "campaign-validate-" }).pipe(Effect.orDie))
     const cellsDir = path.join(path.resolve(out), "cells")
+    yield* fs.remove(cellsDir, { recursive: true, force: true }).pipe(Effect.orDie)
     yield* fs.makeDirectory(cellsDir, { recursive: true }).pipe(Effect.orDie)
     return yield* body(cellsDir)
   }))

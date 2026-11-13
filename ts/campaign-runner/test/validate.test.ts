@@ -6,7 +6,9 @@
  * in is a schema problem named by its file and sub-case; two cells filed under
  * one case id are a consistency problem; a lane timer and a cell no lane runs
  * are notes, never problems. With `--out`, the cells' descriptions, the
- * problems and each cell's expanded expectation are written.
+ * problems and each cell's expanded expectation are written, every step field
+ * and check class the document states among it; a reused `--out` keeps only
+ * its last validation's cells, and one holding other files is refused.
  */
 import { NodeServices } from "@effect/platform-node"
 import type { Pivot } from "@sip/contracts"
@@ -24,18 +26,27 @@ import { CLEANUP_GATE, RFC_GATE } from "../src/checked.js"
 import { readExpanded } from "../src/expanded.js"
 import type { Lint } from "../src/lint.js"
 import { cellOfSource } from "../src/source-cells.js"
-import { exitOf, problemLines, validate, type Validation, withCellsDir, writeOut } from "../src/validate.js"
+import { exitOf, outRefusal, problemLines, validate, type Validation, withCellsDir, writeOut } from "../src/validate.js"
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runner-validate-"))
 afterAll(() => fs.rmSync(dir, { recursive: true, force: true }))
 
-/** Alice's INVITE reaching Bob, who answers it 200 with the To tag checked. */
+/**
+ * Alice's INVITE, sent once the lane is ready, reaching Bob, who answers it
+ * 200 confirming the dialog, with the To tag checked.
+ */
 const FLOW = [
   {
     id: "s1",
     leg: "A",
     op: "send",
-    msg: { method: "INVITE", headers: [{ name: "Allow", value: "INVITE, ACK, BYE" }] },
+    awaits: "lane-ready",
+    msg: {
+      method: "INVITE",
+      cseq: 1,
+      contact: { display: "Alice", user: "alice" },
+      headers: [{ name: "Allow", value: "INVITE, ACK, BYE" }, { name: "X-Origin", value: "a", class: "origin-platform-header" }]
+    },
     delay: { ms: 0, from: "trigger", compressible: true, timer_linked: false }
   },
   {
@@ -44,7 +55,11 @@ const FLOW = [
     op: "expect",
     check: "assert",
     msg: { method: "INVITE" },
-    checks: [{ field: "hdr.From", op: "regex", value: "alice" }, { field: "hdr.X-Debug", op: "absent" }],
+    checks: [
+      { field: "hdr.From", op: "regex", value: "alice" },
+      { field: "hdr.X-Debug", op: "absent" },
+      { field: "hdr.X-Origin", op: "exists", class: "origin-platform-header" }
+    ],
     delay: { ms: 0, from: "step:s1", compressible: true, timer_linked: false }
   },
   {
@@ -52,6 +67,7 @@ const FLOW = [
     leg: "A",
     op: "expect",
     check: "assert",
+    confirms_dialog: true,
     after: ["s2"],
     msg: { status: 200, reason: "OK", "cseq-method": "INVITE" },
     checks: [{ field: "status", op: "eq", value: "200" }],
@@ -229,12 +245,20 @@ describe("a campaign validated with no lane", () => {
     const expanded = JSON.parse(fs.readFileSync(path.join(out, "cells", "ok-a", "expanded.json"), "utf8"))
     expect(expanded.unreadable).toBeUndefined()
     expect(expanded.legs.A.messages.map((m: { message: string }) => m.message)).toEqual(["INVITE", "200 OK"])
-    expect(expanded.legs.A.messages[0].stated.headers).toEqual([{ name: "Allow", value: "INVITE, ACK, BYE" }])
+    expect(expanded.legs.A.messages[0]).toMatchObject({
+      awaits: "lane-ready",
+      stated: {
+        cseq: 1,
+        contact: { display: "Alice", user: "alice" },
+        headers: [{ name: "Allow", value: "INVITE, ACK, BYE" }, { name: "X-Origin", value: "a", class: "origin-platform-header" }]
+      }
+    })
+    expect(expanded.legs.A.messages[1].confirms_dialog).toBe(true)
     expect(expanded.legs.B.messages[0].checks).toEqual({
       exact: [],
       pattern: [{ field: "hdr.From", value: "alice" }],
-      present: [],
-      absent: ["hdr.X-Debug"]
+      present: [{ field: "hdr.X-Origin", class: "origin-platform-header" }],
+      absent: [{ field: "hdr.X-Debug" }]
     })
     expect(expanded.graph.nodes.map((n: { id: string; after: ReadonlyArray<string> }) => [n.id, n.after])).toEqual([
       ["s1", []],
@@ -244,5 +268,25 @@ describe("a campaign validated with no lane", () => {
     expect(expanded.timers.linkedDelays.map((d: { step: string; ms: number }) => [d.step, d.ms])).toEqual([["s3", 32000]])
     expect(expanded.claims.postconditions).toEqual({ cdr: { count: 1 } })
     expect(expanded.claims.checked.at(-1).anchor).toBe("rfc")
+  })
+
+  it("leaves under a reused --out only the cells of its last validation", async () => {
+    const out = path.join(dir, "again")
+    await validated([file("ok"), file("other")], out)
+    await validated([file("ok")], out)
+    expect(fs.readdirSync(path.join(out, "cells")).sort()).toEqual(["ok-a", "ok-b"])
+  })
+
+  it("refuses an --out holding what no validation writes, and takes an empty or absent one", async () => {
+    const foreign = path.join(dir, "foreign")
+    fs.mkdirSync(foreign, { recursive: true })
+    fs.writeFileSync(path.join(foreign, "notes.txt"), "mine\n")
+    const refusalAt = (out: string) => Effect.runPromise(outRefusal(out).pipe(Effect.provide(NodeServices.layer)))
+    expect(await refusalAt(foreign)).toBe(
+      `--out ${foreign} holds notes.txt, which a validation does not write: name an empty directory, or one a validation wrote`
+    )
+    expect(await refusalAt(path.join(dir, "absent"))).toBeUndefined()
+    await validated([file("ok")], path.join(dir, "again"))
+    expect(await refusalAt(path.join(dir, "again"))).toBeUndefined()
   })
 })

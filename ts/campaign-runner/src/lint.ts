@@ -6,6 +6,7 @@
  * prebuilt, or the checkout's release build brought up to date).
  */
 import { PivotSchemaCli } from "@sip/toolchain"
+import { type CliFailed, type CliUnavailable, runner } from "@sip/toolchain/spawn"
 import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -13,6 +14,27 @@ import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessS
 
 /** The error-severity findings of the document at `scenario`; none where it is lint-clean. */
 export type Lint = (scenario: string) => Effect.Effect<ReadonlyArray<string>, Error>
+
+/** Why a tool's run failed, in its own words where it said any. */
+const whyNot = (e: CliFailed | CliUnavailable): string =>
+  e._tag === "Toolchain.CliFailed"
+    ? `${e.binary} ${e.args.join(" ")} exited ${e.exitCode}${e.stderr.trim() === "" ? "" : `: ${e.stderr.trim().split("\n")[0]}`}`
+    : `${e.binary} does not start: ${e.cause instanceof Error ? e.cause.message : String(e.cause)}`
+
+/**
+ * The `pivot-schema` binary `ready` makes ready and names, once it answers
+ * `pivot-schema schema pivot`: a tool that does not run fails here, once,
+ * naming it and why, rather than on every document it would lint.
+ */
+export const runningPivotSchema = <E, R>(ready: Effect.Effect<string, E, R>) =>
+  Effect.gen(function*() {
+    const bin = yield* ready
+    const cli = yield* runner
+    yield* cli.ok(bin, ["schema", "pivot"]).pipe(
+      Effect.mapError((e) => new Error(`the pivot schema tool ${bin} does not run: ${whyNot(e)}`))
+    )
+    return bin
+  })
 
 /** The lint of the `pivot-schema` binary `ready` makes ready and names, made ready first. */
 export const pivotLint = <E, R>(ready: Effect.Effect<string, E, R>) =>

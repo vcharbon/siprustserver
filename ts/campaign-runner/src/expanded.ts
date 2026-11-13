@@ -4,12 +4,14 @@
  *
  * - `legs`: each leg's messages in flow order, each with what the party does
  *   (`send`) or expects (`expect`), the message (method, or status and reason,
- *   with its CSeq method), what the message spec states (R-URI, From, To,
- *   headers with their values, headers only present), its checks sorted by
- *   kind (`exact` for `eq`, `pattern` for `regex`, `present`, `absent`),
- *   whether a check mode records rather than asserts, whether it is optional,
- *   which `unordered` group or `alt` branch holds it, its `after` edges and
- *   delay;
+ *   with its CSeq method), everything else the message spec states (R-URI,
+ *   From, To, CSeq, Contact, headers with their values and classes, headers
+ *   only present, body), its checks sorted by kind (`exact` for `eq`,
+ *   `pattern` for `regex`, `present`, `absent`) with their classes, whether a
+ *   check mode records rather than asserts, whether it is optional, which
+ *   `unordered` group or `alt` branch holds it, its `after` edges and delay,
+ *   and every other field the step states under its document name (`awaits`,
+ *   `confirms_dialog`, `early`, `overlap`, `retransmits`), so none is dropped;
  * - `graph`: every flow node in order (message steps, injects with their
  *   action and target, `alt`, `unordered`), its `after` edges, the operations
  *   the cell injects as steps and whether a tag makes it run alone;
@@ -30,20 +32,27 @@ import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
 import type { Cell } from "./cell.js"
 
+/** A check as its sorted list holds it: every field of the check but its operator, which names the list. */
+type Sorted = Omit<Check.Check, "op">
+
 /** A check sorted by what it asserts. */
 interface Checks {
-  readonly exact: ReadonlyArray<{ readonly field: string; readonly value: string | undefined }>
-  readonly pattern: ReadonlyArray<{ readonly field: string; readonly value: string | undefined }>
-  readonly present: ReadonlyArray<string>
-  readonly absent: ReadonlyArray<string>
+  readonly exact: ReadonlyArray<Sorted>
+  readonly pattern: ReadonlyArray<Sorted>
+  readonly present: ReadonlyArray<Sorted>
+  readonly absent: ReadonlyArray<Sorted>
 }
 
-/** `checks` sorted by their operator. */
+/** The checks of `checks` asserting with `op`, each kept whole but its operator. */
+const withOp = (checks: ReadonlyArray<Check.Check>, op: Check.CheckOp): ReadonlyArray<Sorted> =>
+  checks.filter((c) => c.op === op).map(({ op: _op, ...sorted }) => sorted)
+
+/** `checks` sorted by their operator, each check's other fields (its value, its class) kept. */
 export const checksOf = (checks: ReadonlyArray<Check.Check>): Checks => ({
-  exact: checks.filter((c) => c.op === "eq").map((c) => ({ field: c.field, value: c.value })),
-  pattern: checks.filter((c) => c.op === "regex").map((c) => ({ field: c.field, value: c.value })),
-  present: checks.filter((c) => c.op === "exists").map((c) => c.field),
-  absent: checks.filter((c) => c.op === "absent").map((c) => c.field)
+  exact: withOp(checks, "eq"),
+  pattern: withOp(checks, "regex"),
+  present: withOp(checks, "exists"),
+  absent: withOp(checks, "absent")
 })
 
 /** Where a step sits in the flow: a node of its own, an `unordered` group or an `alt` branch. */
@@ -53,30 +62,34 @@ type Placed = { readonly node: string } | { readonly unordered: string } | { rea
 const messageOf = (msg: Flow.Step["msg"]): string =>
   msg.method !== undefined ? msg.method.toUpperCase() : `${msg.status ?? "?"}${msg.reason === undefined ? "" : ` ${msg.reason}`}`
 
-/** One message step as a leg's reader sees it. */
-const stepOf = (step: Flow.Step, placed: Placed) => ({
-  step: step.id,
-  op: step.op,
-  message: messageOf(step.msg),
-  ...(step.msg["cseq-method"] === undefined ? {} : { cseqMethod: step.msg["cseq-method"].toUpperCase() }),
-  ...placed,
-  ...(step.optional === true ? { optional: true } : {}),
-  ...(step.auto === true ? { auto: true } : {}),
-  ...(step.in_dialog === true ? { inDialog: true } : {}),
-  ...(step.check === "record" ? { checkMode: "record" } : {}),
-  stated: {
-    ...(step.msg.ruri === undefined ? {} : { ruri: step.msg.ruri }),
-    ...(step.msg.from === undefined ? {} : { from: step.msg.from }),
-    ...(step.msg.to === undefined ? {} : { to: step.msg.to }),
-    ...(step.msg.headers === undefined ? {} : { headers: step.msg.headers.map((h) => ({ name: h.name, value: h.value })) }),
-    ...(step.msg["headers-present"] === undefined ? {} : { headersPresent: step.msg["headers-present"] }),
-    ...(step.msg.body === undefined ? {} : { body: step.msg.body })
-  },
-  checks: checksOf(step.checks ?? []),
-  after: step.after ?? [],
-  delay: step.delay,
-  ...(step.within_ms === undefined ? {} : { withinMs: step.within_ms })
-})
+/**
+ * One message step as a leg's reader sees it. The fields restated here are
+ * named for the reader; every other field the step states (`awaits`,
+ * `confirms_dialog`, `early`, `overlap`, `retransmits`, any field the format
+ * gains) is kept under its document name, and `stated` is the message spec
+ * whole but the method, status, reason and CSeq method `message` names.
+ */
+const stepOf = (step: Flow.Step, placed: Placed) => {
+  const { id, op, msg, checks, after, delay, within_ms, optional, auto, in_dialog, check, ...unrestated } = step
+  const { method: _method, status: _status, reason: _reason, "cseq-method": cseqMethod, ...stated } = msg
+  return {
+    step: id,
+    op,
+    message: messageOf(msg),
+    ...(cseqMethod === undefined ? {} : { cseqMethod: cseqMethod.toUpperCase() }),
+    ...placed,
+    ...(optional === true ? { optional: true } : {}),
+    ...(auto === true ? { auto: true } : {}),
+    ...(in_dialog === true ? { inDialog: true } : {}),
+    ...(check === "record" ? { checkMode: "record" } : {}),
+    ...unrestated,
+    stated,
+    checks: checksOf(checks ?? []),
+    after: after ?? [],
+    delay,
+    ...(within_ms === undefined ? {} : { withinMs: within_ms })
+  }
+}
 
 /** Every message step of `flow` in order, with where it sits. */
 const placedSteps = (flow: ReadonlyArray<Flow.FlowNode>): ReadonlyArray<{ readonly step: Flow.Step; readonly placed: Placed }> =>
