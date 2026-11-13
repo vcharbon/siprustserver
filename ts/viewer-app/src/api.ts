@@ -510,7 +510,8 @@ export interface TriageStudy {
   readonly corpusDir?: string
   /** Where the flows document is and how many legs it holds; its legs come per window. */
   readonly flows?: FlowsPlace
-  readonly auto: unknown
+  /** The line the capture's failed extraction left; absent where none. */
+  readonly extractionFailure?: string
   /** The generator's refusal to cut, where it wrote one: a `no-cases` capture's evidence. */
   readonly exclusions?: { readonly path: string; readonly document: unknown }
   readonly cases: readonly TriageStudyCase[]

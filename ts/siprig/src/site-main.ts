@@ -11,7 +11,7 @@
  */
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Roots, TicketStates } from "@sip/lab-host"
-import { Collectors, Identity, Launcher, Tools, Tracker } from "@sip/corpus"
+import { Collectors, Extraction, Identity, Launcher, Tools, Tracker } from "@sip/corpus"
 import { LaneCatalog, RigPath } from "@sip/rig"
 import * as Pack from "@sip/rig/pack"
 import {
@@ -159,9 +159,15 @@ const ViewerLayer = Layer.provideMerge(Links.layer, Layer.mergeAll(
   Collect.layer
 )).pipe(Layer.provideMerge(Inbox.layer))
 
-const DeploymentLayer = Layer.mergeAll(Collectors.layer, Launcher.layer, Identity.layer, Tracker.layer, Tools.layer).pipe(
-  Layer.provideMerge(Roots.layer(LAB))
-)
+/** The base's seams: it composes no extraction, so a study states no extraction failure. */
+const DeploymentLayer = Layer.mergeAll(
+  Collectors.layer,
+  Launcher.layer,
+  Identity.layer,
+  Tracker.layer,
+  Tools.layer,
+  Extraction.layer
+).pipe(Layer.provideMerge(Roots.layer(LAB)))
 
 /** The pack's title, the manifest at `dir` holds; "siprig" where no pack is named. */
 const titleOf = (dir: string | undefined) =>

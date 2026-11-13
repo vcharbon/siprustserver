@@ -28,7 +28,7 @@
  * alone: its cells in every run, its case, its results, the standing cut's
  * refusal of it and the generator's record of it — a capture of thousands of
  * calls is no page for the one a reader opened, so nothing of another call is
- * read and the whole-capture rollups (`auto`, each run's `campaign`) stay with
+ * read and the whole-capture rollups (the extraction's failure, each run's `campaign`) stay with
  * the capture study. A call the cut dropped since the run replayed it still
  * answers with its cells; only a call nothing names is a 404, naming both.
  *
@@ -44,6 +44,7 @@ import * as CallEvidence from "@sip/corpus/report/call-evidence"
 import { TERMINATED } from "@sip/corpus/replay/cell-trim"
 import * as Content from "@sip/corpus/content/content"
 import { excludedFile } from "@sip/corpus/cut/excluded"
+import * as Extraction from "@sip/corpus/deployment/extraction"
 import { Confrontation, Verification } from "@sip/contracts"
 import { TicketStates } from "@sip/lab-host"
 import { Effect, Layer, Option } from "effect"
@@ -325,7 +326,12 @@ export interface TriageStudy {
    * refuses to hold as one. The legs come per window, off their own routes.
    */
   readonly flows?: { readonly path: string; readonly legs: number }
-  readonly auto: unknown
+  /**
+   * The line the capture's failed extraction left, as the deployment's
+   * `Extraction` reads it; absent where it left none, where no extraction is
+   * composed, and in the study of one call.
+   */
+  readonly extractionFailure?: string
   /** The generator's refusal to cut, where it wrote one: the `no-cases` evidence. */
   readonly exclusions?: { readonly path: string; readonly document: unknown }
   readonly cases: readonly StudyCase[]
@@ -465,6 +471,7 @@ export const layer = Layer.effect(
     const calls = yield* Calls.Service
     const refusals = yield* Refusals.Service
     const tickets = yield* TicketStates.Service
+    const extraction = yield* Extraction.Service
     const pack = yield* SitePack.Service
     const sutLogs = pack.sutLogs
     const triageForms = pack.triage.forms
@@ -1041,6 +1048,9 @@ export const layer = Layer.effect(
         : refusal === undefined
         ? undefined
         : exclusionsOf(yield* locateExclusions(triage, capture), caseId)
+      const extractionFailure = caseId === undefined && hasCorpus
+        ? yield* extraction.failureOf(corpusDir, capture).pipe(Effect.orElseSucceed(() => undefined))
+        : undefined
       return {
         capture,
         ...(caseId === undefined ? {} : { case: caseId }),
@@ -1075,7 +1085,7 @@ export const layer = Layer.effect(
         }),
         ...(hasCorpus ? { corpusDir } : {}),
         ...(flows === undefined ? {} : { flows }),
-        auto: caseId === undefined ? yield* readJson(path.join(corpusDir, "auto.json")) : null,
+        ...(extractionFailure === undefined ? {} : { extractionFailure }),
         ...(exclusions === undefined ? {} : { exclusions }),
         cases,
         ...(hasSession ? { sessionDir } : {}),

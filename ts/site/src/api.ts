@@ -478,7 +478,8 @@ export const TriageStudyView = Schema.Struct({
   corpusDir: Schema.optionalKey(Schema.String),
   /** Where the flows document is and how many legs it holds; absent where none is. Its legs come per window, below. */
   flows: Schema.optionalKey(Schema.Struct({ path: Schema.String, legs: Schema.Number })),
-  auto: Schema.Unknown,
+  /** The line the capture's failed extraction left, as the deployment's extraction reads it; absent where none. */
+  extractionFailure: Schema.optionalKey(Schema.String),
   /** The generator's refusal to cut, where it wrote one. */
   exclusions: Schema.optionalKey(Schema.Struct({ path: Schema.String, document: Schema.Unknown })),
   cases: Schema.Array(TriageStudyCase),
