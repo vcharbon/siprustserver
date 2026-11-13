@@ -5,17 +5,19 @@
  * one its replay exported, joined to it on its caller's Call-ID and judged by
  * the pack's `call-records` judge, which attaches it flattened and its claimed
  * fields compared; the run is recorded in the store as the `reference`
- * campaign. On the reference lane, through a workspace holding it on free
- * loopback addresses, the base stands the upstream B2BUA runner for the batch
- * and runs both cells in the plain binary's batch process on the real clock
- * (about 0.7 s); both pass, `calls-ended` reads the runner holding no call
- * after each, the batch's end reads it holding none, the `call-records`
- * collector reads the record the runner wrote of each call, which the judge
- * passes, and the runner captured both legs of each call while `capture`,
- * cutting for failed cells alone, attaches nothing. The runner's capture and
- * record files hold that job's alone, what an earlier one left gone. A job
- * collector of the workspace failing `bob is busy` has `capture` attach that
- * cell, and it alone, its calls' packets.
+ * campaign. The operations a run names as its setup are injected before its
+ * cells and healed after them, each phase an event of its job; one needing a
+ * part no lane of the run names refuses the run before its job opens. On the
+ * reference lane, through a workspace holding it on free loopback addresses,
+ * the base stands the upstream B2BUA runner for the batch and runs both cells
+ * in the plain binary's batch process on the real clock (about 0.8 s); both
+ * pass, `calls-ended` reads the runner holding no call after each, the
+ * batch's end reads it holding none, the `call-records` collector reads the
+ * record the runner wrote of each call, which the judge passes, and the
+ * runner captured both legs of each call while `capture`, cutting for failed
+ * cells alone, attaches nothing. The runner's log, capture and record files
+ * hold no earlier job's lines. A job collector of the workspace failing `bob
+ * is busy` has `capture` attach that cell, and it alone, its calls' packets.
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  *
  * The replay binary is `REPLAY_BIN`, else the workspace's build of

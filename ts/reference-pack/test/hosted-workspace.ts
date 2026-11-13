@@ -61,9 +61,10 @@ const FAIL_BUSY = {
 /**
  * The workspace `dir` holding the reference lane of the pack at `pack` on
  * free addresses: its runner logging, naming its pid, capturing and writing
- * its records where `written` says, `calls-ended` read 0.1 s after each call
- * so a batch stays under a second, and the `fail-busy` collector where
- * `failing` is set.
+ * its records where `written` says, `calls-ended` read 0.1 s after each
+ * call, so a batch stays under a second and each reading falls after the
+ * next call, run once the lane's one call ended, ended too, and the
+ * `fail-busy` collector where `failing` is set.
  */
 export const hostedWorkspace = async (pack: string, dir: string, written: Written, failing = false): Promise<string> => {
   const lane = fs.readFileSync(path.join(pack, "lanes", "reference.toml"), "utf8")

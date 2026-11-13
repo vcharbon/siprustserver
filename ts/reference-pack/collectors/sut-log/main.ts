@@ -3,7 +3,10 @@
  * `open` keeps how long the log file the lane's `b2bua-runner` part names
  * already is; `collect` reads what the batch appended after it, attaches it
  * whole to the batch and, cut to each cell (`cut.ts`), to each cell, as `log`
- * attachments. It answers no verification.
+ * attachments, then empties the log, the collector's lock keeping every
+ * other batch's collector off it, so the file holds one batch's lines at
+ * most. The runner appends to it, so what it writes after lands at its new
+ * end. It answers no verification.
  *
  * It needs no library: node runs it with its types stripped, it reads the
  * step's variables and `context.v1` itself, and answers in the lines of
@@ -73,6 +76,7 @@ const main = (): void => {
     }
     attach(out, `${cell.id}.log`, "the B2BUA runner's log over the call", cut(entries, window), cell.id)
   }
+  if (fs.existsSync(log)) fs.truncateSync(log)
 }
 
 try {
