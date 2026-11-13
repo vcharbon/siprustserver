@@ -3,13 +3,16 @@
 //! The in-memory writer ([`InMemoryCdrWriter`]) lets tests assert exactly one
 //! CDR per call; [`BufferedCdrWriter`] is the production drop-on-overload buffer.
 //! A transport sink publishes the bytes of a [`CdrEncoder`], by default
-//! [`JsonRecordEncoder`] (the [`CdrRecord`] as JSON).
+//! [`JsonRecordEncoder`] (the [`CdrRecord`] as JSON), and tells a
+//! [`CdrDeliveryObserver`] how and when each record ended.
 
 mod buffered;
+mod delivery;
 mod encoder;
 mod memory;
 
 pub use buffered::BufferedCdrWriter;
+pub use delivery::{CdrDelivery, CdrDeliveryObserver};
 pub use encoder::{CdrEncodeError, CdrEncoder, JsonRecordEncoder};
 pub use memory::InMemoryCdrWriter;
 
