@@ -38,11 +38,11 @@ fn free_udp_port() -> SocketAddr {
 }
 
 /// The Prometheus text a system's `/metrics` answers.
-type Body = Arc<dyn Fn() -> String + Send + Sync>;
+pub(crate) type Body = Arc<dyn Fn() -> String + Send + Sync>;
 
 /// Serves `body()` on an HTTP listener of its own, as a hosted system's
 /// `/metrics` does; its address.
-fn metrics_of(body: Body) -> SocketAddr {
+pub(crate) fn metrics_of(body: Body) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a metrics listener");
     let addr = listener.local_addr().expect("its address");
     std::thread::spawn(move || {
@@ -136,7 +136,7 @@ fn batch(
 }
 
 /// Each verification line of the bundle at `out`, by name: its answer.
-fn answers(out: &Path) -> Vec<(String, String)> {
+pub(crate) fn answers(out: &Path) -> Vec<(String, String)> {
     let text = std::fs::read_to_string(out.join("verifications.json")).expect("the cell's lines");
     let lines: Vec<serde_json::Value> = serde_json::from_str(&text).expect("a list of lines");
     lines
