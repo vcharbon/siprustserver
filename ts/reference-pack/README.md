@@ -47,6 +47,11 @@ the image's `siprig-campaign run`).
 | attachment `records` | the `call-records` judge |
 | attachment `diff` | the `call-records` judge |
 
+Not shown, since each would add a process start to every hosted batch: a
+pre-check (a collector with `at = "before"`, ADR-0060 appendix §3), a collector's `close` step
+(§5; `sut-log` empties its log in `collect` instead) and an executable judge (`run`, §6; the
+`call-records` judge is a module).
+
 ## The reference capture
 
 `capture/forked-reliable.pcapng` is one call recorded through the upstream B2BUA. The case
