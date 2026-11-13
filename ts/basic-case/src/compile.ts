@@ -1,8 +1,9 @@
 /**
  * A basic case compiled to its cell (`@sip/rig` `CompiledCell`): one call
  * from the caller's endpoint to the callee's through the system under test,
- * the shape's flow, the session descriptions as resources, and the case's
- * claims beside the document. The document is replayable on every lane, and
+ * the shape's flow with the case's operation steps injected in it, the
+ * session descriptions as resources, and the case's claims and tags beside
+ * the document. The document is replayable on every lane, and
  * states no CDR expectation: what a case expects of the system's records is a
  * claim.
  */
@@ -39,14 +40,14 @@ export interface Call {
 
 /** The pivot document `c` plays. */
 export const documentOf = (c: BasicCase): Pivot.PivotV3 =>
-  callDocumentOf({ title: c.title, caller: c.caller, callee: c.callee, note: `basic case of shape ${c.shape}` }, flowOf(c).steps)
+  callDocumentOf({ title: c.title, caller: c.caller, callee: c.callee, note: `basic case of shape ${c.shape}` }, flowOf(c).nodes)
 
 /**
  * The pivot document playing `steps` between the caller's leg `A` and the
  * callee's leg `B` of `call`, as a basic case's is: a flow a shape does not
  * write keeps the form's parties, endpoints, lanes and budgets.
  */
-export const callDocumentOf = (call: Call, steps: ReadonlyArray<Flow.Step>): Pivot.PivotV3 => ({
+export const callDocumentOf = (call: Call, steps: ReadonlyArray<Flow.FlowNode>): Pivot.PivotV3 => ({
   pivot_version: Pivot.PIVOT_VERSION,
   case: {
     id: idOf(call.title),
@@ -83,7 +84,8 @@ export const compile = (c: BasicCase): CompiledCell.CompiledCell => ({
   title: c.title,
   document: documentOf(c),
   resources: RESOURCES,
-  claims: { ...c.claims }
+  claims: { ...c.claims },
+  ...(c.tags === undefined ? {} : { tags: c.tags })
 })
 
 /**

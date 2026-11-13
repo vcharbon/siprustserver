@@ -2,12 +2,14 @@
  * A compiled cell (ADR-0060 appendix §16): what a case source yields for one
  * cell. Its id names its directory, the case and sub-case it plays name its
  * results, the pivot document is what the interpreter runs, the resources are
- * the files the document's bodies name, and the claims (§4) ride beside the
- * document, never in it.
+ * the files the document's bodies name, and the claims (§4) and the tags its
+ * case carries ride beside the document, never in it. The operations a cell
+ * asks for are its document's operation steps' (`operation-step.ts`).
  *
- * A cell is refused when a resource path leaves its directory, or when a body
- * of its document names a resource the cell does not carry. A cell asking for
- * an operation its lane does not bind is not runnable there (`Lanes.unboundOf`).
+ * A cell is refused when a resource path leaves its directory, when a body of
+ * its document names a resource the cell does not carry, or when its
+ * document's injects do not hold as operation steps. A cell asking for an
+ * operation its lane does not bind is not runnable there (`Lanes.unboundOf`).
  */
 import { Body, Pivot } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -15,6 +17,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as Schema from "effect/Schema"
 import * as path from "node:path"
 import { Name, RelativePath, Text } from "./manifest-file.js"
+import * as OperationStep from "./operation-step.js"
 
 /** The file a cell's claims are written to, beside its document. */
 export const CLAIMS_FILE = "claims.json"
@@ -36,8 +39,8 @@ export const CompiledCell = Schema.Struct({
   resources: Schema.Record(RelativePath, Schema.String),
   /** What the case expects of each collector, by its name (§4), opaque to the base. */
   claims: Schema.Record(Name, Schema.Unknown),
-  /** The operation names its steps ask for (§7): a lane binding none of one cannot run the cell. */
-  operations: Schema.optionalKey(Schema.Array(Name))
+  /** The campaign tags its case carries: one stating alone runs the cell with nothing else on its lane. */
+  tags: Schema.optionalKey(Schema.Array(Name))
 })
 export interface CompiledCell extends Schema.Schema.Type<typeof CompiledCell> {}
 
@@ -51,10 +54,11 @@ const resourcesNamed = (document: Pivot.PivotV3): ReadonlyArray<string> =>
     return []
   })
 
-/** Why `cell` does not hold, or `undefined`: a body naming a resource the cell does not carry. */
+/** Why `cell` does not hold, or `undefined`: a body naming a resource the cell does not carry, an inject that is no operation step. */
 export const meaningOf = (cell: CompiledCell): string | undefined => {
   const missing = resourcesNamed(cell.document).find((ref) => !(ref in cell.resources))
-  return missing === undefined ? undefined : `its document names the resource ${missing}, which the cell does not carry`
+  if (missing !== undefined) return `its document names the resource ${missing}, which the cell does not carry`
+  return OperationStep.refusalOf(cell.document)
 }
 
 /**

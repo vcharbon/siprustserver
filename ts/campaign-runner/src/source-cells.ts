@@ -1,7 +1,8 @@
 /**
  * The cells a case source the pack names yields (`@sip/rig` `CaseSource`), as
  * the runner runs them: such a cell holds no lock, needs no capability, is
- * replayed once and holds nothing after it; its checks are its document's.
+ * replayed once and holds nothing after it; its checks are its document's,
+ * and the operations it asks for are its document's steps'.
  *
  * Its `call-records` claim is stated in the document it runs
  * (`postconditions.claims`), which the judge answers over the records the
@@ -12,7 +13,7 @@
  * is refused (`claims.ts`).
  */
 import { Postcondition } from "@sip/contracts"
-import type { CompiledCell } from "@sip/rig"
+import { type CompiledCell, OperationStep } from "@sip/rig"
 import * as Result from "effect/Result"
 import type { Cell, Checked } from "./cell.js"
 import { checkedOf } from "./checked.js"
@@ -65,22 +66,29 @@ export interface Placing {
   readonly gates: ReadonlyArray<Checked>
 }
 
-/** The runner's cell for the source cell `answered`, placed as `placing` says; a pack's cell adds its own fields beside it. */
-export const cellOfSource = ({ compiled, notRequested }: Answered, placing: Placing): Cell => ({
-  id: compiled.id,
-  ref: compiled.case,
-  subcase: compiled.sub_case ?? "",
-  retries: 0,
-  tags: placing.tags,
-  alone: placing.alone,
-  heal: { healMs: 0, healRealClockOnSimulatedMs: 0 },
-  source: placing.source,
-  checked: checkedOf(compiled.document, placing.gates),
-  locks: [],
-  needs: [],
-  dir: placing.dir,
-  endpoints: compiled.document.endpoints.map((e) => e.id),
-  egress: placing.egress,
-  notRequested,
-  ...(compiled.operations === undefined ? {} : { operations: compiled.operations })
-})
+/**
+ * The runner's cell for the source cell `answered`, placed as `placing` says,
+ * asking for the operations its document's steps inject; a pack's cell adds
+ * its own fields beside it.
+ */
+export const cellOfSource = ({ compiled, notRequested }: Answered, placing: Placing): Cell => {
+  const operations = OperationStep.operationsOf(compiled.document)
+  return {
+    id: compiled.id,
+    ref: compiled.case,
+    subcase: compiled.sub_case ?? "",
+    retries: 0,
+    tags: placing.tags,
+    alone: placing.alone,
+    heal: { healMs: 0, healRealClockOnSimulatedMs: 0 },
+    source: placing.source,
+    checked: checkedOf(compiled.document, placing.gates),
+    locks: [],
+    needs: [],
+    dir: placing.dir,
+    endpoints: compiled.document.endpoints.map((e) => e.id),
+    egress: placing.egress,
+    notRequested,
+    ...(operations.length === 0 ? {} : { operations })
+  }
+}

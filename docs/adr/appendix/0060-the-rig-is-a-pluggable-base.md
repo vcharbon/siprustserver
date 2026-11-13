@@ -345,7 +345,11 @@ probe  = "./probe"             # optional
   One that needs no part runs once. A name the path lacks, or parts no lane names, refuse the
   job before it opens.
 - A case step injects at a named point of its call and heals when the cell ends. The case
-  carries a tag that runs alone.
+  carries a tag that runs alone. The step is an `inject` node of the cell's document whose
+  action is `operation:<name>` and whose `after` names the point (`@sip/rig` `OperationStep`);
+  the call's next send waits on it. A document injecting any other action, or a step naming no
+  point, is refused when its source loads; a case asking for a step and carrying no tag the
+  workspace's `rig.toml` declares `alone` is refused at compile.
 - A lane file's `[operations]` table binds the name a case asks for to an operation of the path.
   A lane where the name resolves to nothing, or that lacks a part the operation needs, cannot
   run the case.
@@ -526,7 +530,9 @@ defineBasicCase({
   caller: "sip:alice@atlanta.example.com",
   callee: "sip:bob@biloxi.example.com",
   final: [{ field: "status", eq: 200 }],
-  claims: { "call-records": { count: 1 } }
+  claims: { "call-records": { count: 1 } },
+  tags: ["disruptive"],                                    // optional
+  steps: [{ operation: "restart-worker", at: "answered" }] // optional
 })
 ```
 
@@ -538,7 +544,9 @@ ends with a BYE from the party `params.ends` names (the caller by default);
 `invite_reject` answers the INVITE with `params.status` (486 by default), a
 status RFC 3261 lets stand without a header beside it and a proxy relays as
 sent (never 503, relayed as 500, §16.7). The `final` checks land
-on the caller's final. A key the form does not name, an address that is no
+on the caller's final. The `tags` ride beside the document. A step injects its operation (§7)
+at `reached` (the INVITE reached the callee) or, in `basic_call`, `answered` (the callee
+received the ACK of its 200), one step per point. A key the form does not name, an address that is no
 `sip:`/`sips:` URI naming a user, a title naming no cell, or a final status
 the shape does not end with is refused when the case is defined.
 
@@ -579,7 +587,7 @@ package that is no Debian package name.
 
 A case source is a module whose default export is an array of compiled cells
 (`@sip/rig` `CompiledCell`: id, case, sub-case, title, the pivot v3 document,
-its resources by path, its claims). `CaseSource.load` refuses, naming the
+its resources by path, its claims, its tags). `CaseSource.load` refuses, naming the
 module, one that does not load, an export that is no such array, a cell that
 does not decode, a body naming a resource the cell does not carry, and two
 cells of one id. A module, not a glob: a pack keeps its own case form and

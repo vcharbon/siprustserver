@@ -15,10 +15,13 @@
  * as the simulated lane answers them, and their documents so stated pass the
  * lint, or the source is broken. A claim its document states that nothing on
  * a lane answers is not requested, or refuses the batch where its collector is
- * required (`claims.ts`).
+ * required (`claims.ts`). A source cell's tags are its own and those
+ * `tag_cases` puts on its source; one the deployment does not declare breaks
+ * the source. A case asking for an operation as a step of its call with no
+ * tag stating alone breaks its file (`operation-needs.ts`).
  */
 import type { Pivot } from "@sip/contracts"
-import { CompiledCell } from "@sip/rig"
+import { CompiledCell, OperationStep } from "@sip/rig"
 import type { Declared } from "@sip/workspace/campaign-tags"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
@@ -30,11 +33,15 @@ import type { Cell, Checked, Heal } from "./cell.js"
 import { checkedOf } from "./checked.js"
 import { unansweredOf } from "./claims.js"
 import type { Lint } from "./lint.js"
+import { aloneRefusalOf } from "./operation-needs.js"
 import * as Results from "@sip/store/campaign-results"
 import { type CompiledCells, PhaseFailed } from "./run.js"
 import type { Only } from "./scope.js"
 import { type Answered, answeredOf, type Placing } from "./source-cells.js"
-import { isAlone, tagsOfFile } from "./selection.js"
+import { caseRefusal, isAlone, tagsOfFile } from "./selection.js"
+
+/** A source cell's heal time: none, the form stating no wait. */
+const NO_HEAL: Heal = { healMs: 0, healRealClockOnSimulatedMs: 0 }
 
 const failed = (reason: string) => new PhaseFailed({ phase: "compile", reason })
 
@@ -114,6 +121,7 @@ const cellOf = <C extends Cell, K extends Compiled>(
   const egress = egressOf(compiled.document)
   if (egress === undefined) return Effect.fail(failed(`${compiled.id}: no endpoint its b-legs land on`))
   const notRequested = unansweredOf(compiled.document, compiler.claimsOf(compiled))
+  const operations = OperationStep.operationsOf(compiled.document)
   return Effect.succeed(compiler.cellOf(compiled, {
     id: compiled.id,
     ref: compiled.ref,
@@ -130,7 +138,8 @@ const cellOf = <C extends Cell, K extends Compiled>(
     endpoints: compiled.document.endpoints.map((e) => e.id),
     egress,
     ...(compiled.laneTimers === undefined ? {} : { laneTimers: compiled.laneTimers }),
-    ...(notRequested.length === 0 ? {} : { notRequested })
+    ...(notRequested.length === 0 ? {} : { notRequested }),
+    ...(operations.length === 0 ? {} : { operations })
   }))
 }
 
@@ -209,8 +218,18 @@ const sourceCells = <C extends Cell, R>(
       findings.push(...found.success)
     }
     if (findings.length > 0) return brokenFor(`fails the pivot schema lint: ${findings.join("; ")}`)
+    const tagged = answered.map(({ compiled: cell }) => {
+      const tags = tagsOfFile(context.declared, file, cell.tags ?? [])
+      return { tags, alone: isAlone(context.declared, tags) }
+    })
+    const unheld = answered.flatMap(({ compiled: cell }, i) => {
+      const { alone, tags } = tagged[i]!
+      const why = caseRefusal(context.declared, cell.id, tags, NO_HEAL) ??
+        aloneRefusalOf(cell.id, OperationStep.operationsOf(cell.document), alone)
+      return why === undefined ? [] : [why]
+    })
+    if (unheld.length > 0) return brokenFor(unheld.join("; "))
     const source = { file: file.file, text: yield* read(file) }
-    const tags = tagsOfFile(context.declared, file, [])
     for (const { compiled: cell } of answered) {
       const named = `${Results.caseIdOf(cell.case, cell.sub_case)} (${source.file})`
       const taken = ids.get(cell.id)
@@ -219,13 +238,13 @@ const sourceCells = <C extends Cell, R>(
       }
       ids.set(cell.id, named)
     }
-    for (const one of answered) {
+    for (const [i, one] of answered.entries()) {
       const cell = one.compiled
       if (!kept(only, { ref: cell.case, subcase: cell.sub_case ?? "" })) continue
       const egress = egressOf(cell.document)
       if (egress === undefined) return { _tag: "Failed", failed: failed(`${cell.id}: no endpoint its b-legs land on`) } satisfies SourceRefusal
       const dir = yield* compiler.writeSource(cellsDir, cell).pipe(Effect.mapError((e) => failed(`write ${cell.id}: ${e.message}`)))
-      into.push(compiler.cellOfSource(one, { dir, source, tags, alone: isAlone(context.declared, tags), egress, gates: compiler.gates }))
+      into.push(compiler.cellOfSource(one, { dir, source, ...tagged[i]!, egress, gates: compiler.gates }))
     }
     return undefined
   })
@@ -267,9 +286,17 @@ export const compileCases = <C extends Cell, K extends Compiled, S extends Selec
         broken.push({ file: file.file, absolute: file.absolute, reason: `fails the pivot schema lint: ${unlinted.success.join("; ")}` })
         continue
       }
-      const source = { file: file.file, text: yield* read(file) }
       const tags = tagsOfFile(context.declared, file, compiler.statedTags(compiled.success))
       const alone = isAlone(context.declared, tags)
+      const unalone = compiled.success.flatMap((one) => {
+        const why = aloneRefusalOf(one.id, OperationStep.operationsOf(one.document), alone)
+        return why === undefined ? [] : [why]
+      })
+      if (unalone.length > 0) {
+        broken.push({ file: file.file, absolute: file.absolute, reason: unalone.join("; ") })
+        continue
+      }
+      const source = { file: file.file, text: yield* read(file) }
       for (const one of compiled.success) {
         const named = `${Results.caseIdOf(one.ref, one.subcase)} (${source.file})`
         const taken = ids.get(one.id)

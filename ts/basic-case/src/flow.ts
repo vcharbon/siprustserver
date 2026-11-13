@@ -1,14 +1,14 @@
 /**
- * The pivot step builder a shape writes its call with: one `send` or `expect`
- * at a time, each step's id, its dwell and its dialog marking derived here
- * (`PCAP2TEST_PIVOT_V3.md` §6.1).
+ * The pivot step builder a shape writes its call with: one `send`, `expect`
+ * or `inject` at a time, each step's id, its dwell, its dialog marking and
+ * its wait on an inject derived here (`PCAP2TEST_PIVOT_V3.md` §6.1, §6.6).
  *
  * A leg's 2xx to its INVITE confirms its dialog: every later step of the leg
  * is `in_dialog`, and the leg's first ACK after it is the one that
  * `confirms_dialog`. An ACK to a non-2xx final belongs to the INVITE's own
  * transaction (RFC 3261 §17.1.1.3) and is neither.
  */
-import { type Check, type Flow, type Msg, Tokens } from "@sip/contracts"
+import { type Check, Flow, type Msg, Tokens } from "@sip/contracts"
 
 /** What a step waits on: the step its dwell is measured from (the call's start where absent) and the dwell. */
 export interface Timing {
@@ -44,12 +44,32 @@ export interface SendOptions extends Placement {
 const isInvite2xx = (msg: Msg.MsgSpec): boolean =>
   msg["cseq-method"] === "INVITE" && msg.status !== undefined && msg.status >= 200 && msg.status < 300
 
-/** The steps of one call, in the order they were added. */
+/**
+ * The nodes of one call, in the order they were added: its steps and the
+ * external events injected between them. The first `send` added after an
+ * inject waits on it (`after`), so the call holds at the inject's point until
+ * the lane's injector answered.
+ */
 export class CallFlow {
-  readonly steps: Array<Flow.Step> = []
+  readonly nodes: Array<Flow.FlowNode> = []
   private readonly confirmed = new Set<string>()
   private readonly ackOwed = new Set<string>()
+  private awaited: Array<string> = []
   private next = 1
+  private nextInject = 1
+
+  /** The message steps, in order. */
+  get steps(): ReadonlyArray<Flow.Step> {
+    return this.nodes.filter(Flow.isStepNode)
+  }
+
+  /** Inject `action` once the step `after` completed (`PCAP2TEST_PIVOT_V3.md` §6.6): the node's id. */
+  inject(action: string, after: string): string {
+    const id = `i${this.nextInject++}`
+    this.nodes.push({ id, op: "inject", action, after: [after] })
+    this.awaited.push(id)
+    return id
+  }
 
   /** Send `msg` on `leg`: the step's id. */
   send(leg: string, msg: Msg.MsgSpec, options: SendOptions = {}): string {
@@ -70,13 +90,16 @@ export class CallFlow {
     const id = `s${this.next++}`
     const inDialog = this.confirmed.has(leg)
     const confirms = inDialog && msg.method === "ACK" && this.ackOwed.delete(leg)
-    this.steps.push({
+    const after = op === "send" ? this.awaited : []
+    if (op === "send") this.awaited = []
+    this.nodes.push({
       id,
       leg,
       op,
       ...(timing.early === undefined ? {} : { early: timing.early }),
       ...(inDialog ? { in_dialog: true } : {}),
       ...(confirms ? { confirms_dialog: true } : {}),
+      ...(after.length > 0 ? { after } : {}),
       ...fields,
       msg,
       delay: {

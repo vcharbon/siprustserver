@@ -8,7 +8,10 @@
  * It runs as a campaign job (the row it was launched as, else its own) under
  * the environment's run lock, recorded in the store as the campaign named
  * after the pack, its collectors those the pack's rig path wires on each
- * lane, at the collection level the run names. Nothing is provisioned. The
+ * lane, at the collection level the run names, its cells selected and
+ * scheduled by the tags the workspace's `rig.toml` declares (a cell carrying
+ * one stating alone runs with nothing else on its lane), none without a
+ * workspace or its `rig.toml`. Nothing is provisioned. The
  * operations the run names as its setup are planned over its lanes
  * (`@sip/rig` `Setup.planOf`), a plan the rig refuses refusing the run
  * before its job opens, injected before its cells and healed at its end,
@@ -37,6 +40,7 @@ import * as path from "node:path"
 import { compile, selectionOf } from "./base-campaign-cells.ts"
 import { CAMPAIGN, REPORT } from "./base-campaign-pack.ts"
 import { deploymentOf, hostingOf, readingOf } from "./base-lane-hosting.ts"
+import { declaredOf } from "./base-workspace.ts"
 
 /** What a base campaign run is asked. */
 export interface Options {
@@ -92,14 +96,15 @@ export const lanesRootOf = (pack: string, manifest: Pack.Pack): string =>
 const aboutOf = (selection: Effect.Success<ReturnType<typeof selectionOf>>) =>
   Object.fromEntries(selection.selected.flatMap((file) => (file.cells ?? []).map((cell) => [cell.case, { title: cell.title }])))
 
-const NO_TAGS: Tagging = { declared: { file: "", tags: {}, tagCases: [] }, allow: [] }
-
 /** The base campaign run `options` asks for: its exit code, a refusal before it opens said and answered 2. */
 export const run = (options: Options) =>
   Effect.gen(function*() {
     const refuse = (reason: string) => Effect.as(Console.error(`${CAMPAIGN.verb}: ${reason}`), 2 as const)
     const manifest = yield* manifestOf(options.pack).pipe(Effect.result)
     if (Result.isFailure(manifest)) return yield* refuse(manifest.failure)
+    const declared = yield* declaredOf(options.workspace).pipe(Effect.result)
+    if (Result.isFailure(declared)) return yield* refuse(declared.failure)
+    const tagging: Tagging = { declared: declared.success, allow: [] }
     const lanesRoot = options.workspace ?? lanesRootOf(options.pack, manifest.success)
     const catalog = yield* LaneCatalog.load(readingOf(options.pack), LaneCatalog.dirsUnder(lanesRoot)).pipe(Effect.result)
     if (Result.isFailure(catalog)) return yield* refuse(catalog.failure.message)
@@ -135,7 +140,7 @@ export const run = (options: Options) =>
           dir: root,
           seed: null,
           scope: null,
-          selection: recordOf(NO_TAGS, picked, false),
+          selection: recordOf(tagging, picked, false),
           provenance: yield* Provenance.current,
           ...(job === undefined ? {} : { jobId: job }),
           identity: (lane) => ReplayIdentity.current(lane, loadOf(LaneCatalog.find(catalog.success, lane)!)),
@@ -149,7 +154,7 @@ export const run = (options: Options) =>
           scope: null,
           coverage: false,
           force: false,
-          tagging: NO_TAGS,
+          tagging,
           root,
           junit: options.junit === undefined ? undefined : path.resolve(options.junit),
           site: options.site,
@@ -159,7 +164,7 @@ export const run = (options: Options) =>
         }, {
           provision: Effect.void,
           compile: Effect.tap(
-            compile(selection.success, path.join(root, "cells"), options.pivotSchema),
+            compile(selection.success, path.join(root, "cells"), options.pivotSchema, declared.success),
             () => store.describe(record.id, aboutOf(selection.success)).pipe(
               Effect.mapError((e) => new PhaseFailed({ phase: "compile", reason: `record the cases: ${String(e)}` }))
             )

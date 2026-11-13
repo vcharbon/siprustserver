@@ -15,6 +15,7 @@ import { pivotLint } from "@sip/campaign-runner/lint"
 import { cellOfSource } from "@sip/campaign-runner/source-cells"
 import { Postcondition } from "@sip/contracts"
 import { CaseSource, CompiledCell } from "@sip/rig"
+import type { Declared } from "@sip/workspace/campaign-tags"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
@@ -124,11 +125,15 @@ export const COMPILER: CaseCompiler<Cell, never, Selected, FileSystem.FileSystem
   cellOfSource
 }
 
-/** The compile phase over `selection` into `cellsDir`, its documents linted by the `pivot-schema` at `binary`. */
-export const compile = (selection: Selected, cellsDir: string, binary: string) =>
+/**
+ * The compile phase over `selection` into `cellsDir`, its documents linted by
+ * the `pivot-schema` at `binary`, its cells' tags read against those
+ * `declared`.
+ */
+export const compile = (selection: Selected, cellsDir: string, binary: string, declared: Declared) =>
   Effect.flatMap(
     pivotLint(Effect.succeed(binary)),
-    (lint) => compileCases(COMPILER, selection, cellsDir, null, { lint, declared: { file: "", tags: {}, tagCases: [] } })
+    (lint) => compileCases(COMPILER, selection, cellsDir, null, { lint, declared })
   )
 
 export * as BaseCampaignCells from "./base-campaign-cells.ts"

@@ -3,11 +3,14 @@
  * command of its own: the `SIPRIG_*` variables, `rig.toml` with the generic
  * sections alone, no directory beyond the generic ones, the store's `siprig`
  * database in the workspace's own postgres on port 5499, the site on 5175,
- * and the rig path over the pack `SIPRIG_PACK` names and the workspace.
+ * the rig path over the pack `SIPRIG_PACK` names and the workspace, and the
+ * campaign tags its `rig.toml` declares.
  */
 import { RigPath } from "@sip/rig"
 import { ConfigFile, Layout, WorkspaceEnv, type WorkspacePack } from "@sip/workspace"
+import * as CampaignTags from "@sip/workspace/campaign-tags"
 import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
 
 export const PACK: WorkspacePack.WorkspacePack<never> = {
   variables: {
@@ -37,6 +40,25 @@ export const RigToml = ConfigFile.make(PACK, { fields: {}, campaignFields: {}, c
 export const { configOf, apply } = WorkspaceEnv.make(PACK, RigToml.decodeText)
 
 export const { layoutOf, of } = Layout.make(PACK)
+
+/** No tag declared: a run with no workspace, or one holding no `rig.toml`. */
+const NO_TAGS: CampaignTags.Declared = { file: "", tags: {}, tagCases: [] }
+
+/**
+ * The campaign tags the workspace at `root` declares in its `rig.toml`
+ * (`[tags]`, `[[tag_cases]]`): none where `root` is undefined or holds no
+ * `rig.toml`; a `rig.toml` that does not read is refused, naming it.
+ */
+export const declaredOf = (root: string | undefined) =>
+  Effect.gen(function*() {
+    if (root === undefined) return NO_TAGS
+    const layout = layoutOf(root)
+    const held = yield* (yield* FileSystem.FileSystem).exists(layout.config).pipe(Effect.orElseSucceed(() => false))
+    if (!held) return NO_TAGS
+    return yield* CampaignTags.declaredIn(Effect.map(configOf(layout), (config) => ({ file: layout.config, config }))).pipe(
+      Effect.mapError((refused) => refused.reason)
+    )
+  })
 
 /** The variable naming the pack's directory in the image. */
 export const PACK_VARIABLE = "SIPRIG_PACK"

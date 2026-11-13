@@ -11,10 +11,13 @@
  *   the system ACKs it on leg B, the caller receives the final and ACKs it
  *   (RFC 3261 §17.1.1.3).
  *
- * The caller's final carries the case's final checks.
+ * The caller's final carries the case's final checks. An operation step is
+ * injected at its point: `reached` after the callee's INVITE, `answered` after
+ * the callee's ACK of its 200; the next message sent waits for it.
  */
 import type { Check, Msg } from "@sip/contracts"
-import { type BasicCall, type BasicCase, DEFAULT_REJECT, type InviteReject, REJECTS } from "./case.js"
+import { OperationStep } from "@sip/rig"
+import { type BasicCall, type BasicCase, DEFAULT_REJECT, type InviteReject, type Point, REJECTS } from "./case.js"
 import { CallFlow } from "./flow.js"
 import { ANSWER, OFFER, REWRITE } from "./media.js"
 
@@ -34,6 +37,13 @@ const HOLD_MS = 200
 /** How long the callee takes to answer an INVITE it received, in ms. */
 const ANSWER_DELAY_MS = 20
 
+/** The operation step `c` states at `point`, injected once the step `reached` completed. */
+const stepAt = (flow: CallFlow, c: BasicCase, point: Point, reached: string): void => {
+  for (const step of c.steps ?? []) {
+    if (step.at === point) flow.inject(OperationStep.actionOf(step.operation), reached)
+  }
+}
+
 /** The checks the case states on the caller's final. */
 const finalChecksOf = (c: BasicCase): ReadonlyArray<Check.Check> =>
   c.final.map((check) => ({ field: check.field, op: "eq", value: String(check.eq) }))
@@ -49,7 +59,9 @@ const dial = (flow: CallFlow, c: BasicCase): string => {
     body: { ref: OFFER, rewrite: [...REWRITE] }
   })
   flow.expect("A", { status: 100, reason: "Trying", "cseq-method": "INVITE", cseq: 1 }, { from: invite, auto: true })
-  return flow.expect("B", { method: "INVITE", body: { mode: "sdp-present" } }, { from: invite })
+  const reached = flow.expect("B", { method: "INVITE", body: { mode: "sdp-present" } }, { from: invite })
+  stepAt(flow, c, "reached", reached)
+  return reached
 }
 
 const basicCall = (flow: CallFlow, c: BasicCall): void => {
@@ -69,6 +81,7 @@ const basicCall = (flow: CallFlow, c: BasicCall): void => {
   })
   const ack = flow.send("A", { method: "ACK", cseq: 1 }, { from: answered, auto: true })
   const acked = flow.expect("B", { method: "ACK", cseq: 1 }, { from: ack, auto: true })
+  stepAt(flow, c, "answered", acked)
   const [ender, other] = (c.params?.ends ?? "caller") === "caller" ? ["A", "B"] : ["B", "A"]
   const bye = flow.send(ender, { method: "BYE" }, { from: acked, ms: HOLD_MS })
   const byeIn = flow.expect(other, { method: "BYE" }, { from: bye })

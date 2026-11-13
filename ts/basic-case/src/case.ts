@@ -1,12 +1,15 @@
 /**
  * The minimal case form (ADR-0060 appendix §14): two parties as plain SIP
  * addresses, the shape their call takes and its parameters, the checks on the
- * final the caller receives, and the claims the case makes of collectors.
+ * final the caller receives, the claims the case makes of collectors, the
+ * campaign tags it carries, and the operations injected as steps of its call.
  *
  * A case is refused when it does not decode (a key the form does not name, an
  * address that is no `sip:`/`sips:` URI with a user part, a status the shape
- * does not play), when its title yields no cell id, and when a `status` check
- * of its final expects another status than the one its shape ends with.
+ * does not play, a tag or an operation that is no name), when its title
+ * yields no cell id, when a `status` check of its final expects another
+ * status than the one its shape ends with, and when an operation step is at a
+ * point its shape does not reach or shares its point with another.
  */
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
@@ -26,8 +29,27 @@ export const FinalCheck = Schema.Struct({
 })
 export interface FinalCheck extends Schema.Schema.Type<typeof FinalCheck> {}
 
-/** A claim's collector name: lower-case letters, digits and dashes. */
-const CollectorName = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]*$/, { title: "a collector name" }))
+/** A collector, operation or campaign tag name: lower-case letters, digits and dashes. */
+const Name = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]*$/, { title: "a name of lower-case letters, digits and dashes" }))
+
+/**
+ * A point of the call an operation step injects at: `reached`, once the
+ * INVITE reached the callee; `answered`, once the callee received the ACK of
+ * its 200, the call up.
+ */
+export const Point = Schema.Literals(["reached", "answered"])
+export type Point = typeof Point.Type
+
+/**
+ * An operation as a step of the call (ADR-0060 appendix §7): the operation
+ * the lane binds by this name, injected at `at`; the call's next message sent
+ * waits for its inject to answer.
+ */
+export const OperationStep = Schema.Struct({
+  operation: Name,
+  at: Point
+})
+export interface OperationStep extends Schema.Schema.Type<typeof OperationStep> {}
 
 const Common = {
   title: Text,
@@ -37,7 +59,11 @@ const Common = {
   callee: Address,
   final: Schema.Array(FinalCheck),
   /** What the case expects of each collector, by its name (ADR-0060 appendix §4). */
-  claims: Schema.optionalKey(Schema.Record(CollectorName, Schema.Unknown))
+  claims: Schema.optionalKey(Schema.Record(Name, Schema.Unknown)),
+  /** The campaign tags the case carries; a case stating a step carries one stating alone, or its campaign refuses it. */
+  tags: Schema.optionalKey(Schema.Array(Name)),
+  /** The operations injected as steps of the call, one per point. */
+  steps: Schema.optionalKey(Schema.Array(OperationStep))
 }
 
 /** Which party hangs up the answered call. */
@@ -111,13 +137,34 @@ export const idOf = (title: string): string =>
 export const finalStatusOf = (c: BasicCase): number =>
   c.shape === "basic_call" ? 200 : (c.params?.status ?? DEFAULT_REJECT)
 
+/** The points each shape's call passes, in its order. */
+export const POINTS: Readonly<Record<BasicCase["shape"], ReadonlyArray<Point>>> = {
+  basic_call: ["reached", "answered"],
+  invite_reject: ["reached"]
+}
+
+/** Why `c`'s operation steps do not hold, or `undefined`: a point its shape does not reach, two steps at one point. */
+const stepsMeaningOf = (c: BasicCase): string | undefined => {
+  const points = POINTS[c.shape]
+  const steps = c.steps ?? []
+  const astray = steps.find((step) => !points.includes(step.at))
+  if (astray !== undefined) {
+    return `steps: ${astray.operation} is at ${astray.at}, which ${c.shape} does not reach (its points: ${points.join(", ")})`
+  }
+  for (const point of points) {
+    const at = steps.filter((step) => step.at === point).map((step) => step.operation).sort()
+    if (at.length > 1) return `steps: ${at.join(" and ")} are both at ${point}: one step per point`
+  }
+  return undefined
+}
+
 /** Why a decoded case does not hold, or `undefined`. */
 const meaningOf = (c: BasicCase): string | undefined => {
   if (idOf(c.title) === "") return "its title holds no letter or digit to name its cell by"
   const status = finalStatusOf(c)
   const contrary = c.final.find((check) => check.field === "status" && String(check.eq) !== String(status))
   return contrary === undefined
-    ? undefined
+    ? stepsMeaningOf(c)
     : `final: expects status ${contrary.eq}, and ${c.shape} ends the INVITE with ${status}`
 }
 
