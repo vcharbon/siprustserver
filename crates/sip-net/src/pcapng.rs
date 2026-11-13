@@ -94,35 +94,36 @@ fn ip_packet(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Option<Vec<u8>
             )
         }
         (from, to) => {
+            let (from, to) = (v6(from).octets(), v6(to).octets());
             let mut header = Vec::with_capacity(40);
             header.extend_from_slice(&[0x60, 0, 0, 0]);
             header.extend_from_slice(&udp_length.to_be_bytes());
             header.extend_from_slice(&[17, 64]);
-            header.extend_from_slice(&v6(from).octets());
-            header.extend_from_slice(&v6(to).octets());
-            let mut pseudo = header[8..40].to_vec();
+            header.extend_from_slice(&from);
+            header.extend_from_slice(&to);
+            let mut pseudo = Vec::with_capacity(40);
+            pseudo.extend_from_slice(&from);
+            pseudo.extend_from_slice(&to);
             pseudo.extend_from_slice(&u32::from(udp_length).to_be_bytes());
             pseudo.extend_from_slice(&[0, 0, 0, 17]);
             (header, pseudo)
         }
     };
-    let mut udp = Vec::with_capacity(usize::from(udp_length));
-    udp.extend_from_slice(&src.port().to_be_bytes());
-    udp.extend_from_slice(&dst.port().to_be_bytes());
-    udp.extend_from_slice(&udp_length.to_be_bytes());
-    udp.extend_from_slice(&0u16.to_be_bytes());
-    udp.extend_from_slice(payload);
-    let checksum = udp_checksum(&pseudo, &udp);
-    udp[6..8].copy_from_slice(&checksum.to_be_bytes());
-    packet.extend_from_slice(&udp);
+    let [p0, p1] = src.port().to_be_bytes();
+    let [q0, q1] = dst.port().to_be_bytes();
+    let [l0, l1] = udp_length.to_be_bytes();
+    let unsummed = [p0, p1, q0, q1, l0, l1, 0, 0];
+    let [c0, c1] = udp_checksum(&pseudo, &unsummed, payload).to_be_bytes();
+    packet.extend_from_slice(&[p0, p1, q0, q1, l0, l1, c0, c1]);
+    packet.extend_from_slice(payload);
     Some(packet)
 }
 
-/// The UDP checksum of the datagram `udp` (its checksum field zero) under the
-/// `pseudo` header: the complement of their one's-complement sum, a zero
-/// result sent as all ones (RFC 768).
-fn udp_checksum(pseudo: &[u8], udp: &[u8]) -> u16 {
-    match !ones_sum(&[pseudo, udp]) {
+/// The UDP checksum of `payload` under its UDP `header` (checksum field zero)
+/// and the IP `pseudo` header: the complement of their one's-complement sum,
+/// a zero result sent as all ones (RFC 768).
+fn udp_checksum(pseudo: &[u8], header: &[u8], payload: &[u8]) -> u16 {
+    match !ones_sum(&[pseudo, header, payload]) {
         0 => 0xffff,
         sum => sum,
     }
