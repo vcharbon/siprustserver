@@ -57,14 +57,24 @@ impl ReadinessSource for NeverReady {
     }
 }
 
+/// The report `GET /admin/cordon` answers with `state`, `cordoned` and
+/// `calls`: the serving process's pid with them.
+fn report_of(state: &str, cordoned: bool, calls: usize) -> serde_json::Value {
+    serde_json::json!({
+        "state": state, "cordoned": cordoned, "calls": calls, "pid": std::process::id()
+    })
+}
+
+/// The GET names the process that serves the route, so an operator holding
+/// a pid can tell whether the worker answering is that process.
 #[tokio::test]
-async fn cordon_and_uncordon_answer_204_twice_and_get_reports_the_state_and_the_calls() {
+async fn cordon_and_uncordon_answer_204_twice_and_get_reports_the_state_the_calls_and_the_pid() {
     let readiness = Readiness::always_ready();
     let s = server(&readiness, 3).await;
     let get = request(s.addr(), "GET", "/admin/cordon").await;
     assert!(get.starts_with("HTTP/1.1 200 OK") && get.contains("application/json"), "{get}");
     let report: serde_json::Value = serde_json::from_str(body(&get)).unwrap();
-    assert_eq!(report, serde_json::json!({"state": "ready", "cordoned": false, "calls": 3}));
+    assert_eq!(report, report_of("ready", false, 3));
 
     for _ in 0..2 {
         let post = request(s.addr(), "POST", "/admin/cordon").await;
@@ -73,7 +83,7 @@ async fn cordon_and_uncordon_answer_204_twice_and_get_reports_the_state_and_the_
     }
     let report: serde_json::Value =
         serde_json::from_str(body(&request(s.addr(), "GET", "/admin/cordon").await)).unwrap();
-    assert_eq!(report, serde_json::json!({"state": "cordoned", "cordoned": true, "calls": 3}));
+    assert_eq!(report, report_of("cordoned", true, 3));
 
     for _ in 0..2 {
         let delete = request(s.addr(), "DELETE", "/admin/cordon").await;
@@ -126,7 +136,7 @@ async fn a_cordon_is_refused_409_on_a_not_ready_and_on_a_draining_node() {
     }
     let report: serde_json::Value =
         serde_json::from_str(body(&request(s.addr(), "GET", "/admin/cordon").await)).unwrap();
-    assert_eq!(report, serde_json::json!({"state": "draining", "cordoned": true, "calls": 0}));
+    assert_eq!(report, report_of("draining", true, 0));
 }
 
 /// `POST /admin/release-all` runs the release once per request and answers

@@ -5,10 +5,11 @@
  * job left on those addresses, named in the file of the lane's `runner-pid`
  * part, is stopped by the inject, so the base stands the job's own runner
  * there, naming it in the same pid file while it runs; the heal and its probe
- * find the stopped one gone. A pid file naming a process that answers on no
- * operator route at the lane's admin address refuses the inject, and the
- * process is left running. A lane binding the operation while it names no
- * `runner-pid` part is refused at load.
+ * find the stopped one gone. A pid file naming a process the lane's admin
+ * address does not vouch for refuses the inject, the process left running:
+ * no runner answers there, the address answers without a runner's state, or
+ * the runner answering is another process (a stale pid file). A lane binding
+ * the operation while it names no `runner-pid` part is refused at load.
  *
  * The runner is `B2BUA_RUNNER_BIN`, else the build of `b2bua-runner`; a
  * missing one FAILS, naming its variable; `TOOLCHAIN_TEST_SKIP=1` skips the
@@ -22,6 +23,7 @@ import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
 import { type ChildProcess, spawn } from "node:child_process"
 import * as fs from "node:fs"
+import * as http from "node:http"
 import * as os from "node:os"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -72,6 +74,22 @@ const running = (pid: number): boolean => {
   } catch {
     return false
   }
+}
+
+/** The admin address of the lane's `b2bua-runner` part. */
+const adminOf = (found: Awaited<ReturnType<typeof referenceLane>>): string => Result.getOrThrow(runnerPartOf(found.lane)).admin
+
+/** `address` (`host:port`) as its host and port. */
+const splitAddress = (address: string): readonly [string, number] => {
+  const at = address.lastIndexOf(":")
+  return [address.slice(0, at), Number(address.slice(at + 1))]
+}
+
+/** What the setup's inject step wrote to its log. */
+const injectLogOf = (found: Awaited<ReturnType<typeof referenceLane>>): string => {
+  const root = path.join(found.dir, "operations")
+  const [instance] = fs.readdirSync(root)
+  return fs.readFileSync(path.join(root, instance!, "inject.log"), "utf8")
 }
 
 /** The setup `restart-worker` on `lane` run around `body`, its events in order. */
@@ -129,10 +147,50 @@ describe.skipIf(skipping)("restart-worker on the reference lane", () => {
     try {
       const { ended, events } = await restarted(found, Effect.void)
       expect(Result.isFailure(ended) ? String(ended.failure) : "", "the inject's refusal").toContain("inject")
+      expect(injectLogOf(found)).toContain(`but no runner answers at ${adminOf(found)}: not signalled`)
       expect(running(stranger.pid!), "the process the pid file names, left running").toBe(true)
       expect(events.map((event) => event.phase)).toEqual(["inject", "failed", "heal", "healed", "recovered"])
     } finally {
       stranger.kill("SIGKILL")
+    }
+  })
+
+  it("refuses to signal a process its pid file names where the admin address answers 200 with no runner's state", async () => {
+    const found = await referenceLane("stateless")
+    const [host, port] = splitAddress(adminOf(found))
+    const server = http.createServer((_request, response) => response.writeHead(200, { "content-type": "application/json" }).end("{}"))
+    await new Promise<void>((resolve) => server.listen(port, host, resolve))
+    const stranger = spawn("sleep", ["30"], { stdio: "ignore" })
+    fs.writeFileSync(found.pid, `${stranger.pid}\n`)
+    try {
+      const { ended } = await restarted(found, Effect.void)
+      expect(Result.isFailure(ended), "the inject refused").toBe(true)
+      expect(injectLogOf(found)).toContain(`but no runner answers at ${adminOf(found)}: not signalled`)
+      expect(running(stranger.pid!), "the process the pid file names, left running").toBe(true)
+    } finally {
+      stranger.kill("SIGKILL")
+      server.close()
+    }
+  })
+
+  it("refuses to signal a process its pid file names where the runner answering at the lane's admin address is another process", async () => {
+    const found = await referenceLane("reused")
+    const part = Result.getOrThrow(runnerPartOf(found.lane))
+    const runner = spawn(RUNNER, [], { env: { ...process.env, ...runnerEnvOf(found.lane, part) }, stdio: ["ignore", "pipe", "pipe"] })
+    const stranger = spawn("sleep", ["30"], { stdio: "ignore" })
+    try {
+      await readyOf(runner, endOf(runner))
+      fs.writeFileSync(found.pid, `${stranger.pid}\n`)
+      const { ended } = await restarted(found, Effect.void)
+      expect(Result.isFailure(ended), "the inject refused").toBe(true)
+      expect(injectLogOf(found)).toContain(
+        `the pid file names process ${stranger.pid}, but the runner at ${adminOf(found)} is process ${runner.pid}: not signalled`
+      )
+      expect(running(stranger.pid!), "the process the stale pid file names, left running").toBe(true)
+      expect(running(runner.pid!), "the runner the pid file does not name, left running").toBe(true)
+    } finally {
+      stranger.kill("SIGKILL")
+      runner.kill("SIGKILL")
     }
   })
 })
