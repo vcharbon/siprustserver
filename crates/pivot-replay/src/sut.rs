@@ -68,9 +68,12 @@ impl Sut for HostedSut {
     }
 }
 
-/// The SUT's `b2bua_active_calls`, where its `/metrics` answers one.
-pub fn active_calls(metrics: SocketAddr) -> Option<u64> {
-    sample(&scrape(metrics)?, "b2bua_active_calls")?.parse().ok()
+/// Each of `names` read off one scrape of the SUT's `/metrics`, in order;
+/// `None` where the endpoint does not answer or renders one of them as no
+/// whole number.
+pub fn gauges(metrics: SocketAddr, names: &[&str]) -> Option<Vec<u64>> {
+    let body = scrape(metrics)?;
+    names.iter().map(|name| sample(&body, name)?.parse().ok()).collect()
 }
 
 /// A SUT's `/metrics` body, over a blocking HTTP/1.0 GET (a localhost round

@@ -5,9 +5,9 @@
 //! binary's own, its lane block `hosted`.
 //!
 //! Its end answers the plain system's `cleanup` gate for every cell of the
-//! batch: the system's `b2bua_active_calls` at the batch-spec's `metrics`
-//! reads 0 within [`REAP_WITHIN`]; a gauge left above it fails every cell's
-//! `cleanup` line, one that cannot be read leaves them not checkable.
+//! batch: each of [`HELD`] at the batch-spec's `metrics` reads 0 within its
+//! `metrics_reap_ms`; one left above 0 fails every cell's `cleanup` line, a
+//! set that cannot be read leaves them not checkable.
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -26,10 +26,16 @@ use crate::spec::{LaneSpec, RunSpec};
 use crate::verifications::{Gates, Standing};
 use crate::{reap, verdict, Case, Failure, RunSummary};
 
-/// How long the batch's end waits for the system to hold no call.
-pub const REAP_WITHIN: Duration = Duration::from_secs(10);
+/// How long the batch's end waits for the system to hold no call, where the
+/// batch-spec states no `metrics_reap_ms`.
+pub const REAP_WITHIN_MS: u64 = 10_000;
 
-/// How often the end reads the gauge again while it waits.
+/// The gauges that each read 0 on a system holding no call: its active
+/// calls, its call map's entries and its SIP routing index's keys. A call
+/// the active gauge lets go while the store keeps it is a store-side leak.
+pub const HELD: [&str; 3] = ["b2bua_active_calls", "b2bua_store_calls", "b2bua_store_sip_index"];
+
+/// How often the end reads the gauges again while it waits.
 const POLL: Duration = Duration::from_millis(250);
 
 /// The batch-spec the harness writes for the plain hosted lane.
@@ -41,6 +47,14 @@ pub struct BatchSpec {
     /// leaves the cleanup gate not checkable.
     #[serde(default)]
     pub metrics: Option<String>,
+    /// How long the batch's end waits for [`HELD`] to read 0.
+    #[serde(default = "reap_within_ms")]
+    pub metrics_reap_ms: u64,
+}
+
+/// The `metrics_reap_ms` a batch-spec stating none waits.
+fn reap_within_ms() -> u64 {
+    REAP_WITHIN_MS
 }
 
 /// The backend double of a system that asks none: it serves nothing, and its
@@ -74,6 +88,7 @@ impl BackendDouble for Unserved {
 /// The plain hosted lane's batch.
 pub struct PlainBatch {
     metrics: Option<SocketAddr>,
+    reap_within: Duration,
 }
 
 impl Registered for PlainBatch {
@@ -92,7 +107,8 @@ impl Registered for PlainBatch {
     async fn stand(spec: &BatchSpec, _seed: u64) -> Result<(PlainBatch, Unserved), Failure> {
         let metrics =
             spec.metrics.as_deref().map(|stated| socket_of("metrics", stated)).transpose()?;
-        Ok((PlainBatch { metrics }, Unserved))
+        let reap_within = Duration::from_millis(spec.metrics_reap_ms);
+        Ok((PlainBatch { metrics, reap_within }, Unserved))
     }
 
     fn cell(host: &Host<PlainBatch>, path: &Path, ordinal: u64) -> Result<RunSummary, Failure> {
@@ -136,10 +152,10 @@ impl Registered for PlainBatch {
             }
             Some(metrics) => {
                 host.waiting.step(format!(
-                    "the system to hold no call (at most {} s)",
-                    REAP_WITHIN.as_secs()
+                    "the system to hold no call (at most {} ms)",
+                    host.reap_within.as_millis()
                 ));
-                match reaped(metrics, REAP_WITHIN).await {
+                match reaped(metrics, host.reap_within).await {
                     Reaped::Clean => (Gate::over(CLEANUP, None), Standing::Judged),
                     Reaped::Held(why) => (Gate::over(CLEANUP, Some(why)), Standing::Judged),
                     Reaped::Unread(why) => {
@@ -180,41 +196,54 @@ fn charge(placed: &[Placed], why: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// What the system's gauge read at the batch's end.
+/// What the system's gauges read at the batch's end.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Reaped {
-    /// It read 0.
+    /// Each of [`HELD`] read 0 on one scrape.
     Clean,
-    /// It never read 0 within the bound: what it last read.
+    /// They never all read 0 within the bound: those the last scrape read
+    /// above 0.
     Held(String),
-    /// It was never read.
+    /// They were never read.
     Unread(String),
 }
 
-/// Reads `b2bua_active_calls` at `metrics` until it is 0 or `within` elapsed.
+/// Reads [`HELD`] at `metrics` until each is 0 on one scrape or `within`
+/// elapsed.
 pub async fn reaped(metrics: SocketAddr, within: Duration) -> Reaped {
     let deadline = tokio::time::Instant::now() + within;
     let mut last = None;
     loop {
-        let read = tokio::task::spawn_blocking(move || crate::sut::active_calls(metrics))
+        let read = tokio::task::spawn_blocking(move || crate::sut::gauges(metrics, &HELD))
             .await
             .ok()
             .flatten();
         match read {
-            Some(0) => return Reaped::Clean,
-            Some(held) => last = Some(held),
+            Some(read) if read.iter().all(|&n| n == 0) => return Reaped::Clean,
+            Some(read) => last = Some(read),
             None => {}
         }
-        if tokio::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             return match last {
-                Some(held) => Reaped::Held(format!(
-                    "the system still held {held} call(s) {} ms after the batch's last cell: \
-                     b2bua_active_calls at {metrics}",
+                Some(read) => Reaped::Held(format!(
+                    "the system still held {} {} ms after the batch's last cell, at {metrics}",
+                    above_zero(&read),
                     within.as_millis()
                 )),
-                None => Reaped::Unread(format!("b2bua_active_calls at {metrics} never answered")),
+                None => Reaped::Unread(format!("{} at {metrics} never answered", HELD.join(", "))),
             };
         }
-        tokio::time::sleep(POLL).await;
+        tokio::time::sleep(POLL.min(deadline - now)).await;
     }
+}
+
+/// The gauges of [`HELD`] that `read` states above 0, each with its value.
+fn above_zero(read: &[u64]) -> String {
+    HELD.iter()
+        .zip(read)
+        .filter(|(_, &n)| n > 0)
+        .map(|(name, n)| format!("{name} {n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
