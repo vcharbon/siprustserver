@@ -110,6 +110,20 @@ describe("the call-records judge", () => {
     })
   })
 
+  it("reads a field the record states null as absent, as the interpreter's record does, and flattens nothing of it", async () => {
+    const record = { ...RECORD, billing_context: null, termination: { ...RECORD.termination, by_leg: null } }
+    const claim = { count: 1, checks: [{ field: "billing_context", op: "absent" }, { field: "termination.by_leg", op: "exists" }] }
+    const { out, lines } = await judged([cellOf("nulls", claim, [record])])
+    expect(verdictOf(lines, "nulls")!["message"]).toContain("no record satisfies the check on termination.by_leg")
+    expect(JSON.parse(attachedOf(out, lines, "nulls", "diff").text)).toEqual({
+      columns: ["claimed", "joined"],
+      rows: [{ field: "termination.by_leg", values: ["(exists)", null] }],
+      same: 2
+    })
+    const flat = JSON.parse(attachedOf(out, lines, "nulls", "records").text) as Record<string, string>
+    expect(Object.keys(flat).filter((field) => field === "billing_context" || field === "termination.by_leg")).toEqual([])
+  })
+
   it("answers a claim stating no whole count not checkable, and gives a cell claiming nothing no line", async () => {
     const { lines } = await judged([cellOf("vague", { checks: CHECKS }, [RECORD]), cellOf("quiet", undefined, [])])
     expect(verdictOf(lines, "vague")).toMatchObject({ answer: "not-checkable" })
