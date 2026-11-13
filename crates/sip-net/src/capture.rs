@@ -10,7 +10,7 @@
 //! never reaches the consumer and is not recorded.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,10 +34,34 @@ pub struct CaptureEndpoint {
 
 impl CaptureEndpoint {
     /// `inner` captured to the file at `path`, created where absent and
-    /// appended to, its section opened. `Err` where the file cannot be opened
-    /// or written.
+    /// appended to, its section opened. A last block an earlier capture's
+    /// write left cut short is dropped first, so the file reads whole. `Err`
+    /// where `inner` is bound to the unspecified address (`InvalidInput`: no
+    /// datagram would state its own address), where the file holds no
+    /// capture of this encoder (`InvalidData`, the file kept), or where it
+    /// cannot be opened or written.
     pub fn open(inner: Arc<dyn UdpEndpoint>, path: &Path) -> std::io::Result<Self> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let local = inner.local_addr();
+        if local.ip().is_unspecified() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "the endpoint is bound to the unspecified address {local}: a capture states \
+                     each datagram's own address, bind a specific one"
+                ),
+            ));
+        }
+        let file = OpenOptions::new().create(true).read(true).append(true).open(path)?;
+        let whole = pcapng::whole_blocks(&file)?;
+        let held = file.metadata()?.len();
+        if whole < held {
+            file.set_len(whole)?;
+            tracing::warn!(
+                file = %path.display(),
+                dropped = held - whole,
+                "the packet capture dropped the block an earlier capture's write left cut short"
+            );
+        }
         (&file).write_all(&pcapng::section_header())?;
         Ok(Self { inner, file, failed: AtomicBool::new(false) })
     }

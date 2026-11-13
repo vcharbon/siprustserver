@@ -52,6 +52,7 @@ pub struct RunnerEnv {
     /// `B2BUA_CAPTURE` — the pcapng file the worker appends each SIP datagram
     /// it sends and receives to, one section per start
     /// ([`sip_net::CaptureEndpoint`]); unset or blank, nothing is captured.
+    /// It refuses the boot where `listen` is the unspecified address.
     pub capture: Option<PathBuf>,
     /// What the process reads the wire under: the default limits and the
     /// exemptions `SIP_EXEMPTIONS` states (comma-separated, default none; a blank
