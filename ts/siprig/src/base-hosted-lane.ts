@@ -27,6 +27,9 @@ import * as path from "node:path"
 /** The part kind a hosted lane of the base names its runner's addresses in. */
 export const RUNNER_PART = "b2bua-runner"
 
+/** The part kind a hosted lane of the base names the file its runner captures its SIP datagrams to in. */
+export const CAPTURE_PART = "sip-capture"
+
 /** The variable naming the B2BUA runner a managed lane stands, ahead of any other place. */
 export const RUNNER_VARIABLE = "B2BUA_RUNNER_BIN"
 
