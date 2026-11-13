@@ -25,6 +25,7 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as ChildProcess from "effect/unstable/process/ChildProcess"
 import { spawn } from "node:child_process"
+import { mkdirSync } from "node:fs"
 import * as path from "node:path"
 
 /** The part kind a hosted lane of the base names its runner's addresses in. */
@@ -129,14 +130,19 @@ export const sutPackOf = (runner: string): Sut.SutPack<LaneView.View, never> => 
   metricsOf: (lane) => Result.getOrUndefined(Result.map(runnerPartOf(lane), (part) => part.metrics)),
   logOf: (lane) => Result.getOrUndefined(runnerPartOf(lane))?.log,
   command: (lane, extraEnv) =>
-    Effect.map(partOrFail(lane), (part) =>
-      ChildProcess.make(runner, [], {
-        env: { ...runnerEnvOf(lane, part), ...extraEnv },
+    Effect.gen(function*() {
+      const part = yield* partOrFail(lane)
+      const env = runnerEnvOf(lane, part)
+      const capture = env["B2BUA_CAPTURE"]
+      if (capture !== undefined) yield* Effect.try(() => mkdirSync(path.dirname(capture), { recursive: true }))
+      return ChildProcess.make(runner, [], {
+        env: { ...env, ...extraEnv },
         extendEnv: true,
         stdin: "ignore",
         killSignal: "SIGTERM",
         forceKillAfter: "10 seconds"
-      }))
+      })
+    })
 })
 
 /** The batch-spec's own fields on `lane`: where the batch's end reads the runner's active calls. */
