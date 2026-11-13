@@ -7,7 +7,7 @@
  */
 import { NodeHttpServer, NodeServices } from "@effect/platform-node"
 import { TicketStates } from "@sip/lab-host"
-import { Collectors, Identity, Launcher, Roots, Tools, Tracker } from "@sip/corpus"
+import { Collectors, ExtractionIdentity, Identity, Launcher, Roots, Tools, Tracker } from "@sip/corpus"
 import {
   Attachments,
   Batches,
@@ -178,13 +178,18 @@ const NowhereRoots = Roots.layerWith({
   bench: Effect.succeed("/nowhere/bench")
 })
 
-/** The upstream deployment seams as they stand before any deployment substitutes its own, the tools and roots apart. */
+/**
+ * The upstream deployment seams as they stand before any deployment substitutes
+ * its own, the tools, the roots and the extraction apart: the extraction is the
+ * identity one, whose failure a test states as a file in a capture's directory.
+ */
 const Deployment = Layer.mergeAll(
   Collectors.layer,
   Launcher.layer,
   Identity.layer,
   Tracker.layer,
-  NoTools
+  NoTools,
+  ExtractionIdentity.layer
 ).pipe(Layer.provideMerge(NowhereRoots))
 
 /** Every site service, as a deployment's composition builds it. */

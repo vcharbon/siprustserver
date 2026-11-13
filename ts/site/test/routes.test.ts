@@ -60,6 +60,21 @@ describe("the triage routes", () => {
     expect(answer.status).toBe(404)
     expect(answer.json).toMatchObject({ id: "nothing-here.pcap", accepted: PACK.triage.forms.capture })
   })
+
+  it("state the line a capture's failed extraction left, as the deployment's extraction reads it", async () => {
+    const corpus = scratch()
+    fs.mkdirSync(path.join(corpus, "broken.pcap"))
+    fs.writeFileSync(path.join(corpus, "broken.pcap", "extraction-failure.txt"), "sipflow failed: truncated record")
+    fs.mkdirSync(path.join(corpus, "whole.pcap"))
+    const nothingStanding = { runs: { standing: () => Effect.succeed(null) }, cuts: { standing: () => Effect.succeed(null) } }
+    const study = async (capture: string) => {
+      const answer = await get(values({ corpus }), nothingStanding, `/api/triage/${capture}`)
+      expect(answer.status).toBe(200)
+      return (answer.json as { extractionFailure?: string }).extractionFailure
+    }
+    expect(await study("broken.pcap")).toBe("sipflow failed: truncated record")
+    expect(await study("whole.pcap")).toBeUndefined()
+  })
 })
 
 describe("the delta sheet", () => {
