@@ -140,6 +140,12 @@ export interface SutPack<L extends LaneView.View, R> {
   /** The SUT's metrics endpoint its handle carries, where the lane's parts state one. */
   readonly metricsOf: (lane: Extract<L, { readonly kind: "hosted" }>) => string | undefined
   /**
+   * The file the worker's output is appended to on `lane`, where the pack
+   * states one (a collector reading the system's log reads it there); a
+   * stamped file under the batch's directory where it states none.
+   */
+  readonly logOf?: (lane: Extract<L, { readonly kind: "hosted" }>) => string | undefined
+  /**
    * The managed worker's command line on `lane`, `extraEnv` added to its
    * environment; a lane that cannot wire one fails, naming why.
    */
@@ -182,8 +188,8 @@ export const stand = <L extends LaneView.View, R>(
     const command = yield* pack.command(hosted, extraEnv)
     const fs = yield* FileSystem.FileSystem
     const path = yield* Path.Path
-    yield* fs.makeDirectory(under, { recursive: true }).pipe(Effect.orDie)
-    const log = logUnder(path, under)
+    const log = pack.logOf?.(hosted) ?? logUnder(path, under)
+    yield* fs.makeDirectory(path.dirname(log), { recursive: true }).pipe(Effect.orDie)
     const held = yield* worker(command, log, lane)
     console.log(`[sut] ${lane}: one ${pack.worker} on ${hosted.sip.ingress}, logging to ${log}`)
     return { metrics, died: held.died, stop: held.stop } satisfies SutHandle

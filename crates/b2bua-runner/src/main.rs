@@ -239,7 +239,7 @@ async fn run() -> Result<std::process::ExitCode, String> {
         ordinal = %base.env.ordinal,
         queue = base.env.queue_max,
         cdr_queue = base.env.cdr_queue,
-        "listening; all calls route to the default callee (resolved per-call)"
+        "listening UDP; all calls route to the default callee (resolved per-call)"
     );
 
     // jemalloc footprint/purge/decay-config counters appended to `/metrics`,
