@@ -528,6 +528,9 @@ const NUMBER_USER = /^\+?[0-9]/
  * number (one the plan classifies, or digits a lane's routing binds); by
  * arrival order where the plan classifies none and its R-URI user is no number
  * (a name, or no user part), since a `ruri-pos` claim matches a number.
+ * Its limit: two such callees on one endpoint dialled at once are told apart
+ * only by which INVITE arrives first, so a replay whose system sends them in
+ * the other order binds each to the other's actor.
  */
 const calleeClaim = (a: ActorObs, identity: PartyIdentity | undefined): LayoutActor["claim"] =>
   identity?.kind === "unknown" && !NUMBER_USER.test(identity.observed)
