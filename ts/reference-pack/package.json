@@ -1,0 +1,24 @@
+{
+  "name": "@sip/reference-pack",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The reference pack: one sample per seam of the rig on the upstream B2BUA, no provisioning, no test value of its own; its campaign runs in this repository's checks.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/basic-case": "workspace:*",
+    "@sip/rig": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@sip/siprig": "workspace:*",
+    "@sip/store": "workspace:*",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

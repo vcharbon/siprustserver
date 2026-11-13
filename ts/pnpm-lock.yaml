@@ -285,6 +285,37 @@ importers:
         specifier: 4.1.11
         version: 4.1.11(@types/node@24.10.1)(vite@8.2.2(@types/node@24.10.1)(tsx@4.20.6))
 
+  reference-pack:
+    dependencies:
+      '@sip/basic-case':
+        specifier: workspace:*
+        version: link:../basic-case
+      '@sip/rig':
+        specifier: workspace:*
+        version: link:../rig
+      effect:
+        specifier: 4.0.0-rc.111
+        version: 4.0.0-rc.111
+    devDependencies:
+      '@effect/platform-node':
+        specifier: 4.0.0-rc.111
+        version: 4.0.0-rc.111(effect@4.0.0-rc.111)(redis@6.2.1)
+      '@sip/siprig':
+        specifier: workspace:*
+        version: link:../siprig
+      '@sip/store':
+        specifier: workspace:*
+        version: link:../store
+      '@types/node':
+        specifier: 24.10.1
+        version: 24.10.1
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@24.10.1)(vite@8.2.2(@types/node@24.10.1)(tsx@4.20.6))
+
   rig:
     dependencies:
       '@effect/platform-node':
@@ -318,6 +349,12 @@ importers:
       '@effect/platform-node':
         specifier: 4.0.0-rc.111
         version: 4.0.0-rc.111(effect@4.0.0-rc.111)(redis@6.2.1)
+      '@sip/campaign-runner':
+        specifier: workspace:*
+        version: link:../campaign-runner
+      '@sip/cli':
+        specifier: workspace:*
+        version: link:../cli
       '@sip/corpus':
         specifier: workspace:*
         version: link:../corpus

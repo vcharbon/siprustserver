@@ -1,0 +1,6 @@
+# The simulated lane: each cell one process of the plain replay binary on a
+# paused clock, the B2BUA worker in process, every call routed to the cell's
+# callee. It exports the worker's record of each call under `call-records`,
+# which the judge of that name answers.
+schema = "lane.v1"
+clock  = "simulated"

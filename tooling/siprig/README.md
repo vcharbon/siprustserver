@@ -41,6 +41,7 @@ it. Each service runs a base command by name:
 | `siprig-workspace check [--config-only] [<dir>]` | `<file>: valid`, then `KEY=value` lines: `SIPRIG_SITE_PORT`, `SIPRIG_SITE_BIND`, `DATABASE_URL` among them; exit 2 on a refused file, naming it, so the container stops at start; `--config-only` reads `rig.toml` alone (run before `init`) | `rig.toml`, and the rig path over the pack and the workspace |
 | `siprig-store migrate` | the store `DATABASE_URL` names (exported, else the workspace's `[database] url`) created and migrated, dumped into the workspace's `backups/` first | the store's own migrations |
 | `siprig-site` | the site, on the workspace's port and bind address | `@sip/site` over a site pack with no lane, campaign or rule |
+| `siprig-campaign run [--lanes] [--out] [--junit] [--job] [--collection]` | every cell the pack's case sources yield, on the workspace's lanes (else the pack's), recorded in the store as the campaign named after the pack; exit 0 all passed, 1 one failed, 2 an error; the wrapper's verb `campaign` | `@sip/campaign-runner` over the base's lane hosting: the simulated lane by the plain `replay` |
 
 A pack replaces a base command by shipping an executable of the same name among its
 binaries: they land in `/opt/siprig/bin`, ahead on `PATH`. A pack's `replay` replaces the

@@ -1,6 +1,6 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Seventeen packages, four of them one layer each of the same stack:
+A pnpm workspace. Eighteen packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
@@ -20,10 +20,11 @@ A pnpm workspace. Seventeen packages, four of them one layer each of the same st
 | `lab-host/` | `@sip/lab-host` | the host a lab runs on: its user session and the boxes its children run in, its binaries built under one box-wide lock, its roots and env files, its inbox, its run bundles, the checks a lane owes before it is driven, and the batch and SUT processes a hosted lane stands |
 | `campaign-runner/` | `@sip/campaign-runner` | a campaign run over a pack's cases: its cells compiled and replayed on each lane under their locks and the lane's pacing, retried, judged into verification lines, recorded in the store's campaign record, and reported (JUnit included) |
 | `site/` | `@sip/site` | the viewer's server: an Effect v4 HttpApi over case directories, run bundles, the store, campaign runs and the job console, serving the app's build and the documents it draws, over what a deployment's pack states of itself (`site-pack.ts`) |
-| `siprig/` | `@sip/siprig` | the base deployment the image kit ships (`tooling/siprig/`): its reading of a pack manifest before a build, and the workspace, store and site commands the base image runs for a pack that ships none of its own |
+| `siprig/` | `@sip/siprig` | the base deployment the image kit ships (`tooling/siprig/`): its reading of a pack manifest before a build, and the workspace, store, site and campaign commands the base image runs for a pack that ships none of its own |
+| `reference-pack/` | `@sip/reference-pack` | the reference pack (ADR-0060 item 17): one sample per seam of the rig on the upstream B2BUA, its campaign run by `siprig`'s in this workspace's tests |
 
 Dependencies point one way only. `contracts` depends on nothing, and every other
-package but the leaves `viewer-core` and `case-modules` and the deployment `siprig` depends on it; beyond it, each
+package but the leaves `viewer-core` and `case-modules`, the deployment `siprig` and the pack `reference-pack` depends on it; beyond it, each
 package's own edges are: `pipeline`, `toolchain`, `store` and `rig` none,
 `driver → {pipeline, toolchain}`, `basic-case → {driver, rig}` (its tests also
 `toolchain`), `corpus → {driver, pipeline, rig, store, toolchain, viewer-core}`,
@@ -31,7 +32,8 @@ package's own edges are: `pipeline`, `toolchain`, `store` and `rig` none,
 `lab-host → {cli, corpus, rig, store, toolchain, workspace}`,
 `campaign-runner → {corpus, rig, store, toolchain, workspace}`,
 `site → {campaign-runner, corpus, lab-host, pipeline, rig, store, viewer-core,
-workspace}`, `siprig → {corpus, lab-host, rig, site, store, workspace}` and
+workspace}`, `siprig → {campaign-runner, cli, corpus, lab-host, rig, site, store,
+workspace}`, `reference-pack → {basic-case, rig}` (its tests also `siprig`, `store`) and
 `viewer-app → viewer-core` (the app reads the report formats' types
 from `contracts`, nothing else).
 The viewer's server is `@sip/site`, a package of its own beside the app: the app

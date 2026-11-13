@@ -3,8 +3,8 @@
 **Status:** proposed (2026-11-11).
 
 **Owner:** `ts/` (the site server, the campaign runner, the lifecycle, the store), `crates/`
-(the replay library `pivot-replay`, `pivot-interpreter`, `pivot-schema`), `tooling/siprig/` (the image kit and
-the reference pack).
+(the replay library `pivot-replay`, `pivot-interpreter`, `pivot-schema`), `tooling/siprig/` (the image kit),
+`ts/reference-pack/` (the reference pack).
 
 Manifests, protocol lines, the cell description and every table are in the
 [appendix](appendix/0060-the-rig-is-a-pluggable-base.md), under the same item numbers.

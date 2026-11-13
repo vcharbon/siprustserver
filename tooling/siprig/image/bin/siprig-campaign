@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# The base's campaign run (`ts/siprig/src/campaign-cli.ts`): `run`, every case
+# the pack's case sources yield on its lanes, the simulated one by the plain
+# replay binary. The wrapper's verb `campaign`. A pack with a run verb of its
+# own replaces it with a `siprig-campaign` of its own binaries.
+set -euo pipefail
+pkg=/opt/siprig/ts/siprig
+exec "$pkg/node_modules/.bin/tsx" "$pkg/src/campaign-cli.ts" "$@"

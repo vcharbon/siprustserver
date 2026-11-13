@@ -16,6 +16,7 @@ packages:
   - "campaign-runner"
   - "site"
   - "siprig"
+  - "reference-pack"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false
