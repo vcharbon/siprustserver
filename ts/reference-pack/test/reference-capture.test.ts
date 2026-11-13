@@ -89,6 +89,19 @@ const recorded = (lane: string, workspace: string | undefined, sources: Readonly
     }).pipe(Effect.provide(services))
   }).pipe(Effect.provide(NodeServices.layer))
 
+/**
+ * The parties of the workspace's reference lane bound on a loopback address
+ * of their own, apart from the runner's: a cut tells the system under test
+ * from its peers by address.
+ */
+const partiesApart = (workspace: string): void => {
+  const lane = path.join(workspace, "lanes", "reference.toml")
+  fs.writeFileSync(lane, fs.readFileSync(lane, "utf8").replace(`endpoint_host = "127.0.0.1"`, `endpoint_host = "${PARTIES}"`))
+}
+
+/** The loopback address the recording's parties are bound on. */
+const PARTIES = "127.0.0.2"
+
 /** One SIP message of a capture: its start line and the headers this suite reads. */
 interface Message {
   readonly start: string
@@ -126,6 +139,7 @@ describe.skipIf(!served || skipping)("the reference capture", () => {
     fs.mkdirSync(path.join(work, "recording"), { recursive: true })
     const written = writtenUnder(path.join(work, "recording"), "b2bua-runner")
     const workspace = await hostedWorkspace(PACK, path.join(work, "workspace"), written)
+    partiesApart(workspace)
     const { code, run } = await Effect.runPromise(recorded("reference", workspace, [SOURCE]))
     expect(code).toBe(0)
     expect(run!.lanes[0]!.results.map((result) => [CampaignResults.caseNameOf(result.caseId).ref, result.passed])).toEqual([

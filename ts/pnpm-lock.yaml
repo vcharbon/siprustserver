@@ -300,6 +300,9 @@ importers:
       '@effect/platform-node':
         specifier: 4.0.0-rc.111
         version: 4.0.0-rc.111(effect@4.0.0-rc.111)(redis@6.2.1)
+      '@sip/corpus':
+        specifier: workspace:*
+        version: link:../corpus
       '@sip/siprig':
         specifier: workspace:*
         version: link:../siprig
@@ -355,6 +358,9 @@ importers:
       '@sip/cli':
         specifier: workspace:*
         version: link:../cli
+      '@sip/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@sip/corpus':
         specifier: workspace:*
         version: link:../corpus

@@ -15,6 +15,7 @@
   },
   "devDependencies": {
     "@effect/platform-node": "4.0.0-rc.111",
+    "@sip/corpus": "workspace:*",
     "@sip/siprig": "workspace:*",
     "@sip/store": "workspace:*",
     "@types/node": "24.10.1",
