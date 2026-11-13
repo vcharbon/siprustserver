@@ -206,7 +206,10 @@ const sourceCells = <C extends Cell, R>(
   into: Array<C>
 ) =>
   Effect.gen(function*() {
-    const brokenFor = (reason: string): SourceRefusal => ({ _tag: "Broken", broken: { file: file.file, absolute: file.absolute, reason } })
+    const brokenFor = (reason: string, linted = false): SourceRefusal => ({
+      _tag: "Broken",
+      broken: { file: file.file, absolute: file.absolute, reason, ...(linted ? { lint: true } : {}) }
+    })
     const reading = yielded.map(answeredOf)
     const refused = reading.flatMap((r) => (Result.isFailure(r) ? [r.failure] : []))
     if (refused.length > 0) return brokenFor(refused.join("; "))
@@ -217,7 +220,7 @@ const sourceCells = <C extends Cell, R>(
       if (Result.isFailure(found)) return brokenFor(`the pivot schema lint did not run: ${found.failure.reason}`)
       findings.push(...found.success)
     }
-    if (findings.length > 0) return brokenFor(`fails the pivot schema lint: ${findings.join("; ")}`)
+    if (findings.length > 0) return brokenFor(`fails the pivot schema lint: ${findings.join("; ")}`, true)
     const tagged = answered.map(({ compiled: cell }) => {
       const tags = tagsOfFile(context.declared, file, cell.tags ?? [])
       return { tags, alone: isAlone(context.declared, tags) }
@@ -283,7 +286,12 @@ export const compileCases = <C extends Cell, K extends Compiled, S extends Selec
         continue
       }
       if (unlinted.success.length > 0) {
-        broken.push({ file: file.file, absolute: file.absolute, reason: `fails the pivot schema lint: ${unlinted.success.join("; ")}` })
+        broken.push({
+          file: file.file,
+          absolute: file.absolute,
+          reason: `fails the pivot schema lint: ${unlinted.success.join("; ")}`,
+          lint: true
+        })
         continue
       }
       const tags = tagsOfFile(context.declared, file, compiler.statedTags(compiled.success))

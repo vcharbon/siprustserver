@@ -22,6 +22,8 @@ export interface Broken {
   readonly file: string
   readonly absolute: string
   readonly reason: string
+  /** Set where its documents compiled and failed the pivot schema lint. */
+  readonly lint?: true
 }
 
 /** What a run's glob selects. */

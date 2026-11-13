@@ -42,6 +42,7 @@ it. Each service runs a base command by name:
 | `siprig-store migrate` | the store `DATABASE_URL` names (exported, else the workspace's `[database] url`) created and migrated, dumped into the workspace's `backups/` first | the store's own migrations |
 | `siprig-site` | the site, on the workspace's port and bind address | `@sip/site` over a site pack with no lane, campaign or rule |
 | `siprig-campaign run [--lanes] [--out] [--junit] [--job] [--collection]` | every cell the pack's case sources yield, on the workspace's lanes (else the pack's), recorded in the store as the campaign named after the pack; exit 0 all passed, 1 one failed, 2 an error; the wrapper's verb `campaign` | `@sip/campaign-runner` over the base's lane hosting: the simulated lane by the plain `replay` |
+| `siprig-campaign validate [--out <dir> [--expand]] [--sources]` | the cells a run would compile, compiled and checked with no lane, store or call: one line per problem (`compile`, `schema`, `consistency`), what only a run settles as `note:` lines; `--out` keeps each compiled document under `<dir>/cells/` with `cells.json` and `validation.json`, `--expand` each cell's `expanded.json` (its legs' messages and checks, step graph, timers, claims); exit 0 none, 1 a problem, 2 the line refused | `@sip/campaign-runner` `validate.ts` over the run's own compile phase |
 
 A pack replaces a base command by shipping an executable of the same name among its
 binaries: they land in `/opt/siprig/bin`, ahead on `PATH`. A pack's `replay` replaces the

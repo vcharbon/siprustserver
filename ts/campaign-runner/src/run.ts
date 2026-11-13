@@ -38,6 +38,8 @@ import type * as CheckLines from "./check-lines.js"
 export interface BrokenFile {
   readonly file: string
   readonly reason: string
+  /** Set where its documents compiled and failed the pivot schema lint. */
+  readonly lint?: true
 }
 
 /** The cells compiled, and the selected files that are broken. */

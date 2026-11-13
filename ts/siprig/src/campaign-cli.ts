@@ -12,7 +12,11 @@
  *
  *   siprig-campaign run [--lanes <a,b>] [--out <dir>] [--junit <file>] [--job <id>] [--collection <level>] [--setup <op,op>]
  *     [--sources <module,module>]
+ *   siprig-campaign validate [--out <dir> [--expand]] [--sources <module,module>]
  *
+ * `validate` compiles and checks the cases a run would read, with no lane, no
+ * store and no call (`base-campaign-validate.ts`): exit 0 with no problem, 1
+ * with one (a line each), 2 where the line is refused.
  * `--sources` names the case sources the run reads in place of those its
  * manifest names: a relative path is in the pack, refused where it leads out
  * of it once its links are followed; an absolute one, a cut's output say, is
@@ -36,6 +40,7 @@ import { Command, Flag } from "effect/unstable/cli"
 import * as path from "node:path"
 import { BaseCampaign, manifestOf } from "./base-campaign.ts"
 import { pivotSchemaOf } from "./base-campaign-cells.ts"
+import { BaseCampaignValidate } from "./base-campaign-validate.ts"
 import { layerOf } from "./base-campaign-services.ts"
 import { runnerBinaryOf } from "./base-hosted-lane.ts"
 import { BIN_DIR_VARIABLE, replayBinaryOf } from "./base-lane-hosting.ts"
@@ -43,12 +48,17 @@ import { CHECKOUT, LAB } from "./base-site-pack.ts"
 import { apply, of, PACK, packDirOf } from "./base-workspace.ts"
 
 const VERB = "siprig-campaign run"
+const VALIDATE = "siprig-campaign validate"
 
 /** The names a comma-separated `--setup` or `--sources` states, in order; none where it is absent. */
 const namesOf = (stated: string | undefined): ReadonlyArray<string> =>
   (stated ?? "").split(",").map((name) => name.trim()).filter((name) => name !== "")
 
-const fail = (reason: string) => Effect.andThen(Console.error(`${VERB}: ${reason}`), Effect.sync(() => (process.exitCode = 2)))
+/** The refusal of a `verb` line: `reason` on stderr, exit code 2. */
+const failOf = (verb: string) => (reason: string) =>
+  Effect.andThen(Console.error(`${verb}: ${reason}`), Effect.sync(() => (process.exitCode = 2)))
+
+const fail = failOf(VERB)
 
 const run = Command.make("run", {
   lanes: Flag.string("lanes").pipe(Flag.withDescription("The lanes to run on, comma-separated (every lane where none is named)"), Flag.optional),
@@ -101,6 +111,39 @@ const run = Command.make("run", {
     process.exitCode = code
   })).pipe(Command.withDescription("Run every case the pack's case sources yield on its lanes, recorded in the store"))
 
-const command = Command.make("siprig-campaign").pipe(Command.withSubcommands([run]))
+const validate = Command.make("validate", {
+  out: Flag.string("out").pipe(
+    Flag.withDescription("Keep the compiled cells under <dir>/cells/, with cells.json and validation.json beside them"),
+    Flag.optional
+  ),
+  expand: Flag.boolean("expand").pipe(
+    Flag.withDescription("With --out, write each cell's expanded.json: its legs' messages and checks, its step graph, timers and claims"),
+    Flag.withDefault(false)
+  ),
+  sources: Flag.string("sources").pipe(
+    Flag.withDescription("The case source modules to read, paths in the pack, comma-separated (the manifest's where none is named)"),
+    Flag.optional
+  )
+}, (input) =>
+  Effect.gen(function*() {
+    const refuse = failOf(VALIDATE)
+    const applied = yield* apply(process.env).pipe(
+      Effect.catchTag("HostEnv.Refused", (refused) => Effect.as(refuse(refused.reason), undefined))
+    )
+    if (applied === undefined) return
+    const pack = packDirOf(process.env)
+    if (pack === undefined) return yield* refuse("SIPRIG_PACK names no pack")
+    const code = yield* BaseCampaignValidate.validate({
+      pack: path.resolve(pack),
+      workspace: of(process.env)?.root,
+      out: Option.getOrUndefined(input.out),
+      expand: input.expand,
+      pivotSchema: pivotSchemaOf(process.env, CHECKOUT),
+      sources: Option.getOrUndefined(Option.map(input.sources, namesOf))
+    })
+    process.exitCode = code
+  })).pipe(Command.withDescription("Compile and check the pack's cases with no lane, no store and no call: one line per problem"))
+
+const command = Command.make("siprig-campaign").pipe(Command.withSubcommands([run, validate]))
 
 Command.run(command, { version: "0.0.0" }).pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain)
