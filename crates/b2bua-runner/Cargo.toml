@@ -37,6 +37,14 @@ tokio = { workspace = true }
 observe = { path = "../observe" }
 tracing = { workspace = true }
 
+[dev-dependencies]
+# The store-gauge test drives the binary over real loopback UDP with the
+# harness's RFC-checked UAs.
+scenario-harness = { path = "../scenario-harness" }
+layer-harness = { path = "../layer-harness" }
+sip-clock = { path = "../sip-clock" }
+sip-net = { path = "../sip-net" }
+
 # jemalloc global allocator (see the #[global_allocator] note in src/main.rs):
 # glibc malloc ratchets RSS under sustained SIP churn (arena retention) and never
 # returns memory to the OS, OOMing a long soak. jemalloc's decay purging bounds
