@@ -3,7 +3,8 @@
  * its size and date, where the pipeline stands with it — `new` (never
  * ingested), `ingested` (in the population, not cut), `cut` (with its case
  * count) — and its last full run per lane, whoever made it; the inbox beside it
- * (`inbox.ts`); and how a capture replay fits each lane (`pcap-lanes.ts`).
+ * (`inbox.ts`); and how a capture replay fits each lane (`pcap-lanes.ts`),
+ * with the pack's refusal of a lane it does not drive now (its lab guard).
  * A file is matched to its source row by the path its ingest recorded; the
  * newest generation of that path speaks for it.
  *
@@ -50,7 +51,8 @@ export interface View {
   readonly inbox: string | null
   readonly files: ReadonlyArray<Pcap>
   readonly inboxEntries: ReadonlyArray<Inbox.Entry>
-  readonly lanes: ReadonlyArray<PcapLanes.LaneFit>
+  /** Each lane's fit and, in a workspace, whether it is driven now; outside one, `refused` is null. */
+  readonly lanes: ReadonlyArray<PcapLanes.LaneStanding>
 }
 
 export interface Interface {
@@ -108,7 +110,12 @@ export const layer = Layer.effect(
     const inbox = yield* Inbox.Service
     const pack = yield* SitePack.Service
     const host = yield* Effect.context<Host>()
-    const lanes = PcapLanes.fits(pack.lanes)
+    const fits = PcapLanes.fits(pack.lanes)
+    const unrefused: ReadonlyArray<PcapLanes.LaneStanding> = fits.map((fit) => ({ ...fit, refused: null }))
+
+    /** Each lane's fit with the pack's refusal of it now, asked once per listing. */
+    const standings = Effect.forEach(pack.lanes.lanes, (lane, i) =>
+      Effect.map(pack.laneRefusal(lane, process.env), (refused) => ({ ...fits[i]!, refused }) satisfies PcapLanes.LaneStanding))
 
     const files = Effect.fn("PcapList.files")(function*(dir: string) {
       const fs = yield* FileSystem.FileSystem
@@ -131,7 +138,7 @@ export const layer = Layer.effect(
     const list = Effect.gen(function*() {
       const workspace = config.workspace
       if (workspace === undefined) {
-        return { pcaps: null, inbox: null, files: [], inboxEntries: [], lanes } satisfies View
+        return { pcaps: null, inbox: null, files: [], inboxEntries: [], lanes: unrefused } satisfies View
       }
       const found = yield* files(workspace.pcaps).pipe(Effect.provide(host))
       const rows = found.length === 0 ? [] : (yield* sources.list({
@@ -148,7 +155,7 @@ export const layer = Layer.effect(
         inbox: workspace.inbox,
         files: found.map((one) => pcapOf(one, byPath.get(one.path))),
         inboxEntries: yield* inbox.list,
-        lanes
+        lanes: yield* standings.pipe(Effect.provide(host))
       } satisfies View
     }).pipe(Effect.withSpan("PcapList.list"))
 

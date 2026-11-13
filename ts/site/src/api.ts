@@ -1282,7 +1282,9 @@ export const JobRedCell = Schema.Struct({
   runId: Schema.Number,
   error: Schema.NullOr(TriageMainError),
   /** The body rows no rule accepts, whatever `error` names. */
-  bodyFailing: Schema.Number
+  bodyFailing: Schema.Number,
+  /** The campaign run the cell belongs to (its page's run and environment); null for a capture replay's, read on the triage pages. */
+  campaign: Schema.NullOr(Schema.Struct({ run: Schema.Number, env: Schema.NullOr(Schema.String) }))
 })
 
 /** A slice of the job's cells of one kind: the gone ones with their reasons, or the ones that landed red so far. */
@@ -1486,7 +1488,9 @@ export const PcapLaneView = Schema.Struct({
   /** fits | forced | none. */
   fit: Schema.String,
   lacks: Schema.Array(Schema.String),
-  line: Schema.NullOr(Schema.String)
+  line: Schema.NullOr(Schema.String),
+  /** Why the deployment does not drive the lane now (its lab guard), or null. */
+  refused: Schema.NullOr(Schema.String)
 })
 
 /** The Pcaps page: the pcap root's files, the inbox, the lanes; the roots null outside a workspace. */

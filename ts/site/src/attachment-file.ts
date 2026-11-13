@@ -34,7 +34,7 @@ export const layer = Layer.unwrap(
       const held = yield* reads.stored(Number(id)).pipe(Effect.option)
       if (held._tag === "None") return notFound
       const one = held.value
-      const served = yield* HttpServerResponse.file(one.path, { contentType: TYPES[one.kind] }).pipe(
+      const served = yield* HttpServerResponse.file(one.path, { headers: { "content-type": TYPES[one.kind] } }).pipe(
         Effect.provideService(FileSystem, fs),
         Effect.option
       )

@@ -63,9 +63,28 @@ const Standings = ({ file }: { readonly file: PcapFile }): JSX.Element =>
     </>
   )
 
-/** The option a lane is offered as: replay, forced replay, or not runnable. */
+/** Whether a replay may be started on `lane` here: it has a harness on its routing path and the deployment drives it now. */
+const startable = (lane: PcapLane): boolean => lane.fit !== "none" && lane.refused === null
+
+/** The option a lane is offered as: replay, forced replay, not runnable, or not driven here. */
 const laneLabel = (lane: PcapLane): string =>
-  lane.fit === "fits" ? `replay on ${lane.lane}` : lane.fit === "forced" ? `replay on ${lane.lane} (forced)` : `${lane.lane}: not runnable`
+  lane.fit === "none"
+    ? `${lane.lane}: not runnable`
+    : lane.refused !== null
+    ? `${lane.lane}: not driven here`
+    : lane.fit === "fits"
+    ? `replay on ${lane.lane}`
+    : `replay on ${lane.lane} (forced)`
+
+/** The lanes this deployment does not drive now, each with why: said once above the files. */
+const RefusedLanes = ({ lanes }: { readonly lanes: readonly PcapLane[] }): JSX.Element | null => {
+  const refused = lanes.filter((lane) => lane.fit !== "none" && lane.refused !== null)
+  return refused.length === 0 ? null : (
+    <ul className="cp-refused muted pcaps-refused">
+      {refused.map((lane) => <li key={lane.lane}>{lane.refused}</li>)}
+    </ul>
+  )
+}
 
 /** The action of one file: a lane, then the two jobs it starts. */
 const ReplayOn = (
@@ -75,7 +94,7 @@ const ReplayOn = (
     readonly onStarted: (jobs: readonly JobStarted[]) => void
   }
 ): JSX.Element => {
-  const first = lanes.find((lane) => lane.fit === "fits") ?? lanes.find((lane) => lane.fit === "forced")
+  const first = lanes.find((lane) => startable(lane) && lane.fit === "fits") ?? lanes.find(startable)
   const [choice, setChoice] = useState(first?.lane ?? "")
   const [phase, setPhase] = useState<
     | { readonly kind: "idle" }
@@ -86,7 +105,7 @@ const ReplayOn = (
   const picked = lanes.find((lane) => lane.lane === choice)
 
   const start = async (): Promise<void> => {
-    if (picked === undefined || picked.fit === "none") return
+    if (picked === undefined || !startable(picked)) return
     setPhase({ kind: "starting" })
     try {
       const { jobs } = await api.jobStart({ kind: "pcap-replay", file: file.file, lane: picked.lane, force: picked.fit === "forced" })
@@ -101,7 +120,7 @@ const ReplayOn = (
     <span className="rerun">
       <select value={choice} onChange={(event) => setChoice(event.target.value)}>
         {lanes.map((lane) => (
-          <option key={lane.lane} value={lane.lane} disabled={lane.fit === "none"} title={lane.line ?? undefined}>
+          <option key={lane.lane} value={lane.lane} disabled={!startable(lane)} title={lane.refused ?? lane.line ?? undefined}>
             {laneLabel(lane)}
           </option>
         ))}
@@ -109,14 +128,14 @@ const ReplayOn = (
       <button
         type="button"
         className="copy-ref"
-        disabled={picked === undefined || picked.fit === "none" || phase.kind === "starting"}
-        title={picked?.line ?? "ingest + cut, then replay"}
+        disabled={picked === undefined || !startable(picked) || phase.kind === "starting"}
+        title={picked?.refused ?? picked?.line ?? "ingest + cut, then replay"}
         onClick={() => void start()}
       >
         {phase.kind === "starting" ? "starting…" : "replay"}
       </button>
       {phase.kind === "started" && <> <JobLinks jobs={phase.jobs} /></>}
-      {phase.kind === "error" && <span className="error"> {phase.detail}</span>}
+      {phase.kind === "error" && <div className="error pcaps-said">{phase.detail}</div>}
     </span>
   )
 }
@@ -243,6 +262,7 @@ export const PcapsPage = (): JSX.Element => {
             )}
             <section>
               <h2>Files · {value.files.length}</h2>
+              <RefusedLanes lanes={value.lanes} />
               {value.files.length === 0
                 ? <p className="muted">none</p>
                 : <FilesTable files={value.files} lanes={value.lanes} onStarted={onStarted} />}

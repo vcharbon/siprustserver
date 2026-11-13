@@ -114,6 +114,20 @@ export interface LaneView {
   readonly captures: number
 }
 
+/**
+ * The lanes a reader may move between: every lane of the catalog, in its
+ * order, with what the run database holds of it (none yet: 0), then every
+ * lane only the run database still knows. A lane nothing ran on yet is a
+ * lane a capture can be replayed on from the queue.
+ */
+export const lanesOffered = (catalog: ReadonlyArray<string>, ran: ReadonlyArray<Runs.Lane>): ReadonlyArray<LaneView> => {
+  const held = new Map(ran.map((one) => [one.lane, one] as const))
+  return [
+    ...catalog.map((lane) => held.get(lane) ?? { lane, runs: 0, captures: 0 }),
+    ...ran.filter((one) => !catalog.includes(one.lane))
+  ]
+}
+
 /** A served call: the store's row, its document's facts, and whether its evidence survives. */
 export interface QueueRow extends Calls.CallDetail {
   /** The run's bundle survives on disk; `false` = cleaned, row intact. A refused call has none. */
@@ -607,7 +621,10 @@ export const layer = Layer.effect(
           rows: []
         } satisfies TriageQueue
       }
-      const lanes = yield* runs.lanes.pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<Runs.Lane>))
+      const lanes = lanesOffered(
+        pack.lanes.lanes.map((one) => one.id),
+        yield* runs.lanes.pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<Runs.Lane>))
+      )
       // A lane nothing has ever run on is still a legitimate question — it
       // answers "nothing here", which is what the reader asked.
       const lane = request.lane ?? triage.lane
@@ -635,7 +652,7 @@ export const layer = Layer.effect(
         // A filter keeping nothing is an answer; a lane no run was made on is the
         // reason nothing can be served.
         detail: listed.problem ?? hydrated.problem ??
-          (listed.queue.matched === 0 && !lanes.some((known) => known.lane === lane)
+          (listed.queue.matched === 0 && !lanes.some((known) => known.lane === lane && known.runs > 0)
             ? `the run database holds no call on lane ${lane}`
             : ""),
         lane,

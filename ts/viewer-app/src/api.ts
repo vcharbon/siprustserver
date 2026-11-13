@@ -906,6 +906,8 @@ export interface JobRedCell {
   readonly error: TriageMainError | null
   /** The body rows no rule accepts, whatever `error` names. */
   readonly bodyFailing: number
+  /** The campaign run the cell belongs to (its page's run and environment); null for a capture replay's. */
+  readonly campaign: { readonly run: number; readonly env: string | null } | null
 }
 
 export type JobCells =
@@ -990,6 +992,8 @@ export interface PcapLane {
   readonly fit: "fits" | "forced" | "none"
   readonly lacks: readonly string[]
   readonly line: string | null
+  /** Why the deployment does not drive the lane now (its lab guard), or null. */
+  readonly refused: string | null
 }
 
 /** The pcaps page: the pcap root's files, the inbox, the lanes; the roots null where the server has none. */

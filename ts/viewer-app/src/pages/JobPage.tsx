@@ -4,7 +4,8 @@
  * counts and the batch it is on, the job's verification lines and each batch
  * with the lines its end gates answered, the live log, its attachments folded (its hook logs), the
  * cells the resolution found gone with their reasons, and the cells landed
- * red so far, each linked to its study — and the same verbs as the list.
+ * red so far, each linked to where it is read (`job-cell-links.ts`: a call's
+ * study, a campaign case's call details) — and the same verbs as the list.
  * Re-read every two seconds while the job runs; everything shown is a row
  * or a file, so a viewer restart changes nothing here.
  */
@@ -19,6 +20,7 @@ import { LogTail } from "../components/LogTail.tsx"
 import { ProgressBar } from "../components/ProgressBar.tsx"
 import { VerificationLines } from "../components/VerificationLines.tsx"
 import { useHeld } from "../held.ts"
+import { cellHref, holderHref } from "../job-cell-links.ts"
 import { unitOf } from "../job-progress.ts"
 import { alsoBadBody } from "../bad-body.ts"
 import { sourceFaultText } from "../source-fault.ts"
@@ -107,9 +109,9 @@ const RedTable = ({ slice }: { readonly slice: Extract<JobCells, { outcome: "red
     <tbody>
       {slice.cells.map((cell) => (
         <tr key={`${cell.runId}/${cell.caseId}`} className="call-failed">
-          <td className="mono break"><Link to={href.triageStudy(cell.capture, { lane: cell.lane })}>{cell.capture}</Link></td>
+          <td className="mono break"><Link to={holderHref(cell)}>{cell.capture}</Link></td>
           <td className="mono break">
-            <Link to={href.triageStudy(cell.capture, { lane: cell.lane, case: cell.caseId })}>{shortCase(cell)}</Link>
+            <Link to={cellHref(cell)}>{shortCase(cell)}</Link>
           </td>
           <td className="mono">run{cell.runId}</td>
           <td>

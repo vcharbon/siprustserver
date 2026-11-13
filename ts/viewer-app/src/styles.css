@@ -1230,6 +1230,17 @@ tr.class-unknown td {
   margin-right: 6px;
 }
 
+/* A replay refused on the Pcaps page: said under its row's actions, wrapped, never widening the row. */
+.row-actions .pcaps-said {
+  white-space: normal;
+  max-width: 36em;
+  margin-top: 4px;
+}
+
+.pcaps-refused {
+  margin-bottom: 8px;
+}
+
 .rerun-log {
   display: block;
   margin-top: 6px;
