@@ -75,6 +75,23 @@ describe("the workspace's repository in a run's provenance", () => {
     expect(added!.tree).not.toBe(first!.tree)
   })
 
+  it("is dirty and hashes anew where a plug-in of the workspace's rig path changed, a Python bytecode cache aside", async () => {
+    write("tool.toml", "")
+    git("init", "-q")
+    git("add", ".")
+    git("commit", "-q", "-m", "one")
+    const first = await componentOf()
+    write("collectors/probe/__pycache__/helper.cpython-313.pyc", "\x00\n")
+    expect(await componentOf()).toEqual(first)
+    for (const plugin of ["collectors/probe/run", "judges/j/judge.toml", "operations/o/operation.toml", "parts/kind.schema.json"]) {
+      const before = await componentOf()
+      write(plugin, "1\n")
+      const changed = await componentOf()
+      expect(changed, plugin).toMatchObject({ sha: first!.sha, dirty: true })
+      expect(changed!.tree, plugin).not.toBe(before!.tree)
+    }
+  })
+
   it("is dirty and hashes anew where a file a run reads changed, and hashes as before once it is back", async () => {
     write("tool.toml", "")
     write("campaigns/a.ts", "export default 1\n")
