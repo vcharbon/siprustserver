@@ -47,7 +47,9 @@ pub struct BatchSpec {
     /// leaves the cleanup gate not checkable.
     #[serde(default)]
     pub metrics: Option<String>,
-    /// How long the batch's end waits for [`HELD`] to read 0.
+    /// How long the batch's end waits for [`HELD`] to read 0: past the
+    /// period a system samples a gauge at (the upstream runner's store
+    /// gauges, every 5 s), else a stale sample fails the gate.
     #[serde(default = "reap_within_ms")]
     pub metrics_reap_ms: u64,
 }
