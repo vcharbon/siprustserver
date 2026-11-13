@@ -51,7 +51,9 @@ as whatever final the engine chooses, and a cluster-wide outage leaves every wor
 7. **Retry rule** (`BackendClient::send_with_retry`): one retry, on the same client, after a
    connection-level failure or a request timeout, when the total budget leaves room for a whole
    attempt. Never after an HTTP response of any status, never while the breaker is open, never
-   for a name that does not resolve or a request never sent. A caller that must not retry uses
+   for a name that does not resolve or a request never sent. A response, here and in 8, is a
+   whole one: one cut or stalled before the end of its body is a connection-level failure or a
+   timeout, so the backend may serve a retried request twice. A caller that must not retry uses
    `BackendClient::attempt`. The adaptation port (`AdaptationHttpPort`) follows the rule.
    Detail: [appendix §7](appendix/0043-outbound-backend-client-policy.md#7-retry-rule).
 8. **Breaker** (`WindowBreaker`, one per backend): it opens when at least the configured number

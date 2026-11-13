@@ -49,6 +49,11 @@ budget leaves room for a whole attempt after the first one was due to end
 (read from its deadline, not from the clock after it, so a total of two
 attempts always holds the second). Never after an HTTP response of any status, never while the breaker
 is open, never for a name that does not resolve or a request never sent.
+A response is a whole one, status, headers and the body to its end: a body
+that stalls is a request timeout and one the peer closes before its declared
+end is an EOF, both retried, and neither is a response for the breaker (8).
+A body past the size cap is not retried. The backend may therefore serve a
+retried request twice: retry suits a request that is safe to repeat.
 The pool hands out the most recently returned idle connection first, so a
 retry lands on a connection that just proved itself. `hyper-util`'s own
 resend of a request never written on a reused connection stays. A caller
@@ -148,7 +153,8 @@ burst of a few lost requests should not open it.
 - Pinned by: `http-net` `tests/it/backend.rs` (retry, cap, rotation, breaker,
   lookup bound), `tests/it/backend_breaker.rs` (a hung burst, slot waits, a
   panicking probe, the boot lookup), `tests/it/classify.rs` (the loopback
-  classifier, a hanging lookup on the real client), `tests/it/real_backend.rs`
+  classifier, a hanging lookup on the real client), `tests/it/real.rs` (a
+  body cut before its end, the size cap), `tests/it/real_backend.rs`
   (the retry's room and a moved name, on the real clock),
   `resolved_target/tests.rs` (stuck lookups, serve stale); `b2bua-harness`
   `unanswered_failure_consult`, `decision_deadline`, `refer_consult_error`,
