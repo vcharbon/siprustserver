@@ -3,15 +3,19 @@
  * campaign run on its simulated lane, each cell one process of the plain
  * replay binary on a paused clock. Both pass; each cell's call record is the
  * one its replay exported, joined to it on its caller's Call-ID and judged by
- * the pack's `call-records` judge; the run is recorded in the store as the
- * `reference` campaign. On the reference lane, through a workspace holding it
- * on free loopback addresses, the base stands the upstream B2BUA runner for
- * the batch and runs both cells in the plain binary's batch process on the
- * real clock (about 0.7 s); both pass, `calls-ended` reads the runner holding
- * no call after each, the batch's end reads it holding none, and the runner
- * captured both legs of each call while `capture`, cutting for failed cells
- * alone, attaches nothing. A job collector of the workspace failing `bob is
- * busy` has `capture` attach that cell, and it alone, its calls' packets.
+ * the pack's `call-records` judge, which attaches it flattened and its claimed
+ * fields compared; the run is recorded in the store as the `reference`
+ * campaign. On the reference lane, through a workspace holding it on free
+ * loopback addresses, the base stands the upstream B2BUA runner for the batch
+ * and runs both cells in the plain binary's batch process on the real clock
+ * (about 0.7 s); both pass, `calls-ended` reads the runner holding no call
+ * after each, the batch's end reads it holding none, the `call-records`
+ * collector reads the record the runner wrote of each call, which the judge
+ * passes, and the runner captured both legs of each call while `capture`,
+ * cutting for failed cells alone, attaches nothing. The runner's capture and
+ * record files hold that job's alone, what an earlier one left gone. A job
+ * collector of the workspace failing `bob is busy` has `capture` attach that
+ * cell, and it alone, its calls' packets.
  * The suite builds and drops its OWN database (`@sip/store/test-server`).
  *
  * The replay binary is `REPLAY_BIN`, else the workspace's build of
@@ -115,10 +119,11 @@ const freeAddress = async (kind: "udp" | "tcp"): Promise<string> => {
   return `127.0.0.1:${port}`
 }
 
-/** What a hosted workspace's runner writes: its log and its packet capture. */
+/** What a hosted workspace's runner writes: its log, its packet capture and its call records. */
 interface Written {
   readonly log: string
   readonly capture: string
+  readonly cdr: string
 }
 
 /**
@@ -162,7 +167,9 @@ const hostedWorkspace = async (name: string, written: Written, failing = false):
   fs.mkdirSync(path.join(dir, "lanes"), { recursive: true })
   fs.mkdirSync(path.join(dir, "targets", "b2bua-runner"), { recursive: true })
   fs.mkdirSync(path.join(dir, "targets", "sip-capture"), { recursive: true })
+  fs.mkdirSync(path.join(dir, "targets", "cdr-file"), { recursive: true })
   fs.writeFileSync(path.join(dir, "lanes", "reference.toml"), lane)
+  fs.writeFileSync(path.join(dir, "targets", "cdr-file", "reference.toml"), `file = "${written.cdr}"\n`)
   fs.writeFileSync(
     path.join(dir, "targets", "b2bua-runner", "reference.toml"),
     `metrics = "${await freeAddress("tcp")}"\nadmin = "${await freeAddress("tcp")}"\nlog = "${written.log}"\n`
@@ -195,6 +202,30 @@ const callIdsIn = (capture: Uint8Array): ReadonlyArray<string> => [
 const linesOf = (file: string): ReadonlyArray<Record<string, unknown>> =>
   fs.readFileSync(file, "utf8").split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Record<string, unknown>)
 
+/** What an earlier job left in the runner's capture and record files: a Call-ID no cell holds. */
+const STALE = "stale-call@192.0.2.1"
+
+/** The block type of a pcapng section header, read little-endian. */
+const SECTION_HEADER = 0x0a0d0d0a
+
+/**
+ * The `call-records` judge's attachments to the cell of `bundle`, listed in
+ * `attachments`: `record`, the one joined to it, flattened (`records`), and
+ * its claimed fields against it, none differing (`diff`).
+ */
+const expectJudged = (bundle: string, attachments: ReadonlyArray<Record<string, unknown>>, record: Record<string, unknown>) => {
+  const named = (name: string) => attachments.filter((line) => line["name"] === name).at(-1)
+  const records = named("call-records")
+  expect([records?.["kind"], records?.["source"]]).toEqual(["records", "call-records"])
+  const flat = linesOf(path.join(bundle, String(records!["file"])))
+  expect(flat.map((one) => one["a_leg.call_id"])).toEqual([(record["a_leg"] as { call_id: string }).call_id])
+  const diff = named("call-records-diff")
+  expect([diff?.["kind"], diff?.["source"]]).toEqual(["diff", "call-records"])
+  const compared = JSON.parse(fs.readFileSync(path.join(bundle, String(diff!["file"])), "utf8")) as { rows: unknown; same: number }
+  expect(compared.rows, "every claimed field as the record holds it").toEqual([])
+  expect(compared.same).toBeGreaterThan(1)
+}
+
 describe.skipIf(!served || skipping)("the reference campaign", () => {
   it("passes both cases on the simulated lane, each call record exported, joined on its Call-ID and judged", async () => {
     const { code, run } = await Effect.runPromise(reference("simulated"))
@@ -213,11 +244,19 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
       const joined = linesOf(path.join(bundle, "joined", "call-records.jsonl"))
       expect(exported.length).toBe(1)
       expect(joined).toEqual([exported[0]!["record"]])
+      expectJudged(bundle, linesOf(path.join(bundle, "attachments.jsonl")), joined[0]!)
     }
   })
 
   it("passes both cases on the reference lane, the B2BUA runner stood for the batch and holding no call at its end", async () => {
-    const written = { log: path.join(work, "b2bua-runner.log"), capture: path.join(work, "passing", "b2bua-runner.pcapng") }
+    const written = {
+      log: path.join(work, "b2bua-runner.log"),
+      capture: path.join(work, "passing", "b2bua-runner.pcapng"),
+      cdr: path.join(work, "passing", "b2bua-runner.cdr.jsonl")
+    }
+    fs.mkdirSync(path.join(work, "passing"), { recursive: true })
+    fs.writeFileSync(written.capture, STALE)
+    fs.writeFileSync(written.cdr, `${JSON.stringify({ a_leg: { call_id: STALE } })}\n`)
     const { code, run } = await Effect.runPromise(reference("reference", await hostedWorkspace("workspace", written)))
     expect(code).toBe(0)
     expect(run?.lanes.map((lane) => [lane.lane, lane.status])).toEqual([["reference", "done"]])
@@ -226,14 +265,27 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
       ["alice calls bob", true],
       ["bob is busy", true]
     ])
-    const captured = callIdsIn(fs.readFileSync(written.capture))
+    const capture = fs.readFileSync(written.capture)
+    expect(capture.readUInt32LE(0), "the job's capture alone, from its first section header").toBe(SECTION_HEADER)
+    expect(capture.includes(STALE), "what an earlier job left is gone").toBe(false)
+    const captured = callIdsIn(capture)
+    const recorded = linesOf(written.cdr).map((record) => (record["a_leg"] as { call_id: string }).call_id)
+    expect(recorded, "the job's records alone, one per call").toHaveLength(2)
     for (const result of results) {
       const answered = Object.fromEntries(result.verifications.map((line) => [line.name, [line.source, line.answer]]))
       expect(answered["call"]?.[1]).toBe("pass")
       expect(answered["cleanup"]?.[1]).toBe("pass")
       expect(answered["calls-ended"], "read after the call, the worker holding no call").toEqual(["calls-ended", "pass"])
+      expect(answered["call-records"], "the runner's record of the call, read by the collector, joined and judged").toEqual([
+        "call-records",
+        "pass"
+      ])
       const bundle = path.join(run!.lanes[0]!.bundlePath, result.cell!)
       const attachments = linesOf(path.join(bundle, "attachments.jsonl"))
+      const joined = linesOf(path.join(bundle, "joined", "call-records.jsonl"))
+      expect(joined).toHaveLength(1)
+      expect(recorded, "the runner wrote the record joined to the cell").toContain((joined[0]!["a_leg"] as { call_id: string }).call_id)
+      expectJudged(bundle, attachments, joined[0]!)
       const attached = attachments.filter((line) => line["name"] === "sut-log")
       expect(attached.map((line) => [line["kind"], line["source"]])).toEqual([["log", "sut-log"]])
       expect(fs.readFileSync(path.join(bundle, String(attached[0]!["file"])), "utf8"), "cut to the call's window, the runner's start before it").not.toContain("listening UDP")
@@ -246,7 +298,11 @@ describe.skipIf(!served || skipping)("the reference campaign", () => {
   })
 
   it("cuts the runner's capture for the failed cell alone, its calls' packets a pcapng of their own", async () => {
-    const written = { log: path.join(work, "failing.log"), capture: path.join(work, "failing", "b2bua-runner.pcapng") }
+    const written = {
+      log: path.join(work, "failing.log"),
+      capture: path.join(work, "failing", "b2bua-runner.pcapng"),
+      cdr: path.join(work, "failing", "b2bua-runner.cdr.jsonl")
+    }
     const { run } = await Effect.runPromise(reference("reference", await hostedWorkspace("failing-workspace", written, true)))
     const results = run!.lanes[0]!.results
     expect(results.map((result) => [CampaignResults.caseNameOf(result.caseId).ref, result.passed])).toEqual([
