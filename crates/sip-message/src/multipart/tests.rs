@@ -120,29 +120,38 @@ fn a_derived_boundary_never_occurs_inside_a_payload() {
     assert!(!contains(&hostile.payload, used.as_bytes()));
 }
 
-/// A part's head is framed text too: a head line starting with `--` and the
-/// boundary would be a line no reader takes for a delimiter, so the derivation
-/// walks past a boundary any head line holds, a lifted description's head
-/// included.
+/// RFC 2046 §5.1.1 allows a boundary of 1 to 70 characters. Whatever a part's
+/// head holds, the derived one is a boundary a reader accepts, no line of the
+/// framed body starts like a delimiter that is none, and the parts read back:
+/// here a head line holding the boundary the parts derive without it, then a
+/// run of `-`, in a stated part and in a lifted description.
 #[test]
-fn a_derived_boundary_never_occurs_inside_a_part_head() {
+fn a_derived_boundary_is_a_boundary_whatever_a_part_head_holds() {
+    let planted = |content_type: &str| {
+        let boundary = content_type.split("boundary=").nth(1).expect("a derived boundary");
+        format!("{boundary}{}", "-".repeat(200))
+    };
+
     let seed = compose("multipart/mixed", &[sdp(), data()]).unwrap();
-    let boundary = seed.content_type.split("boundary=").nth(1).unwrap().to_string();
-    let hostile = data().with_header(format!("--{boundary}x"), "v");
-    let parts = [sdp(), hostile];
+    let parts = [sdp(), data().with_header("X-Note", planted(&seed.content_type))];
     let composed = compose("multipart/mixed", &parts).unwrap();
     let used = composed.content_type.split("boundary=").nth(1).unwrap();
+    assert!(is_boundary(used), "{used} is no RFC 2046 boundary");
     assert!(framing::frames_cleanly(&composed.body, used), "{used} frames the composed body");
     assert_eq!(entity_parts(Some(&composed.content_type), &[], &composed.body), parts);
 
-    let framed = frame("source", &[sdp().with_header(format!("--{boundary}x"), "v")]);
-    let attached = attach(Some("multipart/mixed;boundary=source"), &[], &framed, &[data()]);
+    let source = "multipart/mixed;boundary=source";
+    let seed = attach(Some(source), &[], &frame("source", &[sdp()]), &[data()]);
+    let note = planted(&seed.content_type.expect("a body"));
+    let framed = frame("source", &[sdp().with_header("X-Note", note.clone())]);
+    let attached = attach(Some(source), &[], &framed, &[data()]);
     let content_type = attached.content_type.expect("a body");
     let used = content_type.split("boundary=").nth(1).unwrap();
+    assert!(is_boundary(used), "{used} is no RFC 2046 boundary");
     assert!(framing::frames_cleanly(&attached.body, used), "{used} frames the attached body");
     let lifted = entity_parts(Some(&content_type), &[], &attached.body);
     assert_eq!(lifted.len(), 2, "{}", String::from_utf8_lossy(&attached.body));
-    assert_eq!(lifted[0].headers, [(format!("--{boundary}x"), "v".to_string())]);
+    assert_eq!(lifted[0].headers, [("X-Note".to_string(), note)]);
 }
 
 /// A caller that states its own boundary keeps it — and is refused when a

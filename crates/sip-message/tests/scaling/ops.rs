@@ -15,8 +15,8 @@ use sip_message::header::{
     To, Uri, Via,
 };
 use sip_message::{
-    answer_from_own, decompose_multipart, extract_codec_profile, parse_sdp_body, Bytes,
-    FormatPreference, HeaderName, Method, SipParser, SipRequest,
+    answer_from_own, attach_parts, decompose_multipart, extract_codec_profile, parse_sdp_body,
+    Bytes, FormatPreference, HeaderName, Method, MultipartPart, SipParser, SipRequest,
 };
 
 use super::wire::{self, Shape, PROXY_HOST};
@@ -394,6 +394,41 @@ pub fn multipart_decompose_kib(kib: usize) -> Op {
     Box::new(move || {
         black_box(decompose_multipart(&body, wire::BOUNDARY));
     })
+}
+
+/// The body [`attach_parts`] lifts a description from, framed under
+/// [`wire::BOUNDARY`]: one description part whose head states `note`.
+fn description_with_note(note: Option<&str>) -> Vec<u8> {
+    let line = note.map(|note| format!("X-Note: {note}\r\n")).unwrap_or_default();
+    let mut body =
+        format!("--{}\r\nContent-Type: application/sdp\r\n{line}\r\n", wire::BOUNDARY).into_bytes();
+    body.extend_from_slice(&wire::sdp_sections(0));
+    body.extend_from_slice(format!("\r\n--{}--\r\n", wire::BOUNDARY).as_bytes());
+    body
+}
+
+/// A description whose head states `note` lifted beside one stated part.
+fn attach_beside_note(note: Option<&str>) -> (Op, Option<String>) {
+    let body = description_with_note(note);
+    let part = MultipartPart::new("text/plain", b"opaque".to_vec());
+    let attach = move || {
+        attach_parts(Some(&wire::multipart_type()), &[], &body, std::slice::from_ref(&part))
+    };
+    let content_type = attach().content_type;
+    let op = Box::new(move || {
+        black_box(attach());
+    });
+    (op, content_type)
+}
+
+/// A description lifted beside a part, its head holding one line of `kib`
+/// KiB: the boundary the parts derive without that line, then a run of `-`.
+pub fn attach_planted_head_kib(kib: usize) -> Op {
+    let (_, content_type) = attach_beside_note(None);
+    let content_type = content_type.expect("a framed body");
+    let boundary = content_type.split("boundary=").nth(1).expect("a derived boundary");
+    let note = format!("{boundary}{}", "-".repeat(kib * 1024));
+    attach_beside_note(Some(&note)).0
 }
 
 /// A request whose top Via carries `n` extension parameters.
