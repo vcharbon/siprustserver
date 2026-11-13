@@ -52,6 +52,12 @@ impl Injector for Scripted {
 /// The linear attempt with an `inject` of `node-kill` once the callee took the
 /// ACK (`s9`), the caller's BYE (`s10`) ordered after it.
 fn injected_case(id: &str, delay: Option<Delay>, target: Option<&str>) -> Case {
+    injected_after(id, "s9", delay, target)
+}
+
+/// The linear attempt with an `inject` of `node-kill` once `point` completed,
+/// the caller's BYE (`s10`) ordered after it.
+fn injected_after(id: &str, point: &str, delay: Option<Delay>, target: Option<&str>) -> Case {
     let mut case = fixture("linear-attempt.v3.json");
     case.document.case.id = id.into();
     let at = case.document.flow.iter().position(|node| node.id() == "s10").expect("the BYE");
@@ -62,7 +68,7 @@ fn injected_case(id: &str, delay: Option<Delay>, target: Option<&str>) -> Case {
             op: InjectOp::Inject,
             action: "node-kill".into(),
             target: target.map(str::to_string),
-            after: vec!["s9".into()],
+            after: vec![point.into()],
             delay,
         }),
     );
@@ -86,6 +92,11 @@ async fn replay_injected(
 /// Microseconds from the ACK the callee took (`s9`) to the caller's BYE
 /// (`s10`), off the recording.
 fn ack_to_bye_us(outcome: &Outcome) -> u64 {
+    between_us(outcome, "s9", "s10")
+}
+
+/// Microseconds from step `from` to step `to`, off the recording.
+fn between_us(outcome: &Outcome, from: &str, to: &str) -> u64 {
     let legs = outcome.recording.legs();
     let at = |step: &str| {
         legs.values()
@@ -94,7 +105,7 @@ fn ack_to_bye_us(outcome: &Outcome) -> u64 {
             .map(|m| m.at_us)
             .unwrap_or_else(|| panic!("{step} is recorded: {legs:#?}"))
     };
-    at("s10") - at("s9")
+    at(to) - at(from)
 }
 
 /// The call is billed once and the system holds nothing of it.
@@ -121,6 +132,26 @@ async fn an_answered_inject_holds_the_send_after_it_until_the_answer() {
         [InjectRequest { node: "i1".into(), action: "node-kill".into(), target: None }]
     );
     assert!(ack_to_bye_us(&outcome) >= 1_500_000, "{} µs", ack_to_bye_us(&outcome));
+    call_ended(scene).await;
+}
+
+/// **The legs keep their own traffic while an inject is performed**: `i1` is
+/// handed once the caller took the 200 (`s7`) and answered 1.5 s later; the
+/// ACK the caller sends (`s8`) reaches the callee (`s9`) long before the
+/// answer, and only the BYE ordered after `i1` waits for it.
+#[tokio::test(start_paused = true)]
+async fn the_call_s_traffic_not_ordered_after_an_inject_flows_while_it_is_performed() {
+    let scene = api_scene("pivot-inject-flows").await;
+    let injector = Arc::new(Scripted::new(1_500, Some(Ok(())), 10_000));
+    let case = injected_after("inject-flows", "s7", None, None);
+    let (outcome, dir) = replay_injected(&scene, case, injector.clone()).await;
+
+    assert_bundle_is_complete(&outcome, &dir);
+    assert_eq!(injector.handed.lock().unwrap().len(), 1);
+    let ack_us = between_us(&outcome, "s7", "s9");
+    assert!(ack_us < 1_500_000, "the callee took the ACK {ack_us} µs after the 200");
+    let bye_us = between_us(&outcome, "s7", "s10");
+    assert!(bye_us >= 1_500_000, "the BYE left {bye_us} µs after the 200");
     call_ended(scene).await;
 }
 
