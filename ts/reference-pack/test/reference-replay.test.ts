@@ -4,7 +4,9 @@
  * (`@sip/corpus` `ExtractionIdentity`) by the extractor `sipflow`, its kept
  * flows document the raw one and its name kept when it is extracted again;
  * the base's case generator cuts it into one case, the call between the
- * caller and the forking callee side; and the base's campaign run replays
+ * caller and the forking callee side, which keeps the fork: two early
+ * dialogs on the callee's leg, each opened by a provisional requiring
+ * `100rel` and PRACKed, the first answered; and the base's campaign run replays
  * that case on the simulated lane as its one cell.
  *
  * The extractor is `SIPFLOW_BIN`, else the release build of `sip-pcap`'s
@@ -128,6 +130,41 @@ const replay = (out: string) =>
     }).pipe(Effect.provide(services))
   }).pipe(Effect.provide(NodeServices.layer))
 
+/** One step of a cut document's flow, as far as the fork shows in it. */
+interface Step {
+  readonly leg: string
+  readonly op: string
+  readonly early?: string
+  readonly msg: {
+    readonly method?: string
+    readonly status?: number
+    readonly "cseq-method"?: string
+    readonly headers?: ReadonlyArray<{ readonly name: string; readonly value: string }>
+  }
+}
+
+/**
+ * Each early dialog of leg B in the cut document at `file`, in the order it
+ * opens: the provisionals the callee side sends on it requiring `100rel`
+ * (RFC 3262), the PRACKs it receives on it, and the INVITE's 2xx it sends on
+ * it.
+ */
+const forksOf = (file: string) => {
+  const flow = (JSON.parse(fs.readFileSync(file, "utf8")) as { readonly flow: ReadonlyArray<Step> }).flow
+  const onB = flow.filter((step) => step.leg === "B" && step.early !== undefined)
+  const requiresReliable = (step: Step) =>
+    (step.msg.headers ?? []).some((header) => header.name.toLowerCase() === "require" && /\b100rel\b/.test(header.value))
+  return [...new Set(onB.map((step) => step.early))].map((early) => {
+    const steps = onB.filter((step) => step.early === early)
+    const invite = (step: Step) => step.op === "send" && step.msg["cseq-method"] === "INVITE"
+    return {
+      reliable: steps.filter((step) => invite(step) && step.msg.status! < 200 && requiresReliable(step)).map((step) => step.msg.status),
+      pracked: steps.filter((step) => step.op === "expect" && step.msg.method === "PRACK").length,
+      answered: steps.filter((step) => invite(step) && step.msg.status! >= 200 && step.msg.status! < 300).length
+    }
+  })
+}
+
 describe.skipIf(!served || skipping)("the reference replay", () => {
   it("ingests the capture as it is, cuts it into the forked call's case and replays that case on the simulated lane", async () => {
     const [ingested] = await ingest()
@@ -145,6 +182,10 @@ describe.skipIf(!served || skipping)("the reference replay", () => {
     expect(cut(out)).toEqual([{ capture: CAPTURE, cut: true }])
     const cases = fs.readdirSync(path.join(out, "cases"))
     expect(cases, "the one call between the caller and the forking callee side").toEqual(["forked-reliable-1"])
+    expect(forksOf(path.join(out, "cases", cases[0]!, `${cases[0]!}.v3.json`)), "both forks kept, each ringing reliably and PRACKed").toEqual([
+      { reliable: [183], pracked: 1, answered: 1 },
+      { reliable: [180], pracked: 1, answered: 0 }
+    ])
 
     const { code, run } = await Effect.runPromise(replay(out))
     const results = run!.lanes[0]!.results
