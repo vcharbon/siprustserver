@@ -113,6 +113,22 @@ fn an_unparsable_ring_cap_is_a_boot_refusal_naming_it() {
     assert!(refused.contains("B2BUA_CDR_MESSAGE_RING"), "{refused}");
 }
 
+/// The CDR buffer's depth reads up to its ceiling; one above it, or past
+/// what the platform counts, is a boot refusal naming the variable.
+#[test]
+fn a_cdr_queue_depth_above_the_ceiling_is_a_boot_refusal_naming_it() {
+    use crate::runner_env::cdr_queue_from_lookup;
+    let max = b2bua::cdr::BufferedCdrWriter::MAX_QUEUE;
+    let depth = |v: &str| cdr_queue_from_lookup(lookup(&[("B2BUA_CDR_QUEUE", v)]));
+    assert_eq!(cdr_queue_from_lookup(lookup(&[])), Ok(1_024));
+    assert_eq!(depth("0"), Ok(0));
+    assert_eq!(depth(&max.to_string()), Ok(max));
+    for refused in [(max + 1).to_string(), usize::MAX.to_string(), format!("{}0", usize::MAX)] {
+        let e = depth(&refused).expect_err("a depth above the ceiling refuses the boot");
+        assert!(e.contains("B2BUA_CDR_QUEUE"), "{refused}: {e}");
+    }
+}
+
 #[test]
 fn split_host_port_defaults_and_parses() {
     assert_eq!(split_host_port("bob:5071"), ("bob".to_string(), 5071));

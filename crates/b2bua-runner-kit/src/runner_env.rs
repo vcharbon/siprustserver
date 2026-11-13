@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use b2bua::cdr::BufferedCdrWriter;
 use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
 use sip_message::{Exemptions, SipParserLimits};
 
@@ -68,7 +69,8 @@ pub struct RunnerEnv {
     /// `rmem_max`). What overflows it is dropped by the kernel and exported as
     /// `b2bua_udp_kernel_rx_dropped_total`.
     pub udp_rcvbuf: Option<usize>,
-    /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024).
+    /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024, at
+    /// most [`BufferedCdrWriter::MAX_QUEUE`]).
     pub cdr_queue: usize,
     /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
     pub ordinal: String,
@@ -245,6 +247,24 @@ fn socket_buffer_knob(key: &str) -> Result<Option<usize>, String> {
         .transpose()
 }
 
+/// `B2BUA_CDR_QUEUE`: the CDR buffer's depth in records, 1024 when unset, `0`
+/// unbuffered. `Err` names the variable for a value that is no integer or is
+/// above [`BufferedCdrWriter::MAX_QUEUE`].
+pub(crate) fn cdr_queue_from_lookup(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<usize, String> {
+    let Some(raw) = lookup("B2BUA_CDR_QUEUE") else { return Ok(1_024) };
+    let max = BufferedCdrWriter::MAX_QUEUE;
+    match raw.parse::<usize>() {
+        Ok(depth) if depth <= max => Ok(depth),
+        Ok(depth) => Err(format!(
+            "B2BUA_CDR_QUEUE={depth} is above {max}: each slot of the CDR buffer holds one \
+             whole call; state a depth of at most {max}"
+        )),
+        Err(e) => Err(format!("B2BUA_CDR_QUEUE={raw:?}: {e}")),
+    }
+}
+
 /// `B2BUA_CDR_MESSAGE_RING` (default `0`, off), `B2BUA_CDR_CAPTURED_HEADERS`
 /// (comma-separated, default none) and `B2BUA_CDR_FINAL_RESPONSE_HEADERS`
 /// (comma-separated, default the captured ones) as `lookup` states them; a
@@ -329,7 +349,7 @@ impl RunnerEnv {
             parser_limits: parser_limits(lookup)?,
             udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF")?,
             udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF")?,
-            cdr_queue: knob("B2BUA_CDR_QUEUE", "1024")?,
+            cdr_queue: cdr_queue_from_lookup(lookup)?,
             ordinal: env_or("B2BUA_ORDINAL", "w0"),
             identity: stated(env::var("POD_UID").ok()),
             cluster_key: cluster_key(stated(env::var("B2BUA_CLUSTER_KEY").ok()))?,

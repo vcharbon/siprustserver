@@ -1,7 +1,8 @@
 //! Buffered CDR writer — port of `BufferedCdrLayer`. `write` enqueues
-//! non-blocking (drop-on-overload, counted); a drainer task performs the inner
-//! write. `queue_max == 0` is passthrough (the inner writer is called inline) —
-//! the fake-clock test mode the source uses.
+//! non-blocking (drop-on-overload, counted; the call is copied only once the
+//! queue holds a slot for it); a drainer task performs the inner write.
+//! `queue_max == 0` is passthrough (the inner writer is called inline) — the
+//! fake-clock test mode the source uses.
 //!
 //! `close` is the exit barrier: the drainer closes the queue (a later `write`
 //! is a counted drop), writes what is queued until the deadline, gives up and
@@ -48,9 +49,14 @@ impl Dropped {
 }
 
 impl BufferedCdrWriter {
+    /// The deepest submit queue, in records: a thousand times the default
+    /// depth, far below the channel's permit ceiling.
+    pub const MAX_QUEUE: usize = 1_048_576;
+
     /// Wrap `inner` with a bounded submit queue + drainer. `queue_max == 0`
-    /// disables buffering (passthrough). `metrics` is the shared registry the core
-    /// exports; overflow drops are recorded into `cdr_dropped_total`.
+    /// disables buffering (passthrough); a depth above [`Self::MAX_QUEUE`] is
+    /// held to it. `metrics` is the shared registry the core exports; overflow
+    /// drops are recorded into `cdr_dropped_total`.
     pub fn spawn(inner: Arc<dyn CdrWriter>, queue_max: usize, metrics: B2buaMetrics) -> Self {
         let (close_by, close_rx) = watch::channel(None);
         let (closed_tx, closed) = watch::channel(false);
@@ -63,8 +69,8 @@ impl BufferedCdrWriter {
             drainer: None,
         };
         if queue_max > 0 {
-            #[expect(clippy::disallowed_methods, reason = "queue_max is above zero here")]
-            let (tx, rx) = mpsc::channel::<(Call, i64)>(queue_max);
+            #[expect(clippy::disallowed_methods, reason = "the depth is in 1..=MAX_QUEUE here")]
+            let (tx, rx) = mpsc::channel::<(Call, i64)>(queue_max.min(Self::MAX_QUEUE));
             writer.tx = Some(tx);
             let drainer = Drainer { inner: writer.inner.clone(), dropped: writer.dropped.clone() };
             let task = observe::spawn_keeping_node(drainer.run(rx, close_rx, closed_tx));
@@ -150,11 +156,10 @@ impl CdrWriter for BufferedCdrWriter {
     async fn write(&self, call: &Call, terminated_at: i64) {
         match &self.tx {
             None => self.inner.write(call, terminated_at).await,
-            Some(tx) => {
-                if tx.try_send((call.clone(), terminated_at)).is_err() {
-                    self.dropped.one();
-                }
-            }
+            Some(tx) => match tx.try_reserve() {
+                Ok(slot) => slot.send((call.clone(), terminated_at)),
+                Err(_) => self.dropped.one(),
+            },
         }
     }
 
