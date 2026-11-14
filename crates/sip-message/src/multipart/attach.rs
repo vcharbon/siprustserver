@@ -3,7 +3,10 @@
 //! head, beside the parts a caller states.
 
 use super::part_lines::writable;
-use super::{derive_boundary, describing_entity_headers, find_description, frame, MultipartPart};
+use super::{
+    derive_boundary, describing_entity_headers, find_description, frame, is_entity_header,
+    MultipartPart,
+};
 use crate::header::{HeaderClass, HeaderName};
 use crate::whitespace;
 use crate::write_check::{Position, WriteRefusal};
@@ -36,9 +39,11 @@ pub struct Attached {
 /// §4). The description keeps its own entity headers in wire order, a bare
 /// one those the message stated for it. A part's own `Content-Type` header
 /// types it; its `MIME-Version` and any structural header never ride, the
-/// description's included. A part header line that cannot be written whole,
-/// or that was not UTF-8 as the description's head wrote it, is left out, and
-/// so is a part whose `Content-Type` cannot be written; each is named in
+/// description's included. A framed part keeps every other head line; a part
+/// lifted to be the body lifts only its `Content-` lines, any other is left
+/// out. A part header line that cannot be written whole, or that was not
+/// UTF-8 as the description's head wrote it, is left out, and so is a part
+/// whose `Content-Type` cannot be written; each left out is named in
 /// [`Attached::refused`].
 pub fn attach(
     content_type: Option<&str>,
@@ -53,12 +58,15 @@ pub fn attach(
     let mime = if parts.is_empty() { Vec::new() } else { vec![mime_version()] };
     match all.as_slice() {
         [] => Attached { content_type: None, headers: Vec::new(), body: Vec::new(), refused },
-        [one] => Attached {
-            content_type: Some(one.content_type.clone()),
-            headers: mime.into_iter().chain(one.headers.iter().cloned()).collect(),
-            body: one.payload.clone(),
-            refused,
-        },
+        [one] => {
+            let lifted = lifted_headers(one, &mut refused);
+            Attached {
+                content_type: Some(one.content_type.clone()),
+                headers: mime.into_iter().chain(lifted).collect(),
+                body: one.payload.clone(),
+                refused,
+            }
+        }
         several => {
             let boundary = derive_boundary(several);
             Attached {
@@ -69,6 +77,24 @@ pub fn attach(
             }
         }
     }
+}
+
+/// The head lines of `part`, lifted to be the message body, that become the
+/// message's headers: its entity headers ([`is_entity_header`]), in order.
+/// Any other line describes nothing of the message (RFC 2045 §9) and is left
+/// out, each one pushed onto `refused`.
+fn lifted_headers(part: &MultipartPart, refused: &mut Vec<WriteRefusal>) -> Vec<(String, String)> {
+    let mut lifted = Vec::with_capacity(part.headers.len());
+    for (name, value) in &part.headers {
+        if is_entity_header(name) {
+            lifted.push((name.clone(), value.clone()));
+        } else {
+            let name = whitespace::trim(name);
+            let reason = format!("{name}: no entity header, not lifted from its part");
+            refused.push(WriteRefusal { position: Position::HeaderName, reason });
+        }
+    }
+    lifted
 }
 
 fn mime_version() -> (String, String) {

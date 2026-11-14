@@ -372,6 +372,57 @@ fn a_parts_message_level_headers_are_filtered() {
     );
 }
 
+/// RFC 2045 §9: a part lifted to be the body lifts only its `Content-` lines
+/// onto the message; any other head line is left out and named. Framed, the
+/// same lines stay in the part's head.
+#[test]
+fn a_lifted_part_lifts_only_its_entity_headers() {
+    let stated = location()
+        .with_header("Replaces", "abc@192.0.2.1;to-tag=1;from-tag=2")
+        .with_header("Authorization", "Digest username=\"u\"")
+        .with_header("Content-Disposition", "render");
+    let one = attach(None, &[], b"", std::slice::from_ref(&stated));
+    assert_eq!(
+        one.headers,
+        [
+            ("MIME-Version".to_string(), "1.0".to_string()),
+            ("Content-ID".to_string(), "<loc@example.invalid>".to_string()),
+            ("Content-Disposition".to_string(), "render".to_string())
+        ]
+    );
+    let reasons: Vec<&str> = one.refused.iter().map(|r| r.reason.as_str()).collect();
+    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    assert!(reasons[0].starts_with("Replaces:") && reasons[1].starts_with("Authorization:"));
+
+    let framed = attach(Some("application/sdp"), &[], &sdp().payload, &[stated]);
+    assert_eq!(framed.headers, [("MIME-Version".to_string(), "1.0".to_string())]);
+    assert!(framed.refused.is_empty(), "{:?}", framed.refused);
+    let ct = media(framed.content_type.as_deref().unwrap());
+    let boundary = ct.param("boundary").and_then(ParamValue::as_str).unwrap().to_string();
+    let parts = decompose(&framed.body, &boundary);
+    let names: Vec<&str> = parts[1].entity_headers.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["Content-ID", "Replaces", "Authorization", "Content-Disposition"]);
+}
+
+/// A framed description lifted alone keeps its `Content-` lines; any other
+/// line of its head is left out and named.
+#[test]
+fn a_lifted_description_lifts_only_its_entity_headers() {
+    let sdp_text = String::from_utf8(sdp().payload).unwrap();
+    let body = [
+        "--b\r\nContent-Type: application/sdp\r\nReplaces: abc@192.0.2.1\r\n",
+        "Content-ID: <s@x>\r\n\r\n",
+        &sdp_text,
+        "\r\n--b--\r\n",
+    ]
+    .concat();
+    let attached = attach(Some("multipart/mixed;boundary=b"), &[], body.as_bytes(), &[]);
+    assert_eq!(attached.content_type.as_deref(), Some("application/sdp"));
+    assert_eq!(attached.headers, [("Content-ID".to_string(), "<s@x>".to_string())]);
+    assert_eq!(attached.refused.len(), 1, "{:?}", attached.refused);
+    assert!(attached.refused[0].reason.starts_with("Replaces:"));
+}
+
 /// The description keeps its entity headers: a framed one in wire order, a
 /// bare one those the message stated for it.
 #[test]

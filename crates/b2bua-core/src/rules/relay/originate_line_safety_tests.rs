@@ -101,6 +101,24 @@ fn a_part_line_with_a_line_break_is_left_out_of_the_body() {
     assert!(!text.contains("z9hG4bKinjected"), "{text}");
 }
 
+/// A part that is the whole body brings only its `Content-` lines onto the
+/// INVITE (RFC 2045 §9): a `Replaces` or `Authorization` in its head is left
+/// out and handed back, never a request header.
+#[test]
+fn a_lifted_part_brings_no_request_header() {
+    let parts = vec![MultipartPart::new("application/pidf+xml", b"<presence/>".to_vec())
+        .with_header("Content-ID", "<loc@example.invalid>")
+        .with_header("Replaces", "abc@192.0.2.1;to-tag=1;from-tag=2")
+        .with_header("Authorization", "Digest username=\"u\"")];
+    let body = Body::from_leg(Vec::new(), "a".to_string()).with_parts(parts);
+    let (invite, skipped) = minted(&[], None, Some(&body));
+    assert!(lines(&invite, "Replaces").is_empty());
+    assert!(lines(&invite, "Authorization").is_empty());
+    assert_eq!(lines(&invite, "Content-ID"), ["<loc@example.invalid>"]);
+    assert_eq!(&invite.body()[..], b"<presence/>");
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+}
+
 /// The leg minted with `new_from` / `new_to` stated, and what was left out.
 fn rewritten(
     new_from: &str,
